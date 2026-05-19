@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -168,8 +168,32 @@ export function ProviderForm({
     }
   };
 
+  // 新建供应商时默认选中 oFox 预设
+  const getDefaultPresetId = (): string | null => {
+    if (initialData) return null;
+    const prefix = appId === "claude" ? "claude" : appId;
+    const presets =
+      appId === "claude"
+        ? providerPresets.filter((p) => !p.hidden)
+        : appId === "codex"
+          ? codexProviderPresets
+          : appId === "gemini"
+            ? geminiProviderPresets
+            : appId === "opencode"
+              ? opencodeProviderPresets
+              : appId === "openclaw"
+                ? openclawProviderPresets
+                : appId === "hermes"
+                  ? hermesProviderPresets
+                  : [];
+    const idx = presets.findIndex(
+      (p) => "providerType" in p && p.providerType === "ofox",
+    );
+    return idx >= 0 ? `${prefix}-${idx}` : "custom";
+  };
+
   const [selectedPresetId, setSelectedPresetId] = useState<string | null>(
-    initialData ? null : "custom",
+    getDefaultPresetId,
   );
   const [activePreset, setActivePreset] = useState<{
     id: string;
@@ -225,8 +249,9 @@ export function ProviderForm({
   const isAnyOmoCategory = isOmoCategory || isOmoSlimCategory;
 
   useEffect(() => {
-    setSelectedPresetId(initialData ? null : "custom");
+    setSelectedPresetId(getDefaultPresetId());
     setActivePreset(null);
+    ofoxAppliedRef.current = false; // 切换 app 时重置，允许再次自动应用
 
     if (!initialData) {
       setDraftCustomEndpoints([]);
@@ -1200,8 +1225,28 @@ export function ProviderForm({
     );
   }, [groupedPresets]);
 
+  // 检测当前是否为 oFox 预设（支持所有 CLI 工具）
+  const selectedOfoxPreset = (() => {
+    // 1. Claude 专用：templatePreset（仅 Claude 有值）
+    if (templatePreset?.providerType === "ofox") return true;
+    // 2. 所有工具：通过 activePreset.id 查找 presetEntries
+    if (activePreset?.id) {
+      const entry = presetEntries.find((e) => e.id === activePreset.id);
+      if (entry && "providerType" in entry.preset && entry.preset.providerType === "ofox") return true;
+    }
+    return false;
+  })();
+
+  const isOfoxPreset =
+    selectedOfoxPreset ||
+    initialData?.meta?.providerType === "ofox" ||
+    // 兼容旧版本创建的 oFox 供应商（meta 中未保存 providerType）
+    JSON.stringify(initialData?.settingsConfig ?? "").includes("api.ofox.ai");
+
   const shouldShowSpeedTest =
-    category !== "official" && category !== "cloud_provider";
+    category !== "official" &&
+    category !== "cloud_provider" &&
+    !isOfoxPreset;
 
   const {
     shouldShowApiKeyLink: shouldShowClaudeApiKeyLink,
@@ -1461,6 +1506,25 @@ export function ProviderForm({
       iconColor: preset.iconColor ?? "",
     });
   };
+
+  // 新建供应商时，自动应用 oFox 预设配置（仅首次）
+  const ofoxAppliedRef = useRef(false);
+  const handlePresetChangeRef = useRef(handlePresetChange);
+  handlePresetChangeRef.current = handlePresetChange;
+  useEffect(() => {
+    if (ofoxAppliedRef.current || initialData) return;
+    const ofoxEntry = presetEntries.find(
+      (e) => "providerType" in e.preset && e.preset.providerType === "ofox",
+    );
+    if (ofoxEntry) {
+      ofoxAppliedRef.current = true;
+      // 延迟到下一帧，确保 form 状态已就绪
+      requestAnimationFrame(() => {
+        handlePresetChangeRef.current(ofoxEntry.id);
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [presetEntries, initialData]);
 
   const settingsConfigErrorField = (
     <FormField
@@ -1774,6 +1838,7 @@ export function ProviderForm({
               onApiKeyFieldChange={handleApiKeyFieldChange}
               isFullUrl={localIsFullUrl}
               onFullUrlChange={setLocalIsFullUrl}
+              isOfoxPreset={isOfoxPreset}
             />
           )}
 
@@ -1803,6 +1868,7 @@ export function ProviderForm({
               modelName={codexModelName}
               onModelNameChange={handleCodexModelNameChange}
               speedTestEndpoints={speedTestEndpoints}
+              isOfoxPreset={isOfoxPreset}
             />
           )}
 
@@ -1832,6 +1898,7 @@ export function ProviderForm({
               model={geminiModel}
               onModelChange={handleGeminiModelChange}
               speedTestEndpoints={speedTestEndpoints}
+              isOfoxPreset={isOfoxPreset}
             />
           )}
 
@@ -1854,6 +1921,7 @@ export function ProviderForm({
               onExtraOptionsChange={
                 opencodeForm.handleOpencodeExtraOptionsChange
               }
+              isOfoxPreset={isOfoxPreset}
             />
           )}
 
@@ -1895,6 +1963,7 @@ export function ProviderForm({
               onModelsChange={openclawForm.handleOpenclawModelsChange}
               userAgent={openclawForm.openclawUserAgent}
               onUserAgentChange={openclawForm.handleOpenclawUserAgentChange}
+              isOfoxPreset={isOfoxPreset}
             />
           )}
 
@@ -1918,6 +1987,7 @@ export function ProviderForm({
               onRateLimitDelayChange={
                 hermesForm.handleHermesRateLimitDelayChange
               }
+              isOfoxPreset={isOfoxPreset}
             />
           )}
 

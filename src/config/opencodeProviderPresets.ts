@@ -16,6 +16,8 @@ export interface OpenCodeProviderPreset {
   icon?: string;
   iconColor?: string;
   isCustomTemplate?: boolean;
+  // 供应商类型标识（用于特殊供应商检测）
+  providerType?: "ofox";
 }
 
 export const opencodeNpmPackages = [
@@ -297,6 +299,24 @@ export function getPresetModelDefaults(
 
 export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
   {
+    name: "OfoxAI",
+    websiteUrl: "https://ofox.ai",
+    apiKeyUrl: "https://app.ofox.ai/manage/api-keys",
+    settingsConfig: {
+      npm: "@ai-sdk/openai-compatible",
+      name: "OfoxAI",
+      options: {
+        baseURL: "https://api.ofox.ai/v1",
+        apiKey: "",
+      },
+      models: {},
+    },
+    category: "aggregator",
+    icon: "ofox",
+    iconColor: "#D97706",
+    providerType: "ofox",
+  },
+  {
     name: "Shengsuanyun",
     nameKey: "providerForm.presets.shengsuanyun",
     websiteUrl: "https://www.shengsuanyun.com",
@@ -468,7 +488,7 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
     },
     category: "cn_official",
     icon: "kimi",
-    iconColor: "#6366F1",
+    iconColor: "#D97706",
     templateValues: {
       baseURL: {
         label: "Base URL",
@@ -501,7 +521,7 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
     },
     category: "cn_official",
     icon: "kimi",
-    iconColor: "#6366F1",
+    iconColor: "#D97706",
     templateValues: {
       baseURL: {
         label: "Base URL",
@@ -1548,7 +1568,7 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
     },
     category: "omo-slim" as ProviderCategory,
     icon: "opencode",
-    iconColor: "#6366F1",
+    iconColor: "#D97706",
     isCustomTemplate: true,
   },
 ];

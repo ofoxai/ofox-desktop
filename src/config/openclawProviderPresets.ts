@@ -40,6 +40,8 @@ export interface OpenClawProviderPreset {
   isCustomTemplate?: boolean;
   /** Suggested default model configuration */
   suggestedDefaults?: OpenClawSuggestedDefaults;
+  /** 供应商类型标识（用于特殊供应商检测） */
+  providerType?: "ofox";
 }
 
 /**
@@ -58,6 +60,21 @@ export const openclawApiProtocols = [
  * OpenClaw provider presets list
  */
 export const openclawProviderPresets: OpenClawProviderPreset[] = [
+  {
+    name: "OfoxAI",
+    websiteUrl: "https://ofox.ai",
+    apiKeyUrl: "https://app.ofox.ai/manage/api-keys",
+    settingsConfig: {
+      baseUrl: "https://api.ofox.ai/v1",
+      apiKey: "",
+      api: "openai-completions",
+      models: [],
+    },
+    category: "aggregator",
+    icon: "ofox",
+    iconColor: "#D97706",
+    providerType: "ofox",
+  },
   {
     name: "Shengsuanyun",
     nameKey: "providerForm.presets.shengsuanyun",
@@ -282,7 +299,7 @@ export const openclawProviderPresets: OpenClawProviderPreset[] = [
     },
     category: "cn_official",
     icon: "kimi",
-    iconColor: "#6366F1",
+    iconColor: "#D97706",
     templateValues: {
       baseUrl: {
         label: "Base URL",
@@ -320,7 +337,7 @@ export const openclawProviderPresets: OpenClawProviderPreset[] = [
     },
     category: "cn_official",
     icon: "kimi",
-    iconColor: "#6366F1",
+    iconColor: "#D97706",
     templateValues: {
       baseUrl: {
         label: "Base URL",

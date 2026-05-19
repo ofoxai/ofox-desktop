@@ -23,6 +23,13 @@ export const iconMetadata: Record<string, IconMetadata> = {
     keywords: ["claude"],
     defaultColor: "#D4915D",
   },
+  ofox: {
+    name: "ofox",
+    displayName: "OfoxAI",
+    category: "aggregator",
+    keywords: ["ofox", "fox", "aggregator"],
+    defaultColor: "#D97706",
+  },
   aws: {
     name: "aws",
     displayName: "AWS",

@@ -866,6 +866,7 @@
     "categoryThirdParty": "Third Party",
     "fetchModels": "Fetch Models",
     "fetchingModels": "Fetching...",
+    "selectModelPlaceholder": "Select model",
     "fetchModelsSuccess": "Found {{count}} models",
     "fetchModelsFailed": "Failed to fetch models",
     "fetchModelsEmpty": "No models found",

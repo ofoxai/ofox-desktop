@@ -24,6 +24,8 @@ export interface CodexProviderPreset {
   // 图标配置
   icon?: string; // 图标名称
   iconColor?: string; // 图标颜色
+  // 供应商类型标识（用于特殊供应商检测）
+  providerType?: "ofox";
 }
 
 /**
@@ -77,6 +79,17 @@ export const codexProviderPresets: CodexProviderPreset[] = [
     },
     icon: "openai",
     iconColor: "#00A67E",
+  },
+  {
+    name: "OfoxAI",
+    websiteUrl: "https://ofox.ai",
+    apiKeyUrl: "https://app.ofox.ai/manage/api-keys",
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig("ofox", "https://api.ofox.ai/v1", ""),
+    category: "aggregator",
+    icon: "ofox",
+    iconColor: "#D97706",
+    providerType: "ofox",
   },
   {
     name: "Shengsuanyun",

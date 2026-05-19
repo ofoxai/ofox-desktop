@@ -16,3 +16,11 @@ pub async fn fetch_models_for_config(
 ) -> Result<Vec<FetchedModel>, String> {
     model_fetch::fetch_models(&base_url, &api_key, is_full_url.unwrap_or(false)).await
 }
+
+/// 从 Ofox 获取可用模型列表（公开接口，无需 API Key）
+///
+/// protocol: "openai" | "anthropic" | "gemini"
+#[tauri::command(rename_all = "camelCase")]
+pub async fn fetch_ofox_models(protocol: String) -> Result<Vec<FetchedModel>, String> {
+    model_fetch::fetch_ofox_models(&protocol).await
+}

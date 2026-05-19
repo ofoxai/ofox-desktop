@@ -77,6 +77,19 @@ export function ProviderPresetSelector({
   const renderPresetIcon = (
     preset: ProviderPreset | CodexProviderPreset | GeminiProviderPreset,
   ) => {
+    // 优先使用 icon 字段通过 ProviderIcon 渲染（支持所有已注册图标）
+    if (preset.icon) {
+      return (
+        <ProviderIcon
+          icon={preset.icon}
+          name={preset.name}
+          color={preset.iconColor}
+          size={14}
+          showFallback={false}
+        />
+      );
+    }
+
     const iconType = preset.theme?.icon;
     if (!iconType) return null;
 
@@ -125,10 +138,48 @@ export function ProviderPresetSelector({
     };
   };
 
+  // 从所有分类中找出 oFox 条目，渲染在最前面
+  const ofoxEntry = categoryKeys
+    .flatMap((cat) => groupedPresets[cat] ?? [])
+    .find(
+      (entry) =>
+        "providerType" in entry.preset &&
+        entry.preset.providerType === "ofox",
+    );
+
+  const renderPresetButton = (entry: PresetEntry, category?: string) => {
+    const isSelected = selectedPresetId === entry.id;
+    const isPartner = entry.preset.isPartner;
+    return (
+      <button
+        key={entry.id}
+        type="button"
+        onClick={() => onPresetChange(entry.id)}
+        className={`${getPresetButtonClass(isSelected, entry.preset)} relative`}
+        style={getPresetButtonStyle(isSelected, entry.preset)}
+        title={
+          category
+            ? (presetCategoryLabels[category] ?? t("providerPreset.other"))
+            : undefined
+        }
+      >
+        {renderPresetIcon(entry.preset)}
+        {entry.preset.nameKey ? t(entry.preset.nameKey) : entry.preset.name}
+        {isPartner && (
+          <span className="absolute -top-1 -right-1 flex items-center gap-0.5 rounded-full bg-gradient-to-r from-amber-500 to-yellow-500 px-1.5 py-0.5 text-[10px] font-bold text-white shadow-md">
+            <Star className="h-2.5 w-2.5 fill-current" />
+          </span>
+        )}
+      </button>
+    );
+  };
+
   return (
     <div className="space-y-3">
       <FormLabel>{t("providerPreset.label")}</FormLabel>
       <div className="flex flex-wrap gap-2">
+        {ofoxEntry && renderPresetButton(ofoxEntry)}
+
         <button
           type="button"
           onClick={() => onPresetChange("custom")}
@@ -145,30 +196,9 @@ export function ProviderPresetSelector({
           const entries = groupedPresets[category];
           if (!entries || entries.length === 0) return null;
           return entries.map((entry) => {
-            const isSelected = selectedPresetId === entry.id;
-            const isPartner = entry.preset.isPartner;
-            return (
-              <button
-                key={entry.id}
-                type="button"
-                onClick={() => onPresetChange(entry.id)}
-                className={`${getPresetButtonClass(isSelected, entry.preset)} relative`}
-                style={getPresetButtonStyle(isSelected, entry.preset)}
-                title={
-                  presetCategoryLabels[category] ?? t("providerPreset.other")
-                }
-              >
-                {renderPresetIcon(entry.preset)}
-                {entry.preset.nameKey
-                  ? t(entry.preset.nameKey)
-                  : entry.preset.name}
-                {isPartner && (
-                  <span className="absolute -top-1 -right-1 flex items-center gap-0.5 rounded-full bg-gradient-to-r from-amber-500 to-yellow-500 px-1.5 py-0.5 text-[10px] font-bold text-white shadow-md">
-                    <Star className="h-2.5 w-2.5 fill-current" />
-                  </span>
-                )}
-              </button>
-            );
+            // oFox 已在最前面渲染，跳过
+            if (ofoxEntry && entry.id === ofoxEntry.id) return null;
+            return renderPresetButton(entry, category);
           });
         })}
       </div>

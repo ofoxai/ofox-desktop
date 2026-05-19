@@ -113,6 +113,8 @@ export interface HermesProviderPreset {
   isCustomTemplate?: boolean;
   /** Optional top-level `model:` defaults written on switch. */
   suggestedDefaults?: HermesSuggestedDefaults;
+  /** 供应商类型标识（用于特殊供应商检测） */
+  providerType?: "ofox";
 }
 
 export interface HermesProviderSettingsConfig {
@@ -128,6 +130,22 @@ export interface HermesProviderSettingsConfig {
 }
 
 export const hermesProviderPresets: HermesProviderPreset[] = [
+  {
+    name: "OfoxAI",
+    websiteUrl: "https://ofox.ai",
+    apiKeyUrl: "https://app.ofox.ai/manage/api-keys",
+    settingsConfig: {
+      name: "ofox",
+      base_url: "https://api.ofox.ai/v1",
+      api_key: "",
+      api_mode: "chat_completions",
+      models: [],
+    },
+    category: "aggregator",
+    icon: "ofox",
+    iconColor: "#D97706",
+    providerType: "ofox",
+  },
   {
     name: "Shengsuanyun",
     nameKey: "providerForm.presets.shengsuanyun",
@@ -188,7 +206,7 @@ export const hermesProviderPresets: HermesProviderPreset[] = [
     },
     category: "aggregator",
     icon: "openrouter",
-    iconColor: "#6366F1",
+    iconColor: "#D97706",
     suggestedDefaults: {
       model: { default: "anthropic/claude-opus-4-7", provider: "openrouter" },
     },
@@ -385,7 +403,7 @@ export const hermesProviderPresets: HermesProviderPreset[] = [
     },
     category: "cn_official",
     icon: "kimi",
-    iconColor: "#6366F1",
+    iconColor: "#D97706",
     suggestedDefaults: {
       model: { default: "kimi-k2.6", provider: "kimi" },
     },
@@ -402,7 +420,7 @@ export const hermesProviderPresets: HermesProviderPreset[] = [
     },
     category: "cn_official",
     icon: "kimi",
-    iconColor: "#6366F1",
+    iconColor: "#D97706",
     suggestedDefaults: {
       model: { default: "kimi-for-coding", provider: "kimi_coding" },
     },

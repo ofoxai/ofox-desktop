@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import {
@@ -32,7 +32,12 @@ import {
   Wand2,
 } from "lucide-react";
 import EndpointSpeedTest from "./EndpointSpeedTest";
-import { ApiKeySection, EndpointField, ModelInputWithFetch } from "./shared";
+import {
+  ApiKeySection,
+  EndpointField,
+  ModelInputWithFetch,
+  ModelSelectFromApi,
+} from "./shared";
 import { CopilotAuthSection } from "./CopilotAuthSection";
 import { CodexOAuthSection } from "./CodexOAuthSection";
 import {
@@ -42,8 +47,11 @@ import {
 import type { CopilotModel } from "@/lib/api/copilot";
 import {
   fetchModelsForConfig,
+  fetchOfoxModels,
+  filterOfoxModelsByProtocol,
   showFetchModelsError,
   type FetchedModel,
+  type OfoxProtocol,
 } from "@/lib/api/model-fetch";
 import type {
   ProviderCategory,
@@ -130,6 +138,9 @@ interface ClaudeFormFieldsProps {
   // Full URL mode
   isFullUrl: boolean;
   onFullUrlChange: (value: boolean) => void;
+
+  // Ofox preset
+  isOfoxPreset?: boolean;
 }
 
 export function ClaudeFormFields({
@@ -177,6 +188,7 @@ export function ClaudeFormFields({
   onApiKeyFieldChange,
   isFullUrl,
   onFullUrlChange,
+  isOfoxPreset,
 }: ClaudeFormFieldsProps) {
   const { t } = useTranslation();
   const hasAnyAdvancedValue = !!(
@@ -204,7 +216,99 @@ export function ClaudeFormFields({
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
 
+  // Ofox 模型获取（公开接口，无需 API Key）+ 按协议缓存
+  const ofoxProtocol: OfoxProtocol = useMemo(() => {
+    switch (apiFormat) {
+      case "openai_chat":
+      case "openai_responses":
+        return "openai";
+      case "gemini_native":
+        return "gemini";
+      default:
+        return "anthropic";
+    }
+  }, [apiFormat]);
+
+  const ofoxCacheKey = `cc-switch-ofox-models-${ofoxProtocol}`;
+
+  const [ofoxModels, setOfoxModels] = useState<FetchedModel[]>(() => {
+    try {
+      const cached = localStorage.getItem(ofoxCacheKey);
+      return cached ? JSON.parse(cached) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [isOfoxFetching, setIsOfoxFetching] = useState(false);
+
+  // 协议变化时切换缓存
+  useEffect(() => {
+    try {
+      const cached = localStorage.getItem(ofoxCacheKey);
+      setOfoxModels(cached ? JSON.parse(cached) : []);
+    } catch {
+      setOfoxModels([]);
+    }
+  }, [ofoxCacheKey]);
+
+  const updateOfoxModels = useCallback(
+    (models: FetchedModel[]) => {
+      setOfoxModels(models);
+      try {
+        localStorage.setItem(ofoxCacheKey, JSON.stringify(models));
+      } catch {
+        // ignore quota errors
+      }
+    },
+    [ofoxCacheKey],
+  );
+
+  const handleOfoxFetchModels = useCallback(() => {
+    setIsOfoxFetching(true);
+    fetchOfoxModels(ofoxProtocol)
+      .then((m) => {
+        const filtered = filterOfoxModelsByProtocol(m, ofoxProtocol);
+        updateOfoxModels(filtered);
+        if (filtered.length === 0) {
+          toast.info(t("providerForm.fetchModelsEmpty"));
+        } else {
+          toast.success(
+            t("providerForm.fetchModelsSuccess", { count: filtered.length }),
+          );
+        }
+      })
+      .catch((err) => {
+        console.warn("[Ofox] Failed to fetch models:", err);
+        showFetchModelsError(err, t);
+      })
+      .finally(() => setIsOfoxFetching(false));
+  }, [ofoxProtocol, t, updateOfoxModels]);
+
   const handleFetchModels = useCallback(() => {
+    // oFox 预设使用公开接口获取模型（无需 API Key）
+    if (isOfoxPreset) {
+      setIsFetchingModels(true);
+      fetchOfoxModels(ofoxProtocol)
+        .then((m) => {
+          const filtered = filterOfoxModelsByProtocol(m, ofoxProtocol);
+          setFetchedModels(filtered);
+          updateOfoxModels(filtered);
+          if (filtered.length === 0) {
+            toast.info(t("providerForm.fetchModelsEmpty"));
+          } else {
+            toast.success(
+              t("providerForm.fetchModelsSuccess", { count: filtered.length }),
+            );
+          }
+        })
+        .catch((err) => {
+          console.warn("[Ofox] Failed to fetch models:", err);
+          showFetchModelsError(err, t);
+        })
+        .finally(() => setIsFetchingModels(false));
+      return;
+    }
+
     if (!baseUrl || !apiKey) {
       showFetchModelsError(null, t, {
         hasApiKey: !!apiKey,
@@ -229,7 +333,15 @@ export function ClaudeFormFields({
         showFetchModelsError(err, t);
       })
       .finally(() => setIsFetchingModels(false));
-  }, [baseUrl, apiKey, isFullUrl, t]);
+  }, [baseUrl, apiKey, isFullUrl, isOfoxPreset, ofoxProtocol, updateOfoxModels, t]);
+
+  // oFox 预设：缓存为空时自动获取模型列表（协议变化也会触发）
+  useEffect(() => {
+    if (isOfoxPreset && ofoxModels.length === 0 && !isOfoxFetching) {
+      handleOfoxFetchModels();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOfoxPreset, ofoxProtocol]);
 
   // 当 Copilot 预设且已认证时，加载可用模型
   useEffect(() => {
@@ -280,6 +392,21 @@ export function ClaudeFormFields({
       : never,
     placeholder?: string,
   ) => {
+    // Ofox 供应商：纯下拉选择
+    if (isOfoxPreset) {
+      return (
+        <ModelSelectFromApi
+          id={id}
+          value={value}
+          onChange={(v) => onModelChange(field, v)}
+          placeholder={placeholder}
+          fetchedModels={ofoxModels}
+          isLoading={isOfoxFetching}
+          onFetch={handleOfoxFetchModels}
+        />
+      );
+    }
+
     if (isCopilotPreset && copilotModels.length > 0) {
       // 按 vendor 分组
       const grouped: Record<string, CopilotModel[]> = {};

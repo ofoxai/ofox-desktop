@@ -26,7 +26,132 @@ struct ModelEntry {
     owned_by: Option<String>,
 }
 
+/// Gemini 原生的 models 响应格式
+#[derive(Debug, Deserialize)]
+struct GeminiModelsResponse {
+    models: Option<Vec<GeminiModelEntry>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiModelEntry {
+    /// 格式: "models/provider/model-name"
+    name: String,
+    owned_by: Option<String>,
+}
+
 const FETCH_TIMEOUT_SECS: u64 = 15;
+
+/// 过滤非聊天模型（embedding、图片生成、TTS 等）
+fn is_chat_model(id: &str) -> bool {
+    let lower = id.to_lowercase();
+    // 排除 embedding 模型（如 text-embedding-v4、text-embedding-3-large）
+    if lower.contains("embedding") { return false; }
+    // 排除图片生成模型（如 gpt-image-1.5、gemini-2.5-flash-image）
+    if lower.contains("gpt-image") || lower.ends_with("-image") || lower.contains("-image-") { return false; }
+    // 排除语音/审核模型
+    if lower.contains("tts") || lower.contains("dall-e") || lower.contains("whisper") || lower.contains("moderation") { return false; }
+    true
+}
+
+/// Ofox 各协议的模型列表端点
+const OFOX_OPENAI_MODELS_URL: &str = "https://api.ofox.ai/v1/models";
+const OFOX_ANTHROPIC_MODELS_URL: &str = "https://api.ofox.ai/anthropic/v1/models";
+const OFOX_GEMINI_MODELS_URL: &str = "https://api.ofox.ai/gemini/v1beta/models";
+
+/// 从 Ofox 获取可用模型列表（公开接口，无需 API Key）
+///
+/// 根据 protocol 参数选择对应的端点：
+/// - "openai": GET /v1/models（OpenAI 兼容格式）
+/// - "anthropic": GET /anthropic/v1/models（data[] 格式，同 OpenAI）
+/// - "gemini": GET /gemini/v1beta/models（models[] 格式，需适配）
+pub async fn fetch_ofox_models(protocol: &str) -> Result<Vec<FetchedModel>, String> {
+    let client = crate::proxy::http_client::get();
+
+    match protocol {
+        "openai" | "anthropic" => {
+            let url = if protocol == "openai" {
+                OFOX_OPENAI_MODELS_URL
+            } else {
+                OFOX_ANTHROPIC_MODELS_URL
+            };
+
+            let response = client
+                .get(url)
+                .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
+                .send()
+                .await
+                .map_err(|e| format!("Request failed: {e}"))?;
+
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                return Err(format!("HTTP {status}: {body}"));
+            }
+
+            let resp: ModelsResponse = response
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+            let mut models: Vec<FetchedModel> = resp
+                .data
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|m| is_chat_model(&m.id))
+                .map(|m| FetchedModel {
+                    id: m.id,
+                    owned_by: m.owned_by,
+                })
+                .collect();
+
+            models.sort_by(|a, b| a.id.cmp(&b.id));
+            Ok(models)
+        }
+        "gemini" => {
+            let response = client
+                .get(OFOX_GEMINI_MODELS_URL)
+                .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
+                .send()
+                .await
+                .map_err(|e| format!("Request failed: {e}"))?;
+
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                return Err(format!("HTTP {status}: {body}"));
+            }
+
+            let resp: GeminiModelsResponse = response
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+            let mut models: Vec<FetchedModel> = resp
+                .models
+                .unwrap_or_default()
+                .into_iter()
+                .map(|m| {
+                    // Gemini name 格式为 "models/provider/model-name"，去掉 "models/" 前缀
+                    let id = m
+                        .name
+                        .strip_prefix("models/")
+                        .unwrap_or(&m.name)
+                        .to_string();
+                    FetchedModel {
+                        id,
+                        owned_by: m.owned_by,
+                    }
+                })
+                .filter(|m| is_chat_model(&m.id))
+                .collect();
+
+            models.sort_by(|a, b| a.id.cmp(&b.id));
+            Ok(models)
+        }
+        _ => Err(format!("Unsupported protocol: {protocol}")),
+    }
+}
 
 /// 获取供应商的可用模型列表
 ///
@@ -175,5 +300,22 @@ mod tests {
         let json = r#"{"object":"list","data":[]}"#;
         let resp: ModelsResponse = serde_json::from_str(json).unwrap();
         assert!(resp.data.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_gemini_response() {
+        let json = r#"{"models":[{"name":"models/google/gemini-3.1-pro","displayName":"Gemini 3.1 Pro","ownedBy":"google"}]}"#;
+        let resp: GeminiModelsResponse = serde_json::from_str(json).unwrap();
+        let data = resp.models.unwrap();
+        assert_eq!(data.len(), 1);
+        assert_eq!(data[0].name, "models/google/gemini-3.1-pro");
+        assert_eq!(data[0].owned_by.as_deref(), Some("google"));
+    }
+
+    #[test]
+    fn test_gemini_model_name_strip_prefix() {
+        let name = "models/google/gemini-3.1-pro";
+        let id = name.strip_prefix("models/").unwrap_or(name);
+        assert_eq!(id, "google/gemini-3.1-pro");
     }
 }

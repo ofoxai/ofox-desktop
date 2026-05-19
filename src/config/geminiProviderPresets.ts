@@ -29,6 +29,8 @@ export interface GeminiProviderPreset {
   // 图标配置
   icon?: string; // 图标名称
   iconColor?: string; // 图标颜色
+  // 供应商类型标识（用于特殊供应商检测）
+  providerType?: "ofox";
 }
 
 export const geminiProviderPresets: GeminiProviderPreset[] = [
@@ -49,6 +51,22 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     },
     icon: "gemini",
     iconColor: "#4285F4",
+  },
+  {
+    name: "OfoxAI",
+    websiteUrl: "https://ofox.ai",
+    apiKeyUrl: "https://app.ofox.ai/manage/api-keys",
+    settingsConfig: {
+      env: {
+        GOOGLE_GEMINI_BASE_URL: "https://api.ofox.ai/gemini",
+      },
+    },
+    baseURL: "https://api.ofox.ai/gemini",
+    description: "Ofox",
+    category: "aggregator",
+    icon: "ofox",
+    iconColor: "#D97706",
+    providerType: "ofox",
   },
   {
     name: "Shengsuanyun",

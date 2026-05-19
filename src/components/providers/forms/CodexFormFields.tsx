@@ -1,12 +1,19 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { Download, Loader2 } from "lucide-react";
 import EndpointSpeedTest from "./EndpointSpeedTest";
-import { ApiKeySection, EndpointField, ModelInputWithFetch } from "./shared";
+import {
+  ApiKeySection,
+  EndpointField,
+  ModelInputWithFetch,
+  ModelSelectFromApi,
+} from "./shared";
 import {
   fetchModelsForConfig,
+  fetchOfoxModels,
+  filterOfoxModelsByProtocol,
   showFetchModelsError,
   type FetchedModel,
 } from "@/lib/api/model-fetch";
@@ -46,6 +53,9 @@ interface CodexFormFieldsProps {
 
   // Speed Test Endpoints
   speedTestEndpoints: EndpointCandidate[];
+
+  // Ofox preset
+  isOfoxPreset?: boolean;
 }
 
 export function CodexFormFields({
@@ -71,11 +81,59 @@ export function CodexFormFields({
   modelName = "",
   onModelNameChange,
   speedTestEndpoints,
+  isOfoxPreset,
 }: CodexFormFieldsProps) {
   const { t } = useTranslation();
 
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
+
+  // Ofox 模型获取 + localStorage 缓存
+  const OFOX_CACHE_KEY = "cc-switch-ofox-models-openai";
+  const [ofoxModels, setOfoxModels] = useState<FetchedModel[]>(() => {
+    try {
+      const cached = localStorage.getItem(OFOX_CACHE_KEY);
+      return cached ? JSON.parse(cached) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [isOfoxFetching, setIsOfoxFetching] = useState(false);
+
+  const updateOfoxModels = useCallback((models: FetchedModel[]) => {
+    setOfoxModels(models);
+    try {
+      localStorage.setItem(OFOX_CACHE_KEY, JSON.stringify(models));
+    } catch { /* ignore quota errors */ }
+  }, []);
+
+  const handleOfoxFetchModels = useCallback(() => {
+    setIsOfoxFetching(true);
+    fetchOfoxModels("openai")
+      .then((m) => {
+        const filtered = filterOfoxModelsByProtocol(m, "openai");
+        updateOfoxModels(filtered);
+        if (filtered.length === 0) {
+          toast.info(t("providerForm.fetchModelsEmpty"));
+        } else {
+          toast.success(
+            t("providerForm.fetchModelsSuccess", { count: filtered.length }),
+          );
+        }
+      })
+      .catch((err) => {
+        console.warn("[Ofox] Failed to fetch models:", err);
+        showFetchModelsError(err, t);
+      })
+      .finally(() => setIsOfoxFetching(false));
+  }, [t, updateOfoxModels]);
+
+  useEffect(() => {
+    if (isOfoxPreset && ofoxModels.length === 0 && !isOfoxFetching) {
+      handleOfoxFetchModels();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOfoxPreset]);
 
   const handleFetchModels = useCallback(() => {
     if (!codexBaseUrl || !codexApiKey) {
@@ -153,32 +211,49 @@ export function CodexFormFields({
             >
               {t("codexConfig.modelName", { defaultValue: "模型名称" })}
             </label>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={handleFetchModels}
-              disabled={isFetchingModels}
-              className="h-7 gap-1"
-            >
-              {isFetchingModels ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Download className="h-3.5 w-3.5" />
-              )}
-              {t("providerForm.fetchModels")}
-            </Button>
+            {!isOfoxPreset && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleFetchModels}
+                disabled={isFetchingModels}
+                className="h-7 gap-1"
+              >
+                {isFetchingModels ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Download className="h-3.5 w-3.5" />
+                )}
+                {t("providerForm.fetchModels")}
+              </Button>
+            )}
           </div>
-          <ModelInputWithFetch
-            id="codexModelName"
-            value={modelName}
-            onChange={(v) => onModelNameChange!(v)}
-            placeholder={t("codexConfig.modelNamePlaceholder", {
-              defaultValue: "例如: gpt-5.4",
-            })}
-            fetchedModels={fetchedModels}
-            isLoading={isFetchingModels}
-          />
+          {isOfoxPreset ? (
+            <ModelSelectFromApi
+              id="codexModelName"
+              value={modelName}
+              onChange={(v) => onModelNameChange!(v)}
+              placeholder={t("codexConfig.modelNamePlaceholder", {
+                defaultValue: "例如: gpt-5.4",
+              })}
+              fetchedModels={ofoxModels}
+              isLoading={isOfoxFetching}
+              onFetch={handleOfoxFetchModels}
+              vendorExclude={["google", "anthropic"]}
+            />
+          ) : (
+            <ModelInputWithFetch
+              id="codexModelName"
+              value={modelName}
+              onChange={(v) => onModelNameChange!(v)}
+              placeholder={t("codexConfig.modelNamePlaceholder", {
+                defaultValue: "例如: gpt-5.4",
+              })}
+              fetchedModels={fetchedModels}
+              isLoading={isFetchingModels}
+            />
+          )}
           <p className="text-xs text-muted-foreground">
             {modelName.trim()
               ? t("codexConfig.modelNameHint", {

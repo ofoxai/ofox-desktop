@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { FormLabel } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
@@ -27,11 +27,14 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { ApiKeySection } from "./shared";
+import { ApiKeySection, ModelSelectFromApi } from "./shared";
 import {
   fetchModelsForConfig,
+  fetchOfoxModels,
+  filterOfoxModelsByProtocol,
   showFetchModelsError,
   type FetchedModel,
+  type OfoxProtocol,
 } from "@/lib/api/model-fetch";
 import { opencodeNpmPackages } from "@/config/opencodeProviderPresets";
 import { cn } from "@/lib/utils";
@@ -167,7 +170,8 @@ function ModelDropdown({
 }) {
   const grouped: Record<string, FetchedModel[]> = {};
   for (const model of models) {
-    const vendor = model.ownedBy || "Other";
+    const slashIdx = model.id.indexOf("/");
+    const vendor = slashIdx > 0 ? model.id.slice(0, slashIdx) : (model.ownedBy || "Other");
     if (!grouped[vendor]) grouped[vendor] = [];
     grouped[vendor].push(model);
   }
@@ -225,6 +229,9 @@ interface OpenCodeFormFieldsProps {
   // Extra Options
   extraOptions: Record<string, string>;
   onExtraOptionsChange: (options: Record<string, string>) => void;
+
+  // Ofox preset
+  isOfoxPreset?: boolean;
 }
 
 export function OpenCodeFormFields({
@@ -243,11 +250,103 @@ export function OpenCodeFormFields({
   onModelsChange,
   extraOptions,
   onExtraOptionsChange,
+  isOfoxPreset,
 }: OpenCodeFormFieldsProps) {
   const { t } = useTranslation();
 
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
+
+  // oFox: npm → protocol / endpoint 映射
+  const ofoxProtocol: OfoxProtocol | null = useMemo(() => {
+    if (!isOfoxPreset) return null;
+    switch (npm) {
+      case "@ai-sdk/openai":
+      case "@ai-sdk/openai-compatible":
+        return "openai";
+      case "@ai-sdk/anthropic":
+        return "anthropic";
+      case "@ai-sdk/google":
+        return "gemini";
+      default:
+        return null; // bedrock 不支持
+    }
+  }, [isOfoxPreset, npm]);
+
+  const ofoxEndpoint = useMemo(() => {
+    switch (ofoxProtocol) {
+      case "openai": return "https://api.ofox.ai/v1";
+      case "anthropic": return "https://api.ofox.ai/anthropic";
+      case "gemini": return "https://api.ofox.ai/gemini";
+      default: return "";
+    }
+  }, [ofoxProtocol]);
+
+  // oFox 协议变化时自动更新端点
+  useEffect(() => {
+    if (isOfoxPreset && ofoxEndpoint) {
+      onBaseUrlChange(ofoxEndpoint);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ofoxEndpoint, isOfoxPreset]);
+
+  // Ofox 模型获取 + localStorage 缓存（按协议分 key）
+  const ofoxCacheKey = `cc-switch-ofox-models-${ofoxProtocol || "openai"}`;
+  const [ofoxModels, setOfoxModels] = useState<FetchedModel[]>(() => {
+    try {
+      const cached = localStorage.getItem(ofoxCacheKey);
+      return cached ? JSON.parse(cached) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [isOfoxFetching, setIsOfoxFetching] = useState(false);
+
+  const updateOfoxModels = useCallback((models: FetchedModel[]) => {
+    setOfoxModels(models);
+    try {
+      localStorage.setItem(ofoxCacheKey, JSON.stringify(models));
+    } catch { /* ignore quota errors */ }
+  }, [ofoxCacheKey]);
+
+  const handleOfoxFetchModels = useCallback(() => {
+    if (!ofoxProtocol) return;
+    setIsOfoxFetching(true);
+    fetchOfoxModels(ofoxProtocol)
+      .then((m) => {
+        const filtered = filterOfoxModelsByProtocol(m, ofoxProtocol!);
+        updateOfoxModels(filtered);
+        if (filtered.length === 0) {
+          toast.info(t("providerForm.fetchModelsEmpty"));
+        } else {
+          toast.success(
+            t("providerForm.fetchModelsSuccess", { count: filtered.length }),
+          );
+        }
+      })
+      .catch((err) => {
+        console.warn("[Ofox] Failed to fetch models:", err);
+        showFetchModelsError(err, t);
+      })
+      .finally(() => setIsOfoxFetching(false));
+  }, [ofoxProtocol, t, updateOfoxModels]);
+
+  // 协议变化时切换缓存 + 自动获取
+  useEffect(() => {
+    if (!isOfoxPreset || !ofoxProtocol) return;
+    try {
+      const cached = localStorage.getItem(ofoxCacheKey);
+      const parsed = cached ? JSON.parse(cached) : [];
+      setOfoxModels(parsed);
+      if (parsed.length === 0) {
+        handleOfoxFetchModels();
+      }
+    } catch {
+      setOfoxModels([]);
+      handleOfoxFetchModels();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ofoxProtocol, isOfoxPreset]);
 
   const handleFetchModels = useCallback(() => {
     if (!baseUrl || !apiKey) {
@@ -520,8 +619,13 @@ export function OpenCodeFormFields({
           </SelectTrigger>
           <SelectContent>
             {opencodeNpmPackages.map((pkg) => (
-              <SelectItem key={pkg.value} value={pkg.value}>
+              <SelectItem
+                key={pkg.value}
+                value={pkg.value}
+                disabled={isOfoxPreset && pkg.value === "@ai-sdk/amazon-bedrock"}
+              >
                 {pkg.label}
+                {isOfoxPreset && pkg.value === "@ai-sdk/amazon-bedrock" && " (oFox 不支持)"}
               </SelectItem>
             ))}
           </SelectContent>
@@ -553,14 +657,18 @@ export function OpenCodeFormFields({
         <Input
           id="opencode-baseurl"
           value={baseUrl}
-          onChange={(e) => onBaseUrlChange(e.target.value)}
+          onChange={isOfoxPreset ? undefined : (e) => onBaseUrlChange(e.target.value)}
+          readOnly={isOfoxPreset}
           placeholder="https://api.example.com/v1"
+          className={isOfoxPreset ? "bg-muted text-muted-foreground cursor-not-allowed" : undefined}
         />
         <p className="text-xs text-muted-foreground">
-          {t("opencode.baseUrlHint", {
-            defaultValue:
-              "The base URL for the API endpoint. Leave empty to use the default endpoint for official SDKs.",
-          })}
+          {isOfoxPreset
+            ? t("opencode.ofoxEndpointHint", { defaultValue: "端点由接口格式自动决定。" })
+            : t("opencode.baseUrlHint", {
+                defaultValue:
+                  "The base URL for the API endpoint. Leave empty to use the default endpoint for official SDKs.",
+              })}
         </p>
       </div>
 
@@ -647,21 +755,39 @@ export function OpenCodeFormFields({
             {t("opencode.models", { defaultValue: "Models" })}
           </FormLabel>
           <div className="flex gap-1">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={handleFetchModels}
-              disabled={isFetchingModels}
-              className="h-7 gap-1"
-            >
-              {isFetchingModels ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Download className="h-3.5 w-3.5" />
-              )}
-              {t("providerForm.fetchModels")}
-            </Button>
+            {isOfoxPreset ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleOfoxFetchModels}
+                disabled={isOfoxFetching}
+                className="h-7 gap-1"
+              >
+                {isOfoxFetching ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Download className="h-3.5 w-3.5" />
+                )}
+                {t("providerForm.fetchModels")}
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleFetchModels}
+                disabled={isFetchingModels}
+                className="h-7 gap-1"
+              >
+                {isFetchingModels ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Download className="h-3.5 w-3.5" />
+                )}
+                {t("providerForm.fetchModels")}
+              </Button>
+            )}
             <Button
               type="button"
               variant="outline"
@@ -711,19 +837,33 @@ export function OpenCodeFormFields({
                       )}
                     />
                   </Button>
-                  <div className="flex gap-1 flex-1">
-                    <ModelIdInput
-                      modelId={key}
-                      onChange={(newId) => handleModelIdChange(key, newId)}
-                      placeholder={t("opencode.modelId", {
-                        defaultValue: "Model ID",
-                      })}
-                    />
-                    {fetchedModels.length > 0 && (
-                      <ModelDropdown
-                        models={fetchedModels}
-                        onSelect={(id) => handleModelIdChange(key, id)}
+                  <div className="flex-1">
+                    {isOfoxPreset ? (
+                      <ModelSelectFromApi
+                        id={`opencode-model-${key}`}
+                        value={key}
+                        onChange={(newId) => handleModelIdChange(key, newId)}
+                        placeholder="Model ID"
+                        fetchedModels={ofoxModels}
+                        isLoading={isOfoxFetching}
+                        onFetch={handleOfoxFetchModels}
                       />
+                    ) : (
+                      <div className="flex gap-1">
+                        <ModelIdInput
+                          modelId={key}
+                          onChange={(newId) => handleModelIdChange(key, newId)}
+                          placeholder={t("opencode.modelId", {
+                            defaultValue: "Model ID",
+                          })}
+                        />
+                        {fetchedModels.length > 0 && (
+                          <ModelDropdown
+                            models={fetchedModels}
+                            onSelect={(id) => handleModelIdChange(key, id)}
+                          />
+                        )}
+                      </div>
                     )}
                   </div>
                   <Input

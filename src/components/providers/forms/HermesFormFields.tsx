@@ -39,11 +39,14 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { ApiKeySection } from "./shared";
+import { ApiKeySection, ModelSelectFromApi } from "./shared";
 import {
   fetchModelsForConfig,
+  fetchOfoxModels,
+  filterOfoxModelsByProtocol,
   showFetchModelsError,
   type FetchedModel,
+  type OfoxProtocol,
 } from "@/lib/api/model-fetch";
 import {
   hermesApiModes,
@@ -68,6 +71,9 @@ interface HermesFormFieldsProps {
   onModelsChange: (models: HermesModel[]) => void;
   rateLimitDelay: number | undefined;
   onRateLimitDelayChange: (delay: number | undefined) => void;
+
+  // Ofox preset
+  isOfoxPreset?: boolean;
 }
 
 type BaseUrlErrorCode = "empty" | "invalid" | "scheme";
@@ -155,6 +161,7 @@ export function HermesFormFields({
   onModelsChange,
   rateLimitDelay,
   onRateLimitDelayChange,
+  isOfoxPreset,
 }: HermesFormFieldsProps) {
   const { t } = useTranslation();
   const [expandedModels, setExpandedModels] = useState<Record<number, boolean>>(
@@ -162,6 +169,94 @@ export function HermesFormFields({
   );
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
+
+  // oFox: apiMode → protocol / endpoint 映射
+  const ofoxProtocol: OfoxProtocol | null = useMemo(() => {
+    if (!isOfoxPreset) return null;
+    switch (apiMode) {
+      case "chat_completions":
+      case "codex_responses":
+        return "openai";
+      case "anthropic_messages":
+        return "anthropic";
+      default:
+        return null; // bedrock_converse 不支持
+    }
+  }, [isOfoxPreset, apiMode]);
+
+  const ofoxEndpoint = useMemo(() => {
+    switch (ofoxProtocol) {
+      case "openai": return "https://api.ofox.ai/v1";
+      case "anthropic": return "https://api.ofox.ai/anthropic";
+      default: return "";
+    }
+  }, [ofoxProtocol]);
+
+  // oFox 协议变化时自动更新端点
+  useEffect(() => {
+    if (isOfoxPreset && ofoxEndpoint) {
+      onBaseUrlChange(ofoxEndpoint);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ofoxEndpoint, isOfoxPreset]);
+
+  // Ofox 模型获取 + localStorage 缓存（按协议分 key）
+  const ofoxCacheKey = `cc-switch-ofox-models-${ofoxProtocol || "openai"}`;
+  const [ofoxModels, setOfoxModels] = useState<FetchedModel[]>(() => {
+    try {
+      const cached = localStorage.getItem(ofoxCacheKey);
+      return cached ? JSON.parse(cached) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [isOfoxFetching, setIsOfoxFetching] = useState(false);
+
+  const updateOfoxModels = useCallback((models: FetchedModel[]) => {
+    setOfoxModels(models);
+    try {
+      localStorage.setItem(ofoxCacheKey, JSON.stringify(models));
+    } catch { /* ignore quota errors */ }
+  }, [ofoxCacheKey]);
+
+  const handleOfoxFetchModels = useCallback(() => {
+    if (!ofoxProtocol) return;
+    setIsOfoxFetching(true);
+    fetchOfoxModels(ofoxProtocol)
+      .then((m) => {
+        const filtered = filterOfoxModelsByProtocol(m, ofoxProtocol!);
+        updateOfoxModels(filtered);
+        if (filtered.length === 0) {
+          toast.info(t("providerForm.fetchModelsEmpty"));
+        } else {
+          toast.success(
+            t("providerForm.fetchModelsSuccess", { count: filtered.length }),
+          );
+        }
+      })
+      .catch((err) => {
+        console.warn("[Ofox] Failed to fetch models:", err);
+        showFetchModelsError(err, t);
+      })
+      .finally(() => setIsOfoxFetching(false));
+  }, [ofoxProtocol, t, updateOfoxModels]);
+
+  // 协议变化时切换缓存 + 自动获取
+  useEffect(() => {
+    if (!isOfoxPreset || !ofoxProtocol) return;
+    try {
+      const cached = localStorage.getItem(ofoxCacheKey);
+      const parsed = cached ? JSON.parse(cached) : [];
+      setOfoxModels(parsed);
+      if (parsed.length === 0) {
+        handleOfoxFetchModels();
+      }
+    } catch {
+      setOfoxModels([]);
+      handleOfoxFetchModels();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ofoxProtocol, isOfoxPreset]);
   const [baseUrlTouched, setBaseUrlTouched] = useState(false);
   const [providerAdvancedOpen, setProviderAdvancedOpen] = useState(
     rateLimitDelay !== undefined,
@@ -194,12 +289,14 @@ export function HermesFormFields({
 
   // Group fetched models by vendor once — Radix DropdownMenuContent doesn't
   // lazy-mount, so computing this in JSX would re-run per model row per render.
+  const activeModels = isOfoxPreset ? ofoxModels : fetchedModels;
   const groupedFetchedModels = useMemo(
     () =>
       Object.entries(
-        fetchedModels.reduce(
+        activeModels.reduce(
           (acc, m) => {
-            const v = m.ownedBy || "Other";
+            const slashIdx = m.id.indexOf("/");
+            const v = slashIdx > 0 ? m.id.slice(0, slashIdx) : (m.ownedBy || "Other");
             if (!acc[v]) acc[v] = [];
             acc[v].push(m);
             return acc;
@@ -207,7 +304,7 @@ export function HermesFormFields({
           {} as Record<string, FetchedModel[]>,
         ),
       ).sort(([a], [b]) => a.localeCompare(b)),
-    [fetchedModels],
+    [activeModels],
   );
 
   const toggleModelAdvanced = (index: number) => {
@@ -286,8 +383,13 @@ export function HermesFormFields({
           </SelectTrigger>
           <SelectContent>
             {hermesApiModes.map((mode) => (
-              <SelectItem key={mode.value} value={mode.value}>
+              <SelectItem
+                key={mode.value}
+                value={mode.value}
+                disabled={isOfoxPreset && mode.value === "bedrock_converse"}
+              >
                 {t(mode.labelKey)}
+                {isOfoxPreset && mode.value === "bedrock_converse" && " (oFox 不支持)"}
               </SelectItem>
             ))}
           </SelectContent>
@@ -299,33 +401,52 @@ export function HermesFormFields({
         </p>
       </div>
 
-      <div className="space-y-2">
-        <FormLabel htmlFor="hermes-baseurl">
-          {t("hermes.form.baseUrl", { defaultValue: "API 端点" })}
-        </FormLabel>
-        <Input
-          id="hermes-baseurl"
-          value={baseUrl}
-          onChange={(e) => onBaseUrlChange(e.target.value)}
-          onBlur={() => setBaseUrlTouched(true)}
-          placeholder="https://api.example.com/v1"
-          aria-invalid={showBaseUrlError}
-          className={
-            showBaseUrlError
-              ? "border-destructive focus-visible:ring-destructive"
-              : undefined
-          }
-        />
-        {showBaseUrlError ? (
-          <p className="text-xs text-destructive">{baseUrlErrorMessage}</p>
-        ) : (
+      {isOfoxPreset ? (
+        <div className="space-y-2">
+          <FormLabel htmlFor="hermes-baseurl">
+            {t("hermes.form.baseUrl", { defaultValue: "API 端点" })}
+          </FormLabel>
+          <Input
+            id="hermes-baseurl"
+            value={baseUrl}
+            readOnly
+            className="bg-muted text-muted-foreground cursor-not-allowed"
+          />
           <p className="text-xs text-muted-foreground">
-            {t("hermes.form.baseUrlHint", {
-              defaultValue: "供应商的 API 端点地址。",
+            {t("hermes.form.ofoxEndpointHint", {
+              defaultValue: "端点由 API 模式自动决定。",
             })}
           </p>
-        )}
-      </div>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <FormLabel htmlFor="hermes-baseurl">
+            {t("hermes.form.baseUrl", { defaultValue: "API 端点" })}
+          </FormLabel>
+          <Input
+            id="hermes-baseurl"
+            value={baseUrl}
+            onChange={(e) => onBaseUrlChange(e.target.value)}
+            onBlur={() => setBaseUrlTouched(true)}
+            placeholder="https://api.example.com/v1"
+            aria-invalid={showBaseUrlError}
+            className={
+              showBaseUrlError
+                ? "border-destructive focus-visible:ring-destructive"
+                : undefined
+            }
+          />
+          {showBaseUrlError ? (
+            <p className="text-xs text-destructive">{baseUrlErrorMessage}</p>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              {t("hermes.form.baseUrlHint", {
+                defaultValue: "供应商的 API 端点地址。",
+              })}
+            </p>
+          )}
+        </div>
+      )}
 
       <ApiKeySection
         value={apiKey}
@@ -343,21 +464,39 @@ export function HermesFormFields({
             {t("hermes.form.models", { defaultValue: "模型列表" })}
           </FormLabel>
           <div className="flex gap-1">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={handleFetchModels}
-              disabled={isFetchingModels}
-              className="h-7 gap-1"
-            >
-              {isFetchingModels ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <Download className="h-3.5 w-3.5" />
-              )}
-              {t("providerForm.fetchModels")}
-            </Button>
+            {isOfoxPreset ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleOfoxFetchModels}
+                disabled={isOfoxFetching}
+                className="h-7 gap-1"
+              >
+                {isOfoxFetching ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Download className="h-3.5 w-3.5" />
+                )}
+                {t("providerForm.fetchModels")}
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleFetchModels}
+                disabled={isFetchingModels}
+                className="h-7 gap-1"
+              >
+                {isFetchingModels ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Download className="h-3.5 w-3.5" />
+                )}
+                {t("providerForm.fetchModels")}
+              </Button>
+            )}
             <Button
               type="button"
               variant="outline"
@@ -408,56 +547,68 @@ export function HermesFormFields({
                     <label className="text-xs text-muted-foreground">
                       {t("hermes.form.modelId", { defaultValue: "模型 ID" })}
                     </label>
-                    <div className="flex gap-1">
-                      <Input
+                    {isOfoxPreset ? (
+                      <ModelSelectFromApi
+                        id={`hermes-model-${index}`}
                         value={model.id}
-                        onChange={(e) =>
-                          handleModelChange(index, "id", e.target.value)
-                        }
-                        placeholder={t("hermes.form.modelIdPlaceholder", {
-                          defaultValue: "anthropic/claude-opus-4-7",
-                        })}
-                        className="flex-1"
+                        onChange={(v) => handleModelChange(index, "id", v)}
+                        placeholder="anthropic/claude-opus-4-7"
+                        fetchedModels={ofoxModels}
+                        isLoading={isOfoxFetching}
+                        onFetch={handleOfoxFetchModels}
                       />
-                      {fetchedModels.length > 0 && (
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button
-                              variant="outline"
-                              size="icon"
-                              className="shrink-0"
+                    ) : (
+                      <div className="flex gap-1">
+                        <Input
+                          value={model.id}
+                          onChange={(e) =>
+                            handleModelChange(index, "id", e.target.value)
+                          }
+                          placeholder={t("hermes.form.modelIdPlaceholder", {
+                            defaultValue: "anthropic/claude-opus-4-7",
+                          })}
+                          className="flex-1"
+                        />
+                        {activeModels.length > 0 && (
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button
+                                variant="outline"
+                                size="icon"
+                                className="shrink-0"
+                              >
+                                <ChevronDown className="h-4 w-4" />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent
+                              align="end"
+                              className="max-h-64 overflow-y-auto z-[200]"
                             >
-                              <ChevronDown className="h-4 w-4" />
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent
-                            align="end"
-                            className="max-h-64 overflow-y-auto z-[200]"
-                          >
-                            {groupedFetchedModels.map(
-                              ([vendor, vModels], vi) => (
-                                <div key={vendor}>
-                                  {vi > 0 && <DropdownMenuSeparator />}
-                                  <DropdownMenuLabel>
-                                    {vendor}
-                                  </DropdownMenuLabel>
-                                  {vModels.map((m) => (
-                                    <DropdownMenuItem
-                                      key={m.id}
-                                      onSelect={() =>
-                                        handleModelChange(index, "id", m.id)
-                                      }
-                                    >
-                                      {m.id}
-                                    </DropdownMenuItem>
-                                  ))}
-                                </div>
-                              ),
-                            )}
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      )}
-                    </div>
+                              {groupedFetchedModels.map(
+                                ([vendor, vModels], vi) => (
+                                  <div key={vendor}>
+                                    {vi > 0 && <DropdownMenuSeparator />}
+                                    <DropdownMenuLabel>
+                                      {vendor}
+                                    </DropdownMenuLabel>
+                                    {vModels.map((m) => (
+                                      <DropdownMenuItem
+                                        key={m.id}
+                                        onSelect={() =>
+                                          handleModelChange(index, "id", m.id)
+                                        }
+                                      >
+                                        {m.id}
+                                      </DropdownMenuItem>
+                                    ))}
+                                  </div>
+                                ),
+                              )}
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        )}
+                      </div>
+                    )}
                   </div>
                   <div className="flex-1 space-y-1">
                     <label className="text-xs text-muted-foreground">

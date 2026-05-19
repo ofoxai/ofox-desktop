@@ -59,7 +59,7 @@ export interface ProviderPreset {
   // 供应商类型标识（用于特殊供应商检测）
   // - "github_copilot": GitHub Copilot 供应商（需要 OAuth 认证）
   // - "codex_oauth": OpenAI Codex via ChatGPT Plus/Pro 反代（需要 OAuth 认证）
-  providerType?: "github_copilot" | "codex_oauth";
+  providerType?: "github_copilot" | "codex_oauth" | "ofox";
 
   // 是否需要 OAuth 认证（而非 API Key）
   requiresOAuth?: boolean;
@@ -84,6 +84,22 @@ export const providerPresets: ProviderPreset[] = [
     },
     icon: "anthropic",
     iconColor: "#D4915D",
+  },
+  {
+    name: "OfoxAI",
+    websiteUrl: "https://ofox.ai",
+    apiKeyUrl: "https://app.ofox.ai/manage/api-keys",
+    settingsConfig: {
+      env: {
+        ANTHROPIC_BASE_URL: "https://api.ofox.ai/anthropic",
+        ANTHROPIC_AUTH_TOKEN: "",
+      },
+    },
+    category: "aggregator",
+    apiKeyField: "ANTHROPIC_AUTH_TOKEN",
+    icon: "ofox",
+    iconColor: "#D97706",
+    providerType: "ofox",
   },
   {
     name: "Shengsuanyun",
@@ -217,7 +233,7 @@ export const providerPresets: ProviderPreset[] = [
     },
     category: "cn_official",
     icon: "kimi",
-    iconColor: "#6366F1",
+    iconColor: "#D97706",
   },
   {
     name: "Kimi For Coding",
@@ -230,7 +246,7 @@ export const providerPresets: ProviderPreset[] = [
     },
     category: "cn_official",
     icon: "kimi",
-    iconColor: "#6366F1",
+    iconColor: "#D97706",
   },
   {
     name: "StepFun",
