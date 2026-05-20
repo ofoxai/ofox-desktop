@@ -55,6 +55,9 @@ export function FirstRunNoticeDialog() {
           <DialogDescription className="whitespace-pre-line leading-relaxed">
             {t("firstRunNotice.bodyOfficial")}
           </DialogDescription>
+          <DialogDescription className="whitespace-pre-line leading-relaxed">
+            {t("firstRunNotice.bodyOfox")}
+          </DialogDescription>
         </div>
         <DialogFooter>
           <Button onClick={handleAcknowledge}>

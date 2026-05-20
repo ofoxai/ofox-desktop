@@ -46,11 +46,21 @@ const FETCH_TIMEOUT_SECS: u64 = 15;
 fn is_chat_model(id: &str) -> bool {
     let lower = id.to_lowercase();
     // 排除 embedding 模型（如 text-embedding-v4、text-embedding-3-large）
-    if lower.contains("embedding") { return false; }
+    if lower.contains("embedding") {
+        return false;
+    }
     // 排除图片生成模型（如 gpt-image-1.5、gemini-2.5-flash-image）
-    if lower.contains("gpt-image") || lower.ends_with("-image") || lower.contains("-image-") { return false; }
+    if lower.contains("gpt-image") || lower.ends_with("-image") || lower.contains("-image-") {
+        return false;
+    }
     // 排除语音/审核模型
-    if lower.contains("tts") || lower.contains("dall-e") || lower.contains("whisper") || lower.contains("moderation") { return false; }
+    if lower.contains("tts")
+        || lower.contains("dall-e")
+        || lower.contains("whisper")
+        || lower.contains("moderation")
+    {
+        return false;
+    }
     true
 }
 

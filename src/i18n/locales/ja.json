@@ -46,7 +46,8 @@
     "title": "CC Switch へようこそ",
     "bodyDefault": "CC Switch は Claude Code / Codex / Gemini CLI の複数プロバイダーをワンクリックで切り替えられるツールです。すでにこれらのツールを設定済みの場合、CC Switch は現在の設定を「default」という名前のプロバイダーとして自動的に保存するので、既存の設定が失われることはありません。",
     "bodyOfficial": "リストには「Official（公式）」プリセットも用意されており、公式バージョンに戻したくなったらクリックするだけで切り替えられます。切り替える前に現在の設定は自動で default にバックアップされるので、自由に行き来できます。これが CC Switch の仕組みです 😊",
-    "confirm": "了解しました"
+    "confirm": "了解しました",
+    "bodyOfox": "API Key をまだお持ちでない方には OfoxAI がおすすめです。すべてのツールに対応した集約プロバイダーで、1 つの Key ですべてのモデルが利用できます。app.ofox.ai で取得できます。"
   },
   "apiKeyInput": {
     "placeholder": "API Key を入力",
@@ -170,7 +171,8 @@
         "oauthHint": "Google 公式は OAuth 個人認証を使用するため API Key は不要です。初回利用時にブラウザが開きます。",
         "apiKeyPlaceholder": "Gemini API Key を入力"
       }
-    }
+    },
+    "ofoxQuickStart": "OfoxAI プロバイダーを追加"
   },
   "notifications": {
     "providerAdded": "プロバイダーを追加しました",

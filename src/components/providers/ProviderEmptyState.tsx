@@ -33,14 +33,22 @@ export function ProviderEmptyState({
         </p>
       )}
       <div className="mt-6 flex flex-col gap-2">
+        {onCreate && (
+          <Button
+            onClick={onCreate}
+            className="bg-amber-600 hover:bg-amber-700 text-white"
+          >
+            {t("provider.ofoxQuickStart")}
+          </Button>
+        )}
         {onImport && (
-          <Button onClick={onImport}>
+          <Button variant="outline" onClick={onImport}>
             <Download className="mr-2 h-4 w-4" />
             {t("provider.importCurrent")}
           </Button>
         )}
         {onCreate && (
-          <Button variant={onImport ? "outline" : "default"} onClick={onCreate}>
+          <Button variant="outline" onClick={onCreate}>
             {t("provider.addProvider")}
           </Button>
         )}

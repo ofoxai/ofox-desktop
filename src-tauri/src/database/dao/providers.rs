@@ -535,12 +535,14 @@ impl Database {
         Ok(ids)
     }
 
-    /// 判断指定 app 下是否存在非官方种子的供应商。
+    /// 判断指定 app 下是否存在非内置种子的供应商（即用户手动创建的供应商）。
     ///
     /// 比 `get_all_providers` 轻量得多：只读 id 列、无 endpoint 子查询、首条命中即返回。
     /// 用于 `import_default_config` 决定是否跳过 live 导入。
+    ///
+    /// 排除所有内置种子（官方 + OfoxAI），只有用户手动创建的供应商才视为 "non-seed"。
     pub fn has_non_official_seed_provider(&self, app_type: &str) -> Result<bool, AppError> {
-        use crate::database::dao::providers_seed::is_official_seed_id;
+        use crate::database::dao::providers_seed::is_builtin_seed_id;
         let conn = lock_conn!(self.conn);
         let mut stmt = conn
             .prepare("SELECT id FROM providers WHERE app_type = ?1")
@@ -550,7 +552,7 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))?;
         while let Some(row) = rows.next().map_err(|e| AppError::Database(e.to_string()))? {
             let id: String = row.get(0).map_err(|e| AppError::Database(e.to_string()))?;
-            if !is_official_seed_id(&id) {
+            if !is_builtin_seed_id(&id) {
                 return Ok(true);
             }
         }
@@ -630,6 +632,66 @@ impl Database {
 
         // 即使 inserted=0（例如用户手动创建过同 id）也设置 flag 防止反复检查
         self.set_setting("official_providers_seeded", "true")?;
+
+        Ok(inserted)
+    }
+
+    /// 启动时调用：补齐缺失的 OfoxAI 预设供应商（全部 6 个应用）。
+    ///
+    /// 使用 settings flag `ofox_providers_seeded` 保证每个数据库只执行一次：
+    /// - 全新用户：seed 六条 OfoxAI 预设
+    /// - 老用户升级：同样会触发一次（flag 不存在），追加到末尾，不影响已有排序
+    /// - 用户删除 seed 后：不再重建（flag 已为 true），尊重用户意图
+    pub fn init_default_ofox_providers(&self) -> Result<usize, AppError> {
+        use crate::database::dao::providers_seed::OFOX_SEEDS;
+
+        if self.get_bool_flag("ofox_providers_seeded").unwrap_or(false) {
+            return Ok(0);
+        }
+
+        let mut inserted = 0_usize;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        for seed in OFOX_SEEDS {
+            let app_type_str = seed.app_type.as_str();
+
+            // 若该 id 已存在，跳过
+            if self.get_provider_by_id(seed.id, app_type_str)?.is_some() {
+                continue;
+            }
+
+            let next_sort_index = self.next_sort_index_for_app(app_type_str)?;
+
+            let settings_config: serde_json::Value =
+                serde_json::from_str(seed.settings_config_json).map_err(|e| {
+                    AppError::Database(format!("Seed JSON parse failed for {}: {e}", seed.id))
+                })?;
+
+            let meta: crate::provider::ProviderMeta = serde_json::from_str(seed.meta_json)
+                .map_err(|e| {
+                    AppError::Database(format!("Seed meta JSON parse failed for {}: {e}", seed.id))
+                })?;
+
+            let mut provider = Provider::with_id(
+                seed.id.to_string(),
+                seed.name.to_string(),
+                settings_config,
+                Some(seed.website_url.to_string()),
+            );
+            provider.category = Some("aggregator".to_string());
+            provider.icon = Some(seed.icon.to_string());
+            provider.icon_color = Some(seed.icon_color.to_string());
+            provider.sort_index = Some(next_sort_index);
+            provider.created_at = Some(now_ms);
+            provider.meta = Some(meta);
+
+            self.save_provider(app_type_str, &provider)?;
+            inserted += 1;
+            log::info!("✓ Seeded OfoxAI provider: {} ({})", seed.name, app_type_str);
+        }
+
+        // 即使 inserted=0（例如用户手动创建过同 id）也设置 flag 防止反复检查
+        self.set_setting("ofox_providers_seeded", "true")?;
 
         Ok(inserted)
     }

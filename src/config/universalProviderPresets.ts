@@ -36,9 +36,9 @@ export interface UniversalProviderPreset {
 }
 
 /**
- * NewAPI 默认模型配置
+ * 聚合供应商通用默认模型配置（OfoxAI、NewAPI 等共享）
  */
-const NEWAPI_DEFAULT_MODELS: UniversalProviderModels = {
+const AGGREGATOR_DEFAULT_MODELS: UniversalProviderModels = {
   claude: {
     model: "claude-sonnet-4-6",
     haikuModel: "claude-haiku-4-5-20251001",
@@ -59,6 +59,21 @@ const NEWAPI_DEFAULT_MODELS: UniversalProviderModels = {
  */
 export const universalProviderPresets: UniversalProviderPreset[] = [
   {
+    name: "OfoxAI",
+    providerType: "ofox",
+    defaultApps: {
+      claude: true,
+      codex: true,
+      gemini: true,
+    },
+    defaultModels: AGGREGATOR_DEFAULT_MODELS,
+    websiteUrl: "https://ofox.ai",
+    icon: "ofox",
+    iconColor: "#D97706",
+    description:
+      "OfoxAI 聚合供应商，支持 Anthropic、OpenAI、Gemini 等多种协议，一个 API Key 即可使用所有模型",
+  },
+  {
     name: "NewAPI",
     providerType: "newapi",
     defaultApps: {
@@ -66,7 +81,7 @@ export const universalProviderPresets: UniversalProviderPreset[] = [
       codex: true,
       gemini: true,
     },
-    defaultModels: NEWAPI_DEFAULT_MODELS,
+    defaultModels: AGGREGATOR_DEFAULT_MODELS,
     websiteUrl: "https://www.newapi.pro",
     icon: "newapi",
     iconColor: "#00A67E",
@@ -81,7 +96,7 @@ export const universalProviderPresets: UniversalProviderPreset[] = [
       codex: true,
       gemini: true,
     },
-    defaultModels: NEWAPI_DEFAULT_MODELS,
+    defaultModels: AGGREGATOR_DEFAULT_MODELS,
     icon: "openai",
     iconColor: "#6366F1",
     description: "自定义配置的 API 网关",

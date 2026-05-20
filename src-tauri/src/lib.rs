@@ -514,6 +514,14 @@ pub fn run() {
                 Err(e) => log::warn!("✗ Failed to seed official providers: {e}"),
             }
 
+            match app_state.db.init_default_ofox_providers() {
+                Ok(count) if count > 0 => {
+                    log::info!("✓ Seeded {count} OfoxAI provider(s)");
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("✗ Failed to seed OfoxAI providers: {e}"),
+            }
+
             // 老用户 / 已确认的路径由 `fresh_install_at_startup` 自行拦截，这里不做写入。
             // 字段只由前端在用户点击"我知道了"时 save_settings 回写，语义是"用户显式确认过"。
             if !first_run_already_confirmed && fresh_install_at_startup {
