@@ -16,7 +16,7 @@ export const HERMES_PROVIDER_SOURCE_DICT = "providers_dict";
 
 /**
  * True when the provider was sourced from Hermes' v12+ `providers:` dict —
- * CC Switch renders those read-only and routes edits to Hermes Web UI.
+ * Ofox Switch renders those read-only and routes edits to Hermes Web UI.
  */
 export function isHermesReadOnlyProvider(settingsConfig: unknown): boolean {
   if (!settingsConfig || typeof settingsConfig !== "object") {
@@ -680,7 +680,7 @@ export const hermesProviderPresets: HermesProviderPreset[] = [
   {
     name: "PackyCode",
     websiteUrl: "https://www.packyapi.com",
-    apiKeyUrl: "https://www.packyapi.com/register?aff=cc-switch",
+    apiKeyUrl: "https://www.packyapi.com/register?aff=ofox-switch",
     settingsConfig: {
       name: "packycode",
       base_url: "https://www.packyapi.com",
@@ -823,7 +823,7 @@ export const hermesProviderPresets: HermesProviderPreset[] = [
   {
     name: "CrazyRouter",
     websiteUrl: "https://www.crazyrouter.com",
-    apiKeyUrl: "https://www.crazyrouter.com/register?aff=OZcm&ref=cc-switch",
+    apiKeyUrl: "https://www.crazyrouter.com/register?aff=OZcm&ref=ofox-switch",
     settingsConfig: {
       name: "crazyrouter",
       base_url: "https://crazyrouter.com",
@@ -873,7 +873,7 @@ export const hermesProviderPresets: HermesProviderPreset[] = [
     nameKey: "providerForm.presets.ucloud",
     websiteUrl: "https://www.compshare.cn",
     apiKeyUrl:
-      "https://www.compshare.cn/coding-plan?ytag=GPU_YY_YX_git_cc-switch",
+      "https://www.compshare.cn/coding-plan?ytag=GPU_YY_YX_git_ofox-switch",
     settingsConfig: {
       name: "compshare",
       base_url: "https://api.modelverse.cn/v1",

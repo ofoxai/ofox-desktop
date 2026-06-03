@@ -1085,7 +1085,7 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
   {
     name: "PackyCode",
     websiteUrl: "https://www.packyapi.com",
-    apiKeyUrl: "https://www.packyapi.com/register?aff=cc-switch",
+    apiKeyUrl: "https://www.packyapi.com/register?aff=ofox-switch",
     settingsConfig: {
       npm: "@ai-sdk/anthropic",
       name: "PackyCode",
@@ -1263,7 +1263,7 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
   {
     name: "CrazyRouter",
     websiteUrl: "https://www.crazyrouter.com",
-    apiKeyUrl: "https://www.crazyrouter.com/register?aff=OZcm&ref=cc-switch",
+    apiKeyUrl: "https://www.crazyrouter.com/register?aff=OZcm&ref=ofox-switch",
     settingsConfig: {
       npm: "@ai-sdk/anthropic",
       name: "CrazyRouter",

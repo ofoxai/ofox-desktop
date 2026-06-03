@@ -15,6 +15,7 @@ mod import_export;
 mod mcp;
 mod misc;
 mod model_fetch;
+pub(crate) mod ofox_auth;
 mod omo;
 mod openclaw;
 mod plugin;
@@ -48,6 +49,8 @@ pub use import_export::*;
 pub use mcp::*;
 pub use misc::*;
 pub use model_fetch::*;
+// Note: ofox_auth items are accessed via commands::ofox_auth:: to avoid
+// shadowing lib.rs's top-level ofox_auth module
 pub use omo::*;
 pub use openclaw::*;
 pub use plugin::*;

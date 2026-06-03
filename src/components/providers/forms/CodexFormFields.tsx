@@ -89,7 +89,7 @@ export function CodexFormFields({
   const [isFetchingModels, setIsFetchingModels] = useState(false);
 
   // Ofox 模型获取 + localStorage 缓存
-  const OFOX_CACHE_KEY = "cc-switch-ofox-models-openai";
+  const OFOX_CACHE_KEY = "ofox-switch-ofox-models-openai";
   const [ofoxModels, setOfoxModels] = useState<FetchedModel[]>(() => {
     try {
       const cached = localStorage.getItem(OFOX_CACHE_KEY);

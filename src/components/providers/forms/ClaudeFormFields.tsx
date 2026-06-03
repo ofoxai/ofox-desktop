@@ -229,7 +229,7 @@ export function ClaudeFormFields({
     }
   }, [apiFormat]);
 
-  const ofoxCacheKey = `cc-switch-ofox-models-${ofoxProtocol}`;
+  const ofoxCacheKey = `ofox-switch-ofox-models-${ofoxProtocol}`;
 
   const [ofoxModels, setOfoxModels] = useState<FetchedModel[]>(() => {
     try {

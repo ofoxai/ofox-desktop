@@ -135,7 +135,7 @@ export function OpenClawFormFields({
   }, [ofoxEndpoint, isOfoxPreset]);
 
   // Ofox 模型获取 + localStorage 缓存（按协议分 key）
-  const ofoxCacheKey = `cc-switch-ofox-models-${ofoxProtocol || "openai"}`;
+  const ofoxCacheKey = `ofox-switch-ofox-models-${ofoxProtocol || "openai"}`;
   const [ofoxModels, setOfoxModels] = useState<FetchedModel[]>(() => {
     try {
       const cached = localStorage.getItem(ofoxCacheKey);

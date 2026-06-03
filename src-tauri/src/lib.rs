@@ -17,6 +17,7 @@ mod lightweight;
 #[cfg(target_os = "linux")]
 mod linux_fix;
 mod mcp;
+mod ofox_auth;
 mod openclaw_config;
 mod opencode_config;
 mod panic_hook;
@@ -31,6 +32,7 @@ mod settings;
 mod store;
 
 mod tray;
+mod tray_popover;
 mod usage_script;
 
 pub use app_config::{AppType, InstalledSkill, McpApps, McpServer, MultiAppConfig, SkillApps};
@@ -96,9 +98,9 @@ fn redact_url_for_log(url_str: &str) -> String {
     }
 }
 
-/// 统一处理 ccswitch:// 深链接 URL
+/// 统一处理 ccswitch:// 和 ofoxswitch:// 深链接 URL
 ///
-/// - 解析 URL
+/// - 解析深链接 URL
 /// - 向前端发射 `deeplink-import` / `deeplink-error` 事件
 /// - 可选：在成功时聚焦主窗口
 fn handle_deeplink_url(
@@ -107,15 +109,20 @@ fn handle_deeplink_url(
     focus_main_window: bool,
     source: &str,
 ) -> bool {
-    if !url_str.starts_with("ccswitch://") {
+    // Normalize ofoxswitch:// to ccswitch:// for standard deep link handling
+    let normalized = if url_str.starts_with("ofoxswitch://") {
+        url_str.replacen("ofoxswitch://", "ccswitch://", 1)
+    } else if url_str.starts_with("ccswitch://") {
+        url_str.to_string()
+    } else {
         return false;
-    }
+    };
 
-    let redacted_url = redact_url_for_log(url_str);
+    let redacted_url = redact_url_for_log(&normalized);
     log::info!("✓ Deep link URL detected from {source}: {redacted_url}");
     log::debug!("Deep link URL (raw) from {source}: {url_str}");
 
-    match crate::deeplink::parse_deeplink_url(url_str) {
+    match crate::deeplink::parse_deeplink_url(&normalized) {
         Ok(request) => {
             log::info!(
                 "✓ Successfully parsed deep link: resource={}, app={:?}, name={:?}",
@@ -198,7 +205,7 @@ fn macos_tray_icon() -> Option<Image<'static>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log（默认 ~/.cc-switch/crash.log）
+    // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log（默认 ~/.ofox-switch/crash.log）
     panic_hook::setup_panic_hook();
 
     let mut builder = tauri::Builder::default();
@@ -290,7 +297,7 @@ pub fn run() {
                     log::warn!("初始化 Updater 插件失败，已跳过：{e}");
                 }
             }
-            // 初始化日志（单文件输出到 <app_config_dir>/logs/cc-switch.log）
+            // 初始化日志（单文件输出到 <app_config_dir>/logs/ofox-switch.log）
             {
                 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
@@ -302,7 +309,7 @@ pub fn run() {
                 }
 
                 // 启动时删除旧日志文件，实现单文件覆盖效果
-                let log_file_path = log_dir.join("cc-switch.log");
+                let log_file_path = log_dir.join("ofox-switch.log");
                 let _ = std::fs::remove_file(&log_file_path);
 
                 app.handle().plugin(
@@ -313,7 +320,7 @@ pub fn run() {
                             Target::new(TargetKind::Stdout),
                             Target::new(TargetKind::Folder {
                                 path: log_dir,
-                                file_name: Some("cc-switch".into()),
+                                file_name: Some("ofox-switch".into()),
                             }),
                         ])
                         // 单文件模式：启动时删除旧文件，达到大小时轮转
@@ -329,7 +336,7 @@ pub fn run() {
 
             // 初始化数据库
             let app_config_dir = crate::config::get_app_config_dir();
-            let db_path = app_config_dir.join("cc-switch.db");
+            let db_path = app_config_dir.join("ofox-switch.db");
             let json_path = app_config_dir.join("config.json");
 
             // 检查是否需要从 config.json 迁移到 SQLite
@@ -476,7 +483,7 @@ pub fn run() {
             // 落成 "default" provider 设为 current，再追加官方预设（is_current=false）。
             // 这样用户切到官方预设时，回填机制会保护原 live 配置不丢失。
             //
-            // 捕获首次运行快照：所有全新装用户都会看到欢迎弹窗介绍 CC Switch 的工作方式。
+            // 捕获首次运行快照：所有全新装用户都会看到欢迎弹窗介绍 Ofox Switch 的工作方式。
             // 读失败时默认不弹，宁可漏弹也不要因为故障打扰用户。
             let first_run_already_confirmed = crate::settings::get_settings()
                 .first_run_notice_confirmed
@@ -701,7 +708,7 @@ pub fn run() {
                     let should_register = app
                         .path()
                         .data_dir()
-                        .map(|d| !d.join("applications/cc-switch-handler.desktop").exists())
+                        .map(|d| !d.join("applications/ofox-switch-handler.desktop").exists())
                         .unwrap_or(true);
 
                     if should_register {
@@ -757,10 +764,24 @@ pub fn run() {
             // 构建托盘
             let mut tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID)
                 .on_tray_icon_event(|tray, event| match event {
-                    // 鼠标悬停/点击到托盘图标时，后台异步刷新用量缓存，
-                    // 让用户下一次（或快速打开菜单的那一刻）看到较新的数字。
-                    // refresh_all_usage_in_tray 内部有 10 秒防抖。
-                    TrayIconEvent::Enter { .. } | TrayIconEvent::Click { .. } => {
+                    // 左键点击：切换自定义 popover 窗口
+                    TrayIconEvent::Click {
+                        button: tauri::tray::MouseButton::Left,
+                        button_state: tauri::tray::MouseButtonState::Up,
+                        rect,
+                        ..
+                    } => {
+                        let app = tray.app_handle().clone();
+                        // 同时刷新用量缓存
+                        tauri::async_runtime::spawn(async move {
+                            crate::tray::refresh_all_usage_in_tray(&app).await;
+                        });
+                        if let Err(e) = crate::tray_popover::toggle_popover(tray.app_handle(), rect) {
+                            log::error!("切换 tray popover 失败: {e}");
+                        }
+                    }
+                    // 鼠标悬停时刷新用量缓存
+                    TrayIconEvent::Enter { .. } => {
                         let app = tray.app_handle().clone();
                         tauri::async_runtime::spawn(async move {
                             crate::tray::refresh_all_usage_in_tray(&app).await;
@@ -772,7 +793,7 @@ pub fn run() {
                 .on_menu_event(|app, event| {
                     tray::handle_tray_menu_event(app, &event.id.0);
                 })
-                .show_menu_on_left_click(true);
+                .show_menu_on_left_click(false);
 
             // 使用平台对应的托盘图标（macOS 使用模板图标适配深浅色）
             #[cfg(target_os = "macos")]
@@ -843,6 +864,18 @@ pub fn run() {
                 let codex_oauth_manager = CodexOAuthManager::new(app_config_dir);
                 app.manage(CodexOAuthState(Arc::new(RwLock::new(codex_oauth_manager))));
                 log::info!("✓ CodexOAuthManager initialized");
+            }
+
+            // 初始化 OfoxAuthManager
+            {
+                use crate::ofox_auth::OfoxAuthManager;
+                use commands::ofox_auth::OfoxAuthState;
+                use tokio::sync::RwLock;
+
+                let app_config_dir = crate::config::get_app_config_dir();
+                let ofox_auth_manager = OfoxAuthManager::new(app_config_dir);
+                app.manage(OfoxAuthState(Arc::new(RwLock::new(ofox_auth_manager))));
+                log::info!("✓ OfoxAuthManager initialized");
             }
 
             // 初始化全局出站代理 HTTP 客户端
@@ -1333,6 +1366,12 @@ pub fn run() {
             commands::enter_lightweight_mode,
             commands::exit_lightweight_mode,
             commands::is_lightweight_mode,
+            // Ofox OAuth
+            commands::ofox_auth::ofox_start_login,
+            commands::ofox_auth::ofox_poll_for_token,
+            commands::ofox_auth::ofox_get_user_info,
+            commands::ofox_auth::ofox_is_authenticated,
+            commands::ofox_auth::ofox_logout,
         ]);
 
     let app = builder
@@ -1389,13 +1428,13 @@ pub fn run() {
                         }
                     }
                 }
-                // 处理通过自定义 URL 协议触发的打开事件（例如 ccswitch://...）
+                // 处理通过自定义 URL 协议触发的打开事件（例如 ccswitch://... 或 ofoxswitch://...）
                 RunEvent::Opened { urls } => {
                     if let Some(url) = urls.first() {
                         let url_str = url.to_string();
                         log::info!("RunEvent::Opened with URL: {url_str}");
 
-                        if url_str.starts_with("ccswitch://") {
+                        if url_str.starts_with("ccswitch://") || url_str.starts_with("ofoxswitch://") {
                             if crate::lightweight::is_lightweight_mode() {
                                 if let Err(e) = crate::lightweight::exit_lightweight_mode(app_handle)
                                 {
@@ -1403,48 +1442,8 @@ pub fn run() {
                                 }
                             }
 
-                            // 解析并广播深链接事件，复用与 single_instance 相同的逻辑
-                            match crate::deeplink::parse_deeplink_url(&url_str) {
-                                Ok(request) => {
-                                    log::info!(
-                                        "Successfully parsed deep link from RunEvent::Opened: resource={}, app={:?}",
-                                        request.resource,
-                                        request.app
-                                    );
-
-                                    if let Err(e) =
-                                        app_handle.emit("deeplink-import", &request)
-                                    {
-                                        log::error!(
-                                            "Failed to emit deep link event from RunEvent::Opened: {e}"
-                                        );
-                                    }
-                                }
-                                Err(e) => {
-                                    log::error!(
-                                        "Failed to parse deep link URL from RunEvent::Opened: {e}"
-                                    );
-
-                                    if let Err(emit_err) = app_handle.emit(
-                                        "deeplink-error",
-                                        serde_json::json!({
-                                            "url": url_str,
-                                            "error": e.to_string()
-                                        }),
-                                    ) {
-                                        log::error!(
-                                            "Failed to emit deep link error event from RunEvent::Opened: {emit_err}"
-                                        );
-                                    }
-                                }
-                            }
-
-                            // 确保主窗口可见
-                            if let Some(window) = app_handle.get_webview_window("main") {
-                                let _ = window.unminimize();
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
+                            // 复用 handle_deeplink_url 统一处理（含 Ofox OAuth 回调）
+                            handle_deeplink_url(app_handle, &url_str, true, "RunEvent::Opened");
                         }
                     }
                 }
@@ -1661,7 +1660,7 @@ fn show_migration_error_dialog(app: &tauri::AppHandle, error: &str) -> bool {
         format!(
             "从旧版本迁移配置时发生错误：\n\n{error}\n\n\
             您的数据尚未丢失，旧配置文件仍然保留。\n\
-            建议回退到旧版本 CC Switch 以保护数据。\n\n\
+            建议回退到旧版本 Ofox Switch 以保护数据。\n\n\
             点击「重试」重新尝试迁移\n\
             点击「退出」关闭程序（可回退版本后重新打开）"
         )
@@ -1669,7 +1668,7 @@ fn show_migration_error_dialog(app: &tauri::AppHandle, error: &str) -> bool {
         format!(
             "An error occurred while migrating configuration:\n\n{error}\n\n\
             Your data is NOT lost - the old config file is still preserved.\n\
-            Consider rolling back to an older CC Switch version.\n\n\
+            Consider rolling back to an older Ofox Switch version.\n\n\
             Click 'Retry' to attempt migration again\n\
             Click 'Exit' to close the program"
         )
@@ -1719,7 +1718,7 @@ fn show_database_init_error_dialog(
             您的数据尚未丢失，应用不会自动删除数据库文件。\n\
             常见原因包括：数据库版本过新、文件损坏、权限不足、磁盘空间不足等。\n\n\
             建议：\n\
-            1) 先备份整个配置目录（包含 cc-switch.db）\n\
+            1) 先备份整个配置目录（包含 ofox-switch.db）\n\
             2) 如果提示“数据库版本过新”，请升级到更新版本\n\
             3) 如果刚升级出现异常，可回退旧版本导出/备份后再升级\n\n\
             点击「重试」重新尝试初始化\n\
@@ -1733,8 +1732,8 @@ fn show_database_init_error_dialog(
             Your data is NOT lost - the app will not delete the database automatically.\n\
             Common causes include: newer database version, corrupted file, permission issues, or low disk space.\n\n\
             Suggestions:\n\
-            1) Back up the entire config directory (including cc-switch.db)\n\
-            2) If you see “database version is newer”, please upgrade CC Switch\n\
+            1) Back up the entire config directory (including ofox-switch.db)\n\
+            2) If you see “database version is newer”, please upgrade Ofox Switch\n\
             3) If this happened right after upgrading, consider rolling back to export/backup then upgrade again\n\n\
             Click 'Retry' to attempt initialization again\n\
             Click 'Exit' to close the program",

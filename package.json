@@ -1,7 +1,7 @@
 {
-  "name": "cc-switch",
+  "name": "ofox-switch",
   "version": "3.14.1",
-  "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI",
+  "description": "All-in-One AI Tool Manager - Ofox Switch",
   "type": "module",
   "scripts": {
     "dev": "pnpm tauri dev",

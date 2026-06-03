@@ -229,3 +229,10 @@ input[type="password"]::-ms-clear {
     animation: none;
   }
 }
+
+/* Tray popover 窗口透明背景 */
+html.tray-popover,
+html.tray-popover body,
+html.tray-popover #root {
+  background: transparent !important;
+}

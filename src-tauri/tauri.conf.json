@@ -1,15 +1,16 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "CC Switch",
+  "productName": "Ofox Switch",
   "version": "3.14.1",
-  "identifier": "com.ccswitch.desktop",
+  "identifier": "ai.ofox.switch",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://localhost:3000",
+    "devUrl": "http://localhost:3011",
     "beforeDevCommand": "pnpm run dev:renderer",
     "beforeBuildCommand": "pnpm run build:renderer"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
@@ -56,7 +57,7 @@
   "plugins": {
     "deep-link": {
       "desktop": {
-        "schemes": ["ccswitch"]
+        "schemes": ["ccswitch", "ofoxswitch"]
       }
     },
     "updater": {
