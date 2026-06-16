@@ -45,7 +45,19 @@ const CommandList = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <CommandPrimitive.List
     ref={ref}
-    className={cn("max-h-[300px] overflow-y-auto overflow-x-hidden", className)}
+    className={cn(
+      // Tailwind arbitrary props override the global `* { scrollbar-width:
+      // none }` / `::-webkit-scrollbar { display: none }` rules in
+      // index.css. Without these, the cmdk list scrolls but the user has
+      // no visual indicator that more items exist below the fold.
+      "max-h-[300px] overflow-y-auto overflow-x-hidden " +
+        "[scrollbar-width:thin] " +
+        "[&::-webkit-scrollbar]:block [&::-webkit-scrollbar]:w-1.5 " +
+        "[&::-webkit-scrollbar-thumb]:rounded-full " +
+        "[&::-webkit-scrollbar-thumb]:bg-gray-300 " +
+        "dark:[&::-webkit-scrollbar-thumb]:bg-gray-600",
+      className,
+    )}
     {...props}
   />
 ));
