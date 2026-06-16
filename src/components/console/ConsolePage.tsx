@@ -6,7 +6,11 @@ import { settingsApi } from "@/lib/api";
 import { proxyApi } from "@/lib/api/proxy";
 import { usageApi } from "@/lib/api/usage";
 import { ofoxGetUserInfo, type OfoxUserInfo } from "@/lib/api/ofoxAuth";
-import { TOOL_META, TOOL_ORDER, PROXY_SUPPORTED_TOOLS } from "@/config/toolMeta";
+import {
+  TOOL_META,
+  TOOL_ORDER,
+  PROXY_SUPPORTED_TOOLS,
+} from "@/config/toolMeta";
 // NOTE: ConsolePage previously rendered a read-only "已锁定" badge for tools
 // in `boundTools ∩ PROXY_SUPPORTED_TOOLS`, sourced from
 // `useLockedTakeoverTools`. The badge was retired once the manage-tool dialog
@@ -16,6 +20,7 @@ import { TOOL_META, TOOL_ORDER, PROXY_SUPPORTED_TOOLS } from "@/config/toolMeta"
 // toggle row for those tools.
 import AddToolsDialog from "./AddToolsDialog";
 import ManageToolDialog, { type ManageToolTarget } from "./ManageToolDialog";
+import OfoxSettingsDialog from "./OfoxSettingsDialog";
 import type { UsageSummary } from "@/types/usage";
 
 interface ToolInfo {
@@ -95,6 +100,7 @@ export default function ConsolePage({
 }: ConsolePageProps) {
   const [tools, setTools] = useState<BoundTool[]>([]);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   // null = manage dialog is closed. Holds the snapshot of the tool row that
   // was clicked, so the dialog stays consistent even if `tools` reloads
   // mid-edit (e.g. monthly token refetch).
@@ -461,72 +467,72 @@ export default function ConsolePage({
                 <div className="w-[68px] text-center">操作</div>
               </div>
               {tools.map((tool) => {
-              const style = STATUS_STYLES[tool.status];
-              return (
-                <div
-                  key={tool.id}
-                  className="flex items-center gap-3 border-b border-border px-4 py-3 last:border-b-0"
-                >
+                const style = STATUS_STYLES[tool.status];
+                return (
                   <div
-                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-[11px] font-bold text-white ${tool.color}`}
+                    key={tool.id}
+                    className="flex items-center gap-3 border-b border-border px-4 py-3 last:border-b-0"
                   >
-                    {tool.abbr}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[13px] font-medium text-foreground">
-                      {tool.label}
-                    </div>
-                    <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                      <span
-                        className={`h-1.5 w-1.5 rounded-full ${style.dot}`}
-                      />
-                      {tool.statusText}
-                      {tool.version && ` · v${tool.version}`}
-                    </div>
-                  </div>
-                  {tool.proxySupported ? (
                     <div
-                      className="w-[88px] text-right text-[14px] font-medium text-foreground"
-                      title="本月 Token 用量"
+                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-[11px] font-bold text-white ${tool.color}`}
                     >
-                      {tool.monthTokens ?? "—"}
+                      {tool.abbr}
                     </div>
-                  ) : (
-                    // Label, not a number — render muted/smaller so it doesn't
-                    // compete visually with real token totals on other rows.
-                    <div
-                      className="w-[88px] text-right text-[11px] text-muted-foreground"
-                      title="该工具未走 cc-switch 代理，无法统计 Token 用量"
-                    >
-                      不支持统计
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[13px] font-medium text-foreground">
+                        {tool.label}
+                      </div>
+                      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                        <span
+                          className={`h-1.5 w-1.5 rounded-full ${style.dot}`}
+                        />
+                        {tool.statusText}
+                        {tool.version && ` · v${tool.version}`}
+                      </div>
                     </div>
-                  )}
-                  {/* Action column — fixed width (w-[68px]) matching the
+                    {tool.proxySupported ? (
+                      <div
+                        className="w-[88px] text-right text-[14px] font-medium text-foreground"
+                        title="本月 Token 用量"
+                      >
+                        {tool.monthTokens ?? "—"}
+                      </div>
+                    ) : (
+                      // Label, not a number — render muted/smaller so it doesn't
+                      // compete visually with real token totals on other rows.
+                      <div
+                        className="w-[88px] text-right text-[11px] text-muted-foreground"
+                        title="该工具未走 cc-switch 代理，无法统计 Token 用量"
+                      >
+                        不支持统计
+                      </div>
+                    )}
+                    {/* Action column — fixed width (w-[68px]) matching the
                       header so labels and controls stay aligned regardless
                       of which variant renders. */}
-                  {tool.status === "error" ? (
-                    <button className="w-[68px] rounded-lg bg-orange-500 py-1 text-center text-[12px] font-medium text-white hover:bg-orange-600">
-                      修复
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() =>
-                        setManageTool({
-                          id: tool.id,
-                          abbr: tool.abbr,
-                          label: tool.label,
-                          color: tool.color,
-                          version: tool.version,
-                          statusText: tool.statusText,
-                        })
-                      }
-                      className="w-[68px] rounded-lg py-1 text-center text-[12px] font-medium text-muted-foreground hover:bg-accent"
-                    >
-                      管理
-                    </button>
-                  )}
-                </div>
-              );
+                    {tool.status === "error" ? (
+                      <button className="w-[68px] rounded-lg bg-orange-500 py-1 text-center text-[12px] font-medium text-white hover:bg-orange-600">
+                        修复
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() =>
+                          setManageTool({
+                            id: tool.id,
+                            abbr: tool.abbr,
+                            label: tool.label,
+                            color: tool.color,
+                            version: tool.version,
+                            statusText: tool.statusText,
+                          })
+                        }
+                        className="w-[68px] rounded-lg py-1 text-center text-[12px] font-medium text-muted-foreground hover:bg-accent"
+                      >
+                        管理
+                      </button>
+                    )}
+                  </div>
+                );
               })}
             </>
           )}
@@ -535,7 +541,10 @@ export default function ConsolePage({
 
       {/* Bottom Bar */}
       <div className="flex shrink-0 items-center justify-between border-t border-border px-5 py-2.5">
-        <button className="flex items-center gap-1.5 text-[12px] text-muted-foreground hover:text-foreground">
+        <button
+          onClick={() => setSettingsDialogOpen(true)}
+          className="flex items-center gap-1.5 text-[12px] text-muted-foreground hover:text-foreground"
+        >
           <Settings className="h-3.5 w-3.5" />
           设置
         </button>
@@ -586,6 +595,11 @@ export default function ConsolePage({
           loadData();
         }}
       />
+
+      <OfoxSettingsDialog
+        open={settingsDialogOpen}
+        onOpenChange={setSettingsDialogOpen}
+      />
     </div>
   );
 }
@@ -601,34 +615,22 @@ function formatBalance(value: number | null | undefined): string {
   return `$${value.toFixed(2)}`;
 }
 
-async function getTodaySummary(
-  appType?: string,
-): Promise<UsageSummary | null> {
+async function getTodaySummary(appType?: string): Promise<UsageSummary | null> {
   try {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    return await usageApi.getUsageSummary(
-      today.getTime(),
-      undefined,
-      appType,
-    );
+    return await usageApi.getUsageSummary(today.getTime(), undefined, appType);
   } catch {
     return null;
   }
 }
 
-async function getMonthSummary(
-  appType?: string,
-): Promise<UsageSummary | null> {
+async function getMonthSummary(appType?: string): Promise<UsageSummary | null> {
   try {
     const month = new Date();
     month.setDate(1);
     month.setHours(0, 0, 0, 0);
-    return await usageApi.getUsageSummary(
-      month.getTime(),
-      undefined,
-      appType,
-    );
+    return await usageApi.getUsageSummary(month.getTime(), undefined, appType);
   } catch {
     return null;
   }
