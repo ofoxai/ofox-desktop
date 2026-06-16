@@ -374,38 +374,66 @@ pub async fn ofox_ping_model(
 
     let api_key = extract_api_key(&app_type, &provider.settings_config);
 
-    // Gemini's OfoxAI seed has no api-key field today (Gemini CLI's normal
-    // path is Google OAuth). For ping, fall back to the user's OAuth
-    // access_token — which the OfoxAI gateway currently accepts on the
-    // `/gemini/v1beta/...` route via x-goog-api-key. If that ever stops
-    // being true, we'll see a 401 here and add a dedicated key field.
-    let api_key = match api_key {
-        Some(k) => k,
-        None if matches!(app_type, AppType::Gemini) => {
-            let manager = ofox_state.0.read().await;
-            match manager.get_valid_access_token().await {
-                Ok(t) => t,
-                Err(e) => {
-                    return Ok(PingResult {
-                        success: false,
-                        latency_ms: 0,
-                        status_code: Some(401),
-                        error: Some(format!("获取 OfoxAI 访问令牌失败：{e}")),
-                        });
-                }
+    // For OfoxAI-bound providers, the value sitting in `settings_config` is a
+    // snapshot of the OAuth access_token taken at bind/refresh time. Access
+    // tokens have a short TTL (~1 h on the dev IDP, default `expires_in` on
+    // prod) and stop being honored by the gateway as soon as the matching
+    // `oauth:at:<token>` Redis entry expires. Without this branch, the probe
+    // happily sends a stale snapshot and the user sees a confusing 401
+    // `Invalid or expired token` even though their session in `auth.json` is
+    // still active (the in-memory manager will refresh on demand).
+    //
+    // Ask the manager for a *currently-valid* token instead — it'll perform
+    // a refresh-grant round-trip if the cached one is past its expiry — and
+    // override `api_key` with the result. We only do this for `ofox-*`
+    // providers so a user who hand-bound a non-Ofox provider with a real
+    // `sk-` key keeps using that key untouched.
+    let is_ofox_provider = provider_id.starts_with("ofox-");
+    let api_key = if is_ofox_provider {
+        let manager = ofox_state.0.read().await;
+        match manager.get_valid_access_token().await {
+            Ok(t) => t,
+            Err(e) => {
+                return Ok(PingResult {
+                    success: false,
+                    latency_ms: 0,
+                    status_code: Some(401),
+                    error: Some(format!("获取 OfoxAI 访问令牌失败：{e}")),
+                });
             }
         }
-        None => {
-            // Suppress the unused-state warning even on the error path.
-            let _ = &ofox_state;
-            return Ok(PingResult {
-                success: false,
-                latency_ms: 0,
-                status_code: None,
-                error: Some(format!(
-                    "{app_str} 当前供应商未配置 API Key，无法测试连通性"
-                )),
-            });
+    } else {
+        match api_key {
+            Some(k) => k,
+            // Gemini's OfoxAI seed used to have no api-key field; the branch
+            // is moot for `ofox-gemini` now (covered above) but kept for any
+            // stray non-ofox Gemini provider that still hits this code path.
+            None if matches!(app_type, AppType::Gemini) => {
+                let manager = ofox_state.0.read().await;
+                match manager.get_valid_access_token().await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        return Ok(PingResult {
+                            success: false,
+                            latency_ms: 0,
+                            status_code: Some(401),
+                            error: Some(format!("获取 OfoxAI 访问令牌失败：{e}")),
+                        });
+                    }
+                }
+            }
+            None => {
+                // Suppress the unused-state warning even on the error path.
+                let _ = &ofox_state;
+                return Ok(PingResult {
+                    success: false,
+                    latency_ms: 0,
+                    status_code: None,
+                    error: Some(format!(
+                        "{app_str} 当前供应商未配置 API Key，无法测试连通性"
+                    )),
+                });
+            }
         }
     };
 
