@@ -144,21 +144,33 @@ fn tool_env_type_and_wsl_distro(_tool: &str) -> (String, Option<String>) {
     ("unknown".to_string(), None)
 }
 
+/// Detect installed AI-tool CLIs and (optionally) their latest published
+/// versions.
+///
+/// `include_latest`: when `Some(false)`, skip the npm / GitHub round-trips
+/// that look up each tool's latest published version. Callers that only
+/// need `version`/`error` for "is the CLI installed?" should pass `false` —
+/// those network fetches run serially per tool and otherwise dominate the
+/// command latency (several seconds in the worst case). Defaults to `true`
+/// to preserve the AboutSection callsite, which renders an "update
+/// available" hint.
 #[tauri::command]
 pub async fn get_tool_versions(
     tools: Option<Vec<String>>,
     wsl_shell_by_tool: Option<HashMap<String, WslShellPreferenceInput>>,
+    include_latest: Option<bool>,
 ) -> Result<Vec<ToolVersion>, String> {
     // Windows: completely disable tool version detection to prevent
     // accidentally launching apps (e.g. Claude Code) via protocol handlers.
     #[cfg(target_os = "windows")]
     {
-        let _ = (tools, wsl_shell_by_tool);
+        let _ = (tools, wsl_shell_by_tool, include_latest);
         return Ok(Vec::new());
     }
 
     #[cfg(not(target_os = "windows"))]
     {
+        let include_latest = include_latest.unwrap_or(true);
         let requested: Vec<&str> = if let Some(tools) = tools.as_ref() {
             let set: std::collections::HashSet<&str> = tools.iter().map(|s| s.as_str()).collect();
             VALID_TOOLS
@@ -169,27 +181,40 @@ pub async fn get_tool_versions(
         } else {
             VALID_TOOLS.to_vec()
         };
-        let mut results = Vec::new();
 
-        for tool in requested {
+        // Run all tools concurrently — each `get_single_tool_version_impl`
+        // spawns a child process for `--version` and (when include_latest)
+        // an HTTP request, both of which idle on I/O. Awaiting them serially
+        // serialized all of that for no reason. `futures::future::join_all`
+        // preserves ordering so the returned `Vec<ToolVersion>` is still in
+        // VALID_TOOLS order.
+        let futs = requested.into_iter().map(|tool| {
             let pref = wsl_shell_by_tool.as_ref().and_then(|m| m.get(tool));
             let tool_wsl_shell = pref.and_then(|p| p.wsl_shell.as_deref());
             let tool_wsl_shell_flag = pref.and_then(|p| p.wsl_shell_flag.as_deref());
+            get_single_tool_version_impl(
+                tool,
+                tool_wsl_shell,
+                tool_wsl_shell_flag,
+                include_latest,
+            )
+        });
 
-            results.push(
-                get_single_tool_version_impl(tool, tool_wsl_shell, tool_wsl_shell_flag).await,
-            );
-        }
-
+        let results = futures::future::join_all(futs).await;
         Ok(results)
     }
 }
 
 /// 获取单个工具的版本信息（内部实现）
+///
+/// `include_latest = false` skips the remote npm/GitHub lookup, returning
+/// `latest_version = None`. Used by the bound-tool list on the Console page,
+/// which only needs to know whether the CLI is installed locally.
 async fn get_single_tool_version_impl(
     tool: &str,
     wsl_shell: Option<&str>,
     wsl_shell_flag: Option<&str>,
+    include_latest: bool,
 ) -> ToolVersion {
     debug_assert!(
         VALID_TOOLS.contains(&tool),
@@ -198,9 +223,6 @@ async fn get_single_tool_version_impl(
 
     // 判断该工具的运行环境 & WSL distro（如有）
     let (env_type, wsl_distro) = tool_env_type_and_wsl_distro(tool);
-
-    // 使用全局 HTTP 客户端（已包含代理配置）
-    let client = crate::proxy::http_client::get();
 
     // 1. 获取本地版本
     let (local_version, local_error) = if let Some(distro) = wsl_distro.as_deref() {
@@ -214,13 +236,18 @@ async fn get_single_tool_version_impl(
         }
     };
 
-    // 2. 获取远程最新版本
-    let latest_version = match tool {
-        "claude" => fetch_npm_latest_version(&client, "@anthropic-ai/claude-code").await,
-        "codex" => fetch_npm_latest_version(&client, "@openai/codex").await,
-        "gemini" => fetch_npm_latest_version(&client, "@google/gemini-cli").await,
-        "opencode" => fetch_github_latest_version(&client, "anomalyco/opencode").await,
-        _ => None,
+    // 2. 获取远程最新版本（按需）
+    let latest_version = if include_latest {
+        let client = crate::proxy::http_client::get();
+        match tool {
+            "claude" => fetch_npm_latest_version(&client, "@anthropic-ai/claude-code").await,
+            "codex" => fetch_npm_latest_version(&client, "@openai/codex").await,
+            "gemini" => fetch_npm_latest_version(&client, "@google/gemini-cli").await,
+            "opencode" => fetch_github_latest_version(&client, "anomalyco/opencode").await,
+            _ => None,
+        }
+    } else {
+        None
     };
 
     ToolVersion {

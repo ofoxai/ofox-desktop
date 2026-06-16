@@ -9,6 +9,7 @@ import {
   Loader2,
   Zap,
   Power,
+  Lock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -16,6 +17,7 @@ import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import { ToggleRow } from "@/components/ui/toggle-row";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
+import { useLockedTakeoverTools } from "@/hooks/useLockedTakeoverTools";
 import { toast } from "sonner";
 import { useFailoverQueue } from "@/lib/query/failover";
 import { ProviderHealthBadge } from "@/components/providers/ProviderHealthBadge";
@@ -49,6 +51,9 @@ export function ProxyPanel({
   // 获取应用接管状态
   const { data: takeoverStatus } = useProxyTakeoverStatus();
   const setTakeoverForApp = useSetProxyTakeoverForApp();
+  // Tools whose takeover is force-managed by cc-switch — the Switch is hidden
+  // for these so users can't toggle off a state that's about to be re-enabled.
+  const lockedTools = useLockedTakeoverTools();
 
   // 获取全局代理配置
   const { data: globalConfig } = useGlobalProxyConfig();
@@ -257,6 +262,7 @@ export function ProxyPanel({
                       takeoverStatus?.[
                         appType as keyof typeof takeoverStatus
                       ] ?? false;
+                    const isLocked = lockedTools.has(appType);
                     return (
                       <div
                         key={appType}
@@ -265,13 +271,31 @@ export function ProxyPanel({
                         <span className="text-sm font-medium capitalize">
                           {appType}
                         </span>
-                        <Switch
-                          checked={isEnabled}
-                          onCheckedChange={(checked) =>
-                            handleTakeoverChange(appType, checked)
-                          }
-                          disabled={setTakeoverForApp.isPending}
-                        />
+                        {isLocked ? (
+                          // Reconciled ON by MainApp; render a static badge
+                          // so the row keeps its height and the user can see
+                          // *why* there's no Switch.
+                          <span
+                            className="inline-flex items-center gap-1 rounded-md bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-600 dark:text-emerald-400"
+                            title={t("proxy.takeover.locked.hint", {
+                              defaultValue:
+                                "由 cc-switch 自动管理，运行期间始终接管",
+                            })}
+                          >
+                            <Lock className="h-3 w-3" />
+                            {t("proxy.takeover.locked.badge", {
+                              defaultValue: "已锁定",
+                            })}
+                          </span>
+                        ) : (
+                          <Switch
+                            checked={isEnabled}
+                            onCheckedChange={(checked) =>
+                              handleTakeoverChange(appType, checked)
+                            }
+                            disabled={setTakeoverForApp.isPending}
+                          />
+                        )}
                       </div>
                     );
                   })}

@@ -1,37 +1,197 @@
 import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import OnboardingApp from "./OnboardingApp";
 import ConsolePage from "@/components/console/ConsolePage";
-import { ofoxIsAuthenticated } from "@/lib/api/ofoxAuth";
-import { BOUND_TOOLS_STORAGE_KEY } from "@/config/toolMeta";
+import {
+  OFOX_AUTH_EXPIRED_EVENT,
+  OFOX_AUTH_RESTORED_EVENT,
+  ofoxGetAuthStatus,
+} from "@/lib/api/ofoxAuth";
+import { BOUND_TOOLS_STORAGE_KEY, PROXY_SUPPORTED_TOOLS } from "@/config/toolMeta";
+import { proxyApi } from "@/lib/api/proxy";
 
 type AppState = "loading" | "onboarding" | "console";
 
+/**
+ * Read the persisted bound-tool list synchronously. Used both at top-level
+ * routing time (deciding onboarding vs console for an already-logged-in user)
+ * and by the locked-takeover reconciliation effect.
+ */
+function readBoundToolsFromStorage(): string[] {
+  try {
+    const stored = localStorage.getItem(BOUND_TOOLS_STORAGE_KEY);
+    if (!stored) return [];
+    const parsed = JSON.parse(stored);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Top-level router for the main window.
+ *
+ * Drives three states off the backend's auth snapshot:
+ *   - `active`    → Console
+ *   - `expired`   → Onboarding (LoginPage), so the user can re-authenticate
+ *                   without having to dig through a settings menu
+ *   - `loggedout` → Onboarding (LoginPage)
+ *
+ * It listens to three events so the swap happens without manual refresh:
+ *   - `ofox-auth-expired`     → drop to onboarding immediately
+ *   - `ofox-auth-restored`    → lift back to console (after re-login)
+ *   - `ofox-reauth-requested` → tray popover asked us to surface the
+ *                                LoginPage even if the current state hasn't
+ *                                flipped yet (e.g. user explicitly clicked
+ *                                "重新登录" from the popover)
+ */
 export default function MainApp() {
   const [appState, setAppState] = useState<AppState>("loading");
   const [boundTools, setBoundTools] = useState<string[]>([]);
+  // When entering Onboarding from an already-logged-in state with empty
+  // bind list, skip the LoginPage and drop straight into the tool picker.
+  // `null` while we're loading or while the resolved entry is the default
+  // ("login").
+  const [onboardingEntry, setOnboardingEntry] = useState<
+    "login" | "toolDiscovery"
+  >("login");
 
+  const loadBoundTools = () => {
+    setBoundTools(readBoundToolsFromStorage());
+  };
+
+  // Initial probe.
   useEffect(() => {
-    ofoxIsAuthenticated()
-      .then((authenticated) => {
-        if (authenticated) {
-          // 从 localStorage 读取已绑定的工具
-          try {
-            const stored = localStorage.getItem(BOUND_TOOLS_STORAGE_KEY);
-            if (stored) {
-              setBoundTools(JSON.parse(stored));
-            }
-          } catch {
-            // ignore parse error
+    ofoxGetAuthStatus()
+      .then((status) => {
+        if (status.state === "active") {
+          const tools = readBoundToolsFromStorage();
+          setBoundTools(tools);
+          if (tools.length === 0) {
+            // Logged in but no tools bound — happens after a fresh install,
+            // wiped local state, or migration from a previous version. The
+            // LoginPage would be a no-op (already logged in), so jump
+            // straight to the tool picker.
+            setOnboardingEntry("toolDiscovery");
+            setAppState("onboarding");
+          } else {
+            setAppState("console");
           }
-          setAppState("console");
         } else {
+          setOnboardingEntry("login");
           setAppState("onboarding");
         }
       })
       .catch(() => {
+        setOnboardingEntry("login");
         setAppState("onboarding");
       });
   }, []);
+
+  // Event-driven transitions.
+  useEffect(() => {
+    let active = true;
+    const offs: Array<() => void> = [];
+
+    const setup = async () => {
+      const offExpired = await listen(OFOX_AUTH_EXPIRED_EVENT, () => {
+        if (!active) return;
+        // Token expired — user must log in again.
+        setOnboardingEntry("login");
+        setAppState("onboarding");
+      });
+      const offRestored = await listen(OFOX_AUTH_RESTORED_EVENT, () => {
+        if (!active) return;
+        // Login succeeded. If the user already has bound tools (returning
+        // user), go straight to console; otherwise drop them into the tool
+        // picker so onboarding completes end-to-end.
+        const tools = readBoundToolsFromStorage();
+        setBoundTools(tools);
+        if (tools.length === 0) {
+          setOnboardingEntry("toolDiscovery");
+          setAppState("onboarding");
+        } else {
+          setAppState("console");
+        }
+      });
+      // The tray popover's "重新登录" button asks us to surface onboarding
+      // even when the state was already non-active (e.g. user dismissed and
+      // came back).
+      const offReauth = await listen("ofox-reauth-requested", () => {
+        if (!active) return;
+        setOnboardingEntry("login");
+        setAppState("onboarding");
+      });
+
+      if (!active) {
+        offExpired();
+        offRestored();
+        offReauth();
+        return;
+      }
+      offs.push(offExpired, offRestored, offReauth);
+    };
+
+    void setup();
+    return () => {
+      active = false;
+      offs.forEach((off) => off());
+    };
+  }, []);
+
+  /**
+   * Force proxy takeover ON for every (bound ∩ supported) tool whenever the
+   * Console mounts. cc-switch's value prop is "we intercept these tools for
+   * you" — letting a bound, supported tool sit in the OFF state silently
+   * undermines that, so this acts as a self-heal sweep on top of the UI lock
+   * (the Switches for these tools are hidden in `ProxyToggle` / `ProxyPanel`).
+   *
+   * `setProxyTakeoverForApp` is idempotent on the Rust side (see
+   * `services/proxy.rs::set_takeover_for_app`) and auto-starts the proxy
+   * server if it isn't running, so a steady-state launch is a no-op except
+   * for the single status query at the top.
+   *
+   * Scope: only fires for `boundTools ∩ PROXY_SUPPORTED_TOOLS`. Tools like
+   * OpenCode that the proxy can't intercept yet are untouched — they keep
+   * their existing "暂不支持代理统计" semantics and remain user-controllable.
+   */
+  useEffect(() => {
+    if (appState !== "console" || boundTools.length === 0) return;
+    const locked = boundTools.filter((t) =>
+      PROXY_SUPPORTED_TOOLS.includes(t),
+    );
+    if (locked.length === 0) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const status = await proxyApi.getProxyTakeoverStatus();
+        if (cancelled) return;
+        // ProxyTakeoverStatus has a fixed set of named bools (claude/codex/...);
+        // index by `tool` requires going through `unknown` because the struct
+        // type lacks an index signature.
+        const map = status as unknown as Record<string, boolean>;
+        for (const tool of locked) {
+          if (cancelled) return;
+          if (!map[tool]) {
+            try {
+              await proxyApi.setProxyTakeoverForApp(tool, true);
+            } catch (e) {
+              console.error(
+                `[MainApp] force-enable takeover for ${tool} failed`,
+                e,
+              );
+            }
+          }
+        }
+      } catch (e) {
+        console.error("[MainApp] takeover reconciliation failed", e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [appState, boundTools]);
 
   if (appState === "loading") {
     return null;
@@ -40,20 +200,19 @@ export default function MainApp() {
   if (appState === "onboarding") {
     return (
       <OnboardingApp
+        initialStep={onboardingEntry}
         onComplete={() => {
-          try {
-            const stored = localStorage.getItem(BOUND_TOOLS_STORAGE_KEY);
-            if (stored) {
-              setBoundTools(JSON.parse(stored));
-            }
-          } catch {
-            // ignore
-          }
+          loadBoundTools();
           setAppState("console");
         }}
       />
     );
   }
 
-  return <ConsolePage boundTools={boundTools} />;
+  return (
+    <ConsolePage
+      boundTools={boundTools}
+      onBoundToolsChanged={loadBoundTools}
+    />
+  );
 }

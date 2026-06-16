@@ -19,7 +19,12 @@ interface ToolCard {
 }
 
 interface ToolDiscoveryPageProps {
-  onBack: () => void;
+  /**
+   * Optional. When omitted, the "返回" button is hidden — useful when this
+   * page is the entry point of onboarding (already-logged-in user with no
+   * bound tools), where there's nothing meaningful to go back to.
+   */
+  onBack?: () => void;
   onBind: (selectedTools: string[]) => void;
 }
 
@@ -33,9 +38,12 @@ export default function ToolDiscoveryPage({
   const detectTools = useCallback(async () => {
     setLoading(true);
     try {
+      // Onboarding only renders the local version per tool — no "update
+      // available" hint here — so skip the slow remote latest-version fetch.
       const results = await invoke<ToolInfo[]>("get_tool_versions", {
         tools: null,
         wslShellByTool: null,
+        includeLatest: false,
       });
 
       const detectedMap = new Map<string, ToolInfo>();
@@ -166,12 +174,14 @@ export default function ToolDiscoveryPage({
 
         {/* Actions */}
         <div className="flex w-full max-w-sm items-center justify-center gap-4">
-          <button
-            onClick={onBack}
-            className="px-6 py-2.5 text-sm text-muted-foreground hover:text-foreground"
-          >
-            返回
-          </button>
+          {onBack && (
+            <button
+              onClick={onBack}
+              className="px-6 py-2.5 text-sm text-muted-foreground hover:text-foreground"
+            >
+              返回
+            </button>
+          )}
           <button
             onClick={() =>
               onBind(tools.filter((t) => t.enabled).map((t) => t.id))

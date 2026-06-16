@@ -2,18 +2,29 @@ import { useState } from "react";
 import LoginPage from "@/components/onboarding/LoginPage";
 import ToolDiscoveryPage from "@/components/onboarding/ToolDiscoveryPage";
 import SetupCompletePage from "@/components/onboarding/SetupCompletePage";
-import { BOUND_TOOLS_STORAGE_KEY, PROXY_SUPPORTED_TOOLS } from "@/config/toolMeta";
-import { proxyApi } from "@/lib/api/proxy";
+import { bindTools } from "@/lib/bindTools";
 import type { OfoxUserInfo } from "@/lib/api/ofoxAuth";
 
 type Step = "login" | "toolDiscovery" | "setupComplete";
 
 interface OnboardingAppProps {
+  /**
+   * Where to enter the wizard. Defaults to `"login"` (first-time / logged-out
+   * users). MainApp passes `"toolDiscovery"` when the user already has a valid
+   * OAuth session but has not bound any tools yet — typically because they
+   * cleared local state, reinstalled, or ran the app on a fresh machine. In
+   * that case the LoginPage would be a confusing dead-end (they're already
+   * logged in), so we drop them directly into the tool picker.
+   */
+  initialStep?: Step;
   onComplete: () => void;
 }
 
-export default function OnboardingApp({ onComplete }: OnboardingAppProps) {
-  const [step, setStep] = useState<Step>("login");
+export default function OnboardingApp({
+  initialStep = "login",
+  onComplete,
+}: OnboardingAppProps) {
+  const [step, setStep] = useState<Step>(initialStep);
   const [boundCount, setBoundCount] = useState(0);
 
   const handleLoginSuccess = (_user: OfoxUserInfo) => {
@@ -21,19 +32,7 @@ export default function OnboardingApp({ onComplete }: OnboardingAppProps) {
   };
 
   const handleBind = async (selectedTools: string[]) => {
-    localStorage.setItem(BOUND_TOOLS_STORAGE_KEY, JSON.stringify(selectedTools));
-
-    // 为选中的、支持代理的工具开启本地代理
-    for (const tool of selectedTools) {
-      if (PROXY_SUPPORTED_TOOLS.includes(tool)) {
-        try {
-          await proxyApi.setProxyTakeoverForApp(tool, true);
-        } catch (e) {
-          console.error(`Failed to enable proxy for ${tool}:`, e);
-        }
-      }
-    }
-
+    await bindTools(selectedTools);
     setBoundCount(selectedTools.length);
     setStep("setupComplete");
   };
@@ -42,9 +41,15 @@ export default function OnboardingApp({ onComplete }: OnboardingAppProps) {
     case "login":
       return <LoginPage onLoginSuccess={handleLoginSuccess} />;
     case "toolDiscovery":
+      // If we entered the wizard at toolDiscovery (already-logged-in user with
+      // empty bind list), the LoginPage isn't a meaningful "back" target — the
+      // user can't unsign-in from here. Hide the back button in that case so
+      // we don't strand them on a screen that does nothing.
       return (
         <ToolDiscoveryPage
-          onBack={() => setStep("login")}
+          onBack={
+            initialStep === "login" ? () => setStep("login") : undefined
+          }
           onBind={handleBind}
         />
       );

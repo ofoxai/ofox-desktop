@@ -179,6 +179,12 @@ export const settingsApi = {
       string,
       { wslShell?: string | null; wslShellFlag?: string | null }
     >,
+    /** Pass `false` to skip the slow npm/GitHub round-trip for each tool's
+     *  latest published version. Use this when you only need to know whether
+     *  the CLI is installed locally (Console list, Onboarding picker, Add
+     *  Tool dialog). Defaults to backend behavior (true) which AboutSection
+     *  relies on to render the "update available" hint. */
+    includeLatest?: boolean,
   ): Promise<
     Array<{
       name: string;
@@ -189,7 +195,11 @@ export const settingsApi = {
       wsl_distro: string | null;
     }>
   > {
-    return await invoke("get_tool_versions", { tools, wslShellByTool });
+    return await invoke("get_tool_versions", {
+      tools,
+      wslShellByTool,
+      includeLatest,
+    });
   },
 
   async getRectifierConfig(): Promise<RectifierConfig> {

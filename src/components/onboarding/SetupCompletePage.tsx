@@ -31,7 +31,7 @@ export default function SetupCompletePage({
         </p>
 
         {/* Stats */}
-        <div className="mb-8 grid w-full grid-cols-3 gap-4">
+        <div className="mb-8 grid w-full grid-cols-2 gap-4">
           <div className="flex flex-col items-start rounded-xl border border-border px-4 py-3">
             <span className="text-[11px] text-muted-foreground">
               工具已绑定
@@ -44,17 +44,11 @@ export default function SetupCompletePage({
             <span className="text-[11px] text-muted-foreground">可用模型</span>
             <span className="text-2xl font-bold text-foreground">100+</span>
           </div>
-          <div className="flex flex-col items-start rounded-xl border border-border px-4 py-3">
-            <span className="text-[11px] text-muted-foreground">赠送额度</span>
-            <span className="text-2xl font-bold text-foreground">$5.00</span>
-          </div>
+          {/* 「赠送额度 $5.00」卡片暂时隐藏 —— 实际赠送策略未定，避免给用户硬编码承诺 */}
         </div>
 
         {/* Actions */}
-        <div className="flex w-full max-w-sm items-center justify-center gap-4">
-          <button className="rounded-xl border border-border px-6 py-2.5 text-sm font-medium text-foreground hover:bg-accent">
-            测试连接
-          </button>
+        <div className="flex w-full max-w-sm items-center justify-center">
           <button
             onClick={onOpenConsole}
             className="flex-1 rounded-xl bg-gradient-to-r from-orange-400 to-orange-500 px-6 py-3 text-base font-semibold text-white shadow-md shadow-orange-200 transition-all hover:from-orange-500 hover:to-orange-600 dark:shadow-orange-900/20"

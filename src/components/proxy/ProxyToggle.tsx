@@ -8,6 +8,7 @@
 import { Radio, Loader2 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
+import { useLockedTakeoverTools } from "@/hooks/useLockedTakeoverTools";
 import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
 import type { AppId } from "@/lib/api";
@@ -21,6 +22,12 @@ export function ProxyToggle({ className, activeApp }: ProxyToggleProps) {
   const { t } = useTranslation();
   const { isRunning, takeoverStatus, setTakeoverForApp, isPending, status } =
     useProxyStatus();
+  const lockedTools = useLockedTakeoverTools();
+  // Locked tools have their takeover forced ON by MainApp.tsx's reconciliation
+  // sweep. Surfacing the Switch here would invite a turn-off path that the
+  // sweep immediately undoes — confusing UX. Hide the Switch entirely for
+  // these tools; the pulsing Radio indicator + tooltip carry the meaning.
+  const isLocked = lockedTools.has(activeApp);
 
   const handleToggle = async (checked: boolean) => {
     try {
@@ -41,22 +48,27 @@ export function ProxyToggle({ className, activeApp }: ProxyToggleProps) {
           ? "Gemini"
           : "OpenCode";
 
-  const tooltipText = takeoverEnabled
-    ? isRunning
-      ? t("proxy.takeover.tooltip.active", {
-          appLabel,
-          address: status?.address,
-          port: status?.port,
-          defaultValue: `${appLabel} 已接管 - ${status?.address}:${status?.port}\n切换该应用供应商为热切换`,
-        })
-      : t("proxy.takeover.tooltip.broken", {
-          appLabel,
-          defaultValue: `${appLabel} 已接管，但代理服务未运行`,
-        })
-    : t("proxy.takeover.tooltip.inactive", {
+  const tooltipText = isLocked
+    ? t("proxy.takeover.tooltip.locked", {
         appLabel,
-        defaultValue: `接管 ${appLabel} 的 Live 配置，让该应用请求走本地代理`,
-      });
+        defaultValue: `${appLabel} 已锁定接管：cc-switch 运行期间自动启用`,
+      })
+    : takeoverEnabled
+      ? isRunning
+        ? t("proxy.takeover.tooltip.active", {
+            appLabel,
+            address: status?.address,
+            port: status?.port,
+            defaultValue: `${appLabel} 已接管 - ${status?.address}:${status?.port}\n切换该应用供应商为热切换`,
+          })
+        : t("proxy.takeover.tooltip.broken", {
+            appLabel,
+            defaultValue: `${appLabel} 已接管，但代理服务未运行`,
+          })
+      : t("proxy.takeover.tooltip.inactive", {
+          appLabel,
+          defaultValue: `接管 ${appLabel} 的 Live 配置，让该应用请求走本地代理`,
+        });
 
   return (
     <div
@@ -72,17 +84,22 @@ export function ProxyToggle({ className, activeApp }: ProxyToggleProps) {
         <Radio
           className={cn(
             "h-4 w-4 transition-colors",
-            takeoverEnabled
+            // Locked tools always render as "on" — the sweep keeps them that
+            // way regardless of the live `takeoverEnabled` flag, which can
+            // briefly read false during the reconciliation round-trip.
+            isLocked || takeoverEnabled
               ? "text-emerald-500 animate-pulse"
               : "text-muted-foreground",
           )}
         />
       )}
-      <Switch
-        checked={takeoverEnabled}
-        onCheckedChange={handleToggle}
-        disabled={isPending}
-      />
+      {!isLocked && (
+        <Switch
+          checked={takeoverEnabled}
+          onCheckedChange={handleToggle}
+          disabled={isPending}
+        />
+      )}
     </div>
   );
 }

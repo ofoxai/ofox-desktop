@@ -6,18 +6,14 @@ export const TOOL_META: Record<
   codex: { abbr: "Cu", label: "Cursor", color: "bg-neutral-800" },
   opencode: { abbr: "OC", label: "OpenCode", color: "bg-emerald-500" },
   gemini: { abbr: "Ge", label: "Gemini", color: "bg-blue-500" },
-  aider: { abbr: "Ai", label: "Aider", color: "bg-purple-400" },
-  zed: { abbr: "Z", label: "Zed", color: "bg-indigo-500" },
 };
 
-export const TOOL_ORDER = [
-  "claude",
-  "codex",
-  "opencode",
-  "gemini",
-  "aider",
-  "zed",
-];
+// Single source of truth for which tools the Ofox UI exposes. Aider and Zed
+// were dropped from the bind/manage flows because cc-switch can't proxy
+// them today — leaving them in the picker would let users "bind" something
+// that quietly does nothing. The backend `AppType` enum still includes
+// every kind so old DB rows / migrations stay readable.
+export const TOOL_ORDER = ["claude", "codex", "opencode", "gemini"];
 
 export const BOUND_TOOLS_STORAGE_KEY = "ofox-bound-tools";
 

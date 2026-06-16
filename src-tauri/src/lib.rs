@@ -18,6 +18,7 @@ mod lightweight;
 mod linux_fix;
 mod mcp;
 mod ofox_auth;
+mod ofox_auth_sync;
 mod openclaw_config;
 mod opencode_config;
 mod panic_hook;
@@ -874,7 +875,100 @@ pub fn run() {
 
                 let app_config_dir = crate::config::get_app_config_dir();
                 let ofox_auth_manager = OfoxAuthManager::new(app_config_dir);
-                app.manage(OfoxAuthState(Arc::new(RwLock::new(ofox_auth_manager))));
+                let state = OfoxAuthState(Arc::new(RwLock::new(ofox_auth_manager)));
+
+                // Hand the manager an AppHandle so it can emit lifecycle
+                // events (`ofox-auth-expired`, `ofox-auth-restored`) directly.
+                let attach_handle = app.handle().clone();
+                let attach_state = state.0.clone();
+                tauri::async_runtime::spawn(async move {
+                    let manager = attach_state.read().await;
+                    manager.attach_app_handle(attach_handle).await;
+                });
+
+                // Periodic silent refresh: tick every 30 min and, if the
+                // session is Active and the access token is near expiry,
+                // refresh it. With OFox's default 1 h token TTL and a 60 s
+                // refresh buffer, a 30 min cadence guarantees at least one
+                // check inside every "expiring soon" window — so Claude /
+                // Codex requests can't catch a stale bearer cached in the
+                // ofox-* provider rows. Servers see ~2 silent refreshes/hour
+                // per active session, well within OAuth norms.
+                //
+                // Note: this is belt-and-suspenders alongside the on-demand
+                // lazy refresh inside `get_valid_access_token()`. Anything
+                // touching the token from the UI (balance pill, bind tool,
+                // user-info refetch) already triggers a refresh when it
+                // matters; this loop just covers the "user opened cc-switch
+                // and never clicked anything for an hour" scenario.
+                let bg_state = state.0.clone();
+                tauri::async_runtime::spawn(async move {
+                    use crate::ofox_auth::OfoxAuthState as AuthState;
+                    let mut ticker =
+                        tokio::time::interval(std::time::Duration::from_secs(1800));
+                    // Skip the immediate first tick — startup already refreshes
+                    // user info on demand when the UI calls ofoxGetUserInfo.
+                    ticker.tick().await;
+                    loop {
+                        ticker.tick().await;
+                        let manager = bg_state.read().await;
+                        let status = manager.get_auth_status().await;
+                        if status.state != AuthState::Active {
+                            continue;
+                        }
+                        // get_valid_access_token() internally refreshes when
+                        // the cached token is within TOKEN_REFRESH_BUFFER_MS
+                        // of expiry. We discard the returned token; we only
+                        // care about the side effect.
+                        if let Err(e) = manager.get_valid_access_token().await {
+                            log::debug!(
+                                "[OfoxAuth] periodic refresh ended with: {e}"
+                            );
+                        }
+                    }
+                });
+
+                // Listen for token-refresh events so we can re-sync the new
+                // access_token into every ofox-* provider's settings_config.
+                // Without this, the proxy keeps forwarding requests using the
+                // stale token cached in the provider row (set originally by
+                // `ofox_bind_tool`), and Claude/Codex start returning 401 once
+                // the token expires (~1 h). The handler is fire-and-forget;
+                // any failure is logged but not surfaced.
+                use tauri::Listener;
+                let token_sync_handle = app.handle().clone();
+                let token_sync_state = state.0.clone();
+                app.handle().listen("ofox-auth-token-refreshed", move |_evt| {
+                    let app_handle = token_sync_handle.clone();
+                    let ofox_state = token_sync_state.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let token = {
+                            let manager = ofox_state.read().await;
+                            match manager.get_valid_access_token().await {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    log::warn!(
+                                        "[OfoxAuth] token-refresh listener: get_valid_access_token failed: {e}"
+                                    );
+                                    return;
+                                }
+                            }
+                        };
+                        let app_state = app_handle.state::<AppState>();
+                        if let Err(e) =
+                            crate::ofox_auth_sync::sync_token_to_ofox_providers(
+                                &app_state.db,
+                                &token,
+                            )
+                        {
+                            log::warn!(
+                                "[OfoxAuth] token-refresh listener: sync to providers failed: {e}"
+                            );
+                        }
+                    });
+                });
+
+                app.manage(state);
                 log::info!("✓ OfoxAuthManager initialized");
             }
 
@@ -938,6 +1032,66 @@ pub fn run() {
 
                 // 检查 settings 表中的代理状态，自动恢复代理服务
                 restore_proxy_state_on_startup(&state).await;
+
+                // Self-heal: a tool can have proxy_config.enabled=true while
+                // its active provider is still the official seed
+                // (`claude-official` / `codex-official`, settings_config
+                // `{"env":{}}`). That combo crashes at request time with
+                // "Claude Provider 缺少 base_url 配置". Two ways to land
+                // here today: (a) user bound the tool *before* the
+                // `ofox_bind_tool` flow existed; (b) some path swapped
+                // current provider back to official. Either way, if OFox
+                // auth is alive and we have a matching ofox-* seed, rebind
+                // silently. Best-effort — if OFox isn't logged in we just
+                // skip (the user will see the same 400 they were already
+                // seeing, and can re-login).
+                {
+                    use commands::ofox_auth::OfoxAuthState;
+                    use std::str::FromStr;
+                    let ofox_state = app_handle.state::<OfoxAuthState>();
+                    for app in ["claude", "codex"] {
+                        let Ok(app_type) = crate::app_config::AppType::from_str(app) else {
+                            continue;
+                        };
+                        // Only consider apps with takeover currently on.
+                        let takeover_on = matches!(
+                            state.db.get_proxy_config_for_app(app).await,
+                            Ok(c) if c.enabled
+                        );
+                        if !takeover_on {
+                            continue;
+                        }
+                        // And whose current provider is the offending official seed.
+                        let current = crate::settings::get_effective_current_provider(
+                            &state.db, &app_type,
+                        )
+                        .ok()
+                        .flatten();
+                        let needs_heal = matches!(
+                            (app_type, current.as_deref()),
+                            (crate::app_config::AppType::Claude, Some("claude-official"))
+                                | (crate::app_config::AppType::Codex, Some("codex-official"))
+                        );
+                        if !needs_heal {
+                            continue;
+                        }
+                        match commands::ofox_auth::bind_tool_to_ofox_internal(
+                            &state.db,
+                            &state.proxy_service,
+                            &ofox_state.0,
+                            app,
+                        )
+                        .await
+                        {
+                            Ok(()) => log::info!(
+                                "✓ self-heal: 已把 {app} 的 active provider 切到 ofox-{app}"
+                            ),
+                            Err(e) => log::warn!(
+                                "self-heal: rebind {app} 失败 (will keep stale config): {e}"
+                            ),
+                        }
+                    }
+                }
 
                 // Periodic backup check (on startup)
                 if let Err(e) = state.db.periodic_backup_if_needed() {
@@ -1370,8 +1524,17 @@ pub fn run() {
             commands::ofox_auth::ofox_start_login,
             commands::ofox_auth::ofox_poll_for_token,
             commands::ofox_auth::ofox_get_user_info,
+            commands::ofox_auth::ofox_refresh_user_info,
+            commands::ofox_auth::ofox_get_auth_status,
             commands::ofox_auth::ofox_is_authenticated,
             commands::ofox_auth::ofox_logout,
+            commands::ofox_auth::ofox_request_reauth,
+            commands::ofox_auth::ofox_bind_tool,
+            commands::ofox_auth::ofox_unbind_tool,
+            commands::manage_tool::get_tool_config_file_path,
+            commands::manage_tool::get_active_ofox_model,
+            commands::manage_tool::set_active_ofox_model,
+            commands::manage_tool::ofox_ping_model,
         ]);
 
     let app = builder

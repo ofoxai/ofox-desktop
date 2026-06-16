@@ -12,6 +12,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { message } from "@tauri-apps/plugin-dialog";
 import { exit } from "@tauri-apps/plugin-process";
 import TrayPopoverApp from "@/components/tray/TrayPopoverApp";
+import { Toaster } from "@/components/ui/sonner";
 
 // 根据平台添加 body class，便于平台特定样式
 try {
@@ -93,6 +94,10 @@ async function bootstrap() {
       <QueryClientProvider client={queryClient}>
         <ThemeProvider defaultTheme="system" storageKey="ofox-switch-theme">
           {isTrayPopover ? <TrayPopoverApp /> : <MainApp />}
+          {/* Single Toaster instance shared by main window + tray popover.
+              Without this, every existing `toast.*` call (App.tsx and the
+              new balance-refresh path) silently no-ops. */}
+          <Toaster />
         </ThemeProvider>
       </QueryClientProvider>
     </React.StrictMode>,
