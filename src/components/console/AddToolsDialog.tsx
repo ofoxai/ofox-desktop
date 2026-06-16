@@ -163,7 +163,7 @@ export default function AddToolsDialog({
         </DialogHeader>
 
         {tools.length > 0 && (
-          <div className="grid grid-cols-3 gap-3 py-2">
+          <div className="grid grid-cols-3 gap-3 px-6 py-4">
             {tools.map((tool) => (
               <button
                 key={tool.id}
