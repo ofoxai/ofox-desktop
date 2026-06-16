@@ -390,6 +390,21 @@ impl OfoxAuthManager {
                 false,
             )?;
 
+            // Notify the token-refresh listener (lib.rs) so it pushes the
+            // freshly-issued access_token into every `ofox-*` provider's
+            // settings_config. Without this, a re-login after logout (or a
+            // first login after an old install) leaves bound providers
+            // pinned to the previous token — which the gateway either
+            // can't resolve (we just revoked it on logout) or no longer
+            // has the right scopes for. Mirrors the emit in
+            // `refresh_access_token` (line ~516) — keep both paths
+            // emitting the same event so downstream wiring stays single-
+            // sourced.
+            if let Some(handle) = self.app_handle.read().await.as_ref() {
+                use tauri::Emitter;
+                let _ = handle.emit("ofox-auth-token-refreshed", ());
+            }
+
             log::info!("[OfoxAuth] Device flow login successful for {:?}", user.email);
             return Ok(Some(user));
         }
