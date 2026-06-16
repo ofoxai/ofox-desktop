@@ -188,12 +188,16 @@ export default function ManageToolDialog({
       setCurrentModel(draftModel);
       toast.success("模型已更新");
       onChanged?.();
+      // Close on success — mirrors handleUnbind's收尾 sequence and
+      // matches the pattern users expect from a save action. Failures
+      // keep the dialog open so the user can fix and retry.
+      onOpenChange(false);
     } catch (e) {
       toast.error(`保存失败：${String(e)}`);
     } finally {
       setSaving(false);
     }
-  }, [tool, draftModel, currentModel, onChanged]);
+  }, [tool, draftModel, currentModel, onChanged, onOpenChange]);
 
   /**
    * Probe the OfoxAI gateway end-to-end with the currently-drafted model.

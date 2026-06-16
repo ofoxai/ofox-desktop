@@ -587,12 +587,20 @@ export default function ConsolePage({
           if (!open) setManageTool(null);
         }}
         onChanged={() => {
-          // Save / unbind both mutate state the row depends on (active
-          // model, takeover state, presence in boundTools). For unbind we
-          // also need MainApp to drop the tool from its bound list — it
-          // re-reads localStorage on `onBoundToolsChanged`.
+          // Single trigger: bubble up to MainApp so it re-reads the
+          // bound-tools localStorage. The new boundTools prop flows
+          // back into our `loadData` (its useCallback deps include
+          // boundTools), so the row list re-renders without us
+          // having to call loadData() here.
+          //
+          // Calling loadData() inline used to "double up" the refresh,
+          // but the manual call captured a stale `boundTools` closure
+          // — for unbind, the in-flight stale loadData would race the
+          // prop-driven one and could win, leaving the just-unbound
+          // tool stuck in the list until the user bounced through
+          // 管理→解绑 a second time. The single prop-driven path is
+          // race-free.
           onBoundToolsChanged?.();
-          loadData();
         }}
       />
 
