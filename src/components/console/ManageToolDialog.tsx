@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   Loader2,
@@ -85,6 +85,14 @@ export default function ManageToolDialog({
 }: ManageToolDialogProps) {
   const open = !!tool;
   const protocol = tool ? TOOL_PROTOCOL[tool.id] : undefined;
+
+  // Anchors the model-picker's Popover portal inside the dialog so its
+  // CommandList stays scrollable. Radix Dialog wraps its content in
+  // `react-remove-scroll` with the content node as the only "scroll shard";
+  // any popover portaled to body falls outside the shard and has its wheel
+  // events swallowed. Pointing the popover's `container` at this ref puts it
+  // back inside the shard.
+  const dialogContentRef = useRef<HTMLDivElement>(null);
 
   // --- per-tool state ------------------------------------------------------
   // Reset every time we switch tools so the dialog never shows stale data
@@ -249,7 +257,7 @@ export default function ManageToolDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg gap-0 p-0">
+      <DialogContent ref={dialogContentRef} className="max-w-lg gap-0 p-0">
         {tool && (
           <>
             <DialogHeader className="flex-row items-center gap-3 space-y-0">
@@ -286,6 +294,7 @@ export default function ManageToolDialog({
                     models={models}
                     loading={modelsLoading}
                     onFetch={fetchModels}
+                    portalContainer={dialogContentRef.current}
                   />
                 ) : (
                   <div className="rounded-md border border-dashed border-border-default px-3 py-2 text-[12px] text-muted-foreground">
@@ -310,8 +319,7 @@ export default function ManageToolDialog({
                     size="sm"
                     onClick={handleOpenFolder}
                   >
-                    <Folder className="mr-1 h-3.5 w-3.5" />
-                    在 Finder 打开
+                    <Folder className="mr-1 h-3.5 w-3.5" />在 Finder 打开
                   </Button>
                 </div>
               </div>
@@ -451,7 +459,8 @@ function PingStatusBox({ loading, result, model }: PingStatusBoxProps) {
   if (!result) {
     return (
       <div className="rounded-md border border-dashed border-border-default px-3 py-2 text-[12px] text-muted-foreground">
-        尚未测试。点击右上方「测试连通性」可向所选模型发送一次 1-token 验证请求。
+        尚未测试。点击右上方「测试连通性」可向所选模型发送一次 1-token
+        验证请求。
       </div>
     );
   }
@@ -461,7 +470,9 @@ function PingStatusBox({ loading, result, model }: PingStatusBoxProps) {
         <CheckCircle2 className="h-4 w-4 shrink-0" />
         <span className="flex-1 truncate">
           连通成功（{result.latencyMs} ms）
-          {model && <span className="ml-1 text-muted-foreground">· {model}</span>}
+          {model && (
+            <span className="ml-1 text-muted-foreground">· {model}</span>
+          )}
         </span>
       </div>
     );
@@ -495,6 +506,13 @@ interface ModelPickerProps {
   models: FetchedModel[];
   loading: boolean;
   onFetch: () => void;
+  /**
+   * Portal target for the popover. Defaults to `document.body` when omitted.
+   * Pass the dialog's content node when this picker is rendered inside a
+   * Radix Dialog, so the popover lands inside the dialog's scroll-lock
+   * shard and the search/option list stays scrollable.
+   */
+  portalContainer?: HTMLElement | null;
 }
 
 function ModelPicker({
@@ -504,6 +522,7 @@ function ModelPicker({
   models,
   loading,
   onFetch,
+  portalContainer,
 }: ModelPickerProps) {
   const [open, setOpen] = useState(false);
 
@@ -526,8 +545,7 @@ function ModelPicker({
     const map: Record<string, FetchedModel[]> = {};
     for (const m of models) {
       const slash = m.id.indexOf("/");
-      const vendor =
-        slash > 0 ? m.id.slice(0, slash) : m.ownedBy || "Other";
+      const vendor = slash > 0 ? m.id.slice(0, slash) : m.ownedBy || "Other";
       (map[vendor] ||= []).push(m);
     }
     return map;
@@ -558,6 +576,11 @@ function ModelPicker({
           // Match the trigger width so the list never visually mismatches
           // its anchor (Radix exposes this via CSS var).
           style={{ width: "var(--radix-popover-trigger-width)" }}
+          // Portal into the dialog's content node so this popover lives
+          // inside Radix Dialog's scroll-lock shard — otherwise wheel
+          // events on the model list get swallowed and the dropdown looks
+          // "stuck" (see `ModelPickerProps.portalContainer` above).
+          container={portalContainer ?? undefined}
         >
           <Command>
             <CommandInput placeholder="搜索模型…" className="h-9" />
