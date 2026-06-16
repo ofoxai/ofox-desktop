@@ -627,7 +627,16 @@ async function getTodaySummary(appType?: string): Promise<UsageSummary | null> {
   try {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    return await usageApi.getUsageSummary(today.getTime(), undefined, appType);
+    // usage API 期望 Unix epoch *seconds*, not milliseconds —
+    // matches src/lib/usageRange.ts:21 and the SQL where-clause in
+    // src-tauri/src/services/usage_stats.rs which compares against
+    // proxy_request_logs.created_at (stored in seconds). Passing
+    // getTime() directly silently filters out every row.
+    return await usageApi.getUsageSummary(
+      Math.floor(today.getTime() / 1000),
+      undefined,
+      appType,
+    );
   } catch {
     return null;
   }
@@ -638,7 +647,12 @@ async function getMonthSummary(appType?: string): Promise<UsageSummary | null> {
     const month = new Date();
     month.setDate(1);
     month.setHours(0, 0, 0, 0);
-    return await usageApi.getUsageSummary(month.getTime(), undefined, appType);
+    // See getTodaySummary above — usage API contract is seconds.
+    return await usageApi.getUsageSummary(
+      Math.floor(month.getTime() / 1000),
+      undefined,
+      appType,
+    );
   } catch {
     return null;
   }
