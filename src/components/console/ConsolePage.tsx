@@ -109,6 +109,8 @@ export default function ConsolePage({
   const [loading, setLoading] = useState(true);
   /** Standalone spinner for the manual balance refresh button. */
   const [balanceRefreshing, setBalanceRefreshing] = useState(false);
+  /** Standalone spinner for the manual "绑定的工具" usage refresh button. */
+  const [usageRefreshing, setUsageRefreshing] = useState(false);
 
   /**
    * Refetch *only* the user/wallet snapshot. Decoupled from `loadData` so the
@@ -291,6 +293,39 @@ export default function ConsolePage({
     })();
   }, [boundTools]);
 
+  /**
+   * Force-refresh the bound-tools row stats.
+   *
+   * Two steps:
+   *   1) Sync session usage logs from disk (~/.claude/projects, ~/.codex/sessions,
+   *      ~/.gemini/tmp/...) into proxy_request_logs. Normally this runs every
+   *      60s in the background (lib.rs:1147), but the user clicking refresh
+   *      shouldn't have to wait that long after sending a CLI message.
+   *   2) Re-run loadData(): re-fetches takeover status, tool versions, and
+   *      per-tool monthly token sums. This is what actually re-paints the row.
+   *
+   * Decoupled from loadData() because the sync step is the slow path
+   * (filesystem walk) and we want a separate spinner so the existing rows
+   * stay visible mid-refresh instead of bouncing to the loading skeleton.
+   */
+  const refreshUsage = useCallback(async () => {
+    setUsageRefreshing(true);
+    try {
+      const result = await usageApi.syncSessionUsage();
+      await loadData();
+      if (result.imported > 0) {
+        toast.success(`统计已刷新 · 同步 ${result.imported} 条新会话`);
+      } else {
+        toast.success("统计已刷新");
+      }
+    } catch (e) {
+      console.error("[ConsolePage] usage refresh failed", e);
+      toast.error(`刷新失败：${String(e)}`);
+    } finally {
+      setUsageRefreshing(false);
+    }
+  }, [loadData]);
+
   useEffect(() => {
     // `loadData` fires both the local stage and the background stage-2
     // updates. We don't have a cancel handle into the latter (it's a
@@ -432,6 +467,17 @@ export default function ConsolePage({
               )}
             </div>
             <div className="flex items-center gap-2">
+              <button
+                onClick={refreshUsage}
+                disabled={usageRefreshing}
+                title="同步本地会话日志并刷新统计"
+                className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1 text-[12px] text-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <RefreshCw
+                  className={`h-3.5 w-3.5 ${usageRefreshing ? "animate-spin" : ""}`}
+                />
+                刷新
+              </button>
               <button
                 onClick={() => setAddDialogOpen(true)}
                 className="rounded-md border border-border px-3 py-1 text-[12px] text-foreground hover:bg-accent"
