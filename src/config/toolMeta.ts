@@ -3,7 +3,7 @@ export const TOOL_META: Record<
   { abbr: string; label: string; color: string }
 > = {
   claude: { abbr: "CC", label: "Claude Code", color: "bg-orange-700" },
-  codex: { abbr: "Cu", label: "Cursor", color: "bg-neutral-800" },
+  codex: { abbr: "Cx", label: "Codex", color: "bg-neutral-800" },
   opencode: { abbr: "OC", label: "OpenCode", color: "bg-emerald-500" },
   gemini: { abbr: "Ge", label: "Gemini", color: "bg-blue-500" },
 };
