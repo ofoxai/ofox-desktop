@@ -138,11 +138,13 @@ pub async fn set_active_ofox_model(
         .map_err(|e| format!("更新 {provider_id} settings_config 失败: {e}"))?;
 
     // Re-apply takeover so the new model lands in the live config file.
-    // `set_takeover_for_app(_, true)` is idempotent — if takeover was already
-    // on (the normal case for a bound tool), it just rewrites the snapshot.
+    // Use `refresh_takeover_for_app` instead of `set_takeover_for_app(_, true)`:
+    // the latter has an enabled+has_backup fast-path that early-returns for an
+    // already-bound tool, leaving the disk config stale. `refresh_takeover_for_app`
+    // skips that fast-path and unconditionally re-seeds + re-takes-over.
     state
         .proxy_service
-        .set_takeover_for_app(app_str, true)
+        .refresh_takeover_for_app(app_str)
         .await
         .map_err(|e| format!("刷新 {app_str} live 配置失败: {e}"))?;
 

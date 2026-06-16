@@ -339,6 +339,15 @@ impl ProxyService {
             // 3) 备份 Live 配置（严格：目标 app 不存在则报错）
             self.backup_live_config_strict(&app).await?;
 
+            // 3b) 用当前 provider 模板播种 live。仅 Codex 实际写盘——保证
+            // takeover 阶段 update_codex_toml_field 能落进
+            // [model_providers.<key>] 节，而不是被磁盘上残缺的 config.toml
+            // 卡死。失败则回滚刚做的备份。
+            if let Err(e) = self.seed_live_from_active_provider(&app).await {
+                let _ = self.db.delete_live_backup(app_type_str).await;
+                return Err(e);
+            }
+
             // 4) 同步 Live Token 到数据库（仅当前 app）
             if let Err(e) = self.sync_live_to_provider(&app).await {
                 let _ = self.db.delete_live_backup(app_type_str).await;
@@ -453,6 +462,41 @@ impl ProxyService {
                 let _ = self.stop().await;
             }
         }
+
+        Ok(())
+    }
+
+    /// 用当前 active provider 的设置重新刷一遍 live 配置（保留备份）。
+    ///
+    /// 用途：当用户在 ManageToolDialog 切换模型时，provider 的 `settings_config.config`
+    /// 已被更新，但 `set_takeover_for_app(_, true)` 因 enabled+has_backup 的幂等
+    /// fast-path 会直接 return，磁盘上的 `~/.codex/config.toml` 不会跟着变。
+    /// 这里强制走"种子 → takeover"的后半段，但**不**重新备份（保持用户原始
+    /// pre-takeover 状态作为可回滚来源）。
+    ///
+    /// 当 takeover 未开启时是 no-op：用户没在接管状态下切模型，磁盘不需要刷。
+    pub async fn refresh_takeover_for_app(&self, app_type: &str) -> Result<(), String> {
+        let app = AppType::from_str(app_type).map_err(|e| format!("无效的应用类型: {e}"))?;
+        let app_type_str = app.as_str();
+
+        let current_config = self
+            .db
+            .get_proxy_config_for_app(app_type_str)
+            .await
+            .map_err(|e| format!("获取 {app_type_str} 配置失败: {e}"))?;
+
+        if !current_config.enabled {
+            // 未接管 → 不写盘，留给后续显式的 set_takeover_for_app 处理
+            return Ok(());
+        }
+
+        // 代理服务可能因之前的"全部关闭"已停止，这里需要保证它在跑。
+        if !self.is_running().await {
+            self.start().await?;
+        }
+
+        self.seed_live_from_active_provider(&app).await?;
+        self.takeover_live_config_strict(&app).await?;
 
         Ok(())
     }
@@ -878,6 +922,44 @@ impl ProxyService {
             .map_err(|e| format!("备份 {app_type_str} 配置失败: {e}"))?;
 
         Ok(())
+    }
+
+    /// 用当前 active provider 的完整 settings_config 模板播种 live 配置。
+    ///
+    /// 必须在 `backup_live_config_strict` 之后、`takeover_live_config_strict`
+    /// 之前调用。原因：codex CLI v0.140 只读 `[model_providers.<model_provider>].base_url`，
+    /// 而 takeover 流程的 base_url 改写靠 `update_codex_toml_field`，后者要求
+    /// 文档里已存在 `model_provider`。如果用户磁盘上的 `~/.codex/config.toml` 是
+    /// Codex.app 自己写的（不含 `model_provider`），takeover 改写就会失败/无效。
+    /// 这里先用 provider 行里 `settings_config.config` 的完整 TOML 模板把磁盘
+    /// 重置成"已知良好"状态，takeover 再去改 base_url 才能落到正确节里。
+    ///
+    /// 仅 Codex 需要——Claude/Gemini 是 env 变量改写，没观察到等价问题；缩小回归面。
+    async fn seed_live_from_active_provider(&self, app_type: &AppType) -> Result<(), String> {
+        if !matches!(app_type, AppType::Codex) {
+            return Ok(());
+        }
+
+        let provider_id = crate::settings::get_effective_current_provider(&self.db, app_type)
+            .map_err(|e| format!("获取 {} 当前供应商失败: {e}", app_type.as_str()))?;
+        let Some(provider_id) = provider_id else {
+            // 没设置 current provider —— 不主动播种，让后续 takeover 走原有路径
+            // （多半会失败，但调用方会得到清晰的错误，比静默写入"无 provider"的
+            // 残缺模板更安全）。
+            return Ok(());
+        };
+
+        let provider = match self
+            .db
+            .get_provider_by_id(&provider_id, app_type.as_str())
+            .map_err(|e| format!("读取供应商 {provider_id} 失败: {e}"))?
+        {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+
+        crate::codex_config::write_codex_live_from_provider_settings(&provider.settings_config)
+            .map_err(|e| format!("从供应商 {provider_id} 模板写入 Codex Live 失败: {e}"))
     }
 
     /// 构造写入 Live 的代理地址（处理 0.0.0.0 / IPv6 等特殊情况）
@@ -2029,7 +2111,13 @@ requires_openai_auth = true
     }
 
     #[test]
-    fn update_toml_base_url_falls_back_to_top_level_base_url() {
+    fn update_toml_base_url_returns_original_when_no_model_provider() {
+        // 新契约：codex_config::update_codex_toml_field 在缺 model_provider
+        // 时返回 Err（而不是写到顶层 base_url，因为 codex CLI v0.140 不读顶层）。
+        // ProxyService::update_toml_base_url 的 unwrap_or_else 兜底会原样返回
+        // 输入。新设计依赖 set_takeover_for_app 的 seed 步骤先把 model_provider
+        // 写好，所以走到这条 fallback 一定是异常路径——返回原文比"假装写成功"
+        // 更安全。
         let input = r#"
 model = "gpt-5.1-codex"
 "#;
@@ -2037,15 +2125,154 @@ model = "gpt-5.1-codex"
         let new_url = "http://127.0.0.1:5000/v1";
         let output = ProxyService::update_toml_base_url(input, new_url);
 
+        // 输入原样返回——没有顶层 base_url 被偷偷写进去。
         let parsed: toml::Value =
             toml::from_str(&output).expect("updated config should be valid TOML");
+        assert!(
+            parsed.get("base_url").is_none(),
+            "must not write top-level base_url; codex CLI v0.140 ignores it"
+        );
+        assert!(parsed.get("model_providers").is_none());
+        assert_eq!(output.trim(), input.trim());
+    }
 
-        let base_url = parsed
-            .get("base_url")
-            .and_then(|v| v.as_str())
-            .expect("base_url should exist");
+    #[tokio::test]
+    #[serial]
+    async fn seed_live_from_active_provider_writes_full_codex_template() {
+        // 关键路径测试：bind 流程的核心修复点。
+        // 当 active codex provider 是 ofox-codex（带完整 model_provider+section
+        // 模板）时，seed_live_from_active_provider 必须把模板原封写到磁盘的
+        // ~/.codex/auth.json + config.toml，否则后续 update_toml_base_url 没
+        // model_provider 可写，整条 takeover 链对 codex CLI v0.140 失效。
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
 
-        assert_eq!(base_url, new_url);
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+
+        // 复刻 ofox-codex 种子（database/dao/providers_seed.rs:122）的 settings_config 形状
+        let provider = Provider::with_id(
+            "ofox-codex".to_string(),
+            "OfoxAI".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "real-oauth-token" },
+                "config": "model_provider = \"ofox\"\nmodel = \"\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\n\n[model_providers.ofox]\nname = \"ofox\"\nbase_url = \"https://api.ofox.ai/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
+            }),
+            None,
+        );
+        db.save_provider("codex", &provider).expect("save provider");
+        db.set_current_provider("codex", "ofox-codex")
+            .expect("set is_current in db");
+        crate::settings::set_current_provider(&AppType::Codex, Some("ofox-codex"))
+            .expect("set effective current provider");
+
+        service
+            .seed_live_from_active_provider(&AppType::Codex)
+            .await
+            .expect("seed should succeed");
+
+        // 验证磁盘 auth.json
+        let auth_path = crate::codex_config::get_codex_auth_path();
+        let auth_text = std::fs::read_to_string(&auth_path).expect("read auth.json");
+        let auth: serde_json::Value = serde_json::from_str(&auth_text).expect("parse auth.json");
+        assert_eq!(
+            auth.get("OPENAI_API_KEY").and_then(|v| v.as_str()),
+            Some("real-oauth-token")
+        );
+
+        // 验证磁盘 config.toml 含 model_provider + 对应 section
+        let cfg_path = crate::codex_config::get_codex_config_path();
+        let cfg_text = std::fs::read_to_string(&cfg_path).expect("read config.toml");
+        let cfg: toml::Value = toml::from_str(&cfg_text).expect("parse config.toml");
+        assert_eq!(
+            cfg.get("model_provider").and_then(|v| v.as_str()),
+            Some("ofox"),
+            "model_provider 必须存在；这是 codex CLI v0.140 寻址 base_url 的钥匙"
+        );
+        let provider_section_base_url = cfg
+            .get("model_providers")
+            .and_then(|v| v.get("ofox"))
+            .and_then(|v| v.get("base_url"))
+            .and_then(|v| v.as_str());
+        assert_eq!(provider_section_base_url, Some("https://api.ofox.ai/v1"));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn seed_then_update_base_url_lands_in_provider_section() {
+        // 接 seed_live_from_active_provider 之后的 takeover 改写一步：
+        // update_toml_base_url 应该把代理 URL 落到 [model_providers.ofox].base_url，
+        // 不再触发"无 model_provider → 顶层 fallback"那条已废弃路径。
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+
+        let provider = Provider::with_id(
+            "ofox-codex".to_string(),
+            "OfoxAI".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "real-oauth-token" },
+                "config": "model_provider = \"ofox\"\n\n[model_providers.ofox]\nname = \"ofox\"\nbase_url = \"https://api.ofox.ai/v1\"\nwire_api = \"responses\"\n",
+            }),
+            None,
+        );
+        db.save_provider("codex", &provider).expect("save provider");
+        db.set_current_provider("codex", "ofox-codex")
+            .expect("set is_current");
+        crate::settings::set_current_provider(&AppType::Codex, Some("ofox-codex"))
+            .expect("set effective current");
+
+        service
+            .seed_live_from_active_provider(&AppType::Codex)
+            .await
+            .expect("seed");
+
+        // 模拟 takeover 阶段：读 live → 改 base_url 到代理 → 写回
+        let cfg_path = crate::codex_config::get_codex_config_path();
+        let cfg_text = std::fs::read_to_string(&cfg_path).expect("read config.toml");
+        let proxy_url = "http://127.0.0.1:15721/v1";
+        let updated = ProxyService::update_toml_base_url(&cfg_text, proxy_url);
+
+        let parsed: toml::Value = toml::from_str(&updated).expect("parse updated toml");
+        let provider_base_url = parsed
+            .get("model_providers")
+            .and_then(|v| v.get("ofox"))
+            .and_then(|v| v.get("base_url"))
+            .and_then(|v| v.as_str());
+        assert_eq!(provider_base_url, Some(proxy_url));
+        assert!(
+            parsed.get("base_url").is_none(),
+            "顶层 base_url 不应该出现"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn seed_live_from_active_provider_no_op_for_non_codex() {
+        // Claude/Gemini 不在本次修复范围；helper 直接 Ok 返回，不写盘。
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+
+        // 不预置任何 provider — 即便有也不该触发写盘
+        service
+            .seed_live_from_active_provider(&AppType::Claude)
+            .await
+            .expect("claude no-op");
+        service
+            .seed_live_from_active_provider(&AppType::Gemini)
+            .await
+            .expect("gemini no-op");
+
+        // codex 路径在没有 current provider 时也是 no-op，不报错
+        service
+            .seed_live_from_active_provider(&AppType::Codex)
+            .await
+            .expect("codex with no current provider no-ops");
     }
 
     #[tokio::test]

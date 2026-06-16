@@ -110,6 +110,35 @@ pub fn write_codex_live_atomic(
     Ok(())
 }
 
+/// 用一个 codex provider 的 `settings_config`（要求是含 `auth` / `config` 字段的 JSON
+/// 对象）原子写入 `~/.codex/auth.json` 与 `~/.codex/config.toml`。
+///
+/// 这是 takeover 流程"用 active provider 的完整模板播种 live"的入口：当 provider 是
+/// 像 `ofox-codex` 这样自带 `model_provider = "ofox"` + `[model_providers.ofox]` 的
+/// 种子时，写完后磁盘上的 config.toml 就具备 codex CLI v0.140 需要的全部结构，
+/// 后续的 `update_codex_toml_field("base_url", ...)` 才能正确落到
+/// `[model_providers.ofox].base_url` 而不是触发 fallback。
+///
+/// 复用 [`write_codex_live_atomic`] 的两步写 + 回滚语义，因此调用方拿到 Err 时磁盘
+/// 上要么是改前要么是改后，不会留下半写状态。
+pub fn write_codex_live_from_provider_settings(
+    settings_config: &Value,
+) -> Result<(), AppError> {
+    let obj = settings_config
+        .as_object()
+        .ok_or_else(|| AppError::Config("Codex provider settings_config 必须是对象".into()))?;
+    let auth = obj
+        .get("auth")
+        .ok_or_else(|| AppError::Config("Codex provider settings_config 缺少 auth 字段".into()))?;
+    if !auth.is_object() {
+        return Err(AppError::Config(
+            "Codex provider settings_config 的 auth 必须是对象".into(),
+        ));
+    }
+    let cfg_text = obj.get("config").and_then(Value::as_str);
+    write_codex_live_atomic(auth, cfg_text)
+}
+
 /// 读取 `~/.codex/config.toml`，若不存在返回空字符串
 pub fn read_codex_config_text() -> Result<String, AppError> {
     let path = get_codex_config_path();
@@ -140,8 +169,10 @@ pub fn read_and_validate_codex_config_text() -> Result<String, AppError> {
 /// Update a field in Codex config.toml using toml_edit (syntax-preserving).
 ///
 /// Supported fields:
-/// - `"base_url"`: writes to `[model_providers.<current>].base_url` if `model_provider` exists,
-///   otherwise falls back to top-level `base_url`.
+/// - `"base_url"`: writes to `[model_providers.<current>].base_url` if `model_provider` exists.
+///   Returns `Err` when `model_provider` is missing — codex CLI v0.140 only reads
+///   `[model_providers.<model_provider>].base_url`, so silently writing to top-level
+///   `base_url` would be a dead-write that callers mistake for success.
 /// - `"model"`: writes to top-level `model` field.
 ///
 /// Empty value removes the field.
@@ -159,34 +190,31 @@ pub fn update_codex_toml_field(toml_str: &str, field: &str, value: &str) -> Resu
                 .and_then(|item| item.as_str())
                 .map(str::to_string);
 
-            if let Some(provider_key) = model_provider {
-                // Ensure [model_providers] table exists
-                if doc.get("model_providers").is_none() {
-                    doc["model_providers"] = toml_edit::table();
-                }
+            let provider_key = model_provider.ok_or_else(|| {
+                "config.toml 缺少 model_provider；codex CLI v0.140 仅读取 \
+                 [model_providers.<model_provider>].base_url，无法在顶层 base_url \
+                 上生效。请先用完整 provider 模板播种 live 配置。"
+                    .to_string()
+            })?;
 
-                if let Some(model_providers) = doc["model_providers"].as_table_mut() {
-                    // Ensure [model_providers.<provider_key>] table exists
-                    if !model_providers.contains_key(&provider_key) {
-                        model_providers[&provider_key] = toml_edit::table();
-                    }
-
-                    if let Some(provider_table) = model_providers[&provider_key].as_table_mut() {
-                        if trimmed.is_empty() {
-                            provider_table.remove("base_url");
-                        } else {
-                            provider_table["base_url"] = toml_edit::value(trimmed);
-                        }
-                        return Ok(doc.to_string());
-                    }
-                }
+            // Ensure [model_providers] table exists
+            if doc.get("model_providers").is_none() {
+                doc["model_providers"] = toml_edit::table();
             }
 
-            // Fallback: no model_provider or structure mismatch → top-level base_url
-            if trimmed.is_empty() {
-                doc.as_table_mut().remove("base_url");
-            } else {
-                doc["base_url"] = toml_edit::value(trimmed);
+            if let Some(model_providers) = doc["model_providers"].as_table_mut() {
+                // Ensure [model_providers.<provider_key>] table exists
+                if !model_providers.contains_key(&provider_key) {
+                    model_providers[&provider_key] = toml_edit::table();
+                }
+
+                if let Some(provider_table) = model_providers[&provider_key].as_table_mut() {
+                    if trimmed.is_empty() {
+                        provider_table.remove("base_url");
+                    } else {
+                        provider_table["base_url"] = toml_edit::value(trimmed);
+                    }
+                }
             }
         }
         "model" => {
@@ -306,18 +334,16 @@ model = "gpt-4"
     }
 
     #[test]
-    fn base_url_falls_back_to_top_level_without_model_provider() {
+    fn base_url_returns_err_when_no_model_provider() {
         let input = r#"model = "gpt-4"
 "#;
 
-        let result = update_codex_toml_field(input, "base_url", "https://fallback.api/v1").unwrap();
-        let parsed: toml::Value = toml::from_str(&result).unwrap();
-
-        let base_url = parsed
-            .get("base_url")
-            .and_then(|v| v.as_str())
-            .expect("should set top-level base_url");
-        assert_eq!(base_url, "https://fallback.api/v1");
+        let err = update_codex_toml_field(input, "base_url", "https://fallback.api/v1")
+            .expect_err("missing model_provider must be an error, not a top-level fallback");
+        assert!(
+            err.contains("model_provider"),
+            "error message should mention model_provider, got: {err}"
+        );
     }
 
     #[test]
@@ -466,5 +492,79 @@ base_url = "https://production.api/v1"
             .and_then(|v| v.get("base_url"))
             .and_then(|v| v.as_str());
         assert_eq!(base_url, Some("https://production.api/v1"));
+    }
+
+    // ---- write_codex_live_from_provider_settings ----
+
+    use std::sync::{Mutex, OnceLock};
+
+    fn home_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+    }
+
+    /// Run a test with an isolated temp home (matches the helper used in
+    /// hermes_config tests). Serializes against parallel mutators of
+    /// `CC_SWITCH_TEST_HOME` so the env var swap stays consistent.
+    fn with_test_home<T>(test_fn: impl FnOnce() -> T) -> T {
+        let _guard = home_test_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let old = std::env::var_os("CC_SWITCH_TEST_HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", tmp.path());
+        let result = test_fn();
+        match old {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+        result
+    }
+
+    #[test]
+    fn write_codex_live_from_provider_settings_writes_full_template() {
+        with_test_home(|| {
+            // Mirror the ofox-codex seed shape (database/dao/providers_seed.rs:122).
+            let settings = serde_json::json!({
+                "auth": { "OPENAI_API_KEY": "tok-abc" },
+                "config": "model_provider = \"ofox\"\nmodel = \"\"\n\n[model_providers.ofox]\nname = \"ofox\"\nbase_url = \"https://api.ofox.ai/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
+            });
+
+            write_codex_live_from_provider_settings(&settings).expect("write should succeed");
+
+            let auth_text = std::fs::read_to_string(get_codex_auth_path()).unwrap();
+            let auth: serde_json::Value = serde_json::from_str(&auth_text).unwrap();
+            assert_eq!(
+                auth.get("OPENAI_API_KEY").and_then(|v| v.as_str()),
+                Some("tok-abc")
+            );
+
+            let cfg_text = std::fs::read_to_string(get_codex_config_path()).unwrap();
+            let cfg: toml::Value = toml::from_str(&cfg_text).unwrap();
+            assert_eq!(
+                cfg.get("model_provider").and_then(|v| v.as_str()),
+                Some("ofox")
+            );
+            let base_url = cfg
+                .get("model_providers")
+                .and_then(|v| v.get("ofox"))
+                .and_then(|v| v.get("base_url"))
+                .and_then(|v| v.as_str());
+            assert_eq!(base_url, Some("https://api.ofox.ai/v1"));
+        });
+    }
+
+    #[test]
+    fn write_codex_live_from_provider_settings_rejects_non_object() {
+        let settings = serde_json::json!("not-an-object");
+        let err = write_codex_live_from_provider_settings(&settings).unwrap_err();
+        assert!(format!("{err}").contains("必须是对象"));
+    }
+
+    #[test]
+    fn write_codex_live_from_provider_settings_requires_auth() {
+        let settings = serde_json::json!({ "config": "" });
+        let err = write_codex_live_from_provider_settings(&settings).unwrap_err();
+        assert!(format!("{err}").contains("缺少 auth"));
     }
 }
