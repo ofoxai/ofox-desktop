@@ -2156,7 +2156,7 @@ model = "gpt-5.1-codex"
             "OfoxAI".to_string(),
             json!({
                 "auth": { "OPENAI_API_KEY": "real-oauth-token" },
-                "config": "model_provider = \"ofox\"\nmodel = \"\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\n\n[model_providers.ofox]\nname = \"ofox\"\nbase_url = \"https://api.ofox.ai/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
+                "config": "model_provider = \"ofox\"\nmodel = \"bailian/qwen3-coder-plus\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\n\n[model_providers.ofox]\nname = \"ofox\"\nbase_url = \"https://api.ofox.ai/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
             }),
             None,
         );

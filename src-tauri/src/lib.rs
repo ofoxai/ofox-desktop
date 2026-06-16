@@ -19,6 +19,7 @@ mod linux_fix;
 mod mcp;
 mod ofox_auth;
 mod ofox_auth_sync;
+mod ofox_endpoints;
 mod openclaw_config;
 mod opencode_config;
 mod panic_hook;

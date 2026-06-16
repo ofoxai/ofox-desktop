@@ -527,7 +527,7 @@ base_url = "https://production.api/v1"
             // Mirror the ofox-codex seed shape (database/dao/providers_seed.rs:122).
             let settings = serde_json::json!({
                 "auth": { "OPENAI_API_KEY": "tok-abc" },
-                "config": "model_provider = \"ofox\"\nmodel = \"\"\n\n[model_providers.ofox]\nname = \"ofox\"\nbase_url = \"https://api.ofox.ai/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
+                "config": "model_provider = \"ofox\"\nmodel = \"bailian/qwen3-coder-plus\"\n\n[model_providers.ofox]\nname = \"ofox\"\nbase_url = \"https://api.ofox.ai/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
             });
 
             write_codex_live_from_provider_settings(&settings).expect("write should succeed");

@@ -652,7 +652,7 @@ impl Database {
         let mut inserted = 0_usize;
         let now_ms = chrono::Utc::now().timestamp_millis();
 
-        for seed in OFOX_SEEDS {
+        for seed in OFOX_SEEDS.iter() {
             let app_type_str = seed.app_type.as_str();
 
             // 若该 id 已存在，跳过
@@ -663,7 +663,7 @@ impl Database {
             let next_sort_index = self.next_sort_index_for_app(app_type_str)?;
 
             let settings_config: serde_json::Value =
-                serde_json::from_str(seed.settings_config_json).map_err(|e| {
+                serde_json::from_str(&seed.settings_config_json).map_err(|e| {
                     AppError::Database(format!("Seed JSON parse failed for {}: {e}", seed.id))
                 })?;
 

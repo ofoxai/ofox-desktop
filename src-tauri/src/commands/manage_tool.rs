@@ -24,16 +24,15 @@ use tauri::State;
 
 use crate::app_config::AppType;
 use crate::commands::ofox_auth::OfoxAuthState;
+use crate::ofox_endpoints::OFOX_GATEWAY_BASE_URL;
 use crate::store::AppState;
 
 // Gateway base URL for the connectivity probe. Mirrors the dev/prod toggle in
 // `ofox_auth.rs` — auth flows go through ofox-core (:8080), but chat/messages
 // flow through the gateway plugin (:8088 in dev, line-routed by Traefik in
-// prod). Using prod here while the rest of the app speaks to localhost would
-// hit a Redis whose OAuth namespace doesn't have the dev token, surfacing as
-// the 401 `Invalid or expired token` we used to see.
-// TODO: 发布前改回线上地址
-const OFOX_GATEWAY_BASE_URL: &str = "http://localhost:8088";
+// prod). Single source of truth lives in `crate::ofox_endpoints`; both this
+// probe and the OFOX_SEEDS provider templates read from there so dev/prod
+// flips happen in exactly one spot.
 
 // ---------------------------------------------------------------------------
 // 1) Config file path
