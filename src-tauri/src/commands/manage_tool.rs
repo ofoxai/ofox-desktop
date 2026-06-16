@@ -26,6 +26,15 @@ use crate::app_config::AppType;
 use crate::commands::ofox_auth::OfoxAuthState;
 use crate::store::AppState;
 
+// Gateway base URL for the connectivity probe. Mirrors the dev/prod toggle in
+// `ofox_auth.rs` — auth flows go through ofox-core (:8080), but chat/messages
+// flow through the gateway plugin (:8088 in dev, line-routed by Traefik in
+// prod). Using prod here while the rest of the app speaks to localhost would
+// hit a Redis whose OAuth namespace doesn't have the dev token, surfacing as
+// the 401 `Invalid or expired token` we used to see.
+// TODO: 发布前改回线上地址
+const OFOX_GATEWAY_BASE_URL: &str = "http://localhost:8088";
+
 // ---------------------------------------------------------------------------
 // 1) Config file path
 // ---------------------------------------------------------------------------
@@ -413,14 +422,14 @@ pub async fn ofox_ping_model(
             // Auth header is x-api-key per Anthropic's spec — Bearer also
             // works on the OfoxAI gateway today, but x-api-key is what the
             // claude provider actually injects (see proxy/providers/claude.rs).
-            let url = "https://api.ofox.ai/anthropic/v1/messages";
+            let url = format!("{OFOX_GATEWAY_BASE_URL}/anthropic/v1/messages");
             let body = serde_json::json!({
                 "model": model,
                 "max_tokens": 1,
                 "messages": [{"role": "user", "content": "hi"}],
             });
             client
-                .post(url)
+                .post(&url)
                 .header("x-api-key", &api_key)
                 .header("anthropic-version", "2023-06-01")
                 .timeout(Duration::from_secs(PING_TIMEOUT_SECS))
@@ -430,14 +439,14 @@ pub async fn ofox_ping_model(
         }
         AppType::Codex | AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => {
             // OpenAI-compatible: POST /v1/chat/completions, max_tokens=1.
-            let url = "https://api.ofox.ai/v1/chat/completions";
+            let url = format!("{OFOX_GATEWAY_BASE_URL}/v1/chat/completions");
             let body = serde_json::json!({
                 "model": model,
                 "max_tokens": 1,
                 "messages": [{"role": "user", "content": "hi"}],
             });
             client
-                .post(url)
+                .post(&url)
                 .bearer_auth(&api_key)
                 .timeout(Duration::from_secs(PING_TIMEOUT_SECS))
                 .json(&body)
@@ -449,7 +458,7 @@ pub async fn ofox_ping_model(
             // Auth header is x-goog-api-key (matches what the proxy's
             // gemini adapter injects; see proxy/providers/gemini.rs:248).
             let url = format!(
-                "https://api.ofox.ai/gemini/v1beta/models/{}:generateContent",
+                "{OFOX_GATEWAY_BASE_URL}/gemini/v1beta/models/{}:generateContent",
                 model
             );
             let body = serde_json::json!({

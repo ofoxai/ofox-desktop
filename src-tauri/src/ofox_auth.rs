@@ -28,7 +28,7 @@ const OFOX_USER_INFO_URL: &str = "http://localhost:8080/openapi/me";
 const OFOX_BALANCE_URL: &str = "http://localhost:8080/openapi/orgs/me/balance";
 const OFOX_SPENDING_LIMITS_URL: &str =
     "http://localhost:8080/openapi/orgs/me/spending-limits";
-const OFOX_SCOPES: &str = "org.read balance.read offline_access";
+const OFOX_SCOPES: &str = "org.read balance.read offline_access llm.invoke";
 // TODO: 发布前替换为正式 client_id
 const OFOX_CLIENT_ID: &str = "ofox_app_switch_desktop_dev";
 const TOKEN_REFRESH_BUFFER_MS: i64 = 60_000;
