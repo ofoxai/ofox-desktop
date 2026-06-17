@@ -12,6 +12,15 @@ export { proxyApi } from "./proxy";
 export { openclawApi } from "./openclaw";
 export { sessionsApi } from "./sessions";
 export { workspaceApi } from "./workspace";
+export {
+  toolHealthApi,
+  OFOX_TOOL_HEALTH_UPDATED_EVENT,
+} from "./toolHealth";
+export type {
+  ToolHealthStatus,
+  ToolHealthSnapshot,
+  ToolHealthMap,
+} from "./toolHealth";
 export * as configApi from "./config";
 export * as authApi from "./auth";
 export * as copilotApi from "./copilot";

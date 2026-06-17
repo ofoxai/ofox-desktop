@@ -289,6 +289,27 @@ pub struct AppSettings {
     /// - Linux: "gnome-terminal" | "konsole" | "xfce4-terminal" | "alacritty" | "kitty" | "ghostty"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_terminal: Option<String>,
+
+    // ===== OFox 偏好设置 =====
+    /// 启用低余额提醒（默认 true）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_balance_enabled: Option<bool>,
+    /// 低余额阈值（美元；默认 10.0）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_balance_threshold_usd: Option<f64>,
+    /// 工具健康检查间隔："off" | "1h" | "6h" | "24h"（默认 "6h"）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_check_interval: Option<String>,
+    /// 上次告警时使用的阈值（与当前阈值不一致时清除冷却）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_balance_last_alert_threshold: Option<f64>,
+    /// 上次告警时间戳（unix-ms）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_balance_last_alert_at: Option<i64>,
+    /// 已绑定工具列表（镜像自前端 localStorage `BOUND_TOOLS_STORAGE_KEY`）
+    /// 用于后台健康检查循环知道该探测哪些工具
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_tools: Option<Vec<String>>,
 }
 
 fn default_show_in_tray() -> bool {
@@ -338,6 +359,12 @@ impl Default for AppSettings {
             backup_interval_hours: None,
             backup_retain_count: None,
             preferred_terminal: None,
+            low_balance_enabled: None,
+            low_balance_threshold_usd: None,
+            health_check_interval: None,
+            low_balance_last_alert_threshold: None,
+            low_balance_last_alert_at: None,
+            bound_tools: None,
         }
     }
 }
@@ -744,6 +771,69 @@ pub fn get_preferred_terminal() -> Option<String> {
         })
         .preferred_terminal
         .clone()
+}
+
+// ===== OFox 偏好（低余额 / 健康检查）管理函数 =====
+
+/// 低余额提醒是否启用（默认 true）
+pub fn low_balance_alert_enabled() -> bool {
+    settings_store()
+        .read()
+        .map(|s| s.low_balance_enabled.unwrap_or(true))
+        .unwrap_or(true)
+}
+
+/// 低余额阈值（美元，默认 10.0）
+pub fn low_balance_threshold_usd() -> f64 {
+    settings_store()
+        .read()
+        .map(|s| s.low_balance_threshold_usd.unwrap_or(10.0))
+        .unwrap_or(10.0)
+}
+
+/// 上次告警的阈值（用于检测阈值变化重置冷却）
+pub fn low_balance_last_alert_threshold() -> Option<f64> {
+    settings_store()
+        .read()
+        .ok()
+        .and_then(|s| s.low_balance_last_alert_threshold)
+}
+
+/// 上次告警时间戳（unix-ms）
+pub fn low_balance_last_alert_at() -> Option<i64> {
+    settings_store()
+        .read()
+        .ok()
+        .and_then(|s| s.low_balance_last_alert_at)
+}
+
+/// 写回低余额闩锁（告警发生后调用）
+pub fn set_low_balance_latch(threshold: f64, at_ms: i64) -> Result<(), AppError> {
+    mutate_settings(|s| {
+        s.low_balance_last_alert_threshold = Some(threshold);
+        s.low_balance_last_alert_at = Some(at_ms);
+    })
+}
+
+/// 工具健康检查间隔（默认 "6h"）
+pub fn health_check_interval() -> String {
+    settings_store()
+        .read()
+        .map(|s| {
+            s.health_check_interval
+                .clone()
+                .unwrap_or_else(|| "6h".to_string())
+        })
+        .unwrap_or_else(|_| "6h".to_string())
+}
+
+/// 已绑定工具列表（前端 localStorage 的镜像）
+pub fn get_bound_tools() -> Vec<String> {
+    settings_store()
+        .read()
+        .ok()
+        .and_then(|s| s.bound_tools.clone())
+        .unwrap_or_default()
 }
 
 // ===== WebDAV 同步设置管理函数 =====

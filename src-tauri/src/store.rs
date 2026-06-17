@@ -1,4 +1,5 @@
 use crate::database::Database;
+use crate::services::tool_health::ToolHealthCache;
 use crate::services::{ProxyService, UsageCache};
 use std::sync::Arc;
 
@@ -7,6 +8,8 @@ pub struct AppState {
     pub db: Arc<Database>,
     pub proxy_service: ProxyService,
     pub usage_cache: Arc<UsageCache>,
+    /// 工具健康检查结果缓存（后端循环写入，前端通过事件订阅）
+    pub tool_health_cache: ToolHealthCache,
 }
 
 impl AppState {
@@ -18,6 +21,7 @@ impl AppState {
             db,
             proxy_service,
             usage_cache: Arc::new(UsageCache::new()),
+            tool_health_cache: ToolHealthCache::new(),
         }
     }
 }

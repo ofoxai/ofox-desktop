@@ -21,6 +21,40 @@ fn merge_settings_for_save(
         }
         _ => {}
     }
+
+    // ── 低余额闩锁联动 ─────────────────────────────────────────────────
+    // 阈值变化（开关从关→开 / 阈值数字变了）时，清掉冷却闩锁，让下一轮
+    // 余额循环可以立即重新评估。前端可能没传闩锁字段（写入路径只关心
+    // 用户可见配置），所以两件事都做：
+    //   1. 始终保留 existing 的闩锁（前端不该改）
+    //   2. 若阈值/开关有变化，主动清空闩锁
+    incoming.low_balance_last_alert_threshold = existing.low_balance_last_alert_threshold;
+    incoming.low_balance_last_alert_at = existing.low_balance_last_alert_at;
+
+    let threshold_changed =
+        incoming.low_balance_threshold_usd != existing.low_balance_threshold_usd;
+    let enabled_flipped_on = matches!(
+        (existing.low_balance_enabled, incoming.low_balance_enabled),
+        (Some(false), Some(true)) | (None, Some(true))
+    );
+    if threshold_changed || enabled_flipped_on {
+        incoming.low_balance_last_alert_threshold = None;
+        incoming.low_balance_last_alert_at = None;
+    }
+
+    // ── 健康检查间隔白名单 ─────────────────────────────────────────────
+    // 防止前端写入非法值导致后端 parse_interval 走到 fallback 但用户
+    // 看到的 UI 仍是非法字符串。
+    if let Some(interval) = incoming.health_check_interval.as_deref() {
+        if !matches!(interval, "off" | "1h" | "6h" | "24h") {
+            log::warn!(
+                "[settings] health_check_interval 非法值 {:?}，回退为 existing",
+                interval
+            );
+            incoming.health_check_interval = existing.health_check_interval.clone();
+        }
+    }
+
     incoming
 }
 
@@ -187,6 +221,86 @@ mod tests {
             merged.webdav_sync.as_ref().map(|v| v.password.as_str()),
             Some("")
         );
+    }
+
+    // ── 低余额闩锁联动 ──────────────────────────────────────────────
+
+    #[test]
+    fn merge_should_preserve_latch_when_threshold_unchanged() {
+        let mut existing = AppSettings::default();
+        existing.low_balance_threshold_usd = Some(10.0);
+        existing.low_balance_enabled = Some(true);
+        existing.low_balance_last_alert_threshold = Some(10.0);
+        existing.low_balance_last_alert_at = Some(1_700_000_000_000);
+
+        let mut incoming = AppSettings::default();
+        // Frontend round-trips the threshold without changing it
+        incoming.low_balance_threshold_usd = Some(10.0);
+        incoming.low_balance_enabled = Some(true);
+        // Frontend never sends the latch fields back
+
+        let merged = merge_settings_for_save(incoming, &existing);
+
+        assert_eq!(merged.low_balance_last_alert_threshold, Some(10.0));
+        assert_eq!(merged.low_balance_last_alert_at, Some(1_700_000_000_000));
+    }
+
+    #[test]
+    fn merge_should_clear_latch_when_threshold_changes() {
+        let mut existing = AppSettings::default();
+        existing.low_balance_threshold_usd = Some(10.0);
+        existing.low_balance_last_alert_threshold = Some(10.0);
+        existing.low_balance_last_alert_at = Some(1_700_000_000_000);
+
+        let mut incoming = AppSettings::default();
+        incoming.low_balance_threshold_usd = Some(20.0); // user raised threshold
+
+        let merged = merge_settings_for_save(incoming, &existing);
+
+        assert_eq!(merged.low_balance_last_alert_threshold, None);
+        assert_eq!(merged.low_balance_last_alert_at, None);
+    }
+
+    #[test]
+    fn merge_should_clear_latch_when_enabled_flips_on() {
+        let mut existing = AppSettings::default();
+        existing.low_balance_enabled = Some(false);
+        existing.low_balance_threshold_usd = Some(10.0);
+        existing.low_balance_last_alert_threshold = Some(10.0);
+        existing.low_balance_last_alert_at = Some(1_700_000_000_000);
+
+        let mut incoming = AppSettings::default();
+        incoming.low_balance_enabled = Some(true);
+        incoming.low_balance_threshold_usd = Some(10.0);
+
+        let merged = merge_settings_for_save(incoming, &existing);
+
+        // Re-enabling should give the alert a fresh chance.
+        assert_eq!(merged.low_balance_last_alert_threshold, None);
+        assert_eq!(merged.low_balance_last_alert_at, None);
+    }
+
+    #[test]
+    fn merge_should_reject_invalid_health_interval() {
+        let mut existing = AppSettings::default();
+        existing.health_check_interval = Some("6h".to_string());
+
+        let mut incoming = AppSettings::default();
+        incoming.health_check_interval = Some("foo".to_string());
+
+        let merged = merge_settings_for_save(incoming, &existing);
+
+        assert_eq!(merged.health_check_interval.as_deref(), Some("6h"));
+    }
+
+    #[test]
+    fn merge_should_accept_valid_health_intervals() {
+        for v in ["off", "1h", "6h", "24h"] {
+            let mut incoming = AppSettings::default();
+            incoming.health_check_interval = Some(v.to_string());
+            let merged = merge_settings_for_save(incoming, &AppSettings::default());
+            assert_eq!(merged.health_check_interval.as_deref(), Some(v));
+        }
     }
 }
 

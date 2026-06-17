@@ -3,6 +3,7 @@ pub mod coding_plan;
 pub mod config;
 pub mod env_checker;
 pub mod env_manager;
+pub mod low_balance;
 pub mod mcp;
 pub mod model_fetch;
 pub mod omo;
@@ -13,9 +14,16 @@ pub mod session_usage;
 pub mod session_usage_codex;
 pub mod session_usage_gemini;
 pub mod skill;
+// Test-only fake clock. The production loops in `lib.rs::run` currently
+// use `tokio::time::sleep` directly; this trait is kept ready so future
+// integration tests can swap in `MockSleeper` without re-adding the
+// module.
+#[allow(dead_code)]
+pub mod sleeper;
 pub mod speedtest;
 pub mod stream_check;
 pub mod subscription;
+pub mod tool_health;
 pub mod usage_cache;
 pub mod usage_stats;
 pub mod webdav;

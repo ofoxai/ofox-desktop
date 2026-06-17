@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { Settings, RefreshCw } from "lucide-react";
+import { Settings, RefreshCw, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
 import { settingsApi } from "@/lib/api";
@@ -21,6 +21,8 @@ import {
 import AddToolsDialog from "./AddToolsDialog";
 import ManageToolDialog, { type ManageToolTarget } from "./ManageToolDialog";
 import OfoxSettingsDialog from "./OfoxSettingsDialog";
+import { useToolHealth } from "@/hooks/useToolHealth";
+import type { ToolHealthSnapshot } from "@/lib/api/toolHealth";
 import type { UsageSummary } from "@/types/usage";
 
 interface ToolInfo {
@@ -68,6 +70,20 @@ function formatTokens(input: number, output: number): string {
 }
 
 /**
+ * True when the user object came back from the backend with at least one
+ * identity field populated. False for `null` AND for the all-null
+ * placeholder the backend returns when `/openapi/me` was unreachable
+ * during the login flow (see `ofox_auth.rs::poll_for_token`).
+ *
+ * We treat email or name presence as the signal — `org_id` alone wouldn't
+ * give the header anything useful to render.
+ */
+function isMeaningfulUser(u: OfoxUserInfo | null | undefined): boolean {
+  if (!u) return false;
+  return Boolean(u.email || u.name);
+}
+
+/**
  * Per-tool month-to-date token total for the right-side cell of "绑定的工具".
  *
  * Sums all four token buckets (input + output + cache_creation + cache_read).
@@ -106,6 +122,21 @@ export default function ConsolePage({
   // mid-edit (e.g. monthly token refetch).
   const [manageTool, setManageTool] = useState<ManageToolTarget | null>(null);
   const [user, setUser] = useState<OfoxUserInfo | null>(null);
+  // True while the post-mount retry loop is actively probing because the
+  // initial /openapi/me came back empty (backend's `poll_for_token` now
+  // returns a placeholder user when the API is unreachable, instead of
+  // hard-failing — see `ofox_auth.rs`). The loop tries 3 times with
+  // 1s/3s/8s backoff (total ~12s) so the user doesn't sit through the
+  // earlier 22s window before seeing a definitive failure state.
+  const [userRetrying, setUserRetrying] = useState(false);
+  // Which retry attempt we're currently on, for the "重试中 (1/3)" hint.
+  // 0 means "not retrying"; 1..3 maps to the three backoff tiers.
+  const [userRetryAttempt, setUserRetryAttempt] = useState(0);
+  // Set to true after the retry loop exhausts without ever seeing a real
+  // user. Surfaces a manual "重新加载" link in the header so the user has
+  // an explicit recovery path when the OFox backend was unreachable at
+  // login time but came back later.
+  const [userLoadFailed, setUserLoadFailed] = useState(false);
   const [loading, setLoading] = useState(true);
   /** Standalone spinner for the manual balance refresh button. */
   const [balanceRefreshing, setBalanceRefreshing] = useState(false);
@@ -145,6 +176,11 @@ export default function ConsolePage({
   const [todayRequests, setTodayRequests] = useState("0");
   const [todayTokens, setTodayTokens] = useState("0");
   const [monthCost, setMonthCost] = useState("$0.00");
+
+  // Tool health pills — backend probes each bound tool every 1h/6h/24h
+  // (configurable in settings) and emits `ofox-tool-health-updated`. We
+  // render a colored dot + text in the tool card status row.
+  const { snapshot: healthSnapshot } = useToolHealth();
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -277,6 +313,18 @@ export default function ConsolePage({
 
       if (userInfo) setUser(userInfo);
 
+      // The backend's `poll_for_token` now returns a placeholder user
+      // (all-null fields) when /openapi/me was unreachable at login time
+      // — that prevents the LoginPage spinner trap, but it leaves the
+      // Console showing "用户" with an empty email until the user takes
+      // some action. Detect the placeholder and silently retry a few
+      // times with backoff before giving up. If the backend was just
+      // having a temporary blip (which is the common case), the user
+      // never sees the empty state at all.
+      if (!isMeaningfulUser(userInfo)) {
+        void retryUserInfoWithBackoff();
+      }
+
       if (todaySummary) {
         setTodayCost(formatCost(todaySummary.totalCost));
         setTodayRequests(String(todaySummary.totalRequests));
@@ -292,6 +340,45 @@ export default function ConsolePage({
       }
     })();
   }, [boundTools]);
+
+  /**
+   * Retry `/openapi/me` up to 3 times with 2s/5s/15s backoff. Bails as soon
+   * as a meaningful user comes back (anything with email or name set).
+   *
+   * Sets `userRetrying` while a probe is in flight so the header can show
+   * a "正在加载用户信息…" hint instead of the empty-state ghost. After all
+   * 3 attempts return placeholders, sets `userLoadFailed` so the user
+   * gets an explicit "重新加载" button rather than living with the silent
+   * empty card.
+   *
+   * Safe to call multiple times — caller already guarded with the
+   * isMeaningfulUser check, and the backoff is bounded.
+   */
+  const retryUserInfoWithBackoff = useCallback(async () => {
+    setUserLoadFailed(false);
+    setUserRetrying(true);
+    setUserRetryAttempt(0);
+    // 1s/3s/8s — total ~12s. Picked over the original 2s/5s/15s because
+    // 22s with no UI progress feels broken; 12s is short enough that the
+    // user is still expecting a result and long enough that genuine
+    // backend recovery (a few hundred ms after a glitch) lands inside.
+    const delays = [1000, 3000, 8000];
+    try {
+      for (let i = 0; i < delays.length; i++) {
+        setUserRetryAttempt(i + 1);
+        await new Promise((r) => setTimeout(r, delays[i]));
+        const fresh = await ofoxGetUserInfo().catch(() => null);
+        if (isMeaningfulUser(fresh)) {
+          setUser(fresh);
+          return;
+        }
+      }
+      setUserLoadFailed(true);
+    } finally {
+      setUserRetrying(false);
+      setUserRetryAttempt(0);
+    }
+  }, []);
 
   /**
    * Force-refresh the bound-tools row stats.
@@ -367,9 +454,18 @@ export default function ConsolePage({
 
   return (
     <div className="flex h-screen w-full flex-col bg-gradient-to-br from-orange-50/50 via-white to-orange-50/30 dark:from-neutral-950 dark:via-neutral-900 dark:to-neutral-950">
-      {/* Title bar drag region */}
-      <div className="h-7 shrink-0" data-tauri-drag-region="true">
-        <div className="flex h-full items-center justify-center">
+      {/* Title bar drag region — full 40px so it covers the macOS traffic-light
+          row (titleBarStyle: "Overlay") with comfortable margin on either side.
+          The previous 28px (h-7) was tall enough technically but felt fiddly:
+          users would aim for the visible "Ofox" text and miss. */}
+      <div
+        className="h-10 shrink-0"
+        data-tauri-drag-region="true"
+      >
+        <div
+          className="flex h-full items-center justify-center"
+          data-tauri-drag-region="true"
+        >
           <span className="text-[13px] font-medium text-muted-foreground">
             Ofox
           </span>
@@ -387,10 +483,30 @@ export default function ConsolePage({
               </div>
               <div>
                 <div className="text-[14px] font-semibold text-foreground">
-                  {user?.name ?? "用户"}
+                  {user?.name ?? (userRetrying ? "加载中…" : "用户")}
                 </div>
-                <div className="text-[12px] text-muted-foreground">
-                  {user?.email ?? ""}
+                <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+                  {user?.email ? (
+                    <span className="truncate">{user.email}</span>
+                  ) : userRetrying ? (
+                    <span className="inline-flex items-center gap-1">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      正在加载用户信息
+                      {userRetryAttempt > 0
+                        ? `（${userRetryAttempt}/3）`
+                        : "…"}
+                    </span>
+                  ) : userLoadFailed ? (
+                    <button
+                      type="button"
+                      onClick={retryUserInfoWithBackoff}
+                      className="inline-flex items-center gap-1 text-orange-500 hover:text-orange-600 hover:underline"
+                      title="无法加载用户信息，点击重试"
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                      无法加载用户信息，点击重试
+                    </button>
+                  ) : null}
                 </div>
               </div>
             </div>
@@ -534,6 +650,7 @@ export default function ConsolePage({
                         />
                         {tool.statusText}
                         {tool.version && ` · v${tool.version}`}
+                        <ToolHealthPill snapshot={healthSnapshot[tool.id]} />
                       </div>
                     </div>
                     {tool.proxySupported ? (
@@ -703,3 +820,75 @@ async function getMonthSummary(appType?: string): Promise<UsageSummary | null> {
     return null;
   }
 }
+
+// ─── Tool-health pill ────────────────────────────────────────────────────
+//
+// Renders nothing until the backend has probed at least once. Colors:
+//   ok      → green  + "延迟 X · Y分钟前"
+//   fail    → red    + "连接失败"
+//   skipped → gray   + "未配置模型"
+// All three show full context on hover via `title`.
+
+function ToolHealthPill({
+  snapshot,
+}: {
+  snapshot: ToolHealthSnapshot | undefined;
+}) {
+  if (!snapshot) return null;
+
+  const ageMin = Math.max(
+    0,
+    Math.floor((Date.now() - snapshot.checkedAt) / 60000),
+  );
+  const ageText = ageMin === 0 ? "刚刚" : `${ageMin} 分钟前`;
+
+  if (snapshot.status === "ok") {
+    return (
+      <span
+        className="ml-1 inline-flex items-center gap-1"
+        title={`健康检查通过 (HTTP ${snapshot.statusCode ?? 200})`}
+      >
+        <span
+          aria-hidden
+          className="h-1.5 w-1.5 rounded-full bg-emerald-500"
+        />
+        <span>
+          延迟 {snapshot.latencyMs ?? 0}ms · {ageText}
+        </span>
+      </span>
+    );
+  }
+
+  if (snapshot.status === "fail") {
+    const tooltip = [
+      snapshot.statusCode ? `HTTP ${snapshot.statusCode}` : null,
+      snapshot.error ?? "请求失败",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    return (
+      <span
+        className="ml-1 inline-flex items-center gap-1 text-rose-500"
+        title={tooltip}
+      >
+        <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-rose-500" />
+        <span>连接失败</span>
+      </span>
+    );
+  }
+
+  // skipped
+  return (
+    <span
+      className="ml-1 inline-flex items-center gap-1"
+      title={snapshot.error ?? '请在"管理"中选择模型后再启用健康检查'}
+    >
+      <span
+        aria-hidden
+        className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60"
+      />
+      <span>{snapshot.error ?? "未配置模型"}</span>
+    </span>
+  );
+}
+

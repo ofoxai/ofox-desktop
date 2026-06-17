@@ -19,11 +19,14 @@
 //! `services/provider/live.rs` ultimately consumes.
 
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::State;
+use tokio::sync::RwLock;
 
 use crate::app_config::AppType;
 use crate::commands::ofox_auth::OfoxAuthState;
+use crate::ofox_auth::OfoxAuthManager;
 use crate::ofox_endpoints::OFOX_GATEWAY_BASE_URL;
 use crate::store::AppState;
 
@@ -80,6 +83,19 @@ pub fn get_active_ofox_model(
     app: String,
 ) -> Result<String, String> {
     let app_type = AppType::from_str(&app).map_err(|e| format!("无效的应用类型: {e}"))?;
+    read_active_model_for(&state, &app_type)
+}
+
+/// Plain-reference version of [`get_active_ofox_model`] used by background
+/// tasks (e.g. health-check loop) that can't construct `tauri::State<'_>`.
+///
+/// Returns `Ok("")` when the active provider exists but has no model field
+/// configured (caller is expected to interpret as `"skipped"`); only
+/// surfaces `Err` for hard DB failures or when there is no active provider.
+pub(crate) fn read_active_model_for(
+    state: &AppState,
+    app_type: &AppType,
+) -> Result<String, String> {
     let app_str = app_type.as_str();
 
     let provider_id = state
@@ -94,7 +110,7 @@ pub fn get_active_ofox_model(
         .map_err(|e| format!("读取 {provider_id} 失败: {e}"))?
         .ok_or_else(|| format!("供应商 {provider_id} 不存在"))?;
 
-    Ok(read_model_from_settings(&app_type, &provider.settings_config))
+    Ok(read_model_from_settings(app_type, &provider.settings_config))
 }
 
 // ---------------------------------------------------------------------------
@@ -345,33 +361,88 @@ pub async fn ofox_ping_model(
     app: String,
     model: String,
 ) -> Result<PingResult, String> {
-    let app_type = AppType::from_str(&app).map_err(|e| format!("无效的应用类型: {e}"))?;
+    // Tauri commands can't construct `tauri::State<'_>` from a background
+    // task, so the real implementation lives in `ofox_ping_model_internal`
+    // which takes plain references. The `services::tool_health` loop calls
+    // the internal helper directly with managed-state lookups.
+    Ok(ofox_ping_model_internal(&state, &ofox_state.0, &app, &model).await)
+}
+
+/// Implementation of [`ofox_ping_model`] that takes plain references so it
+/// can be invoked from background tasks (e.g. the periodic health-check
+/// loop). Always returns `Ok`-shaped result; failures land in the
+/// `success: false` variant of [`PingResult`].
+pub(crate) async fn ofox_ping_model_internal(
+    state: &AppState,
+    manager_arc: &Arc<RwLock<OfoxAuthManager>>,
+    app: &str,
+    model: &str,
+) -> PingResult {
+    let app_type = match AppType::from_str(app) {
+        Ok(t) => t,
+        Err(e) => {
+            return PingResult {
+                success: false,
+                latency_ms: 0,
+                status_code: None,
+                error: Some(format!("无效的应用类型: {e}")),
+            };
+        }
+    };
     let app_str = app_type.as_str();
 
     let model = model.trim().to_string();
     if model.is_empty() {
-        return Ok(PingResult {
+        return PingResult {
             success: false,
             latency_ms: 0,
             status_code: None,
             error: Some("请先选择一个模型再测试连通性".to_string()),
-        });
+        };
     }
 
     // Pull the API key the proxy would use for this app. We read the active
     // provider's settings_config rather than the static OfoxAI seed — that
     // way users who edited the seed (or bound to a non-Ofox provider) still
     // get a meaningful probe.
-    let provider_id = state
-        .db
-        .get_current_provider(app_str)
-        .map_err(|e| format!("读取当前供应商失败: {e}"))?
-        .ok_or_else(|| format!("{app_str} 暂无活跃供应商"))?;
-    let provider = state
-        .db
-        .get_provider_by_id(&provider_id, app_str)
-        .map_err(|e| format!("读取 {provider_id} 失败: {e}"))?
-        .ok_or_else(|| format!("供应商 {provider_id} 不存在"))?;
+    let provider_id = match state.db.get_current_provider(app_str) {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            return PingResult {
+                success: false,
+                latency_ms: 0,
+                status_code: None,
+                error: Some(format!("{app_str} 暂无活跃供应商")),
+            };
+        }
+        Err(e) => {
+            return PingResult {
+                success: false,
+                latency_ms: 0,
+                status_code: None,
+                error: Some(format!("读取当前供应商失败: {e}")),
+            };
+        }
+    };
+    let provider = match state.db.get_provider_by_id(&provider_id, app_str) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return PingResult {
+                success: false,
+                latency_ms: 0,
+                status_code: None,
+                error: Some(format!("供应商 {provider_id} 不存在")),
+            };
+        }
+        Err(e) => {
+            return PingResult {
+                success: false,
+                latency_ms: 0,
+                status_code: None,
+                error: Some(format!("读取 {provider_id} 失败: {e}")),
+            };
+        }
+    };
 
     let api_key = extract_api_key(&app_type, &provider.settings_config);
 
@@ -391,16 +462,16 @@ pub async fn ofox_ping_model(
     // `sk-` key keeps using that key untouched.
     let is_ofox_provider = provider_id.starts_with("ofox-");
     let api_key = if is_ofox_provider {
-        let manager = ofox_state.0.read().await;
+        let manager = manager_arc.read().await;
         match manager.get_valid_access_token().await {
             Ok(t) => t,
             Err(e) => {
-                return Ok(PingResult {
+                return PingResult {
                     success: false,
                     latency_ms: 0,
                     status_code: Some(401),
                     error: Some(format!("获取 OfoxAI 访问令牌失败：{e}")),
-                });
+                };
             }
         }
     } else {
@@ -410,30 +481,28 @@ pub async fn ofox_ping_model(
             // is moot for `ofox-gemini` now (covered above) but kept for any
             // stray non-ofox Gemini provider that still hits this code path.
             None if matches!(app_type, AppType::Gemini) => {
-                let manager = ofox_state.0.read().await;
+                let manager = manager_arc.read().await;
                 match manager.get_valid_access_token().await {
                     Ok(t) => t,
                     Err(e) => {
-                        return Ok(PingResult {
+                        return PingResult {
                             success: false,
                             latency_ms: 0,
                             status_code: Some(401),
                             error: Some(format!("获取 OfoxAI 访问令牌失败：{e}")),
-                        });
+                        };
                     }
                 }
             }
             None => {
-                // Suppress the unused-state warning even on the error path.
-                let _ = &ofox_state;
-                return Ok(PingResult {
+                return PingResult {
                     success: false,
                     latency_ms: 0,
                     status_code: None,
                     error: Some(format!(
                         "{app_str} 当前供应商未配置 API Key，无法测试连通性"
                     )),
-                });
+                };
             }
         }
     };
@@ -511,12 +580,12 @@ pub async fn ofox_ping_model(
         Err(e) => {
             // Network-level failure (DNS, TLS, connect refused, timeout, …).
             // No status_code to report.
-            return Ok(PingResult {
+            return PingResult {
                 success: false,
                 latency_ms,
                 status_code: None,
                 error: Some(format!("网络请求失败：{e}")),
-            });
+            };
         }
     };
 
@@ -526,12 +595,12 @@ pub async fn ofox_ping_model(
         // /chat/completions or /generateContent means OfoxAI accepted the
         // request, routed to the upstream model, and got a response. That's
         // the only signal the user cares about.
-        return Ok(PingResult {
+        return PingResult {
             success: true,
             latency_ms,
             status_code: Some(status.as_u16()),
             error: None,
-        });
+        };
     }
 
     // Failure path: read and trim the body so error messages stay glanceable.
@@ -550,7 +619,7 @@ pub async fn ofox_ping_model(
         _ => "",
     };
 
-    Ok(PingResult {
+    PingResult {
         success: false,
         latency_ms,
         status_code: Some(status.as_u16()),
@@ -559,7 +628,7 @@ pub async fn ofox_ping_model(
         } else {
             format!("{hint}（HTTP {status}）{trimmed}")
         }),
-    })
+    }
 }
 
 /// Read the API key (or auth token) that the proxy would inject when

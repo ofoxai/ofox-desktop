@@ -330,6 +330,21 @@ export interface Settings {
   // Windows: "cmd" | "powershell" | "wt"
   // Linux: "gnome-terminal" | "konsole" | "xfce4-terminal" | "alacritty" | "kitty" | "ghostty"
   preferredTerminal?: string;
+
+  // ===== OFox 偏好（低余额提醒 / 工具健康检查）=====
+  // 启用低余额提醒（默认 true）。低于阈值时弹 OS 系统通知。
+  lowBalanceEnabled?: boolean;
+  // 低余额阈值（USD，默认 10.0）
+  lowBalanceThresholdUsd?: number;
+  // 工具健康检查间隔："off" | "1h" | "6h" | "24h"（默认 "6h"）
+  healthCheckInterval?: "off" | "1h" | "6h" | "24h";
+  // 上次告警时使用的阈值（用于检测阈值变更，前端不应主动写）
+  lowBalanceLastAlertThreshold?: number;
+  // 上次告警时间戳（unix-ms，前端不应主动写）
+  lowBalanceLastAlertAt?: number;
+  // 已绑定工具列表（镜像自前端 localStorage `BOUND_TOOLS_STORAGE_KEY`，
+  // 后端循环读它来知道该探测哪些工具）
+  boundTools?: string[];
 }
 
 export interface SessionMeta {

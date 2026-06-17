@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { CheckCircle2 } from "lucide-react";
+import { CheckCircle2, RotateCcw } from "lucide-react";
+import { toast } from "sonner";
 import { settingsApi } from "@/lib/api";
 import {
   ofoxStartLogin,
   ofoxPollForToken,
+  ofoxGetAuthStatus,
   type OfoxDeviceCodeResponse,
   type OfoxUserInfo,
 } from "@/lib/api/ofoxAuth";
@@ -31,6 +33,21 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const intervalRef = useRef(5);
+  // Counts consecutive *unknown* errors during polling (i.e. errors not
+  // matching the three documented OAuth codes). Three in a row trips us
+  // out of the silent-spin trap and tells the user something's wrong.
+  const unknownErrorCountRef = useRef(0);
+  // Tracks whether the "我已完成授权" check is in flight, so we can
+  // disable that one button without affecting the others.
+  const [checkingStatus, setCheckingStatus] = useState(false);
+  // Whether to surface the "重新生成验证码" escape hatch. We hide it by
+  // default to keep the polling card uncluttered — a user actively waiting
+  // for the browser shouldn't be tempted to invalidate their fresh code.
+  // Only after the user clicks "我已完成授权" and the check fails do we
+  // reveal it: at that point regenerating is the right next move because
+  // either the device code is genuinely consumed/expired, or something
+  // upstream is wrong and a fresh code is the cheapest reset.
+  const [showRegenerate, setShowRegenerate] = useState(false);
 
   const stopPolling = useCallback(() => {
     if (pollingRef.current) {
@@ -51,6 +68,8 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
     setError(null);
     setLoginState("idle");
     stopPolling();
+    unknownErrorCountRef.current = 0;
+    setShowRegenerate(false);
 
     try {
       const resp = await ofoxStartLogin();
@@ -90,6 +109,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
             onLoginSuccess(user);
           }
           // null = still pending, keep polling
+          unknownErrorCountRef.current = 0;
         } catch (e) {
           const msg = String(e);
           if (msg.includes("slow_down")) {
@@ -119,6 +139,27 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
                 ? "授权被拒绝"
                 : "验证码已过期，请重试",
             );
+          } else {
+            // Anything we don't recognize — bad network, OFox backend
+            // unreachable, malformed upstream response, an `invalid_grant`
+            // because the device_code was already consumed by a successful
+            // (but not-fully-propagated) poll, etc. Pre-fix this branch
+            // was a no-op, so the user spun forever with no feedback.
+            // Log + count; after 3 consecutive unknown failures, assume
+            // we're stuck and surface an error so the rescue buttons
+            // (regenerate code / "我已完成授权") become the obvious path.
+            unknownErrorCountRef.current += 1;
+            console.warn(
+              `[LoginPage] poll error (${unknownErrorCountRef.current}/3):`,
+              msg,
+            );
+            if (unknownErrorCountRef.current >= 3) {
+              stopPolling();
+              setLoginState("error");
+              setError(
+                "授权检查异常，请尝试「重新生成验证码」或「我已完成授权」",
+              );
+            }
           }
         }
       }, intervalRef.current * 1000);
@@ -148,8 +189,81 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
     }
   };
 
+  /**
+   * Manual rescue — "我已完成授权".
+   *
+   * Most useful when the silent-spin trap hit before the 3-strike threshold:
+   * the backend may already be `Active` (tokens on disk, set_state ran)
+   * but the poll loop hasn't seen a successful return because of the
+   * `/openapi/me` failure path (now fixed in `ofox_auth.rs`, but kept as
+   * a belt-and-suspenders here for older deployments and for genuine
+   * "user gave up before the next poll fired" scenarios).
+   *
+   * Reads `ofoxGetAuthStatus()` directly. If active, we synthesize a
+   * minimal `OfoxUserInfo` from whatever the backend already cached and
+   * call `onLoginSuccess`, mirroring what the polling success path does.
+   */
+  const handleAlreadyAuthorized = useCallback(async () => {
+    if (checkingStatus) return;
+    setCheckingStatus(true);
+    try {
+      const status = await ofoxGetAuthStatus();
+      if (status.state === "active") {
+        stopPolling();
+        setLoginState("success");
+        onLoginSuccess(
+          status.user ?? {
+            email: null,
+            name: null,
+            org_id: null,
+            avatar_url: null,
+          },
+        );
+      } else {
+        // Failed: surface the regenerate hatch now. The user has explicitly
+        // told us "I'm done in the browser" — if the backend disagrees, the
+        // device code is most likely stale, and continuing to wait silently
+        // is the worst option. A fresh code is one click away.
+        setShowRegenerate(true);
+        toast.info("尚未检测到授权，可尝试重新生成验证码");
+      }
+    } catch (e) {
+      console.error("[LoginPage] handleAlreadyAuthorized failed", e);
+      // Network/IPC failure — same UX: offer the regenerate path so the
+      // user isn't stuck if the backend is temporarily unreachable.
+      setShowRegenerate(true);
+      toast.error("检查授权状态失败，请稍后再试");
+    } finally {
+      setCheckingStatus(false);
+    }
+  }, [checkingStatus, onLoginSuccess, stopPolling]);
+
+  /**
+   * Manual rescue — "重新生成验证码".
+   *
+   * Hard reset of the device-code flow. Re-runs `startLogin()` which:
+   *   1. clears polling timers,
+   *   2. resets `unknownErrorCountRef`,
+   *   3. asks the backend for a fresh device code (the previous one is
+   *      orphaned server-side; OFox lets it expire naturally),
+   *   4. opens the browser tab again and starts polling from scratch.
+   */
+  const handleRegenerate = useCallback(async () => {
+    await startLogin();
+  }, []);
+
   return (
-    <div className="flex h-screen w-full items-center justify-center bg-gradient-to-br from-orange-50/80 via-white to-orange-50/40 dark:from-neutral-950 dark:via-neutral-900 dark:to-neutral-950">
+    <div className="flex h-screen w-full flex-col bg-gradient-to-br from-orange-50/80 via-white to-orange-50/40 dark:from-neutral-950 dark:via-neutral-900 dark:to-neutral-950">
+      {/* Title bar drag region — same 40px strip ConsolePage uses, so the
+          window stays movable while the user is on this page. Without this
+          there is literally no draggable surface on the LoginPage and the
+          window gets stuck wherever it first opened. */}
+      <div
+        className="h-10 shrink-0"
+        data-tauri-drag-region="true"
+      />
+
+      <div className="flex flex-1 w-full items-center justify-center">
       <div className="flex w-full max-w-xl flex-col items-center px-8">
         {/* Logo */}
         <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-[22px] bg-gradient-to-br from-orange-400 to-orange-600 text-4xl font-bold text-white shadow-lg shadow-orange-200 dark:shadow-orange-900/30">
@@ -198,6 +312,35 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
               <div className="h-4 w-4 animate-spin rounded-full border-2 border-orange-400 border-t-transparent" />
               等待授权中...
+            </div>
+
+            {/* Rescue actions — visible only while polling so users have an
+             *  escape hatch when something goes wrong silently (e.g. the
+             *  /openapi/me failure used to leave them stuck forever).
+             *  Default visible: only "我已完成授权" — keeps the card calm
+             *  and avoids tempting users to invalidate a perfectly good
+             *  device code. The "重新生成" button only appears AFTER the
+             *  user clicks "我已完成授权" and the check fails — at that
+             *  point regenerating is the obvious next move. */}
+            <div className="mt-2 flex items-center gap-2 text-[12px]">
+              <button
+                type="button"
+                onClick={handleAlreadyAuthorized}
+                disabled={checkingStatus}
+                className="rounded-md border border-border bg-background px-3 py-1.5 font-medium text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {checkingStatus ? "检查中…" : "我已完成授权 →"}
+              </button>
+              {showRegenerate && (
+                <button
+                  type="button"
+                  onClick={handleRegenerate}
+                  className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-3 py-1.5 font-medium text-foreground transition-colors hover:bg-accent"
+                >
+                  <RotateCcw className="h-3 w-3" />
+                  重新生成验证码
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -257,6 +400,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
           </button>
         </p>
       </div>
+    </div>
     </div>
   );
 }

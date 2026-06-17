@@ -364,10 +364,41 @@ impl OfoxAuthManager {
                 *rt = token_resp.refresh_token.clone();
             }
 
-            // Fetch user info
-            let user = self
+            // Fetch user info. Failure here is **non-fatal** — the tokens
+            // we just stored are valid, the OAuth handshake is complete, and
+            // the only thing that didn't load is the profile/balance bundle.
+            // Treat that as a transient network glitch: keep an empty user
+            // placeholder, still transition to Active, and let
+            // `ofox_get_user_info` (which already has cache fallback in
+            // `commands/ofox_auth.rs`) fill the gap on the next call.
+            //
+            // Pre-fix: a `?` here propagated the error all the way up to
+            // the LoginPage's poll loop, which silently swallowed it. Tokens
+            // were on disk but the UI was stuck — `set_state(Active)` and
+            // `emit("ofox-auth-restored")` below never ran, and the device
+            // code (already consumed by the upstream) couldn't be polled
+            // again. Net effect: the user got stuck on the spinner forever.
+            let user = match self
                 .get_user_info_from_api(&token_resp.access_token)
-                .await?;
+                .await
+            {
+                Ok(u) => u,
+                Err(e) => {
+                    log::warn!(
+                        "[OfoxAuth] device login: tokens stored OK, but \
+                         /openapi/me failed ({e}). Continuing with empty \
+                         profile; will be filled on next refresh."
+                    );
+                    OfoxUserInfo {
+                        email: None,
+                        name: None,
+                        org_id: None,
+                        avatar_url: None,
+                        balance: None,
+                        spending: None,
+                    }
+                }
+            };
             {
                 let mut ui = self.user_info.write().await;
                 *ui = Some(user.clone());
