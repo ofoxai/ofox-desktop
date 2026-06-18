@@ -9,6 +9,13 @@ import {
   type OfoxDeviceCodeResponse,
   type OfoxUserInfo,
 } from "@/lib/api/ofoxAuth";
+import { useOfoxApex } from "@/hooks/useOfoxApex";
+import { OfoxApexSwitch } from "@/components/OfoxApexSwitch";
+import {
+  ofoxPrivacyUrl,
+  ofoxRegisterUrl,
+  ofoxTermsUrl,
+} from "@/lib/ofoxUrls";
 
 const FEATURES = [
   "自动检测本机 AI 工具，一键接入",
@@ -24,6 +31,7 @@ interface LoginPageProps {
 }
 
 export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
+  const { apex } = useOfoxApex();
   const [loginState, setLoginState] = useState<LoginState>("idle");
   const [deviceCode, setDeviceCode] =
     useState<OfoxDeviceCodeResponse | null>(null);
@@ -253,7 +261,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
   }, []);
 
   return (
-    <div className="flex h-screen w-full flex-col bg-gradient-to-br from-orange-50/80 via-white to-orange-50/40 dark:from-neutral-950 dark:via-neutral-900 dark:to-neutral-950">
+    <div className="relative flex h-screen w-full flex-col bg-gradient-to-br from-orange-50/80 via-white to-orange-50/40 dark:from-neutral-950 dark:via-neutral-900 dark:to-neutral-950">
       {/* Title bar drag region — same 40px strip ConsolePage uses, so the
           window stays movable while the user is on this page. Without this
           there is literally no draggable surface on the LoginPage and the
@@ -262,6 +270,12 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
         className="h-10 shrink-0"
         data-tauri-drag-region="true"
       />
+
+      {/* Apex (region) switcher — 浮在右上角，避开 drag-region 中心；用户在
+          授权之前就能选对 apex，避免 device flow 打到错误的 IDP。 */}
+      <div className="absolute right-3 top-2 z-10">
+        <OfoxApexSwitch triggerClassName="h-7 w-[126px] text-[12px]" />
+      </div>
 
       <div className="flex flex-1 w-full items-center justify-center">
       <div className="flex w-full max-w-xl flex-col items-center px-8">
@@ -370,7 +384,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
           <span className="text-muted-foreground">未注册？</span>
           <button
             onClick={() =>
-              settingsApi.openExternal("https://app.ofox.ai/register")
+              settingsApi.openExternal(ofoxRegisterUrl(apex))
             }
             className="text-orange-500 hover:text-orange-600 hover:underline"
           >
@@ -383,7 +397,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
           继续登录即表示同意{" "}
           <button
             onClick={() =>
-              settingsApi.openExternal("https://ofox.ai/terms")
+              settingsApi.openExternal(ofoxTermsUrl(apex))
             }
             className="underline hover:text-muted-foreground"
           >
@@ -392,7 +406,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
           与{" "}
           <button
             onClick={() =>
-              settingsApi.openExternal("https://ofox.ai/privacy")
+              settingsApi.openExternal(ofoxPrivacyUrl(apex))
             }
             className="underline hover:text-muted-foreground"
           >

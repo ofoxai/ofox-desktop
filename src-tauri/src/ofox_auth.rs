@@ -18,16 +18,15 @@ use tokio::sync::RwLock;
 
 // ==================== Constants ====================
 
-// 开发环境：指向本地服务
-// ofox-app (Next.js, pm2) → localhost:3000 对应线上 app.ofox.ai
-// ofox-core (Go, pm2) → localhost:8080 对应线上 api.ofox.ai
-// TODO: 发布前改回线上地址
-const OFOX_DEVICE_AUTH_URL: &str = "http://localhost:3000/api/oauth/device_authorization";
-const OFOX_TOKEN_URL: &str = "http://localhost:3000/api/oauth/token";
-const OFOX_USER_INFO_URL: &str = "http://localhost:8080/openapi/me";
-const OFOX_BALANCE_URL: &str = "http://localhost:8080/openapi/orgs/me/balance";
-const OFOX_SPENDING_LIMITS_URL: &str =
-    "http://localhost:8080/openapi/orgs/me/spending-limits";
+// OAuth IDP / OpenAPI 端点的具体 URL 现在由 [`crate::ofox_apex`] 单一开关：
+//   - dev (`cfg!(debug_assertions)`) → localhost:3000 / 8080（与原硬编码常量
+//     一致，不影响本地联调）
+//   - release → `https://app.<apex>` / `https://api.<apex>`，apex 来自
+//     settings.json `ofoxApex` 字段（首次启动 ip-api 探测填充）
+//
+// 单一开关让我们不再担心"token 在 dev IDP 签发但被打到 prod 网关"那种
+// dev/prod 混搭。`ofox_apex::*_url()` 在每次调用时重新求值，所以用户在 UI
+// 切换 apex 后下一次请求立刻走新地址，不需要重启进程。
 const OFOX_SCOPES: &str = "org.read balance.read offline_access llm.invoke";
 // TODO: 发布前替换为正式 client_id
 const OFOX_CLIENT_ID: &str = "ofox_app_switch_desktop_dev";
@@ -54,6 +53,16 @@ pub struct OfoxUserInfo {
     pub name: Option<String>,
     pub org_id: Option<String>,
     pub avatar_url: Option<String>,
+    /// OAuth 颁发 token 时快照的 role 值（owner / admin / member）。来源是
+    /// `/openapi/me` 的 `role` 字段——平台在 token 里就钉死了 role，每次 RT
+    /// rotation 才会刷新（详见 ofox-openapi-example/.../02-api-reference.md
+    /// 的 "Role 模型" 一节）。
+    ///
+    /// `None` = 老版 token 没带这个字段，前端按 member（最小权限）回退；这
+    /// 样既兼容历史 token，也避免误把"未知"当成"管理员"。前端 helper 见
+    /// `src/lib/api/ofoxAuth.ts::isOfoxBillingManager`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     /// Latest snapshot of the account wallet. Populated by
     /// `get_user_info_from_api`, which calls `/openapi/me` and then
     /// `/openapi/orgs/me/balance` in sequence. Optional so cached/legacy
@@ -249,7 +258,7 @@ impl OfoxAuthManager {
     pub async fn start_device_flow(&self) -> Result<OfoxDeviceCodeResponse, String> {
         let response = self
             .http_client
-            .post(OFOX_DEVICE_AUTH_URL)
+            .post(crate::ofox_apex::device_auth_url())
             .header("Content-Type", "application/x-www-form-urlencoded")
             .form(&[
                 ("client_id", OFOX_CLIENT_ID),
@@ -323,7 +332,7 @@ impl OfoxAuthManager {
 
         let response = self
             .http_client
-            .post(OFOX_TOKEN_URL)
+            .post(crate::ofox_apex::token_url())
             .header("Content-Type", "application/x-www-form-urlencoded")
             .form(&[
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
@@ -394,6 +403,7 @@ impl OfoxAuthManager {
                         name: None,
                         org_id: None,
                         avatar_url: None,
+                        role: None,
                         balance: None,
                         spending: None,
                     }
@@ -490,7 +500,7 @@ impl OfoxAuthManager {
 
         let response = self
             .http_client
-            .post(OFOX_TOKEN_URL)
+            .post(crate::ofox_apex::token_url())
             .header("Content-Type", "application/x-www-form-urlencoded")
             .form(&[
                 ("grant_type", "refresh_token"),
@@ -612,7 +622,7 @@ impl OfoxAuthManager {
     async fn get_user_info_from_api(&self, access_token: &str) -> Result<OfoxUserInfo, String> {
         let response = self
             .http_client
-            .get(OFOX_USER_INFO_URL)
+            .get(crate::ofox_apex::user_info_url())
             .header("Authorization", format!("Bearer {access_token}"))
             .send()
             .await
@@ -664,7 +674,7 @@ impl OfoxAuthManager {
     async fn fetch_balance(&self, access_token: &str) -> Result<OfoxBalance, String> {
         let response = self
             .http_client
-            .get(OFOX_BALANCE_URL)
+            .get(crate::ofox_apex::balance_url())
             .header("Authorization", format!("Bearer {access_token}"))
             .send()
             .await
@@ -707,7 +717,7 @@ impl OfoxAuthManager {
     ) -> Result<Option<OfoxSpending>, String> {
         let response = self
             .http_client
-            .get(OFOX_SPENDING_LIMITS_URL)
+            .get(crate::ofox_apex::spending_limits_url())
             .header("Authorization", format!("Bearer {access_token}"))
             .send()
             .await

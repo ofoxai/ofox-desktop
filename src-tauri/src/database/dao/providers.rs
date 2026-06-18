@@ -643,7 +643,7 @@ impl Database {
     /// - 老用户升级：同样会触发一次（flag 不存在），追加到末尾，不影响已有排序
     /// - 用户删除 seed 后：不再重建（flag 已为 true），尊重用户意图
     pub fn init_default_ofox_providers(&self) -> Result<usize, AppError> {
-        use crate::database::dao::providers_seed::OFOX_SEEDS;
+        use crate::database::dao::providers_seed::ofox_seeds;
 
         if self.get_bool_flag("ofox_providers_seeded").unwrap_or(false) {
             return Ok(0);
@@ -652,7 +652,7 @@ impl Database {
         let mut inserted = 0_usize;
         let now_ms = chrono::Utc::now().timestamp_millis();
 
-        for seed in OFOX_SEEDS.iter() {
+        for seed in ofox_seeds() {
             let app_type_str = seed.app_type.as_str();
 
             // 若该 id 已存在，跳过

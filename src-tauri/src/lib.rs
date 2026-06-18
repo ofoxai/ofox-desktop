@@ -19,6 +19,7 @@ mod linux_fix;
 mod mcp;
 mod ofox_auth;
 mod ofox_auth_sync;
+mod ofox_apex;
 mod ofox_endpoints;
 mod openclaw_config;
 mod opencode_config;
@@ -888,6 +889,23 @@ pub fn run() {
                     manager.attach_app_handle(attach_handle).await;
                 });
 
+                // First-launch apex resolution: hit `ip-api.com/json` once and
+                // pin the result (CN → ofox.io, else → ofox.ai) into
+                // `settings.json::ofoxApex`. Subsequent launches see
+                // `ofoxApexResolved == true` and skip the probe.
+                //
+                // Spawned concurrently so window paint / login flow are not
+                // blocked by a slow ip-api response. While the probe runs,
+                // `current_apex()` falls back to "ofox.ai" — fine for `dev`
+                // (everything is localhost anyway) and acceptable for first
+                // launch in CN (LoginPage will refresh after the
+                // `ofox-apex-changed` event lands, ~ a few seconds later).
+                let apex_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let client = crate::proxy::http_client::get();
+                    crate::ofox_apex::ensure_apex_resolved(&apex_handle, &client).await;
+                });
+
                 // Periodic silent refresh: tick every 30 min and, if the
                 // session is Active and the access token is near expiry,
                 // refresh it. With OFox's default 1 h token TTL and a 60 s
@@ -1640,6 +1658,9 @@ pub fn run() {
             commands::ofox_auth::ofox_request_reauth,
             commands::ofox_auth::ofox_bind_tool,
             commands::ofox_auth::ofox_unbind_tool,
+            // Ofox apex (region) switching
+            commands::ofox_apex::ofox_get_apex,
+            commands::ofox_apex::ofox_set_apex,
             commands::manage_tool::get_tool_config_file_path,
             commands::manage_tool::get_active_ofox_model,
             commands::manage_tool::set_active_ofox_model,

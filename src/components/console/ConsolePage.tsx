@@ -5,7 +5,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { settingsApi } from "@/lib/api";
 import { proxyApi } from "@/lib/api/proxy";
 import { usageApi } from "@/lib/api/usage";
-import { ofoxGetUserInfo, type OfoxUserInfo } from "@/lib/api/ofoxAuth";
+import { ofoxGetUserInfo, isOfoxBillingManager, type OfoxUserInfo } from "@/lib/api/ofoxAuth";
+import { useOfoxApex } from "@/hooks/useOfoxApex";
+import {
+  ofoxDashboardUrl,
+  ofoxMarketingUrl,
+  ofoxWalletUrl,
+} from "@/lib/ofoxUrls";
 import {
   TOOL_META,
   TOOL_ORDER,
@@ -114,6 +120,7 @@ export default function ConsolePage({
   boundTools,
   onBoundToolsChanged,
 }: ConsolePageProps) {
+  const { apex } = useOfoxApex();
   const [tools, setTools] = useState<BoundTool[]>([]);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
@@ -531,14 +538,16 @@ export default function ConsolePage({
                   {formatBalance(user?.balance?.balance)}
                 </div>
               </div>
-              <button
-                onClick={() =>
-                  settingsApi.openExternal("https://app.ofox.ai/billing")
-                }
-                className="rounded-lg bg-orange-500 px-4 py-1.5 text-[13px] font-medium text-white hover:bg-orange-600"
-              >
-                充值
-              </button>
+              {isOfoxBillingManager(user) && (
+                <button
+                  onClick={() =>
+                    settingsApi.openExternal(ofoxWalletUrl(apex))
+                  }
+                  className="rounded-lg bg-orange-500 px-4 py-1.5 text-[13px] font-medium text-white hover:bg-orange-600"
+                >
+                  充值
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -714,14 +723,14 @@ export default function ConsolePage({
         <div className="flex items-center gap-4">
           <button
             onClick={() =>
-              settingsApi.openExternal("https://app.ofox.ai/dashboard")
+              settingsApi.openExternal(ofoxDashboardUrl(apex))
             }
             className="text-[12px] text-orange-500 hover:text-orange-600 hover:underline"
           >
             查看详细用量 ↗
           </button>
           <button
-            onClick={() => settingsApi.openExternal("https://ofox.ai")}
+            onClick={() => settingsApi.openExternal(ofoxMarketingUrl(apex))}
             className="text-[12px] text-orange-500 hover:text-orange-600 hover:underline"
           >
             Ofox 网站 ↗

@@ -15,6 +15,7 @@ import {
 import { settingsApi } from "@/lib/api";
 import { ofoxLogout } from "@/lib/api/ofoxAuth";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
+import { OfoxApexSwitch } from "@/components/OfoxApexSwitch";
 import { getCurrentVersion } from "@/lib/updater";
 import type { Settings } from "@/types";
 
@@ -396,6 +397,20 @@ export default function OfoxSettingsDialog({
             </div>
           </SectionCard>
 
+          {/* ─── 区域 ─────────────────────────────────────────────────── */}
+          {/* 与"账户"分卡：账户卡是身份信息（你是谁），区域卡是平台连接点
+              （你连到哪个域）。混在一起会让 logout 与 apex 切换的语义模糊。
+              切换时 `OfoxApexSwitch` 内部弹确认 + 后端原子完成
+              logout/reseed/emit reauth-requested，MainApp 自动跳 LoginPage。 */}
+          <SectionCard title="区域">
+            <Row
+              label="访问区域"
+              hint="国内用户请选 ofox.io，海外用户选 ofox.ai"
+              control={<OfoxApexSwitch />}
+              isLast
+            />
+          </SectionCard>
+
           {/* ─── 偏好 ─────────────────────────────────────────────────── */}
           <SectionCard title="偏好">
             {/* Auto-launch */}
@@ -516,10 +531,19 @@ interface SectionCardProps {
 }
 
 /** Grouped card with a muted header strip, mirroring the mock's "账户 / 偏好 /
- *  关于" group containers. */
+ *  关于" group containers.
+ *
+ *  `shrink-0` is load-bearing: the parent body is `flex flex-col` with a
+ *  `max-h-[70vh] overflow-y-auto`. By default, flex items have
+ *  `flex-shrink: 1`, so when total content height approaches the cap, flex
+ *  shrinks each card proportionally instead of letting overflow take over —
+ *  resulting in every card visibly compressed and content clipped (the user
+ *  reported "卡片都被压扁、内容被裁剪"). Pinning `shrink-0` forces each card
+ *  to keep its natural height; the body container then scrolls as designed.
+ *  This is the standard fix for `max-h + overflow + flex-col` in Tailwind. */
 function SectionCard({ title, children }: SectionCardProps) {
   return (
-    <section className="overflow-hidden rounded-xl border border-border bg-background">
+    <section className="shrink-0 overflow-hidden rounded-xl border border-border bg-background">
       <div className="border-b border-border bg-muted/40 px-4 py-2">
         <h3 className="text-[12px] font-medium uppercase tracking-wider text-muted-foreground">
           {title}

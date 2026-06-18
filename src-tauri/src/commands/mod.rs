@@ -16,6 +16,7 @@ mod mcp;
 mod misc;
 mod model_fetch;
 pub(crate) mod ofox_auth;
+pub(crate) mod ofox_apex;
 mod omo;
 mod openclaw;
 mod plugin;

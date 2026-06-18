@@ -27,7 +27,7 @@ use tokio::sync::RwLock;
 use crate::app_config::AppType;
 use crate::commands::ofox_auth::OfoxAuthState;
 use crate::ofox_auth::OfoxAuthManager;
-use crate::ofox_endpoints::OFOX_GATEWAY_BASE_URL;
+use crate::ofox_apex::gateway_base;
 use crate::store::AppState;
 
 // Gateway base URL for the connectivity probe. Mirrors the dev/prod toggle in
@@ -520,7 +520,7 @@ pub(crate) async fn ofox_ping_model_internal(
             // Auth header is x-api-key per Anthropic's spec — Bearer also
             // works on the OfoxAI gateway today, but x-api-key is what the
             // claude provider actually injects (see proxy/providers/claude.rs).
-            let url = format!("{OFOX_GATEWAY_BASE_URL}/anthropic/v1/messages");
+            let url = format!("{}/anthropic/v1/messages", gateway_base());
             let body = serde_json::json!({
                 "model": model,
                 "max_tokens": 1,
@@ -537,7 +537,7 @@ pub(crate) async fn ofox_ping_model_internal(
         }
         AppType::Codex | AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => {
             // OpenAI-compatible: POST /v1/chat/completions, max_tokens=1.
-            let url = format!("{OFOX_GATEWAY_BASE_URL}/v1/chat/completions");
+            let url = format!("{}/v1/chat/completions", gateway_base());
             let body = serde_json::json!({
                 "model": model,
                 "max_tokens": 1,
@@ -556,7 +556,8 @@ pub(crate) async fn ofox_ping_model_internal(
             // Auth header is x-goog-api-key (matches what the proxy's
             // gemini adapter injects; see proxy/providers/gemini.rs:248).
             let url = format!(
-                "{OFOX_GATEWAY_BASE_URL}/gemini/v1beta/models/{}:generateContent",
+                "{}/gemini/v1beta/models/{}:generateContent",
+                gateway_base(),
                 model
             );
             let body = serde_json::json!({

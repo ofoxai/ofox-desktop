@@ -310,6 +310,20 @@ pub struct AppSettings {
     /// 用于后台健康检查循环知道该探测哪些工具
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_tools: Option<Vec<String>>,
+
+    // ===== OFox 区域（apex）=====
+    /// OFox 访问域名 apex："ofox.ai"（海外）或 "ofox.io"（国内镜像）。
+    /// 影响所有 OAuth、LLM 网关、外链、ofox-* 工具的 base_url。
+    /// `None` 表示尚未通过 ip-api 探测过——`ofoxApexResolved == Some(true)` 后该值
+    /// 会被钉死，再次启动不会重新探测。Dev 模式下读这个值不会影响实际请求 URL
+    /// （所有 URL 都打 localhost），仅 release build 才生效。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ofox_apex: Option<String>,
+    /// 是否已完成首次区域探测。`Some(true)` 表示 `ofox_apex` 是当前权威值，
+    /// 启动钩子不会再次 probe ip-api；用户在 UI 里手动切换也写 `Some(true)`。
+    /// 删除 settings.json / 显式置 `None` 会让下一次启动重新探测。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ofox_apex_resolved: Option<bool>,
 }
 
 fn default_show_in_tray() -> bool {
@@ -365,6 +379,8 @@ impl Default for AppSettings {
             low_balance_last_alert_threshold: None,
             low_balance_last_alert_at: None,
             bound_tools: None,
+            ofox_apex: None,
+            ofox_apex_resolved: None,
         }
     }
 }
@@ -434,6 +450,21 @@ impl AppSettings {
             if sync.is_empty() {
                 self.webdav_sync = None;
             }
+        }
+
+        // OFox apex 白名单：只接受 "ofox.ai" / "ofox.io"，其他值（hand-edit、
+        // 旧字段、笔误）一律置 None 让启动钩子重新探测。这避免一个被破坏的
+        // settings.json 把 URL 拼成 `https://app.ofox.evil.com`。
+        self.ofox_apex = self
+            .ofox_apex
+            .as_ref()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| s == "ofox.ai" || s == "ofox.io");
+        // 一致性：apex 被清掉，resolved 也跟着清，否则启动会"已 resolved 但
+        // apex 是 None"卡住——`current_apex()` 会 fallback `ofox.ai` 但不再触发
+        // ip-api 探测。
+        if self.ofox_apex.is_none() {
+            self.ofox_apex_resolved = None;
         }
     }
 
@@ -554,7 +585,10 @@ pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
     Ok(())
 }
 
-fn mutate_settings<F>(mutator: F) -> Result<(), AppError>
+/// Read-modify-write helper for in-process callers (ip-api 探测、apex 切换命令、
+/// 工具健康检查等）。比 `update_settings` 安全：不会替换无关字段，只把 mutator
+/// 的修改持久化。
+pub fn mutate_settings<F>(mutator: F) -> Result<(), AppError>
 where
     F: FnOnce(&mut AppSettings),
 {

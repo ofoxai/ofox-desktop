@@ -64,10 +64,20 @@ fn is_chat_model(id: &str) -> bool {
     true
 }
 
-/// Ofox 各协议的模型列表端点
-const OFOX_OPENAI_MODELS_URL: &str = "https://api.ofox.ai/v1/models";
-const OFOX_ANTHROPIC_MODELS_URL: &str = "https://api.ofox.ai/anthropic/v1/models";
-const OFOX_GEMINI_MODELS_URL: &str = "https://api.ofox.ai/gemini/v1beta/models";
+/// Ofox 各协议的模型列表端点。base 由 [`crate::ofox_apex::gateway_base`] 单一
+/// 开关，dev/prod、ofox.ai/ofox.io 切换都收敛到这里——避免之前几处常量分散
+/// 漏改某个 URL 导致 release build 把请求打到错误地区。
+fn ofox_openai_models_url() -> String {
+    format!("{}/v1/models", crate::ofox_apex::gateway_base())
+}
+
+fn ofox_anthropic_models_url() -> String {
+    format!("{}/anthropic/v1/models", crate::ofox_apex::gateway_base())
+}
+
+fn ofox_gemini_models_url() -> String {
+    format!("{}/gemini/v1beta/models", crate::ofox_apex::gateway_base())
+}
 
 /// 从 Ofox 获取可用模型列表（公开接口，无需 API Key）
 ///
@@ -81,13 +91,13 @@ pub async fn fetch_ofox_models(protocol: &str) -> Result<Vec<FetchedModel>, Stri
     match protocol {
         "openai" | "anthropic" => {
             let url = if protocol == "openai" {
-                OFOX_OPENAI_MODELS_URL
+                ofox_openai_models_url()
             } else {
-                OFOX_ANTHROPIC_MODELS_URL
+                ofox_anthropic_models_url()
             };
 
             let response = client
-                .get(url)
+                .get(&url)
                 .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
                 .send()
                 .await
@@ -120,7 +130,7 @@ pub async fn fetch_ofox_models(protocol: &str) -> Result<Vec<FetchedModel>, Stri
         }
         "gemini" => {
             let response = client
-                .get(OFOX_GEMINI_MODELS_URL)
+                .get(ofox_gemini_models_url())
                 .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
                 .send()
                 .await
