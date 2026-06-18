@@ -741,11 +741,12 @@ export default function ConsolePage({
             Ofox
           </span>
         </div>
-        {/* Apex (region) switcher — 浮在右上角，和 LoginPage 头部保持同样的
-            位置/尺寸。`data-tauri-drag-region={false}` 阻止 select 的点击被
-            window-drag 吞掉。已登录态切换会触发 ConfirmDialog → 重新登录流程。 */}
+        {/* Apex (region) switcher — 浮在右上角，与下方内容区 (px-5) 右
+            对齐；垂直方向居中 (`top-1.5` = (40-28)/2 = 6px)，上下边距相等。
+            `data-tauri-drag-region={false}` 阻止 select 的点击被 window-drag
+            吞掉。已登录态切换会触发 ConfirmDialog → 重新登录流程。 */}
         <div
-          className="absolute right-3 top-2 z-10"
+          className="absolute right-5 top-1.5 z-10"
           data-tauri-drag-region="false"
         >
           <OfoxApexSwitch triggerClassName="h-7 w-[150px] text-[12px]" />
