@@ -47,6 +47,18 @@ export const usageApi = {
   },
 
   // Proxy usage statistics methods
+  /**
+   * Aggregate usage stats over a time window.
+   *
+   * Scope = everything in cc-switch's `proxy_request_logs` table:
+   * proxy real-time intercepts AND parsed offline session logs from
+   * claude / codex / gemini. Tools cc-switch never saw (e.g. OpenCode
+   * with proxy turned off, direct vendor traffic) physically aren't in
+   * the table and naturally return 0 — no SQL filter needed.
+   *
+   * Numbers here are advisory; surface them with a "供参考" tooltip and
+   * point users at the OFox dashboard for the authoritative billing view.
+   */
   getUsageSummary: async (
     startDate?: number,
     endDate?: number,

@@ -6,6 +6,10 @@ use crate::store::AppState;
 use tauri::State;
 
 /// 获取使用量汇总
+///
+/// 范围 = cc-switch 数据库 `proxy_request_logs` 全部数据，包括 proxy 实拦
+/// 与三种离线日志（claude/codex/gemini session）。详见
+/// [`crate::services::usage_stats::Database::get_usage_summary`] 注释。
 #[tauri::command]
 pub fn get_usage_summary(
     state: State<'_, AppState>,
@@ -187,10 +191,20 @@ pub fn delete_model_pricing(state: State<'_, AppState>, model_id: String) -> Res
 }
 
 /// 手动触发会话日志同步
+///
+/// 兼带 Ofox pricing 强制刷新（无 cooldown）—— 用户点「刷新」就是想看到
+/// 最新的成本估算，包括新上线模型的 pricing。pricing 失败不阻塞日志同步。
 #[tauri::command]
-pub fn sync_session_usage(
+pub async fn sync_session_usage(
     state: State<'_, AppState>,
 ) -> Result<crate::services::session_usage::SessionSyncResult, AppError> {
+    // Pricing 刷新放在 session 解析之前：session_usage_* 在写入每条
+    // proxy_request_logs 时按 model 查 model_pricing 算费用，先把表更新
+    // 到最新版本，刚刚还没收录的模型这次同步即可正确计费。
+    if let Err(e) = crate::services::pricing_sync::sync_pricing(&state.db).await {
+        log::warn!("Pricing sync during manual refresh failed: {e}");
+    }
+
     // 同步 Claude 会话日志
     let mut result = crate::services::session_usage::sync_claude_session_logs(&state.db)?;
 

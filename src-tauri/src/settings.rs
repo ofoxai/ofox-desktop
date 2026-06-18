@@ -306,6 +306,11 @@ pub struct AppSettings {
     /// 上次告警时间戳（unix-ms）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub low_balance_last_alert_at: Option<i64>,
+    /// 上次成功同步 Ofox 模型 pricing 的时间戳（unix 秒）。
+    /// 由 [`crate::services::pricing_sync`] 写入；启动时 / 24h 维护 timer
+    /// 通过 `sync_pricing_if_needed` 读取以做 cooldown 门控。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_pricing_sync_at: Option<i64>,
     /// 已绑定工具列表（镜像自前端 localStorage `BOUND_TOOLS_STORAGE_KEY`）
     /// 用于后台健康检查循环知道该探测哪些工具
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -378,6 +383,7 @@ impl Default for AppSettings {
             health_check_interval: None,
             low_balance_last_alert_threshold: None,
             low_balance_last_alert_at: None,
+            last_pricing_sync_at: None,
             bound_tools: None,
             ofox_apex: None,
             ofox_apex_resolved: None,

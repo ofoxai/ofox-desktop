@@ -1131,6 +1131,15 @@ pub fn run() {
                         if let Err(e) = db_for_timer.periodic_backup_if_needed() {
                             log::warn!("Periodic maintenance timer failed: {e}");
                         }
+                        // Refresh Ofox pricing once a day. fail-open: stale prices
+                        // beat zeros, never DELETE rows on network failure.
+                        if let Err(e) = crate::services::pricing_sync::sync_pricing_if_needed(
+                            &db_for_timer,
+                        )
+                        .await
+                        {
+                            log::warn!("Pricing sync periodic tick failed: {e}");
+                        }
                     }
                 });
 
@@ -1138,6 +1147,18 @@ pub fn run() {
                 let db_for_session_sync = state.db.clone();
                 tauri::async_runtime::spawn(async move {
                     const SESSION_SYNC_INTERVAL_SECS: u64 = 60;
+
+                    // Pricing sync 必须先于 session 解析跑：session_usage_*
+                    // 在写入每条 proxy_request_logs 时按 model 查 model_pricing
+                    // 算 total_cost_usd。先 refresh 一次 pricing，新模型才不会
+                    // 落到本月 0 美元的洞里。cooldown 24h 门控避免重启刷屏。
+                    if let Err(e) = crate::services::pricing_sync::sync_pricing_if_needed(
+                        &db_for_session_sync,
+                    )
+                    .await
+                    {
+                        log::warn!("Pricing sync initial tick failed: {e}");
+                    }
 
                     // 首次同步
                     if let Err(e) =

@@ -222,6 +222,22 @@ fn local_day_start_rfc3339(day: NaiveDate) -> String {
 
 impl Database {
     /// 获取使用量汇总
+    ///
+    /// 统计范围 = cc-switch 数据库 `proxy_request_logs` 全部数据，包括：
+    /// - `data_source='proxy'`：cc-switch 本地代理实时拦截到的请求
+    /// - `data_source='session_log'`：claude `~/.claude/projects/*` 离线日志
+    /// - `data_source='codex_session'`：codex `~/.codex/sessions/*` 离线日志
+    /// - `data_source='gemini_session'`：gemini `~/.gemini/tmp/*` 离线日志
+    ///
+    /// 也就是「cc-switch 看到的全部数据」。OpenCode 这种没接管的工具**物理上**
+    /// 就不会出现在这张表里（既不被代理拦截，也没解析它的离线日志），所以即便
+    /// 不加 data_source 过滤，OpenCode 仍然返回 0 ——「看不到」是数据本身的属性，
+    /// 不需要 SQL 层另做。
+    ///
+    /// 之前一版尝试只算 `data_source='proxy'`（严格语义），但实测发现 codex 的
+    /// SSE 200 响应有概率不写 proxy 行（响应处理路径有 bug，待修），导致严格模式
+    /// 下用户看到的数字大幅偏低。结合 ofox 后台才有真实计费的事实，前端只需把
+    /// 这里的数字标注「供参考」即可。
     pub fn get_usage_summary(
         &self,
         start_date: Option<i64>,

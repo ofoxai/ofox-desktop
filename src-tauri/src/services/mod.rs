@@ -7,6 +7,7 @@ pub mod low_balance;
 pub mod mcp;
 pub mod model_fetch;
 pub mod omo;
+pub mod pricing_sync;
 pub mod prompt;
 pub mod provider;
 pub mod proxy;
