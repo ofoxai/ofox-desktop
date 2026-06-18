@@ -330,6 +330,30 @@ export interface Settings {
   // Windows: "cmd" | "powershell" | "wt"
   // Linux: "gnome-terminal" | "konsole" | "xfce4-terminal" | "alacritty" | "kitty" | "ghostty"
   preferredTerminal?: string;
+
+  // ===== OFox 偏好（低余额提醒 / 工具健康检查）=====
+  // 启用低余额提醒（默认 true）。低于阈值时弹 OS 系统通知。
+  lowBalanceEnabled?: boolean;
+  // 低余额阈值（USD，默认 10.0）
+  lowBalanceThresholdUsd?: number;
+  // 工具健康检查间隔："off" | "1h" | "6h" | "24h"（默认 "6h"）
+  healthCheckInterval?: "off" | "1h" | "6h" | "24h";
+  // 上次告警时使用的阈值（用于检测阈值变更，前端不应主动写）
+  lowBalanceLastAlertThreshold?: number;
+  // 上次告警时间戳（unix-ms，前端不应主动写）
+  lowBalanceLastAlertAt?: number;
+  // 已绑定工具列表（镜像自前端 localStorage `BOUND_TOOLS_STORAGE_KEY`，
+  // 后端循环读它来知道该探测哪些工具）
+  boundTools?: string[];
+
+  // OFox 区域域名："ofox.ai"（海外）或 "ofox.io"（国内镜像）。
+  // 影响所有 OAuth、LLM 网关、外链、ofox-* 工具的 base_url。
+  // 前端不应直接修改此字段——切换走 `invoke('ofox_set_apex', { nextApex })`，
+  // 后端会原子地完成清 token + reseed providers + 通知 UI 三件事。
+  ofoxApex?: "ofox.ai" | "ofox.io" | null;
+  // 是否完成首次 ip-api 探测。`true` 后启动钩子不会再次 probe，用户切换
+  // apex 也写 `true`。前端通常不读这个字段，仅作 settings 同步用。
+  ofoxApexResolved?: boolean | null;
 }
 
 export interface SessionMeta {

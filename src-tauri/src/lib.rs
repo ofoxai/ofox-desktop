@@ -19,6 +19,7 @@ mod linux_fix;
 mod mcp;
 mod ofox_auth;
 mod ofox_auth_sync;
+mod ofox_apex;
 mod ofox_endpoints;
 mod openclaw_config;
 mod opencode_config;
@@ -281,6 +282,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -887,6 +889,23 @@ pub fn run() {
                     manager.attach_app_handle(attach_handle).await;
                 });
 
+                // First-launch apex resolution: hit `ip-api.com/json` once and
+                // pin the result (CN → ofox.io, else → ofox.ai) into
+                // `settings.json::ofoxApex`. Subsequent launches see
+                // `ofoxApexResolved == true` and skip the probe.
+                //
+                // Spawned concurrently so window paint / login flow are not
+                // blocked by a slow ip-api response. While the probe runs,
+                // `current_apex()` falls back to "ofox.ai" — fine for `dev`
+                // (everything is localhost anyway) and acceptable for first
+                // launch in CN (LoginPage will refresh after the
+                // `ofox-apex-changed` event lands, ~ a few seconds later).
+                let apex_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let client = crate::proxy::http_client::get();
+                    crate::ofox_apex::ensure_apex_resolved(&apex_handle, &client).await;
+                });
+
                 // Periodic silent refresh: tick every 30 min and, if the
                 // session is Active and the access token is near expiry,
                 // refresh it. With OFox's default 1 h token TTL and a 60 s
@@ -1188,6 +1207,113 @@ pub fn run() {
                         }
                     });
                 }
+            }
+
+            // ─── OFox 后台循环：低余额提醒 + 工具健康检查 ─────────────────
+            //
+            // 两个独立的 spawn，都在 OFox auth 初始化后运行，与 token 静默
+            // 刷新循环同节奏（30 min 桶）。设计要点见 services/low_balance.rs
+            // 与 services/tool_health.rs 的模块文档。
+            //
+            // 关闭主窗口（仅托盘）不影响这些循环，因为 close handler 走
+            // window.hide() + api.prevent_close()，进程仍在运行。
+            {
+                use commands::ofox_auth::OfoxAuthState;
+                use tauri::Listener;
+
+                // ── 低余额循环（固定 30 分钟）──────────────────────────────
+                let lb_app = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1800));
+                    // 跳过首次立即触发（mount 时 UI 已经走 refresh_user_info）
+                    ticker.tick().await;
+                    loop {
+                        ticker.tick().await;
+                        let ofox_state = lb_app.state::<OfoxAuthState>();
+                        let now_ms = chrono::Utc::now().timestamp_millis();
+                        let _ = crate::services::low_balance::evaluate_and_notify(
+                            &lb_app,
+                            &ofox_state.0,
+                            now_ms,
+                        )
+                        .await;
+                    }
+                });
+
+                // ── 工具健康检查循环（动态间隔，"off" 时阻塞）────────────
+                //
+                // 用 Notify 让前端 emit('ofox-prefs-updated') 时唤醒循环，
+                // 这样间隔从 6h → 1h 不必等下一次原始 tick。
+                let wake = std::sync::Arc::new(tokio::sync::Notify::new());
+                let wake_listener = wake.clone();
+                app.handle().listen("ofox-prefs-updated", move |_| {
+                    wake_listener.notify_one();
+                });
+
+                let hc_app = app.handle().clone();
+                let hc_wake = wake.clone();
+                tauri::async_runtime::spawn(async move {
+                    // 启动时延迟 30 秒再跑首轮，避免与启动期其他网络请求挤在一起
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    loop {
+                        let interval_str = crate::settings::health_check_interval();
+                        let dur = crate::services::tool_health::parse_interval(&interval_str);
+                        let bound_tools = crate::settings::get_bound_tools();
+                        let app_state = hc_app.state::<AppState>();
+                        let ofox_state = hc_app.state::<OfoxAuthState>();
+
+                        // 仅在 auth Active 时执行；否则等下一轮（或 wake）
+                        let auth_ok = {
+                            let manager = ofox_state.0.read().await;
+                            manager.is_authenticated()
+                        };
+                        if auth_ok && dur.is_some() {
+                            let now_ms = chrono::Utc::now().timestamp_millis();
+                            let _ = crate::services::tool_health::run_health_check_round(
+                                &hc_app,
+                                &app_state,
+                                &ofox_state.0,
+                                &app_state.tool_health_cache,
+                                &bound_tools,
+                                now_ms,
+                            )
+                            .await;
+                        }
+
+                        // 决定睡眠：有效间隔则定时；"off" 阻塞等 Notify
+                        match dur {
+                            Some(d) => {
+                                tokio::select! {
+                                    _ = tokio::time::sleep(d) => {}
+                                    _ = hc_wake.notified() => {
+                                        log::info!("[tool_health] woken by ofox-prefs-updated");
+                                    }
+                                }
+                            }
+                            None => {
+                                hc_wake.notified().await;
+                                log::info!("[tool_health] interval was off, woken by prefs-updated");
+                            }
+                        }
+                    }
+                });
+
+                // 用户登出时清空健康检查 cache（设置已存的探测结果会过时）
+                let logout_app = app.handle().clone();
+                app.handle().listen("ofox-auth-expired", move |_| {
+                    let app = logout_app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let app_state = app.state::<AppState>();
+                        app_state.tool_health_cache.clear().await;
+                        let _ = app.emit(
+                            crate::services::tool_health::TOOL_HEALTH_UPDATED_EVENT,
+                            &std::collections::HashMap::<
+                                String,
+                                crate::services::tool_health::ToolHealthSnapshot,
+                            >::new(),
+                        );
+                    });
+                });
             }
 
             // 静默启动：根据设置决定是否显示主窗口
@@ -1532,10 +1658,15 @@ pub fn run() {
             commands::ofox_auth::ofox_request_reauth,
             commands::ofox_auth::ofox_bind_tool,
             commands::ofox_auth::ofox_unbind_tool,
+            // Ofox apex (region) switching
+            commands::ofox_apex::ofox_get_apex,
+            commands::ofox_apex::ofox_set_apex,
             commands::manage_tool::get_tool_config_file_path,
             commands::manage_tool::get_active_ofox_model,
             commands::manage_tool::set_active_ofox_model,
             commands::manage_tool::ofox_ping_model,
+            commands::get_tool_health_snapshot,
+            commands::trigger_tool_health_check_now,
         ]);
 
     let app = builder

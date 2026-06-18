@@ -4,6 +4,8 @@ import { FormLabel } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { useOfoxApex } from "@/hooks/useOfoxApex";
+import { ofoxApiBase } from "@/lib/ofoxUrls";
 import {
   Select,
   SelectContent,
@@ -100,6 +102,7 @@ export function OpenClawFormFields({
   );
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
+  const { apex } = useOfoxApex();
 
   // oFox: api → protocol / endpoint 映射
   const ofoxProtocol: OfoxProtocol | null = useMemo(() => {
@@ -119,12 +122,12 @@ export function OpenClawFormFields({
 
   const ofoxEndpoint = useMemo(() => {
     switch (ofoxProtocol) {
-      case "openai": return "https://api.ofox.ai/v1";
-      case "anthropic": return "https://api.ofox.ai/anthropic";
-      case "gemini": return "https://api.ofox.ai/gemini";
+      case "openai": return `${ofoxApiBase(apex)}/v1`;
+      case "anthropic": return `${ofoxApiBase(apex)}/anthropic`;
+      case "gemini": return `${ofoxApiBase(apex)}/gemini`;
       default: return "";
     }
-  }, [ofoxProtocol]);
+  }, [ofoxProtocol, apex]);
 
   // oFox 协议变化时自动更新端点
   useEffect(() => {

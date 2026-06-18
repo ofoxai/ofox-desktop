@@ -1,11 +1,17 @@
 import { useEffect, useState, useCallback } from "react";
-import { Settings, RefreshCw } from "lucide-react";
+import { Settings, RefreshCw, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
 import { settingsApi } from "@/lib/api";
 import { proxyApi } from "@/lib/api/proxy";
 import { usageApi } from "@/lib/api/usage";
-import { ofoxGetUserInfo, type OfoxUserInfo } from "@/lib/api/ofoxAuth";
+import { ofoxGetUserInfo, isOfoxBillingManager, type OfoxUserInfo } from "@/lib/api/ofoxAuth";
+import { useOfoxApex } from "@/hooks/useOfoxApex";
+import {
+  ofoxDashboardUrl,
+  ofoxMarketingUrl,
+  ofoxWalletUrl,
+} from "@/lib/ofoxUrls";
 import {
   TOOL_META,
   TOOL_ORDER,
@@ -21,6 +27,8 @@ import {
 import AddToolsDialog from "./AddToolsDialog";
 import ManageToolDialog, { type ManageToolTarget } from "./ManageToolDialog";
 import OfoxSettingsDialog from "./OfoxSettingsDialog";
+import { useToolHealth } from "@/hooks/useToolHealth";
+import type { ToolHealthSnapshot } from "@/lib/api/toolHealth";
 import type { UsageSummary } from "@/types/usage";
 
 interface ToolInfo {
@@ -68,6 +76,20 @@ function formatTokens(input: number, output: number): string {
 }
 
 /**
+ * True when the user object came back from the backend with at least one
+ * identity field populated. False for `null` AND for the all-null
+ * placeholder the backend returns when `/openapi/me` was unreachable
+ * during the login flow (see `ofox_auth.rs::poll_for_token`).
+ *
+ * We treat email or name presence as the signal — `org_id` alone wouldn't
+ * give the header anything useful to render.
+ */
+function isMeaningfulUser(u: OfoxUserInfo | null | undefined): boolean {
+  if (!u) return false;
+  return Boolean(u.email || u.name);
+}
+
+/**
  * Per-tool month-to-date token total for the right-side cell of "绑定的工具".
  *
  * Sums all four token buckets (input + output + cache_creation + cache_read).
@@ -98,6 +120,7 @@ export default function ConsolePage({
   boundTools,
   onBoundToolsChanged,
 }: ConsolePageProps) {
+  const { apex } = useOfoxApex();
   const [tools, setTools] = useState<BoundTool[]>([]);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
@@ -106,9 +129,26 @@ export default function ConsolePage({
   // mid-edit (e.g. monthly token refetch).
   const [manageTool, setManageTool] = useState<ManageToolTarget | null>(null);
   const [user, setUser] = useState<OfoxUserInfo | null>(null);
+  // True while the post-mount retry loop is actively probing because the
+  // initial /openapi/me came back empty (backend's `poll_for_token` now
+  // returns a placeholder user when the API is unreachable, instead of
+  // hard-failing — see `ofox_auth.rs`). The loop tries 3 times with
+  // 1s/3s/8s backoff (total ~12s) so the user doesn't sit through the
+  // earlier 22s window before seeing a definitive failure state.
+  const [userRetrying, setUserRetrying] = useState(false);
+  // Which retry attempt we're currently on, for the "重试中 (1/3)" hint.
+  // 0 means "not retrying"; 1..3 maps to the three backoff tiers.
+  const [userRetryAttempt, setUserRetryAttempt] = useState(0);
+  // Set to true after the retry loop exhausts without ever seeing a real
+  // user. Surfaces a manual "重新加载" link in the header so the user has
+  // an explicit recovery path when the OFox backend was unreachable at
+  // login time but came back later.
+  const [userLoadFailed, setUserLoadFailed] = useState(false);
   const [loading, setLoading] = useState(true);
   /** Standalone spinner for the manual balance refresh button. */
   const [balanceRefreshing, setBalanceRefreshing] = useState(false);
+  /** Standalone spinner for the manual "绑定的工具" usage refresh button. */
+  const [usageRefreshing, setUsageRefreshing] = useState(false);
 
   /**
    * Refetch *only* the user/wallet snapshot. Decoupled from `loadData` so the
@@ -143,6 +183,11 @@ export default function ConsolePage({
   const [todayRequests, setTodayRequests] = useState("0");
   const [todayTokens, setTodayTokens] = useState("0");
   const [monthCost, setMonthCost] = useState("$0.00");
+
+  // Tool health pills — backend probes each bound tool every 1h/6h/24h
+  // (configurable in settings) and emits `ofox-tool-health-updated`. We
+  // render a colored dot + text in the tool card status row.
+  const { snapshot: healthSnapshot } = useToolHealth();
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -275,6 +320,18 @@ export default function ConsolePage({
 
       if (userInfo) setUser(userInfo);
 
+      // The backend's `poll_for_token` now returns a placeholder user
+      // (all-null fields) when /openapi/me was unreachable at login time
+      // — that prevents the LoginPage spinner trap, but it leaves the
+      // Console showing "用户" with an empty email until the user takes
+      // some action. Detect the placeholder and silently retry a few
+      // times with backoff before giving up. If the backend was just
+      // having a temporary blip (which is the common case), the user
+      // never sees the empty state at all.
+      if (!isMeaningfulUser(userInfo)) {
+        void retryUserInfoWithBackoff();
+      }
+
       if (todaySummary) {
         setTodayCost(formatCost(todaySummary.totalCost));
         setTodayRequests(String(todaySummary.totalRequests));
@@ -290,6 +347,78 @@ export default function ConsolePage({
       }
     })();
   }, [boundTools]);
+
+  /**
+   * Retry `/openapi/me` up to 3 times with 2s/5s/15s backoff. Bails as soon
+   * as a meaningful user comes back (anything with email or name set).
+   *
+   * Sets `userRetrying` while a probe is in flight so the header can show
+   * a "正在加载用户信息…" hint instead of the empty-state ghost. After all
+   * 3 attempts return placeholders, sets `userLoadFailed` so the user
+   * gets an explicit "重新加载" button rather than living with the silent
+   * empty card.
+   *
+   * Safe to call multiple times — caller already guarded with the
+   * isMeaningfulUser check, and the backoff is bounded.
+   */
+  const retryUserInfoWithBackoff = useCallback(async () => {
+    setUserLoadFailed(false);
+    setUserRetrying(true);
+    setUserRetryAttempt(0);
+    // 1s/3s/8s — total ~12s. Picked over the original 2s/5s/15s because
+    // 22s with no UI progress feels broken; 12s is short enough that the
+    // user is still expecting a result and long enough that genuine
+    // backend recovery (a few hundred ms after a glitch) lands inside.
+    const delays = [1000, 3000, 8000];
+    try {
+      for (let i = 0; i < delays.length; i++) {
+        setUserRetryAttempt(i + 1);
+        await new Promise((r) => setTimeout(r, delays[i]));
+        const fresh = await ofoxGetUserInfo().catch(() => null);
+        if (isMeaningfulUser(fresh)) {
+          setUser(fresh);
+          return;
+        }
+      }
+      setUserLoadFailed(true);
+    } finally {
+      setUserRetrying(false);
+      setUserRetryAttempt(0);
+    }
+  }, []);
+
+  /**
+   * Force-refresh the bound-tools row stats.
+   *
+   * Two steps:
+   *   1) Sync session usage logs from disk (~/.claude/projects, ~/.codex/sessions,
+   *      ~/.gemini/tmp/...) into proxy_request_logs. Normally this runs every
+   *      60s in the background (lib.rs:1147), but the user clicking refresh
+   *      shouldn't have to wait that long after sending a CLI message.
+   *   2) Re-run loadData(): re-fetches takeover status, tool versions, and
+   *      per-tool monthly token sums. This is what actually re-paints the row.
+   *
+   * Decoupled from loadData() because the sync step is the slow path
+   * (filesystem walk) and we want a separate spinner so the existing rows
+   * stay visible mid-refresh instead of bouncing to the loading skeleton.
+   */
+  const refreshUsage = useCallback(async () => {
+    setUsageRefreshing(true);
+    try {
+      const result = await usageApi.syncSessionUsage();
+      await loadData();
+      if (result.imported > 0) {
+        toast.success(`统计已刷新 · 同步 ${result.imported} 条新会话`);
+      } else {
+        toast.success("统计已刷新");
+      }
+    } catch (e) {
+      console.error("[ConsolePage] usage refresh failed", e);
+      toast.error(`刷新失败：${String(e)}`);
+    } finally {
+      setUsageRefreshing(false);
+    }
+  }, [loadData]);
 
   useEffect(() => {
     // `loadData` fires both the local stage and the background stage-2
@@ -332,9 +461,18 @@ export default function ConsolePage({
 
   return (
     <div className="flex h-screen w-full flex-col bg-gradient-to-br from-orange-50/50 via-white to-orange-50/30 dark:from-neutral-950 dark:via-neutral-900 dark:to-neutral-950">
-      {/* Title bar drag region */}
-      <div className="h-7 shrink-0" data-tauri-drag-region="true">
-        <div className="flex h-full items-center justify-center">
+      {/* Title bar drag region — full 40px so it covers the macOS traffic-light
+          row (titleBarStyle: "Overlay") with comfortable margin on either side.
+          The previous 28px (h-7) was tall enough technically but felt fiddly:
+          users would aim for the visible "Ofox" text and miss. */}
+      <div
+        className="h-10 shrink-0"
+        data-tauri-drag-region="true"
+      >
+        <div
+          className="flex h-full items-center justify-center"
+          data-tauri-drag-region="true"
+        >
           <span className="text-[13px] font-medium text-muted-foreground">
             Ofox
           </span>
@@ -352,10 +490,30 @@ export default function ConsolePage({
               </div>
               <div>
                 <div className="text-[14px] font-semibold text-foreground">
-                  {user?.name ?? "用户"}
+                  {user?.name ?? (userRetrying ? "加载中…" : "用户")}
                 </div>
-                <div className="text-[12px] text-muted-foreground">
-                  {user?.email ?? ""}
+                <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+                  {user?.email ? (
+                    <span className="truncate">{user.email}</span>
+                  ) : userRetrying ? (
+                    <span className="inline-flex items-center gap-1">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      正在加载用户信息
+                      {userRetryAttempt > 0
+                        ? `（${userRetryAttempt}/3）`
+                        : "…"}
+                    </span>
+                  ) : userLoadFailed ? (
+                    <button
+                      type="button"
+                      onClick={retryUserInfoWithBackoff}
+                      className="inline-flex items-center gap-1 text-orange-500 hover:text-orange-600 hover:underline"
+                      title="无法加载用户信息，点击重试"
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                      无法加载用户信息，点击重试
+                    </button>
+                  ) : null}
                 </div>
               </div>
             </div>
@@ -380,14 +538,16 @@ export default function ConsolePage({
                   {formatBalance(user?.balance?.balance)}
                 </div>
               </div>
-              <button
-                onClick={() =>
-                  settingsApi.openExternal("https://app.ofox.ai/billing")
-                }
-                className="rounded-lg bg-orange-500 px-4 py-1.5 text-[13px] font-medium text-white hover:bg-orange-600"
-              >
-                充值
-              </button>
+              {isOfoxBillingManager(user) && (
+                <button
+                  onClick={() =>
+                    settingsApi.openExternal(ofoxWalletUrl(apex))
+                  }
+                  className="rounded-lg bg-orange-500 px-4 py-1.5 text-[13px] font-medium text-white hover:bg-orange-600"
+                >
+                  充值
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -432,6 +592,17 @@ export default function ConsolePage({
               )}
             </div>
             <div className="flex items-center gap-2">
+              <button
+                onClick={refreshUsage}
+                disabled={usageRefreshing}
+                title="同步本地会话日志并刷新统计"
+                className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1 text-[12px] text-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <RefreshCw
+                  className={`h-3.5 w-3.5 ${usageRefreshing ? "animate-spin" : ""}`}
+                />
+                刷新
+              </button>
               <button
                 onClick={() => setAddDialogOpen(true)}
                 className="rounded-md border border-border px-3 py-1 text-[12px] text-foreground hover:bg-accent"
@@ -488,6 +659,7 @@ export default function ConsolePage({
                         />
                         {tool.statusText}
                         {tool.version && ` · v${tool.version}`}
+                        <ToolHealthPill snapshot={healthSnapshot[tool.id]} />
                       </div>
                     </div>
                     {tool.proxySupported ? (
@@ -551,14 +723,14 @@ export default function ConsolePage({
         <div className="flex items-center gap-4">
           <button
             onClick={() =>
-              settingsApi.openExternal("https://app.ofox.ai/dashboard")
+              settingsApi.openExternal(ofoxDashboardUrl(apex))
             }
             className="text-[12px] text-orange-500 hover:text-orange-600 hover:underline"
           >
             查看详细用量 ↗
           </button>
           <button
-            onClick={() => settingsApi.openExternal("https://ofox.ai")}
+            onClick={() => settingsApi.openExternal(ofoxMarketingUrl(apex))}
             className="text-[12px] text-orange-500 hover:text-orange-600 hover:underline"
           >
             Ofox 网站 ↗
@@ -587,12 +759,20 @@ export default function ConsolePage({
           if (!open) setManageTool(null);
         }}
         onChanged={() => {
-          // Save / unbind both mutate state the row depends on (active
-          // model, takeover state, presence in boundTools). For unbind we
-          // also need MainApp to drop the tool from its bound list — it
-          // re-reads localStorage on `onBoundToolsChanged`.
+          // Single trigger: bubble up to MainApp so it re-reads the
+          // bound-tools localStorage. The new boundTools prop flows
+          // back into our `loadData` (its useCallback deps include
+          // boundTools), so the row list re-renders without us
+          // having to call loadData() here.
+          //
+          // Calling loadData() inline used to "double up" the refresh,
+          // but the manual call captured a stale `boundTools` closure
+          // — for unbind, the in-flight stale loadData would race the
+          // prop-driven one and could win, leaving the just-unbound
+          // tool stuck in the list until the user bounced through
+          // 管理→解绑 a second time. The single prop-driven path is
+          // race-free.
           onBoundToolsChanged?.();
-          loadData();
         }}
       />
 
@@ -619,7 +799,16 @@ async function getTodaySummary(appType?: string): Promise<UsageSummary | null> {
   try {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    return await usageApi.getUsageSummary(today.getTime(), undefined, appType);
+    // usage API 期望 Unix epoch *seconds*, not milliseconds —
+    // matches src/lib/usageRange.ts:21 and the SQL where-clause in
+    // src-tauri/src/services/usage_stats.rs which compares against
+    // proxy_request_logs.created_at (stored in seconds). Passing
+    // getTime() directly silently filters out every row.
+    return await usageApi.getUsageSummary(
+      Math.floor(today.getTime() / 1000),
+      undefined,
+      appType,
+    );
   } catch {
     return null;
   }
@@ -630,8 +819,85 @@ async function getMonthSummary(appType?: string): Promise<UsageSummary | null> {
     const month = new Date();
     month.setDate(1);
     month.setHours(0, 0, 0, 0);
-    return await usageApi.getUsageSummary(month.getTime(), undefined, appType);
+    // See getTodaySummary above — usage API contract is seconds.
+    return await usageApi.getUsageSummary(
+      Math.floor(month.getTime() / 1000),
+      undefined,
+      appType,
+    );
   } catch {
     return null;
   }
 }
+
+// ─── Tool-health pill ────────────────────────────────────────────────────
+//
+// Renders nothing until the backend has probed at least once. Colors:
+//   ok      → green  + "延迟 X · Y分钟前"
+//   fail    → red    + "连接失败"
+//   skipped → gray   + "未配置模型"
+// All three show full context on hover via `title`.
+
+function ToolHealthPill({
+  snapshot,
+}: {
+  snapshot: ToolHealthSnapshot | undefined;
+}) {
+  if (!snapshot) return null;
+
+  const ageMin = Math.max(
+    0,
+    Math.floor((Date.now() - snapshot.checkedAt) / 60000),
+  );
+  const ageText = ageMin === 0 ? "刚刚" : `${ageMin} 分钟前`;
+
+  if (snapshot.status === "ok") {
+    return (
+      <span
+        className="ml-1 inline-flex items-center gap-1"
+        title={`健康检查通过 (HTTP ${snapshot.statusCode ?? 200})`}
+      >
+        <span
+          aria-hidden
+          className="h-1.5 w-1.5 rounded-full bg-emerald-500"
+        />
+        <span>
+          延迟 {snapshot.latencyMs ?? 0}ms · {ageText}
+        </span>
+      </span>
+    );
+  }
+
+  if (snapshot.status === "fail") {
+    const tooltip = [
+      snapshot.statusCode ? `HTTP ${snapshot.statusCode}` : null,
+      snapshot.error ?? "请求失败",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    return (
+      <span
+        className="ml-1 inline-flex items-center gap-1 text-rose-500"
+        title={tooltip}
+      >
+        <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-rose-500" />
+        <span>连接失败</span>
+      </span>
+    );
+  }
+
+  // skipped
+  return (
+    <span
+      className="ml-1 inline-flex items-center gap-1"
+      title={snapshot.error ?? '请在"管理"中选择模型后再启用健康检查'}
+    >
+      <span
+        aria-hidden
+        className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60"
+      />
+      <span>{snapshot.error ?? "未配置模型"}</span>
+    </span>
+  );
+}
+

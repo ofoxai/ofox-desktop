@@ -40,6 +40,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ApiKeySection, ModelSelectFromApi } from "./shared";
+import { useOfoxApex } from "@/hooks/useOfoxApex";
+import { ofoxApiBase } from "@/lib/ofoxUrls";
 import {
   fetchModelsForConfig,
   fetchOfoxModels,
@@ -170,6 +172,7 @@ export function HermesFormFields({
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
 
+  const { apex } = useOfoxApex();
   // oFox: apiMode → protocol / endpoint 映射
   const ofoxProtocol: OfoxProtocol | null = useMemo(() => {
     if (!isOfoxPreset) return null;
@@ -186,11 +189,11 @@ export function HermesFormFields({
 
   const ofoxEndpoint = useMemo(() => {
     switch (ofoxProtocol) {
-      case "openai": return "https://api.ofox.ai/v1";
-      case "anthropic": return "https://api.ofox.ai/anthropic";
+      case "openai": return `${ofoxApiBase(apex)}/v1`;
+      case "anthropic": return `${ofoxApiBase(apex)}/anthropic`;
       default: return "";
     }
-  }, [ofoxProtocol]);
+  }, [ofoxProtocol, apex]);
 
   // oFox 协议变化时自动更新端点
   useEffect(() => {

@@ -289,6 +289,41 @@ pub struct AppSettings {
     /// - Linux: "gnome-terminal" | "konsole" | "xfce4-terminal" | "alacritty" | "kitty" | "ghostty"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_terminal: Option<String>,
+
+    // ===== OFox 偏好设置 =====
+    /// 启用低余额提醒（默认 true）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_balance_enabled: Option<bool>,
+    /// 低余额阈值（美元；默认 10.0）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_balance_threshold_usd: Option<f64>,
+    /// 工具健康检查间隔："off" | "1h" | "6h" | "24h"（默认 "6h"）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_check_interval: Option<String>,
+    /// 上次告警时使用的阈值（与当前阈值不一致时清除冷却）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_balance_last_alert_threshold: Option<f64>,
+    /// 上次告警时间戳（unix-ms）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub low_balance_last_alert_at: Option<i64>,
+    /// 已绑定工具列表（镜像自前端 localStorage `BOUND_TOOLS_STORAGE_KEY`）
+    /// 用于后台健康检查循环知道该探测哪些工具
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_tools: Option<Vec<String>>,
+
+    // ===== OFox 区域（apex）=====
+    /// OFox 访问域名 apex："ofox.ai"（海外）或 "ofox.io"（国内镜像）。
+    /// 影响所有 OAuth、LLM 网关、外链、ofox-* 工具的 base_url。
+    /// `None` 表示尚未通过 ip-api 探测过——`ofoxApexResolved == Some(true)` 后该值
+    /// 会被钉死，再次启动不会重新探测。Dev 模式下读这个值不会影响实际请求 URL
+    /// （所有 URL 都打 localhost），仅 release build 才生效。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ofox_apex: Option<String>,
+    /// 是否已完成首次区域探测。`Some(true)` 表示 `ofox_apex` 是当前权威值，
+    /// 启动钩子不会再次 probe ip-api；用户在 UI 里手动切换也写 `Some(true)`。
+    /// 删除 settings.json / 显式置 `None` 会让下一次启动重新探测。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ofox_apex_resolved: Option<bool>,
 }
 
 fn default_show_in_tray() -> bool {
@@ -338,6 +373,14 @@ impl Default for AppSettings {
             backup_interval_hours: None,
             backup_retain_count: None,
             preferred_terminal: None,
+            low_balance_enabled: None,
+            low_balance_threshold_usd: None,
+            health_check_interval: None,
+            low_balance_last_alert_threshold: None,
+            low_balance_last_alert_at: None,
+            bound_tools: None,
+            ofox_apex: None,
+            ofox_apex_resolved: None,
         }
     }
 }
@@ -407,6 +450,21 @@ impl AppSettings {
             if sync.is_empty() {
                 self.webdav_sync = None;
             }
+        }
+
+        // OFox apex 白名单：只接受 "ofox.ai" / "ofox.io"，其他值（hand-edit、
+        // 旧字段、笔误）一律置 None 让启动钩子重新探测。这避免一个被破坏的
+        // settings.json 把 URL 拼成 `https://app.ofox.evil.com`。
+        self.ofox_apex = self
+            .ofox_apex
+            .as_ref()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| s == "ofox.ai" || s == "ofox.io");
+        // 一致性：apex 被清掉，resolved 也跟着清，否则启动会"已 resolved 但
+        // apex 是 None"卡住——`current_apex()` 会 fallback `ofox.ai` 但不再触发
+        // ip-api 探测。
+        if self.ofox_apex.is_none() {
+            self.ofox_apex_resolved = None;
         }
     }
 
@@ -527,7 +585,10 @@ pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
     Ok(())
 }
 
-fn mutate_settings<F>(mutator: F) -> Result<(), AppError>
+/// Read-modify-write helper for in-process callers (ip-api 探测、apex 切换命令、
+/// 工具健康检查等）。比 `update_settings` 安全：不会替换无关字段，只把 mutator
+/// 的修改持久化。
+pub fn mutate_settings<F>(mutator: F) -> Result<(), AppError>
 where
     F: FnOnce(&mut AppSettings),
 {
@@ -744,6 +805,69 @@ pub fn get_preferred_terminal() -> Option<String> {
         })
         .preferred_terminal
         .clone()
+}
+
+// ===== OFox 偏好（低余额 / 健康检查）管理函数 =====
+
+/// 低余额提醒是否启用（默认 true）
+pub fn low_balance_alert_enabled() -> bool {
+    settings_store()
+        .read()
+        .map(|s| s.low_balance_enabled.unwrap_or(true))
+        .unwrap_or(true)
+}
+
+/// 低余额阈值（美元，默认 10.0）
+pub fn low_balance_threshold_usd() -> f64 {
+    settings_store()
+        .read()
+        .map(|s| s.low_balance_threshold_usd.unwrap_or(10.0))
+        .unwrap_or(10.0)
+}
+
+/// 上次告警的阈值（用于检测阈值变化重置冷却）
+pub fn low_balance_last_alert_threshold() -> Option<f64> {
+    settings_store()
+        .read()
+        .ok()
+        .and_then(|s| s.low_balance_last_alert_threshold)
+}
+
+/// 上次告警时间戳（unix-ms）
+pub fn low_balance_last_alert_at() -> Option<i64> {
+    settings_store()
+        .read()
+        .ok()
+        .and_then(|s| s.low_balance_last_alert_at)
+}
+
+/// 写回低余额闩锁（告警发生后调用）
+pub fn set_low_balance_latch(threshold: f64, at_ms: i64) -> Result<(), AppError> {
+    mutate_settings(|s| {
+        s.low_balance_last_alert_threshold = Some(threshold);
+        s.low_balance_last_alert_at = Some(at_ms);
+    })
+}
+
+/// 工具健康检查间隔（默认 "6h"）
+pub fn health_check_interval() -> String {
+    settings_store()
+        .read()
+        .map(|s| {
+            s.health_check_interval
+                .clone()
+                .unwrap_or_else(|| "6h".to_string())
+        })
+        .unwrap_or_else(|_| "6h".to_string())
+}
+
+/// 已绑定工具列表（前端 localStorage 的镜像）
+pub fn get_bound_tools() -> Vec<String> {
+    settings_store()
+        .read()
+        .ok()
+        .and_then(|s| s.bound_tools.clone())
+        .unwrap_or_default()
 }
 
 // ===== WebDAV 同步设置管理函数 =====

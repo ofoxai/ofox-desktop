@@ -1,4 +1,21 @@
+import { settingsApi } from "@/lib/api";
+import { useOfoxApex } from "@/hooks/useOfoxApex";
+import { useOfoxAuth } from "@/hooks/useOfoxAuth";
+import { isOfoxBillingManager } from "@/lib/api/ofoxAuth";
+import { ofoxWalletUrl } from "@/lib/ofoxUrls";
+
+/**
+ * 余额低于阈值时显示的警告条。
+ *
+ * 充值按钮的可见性依然按 role 控制——member 看到余额不足时也能从警告里得知
+ * 风险，但没有充值权限，所以按钮收起；owner / admin 可以一键跳到
+ * `/manage/wallet`（跟随当前 apex）。
+ */
 export default function BalanceWarningBanner() {
+  const { apex } = useOfoxApex();
+  const { status } = useOfoxAuth();
+  const canRecharge = isOfoxBillingManager(status?.user);
+
   return (
     <div className="mx-3.5 flex items-center gap-2.5 rounded-lg border border-[#e8d5a3] bg-gradient-to-l from-[#f5dfa0] to-[#faf3e0] px-2.5 py-2 dark:border-yellow-500/30 dark:from-yellow-600/25 dark:to-yellow-500/5">
       {/* 圆形感叹号图标 */}
@@ -13,9 +30,14 @@ export default function BalanceWarningBanner() {
           按当前速率可用不足 1 天，建议尽快充值
         </div>
       </div>
-      <button className="shrink-0 rounded-md bg-orange-500 px-2.5 py-0.5 text-[11px] font-medium text-white hover:bg-orange-600">
-        充值
-      </button>
+      {canRecharge && (
+        <button
+          onClick={() => settingsApi.openExternal(ofoxWalletUrl(apex))}
+          className="shrink-0 rounded-md bg-orange-500 px-2.5 py-0.5 text-[11px] font-medium text-white hover:bg-orange-600"
+        >
+          充值
+        </button>
+      )}
     </div>
   );
 }

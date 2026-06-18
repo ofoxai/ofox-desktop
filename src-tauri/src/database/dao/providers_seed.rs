@@ -8,8 +8,6 @@
 //! - `src/config/codexProviderPresets.ts`（"OpenAI Official"）
 //! - `src/config/geminiProviderPresets.ts`（"Google Official"）
 
-use std::sync::LazyLock;
-
 use crate::app_config::AppType;
 use crate::ofox_endpoints::{anthropic_base_url, gemini_base_url, openai_v1_base_url};
 
@@ -69,8 +67,12 @@ pub(crate) fn is_official_seed_id(id: &str) -> bool {
 }
 
 /// 判断给定的 provider id 是否属于 OfoxAI 种子。
+///
+/// 用 `OFOX_SEED_IDS` 静态白名单而不是 [`ofox_seeds`]：判 id 时不需要每次都
+/// 重新构建整个 `Vec<OfoxProviderSeed>`（含 `format!` 进 settings_config 的
+/// 所有 base_url），避免一个轻量判定路径被 apex 切换引起的重建拖慢。
 pub(crate) fn is_ofox_seed_id(id: &str) -> bool {
-    OFOX_SEEDS.iter().any(|seed| seed.id == id)
+    OFOX_SEED_IDS.contains(&id)
 }
 
 /// 判断给定的 provider id 是否属于任意内置种子（官方 + OfoxAI）。
@@ -90,8 +92,8 @@ pub(crate) fn is_builtin_seed_id(id: &str) -> bool {
 /// 前端据此启用自动模型获取、端点锁定等 OfoxAI 专属行为。
 ///
 /// 字段是 `String`（不是 `&'static str`）——因为各 settings_config 里的
-/// `base_url` 要在运行时按 `ofox_endpoints::OFOX_GATEWAY_BASE_URL` 拼出来，
-/// dev/prod 切换时只改那一个常量即可，不必再各 seed 手动同步。
+/// `base_url` 要在运行时按 [`crate::ofox_apex`] 当前 apex + dev/prod 拼出来，
+/// dev/prod 切换或用户切区域时只改那一个开关即可，不必再各 seed 手动同步。
 pub(crate) struct OfoxProviderSeed {
     pub id: &'static str,
     pub app_type: AppType,
@@ -103,12 +105,117 @@ pub(crate) struct OfoxProviderSeed {
     pub meta_json: &'static str,
 }
 
+/// 6 个 OfoxAI 种子的 id 白名单。`is_ofox_seed_id` 判定时只需要扫这个轻量
+/// 列表，不必触发 [`ofox_seeds`] 的字符串拼接。新增 ofox-* seed 时同步两边。
+pub(crate) const OFOX_SEED_IDS: &[&str] = &[
+    "ofox-claude",
+    "ofox-codex",
+    "ofox-gemini",
+    "ofox-opencode",
+    "ofox-openclaw",
+    "ofox-hermes",
+];
+
+/// 切换 OFox apex 后，把所有 ofox-* provider 的 settings_config 用**当前 apex**
+/// 的 seed 模板重新覆盖一遍。
+///
+/// **覆盖而不是 patch**：codex 那条 seed 把 `base_url` 嵌在 TOML 字符串里
+/// （不是 JSON path），用 regex 改 base_url 既脆又难维护；直接拿当前 apex
+/// 重新拼整段 settings_config，模板是唯一事实源，不会有"哪个字段我忘了改"
+/// 的暗坑。
+///
+/// 调用约束：
+/// - 必须在 [`crate::ofox_apex::current_apex`] 已经被切到**目标**值之后调用——
+///   `ofox_seeds()` 内部会按当前值拼 base_url，顺序错了等于没切。
+/// - 必须在 OFox logout（清 token）**之前或之后**都行，但若在之前调用，新写
+///   入的 settings_config 里 `*_KEY`/`*_TOKEN` 字段都是空字符串（seed 模板里
+///   就是空），用户重新登录后通过 `ofox-auth-token-refreshed` listener 自动
+///   填回。本函数自身不读/写 token。
+///
+/// 部分失败处理：单个 row 写失败 → log warn 继续下一个，整体返回成功条数。
+/// 与 [`crate::ofox_auth_sync::sync_token_to_ofox_providers`] 风格一致——半残
+/// 总比整段崩好。
+pub fn reseed_ofox_providers_with_current_apex(
+    db: &crate::database::Database,
+) -> Result<usize, crate::error::AppError> {
+    let mut updated = 0_usize;
+    for seed in ofox_seeds() {
+        let app_type_str = seed.app_type.as_str();
+
+        // 仅处理已存在的 row：用户可能手动删除过某条 ofox-* seed（被
+        // `init_default_ofox_providers` 的 flag 保护），那种情况下不应该
+        // 重新插入——尊重用户的删除决定。
+        let existing = match db.get_provider_by_id(seed.id, app_type_str) {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                log::debug!(
+                    "[ofox_apex_reseed] {}/{} not in DB (deleted by user?), skip",
+                    app_type_str,
+                    seed.id
+                );
+                continue;
+            }
+            Err(e) => {
+                log::warn!(
+                    "[ofox_apex_reseed] read {}/{} failed: {e}; skip",
+                    app_type_str,
+                    seed.id
+                );
+                continue;
+            }
+        };
+
+        let settings_config: serde_json::Value =
+            match serde_json::from_str(&seed.settings_config_json) {
+                Ok(v) => v,
+                Err(e) => {
+                    log::warn!(
+                        "[ofox_apex_reseed] seed JSON for {} invalid: {e}; skip",
+                        seed.id
+                    );
+                    continue;
+                }
+            };
+
+        // 把旧值留一条 debug 日志便于事后追查（包括误切回的回滚）。
+        log::debug!(
+            "[ofox_apex_reseed] {}/{} OLD settings_config: {}",
+            app_type_str,
+            seed.id,
+            existing.settings_config
+        );
+
+        if let Err(e) = db.update_provider_settings_config(app_type_str, seed.id, &settings_config)
+        {
+            log::warn!(
+                "[ofox_apex_reseed] write {}/{} failed: {e}; skip",
+                app_type_str,
+                seed.id
+            );
+            continue;
+        }
+
+        updated += 1;
+        log::info!(
+            "[ofox_apex_reseed] reseeded {}/{} with current apex",
+            app_type_str,
+            seed.id
+        );
+    }
+    Ok(updated)
+}
+
 /// 6 个应用各一条 OfoxAI 种子。
 ///
 /// settings_config 与前端各 `*ProviderPresets.ts` 中的 OfoxAI 条目保持一致，
 /// 但其中所有 `base_url` 字段都从 [`ofox_endpoints`] 的运行时拼接函数取值——
-/// dev 自测时网关跑在 `localhost:8088`，线上是 `https://api.ofox.ai`，一处开关。
-pub(crate) static OFOX_SEEDS: LazyLock<Vec<OfoxProviderSeed>> = LazyLock::new(|| {
+/// dev 自测时网关跑在 `localhost:8088`，线上是 `https://api.<apex>`，apex
+/// 切换由 [`crate::ofox_apex::current_apex`] 在每次调用时重新决定。
+///
+/// **每次调用都会重新构建 Vec**——这是有意的：apex 在运行时可被用户切换，缓存
+/// 一份 LazyLock 反而会与切换后的状态不一致。轻量判定路径请用
+/// [`OFOX_SEED_IDS`] 而不是这里。
+pub(crate) fn ofox_seeds() -> Vec<OfoxProviderSeed> {
     let openai_v1 = openai_v1_base_url(); // <gateway>/v1
     let anthropic = anthropic_base_url(); // <gateway>/anthropic
     let gemini = gemini_base_url(); // <gateway>/gemini
@@ -200,4 +307,4 @@ pub(crate) static OFOX_SEEDS: LazyLock<Vec<OfoxProviderSeed>> = LazyLock::new(||
             meta_json: r#"{"providerType":"ofox"}"#,
         },
     ]
-});
+}

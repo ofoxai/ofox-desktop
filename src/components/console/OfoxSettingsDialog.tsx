@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Loader2, X } from "lucide-react";
 import { emit } from "@tauri-apps/api/event";
@@ -15,7 +15,9 @@ import {
 import { settingsApi } from "@/lib/api";
 import { ofoxLogout } from "@/lib/api/ofoxAuth";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
+import { OfoxApexSwitch } from "@/components/OfoxApexSwitch";
 import { getCurrentVersion } from "@/lib/updater";
+import type { Settings } from "@/types";
 
 /**
  * OFox-flavored settings dialog launched from the bottom-left "设置" button on
@@ -42,11 +44,19 @@ import { getCurrentVersion } from "@/lib/updater";
 
 // ─── Preference storage ──────────────────────────────────────────────────
 //
-// Two new prefs (low-balance threshold + health-check interval) live in
-// localStorage with the `ofox:` prefix. Backend wiring is intentionally
-// deferred — the toggles surface the user's intent today; the consumers
-// (balance banner, tool health probe) will read the same keys when they
-// land. Default values picked to match the design mock.
+// Two prefs (low-balance threshold + health-check interval) are mirrored
+// between localStorage (so the UI can read them synchronously on first
+// paint) and `AppSettings` (so the Rust background loops can consume
+// them). The dialog keeps both copies in sync via a read-modify-write
+// against `settingsApi.save()` followed by `emit('ofox-prefs-updated')`
+// to wake the health-check loop.
+//
+// IMPORTANT: `settingsApi.save()` takes the FULL settings object — there
+// is no partial-merge path on the backend (except WebDAV which has its
+// own special-case). That's why each handler spreads `currentSettings`
+// before adding the field it touches; otherwise saving "low-balance
+// enabled" would inadvertently reset every other unrelated field to its
+// default.
 
 const PREF_LOW_BAL_ENABLED = "ofox:settings:lowBalanceEnabled";
 const PREF_LOW_BAL_THRESHOLD = "ofox:settings:lowBalanceThreshold";
@@ -116,6 +126,16 @@ export default function OfoxSettingsDialog({
   const [loggingOut, setLoggingOut] = useState(false);
   const [version, setVersion] = useState<string | null>(null);
 
+  // ── Current settings cache for read-modify-write.
+  //
+  // `settingsApi.save()` requires the full settings object, so each pref
+  // handler must spread the latest snapshot before writing. We cache it in
+  // a ref (rather than state) because changes to it should NOT cause the
+  // dialog to re-render — the user-visible values come from the local
+  // useState above, and the cache is purely a buffer for the next save.
+  const currentSettingsRef = useRef<Settings | null>(null);
+  const [notifPermissionWarned, setNotifPermissionWarned] = useState(false);
+
   // Re-read on every open: auto-launch can drift if changed outside the app,
   // and the auth status may have refreshed since dialog was last opened.
   useEffect(() => {
@@ -135,6 +155,29 @@ export default function OfoxSettingsDialog({
       } catch (e) {
         console.error("[OfoxSettingsDialog] getCurrentVersion failed", e);
       }
+      // Cache full settings object for read-modify-write in handlers below.
+      try {
+        const cur = await settingsApi.get();
+        if (!cancelled) {
+          currentSettingsRef.current = cur;
+          // Backend value wins over localStorage if they disagree (e.g.
+          // user edited settings.json by hand). Sync the visible state.
+          if (typeof cur.lowBalanceEnabled === "boolean") {
+            setLowBalEnabled(cur.lowBalanceEnabled);
+          }
+          if (typeof cur.lowBalanceThresholdUsd === "number") {
+            setLowBalThreshold(cur.lowBalanceThresholdUsd);
+          }
+          if (
+            cur.healthCheckInterval &&
+            ["off", "1h", "6h", "24h"].includes(cur.healthCheckInterval)
+          ) {
+            setHealthInterval(cur.healthCheckInterval as HealthInterval);
+          }
+        }
+      } catch (e) {
+        console.error("[OfoxSettingsDialog] settingsApi.get failed", e);
+      }
     })();
     return () => {
       cancelled = true;
@@ -142,6 +185,62 @@ export default function OfoxSettingsDialog({
   }, [open]);
 
   // ── Handlers ───────────────────────────────────────────────────────────
+
+  /**
+   * Read-modify-write helper: spread current settings, apply patch, save,
+   * cache, then emit `ofox-prefs-updated` so the Rust loops can react
+   * (specifically the health-check loop which Notify-wakes from off/long
+   * intervals when settings change).
+   *
+   * Best-effort: errors are toast'd but don't roll back the UI state,
+   * since the localStorage mirror has already been written by the caller
+   * — partial failure is preferable to flicker.
+   */
+  const persistPrefsPatch = useCallback(
+    async (patch: Partial<Settings>) => {
+      if (!currentSettingsRef.current) {
+        console.warn("[OfoxSettingsDialog] persistPrefsPatch: no cached settings yet");
+        return;
+      }
+      const next = { ...currentSettingsRef.current, ...patch };
+      try {
+        await settingsApi.save(next);
+        currentSettingsRef.current = next;
+        await emit("ofox-prefs-updated");
+      } catch (e) {
+        console.error("[OfoxSettingsDialog] persistPrefsPatch failed", e);
+        toast.error("保存偏好失败，请稍后重试");
+      }
+    },
+    [],
+  );
+
+  /**
+   * On enabling the low-balance alert, ensure system-notification permission
+   * is granted. Tauri v2 plugin returns `'granted' | 'denied' | 'default'`
+   * (similar to web Notification API). We only nag once per session if
+   * the user denies — they might have system-level notifications muted
+   * intentionally and don't need a toast every flip.
+   */
+  const ensureNotificationPermission = useCallback(async () => {
+    try {
+      const { isPermissionGranted, requestPermission } = await import(
+        "@tauri-apps/plugin-notification"
+      );
+      const granted = await isPermissionGranted();
+      if (granted) return;
+      const next = await requestPermission();
+      if (next !== "granted" && !notifPermissionWarned) {
+        setNotifPermissionWarned(true);
+        toast.warning("系统通知权限未授予，低余额提醒将无法弹出");
+      }
+    } catch (e) {
+      console.warn(
+        "[OfoxSettingsDialog] ensureNotificationPermission failed",
+        e,
+      );
+    }
+  }, [notifPermissionWarned]);
 
   const handleAutoLaunchToggle = useCallback(
     async (next: boolean) => {
@@ -158,29 +257,45 @@ export default function OfoxSettingsDialog({
     [autoLaunch],
   );
 
-  const handleLowBalToggle = useCallback((next: boolean) => {
-    setLowBalEnabled(next);
-    localStorage.setItem(PREF_LOW_BAL_ENABLED, next ? "1" : "0");
-  }, []);
+  const handleLowBalToggle = useCallback(
+    (next: boolean) => {
+      setLowBalEnabled(next);
+      localStorage.setItem(PREF_LOW_BAL_ENABLED, next ? "1" : "0");
+      void persistPrefsPatch({ lowBalanceEnabled: next });
+      if (next) {
+        // Fire-and-forget; errors are caught inside.
+        void ensureNotificationPermission();
+      }
+    },
+    [persistPrefsPatch, ensureNotificationPermission],
+  );
 
-  const handleLowBalThresholdChange = useCallback((raw: string) => {
-    // Strip non-digits — the input also has type="number" but Safari accepts
-    // letters anyway. Empty input collapses to 0 visually but we don't
-    // persist 0 (would silence the alert entirely without the toggle).
-    const cleaned = raw.replace(/[^\d]/g, "");
-    const n = cleaned === "" ? 0 : Number(cleaned);
-    setLowBalThreshold(n);
-    if (n > 0) {
-      localStorage.setItem(PREF_LOW_BAL_THRESHOLD, String(n));
-    }
-  }, []);
+  const handleLowBalThresholdChange = useCallback(
+    (raw: string) => {
+      // Strip non-digits — the input also has type="number" but Safari accepts
+      // letters anyway. Empty input collapses to 0 visually but we don't
+      // persist 0 (would silence the alert entirely without the toggle).
+      const cleaned = raw.replace(/[^\d]/g, "");
+      const n = cleaned === "" ? 0 : Number(cleaned);
+      setLowBalThreshold(n);
+      if (n > 0) {
+        localStorage.setItem(PREF_LOW_BAL_THRESHOLD, String(n));
+        void persistPrefsPatch({ lowBalanceThresholdUsd: n });
+      }
+    },
+    [persistPrefsPatch],
+  );
 
-  const handleHealthIntervalChange = useCallback((next: string) => {
-    if (next === "off" || next === "1h" || next === "6h" || next === "24h") {
-      setHealthInterval(next);
-      localStorage.setItem(PREF_HEALTH_INTERVAL, next);
-    }
-  }, []);
+  const handleHealthIntervalChange = useCallback(
+    (next: string) => {
+      if (next === "off" || next === "1h" || next === "6h" || next === "24h") {
+        setHealthInterval(next);
+        localStorage.setItem(PREF_HEALTH_INTERVAL, next);
+        void persistPrefsPatch({ healthCheckInterval: next });
+      }
+    },
+    [persistPrefsPatch],
+  );
 
   const handleLogout = useCallback(async () => {
     if (loggingOut) return;
@@ -282,6 +397,20 @@ export default function OfoxSettingsDialog({
             </div>
           </SectionCard>
 
+          {/* ─── 区域 ─────────────────────────────────────────────────── */}
+          {/* 与"账户"分卡：账户卡是身份信息（你是谁），区域卡是平台连接点
+              （你连到哪个域）。混在一起会让 logout 与 apex 切换的语义模糊。
+              切换时 `OfoxApexSwitch` 内部弹确认 + 后端原子完成
+              logout/reseed/emit reauth-requested，MainApp 自动跳 LoginPage。 */}
+          <SectionCard title="区域">
+            <Row
+              label="访问区域"
+              hint="国内用户请选 ofox.io，海外用户选 ofox.ai"
+              control={<OfoxApexSwitch />}
+              isLast
+            />
+          </SectionCard>
+
           {/* ─── 偏好 ─────────────────────────────────────────────────── */}
           <SectionCard title="偏好">
             {/* Auto-launch */}
@@ -332,7 +461,7 @@ export default function OfoxSettingsDialog({
             {/* Health-check frequency */}
             <Row
               label="工具健康检查"
-              hint="定期对每个工具发送测试请求"
+              hint="定期对每个工具发送测试请求（消耗极少额度，max_tokens=1）"
               control={
                 <Select
                   value={healthInterval}
@@ -402,10 +531,19 @@ interface SectionCardProps {
 }
 
 /** Grouped card with a muted header strip, mirroring the mock's "账户 / 偏好 /
- *  关于" group containers. */
+ *  关于" group containers.
+ *
+ *  `shrink-0` is load-bearing: the parent body is `flex flex-col` with a
+ *  `max-h-[70vh] overflow-y-auto`. By default, flex items have
+ *  `flex-shrink: 1`, so when total content height approaches the cap, flex
+ *  shrinks each card proportionally instead of letting overflow take over —
+ *  resulting in every card visibly compressed and content clipped (the user
+ *  reported "卡片都被压扁、内容被裁剪"). Pinning `shrink-0` forces each card
+ *  to keep its natural height; the body container then scrolls as designed.
+ *  This is the standard fix for `max-h + overflow + flex-col` in Tailwind. */
 function SectionCard({ title, children }: SectionCardProps) {
   return (
-    <section className="overflow-hidden rounded-xl border border-border bg-background">
+    <section className="shrink-0 overflow-hidden rounded-xl border border-border bg-background">
       <div className="border-b border-border bg-muted/40 px-4 py-2">
         <h3 className="text-[12px] font-medium uppercase tracking-wider text-muted-foreground">
           {title}

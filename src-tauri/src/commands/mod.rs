@@ -16,6 +16,7 @@ mod mcp;
 mod misc;
 mod model_fetch;
 pub(crate) mod ofox_auth;
+pub(crate) mod ofox_apex;
 mod omo;
 mod openclaw;
 mod plugin;
@@ -31,6 +32,7 @@ mod sync_support;
 
 mod lightweight;
 pub(crate) mod manage_tool;
+mod tool_health_cmd;
 mod usage;
 mod webdav_sync;
 mod workspace;
@@ -66,6 +68,7 @@ pub use subscription::*;
 
 pub use lightweight::*;
 pub use manage_tool::*;
+pub use tool_health_cmd::*;
 pub use usage::*;
 pub use webdav_sync::*;
 pub use workspace::*;

@@ -1,9 +1,35 @@
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import {
   BOUND_TOOLS_STORAGE_KEY,
   PROXY_SUPPORTED_TOOLS,
 } from "@/config/toolMeta";
 import { proxyApi } from "@/lib/api/proxy";
+import { settingsApi } from "@/lib/api";
+
+/**
+ * Mirror the bound-tools list into `AppSettings.boundTools` so the Rust
+ * background loops (specifically `services::tool_health`) can know which
+ * tools to probe without coupling to the frontend's localStorage.
+ *
+ * Best-effort: failures only log + swallow. The localStorage write is the
+ * primary source of truth for the UI; the settings mirror is a hint for
+ * the backend, and missing it just means the next health-check round
+ * sees an empty list (no probes, no harm).
+ *
+ * Always emits `ofox-prefs-updated` afterwards so the health-check loop
+ * can wake up from a long sleep when the bound set changes.
+ */
+async function mirrorBoundToolsToSettings(tools: string[]): Promise<void> {
+  try {
+    const cur = await settingsApi.get();
+    await settingsApi.save({ ...cur, boundTools: tools });
+    await emit("ofox-prefs-updated");
+  } catch (e) {
+    // Swallow — local UI behavior is already correct via localStorage.
+    console.warn("[bindTools] mirrorBoundToolsToSettings failed", e);
+  }
+}
 
 /**
  * Tools the backend can fully bind to OfoxAI in one call (sets the
@@ -41,6 +67,8 @@ const OFOX_AUTO_BIND_TOOLS: ReadonlySet<string> = new Set(["claude", "codex"]);
  */
 export async function bindTools(tools: string[]): Promise<string[]> {
   localStorage.setItem(BOUND_TOOLS_STORAGE_KEY, JSON.stringify(tools));
+  // Mirror to backend (fire-and-forget, doesn't block bind round-trips).
+  void mirrorBoundToolsToSettings(tools);
   for (const tool of tools) {
     if (!PROXY_SUPPORTED_TOOLS.includes(tool)) continue;
     try {
@@ -81,6 +109,7 @@ export async function unbindTool(app: string): Promise<void> {
   const list: string[] = raw ? JSON.parse(raw) : [];
   const next = list.filter((id) => id !== app);
   localStorage.setItem(BOUND_TOOLS_STORAGE_KEY, JSON.stringify(next));
+  void mirrorBoundToolsToSettings(next);
 
   if (PROXY_SUPPORTED_TOOLS.includes(app)) {
     await invoke("ofox_unbind_tool", { app });
