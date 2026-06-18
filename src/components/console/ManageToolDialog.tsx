@@ -74,9 +74,6 @@ interface ManageToolDialogProps {
  * "bound" in the OfoxAI sense, the active provider, base URL, and token
  * are managed by `bindTools()` / `ofox_bind_tool` and aren't user-editable
  * here. The model is the one knob users actually need.
- *
- * Today's-stats panel ships as a "即将推出" placeholder so the layout
- * matches the design and lights up later without UI churn.
  */
 export default function ManageToolDialog({
   tool,

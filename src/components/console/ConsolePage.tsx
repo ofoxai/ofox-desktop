@@ -635,7 +635,7 @@ export default function ConsolePage({
    * when the truth is "we couldn't see this tool".
    *
    * If NONE of the bound tools provided rawStats (e.g. all are unsupported,
-   * or first paint hasn't completed), each card falls back to "即将推出"
+   * or first paint hasn't completed), each card falls back to "计算中"
    * placeholder text so we don't show misleading zeros mid-load.
    *
    * Card semantics:
@@ -655,10 +655,10 @@ export default function ConsolePage({
     const supported = tools.filter((t) => t.rawStats !== null);
     if (supported.length === 0) {
       return [
-        { label: "今日总消费", value: "即将推出", placeholder: true },
-        { label: "今日总请求", value: "即将推出", placeholder: true },
-        { label: "今日总 TOKENS", value: "即将推出", placeholder: true },
-        { label: "本月总消费", value: "即将推出", placeholder: true },
+        { label: "今日总消费", value: "计算中", placeholder: true },
+        { label: "今日总请求", value: "计算中", placeholder: true },
+        { label: "今日总 TOKENS", value: "计算中", placeholder: true },
+        { label: "本月总消费", value: "计算中", placeholder: true },
       ];
     }
     let todayCostSum = 0;
