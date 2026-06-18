@@ -1,5 +1,5 @@
-import { useEffect, useState, useCallback } from "react";
-import { Settings, RefreshCw, Loader2 } from "lucide-react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
+import { Settings, RefreshCw, Loader2, HelpCircle } from "lucide-react";
 import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
 import { settingsApi } from "@/lib/api";
@@ -11,6 +11,7 @@ import {
   ofoxDashboardUrl,
   ofoxMarketingUrl,
   ofoxWalletUrl,
+  type OfoxApex,
 } from "@/lib/ofoxUrls";
 import {
   TOOL_META,
@@ -27,6 +28,13 @@ import {
 import AddToolsDialog from "./AddToolsDialog";
 import ManageToolDialog, { type ManageToolTarget } from "./ManageToolDialog";
 import OfoxSettingsDialog from "./OfoxSettingsDialog";
+import { OfoxApexSwitch } from "@/components/OfoxApexSwitch";
+import { UserAvatar } from "@/components/UserAvatar";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { useToolHealth } from "@/hooks/useToolHealth";
 import type { ToolHealthSnapshot } from "@/lib/api/toolHealth";
 import type { UsageSummary } from "@/types/usage";
@@ -53,6 +61,26 @@ interface BoundTool {
   /** Right-side cell value when `proxySupported` is true. Pre-formatted (e.g.
    *  "1.2M") or null when the fetch returned nothing. Ignored otherwise. */
   monthTokens: string | null;
+  /** Today's usage triple. Pre-formatted strings, ready to render. `null`
+   *  means the fetch failed or returned nothing — fall back to "—" rendering.
+   *  Unsupported tools (proxySupported=false) get `null` here too and render
+   *  "不支持统计" in the dedicated UI branch. */
+  todayUsage: {
+    requests: string;
+    tokens: string;
+    cost: string;
+  } | null;
+  /** Raw numeric snapshot of today + month, used by the top-of-page summary
+   *  cards. Kept separate from the pre-formatted `todayUsage` so the cards
+   *  can sum across tools without re-parsing strings. `null` for unsupported
+   *  or failed fetches — the card aggregator then skips this tool to avoid
+   *  silently understating totals as zero. */
+  rawStats: {
+    todayRequests: number;
+    todayTokens: number;
+    todayCostUsd: number;
+    monthCostUsd: number;
+  } | null;
 }
 
 const STATUS_STYLES: Record<ToolStatus, { dot: string }> = {
@@ -60,20 +88,6 @@ const STATUS_STYLES: Record<ToolStatus, { dot: string }> = {
   idle: { dot: "bg-gray-400" },
   error: { dot: "bg-red-500" },
 };
-
-function formatCost(cost: string | undefined): string {
-  if (!cost) return "$0.00";
-  const n = parseFloat(cost);
-  if (isNaN(n) || n === 0) return "$0.00";
-  return `$${n.toFixed(2)}`;
-}
-
-function formatTokens(input: number, output: number): string {
-  const total = input + output;
-  if (total >= 1_000_000) return `${(total / 1_000_000).toFixed(1)}M`;
-  if (total >= 1_000) return `${(total / 1_000).toFixed(1)}K`;
-  return String(total);
-}
 
 /**
  * True when the user object came back from the backend with at least one
@@ -104,6 +118,85 @@ function formatMonthTokens(s: UsageSummary): string {
     s.totalCacheCreationTokens +
     s.totalCacheReadTokens;
   if (total === 0) return "—";
+  if (total >= 1_000_000) return `${(total / 1_000_000).toFixed(1)}M`;
+  if (total >= 1_000) return `${(total / 1_000).toFixed(1)}K`;
+  return String(total);
+}
+
+/**
+ * Render today's usage triple for the bound-tools list's "今日数据" column.
+ *
+ * Returned strings are display-ready and locale-formatted. Three reasons
+ * this lives outside the row JSX:
+ * - The same shape is reused for the manual refresh path, where a fresh
+ *   `UsageSummary` lands without a re-render of the row's cell helpers.
+ * - Callers (the row map) can keep the column conditional logic minimal:
+ *   `null` → "不支持统计" branch; non-null → render `triple` directly.
+ * - Cost formatting needs the same "<$0.0001 / 4-digit / 2-digit" cliff
+ *   the ManageToolDialog uses so小钱不被四舍五入成 $0.00。
+ *
+ * Tokens here include all four buckets to match `formatMonthTokens` and
+ * the per-tool dialog stat card — billing-equivalent surfaces should
+ * count the same things.
+ */
+function formatTodayUsage(s: UsageSummary): {
+  requests: string;
+  tokens: string;
+  cost: string;
+} {
+  const tokenTotal =
+    s.totalInputTokens +
+    s.totalOutputTokens +
+    s.totalCacheCreationTokens +
+    s.totalCacheReadTokens;
+  const tokens =
+    tokenTotal === 0
+      ? "—"
+      : tokenTotal >= 1_000_000
+        ? `${(tokenTotal / 1_000_000).toFixed(1)}M`
+        : tokenTotal >= 1_000
+          ? `${(tokenTotal / 1_000).toFixed(1)}K`
+          : String(tokenTotal);
+
+  const n = parseFloat(s.totalCost || "0");
+  let cost: string;
+  if (Number.isNaN(n) || n === 0) cost = "$0.00";
+  else if (n < 0.0001) cost = "<$0.0001";
+  else cost = `$${n.toFixed(n < 0.01 ? 4 : 2)}`;
+
+  return {
+    requests: String(s.totalRequests),
+    tokens,
+    cost,
+  };
+}
+
+/**
+ * Format a USD amount for the top-of-page summary cards.
+ *
+ * Same精度 cliffs as `formatTodayUsage.cost` and `ManageToolDialog.renderStatCell`,
+ * since these surfaces all show the same kind of small-dollar usage:
+ *   - 0 → "$0.00" (the formatter NEVER returns "—" — that's the placeholder
+ *         path's job, kept separate so a tool genuinely with $0 today reads
+ *         as "$0.00" not as "no data")
+ *   - <0.0001 → "<$0.0001"
+ *   - <0.01   → 4-digit
+ *   - else    → 2-digit
+ */
+function formatUsd(amount: number): string {
+  if (!Number.isFinite(amount) || amount === 0) return "$0.00";
+  if (amount < 0.0001) return "<$0.0001";
+  return `$${amount.toFixed(amount < 0.01 ? 4 : 2)}`;
+}
+
+/**
+ * Format a raw token count for the TOKENS summary card.
+ *
+ * Aligned with the per-row "本月 Token" cell and the dialog's TOKENS card —
+ * `1.2M` / `22.2K` / raw, no zero-suppression (the card always renders
+ * something; the placeholder branch handles the "no data" case upstream).
+ */
+function formatTokenCount(total: number): string {
   if (total >= 1_000_000) return `${(total / 1_000_000).toFixed(1)}M`;
   if (total >= 1_000) return `${(total / 1_000).toFixed(1)}K`;
   return String(total);
@@ -178,11 +271,11 @@ export default function ConsolePage({
     }
   }, []);
 
-  // Usage stats
-  const [todayCost, setTodayCost] = useState("$0.00");
-  const [todayRequests, setTodayRequests] = useState("0");
-  const [todayTokens, setTodayTokens] = useState("0");
-  const [monthCost, setMonthCost] = useState("$0.00");
+  // Usage stats — aggregated client-side from `tools[].rawStats` via the
+  // `stats` useMemo below. `tools` is the loadData output, so refreshing
+  // it refreshes the top cards automatically; no separate fetch needed.
+  // The 4th card ("本月") surfaces month-to-date *cost* (USD) rather than
+  // tokens — the per-row "本月 Token" column already shows token sums.
 
   // Tool health pills — backend probes each bound tool every 1h/6h/24h
   // (configurable in settings) and emits `ofox-tool-health-updated`. We
@@ -234,20 +327,117 @@ export default function ConsolePage({
     const toolMonthTokens = await Promise.all(
       boundTools.map(async (id) => {
         if (!PROXY_SUPPORTED_TOOLS.includes(id)) {
-          return [id, null] as [string, string | null];
+          return [id, { tokens: null, costUsd: null }] as [
+            string,
+            { tokens: string | null; costUsd: number | null },
+          ];
         }
         try {
           const s = await getMonthSummary(id);
-          return [id, s ? formatMonthTokens(s) : null] as [
+          if (!s) {
+            return [id, { tokens: null, costUsd: null }] as [
+              string,
+              { tokens: string | null; costUsd: number | null },
+            ];
+          }
+          const cost = parseFloat(s.totalCost || "0");
+          return [
+            id,
+            {
+              tokens: formatMonthTokens(s),
+              costUsd: Number.isNaN(cost) ? null : cost,
+            },
+          ] as [
             string,
-            string | null,
+            { tokens: string | null; costUsd: number | null },
           ];
         } catch {
-          return [id, null] as [string, string | null];
+          return [id, { tokens: null, costUsd: null }] as [
+            string,
+            { tokens: string | null; costUsd: number | null },
+          ];
         }
       }),
     );
-    const monthTokensMap = new Map(toolMonthTokens);
+    const monthMap = new Map(toolMonthTokens);
+
+    // Per-tool today snapshot — fetched in parallel with the month query.
+    // Mirror the same proxy-supported gate: unsupported tools render
+    // "不支持统计" in the column and never hit the SQL aggregator. Returning
+    // `null` (not a zero-summary) keeps the unsupported-vs-zero distinction
+    // at the type level so the renderer can branch unambiguously.
+    const toolTodayUsage = await Promise.all(
+      boundTools.map(async (id) => {
+        if (!PROXY_SUPPORTED_TOOLS.includes(id)) {
+          return [id, { display: null, raw: null }] as [
+            string,
+            {
+              display: ReturnType<typeof formatTodayUsage> | null;
+              raw: {
+                requests: number;
+                tokens: number;
+                costUsd: number;
+              } | null;
+            },
+          ];
+        }
+        try {
+          const s = await getTodaySummary(id);
+          if (!s) {
+            return [id, { display: null, raw: null }] as [
+              string,
+              {
+                display: ReturnType<typeof formatTodayUsage> | null;
+                raw: {
+                  requests: number;
+                  tokens: number;
+                  costUsd: number;
+                } | null;
+              },
+            ];
+          }
+          const cost = parseFloat(s.totalCost || "0");
+          return [
+            id,
+            {
+              display: formatTodayUsage(s),
+              raw: {
+                requests: s.totalRequests,
+                tokens:
+                  s.totalInputTokens +
+                  s.totalOutputTokens +
+                  s.totalCacheCreationTokens +
+                  s.totalCacheReadTokens,
+                costUsd: Number.isNaN(cost) ? 0 : cost,
+              },
+            },
+          ] as [
+            string,
+            {
+              display: ReturnType<typeof formatTodayUsage> | null;
+              raw: {
+                requests: number;
+                tokens: number;
+                costUsd: number;
+              } | null;
+            },
+          ];
+        } catch {
+          return [id, { display: null, raw: null }] as [
+            string,
+            {
+              display: ReturnType<typeof formatTodayUsage> | null;
+              raw: {
+                requests: number;
+                tokens: number;
+                costUsd: number;
+              } | null;
+            },
+          ];
+        }
+      }),
+    );
+    const todayMap = new Map(toolTodayUsage);
 
     const ordered = TOOL_ORDER.filter((id) => boundTools.includes(id));
     // Also include any bound tools not in TOOL_ORDER
@@ -290,6 +480,23 @@ export default function ConsolePage({
         statusText = "未检测到";
       }
 
+      const todayEntry = todayMap.get(id);
+      const monthEntry = monthMap.get(id);
+      const todayRaw = todayEntry?.raw ?? null;
+      const monthCost = monthEntry?.costUsd ?? null;
+      // rawStats is non-null only when we actually got numbers back. We
+      // intentionally keep it nullable rather than zero-fill, so the top-of-
+      // page summary cards can distinguish "no data fetched" from "real zero".
+      const rawStats =
+        proxySupported && (todayRaw !== null || monthCost !== null)
+          ? {
+              todayRequests: todayRaw?.requests ?? 0,
+              todayTokens: todayRaw?.tokens ?? 0,
+              todayCostUsd: todayRaw?.costUsd ?? 0,
+              monthCostUsd: monthCost ?? 0,
+            }
+          : null;
+
       return {
         id,
         abbr: meta.abbr,
@@ -299,7 +506,9 @@ export default function ConsolePage({
         status,
         statusText,
         proxySupported,
-        monthTokens: monthTokensMap.get(id) ?? null,
+        monthTokens: monthEntry?.tokens ?? null,
+        todayUsage: todayEntry?.display ?? null,
+        rawStats,
       };
     });
 
@@ -307,16 +516,12 @@ export default function ConsolePage({
     setLoading(false);
 
     // ===== Stage 2: remote / non-blocking =====
-    // Fire-and-forget — these update the header / stat cards once the
-    // network round-trips finish. Errors are swallowed at each call site so
-    // the list (already on-screen) doesn't get pulled back into a loading
-    // state by a stale `await` further down.
+    // Fetch `/openapi/me` after the list paints. The 4 top summary cards
+    // are now derived from `tools[].rawStats` so we no longer fetch
+    // today/month aggregates here — that data already came in during
+    // Stage 1 (per-tool, parallelized) and feeds the cards via useMemo.
     void (async () => {
-      const [todaySummary, monthSummary, userInfo] = await Promise.all([
-        getTodaySummary(),
-        getMonthSummary(),
-        ofoxGetUserInfo().catch(() => null),
-      ]);
+      const userInfo = await ofoxGetUserInfo().catch(() => null);
 
       if (userInfo) setUser(userInfo);
 
@@ -330,20 +535,6 @@ export default function ConsolePage({
       // never sees the empty state at all.
       if (!isMeaningfulUser(userInfo)) {
         void retryUserInfoWithBackoff();
-      }
-
-      if (todaySummary) {
-        setTodayCost(formatCost(todaySummary.totalCost));
-        setTodayRequests(String(todaySummary.totalRequests));
-        setTodayTokens(
-          formatTokens(
-            todaySummary.totalInputTokens,
-            todaySummary.totalOutputTokens,
-          ),
-        );
-      }
-      if (monthSummary) {
-        setMonthCost(formatCost(monthSummary.totalCost));
       }
     })();
   }, [boundTools]);
@@ -435,29 +626,75 @@ export default function ConsolePage({
   const errorCount = tools.filter((t) => t.status === "error").length;
 
   /**
-   * Stats row.
+   * Stats row — top-of-page summary cards.
    *
-   * None of these four metrics are surfaced by the OAuth OpenAPI yet:
-   *   - today's cost / requests / tokens have no endpoint at all
-   *   - `/openapi/orgs/me/spending-limits` looks tempting for "本月" but
-   *     it tracks *configured limits* (returns 403 for members, empty for
-   *     orgs without a monthly limit). Using its `used_usd` would mislead
-   *     users who haven't configured a monthly cap.
+   * Aggregated from the bound-tools list, NOT from a separate API endpoint.
+   * Each card sums the matching field across `tools[].rawStats` for proxy-
+   * supported tools where the fetch returned data. Tools without rawStats
+   * (unsupported, or fetch failed) are skipped — the card never claims `0`
+   * when the truth is "we couldn't see this tool".
    *
-   * Until a real usage endpoint lands, all four cards advertise "即将推出"
-   * with a muted style so they're clearly placeholders, not zeros.
+   * If NONE of the bound tools provided rawStats (e.g. all are unsupported,
+   * or first paint hasn't completed), each card falls back to "即将推出"
+   * placeholder text so we don't show misleading zeros mid-load.
+   *
+   * Card semantics:
+   *   - 今日总消费    : sum(todayCostUsd)        → "$0.0007" / "<$0.0001"
+   *   - 今日总请求    : sum(todayRequests)       → "66"
+   *   - 今日总 TOKENS : sum(todayTokens)         → "22.2K"  (today, not month —
+   *                     the per-row "本月 Token" column is the month surface)
+   *   - 本月总消费    : sum(monthCostUsd)        → "$43.25" / "<$0.0001"
+   *
+   * Scope note: "本月总消费" sums only across **bound** tools (those listed
+   * in `boundTools`). A user who chats with claude-code without binding it
+   * to cc-switch won't see those costs reflected here — that's intentional;
+   * the card mirrors what the table below shows. To see whole-account
+   * monthly spend regardless of binding, point users to "查看详细用量 ↗".
    */
-  void todayCost;
-  void todayRequests;
-  void todayTokens;
-  void monthCost;
-
-  const stats: Array<{ label: string; value: string; placeholder: boolean }> = [
-    { label: "今日消耗", value: "即将推出", placeholder: true },
-    { label: "今日请求", value: "即将推出", placeholder: true },
-    { label: "TOKENS", value: "即将推出", placeholder: true },
-    { label: "本月", value: "即将推出", placeholder: true },
-  ];
+  const stats = useMemo(() => {
+    const supported = tools.filter((t) => t.rawStats !== null);
+    if (supported.length === 0) {
+      return [
+        { label: "今日总消费", value: "即将推出", placeholder: true },
+        { label: "今日总请求", value: "即将推出", placeholder: true },
+        { label: "今日总 TOKENS", value: "即将推出", placeholder: true },
+        { label: "本月总消费", value: "即将推出", placeholder: true },
+      ];
+    }
+    let todayCostSum = 0;
+    let todayReqSum = 0;
+    let todayTokenSum = 0;
+    let monthCostSum = 0;
+    for (const t of supported) {
+      const r = t.rawStats!;
+      todayCostSum += r.todayCostUsd;
+      todayReqSum += r.todayRequests;
+      todayTokenSum += r.todayTokens;
+      monthCostSum += r.monthCostUsd;
+    }
+    return [
+      {
+        label: "今日总消费",
+        value: formatUsd(todayCostSum),
+        placeholder: false,
+      },
+      {
+        label: "今日总请求",
+        value: todayReqSum.toLocaleString(),
+        placeholder: false,
+      },
+      {
+        label: "今日总 TOKENS",
+        value: formatTokenCount(todayTokenSum),
+        placeholder: false,
+      },
+      {
+        label: "本月总消费",
+        value: formatUsd(monthCostSum),
+        placeholder: false,
+      },
+    ];
+  }, [tools]);
 
   return (
     <div className="flex h-screen w-full flex-col bg-gradient-to-br from-orange-50/50 via-white to-orange-50/30 dark:from-neutral-950 dark:via-neutral-900 dark:to-neutral-950">
@@ -466,7 +703,7 @@ export default function ConsolePage({
           The previous 28px (h-7) was tall enough technically but felt fiddly:
           users would aim for the visible "Ofox" text and miss. */}
       <div
-        className="h-10 shrink-0"
+        className="relative h-10 shrink-0"
         data-tauri-drag-region="true"
       >
         <div
@@ -477,6 +714,15 @@ export default function ConsolePage({
             Ofox
           </span>
         </div>
+        {/* Apex (region) switcher — 浮在右上角，和 LoginPage 头部保持同样的
+            位置/尺寸。`data-tauri-drag-region={false}` 阻止 select 的点击被
+            window-drag 吞掉。已登录态切换会触发 ConfirmDialog → 重新登录流程。 */}
+        <div
+          className="absolute right-3 top-2 z-10"
+          data-tauri-drag-region="false"
+        >
+          <OfoxApexSwitch triggerClassName="h-7 w-[150px] text-[12px]" />
+        </div>
       </div>
 
       {/* Content */}
@@ -485,9 +731,13 @@ export default function ConsolePage({
         <div className="mb-4 rounded-xl border border-border bg-background/80 px-5 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-purple-200 text-lg font-bold text-purple-700">
-                {user?.name?.charAt(0) ?? "U"}
-              </div>
+              <UserAvatar
+                avatarUrl={user?.avatar_url}
+                name={user?.name}
+                email={user?.email}
+                className="h-10 w-10"
+                fallbackTextClassName="text-lg"
+              />
               <div>
                 <div className="text-[14px] font-semibold text-foreground">
                   {user?.name ?? (userRetrying ? "加载中…" : "用户")}
@@ -552,16 +802,22 @@ export default function ConsolePage({
           </div>
         </div>
 
-        {/* Stats Row */}
+        {/* Stats Row — 4 张卡聚合自 `tools[].rawStats`。每张卡的 label
+            旁有一个 ❓，hover 整个 label+❓ 区域时弹出统一的「供参考」
+            说明：数据来源、误差来源、跳转 Ofox 官方后台。文案在 6 处
+            （4 张卡 + 表格 2 个列头）共用 `<StatHelpHover>` 复用。 */}
         <div className="mb-4 grid grid-cols-4 gap-3">
           {stats.map((stat) => (
             <div
               key={stat.label}
               className="flex flex-col items-start rounded-xl border border-border bg-background/80 px-4 py-3"
             >
-              <span className="text-[11px] text-muted-foreground">
-                {stat.label}
-              </span>
+              <StatHelpHover apex={apex}>
+                <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                  {stat.label}
+                  <HelpCircle className="h-3 w-3 opacity-60" />
+                </span>
+              </StatHelpHover>
               <span
                 className={
                   stat.placeholder
@@ -629,11 +885,21 @@ export default function ConsolePage({
               <div className="flex items-center gap-3 border-b border-border bg-muted/30 px-4 py-2 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
                 <div className="h-4 w-9 shrink-0" aria-hidden />
                 <div className="min-w-0 flex-1">工具 / 状态</div>
-                <div
-                  className="w-[88px] text-right"
-                  title="按自然月统计，每月 1 号 00:00 本地时间重置"
-                >
-                  本月 Token
+                <div className="w-[210px] text-right">
+                  <StatHelpHover apex={apex} align="end">
+                    <span className="inline-flex items-center gap-1">
+                      今日数据
+                      <HelpCircle className="h-3 w-3 opacity-60" />
+                    </span>
+                  </StatHelpHover>
+                </div>
+                <div className="w-[88px] text-right">
+                  <StatHelpHover apex={apex} align="end">
+                    <span className="inline-flex items-center gap-1">
+                      本月 Token
+                      <HelpCircle className="h-3 w-3 opacity-60" />
+                    </span>
+                  </StatHelpHover>
                 </div>
                 <div className="w-[68px] text-center">操作</div>
               </div>
@@ -662,6 +928,50 @@ export default function ConsolePage({
                         <ToolHealthPill snapshot={healthSnapshot[tool.id]} />
                       </div>
                     </div>
+                    {/* "今日数据" column — three-line stack: 请求 / Token / 金额.
+                      Mirrors the right-side "本月 Token" column's supported/
+                      unsupported branch so OpenCode-style tools that bypass
+                      the proxy show the same "不支持统计" label here, instead
+                      of three rows of zeros that would misrepresent reality. */}
+                    {tool.proxySupported ? (
+                      <div
+                        className="w-[210px] text-right text-[11px] leading-[1.5] text-muted-foreground"
+                        title="今日 0:00 起的累计数据"
+                      >
+                        {tool.todayUsage ? (
+                          <>
+                            <div>
+                              请求{" "}
+                              <span className="font-medium text-foreground">
+                                {tool.todayUsage.requests}
+                              </span>{" "}
+                              次
+                            </div>
+                            <div>
+                              消耗 token{" "}
+                              <span className="font-medium text-foreground">
+                                {tool.todayUsage.tokens}
+                              </span>
+                            </div>
+                            <div>
+                              消耗金额{" "}
+                              <span className="font-medium text-foreground">
+                                {tool.todayUsage.cost}
+                              </span>
+                            </div>
+                          </>
+                        ) : (
+                          <span>—</span>
+                        )}
+                      </div>
+                    ) : (
+                      <div
+                        className="w-[210px] text-right text-[11px] text-muted-foreground"
+                        title="该工具未走 cc-switch 代理，无法统计今日数据"
+                      >
+                        不支持统计
+                      </div>
+                    )}
                     {tool.proxySupported ? (
                       <div
                         className="w-[88px] text-right text-[14px] font-medium text-foreground"
@@ -781,6 +1091,115 @@ export default function ConsolePage({
         onOpenChange={setSettingsDialogOpen}
       />
     </div>
+  );
+}
+
+// ─── Stat help hover ─────────────────────────────────────────────────────
+//
+// Hover-triggered Popover that wraps a stat label (e.g. "今日总消费 ❓").
+// The 4 top cards and the 2 table headers (今日数据 / 本月 Token) all share
+// the same explanation text — extracting this avoids 6 copies of the same
+// JSX and keeps the messaging consistent.
+//
+// Why Popover (not Tooltip): the help text contains a clickable
+// "Ofox 官方后台 ↗" link, and Radix Tooltip doesn't allow the cursor to
+// move into the floating panel without dismissing it. Popover-with-hover
+// supports that flow — we hold `open` open while the cursor is over either
+// the trigger or the content via a small idle timer.
+
+const STAT_HELP_OPEN_DELAY_MS = 80;
+const STAT_HELP_CLOSE_DELAY_MS = 120;
+
+function StatHelpHover({
+  apex,
+  children,
+  align = "start",
+}: {
+  apex: OfoxApex;
+  children: React.ReactNode;
+  align?: "start" | "center" | "end";
+}) {
+  const [open, setOpen] = useState(false);
+  // Two pending timers — one for "open after a short hover" so brushing
+  // past the label doesn't flicker the popover, and one for "close after
+  // leaving" so moving from trigger → content stays open. Both reset on
+  // re-entry.
+  const openTimer = useRef<number | null>(null);
+  const closeTimer = useRef<number | null>(null);
+
+  const cancelTimers = useCallback(() => {
+    if (openTimer.current !== null) {
+      window.clearTimeout(openTimer.current);
+      openTimer.current = null;
+    }
+    if (closeTimer.current !== null) {
+      window.clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+  }, []);
+
+  const handleEnter = useCallback(() => {
+    cancelTimers();
+    openTimer.current = window.setTimeout(() => {
+      setOpen(true);
+    }, STAT_HELP_OPEN_DELAY_MS);
+  }, [cancelTimers]);
+
+  const handleLeave = useCallback(() => {
+    cancelTimers();
+    closeTimer.current = window.setTimeout(() => {
+      setOpen(false);
+    }, STAT_HELP_CLOSE_DELAY_MS);
+  }, [cancelTimers]);
+
+  useEffect(() => () => cancelTimers(), [cancelTimers]);
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger
+        asChild
+        onMouseEnter={handleEnter}
+        onMouseLeave={handleLeave}
+      >
+        <span className="inline-flex cursor-help">{children}</span>
+      </PopoverTrigger>
+      <PopoverContent
+        align={align}
+        side="bottom"
+        sideOffset={6}
+        onMouseEnter={handleEnter}
+        onMouseLeave={handleLeave}
+        // Tighter than the default popover: smaller width, lighter padding,
+        // smaller text. The previous 320px-wide variant felt like a modal
+        // sheet; this reads as an inline annotation.
+        className="w-[280px] p-3 text-[11.5px] leading-relaxed shadow-lg"
+      >
+        <div className="space-y-1.5 text-muted-foreground">
+          <p className="font-medium text-foreground">本页统计仅供参考</p>
+          <p>
+            数据来自本机捕获的 cc-switch 代理流量，以及对
+            Claude / Codex / Gemini 本地会话日志的离线解析。
+          </p>
+          <p className="pt-0.5 font-medium text-foreground">可能的误差来源</p>
+          <ul className="list-disc space-y-0.5 pl-4">
+            <li>未经本工具代理的请求不在统计范围内。</li>
+            <li>SSE 流式响应在部分路径下未被记录，可能导致偏低。</li>
+            <li>金额按本地缓存的模型单价估算，与实际计费可能有差异。</li>
+          </ul>
+          <p className="pt-1">
+            实际消费请以
+            <button
+              type="button"
+              onClick={() => settingsApi.openExternal(ofoxDashboardUrl(apex))}
+              className="mx-1 inline text-orange-500 hover:text-orange-600 hover:underline"
+            >
+              Ofox 官方后台 ↗
+            </button>
+            为准。
+          </p>
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 

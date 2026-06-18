@@ -15,7 +15,7 @@ import {
 import { settingsApi } from "@/lib/api";
 import { ofoxLogout } from "@/lib/api/ofoxAuth";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
-import { OfoxApexSwitch } from "@/components/OfoxApexSwitch";
+import { UserAvatar } from "@/components/UserAvatar";
 import { getCurrentVersion } from "@/lib/updater";
 import type { Settings } from "@/types";
 
@@ -339,10 +339,6 @@ export default function OfoxSettingsDialog({
 
   // ── Render ─────────────────────────────────────────────────────────────
 
-  const userInitial = (user?.name || user?.email || "U")
-    .charAt(0)
-    .toUpperCase();
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
@@ -373,9 +369,13 @@ export default function OfoxSettingsDialog({
           <SectionCard title="账户">
             <div className="flex items-center justify-between px-4 py-3">
               <div className="flex min-w-0 items-center gap-3">
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-purple-200 text-base font-bold text-purple-700">
-                  {userInitial}
-                </div>
+                <UserAvatar
+                  avatarUrl={user?.avatar_url}
+                  name={user?.name}
+                  email={user?.email}
+                  className="h-10 w-10"
+                  fallbackTextClassName="text-base"
+                />
                 <div className="min-w-0">
                   <div className="truncate text-[14px] font-semibold text-foreground">
                     {user?.name ?? "未登录"}
@@ -397,21 +397,9 @@ export default function OfoxSettingsDialog({
             </div>
           </SectionCard>
 
-          {/* ─── 区域 ─────────────────────────────────────────────────── */}
-          {/* 与"账户"分卡：账户卡是身份信息（你是谁），区域卡是平台连接点
-              （你连到哪个域）。混在一起会让 logout 与 apex 切换的语义模糊。
-              切换时 `OfoxApexSwitch` 内部弹确认 + 后端原子完成
-              logout/reseed/emit reauth-requested，MainApp 自动跳 LoginPage。 */}
-          <SectionCard title="区域">
-            <Row
-              label="访问区域"
-              hint="国内用户请选 ofox.io，海外用户选 ofox.ai"
-              control={<OfoxApexSwitch />}
-              isLast
-            />
-          </SectionCard>
-
           {/* ─── 偏好 ─────────────────────────────────────────────────── */}
+          {/* "区域"卡曾在此与"偏好"之间——切到 ConsolePage 顶栏右上角的
+              OfoxApexSwitch 后这里冗余，移除。Apex 切换仍由那个组件统一收口。 */}
           <SectionCard title="偏好">
             {/* Auto-launch */}
             <Row

@@ -274,7 +274,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
       {/* Apex (region) switcher — 浮在右上角，避开 drag-region 中心；用户在
           授权之前就能选对 apex，避免 device flow 打到错误的 IDP。 */}
       <div className="absolute right-3 top-2 z-10">
-        <OfoxApexSwitch triggerClassName="h-7 w-[126px] text-[12px]" />
+        <OfoxApexSwitch triggerClassName="h-7 w-[150px] text-[12px]" />
       </div>
 
       <div className="flex flex-1 w-full items-center justify-center">

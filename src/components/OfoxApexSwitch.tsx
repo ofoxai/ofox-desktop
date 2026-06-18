@@ -1,4 +1,5 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState, type ComponentType, type SVGProps } from "react";
+import { Flag, Globe2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -7,12 +8,13 @@ import {
   SelectContent,
   SelectItem,
   SelectTrigger,
-  SelectValue,
 } from "@/components/ui/select";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
 import { ofoxSetApex } from "@/lib/api/ofoxApex";
 import type { OfoxApex } from "@/lib/ofoxUrls";
+
+type LucideIcon = ComponentType<SVGProps<SVGSVGElement>>;
 
 interface OfoxApexSwitchProps {
   /**
@@ -22,14 +24,23 @@ interface OfoxApexSwitchProps {
   triggerClassName?: string;
 }
 
-const APEX_OPTIONS: ReadonlyArray<{ value: OfoxApex; label: string }> = [
-  { value: "ofox.ai", label: "海外 · ofox.ai" },
-  { value: "ofox.io", label: "国内 · ofox.io" },
+const APEX_OPTIONS: ReadonlyArray<{
+  value: OfoxApex;
+  label: string;
+  icon: LucideIcon;
+}> = [
+  { value: "ofox.ai", label: "海外 · ofox.ai", icon: Globe2 },
+  { value: "ofox.io", label: "国内 · ofox.io", icon: Flag },
 ];
 
 const APEX_LABEL: Record<OfoxApex, string> = {
   "ofox.ai": "海外 · ofox.ai",
   "ofox.io": "国内 · ofox.io",
+};
+
+const APEX_ICON: Record<OfoxApex, LucideIcon> = {
+  "ofox.ai": Globe2,
+  "ofox.io": Flag,
 };
 
 /**
@@ -108,14 +119,33 @@ export function OfoxApexSwitch({
         disabled={submitting}
       >
         <SelectTrigger className={triggerClassName}>
-          <SelectValue />
+          {/* 显式渲染 trigger：图标 + 当前 apex 的纯 label。
+              不能用 `<SelectValue />`——它会回显选中 SelectItem 的全部
+              children，包含我们 absolute 放进 pl-7 槽里的图标，导致 trigger
+              和 item 叠出两个地球图标。这里直接读 APEX_LABEL，可访问性上
+              SelectTrigger 自身已暴露 role=combobox + value，读屏不受影响。 */}
+          <span className="flex items-center gap-1.5 truncate">
+            {(() => {
+              const Icon = APEX_ICON[apex];
+              return <Icon className="h-3.5 w-3.5 shrink-0 opacity-70" />;
+            })()}
+            <span className="truncate">{APEX_LABEL[apex]}</span>
+          </span>
         </SelectTrigger>
         <SelectContent>
-          {APEX_OPTIONS.map((opt) => (
-            <SelectItem key={opt.value} value={opt.value}>
-              {opt.label}
-            </SelectItem>
-          ))}
+          {APEX_OPTIONS.map((opt) => {
+            const Icon = opt.icon;
+            return (
+              <SelectItem key={opt.value} value={opt.value}>
+                {/* 绝对定位到 SelectItem 自带的 pl-7 空白槽里，和原本预留给
+                    勾选标记的位置对齐；文字保持基线不动。 */}
+                <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2">
+                  <Icon className="h-3.5 w-3.5 opacity-70" />
+                </span>
+                {opt.label}
+              </SelectItem>
+            );
+          })}
         </SelectContent>
       </Select>
 
