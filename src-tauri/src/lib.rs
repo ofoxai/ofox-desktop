@@ -1699,6 +1699,7 @@ pub fn run() {
             commands::manage_tool::ofox_ping_model,
             commands::get_tool_health_snapshot,
             commands::trigger_tool_health_check_now,
+            commands::show_main_window,
         ]);
 
     let app = builder

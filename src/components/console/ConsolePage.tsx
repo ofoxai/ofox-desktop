@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { Settings, RefreshCw, Loader2, HelpCircle } from "lucide-react";
 import { toast } from "sonner";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { settingsApi } from "@/lib/api";
 import { proxyApi } from "@/lib/api/proxy";
 import { usageApi } from "@/lib/api/usage";
@@ -242,6 +243,32 @@ export default function ConsolePage({
   const [balanceRefreshing, setBalanceRefreshing] = useState(false);
   /** Standalone spinner for the manual "绑定的工具" usage refresh button. */
   const [usageRefreshing, setUsageRefreshing] = useState(false);
+
+  // 监听 tray popover 发出的"打开偏好设置"事件，把当前 dialog 拉起来。
+  // popover 是独立 webview，无法直接调用本组件的 setState，因此走 Tauri
+  // event 通信。channel 名与 BottomMenu.tsx 里的 emit 必须一致。
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    (async () => {
+      try {
+        const off = await listen("ofox-open-settings", () => {
+          setSettingsDialogOpen(true);
+        });
+        if (cancelled) {
+          off();
+        } else {
+          unlisten = off;
+        }
+      } catch (e) {
+        console.error("[ConsolePage] listen ofox-open-settings failed", e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
 
   /**
    * Refetch *only* the user/wallet snapshot. Decoupled from `loadData` so the

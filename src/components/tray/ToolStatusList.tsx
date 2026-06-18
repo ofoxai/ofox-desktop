@@ -1,54 +1,86 @@
 import { useRef, useState, useEffect, useCallback } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
-const MOCK_TOOLS = [
-  {
-    abbr: "CC",
-    color: "bg-orange-700",
-    name: "Claude Code",
-    subtitle: "Claude Sonnet 4.6 \u00b7 $1.24 今日",
-    status: "active" as const,
-  },
-  {
-    abbr: "Cu",
-    color: "bg-orange-600",
-    name: "Cursor",
-    subtitle: "Claude Sonnet 4.6 \u00b7 $1.86 今日",
-    status: "active" as const,
-  },
-  {
-    abbr: "OC",
-    color: "bg-orange-500",
-    name: "OpenCode",
-    subtitle: "GPT-5.2 \u00b7 $0.72 今日",
-    status: "active" as const,
-  },
-  {
-    abbr: "Co",
-    color: "bg-orange-600",
-    name: "Continue",
-    subtitle: "Claude Sonnet 4.6 \u00b7 未使用",
-    status: "idle" as const,
-  },
-  {
-    abbr: "Ai",
-    color: "bg-orange-500",
-    name: "Aider",
-    subtitle: "认证失败（HTTP 401）\u00b7 需要重新绑定",
-    status: "error" as const,
-  },
-];
+import { manageToolApi } from "@/lib/api/manageTool";
+import { usageApi } from "@/lib/api/usage";
+import {
+  TOOL_META,
+  TOOL_ORDER,
+  PROXY_SUPPORTED_TOOLS,
+} from "@/config/toolMeta";
 
-const STATUS_DOT: Record<string, string> = {
+/**
+ * 单个工具的"活跃度"——与主窗口 ConsolePage 的状态点完全同语义：
+ *
+ *   active = 已接管 + 检测到二进制     (绿点)
+ *   error  = 已接管但未检测到 / 未检测到 (红点)
+ *   idle   = 不支持代理 / 未开启代理   (灰点)
+ *
+ * 由 TrayPopoverApp 集中算好后透传给 StatsRow / ToolStatusList，
+ * 保证 popover 内部多处状态显示一致。
+ */
+export type ToolActiveness = "active" | "error" | "idle";
+export type ToolActivenessMap = Record<string, ToolActiveness>;
+
+interface ToolStatusListProps {
+  boundTools: string[];
+  activeness: ToolActivenessMap;
+}
+
+interface ToolRowData {
+  id: string;
+  abbr: string;
+  label: string;
+  color: string;
+  /** 当前激活的 Ofox 模型；拉不到时为 null（保持 UI 不抖）。 */
+  model: string | null;
+  /** 今日花费 USD；不在 PROXY_SUPPORTED_TOOLS 时为 null。 */
+  todayCostUsd: number | null;
+  /** 今日是否有过请求（用于在金额=0 时显示"未使用"而非 $0.00）。 */
+  todayHasUsage: boolean;
+}
+
+/** activeness -> 状态点颜色。 */
+const STATUS_DOT_BG: Record<ToolActiveness, string> = {
   active: "bg-green-500",
-  idle: "bg-gray-400",
   error: "bg-red-500",
+  idle: "bg-gray-400",
 };
 
-export default function ToolStatusList() {
+/** activeness -> hover title 文案，与主页 statusText 同口径方便用户对照。 */
+const STATUS_TITLE: Record<ToolActiveness, string> = {
+  active: "已接管",
+  error: "未检测到",
+  idle: "未开启代理 / 不支持代理统计",
+};
+
+function todayStartSec(): number {
+  const t = new Date();
+  t.setHours(0, 0, 0, 0);
+  return Math.floor(t.getTime() / 1000);
+}
+
+function formatUsd(value: number): string {
+  return `$${value.toFixed(2)}`;
+}
+
+/** 解析 totalCost 字段（后端返回的是字符串小数）。 */
+function parseTotalCost(s: string | undefined): number {
+  if (!s) return 0;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
+export default function ToolStatusList({
+  boundTools,
+  activeness,
+}: ToolStatusListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [scrollRatio, setScrollRatio] = useState(0);
   const [thumbRatio, setThumbRatio] = useState(1);
   const [showTrack, setShowTrack] = useState(false);
+  const [rows, setRows] = useState<ToolRowData[]>([]);
 
   const update = useCallback(() => {
     const el = scrollRef.current;
@@ -69,6 +101,85 @@ export default function ToolStatusList() {
     return () => ro.disconnect();
   }, [update]);
 
+  // 拉每个工具的当前模型 + 今日花费。在 mount + window focus 时各拉一次。
+  useEffect(() => {
+    let cancelled = false;
+
+    const sortedIds = boundTools
+      .filter((id) => TOOL_META[id])
+      .sort((a, b) => TOOL_ORDER.indexOf(a) - TOOL_ORDER.indexOf(b));
+
+    if (sortedIds.length === 0) {
+      setRows([]);
+      return;
+    }
+
+    const loadAll = async () => {
+      const results = await Promise.all(
+        sortedIds.map(async (id) => {
+          const meta = TOOL_META[id];
+          // 模型名：拉不到不影响其它字段
+          let model: string | null = null;
+          try {
+            const m = await manageToolApi.getActiveModel(id);
+            model = typeof m === "string" && m.trim() ? m : null;
+          } catch {
+            model = null;
+          }
+
+          // 今日花费：只查代理支持的工具，避免对 opencode 等返回 0 误导
+          let todayCostUsd: number | null = null;
+          let todayHasUsage = false;
+          if (PROXY_SUPPORTED_TOOLS.includes(id)) {
+            try {
+              const s = await usageApi.getUsageSummary(
+                todayStartSec(),
+                undefined,
+                id,
+              );
+              todayCostUsd = parseTotalCost(s.totalCost);
+              todayHasUsage = s.totalRequests > 0;
+            } catch {
+              todayCostUsd = null;
+            }
+          }
+
+          const row: ToolRowData = {
+            id,
+            abbr: meta.abbr,
+            label: meta.label,
+            color: meta.color,
+            model,
+            todayCostUsd,
+            todayHasUsage,
+          };
+          return row;
+        }),
+      );
+      if (!cancelled) setRows(results);
+    };
+
+    void loadAll();
+
+    const onFocus = () => void loadAll();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", onFocus);
+    };
+    // 依赖 boundTools 数组本身变化（参考引用）— mount 一次即可，
+    // boundTools 由父组件控制刷新节奏。
+  }, [boundTools]);
+
+  const handleEmptyClick = useCallback(async () => {
+    try {
+      await invoke("show_main_window");
+      await getCurrentWindow().hide();
+    } catch (e) {
+      console.error("[ToolStatusList] open main failed", e);
+    }
+  }, []);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col border-t border-border">
       {/* 固定标题 */}
@@ -83,29 +194,65 @@ export default function ToolStatusList() {
           onScroll={update}
           className="h-full overflow-y-auto px-2 pb-1"
         >
-          {MOCK_TOOLS.map((tool) => (
-            <div
-              key={tool.name}
-              className="flex items-center gap-2.5 rounded-md px-1.5 py-1.5 hover:bg-accent/50"
+          {rows.length === 0 ? (
+            <button
+              onClick={handleEmptyClick}
+              className="mx-1.5 my-2 flex w-[calc(100%-12px)] flex-col items-center justify-center gap-0.5 rounded-md border border-dashed border-border/70 px-3 py-4 text-center transition-colors hover:bg-accent/50"
             >
-              <div
-                className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${tool.color} text-[10px] font-bold text-white`}
-              >
-                {tool.abbr}
+              <div className="text-[12px] font-medium text-foreground">
+                暂未绑定工具
               </div>
-              <div className="min-w-0 flex-1">
-                <div className="text-[12px] font-medium leading-tight text-foreground">
-                  {tool.name}
-                </div>
-                <div className="truncate text-[10px] text-muted-foreground">
-                  {tool.subtitle}
-                </div>
+              <div className="text-[10px] text-muted-foreground">
+                点此前往主窗口完成绑定
               </div>
-              <span
-                className={`h-2 w-2 shrink-0 rounded-full ${STATUS_DOT[tool.status]}`}
-              />
-            </div>
-          ))}
+            </button>
+          ) : (
+            rows.map((row) => {
+              const state = activeness[row.id] ?? "idle";
+              const dotColor = STATUS_DOT_BG[state];
+
+              const subtitleParts: string[] = [];
+              if (row.model) subtitleParts.push(row.model);
+              if (PROXY_SUPPORTED_TOOLS.includes(row.id)) {
+                if (row.todayCostUsd === null) {
+                  subtitleParts.push("今日数据加载中…");
+                } else if (row.todayHasUsage) {
+                  subtitleParts.push(`${formatUsd(row.todayCostUsd)} 今日`);
+                } else {
+                  subtitleParts.push("今日未使用");
+                }
+              } else {
+                subtitleParts.push("不支持统计");
+              }
+              const subtitle =
+                subtitleParts.length > 0 ? subtitleParts.join(" · ") : "—";
+
+              return (
+                <div
+                  key={row.id}
+                  className="flex items-center gap-2.5 rounded-md px-1.5 py-1.5 hover:bg-accent/50"
+                >
+                  <div
+                    className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${row.color} text-[10px] font-bold text-white`}
+                  >
+                    {row.abbr}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[12px] font-medium leading-tight text-foreground">
+                      {row.label}
+                    </div>
+                    <div className="truncate text-[10px] text-muted-foreground">
+                      {subtitle}
+                    </div>
+                  </div>
+                  <span
+                    className={`h-2 w-2 shrink-0 rounded-full ${dotColor}`}
+                    title={STATUS_TITLE[state]}
+                  />
+                </div>
+              );
+            })
+          )}
         </div>
 
         {/* 自定义滚动进度条 */}
