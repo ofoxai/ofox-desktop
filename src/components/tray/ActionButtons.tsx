@@ -3,7 +3,7 @@ import { useOfoxApex } from "@/hooks/useOfoxApex";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
 import { isOfoxBillingManager } from "@/lib/api/ofoxAuth";
 import {
-  ofoxDashboardUrl,
+  ofoxActivityUrl,
   ofoxWalletUrl,
 } from "@/lib/ofoxUrls";
 
@@ -33,7 +33,7 @@ export default function ActionButtons() {
         </button>
       )}
       <button
-        onClick={() => settingsApi.openExternal(ofoxDashboardUrl(apex))}
+        onClick={() => settingsApi.openExternal(ofoxActivityUrl(apex))}
         className="flex-1 rounded-lg border border-border py-1.5 text-[12px] font-medium text-foreground hover:bg-accent"
       >
         用量详情

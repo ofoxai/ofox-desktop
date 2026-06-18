@@ -35,6 +35,15 @@ export const ofoxRegisterUrl = (a: OfoxApex): string =>
 export const ofoxDashboardUrl = (a: OfoxApex): string =>
   `https://app.${a}/dashboard`;
 
+/**
+ * `https://app.<apex>/analytics/activity` —— 详细用量明细页。
+ *
+ * Tray popover 与主窗口"用量详情"按钮使用：dashboard 是用户活动总览，
+ * activity 才是用量条目级明细，更贴合"用量详情"语义。
+ */
+export const ofoxActivityUrl = (a: OfoxApex): string =>
+  `https://app.${a}/analytics/activity`;
+
 /** `https://<apex>/terms` —— 登录页底部条款。 */
 export const ofoxTermsUrl = (a: OfoxApex): string => `https://${a}/terms`;
 
