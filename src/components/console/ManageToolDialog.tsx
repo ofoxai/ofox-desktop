@@ -111,6 +111,11 @@ export default function ManageToolDialog({
   const [pingResult, setPingResult] = useState<PingResult | null>(null);
   const [pingLoading, setPingLoading] = useState(false);
 
+  // Today's stats (per-tool, midnight-local-time → now). null = 还没加载完。
+  // 「今日统计」整段（含 today-stats fetch、loading state、cell renderer）已在
+  // 用户要求下移除 —— ConsolePage 顶部 4 张卡 + 列表中「今日数据」列已经覆盖
+  // 这部分信息，dialog 里再展示一遍只是冗余。
+
   // Initial load when the dialog opens for a given tool.
   useEffect(() => {
     if (!tool) return;
@@ -359,30 +364,6 @@ export default function ManageToolDialog({
                   result={pingResult}
                   model={draftModel}
                 />
-              </div>
-
-              {/* ---- Today's stats (placeholder) ---- */}
-              <div className="space-y-2">
-                <Label className="text-[13px]">今日统计</Label>
-                <div className="grid grid-cols-3 gap-2">
-                  {[
-                    { label: "请求", key: "requests" },
-                    { label: "TOKENS", key: "tokens" },
-                    { label: "金额", key: "cost" },
-                  ].map((cell) => (
-                    <div
-                      key={cell.key}
-                      className="rounded-md border border-border-default bg-muted/30 px-3 py-2"
-                    >
-                      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                        {cell.label}
-                      </div>
-                      <div className="mt-1 text-[13px] font-medium text-muted-foreground">
-                        即将推出
-                      </div>
-                    </div>
-                  ))}
-                </div>
               </div>
             </div>
 
