@@ -64,6 +64,11 @@ pub struct TrayAppSection {
 }
 
 /// Auto 菜单项后缀
+///
+/// dead_code: native menu 绑定已废弃（见 `refresh_tray_menu` 注释），但
+/// `create_tray_menu` 仍构建 menu 来维持 provider/工具状态——这个常量给
+/// 那条死路径用，构建出来的 menu 不会装到 tray 上。
+#[allow(dead_code)]
 pub const AUTO_SUFFIX: &str = "auto";
 pub const TRAY_ID: &str = "ofox-switch";
 
@@ -293,6 +298,12 @@ fn sort_providers(
 }
 
 /// 处理供应商托盘事件
+///
+/// dead_code: native menu 已不再绑到 tray（OFox 改版后左/右键统一弹 popover），
+/// 此函数与下面的 `handle_auto_click`/`handle_provider_click`/
+/// `handle_tray_menu_event` 都进入冷路径。保留以便未来恢复 native menu 时
+/// 不必从 git 翻历史。
+#[allow(dead_code)]
 pub fn handle_provider_tray_event(app: &tauri::AppHandle, event_id: &str) -> bool {
     for section in TRAY_SECTIONS.iter() {
         if let Some(suffix) = event_id.strip_prefix(section.prefix) {
@@ -326,6 +337,7 @@ pub fn handle_provider_tray_event(app: &tauri::AppHandle, event_id: &str) -> boo
 }
 
 /// 处理 Auto 点击：启用 proxy 和 auto_failover
+#[allow(dead_code)] // 见 `handle_provider_tray_event` 的注释
 fn handle_auto_click(app: &tauri::AppHandle, app_type: &AppType) -> Result<(), AppError> {
     if let Some(app_state) = app.try_state::<AppState>() {
         let app_type_str = app_type.as_str();
@@ -415,6 +427,7 @@ fn handle_auto_click(app: &tauri::AppHandle, app_type: &AppType) -> Result<(), A
 }
 
 /// 处理供应商点击：关闭 auto_failover + 切换供应商
+#[allow(dead_code)] // 见 `handle_provider_tray_event` 的注释
 fn handle_provider_click(
     app: &tauri::AppHandle,
     app_type: &AppType,
@@ -629,18 +642,17 @@ fn update_tray_usage_labels(app: &tauri::AppHandle) {
     }
 }
 
+/// Tray native menu 在 OFox 改版后已被废弃——左/右键都统一弹 popover 窗口
+/// （见 `lib.rs` 里的 `on_tray_icon_event`）。这个函数保留签名以兼容仍在调用
+/// 它的旧路径（provider 切换、tool 接管状态变化、定时刷新等），但**不再
+/// 真的把菜单装到 tray 上**——一旦 set_menu，macOS 右键就会绕过 popover
+/// 直接弹 native menu，破坏左右键一致的体验。
+///
+/// `create_tray_menu` 仍保留以维持 provider/工具状态的构建路径，但产物在
+/// lib.rs 启动处和这里都被丢弃。
 pub fn refresh_tray_menu(app: &tauri::AppHandle) {
-    use crate::store::AppState;
-
-    if let Some(state) = app.try_state::<AppState>() {
-        if let Ok(new_menu) = create_tray_menu(app, state.inner()) {
-            if let Some(tray) = app.tray_by_id(TRAY_ID) {
-                if let Err(e) = tray.set_menu(Some(new_menu)) {
-                    log::error!("刷新托盘菜单失败: {e}");
-                }
-            }
-        }
-    }
+    // 显式忽略 app 参数：保留签名兼容，不做实际工作。
+    let _ = app;
 }
 
 #[cfg(target_os = "macos")]
@@ -663,6 +675,7 @@ pub fn apply_tray_policy(app: &tauri::AppHandle, dock_visible: bool) {
 }
 
 /// 处理托盘菜单事件
+#[allow(dead_code)] // 见 `handle_provider_tray_event` 的注释
 pub fn handle_tray_menu_event(app: &tauri::AppHandle, event_id: &str) {
     log::info!("处理托盘菜单事件: {event_id}");
 

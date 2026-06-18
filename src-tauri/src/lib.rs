@@ -763,14 +763,29 @@ pub fn run() {
             log::info!("✓ Deep-link URL handler registered");
 
             // 创建动态托盘菜单
-            let menu = tray::create_tray_menu(app.handle(), &app_state)?;
+            //
+            // 历史上这个 menu 会绑到 tray 上做 macOS/Windows 右键菜单，但 OFox
+            // 改版后右键也统一走 popover 窗口（与左键一致），所以不再 `.menu()`
+            // 它，只调用 `create_tray_menu` 是为了保留 provider/工具的状态构建
+            // 路径——避免下面那一摞 set_menu 调用突然踩空。`refresh_tray_menu`
+            // 已被改写成 noop，create 出来的 menu 这里就直接丢弃。
+            let _menu = tray::create_tray_menu(app.handle(), &app_state)?;
 
             // 构建托盘
+            //
+            // 左/右键都走自定义 popover——不绑 native menu。Tauri 2.x 的
+            // tray-icon 在没绑 menu 时，所有鼠标事件都会进 `on_tray_icon_event`，
+            // 这是把右键统一成左键行为的最干净做法（show_menu_on_left_click
+            // 只能控制左键不弹 menu，右键的 native popup 必须靠"不绑"来禁用）。
             let mut tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID)
                 .on_tray_icon_event(|tray, event| match event {
-                    // 左键点击：切换自定义 popover 窗口
+                    // 鼠标按键松开时切换 popover——左键和右键走同一逻辑。
+                    //
+                    // 用 button_state == Up 而不是 Down，避免在 macOS 上"按下
+                    // 还没抬起"那一帧 popover 已弹但鼠标还在按着导致 focus
+                    // 错乱。两个按键统一一份代码，没有任何 button-specific 逻辑。
                     TrayIconEvent::Click {
-                        button: tauri::tray::MouseButton::Left,
+                        button: tauri::tray::MouseButton::Left | tauri::tray::MouseButton::Right,
                         button_state: tauri::tray::MouseButtonState::Up,
                         rect,
                         ..
@@ -792,10 +807,6 @@ pub fn run() {
                         });
                     }
                     _ => log::debug!("unhandled event {event:?}"),
-                })
-                .menu(&menu)
-                .on_menu_event(|app, event| {
-                    tray::handle_tray_menu_event(app, &event.id.0);
                 })
                 .show_menu_on_left_click(false);
 
