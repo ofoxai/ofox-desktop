@@ -55,7 +55,6 @@ export interface ManageToolTarget {
   label: string;
   color: string;
   version: string | null;
-  statusText: string;
 }
 
 interface ManageToolDialogProps {
@@ -286,8 +285,7 @@ export default function ManageToolDialog({
                   {tool.label}
                 </div>
                 <div className="truncate text-[12px] text-muted-foreground">
-                  {tool.statusText}
-                  {tool.version ? ` · v${tool.version}` : " · 未检测到"}
+                  {tool.version ? `v${tool.version}` : "未检测到"}
                 </div>
               </div>
             </DialogHeader>

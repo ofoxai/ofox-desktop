@@ -84,6 +84,12 @@ export async function bindTools(tools: string[]): Promise<string[]> {
       console.error(`[bindTools] bind ${tool} failed`, e);
     }
   }
+  // 再 emit 一次 prefs-updated，唤醒 tool_health loop —— 此时 ofox_bind_tool
+  // 已完成、active provider 切到 ofox-<app>，health check 才能读到正确的
+  // model。第一次 emit 在 mirrorBoundToolsToSettings 里（与 bind 并行抢跑），
+  // 那次 read 可能仍指向 official seed (models=[]) → "未配置模型"。这次补
+  // emit 是为了让 UI 收到的最终 pill 反映 bind 后的真实状态。
+  void emit("ofox-prefs-updated");
   return tools;
 }
 

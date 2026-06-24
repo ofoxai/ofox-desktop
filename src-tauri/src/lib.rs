@@ -1135,11 +1135,15 @@ pub fn run() {
                     }
                 });
 
-                // Session log usage sync: 启动时同步一次，之后每 60 秒检查
+                // Session log usage sync: 启动时同步一次。**60s 定期 loop 已移除**
+                // —— 主窗口不再展示统计，定时扫描会持续打日志、浪费 IO。
+                // 解析函数 (`session_usage::sync_claude_session_logs` /
+                // `session_usage_codex::sync_codex_usage` /
+                // `session_usage_gemini::sync_gemini_usage`) 保留：UsageDashboard /
+                // tray popover / `sync_session_usage` Tauri 命令仍可主动调，让用户
+                // 在自己想看时按需触发一次新鲜的扫描。
                 let db_for_session_sync = state.db.clone();
                 tauri::async_runtime::spawn(async move {
-                    const SESSION_SYNC_INTERVAL_SECS: u64 = 60;
-
                     // Pricing sync 必须先于 session 解析跑：session_usage_*
                     // 在写入每条 proxy_request_logs 时按 model 查 model_pricing
                     // 算 total_cost_usd。先 refresh 一次 pricing，新模型才不会
@@ -1152,7 +1156,8 @@ pub fn run() {
                         log::warn!("Pricing sync initial tick failed: {e}");
                     }
 
-                    // 首次同步
+                    // 首次同步——给 UsageDashboard / tray 启动时有数据可看，
+                    // 之后再要新数据需要用户主动触发。
                     if let Err(e) =
                         crate::services::session_usage::sync_claude_session_logs(
                             &db_for_session_sync,
@@ -1173,36 +1178,6 @@ pub fn run() {
                         )
                     {
                         log::warn!("Gemini usage initial sync failed: {e}");
-                    }
-
-                    // 定期同步
-                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-                        SESSION_SYNC_INTERVAL_SECS,
-                    ));
-                    interval.tick().await; // skip immediate first tick
-                    loop {
-                        interval.tick().await;
-                        if let Err(e) =
-                            crate::services::session_usage::sync_claude_session_logs(
-                                &db_for_session_sync,
-                            )
-                        {
-                            log::warn!("Session usage periodic sync failed: {e}");
-                        }
-                        if let Err(e) =
-                            crate::services::session_usage_codex::sync_codex_usage(
-                                &db_for_session_sync,
-                            )
-                        {
-                            log::warn!("Codex usage periodic sync failed: {e}");
-                        }
-                        if let Err(e) =
-                            crate::services::session_usage_gemini::sync_gemini_usage(
-                                &db_for_session_sync,
-                            )
-                        {
-                            log::warn!("Gemini usage periodic sync failed: {e}");
-                        }
                     }
                 });
             });
