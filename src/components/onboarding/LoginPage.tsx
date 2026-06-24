@@ -10,7 +10,6 @@ import {
   type OfoxUserInfo,
 } from "@/lib/api/ofoxAuth";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
-import { OfoxApexSwitch } from "@/components/OfoxApexSwitch";
 import {
   ofoxPrivacyUrl,
   ofoxRegisterUrl,
@@ -271,11 +270,9 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
         data-tauri-drag-region="true"
       />
 
-      {/* Apex (region) switcher — 浮在右上角，避开 drag-region 中心；用户在
-          授权之前就能选对 apex，避免 device flow 打到错误的 IDP。 */}
-      <div className="absolute right-3 top-2 z-10">
-        <OfoxApexSwitch triggerClassName="h-7 w-[150px] text-[12px]" />
-      </div>
+      {/* Apex 切换器在 onboarding 阶段不显示：未授权用户从 OFox 官网下载客户端时
+          已经决定了走 .io / .ai，登录前再暴露选择只会把 device flow 引到错误的
+          IDP。需要切换的用户登录后可以在设置弹窗里改。 */}
 
       <div className="flex flex-1 w-full items-center justify-center">
       <div className="flex w-full max-w-xl flex-col items-center px-8">

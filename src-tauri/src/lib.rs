@@ -18,9 +18,13 @@ mod lightweight;
 mod linux_fix;
 mod mcp;
 mod ofox_auth;
-mod ofox_auth_sync;
+// `ofox_auth_sync` 模块在 bind 直写改造（commit 4）后整体废弃——OAuth
+// access_token 不再被当 LLM key 写进 ofox-* provider 的 settings_config。
+// 历史实现见 git log。
 mod ofox_apex;
 mod ofox_endpoints;
+mod ofox_secret;
+mod ofox_api_keys;
 mod openclaw_config;
 mod opencode_config;
 mod panic_hook;
@@ -959,45 +963,14 @@ pub fn run() {
                     }
                 });
 
-                // Listen for token-refresh events so we can re-sync the new
-                // access_token into every ofox-* provider's settings_config.
-                // Without this, the proxy keeps forwarding requests using the
-                // stale token cached in the provider row (set originally by
-                // `ofox_bind_tool`), and Claude/Codex start returning 401 once
-                // the token expires (~1 h). The handler is fire-and-forget;
-                // any failure is logged but not surfaced.
-                use tauri::Listener;
-                let token_sync_handle = app.handle().clone();
-                let token_sync_state = state.0.clone();
-                app.handle().listen("ofox-auth-token-refreshed", move |_evt| {
-                    let app_handle = token_sync_handle.clone();
-                    let ofox_state = token_sync_state.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let token = {
-                            let manager = ofox_state.read().await;
-                            match manager.get_valid_access_token().await {
-                                Ok(t) => t,
-                                Err(e) => {
-                                    log::warn!(
-                                        "[OfoxAuth] token-refresh listener: get_valid_access_token failed: {e}"
-                                    );
-                                    return;
-                                }
-                            }
-                        };
-                        let app_state = app_handle.state::<AppState>();
-                        if let Err(e) =
-                            crate::ofox_auth_sync::sync_token_to_ofox_providers(
-                                &app_state.db,
-                                &token,
-                            )
-                        {
-                            log::warn!(
-                                "[OfoxAuth] token-refresh listener: sync to providers failed: {e}"
-                            );
-                        }
-                    });
-                });
+                // 历史上这里挂一个 `ofox-auth-token-refreshed` listener，把
+                // 新 access_token 同步进每个 `ofox-*` provider 的 settings_config
+                // ——proxy 转发请求时从那份 settings_config 读 token 注入。
+                // **bind 直写改造后**（commit 4），ofox 路径已经把真实 sk-of-
+                // 明文直接写进工具的真实配置文件、不再经 proxy 转发；OAuth
+                // access_token 也不再被当 LLM key 用。这个同步因此变得无意
+                // 义——保留只会在 access_token 刷新时反复"写一份不会被读"
+                // 的字段进 DB，徒增混淆。整段移除。
 
                 app.manage(state);
                 log::info!("✓ OfoxAuthManager initialized");
@@ -1061,8 +1034,13 @@ pub fn run() {
 
                 initialize_common_config_snippets(&state);
 
-                // 检查 settings 表中的代理状态，自动恢复代理服务
-                restore_proxy_state_on_startup(&state).await;
+                // 注：曾经在这里调 `restore_proxy_state_on_startup`——读
+                // `proxy_config.enabled` 然后无脑给所有标 true 的工具重跑
+                // takeover。新 bind 流程是"直写真 sk-of- 到工具配置文件"，
+                // 进程重启不会让磁盘失效，所以这层"事后修复"反而会把刚 bind
+                // 好的真 sk-of- 覆盖回 PROXY_MANAGED 占位符。
+                // 整段移除——启动后磁盘是什么就是什么。老 takeover 残留状态
+                // 通过 unbind / 重置 DB 收尾。
 
                 // Self-heal: a tool can have proxy_config.enabled=true while
                 // its active provider is still the official seed
@@ -1693,6 +1671,10 @@ pub fn run() {
             // Ofox apex (region) switching
             commands::ofox_apex::ofox_get_apex,
             commands::ofox_apex::ofox_set_apex,
+            commands::ofox_api_keys::ofox_list_api_keys,
+            commands::ofox_api_keys::ofox_create_api_key_for_tool,
+            commands::ofox_api_keys::ofox_refresh_api_key_for_tool,
+            commands::ofox_api_keys::ofox_revoke_api_key_for_tool,
             commands::manage_tool::get_tool_config_file_path,
             commands::manage_tool::get_active_ofox_model,
             commands::manage_tool::set_active_ofox_model,
@@ -1832,56 +1814,15 @@ pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
     }
 }
 
-// ============================================================
-// 启动时恢复代理状态
-// ============================================================
-
-/// 启动时根据 proxy_config 表中的代理状态自动恢复代理服务
-///
-/// 检查 `proxy_config.enabled` 字段，如果有任一应用的状态为 `true`，
-/// 则自动启动代理服务并接管对应应用的 Live 配置。
-async fn restore_proxy_state_on_startup(state: &store::AppState) {
-    // 收集需要恢复接管的应用列表（从 proxy_config.enabled 读取）
-    let mut apps_to_restore = Vec::new();
-    for app_type in ["claude", "codex", "gemini"] {
-        if let Ok(config) = state.db.get_proxy_config_for_app(app_type).await {
-            if config.enabled {
-                apps_to_restore.push(app_type);
-            }
-        }
-    }
-
-    if apps_to_restore.is_empty() {
-        log::debug!("启动时无需恢复代理状态");
-        return;
-    }
-
-    log::info!("检测到上次代理状态需要恢复，应用列表: {apps_to_restore:?}");
-
-    // 逐个恢复接管状态
-    for app_type in apps_to_restore {
-        match state
-            .proxy_service
-            .set_takeover_for_app(app_type, true)
-            .await
-        {
-            Ok(()) => {
-                log::info!("✓ 已恢复 {app_type} 的代理接管状态");
-            }
-            Err(e) => {
-                log::error!("✗ 恢复 {app_type} 的代理接管状态失败: {e}");
-                // 失败时清除该应用的状态，避免下次启动再次尝试
-                if let Err(clear_err) = state
-                    .proxy_service
-                    .set_takeover_for_app(app_type, false)
-                    .await
-                {
-                    log::error!("清除 {app_type} 代理状态失败: {clear_err}");
-                }
-            }
-        }
-    }
-}
+// 注：旧 `restore_proxy_state_on_startup` 已在 bind 直写改造后整段移除。
+// 当时是为 takeover 时代设计的——bind 时把工具配置改成 `127.0.0.1:15721`
+// 占位符，进程退出再起就得重新启 proxy server 并重新走 takeover 才能让占位
+// 符变得"会用"。新 bind 改成"直接把真 sk-of- 写工具配置"后，工具配置文件本
+// 身就是稳态、不依赖任何进程在跑，无需事后修复。
+//
+// 反过来，如果留着这段自愈，它会无脑把老 takeover 残留的
+// `proxy_config.enabled=true` 当真，启动时把刚 bind 好的真 sk-of- 重新盖回
+// `PROXY_MANAGED`。
 
 fn initialize_common_config_snippets(state: &store::AppState) {
     // Auto-extract common config snippets from clean live files when snippet is missing.

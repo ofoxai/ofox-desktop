@@ -32,15 +32,24 @@ async function mirrorBoundToolsToSettings(tools: string[]): Promise<void> {
 }
 
 /**
- * Tools the backend can fully bind to OfoxAI in one call (sets the
- * ofox-* provider as current AND injects the OAuth access_token AND turns
- * on takeover). Gemini is intentionally out — its OfoxAI seed has no
- * token field today (Gemini CLI uses its own Google OAuth flow), so we
- * fall back to just enabling takeover.
+ * 走"ofox 直写"路径 bind 的工具：调 `ofox_bind_tool` —— 后端拿 sk-of-
+ * API key（keychain 命中 / 否则调 `/openapi/api-keys` 签发）→ 直接把真
+ * Token 写进工具配置文件、baseURL 指 ofox gateway，**绕开** proxy takeover。
+ *
+ * **Gemini 不在内**：它的 `~/.gemini/.env` 没有 LLM auth token 字段
+ * （CLI 用 Google OAuth 自有流程），后端 `ofox_provider_for` 对 Gemini 返
+ * `None` 直接拒绝。Gemini bind 退回老 `setProxyTakeoverForApp`——proxy 转
+ * 发层负责附加 token；这是历史遗留语义，跟新 bind 路径并存。
  *
  * Keep this in sync with `commands/ofox_auth.rs::ofox_provider_for`.
  */
-const OFOX_AUTO_BIND_TOOLS: ReadonlySet<string> = new Set(["claude", "codex"]);
+const OFOX_AUTO_BIND_TOOLS: ReadonlySet<string> = new Set([
+  "claude",
+  "codex",
+  "opencode",
+  "openclaw",
+  "hermes",
+]);
 
 /**
  * Persist the bound-tool set and wire each tool through to OfoxAI.

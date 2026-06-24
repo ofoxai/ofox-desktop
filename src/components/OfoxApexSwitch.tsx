@@ -29,13 +29,13 @@ const APEX_OPTIONS: ReadonlyArray<{
   label: string;
   icon: LucideIcon;
 }> = [
-  { value: "ofox.ai", label: "海外 · ofox.ai", icon: Globe2 },
-  { value: "ofox.io", label: "国内 · ofox.io", icon: Flag },
+  { value: "ofox.ai", label: "ofox.ai", icon: Globe2 },
+  { value: "ofox.io", label: "ofox.io", icon: Flag },
 ];
 
 const APEX_LABEL: Record<OfoxApex, string> = {
-  "ofox.ai": "海外 · ofox.ai",
-  "ofox.io": "国内 · ofox.io",
+  "ofox.ai": "ofox.ai",
+  "ofox.io": "ofox.io",
 };
 
 const APEX_ICON: Record<OfoxApex, LucideIcon> = {

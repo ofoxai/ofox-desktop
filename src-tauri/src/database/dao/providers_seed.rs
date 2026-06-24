@@ -127,14 +127,14 @@ pub(crate) const OFOX_SEED_IDS: &[&str] = &[
 /// 调用约束：
 /// - 必须在 [`crate::ofox_apex::current_apex`] 已经被切到**目标**值之后调用——
 ///   `ofox_seeds()` 内部会按当前值拼 base_url，顺序错了等于没切。
-/// - 必须在 OFox logout（清 token）**之前或之后**都行，但若在之前调用，新写
-///   入的 settings_config 里 `*_KEY`/`*_TOKEN` 字段都是空字符串（seed 模板里
-///   就是空），用户重新登录后通过 `ofox-auth-token-refreshed` listener 自动
-///   填回。本函数自身不读/写 token。
+/// - 必须在 OFox logout（清 token）**之前或之后**都行：新 bind 直写架构下
+///   ofox-* provider 的 settings_config 里 `*_KEY`/`*_TOKEN` 字段永远是
+///   seed 模板的空字符串——本函数自身不读/写 token，token 注入只发生在
+///   `commands/ofox_auth.rs::bind_tool_to_ofox_internal` 内部、写到工具
+///   真实配置文件而非 DB。
 ///
 /// 部分失败处理：单个 row 写失败 → log warn 继续下一个，整体返回成功条数。
-/// 与 [`crate::ofox_auth_sync::sync_token_to_ofox_providers`] 风格一致——半残
-/// 总比整段崩好。
+/// 半残总比整段崩好。
 pub fn reseed_ofox_providers_with_current_apex(
     db: &crate::database::Database,
 ) -> Result<usize, crate::error::AppError> {

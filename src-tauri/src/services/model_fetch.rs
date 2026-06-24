@@ -35,7 +35,7 @@ struct GeminiModelsResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GeminiModelEntry {
-    /// 格式: "models/provider/model-name"
+    /// 格式: "models/provider/model-name"，例如 `models/google/gemini-2.5-pro`
     name: String,
     owned_by: Option<String>,
 }
@@ -67,6 +67,10 @@ fn is_chat_model(id: &str) -> bool {
 /// Ofox 各协议的模型列表端点。base 由 [`crate::ofox_apex::gateway_base`] 单一
 /// 开关，dev/prod、ofox.ai/ofox.io 切换都收敛到这里——避免之前几处常量分散
 /// 漏改某个 URL 导致 release build 把请求打到错误地区。
+///
+/// 三条端点都对应 ofox.ai 公开文档（`https://ofox.ai/zh/docs/api/`）。dev 模式
+/// 下 base 是本地 ofox-gateway plugin，若本地 plugin 还没补齐对应路径会返回
+/// 404，这是 plugin 侧的实现问题——不要因此把线上请求改道。
 fn ofox_openai_models_url() -> String {
     format!("{}/v1/models", crate::ofox_apex::gateway_base())
 }
@@ -79,14 +83,34 @@ fn ofox_gemini_models_url() -> String {
     format!("{}/gemini/v1beta/models", crate::ofox_apex::gateway_base())
 }
 
-/// 从 Ofox 获取可用模型列表（公开接口，无需 API Key）
+/// 从 Ofox 获取可用模型列表
 ///
-/// 根据 protocol 参数选择对应的端点：
-/// - "openai": GET /v1/models（OpenAI 兼容格式）
-/// - "anthropic": GET /anthropic/v1/models（data[] 格式，同 OpenAI）
-/// - "gemini": GET /gemini/v1beta/models（models[] 格式，需适配）
-pub async fn fetch_ofox_models(protocol: &str) -> Result<Vec<FetchedModel>, String> {
+/// 端点选择（对应 `https://ofox.ai/zh/docs/api/<protocol>/models`）：
+/// - "openai":    GET /v1/models             —— OpenAI 兼容 data[] 格式
+/// - "anthropic": GET /anthropic/v1/models   —— 同 data[] 格式
+/// - "gemini":    GET /gemini/v1beta/models  —— models[] 原生格式，需把
+///   `name = "models/provider/id"` 还原成 `provider/id`
+///
+/// `access_token` 是 OfoxAI OAuth 颁发的 access_token。三条端点在文档里都标
+/// 注「无需 API Key」可匿名调用，但 dev 网关曾经短暂地对 /gemini 强制鉴权，
+/// 故这里在拿得到 token 时统一带上 Bearer——线上无害（公开接口忽略），dev
+/// 严格模式也能过。`None` 走匿名，由 gateway 决定是否放行。
+pub async fn fetch_ofox_models(
+    protocol: &str,
+    access_token: Option<&str>,
+) -> Result<Vec<FetchedModel>, String> {
     let client = crate::proxy::http_client::get();
+
+    /// 把 access_token 统一拼成 Authorization 头加到请求上。
+    fn with_auth(
+        req: reqwest::RequestBuilder,
+        access_token: Option<&str>,
+    ) -> reqwest::RequestBuilder {
+        match access_token {
+            Some(t) if !t.is_empty() => req.header("Authorization", format!("Bearer {t}")),
+            _ => req,
+        }
+    }
 
     match protocol {
         "openai" | "anthropic" => {
@@ -96,8 +120,7 @@ pub async fn fetch_ofox_models(protocol: &str) -> Result<Vec<FetchedModel>, Stri
                 ofox_anthropic_models_url()
             };
 
-            let response = client
-                .get(&url)
+            let response = with_auth(client.get(&url), access_token)
                 .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
                 .send()
                 .await
@@ -129,8 +152,7 @@ pub async fn fetch_ofox_models(protocol: &str) -> Result<Vec<FetchedModel>, Stri
             Ok(models)
         }
         "gemini" => {
-            let response = client
-                .get(ofox_gemini_models_url())
+            let response = with_auth(client.get(ofox_gemini_models_url()), access_token)
                 .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
                 .send()
                 .await
@@ -152,7 +174,9 @@ pub async fn fetch_ofox_models(protocol: &str) -> Result<Vec<FetchedModel>, Stri
                 .unwrap_or_default()
                 .into_iter()
                 .map(|m| {
-                    // Gemini name 格式为 "models/provider/model-name"，去掉 "models/" 前缀
+                    // `name` 形如 `models/google/gemini-2.5-pro`，去掉 "models/" 前缀
+                    // 后得到 `google/gemini-2.5-pro`，跟 openai 协议下的 vendor/id
+                    // 格式一致——前端选择器统一按这个形态展示。
                     let id = m
                         .name
                         .strip_prefix("models/")

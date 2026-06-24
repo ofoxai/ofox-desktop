@@ -121,12 +121,13 @@ pub async fn ofox_request_reauth(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// Identifier of the OfoxAI seed provider for a given app, plus the path
-/// inside `settings_config` where the OAuth access_token should be written.
+/// inside `settings_config` where the LLM API key should be written.
 ///
 /// The settings shape differs by app — Claude keeps tokens in `env.*`, Codex
-/// in `auth.*`, etc. — so the bind command needs an app-keyed table rather
-/// than a single helper. Kept inline so it stays next to the seeds it mirrors
-/// (see `database/dao/providers_seed.rs::OFOX_SEEDS`).
+/// in `auth.*`, OpenCode under `options.apiKey`, OpenClaw at top-level
+/// `apiKey`, Hermes at top-level `api_key` — so the bind command needs an
+/// app-keyed table rather than a single helper. Kept inline so it stays next
+/// to the seeds it mirrors (see `database/dao/providers_seed.rs::OFOX_SEEDS`).
 fn ofox_provider_for(app: &AppType) -> Option<(&'static str, &'static [&'static str])> {
     match app {
         // env.ANTHROPIC_AUTH_TOKEN — matches `ofox-claude` seed at
@@ -139,43 +140,21 @@ fn ofox_provider_for(app: &AppType) -> Option<(&'static str, &'static [&'static 
         // Google OAuth flow rather than a shared bearer. Returning None
         // surfaces a clear error rather than silently doing nothing.
         AppType::Gemini => None,
-        _ => None,
+        // options.apiKey — matches `ofox-opencode` seed at
+        // providers_seed.rs:278-280
+        AppType::OpenCode => Some(("ofox-opencode", &["options", "apiKey"])),
+        // top-level apiKey — matches `ofox-openclaw` seed at
+        // providers_seed.rs:291-293
+        AppType::OpenClaw => Some(("ofox-openclaw", &["apiKey"])),
+        // top-level api_key — matches `ofox-hermes` seed at
+        // providers_seed.rs:304-306
+        AppType::Hermes => Some(("ofox-hermes", &["api_key"])),
     }
 }
 
-/// Write `token` at `path` inside `settings`, creating intermediate objects
-/// as needed. `path` must be non-empty. Always ends by replacing the leaf
-/// value with the provided string.
-fn write_token_at_path(
-    settings: &mut serde_json::Value,
-    path: &[&str],
-    token: &str,
-) -> Result<(), String> {
-    if path.is_empty() {
-        return Err("token path is empty".into());
-    }
-    if !settings.is_object() {
-        *settings = serde_json::json!({});
-    }
-    let (last, ancestors) = path.split_last().expect("non-empty per check above");
-    let mut cursor = settings;
-    for key in ancestors {
-        let obj = cursor
-            .as_object_mut()
-            .ok_or_else(|| format!("settings_config 路径 {key} 处不是对象"))?;
-        // Insert an empty object if the key is missing or holds a non-object
-        // (e.g. accidentally serialized as a string by a hand edit).
-        if !obj.get(*key).map(|v| v.is_object()).unwrap_or(false) {
-            obj.insert((*key).to_string(), serde_json::json!({}));
-        }
-        cursor = obj.get_mut(*key).expect("just inserted");
-    }
-    let leaf = cursor
-        .as_object_mut()
-        .ok_or_else(|| format!("settings_config 路径 {last} 的父级不是对象"))?;
-    leaf.insert((*last).to_string(), serde_json::json!(token));
-    Ok(())
-}
+// 注：`write_token_at_path` 在 bind 直写改造（commit 4）后被
+// `ProxyService::write_token_into_settings` 取代——后者直接服务于"读 seed
+// 模板 + 注入 token + 写盘"路径，DB provider 行不再被 bind 注入污染。
 
 /// Internal implementation of "bind this tool to OfoxAI", reusable from
 /// non-Tauri-command contexts (e.g. the startup self-heal path in `lib.rs`).
@@ -189,48 +168,104 @@ pub async fn bind_tool_to_ofox_internal(
     app: &str,
 ) -> Result<(), String> {
     let app_type = AppType::from_str(app).map_err(|e| format!("无效的应用类型: {e}"))?;
-    let (provider_id, token_path) = ofox_provider_for(&app_type)
+    // 只校验"该工具是否在 ofox 路径里有 token 注入字段"——具体路径由
+    // `ProxyService::ofox_write_direct_to_live` 内部处理。Gemini 走的是
+    // Google OAuth flow，没有 LLM auth token 字段，目前 ofox_provider_for
+    // 对 Gemini 返 None，bind 在此提前拒绝。
+    let provider_id = ofox_provider_for(&app_type)
+        .map(|t| t.0)
         .ok_or_else(|| format!("{} 暂不支持自动绑定到 OfoxAI", app_type.as_str()))?;
 
-    // Pull a fresh token first — if auth is broken, fail before mutating any
-    // DB state so the user can re-login without leaving a half-bound entry.
-    let token = {
+    // 1) 取要写到工具配置里的 LLM 凭据。
+    //
+    // **主路径**：调 `ofox_api_keys::fetch_or_create_api_key(_, CachedOk, _)`
+    // ——keychain 命中直接拿；未命中调 `POST /openapi/api-keys` 签发新 key，
+    // 落 keychain + settings 元数据后返回 key 明文。这是端点 GA 后的稳定路径。
+    //
+    // **逃生口**：`OFOX_USE_OAUTH_TOKEN_AS_KEY=1` 时退回老行为，把 OAuth
+    // access_token 当 LLM key 用。仅供端点切流期临时验证，**下一个 commit 删**
+    // ——access_token ~1h 过期会让工具 401，不是稳态。
+    let token = if std::env::var("OFOX_USE_OAUTH_TOKEN_AS_KEY")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
+        log::warn!(
+            "[ofox_bind] OFOX_USE_OAUTH_TOKEN_AS_KEY set — using OAuth access_token as LLM key \
+             for {}. Transitional escape hatch—remove after /openapi/api-keys verified in prod.",
+            app_type.as_str()
+        );
         let manager = ofox_manager.read().await;
         manager
             .get_valid_access_token()
             .await
             .map_err(|e| format!("获取 OfoxAI 访问令牌失败: {e}"))?
+    } else {
+        crate::ofox_api_keys::fetch_or_create_api_key(
+            app_type,
+            crate::ofox_api_keys::FetchMode::CachedOk,
+            ofox_manager,
+        )
+        .await
+        .map_err(|e| match e {
+            crate::ofox_api_keys::ApiKeyError::Unauthorized(msg) => {
+                format!("OFox 授权失效：{msg}。请退出登录后重新走 device flow。")
+            }
+            crate::ofox_api_keys::ApiKeyError::RemoteRejected(msg) => {
+                format!("OFox API key 服务端拒绝：{msg}")
+            }
+            crate::ofox_api_keys::ApiKeyError::Storage(msg) => {
+                format!("本地 keychain / settings 读写失败：{msg}")
+            }
+        })?
     };
 
-    // Read the seed provider, mutate, write back.
-    let mut provider = db
-        .get_provider_by_id(provider_id, app_type.as_str())
-        .map_err(|e| format!("读取 {provider_id} 失败: {e}"))?
-        .ok_or_else(|| format!("供应商 {provider_id} 不存在（应由启动种子建立）"))?;
+    // 2) 备份工具原配置（DB live_backups）。失败立刻中止——没备份就 bind 会
+    //    让 unbind 找不到东西恢复。Claude/Codex/Gemini 备份整文件；
+    //    OpenCode/OpenClaw/Hermes 备份 "ofox-* provider 子节快照"（bind 前不
+    //    存在就存哨兵）。详见 services/proxy.rs ofox_backup_live_config 注释。
+    proxy_service
+        .ofox_backup_live_config(&app_type)
+        .await
+        .map_err(|e| format!("备份 {} Live 配置失败: {e}", app_type.as_str()))?;
 
-    write_token_at_path(&mut provider.settings_config, token_path, &token)?;
+    // 3) 直接写工具真实配置文件——baseURL=ofox gateway、Token=真实 sk-of- 明文
+    //    （绕开 takeover 的 PROXY_MANAGED 占位语义；proxy server 不为 ofox 启动）。
+    //    内部读 ofox-<app> seed 模板 + 注入 token + 写盘。
+    if let Err(e) = proxy_service
+        .ofox_write_direct_to_live(&app_type, &token)
+        .await
+    {
+        // 写盘失败时尽力恢复备份，免得磁盘卡在"半改"状态。恢复也失败就把
+        // 两端的错都报给用户。
+        let restore_hint = match proxy_service.ofox_restore_from_backup(&app_type).await {
+            Ok(()) => "（已自动从备份恢复）",
+            Err(re) => {
+                log::error!(
+                    "[ofox_bind] {} write failed AND restore failed: {re}",
+                    app_type.as_str()
+                );
+                "（恢复备份也失败，请手动查日志）"
+            }
+        };
+        return Err(format!(
+            "写入 {} 工具配置失败: {e}{restore_hint}",
+            app_type.as_str()
+        ));
+    }
 
-    db.update_provider_settings_config(
-        app_type.as_str(),
-        provider_id,
-        &provider.settings_config,
-    )
-    .map_err(|e| format!("写入 {provider_id} settings_config 失败: {e}"))?;
-
-    // Switch active provider BEFORE flipping takeover so the takeover sync
-    // path sees the right current provider. `settings::set_current_provider`
-    // is the persisted source of truth (see `get_effective_current_provider`).
+    // 4) 切 current provider 到 ofox-<app>，DB is_current 跟随。
+    //    DB 里 ofox-<app> provider 的 settings_config **不再**被 bind 流程
+    //    污染——保持纯 seed 状态。前端不依赖那份字段；proxy 转发层在新路径
+    //    下也不会触发去读它。
     crate::settings::set_current_provider(&app_type, Some(provider_id))
         .map_err(|e| format!("设置 {} 当前供应商失败: {e}", app_type.as_str()))?;
-    // Also mirror to DB's is_current column so anything reading `is_current`
-    // (e.g. tray menu, provider list ordering) stays in sync.
     db.set_current_provider(app_type.as_str(), provider_id)
         .map_err(|e| format!("更新 {} 数据库 is_current 失败: {e}", app_type.as_str()))?;
 
-    // Finally, ensure proxy takeover is on for this app. Idempotent.
-    proxy_service
-        .set_takeover_for_app(app_type.as_str(), true)
-        .await?;
+    // 5) bind 成功后更新 last_used_at——只有走 fetch_or_create_api_key 路径
+    //    才有元数据条目；OFOX_USE_OAUTH_TOKEN_AS_KEY 兜底路径下 `mark_key_used`
+    //    内部会发现没有元数据直接 noop。失败只 warn，不影响 bind 已经完成。
+    crate::ofox_api_keys::mark_key_used(app_type);
 
     Ok(())
 }
@@ -268,26 +303,27 @@ pub async fn ofox_bind_tool(
     .await
 }
 
-/// Mirror of [`bind_tool_to_ofox_internal`] — undo the OfoxAI takeover for
-/// `app` and restore the official provider as active.
+/// Mirror of [`bind_tool_to_ofox_internal`] — undo the OfoxAI bind for `app`
+/// and restore the official provider as active.
 ///
 /// Steps (the inverse order of bind, so we never leave a window where the
-/// live config still has Ofox endpoints but a non-Ofox active provider):
-///   1. Disable proxy takeover for the app — restores the user's previous
-///      live config from backup, stops the proxy if no other tool needs it.
-///   2. Switch the active provider to `<app>-official` for the three apps
-///      that ship an official seed (claude/codex/gemini). For tools without
-///      an official seed (opencode/openclaw/hermes), step 1 alone is the
-///      meaningful action — they have no built-in fallback to switch to.
+/// live config still has ofox endpoints but a non-ofox active provider):
+///   1. 从 DB live_backups 读快照 → 写回工具真实配置 → 删 backup
+///      (`ofox_restore_from_backup`)。Claude/Codex/Gemini 是整文件还原；
+///      OpenCode/OpenClaw/Hermes 是 "ofox-* provider 子节" 还原（或删除，
+///      若 bind 前不存在）。
+///   2. 切 active provider 到 `<app>-official`（仅 claude/codex/gemini 有
+///      official seed；其它工具仅做步骤 1）。
 ///
-/// We deliberately leave the OfoxAI seed's `settings_config` (and any token
-/// previously written into it) alone. Re-binding later will overwrite the
-/// token with a fresh one, and keeping the old value avoids a second token
-/// request on the unbind path.
+/// 我们**故意保留**：
+///   - keychain 里的 `sk-of-...`——用户下次再 bind 直接命中、不重新调端点
+///   - settings.json 里的 `ofoxApiKeys` 元数据——同上
+///   - ofox-* provider 的 DB 行——是 seed，从来不被 bind 流程污染
 ///
-/// Note: the front-end is responsible for updating its own `ofox-bound-tools`
-/// localStorage list — that store is purely UI state and the backend has no
-/// view into it.
+/// 也**不**调 `revoke_remote`——服务端的 key 不主动撤销，留给用户在 ofox
+/// console 管理（避免"我不小心点了 unbind 就把我手工配过的 ofox-cli 也搞挂了"）。
+///
+/// Note: 前端管自己的 `ofox-bound-tools` localStorage——后端不维护那个。
 pub async fn unbind_tool_from_ofox_internal(
     db: &crate::database::Database,
     proxy_service: &crate::services::proxy::ProxyService,
@@ -296,18 +332,17 @@ pub async fn unbind_tool_from_ofox_internal(
     let app_type = AppType::from_str(app).map_err(|e| format!("无效的应用类型: {e}"))?;
     let app_str = app_type.as_str();
 
-    // 1) Turn off takeover first. This restores the live config from backup
-    //    so that, even if step 2 fails, the user's tool is no longer pointed
-    //    at api.ofox.ai with a stale token.
+    // 1) 从 backup 恢复磁盘 + 删 backup。失败立刻中止——没恢复前不能切官方
+    //    provider，否则用户的 active 是 official 但磁盘还指 ofox。
     proxy_service
-        .set_takeover_for_app(app_str, false)
+        .ofox_restore_from_backup(&app_type)
         .await
-        .map_err(|e| format!("关闭 {app_str} 代理接管失败: {e}"))?;
+        .map_err(|e| format!("恢复 {app_str} 工具配置失败: {e}"))?;
 
-    // 2) Switch active provider back to the official seed, if one exists.
-    //    The id convention `<app>-official` matches `OFFICIAL_SEEDS` in
-    //    `database/dao/providers_seed.rs`; only claude/codex/gemini have
-    //    official seeds today.
+    // 2) 切 active provider 到 official seed（如有）。
+    //    `<app>-official` id 跟 `database/dao/providers_seed.rs::OFFICIAL_SEEDS`
+    //    保持一致；目前只 claude/codex/gemini 有。其它工具无 official 概念，
+    //    步骤 1 已经把磁盘还原好，不再额外切。
     let official_id: Option<&str> = match app_type {
         AppType::Claude => Some("claude-official"),
         AppType::Codex => Some("codex-official"),
@@ -316,9 +351,7 @@ pub async fn unbind_tool_from_ofox_internal(
     };
 
     if let Some(id) = official_id {
-        // Persist via the same two-tier write that bind uses, so anything
-        // reading either source-of-truth (settings.json file or DB) sees
-        // the change consistently.
+        // 两端持久化保持一致：settings.json 与 DB is_current。
         crate::settings::set_current_provider(&app_type, Some(id))
             .map_err(|e| format!("设置 {app_str} 当前供应商失败: {e}"))?;
         db.set_current_provider(app_str, id)

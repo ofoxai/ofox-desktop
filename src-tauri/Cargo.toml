@@ -37,6 +37,11 @@ tauri-plugin-store = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-notification = "2.3"
 dirs = "5.0"
+# 系统钥匙串后端：macOS Keychain / Windows Credential Manager / Linux Secret
+# Service。v4 默认 feature `v1` 已经把三平台后端拉进来，**不要**加 features
+# —— 老文档里常见的 `apple-native` / `sync-secret-service` 是 v3 时代的产物，
+# v4 改成独立子 crate 通过 default feature 装配。
+keyring = "4"
 toml = "0.8"
 toml_edit = "0.22"
 reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream", "socks"] }
@@ -72,6 +77,9 @@ url = "2.5"
 auto-launch = "0.5"
 once_cell = "1.21.3"
 base64 = "0.22"
+# 生成"<tool> on <host>"风格的 ofox API key 默认名字——在 ofox console 里
+# 用户一眼看出这把 key 是哪个工具 / 哪台机器创建的。多设备场景靠 host 区分。
+hostname = "0.4"
 rusqlite = { version = "0.31", features = ["bundled", "backup", "hooks"] }
 indexmap = { version = "2", features = ["serde"] }
 rust_decimal = "1.33"
@@ -105,3 +113,6 @@ strip = "symbols"
 [dev-dependencies]
 serial_test = "3"
 tempfile = "3"
+# `/openapi/api-keys` 端点的客户端契约测试用——拦截 reqwest 请求、注入
+# 201/401/403/5xx 响应，验证 `ofox_api_keys::call_create_endpoint` 的错误分类。
+wiremock = "0.6"

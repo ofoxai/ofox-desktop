@@ -316,7 +316,10 @@ use crate::prompt_files::prompt_file_path;
 use crate::provider::ProviderManager;
 
 /// 应用类型
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// `Copy`：纯单元变体枚举，加 Copy 让它能塞进 `Slot::ApiKey { tool }` 这种带 `Copy`
+/// 约束的位置（参 `ofox_secret.rs`），调用方再传递时也不用到处 clone。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AppType {
     Claude,
@@ -328,7 +331,10 @@ pub enum AppType {
 }
 
 impl AppType {
-    pub fn as_str(&self) -> &str {
+    /// 返回 `&'static str`：body 全是字面量，没有理由让生命周期跟 `&self` 绑定。
+    /// 把签名收紧到 `'static` 让 `ofox_secret::Slot::account` 这类返回
+    /// `&'static str` 的调用方能直接转交，不用 leak / clone。
+    pub fn as_str(&self) -> &'static str {
         match self {
             AppType::Claude => "claude",
             AppType::Codex => "codex",

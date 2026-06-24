@@ -27,9 +27,29 @@ use tokio::sync::RwLock;
 // 单一开关让我们不再担心"token 在 dev IDP 签发但被打到 prod 网关"那种
 // dev/prod 混搭。`ofox_apex::*_url()` 在每次调用时重新求值，所以用户在 UI
 // 切换 apex 后下一次请求立刻走新地址，不需要重启进程。
-const OFOX_SCOPES: &str = "org.read balance.read offline_access llm.invoke";
-// TODO: 发布前替换为正式 client_id
-const OFOX_CLIENT_ID: &str = "ofox_app_switch_desktop_dev";
+// `apikey.write` 让我们能调 `POST/GET/PATCH/DELETE /openapi/api-keys`，
+// 给每个工具按 slug 单独签发一把 `sk-of-...` LLM key，写进工具真实配置文件。
+// `llm.read` / `llm.invoke` 当前都没被消费——chat/completions 这条链直连
+// LLM gateway，认证用 sk-of- key，不依赖 OAuth access_token 的 scope。
+const OFOX_SCOPES: &str = "org.read balance.read apikey.write offline_access";
+
+/// 线上 OAuth client（public client，无 client_secret）。在 ofox.io / ofox.ai 的
+/// OAuth app 后台注册为 `is_confidential=false`，device flow RFC 8628 §3.1 标准用法。
+const OFOX_CLIENT_ID_PROD: &str = "ofox_app_0f3825107a340c44320b0f21";
+
+/// 本地 dev IDP 用的 client。仅在 `OFOX_USE_LOCAL=1` 时启用，与 `ofox_apex` 的
+/// dev/prod 切换共用同一开关，保证"endpoint 与 client_id 永远在同一侧"。
+const OFOX_CLIENT_ID_DEV: &str = "ofox_app_switch_desktop_dev";
+
+/// 单一入口决定本进程当前用哪个 client_id。
+fn client_id() -> &'static str {
+    if crate::ofox_apex::use_local_dev_mode() {
+        OFOX_CLIENT_ID_DEV
+    } else {
+        OFOX_CLIENT_ID_PROD
+    }
+}
+
 const TOKEN_REFRESH_BUFFER_MS: i64 = 60_000;
 
 // ==================== Data Structures ====================
@@ -152,15 +172,53 @@ pub struct OfoxDeviceCodeResponse {
     pub interval: u64,
 }
 
+/// 当前 metadata 文件的 schema 版本。
+///
+/// `1` = 首版本，token 已搬进 OS 钥匙串，文件里只有 `expires_at` / `scope` /
+/// `user` / `expired` 等非敏感元数据。0/缺省 = 仍包含明文 token 的旧版，触发
+/// 一次性迁移（见 [`OfoxAuthManager::migrate_legacy_tokens`]）。
+const AUTH_METADATA_SCHEMA_VERSION: u32 = 1;
+
+/// 落盘的非敏感元数据。
+///
+/// 真正的 access_token / refresh_token 落在系统钥匙串里（[`ofox_secret`]），
+/// 这里只保留"重启后还想恢复 UI 状态用得到"的字段。
+///
+/// 一个反直觉的约束：当钥匙串里其实**没有** token（用户从未登录、或刚被清
+/// 掉）时，调用方不应该信任 `user` 字段——否则会出现"未登录但 UI 显示用户
+/// 邮箱"的尴尬中间态。守这条规则的逻辑在 [`OfoxAuthManager::load_from_disk_sync`]
+/// 里：只有读到至少一根 token 时才把 `user` 灌进内存。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct OfoxTokenStore {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
+struct OfoxAuthMetadata {
+    /// schema 版本号；缺省按 `0` 处理（即旧明文版）以便老文件平滑迁移。
+    #[serde(default)]
+    schema_version: u32,
     pub expires_at: i64,
     pub scope: String,
     pub user: Option<OfoxUserInfo>,
     /// Optional, present only for stores written by versions that track expired sessions.
     /// Older files on disk simply lack this field and are treated as `Active`.
+    #[serde(default)]
+    pub expired: bool,
+}
+
+/// 兼容反序列化：v0 / pre-schema 的磁盘文件里 token 还在明文 json 里。
+/// 只用在启动迁移路径，迁移完成后立即被新 schema 覆盖。
+///
+/// `serde(default)` 让缺字段也能解析，所以无论老文件少哪个字段都能解析成功，
+/// 我们靠 `access_token` / `refresh_token` 是否非空判断是否需要迁移。
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyOfoxTokenStore {
+    #[serde(default)]
+    pub access_token: String,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
+    #[serde(default)]
+    pub expires_at: i64,
+    #[serde(default)]
+    pub scope: String,
+    #[serde(default)]
+    pub user: Option<OfoxUserInfo>,
     #[serde(default)]
     pub expired: bool,
 }
@@ -219,10 +277,25 @@ pub struct OfoxAuthManager {
     /// Handle used to emit `ofox-auth-expired` / `ofox-auth-restored` events.
     /// Set via [`OfoxAuthManager::attach_app_handle`] after the Tauri app is built.
     app_handle: Arc<RwLock<Option<tauri::AppHandle>>>,
+    /// OAuth token 落到 OS 钥匙串的后端。`Arc<dyn …>` 是为了测试时能注入
+    /// `InMemoryStore` 跳过真实 Keychain（CI 环境没钥匙串守护进程）。
+    secret_store: Arc<dyn crate::ofox_secret::SecretStore>,
 }
 
 impl OfoxAuthManager {
     pub fn new(app_config_dir: PathBuf) -> Self {
+        Self::new_with_secret_store(
+            app_config_dir,
+            Arc::new(crate::ofox_secret::KeyringStore::new()),
+        )
+    }
+
+    /// 测试入口：注入自定义 SecretStore（通常是 `InMemoryStore`），其余字段
+    /// 跟生产路径一致。不要从生产代码调用——`OfoxAuthManager::new` 是单一入口。
+    pub fn new_with_secret_store(
+        app_config_dir: PathBuf,
+        secret_store: Arc<dyn crate::ofox_secret::SecretStore>,
+    ) -> Self {
         let storage_path = app_config_dir.join("ofox_auth.json");
 
         let manager = Self {
@@ -234,6 +307,7 @@ impl OfoxAuthManager {
             pending_device_codes: Arc::new(RwLock::new(HashMap::new())),
             http_client: Client::new(),
             app_handle: Arc::new(RwLock::new(None)),
+            secret_store,
         };
 
         if let Err(e) = manager.load_from_disk_sync() {
@@ -261,7 +335,7 @@ impl OfoxAuthManager {
             .post(crate::ofox_apex::device_auth_url())
             .header("Content-Type", "application/x-www-form-urlencoded")
             .form(&[
-                ("client_id", OFOX_CLIENT_ID),
+                ("client_id", client_id()),
                 ("scope", OFOX_SCOPES),
             ])
             .send()
@@ -337,7 +411,7 @@ impl OfoxAuthManager {
             .form(&[
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
                 ("device_code", device_code),
-                ("client_id", OFOX_CLIENT_ID),
+                ("client_id", client_id()),
             ])
             .send()
             .await
@@ -505,7 +579,7 @@ impl OfoxAuthManager {
             .form(&[
                 ("grant_type", "refresh_token"),
                 ("refresh_token", refresh_token.as_str()),
-                ("client_id", OFOX_CLIENT_ID),
+                ("client_id", client_id()),
             ])
             .send()
             .await
@@ -896,6 +970,22 @@ impl OfoxAuthManager {
             *s = OfoxAuthState::LoggedOut;
         }
 
+        // 同步删 keychain 两个条目。失败只记 warn——logout 必须能完成，否则
+        // 用户卡在"看着登出按钮但点不动"的中间态比"keychain 里残留死 token"
+        // 危险得多。`clear` 内部已经吞了 NoEntry。
+        if let Err(e) = self
+            .secret_store
+            .clear(crate::ofox_secret::Slot::AccessToken)
+        {
+            log::warn!("[OfoxAuth] Failed to clear access_token from keychain: {e}");
+        }
+        if let Err(e) = self
+            .secret_store
+            .clear(crate::ofox_secret::Slot::RefreshToken)
+        {
+            log::warn!("[OfoxAuth] Failed to clear refresh_token from keychain: {e}");
+        }
+
         if self.storage_path.exists() {
             if let Err(e) = std::fs::remove_file(&self.storage_path) {
                 log::warn!("[OfoxAuth] Failed to delete auth file: {e}");
@@ -907,6 +997,18 @@ impl OfoxAuthManager {
 
     // ==================== Persistence ====================
 
+    /// 持久化一次 auth 状态——token 字段写 OS 钥匙串，其余元数据写 json 文件。
+    ///
+    /// 写入顺序：**先 RT 再 AT**。理由：
+    ///   - RT 是长期凭据，写失败会让用户失去自愈刷新能力——必须先写它确保
+    ///     至少能支撑下一次登录恢复；
+    ///   - AT 即便短暂落不下也无所谓，下次启动 manager 用 RT 重刷一份即可；
+    ///   - 反过来如果先写 AT 成功、写 RT 失败，用户会看到"短期能跑、一小时
+    ///     后突然就要重登"的奇怪表现。
+    ///
+    /// 任一钥匙串调用失败即 fail-fast 返回 Err。json 写入用 atomic_write。
+    /// 调用方（`mark_expired` 之外的三处）会把这个 Err 一路冒到用户层，UI 上
+    /// 体现为登录失败、可以重试。
     fn save_to_disk(
         &self,
         access_token: &str,
@@ -916,69 +1018,173 @@ impl OfoxAuthManager {
         user: Option<&OfoxUserInfo>,
         expired: bool,
     ) -> Result<(), String> {
-        let store = OfoxTokenStore {
-            access_token: access_token.to_string(),
-            refresh_token: refresh_token.map(|s| s.to_string()),
+        use crate::ofox_secret::Slot;
+
+        // 1. 先处理 refresh_token：有值就写、没值就清。
+        match refresh_token {
+            Some(rt) if !rt.is_empty() => self.secret_store.save(Slot::RefreshToken, rt)?,
+            _ => self.secret_store.clear(Slot::RefreshToken)?,
+        }
+
+        // 2. 再处理 access_token：同理。`mark_expired` 走这条空 AT 路径清掉
+        //    钥匙串里那根失效的 access_token，避免别人误读到。
+        if access_token.is_empty() {
+            self.secret_store.clear(Slot::AccessToken)?;
+        } else {
+            self.secret_store.save(Slot::AccessToken, access_token)?;
+        }
+
+        // 3. 写元数据 json（不含任何 token 字段）。
+        let metadata = OfoxAuthMetadata {
+            schema_version: AUTH_METADATA_SCHEMA_VERSION,
             expires_at,
             scope: scope.to_string(),
             user: user.cloned(),
             expired,
         };
 
-        let data = serde_json::to_string_pretty(&store)
-            .map_err(|e| format!("Failed to serialize auth store: {e}"))?;
+        let data = serde_json::to_string_pretty(&metadata)
+            .map_err(|e| format!("Failed to serialize auth metadata: {e}"))?;
 
         crate::config::atomic_write(&self.storage_path, data.as_bytes())
             .map_err(|e| format!("Failed to write auth file: {e}"))?;
 
-        log::debug!("[OfoxAuth] Auth state persisted to disk");
+        log::debug!("[OfoxAuth] Auth state persisted (keychain + metadata)");
         Ok(())
     }
 
     fn load_from_disk_sync(&self) -> Result<(), String> {
         if !self.storage_path.exists() {
+            // 没有 json 文件——通常是全新安装或刚 logout。也兜底清一下钥匙串
+            // 残留（理论上 logout 已经清过；这里再补一刀防御历史 bug 残留）。
             return Ok(());
         }
 
         let content = std::fs::read_to_string(&self.storage_path)
             .map_err(|e| format!("Failed to read auth file: {e}"))?;
 
-        let store: OfoxTokenStore = serde_json::from_str(&content)
+        // 解析成 Value 以便先看 schema_version、再决定走新解析还是迁移路径。
+        // 用 Value 中转一次比起 try-OfoxAuthMetadata-then-try-Legacy 错误信息
+        // 更清晰，且 metadata 文件本来就小（< 2KB），性能不是顾虑。
+        let raw: serde_json::Value = serde_json::from_str(&content)
             .map_err(|e| format!("Failed to parse auth file: {e}"))?;
 
-        // If we previously persisted an `expired` flag, restore that state so
-        // the UI immediately knows to prompt for re-login instead of trying
-        // (and failing) to refresh again on startup.
-        let initial_state = if store.expired {
+        let schema_version = raw
+            .get("schema_version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+
+        // 旧 schema（含明文 token）走一次性迁移；新 schema 直接读。
+        if schema_version < AUTH_METADATA_SCHEMA_VERSION {
+            return self.migrate_legacy_tokens(&raw);
+        }
+
+        let metadata: OfoxAuthMetadata = serde_json::from_value(raw)
+            .map_err(|e| format!("Failed to deserialize auth metadata: {e}"))?;
+
+        self.hydrate_from_keychain(&metadata)
+    }
+
+    /// 从钥匙串读 token + 把 metadata 灌到内存字段。所有"新 schema 路径"的
+    /// 终点都在这里，无论是首次 load、刷新后重读，还是迁移成功后再 hydrate。
+    fn hydrate_from_keychain(&self, metadata: &OfoxAuthMetadata) -> Result<(), String> {
+        use crate::ofox_secret::Slot;
+
+        let stored_at = self.secret_store.load(Slot::AccessToken)?;
+        let stored_rt = self.secret_store.load(Slot::RefreshToken)?;
+        let has_any_token = stored_at.is_some() || stored_rt.is_some();
+
+        // 状态推导：expired flag 优先（哪怕钥匙串里 RT 还在，用户已被 IDP
+        // 拒过一次就不该再无声重试）。否则按"钥匙串里有没有 token"判断。
+        let initial_state = if metadata.expired {
             OfoxAuthState::Expired
-        } else if !store.access_token.is_empty() || store.refresh_token.is_some() {
+        } else if has_any_token {
             OfoxAuthState::Active
         } else {
             OfoxAuthState::LoggedOut
         };
 
         if let Ok(mut at) = self.access_token.try_write() {
-            *at = if store.access_token.is_empty() {
-                None
-            } else {
-                Some(CachedAccessToken {
-                    token: store.access_token,
-                    expires_at_ms: store.expires_at,
-                })
-            };
+            *at = stored_at.map(|token| CachedAccessToken {
+                token,
+                expires_at_ms: metadata.expires_at,
+            });
         }
         if let Ok(mut rt) = self.refresh_token.try_write() {
-            *rt = store.refresh_token;
+            *rt = stored_rt;
         }
         if let Ok(mut ui) = self.user_info.try_write() {
-            *ui = store.user;
+            // 只在确实有 token 时才信任 metadata 里的 user——避免"未登录但
+            // UI 显示历史邮箱"的尴尬。若两根 token 都没了，user 也清空。
+            *ui = if has_any_token { metadata.user.clone() } else { None };
         }
         if let Ok(mut s) = self.auth_state.try_write() {
             *s = initial_state;
         }
 
-        log::info!("[OfoxAuth] Loaded auth state from disk (state={initial_state:?})");
+        log::info!("[OfoxAuth] Loaded auth state (state={initial_state:?})");
         Ok(())
+    }
+
+    /// 一次性迁移：磁盘上还是含明文 token 的旧 schema。
+    ///
+    /// 流程：
+    ///   1. 用 `LegacyOfoxTokenStore` 把旧字段抠出来
+    ///   2. 钥匙串里如果已经有 token（说明之前迁过一半），跳过写入避免覆盖
+    ///      更新过的 token；否则按"先 RT 再 AT"顺序写入
+    ///   3. 全部成功才用新 schema 重写 json（自动丢弃 token 字段）
+    ///   4. 失败保留旧 json 原状，下次启动重试，期间 hydrate 直接读旧字段
+    ///      让用户先用着
+    fn migrate_legacy_tokens(&self, raw: &serde_json::Value) -> Result<(), String> {
+        use crate::ofox_secret::Slot;
+
+        let legacy: LegacyOfoxTokenStore = serde_json::from_value(raw.clone())
+            .map_err(|e| format!("Failed to deserialize legacy auth file: {e}"))?;
+
+        let has_legacy_at = !legacy.access_token.is_empty();
+        let has_legacy_rt = legacy
+            .refresh_token
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+
+        log::info!(
+            "[OfoxAuth] Migrating legacy auth file → keychain (at={has_legacy_at}, rt={has_legacy_rt})"
+        );
+
+        // 钥匙串现存值（若有）的"幂等保护"：之前如果已经迁过一次但 json 重写
+        // 失败，下次启动钥匙串里就已经有最新 token——再覆盖一遍会把刷新过的
+        // 新 token 写回成旧的。检测到非空就跳过。
+        let keychain_has_rt = self.secret_store.load(Slot::RefreshToken)?.is_some();
+        let keychain_has_at = self.secret_store.load(Slot::AccessToken)?.is_some();
+
+        if !keychain_has_rt {
+            if let Some(rt) = legacy.refresh_token.as_deref().filter(|s| !s.is_empty()) {
+                self.secret_store.save(Slot::RefreshToken, rt)?;
+            }
+        }
+        if !keychain_has_at && has_legacy_at {
+            self.secret_store
+                .save(Slot::AccessToken, &legacy.access_token)?;
+        }
+
+        // 用新 schema 重写元数据 json，把 token 字段顺势丢掉。这一步成功后
+        // 旧 token 才真正从磁盘消失——前面写钥匙串失败时不会走到这里。
+        let metadata = OfoxAuthMetadata {
+            schema_version: AUTH_METADATA_SCHEMA_VERSION,
+            expires_at: legacy.expires_at,
+            scope: legacy.scope.clone(),
+            user: legacy.user.clone(),
+            expired: legacy.expired,
+        };
+
+        let data = serde_json::to_string_pretty(&metadata)
+            .map_err(|e| format!("Failed to serialize migrated metadata: {e}"))?;
+        crate::config::atomic_write(&self.storage_path, data.as_bytes())
+            .map_err(|e| format!("Failed to rewrite auth file post-migration: {e}"))?;
+
+        log::info!("[OfoxAuth] Legacy auth file migrated to keychain + new schema");
+        self.hydrate_from_keychain(&metadata)
     }
 }
 
@@ -991,6 +1197,7 @@ fn compute_expires_at_ms(expires_in: Option<i64>) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ofox_secret::SecretStore;
 
     #[test]
     fn test_compute_expires_at_ms() {
@@ -1002,9 +1209,112 @@ mod tests {
 
     #[tokio::test]
     async fn test_manager_initial_state_not_authenticated() {
+        // 用 InMemoryStore 跑——CI 上没真实 keychain 守护进程，调 KeyringStore
+        // 会失败。线程注入符合 `new_with_secret_store` 的设计意图。
         let temp = tempfile::tempdir().unwrap();
-        let manager = OfoxAuthManager::new(temp.path().to_path_buf());
+        let manager = OfoxAuthManager::new_with_secret_store(
+            temp.path().to_path_buf(),
+            Arc::new(crate::ofox_secret::InMemoryStore::new()),
+        );
         assert!(!manager.is_authenticated());
         assert!(manager.get_user_info().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_legacy_json_migrates_tokens_to_keychain() {
+        // 模拟 v0 schema：旧 ofox_auth.json 含明文 token。启动后 manager 应
+        // 把 token 搬进 keychain（InMemoryStore），并把 json 改写为新 schema
+        // 不含 token 字段。
+        let temp = tempfile::tempdir().unwrap();
+        let auth_path = temp.path().join("ofox_auth.json");
+        let legacy = serde_json::json!({
+            "access_token": "legacy-at",
+            "refresh_token": "legacy-rt",
+            "expires_at": 1_700_000_000_000_i64,
+            "scope": "org.read balance.read offline_access",
+            "user": null,
+            "expired": false,
+        });
+        std::fs::write(&auth_path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+
+        let store: Arc<dyn crate::ofox_secret::SecretStore> =
+            Arc::new(crate::ofox_secret::InMemoryStore::new());
+        let manager = OfoxAuthManager::new_with_secret_store(
+            temp.path().to_path_buf(),
+            Arc::clone(&store),
+        );
+
+        // 钥匙串里应该出现两根 token
+        assert_eq!(
+            store
+                .load(crate::ofox_secret::Slot::AccessToken)
+                .unwrap()
+                .as_deref(),
+            Some("legacy-at")
+        );
+        assert_eq!(
+            store
+                .load(crate::ofox_secret::Slot::RefreshToken)
+                .unwrap()
+                .as_deref(),
+            Some("legacy-rt")
+        );
+
+        // 新 json 应该只剩元数据，schema_version=1
+        let migrated = std::fs::read_to_string(&auth_path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&migrated).unwrap();
+        assert_eq!(v["schema_version"], 1);
+        assert!(v.get("access_token").is_none());
+        assert!(v.get("refresh_token").is_none());
+
+        // Manager 状态应为 Active（迁移完成 + 至少一根 token）
+        assert!(manager.is_authenticated());
+    }
+
+    #[tokio::test]
+    async fn test_migration_skips_when_keychain_already_has_tokens() {
+        // 防御场景：上次迁移写完 keychain 但 json 重写失败 → 下次启动如果再
+        // 写一次 keychain 会用旧 token 覆盖期间被 refresh 过的新 token。
+        let temp = tempfile::tempdir().unwrap();
+        let auth_path = temp.path().join("ofox_auth.json");
+        let legacy = serde_json::json!({
+            "access_token": "stale-at-from-disk",
+            "refresh_token": "stale-rt-from-disk",
+            "expires_at": 0,
+            "scope": "",
+            "user": null,
+            "expired": false,
+        });
+        std::fs::write(&auth_path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
+
+        let store = crate::ofox_secret::InMemoryStore::new();
+        store
+            .save(crate::ofox_secret::Slot::AccessToken, "fresh-at")
+            .unwrap();
+        store
+            .save(crate::ofox_secret::Slot::RefreshToken, "fresh-rt")
+            .unwrap();
+        let store: Arc<dyn crate::ofox_secret::SecretStore> = Arc::new(store);
+
+        let _manager = OfoxAuthManager::new_with_secret_store(
+            temp.path().to_path_buf(),
+            Arc::clone(&store),
+        );
+
+        // 钥匙串里的 fresh token 不被磁盘旧值覆盖
+        assert_eq!(
+            store
+                .load(crate::ofox_secret::Slot::AccessToken)
+                .unwrap()
+                .as_deref(),
+            Some("fresh-at")
+        );
+        assert_eq!(
+            store
+                .load(crate::ofox_secret::Slot::RefreshToken)
+                .unwrap()
+                .as_deref(),
+            Some("fresh-rt")
+        );
     }
 }

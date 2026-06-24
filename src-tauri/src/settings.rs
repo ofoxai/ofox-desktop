@@ -167,6 +167,41 @@ impl WebDavSyncSettings {
     }
 }
 
+/// 单个工具对应的 ofox LLM API key 元数据。
+///
+/// key 本体（`sk-...`）**不**在这里——它在 [`crate::ofox_secret`] 的 keychain
+/// 槽位 `Slot::ApiKey { tool }` 里。本结构体存可见的"账面信息"：
+///
+///   - `key_id`：ofox-core 返回的服务端 id，撤销 / 查询用量等服务端操作的索引
+///   - `alias`：用户起的别名（可选；默认 `None`），用于 UI 标识"这把是给 Codex 用的"
+///   - `created_at` / `last_used_at`：人读的时间戳，便于排障
+///
+/// 字段保持紧凑——这份元数据要随 `settings.json` 落盘，里面任何敏感信息都跟
+/// "整把 key 进 keychain"的安全决策相违。所以**严禁**在这里加 key 的 secret /
+/// hash / 任何能反推 key 的字段。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiKeyMeta {
+    /// 关联的工具。整个 `ofox_api_keys` Vec 里 `tool` 是 unique key。
+    pub tool: AppType,
+    /// 服务端返回的 key id。空串非法——上游若不返 id 我们就拒绝持久化。
+    pub key_id: String,
+    /// 用户起的别名。`None` 表示没起。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    /// 服务端返回的明文 key 前缀（如 `sk-of-AbCdEf`），UI 列表用来辅助识别
+    /// "哪一把"。`None` 表示老版本数据 / 端点接入前的 stub 路径未填。**不能**
+    /// 用前缀反推 key 本体——key 本体在 keychain。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_start: Option<String>,
+    /// key 创建时间，unix epoch 秒。`upsert` 时不动（保留原始创建时间）。
+    pub created_at: i64,
+    /// 最近一次被注入到工具配置的时间，unix epoch 秒。`None` 表示从未注入过
+    /// （刚创建尚未 bind）。每次 bind 成功时由调用方更新。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<i64>,
+}
+
 /// 应用设置结构
 ///
 /// 存储设备级别设置，保存在本地 `~/.ofox-switch/settings.json`，不随数据库同步。
@@ -329,6 +364,19 @@ pub struct AppSettings {
     /// 删除 settings.json / 显式置 `None` 会让下一次启动重新探测。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ofox_apex_resolved: Option<bool>,
+
+    // ===== OFox 工具级 API key 元数据 =====
+    /// 每个工具一把 ofox API key 的元数据列表（不含 key 本体——本体在
+    /// keychain）。条目按 `tool` 唯一，`upsert_api_key_meta` 负责"存在则替换"。
+    ///
+    /// 为什么不进 SQLite：key 总数封顶就 6（工具数），写入是低频动作（用户
+    /// 主动 bind 工具时才动），用扁平 JSON 数组比加一张 DB 表 + 写 migration
+    /// 划算多了。如果以后要加用量统计、按时间窗口查询等需求，再考虑迁。
+    ///
+    /// `#[serde(default)]`：保证升级用户的老 settings.json（没这字段）读起来
+    /// 是空 Vec，向后兼容。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ofox_api_keys: Vec<ApiKeyMeta>,
 }
 
 fn default_show_in_tray() -> bool {
@@ -387,6 +435,7 @@ impl Default for AppSettings {
             bound_tools: None,
             ofox_apex: None,
             ofox_apex_resolved: None,
+            ofox_api_keys: Vec::new(),
         }
     }
 }
@@ -898,3 +947,181 @@ pub fn update_webdav_sync_status(status: WebDavSyncStatus) -> Result<(), AppErro
         }
     })
 }
+
+// ─── OFox 工具级 API key 元数据 helpers ───────────────────────────────────
+//
+// 三件套语义跟 keychain 那一层（`crate::ofox_secret`）解耦：本组只动 `settings.
+// json` 上的元数据列表；key 本体的存取调用方各自走 `SecretStore`。两边由
+// `ofox_api_keys::fetch_or_create_api_key` 协调一致。
+
+/// 取某工具的 API key 元数据（不读 keychain，所以拿不到 key 本体）。
+pub fn get_api_key_meta(tool: AppType) -> Option<ApiKeyMeta> {
+    settings_store()
+        .read()
+        .ok()
+        .and_then(|s| s.ofox_api_keys.iter().find(|m| m.tool == tool).cloned())
+}
+
+/// 列出所有工具的 API key 元数据，按 `AppType::all()` 顺序未必稳定，但条目本
+/// 身按 `tool` 唯一。
+pub fn list_api_key_metas() -> Vec<ApiKeyMeta> {
+    settings_store()
+        .read()
+        .map(|s| s.ofox_api_keys.clone())
+        .unwrap_or_default()
+}
+
+/// 写入或更新一个工具的 API key 元数据。
+///
+/// 唯一键：`meta.tool`。已存在则**整条替换**——上游约定 `key_id` 变化即"换了
+/// 一把 key"，元数据要随新 id 一起更新；不存在则追加。
+///
+/// 这里**不**自动维护 `created_at`——由调用方决定（首次创建用当前时间；后续
+/// 更新通常保留旧值或上游下发的新值）。让 `ApiKeyMeta` 本身就是单一事实来源，
+/// 而不是在 helper 里搞隐式合并。
+pub fn upsert_api_key_meta(meta: ApiKeyMeta) -> Result<(), AppError> {
+    if meta.key_id.trim().is_empty() {
+        return Err(AppError::Config(format!(
+            "ApiKeyMeta.key_id is empty for tool={:?}; refuse to persist",
+            meta.tool
+        )));
+    }
+    mutate_settings(|s| {
+        if let Some(slot) = s.ofox_api_keys.iter_mut().find(|m| m.tool == meta.tool) {
+            *slot = meta;
+        } else {
+            s.ofox_api_keys.push(meta);
+        }
+    })
+}
+
+/// 删除某工具的 API key 元数据。不存在不报错（幂等）——跟
+/// `SecretStore::clear` 的语义对齐，方便调用方一把"清干净"两边而不用 match
+/// 出"是不是真的有"。
+pub fn remove_api_key_meta(tool: AppType) -> Result<(), AppError> {
+    mutate_settings(|s| {
+        s.ofox_api_keys.retain(|m| m.tool != tool);
+    })
+}
+
+#[cfg(test)]
+mod api_key_meta_tests {
+    //! 这组测试只覆盖 helpers 对 `AppSettings.ofox_api_keys` 字段的纯函数
+    //! 行为——不触磁盘、不触 keychain。涉及 `settings_store` 全局单例的
+    //! 集成行为靠 `mutate_settings` 自己的串行测试覆盖。
+
+    use super::*;
+
+    fn sample_meta(tool: AppType, key_id: &str) -> ApiKeyMeta {
+        ApiKeyMeta {
+            tool,
+            key_id: key_id.to_string(),
+            alias: None,
+            key_start: None,
+            created_at: 1_700_000_000,
+            last_used_at: None,
+        }
+    }
+
+    #[test]
+    fn upsert_refuses_empty_key_id() {
+        let meta = ApiKeyMeta {
+            key_id: "   ".into(), // trim 后为空也算空
+            ..sample_meta(AppType::Claude, "")
+        };
+        let err = upsert_api_key_meta(meta).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("key_id"), "expected key_id error, got: {msg}");
+    }
+
+    /// 直接对 Vec 操作做断言（不经过 settings 单例，避免污染全局状态）。
+    /// upsert / remove 内部的 mutator 逻辑跟下面这个等价闭包一致，所以
+    /// 这里覆盖等价语义就够了。
+    fn apply_upsert(list: &mut Vec<ApiKeyMeta>, meta: ApiKeyMeta) {
+        if let Some(slot) = list.iter_mut().find(|m| m.tool == meta.tool) {
+            *slot = meta;
+        } else {
+            list.push(meta);
+        }
+    }
+
+    fn apply_remove(list: &mut Vec<ApiKeyMeta>, tool: AppType) {
+        list.retain(|m| m.tool != tool);
+    }
+
+    #[test]
+    fn upsert_appends_then_replaces_in_place() {
+        let mut list = vec![];
+        apply_upsert(&mut list, sample_meta(AppType::Claude, "k1"));
+        apply_upsert(&mut list, sample_meta(AppType::Codex, "k2"));
+        assert_eq!(list.len(), 2);
+
+        // 替换 Claude 的 key
+        apply_upsert(&mut list, sample_meta(AppType::Claude, "k1-new"));
+        assert_eq!(list.len(), 2, "tool 必须唯一");
+        let claude = list.iter().find(|m| m.tool == AppType::Claude).unwrap();
+        assert_eq!(claude.key_id, "k1-new");
+    }
+
+    #[test]
+    fn remove_is_idempotent() {
+        let mut list = vec![sample_meta(AppType::Claude, "k1")];
+        apply_remove(&mut list, AppType::Claude);
+        assert!(list.is_empty());
+        apply_remove(&mut list, AppType::Claude); // 二次删，不应 panic
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn remove_does_not_touch_other_tools() {
+        let mut list = vec![
+            sample_meta(AppType::Claude, "k1"),
+            sample_meta(AppType::Codex, "k2"),
+        ];
+        apply_remove(&mut list, AppType::Claude);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].tool, AppType::Codex);
+    }
+
+    /// `key_start` 是 Option，serde 时 None 不该出现在 JSON 里——避免老
+    /// settings.json 反序列化失败 / 文件里出现大量 `"keyStart":null` 噪声。
+    #[test]
+    fn key_start_serde_skips_when_none() {
+        let meta = sample_meta(AppType::Claude, "k1");
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(
+            !json.contains("keyStart"),
+            "None 的 keyStart 不该出现在序列化输出里: {json}"
+        );
+    }
+
+    /// `key_start` 有值时正确 round-trip——服务端 201 响应里返的就是这个
+    /// 字段，UI 列表用前缀辅助辨认。
+    #[test]
+    fn key_start_round_trips_when_some() {
+        let meta = ApiKeyMeta {
+            key_start: Some("sk-of-AbCdEf".into()),
+            ..sample_meta(AppType::Claude, "k1")
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(json.contains("\"keyStart\":\"sk-of-AbCdEf\""), "got: {json}");
+
+        let decoded: ApiKeyMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.key_start.as_deref(), Some("sk-of-AbCdEf"));
+    }
+
+    /// 老 settings.json 里没有 `keyStart` 字段时反序列化要兜底 None，不能
+    /// 把整条 meta 读丢——`#[serde(default)]` 必须就位。
+    #[test]
+    fn key_start_defaults_when_missing_in_json() {
+        let json = r#"{
+            "tool": "claude",
+            "keyId": "k1",
+            "createdAt": 1700000000
+        }"#;
+        let decoded: ApiKeyMeta = serde_json::from_str(json).unwrap();
+        assert_eq!(decoded.key_start, None);
+        assert_eq!(decoded.key_id, "k1");
+    }
+}
+

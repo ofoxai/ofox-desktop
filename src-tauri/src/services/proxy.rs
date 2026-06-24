@@ -1801,13 +1801,22 @@ impl ProxyService {
     fn read_codex_live(&self) -> Result<Value, String> {
         use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
 
+        // `auth.json` / `config.toml` 任一缺失都视为"用户该字段没有配置"。
+        // 这是 ofox bind 直写路径的契约：备份必须能拿到一个**快照**（哪怕是空
+        // 快照），让后续 `ofox_write_direct_to_live` 能直接把 sk-of- 写进
+        // seed 模板覆盖到磁盘；unbind 时 `restore` 会把这份空快照写回（即
+        // auth/config 都是空，等于把 token 抹掉）。
+        //
+        // 之前这里对 auth.json 缺失硬 fail 是 takeover 时代的设计——那时备份
+        // 是为了"回滚 takeover 写入的 PROXY_MANAGED 占位"，必然要求原文件存在。
+        // 新路径下 bind 写的是真 sk-of-，缺失的 auth.json 反倒说明"用户的
+        // codex 还没登录"，bind 流程恰恰应该填上它。
         let auth_path = get_codex_auth_path();
-        if !auth_path.exists() {
-            return Err("Codex auth.json 不存在".to_string());
-        }
-
-        let auth: Value =
-            read_json_file(&auth_path).map_err(|e| format!("读取 Codex auth 失败: {e}"))?;
+        let auth: Value = if auth_path.exists() {
+            read_json_file(&auth_path).map_err(|e| format!("读取 Codex auth 失败: {e}"))?
+        } else {
+            json!({})
+        };
 
         let config_path = get_codex_config_path();
         let config_str = if config_path.exists() {
@@ -1853,9 +1862,12 @@ impl ProxyService {
     fn read_gemini_live(&self) -> Result<Value, String> {
         use crate::gemini_config::{env_to_json, get_gemini_env_path, read_gemini_env};
 
+        // `.env` 缺失视为空 env map——同 `read_codex_live` 的契约。bind 流程
+        // 备份这份空快照、写入新 env；unbind 用空快照覆盖等于擦除 env，magic
+        // 配合 `write_gemini_env_atomic` 的 "empty map → 写空文件" 语义。
         let env_path = get_gemini_env_path();
         if !env_path.exists() {
-            return Err("Gemini .env 文件不存在".to_string());
+            return Ok(env_to_json(&std::collections::HashMap::new()));
         }
 
         let env_map = read_gemini_env().map_err(|e| format!("读取 Gemini env 失败: {e}"))?;
@@ -1867,6 +1879,298 @@ impl ProxyService {
 
         let env_map = json_to_env(config).map_err(|e| format!("转换 Gemini 配置失败: {e}"))?;
         write_gemini_env_atomic(&env_map).map_err(|e| format!("写入 Gemini env 失败: {e}"))?;
+        Ok(())
+    }
+
+    // ─── OpenCode / OpenClaw / Hermes 的 "ofox provider 子节" IO ─────────
+    //
+    // 这三个工具的真实配置文件是**多 provider 容器**——用户可同时配 deepseek /
+    // openai / ofox 多家供应商。所以"读 / 写 / 备份 / 恢复"的单位都是
+    // **`ofox-*` provider 这一个子节**，而不像 Claude/Codex/Gemini 那样整文件。
+    //
+    // 约定：`read_*_live` 返回的 Value 即 ofox provider 子节的快照；如果 bind
+    // 前用户配置里**根本不存在** ofox 子节，返回 [`PROVIDER_NOT_PRESENT`] 这个
+    // 哨兵字符串包成的 JSON Value。`write_*_live` 调对应 `*_config::set_provider`
+    // 把子节插入/更新；`restore` 看快照是哨兵就 `remove_provider`、否则
+    // `set_provider` 写回。
+    //
+    // 不用 `Option<Value>` 是因为 DB `live_backups` 表 schema 把整列当 JSON
+    // 字符串读写，统一用 `Value` 避免引入新表结构。
+    //
+    // ofox provider id 由各工具的 seed 决定，固定为：
+    //   - opencode → "ofox-opencode" → 写到 `provider."ofox-opencode"` 节
+    //     （注：OpenCode 工具配置里 provider id 跟 cc-switch DB 里 provider_id
+    //     同名，所以这里直接用 const "ofox-opencode"；不要写"ofox"，那会跟用户
+    //     可能自配的 ofox 第三方 provider 撞名）
+    //   - openclaw → 写到 `models.providers."ofox-openclaw"` 节
+    //   - hermes → 写到 `custom_providers[name="ofox-hermes"]` 节
+
+    /// 表示 "bind 前该 ofox provider 子节在工具配置里不存在"。约定为字符串
+    /// 而非 Value::Null——`null` 在 JSON5/YAML round-trip 时容易混淆为 "字段
+    /// 存在但值为 null"。
+    const PROVIDER_NOT_PRESENT_MARKER: &str = "__cc_switch_ofox_provider_not_present__";
+
+    fn read_opencode_live(&self) -> Result<Value, String> {
+        // get_providers() 返回所有 provider；我们只关心 `ofox-opencode` 子节
+        let providers = crate::opencode_config::get_providers()
+            .map_err(|e| format!("读取 OpenCode providers 失败: {e}"))?;
+        match providers.get("ofox-opencode") {
+            Some(v) => Ok(v.clone()),
+            None => Ok(json!(Self::PROVIDER_NOT_PRESENT_MARKER)),
+        }
+    }
+
+    fn write_opencode_live(&self, config: &Value) -> Result<(), String> {
+        // 哨兵字符串 → 删除该 provider 子节
+        if let Some(s) = config.as_str() {
+            if s == Self::PROVIDER_NOT_PRESENT_MARKER {
+                crate::opencode_config::remove_provider("ofox-opencode")
+                    .map_err(|e| format!("移除 OpenCode ofox provider 失败: {e}"))?;
+                return Ok(());
+            }
+        }
+        crate::opencode_config::set_provider("ofox-opencode", config.clone())
+            .map_err(|e| format!("写入 OpenCode ofox provider 失败: {e}"))
+    }
+
+    fn read_openclaw_live(&self) -> Result<Value, String> {
+        let snapshot = crate::openclaw_config::get_provider("ofox-openclaw")
+            .map_err(|e| format!("读取 OpenClaw provider 失败: {e}"))?;
+        match snapshot {
+            Some(v) => Ok(v),
+            None => Ok(json!(Self::PROVIDER_NOT_PRESENT_MARKER)),
+        }
+    }
+
+    fn write_openclaw_live(&self, config: &Value) -> Result<(), String> {
+        if let Some(s) = config.as_str() {
+            if s == Self::PROVIDER_NOT_PRESENT_MARKER {
+                crate::openclaw_config::remove_provider("ofox-openclaw")
+                    .map_err(|e| format!("移除 OpenClaw ofox provider 失败: {e}"))?;
+                return Ok(());
+            }
+        }
+        crate::openclaw_config::set_provider("ofox-openclaw", config.clone())
+            .map_err(|e| format!("写入 OpenClaw ofox provider 失败: {e}"))?;
+        Ok(())
+    }
+
+    fn read_hermes_live(&self) -> Result<Value, String> {
+        let snapshot = crate::hermes_config::get_provider("ofox-hermes")
+            .map_err(|e| format!("读取 Hermes provider 失败: {e}"))?;
+        match snapshot {
+            Some(v) => Ok(v),
+            None => Ok(json!(Self::PROVIDER_NOT_PRESENT_MARKER)),
+        }
+    }
+
+    fn write_hermes_live(&self, config: &Value) -> Result<(), String> {
+        if let Some(s) = config.as_str() {
+            if s == Self::PROVIDER_NOT_PRESENT_MARKER {
+                crate::hermes_config::remove_provider("ofox-hermes")
+                    .map_err(|e| format!("移除 Hermes ofox provider 失败: {e}"))?;
+                return Ok(());
+            }
+        }
+        crate::hermes_config::set_provider("ofox-hermes", config.clone())
+            .map_err(|e| format!("写入 Hermes ofox provider 失败: {e}"))?;
+        Ok(())
+    }
+
+    // ─── ofox bind 直写 wrapper（commit 4 才被 ofox_auth 调）──────────────
+    //
+    // 这 3 个方法把"绕开 takeover 但仍读写工具配置"的微妙语义封进 ProxyService
+    // 内部——`commands/ofox_auth.rs` 不接触底层 read/write_*_live，避免暴露面
+    // 扩大。3 个方法都内部 match 全 6 工具，调用方传 AppType 即可。
+    //
+    // 跟 `set_takeover_for_app` 路径的关键差异：
+    //   1. 不启 proxy server
+    //   2. 写工具配置时**真实 token / base_url**（不写 PROXY_MANAGED 占位）
+    //   3. backup 内容是"按工具语义"的快照（整文件 or provider 子节）
+
+    /// 把工具原配置文件读出来快照存进 DB live_backups。
+    /// 6 工具全支持——内部按 AppType 分派到对应 read_*_live。
+    ///
+    /// `#[allow(dead_code)]`：Commit 3 引入门面，Commit 4 才被 bind 流程调用。
+    #[allow(dead_code)]
+    pub(crate) async fn ofox_backup_live_config(
+        &self,
+        app_type: &AppType,
+    ) -> Result<(), String> {
+        log::info!(
+            "[ofox_direct_backup] 备份 {} 工具配置到 DB live_backups（新 bind 路径）",
+            app_type.as_str(),
+        );
+        let (key, config) = match app_type {
+            AppType::Claude => ("claude", self.read_claude_live()?),
+            AppType::Codex => ("codex", self.read_codex_live()?),
+            AppType::Gemini => ("gemini", self.read_gemini_live()?),
+            AppType::OpenCode => ("opencode", self.read_opencode_live()?),
+            AppType::OpenClaw => ("openclaw", self.read_openclaw_live()?),
+            AppType::Hermes => ("hermes", self.read_hermes_live()?),
+        };
+        let json_str = serde_json::to_string(&config)
+            .map_err(|e| format!("序列化 {key} 配置失败: {e}"))?;
+        self.db
+            .save_live_backup(key, &json_str)
+            .await
+            .map_err(|e| format!("备份 {key} 配置失败: {e}"))
+    }
+
+    /// 直接写工具真实配置文件——指向 ofox gateway、明文 sk-of- token。
+    /// 跳过 takeover 的 placeholder（127.0.0.1:port / PROXY_MANAGED）语义。
+    ///
+    /// 流程：
+    ///   1. 从 DB 拿 `ofox-<app>` provider 的 settings_config 模板
+    ///   2. 把 token 注进模板（按各工具的 token_path）
+    ///   3. 调对应 write_*_live 写盘
+    ///
+    /// `#[allow(dead_code)]`：Commit 3 引入门面，Commit 4 才被 bind 流程调用。
+    #[allow(dead_code)]
+    pub(crate) async fn ofox_write_direct_to_live(
+        &self,
+        app_type: &AppType,
+        api_key: &str,
+    ) -> Result<(), String> {
+        // 留一条入口足迹，方便排查 bind 走的是新直写路径还是老 takeover——
+        // 老路径会打 "代理服务器启动于 ..." + "Live 配置已接管"，这两行只在
+        // `set_takeover_for_app` 里出现；新路径只有这条 ofox_direct_write。
+        // key 前 7 字（"sk-of-X..."）记够辨识、不泄全量。
+        let key_hint: String = api_key.chars().take(7).collect();
+        log::info!(
+            "[ofox_direct_write] {} <- key {}*** (绕开 proxy takeover)",
+            app_type.as_str(),
+            key_hint,
+        );
+
+        // 取 ofox-<app> provider 模板
+        let (provider_id, token_path) = match Self::ofox_provider_target(app_type) {
+            Some(t) => t,
+            None => {
+                return Err(format!(
+                    "{} 在 ofox 直写模式下未配置 token 注入路径",
+                    app_type.as_str()
+                ));
+            }
+        };
+        let mut provider = self
+            .db
+            .get_provider_by_id(provider_id, app_type.as_str())
+            .map_err(|e| format!("读取 ofox provider 模板失败: {e}"))?
+            .ok_or_else(|| format!("ofox-{} seed 缺失", app_type.as_str()))?;
+
+        // 把 token 注进 settings_config（不写回 DB——保持 seed 纯净）
+        Self::write_token_into_settings(&mut provider.settings_config, token_path, api_key)?;
+
+        // 写盘
+        match app_type {
+            AppType::Claude => self.write_claude_live(&provider.settings_config)?,
+            AppType::Codex => self.write_codex_live(&provider.settings_config)?,
+            AppType::Gemini => self.write_gemini_live(&provider.settings_config)?,
+            AppType::OpenCode => self.write_opencode_live(&provider.settings_config)?,
+            AppType::OpenClaw => self.write_openclaw_live(&provider.settings_config)?,
+            AppType::Hermes => self.write_hermes_live(&provider.settings_config)?,
+        }
+        Ok(())
+    }
+
+    /// 从 DB live_backup 读 → 写回工具真实配置文件 → 删 backup。
+    /// 不动 proxy server 状态（ofox bind 本来也没启它）。
+    ///
+    /// **幂等**：找不到 backup 时返 `Ok(())` + warn 日志，不报错。考虑两种合理
+    /// 场景：(a) 用户没经过新 bind 路径就点了"解除绑定"——比如老 takeover
+    /// 残留状态下；(b) 数据被外部清过 / 重装 / 跨设备同步差异。两种场景下解
+    /// 绑动作的产品语义都该是 noop——硬 fail 会让 UI 卡在"已接管"状态没法
+    /// 退出。
+    ///
+    /// `#[allow(dead_code)]`：Commit 3 引入门面，Commit 4 才被 unbind 调用。
+    #[allow(dead_code)]
+    pub(crate) async fn ofox_restore_from_backup(
+        &self,
+        app_type: &AppType,
+    ) -> Result<(), String> {
+        let key = app_type.as_str();
+        let Some(backup) = self
+            .db
+            .get_live_backup(key)
+            .await
+            .map_err(|e| format!("读取 {key} 备份失败: {e}"))?
+        else {
+            log::warn!(
+                "[ofox_unbind] {key} 没有 ofox bind 时的备份记录——视为 noop。\
+                 工具的真实配置文件未被改动；若用户当前磁盘状态异常，请手工核查。"
+            );
+            return Ok(());
+        };
+        let snapshot: Value = serde_json::from_str(&backup.original_config)
+            .map_err(|e| format!("解析 {key} 备份失败: {e}"))?;
+
+        match app_type {
+            AppType::Claude => self.write_claude_live(&snapshot)?,
+            AppType::Codex => self.write_codex_live(&snapshot)?,
+            AppType::Gemini => self.write_gemini_live(&snapshot)?,
+            AppType::OpenCode => self.write_opencode_live(&snapshot)?,
+            AppType::OpenClaw => self.write_openclaw_live(&snapshot)?,
+            AppType::Hermes => self.write_hermes_live(&snapshot)?,
+        }
+
+        self.db
+            .delete_live_backup(key)
+            .await
+            .map_err(|e| format!("删除 {key} 备份失败: {e}"))?;
+        Ok(())
+    }
+
+    /// ofox 模式下"该把 token 写到 settings_config 的哪个字段"。跟
+    /// `commands/ofox_auth.rs::ofox_provider_for` 共享语义，但这里只关心
+    /// `(provider_id, token_path)`——不涉及 ofox_auth 模块的其它职责。
+    ///
+    /// **Gemini 返 None**：它的 `~/.gemini/.env` 只有 base_url、没有 LLM auth
+    /// token 字段。ofox bind 对 Gemini 的语义是"指向 ofox gateway 但 token 走
+    /// Google OAuth"——本次直写 wrapper 不覆盖这种异类，调用方收到 None 应当
+    /// 跳过 ofox_write_direct_to_live（仅做 ofox_backup_live_config 即可）。
+    fn ofox_provider_target(
+        app: &AppType,
+    ) -> Option<(&'static str, &'static [&'static str])> {
+        match app {
+            AppType::Claude => Some(("ofox-claude", &["env", "ANTHROPIC_AUTH_TOKEN"])),
+            AppType::Codex => Some(("ofox-codex", &["auth", "OPENAI_API_KEY"])),
+            AppType::Gemini => None,
+            AppType::OpenCode => Some(("ofox-opencode", &["options", "apiKey"])),
+            AppType::OpenClaw => Some(("ofox-openclaw", &["apiKey"])),
+            AppType::Hermes => Some(("ofox-hermes", &["api_key"])),
+        }
+    }
+
+    /// 复用 `commands/ofox_auth.rs::write_token_at_path` 的语义，但本模块独立
+    /// 实现避免循环依赖。逻辑：按 path 一级一级 ensure object，叶子节点写
+    /// `Value::String(token)`。
+    fn write_token_into_settings(
+        settings: &mut Value,
+        path: &[&str],
+        token: &str,
+    ) -> Result<(), String> {
+        if path.is_empty() {
+            return Err("token path is empty".into());
+        }
+        if !settings.is_object() {
+            *settings = json!({});
+        }
+        let (last, ancestors) = path.split_last().expect("non-empty per check above");
+        let mut cursor = settings;
+        for key in ancestors {
+            let obj = cursor
+                .as_object_mut()
+                .ok_or_else(|| format!("settings_config 路径 {key} 处不是对象"))?;
+            if !obj.get(*key).map(|v| v.is_object()).unwrap_or(false) {
+                obj.insert((*key).to_string(), json!({}));
+            }
+            cursor = obj.get_mut(*key).expect("just inserted");
+        }
+        let leaf = cursor
+            .as_object_mut()
+            .ok_or_else(|| format!("settings_config 路径 {last} 的父级不是对象"))?;
+        leaf.insert((*last).to_string(), json!(token));
         Ok(())
     }
 
@@ -3008,6 +3312,322 @@ command = "latest-command"
                 .and_then(|v| v.as_str()),
             Some("latest-command"),
             "new MCP entries should remain in the restore backup"
+        );
+    }
+
+    // ─── ofox 直写 wrapper 单测 (Commit 3) ──────────────────────────────
+    //
+    // 覆盖 ofox_write_direct_to_live + ofox_backup_live_config + ofox_restore_from_backup
+    // 三个方法对 6 工具的关键不变量：
+    //   - bind 后磁盘里的 token / base_url 是真实值（不是 PROXY_MANAGED 占位）
+    //   - backup → restore round-trip 后磁盘内容跟 bind 前一致
+    //   - OpenCode/OpenClaw/Hermes 的 ofox-* provider 子节"bind 前不存在"场景
+    //     在 restore 后被正确删掉，不残留空壳
+
+    /// 把 ofox-claude seed 写进 DB，让 ofox_write_direct_to_live 能找到模板。
+    fn seed_ofox_claude(db: &Database) {
+        let provider = Provider::with_id(
+            "ofox-claude".to_string(),
+            "OfoxAI".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.ofox.ai/anthropic",
+                    "ANTHROPIC_AUTH_TOKEN": ""
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider).expect("save claude seed");
+    }
+
+    fn seed_ofox_opencode(db: &Database) {
+        let provider = Provider::with_id(
+            "ofox-opencode".to_string(),
+            "OfoxAI".to_string(),
+            json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "OfoxAI",
+                "options": {
+                    "baseURL": "https://api.ofox.ai/v1",
+                    "apiKey": ""
+                },
+                "models": {}
+            }),
+            None,
+        );
+        db.save_provider("opencode", &provider).expect("save opencode seed");
+    }
+
+    /// 准备 Claude 工具的"原始用户配置"——bind 前磁盘上的状态。
+    fn prepare_claude_live_baseline() {
+        let path = crate::config::get_claude_settings_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir for claude");
+        }
+        let baseline = json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                "ANTHROPIC_AUTH_TOKEN": "user-original-token"
+            }
+        });
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&baseline).unwrap(),
+        )
+        .expect("write claude baseline");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn ofox_write_direct_to_live_writes_real_token_for_claude() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+
+        seed_ofox_claude(&db);
+        prepare_claude_live_baseline();
+
+        service
+            .ofox_write_direct_to_live(&AppType::Claude, "sk-of-REAL123")
+            .await
+            .expect("direct write should succeed");
+
+        // 磁盘上的 ~/.claude/settings.json 应当被覆盖：base_url 指 ofox、token
+        // 是真实 sk-of-（**不是** PROXY_MANAGED 占位）。
+        let written = service.read_claude_live().expect("read live");
+        assert_eq!(
+            written
+                .pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(|v| v.as_str()),
+            Some("https://api.ofox.ai/anthropic"),
+            "baseURL 应当指向 ofox gateway, got: {written}"
+        );
+        assert_eq!(
+            written
+                .pointer("/env/ANTHROPIC_AUTH_TOKEN")
+                .and_then(|v| v.as_str()),
+            Some("sk-of-REAL123"),
+            "token 应当是真实 sk-of- 明文（不是占位符）, got: {written}"
+        );
+        assert_ne!(
+            written
+                .pointer("/env/ANTHROPIC_AUTH_TOKEN")
+                .and_then(|v| v.as_str()),
+            Some(PROXY_TOKEN_PLACEHOLDER),
+            "**关键回归**：不能是 PROXY_MANAGED 占位"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn ofox_backup_restore_round_trip_claude() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        seed_ofox_claude(&db);
+        prepare_claude_live_baseline();
+
+        // 记录 bind 前的状态
+        let before = service.read_claude_live().expect("read baseline");
+
+        // bind 流程：backup → write
+        service
+            .ofox_backup_live_config(&AppType::Claude)
+            .await
+            .expect("backup should succeed");
+        service
+            .ofox_write_direct_to_live(&AppType::Claude, "sk-of-IGNORE")
+            .await
+            .expect("direct write");
+
+        // unbind 流程：restore from backup
+        service
+            .ofox_restore_from_backup(&AppType::Claude)
+            .await
+            .expect("restore should succeed");
+
+        // round-trip 后应当跟 baseline 一致
+        let after = service.read_claude_live().expect("read after restore");
+        assert_eq!(
+            after.pointer("/env/ANTHROPIC_BASE_URL"),
+            before.pointer("/env/ANTHROPIC_BASE_URL"),
+            "base_url 应当恢复到原值"
+        );
+        assert_eq!(
+            after.pointer("/env/ANTHROPIC_AUTH_TOKEN"),
+            before.pointer("/env/ANTHROPIC_AUTH_TOKEN"),
+            "token 应当恢复到原值"
+        );
+
+        // backup 已被 restore 消费掉
+        let backup_after = db
+            .get_live_backup("claude")
+            .await
+            .expect("query backup");
+        assert!(backup_after.is_none(), "restore 后应当删 backup");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn ofox_backup_when_opencode_provider_absent_uses_sentinel() {
+        // OpenCode 子节快照语义：bind 前用户没配过 ofox-opencode 这个 provider
+        // → backup 应当存"哨兵"，restore 时把 provider remove 掉而不是恢复成
+        // 空壳。
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        seed_ofox_opencode(&db);
+
+        // 准备一个"没有 ofox-opencode 但有其它 provider"的 baseline
+        let opencode_path = crate::opencode_config::get_opencode_config_path();
+        if let Some(parent) = opencode_path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir for opencode");
+        }
+        std::fs::write(
+            &opencode_path,
+            serde_json::to_string_pretty(&json!({
+                "provider": {
+                    "other-existing": {
+                        "name": "Other",
+                        "options": { "apiKey": "user-key" }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .expect("write opencode baseline");
+
+        // 走完 backup → write → restore
+        service
+            .ofox_backup_live_config(&AppType::OpenCode)
+            .await
+            .expect("backup");
+        service
+            .ofox_write_direct_to_live(&AppType::OpenCode, "sk-of-OC1")
+            .await
+            .expect("write");
+        // bind 状态：ofox-opencode 子节应当存在，且 apiKey = sk-of-OC1
+        let providers_mid = crate::opencode_config::get_providers().expect("read mid");
+        assert_eq!(
+            providers_mid
+                .get("ofox-opencode")
+                .and_then(|v| v.pointer("/options/apiKey"))
+                .and_then(|v| v.as_str()),
+            Some("sk-of-OC1"),
+        );
+        assert!(
+            providers_mid.contains_key("other-existing"),
+            "其它 provider 不该被动到"
+        );
+
+        // restore
+        service
+            .ofox_restore_from_backup(&AppType::OpenCode)
+            .await
+            .expect("restore");
+
+        // ofox-opencode 子节应当被删（bind 前不存在）
+        let providers_after = crate::opencode_config::get_providers().expect("read after");
+        assert!(
+            !providers_after.contains_key("ofox-opencode"),
+            "bind 前不存在的 ofox 子节，restore 后应当被删除"
+        );
+        // 其它 provider 不能被误删
+        assert!(
+            providers_after.contains_key("other-existing"),
+            "其它 provider 必须原样保留"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn ofox_restore_without_backup_is_noop() {
+        // 用户没经过新 bind 路径（比如老 takeover 残留状态下）就点解绑——
+        // restore 应当 noop 退出，不能 hard-fail 让 UI 卡死。
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+
+        // 不调 ofox_backup_live_config——确保 live_backups 表里没记录
+        // 直接调 restore
+        service
+            .ofox_restore_from_backup(&AppType::Claude)
+            .await
+            .expect("缺备份时应当 noop，不报错");
+
+        // 仍然没有备份（restore 没创建任何东西）
+        assert!(
+            db.get_live_backup("claude").await.expect("query").is_none()
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn ofox_backup_when_opencode_provider_pre_exists_restores_in_place() {
+        // 用户**已经**配过 ofox-opencode（比如手工填过）—— backup 应当存原内容,
+        // restore 后子节恢复到原内容，**不**应被删除。
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        seed_ofox_opencode(&db);
+
+        // baseline：用户已经手工配过 ofox-opencode（用别的 key）
+        let opencode_path = crate::opencode_config::get_opencode_config_path();
+        if let Some(parent) = opencode_path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        std::fs::write(
+            &opencode_path,
+            serde_json::to_string_pretty(&json!({
+                "provider": {
+                    "ofox-opencode": {
+                        "name": "Pre-existing Ofox config",
+                        "options": { "apiKey": "user-pre-existing-key" }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .expect("write opencode baseline");
+
+        // bind → unbind
+        service
+            .ofox_backup_live_config(&AppType::OpenCode)
+            .await
+            .expect("backup");
+        service
+            .ofox_write_direct_to_live(&AppType::OpenCode, "sk-of-NEW")
+            .await
+            .expect("write");
+        service
+            .ofox_restore_from_backup(&AppType::OpenCode)
+            .await
+            .expect("restore");
+
+        // 应当还原成用户原来手工配的内容（apiKey = "user-pre-existing-key"）
+        let providers_after = crate::opencode_config::get_providers().expect("read after");
+        let ofox = providers_after
+            .get("ofox-opencode")
+            .expect("ofox-opencode 必须保留");
+        assert_eq!(
+            ofox.pointer("/options/apiKey").and_then(|v| v.as_str()),
+            Some("user-pre-existing-key"),
+            "restore 后应当恢复用户原 apiKey"
+        );
+        assert_eq!(
+            ofox.get("name").and_then(|v| v.as_str()),
+            Some("Pre-existing Ofox config"),
+            "restore 后应当恢复用户原 name"
         );
     }
 }

@@ -446,31 +446,37 @@ pub(crate) async fn ofox_ping_model_internal(
 
     let api_key = extract_api_key(&app_type, &provider.settings_config);
 
-    // For OfoxAI-bound providers, the value sitting in `settings_config` is a
-    // snapshot of the OAuth access_token taken at bind/refresh time. Access
-    // tokens have a short TTL (~1 h on the dev IDP, default `expires_in` on
-    // prod) and stop being honored by the gateway as soon as the matching
-    // `oauth:at:<token>` Redis entry expires. Without this branch, the probe
-    // happily sends a stale snapshot and the user sees a confusing 401
-    // `Invalid or expired token` even though their session in `auth.json` is
-    // still active (the in-memory manager will refresh on demand).
+    // 对 `ofox-*` provider：用 keychain 里 cc-switch 创建的 sk-of- LLM API key
+    // 探活，**不要**用 OAuth access_token。
     //
-    // Ask the manager for a *currently-valid* token instead — it'll perform
-    // a refresh-grant round-trip if the cached one is past its expiry — and
-    // override `api_key` with the result. We only do this for `ofox-*`
-    // providers so a user who hand-bound a non-Ofox provider with a real
-    // `sk-` key keeps using that key untouched.
+    // 历史 context：takeover 时代 `settings_config` 里存的是 OAuth access_token
+    // 快照（proxy server 拿着它代为转发到 gateway），probe 时为了保证 token 没
+    // 过期会走 `get_valid_access_token` 重新拉一份。**但 bind 直写改造后**，
+    // 工具配置文件里写的是 sk-of- 明文，gateway 走 LLM API key 鉴权链；如果
+    // probe 仍然用 access_token，会被 gateway 的 OAuth scope check 拦下报
+    // `Token is missing the required scope "llm.invoke"`——access_token 只有
+    // `org.read / balance.read / apikey.write / offline_access`，没有 LLM 调用
+    // scope，**永远**过不了这道检查。
+    //
+    // 新路径：直接 `fetch_or_create_api_key(_, CachedOk, _)` 从 keychain 拿
+    // bind 时落地的 sk-of-。CachedOk 模式下 keychain 命中立即返回不调端点；
+    // 命中失败（理论上不该发生：能到 probe 阶段说明已 bind 过）会重新签发。
     let is_ofox_provider = provider_id.starts_with("ofox-");
     let api_key = if is_ofox_provider {
-        let manager = manager_arc.read().await;
-        match manager.get_valid_access_token().await {
-            Ok(t) => t,
+        match crate::ofox_api_keys::fetch_or_create_api_key(
+            app_type,
+            crate::ofox_api_keys::FetchMode::CachedOk,
+            manager_arc,
+        )
+        .await
+        {
+            Ok(k) => k,
             Err(e) => {
                 return PingResult {
                     success: false,
                     latency_ms: 0,
                     status_code: Some(401),
-                    error: Some(format!("获取 OfoxAI 访问令牌失败：{e}")),
+                    error: Some(format!("获取 OfoxAI API key 失败：{e}")),
                 };
             }
         }

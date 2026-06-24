@@ -140,25 +140,28 @@ export default function MainApp() {
   }, []);
 
   /**
-   * Force proxy takeover ON for every (bound ∩ supported) tool whenever the
-   * Console mounts. cc-switch's value prop is "we intercept these tools for
-   * you" — letting a bound, supported tool sit in the OFF state silently
-   * undermines that, so this acts as a self-heal sweep on top of the UI lock
-   * (the Switches for these tools are hidden in `ProxyToggle` / `ProxyPanel`).
+   * 历史：takeover 时代的"自愈"——Console mount 时强行给所有
+   * `boundTools ∩ PROXY_SUPPORTED_TOOLS` 开 proxy takeover，保证工具配置
+   * 文件始终指向 `127.0.0.1:15721`。
    *
-   * `setProxyTakeoverForApp` is idempotent on the Rust side (see
-   * `services/proxy.rs::set_takeover_for_app`) and auto-starts the proxy
-   * server if it isn't running, so a steady-state launch is a no-op except
-   * for the single status query at the top.
+   * **bind 直写改造后这层自愈反而是 bug**：新 bind 路径已经把真 sk-of- 写
+   * 进工具配置文件，再叠加一次 `setProxyTakeoverForApp(_, true)` 会把刚写
+   * 好的真 token 覆盖回 `PROXY_MANAGED` 占位符。Claude/Codex 都受影响，磁
+   * 盘静悄悄从"指 ofox gateway 真 key"变成"指本地 proxy 占位符"——后续 LLM
+   * 请求会全部失败。
    *
-   * Scope: only fires for `boundTools ∩ PROXY_SUPPORTED_TOOLS`. Tools like
-   * OpenCode that the proxy can't intercept yet are untouched — they keep
-   * their existing "暂不支持代理统计" semantics and remain user-controllable.
+   * Gemini 仍然走老 takeover 路径（它的 ofox seed 没 LLM token 字段；详见
+   * `commands/ofox_auth.rs::ofox_provider_for`）。对 Gemini 保留自愈语义。
    */
   useEffect(() => {
     if (appState !== "console" || boundTools.length === 0) return;
-    const locked = boundTools.filter((t) =>
-      PROXY_SUPPORTED_TOOLS.includes(t),
+    // 只对仍走老 takeover 路径的工具做自愈——目前只有 Gemini。
+    // **保持与后端 `ofox_provider_for`、`bindTools.ts::OFOX_AUTO_BIND_TOOLS`
+    // 互补一致**：那两处明确收录的工具（claude/codex/opencode/openclaw/hermes）
+    // 走 ofox 直写，自愈必须避开；剩下还在 PROXY_SUPPORTED 里的就是 Gemini。
+    const TAKEOVER_ONLY_TOOLS = new Set(["gemini"]);
+    const locked = boundTools.filter(
+      (t) => PROXY_SUPPORTED_TOOLS.includes(t) && TAKEOVER_ONLY_TOOLS.has(t),
     );
     if (locked.length === 0) return;
 
@@ -167,9 +170,6 @@ export default function MainApp() {
       try {
         const status = await proxyApi.getProxyTakeoverStatus();
         if (cancelled) return;
-        // ProxyTakeoverStatus has a fixed set of named bools (claude/codex/...);
-        // index by `tool` requires going through `unknown` because the struct
-        // type lacks an index signature.
         const map = status as unknown as Record<string, boolean>;
         for (const tool of locked) {
           if (cancelled) return;

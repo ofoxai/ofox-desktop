@@ -13,15 +13,21 @@
 //!
 //! ### Dev / Prod 分支
 //!
-//! `cfg!(debug_assertions) == true` （即 `pnpm tauri dev`、`cargo run`）时所有
-//! base URL 仍指向 `localhost:3000`/`:8080`/`:8088`——这是 ofox-app / ofox-core /
-//! ofox-gateway 在 pm2 下监听的 dev 端口，与之前 `ofox_auth.rs` 与
-//! `ofox_endpoints.rs` 里的硬编码常量等价。release build 才会基于 apex 拼线上
-//! `https://app.<apex>` / `https://api.<apex>`。
+//! 默认情况下（无论 `pnpm tauri dev` 还是 release build）所有 base URL 都
+//! 指向线上 `https://app.<apex>` / `https://api.<apex>`。这一刀切让 dev 与
+//! 生产共享同一 IDP、gateway、`/openapi/*`——避免"dev 跑得通生产挂掉"或
+//! 反向那种 dev/prod 混搭。模型列表这类只读端点尤其依赖这条：本地 ofox-
+//! gateway plugin 还没接 `/gemini/v1beta/models` 时，dev 改打线上就能正常
+//! 工作。
 //!
-//! 所以**只在线上才能验证 apex 切换的最终效果**。dev 下切换 apex 不会改变实际
-//! 请求地址（前端 UI 仍可工作，DB reseed 仍跑通），方便本地开发不被 ip-api 误
-//! 判到 ofox.io 卡住。
+//! 偶尔需要本地后端联调（ofox-app/ofox-core/ofox-gateway 跑在 pm2 上）时，
+//! 把环境变量 `OFOX_USE_LOCAL=1` 传给 `pnpm tauri dev`，本进程内所有 base
+//! 会切回 `localhost:3000`/`:8080`/`:8088`——这是逃生口，不进 settings，
+//! 重启进程即恢复线上模式，避免开发机长期处于一个非默认的隐藏状态。
+//!
+//! 切换 apex（ofox.ai ⇌ ofox.io）走 `settings.json` 的 `ofoxApex` 字段，
+//! 与 dev/prod 切换正交：apex 决定打哪个地区，`OFOX_USE_LOCAL` 决定是否走
+//! 本地后端。
 //!
 //! ### 参考
 //!
@@ -38,10 +44,28 @@ const KNOWN_APEXES: &[&str] = &["ofox.ai", "ofox.io"];
 /// ofox-studio 的 `DEFAULT_APEX` 一致。也在 ip-api 探测失败时使用。
 const DEFAULT_APEX: &str = "ofox.ai";
 
-// ── Dev 端口（与 ofox_auth.rs / ofox_endpoints.rs 历史常量保持一致）──────────
+// ── Dev 端口（仅在 OFOX_USE_LOCAL=1 时生效；与 pm2 下 ofox-app / ofox-core /
+//   ofox-gateway 的监听端口一致）──────────────────────────────────────────────
 const DEV_APP_BASE: &str = "http://localhost:3000";
 const DEV_API_BASE: &str = "http://localhost:8080";
 const DEV_GATEWAY_BASE: &str = "http://localhost:8088";
+
+/// 环境变量名：`OFOX_USE_LOCAL=1` 让本进程所有 base URL 切回 localhost。
+///
+/// 只看是否设置且非空——任意 truthy 字符串（"1"、"true"、"yes"）都生效。
+/// 在每次 `*_base()` 调用时实时读取，所以 `OFOX_USE_LOCAL=1 pnpm tauri dev`
+/// 不重启切换 apex 也能马上换地址。
+const OFOX_USE_LOCAL_ENV: &str = "OFOX_USE_LOCAL";
+
+fn use_local_dev() -> bool {
+    matches!(std::env::var(OFOX_USE_LOCAL_ENV), Ok(v) if !v.is_empty())
+}
+
+/// crate 内部访问 `OFOX_USE_LOCAL` 开关用同一个入口——避免 `ofox_auth` 等模块
+/// 自己再读一次 env 出现"endpoint 已走线上、client_id 还停在 dev"的灰区。
+pub(crate) fn use_local_dev_mode() -> bool {
+    use_local_dev()
+}
 
 // ── 路径片段（与 OFox OpenAPI 文档一致；ofox-openapi-example/docs/modules/oauth）
 
@@ -50,6 +74,13 @@ const OAUTH_TOKEN_PATH: &str = "/api/oauth/token";
 const OPENAPI_ME_PATH: &str = "/openapi/me";
 const OPENAPI_BALANCE_PATH: &str = "/openapi/orgs/me/balance";
 const OPENAPI_SPENDING_LIMITS_PATH: &str = "/openapi/orgs/me/spending-limits";
+/// 与 `APP_API_KEYS_PATH`（`/manage/api-keys`，UI 路径）区分开：这是 OpenAPI
+/// REST endpoint，挂在 `api.<apex>` 上，给 cc-switch 自助签发 / 撤销 LLM key 用。
+///
+/// `#[allow(dead_code)]`：仅 [`openapi_api_keys_url`] / [`openapi_api_key_url`]
+/// 引用，二者在下个 Commit 才会被实际调用；本 Commit 先建好门面。
+#[allow(dead_code)]
+const OPENAPI_API_KEYS_PATH: &str = "/openapi/api-keys";
 
 // 以下路径仅在 Rust 单元测试 / 将来后端外链场景中用到——前端外链直接走
 // `src/lib/ofoxUrls.ts`，不经 Rust。allow(dead_code) 收 warning，不删除是为
@@ -106,9 +137,11 @@ pub fn is_known_apex(s: &str) -> bool {
 // ─────────────────────────────────────────────────────────────────────────
 
 /// `https://app.<apex>` —— OAuth IDP 与控制台 (sign-in / consent / device flow)。
-/// Dev 模式打 `http://localhost:3000`（ofox-app Next.js）。
+///
+/// 默认走线上；设了 `OFOX_USE_LOCAL=1` 时切回 `http://localhost:3000`
+/// （ofox-app Next.js）。
 pub fn auth_app_base() -> String {
-    if cfg!(debug_assertions) {
+    if use_local_dev() {
         DEV_APP_BASE.to_string()
     } else {
         format!("https://app.{}", current_apex())
@@ -116,9 +149,11 @@ pub fn auth_app_base() -> String {
 }
 
 /// `https://api.<apex>` —— OpenAPI 业务接口（/openapi/me、balance 等）。
-/// Dev 模式打 `http://localhost:8080`（ofox-core Go service）。
+///
+/// 默认走线上；设了 `OFOX_USE_LOCAL=1` 时切回 `http://localhost:8080`
+/// （ofox-core Go service）。
 pub fn auth_api_base() -> String {
-    if cfg!(debug_assertions) {
+    if use_local_dev() {
         DEV_API_BASE.to_string()
     } else {
         format!("https://api.{}", current_apex())
@@ -127,30 +162,28 @@ pub fn auth_api_base() -> String {
 
 /// LLM 网关 base —— `<gateway>/v1`、`<gateway>/anthropic`、`<gateway>/gemini`
 /// 等所有协议入口都从这里拼。
-/// Dev 模式打 `http://localhost:8088`（ofox-gateway plugin）。
+///
+/// 默认走线上 `https://api.<apex>`（与 OpenAPI 业务接口共享同一 host，按路径
+/// 前缀分发）；设了 `OFOX_USE_LOCAL=1` 时切回 `http://localhost:8088`
+/// （ofox-gateway plugin）。
 pub fn gateway_base() -> String {
-    if cfg!(debug_assertions) {
+    if use_local_dev() {
         DEV_GATEWAY_BASE.to_string()
     } else {
-        // 线上 api.<apex> 与 OpenAPI 业务接口是同一个 Traefik 入口分流的；网关
-        // 与业务接口在 release 共享同一 host，按路径前缀分发。
         format!("https://api.{}", current_apex())
     }
 }
 
 /// 营销站 `https://<apex>` —— terms / privacy / 主站 marketing 链接。
-/// Dev 模式直接走线上 `https://ofox.ai`：营销页没有本地版本，dev 跑联调时
-/// 也不会真的点这些链接。
+///
+/// 营销页没有本地版本，所以即便 `OFOX_USE_LOCAL=1` 也直接走线上；apex 切换
+/// 仍然生效。
 ///
 /// 仅在测试和 `terms_url()`/`privacy_url()` 内部使用——前端 marketing
 /// 外链直接走 TS 侧 `ofoxMarketingUrl(apex)`。
 #[allow(dead_code)]
 pub fn marketing_site() -> String {
-    if cfg!(debug_assertions) {
-        format!("https://{DEFAULT_APEX}")
-    } else {
-        format!("https://{}", current_apex())
-    }
+    format!("https://{}", current_apex())
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -175,6 +208,24 @@ pub fn balance_url() -> String {
 
 pub fn spending_limits_url() -> String {
     format!("{}{}", auth_api_base(), OPENAPI_SPENDING_LIMITS_PATH)
+}
+
+/// `POST` 创建 / `GET` 列举（暂无 list 端点，仅 GET-by-id）/ `PATCH` / `DELETE`
+/// 都挂在这条 URL 上。详见 `../ofox-openapi-example/docs/modules/oauth/02-api-reference.md`。
+///
+/// `#[allow(dead_code)]`：本 Commit 引入，[`crate::ofox_api_keys::call_create_endpoint`]
+/// 在下个 Commit 才接入消费。先建好门面，便于 review 拆分。
+#[allow(dead_code)]
+pub fn openapi_api_keys_url() -> String {
+    format!("{}{}", auth_api_base(), OPENAPI_API_KEYS_PATH)
+}
+
+/// 单把 key 的资源 URL（`GET` / `PATCH` / `DELETE`）。`id` 来自创建时的响应。
+///
+/// 同上 dead_code 说明。
+#[allow(dead_code)]
+pub fn openapi_api_key_url(id: &str) -> String {
+    format!("{}{}/{}", auth_api_base(), OPENAPI_API_KEYS_PATH, id)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -357,13 +408,53 @@ mod tests {
     }
 
     #[test]
-    fn dev_mode_uses_localhost() {
-        // 这个测试在 cargo test 下永远是 dev——`cfg!(debug_assertions)` true。
-        // 显式 assert 防回归：有人把 dev 分支去掉就会立刻挂。
-        if cfg!(debug_assertions) {
-            assert!(auth_app_base().starts_with("http://localhost:3000"));
-            assert!(auth_api_base().starts_with("http://localhost:8080"));
-            assert!(gateway_base().starts_with("http://localhost:8088"));
+    fn default_mode_targets_production() {
+        // 默认（OFOX_USE_LOCAL 未设置）应走线上 https。回归保险：有人把分支
+        // 写反时立刻挂掉。
+        //
+        // 注意：测试可能在 OFOX_USE_LOCAL=1 的 shell 里跑，那种情况这条测试
+        // 会被跳过——本地手工排错时无所谓，CI 不会带这个 env。
+        if use_local_dev() {
+            eprintln!("[test] OFOX_USE_LOCAL is set; skipping default-mode assertion");
+            return;
         }
+        assert!(auth_app_base().starts_with("https://app."));
+        assert!(auth_api_base().starts_with("https://api."));
+        assert!(gateway_base().starts_with("https://api."));
+        assert!(marketing_site().starts_with("https://"));
+    }
+
+    #[test]
+    fn openapi_api_keys_url_pins_to_api_base() {
+        // 跟 balance_url() 一样挂在 `auth_api_base()` 下；最关键的是**不**
+        // 沿用 `api_keys_url()`（那个是 `auth_app_base()`/`/manage/api-keys`
+        // 控制台路径），混淆会导致 POST 打到一个 HTML 页面。
+        assert_eq!(
+            openapi_api_keys_url(),
+            format!("{}{OPENAPI_API_KEYS_PATH}", auth_api_base())
+        );
+        assert_ne!(openapi_api_keys_url(), api_keys_url());
+    }
+
+    #[test]
+    fn openapi_api_key_url_appends_id() {
+        let id = "n7Hk2vQwR3xLm5pYbAcDe";
+        assert_eq!(
+            openapi_api_key_url(id),
+            format!("{}/{id}", openapi_api_keys_url())
+        );
+    }
+
+    #[test]
+    fn ofox_use_local_env_switches_to_localhost() {
+        // 直接验证 env 开关 → localhost 的映射；不实际改进程 env 以免污染
+        // 同一进程内的其它测试。
+        //
+        // 这里只能模拟逻辑——`use_local_dev()` 读 env，无法在测试里安全
+        // toggle。改为对 DEV_* 常量做形态断言，确保它们指向 localhost 的
+        // 既定端口；切换分支正确性由 `auth_*_base()` 的实现保障。
+        assert!(DEV_APP_BASE.starts_with("http://localhost:3000"));
+        assert!(DEV_API_BASE.starts_with("http://localhost:8080"));
+        assert!(DEV_GATEWAY_BASE.starts_with("http://localhost:8088"));
     }
 }

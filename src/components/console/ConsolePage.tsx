@@ -749,7 +749,7 @@ export default function ConsolePage({
           className="absolute right-5 top-1.5 z-10"
           data-tauri-drag-region="false"
         >
-          <OfoxApexSwitch triggerClassName="h-7 w-[150px] text-[12px]" />
+          <OfoxApexSwitch triggerClassName="h-7 w-[108px] text-[12px]" />
         </div>
       </div>
 
