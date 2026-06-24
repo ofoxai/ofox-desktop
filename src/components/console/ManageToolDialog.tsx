@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import { emit } from "@tauri-apps/api/event";
 import {
   Loader2,
   RefreshCw,
@@ -188,6 +189,11 @@ export default function ManageToolDialog({
     try {
       await manageToolApi.setActiveModel(tool.id, draftModel);
       setCurrentModel(draftModel);
+      // 唤醒后端 tool_health 循环立刻重跑——上一轮跑的时候 model 还是空，
+      // cache 里存的是 Plan::Skip{reason:"未配置模型"}。不 emit 的话用户得
+      // 等 1h/6h/24h 才会看到行尾 pill 从"未配置模型"变成"延迟 X ms"，
+      // 体感像没保存成功。
+      await emit("ofox-prefs-updated");
       toast.success("模型已更新");
       onChanged?.();
       // Close on success — mirrors handleUnbind's收尾 sequence and

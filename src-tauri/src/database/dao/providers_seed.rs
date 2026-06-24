@@ -262,8 +262,13 @@ pub(crate) fn ofox_seeds() -> Vec<OfoxProviderSeed> {
             website_url: "https://ofox.ai",
             icon: "ofox",
             icon_color: "#D97706",
+            // GEMINI_API_KEY 字段在 seed 里留空（占位）——bind 时由
+            // `ProxyService::ofox_write_direct_to_live` 把 sk-of- 注入到
+            // 工具真实配置文件（~/.gemini/.env），DB 行始终是 seed 模板态。
+            // Gemini CLI 同时支持 Google OAuth 与 GEMINI_API_KEY 两种走法，
+            // 这里走的是 GEMINI_API_KEY + base URL 重定向到 ofox gateway。
             settings_config_json: format!(
-                r#"{{"env":{{"GOOGLE_GEMINI_BASE_URL":"{gemini}"}}}}"#
+                r#"{{"env":{{"GOOGLE_GEMINI_BASE_URL":"{gemini}","GEMINI_API_KEY":""}}}}"#
             ),
             meta_json: r#"{"providerType":"ofox"}"#,
         },

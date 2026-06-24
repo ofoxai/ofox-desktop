@@ -64,23 +64,33 @@ fn is_chat_model(id: &str) -> bool {
     true
 }
 
-/// Ofox 各协议的模型列表端点。base 由 [`crate::ofox_apex::gateway_base`] 单一
-/// 开关，dev/prod、ofox.ai/ofox.io 切换都收敛到这里——避免之前几处常量分散
-/// 漏改某个 URL 导致 release build 把请求打到错误地区。
+/// Ofox 各协议的模型列表端点。base 锁定到
+/// [`crate::ofox_apex::models_catalog_base`]——**始终走线上**，
+/// 不跟随 `OFOX_USE_LOCAL`，但仍遵守 apex 切换（ofox.ai / ofox.io）。
 ///
-/// 三条端点都对应 ofox.ai 公开文档（`https://ofox.ai/zh/docs/api/`）。dev 模式
-/// 下 base 是本地 ofox-gateway plugin，若本地 plugin 还没补齐对应路径会返回
-/// 404，这是 plugin 侧的实现问题——不要因此把线上请求改道。
+/// 为什么不沿用 [`crate::ofox_apex::gateway_base`]：本地 ofox-gateway 的
+/// traefik 配置里 `ofox-api-router` 只抢 `/v1/models`，`/anthropic/v1/models`
+/// 和 `/gemini/v1beta/models` 会落到 LLM 父路由 → gemini/anthropic 插件
+/// default 分支 → 404。生产环境由 MSE 网关单独路由直转 ofox-core，避开了
+/// traefik。dev 环境要么得自己改 4 份 configmap、要么让插件实现 list 端点，
+/// 都比"列模型锁线上"重。模型 catalog 是只读跨地区共享的，没有 dev/prod
+/// 数据差异，锁线上副作用最小。
 fn ofox_openai_models_url() -> String {
-    format!("{}/v1/models", crate::ofox_apex::gateway_base())
+    format!("{}/v1/models", crate::ofox_apex::models_catalog_base())
 }
 
 fn ofox_anthropic_models_url() -> String {
-    format!("{}/anthropic/v1/models", crate::ofox_apex::gateway_base())
+    format!(
+        "{}/anthropic/v1/models",
+        crate::ofox_apex::models_catalog_base()
+    )
 }
 
 fn ofox_gemini_models_url() -> String {
-    format!("{}/gemini/v1beta/models", crate::ofox_apex::gateway_base())
+    format!(
+        "{}/gemini/v1beta/models",
+        crate::ofox_apex::models_catalog_base()
+    )
 }
 
 /// 从 Ofox 获取可用模型列表

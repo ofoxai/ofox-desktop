@@ -118,15 +118,23 @@ pub(crate) fn read_active_model_for(
 // ---------------------------------------------------------------------------
 
 /// Write `model` into the active provider's settings_config at the path
-/// appropriate for `app`, then trigger a takeover refresh so the live
-/// config file (`~/.claude/settings.json`, `~/.codex/config.toml`, …)
+/// appropriate for `app`, then refresh the on-disk live config so the tool
 /// picks up the change immediately.
 ///
 /// Empty `model` removes the field — keeps the on-disk config clean and
 /// signals "fall back to OfoxAI's default routing".
+///
+/// For ofox-* providers this goes through the **bind 直写** path
+/// ([`ProxyService::ofox_write_direct_to_live`])：拿 keychain 里的 sk-of-、
+/// 把 DB 里的 settings_config（含新 model）+ token 合成完整磁盘 config 写盘。
+/// 不调老的 `refresh_takeover_for_app`——那条会写 `PROXY_MANAGED` 占位符把
+/// 真 sk-of- 覆盖掉，并触发 backup 删除（破坏 unbind 可恢复性）。
+///
+/// 非 ofox provider 走老路径——保留 takeover 自托管的兼容形态。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn set_active_ofox_model(
     state: State<'_, AppState>,
+    ofox_state: State<'_, OfoxAuthState>,
     app: String,
     model: String,
 ) -> Result<(), String> {
@@ -152,16 +160,31 @@ pub async fn set_active_ofox_model(
         .update_provider_settings_config(app_str, &provider_id, &provider.settings_config)
         .map_err(|e| format!("更新 {provider_id} settings_config 失败: {e}"))?;
 
-    // Re-apply takeover so the new model lands in the live config file.
-    // Use `refresh_takeover_for_app` instead of `set_takeover_for_app(_, true)`:
-    // the latter has an enabled+has_backup fast-path that early-returns for an
-    // already-bound tool, leaving the disk config stale. `refresh_takeover_for_app`
-    // skips that fast-path and unconditionally re-seeds + re-takes-over.
-    state
-        .proxy_service
-        .refresh_takeover_for_app(app_str)
+    if provider_id.starts_with("ofox-") {
+        // ofox 直写路径：拿 keychain 里的 sk-of-（CachedOk——已经 bind 过的工具
+        // 一定命中；命中不了说明 keychain 被清/迁移，这种异常态 fetch 会
+        // 调 /openapi/api-keys 重新签发）+ 新 model 合成完整磁盘 config 写盘。
+        let api_key = crate::ofox_api_keys::fetch_or_create_api_key(
+            app_type,
+            crate::ofox_api_keys::FetchMode::CachedOk,
+            &ofox_state.0,
+        )
         .await
-        .map_err(|e| format!("刷新 {app_str} live 配置失败: {e}"))?;
+        .map_err(|e| format!("获取 {app_str} OfoxAI API key 失败: {e}"))?;
+
+        state
+            .proxy_service
+            .ofox_write_direct_to_live(&app_type, &api_key)
+            .await
+            .map_err(|e| format!("刷新 {app_str} live 配置失败: {e}"))?;
+    } else {
+        // 非 ofox provider 走老 takeover 路径——保留兼容形态。
+        state
+            .proxy_service
+            .refresh_takeover_for_app(app_str)
+            .await
+            .map_err(|e| format!("刷新 {app_str} live 配置失败: {e}"))?;
+    }
 
     Ok(())
 }
@@ -204,13 +227,19 @@ fn read_model_from_settings(app: &AppType, settings: &serde_json::Value) -> Stri
             .and_then(|v| v.as_object())
             .and_then(|m| m.keys().next().cloned())
             .unwrap_or_default(),
-        AppType::OpenClaw | AppType::Hermes => settings
+        AppType::OpenClaw => settings
             .get("models")
             .and_then(|v| v.as_array())
             .and_then(|arr| arr.first())
+            .and_then(|v| v.get("id"))
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
+        AppType::Hermes => settings
+            .get("models")
+            .and_then(|v| v.as_object())
+            .and_then(|m| m.keys().next().cloned())
+            .unwrap_or_default(),
     }
 }
 
@@ -242,14 +271,38 @@ fn write_model_into_settings(
             }
             Ok(())
         }
-        AppType::OpenClaw | AppType::Hermes => {
+        AppType::OpenClaw => {
+            // OpenClaw schema：`models: [{id: string, name: string, ...}]`
+            // —— 对象数组，CLI runtime schema 要求 `name` **必填** string
+            // （Rust `OpenClawModelEntry` 里 name 是 Option，但 CLI 端校验更严，
+            // 缺 name 会报 "Invalid input: expected string, received undefined"
+            // 后整个 config 失效）。name 没有更好来源时直接复用 id。
             let obj = settings
                 .as_object_mut()
                 .ok_or_else(|| "settings_config 不是对象".to_string())?;
             if model.is_empty() {
                 obj.insert("models".into(), serde_json::json!([]));
             } else {
-                obj.insert("models".into(), serde_json::json!([model]));
+                obj.insert(
+                    "models".into(),
+                    serde_json::json!([{ "id": model, "name": model }]),
+                );
+            }
+            Ok(())
+        }
+        AppType::Hermes => {
+            // Hermes schema：`models: { <id>: { context_length?, ... } }`
+            // —— dict，key 是 model id。
+            let obj = settings
+                .as_object_mut()
+                .ok_or_else(|| "settings_config 不是对象".to_string())?;
+            if model.is_empty() {
+                obj.insert("models".into(), serde_json::json!({}));
+            } else {
+                obj.insert(
+                    "models".into(),
+                    serde_json::json!({ model: serde_json::json!({}) }),
+                );
             }
             Ok(())
         }

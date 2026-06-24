@@ -1,10 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
-import {
-  BOUND_TOOLS_STORAGE_KEY,
-  PROXY_SUPPORTED_TOOLS,
-} from "@/config/toolMeta";
-import { proxyApi } from "@/lib/api/proxy";
+import { BOUND_TOOLS_STORAGE_KEY } from "@/config/toolMeta";
 import { settingsApi } from "@/lib/api";
 
 /**
@@ -36,16 +32,16 @@ async function mirrorBoundToolsToSettings(tools: string[]): Promise<void> {
  * API key（keychain 命中 / 否则调 `/openapi/api-keys` 签发）→ 直接把真
  * Token 写进工具配置文件、baseURL 指 ofox gateway，**绕开** proxy takeover。
  *
- * **Gemini 不在内**：它的 `~/.gemini/.env` 没有 LLM auth token 字段
- * （CLI 用 Google OAuth 自有流程），后端 `ofox_provider_for` 对 Gemini 返
- * `None` 直接拒绝。Gemini bind 退回老 `setProxyTakeoverForApp`——proxy 转
- * 发层负责附加 token；这是历史遗留语义，跟新 bind 路径并存。
+ * 6 工具全部走直写：Claude / Codex / Gemini / OpenCode / OpenClaw / Hermes。
+ * Gemini 走 `env.GEMINI_API_KEY` + `GOOGLE_GEMINI_BASE_URL`，CLI 支持这条
+ * 第三方走法（其 Google OAuth 是另一条独立分支，跟我们无关）。
  *
  * Keep this in sync with `commands/ofox_auth.rs::ofox_provider_for`.
  */
 const OFOX_AUTO_BIND_TOOLS: ReadonlySet<string> = new Set([
   "claude",
   "codex",
+  "gemini",
   "opencode",
   "openclaw",
   "hermes",
@@ -62,15 +58,17 @@ const OFOX_AUTO_BIND_TOOLS: ReadonlySet<string> = new Set([
  * badge but the proxy is silently off (or worse, pointing at the official
  * provider which has no base_url and 400s at request time).
  *
- * Per-tool behavior:
- *   - claude / codex → `ofox_bind_tool` does everything: switches active
- *     provider to ofox-<tool>, writes the OAuth access_token into the
- *     provider's settings_config, enables proxy takeover.
- *   - gemini → only `setProxyTakeoverForApp` (no token field yet).
- *   - others (opencode/...) → not in PROXY_SUPPORTED_TOOLS, no-op.
+ * Per-tool behavior：所有 6 个 ofox-supported 工具走 `ofox_bind_tool` —— 切换
+ * active provider 到 ofox-<tool>、从 keychain 取或经 /openapi/api-keys 签发
+ * sk-of- API key、备份 + 字段级 patch 写盘。**无 proxy takeover**。集合外的工具
+ * （例如未来加新工具但还没走通 ofox 路径）跳过。
  *
- * Both Rust paths are idempotent — re-binding an already-bound tool is
- * cheap.
+ * 历史 PROXY_SUPPORTED_TOOLS gate 已经移除——它原本是用来过滤"走 proxy
+ * takeover 的工具"，但 ofox 改造后 bind 完全绕开 proxy，把 OpenCode/OpenClaw/
+ * Hermes 这些 multi-provider 容器型工具也错挡在外。现在统一用
+ * OFOX_AUTO_BIND_TOOLS 作为唯一 gate。
+ *
+ * `ofox_bind_tool` 后端幂等——重复 bind 已绑工具开销可忽略。
  *
  * Returns the same `tools` array it was given so callers can chain.
  */
@@ -79,13 +77,9 @@ export async function bindTools(tools: string[]): Promise<string[]> {
   // Mirror to backend (fire-and-forget, doesn't block bind round-trips).
   void mirrorBoundToolsToSettings(tools);
   for (const tool of tools) {
-    if (!PROXY_SUPPORTED_TOOLS.includes(tool)) continue;
+    if (!OFOX_AUTO_BIND_TOOLS.has(tool)) continue;
     try {
-      if (OFOX_AUTO_BIND_TOOLS.has(tool)) {
-        await invoke("ofox_bind_tool", { app: tool });
-      } else {
-        await proxyApi.setProxyTakeoverForApp(tool, true);
-      }
+      await invoke("ofox_bind_tool", { app: tool });
     } catch (e) {
       console.error(`[bindTools] bind ${tool} failed`, e);
     }
@@ -120,7 +114,7 @@ export async function unbindTool(app: string): Promise<void> {
   localStorage.setItem(BOUND_TOOLS_STORAGE_KEY, JSON.stringify(next));
   void mirrorBoundToolsToSettings(next);
 
-  if (PROXY_SUPPORTED_TOOLS.includes(app)) {
+  if (OFOX_AUTO_BIND_TOOLS.has(app)) {
     await invoke("ofox_unbind_tool", { app });
   }
 }

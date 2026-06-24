@@ -7,8 +7,7 @@ import {
   OFOX_AUTH_RESTORED_EVENT,
   ofoxGetAuthStatus,
 } from "@/lib/api/ofoxAuth";
-import { BOUND_TOOLS_STORAGE_KEY, PROXY_SUPPORTED_TOOLS } from "@/config/toolMeta";
-import { proxyApi } from "@/lib/api/proxy";
+import { BOUND_TOOLS_STORAGE_KEY } from "@/config/toolMeta";
 
 type AppState = "loading" | "onboarding" | "console";
 
@@ -139,59 +138,13 @@ export default function MainApp() {
     };
   }, []);
 
-  /**
-   * 历史：takeover 时代的"自愈"——Console mount 时强行给所有
-   * `boundTools ∩ PROXY_SUPPORTED_TOOLS` 开 proxy takeover，保证工具配置
-   * 文件始终指向 `127.0.0.1:15721`。
-   *
-   * **bind 直写改造后这层自愈反而是 bug**：新 bind 路径已经把真 sk-of- 写
-   * 进工具配置文件，再叠加一次 `setProxyTakeoverForApp(_, true)` 会把刚写
-   * 好的真 token 覆盖回 `PROXY_MANAGED` 占位符。Claude/Codex 都受影响，磁
-   * 盘静悄悄从"指 ofox gateway 真 key"变成"指本地 proxy 占位符"——后续 LLM
-   * 请求会全部失败。
-   *
-   * Gemini 仍然走老 takeover 路径（它的 ofox seed 没 LLM token 字段；详见
-   * `commands/ofox_auth.rs::ofox_provider_for`）。对 Gemini 保留自愈语义。
-   */
-  useEffect(() => {
-    if (appState !== "console" || boundTools.length === 0) return;
-    // 只对仍走老 takeover 路径的工具做自愈——目前只有 Gemini。
-    // **保持与后端 `ofox_provider_for`、`bindTools.ts::OFOX_AUTO_BIND_TOOLS`
-    // 互补一致**：那两处明确收录的工具（claude/codex/opencode/openclaw/hermes）
-    // 走 ofox 直写，自愈必须避开；剩下还在 PROXY_SUPPORTED 里的就是 Gemini。
-    const TAKEOVER_ONLY_TOOLS = new Set(["gemini"]);
-    const locked = boundTools.filter(
-      (t) => PROXY_SUPPORTED_TOOLS.includes(t) && TAKEOVER_ONLY_TOOLS.has(t),
-    );
-    if (locked.length === 0) return;
-
-    let cancelled = false;
-    (async () => {
-      try {
-        const status = await proxyApi.getProxyTakeoverStatus();
-        if (cancelled) return;
-        const map = status as unknown as Record<string, boolean>;
-        for (const tool of locked) {
-          if (cancelled) return;
-          if (!map[tool]) {
-            try {
-              await proxyApi.setProxyTakeoverForApp(tool, true);
-            } catch (e) {
-              console.error(
-                `[MainApp] force-enable takeover for ${tool} failed`,
-                e,
-              );
-            }
-          }
-        }
-      } catch (e) {
-        console.error("[MainApp] takeover reconciliation failed", e);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [appState, boundTools]);
+  // 历史："force-enable takeover" 自愈 effect 已在 bind 直写改造完成后整段
+  // 移除——6 个支持工具全部走 `ofox_bind_tool`（直写 sk-of- 到工具配置文件、
+  // baseURL 指 ofox gateway），没有任何工具再依赖 proxy takeover。再保留这层
+  // 自愈反而会把磁盘上真 token 覆盖成 `PROXY_MANAGED` 占位符。
+  //
+  // proxy server 本身（`crate::proxy::server`）保留但不再被 ofox bind 启动，
+  // 留给将来其它非 ofox provider 的延伸使用，超出本工程范围。
 
   if (appState === "loading") {
     return null;

@@ -1012,19 +1012,22 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
 
-                // 检查是否有 Live 备份（表示上次异常退出时可能处于接管状态）
-                let has_backups = match state.db.has_any_live_backup().await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        log::error!("检查 Live 备份失败: {e}");
-                        false
-                    }
-                };
-                // 检查 Live 配置是否仍处于被接管状态（包含占位符）
+                // 启动自愈：检测 Live 配置里是否有 takeover 占位符残留
+                // （`PROXY_MANAGED` token / `127.0.0.1:port` baseURL）。
+                //
+                // **不再单看 `has_any_live_backup`**：bind 直写改造后 DB 里的
+                // live_backups 是 ofox bind 的"正常状态"——unbind 才删。把它
+                // 当成"异常退出标志"会在每次启动把刚 bind 好的真 sk-of- 当成
+                // takeover 残留擦掉。
+                //
+                // `detect_takeover_in_live_configs` 实际读 ~/.claude/settings.json /
+                // ~/.codex/auth.json / ~/.gemini/.env 看里头有没有占位符——这才
+                // 是真正的"上次异常退出（用户被 takeover 走完一半 SIGKILL）"
+                // 的判据。
                 let live_taken_over = state.proxy_service.detect_takeover_in_live_configs();
 
-                if has_backups || live_taken_over {
-                    log::warn!("检测到上次异常退出（存在接管残留），正在恢复 Live 配置...");
+                if live_taken_over {
+                    log::warn!("检测到上次异常退出（存在接管占位符残留），正在恢复 Live 配置...");
                     if let Err(e) = state.proxy_service.recover_from_crash().await {
                         log::error!("恢复 Live 配置失败: {e}");
                     } else {

@@ -16,14 +16,17 @@
 //! 默认情况下（无论 `pnpm tauri dev` 还是 release build）所有 base URL 都
 //! 指向线上 `https://app.<apex>` / `https://api.<apex>`。这一刀切让 dev 与
 //! 生产共享同一 IDP、gateway、`/openapi/*`——避免"dev 跑得通生产挂掉"或
-//! 反向那种 dev/prod 混搭。模型列表这类只读端点尤其依赖这条：本地 ofox-
-//! gateway plugin 还没接 `/gemini/v1beta/models` 时，dev 改打线上就能正常
-//! 工作。
+//! 反向那种 dev/prod 混搭。
 //!
 //! 偶尔需要本地后端联调（ofox-app/ofox-core/ofox-gateway 跑在 pm2 上）时，
 //! 把环境变量 `OFOX_USE_LOCAL=1` 传给 `pnpm tauri dev`，本进程内所有 base
 //! 会切回 `localhost:3000`/`:8080`/`:8088`——这是逃生口，不进 settings，
 //! 重启进程即恢复线上模式，避免开发机长期处于一个非默认的隐藏状态。
+//!
+//! **例外**：[`models_catalog_base`] **始终指线上**，不响应 `OFOX_USE_LOCAL`。
+//! 模型列表是只读 catalog，且本地 traefik 配置缺 `/anthropic/v1/models`、
+//! `/gemini/v1beta/models` 的直转路由——dev 模式打本地会 404。把这个 base
+//! 单独锁线上是绕开 dev/prod 配置漂移的最小成本修法。详见该函数 docstring。
 //!
 //! 切换 apex（ofox.ai ⇌ ofox.io）走 `settings.json` 的 `ofoxApex` 字段，
 //! 与 dev/prod 切换正交：apex 决定打哪个地区，`OFOX_USE_LOCAL` 决定是否走
@@ -172,6 +175,23 @@ pub fn gateway_base() -> String {
     } else {
         format!("https://api.{}", current_apex())
     }
+}
+
+/// 模型列表（`/v1/models`、`/anthropic/v1/models`、`/gemini/v1beta/models`）
+/// 专用 base —— **始终指向线上 `https://api.<apex>`**，不受 `OFOX_USE_LOCAL`
+/// 影响。
+///
+/// 为什么单独拉一个 base：本地 ofox-gateway traefik 配置里 `ofox-api-router`
+/// 只抢 `/v1/models`，`/anthropic/v1/models` 和 `/gemini/v1beta/models` 会
+/// 误落到 LLM 代理父路由，被 gemini/anthropic 插件 default 分支拦截 404
+/// （插件本来就不该处理这条路径——prod 由 MSE 网关单独路由直转 ofox-core）。
+/// 列模型是只读、跨地区共享的 catalog，把它锁到线上是成本最低的修法：
+/// 比改 4 份 traefik configmap 安全、比让插件实现 list 端点正确。
+///
+/// 仍然遵守 apex 切换（ofox.ai ⇌ ofox.io），所以国内用户的模型列表来自
+/// `api.ofox.io`。
+pub fn models_catalog_base() -> String {
+    format!("https://api.{}", current_apex())
 }
 
 /// 营销站 `https://<apex>` —— terms / privacy / 主站 marketing 链接。
@@ -443,6 +463,16 @@ mod tests {
             openapi_api_key_url(id),
             format!("{}/{id}", openapi_api_keys_url())
         );
+    }
+
+    #[test]
+    fn models_catalog_base_ignores_use_local() {
+        // 即便 OFOX_USE_LOCAL=1，models_catalog_base() 也必须指线上——
+        // 本地 traefik 缺 `/anthropic/v1/models` 和 `/gemini/v1beta/models`
+        // 的直转路由，列模型只能打 prod。回归保险：有人手滑把这条接到
+        // gateway_base() 上时立刻挂掉。
+        assert!(models_catalog_base().starts_with("https://api."));
+        assert!(models_catalog_base().ends_with(current_apex()));
     }
 
     #[test]

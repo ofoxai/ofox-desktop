@@ -123,6 +123,12 @@ pub fn parse_env_file_strict(content: &str) -> Result<HashMap<String, String>, A
 }
 
 /// 将键值对序列化为 .env 格式
+///
+/// **末尾必须带换行符**——Gemini CLI 的 dotenv parser 跟大多数 dotenv 库一样，
+/// 要求每行以 `\n` 收尾；最后一行没换行会被当作残缺数据**丢弃**。曾经的现象：
+/// `GEMINI_API_KEY` 被读到（第一行）、`GOOGLE_GEMINI_BASE_URL` 被丢（末行没
+/// `\n`）→ CLI 显示 "Authenticated" 但请求实际打到了 generativelanguage.
+/// googleapis.com，403 "you don't have access to gemini-3.1-flash-lite"。
 pub fn serialize_env_file(map: &HashMap<String, String>) -> String {
     let mut lines = Vec::new();
 
@@ -136,7 +142,13 @@ pub fn serialize_env_file(map: &HashMap<String, String>) -> String {
         }
     }
 
-    lines.join("\n")
+    if lines.is_empty() {
+        String::new()
+    } else {
+        let mut out = lines.join("\n");
+        out.push('\n');
+        out
+    }
 }
 
 /// 读取 Gemini .env 文件
@@ -412,6 +424,16 @@ GEMINI_MODEL=gemini-3-pro-preview
 
         assert!(content.contains("GEMINI_API_KEY=sk-test"));
         assert!(content.contains("GEMINI_MODEL=gemini-3-pro-preview"));
+        // 回归保险：末尾必须有 `\n`——参见 [`serialize_env_file`] docstring 里
+        // 的"最后一行被 dotenv parser 丢弃"事故说明。
+        assert!(content.ends_with('\n'), "missing trailing newline: {content:?}");
+    }
+
+    #[test]
+    fn test_serialize_env_file_empty_map() {
+        let map = HashMap::new();
+        // 空 map 输出空字符串——避免给磁盘留一个孤零零的 `\n`。
+        assert_eq!(serialize_env_file(&map), "");
     }
 
     #[test]

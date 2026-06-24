@@ -368,6 +368,84 @@ pub(crate) fn provider_uses_common_config(
     }
 }
 
+/// 字段级反 patch：从 `settings` 里减去 `patch` 出现过的字段，原样保留 patch
+/// 没碰过的字段。用于 ofox bind 的 unbind 流程——bind 时记下注入了哪些字段
+/// （patch 形态 = `ProxyService::read_*_live` 的返回值），unbind 时把它们从当前
+/// 磁盘里减掉，**用户在 bind 期间手动加的字段不会被误删**。
+///
+/// 跟 [`remove_common_config_from_settings`] 的差异：
+/// - patch 是 `Value`（不是字符串 snippet）；Codex patch 形态是 `{auth, config:"<TOML>"}`
+///   包装结构，跟 [`crate::services::proxy::ProxyService::read_codex_live`] 对齐
+/// - 支持 OpenCode/OpenClaw/Hermes——patch 形态是单个 provider 子节
+///
+/// 数组语义复用 [`json_remove_array_items`]：source 数组里的每个元素去 target 里
+/// 找 subset 匹配后移除；空 source 数组不会清空 target 数组（这正是用户在
+/// `models` 里加的项不丢的原因）。
+pub(crate) fn remove_patch_from_settings(
+    app_type: &AppType,
+    settings: &Value,
+    patch: &Value,
+) -> Result<Value, AppError> {
+    match app_type {
+        AppType::Claude => {
+            let mut result = settings.clone();
+            json_deep_remove(&mut result, patch);
+            Ok(result)
+        }
+        AppType::Codex => {
+            // patch = { "auth": {...}, "config": "<TOML 字符串>" }
+            // settings 同形态。auth 走 JSON 反 patch；config 走 TOML 反 patch。
+            let mut result = settings.clone();
+            if let Some(result_obj) = result.as_object_mut() {
+                if let (Some(target_auth), Some(patch_auth)) =
+                    (result_obj.get_mut("auth"), patch.get("auth"))
+                {
+                    json_deep_remove(target_auth, patch_auth);
+                }
+                let target_toml = result_obj
+                    .get("config")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let patch_toml = patch.get("config").and_then(Value::as_str).unwrap_or("");
+                if !patch_toml.trim().is_empty() {
+                    let mut target_doc = if target_toml.trim().is_empty() {
+                        DocumentMut::new()
+                    } else {
+                        target_toml.parse::<DocumentMut>().map_err(|e| {
+                            AppError::Message(format!(
+                                "Invalid Codex config.toml while removing patch: {e}"
+                            ))
+                        })?
+                    };
+                    let patch_doc = patch_toml.parse::<DocumentMut>().map_err(|e| {
+                        AppError::Message(format!("Invalid Codex patch TOML: {e}"))
+                    })?;
+                    remove_toml_table_like(target_doc.as_table_mut(), patch_doc.as_table());
+                    result_obj
+                        .insert("config".to_string(), Value::String(target_doc.to_string()));
+                }
+            }
+            Ok(result)
+        }
+        AppType::Gemini => {
+            // patch = { "env": {...} }
+            let mut result = settings.clone();
+            if let (Some(target_env), Some(patch_env)) =
+                (result.get_mut("env"), patch.get("env"))
+            {
+                json_deep_remove(target_env, patch_env);
+            }
+            Ok(result)
+        }
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => {
+            // patch / settings 都是单个 provider 子节的 Value（顶层是 object）。
+            let mut result = settings.clone();
+            json_deep_remove(&mut result, patch);
+            Ok(result)
+        }
+    }
+}
+
 pub(crate) fn remove_common_config_from_settings(
     app_type: &AppType,
     settings: &Value,

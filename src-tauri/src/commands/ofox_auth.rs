@@ -136,10 +136,11 @@ fn ofox_provider_for(app: &AppType) -> Option<(&'static str, &'static [&'static 
         // auth.OPENAI_API_KEY — matches `ofox-codex` seed at
         // providers_seed.rs:122
         AppType::Codex => Some(("ofox-codex", &["auth", "OPENAI_API_KEY"])),
-        // `ofox-gemini` seed has no token field today — Gemini CLI uses a
-        // Google OAuth flow rather than a shared bearer. Returning None
-        // surfaces a clear error rather than silently doing nothing.
-        AppType::Gemini => None,
+        // env.GEMINI_API_KEY — matches `ofox-gemini` seed at
+        // providers_seed.rs:265-267. Gemini CLI 同时支持 Google OAuth 与
+        // GEMINI_API_KEY；ofox bind 走后者 + GOOGLE_GEMINI_BASE_URL 把请求
+        // 重定向到 ofox gateway。
+        AppType::Gemini => Some(("ofox-gemini", &["env", "GEMINI_API_KEY"])),
         // options.apiKey — matches `ofox-opencode` seed at
         // providers_seed.rs:278-280
         AppType::OpenCode => Some(("ofox-opencode", &["options", "apiKey"])),
@@ -169,9 +170,7 @@ pub async fn bind_tool_to_ofox_internal(
 ) -> Result<(), String> {
     let app_type = AppType::from_str(app).map_err(|e| format!("无效的应用类型: {e}"))?;
     // 只校验"该工具是否在 ofox 路径里有 token 注入字段"——具体路径由
-    // `ProxyService::ofox_write_direct_to_live` 内部处理。Gemini 走的是
-    // Google OAuth flow，没有 LLM auth token 字段，目前 ofox_provider_for
-    // 对 Gemini 返 None，bind 在此提前拒绝。
+    // `ProxyService::ofox_write_direct_to_live` 内部处理。
     let provider_id = ofox_provider_for(&app_type)
         .map(|t| t.0)
         .ok_or_else(|| format!("{} 暂不支持自动绑定到 OfoxAI", app_type.as_str()))?;
@@ -219,12 +218,12 @@ pub async fn bind_tool_to_ofox_internal(
         })?
     };
 
-    // 2) 备份工具原配置（DB live_backups）。失败立刻中止——没备份就 bind 会
-    //    让 unbind 找不到东西恢复。Claude/Codex/Gemini 备份整文件；
-    //    OpenCode/OpenClaw/Hermes 备份 "ofox-* provider 子节快照"（bind 前不
-    //    存在就存哨兵）。详见 services/proxy.rs ofox_backup_live_config 注释。
+    // 2) 把"这次 bind 将注入的字段"以字段级 patch 形式存进 DB live_backups。
+    //    跟 ofox_write_direct_to_live 共享同一份 patch 内容，确保 unbind 反 patch
+    //    跟 bind 写盘对得上。详见 services/proxy.rs ofox_backup_live_config 注释。
+    //    失败立刻中止——没备份就 bind 会让 unbind 没法精确还原。
     proxy_service
-        .ofox_backup_live_config(&app_type)
+        .ofox_backup_live_config(&app_type, &token)
         .await
         .map_err(|e| format!("备份 {} Live 配置失败: {e}", app_type.as_str()))?;
 
