@@ -1922,6 +1922,12 @@ impl ProxyService {
     fn write_hermes_live(&self, config: &Value) -> Result<(), String> {
         crate::hermes_config::set_provider("ofox-hermes", config.clone())
             .map_err(|e| format!("写入 Hermes ofox provider 失败: {e}"))?;
+        // Hermes runtime 在启动时只看 `model.provider` / `model.default` 来决定路由
+        // 哪个 provider；只写 `custom_providers` 子节、不动顶层 `model:`，CLI 会以
+        // "No inference provider configured" 拒跑。每次 bind/写 model 都强制把
+        // 顶层 model 同步到 ofox-hermes，免得用户还要再去 `hermes model` 选一次。
+        crate::hermes_config::apply_switch_defaults("ofox-hermes", config)
+            .map_err(|e| format!("写入 Hermes model 默认值失败: {e}"))?;
         Ok(())
     }
 

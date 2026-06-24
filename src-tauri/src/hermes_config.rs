@@ -801,12 +801,22 @@ pub fn apply_switch_defaults(
     provider_id: &str,
     settings_config: &serde_json::Value,
 ) -> Result<HermesWriteOutcome, AppError> {
+    // `models` 在不同入口下可能是两种形态：
+    //  - 数组 [{id, name, ...}]：UI / 旧 DeepLink 导入 / 单测里手写的样子
+    //  - dict { id: { context_length?, ... } }：ofox 直写路径 (manage_tool.rs
+    //    把 model 写进 dict) 和 Hermes runtime 的原生 schema
+    // 两种都要兜住，否则 dict 形态读不到 first id → `model.default` 保留旧值
+    // → Hermes runtime 报 "No inference provider configured"。
     let first_model_id = settings_config
         .get("models")
-        .and_then(|v| v.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|m| m.get("id"))
-        .and_then(|id| id.as_str())
+        .and_then(|v| {
+            v.as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|m| m.get("id"))
+                .and_then(|id| id.as_str())
+                .map(str::to_string)
+                .or_else(|| v.as_object().and_then(|m| m.keys().next().cloned()))
+        })
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
@@ -1806,6 +1816,26 @@ custom_providers:
             // First entry's id is whitespace-only → blank → fall back to old default
             // (we intentionally don't scan past the first entry for a default).
             assert_eq!(model.default.as_deref(), Some("prev-default"));
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn apply_switch_defaults_reads_first_model_from_dict_shape() {
+        // ofox 直写路径里 `manage_tool::write_model_into_settings` 把 Hermes 的
+        // `models` 写成 dict（`{ <id>: { ... } }`），跟 Hermes runtime 的原生 schema
+        // 一致。旧实现只 `as_array()` 单分支，dict 拿不到 first id → `model.default`
+        // 不会更新 → CLI 启动时报 "No inference provider configured"。
+        with_test_home(|| {
+            let settings = serde_json::json!({
+                "base_url": "https://api.example.com/v1",
+                "models": { "minimax/minimax-m2.1-lightning": {} }
+            });
+            apply_switch_defaults("ofox-hermes", &settings).unwrap();
+
+            let model = get_model_config().unwrap().unwrap();
+            assert_eq!(model.default.as_deref(), Some("minimax/minimax-m2.1-lightning"));
+            assert_eq!(model.provider.as_deref(), Some("ofox-hermes"));
         });
     }
 
