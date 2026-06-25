@@ -1,7 +1,7 @@
 [package]
-name = "cc-switch"
-version = "3.14.1"
-description = "All-in-One Assistant for Claude Code, Codex & Gemini CLI"
+name = "ofox-desktop"
+version = "1.0.0"
+description = "All-in-One AI Tool Manager - Ofox Desktop"
 authors = ["Jason Young"]
 license = "MIT"
 repository = "https://github.com/farion1231/cc-switch"

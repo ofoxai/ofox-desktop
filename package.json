@@ -1,7 +1,7 @@
 {
   "name": "ofox-switch",
-  "version": "3.14.1",
-  "description": "All-in-One AI Tool Manager - Ofox Switch",
+  "version": "1.0.0",
+  "description": "All-in-One AI Tool Manager - Ofox Desktop",
   "type": "module",
   "scripts": {
     "dev": "pnpm tauri dev",

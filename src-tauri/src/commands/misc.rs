@@ -50,18 +50,99 @@ pub async fn copy_text_to_clipboard(text: String) -> Result<bool, String> {
     .map_err(|e| format!("剪贴板任务执行失败: {e}"))?
 }
 
-/// 检查更新
-#[tauri::command]
-pub async fn check_for_updates(handle: AppHandle) -> Result<bool, String> {
-    handle
-        .opener()
-        .open_url(
-            "https://github.com/farion1231/ofox-switch/releases/latest",
-            None::<String>,
-        )
-        .map_err(|e| format!("打开更新页面失败: {e}"))?;
+/// Ofox Desktop 自托管更新清单地址（Cloudflare R2 + 自定义域）。
+/// 结构见 `scripts/release.sh` 与 `tool-release` skill。
+const OFOX_UPDATE_MANIFEST_URL: &str = "https://desktop.ofox.ai/latest.json";
 
-    Ok(true)
+/// `latest.json` 的反序列化结构。`downloads` 的 key 形如 `darwin-aarch64`，
+/// 与 `current_platform_key()` 对齐。
+#[derive(Debug, serde::Deserialize)]
+struct UpdateManifest {
+    version: String,
+    #[serde(default)]
+    pub_date: Option<String>,
+    #[serde(default)]
+    notes: Option<String>,
+    #[serde(default)]
+    downloads: HashMap<String, String>,
+    #[serde(default)]
+    download_page: Option<String>,
+}
+
+/// 返回给前端的检查结果。
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCheckResult {
+    /// 是否有比当前更高的版本
+    has_update: bool,
+    current_version: String,
+    latest_version: String,
+    /// 当前平台对应的安装包直链；选不到时回退到 download_page
+    download_url: Option<String>,
+    notes: Option<String>,
+    pub_date: Option<String>,
+}
+
+/// `latest.json` 用的是 Tauri/通用三元组命名（darwin/windows + aarch64/x86_64），
+/// 而 `std::env::consts::OS/ARCH` 是 Rust 命名（macos/windows + aarch64/x86_64）。
+/// 这里把 Rust 命名映射成清单命名，避免两边各写一套。
+fn manifest_platform_key() -> String {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        other => other, // windows / linux 原样
+    };
+    format!("{os}-{}", std::env::consts::ARCH)
+}
+
+/// 比较两个 `x.y.z[-pre]` 版本号，返回 `latest > current`。
+/// 只比较主三段数字；预发布后缀（`-beta` 等）忽略，足够发布场景使用。
+fn is_newer(latest: &str, current: &str) -> bool {
+    fn parse(v: &str) -> [u64; 3] {
+        let core = v.trim().trim_start_matches('v');
+        let core = core.split('-').next().unwrap_or(core);
+        let mut out = [0u64; 3];
+        for (i, part) in core.split('.').take(3).enumerate() {
+            out[i] = part.parse().unwrap_or(0);
+        }
+        out
+    }
+    parse(latest) > parse(current)
+}
+
+/// 检查更新：拉取 R2 上的 `latest.json`，与当前版本比对，返回结构化结果。
+/// 前端据此弹"前往下载"提示——本应用不做自动安装，引导用户手动下载。
+#[tauri::command]
+pub async fn check_for_updates() -> Result<UpdateCheckResult, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+
+    let client = crate::proxy::http_client::get();
+    let manifest: UpdateManifest = client
+        .get(OFOX_UPDATE_MANIFEST_URL)
+        .header("User-Agent", "ofox-desktop")
+        .send()
+        .await
+        .map_err(|e| format!("获取更新清单失败: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("解析更新清单失败: {e}"))?;
+
+    let has_update = is_newer(&manifest.version, &current_version);
+
+    // 命中当前平台的直链；否则回退到通用下载页。
+    let download_url = manifest
+        .downloads
+        .get(&manifest_platform_key())
+        .cloned()
+        .or(manifest.download_page.clone());
+
+    Ok(UpdateCheckResult {
+        has_update,
+        current_version,
+        latest_version: manifest.version,
+        download_url,
+        notes: manifest.notes,
+        pub_date: manifest.pub_date,
+    })
 }
 
 /// 判断是否为便携版（绿色版）运行

@@ -601,6 +601,7 @@
     "aboutHint": "查看版本信息与更新状态。",
     "portableMode": "当前为便携版，更新需手动下载。",
     "updateAvailable": "检测到新版本：{{version}}",
+    "goDownload": "前往下载",
     "updateBadge": "有更新可用",
     "updateFailed": "更新安装失败，已尝试打开下载页面。",
     "checkUpdateFailed": "检查更新失败，请稍后重试。",

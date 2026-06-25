@@ -119,15 +119,12 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
     localStorage.removeItem(LEGACY_DISMISSED_KEY);
   }, []);
 
-  // 应用启动时自动检查更新
-  useEffect(() => {
-    // 延迟1秒后检查，避免影响启动体验
-    const timer = setTimeout(() => {
-      checkUpdate().catch(console.error);
-    }, 1000);
-
-    return () => clearTimeout(timer);
-  }, [checkUpdate]);
+  // 启动自动检查已禁用：更新检查改走 Ofox 自托管清单
+  // (settingsApi.checkUpdates → desktop.ofox.ai/latest.json)，由"关于"页的
+  // "检查更新"按钮手动触发。旧的 Tauri updater 插件 check() 指向上游 GitHub
+  // endpoint，在 Ofox 发布体系下无意义，故不再启动时自动调用。UpdateBadge
+  // 因此不会再亮（hasUpdate 恒为 false），属预期。
+  void checkUpdate;
 
   const value: UpdateContextValue = {
     hasUpdate,

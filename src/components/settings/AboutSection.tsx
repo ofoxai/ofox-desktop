@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
 import {
-  Download,
   Copy,
   ExternalLink,
   Info,
@@ -22,8 +21,6 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { getVersion } from "@tauri-apps/api/app";
 import { settingsApi } from "@/lib/api";
-import { useUpdate } from "@/contexts/UpdateContext";
-import { relaunchApp } from "@/lib/updater";
 import { Badge } from "@/components/ui/badge";
 import { motion } from "framer-motion";
 import appIcon from "@/assets/icons/app-icon.png";
@@ -94,18 +91,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   const { t } = useTranslation();
   const [version, setVersion] = useState<string | null>(null);
   const [isLoadingVersion, setIsLoadingVersion] = useState(true);
-  const [isDownloading, setIsDownloading] = useState(false);
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [toolVersions, setToolVersions] = useState<ToolVersion[]>([]);
   const [isLoadingTools, setIsLoadingTools] = useState(true);
-
-  const {
-    hasUpdate,
-    updateInfo,
-    updateHandle,
-    checkUpdate,
-    resetDismiss,
-    isChecking,
-  } = useUpdate();
 
   const [wslShellByTool, setWslShellByTool] = useState<
     Record<string, WslShellPreference>
@@ -232,72 +220,56 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
 
   const handleOpenReleaseNotes = useCallback(async () => {
     try {
-      const targetVersion = updateInfo?.availableVersion ?? version ?? "";
-      const displayVersion = targetVersion.startsWith("v")
-        ? targetVersion
-        : targetVersion
-          ? `v${targetVersion}`
-          : "";
-
-      if (!displayVersion) {
-        await settingsApi.openExternal(
-          "https://github.com/nicepkg/ofox-switch/releases",
-        );
-        return;
-      }
-
-      await settingsApi.openExternal(
-        `https://github.com/nicepkg/ofox-switch/releases/tag/${displayVersion}`,
-      );
+      // Ofox Desktop 的下载/版本页（自托管），不再指向上游 GitHub releases。
+      await settingsApi.openExternal("https://ofox.ai/download");
     } catch (error) {
       console.error("[AboutSection] Failed to open release notes", error);
       toast.error(t("settings.openReleaseNotesFailed"));
     }
-  }, [t, updateInfo?.availableVersion, version]);
+  }, [t]);
 
   const handleCheckUpdate = useCallback(async () => {
-    if (hasUpdate && updateHandle) {
-      if (isPortable) {
-        try {
-          await settingsApi.checkUpdates();
-        } catch (error) {
-          console.error("[AboutSection] Portable update failed", error);
-        }
+    // Ofox Desktop 自托管更新：拉 R2 的 latest.json 比对版本。本应用不做自动
+    // 安装，发现新版只提示并引导用户去下载页手动安装。
+    setIsCheckingUpdate(true);
+    try {
+      const result = await settingsApi.checkUpdates();
+
+      if (!result.hasUpdate) {
+        toast.success(t("settings.upToDate"), { closeButton: true });
         return;
       }
 
-      setIsDownloading(true);
-      try {
-        resetDismiss();
-        await updateHandle.downloadAndInstall();
-        await relaunchApp();
-      } catch (error) {
-        console.error("[AboutSection] Update failed", error);
-        toast.error(t("settings.updateFailed"));
-        try {
-          await settingsApi.checkUpdates();
-        } catch (fallbackError) {
-          console.error(
-            "[AboutSection] Failed to open fallback updater",
-            fallbackError,
-          );
-        }
-      } finally {
-        setIsDownloading(false);
-      }
-      return;
-    }
-
-    try {
-      const available = await checkUpdate();
-      if (!available) {
-        toast.success(t("settings.upToDate"), { closeButton: true });
-      }
+      const target = result.downloadUrl;
+      toast.info(
+        t("settings.updateAvailable", { version: result.latestVersion }),
+        {
+          description: result.notes || undefined,
+          duration: 12000,
+          closeButton: true,
+          action: target
+            ? {
+                label: t("settings.goDownload"),
+                onClick: () => {
+                  settingsApi.openExternal(target).catch((error) => {
+                    console.error(
+                      "[AboutSection] open download url failed",
+                      error,
+                    );
+                    toast.error(t("settings.openReleaseNotesFailed"));
+                  });
+                },
+              }
+            : undefined,
+        },
+      );
     } catch (error) {
       console.error("[AboutSection] Check update failed", error);
       toast.error(t("settings.checkUpdateFailed"));
+    } finally {
+      setIsCheckingUpdate(false);
     }
-  }, [checkUpdate, hasUpdate, isPortable, resetDismiss, t, updateHandle]);
+  }, [t]);
 
   const handleCopyInstallCommands = useCallback(async () => {
     try {
@@ -334,9 +306,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="space-y-2">
             <div className="flex items-center gap-2">
-              <img src={appIcon} alt="Ofox Switch" className="h-5 w-5" />
+              <img src={appIcon} alt="Ofox Desktop" className="h-5 w-5" />
               <h4 className="text-lg font-semibold text-foreground">
-                Ofox Switch
+                Ofox Desktop
               </h4>
             </div>
             <div className="flex items-center gap-2">
@@ -374,22 +346,10 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               type="button"
               size="sm"
               onClick={handleCheckUpdate}
-              disabled={isChecking || isDownloading}
+              disabled={isCheckingUpdate}
               className="h-8 gap-1.5 text-xs"
             >
-              {isDownloading ? (
-                <>
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  {t("settings.updating")}
-                </>
-              ) : hasUpdate ? (
-                <>
-                  <Download className="h-3.5 w-3.5" />
-                  {t("settings.updateTo", {
-                    version: updateInfo?.availableVersion ?? "",
-                  })}
-                </>
-              ) : isChecking ? (
+              {isCheckingUpdate ? (
                 <>
                   <RefreshCw className="h-3.5 w-3.5 animate-spin" />
                   {t("settings.checking")}
@@ -403,25 +363,6 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
             </Button>
           </div>
         </div>
-
-        {hasUpdate && updateInfo && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            className="rounded-lg bg-primary/10 border border-primary/20 px-4 py-3 text-sm"
-          >
-            <p className="font-medium text-primary mb-1">
-              {t("settings.updateAvailable", {
-                version: updateInfo.availableVersion,
-              })}
-            </p>
-            {updateInfo.notes && (
-              <p className="text-muted-foreground line-clamp-3 leading-relaxed">
-                {updateInfo.notes}
-              </p>
-            )}
-          </motion.div>
-        )}
       </motion.div>
 
       {!isWindows() && (

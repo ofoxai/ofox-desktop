@@ -18,6 +18,16 @@ export interface WebDavSyncResult {
   status: string;
 }
 
+export interface UpdateCheckResult {
+  hasUpdate: boolean;
+  currentVersion: string;
+  latestVersion: string;
+  /** 当前平台安装包直链；选不到时为通用下载页 */
+  downloadUrl: string | null;
+  notes: string | null;
+  pubDate: string | null;
+}
+
 export const settingsApi = {
   async get(): Promise<Settings> {
     return await invoke("get_settings");
@@ -31,8 +41,10 @@ export const settingsApi = {
     return await invoke("restart_app");
   },
 
-  async checkUpdates(): Promise<void> {
-    await invoke("check_for_updates");
+  /** 检查 Ofox Desktop 自身更新（拉 R2 的 latest.json 比对版本）。
+   *  本应用不做自动安装——返回结果由前端引导用户手动下载。 */
+  async checkUpdates(): Promise<UpdateCheckResult> {
+    return await invoke("check_for_updates");
   },
 
   async isPortable(): Promise<boolean> {
