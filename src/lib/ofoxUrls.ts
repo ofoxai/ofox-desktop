@@ -55,3 +55,33 @@ export const ofoxMarketingUrl = (a: OfoxApex): string => `https://${a}`;
 
 /** `https://api.<apex>` —— LLM 网关 / OpenAPI base，preset 表单 base_url 默认。 */
 export const ofoxApiBase = (a: OfoxApex): string => `https://api.${a}`;
+
+/**
+ * OFox 用户头像的对象存储 CDN 前缀。`/openapi/me` 返回的 `avatar_url`
+ * 是这个 bucket 内的相对 key（形如 `GdSPgRS6sTf3KgsOWrhSojnMoJIAC5Eq/xxx.webp`），
+ * 需要前端拼上 bucket 域名 + `avatars/` 路径前缀才能加载。
+ *
+ * 该 bucket 是阿里云 OSS 全球加速域名（oss-accelerate），不随 apex 切换——
+ * ofox.ai / ofox.io 共用同一份用户上传资源。
+ */
+const OFOX_AVATAR_CDN_BASE =
+  "https://ofox-uploads.oss-accelerate.aliyuncs.com/avatars/";
+
+/**
+ * 解析 `/openapi/me.avatar_url` 为可加载的绝对 URL。
+ *
+ * 后端约定：返回的 `avatar_url` 始终是 bucket 内的相对 key，前端负责拼前缀。
+ * 兼容输入：
+ *   - null / undefined / 空串 → null（调用方走首字母 fallback）
+ *   - 已经是 `http(s)://` 的完整 URL → 原样返回（兼容未来后端切换到完整 URL）
+ *   - 相对 key（前后可能带 `/`）→ 拼接 [`OFOX_AVATAR_CDN_BASE`]
+ */
+export function ofoxAvatarUrl(raw: string | null | undefined): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return null;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  // 去掉可能存在的前导 `/` 避免拼出 `avatars//xxx`
+  const key = trimmed.replace(/^\/+/, "");
+  return `${OFOX_AVATAR_CDN_BASE}${key}`;
+}

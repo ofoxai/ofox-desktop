@@ -8,6 +8,8 @@ import ClaudeSvg from "@/icons/extracted/claude.svg?url";
 import OpenAISvg from "@/icons/extracted/openai.svg?url";
 import GeminiSvg from "@/icons/extracted/gemini.svg?url";
 import OpenClawSvg from "@/icons/extracted/claw.svg?url";
+import OpenCodeSvg from "@/icons/extracted/opencode-logo-light.svg?url";
+import HermesPng from "@/icons/extracted/hermes.png";
 
 export function ClaudeIcon({ size = 16, className = "" }: IconProps) {
   return (
@@ -56,6 +58,32 @@ export function OpenClawIcon({ size = 16, className = "" }: IconProps) {
       height={size}
       className={className}
       alt="OpenClaw"
+      loading="lazy"
+    />
+  );
+}
+
+export function OpenCodeIcon({ size = 16, className = "" }: IconProps) {
+  return (
+    <img
+      src={OpenCodeSvg}
+      width={size}
+      height={size}
+      className={className}
+      alt="OpenCode"
+      loading="lazy"
+    />
+  );
+}
+
+export function HermesIcon({ size = 16, className = "" }: IconProps) {
+  return (
+    <img
+      src={HermesPng}
+      width={size}
+      height={size}
+      className={className}
+      alt="Hermes"
       loading="lazy"
     />
   );

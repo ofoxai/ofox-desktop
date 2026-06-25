@@ -47,13 +47,14 @@ use keyring::Entry;
 
 use crate::app_config::AppType;
 
-/// OAuth token 用的 service。沿用原命名——保留对历史 keychain 条目的兼容，
-/// 同一台机器上的老用户升级后不需要重新登录。
-const SERVICE_OAUTH: &str = "ai.ofox.switch.oauth";
+/// OAuth token 用的 service。与 bundle identifier `ai.ofox.desktop` 对齐，
+/// `security dump-keychain` 时能直接对应到 app 身份。改名时间点是 ofox-desktop
+/// 第一次正式发布前——dev 期重命名，没有"老用户兼容"的负担。
+const SERVICE_OAUTH: &str = "ai.ofox.desktop.oauth";
 
-/// 工具级 API key 用的 service。**新增**——跟 OAuth 物理隔离，便于 Keychain
-/// Access.app 里目视区分，也方便"撤销所有工具 key"这种批量动作只动这一组。
-const SERVICE_APIKEY: &str = "ai.ofox.switch.apikey";
+/// 工具级 API key 用的 service——跟 OAuth 物理隔离，便于 Keychain Access.app
+/// 里目视区分，也方便"撤销所有工具 key"这种批量动作只动这一组。
+const SERVICE_APIKEY: &str = "ai.ofox.desktop.apikey";
 
 /// 钥匙串里我们存的几个槽位。account 字段直接就是变体语义对应的字符串，
 /// 跟 OAuth 协议字段名 / cc-switch 工具 slug 一致——日后排障

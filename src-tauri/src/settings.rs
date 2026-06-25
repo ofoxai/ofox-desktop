@@ -204,7 +204,7 @@ pub struct ApiKeyMeta {
 
 /// 应用设置结构
 ///
-/// 存储设备级别设置，保存在本地 `~/.ofox-switch/settings.json`，不随数据库同步。
+/// 存储设备级别设置，保存在本地 `~/.ofox-desktop/settings.json`，不随数据库同步。
 /// 这确保了云同步场景下多设备可以独立运作。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -332,9 +332,6 @@ pub struct AppSettings {
     /// 低余额阈值（美元；默认 10.0）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub low_balance_threshold_usd: Option<f64>,
-    /// 工具健康检查间隔："off" | "1h" | "6h" | "24h"（默认 "6h"）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub health_check_interval: Option<String>,
     /// 上次告警时使用的阈值（与当前阈值不一致时清除冷却）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub low_balance_last_alert_threshold: Option<f64>,
@@ -347,7 +344,6 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_pricing_sync_at: Option<i64>,
     /// 已绑定工具列表（镜像自前端 localStorage `BOUND_TOOLS_STORAGE_KEY`）
-    /// 用于后台健康检查循环知道该探测哪些工具
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_tools: Option<Vec<String>>,
 
@@ -428,7 +424,6 @@ impl Default for AppSettings {
             preferred_terminal: None,
             low_balance_enabled: None,
             low_balance_threshold_usd: None,
-            health_check_interval: None,
             low_balance_last_alert_threshold: None,
             low_balance_last_alert_at: None,
             last_pricing_sync_at: None,
@@ -445,7 +440,7 @@ impl AppSettings {
         // settings.json 保留用于旧版本迁移和无数据库场景
         Some(
             crate::config::get_home_dir()
-                .join(".ofox-switch")
+                .join(".ofox-desktop")
                 .join("settings.json"),
         )
     }
@@ -641,7 +636,7 @@ pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
 }
 
 /// Read-modify-write helper for in-process callers (ip-api 探测、apex 切换命令、
-/// 工具健康检查等）。比 `update_settings` 安全：不会替换无关字段，只把 mutator
+/// 低余额提醒等）。比 `update_settings` 安全：不会替换无关字段，只把 mutator
 /// 的修改持久化。
 pub fn mutate_settings<F>(mutator: F) -> Result<(), AppError>
 where
@@ -862,7 +857,7 @@ pub fn get_preferred_terminal() -> Option<String> {
         .clone()
 }
 
-// ===== OFox 偏好（低余额 / 健康检查）管理函数 =====
+// ===== OFox 偏好（低余额）管理函数 =====
 
 /// 低余额提醒是否启用（默认 true）
 pub fn low_balance_alert_enabled() -> bool {
@@ -902,27 +897,6 @@ pub fn set_low_balance_latch(threshold: f64, at_ms: i64) -> Result<(), AppError>
         s.low_balance_last_alert_threshold = Some(threshold);
         s.low_balance_last_alert_at = Some(at_ms);
     })
-}
-
-/// 工具健康检查间隔（默认 "6h"）
-pub fn health_check_interval() -> String {
-    settings_store()
-        .read()
-        .map(|s| {
-            s.health_check_interval
-                .clone()
-                .unwrap_or_else(|| "6h".to_string())
-        })
-        .unwrap_or_else(|_| "6h".to_string())
-}
-
-/// 已绑定工具列表（前端 localStorage 的镜像）
-pub fn get_bound_tools() -> Vec<String> {
-    settings_store()
-        .read()
-        .ok()
-        .and_then(|s| s.bound_tools.clone())
-        .unwrap_or_default()
 }
 
 // ===== WebDAV 同步设置管理函数 =====

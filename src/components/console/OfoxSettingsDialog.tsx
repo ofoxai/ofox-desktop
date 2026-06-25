@@ -5,51 +5,35 @@ import { emit } from "@tauri-apps/api/event";
 
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { settingsApi } from "@/lib/api";
 import { ofoxLogout } from "@/lib/api/ofoxAuth";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
 import { UserAvatar } from "@/components/UserAvatar";
+import { ofoxAvatarUrl } from "@/lib/ofoxUrls";
 import { getCurrentVersion } from "@/lib/updater";
 import type { Settings } from "@/types";
 
 /**
  * OFox-flavored settings dialog launched from the bottom-left "设置" button on
- * `ConsolePage`. The legacy cc-switch settings page (`SettingsPage.tsx`) still
- * exists and is reachable from the menu bar — this dialog deliberately exposes
- * a much narrower surface scoped to what an OFox end user actually needs:
+ * `ConsolePage`.
  *
  *   · Account     — show identity, allow logout
- *   · Preferences — auto-launch, low-balance threshold, tool health-check freq
+ *   · Preferences — auto-launch, low-balance threshold
  *   · About       — app version + check-for-updates entry point
  *
- * Things deliberately omitted:
- *   · "在浏览器中打开设置" — we don't have an external dashboard for these
- *     prefs yet, and the link in the design mock would otherwise mislead.
- *   · "只显示菜单栏图标 / Dock 图标" — explicitly crossed out in the spec.
- *   · "高级 · 自定义供应商" — design left it cut off; landing in a follow-up.
- *   · "原始配置备份" — deferred until OFox owns its own ~/.ofox/backups/.
- *
- * The "检查更新" button intentionally does NOT call cc-switch's existing
- * tauri-plugin-updater flow — per spec we'll wire a separate OFox-native
- * scheme later. Today it just opens GitHub Releases via openExternal so the
- * button has a reasonable fallback action instead of being inert.
+ * The "检查更新" button calls the OFox-native self-hosted update check
+ * (`check_for_updates` → desktop.ofox.ai/latest.json on Cloudflare R2), NOT
+ * cc-switch's old tauri-plugin-updater flow (whose endpoint points upstream).
+ * New version → toast with a "前往下载" action; up-to-date → success toast.
  */
 
 // ─── Preference storage ──────────────────────────────────────────────────
 //
-// Two prefs (low-balance threshold + health-check interval) are mirrored
-// between localStorage (so the UI can read them synchronously on first
-// paint) and `AppSettings` (so the Rust background loops can consume
-// them). The dialog keeps both copies in sync via a read-modify-write
-// against `settingsApi.save()` followed by `emit('ofox-prefs-updated')`
-// to wake the health-check loop.
+// Low-balance threshold is mirrored between localStorage (so the UI can read
+// it synchronously on first paint) and `AppSettings` (so the Rust background
+// low-balance loop can consume it). The dialog keeps both copies in sync via
+// a read-modify-write against `settingsApi.save()` followed by
+// `emit('ofox-prefs-updated')`.
 //
 // IMPORTANT: `settingsApi.save()` takes the FULL settings object — there
 // is no partial-merge path on the backend (except WebDAV which has its
@@ -60,16 +44,6 @@ import type { Settings } from "@/types";
 
 const PREF_LOW_BAL_ENABLED = "ofox:settings:lowBalanceEnabled";
 const PREF_LOW_BAL_THRESHOLD = "ofox:settings:lowBalanceThreshold";
-const PREF_HEALTH_INTERVAL = "ofox:settings:healthCheckInterval";
-
-type HealthInterval = "off" | "1h" | "6h" | "24h";
-
-const HEALTH_INTERVAL_LABELS: Record<HealthInterval, string> = {
-  off: "关闭",
-  "1h": "每 1 小时",
-  "6h": "每 6 小时",
-  "24h": "每 24 小时",
-};
 
 function readNumberPref(key: string, fallback: number): number {
   const raw = localStorage.getItem(key);
@@ -82,14 +56,6 @@ function readBoolPref(key: string, fallback: boolean): boolean {
   const raw = localStorage.getItem(key);
   if (raw === null) return fallback;
   return raw === "1" || raw === "true";
-}
-
-function readHealthInterval(fallback: HealthInterval): HealthInterval {
-  const raw = localStorage.getItem(PREF_HEALTH_INTERVAL);
-  if (raw === "off" || raw === "1h" || raw === "6h" || raw === "24h") {
-    return raw;
-  }
-  return fallback;
 }
 
 // ─── Component ───────────────────────────────────────────────────────────
@@ -118,13 +84,11 @@ export default function OfoxSettingsDialog({
   const [lowBalThreshold, setLowBalThreshold] = useState<number>(() =>
     readNumberPref(PREF_LOW_BAL_THRESHOLD, 10),
   );
-  const [healthInterval, setHealthInterval] = useState<HealthInterval>(() =>
-    readHealthInterval("6h"),
-  );
 
   // ── Logout / version state
   const [loggingOut, setLoggingOut] = useState(false);
   const [version, setVersion] = useState<string | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
 
   // ── Current settings cache for read-modify-write.
   //
@@ -168,12 +132,6 @@ export default function OfoxSettingsDialog({
           if (typeof cur.lowBalanceThresholdUsd === "number") {
             setLowBalThreshold(cur.lowBalanceThresholdUsd);
           }
-          if (
-            cur.healthCheckInterval &&
-            ["off", "1h", "6h", "24h"].includes(cur.healthCheckInterval)
-          ) {
-            setHealthInterval(cur.healthCheckInterval as HealthInterval);
-          }
         }
       } catch (e) {
         console.error("[OfoxSettingsDialog] settingsApi.get failed", e);
@@ -188,32 +146,30 @@ export default function OfoxSettingsDialog({
 
   /**
    * Read-modify-write helper: spread current settings, apply patch, save,
-   * cache, then emit `ofox-prefs-updated` so the Rust loops can react
-   * (specifically the health-check loop which Notify-wakes from off/long
-   * intervals when settings change).
+   * cache, then emit `ofox-prefs-updated` so the Rust low-balance loop can
+   * react to threshold / toggle changes without waiting for the next tick.
    *
    * Best-effort: errors are toast'd but don't roll back the UI state,
    * since the localStorage mirror has already been written by the caller
    * — partial failure is preferable to flicker.
    */
-  const persistPrefsPatch = useCallback(
-    async (patch: Partial<Settings>) => {
-      if (!currentSettingsRef.current) {
-        console.warn("[OfoxSettingsDialog] persistPrefsPatch: no cached settings yet");
-        return;
-      }
-      const next = { ...currentSettingsRef.current, ...patch };
-      try {
-        await settingsApi.save(next);
-        currentSettingsRef.current = next;
-        await emit("ofox-prefs-updated");
-      } catch (e) {
-        console.error("[OfoxSettingsDialog] persistPrefsPatch failed", e);
-        toast.error("保存偏好失败，请稍后重试");
-      }
-    },
-    [],
-  );
+  const persistPrefsPatch = useCallback(async (patch: Partial<Settings>) => {
+    if (!currentSettingsRef.current) {
+      console.warn(
+        "[OfoxSettingsDialog] persistPrefsPatch: no cached settings yet",
+      );
+      return;
+    }
+    const next = { ...currentSettingsRef.current, ...patch };
+    try {
+      await settingsApi.save(next);
+      currentSettingsRef.current = next;
+      await emit("ofox-prefs-updated");
+    } catch (e) {
+      console.error("[OfoxSettingsDialog] persistPrefsPatch failed", e);
+      toast.error("保存偏好失败，请稍后重试");
+    }
+  }, []);
 
   /**
    * On enabling the low-balance alert, ensure system-notification permission
@@ -286,17 +242,6 @@ export default function OfoxSettingsDialog({
     [persistPrefsPatch],
   );
 
-  const handleHealthIntervalChange = useCallback(
-    (next: string) => {
-      if (next === "off" || next === "1h" || next === "6h" || next === "24h") {
-        setHealthInterval(next);
-        localStorage.setItem(PREF_HEALTH_INTERVAL, next);
-        void persistPrefsPatch({ healthCheckInterval: next });
-      }
-    },
-    [persistPrefsPatch],
-  );
-
   const handleLogout = useCallback(async () => {
     if (loggingOut) return;
     setLoggingOut(true);
@@ -324,18 +269,48 @@ export default function OfoxSettingsDialog({
   }, [loggingOut, refetch, onOpenChange]);
 
   const handleCheckUpdate = useCallback(async () => {
-    // Per spec: don't reuse cc-switch's tauri-plugin-updater here — the OFox
-    // update channel will land later. As a no-op-friendly placeholder we open
-    // the public releases page so the button has a meaningful action today.
+    // 查自托管清单（Cloudflare R2 上的 desktop.ofox.ai/latest.json），与当前
+    // 版本比对；有新版引导用户手动下载，不做应用内自动安装。详见 `tool-release`
+    // skill 与 `misc.rs::check_for_updates`。
+    if (checkingUpdate) return;
+    setCheckingUpdate(true);
     try {
-      await settingsApi.openExternal(
-        "https://github.com/farion1231/ofox-switch/releases/latest",
-      );
+      const result = await settingsApi.checkUpdates();
+      if (result.hasUpdate) {
+        const url = result.downloadUrl;
+        toast.info(`发现新版本 v${result.latestVersion}`, {
+          description: result.notes || undefined,
+          duration: 12000,
+          closeButton: true,
+          action: url
+            ? {
+                label: "前往下载",
+                onClick: () => {
+                  // 先关掉设置弹窗——Radix Dialog 的 focus trap / pointer-events
+                  // 锁定会吞掉浮在它之上的 sonner toast action 点击，关闭后再
+                  // 打开外链才可靠。
+                  onOpenChange(false);
+                  settingsApi.openExternal(url).catch((err) => {
+                    console.error(
+                      "[OfoxSettingsDialog] openExternal failed",
+                      err,
+                    );
+                    toast.error("无法打开下载页面");
+                  });
+                },
+              }
+            : undefined,
+        });
+      } else {
+        toast.success("已是最新版本");
+      }
     } catch (e) {
-      console.error("[OfoxSettingsDialog] openExternal failed", e);
-      toast.error("无法打开更新页面");
+      console.error("[OfoxSettingsDialog] checkUpdates failed", e);
+      toast.error("检查更新失败，请稍后重试");
+    } finally {
+      setCheckingUpdate(false);
     }
-  }, []);
+  }, [checkingUpdate, onOpenChange]);
 
   // ── Render ─────────────────────────────────────────────────────────────
 
@@ -370,7 +345,7 @@ export default function OfoxSettingsDialog({
             <div className="flex items-center justify-between px-4 py-3">
               <div className="flex min-w-0 items-center gap-3">
                 <UserAvatar
-                  avatarUrl={user?.avatar_url}
+                  avatarUrl={ofoxAvatarUrl(user?.avatar_url)}
                   name={user?.name}
                   email={user?.email}
                   className="h-10 w-10"
@@ -444,31 +419,6 @@ export default function OfoxSettingsDialog({
                   />
                 </div>
               }
-            />
-
-            {/* Health-check frequency */}
-            <Row
-              label="工具健康检查"
-              hint="定期对每个工具发送测试请求（消耗极少额度，max_tokens=1）"
-              control={
-                <Select
-                  value={healthInterval}
-                  onValueChange={handleHealthIntervalChange}
-                >
-                  <SelectTrigger className="h-8 w-[112px] text-[13px]">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {(
-                      Object.keys(HEALTH_INTERVAL_LABELS) as HealthInterval[]
-                    ).map((k) => (
-                      <SelectItem key={k} value={k}>
-                        {HEALTH_INTERVAL_LABELS[k]}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              }
               isLast
             />
           </SectionCard>
@@ -487,8 +437,10 @@ export default function OfoxSettingsDialog({
               <button
                 type="button"
                 onClick={handleCheckUpdate}
-                className="rounded-lg border border-border px-3 py-1.5 text-[12px] font-medium text-foreground transition-colors hover:bg-accent"
+                disabled={checkingUpdate}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-[12px] font-medium text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
               >
+                {checkingUpdate && <Loader2 className="h-3 w-3 animate-spin" />}
                 检查更新
               </button>
             </div>

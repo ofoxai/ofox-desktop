@@ -1,26 +1,23 @@
+import { UserAvatar } from "@/components/UserAvatar";
 import type { OfoxAuthStatus } from "@/lib/api/ofoxAuth";
+import { ofoxAvatarUrl } from "@/lib/ofoxUrls";
 
 interface ProfileHeaderProps {
   status: OfoxAuthStatus | null;
 }
 
 /**
- * Avatar + name + email + connection chip.
+ * 头像 + 名称 + 邮箱/状态说明。
  *
- * The connection chip is the user's at-a-glance signal: green dot for an
- * active session, amber for "expired, needs re-login", muted for "not signed
- * in". Names/emails fall back to the cached user info even when expired so
- * the user can still recognize which account they were logged into.
+ * 头像走主窗口同款 `UserAvatar`——有 `avatar_url` 走真实图片，没有则
+ * fallback 到首字母圆。这一组件本身已经负责图片加载失败的 onError 兜底。
+ *
+ * 不再展示"已连接/已过期/未登录" chip——连接状态由 AuthExpiredBanner 在异常态时
+ * 显式提醒；正常态用户看到自己的账号就足够了。
  */
 export default function ProfileHeader({ status }: ProfileHeaderProps) {
   const user = status?.user ?? null;
   const state = status?.state ?? "loggedout";
-
-  // First letter of name or email for the avatar; default to "O" (Ofox).
-  const avatarChar =
-    user?.name?.trim()?.[0]?.toUpperCase() ??
-    user?.email?.trim()?.[0]?.toUpperCase() ??
-    "O";
 
   const displayName = user?.name?.trim() || user?.email || "未登录";
   const subline = (() => {
@@ -33,45 +30,15 @@ export default function ProfileHeader({ status }: ProfileHeaderProps) {
     return "请登录 Ofox 账号";
   })();
 
-  const chip = (() => {
-    if (state === "active") {
-      return (
-        <div className="flex items-center gap-1 text-[11px] text-green-600 dark:text-green-400">
-          <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
-          已连接
-        </div>
-      );
-    }
-    if (state === "expired") {
-      return (
-        <div className="flex items-center gap-1 text-[11px] text-amber-600 dark:text-amber-400">
-          <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-          已过期
-        </div>
-      );
-    }
-    return (
-      <div className="flex items-center gap-1 text-[11px] text-muted-foreground">
-        <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60" />
-        未登录
-      </div>
-    );
-  })();
-
   return (
     <div className="flex items-center gap-2.5 px-3.5 pt-3 pb-2.5">
-      {/* 头像 */}
-      <div
-        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-sm font-bold text-white ${
-          state === "active"
-            ? "bg-orange-500"
-            : state === "expired"
-              ? "bg-amber-500"
-              : "bg-muted-foreground/60"
-        }`}
-      >
-        {avatarChar}
-      </div>
+      <UserAvatar
+        avatarUrl={ofoxAvatarUrl(user?.avatar_url)}
+        name={user?.name}
+        email={user?.email}
+        className="h-8 w-8"
+        fallbackTextClassName="text-sm"
+      />
 
       {/* 用户信息 */}
       <div className="min-w-0 flex-1">
@@ -82,8 +49,6 @@ export default function ProfileHeader({ status }: ProfileHeaderProps) {
           {subline}
         </div>
       </div>
-
-      {chip}
     </div>
   );
 }

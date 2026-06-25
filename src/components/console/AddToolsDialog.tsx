@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { TOOL_META, TOOL_ORDER } from "@/config/toolMeta";
 import { bindTools } from "@/lib/bindTools";
+import { ToolBadge } from "@/components/tools/ToolBadge";
 
 interface ToolInfo {
   name: string;
@@ -177,13 +178,12 @@ export default function AddToolsDialog({
                       : "border-border/50 bg-muted/30 opacity-50"
                 }`}
               >
-                <div
-                  className={`flex h-8 w-8 items-center justify-center rounded-xl text-[11px] font-bold text-white ${
-                    tool.detected ? tool.color : "bg-gray-400"
-                  }`}
-                >
-                  {tool.abbr}
-                </div>
+                <ToolBadge
+                  toolId={tool.id}
+                  size={36}
+                  rounded="xl"
+                  dimmed={!tool.detected}
+                />
                 <span
                   className={`text-[12px] font-medium ${
                     tool.detected ? "text-foreground" : "text-muted-foreground"

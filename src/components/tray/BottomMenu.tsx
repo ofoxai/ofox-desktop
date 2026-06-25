@@ -5,8 +5,6 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { exit } from "@tauri-apps/plugin-process";
 import { toast } from "sonner";
 
-import { toolHealthApi } from "@/lib/api/toolHealth";
-
 /**
  * Tray popover 跟主窗口通信用的事件名。主窗口在 ConsolePage 内监听，
  * 收到后打开 OfoxSettingsDialog。命名沿用项目其它 ofox-* 风格。
@@ -32,16 +30,6 @@ export default function BottomMenu() {
       toast.error("打开主窗口失败");
     }
   }, [hideSelf]);
-
-  const handleRescanTools = useCallback(async () => {
-    try {
-      await toolHealthApi.triggerNow();
-      toast.success("工具检测完成");
-    } catch (e) {
-      console.error("[BottomMenu] triggerNow failed", e);
-      toast.error("工具检测失败");
-    }
-  }, []);
 
   const handleOpenSettings = useCallback(async () => {
     try {
@@ -71,12 +59,6 @@ export default function BottomMenu() {
       label: "打开 Ofox 主窗口",
       shortcut: "⌘O",
       onClick: handleOpenMain,
-    },
-    {
-      // 文案改为"重新检测"，与背后实际行为（运行 max_tokens=1 的健康探针）匹配。
-      // 真正的"工具发现"是 onboarding 的多步流程，popover 一键无法完成。
-      label: "重新检测工具",
-      onClick: handleRescanTools,
     },
     {
       label: "偏好设置...",

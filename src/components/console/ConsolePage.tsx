@@ -8,6 +8,7 @@ import { proxyApi } from "@/lib/api/proxy";
 import { ofoxGetUserInfo, isOfoxBillingManager, type OfoxUserInfo } from "@/lib/api/ofoxAuth";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
 import {
+  ofoxAvatarUrl,
   ofoxDashboardUrl,
   ofoxMarketingUrl,
   ofoxWalletUrl,
@@ -29,6 +30,7 @@ import ManageToolDialog, { type ManageToolTarget } from "./ManageToolDialog";
 import OfoxSettingsDialog from "./OfoxSettingsDialog";
 import { OfoxApexSwitch } from "@/components/OfoxApexSwitch";
 import { UserAvatar } from "@/components/UserAvatar";
+import { ToolBadge } from "@/components/tools/ToolBadge";
 import { manageToolApi, type PingResult } from "@/lib/api/manageTool";
 
 interface ToolInfo {
@@ -404,7 +406,7 @@ export default function ConsolePage({
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <UserAvatar
-                avatarUrl={user?.avatar_url}
+                avatarUrl={ofoxAvatarUrl(user?.avatar_url)}
                 name={user?.name}
                 email={user?.email}
                 className="h-10 w-10"
@@ -531,11 +533,7 @@ export default function ConsolePage({
                     key={tool.id}
                     className="flex items-center gap-3 border-b border-border px-4 py-3 last:border-b-0"
                   >
-                    <div
-                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-[11px] font-bold text-white ${tool.color}`}
-                    >
-                      {tool.abbr}
-                    </div>
+                    <ToolBadge toolId={tool.id} size={36} rounded="xl" />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 text-[13px] font-medium text-foreground">
                         <span>{tool.label}</span>

@@ -3,79 +3,21 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { manageToolApi } from "@/lib/api/manageTool";
-import { usageApi } from "@/lib/api/usage";
-import {
-  TOOL_META,
-  TOOL_ORDER,
-  PROXY_SUPPORTED_TOOLS,
-} from "@/config/toolMeta";
-
-/**
- * 单个工具的"活跃度"——与主窗口 ConsolePage 的状态点完全同语义：
- *
- *   active = 已接管 + 检测到二进制     (绿点)
- *   error  = 已接管但未检测到 / 未检测到 (红点)
- *   idle   = 不支持代理 / 未开启代理   (灰点)
- *
- * 由 TrayPopoverApp 集中算好后透传给 StatsRow / ToolStatusList，
- * 保证 popover 内部多处状态显示一致。
- */
-export type ToolActiveness = "active" | "error" | "idle";
-export type ToolActivenessMap = Record<string, ToolActiveness>;
+import { TOOL_META, TOOL_ORDER } from "@/config/toolMeta";
+import { ToolBadge } from "@/components/tools/ToolBadge";
 
 interface ToolStatusListProps {
   boundTools: string[];
-  activeness: ToolActivenessMap;
 }
 
 interface ToolRowData {
   id: string;
-  abbr: string;
   label: string;
-  color: string;
   /** 当前激活的 Ofox 模型；拉不到时为 null（保持 UI 不抖）。 */
   model: string | null;
-  /** 今日花费 USD；不在 PROXY_SUPPORTED_TOOLS 时为 null。 */
-  todayCostUsd: number | null;
-  /** 今日是否有过请求（用于在金额=0 时显示"未使用"而非 $0.00）。 */
-  todayHasUsage: boolean;
 }
 
-/** activeness -> 状态点颜色。 */
-const STATUS_DOT_BG: Record<ToolActiveness, string> = {
-  active: "bg-green-500",
-  error: "bg-red-500",
-  idle: "bg-gray-400",
-};
-
-/** activeness -> hover title 文案，与主页 statusText 同口径方便用户对照。 */
-const STATUS_TITLE: Record<ToolActiveness, string> = {
-  active: "已接管",
-  error: "未检测到",
-  idle: "未开启代理 / 不支持代理统计",
-};
-
-function todayStartSec(): number {
-  const t = new Date();
-  t.setHours(0, 0, 0, 0);
-  return Math.floor(t.getTime() / 1000);
-}
-
-function formatUsd(value: number): string {
-  return `$${value.toFixed(2)}`;
-}
-
-/** 解析 totalCost 字段（后端返回的是字符串小数）。 */
-function parseTotalCost(s: string | undefined): number {
-  if (!s) return 0;
-  const n = Number(s);
-  return Number.isFinite(n) ? n : 0;
-}
-
-export default function ToolStatusList({
-  boundTools,
-  activeness,
-}: ToolStatusListProps) {
+export default function ToolStatusList({ boundTools }: ToolStatusListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [scrollRatio, setScrollRatio] = useState(0);
   const [thumbRatio, setThumbRatio] = useState(1);
@@ -127,31 +69,10 @@ export default function ToolStatusList({
             model = null;
           }
 
-          // 今日花费：只查代理支持的工具，避免对 opencode 等返回 0 误导
-          let todayCostUsd: number | null = null;
-          let todayHasUsage = false;
-          if (PROXY_SUPPORTED_TOOLS.includes(id)) {
-            try {
-              const s = await usageApi.getUsageSummary(
-                todayStartSec(),
-                undefined,
-                id,
-              );
-              todayCostUsd = parseTotalCost(s.totalCost);
-              todayHasUsage = s.totalRequests > 0;
-            } catch {
-              todayCostUsd = null;
-            }
-          }
-
           const row: ToolRowData = {
             id,
-            abbr: meta.abbr,
             label: meta.label,
-            color: meta.color,
             model,
-            todayCostUsd,
-            todayHasUsage,
           };
           return row;
         }),
@@ -208,35 +129,16 @@ export default function ToolStatusList({
             </button>
           ) : (
             rows.map((row) => {
-              const state = activeness[row.id] ?? "idle";
-              const dotColor = STATUS_DOT_BG[state];
+              const subtitle = row.model ?? "未配置模型";
 
-              const subtitleParts: string[] = [];
-              if (row.model) subtitleParts.push(row.model);
-              if (PROXY_SUPPORTED_TOOLS.includes(row.id)) {
-                if (row.todayCostUsd === null) {
-                  subtitleParts.push("今日数据加载中…");
-                } else if (row.todayHasUsage) {
-                  subtitleParts.push(`${formatUsd(row.todayCostUsd)} 今日`);
-                } else {
-                  subtitleParts.push("今日未使用");
-                }
-              } else {
-                subtitleParts.push("不支持统计");
-              }
-              const subtitle =
-                subtitleParts.length > 0 ? subtitleParts.join(" · ") : "—";
-
+              // ToolBadge size=40 对齐 "工具名 + 模型" 两行文字
+              // (12px + 10px + leading + 间距 ≈ 36-40px) 的上下边。
               return (
                 <div
                   key={row.id}
                   className="flex items-center gap-2.5 rounded-md px-1.5 py-1.5 hover:bg-accent/50"
                 >
-                  <div
-                    className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md ${row.color} text-[10px] font-bold text-white`}
-                  >
-                    {row.abbr}
-                  </div>
+                  <ToolBadge toolId={row.id} size={40} />
                   <div className="min-w-0 flex-1">
                     <div className="text-[12px] font-medium leading-tight text-foreground">
                       {row.label}
@@ -245,10 +147,6 @@ export default function ToolStatusList({
                       {subtitle}
                     </div>
                   </div>
-                  <span
-                    className={`h-2 w-2 shrink-0 rounded-full ${dotColor}`}
-                    title={STATUS_TITLE[state]}
-                  />
                 </div>
               );
             })

@@ -86,13 +86,15 @@ pub fn get_active_ofox_model(
     read_active_model_for(&state, &app_type)
 }
 
-/// Plain-reference version of [`get_active_ofox_model`] used by background
-/// tasks (e.g. health-check loop) that can't construct `tauri::State<'_>`.
+/// Plain-reference helper extracted from [`get_active_ofox_model`] so
+/// internal callers (notably `set_active_ofox_model` and `ofox_ping_model`)
+/// can resolve "what model is the active provider pointing at" without going
+/// through a Tauri command frame.
 ///
 /// Returns `Ok("")` when the active provider exists but has no model field
-/// configured (caller is expected to interpret as `"skipped"`); only
-/// surfaces `Err` for hard DB failures or when there is no active provider.
-pub(crate) fn read_active_model_for(
+/// configured (callers treat empty as "unset"); only surfaces `Err` for hard
+/// DB failures or when there is no active provider.
+fn read_active_model_for(
     state: &AppState,
     app_type: &AppType,
 ) -> Result<String, String> {
@@ -414,18 +416,15 @@ pub async fn ofox_ping_model(
     app: String,
     model: String,
 ) -> Result<PingResult, String> {
-    // Tauri commands can't construct `tauri::State<'_>` from a background
-    // task, so the real implementation lives in `ofox_ping_model_internal`
-    // which takes plain references. The `services::tool_health` loop calls
-    // the internal helper directly with managed-state lookups.
     Ok(ofox_ping_model_internal(&state, &ofox_state.0, &app, &model).await)
 }
 
-/// Implementation of [`ofox_ping_model`] that takes plain references so it
-/// can be invoked from background tasks (e.g. the periodic health-check
-/// loop). Always returns `Ok`-shaped result; failures land in the
-/// `success: false` variant of [`PingResult`].
-pub(crate) async fn ofox_ping_model_internal(
+/// Implementation of [`ofox_ping_model`] that takes plain references — kept
+/// as a separate helper because Tauri commands can't construct
+/// `tauri::State<'_>` from places that don't have the managed-state context.
+/// Always returns `Ok`-shaped result; failures land in the `success: false`
+/// variant of [`PingResult`].
+async fn ofox_ping_model_internal(
     state: &AppState,
     manager_arc: &Arc<RwLock<OfoxAuthManager>>,
     app: &str,

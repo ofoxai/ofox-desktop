@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { emit } from "@tauri-apps/api/event";
 import {
   Loader2,
   RefreshCw,
@@ -45,6 +44,7 @@ import {
   type FetchedModel,
 } from "@/lib/api/model-fetch";
 import { unbindTool } from "@/lib/bindTools";
+import { ToolBadge } from "@/components/tools/ToolBadge";
 import type { AppId } from "@/lib/api/types";
 
 /** Subset of `ConsolePage`'s `BoundTool` that the dialog actually needs.
@@ -188,11 +188,6 @@ export default function ManageToolDialog({
     try {
       await manageToolApi.setActiveModel(tool.id, draftModel);
       setCurrentModel(draftModel);
-      // 唤醒后端 tool_health 循环立刻重跑——上一轮跑的时候 model 还是空，
-      // cache 里存的是 Plan::Skip{reason:"未配置模型"}。不 emit 的话用户得
-      // 等 1h/6h/24h 才会看到行尾 pill 从"未配置模型"变成"延迟 X ms"，
-      // 体感像没保存成功。
-      await emit("ofox-prefs-updated");
       toast.success("模型已更新");
       onChanged?.();
       // Close on success — mirrors handleUnbind's收尾 sequence and
@@ -272,14 +267,7 @@ export default function ManageToolDialog({
         {tool && (
           <>
             <DialogHeader className="flex-row items-center gap-3 space-y-0">
-              <div
-                className={cn(
-                  "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-[12px] font-bold text-white",
-                  tool.color,
-                )}
-              >
-                {tool.abbr}
-              </div>
+              <ToolBadge toolId={tool.id} size={40} rounded="xl" />
               <div className="min-w-0 flex-1 text-left">
                 <div className="text-[15px] font-semibold text-foreground">
                   {tool.label}

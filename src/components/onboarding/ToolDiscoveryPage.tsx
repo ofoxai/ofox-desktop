@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { TOOL_META, TOOL_ORDER } from "@/config/toolMeta";
+import { ToolBadge } from "@/components/tools/ToolBadge";
 
 interface ToolInfo {
   name: string;
@@ -128,13 +129,12 @@ export default function ToolDiscoveryPage({
               }`}
             >
               {/* Icon */}
-              <div
-                className={`flex h-10 w-10 items-center justify-center rounded-xl text-sm font-bold text-white ${
-                  tool.detected ? tool.color : "bg-gray-400"
-                }`}
-              >
-                {tool.abbr}
-              </div>
+              <ToolBadge
+                toolId={tool.id}
+                size={40}
+                rounded="xl"
+                dimmed={!tool.detected}
+              />
 
               {/* Name */}
               <span

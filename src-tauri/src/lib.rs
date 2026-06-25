@@ -212,7 +212,7 @@ fn macos_tray_icon() -> Option<Image<'static>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log（默认 ~/.ofox-switch/crash.log）
+    // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log（默认 ~/.ofox-desktop/crash.log）
     panic_hook::setup_panic_hook();
 
     let mut builder = tauri::Builder::default();
@@ -344,7 +344,7 @@ pub fn run() {
 
             // 初始化数据库
             let app_config_dir = crate::config::get_app_config_dir();
-            let db_path = app_config_dir.join("ofox-switch.db");
+            let db_path = app_config_dir.join("ofox-desktop.db");
             let json_path = app_config_dir.join("config.json");
 
             // 检查是否需要从 config.json 迁移到 SQLite
@@ -1197,17 +1197,18 @@ pub fn run() {
                 }
             }
 
-            // ─── OFox 后台循环：低余额提醒 + 工具健康检查 ─────────────────
+            // ─── OFox 后台循环：低余额提醒 ─────────────────────────────────
             //
-            // 两个独立的 spawn，都在 OFox auth 初始化后运行，与 token 静默
-            // 刷新循环同节奏（30 min 桶）。设计要点见 services/low_balance.rs
-            // 与 services/tool_health.rs 的模块文档。
+            // 在 OFox auth 初始化后运行，与 token 静默刷新循环同节奏（30 min 桶）。
+            // 设计要点见 services/low_balance.rs 的模块文档。
             //
-            // 关闭主窗口（仅托盘）不影响这些循环，因为 close handler 走
+            // 关闭主窗口（仅托盘）不影响这个循环，因为 close handler 走
             // window.hide() + api.prevent_close()，进程仍在运行。
+            //
+            // 工具健康检查循环已移除——延迟测试改为主面板"延迟测试"按钮按需触发，
+            // 不再周期性探测（参考 ConsolePage::PingResultPill / runPingForTool）。
             {
                 use commands::ofox_auth::OfoxAuthState;
-                use tauri::Listener;
 
                 // ── 低余额循环（固定 30 分钟）──────────────────────────────
                 let lb_app = app.handle().clone();
@@ -1226,81 +1227,6 @@ pub fn run() {
                         )
                         .await;
                     }
-                });
-
-                // ── 工具健康检查循环（动态间隔，"off" 时阻塞）────────────
-                //
-                // 用 Notify 让前端 emit('ofox-prefs-updated') 时唤醒循环，
-                // 这样间隔从 6h → 1h 不必等下一次原始 tick。
-                let wake = std::sync::Arc::new(tokio::sync::Notify::new());
-                let wake_listener = wake.clone();
-                app.handle().listen("ofox-prefs-updated", move |_| {
-                    wake_listener.notify_one();
-                });
-
-                let hc_app = app.handle().clone();
-                let hc_wake = wake.clone();
-                tauri::async_runtime::spawn(async move {
-                    // 启动时延迟 30 秒再跑首轮，避免与启动期其他网络请求挤在一起
-                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                    loop {
-                        let interval_str = crate::settings::health_check_interval();
-                        let dur = crate::services::tool_health::parse_interval(&interval_str);
-                        let bound_tools = crate::settings::get_bound_tools();
-                        let app_state = hc_app.state::<AppState>();
-                        let ofox_state = hc_app.state::<OfoxAuthState>();
-
-                        // 仅在 auth Active 时执行；否则等下一轮（或 wake）
-                        let auth_ok = {
-                            let manager = ofox_state.0.read().await;
-                            manager.is_authenticated()
-                        };
-                        if auth_ok && dur.is_some() {
-                            let now_ms = chrono::Utc::now().timestamp_millis();
-                            let _ = crate::services::tool_health::run_health_check_round(
-                                &hc_app,
-                                &app_state,
-                                &ofox_state.0,
-                                &app_state.tool_health_cache,
-                                &bound_tools,
-                                now_ms,
-                            )
-                            .await;
-                        }
-
-                        // 决定睡眠：有效间隔则定时；"off" 阻塞等 Notify
-                        match dur {
-                            Some(d) => {
-                                tokio::select! {
-                                    _ = tokio::time::sleep(d) => {}
-                                    _ = hc_wake.notified() => {
-                                        log::info!("[tool_health] woken by ofox-prefs-updated");
-                                    }
-                                }
-                            }
-                            None => {
-                                hc_wake.notified().await;
-                                log::info!("[tool_health] interval was off, woken by prefs-updated");
-                            }
-                        }
-                    }
-                });
-
-                // 用户登出时清空健康检查 cache（设置已存的探测结果会过时）
-                let logout_app = app.handle().clone();
-                app.handle().listen("ofox-auth-expired", move |_| {
-                    let app = logout_app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        let app_state = app.state::<AppState>();
-                        app_state.tool_health_cache.clear().await;
-                        let _ = app.emit(
-                            crate::services::tool_health::TOOL_HEALTH_UPDATED_EVENT,
-                            &std::collections::HashMap::<
-                                String,
-                                crate::services::tool_health::ToolHealthSnapshot,
-                            >::new(),
-                        );
-                    });
                 });
             }
 
@@ -1657,8 +1583,6 @@ pub fn run() {
             commands::manage_tool::get_active_ofox_model,
             commands::manage_tool::set_active_ofox_model,
             commands::manage_tool::ofox_ping_model,
-            commands::get_tool_health_snapshot,
-            commands::trigger_tool_health_check_now,
             commands::show_main_window,
         ]);
 
@@ -1965,7 +1889,7 @@ fn show_database_init_error_dialog(
             您的数据尚未丢失，应用不会自动删除数据库文件。\n\
             常见原因包括：数据库版本过新、文件损坏、权限不足、磁盘空间不足等。\n\n\
             建议：\n\
-            1) 先备份整个配置目录（包含 ofox-switch.db）\n\
+            1) 先备份整个配置目录（包含 ofox-desktop.db）\n\
             2) 如果提示“数据库版本过新”，请升级到更新版本\n\
             3) 如果刚升级出现异常，可回退旧版本导出/备份后再升级\n\n\
             点击「重试」重新尝试初始化\n\
@@ -1979,8 +1903,8 @@ fn show_database_init_error_dialog(
             Your data is NOT lost - the app will not delete the database automatically.\n\
             Common causes include: newer database version, corrupted file, permission issues, or low disk space.\n\n\
             Suggestions:\n\
-            1) Back up the entire config directory (including ofox-switch.db)\n\
-            2) If you see “database version is newer”, please upgrade Ofox Switch\n\
+            1) Back up the entire config directory (including ofox-desktop.db)\n\
+            2) If you see “database version is newer”, please upgrade Ofox Desktop\n\
             3) If this happened right after upgrading, consider rolling back to export/backup then upgrade again\n\n\
             Click 'Retry' to attempt initialization again\n\
             Click 'Exit' to close the program",

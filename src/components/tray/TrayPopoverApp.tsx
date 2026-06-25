@@ -6,17 +6,12 @@ import ProfileHeader from "./ProfileHeader";
 import AuthExpiredBanner from "./AuthExpiredBanner";
 import AccountBalance from "./AccountBalance";
 import ActionButtons from "./ActionButtons";
-import StatsRow from "./StatsRow";
-import ToolStatusList, { type ToolActivenessMap } from "./ToolStatusList";
+import ToolStatusList from "./ToolStatusList";
 import BottomMenu from "./BottomMenu";
 import BalanceWarningBanner from "./BalanceWarningBanner";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
 import { settingsApi } from "@/lib/api";
-import { proxyApi } from "@/lib/api/proxy";
-import {
-  BOUND_TOOLS_STORAGE_KEY,
-  PROXY_SUPPORTED_TOOLS,
-} from "@/config/toolMeta";
+import { BOUND_TOOLS_STORAGE_KEY } from "@/config/toolMeta";
 
 const DEFAULT_LOW_BALANCE_THRESHOLD = 10;
 
@@ -43,62 +38,6 @@ function readBoundToolsFromStorage(): string[] {
   }
 }
 
-interface ToolInfoLite {
-  name: string;
-  version: string | null;
-  error: string | null;
-}
-
-/**
- * 计算每个绑定工具的状态点颜色，与主窗口 ConsolePage 的"已接管 ●"
- * 完全同语义：
- *
- *   active = 接管 ON 且检测到二进制（绿）—— 主页"已接管"
- *   error  = 接管 ON 但检测不到二进制（红）—— 主页"未检测到"
- *   idle   = 其它（灰）—— 主页"暂不支持代理统计 / 未开启代理 / 未检测到"
- *
- * 不依赖 health probe 探针。健康探针只代表"上次 max_tokens=1 的请求是否
- * 跑通"，跟"已接管"是两件事，会让 popover 与主页色块不一致。
- */
-async function computeActiveness(
-  boundTools: string[],
-): Promise<ToolActivenessMap> {
-  if (boundTools.length === 0) return {};
-
-  const [takeoverStatus, toolInfos] = await Promise.all([
-    proxyApi.getProxyTakeoverStatus().catch(() => null),
-    settingsApi
-      .getToolVersions(boundTools, undefined, false)
-      .catch(() => [] as ToolInfoLite[]),
-  ]);
-
-  const takeoverMap = (takeoverStatus ?? {}) as Record<string, boolean>;
-  const detectedMap = new Map<string, boolean>();
-  for (const info of toolInfos as ToolInfoLite[]) {
-    detectedMap.set(info.name, !!info.version && !info.error);
-  }
-
-  const out: ToolActivenessMap = {};
-  for (const id of boundTools) {
-    const proxied = !!takeoverMap[id];
-    const detected = !!detectedMap.get(id);
-    const proxySupported = PROXY_SUPPORTED_TOOLS.includes(id);
-
-    if (proxied && detected) {
-      out[id] = "active";
-    } else if (proxied && !detected) {
-      out[id] = "error";
-    } else if (!proxySupported && detected) {
-      out[id] = "idle";
-    } else if (detected) {
-      out[id] = "idle";
-    } else {
-      out[id] = "error";
-    }
-  }
-  return out;
-}
-
 /**
  * Tray popover root.
  *
@@ -115,7 +54,6 @@ export default function TrayPopoverApp() {
   const [boundTools, setBoundTools] = useState<string[]>(() =>
     readBoundToolsFromStorage(),
   );
-  const [activeness, setActiveness] = useState<ToolActivenessMap>({});
   const [lowBalanceThreshold, setLowBalanceThreshold] = useState<number>(
     DEFAULT_LOW_BALANCE_THRESHOLD,
   );
@@ -166,23 +104,6 @@ export default function TrayPopoverApp() {
       if (unlisten) unlisten();
     };
   }, [reloadBoundTools, reloadSettings]);
-
-  // boundTools 变化时重算激活状态（takeover + detected）。focus 时也强制重算。
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      const next = await computeActiveness(boundTools);
-      if (!cancelled) setActiveness(next);
-    };
-    void load();
-
-    const onFocus = () => void load();
-    window.addEventListener("focus", onFocus);
-    return () => {
-      cancelled = true;
-      window.removeEventListener("focus", onFocus);
-    };
-  }, [boundTools]);
 
   /**
    * Standalone refresh trigger for the balance pill. `useOfoxAuth.refetch()`
@@ -285,10 +206,9 @@ export default function TrayPopoverApp() {
             />
           )}
           <ActionButtons />
-          <StatsRow boundTools={boundTools} activeness={activeness} />
         </div>
         {/* 工具状态：标题固定，列表可滚动 */}
-        <ToolStatusList boundTools={boundTools} activeness={activeness} />
+        <ToolStatusList boundTools={boundTools} />
         {/* 固定区域：底部菜单 */}
         <div className="shrink-0">
           <BottomMenu />

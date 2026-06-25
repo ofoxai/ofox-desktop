@@ -156,7 +156,7 @@ export function OfoxApexSwitch({
         message={
           pendingTarget
             ? `当前会话将被清除，您需要在 ${APEX_LABEL[pendingTarget]} 重新授权。\n` +
-              `已绑定工具的 API Key 不会丢失，但工具会暂时不可用，直到您完成新的登录。`
+              `已绑定工具的配置不会受影响，可以继续使用。`
             : ""
         }
         confirmText="继续切换"

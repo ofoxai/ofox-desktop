@@ -42,19 +42,6 @@ fn merge_settings_for_save(
         incoming.low_balance_last_alert_at = None;
     }
 
-    // ── 健康检查间隔白名单 ─────────────────────────────────────────────
-    // 防止前端写入非法值导致后端 parse_interval 走到 fallback 但用户
-    // 看到的 UI 仍是非法字符串。
-    if let Some(interval) = incoming.health_check_interval.as_deref() {
-        if !matches!(interval, "off" | "1h" | "6h" | "24h") {
-            log::warn!(
-                "[settings] health_check_interval 非法值 {:?}，回退为 existing",
-                interval
-            );
-            incoming.health_check_interval = existing.health_check_interval.clone();
-        }
-    }
-
     incoming
 }
 
@@ -278,29 +265,6 @@ mod tests {
         // Re-enabling should give the alert a fresh chance.
         assert_eq!(merged.low_balance_last_alert_threshold, None);
         assert_eq!(merged.low_balance_last_alert_at, None);
-    }
-
-    #[test]
-    fn merge_should_reject_invalid_health_interval() {
-        let mut existing = AppSettings::default();
-        existing.health_check_interval = Some("6h".to_string());
-
-        let mut incoming = AppSettings::default();
-        incoming.health_check_interval = Some("foo".to_string());
-
-        let merged = merge_settings_for_save(incoming, &existing);
-
-        assert_eq!(merged.health_check_interval.as_deref(), Some("6h"));
-    }
-
-    #[test]
-    fn merge_should_accept_valid_health_intervals() {
-        for v in ["off", "1h", "6h", "24h"] {
-            let mut incoming = AppSettings::default();
-            incoming.health_check_interval = Some(v.to_string());
-            let merged = merge_settings_for_save(incoming, &AppSettings::default());
-            assert_eq!(merged.health_check_interval.as_deref(), Some(v));
-        }
     }
 }
 
