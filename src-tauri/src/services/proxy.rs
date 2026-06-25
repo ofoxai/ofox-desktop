@@ -1802,6 +1802,11 @@ impl ProxyService {
         Ok(value)
     }
 
+    /// 整文件写 `~/.claude/settings.json`。**`config` 必须是调用方已经算好的
+    /// 最终磁盘态**（unbind 反 patch 后的 `stripped`、或 bind merge 后的完整
+    /// settings）——这里不做 merge。bind 注入的 merge 由
+    /// [`ofox_merge_patch_to_live`] 在写盘前完成，避免 unbind 反 patch 减掉的字段
+    /// 被 merge 又找回来。
     fn write_claude_live(&self, config: &Value) -> Result<(), String> {
         let path = get_claude_settings_path();
         let settings = crate::services::provider::sanitize_claude_settings_for_live(config);
@@ -2007,19 +2012,60 @@ impl ProxyService {
 
         let patch = self.build_ofox_patch(app_type, api_key)?;
 
-        // 写盘——OpenCode/OpenClaw/Hermes 走 set_provider，会**整个覆盖**该子节
-        // （用户在 ofox-<app> 子节里手加的字段会在 bind 一瞬被覆盖；这是 bind
-        // 入口的既有行为，不归 unbind 还原管）。Claude/Codex/Gemini 走整文件
-        // 写入。
+        // 写盘语义分两类：
+        //   - Claude/Codex/Gemini 是**整文件配置**（settings.json / auth.json +
+        //     config.toml / .env）。bind 注入的只是 base_url/token/model 这几个
+        //     字段，必须 **merge 进用户现有文件**，否则会把用户原本的 permissions
+        //     / MCP / profiles / 其它 env 变量整文件冲掉（用户实测反馈的 bug）。
+        //   - OpenCode/OpenClaw/Hermes 走 set_provider，**整个覆盖** `ofox-<app>`
+        //     这一个子节，但天然保留用户其它 provider 子节和顶层配置——`set_provider`
+        //     本就是「读全文件→只 insert 自己子节」。子节内用户手加字段会在 bind
+        //     一瞬被覆盖，这是既有行为，不归 unbind 还原管。
         match app_type {
-            AppType::Claude => self.write_claude_live(&patch)?,
-            AppType::Codex => self.write_codex_live(&patch)?,
-            AppType::Gemini => self.write_gemini_live(&patch)?,
+            AppType::Claude | AppType::Codex | AppType::Gemini => {
+                self.ofox_merge_patch_to_live(app_type, &patch)?
+            }
             AppType::OpenCode => self.write_opencode_live(&patch)?,
             AppType::OpenClaw => self.write_openclaw_live(&patch)?,
             AppType::Hermes => self.write_hermes_live(&patch)?,
         }
         Ok(())
+    }
+
+    /// bind 直写专用：读当前 live 配置，把 patch **字段级 merge** 进去，再写盘。
+    ///
+    /// 跟 [`ofox_restore_from_backup`] 的反 patch（`remove_patch_from_settings`）
+    /// 严格对称：bind 用 [`merge_patch_into_settings`] 加，unbind 用同一份 patch
+    /// 减。Claude=settings.json、Codex=auth.json+config.toml、Gemini=.env。
+    ///
+    /// 关键：merge 必须在写盘**前**完成，写盘走纯覆盖的 `write_*_live`——若让
+    /// `write_*_live` 自己 merge，unbind 反 patch 减掉的字段会被它从旧磁盘 merge
+    /// 回来。
+    ///
+    /// [`merge_patch_into_settings`]: crate::services::provider::merge_patch_into_settings
+    fn ofox_merge_patch_to_live(
+        &self,
+        app_type: &AppType,
+        patch: &Value,
+    ) -> Result<(), String> {
+        use crate::services::provider::merge_patch_into_settings;
+
+        let current = match app_type {
+            AppType::Claude => self.read_claude_live().unwrap_or_else(|_| json!({})),
+            AppType::Codex => self.read_codex_live()?,
+            AppType::Gemini => self.read_gemini_live()?,
+            _ => return Err(format!("{} 不走 merge 直写路径", app_type.as_str())),
+        };
+
+        let merged = merge_patch_into_settings(app_type, &current, patch)
+            .map_err(|e| format!("merge {} patch 失败: {e}", app_type.as_str()))?;
+
+        match app_type {
+            AppType::Claude => self.write_claude_live(&merged),
+            AppType::Codex => self.write_codex_live(&merged),
+            AppType::Gemini => self.write_gemini_live(&merged),
+            _ => unreachable!("已在上面拦截"),
+        }
     }
 
     /// 构造 ofox bind 的字段级 patch——读 `ofox-<app>` seed 模板的
@@ -3451,8 +3497,14 @@ command = "latest-command"
         let baseline = json!({
             "env": {
                 "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
-                "ANTHROPIC_AUTH_TOKEN": "user-original-token"
-            }
+                "ANTHROPIC_AUTH_TOKEN": "user-original-token",
+                "USER_CUSTOM_VAR": "keep-me"
+            },
+            // bind 前用户 settings.json 里大量的非 env 顶层字段——bind 写盘必须
+            // 全部保留（本次回归的核心：直写不能整文件覆盖）。
+            "permissions": { "allow": ["Bash", "Read"] },
+            "statusLine": { "type": "command", "command": "echo baseline" },
+            "model": "opus"
         });
         std::fs::write(
             &path,
@@ -3501,6 +3553,32 @@ command = "latest-command"
                 .and_then(|v| v.as_str()),
             Some(PROXY_TOKEN_PLACEHOLDER),
             "**关键回归**：不能是 PROXY_MANAGED 占位"
+        );
+
+        // **核心回归**（用户反馈）：bind 直写是字段级注入，不能把 bind 前用户
+        // settings.json 里的大量配置整文件覆盖掉。permissions / statusLine /
+        // model / 自定义 env 都必须原样保留。
+        assert_eq!(
+            written.pointer("/permissions/allow/0").and_then(|v| v.as_str()),
+            Some("Bash"),
+            "bind 前的 permissions 必须保留, got: {written}"
+        );
+        assert_eq!(
+            written.pointer("/statusLine/command").and_then(|v| v.as_str()),
+            Some("echo baseline"),
+            "bind 前的 statusLine 必须保留, got: {written}"
+        );
+        assert_eq!(
+            written.pointer("/model").and_then(|v| v.as_str()),
+            Some("opus"),
+            "bind 前的顶层 model 必须保留, got: {written}"
+        );
+        assert_eq!(
+            written
+                .pointer("/env/USER_CUSTOM_VAR")
+                .and_then(|v| v.as_str()),
+            Some("keep-me"),
+            "bind 前 env 里的自定义变量必须保留, got: {written}"
         );
     }
 
@@ -3583,6 +3661,147 @@ command = "latest-command"
             .await
             .expect("query backup");
         assert!(backup_after.is_none(), "restore 后应当删 backup");
+    }
+
+    fn seed_ofox_codex(db: &Database) {
+        // 跟 providers_seed.rs 的 ofox-codex 同形态：{auth, config:"<TOML>"}
+        let provider = Provider::with_id(
+            "ofox-codex".to_string(),
+            "OfoxAI".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "" },
+                "config": "model_provider = \"ofox\"\nmodel = \"bailian/qwen3-coder-plus\"\n\n[model_providers.ofox]\nname = \"ofox\"\nbase_url = \"https://api.ofox.ai/v1\"\nwire_api = \"responses\""
+            }),
+            None,
+        );
+        db.save_provider("codex", &provider).expect("save codex seed");
+    }
+
+    fn seed_ofox_gemini(db: &Database) {
+        let provider = Provider::with_id(
+            "ofox-gemini".to_string(),
+            "OfoxAI".to_string(),
+            json!({
+                "env": {
+                    "GOOGLE_GEMINI_BASE_URL": "https://api.ofox.ai/gemini",
+                    "GEMINI_API_KEY": ""
+                }
+            }),
+            None,
+        );
+        db.save_provider("gemini", &provider).expect("save gemini seed");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn ofox_write_direct_to_live_preserves_user_codex_config() {
+        // **核心回归**：Codex bind 直写必须 merge，不能用 seed 模板整文件覆盖
+        // 用户的 config.toml（MCP server、自定义 profile、其它 model_provider）。
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        seed_ofox_codex(&db);
+
+        // bind 前用户的 ~/.codex/config.toml：自定义 MCP + 一个别的 provider
+        let auth_path = crate::codex_config::get_codex_auth_path();
+        let config_path = crate::codex_config::get_codex_config_path();
+        std::fs::create_dir_all(auth_path.parent().unwrap()).expect("mkdir codex");
+        std::fs::write(
+            &auth_path,
+            r#"{"OPENAI_API_KEY":"user-old-key","USER_EXTRA":"keep-auth"}"#,
+        )
+        .expect("write codex auth baseline");
+        std::fs::write(
+            &config_path,
+            "[mcp_servers.my_tool]\ncommand = \"my-mcp\"\n\n[model_providers.deepseek]\nname = \"deepseek\"\nbase_url = \"https://api.deepseek.com\"\n",
+        )
+        .expect("write codex config baseline");
+
+        service
+            .ofox_write_direct_to_live(&AppType::Codex, "sk-of-CODEX1")
+            .await
+            .expect("codex direct write");
+
+        // config.toml：ofox provider 被注入，用户的 MCP + deepseek provider 保留
+        let written_cfg =
+            std::fs::read_to_string(&config_path).expect("read codex config after bind");
+        assert!(
+            written_cfg.contains("[model_providers.ofox]"),
+            "ofox provider 应被注入, got:\n{written_cfg}"
+        );
+        assert!(
+            written_cfg.contains("[mcp_servers.my_tool]"),
+            "用户的 MCP server 必须保留, got:\n{written_cfg}"
+        );
+        assert!(
+            written_cfg.contains("[model_providers.deepseek]"),
+            "用户的 deepseek provider 必须保留, got:\n{written_cfg}"
+        );
+
+        // auth.json：sk-of- 注入，用户自定义字段保留
+        let written_auth: Value = read_json_file(&auth_path).expect("read codex auth after bind");
+        assert_eq!(
+            written_auth.pointer("/OPENAI_API_KEY").and_then(|v| v.as_str()),
+            Some("sk-of-CODEX1"),
+            "token 应被注入, got: {written_auth}"
+        );
+        assert_eq!(
+            written_auth.pointer("/USER_EXTRA").and_then(|v| v.as_str()),
+            Some("keep-auth"),
+            "auth.json 里用户自定义字段必须保留, got: {written_auth}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn ofox_write_direct_to_live_preserves_user_gemini_env() {
+        // **核心回归**：Gemini bind 直写必须 merge，不能整体重写 .env 把用户
+        // 原有的其它环境变量冲掉。
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        seed_ofox_gemini(&db);
+
+        // bind 前用户的 ~/.gemini/.env：有自定义变量
+        let env_path = crate::gemini_config::get_gemini_env_path();
+        std::fs::create_dir_all(env_path.parent().unwrap()).expect("mkdir gemini");
+        std::fs::write(
+            &env_path,
+            "HTTPS_PROXY=http://localhost:7890\nUSER_CUSTOM=keep-me\n",
+        )
+        .expect("write gemini env baseline");
+
+        service
+            .ofox_write_direct_to_live(&AppType::Gemini, "sk-of-GEM1")
+            .await
+            .expect("gemini direct write");
+
+        let env_map =
+            crate::gemini_config::read_gemini_env().expect("read gemini env after bind");
+        assert_eq!(
+            env_map.get("GEMINI_API_KEY").map(String::as_str),
+            Some("sk-of-GEM1"),
+            "token 应被注入, got: {env_map:?}"
+        );
+        assert_eq!(
+            env_map.get("GOOGLE_GEMINI_BASE_URL").map(String::as_str),
+            Some("https://api.ofox.ai/gemini"),
+            "base url 应被注入, got: {env_map:?}"
+        );
+        assert_eq!(
+            env_map.get("HTTPS_PROXY").map(String::as_str),
+            Some("http://localhost:7890"),
+            "用户的 HTTPS_PROXY 必须保留, got: {env_map:?}"
+        );
+        assert_eq!(
+            env_map.get("USER_CUSTOM").map(String::as_str),
+            Some("keep-me"),
+            "用户的自定义变量必须保留, got: {env_map:?}"
+        );
     }
 
     #[tokio::test]

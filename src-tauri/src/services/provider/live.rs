@@ -446,6 +446,101 @@ pub(crate) fn remove_patch_from_settings(
     }
 }
 
+/// 字段级正 patch：把 `patch` 出现过的字段 merge 进 `settings`，`settings` 里
+/// patch 没碰过的字段原样保留。这是 [`remove_patch_from_settings`] 的**对称
+/// 反操作**——ofox bind 直写时用它把 base_url/token/model 注入用户现有磁盘配置
+/// （不整文件覆盖），unbind 时 `remove_patch_from_settings` 把同一份 patch 减回去。
+///
+/// patch 形态与 [`remove_patch_from_settings`] 完全一致（per-app）：
+/// - Claude：`{env:{...}}` JSON 子集 → `json_deep_merge`
+/// - Codex：`{auth:{...}, config:"<TOML>"}` → auth 走 JSON merge、config 走 TOML merge
+/// - Gemini：`{env:{...}}` → merge 进 env map
+/// - OpenCode/OpenClaw/Hermes：单 provider 子节（bind 走 `set_provider` 整覆盖子节，
+///   不经过本函数；列在这里只为保持 match 完整 + 语义对称）
+pub(crate) fn merge_patch_into_settings(
+    app_type: &AppType,
+    settings: &Value,
+    patch: &Value,
+) -> Result<Value, AppError> {
+    match app_type {
+        AppType::Claude => {
+            let mut result = if settings.is_object() {
+                settings.clone()
+            } else {
+                json!({})
+            };
+            json_deep_merge(&mut result, patch);
+            Ok(result)
+        }
+        AppType::Codex => {
+            // patch = { "auth": {...}, "config": "<TOML 字符串>" }，settings 同形态。
+            let mut result = if settings.is_object() {
+                settings.clone()
+            } else {
+                json!({})
+            };
+            let result_obj = result.as_object_mut().expect("result is object");
+
+            if let Some(patch_auth) = patch.get("auth") {
+                match result_obj.get_mut("auth") {
+                    Some(target_auth) => json_deep_merge(target_auth, patch_auth),
+                    None => {
+                        result_obj.insert("auth".to_string(), patch_auth.clone());
+                    }
+                }
+            }
+
+            let patch_toml = patch.get("config").and_then(Value::as_str).unwrap_or("");
+            if !patch_toml.trim().is_empty() {
+                let target_toml = result_obj
+                    .get("config")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let mut target_doc = if target_toml.trim().is_empty() {
+                    DocumentMut::new()
+                } else {
+                    target_toml.parse::<DocumentMut>().map_err(|e| {
+                        AppError::Message(format!(
+                            "Invalid Codex config.toml while merging patch: {e}"
+                        ))
+                    })?
+                };
+                let patch_doc = patch_toml
+                    .parse::<DocumentMut>()
+                    .map_err(|e| AppError::Message(format!("Invalid Codex patch TOML: {e}")))?;
+                merge_toml_table_like(target_doc.as_table_mut(), patch_doc.as_table());
+                result_obj.insert("config".to_string(), Value::String(target_doc.to_string()));
+            }
+            Ok(result)
+        }
+        AppType::Gemini => {
+            // patch = { "env": {...} }
+            let mut result = if settings.is_object() {
+                settings.clone()
+            } else {
+                json!({})
+            };
+            if let Some(patch_env) = patch.get("env") {
+                match result.get_mut("env") {
+                    Some(target_env) => json_deep_merge(target_env, patch_env),
+                    None => {
+                        result
+                            .as_object_mut()
+                            .expect("result is object")
+                            .insert("env".to_string(), patch_env.clone());
+                    }
+                }
+            }
+            Ok(result)
+        }
+        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => {
+            let mut result = settings.clone();
+            json_deep_merge(&mut result, patch);
+            Ok(result)
+        }
+    }
+}
+
 pub(crate) fn remove_common_config_from_settings(
     app_type: &AppType,
     settings: &Value,
