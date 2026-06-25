@@ -30,6 +30,16 @@ PLATFORM_KEY="darwin-aarch64"
 # R2 内的目标路径（对齐用户约定的下载地址结构）
 R2_PREFIX="release/mac/arm"
 
+# ── 代码签名 / 公证 ───────────────────────────────────────────────────
+# 签名身份（Developer ID Application）；可被同名环境变量覆盖。
+SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:-Developer ID Application: ZIJUN GUO (93J3MQ9NFU)}"
+# 公证用 app-specific password：兼容本机历史变量名 APPLE_APP_SPECIFIC_PASSWORD。
+# Tauri 期望 APPLE_PASSWORD；我们把它对齐过去。
+APPLE_PASSWORD="${APPLE_PASSWORD:-${APPLE_APP_SPECIFIC_PASSWORD:-}}"
+export APPLE_SIGNING_IDENTITY="$SIGNING_IDENTITY"
+export APPLE_PASSWORD
+# APPLE_ID / APPLE_TEAM_ID 期望已在环境里（gzjxfz@qq.com / 93J3MQ9NFU）。
+
 # ── 解析参数 ───────────────────────────────────────────────────────────
 NOTES=""
 SKIP_BUILD=0
@@ -62,11 +72,14 @@ fi
 VERSION="$VER_PKG"
 echo "▶ 发布版本: v$VERSION"
 
-# ── 2. 打包 ───────────────────────────────────────────────────────────
+# ── 2. 打包（本机 host 即 aarch64-apple-darwin，不带 --target）─────────
+# Tauri 在 build 期间会用上面 export 的 APPLE_SIGNING_IDENTITY 签名，并用
+# APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID 公证 + staple 内含的 .app。
+# 注意：Tauri **不会**对 dmg 容器本身 staple，见第 3.5 步。
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
-  echo "▶ 打包 (pnpm tauri build --target aarch64-apple-darwin) ..."
+  echo "▶ 打包 (pnpm tauri build，含签名+公证 .app) ..."
   if [[ "$DRY_RUN" -eq 0 ]]; then
-    pnpm tauri build --target aarch64-apple-darwin
+    pnpm tauri build
   else
     echo "  [dry-run] 跳过实际 build"
   fi
@@ -75,13 +88,38 @@ else
 fi
 
 # ── 3. 定位 dmg ───────────────────────────────────────────────────────
-# tauri 产物：src-tauri/target/<triple>/release/bundle/dmg/Ofox Desktop_<ver>_aarch64.dmg
+# tauri 产物：src-tauri/target/release/bundle/dmg/Ofox Desktop_<ver>_aarch64.dmg
 DMG_SRC=$(find src-tauri/target -path "*/release/bundle/dmg/*.dmg" -name "*${VERSION}*" 2>/dev/null | head -1)
 if [[ -z "$DMG_SRC" && "$DRY_RUN" -eq 0 ]]; then
   echo "❌ 找不到 v$VERSION 的 .dmg 产物。先 build 或检查 target 目录。" >&2
   exit 1
 fi
 echo "▶ dmg 源文件: ${DMG_SRC:-(dry-run, 未定位)}"
+
+# ── 3.5 公证 + staple dmg 容器 ────────────────────────────────────────
+# 关键坑：Tauri 只公证并 staple 了 dmg **内含的 .app**，但 dmg 文件本身没有
+# staple——用户下载 dmg 双击挂载时 Gatekeeper 仍判 Unnotarized。这里对 dmg
+# 容器单独走 notarytool 公证 + stapler staple。dmg 内 app 已公证，这步很快。
+# 用 stapler validate 判断是否已 staple，幂等：重跑 release 不会重复公证。
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  if xcrun stapler validate "$DMG_SRC" >/dev/null 2>&1; then
+    echo "▶ dmg 已 staple，跳过公证"
+  else
+    : "${APPLE_ID:?APPLE_ID 未设置（公证需要）}"
+    : "${APPLE_TEAM_ID:?APPLE_TEAM_ID 未设置（公证需要）}"
+    : "${APPLE_PASSWORD:?APPLE_PASSWORD/APPLE_APP_SPECIFIC_PASSWORD 未设置（公证需要）}"
+    echo "▶ 公证 dmg 容器 (notarytool submit --wait) ..."
+    xcrun notarytool submit "$DMG_SRC" \
+      --apple-id "$APPLE_ID" \
+      --password "$APPLE_PASSWORD" \
+      --team-id "$APPLE_TEAM_ID" \
+      --wait
+    echo "▶ staple 票据到 dmg ..."
+    xcrun stapler staple "$DMG_SRC"
+  fi
+  echo "▶ 验证 Gatekeeper ..."
+  spctl -a -vvv -t open --context context:primary-signature "$DMG_SRC" 2>&1 | sed 's/^/    /'
+fi
 
 # 目标文件名（用户约定）：ofox_desktop_<version>.dmg
 DMG_KEY="${R2_PREFIX}/ofox_desktop_${VERSION}.dmg"
