@@ -42,6 +42,14 @@
     "enabled": "有効",
     "notSet": "未設定"
   },
+  "update": {
+    "promptTitle": "新しいバージョンがあります",
+    "promptMessage": "Ofox Desktop {{version}} がリリースされました。ダウンロードページから更新してください。",
+    "later": "後で",
+    "skipThisVersion": "このバージョンをスキップ",
+    "bannerTitle": "新しいバージョンがあります",
+    "bannerHint": "ダウンロードページで最新版を入手してください"
+  },
   "firstRunNotice": {
     "title": "Ofox Desktop へようこそ",
     "bodyDefault": "Ofox Desktop は Claude Code / Codex / Gemini CLI の複数プロバイダーをワンクリックで切り替えられるツールです。すでにこれらのツールを設定済みの場合、Ofox Desktop は現在の設定を「default」という名前のプロバイダーとして自動的に保存するので、既存の設定が失われることはありません。",

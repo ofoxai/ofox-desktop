@@ -13,6 +13,7 @@ import { message } from "@tauri-apps/plugin-dialog";
 import { exit } from "@tauri-apps/plugin-process";
 import TrayPopoverApp from "@/components/tray/TrayPopoverApp";
 import { Toaster } from "@/components/ui/sonner";
+import { UpdateProvider } from "@/contexts/UpdateContext";
 
 // 根据平台添加 body class，便于平台特定样式
 try {
@@ -93,11 +94,16 @@ async function bootstrap() {
     <React.StrictMode>
       <QueryClientProvider client={queryClient}>
         <ThemeProvider defaultTheme="system" storageKey="ofox-switch-theme">
-          {isTrayPopover ? <TrayPopoverApp /> : <MainApp />}
-          {/* Single Toaster instance shared by main window + tray popover.
-              Without this, every existing `toast.*` call (App.tsx and the
-              new balance-refresh path) silently no-ops. */}
-          <Toaster />
+          {/* UpdateProvider 同时包住主窗口和托盘弹窗：两个 webview 各持一份
+              context 实例，靠 localStorage + `ofox-update-dismissed` 事件对齐
+              跳过状态。自动检查定时器只在主窗口内跑（见 UpdateContext）。 */}
+          <UpdateProvider>
+            {isTrayPopover ? <TrayPopoverApp /> : <MainApp />}
+            {/* Single Toaster instance shared by main window + tray popover.
+                Without this, every existing `toast.*` call (App.tsx and the
+                new balance-refresh path) silently no-ops. */}
+            <Toaster />
+          </UpdateProvider>
         </ThemeProvider>
       </QueryClientProvider>
     </React.StrictMode>,

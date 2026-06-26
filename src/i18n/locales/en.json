@@ -42,6 +42,14 @@
     "enabled": "Enabled",
     "notSet": "Not Set"
   },
+  "update": {
+    "promptTitle": "Update available",
+    "promptMessage": "Ofox Desktop {{version}} is now available. Visit the download page to get the update.",
+    "later": "Later",
+    "skipThisVersion": "Skip this version",
+    "bannerTitle": "Update available",
+    "bannerHint": "Visit the download page for the latest version"
+  },
   "firstRunNotice": {
     "title": "Welcome to Ofox Desktop",
     "bodyDefault": "Ofox Desktop lets you switch between multiple Claude Code / Codex / Gemini CLI providers with a single click. If you already had these tools configured, Ofox Desktop has saved your existing setup as a provider named “default” so none of your previous configuration is lost.",

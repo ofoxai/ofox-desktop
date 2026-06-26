@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
-import { Settings, RefreshCw, Loader2 } from "lucide-react";
+import { Settings, RefreshCw, Loader2, ArrowUpCircle } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { settingsApi } from "@/lib/api";
@@ -31,6 +32,8 @@ import OfoxSettingsDialog from "./OfoxSettingsDialog";
 import { OfoxApexSwitch } from "@/components/OfoxApexSwitch";
 import { UserAvatar } from "@/components/UserAvatar";
 import { ToolBadge } from "@/components/tools/ToolBadge";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { useUpdate } from "@/contexts/UpdateContext";
 import { manageToolApi, type PingResult } from "@/lib/api/manageTool";
 
 interface ToolInfo {
@@ -76,6 +79,17 @@ export default function ConsolePage({
   onBoundToolsChanged,
 }: ConsolePageProps) {
   const { apex } = useOfoxApex();
+  const { t } = useTranslation();
+  // 应用自更新：底部栏提示按钮 + 首次发现弹窗。数据源 = UpdateContext
+  // （自动检查走 R2 latest.json）。
+  const {
+    hasUpdate,
+    isDismissed,
+    updateInfo,
+    shouldPrompt: shouldPromptUpdate,
+    markPrompted,
+    dismissUpdate,
+  } = useUpdate();
   const [tools, setTools] = useState<BoundTool[]>([]);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
@@ -599,13 +613,49 @@ export default function ConsolePage({
 
       {/* Bottom Bar */}
       <div className="flex shrink-0 items-center justify-between border-t border-border px-5 py-2.5">
-        <button
-          onClick={() => setSettingsDialogOpen(true)}
-          className="flex items-center gap-1.5 text-[12px] text-muted-foreground hover:text-foreground"
-        >
-          <Settings className="h-3.5 w-3.5" />
-          设置
-        </button>
+        <div className="flex items-center gap-4">
+          <button
+            onClick={() => setSettingsDialogOpen(true)}
+            className="flex items-center gap-1.5 text-[12px] text-muted-foreground hover:text-foreground"
+          >
+            <Settings className="h-3.5 w-3.5" />
+            设置
+          </button>
+          {hasUpdate && !isDismissed && (
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => {
+                  const target = updateInfo?.downloadUrl;
+                  if (target) {
+                    settingsApi.openExternal(target).catch((e) => {
+                      console.error("[ConsolePage] open download url failed", e);
+                      toast.error(t("settings.openReleaseNotesFailed"));
+                    });
+                  }
+                }}
+                title={t("settings.updateAvailable", {
+                  version: updateInfo?.availableVersion ?? "",
+                })}
+                className="flex items-center gap-1.5 text-[12px] font-medium text-emerald-600 hover:text-emerald-700 dark:text-emerald-400 dark:hover:text-emerald-300"
+              >
+                <ArrowUpCircle className="h-3.5 w-3.5" />
+                {t("update.bannerTitle", { defaultValue: "发现新版本" })}
+                {updateInfo?.availableVersion
+                  ? ` v${updateInfo.availableVersion}`
+                  : ""}
+              </button>
+              <button
+                onClick={() => dismissUpdate()}
+                title={t("update.skipThisVersion", {
+                  defaultValue: "跳过此版本",
+                })}
+                className="rounded px-1 text-[11px] text-muted-foreground hover:text-foreground"
+              >
+                {t("update.skipThisVersion", { defaultValue: "跳过此版本" })}
+              </button>
+            </div>
+          )}
+        </div>
         <div className="flex items-center gap-4">
           <button
             onClick={() =>
@@ -665,6 +715,35 @@ export default function ConsolePage({
       <OfoxSettingsDialog
         open={settingsDialogOpen}
         onOpenChange={setSettingsDialogOpen}
+      />
+
+      {/* 首次发现新版本的提示对话框。底部栏的提示按钮常驻（hasUpdate &&
+          !isDismissed），这里只在本会话首次发现时弹一次，弹过即由
+          markPrompted 关闭，避免每次定时复查都打扰。 */}
+      <ConfirmDialog
+        isOpen={shouldPromptUpdate}
+        variant="info"
+        title={t("update.promptTitle", { defaultValue: "发现新版本" })}
+        message={t("update.promptMessage", {
+          version: updateInfo?.availableVersion ?? "",
+          defaultValue: "Ofox Desktop {{version}} 已发布，前往下载页获取更新。",
+        })}
+        confirmText={t("settings.goDownload", { defaultValue: "前往下载" })}
+        cancelText={t("update.later", { defaultValue: "稍后" })}
+        onConfirm={() => {
+          markPrompted();
+          const target = updateInfo?.downloadUrl;
+          if (target) {
+            settingsApi.openExternal(target).catch((e) => {
+              console.error("[ConsolePage] open download url failed", e);
+              toast.error(t("settings.openReleaseNotesFailed"));
+            });
+          }
+        }}
+        onCancel={() => {
+          // "稍后"：仅关闭弹窗，底部栏提示按钮保留。
+          markPrompted();
+        }}
       />
     </div>
   );

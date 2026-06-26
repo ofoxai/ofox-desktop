@@ -9,7 +9,9 @@ import ActionButtons from "./ActionButtons";
 import ToolStatusList from "./ToolStatusList";
 import BottomMenu from "./BottomMenu";
 import BalanceWarningBanner from "./BalanceWarningBanner";
+import UpdateBanner from "./UpdateBanner";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
+import { useUpdate } from "@/contexts/UpdateContext";
 import { settingsApi } from "@/lib/api";
 import { BOUND_TOOLS_STORAGE_KEY } from "@/config/toolMeta";
 
@@ -47,6 +49,7 @@ function readBoundToolsFromStorage(): string[] {
  */
 export default function TrayPopoverApp() {
   const { status, refetch, isActive, isExpired, isLoggedOut } = useOfoxAuth();
+  const { hasUpdate, isDismissed } = useUpdate();
   const [balanceRefreshing, setBalanceRefreshing] = useState(false);
 
   // 已绑定工具列表来自 localStorage（与主窗口共享同一份）。低余额阈值/开关
@@ -187,6 +190,7 @@ export default function TrayPopoverApp() {
         {/* 固定区域：不滚动 */}
         <div className="shrink-0">
           <ProfileHeader status={status} />
+          {hasUpdate && !isDismissed && <UpdateBanner />}
           {(isExpired || isLoggedOut) && (
             <AuthExpiredBanner
               variant={isExpired ? "expired" : "loggedOut"}
