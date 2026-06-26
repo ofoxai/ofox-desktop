@@ -44,6 +44,14 @@ export const ofoxDashboardUrl = (a: OfoxApex): string =>
 export const ofoxActivityUrl = (a: OfoxApex): string =>
   `https://app.${a}/analytics/activity`;
 
+/**
+ * `https://app.<apex>/analytics?apiKeys=<keyId>` —— 单把 API key 维度的数据
+ * 统计页。绑定工具行的"数据统计"按钮使用：`keyId` 是该工具绑定时 ofox 签发的
+ * key id（见 `ApiKeyMeta.key_id`，经 `ofox_list_api_keys` 暴露到前端）。
+ */
+export const ofoxAnalyticsUrl = (a: OfoxApex, apiKeyId: string): string =>
+  `https://app.${a}/analytics?apiKeys=${encodeURIComponent(apiKeyId)}`;
+
 /** `https://<apex>/terms` —— 登录页底部条款。 */
 export const ofoxTermsUrl = (a: OfoxApex): string => `https://${a}/terms`;
 

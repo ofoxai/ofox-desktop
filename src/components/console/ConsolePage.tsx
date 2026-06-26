@@ -1,5 +1,14 @@
 import { useEffect, useState, useCallback } from "react";
-import { Settings, RefreshCw, Loader2, ArrowUpCircle } from "lucide-react";
+import {
+  Settings,
+  RefreshCw,
+  Loader2,
+  ArrowUpCircle,
+  Gauge,
+  BarChart3,
+  SlidersHorizontal,
+  Wrench,
+} from "lucide-react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
@@ -9,6 +18,7 @@ import { proxyApi } from "@/lib/api/proxy";
 import { ofoxGetUserInfo, isOfoxBillingManager, type OfoxUserInfo } from "@/lib/api/ofoxAuth";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
 import {
+  ofoxAnalyticsUrl,
   ofoxAvatarUrl,
   ofoxDashboardUrl,
   ofoxMarketingUrl,
@@ -35,6 +45,7 @@ import { ToolBadge } from "@/components/tools/ToolBadge";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useUpdate } from "@/contexts/UpdateContext";
 import { manageToolApi, type PingResult } from "@/lib/api/manageTool";
+import ofoxLogo from "@/assets/icons/ofox-logo.png";
 
 interface ToolInfo {
   name: string;
@@ -191,6 +202,14 @@ export default function ConsolePage({
     Record<string, PingState | undefined>
   >({});
 
+  // tool.id → 该工具绑定时 ofox 签发的 API key id。来源 `ofox_list_api_keys`
+  // 命令（读 settings.json 的 ofoxApiKeys，`ApiKeyMeta.tool` 是小写工具名、
+  // `keyId` 是服务端 id）。用于"数据统计"按钮拼 analytics URL；没拿到 id 的
+  // 工具不展示该按钮（按钮要求 key id 作为查询参数）。
+  const [apiKeyIdByTool, setApiKeyIdByTool] = useState<
+    Record<string, string>
+  >({});
+
   const runPingForTool = useCallback(async (toolId: string) => {
     setPingStateByTool((m) => ({ ...m, [toolId]: { loading: true } }));
     try {
@@ -224,7 +243,7 @@ export default function ConsolePage({
     // intact and the header in its placeholder state — never spins forever.
 
     // ===== Stage 1: local-only, blocks list render =====
-    const [toolResults, takeoverStatus] = await Promise.all([
+    const [toolResults, takeoverStatus, apiKeyMetas] = await Promise.all([
       // includeLatest=false: skip the npm/GitHub fetch — we only need the
       // local "is it installed?" check here. That fetch was the main reason
       // this list took ~5s to render.
@@ -236,7 +255,19 @@ export default function ConsolePage({
       proxyApi
         .getProxyTakeoverStatus()
         .catch(() => ({}) as Record<string, boolean>),
+      // 本地 settings.json 里的 ofox API key 元数据——拿每个工具的 keyId 给
+      // "数据统计"按钮拼 URL。失败（如未绑定任何 key）静默回退空数组，按钮自然
+      // 不显示，不阻塞列表渲染。
+      invoke<Array<{ tool: string; keyId: string }>>(
+        "ofox_list_api_keys",
+      ).catch(() => [] as Array<{ tool: string; keyId: string }>),
     ]);
+
+    const keyIdMap: Record<string, string> = {};
+    for (const meta of apiKeyMetas) {
+      if (meta.keyId) keyIdMap[meta.tool] = meta.keyId;
+    }
+    setApiKeyIdByTool(keyIdMap);
 
     const detectedMap = new Map<string, ToolInfo>();
     for (const r of toolResults) {
@@ -394,11 +425,21 @@ export default function ConsolePage({
         data-tauri-drag-region="true"
       >
         <div
-          className="flex h-full items-center justify-center"
+          className="flex h-full items-center justify-center gap-1.5"
           data-tauri-drag-region="true"
         >
-          <span className="text-[13px] font-medium text-muted-foreground">
-            Ofox
+          <img
+            src={ofoxLogo}
+            alt=""
+            aria-hidden
+            className="h-4 w-4"
+            data-tauri-drag-region="true"
+          />
+          <span
+            className="text-[13px] font-medium text-muted-foreground"
+            data-tauri-drag-region="true"
+          >
+            Ofox Desktop
           </span>
         </div>
         {/* Apex (region) switcher — 浮在右上角，与下方内容区 (px-5) 右
@@ -559,20 +600,51 @@ export default function ConsolePage({
                         <PingResultPill state={ping} />
                       </div>
                     </div>
-                    {/* Action column — wider (w-[160px]) so it can host both
-                        the new "延迟测试" button and the existing 管理/修复
-                        button side-by-side without crowding. */}
-                    <div className="flex w-[160px] items-center justify-end gap-1.5">
+                    {/* Action column — host "延迟测试" + 可选的"数据统计" +
+                        管理/修复，并排不挤。宽度按是否带"数据统计"按钮变化
+                        （仅在拿到该工具 keyId 时才渲染该按钮）。 */}
+                    <div className="flex items-center justify-end gap-1.5">
                       <button
                         onClick={() => runPingForTool(tool.id)}
                         disabled={ping && "loading" in ping}
                         title="单独发一次 ping，测当前 active model 的延迟"
-                        className="rounded-lg border border-border px-2.5 py-1 text-[12px] font-medium text-muted-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1 text-[12px] font-medium text-muted-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
                       >
+                        {ping && "loading" in ping ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Gauge className="h-3.5 w-3.5" />
+                        )}
                         {ping && "loading" in ping ? "测试中…" : "延迟测试"}
                       </button>
+                      {apiKeyIdByTool[tool.id] && (
+                        <button
+                          onClick={() =>
+                            settingsApi
+                              .openExternal(
+                                ofoxAnalyticsUrl(
+                                  apex,
+                                  apiKeyIdByTool[tool.id],
+                                ),
+                              )
+                              .catch((e) => {
+                                console.error(
+                                  "[ConsolePage] open analytics url failed",
+                                  e,
+                                );
+                                toast.error("打开数据统计失败");
+                              })
+                          }
+                          title="在浏览器中查看该工具 API key 的用量数据统计"
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1 text-[12px] font-medium text-muted-foreground hover:bg-accent"
+                        >
+                          <BarChart3 className="h-3.5 w-3.5" />
+                          数据统计
+                        </button>
+                      )}
                       {tool.status === "error" ? (
-                        <button className="w-[68px] rounded-lg bg-orange-500 py-1 text-center text-[12px] font-medium text-white hover:bg-orange-600">
+                        <button className="inline-flex items-center gap-1.5 rounded-lg bg-orange-500 px-2.5 py-1 text-[12px] font-medium text-white hover:bg-orange-600">
+                          <Wrench className="h-3.5 w-3.5" />
                           修复
                         </button>
                       ) : (
@@ -586,8 +658,9 @@ export default function ConsolePage({
                               version: tool.version,
                             })
                           }
-                          className="w-[68px] rounded-lg py-1 text-center text-[12px] font-medium text-muted-foreground hover:bg-accent"
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1 text-[12px] font-medium text-muted-foreground hover:bg-accent"
                         >
+                          <SlidersHorizontal className="h-3.5 w-3.5" />
                           管理
                         </button>
                       )}
