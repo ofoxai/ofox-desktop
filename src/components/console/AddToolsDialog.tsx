@@ -134,12 +134,19 @@ export default function AddToolsDialog({
     if (selected.length === 0) return;
     setSubmitting(true);
     try {
-      // Merge with the existing bound list — `bindTools` overwrites
-      // localStorage, so we must include the prior entries to keep them.
+      // Merge with the existing bound list —— `bindTools` 内部按"完整列表"
+      // 语义重写 localStorage，需要把已绑工具一起带上，bindTools 会重做
+      // 一次幂等的二次 bind 验证它们仍可用。
       const merged = Array.from(new Set([...alreadyBound, ...selected]));
-      await bindTools(merged);
-      toast.success(`已绑定 ${selected.length} 个工具`);
-      onAdded(merged);
+      const succeeded = await bindTools(merged);
+      // succeeded 反映**真实**绑成功的工具——bindTools 内部对失败条目已经
+      // toast 警告。这里成功 toast 用 succeeded ∩ selected 的实际数量，
+      // 避免在"用户选了 2 个、只成 1 个"时谎报"已绑定 2 个工具"。
+      const newlySucceeded = succeeded.filter((id) => selected.includes(id));
+      if (newlySucceeded.length > 0) {
+        toast.success(`已绑定 ${newlySucceeded.length} 个工具`);
+      }
+      onAdded(succeeded);
       onOpenChange(false);
     } catch (e) {
       console.error("[AddToolsDialog] bind failed", e);

@@ -114,6 +114,24 @@ pub async fn fetch_or_create_api_key_with_store(
     if matches!(mode, FetchMode::CachedOk) {
         match store.load(Slot::ApiKey { tool }) {
             Ok(Some(key)) => {
+                // Backfill：老 ApiKeyMeta 在加 `name` 字段之前签发，meta.name
+                // 为 None。这里命中既存 keychain 时顺手补一次 default_key_name
+                // 进去——不影响 keychain 数据、不调端点、对新 meta 也是无害的
+                // no-op（已是 Some 就跳过）。这让"老用户不解绑也能在 UI 看到
+                // `<tool> on <host>` 形式的 name"。失败只 warn，不影响 bind。
+                if let Some(meta) = settings::get_api_key_meta(tool) {
+                    if meta.name.is_none() {
+                        let updated = ApiKeyMeta {
+                            name: Some(default_key_name(tool)),
+                            ..meta
+                        };
+                        if let Err(e) = settings::upsert_api_key_meta(updated) {
+                            log::warn!(
+                                "[ofox_api_keys] backfill name for {tool:?} failed: {e:?}"
+                            );
+                        }
+                    }
+                }
                 // 这里**不**更新 `last_used_at`——本函数语义是"取出 key"，是否
                 // 真的被用到（写到工具配置）由调用方决定。让 caller 在成功
                 // bind 后再调 [`mark_key_used`]。
@@ -136,6 +154,10 @@ pub async fn fetch_or_create_api_key_with_store(
     settings::upsert_api_key_meta(ApiKeyMeta {
         tool,
         key_id: created.key_id,
+        // `name` 是我们 submit 给服务端的默认 name（`<tool> on <host>`），
+        // 服务端不在 create 响应里回这个值，所以直接复用本地算出来的字符串。
+        // UI 用它做"这把 key 是哪台机器的哪个工具"的主标签。
+        name: Some(name),
         alias: None,
         key_start: created.key_start,
         created_at: chrono::Utc::now().timestamp(),
@@ -356,12 +378,17 @@ async fn classify_403(resp: reqwest::Response) -> ApiKeyError {
 ///
 /// 我们这里**先 sanitize 再截断**：截断后再撞到末尾的非法字符不会留下"半个字符"。
 /// 同时把长度限制定在 24 char——服务端硬上限是 100 char，留余量。
+///
+/// debug 构建在 host 末尾加 `-dev`：开发期 / 正式版用同一台机器、同一个 ofox
+/// 账户时，ofox console 里的 key 列表会一眼能区分"哪一把是开发版试用签发的、
+/// 哪一把是正式版日常用的"。`-dev` 在服务端 regex 内合法。release 构建不带后
+/// 缀，正式用户看到的还是 `<tool> on <host>`。
 fn default_key_name(tool: AppType) -> String {
     let host = hostname::get()
         .ok()
         .and_then(|s| s.into_string().ok())
         .unwrap_or_else(|| "unknown-host".to_string());
-    let host: String = host
+    let mut host: String = host
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == ' ' || c == '_' || c == '-' {
@@ -375,6 +402,9 @@ fn default_key_name(tool: AppType) -> String {
     // 极端情况——hostname 全是非法字符 → 全部变 `-`，对人不友好但服务端能接受。
     // 不再 fallback 成 "unknown-host"，因为对调试反而有干扰：宁可看到一串 `-` 也
     // 知道哪台机器拿了 key。
+    if cfg!(debug_assertions) {
+        host.push_str("-dev");
+    }
     format!("{} on {}", tool.as_str(), host)
 }
 

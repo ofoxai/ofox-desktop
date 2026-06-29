@@ -236,12 +236,14 @@ pub(crate) fn ofox_seeds() -> Vec<OfoxProviderSeed> {
         },
         // Codex — OpenAI 兼容协议（TOML 与前端 generateThirdPartyConfig("ofox", ..., "") 保持一致）
         //
-        // model 默认填 `bailian/qwen3-coder-plus`：codex CLI v0.140 在
-        // `[model_providers.<name>]` 模式下要求 `model` 非空，否则启动报
-        // "Thread model is unavailable, wait for the thread to finish syncing
-        // or choose a model"。其他 ofox app 的 seed 可以留空（CLI 无此约束），
-        // 但 codex 必须有一个 ofox 网关认得的具体名。用户可在"管理工具"对话框
-        // 改成别的（写回这里 + 同步到 ~/.codex/config.toml）。
+        // model 字段留空——绑定瞬间由前端 `bindTools.ts::ensureDefaultModel`
+        // 拉 OfoxAI /v1/models 后挑「最便宜但不免费」的写入。这样 OfoxAI 上下
+        // 架或调价时不必跟着发版改 seed。
+        //
+        // codex CLI v0.140+ 要求 `model` 非空，否则启动报 "Thread model is
+        // unavailable…"——所以 ensureDefaultModel 在 fetch 失败时**对 Codex
+        // 单独**回落 hardcode `bailian/qwen3-coder-plus`（这里的历史默认值）。
+        // 其他 ofox 工具的 CLI 容忍空 model（走 OfoxAI 默认路由），不需要兜底。
         OfoxProviderSeed {
             id: "ofox-codex",
             app_type: AppType::Codex,
@@ -250,7 +252,7 @@ pub(crate) fn ofox_seeds() -> Vec<OfoxProviderSeed> {
             icon: "ofox",
             icon_color: "#D97706",
             settings_config_json: format!(
-                r#"{{"auth":{{"OPENAI_API_KEY":""}},"config":"model_provider = \"ofox\"\nmodel = \"bailian/qwen3-coder-plus\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\n\n[model_providers.ofox]\nname = \"ofox\"\nbase_url = \"{openai_v1}\"\nwire_api = \"responses\"\nrequires_openai_auth = true"}}"#
+                r#"{{"auth":{{"OPENAI_API_KEY":""}},"config":"model_provider = \"ofox\"\nmodel = \"\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\n\n[model_providers.ofox]\nname = \"ofox\"\nbase_url = \"{openai_v1}\"\nwire_api = \"responses\"\nrequires_openai_auth = true"}}"#
             ),
             meta_json: r#"{"providerType":"ofox"}"#,
         },

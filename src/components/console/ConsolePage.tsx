@@ -1,10 +1,9 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import {
   Settings,
   RefreshCw,
   Loader2,
   ArrowUpCircle,
-  Gauge,
   BarChart3,
   SlidersHorizontal,
   Wrench,
@@ -39,12 +38,14 @@ import {
 import AddToolsDialog from "./AddToolsDialog";
 import ManageToolDialog, { type ManageToolTarget } from "./ManageToolDialog";
 import OfoxSettingsDialog from "./OfoxSettingsDialog";
-import { OfoxApexSwitch } from "@/components/OfoxApexSwitch";
+// OfoxApexSwitch 不再在 ConsolePage 顶栏渲染——已迁入 OfoxSettingsDialog 的
+// "区域" SectionCard。useOfoxApex() hook 仍保留：ofoxAnalyticsUrl(apex, ...)
+// 还要它来拼"数据统计"按钮的目标 URL。
 import { UserAvatar } from "@/components/UserAvatar";
 import { ToolBadge } from "@/components/tools/ToolBadge";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useUpdate } from "@/contexts/UpdateContext";
-import { manageToolApi, type PingResult } from "@/lib/api/manageTool";
+import { manageToolApi } from "@/lib/api/manageTool";
 import ofoxLogo from "@/assets/icons/ofox-logo.png";
 
 interface ToolInfo {
@@ -185,23 +186,6 @@ export default function ConsolePage({
     }
   }, []);
 
-  // 延迟测试 —— 改为按需触发，不再后台轮询。row 上的 "延迟测试" 按钮点一下
-  // 就读取该工具的 active model，单独发一次 ping，结果只显示在这一行旁。
-  // key = tool.id，value = 该 tool 的 ping 状态：
-  //   - undefined → 从未测试过，不展示 pill
-  //   - { loading: true } → 进行中
-  //   - { result: PingResult } → 已完成（success / fail / 401 / …）
-  //   - { error: string } → 客户端/Tauri 错误（极少见）
-  // 主动让 `tools` 数据变化时**保留**已有测试结果，让用户不会因为后台 reload
-  // 把延迟结果"擦掉"。只有点"刷新"或"管理"里改了 model 才该重测。
-  type PingState =
-    | { loading: true }
-    | { result: PingResult }
-    | { error: string };
-  const [pingStateByTool, setPingStateByTool] = useState<
-    Record<string, PingState | undefined>
-  >({});
-
   // tool.id → 该工具绑定时 ofox 签发的 API key id。来源 `ofox_list_api_keys`
   // 命令（读 settings.json 的 ofoxApiKeys，`ApiKeyMeta.tool` 是小写工具名、
   // `keyId` 是服务端 id）。用于"数据统计"按钮拼 analytics URL；没拿到 id 的
@@ -210,26 +194,18 @@ export default function ConsolePage({
     Record<string, string>
   >({});
 
-  const runPingForTool = useCallback(async (toolId: string) => {
-    setPingStateByTool((m) => ({ ...m, [toolId]: { loading: true } }));
-    try {
-      const model = await manageToolApi.getActiveModel(toolId);
-      if (!model.trim()) {
-        setPingStateByTool((m) => ({
-          ...m,
-          [toolId]: { error: '未配置模型，请在"管理"中选择' },
-        }));
-        return;
-      }
-      const result = await manageToolApi.pingModel(toolId, model);
-      setPingStateByTool((m) => ({ ...m, [toolId]: { result } }));
-    } catch (e) {
-      setPingStateByTool((m) => ({
-        ...m,
-        [toolId]: { error: String(e) },
-      }));
-    }
-  }, []);
+  // tool.id → 工具行二级信息要显示的 API key 标签。显示优先级：
+  // user 起的 alias > 服务端返回的 keyStart 前缀（如 "sk-of-Ab12"）>
+  // keyId 末 6 位 fallback。从同一份 ApiKeyMeta 拿到，所以和 keyId 一起填。
+  const [apiKeyLabelByTool, setApiKeyLabelByTool] = useState<
+    Record<string, string>
+  >({});
+
+  // tool.id → 当前 active model id（来自 manageToolApi.getActiveModel）。
+  // 空字符串表示"未设置"——工具行二级信息会显示"未设置 model"提示用户
+  // 进"管理"挑一个。loadData 时批量拉，bind 后 ofox-prefs-updated 触发
+  // 重拉以反映 ensureDefaultModel 写入的默认值。
+  const [modelByTool, setModelByTool] = useState<Record<string, string>>({});
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -256,18 +232,47 @@ export default function ConsolePage({
         .getProxyTakeoverStatus()
         .catch(() => ({}) as Record<string, boolean>),
       // 本地 settings.json 里的 ofox API key 元数据——拿每个工具的 keyId 给
-      // "数据统计"按钮拼 URL。失败（如未绑定任何 key）静默回退空数组，按钮自然
-      // 不显示，不阻塞列表渲染。
-      invoke<Array<{ tool: string; keyId: string }>>(
-        "ofox_list_api_keys",
-      ).catch(() => [] as Array<{ tool: string; keyId: string }>),
+      // "数据统计"按钮拼 URL，顺带拿 name / alias 给工具行二级信息行显示。
+      // 失败（如未绑定任何 key）静默回退空数组，按钮自然不显示，不阻塞列表
+      // 渲染。
+      invoke<
+        Array<{
+          tool: string;
+          keyId: string;
+          name?: string | null;
+          alias?: string | null;
+          keyStart?: string | null;
+        }>
+      >("ofox_list_api_keys").catch(
+        () =>
+          [] as Array<{
+            tool: string;
+            keyId: string;
+            name?: string | null;
+            alias?: string | null;
+            keyStart?: string | null;
+          }>,
+      ),
     ]);
 
     const keyIdMap: Record<string, string> = {};
+    const keyLabelMap: Record<string, string> = {};
     for (const meta of apiKeyMetas) {
       if (meta.keyId) keyIdMap[meta.tool] = meta.keyId;
+      // 显示优先级：用户在 desktop 端起的 alias > bind 时落本地的 name
+      // （`<tool> on <host>`，更易识别"哪台机器哪个工具"）> keyStart 前缀
+      // 兼容老数据 > keyId 末 6 位兜底。任一非空都行。
+      const aliasTrim = meta.alias?.trim();
+      const nameTrim = meta.name?.trim();
+      const label =
+        (aliasTrim && aliasTrim) ||
+        (nameTrim && nameTrim) ||
+        meta.keyStart ||
+        (meta.keyId ? `…${meta.keyId.slice(-6)}` : "");
+      if (label) keyLabelMap[meta.tool] = label;
     }
     setApiKeyIdByTool(keyIdMap);
+    setApiKeyLabelByTool(keyLabelMap);
 
     const detectedMap = new Map<string, ToolInfo>();
     for (const r of toolResults) {
@@ -322,6 +327,23 @@ export default function ConsolePage({
 
     setTools(list);
     setLoading(false);
+
+    // 工具行二级信息——批量读各 tool 的 active model。每个 invoke ≈ DB
+    // 单查询，6 个工具的总开销可忽略。失败的 tool 当 "" 处理（二级行显示
+    // "未设置 model"，引导用户去"管理"挑一个）。Promise.all 不阻塞列表
+    // 渲染：上面 setTools/setLoading 已让基础行先亮起来。
+    void (async () => {
+      const entries = await Promise.all(
+        ordered.map(async (id) => {
+          try {
+            return [id, (await manageToolApi.getActiveModel(id)).trim()] as const;
+          } catch {
+            return [id, ""] as const;
+          }
+        }),
+      );
+      setModelByTool(Object.fromEntries(entries));
+    })();
 
     // ===== Stage 2: remote / non-blocking =====
     void (async () => {
@@ -412,6 +434,49 @@ export default function ConsolePage({
     loadData();
   }, [loadData]);
 
+  // 监听 ofox-prefs-updated —— bindTools.ts 在每次 bind 完一组工具后会
+  // emit 一次（ensureDefaultModel 可能已异步写了默认 model）；unbindTool 也
+  // 经由 mirrorBoundToolsToSettings 异步 emit 一次。节流 500ms 防 burst。
+  //
+  // 关键陷阱：**listener 必须用 ref 持有最新 loadData**，不能把 loadData 直接
+  // 写进 useEffect 依赖。原因——emit 是 Tauri IPC fire-and-forget，发出与回
+  // 调到达 listener 之间有时延；这段时延里 React 已经完成 boundTools 变化的
+  // reconcile，旧 useEffect 已经 cleanup（clearTimeout 看到的是空 pending），
+  // 新 listener 还没来得及 setup。emit 回调命中 still-alive 的旧 listener，
+  // 起了一个 500ms 后跑**旧 closure 里旧 loadData** 的 timer，没人能 clear。
+  // 结果就是 unbind 后 React state 已经 `[]`，但 500ms 后旧 loadData
+  // 把 `tools` setTools 回 `["codex"]`——UI 残留幽灵条目，无法消除。
+  //
+  // useRef 保证 listener 总是调到最新的 loadData，useEffect 只跑一次绑定，
+  // 不再依赖 loadData，没有 cleanup race。
+  const loadDataRef = useRef(loadData);
+  useEffect(() => {
+    loadDataRef.current = loadData;
+  }, [loadData]);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let pending: ReturnType<typeof setTimeout> | null = null;
+    (async () => {
+      try {
+        const off = await listen("ofox-prefs-updated", () => {
+          if (pending) clearTimeout(pending);
+          pending = setTimeout(() => {
+            pending = null;
+            void loadDataRef.current();
+          }, 500);
+        });
+        unlisten = off;
+      } catch (e) {
+        console.error("[ConsolePage] listen ofox-prefs-updated failed", e);
+      }
+    })();
+    return () => {
+      if (pending) clearTimeout(pending);
+      if (unlisten) unlisten();
+    };
+  }, []);
+
   const errorCount = tools.filter((t) => t.status === "error").length;
 
   return (
@@ -442,16 +507,8 @@ export default function ConsolePage({
             Ofox Desktop
           </span>
         </div>
-        {/* Apex (region) switcher — 浮在右上角，与下方内容区 (px-5) 右
-            对齐；垂直方向居中 (`top-1.5` = (40-28)/2 = 6px)，上下边距相等。
-            `data-tauri-drag-region={false}` 阻止 select 的点击被 window-drag
-            吞掉。已登录态切换会触发 ConfirmDialog → 重新登录流程。 */}
-        <div
-          className="absolute right-5 top-1.5 z-10"
-          data-tauri-drag-region="false"
-        >
-          <OfoxApexSwitch triggerClassName="h-7 w-[108px] text-[12px]" />
-        </div>
+        {/* Apex (region) switcher 已迁入"设置"弹窗的"区域"卡——顶栏只保留
+            logo + 标题，更干净；apex 切换是低频操作，藏一层更合适。 */}
       </div>
 
       {/* Content */}
@@ -579,10 +636,12 @@ export default function ConsolePage({
             </div>
           ) : (
             // 列表始终保持渲染，刷新中叠遮罩——避免刷新时整段消失再回来
-            // 的视觉跳变，尤其是用户已经选好滚动位置 / 看着 ping 结果时。
+            // 的视觉跳变，尤其是用户已经选好滚动位置时。
             <div className="relative">
               {tools.map((tool) => {
-                const ping = pingStateByTool[tool.id];
+                const keyLabel = apiKeyLabelByTool[tool.id];
+                const model = modelByTool[tool.id];
+                const hasSecondary = !!(keyLabel || model !== undefined);
                 return (
                   <div
                     key={tool.id}
@@ -597,26 +656,23 @@ export default function ConsolePage({
                             v{tool.version}
                           </span>
                         )}
-                        <PingResultPill state={ping} />
                       </div>
+                      {hasSecondary && (
+                        // 二级信息行——展示当前绑定的 API key 标签 + active model。
+                        // 任一为空时用 "—" / "未设置 model" 占位，让两段宽度
+                        // 稳定，避免行高跳动。`truncate` 防止长 model id 把
+                        // 右侧按钮挤变形。
+                        <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                          <span>{keyLabel ?? "—"}</span>
+                          <span className="mx-1.5 opacity-50">·</span>
+                          <span>{model || "未设置 model"}</span>
+                        </div>
+                      )}
                     </div>
-                    {/* Action column — host "延迟测试" + 可选的"数据统计" +
-                        管理/修复，并排不挤。宽度按是否带"数据统计"按钮变化
-                        （仅在拿到该工具 keyId 时才渲染该按钮）。 */}
+                    {/* Action column — "数据统计"（按是否拿到 keyId 决定渲染）
+                        + 管理/修复。"延迟测试"按钮已下线——日常排障不需要，
+                        重要的连通性测试仍在"管理"弹窗里。 */}
                     <div className="flex items-center justify-end gap-1.5">
-                      <button
-                        onClick={() => runPingForTool(tool.id)}
-                        disabled={ping && "loading" in ping}
-                        title="单独发一次 ping，测当前 active model 的延迟"
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1 text-[12px] font-medium text-muted-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        {ping && "loading" in ping ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Gauge className="h-3.5 w-3.5" />
-                        )}
-                        {ping && "loading" in ping ? "测试中…" : "延迟测试"}
-                      </button>
                       {apiKeyIdByTool[tool.id] && (
                         <button
                           onClick={() =>
@@ -831,72 +887,5 @@ export default function ConsolePage({
 function formatBalance(value: number | null | undefined): string {
   if (typeof value !== "number" || Number.isNaN(value)) return "—";
   return `$${value.toFixed(2)}`;
-}
-
-// ─── Ping result pill ─────────────────────────────────────────────────────
-//
-// Renders ONLY after the user clicks "延迟测试"。三态：
-//   loading → 灰色 "测试中…"
-//   ok      → 绿色 "延迟 X ms"
-//   fail    → 红色 "连接失败"（hover 看完整原因）
-//   error   → 灰色 短句（如"未配置模型"），用于客户端/前置错误，不是请求层失败
-
-type PingPillState =
-  | { loading: true }
-  | { result: PingResult }
-  | { error: string };
-
-function PingResultPill({ state }: { state: PingPillState | undefined }) {
-  if (!state) return null;
-
-  if ("loading" in state) {
-    return (
-      <span className="inline-flex items-center gap-1 text-[11px] font-normal text-muted-foreground">
-        <Loader2 className="h-2.5 w-2.5 animate-spin" />
-        <span>测试中…</span>
-      </span>
-    );
-  }
-
-  if ("error" in state) {
-    return (
-      <span
-        className="inline-flex items-center gap-1 text-[11px] font-normal text-muted-foreground"
-        title={state.error}
-      >
-        <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60" />
-        <span>{state.error}</span>
-      </span>
-    );
-  }
-
-  const r = state.result;
-  if (r.success) {
-    return (
-      <span
-        className="inline-flex items-center gap-1 text-[11px] font-normal"
-        title={`HTTP ${r.statusCode ?? 200}`}
-      >
-        <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-        <span className="text-foreground">延迟 {r.latencyMs}ms</span>
-      </span>
-    );
-  }
-
-  const tooltip = [
-    r.statusCode ? `HTTP ${r.statusCode}` : null,
-    r.error ?? "请求失败",
-  ]
-    .filter(Boolean)
-    .join(" · ");
-  return (
-    <span
-      className="inline-flex items-center gap-1 text-[11px] font-normal text-rose-500"
-      title={tooltip}
-    >
-      <span aria-hidden className="h-1.5 w-1.5 rounded-full bg-rose-500" />
-      <span>连接失败</span>
-    </span>
-  );
 }
 

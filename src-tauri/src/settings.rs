@@ -186,6 +186,15 @@ pub struct ApiKeyMeta {
     pub tool: AppType,
     /// 服务端返回的 key id。空串非法——上游若不返 id 我们就拒绝持久化。
     pub key_id: String,
+    /// 我们提交给服务端的默认 name——形如 `<tool> on <host>`（见
+    /// [`crate::ofox_api_keys::default_key_name`]）。`None` 表示老数据
+    /// 升级前没存（向后兼容字段，UI 会 fall back 到 `key_start`）。
+    ///
+    /// 不跟随服务端"用户改名"——这里始终是 bind 时本地算出的 name；
+    /// 如果用户在 ofox console 改过名，本地不感知。展示用 `alias`（用户
+    /// 在 desktop 端起的别名）作为更高优先级覆盖。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// 用户起的别名。`None` 表示没起。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
@@ -990,6 +999,7 @@ mod api_key_meta_tests {
         ApiKeyMeta {
             tool,
             key_id: key_id.to_string(),
+            name: None,
             alias: None,
             key_start: None,
             created_at: 1_700_000_000,

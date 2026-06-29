@@ -50,11 +50,26 @@ use crate::app_config::AppType;
 /// OAuth token 用的 service。与 bundle identifier `ai.ofox.desktop` 对齐，
 /// `security dump-keychain` 时能直接对应到 app 身份。改名时间点是 ofox-desktop
 /// 第一次正式发布前——dev 期重命名，没有"老用户兼容"的负担。
-const SERVICE_OAUTH: &str = "ai.ofox.desktop.oauth";
+///
+/// **debug 构建带 `.dev` 后缀**：`pnpm tauri dev` 出来的包是 ad-hoc 签名，
+/// 跟正式版（Developer ID 签名）签名身份不同。keychain 条目走传统 ACL（绑
+/// 具体签名身份），两个身份访问**同一**条目时，系统会反复弹"请输入密码"
+/// 授权框。给 dev 包用独立 service 名，让它和正式版各写各的条目、互不打架，
+/// 开发期来回切就不再被授权框打断。release 构建保持原名，正式用户零影响。
+const SERVICE_OAUTH: &str = if cfg!(debug_assertions) {
+    "ai.ofox.desktop.dev.oauth"
+} else {
+    "ai.ofox.desktop.oauth"
+};
 
 /// 工具级 API key 用的 service——跟 OAuth 物理隔离，便于 Keychain Access.app
 /// 里目视区分，也方便"撤销所有工具 key"这种批量动作只动这一组。
-const SERVICE_APIKEY: &str = "ai.ofox.desktop.apikey";
+/// debug 构建带 `.dev` 后缀，原因同 [`SERVICE_OAUTH`]。
+const SERVICE_APIKEY: &str = if cfg!(debug_assertions) {
+    "ai.ofox.desktop.dev.apikey"
+} else {
+    "ai.ofox.desktop.apikey"
+};
 
 /// 钥匙串里我们存的几个槽位。account 字段直接就是变体语义对应的字符串，
 /// 跟 OAuth 协议字段名 / cc-switch 工具 slug 一致——日后排障

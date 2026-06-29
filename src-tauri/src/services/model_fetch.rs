@@ -7,11 +7,17 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// 获取到的模型信息
+///
+/// `pricing_prompt` 是上游 `pricing.prompt`（per-token 输入价，字符串如
+/// "0.000001"；免费模型为 "0"）。前端按数值排序挑「最便宜但不免费」的
+/// 默认 model，所以 Rust 端不在这里做数值解析，原样透传——上游若改成对象
+/// 形态或加单位也不会让我们出错。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FetchedModel {
     pub id: String,
     pub owned_by: Option<String>,
+    pub pricing_prompt: Option<String>,
 }
 
 /// OpenAI 兼容的 /v1/models 响应格式
@@ -24,6 +30,15 @@ struct ModelsResponse {
 struct ModelEntry {
     id: String,
     owned_by: Option<String>,
+    pricing: Option<ModelPricing>,
+}
+
+/// 上游 model 条目里的 pricing 子对象。只挑 `prompt` 字段——其余如
+/// completion / cache / web_search 现阶段用不到，让 serde 忽略以避免
+/// schema 漂移破坏反序列化。
+#[derive(Debug, Deserialize)]
+struct ModelPricing {
+    prompt: Option<String>,
 }
 
 /// Gemini 原生的 models 响应格式
@@ -38,6 +53,8 @@ struct GeminiModelEntry {
     /// 格式: "models/provider/model-name"，例如 `models/google/gemini-2.5-pro`
     name: String,
     owned_by: Option<String>,
+    #[serde(default)]
+    pricing: Option<ModelPricing>,
 }
 
 const FETCH_TIMEOUT_SECS: u64 = 15;
@@ -155,6 +172,7 @@ pub async fn fetch_ofox_models(
                 .map(|m| FetchedModel {
                     id: m.id,
                     owned_by: m.owned_by,
+                    pricing_prompt: m.pricing.and_then(|p| p.prompt),
                 })
                 .collect();
 
@@ -195,6 +213,7 @@ pub async fn fetch_ofox_models(
                     FetchedModel {
                         id,
                         owned_by: m.owned_by,
+                        pricing_prompt: m.pricing.and_then(|p| p.prompt),
                     }
                 })
                 .filter(|m| is_chat_model(&m.id))
@@ -248,6 +267,7 @@ pub async fn fetch_models(
         .map(|m| FetchedModel {
             id: m.id,
             owned_by: m.owned_by,
+            pricing_prompt: m.pricing.and_then(|p| p.prompt),
         })
         .collect();
 
@@ -371,5 +391,27 @@ mod tests {
         let name = "models/google/gemini-3.1-pro";
         let id = name.strip_prefix("models/").unwrap_or(name);
         assert_eq!(id, "google/gemini-3.1-pro");
+    }
+
+    #[test]
+    fn test_parse_response_with_pricing() {
+        // 真实 OfoxAI /v1/models 响应的精简形态——保留 pricing.prompt 是因为
+        // 前端用它来挑「最便宜但不免费」的默认 model；其余字段被 serde 默认忽略。
+        let json = r#"{"object":"list","data":[
+            {"id":"anthropic/claude-haiku-4.5","object":"model","owned_by":"bedrock","pricing":{"prompt":"0.000001","completion":"0.000005"}},
+            {"id":"anthropic/claude-opus-4.5","object":"model","owned_by":"bedrock","pricing":{"prompt":"0.000005","completion":"0.000025"}}
+        ]}"#;
+        let resp: ModelsResponse = serde_json::from_str(json).unwrap();
+        let data = resp.data.unwrap();
+        assert_eq!(data[0].pricing.as_ref().and_then(|p| p.prompt.as_deref()), Some("0.000001"));
+        assert_eq!(data[1].pricing.as_ref().and_then(|p| p.prompt.as_deref()), Some("0.000005"));
+    }
+
+    #[test]
+    fn test_parse_response_pricing_absent() {
+        // 没有 pricing 字段时不应该报错——只是 pricing_prompt = None。
+        let json = r#"{"object":"list","data":[{"id":"my-model","object":"model"}]}"#;
+        let resp: ModelsResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.data.unwrap()[0].pricing.is_none());
     }
 }

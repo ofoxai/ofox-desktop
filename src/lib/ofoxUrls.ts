@@ -27,9 +27,16 @@ export const ofoxWalletUrl = (a: OfoxApex): string =>
 export const ofoxApiKeysUrl = (a: OfoxApex): string =>
   `https://app.${a}/manage/api-keys`;
 
-/** `https://app.<apex>/register` —— 登录页"免费注册"。 */
+/**
+ * `https://app.<apex>/auth/sign-up?utm_source=desktop&utm_medium=app` ——
+ * 登录页"免费注册"。
+ *
+ * 带 UTM 参数标记来源是 desktop 客户端：主站的 GTM 埋点只读 dataLayer、不读
+ * 自定义 URL query，所以走 GA4 **原生**识别的 `utm_*`——无需改主站，注册流量
+ * 会归入 GA4「流量获取 / 来源·媒介」报告的 `desktop / app`。
+ */
 export const ofoxRegisterUrl = (a: OfoxApex): string =>
-  `https://app.${a}/register`;
+  `https://app.${a}/auth/sign-up?utm_source=desktop&utm_medium=app`;
 
 /** `https://app.<apex>/dashboard` —— 控制台跳转入口。 */
 export const ofoxDashboardUrl = (a: OfoxApex): string =>
@@ -52,8 +59,9 @@ export const ofoxActivityUrl = (a: OfoxApex): string =>
 export const ofoxAnalyticsUrl = (a: OfoxApex, apiKeyId: string): string =>
   `https://app.${a}/analytics?apiKeys=${encodeURIComponent(apiKeyId)}`;
 
-/** `https://<apex>/terms` —— 登录页底部条款。 */
-export const ofoxTermsUrl = (a: OfoxApex): string => `https://${a}/terms`;
+/** `https://<apex>/zh/terms-of-service` —— 登录页底部条款。 */
+export const ofoxTermsUrl = (a: OfoxApex): string =>
+  `https://${a}/zh/terms-of-service`;
 
 /** `https://<apex>/privacy` —— 登录页底部隐私政策。 */
 export const ofoxPrivacyUrl = (a: OfoxApex): string => `https://${a}/privacy`;

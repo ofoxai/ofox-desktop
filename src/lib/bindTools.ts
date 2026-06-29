@@ -1,7 +1,70 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
+import { toast } from "sonner";
 import { BOUND_TOOLS_STORAGE_KEY } from "@/config/toolMeta";
 import { settingsApi } from "@/lib/api";
+import { manageToolApi, TOOL_PROTOCOL } from "@/lib/api/manageTool";
+import {
+  fetchOfoxModels,
+  filterOfoxModelsByProtocol,
+  pickCheapestPaidModel,
+} from "@/lib/api/model-fetch";
+
+/**
+ * Codex CLI 启动时强制要求 `model` 非空——空字符串会触发 "Thread model is
+ * unavailable under the current configuration"。其他工具的 CLI 都允许空
+ * （走 OfoxAI 默认路由），所以这个 hardcode 兜底只在 Codex + fetch 失败的
+ * 极端组合下生效，不构成全局的价格表 / 模型列表硬编码。
+ *
+ * 值取 bailian/qwen3-coder-plus —— 这是改造前 Codex seed 的硬编码默认，
+ * 已经过 dogfooding，启动可用。日后如果 OfoxAI 下架该 model，会从 fetch
+ * 列表里挑到新的，正常路径用不到这个值。
+ */
+const CODEX_SAFE_FALLBACK = "bailian/qwen3-coder-plus";
+
+/**
+ * Bind 后立刻给工具挑一个默认 model 写进 active provider 的 settings_config。
+ *
+ * 触发条件：`getActiveModel` 返回空字符串（seed 模板里 model 留空 / 用户
+ * 此前没设过）。用户已选过 model 时 early-return，绝不覆盖用户选择。
+ *
+ * 选法："最便宜但不免费"——见 {@link pickCheapestPaidModel}。
+ * 兜底：fetch 失败 / 列表为空时，**只对 Codex** 回落 hardcode，其他工具留空
+ * （它们的 CLI 容忍空 model，会走 OfoxAI 默认路由）。
+ *
+ * 不阻塞 bind 主流程：任何错误都吞掉打 warn，让用户至少能用上工具，进
+ * "管理"里手动选 model 也能恢复。
+ */
+async function ensureDefaultModel(tool: string): Promise<void> {
+  const protocol = TOOL_PROTOCOL[tool];
+  if (!protocol) return;
+
+  let current = "";
+  try {
+    current = (await manageToolApi.getActiveModel(tool)).trim();
+  } catch {
+    // 读不到当 "" 处理——后续逻辑会按"未设置"挑默认。
+  }
+  if (current) return;
+
+  let picked = "";
+  try {
+    const raw = await fetchOfoxModels(protocol);
+    const candidates = filterOfoxModelsByProtocol(raw, protocol);
+    picked = pickCheapestPaidModel(candidates);
+  } catch (e) {
+    console.warn(`[bindTools] fetch models for ${tool} failed`, e);
+  }
+
+  if (!picked && tool === "codex") picked = CODEX_SAFE_FALLBACK;
+  if (!picked) return;
+
+  try {
+    await manageToolApi.setActiveModel(tool, picked);
+  } catch (e) {
+    console.warn(`[bindTools] setActiveModel(${tool}, ${picked}) failed`, e);
+  }
+}
 
 /**
  * Mirror the bound-tools list into `AppSettings.boundTools` so the Rust
@@ -73,24 +136,62 @@ const OFOX_AUTO_BIND_TOOLS: ReadonlySet<string> = new Set([
  * Returns the same `tools` array it was given so callers can chain.
  */
 export async function bindTools(tools: string[]): Promise<string[]> {
-  localStorage.setItem(BOUND_TOOLS_STORAGE_KEY, JSON.stringify(tools));
-  // Mirror to backend (fire-and-forget, doesn't block bind round-trips).
-  void mirrorBoundToolsToSettings(tools);
+  // 写入顺序：**bind 完成后**才把成功条目落 localStorage。
+  //
+  // 历史问题：之前是"先写 localStorage 再调 ofox_bind_tool"——后端因 token
+  // 过期 / 网络 / 配额等失败时，前端 UI 仍以为绑成功（因为 localStorage 已
+  // 改），用户看到"绑定的工具"列表里多出一个幽灵条目，但磁盘配置完全没动。
+  // 解除绑定时后端日志 "没有 ofox bind 时的备份记录——视为 noop"，前端
+  // 列表却继续显示，反复"解绑也解不掉"。
+  //
+  // 现在每个工具单独 try：
+  //   - 不在 OFOX_AUTO_BIND_TOOLS 里的：默认认为成功（这些 tool 不走 ofox
+  //     接管，没有失败模式）
+  //   - 在集合里的：调 ofox_bind_tool；成功才计入 succeeded，失败 toast 报错
+  //
+  // 最后只把 succeeded 写 localStorage；mirror 也只 mirror 实际成功列表。
+  // 调用方（AddToolsDialog）传进来的是 "已绑 ∪ 本次新选"，所以这里 succeeded
+  // 自然包含了"之前就已绑的"工具——它们走幂等的二次 bind，正常情况都会过。
+  const succeeded: string[] = [];
+  const failed: string[] = [];
   for (const tool of tools) {
-    if (!OFOX_AUTO_BIND_TOOLS.has(tool)) continue;
+    if (!OFOX_AUTO_BIND_TOOLS.has(tool)) {
+      // 非 ofox 接管类工具——本流程不操作其后端状态，视为成功记下来。
+      succeeded.push(tool);
+      continue;
+    }
     try {
       await invoke("ofox_bind_tool", { app: tool });
+      // bind 之后立即挑默认 model：必须在 ofox_bind_tool 完成后才跑，
+      // 因为 setActiveModel 依赖 active provider 已切到 ofox-<tool>。
+      // 单条失败不影响 bind 结果——ensureDefaultModel 内部自吞异常。
+      await ensureDefaultModel(tool);
+      succeeded.push(tool);
     } catch (e) {
       console.error(`[bindTools] bind ${tool} failed`, e);
+      failed.push(tool);
     }
   }
-  // 再 emit 一次 prefs-updated，唤醒 tool_health loop —— 此时 ofox_bind_tool
-  // 已完成、active provider 切到 ofox-<app>，health check 才能读到正确的
-  // model。第一次 emit 在 mirrorBoundToolsToSettings 里（与 bind 并行抢跑），
-  // 那次 read 可能仍指向 official seed (models=[]) → "未配置模型"。这次补
-  // emit 是为了让 UI 收到的最终 pill 反映 bind 后的真实状态。
+
+  if (failed.length > 0) {
+    // 让用户知道哪些工具没绑上——之前是 silent failure，用户只能从"工具
+    // 没出现在列表里"反推。常见原因是 token 过期：toast 文案不点破具体
+    // 错因（后端错误对最终用户不友好），主流程仍然继续，已成功的工具会
+    // 被正常持久化。
+    toast.error(`部分工具未绑定：${failed.join("、")}（可重试或检查登录态）`);
+  }
+
+  localStorage.setItem(BOUND_TOOLS_STORAGE_KEY, JSON.stringify(succeeded));
+  // Mirror to backend after the bind round-trip so the settings.json 镜像
+  // 也只看到已成功的工具——避免 health loop 去探一个根本没 bind 的 app。
+  void mirrorBoundToolsToSettings(succeeded);
+
+  // 再 emit 一次 prefs-updated，唤醒 tool_health loop —— ofox_bind_tool 已
+  // 完成、active provider 切到 ofox-<app>，health check 才能读到正确的
+  // model。mirrorBoundToolsToSettings 内部也会 emit 一次（两次 emit 由订阅
+  // 方节流去重）。
   void emit("ofox-prefs-updated");
-  return tools;
+  return succeeded;
 }
 
 /**

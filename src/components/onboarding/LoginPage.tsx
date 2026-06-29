@@ -19,8 +19,7 @@ import {
 const FEATURES = [
   "自动检测本机 AI 工具，一键接入",
   "Claude / GPT / Gemini 等 100+ 模型",
-  "统一用量与账单，菜单栏随时查看",
-  "支持第三方 API 并存，高级设置可调",
+  "统一用量与账单，一键查看详情",
 ];
 
 type LoginState = "idle" | "polling" | "success" | "error";

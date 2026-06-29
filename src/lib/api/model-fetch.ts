@@ -5,6 +5,35 @@ import { toast } from "sonner";
 export interface FetchedModel {
   id: string;
   ownedBy: string | null;
+  /**
+   * 上游 `pricing.prompt`——per-token 输入价的字符串形式（如 "0.000001"）。
+   * 免费模型为 "0"；上游缺字段 / Gemini 端口未返时为 null。
+   *
+   * 不在前端预先解析成 number：上游若未来加单位或换形态，原样透传更稳。
+   * 取值/比较时再走 `Number(pricingPrompt)`——NaN/<=0 都按"未知或免费"处理。
+   */
+  pricingPrompt: string | null;
+}
+
+/**
+ * 从候选列表里挑「最便宜但不免费」的 model id。
+ *
+ * 算法：
+ * - 解析 `pricingPrompt` 为 number；NaN 或 ≤0 视为"免费 / 未知"，剔除
+ * - 剩余按价格升序，取第一个
+ * - 全部被剔除时回落到原列表首个非空 id（兜底，避免空字符串触发 Codex CLI
+ *   "Thread model is unavailable" 报错；调用方还会对 Codex 单独再兜一层）
+ * - 列表为空返回 ""
+ */
+export function pickCheapestPaidModel(models: FetchedModel[]): string {
+  const paid = models
+    .map((m) => ({ id: m.id, price: Number(m.pricingPrompt ?? "") }))
+    .filter((x) => Number.isFinite(x.price) && x.price > 0);
+  if (paid.length > 0) {
+    paid.sort((a, b) => a.price - b.price);
+    return paid[0].id;
+  }
+  return models.find((m) => m.id)?.id ?? "";
 }
 
 /**

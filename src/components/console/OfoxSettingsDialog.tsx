@@ -11,6 +11,7 @@ import { useOfoxAuth } from "@/hooks/useOfoxAuth";
 import { UserAvatar } from "@/components/UserAvatar";
 import { ofoxAvatarUrl } from "@/lib/ofoxUrls";
 import { getCurrentVersion } from "@/lib/updater";
+import { OfoxApexSwitch } from "@/components/OfoxApexSwitch";
 import type { Settings } from "@/types";
 
 /**
@@ -372,9 +373,22 @@ export default function OfoxSettingsDialog({
             </div>
           </SectionCard>
 
+          {/* ─── 区域 ─────────────────────────────────────────────────── */}
+          {/* 之前 apex 选择器在主页右上角；为了让顶栏更干净（apex 切换是
+              低频操作），收回到设置里。已登录态切换 ofox.ai ↔ ofox.io 会
+              在 OfoxApexSwitch 内部触发 ConfirmDialog → 重新登录流程。 */}
+          <SectionCard title="区域">
+            <Row
+              label="OFox apex"
+              hint="切换 ofox.ai / ofox.io；已登录态切换会触发重新登录"
+              control={
+                <OfoxApexSwitch triggerClassName="h-8 w-[140px] text-[13px]" />
+              }
+              isLast
+            />
+          </SectionCard>
+
           {/* ─── 偏好 ─────────────────────────────────────────────────── */}
-          {/* "区域"卡曾在此与"偏好"之间——切到 ConsolePage 顶栏右上角的
-              OfoxApexSwitch 后这里冗余，移除。Apex 切换仍由那个组件统一收口。 */}
           <SectionCard title="偏好">
             {/* Auto-launch */}
             <Row
