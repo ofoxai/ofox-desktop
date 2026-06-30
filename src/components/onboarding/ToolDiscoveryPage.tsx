@@ -1,7 +1,7 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { TOOL_META, TOOL_ORDER } from "@/config/toolMeta";
-import { ToolBadge } from "@/components/tools/ToolBadge";
+import { ToolDiscoveryCard, type ToolStatus } from "./ToolDiscoveryCard";
 
 interface ToolInfo {
   name: string;
@@ -9,14 +9,12 @@ interface ToolInfo {
   error: string | null;
 }
 
-interface ToolCard {
+interface ToolEntry {
   id: string;
-  abbr: string;
   label: string;
-  color: string;
-  detected: boolean;
+  status: ToolStatus;
   version: string | null;
-  enabled: boolean;
+  autoSelectTick: number;
 }
 
 interface ToolDiscoveryPageProps {
@@ -29,150 +27,169 @@ interface ToolDiscoveryPageProps {
   onBind: (selectedTools: string[]) => void;
 }
 
+/** Stagger 翻 selected 的相邻间隔（ms）。跳过 missing 不占 tick。 */
+const STAGGER_INTERVAL_MS = 200;
+
 export default function ToolDiscoveryPage({
   onBack,
   onBind,
 }: ToolDiscoveryPageProps) {
-  const [tools, setTools] = useState<ToolCard[]>([]);
-  const [loading, setLoading] = useState(true);
+  // 初始就给 6 张 scanning 卡片占位——之前是 tools=[]，扫描期间整面什么也
+  // 看不到，用户不知道有哪些可选工具。改成首屏即就位，扫描完成后从
+  // scanning → missing/unselected → selected 渐进推进。
+  const [entries, setEntries] = useState<ToolEntry[]>(() =>
+    TOOL_ORDER.map((id) => ({
+      id,
+      label: TOOL_META[id].label,
+      status: "scanning" as ToolStatus,
+      version: null,
+      autoSelectTick: 0,
+    })),
+  );
+  // scanDone：stagger 全部跑完才翻 true，确认按钮才允许点。覆盖两种边界：
+  //   1. 扫描出错（catch 分支）—— 直接 true，让用户能继续 onboarding 即便
+  //      6 张都是 missing
+  //   2. 没有任何工具被检测到 —— detectedIds 为空，stagger 不会启动；
+  //      doneT 仍按 `Math.max(0, len-1)*INTERVAL` 调度（0ms 即触发）
+  const [scanDone, setScanDone] = useState(false);
+  // 保存所有 stagger / scanDone 定时器，组件卸载或 detectTools 重跑时统一
+  // clearTimeout——否则 unmount 后 setEntries 会触发 setState-after-unmount
+  // 警告（React 18 dev only，但读 console 时干扰排障）。
+  const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   const detectTools = useCallback(async () => {
-    setLoading(true);
     try {
-      // Onboarding only renders the local version per tool — no "update
-      // available" hint here — so skip the slow remote latest-version fetch.
+      // Onboarding 只需要本地版本——不查 npm/GitHub 最新版（那是 console
+      // 里的"有新版本"提示用的），跳过远程 fetch 让 invoke 更快返回。
       const results = await invoke<ToolInfo[]>("get_tool_versions", {
         tools: null,
         wslShellByTool: null,
         includeLatest: false,
       });
+      const byName = new Map(results.map((r) => [r.name, r]));
 
-      const detectedMap = new Map<string, ToolInfo>();
-      for (const r of results) {
-        detectedMap.set(r.name, r);
-      }
-
-      const cards: ToolCard[] = TOOL_ORDER.map((id) => {
-        const meta = TOOL_META[id];
-        const info = detectedMap.get(id);
+      // Step 1：把 scanning 一次性翻成 missing（没装）或 unselected（装了）。
+      // 此时整页"扫描中..."标题变成"已发现 N 个"，每卡的版本号 / 灰显状态
+      // 落定，但 detected 的卡还都是 unselected——下一步才逐个翻 selected。
+      const settled: ToolEntry[] = TOOL_ORDER.map((id) => {
+        const info = byName.get(id);
         const detected = !!info && !!info.version && !info.error;
         return {
           id,
-          abbr: meta.abbr,
-          label: meta.label,
-          color: meta.color,
-          detected,
+          label: TOOL_META[id].label,
+          status: detected ? ("unselected" as ToolStatus) : "missing",
           version: info?.version ?? null,
-          enabled: detected, // 默认选中已检测到的工具
+          autoSelectTick: 0,
         };
       });
+      setEntries(settled);
 
-      setTools(cards);
+      // Step 2：按 TOOL_ORDER 跳过 missing 逐个 200ms 翻 selected。跳过
+      // missing 是为了视觉节奏 —— 比如 claude(装)/codex(没装)/opencode(装)
+      // 时 opencode 在 claude 之后 200ms，而不是 400ms（让没装的工具占
+      // 一个 tick 空白）。
+      const detectedIds = settled
+        .filter((e) => e.status === "unselected")
+        .map((e) => e.id);
+      detectedIds.forEach((id, i) => {
+        const t = setTimeout(() => {
+          setEntries((prev) =>
+            prev.map((e) =>
+              e.id === id
+                ? {
+                    ...e,
+                    status: "selected",
+                    autoSelectTick: e.autoSelectTick + 1,
+                  }
+                : e,
+            ),
+          );
+        }, i * STAGGER_INTERVAL_MS);
+        timersRef.current.push(t);
+      });
+
+      // scanDone 在最后一张卡翻 selected **的瞬间**翻 true，让"开始绑定"按钮
+      // 跟着最后一张卡的高亮一起出现。Math.max(0, len-1) 处理 0 工具被检测
+      // 到的边界（立刻 ready）。
+      const doneT = setTimeout(
+        () => setScanDone(true),
+        Math.max(0, detectedIds.length - 1) * STAGGER_INTERVAL_MS,
+      );
+      timersRef.current.push(doneT);
     } catch (e) {
       console.error("Tool detection failed:", e);
-      // 如果检测失败，显示所有工具为未检测状态
-      setTools(
+      // 全部置 missing 让用户至少能"返回"或硬选 —— 不阻塞 onboarding。
+      setEntries(
         TOOL_ORDER.map((id) => ({
           id,
-          ...TOOL_META[id],
-          detected: false,
+          label: TOOL_META[id].label,
+          status: "missing",
           version: null,
-          enabled: false,
+          autoSelectTick: 0,
         })),
       );
-    } finally {
-      setLoading(false);
+      setScanDone(true);
     }
   }, []);
 
   useEffect(() => {
     detectTools();
+    return () => {
+      timersRef.current.forEach(clearTimeout);
+      timersRef.current = [];
+    };
   }, [detectTools]);
 
-  const toggleTool = (id: string) => {
-    setTools((prev) =>
-      prev.map((t) =>
-        t.id === id && t.detected ? { ...t, enabled: !t.enabled } : t,
-      ),
+  const handleToggle = (id: string) => {
+    // 扫描中 / stagger 还没跑完都不允许手动切。前者是显式产品规则
+    // ("等所有扫描结束才能流转")，后者是为了不让用户在自动选中动画中
+    // 抢一次 click 造成状态混乱（比如点中的卡正好下一个 tick 要翻
+    // selected，会被覆盖回去）。
+    if (!scanDone) return;
+    setEntries((prev) =>
+      prev.map((e) => {
+        if (e.id !== id) return e;
+        if (e.status === "selected") return { ...e, status: "unselected" };
+        if (e.status === "unselected") return { ...e, status: "selected" };
+        return e; // missing / scanning 不动
+      }),
     );
   };
 
-  const selectedCount = tools.filter((t) => t.enabled).length;
-  const detectedCount = tools.filter((t) => t.detected).length;
+  const selected = entries.filter((e) => e.status === "selected");
+  // detectedCount 包括 selected 和 unselected——只要不是 scanning/missing
+  // 就算"扫描发现的工具"。文案"已发现 N 个" 不依赖用户最终选了几个。
+  const detectedCount = entries.filter(
+    (e) => e.status !== "scanning" && e.status !== "missing",
+  ).length;
+  const isScanning = entries.some((e) => e.status === "scanning");
 
   return (
     <div className="flex h-screen w-full items-center justify-center bg-gradient-to-br from-orange-50/80 via-white to-orange-50/40 dark:from-neutral-950 dark:via-neutral-900 dark:to-neutral-950">
       <div className="flex w-full max-w-2xl flex-col items-center px-8">
-        {/* Title */}
         <h1 className="mb-2 text-3xl font-bold text-foreground">
-          {loading
-            ? "正在扫描 AI 工具..."
+          {isScanning
+            ? "正在扫描 AI 工具…"
             : `已发现 ${detectedCount} 个 AI 工具`}
         </h1>
         <p className="mb-8 text-center text-sm text-muted-foreground">
           选择要接入 Ofox 的工具，我们将生成独立 API Key 并备份原配置
         </p>
 
-        {/* Tool Grid */}
         <div className="mb-8 grid w-full grid-cols-3 gap-4">
-          {tools.map((tool) => (
-            <button
-              key={tool.id}
-              onClick={() => toggleTool(tool.id)}
-              disabled={!tool.detected}
-              className={`flex flex-col items-center gap-2 rounded-xl border-2 px-4 py-5 transition-all ${
-                tool.enabled
-                  ? "border-orange-400 bg-white shadow-sm dark:bg-neutral-800"
-                  : tool.detected
-                    ? "border-border bg-white hover:border-orange-200 dark:bg-neutral-800"
-                    : "border-border/50 bg-muted/30 opacity-50"
-              }`}
-            >
-              {/* Icon */}
-              <ToolBadge
-                toolId={tool.id}
-                size={40}
-                rounded="xl"
-                dimmed={!tool.detected}
-              />
-
-              {/* Name */}
-              <span
-                className={`text-sm font-medium ${
-                  tool.detected
-                    ? "text-foreground"
-                    : "text-muted-foreground"
-                }`}
-              >
-                {tool.label}
-              </span>
-
-              {/* Version */}
-              <span className="text-[11px] text-muted-foreground">
-                {tool.version ?? "未安装"}
-              </span>
-
-              {/* Toggle */}
-              <div
-                className={`relative h-6 w-11 rounded-full transition-colors ${
-                  tool.enabled
-                    ? "bg-orange-500"
-                    : tool.detected
-                      ? "bg-gray-300 dark:bg-gray-600"
-                      : "bg-gray-200 dark:bg-gray-700"
-                }`}
-              >
-                <div
-                  className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
-                    tool.enabled ? "translate-x-5" : "translate-x-0.5"
-                  }`}
-                />
-              </div>
-            </button>
+          {entries.map((e) => (
+            <ToolDiscoveryCard
+              key={e.id}
+              toolId={e.id}
+              label={e.label}
+              version={e.version}
+              status={e.status}
+              autoSelectTick={e.autoSelectTick}
+              onClick={() => handleToggle(e.id)}
+            />
           ))}
         </div>
 
-        {/* Actions */}
         <div className="flex w-full max-w-sm items-center justify-center gap-4">
           {onBack && (
             <button
@@ -183,15 +200,13 @@ export default function ToolDiscoveryPage({
             </button>
           )}
           <button
-            onClick={() =>
-              onBind(tools.filter((t) => t.enabled).map((t) => t.id))
-            }
-            disabled={selectedCount === 0 || loading}
+            onClick={() => onBind(selected.map((e) => e.id))}
+            disabled={!scanDone || selected.length === 0}
             className="flex-1 rounded-xl bg-gradient-to-r from-orange-400 to-orange-500 px-6 py-3 text-base font-semibold text-white shadow-md shadow-orange-200 transition-all hover:from-orange-500 hover:to-orange-600 disabled:opacity-50 dark:shadow-orange-900/20"
           >
-            {loading
-              ? "扫描中..."
-              : `开始绑定（${selectedCount}）→`}
+            {!scanDone
+              ? "扫描中…"
+              : `开始绑定（${selected.length}）→`}
           </button>
         </div>
       </div>

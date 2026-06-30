@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import {
@@ -11,7 +11,10 @@ import {
 } from "@/components/ui/dialog";
 import { TOOL_META, TOOL_ORDER } from "@/config/toolMeta";
 import { bindTools } from "@/lib/bindTools";
-import { ToolBadge } from "@/components/tools/ToolBadge";
+import {
+  ToolDiscoveryCard,
+  type ToolStatus,
+} from "@/components/onboarding/ToolDiscoveryCard";
 
 interface ToolInfo {
   name: string;
@@ -19,38 +22,41 @@ interface ToolInfo {
   error: string | null;
 }
 
-interface ToolCard {
+interface ToolEntry {
   id: string;
-  abbr: string;
   label: string;
-  color: string;
-  detected: boolean;
+  status: ToolStatus;
   version: string | null;
-  enabled: boolean;
+  autoSelectTick: number;
 }
 
 interface AddToolsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** Tools already bound — they're hidden from the picker so we never offer
-   *  duplicates. Order doesn't matter; we filter set-style. */
+  /** 已绑定工具——在面板里以 bound 态展示（橙边 + 绿勾，不可点）。 */
   alreadyBound: string[];
-  /** Called with the FULL new bound list (alreadyBound ∪ newlyAdded) after
-   *  bindTools() succeeds. Caller is responsible for re-reading
-   *  localStorage / state to pick up the change. */
+  /** 新增绑定成功后回调。返回的是 bindTools succeeded 列表（完整新绑定集）。 */
   onAdded: (newBoundList: string[]) => void;
 }
 
+/** stagger 翻 selected 的相邻间隔（ms）——和 onboarding 保持一致。 */
+const STAGGER_INTERVAL_MS = 200;
+
 /**
- * In-Console picker for binding additional tools.
+ * "添加工具"对话框，复用 onboarding ToolDiscoveryCard 的 5 态状态机。
  *
- * Mirrors the gate logic of `ToolDiscoveryPage` (which is the first-bind
- * full-page version), but adapted for a dialog: only candidates that aren't
- * already bound are shown, and confirmation merges them onto the existing
- * bound set rather than replacing it.
+ * 与 onboarding 的差异：
+ *   - 已绑工具不过滤，而是以 `bound` 态展示在网格里——给用户"我目前的接入
+ *     状态全貌"的视觉，新装/可绑的工具自然就站在尚未绑定的位置上
+ *   - bound 态卡片不可点；只读
+ *   - 确认按钮统计的是 selected 数（即"本次新绑的"），不含 bound
  *
- * Detection runs each time the dialog opens — versions can change if the
- * user installed a CLI between sessions.
+ * 状态流：
+ *   scanning（首屏 6 张占位，让对话框打开瞬间不空）
+ *     → bound        // 已在 alreadyBound 集合里
+ *     → missing      // 没装
+ *     → unselected   // 装了 + 没绑——stagger 候选
+ *     → selected     // stagger 翻进来（200ms / 跳过非候选）
  */
 export default function AddToolsDialog({
   open,
@@ -58,58 +64,115 @@ export default function AddToolsDialog({
   alreadyBound,
   onAdded,
 }: AddToolsDialogProps) {
-  const [tools, setTools] = useState<ToolCard[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-
   const alreadyBoundSet = useMemo(
     () => new Set(alreadyBound),
     [alreadyBound],
   );
 
+  // 初始 6 张 scanning——对话框打开瞬间不显示空白网格。
+  const [entries, setEntries] = useState<ToolEntry[]>(() =>
+    TOOL_ORDER.map((id) => ({
+      id,
+      label: TOOL_META[id].label,
+      status: "scanning" as ToolStatus,
+      version: null,
+      autoSelectTick: 0,
+    })),
+  );
+  const [scanDone, setScanDone] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+
   const detect = useCallback(async () => {
-    setLoading(true);
+    setScanDone(false);
+    // 把所有 timer 重置一次——detect 可能在用户关-开对话框时重跑。
+    timersRef.current.forEach(clearTimeout);
+    timersRef.current = [];
+
+    // 重新置 scanning（关-开对话框场景下 entries 还停在上一次的 selected/bound）
+    setEntries(
+      TOOL_ORDER.map((id) => ({
+        id,
+        label: TOOL_META[id].label,
+        status: "scanning" as ToolStatus,
+        version: null,
+        autoSelectTick: 0,
+      })),
+    );
+
     try {
-      // Picker only needs the local "is it installed?" check — skip the
-      // remote latest-version fetch that costs several seconds.
       const results = await invoke<ToolInfo[]>("get_tool_versions", {
         tools: null,
         wslShellByTool: null,
         includeLatest: false,
       });
-      const detectedMap = new Map<string, ToolInfo>();
-      for (const r of results) detectedMap.set(r.name, r);
+      const byName = new Map(results.map((r) => [r.name, r]));
 
-      const candidates: ToolCard[] = TOOL_ORDER.filter(
-        (id) => !alreadyBoundSet.has(id),
-      ).map((id) => {
-        const meta = TOOL_META[id];
-        const info = detectedMap.get(id);
+      // Step 1：scanning → bound / missing / unselected
+      const settled: ToolEntry[] = TOOL_ORDER.map((id) => {
+        const info = byName.get(id);
         const detected = !!info && !!info.version && !info.error;
+        let status: ToolStatus;
+        if (alreadyBoundSet.has(id)) {
+          // 已绑工具即便本机检测不到（极少见，比如卸载了 CLI 但配置还在）
+          // 也保留 bound 态——用户对"是否已绑"的认知靠 ofox 端，不依赖
+          // 本地 CLI 是否仍可用。
+          status = "bound";
+        } else if (detected) {
+          status = "unselected";
+        } else {
+          status = "missing";
+        }
         return {
           id,
-          abbr: meta.abbr,
-          label: meta.label,
-          color: meta.color,
-          detected,
+          label: TOOL_META[id].label,
+          status,
           version: info?.version ?? null,
-          enabled: detected,
+          autoSelectTick: 0,
         };
       });
-      setTools(candidates);
+      setEntries(settled);
+
+      // Step 2：stagger 把 unselected 逐个翻 selected。bound/missing 不占 tick。
+      const candidateIds = settled
+        .filter((e) => e.status === "unselected")
+        .map((e) => e.id);
+      candidateIds.forEach((id, i) => {
+        const t = setTimeout(() => {
+          setEntries((prev) =>
+            prev.map((e) =>
+              e.id === id
+                ? {
+                    ...e,
+                    status: "selected",
+                    autoSelectTick: e.autoSelectTick + 1,
+                  }
+                : e,
+            ),
+          );
+        }, i * STAGGER_INTERVAL_MS);
+        timersRef.current.push(t);
+      });
+
+      // 最后一张卡翻 selected 的瞬间 scanDone=true。无候选时立即就绪。
+      const doneT = setTimeout(
+        () => setScanDone(true),
+        Math.max(0, candidateIds.length - 1) * STAGGER_INTERVAL_MS,
+      );
+      timersRef.current.push(doneT);
     } catch (e) {
       console.error("[AddToolsDialog] detect failed", e);
-      setTools(
-        TOOL_ORDER.filter((id) => !alreadyBoundSet.has(id)).map((id) => ({
+      // 失败兜底：保留 bound 显示已绑、其它全 missing，让用户至少看到现状。
+      setEntries(
+        TOOL_ORDER.map((id) => ({
           id,
-          ...TOOL_META[id],
-          detected: false,
+          label: TOOL_META[id].label,
+          status: alreadyBoundSet.has(id) ? "bound" : "missing",
           version: null,
-          enabled: false,
+          autoSelectTick: 0,
         })),
       );
-    } finally {
-      setLoading(false);
+      setScanDone(true);
     }
   }, [alreadyBoundSet]);
 
@@ -117,32 +180,48 @@ export default function AddToolsDialog({
     if (open) {
       void detect();
     }
+    return () => {
+      timersRef.current.forEach(clearTimeout);
+      timersRef.current = [];
+    };
   }, [open, detect]);
 
-  const toggle = (id: string) => {
-    setTools((prev) =>
-      prev.map((t) =>
-        t.id === id && t.detected ? { ...t, enabled: !t.enabled } : t,
-      ),
+  const handleToggle = (id: string) => {
+    // scanDone 之前完全不响应——stagger 进行中点击会被下一 tick 覆盖。
+    if (!scanDone || submitting) return;
+    setEntries((prev) =>
+      prev.map((e) => {
+        if (e.id !== id) return e;
+        if (e.status === "selected") return { ...e, status: "unselected" };
+        if (e.status === "unselected") return { ...e, status: "selected" };
+        return e; // bound / missing / scanning 不动
+      }),
     );
   };
 
-  const selected = tools.filter((t) => t.enabled).map((t) => t.id);
-  const detectedCount = tools.filter((t) => t.detected).length;
+  const selected = entries.filter((e) => e.status === "selected");
+  // 候选数 = 未绑且装了的工具——文案"检测到 N 个可绑定"应反映这个口径，
+  // 不包含已绑的 bound 卡。
+  const candidateCount = entries.filter(
+    (e) => e.status === "selected" || e.status === "unselected",
+  ).length;
+  const isScanning = entries.some((e) => e.status === "scanning");
 
   const handleConfirm = async () => {
     if (selected.length === 0) return;
     setSubmitting(true);
     try {
-      // Merge with the existing bound list —— `bindTools` 内部按"完整列表"
-      // 语义重写 localStorage，需要把已绑工具一起带上，bindTools 会重做
-      // 一次幂等的二次 bind 验证它们仍可用。
-      const merged = Array.from(new Set([...alreadyBound, ...selected]));
+      // bindTools 按"完整列表"语义重写 localStorage，所以要带上已绑工具。
+      // 它对已绑做幂等二次 bind——失败会 toast 警告。
+      const newlySelectedIds = selected.map((e) => e.id);
+      const merged = Array.from(
+        new Set([...alreadyBound, ...newlySelectedIds]),
+      );
       const succeeded = await bindTools(merged);
-      // succeeded 反映**真实**绑成功的工具——bindTools 内部对失败条目已经
-      // toast 警告。这里成功 toast 用 succeeded ∩ selected 的实际数量，
-      // 避免在"用户选了 2 个、只成 1 个"时谎报"已绑定 2 个工具"。
-      const newlySucceeded = succeeded.filter((id) => selected.includes(id));
+      // 真实成功的"新增"——避免在用户选了 2 个、只成 1 个时谎报。
+      const newlySucceeded = succeeded.filter((id) =>
+        newlySelectedIds.includes(id),
+      );
       if (newlySucceeded.length > 0) {
         toast.success(`已绑定 ${newlySucceeded.length} 个工具`);
       }
@@ -162,49 +241,29 @@ export default function AddToolsDialog({
         <DialogHeader>
           <DialogTitle>添加工具</DialogTitle>
           <DialogDescription>
-            {loading
-              ? "正在扫描已安装的 AI 工具..."
-              : tools.length === 0
+            {isScanning
+              ? "正在扫描已安装的 AI 工具…"
+              : candidateCount === 0
                 ? "没有可添加的工具——所有已识别的工具都已绑定。"
-                : `检测到 ${detectedCount} 个可绑定的工具，勾选后确认即可接入。`}
+                : `检测到 ${candidateCount} 个可绑定的工具，勾选后确认即可接入。`}
           </DialogDescription>
         </DialogHeader>
 
-        {tools.length > 0 && (
-          <div className="grid grid-cols-3 gap-3 px-6 py-4">
-            {tools.map((tool) => (
-              <button
-                key={tool.id}
-                onClick={() => toggle(tool.id)}
-                disabled={!tool.detected || submitting}
-                className={`flex flex-col items-center gap-1.5 rounded-xl border-2 px-3 py-3 transition-all ${
-                  tool.enabled
-                    ? "border-orange-400 bg-background shadow-sm"
-                    : tool.detected
-                      ? "border-border bg-background hover:border-orange-200"
-                      : "border-border/50 bg-muted/30 opacity-50"
-                }`}
-              >
-                <ToolBadge
-                  toolId={tool.id}
-                  size={36}
-                  rounded="xl"
-                  dimmed={!tool.detected}
-                />
-                <span
-                  className={`text-[12px] font-medium ${
-                    tool.detected ? "text-foreground" : "text-muted-foreground"
-                  }`}
-                >
-                  {tool.label}
-                </span>
-                <span className="text-[10px] text-muted-foreground">
-                  {tool.version ?? "未安装"}
-                </span>
-              </button>
-            ))}
-          </div>
-        )}
+        {/* 顶部 mt-2 给绿勾留出溢出空间——勾压在卡片顶边（-top-2），
+            网格容器没有额外间距时会被对话框 padding 裁掉一半。 */}
+        <div className="mt-2 grid grid-cols-3 gap-3 px-6 py-4">
+          {entries.map((e) => (
+            <ToolDiscoveryCard
+              key={e.id}
+              toolId={e.id}
+              label={e.label}
+              version={e.version}
+              status={e.status}
+              autoSelectTick={e.autoSelectTick}
+              onClick={() => handleToggle(e.id)}
+            />
+          ))}
+        </div>
 
         <DialogFooter>
           <button
@@ -216,10 +275,14 @@ export default function AddToolsDialog({
           </button>
           <button
             onClick={handleConfirm}
-            disabled={selected.length === 0 || submitting || loading}
+            disabled={selected.length === 0 || submitting || !scanDone}
             className="rounded-md bg-gradient-to-r from-orange-400 to-orange-500 px-4 py-2 text-sm font-medium text-white shadow-sm hover:from-orange-500 hover:to-orange-600 disabled:opacity-50"
           >
-            {submitting ? "正在绑定..." : `确认（${selected.length}）`}
+            {submitting
+              ? "正在绑定…"
+              : !scanDone
+                ? "扫描中…"
+                : `确认（${selected.length}）`}
           </button>
         </DialogFooter>
       </DialogContent>
