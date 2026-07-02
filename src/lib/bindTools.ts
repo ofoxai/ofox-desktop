@@ -50,7 +50,15 @@ async function ensureDefaultModel(tool: string): Promise<void> {
   let picked = "";
   try {
     const raw = await fetchOfoxModels(protocol);
-    const candidates = filterOfoxModelsByProtocol(raw, protocol);
+    // codex CLI 强绑 responses 协议——挑默认模型时也要收窄，否则会挑到
+    // bailian/qwen-max 这种只支持 chat/completions 的模型，用户一起 codex
+    // 就撞 "wire_api not supported"。
+    const requiredEndpoint = tool === "codex" ? "/v1/responses" : undefined;
+    const candidates = filterOfoxModelsByProtocol(
+      raw,
+      protocol,
+      requiredEndpoint,
+    );
     picked = pickCheapestPaidModel(candidates);
   } catch (e) {
     console.warn(`[bindTools] fetch models for ${tool} failed`, e);

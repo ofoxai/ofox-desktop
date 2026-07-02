@@ -111,7 +111,8 @@ export function CodexFormFields({
     setIsOfoxFetching(true);
     fetchOfoxModels("openai")
       .then((m) => {
-        const filtered = filterOfoxModelsByProtocol(m, "openai");
+        // codex CLI 强绑 responses 协议——见 ManageToolDialog 的同名过滤。
+        const filtered = filterOfoxModelsByProtocol(m, "openai", "/v1/responses");
         updateOfoxModels(filtered);
         if (filtered.length === 0) {
           toast.info(t("providerForm.fetchModelsEmpty"));

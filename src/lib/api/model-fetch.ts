@@ -13,6 +13,17 @@ export interface FetchedModel {
    * 取值/比较时再走 `Number(pricingPrompt)`——NaN/<=0 都按"未知或免费"处理。
    */
   pricingPrompt: string | null;
+  /**
+   * 上游 `supported_endpoints`——形如
+   * `["/v1/chat/completions", "/v1/responses"]`。
+   *
+   * 用途：codex CLI 只能走 responses 协议，选到只支持 chat/completions 的
+   * 模型会导致 "wire_api not supported" 报错。UI 层用这个字段过滤。
+   *
+   * 缺字段（旧 catalog / gemini 端点）时为 null——按"未知则不过滤"处理，
+   * 避免安全降级把合法模型误砍。
+   */
+  supportedEndpoints: string[] | null;
 }
 
 /**
@@ -74,18 +85,35 @@ const OPENAI_VENDOR_EXCLUDE = ["google", "anthropic"];
  *
  * openai 协议排除 google/ 和 anthropic/ 前缀的模型；
  * anthropic / gemini 协议的 API 本身只返回对应模型，无需过滤。
+ *
+ * `requiredEndpoint` 是可选二次过滤：命中值形如 `"/v1/responses"`，只保留
+ * `supportedEndpoints` 包含该端点的模型。Codex CLI 强绑 responses 协议
+ * （见 `codex_config.rs` 里 `wire_api = "responses"` 硬编码），必须过掉
+ * 只支持 chat/completions 的模型。`supportedEndpoints === null` 视为"未知"
+ * ——不过滤（兼容老 catalog / 未接入该字段的端点）。
  */
 export function filterOfoxModelsByProtocol(
   models: FetchedModel[],
   protocol: OfoxProtocol,
+  requiredEndpoint?: string,
 ): FetchedModel[] {
-  if (protocol !== "openai") return models;
-  return models.filter((m) => {
-    const slashIdx = m.id.indexOf("/");
-    if (slashIdx <= 0) return true;
-    const vendor = m.id.slice(0, slashIdx).toLowerCase();
-    return !OPENAI_VENDOR_EXCLUDE.includes(vendor);
-  });
+  let result = models;
+  if (protocol === "openai") {
+    result = result.filter((m) => {
+      const slashIdx = m.id.indexOf("/");
+      if (slashIdx <= 0) return true;
+      const vendor = m.id.slice(0, slashIdx).toLowerCase();
+      return !OPENAI_VENDOR_EXCLUDE.includes(vendor);
+    });
+  }
+  if (requiredEndpoint) {
+    result = result.filter((m) => {
+      // null / undefined → 未知，放行
+      if (!m.supportedEndpoints) return true;
+      return m.supportedEndpoints.includes(requiredEndpoint);
+    });
+  }
+  return result;
 }
 
 /**

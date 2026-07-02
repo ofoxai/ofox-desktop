@@ -7,6 +7,7 @@ import {
   BarChart3,
   SlidersHorizontal,
   Wrench,
+  Terminal,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
@@ -46,6 +47,7 @@ import { ToolBadge } from "@/components/tools/ToolBadge";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useUpdate } from "@/contexts/UpdateContext";
 import { manageToolApi } from "@/lib/api/manageTool";
+import { useToolLaunch } from "@/hooks/useToolLaunch";
 import ofoxLogo from "@/assets/icons/ofox-logo.png";
 
 interface ToolInfo {
@@ -92,6 +94,10 @@ export default function ConsolePage({
 }: ConsolePageProps) {
   const { apex } = useOfoxApex();
   const { t } = useTranslation();
+  // "打开"按钮：把工具 CLI 拉到系统终端里跑，进程独立于 Ofox
+  const { launching: launchingTools, launch: launchTool } = useToolLaunch(
+    () => toast.error("打开终端失败"),
+  );
   // 应用自更新：底部栏提示按钮 + 首次发现弹窗。数据源 = UpdateContext
   // （自动检查走 R2 latest.json）。
   const {
@@ -670,8 +676,9 @@ export default function ConsolePage({
                       )}
                     </div>
                     {/* Action column — "数据统计"（按是否拿到 keyId 决定渲染）
-                        + 管理/修复。"延迟测试"按钮已下线——日常排障不需要，
-                        重要的连通性测试仍在"管理"弹窗里。 */}
+                        + "打开"（拉起独立终端）+ 管理/修复。"延迟测试"按钮
+                        已下线——日常排障不需要，重要的连通性测试仍在"管理"
+                        弹窗里。 */}
                     <div className="flex items-center justify-end gap-1.5">
                       {apiKeyIdByTool[tool.id] && (
                         <button
@@ -698,6 +705,22 @@ export default function ConsolePage({
                           数据统计
                         </button>
                       )}
+                      {TOOL_META[tool.id]?.cliBin &&
+                        tool.status !== "error" && (
+                          <button
+                            onClick={() => launchTool(tool.id)}
+                            disabled={launchingTools.has(tool.id)}
+                            title={`在新的终端窗口中运行 ${TOOL_META[tool.id]?.cliBin}（独立生命周期，关闭 Ofox 不影响）`}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1 text-[12px] font-medium text-muted-foreground hover:bg-accent disabled:opacity-60"
+                          >
+                            {launchingTools.has(tool.id) ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Terminal className="h-3.5 w-3.5" />
+                            )}
+                            打开
+                          </button>
+                        )}
                       {tool.status === "error" ? (
                         <button className="inline-flex items-center gap-1.5 rounded-lg bg-orange-500 px-2.5 py-1 text-[12px] font-medium text-white hover:bg-orange-600">
                           <Wrench className="h-3.5 w-3.5" />

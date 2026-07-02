@@ -18,6 +18,11 @@ pub struct FetchedModel {
     pub id: String,
     pub owned_by: Option<String>,
     pub pricing_prompt: Option<String>,
+    /// 上游 `supported_endpoints`——形如 `["/v1/chat/completions", "/v1/responses"]`。
+    /// 前端按需过滤（例如 Codex 只能选带 `/v1/responses` 的模型）。上游未返
+    /// 该字段（老 catalog / gemini 端点）时为 `None`；调用方按"未知则不过滤"
+    /// 处理，避免安全降级把合法模型也砍掉。
+    pub supported_endpoints: Option<Vec<String>>,
 }
 
 /// OpenAI 兼容的 /v1/models 响应格式
@@ -31,6 +36,8 @@ struct ModelEntry {
     id: String,
     owned_by: Option<String>,
     pricing: Option<ModelPricing>,
+    #[serde(default)]
+    supported_endpoints: Option<Vec<String>>,
 }
 
 /// 上游 model 条目里的 pricing 子对象。只挑 `prompt` 字段——其余如
@@ -55,6 +62,10 @@ struct GeminiModelEntry {
     owned_by: Option<String>,
     #[serde(default)]
     pricing: Option<ModelPricing>,
+    /// Gemini catalog 端点当前不返 supported_endpoints，保留字段以便未来
+    /// 上游对齐；serde(default) 让缺字段时安静降级为 None。
+    #[serde(default, rename = "supportedEndpoints")]
+    supported_endpoints: Option<Vec<String>>,
 }
 
 const FETCH_TIMEOUT_SECS: u64 = 15;
@@ -173,6 +184,7 @@ pub async fn fetch_ofox_models(
                     id: m.id,
                     owned_by: m.owned_by,
                     pricing_prompt: m.pricing.and_then(|p| p.prompt),
+                    supported_endpoints: m.supported_endpoints,
                 })
                 .collect();
 
@@ -214,6 +226,7 @@ pub async fn fetch_ofox_models(
                         id,
                         owned_by: m.owned_by,
                         pricing_prompt: m.pricing.and_then(|p| p.prompt),
+                        supported_endpoints: m.supported_endpoints,
                     }
                 })
                 .filter(|m| is_chat_model(&m.id))
@@ -268,6 +281,7 @@ pub async fn fetch_models(
             id: m.id,
             owned_by: m.owned_by,
             pricing_prompt: m.pricing.and_then(|p| p.prompt),
+            supported_endpoints: m.supported_endpoints,
         })
         .collect();
 

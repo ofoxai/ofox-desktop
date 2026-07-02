@@ -1279,6 +1279,10 @@ pub fn run() {
             commands::open_config_folder,
             commands::pick_directory,
             commands::open_external,
+            // Tool installer (macOS only, delegates to scripts/installer/init.sh)
+            commands::install_tool,
+            // 主页"打开"按钮：在系统终端里拉起工具 CLI，独立生命周期
+            commands::launch_tool_cli,
             commands::get_init_error,
             commands::get_migration_result,
             commands::get_skills_migration_result,

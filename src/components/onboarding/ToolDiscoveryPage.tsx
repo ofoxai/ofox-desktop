@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { TOOL_META, TOOL_ORDER } from "@/config/toolMeta";
+import { INSTALLABLE_TOOLS, TOOL_META, TOOL_ORDER } from "@/config/toolMeta";
+import { useToolInstall } from "@/hooks/useToolInstall";
 import { ToolDiscoveryCard, type ToolStatus } from "./ToolDiscoveryCard";
 
 interface ToolInfo {
@@ -140,6 +141,17 @@ export default function ToolDiscoveryPage({
     };
   }, [detectTools]);
 
+  // 工具自动安装——missing 卡片右下角"安装"按钮触发。装完成功就重扫，让
+  // 卡片从 missing 状态自动翻到 unselected/selected；失败则保持 missing
+  // 态让用户可以再点一次（init.py 的断点续装会跳过已完成的子步骤）。
+  const { installing, install } = useToolInstall((toolId, code) => {
+    if (code === 0) {
+      void detectTools();
+    } else {
+      console.warn(`[ToolDiscoveryPage] install_tool(${toolId}) exit=${code}`);
+    }
+  });
+
   const handleToggle = (id: string) => {
     // 扫描中 / stagger 还没跑完都不允许手动切。前者是显式产品规则
     // ("等所有扫描结束才能流转")，后者是为了不让用户在自动选中动画中
@@ -177,17 +189,29 @@ export default function ToolDiscoveryPage({
         </p>
 
         <div className="mb-8 grid w-full grid-cols-3 gap-4">
-          {entries.map((e) => (
-            <ToolDiscoveryCard
-              key={e.id}
-              toolId={e.id}
-              label={e.label}
-              version={e.version}
-              status={e.status}
-              autoSelectTick={e.autoSelectTick}
-              onClick={() => handleToggle(e.id)}
-            />
-          ))}
+          {entries.map((e) => {
+            // installing 覆盖 entries 里的 status——entries 是检测结果的镜像，
+            // 不知道"我正在装它"；installing 集合才是当前操作的真相。
+            const effective: ToolStatus = installing.has(e.id)
+              ? "installing"
+              : e.status;
+            return (
+              <ToolDiscoveryCard
+                key={e.id}
+                toolId={e.id}
+                label={e.label}
+                version={e.version}
+                status={effective}
+                autoSelectTick={e.autoSelectTick}
+                onClick={() => handleToggle(e.id)}
+                onInstall={
+                  INSTALLABLE_TOOLS.includes(e.id)
+                    ? () => install(e.id)
+                    : undefined
+                }
+              />
+            );
+          })}
         </div>
 
         <div className="flex w-full max-w-sm items-center justify-center gap-4">

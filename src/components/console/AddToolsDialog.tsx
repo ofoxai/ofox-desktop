@@ -9,8 +9,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { TOOL_META, TOOL_ORDER } from "@/config/toolMeta";
+import { INSTALLABLE_TOOLS, TOOL_META, TOOL_ORDER } from "@/config/toolMeta";
 import { bindTools } from "@/lib/bindTools";
+import { useToolInstall } from "@/hooks/useToolInstall";
 import {
   ToolDiscoveryCard,
   type ToolStatus,
@@ -186,6 +187,17 @@ export default function AddToolsDialog({
     };
   }, [open, detect]);
 
+  // 装完一个 missing 工具就重扫，让卡片自动从 missing 翻 unselected/selected。
+  // 注意：在 stagger 期间装完也安全——detect() 会重置 entries 和 scanDone，
+  // 用户体验是"哦原来这个工具装好了，自动选中给我了"。
+  const { installing, install } = useToolInstall((toolId, code) => {
+    if (code === 0 && open) {
+      void detect();
+    } else if (code !== 0) {
+      console.warn(`[AddToolsDialog] install_tool(${toolId}) exit=${code}`);
+    }
+  });
+
   const handleToggle = (id: string) => {
     // scanDone 之前完全不响应——stagger 进行中点击会被下一 tick 覆盖。
     if (!scanDone || submitting) return;
@@ -252,17 +264,30 @@ export default function AddToolsDialog({
         {/* 顶部 mt-2 给绿勾留出溢出空间——勾压在卡片顶边（-top-2），
             网格容器没有额外间距时会被对话框 padding 裁掉一半。 */}
         <div className="mt-2 grid grid-cols-3 gap-3 px-6 py-4">
-          {entries.map((e) => (
-            <ToolDiscoveryCard
-              key={e.id}
-              toolId={e.id}
-              label={e.label}
-              version={e.version}
-              status={e.status}
-              autoSelectTick={e.autoSelectTick}
-              onClick={() => handleToggle(e.id)}
-            />
-          ))}
+          {entries.map((e) => {
+            // installing 覆盖 entries 里的 status —— 同 ToolDiscoveryPage。
+            // bound 工具理论上不会进 install 流程（按钮也只在 missing 渲染），
+            // 但 effective 取代会自然处理。
+            const effective: ToolStatus = installing.has(e.id)
+              ? "installing"
+              : e.status;
+            return (
+              <ToolDiscoveryCard
+                key={e.id}
+                toolId={e.id}
+                label={e.label}
+                version={e.version}
+                status={effective}
+                autoSelectTick={e.autoSelectTick}
+                onClick={() => handleToggle(e.id)}
+                onInstall={
+                  INSTALLABLE_TOOLS.includes(e.id)
+                    ? () => install(e.id)
+                    : undefined
+                }
+              />
+            );
+          })}
         </div>
 
         <DialogFooter>

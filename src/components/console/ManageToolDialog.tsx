@@ -158,19 +158,26 @@ export default function ManageToolDialog({
   // Lazy model fetch — only runs when the user clicks the dropdown trigger
   // (or the refresh button). We never preload on open, since hitting the
   // network for a dialog the user might just be peeking at is wasteful.
+  //
+  // Codex CLI 强绑 responses 协议（codex_config.rs 里 wire_api="responses"
+  // 是硬编码），选到只支持 chat/completions 的模型会导致 CLI 报
+  // `wire_api not supported`——按端点二次过滤，UI 层就不给用户选到
+  // 不兼容的模型。其他工具走 chat 协议不需要收窄。
+  const requiredEndpoint =
+    tool?.id === "codex" ? "/v1/responses" : undefined;
   const fetchModels = useCallback(async () => {
     if (!protocol) return;
     setModelsLoading(true);
     try {
       const all = await fetchOfoxModels(protocol);
-      setModels(filterOfoxModelsByProtocol(all, protocol));
+      setModels(filterOfoxModelsByProtocol(all, protocol, requiredEndpoint));
     } catch (e) {
       console.error("[ManageToolDialog] fetchOfoxModels failed", e);
       toast.error(`获取模型列表失败：${String(e)}`);
     } finally {
       setModelsLoading(false);
     }
-  }, [protocol]);
+  }, [protocol, requiredEndpoint]);
 
   const handleOpenFolder = useCallback(async () => {
     if (!tool) return;

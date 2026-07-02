@@ -1081,16 +1081,43 @@ exec bash --norc --noprofile
 }
 
 /// macOS: Terminal.app
+///
+/// 冷启动坑：`tell application "Terminal" → activate` 会先启动 Terminal.app，
+/// 而 Terminal.app 自己 launch 时默认开一个空窗口；紧接着的 `do script "..."`
+/// 又开第二个窗口跑脚本——用户看到两个窗口，其中一个是空的孤儿。
+///
+/// 修法：如果 Terminal 没在跑，就用 `in window 1` 复用它 launch 时开的第一个
+/// 空窗口（`do script` 支持指定 target window）。如果已经在跑，走原来的
+/// 无参 `do script`——那时候不能给 `in window 1`，否则会把用户正在用的窗口
+/// 接管掉。
 #[cfg(target_os = "macos")]
 fn launch_macos_terminal_app(script_file: &std::path::Path) -> Result<(), String> {
     use std::process::Command;
 
+    // 先探测 Terminal 是否在跑——用 pgrep 比 osascript 的 `is running` 快
+    // 且无 UI 副作用。跑不跑决定 do script 后面接不接 `in window 1`。
+    let terminal_running = Command::new("pgrep")
+        .arg("-x")
+        .arg("Terminal")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    let do_script_target = if terminal_running {
+        // 已在跑：新开窗口。不指定 target。
+        String::new()
+    } else {
+        // 冷启动：复用 activate 触发生成的第一个窗口，避免孤儿空窗口。
+        " in window 1".to_string()
+    };
+
     let applescript = format!(
         r#"tell application "Terminal"
     activate
-    do script "bash '{}'"
+    do script "bash '{}'"{}
 end tell"#,
-        script_file.display()
+        script_file.display(),
+        do_script_target,
     );
 
     let output = Command::new("osascript")

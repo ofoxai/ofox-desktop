@@ -1,11 +1,41 @@
 export const TOOL_META: Record<
   string,
-  { abbr: string; label: string; color: string }
+  {
+    abbr: string;
+    label: string;
+    color: string;
+    /**
+     * 主页"打开"按钮启动的 CLI 命令。留空表示该工具不支持一键打开
+     * （例如 hermes 是 dashboard 服务而不是交互式 CLI，openclaw 走
+     * gateway，不需要在终端里跑）。
+     */
+    cliBin?: string;
+  }
 > = {
-  claude: { abbr: "CC", label: "Claude Code", color: "bg-orange-700" },
-  codex: { abbr: "Cx", label: "Codex", color: "bg-neutral-800" },
-  opencode: { abbr: "OC", label: "OpenCode", color: "bg-emerald-500" },
-  gemini: { abbr: "Ge", label: "Gemini", color: "bg-blue-500" },
+  claude: {
+    abbr: "CC",
+    label: "Claude Code",
+    color: "bg-orange-700",
+    cliBin: "claude",
+  },
+  codex: {
+    abbr: "Cx",
+    label: "Codex",
+    color: "bg-neutral-800",
+    cliBin: "codex",
+  },
+  opencode: {
+    abbr: "OC",
+    label: "OpenCode",
+    color: "bg-emerald-500",
+    cliBin: "opencode",
+  },
+  gemini: {
+    abbr: "Ge",
+    label: "Gemini",
+    color: "bg-blue-500",
+    cliBin: "gemini",
+  },
   openclaw: { abbr: "OCl", label: "OpenClaw", color: "bg-amber-600" },
   hermes: { abbr: "He", label: "Hermes", color: "bg-violet-600" },
 };
@@ -29,3 +59,15 @@ export const TOOL_ORDER = [
 export const BOUND_TOOLS_STORAGE_KEY = "ofox-bound-tools";
 
 export const PROXY_SUPPORTED_TOOLS = ["claude", "codex", "gemini"];
+
+// 哪些工具支持从 cc-switch UI 一键安装。当前 6 个都在 scripts/installer/app/
+// steps.py 的 TOOL_STEPS 注册表里——保持两边同步即可。Windows / Linux 实现
+// 落地后在此处按平台收紧。
+export const INSTALLABLE_TOOLS: readonly string[] = [
+  "claude",
+  "codex",
+  "gemini",
+  "opencode",
+  "openclaw",
+  "hermes",
+];
