@@ -243,12 +243,12 @@ class MirrorsStep(Step):
 # ── AI 工具 Step 基类 ────────────────────────────────────────────────────────
 #
 # 两种安装模式，分别抽象成基类，让具体工具只需要 3-5 行配置：
-#   - NpmGlobalStep     → npm install -g <pkg>          (claude/codex/gemini/openclaw)
-#   - CurlInstallerStep → curl -fsSL <url> | bash       (opencode/hermes)
+#   - NpmGlobalStep     → npm install -g <pkg>          (claude/codex/gemini/openclaw/opencode)
+#   - CurlInstallerStep → curl -fsSL <url> | bash       (hermes)
 
 
 class NpmGlobalStep(Step):
-    """通过 npm install -g 安装的工具——5 个 npm 工具的公共骨架。"""
+    """通过 npm install -g 安装的工具——npm 工具的公共骨架。"""
 
     needs_terminal = True
     timeout = 300
@@ -347,23 +347,20 @@ class OpenClawStep(NpmGlobalStep):
     bin_name = "openclaw"
 
 
-class OpenCodeStep(CurlInstallerStep):
+class OpenCodeStep(NpmGlobalStep):
     name = "OpenCode"
     description = "OpenCode CLI"
-    installer_url = "https://opencode.ai/install"
+    # 与其他 npm 工具（claude / codex / gemini / openclaw）走同一条链路：nvm
+    # 全局 bin 会被 NVM_PREFIX 加入 PATH，二进制名 `opencode` 通过 command -v
+    # 检出，不需要 CurlInstallerStep 的 bin_search_paths 兜底。
+    npm_pkg = "opencode-ai"
     bin_name = "opencode"
-    # 与 cc-switch src-tauri/src/commands/misc.rs 的 opencode 扫描路径对齐。
-    bin_search_paths = [
-        "~/.opencode/bin/opencode",
-        "~/bin/opencode",
-        "/usr/local/bin/opencode",
-    ]
 
 
 class HermesStep(CurlInstallerStep):
     name = "Hermes"
     description = "Hermes Agent CLI (Nous Research)"
-    installer_url = "https://hermes-agent.nousresearch.com/install.sh"
+    installer_url = "https://res1.hermesagent.org.cn/install.sh"
     bin_name = "hermes"
     bin_search_paths = [
         "~/.hermes/bin/hermes",
