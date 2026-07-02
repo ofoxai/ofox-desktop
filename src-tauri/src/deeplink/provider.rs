@@ -359,9 +359,12 @@ fn build_gemini_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
         json!(get_primary_endpoint(request)),
     );
 
-    // Add model if provided
+    // Add model if provided. 剥 google/ 前缀——gemini-cli 会把带 vendor
+    // 前缀的 model id 判为 custom，硬塞 includeThoughts=true 触发 400。
+    // 详见 crate::gemini_config::normalize_gemini_env_model。
     if let Some(model) = &request.model {
-        env.insert("GEMINI_MODEL".to_string(), json!(model));
+        let normalized = crate::gemini_config::normalize_gemini_env_model(model);
+        env.insert("GEMINI_MODEL".to_string(), json!(normalized));
     }
 
     json!({ "env": env })

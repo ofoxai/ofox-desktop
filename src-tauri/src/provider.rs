@@ -595,6 +595,8 @@ requires_openai_auth = true"#
         let model = models
             .and_then(|m| m.model.clone())
             .unwrap_or_else(|| "gemini-2.5-pro".to_string());
+        // 剥 google/ 前缀：见 gemini_config::normalize_gemini_env_model 里的注释
+        let model = crate::gemini_config::normalize_gemini_env_model(&model);
 
         let settings_config = serde_json::json!({
             "env": {

@@ -122,6 +122,23 @@ pub fn parse_env_file_strict(content: &str) -> Result<HashMap<String, String>, A
     Ok(map)
 }
 
+/// 剥掉 `google/` vendor 前缀，让 model id 变成 gemini-cli 认识的形态。
+///
+/// 为什么必须剥：Ofox 的 `/v1/models` catalog 里 Gemini 模型都是
+/// `google/gemini-2.5-flash-lite` 这种带 vendor 前缀的形态（跟 openai/、
+/// anthropic/ 一样，方便前端统一展示）。Ofox 网关兼容两种写法都能路由，
+/// 所以 http 请求过得去；但 **gemini-cli 客户端本地会把不以 `gemini-`
+/// 开头的 model id 判定为 "custom model"**，走 `supportsModernFeatures`
+/// 的兜底路径硬塞 `thinkingConfig.includeThoughts = true`——在
+/// `gemini-2.5-flash-lite`（thinking 默认关）上就撞 400
+/// `Thinking_config.include_thoughts is only enabled when thinking is enabled`。
+///
+/// 只剥 `google/` 一层——上游 catalog 没有 `google/models/...` 那种
+/// 双层写法；`gemini-*` 或已经不带前缀的直接透传，不做多余处理。
+pub fn normalize_gemini_env_model(model: &str) -> String {
+    model.strip_prefix("google/").unwrap_or(model).to_string()
+}
+
 /// 将键值对序列化为 .env 格式
 ///
 /// **末尾必须带换行符**——Gemini CLI 的 dotenv parser 跟大多数 dotenv 库一样，
@@ -385,6 +402,25 @@ pub fn write_google_oauth_settings() -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_normalize_gemini_env_model() {
+        assert_eq!(
+            normalize_gemini_env_model("google/gemini-2.5-flash-lite"),
+            "gemini-2.5-flash-lite"
+        );
+        // 已经不带前缀 → 原样透传
+        assert_eq!(
+            normalize_gemini_env_model("gemini-2.5-pro"),
+            "gemini-2.5-pro"
+        );
+        // 空串 / 别的 vendor 也不动
+        assert_eq!(normalize_gemini_env_model(""), "");
+        assert_eq!(
+            normalize_gemini_env_model("bailian/qwen-max"),
+            "bailian/qwen-max"
+        );
+    }
 
     #[test]
     fn test_parse_env_file() {

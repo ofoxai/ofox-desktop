@@ -255,7 +255,11 @@ fn write_model_into_settings(
 ) -> Result<(), String> {
     match app {
         AppType::Claude => set_env_string(settings, "ANTHROPIC_MODEL", model),
-        AppType::Gemini => set_env_string(settings, "GEMINI_MODEL", model),
+        AppType::Gemini => set_env_string(
+            settings,
+            "GEMINI_MODEL",
+            &crate::gemini_config::normalize_gemini_env_model(model),
+        ),
         AppType::Codex => set_codex_model(settings, model),
         AppType::OpenCode => {
             // Single-select: replace the entire `models` dict. Keys are model
