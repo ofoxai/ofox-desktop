@@ -1213,9 +1213,16 @@ pub fn run() {
                 // ── 低余额循环（固定 30 分钟）──────────────────────────────
                 let lb_app = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
-                    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1800));
-                    // 跳过首次立即触发（mount 时 UI 已经走 refresh_user_info）
-                    ticker.tick().await;
+                    // 与 token 静默刷新循环（同为 30 min 周期、同秒 spawn）错
+                    // 峰 15 分钟：首 tick 在启动后 45 min，之后每 30 min 一次，
+                    // 两个循环永不同秒触发。曾经的同秒 tick 会让两边并发进
+                    // refresh_access_token，虽然现在有单飞锁兜底，错峰后连排
+                    // 队都省了。首次评估从 30 min 推迟到 45 min，无感知差异
+                    // （mount 时 UI 已经走 refresh_user_info）。
+                    let mut ticker = tokio::time::interval_at(
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(2700),
+                        std::time::Duration::from_secs(1800),
+                    );
                     loop {
                         ticker.tick().await;
                         let ofox_state = lb_app.state::<OfoxAuthState>();

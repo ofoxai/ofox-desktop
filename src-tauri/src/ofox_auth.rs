@@ -272,6 +272,11 @@ pub struct OfoxAuthManager {
     ///   any       → LoggedOut  (explicit logout)
     ///   Expired   → Active     (successful re-login)
     auth_state: Arc<RwLock<OfoxAuthState>>,
+    /// 刷新单飞锁。token 静默刷新循环、低余额循环、UI 触发的 refresh_user_info
+    /// 都可能在同一秒并发进 `refresh_access_token`——OFox IDP 的 refresh_token
+    /// 一次性轮转,并发双刷会让后到者吃 `invalid_grant` 把好端端的会话标成
+    /// Expired。持锁 + 锁内 double-check 保证同一时刻只有一个真实刷新请求在飞。
+    refresh_lock: tokio::sync::Mutex<()>,
     pending_device_codes: Arc<RwLock<HashMap<String, PendingDeviceCode>>>,
     http_client: Client,
     /// Handle used to emit `ofox-auth-expired` / `ofox-auth-restored` events.
@@ -304,6 +309,7 @@ impl OfoxAuthManager {
             refresh_token: Arc::new(RwLock::new(None)),
             user_info: Arc::new(RwLock::new(None)),
             auth_state: Arc::new(RwLock::new(OfoxAuthState::LoggedOut)),
+            refresh_lock: tokio::sync::Mutex::new(()),
             pending_device_codes: Arc::new(RwLock::new(HashMap::new())),
             http_client: Client::new(),
             app_handle: Arc::new(RwLock::new(None)),
@@ -566,6 +572,34 @@ impl OfoxAuthManager {
     /// On `invalid_grant` (refresh_token rejected by the server), transitions
     /// to `Expired` and emits `ofox-auth-expired` for the UI.
     pub async fn refresh_access_token(&self) -> Result<(), String> {
+        self.refresh_access_token_at(&crate::ofox_apex::token_url())
+            .await
+    }
+
+    /// URL-agnostic 内层——拆出来仅为单测能注入本地 wiremock 地址(与
+    /// `ofox_api_keys::call_create_endpoint_at` 同一先例)。生产路径走
+    /// [`Self::refresh_access_token`]。
+    async fn refresh_access_token_at(&self, token_url: &str) -> Result<(), String> {
+        // 单飞:并发调用在这排队,同一时刻只有一个真实刷新请求在飞。
+        let _guard = self.refresh_lock.lock().await;
+
+        // Double-check(拿到锁后世界可能已经变了):
+        //   - 等锁期间别的任务吃了真·invalid_grant → 状态已 Expired,别再拿
+        //     死 RT 去撞 IDP;
+        //   - 等锁期间别的任务刚刷完 → 缓存 AT 已新鲜,直接复用,不发第二次
+        //     请求(第二次请求会消费掉一次性轮转的 RT,把会话搞死)。
+        if *self.auth_state.read().await == OfoxAuthState::Expired {
+            return Err("session_expired".to_string());
+        }
+        {
+            let at = self.access_token.read().await;
+            if let Some(cached) = at.as_ref() {
+                if !cached.is_expiring_soon() {
+                    return Ok(());
+                }
+            }
+        }
+
         let refresh_token = {
             let rt = self.refresh_token.read().await;
             rt.clone()
@@ -574,7 +608,7 @@ impl OfoxAuthManager {
 
         let response = self
             .http_client
-            .post(crate::ofox_apex::token_url())
+            .post(token_url)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .form(&[
                 ("grant_type", "refresh_token"),
@@ -594,6 +628,22 @@ impl OfoxAuthManager {
                 .map(|e| e.error == "invalid_grant")
                 .unwrap_or(false);
             if is_invalid_grant {
+                // 兜底:请求期间 RT 可能被其他写入路径轮转过(典型是
+                // `poll_for_token` 并发完成了一次重新登录)。此时被拒的是旧
+                // RT,会话本身是好的——不能标 Expired。单飞锁挡刷新↔刷新,
+                // 这里挡刷新↔登录。
+                let rt_rotated = {
+                    let rt = self.refresh_token.read().await;
+                    rt.as_deref() != Some(refresh_token.as_str())
+                };
+                if rt_rotated {
+                    log::warn!(
+                        "[OfoxAuth] refresh got invalid_grant but the refresh_token \
+                         was rotated concurrently (likely a parallel re-login); \
+                         keeping session alive"
+                    );
+                    return Ok(());
+                }
                 log::warn!("[OfoxAuth] refresh_token rejected as invalid_grant, marking session expired");
                 self.mark_expired().await;
                 return Err("invalid_grant".to_string());
@@ -1218,6 +1268,105 @@ mod tests {
         );
         assert!(!manager.is_authenticated());
         assert!(manager.get_user_info().is_none());
+    }
+
+    /// 造一个"临期 AT + 可用 RT + Active"的 manager,复现刷新窗口内的状态。
+    async fn seeded_manager(temp: &tempfile::TempDir) -> OfoxAuthManager {
+        let manager = OfoxAuthManager::new_with_secret_store(
+            temp.path().to_path_buf(),
+            Arc::new(crate::ofox_secret::InMemoryStore::new()),
+        );
+        {
+            let mut at = manager.access_token.write().await;
+            *at = Some(CachedAccessToken {
+                token: "old-at".into(),
+                // 10s 后过期——落在 TOKEN_REFRESH_BUFFER_MS(60s)窗口内
+                expires_at_ms: chrono::Utc::now().timestamp_millis() + 10_000,
+            });
+        }
+        {
+            let mut rt = manager.refresh_token.write().await;
+            *rt = Some("rt-1".into());
+        }
+        manager.set_state(OfoxAuthState::Active).await;
+        manager
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_refresh_single_flights() {
+        // 复现 12:03:13 事故:两个 30min 定时器同秒并发进刷新。单飞锁下
+        // 只有一个真实请求打到 IDP(`.expect(1)`),后到者复用新 AT,会话
+        // 保持 Active,RT 换成轮转后的新值。
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let temp = tempfile::tempdir().unwrap();
+        let manager = seeded_manager(&temp).await;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/oauth/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "new-at",
+                "refresh_token": "rt-2",
+                "expires_in": 3600,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/api/oauth/token", server.uri());
+        let (r1, r2) = tokio::join!(
+            manager.refresh_access_token_at(&url),
+            manager.refresh_access_token_at(&url),
+        );
+        assert!(r1.is_ok(), "first refresh failed: {r1:?}");
+        assert!(r2.is_ok(), "second refresh failed: {r2:?}");
+
+        assert!(manager.is_authenticated(), "session must stay Active");
+        assert_eq!(
+            manager.refresh_token.read().await.as_deref(),
+            Some("rt-2"),
+            "RT should be the rotated one"
+        );
+        assert_eq!(
+            manager.access_token.read().await.as_ref().unwrap().token,
+            "new-at"
+        );
+        // MockServer drop 校验 expect(1)——多于一次请求会 panic
+    }
+
+    #[tokio::test]
+    async fn test_invalid_grant_marks_session_expired() {
+        // 真失效路径不被单飞/兜底逻辑误伤:RT 未被并发轮转、IDP 判
+        // invalid_grant → 状态必须转 Expired,让 UI 引导重登。
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let temp = tempfile::tempdir().unwrap();
+        let manager = seeded_manager(&temp).await;
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/oauth/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "invalid_grant",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/api/oauth/token", server.uri());
+        let err = manager.refresh_access_token_at(&url).await.unwrap_err();
+        assert_eq!(err, "invalid_grant");
+
+        let status = manager.get_auth_status().await;
+        assert_eq!(status.state, OfoxAuthState::Expired);
+        // Expired 后 get_valid_access_token 硬短路,不再撞 IDP
+        assert_eq!(
+            manager.get_valid_access_token().await.unwrap_err(),
+            "session_expired"
+        );
     }
 
     #[tokio::test]
