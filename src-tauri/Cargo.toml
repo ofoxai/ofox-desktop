@@ -1,6 +1,6 @@
 [package]
 name = "ofox-desktop"
-version = "1.3.0"
+version = "1.3.1"
 description = "All-in-One AI Tool Manager - Ofox Desktop"
 authors = ["Jason Young"]
 license = "MIT"
