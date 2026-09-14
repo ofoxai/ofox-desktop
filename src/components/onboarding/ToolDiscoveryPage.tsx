@@ -144,7 +144,11 @@ export default function ToolDiscoveryPage({
   // 工具自动安装——missing 卡片右下角"安装"按钮触发。装完成功就重扫，让
   // 卡片从 missing 状态自动翻到 unselected/selected；失败则保持 missing
   // 态让用户可以再点一次（init.py 的断点续装会跳过已完成的子步骤）。
-  const { installing, install } = useToolInstall((toolId, code) => {
+  const {
+    installing,
+    install,
+    error: installError,
+  } = useToolInstall((toolId, code) => {
     if (code === 0) {
       void detectTools();
     } else {
@@ -214,6 +218,18 @@ export default function ToolDiscoveryPage({
           })}
         </div>
 
+        {installError && (
+          // 安装脚本压根没起来时（找不到 init.sh / 非 arm64）唯一的用户可见
+          // 反馈——没有这条，点"安装"会表现为完全没反应。
+          <div
+            role="alert"
+            className="mb-4 w-full rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300"
+          >
+            安装 {TOOL_META[installError.toolId]?.label ?? installError.toolId}{" "}
+            失败：{installError.message}
+          </div>
+        )}
+
         <div className="flex w-full max-w-sm items-center justify-center gap-4">
           {onBack && (
             <button
@@ -228,9 +244,7 @@ export default function ToolDiscoveryPage({
             disabled={!scanDone || selected.length === 0}
             className="flex-1 rounded-xl bg-gradient-to-r from-orange-400 to-orange-500 px-6 py-3 text-base font-semibold text-white shadow-md shadow-orange-200 transition-all hover:from-orange-500 hover:to-orange-600 disabled:opacity-50 dark:shadow-orange-900/20"
           >
-            {!scanDone
-              ? "扫描中…"
-              : `开始绑定（${selected.length}）→`}
+            {!scanDone ? "扫描中…" : `开始绑定（${selected.length}）→`}
           </button>
         </div>
       </div>

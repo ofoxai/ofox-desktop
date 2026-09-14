@@ -65,10 +65,7 @@ export default function AddToolsDialog({
   alreadyBound,
   onAdded,
 }: AddToolsDialogProps) {
-  const alreadyBoundSet = useMemo(
-    () => new Set(alreadyBound),
-    [alreadyBound],
-  );
+  const alreadyBoundSet = useMemo(() => new Set(alreadyBound), [alreadyBound]);
 
   // 初始 6 张 scanning——对话框打开瞬间不显示空白网格。
   const [entries, setEntries] = useState<ToolEntry[]>(() =>
@@ -190,7 +187,11 @@ export default function AddToolsDialog({
   // 装完一个 missing 工具就重扫，让卡片自动从 missing 翻 unselected/selected。
   // 注意：在 stagger 期间装完也安全——detect() 会重置 entries 和 scanDone，
   // 用户体验是"哦原来这个工具装好了，自动选中给我了"。
-  const { installing, install } = useToolInstall((toolId, code) => {
+  const {
+    installing,
+    install,
+    error: installError,
+  } = useToolInstall((toolId, code) => {
     if (code === 0 && open) {
       void detect();
     } else if (code !== 0) {
@@ -289,6 +290,17 @@ export default function AddToolsDialog({
             );
           })}
         </div>
+
+        {installError && (
+          // 安装脚本没起来时唯一的用户可见反馈——同 ToolDiscoveryPage。
+          <div
+            role="alert"
+            className="mx-6 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300"
+          >
+            安装 {TOOL_META[installError.toolId]?.label ?? installError.toolId}{" "}
+            失败：{installError.message}
+          </div>
+        )}
 
         <DialogFooter>
           <button

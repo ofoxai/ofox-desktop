@@ -45,11 +45,7 @@ pub async fn install_tool(
 }
 
 #[cfg(target_os = "macos")]
-async fn run_installer(
-    app: AppHandle,
-    tool_id: String,
-    skip_env: bool,
-) -> Result<i32, String> {
+async fn run_installer(app: AppHandle, tool_id: String, skip_env: bool) -> Result<i32, String> {
     use tokio::process::Command;
 
     let script_path = resolve_init_sh(&app)?;
@@ -67,9 +63,7 @@ async fn run_installer(
     }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("启动安装脚本失败: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| format!("启动安装脚本失败: {e}"))?;
 
     // stdout / stderr 各起一个 task 转发到前端事件流。这里捕获的只是 init.py
     // 主进程的状态行——npm install 的真实日志在 osascript 弹出的那个 Terminal
@@ -89,12 +83,8 @@ async fn run_installer(
 }
 
 #[cfg(target_os = "macos")]
-fn spawn_stream_pump<R>(
-    app: &AppHandle,
-    pipe: Option<R>,
-    tool_id: String,
-    stream: &'static str,
-) where
+fn spawn_stream_pump<R>(app: &AppHandle, pipe: Option<R>, tool_id: String, stream: &'static str)
+where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     use tokio::io::{AsyncBufReadExt, BufReader};
@@ -115,20 +105,34 @@ fn spawn_stream_pump<R>(
 /// 解析 init.sh 在文件系统里的实际位置。
 ///
 /// 两种模式：
-///   - 打包后 (.app)：脚本在 `<bundle>/Contents/Resources/scripts/installer/`
+///   - 打包后 (.app)：脚本在 `<bundle>/Contents/Resources/_up_/scripts/installer/`
 ///   - dev 模式：脚本在 `<CARGO_MANIFEST_DIR>/../scripts/installer/`
 ///
-/// 两种都查一遍，取第一个真实存在的——dev 模式下 Tauri 也能成功 resolve 出
-/// Resource 路径但文件不存在，所以必须用 `.exists()` 校验。
+/// **`_up_` 前缀是必须的**：tauri.conf.json 里资源声明为
+/// `"../scripts/installer/**/*"`，Tauri 打包时会把路径里的 `..` 转义成字面
+/// 目录名 `_up_`（`tauri_utils::resources` 的 `resource_relpath` 规则），
+/// 所以 bundle 里的真实布局是 `Resources/_up_/scripts/...` 而**不是**
+/// `Resources/scripts/...`。历史上这里只查了不带 `_up_` 的路径，导致正式版
+/// 点"安装"必定 Err("找不到 init.sh")，而前端 catch 只打 console —— 表现为
+/// 按钮点了完全没反应。不带 `_up_` 的候选仍保留，兼容将来资源声明改成不带
+/// `../` 的写法。
+///
+/// 所有候选都用 `.exists()` 校验后才返回——dev 模式下 Tauri 也能成功 resolve
+/// 出 Resource 路径，但文件并不存在。
 #[cfg(target_os = "macos")]
 fn resolve_init_sh(app: &AppHandle) -> Result<PathBuf, String> {
     // prod 路径：通过 Tauri path API 找到 Resources 下的安装脚本
-    if let Ok(p) = app.path().resolve(
+    for rel in [
+        "_up_/scripts/installer/init.sh",
         "scripts/installer/init.sh",
-        tauri::path::BaseDirectory::Resource,
-    ) {
-        if p.exists() {
-            return Ok(p);
+    ] {
+        if let Ok(p) = app
+            .path()
+            .resolve(rel, tauri::path::BaseDirectory::Resource)
+        {
+            if p.exists() {
+                return Ok(p);
+            }
         }
     }
 
@@ -143,7 +147,8 @@ fn resolve_init_sh(app: &AppHandle) -> Result<PathBuf, String> {
     }
 
     Err(format!(
-        "找不到 init.sh —— 既不在 Resources，也不在 {}",
+        "找不到 init.sh —— 既不在 Resources（_up_/scripts/installer/ 或 \
+         scripts/installer/），也不在 {}",
         dev.display()
     ))
 }
