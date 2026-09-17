@@ -29,11 +29,11 @@ describe("Universal Provider Presets - OfoxAI Integration", () => {
   it("OfoxAI preset should have default models for all apps", () => {
     const ofox = universalProviderPresets[0];
     expect(ofox.defaultModels.claude).toBeDefined();
-    expect(ofox.defaultModels.claude.model).toBeTruthy();
+    expect(ofox.defaultModels.claude!.model).toBeTruthy();
     expect(ofox.defaultModels.codex).toBeDefined();
-    expect(ofox.defaultModels.codex.model).toBeTruthy();
+    expect(ofox.defaultModels.codex!.model).toBeTruthy();
     expect(ofox.defaultModels.gemini).toBeDefined();
-    expect(ofox.defaultModels.gemini.model).toBeTruthy();
+    expect(ofox.defaultModels.gemini!.model).toBeTruthy();
   });
 
   it("all presets should share the same AGGREGATOR_DEFAULT_MODELS reference", () => {

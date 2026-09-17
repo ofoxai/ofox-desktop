@@ -55,6 +55,14 @@ describe("bindTools.mirrorBoundToolsToSettings", () => {
         savedPayload = body.settings as Record<string, unknown>;
         return HttpResponse.json(true);
       }),
+      // bindTools calls ensureDefaultModel() after each bind, which reads the
+      // active model first. Without a stub, MSW passes the request through
+      // (setupTests.ts uses onUnhandledRequest: "warn"), the call to
+      // tauri.local hangs, and the test dies at the 5s timeout. A non-empty
+      // value makes ensureDefaultModel return early.
+      http.post(`${TAURI_ENDPOINT}/get_active_ofox_model`, () =>
+        HttpResponse.json("ofox-default"),
+      ),
       // Stub the actual bind invocation — we only care about the mirror path.
       http.post(`${TAURI_ENDPOINT}/ofox_bind_tool`, () =>
         HttpResponse.json(undefined),
