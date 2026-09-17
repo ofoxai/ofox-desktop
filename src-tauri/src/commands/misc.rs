@@ -476,7 +476,7 @@ fn try_get_version(tool: &str) -> (Option<String>, Option<String>) {
 
 /// 校验 WSL 发行版名称是否合法
 /// WSL 发行版名称只允许字母、数字、连字符和下划线
-#[cfg(target_os = "windows")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn is_valid_wsl_distro_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
@@ -486,7 +486,7 @@ fn is_valid_wsl_distro_name(name: &str) -> bool {
 }
 
 /// Validate that the given shell name is one of the allowed shells.
-#[cfg(target_os = "windows")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn is_valid_shell(shell: &str) -> bool {
     matches!(
         shell.rsplit('/').next().unwrap_or(shell),
@@ -495,13 +495,13 @@ fn is_valid_shell(shell: &str) -> bool {
 }
 
 /// Validate that the given shell flag is one of the allowed flags.
-#[cfg(target_os = "windows")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn is_valid_shell_flag(flag: &str) -> bool {
     matches!(flag, "-c" | "-lc" | "-lic")
 }
 
 /// Return the default invocation flag for the given shell.
-#[cfg(target_os = "windows")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn default_flag_for_shell(shell: &str) -> &'static str {
     match shell.rsplit('/').next().unwrap_or(shell) {
         "dash" | "sh" => "-c",
@@ -1706,7 +1706,6 @@ mod tests {
         assert_eq!(extract_version("no version here"), "no version here");
     }
 
-    #[cfg(target_os = "windows")]
     mod wsl_helpers {
         use super::super::*;
 
