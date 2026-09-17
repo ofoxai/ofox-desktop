@@ -1,0 +1,487 @@
+name: Release
+
+# 发版流程：打 tag → 构建 → 签名/公证 → 上传 R2 → 更新 latest.json
+#
+# 安全模型（公开仓库）：
+#   1. 只由 tag push 触发。fork 无法向本仓库推 tag，因此拿不到任何 secret。
+#   2. 绝不使用 pull_request_target —— 那会在 fork PR 上注入 secret。
+#   3. 所有凭据放在 `release` environment，仅声明了该 environment 的 job 可见；
+#      environment 另配 tag 部署策略（只允许 *_*_* 形态），仓库转 public 后
+#      再补 required reviewers 审批门。
+#   4. 不 echo / 不 base64 变换后打印任何 secret —— 自动打码只对字面值生效。
+#
+# 扩展 Windows / Linux：在 build 的 matrix 里取消对应注释块，并补该平台的
+# 「打包产物 → 重命名」步骤。publish job 无需改动（它按 artifact 目录遍历）。
+
+on:
+  push:
+    tags:
+      # 对齐发版 tag 约定：<version>_YYYYMMDD_HHMM，例如 1.3.2_20260917_1230
+      - "[0-9]+.[0-9]+.[0-9]+_[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9]"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "只构建不上传 R2（用于验证流水线）"
+        type: boolean
+        default: true
+
+# 最小默认权限；需要提权的 job 自行声明
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false # 发版过程不中断
+
+env:
+  NODE_VERSION: "20"
+  PNPM_VERSION: "10.12.3"
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # 构建：按平台 fan out，产物以 artifact 形式交给 publish
+  # ─────────────────────────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.platform }})
+    environment: release # ← secrets 边界
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-aarch64
+            os: macos-14
+            r2_prefix: release/mac/arm
+            ext: dmg
+          # ── 预留：Windows ──────────────────────────────────
+          # - platform: windows-x86_64
+          #   os: windows-2022
+          #   r2_prefix: release/windows/x64
+          #   ext: msi
+          # ── 预留：Linux ────────────────────────────────────
+          # - platform: linux-x86_64
+          #   os: ubuntu-22.04
+          #   r2_prefix: release/linux/x64
+          #   ext: AppImage
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 版本号是发版的唯一真相来源：三处必须一致，且 tag 前缀要对得上。
+      # 打错 tag 是最容易犯的错，这里直接失败比发出错版本强。
+      - name: Verify version consistency
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER_PKG=$(node -p "require('./package.json').version")
+          VER_TAURI=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          VER_CARGO=$(grep -m1 '^version = ' src-tauri/Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+
+          if [[ "$VER_PKG" != "$VER_TAURI" || "$VER_PKG" != "$VER_CARGO" ]]; then
+            echo "❌ 版本号不一致：" >&2
+            echo "   package.json    = $VER_PKG" >&2
+            echo "   tauri.conf.json = $VER_TAURI" >&2
+            echo "   Cargo.toml      = $VER_CARGO" >&2
+            exit 1
+          fi
+
+          # tag 触发时校验 tag 前缀 == 版本号（<version>_YYYYMMDD_HHMM）
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            TAG_VER="${GITHUB_REF_NAME%%_*}"
+            if [[ "$TAG_VER" != "$VER_PKG" ]]; then
+              echo "❌ tag 版本号 ($TAG_VER) 与项目版本号 ($VER_PKG) 不符" >&2
+              echo "   tag = $GITHUB_REF_NAME" >&2
+              exit 1
+            fi
+          fi
+
+          echo "version=$VER_PKG" >> "$GITHUB_OUTPUT"
+          echo "✅ 版本号一致: $VER_PKG"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-
+
+      - name: Get pnpm store directory
+        id: pnpm-store
+        shell: bash
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: ${{ runner.os }}-${{ runner.arch }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-pnpm-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # ── macOS：证书导入 ──────────────────────────────────────
+      # 建临时 keychain 而非污染 runner 默认 keychain；always() 那步会清理。
+      - name: Import Apple signing certificate
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          # 加进搜索列表而非替换默认 keychain，降低对 runner 环境的侵入
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          security default-keychain -s "$KEYCHAIN_PATH"
+
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          # 无此步 codesign 会弹交互授权框，CI 上表现为卡死
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | grep "Developer ID Application" | grep -oE '"[^"]+"' | head -1 | tr -d '"')
+          if [ -z "$IDENTITY" ]; then
+            echo "❌ 未找到 Developer ID Application 身份" >&2
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH" >&2
+            exit 1
+          fi
+          echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "✅ 签名身份: $IDENTITY"
+
+          rm -f "$CERT_PATH"
+
+      # ── macOS：构建（Tauri 内部完成 codesign + 公证 + staple .app）──
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        timeout-minutes: 60
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          # 公证服务偶发超时/限流，重试而非直接失败
+          for attempt in 1 2 3; do
+            echo "=== 构建尝试 $attempt/3 ==="
+            if pnpm tauri build; then
+              echo "✅ 构建成功"
+              exit 0
+            fi
+            [ "$attempt" -eq 3 ] && { echo "❌ 构建失败（已重试 3 次）" >&2; exit 1; }
+            echo "⚠️ 失败，${attempt}0 秒后重试..."
+            sleep "${attempt}0"
+          done
+
+      # ── macOS：公证 dmg 容器本身 ─────────────────────────────
+      # 关键坑：Tauri 只公证并 staple 了 dmg **内含的 .app**，dmg 文件本身没
+      # staple。用户下载 dmg 双击挂载时 Gatekeeper 仍判 Unnotarized。
+      # 这里对容器单独公证 + staple（内含 app 已公证，这步很快）。
+      - name: Notarize & staple DMG (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        timeout-minutes: 30
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          DMG=$(find src-tauri/target -path "*/release/bundle/dmg/*.dmg" -name "*${VERSION}*" | head -1)
+          [ -z "$DMG" ] && { echo "❌ 找不到 v${VERSION} 的 dmg 产物" >&2; exit 1; }
+          echo "dmg: $DMG"
+
+          # stapler validate 判幂等：重跑不会重复公证
+          if xcrun stapler validate "$DMG" >/dev/null 2>&1; then
+            echo "▶ 已 staple，跳过公证"
+          else
+            for attempt in 1 2 3; do
+              echo "=== 公证尝试 $attempt/3 ==="
+              if xcrun notarytool submit "$DMG" \
+                  --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" \
+                  --team-id "$APPLE_TEAM_ID" --wait; then
+                xcrun stapler staple "$DMG"
+                echo "✅ 公证 + staple 完成"
+                break
+              fi
+              [ "$attempt" -eq 3 ] && { echo "❌ 公证失败（已重试 3 次）" >&2; exit 1; }
+              sleep $((attempt * 60))
+            done
+          fi
+
+          echo "▶ Gatekeeper 验证"
+          spctl -a -vvv -t open --context context:primary-signature "$DMG"
+          xcrun stapler validate "$DMG"
+          echo "✅ 验证通过"
+
+          # 归一化文件名：Ofox Desktop_1.3.2_aarch64.dmg → ofox_desktop_1.3.2.dmg
+          mkdir -p dist-release
+          cp "$DMG" "dist-release/ofox_desktop_${VERSION}.dmg"
+
+      # ── 预留：Windows 打包 ───────────────────────────────────
+      # - name: Prepare artifact (Windows)
+      #   if: runner.os == 'Windows'
+      #   shell: bash
+      #   env:
+      #     VERSION: ${{ steps.version.outputs.version }}
+      #   run: |
+      #     set -euo pipefail
+      #     mkdir -p dist-release
+      #     MSI=$(find src-tauri/target -path "*/release/bundle/msi/*.msi" | head -1)
+      #     cp "$MSI" "dist-release/ofox_desktop_${VERSION}.msi"
+
+      # ── 预留：Linux 打包 ─────────────────────────────────────
+      # - name: Prepare artifact (Linux)
+      #   if: runner.os == 'Linux'
+      #   shell: bash
+      #   env:
+      #     VERSION: ${{ steps.version.outputs.version }}
+      #   run: |
+      #     set -euo pipefail
+      #     mkdir -p dist-release
+      #     APPIMAGE=$(find src-tauri/target -name "*.AppImage" | head -1)
+      #     cp "$APPIMAGE" "dist-release/ofox_desktop_${VERSION}.AppImage"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.platform }}
+          path: dist-release/*
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Clean up keychain
+        if: runner.os == 'macOS' && always()
+        shell: bash
+        run: |
+          security delete-keychain "$RUNNER_TEMP/build.keychain-db" 2>/dev/null || true
+
+  # ─────────────────────────────────────────────────────────────
+  # 发布：汇总各平台产物 → 上传 R2 → 合并更新 latest.json
+  # ─────────────────────────────────────────────────────────────
+  publish:
+    name: Publish to R2
+    needs: build
+    environment: release
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    # dry_run 时跳过（workflow_dispatch 默认 dry_run=true）
+    if: github.event_name == 'push' || inputs.dry_run == false
+
+    env:
+      BUCKET: ofox-desktop-releases
+      BASE_URL: https://desktop.ofox.ai
+      DOWNLOAD_PAGE: https://ofox.ai/download
+      VERSION: ${{ needs.build.outputs.version }}
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: build-*
+          path: artifacts
+
+      - name: Configure R2 credentials
+        shell: bash
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.aws
+          # 写文件而非 export，避免出现在进程列表 / 子进程环境里
+          {
+            echo "[default]"
+            echo "aws_access_key_id=${R2_ACCESS_KEY_ID}"
+            echo "aws_secret_access_key=${R2_SECRET_ACCESS_KEY}"
+          } > ~/.aws/credentials
+          chmod 600 ~/.aws/credentials
+
+      - name: Upload installers to R2
+        shell: bash
+        env:
+          ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          ENDPOINT="https://${ACCOUNT_ID}.r2.cloudflarestorage.com"
+
+          # platform → (R2 前缀, content-type) 映射。
+          # 新增平台时在这里加一行即可。
+          declare -A PREFIX=(
+            [darwin-aarch64]="release/mac/arm"
+            [windows-x86_64]="release/windows/x64"
+            [linux-x86_64]="release/linux/x64"
+          )
+          declare -A CTYPE=(
+            [dmg]="application/x-apple-diskimage"
+            [msi]="application/x-msi"
+            [AppImage]="application/x-executable"
+          )
+
+          for dir in artifacts/build-*; do
+            [ -d "$dir" ] || continue
+            platform="${dir#artifacts/build-}"
+            prefix="${PREFIX[$platform]:-}"
+            [ -z "$prefix" ] && { echo "❌ 未知平台 $platform，缺少 R2 前缀映射" >&2; exit 1; }
+
+            for file in "$dir"/*; do
+              [ -f "$file" ] || continue
+              fname=$(basename "$file")
+              ext="${fname##*.}"
+              ctype="${CTYPE[$ext]:-application/octet-stream}"
+
+              echo "▶ ${fname} → r2://${BUCKET}/${prefix}/${fname}"
+              aws s3 cp "$file" "s3://${BUCKET}/${prefix}/${fname}" \
+                --endpoint-url "$ENDPOINT" \
+                --content-type "$ctype" \
+                --only-show-errors
+            done
+          done
+          echo "✅ 安装包上传完成"
+
+      # latest.json 必须「合并」而非「覆盖」：各平台可能在不同时间独立发版，
+      # 直接覆盖会抹掉其他平台的 downloads key。
+      - name: Update latest.json
+        shell: bash
+        env:
+          ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          ENDPOINT="https://${ACCOUNT_ID}.r2.cloudflarestorage.com"
+
+          # 拉现有清单；不存在则从空对象起步
+          if aws s3 cp "s3://${BUCKET}/latest.json" old.json \
+               --endpoint-url "$ENDPOINT" --only-show-errors 2>/dev/null; then
+            echo "▶ 已拉取现有 latest.json"
+          else
+            echo '{}' > old.json
+            echo "▶ 无现有 latest.json，新建"
+          fi
+
+          # 本次构建覆盖了哪些平台
+          PLATFORMS=""
+          for dir in artifacts/build-*; do
+            [ -d "$dir" ] || continue
+            PLATFORMS="${PLATFORMS} ${dir#artifacts/build-}"
+          done
+
+          VERSION="$VERSION" BASE_URL="$BASE_URL" DOWNLOAD_PAGE="$DOWNLOAD_PAGE" \
+          PLATFORMS="$PLATFORMS" node <<'NODE' > latest.json
+          const fs = require('fs');
+          const old = JSON.parse(fs.readFileSync('old.json', 'utf8'));
+          const { VERSION, BASE_URL, DOWNLOAD_PAGE, PLATFORMS } = process.env;
+
+          const PREFIX = {
+            'darwin-aarch64': 'release/mac/arm',
+            'windows-x86_64': 'release/windows/x64',
+            'linux-x86_64':   'release/linux/x64',
+          };
+          const EXT = {
+            'darwin-aarch64': 'dmg',
+            'windows-x86_64': 'msi',
+            'linux-x86_64':   'AppImage',
+          };
+
+          // 保留其他平台既有条目，只更新本次构建的平台
+          const downloads = { ...(old.downloads || {}) };
+          for (const p of PLATFORMS.trim().split(/\s+/).filter(Boolean)) {
+            downloads[p] = `${BASE_URL}/${PREFIX[p]}/ofox_desktop_${VERSION}.${EXT[p]}`;
+          }
+
+          console.log(JSON.stringify({
+            version: VERSION,
+            pubDate: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+            notes: old.notes ?? "",   // 默认留空，避免撑爆检查更新 toast
+            downloads,
+            downloadPage: DOWNLOAD_PAGE,
+          }, null, 2));
+          NODE
+
+          echo "▶ 新 latest.json:"
+          cat latest.json
+
+          aws s3 cp latest.json "s3://${BUCKET}/latest.json" \
+            --endpoint-url "$ENDPOINT" \
+            --content-type "application/json" \
+            --cache-control "no-cache, max-age=0" \
+            --only-show-errors
+          echo "✅ 清单已更新"
+
+      - name: Verify published manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "▶ 拉取 ${BASE_URL}/latest.json"
+          # CDN 可能有短暂缓存，重试几次
+          for i in 1 2 3 4 5; do
+            PUBLISHED=$(curl -fsSL "${BASE_URL}/latest.json" || echo '{}')
+            GOT=$(echo "$PUBLISHED" | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version || ''" 2>/dev/null || echo "")
+            if [ "$GOT" = "$VERSION" ]; then
+              echo "$PUBLISHED"
+              echo "✅ 线上清单版本 = $VERSION"
+              exit 0
+            fi
+            echo "⏳ 线上仍为 '${GOT}'，等待 CDN 刷新 (${i}/5)..."
+            sleep 10
+          done
+          echo "⚠️ 线上清单未在预期时间内更新到 $VERSION —— 可能是 CDN 缓存，请手动核对" >&2
+          # 上传已成功，缓存滞后不应判定发版失败
+          exit 0
+
+      - name: Clean up credentials
+        if: always()
+        shell: bash
+        run: rm -f ~/.aws/credentials
+
+      - name: Summary
+        shell: bash
+        run: |
+          {
+            echo "## ✅ 发版完成 v${VERSION}"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "| --- | --- |"
+            echo "| 清单 | ${BASE_URL}/latest.json |"
+            for dir in artifacts/build-*; do
+              [ -d "$dir" ] || continue
+              for f in "$dir"/*; do
+                [ -f "$f" ] && echo "| 产物 | \`$(basename "$f")\` |"
+              done
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
