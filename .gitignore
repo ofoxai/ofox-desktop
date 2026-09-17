@@ -8,9 +8,10 @@ release/
 *.tsbuildinfo
 .npmrc
 CLAUDE.md
-# AGENTS.md
+AGENTS.md
 GEMINI.md
 /.claude
+/.agents
 /.codex
 /.gemini
 /.cc-switch
@@ -28,4 +29,4 @@ flatpak-repo/
 copilot-api
 .history
 CODEBUDDY.md
-.github
+latest.json

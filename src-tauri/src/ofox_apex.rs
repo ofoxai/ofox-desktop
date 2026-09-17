@@ -303,17 +303,25 @@ struct IpApiResponse {
 
 /// 探测当前网络出口所在国家，决定默认 apex。
 ///
-/// 规则：`countryCode == "CN"` → `"ofox.io"`，其他/失败 → `"ofox.ai"`。
+/// 规则：`countryCode == "CN"` → `"ofox.io"`，其他 → `"ofox.ai"`。
 ///
-/// 任何错误（DNS、超时、JSON 解析、HTTP 非 2xx）都吞掉、记一条 warn，返回
-/// `DEFAULT_APEX`——首次安装如果网络糟糕，至少能进 LoginPage 给用户手动切的
-/// 机会，不会卡死。
+/// 返回 `(apex, confident)`：
+///   - `confident == true`  探测真的拿到了 countryCode，结论可信
+///   - `confident == false` 任何错误（DNS、超时、JSON 解析、HTTP 非 2xx、
+///     缺 countryCode）导致的回退值
+///
+/// **为什么要区分**：失败回退到 `DEFAULT_APEX`（= `ofox.ai`）对国内用户是
+/// 致命的——`api.ofox.ai` 在境内根本连不通，而 [`ensure_apex_resolved`] 一旦
+/// 把它连同 `ofox_apex_resolved = true` 落盘，后续启动就永远 skip 探测，
+/// 用户被**永久**锁死在一个不可达的 apex 上，表现为登录态明明 Active 但
+/// bind 一直失败（`/openapi/api-keys` 超时）。首次启动网络抖一下就要用户
+/// 手动去设置里切，这个代价不该由回退值来承担。调用方据此决定"要不要固化"。
 ///
 /// `client` 由调用方传入，复用全局带代理配置的 `reqwest::Client`
 /// （`crate::proxy::http_client::get()`）。这点对国内用户尤其重要：他们如果
 /// 配了 HTTP 代理走出墙，ip-api 看到的是代理出口 IP，会判成海外——这恰好
 /// 是用户的真实意图，不应该绕过代理。
-pub async fn detect_apex_from_geo(client: &reqwest::Client) -> &'static str {
+pub async fn detect_apex_from_geo(client: &reqwest::Client) -> (&'static str, bool) {
     let resp = match client
         .get("http://ip-api.com/json")
         .timeout(std::time::Duration::from_secs(GEO_PROBE_TIMEOUT_SECS))
@@ -323,7 +331,7 @@ pub async fn detect_apex_from_geo(client: &reqwest::Client) -> &'static str {
         Ok(r) => r,
         Err(e) => {
             log::warn!("[OfoxApex] ip-api probe failed: {e}; falling back to {DEFAULT_APEX}");
-            return DEFAULT_APEX;
+            return (DEFAULT_APEX, false);
         }
     };
 
@@ -332,31 +340,31 @@ pub async fn detect_apex_from_geo(client: &reqwest::Client) -> &'static str {
             "[OfoxApex] ip-api returned non-success status {}; falling back to {DEFAULT_APEX}",
             resp.status()
         );
-        return DEFAULT_APEX;
+        return (DEFAULT_APEX, false);
     }
 
     let parsed: IpApiResponse = match resp.json().await {
         Ok(p) => p,
         Err(e) => {
             log::warn!("[OfoxApex] ip-api JSON parse failed: {e}; falling back to {DEFAULT_APEX}");
-            return DEFAULT_APEX;
+            return (DEFAULT_APEX, false);
         }
     };
 
     match parsed.country_code.as_deref() {
         Some("CN") => {
             log::info!("[OfoxApex] ip-api countryCode=CN → ofox.io");
-            "ofox.io"
+            ("ofox.io", true)
         }
         Some(code) => {
             log::info!("[OfoxApex] ip-api countryCode={code} → ofox.ai");
-            "ofox.ai"
+            ("ofox.ai", true)
         }
         None => {
             log::warn!(
                 "[OfoxApex] ip-api response missing countryCode; falling back to {DEFAULT_APEX}"
             );
-            DEFAULT_APEX
+            (DEFAULT_APEX, false)
         }
     }
 }
@@ -369,6 +377,14 @@ pub async fn detect_apex_from_geo(client: &reqwest::Client) -> &'static str {
 ///
 /// 探测完成后通过 `app` emit `ofox-apex-changed` 事件，前端 hook 据此重读。
 /// 即便此时还没有打开任何窗口，emit 也是非阻塞的（Tauri 内部 channel 缓冲）。
+///
+/// **探测结果与探测前的 apex 不同时，会 reseed 所有 ofox-* provider 行**——
+/// 这一步不能省：本函数是 spawn 出去异步跑的，而 DB seeding 在启动早期就用
+/// 当时的 `current_apex()`（探测未完成时是 fallback `ofox.ai`）把 base_url
+/// 拼好写进了 `providers.settings_config`。探测随后判定 CN 改成 ofox.io，
+/// settings 是对的，但**已经落库的 6 条种子仍冻着 api.ofox.ai**——之后 bind
+/// 读种子写盘，Claude/Codex/Gemini 的配置文件全部指向境内不可达的 host，
+/// 现象是 CLI 一直 "Connection failed: error sending request"。
 pub async fn ensure_apex_resolved(app: &tauri::AppHandle, client: &reqwest::Client) {
     let already_resolved = crate::settings::get_settings()
         .ofox_apex_resolved
@@ -378,17 +394,59 @@ pub async fn ensure_apex_resolved(app: &tauri::AppHandle, client: &reqwest::Clie
         return;
     }
 
-    let detected = detect_apex_from_geo(client).await;
+    // 探测前的 apex —— DB 里的种子就是用这个值拼的 base_url。
+    let apex_before = current_apex();
 
+    let (detected, confident) = detect_apex_from_geo(client).await;
+
+    // 只有探测**真的拿到 countryCode** 才固化（resolved=true）。探测失败时
+    // 写入 apex 值但保持 resolved=false，让下次启动重新探一遍。
+    //
+    // 否则：国内用户首次启动恰好网络抖动 → 回退 ofox.ai → 连同 resolved=true
+    // 落盘 → 之后每次启动都 skip 探测 → 永久卡在境内不可达的 api.ofox.ai，
+    // 现象是登录态 Active 但 bind 永远失败。回退值是猜的，不该有终局效力。
     if let Err(e) = crate::settings::mutate_settings(|s| {
         s.ofox_apex = Some(detected.to_string());
-        s.ofox_apex_resolved = Some(true);
+        s.ofox_apex_resolved = Some(confident);
     }) {
         log::warn!("[OfoxApex] persist apex={detected} failed: {e}; will re-probe next launch");
         return;
     }
 
-    log::info!("[OfoxApex] resolved apex={detected} (persisted)");
+    // apex 变了 → 把用旧 apex 拼好的 provider 种子重建一遍。不做的话
+    // settings 指向新 apex、DB 种子还冻着旧 apex，bind 会把旧 host 写进
+    // 工具配置文件（详见本函数 doc comment）。
+    if detected != apex_before {
+        use tauri::Manager;
+        match app.try_state::<crate::store::AppState>() {
+            Some(state) => {
+                match crate::database::dao::providers_seed::reseed_ofox_providers_with_current_apex(
+                    &state.db,
+                ) {
+                    Ok(n) => log::info!(
+                        "[OfoxApex] apex {apex_before} → {detected}: reseeded {n} provider rows"
+                    ),
+                    Err(e) => log::warn!(
+                        "[OfoxApex] apex {apex_before} → {detected}: reseed failed: {e}; \
+                         ofox-* providers may still carry the old base_url"
+                    ),
+                }
+            }
+            None => log::warn!(
+                "[OfoxApex] apex {apex_before} → {detected}: AppState unavailable; \
+                 skipped reseed — ofox-* providers may still carry the old base_url"
+            ),
+        }
+    }
+
+    if confident {
+        log::info!("[OfoxApex] resolved apex={detected} (persisted)");
+    } else {
+        log::warn!(
+            "[OfoxApex] apex={detected} is a fallback guess (geo probe failed); \
+             not marking resolved — will re-probe on next launch"
+        );
+    }
 
     use tauri::Emitter;
     if let Err(e) = app.emit("ofox-apex-changed", detected) {
