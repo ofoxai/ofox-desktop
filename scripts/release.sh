@@ -2,6 +2,19 @@
 #
 # release.sh — 把 Ofox Desktop 打包并发布到 Cloudflare R2。
 #
+# ⚠️ 常规发版请走 CI，此脚本仅供应急。
+#
+#   常规路径：打 tag 触发 .github/workflows/release.yml
+#     git tag <version>_$(date +%Y%m%d_%H%M) && git push origin --tags
+#
+#   CI 相比本脚本的额外保障：凭据存 GitHub Environment 而非本机环境变量、
+#   tag 前缀与版本号交叉校验、latest.json 按平台合并（不会覆盖掉其他平台的
+#   downloads key）。本脚本直接覆写 latest.json —— 将来 Windows/Linux 上线后
+#   用它发版会抹掉其他平台的条目，届时务必只用 CI。
+#
+#   应急场景（CI 不可用 / GitHub 挂了 / 需要立刻出包）才用这个脚本。用完记得
+#   确认线上 latest.json 与预期一致：curl -s https://desktop.ofox.ai/latest.json
+#
 # 流程：
 #   1. 校验三处版本号一致（package.json / tauri.conf.json / Cargo.toml）
 #   2. pnpm tauri build（默认 macOS aarch64；可 --skip-build 复用已有产物）
@@ -31,14 +44,22 @@ PLATFORM_KEY="darwin-aarch64"
 R2_PREFIX="release/mac/arm"
 
 # ── 代码签名 / 公证 ───────────────────────────────────────────────────
-# 签名身份（Developer ID Application）；可被同名环境变量覆盖。
-SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:-Developer ID Application: ZIJUN GUO (93J3MQ9NFU)}"
+# 全部凭据从环境变量读，不在仓库里硬编码任何身份信息。
+# 未设置时自动从钥匙串解析唯一的 Developer ID Application 身份。
+if [[ -z "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+  APPLE_SIGNING_IDENTITY=$(security find-identity -v -p codesigning \
+    | grep "Developer ID Application" | grep -oE '"[^"]+"' | head -1 | tr -d '"')
+  [[ -z "$APPLE_SIGNING_IDENTITY" ]] && {
+    echo "❌ 钥匙串里找不到 Developer ID Application 身份，也未设置 APPLE_SIGNING_IDENTITY" >&2
+    exit 1
+  }
+fi
 # 公证用 app-specific password：兼容本机历史变量名 APPLE_APP_SPECIFIC_PASSWORD。
 # Tauri 期望 APPLE_PASSWORD；我们把它对齐过去。
 APPLE_PASSWORD="${APPLE_PASSWORD:-${APPLE_APP_SPECIFIC_PASSWORD:-}}"
-export APPLE_SIGNING_IDENTITY="$SIGNING_IDENTITY"
+export APPLE_SIGNING_IDENTITY
 export APPLE_PASSWORD
-# APPLE_ID / APPLE_TEAM_ID 期望已在环境里（gzjxfz@qq.com / 93J3MQ9NFU）。
+# APPLE_ID / APPLE_TEAM_ID 需已在环境变量里（公证时校验，缺了会报错）。
 
 # ── 解析参数 ───────────────────────────────────────────────────────────
 NOTES=""
