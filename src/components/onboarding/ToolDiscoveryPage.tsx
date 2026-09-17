@@ -148,6 +148,7 @@ export default function ToolDiscoveryPage({
     installing,
     install,
     error: installError,
+    progress: installProgress,
   } = useToolInstall((toolId, code) => {
     if (code === 0) {
       void detectTools();
@@ -207,6 +208,7 @@ export default function ToolDiscoveryPage({
                 version={e.version}
                 status={effective}
                 autoSelectTick={e.autoSelectTick}
+                progress={installProgress[e.id]}
                 onClick={() => handleToggle(e.id)}
                 onInstall={
                   INSTALLABLE_TOOLS.includes(e.id)
