@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import os
 import subprocess
+
+from app.shell import login_shell_argv
 from typing import Callable
 
 # nvm 命令前缀：加载 nvm 环境
@@ -25,19 +27,19 @@ def set_region(region: str) -> None:
 
 def _cmd_exists(cmd: str) -> bool:
     """检测命令是否存在"""
-    return subprocess.run(
-        f"command -v {cmd}",
-        shell=True,
-        capture_output=True,
-    ).returncode == 0
+    return _shell_check(f"command -v {cmd}")
 
 
 def _shell_check(cmd: str) -> bool:
-    """执行 shell 命令并返回是否成功"""
+    """
+    用 login shell 执行检测命令，返回是否成功。
+
+    必须走 login shell：应用从 Finder/Dock 启动时 PATH 只有系统目录，不含
+    nvm / fnm / volta / Homebrew 往用户 shell rc 里加的路径。用裸 shell 检测会把
+    已装的工具判成未装，导致反复重装（fizzy #865）。详见 app/shell.py。
+    """
     return subprocess.run(
-        cmd,
-        shell=True,
-        executable="/bin/bash",
+        login_shell_argv(cmd),
         capture_output=True,
     ).returncode == 0
 
@@ -143,7 +145,7 @@ class NodejsStep(Step):
     poll_interval = 3.0
 
     def check(self) -> bool:
-        return _shell_check(NVM_PREFIX + 'node --version')
+        return _shell_check('node --version')
 
     def terminal_command(self) -> str:
         mirror_env = ""
@@ -183,7 +185,7 @@ class MirrorsStep(Step):
     def check(self) -> bool:
         # 检查 npm 镜像
         npm_ok = _shell_check(
-            NVM_PREFIX + 'npm config get registry 2>/dev/null | grep -q npmmirror.com'
+            'npm config get registry 2>/dev/null | grep -q npmmirror.com'
         )
         # 检查 pip 镜像
         pip_config = os.path.expanduser("~/.pip/config")
@@ -259,7 +261,7 @@ class NpmGlobalStep(Step):
     def check(self) -> bool:
         # 用 `command -v` 而不是 `npm ls -g`——后者要全量读 npm 全局 tree，
         # 启动慢；只要 PATH 能找到 binary 就算装好（cc-switch 检测逻辑也是这个）。
-        return _shell_check(NVM_PREFIX + f'command -v {self.bin_name}')
+        return _shell_check(f'command -v {self.bin_name}')
 
     def terminal_command(self) -> str:
         return f"""
@@ -389,9 +391,9 @@ class VerifyStep(Step):
         # 公共环境层
         env_tools = [
             ("Xcode CLT", "xcode-select -p"),
-            ("nvm", NVM_PREFIX + 'nvm --version'),
-            ("Node.js", NVM_PREFIX + 'node --version'),
-            ("npm", NVM_PREFIX + 'npm --version'),
+            ("nvm", 'nvm --version'),
+            ("Node.js", 'node --version'),
+            ("npm", 'npm --version'),
         ]
         all_ok = True
         for name, cmd in env_tools:
@@ -444,7 +446,7 @@ class VerifyStep(Step):
         # 验证仅看公共环境（nvm + node 必须在）。
         checks = [
             os.path.isfile(os.path.expanduser("~/.nvm/nvm.sh")),
-            _shell_check(NVM_PREFIX + 'node --version'),
+            _shell_check('node --version'),
         ]
         return all(checks)
 
