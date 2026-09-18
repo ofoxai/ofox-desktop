@@ -184,6 +184,104 @@ class ShellCheckUnderBareEnvTest(unittest.TestCase):
         )
 
 
+class InteractiveRcToolsTest(unittest.TestCase):
+    """
+    第一版修复（只用 `-l -c`）漏掉的场景。
+
+    zsh 的加载规则：`-l`（login）只读 `.zprofile` / `.zlogin`，而 **`.zshrc` 只在
+    interactive 时加载**。于是配在 `.zshrc` 里的 PATH —— pnpm 的 `PNPM_HOME`
+    就是典型 —— 用 `-l -c` 根本看不到。
+
+    实测：`~/.local/share/pnpm/opencode` 用 `-l -c` 找不到、`-l -i -c` 找得到。
+    所以已装的 opencode 会被安装器判成未装，#865 没有修干净。
+
+    但不能简单全改 `-i`：实测 interactive shell 每次约 800ms，是 `-l -c` 的 34 倍，
+    6 个工具就要 4.8s。正确做法是只用一次 interactive shell 把完整 PATH 取出来
+    缓存，之后所有检测复用。
+    """
+
+    INSTALLER_DIR = os.path.join(os.path.dirname(__file__), "..")
+
+    def _cmd_exists_in_bare_env(self, command: str) -> subprocess.CompletedProcess:
+        code = (
+            "import sys; sys.path.insert(0, {dir!r});"
+            "from app.steps import _cmd_exists;"
+            "sys.exit(0 if _cmd_exists({cmd!r}) else 1)"
+        ).format(dir=self.INSTALLER_DIR, cmd=command)
+
+        return subprocess.run(
+            [sys.executable, "-c", code],
+            env={
+                "HOME": os.environ.get("HOME", ""),
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "SHELL": os.environ.get("SHELL", ""),
+            },
+            capture_output=True,
+        )
+
+    @unittest.skipUnless(
+        os.environ.get("SHELL"), "需要 SHELL 才能验证 login shell 行为"
+    )
+    def test_finds_tool_whose_path_lives_in_interactive_rc(self):
+        import shutil
+
+        tool = "opencode"
+        if shutil.which(tool) is None:
+            self.skipTest(f"本机没装 {tool}，无法验证 .zshrc-only 的 PATH 场景")
+        if subprocess.run(
+            ["/bin/sh", "-c", f"command -v {tool}"],
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+            capture_output=True,
+        ).returncode == 0:
+            self.skipTest(f"{tool} 在系统 PATH 里，此用例无法区分")
+
+        result = self._cmd_exists_in_bare_env(tool)
+
+        self.assertEqual(
+            result.returncode,
+            0,
+            f"{tool} 的 PATH 配在 interactive rc 里，检测必须也能覆盖到。"
+            f" stderr: {result.stderr.decode(errors='replace')}",
+        )
+
+    @unittest.skipUnless(
+        os.environ.get("SHELL"), "需要 SHELL 才能验证 login shell 行为"
+    )
+    def test_detection_of_many_tools_stays_fast(self):
+        """
+        性能护栏：把 interactive shell 的开销摊成一次，别让它乘以工具数。
+        全用 `-l -i -c` 的话 6 个工具约 4.8s，用户打开"添加工具"要干等。
+        """
+        code = (
+            "import sys, time; sys.path.insert(0, {dir!r});"
+            "from app.steps import _cmd_exists;"
+            "t0 = time.monotonic();"
+            "[_cmd_exists(t) for t in "
+            "('claude','codex','opencode','openclaw','hermes','gemini')];"
+            "print(time.monotonic() - t0)"
+        ).format(dir=self.INSTALLER_DIR)
+
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            env={
+                "HOME": os.environ.get("HOME", ""),
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "SHELL": os.environ.get("SHELL", ""),
+            },
+            capture_output=True,
+        )
+        self.assertEqual(
+            result.returncode, 0, result.stderr.decode(errors="replace")
+        )
+
+        elapsed = float(result.stdout.decode().strip())
+        self.assertLess(
+            elapsed,
+            2.5,
+            f"检测 6 个工具用了 {elapsed:.2f}s —— interactive shell 的开销应当只付一次",
+        )
+
+
 class RunShellCommandUnderBareEnvTest(unittest.TestCase):
     """
     #865 的执行侧。

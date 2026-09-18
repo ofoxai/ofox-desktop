@@ -10,7 +10,9 @@ from __future__ import annotations
 import os
 import subprocess
 
-from app.shell import login_shell_argv
+import shutil
+
+from app.shell import login_shell_argv, login_shell_env, login_shell_path
 from typing import Callable
 
 # nvm 命令前缀：加载 nvm 环境
@@ -24,21 +26,29 @@ def set_region(region: str) -> None:
 
 
 def _cmd_exists(cmd: str) -> bool:
-    """检测命令是否存在"""
-    return _shell_check(f"command -v {cmd}")
+    """
+    命令是否存在。直接在缓存的 login PATH 里查，不起 shell —— 微秒级。
+
+    比 `_shell_check(f"command -v {cmd}")` 快三个数量级，覆盖还更全：那个 PATH 取自
+    interactive shell，含 `.zshrc` 里配的路径（pnpm 的 PNPM_HOME 就在那）。
+    """
+    return shutil.which(cmd, path=login_shell_path()) is not None
 
 
 def _shell_check(cmd: str) -> bool:
     """
-    用 login shell 执行检测命令，返回是否成功。
+    执行检测命令，返回是否成功。
 
-    必须走 login shell：应用从 Finder/Dock 启动时 PATH 只有系统目录，不含
-    nvm / fnm / volta / Homebrew 往用户 shell rc 里加的路径。用裸 shell 检测会把
-    已装的工具判成未装，导致反复重装（fizzy #865）。详见 app/shell.py。
+    非交互 login shell（约 23ms）+ 注入完整 PATH：shell 起得快，PATH 又是全的。
+    为什么需要这套：应用从 Finder/Dock 启动时 PATH 只有系统目录，不含
+    nvm / fnm / volta / pnpm / Homebrew 往用户 shell rc 里加的路径，裸 shell 检测会
+    把已装的工具判成未装、反复重装（fizzy #865）。详见 app/shell.py。
     """
     return subprocess.run(
         login_shell_argv(cmd),
+        env=login_shell_env(),
         capture_output=True,
+        stdin=subprocess.DEVNULL,
     ).returncode == 0
 
 
@@ -259,7 +269,7 @@ class NpmGlobalStep(Step):
     def check(self) -> bool:
         # 用 `command -v` 而不是 `npm ls -g`——后者要全量读 npm 全局 tree，
         # 启动慢；只要 PATH 能找到 binary 就算装好（cc-switch 检测逻辑也是这个）。
-        return _shell_check(f'command -v {self.bin_name}')
+        return _cmd_exists(self.bin_name)
 
     def terminal_command(self) -> str:
         return f"""
@@ -295,7 +305,7 @@ class CurlInstallerStep(Step):
         for p in self.bin_search_paths:
             if os.path.isfile(os.path.expanduser(p)):
                 return True
-        return _shell_check(f'command -v {self.bin_name}')
+        return _cmd_exists(self.bin_name)
 
     def terminal_command(self) -> str:
         return f"""
