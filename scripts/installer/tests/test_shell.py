@@ -184,5 +184,70 @@ class ShellCheckUnderBareEnvTest(unittest.TestCase):
         )
 
 
+class RunShellCommandUnderBareEnvTest(unittest.TestCase):
+    """
+    #865 的执行侧。
+
+    MirrorsStep 用 `run_shell_command` 跑 `npm config set registry ...`，同一个
+    PATH 问题会让 fnm / volta / Homebrew 用户的镜像配置静默失败：检测说"没配"，
+    执行又找不到 npm，于是这一步永远成功不了。
+
+    executor 原来自己注入 `~/.nvm/versions/node/<最新>/bin` 来补 PATH，同样只
+    照顾 nvm 用户。
+    """
+
+    INSTALLER_DIR = os.path.join(os.path.dirname(__file__), "..")
+
+    def _run_in_bare_env(self, command: str) -> subprocess.CompletedProcess:
+        code = (
+            "import sys; sys.path.insert(0, {dir!r});"
+            "from app.executor import run_shell_command;"
+            "sys.exit(0 if run_shell_command({cmd!r}) else 1)"
+        ).format(dir=self.INSTALLER_DIR, cmd=command)
+
+        return subprocess.run(
+            [sys.executable, "-c", code],
+            env={
+                "HOME": os.environ.get("HOME", ""),
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "SHELL": os.environ.get("SHELL", ""),
+            },
+            capture_output=True,
+        )
+
+    def test_runs_system_command(self):
+        result = self._run_in_bare_env("true")
+
+        self.assertEqual(
+            result.returncode, 0, f"stderr: {result.stderr.decode(errors='replace')}"
+        )
+
+    def test_reports_failure_for_failing_command(self):
+        # 别把"命令失败"和"找不到命令"混为一谈——前者必须照实返回 False
+        result = self._run_in_bare_env("false")
+
+        self.assertEqual(result.returncode, 1)
+
+    @unittest.skipUnless(
+        os.environ.get("SHELL"), "需要 SHELL 才能验证 login shell 行为"
+    )
+    def test_runs_version_managed_command_despite_bare_path(self):
+        if subprocess.run(
+            ["/bin/sh", "-c", "command -v npm"],
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+            capture_output=True,
+        ).returncode == 0:
+            self.skipTest("本机 npm 在系统 PATH 里，此用例无法区分修复前后")
+
+        result = self._run_in_bare_env("npm --version")
+
+        self.assertEqual(
+            result.returncode,
+            0,
+            "贫瘠 PATH 下 run_shell_command 仍应能跑起 npm，否则镜像配置会静默失败。"
+            f" stderr: {result.stderr.decode(errors='replace')}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

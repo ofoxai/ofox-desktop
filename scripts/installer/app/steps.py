@@ -14,8 +14,6 @@ from app.shell import login_shell_argv
 from typing import Callable
 
 # nvm 命令前缀：加载 nvm 环境
-NVM_PREFIX = 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && '
-
 # 全局区域设置，由 init.py 在启动时设置
 REGION = "CN"
 
@@ -206,7 +204,7 @@ class MirrorsStep(Step):
         # npm 淘宝镜像
         log_fn("配置 npm 镜像: registry.npmmirror.com")
         if not run_shell_command(
-            NVM_PREFIX + 'npm config set registry https://registry.npmmirror.com',
+            'npm config set registry https://registry.npmmirror.com',
             log_fn=log_fn,
         ):
             ok = False
@@ -352,9 +350,10 @@ class OpenClawStep(NpmGlobalStep):
 class OpenCodeStep(NpmGlobalStep):
     name = "OpenCode"
     description = "OpenCode CLI"
-    # 与其他 npm 工具（claude / codex / gemini / openclaw）走同一条链路：nvm
-    # 全局 bin 会被 NVM_PREFIX 加入 PATH，二进制名 `opencode` 通过 command -v
-    # 检出，不需要 CurlInstallerStep 的 bin_search_paths 兜底。
+    # 与其他 npm 工具（claude / codex / gemini / openclaw）走同一条链路：检测走
+    # login shell（见 app/shell.py），npm 全局 bin 自然在用户 PATH 里，二进制名
+    # `opencode` 通过 command -v 检出，不需要 CurlInstallerStep 的
+    # bin_search_paths 兜底。
     npm_pkg = "opencode-ai"
     bin_name = "opencode"
 
@@ -422,8 +421,7 @@ class VerifyStep(Step):
         if REGION == "CN":
             log_fn("")
             npm_reg = subprocess.run(
-                NVM_PREFIX + 'npm config get registry',
-                shell=True, executable="/bin/bash",
+                login_shell_argv('npm config get registry'),
                 capture_output=True, text=True,
             )
             log_fn(f"  npm 镜像: {npm_reg.stdout.strip()}")
