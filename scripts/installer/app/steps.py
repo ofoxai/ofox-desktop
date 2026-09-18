@@ -95,6 +95,21 @@ class NvmStep(Step):
     timeout = 300  # 5 分钟
     poll_interval = 3.0
 
+    def should_skip(self) -> bool:
+        """
+        已经有可用的 node + npm 就不装 nvm。
+
+        nvm 只是**手段**，目的是有个能用的 node —— fnm / volta / Homebrew 装的同样
+        算达成。原来只看 `check()` 里那个 `~/.nvm/nvm.sh` 是否存在，于是所有非 nvm
+        用户都被强行装一遍 nvm，还会往 `.zshrc` 追加 nvm 初始化代码，跟他现有的
+        版本管理器抢 PATH（fizzy #874）。
+
+        不做版本判断：node 太旧的话，`npm install -g` 会按包的 engines 字段报出
+        准确的错误，比我们在这里猜一个下限可靠；而强行装 nvm 去覆盖用户环境的
+        代价大得多。
+        """
+        return _cmd_exists("node") and _cmd_exists("npm")
+
     def check(self) -> bool:
         return os.path.isfile(os.path.expanduser("~/.nvm/nvm.sh"))
 
@@ -453,8 +468,11 @@ class VerifyStep(Step):
     def verify(self) -> bool:
         # 验证仅看公共环境（nvm + node 必须在）。
         checks = [
-            os.path.isfile(os.path.expanduser("~/.nvm/nvm.sh")),
+            # 判据是"node / npm 能用"，不是"nvm 装了"——fnm / volta / Homebrew 装的
+            # node 同样算环境就绪。原来要求 ~/.nvm/nvm.sh 存在，会让所有非 nvm 用户
+            # 的验证永远失败、被告知"环境未就绪"，而他的环境明明是好的（#874）。
             _shell_check('node --version'),
+            _cmd_exists("npm"),
         ]
         return all(checks)
 
