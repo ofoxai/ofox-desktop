@@ -5,11 +5,10 @@ Popen + 逐行输出，用于 inline 步骤（不需要新终端窗口的步骤�
 """
 from __future__ import annotations
 
-import os
 import subprocess
 from typing import Callable, Optional
 
-from app.shell import login_shell_argv
+from app.shell import login_shell_argv, login_shell_env
 
 
 def run_shell_command(
@@ -27,7 +26,8 @@ def run_shell_command(
     Homebrew 用户的 `npm config set` 会静默失败，镜像永远配不上。login shell
     加载用户自己的 rc，几种装法全覆盖。详见 app/shell.py 与 fizzy #865。
     """
-    env = os.environ.copy()
+    # PATH 换成用户 login shell 的完整版，否则 npm 之类的命令找不到
+    env = login_shell_env()
     if env_extra:
         env.update(env_extra)
 

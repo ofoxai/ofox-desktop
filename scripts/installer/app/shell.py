@@ -20,7 +20,8 @@
 from __future__ import annotations
 
 import os
-from typing import List, Optional
+import subprocess
+from typing import Dict, List, Optional
 
 try:
     import pwd  # POSIX 独有；Windows 上没有这个模块
@@ -73,3 +74,56 @@ def login_shell_argv(command: str, shell: Optional[str] = None) -> List[str]:
     作为一个参数传给 `-c`，不会被二次解析。
     """
     return [resolve_login_shell(shell), "-l", "-c", command]
+
+
+#: `login_shell_path()` 的进程内缓存。interactive shell 启动约 800ms，是非交互的
+#: 34 倍（实测），所以这个开销只能付一次，绝不能乘以工具数。
+_LOGIN_PATH_CACHE: Optional[str] = None
+
+
+def login_shell_path(shell: Optional[str] = None) -> str:
+    """
+    取用户 login + **interactive** shell 的完整 PATH，进程内缓存。
+
+    为什么非得 interactive：zsh 的 `-l` 只读 `.zprofile` / `.zlogin`，而 `.zshrc`
+    只在 interactive 时加载 —— pnpm 的 `PNPM_HOME` 这类 PATH 通常就配在 `.zshrc`
+    里。实测 `~/.local/share/pnpm/opencode` 用 `-l -c` 找不到、`-l -i -c` 找得到，
+    于是已装的 opencode 被判成未装。
+
+    为什么缓存：interactive shell 要加载完整 rc（插件、补全…），实测每次约 800ms；
+    6 个工具各起一次就是 4.8s，用户打开"添加工具"得干等。取一次 PATH 之后，
+    所有检测都用它，总代价固定。
+
+    拿不到就回退到当前进程的 PATH —— 检测不准胜过整个流程起不来。
+    """
+    global _LOGIN_PATH_CACHE
+    if _LOGIN_PATH_CACHE is not None:
+        return _LOGIN_PATH_CACHE
+
+    captured = ""
+    try:
+        result = subprocess.run(
+            [resolve_login_shell(shell), "-l", "-i", "-c", 'printf %s "$PATH"'],
+            capture_output=True,
+            text=True,
+            # interactive shell 可能读 stdin；给它 /dev/null 才不会挂住
+            stdin=subprocess.DEVNULL,
+            timeout=20,
+        )
+        captured = result.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        # 超时 / shell 起不来 / rc 里有交互式阻塞 —— 都退回当前 PATH
+        pass
+
+    _LOGIN_PATH_CACHE = captured or os.environ.get("PATH", "")
+    return _LOGIN_PATH_CACHE
+
+
+def login_shell_env(shell: Optional[str] = None) -> Dict[str, str]:
+    """当前环境，但 PATH 换成用户 login shell 的完整 PATH。
+
+    配 [`login_shell_argv`]（非交互，约 23ms）一起用：shell 启动快，PATH 又是全的。
+    """
+    env = os.environ.copy()
+    env["PATH"] = login_shell_path(shell)
+    return env
