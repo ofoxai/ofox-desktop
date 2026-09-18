@@ -289,10 +289,9 @@ pub struct OfoxAuthManager {
 
 impl OfoxAuthManager {
     pub fn new(app_config_dir: PathBuf) -> Self {
-        Self::new_with_secret_store(
-            app_config_dir,
-            Arc::new(crate::ofox_secret::KeyringStore::new()),
-        )
+        // release 走钥匙串，debug 走明文文件（避免反复弹授权框）——选择逻辑集中
+        // 在 ofox_secret::default_store 里，见那里的说明。
+        Self::new_with_secret_store(app_config_dir, crate::ofox_secret::default_store())
     }
 
     /// 测试入口：注入自定义 SecretStore（通常是 `InMemoryStore`），其余字段

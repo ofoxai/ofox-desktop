@@ -27,7 +27,7 @@ use tokio::sync::RwLock;
 use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::ofox_auth::OfoxAuthManager;
-use crate::ofox_secret::{KeyringStore, SecretStore, Slot};
+use crate::ofox_secret::{SecretStore, Slot};
 use crate::settings::{self, ApiKeyMeta};
 
 /// 上层（command / bind 流程）能拿到的强类型错误。
@@ -74,10 +74,11 @@ pub enum FetchMode {
     ForceRefresh,
 }
 
-/// 单例 keychain store。生产路径用这一份；测试需要注入 `InMemoryStore` 时
-/// 走显式 `*_with_store` 入口（见下方）。
+/// 生产路径的 store：release 用钥匙串，debug 用明文文件（避免反复弹授权框）。
+/// 选择逻辑集中在 `ofox_secret::default_store`，这里只是转发。
+/// 测试需要注入 `InMemoryStore` 时走显式 `*_with_store` 入口（见下方）。
 fn default_store() -> Arc<dyn SecretStore> {
-    Arc::new(KeyringStore::new())
+    crate::ofox_secret::default_store()
 }
 
 /// 取或为指定工具创建 ofox API key。
