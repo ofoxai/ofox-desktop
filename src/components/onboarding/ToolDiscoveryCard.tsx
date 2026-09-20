@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { motion, useAnimationControls } from "framer-motion";
 import { ToolBadge } from "@/components/tools/ToolBadge";
+import type { InstallProgress } from "@/hooks/useToolInstall";
 
 /**
  * 工具卡的六态状态机。两个调用点共用：
@@ -48,6 +49,13 @@ interface ToolDiscoveryCardProps {
    * AddToolsDialog 里某些不该让用户装的工具，如未来 hermes 临时不可装时）。
    */
   onInstall?: () => void;
+  /**
+   * 安装进度，仅 installing 态使用。不传则版本位显示笼统的"安装中…"。
+   *
+   * 只反映安装器推进到了第几步，没有真实下载百分比——npm 跑在 osascript 弹出的
+   * 独立 Terminal 里，与主进程没有管道关系（见 useToolInstall 的说明）。
+   */
+  progress?: InstallProgress;
 }
 
 // relative：让顶部绿勾 badge 用 absolute 定位锚到这里
@@ -81,6 +89,7 @@ export function ToolDiscoveryCard({
   autoSelectTick,
   onClick,
   onInstall,
+  progress,
 }: ToolDiscoveryCardProps) {
   const controls = useAnimationControls();
 
@@ -106,11 +115,25 @@ export function ToolDiscoveryCard({
     status === "missing" ||
     status === "installing" ||
     status === "bound";
+  // 安装耗时长（装 Node 动辄几分钟），只显示"安装中…"用户会以为卡死了。有进度
+  // 就把"第几步 / 共几步 · 步骤名"摊开；waiting 阶段再补一个已用秒数，让用户
+  // 看得出它确实在动。
+  const installingText = progress
+    ? `${progress.step}/${progress.total} · ${progress.name}` +
+      (progress.detail ? ` · ${progress.detail}` : "") +
+      (progress.percent !== undefined
+        ? ` · ${Math.round(progress.percent)}%`
+        : "") +
+      (progress.phase === "waiting" && progress.elapsed !== undefined
+        ? ` · ${progress.elapsed}s`
+        : "")
+    : "安装中…";
+
   const versionText =
     status === "scanning"
       ? "检测中…"
       : status === "installing"
-        ? "安装中…"
+        ? installingText
         : (version ?? "未安装");
 
   // 外层 div 是 "卡片本体（motion.button）+ 角标按钮" 的共同定位锚——把

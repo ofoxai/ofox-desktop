@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import os
 import subprocess
+
+import shutil
+
+from app.shell import login_shell_argv, login_shell_env, login_shell_path
 from typing import Callable
 
 # nvm 命令前缀：加载 nvm 环境
-NVM_PREFIX = 'export NVM_DIR="$HOME/.nvm" && [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && '
-
 # 全局区域设置，由 init.py 在启动时设置
 REGION = "CN"
 
@@ -24,21 +26,29 @@ def set_region(region: str) -> None:
 
 
 def _cmd_exists(cmd: str) -> bool:
-    """检测命令是否存在"""
-    return subprocess.run(
-        f"command -v {cmd}",
-        shell=True,
-        capture_output=True,
-    ).returncode == 0
+    """
+    命令是否存在。直接在缓存的 login PATH 里查，不起 shell —— 微秒级。
+
+    比 `_shell_check(f"command -v {cmd}")` 快三个数量级，覆盖还更全：那个 PATH 取自
+    interactive shell，含 `.zshrc` 里配的路径（pnpm 的 PNPM_HOME 就在那）。
+    """
+    return shutil.which(cmd, path=login_shell_path()) is not None
 
 
 def _shell_check(cmd: str) -> bool:
-    """执行 shell 命令并返回是否成功"""
+    """
+    执行检测命令，返回是否成功。
+
+    非交互 login shell（约 23ms）+ 注入完整 PATH：shell 起得快，PATH 又是全的。
+    为什么需要这套：应用从 Finder/Dock 启动时 PATH 只有系统目录，不含
+    nvm / fnm / volta / pnpm / Homebrew 往用户 shell rc 里加的路径，裸 shell 检测会
+    把已装的工具判成未装、反复重装（fizzy #865）。详见 app/shell.py。
+    """
     return subprocess.run(
-        cmd,
-        shell=True,
-        executable="/bin/bash",
+        login_shell_argv(cmd),
+        env=login_shell_env(),
         capture_output=True,
+        stdin=subprocess.DEVNULL,
     ).returncode == 0
 
 
@@ -84,6 +94,21 @@ class NvmStep(Step):
     needs_terminal = True
     timeout = 300  # 5 分钟
     poll_interval = 3.0
+
+    def should_skip(self) -> bool:
+        """
+        已经有可用的 node + npm 就不装 nvm。
+
+        nvm 只是**手段**，目的是有个能用的 node —— fnm / volta / Homebrew 装的同样
+        算达成。原来只看 `check()` 里那个 `~/.nvm/nvm.sh` 是否存在，于是所有非 nvm
+        用户都被强行装一遍 nvm，还会往 `.zshrc` 追加 nvm 初始化代码，跟他现有的
+        版本管理器抢 PATH（fizzy #874）。
+
+        不做版本判断：node 太旧的话，`npm install -g` 会按包的 engines 字段报出
+        准确的错误，比我们在这里猜一个下限可靠；而强行装 nvm 去覆盖用户环境的
+        代价大得多。
+        """
+        return _cmd_exists("node") and _cmd_exists("npm")
 
     def check(self) -> bool:
         return os.path.isfile(os.path.expanduser("~/.nvm/nvm.sh"))
@@ -143,7 +168,7 @@ class NodejsStep(Step):
     poll_interval = 3.0
 
     def check(self) -> bool:
-        return _shell_check(NVM_PREFIX + 'node --version')
+        return _shell_check('node --version')
 
     def terminal_command(self) -> str:
         mirror_env = ""
@@ -183,7 +208,7 @@ class MirrorsStep(Step):
     def check(self) -> bool:
         # 检查 npm 镜像
         npm_ok = _shell_check(
-            NVM_PREFIX + 'npm config get registry 2>/dev/null | grep -q npmmirror.com'
+            'npm config get registry 2>/dev/null | grep -q npmmirror.com'
         )
         # 检查 pip 镜像
         pip_config = os.path.expanduser("~/.pip/config")
@@ -204,7 +229,7 @@ class MirrorsStep(Step):
         # npm 淘宝镜像
         log_fn("配置 npm 镜像: registry.npmmirror.com")
         if not run_shell_command(
-            NVM_PREFIX + 'npm config set registry https://registry.npmmirror.com',
+            'npm config set registry https://registry.npmmirror.com',
             log_fn=log_fn,
         ):
             ok = False
@@ -259,7 +284,7 @@ class NpmGlobalStep(Step):
     def check(self) -> bool:
         # 用 `command -v` 而不是 `npm ls -g`——后者要全量读 npm 全局 tree，
         # 启动慢；只要 PATH 能找到 binary 就算装好（cc-switch 检测逻辑也是这个）。
-        return _shell_check(NVM_PREFIX + f'command -v {self.bin_name}')
+        return _cmd_exists(self.bin_name)
 
     def terminal_command(self) -> str:
         return f"""
@@ -295,7 +320,7 @@ class CurlInstallerStep(Step):
         for p in self.bin_search_paths:
             if os.path.isfile(os.path.expanduser(p)):
                 return True
-        return _shell_check(f'command -v {self.bin_name}')
+        return _cmd_exists(self.bin_name)
 
     def terminal_command(self) -> str:
         return f"""
@@ -350,9 +375,10 @@ class OpenClawStep(NpmGlobalStep):
 class OpenCodeStep(NpmGlobalStep):
     name = "OpenCode"
     description = "OpenCode CLI"
-    # 与其他 npm 工具（claude / codex / gemini / openclaw）走同一条链路：nvm
-    # 全局 bin 会被 NVM_PREFIX 加入 PATH，二进制名 `opencode` 通过 command -v
-    # 检出，不需要 CurlInstallerStep 的 bin_search_paths 兜底。
+    # 与其他 npm 工具（claude / codex / gemini / openclaw）走同一条链路：检测走
+    # login shell（见 app/shell.py），npm 全局 bin 自然在用户 PATH 里，二进制名
+    # `opencode` 通过 command -v 检出，不需要 CurlInstallerStep 的
+    # bin_search_paths 兜底。
     npm_pkg = "opencode-ai"
     bin_name = "opencode"
 
@@ -389,9 +415,9 @@ class VerifyStep(Step):
         # 公共环境层
         env_tools = [
             ("Xcode CLT", "xcode-select -p"),
-            ("nvm", NVM_PREFIX + 'nvm --version'),
-            ("Node.js", NVM_PREFIX + 'node --version'),
-            ("npm", NVM_PREFIX + 'npm --version'),
+            ("nvm", 'nvm --version'),
+            ("Node.js", 'node --version'),
+            ("npm", 'npm --version'),
         ]
         all_ok = True
         for name, cmd in env_tools:
@@ -420,8 +446,7 @@ class VerifyStep(Step):
         if REGION == "CN":
             log_fn("")
             npm_reg = subprocess.run(
-                NVM_PREFIX + 'npm config get registry',
-                shell=True, executable="/bin/bash",
+                login_shell_argv('npm config get registry'),
                 capture_output=True, text=True,
             )
             log_fn(f"  npm 镜像: {npm_reg.stdout.strip()}")
@@ -443,8 +468,11 @@ class VerifyStep(Step):
     def verify(self) -> bool:
         # 验证仅看公共环境（nvm + node 必须在）。
         checks = [
-            os.path.isfile(os.path.expanduser("~/.nvm/nvm.sh")),
-            _shell_check(NVM_PREFIX + 'node --version'),
+            # 判据是"node / npm 能用"，不是"nvm 装了"——fnm / volta / Homebrew 装的
+            # node 同样算环境就绪。原来要求 ~/.nvm/nvm.sh 存在，会让所有非 nvm 用户
+            # 的验证永远失败、被告知"环境未就绪"，而他的环境明明是好的（#874）。
+            _shell_check('node --version'),
+            _cmd_exists("npm"),
         ]
         return all(checks)
 

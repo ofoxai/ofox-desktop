@@ -191,6 +191,7 @@ export default function AddToolsDialog({
     installing,
     install,
     error: installError,
+    progress: installProgress,
   } = useToolInstall((toolId, code) => {
     if (code === 0 && open) {
       void detect();
@@ -280,6 +281,7 @@ export default function AddToolsDialog({
                 version={e.version}
                 status={effective}
                 autoSelectTick={e.autoSelectTick}
+                progress={installProgress[e.id]}
                 onClick={() => handleToggle(e.id)}
                 onInstall={
                   INSTALLABLE_TOOLS.includes(e.id)
