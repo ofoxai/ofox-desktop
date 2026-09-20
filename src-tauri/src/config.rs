@@ -270,6 +270,71 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+
+    /// 临时设置 `CC_SWITCH_TEST_HOME`，Drop 时还原。
+    ///
+    /// 环境变量是进程全局的，不还原会污染同一进程里的其他测试；配合 `#[serial]`
+    /// 才能保证并发跑测试时不互相踩。
+    struct TestHomeGuard(Option<std::ffi::OsString>);
+
+    impl TestHomeGuard {
+        fn set(value: &str) -> Self {
+            let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
+            std::env::set_var("CC_SWITCH_TEST_HOME", value);
+            Self(previous)
+        }
+    }
+
+    impl Drop for TestHomeGuard {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_home_override_takes_precedence_over_real_home() {
+        let _guard = TestHomeGuard::set("/tmp/ofox-fake-home");
+
+        assert_eq!(get_home_dir(), PathBuf::from("/tmp/ofox-fake-home"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_home_override_is_trimmed() {
+        let _guard = TestHomeGuard::set("  /tmp/ofox-fake-home  ");
+
+        assert_eq!(get_home_dir(), PathBuf::from("/tmp/ofox-fake-home"));
+    }
+
+    #[test]
+    #[serial]
+    fn blank_test_home_override_falls_back_to_real_home() {
+        let _guard = TestHomeGuard::set("   ");
+
+        // 只断言"没把空白当成 home"——真实 home 的值取决于运行环境，不能硬编码。
+        assert_ne!(get_home_dir(), PathBuf::from("   "));
+        assert_ne!(get_home_dir(), PathBuf::new());
+    }
+
+    /// Windows 上 `CC_SWITCH_TEST_HOME` 会是 `C:\Users\Alice` 这种形态。这里用
+    /// `PathBuf::join` 而不是硬编码分隔符做断言，所以同一个用例在 macOS 和
+    /// Windows 上都成立——等 Windows CI 跑起来时，它能直接当回归保护网。
+    #[test]
+    #[serial]
+    fn windows_style_home_is_preserved_when_joining() {
+        let _guard = TestHomeGuard::set(r"C:\Users\Alice");
+
+        assert_eq!(get_home_dir(), PathBuf::from(r"C:\Users\Alice"));
+        assert_eq!(
+            get_default_claude_mcp_path(),
+            PathBuf::from(r"C:\Users\Alice").join(".claude.json")
+        );
+    }
 
     #[test]
     fn derive_mcp_path_from_override_preserves_folder_name() {

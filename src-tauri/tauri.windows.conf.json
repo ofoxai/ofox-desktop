@@ -1,15 +1,19 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Ofox Desktop",
   "app": {
     "windows": [
       {
         "label": "main",
-        "title": "CC Switch",
+        "title": "Ofox Desktop",
         "titleBarStyle": "Visible",
         "visible": false,
         "minWidth": 900,
         "minHeight": 600
       }
     ]
+  },
+  "bundle": {
+    "icon": ["icons/icon.ico"]
   }
 }

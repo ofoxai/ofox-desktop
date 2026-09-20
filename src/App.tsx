@@ -30,7 +30,7 @@ import {
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Provider, VisibleApps } from "@/types";
-import type { EnvConflict } from "@/types/env";
+import { envConflictKey, type EnvConflict } from "@/types/env";
 import { useProvidersQuery, useSettingsQuery } from "@/lib/query";
 import {
   providersApi,
@@ -568,11 +568,9 @@ function App() {
 
         if (conflicts.length > 0) {
           setEnvConflicts((prev) => {
-            const existingKeys = new Set(
-              prev.map((c) => `${c.varName}:${c.sourcePath}`),
-            );
+            const existingKeys = new Set(prev.map(envConflictKey));
             const newConflicts = conflicts.filter(
-              (c) => !existingKeys.has(`${c.varName}:${c.sourcePath}`),
+              (c) => !existingKeys.has(envConflictKey(c)),
             );
             return [...prev, ...newConflicts];
           });

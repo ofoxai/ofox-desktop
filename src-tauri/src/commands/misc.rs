@@ -254,44 +254,29 @@ pub async fn get_tool_versions(
     wsl_shell_by_tool: Option<HashMap<String, WslShellPreferenceInput>>,
     include_latest: Option<bool>,
 ) -> Result<Vec<ToolVersion>, String> {
-    // Windows: completely disable tool version detection to prevent
-    // accidentally launching apps (e.g. Claude Code) via protocol handlers.
-    #[cfg(target_os = "windows")]
-    {
-        let _ = (tools, wsl_shell_by_tool, include_latest);
-        return Ok(Vec::new());
-    }
+    let include_latest = include_latest.unwrap_or(true);
+    let requested: Vec<&str> = if let Some(tools) = tools.as_ref() {
+        let set: std::collections::HashSet<&str> = tools.iter().map(|s| s.as_str()).collect();
+        VALID_TOOLS
+            .iter()
+            .copied()
+            .filter(|t| set.contains(t))
+            .collect()
+    } else {
+        VALID_TOOLS.to_vec()
+    };
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        let include_latest = include_latest.unwrap_or(true);
-        let requested: Vec<&str> = if let Some(tools) = tools.as_ref() {
-            let set: std::collections::HashSet<&str> = tools.iter().map(|s| s.as_str()).collect();
-            VALID_TOOLS
-                .iter()
-                .copied()
-                .filter(|t| set.contains(t))
-                .collect()
-        } else {
-            VALID_TOOLS.to_vec()
-        };
+    // Run all tools concurrently — each implementation waits on local child
+    // processes and optional registry/network lookups. Ordering remains the
+    // same as VALID_TOOLS.
+    let futs = requested.into_iter().map(|tool| {
+        let pref = wsl_shell_by_tool.as_ref().and_then(|m| m.get(tool));
+        let tool_wsl_shell = pref.and_then(|p| p.wsl_shell.as_deref());
+        let tool_wsl_shell_flag = pref.and_then(|p| p.wsl_shell_flag.as_deref());
+        get_single_tool_version_impl(tool, tool_wsl_shell, tool_wsl_shell_flag, include_latest)
+    });
 
-        // Run all tools concurrently — each `get_single_tool_version_impl`
-        // spawns a child process for `--version` and (when include_latest)
-        // an HTTP request, both of which idle on I/O. Awaiting them serially
-        // serialized all of that for no reason. `futures::future::join_all`
-        // preserves ordering so the returned `Vec<ToolVersion>` is still in
-        // VALID_TOOLS order.
-        let futs = requested.into_iter().map(|tool| {
-            let pref = wsl_shell_by_tool.as_ref().and_then(|m| m.get(tool));
-            let tool_wsl_shell = pref.and_then(|p| p.wsl_shell.as_deref());
-            let tool_wsl_shell_flag = pref.and_then(|p| p.wsl_shell_flag.as_deref());
-            get_single_tool_version_impl(tool, tool_wsl_shell, tool_wsl_shell_flag, include_latest)
-        });
-
-        let results = futures::future::join_all(futs).await;
-        Ok(results)
-    }
+    Ok(futures::future::join_all(futs).await)
 }
 
 /// 获取单个工具的版本信息（内部实现）
@@ -334,8 +319,29 @@ async fn get_single_tool_version_impl(
         None
     };
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let codex_app_error: Option<String> = None;
+
+    #[cfg(target_os = "windows")]
+    let codex_app_error = if tool == "codex" && wsl_distro.is_none() {
+        match super::windows_codex_app::detect_codex_desktop_app() {
+            Ok(Some(version)) => {
+                return ToolVersion {
+                    name: tool.to_string(),
+                    version: Some(version),
+                    latest_version: None,
+                    error: None,
+                    env_type,
+                    wsl_distro,
+                    installation_kind: InstallationKind::DesktopApp,
+                };
+            }
+            Ok(None) => None,
+            Err(err) => Some(err),
+        }
+    } else {
+        None
+    };
 
     // 1. 获取本地版本
     let (local_version, local_error) = if let Some(distro) = wsl_distro.as_deref() {
@@ -429,15 +435,11 @@ fn extract_version(raw: &str) -> String {
 
 /// 尝试直接执行命令获取版本
 fn try_get_version(tool: &str) -> (Option<String>, Option<String>) {
+    #[cfg(not(target_os = "windows"))]
     use std::process::Command;
 
     #[cfg(target_os = "windows")]
-    let output = {
-        Command::new("cmd")
-            .args(["/C", &format!("{tool} --version")])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-    };
+    let output = try_get_version_windows(tool);
 
     #[cfg(not(target_os = "windows"))]
     let output = {
@@ -449,7 +451,17 @@ fn try_get_version(tool: &str) -> (Option<String>, Option<String>) {
 
     match output {
         Ok(out) => {
+            #[cfg(target_os = "windows")]
+            let stdout = decode_windows_command_output(&out.stdout)
+                .trim()
+                .to_string();
+            #[cfg(not(target_os = "windows"))]
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            #[cfg(target_os = "windows")]
+            let stderr = decode_windows_command_output(&out.stderr)
+                .trim()
+                .to_string();
+            #[cfg(not(target_os = "windows"))]
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             if out.status.success() {
                 let raw = if stdout.is_empty() { &stderr } else { &stdout };
@@ -474,9 +486,269 @@ fn try_get_version(tool: &str) -> (Option<String>, Option<String>) {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn try_get_version_windows(tool: &str) -> Result<std::process::Output, String> {
+    let effective_path = effective_windows_path();
+    let tool_path = resolve_windows_path_tool(tool, &effective_path)?
+        .ok_or_else(|| "not installed or not executable".to_string())?;
+    run_windows_tool_version_command(&tool_path, &effective_path)
+        .map_err(|err| format!("failed to execute {}: {err}", tool_path.display()))
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_windows_path_tool(tool: &str, effective_path: &str) -> Result<Option<PathBuf>, String> {
+    use std::process::{Command, Stdio};
+
+    debug_assert!(VALID_TOOLS.contains(&tool), "unexpected tool name: {tool}");
+    let system_root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let output = Command::new(system_root.join("System32").join("where.exe"))
+        // `$PATH:pattern` searches only PATH, unlike bare `where tool`, which
+        // also probes the current directory.
+        .arg(format!("$PATH:{tool}"))
+        .env("PATH", effective_path)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|err| format!("failed to locate {tool}: {err}"))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let raw = decode_windows_command_output(&output.stdout);
+    let Some(path) = first_safe_windows_path_match(&raw) else {
+        return Ok(None);
+    };
+    let preferred = windows_runnable_sibling_for_extensionless_tool(&path).unwrap_or(path);
+    Ok(std::fs::canonicalize(preferred).ok())
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn first_safe_windows_path_match(output: &str) -> Option<PathBuf> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .find(|line| !is_windows_app_execution_alias_path(line))
+        .map(PathBuf::from)
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn is_windows_app_execution_alias_path(path: &str) -> bool {
+    let normalized = path.replace('/', "\\").to_ascii_lowercase();
+    normalized.contains("\\microsoft\\windowsapps\\")
+        || normalized.ends_with("\\microsoft\\windowsapps")
+}
+
+#[cfg(target_os = "windows")]
+fn windows_runnable_sibling_for_extensionless_tool(path: &Path) -> Option<PathBuf> {
+    if path.extension().is_some() {
+        return None;
+    }
+    ["cmd", "exe"]
+        .iter()
+        .map(|extension| path.with_extension(extension))
+        .find(|candidate| candidate.is_file())
+}
+
+#[cfg(target_os = "windows")]
+fn is_windows_command_script(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_shell_compatible_path(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{unc}"))
+    } else if let Some(local) = raw.strip_prefix(r"\\?\") {
+        PathBuf::from(local)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn win_double_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\\\""))
+}
+
+#[cfg(target_os = "windows")]
+fn win_quote_path_for_batch(path: &str) -> String {
+    let escaped = path.replace('%', "%%%%");
+    let needs_quote = path.chars().any(|ch| {
+        matches!(
+            ch,
+            ' ' | '&' | '(' | ')' | '^' | ';' | '<' | '>' | '|' | ','
+        )
+    });
+    if needs_quote {
+        win_double_quote(&escaped)
+    } else {
+        escaped
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_tool_version_command(
+    tool_path: &Path,
+    effective_path: &str,
+) -> std::io::Result<std::process::Output> {
+    use std::process::Command;
+
+    if is_windows_command_script(tool_path) {
+        let shell_path = windows_shell_compatible_path(tool_path);
+        let command = format!(
+            "call {} --version",
+            win_quote_path_for_batch(&shell_path.to_string_lossy())
+        );
+        let mut child = Command::new("cmd.exe");
+        child
+            .args(["/D", "/S", "/C"])
+            .raw_arg(&command)
+            .env("PATH", effective_path)
+            .creation_flags(CREATE_NO_WINDOW);
+        return child.output();
+    }
+
+    Command::new(tool_path)
+        .arg("--version")
+        .env("PATH", effective_path)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+}
+
+#[cfg(target_os = "windows")]
+fn effective_windows_path() -> String {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    use winreg::RegKey;
+
+    let process = std::env::var("PATH").unwrap_or_default();
+    let user = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey("Environment")
+        .and_then(|key| key.get_value::<String, &str>("Path"))
+        .map(|raw| expand_windows_env_vars(&raw))
+        .unwrap_or_default();
+    let machine = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey("SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment")
+        .and_then(|key| key.get_value::<String, &str>("Path"))
+        .map(|raw| expand_windows_env_vars(&raw))
+        .unwrap_or_default();
+    merge_windows_path_segments(&[&process, &user, &machine])
+}
+
+#[cfg(target_os = "windows")]
+fn expand_windows_env_vars(raw: &str) -> String {
+    let mut output = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(open) = rest.find('%') {
+        output.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('%') else {
+            output.push('%');
+            output.push_str(after);
+            return output;
+        };
+        let name = &after[..close];
+        if !name.is_empty()
+            && name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            match std::env::var(name) {
+                Ok(value) => output.push_str(&value),
+                Err(_) => {
+                    output.push('%');
+                    output.push_str(name);
+                    output.push('%');
+                }
+            }
+        } else {
+            output.push('%');
+            output.push_str(name);
+            output.push('%');
+        }
+        rest = &after[close + 1..];
+    }
+    output.push_str(rest);
+    output
+}
+
+#[cfg(target_os = "windows")]
+fn merge_windows_path_segments(parts: &[&str]) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut merged = Vec::new();
+    for part in parts {
+        for segment in part
+            .split(';')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+        {
+            if seen.insert(segment.to_ascii_lowercase()) {
+                merged.push(segment);
+            }
+        }
+    }
+    merged.join(";")
+}
+
+#[cfg(target_os = "windows")]
+fn decode_windows_command_output(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return text.to_string();
+    }
+
+    use windows_sys::Win32::Globalization::{GetACP, GetOEMCP, MultiByteToWideChar};
+
+    fn decode_codepage(bytes: &[u8], codepage: u32) -> Option<String> {
+        let input_len = i32::try_from(bytes.len()).ok()?;
+        unsafe {
+            let wide_len = MultiByteToWideChar(
+                codepage,
+                0,
+                bytes.as_ptr(),
+                input_len,
+                std::ptr::null_mut(),
+                0,
+            );
+            if wide_len <= 0 {
+                return None;
+            }
+            let mut wide = vec![0_u16; wide_len as usize];
+            let written = MultiByteToWideChar(
+                codepage,
+                0,
+                bytes.as_ptr(),
+                input_len,
+                wide.as_mut_ptr(),
+                wide_len,
+            );
+            (written > 0).then(|| String::from_utf16_lossy(&wide[..written as usize]))
+        }
+    }
+
+    let oem = unsafe { GetOEMCP() };
+    decode_codepage(bytes, oem)
+        .or_else(|| {
+            let ansi = unsafe { GetACP() };
+            (ansi != oem)
+                .then(|| decode_codepage(bytes, ansi))
+                .flatten()
+        })
+        .unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned())
+}
+
 /// 校验 WSL 发行版名称是否合法
 /// WSL 发行版名称只允许字母、数字、连字符和下划线
-#[cfg(target_os = "windows")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn is_valid_wsl_distro_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
@@ -486,7 +758,7 @@ fn is_valid_wsl_distro_name(name: &str) -> bool {
 }
 
 /// Validate that the given shell name is one of the allowed shells.
-#[cfg(target_os = "windows")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn is_valid_shell(shell: &str) -> bool {
     matches!(
         shell.rsplit('/').next().unwrap_or(shell),
@@ -495,13 +767,13 @@ fn is_valid_shell(shell: &str) -> bool {
 }
 
 /// Validate that the given shell flag is one of the allowed flags.
-#[cfg(target_os = "windows")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn is_valid_shell_flag(flag: &str) -> bool {
     matches!(flag, "-c" | "-lc" | "-lic")
 }
 
 /// Return the default invocation flag for the given shell.
-#[cfg(target_os = "windows")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn default_flag_for_shell(shell: &str) -> &'static str {
     match shell.rsplit('/').next().unwrap_or(shell) {
         "dash" | "sh" => "-c",
@@ -700,6 +972,7 @@ fn tool_executable_candidates(tool: &str, dir: &Path) -> Vec<std::path::PathBuf>
 
 /// 扫描常见路径查找 CLI
 fn scan_cli_version(tool: &str) -> (Option<String>, Option<String>) {
+    #[cfg(not(target_os = "windows"))]
     use std::process::Command;
 
     let home = dirs::home_dir().unwrap_or_default();
@@ -738,6 +1011,14 @@ fn scan_cli_version(tool: &str) -> (Option<String>, Option<String>) {
     {
         if let Some(appdata) = dirs::data_dir() {
             push_unique_path(&mut search_paths, appdata.join("npm"));
+        }
+        if tool == "codex" {
+            if let Some(local_data) = dirs::data_local_dir() {
+                push_unique_path(
+                    &mut search_paths,
+                    local_data.join("Programs/OpenAI/Codex/bin"),
+                );
+            }
         }
         push_unique_path(
             &mut search_paths,
@@ -782,6 +1063,9 @@ fn scan_cli_version(tool: &str) -> (Option<String>, Option<String>) {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    let current_path = effective_windows_path();
+    #[cfg(not(target_os = "windows"))]
     let current_path = std::env::var("PATH").unwrap_or_default();
 
     for path in &search_paths {
@@ -797,13 +1081,7 @@ fn scan_cli_version(tool: &str) -> (Option<String>, Option<String>) {
             }
 
             #[cfg(target_os = "windows")]
-            let output = {
-                Command::new("cmd")
-                    .args(["/C", &format!("\"{}\" --version", tool_path.display())])
-                    .env("PATH", &new_path)
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .output()
-            };
+            let output = run_windows_tool_version_command(&tool_path, &new_path);
 
             #[cfg(not(target_os = "windows"))]
             let output = {
@@ -814,7 +1092,17 @@ fn scan_cli_version(tool: &str) -> (Option<String>, Option<String>) {
             };
 
             if let Ok(out) = output {
+                #[cfg(target_os = "windows")]
+                let stdout = decode_windows_command_output(&out.stdout)
+                    .trim()
+                    .to_string();
+                #[cfg(not(target_os = "windows"))]
                 let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                #[cfg(target_os = "windows")]
+                let stderr = decode_windows_command_output(&out.stderr)
+                    .trim()
+                    .to_string();
+                #[cfg(not(target_os = "windows"))]
                 let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
                 if out.status.success() {
                     let raw = if stdout.is_empty() { &stderr } else { &stdout };
@@ -1706,7 +1994,67 @@ mod tests {
         assert_eq!(extract_version("no version here"), "no version here");
     }
 
+    #[test]
+    fn windows_path_matches_skip_store_execution_aliases() {
+        let output = concat!(
+            "C:\\Users\\Alice\\AppData\\Local\\Microsoft\\WindowsApps\\codex.exe\r\n",
+            "C:\\Users\\Alice\\AppData\\Roaming\\npm\\codex.cmd\r\n"
+        );
+        assert_eq!(
+            first_safe_windows_path_match(output),
+            Some(PathBuf::from(
+                r"C:\Users\Alice\AppData\Roaming\npm\codex.cmd"
+            ))
+        );
+    }
+
     #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_shell_compatible_path_strips_verbatim_prefixes() {
+        assert_eq!(
+            windows_shell_compatible_path(Path::new(r"\\?\C:\tools\codex.cmd")),
+            PathBuf::from(r"C:\tools\codex.cmd")
+        );
+        assert_eq!(
+            windows_shell_compatible_path(Path::new(r"\\?\UNC\server\share\codex.cmd")),
+            PathBuf::from(r"\\server\share\codex.cmd")
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_path_merge_is_case_insensitive_and_ordered() {
+        assert_eq!(
+            merge_windows_path_segments(&[
+                r"C:\Tools;C:\Windows",
+                r"c:\tools;D:\Node",
+                r"D:\NODE;E:\Codex"
+            ]),
+            r"C:\Tools;C:\Windows;D:\Node;E:\Codex"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_version_command_executes_canonicalized_cmd_path() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let script = temp.path().join("test tool.cmd");
+        std::fs::write(&script, "@echo off\r\necho 9.9.9\r\n").expect("write batch script");
+        let canonical = std::fs::canonicalize(&script).expect("canonicalize batch script");
+
+        let output = run_windows_tool_version_command(
+            &canonical,
+            &std::env::var("PATH").unwrap_or_default(),
+        )
+        .expect("execute batch script");
+
+        assert!(output.status.success());
+        assert_eq!(
+            decode_windows_command_output(&output.stdout).trim(),
+            "9.9.9"
+        );
+    }
+
     mod wsl_helpers {
         use super::super::*;
 
