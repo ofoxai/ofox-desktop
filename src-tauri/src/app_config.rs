@@ -931,6 +931,7 @@ mod tests {
     use tempfile::TempDir;
 
     struct TempHome {
+        _env_guard: std::sync::MutexGuard<'static, ()>,
         #[allow(dead_code)] // 字段通过 Drop trait 管理临时目录生命周期
         dir: TempDir,
         original_home: Option<String>,
@@ -940,6 +941,7 @@ mod tests {
 
     impl TempHome {
         fn new() -> Self {
+            let env_guard = crate::config::test_env_lock();
             let dir = TempDir::new().expect("failed to create temp home");
             let original_home = env::var("HOME").ok();
             let original_userprofile = env::var("USERPROFILE").ok();
@@ -950,6 +952,7 @@ mod tests {
             env::set_var("CC_SWITCH_TEST_HOME", dir.path());
 
             Self {
+                _env_guard: env_guard,
                 dir,
                 original_home,
                 original_userprofile,

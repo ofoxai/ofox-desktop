@@ -915,17 +915,8 @@ pub fn set_tools_config(tools: &OpenClawToolsConfig) -> Result<OpenClawWriteOutc
 mod tests {
     use super::*;
     use serial_test::serial;
-    use std::sync::{Mutex, OnceLock};
-
-    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-    }
-
     fn with_test_paths<T>(source: &str, test: impl FnOnce(&Path) -> T) -> T {
-        let _guard = test_guard();
+        let _guard = crate::config::test_env_lock();
         let temp = tempfile::tempdir().unwrap();
         let openclaw_dir = temp.path().join(".openclaw");
         fs::create_dir_all(&openclaw_dir).unwrap();

@@ -333,7 +333,15 @@ export function ClaudeFormFields({
         showFetchModelsError(err, t);
       })
       .finally(() => setIsFetchingModels(false));
-  }, [baseUrl, apiKey, isFullUrl, isOfoxPreset, ofoxProtocol, updateOfoxModels, t]);
+  }, [
+    baseUrl,
+    apiKey,
+    isFullUrl,
+    isOfoxPreset,
+    ofoxProtocol,
+    updateOfoxModels,
+    t,
+  ]);
 
   // oFox 预设：缓存为空时自动获取模型列表（协议变化也会触发）
   useEffect(() => {

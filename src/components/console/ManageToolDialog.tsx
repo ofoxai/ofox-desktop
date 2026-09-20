@@ -163,8 +163,7 @@ export default function ManageToolDialog({
   // 是硬编码），选到只支持 chat/completions 的模型会导致 CLI 报
   // `wire_api not supported`——按端点二次过滤，UI 层就不给用户选到
   // 不兼容的模型。其他工具走 chat 协议不需要收窄。
-  const requiredEndpoint =
-    tool?.id === "codex" ? "/v1/responses" : undefined;
+  const requiredEndpoint = tool?.id === "codex" ? "/v1/responses" : undefined;
   const fetchModels = useCallback(async () => {
     if (!protocol) return;
     setModelsLoading(true);

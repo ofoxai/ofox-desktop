@@ -462,7 +462,10 @@ GEMINI_MODEL=gemini-3-pro-preview
         assert!(content.contains("GEMINI_MODEL=gemini-3-pro-preview"));
         // 回归保险：末尾必须有 `\n`——参见 [`serialize_env_file`] docstring 里
         // 的"最后一行被 dotenv parser 丢弃"事故说明。
-        assert!(content.ends_with('\n'), "missing trailing newline: {content:?}");
+        assert!(
+            content.ends_with('\n'),
+            "missing trailing newline: {content:?}"
+        );
     }
 
     #[test]

@@ -39,9 +39,7 @@ export default function AccountBalance({
 
   const helperLine = (() => {
     if (!isActive) {
-      return state === "expired"
-        ? "需重新登录后更新"
-        : "请登录后查看余额";
+      return state === "expired" ? "需重新登录后更新" : "请登录后查看余额";
     }
     return hasNumber ? "实时余额" : "正在同步…";
   })();

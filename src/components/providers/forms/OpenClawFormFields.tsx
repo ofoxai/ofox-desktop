@@ -122,10 +122,14 @@ export function OpenClawFormFields({
 
   const ofoxEndpoint = useMemo(() => {
     switch (ofoxProtocol) {
-      case "openai": return `${ofoxApiBase(apex)}/v1`;
-      case "anthropic": return `${ofoxApiBase(apex)}/anthropic`;
-      case "gemini": return `${ofoxApiBase(apex)}/gemini`;
-      default: return "";
+      case "openai":
+        return `${ofoxApiBase(apex)}/v1`;
+      case "anthropic":
+        return `${ofoxApiBase(apex)}/anthropic`;
+      case "gemini":
+        return `${ofoxApiBase(apex)}/gemini`;
+      default:
+        return "";
     }
   }, [ofoxProtocol, apex]);
 
@@ -149,12 +153,17 @@ export function OpenClawFormFields({
   });
   const [isOfoxFetching, setIsOfoxFetching] = useState(false);
 
-  const updateOfoxModels = useCallback((models: FetchedModel[]) => {
-    setOfoxModels(models);
-    try {
-      localStorage.setItem(ofoxCacheKey, JSON.stringify(models));
-    } catch { /* ignore quota errors */ }
-  }, [ofoxCacheKey]);
+  const updateOfoxModels = useCallback(
+    (models: FetchedModel[]) => {
+      setOfoxModels(models);
+      try {
+        localStorage.setItem(ofoxCacheKey, JSON.stringify(models));
+      } catch {
+        /* ignore quota errors */
+      }
+    },
+    [ofoxCacheKey],
+  );
 
   const handleOfoxFetchModels = useCallback(() => {
     if (!ofoxProtocol) return;
@@ -325,10 +334,14 @@ export function OpenClawFormFields({
               <SelectItem
                 key={protocol.value}
                 value={protocol.value}
-                disabled={isOfoxPreset && protocol.value === "bedrock-converse-stream"}
+                disabled={
+                  isOfoxPreset && protocol.value === "bedrock-converse-stream"
+                }
               >
                 {protocol.label}
-                {isOfoxPreset && protocol.value === "bedrock-converse-stream" && " (oFox 不支持)"}
+                {isOfoxPreset &&
+                  protocol.value === "bedrock-converse-stream" &&
+                  " (oFox 不支持)"}
               </SelectItem>
             ))}
           </SelectContent>
@@ -349,15 +362,25 @@ export function OpenClawFormFields({
         <Input
           id="openclaw-baseurl"
           value={baseUrl}
-          onChange={isOfoxPreset ? undefined : (e) => onBaseUrlChange(e.target.value)}
+          onChange={
+            isOfoxPreset ? undefined : (e) => onBaseUrlChange(e.target.value)
+          }
           readOnly={isOfoxPreset}
           placeholder="https://api.example.com/v1"
-          className={isOfoxPreset ? "bg-muted text-muted-foreground cursor-not-allowed" : undefined}
+          className={
+            isOfoxPreset
+              ? "bg-muted text-muted-foreground cursor-not-allowed"
+              : undefined
+          }
         />
         <p className="text-xs text-muted-foreground">
           {isOfoxPreset
-            ? t("openclaw.ofoxEndpointHint", { defaultValue: "端点由 API 协议自动决定。" })
-            : t("openclaw.baseUrlHint", { defaultValue: "供应商的 API 端点地址。" })}
+            ? t("openclaw.ofoxEndpointHint", {
+                defaultValue: "端点由 API 协议自动决定。",
+              })
+            : t("openclaw.baseUrlHint", {
+                defaultValue: "供应商的 API 端点地址。",
+              })}
         </p>
       </div>
 
@@ -518,7 +541,10 @@ export function OpenClawFormFields({
                                 fetchedModels.reduce(
                                   (acc, m) => {
                                     const slashIdx = m.id.indexOf("/");
-                                    const v = slashIdx > 0 ? m.id.slice(0, slashIdx) : (m.ownedBy || "Other");
+                                    const v =
+                                      slashIdx > 0
+                                        ? m.id.slice(0, slashIdx)
+                                        : m.ownedBy || "Other";
                                     if (!acc[v]) acc[v] = [];
                                     acc[v].push(m);
                                     return acc;

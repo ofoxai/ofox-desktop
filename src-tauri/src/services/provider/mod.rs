@@ -64,10 +64,11 @@ mod tests {
     use std::env;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     struct TempHome {
+        _env_guard: std::sync::MutexGuard<'static, ()>,
         #[allow(dead_code)]
         dir: TempDir,
         original_home: Option<String>,
@@ -77,6 +78,7 @@ mod tests {
 
     impl TempHome {
         fn new() -> Self {
+            let env_guard = crate::config::test_env_lock();
             let dir = TempDir::new().expect("failed to create temp home");
             let original_home = env::var("HOME").ok();
             let original_userprofile = env::var("USERPROFILE").ok();
@@ -87,6 +89,7 @@ mod tests {
             env::set_var("CC_SWITCH_TEST_HOME", dir.path());
 
             Self {
+                _env_guard: env_guard,
                 dir,
                 original_home,
                 original_userprofile,
@@ -114,15 +117,8 @@ mod tests {
         }
     }
 
-    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-    }
-
     fn with_test_home<T>(test: impl FnOnce(&AppState, &Path) -> T) -> T {
-        let _guard = test_guard();
+        let _guard = crate::config::test_env_lock();
         let temp = tempfile::tempdir().expect("tempdir");
         let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
         let old_home = std::env::var_os("HOME");
@@ -1489,7 +1485,7 @@ impl ProviderService {
                 // no backfill needed (backfill is for exclusive mode apps like Claude/Codex/Gemini)
                 if !app_type.is_additive_mode() {
                     // Only backfill when switching to a different provider
-                    if let Ok(live_config) = read_live_settings(app_type.clone()) {
+                    if let Ok(live_config) = read_live_settings(app_type) {
                         if let Some(mut current_provider) = providers.get(&current_id).cloned() {
                             current_provider.settings_config =
                                 strip_common_config_from_live_settings(
@@ -1718,7 +1714,7 @@ impl ProviderService {
         app_type: AppType,
     ) -> Result<String, AppError> {
         // Get current provider
-        let current_id = Self::current(state, app_type.clone())?;
+        let current_id = Self::current(state, app_type)?;
         if current_id.is_empty() {
             return Err(AppError::Message("No current provider".to_string()));
         }

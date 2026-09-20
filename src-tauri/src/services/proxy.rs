@@ -2043,11 +2043,7 @@ impl ProxyService {
     /// 回来。
     ///
     /// [`merge_patch_into_settings`]: crate::services::provider::merge_patch_into_settings
-    fn ofox_merge_patch_to_live(
-        &self,
-        app_type: &AppType,
-        patch: &Value,
-    ) -> Result<(), String> {
+    fn ofox_merge_patch_to_live(&self, app_type: &AppType, patch: &Value) -> Result<(), String> {
         use crate::services::provider::merge_patch_into_settings;
 
         let current = match app_type {
@@ -2120,10 +2116,7 @@ impl ProxyService {
     ///
     /// `#[allow(dead_code)]`：Commit 3 引入门面，Commit 4 才被 unbind 调用。
     #[allow(dead_code)]
-    pub(crate) async fn ofox_restore_from_backup(
-        &self,
-        app_type: &AppType,
-    ) -> Result<(), String> {
+    pub(crate) async fn ofox_restore_from_backup(&self, app_type: &AppType) -> Result<(), String> {
         use crate::services::provider::remove_patch_from_settings;
 
         let key = app_type.as_str();
@@ -2165,39 +2158,57 @@ impl ProxyService {
                 app_type,
                 "ofox-opencode",
                 &patch,
-                |id| crate::opencode_config::get_providers()
-                    .map(|m| m.get(id).cloned())
-                    .map_err(|e| format!("读取 OpenCode providers 失败: {e}")),
-                |id, value| crate::opencode_config::set_provider(id, value)
-                    .map_err(|e| format!("写入 OpenCode ofox provider 失败: {e}")),
-                |id| crate::opencode_config::remove_provider(id)
-                    .map_err(|e| format!("移除 OpenCode ofox provider 失败: {e}")),
+                |id| {
+                    crate::opencode_config::get_providers()
+                        .map(|m| m.get(id).cloned())
+                        .map_err(|e| format!("读取 OpenCode providers 失败: {e}"))
+                },
+                |id, value| {
+                    crate::opencode_config::set_provider(id, value)
+                        .map_err(|e| format!("写入 OpenCode ofox provider 失败: {e}"))
+                },
+                |id| {
+                    crate::opencode_config::remove_provider(id)
+                        .map_err(|e| format!("移除 OpenCode ofox provider 失败: {e}"))
+                },
             )?,
             AppType::OpenClaw => self.unbind_provider_subsection(
                 app_type,
                 "ofox-openclaw",
                 &patch,
-                |id| crate::openclaw_config::get_provider(id)
-                    .map_err(|e| format!("读取 OpenClaw provider 失败: {e}")),
-                |id, value| crate::openclaw_config::set_provider(id, value)
-                    .map(|_| ())
-                    .map_err(|e| format!("写入 OpenClaw ofox provider 失败: {e}")),
-                |id| crate::openclaw_config::remove_provider(id)
-                    .map(|_| ())
-                    .map_err(|e| format!("移除 OpenClaw ofox provider 失败: {e}")),
+                |id| {
+                    crate::openclaw_config::get_provider(id)
+                        .map_err(|e| format!("读取 OpenClaw provider 失败: {e}"))
+                },
+                |id, value| {
+                    crate::openclaw_config::set_provider(id, value)
+                        .map(|_| ())
+                        .map_err(|e| format!("写入 OpenClaw ofox provider 失败: {e}"))
+                },
+                |id| {
+                    crate::openclaw_config::remove_provider(id)
+                        .map(|_| ())
+                        .map_err(|e| format!("移除 OpenClaw ofox provider 失败: {e}"))
+                },
             )?,
             AppType::Hermes => self.unbind_provider_subsection(
                 app_type,
                 "ofox-hermes",
                 &patch,
-                |id| crate::hermes_config::get_provider(id)
-                    .map_err(|e| format!("读取 Hermes provider 失败: {e}")),
-                |id, value| crate::hermes_config::set_provider(id, value)
-                    .map(|_| ())
-                    .map_err(|e| format!("写入 Hermes ofox provider 失败: {e}")),
-                |id| crate::hermes_config::remove_provider(id)
-                    .map(|_| ())
-                    .map_err(|e| format!("移除 Hermes ofox provider 失败: {e}")),
+                |id| {
+                    crate::hermes_config::get_provider(id)
+                        .map_err(|e| format!("读取 Hermes provider 失败: {e}"))
+                },
+                |id, value| {
+                    crate::hermes_config::set_provider(id, value)
+                        .map(|_| ())
+                        .map_err(|e| format!("写入 Hermes ofox provider 失败: {e}"))
+                },
+                |id| {
+                    crate::hermes_config::remove_provider(id)
+                        .map(|_| ())
+                        .map_err(|e| format!("移除 Hermes ofox provider 失败: {e}"))
+                },
             )?,
         }
 
@@ -2239,9 +2250,7 @@ impl ProxyService {
         let stripped = remove_patch_from_settings(app_type, &current, patch)
             .map_err(|e| format!("反 patch {} 子节失败: {e}", app_type.as_str()))?;
 
-        let is_empty = stripped
-            .as_object()
-            .is_some_and(|obj| obj.is_empty());
+        let is_empty = stripped.as_object().is_some_and(|obj| obj.is_empty());
 
         if is_empty {
             remove_writer(provider_id)
@@ -2255,9 +2264,7 @@ impl ProxyService {
     /// 是为避免 commands ↔ services 反向依赖，但语义不能漂移；漂移会导致 bind
     /// 内部回滚（write 触发 None 路径报错 → ofox_restore_from_backup → 删 backup
     /// + 擦 sk-of- + 切回 official）。改其中一处务必同步改另一处。
-    fn ofox_provider_target(
-        app: &AppType,
-    ) -> Option<(&'static str, &'static [&'static str])> {
+    fn ofox_provider_target(app: &AppType) -> Option<(&'static str, &'static [&'static str])> {
         match app {
             AppType::Claude => Some(("ofox-claude", &["env", "ANTHROPIC_AUTH_TOKEN"])),
             AppType::Codex => Some(("ofox-codex", &["auth", "OPENAI_API_KEY"])),
@@ -2456,6 +2463,7 @@ mod tests {
     use tempfile::TempDir;
 
     struct TempHome {
+        _env_guard: std::sync::MutexGuard<'static, ()>,
         #[allow(dead_code)]
         dir: TempDir,
         original_home: Option<String>,
@@ -2465,6 +2473,7 @@ mod tests {
 
     impl TempHome {
         fn new() -> Self {
+            let env_guard = crate::config::test_env_lock();
             let dir = TempDir::new().expect("failed to create temp home");
             let original_home = env::var("HOME").ok();
             let original_userprofile = env::var("USERPROFILE").ok();
@@ -2475,6 +2484,7 @@ mod tests {
             env::set_var("CC_SWITCH_TEST_HOME", dir.path());
 
             Self {
+                _env_guard: env_guard,
                 dir,
                 original_home,
                 original_userprofile,
@@ -2676,10 +2686,7 @@ model = "gpt-5.1-codex"
             .and_then(|v| v.get("base_url"))
             .and_then(|v| v.as_str());
         assert_eq!(provider_base_url, Some(proxy_url));
-        assert!(
-            parsed.get("base_url").is_none(),
-            "顶层 base_url 不应该出现"
-        );
+        assert!(parsed.get("base_url").is_none(), "顶层 base_url 不应该出现");
     }
 
     #[tokio::test]
@@ -3467,7 +3474,8 @@ command = "latest-command"
             }),
             None,
         );
-        db.save_provider("claude", &provider).expect("save claude seed");
+        db.save_provider("claude", &provider)
+            .expect("save claude seed");
     }
 
     fn seed_ofox_opencode(db: &Database) {
@@ -3485,7 +3493,8 @@ command = "latest-command"
             }),
             None,
         );
-        db.save_provider("opencode", &provider).expect("save opencode seed");
+        db.save_provider("opencode", &provider)
+            .expect("save opencode seed");
     }
 
     /// 准备 Claude 工具的"原始用户配置"——bind 前磁盘上的状态。
@@ -3506,11 +3515,8 @@ command = "latest-command"
             "statusLine": { "type": "command", "command": "echo baseline" },
             "model": "opus"
         });
-        std::fs::write(
-            &path,
-            serde_json::to_string_pretty(&baseline).unwrap(),
-        )
-        .expect("write claude baseline");
+        std::fs::write(&path, serde_json::to_string_pretty(&baseline).unwrap())
+            .expect("write claude baseline");
     }
 
     #[tokio::test]
@@ -3559,12 +3565,16 @@ command = "latest-command"
         // settings.json 里的大量配置整文件覆盖掉。permissions / statusLine /
         // model / 自定义 env 都必须原样保留。
         assert_eq!(
-            written.pointer("/permissions/allow/0").and_then(|v| v.as_str()),
+            written
+                .pointer("/permissions/allow/0")
+                .and_then(|v| v.as_str()),
             Some("Bash"),
             "bind 前的 permissions 必须保留, got: {written}"
         );
         assert_eq!(
-            written.pointer("/statusLine/command").and_then(|v| v.as_str()),
+            written
+                .pointer("/statusLine/command")
+                .and_then(|v| v.as_str()),
             Some("echo baseline"),
             "bind 前的 statusLine 必须保留, got: {written}"
         );
@@ -3629,21 +3639,19 @@ command = "latest-command"
         // env 里的 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN 都该被减掉
         let after = service.read_claude_live().expect("read after restore");
         assert!(
-            after
-                .pointer("/env/ANTHROPIC_BASE_URL")
-                .is_none(),
+            after.pointer("/env/ANTHROPIC_BASE_URL").is_none(),
             "注入的 base_url 应当被反 patch 减掉, got: {after}"
         );
         assert!(
-            after
-                .pointer("/env/ANTHROPIC_AUTH_TOKEN")
-                .is_none(),
+            after.pointer("/env/ANTHROPIC_AUTH_TOKEN").is_none(),
             "注入的 token 应当被反 patch 减掉, got: {after}"
         );
 
         // **核心承诺**：用户在 bind 期间手加的字段不能丢
         assert_eq!(
-            after.pointer("/statusLine/command").and_then(|v| v.as_str()),
+            after
+                .pointer("/statusLine/command")
+                .and_then(|v| v.as_str()),
             Some("echo hi"),
             "用户加的 statusLine 必须保留"
         );
@@ -3656,10 +3664,7 @@ command = "latest-command"
         );
 
         // backup 已被 restore 消费掉
-        let backup_after = db
-            .get_live_backup("claude")
-            .await
-            .expect("query backup");
+        let backup_after = db.get_live_backup("claude").await.expect("query backup");
         assert!(backup_after.is_none(), "restore 后应当删 backup");
     }
 
@@ -3674,7 +3679,8 @@ command = "latest-command"
             }),
             None,
         );
-        db.save_provider("codex", &provider).expect("save codex seed");
+        db.save_provider("codex", &provider)
+            .expect("save codex seed");
     }
 
     fn seed_ofox_gemini(db: &Database) {
@@ -3689,7 +3695,8 @@ command = "latest-command"
             }),
             None,
         );
-        db.save_provider("gemini", &provider).expect("save gemini seed");
+        db.save_provider("gemini", &provider)
+            .expect("save gemini seed");
     }
 
     #[tokio::test]
@@ -3743,7 +3750,9 @@ command = "latest-command"
         // auth.json：sk-of- 注入，用户自定义字段保留
         let written_auth: Value = read_json_file(&auth_path).expect("read codex auth after bind");
         assert_eq!(
-            written_auth.pointer("/OPENAI_API_KEY").and_then(|v| v.as_str()),
+            written_auth
+                .pointer("/OPENAI_API_KEY")
+                .and_then(|v| v.as_str()),
             Some("sk-of-CODEX1"),
             "token 应被注入, got: {written_auth}"
         );
@@ -3780,8 +3789,7 @@ command = "latest-command"
             .await
             .expect("gemini direct write");
 
-        let env_map =
-            crate::gemini_config::read_gemini_env().expect("read gemini env after bind");
+        let env_map = crate::gemini_config::read_gemini_env().expect("read gemini env after bind");
         assert_eq!(
             env_map.get("GEMINI_API_KEY").map(String::as_str),
             Some("sk-of-GEM1"),
@@ -3918,16 +3926,13 @@ command = "latest-command"
             .get("ofox-opencode")
             .cloned()
             .expect("ofox-opencode bind 后必须存在");
-        subsection
-            .as_object_mut()
-            .unwrap()
-            .insert(
-                "models".to_string(),
-                json!({
-                    "qwen3-coder-plus": { "name": "Qwen3 Coder Plus" },
-                    "deepseek-v3": { "name": "DeepSeek V3" }
-                }),
-            );
+        subsection.as_object_mut().unwrap().insert(
+            "models".to_string(),
+            json!({
+                "qwen3-coder-plus": { "name": "Qwen3 Coder Plus" },
+                "deepseek-v3": { "name": "DeepSeek V3" }
+            }),
+        );
         // 顺手再加一个完全跟 patch 无关的顶层字段
         subsection
             .as_object_mut()
@@ -3997,8 +4002,6 @@ command = "latest-command"
             .expect("缺备份时应当 noop，不报错");
 
         // 仍然没有备份（restore 没创建任何东西）
-        assert!(
-            db.get_live_backup("claude").await.expect("query").is_none()
-        );
+        assert!(db.get_live_backup("claude").await.expect("query").is_none());
     }
 }

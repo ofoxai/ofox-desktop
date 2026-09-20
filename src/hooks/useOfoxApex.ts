@@ -1,10 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 
-import {
-  OFOX_APEX_CHANGED_EVENT,
-  ofoxGetApex,
-} from "@/lib/api/ofoxApex";
+import { OFOX_APEX_CHANGED_EVENT, ofoxGetApex } from "@/lib/api/ofoxApex";
 import { DEFAULT_OFOX_APEX, type OfoxApex } from "@/lib/ofoxUrls";
 
 /**

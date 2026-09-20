@@ -189,9 +189,12 @@ export function HermesFormFields({
 
   const ofoxEndpoint = useMemo(() => {
     switch (ofoxProtocol) {
-      case "openai": return `${ofoxApiBase(apex)}/v1`;
-      case "anthropic": return `${ofoxApiBase(apex)}/anthropic`;
-      default: return "";
+      case "openai":
+        return `${ofoxApiBase(apex)}/v1`;
+      case "anthropic":
+        return `${ofoxApiBase(apex)}/anthropic`;
+      default:
+        return "";
     }
   }, [ofoxProtocol, apex]);
 
@@ -215,12 +218,17 @@ export function HermesFormFields({
   });
   const [isOfoxFetching, setIsOfoxFetching] = useState(false);
 
-  const updateOfoxModels = useCallback((models: FetchedModel[]) => {
-    setOfoxModels(models);
-    try {
-      localStorage.setItem(ofoxCacheKey, JSON.stringify(models));
-    } catch { /* ignore quota errors */ }
-  }, [ofoxCacheKey]);
+  const updateOfoxModels = useCallback(
+    (models: FetchedModel[]) => {
+      setOfoxModels(models);
+      try {
+        localStorage.setItem(ofoxCacheKey, JSON.stringify(models));
+      } catch {
+        /* ignore quota errors */
+      }
+    },
+    [ofoxCacheKey],
+  );
 
   const handleOfoxFetchModels = useCallback(() => {
     if (!ofoxProtocol) return;
@@ -299,7 +307,8 @@ export function HermesFormFields({
         activeModels.reduce(
           (acc, m) => {
             const slashIdx = m.id.indexOf("/");
-            const v = slashIdx > 0 ? m.id.slice(0, slashIdx) : (m.ownedBy || "Other");
+            const v =
+              slashIdx > 0 ? m.id.slice(0, slashIdx) : m.ownedBy || "Other";
             if (!acc[v]) acc[v] = [];
             acc[v].push(m);
             return acc;
@@ -392,7 +401,9 @@ export function HermesFormFields({
                 disabled={isOfoxPreset && mode.value === "bedrock_converse"}
               >
                 {t(mode.labelKey)}
-                {isOfoxPreset && mode.value === "bedrock_converse" && " (oFox 不支持)"}
+                {isOfoxPreset &&
+                  mode.value === "bedrock_converse" &&
+                  " (oFox 不支持)"}
               </SelectItem>
             ))}
           </SelectContent>

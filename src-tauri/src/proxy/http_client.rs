@@ -336,12 +336,6 @@ pub fn mask_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     #[test]
     fn test_mask_url() {
@@ -412,8 +406,6 @@ mod tests {
 
     #[test]
     fn test_system_proxy_points_to_loopback() {
-        let _guard = env_lock().lock().unwrap();
-
         // 设置 CC Switch 代理端口
         set_proxy_port(15721);
 
@@ -425,25 +417,22 @@ mod tests {
             "ALL_PROXY",
             "all_proxy",
         ];
+        let env = crate::config::TestEnvGuard::new(&keys);
 
         for key in &keys {
-            std::env::remove_var(key);
+            env.remove(key);
         }
 
         // 指向 CC Switch 端口的代理应该被跳过
-        std::env::set_var("HTTP_PROXY", "http://127.0.0.1:15721");
+        env.set("HTTP_PROXY", "http://127.0.0.1:15721");
         assert!(system_proxy_points_to_loopback());
 
         // 指向其他端口的本地代理不应该被跳过
-        std::env::set_var("HTTP_PROXY", "http://127.0.0.1:7890");
+        env.set("HTTP_PROXY", "http://127.0.0.1:7890");
         assert!(!system_proxy_points_to_loopback());
 
         // 非 loopback 地址不应该被跳过
-        std::env::set_var("HTTP_PROXY", "http://10.0.0.2:7890");
+        env.set("HTTP_PROXY", "http://10.0.0.2:7890");
         assert!(!system_proxy_points_to_loopback());
-
-        for key in &keys {
-            std::env::remove_var(key);
-        }
     }
 }

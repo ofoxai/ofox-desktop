@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+#[cfg(unix)]
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
@@ -1088,7 +1089,10 @@ mod api_key_meta_tests {
             ..sample_meta(AppType::Claude, "k1")
         };
         let json = serde_json::to_string(&meta).unwrap();
-        assert!(json.contains("\"keyStart\":\"sk-of-AbCdEf\""), "got: {json}");
+        assert!(
+            json.contains("\"keyStart\":\"sk-of-AbCdEf\""),
+            "got: {json}"
+        );
 
         let decoded: ApiKeyMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.key_start.as_deref(), Some("sk-of-AbCdEf"));
@@ -1108,4 +1112,3 @@ mod api_key_meta_tests {
         assert_eq!(decoded.key_id, "k1");
     }
 }
-

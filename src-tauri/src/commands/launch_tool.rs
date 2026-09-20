@@ -34,8 +34,7 @@ fn resolve_cli_bin(tool_id: &str) -> Option<&'static str> {
 
 #[tauri::command]
 pub async fn launch_tool_cli(_app: AppHandle, tool_id: String) -> Result<(), String> {
-    let bin = resolve_cli_bin(&tool_id)
-        .ok_or_else(|| format!("工具 {tool_id} 不支持一键打开"))?;
+    let bin = resolve_cli_bin(&tool_id).ok_or_else(|| format!("工具 {tool_id} 不支持一键打开"))?;
 
     // `exec "$SHELL" -l -i -c "…"`：交给用户的 login shell 处理 rc 加载，
     // 避开 bash 硬 source zshrc 会踩到 zsh 语法（`(N)` glob 修饰符、

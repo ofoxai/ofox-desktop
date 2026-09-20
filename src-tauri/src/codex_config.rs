@@ -121,9 +121,7 @@ pub fn write_codex_live_atomic(
 ///
 /// 复用 [`write_codex_live_atomic`] 的两步写 + 回滚语义，因此调用方拿到 Err 时磁盘
 /// 上要么是改前要么是改后，不会留下半写状态。
-pub fn write_codex_live_from_provider_settings(
-    settings_config: &Value,
-) -> Result<(), AppError> {
+pub fn write_codex_live_from_provider_settings(settings_config: &Value) -> Result<(), AppError> {
     let obj = settings_config
         .as_object()
         .ok_or_else(|| AppError::Config("Codex provider settings_config 必须是对象".into()))?;
@@ -496,20 +494,11 @@ base_url = "https://production.api/v1"
 
     // ---- write_codex_live_from_provider_settings ----
 
-    use std::sync::{Mutex, OnceLock};
-
-    fn home_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-    }
-
     /// Run a test with an isolated temp home (matches the helper used in
     /// hermes_config tests). Serializes against parallel mutators of
     /// `CC_SWITCH_TEST_HOME` so the env var swap stays consistent.
     fn with_test_home<T>(test_fn: impl FnOnce() -> T) -> T {
-        let _guard = home_test_guard();
+        let _guard = crate::config::test_env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let old = std::env::var_os("CC_SWITCH_TEST_HOME");
         std::env::set_var("CC_SWITCH_TEST_HOME", tmp.path());

@@ -11,11 +11,16 @@
 //! 仅 macOS：脚本入口 `init.sh` 第一行就 `uname -m != arm64 → exit 1`，
 //! Rust 这边也用 cfg 提前拦——Intel Mac / Windows 用户得到清晰错误。
 
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
 use std::process::Stdio;
 
+#[cfg(target_os = "macos")]
 use serde_json::json;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::AppHandle;
+#[cfg(target_os = "macos")]
+use tauri::{Emitter, Manager};
 
 /// 与 `scripts/installer/app/steps.py::TOOL_STEPS` 字典 key 对齐。
 const ALLOWED_TOOLS: &[&str] = &[
@@ -35,7 +40,7 @@ pub async fn install_tool(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (app, skip_env);
-        return Err("工具自动安装目前仅支持 macOS arm64".into());
+        Err("工具自动安装目前仅支持 macOS arm64".into())
     }
 
     #[cfg(target_os = "macos")]

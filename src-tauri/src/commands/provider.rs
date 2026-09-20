@@ -109,7 +109,7 @@ pub fn switch_provider(
 }
 
 fn import_default_config_internal(state: &AppState, app_type: AppType) -> Result<bool, AppError> {
-    let imported = ProviderService::import_default_config(state, app_type.clone())?;
+    let imported = ProviderService::import_default_config(state, app_type)?;
 
     if imported {
         // Extract common config snippet (mirrors old startup logic in lib.rs)
@@ -117,7 +117,7 @@ fn import_default_config_internal(state: &AppState, app_type: AppType) -> Result
             .db
             .should_auto_extract_config_snippet(app_type.as_str())?
         {
-            match ProviderService::extract_common_config_snippet(state, app_type.clone()) {
+            match ProviderService::extract_common_config_snippet(state, app_type) {
                 Ok(snippet) if !snippet.is_empty() && snippet != "{}" => {
                     let _ = state
                         .db
@@ -130,7 +130,7 @@ fn import_default_config_internal(state: &AppState, app_type: AppType) -> Result
             }
         }
 
-        ProviderService::migrate_legacy_common_config_usage_if_needed(state, app_type.clone())?;
+        ProviderService::migrate_legacy_common_config_usage_if_needed(state, app_type)?;
     }
 
     Ok(imported)
@@ -166,8 +166,7 @@ pub async fn queryProviderUsage(
     // 两种都要把"失败"写进 UsageCache 并刷新托盘，让 format_script_summary 的
     // success 守卫生效、suffix 自然消失，避免旧 success 快照长期滞留。
     // 同时保持原始 Err 返回给前端 React Query 的 onError 回调，不吞错误。
-    let inner =
-        query_provider_usage_inner(&state, &copilot_state, app_type.clone(), &providerId).await;
+    let inner = query_provider_usage_inner(&state, &copilot_state, app_type, &providerId).await;
     let snapshot = match &inner {
         Ok(r) => r.clone(),
         Err(err_msg) => crate::provider::UsageResult {

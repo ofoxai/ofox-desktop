@@ -417,12 +417,11 @@ pub(crate) fn remove_patch_from_settings(
                             ))
                         })?
                     };
-                    let patch_doc = patch_toml.parse::<DocumentMut>().map_err(|e| {
-                        AppError::Message(format!("Invalid Codex patch TOML: {e}"))
-                    })?;
+                    let patch_doc = patch_toml
+                        .parse::<DocumentMut>()
+                        .map_err(|e| AppError::Message(format!("Invalid Codex patch TOML: {e}")))?;
                     remove_toml_table_like(target_doc.as_table_mut(), patch_doc.as_table());
-                    result_obj
-                        .insert("config".to_string(), Value::String(target_doc.to_string()));
+                    result_obj.insert("config".to_string(), Value::String(target_doc.to_string()));
                 }
             }
             Ok(result)
@@ -430,9 +429,7 @@ pub(crate) fn remove_patch_from_settings(
         AppType::Gemini => {
             // patch = { "env": {...} }
             let mut result = settings.clone();
-            if let (Some(target_env), Some(patch_env)) =
-                (result.get_mut("env"), patch.get("env"))
-            {
+            if let (Some(target_env), Some(patch_env)) = (result.get_mut("env"), patch.get("env")) {
                 json_deep_remove(target_env, patch_env);
             }
             Ok(result)
