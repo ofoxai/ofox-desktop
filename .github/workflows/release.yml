@@ -53,10 +53,10 @@ jobs:
             r2_prefix: release/mac/arm
             ext: dmg
           # ── 预留：Windows ──────────────────────────────────
-          # - platform: windows-x86_64
-          #   os: windows-2022
-          #   r2_prefix: release/windows/x64
-          #   ext: msi
+          - platform: windows-x86_64
+            os: windows-2022
+            r2_prefix: release/windows/x64
+            ext: msi
           # ── 预留：Linux ────────────────────────────────────
           # - platform: linux-x86_64
           #   os: ubuntu-22.04
@@ -184,6 +184,34 @@ jobs:
 
           rm -f "$CERT_PATH"
 
+      # Windows 产物必须在构建时导入可用的 PFX，不允许无签名 MSI 进入发布阶段。
+      - name: Import Windows signing certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE) -or
+              [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD) -or
+              [string]::IsNullOrWhiteSpace($env:WINDOWS_TIMESTAMP_URL)) {
+            throw 'Windows signing secrets are required: WINDOWS_CERTIFICATE, WINDOWS_CERTIFICATE_PASSWORD, WINDOWS_TIMESTAMP_URL'
+          }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'ofox-windows-signing.pfx'
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $password |
+            Select-Object -First 1
+          if (-not $cert -or -not $cert.HasPrivateKey) {
+            throw 'Imported Windows signing certificate has no private key'
+          }
+          "WINDOWS_CERT_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Remove-Item $pfxPath -Force
+          Write-Host "Imported Windows signing certificate: $($cert.Subject)"
+
       # ── macOS：构建（Tauri 内部完成 codesign + 公证 + staple .app）──
       - name: Build (macOS)
         if: runner.os == 'macOS'
@@ -207,6 +235,49 @@ jobs:
             echo "⚠️ 失败，${attempt}0 秒后重试..."
             sleep "${attempt}0"
           done
+
+      - name: Build signed MSI (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 60
+        env:
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $configPath = Join-Path $env:RUNNER_TEMP 'tauri.windows.signing.conf.json'
+          @{
+            bundle = @{
+              windows = @{
+                certificateThumbprint = $env:WINDOWS_CERT_THUMBPRINT
+                digestAlgorithm = 'sha256'
+                timestampUrl = $env:WINDOWS_TIMESTAMP_URL
+              }
+            }
+          } | ConvertTo-Json -Depth 5 | Set-Content -Path $configPath -Encoding utf8
+
+          pnpm tauri build --bundles msi --config $configPath
+
+      - name: Verify and prepare MSI (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Get-Item 'src-tauri/target/release/ofox-desktop.exe'
+          $msi = Get-ChildItem 'src-tauri/target/release/bundle/msi/*.msi' | Select-Object -First 1
+          if (-not $msi) { throw 'MSI artifact was not produced' }
+
+          foreach ($artifact in @($exe, $msi)) {
+            $signature = Get-AuthenticodeSignature $artifact.FullName
+            if ($signature.Status -ne 'Valid') {
+              throw "Invalid Authenticode signature for $($artifact.FullName): $($signature.StatusMessage)"
+            }
+            Write-Host "Valid signature: $($artifact.Name) / $($signature.SignerCertificate.Subject)"
+          }
+
+          New-Item -ItemType Directory -Force dist-release | Out-Null
+          Copy-Item $msi.FullName "dist-release/ofox_desktop_$env:VERSION.msi"
 
       # ── macOS：公证 dmg 容器本身 ─────────────────────────────
       # 关键坑：Tauri 只公证并 staple 了 dmg **内含的 .app**，dmg 文件本身没
@@ -291,6 +362,16 @@ jobs:
         shell: bash
         run: |
           security delete-keychain "$RUNNER_TEMP/build.keychain-db" 2>/dev/null || true
+
+      - name: Clean up Windows certificate
+        if: runner.os == 'Windows' && always()
+        shell: pwsh
+        run: |
+          if ($env:WINDOWS_CERT_THUMBPRINT) {
+            Remove-Item "Cert:\CurrentUser\My\$env:WINDOWS_CERT_THUMBPRINT" -Force -ErrorAction SilentlyContinue
+          }
+          Remove-Item (Join-Path $env:RUNNER_TEMP 'tauri.windows.signing.conf.json') -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $env:RUNNER_TEMP 'ofox-windows-signing.pfx') -Force -ErrorAction SilentlyContinue
 
   # ─────────────────────────────────────────────────────────────
   # 发布：汇总各平台产物 → 上传 R2 → 合并更新 latest.json

@@ -1009,6 +1009,9 @@ fn scan_cli_version(tool: &str) -> (Option<String>, Option<String>) {
 
     #[cfg(target_os = "windows")]
     {
+        if let Some(prefix) = super::windows_installer::managed_npm_prefix() {
+            push_unique_path(&mut search_paths, prefix);
+        }
         if let Some(appdata) = dirs::data_dir() {
             push_unique_path(&mut search_paths, appdata.join("npm"));
         }
@@ -1064,7 +1067,11 @@ fn scan_cli_version(tool: &str) -> (Option<String>, Option<String>) {
     }
 
     #[cfg(target_os = "windows")]
-    let current_path = effective_windows_path();
+    let current_path = if let Some(node_dir) = super::windows_installer::managed_node_dir() {
+        format!("{};{}", node_dir.display(), effective_windows_path())
+    } else {
+        effective_windows_path()
+    };
     #[cfg(not(target_os = "windows"))]
     let current_path = std::env::var("PATH").unwrap_or_default();
 

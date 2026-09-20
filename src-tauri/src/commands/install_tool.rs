@@ -8,19 +8,21 @@
 //!     的状态行，详细 npm 日志在那个新开的 Terminal 窗口里给用户看。
 //!   - 结束时 emit `install-tool-done`，前端 hook 据此触发重新扫描工具版本。
 //!
-//! 仅 macOS：脚本入口 `init.sh` 第一行就 `uname -m != arm64 → exit 1`，
-//! Rust 这边也用 cfg 提前拦——Intel Mac / Windows 用户得到清晰错误。
+//! macOS 保留原有 Python 安装器；Windows 使用 Rust/PowerShell 原生后端，
+//! 不依赖预装 Python 或外部终端。
 
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 use std::process::Stdio;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use serde_json::json;
 use tauri::AppHandle;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use tauri::Emitter;
 #[cfg(target_os = "macos")]
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 /// 与 `scripts/installer/app/steps.py::TOOL_STEPS` 字典 key 对齐。
 const ALLOWED_TOOLS: &[&str] = &[
@@ -37,10 +39,21 @@ pub async fn install_tool(
         return Err(format!("不支持的工具: {tool_id}"));
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = (app, skip_env);
-        Err("工具自动安装目前仅支持 macOS arm64".into())
+        Err("工具自动安装目前支持 macOS arm64 和 Windows x64".into())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = skip_env;
+        let code = super::windows_installer::install_windows_tool(&app, &tool_id).await?;
+        let _ = app.emit(
+            "install-tool-done",
+            json!({ "tool": tool_id, "code": code }),
+        );
+        Ok(code)
     }
 
     #[cfg(target_os = "macos")]

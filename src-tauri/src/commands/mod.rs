@@ -34,6 +34,7 @@ mod stream_check;
 mod subscription;
 mod sync_support;
 mod windows_codex_app;
+mod windows_installer;
 
 mod lightweight;
 pub(crate) mod manage_tool;

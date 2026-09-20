@@ -39,6 +39,11 @@ pub async fn launch_tool_cli(_app: AppHandle, tool_id: String) -> Result<(), Str
         return Ok(());
     }
 
+    #[cfg(target_os = "windows")]
+    if tool_id == "codex" && super::windows_codex_app::launch_codex_desktop_app()? {
+        return Ok(());
+    }
+
     let bin = resolve_cli_bin(&tool_id).ok_or_else(|| format!("工具 {tool_id} 不支持一键打开"))?;
 
     // `exec "$SHELL" -l -i -c "…"`：交给用户的 login shell 处理 rc 加载，
@@ -55,7 +60,8 @@ pub async fn launch_tool_cli(_app: AppHandle, tool_id: String) -> Result<(), Str
     );
 
     #[cfg(target_os = "windows")]
-    let command_line = bin.to_string();
+    let command_line = super::windows_installer::managed_cli_launch_command(bin)
+        .unwrap_or_else(|| bin.to_string());
 
     launch_terminal_running(&command_line, &format!("launch_{tool_id}"))
 }
