@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { AlertTriangle, ChevronDown, ChevronUp, X, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import type { EnvConflict } from "@/types/env";
+import { envConflictKey, type EnvConflict } from "@/types/env";
 import { deleteEnvVars } from "@/lib/api/env";
 import { toast } from "sonner";
 import {
@@ -52,9 +52,7 @@ export function EnvWarningBanner({
     if (selectedConflicts.size === conflicts.length) {
       setSelectedConflicts(new Set());
     } else {
-      setSelectedConflicts(
-        new Set(conflicts.map((c) => `${c.varName}:${c.sourcePath}`)),
-      );
+      setSelectedConflicts(new Set(conflicts.map(envConflictKey)));
     }
   };
 
@@ -64,7 +62,7 @@ export function EnvWarningBanner({
 
     try {
       const conflictsToDelete = conflicts.filter((c) =>
-        selectedConflicts.has(`${c.varName}:${c.sourcePath}`),
+        selectedConflicts.has(envConflictKey(c)),
       );
 
       if (conflictsToDelete.length === 0) {
@@ -105,7 +103,10 @@ export function EnvWarningBanner({
         return t("env.source.systemEnv");
       }
     } else {
-      return conflict.sourcePath;
+      const location = `${conflict.sourcePath}${conflict.lineNumber ? `:${conflict.lineNumber}` : ""}`;
+      return conflict.environment === "wsl"
+        ? `[WSL: ${conflict.wslDistro ?? "unknown"}] ${location}`
+        : location;
     }
   };
 
@@ -176,7 +177,7 @@ export function EnvWarningBanner({
 
                   <div className="max-h-96 overflow-y-auto space-y-2">
                     {conflicts.map((conflict) => {
-                      const key = `${conflict.varName}:${conflict.sourcePath}`;
+                      const key = envConflictKey(conflict);
                       return (
                         <div
                           key={key}

@@ -4,7 +4,8 @@
     "windows": [
       {
         "label": "main",
-        "title": "CC Switch",
+        "title": "Ofox Desktop",
+        "icon": "icons/icon.png",
         "titleBarStyle": "Visible",
         "visible": false,
         "minWidth": 900,
