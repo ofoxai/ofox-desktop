@@ -34,6 +34,11 @@ fn resolve_cli_bin(tool_id: &str) -> Option<&'static str> {
 
 #[tauri::command]
 pub async fn launch_tool_cli(_app: AppHandle, tool_id: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if tool_id == "codex" && super::codex_app::launch_codex_desktop_app()? {
+        return Ok(());
+    }
+
     let bin = resolve_cli_bin(&tool_id).ok_or_else(|| format!("工具 {tool_id} 不支持一键打开"))?;
 
     // `exec "$SHELL" -l -i -c "…"`：交给用户的 login shell 处理 rc 加载，

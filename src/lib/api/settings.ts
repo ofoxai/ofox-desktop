@@ -205,6 +205,7 @@ export const settingsApi = {
       error: string | null;
       env_type: "windows" | "wsl" | "macos" | "linux" | "unknown";
       wsl_distro: string | null;
+      installationKind: "desktopApp" | "cli";
     }>
   > {
     return await invoke("get_tool_versions", {

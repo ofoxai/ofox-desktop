@@ -45,6 +45,14 @@ pub async fn install_tool(
 
     #[cfg(target_os = "macos")]
     {
+        if tool_id == "codex" {
+            let code = super::codex_app::install_codex_desktop_app(&app).await?;
+            let _ = app.emit(
+                "install-tool-done",
+                json!({ "tool": tool_id, "code": code }),
+            );
+            return Ok(code);
+        }
         run_installer(app, tool_id, skip_env.unwrap_or(false)).await
     }
 }

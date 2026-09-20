@@ -58,6 +58,7 @@ interface ToolInfo {
   name: string;
   version: string | null;
   error: string | null;
+  installationKind: "desktopApp" | "cli";
 }
 
 type ToolStatus = "active" | "idle" | "error";
