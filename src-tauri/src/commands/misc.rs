@@ -195,6 +195,7 @@ pub struct ToolVersion {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 enum InstallationKind {
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     DesktopApp,
     Cli,
 }
