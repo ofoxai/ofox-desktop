@@ -163,42 +163,77 @@ pub(crate) fn managed_cli_launch_command(tool: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn emit_progress(
-    app: &AppHandle,
-    tool: &str,
+struct InstallProgress<'a> {
     step: u64,
     total: u64,
-    name: &str,
-    phase: &str,
-    detail: Option<&str>,
-    downloaded: Option<u64>,
+    name: &'a str,
+    phase: &'a str,
+    detail: Option<&'a str>,
+    downloaded_bytes: Option<u64>,
     total_bytes: Option<u64>,
     elapsed: Option<u64>,
-) {
-    let mut value = serde_json::json!({
-        "type": "ofox-install-progress",
-        "step": step,
-        "total": total,
-        "name": name,
-        "phase": phase,
-    });
-    let object = value.as_object_mut().expect("progress is an object");
-    if let Some(detail) = detail {
-        object.insert("detail".into(), serde_json::json!(detail));
-    }
-    if let Some(downloaded) = downloaded {
-        object.insert("downloadedBytes".into(), serde_json::json!(downloaded));
-    }
-    if let Some(total_bytes) = total_bytes {
-        object.insert("totalBytes".into(), serde_json::json!(total_bytes));
-        if total_bytes > 0 {
-            object.insert(
-                "percent".into(),
-                serde_json::json!((downloaded.unwrap_or(0) * 100 / total_bytes).min(100)),
-            );
+}
+
+#[cfg(target_os = "windows")]
+impl<'a> InstallProgress<'a> {
+    fn new(step: u64, total: u64, name: &'a str, phase: &'a str) -> Self {
+        Self {
+            step,
+            total,
+            name,
+            phase,
+            detail: None,
+            downloaded_bytes: None,
+            total_bytes: None,
+            elapsed: None,
         }
     }
-    if let Some(elapsed) = elapsed {
+
+    fn detail(mut self, detail: &'a str) -> Self {
+        self.detail = Some(detail);
+        self
+    }
+
+    fn download(mut self, downloaded_bytes: u64, total_bytes: Option<u64>) -> Self {
+        self.downloaded_bytes = Some(downloaded_bytes);
+        self.total_bytes = total_bytes;
+        self
+    }
+
+    fn elapsed(mut self, elapsed: u64) -> Self {
+        self.elapsed = Some(elapsed);
+        self
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn emit_progress(app: &AppHandle, tool: &str, progress: InstallProgress<'_>) {
+    let mut value = serde_json::json!({
+        "type": "ofox-install-progress",
+        "step": progress.step,
+        "total": progress.total,
+        "name": progress.name,
+        "phase": progress.phase,
+    });
+    let object = value.as_object_mut().expect("progress is an object");
+    if let Some(detail) = progress.detail {
+        object.insert("detail".into(), serde_json::json!(detail));
+    }
+    if let Some(downloaded) = progress.downloaded_bytes {
+        object.insert("downloadedBytes".into(), serde_json::json!(downloaded));
+    }
+    if let Some(total_bytes) = progress.total_bytes {
+        object.insert("totalBytes".into(), serde_json::json!(total_bytes));
+        if let Some(percent) = progress
+            .downloaded_bytes
+            .unwrap_or(0)
+            .saturating_mul(100)
+            .checked_div(total_bytes)
+        {
+            object.insert("percent".into(), serde_json::json!(percent.min(100)));
+        }
+    }
+    if let Some(elapsed) = progress.elapsed {
         object.insert("elapsed".into(), serde_json::json!(elapsed));
     }
     let _ = app.emit(
@@ -293,14 +328,7 @@ async fn install_official_powershell_tool(app: &AppHandle, tool: &str) -> Result
     emit_progress(
         app,
         tool,
-        1,
-        2,
-        "官方安装器",
-        "start",
-        Some(url),
-        None,
-        None,
-        None,
+        InstallProgress::new(1, 2, "官方安装器", "start").detail(url),
     );
     let script = format!(
         "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; \
@@ -311,31 +339,13 @@ async fn install_official_powershell_tool(app: &AppHandle, tool: &str) -> Result
         emit_progress(
             app,
             tool,
-            1,
-            2,
-            "官方安装器",
-            "failed",
-            Some(&err),
-            None,
-            None,
-            None,
+            InstallProgress::new(1, 2, "官方安装器", "failed").detail(&err),
         );
         return Err(err);
     }
-    emit_progress(
-        app,
-        tool,
-        1,
-        2,
-        "官方安装器",
-        "done",
-        None,
-        None,
-        None,
-        None,
-    );
+    emit_progress(app, tool, InstallProgress::new(1, 2, "官方安装器", "done"));
 
-    emit_progress(app, tool, 2, 2, "验证安装", "start", None, None, None, None);
+    emit_progress(app, tool, InstallProgress::new(2, 2, "验证安装", "start"));
     let verify = format!(
         "$p=@([Environment]::GetEnvironmentVariable('Path','Process'), \
          [Environment]::GetEnvironmentVariable('Path','User'), \
@@ -346,18 +356,11 @@ async fn install_official_powershell_tool(app: &AppHandle, tool: &str) -> Result
         emit_progress(
             app,
             tool,
-            2,
-            2,
-            "验证安装",
-            "failed",
-            Some(&err),
-            None,
-            None,
-            None,
+            InstallProgress::new(2, 2, "验证安装", "failed").detail(&err),
         );
         return Err(err);
     }
-    emit_progress(app, tool, 2, 2, "验证安装", "done", None, None, None, None);
+    emit_progress(app, tool, InstallProgress::new(2, 2, "验证安装", "done"));
     Ok(0)
 }
 
@@ -367,14 +370,8 @@ async fn install_codex_store_app(app: &AppHandle) -> Result<i32, String> {
         emit_progress(
             app,
             "codex",
-            1,
-            1,
-            "Microsoft Store",
-            "skipped",
-            Some("ChatGPT/Codex App 已安装"),
-            None,
-            None,
-            None,
+            InstallProgress::new(1, 1, "Microsoft Store", "skipped")
+                .detail("ChatGPT/Codex App 已安装"),
         );
         return Ok(0);
     }
@@ -392,14 +389,9 @@ async fn install_codex_store_app(app: &AppHandle) -> Result<i32, String> {
             emit_progress(
                 app,
                 "codex",
-                1,
-                1,
-                "Microsoft Store",
-                "done",
-                Some("ChatGPT/Codex App 安装完成"),
-                None,
-                None,
-                Some(started.elapsed().as_secs()),
+                InstallProgress::new(1, 1, "Microsoft Store", "done")
+                    .detail("ChatGPT/Codex App 安装完成")
+                    .elapsed(started.elapsed().as_secs()),
             );
             return Ok(0);
         }
@@ -409,28 +401,18 @@ async fn install_codex_store_app(app: &AppHandle) -> Result<i32, String> {
             emit_progress(
                 app,
                 "codex",
-                1,
-                1,
-                "Microsoft Store",
-                "failed",
-                Some(err),
-                None,
-                None,
-                Some(elapsed),
+                InstallProgress::new(1, 1, "Microsoft Store", "failed")
+                    .detail(err)
+                    .elapsed(elapsed),
             );
             return Err(err.to_string());
         }
         emit_progress(
             app,
             "codex",
-            1,
-            1,
-            "Microsoft Store",
-            "waiting",
-            Some("请在 Microsoft Store 中完成安装"),
-            None,
-            None,
-            Some(elapsed),
+            InstallProgress::new(1, 1, "Microsoft Store", "waiting")
+                .detail("请在 Microsoft Store 中完成安装")
+                .elapsed(elapsed),
         );
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
@@ -518,14 +500,8 @@ async fn ensure_managed_node(app: &AppHandle, tool: &str) -> Result<PathBuf, Str
         emit_progress(
             app,
             tool,
-            1,
-            3,
-            "Node.js LTS",
-            "skipped",
-            Some(&format!("{} 已就绪", release.version)),
-            None,
-            None,
-            None,
+            InstallProgress::new(1, 3, "Node.js LTS", "skipped")
+                .detail(&format!("{} 已就绪", release.version)),
         );
         return Ok(node_dir);
     }
@@ -579,14 +555,9 @@ async fn ensure_managed_node(app: &AppHandle, tool: &str) -> Result<PathBuf, Str
                 emit_progress(
                     app,
                     tool,
-                    1,
-                    3,
-                    "Node.js LTS",
-                    "waiting",
-                    Some(&release.version),
-                    Some(downloaded),
-                    total_bytes,
-                    None,
+                    InstallProgress::new(1, 3, "Node.js LTS", "waiting")
+                        .detail(&release.version)
+                        .download(downloaded, total_bytes),
                 );
                 last_percent = percent;
             }
@@ -637,14 +608,7 @@ async fn ensure_managed_node(app: &AppHandle, tool: &str) -> Result<PathBuf, Str
     emit_progress(
         app,
         tool,
-        1,
-        3,
-        "Node.js LTS",
-        "done",
-        Some(&release.version),
-        None,
-        None,
-        None,
+        InstallProgress::new(1, 3, "Node.js LTS", "done").detail(&release.version),
     );
     Ok(node_dir)
 }
@@ -724,14 +688,7 @@ async fn install_npm_tool(app: &AppHandle, tool: &str) -> Result<i32, String> {
     emit_progress(
         app,
         tool,
-        1,
-        3,
-        "Node.js LTS",
-        "start",
-        Some("查询官方 LTS 清单"),
-        None,
-        None,
-        None,
+        InstallProgress::new(1, 3, "Node.js LTS", "start").detail("查询官方 LTS 清单"),
     );
     let node_dir = ensure_managed_node(app, tool).await?;
     let local_data = local_app_data_dir()?;
@@ -742,14 +699,7 @@ async fn install_npm_tool(app: &AppHandle, tool: &str) -> Result<i32, String> {
     emit_progress(
         app,
         tool,
-        2,
-        3,
-        "npm 安装",
-        "start",
-        Some(package),
-        None,
-        None,
-        None,
+        InstallProgress::new(2, 3, "npm 安装", "start").detail(package),
     );
     let npm = node_dir.join("npm.cmd");
     let npm_version_output = std::process::Command::new(&npm)
@@ -782,31 +732,17 @@ async fn install_npm_tool(app: &AppHandle, tool: &str) -> Result<i32, String> {
         emit_progress(
             app,
             tool,
-            2,
-            3,
-            "npm 安装",
-            "failed",
-            Some(&err),
-            None,
-            None,
-            None,
+            InstallProgress::new(2, 3, "npm 安装", "failed").detail(&err),
         );
         return Err(err);
     }
     emit_progress(
         app,
         tool,
-        2,
-        3,
-        "npm 安装",
-        "done",
-        Some(package),
-        None,
-        None,
-        None,
+        InstallProgress::new(2, 3, "npm 安装", "done").detail(package),
     );
 
-    emit_progress(app, tool, 3, 3, "验证安装", "start", None, None, None, None);
+    emit_progress(app, tool, InstallProgress::new(3, 3, "验证安装", "start"));
     let verify_line = managed_cli_launch_command(tool)
         .map(|command| format!("{command} --version"))
         .ok_or_else(|| format!("npm 未生成 {tool} 启动器"))?;
@@ -817,7 +753,7 @@ async fn install_npm_tool(app: &AppHandle, tool: &str) -> Result<i32, String> {
         .env("PATH", &path);
     run_command(app, tool, &mut verify, "安装验证").await?;
     persist_user_path(&node_dir, &npm_prefix)?;
-    emit_progress(app, tool, 3, 3, "验证安装", "done", None, None, None, None);
+    emit_progress(app, tool, InstallProgress::new(3, 3, "验证安装", "done"));
     Ok(0)
 }
 
