@@ -102,7 +102,9 @@ export function GeminiFormFields({
     setOfoxModels(models);
     try {
       localStorage.setItem(OFOX_CACHE_KEY, JSON.stringify(models));
-    } catch { /* ignore quota errors */ }
+    } catch {
+      /* ignore quota errors */
+    }
   }, []);
 
   const handleOfoxFetchModels = useCallback(() => {

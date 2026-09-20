@@ -22,9 +22,9 @@ mod ofox_auth;
 // access_token 不再被当 LLM key 写进 ofox-* provider 的 settings_config。
 // 历史实现见 git log。
 mod ofox_apex;
+mod ofox_api_keys;
 mod ofox_endpoints;
 mod ofox_secret;
-mod ofox_api_keys;
 mod openclaw_config;
 mod opencode_config;
 mod panic_hook;
@@ -504,7 +504,7 @@ pub fn run() {
             {
                 match crate::services::provider::import_default_config(
                     &app_state,
-                    app_type.clone(),
+                    app_type,
                 ) {
                     Ok(true) => log::info!(
                         "✓ Imported live config for {} as default provider",
@@ -684,7 +684,7 @@ pub fn run() {
                 ] {
                     match crate::services::prompt::PromptService::import_from_file_on_first_launch(
                         &app_state,
-                        app.clone(),
+                        app,
                     ) {
                         Ok(count) if count > 0 => {
                             log::info!("✓ Imported {count} prompt(s) for {}", app.as_str());
@@ -1657,9 +1657,12 @@ pub fn run() {
                         let url_str = url.to_string();
                         log::info!("RunEvent::Opened with URL: {url_str}");
 
-                        if url_str.starts_with("ccswitch://") || url_str.starts_with("ofoxswitch://") {
+                        if url_str.starts_with("ccswitch://")
+                            || url_str.starts_with("ofoxswitch://")
+                        {
                             if crate::lightweight::is_lightweight_mode() {
-                                if let Err(e) = crate::lightweight::exit_lightweight_mode(app_handle)
+                                if let Err(e) =
+                                    crate::lightweight::exit_lightweight_mode(app_handle)
                                 {
                                     log::error!("退出轻量模式重建窗口失败: {e}");
                                 }
@@ -1750,15 +1753,14 @@ fn initialize_common_config_snippets(state: &store::AppState) {
             continue;
         }
 
-        let settings = match crate::services::provider::ProviderService::read_live_settings(
-            app_type.clone(),
-        ) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
+        let settings =
+            match crate::services::provider::ProviderService::read_live_settings(app_type) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
 
         match crate::services::provider::ProviderService::extract_common_config_snippet_from_settings(
-            app_type.clone(),
+            app_type,
             &settings,
         ) {
             Ok(snippet) if !snippet.is_empty() && snippet != "{}" => {
@@ -1801,7 +1803,7 @@ fn initialize_common_config_snippets(state: &store::AppState) {
         ] {
             if let Err(e) = crate::services::provider::ProviderService::migrate_legacy_common_config_usage_if_needed(
                 state,
-                app_type.clone(),
+                app_type,
             ) {
                 log::warn!(
                     "✗ Failed to migrate legacy common-config usage for {}: {e}",

@@ -143,8 +143,7 @@ export function ProviderPresetSelector({
     .flatMap((cat) => groupedPresets[cat] ?? [])
     .find(
       (entry) =>
-        "providerType" in entry.preset &&
-        entry.preset.providerType === "ofox",
+        "providerType" in entry.preset && entry.preset.providerType === "ofox",
     );
 
   const renderPresetButton = (entry: PresetEntry, category?: string) => {

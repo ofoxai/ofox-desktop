@@ -190,12 +190,7 @@ pub struct ToolVersion {
 }
 
 const VALID_TOOLS: [&str; 6] = [
-    "claude",
-    "codex",
-    "gemini",
-    "opencode",
-    "openclaw",
-    "hermes",
+    "claude", "codex", "gemini", "opencode", "openclaw", "hermes",
 ];
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -280,12 +275,7 @@ pub async fn get_tool_versions(
             let pref = wsl_shell_by_tool.as_ref().and_then(|m| m.get(tool));
             let tool_wsl_shell = pref.and_then(|p| p.wsl_shell.as_deref());
             let tool_wsl_shell_flag = pref.and_then(|p| p.wsl_shell_flag.as_deref());
-            get_single_tool_version_impl(
-                tool,
-                tool_wsl_shell,
-                tool_wsl_shell_flag,
-                include_latest,
-            )
+            get_single_tool_version_impl(tool, tool_wsl_shell, tool_wsl_shell_flag, include_latest)
         });
 
         let results = futures::future::join_all(futs).await;
@@ -857,7 +847,7 @@ pub async fn open_provider_terminal(
     let launch_cwd = resolve_launch_cwd(cwd)?;
 
     // 获取提供商配置
-    let providers = ProviderService::list(state.inner(), app_type.clone())
+    let providers = ProviderService::list(state.inner(), app_type)
         .map_err(|e| format!("获取提供商列表失败: {e}"))?;
 
     let provider = providers

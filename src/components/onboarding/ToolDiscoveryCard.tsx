@@ -57,8 +57,7 @@ const BASE =
 const STATE_CLASSES: Record<ToolStatus, string> = {
   scanning:
     "border-dashed border-border/40 bg-muted/20 animate-pulse cursor-default",
-  missing:
-    "border-border/40 bg-muted/30 opacity-50 cursor-not-allowed",
+  missing: "border-border/40 bg-muted/30 opacity-50 cursor-not-allowed",
   // installing：橙色虚线 + pulse，区别于 scanning 的"未知"灰色 pulse——这里
   // 是"正在被处理"，应该用品牌色而不是灰色。卡片不灰显，让用户看清楚是哪个
   // 工具在装。
@@ -112,7 +111,7 @@ export function ToolDiscoveryCard({
       ? "检测中…"
       : status === "installing"
         ? "安装中…"
-        : version ?? "未安装";
+        : (version ?? "未安装");
 
   // 外层 div 是 "卡片本体（motion.button）+ 角标按钮" 的共同定位锚——把
   // 角标渲染到 button **外部**有两个关键作用：

@@ -16,6 +16,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+#[cfg(test)]
+fn build_auth_http_client() -> Client {
+    Client::builder()
+        .no_proxy()
+        .build()
+        .expect("build direct test HTTP client")
+}
+
+#[cfg(not(test))]
+fn build_auth_http_client() -> Client {
+    Client::new()
+}
+
 // ==================== Constants ====================
 
 // OAuth IDP / OpenAPI 端点的具体 URL 现在由 [`crate::ofox_apex`] 单一开关：
@@ -94,6 +107,7 @@ pub struct OfoxUserInfo {
     ///   - role is `member` (endpoint returns 403)
     ///   - no spending limit with `period: "monthly"` is configured
     ///   - the endpoint is unreachable
+    ///
     /// In all of these cases the UI should render a `—` placeholder rather
     /// than a fake zero.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -225,7 +239,6 @@ struct LegacyOfoxTokenStore {
 
 #[derive(Debug, Clone)]
 struct PendingDeviceCode {
-    user_code: String,
     expires_at_ms: i64,
 }
 
@@ -311,7 +324,7 @@ impl OfoxAuthManager {
             auth_state: Arc::new(RwLock::new(OfoxAuthState::LoggedOut)),
             refresh_lock: tokio::sync::Mutex::new(()),
             pending_device_codes: Arc::new(RwLock::new(HashMap::new())),
-            http_client: Client::new(),
+            http_client: build_auth_http_client(),
             app_handle: Arc::new(RwLock::new(None)),
             secret_store,
         };
@@ -340,10 +353,7 @@ impl OfoxAuthManager {
             .http_client
             .post(crate::ofox_apex::device_auth_url())
             .header("Content-Type", "application/x-www-form-urlencoded")
-            .form(&[
-                ("client_id", client_id()),
-                ("scope", OFOX_SCOPES),
-            ])
+            .form(&[("client_id", client_id()), ("scope", OFOX_SCOPES)])
             .send()
             .await
             .map_err(|e| format!("Device authorization request failed: {e}"))?;
@@ -360,8 +370,7 @@ impl OfoxAuthManager {
             .map_err(|e| format!("Failed to parse device authorization response: {e}"))?;
 
         // Store pending device code
-        let expires_at_ms =
-            chrono::Utc::now().timestamp_millis() + (resp.expires_in as i64) * 1000;
+        let expires_at_ms = chrono::Utc::now().timestamp_millis() + (resp.expires_in as i64) * 1000;
         {
             let mut pending = self.pending_device_codes.write().await;
             // Clean expired entries
@@ -369,10 +378,7 @@ impl OfoxAuthManager {
             pending.retain(|_, entry| entry.expires_at_ms > now_ms);
             pending.insert(
                 resp.device_code.clone(),
-                PendingDeviceCode {
-                    user_code: resp.user_code.clone(),
-                    expires_at_ms,
-                },
+                PendingDeviceCode { expires_at_ms },
             );
         }
 
@@ -391,10 +397,7 @@ impl OfoxAuthManager {
     /// - `Err("slow_down")` — poll too fast, increase interval
     /// - `Err("access_denied")` — user denied
     /// - `Err("expired_token")` — device code expired
-    pub async fn poll_for_token(
-        &self,
-        device_code: &str,
-    ) -> Result<Option<OfoxUserInfo>, String> {
+    pub async fn poll_for_token(&self, device_code: &str) -> Result<Option<OfoxUserInfo>, String> {
         // Verify device code is pending
         {
             let pending = self.pending_device_codes.read().await;
@@ -467,10 +470,7 @@ impl OfoxAuthManager {
             // `emit("ofox-auth-restored")` below never ran, and the device
             // code (already consumed by the upstream) couldn't be polled
             // again. Net effect: the user got stuck on the spinner forever.
-            let user = match self
-                .get_user_info_from_api(&token_resp.access_token)
-                .await
-            {
+            let user = match self.get_user_info_from_api(&token_resp.access_token).await {
                 Ok(u) => u,
                 Err(e) => {
                     log::warn!(
@@ -526,7 +526,10 @@ impl OfoxAuthManager {
                 let _ = handle.emit("ofox-auth-token-refreshed", ());
             }
 
-            log::info!("[OfoxAuth] Device flow login successful for {:?}", user.email);
+            log::info!(
+                "[OfoxAuth] Device flow login successful for {:?}",
+                user.email
+            );
             return Ok(Some(user));
         }
 
@@ -644,7 +647,9 @@ impl OfoxAuthManager {
                     );
                     return Ok(());
                 }
-                log::warn!("[OfoxAuth] refresh_token rejected as invalid_grant, marking session expired");
+                log::warn!(
+                    "[OfoxAuth] refresh_token rejected as invalid_grant, marking session expired"
+                );
                 self.mark_expired().await;
                 return Err("invalid_grant".to_string());
             }
@@ -835,10 +840,7 @@ impl OfoxAuthManager {
     ///     configured.
     ///   - `Err(_)` for transport / parse failures — caller logs and moves on.
     #[allow(dead_code)]
-    async fn fetch_spending(
-        &self,
-        access_token: &str,
-    ) -> Result<Option<OfoxSpending>, String> {
+    async fn fetch_spending(&self, access_token: &str) -> Result<Option<OfoxSpending>, String> {
         let response = self
             .http_client
             .get(crate::ofox_apex::spending_limits_url())
@@ -871,8 +873,8 @@ impl OfoxAuthManager {
             .map_err(|e| format!("Failed to read spending body: {e}"))?;
         log::debug!("[OfoxAuth] /openapi/orgs/me/spending-limits response: {body}");
 
-        let parsed: SpendingLimitsResponse = serde_json::from_str(&body)
-            .map_err(|e| format!("Failed to parse spending: {e}"))?;
+        let parsed: SpendingLimitsResponse =
+            serde_json::from_str(&body).map_err(|e| format!("Failed to parse spending: {e}"))?;
 
         // Find the monthly entry. The endpoint can return multiple periods
         // (`daily`, `weekly`, `monthly`); we only surface monthly here.
@@ -1166,7 +1168,11 @@ impl OfoxAuthManager {
         if let Ok(mut ui) = self.user_info.try_write() {
             // 只在确实有 token 时才信任 metadata 里的 user——避免"未登录但
             // UI 显示历史邮箱"的尴尬。若两根 token 都没了，user 也清空。
-            *ui = if has_any_token { metadata.user.clone() } else { None };
+            *ui = if has_any_token {
+                metadata.user.clone()
+            } else {
+                None
+            };
         }
         if let Ok(mut s) = self.auth_state.try_write() {
             *s = initial_state;
@@ -1388,10 +1394,8 @@ mod tests {
 
         let store: Arc<dyn crate::ofox_secret::SecretStore> =
             Arc::new(crate::ofox_secret::InMemoryStore::new());
-        let manager = OfoxAuthManager::new_with_secret_store(
-            temp.path().to_path_buf(),
-            Arc::clone(&store),
-        );
+        let manager =
+            OfoxAuthManager::new_with_secret_store(temp.path().to_path_buf(), Arc::clone(&store));
 
         // 钥匙串里应该出现两根 token
         assert_eq!(
@@ -1445,10 +1449,8 @@ mod tests {
             .unwrap();
         let store: Arc<dyn crate::ofox_secret::SecretStore> = Arc::new(store);
 
-        let _manager = OfoxAuthManager::new_with_secret_store(
-            temp.path().to_path_buf(),
-            Arc::clone(&store),
-        );
+        let _manager =
+            OfoxAuthManager::new_with_secret_store(temp.path().to_path_buf(), Arc::clone(&store));
 
         // 钥匙串里的 fresh token 不被磁盘旧值覆盖
         assert_eq!(

@@ -268,6 +268,7 @@ mod tests {
     use tempfile::TempDir;
 
     struct TempHome {
+        _env_guard: std::sync::MutexGuard<'static, ()>,
         #[allow(dead_code)]
         dir: TempDir,
         original_home: Option<String>,
@@ -277,6 +278,7 @@ mod tests {
 
     impl TempHome {
         fn new() -> Self {
+            let env_guard = crate::config::test_env_lock();
             let dir = TempDir::new().expect("failed to create temp home");
             let original_home = env::var("HOME").ok();
             let original_userprofile = env::var("USERPROFILE").ok();
@@ -288,6 +290,7 @@ mod tests {
             crate::settings::reload_settings().expect("reload settings");
 
             Self {
+                _env_guard: env_guard,
                 dir,
                 original_home,
                 original_userprofile,

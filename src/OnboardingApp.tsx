@@ -49,18 +49,13 @@ export default function OnboardingApp({
       // we don't strand them on a screen that does nothing.
       return (
         <ToolDiscoveryPage
-          onBack={
-            initialStep === "login" ? () => setStep("login") : undefined
-          }
+          onBack={initialStep === "login" ? () => setStep("login") : undefined}
           onBind={handleBind}
         />
       );
     case "setupComplete":
       return (
-        <SetupCompletePage
-          boundCount={boundCount}
-          onOpenConsole={onComplete}
-        />
+        <SetupCompletePage boundCount={boundCount} onOpenConsole={onComplete} />
       );
   }
 }

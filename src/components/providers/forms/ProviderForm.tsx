@@ -1232,7 +1232,12 @@ export function ProviderForm({
     // 2. 所有工具：通过 activePreset.id 查找 presetEntries
     if (activePreset?.id) {
       const entry = presetEntries.find((e) => e.id === activePreset.id);
-      if (entry && "providerType" in entry.preset && entry.preset.providerType === "ofox") return true;
+      if (
+        entry &&
+        "providerType" in entry.preset &&
+        entry.preset.providerType === "ofox"
+      )
+        return true;
     }
     return false;
   })();
@@ -1244,9 +1249,7 @@ export function ProviderForm({
     JSON.stringify(initialData?.settingsConfig ?? "").includes("api.ofox.ai");
 
   const shouldShowSpeedTest =
-    category !== "official" &&
-    category !== "cloud_provider" &&
-    !isOfoxPreset;
+    category !== "official" && category !== "cloud_provider" && !isOfoxPreset;
 
   const {
     shouldShowApiKeyLink: shouldShowClaudeApiKeyLink,

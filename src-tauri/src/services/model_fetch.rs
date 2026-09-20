@@ -417,8 +417,14 @@ mod tests {
         ]}"#;
         let resp: ModelsResponse = serde_json::from_str(json).unwrap();
         let data = resp.data.unwrap();
-        assert_eq!(data[0].pricing.as_ref().and_then(|p| p.prompt.as_deref()), Some("0.000001"));
-        assert_eq!(data[1].pricing.as_ref().and_then(|p| p.prompt.as_deref()), Some("0.000005"));
+        assert_eq!(
+            data[0].pricing.as_ref().and_then(|p| p.prompt.as_deref()),
+            Some("0.000001")
+        );
+        assert_eq!(
+            data[1].pricing.as_ref().and_then(|p| p.prompt.as_deref()),
+            Some("0.000005")
+        );
     }
 
     #[test]

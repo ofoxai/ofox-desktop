@@ -53,7 +53,13 @@ fn init_ofox_providers_inserts_six_seeds() {
             .db
             .get_provider_by_id(expected_id, app_type.as_str())
             .expect("query provider")
-            .unwrap_or_else(|| panic!("OfoxAI seed '{}' should exist for {}", expected_id, app_type.as_str()));
+            .unwrap_or_else(|| {
+                panic!(
+                    "OfoxAI seed '{}' should exist for {}",
+                    expected_id,
+                    app_type.as_str()
+                )
+            });
 
         assert_eq!(provider.name, "OfoxAI");
         assert_eq!(provider.icon.as_deref(), Some("ofox"));
@@ -82,16 +88,10 @@ fn init_ofox_providers_is_idempotent() {
 
     let state = create_test_state().expect("create test state");
 
-    let first = state
-        .db
-        .init_default_ofox_providers()
-        .expect("first init");
+    let first = state.db.init_default_ofox_providers().expect("first init");
     assert_eq!(first, 6);
 
-    let second = state
-        .db
-        .init_default_ofox_providers()
-        .expect("second init");
+    let second = state.db.init_default_ofox_providers().expect("second init");
     assert_eq!(second, 0, "second call should be a no-op (flag is set)");
 
     // 确认仍然只有 6 条
@@ -124,10 +124,7 @@ fn has_non_official_seed_returns_false_with_only_seeds() {
         .db
         .init_default_official_providers()
         .expect("init official");
-    state
-        .db
-        .init_default_ofox_providers()
-        .expect("init ofox");
+    state.db.init_default_ofox_providers().expect("init ofox");
 
     // 对 Claude/Codex/Gemini（有官方+OfoxAI 种子），应返回 false
     for app_type in &[AppType::Claude, AppType::Codex, AppType::Gemini] {
@@ -169,10 +166,7 @@ fn has_non_official_seed_returns_true_with_user_provider() {
         .db
         .init_default_official_providers()
         .expect("init official");
-    state
-        .db
-        .init_default_ofox_providers()
-        .expect("init ofox");
+    state.db.init_default_ofox_providers().expect("init ofox");
 
     // 手动添加一个用户创建的供应商
     let user_provider = cc_switch_lib::Provider::with_id(
@@ -214,10 +208,7 @@ fn ofox_seed_settings_config_is_valid_json() {
     let _home = ensure_test_home();
 
     let state = create_test_state().expect("create test state");
-    state
-        .db
-        .init_default_ofox_providers()
-        .expect("init ofox");
+    state.db.init_default_ofox_providers().expect("init ofox");
 
     for (app_type, expected_id) in ALL_APP_TYPES.iter().zip(OFOX_SEED_IDS.iter()) {
         let provider = state

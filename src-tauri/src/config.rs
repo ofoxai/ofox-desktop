@@ -5,6 +5,62 @@ use std::path::{Path, PathBuf};
 
 use crate::error::AppError;
 
+/// Serialize tests that temporarily replace process-wide home-directory
+/// environment variables. A single crate-level lock is required because a
+/// module-local mutex cannot protect tests running in other modules.
+#[cfg(test)]
+pub fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+}
+
+/// Saves and restores selected environment variables while holding the shared
+/// test environment lock.
+#[cfg(test)]
+pub struct TestEnvGuard {
+    originals: Vec<(String, Option<std::ffi::OsString>)>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl TestEnvGuard {
+    pub fn new(keys: &[&str]) -> Self {
+        let lock = test_env_lock();
+        let originals = keys
+            .iter()
+            .map(|key| ((*key).to_string(), std::env::var_os(key)))
+            .collect();
+        Self {
+            originals,
+            _lock: lock,
+        }
+    }
+
+    pub fn set(&self, key: &str, value: impl AsRef<std::ffi::OsStr>) {
+        std::env::set_var(key, value);
+    }
+
+    pub fn remove(&self, key: &str) {
+        std::env::remove_var(key);
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestEnvGuard {
+    fn drop(&mut self) {
+        for (key, value) in self.originals.iter().rev() {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
+
 /// 获取用户主目录，带回退和日志
 ///
 /// ## Windows 注意事项

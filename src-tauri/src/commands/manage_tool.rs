@@ -26,8 +26,8 @@ use tokio::sync::RwLock;
 
 use crate::app_config::AppType;
 use crate::commands::ofox_auth::OfoxAuthState;
-use crate::ofox_auth::OfoxAuthManager;
 use crate::ofox_apex::gateway_base;
+use crate::ofox_auth::OfoxAuthManager;
 use crate::store::AppState;
 
 // Gateway base URL for the connectivity probe. Mirrors the dev/prod toggle in
@@ -78,10 +78,7 @@ pub fn get_tool_config_file_path(app: String) -> Result<String, String> {
 /// (unknown app, DB failure). The dialog treats `""` as "未设置" and
 /// still allows the user to save a new value.
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_active_ofox_model(
-    state: State<'_, AppState>,
-    app: String,
-) -> Result<String, String> {
+pub fn get_active_ofox_model(state: State<'_, AppState>, app: String) -> Result<String, String> {
     let app_type = AppType::from_str(&app).map_err(|e| format!("无效的应用类型: {e}"))?;
     read_active_model_for(&state, &app_type)
 }
@@ -94,10 +91,7 @@ pub fn get_active_ofox_model(
 /// Returns `Ok("")` when the active provider exists but has no model field
 /// configured (callers treat empty as "unset"); only surfaces `Err` for hard
 /// DB failures or when there is no active provider.
-fn read_active_model_for(
-    state: &AppState,
-    app_type: &AppType,
-) -> Result<String, String> {
+fn read_active_model_for(state: &AppState, app_type: &AppType) -> Result<String, String> {
     let app_str = app_type.as_str();
 
     let provider_id = state
@@ -112,7 +106,10 @@ fn read_active_model_for(
         .map_err(|e| format!("读取 {provider_id} 失败: {e}"))?
         .ok_or_else(|| format!("供应商 {provider_id} 不存在"))?;
 
-    Ok(read_model_from_settings(app_type, &provider.settings_config))
+    Ok(read_model_from_settings(
+        app_type,
+        &provider.settings_config,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -215,7 +212,10 @@ fn read_model_from_settings(app: &AppType, settings: &serde_json::Value) -> Stri
         AppType::Codex => {
             // Codex stores its config as a TOML *string* inside the
             // `config` key. Parse and read the top-level `model`.
-            let cfg_text = settings.get("config").and_then(|v| v.as_str()).unwrap_or("");
+            let cfg_text = settings
+                .get("config")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if cfg_text.is_empty() {
                 return String::new();
             }
@@ -316,17 +316,11 @@ fn write_model_into_settings(
 }
 
 /// Set or remove `settings.env.<key>`. Creates the `env` object if missing.
-fn set_env_string(
-    settings: &mut serde_json::Value,
-    key: &str,
-    value: &str,
-) -> Result<(), String> {
+fn set_env_string(settings: &mut serde_json::Value, key: &str, value: &str) -> Result<(), String> {
     if !settings.is_object() {
         *settings = serde_json::json!({});
     }
-    let root = settings
-        .as_object_mut()
-        .expect("ensured object above");
+    let root = settings.as_object_mut().expect("ensured object above");
     if !root.get("env").map(|v| v.is_object()).unwrap_or(false) {
         root.insert("env".into(), serde_json::json!({}));
     }

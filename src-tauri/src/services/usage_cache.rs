@@ -55,13 +55,13 @@ impl UsageCache {
         self.script
             .read()
             .ok()
-            .and_then(|r| r.get(&(app_type.clone(), provider_id.to_string())).map(f))
+            .and_then(|r| r.get(&(*app_type, provider_id.to_string())).map(f))
     }
 
     pub fn invalidate_script(&self, app_type: &AppType, provider_id: &str) {
         // 热路径会对每个禁用脚本的 provider 在托盘重建时调用一次：先走读锁
         // `contains_key` 快速放行"本来就不在缓存里"的常见情况，避免无谓的写锁升级。
-        let key = (app_type.clone(), provider_id.to_string());
+        let key = (*app_type, provider_id.to_string());
         if !self.script.read().is_ok_and(|r| r.contains_key(&key)) {
             return;
         }

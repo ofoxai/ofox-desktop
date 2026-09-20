@@ -15,7 +15,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { settingsApi } from "@/lib/api";
 import { proxyApi } from "@/lib/api/proxy";
-import { ofoxGetUserInfo, isOfoxBillingManager, type OfoxUserInfo } from "@/lib/api/ofoxAuth";
+import {
+  ofoxGetUserInfo,
+  isOfoxBillingManager,
+  type OfoxUserInfo,
+} from "@/lib/api/ofoxAuth";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
 import {
   ofoxAnalyticsUrl,
@@ -95,8 +99,8 @@ export default function ConsolePage({
   const { apex } = useOfoxApex();
   const { t } = useTranslation();
   // "打开"按钮：把工具 CLI 拉到系统终端里跑，进程独立于 Ofox
-  const { launching: launchingTools, launch: launchTool } = useToolLaunch(
-    () => toast.error("打开终端失败"),
+  const { launching: launchingTools, launch: launchTool } = useToolLaunch(() =>
+    toast.error("打开终端失败"),
   );
   // 应用自更新：底部栏提示按钮 + 首次发现弹窗。数据源 = UpdateContext
   // （自动检查走 R2 latest.json）。
@@ -196,9 +200,9 @@ export default function ConsolePage({
   // 命令（读 settings.json 的 ofoxApiKeys，`ApiKeyMeta.tool` 是小写工具名、
   // `keyId` 是服务端 id）。用于"数据统计"按钮拼 analytics URL；没拿到 id 的
   // 工具不展示该按钮（按钮要求 key id 作为查询参数）。
-  const [apiKeyIdByTool, setApiKeyIdByTool] = useState<
-    Record<string, string>
-  >({});
+  const [apiKeyIdByTool, setApiKeyIdByTool] = useState<Record<string, string>>(
+    {},
+  );
 
   // tool.id → 工具行二级信息要显示的 API key 标签。显示优先级：
   // user 起的 alias > 服务端返回的 keyStart 前缀（如 "sk-of-Ab12"）>
@@ -342,7 +346,10 @@ export default function ConsolePage({
       const entries = await Promise.all(
         ordered.map(async (id) => {
           try {
-            return [id, (await manageToolApi.getActiveModel(id)).trim()] as const;
+            return [
+              id,
+              (await manageToolApi.getActiveModel(id)).trim(),
+            ] as const;
           } catch {
             return [id, ""] as const;
           }
@@ -491,10 +498,7 @@ export default function ConsolePage({
           row (titleBarStyle: "Overlay") with comfortable margin on either side.
           The previous 28px (h-7) was tall enough technically but felt fiddly:
           users would aim for the visible "Ofox" text and miss. */}
-      <div
-        className="relative h-10 shrink-0"
-        data-tauri-drag-region="true"
-      >
+      <div className="relative h-10 shrink-0" data-tauri-drag-region="true">
         <div
           className="flex h-full items-center justify-center gap-1.5"
           data-tauri-drag-region="true"
@@ -541,9 +545,7 @@ export default function ConsolePage({
                     <span className="inline-flex items-center gap-1">
                       <Loader2 className="h-3 w-3 animate-spin" />
                       正在加载用户信息
-                      {userRetryAttempt > 0
-                        ? `（${userRetryAttempt}/3）`
-                        : "…"}
+                      {userRetryAttempt > 0 ? `（${userRetryAttempt}/3）` : "…"}
                     </span>
                   ) : userLoadFailed ? (
                     <button
@@ -582,9 +584,7 @@ export default function ConsolePage({
               </div>
               {isOfoxBillingManager(user) && (
                 <button
-                  onClick={() =>
-                    settingsApi.openExternal(ofoxWalletUrl(apex))
-                  }
+                  onClick={() => settingsApi.openExternal(ofoxWalletUrl(apex))}
                   className="rounded-lg bg-orange-500 px-4 py-1.5 text-[13px] font-medium text-white hover:bg-orange-600"
                 >
                   充值
@@ -685,10 +685,7 @@ export default function ConsolePage({
                           onClick={() =>
                             settingsApi
                               .openExternal(
-                                ofoxAnalyticsUrl(
-                                  apex,
-                                  apiKeyIdByTool[tool.id],
-                                ),
+                                ofoxAnalyticsUrl(apex, apiKeyIdByTool[tool.id]),
                               )
                               .catch((e) => {
                                 console.error(
@@ -780,7 +777,10 @@ export default function ConsolePage({
                   const target = updateInfo?.downloadUrl;
                   if (target) {
                     settingsApi.openExternal(target).catch((e) => {
-                      console.error("[ConsolePage] open download url failed", e);
+                      console.error(
+                        "[ConsolePage] open download url failed",
+                        e,
+                      );
                       toast.error(t("settings.openReleaseNotesFailed"));
                     });
                   }
@@ -810,9 +810,7 @@ export default function ConsolePage({
         </div>
         <div className="flex items-center gap-4">
           <button
-            onClick={() =>
-              settingsApi.openExternal(ofoxDashboardUrl(apex))
-            }
+            onClick={() => settingsApi.openExternal(ofoxDashboardUrl(apex))}
             className="text-[12px] text-orange-500 hover:text-orange-600 hover:underline"
           >
             查看详细用量 ↗
@@ -911,4 +909,3 @@ function formatBalance(value: number | null | undefined): string {
   if (typeof value !== "number" || Number.isNaN(value)) return "—";
   return `$${value.toFixed(2)}`;
 }
-

@@ -81,10 +81,9 @@ pub async fn ofox_set_apex(
     }
 
     // 5. 重新生成所有 ofox-* provider 的 settings_config
-    let updated = crate::database::dao::providers_seed::reseed_ofox_providers_with_current_apex(
-        &state.db,
-    )
-    .map_err(|e| format!("reseed providers 失败: {e}"))?;
+    let updated =
+        crate::database::dao::providers_seed::reseed_ofox_providers_with_current_apex(&state.db)
+            .map_err(|e| format!("reseed providers 失败: {e}"))?;
     log::info!("[OfoxApex] reseeded {updated} provider rows");
 
     // 6. 通知前端

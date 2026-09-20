@@ -1024,21 +1024,12 @@ pub fn read_memory_limits() -> Result<HermesMemoryLimits, AppError> {
 mod tests {
     use super::*;
     use serial_test::serial;
-    use std::sync::{Mutex, OnceLock};
-
-    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-    }
-
     /// Run a test with an isolated temp home directory.
     ///
     /// Saves and restores `CC_SWITCH_TEST_HOME` to avoid interfering with
     /// parallel tests in other modules.
     fn with_test_home<T>(test_fn: impl FnOnce() -> T) -> T {
-        let _guard = test_guard();
+        let _guard = crate::config::test_env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
         std::env::set_var("CC_SWITCH_TEST_HOME", tmp.path());
@@ -1834,7 +1825,10 @@ custom_providers:
             apply_switch_defaults("ofox-hermes", &settings).unwrap();
 
             let model = get_model_config().unwrap().unwrap();
-            assert_eq!(model.default.as_deref(), Some("minimax/minimax-m2.1-lightning"));
+            assert_eq!(
+                model.default.as_deref(),
+                Some("minimax/minimax-m2.1-lightning")
+            );
             assert_eq!(model.provider.as_deref(), Some("ofox-hermes"));
         });
     }

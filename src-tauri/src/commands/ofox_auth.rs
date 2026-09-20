@@ -83,18 +83,14 @@ pub async fn ofox_get_auth_status(
 
 /// Check if the user is currently authenticated with Ofox.
 #[tauri::command(rename_all = "camelCase")]
-pub async fn ofox_is_authenticated(
-    state: State<'_, OfoxAuthState>,
-) -> Result<bool, String> {
+pub async fn ofox_is_authenticated(state: State<'_, OfoxAuthState>) -> Result<bool, String> {
     let manager = state.0.read().await;
     Ok(manager.is_authenticated())
 }
 
 /// Log out from Ofox (clears tokens and persisted state).
 #[tauri::command(rename_all = "camelCase")]
-pub async fn ofox_logout(
-    state: State<'_, OfoxAuthState>,
-) -> Result<(), String> {
+pub async fn ofox_logout(state: State<'_, OfoxAuthState>) -> Result<(), String> {
     let mut manager = state.0.write().await;
     manager.logout();
     Ok(())
@@ -293,13 +289,7 @@ pub async fn ofox_bind_tool(
     ofox_state: State<'_, OfoxAuthState>,
     app: String,
 ) -> Result<(), String> {
-    bind_tool_to_ofox_internal(
-        &state.db,
-        &state.proxy_service,
-        &ofox_state.0,
-        &app,
-    )
-    .await
+    bind_tool_to_ofox_internal(&state.db, &state.proxy_service, &ofox_state.0, &app).await
 }
 
 /// Mirror of [`bind_tool_to_ofox_internal`] — undo the OfoxAI bind for `app`
@@ -362,9 +352,6 @@ pub async fn unbind_tool_from_ofox_internal(
 
 /// Tauri command wrapper — see [`unbind_tool_from_ofox_internal`].
 #[tauri::command(rename_all = "camelCase")]
-pub async fn ofox_unbind_tool(
-    state: State<'_, AppState>,
-    app: String,
-) -> Result<(), String> {
+pub async fn ofox_unbind_tool(state: State<'_, AppState>, app: String) -> Result<(), String> {
     unbind_tool_from_ofox_internal(&state.db, &state.proxy_service, &app).await
 }

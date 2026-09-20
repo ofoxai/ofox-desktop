@@ -784,6 +784,7 @@ mod tests {
     #[test]
     #[serial]
     fn periodic_maintenance_runs_even_when_auto_backup_disabled() -> Result<(), AppError> {
+        let _env_guard = crate::config::test_env_lock();
         let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
         let test_home =
             std::env::temp_dir().join("cc-switch-periodic-maintenance-backup-disabled-test");
