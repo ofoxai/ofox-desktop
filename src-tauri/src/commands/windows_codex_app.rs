@@ -63,6 +63,51 @@ pub(crate) fn detect_codex_desktop_app() -> Result<Option<String>, String> {
     parse_appx_identity(&stdout)
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) fn launch_codex_desktop_app() -> Result<bool, String> {
+    if detect_codex_desktop_app()?.is_none() {
+        return Ok(false);
+    }
+
+    let system_root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let powershell = system_root
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let script = concat!(
+        "$ErrorActionPreference='Stop';",
+        "try { Start-Process 'codex://' } ",
+        "catch { Start-Process 'shell:AppsFolder\\OpenAI.Codex_2p2nqsd0c76g0!App' }"
+    );
+    let output = Command::new(powershell)
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|err| format!("启动 ChatGPT/Codex Store App 失败: {err}"))?;
+
+    if output.status.success() {
+        Ok(true)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() {
+            "启动 ChatGPT/Codex Store App 失败".to_string()
+        } else {
+            format!("启动 ChatGPT/Codex Store App 失败: {stderr}")
+        })
+    }
+}
+
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn parse_appx_identity(output: &str) -> Result<Option<String>, String> {
     let line = output.lines().map(str::trim).find(|line| !line.is_empty());
