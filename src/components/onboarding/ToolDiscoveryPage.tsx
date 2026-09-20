@@ -8,6 +8,7 @@ interface ToolInfo {
   name: string;
   version: string | null;
   error: string | null;
+  installationKind: "desktopApp" | "cli";
 }
 
 interface ToolEntry {

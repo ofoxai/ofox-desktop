@@ -37,6 +37,7 @@ interface ToolVersion {
   error: string | null;
   env_type: "windows" | "wsl" | "macos" | "linux" | "unknown";
   wsl_distro: string | null;
+  installationKind: "desktopApp" | "cli";
 }
 
 const TOOL_NAMES = ["claude", "codex", "gemini", "opencode"] as const;

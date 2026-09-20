@@ -187,6 +187,17 @@ pub struct ToolVersion {
     env_type: String,
     /// 当 env_type 为 "wsl" 时，返回该工具绑定的 WSL distro（用于按 distro 探测 shells）
     wsl_distro: Option<String>,
+    /// 桌面 App 的日历版本与 CLI semver 不可直接比较，显式标记安装形态。
+    #[serde(rename = "installationKind")]
+    installation_kind: InstallationKind,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+enum InstallationKind {
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    DesktopApp,
+    Cli,
 }
 
 const VALID_TOOLS: [&str; 6] = [
@@ -302,6 +313,30 @@ async fn get_single_tool_version_impl(
     // 判断该工具的运行环境 & WSL distro（如有）
     let (env_type, wsl_distro) = tool_env_type_and_wsl_distro(tool);
 
+    #[cfg(target_os = "macos")]
+    let codex_app_error = if tool == "codex" {
+        match super::codex_app::detect_codex_desktop_app() {
+            Ok(Some(app)) => {
+                return ToolVersion {
+                    name: tool.to_string(),
+                    version: Some(app.version),
+                    latest_version: None,
+                    error: None,
+                    env_type,
+                    wsl_distro,
+                    installation_kind: InstallationKind::DesktopApp,
+                };
+            }
+            Ok(None) => None,
+            Err(err) => Some(err),
+        }
+    } else {
+        None
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    let codex_app_error: Option<String> = None;
+
     // 1. 获取本地版本
     let (local_version, local_error) = if let Some(distro) = wsl_distro.as_deref() {
         try_get_version_wsl(tool, distro, wsl_shell, wsl_shell_flag)
@@ -332,9 +367,10 @@ async fn get_single_tool_version_impl(
         name: tool.to_string(),
         version: local_version,
         latest_version,
-        error: local_error,
+        error: local_error.or(codex_app_error),
         env_type,
         wsl_distro,
+        installation_kind: InstallationKind::Cli,
     }
 }
 
@@ -1644,6 +1680,23 @@ pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_version_serializes_installation_kind_as_camel_case() {
+        let value = serde_json::to_value(ToolVersion {
+            name: "codex".to_string(),
+            version: Some("26.915.31945".to_string()),
+            latest_version: None,
+            error: None,
+            env_type: "macos".to_string(),
+            wsl_distro: None,
+            installation_kind: InstallationKind::DesktopApp,
+        })
+        .expect("serialize ToolVersion");
+
+        assert_eq!(value["installationKind"], "desktopApp");
+        assert!(value.get("installation_kind").is_none());
+    }
     use std::path::PathBuf;
 
     #[test]
