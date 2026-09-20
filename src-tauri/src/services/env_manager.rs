@@ -201,11 +201,13 @@ fn conflict_file_location(conflict: &EnvConflict) -> Result<(&str, Option<usize>
     Ok((&conflict.source_path, None))
 }
 
+#[cfg(any(test, not(target_os = "windows")))]
 fn assignment_name(line: &str) -> Option<&str> {
     let assignment = line.trim().strip_prefix("export ").unwrap_or(line.trim());
     assignment.split_once('=').map(|(name, _)| name.trim())
 }
 
+#[cfg(any(test, not(target_os = "windows")))]
 fn remove_conflict_line(content: &str, conflict: &EnvConflict) -> Result<String, String> {
     let (_, requested_line) = conflict_file_location(conflict)?;
     let trailing_newline = content.ends_with('\n');
@@ -241,6 +243,7 @@ fn shell_export_line(conflict: &EnvConflict) -> String {
     format!("export {}='{escaped}'", conflict.var_name)
 }
 
+#[cfg(any(test, not(target_os = "windows")))]
 fn restore_conflict_line(content: &str, conflict: &EnvConflict) -> Result<String, String> {
     let (_, requested_line) = conflict_file_location(conflict)?;
     let trailing_newline = content.ends_with('\n');
