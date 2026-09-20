@@ -292,7 +292,15 @@ def main() -> None:
             if cmd:
                 handle = open_terminal_with_command(step.name, cmd)
                 if handle is None:
-                    print_failure_hint("无法打开终端窗口，请检查 Terminal.app 权限。")
+                    detail = "无法打开终端窗口，请检查 Terminal.app 权限。"
+                    print_failure_hint(detail)
+                    emit_progress(
+                        step=i + 1,
+                        total=total,
+                        name=step.name,
+                        phase="failed",
+                        detail=detail,
+                    )
                     if not ask_continue():
                         save_state(state)
                         print_info("已保存进度，下次运行将从断点继续。")
@@ -338,6 +346,7 @@ def main() -> None:
             total=total,
             name=step.name,
             phase="done" if success else "failed",
+            detail=None if success else step.failure_hint(),
         )
 
         if success:

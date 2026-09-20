@@ -42,6 +42,19 @@ describe("ToolDiscoveryCard 的安装进度展示", () => {
     expect(screen.getByText(/18s/)).toBeTruthy();
   });
 
+  it("显示安装器提供的子阶段和百分比", () => {
+    render(
+      <ToolDiscoveryCard
+        {...baseProps}
+        status="installing"
+        progress={progress({ detail: "正在下载", percent: 42.4 })}
+      />,
+    );
+
+    expect(screen.getByText(/正在下载/)).toBeTruthy();
+    expect(screen.getByText(/42%/)).toBeTruthy();
+  });
+
   it("没有进度时回退到“安装中…”", () => {
     render(<ToolDiscoveryCard {...baseProps} status="installing" />);
 

@@ -36,6 +36,10 @@ describe("useToolInstall 的安装进度", () => {
           phase: "waiting",
           elapsed: 18,
           timeout: 300,
+          downloadedBytes: 1024,
+          totalBytes: 4096,
+          percent: 25,
+          detail: "正在下载",
         }),
       );
     });
@@ -47,6 +51,10 @@ describe("useToolInstall 的安装进度", () => {
       phase: "waiting",
       elapsed: 18,
       timeout: 300,
+      downloadedBytes: 1024,
+      totalBytes: 4096,
+      percent: 25,
+      detail: "正在下载",
     });
   });
 
@@ -124,5 +132,32 @@ describe("useToolInstall 的安装进度", () => {
     });
 
     expect(result.current.progress.codex).toBeUndefined();
+  });
+
+  it("安装脚本非零退出时显示最后一步的诊断信息", async () => {
+    const onDone = vi.fn();
+    const { result } = renderHook(() => useToolInstall(onDone));
+    await waitFor(() => expect(typeof result.current.progress).toBe("object"));
+
+    act(() => {
+      emitLog(
+        "codex",
+        progressLine({
+          step: 4,
+          total: 4,
+          name: "Codex",
+          phase: "failed",
+          detail: "下载连接中断",
+        }),
+      );
+      emitTauriEvent("install-tool-done", { tool: "codex", code: 1 });
+    });
+
+    expect(result.current.error).toEqual({
+      toolId: "codex",
+      message: "下载连接中断",
+    });
+    expect(result.current.progress.codex).toBeUndefined();
+    expect(onDone).toHaveBeenCalledWith("codex", 1);
   });
 });

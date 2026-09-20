@@ -120,6 +120,10 @@ export function ToolDiscoveryCard({
   // 看得出它确实在动。
   const installingText = progress
     ? `${progress.step}/${progress.total} · ${progress.name}` +
+      (progress.detail ? ` · ${progress.detail}` : "") +
+      (progress.percent !== undefined
+        ? ` · ${Math.round(progress.percent)}%`
+        : "") +
       (progress.phase === "waiting" && progress.elapsed !== undefined
         ? ` · ${progress.elapsed}s`
         : "")

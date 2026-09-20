@@ -43,6 +43,14 @@ export interface InstallProgress {
   elapsed?: number;
   /** 该步的超时预算秒数，仅 waiting 阶段有。 */
   timeout?: number;
+  /** 原生下载通道已接收的字节数。 */
+  downloadedBytes?: number;
+  /** 原生下载通道的总字节数。 */
+  totalBytes?: number;
+  /** 0-100 的下载或步骤完成百分比。 */
+  percent?: number;
+  /** 当前子阶段或失败原因，可直接展示。 */
+  detail?: string;
 }
 
 /**
@@ -79,6 +87,14 @@ function parseProgressLine(line: string): InstallProgress | null {
   };
   if (typeof parsed.elapsed === "number") progress.elapsed = parsed.elapsed;
   if (typeof parsed.timeout === "number") progress.timeout = parsed.timeout;
+  if (typeof parsed.downloadedBytes === "number") {
+    progress.downloadedBytes = parsed.downloadedBytes;
+  }
+  if (typeof parsed.totalBytes === "number") {
+    progress.totalBytes = parsed.totalBytes;
+  }
+  if (typeof parsed.percent === "number") progress.percent = parsed.percent;
+  if (typeof parsed.detail === "string") progress.detail = parsed.detail;
 
   return progress;
 }
@@ -113,6 +129,7 @@ export function useToolInstall(
 ): UseToolInstall {
   const [installing, setInstalling] = useState<Set<string>>(new Set());
   const [progress, setProgress] = useState<Record<string, InstallProgress>>({});
+  const progressRef = useRef<Record<string, InstallProgress>>({});
   const [error, setError] = useState<{
     toolId: string;
     message: string;
@@ -136,6 +153,7 @@ export function useToolInstall(
 
         const parsed = parseProgressLine(line);
         if (parsed) {
+          progressRef.current = { ...progressRef.current, [tool]: parsed };
           setProgress((prev) => ({ ...prev, [tool]: parsed }));
           return;
         }
@@ -147,6 +165,7 @@ export function useToolInstall(
 
       un2 = await listen<InstallDone>("install-tool-done", (e) => {
         const { tool, code } = e.payload;
+        const latestProgress = progressRef.current[tool];
         setInstalling((prev) => {
           if (!prev.has(tool)) return prev;
           const next = new Set(prev);
@@ -160,6 +179,15 @@ export function useToolInstall(
           delete next[tool];
           return next;
         });
+        delete progressRef.current[tool];
+        if (code !== 0) {
+          setError({
+            toolId: tool,
+            message:
+              latestProgress?.detail ??
+              `${latestProgress?.name ? `${latestProgress.name}：` : ""}安装脚本退出（代码 ${code}）`,
+          });
+        }
         onDoneRef.current(tool, code);
       });
     })();
@@ -187,6 +215,13 @@ export function useToolInstall(
 
       // 重试前先清掉上一次的错误，否则旧提示会一直挂着。
       setError(null);
+      delete progressRef.current[toolId];
+      setProgress((prev) => {
+        if (!(toolId in prev)) return prev;
+        const next = { ...prev };
+        delete next[toolId];
+        return next;
+      });
 
       try {
         await invoke<number>("install_tool", { toolId, skipEnv });

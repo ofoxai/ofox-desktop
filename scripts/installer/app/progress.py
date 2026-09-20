@@ -26,6 +26,10 @@ def emit_progress(
     phase: str,
     elapsed: Optional[int] = None,
     timeout: Optional[int] = None,
+    downloaded_bytes: Optional[int] = None,
+    total_bytes: Optional[int] = None,
+    percent: Optional[float] = None,
+    detail: Optional[str] = None,
 ) -> None:
     """
     打印一行进度 JSON 到 stdout。
@@ -37,8 +41,9 @@ def emit_progress(
       - "skipped" 该步跳过（已安装等）
       - "failed"  该步失败
 
-    elapsed/timeout 只在 waiting 阶段有意义，其余阶段省略而不是填 0——省略让前端能
-    区分"没有这个信息"和"真的是 0 秒"。
+    elapsed/timeout 只在 waiting 阶段有意义。下载字节数和 percent 为后续原生下载
+    通道预留；detail 可携带失败原因或当前子阶段。可选字段未提供时直接省略，让
+    前端能区分"没有这个信息"和"真的是 0"。
     """
     payload = {
         "type": PROGRESS_TYPE,
@@ -51,6 +56,14 @@ def emit_progress(
         payload["elapsed"] = elapsed
     if timeout is not None:
         payload["timeout"] = timeout
+    if downloaded_bytes is not None:
+        payload["downloadedBytes"] = downloaded_bytes
+    if total_bytes is not None:
+        payload["totalBytes"] = total_bytes
+    if percent is not None:
+        payload["percent"] = percent
+    if detail is not None:
+        payload["detail"] = detail
 
     # ensure_ascii=False 让中文步骤名保持原样，便于 dev 时直接读日志。
     # flush=True 是关键：安装器 stdout 走管道时默认全缓冲，不 flush 的话进度会积压

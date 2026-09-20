@@ -21,10 +21,13 @@ import os
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.shell import login_shell_argv, resolve_login_shell  # noqa: E402
+from app import shell as shell_module  # noqa: E402
+from app import steps as steps_module  # noqa: E402
 
 
 class ResolveLoginShellTest(unittest.TestCase):
@@ -244,42 +247,35 @@ class InteractiveRcToolsTest(unittest.TestCase):
             f" stderr: {result.stderr.decode(errors='replace')}",
         )
 
-    @unittest.skipUnless(
-        os.environ.get("SHELL"), "需要 SHELL 才能验证 login shell 行为"
-    )
-    def test_detection_of_many_tools_stays_fast(self):
+    def test_detection_of_many_tools_probes_interactive_path_once(self):
         """
-        性能护栏：把 interactive shell 的开销摊成一次，别让它乘以工具数。
-        全用 `-l -i -c` 的话 6 个工具约 4.8s，用户打开"添加工具"要干等。
+        确定性性能护栏：6 个工具检测只能启动一次 interactive shell。
+
+        不断言墙钟耗时，因为 CI 负载、用户 rc 和机器性能都会让固定秒数产生
+        假失败；调用次数才是这个优化真正要守住的不变量。
         """
-        code = (
-            "import sys, time; sys.path.insert(0, {dir!r});"
-            "from app.steps import _cmd_exists;"
-            "t0 = time.monotonic();"
-            "[_cmd_exists(t) for t in "
-            "('claude','codex','opencode','openclaw','hermes','gemini')];"
-            "print(time.monotonic() - t0)"
-        ).format(dir=self.INSTALLER_DIR)
+        old_cache = shell_module._LOGIN_PATH_CACHE
+        shell_module._LOGIN_PATH_CACHE = None
+        shell_result = subprocess.CompletedProcess(
+            args=["/bin/zsh"], returncode=0, stdout="/mock/bin", stderr=""
+        )
+        tools = ("claude", "codex", "opencode", "openclaw", "hermes", "gemini")
 
-        result = subprocess.run(
-            [sys.executable, "-c", code],
-            env={
-                "HOME": os.environ.get("HOME", ""),
-                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-                "SHELL": os.environ.get("SHELL", ""),
-            },
-            capture_output=True,
-        )
-        self.assertEqual(
-            result.returncode, 0, result.stderr.decode(errors="replace")
-        )
+        try:
+            with patch.object(
+                shell_module.subprocess, "run", return_value=shell_result
+            ) as shell_run, patch.object(
+                steps_module.shutil,
+                "which",
+                side_effect=lambda command, path: f"{path}/{command}",
+            ) as which:
+                found = [steps_module._cmd_exists(tool) for tool in tools]
+        finally:
+            shell_module._LOGIN_PATH_CACHE = old_cache
 
-        elapsed = float(result.stdout.decode().strip())
-        self.assertLess(
-            elapsed,
-            2.5,
-            f"检测 6 个工具用了 {elapsed:.2f}s —— interactive shell 的开销应当只付一次",
-        )
+        self.assertEqual(found, [True] * len(tools))
+        self.assertEqual(shell_run.call_count, 1)
+        self.assertEqual(which.call_count, len(tools))
 
 
 class RunShellCommandUnderBareEnvTest(unittest.TestCase):

@@ -65,6 +65,28 @@ class EmitProgressTest(unittest.TestCase):
 
         self.assertNotIn("elapsed", payload)
         self.assertNotIn("timeout", payload)
+        self.assertNotIn("downloadedBytes", payload)
+        self.assertNotIn("totalBytes", payload)
+        self.assertNotIn("percent", payload)
+        self.assertNotIn("detail", payload)
+
+    def test_carries_download_and_detail_fields_when_given(self):
+        out = self._capture(
+            step=4,
+            total=4,
+            name="Codex",
+            phase="failed",
+            downloaded_bytes=1024,
+            total_bytes=4096,
+            percent=25.0,
+            detail="下载连接中断",
+        )
+        payload = json.loads(out)
+
+        self.assertEqual(payload["downloadedBytes"], 1024)
+        self.assertEqual(payload["totalBytes"], 4096)
+        self.assertEqual(payload["percent"], 25.0)
+        self.assertEqual(payload["detail"], "下载连接中断")
 
     def test_step_name_with_quotes_stays_parseable(self):
         # 步骤名来自 steps.py，将来可能含引号/中文；JSON 编码必须扛得住
