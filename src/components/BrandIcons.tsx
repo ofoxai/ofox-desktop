@@ -9,6 +9,7 @@ import OpenAISvg from "@/icons/extracted/openai.svg?url";
 import GeminiSvg from "@/icons/extracted/gemini.svg?url";
 import OpenClawSvg from "@/icons/extracted/claw.svg?url";
 import OpenCodeSvg from "@/icons/extracted/opencode-logo-light.svg?url";
+import WorkBuddySvg from "@/icons/extracted/workbuddy.svg?url";
 import HermesPng from "@/icons/extracted/hermes.png";
 
 export function ClaudeIcon({ size = 16, className = "" }: IconProps) {
@@ -84,6 +85,19 @@ export function HermesIcon({ size = 16, className = "" }: IconProps) {
       height={size}
       className={className}
       alt="Hermes"
+      loading="lazy"
+    />
+  );
+}
+
+export function WorkBuddyIcon({ size = 16, className = "" }: IconProps) {
+  return (
+    <img
+      src={WorkBuddySvg}
+      width={size}
+      height={size}
+      className={className}
+      alt="WorkBuddy"
       loading="lazy"
     />
   );

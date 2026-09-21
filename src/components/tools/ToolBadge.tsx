@@ -7,6 +7,7 @@ import {
   HermesIcon,
   OpenClawIcon,
   OpenCodeIcon,
+  WorkBuddyIcon,
 } from "@/components/BrandIcons";
 import { TOOL_META } from "@/config/toolMeta";
 import { cn } from "@/lib/utils";
@@ -31,6 +32,7 @@ type BrandIconComponent = ComponentType<{
  *   - OpenCode         浅灰 — pixel art logo 需要明度对比；浅灰避免过黑
  *   - OpenClaw         米色 — 红色卡通龙虾，米底突出主体
  *   - Hermes           米色 — 头像类图标，米底比纯白柔和
+ *   - WorkBuddy        透明 — 官方圆形图标自带完整渐变背景
  *
  * 内边距统一走 padding（容器 size 的 1/5）——SVG 的 size 自然撑满剩余空间，
  * 不需要为每家硬编码不同 px。OpenCode 占比偏大的问题靠这个 padding 一并解决。
@@ -42,6 +44,7 @@ const TOOL_ICON: Record<string, BrandIconComponent> = {
   opencode: OpenCodeIcon,
   openclaw: OpenClawIcon,
   hermes: HermesIcon,
+  workbuddy: WorkBuddyIcon,
 };
 
 /**
@@ -61,6 +64,8 @@ const TOOL_BADGE_BG: Record<string, string> = {
   // ring 让白底在浅色 popover 上仍有可见边界，不至于"消失"。
   hermes:
     "bg-white ring-1 ring-black/10 dark:bg-neutral-100 dark:ring-white/10",
+  // WorkBuddy 官方图标已自带圆形渐变背景，不再叠加额外色块。
+  workbuddy: "bg-transparent",
 };
 
 /**
@@ -128,9 +133,11 @@ export function ToolBadge({
   //
   // OpenCode 的 SVG 是 pixel-art monitor，本身没有 viewBox 留白，监视器
   // 矩形几乎贴到边——视觉上比其它"自带 padding"的 lobehub logo 大一圈。
-  // 单独给它一个更大的 padding 系数把比例拉回来。
-  const paddingRatio = toolId === "opencode" ? 0.3 : 0.18;
-  const padding = Math.max(4, Math.round(size * paddingRatio));
+  // WorkBuddy 的官方圆形图标则自带完整背景，需要铺满徽章。
+  const paddingRatio =
+    toolId === "opencode" ? 0.3 : toolId === "workbuddy" ? 0 : 0.18;
+  const padding =
+    toolId === "workbuddy" ? 0 : Math.max(4, Math.round(size * paddingRatio));
   const innerSize = size - padding * 2;
 
   return (

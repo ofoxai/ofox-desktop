@@ -96,6 +96,8 @@ describe("ToolDiscoveryCard 的安装进度展示", () => {
         status="missing"
       />,
     );
+    expect(screen.getByAltText("WorkBuddy")).toBeInTheDocument();
+    expect(screen.queryByText("WB")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "下载" }));
 
     await waitFor(() => {
