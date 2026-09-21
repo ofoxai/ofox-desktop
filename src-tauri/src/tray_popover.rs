@@ -13,18 +13,19 @@ const POPOVER_HEIGHT: f64 = 620.0;
 /// - 窗口已存在且可见 → 隐藏
 /// - 窗口已存在但隐藏 → 重新定位并显示
 /// - 窗口不存在 → 创建并显示
-pub fn toggle_popover(
-    app: &tauri::AppHandle,
-    tray_rect: tauri::Rect,
-) -> Result<(), String> {
+pub fn toggle_popover(app: &tauri::AppHandle, tray_rect: tauri::Rect) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(POPOVER_LABEL) {
         // 窗口已存在，切换可见性
         let visible = window.is_visible().unwrap_or(false);
         if visible {
-            window.hide().map_err(|e| format!("隐藏 popover 失败: {e}"))?;
+            window
+                .hide()
+                .map_err(|e| format!("隐藏 popover 失败: {e}"))?;
         } else {
             position_window(&window, &tray_rect)?;
-            window.show().map_err(|e| format!("显示 popover 失败: {e}"))?;
+            window
+                .show()
+                .map_err(|e| format!("显示 popover 失败: {e}"))?;
             window
                 .set_focus()
                 .map_err(|e| format!("聚焦 popover 失败: {e}"))?;
@@ -101,17 +102,17 @@ fn extract_logical_rect(rect: &tauri::Rect, scale_factor: f64) -> (f64, f64, f64
         tauri::Position::Logical(l) => (l.x, l.y),
     };
     let (w, h) = match &rect.size {
-        tauri::Size::Physical(p) => (p.width as f64 / scale_factor, p.height as f64 / scale_factor),
+        tauri::Size::Physical(p) => (
+            p.width as f64 / scale_factor,
+            p.height as f64 / scale_factor,
+        ),
         tauri::Size::Logical(l) => (l.width, l.height),
     };
     (x, y, w, h)
 }
 
 /// 将 popover 窗口定位到 tray icon 正下方
-fn position_window(
-    window: &tauri::WebviewWindow,
-    tray_rect: &tauri::Rect,
-) -> Result<(), String> {
+fn position_window(window: &tauri::WebviewWindow, tray_rect: &tauri::Rect) -> Result<(), String> {
     let scale_factor = window.scale_factor().unwrap_or(1.0);
     let (tray_x, tray_y, tray_w, tray_h) = extract_logical_rect(tray_rect, scale_factor);
 

@@ -39,7 +39,8 @@ export function ModelInputWithFetch({
     const grouped: Record<string, FetchedModel[]> = {};
     for (const model of fetchedModels) {
       const slashIdx = model.id.indexOf("/");
-      const vendor = slashIdx > 0 ? model.id.slice(0, slashIdx) : (model.ownedBy || "Other");
+      const vendor =
+        slashIdx > 0 ? model.id.slice(0, slashIdx) : model.ownedBy || "Other";
       if (!grouped[vendor]) grouped[vendor] = [];
       grouped[vendor].push(model);
     }

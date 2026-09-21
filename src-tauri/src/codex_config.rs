@@ -121,9 +121,7 @@ pub fn write_codex_live_atomic(
 ///
 /// 复用 [`write_codex_live_atomic`] 的两步写 + 回滚语义，因此调用方拿到 Err 时磁盘
 /// 上要么是改前要么是改后，不会留下半写状态。
-pub fn write_codex_live_from_provider_settings(
-    settings_config: &Value,
-) -> Result<(), AppError> {
+pub fn write_codex_live_from_provider_settings(settings_config: &Value) -> Result<(), AppError> {
     let obj = settings_config
         .as_object()
         .ok_or_else(|| AppError::Config("Codex provider settings_config 必须是对象".into()))?;

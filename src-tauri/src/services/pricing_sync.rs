@@ -90,6 +90,7 @@ struct OpenAiShapeModel {
 /// - Anthropic 有 `input_cache_write_5m` 和 `_1h` 两档；我们取 5m，与
 ///   Claude SDK 默认 cache TTL 一致。
 /// - Gemini 用平铺的 `input_cache_write`（无 TTL 区分）。
+///
 /// 写库时会按优先级 `_5m → input_cache_write` 选第一个有值的。
 #[derive(Debug, Deserialize, Clone)]
 struct OfoxPricing {
@@ -117,10 +118,7 @@ struct NormalizedModel {
 impl From<OpenAiShapeModel> for Option<NormalizedModel> {
     fn from(m: OpenAiShapeModel) -> Self {
         let pricing = m.pricing?;
-        let display_name = m
-            .display_name
-            .or(m.name)
-            .unwrap_or_else(|| m.id.clone());
+        let display_name = m.display_name.or(m.name).unwrap_or_else(|| m.id.clone());
         Some(NormalizedModel {
             id: m.id,
             display_name,
@@ -185,7 +183,10 @@ pub async fn sync_pricing(db: &Database) -> Result<PricingSyncResult, AppError> 
     }
 
     if !errors.is_empty() {
-        log::warn!("pricing_sync: partial success ({} errors): {errors:?}", errors.len());
+        log::warn!(
+            "pricing_sync: partial success ({} errors): {errors:?}",
+            errors.len()
+        );
     }
     log::info!(
         "pricing_sync: imported {} models, wrote {} rows",
@@ -276,7 +277,12 @@ fn write_pricing_rows(db: &Database, models: &[NormalizedModel]) -> Result<usize
                 }
                 None => "0".to_string(),
             };
-            let output_cost = match m.pricing.completion.as_deref().map(per_token_to_per_million) {
+            let output_cost = match m
+                .pricing
+                .completion
+                .as_deref()
+                .map(per_token_to_per_million)
+            {
                 Some(Ok(v)) => v,
                 Some(Err(e)) => {
                     log::warn!("pricing_sync: bad completion for {}: {e}", m.id);
@@ -284,7 +290,12 @@ fn write_pricing_rows(db: &Database, models: &[NormalizedModel]) -> Result<usize
                 }
                 None => "0".to_string(),
             };
-            let cache_read = match m.pricing.input_cache_read.as_deref().map(per_token_to_per_million) {
+            let cache_read = match m
+                .pricing
+                .input_cache_read
+                .as_deref()
+                .map(per_token_to_per_million)
+            {
                 Some(Ok(v)) => v,
                 Some(Err(_)) | None => "0".to_string(),
             };
@@ -395,7 +406,7 @@ fn backfill_zero_cost_session_logs(db: &Database) -> Result<usize, AppError> {
             // services::usage_stats 里：复用它而不是重写，保证清洗逻辑一致。
             let pricing = match crate::services::usage_stats::find_model_pricing_row(&tx, &model) {
                 Ok(Some(p)) => p,
-                Ok(None) => continue,                       // 还是查不到，下次 sync 再说
+                Ok(None) => continue, // 还是查不到，下次 sync 再说
                 Err(e) => {
                     log::warn!("backfill: lookup failed for `{model}`: {e}");
                     continue;
@@ -405,20 +416,27 @@ fn backfill_zero_cost_session_logs(db: &Database) -> Result<usize, AppError> {
 
             // 失败一行就 skip，不阻塞批量
             let parse = |s: &str| -> Option<Decimal> { Decimal::from_str(s.trim()).ok() };
-            let (Some(input_per_m), Some(output_per_m), Some(cache_r_per_m), Some(cache_w_per_m), Some(mult)) = (
+            let (
+                Some(input_per_m),
+                Some(output_per_m),
+                Some(cache_r_per_m),
+                Some(cache_w_per_m),
+                Some(mult),
+            ) = (
                 parse(&input_per_m),
                 parse(&output_per_m),
                 parse(&cache_r_per_m),
                 parse(&cache_w_per_m),
                 parse(&multiplier_s),
-            ) else {
+            )
+            else {
                 log::warn!("backfill: decimal parse failed for `{model}`, skipping");
                 continue;
             };
 
             let million = Decimal::from(1_000_000_u64);
             // 与 CostCalculator::calculate 完全一致：billable_input 减掉 cache_read
-            let billable_in = (input_t as i64).saturating_sub(cache_r_t).max(0);
+            let billable_in = input_t.saturating_sub(cache_r_t).max(0);
             let in_cost = Decimal::from(billable_in) * input_per_m / million;
             let out_cost = Decimal::from(output_t) * output_per_m / million;
             let cr_cost = Decimal::from(cache_r_t) * cache_r_per_m / million;
@@ -582,7 +600,11 @@ mod tests {
     fn expand_keys_anthropic_example() {
         let m = mk(
             "anthropic/claude-opus-4.6",
-            &["claude-opus-4.6", "claude-opus-4-6", "claude-opus-4-6-20260205"],
+            &[
+                "claude-opus-4.6",
+                "claude-opus-4-6",
+                "claude-opus-4-6-20260205",
+            ],
             empty_pricing(),
         );
         let keys = expand_keys(&m);
@@ -646,10 +668,7 @@ mod tests {
         let keys = expand_keys(&m);
         assert_eq!(
             keys,
-            vec![
-                "bailian/qwen-flash".to_string(),
-                "qwen-flash".to_string(),
-            ]
+            vec!["bailian/qwen-flash".to_string(), "qwen-flash".to_string(),]
         );
     }
 
@@ -717,7 +736,10 @@ mod tests {
             .as_deref()
             .or(p_5m.input_cache_write.as_deref());
         assert_eq!(cache_write, Some("0.00000375"));
-        assert_eq!(per_token_to_per_million(cache_write.unwrap()).unwrap(), "3.75");
+        assert_eq!(
+            per_token_to_per_million(cache_write.unwrap()).unwrap(),
+            "3.75"
+        );
 
         // Gemini shape：只有平铺 input_cache_write
         let p_gem = OfoxPricing {
@@ -743,10 +765,7 @@ mod tests {
             input_cache_write: None,
         };
         // 只断言 helper 行为；完整 INSERT 路径在集成测试中验证
-        assert_eq!(
-            per_token_to_per_million("0.000002").unwrap(),
-            "2"
-        );
+        assert_eq!(per_token_to_per_million("0.000002").unwrap(), "2");
     }
 
     #[test]

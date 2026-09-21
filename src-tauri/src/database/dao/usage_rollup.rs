@@ -269,8 +269,10 @@ mod tests {
 
         {
             let conn = crate::database::lock_conn!(db.conn);
-            let date_str = chrono::DateTime::from_timestamp(old_ts, 0)
-                .unwrap()
+            let date_str = Local
+                .timestamp_opt(old_ts, 0)
+                .single()
+                .expect("test timestamp is unambiguous")
                 .format("%Y-%m-%d")
                 .to_string();
             conn.execute(

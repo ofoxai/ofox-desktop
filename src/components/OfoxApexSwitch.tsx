@@ -1,4 +1,9 @@
-import { useCallback, useState, type ComponentType, type SVGProps } from "react";
+import {
+  useCallback,
+  useState,
+  type ComponentType,
+  type SVGProps,
+} from "react";
 import { Flag, Globe2 } from "lucide-react";
 import { toast } from "sonner";
 

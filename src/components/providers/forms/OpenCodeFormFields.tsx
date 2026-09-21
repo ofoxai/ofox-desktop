@@ -173,7 +173,8 @@ function ModelDropdown({
   const grouped: Record<string, FetchedModel[]> = {};
   for (const model of models) {
     const slashIdx = model.id.indexOf("/");
-    const vendor = slashIdx > 0 ? model.id.slice(0, slashIdx) : (model.ownedBy || "Other");
+    const vendor =
+      slashIdx > 0 ? model.id.slice(0, slashIdx) : model.ownedBy || "Other";
     if (!grouped[vendor]) grouped[vendor] = [];
     grouped[vendor].push(model);
   }
@@ -278,10 +279,14 @@ export function OpenCodeFormFields({
 
   const ofoxEndpoint = useMemo(() => {
     switch (ofoxProtocol) {
-      case "openai": return `${ofoxApiBase(apex)}/v1`;
-      case "anthropic": return `${ofoxApiBase(apex)}/anthropic`;
-      case "gemini": return `${ofoxApiBase(apex)}/gemini`;
-      default: return "";
+      case "openai":
+        return `${ofoxApiBase(apex)}/v1`;
+      case "anthropic":
+        return `${ofoxApiBase(apex)}/anthropic`;
+      case "gemini":
+        return `${ofoxApiBase(apex)}/gemini`;
+      default:
+        return "";
     }
   }, [ofoxProtocol, apex]);
 
@@ -305,12 +310,17 @@ export function OpenCodeFormFields({
   });
   const [isOfoxFetching, setIsOfoxFetching] = useState(false);
 
-  const updateOfoxModels = useCallback((models: FetchedModel[]) => {
-    setOfoxModels(models);
-    try {
-      localStorage.setItem(ofoxCacheKey, JSON.stringify(models));
-    } catch { /* ignore quota errors */ }
-  }, [ofoxCacheKey]);
+  const updateOfoxModels = useCallback(
+    (models: FetchedModel[]) => {
+      setOfoxModels(models);
+      try {
+        localStorage.setItem(ofoxCacheKey, JSON.stringify(models));
+      } catch {
+        /* ignore quota errors */
+      }
+    },
+    [ofoxCacheKey],
+  );
 
   const handleOfoxFetchModels = useCallback(() => {
     if (!ofoxProtocol) return;
@@ -625,10 +635,14 @@ export function OpenCodeFormFields({
               <SelectItem
                 key={pkg.value}
                 value={pkg.value}
-                disabled={isOfoxPreset && pkg.value === "@ai-sdk/amazon-bedrock"}
+                disabled={
+                  isOfoxPreset && pkg.value === "@ai-sdk/amazon-bedrock"
+                }
               >
                 {pkg.label}
-                {isOfoxPreset && pkg.value === "@ai-sdk/amazon-bedrock" && " (oFox 不支持)"}
+                {isOfoxPreset &&
+                  pkg.value === "@ai-sdk/amazon-bedrock" &&
+                  " (oFox 不支持)"}
               </SelectItem>
             ))}
           </SelectContent>
@@ -660,14 +674,22 @@ export function OpenCodeFormFields({
         <Input
           id="opencode-baseurl"
           value={baseUrl}
-          onChange={isOfoxPreset ? undefined : (e) => onBaseUrlChange(e.target.value)}
+          onChange={
+            isOfoxPreset ? undefined : (e) => onBaseUrlChange(e.target.value)
+          }
           readOnly={isOfoxPreset}
           placeholder="https://api.example.com/v1"
-          className={isOfoxPreset ? "bg-muted text-muted-foreground cursor-not-allowed" : undefined}
+          className={
+            isOfoxPreset
+              ? "bg-muted text-muted-foreground cursor-not-allowed"
+              : undefined
+          }
         />
         <p className="text-xs text-muted-foreground">
           {isOfoxPreset
-            ? t("opencode.ofoxEndpointHint", { defaultValue: "端点由接口格式自动决定。" })
+            ? t("opencode.ofoxEndpointHint", {
+                defaultValue: "端点由接口格式自动决定。",
+              })
             : t("opencode.baseUrlHint", {
                 defaultValue:
                   "The base URL for the API endpoint. Leave empty to use the default endpoint for official SDKs.",

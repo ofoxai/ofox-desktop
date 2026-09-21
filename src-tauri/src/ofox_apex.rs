@@ -3,13 +3,13 @@
 //! OFox 平台同时部署在 `ofox.ai`（海外）与 `ofox.io`（国内镜像），同一 cc-switch
 //! 桌面端要能根据用户所在地区无缝切换。本模块是这个能力的**唯一**入口：
 //!
-//!   - [`current_apex`]    返回当前 apex 字符串（`"ofox.ai"` / `"ofox.io"`）
-//!   - [`auth_app_base`] / [`auth_api_base`] / [`gateway_base`] / [`marketing_site`]
-//!                        返回拼好的 base URL（dev/prod 已分支处理）
-//!   - 若干 `*_url` 组合器把常用路径（device authorization、token、wallet、
-//!                        register、terms 等）拼到对应 base 上
-//!   - [`detect_apex_from_geo`] / [`ensure_apex_resolved`] 实现首次启动时
-//!                        通过 ip-api.com 决定默认 apex
+//! - [`current_apex`] 返回当前 apex 字符串（`"ofox.ai"` / `"ofox.io"`）
+//! - [`auth_app_base`] / [`auth_api_base`] / [`gateway_base`] / [`marketing_site`]
+//!   返回拼好的 base URL（dev/prod 已分支处理）
+//! - 若干 `*_url` 组合器把常用路径（device authorization、token、wallet、
+//!   register、terms 等）拼到对应 base 上
+//! - [`detect_apex_from_geo`] / [`ensure_apex_resolved`] 实现首次启动时
+//!   通过 ip-api.com 决定默认 apex
 //!
 //! ### Dev / Prod 分支
 //!
@@ -390,7 +390,10 @@ pub async fn ensure_apex_resolved(app: &tauri::AppHandle, client: &reqwest::Clie
         .ofox_apex_resolved
         .unwrap_or(false);
     if already_resolved {
-        log::debug!("[OfoxApex] already resolved (apex={}); skip probe", current_apex());
+        log::debug!(
+            "[OfoxApex] already resolved (apex={}); skip probe",
+            current_apex()
+        );
         return;
     }
 
@@ -478,7 +481,10 @@ mod tests {
             device_auth_url(),
             format!("{}{OAUTH_DEVICE_AUTH_PATH}", auth_app_base())
         );
-        assert_eq!(token_url(), format!("{}{OAUTH_TOKEN_PATH}", auth_app_base()));
+        assert_eq!(
+            token_url(),
+            format!("{}{OAUTH_TOKEN_PATH}", auth_app_base())
+        );
         assert_eq!(
             wallet_url(),
             format!("{}{APP_WALLET_PATH}", auth_app_base())

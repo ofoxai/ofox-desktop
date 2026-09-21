@@ -59,7 +59,8 @@ const TOOL_BADGE_BG: Record<string, string> = {
   openclaw: "bg-[#FFD7BC] dark:bg-[#3A2418]",
   // Hermes 头像类图标，纯白底最干净——其它米色背景会让它"糊"在一起。
   // ring 让白底在浅色 popover 上仍有可见边界，不至于"消失"。
-  hermes: "bg-white ring-1 ring-black/10 dark:bg-neutral-100 dark:ring-white/10",
+  hermes:
+    "bg-white ring-1 ring-black/10 dark:bg-neutral-100 dark:ring-white/10",
 };
 
 /**
@@ -111,7 +112,7 @@ export function ToolBadge({
         className={cn(
           "flex shrink-0 items-center justify-center font-bold text-white",
           ROUNDED_CLASS[rounded],
-          dimmed ? "bg-gray-400" : meta?.color ?? "bg-muted-foreground",
+          dimmed ? "bg-gray-400" : (meta?.color ?? "bg-muted-foreground"),
           className,
         )}
       >
@@ -140,7 +141,7 @@ export function ToolBadge({
         ROUNDED_CLASS[rounded],
         dimmed
           ? "bg-neutral-200 dark:bg-neutral-800"
-          : TOOL_BADGE_BG[toolId] ?? "bg-muted",
+          : (TOOL_BADGE_BG[toolId] ?? "bg-muted"),
         // 仅在非 dimmed 时应用品牌特定滤镜——dimmed 下我们让整张 logo 降饱和
         !dimmed && TOOL_ICON_FILTER[toolId],
         dimmed && "opacity-50 grayscale",

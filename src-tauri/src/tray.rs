@@ -311,7 +311,7 @@ pub fn handle_provider_tray_event(app: &tauri::AppHandle, event_id: &str) -> boo
             if suffix == AUTO_SUFFIX {
                 log::info!("切换到{} Auto模式", section.log_name);
                 let app_handle = app.clone();
-                let app_type = section.app_type.clone();
+                let app_type = section.app_type;
                 tauri::async_runtime::spawn_blocking(move || {
                     if let Err(e) = handle_auto_click(&app_handle, &app_type) {
                         log::error!("切换{}Auto模式失败: {e}", section.log_name);
@@ -324,7 +324,7 @@ pub fn handle_provider_tray_event(app: &tauri::AppHandle, event_id: &str) -> boo
             log::info!("切换到{}供应商: {suffix}", section.log_name);
             let app_handle = app.clone();
             let provider_id = suffix.to_string();
-            let app_type = section.app_type.clone();
+            let app_type = section.app_type;
             tauri::async_runtime::spawn_blocking(move || {
                 if let Err(e) = handle_provider_click(&app_handle, &app_type, &provider_id) {
                     log::error!("切换{}供应商失败: {e}", section.log_name);
@@ -570,7 +570,7 @@ pub fn create_tray_menu(
             let submenu = submenu_builder.build().map_err(|e| {
                 AppError::Message(format!("构建{}子菜单失败: {e}", section.log_name))
             })?;
-            section_handles.insert(section.app_type.clone(), submenu.clone());
+            section_handles.insert(section.app_type, submenu.clone());
             menu_builder = menu_builder.item(&submenu);
         }
 

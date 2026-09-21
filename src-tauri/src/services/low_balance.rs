@@ -64,10 +64,7 @@ pub async fn evaluate_and_notify(
 
     let threshold = crate::settings::low_balance_threshold_usd();
     if threshold <= 0.0 {
-        log::warn!(
-            "[low-balance] threshold is <= 0 ({}), skipping",
-            threshold
-        );
+        log::warn!("[low-balance] threshold is <= 0 ({}), skipping", threshold);
         return false;
     }
 
@@ -107,17 +104,8 @@ pub async fn evaluate_and_notify(
 
     // ── Fire ──────────────────────────────────────────────────────────
     let title = "OFox 余额提醒";
-    let body = format!(
-        "当前余额 ${:.2}，低于阈值 ${:.2}。",
-        balance, threshold
-    );
-    if let Err(e) = app
-        .notification()
-        .builder()
-        .title(title)
-        .body(&body)
-        .show()
-    {
+    let body = format!("当前余额 ${:.2}，低于阈值 ${:.2}。", balance, threshold);
+    if let Err(e) = app.notification().builder().title(title).body(&body).show() {
         log::warn!("[low-balance] notify failed (continuing): {}", e);
     } else {
         log::info!("[low-balance] notification sent: {}", body);
