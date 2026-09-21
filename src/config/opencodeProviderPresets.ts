@@ -303,7 +303,7 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
     websiteUrl: "https://ofox.ai",
     apiKeyUrl: "https://app.ofox.ai/manage/api-keys",
     settingsConfig: {
-      npm: "@ai-sdk/openai-compatible",
+      npm: "@ai-sdk/openai",
       name: "OfoxAI",
       options: {
         baseURL: "https://api.ofox.ai/v1",

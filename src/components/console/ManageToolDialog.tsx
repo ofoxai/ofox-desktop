@@ -9,6 +9,8 @@ import {
   Zap,
   CheckCircle2,
   XCircle,
+  Github,
+  ExternalLink,
 } from "lucide-react";
 import {
   Dialog,
@@ -41,10 +43,13 @@ import {
 import {
   fetchOfoxModels,
   filterOfoxModelsByProtocol,
+  filterOfoxModelsForWorkBuddy,
+  toWorkBuddyModelSelection,
   type FetchedModel,
 } from "@/lib/api/model-fetch";
 import { unbindTool } from "@/lib/bindTools";
 import { ToolBadge } from "@/components/tools/ToolBadge";
+import { TOOL_META } from "@/config/toolMeta";
 import type { AppId } from "@/lib/api/types";
 
 /** Subset of `ConsolePage`'s `BoundTool` that the dialog actually needs.
@@ -82,6 +87,10 @@ export default function ManageToolDialog({
 }: ManageToolDialogProps) {
   const open = !!tool;
   const protocol = tool ? TOOL_PROTOCOL[tool.id] : undefined;
+  const projectUrl = tool ? TOOL_META[tool.id]?.projectUrl : undefined;
+  const projectLinkLabel = tool
+    ? TOOL_META[tool.id]?.projectLinkLabel
+    : undefined;
 
   // Anchors the model-picker's Popover portal inside the dialog so its
   // CommandList stays scrollable. Radix Dialog wraps its content in
@@ -163,21 +172,24 @@ export default function ManageToolDialog({
   // 是硬编码），选到只支持 chat/completions 的模型会导致 CLI 报
   // `wire_api not supported`——按端点二次过滤，UI 层就不给用户选到
   // 不兼容的模型。其他工具走 chat 协议不需要收窄。
-  const requiredEndpoint =
-    tool?.id === "codex" ? "/v1/responses" : undefined;
+  const requiredEndpoint = tool?.id === "codex" ? "/v1/responses" : undefined;
   const fetchModels = useCallback(async () => {
     if (!protocol) return;
     setModelsLoading(true);
     try {
       const all = await fetchOfoxModels(protocol);
-      setModels(filterOfoxModelsByProtocol(all, protocol, requiredEndpoint));
+      setModels(
+        tool?.id === "workbuddy"
+          ? filterOfoxModelsForWorkBuddy(all)
+          : filterOfoxModelsByProtocol(all, protocol, requiredEndpoint),
+      );
     } catch (e) {
       console.error("[ManageToolDialog] fetchOfoxModels failed", e);
       toast.error(`获取模型列表失败：${String(e)}`);
     } finally {
       setModelsLoading(false);
     }
-  }, [protocol, requiredEndpoint]);
+  }, [protocol, requiredEndpoint, tool?.id]);
 
   const handleOpenFolder = useCallback(async () => {
     if (!tool) return;
@@ -188,12 +200,29 @@ export default function ManageToolDialog({
     }
   }, [tool]);
 
+  const handleOpenProject = useCallback(async () => {
+    if (!projectUrl) return;
+    try {
+      await settingsApi.openExternal(projectUrl);
+    } catch (e) {
+      toast.error(`打开项目链接失败：${String(e)}`);
+    }
+  }, [projectUrl]);
+
   const handleSave = useCallback(async () => {
     if (!tool) return;
     if (draftModel === currentModel) return;
     setSaving(true);
     try {
-      await manageToolApi.setActiveModel(tool.id, draftModel);
+      const selectedModel = models.find((model) => model.id === draftModel);
+      if (tool.id === "workbuddy" && !selectedModel) {
+        throw new Error("所选模型已不在兼容列表中，请刷新后重试");
+      }
+      const modelSelection =
+        tool.id === "workbuddy" && selectedModel
+          ? toWorkBuddyModelSelection(selectedModel)
+          : undefined;
+      await manageToolApi.setActiveModel(tool.id, draftModel, modelSelection);
       setCurrentModel(draftModel);
       toast.success("模型已更新");
       onChanged?.();
@@ -206,7 +235,7 @@ export default function ManageToolDialog({
     } finally {
       setSaving(false);
     }
-  }, [tool, draftModel, currentModel, onChanged, onOpenChange]);
+  }, [tool, draftModel, currentModel, models, onChanged, onOpenChange]);
 
   /**
    * Probe the OfoxAI gateway end-to-end with the currently-drafted model.
@@ -280,9 +309,29 @@ export default function ManageToolDialog({
                   {tool.label}
                 </div>
                 <div className="truncate text-[12px] text-muted-foreground">
-                  {tool.version ? `v${tool.version}` : "未检测到"}
+                  {tool.version
+                    ? `${TOOL_META[tool.id]?.launchKind === "desktopApp" ? "桌面应用 · " : ""}v${tool.version}`
+                    : "未检测到"}
                 </div>
               </div>
+              {projectUrl && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => void handleOpenProject()}
+                  aria-label={`查看 ${tool.label} ${projectLinkLabel}`}
+                  title={`查看 ${tool.label} ${projectLinkLabel}`}
+                  className="shrink-0 text-muted-foreground"
+                >
+                  {projectLinkLabel === "GitHub" ? (
+                    <Github className="mr-1.5 h-4 w-4" />
+                  ) : (
+                    <ExternalLink className="mr-1.5 h-4 w-4" />
+                  )}
+                  {projectLinkLabel}
+                </Button>
+              )}
             </DialogHeader>
 
             <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">

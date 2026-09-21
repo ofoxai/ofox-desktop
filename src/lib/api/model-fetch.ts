@@ -4,6 +4,7 @@ import { toast } from "sonner";
 
 export interface FetchedModel {
   id: string;
+  name: string | null;
   ownedBy: string | null;
   /**
    * 上游 `pricing.prompt`——per-token 输入价的字符串形式（如 "0.000001"）。
@@ -24,6 +25,17 @@ export interface FetchedModel {
    * 避免安全降级把合法模型误砍。
    */
   supportedEndpoints: string[] | null;
+  supportedParameters: string[] | null;
+  inputModalities: string[] | null;
+  outputModalities: string[] | null;
+}
+
+export interface WorkBuddyModelSelection {
+  id: string;
+  name: string;
+  supportsToolCall: boolean;
+  supportsImages: boolean;
+  supportsReasoning: boolean;
 }
 
 /**
@@ -114,6 +126,37 @@ export function filterOfoxModelsByProtocol(
     });
   }
   return result;
+}
+
+/** WorkBuddy is an OpenAI-compatible agent host, not an OpenAI-vendor-only
+ * client. Keep every catalog model that can return text over chat completions
+ * and explicitly advertises tool calls. */
+export function filterOfoxModelsForWorkBuddy(
+  models: FetchedModel[],
+): FetchedModel[] {
+  return models.filter((model) => {
+    const endpoints = model.supportedEndpoints ?? [];
+    const outputs = model.outputModalities ?? [];
+    const parameters = model.supportedParameters ?? [];
+    return (
+      endpoints.includes("/v1/chat/completions") &&
+      outputs.includes("text") &&
+      parameters.includes("tools")
+    );
+  });
+}
+
+export function toWorkBuddyModelSelection(
+  model: FetchedModel,
+): WorkBuddyModelSelection {
+  const parameters = model.supportedParameters ?? [];
+  return {
+    id: model.id,
+    name: model.name?.trim() || model.id,
+    supportsToolCall: parameters.includes("tools"),
+    supportsImages: (model.inputModalities ?? []).includes("image"),
+    supportsReasoning: parameters.includes("reasoning"),
+  };
 }
 
 /**

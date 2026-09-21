@@ -1,7 +1,10 @@
 import { useEffect } from "react";
 import { motion, useAnimationControls } from "framer-motion";
+import { ExternalLink, Github } from "lucide-react";
 import { ToolBadge } from "@/components/tools/ToolBadge";
+import { TOOL_META } from "@/config/toolMeta";
 import type { InstallProgress } from "@/hooks/useToolInstall";
+import { settingsApi } from "@/lib/api";
 
 /**
  * 工具卡的六态状态机。两个调用点共用：
@@ -65,8 +68,7 @@ const BASE =
 const STATE_CLASSES: Record<ToolStatus, string> = {
   scanning:
     "border-dashed border-border/40 bg-muted/20 animate-pulse cursor-default",
-  missing:
-    "border-border/40 bg-muted/30 opacity-50 cursor-not-allowed",
+  missing: "border-border/40 bg-muted/30 opacity-50 cursor-not-allowed",
   // installing：橙色虚线 + pulse，区别于 scanning 的"未知"灰色 pulse——这里
   // 是"正在被处理"，应该用品牌色而不是灰色。卡片不灰显，让用户看清楚是哪个
   // 工具在装。
@@ -93,6 +95,27 @@ export function ToolDiscoveryCard({
   progress,
 }: ToolDiscoveryCardProps) {
   const controls = useAnimationControls();
+  const meta = TOOL_META[toolId];
+  const projectUrl = meta?.projectUrl;
+  const downloadUrl = meta?.downloadUrl;
+
+  const handleOpenProject = async () => {
+    if (!projectUrl) return;
+    try {
+      await settingsApi.openExternal(projectUrl);
+    } catch (error) {
+      console.error(`Failed to open ${label} project page:`, error);
+    }
+  };
+
+  const handleDownload = async () => {
+    if (!downloadUrl) return;
+    try {
+      await settingsApi.openExternal(downloadUrl);
+    } catch (error) {
+      console.error(`Failed to open ${label} download page:`, error);
+    }
+  };
 
   // 自动 stagger 翻 selected 时,播一次缩放反馈。条件里同时校验 status 是
   // selected——避免父组件因为别的原因（理论上不会发生）递增 tick 时也触发
@@ -126,12 +149,16 @@ export function ToolDiscoveryCard({
         : "")
     : "安装中…";
 
+  const detectedVersion =
+    meta?.launchKind === "desktopApp" && version
+      ? `桌面应用 · v${version}`
+      : version;
   const versionText =
     status === "scanning"
       ? "检测中…"
       : status === "installing"
         ? installingText
-        : version ?? "未安装";
+        : (detectedVersion ?? "未安装");
 
   // 外层 div 是 "卡片本体（motion.button）+ 角标按钮" 的共同定位锚——把
   // 角标渲染到 button **外部**有两个关键作用：
@@ -180,6 +207,23 @@ export function ToolDiscoveryCard({
         </span>
         <span className="text-[11px] text-muted-foreground">{versionText}</span>
       </motion.button>
+      {projectUrl && (
+        // Keep this outside the card's motion.button: nested interactive
+        // elements are invalid HTML, and disabled cards would swallow clicks.
+        <button
+          type="button"
+          onClick={() => void handleOpenProject()}
+          aria-label={`查看 ${label} ${meta?.projectLinkLabel}`}
+          title={`查看 ${label} ${meta?.projectLinkLabel}`}
+          className="absolute right-2 top-2 z-10 rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          {meta?.projectLinkLabel === "GitHub" ? (
+            <Github className="h-3.5 w-3.5" />
+          ) : (
+            <ExternalLink className="h-3.5 w-3.5" />
+          )}
+        </button>
+      )}
       {status === "missing" && onInstall && (
         // 真 <button>——在 motion.button 外面，所以可以是嵌套 interactive
         // 元素，且不受外层 disabled / opacity-50 影响。z-10 保险锚到顶层。
@@ -189,6 +233,15 @@ export function ToolDiscoveryCard({
           className="absolute bottom-2 right-2 z-10 cursor-pointer rounded-md bg-orange-500 px-2 py-0.5 text-[10px] font-medium text-white shadow-sm hover:bg-orange-600"
         >
           安装
+        </button>
+      )}
+      {status === "missing" && !onInstall && downloadUrl && (
+        <button
+          type="button"
+          onClick={() => void handleDownload()}
+          className="absolute bottom-2 right-2 z-10 cursor-pointer rounded-md bg-orange-500 px-2 py-0.5 text-[10px] font-medium text-white shadow-sm hover:bg-orange-600"
+        >
+          下载
         </button>
       )}
     </div>

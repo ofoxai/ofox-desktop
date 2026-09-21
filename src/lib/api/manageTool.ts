@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { WorkBuddyModelSelection } from "@/lib/api/model-fetch";
 
 /**
  * The wire protocol the OfoxAI gateway speaks for each tool.
@@ -21,6 +22,7 @@ export const TOOL_PROTOCOL: Readonly<Record<string, ToolProtocol>> = {
   opencode: "openai",
   openclaw: "openai",
   hermes: "openai",
+  workbuddy: "openai",
 };
 
 /**
@@ -73,8 +75,12 @@ export const manageToolApi = {
     return await invoke("get_active_ofox_model", { app });
   },
 
-  async setActiveModel(app: string, model: string): Promise<void> {
-    await invoke("set_active_ofox_model", { app, model });
+  async setActiveModel(
+    app: string,
+    model: string,
+    modelSelection?: WorkBuddyModelSelection,
+  ): Promise<void> {
+    await invoke("set_active_ofox_model", { app, model, modelSelection });
   },
 
   async pingModel(app: string, model: string): Promise<PingResult> {

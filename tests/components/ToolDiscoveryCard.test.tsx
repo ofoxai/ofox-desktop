@@ -1,7 +1,8 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { ToolDiscoveryCard } from "@/components/onboarding/ToolDiscoveryCard";
 import type { InstallProgress } from "@/hooks/useToolInstall";
+import { settingsApi } from "@/lib/api";
 
 const baseProps = {
   toolId: "codex",
@@ -22,7 +23,11 @@ const progress = (over: Partial<InstallProgress> = {}): InstallProgress => ({
 describe("ToolDiscoveryCard 的安装进度展示", () => {
   it("有进度时显示第几步和步骤名，而不是笼统的“安装中…”", () => {
     render(
-      <ToolDiscoveryCard {...baseProps} status="installing" progress={progress()} />,
+      <ToolDiscoveryCard
+        {...baseProps}
+        status="installing"
+        progress={progress()}
+      />,
     );
 
     expect(screen.getByText(/2\/4/)).toBeTruthy();
@@ -60,5 +65,44 @@ describe("ToolDiscoveryCard 的安装进度展示", () => {
 
     expect(screen.getByText("1.2.3")).toBeTruthy();
     expect(screen.queryByText(/2\/4/)).toBeNull();
+  });
+
+  it("通过系统浏览器打开对应工具的官方 GitHub 仓库", async () => {
+    const openExternal = vi
+      .spyOn(settingsApi, "openExternal")
+      .mockResolvedValueOnce();
+
+    render(<ToolDiscoveryCard {...baseProps} status="selected" />);
+    fireEvent.click(screen.getByRole("button", { name: "查看 Codex GitHub" }));
+
+    await waitFor(() => {
+      expect(openExternal).toHaveBeenCalledWith(
+        "https://github.com/openai/codex",
+      );
+    });
+    openExternal.mockRestore();
+  });
+
+  it("WorkBuddy 未安装时提供官方下载入口", async () => {
+    const openExternal = vi
+      .spyOn(settingsApi, "openExternal")
+      .mockResolvedValueOnce();
+
+    render(
+      <ToolDiscoveryCard
+        {...baseProps}
+        toolId="workbuddy"
+        label="WorkBuddy"
+        status="missing"
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "下载" }));
+
+    await waitFor(() => {
+      expect(openExternal).toHaveBeenCalledWith(
+        "https://www.workbuddy.cn/work/",
+      );
+    });
+    openExternal.mockRestore();
   });
 });

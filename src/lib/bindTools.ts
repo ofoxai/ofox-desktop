@@ -7,7 +7,10 @@ import { manageToolApi, TOOL_PROTOCOL } from "@/lib/api/manageTool";
 import {
   fetchOfoxModels,
   filterOfoxModelsByProtocol,
+  filterOfoxModelsForWorkBuddy,
   pickCheapestPaidModel,
+  toWorkBuddyModelSelection,
+  type WorkBuddyModelSelection,
 } from "@/lib/api/model-fetch";
 
 /**
@@ -116,7 +119,30 @@ const OFOX_AUTO_BIND_TOOLS: ReadonlySet<string> = new Set([
   "opencode",
   "openclaw",
   "hermes",
+  "workbuddy",
 ]);
+
+async function selectWorkBuddyDefault(): Promise<WorkBuddyModelSelection> {
+  const all = await fetchOfoxModels("openai");
+  const compatible = filterOfoxModelsForWorkBuddy(all);
+  const activeId = await manageToolApi
+    .getActiveModel("workbuddy")
+    .then((id) => id.trim())
+    .catch(() => "");
+  const pickedId =
+    compatible.find((model) => model.id === activeId)?.id ||
+    pickCheapestPaidModel(
+      compatible.filter((model) => {
+        const price = Number(model.pricingPrompt ?? "");
+        return Number.isFinite(price) && price > 0;
+      }),
+    );
+  const picked = compatible.find((model) => model.id === pickedId);
+  if (!picked) {
+    throw new Error("暂无同时支持文本、工具调用和 chat/completions 的模型");
+  }
+  return toWorkBuddyModelSelection(picked);
+}
 
 /**
  * Persist the bound-tool set and wire each tool through to OfoxAI.
@@ -169,11 +195,13 @@ export async function bindTools(tools: string[]): Promise<string[]> {
       continue;
     }
     try {
-      await invoke("ofox_bind_tool", { app: tool });
+      const modelSelection =
+        tool === "workbuddy" ? await selectWorkBuddyDefault() : undefined;
+      await invoke("ofox_bind_tool", { app: tool, modelSelection });
       // bind 之后立即挑默认 model：必须在 ofox_bind_tool 完成后才跑，
       // 因为 setActiveModel 依赖 active provider 已切到 ofox-<tool>。
       // 单条失败不影响 bind 结果——ensureDefaultModel 内部自吞异常。
-      await ensureDefaultModel(tool);
+      if (tool !== "workbuddy") await ensureDefaultModel(tool);
       succeeded.push(tool);
     } catch (e) {
       console.error(`[bindTools] bind ${tool} failed`, e);
