@@ -14,7 +14,7 @@
 //! `ofox_unbind_tool`).
 //!
 //! Layout note: model fields land in different shapes depending on the tool
-//! (Anthropic env, Codex TOML, Gemini env, OpenCode dict, OpenClaw/Hermes
+//! (Anthropic env, Codex TOML, Gemini env, OpenCode/Hermes dict, OpenClaw
 //! list). The read/write helpers below mirror what
 //! `services/provider/live.rs` ultimately consumes.
 
@@ -24,10 +24,10 @@ use std::time::{Duration, Instant};
 use tauri::State;
 use tokio::sync::RwLock;
 
-use crate::app_config::AppType;
+use crate::app_config::{AppType, BindableTool};
 use crate::commands::ofox_auth::OfoxAuthState;
-use crate::ofox_auth::OfoxAuthManager;
 use crate::ofox_apex::gateway_base;
+use crate::ofox_auth::OfoxAuthManager;
 use crate::store::AppState;
 
 // Gateway base URL for the connectivity probe. Mirrors the dev/prod toggle in
@@ -51,6 +51,11 @@ use crate::store::AppState;
 /// "settings/config" file — that's the one users would actually inspect.
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_tool_config_file_path(app: String) -> Result<String, String> {
+    if app.trim().eq_ignore_ascii_case("workbuddy") {
+        return Ok(crate::workbuddy_config::models_path()
+            .to_string_lossy()
+            .to_string());
+    }
     let app_type = AppType::from_str(&app).map_err(|e| format!("无效的应用类型: {e}"))?;
     let path = match app_type {
         AppType::Claude => crate::config::get_claude_settings_path(),
@@ -78,10 +83,13 @@ pub fn get_tool_config_file_path(app: String) -> Result<String, String> {
 /// (unknown app, DB failure). The dialog treats `""` as "未设置" and
 /// still allows the user to save a new value.
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_active_ofox_model(
+pub async fn get_active_ofox_model(
     state: State<'_, AppState>,
     app: String,
 ) -> Result<String, String> {
+    if app.trim().eq_ignore_ascii_case("workbuddy") {
+        return crate::workbuddy_config::active_model(&state.db).await;
+    }
     let app_type = AppType::from_str(&app).map_err(|e| format!("无效的应用类型: {e}"))?;
     read_active_model_for(&state, &app_type)
 }
@@ -94,10 +102,17 @@ pub fn get_active_ofox_model(
 /// Returns `Ok("")` when the active provider exists but has no model field
 /// configured (callers treat empty as "unset"); only surfaces `Err` for hard
 /// DB failures or when there is no active provider.
-fn read_active_model_for(
+fn read_active_model_for(state: &AppState, app_type: &AppType) -> Result<String, String> {
+    read_active_provider_and_model_for(state, app_type).map(|(_, model)| model)
+}
+
+/// Resolve the active provider id together with the model stored in that
+/// provider's configuration. The launcher uses both pieces for tools such as
+/// OpenCode, whose CLI model syntax is `<provider-id>/<model-id>`.
+pub(crate) fn read_active_provider_and_model_for(
     state: &AppState,
     app_type: &AppType,
-) -> Result<String, String> {
+) -> Result<(String, String), String> {
     let app_str = app_type.as_str();
 
     let provider_id = state
@@ -112,7 +127,8 @@ fn read_active_model_for(
         .map_err(|e| format!("读取 {provider_id} 失败: {e}"))?
         .ok_or_else(|| format!("供应商 {provider_id} 不存在"))?;
 
-    Ok(read_model_from_settings(app_type, &provider.settings_config))
+    let model = read_model_from_settings(app_type, &provider.settings_config);
+    Ok((provider_id, model))
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +155,25 @@ pub async fn set_active_ofox_model(
     ofox_state: State<'_, OfoxAuthState>,
     app: String,
     model: String,
+    model_selection: Option<crate::workbuddy_config::WorkBuddyModelSelection>,
 ) -> Result<(), String> {
+    if app.trim().eq_ignore_ascii_case("workbuddy") {
+        let selection = model_selection
+            .ok_or_else(|| "切换 WorkBuddy 模型时缺少能力信息，请刷新模型列表后重试".to_string())?;
+        if selection.id.trim() != model.trim() {
+            return Err("WorkBuddy 模型 ID 与能力信息不一致，请刷新后重试".to_string());
+        }
+        let api_key = crate::ofox_api_keys::fetch_or_create_api_key(
+            BindableTool::WorkBuddy,
+            crate::ofox_api_keys::FetchMode::CachedOk,
+            &ofox_state.0,
+        )
+        .await
+        .map_err(|e| format!("获取 WorkBuddy OfoxAI API key 失败: {e}"))?;
+        crate::workbuddy_config::bind_or_switch(&state.db, &api_key, &selection).await?;
+        crate::ofox_api_keys::mark_key_used(BindableTool::WorkBuddy);
+        return Ok(());
+    }
     let app_type = AppType::from_str(&app).map_err(|e| format!("无效的应用类型: {e}"))?;
     let app_str = app_type.as_str();
 
@@ -215,7 +249,10 @@ fn read_model_from_settings(app: &AppType, settings: &serde_json::Value) -> Stri
         AppType::Codex => {
             // Codex stores its config as a TOML *string* inside the
             // `config` key. Parse and read the top-level `model`.
-            let cfg_text = settings.get("config").and_then(|v| v.as_str()).unwrap_or("");
+            let cfg_text = settings
+                .get("config")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if cfg_text.is_empty() {
                 return String::new();
             }
@@ -263,7 +300,8 @@ fn write_model_into_settings(
         AppType::Codex => set_codex_model(settings, model),
         AppType::OpenCode => {
             // Single-select: replace the entire `models` dict. Keys are model
-            // names; the value object is empty (matches the OfoxAI seed).
+            // ids. Keep `name` populated as required by OpenCodeModel so the
+            // provider remains readable by both OpenCode and Ofox on restart.
             let obj = settings
                 .as_object_mut()
                 .ok_or_else(|| "settings_config 不是对象".to_string())?;
@@ -272,7 +310,7 @@ fn write_model_into_settings(
             } else {
                 obj.insert(
                     "models".into(),
-                    serde_json::json!({ model: serde_json::json!({}) }),
+                    serde_json::json!({ model: { "name": model } }),
                 );
             }
             Ok(())
@@ -316,17 +354,11 @@ fn write_model_into_settings(
 }
 
 /// Set or remove `settings.env.<key>`. Creates the `env` object if missing.
-fn set_env_string(
-    settings: &mut serde_json::Value,
-    key: &str,
-    value: &str,
-) -> Result<(), String> {
+fn set_env_string(settings: &mut serde_json::Value, key: &str, value: &str) -> Result<(), String> {
     if !settings.is_object() {
         *settings = serde_json::json!({});
     }
-    let root = settings
-        .as_object_mut()
-        .expect("ensured object above");
+    let root = settings.as_object_mut().expect("ensured object above");
     if !root.get("env").map(|v| v.is_object()).unwrap_or(false) {
         root.insert("env".into(), serde_json::json!({}));
     }
@@ -374,6 +406,31 @@ fn set_codex_model(settings: &mut serde_json::Value, model: &str) -> Result<(), 
 
     root.insert("config".into(), serde_json::Value::String(doc.to_string()));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opencode_model_entry_remains_typed_config_compatible() {
+        let mut settings = serde_json::json!({
+            "npm": "@ai-sdk/openai",
+            "name": "OfoxAI",
+            "options": {},
+            "models": {}
+        });
+
+        write_model_into_settings(&AppType::OpenCode, &mut settings, "openai/gpt-5.6-terra")
+            .unwrap();
+
+        assert_eq!(
+            settings.pointer("/models/openai~1gpt-5.6-terra/name"),
+            Some(&serde_json::json!("openai/gpt-5.6-terra"))
+        );
+        serde_json::from_value::<crate::provider::OpenCodeProviderConfig>(settings)
+            .expect("saved provider should remain readable after restart");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -434,6 +491,51 @@ async fn ofox_ping_model_internal(
     app: &str,
     model: &str,
 ) -> PingResult {
+    let model = model.trim().to_string();
+    if model.is_empty() {
+        return PingResult {
+            success: false,
+            latency_ms: 0,
+            status_code: None,
+            error: Some("请先选择一个模型再测试连通性".to_string()),
+        };
+    }
+
+    if app.trim().eq_ignore_ascii_case("workbuddy") {
+        let api_key = match crate::ofox_api_keys::fetch_or_create_api_key(
+            BindableTool::WorkBuddy,
+            crate::ofox_api_keys::FetchMode::CachedOk,
+            manager_arc,
+        )
+        .await
+        {
+            Ok(key) => key,
+            Err(error) => {
+                return PingResult {
+                    success: false,
+                    latency_ms: 0,
+                    status_code: Some(401),
+                    error: Some(format!("获取 WorkBuddy OfoxAI API key 失败：{error}")),
+                };
+            }
+        };
+        let started = Instant::now();
+        let url = format!("{}/v1/chat/completions", gateway_base());
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let response = crate::proxy::http_client::get()
+            .post(&url)
+            .bearer_auth(api_key)
+            .timeout(Duration::from_secs(PING_TIMEOUT_SECS))
+            .json(&body)
+            .send()
+            .await;
+        return ping_result_from_response(started, response).await;
+    }
+
     let app_type = match AppType::from_str(app) {
         Ok(t) => t,
         Err(e) => {
@@ -446,16 +548,6 @@ async fn ofox_ping_model_internal(
         }
     };
     let app_str = app_type.as_str();
-
-    let model = model.trim().to_string();
-    if model.is_empty() {
-        return PingResult {
-            success: false,
-            latency_ms: 0,
-            status_code: None,
-            error: Some("请先选择一个模型再测试连通性".to_string()),
-        };
-    }
 
     // Pull the API key the proxy would use for this app. We read the active
     // provider's settings_config rather than the static OfoxAI seed — that
@@ -636,8 +728,14 @@ async fn ofox_ping_model_internal(
         }
     };
 
-    let latency_ms = started.elapsed().as_millis() as u64;
+    ping_result_from_response(started, response_result).await
+}
 
+async fn ping_result_from_response(
+    started: Instant,
+    response_result: Result<reqwest::Response, reqwest::Error>,
+) -> PingResult {
+    let latency_ms = started.elapsed().as_millis() as u64;
     let response = match response_result {
         Ok(r) => r,
         Err(e) => {

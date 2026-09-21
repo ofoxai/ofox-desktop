@@ -47,7 +47,7 @@ use std::sync::Mutex;
 
 use keyring::Entry;
 
-use crate::app_config::AppType;
+use crate::app_config::BindableTool;
 
 /// OAuth token 用的 service。与 bundle identifier `ai.ofox.desktop` 对齐，
 /// `security dump-keychain` 时能直接对应到 app 身份。改名时间点是 ofox-desktop
@@ -86,7 +86,9 @@ pub enum Slot {
     /// 工具级 ofox LLM API key——每工具一把。account 用 `AppType::as_str()`
     /// 返回的 slug（`claude` / `codex` / `gemini` / `opencode` / `openclaw` /
     /// `hermes`）。
-    ApiKey { tool: AppType },
+    ApiKey {
+        tool: BindableTool,
+    },
 }
 
 impl Slot {
@@ -327,6 +329,7 @@ pub fn default_store() -> std::sync::Arc<dyn SecretStore> {
 /// 单测用：进程内 HashMap 替代 OS 凭据库。线程安全，因为 `OfoxAuthManager`
 /// 把 store 包在 `Arc<dyn SecretStore>` 里跨 await 共享。
 #[derive(Debug, Default)]
+#[allow(dead_code)] // Production builds do not construct the test secret store.
 pub struct InMemoryStore {
     // 用 Mutex<Vec<(Slot, String)>> 比 HashMap 简单——total 槽位 < 10，Vec 顺序
     // 扫线性开销可忽略，省一个 Eq+Hash bound 的样板。
@@ -334,6 +337,7 @@ pub struct InMemoryStore {
 }
 
 impl InMemoryStore {
+    #[allow(dead_code)] // Used by unit tests compiled with the test harness.
     pub fn new() -> Self {
         Self::default()
     }
@@ -377,7 +381,7 @@ mod file_store_tests {
     /// 包一层，免得 `Slot::ApiKey { tool: ... }` 这个 struct literal 在断言里
     /// 被 rustfmt 展开成四行，读起来全是噪音。
     fn api_key(tool: AppType) -> Slot {
-        Slot::ApiKey { tool }
+        Slot::ApiKey { tool: tool.into() }
     }
 
     fn store() -> (FileStore, tempfile::TempDir) {
@@ -512,6 +516,7 @@ mod file_store_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_config::AppType;
 
     #[test]
     fn in_memory_round_trips_both_slots() {
@@ -522,8 +527,14 @@ mod tests {
         store.save(Slot::AccessToken, "at-1").unwrap();
         store.save(Slot::RefreshToken, "rt-1").unwrap();
 
-        assert_eq!(store.load(Slot::AccessToken).unwrap().as_deref(), Some("at-1"));
-        assert_eq!(store.load(Slot::RefreshToken).unwrap().as_deref(), Some("rt-1"));
+        assert_eq!(
+            store.load(Slot::AccessToken).unwrap().as_deref(),
+            Some("at-1")
+        );
+        assert_eq!(
+            store.load(Slot::RefreshToken).unwrap().as_deref(),
+            Some("rt-1")
+        );
     }
 
     #[test]
@@ -535,7 +546,10 @@ mod tests {
         store.clear(Slot::AccessToken).unwrap();
         store.save(Slot::RefreshToken, "rt").unwrap();
         assert_eq!(store.load(Slot::AccessToken).unwrap(), None);
-        assert_eq!(store.load(Slot::RefreshToken).unwrap().as_deref(), Some("rt"));
+        assert_eq!(
+            store.load(Slot::RefreshToken).unwrap().as_deref(),
+            Some("rt")
+        );
     }
 
     #[test]
@@ -563,7 +577,10 @@ mod tests {
         // 也确认即便 save 失败，原有值不被破坏
         store.save(Slot::AccessToken, "at").unwrap();
         assert!(store.save(Slot::AccessToken, "").is_err());
-        assert_eq!(store.load(Slot::AccessToken).unwrap().as_deref(), Some("at"));
+        assert_eq!(
+            store.load(Slot::AccessToken).unwrap().as_deref(),
+            Some("at")
+        );
     }
 
     #[test]
@@ -571,7 +588,10 @@ mod tests {
         let store = InMemoryStore::new();
         store.save(Slot::AccessToken, "old").unwrap();
         store.save(Slot::AccessToken, "new").unwrap();
-        assert_eq!(store.load(Slot::AccessToken).unwrap().as_deref(), Some("new"));
+        assert_eq!(
+            store.load(Slot::AccessToken).unwrap().as_deref(),
+            Some("new")
+        );
     }
 
     // ─── ApiKey 变体：新增覆盖 ─────────────────────────────────────────
@@ -583,29 +603,47 @@ mod tests {
         // 假设就破了。
         let store = InMemoryStore::new();
         store
-            .save(Slot::ApiKey { tool: AppType::Claude }, "sk-claude")
+            .save(
+                Slot::ApiKey {
+                    tool: AppType::Claude.into(),
+                },
+                "sk-claude",
+            )
             .unwrap();
         store
-            .save(Slot::ApiKey { tool: AppType::Codex }, "sk-codex")
+            .save(
+                Slot::ApiKey {
+                    tool: AppType::Codex.into(),
+                },
+                "sk-codex",
+            )
             .unwrap();
 
         assert_eq!(
             store
-                .load(Slot::ApiKey { tool: AppType::Claude })
+                .load(Slot::ApiKey {
+                    tool: AppType::Claude.into()
+                })
                 .unwrap()
                 .as_deref(),
             Some("sk-claude")
         );
         assert_eq!(
             store
-                .load(Slot::ApiKey { tool: AppType::Codex })
+                .load(Slot::ApiKey {
+                    tool: AppType::Codex.into()
+                })
                 .unwrap()
                 .as_deref(),
             Some("sk-codex")
         );
         // 没存过的 tool 应当读出 None
         assert_eq!(
-            store.load(Slot::ApiKey { tool: AppType::Gemini }).unwrap(),
+            store
+                .load(Slot::ApiKey {
+                    tool: AppType::Gemini.into()
+                })
+                .unwrap(),
             None
         );
     }
@@ -618,7 +656,12 @@ mod tests {
         let store = InMemoryStore::new();
         store.save(Slot::AccessToken, "oauth-at").unwrap();
         store
-            .save(Slot::ApiKey { tool: AppType::Claude }, "tool-key")
+            .save(
+                Slot::ApiKey {
+                    tool: AppType::Claude.into(),
+                },
+                "tool-key",
+            )
             .unwrap();
 
         assert_eq!(
@@ -627,7 +670,9 @@ mod tests {
         );
         assert_eq!(
             store
-                .load(Slot::ApiKey { tool: AppType::Claude })
+                .load(Slot::ApiKey {
+                    tool: AppType::Claude.into()
+                })
                 .unwrap()
                 .as_deref(),
             Some("tool-key")
@@ -635,14 +680,20 @@ mod tests {
 
         // 清 Claude 的 API key 不应影响 OAuth token
         store
-            .clear(Slot::ApiKey { tool: AppType::Claude })
+            .clear(Slot::ApiKey {
+                tool: AppType::Claude.into(),
+            })
             .unwrap();
         assert_eq!(
             store.load(Slot::AccessToken).unwrap().as_deref(),
             Some("oauth-at")
         );
         assert_eq!(
-            store.load(Slot::ApiKey { tool: AppType::Claude }).unwrap(),
+            store
+                .load(Slot::ApiKey {
+                    tool: AppType::Claude.into()
+                })
+                .unwrap(),
             None
         );
     }
@@ -654,11 +705,17 @@ mod tests {
         assert_eq!(Slot::AccessToken.service(), SERVICE_OAUTH);
         assert_eq!(Slot::RefreshToken.service(), SERVICE_OAUTH);
         assert_eq!(
-            Slot::ApiKey { tool: AppType::Claude }.service(),
+            Slot::ApiKey {
+                tool: AppType::Claude.into()
+            }
+            .service(),
             SERVICE_APIKEY
         );
         assert_eq!(
-            Slot::ApiKey { tool: AppType::Hermes }.service(),
+            Slot::ApiKey {
+                tool: AppType::Hermes.into()
+            }
+            .service(),
             SERVICE_APIKEY
         );
     }
@@ -668,7 +725,7 @@ mod tests {
         // account 字段必须跟 AppType slug 一致——`security find-generic-password`
         // 排障时这是用户能看到的字段。
         for tool in AppType::all() {
-            let slot = Slot::ApiKey { tool };
+            let slot = Slot::ApiKey { tool: tool.into() };
             assert_eq!(slot.account(), tool.as_str());
         }
     }

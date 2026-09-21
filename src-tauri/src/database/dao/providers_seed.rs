@@ -274,7 +274,8 @@ pub(crate) fn ofox_seeds() -> Vec<OfoxProviderSeed> {
             ),
             meta_json: r#"{"providerType":"ofox"}"#,
         },
-        // OpenCode — OpenAI Compatible NPM 包
+        // OpenCode — OpenAI Responses API。Ofox 的 Chat Completions 流式响应
+        // 不是 delta 事件，使用 compatible adapter 会产生 token 但显示空白。
         OfoxProviderSeed {
             id: "ofox-opencode",
             app_type: AppType::OpenCode,
@@ -283,7 +284,7 @@ pub(crate) fn ofox_seeds() -> Vec<OfoxProviderSeed> {
             icon: "ofox",
             icon_color: "#D97706",
             settings_config_json: format!(
-                r#"{{"npm":"@ai-sdk/openai-compatible","name":"OfoxAI","options":{{"baseURL":"{openai_v1}","apiKey":""}},"models":{{}}}}"#
+                r#"{{"npm":"@ai-sdk/openai","name":"OfoxAI","options":{{"baseURL":"{openai_v1}","apiKey":""}},"models":{{}}}}"#
             ),
             meta_json: r#"{"providerType":"ofox"}"#,
         },

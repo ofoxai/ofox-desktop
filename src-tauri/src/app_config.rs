@@ -315,6 +315,48 @@ use crate::error::AppError;
 use crate::prompt_files::prompt_file_path;
 use crate::provider::ProviderManager;
 
+/// Tools that can receive a dedicated Ofox API key. This is deliberately
+/// broader than [`AppType`]: WorkBuddy participates in bind/config flows but
+/// is not a provider/proxy/prompt/MCP application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BindableTool {
+    Claude,
+    Codex,
+    Gemini,
+    OpenCode,
+    OpenClaw,
+    Hermes,
+    WorkBuddy,
+}
+
+impl BindableTool {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Gemini => "gemini",
+            Self::OpenCode => "opencode",
+            Self::OpenClaw => "openclaw",
+            Self::Hermes => "hermes",
+            Self::WorkBuddy => "workbuddy",
+        }
+    }
+}
+
+impl From<AppType> for BindableTool {
+    fn from(value: AppType) -> Self {
+        match value {
+            AppType::Claude => Self::Claude,
+            AppType::Codex => Self::Codex,
+            AppType::Gemini => Self::Gemini,
+            AppType::OpenCode => Self::OpenCode,
+            AppType::OpenClaw => Self::OpenClaw,
+            AppType::Hermes => Self::Hermes,
+        }
+    }
+}
+
 /// 应用类型
 ///
 /// `Copy`：纯单元变体枚举，加 Copy 让它能塞进 `Slot::ApiKey { tool }` 这种带 `Copy`
@@ -926,33 +968,23 @@ impl MultiAppConfig {
 mod tests {
     use super::*;
     use serial_test::serial;
-    use std::env;
     use std::fs;
     use tempfile::TempDir;
 
     struct TempHome {
         #[allow(dead_code)] // 字段通过 Drop trait 管理临时目录生命周期
         dir: TempDir,
-        original_home: Option<String>,
-        original_userprofile: Option<String>,
-        original_test_home: Option<String>,
+        original_test_home: Option<std::ffi::OsString>,
     }
 
     impl TempHome {
         fn new() -> Self {
             let dir = TempDir::new().expect("failed to create temp home");
-            let original_home = env::var("HOME").ok();
-            let original_userprofile = env::var("USERPROFILE").ok();
-            let original_test_home = env::var("CC_SWITCH_TEST_HOME").ok();
-
-            env::set_var("HOME", dir.path());
-            env::set_var("USERPROFILE", dir.path());
-            env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+            let original_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+            std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
 
             Self {
                 dir,
-                original_home,
-                original_userprofile,
                 original_test_home,
             }
         }
@@ -960,19 +992,9 @@ mod tests {
 
     impl Drop for TempHome {
         fn drop(&mut self) {
-            match &self.original_home {
-                Some(value) => env::set_var("HOME", value),
-                None => env::remove_var("HOME"),
-            }
-
-            match &self.original_userprofile {
-                Some(value) => env::set_var("USERPROFILE", value),
-                None => env::remove_var("USERPROFILE"),
-            }
-
             match &self.original_test_home {
-                Some(value) => env::set_var("CC_SWITCH_TEST_HOME", value),
-                None => env::remove_var("CC_SWITCH_TEST_HOME"),
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
             }
         }
     }

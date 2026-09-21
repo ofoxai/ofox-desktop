@@ -46,14 +46,44 @@ use std::sync::{Mutex, OnceLock};
 
 /// 获取 Hermes 配置目录
 ///
-/// 默认路径: `~/.hermes/`
-/// 可通过 settings.hermes_config_dir 覆盖
+/// 解析顺序与 Hermes 自身一致：显式设置、`HERMES_HOME`、平台默认目录。
 pub fn get_hermes_dir() -> PathBuf {
     if let Some(override_dir) = get_hermes_override_dir() {
         return override_dir;
     }
 
+    if let Some(raw) = std::env::var_os("HERMES_HOME") {
+        let value = raw.to_string_lossy();
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+
+    default_hermes_dir()
+}
+
+#[cfg(target_os = "windows")]
+fn default_hermes_dir() -> PathBuf {
+    windows_local_hermes_dir(
+        std::env::var_os("LOCALAPPDATA").as_deref(),
+        &crate::config::get_home_dir(),
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+fn default_hermes_dir() -> PathBuf {
     crate::config::get_home_dir().join(".hermes")
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_local_hermes_dir(localappdata: Option<&std::ffi::OsStr>, home: &Path) -> PathBuf {
+    localappdata
+        .map(|value| value.to_string_lossy().trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join("AppData").join("Local"))
+        .join("hermes")
 }
 
 /// 获取 Hermes 配置文件路径
@@ -116,8 +146,61 @@ pub fn read_hermes_config() -> Result<serde_yaml::Value, AppError> {
         return Ok(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
     }
 
-    serde_yaml::from_str(&content)
+    // Older section replacement code could append duplicate top-level keys
+    // on CRLF files. Hermes/PyYAML treats the last value as active, so heal
+    // those files using the same keep-last rule before parsing.
+    let deduped = deduplicate_top_level_keys(&content);
+
+    serde_yaml::from_str(&deduped)
         .map_err(|e| AppError::Config(format!("Failed to parse Hermes config as YAML: {e}")))
+}
+
+fn deduplicate_top_level_keys(raw: &str) -> String {
+    use std::collections::HashMap;
+
+    let mut sections: Vec<(&str, usize)> = Vec::new();
+    let mut offset = 0;
+    for line in raw.split('\n') {
+        if is_top_level_key_line(line) {
+            if let Some(colon_pos) = line.find(':') {
+                sections.push((&line[..colon_pos], offset));
+            }
+        }
+        offset += line.len() + 1;
+    }
+
+    let mut remaining: HashMap<&str, usize> = HashMap::new();
+    for (key, _) in &sections {
+        *remaining.entry(key).or_insert(0) += 1;
+    }
+    if remaining.values().all(|&count| count <= 1) {
+        return raw.to_string();
+    }
+
+    let mut result = String::with_capacity(raw.len());
+    let head_end = sections
+        .first()
+        .map(|&(_, start)| start)
+        .unwrap_or(raw.len());
+    result.push_str(&raw[..head_end]);
+
+    for (index, &(key, start)) in sections.iter().enumerate() {
+        let end = sections
+            .get(index + 1)
+            .map(|&(_, next_start)| next_start)
+            .unwrap_or(raw.len());
+        let count = remaining.get_mut(key).expect("key collected above");
+        *count -= 1;
+        if *count > 0 {
+            log::warn!(
+                "Hermes config: dropped duplicate top-level section '{key}' (keeping the last occurrence)"
+            );
+            continue;
+        }
+        result.push_str(&raw[start..end]);
+    }
+
+    result
 }
 
 // ============================================================================
@@ -142,7 +225,7 @@ fn is_top_level_key_line(line: &str) -> bool {
     }
     if let Some(colon_pos) = line.find(':') {
         let after_colon = &line[colon_pos + 1..];
-        after_colon.is_empty() || after_colon.starts_with(' ') || after_colon.starts_with('\t')
+        after_colon.is_empty() || after_colon.starts_with([' ', '\t', '\r', '\n'])
     } else {
         false
     }
@@ -196,6 +279,17 @@ fn serialize_yaml_section(key: &str, value: &serde_yaml::Value) -> Result<String
     Ok(yaml_str)
 }
 
+fn remove_all_sections(raw: &str, section_key: &str) -> String {
+    let mut result = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some((start, end)) = find_yaml_section_range(rest, section_key) {
+        result.push_str(&rest[..start]);
+        rest = &rest[end..];
+    }
+    result.push_str(rest);
+    result
+}
+
 /// Replace a YAML section in raw text, or append it if not found.
 fn replace_yaml_section(
     raw: &str,
@@ -208,12 +302,12 @@ fn replace_yaml_section(
         let mut result = String::with_capacity(raw.len());
         result.push_str(&raw[..start]);
         result.push_str(&serialized);
-        // Ensure proper separation between sections
-        let remainder = &raw[end..];
+        // Remove stale duplicates left by older CRLF handling bugs.
+        let remainder = remove_all_sections(&raw[end..], section_key);
         if !serialized.ends_with('\n') && !remainder.is_empty() && !remainder.starts_with('\n') {
             result.push('\n');
         }
-        result.push_str(remainder);
+        result.push_str(&remainder);
         Ok(result)
     } else {
         // Section not found — append at end
@@ -829,6 +923,22 @@ pub fn apply_switch_defaults(
     set_model_config(&merged)
 }
 
+/// Restore only the routing fields changed by [`apply_switch_defaults`].
+///
+/// Context limits and future fields edited while Ofox was bound are preserved.
+pub fn restore_switch_defaults(
+    default: Option<String>,
+    provider: Option<String>,
+) -> Result<HermesWriteOutcome, AppError> {
+    let current = get_model_config()?.unwrap_or_default();
+    let restored = HermesModelConfig {
+        default,
+        provider,
+        ..current
+    };
+    set_model_config(&restored)
+}
+
 // ============================================================================
 // MCP Section Access (for mcp/hermes.rs to use in Phase 4)
 // ============================================================================
@@ -1042,7 +1152,21 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
         std::env::set_var("CC_SWITCH_TEST_HOME", tmp.path());
+        // Prevent an ambient Hermes installation from making tests escape the
+        // isolated home. Restore both variables after the test completes.
+        let old_hermes_home = std::env::var_os("HERMES_HOME");
+        let old_local_appdata = std::env::var_os("LOCALAPPDATA");
+        std::env::remove_var("HERMES_HOME");
+        std::env::remove_var("LOCALAPPDATA");
         let result = test_fn();
+        match old_local_appdata {
+            Some(value) => std::env::set_var("LOCALAPPDATA", value),
+            None => std::env::remove_var("LOCALAPPDATA"),
+        }
+        match old_hermes_home {
+            Some(value) => std::env::set_var("HERMES_HOME", value),
+            None => std::env::remove_var("HERMES_HOME"),
+        }
         match old_test_home {
             Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
             None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
@@ -1212,6 +1336,39 @@ model:
         // Should match "model:", not "model_extra:"
         assert!(section.starts_with("model:"));
         assert!(!section.starts_with("model_extra:"));
+    }
+
+    #[test]
+    fn find_section_handles_crlf() {
+        let yaml = "model:\r\n  default: gpt-4\r\nagent:\r\n  max_turns: 10\r\n";
+        let (start, end) = find_yaml_section_range(yaml, "model").unwrap();
+        let section = &yaml[start..end];
+        assert!(section.starts_with("model:"));
+        assert!(section.contains("default: gpt-4"));
+        assert!(!section.contains("agent:"));
+    }
+
+    #[test]
+    fn dedup_keeps_last_top_level_section() {
+        let yaml = "model:\n  default: old\nagent:\n  max_turns: 10\nmodel:\n  default: new\n";
+        let healed = deduplicate_top_level_keys(yaml);
+        assert_eq!(healed.lines().filter(|line| *line == "model:").count(), 1);
+        assert!(healed.contains("default: new"));
+        assert!(!healed.contains("default: old"));
+        assert!(healed.contains("agent:"));
+    }
+
+    #[test]
+    fn windows_default_path_matches_hermes() {
+        let home = Path::new("C:\\Users\\tester");
+        assert_eq!(
+            windows_local_hermes_dir(Some(std::ffi::OsStr::new("D:\\AppData")), home),
+            PathBuf::from("D:\\AppData").join("hermes")
+        );
+        assert_eq!(
+            windows_local_hermes_dir(None, home),
+            home.join("AppData").join("Local").join("hermes")
+        );
     }
 
     // ---- replace_yaml_section tests ----
@@ -1834,7 +1991,10 @@ custom_providers:
             apply_switch_defaults("ofox-hermes", &settings).unwrap();
 
             let model = get_model_config().unwrap().unwrap();
-            assert_eq!(model.default.as_deref(), Some("minimax/minimax-m2.1-lightning"));
+            assert_eq!(
+                model.default.as_deref(),
+                Some("minimax/minimax-m2.1-lightning")
+            );
             assert_eq!(model.provider.as_deref(), Some("ofox-hermes"));
         });
     }

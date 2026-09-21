@@ -16,6 +16,7 @@ use std::time::Duration;
 #[serde(rename_all = "camelCase")]
 pub struct FetchedModel {
     pub id: String,
+    pub name: Option<String>,
     pub owned_by: Option<String>,
     pub pricing_prompt: Option<String>,
     /// 上游 `supported_endpoints`——形如 `["/v1/chat/completions", "/v1/responses"]`。
@@ -23,6 +24,9 @@ pub struct FetchedModel {
     /// 该字段（老 catalog / gemini 端点）时为 `None`；调用方按"未知则不过滤"
     /// 处理，避免安全降级把合法模型也砍掉。
     pub supported_endpoints: Option<Vec<String>>,
+    pub supported_parameters: Option<Vec<String>>,
+    pub input_modalities: Option<Vec<String>>,
+    pub output_modalities: Option<Vec<String>>,
 }
 
 /// OpenAI 兼容的 /v1/models 响应格式
@@ -34,10 +38,24 @@ struct ModelsResponse {
 #[derive(Debug, Deserialize)]
 struct ModelEntry {
     id: String,
+    #[serde(default)]
+    name: Option<String>,
     owned_by: Option<String>,
     pricing: Option<ModelPricing>,
     #[serde(default)]
     supported_endpoints: Option<Vec<String>>,
+    #[serde(default)]
+    supported_parameters: Option<Vec<String>>,
+    #[serde(default)]
+    architecture: Option<ModelArchitecture>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelArchitecture {
+    #[serde(default)]
+    input_modalities: Option<Vec<String>>,
+    #[serde(default)]
+    output_modalities: Option<Vec<String>>,
 }
 
 /// 上游 model 条目里的 pricing 子对象。只挑 `prompt` 字段——其余如
@@ -182,9 +200,16 @@ pub async fn fetch_ofox_models(
                 .filter(|m| is_chat_model(&m.id))
                 .map(|m| FetchedModel {
                     id: m.id,
+                    name: m.name,
                     owned_by: m.owned_by,
                     pricing_prompt: m.pricing.and_then(|p| p.prompt),
                     supported_endpoints: m.supported_endpoints,
+                    supported_parameters: m.supported_parameters,
+                    input_modalities: m
+                        .architecture
+                        .as_ref()
+                        .and_then(|a| a.input_modalities.clone()),
+                    output_modalities: m.architecture.and_then(|a| a.output_modalities),
                 })
                 .collect();
 
@@ -224,9 +249,13 @@ pub async fn fetch_ofox_models(
                         .to_string();
                     FetchedModel {
                         id,
+                        name: None,
                         owned_by: m.owned_by,
                         pricing_prompt: m.pricing.and_then(|p| p.prompt),
                         supported_endpoints: m.supported_endpoints,
+                        supported_parameters: None,
+                        input_modalities: None,
+                        output_modalities: None,
                     }
                 })
                 .filter(|m| is_chat_model(&m.id))
@@ -279,9 +308,16 @@ pub async fn fetch_models(
         .into_iter()
         .map(|m| FetchedModel {
             id: m.id,
+            name: m.name,
             owned_by: m.owned_by,
             pricing_prompt: m.pricing.and_then(|p| p.prompt),
             supported_endpoints: m.supported_endpoints,
+            supported_parameters: m.supported_parameters,
+            input_modalities: m
+                .architecture
+                .as_ref()
+                .and_then(|a| a.input_modalities.clone()),
+            output_modalities: m.architecture.and_then(|a| a.output_modalities),
         })
         .collect();
 
@@ -417,8 +453,14 @@ mod tests {
         ]}"#;
         let resp: ModelsResponse = serde_json::from_str(json).unwrap();
         let data = resp.data.unwrap();
-        assert_eq!(data[0].pricing.as_ref().and_then(|p| p.prompt.as_deref()), Some("0.000001"));
-        assert_eq!(data[1].pricing.as_ref().and_then(|p| p.prompt.as_deref()), Some("0.000005"));
+        assert_eq!(
+            data[0].pricing.as_ref().and_then(|p| p.prompt.as_deref()),
+            Some("0.000001")
+        );
+        assert_eq!(
+            data[1].pricing.as_ref().and_then(|p| p.prompt.as_deref()),
+            Some("0.000005")
+        );
     }
 
     #[test]

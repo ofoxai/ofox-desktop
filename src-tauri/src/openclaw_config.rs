@@ -780,6 +780,35 @@ pub fn set_default_model(model: &OpenClawDefaultModel) -> Result<OpenClawWriteOu
     write_root_section("agents", &agents_value)
 }
 
+/// Restore `agents.defaults.model` without replacing unrelated agent defaults.
+///
+/// `None` removes the model field that Ofox created. Other keys added while
+/// Ofox was bound remain untouched.
+pub fn restore_default_model(
+    model: Option<&OpenClawDefaultModel>,
+) -> Result<OpenClawWriteOutcome, AppError> {
+    if let Some(model) = model {
+        return set_default_model(model);
+    }
+
+    let mut config = read_openclaw_config()?;
+    let Some(agents) = config.get_mut("agents").and_then(Value::as_object_mut) else {
+        return Ok(OpenClawWriteOutcome::default());
+    };
+    let Some(defaults) = agents.get_mut("defaults").and_then(Value::as_object_mut) else {
+        return Ok(OpenClawWriteOutcome::default());
+    };
+    if defaults.remove("model").is_none() {
+        return Ok(OpenClawWriteOutcome::default());
+    }
+
+    let agents_value = config
+        .get("agents")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    write_root_section("agents", &agents_value)
+}
+
 /// 读取模型目录/允许列表（agents.defaults.models）
 pub fn get_model_catalog() -> Result<Option<HashMap<String, OpenClawModelCatalogEntry>>, AppError> {
     let config = read_openclaw_config()?;

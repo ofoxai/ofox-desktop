@@ -24,7 +24,7 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
-use crate::app_config::AppType;
+use crate::app_config::BindableTool;
 use crate::error::AppError;
 use crate::ofox_auth::OfoxAuthManager;
 use crate::ofox_secret::{SecretStore, Slot};
@@ -95,8 +95,8 @@ fn default_store() -> Arc<dyn SecretStore> {
 ///   - `Storage`：keychain 或 settings 读写失败
 ///   - `Unauthorized`：access_token 失效、scope 不足、组织被解绑
 ///   - `RemoteRejected`：服务端非 401 拒绝，或网络错
-pub async fn fetch_or_create_api_key(
-    tool: AppType,
+pub async fn fetch_or_create_api_key<T: Into<BindableTool>>(
+    tool: T,
     mode: FetchMode,
     manager: &Arc<RwLock<OfoxAuthManager>>,
 ) -> Result<String, ApiKeyError> {
@@ -105,12 +105,13 @@ pub async fn fetch_or_create_api_key(
 
 /// 显式注入 store 的版本——单测/集成测试用。生产代码请用
 /// [`fetch_or_create_api_key`]。
-pub async fn fetch_or_create_api_key_with_store(
-    tool: AppType,
+pub async fn fetch_or_create_api_key_with_store<T: Into<BindableTool>>(
+    tool: T,
     mode: FetchMode,
     store: Arc<dyn SecretStore>,
     manager: &Arc<RwLock<OfoxAuthManager>>,
 ) -> Result<String, ApiKeyError> {
+    let tool = tool.into();
     // CachedOk：命中直接返。ForceRefresh：跳过 keychain 走端点。
     if matches!(mode, FetchMode::CachedOk) {
         match store.load(Slot::ApiKey { tool }) {
@@ -127,9 +128,7 @@ pub async fn fetch_or_create_api_key_with_store(
                             ..meta
                         };
                         if let Err(e) = settings::upsert_api_key_meta(updated) {
-                            log::warn!(
-                                "[ofox_api_keys] backfill name for {tool:?} failed: {e:?}"
-                            );
+                            log::warn!("[ofox_api_keys] backfill name for {tool:?} failed: {e:?}");
                         }
                     }
                 }
@@ -171,7 +170,8 @@ pub async fn fetch_or_create_api_key_with_store(
 
 /// 标记某把 key 刚被 bind 到工具——更新 `last_used_at`。失败只 warn，不影响
 /// 上层 bind 结果（元数据不准不至于功能挂掉）。
-pub fn mark_key_used(tool: AppType) {
+pub fn mark_key_used<T: Into<BindableTool>>(tool: T) {
+    let tool = tool.into();
     if let Some(mut meta) = settings::get_api_key_meta(tool) {
         meta.last_used_at = Some(chrono::Utc::now().timestamp());
         if let Err(e) = settings::upsert_api_key_meta(meta) {
@@ -186,14 +186,15 @@ pub fn mark_key_used(tool: AppType) {
 /// 仅本地撤销：清 keychain + settings 条目。不调端点。
 ///
 /// 用于"用户在 ofox 后台已撤销"或"本地状态污染时手动重置"。
-pub async fn revoke_local(tool: AppType) -> Result<(), ApiKeyError> {
+pub async fn revoke_local<T: Into<BindableTool>>(tool: T) -> Result<(), ApiKeyError> {
     revoke_local_with_store(tool, default_store()).await
 }
 
-pub async fn revoke_local_with_store(
-    tool: AppType,
+pub async fn revoke_local_with_store<T: Into<BindableTool>>(
+    tool: T,
     store: Arc<dyn SecretStore>,
 ) -> Result<(), ApiKeyError> {
+    let tool = tool.into();
     // 先清 keychain：失败要传上去，避免"settings 记录被删但 keychain 还残留
     // 一份孤儿 key"
     store
@@ -208,10 +209,11 @@ pub async fn revoke_local_with_store(
 ///
 /// 404 视为成功——服务端已经把这把 key 删了（用户在 ofox console 操作过），
 /// 本地仍应清理。其它 4xx / 5xx 不清本地，让用户看到错误后决定。
-pub async fn revoke_remote(
-    tool: AppType,
+pub async fn revoke_remote<T: Into<BindableTool>>(
+    tool: T,
     manager: &Arc<RwLock<OfoxAuthManager>>,
 ) -> Result<(), ApiKeyError> {
+    let tool = tool.into();
     let Some(meta) = settings::get_api_key_meta(tool) else {
         // 本地已经没记录——视为已撤销，幂等返回。
         log::debug!("[ofox_api_keys] revoke_remote: no meta for {tool:?}, treating as no-op");
@@ -255,7 +257,7 @@ pub async fn revoke_remote(
 /// 返回 `(key_id, secret, key_start)`——上层 `fetch_or_create_api_key` 拿到
 /// 这三个值各自持久化到 settings / keychain。
 async fn call_create_endpoint(
-    tool: AppType,
+    tool: BindableTool,
     name: &str,
     manager: &Arc<RwLock<OfoxAuthManager>>,
 ) -> Result<CreatedKey, ApiKeyError> {
@@ -356,12 +358,12 @@ async fn classify_403(resp: reqwest::Response) -> ApiKeyError {
         Some("insufficient_scope") => ApiKeyError::Unauthorized(
             "缺少 apikey.write 权限，请重新登录以授权 API Key 管理".into(),
         ),
-        Some("organization_unbound") => ApiKeyError::RemoteRejected(
-            "OAuth 绑定的组织已被删除，请重新走 OAuth 授权".into(),
-        ),
+        Some("organization_unbound") => {
+            ApiKeyError::RemoteRejected("OAuth 绑定的组织已被删除，请重新走 OAuth 授权".into())
+        }
         _ => ApiKeyError::RemoteRejected(
             parsed
-                .and_then(|e| e.error_description.or_else(|| Some(e.error)))
+                .and_then(|e| e.error_description.or(Some(e.error)))
                 .unwrap_or_else(|| "403 (无 RFC 6750 错误体)".into()),
         ),
     }
@@ -384,7 +386,7 @@ async fn classify_403(resp: reqwest::Response) -> ApiKeyError {
 /// 账户时，ofox console 里的 key 列表会一眼能区分"哪一把是开发版试用签发的、
 /// 哪一把是正式版日常用的"。`-dev` 在服务端 regex 内合法。release 构建不带后
 /// 缀，正式用户看到的还是 `<tool> on <host>`。
-fn default_key_name(tool: AppType) -> String {
+fn default_key_name(tool: BindableTool) -> String {
     let host = hostname::get()
         .ok()
         .and_then(|s| s.into_string().ok())
@@ -417,6 +419,7 @@ mod tests {
     //! 命中 / 跳过分支由 `*_with_store` 接口注入 `InMemoryStore` 验证。
 
     use super::*;
+    use crate::app_config::AppType;
     use crate::ofox_secret::InMemoryStore;
     use serde_json::json;
     use wiremock::matchers::{header, method, path};
@@ -427,7 +430,12 @@ mod tests {
     async fn cached_key_returns_without_endpoint_call() {
         let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
         store
-            .save(Slot::ApiKey { tool: AppType::Claude }, "sk-of-cached")
+            .save(
+                Slot::ApiKey {
+                    tool: AppType::Claude.into(),
+                },
+                "sk-of-cached",
+            )
             .unwrap();
 
         // 这里不构造 manager —— CachedOk 命中分支不会用到。给个 dangling
@@ -450,7 +458,12 @@ mod tests {
     async fn cached_key_is_per_tool() {
         let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
         store
-            .save(Slot::ApiKey { tool: AppType::Claude }, "sk-of-claude")
+            .save(
+                Slot::ApiKey {
+                    tool: AppType::Claude.into(),
+                },
+                "sk-of-claude",
+            )
             .unwrap();
 
         let manager = dummy_manager_for_cache_test();
@@ -467,7 +480,11 @@ mod tests {
         // 的命中没串到 Codex"，不验未命中分支（那由其它测试覆盖）。
         // 直接检查 store 状态：
         assert_eq!(
-            store.load(Slot::ApiKey { tool: AppType::Codex }).unwrap(),
+            store
+                .load(Slot::ApiKey {
+                    tool: AppType::Codex.into()
+                })
+                .unwrap(),
             None
         );
     }
@@ -561,7 +578,10 @@ mod tests {
         let err = call_create_endpoint_at(&url, "valid-bearer", &json!({ "name": "x" }))
             .await
             .unwrap_err();
-        assert!(matches!(err, ApiKeyError::RemoteRejected(_)), "got: {err:?}");
+        assert!(
+            matches!(err, ApiKeyError::RemoteRejected(_)),
+            "got: {err:?}"
+        );
     }
 
     /// 服务端 5xx → RemoteRejected。
@@ -625,7 +645,10 @@ mod tests {
         let err = call_create_endpoint_at(&url, "b", &json!({ "name": "x" }))
             .await
             .unwrap_err();
-        assert!(matches!(err, ApiKeyError::RemoteRejected(_)), "got: {err:?}");
+        assert!(
+            matches!(err, ApiKeyError::RemoteRejected(_)),
+            "got: {err:?}"
+        );
     }
 
     /// 本地撤销应当清 keychain；settings 端在没条目时也吃得下（幂等）。
@@ -633,7 +656,12 @@ mod tests {
     async fn revoke_local_clears_keychain_entry() {
         let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
         store
-            .save(Slot::ApiKey { tool: AppType::Hermes }, "sk-of-hermes")
+            .save(
+                Slot::ApiKey {
+                    tool: AppType::Hermes.into(),
+                },
+                "sk-of-hermes",
+            )
             .unwrap();
 
         revoke_local_with_store(AppType::Hermes, store.clone())
@@ -641,7 +669,11 @@ mod tests {
             .expect("revoke should succeed even when settings has no meta entry");
 
         assert_eq!(
-            store.load(Slot::ApiKey { tool: AppType::Hermes }).unwrap(),
+            store
+                .load(Slot::ApiKey {
+                    tool: AppType::Hermes.into()
+                })
+                .unwrap(),
             None
         );
     }
@@ -650,7 +682,7 @@ mod tests {
     /// `<tool> on <host-prefix>`。
     #[test]
     fn default_key_name_format() {
-        let name = default_key_name(AppType::Claude);
+        let name = default_key_name(AppType::Claude.into());
         assert!(name.starts_with("claude on "), "got: {name}");
     }
 
@@ -660,7 +692,7 @@ mod tests {
     /// 的输出始终满足服务端 regex。
     #[test]
     fn default_key_name_satisfies_remote_regex() {
-        let name = default_key_name(AppType::Codex);
+        let name = default_key_name(AppType::Codex.into());
         for ch in name.chars() {
             assert!(
                 ch.is_ascii_alphanumeric() || ch == ' ' || ch == '_' || ch == '-',

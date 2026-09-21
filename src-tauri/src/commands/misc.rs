@@ -187,15 +187,18 @@ pub struct ToolVersion {
     env_type: String,
     /// 当 env_type 为 "wsl" 时，返回该工具绑定的 WSL distro（用于按 distro 探测 shells）
     wsl_distro: Option<String>,
+    #[serde(rename = "installationKind")]
+    installation_kind: String,
 }
 
-const VALID_TOOLS: [&str; 6] = [
+const VALID_TOOLS: [&str; 7] = [
     "claude",
     "codex",
     "gemini",
     "opencode",
     "openclaw",
     "hermes",
+    "workbuddy",
 ];
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -232,6 +235,130 @@ fn tool_env_type_and_wsl_distro(_tool: &str) -> (String, Option<String>) {
     ("unknown".to_string(), None)
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn find_workbuddy_app() -> Result<(PathBuf, String), String> {
+    let candidates = [
+        PathBuf::from("/Applications/WorkBuddy.app"),
+        crate::config::get_home_dir()
+            .join("Applications")
+            .join("WorkBuddy.app"),
+    ];
+    for path in candidates {
+        let plist = path.join("Contents/Info.plist");
+        if !plist.is_file() {
+            continue;
+        }
+        let read_value = |key: &str| -> Option<String> {
+            std::process::Command::new("/usr/libexec/PlistBuddy")
+                .args(["-c", &format!("Print :{key}")])
+                .arg(&plist)
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
+        if read_value("CFBundleIdentifier").as_deref() != Some("com.workbuddy.workbuddy") {
+            continue;
+        }
+        let version = read_value("CFBundleShortVersionString")
+            .or_else(|| read_value("CFBundleVersion"))
+            .unwrap_or_else(|| "已安装".to_string());
+        return Ok((path, version));
+    }
+    Err("未检测到官方 WorkBuddy.app".to_string())
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn find_workbuddy_app() -> Result<(PathBuf, String), String> {
+    let mut candidates = Vec::new();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(
+            PathBuf::from(local)
+                .join("Programs")
+                .join("WorkBuddy")
+                .join("WorkBuddy.exe"),
+        );
+    }
+
+    let mut command = std::process::Command::new("reg");
+    command
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+            "/s",
+            "/f",
+            "WorkBuddy",
+        ])
+        .creation_flags(CREATE_NO_WINDOW);
+    if let Ok(output) = command.output() {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                let trimmed = line.trim();
+                for field in ["DisplayIcon", "InstallLocation"] {
+                    if let Some(index) = trimmed.find(field) {
+                        let value = trimmed[index + field.len()..]
+                            .trim_start_matches(|c: char| {
+                                c.is_whitespace()
+                                    || c == 'R'
+                                    || c == 'E'
+                                    || c == 'G'
+                                    || c == '_'
+                                    || c.is_ascii_digit()
+                            })
+                            .trim()
+                            .trim_matches('"')
+                            .split(',')
+                            .next()
+                            .unwrap_or_default();
+                        if !value.is_empty() {
+                            let path = PathBuf::from(value);
+                            candidates.push(if path.extension().is_some() {
+                                path
+                            } else {
+                                path.join("WorkBuddy.exe")
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for path in candidates {
+        if !path.is_file() {
+            continue;
+        }
+        let escaped = path.to_string_lossy().replace('\'', "''");
+        let mut command = std::process::Command::new("powershell");
+        command
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!("(Get-Item -LiteralPath '{escaped}').VersionInfo.ProductVersion"),
+            ])
+            .creation_flags(CREATE_NO_WINDOW);
+        let version = command
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "已安装".to_string());
+        return Ok((path, version));
+    }
+    Err("未检测到 WorkBuddy.exe".to_string())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub(crate) fn find_workbuddy_app() -> Result<(PathBuf, String), String> {
+    Err("WorkBuddy 首版仅支持 macOS 和 Windows".to_string())
+}
+
 /// Detect installed AI-tool CLIs and (optionally) their latest published
 /// versions.
 ///
@@ -248,49 +375,33 @@ pub async fn get_tool_versions(
     wsl_shell_by_tool: Option<HashMap<String, WslShellPreferenceInput>>,
     include_latest: Option<bool>,
 ) -> Result<Vec<ToolVersion>, String> {
-    // Windows: completely disable tool version detection to prevent
-    // accidentally launching apps (e.g. Claude Code) via protocol handlers.
-    #[cfg(target_os = "windows")]
-    {
-        let _ = (tools, wsl_shell_by_tool, include_latest);
-        return Ok(Vec::new());
-    }
+    let include_latest = include_latest.unwrap_or(true);
+    let requested: Vec<&str> = if let Some(tools) = tools.as_ref() {
+        let set: std::collections::HashSet<&str> = tools.iter().map(|s| s.as_str()).collect();
+        VALID_TOOLS
+            .iter()
+            .copied()
+            .filter(|t| set.contains(t))
+            .collect()
+    } else {
+        VALID_TOOLS.to_vec()
+    };
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        let include_latest = include_latest.unwrap_or(true);
-        let requested: Vec<&str> = if let Some(tools) = tools.as_ref() {
-            let set: std::collections::HashSet<&str> = tools.iter().map(|s| s.as_str()).collect();
-            VALID_TOOLS
-                .iter()
-                .copied()
-                .filter(|t| set.contains(t))
-                .collect()
-        } else {
-            VALID_TOOLS.to_vec()
-        };
+    // Run all tools concurrently — each `get_single_tool_version_impl`
+    // spawns a child process for `--version` and (when include_latest)
+    // an HTTP request, both of which idle on I/O. Awaiting them serially
+    // serialized all of that for no reason. `futures::future::join_all`
+    // preserves ordering so the returned `Vec<ToolVersion>` is still in
+    // VALID_TOOLS order.
+    let futs = requested.into_iter().map(|tool| {
+        let pref = wsl_shell_by_tool.as_ref().and_then(|m| m.get(tool));
+        let tool_wsl_shell = pref.and_then(|p| p.wsl_shell.as_deref());
+        let tool_wsl_shell_flag = pref.and_then(|p| p.wsl_shell_flag.as_deref());
+        get_single_tool_version_impl(tool, tool_wsl_shell, tool_wsl_shell_flag, include_latest)
+    });
 
-        // Run all tools concurrently — each `get_single_tool_version_impl`
-        // spawns a child process for `--version` and (when include_latest)
-        // an HTTP request, both of which idle on I/O. Awaiting them serially
-        // serialized all of that for no reason. `futures::future::join_all`
-        // preserves ordering so the returned `Vec<ToolVersion>` is still in
-        // VALID_TOOLS order.
-        let futs = requested.into_iter().map(|tool| {
-            let pref = wsl_shell_by_tool.as_ref().and_then(|m| m.get(tool));
-            let tool_wsl_shell = pref.and_then(|p| p.wsl_shell.as_deref());
-            let tool_wsl_shell_flag = pref.and_then(|p| p.wsl_shell_flag.as_deref());
-            get_single_tool_version_impl(
-                tool,
-                tool_wsl_shell,
-                tool_wsl_shell_flag,
-                include_latest,
-            )
-        });
-
-        let results = futures::future::join_all(futs).await;
-        Ok(results)
-    }
+    let results = futures::future::join_all(futs).await;
+    Ok(results)
 }
 
 /// 获取单个工具的版本信息（内部实现）
@@ -308,6 +419,30 @@ async fn get_single_tool_version_impl(
         VALID_TOOLS.contains(&tool),
         "unexpected tool name in get_single_tool_version_impl: {tool}"
     );
+
+    if tool == "workbuddy" {
+        let (env_type, wsl_distro) = tool_env_type_and_wsl_distro(tool);
+        return match find_workbuddy_app() {
+            Ok((_path, version)) => ToolVersion {
+                name: tool.to_string(),
+                version: Some(version),
+                latest_version: None,
+                error: None,
+                env_type,
+                wsl_distro,
+                installation_kind: "desktopApp".to_string(),
+            },
+            Err(error) => ToolVersion {
+                name: tool.to_string(),
+                version: None,
+                latest_version: None,
+                error: Some(error),
+                env_type,
+                wsl_distro,
+                installation_kind: "desktopApp".to_string(),
+            },
+        };
+    }
 
     // 判断该工具的运行环境 & WSL distro（如有）
     let (env_type, wsl_distro) = tool_env_type_and_wsl_distro(tool);
@@ -345,6 +480,7 @@ async fn get_single_tool_version_impl(
         error: local_error,
         env_type,
         wsl_distro,
+        installation_kind: "cli".to_string(),
     }
 }
 
@@ -857,7 +993,7 @@ pub async fn open_provider_terminal(
     let launch_cwd = resolve_launch_cwd(cwd)?;
 
     // 获取提供商配置
-    let providers = ProviderService::list(state.inner(), app_type.clone())
+    let providers = ProviderService::list(state.inner(), app_type)
         .map_err(|e| format!("获取提供商列表失败: {e}"))?;
 
     let provider = providers

@@ -1894,6 +1894,8 @@ impl ProxyService {
 
         let env_map = json_to_env(config).map_err(|e| format!("转换 Gemini 配置失败: {e}"))?;
         write_gemini_env_atomic(&env_map).map_err(|e| format!("写入 Gemini env 失败: {e}"))?;
+        crate::gemini_config::ensure_api_key_auth_selected()
+            .map_err(|e| format!("写入 Gemini 认证方式失败: {e}"))?;
         Ok(())
     }
 
@@ -1904,8 +1906,8 @@ impl ProxyService {
     //
     // 旧的 read_*_live + PROVIDER_NOT_PRESENT 哨兵在"整文件备份"语义下用来记
     // "bind 前这个子节存不存在"。新方案改成字段级 patch 后不需要——backup 存
-    // 的就是注入的 patch 本身，unbind 直接反 patch（见 `ofox_restore_from_backup`
-    // 里的 `unbind_provider_subsection`）。
+    // 注入 patch；OpenClaw/Hermes 额外存一份运行时默认快照。unbind 反 patch
+    // 后再恢复默认（见 `ofox_restore_from_backup`）。
     //
     // ofox provider id 由各工具的 seed 决定，固定为：
     //   - opencode → 写到 `provider."ofox-opencode"` 节（注：OpenCode 工具配置
@@ -1921,6 +1923,28 @@ impl ProxyService {
     fn write_openclaw_live(&self, config: &Value) -> Result<(), String> {
         crate::openclaw_config::set_provider("ofox-openclaw", config.clone())
             .map_err(|e| format!("写入 OpenClaw ofox provider 失败: {e}"))?;
+
+        let first_model_id = config
+            .get("models")
+            .and_then(Value::as_array)
+            .and_then(|models| models.first())
+            .and_then(|model| model.get("id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|model| !model.is_empty());
+
+        if let Some(model_id) = first_model_id {
+            let mut default = crate::openclaw_config::get_default_model()
+                .map_err(|e| format!("读取 OpenClaw 默认模型失败: {e}"))?
+                .unwrap_or_else(|| crate::openclaw_config::OpenClawDefaultModel {
+                    primary: String::new(),
+                    fallbacks: Vec::new(),
+                    extra: std::collections::HashMap::new(),
+                });
+            default.primary = format!("ofox-openclaw/{model_id}");
+            crate::openclaw_config::set_default_model(&default)
+                .map_err(|e| format!("写入 OpenClaw 默认模型失败: {e}"))?;
+        }
         Ok(())
     }
 
@@ -1948,8 +1972,9 @@ impl ProxyService {
     //   3. backup 内容是"按工具语义"的快照（整文件 or provider 子节）
 
     /// 把"这次 bind 将要往工具配置里注入的字段"记进 DB live_backups。
-    /// 6 工具全支持。**存的不是磁盘当前态**，而是即将写入的 patch
+    /// 6 工具全支持。**存的不是整份磁盘当前态**，而是即将写入的 patch
     /// （= `ofox-<app>` seed 模板的 settings_config，token 已注入）。
+    /// OpenClaw/Hermes 会用版本化 envelope 同时保存被改动的运行时默认。
     ///
     /// unbind 时 [`ofox_restore_from_backup`] 用这份 patch 从磁盘上**反向减去**
     /// 字段——用户在 bind 期间手动加的字段（OpenClaw 子节里手加的 models、
@@ -1977,8 +2002,39 @@ impl ProxyService {
         );
         let patch = self.build_ofox_patch(app_type, api_key)?;
         let key = app_type.as_str();
-        let json_str =
-            serde_json::to_string(&patch).map_err(|e| format!("序列化 {key} patch 失败: {e}"))?;
+        // Provider-only patches are enough for most tools. OpenClaw and Hermes
+        // additionally change their runtime routing defaults, so keep those
+        // small pre-bind snapshots beside the patch. The envelope is versioned
+        // and restore still accepts legacy raw-patch backups.
+        let backup_value = match app_type {
+            AppType::OpenClaw => {
+                let runtime_default = crate::openclaw_config::get_default_model()
+                    .map_err(|e| format!("读取 OpenClaw 默认模型失败: {e}"))?;
+                json!({
+                    "__ofoxDirectBackupVersion": 1,
+                    "patch": patch,
+                    "runtimeDefault": runtime_default,
+                })
+            }
+            AppType::Hermes => {
+                let runtime_default = crate::hermes_config::get_model_config()
+                    .map_err(|e| format!("读取 Hermes model 配置失败: {e}"))?
+                    .map(|model| {
+                        json!({
+                            "default": model.default,
+                            "provider": model.provider,
+                        })
+                    });
+                json!({
+                    "__ofoxDirectBackupVersion": 1,
+                    "patch": patch,
+                    "runtimeDefault": runtime_default,
+                })
+            }
+            _ => patch,
+        };
+        let json_str = serde_json::to_string(&backup_value)
+            .map_err(|e| format!("序列化 {key} patch 失败: {e}"))?;
         self.db
             .save_live_backup(key, &json_str)
             .await
@@ -2018,9 +2074,10 @@ impl ProxyService {
         //     字段，必须 **merge 进用户现有文件**，否则会把用户原本的 permissions
         //     / MCP / profiles / 其它 env 变量整文件冲掉（用户实测反馈的 bug）。
         //   - OpenCode/OpenClaw/Hermes 走 set_provider，**整个覆盖** `ofox-<app>`
-        //     这一个子节，但天然保留用户其它 provider 子节和顶层配置——`set_provider`
-        //     本就是「读全文件→只 insert 自己子节」。子节内用户手加字段会在 bind
-        //     一瞬被覆盖，这是既有行为，不归 unbind 还原管。
+        //     这一个子节，但天然保留用户其它 provider 子节和顶层配置。OpenClaw /
+        //     Hermes 还会同步各自的 runtime default；对应旧值已由 backup 保存。
+        //     子节内用户手加字段会在 bind 一瞬被覆盖，这是既有行为，不归 unbind
+        //     还原管。
         match app_type {
             AppType::Claude | AppType::Codex | AppType::Gemini => {
                 self.ofox_merge_patch_to_live(app_type, &patch)?
@@ -2043,11 +2100,7 @@ impl ProxyService {
     /// 回来。
     ///
     /// [`merge_patch_into_settings`]: crate::services::provider::merge_patch_into_settings
-    fn ofox_merge_patch_to_live(
-        &self,
-        app_type: &AppType,
-        patch: &Value,
-    ) -> Result<(), String> {
+    fn ofox_merge_patch_to_live(&self, app_type: &AppType, patch: &Value) -> Result<(), String> {
         use crate::services::provider::merge_patch_into_settings;
 
         let current = match app_type {
@@ -2092,6 +2145,11 @@ impl ProxyService {
 
         // 把 token 注进 settings_config（不写回 DB——保持 seed 纯净）
         Self::write_token_into_settings(&mut provider.settings_config, token_path, api_key)?;
+        if matches!(app_type, AppType::OpenCode) {
+            crate::opencode_config::normalize_ofox_provider_transport(
+                &mut provider.settings_config,
+            );
+        }
         Ok(provider.settings_config)
     }
 
@@ -2120,10 +2178,7 @@ impl ProxyService {
     ///
     /// `#[allow(dead_code)]`：Commit 3 引入门面，Commit 4 才被 unbind 调用。
     #[allow(dead_code)]
-    pub(crate) async fn ofox_restore_from_backup(
-        &self,
-        app_type: &AppType,
-    ) -> Result<(), String> {
+    pub(crate) async fn ofox_restore_from_backup(&self, app_type: &AppType) -> Result<(), String> {
         use crate::services::provider::remove_patch_from_settings;
 
         let key = app_type.as_str();
@@ -2139,8 +2194,23 @@ impl ProxyService {
             );
             return Ok(());
         };
-        let patch: Value = serde_json::from_str(&backup.original_config)
+        let backup_value: Value = serde_json::from_str(&backup.original_config)
             .map_err(|e| format!("解析 {key} patch 失败: {e}"))?;
+        let (patch, runtime_default) = if backup_value
+            .get("__ofoxDirectBackupVersion")
+            .and_then(Value::as_u64)
+            == Some(1)
+        {
+            let patch = backup_value
+                .get("patch")
+                .cloned()
+                .ok_or_else(|| format!("{key} 备份缺少 patch"))?;
+            (patch, backup_value.get("runtimeDefault").cloned())
+        } else {
+            // Backward compatibility with backups written before the envelope
+            // existed: the stored JSON was the patch itself.
+            (backup_value, None)
+        };
 
         match app_type {
             AppType::Claude => {
@@ -2160,45 +2230,115 @@ impl ProxyService {
                 let stripped = remove_patch_from_settings(app_type, &current, &patch)
                     .map_err(|e| format!("反 patch Gemini 配置失败: {e}"))?;
                 self.write_gemini_live(&stripped)?;
+                // Unbinding switches Gemini back to the official provider.
+                // The `.env` patch removal alone is insufficient: Gemini CLI
+                // also persists its auth choice in settings.json.
+                crate::gemini_config::write_google_oauth_settings()
+                    .map_err(|e| format!("恢复 Gemini OAuth 认证方式失败: {e}"))?;
             }
             AppType::OpenCode => self.unbind_provider_subsection(
                 app_type,
                 "ofox-opencode",
                 &patch,
-                |id| crate::opencode_config::get_providers()
-                    .map(|m| m.get(id).cloned())
-                    .map_err(|e| format!("读取 OpenCode providers 失败: {e}")),
-                |id, value| crate::opencode_config::set_provider(id, value)
-                    .map_err(|e| format!("写入 OpenCode ofox provider 失败: {e}")),
-                |id| crate::opencode_config::remove_provider(id)
-                    .map_err(|e| format!("移除 OpenCode ofox provider 失败: {e}")),
+                |id| {
+                    crate::opencode_config::get_providers()
+                        .map(|m| m.get(id).cloned())
+                        .map_err(|e| format!("读取 OpenCode providers 失败: {e}"))
+                },
+                |id, value| {
+                    crate::opencode_config::set_provider(id, value)
+                        .map_err(|e| format!("写入 OpenCode ofox provider 失败: {e}"))
+                },
+                |id| {
+                    crate::opencode_config::remove_provider(id)
+                        .map_err(|e| format!("移除 OpenCode ofox provider 失败: {e}"))
+                },
             )?,
-            AppType::OpenClaw => self.unbind_provider_subsection(
-                app_type,
-                "ofox-openclaw",
-                &patch,
-                |id| crate::openclaw_config::get_provider(id)
-                    .map_err(|e| format!("读取 OpenClaw provider 失败: {e}")),
-                |id, value| crate::openclaw_config::set_provider(id, value)
-                    .map(|_| ())
-                    .map_err(|e| format!("写入 OpenClaw ofox provider 失败: {e}")),
-                |id| crate::openclaw_config::remove_provider(id)
-                    .map(|_| ())
-                    .map_err(|e| format!("移除 OpenClaw ofox provider 失败: {e}")),
-            )?,
-            AppType::Hermes => self.unbind_provider_subsection(
-                app_type,
-                "ofox-hermes",
-                &patch,
-                |id| crate::hermes_config::get_provider(id)
-                    .map_err(|e| format!("读取 Hermes provider 失败: {e}")),
-                |id, value| crate::hermes_config::set_provider(id, value)
-                    .map(|_| ())
-                    .map_err(|e| format!("写入 Hermes ofox provider 失败: {e}")),
-                |id| crate::hermes_config::remove_provider(id)
-                    .map(|_| ())
-                    .map_err(|e| format!("移除 Hermes ofox provider 失败: {e}")),
-            )?,
+            AppType::OpenClaw => {
+                self.unbind_provider_subsection(
+                    app_type,
+                    "ofox-openclaw",
+                    &patch,
+                    |id| {
+                        crate::openclaw_config::get_provider(id)
+                            .map_err(|e| format!("读取 OpenClaw provider 失败: {e}"))
+                    },
+                    |id, value| {
+                        crate::openclaw_config::set_provider(id, value)
+                            .map(|_| ())
+                            .map_err(|e| format!("写入 OpenClaw ofox provider 失败: {e}"))
+                    },
+                    |id| {
+                        crate::openclaw_config::remove_provider(id)
+                            .map(|_| ())
+                            .map_err(|e| format!("移除 OpenClaw ofox provider 失败: {e}"))
+                    },
+                )?;
+
+                if let Some(snapshot) = runtime_default {
+                    let previous = if snapshot.is_null() {
+                        None
+                    } else {
+                        Some(
+                            serde_json::from_value(snapshot)
+                                .map_err(|e| format!("解析 OpenClaw 默认模型备份失败: {e}"))?,
+                        )
+                    };
+                    crate::openclaw_config::restore_default_model(previous.as_ref())
+                        .map_err(|e| format!("恢复 OpenClaw 默认模型失败: {e}"))?;
+                }
+            }
+            AppType::Hermes => {
+                let live_patch = Self::hermes_patch_for_readback(&patch);
+                self.unbind_provider_subsection(
+                    app_type,
+                    "ofox-hermes",
+                    &live_patch,
+                    |id| {
+                        crate::hermes_config::get_provider(id)
+                            .map_err(|e| format!("读取 Hermes provider 失败: {e}"))
+                    },
+                    |id, value| {
+                        crate::hermes_config::set_provider(id, value)
+                            .map(|_| ())
+                            .map_err(|e| format!("写入 Hermes ofox provider 失败: {e}"))
+                    },
+                    |id| {
+                        crate::hermes_config::remove_provider(id)
+                            .map(|_| ())
+                            .map_err(|e| format!("移除 Hermes ofox provider 失败: {e}"))
+                    },
+                )?;
+
+                let previous_routing = runtime_default.as_ref().map(|snapshot| {
+                    (
+                        snapshot
+                            .get("default")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        snapshot
+                            .get("provider")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    )
+                });
+
+                if let Some((default, provider)) = previous_routing {
+                    crate::hermes_config::restore_switch_defaults(default, provider)
+                        .map_err(|e| format!("恢复 Hermes model 默认值失败: {e}"))?;
+                } else if crate::hermes_config::get_model_config()
+                    .map_err(|e| format!("读取 Hermes model 配置失败: {e}"))?
+                    .and_then(|model| model.provider)
+                    .as_deref()
+                    == Some("ofox-hermes")
+                {
+                    // Legacy raw-patch backups did not capture the previous
+                    // routing. At minimum clear the now-removed provider so
+                    // Hermes does not keep a dangling ofox-hermes default.
+                    crate::hermes_config::restore_switch_defaults(None, None)
+                        .map_err(|e| format!("清理 Hermes model 默认值失败: {e}"))?;
+                }
+            }
         }
 
         self.db
@@ -2206,6 +2346,41 @@ impl ProxyService {
             .await
             .map_err(|e| format!("删除 {key} 备份失败: {e}"))?;
         Ok(())
+    }
+
+    /// Convert the stored Hermes seed patch into the shape returned by
+    /// `hermes_config::get_provider` after a write/read round trip.
+    ///
+    /// Hermes rewrites `name`, denormalizes the models dict to an array, adds
+    /// a singular `model`, and exposes a UI-only source marker. Matching that
+    /// shape makes the generic reverse-patch logic remove only Ofox-managed
+    /// fields while retaining fields/models the user added later.
+    fn hermes_patch_for_readback(patch: &Value) -> Value {
+        let mut live_patch = patch.clone();
+        let Some(root) = live_patch.as_object_mut() else {
+            return live_patch;
+        };
+
+        root.insert("name".to_string(), json!("ofox-hermes"));
+        root.insert(
+            crate::hermes_config::PROVIDER_SOURCE_FIELD.to_string(),
+            json!(crate::hermes_config::PROVIDER_SOURCE_CUSTOM_LIST),
+        );
+
+        if let Some(models) = root.get("models").and_then(Value::as_object) {
+            let mut denormalized = Vec::with_capacity(models.len());
+            for (id, config) in models {
+                let mut entry = config.as_object().cloned().unwrap_or_default();
+                entry.insert("id".to_string(), json!(id));
+                denormalized.push(Value::Object(entry));
+            }
+            if let Some(first_id) = models.keys().next().cloned() {
+                root.insert("model".to_string(), json!(first_id));
+            }
+            root.insert("models".to_string(), Value::Array(denormalized));
+        }
+
+        live_patch
     }
 
     /// OpenCode/OpenClaw/Hermes 共用的"子节反 patch"逻辑——读当前子节、反 patch、
@@ -2239,9 +2414,7 @@ impl ProxyService {
         let stripped = remove_patch_from_settings(app_type, &current, patch)
             .map_err(|e| format!("反 patch {} 子节失败: {e}", app_type.as_str()))?;
 
-        let is_empty = stripped
-            .as_object()
-            .is_some_and(|obj| obj.is_empty());
+        let is_empty = stripped.as_object().is_some_and(|obj| obj.is_empty());
 
         if is_empty {
             remove_writer(provider_id)
@@ -2255,9 +2428,7 @@ impl ProxyService {
     /// 是为避免 commands ↔ services 反向依赖，但语义不能漂移；漂移会导致 bind
     /// 内部回滚（write 触发 None 路径报错 → ofox_restore_from_backup → 删 backup
     /// + 擦 sk-of- + 切回 official）。改其中一处务必同步改另一处。
-    fn ofox_provider_target(
-        app: &AppType,
-    ) -> Option<(&'static str, &'static [&'static str])> {
+    fn ofox_provider_target(app: &AppType) -> Option<(&'static str, &'static [&'static str])> {
         match app {
             AppType::Claude => Some(("ofox-claude", &["env", "ANTHROPIC_AUTH_TOKEN"])),
             AppType::Codex => Some(("ofox-codex", &["auth", "OPENAI_API_KEY"])),
@@ -2676,10 +2847,7 @@ model = "gpt-5.1-codex"
             .and_then(|v| v.get("base_url"))
             .and_then(|v| v.as_str());
         assert_eq!(provider_base_url, Some(proxy_url));
-        assert!(
-            parsed.get("base_url").is_none(),
-            "顶层 base_url 不应该出现"
-        );
+        assert!(parsed.get("base_url").is_none(), "顶层 base_url 不应该出现");
     }
 
     #[tokio::test]
@@ -3467,7 +3635,8 @@ command = "latest-command"
             }),
             None,
         );
-        db.save_provider("claude", &provider).expect("save claude seed");
+        db.save_provider("claude", &provider)
+            .expect("save claude seed");
     }
 
     fn seed_ofox_opencode(db: &Database) {
@@ -3475,7 +3644,7 @@ command = "latest-command"
             "ofox-opencode".to_string(),
             "OfoxAI".to_string(),
             json!({
-                "npm": "@ai-sdk/openai-compatible",
+                "npm": "@ai-sdk/openai",
                 "name": "OfoxAI",
                 "options": {
                     "baseURL": "https://api.ofox.ai/v1",
@@ -3485,7 +3654,41 @@ command = "latest-command"
             }),
             None,
         );
-        db.save_provider("opencode", &provider).expect("save opencode seed");
+        db.save_provider("opencode", &provider)
+            .expect("save opencode seed");
+    }
+
+    fn seed_ofox_openclaw(db: &Database) {
+        let provider = Provider::with_id(
+            "ofox-openclaw".to_string(),
+            "OfoxAI".to_string(),
+            json!({
+                "baseUrl": "https://api.ofox.ai/v1",
+                "apiKey": "",
+                "api": "openai-completions",
+                "models": [{ "id": "openai/gpt-5.6-terra", "name": "openai/gpt-5.6-terra" }]
+            }),
+            None,
+        );
+        db.save_provider("openclaw", &provider)
+            .expect("save openclaw seed");
+    }
+
+    fn seed_ofox_hermes(db: &Database) {
+        let provider = Provider::with_id(
+            "ofox-hermes".to_string(),
+            "OfoxAI".to_string(),
+            json!({
+                "name": "ofox",
+                "base_url": "https://api.ofox.ai/v1",
+                "api_key": "",
+                "api_mode": "chat_completions",
+                "models": { "openai/gpt-5.6-terra": {} }
+            }),
+            None,
+        );
+        db.save_provider("hermes", &provider)
+            .expect("save hermes seed");
     }
 
     /// 准备 Claude 工具的"原始用户配置"——bind 前磁盘上的状态。
@@ -3506,11 +3709,8 @@ command = "latest-command"
             "statusLine": { "type": "command", "command": "echo baseline" },
             "model": "opus"
         });
-        std::fs::write(
-            &path,
-            serde_json::to_string_pretty(&baseline).unwrap(),
-        )
-        .expect("write claude baseline");
+        std::fs::write(&path, serde_json::to_string_pretty(&baseline).unwrap())
+            .expect("write claude baseline");
     }
 
     #[tokio::test]
@@ -3559,12 +3759,16 @@ command = "latest-command"
         // settings.json 里的大量配置整文件覆盖掉。permissions / statusLine /
         // model / 自定义 env 都必须原样保留。
         assert_eq!(
-            written.pointer("/permissions/allow/0").and_then(|v| v.as_str()),
+            written
+                .pointer("/permissions/allow/0")
+                .and_then(|v| v.as_str()),
             Some("Bash"),
             "bind 前的 permissions 必须保留, got: {written}"
         );
         assert_eq!(
-            written.pointer("/statusLine/command").and_then(|v| v.as_str()),
+            written
+                .pointer("/statusLine/command")
+                .and_then(|v| v.as_str()),
             Some("echo baseline"),
             "bind 前的 statusLine 必须保留, got: {written}"
         );
@@ -3629,21 +3833,19 @@ command = "latest-command"
         // env 里的 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN 都该被减掉
         let after = service.read_claude_live().expect("read after restore");
         assert!(
-            after
-                .pointer("/env/ANTHROPIC_BASE_URL")
-                .is_none(),
+            after.pointer("/env/ANTHROPIC_BASE_URL").is_none(),
             "注入的 base_url 应当被反 patch 减掉, got: {after}"
         );
         assert!(
-            after
-                .pointer("/env/ANTHROPIC_AUTH_TOKEN")
-                .is_none(),
+            after.pointer("/env/ANTHROPIC_AUTH_TOKEN").is_none(),
             "注入的 token 应当被反 patch 减掉, got: {after}"
         );
 
         // **核心承诺**：用户在 bind 期间手加的字段不能丢
         assert_eq!(
-            after.pointer("/statusLine/command").and_then(|v| v.as_str()),
+            after
+                .pointer("/statusLine/command")
+                .and_then(|v| v.as_str()),
             Some("echo hi"),
             "用户加的 statusLine 必须保留"
         );
@@ -3656,10 +3858,7 @@ command = "latest-command"
         );
 
         // backup 已被 restore 消费掉
-        let backup_after = db
-            .get_live_backup("claude")
-            .await
-            .expect("query backup");
+        let backup_after = db.get_live_backup("claude").await.expect("query backup");
         assert!(backup_after.is_none(), "restore 后应当删 backup");
     }
 
@@ -3674,7 +3873,8 @@ command = "latest-command"
             }),
             None,
         );
-        db.save_provider("codex", &provider).expect("save codex seed");
+        db.save_provider("codex", &provider)
+            .expect("save codex seed");
     }
 
     fn seed_ofox_gemini(db: &Database) {
@@ -3689,7 +3889,8 @@ command = "latest-command"
             }),
             None,
         );
-        db.save_provider("gemini", &provider).expect("save gemini seed");
+        db.save_provider("gemini", &provider)
+            .expect("save gemini seed");
     }
 
     #[tokio::test]
@@ -3743,7 +3944,9 @@ command = "latest-command"
         // auth.json：sk-of- 注入，用户自定义字段保留
         let written_auth: Value = read_json_file(&auth_path).expect("read codex auth after bind");
         assert_eq!(
-            written_auth.pointer("/OPENAI_API_KEY").and_then(|v| v.as_str()),
+            written_auth
+                .pointer("/OPENAI_API_KEY")
+                .and_then(|v| v.as_str()),
             Some("sk-of-CODEX1"),
             "token 应被注入, got: {written_auth}"
         );
@@ -3780,8 +3983,7 @@ command = "latest-command"
             .await
             .expect("gemini direct write");
 
-        let env_map =
-            crate::gemini_config::read_gemini_env().expect("read gemini env after bind");
+        let env_map = crate::gemini_config::read_gemini_env().expect("read gemini env after bind");
         assert_eq!(
             env_map.get("GEMINI_API_KEY").map(String::as_str),
             Some("sk-of-GEM1"),
@@ -3801,6 +4003,60 @@ command = "latest-command"
             env_map.get("USER_CUSTOM").map(String::as_str),
             Some("keep-me"),
             "用户的自定义变量必须保留, got: {env_map:?}"
+        );
+
+        let settings: Value =
+            read_json_file(&crate::gemini_config::get_gemini_dir().join("settings.json"))
+                .expect("read gemini settings after bind");
+        assert_eq!(
+            settings
+                .pointer("/security/auth/selectedType")
+                .and_then(Value::as_str),
+            Some("gemini-api-key"),
+            "API key bind 应同步 Gemini CLI 认证方式, got: {settings}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn ofox_unbind_gemini_restores_oauth_auth_mode() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        seed_ofox_gemini(&db);
+
+        let env_path = crate::gemini_config::get_gemini_env_path();
+        std::fs::create_dir_all(env_path.parent().unwrap()).expect("mkdir gemini");
+        std::fs::write(&env_path, "USER_CUSTOM=keep-me\n").expect("write gemini baseline");
+        crate::gemini_config::write_google_oauth_settings().expect("seed oauth mode");
+
+        service
+            .ofox_backup_live_config(&AppType::Gemini, "sk-of-GEM1")
+            .await
+            .expect("backup gemini patch");
+        service
+            .ofox_write_direct_to_live(&AppType::Gemini, "sk-of-GEM1")
+            .await
+            .expect("bind gemini");
+        service
+            .ofox_restore_from_backup(&AppType::Gemini)
+            .await
+            .expect("unbind gemini");
+
+        let env = crate::gemini_config::read_gemini_env().expect("read restored env");
+        assert_eq!(env.get("USER_CUSTOM").map(String::as_str), Some("keep-me"));
+        assert!(!env.contains_key("GEMINI_API_KEY"));
+        assert!(!env.contains_key("GOOGLE_GEMINI_BASE_URL"));
+
+        let settings: Value = read_json_file(&crate::gemini_config::get_gemini_settings_path())
+            .expect("read restored gemini settings");
+        assert_eq!(
+            settings
+                .pointer("/security/auth/selectedType")
+                .and_then(Value::as_str),
+            Some("oauth-personal")
         );
     }
 
@@ -3918,16 +4174,13 @@ command = "latest-command"
             .get("ofox-opencode")
             .cloned()
             .expect("ofox-opencode bind 后必须存在");
-        subsection
-            .as_object_mut()
-            .unwrap()
-            .insert(
-                "models".to_string(),
-                json!({
-                    "qwen3-coder-plus": { "name": "Qwen3 Coder Plus" },
-                    "deepseek-v3": { "name": "DeepSeek V3" }
-                }),
-            );
+        subsection.as_object_mut().unwrap().insert(
+            "models".to_string(),
+            json!({
+                "qwen3-coder-plus": { "name": "Qwen3 Coder Plus" },
+                "deepseek-v3": { "name": "DeepSeek V3" }
+            }),
+        );
         // 顺手再加一个完全跟 patch 无关的顶层字段
         subsection
             .as_object_mut()
@@ -3980,6 +4233,127 @@ command = "latest-command"
 
     #[tokio::test]
     #[serial]
+    async fn ofox_openclaw_bind_and_unbind_restores_runtime_default() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        seed_ofox_openclaw(&db);
+
+        let path = crate::openclaw_config::get_openclaw_config_path();
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir openclaw");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "models": { "mode": "merge", "providers": {} },
+                "agents": {
+                    "defaults": {
+                        "model": {
+                            "primary": "existing/old-model",
+                            "fallbacks": ["existing/fallback"]
+                        },
+                        "timeoutSeconds": 120
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .expect("write openclaw baseline");
+
+        service
+            .ofox_backup_live_config(&AppType::OpenClaw, "sk-of-CLAW1")
+            .await
+            .expect("backup openclaw");
+        service
+            .ofox_write_direct_to_live(&AppType::OpenClaw, "sk-of-CLAW1")
+            .await
+            .expect("bind openclaw");
+
+        let bound_default = crate::openclaw_config::get_default_model()
+            .expect("read bound default")
+            .expect("bound default present");
+        assert_eq!(bound_default.primary, "ofox-openclaw/openai/gpt-5.6-terra");
+
+        service
+            .ofox_restore_from_backup(&AppType::OpenClaw)
+            .await
+            .expect("unbind openclaw");
+
+        let restored = crate::openclaw_config::get_default_model()
+            .expect("read restored default")
+            .expect("restored default present");
+        assert_eq!(restored.primary, "existing/old-model");
+        assert_eq!(restored.fallbacks, ["existing/fallback"]);
+        let config = crate::openclaw_config::read_openclaw_config().expect("read config");
+        assert_eq!(
+            config
+                .pointer("/agents/defaults/timeoutSeconds")
+                .and_then(Value::as_u64),
+            Some(120)
+        );
+        assert!(crate::openclaw_config::get_provider("ofox-openclaw")
+            .expect("read provider")
+            .is_none());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn ofox_hermes_bind_and_unbind_restores_runtime_routing() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        seed_ofox_hermes(&db);
+
+        let path = crate::hermes_config::get_hermes_config_path();
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir hermes");
+        std::fs::write(
+            &path,
+            "model:\n  default: existing/old-model\n  provider: existing-provider\n  context_length: 32000\ncustom_providers: []\n",
+        )
+        .expect("write hermes baseline");
+
+        service
+            .ofox_backup_live_config(&AppType::Hermes, "sk-of-HERMES1")
+            .await
+            .expect("backup hermes");
+        service
+            .ofox_write_direct_to_live(&AppType::Hermes, "sk-of-HERMES1")
+            .await
+            .expect("bind hermes");
+
+        let bound = crate::hermes_config::get_model_config()
+            .expect("read bound model")
+            .expect("bound model present");
+        assert_eq!(bound.provider.as_deref(), Some("ofox-hermes"));
+        assert_eq!(bound.default.as_deref(), Some("openai/gpt-5.6-terra"));
+
+        // Simulate a user changing an unrelated routing limit while bound.
+        let mut edited = bound;
+        edited.max_tokens = Some(8192);
+        crate::hermes_config::set_model_config(&edited).expect("edit max tokens");
+
+        service
+            .ofox_restore_from_backup(&AppType::Hermes)
+            .await
+            .expect("unbind hermes");
+
+        let restored = crate::hermes_config::get_model_config()
+            .expect("read restored model")
+            .expect("restored model present");
+        assert_eq!(restored.provider.as_deref(), Some("existing-provider"));
+        assert_eq!(restored.default.as_deref(), Some("existing/old-model"));
+        assert_eq!(restored.context_length, Some(32000));
+        assert_eq!(restored.max_tokens, Some(8192));
+        assert!(crate::hermes_config::get_provider("ofox-hermes")
+            .expect("read provider")
+            .is_none());
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn ofox_restore_without_backup_is_noop() {
         // 用户没经过新 bind 路径（比如老 takeover 残留状态下）就点解绑——
         // restore 应当 noop 退出，不能 hard-fail 让 UI 卡死。
@@ -3997,8 +4371,6 @@ command = "latest-command"
             .expect("缺备份时应当 noop，不报错");
 
         // 仍然没有备份（restore 没创建任何东西）
-        assert!(
-            db.get_live_backup("claude").await.expect("query").is_none()
-        );
+        assert!(db.get_live_backup("claude").await.expect("query").is_none());
     }
 }
