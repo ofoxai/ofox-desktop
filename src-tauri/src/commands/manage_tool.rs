@@ -459,6 +459,32 @@ mod tests {
         serde_json::from_value::<crate::provider::OpenCodeProviderConfig>(settings)
             .expect("saved provider should remain readable after restart");
     }
+
+    #[test]
+    fn opencode_glm_53_selection_receives_chat_compatibility_override() {
+        let mut settings = serde_json::json!({
+            "npm": "@ai-sdk/openai",
+            "name": "OfoxAI",
+            "options": {},
+            "models": {}
+        });
+
+        write_model_into_settings(&AppType::OpenCode, &mut settings, "z-ai/glm-5.3-flash").unwrap();
+        assert!(crate::opencode_config::normalize_ofox_provider_transport(
+            &mut settings
+        ));
+
+        assert_eq!(
+            settings.pointer("/models/z-ai~1glm-5.3-flash/provider/npm"),
+            Some(&serde_json::json!("@ai-sdk/openai-compatible"))
+        );
+        assert_eq!(
+            settings.pointer("/models/z-ai~1glm-5.3-flash/interleaved"),
+            Some(&serde_json::json!("reasoning_content"))
+        );
+        serde_json::from_value::<crate::provider::OpenCodeProviderConfig>(settings)
+            .expect("GLM compatibility fields must survive the typed config round trip");
+    }
 }
 
 // ---------------------------------------------------------------------------

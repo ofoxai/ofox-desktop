@@ -11,6 +11,14 @@ const STANDARD_OMO_PLUGIN_PREFIXES: [&str; 2] = ["oh-my-openagent", "oh-my-openc
 const SLIM_OMO_PLUGIN_PREFIXES: [&str; 1] = ["oh-my-opencode-slim"];
 pub(crate) const OFOX_PROVIDER_ID: &str = "ofox-opencode";
 pub(crate) const OFOX_RESPONSES_NPM: &str = "@ai-sdk/openai";
+pub(crate) const OFOX_CHAT_NPM: &str = "@ai-sdk/openai-compatible";
+
+const GLM_53_CHAT_MODELS: [&str; 4] = [
+    "glm-5.3",
+    "glm-5.3-flash",
+    "z-ai/glm-5.3",
+    "z-ai/glm-5.3-flash",
+];
 
 fn opencode_config_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -108,20 +116,57 @@ pub fn get_providers() -> Result<Map<String, Value>, AppError> {
         .unwrap_or_default())
 }
 
-/// Ofox's `/v1/responses` endpoint emits the streaming event shape OpenCode
-/// expects. The legacy `@ai-sdk/openai-compatible` adapter targets
-/// `/v1/chat/completions`; Ofox currently returns a complete
-/// `choices[].message` object even when `stream=true`, so the adapter sees
-/// token usage but no `choices[].delta.content` and renders a blank answer.
+/// Keep Responses as Ofox's default OpenCode transport, while routing models
+/// with a known Responses-stream incompatibility through Chat Completions.
+///
+/// GLM 5.3 Responses streams currently emit a signed reasoning item id in
+/// `response.output_item.added`, then refer to the same item with the signature
+/// removed in later reasoning events. OpenCode cannot match those events and
+/// fails with `reasoning part ... not found`. The Chat Completions stream is
+/// internally consistent, so OpenCode's per-model provider override is the
+/// narrowest safe workaround until the gateway normalizes those ids.
 pub(crate) fn normalize_ofox_provider_transport(config: &mut Value) -> bool {
     let Some(root) = config.as_object_mut() else {
         return false;
     };
-    if root.get("npm").and_then(Value::as_str) == Some(OFOX_RESPONSES_NPM) {
-        return false;
+    let mut changed = false;
+    if root.get("npm").and_then(Value::as_str) != Some(OFOX_RESPONSES_NPM) {
+        root.insert("npm".to_string(), json!(OFOX_RESPONSES_NPM));
+        changed = true;
     }
-    root.insert("npm".to_string(), json!(OFOX_RESPONSES_NPM));
-    true
+
+    let Some(models) = root.get_mut("models").and_then(Value::as_object_mut) else {
+        return changed;
+    };
+    for model_id in GLM_53_CHAT_MODELS {
+        let Some(model) = models.get_mut(model_id).and_then(Value::as_object_mut) else {
+            continue;
+        };
+
+        if model.get("reasoning").and_then(Value::as_bool) != Some(true) {
+            model.insert("reasoning".to_string(), json!(true));
+            changed = true;
+        }
+        if model.get("interleaved").and_then(Value::as_str) != Some("reasoning_content") {
+            model.insert("interleaved".to_string(), json!("reasoning_content"));
+            changed = true;
+        }
+
+        if !model.get("provider").is_some_and(Value::is_object) {
+            model.insert("provider".to_string(), json!({}));
+            changed = true;
+        }
+        let provider = model
+            .get_mut("provider")
+            .and_then(Value::as_object_mut)
+            .expect("provider was normalized to an object");
+        if provider.get("npm").and_then(Value::as_str) != Some(OFOX_CHAT_NPM) {
+            provider.insert("npm".to_string(), json!(OFOX_CHAT_NPM));
+            changed = true;
+        }
+    }
+
+    changed
 }
 
 /// Upgrade an already-bound OpenCode live config in place. This runs at app
@@ -373,5 +418,62 @@ mod tests {
         assert!(normalize_ofox_provider_transport(&mut provider));
         assert_eq!(provider.get("npm"), Some(&json!("@ai-sdk/openai")));
         assert!(!normalize_ofox_provider_transport(&mut provider));
+    }
+
+    #[test]
+    fn glm_53_models_use_chat_transport_without_changing_other_models() {
+        let mut provider = json!({
+            "npm": "@ai-sdk/openai",
+            "models": {
+                "z-ai/glm-5.3": { "name": "GLM 5.3" },
+                "z-ai/glm-5.3-flash": { "name": "GLM 5.3 Flash" },
+                "openai/gpt-5.6-terra": { "name": "GPT 5.6 Terra" }
+            }
+        });
+
+        assert!(normalize_ofox_provider_transport(&mut provider));
+        for model_id in ["z-ai~1glm-5.3", "z-ai~1glm-5.3-flash"] {
+            assert_eq!(
+                provider.pointer(&format!("/models/{model_id}/provider/npm")),
+                Some(&json!("@ai-sdk/openai-compatible"))
+            );
+            assert_eq!(
+                provider.pointer(&format!("/models/{model_id}/interleaved")),
+                Some(&json!("reasoning_content"))
+            );
+            assert_eq!(
+                provider.pointer(&format!("/models/{model_id}/reasoning")),
+                Some(&json!(true))
+            );
+        }
+        assert_eq!(
+            provider.pointer("/models/openai~1gpt-5.6-terra"),
+            Some(&json!({ "name": "GPT 5.6 Terra" }))
+        );
+        assert!(!normalize_ofox_provider_transport(&mut provider));
+    }
+
+    #[test]
+    fn glm_53_chat_override_preserves_existing_provider_fields() {
+        let mut provider = json!({
+            "npm": "@ai-sdk/openai",
+            "models": {
+                "glm-5.3": {
+                    "name": "GLM 5.3",
+                    "provider": { "api": "https://example.test/v1" },
+                    "custom": "keep-me"
+                }
+            }
+        });
+
+        assert!(normalize_ofox_provider_transport(&mut provider));
+        assert_eq!(
+            provider.pointer("/models/glm-5.3/provider/api"),
+            Some(&json!("https://example.test/v1"))
+        );
+        assert_eq!(
+            provider.pointer("/models/glm-5.3/custom"),
+            Some(&json!("keep-me"))
+        );
     }
 }
