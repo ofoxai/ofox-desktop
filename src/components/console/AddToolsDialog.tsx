@@ -251,7 +251,7 @@ export default function AddToolsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="max-h-[calc(100vh-3rem)] w-[calc(100vw-2rem)] overflow-hidden sm:max-w-[560px]">
         <DialogHeader>
           <DialogTitle>添加工具</DialogTitle>
           <DialogDescription>
@@ -263,48 +263,51 @@ export default function AddToolsDialog({
           </DialogDescription>
         </DialogHeader>
 
-        {/* 顶部 mt-2 给绿勾留出溢出空间——勾压在卡片顶边（-top-2），
-            网格容器没有额外间距时会被对话框 padding 裁掉一半。 */}
-        <div className="mt-2 grid grid-cols-3 gap-3 px-6 py-4">
-          {entries.map((e) => {
-            // installing 覆盖 entries 里的 status —— 同 ToolDiscoveryPage。
-            // bound 工具理论上不会进 install 流程（按钮也只在 missing 渲染），
-            // 但 effective 取代会自然处理。
-            const effective: ToolStatus = installing.has(e.id)
-              ? "installing"
-              : e.status;
-            return (
-              <ToolDiscoveryCard
-                key={e.id}
-                toolId={e.id}
-                label={e.label}
-                version={e.version}
-                status={effective}
-                autoSelectTick={e.autoSelectTick}
-                progress={installProgress[e.id]}
-                onClick={() => handleToggle(e.id)}
-                onInstall={
-                  INSTALLABLE_TOOLS.includes(e.id)
-                    ? () => install(e.id)
-                    : undefined
-                }
-              />
-            );
-          })}
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-6">
+          {/* 顶部 pt-2 给绿勾留出溢出空间——勾压在卡片顶边（-top-2），
+              网格容器没有额外间距时会被滚动区域裁掉一半。 */}
+          <div className="grid grid-cols-2 gap-3 pt-2 sm:grid-cols-3">
+            {entries.map((e) => {
+              // installing 覆盖 entries 里的 status —— 同 ToolDiscoveryPage。
+              // bound 工具理论上不会进 install 流程（按钮也只在 missing 渲染），
+              // 但 effective 取代会自然处理。
+              const effective: ToolStatus = installing.has(e.id)
+                ? "installing"
+                : e.status;
+              return (
+                <ToolDiscoveryCard
+                  key={e.id}
+                  toolId={e.id}
+                  label={e.label}
+                  version={e.version}
+                  status={effective}
+                  autoSelectTick={e.autoSelectTick}
+                  progress={installProgress[e.id]}
+                  onClick={() => handleToggle(e.id)}
+                  onInstall={
+                    INSTALLABLE_TOOLS.includes(e.id)
+                      ? () => install(e.id)
+                      : undefined
+                  }
+                />
+              );
+            })}
+          </div>
+
+          {installError && (
+            // 安装脚本没起来时唯一的用户可见反馈——同 ToolDiscoveryPage。
+            <div
+              role="alert"
+              className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300"
+            >
+              安装{" "}
+              {TOOL_META[installError.toolId]?.label ?? installError.toolId}{" "}
+              失败：{installError.message}
+            </div>
+          )}
         </div>
 
-        {installError && (
-          // 安装脚本没起来时唯一的用户可见反馈——同 ToolDiscoveryPage。
-          <div
-            role="alert"
-            className="mx-6 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300"
-          >
-            安装 {TOOL_META[installError.toolId]?.label ?? installError.toolId}{" "}
-            失败：{installError.message}
-          </div>
-        )}
-
-        <DialogFooter>
+        <DialogFooter className="bg-background/95 py-4 shadow-[0_-8px_24px_rgba(15,23,42,0.06)] dark:shadow-[0_-8px_24px_rgba(0,0,0,0.24)]">
           <button
             onClick={() => onOpenChange(false)}
             disabled={submitting}
