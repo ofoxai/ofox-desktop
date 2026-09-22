@@ -555,7 +555,12 @@ async fn get_single_tool_version_impl(
         match &active_installation {
             Ok(installation) => {
                 let path = Some(installation.path.to_string_lossy().into_owned());
-                match super::tool_update::verified_plan(tool, installation) {
+                let plan = if include_latest {
+                    super::tool_update::resolve_plan(tool, installation).await
+                } else {
+                    super::tool_update::verified_plan(tool, installation)
+                };
+                match plan {
                     Ok(plan) => (Some(plan.source.to_string()), true, None, path),
                     Err(reason) => (None, false, Some(reason), path),
                 }

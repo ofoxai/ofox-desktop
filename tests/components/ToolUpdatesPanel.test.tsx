@@ -44,6 +44,23 @@ beforeEach(async () => {
 });
 
 describe("Tool updates", () => {
+  it("puts updates first and keeps a visible action for unsupported sources", async () => {
+    vi.mocked(toolUpdatesApi.check).mockResolvedValue([
+      tool("claude", { update_status: "current" }),
+      tool("opencode", { update_supported: false }),
+    ]);
+    await checkToolUpdates();
+    const open = vi.spyOn(settingsApi, "openExternal").mockResolvedValue();
+    const { container } = render(<ToolUpdatesPanel />);
+    expect(container.querySelector("[data-tool]")).toHaveAttribute(
+      "data-tool",
+      "opencode",
+    );
+    expect(screen.getByText("发现新版")).toBeVisible();
+    expect(screen.getByText("1 个工具有更新")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "查看更新方式" }));
+    expect(open).toHaveBeenCalledWith("https://github.com/anomalyco/opencode");
+  });
   it("distinguishes failed checks and app-managed updates from up-to-date", async () => {
     vi.mocked(toolUpdatesApi.check).mockResolvedValue([
       tool("gemini", { update_status: "failed", latest_version: null }),
@@ -99,9 +116,9 @@ describe("Tool updates", () => {
       },
     );
     render(<ToolUpdatesPanel />);
-    fireEvent.click(screen.getByRole("button", { name: "全部升级" }));
+    fireEvent.click(screen.getByRole("button", { name: /^全部升级/ }));
     await waitFor(() => expect(toolUpdatesApi.update).toHaveBeenCalledTimes(1));
-    expect(screen.getByRole("button", { name: "全部升级" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^全部升级/ })).toBeDisabled();
     await act(() => updateTools(["claude"]));
     expect(toolUpdatesApi.update).toHaveBeenCalledTimes(1);
     expect(screen.queryByText(/unrelated-log/)).not.toBeInTheDocument();
@@ -140,6 +157,6 @@ describe("Tool updates", () => {
     await waitFor(() =>
       expect(screen.queryByText("有可用更新")).not.toBeInTheDocument(),
     );
-    expect(screen.getByRole("button", { name: "全部升级" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^全部升级/ })).toBeDisabled();
   });
 });

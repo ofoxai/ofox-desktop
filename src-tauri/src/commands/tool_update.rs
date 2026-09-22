@@ -241,6 +241,129 @@ pub(crate) fn verified_plan(tool: &str, install: &Installation) -> Result<Update
     Ok(plan)
 }
 
+/// pnpm shims may outlive the pnpm version that created them. Confirm both
+/// global bin and package root before selecting a manager (never migrate copies).
+pub(crate) async fn resolve_plan(tool: &str, install: &Installation) -> Result<UpdatePlan, String> {
+    tokio::time::timeout(PROBE_TIMEOUT, resolve_plan_inner(tool, install))
+        .await
+        .map_err(|_| {
+            "Installation-source detection timed out; retry or update manually".to_string()
+        })?
+}
+
+async fn resolve_plan_inner(tool: &str, install: &Installation) -> Result<UpdatePlan, String> {
+    let original = verified_plan(tool, install);
+    if original.is_ok() {
+        return original;
+    }
+    let Some(package) = npm_package(tool) else {
+        return original;
+    };
+    let Some(bin_dir) = install.path.parent() else {
+        return original;
+    };
+    use std::io::Read;
+    let mut shim = String::new();
+    if let Ok(file) = std::fs::File::open(&install.path) {
+        let _ = file.take(65536).read_to_string(&mut shim);
+    }
+    let target = shim
+        .lines()
+        .find_map(|line| line.strip_prefix("# cmd-shim-target="))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| install.real.clone());
+    if !target.is_absolute() || !target.is_file() || !target.starts_with(bin_dir.join("global")) {
+        return original;
+    }
+    let mut candidates = vec![bin_dir.join("pnpm")];
+    candidates.extend(std::env::split_paths(&install.search_path).map(|path| path.join("pnpm")));
+    // pnpm 11 keeps downloaded package-manager versions in its local tools store.
+    // Read only this bounded directory, not arbitrary user package contents.
+    let versions = bin_dir.join("store/v11/links/@/pnpm");
+    if let Ok(entries) = std::fs::read_dir(versions) {
+        for entry in entries.flatten().take(16) {
+            if let Ok(builds) = std::fs::read_dir(entry.path()) {
+                candidates.extend(
+                    builds
+                        .flatten()
+                        .take(4)
+                        .map(|entry| entry.path().join("bin/pnpm")),
+                );
+            }
+        }
+    }
+    let mut seen = HashSet::new();
+    for candidate in candidates {
+        let Ok(program) = std::fs::canonicalize(candidate) else {
+            continue;
+        };
+        if !seen.insert(program.clone()) {
+            continue;
+        }
+        let query = |argument| {
+            let mut command = Command::new(&program);
+            command
+                .args([argument, "--global"])
+                .env("PATH", &install.search_path)
+                .current_dir(bin_dir);
+            bounded_output(command)
+        };
+        let (root, bin) = tokio::join!(query("root"), query("bin"));
+        let (Ok(root), Ok(bin)) = (root, bin) else {
+            continue;
+        };
+        if !root.status.success() || !bin.status.success() {
+            continue;
+        }
+        let root = PathBuf::from(String::from_utf8_lossy(&root.stdout).trim());
+        let bin = PathBuf::from(String::from_utf8_lossy(&bin.stdout).trim());
+        if std::fs::canonicalize(&bin).ok() != std::fs::canonicalize(bin_dir).ok() {
+            continue;
+        }
+        let Some(global_dir) = pnpm_owned_root(&root, &target, package) else {
+            continue;
+        };
+        return Ok(UpdatePlan {
+            source: "pnpm",
+            program,
+            args: vec![
+                "--dir".into(),
+                bin_dir.to_string_lossy().into_owned(),
+                "update".into(),
+                "--global".into(),
+                "--latest".into(),
+                format!("--config.global-dir={}", global_dir.display()),
+                format!("--config.global-bin-dir={}", bin_dir.display()),
+                package.into(),
+            ],
+            path: install.search_path.clone(),
+        });
+    }
+    Err("Could not find the pnpm version owning this installation; update using the original pnpm version".into())
+}
+
+fn pnpm_owned_root(root: &Path, target: &Path, package: &str) -> Option<PathBuf> {
+    if target
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    if root.ends_with("node_modules") {
+        target.strip_prefix(root.join(package)).ok()?;
+        return root.parent()?.parent().map(Path::to_path_buf);
+    }
+    if root.ends_with("v11") {
+        let relative = target.strip_prefix(root).ok()?;
+        let group = relative.components().next()?.as_os_str();
+        target
+            .strip_prefix(root.join(group).join("node_modules").join(package))
+            .ok()?;
+        return root.parent().map(Path::to_path_buf);
+    }
+    None
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Progress<'a> {
@@ -323,7 +446,7 @@ async fn perform_update<F: Fn(&str, &str)>(tool: &str, emit: F) -> Result<Update
             after: install.version,
         });
     }
-    let plan = verified_plan(tool, &install)?;
+    let plan = resolve_plan(tool, &install).await?;
     emit("updating", plan.source);
     let mut command = Command::new(&plan.program);
     command
@@ -333,7 +456,7 @@ async fn perform_update<F: Fn(&str, &str)>(tool: &str, emit: F) -> Result<Update
     run_update_process(command, |line| emit("log", line), UPDATE_TIMEOUT).await?;
     emit("verifying", "");
     let after = probe(tool).await?;
-    let after_plan = verified_plan(tool, &after)?;
+    let after_plan = resolve_plan(tool, &after).await?;
     // fnm creates a fresh multishell symlink on every login. Compare the
     // canonical package-manager target, not that ephemeral launcher path.
     if after_plan.source != plan.source
@@ -456,6 +579,68 @@ pub(crate) async fn codex_desktop_version() -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pnpm_roots_reject_other_versions_packages_and_traversal() {
+        let root = Path::new("/pnpm/global/v11");
+        assert_eq!(
+            pnpm_owned_root(
+                root,
+                Path::new("/pnpm/global/v11/group/node_modules/opencode-ai/bin/opencode"),
+                "opencode-ai"
+            ),
+            Some(PathBuf::from("/pnpm/global"))
+        );
+        for path in [
+            "/pnpm/global/5/node_modules/opencode-ai/bin/opencode",
+            "/pnpm/global/v11/group/node_modules/other/bin/opencode",
+            "/pnpm/global/v11/../group/node_modules/opencode-ai/bin/opencode",
+        ] {
+            assert!(pnpm_owned_root(root, Path::new(path), "opencode-ai").is_none());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pnpm_uses_matching_cached_manager_not_another_global_install() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path();
+        let target = home.join("global/v11/group/node_modules/opencode-ai/bin/opencode");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "binary").unwrap();
+        let wrapper = home.join("opencode");
+        std::fs::write(
+            &wrapper,
+            format!("#!/bin/sh\n# cmd-shim-target={}\n", target.display()),
+        )
+        .unwrap();
+        let cached = home.join("store/v11/links/@/pnpm/11.6.0/build/bin/pnpm");
+        std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        for (manager, root) in [
+            (home.join("pnpm"), home.join("global/5/node_modules")),
+            (cached.clone(), home.join("global/v11")),
+        ] {
+            std::fs::write(
+                &manager,
+                format!(
+                    "#!/bin/sh\ncase \"$1\" in root) echo '{}';; bin) echo '{}';; esac\n",
+                    root.display(),
+                    home.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(manager, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let installation = install(wrapper.to_str().unwrap(), wrapper.to_str().unwrap());
+        let plan = resolve_plan("opencode", &installation).await.unwrap();
+        assert_eq!(plan.source, "pnpm");
+        assert_eq!(plan.program, std::fs::canonicalize(cached).unwrap());
+        assert!(plan.args.contains(&format!(
+            "--config.global-dir={}",
+            home.join("global").display()
+        )));
+        assert_eq!(plan.args.last().unwrap(), "opencode-ai");
+    }
     #[cfg(target_os = "macos")]
     #[tokio::test]
     #[ignore = "Manual installed-tool and network probe"]
@@ -472,7 +657,7 @@ mod tests {
                         install.version,
                         install.path.display(),
                         install.real.display(),
-                        verified_plan(tool, &install)
+                        resolve_plan(tool, &install).await
                     );
                 }
                 Err(error) => println!("{tool}: {error}"),

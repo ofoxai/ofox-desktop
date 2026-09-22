@@ -1,5 +1,9 @@
 {
   "toolUpdates": {
+    "newVersion": "New version",
+    "pendingCount": "{{count}} tools have updates",
+    "actionCounts": "{{automatic}} can update automatically; {{manual}} require manual updates",
+    "manualAction": "View update instructions",
     "title": "Tool updates",
     "check": "Check for updates",
     "checking": "Checking…",

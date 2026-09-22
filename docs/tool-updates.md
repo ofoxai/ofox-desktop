@@ -6,12 +6,13 @@ Ofox follows [cc-switch's lifecycle implementation](https://github.com/farion123
 
 - macOS: Claude Code, Codex CLI, Gemini, OpenCode, OpenClaw and Hermes version checks; single or sequential batch updates.
 - npm installations: use the owning prefix's npm and Node.js, with an explicit `--prefix`. This also supports fnm/nvm installations whose shell entry points change between sessions.
+- pnpm installations: match the shim target against the manager's global bin and package root. Locally cached pnpm 11 managers are considered when PATH points to an older manager. Update only the selected package with explicit global directories; mismatches fall back to manual guidance.
 - Homebrew: update the owning formula/cask. Supported native installations use the CLI's own update command.
-- Unknown installation sources (including pnpm, Bun and Volta wrappers in this release): show manual-update guidance instead of installing another copy.
+- Unknown installation sources (including Bun and Volta wrappers in this release): show a visible manual-update action instead of installing another copy.
 - WorkBuddy and desktop-only Codex: use in-app updates or official download pages. App versions are not compared with CLI versions.
 - Windows/Linux: version checks only; no automatic updates in this release.
 
-The settings panel and console share update state. Checks are cached for five minutes between mounts and can be refreshed manually. A failed query never means “up to date.” Updates do not change Ofox bindings, API keys or model settings.
+The settings panel and console share update state. Tools with updates appear first, highlighted in orange, with an update count and an automatic or manual action. Checks are cached for five minutes between mounts and can be refreshed manually. A failed query never means “up to date.” Updates do not change Ofox bindings, API keys or model settings.
 
 ## API
 
@@ -34,5 +35,5 @@ The second command upgrades the actual selected npm installation and requires a 
 
 - macOS ARM64, fnm Node.js 24.15.0: Codex CLI upgraded from 0.154.0 to 0.155.1 using the actual Rust update implementation; the post-update launch-shell probe confirmed 0.155.1.
 - Claude Code and Gemini were detected in their fnm/npm installation; Hermes was detected through its native launcher. No updates were performed for those tools.
-- The local OpenCode installation uses a pnpm wrapper; it correctly reports manual-update guidance. OpenClaw was not installed.
+- The local OpenCode installation uses pnpm 11 while PATH selects pnpm 10. Source detection now selects the cached pnpm 11 manager owning the existing installation. The actual OpenCode upgrade is left for the UI action. OpenClaw was not installed.
 - Homebrew execution, native Hermes/Claude/OpenCode execution, and Windows detection have automated coverage where applicable but were not manually validated on clean VMs. This is not a release certification.

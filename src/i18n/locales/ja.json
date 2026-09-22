@@ -1,5 +1,9 @@
 {
   "toolUpdates": {
+    "newVersion": "新バージョン",
+    "pendingCount": "{{count}} 個のツールに更新があります",
+    "actionCounts": "自動更新：{{automatic}} 個、手動更新：{{manual}} 個",
+    "manualAction": "更新方法を確認",
     "title": "ツールの更新",
     "check": "更新を確認",
     "checking": "確認中…",

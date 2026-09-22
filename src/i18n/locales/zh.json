@@ -1,5 +1,9 @@
 {
   "toolUpdates": {
+    "newVersion": "发现新版",
+    "pendingCount": "{{count}} 个工具有更新",
+    "actionCounts": "可一键升级 {{automatic}} 个，需手动更新 {{manual}} 个",
+    "manualAction": "查看更新方式",
     "title": "工具更新",
     "check": "检查更新",
     "checking": "正在检查…",
