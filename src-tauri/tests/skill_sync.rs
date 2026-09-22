@@ -78,7 +78,7 @@ fn sync_to_app_removes_disabled_and_orphaned_ssot_symlinks() {
     reset_test_fs();
     let home = ensure_test_home();
 
-    let ssot_dir = home.join(".cc-switch").join("skills");
+    let ssot_dir = home.join(".ofox-desktop").join("skills");
     let disabled_skill = ssot_dir.join("disabled-skill");
     let orphan_skill = ssot_dir.join("orphan-skill");
     write_skill(&disabled_skill, "Disabled");
@@ -126,7 +126,10 @@ fn uninstall_skill_creates_backup_before_removing_ssot() {
     reset_test_fs();
     let home = ensure_test_home();
 
-    let ssot_skill_dir = home.join(".cc-switch").join("skills").join("backup-skill");
+    let ssot_skill_dir = home
+        .join(".ofox-desktop")
+        .join("skills")
+        .join("backup-skill");
     write_skill(&ssot_skill_dir, "Backup Skill");
     fs::write(ssot_skill_dir.join("prompt.md"), "backup me").expect("write prompt.md");
 
@@ -194,7 +197,10 @@ fn restore_skill_backup_restores_files_to_ssot_and_current_app() {
     reset_test_fs();
     let home = ensure_test_home();
 
-    let ssot_skill_dir = home.join(".cc-switch").join("skills").join("restore-skill");
+    let ssot_skill_dir = home
+        .join(".ofox-desktop")
+        .join("skills")
+        .join("restore-skill");
     write_skill(&ssot_skill_dir, "Restore Skill");
     fs::write(ssot_skill_dir.join("prompt.md"), "restore me").expect("write prompt.md");
 
@@ -242,7 +248,7 @@ fn restore_skill_backup_restores_files_to_ssot_and_current_app() {
         "restore should only enable the selected app"
     );
     assert!(
-        home.join(".cc-switch")
+        home.join(".ofox-desktop")
             .join("skills")
             .join("restore-skill")
             .join("prompt.md")
@@ -274,7 +280,7 @@ fn delete_skill_backup_removes_backup_directory() {
     let home = ensure_test_home();
 
     let ssot_skill_dir = home
-        .join(".cc-switch")
+        .join(".ofox-desktop")
         .join("skills")
         .join("delete-backup-skill");
     write_skill(&ssot_skill_dir, "Delete Backup Skill");
