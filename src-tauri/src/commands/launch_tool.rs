@@ -20,6 +20,13 @@ use tauri::{AppHandle, Manager};
 use crate::app_config::AppType;
 use crate::commands::misc::launch_terminal_running;
 
+#[cfg(target_os = "macos")]
+fn workbuddy_macos_launch_command(path: &std::path::Path) -> std::process::Command {
+    let mut command = std::process::Command::new("open");
+    command.arg(path);
+    command
+}
+
 /// 与 `TOOL_META` 的 `cliBin` 字段保持一致。openclaw/hermes 不在此列——
 /// openclaw 走 gateway 不需要交互式 CLI，hermes 是 dashboard 服务，另有
 /// `launch_hermes_dashboard` 命令。
@@ -122,8 +129,7 @@ pub async fn launch_tool(app: AppHandle, tool_id: String) -> Result<(), String> 
 
     #[cfg(target_os = "macos")]
     {
-        let status = std::process::Command::new("open")
-            .args(["-b", "com.workbuddy.workbuddy"])
+        let status = workbuddy_macos_launch_command(&path)
             .status()
             .map_err(|error| format!("启动 WorkBuddy 失败：{error}"))?;
         if !status.success() {
@@ -168,6 +174,18 @@ mod tests {
     fn opencode_launch_does_not_override_non_ofox_provider() {
         let args = cli_args("opencode", "opencode", Some(("openai", "gpt-5.6-luna")));
         assert_eq!(args, ["opencode"]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn workbuddy_launch_uses_the_verified_app_path() {
+        use std::ffi::OsStr;
+
+        let path = std::path::Path::new("/Applications/WorkBuddy.app");
+        let command = workbuddy_macos_launch_command(path);
+
+        assert_eq!(command.get_program(), OsStr::new("open"));
+        assert_eq!(command.get_args().collect::<Vec<_>>(), [path.as_os_str()]);
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]

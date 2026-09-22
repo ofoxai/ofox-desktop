@@ -236,6 +236,24 @@ fn tool_env_type_and_wsl_distro(_tool: &str) -> (String, Option<String>) {
 }
 
 #[cfg(target_os = "macos")]
+const WORKBUDDY_MACOS_BUNDLE_ID: &str = "com.tencent.workbuddy.mac";
+
+#[cfg(target_os = "macos")]
+fn workbuddy_macos_app_from_plist<F>(path: &Path, mut read_value: F) -> Option<(PathBuf, String)>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    if read_value("CFBundleIdentifier").as_deref() != Some(WORKBUDDY_MACOS_BUNDLE_ID) {
+        return None;
+    }
+
+    let version = read_value("CFBundleShortVersionString")
+        .or_else(|| read_value("CFBundleVersion"))
+        .unwrap_or_else(|| "已安装".to_string());
+    Some((path.to_path_buf(), version))
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn find_workbuddy_app() -> Result<(PathBuf, String), String> {
     let candidates = [
         PathBuf::from("/Applications/WorkBuddy.app"),
@@ -259,13 +277,9 @@ pub(crate) fn find_workbuddy_app() -> Result<(PathBuf, String), String> {
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
         };
-        if read_value("CFBundleIdentifier").as_deref() != Some("com.workbuddy.workbuddy") {
-            continue;
+        if let Some(app) = workbuddy_macos_app_from_plist(&path, read_value) {
+            return Ok(app);
         }
-        let version = read_value("CFBundleShortVersionString")
-            .or_else(|| read_value("CFBundleVersion"))
-            .unwrap_or_else(|| "已安装".to_string());
-        return Ok((path, version));
     }
     Err("未检测到官方 WorkBuddy.app".to_string())
 }
@@ -1795,6 +1809,47 @@ mod tests {
         assert_eq!(extract_version("claude 1.0.20"), "1.0.20");
         assert_eq!(extract_version("v2.3.4-beta.1"), "2.3.4-beta.1");
         assert_eq!(extract_version("no version here"), "no version here");
+    }
+
+    #[cfg(target_os = "macos")]
+    mod workbuddy_macos {
+        use super::super::*;
+
+        #[test]
+        fn accepts_the_official_bundle_identifier_and_reads_version() {
+            let path = Path::new("/Applications/WorkBuddy.app");
+            let app = workbuddy_macos_app_from_plist(path, |key| match key {
+                "CFBundleIdentifier" => Some("com.tencent.workbuddy.mac".to_string()),
+                "CFBundleShortVersionString" => Some("5.5.6".to_string()),
+                _ => None,
+            });
+
+            assert_eq!(app, Some((path.to_path_buf(), "5.5.6".to_string())));
+        }
+
+        #[test]
+        fn rejects_the_previous_incorrect_bundle_identifier() {
+            let app =
+                workbuddy_macos_app_from_plist(Path::new("/Applications/WorkBuddy.app"), |key| {
+                    (key == "CFBundleIdentifier").then(|| "com.workbuddy.workbuddy".to_string())
+                });
+
+            assert_eq!(app, None);
+        }
+
+        #[test]
+        fn falls_back_to_bundle_version() {
+            let app = workbuddy_macos_app_from_plist(
+                Path::new("/Users/tester/Applications/WorkBuddy.app"),
+                |key| match key {
+                    "CFBundleIdentifier" => Some(WORKBUDDY_MACOS_BUNDLE_ID.to_string()),
+                    "CFBundleVersion" => Some("42".to_string()),
+                    _ => None,
+                },
+            );
+
+            assert_eq!(app.map(|(_, version)| version), Some("42".to_string()));
+        }
     }
 
     mod wsl_helpers {
