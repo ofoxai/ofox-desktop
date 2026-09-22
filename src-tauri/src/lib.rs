@@ -1301,6 +1301,7 @@ pub fn run() {
             commands::open_external,
             // Tool installer (macOS only, delegates to scripts/installer/init.sh)
             commands::install_tool,
+            commands::update_tool,
             // 主页"打开"按钮：在系统终端里拉起工具 CLI，独立生命周期
             commands::launch_tool_cli,
             commands::launch_tool,

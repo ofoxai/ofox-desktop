@@ -31,6 +31,7 @@ pub async fn install_tool(
     if !ALLOWED_TOOLS.contains(&tool_id.as_str()) {
         return Err(format!("不支持的工具: {tool_id}"));
     }
+    let _guard = super::tool_update::ToolOperationGuard::acquire(&tool_id)?;
 
     #[cfg(not(target_os = "macos"))]
     {

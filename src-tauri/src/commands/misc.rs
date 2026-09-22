@@ -189,6 +189,11 @@ pub struct ToolVersion {
     wsl_distro: Option<String>,
     #[serde(rename = "installationKind")]
     installation_kind: String,
+    update_status: String,
+    update_source: Option<String>,
+    update_supported: bool,
+    update_reason: Option<String>,
+    executable_path: Option<String>,
 }
 
 const VALID_TOOLS: [&str; 7] = [
@@ -445,6 +450,11 @@ async fn get_single_tool_version_impl(
                 env_type,
                 wsl_distro,
                 installation_kind: "desktopApp".to_string(),
+                update_status: "appManaged".into(),
+                update_source: None,
+                update_supported: false,
+                update_reason: None,
+                executable_path: None,
             },
             Err(error) => ToolVersion {
                 name: tool.to_string(),
@@ -454,6 +464,11 @@ async fn get_single_tool_version_impl(
                 env_type,
                 wsl_distro,
                 installation_kind: "desktopApp".to_string(),
+                update_status: "appManaged".into(),
+                update_source: None,
+                update_supported: false,
+                update_reason: None,
+                executable_path: None,
             },
         };
     }
@@ -462,6 +477,55 @@ async fn get_single_tool_version_impl(
     let (env_type, wsl_distro) = tool_env_type_and_wsl_distro(tool);
 
     // 1. 获取本地版本
+    #[cfg(target_os = "macos")]
+    let active_installation = super::tool_update::probe(tool).await;
+    // Never compare a desktop calendar version with npm semver.
+    #[cfg(target_os = "macos")]
+    if tool == "codex" && active_installation.is_err() {
+        if let Some((path, version)) = super::tool_update::codex_desktop_version().await {
+            return ToolVersion {
+                name: tool.into(),
+                version: Some(version),
+                latest_version: None,
+                error: None,
+                env_type,
+                wsl_distro,
+                installation_kind: "desktopApp".into(),
+                update_status: "appManaged".into(),
+                update_source: None,
+                update_supported: false,
+                update_reason: None,
+                executable_path: Some(path),
+            };
+        }
+    }
+    #[cfg(target_os = "macos")]
+    let (local_version, local_error) = match &active_installation {
+        Ok(installation) => (Some(installation.version.clone()), None),
+        // A found-but-broken active binary must not be hidden by an older copy.
+        Err(error) if !error.starts_with("No executable in the launch shell PATH") => {
+            (None, Some(error.clone()))
+        }
+        Err(error) => {
+            let tool = tool.to_string();
+            let fallback = tokio::task::spawn_blocking(move || {
+                let direct = try_get_version(&tool);
+                if direct.0.is_some() {
+                    direct
+                } else {
+                    scan_cli_version(&tool)
+                }
+            })
+            .await
+            .unwrap_or((None, None));
+            if fallback.0.is_some() {
+                fallback
+            } else {
+                (None, Some(error.clone()))
+            }
+        }
+    };
+    #[cfg(not(target_os = "macos"))]
     let (local_version, local_error) = if let Some(distro) = wsl_distro.as_deref() {
         try_get_version_wsl(tool, distro, wsl_shell, wsl_shell_flag)
     } else {
@@ -475,17 +539,38 @@ async fn get_single_tool_version_impl(
 
     // 2. 获取远程最新版本（按需）
     let latest_version = if include_latest {
-        let client = crate::proxy::http_client::get();
-        match tool {
-            "claude" => fetch_npm_latest_version(&client, "@anthropic-ai/claude-code").await,
-            "codex" => fetch_npm_latest_version(&client, "@openai/codex").await,
-            "gemini" => fetch_npm_latest_version(&client, "@google/gemini-cli").await,
-            "opencode" => fetch_github_latest_version(&client, "anomalyco/opencode").await,
-            _ => None,
-        }
+        latest_tool_version(tool, local_version.as_deref()).await
     } else {
         None
     };
+
+    let update_status = if include_latest {
+        super::tool_update::version_status(local_version.as_deref(), latest_version.as_deref())
+    } else {
+        "unchecked"
+    }
+    .to_string();
+    #[cfg(target_os = "macos")]
+    let (update_source, update_supported, update_reason, executable_path) =
+        match &active_installation {
+            Ok(installation) => {
+                let path = Some(installation.path.to_string_lossy().into_owned());
+                match super::tool_update::verified_plan(tool, installation) {
+                    Ok(plan) => (Some(plan.source.to_string()), true, None, path),
+                    Err(reason) => (None, false, Some(reason), path),
+                }
+            }
+            Err(reason) => (None, false, Some(reason.clone()), None),
+        };
+    #[cfg(not(target_os = "macos"))]
+    let (update_source, update_supported, update_reason, executable_path) = (
+        None,
+        false,
+        Some("Automatic updates are currently supported on macOS only".into()),
+        None,
+    );
+    #[cfg(target_os = "macos")]
+    let _ = (wsl_shell, wsl_shell_flag);
 
     ToolVersion {
         name: tool.to_string(),
@@ -495,47 +580,178 @@ async fn get_single_tool_version_impl(
         env_type,
         wsl_distro,
         installation_kind: "cli".to_string(),
+        update_status,
+        update_source,
+        update_supported,
+        update_reason,
+        executable_path,
     }
 }
 
-/// Helper function to fetch latest version from npm registry
-async fn fetch_npm_latest_version(client: &reqwest::Client, package: &str) -> Option<String> {
-    let url = format!("https://registry.npmjs.org/{package}");
-    match client.get(&url).send().await {
-        Ok(resp) => {
-            if let Ok(json) = resp.json::<serde_json::Value>().await {
-                json.get("dist-tags")
-                    .and_then(|tags| tags.get("latest"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            } else {
-                None
+pub(crate) async fn latest_tool_version(tool: &str, local: Option<&str>) -> Option<String> {
+    let client = crate::proxy::http_client::get();
+    let query = async {
+        if let Some(package) = super::tool_update::npm_package(tool) {
+            let version = fetch_npm_latest_version(&client, package).await;
+            if version.is_some() || tool != "opencode" {
+                return version;
             }
+            return fetch_github_latest_version(&client, "anomalyco/opencode").await;
         }
-        Err(_) => None,
-    }
+        if tool == "hermes" {
+            if let Some(version) =
+                fetch_github_latest_version(&client, "NousResearch/hermes-agent").await
+            {
+                return Some(version);
+            }
+            let fallback = client
+                .get("https://pypi.org/pypi/hermes-agent/json")
+                .timeout(std::time::Duration::from_secs(7))
+                .send()
+                .await
+                .ok()?
+                .error_for_status()
+                .ok()?
+                .json::<serde_json::Value>()
+                .await
+                .ok()?
+                .get("info")?
+                .get("version")?
+                .as_str()
+                .map(str::to_string);
+            // PyPI can lag official git releases; don't claim it is current.
+            return fallback.filter(|latest| {
+                match (
+                    local.and_then(|value| semver::Version::parse(value).ok()),
+                    semver::Version::parse(latest).ok(),
+                ) {
+                    (Some(local), Some(latest)) => !local.cmp_precedence(&latest).is_gt(),
+                    _ => true,
+                }
+            });
+        }
+        None
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(15), query)
+        .await
+        .ok()
+        .flatten()
+        .filter(|v| semver::Version::parse(v).is_ok_and(|v| v.pre.is_empty()))
 }
 
-/// Helper function to fetch latest version from GitHub releases
-async fn fetch_github_latest_version(client: &reqwest::Client, repo: &str) -> Option<String> {
-    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
-    match client
-        .get(&url)
-        .header("User-Agent", "ofox-switch")
-        .header("Accept", "application/vnd.github+json")
+/// One bounded request, including body read. Failures remain unknown, never "current".
+async fn fetch_version_json(
+    client: &reqwest::Client,
+    url: &str,
+    timeout: std::time::Duration,
+) -> Option<serde_json::Value> {
+    client
+        .get(url)
+        .timeout(timeout)
+        .header("User-Agent", "ofox-desktop")
         .send()
         .await
-    {
-        Ok(resp) => {
-            if let Ok(json) = resp.json::<serde_json::Value>().await {
-                json.get("tag_name")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.strip_prefix('v').unwrap_or(s).to_string())
-            } else {
-                None
-            }
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()
+}
+
+/// Fetch the small dist-tags document, not the full package history.
+async fn fetch_npm_latest_version(client: &reqwest::Client, package: &str) -> Option<String> {
+    let package = package.replace('/', "%2f");
+    let url = format!("https://registry.npmjs.org/-/package/{package}/dist-tags");
+    fetch_version_json(client, &url, std::time::Duration::from_secs(7))
+        .await?
+        .get("latest")?
+        .as_str()
+        .map(str::to_string)
+}
+
+async fn fetch_github_latest_version(client: &reqwest::Client, repo: &str) -> Option<String> {
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let json = fetch_version_json(client, &url, std::time::Duration::from_secs(7)).await?;
+    if json.get("prerelease").and_then(|value| value.as_bool()) == Some(true) {
+        return None;
+    }
+    release_version(&json)
+}
+
+fn release_version(json: &serde_json::Value) -> Option<String> {
+    // Hermes release tags are dates; the release title contains the CLI version.
+    [json.get("name"), json.get("tag_name")]
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str())
+        .map(extract_version)
+        .find(|value| {
+            semver::Version::parse(value).is_ok_and(|v| v.major < 1000 && v.pre.is_empty())
+        })
+}
+
+#[cfg(test)]
+mod latest_version_tests {
+    use super::*;
+    use wiremock::matchers::path;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    #[test]
+    fn release_calendar_tag_is_not_a_cli_version() {
+        assert_eq!(
+            release_version(
+                &serde_json::json!({"name": "Hermes Agent v0.21.4", "tag_name": "v2026.9.21"})
+            ),
+            Some("0.21.4".into())
+        );
+        assert_eq!(
+            release_version(&serde_json::json!({"tag_name": "v2026.9.21"})),
+            None
+        );
+        assert_eq!(
+            release_version(&serde_json::json!({"tag_name": "v1.2.3"})),
+            Some("1.2.3".into())
+        );
+    }
+    #[tokio::test]
+    async fn version_lookup_rejects_http_errors_bad_json_and_timeout() {
+        let server = MockServer::start().await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for (route, response) in [
+            (
+                "/ok",
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"latest": "1.2.3"})),
+            ),
+            (
+                "/error",
+                ResponseTemplate::new(503).set_body_json(serde_json::json!({"latest": "9.9.9"})),
+            ),
+            (
+                "/bad",
+                ResponseTemplate::new(200).set_body_string("not json"),
+            ),
+            (
+                "/slow",
+                ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(1)),
+            ),
+        ] {
+            Mock::given(path(route))
+                .respond_with(response)
+                .mount(&server)
+                .await;
         }
-        Err(_) => None,
+        let timeout = std::time::Duration::from_millis(100);
+        let value = fetch_version_json(&client, &format!("{}/ok", server.uri()), timeout)
+            .await
+            .unwrap();
+        assert_eq!(value["latest"], "1.2.3");
+        for route in ["error", "bad", "slow"] {
+            assert!(
+                fetch_version_json(&client, &format!("{}/{route}", server.uri()), timeout)
+                    .await
+                    .is_none()
+            );
+        }
     }
 }
 
@@ -734,7 +950,7 @@ fn try_get_version_wsl(
 /// 非 Windows 平台的 WSL 版本检测存根
 /// 注意：此函数实际上不会被调用，因为 `wsl_distro_from_path` 在非 Windows 平台总是返回 None。
 /// 保留此函数是为了保持 API 一致性，防止未来重构时遗漏。
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn try_get_version_wsl(
     _tool: &str,
     _distro: &str,

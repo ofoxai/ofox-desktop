@@ -294,7 +294,7 @@ echo ""
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 
-npm install -g {self.npm_pkg}
+npm install -g {self.npm_pkg}@latest
 
 echo ""
 echo "{self.bin_name} 版本: $({self.bin_name} --version 2>/dev/null || echo '?')"

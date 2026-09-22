@@ -76,6 +76,21 @@ fn build_unix_command(args: &[String]) -> String {
 
 #[tauri::command]
 pub async fn launch_tool_cli(app: AppHandle, tool_id: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if tool_id == "codex" && super::tool_update::probe("codex").await.is_err() {
+        if let Some((path, _)) = super::tool_update::codex_desktop_version().await {
+            let status = tokio::process::Command::new("/usr/bin/open")
+                .arg(path)
+                .status()
+                .await
+                .map_err(|e| e.to_string())?;
+            return if status.success() {
+                Ok(())
+            } else {
+                Err("Could not open Codex desktop app".into())
+            };
+        }
+    }
     let bin = resolve_cli_bin(&tool_id).ok_or_else(|| format!("工具 {tool_id} 不支持一键打开"))?;
 
     // Self-heal bindings created by older Ofox versions. Gemini CLI otherwise
