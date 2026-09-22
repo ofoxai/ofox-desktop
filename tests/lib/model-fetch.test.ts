@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   filterOfoxModelsForWorkBuddy,
+  pickWorkBuddyCuratedModels,
   toWorkBuddyModelSelection,
   type FetchedModel,
 } from "@/lib/api/model-fetch";
@@ -40,5 +41,36 @@ describe("WorkBuddy model compatibility", () => {
       supportsImages: true,
       supportsReasoning: true,
     });
+  });
+
+  it("curates affordable models with capability and vendor diversity", () => {
+    const models = [
+      model({
+        id: "openai/cheap",
+        pricingPrompt: "0.1",
+        supportedParameters: ["tools"],
+      }),
+      model({ id: "openai/reasoning", pricingPrompt: "0.2" }),
+      model({
+        id: "anthropic/vision",
+        pricingPrompt: "0.3",
+        supportedParameters: ["tools"],
+      }),
+      model({
+        id: "google/other",
+        pricingPrompt: "0.4",
+        inputModalities: ["text"],
+      }),
+      model({ id: "free/model", pricingPrompt: "0" }),
+    ];
+
+    expect(
+      pickWorkBuddyCuratedModels(models, 4).map((item) => item.id),
+    ).toEqual([
+      "openai/cheap",
+      "openai/reasoning",
+      "anthropic/vision",
+      "google/other",
+    ]);
   });
 });

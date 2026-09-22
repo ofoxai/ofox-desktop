@@ -9,6 +9,7 @@ import {
   filterOfoxModelsByProtocol,
   filterOfoxModelsForWorkBuddy,
   pickCheapestPaidModel,
+  pickWorkBuddyCuratedModels,
   toWorkBuddyModelSelection,
   type WorkBuddyModelSelection,
 } from "@/lib/api/model-fetch";
@@ -122,26 +123,21 @@ const OFOX_AUTO_BIND_TOOLS: ReadonlySet<string> = new Set([
   "workbuddy",
 ]);
 
-async function selectWorkBuddyDefault(): Promise<WorkBuddyModelSelection> {
+async function selectWorkBuddyDefaults(): Promise<WorkBuddyModelSelection[]> {
   const all = await fetchOfoxModels("openai");
   const compatible = filterOfoxModelsForWorkBuddy(all);
-  const activeId = await manageToolApi
-    .getActiveModel("workbuddy")
-    .then((id) => id.trim())
-    .catch(() => "");
-  const pickedId =
-    compatible.find((model) => model.id === activeId)?.id ||
-    pickCheapestPaidModel(
-      compatible.filter((model) => {
-        const price = Number(model.pricingPrompt ?? "");
-        return Number.isFinite(price) && price > 0;
-      }),
-    );
-  const picked = compatible.find((model) => model.id === pickedId);
-  if (!picked) {
+  if (compatible.length === 0) {
     throw new Error("暂无同时支持文本、工具调用和 chat/completions 的模型");
   }
-  return toWorkBuddyModelSelection(picked);
+  const existingIds = await manageToolApi
+    .getWorkBuddyManagedModels()
+    .catch(() => []);
+  const existing = existingIds
+    .map((id) => compatible.find((model) => model.id === id))
+    .filter((model): model is (typeof compatible)[number] => !!model);
+  const selected =
+    existing.length > 0 ? existing : pickWorkBuddyCuratedModels(compatible);
+  return selected.map(toWorkBuddyModelSelection);
 }
 
 /**
@@ -195,9 +191,9 @@ export async function bindTools(tools: string[]): Promise<string[]> {
       continue;
     }
     try {
-      const modelSelection =
-        tool === "workbuddy" ? await selectWorkBuddyDefault() : undefined;
-      await invoke("ofox_bind_tool", { app: tool, modelSelection });
+      const modelSelections =
+        tool === "workbuddy" ? await selectWorkBuddyDefaults() : undefined;
+      await invoke("ofox_bind_tool", { app: tool, modelSelections });
       // bind 之后立即挑默认 model：必须在 ofox_bind_tool 完成后才跑，
       // 因为 setActiveModel 依赖 active provider 已切到 ofox-<tool>。
       // 单条失败不影响 bind 结果——ensureDefaultModel 内部自吞异常。

@@ -146,6 +146,56 @@ export function filterOfoxModelsForWorkBuddy(
   });
 }
 
+/**
+ * Build WorkBuddy's recommended starter set. Prefer paid models with known
+ * pricing, then balance cost with useful capabilities and vendor diversity.
+ * The result is deterministic so repeated binds do not churn models.json.
+ */
+export function pickWorkBuddyCuratedModels(
+  models: FetchedModel[],
+  limit = 8,
+): FetchedModel[] {
+  if (limit <= 0 || models.length === 0) return [];
+  const priced = models.filter((model) => {
+    const price = Number(model.pricingPrompt ?? "");
+    return Number.isFinite(price) && price > 0;
+  });
+  const pool = priced.length > 0 ? priced : models;
+  const sorted = [...pool].sort((a, b) => {
+    const aPrice = Number(a.pricingPrompt ?? "") || Number.POSITIVE_INFINITY;
+    const bPrice = Number(b.pricingPrompt ?? "") || Number.POSITIVE_INFINITY;
+    return aPrice - bPrice || a.id.localeCompare(b.id);
+  });
+  const selected: FetchedModel[] = [];
+  const selectedIds = new Set<string>();
+  const add = (model: FetchedModel | undefined) => {
+    if (!model || selected.length >= limit || selectedIds.has(model.id)) return;
+    selected.push(model);
+    selectedIds.add(model.id);
+  };
+
+  add(sorted[0]);
+  add(
+    sorted.find((model) =>
+      (model.supportedParameters ?? []).includes("reasoning"),
+    ),
+  );
+  add(sorted.find((model) => (model.inputModalities ?? []).includes("image")));
+
+  const representedVendors = new Set(
+    selected.map((model) => model.id.split("/", 1)[0].toLowerCase()),
+  );
+  for (const model of sorted) {
+    const vendor = model.id.split("/", 1)[0].toLowerCase();
+    if (!representedVendors.has(vendor)) {
+      add(model);
+      representedVendors.add(vendor);
+    }
+  }
+  for (const model of sorted) add(model);
+  return selected;
+}
+
 export function toWorkBuddyModelSelection(
   model: FetchedModel,
 ): WorkBuddyModelSelection {

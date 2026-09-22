@@ -83,6 +83,16 @@ export const manageToolApi = {
     await invoke("set_active_ofox_model", { app, model, modelSelection });
   },
 
+  async getWorkBuddyManagedModels(): Promise<string[]> {
+    return await invoke("get_workbuddy_managed_models");
+  },
+
+  async setWorkBuddyManagedModels(
+    modelSelections: WorkBuddyModelSelection[],
+  ): Promise<void> {
+    await invoke("set_workbuddy_managed_models", { modelSelections });
+  },
+
   async pingModel(app: string, model: string): Promise<PingResult> {
     return await invoke("ofox_ping_model", { app, model });
   },
