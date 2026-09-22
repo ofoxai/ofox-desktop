@@ -1,4 +1,30 @@
 {
+  "toolUpdates": {
+    "title": "ツールの更新",
+    "check": "更新を確認",
+    "checking": "確認中…",
+    "update": "更新",
+    "updateAll": "すべて更新",
+    "updating": "更新中…",
+    "version": "現在：{{version}}",
+    "latest": "最新：{{version}}",
+    "available": "更新があります",
+    "current": "最新の安定版以上です",
+    "failed": "確認に失敗しました。再試行してください",
+    "unchecked": "未確認",
+    "unknown": "バージョンを比較できません",
+    "notInstalled": "実行可能なツールが見つかりません",
+    "appManaged": "クライアント内で更新を確認してください",
+    "download": "公式ダウンロードページ",
+    "manual": "元のインストール方法で更新してください。診断情報を参照",
+    "details": "診断と更新ログ",
+    "result": {
+      "updated": "更新と有効なバージョンの確認が完了しました",
+      "unchanged": "対象バージョンが有効ではありません。ログとパスを確認してください",
+      "current": "更新は不要です",
+      "failed": "更新に失敗しました。ログを確認して再試行してください"
+    }
+  },
   "app": {
     "title": "Ofox Desktop",
     "description": "Claude Code・Codex・Gemini CLI のためのオールインワンアシスタント"

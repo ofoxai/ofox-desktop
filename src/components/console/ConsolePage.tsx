@@ -53,6 +53,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useUpdate } from "@/contexts/UpdateContext";
 import { manageToolApi } from "@/lib/api/manageTool";
 import { useToolLaunch } from "@/hooks/useToolLaunch";
+import { useToolUpdates } from "@/hooks/useToolUpdates";
 import ofoxLogo from "@/assets/icons/ofox-logo.png";
 
 interface ToolInfo {
@@ -114,6 +115,7 @@ export default function ConsolePage({
     dismissUpdate,
   } = useUpdate();
   const [tools, setTools] = useState<BoundTool[]>([]);
+  const toolUpdates = useToolUpdates();
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   // null = manage dialog is closed. Holds the snapshot of the tool row that
@@ -465,6 +467,13 @@ export default function ConsolePage({
   // 不再依赖 loadData，没有 cleanup race。
   const loadDataRef = useRef(loadData);
   useEffect(() => {
+    const refresh = () => {
+      void loadDataRef.current();
+    };
+    window.addEventListener("tool-updates-complete", refresh);
+    return () => window.removeEventListener("tool-updates-complete", refresh);
+  }, []);
+  useEffect(() => {
     loadDataRef.current = loadData;
   }, [loadData]);
 
@@ -684,6 +693,19 @@ export default function ConsolePage({
                         已下线——日常排障不需要，重要的连通性测试仍在"管理"
                         弹窗里。 */}
                     <div className="flex items-center justify-end gap-1.5">
+                      {toolUpdates.tools.some(
+                        (entry) =>
+                          entry.name === tool.id &&
+                          entry.update_status === "available",
+                      ) && (
+                        <button
+                          onClick={() => setSettingsDialogOpen(true)}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-orange-400 px-2.5 py-1 text-[12px] font-medium text-orange-600 hover:bg-accent"
+                        >
+                          <ArrowUpCircle className="h-3.5 w-3.5" />
+                          {t("toolUpdates.available")}
+                        </button>
+                      )}
                       {apiKeyIdByTool[tool.id] && (
                         <button
                           onClick={() =>

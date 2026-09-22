@@ -1,4 +1,30 @@
 {
+  "toolUpdates": {
+    "title": "Tool updates",
+    "check": "Check for updates",
+    "checking": "Checking…",
+    "update": "Update",
+    "updateAll": "Update all",
+    "updating": "Updating…",
+    "version": "Current: {{version}}",
+    "latest": "Latest: {{version}}",
+    "available": "Update available",
+    "current": "At or above the latest stable version",
+    "failed": "Check failed. Please retry",
+    "unchecked": "Not checked",
+    "unknown": "Cannot compare versions",
+    "notInstalled": "No runnable installation detected",
+    "appManaged": "Check for updates inside the client",
+    "download": "Official download page",
+    "manual": "Update using the original installer. See diagnostics",
+    "details": "Diagnostics and update log",
+    "result": {
+      "updated": "Updated and verified the active version",
+      "unchanged": "Target version not active. Check logs and installation path",
+      "current": "No update needed",
+      "failed": "Update failed. Review the log and retry"
+    }
+  },
   "app": {
     "title": "Ofox Desktop",
     "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI"

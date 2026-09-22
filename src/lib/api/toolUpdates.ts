@@ -1,0 +1,41 @@
+import { invoke } from "@tauri-apps/api/core";
+
+export interface ToolUpdateInfo {
+  name: string;
+  version: string | null;
+  latest_version: string | null;
+  error: string | null;
+  installationKind: "desktopApp" | "cli";
+  update_status:
+    | "unchecked"
+    | "notInstalled"
+    | "failed"
+    | "available"
+    | "current"
+    | "unknown"
+    | "appManaged";
+  update_source: string | null;
+  update_supported: boolean;
+  update_reason: string | null;
+  executable_path: string | null;
+}
+
+export interface ToolUpdateResult {
+  status: "updated" | "unchanged" | "current";
+  before: string;
+  after: string;
+}
+
+export interface ToolUpdateProgress {
+  tool: string;
+  operationId: string;
+  stage: string;
+  detail: string;
+}
+
+export const toolUpdatesApi = {
+  check: () =>
+    invoke<ToolUpdateInfo[]>("get_tool_versions", { includeLatest: true }),
+  update: (tool: string, operationId: string) =>
+    invoke<ToolUpdateResult>("update_tool", { tool, operationId }),
+};

@@ -1,4 +1,30 @@
 {
+  "toolUpdates": {
+    "title": "工具更新",
+    "check": "检查更新",
+    "checking": "正在检查…",
+    "update": "升级",
+    "updateAll": "全部升级",
+    "updating": "正在升级…",
+    "version": "当前：{{version}}",
+    "latest": "最新：{{version}}",
+    "available": "有可用更新",
+    "current": "当前版本不低于最新稳定版",
+    "failed": "检查失败，请重试",
+    "unchecked": "尚未检查",
+    "unknown": "无法比较版本",
+    "notInstalled": "未检测到可运行的工具",
+    "appManaged": "请在客户端内检查更新",
+    "download": "官方下载页",
+    "manual": "请使用原安装方式手动升级，详见诊断信息",
+    "details": "诊断与升级日志",
+    "result": {
+      "updated": "升级完成，已验证生效版本",
+      "unchanged": "尚未升级至目标版本，请检查日志和安装路径",
+      "current": "无需升级",
+      "failed": "升级失败，请查看日志后重试"
+    }
+  },
   "app": {
     "title": "Ofox Desktop",
     "description": "Claude Code / Codex / Gemini CLI 全方位辅助工具"
