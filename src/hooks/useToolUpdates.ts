@@ -75,7 +75,7 @@ export async function updateTools(names: string[]) {
       (tool) =>
         tool.name === name &&
         tool.update_supported &&
-        tool.update_status === "available",
+        (tool.update_status === "available" || tool.update_status === "broken"),
     ),
   );
   if (!eligible.length) return;

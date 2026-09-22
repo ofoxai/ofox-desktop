@@ -1,5 +1,8 @@
 {
   "toolUpdates": {
+    "broken": "Installation found but cannot run; version is unverified",
+    "repair": "Repair installation",
+    "pnpmPolicy": "pnpm's release-age policy may delay the latest release. An update may remain available even when the installed tool works. Check logs and retry later.",
     "newVersion": "New version",
     "pendingCount": "{{count}} tools have updates",
     "actionCounts": "{{automatic}} can update automatically; {{manual}} require manual updates",
@@ -11,7 +14,7 @@
     "updateAll": "Update all",
     "updating": "Updating…",
     "version": "Current: {{version}}",
-    "latest": "Latest: {{version}}",
+    "latest": "Registry latest: {{version}}",
     "available": "Update available",
     "current": "At or above the latest stable version",
     "failed": "Check failed. Please retry",
@@ -23,6 +26,7 @@
     "manual": "Update using the original installer. See diagnostics",
     "details": "Diagnostics and update log",
     "result": {
+      "repaired": "Installation repaired and runnable version verified; check update status for newer releases",
       "updated": "Updated and verified the active version",
       "unchanged": "Target version not active. Check logs and installation path",
       "current": "No update needed",

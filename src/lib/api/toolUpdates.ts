@@ -9,6 +9,7 @@ export interface ToolUpdateInfo {
   update_status:
     | "unchecked"
     | "notInstalled"
+    | "broken"
     | "failed"
     | "available"
     | "current"
@@ -21,7 +22,7 @@ export interface ToolUpdateInfo {
 }
 
 export interface ToolUpdateResult {
-  status: "updated" | "unchanged" | "current";
+  status: "updated" | "unchanged" | "current" | "repaired";
   before: string;
   after: string;
 }

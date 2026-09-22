@@ -121,6 +121,11 @@ export function ToolUpdatesPanel() {
                   `toolUpdates.${busy ? "updating" : state.checking ? "checking" : appManaged ? "appManaged" : (tool?.update_status ?? "unchecked")}`,
                 )}
               </p>
+              {hasUpdate && tool?.update_source === "pnpm" && (
+                <p className="text-xs text-muted-foreground">
+                  {t("toolUpdates.pnpmPolicy")}
+                </p>
+              )}
               {appManaged ? (
                 <Button
                   size="sm"
@@ -139,7 +144,8 @@ export function ToolUpdatesPanel() {
                 >
                   {t("toolUpdates.download")}
                 </Button>
-              ) : tool?.update_status === "available" &&
+              ) : (tool?.update_status === "available" ||
+                  tool?.update_status === "broken") &&
                 tool.update_supported ? (
                 <Button
                   size="sm"
@@ -148,9 +154,14 @@ export function ToolUpdatesPanel() {
                   onClick={() => void updateTools([name])}
                 >
                   <ArrowUpCircle className="mr-1.5 h-4 w-4" />
-                  {t("toolUpdates.update")}
+                  {t(
+                    tool.update_status === "broken"
+                      ? "toolUpdates.repair"
+                      : "toolUpdates.update",
+                  )}
                 </Button>
-              ) : hasUpdate && !tool?.update_supported ? (
+              ) : (hasUpdate || tool?.update_status === "broken") &&
+                !tool?.update_supported ? (
                 <div className="space-y-2">
                   <p className="text-xs text-muted-foreground">
                     {t("toolUpdates.manual")}

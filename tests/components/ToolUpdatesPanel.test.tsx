@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
@@ -44,6 +45,39 @@ beforeEach(async () => {
 });
 
 describe("Tool updates", () => {
+  it("offers repair for a broken installation without presenting the registry version as installed", async () => {
+    vi.mocked(toolUpdatesApi.check).mockResolvedValue([
+      tool("opencode", {
+        version: null,
+        update_status: "broken",
+        update_source: "pnpm",
+      }),
+    ]);
+    vi.mocked(toolUpdatesApi.update).mockResolvedValue({
+      status: "repaired",
+      before: "",
+      after: "1.1.0",
+    });
+    await checkToolUpdates();
+    const { container } = render(<ToolUpdatesPanel />);
+    expect(
+      within(
+        container.querySelector('[data-tool="opencode"]') as HTMLElement,
+      ).getByText("当前：—"),
+    ).toBeVisible();
+    expect(screen.getByText("远端最新：1.1.0")).toBeVisible();
+    expect(
+      screen.getByText("已检测到安装，但无法运行；版本尚未验证"),
+    ).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "修复安装" }));
+    await waitFor(() =>
+      expect(toolUpdatesApi.update).toHaveBeenCalledWith(
+        "opencode",
+        expect.any(String),
+      ),
+    );
+    await waitFor(() => expect(screen.getByText(/已恢复运行/)).toBeVisible());
+  });
   it("puts updates first and keeps a visible action for unsupported sources", async () => {
     vi.mocked(toolUpdatesApi.check).mockResolvedValue([
       tool("claude", { update_status: "current" }),

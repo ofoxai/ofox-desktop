@@ -67,6 +67,7 @@ pub(crate) struct Installation {
     pub path: PathBuf,
     pub real: PathBuf,
     pub version: String,
+    pub error: Option<String>,
     pub search_path: String,
 }
 
@@ -104,10 +105,29 @@ pub(crate) async fn probe(tool: &str) -> Result<Installation, String> {
     let real = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
     let mut command = Command::new(&path);
     command.arg("--version").env("PATH", &search_path);
-    let output = bounded_output(command).await?;
-    if !output.status.success() {
-        return Err("Active executable failed its version check".into());
-    }
+    let output = bounded_output(command).await;
+    let (version, error) = executable_version(output);
+    Ok(Installation {
+        path,
+        real,
+        version,
+        error,
+        search_path,
+    })
+}
+
+fn executable_version(output: Result<std::process::Output, String>) -> (String, Option<String>) {
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => {
+            return (
+                String::new(),
+                Some(format!(
+                    "Active executable failed its version check: {error}"
+                )),
+            )
+        }
+    };
     let text = format!(
         "{} {}",
         String::from_utf8_lossy(&output.stdout),
@@ -115,17 +135,18 @@ pub(crate) async fn probe(tool: &str) -> Result<Installation, String> {
     );
     let regex =
         regex::Regex::new(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?").unwrap();
-    let version = regex
-        .find(&text)
-        .ok_or("Unrecognized version output")?
-        .as_str()
-        .to_string();
-    Ok(Installation {
-        path,
-        real,
-        version,
-        search_path,
-    })
+    if output.status.success() {
+        if let Some(version) = regex.find(&text) {
+            return (version.as_str().to_string(), None);
+        }
+    }
+    (
+        String::new(),
+        Some(format!(
+            "Active executable failed its version check: {}",
+            text.chars().take(2048).collect::<String>()
+        )),
+    )
 }
 
 async fn bounded_output(mut command: Command) -> Result<std::process::Output, String> {
@@ -323,18 +344,23 @@ async fn resolve_plan_inner(tool: &str, install: &Installation) -> Result<Update
         let Some(global_dir) = pnpm_owned_root(&root, &target, package) else {
             continue;
         };
+        // The scoped --allow-build lifecycle is supported by pnpm 11. Do not
+        // silently use an older manager or globally disable build protections.
+        if !root.ends_with("v11") {
+            continue;
+        }
         return Ok(UpdatePlan {
             source: "pnpm",
             program,
             args: vec![
                 "--dir".into(),
                 bin_dir.to_string_lossy().into_owned(),
-                "update".into(),
+                "add".into(),
                 "--global".into(),
-                "--latest".into(),
+                format!("--allow-build={package}"),
                 format!("--config.global-dir={}", global_dir.display()),
                 format!("--config.global-bin-dir={}", bin_dir.display()),
-                package.into(),
+                format!("{package}@latest"),
             ],
             path: install.search_path.clone(),
         });
@@ -401,6 +427,20 @@ fn verify_result(before: &str, after: &str, latest: &str) -> UpdateResult {
     }
 }
 
+fn execution_args(plan: &UpdatePlan, install: &Installation, latest: &str) -> Vec<String> {
+    let mut args = plan.args.clone();
+    // A release-age policy may select an older version than dist-tags.latest.
+    // Constrain a healthy installation so that this cannot downgrade it.
+    if plan.source == "pnpm" && install.error.is_none() {
+        if let Some(specifier) = args.last_mut() {
+            if let Some(package) = specifier.strip_suffix("@latest") {
+                *specifier = format!("{package}@>={} <={latest}", install.version);
+            }
+        }
+    }
+    args
+}
+
 #[tauri::command]
 pub async fn update_tool(
     app: AppHandle,
@@ -439,7 +479,9 @@ async fn perform_update<F: Fn(&str, &str)>(tool: &str, emit: F) -> Result<Update
     let latest = super::misc::latest_tool_version(tool, Some(&install.version))
         .await
         .ok_or("Could not check latest stable version; retry later")?;
-    if version_status(Some(&install.version), Some(&latest)) != "available" {
+    if install.error.is_none()
+        && version_status(Some(&install.version), Some(&latest)) != "available"
+    {
         return Ok(UpdateResult {
             status: "current".into(),
             before: install.version.clone(),
@@ -447,15 +489,23 @@ async fn perform_update<F: Fn(&str, &str)>(tool: &str, emit: F) -> Result<Update
         });
     }
     let plan = resolve_plan(tool, &install).await?;
+    if install.error.is_some() && plan.source != "pnpm" {
+        return Err("Repair is currently supported only for verified pnpm 11 installations; use the original installer".into());
+    }
     emit("updating", plan.source);
     let mut command = Command::new(&plan.program);
     command
-        .args(&plan.args)
+        .args(execution_args(&plan, &install, &latest))
         .env("PATH", &plan.path)
         .env("CI", "1");
     run_update_process(command, |line| emit("log", line), UPDATE_TIMEOUT).await?;
     emit("verifying", "");
     let after = probe(tool).await?;
+    if let Some(error) = &after.error {
+        return Err(format!(
+            "Installation is present but cannot run. Retry repair. {error}"
+        ));
+    }
     let after_plan = resolve_plan(tool, &after).await?;
     // fnm creates a fresh multishell symlink on every login. Compare the
     // canonical package-manager target, not that ephemeral launcher path.
@@ -466,6 +516,16 @@ async fn perform_update<F: Fn(&str, &str)>(tool: &str, emit: F) -> Result<Update
         return Err(
             "The launch PATH changed during update; inspect the active installation".into(),
         );
+    }
+    if install.error.is_some() {
+        return Ok(UpdateResult {
+            status: "repaired".into(),
+            before: install.version,
+            after: after.version,
+        });
+    }
+    if version_status(Some(&after.version), Some(&latest)) == "available" {
+        emit("log", "The runnable version is below the registry latest. Check the package manager's release-age policy and registry; safety policies were not disabled.");
     }
     Ok(verify_result(&install.version, &after.version, &latest))
 }
@@ -579,6 +639,41 @@ pub(crate) async fn codex_desktop_version() -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn broken_installation_preserves_diagnostic_not_a_version_from_error() {
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "echo '1.18.32 postinstall script was not run' >&2; exit 1",
+        ]);
+        let (version, error) = executable_version(bounded_output(command).await);
+        assert!(version.is_empty());
+        assert!(error.unwrap().contains("postinstall script was not run"));
+        let (version, error) = executable_version(Err("Version probe timed out".into()));
+        assert!(version.is_empty());
+        assert!(error.unwrap().starts_with("Active executable failed"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore = "Explicit manual acceptance: repairs/upgrades the actual pnpm OpenCode installation"]
+    async fn manual_repair_pnpm_opencode() {
+        assert_eq!(std::env::var("OFOX_TEST_UPDATE_TOOL").unwrap(), "opencode");
+        let _guard = ToolOperationGuard::acquire("opencode").unwrap();
+        let install = probe("opencode").await.unwrap();
+        assert_eq!(
+            resolve_plan("opencode", &install).await.unwrap().source,
+            "pnpm"
+        );
+        let result = perform_update("opencode", |stage, line| println!("{stage}: {line}"))
+            .await
+            .unwrap();
+        println!("{result:?}");
+        let after = probe("opencode").await.unwrap();
+        assert!(after.error.is_none(), "{:?}", after.error);
+        assert!(!after.version.is_empty());
+    }
     #[test]
     fn pnpm_roots_reject_other_versions_packages_and_traversal() {
         let root = Path::new("/pnpm/global/v11");
@@ -632,6 +727,21 @@ mod tests {
             std::fs::set_permissions(manager, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
         let installation = install(wrapper.to_str().unwrap(), wrapper.to_str().unwrap());
+        let selected = resolve_plan("opencode", &installation).await.unwrap();
+        assert!(selected
+            .args
+            .contains(&"--allow-build=opencode-ai".to_string()));
+        assert!(selected.args.contains(&"opencode-ai@latest".to_string()));
+        assert_eq!(
+            execution_args(&selected, &installation, "1.1.0")
+                .last()
+                .unwrap(),
+            "opencode-ai@>=1.0.0 <=1.1.0"
+        );
+        assert!(!selected
+            .args
+            .iter()
+            .any(|arg| arg.contains("dangerously") || arg.contains("minimum-release-age")));
         let plan = resolve_plan("opencode", &installation).await.unwrap();
         assert_eq!(plan.source, "pnpm");
         assert_eq!(plan.program, std::fs::canonicalize(cached).unwrap());
@@ -639,7 +749,23 @@ mod tests {
             "--config.global-dir={}",
             home.join("global").display()
         )));
-        assert_eq!(plan.args.last().unwrap(), "opencode-ai");
+        assert_eq!(plan.args.last().unwrap(), "opencode-ai@latest");
+        // A manager returning exit 0 is insufficient: simulate a package whose
+        // runnable entry is created only by its explicitly allowed postinstall.
+        std::fs::write(&plan.program, format!(
+            "#!/bin/sh\ncase \" $* \" in *' --allow-build=opencode-ai '*) printf '#!/bin/sh\\necho 1.1.0\\n' > '{}'; chmod +x '{}';; *) exit 9;; esac\n",
+            target.display(), target.display()
+        )).unwrap();
+        let mut command = Command::new(&plan.program);
+        command.args(&plan.args);
+        run_update_process(command, |_| {}, Duration::from_secs(2))
+            .await
+            .unwrap();
+        let mut command = Command::new(&target);
+        command.arg("--version");
+        let (version, error) = executable_version(bounded_output(command).await);
+        assert_eq!(version, "1.1.0");
+        assert!(error.is_none());
     }
     #[cfg(target_os = "macos")]
     #[tokio::test]
@@ -688,6 +814,7 @@ mod tests {
             path: path.into(),
             real: real.into(),
             version: "1.0.0".into(),
+            error: None,
             search_path: "/usr/bin:/bin".into(),
         }
     }

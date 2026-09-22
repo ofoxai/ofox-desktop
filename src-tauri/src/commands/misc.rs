@@ -501,7 +501,10 @@ async fn get_single_tool_version_impl(
     }
     #[cfg(target_os = "macos")]
     let (local_version, local_error) = match &active_installation {
-        Ok(installation) => (Some(installation.version.clone()), None),
+        Ok(installation) => (
+            (!installation.version.is_empty()).then(|| installation.version.clone()),
+            installation.error.clone(),
+        ),
         // A found-but-broken active binary must not be hidden by an older copy.
         Err(error) if !error.starts_with("No executable in the launch shell PATH") => {
             (None, Some(error.clone()))
@@ -544,7 +547,13 @@ async fn get_single_tool_version_impl(
         None
     };
 
-    let update_status = if include_latest {
+    let update_status = if local_version.is_none()
+        && local_error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("Active executable failed"))
+    {
+        "broken"
+    } else if include_latest {
         super::tool_update::version_status(local_version.as_deref(), latest_version.as_deref())
     } else {
         "unchecked"
@@ -561,7 +570,12 @@ async fn get_single_tool_version_impl(
                     super::tool_update::verified_plan(tool, installation)
                 };
                 match plan {
-                    Ok(plan) => (Some(plan.source.to_string()), true, None, path),
+                    Ok(plan) => (
+                        Some(plan.source.to_string()),
+                        installation.error.is_none() || plan.source == "pnpm",
+                        installation.error.clone(),
+                        path,
+                    ),
                     Err(reason) => (None, false, Some(reason), path),
                 }
             }
