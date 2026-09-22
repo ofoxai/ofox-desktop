@@ -1607,6 +1607,8 @@ pub fn run() {
             commands::manage_tool::get_tool_config_file_path,
             commands::manage_tool::get_active_ofox_model,
             commands::manage_tool::set_active_ofox_model,
+            commands::manage_tool::get_workbuddy_managed_models,
+            commands::manage_tool::set_workbuddy_managed_models,
             commands::manage_tool::ofox_ping_model,
             commands::show_main_window,
         ]);

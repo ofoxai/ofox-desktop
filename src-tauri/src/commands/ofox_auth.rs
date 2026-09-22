@@ -163,7 +163,7 @@ pub async fn bind_tool_to_ofox_internal(
     proxy_service: &crate::services::proxy::ProxyService,
     ofox_manager: &Arc<RwLock<crate::ofox_auth::OfoxAuthManager>>,
     app: &str,
-    model_selection: Option<crate::workbuddy_config::WorkBuddyModelSelection>,
+    model_selections: Option<Vec<crate::workbuddy_config::WorkBuddyModelSelection>>,
 ) -> Result<(), String> {
     let is_workbuddy = app.trim().eq_ignore_ascii_case("workbuddy");
     let app_type = if is_workbuddy {
@@ -174,8 +174,8 @@ pub async fn bind_tool_to_ofox_internal(
     let key_tool = app_type
         .map(crate::app_config::BindableTool::from)
         .unwrap_or(crate::app_config::BindableTool::WorkBuddy);
-    let workbuddy_selection = if is_workbuddy {
-        Some(model_selection.ok_or_else(|| "绑定 WorkBuddy 前必须选择兼容模型".to_string())?)
+    let workbuddy_selections = if is_workbuddy {
+        Some(model_selections.ok_or_else(|| "绑定 WorkBuddy 前必须选择兼容模型".to_string())?)
     } else {
         None
     };
@@ -235,8 +235,8 @@ pub async fn bind_tool_to_ofox_internal(
         })?
     };
 
-    if let Some(selection) = workbuddy_selection.as_ref() {
-        crate::workbuddy_config::bind_or_switch(db, &token, selection).await?;
+    if let Some(selections) = workbuddy_selections.as_ref() {
+        crate::workbuddy_config::sync_selected_models(db, &token, selections).await?;
         crate::ofox_api_keys::mark_key_used(key_tool);
         return Ok(());
     }
@@ -319,13 +319,17 @@ pub async fn ofox_bind_tool(
     ofox_state: State<'_, OfoxAuthState>,
     app: String,
     model_selection: Option<crate::workbuddy_config::WorkBuddyModelSelection>,
+    model_selections: Option<Vec<crate::workbuddy_config::WorkBuddyModelSelection>>,
 ) -> Result<(), String> {
+    // `modelSelection` remains accepted for compatibility with older renderer
+    // builds while the multi-model UI sends `modelSelections`.
+    let selections = model_selections.or_else(|| model_selection.map(|selection| vec![selection]));
     bind_tool_to_ofox_internal(
         &state.db,
         &state.proxy_service,
         &ofox_state.0,
         &app,
-        model_selection,
+        selections,
     )
     .await
 }

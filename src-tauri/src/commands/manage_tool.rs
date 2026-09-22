@@ -94,6 +94,14 @@ pub async fn get_active_ofox_model(
     read_active_model_for(&state, &app_type)
 }
 
+/// Return every WorkBuddy model currently managed by Ofox, in display order.
+#[tauri::command]
+pub async fn get_workbuddy_managed_models(
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    crate::workbuddy_config::active_models(&state.db).await
+}
+
 /// Plain-reference helper extracted from [`get_active_ofox_model`] so
 /// internal callers (notably `set_active_ofox_model` and `ofox_ping_model`)
 /// can resolve "what model is the active provider pointing at" without going
@@ -170,7 +178,7 @@ pub async fn set_active_ofox_model(
         )
         .await
         .map_err(|e| format!("获取 WorkBuddy OfoxAI API key 失败: {e}"))?;
-        crate::workbuddy_config::bind_or_switch(&state.db, &api_key, &selection).await?;
+        crate::workbuddy_config::sync_selected_models(&state.db, &api_key, &[selection]).await?;
         crate::ofox_api_keys::mark_key_used(BindableTool::WorkBuddy);
         return Ok(());
     }
@@ -222,6 +230,26 @@ pub async fn set_active_ofox_model(
             .map_err(|e| format!("刷新 {app_str} live 配置失败: {e}"))?;
     }
 
+    Ok(())
+}
+
+/// Replace the complete set of WorkBuddy models managed by Ofox. The adapter
+/// performs conflict checks and writes all selected entries atomically.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn set_workbuddy_managed_models(
+    state: State<'_, AppState>,
+    ofox_state: State<'_, OfoxAuthState>,
+    model_selections: Vec<crate::workbuddy_config::WorkBuddyModelSelection>,
+) -> Result<(), String> {
+    let api_key = crate::ofox_api_keys::fetch_or_create_api_key(
+        BindableTool::WorkBuddy,
+        crate::ofox_api_keys::FetchMode::CachedOk,
+        &ofox_state.0,
+    )
+    .await
+    .map_err(|e| format!("获取 WorkBuddy OfoxAI API key 失败: {e}"))?;
+    crate::workbuddy_config::sync_selected_models(&state.db, &api_key, &model_selections).await?;
+    crate::ofox_api_keys::mark_key_used(BindableTool::WorkBuddy);
     Ok(())
 }
 
