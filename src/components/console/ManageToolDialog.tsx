@@ -261,9 +261,11 @@ export default function ManageToolDialog({
       const ids =
         tool?.id === "workbuddy"
           ? draftModels.filter((id) => !currentModels.includes(id))
-          : draftModel && draftModel !== currentModel && !desktopCodex
+          : tool?.id === "opencode" && draftModel
             ? [draftModel]
-            : [];
+            : draftModel && draftModel !== currentModel && !desktopCodex
+              ? [draftModel]
+              : [];
       if (!tool || ids.length === 0) {
         setCompatibilityLoading(false);
         return;
@@ -327,14 +329,21 @@ export default function ManageToolDialog({
     }
   }, [projectUrl]);
 
+  // A selected OpenCode model may keep the same ID while its transport needs
+  // to change (for example GLM Responses -> Chat). Allow applying the probe
+  // result without forcing the user to pick another model first.
+  const isDirty =
+    tool?.id === "workbuddy"
+      ? !arraysEqual(draftModels, currentModels)
+      : draftModel !== currentModel ||
+        (tool?.id === "opencode" &&
+          !!draftModel &&
+          compatibilityResults[0]?.model === draftModel);
+
   const handleSave = useCallback(async () => {
     if (!tool) return;
     const workBuddy = tool.id === "workbuddy";
-    if (
-      workBuddy
-        ? arraysEqual(draftModels, currentModels)
-        : draftModel === currentModel
-    ) {
+    if (workBuddy ? arraysEqual(draftModels, currentModels) : !isDirty) {
       return;
     }
     setSaving(true);
@@ -385,6 +394,7 @@ export default function ManageToolDialog({
     tool,
     draftModel,
     currentModel,
+    isDirty,
     draftModels,
     currentModels,
     models,
@@ -456,10 +466,6 @@ export default function ManageToolDialog({
     }
   }, [tool, unbindConfirming, onChanged, onOpenChange]);
 
-  const isDirty =
-    tool?.id === "workbuddy"
-      ? !arraysEqual(draftModels, currentModels)
-      : draftModel !== currentModel;
   const hasIncompatible = compatibilityResults.some(
     (result) => result.status === "incompatible",
   );
@@ -739,7 +745,9 @@ export default function ManageToolDialog({
                   {saving && (
                     <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                   )}
-                  保存
+                  {tool.id === "opencode" && draftModel === currentModel
+                    ? t("modelCompatibility.applyProtocol")
+                    : "保存"}
                 </Button>
               </div>
             </DialogFooter>

@@ -62,6 +62,44 @@ async function renderTool(id: string, label: string, version = "1.0") {
 }
 
 describe("ManageToolDialog streaming compatibility", () => {
+  it("reapplies the detected transport to an already-selected OpenCode model", async () => {
+    const model = compatibleModel("z-ai/glm-5.3");
+    model.supportedEndpoints = ["/v1/responses", "/v1/chat/completions"];
+    mockSingleTool(model);
+    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue(model.id);
+    const check = vi
+      .spyOn(manageToolApi, "checkCompatibility")
+      .mockResolvedValue({
+        app: "opencode",
+        model: model.id,
+        protocol: "chatCompletions",
+        status: "compatible",
+        source: "probe",
+        reason: null,
+      });
+    const save = vi.spyOn(manageToolApi, "setActiveModel").mockResolvedValue();
+
+    await renderTool("opencode", "OpenCode");
+    await waitFor(() =>
+      expect(check).toHaveBeenCalledWith("opencode", model.id, false),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "应用检测结果" }),
+      ).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "应用检测结果" }));
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith(
+        "opencode",
+        model.id,
+        undefined,
+        "chatCompletions",
+        false,
+      ),
+    );
+  });
+
   it("saves OpenCode with the detected Chat transport", async () => {
     const model = compatibleModel("z-ai/glm-5.3");
     model.supportedEndpoints = ["/v1/responses", "/v1/chat/completions"];

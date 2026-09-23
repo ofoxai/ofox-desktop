@@ -10,6 +10,7 @@
     "continueUnverified": "I understand the risk and want to save without verification",
     "requestFailed": "Check failed; try again",
     "desktopCodex": "Codex desktop manages models in the app; CLI protocol checks do not apply",
+    "applyProtocol": "Apply check result",
     "defaultModelFailed": "{{tool}} was bound, but its default model could not be stream-verified. Choose a model in Manage."
   },
   "toolUpdates": {

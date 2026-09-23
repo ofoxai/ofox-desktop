@@ -10,6 +10,7 @@
     "continueUnverified": "リスクを理解した上で未検証のまま保存する",
     "requestFailed": "確認に失敗しました。再試行してください",
     "desktopCodex": "Codex デスクトップのモデルはアプリ内で管理され、CLI の確認は対象外です",
+    "applyProtocol": "検査結果を適用",
     "defaultModelFailed": "{{tool}} の連携は完了しましたが、既定モデルのストリーミングを確認できませんでした。管理画面でモデルを選択してください"
   },
   "toolUpdates": {
