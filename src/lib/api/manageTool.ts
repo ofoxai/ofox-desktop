@@ -46,6 +46,22 @@ export interface PingResult {
   error: string | null;
 }
 
+export type CompatibilityProtocol =
+  | "responses"
+  | "chatCompletions"
+  | "anthropic"
+  | "gemini";
+
+export interface CompatibilityResult {
+  app: string;
+  model: string;
+  protocol: CompatibilityProtocol | null;
+  status: "compatible" | "incompatible" | "inconclusive";
+  source: "catalog" | "cache" | "probe" | "manual";
+  reason: string | null;
+  allowedProtocols?: CompatibilityProtocol[];
+}
+
 /**
  * Manage-dialog API surface.
  *
@@ -79,8 +95,16 @@ export const manageToolApi = {
     app: string,
     model: string,
     modelSelection?: WorkBuddyModelSelection,
+    compatibilityProtocol?: CompatibilityProtocol,
+    allowUnverified?: boolean,
   ): Promise<void> {
-    await invoke("set_active_ofox_model", { app, model, modelSelection });
+    await invoke("set_active_ofox_model", {
+      app,
+      model,
+      modelSelection,
+      compatibilityProtocol,
+      allowUnverified,
+    });
   },
 
   async getWorkBuddyManagedModels(): Promise<string[]> {
@@ -89,8 +113,24 @@ export const manageToolApi = {
 
   async setWorkBuddyManagedModels(
     modelSelections: WorkBuddyModelSelection[],
+    allowUnverified?: boolean,
   ): Promise<void> {
-    await invoke("set_workbuddy_managed_models", { modelSelections });
+    await invoke("set_workbuddy_managed_models", {
+      modelSelections,
+      allowUnverified,
+    });
+  },
+
+  async checkCompatibility(
+    app: string,
+    model: string,
+    forceRetest = false,
+  ): Promise<CompatibilityResult> {
+    return await invoke("check_ofox_model_compatibility", {
+      app,
+      model,
+      forceRetest,
+    });
   },
 
   async pingModel(app: string, model: string): Promise<PingResult> {

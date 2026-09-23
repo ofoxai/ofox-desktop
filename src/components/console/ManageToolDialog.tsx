@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
   Loader2,
@@ -40,6 +41,8 @@ import {
   manageToolApi,
   TOOL_PROTOCOL,
   type PingResult,
+  type CompatibilityProtocol,
+  type CompatibilityResult,
 } from "@/lib/api/manageTool";
 import {
   fetchOfoxModels,
@@ -62,6 +65,7 @@ export interface ManageToolTarget {
   label: string;
   color: string;
   version: string | null;
+  installationKind?: "desktopApp" | "cli";
 }
 
 interface ManageToolDialogProps {
@@ -94,8 +98,11 @@ export default function ManageToolDialog({
   onOpenChange,
   onChanged,
 }: ManageToolDialogProps) {
+  const { t } = useTranslation();
   const open = !!tool;
   const protocol = tool ? TOOL_PROTOCOL[tool.id] : undefined;
+  const desktopCodex =
+    tool?.id === "codex" && tool.installationKind === "desktopApp";
   const projectUrl = tool ? TOOL_META[tool.id]?.projectUrl : undefined;
   const projectLinkLabel = tool
     ? TOOL_META[tool.id]?.projectLinkLabel
@@ -127,6 +134,15 @@ export default function ManageToolDialog({
   // with a PingResult, so we never put an exception here.
   const [pingResult, setPingResult] = useState<PingResult | null>(null);
   const [pingLoading, setPingLoading] = useState(false);
+  const [compatibilityResults, setCompatibilityResults] = useState<
+    CompatibilityResult[]
+  >([]);
+  const [compatibilityLoading, setCompatibilityLoading] = useState(false);
+  const [manualProtocol, setManualProtocol] = useState<
+    CompatibilityProtocol | ""
+  >("");
+  const [allowUnverified, setAllowUnverified] = useState(false);
+  const compatibilityRequest = useRef(0);
 
   // Today's stats (per-tool, midnight-local-time → now). null = 还没加载完。
   // 「今日统计」整段（含 today-stats fetch、loading state、cell renderer）已在
@@ -151,6 +167,11 @@ export default function ManageToolDialog({
     setUnbindLoading(false);
     setPingResult(null);
     setPingLoading(false);
+    setCompatibilityResults([]);
+    setCompatibilityLoading(false);
+    setManualProtocol("");
+    setAllowUnverified(false);
+    compatibilityRequest.current += 1;
 
     const loadPath = async () => {
       try {
@@ -206,8 +227,13 @@ export default function ManageToolDialog({
   // Codex CLI 强绑 responses 协议（codex_config.rs 里 wire_api="responses"
   // 是硬编码），选到只支持 chat/completions 的模型会导致 CLI 报
   // `wire_api not supported`——按端点二次过滤，UI 层就不给用户选到
-  // 不兼容的模型。其他工具走 chat 协议不需要收窄。
-  const requiredEndpoint = tool?.id === "codex" ? "/v1/responses" : undefined;
+  // 不兼容的模型。其他固定 Chat 客户端也按端点过滤。
+  const requiredEndpoint =
+    tool?.id === "codex"
+      ? "/v1/responses"
+      : tool?.id === "openclaw" || tool?.id === "hermes"
+        ? "/v1/chat/completions"
+        : undefined;
   const fetchModels = useCallback(async () => {
     if (!protocol) return;
     setModelsLoading(true);
@@ -225,6 +251,63 @@ export default function ManageToolDialog({
       setModelsLoading(false);
     }
   }, [protocol, requiredEndpoint, tool?.id]);
+
+  const runCompatibility = useCallback(
+    async (forceRetest: boolean) => {
+      const request = ++compatibilityRequest.current;
+      setCompatibilityResults([]);
+      setManualProtocol("");
+      setAllowUnverified(false);
+      const ids =
+        tool?.id === "workbuddy"
+          ? draftModels.filter((id) => !currentModels.includes(id))
+          : draftModel && draftModel !== currentModel && !desktopCodex
+            ? [draftModel]
+            : [];
+      if (!tool || ids.length === 0) {
+        setCompatibilityLoading(false);
+        return;
+      }
+      setCompatibilityLoading(true);
+      const results: CompatibilityResult[] = [];
+      for (const id of ids) {
+        try {
+          results.push(
+            await manageToolApi.checkCompatibility(tool.id, id, forceRetest),
+          );
+        } catch {
+          results.push({
+            app: tool.id,
+            model: id,
+            protocol: null,
+            status: "inconclusive",
+            source: "probe",
+            reason: t("modelCompatibility.requestFailed"),
+          });
+        }
+        if (request !== compatibilityRequest.current) return;
+        setCompatibilityResults([...results]);
+      }
+      if (request === compatibilityRequest.current)
+        setCompatibilityLoading(false);
+    },
+    [
+      tool?.id,
+      draftModel,
+      currentModel,
+      draftModels,
+      currentModels,
+      desktopCodex,
+      t,
+    ],
+  );
+
+  useEffect(() => {
+    void runCompatibility(false);
+    return () => {
+      compatibilityRequest.current += 1;
+    };
+  }, [runCompatibility]);
 
   const handleOpenFolder = useCallback(async () => {
     if (!tool) return;
@@ -268,10 +351,21 @@ export default function ManageToolDialog({
         }
         await manageToolApi.setWorkBuddyManagedModels(
           selections.map((model) => toWorkBuddyModelSelection(model!)),
+          allowUnverified,
         );
         setCurrentModels(draftModels);
       } else {
-        await manageToolApi.setActiveModel(tool.id, draftModel);
+        const selectedProtocol =
+          compatibilityResults[0]?.status === "compatible"
+            ? (compatibilityResults[0].protocol ?? undefined)
+            : manualProtocol || undefined;
+        await manageToolApi.setActiveModel(
+          tool.id,
+          draftModel,
+          undefined,
+          selectedProtocol,
+          allowUnverified,
+        );
         setCurrentModel(draftModel);
       }
       toast.success(
@@ -294,6 +388,9 @@ export default function ManageToolDialog({
     draftModels,
     currentModels,
     models,
+    compatibilityResults,
+    manualProtocol,
+    allowUnverified,
     onChanged,
     onOpenChange,
   ]);
@@ -363,6 +460,23 @@ export default function ManageToolDialog({
     tool?.id === "workbuddy"
       ? !arraysEqual(draftModels, currentModels)
       : draftModel !== currentModel;
+  const hasIncompatible = compatibilityResults.some(
+    (result) => result.status === "incompatible",
+  );
+  const hasInconclusive = compatibilityResults.some(
+    (result) => result.status === "inconclusive",
+  );
+  const compatibilityReady =
+    !compatibilityLoading &&
+    !hasIncompatible &&
+    (!hasInconclusive ||
+      (allowUnverified && (tool?.id !== "opencode" || !!manualProtocol))) &&
+    (tool?.id === "workbuddy"
+      ? compatibilityResults.length ===
+        draftModels.filter((id) => !currentModels.includes(id)).length
+      : !draftModel ||
+        draftModel === currentModel ||
+        compatibilityResults[0]?.model === draftModel);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -411,7 +525,7 @@ export default function ManageToolDialog({
                 <Label htmlFor="manage-model" className="text-[13px]">
                   模型
                 </Label>
-                {protocol && tool.id === "workbuddy" ? (
+                {protocol && !desktopCodex && tool.id === "workbuddy" ? (
                   <WorkBuddyModelPicker
                     id="manage-model"
                     selectedIds={draftModels}
@@ -421,7 +535,7 @@ export default function ManageToolDialog({
                     onFetch={fetchModels}
                     portalContainer={dialogContentRef.current}
                   />
-                ) : protocol ? (
+                ) : protocol && !desktopCodex ? (
                   <ModelPicker
                     id="manage-model"
                     value={draftModel}
@@ -433,7 +547,96 @@ export default function ManageToolDialog({
                   />
                 ) : (
                   <div className="rounded-md border border-dashed border-border-default px-3 py-2 text-[12px] text-muted-foreground">
-                    该工具暂不支持模型管理
+                    {desktopCodex
+                      ? t("modelCompatibility.desktopCodex")
+                      : "该工具暂不支持模型管理"}
+                  </div>
+                )}
+                {isDirty && !desktopCodex && (
+                  <div className="space-y-2 rounded-md border border-border-default bg-muted/20 p-3 text-[12px]">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium">
+                        {compatibilityLoading
+                          ? t("modelCompatibility.checking")
+                          : t("modelCompatibility.title")}
+                      </span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={compatibilityLoading}
+                        onClick={() => void runCompatibility(true)}
+                      >
+                        <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                        {t("modelCompatibility.retest")}
+                      </Button>
+                    </div>
+                    {compatibilityResults.map((result) => (
+                      <p key={result.model} className="text-muted-foreground">
+                        {result.model}:{" "}
+                        {t(`modelCompatibility.${result.status}`)}
+                        {result.protocol ? ` · ${result.protocol}` : ""}
+                        {result.reason ? ` · ${result.reason}` : ""}
+                      </p>
+                    ))}
+                    {hasInconclusive && (
+                      <div className="space-y-2">
+                        {tool.id === "opencode" && (
+                          <select
+                            aria-label={t("modelCompatibility.chooseProtocol")}
+                            value={manualProtocol}
+                            onChange={(event) =>
+                              setManualProtocol(
+                                event.target.value as
+                                  | CompatibilityProtocol
+                                  | "",
+                              )
+                            }
+                            className="w-full rounded-md border border-border-default bg-background p-2"
+                          >
+                            <option value="">
+                              {t("modelCompatibility.chooseProtocol")}
+                            </option>
+                            <option
+                              value="responses"
+                              disabled={
+                                compatibilityResults[0]?.allowedProtocols
+                                  ?.length
+                                  ? !compatibilityResults[0].allowedProtocols.includes(
+                                      "responses",
+                                    )
+                                  : false
+                              }
+                            >
+                              Responses
+                            </option>
+                            <option
+                              value="chatCompletions"
+                              disabled={
+                                compatibilityResults[0]?.allowedProtocols
+                                  ?.length
+                                  ? !compatibilityResults[0].allowedProtocols.includes(
+                                      "chatCompletions",
+                                    )
+                                  : false
+                              }
+                            >
+                              Chat Completions
+                            </option>
+                          </select>
+                        )}
+                        <label className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={allowUnverified}
+                            onChange={(event) =>
+                              setAllowUnverified(event.target.checked)
+                            }
+                          />
+                          {t("modelCompatibility.continueUnverified")}
+                        </label>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -528,6 +731,8 @@ export default function ManageToolDialog({
                     !isDirty ||
                     saving ||
                     !protocol ||
+                    !compatibilityReady ||
+                    desktopCodex ||
                     (tool.id === "workbuddy" && draftModels.length === 0)
                   }
                 >

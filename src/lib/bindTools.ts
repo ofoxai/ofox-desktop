@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { toast } from "sonner";
+import i18n from "@/i18n";
 import { BOUND_TOOLS_STORAGE_KEY } from "@/config/toolMeta";
 import { settingsApi } from "@/lib/api";
 import { manageToolApi, TOOL_PROTOCOL } from "@/lib/api/manageTool";
@@ -75,6 +76,7 @@ async function ensureDefaultModel(tool: string): Promise<void> {
     await manageToolApi.setActiveModel(tool, picked);
   } catch (e) {
     console.warn(`[bindTools] setActiveModel(${tool}, ${picked}) failed`, e);
+    toast.warning(i18n.t("modelCompatibility.defaultModelFailed", { tool }));
   }
 }
 

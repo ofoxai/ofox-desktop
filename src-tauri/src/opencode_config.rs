@@ -143,15 +143,6 @@ pub(crate) fn normalize_ofox_provider_transport(config: &mut Value) -> bool {
             continue;
         };
 
-        if model.get("reasoning").and_then(Value::as_bool) != Some(true) {
-            model.insert("reasoning".to_string(), json!(true));
-            changed = true;
-        }
-        if model.get("interleaved").and_then(Value::as_str) != Some("reasoning_content") {
-            model.insert("interleaved".to_string(), json!("reasoning_content"));
-            changed = true;
-        }
-
         if !model.get("provider").is_some_and(Value::is_object) {
             model.insert("provider".to_string(), json!({}));
             changed = true;
@@ -160,9 +151,22 @@ pub(crate) fn normalize_ofox_provider_transport(config: &mut Value) -> bool {
             .get_mut("provider")
             .and_then(Value::as_object_mut)
             .expect("provider was normalized to an object");
-        if provider.get("npm").and_then(Value::as_str) != Some(OFOX_CHAT_NPM) {
+        // Keep an explicit result from the streaming compatibility check.
+        // Legacy GLM entries without a transport still receive the safe Chat
+        // default, but startup migration must not undo a user's newer choice.
+        if provider.get("npm").and_then(Value::as_str).is_none() {
             provider.insert("npm".to_string(), json!(OFOX_CHAT_NPM));
             changed = true;
+        }
+        if provider.get("npm").and_then(Value::as_str) == Some(OFOX_CHAT_NPM) {
+            if model.get("reasoning").and_then(Value::as_bool) != Some(true) {
+                model.insert("reasoning".to_string(), json!(true));
+                changed = true;
+            }
+            if model.get("interleaved").and_then(Value::as_str) != Some("reasoning_content") {
+                model.insert("interleaved".to_string(), json!("reasoning_content"));
+                changed = true;
+            }
         }
     }
 
@@ -474,6 +478,24 @@ mod tests {
         assert_eq!(
             provider.pointer("/models/glm-5.3/custom"),
             Some(&json!("keep-me"))
+        );
+    }
+
+    #[test]
+    fn explicit_glm_transport_survives_normalization() {
+        let mut provider = json!({
+            "npm": "@ai-sdk/openai",
+            "models": {
+                "z-ai/glm-5.3": {
+                    "name": "GLM 5.3",
+                    "provider": { "npm": "@ai-sdk/openai" }
+                }
+            }
+        });
+        assert!(!normalize_ofox_provider_transport(&mut provider));
+        assert_eq!(
+            provider.pointer("/models/z-ai~1glm-5.3/provider/npm"),
+            Some(&json!("@ai-sdk/openai"))
         );
     }
 }

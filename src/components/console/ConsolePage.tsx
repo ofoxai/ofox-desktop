@@ -60,6 +60,7 @@ interface ToolInfo {
   name: string;
   version: string | null;
   error: string | null;
+  installationKind?: "desktopApp" | "cli";
 }
 
 type ToolStatus = "active" | "idle" | "error";
@@ -70,6 +71,7 @@ interface BoundTool {
   label: string;
   color: string;
   version: string | null;
+  installationKind?: "desktopApp" | "cli";
   status: ToolStatus;
 }
 
@@ -334,6 +336,7 @@ export default function ConsolePage({
         label: meta.label,
         color: meta.color,
         version: info?.version ?? null,
+        installationKind: info?.installationKind,
         status,
       };
     });
@@ -772,6 +775,7 @@ export default function ConsolePage({
                               label: tool.label,
                               color: tool.color,
                               version: tool.version,
+                              installationKind: tool.installationKind,
                             })
                           }
                           className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1 text-[12px] font-medium text-muted-foreground hover:bg-accent"

@@ -1,4 +1,17 @@
 {
+  "modelCompatibility": {
+    "title": "ストリーミング互換性",
+    "checking": "ストリーミング互換性を確認中…",
+    "retest": "再確認",
+    "compatible": "互換",
+    "incompatible": "非互換のため保存不可",
+    "inconclusive": "判定できません",
+    "chooseProtocol": "OpenCode のプロトコルを選択",
+    "continueUnverified": "リスクを理解した上で未検証のまま保存する",
+    "requestFailed": "確認に失敗しました。再試行してください",
+    "desktopCodex": "Codex デスクトップのモデルはアプリ内で管理され、CLI の確認は対象外です",
+    "defaultModelFailed": "{{tool}} の連携は完了しましたが、既定モデルのストリーミングを確認できませんでした。管理画面でモデルを選択してください"
+  },
   "toolUpdates": {
     "broken": "インストール済みですが起動できません。バージョンは未検証です",
     "repair": "インストールを修復",

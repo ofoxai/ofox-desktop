@@ -1,4 +1,17 @@
 {
+  "modelCompatibility": {
+    "title": "Streaming compatibility",
+    "checking": "Checking streaming compatibility…",
+    "retest": "Retest",
+    "compatible": "Compatible",
+    "incompatible": "Incompatible; cannot save",
+    "inconclusive": "Could not determine",
+    "chooseProtocol": "Choose OpenCode protocol manually",
+    "continueUnverified": "I understand the risk and want to save without verification",
+    "requestFailed": "Check failed; try again",
+    "desktopCodex": "Codex desktop manages models in the app; CLI protocol checks do not apply",
+    "defaultModelFailed": "{{tool}} was bound, but its default model could not be stream-verified. Choose a model in Manage."
+  },
   "toolUpdates": {
     "broken": "Installation found but cannot run; version is unverified",
     "repair": "Repair installation",

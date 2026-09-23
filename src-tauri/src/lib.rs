@@ -21,6 +21,7 @@ mod ofox_auth;
 // `ofox_auth_sync` 模块在 bind 直写改造（commit 4）后整体废弃——OAuth
 // access_token 不再被当 LLM key 写进 ofox-* provider 的 settings_config。
 // 历史实现见 git log。
+mod model_compat;
 mod ofox_apex;
 mod ofox_api_keys;
 mod ofox_endpoints;
@@ -1611,6 +1612,7 @@ pub fn run() {
             commands::manage_tool::get_workbuddy_managed_models,
             commands::manage_tool::set_workbuddy_managed_models,
             commands::manage_tool::ofox_ping_model,
+            commands::manage_tool::check_ofox_model_compatibility,
             commands::show_main_window,
         ]);
 

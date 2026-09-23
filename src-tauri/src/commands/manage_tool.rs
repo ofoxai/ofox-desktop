@@ -18,6 +18,7 @@
 //! list). The read/write helpers below mirror what
 //! `services/provider/live.rs` ultimately consumes.
 
+use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -151,7 +152,7 @@ pub(crate) fn read_active_provider_and_model_for(
 /// signals "fall back to OfoxAI's default routing".
 ///
 /// For ofox-* providers this goes through the **bind 直写** path
-/// ([`ProxyService::ofox_write_direct_to_live`])：拿 keychain 里的 sk-of-、
+/// ([`ProxyService::ofox_write_direct_to_live`])：读取已绑定的 sk-of-、
 /// 把 DB 里的 settings_config（含新 model）+ token 合成完整磁盘 config 写盘。
 /// 不调老的 `refresh_takeover_for_app`——那条会写 `PROXY_MANAGED` 占位符把
 /// 真 sk-of- 覆盖掉，并触发 backup 删除（破坏 unbind 可恢复性）。
@@ -164,6 +165,8 @@ pub async fn set_active_ofox_model(
     app: String,
     model: String,
     model_selection: Option<crate::workbuddy_config::WorkBuddyModelSelection>,
+    compatibility_protocol: Option<String>,
+    allow_unverified: Option<bool>,
 ) -> Result<(), String> {
     if app.trim().eq_ignore_ascii_case("workbuddy") {
         let selection = model_selection
@@ -171,6 +174,15 @@ pub async fn set_active_ofox_model(
         if selection.id.trim() != model.trim() {
             return Err("WorkBuddy 模型 ID 与能力信息不一致，请刷新后重试".to_string());
         }
+        let catalog_token = catalog_access_token(&ofox_state.0).await;
+        validate_compatibility(
+            BindableTool::WorkBuddy,
+            &model,
+            compatibility_protocol.as_deref(),
+            allow_unverified.unwrap_or(false),
+            catalog_token.as_deref(),
+        )
+        .await?;
         let api_key = crate::ofox_api_keys::fetch_or_create_api_key(
             BindableTool::WorkBuddy,
             crate::ofox_api_keys::FetchMode::CachedOk,
@@ -197,39 +209,100 @@ pub async fn set_active_ofox_model(
         .map_err(|e| format!("读取 {provider_id} 失败: {e}"))?
         .ok_or_else(|| format!("供应商 {provider_id} 不存在"))?;
 
-    write_model_into_settings(&app_type, &mut provider.settings_config, model.trim())?;
-
-    state
-        .db
-        .update_provider_settings_config(app_str, &provider_id, &provider.settings_config)
-        .map_err(|e| format!("更新 {provider_id} settings_config 失败: {e}"))?;
-
-    if provider_id.starts_with("ofox-") {
-        // ofox 直写路径：拿 keychain 里的 sk-of-（CachedOk——已经 bind 过的工具
-        // 一定命中；命中不了说明 keychain 被清/迁移，这种异常态 fetch 会
-        // 调 /openapi/api-keys 重新签发）+ 新 model 合成完整磁盘 config 写盘。
-        let api_key = crate::ofox_api_keys::fetch_or_create_api_key(
-            app_type,
-            crate::ofox_api_keys::FetchMode::CachedOk,
-            &ofox_state.0,
-        )
-        .await
-        .map_err(|e| format!("获取 {app_str} OfoxAI API key 失败: {e}"))?;
-
-        state
-            .proxy_service
-            .ofox_write_direct_to_live(&app_type, &api_key)
-            .await
-            .map_err(|e| format!("刷新 {app_str} live 配置失败: {e}"))?;
+    let catalog_token = if provider_id.starts_with("ofox-") && !model.trim().is_empty() {
+        catalog_access_token(&ofox_state.0).await
     } else {
-        // 非 ofox provider 走老 takeover 路径——保留兼容形态。
-        state
-            .proxy_service
-            .refresh_takeover_for_app(app_str)
-            .await
-            .map_err(|e| format!("刷新 {app_str} live 配置失败: {e}"))?;
+        None
+    };
+    let resolved_protocol = if provider_id.starts_with("ofox-") && !model.trim().is_empty() {
+        validate_compatibility(
+            app_type.into(),
+            &model,
+            compatibility_protocol.as_deref(),
+            allow_unverified.unwrap_or(false),
+            catalog_token.as_deref(),
+        )
+        .await?
+    } else {
+        None
+    };
+    let previous_settings = provider.settings_config.clone();
+
+    write_model_into_settings(&app_type, &mut provider.settings_config, model.trim())?;
+    if app_type == AppType::OpenCode && !model.trim().is_empty() {
+        if let Some(protocol) = resolved_protocol.as_deref() {
+            let npm = match protocol {
+                "responses" => crate::opencode_config::OFOX_RESPONSES_NPM,
+                "chatCompletions" => crate::opencode_config::OFOX_CHAT_NPM,
+                _ => return Err("OpenCode 协议选择无效".into()),
+            };
+            provider.settings_config["models"][model.trim()]["provider"] =
+                serde_json::json!({ "npm": npm });
+        }
     }
 
+    let api_key = if provider_id.starts_with("ofox-") {
+        Some(
+            crate::ofox_secret::default_store()
+                .load(crate::ofox_secret::Slot::ApiKey {
+                    tool: app_type.into(),
+                })
+                .map_err(|_| "读取已绑定的 API Key 失败".to_string())?
+                .ok_or_else(|| "未找到已绑定的 API Key，请重新绑定".to_string())?,
+        )
+    } else {
+        None
+    };
+
+    persist_with_rollback(
+        &state.db,
+        app_str,
+        &provider_id,
+        &previous_settings,
+        &provider.settings_config,
+        || async {
+            if provider_id.starts_with("ofox-") {
+                // ofox 直写路径：使用上面读取的已绑定 key。模型切换不会创建
+                // 新 key，也不会把密钥放入诊断日志。
+                state
+                    .proxy_service
+                    .ofox_write_direct_to_live(&app_type, api_key.as_deref().unwrap_or_default())
+                    .await
+                    .map_err(|e| format!("刷新 {app_str} live 配置失败: {e}"))
+            } else {
+                // 非 ofox provider 走老 takeover 路径——保留兼容形态。
+                state
+                    .proxy_service
+                    .refresh_takeover_for_app(app_str)
+                    .await
+                    .map_err(|e| format!("刷新 {app_str} live 配置失败: {e}"))
+            }
+        },
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn persist_with_rollback<F, Fut>(
+    db: &crate::database::Database,
+    app: &str,
+    provider_id: &str,
+    previous: &serde_json::Value,
+    updated: &serde_json::Value,
+    write_live: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
+    db.update_provider_settings_config(app, provider_id, updated)
+        .map_err(|e| format!("更新 {provider_id} settings_config 失败: {e}"))?;
+    if let Err(error) = write_live().await {
+        db.update_provider_settings_config(app, provider_id, previous)
+            .map_err(|rollback| format!("{error}；恢复数据库配置失败: {rollback}"))?;
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -240,7 +313,22 @@ pub async fn set_workbuddy_managed_models(
     state: State<'_, AppState>,
     ofox_state: State<'_, OfoxAuthState>,
     model_selections: Vec<crate::workbuddy_config::WorkBuddyModelSelection>,
+    allow_unverified: Option<bool>,
 ) -> Result<(), String> {
+    let existing = crate::workbuddy_config::active_models(&state.db).await?;
+    let catalog_token = catalog_access_token(&ofox_state.0).await;
+    for selection in &model_selections {
+        if !existing.contains(&selection.id) {
+            validate_compatibility(
+                BindableTool::WorkBuddy,
+                &selection.id,
+                None,
+                allow_unverified.unwrap_or(false),
+                catalog_token.as_deref(),
+            )
+            .await?;
+        }
+    }
     let api_key = crate::ofox_api_keys::fetch_or_create_api_key(
         BindableTool::WorkBuddy,
         crate::ofox_api_keys::FetchMode::CachedOk,
@@ -251,6 +339,81 @@ pub async fn set_workbuddy_managed_models(
     crate::workbuddy_config::sync_selected_models(&state.db, &api_key, &model_selections).await?;
     crate::ofox_api_keys::mark_key_used(BindableTool::WorkBuddy);
     Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn check_ofox_model_compatibility(
+    app: String,
+    model: String,
+    force_retest: Option<bool>,
+    ofox_state: State<'_, OfoxAuthState>,
+) -> Result<crate::model_compat::CompatibilityResult, String> {
+    let tool = match app.as_str() {
+        "workbuddy" => BindableTool::WorkBuddy,
+        _ => AppType::from_str(&app)
+            .map(BindableTool::from)
+            .map_err(|e| e.to_string())?,
+    };
+    let catalog_token = catalog_access_token(&ofox_state.0).await;
+    Ok(crate::model_compat::check(
+        tool,
+        &model,
+        force_retest.unwrap_or(false),
+        catalog_token.as_deref(),
+    )
+    .await)
+}
+
+async fn catalog_access_token(manager: &Arc<RwLock<OfoxAuthManager>>) -> Option<String> {
+    manager.read().await.get_valid_access_token().await.ok()
+}
+
+async fn validate_compatibility(
+    tool: BindableTool,
+    model: &str,
+    selected: Option<&str>,
+    allow_unverified: bool,
+    catalog_access_token: Option<&str>,
+) -> Result<Option<String>, String> {
+    let result = crate::model_compat::check(tool, model, false, catalog_access_token).await;
+    accept_compatibility_result(tool, result, selected, allow_unverified)
+}
+
+fn accept_compatibility_result(
+    tool: BindableTool,
+    result: crate::model_compat::CompatibilityResult,
+    selected: Option<&str>,
+    allow_unverified: bool,
+) -> Result<Option<String>, String> {
+    if let Some(selected) = selected {
+        if !result.allowed_protocols.is_empty()
+            && !result
+                .allowed_protocols
+                .iter()
+                .any(|allowed| allowed == selected)
+        {
+            return Err("所选协议未通过模型目录或流式检查".into());
+        }
+    }
+    match result.status.as_str() {
+        "compatible" if selected.is_none() || selected == result.protocol.as_deref() => {
+            Ok(result.protocol)
+        }
+        "inconclusive"
+            if allow_unverified
+                && (tool != BindableTool::OpenCode
+                    || matches!(selected, Some("responses" | "chatCompletions"))) =>
+        {
+            Ok(selected.map(str::to_string))
+        }
+        "incompatible" => Err(result
+            .reason
+            .unwrap_or_else(|| "模型与客户端协议不兼容".into())),
+        "inconclusive" => Err(result
+            .reason
+            .unwrap_or_else(|| "流式兼容性尚未确定，请重试或显式继续".into())),
+        _ => Err("所选协议与检测结果不一致，请重新检测".into()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -484,6 +647,92 @@ mod tests {
         );
         serde_json::from_value::<crate::provider::OpenCodeProviderConfig>(settings)
             .expect("GLM compatibility fields must survive the typed config round trip");
+    }
+
+    #[test]
+    fn incompatible_model_cannot_be_overridden() {
+        let result = crate::model_compat::CompatibilityResult {
+            app: "opencode".into(),
+            model: "x".into(),
+            protocol: Some("chatCompletions".into()),
+            status: "incompatible".into(),
+            source: "probe".into(),
+            reason: Some("broken stream".into()),
+            allowed_protocols: vec!["chatCompletions".into()],
+        };
+        assert!(accept_compatibility_result(
+            BindableTool::OpenCode,
+            result,
+            Some("chatCompletions"),
+            true
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn inconclusive_opencode_requires_explicit_valid_choice() {
+        let result = crate::model_compat::CompatibilityResult {
+            app: "opencode".into(),
+            model: "x".into(),
+            protocol: Some("chatCompletions".into()),
+            status: "inconclusive".into(),
+            source: "probe".into(),
+            reason: None,
+            allowed_protocols: vec!["chatCompletions".into()],
+        };
+        assert!(
+            accept_compatibility_result(BindableTool::OpenCode, result.clone(), None, true)
+                .is_err()
+        );
+        assert!(accept_compatibility_result(
+            BindableTool::OpenCode,
+            result.clone(),
+            Some("responses"),
+            true
+        )
+        .is_err());
+        assert_eq!(
+            accept_compatibility_result(
+                BindableTool::OpenCode,
+                result,
+                Some("chatCompletions"),
+                true
+            )
+            .unwrap(),
+            Some("chatCompletions".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_live_write_restores_previous_provider_settings() {
+        let db = crate::database::Database::memory().unwrap();
+        let previous = serde_json::json!({ "models": {"old": {"name": "old"}} });
+        let updated = serde_json::json!({ "models": {"new": {"name": "new"}} });
+        let provider = crate::provider::Provider::with_id(
+            "ofox-opencode".into(),
+            "OfoxAI".into(),
+            previous.clone(),
+            None,
+        );
+        db.save_provider("opencode", &provider).unwrap();
+        let error = persist_with_rollback(
+            &db,
+            "opencode",
+            "ofox-opencode",
+            &previous,
+            &updated,
+            || async { Err("disk write failed".into()) },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "disk write failed");
+        assert_eq!(
+            db.get_provider_by_id("ofox-opencode", "opencode")
+                .unwrap()
+                .unwrap()
+                .settings_config,
+            previous
+        );
     }
 }
 

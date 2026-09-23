@@ -1,4 +1,17 @@
 {
+  "modelCompatibility": {
+    "title": "流式兼容性",
+    "checking": "正在验证流式兼容性…",
+    "retest": "重新检测",
+    "compatible": "兼容",
+    "incompatible": "不兼容，无法保存",
+    "inconclusive": "暂时无法确定",
+    "chooseProtocol": "手动选择 OpenCode 协议",
+    "continueUnverified": "我了解风险，仍要保存未验证的模型",
+    "requestFailed": "检测请求失败，请重试",
+    "desktopCodex": "Codex 桌面版使用应用内模型设置，不进行 CLI 协议检测",
+    "defaultModelFailed": "{{tool}} 已绑定，但默认模型未通过流式验证；请在管理中选择模型"
+  },
   "toolUpdates": {
     "newVersion": "发现新版",
     "pendingCount": "{{count}} 个工具有更新",
