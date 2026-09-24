@@ -35,7 +35,7 @@ def _cmd_exists(cmd: str) -> bool:
     return shutil.which(cmd, path=login_shell_path()) is not None
 
 
-def _shell_check(cmd: str) -> bool:
+def _shell_check(cmd: str, *, refresh_path: bool = False) -> bool:
     """
     执行检测命令，返回是否成功。
 
@@ -46,7 +46,7 @@ def _shell_check(cmd: str) -> bool:
     """
     return subprocess.run(
         login_shell_argv(cmd),
-        env=login_shell_env(),
+        env=login_shell_env(refresh_path=refresh_path),
         capture_output=True,
         stdin=subprocess.DEVNULL,
     ).returncode == 0
@@ -168,7 +168,9 @@ class NodejsStep(Step):
     poll_interval = 3.0
 
     def check(self) -> bool:
-        return _shell_check('node --version')
+        # nvm may have installed Node after the installer's first PATH lookup.
+        # Refresh while polling so this same run can advance to the tool step.
+        return _shell_check('node --version', refresh_path=True)
 
     def terminal_command(self) -> str:
         mirror_env = ""

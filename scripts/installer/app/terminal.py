@@ -23,6 +23,14 @@ class TerminalHandle:
         """脚本是否已执行完毕（标记文件存在即完毕）。"""
         return os.path.isfile(self.done_file)
 
+    def exit_code(self) -> Optional[int]:
+        """读取安装命令的真实退出码；缺失或损坏时不能视为成功。"""
+        try:
+            with open(self.done_file) as result:
+                return int(result.read().strip())
+        except (OSError, ValueError):
+            return None
+
     def cleanup(self) -> None:
         """清理标记文件。"""
         try:
@@ -87,6 +95,42 @@ end tell
 '''
 
 
+def _build_install_script(title: str, command: str, script_path: str, done_file: str) -> str:
+    """构造可验证退出码的终端脚本。"""
+    return f"""#!/bin/bash
+# Ofox Desktop 安装脚本: {title}
+# 此文件由 Ofox Desktop 的安装器自动生成，执行完成后会自动删除
+
+echo ""
+echo "══════════════════════════════════════════════"
+echo "  {title}"
+echo "══════════════════════════════════════════════"
+echo ""
+
+(
+  set -e
+  set -o pipefail
+{command}
+)
+
+EXIT_CODE=$?
+
+echo ""
+if [ $EXIT_CODE -eq 0 ]; then
+    echo "✓ {title} — 完成"
+else
+    echo "✕ {title} — 失败 (退出码: $EXIT_CODE)"
+fi
+
+# 原子写入真实退出码；主进程看到标记后才能安全验证并继续下一步。
+printf '%s\\n' "$EXIT_CODE" > "{done_file}.tmp"
+mv "{done_file}.tmp" "{done_file}"
+
+# 清理临时脚本
+rm -f "{script_path}"
+"""
+
+
 def open_terminal_with_command(title: str, command: str) -> Optional[TerminalHandle]:
     """
     将命令写入临时脚本，通过 osascript 在 Terminal.app 新窗口中执行。
@@ -103,34 +147,7 @@ def open_terminal_with_command(title: str, command: str) -> Optional[TerminalHan
 
     # 脚本完成标记文件
     done_file = script_path + ".done"
-
-    script_content = f"""#!/bin/bash
-# Ofox Desktop 安装脚本: {title}
-# 此文件由 Ofox Desktop 的安装器自动生成，执行完成后会自动删除
-
-echo ""
-echo "══════════════════════════════════════════════"
-echo "  {title}"
-echo "══════════════════════════════════════════════"
-echo ""
-
-{command}
-
-EXIT_CODE=$?
-
-echo ""
-if [ $EXIT_CODE -eq 0 ]; then
-    echo "✓ {title} — 完成"
-else
-    echo "✕ {title} — 失败 (退出码: $EXIT_CODE)"
-fi
-
-# 写入完成标记
-touch "{done_file}"
-
-# 清理临时脚本
-rm -f "{script_path}"
-"""
+    script_content = _build_install_script(title, command, script_path, done_file)
 
     with os.fdopen(fd, "w") as f:
         f.write(script_content)

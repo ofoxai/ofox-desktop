@@ -81,7 +81,7 @@ def login_shell_argv(command: str, shell: Optional[str] = None) -> List[str]:
 _LOGIN_PATH_CACHE: Optional[str] = None
 
 
-def login_shell_path(shell: Optional[str] = None) -> str:
+def login_shell_path(shell: Optional[str] = None, *, refresh: bool = False) -> str:
     """
     取用户 login + **interactive** shell 的完整 PATH，进程内缓存。
 
@@ -97,7 +97,7 @@ def login_shell_path(shell: Optional[str] = None) -> str:
     拿不到就回退到当前进程的 PATH —— 检测不准胜过整个流程起不来。
     """
     global _LOGIN_PATH_CACHE
-    if _LOGIN_PATH_CACHE is not None:
+    if _LOGIN_PATH_CACHE is not None and not refresh:
         return _LOGIN_PATH_CACHE
 
     captured = ""
@@ -119,11 +119,13 @@ def login_shell_path(shell: Optional[str] = None) -> str:
     return _LOGIN_PATH_CACHE
 
 
-def login_shell_env(shell: Optional[str] = None) -> Dict[str, str]:
+def login_shell_env(
+    shell: Optional[str] = None, *, refresh_path: bool = False
+) -> Dict[str, str]:
     """当前环境，但 PATH 换成用户 login shell 的完整 PATH。
 
     配 [`login_shell_argv`]（非交互，约 23ms）一起用：shell 启动快，PATH 又是全的。
     """
     env = os.environ.copy()
-    env["PATH"] = login_shell_path(shell)
+    env["PATH"] = login_shell_path(shell, refresh=refresh_path)
     return env

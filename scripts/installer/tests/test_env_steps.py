@@ -22,7 +22,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app import steps as steps_mod  # noqa: E402
-from app.steps import NvmStep, VerifyStep  # noqa: E402
+from app.steps import NvmStep, NodejsStep, VerifyStep  # noqa: E402
 
 
 def _cmd_exists_returning(available: set) -> "mock._patch":
@@ -59,6 +59,15 @@ class NvmStepSkipTest(unittest.TestCase):
         with _cmd_exists_returning({"node", "npm"}):
             with mock.patch.object(os.path, "isfile", return_value=False):
                 self.assertTrue(NvmStep().should_skip())
+
+
+class NodejsStepTest(unittest.TestCase):
+    def test_refreshes_path_while_waiting_for_new_install(self):
+        # The first PATH lookup happens before nvm installs Node. Polling must
+        # not keep reusing that snapshot for the whole installation.
+        with mock.patch.object(steps_mod, "_shell_check", return_value=True) as check:
+            self.assertTrue(NodejsStep().check())
+            check.assert_called_once_with("node --version", refresh_path=True)
 
 
 class VerifyStepTest(unittest.TestCase):

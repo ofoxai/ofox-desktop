@@ -21,10 +21,31 @@ import os
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from app import shell as shell_mod  # noqa: E402
 from app.shell import login_shell_argv, resolve_login_shell  # noqa: E402
+
+
+class LoginShellPathCacheTest(unittest.TestCase):
+    def test_refresh_detects_path_added_after_install(self):
+        before = subprocess.CompletedProcess([], 0, stdout="/usr/bin")
+        after = subprocess.CompletedProcess([], 0, stdout="/new/node/bin:/usr/bin")
+        with mock.patch.object(shell_mod, "_LOGIN_PATH_CACHE", None):
+            with mock.patch.object(shell_mod.subprocess, "run", side_effect=[before, after]) as run:
+                self.assertEqual(shell_mod.login_shell_path("/bin/zsh"), "/usr/bin")
+                self.assertEqual(shell_mod.login_shell_path("/bin/zsh"), "/usr/bin")
+                self.assertEqual(
+                    shell_mod.login_shell_path("/bin/zsh", refresh=True),
+                    "/new/node/bin:/usr/bin",
+                )
+                self.assertEqual(
+                    shell_mod.login_shell_env("/bin/zsh")["PATH"],
+                    "/new/node/bin:/usr/bin",
+                )
+                self.assertEqual(run.call_count, 2)
 
 
 class ResolveLoginShellTest(unittest.TestCase):

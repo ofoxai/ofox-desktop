@@ -301,9 +301,11 @@ def main() -> None:
                     continue
                 print_waiting(step.name)
 
-                # 轮询等待安装完成
-                ok = wait_for_condition(
-                    condition_fn=step.check,
+                # 等终端里的安装命令真正结束，而不只看见新二进制就推进。
+                # npm 可能先写出可执行文件、随后才下载依赖或报错；仅靠
+                # `command -v` 会把失败误判成成功。标记文件包含真实退出码。
+                done = wait_for_condition(
+                    condition_fn=handle.is_script_done,
                     timeout=step.timeout,
                     interval=step.poll_interval,
                     progress_callback=make_poll_callback(
@@ -311,19 +313,11 @@ def main() -> None:
                     ),
                 )
                 print_poll_done()
-
-                if ok:
-                    success = step.verify()
+                success = done and handle.exit_code() == 0 and step.verify()
+                if not done:
+                    print_failure_hint("安装命令超时；终端仍保持打开，请检查其中的日志。")
                 else:
-                    success = False
-
-                # 等待终端脚本真正执行完毕（标记文件出现），再关闭窗口
-                wait_for_condition(
-                    condition_fn=handle.is_script_done,
-                    timeout=300,  # 5 分钟，确保慢速安装也能完成
-                    interval=1.0,
-                )
-                close_terminal_window(handle.window_id)
+                    close_terminal_window(handle.window_id)
                 handle.cleanup()
         else:
             # 在主进程中直接执行

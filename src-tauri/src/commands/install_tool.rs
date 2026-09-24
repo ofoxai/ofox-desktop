@@ -62,7 +62,12 @@ async fn run_installer(app: AppHandle, tool_id: String, skip_env: bool) -> Resul
     if skip_env {
         cmd.arg("--skip-env");
     }
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // The GUI has no place to answer init.py's fallback "continue?" prompt.
+    // In dev mode stdin can otherwise be inherited from the launching shell
+    // and leave an install stuck indefinitely after a failed prerequisite.
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     let mut child = cmd.spawn().map_err(|e| format!("启动安装脚本失败: {e}"))?;
 

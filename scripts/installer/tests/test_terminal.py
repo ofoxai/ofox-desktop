@@ -25,12 +25,61 @@ Terminal 的 AppleScript 字典里也没有"执行文件"这个动作，只有 `
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.terminal import _build_launch_applescript, _script_prefix  # noqa: E402
+from app.terminal import (  # noqa: E402
+    TerminalHandle,
+    _build_install_script,
+    _build_launch_applescript,
+    _script_prefix,
+)
+
+
+class InstallScriptResultTest(unittest.TestCase):
+    def test_failed_command_writes_real_exit_code_and_stops(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = os.path.join(directory, "install.sh")
+            marker = script + ".done"
+            content = _build_install_script(
+                "OpenCode", "false\necho should-not-run", script, marker
+            )
+            result = subprocess.run(
+                ["/bin/bash", "-c", content], capture_output=True, text=True
+            )
+            self.assertNotIn("should-not-run", result.stdout)
+            self.assertEqual(TerminalHandle(1, marker).exit_code(), 1)
+
+    def test_success_writes_zero_exit_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = os.path.join(directory, "install.sh")
+            marker = script + ".done"
+            content = _build_install_script("Node.js LTS", "true", script, marker)
+            subprocess.run(["/bin/bash", "-c", content], check=True, capture_output=True)
+            handle = TerminalHandle(1, marker)
+            self.assertTrue(handle.is_script_done())
+            self.assertEqual(handle.exit_code(), 0)
+
+    def test_failed_download_pipe_is_not_reported_as_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = os.path.join(directory, "install.sh")
+            marker = script + ".done"
+            content = _build_install_script("Hermes", "false | true", script, marker)
+            subprocess.run(["/bin/bash", "-c", content], capture_output=True)
+            self.assertEqual(TerminalHandle(1, marker).exit_code(), 1)
+
+    def test_missing_or_invalid_marker_is_not_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = os.path.join(directory, "install.done")
+            handle = TerminalHandle(1, marker)
+            self.assertIsNone(handle.exit_code())
+            with open(marker, "w") as result:
+                result.write("invalid")
+            self.assertIsNone(handle.exit_code())
 
 
 class BuildLaunchAppleScriptTest(unittest.TestCase):
