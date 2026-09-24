@@ -114,7 +114,10 @@ export default function ManageToolDialog({
   // any popover portaled to body falls outside the shard and has its wheel
   // events swallowed. Pointing the popover's `container` at this ref puts it
   // back inside the shard.
-  const dialogContentRef = useRef<HTMLDivElement>(null);
+  // A ref's `.current` does not trigger a render. Keep the portal target in
+  // state so the first open cannot accidentally portal to `document.body`.
+  const [dialogContentNode, setDialogContentNode] =
+    useState<HTMLDivElement | null>(null);
 
   // --- per-tool state ------------------------------------------------------
   // Reset every time we switch tools so the dialog never shows stale data
@@ -487,7 +490,7 @@ export default function ManageToolDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        ref={dialogContentRef}
+        ref={setDialogContentNode}
         className="max-w-lg gap-0 p-0"
         aria-describedby={undefined}
       >
@@ -539,7 +542,7 @@ export default function ManageToolDialog({
                     models={models}
                     loading={modelsLoading}
                     onFetch={fetchModels}
-                    portalContainer={dialogContentRef.current}
+                    portalContainer={dialogContentNode}
                   />
                 ) : protocol && !desktopCodex ? (
                   <ModelPicker
@@ -549,7 +552,7 @@ export default function ManageToolDialog({
                     models={models}
                     loading={modelsLoading}
                     onFetch={fetchModels}
-                    portalContainer={dialogContentRef.current}
+                    portalContainer={dialogContentNode}
                   />
                 ) : (
                   <div className="rounded-md border border-dashed border-border-default px-3 py-2 text-[12px] text-muted-foreground">
@@ -762,6 +765,70 @@ export default function ManageToolDialog({
 // WorkBuddyModelPicker — searchable multi-select with curated/all shortcuts
 // ---------------------------------------------------------------------------
 
+// cmdk becomes noticeably slow when every catalog entry is mounted at once.
+// Search the full catalog, but render it in small batches as the user scrolls.
+const MODEL_PICKER_BATCH_SIZE = 80;
+
+function filterPickerModels(
+  models: FetchedModel[],
+  query: string,
+): FetchedModel[] {
+  const search = query.trim().toLocaleLowerCase();
+  if (!search) return models;
+  return models.filter((model) =>
+    `${model.id} ${model.name ?? ""} ${model.ownedBy ?? ""}`
+      .toLocaleLowerCase()
+      .includes(search),
+  );
+}
+
+function groupPickerModels(
+  models: FetchedModel[],
+): Record<string, FetchedModel[]> {
+  const grouped: Record<string, FetchedModel[]> = {};
+  for (const model of models) {
+    const slash = model.id.indexOf("/");
+    const vendor =
+      slash > 0 ? model.id.slice(0, slash) : model.ownedBy || "Other";
+    (grouped[vendor] ||= []).push(model);
+  }
+  return grouped;
+}
+
+function usePickerResults(models: FetchedModel[]) {
+  const [search, setSearch] = useState("");
+  const [visibleCount, setVisibleCount] = useState(MODEL_PICKER_BATCH_SIZE);
+  const filtered = useMemo(
+    () => filterPickerModels(models, search),
+    [models, search],
+  );
+  const visible = useMemo(
+    () => filtered.slice(0, visibleCount),
+    [filtered, visibleCount],
+  );
+  const grouped = useMemo(() => groupPickerModels(visible), [visible]);
+  const vendors = useMemo(() => Object.keys(grouped).sort(), [grouped]);
+
+  const updateSearch = useCallback((value: string) => {
+    setSearch(value);
+    setVisibleCount(MODEL_PICKER_BATCH_SIZE);
+  }, []);
+  const loadMore = useCallback(
+    (event: React.UIEvent<HTMLDivElement>) => {
+      const list = event.currentTarget;
+      if (
+        visibleCount < filtered.length &&
+        list.scrollTop + list.clientHeight >= list.scrollHeight - 48
+      ) {
+        setVisibleCount((count) => count + MODEL_PICKER_BATCH_SIZE);
+      }
+    },
+    [filtered.length, visibleCount],
+  );
+
+  return { search, updateSearch, filtered, grouped, vendors, loadMore };
+}
+
 interface WorkBuddyModelPickerProps {
   id: string;
   selectedIds: string[];
@@ -785,24 +852,18 @@ function WorkBuddyModelPicker({
   const selected = useMemo(() => new Set(selectedIds), [selectedIds]);
   const allSelected =
     models.length > 0 && models.every((model) => selected.has(model.id));
-  const grouped = useMemo(() => {
-    const map: Record<string, FetchedModel[]> = {};
-    for (const model of models) {
-      const slash = model.id.indexOf("/");
-      const vendor =
-        slash > 0 ? model.id.slice(0, slash) : model.ownedBy || "Other";
-      (map[vendor] ||= []).push(model);
-    }
-    return map;
-  }, [models]);
-  const vendors = useMemo(() => Object.keys(grouped).sort(), [grouped]);
+  const { search, updateSearch, filtered, grouped, vendors, loadMore } =
+    usePickerResults(models);
 
   const handleOpenChange = useCallback(
     (next: boolean) => {
       setOpen(next);
-      if (next && models.length === 0 && !loading) onFetch();
+      if (next) {
+        updateSearch("");
+        if (models.length === 0 && !loading) onFetch();
+      }
     },
-    [loading, models.length, onFetch],
+    [loading, models.length, onFetch, updateSearch],
   );
 
   const toggle = useCallback(
@@ -848,9 +909,14 @@ function WorkBuddyModelPicker({
             style={{ width: "var(--radix-popover-trigger-width)" }}
             container={portalContainer ?? undefined}
           >
-            <Command>
-              <CommandInput placeholder="搜索模型或供应商…" className="h-9" />
-              <CommandList className="max-h-72">
+            <Command shouldFilter={false}>
+              <CommandInput
+                placeholder="搜索模型或供应商…"
+                className="h-9"
+                value={search}
+                onValueChange={updateSearch}
+              />
+              <CommandList className="max-h-72" onScroll={loadMore}>
                 {loading ? (
                   <div className="flex items-center justify-center py-6 text-[12px] text-muted-foreground">
                     <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
@@ -858,7 +924,9 @@ function WorkBuddyModelPicker({
                   </div>
                 ) : (
                   <>
-                    <CommandEmpty>未找到兼容模型</CommandEmpty>
+                    {filtered.length === 0 && (
+                      <CommandEmpty>未找到兼容模型</CommandEmpty>
+                    )}
                     {vendors.map((vendor) => (
                       <CommandGroup key={vendor} heading={vendor}>
                         {grouped[vendor].map((model) => (
@@ -1055,6 +1123,8 @@ function ModelPicker({
   portalContainer,
 }: ModelPickerProps) {
   const [open, setOpen] = useState(false);
+  const { search, updateSearch, filtered, grouped, vendors, loadMore } =
+    usePickerResults(models);
 
   // Trigger an initial fetch the first time the user opens the dropdown.
   // Subsequent opens reuse the cached list; the explicit refresh button
@@ -1062,25 +1132,13 @@ function ModelPicker({
   const handleOpenChange = useCallback(
     (next: boolean) => {
       setOpen(next);
-      if (next && models.length === 0 && !loading) {
-        onFetch();
+      if (next) {
+        updateSearch("");
+        if (models.length === 0 && !loading) onFetch();
       }
     },
-    [models.length, loading, onFetch],
+    [models.length, loading, onFetch, updateSearch],
   );
-
-  // Group by vendor (everything before the first "/", falling back to ownedBy
-  // or "Other"). Matches what ModelSelectFromApi does so the UX is familiar.
-  const grouped = useMemo(() => {
-    const map: Record<string, FetchedModel[]> = {};
-    for (const m of models) {
-      const slash = m.id.indexOf("/");
-      const vendor = slash > 0 ? m.id.slice(0, slash) : m.ownedBy || "Other";
-      (map[vendor] ||= []).push(m);
-    }
-    return map;
-  }, [models]);
-  const vendors = useMemo(() => Object.keys(grouped).sort(), [grouped]);
 
   return (
     <div className="flex gap-1">
@@ -1112,9 +1170,14 @@ function ModelPicker({
           // "stuck" (see `ModelPickerProps.portalContainer` above).
           container={portalContainer ?? undefined}
         >
-          <Command>
-            <CommandInput placeholder="搜索模型…" className="h-9" />
-            <CommandList>
+          <Command shouldFilter={false}>
+            <CommandInput
+              placeholder="搜索模型…"
+              className="h-9"
+              value={search}
+              onValueChange={updateSearch}
+            />
+            <CommandList onScroll={loadMore}>
               {loading ? (
                 <div className="flex items-center justify-center py-6 text-[12px] text-muted-foreground">
                   <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
@@ -1122,7 +1185,9 @@ function ModelPicker({
                 </div>
               ) : (
                 <>
-                  <CommandEmpty>未找到模型</CommandEmpty>
+                  {filtered.length === 0 && (
+                    <CommandEmpty>未找到模型</CommandEmpty>
+                  )}
                   {vendors.map((vendor) => (
                     <CommandGroup key={vendor} heading={vendor}>
                       {grouped[vendor].map((m) => (

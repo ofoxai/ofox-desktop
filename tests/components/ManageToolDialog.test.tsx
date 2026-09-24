@@ -221,6 +221,42 @@ describe("ManageToolDialog streaming compatibility", () => {
   });
 });
 
+describe("ManageToolDialog model picker", () => {
+  it("keeps the dropdown inside the dialog and renders large catalogs in batches", async () => {
+    const models = Array.from({ length: 200 }, (_, index) =>
+      compatibleModel(`openai/model-${String(index).padStart(3, "0")}`),
+    );
+    mockSingleTool(models[0]);
+    vi.spyOn(modelFetch, "fetchOfoxModels").mockResolvedValue(models);
+    await renderTool("openclaw", "OpenClaw");
+    await screen.findByText("/Users/test/.config/tool/config.json");
+    fireEvent.click(screen.getByRole("combobox"));
+
+    const list = await screen.findByRole("listbox");
+    expect(list.closest('[role="dialog"]')).not.toBeNull();
+    expect(screen.getAllByRole("option")).toHaveLength(80);
+    expect(
+      screen.queryByRole("option", { name: "openai/model-199" }),
+    ).toBeNull();
+
+    Object.defineProperties(list, {
+      clientHeight: { configurable: true, value: 300 },
+      scrollHeight: { configurable: true, value: 600 },
+      scrollTop: { configurable: true, value: 300, writable: true },
+    });
+    fireEvent.scroll(list);
+    expect(screen.getAllByRole("option")).toHaveLength(160);
+
+    fireEvent.change(screen.getByPlaceholderText("搜索模型…"), {
+      target: { value: "model-199" },
+    });
+    expect(
+      screen.getByRole("option", { name: "openai/model-199" }),
+    ).toBeVisible();
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+  });
+});
+
 describe("ManageToolDialog WorkBuddy multi-model management", () => {
   it("selects every compatible model and saves the complete set", async () => {
     const models = [
