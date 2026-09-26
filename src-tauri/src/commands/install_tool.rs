@@ -22,16 +22,35 @@ const ALLOWED_TOOLS: &[&str] = &[
     "claude", "codex", "gemini", "opencode", "openclaw", "hermes",
 ];
 
+/// 走 Rust 原生下载 + DMG 安装，不经过 Python installer / osascript Terminal。
+/// 与 `ALLOWED_TOOLS` 互斥——同一个 tool_id 不会两条路径都命中。
+const NATIVE_INSTALL_TOOLS: &[&str] = &["chatgpt"];
+
 #[tauri::command]
 pub async fn install_tool(
     app: AppHandle,
     tool_id: String,
     skip_env: Option<bool>,
 ) -> Result<i32, String> {
-    if !ALLOWED_TOOLS.contains(&tool_id.as_str()) {
+    let is_script_tool = ALLOWED_TOOLS.contains(&tool_id.as_str());
+    let is_native_tool = NATIVE_INSTALL_TOOLS.contains(&tool_id.as_str());
+    if !is_script_tool && !is_native_tool {
         return Err(format!("不支持的工具: {tool_id}"));
     }
     let _guard = super::tool_update::ToolOperationGuard::acquire(&tool_id)?;
+
+    if is_native_tool {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = skip_env;
+            return native_install(app, &tool_id).await;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (app, skip_env);
+            return Err(format!("{tool_id} 自动安装目前仅支持 macOS"));
+        }
+    }
 
     #[cfg(not(target_os = "macos"))]
     {
@@ -43,6 +62,21 @@ pub async fn install_tool(
     {
         run_installer(app, tool_id, skip_env.unwrap_or(false)).await
     }
+}
+
+#[cfg(target_os = "macos")]
+async fn native_install(app: AppHandle, tool_id: &str) -> Result<i32, String> {
+    let result = match tool_id {
+        "chatgpt" => super::chatgpt_app::install_chatgpt_desktop_app(&app).await,
+        other => Err(format!("原生安装未实现: {other}")),
+    };
+    // 与 osascript 安装分支保持一致：无论成功失败都 emit done，前端 hook 据此重扫。
+    let code = result.as_ref().copied().unwrap_or(-1);
+    let _ = app.emit(
+        "install-tool-done",
+        json!({ "tool": tool_id, "code": code }),
+    );
+    result
 }
 
 #[cfg(target_os = "macos")]

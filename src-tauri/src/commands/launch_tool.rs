@@ -136,6 +136,19 @@ pub async fn launch_tool_cli(app: AppHandle, tool_id: String) -> Result<(), Stri
 /// desktop-app tools are started natively without shelling through a CLI.
 #[tauri::command]
 pub async fn launch_tool(app: AppHandle, tool_id: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if tool_id == "chatgpt" {
+        return match super::chatgpt_app::launch_chatgpt_desktop_app() {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("ChatGPT App 尚未安装".to_string()),
+            Err(err) => Err(err),
+        };
+    }
+    #[cfg(not(target_os = "macos"))]
+    if tool_id == "chatgpt" {
+        return Err("ChatGPT App 目前仅支持 macOS".to_string());
+    }
+
     if tool_id != "workbuddy" {
         return launch_tool_cli(app, tool_id).await;
     }

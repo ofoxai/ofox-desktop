@@ -2,6 +2,8 @@
 
 mod auth;
 mod balance;
+#[cfg(target_os = "macos")]
+mod chatgpt_app;
 mod codex_oauth;
 mod coding_plan;
 mod config;

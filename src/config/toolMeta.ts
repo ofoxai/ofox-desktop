@@ -34,6 +34,15 @@ export const TOOL_META: Record<
     projectLinkLabel: "GitHub",
     cliBin: "codex",
   },
+  chatgpt: {
+    abbr: "GP",
+    label: "ChatGPT",
+    color: "bg-emerald-700",
+    projectUrl: "https://chatgpt.com/download/",
+    projectLinkLabel: "官网",
+    downloadUrl: "https://chatgpt.com/download/",
+    launchKind: "desktopApp",
+  },
   opencode: {
     abbr: "OC",
     label: "OpenCode",
@@ -85,6 +94,7 @@ export const TOOL_META: Record<
 export const TOOL_ORDER = [
   "claude",
   "codex",
+  "chatgpt",
   "opencode",
   "openclaw",
   "hermes",
@@ -102,6 +112,7 @@ export const PROXY_SUPPORTED_TOOLS = ["claude", "codex", "gemini"];
 export const INSTALLABLE_TOOLS: readonly string[] = [
   "claude",
   "codex",
+  "chatgpt",
   "gemini",
   "opencode",
   "openclaw",

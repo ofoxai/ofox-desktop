@@ -196,9 +196,10 @@ pub struct ToolVersion {
     executable_path: Option<String>,
 }
 
-const VALID_TOOLS: [&str; 7] = [
+const VALID_TOOLS: [&str; 8] = [
     "claude",
     "codex",
+    "chatgpt",
     "gemini",
     "opencode",
     "openclaw",
@@ -471,6 +472,63 @@ async fn get_single_tool_version_impl(
                 executable_path: None,
             },
         };
+    }
+
+    // 桌面 App 型工具 —— 复用 codex_desktop_version 的 Info.plist 探测，但不与
+    // codex CLI 检测共享 tool_id。这是 `chatgpt` 独立于 `codex` 的关键：codex
+    // 分支仍走 CLI probe + App 兜底，chatgpt 分支只看 App 本身在不在。
+    if tool == "chatgpt" {
+        let (env_type, wsl_distro) = tool_env_type_and_wsl_distro(tool);
+        #[cfg(target_os = "macos")]
+        {
+            if let Some((path, version)) = super::tool_update::codex_desktop_version().await {
+                return ToolVersion {
+                    name: tool.to_string(),
+                    version: Some(version),
+                    latest_version: None,
+                    error: None,
+                    env_type,
+                    wsl_distro,
+                    installation_kind: "desktopApp".into(),
+                    update_status: "appManaged".into(),
+                    update_source: None,
+                    update_supported: false,
+                    update_reason: None,
+                    executable_path: Some(path),
+                };
+            }
+            return ToolVersion {
+                name: tool.to_string(),
+                version: None,
+                latest_version: None,
+                error: None,
+                env_type,
+                wsl_distro,
+                installation_kind: "desktopApp".into(),
+                update_status: "notInstalled".into(),
+                update_source: None,
+                update_supported: false,
+                update_reason: None,
+                executable_path: None,
+            };
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            return ToolVersion {
+                name: tool.to_string(),
+                version: None,
+                latest_version: None,
+                error: Some("ChatGPT App 目前仅支持 macOS".into()),
+                env_type,
+                wsl_distro,
+                installation_kind: "desktopApp".into(),
+                update_status: "unsupported".into(),
+                update_source: None,
+                update_supported: false,
+                update_reason: None,
+                executable_path: None,
+            };
+        }
     }
 
     // 判断该工具的运行环境 & WSL distro（如有）

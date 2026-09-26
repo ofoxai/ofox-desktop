@@ -40,6 +40,9 @@ type BrandIconComponent = ComponentType<{
 const TOOL_ICON: Record<string, BrandIconComponent> = {
   claude: ClaudeIcon,
   codex: CodexIcon,
+  // ChatGPT App 复用 OpenAI 单色 logo —— 与 Codex 同厂牌，靠背景色（绿底）
+  // 和 label（"ChatGPT" vs "Codex"）而不是图标本身区分开。
+  chatgpt: CodexIcon,
   gemini: GeminiIcon,
   opencode: OpenCodeIcon,
   openclaw: OpenClawIcon,
@@ -55,6 +58,9 @@ const TOOL_ICON: Record<string, BrandIconComponent> = {
 const TOOL_BADGE_BG: Record<string, string> = {
   claude: "bg-[#E8DCC8] dark:bg-[#2D2419]",
   codex: "bg-neutral-900 dark:bg-neutral-900",
+  // ChatGPT 品牌绿（近 OpenAI 官网 accent），让"Codex vs ChatGPT"两张
+  // OpenAI 牌卡片一眼分得开。
+  chatgpt: "bg-[#10A37F] dark:bg-[#0E8266]",
   // Gemini logo 是彩色，给暖米底让蓝/绿/红/黄四色更跳。
   gemini: "bg-[#E8DDC8] dark:bg-[#2A2419]",
   // OpenCode pixel-art monitor 黑+灰，给中性浅灰让线条干净。
@@ -76,6 +82,8 @@ const TOOL_BADGE_BG: Record<string, string> = {
  */
 const TOOL_ICON_FILTER: Record<string, string> = {
   codex: "[&_img]:brightness-0 [&_img]:invert",
+  // ChatGPT 徽章底是绿色——单色 OpenAI logo 同样需要反色为白才能立起来。
+  chatgpt: "[&_img]:brightness-0 [&_img]:invert",
 };
 
 interface ToolBadgeProps {
