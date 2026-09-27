@@ -1,0 +1,75 @@
+name: Windows Probe
+
+# 目的：给 Windows 验收链路一个"零环境成本"的产物入口。
+#
+# 主 CI（ci.yml）只在 pull_request→main 上跑，且 backend job 用 ubuntu-22.04
+# 跑 clippy，捕不到 Windows target 特有的 unused_imports / cfg mismatch 等
+# 问题。本 workflow 补两件事：
+#   1. Windows target 下的 clippy —— 与 ubuntu 那份互补
+#   2. `verify_chatgpt_install.exe` 探针产物 —— PR reviewer / 你可以直接
+#      下载去干净 Windows 环境验收，不用现装 Rust/MSVC/Node
+#
+# 触发器故意宽——feat/chatgpt-* 分支上每次 push 都跑，避免"改了 Windows
+# 分支代码但没跑 Windows CI，问题拖到最后 rebase"。也支持 workflow_dispatch
+# 手动重跑。
+on:
+  push:
+    branches:
+      - main
+      - "feat/chatgpt-**"
+      - "feat/*windows*"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: windows-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-probe:
+    name: Build probe + Windows clippy
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # 显式声明 MSVC target——runner 默认就是它，这里写清楚免得 install-target
+          # 步骤被跳过时找不到 std。
+          targets: x86_64-pc-windows-msvc
+          components: clippy
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          # windows-2022 与 ubuntu 缓存分开——windows 的 target/ 目录里是 .pdb/.lib
+          # 与 linux 完全不兼容，共享 cache key 会互相 invalidate。
+          key: windows-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: windows-cargo-
+
+      # tauri-build 会检查 frontend dist 是否存在（就算这里只 build lib+bins 不装 WebView2
+      # 也过一遍 build script）。给个空 dist 占位，与 ci.yml backend job 保持一致。
+      - name: Create frontend dist placeholder
+        run: mkdir dist -Force
+        shell: pwsh
+
+      - name: Clippy (Windows target)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --lib --bins -- -D warnings
+
+      - name: Build verify_chatgpt_install.exe
+        run: cargo build --manifest-path src-tauri/Cargo.toml --release --bin verify_chatgpt_install
+
+      - name: Upload probe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify_chatgpt_install-${{ github.sha }}
+          path: src-tauri/target/release/verify_chatgpt_install.exe
+          # 90 天足够 review + 手工验收周期用；超过就重跑 workflow 即可。
+          retention-days: 90
+          if-no-files-found: error
