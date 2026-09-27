@@ -144,9 +144,17 @@ pub async fn launch_tool(app: AppHandle, tool_id: String) -> Result<(), String> 
             Err(err) => Err(err),
         };
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     if tool_id == "chatgpt" {
-        return Err("ChatGPT App 目前仅支持 macOS".to_string());
+        return match super::windows_chatgpt::launch_chatgpt_desktop_app() {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("ChatGPT App 尚未安装".to_string()),
+            Err(err) => Err(err),
+        };
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    if tool_id == "chatgpt" {
+        return Err("ChatGPT App 目前仅支持 macOS / Windows".to_string());
     }
 
     if tool_id != "workbuddy" {

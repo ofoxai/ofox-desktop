@@ -35,6 +35,8 @@ mod stream_check;
 mod subscription;
 mod sync_support;
 pub(crate) mod tool_update;
+#[cfg(target_os = "windows")]
+mod windows_chatgpt;
 
 mod lightweight;
 pub(crate) mod manage_tool;
@@ -63,6 +65,8 @@ pub use mcp::*;
 pub use misc::*;
 pub use model_fetch::*;
 pub use tool_update::*;
+#[cfg(target_os = "windows")]
+pub use windows_chatgpt::install_chatgpt_desktop_app_with;
 // Note: ofox_auth items are accessed via commands::ofox_auth:: to avoid
 // shadowing lib.rs's top-level ofox_auth module
 pub use omo::*;

@@ -512,13 +512,71 @@ async fn get_single_tool_version_impl(
                 executable_path: None,
             };
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        {
+            // AppxPackage 探不到 = 没装；探到 = 返回版本号。
+            // executable_path 用 shell:AppsFolder\<AUMID>——用户点"打开"时启动器
+            // 拿它拉起 Store app，跟检测口径一致。
+            match super::windows_chatgpt::detect_chatgpt_desktop_app() {
+                Ok(Some(version)) => {
+                    return ToolVersion {
+                        name: tool.to_string(),
+                        version: Some(version),
+                        latest_version: None,
+                        error: None,
+                        env_type,
+                        wsl_distro,
+                        installation_kind: "desktopApp".into(),
+                        update_status: "appManaged".into(),
+                        update_source: None,
+                        update_supported: false,
+                        update_reason: None,
+                        executable_path: Some(
+                            "shell:AppsFolder\\OpenAI.Codex_2p2nqsd0c76g0!App".into(),
+                        ),
+                    };
+                }
+                Ok(None) => {
+                    return ToolVersion {
+                        name: tool.to_string(),
+                        version: None,
+                        latest_version: None,
+                        error: None,
+                        env_type,
+                        wsl_distro,
+                        installation_kind: "desktopApp".into(),
+                        update_status: "notInstalled".into(),
+                        update_source: None,
+                        update_supported: false,
+                        update_reason: None,
+                        executable_path: None,
+                    };
+                }
+                Err(err) => {
+                    return ToolVersion {
+                        name: tool.to_string(),
+                        version: None,
+                        latest_version: None,
+                        error: Some(err),
+                        env_type,
+                        wsl_distro,
+                        installation_kind: "desktopApp".into(),
+                        update_status: "failed".into(),
+                        update_source: None,
+                        update_supported: false,
+                        update_reason: None,
+                        executable_path: None,
+                    };
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             return ToolVersion {
                 name: tool.to_string(),
                 version: None,
                 latest_version: None,
-                error: Some("ChatGPT App 目前仅支持 macOS".into()),
+                error: Some("ChatGPT App 目前仅支持 macOS / Windows".into()),
                 env_type,
                 wsl_distro,
                 installation_kind: "desktopApp".into(),
