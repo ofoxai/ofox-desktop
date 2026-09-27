@@ -8,13 +8,13 @@
 //! on the frontend.
 
 #[cfg(target_os = "macos")]
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 #[cfg(target_os = "macos")]
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::{Command, Output};
 #[cfg(target_os = "macos")]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
 use futures::StreamExt;
@@ -37,6 +37,19 @@ const MIN_MACOS_MAJOR: u32 = 13;
 const PROGRESS_TOTAL: u32 = 4;
 #[cfg(target_os = "macos")]
 const TOOL_ID: &str = "chatgpt";
+/// 尝试次数上限。国内网络最常见的失败模式是 TCP reset / TLS handshake 半路
+/// 断，直连一次不成功再试往往就通了；三次没通基本就是这台机器/时段真的
+/// 到不了，用户手动去官网下更靠谱。
+#[cfg(target_os = "macos")]
+const DOWNLOAD_ATTEMPTS: u32 = 3;
+/// 每次尝试的 wall-clock 上限。原代码用 15 min 是"整个下载"的上限；引入
+/// resume 之后每次尝试只需要覆盖剩余部分，10 min 已经宽裕。
+#[cfg(target_os = "macos")]
+const DOWNLOAD_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// 连续 60 秒读不到任何字节，就认为链路 stall——直接中断本次尝试进入 resume
+/// 分支。CDN 命中普遍 3 MB/s，stall 60s 意味着掉线，重试通常就恢复。
+#[cfg(target_os = "macos")]
+const STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,32 +193,177 @@ async fn install_chatgpt_desktop_app_inner(app: &AppHandle) -> Result<(), String
     Ok(())
 }
 
+/// 下载协调层：三次尝试 + resume 兜底。所有失败最终转成"用户可以自己
+/// 修的"错误消息（含官方 URL 供手动下载），不再抛裸的 reqwest 错误。
 #[cfg(target_os = "macos")]
 async fn download_dmg(app: &AppHandle, destination: &Path) -> Result<(), String> {
     emit_progress(app, 2, "下载官方安装包", "start", None, None);
-    let response = crate::proxy::http_client::get()
-        .get(DOWNLOAD_URL)
-        .timeout(Duration::from_secs(15 * 60))
-        .send()
-        .await
-        .map_err(|err| format!("下载 ChatGPT DMG 失败: {err}"))?
-        .error_for_status()
-        .map_err(|err| format!("下载 ChatGPT DMG 失败: {err}"))?;
-    let total = response.content_length();
-    let mut stream = response.bytes_stream();
-    let mut file = std::fs::File::create(destination)
-        .map_err(|err| format!("创建 ChatGPT DMG 临时文件失败: {err}"))?;
-    let mut downloaded = 0_u64;
-    let mut last_emitted_percent = None;
-    let mut last_emitted_bytes = 0_u64;
-    let mut hasher = Sha256::new();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|err| format!("下载 ChatGPT DMG 中断: {err}"))?;
-        file.write_all(&chunk)
-            .map_err(|err| format!("写入 ChatGPT DMG 失败: {err}"))?;
+    // hasher 必须跨 attempt 保持——resume 是从磁盘上已存字节继续算，
+    // 每次尝试都新建 hasher 会导致最终 SHA-256 只覆盖最后一段。
+    let mut hasher = Sha256::new();
+    let mut downloaded = 0_u64;
+    let mut last_error: Option<String> = None;
+
+    for attempt in 1..=DOWNLOAD_ATTEMPTS {
+        match download_attempt(app, destination, &mut hasher, downloaded, attempt).await {
+            Ok((final_downloaded, total)) => {
+                let sha256 = format!("{:x}", hasher.finalize());
+                emit_progress(
+                    app,
+                    2,
+                    "下载官方安装包",
+                    "done",
+                    Some((final_downloaded, total)),
+                    Some(&format!("SHA-256 {sha256}")),
+                );
+                return Ok(());
+            }
+            Err(DownloadFailure { transferred, error }) => {
+                downloaded = transferred;
+                log::warn!(
+                    "ChatGPT DMG 第 {attempt}/{DOWNLOAD_ATTEMPTS} 次下载失败（已收 {downloaded} 字节）：{error}"
+                );
+                last_error = Some(error);
+                if attempt < DOWNLOAD_ATTEMPTS {
+                    // 指数退避：1s → 3s → 5s。别太长——用户在盯着看。
+                    let backoff = Duration::from_secs(2u64.saturating_mul(attempt as u64) - 1);
+                    tokio::time::sleep(backoff).await;
+                }
+            }
+        }
+    }
+
+    Err(format!(
+        "ChatGPT DMG 下载失败（已重试 {DOWNLOAD_ATTEMPTS} 次）：{}\n\n手动下载入口：{DOWNLOAD_URL}\n\
+         或访问官方页面 https://chatgpt.com/download/ 选 macOS 版，把 ChatGPT.app 拖到 ~/Applications 即可。",
+        last_error.unwrap_or_else(|| "未知错误".to_string())
+    ))
+}
+
+/// 单次下载尝试的返回值——`transferred` 是本轮结束时磁盘上确认写入的字节
+/// 数，无论成功还是失败都要报，好让上层 resume 从这里接着来。
+#[cfg(target_os = "macos")]
+struct DownloadFailure {
+    transferred: u64,
+    error: String,
+}
+
+#[cfg(target_os = "macos")]
+async fn download_attempt(
+    app: &AppHandle,
+    destination: &Path,
+    hasher: &mut Sha256,
+    resume_from: u64,
+    attempt: u32,
+) -> Result<(u64, Option<u64>), DownloadFailure> {
+    // 每次尝试都用 Range: bytes=N-；首次 N=0 服务端返回 200 + full body，
+    // 之后 N>0 返回 206 + partial，两条路径都被 reqwest 正常收流。
+    let mut request = crate::proxy::http_client::get()
+        .get(DOWNLOAD_URL)
+        .timeout(DOWNLOAD_ATTEMPT_TIMEOUT);
+    if resume_from > 0 {
+        request = request.header("Range", format!("bytes={resume_from}-"));
+    }
+
+    let response = match request.send().await {
+        Ok(resp) => resp,
+        Err(err) => {
+            return Err(DownloadFailure {
+                transferred: resume_from,
+                error: format!("发起请求失败: {err}"),
+            });
+        }
+    };
+    let response = match response.error_for_status() {
+        Ok(resp) => resp,
+        Err(err) => {
+            return Err(DownloadFailure {
+                transferred: resume_from,
+                error: format!("HTTP 状态错误: {err}"),
+            });
+        }
+    };
+
+    // content-length 对 206 表示的是本轮 body 长度，不是整个文件；换算到"整体
+    // 大小"用来算 progress 百分比。首次响应（resume_from=0）直接就是 total。
+    let remaining_len = response.content_length();
+    let total = remaining_len.map(|len| len.saturating_add(resume_from));
+
+    let mut file = if resume_from > 0 {
+        let mut f = match std::fs::OpenOptions::new().write(true).open(destination) {
+            Ok(f) => f,
+            Err(err) => {
+                return Err(DownloadFailure {
+                    transferred: resume_from,
+                    error: format!("打开已下载的临时文件失败: {err}"),
+                });
+            }
+        };
+        // seek 到已下载末尾续写；不 truncate，避免抹掉前面的 partial。
+        if let Err(err) = f.seek(SeekFrom::Start(resume_from)) {
+            return Err(DownloadFailure {
+                transferred: resume_from,
+                error: format!("续传定位失败: {err}"),
+            });
+        }
+        f
+    } else {
+        match std::fs::File::create(destination) {
+            Ok(f) => f,
+            Err(err) => {
+                return Err(DownloadFailure {
+                    transferred: 0,
+                    error: format!("创建临时文件失败: {err}"),
+                });
+            }
+        }
+    };
+
+    let mut stream = response.bytes_stream();
+    let mut downloaded = resume_from;
+    let mut last_emitted_percent = None;
+    let mut last_emitted_bytes = downloaded;
+    let mut last_progress_at = Instant::now();
+
+    let stall_label = if attempt == 1 {
+        "下载官方安装包".to_string()
+    } else {
+        format!("续传官方安装包（第 {attempt} 次）")
+    };
+
+    loop {
+        // 每 chunk 上一层套 stall timeout——单个 chunk 之间静默超过 STALL_TIMEOUT
+        // 就把这次尝试算失败，让 resume 分支接手。
+        let chunk = match tokio::time::timeout(STALL_TIMEOUT, stream.next()).await {
+            Ok(Some(Ok(chunk))) => chunk,
+            Ok(Some(Err(err))) => {
+                return Err(DownloadFailure {
+                    transferred: downloaded,
+                    error: format!("下载中断: {err}"),
+                });
+            }
+            Ok(None) => break,
+            Err(_) => {
+                return Err(DownloadFailure {
+                    transferred: downloaded,
+                    error: format!(
+                        "{} 秒没有新数据到达，判定链路 stall",
+                        STALL_TIMEOUT.as_secs()
+                    ),
+                });
+            }
+        };
+
+        if let Err(err) = file.write_all(&chunk) {
+            return Err(DownloadFailure {
+                transferred: downloaded,
+                error: format!("写入临时文件失败: {err}"),
+            });
+        }
         hasher.update(&chunk);
         downloaded = downloaded.saturating_add(chunk.len() as u64);
+        last_progress_at = Instant::now();
 
         let percent = total
             .filter(|value| *value > 0)
@@ -216,7 +374,7 @@ async fn download_dmg(app: &AppHandle, destination: &Path) -> Result<(), String>
             emit_progress(
                 app,
                 2,
-                "下载官方安装包",
+                &stall_label,
                 "waiting",
                 Some((downloaded, total)),
                 None,
@@ -225,25 +383,25 @@ async fn download_dmg(app: &AppHandle, destination: &Path) -> Result<(), String>
             last_emitted_bytes = downloaded;
         }
     }
-    file.sync_all()
-        .map_err(|err| format!("同步 ChatGPT DMG 失败: {err}"))?;
-    if !download_length_matches(downloaded, total) {
-        return Err(format!(
-            "ChatGPT DMG 下载不完整：期望 {} 字节，实际 {downloaded} 字节",
-            total.unwrap_or_default()
-        ));
-    }
 
-    let sha256 = format!("{:x}", hasher.finalize());
-    emit_progress(
-        app,
-        2,
-        "下载官方安装包",
-        "done",
-        Some((downloaded, total)),
-        Some(&format!("SHA-256 {sha256}")),
-    );
-    Ok(())
+    // 防御性——防止 sync_all 失败时把上面已成功的字节丢失。
+    if let Err(err) = file.sync_all() {
+        return Err(DownloadFailure {
+            transferred: downloaded,
+            error: format!("同步临时文件失败: {err}"),
+        });
+    }
+    if !download_length_matches(downloaded, total) {
+        return Err(DownloadFailure {
+            transferred: downloaded,
+            error: format!(
+                "下载不完整：期望 {} 字节，实际 {downloaded} 字节",
+                total.unwrap_or_default()
+            ),
+        });
+    }
+    let _ = last_progress_at; // silence unused warning; kept for potential future stall tuning
+    Ok((downloaded, total))
 }
 
 #[cfg(target_os = "macos")]
