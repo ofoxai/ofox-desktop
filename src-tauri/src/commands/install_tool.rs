@@ -11,11 +11,16 @@
 //! 仅 macOS：脚本入口 `init.sh` 第一行就 `uname -m != arm64 → exit 1`，
 //! Rust 这边也用 cfg 提前拦——Intel Mac / Windows 用户得到清晰错误。
 
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
 use std::process::Stdio;
 
+#[cfg(target_os = "macos")]
 use serde_json::json;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::AppHandle;
+#[cfg(target_os = "macos")]
+use tauri::{Emitter, Manager};
 
 /// 与 `scripts/installer/app/steps.py::TOOL_STEPS` 字典 key 对齐。
 const ALLOWED_TOOLS: &[&str] = &[
@@ -38,29 +43,37 @@ pub async fn install_tool(
         return Err(format!("不支持的工具: {tool_id}"));
     }
     let _guard = super::tool_update::ToolOperationGuard::acquire(&tool_id)?;
+    install_tool_impl(app, tool_id, skip_env, is_native_tool).await
+}
 
+/// 拆分入口以避免主命令函数在 Linux CI 下踩 clippy 的 needless_return
+/// —— cfg-gate 完整覆盖每个平台下的最终表达式。
+#[cfg(target_os = "macos")]
+async fn install_tool_impl(
+    app: AppHandle,
+    tool_id: String,
+    skip_env: Option<bool>,
+    is_native_tool: bool,
+) -> Result<i32, String> {
     if is_native_tool {
-        #[cfg(target_os = "macos")]
-        {
-            let _ = skip_env;
-            return native_install(app, &tool_id).await;
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            let _ = (app, skip_env);
-            return Err(format!("{tool_id} 自动安装目前仅支持 macOS"));
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (app, skip_env);
-        return Err("工具自动安装目前仅支持 macOS arm64".into());
-    }
-
-    #[cfg(target_os = "macos")]
-    {
+        let _ = skip_env;
+        native_install(app, &tool_id).await
+    } else {
         run_installer(app, tool_id, skip_env.unwrap_or(false)).await
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn install_tool_impl(
+    _app: AppHandle,
+    tool_id: String,
+    _skip_env: Option<bool>,
+    is_native_tool: bool,
+) -> Result<i32, String> {
+    if is_native_tool {
+        Err(format!("{tool_id} 自动安装目前仅支持 macOS"))
+    } else {
+        Err("工具自动安装目前仅支持 macOS arm64".into())
     }
 }
 
