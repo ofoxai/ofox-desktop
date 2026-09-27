@@ -291,7 +291,8 @@ fn run_powershell(script: &str) -> Result<(), String> {
         .output()
         .map_err(|err| format!("spawn PowerShell 失败: {err}"))?;
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim());
+        // 这里返回类型是 String——&str 不能自动进 String，to_string() 必需。
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     Ok(())
 }
