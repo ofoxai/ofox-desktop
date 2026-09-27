@@ -111,20 +111,41 @@ pub(crate) fn launch_chatgpt_desktop_app() -> Result<bool, String> {
     }
 }
 
+/// AppHandle 入口——生产路径。构建一个把 progress payload 转发到前端
+/// `install-tool-log` 事件的 emit 闭包，然后走通用 install 流程。
 #[cfg(target_os = "macos")]
 pub(crate) async fn install_chatgpt_desktop_app(app: &AppHandle) -> Result<i32, String> {
-    match install_chatgpt_desktop_app_inner(app).await {
+    let emit = |line: &str| {
+        let _ = app.emit(
+            "install-tool-log",
+            json!({ "tool": TOOL_ID, "stream": "stdout", "line": line }),
+        );
+    };
+    install_chatgpt_desktop_app_with(&emit).await
+}
+
+/// 通用 install 入口——bin/verify_chatgpt_install 用这条走 println 触发实际
+/// 下载/校验/安装，绕开 Tauri AppHandle。返回 exit code；0 = 成功，其它 = 失败。
+#[cfg(target_os = "macos")]
+pub async fn install_chatgpt_desktop_app_with<E>(emit: &E) -> Result<i32, String>
+where
+    E: Fn(&str) + Sync,
+{
+    match install_chatgpt_desktop_app_inner(emit).await {
         Ok(()) => Ok(0),
         Err(err) => {
-            emit_progress(app, 4, "ChatGPT App", "failed", None, Some(&err));
+            emit_progress(emit, 4, "ChatGPT App", "failed", None, Some(&err));
             Err(err)
         }
     }
 }
 
 #[cfg(target_os = "macos")]
-async fn install_chatgpt_desktop_app_inner(app: &AppHandle) -> Result<(), String> {
-    emit_progress(app, 1, "系统兼容性", "start", None, None);
+async fn install_chatgpt_desktop_app_inner<E>(emit: &E) -> Result<(), String>
+where
+    E: Fn(&str) + Sync,
+{
+    emit_progress(emit, 1, "系统兼容性", "start", None, None);
     let product_version = macos_product_version()?;
     if std::env::consts::ARCH != "aarch64" {
         return Err(format!(
@@ -138,7 +159,7 @@ async fn install_chatgpt_desktop_app_inner(app: &AppHandle) -> Result<(), String
         ));
     }
     emit_progress(
-        app,
+        emit,
         1,
         "系统兼容性",
         "done",
@@ -148,7 +169,7 @@ async fn install_chatgpt_desktop_app_inner(app: &AppHandle) -> Result<(), String
 
     if let Some(installed) = detect_chatgpt_desktop_app()? {
         emit_progress(
-            app,
+            emit,
             4,
             "ChatGPT App",
             "skipped",
@@ -160,11 +181,11 @@ async fn install_chatgpt_desktop_app_inner(app: &AppHandle) -> Result<(), String
 
     let temp = tempfile::tempdir().map_err(|err| format!("创建临时目录失败: {err}"))?;
     let dmg_path = temp.path().join("ChatGPT.dmg");
-    download_dmg(app, &dmg_path).await?;
+    download_dmg(emit, &dmg_path).await?;
 
     let mount_path = temp.path().join("mount");
     std::fs::create_dir(&mount_path).map_err(|err| format!("创建挂载目录失败: {err}"))?;
-    emit_progress(app, 3, "校验官方安装包", "start", None, None);
+    emit_progress(emit, 3, "校验官方安装包", "start", None, None);
     let attach = Command::new("/usr/bin/hdiutil")
         .args(["attach", "-nobrowse", "-readonly", "-mountpoint"])
         .arg(&mount_path)
@@ -175,7 +196,7 @@ async fn install_chatgpt_desktop_app_inner(app: &AppHandle) -> Result<(), String
         return Err(format!("挂载 ChatGPT DMG 失败: {}", command_error(&attach)));
     }
 
-    let install_result = install_from_mount(app, &mount_path);
+    let install_result = install_from_mount(emit, &mount_path);
     let detach_result = Command::new("/usr/bin/hdiutil")
         .arg("detach")
         .arg(&mount_path)
@@ -196,8 +217,11 @@ async fn install_chatgpt_desktop_app_inner(app: &AppHandle) -> Result<(), String
 /// 下载协调层：三次尝试 + resume 兜底。所有失败最终转成"用户可以自己
 /// 修的"错误消息（含官方 URL 供手动下载），不再抛裸的 reqwest 错误。
 #[cfg(target_os = "macos")]
-async fn download_dmg(app: &AppHandle, destination: &Path) -> Result<(), String> {
-    emit_progress(app, 2, "下载官方安装包", "start", None, None);
+async fn download_dmg<E>(emit: &E, destination: &Path) -> Result<(), String>
+where
+    E: Fn(&str) + Sync,
+{
+    emit_progress(emit, 2, "下载官方安装包", "start", None, None);
 
     // hasher 必须跨 attempt 保持——resume 是从磁盘上已存字节继续算，
     // 每次尝试都新建 hasher 会导致最终 SHA-256 只覆盖最后一段。
@@ -206,11 +230,11 @@ async fn download_dmg(app: &AppHandle, destination: &Path) -> Result<(), String>
     let mut last_error: Option<String> = None;
 
     for attempt in 1..=DOWNLOAD_ATTEMPTS {
-        match download_attempt(app, destination, &mut hasher, downloaded, attempt).await {
+        match download_attempt(emit, destination, &mut hasher, downloaded, attempt).await {
             Ok((final_downloaded, total)) => {
                 let sha256 = format!("{:x}", hasher.finalize());
                 emit_progress(
-                    app,
+                    emit,
                     2,
                     "下载官方安装包",
                     "done",
@@ -250,13 +274,16 @@ struct DownloadFailure {
 }
 
 #[cfg(target_os = "macos")]
-async fn download_attempt(
-    app: &AppHandle,
+async fn download_attempt<E>(
+    emit: &E,
     destination: &Path,
     hasher: &mut Sha256,
     resume_from: u64,
     attempt: u32,
-) -> Result<(u64, Option<u64>), DownloadFailure> {
+) -> Result<(u64, Option<u64>), DownloadFailure>
+where
+    E: Fn(&str) + Sync,
+{
     // 每次尝试都用 Range: bytes=N-；首次 N=0 服务端返回 200 + full body，
     // 之后 N>0 返回 206 + partial，两条路径都被 reqwest 正常收流。
     let mut request = crate::proxy::http_client::get()
@@ -372,7 +399,7 @@ async fn download_attempt(
             percent.is_none() && downloaded.saturating_sub(last_emitted_bytes) >= 1024 * 1024;
         if percent != last_emitted_percent || bytes_checkpoint {
             emit_progress(
-                app,
+                emit,
                 2,
                 &stall_label,
                 "waiting",
@@ -405,7 +432,10 @@ async fn download_attempt(
 }
 
 #[cfg(target_os = "macos")]
-fn install_from_mount(app: &AppHandle, mount_path: &Path) -> Result<(), String> {
+fn install_from_mount<E>(emit: &E, mount_path: &Path) -> Result<(), String>
+where
+    E: Fn(&str) + Sync,
+{
     let source = ["ChatGPT.app", "Codex.app"]
         .into_iter()
         .map(|name| mount_path.join(name))
@@ -414,7 +444,7 @@ fn install_from_mount(app: &AppHandle, mount_path: &Path) -> Result<(), String> 
 
     let version = verify_trusted_bundle(&source)?;
     emit_progress(
-        app,
+        emit,
         3,
         "校验官方安装包",
         "done",
@@ -422,7 +452,7 @@ fn install_from_mount(app: &AppHandle, mount_path: &Path) -> Result<(), String> 
         Some(&format!("签名有效，版本 {version}")),
     );
 
-    emit_progress(app, 4, "安装 ChatGPT App", "start", None, None);
+    emit_progress(emit, 4, "安装 ChatGPT App", "start", None, None);
     let applications = dirs::home_dir()
         .ok_or_else(|| "无法获取用户主目录".to_string())?
         .join("Applications");
@@ -458,7 +488,7 @@ fn install_from_mount(app: &AppHandle, mount_path: &Path) -> Result<(), String> 
     }
 
     emit_progress(
-        app,
+        emit,
         4,
         "安装 ChatGPT App",
         "done",
@@ -598,15 +628,20 @@ fn command_error(output: &Output) -> String {
     }
 }
 
+/// 把一条 progress 事件封成 JSON payload 字符串，交给 caller 传进来的
+/// emit 闭包。生产路径下 emit 会调 `app.emit("install-tool-log", ...)`；
+/// 探针路径下 emit 就是 println!，输出给 stdout 便于 tail -f。
 #[cfg(target_os = "macos")]
-fn emit_progress(
-    app: &AppHandle,
+fn emit_progress<E>(
+    emit: &E,
     step: u32,
     name: &str,
     phase: &str,
     bytes: Option<(u64, Option<u64>)>,
     detail: Option<&str>,
-) {
+) where
+    E: Fn(&str) + Sync,
+{
     let (downloaded, total) = bytes.unwrap_or((0, None));
     let percent = total
         .filter(|value| *value > 0)
@@ -634,10 +669,7 @@ fn emit_progress(
         object.insert("detail".into(), json!(detail));
     }
 
-    let _ = app.emit(
-        "install-tool-log",
-        json!({ "tool": TOOL_ID, "stream": "stdout", "line": payload.to_string() }),
-    );
+    emit(&payload.to_string());
 }
 
 #[cfg(all(test, target_os = "macos"))]

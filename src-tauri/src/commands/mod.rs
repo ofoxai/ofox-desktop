@@ -45,6 +45,8 @@ mod workspace;
 
 pub use auth::*;
 pub use balance::*;
+#[cfg(target_os = "macos")]
+pub use chatgpt_app::install_chatgpt_desktop_app_with;
 pub use codex_oauth::*;
 pub use coding_plan::*;
 pub use config::*;
