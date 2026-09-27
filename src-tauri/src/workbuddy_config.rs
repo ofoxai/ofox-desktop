@@ -115,6 +115,9 @@ fn read_models_from(path: &Path) -> Result<Vec<Value>, String> {
 }
 
 fn write_models_to(path: &Path, models: &[Value]) -> Result<(), String> {
+    // 只在 unix 才用 existed 做"新建文件才 chmod 600"的判断；Windows 上
+    // 文件权限走 ACL，我们不参与，变量本身也没意义。
+    #[cfg(unix)]
     let existed = path.exists();
     let bytes = serde_json::to_vec_pretty(models)
         .map_err(|e| format!("序列化 WorkBuddy 模型配置失败：{e}"))?;

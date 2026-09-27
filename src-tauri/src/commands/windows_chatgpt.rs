@@ -183,7 +183,7 @@ where
     if !probe.status.success() {
         return Err(format!(
             "winget --version 失败: {}",
-            String::from_utf8_lossy(&probe.stderr).trim().to_string()
+            String::from_utf8_lossy(&probe.stderr).trim()
         ));
     }
 
@@ -206,7 +206,7 @@ where
         return Err(format!(
             "winget install 退出码 {}: {}",
             output.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&output.stderr).trim().to_string()
+            String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
     Ok(())
@@ -225,12 +225,14 @@ pub(crate) fn detect_chatgpt_desktop_app() -> Result<Option<String>, String> {
         .join("powershell.exe");
     // Get-AppxPackage 返回多版本时按 version desc 排、取第一条，与用户"最新版
     // 即当前版"的直觉对齐。tab 分隔字段避免和空格路径打架。
-    let script = concat!(
-        "$ErrorActionPreference='Stop';",
-        "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);",
-        "$p=Get-AppxPackage -Name OpenAI.Codex -ErrorAction SilentlyContinue | ",
-        "Sort-Object {[version]$_.Version} -Descending | Select-Object -First 1;",
-        "if($p){[Console]::Out.WriteLine(('{0}{1}{2}' -f $p.Version,[char]9,$p.PackageFamilyName))}"
+    // PACKAGE_NAME 只允许字母数字点，脚本注入攻击面为零；这里 format! 拼进去
+    // 让 PACKAGE_NAME 保持是"改名唯一入口"的角色。
+    let script = format!(
+        "$ErrorActionPreference='Stop';\
+         [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);\
+         $p=Get-AppxPackage -Name {PACKAGE_NAME} -ErrorAction SilentlyContinue | \
+         Sort-Object {{[version]$_.Version}} -Descending | Select-Object -First 1;\
+         if($p){{[Console]::Out.WriteLine(('{{0}}{{1}}{{2}}' -f $p.Version,[char]9,$p.PackageFamilyName))}}"
     );
     let output = Command::new(powershell)
         .args([
@@ -239,7 +241,7 @@ pub(crate) fn detect_chatgpt_desktop_app() -> Result<Option<String>, String> {
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            script,
+            &script,
         ])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
@@ -247,7 +249,7 @@ pub(crate) fn detect_chatgpt_desktop_app() -> Result<Option<String>, String> {
     if !output.status.success() {
         return Err(format!(
             "Get-AppxPackage 失败: {}",
-            String::from_utf8_lossy(&output.stderr).trim().to_string()
+            String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
     parse_appx_identity(&String::from_utf8_lossy(&output.stdout))
@@ -289,7 +291,7 @@ fn run_powershell(script: &str) -> Result<(), String> {
         .output()
         .map_err(|err| format!("spawn PowerShell 失败: {err}"))?;
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        return Err(String::from_utf8_lossy(&output.stderr).trim());
     }
     Ok(())
 }

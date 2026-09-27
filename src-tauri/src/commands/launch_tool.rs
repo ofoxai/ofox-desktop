@@ -40,6 +40,7 @@ fn resolve_cli_bin(tool_id: &str) -> Option<&'static str> {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
