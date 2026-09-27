@@ -486,6 +486,25 @@ fn emit_progress(
 mod tests {
     use super::*;
 
+    /// 真机探测手册测试：不是 CI 单测，也不是 mock 校验——直接对当前用户
+    /// 的 filesystem 跑 detect + 校验，作为"新增 chatgpt 工具"落地时验证
+    /// candidate_paths / codesign / Team ID 三条约束在本机上确实能命中的
+    /// 简单办法。默认 ignore；`cargo test --lib -- --ignored manual_detect_chatgpt`
+    /// 触发。
+    #[test]
+    #[ignore = "Real-machine acceptance: reads /Applications/ChatGPT.app on this host"]
+    fn manual_detect_chatgpt() {
+        match detect_chatgpt_desktop_app() {
+            Ok(Some(app)) => println!(
+                "[manual_detect_chatgpt] found path={} version={}",
+                app.path.display(),
+                app.version
+            ),
+            Ok(None) => println!("[manual_detect_chatgpt] not installed"),
+            Err(err) => panic!("[manual_detect_chatgpt] error: {err}"),
+        }
+    }
+
     #[test]
     fn parses_openai_team_identifier() {
         let output = "Identifier=com.openai.codex\nTeamIdentifier=2DC432GLL2\n";
