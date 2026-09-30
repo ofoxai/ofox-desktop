@@ -47,6 +47,7 @@ fn normalized_proxy_url(value: &str) -> Option<String> {
     Some(url)
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn parse_macos_system_proxy(output: &str) -> CliSystemProxy {
     let mut values = std::collections::HashMap::new();
     let mut exceptions = Vec::new();
