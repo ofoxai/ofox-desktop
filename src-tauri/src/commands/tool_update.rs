@@ -447,11 +447,11 @@ pub async fn update_tool(
     tool: String,
     operation_id: String,
 ) -> Result<UpdateResult, String> {
-    if !cfg!(target_os = "macos") {
-        return Err("Automatic updates are currently supported on macOS only".into());
-    }
     if operation_id.is_empty() || operation_id.len() > 128 {
         return Err("Invalid operation ID".into());
+    }
+    if tool != "chatgpt" && !cfg!(target_os = "macos") {
+        return Err("Automatic updates are currently supported on macOS only".into());
     }
     let _guard = ToolOperationGuard::acquire(&tool)?;
     let emit = |stage: &str, detail: &str| {
@@ -465,12 +465,52 @@ pub async fn update_tool(
             },
         );
     };
-    let result = perform_update(&tool, &emit).await;
+    let result = if tool == "chatgpt" {
+        chatgpt_update(&emit).await
+    } else {
+        perform_update(&tool, &emit).await
+    };
     match &result {
         Ok(_) => emit("done", ""),
         Err(error) => emit("failed", error),
     }
     result
+}
+
+/// ChatGPT 桌面 App：Windows 由 Ofox 走 winget/Store 升级；macOS 交给 App 内置 Sparkle。
+#[cfg(target_os = "windows")]
+async fn chatgpt_update<F: Fn(&str, &str) + Sync>(emit: &F) -> Result<UpdateResult, String> {
+    super::windows_chatgpt::upgrade_chatgpt_desktop_app_with(emit).await
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn chatgpt_update<F: Fn(&str, &str) + Sync>(_emit: &F) -> Result<UpdateResult, String> {
+    Err(
+        "ChatGPT updates itself on this platform; open ChatGPT and choose Check for Updates…"
+            .into(),
+    )
+}
+
+/// 升级前确认桌面 App 是否在运行，好让用户先确认再关闭它。
+#[tauri::command]
+pub async fn is_tool_app_running(tool: String) -> Result<bool, String> {
+    if tool != "chatgpt" {
+        return Err(format!("Unsupported desktop app: {tool}"));
+    }
+    chatgpt_running().await
+}
+
+#[cfg(target_os = "windows")]
+async fn chatgpt_running() -> Result<bool, String> {
+    tokio::task::spawn_blocking(super::windows_chatgpt::chatgpt_process_ids)
+        .await
+        .map_err(|err| err.to_string())?
+        .map(|ids| !ids.is_empty())
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn chatgpt_running() -> Result<bool, String> {
+    Ok(false)
 }
 
 async fn perform_update<F: Fn(&str, &str)>(tool: &str, emit: F) -> Result<UpdateResult, String> {
@@ -530,12 +570,28 @@ async fn perform_update<F: Fn(&str, &str)>(tool: &str, emit: F) -> Result<Update
     Ok(verify_result(&install.version, &after.version, &latest))
 }
 
-/// Stream both pipes before waiting, so a verbose package manager cannot deadlock.
 async fn run_update_process<F: Fn(&str)>(
-    mut command: Command,
+    command: Command,
     log: F,
     timeout: Duration,
 ) -> Result<(), String> {
+    let status = run_logged_process(command, log, timeout).await?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Update process exited with {status}; see update log"
+        ))
+    }
+}
+
+/// Stream both pipes before waiting, so a verbose package manager cannot deadlock.
+/// Lines are decoded lossily: localized winget/npm output must not abort the update.
+pub(crate) async fn run_logged_process<F: Fn(&str)>(
+    mut command: Command,
+    log: F,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus, String> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -549,38 +605,44 @@ async fn run_update_process<F: Fn(&str)>(
     let mut child = command.spawn().map_err(|e| e.to_string())?;
     #[cfg(unix)]
     let _group = ProcessGroup(child.id().ok_or("Missing process ID")?);
-    let stdout = BufReader::new(child.stdout.take().ok_or("Missing stdout")?).lines();
-    let stderr = BufReader::new(child.stderr.take().ok_or("Missing stderr")?).lines();
-    let stdout_task = async {
-        let mut lines = stdout;
-        while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
-            log(&line);
-        }
-        Ok::<(), String>(())
-    };
-    let stderr_task = async {
-        let mut lines = stderr;
-        while let Some(line) = lines.next_line().await.map_err(|e| e.to_string())? {
-            log(&line);
-        }
-        Ok::<(), String>(())
-    };
+    let stdout = BufReader::new(child.stdout.take().ok_or("Missing stdout")?);
+    let stderr = BufReader::new(child.stderr.take().ok_or("Missing stderr")?);
     let work = async {
-        let (out, err, status) = tokio::join!(stdout_task, stderr_task, child.wait());
+        let (out, err, status) = tokio::join!(
+            forward_lines(stdout, &log),
+            forward_lines(stderr, &log),
+            child.wait()
+        );
         out?;
         err?;
-        let status = status.map_err(|e| e.to_string())?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!(
-                "Update process exited with {status}; see update log"
-            ))
-        }
+        status.map_err(|e| e.to_string())
     };
     tokio::time::timeout(timeout, work)
         .await
         .map_err(|_| "Update timed out; inspect the installation before retrying".to_string())?
+}
+
+async fn forward_lines<R, F>(mut reader: BufReader<R>, log: &F) -> Result<(), String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    F: Fn(&str),
+{
+    let mut buffer = Vec::new();
+    loop {
+        buffer.clear();
+        if reader
+            .read_until(b'\n', &mut buffer)
+            .await
+            .map_err(|e| e.to_string())?
+            == 0
+        {
+            return Ok(());
+        }
+        let line = String::from_utf8_lossy(&buffer);
+        let line = line.trim_end_matches(['\r', '\n']);
+        // Progress bars redraw with a bare \r; keep only the final frame.
+        log(line.rsplit('\r').next().unwrap_or(line));
+    }
 }
 
 #[cfg(unix)]
@@ -951,5 +1013,39 @@ mod tests {
                 .unwrap_err()
                 .contains("timed out")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn logged_process_reports_exit_status_and_survives_invalid_utf8() {
+        let lines = Mutex::new(Vec::new());
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", r"printf 'ok\r\n\377\n'; exit 3"]);
+        let status = run_logged_process(
+            command,
+            |s| lines.lock().unwrap().push(s.to_string()),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status.code(), Some(3));
+        assert_eq!(
+            *lines.lock().unwrap(),
+            vec!["ok".to_string(), "\u{FFFD}".to_string()]
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn chatgpt_update_is_left_to_the_app_off_windows() {
+        let error = chatgpt_update(&|_: &str, _: &str| {}).await.unwrap_err();
+        assert!(error.contains("Check for Updates"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn only_chatgpt_reports_a_running_app() {
+        assert!(is_tool_app_running("claude".into()).await.is_err());
+        #[cfg(not(target_os = "windows"))]
+        assert!(!is_tool_app_running("chatgpt".into()).await.unwrap());
     }
 }

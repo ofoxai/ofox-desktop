@@ -35,7 +35,7 @@ pub(crate) const PACKAGE_NAME: &str = "OpenAI.Codex";
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) const PACKAGE_FAMILY: &str = "OpenAI.Codex_2p2nqsd0c76g0";
 
-const FETCH_TIMEOUT: Duration = Duration::from_secs(7);
+pub(crate) const FETCH_TIMEOUT: Duration = Duration::from_secs(7);
 const MAX_FEED_BYTES: usize = 1024 * 1024;
 
 /// `shell:AppsFolder\<AUMID>`——启动 Store App 的目标，检测与启动共用。
@@ -351,6 +351,105 @@ pub(crate) async fn fetch_latest_for_host(client: &reqwest::Client) -> Result<St
         fetch_windows_latest(client, WINDOWS_MANIFEST_URL, FETCH_TIMEOUT).await
     } else {
         Err("ChatGPT desktop updates are only tracked on macOS and Windows".into())
+    }
+}
+
+// ---- Windows 升级用的纯函数（全平台编译，方便在 macOS/Linux CI 上测） ----
+
+/// winget 的 APPINSTALLER_CLI_ERROR_UPDATE_NOT_APPLICABLE：Store 还没给这台机器推送新版本。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) const WINGET_UPDATE_NOT_APPLICABLE: i32 = 0x8A15002Bu32 as i32;
+
+#[derive(Debug, PartialEq)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) enum WingetOutcome {
+    Upgraded,
+    NotApplicable,
+    Failed(String),
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn classify_winget_exit(code: Option<i32>) -> WingetOutcome {
+    match code {
+        Some(0) => WingetOutcome::Upgraded,
+        Some(WINGET_UPDATE_NOT_APPLICABLE) => WingetOutcome::NotApplicable,
+        Some(code) => WingetOutcome::Failed(format!("exit code 0x{:08X}", code as u32)),
+        None => WingetOutcome::Failed("terminated without an exit code".into()),
+    }
+}
+
+/// 进程路径是否在 ChatGPT 的 MSIX 安装目录里
+/// （`…\WindowsApps\OpenAI.Codex_<版本>_<架构>__<publisher>\…`）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn is_chatgpt_package_path(path: &str) -> bool {
+    let publisher = PACKAGE_FAMILY.rsplit('_').next().unwrap_or_default();
+    let prefix = format!("{}_", PACKAGE_NAME.to_ascii_lowercase());
+    let suffix = format!("__{}", publisher.to_ascii_lowercase());
+    let path = path.to_ascii_lowercase();
+    let mut components = path.split(['\\', '/']);
+    while let Some(component) = components.next() {
+        if component == "windowsapps" {
+            return components
+                .next()
+                .is_some_and(|package| package.starts_with(&prefix) && package.ends_with(&suffix));
+        }
+    }
+    false
+}
+
+/// 解析 `pid<TAB>path` 行，只保留 ChatGPT 包内的进程。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn parse_process_list(stdout: &str) -> Vec<u32> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let (pid, path) = line.trim().split_once('\t')?;
+            if !is_chatgpt_package_path(path) {
+                return None;
+            }
+            pid.trim().parse().ok()
+        })
+        .collect()
+}
+
+fn pid_list(pids: &[u32]) -> String {
+    pids.iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// 请求窗口正常关闭（相当于点关闭按钮），给 App 保存状态的机会。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn close_script(pids: &[u32]) -> String {
+    format!(
+        "Get-Process -Id {} -ErrorAction SilentlyContinue | \
+         ForEach-Object {{ [void]$_.CloseMainWindow() }}",
+        pid_list(pids)
+    )
+}
+
+/// 正常关闭没生效时（例如最小化到托盘）强制结束。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn stop_script(pids: &[u32]) -> String {
+    format!(
+        "Stop-Process -Id {} -Force -ErrorAction SilentlyContinue",
+        pid_list(pids)
+    )
+}
+
+/// 只有版本号确实升高才算 updated；Store 可能比 manifest 晚或跳版，不要求等于 latest。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn desktop_update_result(before: &str, after: &str) -> super::tool_update::UpdateResult {
+    let status = if compare_dotted(after, before) == Some(Ordering::Greater) {
+        "updated"
+    } else {
+        "unchanged"
+    };
+    super::tool_update::UpdateResult {
+        status: status.into(),
+        before: before.into(),
+        after: after.into(),
     }
 }
 
@@ -681,6 +780,76 @@ mod tests {
                 "{route}"
             );
         }
+    }
+
+    #[test]
+    fn winget_exit_codes_distinguish_success_no_update_and_failure() {
+        assert_eq!(WINGET_UPDATE_NOT_APPLICABLE, -1978335189);
+        assert_eq!(classify_winget_exit(Some(0)), WingetOutcome::Upgraded);
+        assert_eq!(
+            classify_winget_exit(Some(WINGET_UPDATE_NOT_APPLICABLE)),
+            WingetOutcome::NotApplicable
+        );
+        assert_eq!(
+            classify_winget_exit(Some(1)),
+            WingetOutcome::Failed("exit code 0x00000001".into())
+        );
+        assert!(matches!(
+            classify_winget_exit(None),
+            WingetOutcome::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn package_path_matches_only_the_chatgpt_store_package() {
+        for path in [
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_26.928.2636.0_x64__2p2nqsd0c76g0\app\Codex.exe",
+            r"c:\program files\windowsapps\openai.codex_26.924.2600.0_arm64__2P2NQSD0C76G0\resources\codex.exe",
+        ] {
+            assert!(is_chatgpt_package_path(path), "{path}");
+        }
+        for path in [
+            r"C:\Program Files\WindowsApps\OpenAI.CodexHelper_1.0.0.0_x64__2p2nqsd0c76g0\a.exe",
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_26.928.2636.0_x64__8wekyb3d8bbwe\a.exe",
+            r"C:\Users\me\AppData\Local\Programs\codex\codex.exe",
+            "",
+        ] {
+            assert!(!is_chatgpt_package_path(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn process_list_keeps_only_chatgpt_package_processes() {
+        let stdout = "12\tC:\\Program Files\\WindowsApps\\OpenAI.Codex_26.928.2636.0_x64__2p2nqsd0c76g0\\app\\Codex.exe\r\n\
+                      34\tC:\\Windows\\explorer.exe\r\n\
+                      oops\tC:\\Program Files\\WindowsApps\\OpenAI.Codex_1_x64__2p2nqsd0c76g0\\a.exe\r\n\
+                      \r\n\
+                      56\tC:\\Program Files\\WindowsApps\\OpenAI.Codex_26.928.2636.0_x64__2p2nqsd0c76g0\\resources\\codex.exe\r\n";
+        assert_eq!(parse_process_list(stdout), vec![12, 56]);
+    }
+
+    #[test]
+    fn close_and_stop_scripts_target_the_given_process_ids() {
+        let close = close_script(&[12, 345]);
+        assert!(close.contains("-Id 12,345"), "{close}");
+        assert!(close.contains("CloseMainWindow"), "{close}");
+        let stop = stop_script(&[12, 345]);
+        assert!(stop.starts_with("Stop-Process -Id 12,345 -Force"), "{stop}");
+    }
+
+    #[test]
+    fn desktop_update_result_requires_a_version_increase() {
+        let updated = desktop_update_result("26.924.2600.0", "26.928.2636.0");
+        assert_eq!(updated.status, "updated");
+        assert_eq!(updated.after, "26.928.2636.0");
+        assert_eq!(
+            desktop_update_result("26.928.2636.0", "26.928.2636.0").status,
+            "unchanged"
+        );
+        assert_eq!(
+            desktop_update_result("26.928.2636.0", "26.924.2600.0").status,
+            "unchanged"
+        );
     }
 
     #[tokio::test]

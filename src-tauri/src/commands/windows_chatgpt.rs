@@ -22,7 +22,13 @@ use serde_json::json;
 
 // 包身份常量与更新检测共用，定义在 chatgpt_updates（全平台编译）。
 #[cfg(target_os = "windows")]
-use super::chatgpt_updates::{windows_launch_target, PACKAGE_NAME, STORE_PRODUCT_ID};
+use super::chatgpt_updates::{
+    classify_winget_exit, close_script, compare_dotted, desktop_update_result,
+    fetch_windows_latest, parse_process_list, stop_script, windows_launch_target, WingetOutcome,
+    FETCH_TIMEOUT, PACKAGE_NAME, STORE_PRODUCT_ID, WINDOWS_MANIFEST_URL,
+};
+#[cfg(target_os = "windows")]
+use super::tool_update::{run_logged_process, UpdateResult};
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -40,6 +46,26 @@ const INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// 让"装完了但还没被识别"的窗口拉长，3s 是可接受折中。
 #[cfg(target_os = "windows")]
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
+
+/// winget upgrade 自身的超时。
+#[cfg(target_os = "windows")]
+const WINGET_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// winget 报成功后，等 AppxPackage 换成新版本的时间。
+#[cfg(target_os = "windows")]
+const WINGET_SETTLE: Duration = Duration::from_secs(90);
+
+/// 回退到 Store 页面后等用户点「更新」的时间。比安装短，免得面板长时间忙碌。
+#[cfg(target_os = "windows")]
+const STORE_UPGRADE_WAIT: Duration = Duration::from_secs(5 * 60);
+
+/// CloseMainWindow 之后等进程退出的时间；超时再强制结束。
+#[cfg(target_os = "windows")]
+const CLOSE_GRACE: Duration = Duration::from_secs(10);
+
+/// 强制结束后等进程消失的时间。
+#[cfg(target_os = "windows")]
+const STOP_GRACE: Duration = Duration::from_secs(5);
 
 /// 生产入口（`launch_tool`）——同步返回。
 #[cfg(target_os = "windows")]
@@ -111,9 +137,7 @@ where
             "waiting",
             Some(&format!("winget 不可用（{err}），改用 Store 手动完成")),
         );
-        let uri = format!("ms-windows-store://pdp/?ProductId={STORE_PRODUCT_ID}");
-        let script = format!("Start-Process '{}'", uri.replace('\'', "''"));
-        run_powershell(&script).map_err(|e| format!("打开 Microsoft Store 失败: {e}"))?;
+        open_store_page()?;
         waiting_for_store = true;
     }
 
@@ -157,6 +181,200 @@ where
         );
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+/// 升级入口：检查 → 关闭运行中的 App → winget/Store → 等新版本出现 → 重开。
+/// `emit(stage, detail)` 与 `update_tool` 的 tool-update-progress 事件一致。
+#[cfg(target_os = "windows")]
+pub async fn upgrade_chatgpt_desktop_app_with<E>(emit: &E) -> Result<UpdateResult, String>
+where
+    E: Fn(&str, &str) + Sync,
+{
+    emit("checking", "");
+    let before = blocking(detect_chatgpt_desktop_app)
+        .await?
+        .ok_or("ChatGPT App 尚未安装")?;
+    let client = crate::proxy::http_client::get();
+    let latest = fetch_windows_latest(&client, WINDOWS_MANIFEST_URL, FETCH_TIMEOUT).await?;
+    if compare_dotted(&latest, &before) != Some(std::cmp::Ordering::Greater) {
+        return Ok(UpdateResult {
+            status: "current".into(),
+            before: before.clone(),
+            after: before,
+        });
+    }
+    let was_running = !blocking(chatgpt_process_ids).await?.is_empty();
+    if was_running {
+        emit("log", "正在关闭 ChatGPT…");
+        close_chatgpt().await?;
+    }
+    let result = upgrade_inner(emit, &before).await;
+    // 无论升级成败，用户原本开着的 App 都要回来；重开失败不影响升级结果。
+    if was_running {
+        match blocking(launch_chatgpt_desktop_app).await {
+            Ok(_) => emit("log", "已重新打开 ChatGPT"),
+            Err(err) => emit("log", &format!("重新打开 ChatGPT 失败：{err}")),
+        }
+    }
+    result
+}
+
+#[cfg(target_os = "windows")]
+async fn upgrade_inner<E>(emit: &E, before: &str) -> Result<UpdateResult, String>
+where
+    E: Fn(&str, &str) + Sync,
+{
+    emit("updating", "msstore");
+    let mut command = tokio::process::Command::new("winget");
+    command
+        .args([
+            "upgrade",
+            "--id",
+            STORE_PRODUCT_ID,
+            "--source",
+            "msstore",
+            "--silent",
+            "--accept-source-agreements",
+            "--accept-package-agreements",
+        ])
+        .creation_flags(CREATE_NO_WINDOW);
+    let outcome = match run_logged_process(command, |line| emit("log", line), WINGET_TIMEOUT).await
+    {
+        Ok(status) => classify_winget_exit(status.code()),
+        Err(err) => WingetOutcome::Failed(err),
+    };
+    let via_store = match outcome {
+        WingetOutcome::Upgraded => false,
+        WingetOutcome::NotApplicable => {
+            emit(
+                "log",
+                "winget 暂未拿到这个版本（Store 可能还没推送），改为打开 Microsoft Store",
+            );
+            true
+        }
+        WingetOutcome::Failed(err) => {
+            emit(
+                "log",
+                &format!("winget 升级失败（{err}），改为打开 Microsoft Store"),
+            );
+            true
+        }
+    };
+    if via_store {
+        blocking(open_store_page).await?;
+        emit(
+            "log",
+            "请在 Microsoft Store 中点击「更新」，完成后这里会自动识别",
+        );
+    }
+
+    emit("verifying", "");
+    let wait = if via_store {
+        STORE_UPGRADE_WAIT
+    } else {
+        WINGET_SETTLE
+    };
+    let started = Instant::now();
+    let mut last_report = Instant::now();
+    loop {
+        // MSIX 换包时可能短暂查不到，None 继续等。
+        if let Some(after) = blocking(detect_chatgpt_desktop_app).await? {
+            if compare_dotted(&after, before) == Some(std::cmp::Ordering::Greater) {
+                return Ok(desktop_update_result(before, &after));
+            }
+        }
+        if started.elapsed() >= wait {
+            break;
+        }
+        if last_report.elapsed() >= Duration::from_secs(30) {
+            emit(
+                "log",
+                &format!(
+                    "等待新版本安装完成（已等待 {} 秒）",
+                    started.elapsed().as_secs()
+                ),
+            );
+            last_report = Instant::now();
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+    if via_store {
+        return Err(format!(
+            "Microsoft Store 未在 {} 分钟内完成更新；请在 Store 中完成后回到 Ofox 点击「检查更新」",
+            STORE_UPGRADE_WAIT.as_secs() / 60
+        ));
+    }
+    // winget 报成功但版本没变：如实返回 unchanged，不冒充 updated。
+    let after = blocking(detect_chatgpt_desktop_app)
+        .await?
+        .unwrap_or_else(|| before.to_string());
+    Ok(desktop_update_result(before, &after))
+}
+
+/// 先请求正常关闭，等不到再强制结束；仍有残留就报错，不带着运行中的 App 去升级。
+#[cfg(target_os = "windows")]
+async fn close_chatgpt() -> Result<(), String> {
+    let ids = blocking(chatgpt_process_ids).await?;
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let script = close_script(&ids);
+    blocking(move || run_powershell(&script)).await?;
+    if wait_until_closed(CLOSE_GRACE).await? {
+        return Ok(());
+    }
+    let ids = blocking(chatgpt_process_ids).await?;
+    if !ids.is_empty() {
+        let script = stop_script(&ids);
+        blocking(move || run_powershell(&script)).await?;
+    }
+    if wait_until_closed(STOP_GRACE).await? {
+        return Ok(());
+    }
+    Err("无法关闭 ChatGPT，请手动退出后重试".into())
+}
+
+#[cfg(target_os = "windows")]
+async fn wait_until_closed(limit: Duration) -> Result<bool, String> {
+    let started = Instant::now();
+    loop {
+        if blocking(chatgpt_process_ids).await?.is_empty() {
+            return Ok(true);
+        }
+        if started.elapsed() >= limit {
+            return Ok(false);
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// 运行中的 ChatGPT 包内进程（主程序以及它拉起的 codex 等子进程）。
+#[cfg(target_os = "windows")]
+pub(crate) fn chatgpt_process_ids() -> Result<Vec<u32>, String> {
+    let script = "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);\
+                  Get-Process -ErrorAction SilentlyContinue | \
+                  Where-Object { $_.Path -like '*\\WindowsApps\\OpenAI.Codex_*' } | \
+                  ForEach-Object { [Console]::Out.WriteLine(('{0}{1}{2}' -f $_.Id,[char]9,$_.Path)) }";
+    Ok(parse_process_list(&powershell_stdout(script)?))
+}
+
+#[cfg(target_os = "windows")]
+fn open_store_page() -> Result<(), String> {
+    let uri = format!("ms-windows-store://pdp/?ProductId={STORE_PRODUCT_ID}");
+    let script = format!("Start-Process '{}'", uri.replace('\'', "''"));
+    run_powershell(&script).map_err(|e| format!("打开 Microsoft Store 失败: {e}"))
+}
+
+/// PowerShell / AppxPackage 调用都是阻塞的，放到 blocking 线程执行。
+#[cfg(target_os = "windows")]
+async fn blocking<T, F>(work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|err| format!("后台任务失败: {err}"))?
 }
 
 /// 用 winget 尝试装。返回 Ok(()) 表示 winget 至少 spawn 且退出码 0；不代表
@@ -263,6 +481,11 @@ fn parse_appx_identity(output: &str) -> Result<Option<String>, String> {
 
 #[cfg(target_os = "windows")]
 fn run_powershell(script: &str) -> Result<(), String> {
+    powershell_stdout(script).map(|_| ())
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_stdout(script: &str) -> Result<String, String> {
     let system_root = std::env::var_os("SystemRoot")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
@@ -287,7 +510,7 @@ fn run_powershell(script: &str) -> Result<(), String> {
         // 这里返回类型是 String——&str 不能自动进 String，to_string() 必需。
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
-    Ok(())
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// 与 `chatgpt_app::emit_progress` 输出格式对齐——前端解 JSON 一份 parser 通吃

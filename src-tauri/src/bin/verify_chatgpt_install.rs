@@ -9,14 +9,18 @@
 //! 用法（假定编译产物 scp 到 VM 上）：
 //!   ./verify_chatgpt_install                 # 完整安装
 //!   ./verify_chatgpt_install --check-latest  # 只读：打印 get_tool_versions 的 chatgpt 结果
+//!   ./verify_chatgpt_install --running       # 只读：ChatGPT 是否在运行（仅 Windows 会检测）
+//!   ./verify_chatgpt_install --upgrade       # 仅 Windows：关闭 → winget/Store 升级 → 重开
 //!
 //! 判定：进程 exit code 0 且最后一行是 `RESULT: ok=0`，且系统里能查到
 //! ChatGPT App（macOS 下 `~/Applications/ChatGPT.app`；Windows 下
 //! `Get-AppxPackage OpenAI.Codex`）。`--check-latest` 以打印的 JSON 为准
 //! （version / latest_version / update_status / update_source）。
 
+#[cfg(target_os = "windows")]
+use cc_switch_lib::upgrade_chatgpt_desktop_app_with;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use cc_switch_lib::{get_tool_versions, install_chatgpt_desktop_app_with};
+use cc_switch_lib::{get_tool_versions, install_chatgpt_desktop_app_with, is_tool_app_running};
 
 fn main() {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -43,6 +47,38 @@ fn main() {
                 Err(err) => {
                     eprintln!("ERROR: {err}");
                     std::process::exit(1);
+                }
+            }
+        }
+
+        if std::env::args().any(|arg| arg == "--running") {
+            match runtime.block_on(is_tool_app_running("chatgpt".into())) {
+                Ok(running) => {
+                    println!("RUNNING: {running}");
+                    std::process::exit(0);
+                }
+                Err(err) => {
+                    eprintln!("ERROR: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            if std::env::args().any(|arg| arg == "--upgrade") {
+                let emit = |stage: &str, detail: &str| println!("PROGRESS: {stage} {detail}");
+                match runtime.block_on(upgrade_chatgpt_desktop_app_with(&emit)) {
+                    Ok(result) => {
+                        let json = serde_json::to_string(&result).expect("serialize");
+                        println!("RESULT: {json}");
+                        std::process::exit(0);
+                    }
+                    Err(err) => {
+                        println!("RESULT: err");
+                        eprintln!("ERROR: {err}");
+                        std::process::exit(1);
+                    }
                 }
             }
         }
