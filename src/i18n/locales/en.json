@@ -3,6 +3,9 @@
     "failed": "Could not open the tool",
     "proxyUnavailable": "The local proxy at {{endpoint}} is unavailable. Start the proxy or restore the port forward, then try again."
   },
+  "toolInstall": {
+    "exitCode": "Installation did not finish (exit code {{code}}); please retry"
+  },
   "modelCompatibility": {
     "title": "Streaming compatibility",
     "checking": "Checking streaming compatibility…",

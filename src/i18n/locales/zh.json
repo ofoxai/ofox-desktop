@@ -3,6 +3,9 @@
     "failed": "打开工具失败",
     "proxyUnavailable": "本机代理 {{endpoint}} 未运行。请启动代理或恢复端口转发后重试。"
   },
+  "toolInstall": {
+    "exitCode": "安装未完成（退出码 {{code}}），请重试"
+  },
   "modelCompatibility": {
     "title": "流式兼容性",
     "checking": "正在验证流式兼容性…",

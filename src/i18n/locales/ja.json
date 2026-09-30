@@ -3,6 +3,9 @@
     "failed": "ツールを開けませんでした",
     "proxyUnavailable": "ローカルプロキシ {{endpoint}} に接続できません。プロキシまたはポート転送を復旧してから再試行してください。"
   },
+  "toolInstall": {
+    "exitCode": "インストールが完了しませんでした（終了コード {{code}}）。再試行してください"
+  },
   "modelCompatibility": {
     "title": "ストリーミング互換性",
     "checking": "ストリーミング互換性を確認中…",
