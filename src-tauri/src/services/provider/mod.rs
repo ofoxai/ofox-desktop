@@ -1489,7 +1489,7 @@ impl ProviderService {
                 // no backfill needed (backfill is for exclusive mode apps like Claude/Codex/Gemini)
                 if !app_type.is_additive_mode() {
                     // Only backfill when switching to a different provider
-                    if let Ok(live_config) = read_live_settings(app_type.clone()) {
+                    if let Ok(live_config) = read_live_settings(app_type) {
                         if let Some(mut current_provider) = providers.get(&current_id).cloned() {
                             current_provider.settings_config =
                                 strip_common_config_from_live_settings(
@@ -1718,7 +1718,7 @@ impl ProviderService {
         app_type: AppType,
     ) -> Result<String, AppError> {
         // Get current provider
-        let current_id = Self::current(state, app_type.clone())?;
+        let current_id = Self::current(state, app_type)?;
         if current_id.is_empty() {
             return Err(AppError::Message("No current provider".to_string()));
         }

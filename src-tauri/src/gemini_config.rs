@@ -381,6 +381,24 @@ pub fn write_packycode_settings() -> Result<(), AppError> {
     update_selected_type("gemini-api-key")
 }
 
+/// Keep Gemini CLI's authentication choice in sync with an existing API key.
+///
+/// Older Ofox bindings only wrote `.env`, which left Gemini CLI at its first-run
+/// authentication chooser even though `GEMINI_API_KEY` was already available.
+/// When no key is configured, leave the user's OAuth preference untouched.
+pub fn ensure_api_key_auth_selected() -> Result<bool, AppError> {
+    let env = read_gemini_env()?;
+    let has_api_key = env
+        .get("GEMINI_API_KEY")
+        .is_some_and(|value| !value.trim().is_empty());
+
+    if has_api_key {
+        write_packycode_settings()?;
+    }
+
+    Ok(has_api_key)
+}
+
 /// 为 Google 官方 Gemini 供应商写入 settings.json（OAuth 模式）
 ///
 /// 设置 `~/.gemini/settings.json` 中的：
@@ -462,7 +480,10 @@ GEMINI_MODEL=gemini-3-pro-preview
         assert!(content.contains("GEMINI_MODEL=gemini-3-pro-preview"));
         // 回归保险：末尾必须有 `\n`——参见 [`serialize_env_file`] docstring 里
         // 的"最后一行被 dotenv parser 丢弃"事故说明。
-        assert!(content.ends_with('\n'), "missing trailing newline: {content:?}");
+        assert!(
+            content.ends_with('\n'),
+            "missing trailing newline: {content:?}"
+        );
     }
 
     #[test]

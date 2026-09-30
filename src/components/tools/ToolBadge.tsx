@@ -7,6 +7,7 @@ import {
   HermesIcon,
   OpenClawIcon,
   OpenCodeIcon,
+  WorkBuddyIcon,
 } from "@/components/BrandIcons";
 import { TOOL_META } from "@/config/toolMeta";
 import { cn } from "@/lib/utils";
@@ -31,6 +32,7 @@ type BrandIconComponent = ComponentType<{
  *   - OpenCode         浅灰 — pixel art logo 需要明度对比；浅灰避免过黑
  *   - OpenClaw         米色 — 红色卡通龙虾，米底突出主体
  *   - Hermes           米色 — 头像类图标，米底比纯白柔和
+ *   - WorkBuddy        透明 — 官方圆形图标自带完整渐变背景
  *
  * 内边距统一走 padding（容器 size 的 1/5）——SVG 的 size 自然撑满剩余空间，
  * 不需要为每家硬编码不同 px。OpenCode 占比偏大的问题靠这个 padding 一并解决。
@@ -38,10 +40,14 @@ type BrandIconComponent = ComponentType<{
 const TOOL_ICON: Record<string, BrandIconComponent> = {
   claude: ClaudeIcon,
   codex: CodexIcon,
+  // ChatGPT App 复用 OpenAI 单色 logo —— 与 Codex 同厂牌，靠背景色（绿底）
+  // 和 label（"ChatGPT" vs "Codex"）而不是图标本身区分开。
+  chatgpt: CodexIcon,
   gemini: GeminiIcon,
   opencode: OpenCodeIcon,
   openclaw: OpenClawIcon,
   hermes: HermesIcon,
+  workbuddy: WorkBuddyIcon,
 };
 
 /**
@@ -52,6 +58,9 @@ const TOOL_ICON: Record<string, BrandIconComponent> = {
 const TOOL_BADGE_BG: Record<string, string> = {
   claude: "bg-[#E8DCC8] dark:bg-[#2D2419]",
   codex: "bg-neutral-900 dark:bg-neutral-900",
+  // ChatGPT 品牌绿（近 OpenAI 官网 accent），让"Codex vs ChatGPT"两张
+  // OpenAI 牌卡片一眼分得开。
+  chatgpt: "bg-[#10A37F] dark:bg-[#0E8266]",
   // Gemini logo 是彩色，给暖米底让蓝/绿/红/黄四色更跳。
   gemini: "bg-[#E8DDC8] dark:bg-[#2A2419]",
   // OpenCode pixel-art monitor 黑+灰，给中性浅灰让线条干净。
@@ -59,7 +68,10 @@ const TOOL_BADGE_BG: Record<string, string> = {
   openclaw: "bg-[#FFD7BC] dark:bg-[#3A2418]",
   // Hermes 头像类图标，纯白底最干净——其它米色背景会让它"糊"在一起。
   // ring 让白底在浅色 popover 上仍有可见边界，不至于"消失"。
-  hermes: "bg-white ring-1 ring-black/10 dark:bg-neutral-100 dark:ring-white/10",
+  hermes:
+    "bg-white ring-1 ring-black/10 dark:bg-neutral-100 dark:ring-white/10",
+  // WorkBuddy 官方图标已自带圆形渐变背景，不再叠加额外色块。
+  workbuddy: "bg-transparent",
 };
 
 /**
@@ -70,6 +82,8 @@ const TOOL_BADGE_BG: Record<string, string> = {
  */
 const TOOL_ICON_FILTER: Record<string, string> = {
   codex: "[&_img]:brightness-0 [&_img]:invert",
+  // ChatGPT 徽章底是绿色——单色 OpenAI logo 同样需要反色为白才能立起来。
+  chatgpt: "[&_img]:brightness-0 [&_img]:invert",
 };
 
 interface ToolBadgeProps {
@@ -111,7 +125,7 @@ export function ToolBadge({
         className={cn(
           "flex shrink-0 items-center justify-center font-bold text-white",
           ROUNDED_CLASS[rounded],
-          dimmed ? "bg-gray-400" : meta?.color ?? "bg-muted-foreground",
+          dimmed ? "bg-gray-400" : (meta?.color ?? "bg-muted-foreground"),
           className,
         )}
       >
@@ -127,9 +141,11 @@ export function ToolBadge({
   //
   // OpenCode 的 SVG 是 pixel-art monitor，本身没有 viewBox 留白，监视器
   // 矩形几乎贴到边——视觉上比其它"自带 padding"的 lobehub logo 大一圈。
-  // 单独给它一个更大的 padding 系数把比例拉回来。
-  const paddingRatio = toolId === "opencode" ? 0.3 : 0.18;
-  const padding = Math.max(4, Math.round(size * paddingRatio));
+  // WorkBuddy 的官方圆形图标则自带完整背景，需要铺满徽章。
+  const paddingRatio =
+    toolId === "opencode" ? 0.3 : toolId === "workbuddy" ? 0 : 0.18;
+  const padding =
+    toolId === "workbuddy" ? 0 : Math.max(4, Math.round(size * paddingRatio));
   const innerSize = size - padding * 2;
 
   return (
@@ -140,7 +156,7 @@ export function ToolBadge({
         ROUNDED_CLASS[rounded],
         dimmed
           ? "bg-neutral-200 dark:bg-neutral-800"
-          : TOOL_BADGE_BG[toolId] ?? "bg-muted",
+          : (TOOL_BADGE_BG[toolId] ?? "bg-muted"),
         // 仅在非 dimmed 时应用品牌特定滤镜——dimmed 下我们让整张 logo 降饱和
         !dimmed && TOOL_ICON_FILTER[toolId],
         dimmed && "opacity-50 grayscale",

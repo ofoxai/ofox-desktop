@@ -163,9 +163,6 @@ export default function MainApp() {
   }
 
   return (
-    <ConsolePage
-      boundTools={boundTools}
-      onBoundToolsChanged={loadBoundTools}
-    />
+    <ConsolePage boundTools={boundTools} onBoundToolsChanged={loadBoundTools} />
   );
 }

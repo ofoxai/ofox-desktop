@@ -1,13 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { toast } from "sonner";
+import i18n from "@/i18n";
 import { BOUND_TOOLS_STORAGE_KEY } from "@/config/toolMeta";
 import { settingsApi } from "@/lib/api";
 import { manageToolApi, TOOL_PROTOCOL } from "@/lib/api/manageTool";
 import {
   fetchOfoxModels,
   filterOfoxModelsByProtocol,
+  filterOfoxModelsForWorkBuddy,
   pickCheapestPaidModel,
+  pickWorkBuddyCuratedModels,
+  toWorkBuddyModelSelection,
+  type WorkBuddyModelSelection,
 } from "@/lib/api/model-fetch";
 
 /**
@@ -71,6 +76,7 @@ async function ensureDefaultModel(tool: string): Promise<void> {
     await manageToolApi.setActiveModel(tool, picked);
   } catch (e) {
     console.warn(`[bindTools] setActiveModel(${tool}, ${picked}) failed`, e);
+    toast.warning(i18n.t("modelCompatibility.defaultModelFailed", { tool }));
   }
 }
 
@@ -107,6 +113,13 @@ async function mirrorBoundToolsToSettings(tools: string[]): Promise<void> {
  * Gemini 走 `env.GEMINI_API_KEY` + `GOOGLE_GEMINI_BASE_URL`，CLI 支持这条
  * 第三方走法（其 Google OAuth 是另一条独立分支，跟我们无关）。
  *
+ * `chatgpt` **故意不在此集合**：ChatGPT App 与 codex CLI 共用
+ * `~/.codex/config.toml`。用户 bind codex 时写下的配置就是 App 用的配置——
+ * 再对 chatgpt 走一次 `ofox_bind_tool` 会重写同一份文件，做的是重复工作。
+ * 这个共享关系仅适用于 App 的 Codex 模式；Chat/Work 使用 OpenAI 登录态。
+ * 集合外的工具在 `bindTools` 循环里直接进"视为成功"分支——记入 localStorage
+ * 但不动后端，chatgpt 就借这条路径进 bound 列表。
+ *
  * Keep this in sync with `commands/ofox_auth.rs::ofox_provider_for`.
  */
 const OFOX_AUTO_BIND_TOOLS: ReadonlySet<string> = new Set([
@@ -116,7 +129,25 @@ const OFOX_AUTO_BIND_TOOLS: ReadonlySet<string> = new Set([
   "opencode",
   "openclaw",
   "hermes",
+  "workbuddy",
 ]);
+
+async function selectWorkBuddyDefaults(): Promise<WorkBuddyModelSelection[]> {
+  const all = await fetchOfoxModels("openai");
+  const compatible = filterOfoxModelsForWorkBuddy(all);
+  if (compatible.length === 0) {
+    throw new Error("暂无同时支持文本、工具调用和 chat/completions 的模型");
+  }
+  const existingIds = await manageToolApi
+    .getWorkBuddyManagedModels()
+    .catch(() => []);
+  const existing = existingIds
+    .map((id) => compatible.find((model) => model.id === id))
+    .filter((model): model is (typeof compatible)[number] => !!model);
+  const selected =
+    existing.length > 0 ? existing : pickWorkBuddyCuratedModels(compatible);
+  return selected.map(toWorkBuddyModelSelection);
+}
 
 /**
  * Persist the bound-tool set and wire each tool through to OfoxAI.
@@ -169,11 +200,13 @@ export async function bindTools(tools: string[]): Promise<string[]> {
       continue;
     }
     try {
-      await invoke("ofox_bind_tool", { app: tool });
+      const modelSelections =
+        tool === "workbuddy" ? await selectWorkBuddyDefaults() : undefined;
+      await invoke("ofox_bind_tool", { app: tool, modelSelections });
       // bind 之后立即挑默认 model：必须在 ofox_bind_tool 完成后才跑，
       // 因为 setActiveModel 依赖 active provider 已切到 ofox-<tool>。
       // 单条失败不影响 bind 结果——ensureDefaultModel 内部自吞异常。
-      await ensureDefaultModel(tool);
+      if (tool !== "workbuddy") await ensureDefaultModel(tool);
       succeeded.push(tool);
     } catch (e) {
       console.error(`[bindTools] bind ${tool} failed`, e);

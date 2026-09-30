@@ -245,12 +245,18 @@ fn build_client(proxy_url: Option<&str>) -> Result<Client, String> {
         builder = builder.proxy(proxy);
         log::debug!("[GlobalProxy] Proxy configured: {}", mask_url(url));
     } else {
-        // 未设置全局代理时，让 reqwest 自动检测系统代理（环境变量）
-        // 若系统代理指向本机，禁用系统代理避免自环
+        // Follow the OS proxy when it is usable. A dead loopback proxy is
+        // common in VMs after a host port forward stops; reqwest otherwise
+        // routes every request into connection refused instead of going direct.
         if system_proxy_points_to_loopback() {
             builder = builder.no_proxy();
             log::warn!(
-                "[GlobalProxy] System proxy points to localhost, bypassing to avoid recursion"
+                "[GlobalProxy] System proxy points to this app, bypassing to avoid recursion"
+            );
+        } else if let Some(endpoint) = crate::commands::unavailable_system_proxy() {
+            builder = builder.no_proxy();
+            log::warn!(
+                "[GlobalProxy] Local system proxy {endpoint} is unavailable; using direct connection"
             );
         } else {
             log::debug!("[GlobalProxy] Following system proxy (no explicit proxy configured)");

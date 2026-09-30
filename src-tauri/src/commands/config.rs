@@ -120,6 +120,13 @@ pub async fn get_claude_code_config_path() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn get_config_dir(app: String) -> Result<String, String> {
+    if app.trim().eq_ignore_ascii_case("workbuddy") {
+        return Ok(crate::workbuddy_config::models_path()
+            .parent()
+            .expect("models path has a parent")
+            .to_string_lossy()
+            .to_string());
+    }
     let dir = match AppType::from_str(&app).map_err(|e| e.to_string())? {
         AppType::Claude => config::get_claude_config_dir(),
         AppType::Codex => codex_config::get_codex_config_dir(),
@@ -134,13 +141,20 @@ pub async fn get_config_dir(app: String) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn open_config_folder(handle: AppHandle, app: String) -> Result<bool, String> {
-    let config_dir = match AppType::from_str(&app).map_err(|e| e.to_string())? {
-        AppType::Claude => config::get_claude_config_dir(),
-        AppType::Codex => codex_config::get_codex_config_dir(),
-        AppType::Gemini => crate::gemini_config::get_gemini_dir(),
-        AppType::OpenCode => crate::opencode_config::get_opencode_dir(),
-        AppType::OpenClaw => crate::openclaw_config::get_openclaw_dir(),
-        AppType::Hermes => crate::hermes_config::get_hermes_dir(),
+    let config_dir = if app.trim().eq_ignore_ascii_case("workbuddy") {
+        crate::workbuddy_config::models_path()
+            .parent()
+            .expect("models path has a parent")
+            .to_path_buf()
+    } else {
+        match AppType::from_str(&app).map_err(|e| e.to_string())? {
+            AppType::Claude => config::get_claude_config_dir(),
+            AppType::Codex => codex_config::get_codex_config_dir(),
+            AppType::Gemini => crate::gemini_config::get_gemini_dir(),
+            AppType::OpenCode => crate::opencode_config::get_opencode_dir(),
+            AppType::OpenClaw => crate::openclaw_config::get_openclaw_dir(),
+            AppType::Hermes => crate::hermes_config::get_hermes_dir(),
+        }
     };
 
     if !config_dir.exists() {

@@ -4,7 +4,11 @@
 //! 主要面向第三方聚合站（硅基流动、OpenRouter 等）。
 
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use once_cell::sync::Lazy;
 
 /// 获取到的模型信息
 ///
@@ -16,6 +20,7 @@ use std::time::Duration;
 #[serde(rename_all = "camelCase")]
 pub struct FetchedModel {
     pub id: String,
+    pub name: Option<String>,
     pub owned_by: Option<String>,
     pub pricing_prompt: Option<String>,
     /// 上游 `supported_endpoints`——形如 `["/v1/chat/completions", "/v1/responses"]`。
@@ -23,6 +28,9 @@ pub struct FetchedModel {
     /// 该字段（老 catalog / gemini 端点）时为 `None`；调用方按"未知则不过滤"
     /// 处理，避免安全降级把合法模型也砍掉。
     pub supported_endpoints: Option<Vec<String>>,
+    pub supported_parameters: Option<Vec<String>>,
+    pub input_modalities: Option<Vec<String>>,
+    pub output_modalities: Option<Vec<String>>,
 }
 
 /// OpenAI 兼容的 /v1/models 响应格式
@@ -34,10 +42,24 @@ struct ModelsResponse {
 #[derive(Debug, Deserialize)]
 struct ModelEntry {
     id: String,
+    #[serde(default)]
+    name: Option<String>,
     owned_by: Option<String>,
     pricing: Option<ModelPricing>,
     #[serde(default)]
     supported_endpoints: Option<Vec<String>>,
+    #[serde(default)]
+    supported_parameters: Option<Vec<String>>,
+    #[serde(default)]
+    architecture: Option<ModelArchitecture>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModelArchitecture {
+    #[serde(default)]
+    input_modalities: Option<Vec<String>>,
+    #[serde(default)]
+    output_modalities: Option<Vec<String>>,
 }
 
 /// 上游 model 条目里的 pricing 子对象。只挑 `prompt` 字段——其余如
@@ -69,6 +91,45 @@ struct GeminiModelEntry {
 }
 
 const FETCH_TIMEOUT_SECS: u64 = 15;
+const CATALOG_FRESH_FOR: Duration = Duration::from_secs(10 * 60);
+const CATALOG_STALE_FOR: Duration = Duration::from_secs(24 * 60 * 60);
+
+struct CatalogCacheEntry {
+    fetched_at: Instant,
+    models: Vec<FetchedModel>,
+}
+
+static CATALOG_CACHE: Lazy<Mutex<HashMap<String, CatalogCacheEntry>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// A stale catalog can still guide a stream probe, but a model absent from it
+/// must not be reported as incompatible.
+pub struct OfoxCatalog {
+    pub models: Vec<FetchedModel>,
+    pub stale: bool,
+}
+
+fn cached_catalog(url: &str, max_age: Duration) -> Option<OfoxCatalog> {
+    let cache = CATALOG_CACHE.lock().ok()?;
+    let entry = cache.get(url)?;
+    let age = entry.fetched_at.elapsed();
+    (age <= max_age).then(|| OfoxCatalog {
+        models: entry.models.clone(),
+        stale: age > CATALOG_FRESH_FOR,
+    })
+}
+
+fn save_catalog(url: String, models: &[FetchedModel]) {
+    if let Ok(mut cache) = CATALOG_CACHE.lock() {
+        cache.insert(
+            url,
+            CatalogCacheEntry {
+                fetched_at: Instant::now(),
+                models: models.to_vec(),
+            },
+        );
+    }
+}
 
 /// 过滤非聊天模型（embedding、图片生成、TTS 等）
 fn is_chat_model(id: &str) -> bool {
@@ -129,62 +190,134 @@ fn ofox_gemini_models_url() -> String {
 /// - "gemini":    GET /gemini/v1beta/models  —— models[] 原生格式，需把
 ///   `name = "models/provider/id"` 还原成 `provider/id`
 ///
-/// `access_token` 是 OfoxAI OAuth 颁发的 access_token。三条端点在文档里都标
-/// 注「无需 API Key」可匿名调用，但 dev 网关曾经短暂地对 /gemini 强制鉴权，
-/// 故这里在拿得到 token 时统一带上 Bearer——线上无害（公开接口忽略），dev
-/// 严格模式也能过。`None` 走匿名，由 gateway 决定是否放行。
+/// Catalog requests are anonymous first. Some gateways require OAuth for
+/// particular paths, so a 401/403 is retried once with the session token.
+/// Cached entries are keyed by the resolved URL, keeping .ai and .io apart.
 pub async fn fetch_ofox_models(
     protocol: &str,
     access_token: Option<&str>,
 ) -> Result<Vec<FetchedModel>, String> {
-    let client = crate::proxy::http_client::get();
+    fetch_ofox_catalog(protocol, access_token, false)
+        .await
+        .map(|catalog| catalog.models)
+}
 
-    /// 把 access_token 统一拼成 Authorization 头加到请求上。
-    fn with_auth(
-        req: reqwest::RequestBuilder,
-        access_token: Option<&str>,
-    ) -> reqwest::RequestBuilder {
-        match access_token {
-            Some(t) if !t.is_empty() => req.header("Authorization", format!("Bearer {t}")),
-            _ => req,
+pub async fn refresh_ofox_models(
+    protocol: &str,
+    access_token: Option<&str>,
+) -> Result<Vec<FetchedModel>, String> {
+    fetch_ofox_catalog(protocol, access_token, true)
+        .await
+        .map(|catalog| catalog.models)
+}
+
+pub async fn fetch_ofox_catalog(
+    protocol: &str,
+    access_token: Option<&str>,
+    force_refresh: bool,
+) -> Result<OfoxCatalog, String> {
+    let url = match protocol {
+        "openai" => ofox_openai_models_url(),
+        "anthropic" => ofox_anthropic_models_url(),
+        "gemini" => ofox_gemini_models_url(),
+        _ => return Err(format!("Unsupported protocol: {protocol}")),
+    };
+    if !force_refresh {
+        if let Some(catalog) = cached_catalog(&url, CATALOG_FRESH_FOR) {
+            return Ok(catalog);
         }
     }
 
-    match protocol {
-        "openai" | "anthropic" => {
-            let url = if protocol == "openai" {
-                ofox_openai_models_url()
+    let client = crate::proxy::http_client::get();
+    match fetch_ofox_models_uncached(&client, protocol, &url, access_token).await {
+        Ok(models) => {
+            save_catalog(url, &models);
+            Ok(OfoxCatalog {
+                models,
+                stale: false,
+            })
+        }
+        Err(error) if !force_refresh => {
+            if let Some(catalog) = cached_catalog(&url, CATALOG_STALE_FOR) {
+                log::warn!("Ofox model catalog request failed; using recent cache: {error}");
+                Ok(catalog)
             } else {
-                ofox_anthropic_models_url()
-            };
+                Err(error)
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
 
-            let response = with_auth(client.get(&url), access_token)
+fn request_error(error: reqwest::Error) -> String {
+    if error.is_timeout() {
+        "模型目录请求超时".into()
+    } else if error.is_connect() {
+        "无法连接模型目录服务器".into()
+    } else {
+        "模型目录请求失败".into()
+    }
+}
+
+async fn request_ofox_catalog(
+    client: &reqwest::Client,
+    url: &str,
+    access_token: Option<&str>,
+) -> Result<reqwest::Response, String> {
+    let mut response = client
+        .get(url)
+        .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
+        .send()
+        .await
+        .map_err(request_error)?;
+    if matches!(response.status().as_u16(), 401 | 403) {
+        if let Some(token) = access_token.filter(|token| !token.is_empty()) {
+            response = client
+                .get(url)
+                .bearer_auth(token)
                 .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
                 .send()
                 .await
-                .map_err(|e| format!("Request failed: {e}"))?;
+                .map_err(request_error)?;
+        }
+    }
+    if !response.status().is_success() {
+        return Err(format!("模型目录返回 HTTP {}", response.status().as_u16()));
+    }
+    Ok(response)
+}
 
-            let status = response.status();
-            if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
-                return Err(format!("HTTP {status}: {body}"));
-            }
-
+async fn fetch_ofox_models_uncached(
+    client: &reqwest::Client,
+    protocol: &str,
+    url: &str,
+    access_token: Option<&str>,
+) -> Result<Vec<FetchedModel>, String> {
+    let response = request_ofox_catalog(client, url, access_token).await?;
+    match protocol {
+        "openai" | "anthropic" => {
             let resp: ModelsResponse = response
                 .json()
                 .await
-                .map_err(|e| format!("Failed to parse response: {e}"))?;
+                .map_err(|_| "模型目录响应格式错误".to_string())?;
 
             let mut models: Vec<FetchedModel> = resp
                 .data
-                .unwrap_or_default()
+                .ok_or_else(|| "模型目录响应缺少模型列表".to_string())?
                 .into_iter()
                 .filter(|m| is_chat_model(&m.id))
                 .map(|m| FetchedModel {
                     id: m.id,
+                    name: m.name,
                     owned_by: m.owned_by,
                     pricing_prompt: m.pricing.and_then(|p| p.prompt),
                     supported_endpoints: m.supported_endpoints,
+                    supported_parameters: m.supported_parameters,
+                    input_modalities: m
+                        .architecture
+                        .as_ref()
+                        .and_then(|a| a.input_modalities.clone()),
+                    output_modalities: m.architecture.and_then(|a| a.output_modalities),
                 })
                 .collect();
 
@@ -192,26 +325,14 @@ pub async fn fetch_ofox_models(
             Ok(models)
         }
         "gemini" => {
-            let response = with_auth(client.get(ofox_gemini_models_url()), access_token)
-                .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
-                .send()
-                .await
-                .map_err(|e| format!("Request failed: {e}"))?;
-
-            let status = response.status();
-            if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
-                return Err(format!("HTTP {status}: {body}"));
-            }
-
             let resp: GeminiModelsResponse = response
                 .json()
                 .await
-                .map_err(|e| format!("Failed to parse response: {e}"))?;
+                .map_err(|_| "模型目录响应格式错误".to_string())?;
 
             let mut models: Vec<FetchedModel> = resp
                 .models
-                .unwrap_or_default()
+                .ok_or_else(|| "模型目录响应缺少模型列表".to_string())?
                 .into_iter()
                 .map(|m| {
                     // `name` 形如 `models/google/gemini-2.5-pro`，去掉 "models/" 前缀
@@ -224,9 +345,13 @@ pub async fn fetch_ofox_models(
                         .to_string();
                     FetchedModel {
                         id,
+                        name: None,
                         owned_by: m.owned_by,
                         pricing_prompt: m.pricing.and_then(|p| p.prompt),
                         supported_endpoints: m.supported_endpoints,
+                        supported_parameters: None,
+                        input_modalities: None,
+                        output_modalities: None,
                     }
                 })
                 .filter(|m| is_chat_model(&m.id))
@@ -279,9 +404,16 @@ pub async fn fetch_models(
         .into_iter()
         .map(|m| FetchedModel {
             id: m.id,
+            name: m.name,
             owned_by: m.owned_by,
             pricing_prompt: m.pricing.and_then(|p| p.prompt),
             supported_endpoints: m.supported_endpoints,
+            supported_parameters: m.supported_parameters,
+            input_modalities: m
+                .architecture
+                .as_ref()
+                .and_then(|a| a.input_modalities.clone()),
+            output_modalities: m.architecture.and_then(|a| a.output_modalities),
         })
         .collect();
 
@@ -325,6 +457,130 @@ fn build_models_url(base_url: &str, is_full_url: bool) -> Result<String, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_model(id: &str) -> FetchedModel {
+        FetchedModel {
+            id: id.into(),
+            name: None,
+            owned_by: None,
+            pricing_prompt: None,
+            supported_endpoints: None,
+            supported_parameters: None,
+            input_modalities: None,
+            output_modalities: None,
+        }
+    }
+
+    #[test]
+    fn catalog_cache_is_partitioned_by_resolved_region_url() {
+        let io_url = "test://api.ofox.io/v1/models";
+        let ai_url = "test://api.ofox.ai/v1/models";
+        save_catalog(io_url.into(), &[sample_model("io-model")]);
+        assert_eq!(
+            cached_catalog(io_url, CATALOG_FRESH_FOR).unwrap().models[0].id,
+            "io-model"
+        );
+        assert!(cached_catalog(ai_url, CATALOG_FRESH_FOR).is_none());
+    }
+
+    #[test]
+    fn stale_catalog_is_available_only_for_bounded_fallback() {
+        let url = "test://stale-model-catalog";
+        CATALOG_CACHE.lock().unwrap().insert(
+            url.into(),
+            CatalogCacheEntry {
+                fetched_at: Instant::now() - CATALOG_FRESH_FOR - Duration::from_secs(1),
+                models: vec![sample_model("cached-model")],
+            },
+        );
+        assert!(cached_catalog(url, CATALOG_FRESH_FOR).is_none());
+        assert!(cached_catalog(url, CATALOG_STALE_FOR).unwrap().stale);
+        CATALOG_CACHE.lock().unwrap().insert(
+            url.into(),
+            CatalogCacheEntry {
+                fetched_at: Instant::now() - CATALOG_STALE_FOR - Duration::from_secs(1),
+                models: vec![sample_model("expired-model")],
+            },
+        );
+        assert!(cached_catalog(url, CATALOG_STALE_FOR).is_none());
+    }
+
+    #[tokio::test]
+    async fn public_catalog_does_not_send_oauth_token() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "openai/gpt-6-luna"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let url = format!("{}/v1/models", server.uri());
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let models = fetch_ofox_models_uncached(&client, "openai", &url, Some("secret-token"))
+            .await
+            .unwrap();
+        assert_eq!(models[0].id, "openai/gpt-6-luna");
+        let requests = server.received_requests().await.unwrap();
+        assert!(!requests[0].headers.contains_key("authorization"));
+    }
+
+    #[tokio::test]
+    async fn private_catalog_retries_once_with_oauth_token() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("authorization", "Bearer session-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "openai/gpt-6-luna"}]
+            })))
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(401))
+            .with_priority(2)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let url = format!("{}/v1/models", server.uri());
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let models = fetch_ofox_models_uncached(&client, "openai", &url, Some("session-token"))
+            .await
+            .unwrap();
+        assert_eq!(models[0].id, "openai/gpt-6-luna");
+    }
+
+    #[tokio::test]
+    async fn malformed_catalog_is_not_treated_as_empty_compatible_catalog() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "unexpected": []
+            })))
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let url = format!("{}/v1/models", server.uri());
+        let error = fetch_ofox_models_uncached(&client, "openai", &url, None)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error, "模型目录响应缺少模型列表");
+    }
 
     #[test]
     fn test_build_models_url_basic() {
@@ -417,8 +673,14 @@ mod tests {
         ]}"#;
         let resp: ModelsResponse = serde_json::from_str(json).unwrap();
         let data = resp.data.unwrap();
-        assert_eq!(data[0].pricing.as_ref().and_then(|p| p.prompt.as_deref()), Some("0.000001"));
-        assert_eq!(data[1].pricing.as_ref().and_then(|p| p.prompt.as_deref()), Some("0.000005"));
+        assert_eq!(
+            data[0].pricing.as_ref().and_then(|p| p.prompt.as_deref()),
+            Some("0.000001")
+        );
+        assert_eq!(
+            data[1].pricing.as_ref().and_then(|p| p.prompt.as_deref()),
+            Some("0.000005")
+        );
     }
 
     #[test]

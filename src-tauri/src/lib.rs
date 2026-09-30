@@ -21,10 +21,11 @@ mod ofox_auth;
 // `ofox_auth_sync` 模块在 bind 直写改造（commit 4）后整体废弃——OAuth
 // access_token 不再被当 LLM key 写进 ofox-* provider 的 settings_config。
 // 历史实现见 git log。
+mod model_compat;
 mod ofox_apex;
+mod ofox_api_keys;
 mod ofox_endpoints;
 mod ofox_secret;
-mod ofox_api_keys;
 mod openclaw_config;
 mod opencode_config;
 mod panic_hook;
@@ -41,6 +42,7 @@ mod store;
 mod tray;
 mod tray_popover;
 mod usage_script;
+mod workbuddy_config;
 
 pub use app_config::{AppType, InstalledSkill, McpApps, McpServer, MultiAppConfig, SkillApps};
 pub use codex_config::{get_codex_auth_path, get_codex_config_path, write_codex_live_atomic};
@@ -504,7 +506,7 @@ pub fn run() {
             {
                 match crate::services::provider::import_default_config(
                     &app_state,
-                    app_type.clone(),
+                    app_type,
                 ) {
                     Ok(true) => log::info!(
                         "✓ Imported live config for {} as default provider",
@@ -535,6 +537,17 @@ pub fn run() {
                 }
                 Ok(_) => {}
                 Err(e) => log::warn!("✗ Failed to seed OfoxAI providers: {e}"),
+            }
+
+            // OpenCode's legacy compatible adapter expects streamed
+            // `delta.content`, while Ofox's Chat Completions endpoint returns
+            // a final `message.content` event. Migrate only the Ofox-managed
+            // provider to the Responses adapter; unrelated providers remain
+            // untouched.
+            match crate::opencode_config::migrate_ofox_provider_transport() {
+                Ok(true) => log::info!("✓ Migrated Ofox OpenCode provider to Responses API"),
+                Ok(false) => {}
+                Err(e) => log::warn!("✗ Failed to migrate Ofox OpenCode provider: {e}"),
             }
 
             // 老用户 / 已确认的路径由 `fresh_install_at_startup` 自行拦截，这里不做写入。
@@ -684,7 +697,7 @@ pub fn run() {
                 ] {
                     match crate::services::prompt::PromptService::import_from_file_on_first_launch(
                         &app_state,
-                        app.clone(),
+                        app,
                     ) {
                         Ok(count) if count > 0 => {
                             log::info!("✓ Imported {count} prompt(s) for {}", app.as_str());
@@ -885,6 +898,56 @@ pub fn run() {
                 log::info!("✓ CodexOAuthManager initialized");
             }
 
+            // Initialize the saved outbound proxy before apex detection. The
+            // latter can run while credential storage awaits Keychain access.
+            {
+                let db = &app.state::<AppState>().db;
+                let proxy_url = db.get_global_proxy_url().ok().flatten();
+
+                if let Err(e) = crate::proxy::http_client::init(proxy_url.as_deref()) {
+                    log::error!(
+                        "[GlobalProxy] [GP-005] Failed to initialize with saved config: {e}"
+                    );
+
+                    if proxy_url.is_some() {
+                        log::warn!(
+                            "[GlobalProxy] [GP-006] Clearing invalid proxy config from database"
+                        );
+                        if let Err(clear_err) = db.set_global_proxy_url(None) {
+                            log::error!(
+                                "[GlobalProxy] [GP-007] Failed to clear invalid config: {clear_err}"
+                            );
+                        }
+                    }
+
+                    if let Err(fallback_err) = crate::proxy::http_client::init(None) {
+                        log::error!(
+                            "[GlobalProxy] [GP-008] Failed to initialize direct connection: {fallback_err}"
+                        );
+                    }
+                }
+            }
+
+            // Reconcile managed WorkBuddy URLs as soon as the database is ready.
+            // Credential initialization below may wait for a macOS Keychain
+            // authorization prompt, but endpoint migration needs no secret.
+            let apex_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let client = crate::proxy::http_client::get();
+                crate::ofox_apex::ensure_apex_resolved(&apex_handle, &client).await;
+                if let Some(state) = apex_handle.try_state::<crate::store::AppState>() {
+                    match crate::workbuddy_config::reconcile_managed_endpoint(&state.db).await {
+                        Ok(true) => log::info!(
+                            "[WorkBuddy] updated managed model endpoint for current apex"
+                        ),
+                        Ok(false) => {}
+                        Err(error) => {
+                            log::warn!("[WorkBuddy] endpoint reconciliation failed: {error}")
+                        }
+                    }
+                }
+            });
+
             // 初始化 OfoxAuthManager
             {
                 use crate::ofox_auth::OfoxAuthManager;
@@ -902,23 +965,6 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     let manager = attach_state.read().await;
                     manager.attach_app_handle(attach_handle).await;
-                });
-
-                // First-launch apex resolution: hit `ip-api.com/json` once and
-                // pin the result (CN → ofox.io, else → ofox.ai) into
-                // `settings.json::ofoxApex`. Subsequent launches see
-                // `ofoxApexResolved == true` and skip the probe.
-                //
-                // Spawned concurrently so window paint / login flow are not
-                // blocked by a slow ip-api response. While the probe runs,
-                // `current_apex()` falls back to "ofox.ai" — fine for `dev`
-                // (everything is localhost anyway) and acceptable for first
-                // launch in CN (LoginPage will refresh after the
-                // `ofox-apex-changed` event lands, ~ a few seconds later).
-                let apex_handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    let client = crate::proxy::http_client::get();
-                    crate::ofox_apex::ensure_apex_resolved(&apex_handle, &client).await;
                 });
 
                 // Periodic silent refresh: tick every 30 min and, if the
@@ -974,37 +1020,6 @@ pub fn run() {
 
                 app.manage(state);
                 log::info!("✓ OfoxAuthManager initialized");
-            }
-
-            // 初始化全局出站代理 HTTP 客户端
-            {
-                let db = &app.state::<AppState>().db;
-                let proxy_url = db.get_global_proxy_url().ok().flatten();
-
-                if let Err(e) = crate::proxy::http_client::init(proxy_url.as_deref()) {
-                    log::error!(
-                        "[GlobalProxy] [GP-005] Failed to initialize with saved config: {e}"
-                    );
-
-                    // 清除无效的代理配置
-                    if proxy_url.is_some() {
-                        log::warn!(
-                            "[GlobalProxy] [GP-006] Clearing invalid proxy config from database"
-                        );
-                        if let Err(clear_err) = db.set_global_proxy_url(None) {
-                            log::error!(
-                                "[GlobalProxy] [GP-007] Failed to clear invalid config: {clear_err}"
-                            );
-                        }
-                    }
-
-                    // 使用直连模式重新初始化
-                    if let Err(fallback_err) = crate::proxy::http_client::init(None) {
-                        log::error!(
-                            "[GlobalProxy] [GP-008] Failed to initialize direct connection: {fallback_err}"
-                        );
-                    }
-                }
             }
 
             // 异常退出恢复 + 代理状态自动恢复
@@ -1092,6 +1107,7 @@ pub fn run() {
                             &state.proxy_service,
                             &ofox_state.0,
                             app,
+                            None,
                         )
                         .await
                         {
@@ -1288,8 +1304,11 @@ pub fn run() {
             commands::open_external,
             // Tool installer (macOS only, delegates to scripts/installer/init.sh)
             commands::install_tool,
+            commands::update_tool,
+            commands::is_tool_app_running,
             // 主页"打开"按钮：在系统终端里拉起工具 CLI，独立生命周期
             commands::launch_tool_cli,
+            commands::launch_tool,
             commands::get_init_error,
             commands::get_migration_result,
             commands::get_skills_migration_result,
@@ -1593,7 +1612,11 @@ pub fn run() {
             commands::manage_tool::get_tool_config_file_path,
             commands::manage_tool::get_active_ofox_model,
             commands::manage_tool::set_active_ofox_model,
+            commands::manage_tool::get_workbuddy_managed_models,
+            commands::manage_tool::set_workbuddy_managed_models,
+            commands::manage_tool::get_workbuddy_endpoint_status,
             commands::manage_tool::ofox_ping_model,
+            commands::manage_tool::check_ofox_model_compatibility,
             commands::show_main_window,
         ]);
 
@@ -1657,9 +1680,12 @@ pub fn run() {
                         let url_str = url.to_string();
                         log::info!("RunEvent::Opened with URL: {url_str}");
 
-                        if url_str.starts_with("ccswitch://") || url_str.starts_with("ofoxswitch://") {
+                        if url_str.starts_with("ccswitch://")
+                            || url_str.starts_with("ofoxswitch://")
+                        {
                             if crate::lightweight::is_lightweight_mode() {
-                                if let Err(e) = crate::lightweight::exit_lightweight_mode(app_handle)
+                                if let Err(e) =
+                                    crate::lightweight::exit_lightweight_mode(app_handle)
                                 {
                                     log::error!("退出轻量模式重建窗口失败: {e}");
                                 }
@@ -1750,15 +1776,14 @@ fn initialize_common_config_snippets(state: &store::AppState) {
             continue;
         }
 
-        let settings = match crate::services::provider::ProviderService::read_live_settings(
-            app_type.clone(),
-        ) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
+        let settings =
+            match crate::services::provider::ProviderService::read_live_settings(app_type) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
 
         match crate::services::provider::ProviderService::extract_common_config_snippet_from_settings(
-            app_type.clone(),
+            app_type,
             &settings,
         ) {
             Ok(snippet) if !snippet.is_empty() && snippet != "{}" => {
@@ -1801,7 +1826,7 @@ fn initialize_common_config_snippets(state: &store::AppState) {
         ] {
             if let Err(e) = crate::services::provider::ProviderService::migrate_legacy_common_config_usage_if_needed(
                 state,
-                app_type.clone(),
+                app_type,
             ) {
                 log::warn!(
                     "✗ Failed to migrate legacy common-config usage for {}: {e}",

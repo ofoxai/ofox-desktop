@@ -30,6 +30,7 @@ pub fn reset_test_fs() {
         ".claude",
         ".codex",
         ".cc-switch",
+        ".ofox-desktop",
         ".gemini",
         ".config",
         ".openclaw",

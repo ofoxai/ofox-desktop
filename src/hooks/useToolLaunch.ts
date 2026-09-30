@@ -2,8 +2,8 @@ import { useCallback, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 /**
- * 主页"打开"按钮：调 Rust `launch_tool_cli`，让系统终端（Terminal.app /
- * iTerm2 等）打开新窗口跑对应工具的 CLI。子进程归属新开的终端，Ofox 主
+ * 主页"打开"按钮：调统一的 `launch_tool`。CLI 工具在系统终端中运行，
+ * WorkBuddy 这类桌面客户端则直接通过系统应用启动。CLI 子进程归属新开的终端，Ofox 主
  * 进程退出后 CLI 仍然存活，直到用户主动关闭那个终端窗口——这是"独立生命
  * 周期"的实现落点，跟 useToolInstall 的 osascript 弹窗同款机制。
  *
@@ -36,9 +36,9 @@ export function useToolLaunch(
       if (already) return;
 
       try {
-        await invoke<void>("launch_tool_cli", { toolId });
+        await invoke<void>("launch_tool", { toolId });
       } catch (e) {
-        console.error(`[useToolLaunch] launch_tool_cli(${toolId}) 失败`, e);
+        console.error(`[useToolLaunch] launch_tool(${toolId}) 失败`, e);
         onError?.(toolId, e);
       } finally {
         // 短延时清 loading——invoke 已返回但用户还没看到终端弹出，

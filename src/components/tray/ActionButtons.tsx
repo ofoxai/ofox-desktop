@@ -2,10 +2,7 @@ import { settingsApi } from "@/lib/api";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
 import { isOfoxBillingManager } from "@/lib/api/ofoxAuth";
-import {
-  ofoxActivityUrl,
-  ofoxWalletUrl,
-} from "@/lib/ofoxUrls";
+import { ofoxActivityUrl, ofoxWalletUrl } from "@/lib/ofoxUrls";
 
 /**
  * Tray popover 顶部的两个 CTA：「充值」+「用量详情」。

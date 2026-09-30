@@ -26,6 +26,7 @@ interface ProviderPresetSelectorProps {
   onUniversalPresetSelect?: (preset: UniversalProviderPreset) => void;
   onManageUniversalProviders?: () => void;
   category?: ProviderCategory; // 当前选中的分类
+  isOfoxApexLoading?: boolean;
 }
 
 export function ProviderPresetSelector({
@@ -37,6 +38,7 @@ export function ProviderPresetSelector({
   onUniversalPresetSelect,
   onManageUniversalProviders,
   category,
+  isOfoxApexLoading = false,
 }: ProviderPresetSelectorProps) {
   const { t } = useTranslation();
 
@@ -143,18 +145,20 @@ export function ProviderPresetSelector({
     .flatMap((cat) => groupedPresets[cat] ?? [])
     .find(
       (entry) =>
-        "providerType" in entry.preset &&
-        entry.preset.providerType === "ofox",
+        "providerType" in entry.preset && entry.preset.providerType === "ofox",
     );
 
   const renderPresetButton = (entry: PresetEntry, category?: string) => {
     const isSelected = selectedPresetId === entry.id;
     const isPartner = entry.preset.isPartner;
+    const isOfox =
+      "providerType" in entry.preset && entry.preset.providerType === "ofox";
     return (
       <button
         key={entry.id}
         type="button"
         onClick={() => onPresetChange(entry.id)}
+        disabled={isOfox && isOfoxApexLoading}
         className={`${getPresetButtonClass(isSelected, entry.preset)} relative`}
         style={getPresetButtonStyle(isSelected, entry.preset)}
         title={

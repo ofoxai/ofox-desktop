@@ -14,20 +14,21 @@
 //! `ofox_unbind_tool`).
 //!
 //! Layout note: model fields land in different shapes depending on the tool
-//! (Anthropic env, Codex TOML, Gemini env, OpenCode dict, OpenClaw/Hermes
+//! (Anthropic env, Codex TOML, Gemini env, OpenCode/Hermes dict, OpenClaw
 //! list). The read/write helpers below mirror what
 //! `services/provider/live.rs` ultimately consumes.
 
+use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::State;
 use tokio::sync::RwLock;
 
-use crate::app_config::AppType;
+use crate::app_config::{AppType, BindableTool};
 use crate::commands::ofox_auth::OfoxAuthState;
-use crate::ofox_auth::OfoxAuthManager;
 use crate::ofox_apex::gateway_base;
+use crate::ofox_auth::OfoxAuthManager;
 use crate::store::AppState;
 
 // Gateway base URL for the connectivity probe. Mirrors the dev/prod toggle in
@@ -51,6 +52,11 @@ use crate::store::AppState;
 /// "settings/config" file — that's the one users would actually inspect.
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_tool_config_file_path(app: String) -> Result<String, String> {
+    if app.trim().eq_ignore_ascii_case("workbuddy") {
+        return Ok(crate::workbuddy_config::models_path()
+            .to_string_lossy()
+            .to_string());
+    }
     let app_type = AppType::from_str(&app).map_err(|e| format!("无效的应用类型: {e}"))?;
     let path = match app_type {
         AppType::Claude => crate::config::get_claude_settings_path(),
@@ -78,12 +84,23 @@ pub fn get_tool_config_file_path(app: String) -> Result<String, String> {
 /// (unknown app, DB failure). The dialog treats `""` as "未设置" and
 /// still allows the user to save a new value.
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_active_ofox_model(
+pub async fn get_active_ofox_model(
     state: State<'_, AppState>,
     app: String,
 ) -> Result<String, String> {
+    if app.trim().eq_ignore_ascii_case("workbuddy") {
+        return crate::workbuddy_config::active_model(&state.db).await;
+    }
     let app_type = AppType::from_str(&app).map_err(|e| format!("无效的应用类型: {e}"))?;
     read_active_model_for(&state, &app_type)
+}
+
+/// Return every WorkBuddy model currently managed by Ofox, in display order.
+#[tauri::command]
+pub async fn get_workbuddy_managed_models(
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    crate::workbuddy_config::active_models(&state.db).await
 }
 
 /// Plain-reference helper extracted from [`get_active_ofox_model`] so
@@ -94,10 +111,17 @@ pub fn get_active_ofox_model(
 /// Returns `Ok("")` when the active provider exists but has no model field
 /// configured (callers treat empty as "unset"); only surfaces `Err` for hard
 /// DB failures or when there is no active provider.
-fn read_active_model_for(
+fn read_active_model_for(state: &AppState, app_type: &AppType) -> Result<String, String> {
+    read_active_provider_and_model_for(state, app_type).map(|(_, model)| model)
+}
+
+/// Resolve the active provider id together with the model stored in that
+/// provider's configuration. The launcher uses both pieces for tools such as
+/// OpenCode, whose CLI model syntax is `<provider-id>/<model-id>`.
+pub(crate) fn read_active_provider_and_model_for(
     state: &AppState,
     app_type: &AppType,
-) -> Result<String, String> {
+) -> Result<(String, String), String> {
     let app_str = app_type.as_str();
 
     let provider_id = state
@@ -112,7 +136,8 @@ fn read_active_model_for(
         .map_err(|e| format!("读取 {provider_id} 失败: {e}"))?
         .ok_or_else(|| format!("供应商 {provider_id} 不存在"))?;
 
-    Ok(read_model_from_settings(app_type, &provider.settings_config))
+    let model = read_model_from_settings(app_type, &provider.settings_config);
+    Ok((provider_id, model))
 }
 
 // ---------------------------------------------------------------------------
@@ -127,7 +152,7 @@ fn read_active_model_for(
 /// signals "fall back to OfoxAI's default routing".
 ///
 /// For ofox-* providers this goes through the **bind 直写** path
-/// ([`ProxyService::ofox_write_direct_to_live`])：拿 keychain 里的 sk-of-、
+/// ([`ProxyService::ofox_write_direct_to_live`])：读取已绑定的 sk-of-、
 /// 把 DB 里的 settings_config（含新 model）+ token 合成完整磁盘 config 写盘。
 /// 不调老的 `refresh_takeover_for_app`——那条会写 `PROXY_MANAGED` 占位符把
 /// 真 sk-of- 覆盖掉，并触发 backup 删除（破坏 unbind 可恢复性）。
@@ -139,7 +164,28 @@ pub async fn set_active_ofox_model(
     ofox_state: State<'_, OfoxAuthState>,
     app: String,
     model: String,
+    model_selection: Option<crate::workbuddy_config::WorkBuddyModelSelection>,
+    compatibility_protocol: Option<String>,
+    allow_unverified: Option<bool>,
 ) -> Result<(), String> {
+    if app.trim().eq_ignore_ascii_case("workbuddy") {
+        let selection = model_selection
+            .ok_or_else(|| "切换 WorkBuddy 模型时缺少能力信息，请刷新模型列表后重试".to_string())?;
+        if selection.id.trim() != model.trim() {
+            return Err("WorkBuddy 模型 ID 与能力信息不一致，请刷新后重试".to_string());
+        }
+        crate::workbuddy_config::validate_selections(std::slice::from_ref(&selection))?;
+        let api_key = crate::ofox_api_keys::fetch_or_create_api_key(
+            BindableTool::WorkBuddy,
+            crate::ofox_api_keys::FetchMode::CachedOk,
+            &ofox_state.0,
+        )
+        .await
+        .map_err(|e| format!("获取 WorkBuddy OfoxAI API key 失败: {e}"))?;
+        crate::workbuddy_config::sync_selected_models(&state.db, &api_key, &[selection]).await?;
+        crate::ofox_api_keys::mark_key_used(BindableTool::WorkBuddy);
+        return Ok(());
+    }
     let app_type = AppType::from_str(&app).map_err(|e| format!("无效的应用类型: {e}"))?;
     let app_str = app_type.as_str();
 
@@ -155,40 +201,206 @@ pub async fn set_active_ofox_model(
         .map_err(|e| format!("读取 {provider_id} 失败: {e}"))?
         .ok_or_else(|| format!("供应商 {provider_id} 不存在"))?;
 
-    write_model_into_settings(&app_type, &mut provider.settings_config, model.trim())?;
-
-    state
-        .db
-        .update_provider_settings_config(app_str, &provider_id, &provider.settings_config)
-        .map_err(|e| format!("更新 {provider_id} settings_config 失败: {e}"))?;
-
-    if provider_id.starts_with("ofox-") {
-        // ofox 直写路径：拿 keychain 里的 sk-of-（CachedOk——已经 bind 过的工具
-        // 一定命中；命中不了说明 keychain 被清/迁移，这种异常态 fetch 会
-        // 调 /openapi/api-keys 重新签发）+ 新 model 合成完整磁盘 config 写盘。
-        let api_key = crate::ofox_api_keys::fetch_or_create_api_key(
-            app_type,
-            crate::ofox_api_keys::FetchMode::CachedOk,
-            &ofox_state.0,
-        )
-        .await
-        .map_err(|e| format!("获取 {app_str} OfoxAI API key 失败: {e}"))?;
-
-        state
-            .proxy_service
-            .ofox_write_direct_to_live(&app_type, &api_key)
-            .await
-            .map_err(|e| format!("刷新 {app_str} live 配置失败: {e}"))?;
+    let catalog_token = if provider_id.starts_with("ofox-") && !model.trim().is_empty() {
+        catalog_access_token(&ofox_state.0).await
     } else {
-        // 非 ofox provider 走老 takeover 路径——保留兼容形态。
-        state
-            .proxy_service
-            .refresh_takeover_for_app(app_str)
-            .await
-            .map_err(|e| format!("刷新 {app_str} live 配置失败: {e}"))?;
+        None
+    };
+    let resolved_protocol = if provider_id.starts_with("ofox-") && !model.trim().is_empty() {
+        validate_compatibility(
+            app_type.into(),
+            &model,
+            compatibility_protocol.as_deref(),
+            allow_unverified.unwrap_or(false),
+            catalog_token.as_deref(),
+        )
+        .await?
+    } else {
+        None
+    };
+    let previous_settings = provider.settings_config.clone();
+
+    write_model_into_settings(&app_type, &mut provider.settings_config, model.trim())?;
+    if app_type == AppType::OpenCode && !model.trim().is_empty() {
+        if let Some(protocol) = resolved_protocol.as_deref() {
+            let npm = match protocol {
+                "responses" => crate::opencode_config::OFOX_RESPONSES_NPM,
+                "chatCompletions" => crate::opencode_config::OFOX_CHAT_NPM,
+                _ => return Err("OpenCode 协议选择无效".into()),
+            };
+            provider.settings_config["models"][model.trim()]["provider"] =
+                serde_json::json!({ "npm": npm });
+        }
     }
 
+    let api_key = if provider_id.starts_with("ofox-") {
+        Some(
+            crate::ofox_secret::default_store()
+                .load(crate::ofox_secret::Slot::ApiKey {
+                    tool: app_type.into(),
+                })
+                .map_err(|_| "读取已绑定的 API Key 失败".to_string())?
+                .ok_or_else(|| "未找到已绑定的 API Key，请重新绑定".to_string())?,
+        )
+    } else {
+        None
+    };
+
+    persist_with_rollback(
+        &state.db,
+        app_str,
+        &provider_id,
+        &previous_settings,
+        &provider.settings_config,
+        || async {
+            if provider_id.starts_with("ofox-") {
+                // ofox 直写路径：使用上面读取的已绑定 key。模型切换不会创建
+                // 新 key，也不会把密钥放入诊断日志。
+                state
+                    .proxy_service
+                    .ofox_write_direct_to_live(&app_type, api_key.as_deref().unwrap_or_default())
+                    .await
+                    .map_err(|e| format!("刷新 {app_str} live 配置失败: {e}"))
+            } else {
+                // 非 ofox provider 走老 takeover 路径——保留兼容形态。
+                state
+                    .proxy_service
+                    .refresh_takeover_for_app(app_str)
+                    .await
+                    .map_err(|e| format!("刷新 {app_str} live 配置失败: {e}"))
+            }
+        },
+    )
+    .await?;
+
     Ok(())
+}
+
+async fn persist_with_rollback<F, Fut>(
+    db: &crate::database::Database,
+    app: &str,
+    provider_id: &str,
+    previous: &serde_json::Value,
+    updated: &serde_json::Value,
+    write_live: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
+    db.update_provider_settings_config(app, provider_id, updated)
+        .map_err(|e| format!("更新 {provider_id} settings_config 失败: {e}"))?;
+    if let Err(error) = write_live().await {
+        db.update_provider_settings_config(app, provider_id, previous)
+            .map_err(|rollback| format!("{error}；恢复数据库配置失败: {rollback}"))?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Replace the complete set of WorkBuddy models managed by Ofox. The adapter
+/// performs conflict checks and writes all selected entries atomically.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn set_workbuddy_managed_models(
+    state: State<'_, AppState>,
+    ofox_state: State<'_, OfoxAuthState>,
+    model_selections: Vec<crate::workbuddy_config::WorkBuddyModelSelection>,
+) -> Result<(), String> {
+    crate::workbuddy_config::validate_selections(&model_selections)?;
+    let api_key = crate::ofox_api_keys::fetch_or_create_api_key(
+        BindableTool::WorkBuddy,
+        crate::ofox_api_keys::FetchMode::CachedOk,
+        &ofox_state.0,
+    )
+    .await
+    .map_err(|e| format!("获取 WorkBuddy OfoxAI API key 失败: {e}"))?;
+    crate::workbuddy_config::sync_selected_models(&state.db, &api_key, &model_selections).await?;
+    crate::ofox_api_keys::mark_key_used(BindableTool::WorkBuddy);
+    Ok(())
+}
+
+/// Show the URL WorkBuddy actually has on disk alongside Ofox's selected
+/// gateway. Never return the API key stored in the same JSON entries.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_workbuddy_endpoint_status(
+    state: State<'_, AppState>,
+) -> Result<crate::workbuddy_config::WorkBuddyEndpointStatus, String> {
+    crate::workbuddy_config::endpoint_status(&state.db).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn check_ofox_model_compatibility(
+    app: String,
+    model: String,
+    force_retest: Option<bool>,
+    ofox_state: State<'_, OfoxAuthState>,
+) -> Result<crate::model_compat::CompatibilityResult, String> {
+    let tool = match app.as_str() {
+        "workbuddy" => BindableTool::WorkBuddy,
+        _ => AppType::from_str(&app)
+            .map(BindableTool::from)
+            .map_err(|e| e.to_string())?,
+    };
+    let catalog_token = catalog_access_token(&ofox_state.0).await;
+    Ok(crate::model_compat::check(
+        tool,
+        &model,
+        force_retest.unwrap_or(false),
+        catalog_token.as_deref(),
+    )
+    .await)
+}
+
+async fn catalog_access_token(manager: &Arc<RwLock<OfoxAuthManager>>) -> Option<String> {
+    manager.read().await.get_valid_access_token().await.ok()
+}
+
+async fn validate_compatibility(
+    tool: BindableTool,
+    model: &str,
+    selected: Option<&str>,
+    allow_unverified: bool,
+    catalog_access_token: Option<&str>,
+) -> Result<Option<String>, String> {
+    let result = crate::model_compat::check(tool, model, false, catalog_access_token).await;
+    accept_compatibility_result(tool, result, selected, allow_unverified)
+}
+
+fn accept_compatibility_result(
+    tool: BindableTool,
+    result: crate::model_compat::CompatibilityResult,
+    selected: Option<&str>,
+    allow_unverified: bool,
+) -> Result<Option<String>, String> {
+    if let Some(selected) = selected {
+        if !result.allowed_protocols.is_empty()
+            && !result
+                .allowed_protocols
+                .iter()
+                .any(|allowed| allowed == selected)
+        {
+            return Err("所选协议未通过模型目录或流式检查".into());
+        }
+    }
+    match result.status.as_str() {
+        "compatible" if selected.is_none() || selected == result.protocol.as_deref() => {
+            Ok(result.protocol)
+        }
+        "inconclusive"
+            if allow_unverified
+                && (tool != BindableTool::OpenCode
+                    || matches!(selected, Some("responses" | "chatCompletions"))) =>
+        {
+            Ok(selected.map(str::to_string))
+        }
+        "incompatible" => Err(result
+            .reason
+            .unwrap_or_else(|| "模型与客户端协议不兼容".into())),
+        "inconclusive" => Err(result
+            .reason
+            .unwrap_or_else(|| "流式兼容性尚未确定，请重试或显式继续".into())),
+        _ => Err("所选协议与检测结果不一致，请重新检测".into()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -215,7 +427,10 @@ fn read_model_from_settings(app: &AppType, settings: &serde_json::Value) -> Stri
         AppType::Codex => {
             // Codex stores its config as a TOML *string* inside the
             // `config` key. Parse and read the top-level `model`.
-            let cfg_text = settings.get("config").and_then(|v| v.as_str()).unwrap_or("");
+            let cfg_text = settings
+                .get("config")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if cfg_text.is_empty() {
                 return String::new();
             }
@@ -263,7 +478,8 @@ fn write_model_into_settings(
         AppType::Codex => set_codex_model(settings, model),
         AppType::OpenCode => {
             // Single-select: replace the entire `models` dict. Keys are model
-            // names; the value object is empty (matches the OfoxAI seed).
+            // ids. Keep `name` populated as required by OpenCodeModel so the
+            // provider remains readable by both OpenCode and Ofox on restart.
             let obj = settings
                 .as_object_mut()
                 .ok_or_else(|| "settings_config 不是对象".to_string())?;
@@ -272,7 +488,7 @@ fn write_model_into_settings(
             } else {
                 obj.insert(
                     "models".into(),
-                    serde_json::json!({ model: serde_json::json!({}) }),
+                    serde_json::json!({ model: { "name": model } }),
                 );
             }
             Ok(())
@@ -316,17 +532,11 @@ fn write_model_into_settings(
 }
 
 /// Set or remove `settings.env.<key>`. Creates the `env` object if missing.
-fn set_env_string(
-    settings: &mut serde_json::Value,
-    key: &str,
-    value: &str,
-) -> Result<(), String> {
+fn set_env_string(settings: &mut serde_json::Value, key: &str, value: &str) -> Result<(), String> {
     if !settings.is_object() {
         *settings = serde_json::json!({});
     }
-    let root = settings
-        .as_object_mut()
-        .expect("ensured object above");
+    let root = settings.as_object_mut().expect("ensured object above");
     if !root.get("env").map(|v| v.is_object()).unwrap_or(false) {
         root.insert("env".into(), serde_json::json!({}));
     }
@@ -374,6 +584,143 @@ fn set_codex_model(settings: &mut serde_json::Value, model: &str) -> Result<(), 
 
     root.insert("config".into(), serde_json::Value::String(doc.to_string()));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opencode_model_entry_remains_typed_config_compatible() {
+        let mut settings = serde_json::json!({
+            "npm": "@ai-sdk/openai",
+            "name": "OfoxAI",
+            "options": {},
+            "models": {}
+        });
+
+        write_model_into_settings(&AppType::OpenCode, &mut settings, "openai/gpt-5.6-terra")
+            .unwrap();
+
+        assert_eq!(
+            settings.pointer("/models/openai~1gpt-5.6-terra/name"),
+            Some(&serde_json::json!("openai/gpt-5.6-terra"))
+        );
+        serde_json::from_value::<crate::provider::OpenCodeProviderConfig>(settings)
+            .expect("saved provider should remain readable after restart");
+    }
+
+    #[test]
+    fn opencode_glm_53_selection_receives_chat_compatibility_override() {
+        let mut settings = serde_json::json!({
+            "npm": "@ai-sdk/openai",
+            "name": "OfoxAI",
+            "options": {},
+            "models": {}
+        });
+
+        write_model_into_settings(&AppType::OpenCode, &mut settings, "z-ai/glm-5.3-flash").unwrap();
+        assert!(crate::opencode_config::normalize_ofox_provider_transport(
+            &mut settings
+        ));
+
+        assert_eq!(
+            settings.pointer("/models/z-ai~1glm-5.3-flash/provider/npm"),
+            Some(&serde_json::json!("@ai-sdk/openai-compatible"))
+        );
+        assert_eq!(
+            settings.pointer("/models/z-ai~1glm-5.3-flash/interleaved"),
+            Some(&serde_json::json!("reasoning_content"))
+        );
+        serde_json::from_value::<crate::provider::OpenCodeProviderConfig>(settings)
+            .expect("GLM compatibility fields must survive the typed config round trip");
+    }
+
+    #[test]
+    fn incompatible_model_cannot_be_overridden() {
+        let result = crate::model_compat::CompatibilityResult {
+            app: "opencode".into(),
+            model: "x".into(),
+            protocol: Some("chatCompletions".into()),
+            status: "incompatible".into(),
+            source: "probe".into(),
+            reason: Some("broken stream".into()),
+            allowed_protocols: vec!["chatCompletions".into()],
+        };
+        assert!(accept_compatibility_result(
+            BindableTool::OpenCode,
+            result,
+            Some("chatCompletions"),
+            true
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn inconclusive_opencode_requires_explicit_valid_choice() {
+        let result = crate::model_compat::CompatibilityResult {
+            app: "opencode".into(),
+            model: "x".into(),
+            protocol: Some("chatCompletions".into()),
+            status: "inconclusive".into(),
+            source: "probe".into(),
+            reason: None,
+            allowed_protocols: vec!["chatCompletions".into()],
+        };
+        assert!(
+            accept_compatibility_result(BindableTool::OpenCode, result.clone(), None, true)
+                .is_err()
+        );
+        assert!(accept_compatibility_result(
+            BindableTool::OpenCode,
+            result.clone(),
+            Some("responses"),
+            true
+        )
+        .is_err());
+        assert_eq!(
+            accept_compatibility_result(
+                BindableTool::OpenCode,
+                result,
+                Some("chatCompletions"),
+                true
+            )
+            .unwrap(),
+            Some("chatCompletions".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_live_write_restores_previous_provider_settings() {
+        let db = crate::database::Database::memory().unwrap();
+        let previous = serde_json::json!({ "models": {"old": {"name": "old"}} });
+        let updated = serde_json::json!({ "models": {"new": {"name": "new"}} });
+        let provider = crate::provider::Provider::with_id(
+            "ofox-opencode".into(),
+            "OfoxAI".into(),
+            previous.clone(),
+            None,
+        );
+        db.save_provider("opencode", &provider).unwrap();
+        let error = persist_with_rollback(
+            &db,
+            "opencode",
+            "ofox-opencode",
+            &previous,
+            &updated,
+            || async { Err("disk write failed".into()) },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "disk write failed");
+        assert_eq!(
+            db.get_provider_by_id("ofox-opencode", "opencode")
+                .unwrap()
+                .unwrap()
+                .settings_config,
+            previous
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -434,6 +781,51 @@ async fn ofox_ping_model_internal(
     app: &str,
     model: &str,
 ) -> PingResult {
+    let model = model.trim().to_string();
+    if model.is_empty() {
+        return PingResult {
+            success: false,
+            latency_ms: 0,
+            status_code: None,
+            error: Some("请先选择一个模型再测试连通性".to_string()),
+        };
+    }
+
+    if app.trim().eq_ignore_ascii_case("workbuddy") {
+        let api_key = match crate::ofox_api_keys::fetch_or_create_api_key(
+            BindableTool::WorkBuddy,
+            crate::ofox_api_keys::FetchMode::CachedOk,
+            manager_arc,
+        )
+        .await
+        {
+            Ok(key) => key,
+            Err(error) => {
+                return PingResult {
+                    success: false,
+                    latency_ms: 0,
+                    status_code: Some(401),
+                    error: Some(format!("获取 WorkBuddy OfoxAI API key 失败：{error}")),
+                };
+            }
+        };
+        let started = Instant::now();
+        let url = format!("{}/v1/chat/completions", gateway_base());
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let response = crate::proxy::http_client::get()
+            .post(&url)
+            .bearer_auth(api_key)
+            .timeout(Duration::from_secs(PING_TIMEOUT_SECS))
+            .json(&body)
+            .send()
+            .await;
+        return ping_result_from_response(started, response).await;
+    }
+
     let app_type = match AppType::from_str(app) {
         Ok(t) => t,
         Err(e) => {
@@ -446,16 +838,6 @@ async fn ofox_ping_model_internal(
         }
     };
     let app_str = app_type.as_str();
-
-    let model = model.trim().to_string();
-    if model.is_empty() {
-        return PingResult {
-            success: false,
-            latency_ms: 0,
-            status_code: None,
-            error: Some("请先选择一个模型再测试连通性".to_string()),
-        };
-    }
 
     // Pull the API key the proxy would use for this app. We read the active
     // provider's settings_config rather than the static OfoxAI seed — that
@@ -636,8 +1018,14 @@ async fn ofox_ping_model_internal(
         }
     };
 
-    let latency_ms = started.elapsed().as_millis() as u64;
+    ping_result_from_response(started, response_result).await
+}
 
+async fn ping_result_from_response(
+    started: Instant,
+    response_result: Result<reqwest::Response, reqwest::Error>,
+) -> PingResult {
+    let latency_ms = started.elapsed().as_millis() as u64;
     let response = match response_result {
         Ok(r) => r,
         Err(e) => {

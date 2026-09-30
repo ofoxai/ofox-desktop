@@ -187,15 +187,24 @@ pub struct ToolVersion {
     env_type: String,
     /// 当 env_type 为 "wsl" 时，返回该工具绑定的 WSL distro（用于按 distro 探测 shells）
     wsl_distro: Option<String>,
+    #[serde(rename = "installationKind")]
+    installation_kind: String,
+    update_status: String,
+    update_source: Option<String>,
+    update_supported: bool,
+    update_reason: Option<String>,
+    executable_path: Option<String>,
 }
 
-const VALID_TOOLS: [&str; 6] = [
+const VALID_TOOLS: [&str; 8] = [
     "claude",
     "codex",
+    "chatgpt",
     "gemini",
     "opencode",
     "openclaw",
     "hermes",
+    "workbuddy",
 ];
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -232,6 +241,144 @@ fn tool_env_type_and_wsl_distro(_tool: &str) -> (String, Option<String>) {
     ("unknown".to_string(), None)
 }
 
+#[cfg(target_os = "macos")]
+const WORKBUDDY_MACOS_BUNDLE_ID: &str = "com.tencent.workbuddy.mac";
+
+#[cfg(target_os = "macos")]
+fn workbuddy_macos_app_from_plist<F>(path: &Path, mut read_value: F) -> Option<(PathBuf, String)>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    if read_value("CFBundleIdentifier").as_deref() != Some(WORKBUDDY_MACOS_BUNDLE_ID) {
+        return None;
+    }
+
+    let version = read_value("CFBundleShortVersionString")
+        .or_else(|| read_value("CFBundleVersion"))
+        .unwrap_or_else(|| "已安装".to_string());
+    Some((path.to_path_buf(), version))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn find_workbuddy_app() -> Result<(PathBuf, String), String> {
+    let candidates = [
+        PathBuf::from("/Applications/WorkBuddy.app"),
+        crate::config::get_home_dir()
+            .join("Applications")
+            .join("WorkBuddy.app"),
+    ];
+    for path in candidates {
+        let plist = path.join("Contents/Info.plist");
+        if !plist.is_file() {
+            continue;
+        }
+        let read_value = |key: &str| -> Option<String> {
+            std::process::Command::new("/usr/libexec/PlistBuddy")
+                .args(["-c", &format!("Print :{key}")])
+                .arg(&plist)
+                .output()
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        };
+        if let Some(app) = workbuddy_macos_app_from_plist(&path, read_value) {
+            return Ok(app);
+        }
+    }
+    Err("未检测到官方 WorkBuddy.app".to_string())
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn find_workbuddy_app() -> Result<(PathBuf, String), String> {
+    let mut candidates = Vec::new();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(
+            PathBuf::from(local)
+                .join("Programs")
+                .join("WorkBuddy")
+                .join("WorkBuddy.exe"),
+        );
+    }
+
+    let mut command = std::process::Command::new("reg");
+    command
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+            "/s",
+            "/f",
+            "WorkBuddy",
+        ])
+        .creation_flags(CREATE_NO_WINDOW);
+    if let Ok(output) = command.output() {
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                let trimmed = line.trim();
+                for field in ["DisplayIcon", "InstallLocation"] {
+                    if let Some(index) = trimmed.find(field) {
+                        let value = trimmed[index + field.len()..]
+                            .trim_start_matches(|c: char| {
+                                c.is_whitespace()
+                                    || c == 'R'
+                                    || c == 'E'
+                                    || c == 'G'
+                                    || c == '_'
+                                    || c.is_ascii_digit()
+                            })
+                            .trim()
+                            .trim_matches('"')
+                            .split(',')
+                            .next()
+                            .unwrap_or_default();
+                        if !value.is_empty() {
+                            let path = PathBuf::from(value);
+                            candidates.push(if path.extension().is_some() {
+                                path
+                            } else {
+                                path.join("WorkBuddy.exe")
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for path in candidates {
+        if !path.is_file() {
+            continue;
+        }
+        let escaped = path.to_string_lossy().replace('\'', "''");
+        let mut command = std::process::Command::new("powershell");
+        command
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!("(Get-Item -LiteralPath '{escaped}').VersionInfo.ProductVersion"),
+            ])
+            .creation_flags(CREATE_NO_WINDOW);
+        let version = command
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "已安装".to_string());
+        return Ok((path, version));
+    }
+    Err("未检测到 WorkBuddy.exe".to_string())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub(crate) fn find_workbuddy_app() -> Result<(PathBuf, String), String> {
+    Err("WorkBuddy 首版仅支持 macOS 和 Windows".to_string())
+}
+
 /// Detect installed AI-tool CLIs and (optionally) their latest published
 /// versions.
 ///
@@ -248,48 +395,74 @@ pub async fn get_tool_versions(
     wsl_shell_by_tool: Option<HashMap<String, WslShellPreferenceInput>>,
     include_latest: Option<bool>,
 ) -> Result<Vec<ToolVersion>, String> {
-    // Windows: completely disable tool version detection to prevent
-    // accidentally launching apps (e.g. Claude Code) via protocol handlers.
-    #[cfg(target_os = "windows")]
-    {
-        let _ = (tools, wsl_shell_by_tool, include_latest);
-        return Ok(Vec::new());
-    }
+    let include_latest = include_latest.unwrap_or(true);
+    let requested: Vec<&str> = if let Some(tools) = tools.as_ref() {
+        let set: std::collections::HashSet<&str> = tools.iter().map(|s| s.as_str()).collect();
+        VALID_TOOLS
+            .iter()
+            .copied()
+            .filter(|t| set.contains(t))
+            .collect()
+    } else {
+        VALID_TOOLS.to_vec()
+    };
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        let include_latest = include_latest.unwrap_or(true);
-        let requested: Vec<&str> = if let Some(tools) = tools.as_ref() {
-            let set: std::collections::HashSet<&str> = tools.iter().map(|s| s.as_str()).collect();
-            VALID_TOOLS
-                .iter()
-                .copied()
-                .filter(|t| set.contains(t))
-                .collect()
-        } else {
-            VALID_TOOLS.to_vec()
-        };
+    // Run all tools concurrently — each `get_single_tool_version_impl`
+    // spawns a child process for `--version` and (when include_latest)
+    // an HTTP request, both of which idle on I/O. Awaiting them serially
+    // serialized all of that for no reason. `futures::future::join_all`
+    // preserves ordering so the returned `Vec<ToolVersion>` is still in
+    // VALID_TOOLS order.
+    let futs = requested.into_iter().map(|tool| {
+        let pref = wsl_shell_by_tool.as_ref().and_then(|m| m.get(tool));
+        let tool_wsl_shell = pref.and_then(|p| p.wsl_shell.as_deref());
+        let tool_wsl_shell_flag = pref.and_then(|p| p.wsl_shell_flag.as_deref());
+        get_single_tool_version_impl(tool, tool_wsl_shell, tool_wsl_shell_flag, include_latest)
+    });
 
-        // Run all tools concurrently — each `get_single_tool_version_impl`
-        // spawns a child process for `--version` and (when include_latest)
-        // an HTTP request, both of which idle on I/O. Awaiting them serially
-        // serialized all of that for no reason. `futures::future::join_all`
-        // preserves ordering so the returned `Vec<ToolVersion>` is still in
-        // VALID_TOOLS order.
-        let futs = requested.into_iter().map(|tool| {
-            let pref = wsl_shell_by_tool.as_ref().and_then(|m| m.get(tool));
-            let tool_wsl_shell = pref.and_then(|p| p.wsl_shell.as_deref());
-            let tool_wsl_shell_flag = pref.and_then(|p| p.wsl_shell_flag.as_deref());
-            get_single_tool_version_impl(
-                tool,
-                tool_wsl_shell,
-                tool_wsl_shell_flag,
-                include_latest,
-            )
-        });
+    let results = futures::future::join_all(futs).await;
+    Ok(results)
+}
 
-        let results = futures::future::join_all(futs).await;
-        Ok(results)
+/// ChatGPT 桌面 App 的更新字段；`include_latest = false` 时不联网。
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+async fn chatgpt_update_fields(
+    source: &str,
+    installed: &str,
+    include_latest: bool,
+    one_click: bool,
+) -> super::chatgpt_updates::DesktopUpdateFields {
+    let latest = if include_latest {
+        let client = crate::proxy::http_client::get();
+        Some(super::chatgpt_updates::fetch_latest_for_host(&client).await)
+    } else {
+        None
+    };
+    super::chatgpt_updates::desktop_update_fields(source, installed, latest, one_click)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn desktop_tool_version(
+    tool: &str,
+    version: String,
+    update: super::chatgpt_updates::DesktopUpdateFields,
+    env_type: String,
+    wsl_distro: Option<String>,
+    executable_path: String,
+) -> ToolVersion {
+    ToolVersion {
+        name: tool.to_string(),
+        version: Some(version),
+        latest_version: update.latest_version,
+        error: None,
+        env_type,
+        wsl_distro,
+        installation_kind: "desktopApp".into(),
+        update_status: update.update_status.into(),
+        update_source: update.update_source,
+        update_supported: update.update_supported,
+        update_reason: update.update_reason,
+        executable_path: Some(executable_path),
     }
 }
 
@@ -309,10 +482,201 @@ async fn get_single_tool_version_impl(
         "unexpected tool name in get_single_tool_version_impl: {tool}"
     );
 
+    if tool == "workbuddy" {
+        let (env_type, wsl_distro) = tool_env_type_and_wsl_distro(tool);
+        return match find_workbuddy_app() {
+            Ok((_path, version)) => ToolVersion {
+                name: tool.to_string(),
+                version: Some(version),
+                latest_version: None,
+                error: None,
+                env_type,
+                wsl_distro,
+                installation_kind: "desktopApp".to_string(),
+                update_status: "appManaged".into(),
+                update_source: None,
+                update_supported: false,
+                update_reason: None,
+                executable_path: None,
+            },
+            Err(error) => ToolVersion {
+                name: tool.to_string(),
+                version: None,
+                latest_version: None,
+                error: Some(error),
+                env_type,
+                wsl_distro,
+                installation_kind: "desktopApp".to_string(),
+                update_status: "appManaged".into(),
+                update_source: None,
+                update_supported: false,
+                update_reason: None,
+                executable_path: None,
+            },
+        };
+    }
+
+    // 桌面 App 型工具 —— 复用 codex_desktop_version 的 Info.plist 探测，但不与
+    // codex CLI 检测共享 tool_id。这是 `chatgpt` 独立于 `codex` 的关键：codex
+    // 分支仍走 CLI probe + App 兜底，chatgpt 分支只看 App 本身在不在。
+    if tool == "chatgpt" {
+        let (env_type, wsl_distro) = tool_env_type_and_wsl_distro(tool);
+        #[cfg(target_os = "macos")]
+        {
+            if let Some((path, version)) = super::tool_update::codex_desktop_version().await {
+                // macOS 由 App 内置 Sparkle 升级，Ofox 只报告状态。
+                let update =
+                    chatgpt_update_fields("sparkle", &version, include_latest, false).await;
+                return desktop_tool_version(tool, version, update, env_type, wsl_distro, path);
+            }
+            return ToolVersion {
+                name: tool.to_string(),
+                version: None,
+                latest_version: None,
+                error: None,
+                env_type,
+                wsl_distro,
+                installation_kind: "desktopApp".into(),
+                update_status: "notInstalled".into(),
+                update_source: None,
+                update_supported: false,
+                update_reason: None,
+                executable_path: None,
+            };
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // AppxPackage 探不到 = 没装；探到 = 返回版本号。
+            // executable_path 用 shell:AppsFolder\<AUMID>——用户点"打开"时启动器
+            // 拿它拉起 Store app，跟检测口径一致。
+            // PowerShell 探测是阻塞调用，放到 blocking 线程，免得在 join_all 里拖住其它工具。
+            let detected =
+                tokio::task::spawn_blocking(super::windows_chatgpt::detect_chatgpt_desktop_app)
+                    .await
+                    .unwrap_or_else(|err| Err(format!("ChatGPT 检测任务失败: {err}")));
+            match detected {
+                Ok(Some(version)) => {
+                    // Windows 由 Ofox 一键升级（winget/Store），见 upgrade_chatgpt_desktop_app_with。
+                    let update =
+                        chatgpt_update_fields("msstore", &version, include_latest, true).await;
+                    return desktop_tool_version(
+                        tool,
+                        version,
+                        update,
+                        env_type,
+                        wsl_distro,
+                        super::chatgpt_updates::windows_launch_target(),
+                    );
+                }
+                Ok(None) => {
+                    return ToolVersion {
+                        name: tool.to_string(),
+                        version: None,
+                        latest_version: None,
+                        error: None,
+                        env_type,
+                        wsl_distro,
+                        installation_kind: "desktopApp".into(),
+                        update_status: "notInstalled".into(),
+                        update_source: None,
+                        update_supported: false,
+                        update_reason: None,
+                        executable_path: None,
+                    };
+                }
+                Err(err) => {
+                    return ToolVersion {
+                        name: tool.to_string(),
+                        version: None,
+                        latest_version: None,
+                        error: Some(err),
+                        env_type,
+                        wsl_distro,
+                        installation_kind: "desktopApp".into(),
+                        update_status: "failed".into(),
+                        update_source: None,
+                        update_supported: false,
+                        update_reason: None,
+                        executable_path: None,
+                    };
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            return ToolVersion {
+                name: tool.to_string(),
+                version: None,
+                latest_version: None,
+                error: Some("ChatGPT App 目前仅支持 macOS / Windows".into()),
+                env_type,
+                wsl_distro,
+                installation_kind: "desktopApp".into(),
+                update_status: "unsupported".into(),
+                update_source: None,
+                update_supported: false,
+                update_reason: None,
+                executable_path: None,
+            };
+        }
+    }
+
     // 判断该工具的运行环境 & WSL distro（如有）
     let (env_type, wsl_distro) = tool_env_type_and_wsl_distro(tool);
 
     // 1. 获取本地版本
+    #[cfg(target_os = "macos")]
+    let active_installation = super::tool_update::probe(tool).await;
+    // Never compare a desktop calendar version with npm semver.
+    #[cfg(target_os = "macos")]
+    if tool == "codex" && active_installation.is_err() {
+        if let Some((path, version)) = super::tool_update::codex_desktop_version().await {
+            return ToolVersion {
+                name: tool.into(),
+                version: Some(version),
+                latest_version: None,
+                error: None,
+                env_type,
+                wsl_distro,
+                installation_kind: "desktopApp".into(),
+                update_status: "appManaged".into(),
+                update_source: None,
+                update_supported: false,
+                update_reason: None,
+                executable_path: Some(path),
+            };
+        }
+    }
+    #[cfg(target_os = "macos")]
+    let (local_version, local_error) = match &active_installation {
+        Ok(installation) => (
+            (!installation.version.is_empty()).then(|| installation.version.clone()),
+            installation.error.clone(),
+        ),
+        // A found-but-broken active binary must not be hidden by an older copy.
+        Err(error) if !error.starts_with("No executable in the launch shell PATH") => {
+            (None, Some(error.clone()))
+        }
+        Err(error) => {
+            let tool = tool.to_string();
+            let fallback = tokio::task::spawn_blocking(move || {
+                let direct = try_get_version(&tool);
+                if direct.0.is_some() {
+                    direct
+                } else {
+                    scan_cli_version(&tool)
+                }
+            })
+            .await
+            .unwrap_or((None, None));
+            if fallback.0.is_some() {
+                fallback
+            } else {
+                (None, Some(error.clone()))
+            }
+        }
+    };
+    #[cfg(not(target_os = "macos"))]
     let (local_version, local_error) = if let Some(distro) = wsl_distro.as_deref() {
         try_get_version_wsl(tool, distro, wsl_shell, wsl_shell_flag)
     } else {
@@ -326,17 +690,54 @@ async fn get_single_tool_version_impl(
 
     // 2. 获取远程最新版本（按需）
     let latest_version = if include_latest {
-        let client = crate::proxy::http_client::get();
-        match tool {
-            "claude" => fetch_npm_latest_version(&client, "@anthropic-ai/claude-code").await,
-            "codex" => fetch_npm_latest_version(&client, "@openai/codex").await,
-            "gemini" => fetch_npm_latest_version(&client, "@google/gemini-cli").await,
-            "opencode" => fetch_github_latest_version(&client, "anomalyco/opencode").await,
-            _ => None,
-        }
+        latest_tool_version(tool, local_version.as_deref()).await
     } else {
         None
     };
+
+    let update_status = if local_version.is_none()
+        && local_error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("Active executable failed"))
+    {
+        "broken"
+    } else if include_latest {
+        super::tool_update::version_status(local_version.as_deref(), latest_version.as_deref())
+    } else {
+        "unchecked"
+    }
+    .to_string();
+    #[cfg(target_os = "macos")]
+    let (update_source, update_supported, update_reason, executable_path) =
+        match &active_installation {
+            Ok(installation) => {
+                let path = Some(installation.path.to_string_lossy().into_owned());
+                let plan = if include_latest {
+                    super::tool_update::resolve_plan(tool, installation).await
+                } else {
+                    super::tool_update::verified_plan(tool, installation)
+                };
+                match plan {
+                    Ok(plan) => (
+                        Some(plan.source.to_string()),
+                        installation.error.is_none() || plan.source == "pnpm",
+                        installation.error.clone(),
+                        path,
+                    ),
+                    Err(reason) => (None, false, Some(reason), path),
+                }
+            }
+            Err(reason) => (None, false, Some(reason.clone()), None),
+        };
+    #[cfg(not(target_os = "macos"))]
+    let (update_source, update_supported, update_reason, executable_path) = (
+        None,
+        false,
+        Some("Automatic updates are currently supported on macOS only".into()),
+        None,
+    );
+    #[cfg(target_os = "macos")]
+    let _ = (wsl_shell, wsl_shell_flag);
 
     ToolVersion {
         name: tool.to_string(),
@@ -345,47 +746,179 @@ async fn get_single_tool_version_impl(
         error: local_error,
         env_type,
         wsl_distro,
+        installation_kind: "cli".to_string(),
+        update_status,
+        update_source,
+        update_supported,
+        update_reason,
+        executable_path,
     }
 }
 
-/// Helper function to fetch latest version from npm registry
-async fn fetch_npm_latest_version(client: &reqwest::Client, package: &str) -> Option<String> {
-    let url = format!("https://registry.npmjs.org/{package}");
-    match client.get(&url).send().await {
-        Ok(resp) => {
-            if let Ok(json) = resp.json::<serde_json::Value>().await {
-                json.get("dist-tags")
-                    .and_then(|tags| tags.get("latest"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            } else {
-                None
+pub(crate) async fn latest_tool_version(tool: &str, local: Option<&str>) -> Option<String> {
+    let client = crate::proxy::http_client::get();
+    let query = async {
+        if let Some(package) = super::tool_update::npm_package(tool) {
+            let version = fetch_npm_latest_version(&client, package).await;
+            if version.is_some() || tool != "opencode" {
+                return version;
             }
+            return fetch_github_latest_version(&client, "anomalyco/opencode").await;
         }
-        Err(_) => None,
-    }
+        if tool == "hermes" {
+            if let Some(version) =
+                fetch_github_latest_version(&client, "NousResearch/hermes-agent").await
+            {
+                return Some(version);
+            }
+            let fallback = client
+                .get("https://pypi.org/pypi/hermes-agent/json")
+                .timeout(std::time::Duration::from_secs(7))
+                .send()
+                .await
+                .ok()?
+                .error_for_status()
+                .ok()?
+                .json::<serde_json::Value>()
+                .await
+                .ok()?
+                .get("info")?
+                .get("version")?
+                .as_str()
+                .map(str::to_string);
+            // PyPI can lag official git releases; don't claim it is current.
+            return fallback.filter(|latest| {
+                match (
+                    local.and_then(|value| semver::Version::parse(value).ok()),
+                    semver::Version::parse(latest).ok(),
+                ) {
+                    (Some(local), Some(latest)) => !local.cmp_precedence(&latest).is_gt(),
+                    _ => true,
+                }
+            });
+        }
+        None
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(15), query)
+        .await
+        .ok()
+        .flatten()
+        .filter(|v| semver::Version::parse(v).is_ok_and(|v| v.pre.is_empty()))
 }
 
-/// Helper function to fetch latest version from GitHub releases
-async fn fetch_github_latest_version(client: &reqwest::Client, repo: &str) -> Option<String> {
-    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
-    match client
-        .get(&url)
-        .header("User-Agent", "ofox-switch")
-        .header("Accept", "application/vnd.github+json")
+/// One bounded request, including body read. Failures remain unknown, never "current".
+async fn fetch_version_json(
+    client: &reqwest::Client,
+    url: &str,
+    timeout: std::time::Duration,
+) -> Option<serde_json::Value> {
+    client
+        .get(url)
+        .timeout(timeout)
+        .header("User-Agent", "ofox-desktop")
         .send()
         .await
-    {
-        Ok(resp) => {
-            if let Ok(json) = resp.json::<serde_json::Value>().await {
-                json.get("tag_name")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.strip_prefix('v').unwrap_or(s).to_string())
-            } else {
-                None
-            }
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()
+}
+
+/// Fetch the small dist-tags document, not the full package history.
+async fn fetch_npm_latest_version(client: &reqwest::Client, package: &str) -> Option<String> {
+    let package = package.replace('/', "%2f");
+    let url = format!("https://registry.npmjs.org/-/package/{package}/dist-tags");
+    fetch_version_json(client, &url, std::time::Duration::from_secs(7))
+        .await?
+        .get("latest")?
+        .as_str()
+        .map(str::to_string)
+}
+
+async fn fetch_github_latest_version(client: &reqwest::Client, repo: &str) -> Option<String> {
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let json = fetch_version_json(client, &url, std::time::Duration::from_secs(7)).await?;
+    if json.get("prerelease").and_then(|value| value.as_bool()) == Some(true) {
+        return None;
+    }
+    release_version(&json)
+}
+
+fn release_version(json: &serde_json::Value) -> Option<String> {
+    // Hermes release tags are dates; the release title contains the CLI version.
+    [json.get("name"), json.get("tag_name")]
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str())
+        .map(extract_version)
+        .find(|value| {
+            semver::Version::parse(value).is_ok_and(|v| v.major < 1000 && v.pre.is_empty())
+        })
+}
+
+#[cfg(test)]
+mod latest_version_tests {
+    use super::*;
+    use wiremock::matchers::path;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    #[test]
+    fn release_calendar_tag_is_not_a_cli_version() {
+        assert_eq!(
+            release_version(
+                &serde_json::json!({"name": "Hermes Agent v0.21.4", "tag_name": "v2026.9.21"})
+            ),
+            Some("0.21.4".into())
+        );
+        assert_eq!(
+            release_version(&serde_json::json!({"tag_name": "v2026.9.21"})),
+            None
+        );
+        assert_eq!(
+            release_version(&serde_json::json!({"tag_name": "v1.2.3"})),
+            Some("1.2.3".into())
+        );
+    }
+    #[tokio::test]
+    async fn version_lookup_rejects_http_errors_bad_json_and_timeout() {
+        let server = MockServer::start().await;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for (route, response) in [
+            (
+                "/ok",
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"latest": "1.2.3"})),
+            ),
+            (
+                "/error",
+                ResponseTemplate::new(503).set_body_json(serde_json::json!({"latest": "9.9.9"})),
+            ),
+            (
+                "/bad",
+                ResponseTemplate::new(200).set_body_string("not json"),
+            ),
+            (
+                "/slow",
+                ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(1)),
+            ),
+        ] {
+            Mock::given(path(route))
+                .respond_with(response)
+                .mount(&server)
+                .await;
         }
-        Err(_) => None,
+        let timeout = std::time::Duration::from_millis(100);
+        let value = fetch_version_json(&client, &format!("{}/ok", server.uri()), timeout)
+            .await
+            .unwrap();
+        assert_eq!(value["latest"], "1.2.3");
+        for route in ["error", "bad", "slow"] {
+            assert!(
+                fetch_version_json(&client, &format!("{}/{route}", server.uri()), timeout)
+                    .await
+                    .is_none()
+            );
+        }
     }
 }
 
@@ -450,7 +983,7 @@ fn try_get_version(tool: &str) -> (Option<String>, Option<String>) {
 
 /// 校验 WSL 发行版名称是否合法
 /// WSL 发行版名称只允许字母、数字、连字符和下划线
-#[cfg(target_os = "windows")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn is_valid_wsl_distro_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
@@ -460,7 +993,7 @@ fn is_valid_wsl_distro_name(name: &str) -> bool {
 }
 
 /// Validate that the given shell name is one of the allowed shells.
-#[cfg(target_os = "windows")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn is_valid_shell(shell: &str) -> bool {
     matches!(
         shell.rsplit('/').next().unwrap_or(shell),
@@ -469,13 +1002,13 @@ fn is_valid_shell(shell: &str) -> bool {
 }
 
 /// Validate that the given shell flag is one of the allowed flags.
-#[cfg(target_os = "windows")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn is_valid_shell_flag(flag: &str) -> bool {
     matches!(flag, "-c" | "-lc" | "-lic")
 }
 
 /// Return the default invocation flag for the given shell.
-#[cfg(target_os = "windows")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn default_flag_for_shell(shell: &str) -> &'static str {
     match shell.rsplit('/').next().unwrap_or(shell) {
         "dash" | "sh" => "-c",
@@ -584,7 +1117,7 @@ fn try_get_version_wsl(
 /// 非 Windows 平台的 WSL 版本检测存根
 /// 注意：此函数实际上不会被调用，因为 `wsl_distro_from_path` 在非 Windows 平台总是返回 None。
 /// 保留此函数是为了保持 API 一致性，防止未来重构时遗漏。
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn try_get_version_wsl(
     _tool: &str,
     _distro: &str,
@@ -857,7 +1390,7 @@ pub async fn open_provider_terminal(
     let launch_cwd = resolve_launch_cwd(cwd)?;
 
     // 获取提供商配置
-    let providers = ProviderService::list(state.inner(), app_type.clone())
+    let providers = ProviderService::list(state.inner(), app_type)
         .map_err(|e| format!("获取提供商列表失败: {e}"))?;
 
     let provider = providers
@@ -994,7 +1527,7 @@ fn launch_terminal_with_env(
     #[cfg(target_os = "windows")]
     {
         launch_windows_terminal(&temp_dir, &config_file, cwd)?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -1376,6 +1909,7 @@ del \"%~f0\" >nul 2>&1
     result
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn build_shell_cd_command(cwd: Option<&Path>) -> String {
     cwd.map(|dir| {
         format!(
@@ -1386,6 +1920,7 @@ fn build_shell_cd_command(cwd: Option<&Path>) -> String {
     .unwrap_or_default()
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -1459,37 +1994,101 @@ fn run_windows_start_command(args: &[&str], terminal_name: &str) -> Result<(), S
 /// **Security**：`command_line` 会被原样拼进 shell/batch 脚本，调用方必须
 /// 保证它是可信字符串（当前只由后端硬编码调用）。
 pub(crate) fn launch_terminal_running(command_line: &str, label: &str) -> Result<(), String> {
-    let temp_dir = std::env::temp_dir();
-    let pid = std::process::id();
+    launch_terminal_running_with_env(command_line, label, &[])
+}
 
+fn write_terminal_launcher(
+    label: &str,
+    suffix: &str,
+    content: &str,
+) -> Result<std::path::PathBuf, String> {
+    use std::io::Write;
+
+    let mut file = tempfile::Builder::new()
+        .prefix(&format!("cc_switch_{label}_"))
+        .suffix(suffix)
+        .tempfile()
+        .map_err(|e| format!("创建终端启动脚本失败: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("设置终端启动脚本权限失败: {e}"))?;
+    }
+    file.write_all(content.as_bytes())
+        .map_err(|e| format!("写入终端启动脚本失败: {e}"))?;
+    file.into_temp_path()
+        .keep()
+        .map_err(|e| format!("保存终端启动脚本失败: {e}"))
+}
+
+fn launcher_env_name(name: &str) -> bool {
+    matches!(
+        name,
+        "HTTP_PROXY"
+            | "http_proxy"
+            | "HTTPS_PROXY"
+            | "https_proxy"
+            | "ALL_PROXY"
+            | "all_proxy"
+            | "NO_PROXY"
+            | "no_proxy"
+    )
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn unix_launcher_env_lines(env_vars: &[(String, String)]) -> String {
+    env_vars
+        .iter()
+        .filter(|(name, _)| launcher_env_name(name))
+        .map(|(name, value)| {
+            let quoted = shell_single_quote(value);
+            // The login shell may source a profile that changes proxy vars.
+            // Keep a private copy and restore it after profile loading.
+            format!("export {name}={quoted}\nexport OFOX_LAUNCH_{name}={quoted}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_launcher_env_line(name: &str, value: &str) -> Result<String, String> {
+    if !launcher_env_name(name) || value.contains(['"', '\r', '\n', '^']) {
+        return Err(format!("无法安全传递代理变量 {name} 到 Windows 终端"));
+    }
+    Ok(format!("set \"{name}={}\"", value.replace('%', "%%")))
+}
+
+/// Start a terminal command with selected proxy variables from Ofox's process
+/// or system settings. New Terminal.app windows do not inherit Ofox's process
+/// environment, so the variables must be written into the terminal script.
+pub(crate) fn launch_terminal_running_with_env(
+    command_line: &str,
+    label: &str,
+    env_vars: &[(String, String)],
+) -> Result<(), String> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let (script_file, script_content) = {
-        let file = temp_dir.join(format!("cc_switch_{}_{}.sh", label, pid));
+    let script_file = {
+        let env_lines = unix_launcher_env_lines(env_vars);
         let content = format!(
             r#"#!/bin/bash
-trap 'rm -f "{script_path}"' EXIT
-echo "[ofox-switch] Starting: {cmd}"
+trap 'rm -f -- "$0"' EXIT
+echo "[ofox-switch] Starting: {label}"
 echo ""
+{env_lines}
 {cmd}
 echo ""
 echo "[ofox-switch] Command exited. Press any key to close."
 read -n 1 -s
 "#,
-            script_path = file.display(),
             cmd = command_line,
         );
-        (file, content)
+        write_terminal_launcher(label, ".sh", &content)?
     };
 
     #[cfg(target_os = "macos")]
     {
-        use std::os::unix::fs::PermissionsExt;
-
-        std::fs::write(&script_file, &script_content)
-            .map_err(|e| format!("写入启动脚本失败: {e}"))?;
-        std::fs::set_permissions(&script_file, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("设置脚本权限失败: {e}"))?;
-
         let preferred = crate::settings::get_preferred_terminal();
         let terminal = preferred.as_deref().unwrap_or("terminal");
 
@@ -1503,26 +2102,25 @@ read -n 1 -s
             _ => launch_macos_terminal_app(&script_file),
         };
 
-        if result.is_err() && terminal != "terminal" {
+        let final_result = if result.is_err() && terminal != "terminal" {
             log::warn!(
                 "首选终端 {} 启动失败，回退到 Terminal.app: {:?}",
                 terminal,
                 result.as_ref().err()
             );
-            return launch_macos_terminal_app(&script_file);
+            launch_macos_terminal_app(&script_file)
+        } else {
+            result
+        };
+        if final_result.is_err() {
+            let _ = std::fs::remove_file(&script_file);
         }
-        result
+        final_result
     }
 
     #[cfg(target_os = "linux")]
     {
-        use std::os::unix::fs::PermissionsExt;
         use std::process::Command;
-
-        std::fs::write(&script_file, &script_content)
-            .map_err(|e| format!("写入启动脚本失败: {e}"))?;
-        std::fs::set_permissions(&script_file, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("设置脚本权限失败: {e}"))?;
 
         let preferred = crate::settings::get_preferred_terminal();
         let default_terminals = [
@@ -1585,15 +2183,19 @@ read -n 1 -s
 
     #[cfg(target_os = "windows")]
     {
+        let env_lines = env_vars
+            .iter()
+            .map(|(name, value)| windows_launcher_env_line(name, value))
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\r\n");
         let preferred = crate::settings::get_preferred_terminal();
         let terminal = preferred.as_deref().unwrap_or("cmd");
 
-        let bat_file = temp_dir.join(format!("cc_switch_{}_{}.bat", label, pid));
         let content = format!(
-            "@echo off\r\necho [ofox-switch] Starting: {cmd}\r\necho.\r\n{cmd}\r\necho.\r\necho [ofox-switch] Command exited. Press any key to close.\r\npause >nul\r\ndel \"%~f0\" >nul 2>&1\r\n",
+            "@echo off\r\nsetlocal DisableDelayedExpansion\r\necho [ofox-switch] Starting: {cmd}\r\necho.\r\n{env_lines}\r\n{cmd}\r\necho.\r\necho [ofox-switch] Command exited. Press any key to close.\r\npause >nul\r\ndel \"%~f0\" >nul 2>&1\r\n",
             cmd = command_line,
         );
-        std::fs::write(&bat_file, &content).map_err(|e| format!("写入批处理文件失败: {e}"))?;
+        let bat_file = write_terminal_launcher(label, ".bat", &content)?;
 
         let bat_path = bat_file.to_string_lossy();
         let ps_cmd = format!("& '{}'", bat_path);
@@ -1629,7 +2231,7 @@ read -n 1 -s
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
-        let _ = (temp_dir, pid, command_line, label);
+        let _ = (command_line, label, env_vars);
         Err("不支持的操作系统".to_string())
     }
 }
@@ -1654,6 +2256,61 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    #[cfg(unix)]
+    #[test]
+    fn terminal_proxy_exports_are_quoted_and_launcher_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let env = vec![(
+            "HTTPS_PROXY".to_string(),
+            "http://user:pa'ss@127.0.0.1:7890".to_string(),
+        )];
+        let lines = unix_launcher_env_lines(&env);
+        assert_eq!(
+            lines,
+            "export HTTPS_PROXY='http://user:pa'\"'\"'ss@127.0.0.1:7890'\nexport OFOX_LAUNCH_HTTPS_PROXY='http://user:pa'\"'\"'ss@127.0.0.1:7890'"
+        );
+
+        let path = write_terminal_launcher("proxy_test", ".sh", &lines).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn launcher_can_clear_stale_proxy_vars_on_unix_and_windows() {
+        let vars = vec![
+            ("HTTPS_PROXY".to_string(), String::new()),
+            ("https_proxy".to_string(), String::new()),
+        ];
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            let lines = unix_launcher_env_lines(&vars);
+            assert!(lines.contains("export OFOX_LAUNCH_HTTPS_PROXY=''"));
+            assert!(lines.contains("export OFOX_LAUNCH_https_proxy=''"));
+        }
+        assert_eq!(
+            windows_launcher_env_line("HTTPS_PROXY", "").unwrap(),
+            "set \"HTTPS_PROXY=\""
+        );
+        assert_eq!(
+            windows_launcher_env_line("https_proxy", "").unwrap(),
+            "set \"https_proxy=\""
+        );
+    }
+
+    #[test]
+    fn windows_proxy_assignment_preserves_percent_encoded_credentials() {
+        assert_eq!(
+            windows_launcher_env_line("HTTPS_PROXY", "http://user:p%40ss@host:7890").unwrap(),
+            "set \"HTTPS_PROXY=http://user:p%%40ss@host:7890\""
+        );
+        assert!(windows_launcher_env_line("HTTPS_PROXY", "http://bad\"host").is_err());
+        assert!(windows_launcher_env_line("OTHER", "http://host:7890").is_err());
+    }
+
     #[test]
     fn test_extract_version() {
         assert_eq!(extract_version("claude 1.0.20"), "1.0.20");
@@ -1661,7 +2318,47 @@ mod tests {
         assert_eq!(extract_version("no version here"), "no version here");
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(target_os = "macos")]
+    mod workbuddy_macos {
+        use super::super::*;
+
+        #[test]
+        fn accepts_the_official_bundle_identifier_and_reads_version() {
+            let path = Path::new("/Applications/WorkBuddy.app");
+            let app = workbuddy_macos_app_from_plist(path, |key| match key {
+                "CFBundleIdentifier" => Some("com.tencent.workbuddy.mac".to_string()),
+                "CFBundleShortVersionString" => Some("5.5.6".to_string()),
+                _ => None,
+            });
+
+            assert_eq!(app, Some((path.to_path_buf(), "5.5.6".to_string())));
+        }
+
+        #[test]
+        fn rejects_the_previous_incorrect_bundle_identifier() {
+            let app =
+                workbuddy_macos_app_from_plist(Path::new("/Applications/WorkBuddy.app"), |key| {
+                    (key == "CFBundleIdentifier").then(|| "com.workbuddy.workbuddy".to_string())
+                });
+
+            assert_eq!(app, None);
+        }
+
+        #[test]
+        fn falls_back_to_bundle_version() {
+            let app = workbuddy_macos_app_from_plist(
+                Path::new("/Users/tester/Applications/WorkBuddy.app"),
+                |key| match key {
+                    "CFBundleIdentifier" => Some(WORKBUDDY_MACOS_BUNDLE_ID.to_string()),
+                    "CFBundleVersion" => Some("42".to_string()),
+                    _ => None,
+                },
+            );
+
+            assert_eq!(app.map(|(_, version)| version), Some("42".to_string()));
+        }
+    }
+
     mod wsl_helpers {
         use super::super::*;
 
@@ -1806,6 +2503,7 @@ mod tests {
         assert!(error.contains("目录不存在"));
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn build_shell_cd_command_quotes_spaces_and_single_quotes() {
         let command = build_shell_cd_command(Some(Path::new("/tmp/project O'Brien")));

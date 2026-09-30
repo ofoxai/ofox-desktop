@@ -421,7 +421,7 @@ describe("WebdavSyncSection", () => {
       expect(settingsApiMock.webdavSyncFetchRemoteInfo).toHaveBeenCalledTimes(1);
     });
 
-    fireEvent.change(screen.getByPlaceholderText("cc-switch-sync"), {
+    fireEvent.change(screen.getByPlaceholderText("ofox-switch-sync"), {
       target: { value: "new-root" },
     });
     fireEvent.click(

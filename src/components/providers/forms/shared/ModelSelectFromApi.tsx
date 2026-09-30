@@ -14,7 +14,13 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command";
-import { Download, Loader2, RefreshCw, Check, ChevronsUpDown } from "lucide-react";
+import {
+  Download,
+  Loader2,
+  RefreshCw,
+  Check,
+  ChevronsUpDown,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { FetchedModel } from "@/lib/api/model-fetch";
 
@@ -51,8 +57,18 @@ export function ModelSelectFromApi({
     return fetchedModels.filter((m) => {
       const slashIdx = m.id.indexOf("/");
       const vendor = slashIdx > 0 ? m.id.slice(0, slashIdx).toLowerCase() : "";
-      if (vendorFilter && vendor && !vendorFilter.some((v) => v.toLowerCase() === vendor)) return false;
-      if (vendorExclude && vendor && vendorExclude.some((v) => v.toLowerCase() === vendor)) return false;
+      if (
+        vendorFilter &&
+        vendor &&
+        !vendorFilter.some((v) => v.toLowerCase() === vendor)
+      )
+        return false;
+      if (
+        vendorExclude &&
+        vendor &&
+        vendorExclude.some((v) => v.toLowerCase() === vendor)
+      )
+        return false;
       return true;
     });
   }, [fetchedModels, vendorFilter, vendorExclude]);
@@ -61,7 +77,8 @@ export function ModelSelectFromApi({
     const map: Record<string, FetchedModel[]> = {};
     for (const model of filtered) {
       const slashIdx = model.id.indexOf("/");
-      const vendor = slashIdx > 0 ? model.id.slice(0, slashIdx) : (model.ownedBy || "Other");
+      const vendor =
+        slashIdx > 0 ? model.id.slice(0, slashIdx) : model.ownedBy || "Other";
       if (!map[vendor]) map[vendor] = [];
       map[vendor].push(model);
     }
@@ -84,12 +101,17 @@ export function ModelSelectFromApi({
               className="flex-1 justify-between font-normal"
             >
               <span className="truncate">
-                {value || placeholder || t("providerForm.selectModelPlaceholder")}
+                {value ||
+                  placeholder ||
+                  t("providerForm.selectModelPlaceholder")}
               </span>
               <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
             </Button>
           </PopoverTrigger>
-          <PopoverContent className="w-[--radix-popover-trigger-width] p-0 z-[200]" align="start">
+          <PopoverContent
+            className="w-[--radix-popover-trigger-width] p-0 z-[200]"
+            align="start"
+          >
             <Command>
               <CommandInput
                 placeholder={t("providerForm.searchModelPlaceholder", {

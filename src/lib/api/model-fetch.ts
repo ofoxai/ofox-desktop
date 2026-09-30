@@ -4,6 +4,7 @@ import { toast } from "sonner";
 
 export interface FetchedModel {
   id: string;
+  name: string | null;
   ownedBy: string | null;
   /**
    * 上游 `pricing.prompt`——per-token 输入价的字符串形式（如 "0.000001"）。
@@ -24,6 +25,17 @@ export interface FetchedModel {
    * 避免安全降级把合法模型误砍。
    */
   supportedEndpoints: string[] | null;
+  supportedParameters: string[] | null;
+  inputModalities: string[] | null;
+  outputModalities: string[] | null;
+}
+
+export interface WorkBuddyModelSelection {
+  id: string;
+  name: string;
+  supportsToolCall: boolean;
+  supportsImages: boolean;
+  supportsReasoning: boolean;
 }
 
 /**
@@ -73,8 +85,9 @@ export type OfoxProtocol = "openai" | "anthropic" | "gemini";
  */
 export async function fetchOfoxModels(
   protocol: OfoxProtocol,
+  forceRefresh = false,
 ): Promise<FetchedModel[]> {
-  return invoke("fetch_ofox_models", { protocol });
+  return invoke("fetch_ofox_models", { protocol, forceRefresh });
 }
 
 /** openai 协议下需要排除的模型 vendor 前缀 */
@@ -114,6 +127,87 @@ export function filterOfoxModelsByProtocol(
     });
   }
   return result;
+}
+
+/** WorkBuddy is an OpenAI-compatible agent host, not an OpenAI-vendor-only
+ * client. Keep every catalog model that can return text over chat completions
+ * and explicitly advertises tool calls. */
+export function filterOfoxModelsForWorkBuddy(
+  models: FetchedModel[],
+): FetchedModel[] {
+  return models.filter((model) => {
+    const endpoints = model.supportedEndpoints ?? [];
+    const outputs = model.outputModalities ?? [];
+    const parameters = model.supportedParameters ?? [];
+    return (
+      endpoints.includes("/v1/chat/completions") &&
+      outputs.includes("text") &&
+      parameters.includes("tools")
+    );
+  });
+}
+
+/**
+ * Build WorkBuddy's recommended starter set. Prefer paid models with known
+ * pricing, then balance cost with useful capabilities and vendor diversity.
+ * The result is deterministic so repeated binds do not churn models.json.
+ */
+export function pickWorkBuddyCuratedModels(
+  models: FetchedModel[],
+  limit = 8,
+): FetchedModel[] {
+  if (limit <= 0 || models.length === 0) return [];
+  const priced = models.filter((model) => {
+    const price = Number(model.pricingPrompt ?? "");
+    return Number.isFinite(price) && price > 0;
+  });
+  const pool = priced.length > 0 ? priced : models;
+  const sorted = [...pool].sort((a, b) => {
+    const aPrice = Number(a.pricingPrompt ?? "") || Number.POSITIVE_INFINITY;
+    const bPrice = Number(b.pricingPrompt ?? "") || Number.POSITIVE_INFINITY;
+    return aPrice - bPrice || a.id.localeCompare(b.id);
+  });
+  const selected: FetchedModel[] = [];
+  const selectedIds = new Set<string>();
+  const add = (model: FetchedModel | undefined) => {
+    if (!model || selected.length >= limit || selectedIds.has(model.id)) return;
+    selected.push(model);
+    selectedIds.add(model.id);
+  };
+
+  add(sorted[0]);
+  add(
+    sorted.find((model) =>
+      (model.supportedParameters ?? []).includes("reasoning"),
+    ),
+  );
+  add(sorted.find((model) => (model.inputModalities ?? []).includes("image")));
+
+  const representedVendors = new Set(
+    selected.map((model) => model.id.split("/", 1)[0].toLowerCase()),
+  );
+  for (const model of sorted) {
+    const vendor = model.id.split("/", 1)[0].toLowerCase();
+    if (!representedVendors.has(vendor)) {
+      add(model);
+      representedVendors.add(vendor);
+    }
+  }
+  for (const model of sorted) add(model);
+  return selected;
+}
+
+export function toWorkBuddyModelSelection(
+  model: FetchedModel,
+): WorkBuddyModelSelection {
+  const parameters = model.supportedParameters ?? [];
+  return {
+    id: model.id,
+    name: model.name?.trim() || model.id,
+    supportsToolCall: parameters.includes("tools"),
+    supportsImages: (model.inputModalities ?? []).includes("image"),
+    supportsReasoning: parameters.includes("reasoning"),
+  };
 }
 
 /**

@@ -12,7 +12,8 @@
 //!    紧随其后的 `reseed` 调用 `current_apex()` 已经返回新 apex。
 //! 4. **再** logout：清掉旧 apex 域签发的 token + 删 ofox_auth.json，避免被
 //!    误用到新域上。
-//! 5. **最后** reseed：把所有 ofox-* provider 的 settings_config 用新 apex 拼。
+//! 5. **最后** reseed：把所有 ofox-* provider 的 settings_config 用新 apex 拼，
+//!    同步已绑定 WorkBuddy 模型的 URL（保留原 API key 与其他字段）。
 //!    部分 row 写失败只 warn，不回滚——返回值会显示成功条数，前端可酌情提示。
 //! 6. emit `ofox-apex-changed`（payload 是新 apex）+ `ofox-reauth-requested`
 //!    （MainApp 已监听，自动跳到 LoginPage）。
@@ -48,7 +49,7 @@ pub async fn ofox_set_apex(
     state: State<'_, AppState>,
     ofox_state: State<'_, OfoxAuthState>,
     app: tauri::AppHandle,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     // 1. 白名单校验
     if !crate::ofox_apex::is_known_apex(&next_apex) {
         return Err(format!("未知 apex: {next_apex}"));
@@ -58,7 +59,7 @@ pub async fn ofox_set_apex(
     let current = crate::ofox_apex::current_apex();
     if current == next_apex.as_str() {
         log::info!("[OfoxApex] set_apex({next_apex}): same as current, no-op");
-        return Ok(());
+        return Ok(true);
     }
 
     log::info!("[OfoxApex] switching apex: {current} → {next_apex}");
@@ -81,11 +82,23 @@ pub async fn ofox_set_apex(
     }
 
     // 5. 重新生成所有 ofox-* provider 的 settings_config
-    let updated = crate::database::dao::providers_seed::reseed_ofox_providers_with_current_apex(
-        &state.db,
-    )
-    .map_err(|e| format!("reseed providers 失败: {e}"))?;
+    let updated =
+        crate::database::dao::providers_seed::reseed_ofox_providers_with_current_apex(&state.db)
+            .map_err(|e| format!("reseed providers 失败: {e}"))?;
     log::info!("[OfoxApex] reseeded {updated} provider rows");
+
+    // Region switching must update the URL already written to WorkBuddy's
+    // models.json. A conflict is non-fatal for the apex switch, but the caller
+    // gets a warning instead of silently leaving the external app on the old
+    // host. Startup retries this migration as well.
+    let workbuddy_synced =
+        match crate::workbuddy_config::reconcile_managed_endpoint(&state.db).await {
+            Ok(_) => true,
+            Err(error) => {
+                log::warn!("[OfoxApex] WorkBuddy endpoint reconciliation failed: {error}");
+                false
+            }
+        };
 
     // 6. 通知前端
     if let Err(e) = app.emit("ofox-apex-changed", &next_apex) {
@@ -95,5 +108,5 @@ pub async fn ofox_set_apex(
         log::warn!("[OfoxApex] emit ofox-reauth-requested failed: {e}");
     }
 
-    Ok(())
+    Ok(workbuddy_synced)
 }

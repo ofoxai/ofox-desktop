@@ -1,10 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+#[cfg(unix)]
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
 
-use crate::app_config::AppType;
+use crate::app_config::{AppType, BindableTool};
 use crate::error::AppError;
 use crate::services::skill::{SkillStorageLocation, SyncMethod};
 
@@ -183,7 +184,7 @@ impl WebDavSyncSettings {
 #[serde(rename_all = "camelCase")]
 pub struct ApiKeyMeta {
     /// 关联的工具。整个 `ofox_api_keys` Vec 里 `tool` 是 unique key。
-    pub tool: AppType,
+    pub tool: BindableTool,
     /// 服务端返回的 key id。空串非法——上游若不返 id 我们就拒绝持久化。
     pub key_id: String,
     /// 我们提交给服务端的默认 name——形如 `<tool> on <host>`（见
@@ -938,7 +939,8 @@ pub fn update_webdav_sync_status(status: WebDavSyncStatus) -> Result<(), AppErro
 // `ofox_api_keys::fetch_or_create_api_key` 协调一致。
 
 /// 取某工具的 API key 元数据（不读 keychain，所以拿不到 key 本体）。
-pub fn get_api_key_meta(tool: AppType) -> Option<ApiKeyMeta> {
+pub fn get_api_key_meta<T: Into<BindableTool>>(tool: T) -> Option<ApiKeyMeta> {
+    let tool = tool.into();
     settings_store()
         .read()
         .ok()
@@ -981,7 +983,8 @@ pub fn upsert_api_key_meta(meta: ApiKeyMeta) -> Result<(), AppError> {
 /// 删除某工具的 API key 元数据。不存在不报错（幂等）——跟
 /// `SecretStore::clear` 的语义对齐，方便调用方一把"清干净"两边而不用 match
 /// 出"是不是真的有"。
-pub fn remove_api_key_meta(tool: AppType) -> Result<(), AppError> {
+pub fn remove_api_key_meta<T: Into<BindableTool>>(tool: T) -> Result<(), AppError> {
+    let tool = tool.into();
     mutate_settings(|s| {
         s.ofox_api_keys.retain(|m| m.tool != tool);
     })
@@ -997,7 +1000,7 @@ mod api_key_meta_tests {
 
     fn sample_meta(tool: AppType, key_id: &str) -> ApiKeyMeta {
         ApiKeyMeta {
-            tool,
+            tool: tool.into(),
             key_id: key_id.to_string(),
             name: None,
             alias: None,
@@ -1030,7 +1033,7 @@ mod api_key_meta_tests {
     }
 
     fn apply_remove(list: &mut Vec<ApiKeyMeta>, tool: AppType) {
-        list.retain(|m| m.tool != tool);
+        list.retain(|m| m.tool != tool.into());
     }
 
     #[test]
@@ -1043,7 +1046,10 @@ mod api_key_meta_tests {
         // 替换 Claude 的 key
         apply_upsert(&mut list, sample_meta(AppType::Claude, "k1-new"));
         assert_eq!(list.len(), 2, "tool 必须唯一");
-        let claude = list.iter().find(|m| m.tool == AppType::Claude).unwrap();
+        let claude = list
+            .iter()
+            .find(|m| m.tool == AppType::Claude.into())
+            .unwrap();
         assert_eq!(claude.key_id, "k1-new");
     }
 
@@ -1064,7 +1070,7 @@ mod api_key_meta_tests {
         ];
         apply_remove(&mut list, AppType::Claude);
         assert_eq!(list.len(), 1);
-        assert_eq!(list[0].tool, AppType::Codex);
+        assert_eq!(list[0].tool, AppType::Codex.into());
     }
 
     /// `key_start` 是 Option，serde 时 None 不该出现在 JSON 里——避免老
@@ -1088,7 +1094,10 @@ mod api_key_meta_tests {
             ..sample_meta(AppType::Claude, "k1")
         };
         let json = serde_json::to_string(&meta).unwrap();
-        assert!(json.contains("\"keyStart\":\"sk-of-AbCdEf\""), "got: {json}");
+        assert!(
+            json.contains("\"keyStart\":\"sk-of-AbCdEf\""),
+            "got: {json}"
+        );
 
         let decoded: ApiKeyMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.key_start.as_deref(), Some("sk-of-AbCdEf"));
@@ -1108,4 +1117,3 @@ mod api_key_meta_tests {
         assert_eq!(decoded.key_id, "k1");
     }
 }
-

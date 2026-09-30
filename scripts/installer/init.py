@@ -53,6 +53,7 @@ from app.display import (
 )
 from app.terminal import open_terminal_with_command, close_terminal_window, TerminalHandle
 from app.monitor import wait_for_condition
+from app.progress import emit_progress, make_poll_callback
 from app.steps import Step, set_region, get_env_steps, get_tool_step, TOOL_STEPS, VerifyStep
 
 # 与 openclaw-launcher 的 ~/.openclaw-init-state.json 隔离——同一台机器上
@@ -238,12 +239,16 @@ def main() -> None:
 
     for i, step in enumerate(steps):
         step_key = str(i)
+        # 结构化进度：每步开始就发一条，前端据此把卡片文案从笼统的"安装中…"
+        # 换成具体步骤名。人类可读输出仍走 display 的 print_*，两条通路互不干扰。
+        emit_progress(step=i + 1, total=total, name=step.name, phase="start")
 
         # 检查是否应该跳过
         if step.should_skip():
             print_step_start(i + 1, total, step.name, step.description)
             reason = "海外用户无需配置" if step.name == "国内镜像配置" else ""
             print_skipped(reason)
+            emit_progress(step=i + 1, total=total, name=step.name, phase="skipped")
             state[step_key] = "SKIPPED"
             save_state(state)
             summary.append((step.name, True, True))
@@ -255,6 +260,9 @@ def main() -> None:
             if step.check():
                 print_step_start(i + 1, total, step.name, step.description)
                 print_already_installed()
+                emit_progress(
+                    step=i + 1, total=total, name=step.name, phase="skipped"
+                )
                 state[step_key] = "SUCCESS"
                 summary.append((step.name, True, True))
                 continue
@@ -267,6 +275,7 @@ def main() -> None:
         print_checking(step.name)
         if step.check():
             print_already_installed()
+            emit_progress(step=i + 1, total=total, name=step.name, phase="skipped")
             state[step_key] = "SUCCESS"
             save_state(state)
             summary.append((step.name, True, True))
@@ -292,27 +301,23 @@ def main() -> None:
                     continue
                 print_waiting(step.name)
 
-                # 轮询等待安装完成
-                ok = wait_for_condition(
-                    condition_fn=step.check,
+                # 等终端里的安装命令真正结束，而不只看见新二进制就推进。
+                # npm 可能先写出可执行文件、随后才下载依赖或报错；仅靠
+                # `command -v` 会把失败误判成成功。标记文件包含真实退出码。
+                done = wait_for_condition(
+                    condition_fn=handle.is_script_done,
                     timeout=step.timeout,
                     interval=step.poll_interval,
-                    progress_callback=print_poll_tick,
+                    progress_callback=make_poll_callback(
+                        i + 1, total, step.name, tick_fn=print_poll_tick
+                    ),
                 )
                 print_poll_done()
-
-                if ok:
-                    success = step.verify()
+                success = done and handle.exit_code() == 0 and step.verify()
+                if not done:
+                    print_failure_hint("安装命令超时；终端仍保持打开，请检查其中的日志。")
                 else:
-                    success = False
-
-                # 等待终端脚本真正执行完毕（标记文件出现），再关闭窗口
-                wait_for_condition(
-                    condition_fn=handle.is_script_done,
-                    timeout=300,  # 5 分钟，确保慢速安装也能完成
-                    interval=1.0,
-                )
-                close_terminal_window(handle.window_id)
+                    close_terminal_window(handle.window_id)
                 handle.cleanup()
         else:
             # 在主进程中直接执行
@@ -322,6 +327,12 @@ def main() -> None:
 
         # 显示结果
         print_step_done(step.name, success)
+        emit_progress(
+            step=i + 1,
+            total=total,
+            name=step.name,
+            phase="done" if success else "failed",
+        )
 
         if success:
             state[step_key] = "SUCCESS"

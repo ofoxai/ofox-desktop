@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { WorkBuddyModelSelection } from "@/lib/api/model-fetch";
 
 /**
  * The wire protocol the OfoxAI gateway speaks for each tool.
@@ -17,11 +18,20 @@ export type ToolProtocol = "openai" | "anthropic" | "gemini";
 export const TOOL_PROTOCOL: Readonly<Record<string, ToolProtocol>> = {
   claude: "anthropic",
   codex: "openai",
+  // ChatGPT desktop's Codex view uses the same config.toml as the CLI.
+  // Chat and Work use the signed-in OpenAI account, not this API protocol.
+  chatgpt: "openai",
   gemini: "gemini",
   opencode: "openai",
   openclaw: "openai",
   hermes: "openai",
+  workbuddy: "openai",
 };
+
+/** Route the desktop app's Codex view to the CLI's single shared config. */
+export function managedToolId(app: string): string {
+  return app === "chatgpt" ? "codex" : app;
+}
 
 /**
  * Connectivity probe result. Mirrors `commands/manage_tool.rs::PingResult` —
@@ -42,6 +52,28 @@ export interface PingResult {
   latencyMs: number;
   statusCode: number | null;
   error: string | null;
+}
+
+export interface WorkBuddyEndpointStatus {
+  expectedUrl: string;
+  configuredUrls: string[];
+  externallyModified: boolean;
+}
+
+export type CompatibilityProtocol =
+  | "responses"
+  | "chatCompletions"
+  | "anthropic"
+  | "gemini";
+
+export interface CompatibilityResult {
+  app: string;
+  model: string;
+  protocol: CompatibilityProtocol | null;
+  status: "compatible" | "incompatible" | "inconclusive";
+  source: "catalog" | "cache" | "probe" | "manual";
+  reason: string | null;
+  allowedProtocols?: CompatibilityProtocol[];
 }
 
 /**
@@ -66,18 +98,60 @@ export interface PingResult {
  */
 export const manageToolApi = {
   async getConfigFilePath(app: string): Promise<string> {
-    return await invoke("get_tool_config_file_path", { app });
+    return await invoke("get_tool_config_file_path", {
+      app: managedToolId(app),
+    });
   },
 
   async getActiveModel(app: string): Promise<string> {
-    return await invoke("get_active_ofox_model", { app });
+    return await invoke("get_active_ofox_model", { app: managedToolId(app) });
   },
 
-  async setActiveModel(app: string, model: string): Promise<void> {
-    await invoke("set_active_ofox_model", { app, model });
+  async setActiveModel(
+    app: string,
+    model: string,
+    modelSelection?: WorkBuddyModelSelection,
+    compatibilityProtocol?: CompatibilityProtocol,
+    allowUnverified?: boolean,
+  ): Promise<void> {
+    await invoke("set_active_ofox_model", {
+      app: managedToolId(app),
+      model,
+      modelSelection,
+      compatibilityProtocol,
+      allowUnverified,
+    });
+  },
+
+  async getWorkBuddyManagedModels(): Promise<string[]> {
+    return await invoke("get_workbuddy_managed_models");
+  },
+
+  async getWorkBuddyEndpointStatus(): Promise<WorkBuddyEndpointStatus> {
+    return await invoke("get_workbuddy_endpoint_status");
+  },
+
+  async setWorkBuddyManagedModels(
+    modelSelections: WorkBuddyModelSelection[],
+  ): Promise<void> {
+    await invoke("set_workbuddy_managed_models", {
+      modelSelections,
+    });
+  },
+
+  async checkCompatibility(
+    app: string,
+    model: string,
+    forceRetest = false,
+  ): Promise<CompatibilityResult> {
+    return await invoke("check_ofox_model_compatibility", {
+      app: managedToolId(app),
+      model,
+      forceRetest,
+    });
   },
 
   async pingModel(app: string, model: string): Promise<PingResult> {
-    return await invoke("ofox_ping_model", { app, model });
+    return await invoke("ofox_ping_model", { app: managedToolId(app), model });
   },
 };

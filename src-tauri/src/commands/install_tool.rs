@@ -11,16 +11,27 @@
 //! 仅 macOS：脚本入口 `init.sh` 第一行就 `uname -m != arm64 → exit 1`，
 //! Rust 这边也用 cfg 提前拦——Intel Mac / Windows 用户得到清晰错误。
 
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
 use std::process::Stdio;
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use serde_json::json;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::AppHandle;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use tauri::Emitter;
+#[cfg(target_os = "macos")]
+use tauri::Manager;
 
 /// 与 `scripts/installer/app/steps.py::TOOL_STEPS` 字典 key 对齐。
 const ALLOWED_TOOLS: &[&str] = &[
     "claude", "codex", "gemini", "opencode", "openclaw", "hermes",
 ];
+
+/// 走 Rust 原生下载 + DMG 安装，不经过 Python installer / osascript Terminal。
+/// 与 `ALLOWED_TOOLS` 互斥——同一个 tool_id 不会两条路径都命中。
+const NATIVE_INSTALL_TOOLS: &[&str] = &["chatgpt"];
 
 #[tauri::command]
 pub async fn install_tool(
@@ -28,20 +39,104 @@ pub async fn install_tool(
     tool_id: String,
     skip_env: Option<bool>,
 ) -> Result<i32, String> {
-    if !ALLOWED_TOOLS.contains(&tool_id.as_str()) {
+    let is_script_tool = ALLOWED_TOOLS.contains(&tool_id.as_str());
+    let is_native_tool = NATIVE_INSTALL_TOOLS.contains(&tool_id.as_str());
+    if !is_script_tool && !is_native_tool {
         return Err(format!("不支持的工具: {tool_id}"));
     }
+    let _guard = super::tool_update::ToolOperationGuard::acquire(&tool_id)?;
+    install_tool_impl(app, tool_id, skip_env, is_native_tool).await
+}
 
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (app, skip_env);
-        return Err("工具自动安装目前仅支持 macOS arm64".into());
-    }
-
-    #[cfg(target_os = "macos")]
-    {
+/// 拆分入口以避免主命令函数在 Linux CI 下踩 clippy 的 needless_return
+/// —— cfg-gate 完整覆盖每个平台下的最终表达式。
+#[cfg(target_os = "macos")]
+async fn install_tool_impl(
+    app: AppHandle,
+    tool_id: String,
+    skip_env: Option<bool>,
+    is_native_tool: bool,
+) -> Result<i32, String> {
+    if is_native_tool {
+        let _ = skip_env;
+        native_install(app, &tool_id).await
+    } else {
         run_installer(app, tool_id, skip_env.unwrap_or(false)).await
     }
+}
+
+/// Windows 上 chatgpt 走 Microsoft Store（winget 静默 + Store URI 兜底）；其他
+/// 工具的 Windows 支持（codex CLI on WSL、gemini 等）不在本 PR 的 code-only
+/// scope 内，给出明确错误。
+#[cfg(target_os = "windows")]
+async fn install_tool_impl(
+    app: AppHandle,
+    tool_id: String,
+    _skip_env: Option<bool>,
+    is_native_tool: bool,
+) -> Result<i32, String> {
+    if is_native_tool {
+        native_install_windows(app, &tool_id).await
+    } else {
+        Err(format!(
+            "{tool_id} 在 Windows 上暂不支持一键安装；请按官方文档手动装或用 WSL"
+        ))
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+async fn install_tool_impl(
+    _app: AppHandle,
+    tool_id: String,
+    _skip_env: Option<bool>,
+    is_native_tool: bool,
+) -> Result<i32, String> {
+    if is_native_tool {
+        Err(format!("{tool_id} 自动安装目前仅支持 macOS/Windows"))
+    } else {
+        Err("工具自动安装目前仅支持 macOS/Windows".into())
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn native_install(app: AppHandle, tool_id: &str) -> Result<i32, String> {
+    let result = match tool_id {
+        "chatgpt" => super::chatgpt_app::install_chatgpt_desktop_app(&app).await,
+        other => Err(format!("原生安装未实现: {other}")),
+    };
+    // 与 osascript 安装分支保持一致：无论成功失败都 emit done，前端 hook 据此重扫。
+    let code = result.as_ref().copied().unwrap_or(-1);
+    let _ = app.emit(
+        "install-tool-done",
+        json!({ "tool": tool_id, "code": code }),
+    );
+    result
+}
+
+/// Windows 上的 native install 路由——包一层 emit 闭包，把 windows_chatgpt 的
+/// progress JSON 转发到前端 `install-tool-log` 事件。行为跟 macOS 侧一致。
+#[cfg(target_os = "windows")]
+async fn native_install_windows(app: AppHandle, tool_id: &str) -> Result<i32, String> {
+    let result = match tool_id {
+        "chatgpt" => {
+            let tool_id_owned = tool_id.to_string();
+            let app_for_emit = app.clone();
+            let emit = move |line: &str| {
+                let _ = app_for_emit.emit(
+                    "install-tool-log",
+                    json!({ "tool": &tool_id_owned, "stream": "stdout", "line": line }),
+                );
+            };
+            super::windows_chatgpt::install_chatgpt_desktop_app_with(&emit).await
+        }
+        other => Err(format!("Windows 原生安装未实现: {other}")),
+    };
+    let code = result.as_ref().copied().unwrap_or(-1);
+    let _ = app.emit(
+        "install-tool-done",
+        json!({ "tool": tool_id, "code": code }),
+    );
+    result
 }
 
 #[cfg(target_os = "macos")]
@@ -61,7 +156,12 @@ async fn run_installer(app: AppHandle, tool_id: String, skip_env: bool) -> Resul
     if skip_env {
         cmd.arg("--skip-env");
     }
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // The GUI has no place to answer init.py's fallback "continue?" prompt.
+    // In dev mode stdin can otherwise be inherited from the launching shell
+    // and leave an install stuck indefinitely after a failed prerequisite.
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     let mut child = cmd.spawn().map_err(|e| format!("启动安装脚本失败: {e}"))?;
 

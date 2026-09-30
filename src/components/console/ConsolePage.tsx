@@ -8,6 +8,7 @@ import {
   SlidersHorizontal,
   Wrench,
   Terminal,
+  AppWindow,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
@@ -15,7 +16,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { settingsApi } from "@/lib/api";
 import { proxyApi } from "@/lib/api/proxy";
-import { ofoxGetUserInfo, isOfoxBillingManager, type OfoxUserInfo } from "@/lib/api/ofoxAuth";
+import {
+  ofoxGetUserInfo,
+  isOfoxBillingManager,
+  type OfoxUserInfo,
+} from "@/lib/api/ofoxAuth";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
 import {
   ofoxAnalyticsUrl,
@@ -48,12 +53,14 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useUpdate } from "@/contexts/UpdateContext";
 import { manageToolApi } from "@/lib/api/manageTool";
 import { useToolLaunch } from "@/hooks/useToolLaunch";
+import { useToolUpdates } from "@/hooks/useToolUpdates";
 import ofoxLogo from "@/assets/icons/ofox-logo.png";
 
 interface ToolInfo {
   name: string;
   version: string | null;
   error: string | null;
+  installationKind?: "desktopApp" | "cli";
 }
 
 type ToolStatus = "active" | "idle" | "error";
@@ -64,6 +71,7 @@ interface BoundTool {
   label: string;
   color: string;
   version: string | null;
+  installationKind?: "desktopApp" | "cli";
   status: ToolStatus;
 }
 
@@ -94,9 +102,21 @@ export default function ConsolePage({
 }: ConsolePageProps) {
   const { apex } = useOfoxApex();
   const { t } = useTranslation();
-  // "打开"按钮：把工具 CLI 拉到系统终端里跑，进程独立于 Ofox
+  // "打开"按钮：CLI 拉到独立终端，桌面客户端由系统直接启动。
   const { launching: launchingTools, launch: launchTool } = useToolLaunch(
-    () => toast.error("打开终端失败"),
+    (_toolId, error) => {
+      const message = String(error);
+      const proxyError = "LOCAL_PROXY_UNAVAILABLE|";
+      if (message.startsWith(proxyError)) {
+        toast.error(
+          t("toolLaunch.proxyUnavailable", {
+            endpoint: message.slice(proxyError.length),
+          }),
+        );
+        return;
+      }
+      toast.error(t("toolLaunch.failed"));
+    },
   );
   // 应用自更新：底部栏提示按钮 + 首次发现弹窗。数据源 = UpdateContext
   // （自动检查走 R2 latest.json）。
@@ -109,6 +129,7 @@ export default function ConsolePage({
     dismissUpdate,
   } = useUpdate();
   const [tools, setTools] = useState<BoundTool[]>([]);
+  const toolUpdates = useToolUpdates();
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   // null = manage dialog is closed. Holds the snapshot of the tool row that
@@ -196,9 +217,9 @@ export default function ConsolePage({
   // 命令（读 settings.json 的 ofoxApiKeys，`ApiKeyMeta.tool` 是小写工具名、
   // `keyId` 是服务端 id）。用于"数据统计"按钮拼 analytics URL；没拿到 id 的
   // 工具不展示该按钮（按钮要求 key id 作为查询参数）。
-  const [apiKeyIdByTool, setApiKeyIdByTool] = useState<
-    Record<string, string>
-  >({});
+  const [apiKeyIdByTool, setApiKeyIdByTool] = useState<Record<string, string>>(
+    {},
+  );
 
   // tool.id → 工具行二级信息要显示的 API key 标签。显示优先级：
   // user 起的 alias > 服务端返回的 keyStart 前缀（如 "sk-of-Ab12"）>
@@ -327,6 +348,7 @@ export default function ConsolePage({
         label: meta.label,
         color: meta.color,
         version: info?.version ?? null,
+        installationKind: info?.installationKind,
         status,
       };
     });
@@ -342,7 +364,10 @@ export default function ConsolePage({
       const entries = await Promise.all(
         ordered.map(async (id) => {
           try {
-            return [id, (await manageToolApi.getActiveModel(id)).trim()] as const;
+            return [
+              id,
+              (await manageToolApi.getActiveModel(id)).trim(),
+            ] as const;
           } catch {
             return [id, ""] as const;
           }
@@ -457,6 +482,13 @@ export default function ConsolePage({
   // 不再依赖 loadData，没有 cleanup race。
   const loadDataRef = useRef(loadData);
   useEffect(() => {
+    const refresh = () => {
+      void loadDataRef.current();
+    };
+    window.addEventListener("tool-updates-complete", refresh);
+    return () => window.removeEventListener("tool-updates-complete", refresh);
+  }, []);
+  useEffect(() => {
     loadDataRef.current = loadData;
   }, [loadData]);
 
@@ -491,10 +523,7 @@ export default function ConsolePage({
           row (titleBarStyle: "Overlay") with comfortable margin on either side.
           The previous 28px (h-7) was tall enough technically but felt fiddly:
           users would aim for the visible "Ofox" text and miss. */}
-      <div
-        className="relative h-10 shrink-0"
-        data-tauri-drag-region="true"
-      >
+      <div className="relative h-10 shrink-0" data-tauri-drag-region="true">
         <div
           className="flex h-full items-center justify-center gap-1.5"
           data-tauri-drag-region="true"
@@ -541,9 +570,7 @@ export default function ConsolePage({
                     <span className="inline-flex items-center gap-1">
                       <Loader2 className="h-3 w-3 animate-spin" />
                       正在加载用户信息
-                      {userRetryAttempt > 0
-                        ? `（${userRetryAttempt}/3）`
-                        : "…"}
+                      {userRetryAttempt > 0 ? `（${userRetryAttempt}/3）` : "…"}
                     </span>
                   ) : userLoadFailed ? (
                     <button
@@ -582,9 +609,7 @@ export default function ConsolePage({
               </div>
               {isOfoxBillingManager(user) && (
                 <button
-                  onClick={() =>
-                    settingsApi.openExternal(ofoxWalletUrl(apex))
-                  }
+                  onClick={() => settingsApi.openExternal(ofoxWalletUrl(apex))}
                   className="rounded-lg bg-orange-500 px-4 py-1.5 text-[13px] font-medium text-white hover:bg-orange-600"
                 >
                   充值
@@ -647,7 +672,8 @@ export default function ConsolePage({
               {tools.map((tool) => {
                 const keyLabel = apiKeyLabelByTool[tool.id];
                 const model = modelByTool[tool.id];
-                const hasSecondary = !!(keyLabel || model !== undefined);
+                const hasSecondary =
+                  tool.id === "chatgpt" || !!(keyLabel || model !== undefined);
                 return (
                   <div
                     key={tool.id}
@@ -659,6 +685,9 @@ export default function ConsolePage({
                         <span>{tool.label}</span>
                         {tool.version && (
                           <span className="text-[11px] font-normal text-muted-foreground">
+                            {TOOL_META[tool.id]?.launchKind === "desktopApp"
+                              ? "桌面应用 · "
+                              : ""}
                             v{tool.version}
                           </span>
                         )}
@@ -669,9 +698,24 @@ export default function ConsolePage({
                         // 稳定，避免行高跳动。`truncate` 防止长 model id 把
                         // 右侧按钮挤变形。
                         <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
-                          <span>{keyLabel ?? "—"}</span>
-                          <span className="mx-1.5 opacity-50">·</span>
-                          <span>{model || "未设置 model"}</span>
+                          {tool.id === "chatgpt" ? (
+                            <>
+                              <span>
+                                {t("modelCompatibility.chatgptCodexMode")}
+                              </span>
+                              <span className="mx-1.5 opacity-50">·</span>
+                              <span>
+                                {model ||
+                                  t("modelCompatibility.chatgptCodexUnset")}
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              <span>{keyLabel ?? "—"}</span>
+                              <span className="mx-1.5 opacity-50">·</span>
+                              <span>{model || "未设置 model"}</span>
+                            </>
+                          )}
                         </div>
                       )}
                     </div>
@@ -680,15 +724,25 @@ export default function ConsolePage({
                         已下线——日常排障不需要，重要的连通性测试仍在"管理"
                         弹窗里。 */}
                     <div className="flex items-center justify-end gap-1.5">
+                      {toolUpdates.tools.some(
+                        (entry) =>
+                          entry.name === tool.id &&
+                          entry.update_status === "available",
+                      ) && (
+                        <button
+                          onClick={() => setSettingsDialogOpen(true)}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-orange-400 px-2.5 py-1 text-[12px] font-medium text-orange-600 hover:bg-accent"
+                        >
+                          <ArrowUpCircle className="h-3.5 w-3.5" />
+                          {t("toolUpdates.available")}
+                        </button>
+                      )}
                       {apiKeyIdByTool[tool.id] && (
                         <button
                           onClick={() =>
                             settingsApi
                               .openExternal(
-                                ofoxAnalyticsUrl(
-                                  apex,
-                                  apiKeyIdByTool[tool.id],
-                                ),
+                                ofoxAnalyticsUrl(apex, apiKeyIdByTool[tool.id]),
                               )
                               .catch((e) => {
                                 console.error(
@@ -705,16 +759,24 @@ export default function ConsolePage({
                           数据统计
                         </button>
                       )}
-                      {TOOL_META[tool.id]?.cliBin &&
+                      {(TOOL_META[tool.id]?.cliBin ||
+                        TOOL_META[tool.id]?.launchKind === "desktopApp") &&
                         tool.status !== "error" && (
                           <button
                             onClick={() => launchTool(tool.id)}
                             disabled={launchingTools.has(tool.id)}
-                            title={`在新的终端窗口中运行 ${TOOL_META[tool.id]?.cliBin}（独立生命周期，关闭 Ofox 不影响）`}
+                            title={
+                              TOOL_META[tool.id]?.launchKind === "desktopApp"
+                                ? `打开 ${tool.label}`
+                                : `在新的终端窗口中运行 ${TOOL_META[tool.id]?.cliBin}（独立生命周期，关闭 Ofox 不影响）`
+                            }
                             className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1 text-[12px] font-medium text-muted-foreground hover:bg-accent disabled:opacity-60"
                           >
                             {launchingTools.has(tool.id) ? (
                               <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : TOOL_META[tool.id]?.launchKind ===
+                              "desktopApp" ? (
+                              <AppWindow className="h-3.5 w-3.5" />
                             ) : (
                               <Terminal className="h-3.5 w-3.5" />
                             )}
@@ -722,7 +784,13 @@ export default function ConsolePage({
                           </button>
                         )}
                       {tool.status === "error" ? (
-                        <button className="inline-flex items-center gap-1.5 rounded-lg bg-orange-500 px-2.5 py-1 text-[12px] font-medium text-white hover:bg-orange-600">
+                        <button
+                          onClick={() => {
+                            const url = TOOL_META[tool.id]?.downloadUrl;
+                            if (url) void settingsApi.openExternal(url);
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-orange-500 px-2.5 py-1 text-[12px] font-medium text-white hover:bg-orange-600"
+                        >
                           <Wrench className="h-3.5 w-3.5" />
                           修复
                         </button>
@@ -735,6 +803,7 @@ export default function ConsolePage({
                               label: tool.label,
                               color: tool.color,
                               version: tool.version,
+                              installationKind: tool.installationKind,
                             })
                           }
                           className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1 text-[12px] font-medium text-muted-foreground hover:bg-accent"
@@ -780,7 +849,10 @@ export default function ConsolePage({
                   const target = updateInfo?.downloadUrl;
                   if (target) {
                     settingsApi.openExternal(target).catch((e) => {
-                      console.error("[ConsolePage] open download url failed", e);
+                      console.error(
+                        "[ConsolePage] open download url failed",
+                        e,
+                      );
                       toast.error(t("settings.openReleaseNotesFailed"));
                     });
                   }
@@ -810,9 +882,7 @@ export default function ConsolePage({
         </div>
         <div className="flex items-center gap-4">
           <button
-            onClick={() =>
-              settingsApi.openExternal(ofoxDashboardUrl(apex))
-            }
+            onClick={() => settingsApi.openExternal(ofoxDashboardUrl(apex))}
             className="text-[12px] text-orange-500 hover:text-orange-600 hover:underline"
           >
             查看详细用量 ↗
@@ -911,4 +981,3 @@ function formatBalance(value: number | null | undefined): string {
   if (typeof value !== "number" || Number.isNaN(value)) return "—";
   return `$${value.toFixed(2)}`;
 }
-

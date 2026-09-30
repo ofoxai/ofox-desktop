@@ -4,40 +4,84 @@ export const TOOL_META: Record<
     abbr: string;
     label: string;
     color: string;
+    /** Official upstream project page shown from discovery and management UI. */
+    projectUrl: string;
+    projectLinkLabel: "GitHub" | "官网";
+    /** Official download page for desktop-only tools without an installer. */
+    downloadUrl?: string;
     /**
      * 主页"打开"按钮启动的 CLI 命令。留空表示该工具不支持一键打开
      * （例如 hermes 是 dashboard 服务而不是交互式 CLI，openclaw 走
      * gateway，不需要在终端里跑）。
      */
     cliBin?: string;
+    launchKind?: "cli" | "desktopApp";
   }
 > = {
   claude: {
     abbr: "CC",
     label: "Claude Code",
     color: "bg-orange-700",
+    projectUrl: "https://github.com/anthropics/claude-code",
+    projectLinkLabel: "GitHub",
     cliBin: "claude",
   },
   codex: {
     abbr: "Cx",
     label: "Codex",
     color: "bg-neutral-800",
+    projectUrl: "https://github.com/openai/codex",
+    projectLinkLabel: "GitHub",
     cliBin: "codex",
+  },
+  chatgpt: {
+    abbr: "GP",
+    label: "ChatGPT",
+    color: "bg-emerald-700",
+    projectUrl: "https://chatgpt.com/download/",
+    projectLinkLabel: "官网",
+    downloadUrl: "https://chatgpt.com/download/",
+    launchKind: "desktopApp",
   },
   opencode: {
     abbr: "OC",
     label: "OpenCode",
     color: "bg-emerald-500",
+    projectUrl: "https://github.com/anomalyco/opencode",
+    projectLinkLabel: "GitHub",
     cliBin: "opencode",
   },
   gemini: {
     abbr: "Ge",
     label: "Gemini",
     color: "bg-blue-500",
+    projectUrl: "https://github.com/google-gemini/gemini-cli",
+    projectLinkLabel: "GitHub",
     cliBin: "gemini",
   },
-  openclaw: { abbr: "OCl", label: "OpenClaw", color: "bg-amber-600" },
-  hermes: { abbr: "He", label: "Hermes", color: "bg-violet-600" },
+  openclaw: {
+    abbr: "OCl",
+    label: "OpenClaw",
+    color: "bg-amber-600",
+    projectUrl: "https://github.com/openclaw/openclaw",
+    projectLinkLabel: "GitHub",
+  },
+  hermes: {
+    abbr: "He",
+    label: "Hermes",
+    color: "bg-violet-600",
+    projectUrl: "https://github.com/NousResearch/hermes-agent",
+    projectLinkLabel: "GitHub",
+  },
+  workbuddy: {
+    abbr: "WB",
+    label: "WorkBuddy",
+    color: "bg-cyan-600",
+    projectUrl: "https://www.workbuddy.cn/work/",
+    projectLinkLabel: "官网",
+    downloadUrl: "https://www.workbuddy.cn/work/",
+    launchKind: "desktopApp",
+  },
 };
 
 // Single source of truth for which tools the Ofox UI exposes. Aider and Zed
@@ -50,10 +94,12 @@ export const TOOL_META: Record<
 export const TOOL_ORDER = [
   "claude",
   "codex",
+  "chatgpt",
   "opencode",
   "openclaw",
   "hermes",
   "gemini",
+  "workbuddy",
 ];
 
 export const BOUND_TOOLS_STORAGE_KEY = "ofox-bound-tools";
@@ -66,6 +112,7 @@ export const PROXY_SUPPORTED_TOOLS = ["claude", "codex", "gemini"];
 export const INSTALLABLE_TOOLS: readonly string[] = [
   "claude",
   "codex",
+  "chatgpt",
   "gemini",
   "opencode",
   "openclaw",
