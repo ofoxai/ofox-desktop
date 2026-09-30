@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import i18n from "i18next";
 
 /**
  * 调 Rust `install_tool` command，并订阅 `install-tool-log` /
@@ -83,18 +84,35 @@ function parseProgressLine(line: string): InstallProgress | null {
   return progress;
 }
 
+const ANSI_ESCAPE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
+
+/**
+ * 从安装器输出里认出失败原因，认不出返回 null。对应 `app/display.py`：
+ * 预检失败打 `错误: …`，步骤失败先打 `✕ <步骤> 失败` 再打 `提示: …`。
+ * 同一次安装里以最后一条为准——步骤失败时 `提示` 比 `✕` 更具体。
+ */
+function failureReason(line: string): string | null {
+  const text = line.replace(ANSI_ESCAPE, "").trim();
+  const labeled = /^(?:错误|提示)[:：]\s*(.+)$/.exec(text);
+  if (labeled) return labeled[1].trim();
+  if (text.startsWith("✕")) return text.slice(1).trim();
+  return null;
+}
+
 export interface UseToolInstall {
   /** 当前正在装的工具 id 集合——同一时刻可能多个并发。 */
   installing: Set<string>;
   /** 触发安装。`skipEnv=true` 时跳过 nvm/Node 公共环境，加速重复调用。 */
   install: (toolId: string, skipEnv?: boolean) => Promise<void>;
   /**
-   * 最近一次 `install_tool` invoke 失败的信息，`null` 表示当前无错误。
+   * 最近一次安装失败的信息，`null` 表示当前无错误。
    *
-   * 只覆盖 **invoke 本身** 抛出的错（找不到 init.sh、非 macOS/arm64、脚本
-   * 起不来）——这类失败下子进程根本没跑起来，不会有 `install-tool-done`
-   * 事件，卡片瞬间从 installing 退回 missing，UI 上看不出任何异常。把错误
-   * 暴露出来让调用方能给用户一条可见反馈，而不是只打进 console。
+   * 两种来源：
+   *   - **invoke 本身** 抛错（找不到 init.sh、非 macOS/arm64、脚本起不来）；
+   *   - 安装脚本跑起来了但以非零码退出（如预检发现磁盘不足）——message 取
+   *     脚本最后打印的失败原因，认不出时给退出码。
+   * 两种情况下卡片都会瞬间从 installing 退回 missing，没有这条错误用户会以为
+   * 按钮没反应。
    */
   error: { toolId: string; message: string } | null;
   /** 手动清除 error（用户关掉提示条时调）。 */
@@ -122,6 +140,8 @@ export function useToolInstall(
   // 都会新建函数引用，导致 listen 不断重订阅（旧 listener 会泄漏，事件可能
   // 触发多次）。这套 ref 模式跟 ConsolePage 里 loadDataRef 同款。
   const onDoneRef = useRef(onDone);
+  // 每个工具本次安装里最后一条失败原因；安装结束（或重新开始）时清掉。
+  const reasonsRef = useRef<Record<string, string>>({});
   useEffect(() => {
     onDoneRef.current = onDone;
   }, [onDone]);
@@ -140,6 +160,9 @@ export function useToolInstall(
           return;
         }
 
+        const reason = failureReason(line);
+        if (reason) reasonsRef.current[tool] = reason;
+
         // 非进度行仍走 console，便于 dev 时排查路径/参数问题。
         // 真实 npm 日志在 osascript 弹的 Terminal 里，不通过这条事件流。
         console.log(`[install:${tool}:${stream}] ${line}`);
@@ -147,6 +170,14 @@ export function useToolInstall(
 
       un2 = await listen<InstallDone>("install-tool-done", (e) => {
         const { tool, code } = e.payload;
+        const reason = reasonsRef.current[tool];
+        delete reasonsRef.current[tool];
+        if (code !== 0) {
+          setError({
+            toolId: tool,
+            message: reason ?? i18n.t("toolInstall.exitCode", { code }),
+          });
+        }
         setInstalling((prev) => {
           if (!prev.has(tool)) return prev;
           const next = new Set(prev);
@@ -185,8 +216,9 @@ export function useToolInstall(
       });
       if (alreadyInstalling) return;
 
-      // 重试前先清掉上一次的错误，否则旧提示会一直挂着。
+      // 重试前先清掉上一次的错误和残留原因，否则旧提示会一直挂着。
       setError(null);
+      delete reasonsRef.current[toolId];
 
       try {
         await invoke<number>("install_tool", { toolId, skipEnv });

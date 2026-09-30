@@ -16,7 +16,11 @@ use crate::database::Database;
 
 const BACKUP_VERSION: u32 = 2;
 const BACKUP_KEY: &str = "workbuddy";
-const OFOX_CHAT_COMPLETIONS_URL: &str = "https://api.ofox.ai/v1/chat/completions";
+static CONFIG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn endpoint_url() -> String {
+    format!("{}/v1/chat/completions", crate::ofox_apex::gateway_base())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -44,6 +48,14 @@ pub struct WorkBuddyBindingState {
     pub managed_models: Vec<WorkBuddyManagedModelState>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkBuddyEndpointStatus {
+    pub expected_url: String,
+    pub configured_urls: Vec<String>,
+    pub externally_modified: bool,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LegacyWorkBuddyBindingState {
@@ -57,7 +69,7 @@ pub fn models_path() -> PathBuf {
     get_home_dir().join(".workbuddy").join("models.json")
 }
 
-fn validate_selections(selections: &[WorkBuddyModelSelection]) -> Result<(), String> {
+pub(crate) fn validate_selections(selections: &[WorkBuddyModelSelection]) -> Result<(), String> {
     if selections.is_empty() {
         return Err("WorkBuddy 至少需要选择一个模型".to_string());
     }
@@ -79,12 +91,12 @@ fn validate_selections(selections: &[WorkBuddyModelSelection]) -> Result<(), Str
     Ok(())
 }
 
-fn managed_entry(api_key: &str, selection: &WorkBuddyModelSelection) -> Value {
+fn managed_entry(api_key: &str, selection: &WorkBuddyModelSelection, url: &str) -> Value {
     json!({
         "id": selection.id.trim(),
         "name": if selection.name.trim().is_empty() { selection.id.trim() } else { selection.name.trim() },
         "vendor": "OfoxAI",
-        "url": OFOX_CHAT_COMPLETIONS_URL,
+        "url": url,
         "apiKey": api_key,
         "supportsToolCall": selection.supports_tool_call,
         "supportsImages": selection.supports_images,
@@ -115,6 +127,9 @@ fn read_models_from(path: &Path) -> Result<Vec<Value>, String> {
 }
 
 fn write_models_to(path: &Path, models: &[Value]) -> Result<(), String> {
+    // 只在 unix 才用 existed 做"新建文件才 chmod 600"的判断；Windows 上
+    // 文件权限走 ACL，我们不参与，变量本身也没意义。
+    #[cfg(unix)]
     let existed = path.exists();
     let bytes = serde_json::to_vec_pretty(models)
         .map_err(|e| format!("序列化 WorkBuddy 模型配置失败：{e}"))?;
@@ -190,6 +205,7 @@ fn sync_models(
     previous: Option<&WorkBuddyBindingState>,
     api_key: &str,
     selections: &[WorkBuddyModelSelection],
+    url: &str,
 ) -> Result<(Vec<Value>, WorkBuddyBindingState), String> {
     validate_selections(selections)?;
     if let Some(state) = previous {
@@ -208,7 +224,7 @@ fn sync_models(
         } else {
             None
         };
-        let entry = managed_entry(api_key, selection);
+        let entry = managed_entry(api_key, selection, url);
         models.insert(original_index.min(models.len()), entry.clone());
         managed_models.push(WorkBuddyManagedModelState {
             model_id: target_id.to_string(),
@@ -225,6 +241,41 @@ fn sync_models(
             managed_models,
         },
     ))
+}
+
+/// Change only Ofox-managed URLs. The exact saved fingerprint must still be
+/// present for every model, so a WorkBuddy-side edit cannot be overwritten.
+fn reconcile_models_endpoint(
+    mut models: Vec<Value>,
+    state: &WorkBuddyBindingState,
+    url: &str,
+) -> Result<Option<(Vec<Value>, WorkBuddyBindingState)>, String> {
+    let mut next_state = state.clone();
+    let mut indexes = HashSet::with_capacity(state.managed_models.len());
+    let mut changed = false;
+    for managed in &mut next_state.managed_models {
+        let Some(index) = models
+            .iter()
+            .position(|entry| entry == &managed.last_written_entry)
+        else {
+            return Err(format!(
+                "WorkBuddy 模型 {} 已被外部修改或删除，无法自动更新地址",
+                managed.model_id
+            ));
+        };
+        if !indexes.insert(index) {
+            return Err("WorkBuddy 绑定备份包含重复模型指纹，无法自动更新地址".to_string());
+        }
+        let entry = models[index]
+            .as_object_mut()
+            .ok_or_else(|| "WorkBuddy 托管模型配置不是对象".to_string())?;
+        if entry.get("url").and_then(Value::as_str) != Some(url) {
+            entry.insert("url".to_string(), Value::String(url.to_string()));
+            managed.last_written_entry = models[index].clone();
+            changed = true;
+        }
+    }
+    Ok(changed.then_some((models, next_state)))
 }
 
 fn restore_models(
@@ -293,22 +344,18 @@ fn restore_file_snapshot(path: &Path, snapshot: Option<&[u8]>) -> Result<(), Str
     }
 }
 
-pub async fn sync_selected_models(
+async fn persist_binding_state(
     db: &Database,
-    api_key: &str,
-    selections: &[WorkBuddyModelSelection],
+    path: &Path,
+    models: &[Value],
+    state: &WorkBuddyBindingState,
 ) -> Result<(), String> {
-    let path = models_path();
-    let previous = load_state(db).await?;
-    let models = read_models_from(&path)?;
-    let (next_models, next_state) = sync_models(models, previous.as_ref(), api_key, selections)?;
-    let snapshot = file_snapshot(&path)?;
-    write_models_to(&path, &next_models)?;
-
-    let state_json = serde_json::to_string(&next_state)
-        .map_err(|e| format!("序列化 WorkBuddy 绑定备份失败：{e}"))?;
+    let state_json =
+        serde_json::to_string(state).map_err(|e| format!("序列化 WorkBuddy 绑定备份失败：{e}"))?;
+    let snapshot = file_snapshot(path)?;
+    write_models_to(path, models)?;
     if let Err(error) = db.save_live_backup(BACKUP_KEY, &state_json).await {
-        let rollback = restore_file_snapshot(&path, snapshot.as_deref());
+        let rollback = restore_file_snapshot(path, snapshot.as_deref());
         return Err(match rollback {
             Ok(()) => format!("保存 WorkBuddy 绑定备份失败：{error}（已回滚配置）"),
             Err(rollback_error) => {
@@ -317,6 +364,72 @@ pub async fn sync_selected_models(
         });
     }
     Ok(())
+}
+
+pub async fn sync_selected_models(
+    db: &Database,
+    api_key: &str,
+    selections: &[WorkBuddyModelSelection],
+) -> Result<(), String> {
+    let _guard = CONFIG_LOCK.lock().await;
+    let path = models_path();
+    let previous = load_state(db).await?;
+    let models = read_models_from(&path)?;
+    let url = endpoint_url();
+    let (next_models, next_state) =
+        sync_models(models, previous.as_ref(), api_key, selections, &url)?;
+    persist_binding_state(db, &path, &next_models, &next_state).await
+}
+
+/// Repair bindings created by older builds or left behind by an apex switch.
+/// No key refresh is needed: the existing key and every other model field stay
+/// exactly as they were. Startup and region switching both call this method.
+pub async fn reconcile_managed_endpoint(db: &Database) -> Result<bool, String> {
+    let _guard = CONFIG_LOCK.lock().await;
+    let Some(state) = load_state(db).await? else {
+        return Ok(false);
+    };
+    let path = models_path();
+    let models = read_models_from(&path)?;
+    let url = endpoint_url();
+    let Some((next_models, next_state)) = reconcile_models_endpoint(models, &state, &url)? else {
+        return Ok(false);
+    };
+    persist_binding_state(db, &path, &next_models, &next_state).await?;
+    Ok(true)
+}
+
+/// Return only URLs for display; API keys never cross the IPC boundary.
+pub async fn endpoint_status(db: &Database) -> Result<WorkBuddyEndpointStatus, String> {
+    let _guard = CONFIG_LOCK.lock().await;
+    let expected_url = endpoint_url();
+    let mut status = WorkBuddyEndpointStatus {
+        expected_url,
+        configured_urls: Vec::new(),
+        externally_modified: false,
+    };
+    let Some(state) = load_state(db).await? else {
+        return Ok(status);
+    };
+    let models = read_models_from(&models_path())?;
+    for managed in &state.managed_models {
+        let Some(entry) = models
+            .iter()
+            .find(|entry| model_id(entry) == Some(managed.model_id.as_str()))
+        else {
+            status.externally_modified = true;
+            continue;
+        };
+        if entry != &managed.last_written_entry {
+            status.externally_modified = true;
+        }
+        if let Some(url) = entry.get("url").and_then(Value::as_str) {
+            if !status.configured_urls.iter().any(|item| item == url) {
+                status.configured_urls.push(url.to_string());
+            }
+        }
+    }
+    Ok(status)
 }
 
 pub async fn active_models(db: &Database) -> Result<Vec<String>, String> {
@@ -342,6 +455,7 @@ pub async fn active_model(db: &Database) -> Result<String, String> {
 }
 
 pub async fn unbind(db: &Database) -> Result<(), String> {
+    let _guard = CONFIG_LOCK.lock().await;
     let Some(state) = load_state(db).await? else {
         return Ok(());
     };
@@ -386,6 +500,7 @@ mod tests {
             None,
             "sk-of-test",
             &[selection("model-a"), selection("model-b")],
+            "https://api.ofox.io/v1/chat/completions",
         )
         .unwrap();
 
@@ -393,6 +508,7 @@ mod tests {
         assert_eq!(models[1], unrelated);
         assert_eq!(models[2]["vendor"], "OfoxAI");
         assert_eq!(models[0]["apiKey"], "sk-of-test");
+        assert_eq!(models[0]["url"], "https://api.ofox.io/v1/chat/completions");
         assert_eq!(state.managed_models[0].original_entry, Some(a));
         assert_eq!(state.managed_models[1].original_entry, Some(b));
     }
@@ -406,6 +522,7 @@ mod tests {
             None,
             "key",
             &[selection("model-a"), selection("model-b")],
+            "https://api.ofox.ai/v1/chat/completions",
         )
         .unwrap();
         let (models, state) = sync_models(
@@ -413,12 +530,14 @@ mod tests {
             Some(&first_state),
             "key",
             &[selection("model-b"), selection("model-c")],
+            "https://api.ofox.io/v1/chat/completions",
         )
         .unwrap();
 
         assert_eq!(models[0], a);
         assert_eq!(models[1]["id"], "model-b");
         assert_eq!(models[2]["id"], "model-c");
+        assert_eq!(models[1]["url"], "https://api.ofox.io/v1/chat/completions");
         assert_eq!(state.managed_models[0].original_entry, Some(b));
     }
 
@@ -434,6 +553,7 @@ mod tests {
             None,
             "key",
             &[selection("model-a"), selection("model-b")],
+            "https://api.ofox.ai/v1/chat/completions",
         )
         .unwrap();
         assert_eq!(restore_models(models, &state).unwrap(), original);
@@ -446,31 +566,115 @@ mod tests {
             None,
             "key",
             &[selection("model-a"), selection("model-b")],
+            "https://api.ofox.ai/v1/chat/completions",
         )
         .unwrap();
         models[1]["name"] = json!("Changed outside Ofox");
-        let error = sync_models(models, Some(&state), "key", &[selection("model-c")]).unwrap_err();
+        let error = sync_models(
+            models,
+            Some(&state),
+            "key",
+            &[selection("model-c")],
+            "https://api.ofox.io/v1/chat/completions",
+        )
+        .unwrap_err();
         assert!(error.contains("已被外部修改"));
     }
 
     #[test]
     fn invalid_selection_sets_are_rejected() {
-        assert!(sync_models(Vec::new(), None, "key", &[])
-            .unwrap_err()
-            .contains("至少"));
         assert!(sync_models(
             Vec::new(),
             None,
             "key",
-            &[selection("same"), selection("same")]
+            &[],
+            "https://api.ofox.ai/v1/chat/completions"
+        )
+        .unwrap_err()
+        .contains("至少"));
+        assert!(sync_models(
+            Vec::new(),
+            None,
+            "key",
+            &[selection("same"), selection("same")],
+            "https://api.ofox.ai/v1/chat/completions",
         )
         .unwrap_err()
         .contains("重复"));
         let mut invalid = selection("model-a");
         invalid.supports_tool_call = false;
-        assert!(sync_models(Vec::new(), None, "key", &[invalid])
-            .unwrap_err()
-            .contains("工具调用"));
+        assert!(sync_models(
+            Vec::new(),
+            None,
+            "key",
+            &[invalid],
+            "https://api.ofox.ai/v1/chat/completions"
+        )
+        .unwrap_err()
+        .contains("工具调用"));
+    }
+
+    #[test]
+    fn endpoint_reconciliation_updates_only_managed_urls_and_fingerprints() {
+        let unrelated = json!({"id":"local", "url":"http://localhost:11434/v1"});
+        let (models, state) = sync_models(
+            vec![unrelated.clone()],
+            None,
+            "secret-key",
+            &[selection("model-a"), selection("model-b")],
+            "https://api.ofox.ai/v1/chat/completions",
+        )
+        .unwrap();
+        let (updated, next_state) =
+            reconcile_models_endpoint(models, &state, "https://api.ofox.io/v1/chat/completions")
+                .unwrap()
+                .unwrap();
+        assert_eq!(updated[0], unrelated);
+        for managed in &next_state.managed_models {
+            let entry = updated
+                .iter()
+                .find(|entry| model_id(entry) == Some(managed.model_id.as_str()))
+                .unwrap();
+            assert_eq!(entry["url"], "https://api.ofox.io/v1/chat/completions");
+            assert_eq!(entry["apiKey"], "secret-key");
+            assert_eq!(entry, &managed.last_written_entry);
+        }
+        assert!(reconcile_models_endpoint(
+            updated.clone(),
+            &next_state,
+            "https://api.ofox.io/v1/chat/completions"
+        )
+        .unwrap()
+        .is_none());
+        assert_eq!(
+            restore_models(updated, &next_state).unwrap(),
+            vec![unrelated]
+        );
+    }
+
+    #[test]
+    fn endpoint_reconciliation_rejects_external_edit_without_partial_change() {
+        let (mut models, state) = sync_models(
+            Vec::new(),
+            None,
+            "key",
+            &[selection("model-a"), selection("model-b")],
+            "https://api.ofox.ai/v1/chat/completions",
+        )
+        .unwrap();
+        models[1]["url"] = json!("https://user.example/v1/chat/completions");
+        let original = models.clone();
+        assert!(reconcile_models_endpoint(
+            models,
+            &state,
+            "https://api.ofox.io/v1/chat/completions"
+        )
+        .unwrap_err()
+        .contains("外部修改"));
+        assert_eq!(
+            original[0]["url"],
+            "https://api.ofox.ai/v1/chat/completions"
+        );
     }
 
     #[test]

@@ -24,13 +24,12 @@ pub async fn fetch_models_for_config(
 ///
 /// protocol: "openai" | "anthropic" | "gemini"
 ///
-/// 端点在 ofox.ai gateway 上不是匿名公开的——至少 `/gemini/...` 路径会返回
-/// 401 If you don't provide an API key。因此我们尽可能附带当前 OfoxAI
-/// OAuth 会话的 access_token。拿不到时（未登录 / 刷新失败）就匿名发出去，
-/// 让 gateway 的 401 透传给前端，由现有的错误提示文案处理。
+/// Public catalog requests start anonymously; on 401/403 the service retries
+/// with the OAuth token. An explicit refresh bypasses the recent cache.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn fetch_ofox_models(
     protocol: String,
+    force_refresh: Option<bool>,
     ofox_state: State<'_, OfoxAuthState>,
 ) -> Result<Vec<FetchedModel>, String> {
     // 用一个独立作用域释放读锁，避免在等待 HTTP 时一直占着 manager。
@@ -38,5 +37,9 @@ pub async fn fetch_ofox_models(
         let manager = ofox_state.0.read().await;
         manager.get_valid_access_token().await.ok()
     };
-    model_fetch::fetch_ofox_models(&protocol, access_token.as_deref()).await
+    if force_refresh.unwrap_or(false) {
+        model_fetch::refresh_ofox_models(&protocol, access_token.as_deref()).await
+    } else {
+        model_fetch::fetch_ofox_models(&protocol, access_token.as_deref()).await
+    }
 }

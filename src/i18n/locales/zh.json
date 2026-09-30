@@ -1,4 +1,11 @@
 {
+  "toolLaunch": {
+    "failed": "打开工具失败",
+    "proxyUnavailable": "本机代理 {{endpoint}} 未运行。请启动代理或恢复端口转发后重试。"
+  },
+  "toolInstall": {
+    "exitCode": "安装未完成（退出码 {{code}}），请重试"
+  },
   "modelCompatibility": {
     "title": "流式兼容性",
     "checking": "正在验证流式兼容性…",
@@ -10,7 +17,22 @@
     "continueUnverified": "我了解风险，仍要保存未验证的模型",
     "requestFailed": "检测请求失败，请重试",
     "desktopCodex": "Codex 桌面版使用应用内模型设置，不进行 CLI 协议检测",
+    "chatgptCodexMode": "Codex 模式",
+    "chatgptCodexUnset": "Codex 模型未设置",
+    "chatgptCodexShared": "此处管理桌面应用的 Codex 模式，与 Codex CLI 共用配置。Chat 和 Work 使用 OpenAI 账号登录与模型，不能通过 Ofox 模型配置接管。",
     "applyProtocol": "应用检测结果",
+    "workBuddyProtocol": "WorkBuddy 自定义模型使用 Chat Completions 协议",
+    "workBuddyConfiguredEndpoint": "WorkBuddy 当前配置地址",
+    "workBuddyExpectedEndpoint": "Ofox 当前地区地址",
+    "workBuddyEndpointMismatch": "WorkBuddy 配置与当前地区不一致，或已在 WorkBuddy 中修改；请重新绑定或检查配置。",
+    "workBuddyEndpointCheckScope": "模型检测使用 Ofox 的网络路径；WorkBuddy 若仍请求旧地址，请完全退出后重开。",
+    "workBuddyEndpointSyncFailed": "地区已切换，但 WorkBuddy 地址未能自动更新。请在 WorkBuddy 工具管理中检查。",
+    "workBuddyTestModel": "选择待检测的 WorkBuddy 模型",
+    "workBuddyTest": "检测选中模型",
+    "workBuddySaveHint": "目录兼容即可保存；流式检测按需进行，不影响保存。",
+    "workBuddyIncompatible": "流式检测不兼容（仍可保存）",
+    "workBuddyCatalogFailed": "模型目录加载失败，请刷新后重试。",
+    "workBuddyMissingCatalog": "部分已选模型不在当前兼容目录中，请刷新或移除后保存。",
     "defaultModelFailed": "{{tool}} 已绑定，但默认模型未通过流式验证；请在管理中选择模型"
   },
   "toolUpdates": {
@@ -37,6 +59,15 @@
     "notInstalled": "未检测到可运行的工具",
     "appManaged": "请在客户端内检查更新",
     "download": "官方下载页",
+    "unsupported": "当前系统不支持",
+    "openInApp": "在 ChatGPT 中更新",
+    "sparkleHint": "Ofox 会打开 ChatGPT，请在菜单栏「ChatGPT」中选择「检查更新…」。新版本分批推送，若提示已是最新请稍后再试。",
+    "sparkleOpened": "已打开 ChatGPT，请在菜单栏「ChatGPT」中选择「检查更新…」",
+    "openAppFailed": "打开 ChatGPT 失败",
+    "storeHint": "通过 Microsoft Store 升级；若 Store 暂未推送，会打开 Store 页面由你完成。",
+    "closeAppTitle": "需要先关闭 ChatGPT",
+    "closeAppMessage": "ChatGPT 正在运行。Ofox 会先关闭它，升级完成后自动重新打开。请先保存进行中的工作。",
+    "closeAppConfirm": "关闭并升级",
     "manual": "请使用原安装方式手动升级，详见诊断信息",
     "details": "诊断与升级日志",
     "result": {

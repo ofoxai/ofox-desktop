@@ -16,11 +16,13 @@ use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 use std::process::Stdio;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use serde_json::json;
 use tauri::AppHandle;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use tauri::Emitter;
 #[cfg(target_os = "macos")]
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 /// 与 `scripts/installer/app/steps.py::TOOL_STEPS` 字典 key 对齐。
 const ALLOWED_TOOLS: &[&str] = &[
@@ -63,7 +65,26 @@ async fn install_tool_impl(
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows 上 chatgpt 走 Microsoft Store（winget 静默 + Store URI 兜底）；其他
+/// 工具的 Windows 支持（codex CLI on WSL、gemini 等）不在本 PR 的 code-only
+/// scope 内，给出明确错误。
+#[cfg(target_os = "windows")]
+async fn install_tool_impl(
+    app: AppHandle,
+    tool_id: String,
+    _skip_env: Option<bool>,
+    is_native_tool: bool,
+) -> Result<i32, String> {
+    if is_native_tool {
+        native_install_windows(app, &tool_id).await
+    } else {
+        Err(format!(
+            "{tool_id} 在 Windows 上暂不支持一键安装；请按官方文档手动装或用 WSL"
+        ))
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 async fn install_tool_impl(
     _app: AppHandle,
     tool_id: String,
@@ -71,9 +92,9 @@ async fn install_tool_impl(
     is_native_tool: bool,
 ) -> Result<i32, String> {
     if is_native_tool {
-        Err(format!("{tool_id} 自动安装目前仅支持 macOS"))
+        Err(format!("{tool_id} 自动安装目前仅支持 macOS/Windows"))
     } else {
-        Err("工具自动安装目前仅支持 macOS arm64".into())
+        Err("工具自动安装目前仅支持 macOS/Windows".into())
     }
 }
 
@@ -84,6 +105,32 @@ async fn native_install(app: AppHandle, tool_id: &str) -> Result<i32, String> {
         other => Err(format!("原生安装未实现: {other}")),
     };
     // 与 osascript 安装分支保持一致：无论成功失败都 emit done，前端 hook 据此重扫。
+    let code = result.as_ref().copied().unwrap_or(-1);
+    let _ = app.emit(
+        "install-tool-done",
+        json!({ "tool": tool_id, "code": code }),
+    );
+    result
+}
+
+/// Windows 上的 native install 路由——包一层 emit 闭包，把 windows_chatgpt 的
+/// progress JSON 转发到前端 `install-tool-log` 事件。行为跟 macOS 侧一致。
+#[cfg(target_os = "windows")]
+async fn native_install_windows(app: AppHandle, tool_id: &str) -> Result<i32, String> {
+    let result = match tool_id {
+        "chatgpt" => {
+            let tool_id_owned = tool_id.to_string();
+            let app_for_emit = app.clone();
+            let emit = move |line: &str| {
+                let _ = app_for_emit.emit(
+                    "install-tool-log",
+                    json!({ "tool": &tool_id_owned, "stream": "stdout", "line": line }),
+                );
+            };
+            super::windows_chatgpt::install_chatgpt_desktop_app_with(&emit).await
+        }
+        other => Err(format!("Windows 原生安装未实现: {other}")),
+    };
     let code = result.as_ref().copied().unwrap_or(-1);
     let _ = app.emit(
         "install-tool-done",

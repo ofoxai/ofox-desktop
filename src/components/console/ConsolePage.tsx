@@ -103,8 +103,20 @@ export default function ConsolePage({
   const { apex } = useOfoxApex();
   const { t } = useTranslation();
   // "打开"按钮：CLI 拉到独立终端，桌面客户端由系统直接启动。
-  const { launching: launchingTools, launch: launchTool } = useToolLaunch(() =>
-    toast.error("打开工具失败"),
+  const { launching: launchingTools, launch: launchTool } = useToolLaunch(
+    (_toolId, error) => {
+      const message = String(error);
+      const proxyError = "LOCAL_PROXY_UNAVAILABLE|";
+      if (message.startsWith(proxyError)) {
+        toast.error(
+          t("toolLaunch.proxyUnavailable", {
+            endpoint: message.slice(proxyError.length),
+          }),
+        );
+        return;
+      }
+      toast.error(t("toolLaunch.failed"));
+    },
   );
   // 应用自更新：底部栏提示按钮 + 首次发现弹窗。数据源 = UpdateContext
   // （自动检查走 R2 latest.json）。
@@ -660,7 +672,8 @@ export default function ConsolePage({
               {tools.map((tool) => {
                 const keyLabel = apiKeyLabelByTool[tool.id];
                 const model = modelByTool[tool.id];
-                const hasSecondary = !!(keyLabel || model !== undefined);
+                const hasSecondary =
+                  tool.id === "chatgpt" || !!(keyLabel || model !== undefined);
                 return (
                   <div
                     key={tool.id}
@@ -685,9 +698,24 @@ export default function ConsolePage({
                         // 稳定，避免行高跳动。`truncate` 防止长 model id 把
                         // 右侧按钮挤变形。
                         <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
-                          <span>{keyLabel ?? "—"}</span>
-                          <span className="mx-1.5 opacity-50">·</span>
-                          <span>{model || "未设置 model"}</span>
+                          {tool.id === "chatgpt" ? (
+                            <>
+                              <span>
+                                {t("modelCompatibility.chatgptCodexMode")}
+                              </span>
+                              <span className="mx-1.5 opacity-50">·</span>
+                              <span>
+                                {model ||
+                                  t("modelCompatibility.chatgptCodexUnset")}
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              <span>{keyLabel ?? "—"}</span>
+                              <span className="mx-1.5 opacity-50">·</span>
+                              <span>{model || "未设置 model"}</span>
+                            </>
+                          )}
                         </div>
                       )}
                     </div>

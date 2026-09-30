@@ -31,8 +31,8 @@ export async function ofoxGetApex(): Promise<OfoxApex> {
  * 调用方拿到 reject 后只需 toast——副作用要么全做、要么没做、要么半做但已 emit
  * reauth；UI 跟随事件即可。
  */
-export async function ofoxSetApex(next: OfoxApex): Promise<void> {
-  await invoke("ofox_set_apex", { nextApex: next });
+export async function ofoxSetApex(next: OfoxApex): Promise<boolean> {
+  return await invoke("ofox_set_apex", { nextApex: next });
 }
 
 /** 后端 emit 的 apex 切换事件名，供前端 hook 监听。 */

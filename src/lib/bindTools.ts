@@ -116,6 +116,7 @@ async function mirrorBoundToolsToSettings(tools: string[]): Promise<void> {
  * `chatgpt` **故意不在此集合**：ChatGPT App 与 codex CLI 共用
  * `~/.codex/config.toml`。用户 bind codex 时写下的配置就是 App 用的配置——
  * 再对 chatgpt 走一次 `ofox_bind_tool` 会重写同一份文件，做的是重复工作。
+ * 这个共享关系仅适用于 App 的 Codex 模式；Chat/Work 使用 OpenAI 登录态。
  * 集合外的工具在 `bindTools` 循环里直接进"视为成功"分支——记入 localStorage
  * 但不动后端，chatgpt 就借这条路径进 bound 列表。
  *

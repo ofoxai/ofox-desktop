@@ -1,9 +1,12 @@
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ArrowUpCircle, ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { TOOL_META, TOOL_ORDER } from "@/config/toolMeta";
 import { settingsApi } from "@/lib/api";
+import { toolUpdatesApi } from "@/lib/api/toolUpdates";
 import {
   checkToolUpdates,
   updateTools,
@@ -13,12 +16,45 @@ import {
 export function ToolUpdatesPanel() {
   const { t } = useTranslation();
   const state = useToolUpdates();
+  // Desktop app whose upgrade has to close it first; waiting for the user.
+  const [confirmTool, setConfirmTool] = useState<string | null>(null);
+  const [openingApp, setOpeningApp] = useState<string | null>(null);
+  // Desktop apps upgrade only from their own card: large downloads, may close the app.
   const available = state.tools.filter(
-    (tool) => tool.update_status === "available" && tool.update_supported,
+    (tool) =>
+      tool.update_status === "available" &&
+      tool.update_supported &&
+      tool.installationKind !== "desktopApp",
   );
   const pending = state.tools.filter(
     (tool) => tool.update_status === "available",
   );
+  const automatic = pending.filter((tool) => tool.update_supported).length;
+  const openDownloadPage = (name: string) =>
+    void settingsApi
+      .openExternal(
+        name === "workbuddy"
+          ? "https://www.workbuddy.cn/work/"
+          : "https://chatgpt.com/download/",
+      )
+      .catch(() => toast.error(t("settings.openReleaseNotesFailed")));
+  const requestDesktopUpdate = async (name: string) => {
+    // If the check itself fails, assume it is running rather than close it unannounced.
+    const running = await toolUpdatesApi.isAppRunning(name).catch(() => true);
+    if (running) setConfirmTool(name);
+    else void updateTools([name]);
+  };
+  const openInApp = async (name: string) => {
+    setOpeningApp(name);
+    try {
+      await toolUpdatesApi.openApp(name);
+      toast.info(t("toolUpdates.sparkleOpened"));
+    } catch {
+      toast.error(t("toolUpdates.openAppFailed"));
+    } finally {
+      setOpeningApp(null);
+    }
+  };
   const orderedTools = [...TOOL_ORDER].sort(
     (a, b) =>
       Number(pending.some((tool) => tool.name === b)) -
@@ -63,8 +99,8 @@ export function ToolUpdatesPanel() {
             </p>
             <p className="mt-1 text-xs">
               {t("toolUpdates.actionCounts", {
-                automatic: available.length,
-                manual: pending.length - available.length,
+                automatic,
+                manual: pending.length - automatic,
               })}
             </p>
           </div>
@@ -81,8 +117,11 @@ export function ToolUpdatesPanel() {
           const result = state.results[name];
           const busy = state.busy === name;
           const hasUpdate = tool?.update_status === "available";
+          const desktopApp = tool?.installationKind === "desktopApp";
+          // Desktop apps report real versions now; this is only for those that
+          // cannot (WorkBuddy, a failed ChatGPT lookup, the Codex desktop fallback).
           const appManaged =
-            tool?.installationKind === "desktopApp" || name === "workbuddy";
+            name === "workbuddy" || tool?.update_status === "appManaged";
           return (
             <div
               key={name}
@@ -130,35 +169,62 @@ export function ToolUpdatesPanel() {
                 <Button
                   size="sm"
                   variant="outline"
-                  onClick={() =>
-                    void settingsApi
-                      .openExternal(
-                        name === "workbuddy"
-                          ? "https://www.workbuddy.cn/work/"
-                          : "https://chatgpt.com/download/",
-                      )
-                      .catch(() =>
-                        toast.error(t("settings.openReleaseNotesFailed")),
-                      )
-                  }
+                  onClick={() => openDownloadPage(name)}
                 >
                   {t("toolUpdates.download")}
                 </Button>
               ) : (tool?.update_status === "available" ||
                   tool?.update_status === "broken") &&
                 tool.update_supported ? (
+                <div className="space-y-2">
+                  <Button
+                    size="sm"
+                    className="w-full bg-orange-500 text-white hover:bg-orange-600"
+                    disabled={state.batch || state.checking}
+                    onClick={() =>
+                      desktopApp
+                        ? void requestDesktopUpdate(name)
+                        : void updateTools([name])
+                    }
+                  >
+                    <ArrowUpCircle className="mr-1.5 h-4 w-4" />
+                    {t(
+                      tool.update_status === "broken"
+                        ? "toolUpdates.repair"
+                        : "toolUpdates.update",
+                    )}
+                  </Button>
+                  {tool.update_source === "msstore" && (
+                    <p className="text-xs text-muted-foreground">
+                      {t("toolUpdates.storeHint")}
+                    </p>
+                  )}
+                </div>
+              ) : hasUpdate && tool?.update_source === "sparkle" ? (
+                <div className="space-y-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="w-full border-orange-400 text-orange-700 dark:text-orange-300"
+                    disabled={openingApp === name}
+                    onClick={() => void openInApp(name)}
+                  >
+                    <ExternalLink className="mr-1.5 h-4 w-4" />
+                    {t("toolUpdates.openInApp")}
+                  </Button>
+                  <p className="text-xs text-muted-foreground">
+                    {t("toolUpdates.sparkleHint")}
+                  </p>
+                </div>
+              ) : desktopApp &&
+                (tool?.update_status === "notInstalled" ||
+                  tool?.update_status === "failed") ? (
                 <Button
                   size="sm"
-                  className="w-full bg-orange-500 text-white hover:bg-orange-600"
-                  disabled={state.batch || state.checking}
-                  onClick={() => void updateTools([name])}
+                  variant="outline"
+                  onClick={() => openDownloadPage(name)}
                 >
-                  <ArrowUpCircle className="mr-1.5 h-4 w-4" />
-                  {t(
-                    tool.update_status === "broken"
-                      ? "toolUpdates.repair"
-                      : "toolUpdates.update",
-                  )}
+                  {t("toolUpdates.download")}
                 </Button>
               ) : (hasUpdate || tool?.update_status === "broken") &&
                 !tool?.update_supported ? (
@@ -211,6 +277,19 @@ export function ToolUpdatesPanel() {
           );
         })}
       </div>
+      <ConfirmDialog
+        isOpen={confirmTool !== null}
+        variant="info"
+        title={t("toolUpdates.closeAppTitle")}
+        message={t("toolUpdates.closeAppMessage")}
+        confirmText={t("toolUpdates.closeAppConfirm")}
+        onConfirm={() => {
+          const name = confirmTool;
+          setConfirmTool(null);
+          if (name) void updateTools([name]);
+        }}
+        onCancel={() => setConfirmTool(null)}
+      />
     </section>
   );
 }
