@@ -420,20 +420,22 @@ fn pid_list(pids: &[u32]) -> String {
 }
 
 /// 请求窗口正常关闭（相当于点关闭按钮），给 App 保存状态的机会。
+/// 尽力而为：刚退出的 PID 会让 `$?` 为 false、powershell 以 1 退出，所以固定 `exit 0`，
+/// 是否真的关掉由调用方轮询判断。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn close_script(pids: &[u32]) -> String {
     format!(
         "Get-Process -Id {} -ErrorAction SilentlyContinue | \
-         ForEach-Object {{ [void]$_.CloseMainWindow() }}",
+         ForEach-Object {{ [void]$_.CloseMainWindow() }}; exit 0",
         pid_list(pids)
     )
 }
 
-/// 正常关闭没生效时（例如最小化到托盘）强制结束。
+/// 正常关闭没生效时（例如最小化到托盘）强制结束。同样尽力而为。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn stop_script(pids: &[u32]) -> String {
     format!(
-        "Stop-Process -Id {} -Force -ErrorAction SilentlyContinue",
+        "Stop-Process -Id {} -Force -ErrorAction SilentlyContinue; exit 0",
         pid_list(pids)
     )
 }
@@ -835,6 +837,15 @@ mod tests {
         assert!(close.contains("CloseMainWindow"), "{close}");
         let stop = stop_script(&[12, 345]);
         assert!(stop.starts_with("Stop-Process -Id 12,345 -Force"), "{stop}");
+    }
+
+    #[test]
+    fn close_and_stop_scripts_succeed_when_a_process_already_exited() {
+        // A PID that exits between listing and closing leaves $? false, which
+        // makes powershell.exe exit 1; whether the app closed is decided by polling.
+        for script in [close_script(&[12]), stop_script(&[12])] {
+            assert!(script.trim_end().ends_with("; exit 0"), "{script}");
+        }
     }
 
     #[test]

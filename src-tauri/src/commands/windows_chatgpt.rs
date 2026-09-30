@@ -204,23 +204,40 @@ where
         });
     }
     let was_running = !blocking(chatgpt_process_ids).await?.is_empty();
-    if was_running {
+    // 用户原本开着的 App 一定要回来：关闭失败、升级失败都一样。回退到 Store 时
+    // upgrade_inner 会提前重开并清掉这个标记，免得 App 在等待期间一直关着。
+    let mut reopen = was_running;
+    let closed = if was_running {
         emit("log", "正在关闭 ChatGPT…");
-        close_chatgpt().await?;
-    }
-    let result = upgrade_inner(emit, &before).await;
-    // 无论升级成败，用户原本开着的 App 都要回来；重开失败不影响升级结果。
-    if was_running {
-        match blocking(launch_chatgpt_desktop_app).await {
-            Ok(_) => emit("log", "已重新打开 ChatGPT"),
-            Err(err) => emit("log", &format!("重新打开 ChatGPT 失败：{err}")),
-        }
+        close_chatgpt().await
+    } else {
+        Ok(())
+    };
+    let result = match closed {
+        Ok(()) => upgrade_inner(emit, &before, &mut reopen).await,
+        Err(err) => Err(err),
+    };
+    if reopen {
+        reopen_chatgpt(emit).await;
     }
     result
 }
 
+/// 重开失败只记日志，不影响升级结果。
 #[cfg(target_os = "windows")]
-async fn upgrade_inner<E>(emit: &E, before: &str) -> Result<UpdateResult, String>
+async fn reopen_chatgpt<E>(emit: &E)
+where
+    E: Fn(&str, &str) + Sync,
+{
+    match blocking(launch_chatgpt_desktop_app).await {
+        Ok(true) => emit("log", "已重新打开 ChatGPT"),
+        Ok(false) => emit("log", "未检测到 ChatGPT，无法重新打开"),
+        Err(err) => emit("log", &format!("重新打开 ChatGPT 失败：{err}")),
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn upgrade_inner<E>(emit: &E, before: &str, reopen: &mut bool) -> Result<UpdateResult, String>
 where
     E: Fn(&str, &str) + Sync,
 {
@@ -261,6 +278,10 @@ where
         }
     };
     if via_store {
+        // Store 更新 MSIX 时自己处理运行中的 App，不必让 ChatGPT 在等待期间一直关着。
+        if std::mem::take(reopen) {
+            reopen_chatgpt(emit).await;
+        }
         blocking(open_store_page).await?;
         emit(
             "log",
@@ -508,7 +529,12 @@ fn powershell_stdout(script: &str) -> Result<String, String> {
         .map_err(|err| format!("spawn PowerShell 失败: {err}"))?;
     if !output.status.success() {
         // 这里返回类型是 String——&str 不能自动进 String，to_string() 必需。
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            format!("PowerShell 退出码 {}", output.status)
+        } else {
+            stderr
+        });
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
