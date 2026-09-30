@@ -23,6 +23,13 @@ import {
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
   Popover,
   PopoverContent,
   PopoverTrigger,
@@ -39,10 +46,12 @@ import { cn } from "@/lib/utils";
 import { settingsApi } from "@/lib/api";
 import {
   manageToolApi,
+  managedToolId,
   TOOL_PROTOCOL,
   type PingResult,
   type CompatibilityProtocol,
   type CompatibilityResult,
+  type WorkBuddyEndpointStatus,
 } from "@/lib/api/manageTool";
 import {
   fetchOfoxModels,
@@ -130,6 +139,9 @@ export default function ManageToolDialog({
   const [draftModels, setDraftModels] = useState<string[]>([]);
   const [models, setModels] = useState<FetchedModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
+  const [workBuddyCatalogError, setWorkBuddyCatalogError] = useState(false);
+  const [workBuddyEndpointStatus, setWorkBuddyEndpointStatus] =
+    useState<WorkBuddyEndpointStatus | null>(null);
   const [saving, setSaving] = useState(false);
   const [unbindConfirming, setUnbindConfirming] = useState(false);
   const [unbindLoading, setUnbindLoading] = useState(false);
@@ -146,6 +158,11 @@ export default function ManageToolDialog({
   >("");
   const [allowUnverified, setAllowUnverified] = useState(false);
   const compatibilityRequest = useRef(0);
+  const [workBuddyTestModel, setWorkBuddyTestModel] = useState("");
+  const [workBuddyTestResult, setWorkBuddyTestResult] =
+    useState<CompatibilityResult | null>(null);
+  const [workBuddyTestLoading, setWorkBuddyTestLoading] = useState(false);
+  const workBuddyTestRequest = useRef(0);
 
   // Today's stats (per-tool, midnight-local-time → now). null = 还没加载完。
   // 「今日统计」整段（含 today-stats fetch、loading state、cell renderer）已在
@@ -165,6 +182,8 @@ export default function ManageToolDialog({
     setDraftModels([]);
     setModels([]);
     setModelsLoading(tool.id === "workbuddy");
+    setWorkBuddyCatalogError(false);
+    setWorkBuddyEndpointStatus(null);
     setSaving(false);
     setUnbindConfirming(false);
     setUnbindLoading(false);
@@ -175,6 +194,10 @@ export default function ManageToolDialog({
     setManualProtocol("");
     setAllowUnverified(false);
     compatibilityRequest.current += 1;
+    setWorkBuddyTestModel("");
+    setWorkBuddyTestResult(null);
+    setWorkBuddyTestLoading(false);
+    workBuddyTestRequest.current += 1;
 
     const loadPath = async () => {
       try {
@@ -187,10 +210,12 @@ export default function ManageToolDialog({
     const loadModels = async () => {
       try {
         if (tool.id === "workbuddy") {
-          const [managedResult, catalogResult] = await Promise.allSettled([
-            manageToolApi.getWorkBuddyManagedModels(),
-            fetchOfoxModels("openai"),
-          ]);
+          const [managedResult, catalogResult, endpointResult] =
+            await Promise.allSettled([
+              manageToolApi.getWorkBuddyManagedModels(),
+              fetchOfoxModels("openai"),
+              manageToolApi.getWorkBuddyEndpointStatus(),
+            ]);
           if (!cancelled) {
             if (managedResult.status === "fulfilled") {
               setCurrentModels(managedResult.value);
@@ -198,6 +223,12 @@ export default function ManageToolDialog({
             }
             if (catalogResult.status === "fulfilled") {
               setModels(filterOfoxModelsForWorkBuddy(catalogResult.value));
+              setWorkBuddyCatalogError(false);
+            } else {
+              setWorkBuddyCatalogError(true);
+            }
+            if (endpointResult.status === "fulfilled") {
+              setWorkBuddyEndpointStatus(endpointResult.value);
             }
             setModelsLoading(false);
           }
@@ -232,28 +263,33 @@ export default function ManageToolDialog({
   // `wire_api not supported`——按端点二次过滤，UI 层就不给用户选到
   // 不兼容的模型。其他固定 Chat 客户端也按端点过滤。
   const requiredEndpoint =
-    tool?.id === "codex"
+    tool?.id === "codex" || tool?.id === "chatgpt"
       ? "/v1/responses"
       : tool?.id === "openclaw" || tool?.id === "hermes"
         ? "/v1/chat/completions"
         : undefined;
-  const fetchModels = useCallback(async () => {
-    if (!protocol) return;
-    setModelsLoading(true);
-    try {
-      const all = await fetchOfoxModels(protocol);
-      setModels(
-        tool?.id === "workbuddy"
-          ? filterOfoxModelsForWorkBuddy(all)
-          : filterOfoxModelsByProtocol(all, protocol, requiredEndpoint),
-      );
-    } catch (e) {
-      console.error("[ManageToolDialog] fetchOfoxModels failed", e);
-      toast.error(`获取模型列表失败：${String(e)}`);
-    } finally {
-      setModelsLoading(false);
-    }
-  }, [protocol, requiredEndpoint, tool?.id]);
+  const fetchModels = useCallback(
+    async (forceRefresh = false) => {
+      if (!protocol) return;
+      setModelsLoading(true);
+      try {
+        const all = await fetchOfoxModels(protocol, forceRefresh);
+        setModels(
+          tool?.id === "workbuddy"
+            ? filterOfoxModelsForWorkBuddy(all)
+            : filterOfoxModelsByProtocol(all, protocol, requiredEndpoint),
+        );
+        if (tool?.id === "workbuddy") setWorkBuddyCatalogError(false);
+      } catch (e) {
+        console.error("[ManageToolDialog] fetchOfoxModels failed", e);
+        if (tool?.id === "workbuddy") setWorkBuddyCatalogError(true);
+        toast.error(`获取模型列表失败：${String(e)}`);
+      } finally {
+        setModelsLoading(false);
+      }
+    },
+    [protocol, requiredEndpoint, tool?.id],
+  );
 
   const runCompatibility = useCallback(
     async (forceRetest: boolean) => {
@@ -262,13 +298,11 @@ export default function ManageToolDialog({
       setManualProtocol("");
       setAllowUnverified(false);
       const ids =
-        tool?.id === "workbuddy"
-          ? draftModels.filter((id) => !currentModels.includes(id))
-          : tool?.id === "opencode" && draftModel
+        tool?.id === "opencode" && draftModel
+          ? [draftModel]
+          : draftModel && draftModel !== currentModel && !desktopCodex
             ? [draftModel]
-            : draftModel && draftModel !== currentModel && !desktopCodex
-              ? [draftModel]
-              : [];
+            : [];
       if (!tool || ids.length === 0) {
         setCompatibilityLoading(false);
         return;
@@ -296,28 +330,60 @@ export default function ManageToolDialog({
       if (request === compatibilityRequest.current)
         setCompatibilityLoading(false);
     },
-    [
-      tool?.id,
-      draftModel,
-      currentModel,
-      draftModels,
-      currentModels,
-      desktopCodex,
-      t,
-    ],
+    [tool?.id, draftModel, currentModel, desktopCodex, t],
   );
 
   useEffect(() => {
+    if (tool?.id === "workbuddy") return;
     void runCompatibility(false);
     return () => {
       compatibilityRequest.current += 1;
     };
-  }, [runCompatibility]);
+  }, [runCompatibility, tool?.id]);
+
+  useEffect(() => {
+    if (tool?.id !== "workbuddy" || draftModels.includes(workBuddyTestModel))
+      return;
+    workBuddyTestRequest.current += 1;
+    setWorkBuddyTestModel(draftModels[0] ?? "");
+    setWorkBuddyTestResult(null);
+    setWorkBuddyTestLoading(false);
+  }, [draftModels, tool?.id, workBuddyTestModel]);
+
+  const handleWorkBuddyTest = useCallback(async () => {
+    if (tool?.id !== "workbuddy" || !workBuddyTestModel) return;
+    const request = ++workBuddyTestRequest.current;
+    setWorkBuddyTestLoading(true);
+    setWorkBuddyTestResult(null);
+    try {
+      const result = await manageToolApi.checkCompatibility(
+        "workbuddy",
+        workBuddyTestModel,
+        true,
+      );
+      if (request === workBuddyTestRequest.current)
+        setWorkBuddyTestResult(result);
+    } catch {
+      if (request === workBuddyTestRequest.current) {
+        setWorkBuddyTestResult({
+          app: "workbuddy",
+          model: workBuddyTestModel,
+          protocol: null,
+          status: "inconclusive",
+          source: "probe",
+          reason: t("modelCompatibility.requestFailed"),
+        });
+      }
+    } finally {
+      if (request === workBuddyTestRequest.current)
+        setWorkBuddyTestLoading(false);
+    }
+  }, [tool?.id, workBuddyTestModel, t]);
 
   const handleOpenFolder = useCallback(async () => {
     if (!tool) return;
     try {
-      await settingsApi.openConfigFolder(tool.id as AppId);
+      await settingsApi.openConfigFolder(managedToolId(tool.id) as AppId);
     } catch (e) {
       toast.error(`打开配置目录失败：${String(e)}`);
     }
@@ -363,7 +429,6 @@ export default function ManageToolDialog({
         }
         await manageToolApi.setWorkBuddyManagedModels(
           selections.map((model) => toWorkBuddyModelSelection(model!)),
-          allowUnverified,
         );
         setCurrentModels(draftModels);
       } else {
@@ -408,8 +473,7 @@ export default function ManageToolDialog({
     onOpenChange,
   ]);
 
-  const probeModel =
-    tool?.id === "workbuddy" ? (draftModels[0] ?? "") : draftModel;
+  const probeModel = draftModel;
 
   /**
    * Probe the OfoxAI gateway end-to-end with the currently-drafted model.
@@ -476,16 +540,23 @@ export default function ManageToolDialog({
     (result) => result.status === "inconclusive",
   );
   const compatibilityReady =
-    !compatibilityLoading &&
-    !hasIncompatible &&
-    (!hasInconclusive ||
-      (allowUnverified && (tool?.id !== "opencode" || !!manualProtocol))) &&
-    (tool?.id === "workbuddy"
-      ? compatibilityResults.length ===
-        draftModels.filter((id) => !currentModels.includes(id)).length
-      : !draftModel ||
+    tool?.id === "workbuddy" ||
+    (!compatibilityLoading &&
+      !hasIncompatible &&
+      (!hasInconclusive ||
+        (allowUnverified && (tool?.id !== "opencode" || !!manualProtocol))) &&
+      (!draftModel ||
         draftModel === currentModel ||
-        compatibilityResults[0]?.model === draftModel);
+        compatibilityResults[0]?.model === draftModel));
+  const catalogModelIds = new Set(models.map((model) => model.id));
+  const workBuddyMissingIds = draftModels.filter(
+    (id) => !catalogModelIds.has(id),
+  );
+  const workBuddyCatalogReady =
+    !modelsLoading &&
+    !workBuddyCatalogError &&
+    draftModels.length > 0 &&
+    workBuddyMissingIds.length === 0;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -534,16 +605,74 @@ export default function ManageToolDialog({
                 <Label htmlFor="manage-model" className="text-[13px]">
                   模型
                 </Label>
+                {tool.id === "chatgpt" && (
+                  <p className="text-[11px] text-muted-foreground">
+                    {t("modelCompatibility.chatgptCodexShared")}
+                  </p>
+                )}
                 {protocol && !desktopCodex && tool.id === "workbuddy" ? (
-                  <WorkBuddyModelPicker
-                    id="manage-model"
-                    selectedIds={draftModels}
-                    onChange={setDraftModels}
-                    models={models}
-                    loading={modelsLoading}
-                    onFetch={fetchModels}
-                    portalContainer={dialogContentNode}
-                  />
+                  <>
+                    <WorkBuddyModelPicker
+                      id="manage-model"
+                      selectedIds={draftModels}
+                      onChange={setDraftModels}
+                      models={models}
+                      loading={modelsLoading}
+                      onFetch={fetchModels}
+                      portalContainer={dialogContentNode}
+                    />
+                    <p className="text-[11px] text-muted-foreground">
+                      {t("modelCompatibility.workBuddyProtocol")}
+                    </p>
+                    {workBuddyEndpointStatus && (
+                      <div className="space-y-1 rounded-md border border-border-default bg-muted/20 p-3 text-[11px]">
+                        <p className="font-medium">
+                          {t("modelCompatibility.workBuddyConfiguredEndpoint")}
+                        </p>
+                        {workBuddyEndpointStatus.configuredUrls.length > 0 ? (
+                          workBuddyEndpointStatus.configuredUrls.map((url) => (
+                            <code
+                              key={url}
+                              className="block break-all"
+                              title={url}
+                            >
+                              {url}
+                            </code>
+                          ))
+                        ) : (
+                          <p className="text-muted-foreground">—</p>
+                        )}
+                        <p className="break-all text-muted-foreground">
+                          {t("modelCompatibility.workBuddyExpectedEndpoint")}:{" "}
+                          {workBuddyEndpointStatus.expectedUrl}
+                        </p>
+                        {(workBuddyEndpointStatus.externallyModified ||
+                          workBuddyEndpointStatus.configuredUrls.some(
+                            (url) =>
+                              url !== workBuddyEndpointStatus.expectedUrl,
+                          )) && (
+                          <p className="text-red-600">
+                            {t("modelCompatibility.workBuddyEndpointMismatch")}
+                          </p>
+                        )}
+                        <p className="text-muted-foreground">
+                          {t("modelCompatibility.workBuddyEndpointCheckScope")}
+                        </p>
+                      </div>
+                    )}
+                    {!modelsLoading && workBuddyCatalogError && (
+                      <p className="text-[11px] text-red-600">
+                        {t("modelCompatibility.workBuddyCatalogFailed")}
+                      </p>
+                    )}
+                    {!modelsLoading &&
+                      !workBuddyCatalogError &&
+                      workBuddyMissingIds.length > 0 && (
+                        <p className="text-[11px] text-red-600">
+                          {t("modelCompatibility.workBuddyMissingCatalog")}
+                        </p>
+                      )}
+                  </>
                 ) : protocol && !desktopCodex ? (
                   <ModelPicker
                     id="manage-model"
@@ -561,7 +690,7 @@ export default function ManageToolDialog({
                       : "该工具暂不支持模型管理"}
                   </div>
                 )}
-                {isDirty && !desktopCodex && (
+                {isDirty && !desktopCodex && tool.id !== "workbuddy" && (
                   <div className="space-y-2 rounded-md border border-border-default bg-muted/20 p-3 text-[12px]">
                     <div className="flex items-center justify-between gap-2">
                       <span className="font-medium">
@@ -591,48 +720,51 @@ export default function ManageToolDialog({
                     {hasInconclusive && (
                       <div className="space-y-2">
                         {tool.id === "opencode" && (
-                          <select
-                            aria-label={t("modelCompatibility.chooseProtocol")}
+                          <Select
                             value={manualProtocol}
-                            onChange={(event) =>
-                              setManualProtocol(
-                                event.target.value as
-                                  | CompatibilityProtocol
-                                  | "",
-                              )
+                            onValueChange={(value) =>
+                              setManualProtocol(value as CompatibilityProtocol)
                             }
-                            className="w-full rounded-md border border-border-default bg-background p-2"
                           >
-                            <option value="">
-                              {t("modelCompatibility.chooseProtocol")}
-                            </option>
-                            <option
-                              value="responses"
-                              disabled={
-                                compatibilityResults[0]?.allowedProtocols
-                                  ?.length
-                                  ? !compatibilityResults[0].allowedProtocols.includes(
-                                      "responses",
-                                    )
-                                  : false
-                              }
+                            <SelectTrigger
+                              aria-label={t(
+                                "modelCompatibility.chooseProtocol",
+                              )}
+                              className="h-9 text-[12px]"
                             >
-                              Responses
-                            </option>
-                            <option
-                              value="chatCompletions"
-                              disabled={
-                                compatibilityResults[0]?.allowedProtocols
-                                  ?.length
-                                  ? !compatibilityResults[0].allowedProtocols.includes(
-                                      "chatCompletions",
-                                    )
-                                  : false
-                              }
-                            >
-                              Chat Completions
-                            </option>
-                          </select>
+                              <SelectValue
+                                placeholder={t(
+                                  "modelCompatibility.chooseProtocol",
+                                )}
+                              />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem
+                                value="responses"
+                                disabled={
+                                  !!compatibilityResults[0]?.allowedProtocols
+                                    ?.length &&
+                                  !compatibilityResults[0].allowedProtocols.includes(
+                                    "responses",
+                                  )
+                                }
+                              >
+                                Responses
+                              </SelectItem>
+                              <SelectItem
+                                value="chatCompletions"
+                                disabled={
+                                  !!compatibilityResults[0]?.allowedProtocols
+                                    ?.length &&
+                                  !compatibilityResults[0].allowedProtocols.includes(
+                                    "chatCompletions",
+                                  )
+                                }
+                              >
+                                Chat Completions
+                              </SelectItem>
+                            </SelectContent>
+                          </Select>
                         )}
                         <label className="flex items-center gap-2">
                           <input
@@ -671,38 +803,106 @@ export default function ManageToolDialog({
                 </div>
               </div>
 
-              {/* ---- Connectivity ----
-                   Ping *draft* model (not saved) so the user can vet their
-                   choice before committing. Empty state until the first run;
-                   afterwards the dot reflects the most recent attempt. */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <Label className="text-[13px]">连通性</Label>
-                  <Button
-                    type="button"
-                    size="sm"
-                    onClick={handlePing}
-                    disabled={pingLoading || !protocol || !probeModel}
-                    // Brand-orange to match the other primary CTAs in the app
-                    // (充值 / 修复 / 打开控制台). The ping action is the focal
-                    // verb of this section, so it gets the same weight rather
-                    // than the muted outline used for secondary controls.
-                    className="bg-orange-500 text-white shadow-sm shadow-orange-200/60 hover:bg-orange-600 disabled:bg-orange-500/60 disabled:text-white dark:shadow-orange-900/20"
-                  >
-                    {pingLoading ? (
-                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                    ) : (
-                      <Zap className="mr-1.5 h-3.5 w-3.5" />
-                    )}
-                    {pingLoading ? "测试中…" : "测试连通性"}
-                  </Button>
+              {/* WorkBuddy checks one chosen stream on demand. Other tools
+                  keep their separate, optional 1-token connectivity ping. */}
+              {tool.id === "workbuddy" ? (
+                <div className="space-y-2">
+                  <Label htmlFor="workbuddy-test-model" className="text-[13px]">
+                    {t("modelCompatibility.title")}
+                  </Label>
+                  <div className="flex gap-2">
+                    <Select
+                      value={workBuddyTestModel}
+                      onValueChange={(value) => {
+                        workBuddyTestRequest.current += 1;
+                        setWorkBuddyTestModel(value);
+                        setWorkBuddyTestResult(null);
+                        setWorkBuddyTestLoading(false);
+                      }}
+                      disabled={draftModels.length === 0}
+                    >
+                      <SelectTrigger
+                        id="workbuddy-test-model"
+                        aria-label={t("modelCompatibility.workBuddyTestModel")}
+                        className="min-w-0 flex-1 text-[12px]"
+                      >
+                        <SelectValue placeholder="—" />
+                      </SelectTrigger>
+                      <SelectContent className="max-h-60">
+                        {draftModels.map((id) => (
+                          <SelectItem
+                            key={id}
+                            value={id}
+                            className="text-[12px]"
+                          >
+                            {id}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => void handleWorkBuddyTest()}
+                      disabled={!workBuddyTestModel || workBuddyTestLoading}
+                    >
+                      {workBuddyTestLoading && (
+                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                      )}
+                      {workBuddyTestLoading
+                        ? t("modelCompatibility.checking")
+                        : t("modelCompatibility.workBuddyTest")}
+                    </Button>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">
+                    {t("modelCompatibility.workBuddySaveHint")}
+                  </p>
+                  {workBuddyTestResult && (
+                    <div
+                      className={cn(
+                        "rounded-md border px-3 py-2 text-[12px]",
+                        workBuddyTestResult.status === "compatible"
+                          ? "border-emerald-500/30 text-emerald-700"
+                          : workBuddyTestResult.status === "incompatible"
+                            ? "border-red-500/30 text-red-700"
+                            : "border-border-default text-muted-foreground",
+                      )}
+                    >
+                      {workBuddyTestResult.model}:{" "}
+                      {workBuddyTestResult.status === "incompatible"
+                        ? t("modelCompatibility.workBuddyIncompatible")
+                        : t(`modelCompatibility.${workBuddyTestResult.status}`)}
+                      {workBuddyTestResult.reason &&
+                        ` · ${workBuddyTestResult.reason}`}
+                    </div>
+                  )}
                 </div>
-                <PingStatusBox
-                  loading={pingLoading}
-                  result={pingResult}
-                  model={probeModel}
-                />
-              </div>
+              ) : (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Label className="text-[13px]">连通性</Label>
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={handlePing}
+                      disabled={pingLoading || !protocol || !probeModel}
+                      className="bg-orange-500 text-white shadow-sm shadow-orange-200/60 hover:bg-orange-600 disabled:bg-orange-500/60 disabled:text-white dark:shadow-orange-900/20"
+                    >
+                      {pingLoading ? (
+                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Zap className="mr-1.5 h-3.5 w-3.5" />
+                      )}
+                      {pingLoading ? "测试中…" : "测试连通性"}
+                    </Button>
+                  </div>
+                  <PingStatusBox
+                    loading={pingLoading}
+                    result={pingResult}
+                    model={probeModel}
+                  />
+                </div>
+              )}
             </div>
 
             <DialogFooter className="!items-center sm:!justify-between">
@@ -742,7 +942,7 @@ export default function ManageToolDialog({
                     !protocol ||
                     !compatibilityReady ||
                     desktopCodex ||
-                    (tool.id === "workbuddy" && draftModels.length === 0)
+                    (tool.id === "workbuddy" && !workBuddyCatalogReady)
                   }
                 >
                   {saving && (
@@ -835,7 +1035,7 @@ interface WorkBuddyModelPickerProps {
   onChange: (ids: string[]) => void;
   models: FetchedModel[];
   loading: boolean;
-  onFetch: () => void;
+  onFetch: (forceRefresh?: boolean) => void;
   portalContainer?: HTMLElement | null;
 }
 
@@ -983,7 +1183,7 @@ function WorkBuddyModelPicker({
           type="button"
           variant="outline"
           size="icon"
-          onClick={onFetch}
+          onClick={() => onFetch(true)}
           disabled={loading}
           title="刷新模型列表"
         >
@@ -1103,7 +1303,7 @@ interface ModelPickerProps {
   onChange: (v: string) => void;
   models: FetchedModel[];
   loading: boolean;
-  onFetch: () => void;
+  onFetch: (forceRefresh?: boolean) => void;
   /**
    * Portal target for the popover. Defaults to `document.body` when omitted.
    * Pass the dialog's content node when this picker is rendered inside a
@@ -1220,7 +1420,7 @@ function ModelPicker({
         type="button"
         variant="outline"
         size="icon"
-        onClick={onFetch}
+        onClick={() => onFetch(true)}
         disabled={loading}
         title="刷新模型列表"
       >

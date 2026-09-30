@@ -898,6 +898,56 @@ pub fn run() {
                 log::info!("✓ CodexOAuthManager initialized");
             }
 
+            // Initialize the saved outbound proxy before apex detection. The
+            // latter can run while credential storage awaits Keychain access.
+            {
+                let db = &app.state::<AppState>().db;
+                let proxy_url = db.get_global_proxy_url().ok().flatten();
+
+                if let Err(e) = crate::proxy::http_client::init(proxy_url.as_deref()) {
+                    log::error!(
+                        "[GlobalProxy] [GP-005] Failed to initialize with saved config: {e}"
+                    );
+
+                    if proxy_url.is_some() {
+                        log::warn!(
+                            "[GlobalProxy] [GP-006] Clearing invalid proxy config from database"
+                        );
+                        if let Err(clear_err) = db.set_global_proxy_url(None) {
+                            log::error!(
+                                "[GlobalProxy] [GP-007] Failed to clear invalid config: {clear_err}"
+                            );
+                        }
+                    }
+
+                    if let Err(fallback_err) = crate::proxy::http_client::init(None) {
+                        log::error!(
+                            "[GlobalProxy] [GP-008] Failed to initialize direct connection: {fallback_err}"
+                        );
+                    }
+                }
+            }
+
+            // Reconcile managed WorkBuddy URLs as soon as the database is ready.
+            // Credential initialization below may wait for a macOS Keychain
+            // authorization prompt, but endpoint migration needs no secret.
+            let apex_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let client = crate::proxy::http_client::get();
+                crate::ofox_apex::ensure_apex_resolved(&apex_handle, &client).await;
+                if let Some(state) = apex_handle.try_state::<crate::store::AppState>() {
+                    match crate::workbuddy_config::reconcile_managed_endpoint(&state.db).await {
+                        Ok(true) => log::info!(
+                            "[WorkBuddy] updated managed model endpoint for current apex"
+                        ),
+                        Ok(false) => {}
+                        Err(error) => {
+                            log::warn!("[WorkBuddy] endpoint reconciliation failed: {error}")
+                        }
+                    }
+                }
+            });
+
             // 初始化 OfoxAuthManager
             {
                 use crate::ofox_auth::OfoxAuthManager;
@@ -915,23 +965,6 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     let manager = attach_state.read().await;
                     manager.attach_app_handle(attach_handle).await;
-                });
-
-                // First-launch apex resolution: hit `ip-api.com/json` once and
-                // pin the result (CN → ofox.io, else → ofox.ai) into
-                // `settings.json::ofoxApex`. Subsequent launches see
-                // `ofoxApexResolved == true` and skip the probe.
-                //
-                // Spawned concurrently so window paint / login flow are not
-                // blocked by a slow ip-api response. While the probe runs,
-                // `current_apex()` falls back to "ofox.ai" — fine for `dev`
-                // (everything is localhost anyway) and acceptable for first
-                // launch in CN (LoginPage will refresh after the
-                // `ofox-apex-changed` event lands, ~ a few seconds later).
-                let apex_handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    let client = crate::proxy::http_client::get();
-                    crate::ofox_apex::ensure_apex_resolved(&apex_handle, &client).await;
                 });
 
                 // Periodic silent refresh: tick every 30 min and, if the
@@ -987,37 +1020,6 @@ pub fn run() {
 
                 app.manage(state);
                 log::info!("✓ OfoxAuthManager initialized");
-            }
-
-            // 初始化全局出站代理 HTTP 客户端
-            {
-                let db = &app.state::<AppState>().db;
-                let proxy_url = db.get_global_proxy_url().ok().flatten();
-
-                if let Err(e) = crate::proxy::http_client::init(proxy_url.as_deref()) {
-                    log::error!(
-                        "[GlobalProxy] [GP-005] Failed to initialize with saved config: {e}"
-                    );
-
-                    // 清除无效的代理配置
-                    if proxy_url.is_some() {
-                        log::warn!(
-                            "[GlobalProxy] [GP-006] Clearing invalid proxy config from database"
-                        );
-                        if let Err(clear_err) = db.set_global_proxy_url(None) {
-                            log::error!(
-                                "[GlobalProxy] [GP-007] Failed to clear invalid config: {clear_err}"
-                            );
-                        }
-                    }
-
-                    // 使用直连模式重新初始化
-                    if let Err(fallback_err) = crate::proxy::http_client::init(None) {
-                        log::error!(
-                            "[GlobalProxy] [GP-008] Failed to initialize direct connection: {fallback_err}"
-                        );
-                    }
-                }
             }
 
             // 异常退出恢复 + 代理状态自动恢复
@@ -1611,6 +1613,7 @@ pub fn run() {
             commands::manage_tool::set_active_ofox_model,
             commands::manage_tool::get_workbuddy_managed_models,
             commands::manage_tool::set_workbuddy_managed_models,
+            commands::manage_tool::get_workbuddy_endpoint_status,
             commands::manage_tool::ofox_ping_model,
             commands::manage_tool::check_ofox_model_compatibility,
             commands::show_main_window,

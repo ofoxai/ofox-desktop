@@ -1,4 +1,8 @@
 {
+  "toolLaunch": {
+    "failed": "ツールを開けませんでした",
+    "proxyUnavailable": "ローカルプロキシ {{endpoint}} に接続できません。プロキシまたはポート転送を復旧してから再試行してください。"
+  },
   "modelCompatibility": {
     "title": "ストリーミング互換性",
     "checking": "ストリーミング互換性を確認中…",
@@ -10,7 +14,22 @@
     "continueUnverified": "リスクを理解した上で未検証のまま保存する",
     "requestFailed": "確認に失敗しました。再試行してください",
     "desktopCodex": "Codex デスクトップのモデルはアプリ内で管理され、CLI の確認は対象外です",
+    "chatgptCodexMode": "Codex モード",
+    "chatgptCodexUnset": "Codex モデル未設定",
+    "chatgptCodexShared": "ここでは Codex CLI と設定を共有するデスクトップアプリの Codex モードを管理します。Chat と Work は OpenAI アカウントでサインインして利用し、Ofox のモデル設定では変更できません。",
     "applyProtocol": "検査結果を適用",
+    "workBuddyProtocol": "WorkBuddy のカスタムモデルは Chat Completions を使用します",
+    "workBuddyConfiguredEndpoint": "WorkBuddy の現在の接続先",
+    "workBuddyExpectedEndpoint": "現在の地域の Ofox 接続先",
+    "workBuddyEndpointMismatch": "WorkBuddy の接続先が現在の地域と異なるか、設定が変更されています。再連携するか設定を確認してください。",
+    "workBuddyEndpointCheckScope": "モデル検査は Ofox の通信経路を使用します。WorkBuddy が古い接続先を使い続ける場合は、完全に終了して再起動してください。",
+    "workBuddyEndpointSyncFailed": "地域は切り替わりましたが、WorkBuddy の接続先を自動更新できませんでした。WorkBuddy の管理画面で確認してください。",
+    "workBuddyTestModel": "検査する WorkBuddy モデルを選択",
+    "workBuddyTest": "選択したモデルを検査",
+    "workBuddySaveHint": "カタログで互換性が確認できれば保存できます。ストリーミング検査は任意です。",
+    "workBuddyIncompatible": "ストリーミング非互換（保存は可能）",
+    "workBuddyCatalogFailed": "モデルカタログを読み込めませんでした。更新して再試行してください。",
+    "workBuddyMissingCatalog": "選択したモデルの一部が互換カタログにありません。更新するか削除してから保存してください。",
     "defaultModelFailed": "{{tool}} の連携は完了しましたが、既定モデルのストリーミングを確認できませんでした。管理画面でモデルを選択してください"
   },
   "toolUpdates": {

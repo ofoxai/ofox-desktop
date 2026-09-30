@@ -85,8 +85,9 @@ export type OfoxProtocol = "openai" | "anthropic" | "gemini";
  */
 export async function fetchOfoxModels(
   protocol: OfoxProtocol,
+  forceRefresh = false,
 ): Promise<FetchedModel[]> {
-  return invoke("fetch_ofox_models", { protocol });
+  return invoke("fetch_ofox_models", { protocol, forceRefresh });
 }
 
 /** openai 协议下需要排除的模型 vendor 前缀 */

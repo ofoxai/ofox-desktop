@@ -103,6 +103,8 @@ import { HERMES_DEFAULT_CONFIG } from "./hooks/useHermesFormState";
 import { resolveManagedAccountId } from "@/lib/authBinding";
 import { useOpenClawLiveProviderIds } from "@/hooks/useOpenClaw";
 import { useHermesLiveProviderIds } from "@/hooks/useHermes";
+import { useOfoxApex } from "@/hooks/useOfoxApex";
+import { resolveOfoxPreset } from "@/lib/ofoxUrls";
 
 type PresetEntry = {
   id: string;
@@ -150,6 +152,7 @@ export function ProviderForm({
   showButtons = true,
 }: ProviderFormProps) {
   const { t } = useTranslation();
+  const { apex, isLoading: isApexLoading } = useOfoxApex();
   const isEditMode = Boolean(initialData);
   const queryClient = useQueryClient();
   const { data: settingsData } = useSettingsQuery();
@@ -468,39 +471,38 @@ export function ProviderForm({
   );
 
   const presetEntries = useMemo(() => {
+    const entry = (id: string, preset: PresetEntry["preset"]): PresetEntry => ({
+      id,
+      preset:
+        "providerType" in preset && preset.providerType === "ofox"
+          ? resolveOfoxPreset(preset, apex)
+          : preset,
+    });
     if (appId === "codex") {
-      return codexProviderPresets.map<PresetEntry>((preset, index) => ({
-        id: `codex-${index}`,
-        preset,
-      }));
+      return codexProviderPresets.map((preset, index) =>
+        entry(`codex-${index}`, preset),
+      );
     } else if (appId === "gemini") {
-      return geminiProviderPresets.map<PresetEntry>((preset, index) => ({
-        id: `gemini-${index}`,
-        preset,
-      }));
+      return geminiProviderPresets.map((preset, index) =>
+        entry(`gemini-${index}`, preset),
+      );
     } else if (appId === "opencode") {
-      return opencodeProviderPresets.map<PresetEntry>((preset, index) => ({
-        id: `opencode-${index}`,
-        preset,
-      }));
+      return opencodeProviderPresets.map((preset, index) =>
+        entry(`opencode-${index}`, preset),
+      );
     } else if (appId === "openclaw") {
-      return openclawProviderPresets.map<PresetEntry>((preset, index) => ({
-        id: `openclaw-${index}`,
-        preset,
-      }));
+      return openclawProviderPresets.map((preset, index) =>
+        entry(`openclaw-${index}`, preset),
+      );
     } else if (appId === "hermes") {
-      return hermesProviderPresets.map<PresetEntry>((preset, index) => ({
-        id: `hermes-${index}`,
-        preset,
-      }));
+      return hermesProviderPresets.map((preset, index) =>
+        entry(`hermes-${index}`, preset),
+      );
     }
     return providerPresets
       .filter((p) => !p.hidden)
-      .map<PresetEntry>((preset, index) => ({
-        id: `claude-${index}`,
-        preset,
-      }));
-  }, [appId]);
+      .map((preset, index) => entry(`claude-${index}`, preset));
+  }, [appId, apex]);
 
   const {
     templateValues,
@@ -1246,7 +1248,9 @@ export function ProviderForm({
     selectedOfoxPreset ||
     initialData?.meta?.providerType === "ofox" ||
     // 兼容旧版本创建的 oFox 供应商（meta 中未保存 providerType）
-    JSON.stringify(initialData?.settingsConfig ?? "").includes("api.ofox.ai");
+    /api\.ofox\.(?:ai|io)/.test(
+      JSON.stringify(initialData?.settingsConfig ?? ""),
+    );
 
   const shouldShowSpeedTest =
     category !== "official" && category !== "cloud_provider" && !isOfoxPreset;
@@ -1515,7 +1519,7 @@ export function ProviderForm({
   const handlePresetChangeRef = useRef(handlePresetChange);
   handlePresetChangeRef.current = handlePresetChange;
   useEffect(() => {
-    if (ofoxAppliedRef.current || initialData) return;
+    if (ofoxAppliedRef.current || initialData || isApexLoading) return;
     const ofoxEntry = presetEntries.find(
       (e) => "providerType" in e.preset && e.preset.providerType === "ofox",
     );
@@ -1527,7 +1531,7 @@ export function ProviderForm({
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [presetEntries, initialData]);
+  }, [presetEntries, initialData, isApexLoading]);
 
   const settingsConfigErrorField = (
     <FormField
@@ -1559,6 +1563,7 @@ export function ProviderForm({
               onUniversalPresetSelect={onUniversalPresetSelect}
               onManageUniversalProviders={onManageUniversalProviders}
               category={category}
+              isOfoxApexLoading={isApexLoading}
             />
           )}
 
