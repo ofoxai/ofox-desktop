@@ -556,8 +556,9 @@ async fn get_single_tool_version_impl(
                     .unwrap_or_else(|err| Err(format!("ChatGPT 检测任务失败: {err}")));
             match detected {
                 Ok(Some(version)) => {
+                    // Windows 由 Ofox 一键升级（winget/Store），见 upgrade_chatgpt_desktop_app_with。
                     let update =
-                        chatgpt_update_fields("msstore", &version, include_latest, false).await;
+                        chatgpt_update_fields("msstore", &version, include_latest, true).await;
                     return desktop_tool_version(
                         tool,
                         version,

@@ -41,4 +41,9 @@ export const toolUpdatesApi = {
     invoke<ToolUpdateInfo[]>("get_tool_versions", { includeLatest: true }),
   update: (tool: string, operationId: string) =>
     invoke<ToolUpdateResult>("update_tool", { tool, operationId }),
+  /** Desktop apps only: whether upgrading would have to close the app first. */
+  isAppRunning: (tool: string) =>
+    invoke<boolean>("is_tool_app_running", { tool }),
+  /** Opens a desktop app so its built-in updater (e.g. Sparkle) can run. */
+  openApp: (tool: string) => invoke<void>("launch_tool", { toolId: tool }),
 };
