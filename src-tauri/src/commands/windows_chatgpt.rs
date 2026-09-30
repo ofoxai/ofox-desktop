@@ -490,10 +490,14 @@ pub(crate) fn detect_chatgpt_desktop_app() -> Result<Option<String>, String> {
 /// 抽出来的纯函数——单测能直接喂假 stdout 打回归。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn parse_appx_identity(output: &str) -> Result<Option<String>, String> {
-    let line = output.lines().find(|l| !l.trim().is_empty()).map(str::trim);
+    // 只去掉行尾换行：整行 trim 会吃掉开头的 Tab，把「版本为空」误读成
+    // 「版本 = PackageFamilyName」。
+    let line = output
+        .lines()
+        .map(|l| l.trim_end_matches('\r'))
+        .find(|l| !l.trim().is_empty());
     let Some(line) = line else { return Ok(None) };
-    let mut parts = line.split('\t');
-    let version = parts.next().unwrap_or("").trim();
+    let version = line.split('\t').next().unwrap_or("").trim();
     if version.is_empty() {
         return Err(format!("Get-AppxPackage 输出无法解析: {output}"));
     }
