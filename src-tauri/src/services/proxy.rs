@@ -2035,9 +2035,10 @@ impl ProxyService {
         };
         let json_str = serde_json::to_string(&backup_value)
             .map_err(|e| format!("序列化 {key} patch 失败: {e}"))?;
+        // 存进本机专属的绑定表，不和接管模式共用 proxy_live_backup——那张表会在
+        // 退出/崩溃清理时整表删除。
         self.db
-            .save_live_backup(key, &json_str)
-            .await
+            .upsert_bind_record(key, &json_str)
             .map_err(|e| format!("备份 {key} patch 失败: {e}"))
     }
 
@@ -2184,8 +2185,7 @@ impl ProxyService {
         let key = app_type.as_str();
         let Some(backup) = self
             .db
-            .get_live_backup(key)
-            .await
+            .get_bind_record(key)
             .map_err(|e| format!("读取 {key} 备份失败: {e}"))?
         else {
             log::warn!(
@@ -2194,7 +2194,7 @@ impl ProxyService {
             );
             return Ok(());
         };
-        let backup_value: Value = serde_json::from_str(&backup.original_config)
+        let backup_value: Value = serde_json::from_str(&backup.record)
             .map_err(|e| format!("解析 {key} patch 失败: {e}"))?;
         let (patch, runtime_default) = if backup_value
             .get("__ofoxDirectBackupVersion")
@@ -2342,8 +2342,7 @@ impl ProxyService {
         }
 
         self.db
-            .delete_live_backup(key)
-            .await
+            .delete_bind_record(key)
             .map_err(|e| format!("删除 {key} 备份失败: {e}"))?;
         Ok(())
     }
@@ -3788,6 +3787,49 @@ command = "latest-command"
 
     #[tokio::test]
     #[serial]
+    async fn quit_and_crash_cleanup_keep_ofox_bind_records() {
+        // 退出、停止、崩溃恢复都会整表清 proxy_live_backup。绑定记录在独立的表里，
+        // 必须保留下来；「有绑定」也不能被当成「需要做接管清理」。
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        seed_ofox_claude(&db);
+        prepare_claude_live_baseline();
+        service
+            .ofox_backup_live_config(&AppType::Claude, "sk-of-KEEP")
+            .await
+            .expect("backup");
+        service
+            .ofox_write_direct_to_live(&AppType::Claude, "sk-of-KEEP")
+            .await
+            .expect("write");
+
+        assert!(
+            !db.has_any_live_backup().await.expect("query"),
+            "a bound tool must not trigger takeover cleanup on quit"
+        );
+        service
+            .stop_with_restore_keep_state()
+            .await
+            .expect("quit cleanup");
+        service.stop_with_restore().await.expect("stop cleanup");
+        service.recover_from_crash().await.expect("crash recovery");
+        assert!(db.get_bind_record("claude").expect("query").is_some());
+
+        service
+            .ofox_restore_from_backup(&AppType::Claude)
+            .await
+            .expect("unbind");
+        let live = service.read_claude_live().expect("read");
+        assert!(
+            live["env"].get("ANTHROPIC_AUTH_TOKEN").is_none(),
+            "unbind after a quit still removes the Ofox token"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn ofox_unbind_strips_only_injected_fields_for_claude() {
         // Claude unbind 字段级反 patch：bind 期间用户往 settings.json 加的
         // statusLine 字段必须原样保留；只有 cc-switch 注入的 env 字段被减掉。
@@ -3858,7 +3900,7 @@ command = "latest-command"
         );
 
         // backup 已被 restore 消费掉
-        let backup_after = db.get_live_backup("claude").await.expect("query backup");
+        let backup_after = db.get_bind_record("claude").expect("query backup");
         assert!(backup_after.is_none(), "restore 后应当删 backup");
     }
 
@@ -4371,6 +4413,6 @@ command = "latest-command"
             .expect("缺备份时应当 noop，不报错");
 
         // 仍然没有备份（restore 没创建任何东西）
-        assert!(db.get_live_backup("claude").await.expect("query").is_none());
+        assert!(db.get_bind_record("claude").expect("query").is_none());
     }
 }

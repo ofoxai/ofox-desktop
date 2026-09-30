@@ -177,6 +177,16 @@ pub fn gateway_base() -> String {
     }
 }
 
+/// 文本里是否出现 Ofox 网关地址（任一已知 apex 的 `https://api.<apex>`，或本地
+/// dev 网关）。用来识别 Ofox 写入的配置片段；Codex 的片段是一整段 TOML 字符串，
+/// 所以按子串匹配，不解析 URL。
+pub(crate) fn mentions_ofox_gateway(text: &str) -> bool {
+    text.contains(DEV_GATEWAY_BASE)
+        || KNOWN_APEXES
+            .iter()
+            .any(|apex| text.contains(&format!("https://api.{apex}")))
+}
+
 /// 模型列表（`/v1/models`、`/anthropic/v1/models`、`/gemini/v1beta/models`）
 /// 专用 base —— **始终指向线上 `https://api.<apex>`**，不受 `OFOX_USE_LOCAL`
 /// 影响。
@@ -460,6 +470,17 @@ pub async fn ensure_apex_resolved(app: &tauri::AppHandle, client: &reqwest::Clie
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_mentions_cover_every_apex_and_dev_gateway() {
+        assert!(mentions_ofox_gateway(
+            "base_url = \"https://api.ofox.ai/v1\"\nwire_api = \"responses\""
+        ));
+        assert!(mentions_ofox_gateway("https://api.ofox.io/anthropic"));
+        assert!(mentions_ofox_gateway("http://localhost:8088/v1"));
+        assert!(!mentions_ofox_gateway("https://api.openai.com/v1"));
+        assert!(!mentions_ofox_gateway("https://app.ofox.ai/dashboard"));
+    }
 
     #[test]
     fn known_apex_matches_whitelist() {

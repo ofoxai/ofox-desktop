@@ -316,13 +316,12 @@ fn parse_state(raw: &str) -> Result<WorkBuddyBindingState, String> {
 
 async fn load_state(db: &Database) -> Result<Option<WorkBuddyBindingState>, String> {
     let Some(backup) = db
-        .get_live_backup(BACKUP_KEY)
-        .await
+        .get_bind_record(BACKUP_KEY)
         .map_err(|e| format!("读取 WorkBuddy 绑定备份失败：{e}"))?
     else {
         return Ok(None);
     };
-    parse_state(&backup.original_config).map(Some)
+    parse_state(&backup.record).map(Some)
 }
 
 fn file_snapshot(path: &Path) -> Result<Option<Vec<u8>>, String> {
@@ -354,7 +353,7 @@ async fn persist_binding_state(
         serde_json::to_string(state).map_err(|e| format!("序列化 WorkBuddy 绑定备份失败：{e}"))?;
     let snapshot = file_snapshot(path)?;
     write_models_to(path, models)?;
-    if let Err(error) = db.save_live_backup(BACKUP_KEY, &state_json).await {
+    if let Err(error) = db.upsert_bind_record(BACKUP_KEY, &state_json) {
         let rollback = restore_file_snapshot(path, snapshot.as_deref());
         return Err(match rollback {
             Ok(()) => format!("保存 WorkBuddy 绑定备份失败：{error}（已回滚配置）"),
@@ -464,7 +463,7 @@ pub async fn unbind(db: &Database) -> Result<(), String> {
     let restored = restore_models(models, &state)?;
     let snapshot = file_snapshot(&path)?;
     write_models_to(&path, &restored)?;
-    if let Err(error) = db.delete_live_backup(BACKUP_KEY).await {
+    if let Err(error) = db.delete_bind_record(BACKUP_KEY) {
         let rollback = restore_file_snapshot(&path, snapshot.as_deref());
         return Err(match rollback {
             Ok(()) => format!("删除 WorkBuddy 绑定备份失败：{error}（已回滚配置）"),

@@ -539,6 +539,21 @@ pub fn run() {
                 Err(e) => log::warn!("✗ Failed to seed OfoxAI providers: {e}"),
             }
 
+            // 旧版把 Ofox 绑定数据和接管备份混存在 proxy_live_backup，退出/崩溃
+            // 清理会整表删除。搬到本机专属的 ofox_bind_snapshot（可重复执行）。
+            // 必须早于下面异步任务里的 recover_from_crash——它会清空旧表。
+            match crate::services::ofox_bind::relocate::relocate_legacy_rows(&app_state.db, |app| {
+                app_state
+                    .proxy_service
+                    .detect_takeover_in_live_config_for_app(app)
+            }) {
+                Ok(moved) if !moved.is_empty() => {
+                    log::info!("✓ Relocated Ofox bind records: {moved:?}");
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("✗ Failed to relocate Ofox bind records: {e}"),
+            }
+
             // OpenCode's legacy compatible adapter expects streamed
             // `delta.content`, while Ofox's Chat Completions endpoint returns
             // a final `message.content` event. Migrate only the Ofox-managed
