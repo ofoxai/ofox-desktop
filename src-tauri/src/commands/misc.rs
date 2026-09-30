@@ -2503,6 +2503,7 @@ mod tests {
         assert!(error.contains("目录不存在"));
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn build_shell_cd_command_quotes_spaces_and_single_quotes() {
         let command = build_shell_cd_command(Some(Path::new("/tmp/project O'Brien")));
