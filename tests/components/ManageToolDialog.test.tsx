@@ -222,6 +222,104 @@ describe("ManageToolDialog streaming compatibility", () => {
   });
 });
 
+describe("ManageToolDialog re-saving an unchanged model", () => {
+  it("re-saves the loaded model of a fixed-protocol client", async () => {
+    const model = compatibleModel("google/gemini-3.8-flash");
+    mockSingleTool(model);
+    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue(model.id);
+    const check = vi.spyOn(manageToolApi, "checkCompatibility");
+    const save = vi.spyOn(manageToolApi, "setActiveModel").mockResolvedValue();
+
+    await renderTool("gemini", "Gemini");
+    await waitFor(() =>
+      expect(screen.getByRole("combobox")).toHaveTextContent(model.id),
+    );
+    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith(
+        "gemini",
+        model.id,
+        undefined,
+        undefined,
+        false,
+      ),
+    );
+    expect(check).not.toHaveBeenCalled();
+  });
+
+  it("keeps save disabled when the current model failed to load", async () => {
+    const model = compatibleModel("google/gemini-3.8-flash");
+    mockSingleTool(model);
+    vi.spyOn(manageToolApi, "getActiveModel").mockRejectedValue(
+      new Error("read failed"),
+    );
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const save = vi.spyOn(manageToolApi, "setActiveModel");
+
+    await renderTool("gemini", "Gemini");
+    await screen.findByText("/Users/test/.config/tool/config.json");
+
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it("keeps an unchanged OpenCode save gated on its running check", async () => {
+    const model = compatibleModel("z-ai/glm-5.3");
+    mockSingleTool(model);
+    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue(model.id);
+    let finish!: (
+      value: Awaited<ReturnType<typeof manageToolApi.checkCompatibility>>,
+    ) => void;
+    vi.spyOn(manageToolApi, "checkCompatibility").mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+
+    await renderTool("opencode", "OpenCode");
+    await waitFor(() =>
+      expect(screen.getByRole("combobox")).toHaveTextContent(model.id),
+    );
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+
+    await act(async () => {
+      finish({
+        app: "opencode",
+        model: model.id,
+        protocol: "chatCompletions",
+        status: "compatible",
+        source: "probe",
+        reason: null,
+      });
+    });
+    expect(screen.getByRole("button", { name: "应用检测结果" })).toBeEnabled();
+  });
+
+  it("labels an unset OpenCode model as a plain save", async () => {
+    mockSingleTool(compatibleModel("z-ai/glm-5.3"));
+    const save = vi.spyOn(manageToolApi, "setActiveModel").mockResolvedValue();
+
+    await renderTool("opencode", "OpenCode");
+    await screen.findByText("/Users/test/.config/tool/config.json");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "保存" })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith(
+        "opencode",
+        "",
+        undefined,
+        undefined,
+        false,
+      ),
+    );
+  });
+});
+
 describe("ManageToolDialog model picker", () => {
   it("bypasses the catalog cache only for an explicit refresh", async () => {
     const model = compatibleModel("openai/gpt-6-luna");
@@ -351,6 +449,25 @@ describe("ManageToolDialog WorkBuddy multi-model management", () => {
       );
     });
     expect(check).not.toHaveBeenCalled();
+  });
+
+  it("re-saves an unchanged WorkBuddy selection", async () => {
+    const model = compatibleModel("openai/model-a");
+    mockWorkBuddy([model]);
+    const save = vi
+      .spyOn(manageToolApi, "setWorkBuddyManagedModels")
+      .mockResolvedValue();
+
+    await renderTool("workbuddy", "WorkBuddy");
+    await screen.findByText("共 1 个兼容模型，共用一个 Ofox Key");
+    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith([
+        modelFetch.toWorkBuddyModelSelection(model),
+      ]),
+    );
   });
 
   it("manually checks only the chosen model without blocking save", async () => {

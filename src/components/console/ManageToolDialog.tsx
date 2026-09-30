@@ -137,6 +137,9 @@ export default function ManageToolDialog({
   const [draftModel, setDraftModel] = useState<string>("");
   const [currentModels, setCurrentModels] = useState<string[]>([]);
   const [draftModels, setDraftModels] = useState<string[]>([]);
+  // Re-saving an unchanged model is allowed only after the current value was
+  // actually read — otherwise an empty draft would wipe the configured model.
+  const [currentModelLoaded, setCurrentModelLoaded] = useState(false);
   const [models, setModels] = useState<FetchedModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [workBuddyCatalogError, setWorkBuddyCatalogError] = useState(false);
@@ -180,6 +183,7 @@ export default function ManageToolDialog({
     setDraftModel("");
     setCurrentModels([]);
     setDraftModels([]);
+    setCurrentModelLoaded(false);
     setModels([]);
     setModelsLoading(tool.id === "workbuddy");
     setWorkBuddyCatalogError(false);
@@ -220,6 +224,7 @@ export default function ManageToolDialog({
             if (managedResult.status === "fulfilled") {
               setCurrentModels(managedResult.value);
               setDraftModels(managedResult.value);
+              setCurrentModelLoaded(true);
             }
             if (catalogResult.status === "fulfilled") {
               setModels(filterOfoxModelsForWorkBuddy(catalogResult.value));
@@ -240,6 +245,7 @@ export default function ManageToolDialog({
         if (!cancelled) {
           setCurrentModel(m);
           setDraftModel(m);
+          setCurrentModelLoaded(true);
         }
       } catch (e) {
         // Soft-fail: an empty model just means "OfoxAI default routing",
@@ -412,9 +418,7 @@ export default function ManageToolDialog({
   const handleSave = useCallback(async () => {
     if (!tool) return;
     const workBuddy = tool.id === "workbuddy";
-    if (workBuddy ? arraysEqual(draftModels, currentModels) : !isDirty) {
-      return;
-    }
+    if (!isDirty && !currentModelLoaded) return;
     setSaving(true);
     try {
       if (workBuddy) {
@@ -463,8 +467,8 @@ export default function ManageToolDialog({
     draftModel,
     currentModel,
     isDirty,
+    currentModelLoaded,
     draftModels,
-    currentModels,
     models,
     compatibilityResults,
     manualProtocol,
@@ -937,7 +941,7 @@ export default function ManageToolDialog({
                   size="sm"
                   onClick={handleSave}
                   disabled={
-                    !isDirty ||
+                    (!isDirty && !currentModelLoaded) ||
                     saving ||
                     !protocol ||
                     !compatibilityReady ||
@@ -948,7 +952,9 @@ export default function ManageToolDialog({
                   {saving && (
                     <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                   )}
-                  {tool.id === "opencode" && draftModel === currentModel
+                  {tool.id === "opencode" &&
+                  draftModel === currentModel &&
+                  isDirty
                     ? t("modelCompatibility.applyProtocol")
                     : "保存"}
                 </Button>
