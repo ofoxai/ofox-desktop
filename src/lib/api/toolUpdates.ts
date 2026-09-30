@@ -14,7 +14,9 @@ export interface ToolUpdateInfo {
     | "available"
     | "current"
     | "unknown"
-    | "appManaged";
+    | "appManaged"
+    | "unsupported";
+  /** homebrew | npm | native | pnpm (CLIs); sparkle | msstore (ChatGPT desktop). */
   update_source: string | null;
   update_supported: boolean;
   update_reason: string | null;

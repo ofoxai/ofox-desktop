@@ -7,14 +7,16 @@
 //! 进度事件用 println! emit 到 stdout（每行一条 JSON），不依赖 Tauri IPC。
 //!
 //! 用法（假定编译产物 scp 到 VM 上）：
-//!   ./verify_chatgpt_install
+//!   ./verify_chatgpt_install                 # 完整安装
+//!   ./verify_chatgpt_install --check-latest  # 只读：打印 get_tool_versions 的 chatgpt 结果
 //!
 //! 判定：进程 exit code 0 且最后一行是 `RESULT: ok=0`，且系统里能查到
 //! ChatGPT App（macOS 下 `~/Applications/ChatGPT.app`；Windows 下
-//! `Get-AppxPackage OpenAI.Codex`）。
+//! `Get-AppxPackage OpenAI.Codex`）。`--check-latest` 以打印的 JSON 为准
+//! （version / latest_version / update_status / update_source）。
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use cc_switch_lib::install_chatgpt_desktop_app_with;
+use cc_switch_lib::{get_tool_versions, install_chatgpt_desktop_app_with};
 
 fn main() {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -29,6 +31,21 @@ fn main() {
             .enable_all()
             .build()
             .expect("start tokio runtime");
+
+        if std::env::args().any(|arg| arg == "--check-latest") {
+            let tools = Some(vec!["chatgpt".to_string()]);
+            match runtime.block_on(get_tool_versions(tools, None, Some(true))) {
+                Ok(versions) => {
+                    let json = serde_json::to_string_pretty(&versions).expect("serialize");
+                    println!("{json}");
+                    std::process::exit(0);
+                }
+                Err(err) => {
+                    eprintln!("ERROR: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
 
         let emit = |line: &str| {
             println!("PROGRESS: {line}");

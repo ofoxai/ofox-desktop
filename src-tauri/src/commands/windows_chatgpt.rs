@@ -20,16 +20,9 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "windows")]
 use serde_json::json;
 
-/// Microsoft Store Product ID —— winget msstore 源 + ms-windows-store URI 都用这个。
-pub(crate) const STORE_PRODUCT_ID: &str = "9PLM9XGG6VKS";
-
-/// AppxPackage 名——`Get-AppxPackage -Name` 查询用。
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-const PACKAGE_NAME: &str = "OpenAI.Codex";
-
-/// AppUserModelId (`PackageFamilyName!AppId`)——`shell:AppsFolder\<AUMID>` 拉起用。
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-const PACKAGE_FAMILY: &str = "OpenAI.Codex_2p2nqsd0c76g0";
+// 包身份常量与更新检测共用，定义在 chatgpt_updates（全平台编译）。
+#[cfg(target_os = "windows")]
+use super::chatgpt_updates::{windows_launch_target, PACKAGE_NAME, STORE_PRODUCT_ID};
 
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -54,7 +47,7 @@ pub(crate) fn launch_chatgpt_desktop_app() -> Result<bool, String> {
     if detect_chatgpt_desktop_app()?.is_none() {
         return Ok(false);
     }
-    let target = format!("shell:AppsFolder\\{PACKAGE_FAMILY}!App");
+    let target = windows_launch_target();
     let script = format!("Start-Process '{}'", target.replace('\'', "''"));
     match run_powershell(&script) {
         Ok(_) => Ok(true),

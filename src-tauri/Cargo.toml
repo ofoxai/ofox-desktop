@@ -69,6 +69,8 @@ webpki-roots = "0.26"
 rustls-native-certs = "0.8"
 regex = "1.10"
 semver = "1"
+# 解析 ChatGPT 桌面 App 的 Sparkle appcast；与 plist 依赖链已锁定的版本一致。
+quick-xml = "0.38"
 libc = "0.2"
 rquickjs = { version = "0.8", features = ["array-buffer", "classes"] }
 thiserror = "2.0"

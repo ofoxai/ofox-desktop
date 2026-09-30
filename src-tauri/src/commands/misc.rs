@@ -424,6 +424,48 @@ pub async fn get_tool_versions(
     Ok(results)
 }
 
+/// ChatGPT 桌面 App 的更新字段；`include_latest = false` 时不联网。
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+async fn chatgpt_update_fields(
+    source: &str,
+    installed: &str,
+    include_latest: bool,
+    one_click: bool,
+) -> super::chatgpt_updates::DesktopUpdateFields {
+    let latest = if include_latest {
+        let client = crate::proxy::http_client::get();
+        Some(super::chatgpt_updates::fetch_latest_for_host(&client).await)
+    } else {
+        None
+    };
+    super::chatgpt_updates::desktop_update_fields(source, installed, latest, one_click)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn desktop_tool_version(
+    tool: &str,
+    version: String,
+    update: super::chatgpt_updates::DesktopUpdateFields,
+    env_type: String,
+    wsl_distro: Option<String>,
+    executable_path: String,
+) -> ToolVersion {
+    ToolVersion {
+        name: tool.to_string(),
+        version: Some(version),
+        latest_version: update.latest_version,
+        error: None,
+        env_type,
+        wsl_distro,
+        installation_kind: "desktopApp".into(),
+        update_status: update.update_status.into(),
+        update_source: update.update_source,
+        update_supported: update.update_supported,
+        update_reason: update.update_reason,
+        executable_path: Some(executable_path),
+    }
+}
+
 /// 获取单个工具的版本信息（内部实现）
 ///
 /// `include_latest = false` skips the remote npm/GitHub lookup, returning
@@ -482,20 +524,10 @@ async fn get_single_tool_version_impl(
         #[cfg(target_os = "macos")]
         {
             if let Some((path, version)) = super::tool_update::codex_desktop_version().await {
-                return ToolVersion {
-                    name: tool.to_string(),
-                    version: Some(version),
-                    latest_version: None,
-                    error: None,
-                    env_type,
-                    wsl_distro,
-                    installation_kind: "desktopApp".into(),
-                    update_status: "appManaged".into(),
-                    update_source: None,
-                    update_supported: false,
-                    update_reason: None,
-                    executable_path: Some(path),
-                };
+                // macOS 由 App 内置 Sparkle 升级，Ofox 只报告状态。
+                let update =
+                    chatgpt_update_fields("sparkle", &version, include_latest, false).await;
+                return desktop_tool_version(tool, version, update, env_type, wsl_distro, path);
             }
             return ToolVersion {
                 name: tool.to_string(),
@@ -517,24 +549,23 @@ async fn get_single_tool_version_impl(
             // AppxPackage 探不到 = 没装；探到 = 返回版本号。
             // executable_path 用 shell:AppsFolder\<AUMID>——用户点"打开"时启动器
             // 拿它拉起 Store app，跟检测口径一致。
-            match super::windows_chatgpt::detect_chatgpt_desktop_app() {
+            // PowerShell 探测是阻塞调用，放到 blocking 线程，免得在 join_all 里拖住其它工具。
+            let detected =
+                tokio::task::spawn_blocking(super::windows_chatgpt::detect_chatgpt_desktop_app)
+                    .await
+                    .unwrap_or_else(|err| Err(format!("ChatGPT 检测任务失败: {err}")));
+            match detected {
                 Ok(Some(version)) => {
-                    return ToolVersion {
-                        name: tool.to_string(),
-                        version: Some(version),
-                        latest_version: None,
-                        error: None,
+                    let update =
+                        chatgpt_update_fields("msstore", &version, include_latest, false).await;
+                    return desktop_tool_version(
+                        tool,
+                        version,
+                        update,
                         env_type,
                         wsl_distro,
-                        installation_kind: "desktopApp".into(),
-                        update_status: "appManaged".into(),
-                        update_source: None,
-                        update_supported: false,
-                        update_reason: None,
-                        executable_path: Some(
-                            "shell:AppsFolder\\OpenAI.Codex_2p2nqsd0c76g0!App".into(),
-                        ),
-                    };
+                        super::chatgpt_updates::windows_launch_target(),
+                    );
                 }
                 Ok(None) => {
                     return ToolVersion {
