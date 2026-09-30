@@ -1,5 +1,7 @@
 import { renderHook, act, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import i18n from "i18next";
+import zh from "@/i18n/locales/zh.json";
 import { useToolInstall } from "@/hooks/useToolInstall";
 import { emitTauriEvent } from "../msw/tauriMocks";
 
@@ -55,8 +57,14 @@ describe("useToolInstall 的安装进度", () => {
     await waitFor(() => expect(typeof result.current.progress).toBe("object"));
 
     act(() => {
-      emitLog("codex", progressLine({ step: 1, total: 4, name: "nvm", phase: "start" }));
-      emitLog("claude", progressLine({ step: 3, total: 4, name: "镜像", phase: "done" }));
+      emitLog(
+        "codex",
+        progressLine({ step: 1, total: 4, name: "nvm", phase: "start" }),
+      );
+      emitLog(
+        "claude",
+        progressLine({ step: 3, total: 4, name: "镜像", phase: "done" }),
+      );
     });
 
     expect(result.current.progress.codex?.name).toBe("nvm");
@@ -68,8 +76,19 @@ describe("useToolInstall 的安装进度", () => {
     await waitFor(() => expect(typeof result.current.progress).toBe("object"));
 
     act(() => {
-      emitLog("codex", progressLine({ step: 1, total: 4, name: "nvm", phase: "start" }));
-      emitLog("codex", progressLine({ step: 2, total: 4, name: "Node.js LTS", phase: "start" }));
+      emitLog(
+        "codex",
+        progressLine({ step: 1, total: 4, name: "nvm", phase: "start" }),
+      );
+      emitLog(
+        "codex",
+        progressLine({
+          step: 2,
+          total: 4,
+          name: "Node.js LTS",
+          phase: "start",
+        }),
+      );
     });
 
     expect(result.current.progress.codex?.step).toBe(2);
@@ -115,7 +134,10 @@ describe("useToolInstall 的安装进度", () => {
     await waitFor(() => expect(typeof result.current.progress).toBe("object"));
 
     act(() => {
-      emitLog("codex", progressLine({ step: 4, total: 4, name: "Codex", phase: "done" }));
+      emitLog(
+        "codex",
+        progressLine({ step: 4, total: 4, name: "Codex", phase: "done" }),
+      );
     });
     expect(result.current.progress.codex).toBeDefined();
 
@@ -124,5 +146,96 @@ describe("useToolInstall 的安装进度", () => {
     });
 
     expect(result.current.progress.codex).toBeUndefined();
+  });
+});
+
+describe("useToolInstall 的失败反馈", () => {
+  beforeAll(() => {
+    i18n.addResourceBundle("zh", "translation", zh, true, true);
+  });
+
+  beforeEach(() => {
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue(1);
+  });
+
+  const emitErr = (tool: string, line: string) =>
+    emitTauriEvent("install-tool-log", { tool, stream: "stderr", line });
+
+  it("安装脚本非零退出时，把它打印的错误原因暴露出来", async () => {
+    const { result } = renderHook(() => useToolInstall(vi.fn()));
+    await waitFor(() => expect(typeof result.current.progress).toBe("object"));
+
+    act(() => {
+      emitLog("openclaw", "  OpenClaw macOS 环境初始化");
+      emitErr(
+        "openclaw",
+        "  \u001b[31m\u001b[1m错误: 磁盘可用空间不足（2.3GB），至少需要 5GB。\u001b[0m",
+      );
+      emitTauriEvent("install-tool-done", { tool: "openclaw", code: 1 });
+    });
+
+    expect(result.current.error).toEqual({
+      toolId: "openclaw",
+      message: "磁盘可用空间不足（2.3GB），至少需要 5GB。",
+    });
+  });
+
+  it("步骤失败时优先给出安装器的提示", async () => {
+    const { result } = renderHook(() => useToolInstall(vi.fn()));
+    await waitFor(() => expect(typeof result.current.progress).toBe("object"));
+
+    act(() => {
+      emitLog("hermes", "       \u001b[31m\u001b[1m✕ Hermes 失败\u001b[0m");
+      emitLog(
+        "hermes",
+        "       \u001b[33m提示: 安装命令超时；终端仍保持打开，请检查其中的日志。\u001b[0m",
+      );
+      emitLog("hermes", "  ℹ 已保存进度，下次运行将从断点继续。");
+      emitTauriEvent("install-tool-done", { tool: "hermes", code: 1 });
+    });
+
+    expect(result.current.error?.message).toBe(
+      "安装命令超时；终端仍保持打开，请检查其中的日志。",
+    );
+  });
+
+  it("没有可识别的原因时至少给出退出码", async () => {
+    const { result } = renderHook(() => useToolInstall(vi.fn()));
+    await waitFor(() => expect(typeof result.current.progress).toBe("object"));
+
+    act(() => {
+      emitTauriEvent("install-tool-done", { tool: "gemini", code: 2 });
+    });
+
+    expect(result.current.error).toEqual({
+      toolId: "gemini",
+      message: "安装未完成（退出码 2），请重试",
+    });
+  });
+
+  it("安装成功不产生错误，重新安装时清掉上次的原因", async () => {
+    const { result } = renderHook(() => useToolInstall(vi.fn()));
+    await waitFor(() => expect(typeof result.current.progress).toBe("object"));
+
+    act(() => {
+      emitErr("codex", "  错误: 网络不可用");
+      emitTauriEvent("install-tool-done", { tool: "codex", code: 0 });
+    });
+    expect(result.current.error).toBeNull();
+
+    act(() => {
+      emitErr("codex", "  错误: 网络不可用");
+    });
+    await act(async () => {
+      await result.current.install("codex");
+    });
+    act(() => {
+      emitTauriEvent("install-tool-done", { tool: "codex", code: 3 });
+    });
+
+    expect(result.current.error?.message).toBe(
+      "安装未完成（退出码 3），请重试",
+    );
   });
 });

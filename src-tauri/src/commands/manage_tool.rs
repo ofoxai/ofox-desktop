@@ -174,15 +174,7 @@ pub async fn set_active_ofox_model(
         if selection.id.trim() != model.trim() {
             return Err("WorkBuddy 模型 ID 与能力信息不一致，请刷新后重试".to_string());
         }
-        let catalog_token = catalog_access_token(&ofox_state.0).await;
-        validate_compatibility(
-            BindableTool::WorkBuddy,
-            &model,
-            compatibility_protocol.as_deref(),
-            allow_unverified.unwrap_or(false),
-            catalog_token.as_deref(),
-        )
-        .await?;
+        crate::workbuddy_config::validate_selections(std::slice::from_ref(&selection))?;
         let api_key = crate::ofox_api_keys::fetch_or_create_api_key(
             BindableTool::WorkBuddy,
             crate::ofox_api_keys::FetchMode::CachedOk,
@@ -313,22 +305,8 @@ pub async fn set_workbuddy_managed_models(
     state: State<'_, AppState>,
     ofox_state: State<'_, OfoxAuthState>,
     model_selections: Vec<crate::workbuddy_config::WorkBuddyModelSelection>,
-    allow_unverified: Option<bool>,
 ) -> Result<(), String> {
-    let existing = crate::workbuddy_config::active_models(&state.db).await?;
-    let catalog_token = catalog_access_token(&ofox_state.0).await;
-    for selection in &model_selections {
-        if !existing.contains(&selection.id) {
-            validate_compatibility(
-                BindableTool::WorkBuddy,
-                &selection.id,
-                None,
-                allow_unverified.unwrap_or(false),
-                catalog_token.as_deref(),
-            )
-            .await?;
-        }
-    }
+    crate::workbuddy_config::validate_selections(&model_selections)?;
     let api_key = crate::ofox_api_keys::fetch_or_create_api_key(
         BindableTool::WorkBuddy,
         crate::ofox_api_keys::FetchMode::CachedOk,
@@ -339,6 +317,15 @@ pub async fn set_workbuddy_managed_models(
     crate::workbuddy_config::sync_selected_models(&state.db, &api_key, &model_selections).await?;
     crate::ofox_api_keys::mark_key_used(BindableTool::WorkBuddy);
     Ok(())
+}
+
+/// Show the URL WorkBuddy actually has on disk alongside Ofox's selected
+/// gateway. Never return the API key stored in the same JSON entries.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_workbuddy_endpoint_status(
+    state: State<'_, AppState>,
+) -> Result<crate::workbuddy_config::WorkBuddyEndpointStatus, String> {
+    crate::workbuddy_config::endpoint_status(&state.db).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

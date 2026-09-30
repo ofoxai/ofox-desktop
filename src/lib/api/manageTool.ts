@@ -18,12 +18,20 @@ export type ToolProtocol = "openai" | "anthropic" | "gemini";
 export const TOOL_PROTOCOL: Readonly<Record<string, ToolProtocol>> = {
   claude: "anthropic",
   codex: "openai",
+  // ChatGPT desktop's Codex view uses the same config.toml as the CLI.
+  // Chat and Work use the signed-in OpenAI account, not this API protocol.
+  chatgpt: "openai",
   gemini: "gemini",
   opencode: "openai",
   openclaw: "openai",
   hermes: "openai",
   workbuddy: "openai",
 };
+
+/** Route the desktop app's Codex view to the CLI's single shared config. */
+export function managedToolId(app: string): string {
+  return app === "chatgpt" ? "codex" : app;
+}
 
 /**
  * Connectivity probe result. Mirrors `commands/manage_tool.rs::PingResult` —
@@ -44,6 +52,12 @@ export interface PingResult {
   latencyMs: number;
   statusCode: number | null;
   error: string | null;
+}
+
+export interface WorkBuddyEndpointStatus {
+  expectedUrl: string;
+  configuredUrls: string[];
+  externallyModified: boolean;
 }
 
 export type CompatibilityProtocol =
@@ -84,11 +98,13 @@ export interface CompatibilityResult {
  */
 export const manageToolApi = {
   async getConfigFilePath(app: string): Promise<string> {
-    return await invoke("get_tool_config_file_path", { app });
+    return await invoke("get_tool_config_file_path", {
+      app: managedToolId(app),
+    });
   },
 
   async getActiveModel(app: string): Promise<string> {
-    return await invoke("get_active_ofox_model", { app });
+    return await invoke("get_active_ofox_model", { app: managedToolId(app) });
   },
 
   async setActiveModel(
@@ -99,7 +115,7 @@ export const manageToolApi = {
     allowUnverified?: boolean,
   ): Promise<void> {
     await invoke("set_active_ofox_model", {
-      app,
+      app: managedToolId(app),
       model,
       modelSelection,
       compatibilityProtocol,
@@ -111,13 +127,15 @@ export const manageToolApi = {
     return await invoke("get_workbuddy_managed_models");
   },
 
+  async getWorkBuddyEndpointStatus(): Promise<WorkBuddyEndpointStatus> {
+    return await invoke("get_workbuddy_endpoint_status");
+  },
+
   async setWorkBuddyManagedModels(
     modelSelections: WorkBuddyModelSelection[],
-    allowUnverified?: boolean,
   ): Promise<void> {
     await invoke("set_workbuddy_managed_models", {
       modelSelections,
-      allowUnverified,
     });
   },
 
@@ -127,13 +145,13 @@ export const manageToolApi = {
     forceRetest = false,
   ): Promise<CompatibilityResult> {
     return await invoke("check_ofox_model_compatibility", {
-      app,
+      app: managedToolId(app),
       model,
       forceRetest,
     });
   },
 
   async pingModel(app: string, model: string): Promise<PingResult> {
-    return await invoke("ofox_ping_model", { app, model });
+    return await invoke("ofox_ping_model", { app: managedToolId(app), model });
   },
 };

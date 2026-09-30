@@ -585,7 +585,7 @@ fn plist_value(path: &Path, key: &str) -> Result<String, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_product_version() -> Result<String, String> {
+pub(crate) fn macos_product_version() -> Result<String, String> {
     let output = Command::new("/usr/bin/sw_vers")
         .arg("-productVersion")
         .output()

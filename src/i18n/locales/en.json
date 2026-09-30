@@ -1,4 +1,11 @@
 {
+  "toolLaunch": {
+    "failed": "Could not open the tool",
+    "proxyUnavailable": "The local proxy at {{endpoint}} is unavailable. Start the proxy or restore the port forward, then try again."
+  },
+  "toolInstall": {
+    "exitCode": "Installation did not finish (exit code {{code}}); please retry"
+  },
   "modelCompatibility": {
     "title": "Streaming compatibility",
     "checking": "Checking streaming compatibility…",
@@ -10,7 +17,22 @@
     "continueUnverified": "I understand the risk and want to save without verification",
     "requestFailed": "Check failed; try again",
     "desktopCodex": "Codex desktop manages models in the app; CLI protocol checks do not apply",
+    "chatgptCodexMode": "Codex mode",
+    "chatgptCodexUnset": "Codex model not set",
+    "chatgptCodexShared": "This manages the desktop app's Codex mode, which shares its configuration with Codex CLI. Chat and Work use your signed-in OpenAI account and models; Ofox model settings do not configure them.",
     "applyProtocol": "Apply check result",
+    "workBuddyProtocol": "WorkBuddy custom models use Chat Completions",
+    "workBuddyConfiguredEndpoint": "WorkBuddy configured endpoint",
+    "workBuddyExpectedEndpoint": "Ofox endpoint for this region",
+    "workBuddyEndpointMismatch": "WorkBuddy uses a different endpoint or its configuration was edited. Rebind or review the configuration.",
+    "workBuddyEndpointCheckScope": "Model checks use Ofox's network route. If WorkBuddy still requests the old endpoint, quit and reopen it.",
+    "workBuddyEndpointSyncFailed": "Region changed, but WorkBuddy's endpoint could not be updated. Check it in WorkBuddy management.",
+    "workBuddyTestModel": "Choose a WorkBuddy model to test",
+    "workBuddyTest": "Test selected model",
+    "workBuddySaveHint": "Catalog-compatible models can be saved now; streaming checks are optional.",
+    "workBuddyIncompatible": "Streaming check failed (saving is still available)",
+    "workBuddyCatalogFailed": "Could not load the model catalog. Refresh and try again.",
+    "workBuddyMissingCatalog": "Some selected models are missing from the compatible catalog. Refresh or remove them before saving.",
     "defaultModelFailed": "{{tool}} was bound, but its default model could not be stream-verified. Choose a model in Manage."
   },
   "toolUpdates": {
@@ -37,6 +59,15 @@
     "notInstalled": "No runnable installation detected",
     "appManaged": "Check for updates inside the client",
     "download": "Official download page",
+    "unsupported": "Not supported on this system",
+    "openInApp": "Update in ChatGPT",
+    "sparkleHint": "Ofox opens ChatGPT; choose ChatGPT → “Check for Updates…” in the menu bar. Releases roll out gradually, so if it says you're up to date, try again later.",
+    "sparkleOpened": "ChatGPT is open. Choose ChatGPT → “Check for Updates…” in the menu bar.",
+    "openAppFailed": "Could not open ChatGPT",
+    "storeHint": "Updates through Microsoft Store. If the Store hasn't offered it yet, the Store page opens for you to finish.",
+    "closeAppTitle": "Close ChatGPT first",
+    "closeAppMessage": "ChatGPT is running. Ofox will close it and reopen it after the update. Save any work in progress first.",
+    "closeAppConfirm": "Close and update",
     "manual": "Update using the original installer. See diagnostics",
     "details": "Diagnostics and update log",
     "result": {

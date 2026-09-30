@@ -6,6 +6,7 @@ import {
 } from "react";
 import { Flag, Globe2 } from "lucide-react";
 import { toast } from "sonner";
+import { useTranslation } from "react-i18next";
 
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import {
@@ -66,6 +67,7 @@ const APEX_ICON: Record<OfoxApex, LucideIcon> = {
 export function OfoxApexSwitch({
   triggerClassName = "h-8 w-[140px] text-[13px]",
 }: OfoxApexSwitchProps) {
+  const { t } = useTranslation();
   const { apex, refetch } = useOfoxApex();
   const { isActive } = useOfoxAuth();
 
@@ -76,11 +78,14 @@ export function OfoxApexSwitch({
     async (next: OfoxApex) => {
       setSubmitting(true);
       try {
-        await ofoxSetApex(next);
+        const workBuddySynced = await ofoxSetApex(next);
         // 后端会 emit `ofox-apex-changed`，hook 自动 setApex；这里 refetch
         // 兜底覆盖事件丢失的极端情形（dev 下 emit 偶尔来不及）。
         await refetch();
         toast.success(`已切换到 ${APEX_LABEL[next]}`);
+        if (!workBuddySynced) {
+          toast.warning(t("modelCompatibility.workBuddyEndpointSyncFailed"));
+        }
       } catch (e) {
         console.error("[OfoxApexSwitch] ofoxSetApex failed", e);
         toast.error("切换区域失败，请稍后重试");
@@ -89,7 +94,7 @@ export function OfoxApexSwitch({
         setPendingTarget(null);
       }
     },
-    [refetch],
+    [refetch, t],
   );
 
   const handleSelectChange = useCallback(

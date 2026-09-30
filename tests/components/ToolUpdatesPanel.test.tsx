@@ -16,7 +16,12 @@ import { settingsApi } from "@/lib/api";
 import { emitTauriEvent } from "../msw/tauriMocks";
 
 vi.mock("@/lib/api/toolUpdates", () => ({
-  toolUpdatesApi: { check: vi.fn(), update: vi.fn() },
+  toolUpdatesApi: {
+    check: vi.fn(),
+    update: vi.fn(),
+    isAppRunning: vi.fn(),
+    openApp: vi.fn(),
+  },
 }));
 
 function tool(
@@ -192,5 +197,186 @@ describe("Tool updates", () => {
       expect(screen.queryByText("有可用更新")).not.toBeInTheDocument(),
     );
     expect(screen.getByRole("button", { name: /^全部升级/ })).toBeDisabled();
+  });
+});
+
+function chatgpt(extra: Partial<ToolUpdateInfo> = {}): ToolUpdateInfo {
+  return tool("chatgpt", {
+    installationKind: "desktopApp",
+    version: "26.924.22138",
+    latest_version: "26.928.21956",
+    update_source: "sparkle",
+    update_supported: false,
+    update_reason:
+      "Public Sparkle feed; ChatGPT may roll this release out gradually",
+    executable_path: "/Users/test/Applications/ChatGPT.app",
+    ...extra,
+  });
+}
+
+function card(container: HTMLElement, name: string) {
+  return within(
+    container.querySelector(`[data-tool="${name}"]`) as HTMLElement,
+  );
+}
+
+describe("ChatGPT desktop updates", () => {
+  it("shows the real latest version instead of in-client guidance", async () => {
+    vi.mocked(toolUpdatesApi.check).mockResolvedValue([chatgpt()]);
+    await checkToolUpdates();
+    const { container } = render(<ToolUpdatesPanel />);
+    const chat = card(container, "chatgpt");
+    expect(chat.getByText("远端最新：26.928.21956")).toBeVisible();
+    expect(chat.getByText("发现新版")).toBeVisible();
+    expect(chat.getByText("有可用更新")).toBeVisible();
+    expect(chat.queryByText("请在客户端内检查更新")).not.toBeInTheDocument();
+    expect(chat.getByText(/选择「检查更新…」/)).toBeVisible();
+  });
+
+  it("opens ChatGPT for a Sparkle update instead of running an update", async () => {
+    vi.mocked(toolUpdatesApi.check).mockResolvedValue([chatgpt()]);
+    vi.mocked(toolUpdatesApi.openApp).mockResolvedValue();
+    await checkToolUpdates();
+    render(<ToolUpdatesPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "在 ChatGPT 中更新" }));
+    await waitFor(() =>
+      expect(toolUpdatesApi.openApp).toHaveBeenCalledWith("chatgpt"),
+    );
+    expect(toolUpdatesApi.update).not.toHaveBeenCalled();
+  });
+
+  it("leaves ChatGPT out of update all", async () => {
+    vi.mocked(toolUpdatesApi.check).mockResolvedValue([
+      tool("claude"),
+      chatgpt({ update_source: "msstore", update_supported: true }),
+    ]);
+    vi.mocked(toolUpdatesApi.update).mockResolvedValue({
+      status: "updated",
+      before: "1.0.0",
+      after: "1.1.0",
+    });
+    await checkToolUpdates();
+    render(<ToolUpdatesPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "全部升级 (1)" }));
+    await waitFor(() =>
+      expect(toolUpdatesApi.update).toHaveBeenCalledWith(
+        "claude",
+        expect.any(String),
+      ),
+    );
+    expect(toolUpdatesApi.update).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("可一键升级 2 个，需手动更新 0 个")).toBeVisible();
+  });
+
+  it("confirms before closing a running ChatGPT and upgrades after confirming", async () => {
+    vi.mocked(toolUpdatesApi.check).mockResolvedValue([
+      chatgpt({ update_source: "msstore", update_supported: true }),
+    ]);
+    vi.mocked(toolUpdatesApi.isAppRunning).mockResolvedValue(true);
+    vi.mocked(toolUpdatesApi.update).mockResolvedValue({
+      status: "updated",
+      before: "26.924.22138",
+      after: "26.928.21956",
+    });
+    await checkToolUpdates();
+    render(<ToolUpdatesPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "升级" }));
+    expect(await screen.findByText("需要先关闭 ChatGPT")).toBeVisible();
+    expect(toolUpdatesApi.update).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "关闭并升级" }));
+    await waitFor(() =>
+      expect(toolUpdatesApi.update).toHaveBeenCalledWith(
+        "chatgpt",
+        expect.any(String),
+      ),
+    );
+  });
+
+  it("does not upgrade a running ChatGPT when the user cancels", async () => {
+    vi.mocked(toolUpdatesApi.check).mockResolvedValue([
+      chatgpt({ update_source: "msstore", update_supported: true }),
+    ]);
+    vi.mocked(toolUpdatesApi.isAppRunning).mockResolvedValue(true);
+    await checkToolUpdates();
+    render(<ToolUpdatesPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "升级" }));
+    fireEvent.click(await screen.findByRole("button", { name: "取消" }));
+    await waitFor(() =>
+      expect(screen.queryByText("需要先关闭 ChatGPT")).not.toBeInTheDocument(),
+    );
+    expect(toolUpdatesApi.update).not.toHaveBeenCalled();
+  });
+
+  it("upgrades a closed ChatGPT without asking", async () => {
+    vi.mocked(toolUpdatesApi.check).mockResolvedValue([
+      chatgpt({ update_source: "msstore", update_supported: true }),
+    ]);
+    vi.mocked(toolUpdatesApi.isAppRunning).mockResolvedValue(false);
+    vi.mocked(toolUpdatesApi.update).mockResolvedValue({
+      status: "updated",
+      before: "26.924.22138",
+      after: "26.928.21956",
+    });
+    await checkToolUpdates();
+    render(<ToolUpdatesPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "升级" }));
+    await waitFor(() =>
+      expect(toolUpdatesApi.update).toHaveBeenCalledWith(
+        "chatgpt",
+        expect.any(String),
+      ),
+    );
+    expect(screen.queryByText("需要先关闭 ChatGPT")).not.toBeInTheDocument();
+  });
+
+  it("asks before upgrading when the running check fails", async () => {
+    vi.mocked(toolUpdatesApi.check).mockResolvedValue([
+      chatgpt({ update_source: "msstore", update_supported: true }),
+    ]);
+    vi.mocked(toolUpdatesApi.isAppRunning).mockRejectedValue(
+      new Error("powershell failed"),
+    );
+    await checkToolUpdates();
+    render(<ToolUpdatesPanel />);
+    fireEvent.click(screen.getByRole("button", { name: "升级" }));
+    expect(await screen.findByText("需要先关闭 ChatGPT")).toBeVisible();
+    expect(toolUpdatesApi.update).not.toHaveBeenCalled();
+  });
+
+  it("offers the download page when ChatGPT is missing", async () => {
+    vi.mocked(toolUpdatesApi.check).mockResolvedValue([
+      chatgpt({
+        version: null,
+        latest_version: null,
+        update_status: "notInstalled",
+        update_source: null,
+        update_reason: null,
+        executable_path: null,
+      }),
+    ]);
+    await checkToolUpdates();
+    const open = vi.spyOn(settingsApi, "openExternal").mockResolvedValue();
+    const { container } = render(<ToolUpdatesPanel />);
+    const chat = card(container, "chatgpt");
+    expect(chat.getByText("未检测到可运行的工具")).toBeVisible();
+    fireEvent.click(chat.getByRole("button", { name: "官方下载页" }));
+    expect(open).toHaveBeenCalledWith("https://chatgpt.com/download/");
+  });
+
+  it("keeps in-client guidance and the reason when the latest check failed", async () => {
+    vi.mocked(toolUpdatesApi.check).mockResolvedValue([
+      chatgpt({
+        latest_version: null,
+        update_status: "appManaged",
+        update_reason: "Latest-version check failed: offline",
+      }),
+    ]);
+    await checkToolUpdates();
+    const { container } = render(<ToolUpdatesPanel />);
+    const chat = card(container, "chatgpt");
+    expect(chat.getByText("请在客户端内检查更新")).toBeVisible();
+    expect(
+      chat.getByText(/Latest-version check failed: offline/),
+    ).toBeInTheDocument();
   });
 });

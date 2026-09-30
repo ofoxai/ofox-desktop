@@ -205,32 +205,44 @@ pub async fn check(
     }
     // The catalog may live on a different host from the dev inference gateway.
     // Never send a tool API key to it; follow the existing OAuth catalog path.
-    let catalog = match crate::services::model_fetch::fetch_ofox_models(
+    let catalog = match crate::services::model_fetch::fetch_ofox_catalog(
         tool_protocol(tool),
         catalog_access_token,
+        false,
     )
     .await
     {
         Ok(models) => models,
-        Err(_) => {
+        Err(error) => {
             return CompatibilityResult::new(
                 tool,
                 model_id,
                 None,
                 "inconclusive",
                 "catalog",
-                Some("模型目录暂时不可用，请重试"),
+                Some(&format!(
+                    "{error}（{}），请检查代理或地区设置后刷新模型目录",
+                    crate::ofox_apex::current_apex()
+                )),
             )
         }
     };
-    let Some(model) = catalog.into_iter().find(|m| m.id == model_id) else {
+    let Some(model) = catalog.models.into_iter().find(|m| m.id == model_id) else {
         return CompatibilityResult::new(
             tool,
             model_id,
             None,
-            "incompatible",
+            if catalog.stale {
+                "inconclusive"
+            } else {
+                "incompatible"
+            },
             "catalog",
-            Some("模型不在当前客户端的 Ofox 目录中"),
+            Some(if catalog.stale {
+                "模型不在最近缓存的目录中，请刷新后重试"
+            } else {
+                "模型不在当前客户端的 Ofox 目录中"
+            }),
         );
     };
     let protocols = match protocols_for(tool, &model) {
@@ -240,9 +252,17 @@ pub async fn check(
                 tool,
                 model_id,
                 None,
-                "incompatible",
+                if catalog.stale {
+                    "inconclusive"
+                } else {
+                    "incompatible"
+                },
                 "catalog",
-                Some(reason),
+                Some(if catalog.stale {
+                    "最近缓存的模型目录未声明所需协议，请刷新后重试"
+                } else {
+                    reason
+                }),
             )
         }
     };

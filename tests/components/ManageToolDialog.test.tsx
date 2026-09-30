@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
@@ -145,11 +146,11 @@ describe("ManageToolDialog streaming compatibility", () => {
     await chooseModel(model.id);
     await screen.findByText(/暂时无法确定/);
     expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
-    fireEvent.change(
+    fireEvent.click(
       screen.getByRole("combobox", { name: "手动选择 OpenCode 协议" }),
-      {
-        target: { value: "chatCompletions" },
-      },
+    );
+    fireEvent.click(
+      await screen.findByRole("option", { name: "Chat Completions" }),
     );
     fireEvent.click(screen.getByRole("checkbox"));
     expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
@@ -221,7 +222,134 @@ describe("ManageToolDialog streaming compatibility", () => {
   });
 });
 
+describe("ManageToolDialog re-saving an unchanged model", () => {
+  it("re-saves the loaded model of a fixed-protocol client", async () => {
+    const model = compatibleModel("google/gemini-3.8-flash");
+    mockSingleTool(model);
+    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue(model.id);
+    const check = vi.spyOn(manageToolApi, "checkCompatibility");
+    const save = vi.spyOn(manageToolApi, "setActiveModel").mockResolvedValue();
+
+    await renderTool("gemini", "Gemini");
+    await waitFor(() =>
+      expect(screen.getByRole("combobox")).toHaveTextContent(model.id),
+    );
+    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith(
+        "gemini",
+        model.id,
+        undefined,
+        undefined,
+        false,
+      ),
+    );
+    expect(check).not.toHaveBeenCalled();
+  });
+
+  it("keeps save disabled when the current model failed to load", async () => {
+    const model = compatibleModel("google/gemini-3.8-flash");
+    mockSingleTool(model);
+    vi.spyOn(manageToolApi, "getActiveModel").mockRejectedValue(
+      new Error("read failed"),
+    );
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const save = vi.spyOn(manageToolApi, "setActiveModel");
+
+    await renderTool("gemini", "Gemini");
+    await screen.findByText("/Users/test/.config/tool/config.json");
+
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it("keeps an unchanged OpenCode save gated on its running check", async () => {
+    const model = compatibleModel("z-ai/glm-5.3");
+    mockSingleTool(model);
+    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue(model.id);
+    let finish!: (
+      value: Awaited<ReturnType<typeof manageToolApi.checkCompatibility>>,
+    ) => void;
+    vi.spyOn(manageToolApi, "checkCompatibility").mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+
+    await renderTool("opencode", "OpenCode");
+    await waitFor(() =>
+      expect(screen.getByRole("combobox")).toHaveTextContent(model.id),
+    );
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+
+    await act(async () => {
+      finish({
+        app: "opencode",
+        model: model.id,
+        protocol: "chatCompletions",
+        status: "compatible",
+        source: "probe",
+        reason: null,
+      });
+    });
+    expect(screen.getByRole("button", { name: "应用检测结果" })).toBeEnabled();
+  });
+
+  it("labels an unset OpenCode model as a plain save", async () => {
+    mockSingleTool(compatibleModel("z-ai/glm-5.3"));
+    const save = vi.spyOn(manageToolApi, "setActiveModel").mockResolvedValue();
+
+    await renderTool("opencode", "OpenCode");
+    await screen.findByText("/Users/test/.config/tool/config.json");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "保存" })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith(
+        "opencode",
+        "",
+        undefined,
+        undefined,
+        false,
+      ),
+    );
+  });
+});
+
 describe("ManageToolDialog model picker", () => {
+  it("bypasses the catalog cache only for an explicit refresh", async () => {
+    const model = compatibleModel("openai/gpt-6-luna");
+    mockSingleTool(model);
+    const fetch = vi.spyOn(modelFetch, "fetchOfoxModels");
+
+    await renderTool("opencode", "OpenCode");
+    fireEvent.click(screen.getByRole("combobox"));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("openai", false));
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新模型列表" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("openai", true));
+  });
+
+  it("explains that ChatGPT desktop shares only its Codex mode with the CLI", async () => {
+    const model = compatibleModel("openai/gpt-6-luna");
+    model.supportedEndpoints = ["/v1/responses"];
+    mockSingleTool(model);
+    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue(model.id);
+
+    await renderTool("chatgpt", "ChatGPT");
+    await screen.findByText(model.id);
+    expect(screen.getByText(/Codex CLI 共用配置/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Chat 和 Work 使用 OpenAI 账号/),
+    ).toBeInTheDocument();
+    expect(manageToolApi.getActiveModel).toHaveBeenCalledWith("chatgpt");
+    expect(screen.getByRole("combobox")).toBeInTheDocument();
+  });
+
   it("keeps the dropdown inside the dialog and renders large catalogs in batches", async () => {
     const models = Array.from({ length: 200 }, (_, index) =>
       compatibleModel(`openai/model-${String(index).padStart(3, "0")}`),
@@ -258,29 +386,46 @@ describe("ManageToolDialog model picker", () => {
 });
 
 describe("ManageToolDialog WorkBuddy multi-model management", () => {
-  it("selects every compatible model and saves the complete set", async () => {
+  function mockWorkBuddy(models: FetchedModel[], current = [models[0].id]) {
+    vi.spyOn(manageToolApi, "getConfigFilePath").mockResolvedValue(
+      "/Users/test/.workbuddy/models.json",
+    );
+    vi.spyOn(manageToolApi, "getWorkBuddyManagedModels").mockResolvedValue(
+      current,
+    );
+    vi.spyOn(manageToolApi, "getWorkBuddyEndpointStatus").mockResolvedValue({
+      expectedUrl: "https://api.ofox.io/v1/chat/completions",
+      configuredUrls: ["https://api.ofox.io/v1/chat/completions"],
+      externallyModified: false,
+    });
+    vi.spyOn(modelFetch, "fetchOfoxModels").mockResolvedValue(models);
+  }
+
+  it("shows the actual WorkBuddy endpoint and flags a stale region", async () => {
+    mockWorkBuddy([compatibleModel("openai/model-a")]);
+    vi.spyOn(manageToolApi, "getWorkBuddyEndpointStatus").mockResolvedValue({
+      expectedUrl: "https://api.ofox.io/v1/chat/completions",
+      configuredUrls: ["https://api.ofox.ai/v1/chat/completions"],
+      externallyModified: false,
+    });
+
+    await renderTool("workbuddy", "WorkBuddy");
+
+    expect(await screen.findByText("WorkBuddy 当前配置地址")).toBeVisible();
+    expect(
+      screen.getByText("https://api.ofox.ai/v1/chat/completions"),
+    ).toBeVisible();
+    expect(screen.getByText(/WorkBuddy 配置与当前地区不一致/)).toBeVisible();
+  });
+
+  it("saves every catalog-compatible model without automatic probes", async () => {
     const models = [
       compatibleModel("openai/model-a"),
       compatibleModel("anthropic/model-b"),
       compatibleModel("google/model-c"),
     ];
-    vi.spyOn(manageToolApi, "getConfigFilePath").mockResolvedValue(
-      "/Users/test/.workbuddy/models.json",
-    );
-    vi.spyOn(manageToolApi, "getWorkBuddyManagedModels").mockResolvedValue([
-      "openai/model-a",
-    ]);
-    vi.spyOn(modelFetch, "fetchOfoxModels").mockResolvedValue(models);
-    vi.spyOn(manageToolApi, "checkCompatibility").mockImplementation(
-      async (app, model) => ({
-        app,
-        model,
-        protocol: "chatCompletions",
-        status: "compatible",
-        source: "probe",
-        reason: null,
-      }),
-    );
+    mockWorkBuddy(models);
+    const check = vi.spyOn(manageToolApi, "checkCompatibility");
     const save = vi
       .spyOn(manageToolApi, "setWorkBuddyManagedModels")
       .mockResolvedValue();
@@ -294,16 +439,195 @@ describe("ManageToolDialog WorkBuddy multi-model management", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "全选兼容" }));
     expect(screen.getByText("已选择 3 个兼容模型")).toBeVisible();
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
-    });
+    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+    expect(check).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() => {
       expect(save).toHaveBeenCalledWith(
         models.map(modelFetch.toWorkBuddyModelSelection),
-        false,
       );
     });
+    expect(check).not.toHaveBeenCalled();
+  });
+
+  it("re-saves an unchanged WorkBuddy selection", async () => {
+    const model = compatibleModel("openai/model-a");
+    mockWorkBuddy([model]);
+    const save = vi
+      .spyOn(manageToolApi, "setWorkBuddyManagedModels")
+      .mockResolvedValue();
+
+    await renderTool("workbuddy", "WorkBuddy");
+    await screen.findByText("共 1 个兼容模型，共用一个 Ofox Key");
+    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith([
+        modelFetch.toWorkBuddyModelSelection(model),
+      ]),
+    );
+  });
+
+  it("manually checks only the chosen model without blocking save", async () => {
+    const models = [
+      compatibleModel("openai/model-a"),
+      compatibleModel("openai/model-b"),
+    ];
+    mockWorkBuddy(models);
+    const check = vi
+      .spyOn(manageToolApi, "checkCompatibility")
+      .mockResolvedValue({
+        app: "workbuddy",
+        model: models[1].id,
+        protocol: "chatCompletions",
+        status: "incompatible",
+        source: "probe",
+        reason: "流式正文不可读取",
+      });
+
+    await renderTool("workbuddy", "WorkBuddy");
+    await screen.findByText("共 2 个兼容模型，共用一个 Ofox Key");
+    fireEvent.click(screen.getByRole("button", { name: "全选兼容" }));
+    fireEvent.click(
+      screen.getByRole("combobox", { name: "选择待检测的 WorkBuddy 模型" }),
+    );
+    fireEvent.click(await screen.findByRole("option", { name: models[1].id }));
+    fireEvent.click(screen.getByRole("button", { name: "检测选中模型" }));
+
+    await screen.findByText(/model-b: 流式检测不兼容（仍可保存）/);
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(check).toHaveBeenCalledWith("workbuddy", models[1].id, true);
+    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+  });
+
+  it("can save while a manual WorkBuddy stream check is still running", async () => {
+    const models = [
+      compatibleModel("openai/model-a"),
+      compatibleModel("openai/model-b"),
+    ];
+    mockWorkBuddy(models);
+    vi.spyOn(manageToolApi, "checkCompatibility").mockImplementation(
+      () => new Promise(() => {}),
+    );
+    const save = vi
+      .spyOn(manageToolApi, "setWorkBuddyManagedModels")
+      .mockResolvedValue();
+
+    await renderTool("workbuddy", "WorkBuddy");
+    await screen.findByText("共 2 个兼容模型，共用一个 Ofox Key");
+    fireEvent.click(screen.getByRole("button", { name: "全选兼容" }));
+    fireEvent.click(screen.getByRole("button", { name: "检测选中模型" }));
+
+    expect(
+      screen.getByRole("button", { name: "正在验证流式兼容性…" }),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
+  });
+
+  it("shows a successful manual stream check for its selected model", async () => {
+    const models = [
+      compatibleModel("openai/model-a"),
+      compatibleModel("openai/model-b"),
+    ];
+    mockWorkBuddy(models);
+    const check = vi
+      .spyOn(manageToolApi, "checkCompatibility")
+      .mockResolvedValue({
+        app: "workbuddy",
+        model: models[1].id,
+        protocol: "chatCompletions",
+        status: "compatible",
+        source: "probe",
+        reason: null,
+      });
+
+    await renderTool("workbuddy", "WorkBuddy");
+    await screen.findByText("共 2 个兼容模型，共用一个 Ofox Key");
+    fireEvent.click(screen.getByRole("button", { name: "全选兼容" }));
+    fireEvent.click(
+      screen.getByRole("combobox", { name: "选择待检测的 WorkBuddy 模型" }),
+    );
+    fireEvent.click(await screen.findByRole("option", { name: models[1].id }));
+    fireEvent.click(screen.getByRole("button", { name: "检测选中模型" }));
+
+    expect(await screen.findByText("openai/model-b: 兼容")).toBeVisible();
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(check).toHaveBeenCalledWith("workbuddy", models[1].id, true);
+  });
+
+  it("keeps save disabled when the catalog lacks a selected model", async () => {
+    const models = [compatibleModel("openai/model-a")];
+    mockWorkBuddy(models, ["missing/model"]);
+    const save = vi.spyOn(manageToolApi, "setWorkBuddyManagedModels");
+
+    await renderTool("workbuddy", "WorkBuddy");
+    await screen.findByText("共 1 个兼容模型，共用一个 Ofox Key");
+    fireEvent.click(screen.getByRole("combobox", { name: "模型" }));
+    fireEvent.click(
+      within(await screen.findByRole("listbox")).getByRole("option", {
+        name: /openai\/model-a/,
+      }),
+    );
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it("does not save an empty WorkBuddy selection", async () => {
+    const model = compatibleModel("openai/model-a");
+    mockWorkBuddy([model]);
+    const save = vi.spyOn(manageToolApi, "setWorkBuddyManagedModels");
+
+    await renderTool("workbuddy", "WorkBuddy");
+    await screen.findByText("共 1 个兼容模型，共用一个 Ofox Key");
+    fireEvent.click(screen.getByRole("combobox", { name: "模型" }));
+    fireEvent.click(
+      within(await screen.findByRole("listbox")).getByRole("option", {
+        name: /openai\/model-a/,
+      }),
+    );
+
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it("explains why save is unavailable when the catalog cannot load", async () => {
+    mockWorkBuddy([compatibleModel("openai/model-a")]);
+    vi.spyOn(modelFetch, "fetchOfoxModels").mockRejectedValue(
+      new Error("catalog unavailable"),
+    );
+
+    await renderTool("workbuddy", "WorkBuddy");
+    expect(
+      await screen.findByText("模型目录加载失败，请刷新后重试。"),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+  });
+
+  it("reports a manual timeout while keeping catalog-based save available", async () => {
+    const models = [
+      compatibleModel("openai/model-a"),
+      compatibleModel("openai/model-b"),
+    ];
+    mockWorkBuddy(models);
+    vi.spyOn(manageToolApi, "checkCompatibility").mockResolvedValue({
+      app: "workbuddy",
+      model: models[0].id,
+      protocol: "chatCompletions",
+      status: "inconclusive",
+      source: "probe",
+      reason: "网络错误或检测超时",
+    });
+
+    await renderTool("workbuddy", "WorkBuddy");
+    await screen.findByText("共 2 个兼容模型，共用一个 Ofox Key");
+    fireEvent.click(screen.getByRole("button", { name: "全选兼容" }));
+    fireEvent.click(screen.getByRole("button", { name: "检测选中模型" }));
+
+    expect(await screen.findByText(/网络错误或检测超时/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
   });
 });

@@ -72,6 +72,27 @@ export const ofoxMarketingUrl = (a: OfoxApex): string => `https://${a}`;
 /** `https://api.<apex>` —— LLM 网关 / OpenAPI base，preset 表单 base_url 默认。 */
 export const ofoxApiBase = (a: OfoxApex): string => `https://api.${a}`;
 
+/** Resolve the OFox URLs inside a built-in agent preset at selection time. */
+export function resolveOfoxPreset<T>(preset: T, apex: OfoxApex): T {
+  const rewrite = (value: unknown): unknown => {
+    if (typeof value === "string") {
+      return value
+        .replace(/https:\/\/api\.ofox\.(?:ai|io)/g, ofoxApiBase(apex))
+        .replace(/https:\/\/app\.ofox\.(?:ai|io)/g, `https://app.${apex}`)
+        .replace(/https:\/\/ofox\.(?:ai|io)/g, `https://${apex}`);
+    }
+    if (Array.isArray(value)) return value.map(rewrite);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value).map(([key, item]) => [key, rewrite(item)]),
+      );
+    }
+    return value;
+  };
+
+  return rewrite(preset) as T;
+}
+
 /**
  * OFox 用户头像的对象存储 CDN 前缀。`/openapi/me` 返回的 `avatar_url`
  * 是这个 bucket 内的相对 key（形如 `GdSPgRS6sTf3KgsOWrhSojnMoJIAC5Eq/xxx.webp`），

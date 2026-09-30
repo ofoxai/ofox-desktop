@@ -424,6 +424,48 @@ pub async fn get_tool_versions(
     Ok(results)
 }
 
+/// ChatGPT 桌面 App 的更新字段；`include_latest = false` 时不联网。
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+async fn chatgpt_update_fields(
+    source: &str,
+    installed: &str,
+    include_latest: bool,
+    one_click: bool,
+) -> super::chatgpt_updates::DesktopUpdateFields {
+    let latest = if include_latest {
+        let client = crate::proxy::http_client::get();
+        Some(super::chatgpt_updates::fetch_latest_for_host(&client).await)
+    } else {
+        None
+    };
+    super::chatgpt_updates::desktop_update_fields(source, installed, latest, one_click)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn desktop_tool_version(
+    tool: &str,
+    version: String,
+    update: super::chatgpt_updates::DesktopUpdateFields,
+    env_type: String,
+    wsl_distro: Option<String>,
+    executable_path: String,
+) -> ToolVersion {
+    ToolVersion {
+        name: tool.to_string(),
+        version: Some(version),
+        latest_version: update.latest_version,
+        error: None,
+        env_type,
+        wsl_distro,
+        installation_kind: "desktopApp".into(),
+        update_status: update.update_status.into(),
+        update_source: update.update_source,
+        update_supported: update.update_supported,
+        update_reason: update.update_reason,
+        executable_path: Some(executable_path),
+    }
+}
+
 /// 获取单个工具的版本信息（内部实现）
 ///
 /// `include_latest = false` skips the remote npm/GitHub lookup, returning
@@ -482,20 +524,10 @@ async fn get_single_tool_version_impl(
         #[cfg(target_os = "macos")]
         {
             if let Some((path, version)) = super::tool_update::codex_desktop_version().await {
-                return ToolVersion {
-                    name: tool.to_string(),
-                    version: Some(version),
-                    latest_version: None,
-                    error: None,
-                    env_type,
-                    wsl_distro,
-                    installation_kind: "desktopApp".into(),
-                    update_status: "appManaged".into(),
-                    update_source: None,
-                    update_supported: false,
-                    update_reason: None,
-                    executable_path: Some(path),
-                };
+                // macOS 由 App 内置 Sparkle 升级，Ofox 只报告状态。
+                let update =
+                    chatgpt_update_fields("sparkle", &version, include_latest, false).await;
+                return desktop_tool_version(tool, version, update, env_type, wsl_distro, path);
             }
             return ToolVersion {
                 name: tool.to_string(),
@@ -512,13 +544,71 @@ async fn get_single_tool_version_impl(
                 executable_path: None,
             };
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        {
+            // AppxPackage 探不到 = 没装；探到 = 返回版本号。
+            // executable_path 用 shell:AppsFolder\<AUMID>——用户点"打开"时启动器
+            // 拿它拉起 Store app，跟检测口径一致。
+            // PowerShell 探测是阻塞调用，放到 blocking 线程，免得在 join_all 里拖住其它工具。
+            let detected =
+                tokio::task::spawn_blocking(super::windows_chatgpt::detect_chatgpt_desktop_app)
+                    .await
+                    .unwrap_or_else(|err| Err(format!("ChatGPT 检测任务失败: {err}")));
+            match detected {
+                Ok(Some(version)) => {
+                    // Windows 由 Ofox 一键升级（winget/Store），见 upgrade_chatgpt_desktop_app_with。
+                    let update =
+                        chatgpt_update_fields("msstore", &version, include_latest, true).await;
+                    return desktop_tool_version(
+                        tool,
+                        version,
+                        update,
+                        env_type,
+                        wsl_distro,
+                        super::chatgpt_updates::windows_launch_target(),
+                    );
+                }
+                Ok(None) => {
+                    return ToolVersion {
+                        name: tool.to_string(),
+                        version: None,
+                        latest_version: None,
+                        error: None,
+                        env_type,
+                        wsl_distro,
+                        installation_kind: "desktopApp".into(),
+                        update_status: "notInstalled".into(),
+                        update_source: None,
+                        update_supported: false,
+                        update_reason: None,
+                        executable_path: None,
+                    };
+                }
+                Err(err) => {
+                    return ToolVersion {
+                        name: tool.to_string(),
+                        version: None,
+                        latest_version: None,
+                        error: Some(err),
+                        env_type,
+                        wsl_distro,
+                        installation_kind: "desktopApp".into(),
+                        update_status: "failed".into(),
+                        update_source: None,
+                        update_supported: false,
+                        update_reason: None,
+                        executable_path: None,
+                    };
+                }
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             return ToolVersion {
                 name: tool.to_string(),
                 version: None,
                 latest_version: None,
-                error: Some("ChatGPT App 目前仅支持 macOS".into()),
+                error: Some("ChatGPT App 目前仅支持 macOS / Windows".into()),
                 env_type,
                 wsl_distro,
                 installation_kind: "desktopApp".into(),
@@ -1437,7 +1527,7 @@ fn launch_terminal_with_env(
     #[cfg(target_os = "windows")]
     {
         launch_windows_terminal(&temp_dir, &config_file, cwd)?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -1819,6 +1909,7 @@ del \"%~f0\" >nul 2>&1
     result
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn build_shell_cd_command(cwd: Option<&Path>) -> String {
     cwd.map(|dir| {
         format!(
@@ -1829,6 +1920,7 @@ fn build_shell_cd_command(cwd: Option<&Path>) -> String {
     .unwrap_or_default()
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -1902,37 +1994,101 @@ fn run_windows_start_command(args: &[&str], terminal_name: &str) -> Result<(), S
 /// **Security**：`command_line` 会被原样拼进 shell/batch 脚本，调用方必须
 /// 保证它是可信字符串（当前只由后端硬编码调用）。
 pub(crate) fn launch_terminal_running(command_line: &str, label: &str) -> Result<(), String> {
-    let temp_dir = std::env::temp_dir();
-    let pid = std::process::id();
+    launch_terminal_running_with_env(command_line, label, &[])
+}
 
+fn write_terminal_launcher(
+    label: &str,
+    suffix: &str,
+    content: &str,
+) -> Result<std::path::PathBuf, String> {
+    use std::io::Write;
+
+    let mut file = tempfile::Builder::new()
+        .prefix(&format!("cc_switch_{label}_"))
+        .suffix(suffix)
+        .tempfile()
+        .map_err(|e| format!("创建终端启动脚本失败: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("设置终端启动脚本权限失败: {e}"))?;
+    }
+    file.write_all(content.as_bytes())
+        .map_err(|e| format!("写入终端启动脚本失败: {e}"))?;
+    file.into_temp_path()
+        .keep()
+        .map_err(|e| format!("保存终端启动脚本失败: {e}"))
+}
+
+fn launcher_env_name(name: &str) -> bool {
+    matches!(
+        name,
+        "HTTP_PROXY"
+            | "http_proxy"
+            | "HTTPS_PROXY"
+            | "https_proxy"
+            | "ALL_PROXY"
+            | "all_proxy"
+            | "NO_PROXY"
+            | "no_proxy"
+    )
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn unix_launcher_env_lines(env_vars: &[(String, String)]) -> String {
+    env_vars
+        .iter()
+        .filter(|(name, _)| launcher_env_name(name))
+        .map(|(name, value)| {
+            let quoted = shell_single_quote(value);
+            // The login shell may source a profile that changes proxy vars.
+            // Keep a private copy and restore it after profile loading.
+            format!("export {name}={quoted}\nexport OFOX_LAUNCH_{name}={quoted}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_launcher_env_line(name: &str, value: &str) -> Result<String, String> {
+    if !launcher_env_name(name) || value.contains(['"', '\r', '\n', '^']) {
+        return Err(format!("无法安全传递代理变量 {name} 到 Windows 终端"));
+    }
+    Ok(format!("set \"{name}={}\"", value.replace('%', "%%")))
+}
+
+/// Start a terminal command with selected proxy variables from Ofox's process
+/// or system settings. New Terminal.app windows do not inherit Ofox's process
+/// environment, so the variables must be written into the terminal script.
+pub(crate) fn launch_terminal_running_with_env(
+    command_line: &str,
+    label: &str,
+    env_vars: &[(String, String)],
+) -> Result<(), String> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    let (script_file, script_content) = {
-        let file = temp_dir.join(format!("cc_switch_{}_{}.sh", label, pid));
+    let script_file = {
+        let env_lines = unix_launcher_env_lines(env_vars);
         let content = format!(
             r#"#!/bin/bash
-trap 'rm -f "{script_path}"' EXIT
-echo "[ofox-switch] Starting: {cmd}"
+trap 'rm -f -- "$0"' EXIT
+echo "[ofox-switch] Starting: {label}"
 echo ""
+{env_lines}
 {cmd}
 echo ""
 echo "[ofox-switch] Command exited. Press any key to close."
 read -n 1 -s
 "#,
-            script_path = file.display(),
             cmd = command_line,
         );
-        (file, content)
+        write_terminal_launcher(label, ".sh", &content)?
     };
 
     #[cfg(target_os = "macos")]
     {
-        use std::os::unix::fs::PermissionsExt;
-
-        std::fs::write(&script_file, &script_content)
-            .map_err(|e| format!("写入启动脚本失败: {e}"))?;
-        std::fs::set_permissions(&script_file, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("设置脚本权限失败: {e}"))?;
-
         let preferred = crate::settings::get_preferred_terminal();
         let terminal = preferred.as_deref().unwrap_or("terminal");
 
@@ -1946,26 +2102,25 @@ read -n 1 -s
             _ => launch_macos_terminal_app(&script_file),
         };
 
-        if result.is_err() && terminal != "terminal" {
+        let final_result = if result.is_err() && terminal != "terminal" {
             log::warn!(
                 "首选终端 {} 启动失败，回退到 Terminal.app: {:?}",
                 terminal,
                 result.as_ref().err()
             );
-            return launch_macos_terminal_app(&script_file);
+            launch_macos_terminal_app(&script_file)
+        } else {
+            result
+        };
+        if final_result.is_err() {
+            let _ = std::fs::remove_file(&script_file);
         }
-        result
+        final_result
     }
 
     #[cfg(target_os = "linux")]
     {
-        use std::os::unix::fs::PermissionsExt;
         use std::process::Command;
-
-        std::fs::write(&script_file, &script_content)
-            .map_err(|e| format!("写入启动脚本失败: {e}"))?;
-        std::fs::set_permissions(&script_file, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("设置脚本权限失败: {e}"))?;
 
         let preferred = crate::settings::get_preferred_terminal();
         let default_terminals = [
@@ -2028,15 +2183,19 @@ read -n 1 -s
 
     #[cfg(target_os = "windows")]
     {
+        let env_lines = env_vars
+            .iter()
+            .map(|(name, value)| windows_launcher_env_line(name, value))
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\r\n");
         let preferred = crate::settings::get_preferred_terminal();
         let terminal = preferred.as_deref().unwrap_or("cmd");
 
-        let bat_file = temp_dir.join(format!("cc_switch_{}_{}.bat", label, pid));
         let content = format!(
-            "@echo off\r\necho [ofox-switch] Starting: {cmd}\r\necho.\r\n{cmd}\r\necho.\r\necho [ofox-switch] Command exited. Press any key to close.\r\npause >nul\r\ndel \"%~f0\" >nul 2>&1\r\n",
+            "@echo off\r\nsetlocal DisableDelayedExpansion\r\necho [ofox-switch] Starting: {cmd}\r\necho.\r\n{env_lines}\r\n{cmd}\r\necho.\r\necho [ofox-switch] Command exited. Press any key to close.\r\npause >nul\r\ndel \"%~f0\" >nul 2>&1\r\n",
             cmd = command_line,
         );
-        std::fs::write(&bat_file, &content).map_err(|e| format!("写入批处理文件失败: {e}"))?;
+        let bat_file = write_terminal_launcher(label, ".bat", &content)?;
 
         let bat_path = bat_file.to_string_lossy();
         let ps_cmd = format!("& '{}'", bat_path);
@@ -2072,7 +2231,7 @@ read -n 1 -s
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
-        let _ = (temp_dir, pid, command_line, label);
+        let _ = (command_line, label, env_vars);
         Err("不支持的操作系统".to_string())
     }
 }
@@ -2096,6 +2255,61 @@ pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<()
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[cfg(unix)]
+    #[test]
+    fn terminal_proxy_exports_are_quoted_and_launcher_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let env = vec![(
+            "HTTPS_PROXY".to_string(),
+            "http://user:pa'ss@127.0.0.1:7890".to_string(),
+        )];
+        let lines = unix_launcher_env_lines(&env);
+        assert_eq!(
+            lines,
+            "export HTTPS_PROXY='http://user:pa'\"'\"'ss@127.0.0.1:7890'\nexport OFOX_LAUNCH_HTTPS_PROXY='http://user:pa'\"'\"'ss@127.0.0.1:7890'"
+        );
+
+        let path = write_terminal_launcher("proxy_test", ".sh", &lines).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn launcher_can_clear_stale_proxy_vars_on_unix_and_windows() {
+        let vars = vec![
+            ("HTTPS_PROXY".to_string(), String::new()),
+            ("https_proxy".to_string(), String::new()),
+        ];
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            let lines = unix_launcher_env_lines(&vars);
+            assert!(lines.contains("export OFOX_LAUNCH_HTTPS_PROXY=''"));
+            assert!(lines.contains("export OFOX_LAUNCH_https_proxy=''"));
+        }
+        assert_eq!(
+            windows_launcher_env_line("HTTPS_PROXY", "").unwrap(),
+            "set \"HTTPS_PROXY=\""
+        );
+        assert_eq!(
+            windows_launcher_env_line("https_proxy", "").unwrap(),
+            "set \"https_proxy=\""
+        );
+    }
+
+    #[test]
+    fn windows_proxy_assignment_preserves_percent_encoded_credentials() {
+        assert_eq!(
+            windows_launcher_env_line("HTTPS_PROXY", "http://user:p%40ss@host:7890").unwrap(),
+            "set \"HTTPS_PROXY=http://user:p%%40ss@host:7890\""
+        );
+        assert!(windows_launcher_env_line("HTTPS_PROXY", "http://bad\"host").is_err());
+        assert!(windows_launcher_env_line("OTHER", "http://host:7890").is_err());
+    }
 
     #[test]
     fn test_extract_version() {
@@ -2289,6 +2503,7 @@ mod tests {
         assert!(error.contains("目录不存在"));
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn build_shell_cd_command_quotes_spaces_and_single_quotes() {
         let command = build_shell_cd_command(Some(Path::new("/tmp/project O'Brien")));
