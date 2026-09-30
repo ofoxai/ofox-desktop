@@ -3485,7 +3485,7 @@ dependencies = [
 
 [[package]]
 name = "ofox-desktop"
-version = "1.3.2"
+version = "1.3.3"
 dependencies = [
  "anyhow",
  "arboard",
