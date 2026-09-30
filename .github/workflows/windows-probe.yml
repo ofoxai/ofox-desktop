@@ -73,3 +73,9 @@ jobs:
           # 90 天足够 review + 手工验收周期用；超过就重跑 workflow 即可。
           retention-days: 90
           if-no-files-found: error
+
+      # 放在上传之后：lib 测试目标此前从没在 Windows 上编译过，万一其它模块的测试
+      # 不兼容 Windows，也不影响上面的探针产物。chatgpt 过滤只跑 chatgpt_updates /
+      # windows_chatgpt 两组——后者的测试只在 Windows 上编译。
+      - name: ChatGPT unit tests (Windows target)
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib chatgpt
