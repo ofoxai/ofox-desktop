@@ -2067,6 +2067,12 @@ impl ProxyService {
             key_hint,
         );
 
+        // Codex 绑定只改 config.toml、key 放进 Ofox 服务商（见 ofox_bind::codex），
+        // 不再把 key 写进 auth.json。
+        if matches!(app_type, AppType::Codex) {
+            return crate::services::ofox_bind::rewrite_codex_bound_config(&self.db, api_key).await;
+        }
+
         let patch = self.build_ofox_patch(app_type, api_key)?;
 
         // 写盘语义分两类：
@@ -3983,19 +3989,19 @@ command = "latest-command"
             "用户的 deepseek provider 必须保留, got:\n{written_cfg}"
         );
 
-        // auth.json：sk-of- 注入，用户自定义字段保留
-        let written_auth: Value = read_json_file(&auth_path).expect("read codex auth after bind");
+        // key 放在 Ofox 服务商里，不依赖 auth.json（ChatGPT 登录的用户会把令牌发出去）。
+        let cfg: toml::Table = toml::from_str(&written_cfg).expect("parse codex config");
+        let ofox = &cfg["model_providers"]["ofox"];
         assert_eq!(
-            written_auth
-                .pointer("/OPENAI_API_KEY")
-                .and_then(|v| v.as_str()),
-            Some("sk-of-CODEX1"),
-            "token 应被注入, got: {written_auth}"
+            ofox["experimental_bearer_token"].as_str(),
+            Some("sk-of-CODEX1")
         );
+        assert_eq!(ofox["requires_openai_auth"].as_bool(), Some(false));
+
+        // auth.json 一个字节都不动。
         assert_eq!(
-            written_auth.pointer("/USER_EXTRA").and_then(|v| v.as_str()),
-            Some("keep-auth"),
-            "auth.json 里用户自定义字段必须保留, got: {written_auth}"
+            std::fs::read_to_string(&auth_path).expect("read codex auth after bind"),
+            r#"{"OPENAI_API_KEY":"user-old-key","USER_EXTRA":"keep-auth"}"#,
         );
     }
 

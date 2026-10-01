@@ -677,6 +677,15 @@ pub(crate) fn write_live_with_common_config(
     app_type: &AppType,
     provider: &Provider,
 ) -> Result<(), AppError> {
+    // Ofox 服务商的磁盘配置只由绑定流程写（带真实 key、只改受管字段）。这里写的是
+    // DB 里的模板（key 为空），对 Codex 还会整份覆盖 auth.json、冲掉 ChatGPT 登录。
+    if crate::database::dao::providers_seed::is_ofox_seed_id(&provider.id) {
+        log::debug!(
+            "skip writing Ofox template {} to live config; bindings manage it",
+            provider.id
+        );
+        return Ok(());
+    }
     let mut effective_provider = provider.clone();
     effective_provider.settings_config =
         build_effective_settings_with_common_config(db, app_type, provider)?;

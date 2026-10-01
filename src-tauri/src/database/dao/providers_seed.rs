@@ -252,7 +252,7 @@ pub(crate) fn ofox_seeds() -> Vec<OfoxProviderSeed> {
             icon: "ofox",
             icon_color: "#D97706",
             settings_config_json: format!(
-                r#"{{"auth":{{"OPENAI_API_KEY":""}},"config":"model_provider = \"ofox\"\nmodel = \"\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\n\n[model_providers.ofox]\nname = \"ofox\"\nbase_url = \"{openai_v1}\"\nwire_api = \"responses\"\nrequires_openai_auth = true"}}"#
+                r#"{{"auth":{{}},"config":"model_provider = \"ofox\"\nmodel = \"\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\n\n[model_providers.ofox]\nname = \"ofox\"\nbase_url = \"{openai_v1}\"\nwire_api = \"responses\"\nrequires_openai_auth = false"}}"#
             ),
             meta_json: r#"{"providerType":"ofox"}"#,
         },

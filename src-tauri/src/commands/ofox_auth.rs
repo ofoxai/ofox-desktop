@@ -9,6 +9,7 @@ use tauri::State;
 use tokio::sync::RwLock;
 
 use crate::app_config::AppType;
+use crate::services::ofox_bind::report::UnbindReport;
 use crate::store::AppState;
 
 /// Ofox Auth state wrapper for Tauri managed state.
@@ -153,45 +154,11 @@ fn ofox_provider_for(app: &AppType) -> Option<(&'static str, &'static [&'static 
 // `ProxyService::write_token_into_settings` 取代——后者直接服务于"读 seed
 // 模板 + 注入 token + 写盘"路径，DB provider 行不再被 bind 注入污染。
 
-/// Internal implementation of "bind this tool to OfoxAI", reusable from
-/// non-Tauri-command contexts (e.g. the startup self-heal path in `lib.rs`).
-///
-/// The Tauri command wrapper [`ofox_bind_tool`] just forwards `State<...>`
-/// references into this function — keep them in sync.
-pub async fn bind_tool_to_ofox_internal(
-    db: &crate::database::Database,
-    proxy_service: &crate::services::proxy::ProxyService,
+/// 取要写到工具配置里的 LLM 凭据（keychain 命中直接用，否则向 Ofox 签发）。
+async fn acquire_bind_token(
+    key_tool: crate::app_config::BindableTool,
     ofox_manager: &Arc<RwLock<crate::ofox_auth::OfoxAuthManager>>,
-    app: &str,
-    model_selections: Option<Vec<crate::workbuddy_config::WorkBuddyModelSelection>>,
-) -> Result<(), String> {
-    let is_workbuddy = app.trim().eq_ignore_ascii_case("workbuddy");
-    let app_type = if is_workbuddy {
-        None
-    } else {
-        Some(AppType::from_str(app).map_err(|e| format!("无效的应用类型: {e}"))?)
-    };
-    let key_tool = app_type
-        .map(crate::app_config::BindableTool::from)
-        .unwrap_or(crate::app_config::BindableTool::WorkBuddy);
-    let workbuddy_selections = if is_workbuddy {
-        Some(model_selections.ok_or_else(|| "绑定 WorkBuddy 前必须选择兼容模型".to_string())?)
-    } else {
-        None
-    };
-    // 只校验"该工具是否在 ofox 路径里有 token 注入字段"——具体路径由
-    // `ProxyService::ofox_write_direct_to_live` 内部处理。
-    let provider_id = if is_workbuddy {
-        None
-    } else {
-        let typed_app = app_type.as_ref().expect("non-WorkBuddy app was parsed");
-        Some(
-            ofox_provider_for(typed_app)
-                .map(|t| t.0)
-                .ok_or_else(|| format!("{} 暂不支持自动绑定到 OfoxAI", typed_app.as_str()))?,
-        )
-    };
-
+) -> Result<String, String> {
     // 1) 取要写到工具配置里的 LLM 凭据。
     //
     // **主路径**：调 `ofox_api_keys::fetch_or_create_api_key(_, CachedOk, _)`
@@ -234,6 +201,57 @@ pub async fn bind_tool_to_ofox_internal(
             }
         })?
     };
+    Ok(token)
+}
+
+/// Internal implementation of "bind this tool to OfoxAI", reusable from
+/// non-Tauri-command contexts (e.g. the startup self-heal path in `lib.rs`).
+///
+/// The Tauri command wrapper [`ofox_bind_tool`] just forwards `State<...>`
+/// references into this function — keep them in sync.
+pub async fn bind_tool_to_ofox_internal(
+    db: &crate::database::Database,
+    proxy_service: &crate::services::proxy::ProxyService,
+    ofox_manager: &Arc<RwLock<crate::ofox_auth::OfoxAuthManager>>,
+    app: &str,
+    model_selections: Option<Vec<crate::workbuddy_config::WorkBuddyModelSelection>>,
+) -> Result<(), String> {
+    // Codex 和 ChatGPT 共用 ~/.codex：只改 config.toml（key 放进 Ofox 服务商），
+    // 第一次绑定时记下原样，解绑时精确还原。
+    if let Some(holder) = crate::services::ofox_bind::codex_holder(app) {
+        let token = acquire_bind_token(AppType::Codex.into(), ofox_manager).await?;
+        crate::services::ofox_bind::bind_codex(db, holder, &token).await?;
+        crate::ofox_api_keys::mark_key_used(AppType::Codex);
+        return Ok(());
+    }
+    let is_workbuddy = app.trim().eq_ignore_ascii_case("workbuddy");
+    let app_type = if is_workbuddy {
+        None
+    } else {
+        Some(AppType::from_str(app).map_err(|e| format!("无效的应用类型: {e}"))?)
+    };
+    let key_tool = app_type
+        .map(crate::app_config::BindableTool::from)
+        .unwrap_or(crate::app_config::BindableTool::WorkBuddy);
+    let workbuddy_selections = if is_workbuddy {
+        Some(model_selections.ok_or_else(|| "绑定 WorkBuddy 前必须选择兼容模型".to_string())?)
+    } else {
+        None
+    };
+    // 只校验"该工具是否在 ofox 路径里有 token 注入字段"——具体路径由
+    // `ProxyService::ofox_write_direct_to_live` 内部处理。
+    let provider_id = if is_workbuddy {
+        None
+    } else {
+        let typed_app = app_type.as_ref().expect("non-WorkBuddy app was parsed");
+        Some(
+            ofox_provider_for(typed_app)
+                .map(|t| t.0)
+                .ok_or_else(|| format!("{} 暂不支持自动绑定到 OfoxAI", typed_app.as_str()))?,
+        )
+    };
+
+    let token = acquire_bind_token(key_tool, ofox_manager).await?;
 
     if let Some(selections) = workbuddy_selections.as_ref() {
         crate::workbuddy_config::sync_selected_models(db, &token, selections).await?;
@@ -359,9 +377,19 @@ pub async fn unbind_tool_from_ofox_internal(
     db: &crate::database::Database,
     proxy_service: &crate::services::proxy::ProxyService,
     app: &str,
-) -> Result<(), String> {
+    still_bound: &[String],
+    dry_run: bool,
+) -> Result<UnbindReport, String> {
+    if let Some(holder) = crate::services::ofox_bind::codex_holder(app) {
+        return crate::services::ofox_bind::unbind_codex(db, holder, still_bound, dry_run).await;
+    }
+    if dry_run {
+        // 其它工具的预览后续阶段接入；先返回空报告，界面显示通用说明。
+        return Ok(UnbindReport::new(app.trim(), true));
+    }
     if app.trim().eq_ignore_ascii_case("workbuddy") {
-        return crate::workbuddy_config::unbind(db).await;
+        crate::workbuddy_config::unbind(db).await?;
+        return Ok(UnbindReport::new("workbuddy", false));
     }
     let app_type = AppType::from_str(app).map_err(|e| format!("无效的应用类型: {e}"))?;
     let app_str = app_type.as_str();
@@ -392,11 +420,30 @@ pub async fn unbind_tool_from_ofox_internal(
             .map_err(|e| format!("更新 {app_str} 数据库 is_current 失败: {e}"))?;
     }
 
-    Ok(())
+    Ok(UnbindReport::new(app_str, false))
 }
 
 /// Tauri command wrapper — see [`unbind_tool_from_ofox_internal`].
+///
+/// `still_bound`：前端认为仍然绑定的其它工具。Codex 和 ChatGPT 共用 ~/.codex，
+/// 另一方还绑定着时只解除这一方，不还原配置。
 #[tauri::command(rename_all = "camelCase")]
-pub async fn ofox_unbind_tool(state: State<'_, AppState>, app: String) -> Result<(), String> {
-    unbind_tool_from_ofox_internal(&state.db, &state.proxy_service, &app).await
+pub async fn ofox_unbind_tool(
+    state: State<'_, AppState>,
+    app: String,
+    still_bound: Option<Vec<String>>,
+) -> Result<UnbindReport, String> {
+    let still_bound = still_bound.unwrap_or_default();
+    unbind_tool_from_ofox_internal(&state.db, &state.proxy_service, &app, &still_bound, false).await
+}
+
+/// 解绑预览：返回解绑会还原/删除哪些内容，不做任何改动。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn ofox_unbind_preview(
+    state: State<'_, AppState>,
+    app: String,
+    still_bound: Option<Vec<String>>,
+) -> Result<UnbindReport, String> {
+    let still_bound = still_bound.unwrap_or_default();
+    unbind_tool_from_ofox_internal(&state.db, &state.proxy_service, &app, &still_bound, true).await
 }

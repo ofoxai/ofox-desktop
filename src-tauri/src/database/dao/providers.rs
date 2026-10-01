@@ -287,6 +287,17 @@ impl Database {
         Ok(())
     }
 
+    /// 清空某个应用的当前供应商（绑定前本来就没有当前供应商时，解绑要还原成这样）。
+    pub fn clear_current_provider(&self, app_type: &str) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute(
+            "UPDATE providers SET is_current = 0 WHERE app_type = ?1",
+            params![app_type],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
     pub fn set_current_provider(&self, app_type: &str, id: &str) -> Result<(), AppError> {
         let mut conn = lock_conn!(self.conn);
         let tx = conn
