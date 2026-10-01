@@ -504,8 +504,8 @@ base_url = "https://production.api/v1"
     }
 
     /// Run a test with an isolated temp home (matches the helper used in
-    /// hermes_config tests). Serializes against parallel mutators of
-    /// `CC_SWITCH_TEST_HOME` so the env var swap stays consistent.
+    /// hermes_config tests). Callers also need `#[serial]`: other modules'
+    /// tests swap `CC_SWITCH_TEST_HOME` under that lock, not this one.
     fn with_test_home<T>(test_fn: impl FnOnce() -> T) -> T {
         let _guard = home_test_guard();
         let tmp = tempfile::tempdir().unwrap();
@@ -520,6 +520,7 @@ base_url = "https://production.api/v1"
     }
 
     #[test]
+    #[serial_test::serial]
     fn write_codex_live_from_provider_settings_writes_full_template() {
         with_test_home(|| {
             // Mirror the ofox-codex seed shape (database/dao/providers_seed.rs:122).
