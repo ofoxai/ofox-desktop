@@ -6,6 +6,28 @@
   "toolInstall": {
     "exitCode": "安装未完成（退出码 {{code}}），请重试"
   },
+  "unbind": {
+    "button": "解除绑定",
+    "confirm": "确认解除绑定？",
+    "willRestoreTitle": "解除绑定会把接入方式恢复到绑定前：",
+    "generic": "将移除 Ofox 写入的地址、密钥和模型，恢复绑定前的配置。",
+    "keepNotice": "MCP、skills、插件等其它配置不受影响。",
+    "forceRestoreNotice": "绑定期间手动改过的这些设置，也会恢复为绑定前的值。",
+    "legacyNotice": "该工具在旧版本中绑定，没有保存绑定前的配置。解除绑定会移除 Ofox 写入的地址、密钥和模型，并恢复工具默认的登录方式；原有的自定义配置无法自动恢复。",
+    "sharedNotice": "{{others}} 仍在使用 Ofox，共用的 ~/.codex 配置会保留，等它也解除绑定后再恢复。",
+    "nothingToRestore": "没有发现 Ofox 写入的配置，解除绑定只会把它从列表中移除。",
+    "success": "{{tool}} 已解除绑定",
+    "resultExact": "配置文件已恢复为绑定前的原样。",
+    "resultRestored": "已还原 {{count}} 项接入配置。",
+    "resultShared": "{{others}} 仍在使用 Ofox，~/.codex 配置已保留。",
+    "resultLegacy": "旧版本绑定：已移除 Ofox 的配置，原有自定义配置无法恢复。",
+    "failed": "解除绑定失败：{{error}}",
+    "warning": {
+      "previousProviderMissing": "绑定前使用的服务商已不存在，已切换为官方默认。",
+      "fileKeptHasOtherContent": "Ofox 新建的配置文件里有你后来添加的内容，文件已保留。",
+      "recordCleanupFailed": "配置已还原，但清理绑定记录失败；可以再解除绑定一次。"
+    }
+  },
   "modelCompatibility": {
     "title": "流式兼容性",
     "checking": "正在验证流式兼容性…",

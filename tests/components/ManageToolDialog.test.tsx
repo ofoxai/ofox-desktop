@@ -13,6 +13,9 @@ import ManageToolDialog from "@/components/console/ManageToolDialog";
 import { manageToolApi } from "@/lib/api/manageTool";
 import * as modelFetch from "@/lib/api/model-fetch";
 import type { FetchedModel } from "@/lib/api/model-fetch";
+import * as bindToolsModule from "@/lib/bindTools";
+import { ofoxBindApi, type UnbindReport } from "@/lib/api/ofoxBind";
+import { toast } from "sonner";
 
 function compatibleModel(id: string): FetchedModel {
   return {
@@ -629,5 +632,128 @@ describe("ManageToolDialog WorkBuddy multi-model management", () => {
 
     expect(await screen.findByText(/网络错误或检测超时/)).toBeVisible();
     expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+  });
+});
+
+describe("ManageToolDialog unbind", () => {
+  function report(extra: Partial<UnbindReport> = {}): UnbindReport {
+    return {
+      tool: "codex",
+      dryRun: true,
+      legacy: false,
+      alreadyUnbound: false,
+      exactFiles: ["~/.codex/config.toml"],
+      restoredKeys: ["~/.codex/config.toml: model"],
+      removedKeys: ["~/.codex/config.toml: model_provider"],
+      filesRemoved: [],
+      providerRestoredTo: "default",
+      sharedKeptBy: [],
+      warnings: [],
+      ...extra,
+    };
+  }
+
+  async function renderCodex(onOpenChange = vi.fn()) {
+    vi.spyOn(manageToolApi, "getConfigFilePath").mockResolvedValue(
+      "/Users/test/.codex/config.toml",
+    );
+    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue("");
+    vi.spyOn(modelFetch, "fetchOfoxModels").mockResolvedValue([]);
+    await act(async () => {
+      render(
+        <ManageToolDialog
+          tool={{
+            id: "codex",
+            abbr: "CX",
+            label: "Codex",
+            color: "",
+            version: "1.0",
+          }}
+          onOpenChange={onOpenChange}
+        />,
+      );
+    });
+    await screen.findByText("/Users/test/.codex/config.toml");
+  }
+
+  it("previews what the first click will restore and that MCP/skills are kept", async () => {
+    const preview = vi
+      .spyOn(ofoxBindApi, "unbindPreview")
+      .mockResolvedValue(report());
+    await renderCodex();
+
+    fireEvent.click(screen.getByRole("button", { name: "解除绑定" }));
+
+    expect(await screen.findByText(/恢复到绑定前/)).toBeVisible();
+    expect(screen.getByText("~/.codex/config.toml: model")).toBeVisible();
+    expect(
+      screen.getByText("~/.codex/config.toml: model_provider"),
+    ).toBeVisible();
+    expect(screen.getByText(/MCP、skills、插件/)).toBeVisible();
+    expect(preview).toHaveBeenCalledWith("codex", []);
+    expect(
+      screen.getByRole("button", { name: "确认解除绑定？" }),
+    ).toBeVisible();
+  });
+
+  it("warns that an older binding cannot be fully restored", async () => {
+    vi.spyOn(ofoxBindApi, "unbindPreview").mockResolvedValue(
+      report({ legacy: true, exactFiles: [], restoredKeys: [] }),
+    );
+    await renderCodex();
+    fireEvent.click(screen.getByRole("button", { name: "解除绑定" }));
+    expect(await screen.findByText(/旧版本中绑定/)).toBeVisible();
+  });
+
+  it("explains that ChatGPT keeps the shared Codex config", async () => {
+    vi.spyOn(ofoxBindApi, "unbindPreview").mockResolvedValue(
+      report({ sharedKeptBy: ["chatgpt"], restoredKeys: [], removedKeys: [] }),
+    );
+    await renderCodex();
+    fireEvent.click(screen.getByRole("button", { name: "解除绑定" }));
+    expect(await screen.findByText(/ChatGPT 仍在使用 Ofox/)).toBeVisible();
+  });
+
+  it("confirms on the second click and summarizes the restore", async () => {
+    vi.spyOn(ofoxBindApi, "unbindPreview").mockResolvedValue(report());
+    const unbind = vi
+      .spyOn(bindToolsModule, "unbindTool")
+      .mockResolvedValue(report({ dryRun: false }));
+    const success = vi.spyOn(toast, "success").mockImplementation(() => "");
+    const onOpenChange = vi.fn();
+    await renderCodex(onOpenChange);
+
+    fireEvent.click(screen.getByRole("button", { name: "解除绑定" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认解除绑定？" }),
+    );
+
+    await waitFor(() => expect(unbind).toHaveBeenCalledWith("codex"));
+    await waitFor(() =>
+      expect(success).toHaveBeenCalledWith("Codex 已解除绑定", {
+        description: "配置文件已恢复为绑定前的原样。",
+      }),
+    );
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("keeps the dialog open when unbinding fails", async () => {
+    vi.spyOn(ofoxBindApi, "unbindPreview").mockResolvedValue(report());
+    vi.spyOn(bindToolsModule, "unbindTool").mockRejectedValue(
+      new Error("restore failed"),
+    );
+    const error = vi.spyOn(toast, "error").mockImplementation(() => "");
+    const onOpenChange = vi.fn();
+    await renderCodex(onOpenChange);
+
+    fireEvent.click(screen.getByRole("button", { name: "解除绑定" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认解除绑定？" }),
+    );
+
+    await waitFor(() =>
+      expect(error).toHaveBeenCalledWith("解除绑定失败：Error: restore failed"),
+    );
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
   });
 });

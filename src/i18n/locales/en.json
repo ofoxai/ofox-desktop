@@ -6,6 +6,28 @@
   "toolInstall": {
     "exitCode": "Installation did not finish (exit code {{code}}); please retry"
   },
+  "unbind": {
+    "button": "Unbind",
+    "confirm": "Confirm unbind?",
+    "willRestoreTitle": "Unbinding restores how this tool connected before Ofox:",
+    "generic": "Ofox's address, key and model will be removed and your previous setup restored.",
+    "keepNotice": "MCP servers, skills, plugins and other settings are kept.",
+    "forceRestoreNotice": "These settings return to their pre-Ofox values even if you changed them while bound.",
+    "legacyNotice": "This tool was bound by an older version, so its original settings weren't saved. Unbinding removes Ofox's address, key and model and returns the tool to its default sign-in; your earlier custom settings can't be restored.",
+    "sharedNotice": "{{others}} still uses Ofox, so the shared ~/.codex config stays until it is unbound too.",
+    "nothingToRestore": "No Ofox configuration was found; unbinding only removes it from the list.",
+    "success": "{{tool}} unbound",
+    "resultExact": "Config files are back exactly as they were before binding.",
+    "resultRestored": "Restored {{count}} connection settings.",
+    "resultShared": "{{others}} still uses Ofox, so ~/.codex was kept.",
+    "resultLegacy": "Bound by an older version: Ofox's settings were removed, but your earlier custom settings can't be restored.",
+    "failed": "Unbind failed: {{error}}",
+    "warning": {
+      "previousProviderMissing": "The provider you used before binding no longer exists; switched to the official default.",
+      "fileKeptHasOtherContent": "A config file Ofox created now has content you added, so it was kept.",
+      "recordCleanupFailed": "Settings were restored, but the binding record couldn't be cleared; unbinding again is safe."
+    }
+  },
   "modelCompatibility": {
     "title": "Streaming compatibility",
     "checking": "Checking streaming compatibility…",

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { toast } from "sonner";
 import {
   Loader2,
@@ -61,7 +62,8 @@ import {
   toWorkBuddyModelSelection,
   type FetchedModel,
 } from "@/lib/api/model-fetch";
-import { unbindTool } from "@/lib/bindTools";
+import { readBoundTools, unbindTool } from "@/lib/bindTools";
+import { ofoxBindApi, type UnbindReport } from "@/lib/api/ofoxBind";
 import { ToolBadge } from "@/components/tools/ToolBadge";
 import { TOOL_META } from "@/config/toolMeta";
 import type { AppId } from "@/lib/api/types";
@@ -84,6 +86,38 @@ interface ManageToolDialogProps {
   /** Fired after a successful save or successful unbind so ConsolePage can
    *  refresh its list (status pill, monthly tokens, presence after unbind). */
   onChanged?: () => void;
+}
+
+function toolLabels(ids: string[]): string {
+  return ids.map((id) => TOOL_META[id]?.label ?? id).join(", ");
+}
+
+/** One-line summary of an unbind result for the toast; paths/counts only. */
+function describeUnbindResult(
+  report: UnbindReport | null,
+  t: TFunction,
+): string | undefined {
+  if (!report) return undefined;
+  const parts: string[] = [];
+  const changed = report.restoredKeys.length + report.removedKeys.length;
+  if (report.sharedKeptBy.length > 0) {
+    parts.push(
+      t("unbind.resultShared", { others: toolLabels(report.sharedKeptBy) }),
+    );
+  } else if (report.legacy) {
+    parts.push(t("unbind.resultLegacy"));
+  } else if (report.alreadyUnbound) {
+    parts.push(t("unbind.nothingToRestore"));
+  } else if (report.exactFiles.length > 0) {
+    parts.push(t("unbind.resultExact"));
+  } else if (changed > 0) {
+    parts.push(t("unbind.resultRestored", { count: changed }));
+  }
+  for (const warning of report.warnings) {
+    parts.push(t(`unbind.warning.${warning.code}`, { defaultValue: "" }));
+  }
+  const text = parts.filter(Boolean).join(" ");
+  return text || undefined;
 }
 
 function arraysEqual(left: string[], right: string[]): boolean {
@@ -148,6 +182,8 @@ export default function ManageToolDialog({
   const [saving, setSaving] = useState(false);
   const [unbindConfirming, setUnbindConfirming] = useState(false);
   const [unbindLoading, setUnbindLoading] = useState(false);
+  // What the unbind would restore; null until loaded (or if the preview failed).
+  const [unbindPreview, setUnbindPreview] = useState<UnbindReport | null>(null);
   // Connectivity probe — null means "未测试". The backend always resolves
   // with a PingResult, so we never put an exception here.
   const [pingResult, setPingResult] = useState<PingResult | null>(null);
@@ -191,6 +227,7 @@ export default function ManageToolDialog({
     setSaving(false);
     setUnbindConfirming(false);
     setUnbindLoading(false);
+    setUnbindPreview(null);
     setPingResult(null);
     setPingLoading(false);
     setCompatibilityResults([]);
@@ -518,24 +555,39 @@ export default function ManageToolDialog({
   const handleUnbind = useCallback(async () => {
     if (!tool) return;
     if (!unbindConfirming) {
-      // First click → arm the confirm state. The button label flips to make
-      // the destructive intent obvious before the second click commits.
+      // First click → arm the confirm state and show what will be restored
+      // before the second click commits.
       setUnbindConfirming(true);
+      try {
+        const stillBound = readBoundTools().filter((id) => id !== tool.id);
+        setUnbindPreview(await ofoxBindApi.unbindPreview(tool.id, stillBound));
+      } catch (e) {
+        // A failed preview must not block unbinding; the panel falls back to
+        // the generic description.
+        console.warn("[ManageToolDialog] unbind preview failed", e);
+        setUnbindPreview(null);
+      }
       return;
     }
     setUnbindLoading(true);
     try {
-      await unbindTool(tool.id);
-      toast.success(`${tool.label} 已解除绑定`);
+      const report = await unbindTool(tool.id);
+      const message = t("unbind.success", { tool: tool.label });
+      const description = describeUnbindResult(report, t);
+      if (report?.legacy) {
+        toast.warning(message, { description, duration: 10_000 });
+      } else {
+        toast.success(message, { description });
+      }
       onChanged?.();
       onOpenChange(false);
     } catch (e) {
-      toast.error(`解除绑定失败：${String(e)}`);
+      toast.error(t("unbind.failed", { error: String(e) }));
       setUnbindConfirming(false);
     } finally {
       setUnbindLoading(false);
     }
-  }, [tool, unbindConfirming, onChanged, onOpenChange]);
+  }, [tool, unbindConfirming, onChanged, onOpenChange, t]);
 
   const hasIncompatible = compatibilityResults.some(
     (result) => result.status === "incompatible",
@@ -909,6 +961,8 @@ export default function ManageToolDialog({
               )}
             </div>
 
+            {unbindConfirming && <UnbindPreviewPanel preview={unbindPreview} />}
+
             <DialogFooter className="!items-center sm:!justify-between">
               <Button
                 type="button"
@@ -924,7 +978,7 @@ export default function ManageToolDialog({
                 {unbindLoading && (
                   <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                 )}
-                {unbindConfirming ? "确认解除绑定？" : "解除绑定"}
+                {unbindConfirming ? t("unbind.confirm") : t("unbind.button")}
               </Button>
               <div className="flex gap-2">
                 <Button
@@ -1249,6 +1303,50 @@ interface PingStatusBoxProps {
   loading: boolean;
   result: PingResult | null;
   model: string;
+}
+
+/** Shown between the first and second "解除绑定" click: what will be restored. */
+function UnbindPreviewPanel({ preview }: { preview: UnbindReport | null }) {
+  const { t } = useTranslation();
+  const changedKeys = preview
+    ? [...preview.restoredKeys, ...preview.removedKeys]
+    : [];
+  return (
+    <div
+      role="note"
+      className="mx-6 mb-3 space-y-1.5 rounded-md border border-red-200 bg-red-50/60 px-3 py-2 text-[12px] text-foreground dark:border-red-500/30 dark:bg-red-500/10"
+    >
+      {preview && preview.sharedKeptBy.length > 0 ? (
+        <p>
+          {t("unbind.sharedNotice", {
+            others: toolLabels(preview.sharedKeptBy),
+          })}
+        </p>
+      ) : preview?.alreadyUnbound ? (
+        <p>{t("unbind.nothingToRestore")}</p>
+      ) : (
+        <>
+          <p className="font-medium">{t("unbind.willRestoreTitle")}</p>
+          {preview?.legacy && (
+            <p className="text-amber-700 dark:text-amber-300">
+              {t("unbind.legacyNotice")}
+            </p>
+          )}
+          {changedKeys.length > 0 ? (
+            <ul className="space-y-0.5 font-mono text-[11px] text-muted-foreground">
+              {changedKeys.map((key) => (
+                <li key={key}>{key}</li>
+              ))}
+            </ul>
+          ) : (
+            <p>{t("unbind.generic")}</p>
+          )}
+          {!preview?.legacy && <p>{t("unbind.forceRestoreNotice")}</p>}
+          <p className="text-muted-foreground">{t("unbind.keepNotice")}</p>
+        </>
+      )}
+    </div>
+  );
 }
 
 function PingStatusBox({ loading, result, model }: PingStatusBoxProps) {

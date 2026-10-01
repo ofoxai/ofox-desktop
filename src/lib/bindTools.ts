@@ -234,6 +234,12 @@ export async function bindTools(tools: string[]): Promise<string[]> {
   return succeeded;
 }
 
+/** Tools currently marked bound in this renderer (localStorage). */
+export function readBoundTools(): string[] {
+  const raw = localStorage.getItem(BOUND_TOOLS_STORAGE_KEY);
+  return raw ? (JSON.parse(raw) as string[]) : [];
+}
+
 /**
  * Inverse of {@link bindTools} for a single tool — used by the manage dialog's
  * "解除绑定" button.
@@ -246,9 +252,7 @@ export async function bindTools(tools: string[]): Promise<string[]> {
  * stays bound, the dialog stays open and the user can retry.
  */
 export async function unbindTool(app: string): Promise<UnbindReport | null> {
-  const raw = localStorage.getItem(BOUND_TOOLS_STORAGE_KEY);
-  const list: string[] = raw ? JSON.parse(raw) : [];
-  const stillBound = list.filter((id) => id !== app);
+  const stillBound = readBoundTools().filter((id) => id !== app);
 
   const report = OFOX_AUTO_BIND_TOOLS.has(app)
     ? await invoke<UnbindReport>("ofox_unbind_tool", { app, stillBound })
