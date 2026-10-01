@@ -1123,7 +1123,6 @@ pub fn run() {
                         }
                         match commands::ofox_auth::bind_tool_to_ofox_internal(
                             &state.db,
-                            &state.proxy_service,
                             &ofox_state.0,
                             app,
                             None,

@@ -55,21 +55,26 @@ pub(crate) fn remove(value: &mut Value, path: JsonPath) -> bool {
         .is_some_and(|object| object.remove(*last).is_some())
 }
 
+/// 按绑定前的值还原后的结果，以及还原 / 删除了哪些字段。
+pub(crate) struct Restored {
+    pub value: Value,
+    pub restored_keys: Vec<String>,
+    pub removed_keys: Vec<String>,
+}
+
 /// 受管字段一律还原成绑定前的值（原来没有就删掉）；`containers` 里的对象只在
 /// 绑定前不存在、现在又空了时删除（按给定顺序，先深后浅）。
-pub(crate) fn plan_restore(
-    original: Option<&str>,
-    current: Option<&str>,
-    label: &str,
+pub(crate) fn restore_value(
+    original: &Value,
+    current: &Value,
     leaves: &[JsonPath],
     containers: &[JsonPath],
-) -> Result<RestorePlan, String> {
-    let original_value = parse_object(original, label)?;
-    let mut value = parse_object(current, label)?;
+) -> Restored {
+    let mut value = current.clone();
     let mut restored_keys = Vec::new();
     let mut removed_keys = Vec::new();
     for leaf in leaves {
-        match get(&original_value, leaf) {
+        match get(original, leaf) {
             Some(item) => {
                 set(&mut value, leaf, item.clone());
                 restored_keys.push(leaf.join("."));
@@ -85,18 +90,40 @@ pub(crate) fn plan_restore(
         let now_empty = get(&value, container)
             .and_then(Value::as_object)
             .is_some_and(Map::is_empty);
-        if get(&original_value, container).is_none() && now_empty {
+        if get(original, container).is_none() && now_empty {
             remove(&mut value, container);
         }
     }
-    let same = value == original_value;
-    let restored = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
-    Ok(RestorePlan::finish(
-        restored,
-        original,
-        same,
+    Restored {
+        value,
         restored_keys,
         removed_keys,
+    }
+}
+
+/// [`restore_value`] 之后按 JSON 写回；语义上等于绑定前时写回原文本。
+pub(crate) fn plan_restore(
+    original: Option<&str>,
+    current: Option<&str>,
+    label: &str,
+    leaves: &[JsonPath],
+    containers: &[JsonPath],
+) -> Result<RestorePlan, String> {
+    let original_value = parse_object(original, label)?;
+    let restored = restore_value(
+        &original_value,
+        &parse_object(current, label)?,
+        leaves,
+        containers,
+    );
+    let same = restored.value == original_value;
+    let text = serde_json::to_string_pretty(&restored.value).map_err(|e| e.to_string())?;
+    Ok(RestorePlan::finish(
+        text,
+        original,
+        same,
+        restored.restored_keys,
+        restored.removed_keys,
     ))
 }
 

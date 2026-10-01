@@ -508,7 +508,7 @@ fn save_tool_template(db: &Database, tool: Tool, template: Value) {
 fn db_for(tool: Tool, template: Value) -> Database {
     let db = Database::memory().expect("db");
     save_tool_template(&db, tool, template);
-    for id in ["relay", tool.official_id()] {
+    for id in std::iter::once("relay").chain(tool.official_id()) {
         db.save_provider(
             tool.app().as_str(),
             &Provider::with_id(id.into(), id.into(), json!({}), None),
@@ -796,4 +796,277 @@ async fn gemini_legacy_cleanup_keeps_api_key_login_when_the_user_has_an_own_key(
         "GEMINI_API_KEY=AIza-mine\n"
     );
     assert_eq!(fs::read_to_string(&settings).unwrap(), settings_text);
+}
+
+// ─── OpenCode / OpenClaw / Hermes ───────────────────────────────────────────
+
+const OPENCODE_CONFIG: &str = "{\n  // my providers\n  \"provider\": {\n    \"deepseek\": { \"options\": { \"apiKey\": \"sk-ds\" } }\n  },\n  \"mcp\": {}\n}\n";
+const OPENCLAW_CONFIG: &str = "{\n  // routing\n  models: {\n    mode: 'merge',\n    providers: {},\n  },\n  agents: {\n    defaults: {\n      model: { primary: 'existing/old-model', fallbacks: ['existing/fallback'] },\n      timeoutSeconds: 120,\n    },\n  },\n}\n";
+const HERMES_CONFIG: &str = "# Hermes\nmodel:\n  default: existing/old-model\n  provider: existing-provider\n  context_length: 32000\ncustom_providers: []\n";
+
+fn opencode_template(model: Option<&str>) -> Value {
+    let models = model.map_or(json!({}), |id| json!({ id: { "name": id } }));
+    json!({
+        "npm": "@ai-sdk/openai",
+        "name": "OfoxAI",
+        "options": { "baseURL": "https://api.ofox.ai/v1", "apiKey": "" },
+        "models": models,
+    })
+}
+
+fn openclaw_template() -> Value {
+    json!({
+        "baseUrl": "https://api.ofox.ai/v1",
+        "apiKey": "",
+        "api": "openai-completions",
+        "models": [{ "id": "openai/gpt-x", "name": "openai/gpt-x" }],
+    })
+}
+
+fn hermes_template() -> Value {
+    json!({
+        "name": "ofox",
+        "base_url": "https://api.ofox.ai/v1",
+        "api_key": "",
+        "api_mode": "chat_completions",
+        "models": { "openai/gpt-x": {} },
+    })
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_commented_config_comes_back_byte_for_byte_after_a_model_change() {
+    let _home = Home::new();
+    let path = crate::opencode_config::get_opencode_config_path();
+    write(&path, OPENCODE_CONFIG);
+    let db = db_for(Tool::OpenCode, opencode_template(None));
+
+    bind(&db, Tool::OpenCode, "opencode", KEY)
+        .await
+        .expect("bind");
+    let providers = crate::opencode_config::get_providers().unwrap();
+    assert_eq!(providers["ofox-opencode"]["options"]["apiKey"], KEY);
+    assert_eq!(providers["deepseek"]["options"]["apiKey"], "sk-ds");
+
+    save_tool_template(&db, Tool::OpenCode, opencode_template(Some("openai/gpt-x")));
+    rewrite_bound_config(&db, Tool::OpenCode, KEY)
+        .await
+        .expect("model change");
+    assert!(
+        crate::opencode_config::get_providers().unwrap()["ofox-opencode"]["models"]
+            .get("openai/gpt-x")
+            .is_some()
+    );
+
+    let report = unbind(&db, Tool::OpenCode, "opencode", &[], false)
+        .await
+        .expect("unbind");
+    assert_eq!(fs::read_to_string(&path).unwrap(), OPENCODE_CONFIG);
+    assert_eq!(report.exact_files.len(), 1);
+    assert_eq!(
+        current_provider(&db, Tool::OpenCode).as_deref(),
+        Some("relay")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_ofox_entry_goes_away_whole_while_other_changes_stay() {
+    // 决定 1：Ofox 条目整条还原（绑定期间往里加的模型也一起去掉）；条目以外的改动保留。
+    let _home = Home::new();
+    let path = crate::opencode_config::get_opencode_config_path();
+    write(&path, OPENCODE_CONFIG);
+    let db = db_for(Tool::OpenCode, opencode_template(None));
+    bind(&db, Tool::OpenCode, "opencode", KEY)
+        .await
+        .expect("bind");
+
+    let mut edited = json_at(&path);
+    edited["provider"]["ofox-opencode"]["models"] = json!({ "qwen3-coder-plus": {} });
+    edited["provider"]["added"] = json!({ "options": { "apiKey": "sk-added" } });
+    write(&path, &serde_json::to_string_pretty(&edited).unwrap());
+
+    unbind(&db, Tool::OpenCode, "opencode", &[], false)
+        .await
+        .expect("unbind");
+    let restored = json_at(&path);
+    assert!(restored["provider"].get("ofox-opencode").is_none());
+    assert_eq!(
+        restored["provider"]["added"]["options"]["apiKey"],
+        "sk-added"
+    );
+    assert_eq!(
+        restored["provider"]["deepseek"]["options"]["apiKey"],
+        "sk-ds"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_config_created_by_bind_is_removed_again() {
+    let _home = Home::new();
+    let path = crate::opencode_config::get_opencode_config_path();
+    let db = db_for(Tool::OpenCode, opencode_template(None));
+    bind(&db, Tool::OpenCode, "opencode", KEY)
+        .await
+        .expect("bind");
+    assert!(path.exists());
+
+    unbind(&db, Tool::OpenCode, "opencode", &[], false)
+        .await
+        .expect("unbind");
+    assert!(!path.exists());
+    assert!(!path.parent().unwrap().exists());
+}
+
+#[tokio::test]
+#[serial]
+async fn openclaw_default_model_and_entry_are_restored_byte_for_byte() {
+    let _home = Home::new();
+    let path = crate::openclaw_config::get_openclaw_config_path();
+    write(&path, OPENCLAW_CONFIG);
+    let db = db_for(Tool::OpenClaw, openclaw_template());
+
+    bind(&db, Tool::OpenClaw, "openclaw", KEY)
+        .await
+        .expect("bind");
+    let bound = crate::openclaw_config::get_default_model()
+        .unwrap()
+        .unwrap();
+    assert_eq!(bound.primary, "ofox-openclaw/openai/gpt-x");
+    assert_eq!(bound.fallbacks, ["existing/fallback"]);
+    assert_eq!(
+        crate::openclaw_config::get_provider("ofox-openclaw")
+            .unwrap()
+            .unwrap()["apiKey"],
+        KEY
+    );
+
+    unbind(&db, Tool::OpenClaw, "openclaw", &[], false)
+        .await
+        .expect("unbind");
+    assert_eq!(fs::read_to_string(&path).unwrap(), OPENCLAW_CONFIG);
+    assert_eq!(
+        current_provider(&db, Tool::OpenClaw).as_deref(),
+        Some("relay")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn openclaw_legacy_binding_restores_the_recorded_default_model() {
+    let _home = Home::new();
+    let path = crate::openclaw_config::get_openclaw_config_path();
+    write(
+        &path,
+        "{\n  models: { mode: 'merge', providers: { 'ofox-openclaw': { baseUrl: 'https://api.ofox.ai/v1', apiKey: 'sk-of-OLD' } } },\n  agents: { defaults: { model: { primary: 'ofox-openclaw/x' }, timeoutSeconds: 120 } },\n}\n",
+    );
+    let db = db_for(Tool::OpenClaw, openclaw_template());
+    set_current_provider(&db, &AppType::OpenClaw, "ofox-openclaw").unwrap();
+    // 从 proxy_live_backup 搬来的旧版记录：只有补丁和绑定前的默认模型。
+    db.upsert_bind_record(
+        "openclaw",
+        r#"{"__ofoxDirectBackupVersion":1,"patch":{"apiKey":"sk-of-OLD"},"runtimeDefault":{"primary":"existing/old-model","fallbacks":["existing/fallback"]}}"#,
+    )
+    .unwrap();
+
+    let report = unbind(&db, Tool::OpenClaw, "openclaw", &[], false)
+        .await
+        .expect("unbind");
+    assert!(report.legacy);
+    assert!(crate::openclaw_config::get_provider("ofox-openclaw")
+        .unwrap()
+        .is_none());
+    let default = crate::openclaw_config::get_default_model()
+        .unwrap()
+        .unwrap();
+    assert_eq!(default.primary, "existing/old-model");
+    assert_eq!(default.fallbacks, ["existing/fallback"]);
+    assert_eq!(
+        crate::openclaw_config::read_openclaw_config().unwrap()["agents"]["defaults"]
+            ["timeoutSeconds"],
+        120
+    );
+    assert_eq!(current_provider(&db, Tool::OpenClaw), None);
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_routing_comes_back_and_edits_made_while_bound_stay() {
+    let _home = Home::new();
+    let path = crate::hermes_config::get_hermes_config_path();
+    write(&path, HERMES_CONFIG);
+    let db = db_for(Tool::Hermes, hermes_template());
+
+    bind(&db, Tool::Hermes, "hermes", KEY).await.expect("bind");
+    let bound = crate::hermes_config::get_model_config().unwrap().unwrap();
+    assert_eq!(bound.provider.as_deref(), Some("ofox-hermes"));
+    assert_eq!(bound.default.as_deref(), Some("openai/gpt-x"));
+    assert_eq!(
+        crate::hermes_config::get_provider("ofox-hermes")
+            .unwrap()
+            .unwrap()["api_key"],
+        KEY
+    );
+
+    // 绑定期间用户改了一个无关的上限。
+    let mut edited = bound;
+    edited.max_tokens = Some(8192);
+    crate::hermes_config::set_model_config(&edited).unwrap();
+
+    unbind(&db, Tool::Hermes, "hermes", &[], false)
+        .await
+        .expect("unbind");
+    let restored = crate::hermes_config::get_model_config().unwrap().unwrap();
+    assert_eq!(restored.provider.as_deref(), Some("existing-provider"));
+    assert_eq!(restored.default.as_deref(), Some("existing/old-model"));
+    assert_eq!(restored.context_length, Some(32000));
+    assert_eq!(restored.max_tokens, Some(8192));
+    assert!(crate::hermes_config::get_provider("ofox-hermes")
+        .unwrap()
+        .is_none());
+    assert!(fs::read_to_string(&path).unwrap().starts_with("# Hermes\n"));
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_comes_back_byte_for_byte_when_nothing_else_changed() {
+    let _home = Home::new();
+    let path = crate::hermes_config::get_hermes_config_path();
+    write(&path, HERMES_CONFIG);
+    let db = db_for(Tool::Hermes, hermes_template());
+    bind(&db, Tool::Hermes, "hermes", KEY).await.expect("bind");
+
+    let report = unbind(&db, Tool::Hermes, "hermes", &[], false)
+        .await
+        .expect("unbind");
+    assert_eq!(fs::read_to_string(&path).unwrap(), HERMES_CONFIG);
+    assert_eq!(report.exact_files.len(), 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_legacy_binding_without_a_routing_snapshot_clears_ofox_routing() {
+    let _home = Home::new();
+    let path = crate::hermes_config::get_hermes_config_path();
+    write(
+        &path,
+        "model:\n  default: openai/gpt-x\n  provider: ofox-hermes\n  context_length: 32000\ncustom_providers:\n- name: deepseek\n  base_url: https://api.deepseek.com/v1\n- name: ofox-hermes\n  base_url: https://api.ofox.ai/v1\n  api_key: sk-of-OLD\n",
+    );
+    let db = db_for(Tool::Hermes, hermes_template());
+    // 旧格式：记录就是补丁本身，没有绑定前的路由。
+    db.upsert_bind_record("hermes", r#"{"api_key":"sk-of-OLD"}"#)
+        .unwrap();
+
+    let report = unbind(&db, Tool::Hermes, "hermes", &[], false)
+        .await
+        .expect("unbind");
+    assert!(report.legacy);
+    let model = crate::hermes_config::get_model_config().unwrap().unwrap();
+    assert_eq!(model.provider, None);
+    assert_eq!(model.default, None);
+    assert_eq!(model.context_length, Some(32000));
+    let providers = crate::hermes_config::get_providers().unwrap();
+    assert!(providers.get("ofox-hermes").is_none());
+    assert!(providers.get("deepseek").is_some());
 }

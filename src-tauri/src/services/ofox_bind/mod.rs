@@ -1,17 +1,19 @@
 //! Ofox 绑定记录：每个工具绑定前的状态，存在本机专属的 `ofox_bind_snapshot`
 //! 表里（见 `database/dao/ofox_bind.rs`）。
 //!
-//! Codex（含 ChatGPT 桌面版的 Codex 模式）、Claude Code、Gemini CLI 走这里的
-//! 「绑定前快照 + 精确还原」：解绑时只把接入方式（地址、key、登录方式、模型）
-//! 还原成绑定前的样子，MCP、skills、插件等其余配置一律不动。OpenCode /
-//! OpenClaw / Hermes 仍走 `ProxyService::ofox_backup_live_config` /
-//! `ofox_restore_from_backup`。
+//! 所有直接改配置文件的工具（Codex 含 ChatGPT 桌面版的 Codex 模式、Claude Code、
+//! Gemini CLI、OpenCode、OpenClaw、Hermes）都走这里的「绑定前快照 + 精确还原」：
+//! 解绑时只把接入方式（地址、key、登录方式、模型）还原成绑定前的样子，MCP、
+//! skills、插件等其余配置一律不动。WorkBuddy 走 `workbuddy_config`。
 
 pub(crate) mod claude;
 pub(crate) mod codex;
 mod env_file;
 pub(crate) mod gemini;
+mod hermes;
 mod json_file;
+mod openclaw;
+mod opencode;
 mod plan;
 pub(crate) mod record;
 pub(crate) mod relocate;
@@ -44,15 +46,20 @@ pub(crate) enum Tool {
     Codex,
     Claude,
     Gemini,
+    OpenCode,
+    OpenClaw,
+    Hermes,
 }
 
 impl Tool {
-    pub(crate) fn from_app(app: &AppType) -> Option<Self> {
+    pub(crate) fn from_app(app: &AppType) -> Self {
         match app {
-            AppType::Codex => Some(Self::Codex),
-            AppType::Claude => Some(Self::Claude),
-            AppType::Gemini => Some(Self::Gemini),
-            AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => None,
+            AppType::Codex => Self::Codex,
+            AppType::Claude => Self::Claude,
+            AppType::Gemini => Self::Gemini,
+            AppType::OpenCode => Self::OpenCode,
+            AppType::OpenClaw => Self::OpenClaw,
+            AppType::Hermes => Self::Hermes,
         }
     }
 
@@ -61,6 +68,9 @@ impl Tool {
             Self::Codex => AppType::Codex,
             Self::Claude => AppType::Claude,
             Self::Gemini => AppType::Gemini,
+            Self::OpenCode => AppType::OpenCode,
+            Self::OpenClaw => AppType::OpenClaw,
+            Self::Hermes => AppType::Hermes,
         }
     }
 
@@ -69,6 +79,9 @@ impl Tool {
             Self::Codex => "Codex",
             Self::Claude => "Claude",
             Self::Gemini => "Gemini",
+            Self::OpenCode => "OpenCode",
+            Self::OpenClaw => "OpenClaw",
+            Self::Hermes => "Hermes",
         }
     }
 
@@ -82,14 +95,19 @@ impl Tool {
             Self::Codex => "ofox-codex",
             Self::Claude => "ofox-claude",
             Self::Gemini => "ofox-gemini",
+            Self::OpenCode => "ofox-opencode",
+            Self::OpenClaw => "ofox-openclaw",
+            Self::Hermes => "ofox-hermes",
         }
     }
 
-    fn official_id(self) -> &'static str {
+    /// 官方服务商（`providers_seed.rs` 的 OFFICIAL_SEEDS）；可同时配多家的工具没有。
+    fn official_id(self) -> Option<&'static str> {
         match self {
-            Self::Codex => "codex-official",
-            Self::Claude => "claude-official",
-            Self::Gemini => "gemini-official",
+            Self::Codex => Some("codex-official"),
+            Self::Claude => Some("claude-official"),
+            Self::Gemini => Some("gemini-official"),
+            Self::OpenCode | Self::OpenClaw | Self::Hermes => None,
         }
     }
 
@@ -98,6 +116,9 @@ impl Tool {
             Self::Codex => &[ManagedFile::CodexConfig],
             Self::Claude => &[ManagedFile::ClaudeSettings],
             Self::Gemini => &[ManagedFile::GeminiEnv, ManagedFile::GeminiSettings],
+            Self::OpenCode => &[ManagedFile::OpenCodeConfig],
+            Self::OpenClaw => &[ManagedFile::OpenClawConfig],
+            Self::Hermes => &[ManagedFile::HermesConfig],
         }
     }
 }
@@ -109,6 +130,9 @@ pub(crate) fn tool_for(app: &str) -> Option<(Tool, &'static str)> {
         "chatgpt" => Some((Tool::Codex, "chatgpt")),
         "claude" => Some((Tool::Claude, "claude")),
         "gemini" => Some((Tool::Gemini, "gemini")),
+        "opencode" => Some((Tool::OpenCode, "opencode")),
+        "openclaw" => Some((Tool::OpenClaw, "openclaw")),
+        "hermes" => Some((Tool::Hermes, "hermes")),
         _ => None,
     }
 }
@@ -120,6 +144,9 @@ impl ManagedFile {
             Self::ClaudeSettings => claude::settings_path(),
             Self::GeminiEnv => gemini::env_path(),
             Self::GeminiSettings => gemini::settings_path(),
+            Self::OpenCodeConfig => opencode::config_path(),
+            Self::OpenClawConfig => openclaw::config_path(),
+            Self::HermesConfig => hermes::config_path(),
         }
     }
 
@@ -130,6 +157,9 @@ impl ManagedFile {
             // .env 按行读，没有「解析失败」。
             Self::GeminiEnv => Ok(()),
             Self::GeminiSettings => gemini::validate_settings(text),
+            Self::OpenCodeConfig => opencode::validate(text),
+            Self::OpenClawConfig => openclaw::validate(text),
+            Self::HermesConfig => hermes::validate(text),
         }
     }
 
@@ -143,6 +173,9 @@ impl ManagedFile {
             Self::ClaudeSettings => claude::plan_restore(original, current),
             Self::GeminiEnv => Ok(gemini::plan_restore_env(original, current)),
             Self::GeminiSettings => gemini::plan_restore_settings(original, current),
+            Self::OpenCodeConfig => opencode::plan_restore(original, current),
+            Self::OpenClawConfig => openclaw::plan_restore(original, current),
+            Self::HermesConfig => hermes::plan_restore(original, current),
         }
     }
 }
@@ -171,6 +204,9 @@ fn bound_on_disk(tool: Tool) -> Result<bool, String> {
         Tool::Codex => (codex::config_path(), codex::is_ofox_bound),
         Tool::Claude => (claude::settings_path(), claude::is_ofox_bound),
         Tool::Gemini => (gemini::env_path(), gemini::is_ofox_bound),
+        Tool::OpenCode => (opencode::config_path(), opencode::is_ofox_bound),
+        Tool::OpenClaw => (openclaw::config_path(), openclaw::is_ofox_bound),
+        Tool::Hermes => (hermes::config_path(), hermes::is_ofox_bound),
     };
     Ok(read_text(&path)?.as_deref().is_some_and(is_bound))
 }
@@ -199,14 +235,21 @@ fn write_bound(
         }
         Tool::Claude => claude::write_bound(template, api_key, txn),
         Tool::Gemini => gemini::write_bound(template, api_key, txn),
+        Tool::OpenCode => opencode::write_bound(template, api_key, txn),
+        Tool::OpenClaw => openclaw::write_bound(template, api_key, txn),
+        Tool::Hermes => hermes::write_bound(template, api_key, txn),
     }
 }
 
-fn legacy_edits(tool: Tool) -> Result<Vec<FileEdit>, String> {
+/// `legacy` 是旧版本留下的绑定记录（OpenClaw / Hermes 的记录里可能有绑定前的路由）。
+fn legacy_edits(tool: Tool, legacy: Option<&Value>) -> Result<Vec<FileEdit>, String> {
     match tool {
         Tool::Codex => codex::legacy_edits(),
         Tool::Claude => claude::legacy_edits(),
         Tool::Gemini => gemini::legacy_edits(),
+        Tool::OpenCode => opencode::legacy_edits(),
+        Tool::OpenClaw => openclaw::legacy_edits(legacy),
+        Tool::Hermes => hermes::legacy_edits(legacy),
     }
 }
 
@@ -236,6 +279,33 @@ fn provider_exists(db: &Database, app: &AppType, id: &str) -> bool {
     matches!(db.get_provider_by_id(id, app.as_str()), Ok(Some(_)))
 }
 
+/// 回到官方服务商；没有官方服务商的工具，当前服务商还是 Ofox 时清掉。
+fn fall_back_to_official(
+    db: &Database,
+    tool: Tool,
+    report: &mut UnbindReport,
+    dry_run: bool,
+) -> Result<(), String> {
+    let app = tool.app();
+    report.provider_restored_to = tool.official_id().map(str::to_string);
+    if dry_run {
+        return Ok(());
+    }
+    if let Some(id) = tool.official_id() {
+        return set_current_provider(db, &app, id);
+    }
+    let current = db
+        .get_current_provider(app.as_str())
+        .map_err(|e| format!("读取当前供应商失败：{e}"))?;
+    if current.as_deref() != Some(tool.provider_id()) {
+        return Ok(());
+    }
+    crate::settings::set_current_provider(&app, None)
+        .map_err(|e| format!("清除 {} 当前供应商失败：{e}", app.as_str()))?;
+    db.clear_current_provider(app.as_str())
+        .map_err(|e| format!("清除 {} 当前供应商失败：{e}", app.as_str()))
+}
+
 /// 还原绑定前的当前服务商；那个服务商已经不在了就退回官方服务商。
 fn restore_previous_provider(
     db: &Database,
@@ -250,8 +320,7 @@ fn restore_previous_provider(
     };
     if missing(&previous.settings) || missing(&previous.db) {
         report.warn("previousProviderMissing", None);
-        report.provider_restored_to = Some(tool.official_id().to_string());
-        return set_current_provider(db, &app, tool.official_id());
+        return fall_back_to_official(db, tool, report, false);
     }
     crate::settings::set_current_provider(&app, previous.settings.as_deref())
         .map_err(|e| format!("还原 {} 当前供应商失败：{e}", app.as_str()))?;
@@ -542,13 +611,14 @@ pub(crate) async fn unbind(
                     .for_each(|dir| remove_dir_if_empty(dir));
             }
         }
-        _ => {
-            if apply_legacy_edits(legacy_edits(tool)?, &mut report, dry_run)? {
+        stored => {
+            let legacy = match &stored {
+                Some(StoredRecord::Legacy(value)) => Some(value),
+                _ => None,
+            };
+            if apply_legacy_edits(legacy_edits(tool, legacy)?, &mut report, dry_run)? {
                 report.legacy = true;
-                report.provider_restored_to = Some(tool.official_id().to_string());
-                if !dry_run {
-                    set_current_provider(db, &tool.app(), tool.official_id())?;
-                }
+                fall_back_to_official(db, tool, &mut report, dry_run)?;
             } else {
                 report.already_unbound = true;
             }

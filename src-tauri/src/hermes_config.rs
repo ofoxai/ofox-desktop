@@ -142,6 +142,11 @@ pub fn read_hermes_config() -> Result<serde_yaml::Value, AppError> {
     }
 
     let content = fs::read_to_string(&path).map_err(|e| AppError::io(&path, e))?;
+    parse_config_text(&content)
+}
+
+/// 解析 Hermes 配置文本；空文本视为空 Mapping。
+pub(crate) fn parse_config_text(content: &str) -> Result<serde_yaml::Value, AppError> {
     if content.trim().is_empty() {
         return Ok(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
     }
@@ -149,7 +154,7 @@ pub fn read_hermes_config() -> Result<serde_yaml::Value, AppError> {
     // Older section replacement code could append duplicate top-level keys
     // on CRLF files. Hermes/PyYAML treats the last value as active, so heal
     // those files using the same keep-last rule before parsing.
-    let deduped = deduplicate_top_level_keys(&content);
+    let deduped = deduplicate_top_level_keys(content);
 
     serde_yaml::from_str(&deduped)
         .map_err(|e| AppError::Config(format!("Failed to parse Hermes config as YAML: {e}")))
@@ -297,30 +302,54 @@ fn replace_yaml_section(
     value: &serde_yaml::Value,
 ) -> Result<String, AppError> {
     let serialized = serialize_yaml_section(section_key, value)?;
+    Ok(splice_yaml_section(raw, section_key, &serialized))
+}
 
+/// Replace a YAML section with already-rendered text, or append it if not found.
+fn splice_yaml_section(raw: &str, section_key: &str, serialized: &str) -> String {
     if let Some((start, end)) = find_yaml_section_range(raw, section_key) {
         let mut result = String::with_capacity(raw.len());
         result.push_str(&raw[..start]);
-        result.push_str(&serialized);
+        result.push_str(serialized);
         // Remove stale duplicates left by older CRLF handling bugs.
         let remainder = remove_all_sections(&raw[end..], section_key);
         if !serialized.ends_with('\n') && !remainder.is_empty() && !remainder.starts_with('\n') {
             result.push('\n');
         }
         result.push_str(&remainder);
-        Ok(result)
+        result
     } else {
         // Section not found — append at end
         let mut result = raw.to_string();
         if !result.is_empty() && !result.ends_with('\n') {
             result.push('\n');
         }
-        result.push_str(&serialized);
+        result.push_str(serialized);
         if !result.ends_with('\n') {
             result.push('\n');
         }
-        Ok(result)
+        result
     }
+}
+
+/// 在配置文本上设置（`Some`）或删除（`None`）一个顶层段落，其余段落的注释和
+/// 格式原样保留。不读写磁盘。
+pub(crate) fn render_section(
+    raw: &str,
+    section_key: &str,
+    value: Option<&serde_yaml::Value>,
+) -> Result<String, AppError> {
+    match value {
+        Some(value) => replace_yaml_section(raw, section_key, value),
+        None => Ok(remove_all_sections(raw, section_key)),
+    }
+}
+
+/// 把 `from` 里的顶层段落原样（含注释和格式）放进 `raw`。`from` 里没有这一段时
+/// 返回 `None`。
+pub(crate) fn copy_section(raw: &str, from: &str, section_key: &str) -> Option<String> {
+    let (start, end) = find_yaml_section_range(from, section_key)?;
+    Some(splice_yaml_section(raw, section_key, &from[start..end]))
 }
 
 // ============================================================================
@@ -763,7 +792,17 @@ pub fn set_provider(
     let _guard = hermes_write_lock().lock()?;
 
     let config = read_hermes_config()?;
-    ensure_provider_writable(&config, name, "edit")?;
+    let providers_value = upsert_custom_provider(&config, name, provider_config)?;
+    write_yaml_section_to_config_locked("custom_providers", &providers_value)
+}
+
+/// `custom_providers` 段落写入（或更新）`name` 之后的样子，不读写磁盘。
+pub(crate) fn upsert_custom_provider(
+    config: &serde_yaml::Value,
+    name: &str,
+    provider_config: serde_json::Value,
+) -> Result<serde_yaml::Value, AppError> {
+    ensure_provider_writable(config, name, "edit")?;
     let mut providers: Vec<serde_yaml::Value> = config
         .get("custom_providers")
         .and_then(|v| v.as_sequence())
@@ -823,8 +862,7 @@ pub fn set_provider(
         providers.push(yaml_val);
     }
 
-    let providers_value = serde_yaml::Value::Sequence(providers);
-    write_yaml_section_to_config_locked("custom_providers", &providers_value)
+    Ok(serde_yaml::Value::Sequence(providers))
 }
 
 /// Remove a custom provider by name.
@@ -860,7 +898,13 @@ pub fn remove_provider(name: &str) -> Result<HermesWriteOutcome, AppError> {
 
 /// Get the `model` section as a typed config.
 pub fn get_model_config() -> Result<Option<HermesModelConfig>, AppError> {
-    let config = read_hermes_config()?;
+    model_config_of(&read_hermes_config()?)
+}
+
+/// 已解析配置里的 `model` 段落。
+pub(crate) fn model_config_of(
+    config: &serde_yaml::Value,
+) -> Result<Option<HermesModelConfig>, AppError> {
     let Some(model_value) = config.get("model") else {
         return Ok(None);
     };
@@ -895,6 +939,16 @@ pub fn apply_switch_defaults(
     provider_id: &str,
     settings_config: &serde_json::Value,
 ) -> Result<HermesWriteOutcome, AppError> {
+    let current = get_model_config()?.unwrap_or_default();
+    set_model_config(&switch_defaults(current, provider_id, settings_config))
+}
+
+/// [`apply_switch_defaults`] 写入的 `model` 段落，不读写磁盘。
+pub(crate) fn switch_defaults(
+    current: HermesModelConfig,
+    provider_id: &str,
+    settings_config: &serde_json::Value,
+) -> HermesModelConfig {
     // `models` 在不同入口下可能是两种形态：
     //  - 数组 [{id, name, ...}]：UI / 旧 DeepLink 导入 / 单测里手写的样子
     //  - dict { id: { context_length?, ... } }：ofox 直写路径 (manage_tool.rs
@@ -914,29 +968,11 @@ pub fn apply_switch_defaults(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    let current = get_model_config()?.unwrap_or_default();
-    let merged = HermesModelConfig {
+    HermesModelConfig {
         default: first_model_id.or(current.default.clone()),
         provider: Some(provider_id.to_string()),
         ..current
-    };
-    set_model_config(&merged)
-}
-
-/// Restore only the routing fields changed by [`apply_switch_defaults`].
-///
-/// Context limits and future fields edited while Ofox was bound are preserved.
-pub fn restore_switch_defaults(
-    default: Option<String>,
-    provider: Option<String>,
-) -> Result<HermesWriteOutcome, AppError> {
-    let current = get_model_config()?.unwrap_or_default();
-    let restored = HermesModelConfig {
-        default,
-        provider,
-        ..current
-    };
-    set_model_config(&restored)
+    }
 }
 
 // ============================================================================

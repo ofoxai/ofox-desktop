@@ -12,7 +12,7 @@ use crate::database::Database;
 use crate::error::AppError;
 use crate::ofox_apex::mentions_ofox_gateway;
 
-/// OpenClaw/Hermes 的绑定备份外层标记（见 `ProxyService::ofox_backup_live_config`）。
+/// 旧版本 OpenClaw/Hermes 绑定备份的外层标记（里面带绑定前的默认路由）。
 const DIRECT_BACKUP_MARKER: &str = "__ofoxDirectBackupVersion";
 
 /// 这一行是不是 Ofox 绑定写的。`taken_over` 报告该工具的配置文件里现在是否有

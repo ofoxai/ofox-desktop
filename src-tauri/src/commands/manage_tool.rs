@@ -151,9 +151,8 @@ pub(crate) fn read_active_provider_and_model_for(
 /// Empty `model` removes the field — keeps the on-disk config clean and
 /// signals "fall back to OfoxAI's default routing".
 ///
-/// For ofox-* providers this goes through the **bind 直写** path
-/// ([`ProxyService::ofox_write_direct_to_live`])：读取已绑定的 sk-of-、
-/// 把 DB 里的 settings_config（含新 model）+ token 合成完整磁盘 config 写盘。
+/// For ofox-* providers this goes through `services::ofox_bind::rewrite_bound_config`：
+/// 读取已绑定的 sk-of-，按 DB 里的 settings_config（含新 model）重写接入字段。
 /// 不调老的 `refresh_takeover_for_app`——那条会写 `PROXY_MANAGED` 占位符把
 /// 真 sk-of- 覆盖掉，并触发 backup 删除（破坏 unbind 可恢复性）。
 ///
@@ -254,13 +253,15 @@ pub async fn set_active_ofox_model(
         &provider.settings_config,
         || async {
             if provider_id.starts_with("ofox-") {
-                // ofox 直写路径：使用上面读取的已绑定 key。模型切换不会创建
-                // 新 key，也不会把密钥放入诊断日志。
-                state
-                    .proxy_service
-                    .ofox_write_direct_to_live(&app_type, api_key.as_deref().unwrap_or_default())
-                    .await
-                    .map_err(|e| format!("刷新 {app_str} live 配置失败: {e}"))
+                // ofox 直写路径：使用上面读取的已绑定 key，只重写接入字段。模型
+                // 切换不会创建新 key，也不会把密钥放入诊断日志。
+                crate::services::ofox_bind::rewrite_bound_config(
+                    &state.db,
+                    crate::services::ofox_bind::Tool::from_app(&app_type),
+                    api_key.as_deref().unwrap_or_default(),
+                )
+                .await
+                .map_err(|e| format!("刷新 {app_str} live 配置失败: {e}"))
             } else {
                 // 非 ofox provider 走老 takeover 路径——保留兼容形态。
                 state

@@ -36,6 +36,9 @@ pub(crate) enum ManagedFile {
     ClaudeSettings,
     GeminiEnv,
     GeminiSettings,
+    OpenCodeConfig,
+    OpenClawConfig,
+    HermesConfig,
 }
 
 /// 一个受管文件在绑定前的样子。`original` 是原文件的完整文本：受管字段的原值

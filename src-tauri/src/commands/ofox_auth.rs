@@ -3,12 +3,10 @@
 //! Provides Ofox AI OAuth authentication commands exposed to the frontend.
 //! Uses Device Authorization Grant (RFC 8628).
 
-use std::str::FromStr;
 use std::sync::Arc;
 use tauri::State;
 use tokio::sync::RwLock;
 
-use crate::app_config::AppType;
 use crate::services::ofox_bind::report::UnbindReport;
 use crate::store::AppState;
 
@@ -117,43 +115,6 @@ pub async fn ofox_request_reauth(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Identifier of the OfoxAI seed provider for a given app, plus the path
-/// inside `settings_config` where the LLM API key should be written.
-///
-/// The settings shape differs by app — Claude keeps tokens in `env.*`, Codex
-/// in `auth.*`, OpenCode under `options.apiKey`, OpenClaw at top-level
-/// `apiKey`, Hermes at top-level `api_key` — so the bind command needs an
-/// app-keyed table rather than a single helper. Kept inline so it stays next
-/// to the seeds it mirrors (see `database/dao/providers_seed.rs::OFOX_SEEDS`).
-fn ofox_provider_for(app: &AppType) -> Option<(&'static str, &'static [&'static str])> {
-    match app {
-        // env.ANTHROPIC_AUTH_TOKEN — matches `ofox-claude` seed at
-        // providers_seed.rs:111
-        AppType::Claude => Some(("ofox-claude", &["env", "ANTHROPIC_AUTH_TOKEN"])),
-        // auth.OPENAI_API_KEY — matches `ofox-codex` seed at
-        // providers_seed.rs:122
-        AppType::Codex => Some(("ofox-codex", &["auth", "OPENAI_API_KEY"])),
-        // env.GEMINI_API_KEY — matches `ofox-gemini` seed at
-        // providers_seed.rs:265-267. Gemini CLI 同时支持 Google OAuth 与
-        // GEMINI_API_KEY；ofox bind 走后者 + GOOGLE_GEMINI_BASE_URL 把请求
-        // 重定向到 ofox gateway。
-        AppType::Gemini => Some(("ofox-gemini", &["env", "GEMINI_API_KEY"])),
-        // options.apiKey — matches `ofox-opencode` seed at
-        // providers_seed.rs:278-280
-        AppType::OpenCode => Some(("ofox-opencode", &["options", "apiKey"])),
-        // top-level apiKey — matches `ofox-openclaw` seed at
-        // providers_seed.rs:291-293
-        AppType::OpenClaw => Some(("ofox-openclaw", &["apiKey"])),
-        // top-level api_key — matches `ofox-hermes` seed at
-        // providers_seed.rs:304-306
-        AppType::Hermes => Some(("ofox-hermes", &["api_key"])),
-    }
-}
-
-// 注：`write_token_at_path` 在 bind 直写改造（commit 4）后被
-// `ProxyService::write_token_into_settings` 取代——后者直接服务于"读 seed
-// 模板 + 注入 token + 写盘"路径，DB provider 行不再被 bind 注入污染。
-
 /// 取要写到工具配置里的 LLM 凭据（keychain 命中直接用，否则向 Ofox 签发）。
 async fn acquire_bind_token(
     key_tool: crate::app_config::BindableTool,
@@ -211,126 +172,36 @@ async fn acquire_bind_token(
 /// references into this function — keep them in sync.
 pub async fn bind_tool_to_ofox_internal(
     db: &crate::database::Database,
-    proxy_service: &crate::services::proxy::ProxyService,
     ofox_manager: &Arc<RwLock<crate::ofox_auth::OfoxAuthManager>>,
     app: &str,
     model_selections: Option<Vec<crate::workbuddy_config::WorkBuddyModelSelection>>,
 ) -> Result<(), String> {
-    // Codex（含共用 ~/.codex 的 ChatGPT）、Claude、Gemini：第一次绑定时记下受管
-    // 文件原样，只改接入字段，解绑时精确还原。
+    // 直接改配置文件的工具：第一次绑定时记下受管文件原样，只改接入字段，解绑时
+    // 精确还原（见 services::ofox_bind）。Codex 和 ChatGPT 共用 ~/.codex。
     if let Some((tool, holder)) = crate::services::ofox_bind::tool_for(app) {
         let token = acquire_bind_token(tool.app().into(), ofox_manager).await?;
         crate::services::ofox_bind::bind(db, tool, holder, &token).await?;
+        // 只有走 fetch_or_create_api_key 才有元数据；没有时内部直接 noop。
         crate::ofox_api_keys::mark_key_used(tool.app());
         return Ok(());
     }
-    let is_workbuddy = app.trim().eq_ignore_ascii_case("workbuddy");
-    let app_type = if is_workbuddy {
-        None
-    } else {
-        Some(AppType::from_str(app).map_err(|e| format!("无效的应用类型: {e}"))?)
-    };
-    let key_tool = app_type
-        .map(crate::app_config::BindableTool::from)
-        .unwrap_or(crate::app_config::BindableTool::WorkBuddy);
-    let workbuddy_selections = if is_workbuddy {
-        Some(model_selections.ok_or_else(|| "绑定 WorkBuddy 前必须选择兼容模型".to_string())?)
-    } else {
-        None
-    };
-    // 只校验"该工具是否在 ofox 路径里有 token 注入字段"——具体路径由
-    // `ProxyService::ofox_write_direct_to_live` 内部处理。
-    let provider_id = if is_workbuddy {
-        None
-    } else {
-        let typed_app = app_type.as_ref().expect("non-WorkBuddy app was parsed");
-        Some(
-            ofox_provider_for(typed_app)
-                .map(|t| t.0)
-                .ok_or_else(|| format!("{} 暂不支持自动绑定到 OfoxAI", typed_app.as_str()))?,
-        )
-    };
-
+    if !app.trim().eq_ignore_ascii_case("workbuddy") {
+        return Err(format!("无效的应用类型: {}", app.trim()));
+    }
+    let selections =
+        model_selections.ok_or_else(|| "绑定 WorkBuddy 前必须选择兼容模型".to_string())?;
+    let key_tool = crate::app_config::BindableTool::WorkBuddy;
     let token = acquire_bind_token(key_tool, ofox_manager).await?;
-
-    if let Some(selections) = workbuddy_selections.as_ref() {
-        crate::workbuddy_config::sync_selected_models(db, &token, selections).await?;
-        crate::ofox_api_keys::mark_key_used(key_tool);
-        return Ok(());
-    }
-
-    let app_type = app_type.expect("non-WorkBuddy binding has AppType");
-    let provider_id = provider_id.expect("non-WorkBuddy bindings resolve a provider seed");
-
-    // 2) 把"这次 bind 将注入的字段"以字段级 patch 形式存进 DB live_backups。
-    //    跟 ofox_write_direct_to_live 共享同一份 patch 内容，确保 unbind 反 patch
-    //    跟 bind 写盘对得上。详见 services/proxy.rs ofox_backup_live_config 注释。
-    //    失败立刻中止——没备份就 bind 会让 unbind 没法精确还原。
-    proxy_service
-        .ofox_backup_live_config(&app_type, &token)
-        .await
-        .map_err(|e| format!("备份 {} Live 配置失败: {e}", app_type.as_str()))?;
-
-    // 3) 直接写工具真实配置文件——baseURL=ofox gateway、Token=真实 sk-of- 明文
-    //    （绕开 takeover 的 PROXY_MANAGED 占位语义；proxy server 不为 ofox 启动）。
-    //    内部读 ofox-<app> seed 模板 + 注入 token + 写盘。
-    if let Err(e) = proxy_service
-        .ofox_write_direct_to_live(&app_type, &token)
-        .await
-    {
-        // 写盘失败时尽力恢复备份，免得磁盘卡在"半改"状态。恢复也失败就把
-        // 两端的错都报给用户。
-        let restore_hint = match proxy_service.ofox_restore_from_backup(&app_type).await {
-            Ok(()) => "（已自动从备份恢复）",
-            Err(re) => {
-                log::error!(
-                    "[ofox_bind] {} write failed AND restore failed: {re}",
-                    app_type.as_str()
-                );
-                "（恢复备份也失败，请手动查日志）"
-            }
-        };
-        return Err(format!(
-            "写入 {} 工具配置失败: {e}{restore_hint}",
-            app_type.as_str()
-        ));
-    }
-
-    // 4) 切 current provider 到 ofox-<app>，DB is_current 跟随。
-    //    DB 里 ofox-<app> provider 的 settings_config **不再**被 bind 流程
-    //    污染——保持纯 seed 状态。前端不依赖那份字段；proxy 转发层在新路径
-    //    下也不会触发去读它。
-    crate::settings::set_current_provider(&app_type, Some(provider_id))
-        .map_err(|e| format!("设置 {} 当前供应商失败: {e}", app_type.as_str()))?;
-    db.set_current_provider(app_type.as_str(), provider_id)
-        .map_err(|e| format!("更新 {} 数据库 is_current 失败: {e}", app_type.as_str()))?;
-
-    // 5) bind 成功后更新 last_used_at——只有走 fetch_or_create_api_key 路径
-    //    才有元数据条目；OFOX_USE_OAUTH_TOKEN_AS_KEY 兜底路径下 `mark_key_used`
-    //    内部会发现没有元数据直接 noop。失败只 warn，不影响 bind 已经完成。
-    crate::ofox_api_keys::mark_key_used(app_type);
-
+    crate::workbuddy_config::sync_selected_models(db, &token, &selections).await?;
+    crate::ofox_api_keys::mark_key_used(key_tool);
     Ok(())
 }
 
 /// Bind an AI tool (claude/codex/...) to OfoxAI.
 ///
-/// The user-visible effect: after this returns, the tool's requests are
-/// intercepted by cc-switch's local proxy and forwarded to OfoxAI's gateway
-/// (`https://api.ofox.ai/...`) with the user's OAuth access_token attached.
-///
-/// Concretely:
-///   1. Look up the matching `ofox-<app>` seed provider in the DB.
-///   2. Pull a fresh, valid access_token from OfoxAuth (refreshes if needed).
-///   3. Write the token into that provider's `settings_config` at the right
-///      path for the app (env.ANTHROPIC_AUTH_TOKEN, auth.OPENAI_API_KEY, …).
-///   4. Persist + set it as the current provider for the app.
-///   5. Enable proxy takeover for the app (idempotent on the Rust side).
-///
-/// This is the missing step that the previous in-Console "+ 添加" path lacked:
-/// it would toggle takeover ON, but leave the current provider pointing at
-/// `claude-official` (settings_config `{"env":{}}`), which has no base_url
-/// and produces "Claude Provider 缺少 base_url 配置" at request time.
+/// 取（或签发）该工具的 Ofox API key，把工具配置文件里的接入方式改成 Ofox 网关，
+/// 并把当前服务商切到 `ofox-<app>`。第一次绑定时记下绑定前的样子，解绑时精确还原。
+/// 详见 [`bind_tool_to_ofox_internal`]。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ofox_bind_tool(
     state: State<'_, AppState>,
@@ -342,22 +213,13 @@ pub async fn ofox_bind_tool(
     // `modelSelection` remains accepted for compatibility with older renderer
     // builds while the multi-model UI sends `modelSelections`.
     let selections = model_selections.or_else(|| model_selection.map(|selection| vec![selection]));
-    bind_tool_to_ofox_internal(
-        &state.db,
-        &state.proxy_service,
-        &ofox_state.0,
-        &app,
-        selections,
-    )
-    .await
+    bind_tool_to_ofox_internal(&state.db, &ofox_state.0, &app, selections).await
 }
 
 /// Mirror of [`bind_tool_to_ofox_internal`] — undo the OfoxAI bind for `app`.
 ///
-/// - Codex / ChatGPT / Claude / Gemini：交给 `services::ofox_bind::unbind`，按绑定前
-///   快照把接入方式（地址、key、登录方式、模型）和当前服务商精确还原。
-/// - OpenCode / OpenClaw / Hermes：从绑定记录读补丁 → 还原（或删除）
-///   "ofox-* provider 子节"（`ofox_restore_from_backup`）。
+/// - 直接改配置文件的工具：交给 `services::ofox_bind::unbind`，按绑定前快照把
+///   接入方式（地址、key、登录方式、模型）和当前服务商精确还原。
 /// - WorkBuddy：`workbuddy_config::unbind`。
 ///
 /// 我们**故意保留**：
@@ -371,7 +233,6 @@ pub async fn ofox_bind_tool(
 /// Note: 前端管自己的 `ofox-bound-tools` localStorage——后端不维护那个。
 pub async fn unbind_tool_from_ofox_internal(
     db: &crate::database::Database,
-    proxy_service: &crate::services::proxy::ProxyService,
     app: &str,
     still_bound: &[String],
     dry_run: bool,
@@ -379,24 +240,15 @@ pub async fn unbind_tool_from_ofox_internal(
     if let Some((tool, holder)) = crate::services::ofox_bind::tool_for(app) {
         return crate::services::ofox_bind::unbind(db, tool, holder, still_bound, dry_run).await;
     }
+    if !app.trim().eq_ignore_ascii_case("workbuddy") {
+        return Err(format!("无效的应用类型: {}", app.trim()));
+    }
     if dry_run {
-        // 其它工具的预览后续阶段接入；先返回空报告，界面显示通用说明。
-        return Ok(UnbindReport::new(app.trim(), true));
+        // WorkBuddy 的预览后续阶段接入；先返回空报告，界面显示通用说明。
+        return Ok(UnbindReport::new("workbuddy", true));
     }
-    if app.trim().eq_ignore_ascii_case("workbuddy") {
-        crate::workbuddy_config::unbind(db).await?;
-        return Ok(UnbindReport::new("workbuddy", false));
-    }
-    let app_type = AppType::from_str(app).map_err(|e| format!("无效的应用类型: {e}"))?;
-    let app_str = app_type.as_str();
-
-    // OpenCode/OpenClaw/Hermes 没有官方服务商的概念：还原 ofox-* 子节即可。
-    proxy_service
-        .ofox_restore_from_backup(&app_type)
-        .await
-        .map_err(|e| format!("恢复 {app_str} 工具配置失败: {e}"))?;
-
-    Ok(UnbindReport::new(app_str, false))
+    crate::workbuddy_config::unbind(db).await?;
+    Ok(UnbindReport::new("workbuddy", false))
 }
 
 /// Tauri command wrapper — see [`unbind_tool_from_ofox_internal`].
@@ -410,7 +262,7 @@ pub async fn ofox_unbind_tool(
     still_bound: Option<Vec<String>>,
 ) -> Result<UnbindReport, String> {
     let still_bound = still_bound.unwrap_or_default();
-    unbind_tool_from_ofox_internal(&state.db, &state.proxy_service, &app, &still_bound, false).await
+    unbind_tool_from_ofox_internal(&state.db, &app, &still_bound, false).await
 }
 
 /// 解绑预览：返回解绑会还原/删除哪些内容，不做任何改动。
@@ -421,5 +273,5 @@ pub async fn ofox_unbind_preview(
     still_bound: Option<Vec<String>>,
 ) -> Result<UnbindReport, String> {
     let still_bound = still_bound.unwrap_or_default();
-    unbind_tool_from_ofox_internal(&state.db, &state.proxy_service, &app, &still_bound, true).await
+    unbind_tool_from_ofox_internal(&state.db, &app, &still_bound, true).await
 }
