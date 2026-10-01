@@ -92,10 +92,7 @@ describe("bindTools.mirrorBoundToolsToSettings", () => {
   });
 
   it("unbindTool drops the tool from boundTools", async () => {
-    localStorage.setItem(
-      "bound_tools",
-      JSON.stringify(["claude", "codex"]),
-    );
+    localStorage.setItem("bound_tools", JSON.stringify(["claude", "codex"]));
 
     let savedPayload: Record<string, unknown> | null = null;
 
@@ -128,5 +125,83 @@ describe("bindTools.mirrorBoundToolsToSettings", () => {
     expect(
       (savedPayload as unknown as { boundTools?: unknown })?.boundTools,
     ).toEqual(["claude"]);
+  });
+
+  it("unbindTool keeps the tool bound when the backend rejects", async () => {
+    localStorage.setItem("bound_tools", JSON.stringify(["claude", "codex"]));
+    server.use(
+      http.post(`${TAURI_ENDPOINT}/ofox_unbind_tool`, () =>
+        HttpResponse.text("restore failed", { status: 500 }),
+      ),
+    );
+
+    vi.resetModules();
+    const { unbindTool } = await import("@/lib/bindTools");
+    await expect(unbindTool("codex")).rejects.toThrow("restore failed");
+
+    expect(localStorage.getItem("bound_tools")).toBe(
+      JSON.stringify(["claude", "codex"]),
+    );
+  });
+
+  it("unbindTool tells the backend which tools stay bound and returns the report", async () => {
+    localStorage.setItem(
+      "bound_tools",
+      JSON.stringify(["claude", "codex", "chatgpt"]),
+    );
+    let request: Record<string, unknown> | null = null;
+    const report = { tool: "codex", sharedKeptBy: ["chatgpt"] };
+    server.use(
+      http.post(`${TAURI_ENDPOINT}/get_settings`, () =>
+        HttpResponse.json(baseSettings),
+      ),
+      http.post(`${TAURI_ENDPOINT}/save_settings`, () =>
+        HttpResponse.json(true),
+      ),
+      http.post(
+        `${TAURI_ENDPOINT}/ofox_unbind_tool`,
+        async ({ request: r }) => {
+          request = (await r.json()) as Record<string, unknown>;
+          return HttpResponse.json(report);
+        },
+      ),
+    );
+
+    vi.resetModules();
+    const { unbindTool } = await import("@/lib/bindTools");
+    await expect(unbindTool("codex")).resolves.toEqual(report);
+
+    expect(request).toEqual({
+      app: "codex",
+      stillBound: ["claude", "chatgpt"],
+    });
+    expect(localStorage.getItem("bound_tools")).toBe(
+      JSON.stringify(["claude", "chatgpt"]),
+    );
+  });
+
+  it("bindTools binds chatgpt through the backend so ~/.codex is configured", async () => {
+    const bound: string[] = [];
+    server.use(
+      http.post(`${TAURI_ENDPOINT}/get_settings`, () =>
+        HttpResponse.json(baseSettings),
+      ),
+      http.post(`${TAURI_ENDPOINT}/save_settings`, () =>
+        HttpResponse.json(true),
+      ),
+      http.post(`${TAURI_ENDPOINT}/get_active_ofox_model`, () =>
+        HttpResponse.json("ofox-default"),
+      ),
+      http.post(`${TAURI_ENDPOINT}/ofox_bind_tool`, async ({ request }) => {
+        bound.push(((await request.json()) as { app: string }).app);
+        return HttpResponse.json(undefined);
+      }),
+    );
+
+    vi.resetModules();
+    const { bindTools } = await import("@/lib/bindTools");
+    await bindTools(["chatgpt"]);
+
+    expect(bound).toEqual(["chatgpt"]);
   });
 });

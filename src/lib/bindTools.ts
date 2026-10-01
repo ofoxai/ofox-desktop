@@ -5,6 +5,7 @@ import i18n from "@/i18n";
 import { BOUND_TOOLS_STORAGE_KEY } from "@/config/toolMeta";
 import { settingsApi } from "@/lib/api";
 import { manageToolApi, TOOL_PROTOCOL } from "@/lib/api/manageTool";
+import type { UnbindReport } from "@/lib/api/ofoxBind";
 import {
   fetchOfoxModels,
   filterOfoxModelsByProtocol,
@@ -113,18 +114,16 @@ async function mirrorBoundToolsToSettings(tools: string[]): Promise<void> {
  * Gemini 走 `env.GEMINI_API_KEY` + `GOOGLE_GEMINI_BASE_URL`，CLI 支持这条
  * 第三方走法（其 Google OAuth 是另一条独立分支，跟我们无关）。
  *
- * `chatgpt` **故意不在此集合**：ChatGPT App 与 codex CLI 共用
- * `~/.codex/config.toml`。用户 bind codex 时写下的配置就是 App 用的配置——
- * 再对 chatgpt 走一次 `ofox_bind_tool` 会重写同一份文件，做的是重复工作。
- * 这个共享关系仅适用于 App 的 Codex 模式；Chat/Work 使用 OpenAI 登录态。
- * 集合外的工具在 `bindTools` 循环里直接进"视为成功"分支——记入 localStorage
- * 但不动后端，chatgpt 就借这条路径进 bound 列表。
+ * `chatgpt` 也在集合里：ChatGPT App 的 Codex 模式与 codex CLI 共用
+ * `~/.codex/config.toml`。后端把两者记为同一份配置的两个绑定方——只绑 ChatGPT
+ * 也会配置 `~/.codex`，两个都解绑后才还原。Chat/Work 使用 OpenAI 登录态，不受影响。
  *
  * Keep this in sync with `commands/ofox_auth.rs::ofox_provider_for`.
  */
 const OFOX_AUTO_BIND_TOOLS: ReadonlySet<string> = new Set([
   "claude",
   "codex",
+  "chatgpt",
   "gemini",
   "opencode",
   "openclaw",
@@ -239,30 +238,23 @@ export async function bindTools(tools: string[]): Promise<string[]> {
  * Inverse of {@link bindTools} for a single tool — used by the manage dialog's
  * "解除绑定" button.
  *
- * Order matters and mirrors the bind path inverted:
- *   1. Update the persisted list FIRST so the locked-on reconciliation in
- *      MainApp.tsx (which treats `boundTools ∩ PROXY_SUPPORTED` as locked-on)
- *      doesn't race against the backend turning takeover off and immediately
- *      flip it back on. With the localStorage write done first, by the time
- *      any reconciliation runs the tool is no longer in the bound set.
- *   2. Tell the backend to (a) flip takeover off — restoring the user's
- *      pre-cc-switch live config from backup, and (b) switch the active
- *      provider back to `<app>-official` for tools that have an official
- *      seed. See `unbind_tool_from_ofox_internal` for details.
+ * The backend restores the tool's pre-Ofox connection setup (provider, base URL,
+ * key, model) and keeps everything else (MCP, skills, plugins). `stillBound`
+ * lets it keep `~/.codex` while the other of Codex / ChatGPT is still bound.
  *
- * Throws if the backend call fails — caller (the dialog) shows a toast and
- * keeps itself open. localStorage has already been updated by then; that's
- * okay because the next `bindTools(...)` invocation (e.g. user re-adding the
- * tool from "+ 添加") rewrites it.
+ * The bound list changes only after the backend succeeds: on failure the tool
+ * stays bound, the dialog stays open and the user can retry.
  */
-export async function unbindTool(app: string): Promise<void> {
+export async function unbindTool(app: string): Promise<UnbindReport | null> {
   const raw = localStorage.getItem(BOUND_TOOLS_STORAGE_KEY);
   const list: string[] = raw ? JSON.parse(raw) : [];
-  const next = list.filter((id) => id !== app);
-  localStorage.setItem(BOUND_TOOLS_STORAGE_KEY, JSON.stringify(next));
-  void mirrorBoundToolsToSettings(next);
+  const stillBound = list.filter((id) => id !== app);
 
-  if (OFOX_AUTO_BIND_TOOLS.has(app)) {
-    await invoke("ofox_unbind_tool", { app });
-  }
+  const report = OFOX_AUTO_BIND_TOOLS.has(app)
+    ? await invoke<UnbindReport>("ofox_unbind_tool", { app, stillBound })
+    : null;
+
+  localStorage.setItem(BOUND_TOOLS_STORAGE_KEY, JSON.stringify(stillBound));
+  void mirrorBoundToolsToSettings(stillBound);
+  return report;
 }
