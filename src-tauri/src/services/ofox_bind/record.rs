@@ -33,6 +33,9 @@ pub(crate) struct PreviousProvider {
 #[serde(rename_all = "camelCase")]
 pub(crate) enum ManagedFile {
     CodexConfig,
+    ClaudeSettings,
+    GeminiEnv,
+    GeminiSettings,
 }
 
 /// 一个受管文件在绑定前的样子。`original` 是原文件的完整文本：受管字段的原值

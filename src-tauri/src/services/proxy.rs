@@ -1803,10 +1803,7 @@ impl ProxyService {
     }
 
     /// 整文件写 `~/.claude/settings.json`。**`config` 必须是调用方已经算好的
-    /// 最终磁盘态**（unbind 反 patch 后的 `stripped`、或 bind merge 后的完整
-    /// settings）——这里不做 merge。bind 注入的 merge 由
-    /// [`ofox_merge_patch_to_live`] 在写盘前完成，避免 unbind 反 patch 减掉的字段
-    /// 被 merge 又找回来。
+    /// 最终磁盘态**——这里不做 merge。（Ofox 绑定不走这里，见 `services::ofox_bind`。）
     fn write_claude_live(&self, config: &Value) -> Result<(), String> {
         let path = get_claude_settings_path();
         let settings = crate::services::provider::sanitize_claude_settings_for_live(config);
@@ -2067,65 +2064,28 @@ impl ProxyService {
             key_hint,
         );
 
-        // Codex 绑定只改 config.toml、key 放进 Ofox 服务商（见 ofox_bind::codex），
-        // 不再把 key 写进 auth.json。
-        if matches!(app_type, AppType::Codex) {
-            return crate::services::ofox_bind::rewrite_codex_bound_config(&self.db, api_key).await;
+        // Codex / Claude / Gemini 只改接入字段（见 services::ofox_bind），Codex 不再
+        // 把 key 写进 auth.json。
+        if let Some(tool) = crate::services::ofox_bind::Tool::from_app(app_type) {
+            return crate::services::ofox_bind::rewrite_bound_config(&self.db, tool, api_key).await;
         }
 
         let patch = self.build_ofox_patch(app_type, api_key)?;
 
-        // 写盘语义分两类：
-        //   - Claude/Codex/Gemini 是**整文件配置**（settings.json / auth.json +
-        //     config.toml / .env）。bind 注入的只是 base_url/token/model 这几个
-        //     字段，必须 **merge 进用户现有文件**，否则会把用户原本的 permissions
-        //     / MCP / profiles / 其它 env 变量整文件冲掉（用户实测反馈的 bug）。
-        //   - OpenCode/OpenClaw/Hermes 走 set_provider，**整个覆盖** `ofox-<app>`
-        //     这一个子节，但天然保留用户其它 provider 子节和顶层配置。OpenClaw /
-        //     Hermes 还会同步各自的 runtime default；对应旧值已由 backup 保存。
-        //     子节内用户手加字段会在 bind 一瞬被覆盖，这是既有行为，不归 unbind
-        //     还原管。
+        // OpenCode/OpenClaw/Hermes 走 set_provider，**整个覆盖** `ofox-<app>`
+        // 这一个子节，但天然保留用户其它 provider 子节和顶层配置。OpenClaw /
+        // Hermes 还会同步各自的 runtime default；对应旧值已由 backup 保存。
+        // 子节内用户手加字段会在 bind 一瞬被覆盖，这是既有行为，不归 unbind
+        // 还原管。
         match app_type {
-            AppType::Claude | AppType::Codex | AppType::Gemini => {
-                self.ofox_merge_patch_to_live(app_type, &patch)?
-            }
             AppType::OpenCode => self.write_opencode_live(&patch)?,
             AppType::OpenClaw => self.write_openclaw_live(&patch)?,
             AppType::Hermes => self.write_hermes_live(&patch)?,
+            AppType::Claude | AppType::Codex | AppType::Gemini => {
+                unreachable!("handled by ofox_bind above")
+            }
         }
         Ok(())
-    }
-
-    /// bind 直写专用：读当前 live 配置，把 patch **字段级 merge** 进去，再写盘。
-    ///
-    /// 跟 [`ofox_restore_from_backup`] 的反 patch（`remove_patch_from_settings`）
-    /// 严格对称：bind 用 [`merge_patch_into_settings`] 加，unbind 用同一份 patch
-    /// 减。Claude=settings.json、Codex=auth.json+config.toml、Gemini=.env。
-    ///
-    /// 关键：merge 必须在写盘**前**完成，写盘走纯覆盖的 `write_*_live`——若让
-    /// `write_*_live` 自己 merge，unbind 反 patch 减掉的字段会被它从旧磁盘 merge
-    /// 回来。
-    ///
-    /// [`merge_patch_into_settings`]: crate::services::provider::merge_patch_into_settings
-    fn ofox_merge_patch_to_live(&self, app_type: &AppType, patch: &Value) -> Result<(), String> {
-        use crate::services::provider::merge_patch_into_settings;
-
-        let current = match app_type {
-            AppType::Claude => self.read_claude_live().unwrap_or_else(|_| json!({})),
-            AppType::Codex => self.read_codex_live()?,
-            AppType::Gemini => self.read_gemini_live()?,
-            _ => return Err(format!("{} 不走 merge 直写路径", app_type.as_str())),
-        };
-
-        let merged = merge_patch_into_settings(app_type, &current, patch)
-            .map_err(|e| format!("merge {} patch 失败: {e}", app_type.as_str()))?;
-
-        match app_type {
-            AppType::Claude => self.write_claude_live(&merged),
-            AppType::Codex => self.write_codex_live(&merged),
-            AppType::Gemini => self.write_gemini_live(&merged),
-            _ => unreachable!("已在上面拦截"),
-        }
     }
 
     /// 构造 ofox bind 的字段级 patch——读 `ofox-<app>` seed 模板的
@@ -2186,8 +2146,6 @@ impl ProxyService {
     /// `#[allow(dead_code)]`：Commit 3 引入门面，Commit 4 才被 unbind 调用。
     #[allow(dead_code)]
     pub(crate) async fn ofox_restore_from_backup(&self, app_type: &AppType) -> Result<(), String> {
-        use crate::services::provider::remove_patch_from_settings;
-
         let key = app_type.as_str();
         let Some(backup) = self
             .db
@@ -2219,28 +2177,8 @@ impl ProxyService {
         };
 
         match app_type {
-            AppType::Claude => {
-                let current = self.read_claude_live()?;
-                let stripped = remove_patch_from_settings(app_type, &current, &patch)
-                    .map_err(|e| format!("反 patch Claude 配置失败: {e}"))?;
-                self.write_claude_live(&stripped)?;
-            }
-            AppType::Codex => {
-                let current = self.read_codex_live()?;
-                let stripped = remove_patch_from_settings(app_type, &current, &patch)
-                    .map_err(|e| format!("反 patch Codex 配置失败: {e}"))?;
-                self.write_codex_live(&stripped)?;
-            }
-            AppType::Gemini => {
-                let current = self.read_gemini_live()?;
-                let stripped = remove_patch_from_settings(app_type, &current, &patch)
-                    .map_err(|e| format!("反 patch Gemini 配置失败: {e}"))?;
-                self.write_gemini_live(&stripped)?;
-                // Unbinding switches Gemini back to the official provider.
-                // The `.env` patch removal alone is insufficient: Gemini CLI
-                // also persists its auth choice in settings.json.
-                crate::gemini_config::write_google_oauth_settings()
-                    .map_err(|e| format!("恢复 Gemini OAuth 认证方式失败: {e}"))?;
+            AppType::Claude | AppType::Codex | AppType::Gemini => {
+                return Err(format!("{key} 的解绑由 ofox_bind 负责"));
             }
             AppType::OpenCode => self.unbind_provider_subsection(
                 app_type,
@@ -3621,11 +3559,11 @@ command = "latest-command"
     // ─── ofox 直写 wrapper 单测 (Commit 3) ──────────────────────────────
     //
     // 覆盖 ofox_write_direct_to_live + ofox_backup_live_config + ofox_restore_from_backup
-    // 三个方法对 6 工具的关键不变量：
+    // 的关键不变量：
     //   - bind 后磁盘里的 token / base_url 是真实值（不是 PROXY_MANAGED 占位）
-    //   - backup → restore round-trip 后磁盘内容跟 bind 前一致
     //   - OpenCode/OpenClaw/Hermes 的 ofox-* provider 子节"bind 前不存在"场景
     //     在 restore 后被正确删掉，不残留空壳
+    // Claude/Codex/Gemini 的绑定、解绑还原见 services::ofox_bind::tests。
 
     /// 把 ofox-claude seed 写进 DB，让 ofox_write_direct_to_live 能找到模板。
     fn seed_ofox_claude(db: &Database) {
@@ -3802,14 +3740,16 @@ command = "latest-command"
         let service = ProxyService::new(db.clone());
         seed_ofox_claude(&db);
         prepare_claude_live_baseline();
-        service
-            .ofox_backup_live_config(&AppType::Claude, "sk-of-KEEP")
-            .await
-            .expect("backup");
-        service
-            .ofox_write_direct_to_live(&AppType::Claude, "sk-of-KEEP")
-            .await
-            .expect("write");
+        let settings_path = crate::config::get_claude_settings_path();
+        let original = std::fs::read_to_string(&settings_path).expect("read baseline");
+        crate::services::ofox_bind::bind(
+            &db,
+            crate::services::ofox_bind::Tool::Claude,
+            "claude",
+            "sk-of-KEEP",
+        )
+        .await
+        .expect("bind");
 
         assert!(
             !db.has_any_live_backup().await.expect("query"),
@@ -3823,91 +3763,20 @@ command = "latest-command"
         service.recover_from_crash().await.expect("crash recovery");
         assert!(db.get_bind_record("claude").expect("query").is_some());
 
-        service
-            .ofox_restore_from_backup(&AppType::Claude)
-            .await
-            .expect("unbind");
-        let live = service.read_claude_live().expect("read");
-        assert!(
-            live["env"].get("ANTHROPIC_AUTH_TOKEN").is_none(),
-            "unbind after a quit still removes the Ofox token"
-        );
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn ofox_unbind_strips_only_injected_fields_for_claude() {
-        // Claude unbind 字段级反 patch：bind 期间用户往 settings.json 加的
-        // statusLine 字段必须原样保留；只有 cc-switch 注入的 env 字段被减掉。
-        let _home = TempHome::new();
-        crate::settings::reload_settings().expect("reload settings");
-
-        let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
-        seed_ofox_claude(&db);
-        prepare_claude_live_baseline();
-
-        // bind 流程：backup（存 patch）→ write
-        service
-            .ofox_backup_live_config(&AppType::Claude, "sk-of-IGNORE")
-            .await
-            .expect("backup should succeed");
-        service
-            .ofox_write_direct_to_live(&AppType::Claude, "sk-of-IGNORE")
-            .await
-            .expect("direct write");
-
-        // bind 期间用户跟着某个教程往 settings.json 加了 statusLine + 一个 MCP
-        let bind_state = service.read_claude_live().expect("read bind state");
-        let mut augmented = bind_state.clone();
-        augmented.as_object_mut().unwrap().insert(
-            "statusLine".to_string(),
-            json!({ "type": "command", "command": "echo hi" }),
-        );
-        augmented
-            .as_object_mut()
-            .unwrap()
-            .insert("permissions".to_string(), json!({ "allow": ["Bash"] }));
-        service
-            .write_claude_live(&augmented)
-            .expect("write augmented");
-
-        // unbind
-        service
-            .ofox_restore_from_backup(&AppType::Claude)
-            .await
-            .expect("restore should succeed");
-
-        // env 里的 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN 都该被减掉
-        let after = service.read_claude_live().expect("read after restore");
-        assert!(
-            after.pointer("/env/ANTHROPIC_BASE_URL").is_none(),
-            "注入的 base_url 应当被反 patch 减掉, got: {after}"
-        );
-        assert!(
-            after.pointer("/env/ANTHROPIC_AUTH_TOKEN").is_none(),
-            "注入的 token 应当被反 patch 减掉, got: {after}"
-        );
-
-        // **核心承诺**：用户在 bind 期间手加的字段不能丢
+        crate::services::ofox_bind::unbind(
+            &db,
+            crate::services::ofox_bind::Tool::Claude,
+            "claude",
+            &[],
+            false,
+        )
+        .await
+        .expect("unbind");
         assert_eq!(
-            after
-                .pointer("/statusLine/command")
-                .and_then(|v| v.as_str()),
-            Some("echo hi"),
-            "用户加的 statusLine 必须保留"
+            std::fs::read_to_string(&settings_path).expect("read restored"),
+            original,
+            "unbind after a quit still restores the pre-bind settings"
         );
-        assert_eq!(
-            after
-                .pointer("/permissions/allow/0")
-                .and_then(|v| v.as_str()),
-            Some("Bash"),
-            "用户加的 permissions 必须保留"
-        );
-
-        // backup 已被 restore 消费掉
-        let backup_after = db.get_bind_record("claude").expect("query backup");
-        assert!(backup_after.is_none(), "restore 后应当删 backup");
     }
 
     fn seed_ofox_codex(db: &Database) {
@@ -4062,49 +3931,6 @@ command = "latest-command"
                 .and_then(Value::as_str),
             Some("gemini-api-key"),
             "API key bind 应同步 Gemini CLI 认证方式, got: {settings}"
-        );
-    }
-
-    #[tokio::test]
-    #[serial]
-    async fn ofox_unbind_gemini_restores_oauth_auth_mode() {
-        let _home = TempHome::new();
-        crate::settings::reload_settings().expect("reload settings");
-
-        let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
-        seed_ofox_gemini(&db);
-
-        let env_path = crate::gemini_config::get_gemini_env_path();
-        std::fs::create_dir_all(env_path.parent().unwrap()).expect("mkdir gemini");
-        std::fs::write(&env_path, "USER_CUSTOM=keep-me\n").expect("write gemini baseline");
-        crate::gemini_config::write_google_oauth_settings().expect("seed oauth mode");
-
-        service
-            .ofox_backup_live_config(&AppType::Gemini, "sk-of-GEM1")
-            .await
-            .expect("backup gemini patch");
-        service
-            .ofox_write_direct_to_live(&AppType::Gemini, "sk-of-GEM1")
-            .await
-            .expect("bind gemini");
-        service
-            .ofox_restore_from_backup(&AppType::Gemini)
-            .await
-            .expect("unbind gemini");
-
-        let env = crate::gemini_config::read_gemini_env().expect("read restored env");
-        assert_eq!(env.get("USER_CUSTOM").map(String::as_str), Some("keep-me"));
-        assert!(!env.contains_key("GEMINI_API_KEY"));
-        assert!(!env.contains_key("GOOGLE_GEMINI_BASE_URL"));
-
-        let settings: Value = read_json_file(&crate::gemini_config::get_gemini_settings_path())
-            .expect("read restored gemini settings");
-        assert_eq!(
-            settings
-                .pointer("/security/auth/selectedType")
-                .and_then(Value::as_str),
-            Some("oauth-personal")
         );
     }
 
@@ -4414,11 +4240,11 @@ command = "latest-command"
         // 不调 ofox_backup_live_config——确保 live_backups 表里没记录
         // 直接调 restore
         service
-            .ofox_restore_from_backup(&AppType::Claude)
+            .ofox_restore_from_backup(&AppType::OpenCode)
             .await
             .expect("缺备份时应当 noop，不报错");
 
         // 仍然没有备份（restore 没创建任何东西）
-        assert!(db.get_bind_record("claude").expect("query").is_none());
+        assert!(db.get_bind_record("opencode").expect("query").is_none());
     }
 }

@@ -216,12 +216,12 @@ pub async fn bind_tool_to_ofox_internal(
     app: &str,
     model_selections: Option<Vec<crate::workbuddy_config::WorkBuddyModelSelection>>,
 ) -> Result<(), String> {
-    // Codex 和 ChatGPT 共用 ~/.codex：只改 config.toml（key 放进 Ofox 服务商），
-    // 第一次绑定时记下原样，解绑时精确还原。
-    if let Some(holder) = crate::services::ofox_bind::codex_holder(app) {
-        let token = acquire_bind_token(AppType::Codex.into(), ofox_manager).await?;
-        crate::services::ofox_bind::bind_codex(db, holder, &token).await?;
-        crate::ofox_api_keys::mark_key_used(AppType::Codex);
+    // Codex（含共用 ~/.codex 的 ChatGPT）、Claude、Gemini：第一次绑定时记下受管
+    // 文件原样，只改接入字段，解绑时精确还原。
+    if let Some((tool, holder)) = crate::services::ofox_bind::tool_for(app) {
+        let token = acquire_bind_token(tool.app().into(), ofox_manager).await?;
+        crate::services::ofox_bind::bind(db, tool, holder, &token).await?;
+        crate::ofox_api_keys::mark_key_used(tool.app());
         return Ok(());
     }
     let is_workbuddy = app.trim().eq_ignore_ascii_case("workbuddy");
@@ -352,17 +352,13 @@ pub async fn ofox_bind_tool(
     .await
 }
 
-/// Mirror of [`bind_tool_to_ofox_internal`] — undo the OfoxAI bind for `app`
-/// and restore the official provider as active.
+/// Mirror of [`bind_tool_to_ofox_internal`] — undo the OfoxAI bind for `app`.
 ///
-/// Steps (the inverse order of bind, so we never leave a window where the
-/// live config still has ofox endpoints but a non-ofox active provider):
-///   1. 从 DB live_backups 读快照 → 写回工具真实配置 → 删 backup
-///      (`ofox_restore_from_backup`)。Claude/Codex/Gemini 是整文件还原；
-///      OpenCode/OpenClaw/Hermes 是 "ofox-* provider 子节" 还原（或删除，
-///      若 bind 前不存在）。
-///   2. 切 active provider 到 `<app>-official`（仅 claude/codex/gemini 有
-///      official seed；其它工具仅做步骤 1）。
+/// - Codex / ChatGPT / Claude / Gemini：交给 `services::ofox_bind::unbind`，按绑定前
+///   快照把接入方式（地址、key、登录方式、模型）和当前服务商精确还原。
+/// - OpenCode / OpenClaw / Hermes：从绑定记录读补丁 → 还原（或删除）
+///   "ofox-* provider 子节"（`ofox_restore_from_backup`）。
+/// - WorkBuddy：`workbuddy_config::unbind`。
 ///
 /// 我们**故意保留**：
 ///   - keychain 里的 `sk-of-...`——用户下次再 bind 直接命中、不重新调端点
@@ -380,8 +376,8 @@ pub async fn unbind_tool_from_ofox_internal(
     still_bound: &[String],
     dry_run: bool,
 ) -> Result<UnbindReport, String> {
-    if let Some(holder) = crate::services::ofox_bind::codex_holder(app) {
-        return crate::services::ofox_bind::unbind_codex(db, holder, still_bound, dry_run).await;
+    if let Some((tool, holder)) = crate::services::ofox_bind::tool_for(app) {
+        return crate::services::ofox_bind::unbind(db, tool, holder, still_bound, dry_run).await;
     }
     if dry_run {
         // 其它工具的预览后续阶段接入；先返回空报告，界面显示通用说明。
@@ -394,31 +390,11 @@ pub async fn unbind_tool_from_ofox_internal(
     let app_type = AppType::from_str(app).map_err(|e| format!("无效的应用类型: {e}"))?;
     let app_str = app_type.as_str();
 
-    // 1) 从 backup 恢复磁盘 + 删 backup。失败立刻中止——没恢复前不能切官方
-    //    provider，否则用户的 active 是 official 但磁盘还指 ofox。
+    // OpenCode/OpenClaw/Hermes 没有官方服务商的概念：还原 ofox-* 子节即可。
     proxy_service
         .ofox_restore_from_backup(&app_type)
         .await
         .map_err(|e| format!("恢复 {app_str} 工具配置失败: {e}"))?;
-
-    // 2) 切 active provider 到 official seed（如有）。
-    //    `<app>-official` id 跟 `database/dao/providers_seed.rs::OFFICIAL_SEEDS`
-    //    保持一致；目前只 claude/codex/gemini 有。其它工具无 official 概念，
-    //    步骤 1 已经把磁盘还原好，不再额外切。
-    let official_id: Option<&str> = match app_type {
-        AppType::Claude => Some("claude-official"),
-        AppType::Codex => Some("codex-official"),
-        AppType::Gemini => Some("gemini-official"),
-        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => None,
-    };
-
-    if let Some(id) = official_id {
-        // 两端持久化保持一致：settings.json 与 DB is_current。
-        crate::settings::set_current_provider(&app_type, Some(id))
-            .map_err(|e| format!("设置 {app_str} 当前供应商失败: {e}"))?;
-        db.set_current_provider(app_str, id)
-            .map_err(|e| format!("更新 {app_str} 数据库 is_current 失败: {e}"))?;
-    }
 
     Ok(UnbindReport::new(app_str, false))
 }

@@ -15,10 +15,10 @@ use serde_json::Value;
 use toml_edit::{DocumentMut, Item, Table, TableLike};
 
 use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
-use crate::config::{file_mode, read_file_bytes, FileTxn};
+use crate::config::FileTxn;
 use crate::ofox_apex::mentions_ofox_gateway;
 
-use super::record::{FileBaseline, ManagedFile};
+use super::plan::{read_text, FileEdit, RestorePlan};
 
 const OFOX_PROVIDER: &str = "ofox";
 const PROVIDERS_TABLE: &str = "model_providers";
@@ -35,15 +35,6 @@ const BOUND_CONFIG_MODE: u32 = 0o600;
 fn parse_doc(text: &str) -> Result<DocumentMut, String> {
     text.parse::<DocumentMut>()
         .map_err(|e| format!("~/.codex/config.toml 不是有效的 TOML，请先修复后再操作：{e}"))
-}
-
-fn read_text(path: &Path) -> Result<Option<String>, String> {
-    read_file_bytes(path)
-        .map_err(|e| e.to_string())?
-        .map(|bytes| {
-            String::from_utf8(bytes).map_err(|_| format!("{} 不是 UTF-8 文本", path.display()))
-        })
-        .transpose()
 }
 
 fn child_table<'a>(
@@ -126,36 +117,8 @@ pub(crate) fn write_bound_config(
         .map_err(|e| format!("写入 Codex 配置失败：{e}"))
 }
 
-/// 绑定前的 config.toml。解析不了就拒绝绑定——不能把一份坏掉的文件当成原样保存，
-/// 再在它上面写配置。
-pub(crate) fn capture_baseline() -> Result<FileBaseline, String> {
-    let path = get_codex_config_path();
-    let original = read_text(&path)?;
-    if let Some(text) = original.as_deref() {
-        parse_doc(text)?;
-    }
-    Ok(FileBaseline {
-        file: ManagedFile::CodexConfig,
-        path: path.to_string_lossy().into_owned(),
-        existed: original.is_some(),
-        dir_existed: path.parent().is_some_and(Path::exists),
-        mode: file_mode(&path),
-        original,
-    })
-}
-
-pub(crate) fn read_config() -> Result<Option<String>, String> {
-    read_text(&get_codex_config_path())
-}
-
-/// 还原计划。`content` 为 `None` 表示删除文件（绑定前不存在且没有其它内容）。
-#[derive(Debug, PartialEq)]
-pub(crate) struct RestorePlan {
-    pub content: Option<String>,
-    /// 还原结果与绑定前的文件语义相同，因此直接写回原文本（逐字节一致）。
-    pub exact: bool,
-    pub restored_keys: Vec<String>,
-    pub removed_keys: Vec<String>,
+pub(crate) fn validate(text: &str) -> Result<(), String> {
+    parse_doc(text).map(drop)
 }
 
 fn same_toml(a: &str, b: &str) -> bool {
@@ -223,18 +186,14 @@ pub(crate) fn plan_restore(
     }
 
     let restored = doc.to_string();
-    let original_text = original.unwrap_or_default();
-    let (content, exact) = if same_toml(&restored, original_text) {
-        (original.map(str::to_string), true)
-    } else {
-        (Some(restored), false)
-    };
-    Ok(RestorePlan {
-        content,
-        exact,
+    let same = same_toml(&restored, original.unwrap_or_default());
+    Ok(RestorePlan::finish(
+        restored,
+        original,
+        same,
         restored_keys,
         removed_keys,
-    })
+    ))
 }
 
 fn is_ofox_key(value: &str, ofox_key: Option<&str>) -> bool {
@@ -346,9 +305,37 @@ pub(crate) fn migrate_legacy_shape(
     Ok(true)
 }
 
-/// 没有绑定前快照时的尽力清理：去掉 Ofox 写进去的接入字段，回到 Codex 默认登录。
+/// 没有绑定前快照时的尽力清理：去掉 Ofox 写进 config.toml 的接入字段，以及旧版本
+/// 留在 auth.json 里的 Ofox key，回到 Codex 默认登录。
+pub(crate) fn legacy_edits() -> Result<Vec<FileEdit>, String> {
+    let mut edits = Vec::new();
+    let config_path = get_codex_config_path();
+    if let Some(config) = read_text(&config_path)? {
+        if let (Some(content), removed_keys) = legacy_cleanup_config(&config)? {
+            edits.push(FileEdit {
+                path: config_path,
+                content: Some(content),
+                restored_keys: Vec::new(),
+                removed_keys,
+            });
+        }
+    }
+    let auth_path = get_codex_auth_path();
+    if let Some(auth) = read_text(&auth_path)? {
+        if let Some(content) = strip_ofox_key_from_auth(&auth, None)? {
+            edits.push(FileEdit {
+                path: auth_path,
+                content,
+                restored_keys: Vec::new(),
+                removed_keys: vec!["OPENAI_API_KEY".to_string()],
+            });
+        }
+    }
+    Ok(edits)
+}
+
 /// 返回新的 config 内容（`None` 表示无需改动）和被删掉的字段。
-pub(crate) fn legacy_cleanup_config(config: &str) -> Result<(Option<String>, Vec<String>), String> {
+fn legacy_cleanup_config(config: &str) -> Result<(Option<String>, Vec<String>), String> {
     let mut doc = parse_doc(config)?;
     let mut removed = Vec::new();
     let provider_is_ofox = is_ofox_bound(config);
@@ -389,27 +376,8 @@ pub(crate) fn legacy_cleanup_config(config: &str) -> Result<(Option<String>, Vec
     Ok((Some(doc.to_string()), removed))
 }
 
-/// 旧版本绑定可能在 auth.json 里留下 Ofox 的 key；清理时一并去掉。
-pub(crate) fn legacy_cleanup_auth(txn: &mut FileTxn, dry_run: bool) -> Result<bool, String> {
-    let path = get_codex_auth_path();
-    let Some(text) = read_text(&path)? else {
-        return Ok(false);
-    };
-    let Some(edit) = strip_ofox_key_from_auth(&text, None)? else {
-        return Ok(false);
-    };
-    if !dry_run {
-        apply_auth_edit(txn, &path, edit)?;
-    }
-    Ok(true)
-}
-
 pub(crate) fn config_path() -> PathBuf {
     get_codex_config_path()
-}
-
-pub(crate) fn auth_path() -> PathBuf {
-    get_codex_auth_path()
 }
 
 #[cfg(test)]
