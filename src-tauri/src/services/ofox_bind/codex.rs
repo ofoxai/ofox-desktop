@@ -283,7 +283,12 @@ fn apply_auth_edit(txn: &mut FileTxn, path: &Path, edit: Option<String>) -> Resu
 /// 旧版本绑定的安装：key 在 auth.json 里、`requires_openai_auth = true`。改成新
 /// 形态（key 放进 Ofox 服务商），并从 auth.json 里拿掉 Ofox 的 key。可重复执行；
 /// 找不到 key 时什么都不改。返回是否做了迁移。
-pub(crate) fn migrate_legacy_shape(stored_key: Option<&str>) -> Result<bool, String> {
+///
+/// `stored_key` 只在确实要迁移、且 auth.json 里没有 Ofox key 时才调用——读钥匙串
+/// 可能弹系统授权窗口，不能在每次启动时无条件去读。
+pub(crate) fn migrate_legacy_shape(
+    stored_key: impl FnOnce() -> Option<String>,
+) -> Result<bool, String> {
     let config_path = get_codex_config_path();
     let Some(config) = read_text(&config_path)? else {
         return Ok(false);
@@ -310,7 +315,7 @@ pub(crate) fn migrate_legacy_shape(stored_key: Option<&str>) -> Result<bool, Str
         .and_then(|text| serde_json::from_str::<Value>(text).ok())
         .and_then(|auth| auth.get("OPENAI_API_KEY")?.as_str().map(str::to_string))
         .filter(|key| key.starts_with("sk-of-"));
-    let Some(key) = auth_key.or_else(|| stored_key.map(str::to_string)) else {
+    let Some(key) = auth_key.or_else(stored_key) else {
         log::warn!("[ofox_bind] Codex 旧版绑定缺少可用的 Ofox key，暂不迁移");
         return Ok(false);
     };

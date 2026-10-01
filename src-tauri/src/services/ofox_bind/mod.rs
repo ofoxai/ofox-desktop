@@ -124,7 +124,7 @@ fn load_record(db: &Database, tool: &str) -> Result<Option<(String, StoredRecord
 /// 已经绑定的 Codex（切换模型时）：按 DB 模板重写 config.toml，不碰 auth.json。
 pub(crate) async fn rewrite_codex_bound_config(db: &Database, api_key: &str) -> Result<(), String> {
     let _guard = BIND_LOCK.lock().await;
-    codex::migrate_legacy_shape(Some(api_key))?;
+    codex::migrate_legacy_shape(|| Some(api_key.to_string()))?;
     let template = codex_template(db)?;
     let mut txn = FileTxn::new();
     if let Err(error) = codex::write_bound_config(&template, api_key, &mut txn) {
@@ -137,13 +137,15 @@ pub(crate) async fn rewrite_codex_bound_config(db: &Database, api_key: &str) -> 
 /// 启动时把旧版本绑定的 Codex 迁成「服务商自带 key」，堵住 ChatGPT 令牌外发。
 pub(crate) async fn migrate_codex_on_startup() {
     let _guard = BIND_LOCK.lock().await;
-    let stored_key = crate::ofox_secret::default_store()
-        .load(crate::ofox_secret::Slot::ApiKey {
-            tool: AppType::Codex.into(),
-        })
-        .ok()
-        .flatten();
-    match codex::migrate_legacy_shape(stored_key.as_deref()) {
+    let stored_key = || {
+        crate::ofox_secret::default_store()
+            .load(crate::ofox_secret::Slot::ApiKey {
+                tool: AppType::Codex.into(),
+            })
+            .ok()
+            .flatten()
+    };
+    match codex::migrate_legacy_shape(stored_key) {
         Ok(true) => log::info!("✓ Migrated legacy Codex Ofox binding"),
         Ok(false) => {}
         Err(e) => log::warn!("✗ Failed to migrate legacy Codex Ofox binding: {e}"),
@@ -154,7 +156,7 @@ pub(crate) async fn migrate_codex_on_startup() {
 /// 服务商，之后重复绑定只增加绑定方，不覆盖快照。
 pub(crate) async fn bind_codex(db: &Database, holder: &str, api_key: &str) -> Result<(), String> {
     let _guard = BIND_LOCK.lock().await;
-    codex::migrate_legacy_shape(Some(api_key))?;
+    codex::migrate_legacy_shape(|| Some(api_key.to_string()))?;
     let template = codex_template(db)?;
 
     let existing = load_record(db, CODEX_RECORD)?;
@@ -755,7 +757,7 @@ mod tests {
         write(&config, TEMPLATE);
         write(&auth, "{\"OPENAI_API_KEY\": \"sk-proj-mine\"}");
         assert!(
-            !codex::migrate_legacy_shape(None).unwrap(),
+            !codex::migrate_legacy_shape(|| None).unwrap(),
             "no Ofox key anywhere"
         );
         assert_eq!(fs::read_to_string(&config).unwrap(), TEMPLATE);
@@ -767,14 +769,43 @@ mod tests {
                 "\"OPENAI_API_KEY\": \"sk-of-OLD\"",
             ),
         );
-        assert!(codex::migrate_legacy_shape(None).unwrap());
+        assert!(codex::migrate_legacy_shape(|| None).unwrap());
         assert_eq!(
             toml_at(&config)["model_providers"]["ofox"]["experimental_bearer_token"].as_str(),
             Some("sk-of-OLD")
         );
         assert!(
-            !codex::migrate_legacy_shape(None).unwrap(),
+            !codex::migrate_legacy_shape(|| None).unwrap(),
             "second run is a no-op"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn legacy_migration_reads_the_keychain_only_when_it_has_to() {
+        // 读钥匙串可能弹系统授权窗口：不需要迁移、或 auth.json 里已有 key 时都不能读。
+        let home = Home::new();
+        let (auth, config) = (home.codex("auth.json"), home.codex("config.toml"));
+        let keychain = || -> Option<String> { panic!("keychain must not be read") };
+
+        write(&config, USER_CONFIG);
+        assert!(!codex::migrate_legacy_shape(keychain).unwrap());
+
+        write(&config, TEMPLATE);
+        write(&auth, "{\"OPENAI_API_KEY\": \"sk-of-OLD\"}");
+        assert!(codex::migrate_legacy_shape(keychain).unwrap());
+        assert!(!auth.exists(), "auth.json held only the Ofox key");
+
+        let mut asked = false;
+        write(&config, TEMPLATE);
+        assert!(codex::migrate_legacy_shape(|| {
+            asked = true;
+            Some("sk-of-STORED".to_string())
+        })
+        .unwrap());
+        assert!(
+            asked,
+            "falls back to the stored key when auth.json has none"
         );
     }
 
