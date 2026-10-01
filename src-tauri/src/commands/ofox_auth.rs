@@ -243,12 +243,7 @@ pub async fn unbind_tool_from_ofox_internal(
     if !app.trim().eq_ignore_ascii_case("workbuddy") {
         return Err(format!("无效的应用类型: {}", app.trim()));
     }
-    if dry_run {
-        // WorkBuddy 的预览后续阶段接入；先返回空报告，界面显示通用说明。
-        return Ok(UnbindReport::new("workbuddy", true));
-    }
-    crate::workbuddy_config::unbind(db).await?;
-    Ok(UnbindReport::new("workbuddy", false))
+    crate::workbuddy_config::unbind(db, dry_run).await
 }
 
 /// Tauri command wrapper — see [`unbind_tool_from_ofox_internal`].

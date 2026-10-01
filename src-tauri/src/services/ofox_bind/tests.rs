@@ -1070,3 +1070,49 @@ async fn hermes_legacy_binding_without_a_routing_snapshot_clears_ofox_routing() 
     assert!(providers.get("ofox-hermes").is_none());
     assert!(providers.get("deepseek").is_some());
 }
+
+// ─── WorkBuddy ──────────────────────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn workbuddy_unbind_restores_even_after_edits_in_workbuddy() {
+    let _home = Home::new();
+    let path = crate::workbuddy_config::models_path();
+    let original = "[\n  {\n    \"id\": \"openai/gpt-x\",\n    \"vendor\": \"Mine\"\n  },\n  {\n    \"id\": \"local\"\n  }\n]";
+    write(&path, original);
+    let db = Database::memory().expect("db");
+    let selection = crate::workbuddy_config::WorkBuddyModelSelection {
+        id: "openai/gpt-x".into(),
+        name: "GPT X".into(),
+        supports_tool_call: true,
+        supports_images: false,
+        supports_reasoning: false,
+    };
+    crate::workbuddy_config::sync_selected_models(&db, KEY, &[selection])
+        .await
+        .expect("bind");
+
+    // 用户在 WorkBuddy 里改了 Ofox 的条目。
+    let mut models: Vec<Value> = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    models[0]["name"] = json!("Renamed in WorkBuddy");
+    write(&path, &serde_json::to_string_pretty(&models).unwrap());
+    let edited = fs::read_to_string(&path).unwrap();
+
+    let preview = crate::workbuddy_config::unbind(&db, true)
+        .await
+        .expect("preview");
+    assert_eq!(
+        preview.restored_keys,
+        ["~/.workbuddy/models.json: openai/gpt-x"]
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), edited);
+
+    crate::workbuddy_config::unbind(&db, false)
+        .await
+        .expect("unbind");
+    assert_eq!(
+        serde_json::from_str::<Value>(&fs::read_to_string(&path).unwrap()).unwrap(),
+        serde_json::from_str::<Value>(original).unwrap()
+    );
+    assert!(db.get_bind_record("workbuddy").unwrap().is_none());
+}
