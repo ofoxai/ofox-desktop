@@ -93,7 +93,8 @@ pub fn get_hermes_config_path() -> PathBuf {
     get_hermes_dir().join("config.yaml")
 }
 
-fn hermes_write_lock() -> &'static Mutex<()> {
+/// 所有读改写 config.yaml 的路径都要拿这把锁。
+pub(crate) fn hermes_write_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -348,7 +349,9 @@ pub(crate) fn render_section(
 /// 把 `from` 里的顶层段落原样（含注释和格式）放进 `raw`。`from` 里没有这一段时
 /// 返回 `None`。
 pub(crate) fn copy_section(raw: &str, from: &str, section_key: &str) -> Option<String> {
-    let (start, end) = find_yaml_section_range(from, section_key)?;
+    // 重复的顶层键以最后一个为准（和 Hermes / PyYAML、parse_config_text 一致）。
+    let from = deduplicate_top_level_keys(from);
+    let (start, end) = find_yaml_section_range(&from, section_key)?;
     Some(splice_yaml_section(raw, section_key, &from[start..end]))
 }
 
@@ -1169,6 +1172,14 @@ pub fn read_memory_limits() -> Result<HermesMemoryLimits, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_section_uses_the_active_duplicate() {
+        let from = "model:\n  provider: stale\nskills: {}\nmodel:\n  provider: deepseek\n";
+        let copied = copy_section("model:\n  provider: ofox-hermes\n", from, "model").unwrap();
+        let config = parse_config_text(&copied).unwrap();
+        assert_eq!(config["model"]["provider"].as_str(), Some("deepseek"));
+    }
     use serial_test::serial;
     use std::sync::{Mutex, OnceLock};
 

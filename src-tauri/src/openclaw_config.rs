@@ -5,14 +5,11 @@
 
 use crate::config::{atomic_write, get_app_config_dir};
 use crate::error::AppError;
+use crate::json5_sections::{self, KeyStyle};
 use crate::settings::{effective_backup_retain_count, get_openclaw_override_dir};
 use chrono::Local;
 use indexmap::IndexMap;
-use json_five::rt::parser::{
-    from_str as rt_from_str, JSONKeyValuePair as RtJSONKeyValuePair,
-    JSONObjectContext as RtJSONObjectContext, JSONText as RtJSONText, JSONValue as RtJSONValue,
-    KeyValuePairContext as RtKeyValuePairContext,
-};
+use json_five::rt::parser::JSONText as RtJSONText;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -20,7 +17,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-const OPENCLAW_DEFAULT_SOURCE: &str =
+/// 配置文件不存在时 OpenClaw 自己用的默认配置。
+pub(crate) const OPENCLAW_DEFAULT_SOURCE: &str =
     "{\n  models: {\n    mode: 'merge',\n    providers: {},\n  },\n}\n";
 const OPENCLAW_TOOLS_PROFILES: &[&str] = &["minimal", "coding", "messaging", "full"];
 
@@ -56,7 +54,8 @@ fn default_openclaw_config_value() -> Value {
     })
 }
 
-fn openclaw_write_lock() -> &'static Mutex<()> {
+/// 所有读改写 openclaw.json 的路径都要拿这把锁。
+pub(crate) fn openclaw_write_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -242,7 +241,7 @@ impl OpenClawConfigDocument {
             None
         };
 
-        let text = parse_rt_source(
+        let text = json5_sections::parse(
             original_source
                 .as_deref()
                 .unwrap_or(OPENCLAW_DEFAULT_SOURCE),
@@ -256,181 +255,8 @@ impl OpenClawConfigDocument {
     }
 
     fn set_root_section(&mut self, key: &str, value: &Value) -> Result<(), AppError> {
-        put_root_section(&mut self.text, key, |indent| {
-            value_to_rt_value(value, indent)
-        })
+        json5_sections::set_root_section(&mut self.text, key, value, KeyStyle::Json5)
     }
-}
-
-fn parse_rt_source(source: &str) -> Result<RtJSONText, AppError> {
-    rt_from_str(source).map_err(|e| {
-        AppError::Config(format!(
-            "Failed to parse OpenClaw config as round-trip JSON5 document: {}",
-            e.message
-        ))
-    })
-}
-
-fn root_object(
-    text: &mut RtJSONText,
-) -> Result<
-    (
-        &mut Vec<RtJSONKeyValuePair>,
-        &mut Option<RtJSONObjectContext>,
-    ),
-    AppError,
-> {
-    match &mut text.value {
-        RtJSONValue::JSONObject {
-            key_value_pairs,
-            context,
-        } => Ok((key_value_pairs, context)),
-        _ => Err(AppError::Config(
-            "OpenClaw config root must be a JSON5 object".to_string(),
-        )),
-    }
-}
-
-/// 设置顶层段落 `key`，其余段落（含注释和格式）原样保留。`make_value` 拿到子级缩进。
-fn put_root_section(
-    text: &mut RtJSONText,
-    key: &str,
-    make_value: impl FnOnce(&str) -> Result<RtJSONValue, AppError>,
-) -> Result<(), AppError> {
-    let (key_value_pairs, context) = root_object(text)?;
-
-    if key_value_pairs.is_empty()
-        && context
-            .as_ref()
-            .map(|ctx| ctx.wsc.0.is_empty())
-            .unwrap_or(true)
-    {
-        *context = Some(RtJSONObjectContext {
-            wsc: ("\n  ".to_string(),),
-        });
-    }
-
-    let leading_ws = context
-        .as_ref()
-        .map(|ctx| ctx.wsc.0.clone())
-        .unwrap_or_default();
-    let entry_separator_ws = derive_entry_separator(&leading_ws);
-    let child_indent = extract_trailing_indent(&leading_ws);
-    let new_value = make_value(&child_indent)?;
-
-    if let Some(existing) = key_value_pairs
-        .iter_mut()
-        .find(|pair| json5_key_name(&pair.key) == Some(key))
-    {
-        existing.value = new_value;
-        return Ok(());
-    }
-
-    let new_pair = if let Some(last_pair) = key_value_pairs.last_mut() {
-        let last_ctx = ensure_kvp_context(last_pair);
-        let closing_ws = if let Some(after_comma) = last_ctx.wsc.3.clone() {
-            last_ctx.wsc.3 = Some(entry_separator_ws.clone());
-            after_comma
-        } else {
-            let closing_ws = std::mem::take(&mut last_ctx.wsc.2);
-            last_ctx.wsc.3 = Some(entry_separator_ws.clone());
-            closing_ws
-        };
-
-        make_root_pair(key, new_value, closing_ws)
-    } else {
-        make_root_pair(
-            key,
-            new_value,
-            derive_closing_ws_from_separator(&leading_ws),
-        )
-    };
-
-    key_value_pairs.push(new_pair);
-    Ok(())
-}
-
-/// 删除顶层段落 `key`：它前面的注释随它一起删掉，后面的注释和格式保持不变。
-fn remove_root_section(text: &mut RtJSONText, key: &str) -> Result<bool, AppError> {
-    let (key_value_pairs, context) = root_object(text)?;
-    let Some(index) = key_value_pairs
-        .iter()
-        .position(|pair| json5_key_name(&pair.key) == Some(key))
-    else {
-        return Ok(false);
-    };
-    let removed = key_value_pairs.remove(index);
-    let (after_value, after_comma) = removed
-        .context
-        .map(|ctx| (ctx.wsc.2, ctx.wsc.3))
-        .unwrap_or_default();
-    let is_last = index == key_value_pairs.len();
-
-    if !is_last {
-        // 原来引出被删段落的空白（含它的注释），换成引出下一段的空白。
-        let lead_in = after_comma.unwrap_or_default();
-        match index.checked_sub(1) {
-            Some(previous) => {
-                ensure_kvp_context(&mut key_value_pairs[previous]).wsc.3 = Some(lead_in)
-            }
-            None => *context = Some(RtJSONObjectContext { wsc: (lead_in,) }),
-        }
-        return Ok(true);
-    }
-
-    match index.checked_sub(1) {
-        Some(previous) => {
-            let ctx = ensure_kvp_context(&mut key_value_pairs[previous]);
-            match after_comma {
-                // 原来最后一段带逗号：前一段沿用逗号和收尾空白。
-                Some(closing) => ctx.wsc.3 = Some(closing),
-                None => {
-                    ctx.wsc.3 = None;
-                    ctx.wsc.2.push_str(&after_value);
-                }
-            }
-        }
-        None => {
-            *context = Some(RtJSONObjectContext {
-                wsc: (after_comma.unwrap_or(after_value),),
-            })
-        }
-    }
-    Ok(true)
-}
-
-/// 在配置文本上设置（`Some`）或删除（`None`）几个顶层段落，其余段落的注释和格式
-/// 原样保留。`source` 为 `None` 时从默认配置开始。不读写磁盘。
-pub(crate) fn edit_root_sections(
-    source: Option<&str>,
-    edits: &[(&str, Option<&Value>)],
-) -> Result<String, AppError> {
-    let mut text = parse_rt_source(source.unwrap_or(OPENCLAW_DEFAULT_SOURCE))?;
-    for (key, value) in edits {
-        match value {
-            Some(value) => {
-                put_root_section(&mut text, key, |indent| value_to_rt_value(value, indent))?
-            }
-            None => {
-                remove_root_section(&mut text, key)?;
-            }
-        }
-    }
-    Ok(text.to_string())
-}
-
-/// 把 `from` 里的顶层段落 `key` 原样（含注释和格式）放进 `source`。
-pub(crate) fn copy_root_section(source: &str, from: &str, key: &str) -> Result<String, AppError> {
-    let mut from_text = parse_rt_source(from)?;
-    let (pairs, _) = root_object(&mut from_text)?;
-    let value = pairs
-        .iter()
-        .find(|pair| json5_key_name(&pair.key) == Some(key))
-        .map(|pair| pair.value.clone())
-        .ok_or_else(|| AppError::Config(format!("OpenClaw config has no '{key}' section")))?;
-    let mut text = parse_rt_source(source)?;
-    put_root_section(&mut text, key, |_| Ok(value))?;
-    Ok(text.to_string())
 }
 
 impl OpenClawConfigDocument {
@@ -554,127 +380,6 @@ fn ensure_object(value: &mut Value) -> &mut Map<String, Value> {
     value
         .as_object_mut()
         .expect("value should be object after normalization")
-}
-
-fn ensure_kvp_context(pair: &mut RtJSONKeyValuePair) -> &mut RtKeyValuePairContext {
-    pair.context.get_or_insert_with(|| RtKeyValuePairContext {
-        wsc: (String::new(), " ".to_string(), String::new(), None),
-    })
-}
-
-fn extract_trailing_indent(separator_ws: &str) -> String {
-    separator_ws
-        .rsplit_once('\n')
-        .map(|(_, tail)| tail.to_string())
-        .unwrap_or_default()
-}
-
-fn derive_closing_ws_from_separator(separator_ws: &str) -> String {
-    let Some((prefix, indent)) = separator_ws.rsplit_once('\n') else {
-        return String::new();
-    };
-
-    let reduced_indent = if indent.ends_with('\t') {
-        &indent[..indent.len().saturating_sub(1)]
-    } else if indent.ends_with("  ") {
-        &indent[..indent.len().saturating_sub(2)]
-    } else if indent.ends_with(' ') {
-        &indent[..indent.len().saturating_sub(1)]
-    } else {
-        indent
-    };
-
-    format!("{prefix}\n{reduced_indent}")
-}
-
-fn derive_entry_separator(leading_ws: &str) -> String {
-    if leading_ws.is_empty() {
-        return String::new();
-    }
-
-    if leading_ws.contains('\n') {
-        return format!("\n{}", extract_trailing_indent(leading_ws));
-    }
-
-    String::new()
-}
-
-fn value_to_rt_value(value: &Value, parent_indent: &str) -> Result<RtJSONValue, AppError> {
-    // `json-five` 0.3.1 can panic when pretty-printing nested empty maps/arrays.
-    // Serialize with `serde_json` instead; the resulting JSON is valid JSON5 and
-    // can still be parsed back into the round-trip AST we use for insertion.
-    let source = serde_json::to_string_pretty(value)
-        .map_err(|e| AppError::Config(format!("Failed to serialize JSON section: {e}")))?;
-
-    let adjusted = reindent_json5_block(&source, parent_indent);
-    let text = rt_from_str(&adjusted).map_err(|e| {
-        AppError::Config(format!(
-            "Failed to parse generated JSON5 section: {}",
-            e.message
-        ))
-    })?;
-    Ok(text.value)
-}
-
-fn reindent_json5_block(source: &str, parent_indent: &str) -> String {
-    let normalized = normalize_json_five_output(source);
-    if parent_indent.is_empty() || !normalized.contains('\n') {
-        return normalized;
-    }
-
-    let mut lines = normalized.lines();
-    let Some(first_line) = lines.next() else {
-        return String::new();
-    };
-
-    let mut result = String::from(first_line);
-    for line in lines {
-        result.push('\n');
-        result.push_str(parent_indent);
-        result.push_str(line);
-    }
-    result
-}
-
-fn normalize_json_five_output(source: &str) -> String {
-    source.replace("\\/", "/")
-}
-
-fn make_root_pair(key: &str, value: RtJSONValue, closing_ws: String) -> RtJSONKeyValuePair {
-    RtJSONKeyValuePair {
-        key: make_json5_key(key),
-        value,
-        context: Some(RtKeyValuePairContext {
-            wsc: (String::new(), " ".to_string(), closing_ws, None),
-        }),
-    }
-}
-
-fn make_json5_key(key: &str) -> RtJSONValue {
-    if is_identifier_key(key) {
-        RtJSONValue::Identifier(key.to_string())
-    } else {
-        RtJSONValue::DoubleQuotedString(key.to_string())
-    }
-}
-
-fn is_identifier_key(key: &str) -> bool {
-    let mut chars = key.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-
-    matches!(first, 'a'..='z' | 'A'..='Z' | '_' | '$')
-        && chars.all(|ch| matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '$'))
-}
-
-fn json5_key_name(key: &RtJSONValue) -> Option<&str> {
-    match key {
-        RtJSONValue::Identifier(name)
-        | RtJSONValue::DoubleQuotedString(name)
-        | RtJSONValue::SingleQuotedString(name) => Some(name),
-        _ => None,
-    }
 }
 
 fn warning(code: &str, message: impl Into<String>, path: Option<&str>) -> OpenClawHealthWarning {
@@ -1035,51 +740,6 @@ mod tests {
         LOCK.get_or_init(|| Mutex::new(()))
             .lock()
             .unwrap_or_else(|err| err.into_inner())
-    }
-
-    fn without(source: &str, key: &str) -> String {
-        edit_root_sections(Some(source), &[(key, None)]).unwrap()
-    }
-
-    #[test]
-    fn removing_a_section_drops_its_comment_and_keeps_the_next_one() {
-        let source = "{\n  // models config\n  models: { mode: 'merge' },\n  // agents config\n  agents: { defaults: {} },\n  // tools config\n  tools: {},\n}\n";
-        assert_eq!(
-            without(source, "agents"),
-            "{\n  // models config\n  models: { mode: 'merge' },\n  // tools config\n  tools: {},\n}\n"
-        );
-        assert_eq!(
-            without(source, "models"),
-            "{\n  // agents config\n  agents: { defaults: {} },\n  // tools config\n  tools: {},\n}\n"
-        );
-    }
-
-    #[test]
-    fn removing_the_last_section_keeps_the_closing_layout() {
-        assert_eq!(
-            without("{\n  models: {},\n  agents: {}\n}", "agents"),
-            "{\n  models: {}\n}"
-        );
-        assert_eq!(
-            without("{\n  models: {},\n  agents: {},\n}", "agents"),
-            "{\n  models: {},\n}"
-        );
-        assert_eq!(without("{\n  agents: {},\n}", "agents"), "{\n}");
-        assert_eq!(
-            without("{\n  models: {},\n}", "agents"),
-            "{\n  models: {},\n}"
-        );
-    }
-
-    #[test]
-    fn copying_a_section_keeps_its_original_comments() {
-        let from = "{\n  agents: {\n    // keep me\n    defaults: { model: 'a/b' },\n  },\n}\n";
-        let source =
-            "{\n  meta: { touched: 1 },\n  agents: { defaults: { model: 'ofox/x' } },\n}\n";
-        assert_eq!(
-            copy_root_section(source, from, "agents").unwrap(),
-            "{\n  meta: { touched: 1 },\n  agents: {\n    // keep me\n    defaults: { model: 'a/b' },\n  },\n}\n"
-        );
     }
 
     fn with_test_paths<T>(source: &str, test: impl FnOnce(&Path) -> T) -> T {

@@ -9,7 +9,7 @@ use crate::config::FileTxn;
 use crate::ofox_apex::mentions_ofox_gateway;
 use crate::opencode_config::{get_opencode_config_path, normalize_ofox_provider_transport};
 
-use super::json_file::{self, JsonPath};
+use super::json_file::{self, JsonPath, KeyStyle};
 use super::plan::{read_text, FileEdit, RestorePlan};
 
 const LABEL: &str = "OpenCode 的 opencode.json";
@@ -28,7 +28,7 @@ pub(crate) fn config_path() -> PathBuf {
 }
 
 pub(crate) fn validate(text: &str) -> Result<(), String> {
-    json_file::parse_object(Some(text), LABEL).map(drop)
+    json_file::validate(text, LABEL)
 }
 
 /// `provider."ofox-opencode"` 指向 Ofox 网关——当前（或旧版本）绑定留下的配置。
@@ -57,12 +57,13 @@ pub(crate) fn bound_config(
     template: &Value,
     api_key: &str,
 ) -> Result<String, String> {
+    let before = json_file::parse_object(current, LABEL)?;
     let mut value = match current {
-        Some(text) => json_file::parse_object(Some(text), LABEL)?,
+        Some(_) => before.clone(),
         None => json!({ "$schema": SCHEMA_URL }),
     };
     json_file::set(&mut value, ENTRY, bound_entry(template, api_key));
-    serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
+    json_file::render_changed(current.unwrap_or_default(), KeyStyle::Json, &before, &value)
 }
 
 /// 绑定和切换模型共用。
@@ -81,7 +82,7 @@ pub(crate) fn plan_restore(
     original: Option<&str>,
     current: Option<&str>,
 ) -> Result<RestorePlan, String> {
-    json_file::plan_restore(original, current, LABEL, LEAVES, CONTAINERS)
+    json_file::plan_restore(original, current, LABEL, KeyStyle::Json, LEAVES, CONTAINERS)
 }
 
 /// 没有绑定前快照时的尽力清理：`ofox-opencode` 是 Ofox 专用的条目，整条删掉。
@@ -90,7 +91,8 @@ pub(crate) fn legacy_edits() -> Result<Vec<FileEdit>, String> {
     let Some(text) = read_text(&path)? else {
         return Ok(Vec::new());
     };
-    let mut value = json_file::parse_object(Some(&text), LABEL)?;
+    let before = json_file::parse_object(Some(&text), LABEL)?;
+    let mut value = before.clone();
     if !json_file::remove(&mut value, ENTRY) {
         return Ok(Vec::new());
     }
@@ -102,7 +104,12 @@ pub(crate) fn legacy_edits() -> Result<Vec<FileEdit>, String> {
     }
     Ok(vec![FileEdit {
         path,
-        content: Some(serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?),
+        content: Some(json_file::render_changed(
+            &text,
+            KeyStyle::Json,
+            &before,
+            &value,
+        )?),
         restored_keys: Vec::new(),
         removed_keys: vec![ENTRY.join(".")],
     }])
@@ -126,7 +133,11 @@ mod tests {
     #[test]
     fn bind_adds_only_the_ofox_entry() {
         let bound = bound_config(Some(USER_CONFIG), &template(), "sk-of-K").unwrap();
-        let value: Value = serde_json::from_str(&bound).unwrap();
+        assert!(
+            bound.contains("// my providers"),
+            "comments stay while bound: {bound}"
+        );
+        let value = json_file::parse_object(Some(&bound), LABEL).unwrap();
         assert_eq!(
             value["provider"]["ofox-opencode"]["options"]["apiKey"],
             "sk-of-K"

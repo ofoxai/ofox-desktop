@@ -13,7 +13,7 @@ use crate::gemini_config::{
 use crate::ofox_apex::mentions_ofox_gateway;
 
 use super::env_file;
-use super::json_file::{self, JsonPath};
+use super::json_file::{self, JsonPath, KeyStyle};
 use super::plan::{read_text, FileEdit, RestorePlan};
 
 const API_KEY: &str = "GEMINI_API_KEY";
@@ -38,7 +38,7 @@ pub(crate) fn settings_path() -> PathBuf {
 }
 
 pub(crate) fn validate_settings(text: &str) -> Result<(), String> {
-    json_file::parse_object(Some(text), SETTINGS_LABEL).map(drop)
+    json_file::validate(text, SETTINGS_LABEL)
 }
 
 /// `.env` 的 `GOOGLE_GEMINI_BASE_URL` 指向 Ofox 网关——当前（或旧版本）绑定留下的配置。
@@ -64,17 +64,16 @@ pub(crate) fn bound_env(current: &str, template: &Value, api_key: &str) -> Resul
     Ok(env_file::set_value(&env, MODEL, model.as_deref()))
 }
 
-/// 让 Gemini CLI 用 `.env` 里的 key 登录。已经是 API key 登录时返回 `None`，
-/// 不重写文件（保留用户的注释和格式）。
+/// 让 Gemini CLI 用 `.env` 里的 key 登录。已经是 API key 登录时返回 `None`，不写文件。
 pub(crate) fn bound_settings(current: Option<&str>) -> Result<Option<String>, String> {
-    let mut value = json_file::parse_object(current, SETTINGS_LABEL)?;
-    if json_file::get(&value, SELECTED_TYPE).and_then(Value::as_str) == Some(API_KEY_AUTH) {
+    let before = json_file::parse_object(current, SETTINGS_LABEL)?;
+    if json_file::get(&before, SELECTED_TYPE).and_then(Value::as_str) == Some(API_KEY_AUTH) {
         return Ok(None);
     }
+    let mut value = before.clone();
     json_file::set(&mut value, SELECTED_TYPE, API_KEY_AUTH.into());
-    serde_json::to_string_pretty(&value)
+    json_file::render_changed(current.unwrap_or_default(), KeyStyle::Json, &before, &value)
         .map(Some)
-        .map_err(|e| e.to_string())
 }
 
 /// 绑定和切换模型共用。两个文件都算好再写，任何一个解析失败都不动磁盘。
@@ -111,6 +110,7 @@ pub(crate) fn plan_restore_settings(
         original,
         current,
         SETTINGS_LABEL,
+        KeyStyle::Json,
         &[SELECTED_TYPE],
         SETTINGS_CONTAINERS,
     )
@@ -154,12 +154,18 @@ pub(crate) fn legacy_edits() -> Result<Vec<FileEdit>, String> {
     }];
     let settings_path = settings_path();
     if let (false, Some(text)) = (own_key_left, read_text(&settings_path)?) {
-        let mut value = json_file::parse_object(Some(&text), SETTINGS_LABEL)?;
-        if json_file::get(&value, SELECTED_TYPE).and_then(Value::as_str) == Some(API_KEY_AUTH) {
+        let before = json_file::parse_object(Some(&text), SETTINGS_LABEL)?;
+        if json_file::get(&before, SELECTED_TYPE).and_then(Value::as_str) == Some(API_KEY_AUTH) {
+            let mut value = before.clone();
             json_file::set(&mut value, SELECTED_TYPE, GOOGLE_LOGIN_AUTH.into());
             edits.push(FileEdit {
                 path: settings_path,
-                content: Some(serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?),
+                content: Some(json_file::render_changed(
+                    &text,
+                    KeyStyle::Json,
+                    &before,
+                    &value,
+                )?),
                 restored_keys: vec![SELECTED_TYPE.join(".")],
                 removed_keys: Vec::new(),
             });

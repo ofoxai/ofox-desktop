@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::config::{get_claude_settings_path, FileTxn};
 use crate::ofox_apex::mentions_ofox_gateway;
 
-use super::json_file::{self, JsonPath};
+use super::json_file::{self, JsonPath, KeyStyle};
 use super::plan::{read_text, FileEdit, RestorePlan};
 
 const LABEL: &str = "Claude 的 settings.json";
@@ -26,7 +26,7 @@ pub(crate) fn settings_path() -> PathBuf {
 }
 
 pub(crate) fn validate(text: &str) -> Result<(), String> {
-    json_file::parse_object(Some(text), LABEL).map(drop)
+    json_file::validate(text, LABEL)
 }
 
 /// `env.ANTHROPIC_BASE_URL` 指向 Ofox 网关——当前（或旧版本）绑定留下的配置。
@@ -55,7 +55,8 @@ pub(crate) fn bound_settings(
 ) -> Result<String, String> {
     let base_url = template_str(template, BASE_URL)
         .ok_or_else(|| "Ofox Claude 模板缺少 ANTHROPIC_BASE_URL".to_string())?;
-    let mut value = json_file::parse_object(current, LABEL)?;
+    let before = json_file::parse_object(current, LABEL)?;
+    let mut value = before.clone();
     json_file::set(&mut value, BASE_URL, base_url.into());
     json_file::set(&mut value, AUTH_TOKEN, api_key.into());
     match template_str(template, MODEL) {
@@ -65,7 +66,7 @@ pub(crate) fn bound_settings(
         }
     }
     json_file::remove(&mut value, API_KEY);
-    serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
+    json_file::render_changed(current.unwrap_or_default(), KeyStyle::Json, &before, &value)
 }
 
 /// 绑定和切换模型共用。
@@ -85,7 +86,7 @@ pub(crate) fn plan_restore(
     original: Option<&str>,
     current: Option<&str>,
 ) -> Result<RestorePlan, String> {
-    json_file::plan_restore(original, current, LABEL, LEAVES, CONTAINERS)
+    json_file::plan_restore(original, current, LABEL, KeyStyle::Json, LEAVES, CONTAINERS)
 }
 
 /// 没有绑定前快照时的尽力清理：去掉 Ofox 的地址、key 和 Ofox 的模型名，
@@ -95,7 +96,8 @@ pub(crate) fn legacy_edits() -> Result<Vec<FileEdit>, String> {
     let Some(text) = read_text(&path)? else {
         return Ok(Vec::new());
     };
-    let mut value = json_file::parse_object(Some(&text), LABEL)?;
+    let before = json_file::parse_object(Some(&text), LABEL)?;
+    let mut value = before.clone();
     let points_to_ofox = is_ofox_bound(&text);
     let ofox_token = json_file::get(&value, AUTH_TOKEN)
         .and_then(Value::as_str)
@@ -124,7 +126,12 @@ pub(crate) fn legacy_edits() -> Result<Vec<FileEdit>, String> {
     }
     Ok(vec![FileEdit {
         path,
-        content: Some(serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?),
+        content: Some(json_file::render_changed(
+            &text,
+            KeyStyle::Json,
+            &before,
+            &value,
+        )?),
         restored_keys: Vec::new(),
         removed_keys,
     }])

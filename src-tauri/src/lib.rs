@@ -13,6 +13,7 @@ mod gemini_config;
 mod gemini_mcp;
 pub mod hermes_config;
 mod init_status;
+mod json5_sections;
 mod lightweight;
 #[cfg(target_os = "linux")]
 mod linux_fix;

@@ -11,7 +11,7 @@ use crate::config::FileTxn;
 use crate::ofox_apex::mentions_ofox_gateway;
 use crate::openclaw_config::{self, get_openclaw_config_path, OpenClawDefaultModel};
 
-use super::json_file::{self, JsonPath};
+use super::json_file::{self, JsonPath, KeyStyle};
 use super::plan::{read_text, FileEdit, RestorePlan};
 
 const LABEL: &str = "OpenClaw 的 openclaw.json";
@@ -30,16 +30,9 @@ const CONTAINERS: &[JsonPath] = &[
     &["agents", "defaults"],
     &["agents"],
 ];
-/// 受管字段所在的顶层段落。
-const SECTIONS: &[&str] = &["models", "agents"];
 
 pub(crate) fn config_path() -> PathBuf {
     get_openclaw_config_path()
-}
-
-/// 文件不存在时 OpenClaw 自己用的默认配置。
-fn default_source() -> Result<String, String> {
-    openclaw_config::edit_root_sections(None, &[]).map_err(|e| e.to_string())
 }
 
 fn parse(text: &str) -> Result<Value, String> {
@@ -47,11 +40,7 @@ fn parse(text: &str) -> Result<Value, String> {
 }
 
 pub(crate) fn validate(text: &str) -> Result<(), String> {
-    parse(text)?;
-    // 写回时按段落改文本，保留格式的解析也得能过。
-    openclaw_config::edit_root_sections(Some(text), &[])
-        .map(drop)
-        .map_err(|e| format!("{LABEL} 解析失败，请先修复后再操作：{e}"))
+    json_file::validate(text, LABEL)
 }
 
 /// `models.providers."ofox-openclaw"` 指向 Ofox 网关——当前（或旧版本）绑定留下的配置。
@@ -67,17 +56,8 @@ pub(crate) fn is_ofox_bound(text: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 只把值有变化的段落写回 `source`。
 fn render_changed(source: &str, before: &Value, after: &Value) -> Result<String, String> {
-    let edits: Vec<(&str, Option<&Value>)> = SECTIONS
-        .iter()
-        .filter(|section| before.get(**section) != after.get(**section))
-        .map(|section| (*section, after.get(*section)))
-        .collect();
-    if edits.is_empty() {
-        return Ok(source.to_string());
-    }
-    openclaw_config::edit_root_sections(Some(source), &edits).map_err(|e| e.to_string())
+    json_file::render_changed(source, KeyStyle::Json5, before, after)
 }
 
 fn first_model_id(entry: &Value) -> Option<&str> {
@@ -97,11 +77,9 @@ pub(crate) fn bound_config(
     template: &Value,
     api_key: &str,
 ) -> Result<String, String> {
-    let source = match current {
-        Some(text) => text.to_string(),
-        None => default_source()?,
-    };
-    let before = parse(&source)?;
+    // 文件不存在时从 OpenClaw 自己的默认配置开始。
+    let source = current.unwrap_or(openclaw_config::OPENCLAW_DEFAULT_SOURCE);
+    let before = parse(source)?;
     let mut after = before.clone();
     if json_file::get(&after, &["models"]).is_none() {
         json_file::set(
@@ -130,7 +108,7 @@ pub(crate) fn bound_config(
         );
     }
     json_file::set(&mut after, ENTRY, entry);
-    render_changed(&source, &before, &after)
+    render_changed(source, &before, &after)
 }
 
 /// 绑定和切换模型共用。
@@ -145,48 +123,18 @@ pub(crate) fn write_bound(
         .map_err(|e| format!("写入 OpenClaw 配置失败：{e}"))
 }
 
-/// 受管字段还原成绑定前的值。语义上等于绑定前时写回原文本；否则只改有变化的段落，
-/// 和绑定前一样的段落原样搬回（含注释）。
 pub(crate) fn plan_restore(
     original: Option<&str>,
     current: Option<&str>,
 ) -> Result<RestorePlan, String> {
-    let original_value = json_file::parse_object(original, LABEL)?;
-    let source = match current {
-        Some(text) => text.to_string(),
-        None => default_source()?,
-    };
-    let current_value = parse(&source)?;
-    let restored = json_file::restore_value(&original_value, &current_value, LEAVES, CONTAINERS);
-    if restored.value == original_value {
-        return Ok(RestorePlan {
-            content: original.map(str::to_string),
-            exact: true,
-            restored_keys: restored.restored_keys,
-            removed_keys: restored.removed_keys,
-        });
-    }
-
-    let mut text = source;
-    for section in SECTIONS {
-        let target = restored.value.get(*section);
-        if target == current_value.get(*section) {
-            continue;
-        }
-        text = match (target, original) {
-            (Some(value), Some(original_text)) if original_value.get(*section) == Some(value) => {
-                openclaw_config::copy_root_section(&text, original_text, section)
-            }
-            _ => openclaw_config::edit_root_sections(Some(&text), &[(section, target)]),
-        }
-        .map_err(|e| e.to_string())?;
-    }
-    Ok(RestorePlan {
-        content: Some(text),
-        exact: false,
-        restored_keys: restored.restored_keys,
-        removed_keys: restored.removed_keys,
-    })
+    json_file::plan_restore(
+        original,
+        current,
+        LABEL,
+        KeyStyle::Json5,
+        LEAVES,
+        CONTAINERS,
+    )
 }
 
 /// 旧版本（`__ofoxDirectBackupVersion` 外层）记下的绑定前默认模型。
@@ -297,8 +245,9 @@ mod tests {
         )
         .unwrap();
         // OpenClaw 自己在绑定期间写了别的段落。
-        let touched = openclaw_config::edit_root_sections(
-            Some(&bound),
+        let touched = crate::json5_sections::edit_root_sections(
+            &bound,
+            KeyStyle::Json5,
             &[("meta", Some(&json!({ "lastTouchedAt": "2026-10-01" })))],
         )
         .unwrap();
