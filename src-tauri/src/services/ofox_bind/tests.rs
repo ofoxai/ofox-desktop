@@ -377,10 +377,19 @@ async fn legacy_migration_moves_the_key_once_and_ignores_user_keys() {
     write(&config, TEMPLATE);
     write(&auth, "{\"OPENAI_API_KEY\": \"sk-proj-mine\"}");
     assert!(
-        !codex::migrate_legacy_shape(|| None).unwrap(),
-        "no Ofox key anywhere"
+        codex::migrate_legacy_shape(|| None).unwrap(),
+        "no Ofox key anywhere: still stops relying on the user's login"
     );
-    assert_eq!(fs::read_to_string(&config).unwrap(), TEMPLATE);
+    assert_eq!(
+        toml_at(&config)["model_providers"]["ofox"]["requires_openai_auth"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        fs::read_to_string(&auth).unwrap(),
+        "{\"OPENAI_API_KEY\": \"sk-proj-mine\"}",
+        "the user's own key is untouched"
+    );
+    assert!(!codex::migrate_legacy_shape(|| None).unwrap());
 
     write(
         &auth,
@@ -523,8 +532,9 @@ fn current_provider(db: &Database, tool: Tool) -> Option<String> {
     db.get_current_provider(tool.app().as_str()).unwrap()
 }
 
+/// 读 JSON / JSONC（绑定后用户的注释还在）。
 fn json_at(path: &Path) -> Value {
-    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    json_file::parse_object(Some(&fs::read_to_string(path).unwrap()), "test").unwrap()
 }
 
 #[tokio::test]
@@ -1115,4 +1125,234 @@ async fn workbuddy_unbind_restores_even_after_edits_in_workbuddy() {
         serde_json::from_str::<Value>(original).unwrap()
     );
     assert!(db.get_bind_record("workbuddy").unwrap().is_none());
+}
+
+// ─── 审查发现的问题 ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+#[serial]
+async fn a_stale_record_is_replaced_by_a_fresh_snapshot() {
+    // 上次解绑后记录没删掉（或磁盘被手动改回去了）：再绑定要重新拍快照，不能
+    // 把更早的快照当成现在的原样。
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    let stale = db.get_bind_record(CODEX_RECORD).unwrap().unwrap().record;
+    unbind(&db, Tool::Codex, "codex", &[], false)
+        .await
+        .expect("unbind");
+    db.upsert_bind_record(CODEX_RECORD, &stale).unwrap();
+
+    let newer = USER_CONFIG.replace("gpt-5-codex", "gpt-6-codex");
+    write(&config, &newer);
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("rebind");
+    unbind(&db, Tool::Codex, "codex", &[], false)
+        .await
+        .expect("unbind again");
+    assert_eq!(fs::read_to_string(&config).unwrap(), newer);
+}
+
+#[tokio::test]
+#[serial]
+async fn rebinding_over_a_legacy_record_keeps_its_saved_routing() {
+    // 「添加工具」会把已绑定的工具再绑一次：旧版本记录里的绑定前默认模型不能丢。
+    let _home = Home::new();
+    let path = crate::openclaw_config::get_openclaw_config_path();
+    write(
+        &path,
+        "{\n  models: { mode: 'merge', providers: { 'ofox-openclaw': { baseUrl: 'https://api.ofox.ai/v1', apiKey: 'sk-of-OLD' } } },\n  agents: { defaults: { model: { primary: 'ofox-openclaw/x' } } },\n}\n",
+    );
+    let db = db_for(Tool::OpenClaw, openclaw_template());
+    db.upsert_bind_record(
+        "openclaw",
+        r#"{"__ofoxDirectBackupVersion":1,"patch":{"apiKey":"sk-of-OLD"},"runtimeDefault":{"primary":"existing/old-model"}}"#,
+    )
+    .unwrap();
+
+    bind(&db, Tool::OpenClaw, "openclaw", KEY)
+        .await
+        .expect("rebind");
+    let report = unbind(&db, Tool::OpenClaw, "openclaw", &[], false)
+        .await
+        .expect("unbind");
+    assert!(report.legacy);
+    assert_eq!(
+        crate::openclaw_config::get_default_model()
+            .unwrap()
+            .unwrap()
+            .primary,
+        "existing/old-model"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_retried_legacy_unbind_still_moves_the_provider_off_ofox() {
+    // 上次清理完文件、切服务商时出了错：这次文件已经干净，服务商也得切回来。
+    let home = Home::new();
+    write(
+        &home.claude("settings.json"),
+        "{\n  \"permissions\": {}\n}\n",
+    );
+    let db = db_for(Tool::Claude, claude_template(None));
+    set_current_provider(&db, &AppType::Claude, "ofox-claude").unwrap();
+
+    let report = unbind(&db, Tool::Claude, "claude", &[], false)
+        .await
+        .expect("unbind");
+    assert!(!report.already_unbound);
+    assert_eq!(
+        report.provider_restored_to.as_deref(),
+        Some("claude-official")
+    );
+    assert_eq!(
+        current_provider(&db, Tool::Claude).as_deref(),
+        Some("claude-official")
+    );
+
+    let again = unbind(&db, Tool::Claude, "claude", &[], false)
+        .await
+        .expect("unbind again");
+    assert!(again.already_unbound);
+}
+
+#[tokio::test]
+#[serial]
+async fn ofox_config_at_a_moved_path_is_cleaned_up_too() {
+    // 绑定后改了 Codex 的配置目录，并在新目录里换过模型：解绑要两边都处理。
+    let home = Home::new();
+    let old_config = home.codex("config.toml");
+    write(&old_config, USER_CONFIG);
+    let db = db_with_default_provider();
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+
+    let moved_dir = home.dir.path().join("codex-moved");
+    let moved_config = moved_dir.join("config.toml");
+    fs::create_dir_all(&moved_dir).unwrap();
+    fs::copy(&old_config, &moved_config).unwrap();
+    crate::settings::mutate_settings(|settings| {
+        settings.codex_config_dir = Some(moved_dir.to_string_lossy().into_owned());
+    })
+    .unwrap();
+
+    let preview = unbind(&db, Tool::Codex, "codex", &[], true)
+        .await
+        .expect("preview");
+    assert!(preview.warnings.iter().any(|w| w.code == "leftoverRemoved"));
+    let report = unbind(&db, Tool::Codex, "codex", &[], false)
+        .await
+        .expect("unbind");
+    assert!(report.warnings.iter().any(|w| w.code == "leftoverRemoved"));
+    assert_eq!(fs::read_to_string(&old_config).unwrap(), USER_CONFIG);
+    assert!(!codex::is_ofox_bound(
+        &fs::read_to_string(&moved_config).unwrap()
+    ));
+}
+
+#[tokio::test]
+#[serial]
+async fn legacy_codex_without_a_key_stops_using_the_chatgpt_login() {
+    let home = Home::new();
+    let (auth, config) = (home.codex("auth.json"), home.codex("config.toml"));
+    write(&config, TEMPLATE);
+    write(&auth, OAUTH_AUTH);
+
+    assert!(codex::migrate_legacy_shape(|| None).unwrap());
+    let provider = &toml_at(&config)["model_providers"]["ofox"];
+    assert_eq!(provider["requires_openai_auth"].as_bool(), Some(false));
+    assert!(provider.get("experimental_bearer_token").is_none());
+    assert_eq!(fs::read_to_string(&auth).unwrap(), OAUTH_AUTH);
+    assert!(!codex::migrate_legacy_shape(|| None).unwrap(), "idempotent");
+
+    assert!(codex::migrate_legacy_shape(|| Some("sk-of-LATER".into())).unwrap());
+    assert_eq!(
+        toml_at(&config)["model_providers"]["ofox"]["experimental_bearer_token"].as_str(),
+        Some("sk-of-LATER")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn preview_and_unbind_agree_when_the_previous_provider_is_gone() {
+    let home = Home::new();
+    write(&home.claude("settings.json"), CLAUDE_RELAY);
+    let db = db_for(Tool::Claude, claude_template(None));
+    bind(&db, Tool::Claude, "claude", KEY).await.expect("bind");
+    db.delete_provider("claude", "relay").unwrap();
+
+    let preview = unbind(&db, Tool::Claude, "claude", &[], true)
+        .await
+        .expect("preview");
+    let report = unbind(&db, Tool::Claude, "claude", &[], false)
+        .await
+        .expect("unbind");
+    assert_eq!(
+        preview.provider_restored_to.as_deref(),
+        Some("claude-official")
+    );
+    assert_eq!(preview.provider_restored_to, report.provider_restored_to);
+    assert_eq!(preview.warnings, report.warnings);
+    assert!(report
+        .warnings
+        .iter()
+        .any(|w| w.code == "previousProviderMissing"));
+    assert_eq!(
+        current_provider(&db, Tool::Claude).as_deref(),
+        Some("claude-official")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn broken_records_are_rejected_instead_of_deleting_user_config() {
+    let home = Home::new();
+    write(&home.claude("settings.json"), CLAUDE_RELAY);
+    let db = db_for(Tool::Claude, claude_template(None));
+    db.upsert_bind_record("claude", r#"{"v":1,"kind":"snapshot","files":[]}"#)
+        .unwrap();
+    assert!(unbind(&db, Tool::Claude, "claude", &[], false)
+        .await
+        .is_err());
+    assert_eq!(
+        fs::read_to_string(home.claude("settings.json")).unwrap(),
+        CLAUDE_RELAY
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn workbuddy_unbind_drops_ofox_entries_the_record_does_not_track() {
+    let _home = Home::new();
+    let path = crate::workbuddy_config::models_path();
+    write(&path, "[]");
+    let db = Database::memory().expect("db");
+    let selection = |id: &str| crate::workbuddy_config::WorkBuddyModelSelection {
+        id: id.into(),
+        name: id.into(),
+        supports_tool_call: true,
+        supports_images: false,
+        supports_reasoning: false,
+    };
+    crate::workbuddy_config::sync_selected_models(&db, KEY, &[selection("openai/gpt-x")])
+        .await
+        .expect("bind");
+    // 更早的绑定留下的条目，记录里没有它。
+    let read_models =
+        || -> Vec<Value> { serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap() };
+    let mut models = read_models();
+    let mut stray = models[0].clone();
+    stray["id"] = json!("openai/gpt-old");
+    models.push(stray);
+    models.push(json!({ "id": "local", "url": "http://localhost:11434/v1" }));
+    write(&path, &serde_json::to_string_pretty(&models).unwrap());
+
+    crate::workbuddy_config::unbind(&db, false)
+        .await
+        .expect("unbind");
+    assert_eq!(
+        read_models(),
+        [json!({ "id": "local", "url": "http://localhost:11434/v1" })]
+    );
 }

@@ -501,7 +501,13 @@ pub async fn unbind(db: &Database, dry_run: bool) -> Result<UnbindReport, String
                     report.removed_keys.push(key);
                 }
             }
-            restore_models(models.clone(), &state)?
+            let mut restored = restore_models(models.clone(), &state)?;
+            // 记录之外还指向 Ofox 的条目（更早的绑定留下的）一并去掉。
+            let leftover = remove_ofox_entries(&mut restored);
+            report
+                .removed_keys
+                .extend(leftover.iter().map(|id| format!("{shown}: {id}")));
+            restored
         }
         None => {
             let mut cleaned = models.clone();

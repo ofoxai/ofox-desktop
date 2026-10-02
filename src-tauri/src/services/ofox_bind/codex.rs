@@ -274,34 +274,44 @@ pub(crate) fn migrate_legacy_shape(
         .and_then(|text| serde_json::from_str::<Value>(text).ok())
         .and_then(|auth| auth.get("OPENAI_API_KEY")?.as_str().map(str::to_string))
         .filter(|key| key.starts_with("sk-of-"));
-    let Some(key) = auth_key.or_else(stored_key) else {
-        log::warn!("[ofox_bind] Codex 旧版绑定缺少可用的 Ofox key，暂不迁移");
+    let key = auth_key.or_else(stored_key);
+    if key.is_none() && !needs_openai_auth {
+        // 泄露已经堵住，只是还没有 key；等下次绑定补上。
         return Ok(false);
-    };
+    }
 
     let mut migrated = parse_doc(&config)?;
     let providers = child_table(migrated.as_table_mut(), PROVIDERS_TABLE)?;
     let provider = child_table(providers, OFOX_PROVIDER)?;
     provider.insert("requires_openai_auth", toml_edit::value(false));
-    provider.insert("experimental_bearer_token", toml_edit::value(key.as_str()));
+    if let Some(key) = key.as_deref() {
+        provider.insert("experimental_bearer_token", toml_edit::value(key));
+    }
 
     let mut txn = FileTxn::new();
     let result = (|| {
         txn.write(&config_path, migrated.to_string().as_bytes())
             .and_then(|()| txn.set_mode(&config_path, BOUND_CONFIG_MODE))
             .map_err(|e| format!("迁移 Codex 配置失败：{e}"))?;
-        if let Some(text) = auth_text.as_deref() {
-            if let Some(edit) = strip_ofox_key_from_auth(text, Some(&key))? {
+        if let (Some(text), Some(key)) = (auth_text.as_deref(), key.as_deref()) {
+            if let Some(edit) = strip_ofox_key_from_auth(text, Some(key))? {
                 apply_auth_edit(&mut txn, &auth_path, edit)?;
             }
         }
         Ok(())
     })();
     if let Err(error) = result {
-        let _ = txn.rollback();
-        return Err(error);
+        return Err(super::rollback_with(txn, error));
     }
-    log::info!("[ofox_bind] 已把旧版 Codex 绑定迁移为服务商自带 key，auth.json 不再存 Ofox key");
+    match key {
+        Some(_) => log::info!(
+            "[ofox_bind] 已把旧版 Codex 绑定迁移为服务商自带 key，auth.json 不再存 Ofox key"
+        ),
+        // 没有 key 也要先堵住泄露：Ofox 服务商不再用 ChatGPT 的登录信息。
+        None => log::warn!(
+            "[ofox_bind] Codex 旧版绑定缺少可用的 Ofox key：已关闭 requires_openai_auth，重新绑定后恢复可用"
+        ),
+    }
     Ok(true)
 }
 

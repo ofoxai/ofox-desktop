@@ -25,7 +25,8 @@
     "warning": {
       "previousProviderMissing": "連携前のプロバイダーが見つからないため、公式の既定に切り替えました。",
       "fileKeptHasOtherContent": "Ofox が作成した設定ファイルに追加した内容があるため、ファイルは残しました。",
-      "recordCleanupFailed": "設定は戻しましたが連携記録を削除できませんでした。もう一度解除しても問題ありません。"
+      "recordCleanupFailed": "設定は戻しましたが連携記録を削除できませんでした。もう一度解除しても問題ありません。",
+      "leftoverRemoved": "別の場所にも Ofox の設定があったため、あわせて削除しました。"
     }
   },
   "modelCompatibility": {

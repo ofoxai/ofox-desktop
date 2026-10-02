@@ -69,6 +69,10 @@ pub(crate) struct BindEnvelope {
     pub previous_provider: PreviousProvider,
     #[serde(default)]
     pub files: Vec<FileBaseline>,
+    /// 接手旧版本绑定时原来的记录（OpenClaw / Hermes 的记录里有绑定前的默认路由），
+    /// 解绑时还要用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy: Option<Value>,
 }
 
 impl BindEnvelope {
@@ -83,16 +87,18 @@ impl BindEnvelope {
             holders: BTreeSet::from([holder.to_string()]),
             previous_provider,
             files,
+            legacy: None,
         }
     }
 
-    pub(crate) fn legacy_adopted(holder: &str) -> Self {
+    pub(crate) fn legacy_adopted(holder: &str, legacy: Option<Value>) -> Self {
         Self {
             v: RECORD_VERSION,
             kind: RecordKind::LegacyAdopted,
             holders: BTreeSet::from([holder.to_string()]),
             previous_provider: PreviousProvider::default(),
             files: Vec::new(),
+            legacy,
         }
     }
 }
@@ -107,14 +113,26 @@ pub(crate) enum StoredRecord {
 pub(crate) fn parse_record(text: &str) -> Result<StoredRecord, String> {
     let value: Value =
         serde_json::from_str(text).map_err(|e| format!("绑定记录不是有效 JSON：{e}"))?;
-    let is_envelope = value.get("v").is_some() && value.get("kind").is_some();
-    if !is_envelope {
+    if value.get("v").is_none() {
         return Ok(StoredRecord::Legacy(value));
     }
     let envelope: BindEnvelope =
         serde_json::from_value(value).map_err(|e| format!("绑定记录格式无效：{e}"))?;
     if envelope.v != RECORD_VERSION {
         return Err(format!("不支持的绑定记录版本：{}", envelope.v));
+    }
+    // 快照必须完整：缺了原文的快照还原出来会把用户的配置删掉。
+    if envelope.kind == RecordKind::Snapshot {
+        if envelope.files.is_empty() {
+            return Err("绑定记录损坏：快照里没有文件".to_string());
+        }
+        if let Some(broken) = envelope
+            .files
+            .iter()
+            .find(|file| file.existed && file.original.is_none())
+        {
+            return Err(format!("绑定记录损坏：{} 的原文缺失", broken.path));
+        }
     }
     Ok(StoredRecord::Envelope(envelope))
 }
@@ -126,6 +144,7 @@ pub(crate) fn serialize_record(envelope: &BindEnvelope) -> Result<String, String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn envelope_round_trips() {
@@ -166,7 +185,29 @@ mod tests {
     }
 
     #[test]
-    fn unknown_record_version_is_rejected() {
+    fn unknown_or_broken_envelopes_are_rejected() {
         assert!(parse_record(r#"{"v":9,"kind":"snapshot"}"#).is_err());
+        assert!(parse_record(r#"{"v":1}"#).is_err(), "kind missing");
+        assert!(
+            parse_record(r#"{"v":1,"kind":"snapshot","files":[]}"#).is_err(),
+            "snapshot without files"
+        );
+        let no_original = r#"{"v":1,"kind":"snapshot","files":[{"file":"codexConfig","path":"/x","existed":true,"dirExisted":true}]}"#;
+        assert!(parse_record(no_original).is_err());
+        let fine = r#"{"v":1,"kind":"snapshot","files":[{"file":"codexConfig","path":"/x","existed":false,"dirExisted":true}]}"#;
+        assert!(parse_record(fine).is_ok());
+    }
+
+    #[test]
+    fn legacy_adopted_keeps_the_old_record() {
+        let envelope =
+            BindEnvelope::legacy_adopted("openclaw", Some(json!({ "runtimeDefault": 1 })));
+        let text = serialize_record(&envelope).unwrap();
+        match parse_record(&text).unwrap() {
+            StoredRecord::Envelope(parsed) => {
+                assert_eq!(parsed.legacy, Some(json!({ "runtimeDefault": 1 })))
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

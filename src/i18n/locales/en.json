@@ -25,7 +25,8 @@
     "warning": {
       "previousProviderMissing": "The provider you used before binding no longer exists; switched to the official default.",
       "fileKeptHasOtherContent": "A config file Ofox created now has content you added, so it was kept.",
-      "recordCleanupFailed": "Settings were restored, but the binding record couldn't be cleared; unbinding again is safe."
+      "recordCleanupFailed": "Settings were restored, but the binding record couldn't be cleared; unbinding again is safe.",
+      "leftoverRemoved": "Ofox settings were also found in another location and have been removed."
     }
   },
   "modelCompatibility": {

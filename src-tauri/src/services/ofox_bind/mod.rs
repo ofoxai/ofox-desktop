@@ -253,9 +253,13 @@ fn legacy_edits(tool: Tool, legacy: Option<&Value>) -> Result<Vec<FileEdit>, Str
     }
 }
 
-fn rollback(txn: FileTxn, context: &str) {
-    if let Err(e) = txn.rollback() {
-        log::error!("[ofox_bind] {context}失败后回滚文件也失败：{e}");
+/// 回滚文件，把回滚结果附在 `error` 后面。
+pub(crate) fn rollback_with(txn: FileTxn, error: String) -> String {
+    match txn.rollback() {
+        Ok(()) => format!("{error}（已回滚文件）"),
+        Err(rollback_error) => {
+            format!("{error}；回滚文件也失败：{rollback_error}，请检查该工具的配置文件")
+        }
     }
 }
 
@@ -264,85 +268,117 @@ fn previous_provider(db: &Database, app: &AppType) -> Result<PreviousProvider, S
         settings: crate::settings::get_current_provider(app),
         db: db
             .get_current_provider(app.as_str())
-            .map_err(|e| format!("读取当前供应商失败：{e}"))?,
+            .map_err(|e| format!("读取当前服务商失败：{e}"))?,
     })
 }
 
 fn set_current_provider(db: &Database, app: &AppType, id: &str) -> Result<(), String> {
     crate::settings::set_current_provider(app, Some(id))
-        .map_err(|e| format!("设置 {} 当前供应商失败：{e}", app.as_str()))?;
+        .map_err(|e| format!("设置 {} 当前服务商失败：{e}", app.as_str()))?;
     db.set_current_provider(app.as_str(), id)
-        .map_err(|e| format!("更新 {} 当前供应商失败：{e}", app.as_str()))
+        .map_err(|e| format!("更新 {} 当前服务商失败：{e}", app.as_str()))
 }
 
-fn provider_exists(db: &Database, app: &AppType, id: &str) -> bool {
-    matches!(db.get_provider_by_id(id, app.as_str()), Ok(Some(_)))
-}
-
-/// 回到官方服务商；没有官方服务商的工具，当前服务商还是 Ofox 时清掉。
-fn fall_back_to_official(
+/// 把当前服务商写回 `previous`（settings 和 DB 各自）。
+fn write_previous_provider(
     db: &Database,
-    tool: Tool,
-    report: &mut UnbindReport,
-    dry_run: bool,
-) -> Result<(), String> {
-    let app = tool.app();
-    report.provider_restored_to = tool.official_id().map(str::to_string);
-    if dry_run {
-        return Ok(());
-    }
-    if let Some(id) = tool.official_id() {
-        return set_current_provider(db, &app, id);
-    }
-    let current = db
-        .get_current_provider(app.as_str())
-        .map_err(|e| format!("读取当前供应商失败：{e}"))?;
-    if current.as_deref() != Some(tool.provider_id()) {
-        return Ok(());
-    }
-    crate::settings::set_current_provider(&app, None)
-        .map_err(|e| format!("清除 {} 当前供应商失败：{e}", app.as_str()))?;
-    db.clear_current_provider(app.as_str())
-        .map_err(|e| format!("清除 {} 当前供应商失败：{e}", app.as_str()))
-}
-
-/// 还原绑定前的当前服务商；那个服务商已经不在了就退回官方服务商。
-fn restore_previous_provider(
-    db: &Database,
-    tool: Tool,
+    app: &AppType,
     previous: &PreviousProvider,
-    report: &mut UnbindReport,
 ) -> Result<(), String> {
-    let app = tool.app();
-    let missing = |id: &Option<String>| {
-        id.as_deref()
-            .is_some_and(|id| !provider_exists(db, &app, id))
-    };
-    if missing(&previous.settings) || missing(&previous.db) {
-        report.warn("previousProviderMissing", None);
-        return fall_back_to_official(db, tool, report, false);
-    }
-    crate::settings::set_current_provider(&app, previous.settings.as_deref())
-        .map_err(|e| format!("还原 {} 当前供应商失败：{e}", app.as_str()))?;
+    crate::settings::set_current_provider(app, previous.settings.as_deref())
+        .map_err(|e| format!("还原 {} 当前服务商失败：{e}", app.as_str()))?;
     match previous.db.as_deref() {
         Some(id) => db.set_current_provider(app.as_str(), id),
         None => db.clear_current_provider(app.as_str()),
     }
-    .map_err(|e| format!("还原 {} 当前供应商失败：{e}", app.as_str()))?;
-    report.provider_restored_to = previous.settings.clone().or_else(|| previous.db.clone());
-    Ok(())
+    .map_err(|e| format!("还原 {} 当前服务商失败：{e}", app.as_str()))
 }
 
-/// 绑定期间不再需要接管模式的代理开关；留着会让启动自愈把刚解绑的工具又绑回去。
-async fn disable_proxy_flag(db: &Database, app: &AppType) {
-    if let Ok(mut config) = db.get_proxy_config_for_app(app.as_str()).await {
-        if config.enabled {
-            config.enabled = false;
-            if let Err(e) = db.update_proxy_config_for_app(config).await {
-                log::warn!("[ofox_bind] 清除 {} 代理开关失败：{e}", app.as_str());
+fn provider_exists(db: &Database, app: &AppType, id: &str) -> Result<bool, String> {
+    db.get_provider_by_id(id, app.as_str())
+        .map(|provider| provider.is_some())
+        .map_err(|e| format!("读取服务商 {id} 失败：{e}"))
+}
+
+/// 当前服务商（settings 或 DB）还是 Ofox。
+fn provider_is_ofox(db: &Database, tool: Tool) -> Result<bool, String> {
+    let current = previous_provider(db, &tool.app())?;
+    Ok([current.settings, current.db]
+        .iter()
+        .any(|id| id.as_deref() == Some(tool.provider_id())))
+}
+
+/// 解绑后当前服务商该是什么。
+#[derive(Debug, PartialEq)]
+enum ProviderTarget {
+    /// 绑定前的那个。
+    Previous(PreviousProvider),
+    Official,
+    /// 没有官方服务商的工具：还指着 Ofox 就清掉。
+    ClearIfOfox,
+}
+
+/// 绑定前的服务商还在就回到它；不在了（或根本没有快照）就退回官方服务商。
+/// 预览和实际解绑共用这个决定，报告里的内容两边一致。
+fn provider_target(
+    db: &Database,
+    tool: Tool,
+    previous: Option<&PreviousProvider>,
+    report: &mut UnbindReport,
+) -> Result<ProviderTarget, String> {
+    if let Some(previous) = previous {
+        let app = tool.app();
+        let mut missing = false;
+        for id in [previous.settings.as_deref(), previous.db.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            missing |= !provider_exists(db, &app, id)?;
+        }
+        if !missing {
+            report.provider_restored_to = previous.settings.clone().or_else(|| previous.db.clone());
+            return Ok(ProviderTarget::Previous(previous.clone()));
+        }
+        report.warn("previousProviderMissing", None);
+    }
+    report.provider_restored_to = tool.official_id().map(str::to_string);
+    Ok(match tool.official_id() {
+        Some(_) => ProviderTarget::Official,
+        None => ProviderTarget::ClearIfOfox,
+    })
+}
+
+fn apply_provider_target(db: &Database, tool: Tool, target: ProviderTarget) -> Result<(), String> {
+    let app = tool.app();
+    match target {
+        ProviderTarget::Previous(previous) => write_previous_provider(db, &app, &previous),
+        ProviderTarget::Official => {
+            set_current_provider(db, &app, tool.official_id().expect("has official"))
+        }
+        ProviderTarget::ClearIfOfox => {
+            if provider_is_ofox(db, tool)? {
+                write_previous_provider(db, &app, &PreviousProvider::default())
+            } else {
+                Ok(())
             }
         }
     }
+}
+
+/// 绑定期间不再需要接管模式的代理开关；留着会让启动自愈把刚解绑的工具又绑回去。
+/// 先关它再动文件：关不掉就不解绑。
+async fn disable_proxy_flag(db: &Database, app: &AppType) -> Result<(), String> {
+    let mut config = db
+        .get_proxy_config_for_app(app.as_str())
+        .await
+        .map_err(|e| format!("读取 {} 代理开关失败：{e}", app.as_str()))?;
+    if config.enabled {
+        config.enabled = false;
+        db.update_proxy_config_for_app(config)
+            .await
+            .map_err(|e| format!("关闭 {} 代理开关失败：{e}", app.as_str()))?;
+    }
+    Ok(())
 }
 
 fn load_record(db: &Database, tool: Tool) -> Result<Option<(String, StoredRecord)>, String> {
@@ -357,6 +393,22 @@ fn load_record(db: &Database, tool: Tool) -> Result<Option<(String, StoredRecord
     Ok(Some((row.record, parsed)))
 }
 
+/// 工具配置文件所在模块的锁：和应用里其它改同一份文件的路径互斥。拿到之后
+/// 不能再 `.await`。
+fn file_locks(tool: Tool) -> Vec<std::sync::MutexGuard<'static, ()>> {
+    let lock = |mutex: &'static std::sync::Mutex<()>| {
+        mutex
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    };
+    match tool {
+        Tool::OpenCode => vec![lock(crate::opencode_config::opencode_config_lock())],
+        Tool::OpenClaw => vec![lock(crate::openclaw_config::openclaw_write_lock())],
+        Tool::Hermes => vec![lock(crate::hermes_config::hermes_write_lock())],
+        Tool::Codex | Tool::Claude | Tool::Gemini => Vec::new(),
+    }
+}
+
 /// 已经绑定的工具（切换模型时）：按 DB 模板重写接入字段，其余内容不动。
 pub(crate) async fn rewrite_bound_config(
     db: &Database,
@@ -364,14 +416,14 @@ pub(crate) async fn rewrite_bound_config(
     api_key: &str,
 ) -> Result<(), String> {
     let _guard = BIND_LOCK.lock().await;
+    let _file_locks = file_locks(tool);
     if tool == Tool::Codex {
         codex::migrate_legacy_shape(|| Some(api_key.to_string()))?;
     }
     let template = template(db, tool)?;
     let mut txn = FileTxn::new();
     if let Err(error) = write_bound(tool, &template, api_key, &mut txn) {
-        rollback(txn, "重写绑定配置");
-        return Err(error);
+        return Err(rollback_with(txn, error));
     }
     Ok(())
 }
@@ -380,12 +432,16 @@ pub(crate) async fn rewrite_bound_config(
 pub(crate) async fn migrate_codex_on_startup() {
     let _guard = BIND_LOCK.lock().await;
     let stored_key = || {
-        crate::ofox_secret::default_store()
-            .load(crate::ofox_secret::Slot::ApiKey {
-                tool: AppType::Codex.into(),
-            })
-            .ok()
-            .flatten()
+        let slot = crate::ofox_secret::Slot::ApiKey {
+            tool: AppType::Codex.into(),
+        };
+        match crate::ofox_secret::default_store().load(slot) {
+            Ok(key) => key,
+            Err(e) => {
+                log::warn!("[ofox_bind] 读取 Codex 的 Ofox key 失败：{e}");
+                None
+            }
+        }
     };
     match codex::migrate_legacy_shape(stored_key) {
         Ok(true) => log::info!("✓ Migrated legacy Codex Ofox binding"),
@@ -403,25 +459,33 @@ pub(crate) async fn bind(
     api_key: &str,
 ) -> Result<(), String> {
     let _guard = BIND_LOCK.lock().await;
+    let _file_locks = file_locks(tool);
     if tool == Tool::Codex {
         codex::migrate_legacy_shape(|| Some(api_key.to_string()))?;
     }
     let template = template(db, tool)?;
+    let app = tool.app();
+    let previous = previous_provider(db, &app)?;
 
     let existing = load_record(db, tool)?;
     let previous_text = existing.as_ref().map(|(text, _)| text.clone());
+    let bound = bound_on_disk(tool)?;
     let envelope = match existing {
-        Some((_, StoredRecord::Envelope(mut envelope))) => {
+        // 磁盘上还是 Ofox 的配置：沿用记录，只加绑定方。
+        Some((_, StoredRecord::Envelope(mut envelope))) if bound => {
             envelope.holders.insert(holder.to_string());
             envelope
         }
-        // 旧版本留下的补丁记录没有绑定前快照。
-        Some((_, StoredRecord::Legacy(_))) => BindEnvelope::legacy_adopted(holder),
-        // 磁盘上已经是 Ofox 的配置：不能把它当成原样。
-        None if bound_on_disk(tool)? => BindEnvelope::legacy_adopted(holder),
-        None => BindEnvelope::snapshot(
+        // 旧版本的记录没有绑定前快照；带上它，解绑时还能用里面的默认路由。
+        Some((_, StoredRecord::Legacy(record))) if bound => {
+            BindEnvelope::legacy_adopted(holder, Some(record))
+        }
+        // 磁盘上已经是 Ofox 的配置、又没有记录（旧版本绑定的）：不能把它当成原样。
+        None if bound => BindEnvelope::legacy_adopted(holder, None),
+        // 没绑定过，或者上次解绑后记录没删掉：重新拍快照。
+        _ => BindEnvelope::snapshot(
             holder,
-            previous_provider(db, &tool.app())?,
+            previous.clone(),
             tool.files()
                 .iter()
                 .map(|file| capture_baseline(*file))
@@ -434,18 +498,18 @@ pub(crate) async fn bind(
 
     let mut txn = FileTxn::new();
     let result = write_bound(tool, &template, api_key, &mut txn)
-        .and_then(|()| set_current_provider(db, &tool.app(), tool.provider_id()));
+        .and_then(|()| set_current_provider(db, &app, tool.provider_id()));
     if let Err(error) = result {
-        rollback(txn, "绑定");
+        let mut error = rollback_with(txn, error);
+        if let Err(e) = write_previous_provider(db, &app, &previous) {
+            error.push_str(&format!("；还原当前服务商也失败：{e}"));
+        }
         let record_rollback = match previous_text {
             Some(text) => db.upsert_bind_record(key, &text),
             None => db.delete_bind_record(key),
         };
         if let Err(e) = record_rollback {
-            log::error!(
-                "[ofox_bind] {} 绑定失败后还原绑定记录也失败：{e}",
-                tool.label()
-            );
+            error.push_str(&format!("；还原绑定记录也失败：{e}"));
         }
         return Err(error);
     }
@@ -474,9 +538,7 @@ fn restore_snapshot(
         for baseline in &envelope.files {
             let path = PathBuf::from(&baseline.path);
             let shown = display_path(&path);
-            let current = crate::config::read_file_bytes(&path)
-                .map_err(|e| e.to_string())?
-                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+            let current = read_text(&path)?;
             let plan = baseline
                 .file
                 .plan_restore(baseline.original.as_deref(), current.as_deref())?;
@@ -520,10 +582,18 @@ fn restore_snapshot(
         Ok(())
     })();
     if let Err(error) = result {
-        rollback(txn, "还原");
-        return Err(error);
+        return Err(rollback_with(txn, error));
     }
     Ok(dirs_to_prune)
+}
+
+/// 快照记的是拍快照时的路径；之后改过配置目录的话，现在的路径上可能也有 Ofox
+/// 的配置。
+fn paths_moved(envelope: &BindEnvelope) -> bool {
+    envelope
+        .files
+        .iter()
+        .any(|baseline| baseline.file.current_path() != Path::new(&baseline.path))
 }
 
 /// 没有快照时的尽力清理。返回是否找到了 Ofox 的配置。
@@ -552,8 +622,8 @@ fn apply_legacy_edits(
             None => txn.remove(&edit.path),
         };
         if let Err(e) = result {
-            rollback(txn, "清理旧版绑定");
-            return Err(format!("清理 {} 失败：{e}", display_path(&edit.path)));
+            let error = format!("清理 {} 失败：{e}", display_path(&edit.path));
+            return Err(rollback_with(txn, error));
         }
     }
     Ok(!edits.is_empty())
@@ -597,15 +667,21 @@ pub(crate) async fn unbind(
         return Ok(report);
     }
 
+    if !dry_run {
+        disable_proxy_flag(db, &tool.app()).await?;
+    }
+    let _file_locks = file_locks(tool);
+
     match stored {
         Some(StoredRecord::Envelope(envelope)) if envelope.kind == RecordKind::Snapshot => {
             let dirs_to_prune = restore_snapshot(&envelope, &mut report, dry_run)?;
-            if dry_run {
-                let previous = &envelope.previous_provider;
-                report.provider_restored_to =
-                    previous.settings.clone().or_else(|| previous.db.clone());
-            } else {
-                restore_previous_provider(db, tool, &envelope.previous_provider, &mut report)?;
+            if paths_moved(&envelope) && bound_on_disk(tool)? {
+                apply_legacy_edits(legacy_edits(tool, None)?, &mut report, dry_run)?;
+                report.warn("leftoverRemoved", None);
+            }
+            let target = provider_target(db, tool, Some(&envelope.previous_provider), &mut report)?;
+            if !dry_run {
+                apply_provider_target(db, tool, target)?;
                 dirs_to_prune
                     .iter()
                     .for_each(|dir| remove_dir_if_empty(dir));
@@ -614,11 +690,17 @@ pub(crate) async fn unbind(
         stored => {
             let legacy = match &stored {
                 Some(StoredRecord::Legacy(value)) => Some(value),
-                _ => None,
+                Some(StoredRecord::Envelope(envelope)) => envelope.legacy.as_ref(),
+                None => None,
             };
-            if apply_legacy_edits(legacy_edits(tool, legacy)?, &mut report, dry_run)? {
-                report.legacy = true;
-                fall_back_to_official(db, tool, &mut report, dry_run)?;
+            let found = apply_legacy_edits(legacy_edits(tool, legacy)?, &mut report, dry_run)?;
+            // 上次清理后服务商没切回来（比如中途出错）：这次补上。
+            if found || provider_is_ofox(db, tool)? {
+                report.legacy = found;
+                let target = provider_target(db, tool, None, &mut report)?;
+                if !dry_run {
+                    apply_provider_target(db, tool, target)?;
+                }
             } else {
                 report.already_unbound = true;
             }
@@ -626,9 +708,8 @@ pub(crate) async fn unbind(
     }
 
     if !dry_run {
-        disable_proxy_flag(db, &tool.app()).await;
         if let Err(e) = db.delete_bind_record(key) {
-            // 文件已经还原；记录删不掉时再解绑一次也是同样结果。
+            // 文件已经还原；下次绑定看到磁盘上不是 Ofox 的配置会重新拍快照。
             log::warn!("[ofox_bind] 删除 {} 绑定记录失败：{e}", tool.label());
             report.warn("recordCleanupFailed", None);
         }

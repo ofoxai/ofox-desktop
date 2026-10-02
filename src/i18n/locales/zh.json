@@ -25,7 +25,8 @@
     "warning": {
       "previousProviderMissing": "绑定前使用的服务商已不存在，已切换为官方默认。",
       "fileKeptHasOtherContent": "Ofox 新建的配置文件里有你后来添加的内容，文件已保留。",
-      "recordCleanupFailed": "配置已还原，但清理绑定记录失败；可以再解除绑定一次。"
+      "recordCleanupFailed": "配置已还原，但清理绑定记录失败；可以再解除绑定一次。",
+      "leftoverRemoved": "另一个位置也有 Ofox 的配置，已一并清除。"
     }
   },
   "modelCompatibility": {
