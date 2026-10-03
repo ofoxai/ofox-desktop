@@ -882,7 +882,14 @@
     "openConfigFolderFailed": "Failed to open config folder:",
     "selectConfigDirFailed": "Failed to select config directory:",
     "getDefaultConfigDirFailed": "Failed to get default config directory:",
-    "openReleaseNotesFailed": "Failed to open release notes:"
+    "openReleaseNotesFailed": "Failed to open release notes:",
+    "repair": "Repair",
+    "repairing": "Repairing…",
+    "repairInstallHint": "Reinstall {{tool}}",
+    "repairDownloadHint": "Open the download page for {{tool}}",
+    "repairUnavailable": "This tool has to be installed manually",
+    "repairFailed": "Repairing {{tool}} failed: {{message}}",
+    "repairDismiss": "Dismiss"
   },
   "providerForm": {
     "supplierName": "Provider Name",

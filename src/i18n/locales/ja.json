@@ -882,7 +882,14 @@
     "openConfigFolderFailed": "設定フォルダを開けませんでした:",
     "selectConfigDirFailed": "設定ディレクトリの選択に失敗:",
     "getDefaultConfigDirFailed": "デフォルト設定ディレクトリの取得に失敗:",
-    "openReleaseNotesFailed": "リリースノートを開けませんでした:"
+    "openReleaseNotesFailed": "リリースノートを開けませんでした:",
+    "repair": "修復",
+    "repairing": "修復中…",
+    "repairInstallHint": "{{tool}} を再インストール",
+    "repairDownloadHint": "{{tool}} のダウンロードページを開く",
+    "repairUnavailable": "このツールは手動でインストールしてください",
+    "repairFailed": "{{tool}} の修復に失敗しました：{{message}}",
+    "repairDismiss": "閉じる"
   },
   "providerForm": {
     "supplierName": "プロバイダー名",

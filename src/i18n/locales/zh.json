@@ -882,7 +882,14 @@
     "openConfigFolderFailed": "打开配置文件夹失败:",
     "selectConfigDirFailed": "选择配置目录失败:",
     "getDefaultConfigDirFailed": "获取默认配置目录失败:",
-    "openReleaseNotesFailed": "打开更新日志失败:"
+    "openReleaseNotesFailed": "打开更新日志失败:",
+    "repair": "修复",
+    "repairing": "修复中…",
+    "repairInstallHint": "重新安装 {{tool}}",
+    "repairDownloadHint": "打开 {{tool}} 的下载页面",
+    "repairUnavailable": "这个工具需要手动安装",
+    "repairFailed": "修复 {{tool}} 失败：{{message}}",
+    "repairDismiss": "关闭"
   },
   "providerForm": {
     "supplierName": "供应商名称",

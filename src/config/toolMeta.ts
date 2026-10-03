@@ -109,6 +109,18 @@ export const PROXY_SUPPORTED_TOOLS = ["claude", "codex", "gemini"];
 // 哪些工具支持从 cc-switch UI 一键安装。当前 6 个都在 scripts/installer/app/
 // steps.py 的 TOOL_STEPS 注册表里——保持两边同步即可。Windows / Linux 实现
 // 落地后在此处按平台收紧。
+/**
+ * 「修复」按钮该做什么：能用安装器装的工具就重装；只有下载页的桌面应用打开下载页；
+ * 两者都没有时按钮不可用。
+ */
+export type RepairAction = "install" | "download" | "none";
+
+export function repairActionFor(toolId: string): RepairAction {
+  if (INSTALLABLE_TOOLS.includes(toolId)) return "install";
+  if (TOOL_META[toolId]?.downloadUrl) return "download";
+  return "none";
+}
+
 export const INSTALLABLE_TOOLS: readonly string[] = [
   "claude",
   "codex",

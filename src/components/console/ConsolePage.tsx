@@ -54,6 +54,8 @@ import { useUpdate } from "@/contexts/UpdateContext";
 import { manageToolApi } from "@/lib/api/manageTool";
 import { useToolLaunch } from "@/hooks/useToolLaunch";
 import { useToolUpdates } from "@/hooks/useToolUpdates";
+import { useToolInstall } from "@/hooks/useToolInstall";
+import { repairActionFor } from "@/config/toolMeta";
 import ofoxLogo from "@/assets/icons/ofox-logo.png";
 
 interface ToolInfo {
@@ -481,6 +483,21 @@ export default function ConsolePage({
   // useRef 保证 listener 总是调到最新的 loadData，useEffect 只跑一次绑定，
   // 不再依赖 loadData，没有 cleanup race。
   const loadDataRef = useRef(loadData);
+
+  // 「修复」= 用安装器重装这个工具。装完重新检测，卡片自己从「需修复」翻回正常。
+  const {
+    installing: repairing,
+    install: repair,
+    error: repairError,
+    clearError: clearRepairError,
+    progress: repairProgress,
+  } = useToolInstall((toolId, code) => {
+    if (code === 0) {
+      void loadDataRef.current();
+    } else {
+      console.warn(`[ConsolePage] repair ${toolId} exit=${code}`);
+    }
+  });
   useEffect(() => {
     const refresh = () => {
       void loadDataRef.current();
@@ -669,6 +686,27 @@ export default function ConsolePage({
             // 列表始终保持渲染，刷新中叠遮罩——避免刷新时整段消失再回来
             // 的视觉跳变，尤其是用户已经选好滚动位置时。
             <div className="relative">
+              {repairError && (
+                <div
+                  role="alert"
+                  className="mb-3 flex items-start justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300"
+                >
+                  <span>
+                    {t("console.repairFailed", {
+                      tool:
+                        TOOL_META[repairError.toolId]?.label ??
+                        repairError.toolId,
+                      message: repairError.message,
+                    })}
+                  </span>
+                  <button
+                    onClick={clearRepairError}
+                    className="shrink-0 font-medium underline-offset-2 hover:underline"
+                  >
+                    {t("console.repairDismiss")}
+                  </button>
+                </div>
+              )}
               {tools.map((tool) => {
                 const keyLabel = apiKeyLabelByTool[tool.id];
                 const model = modelByTool[tool.id];
@@ -786,13 +824,40 @@ export default function ConsolePage({
                       {tool.status === "error" ? (
                         <button
                           onClick={() => {
-                            const url = TOOL_META[tool.id]?.downloadUrl;
-                            if (url) void settingsApi.openExternal(url);
+                            const action = repairActionFor(tool.id);
+                            if (action === "install") {
+                              void repair(tool.id);
+                            } else if (action === "download") {
+                              const url = TOOL_META[tool.id]?.downloadUrl;
+                              if (url) void settingsApi.openExternal(url);
+                            }
                           }}
-                          className="inline-flex items-center gap-1.5 rounded-lg bg-orange-500 px-2.5 py-1 text-[12px] font-medium text-white hover:bg-orange-600"
+                          disabled={
+                            repairing.has(tool.id) ||
+                            repairActionFor(tool.id) === "none"
+                          }
+                          title={
+                            repairActionFor(tool.id) === "install"
+                              ? t("console.repairInstallHint", {
+                                  tool: tool.label,
+                                })
+                              : repairActionFor(tool.id) === "download"
+                                ? t("console.repairDownloadHint", {
+                                    tool: tool.label,
+                                  })
+                                : t("console.repairUnavailable")
+                          }
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-orange-500 px-2.5 py-1 text-[12px] font-medium text-white hover:bg-orange-600 disabled:cursor-default disabled:opacity-60"
                         >
-                          <Wrench className="h-3.5 w-3.5" />
-                          修复
+                          {repairing.has(tool.id) ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Wrench className="h-3.5 w-3.5" />
+                          )}
+                          {repairing.has(tool.id)
+                            ? (repairProgress[tool.id]?.name ??
+                              t("console.repairing"))
+                            : t("console.repair")}
                         </button>
                       ) : (
                         <button
