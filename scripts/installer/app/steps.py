@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-import urllib.request
 
 import shutil
 
@@ -487,11 +486,20 @@ class HermesStep(CurlInstallerStep):
     probe_args = [["--version"], ["--help"]]
 
     def _fetch_mirror_script(self) -> Optional[str]:
+        # 用 curl 取，和终端里真正执行安装的是同一条网络路径。urllib 会跟随 macOS
+        # 的系统代理设置，代理失效时这里会误判成「镜像不可用」。
         try:
-            with urllib.request.urlopen(HERMES_MIRROR_URL, timeout=20) as resp:
-                return resp.read().decode("utf-8", "replace")
-        except Exception:
+            result = subprocess.run(
+                ["curl", "-fsSL", "--max-time", "20", HERMES_MIRROR_URL],
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired):
             return None
+        if result.returncode != 0 or not result.stdout:
+            return None
+        return result.stdout.decode("utf-8", "replace")
 
     def _official_command(self) -> str:
         self.installer_url = HERMES_OFFICIAL_URL

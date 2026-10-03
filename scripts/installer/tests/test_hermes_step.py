@@ -27,7 +27,7 @@ MIRROR_SCRIPT = (
 HERMES_PATH = os.path.expanduser("~/.local/bin/hermes")
 
 
-def _completed(code: int, stderr: str = "", stdout: str = "") -> subprocess.CompletedProcess:
+def _completed(code: int, stderr: str = "", stdout="") -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(args=[], returncode=code, stdout=stdout, stderr=stderr)
 
 
@@ -89,6 +89,17 @@ class HermesInstallCommandTest(unittest.TestCase):
             command = step.terminal_command()
         self.assertIn("镜像不可用", command)
         self.assertIn(HERMES_OFFICIAL_URL, command)
+
+    def test_mirror_script_is_fetched_with_curl(self):
+        """和终端里执行安装的是同一条路径；失效的系统代理不能把镜像误判成不可用。"""
+        step = HermesStep()
+        with mock.patch.object(
+            steps_mod.subprocess, "run", return_value=_completed(0, stdout=MIRROR_SCRIPT.encode())
+        ) as run:
+            self.assertEqual(step._fetch_mirror_script(), MIRROR_SCRIPT)
+        self.assertEqual(run.call_args.args[0][:3], ["curl", "-fsSL", "--max-time"])
+        with mock.patch.object(steps_mod.subprocess, "run", return_value=_completed(22, stdout=b"")):
+            self.assertIsNone(step._fetch_mirror_script())
 
 
 class HermesVerifyTest(unittest.TestCase):
