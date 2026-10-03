@@ -448,7 +448,7 @@ pub async fn probe_apex_on_startup(app: &tauri::AppHandle, client: &reqwest::Cli
             let unchanged = settings.ofox_apex.as_deref() == Some(apex)
                 && settings.ofox_apex_resolved == Some(resolved);
             if unchanged {
-                log::debug!("[OfoxApex] apex={apex} confirmed by probe");
+                log::info!("[OfoxApex] apex={apex} confirmed by geo probe (pinned={pinned})");
                 return;
             }
             if let Err(e) = crate::settings::mutate_settings(move |s| {
