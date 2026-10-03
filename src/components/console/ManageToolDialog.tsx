@@ -58,7 +58,6 @@ import {
   fetchOfoxModels,
   filterOfoxModelsByProtocol,
   filterOfoxModelsForWorkBuddy,
-  pickWorkBuddyCuratedModels,
   toWorkBuddyModelSelection,
   type FetchedModel,
 } from "@/lib/api/model-fetch";
@@ -1022,7 +1021,7 @@ export default function ManageToolDialog({
 }
 
 // ---------------------------------------------------------------------------
-// WorkBuddyModelPicker — searchable multi-select with curated/all shortcuts
+// WorkBuddyModelPicker — searchable multi-select with select-all / clear shortcuts
 // ---------------------------------------------------------------------------
 
 // cmdk becomes noticeably slow when every catalog entry is mounted at once.
@@ -1262,24 +1261,20 @@ function WorkBuddyModelPicker({
             variant="ghost"
             size="sm"
             className="h-7 px-2 text-[11px]"
-            disabled={loading || models.length === 0}
-            onClick={() =>
-              onChange(
-                pickWorkBuddyCuratedModels(models).map((model) => model.id),
-              )
-            }
+            disabled={loading || models.length === 0 || allSelected}
+            onClick={() => onChange(models.map((model) => model.id))}
           >
-            精选模型
+            全选兼容
           </Button>
           <Button
             type="button"
             variant="ghost"
             size="sm"
             className="h-7 px-2 text-[11px]"
-            disabled={loading || models.length === 0 || allSelected}
-            onClick={() => onChange(models.map((model) => model.id))}
+            disabled={loading || selectedIds.length === 0}
+            onClick={() => onChange([])}
           >
-            全选兼容
+            取消全选
           </Button>
         </span>
       </div>

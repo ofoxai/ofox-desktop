@@ -454,6 +454,25 @@ describe("ManageToolDialog WorkBuddy multi-model management", () => {
     expect(check).not.toHaveBeenCalled();
   });
 
+  it("clears the whole WorkBuddy selection", async () => {
+    const models = [
+      compatibleModel("openai/model-a"),
+      compatibleModel("anthropic/model-b"),
+    ];
+    mockWorkBuddy(models);
+
+    await renderTool("workbuddy", "WorkBuddy", "5.5.6");
+    await screen.findByText("共 2 个兼容模型，共用一个 Ofox Key");
+    fireEvent.click(screen.getByRole("button", { name: "全选兼容" }));
+    expect(screen.getByText("已选择 2 个兼容模型")).toBeVisible();
+
+    fireEvent.click(screen.getByRole("button", { name: "取消全选" }));
+    expect(screen.getByText("请选择至少一个兼容模型")).toBeVisible();
+    expect(screen.getByRole("button", { name: "取消全选" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "精选模型" })).toBeNull();
+  });
+
   it("re-saves an unchanged WorkBuddy selection", async () => {
     const model = compatibleModel("openai/model-a");
     mockWorkBuddy([model]);
