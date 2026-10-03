@@ -1130,6 +1130,24 @@ fn try_get_version_wsl(
     )
 }
 
+/// 用户目录下常见的 CLI 安装位置（登录 shell 的 PATH 里不一定有）。
+fn home_bin_search_paths(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    if home.as_os_str().is_empty() {
+        return Vec::new();
+    }
+    [
+        ".local/bin",
+        ".npm-global/bin",
+        "n/bin",
+        ".volta/bin",
+        // Hermes 的安装脚本把启动器放在这里。
+        ".hermes/bin",
+    ]
+    .iter()
+    .map(|rel| home.join(rel))
+    .collect()
+}
+
 fn push_unique_path(paths: &mut Vec<std::path::PathBuf>, path: std::path::PathBuf) {
     if path.as_os_str().is_empty() {
         return;
@@ -1213,11 +1231,8 @@ fn scan_cli_version(tool: &str) -> (Option<String>, Option<String>) {
 
     // 常见的安装路径（原生安装优先）
     let mut search_paths: Vec<std::path::PathBuf> = Vec::new();
-    if !home.as_os_str().is_empty() {
-        push_unique_path(&mut search_paths, home.join(".local/bin"));
-        push_unique_path(&mut search_paths, home.join(".npm-global/bin"));
-        push_unique_path(&mut search_paths, home.join("n/bin"));
-        push_unique_path(&mut search_paths, home.join(".volta/bin"));
+    for path in home_bin_search_paths(&home) {
+        push_unique_path(&mut search_paths, path);
     }
 
     #[cfg(target_os = "macos")]
@@ -2254,6 +2269,17 @@ pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_bin_search_paths_include_hermes_bin() {
+        let home = std::path::Path::new("/home/me");
+        let paths = home_bin_search_paths(home);
+        assert!(paths.contains(&home.join(".local/bin")));
+        assert!(paths.contains(&home.join(".hermes/bin")));
+        let unique: std::collections::HashSet<_> = paths.iter().collect();
+        assert_eq!(unique.len(), paths.len());
+        assert!(home_bin_search_paths(std::path::Path::new("")).is_empty());
+    }
     use std::path::PathBuf;
 
     #[cfg(unix)]
