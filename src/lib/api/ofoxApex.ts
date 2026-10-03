@@ -35,5 +35,32 @@ export async function ofoxSetApex(next: OfoxApex): Promise<boolean> {
   return await invoke("ofox_set_apex", { nextApex: next });
 }
 
+export interface OfoxApexState {
+  apex: OfoxApex;
+  /** 用户手动选过（锁定）。否则每次启动按网络重新探测。 */
+  pinned: boolean;
+  /** `ofoxSetApexAuto` 专用：这次探测有没有拿到结果。 */
+  detected: boolean;
+}
+
+function normalizeApex(value: unknown): OfoxApex {
+  return value === "ofox.io" ? "ofox.io" : "ofox.ai";
+}
+
+/** 读当前 apex 和是否锁定。 */
+export async function ofoxGetApexState(): Promise<OfoxApexState> {
+  const state = await invoke<OfoxApexState>("ofox_get_apex_state");
+  return { ...state, apex: normalizeApex(state.apex) };
+}
+
+/**
+ * 改回跟随网络：后端解除锁定并立刻探测一次，结果和当前不同就按手动切换的
+ * 流程切过去（会清会话并 emit reauth）。探测失败时保持当前值，`detected` 为 false。
+ */
+export async function ofoxSetApexAuto(): Promise<OfoxApexState> {
+  const state = await invoke<OfoxApexState>("ofox_set_apex_auto");
+  return { ...state, apex: normalizeApex(state.apex) };
+}
+
 /** 后端 emit 的 apex 切换事件名，供前端 hook 监听。 */
 export const OFOX_APEX_CHANGED_EVENT = "ofox-apex-changed";

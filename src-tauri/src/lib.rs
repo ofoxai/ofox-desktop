@@ -944,26 +944,6 @@ pub fn run() {
                 }
             }
 
-            // Reconcile managed WorkBuddy URLs as soon as the database is ready.
-            // Credential initialization below may wait for a macOS Keychain
-            // authorization prompt, but endpoint migration needs no secret.
-            let apex_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let client = crate::proxy::http_client::get();
-                crate::ofox_apex::ensure_apex_resolved(&apex_handle, &client).await;
-                if let Some(state) = apex_handle.try_state::<crate::store::AppState>() {
-                    match crate::workbuddy_config::reconcile_managed_endpoint(&state.db).await {
-                        Ok(true) => log::info!(
-                            "[WorkBuddy] updated managed model endpoint for current apex"
-                        ),
-                        Ok(false) => {}
-                        Err(error) => {
-                            log::warn!("[WorkBuddy] endpoint reconciliation failed: {error}")
-                        }
-                    }
-                }
-            });
-
             // 初始化 OfoxAuthManager
             {
                 use crate::ofox_auth::OfoxAuthManager;
@@ -1037,6 +1017,25 @@ pub fn run() {
                 app.manage(state);
                 log::info!("✓ OfoxAuthManager initialized");
             }
+
+            // 每次启动按出口 IP 探测区域；结果变了就切换（会清旧域登录态，所以放在
+            // OfoxAuthState 注册之后）。然后把 WorkBuddy 里的网关地址同步到当前区域。
+            let apex_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let client = crate::proxy::http_client::get();
+                crate::ofox_apex::probe_apex_on_startup(&apex_handle, &client).await;
+                if let Some(state) = apex_handle.try_state::<crate::store::AppState>() {
+                    match crate::workbuddy_config::reconcile_managed_endpoint(&state.db).await {
+                        Ok(true) => log::info!(
+                            "[WorkBuddy] updated managed model endpoint for current apex"
+                        ),
+                        Ok(false) => {}
+                        Err(error) => {
+                            log::warn!("[WorkBuddy] endpoint reconciliation failed: {error}")
+                        }
+                    }
+                }
+            });
 
             // 异常退出恢复 + 代理状态自动恢复
             let app_handle = app.handle().clone();
@@ -1624,7 +1623,9 @@ pub fn run() {
             commands::ofox_auth::ofox_unbind_preview,
             // Ofox apex (region) switching
             commands::ofox_apex::ofox_get_apex,
+            commands::ofox_apex::ofox_get_apex_state,
             commands::ofox_apex::ofox_set_apex,
+            commands::ofox_apex::ofox_set_apex_auto,
             commands::ofox_api_keys::ofox_list_api_keys,
             commands::ofox_api_keys::ofox_create_api_key_for_tool,
             commands::ofox_api_keys::ofox_refresh_api_key_for_tool,

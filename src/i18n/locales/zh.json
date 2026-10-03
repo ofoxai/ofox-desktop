@@ -29,6 +29,20 @@
       "leftoverRemoved": "另一个位置也有 Ofox 的配置，已一并清除。"
     }
   },
+  "apexSwitch": {
+    "auto": "自动检测",
+    "autoLabel": "自动 · {{apex}}",
+    "pinned": "已固定为 {{apex}}，启动时不再按网络自动切换",
+    "switched": "已切换到 {{apex}}",
+    "switchFailed": "切换区域失败，请稍后重试",
+    "autoDetected": "已按当前网络选择 {{apex}}，以后每次启动会重新检测",
+    "autoUndetected": "无法检测当前网络所在区域，保持 {{apex}}；下次启动会再试",
+    "confirmTitle": "切换区域需要重新登录",
+    "confirmMessage": "当前会话将被清除，您需要在 {{apex}} 重新授权。\n已绑定的工具会继续使用原来的网关地址，重新绑定后才会切换。",
+    "confirmAutoMessage": "将按当前网络重新检测区域。如果结果和 {{apex}} 不同，当前会话会被清除，需要重新登录。",
+    "confirm": "继续切换",
+    "cancel": "保留当前区域"
+  },
   "modelCompatibility": {
     "title": "流式兼容性",
     "checking": "正在验证流式兼容性…",

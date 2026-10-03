@@ -27,7 +27,6 @@
 //!   用户引导到 LoginPage；下次手动再切一次 apex 即可恢复。
 
 use tauri::Emitter;
-use tauri::State;
 
 use crate::commands::ofox_auth::OfoxAuthState;
 use crate::store::AppState;
@@ -39,36 +38,53 @@ pub async fn ofox_get_apex() -> Result<String, String> {
     Ok(crate::ofox_apex::current_apex().to_string())
 }
 
-/// 切换 OFox apex 并完成关联副作用。详见模块文档。
-///
-/// `next_apex`: 必须是 `"ofox.ai"` 或 `"ofox.io"`，前端 Select 已经把字符串
-/// 限制好了，但服务端再校验一次防止被绕过写入未知值。
+/// 前端看到的区域状态：当前 apex，以及是不是用户手动锁定的。
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApexState {
+    pub apex: String,
+    pub pinned: bool,
+    /// `ofox_set_apex_auto` 专用：这次探测有没有拿到结果。
+    pub detected: bool,
+}
+
+fn apex_state(detected: bool) -> ApexState {
+    ApexState {
+        apex: crate::ofox_apex::current_apex().to_string(),
+        pinned: crate::ofox_apex::apex_pinned(),
+        detected,
+    }
+}
+
 #[tauri::command(rename_all = "camelCase")]
-pub async fn ofox_set_apex(
-    next_apex: String,
-    state: State<'_, AppState>,
-    ofox_state: State<'_, OfoxAuthState>,
-    app: tauri::AppHandle,
+pub async fn ofox_get_apex_state() -> Result<ApexState, String> {
+    Ok(apex_state(true))
+}
+
+/// 切换 apex 并完成关联副作用（持久化 → 清旧域 token → 重建种子 → 同步
+/// WorkBuddy 地址 → 通知前端）。手动切换和启动探测共用。`pin` 为真表示用户
+/// 手动选的，之后启动探测不再改它。返回 WorkBuddy 地址是否同步成功。
+pub(crate) async fn apply_apex_switch(
+    app: &tauri::AppHandle,
+    next_apex: &str,
+    pin: bool,
 ) -> Result<bool, String> {
-    // 1. 白名单校验
-    if !crate::ofox_apex::is_known_apex(&next_apex) {
-        return Err(format!("未知 apex: {next_apex}"));
-    }
-
-    // 2. 同值 no-op——别人误点同一个选项不至于触发 logout
+    use tauri::Manager;
+    let state = app
+        .try_state::<AppState>()
+        .ok_or_else(|| "应用状态尚未就绪".to_string())?;
+    let ofox_state = app
+        .try_state::<OfoxAuthState>()
+        .ok_or_else(|| "登录状态尚未就绪".to_string())?;
     let current = crate::ofox_apex::current_apex();
-    if current == next_apex.as_str() {
-        log::info!("[OfoxApex] set_apex({next_apex}): same as current, no-op");
-        return Ok(true);
-    }
-
     log::info!("[OfoxApex] switching apex: {current} → {next_apex}");
 
     // 3. 持久化新 apex（必须早于 reseed，否则 reseed 拿到的还是旧 apex）
-    let next_for_settings = next_apex.clone();
+    let next_for_settings = next_apex.to_string();
     crate::settings::mutate_settings(move |s| {
         s.ofox_apex = Some(next_for_settings);
         s.ofox_apex_resolved = Some(true);
+        s.ofox_apex_pinned = Some(pin);
     })
     .map_err(|e| format!("写入 settings 失败: {e}"))?;
 
@@ -101,7 +117,7 @@ pub async fn ofox_set_apex(
         };
 
     // 6. 通知前端
-    if let Err(e) = app.emit("ofox-apex-changed", &next_apex) {
+    if let Err(e) = app.emit("ofox-apex-changed", next_apex) {
         log::warn!("[OfoxApex] emit ofox-apex-changed failed: {e}");
     }
     if let Err(e) = app.emit("ofox-reauth-requested", ()) {
@@ -109,4 +125,43 @@ pub async fn ofox_set_apex(
     }
 
     Ok(workbuddy_synced)
+}
+
+/// 手动切换 OFox apex（并锁定）。详见模块文档。
+///
+/// `next_apex`: 必须是 `"ofox.ai"` 或 `"ofox.io"`，前端 Select 已经把字符串
+/// 限制好了，但服务端再校验一次防止被绕过写入未知值。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn ofox_set_apex(next_apex: String, app: tauri::AppHandle) -> Result<bool, String> {
+    // 1. 白名单校验
+    if !crate::ofox_apex::is_known_apex(&next_apex) {
+        return Err(format!("未知 apex: {next_apex}"));
+    }
+
+    // 2. 同值：只锁定，不触发 logout（从「自动」改成手动选当前这个）
+    let current = crate::ofox_apex::current_apex();
+    if current == next_apex.as_str() {
+        if !crate::ofox_apex::apex_pinned() {
+            crate::settings::mutate_settings(|s| s.ofox_apex_pinned = Some(true))
+                .map_err(|e| format!("写入 settings 失败: {e}"))?;
+        }
+        log::info!("[OfoxApex] set_apex({next_apex}): same as current, pinned");
+        return Ok(true);
+    }
+
+    apply_apex_switch(&app, &next_apex, true).await
+}
+
+/// 改回跟随网络：解除锁定并立刻探测一次，结果和当前不同就切换。
+/// 探测失败时保持当前值（`detected == false`），下次启动会再试。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn ofox_set_apex_auto(app: tauri::AppHandle) -> Result<ApexState, String> {
+    crate::settings::mutate_settings(|s| s.ofox_apex_pinned = None)
+        .map_err(|e| format!("写入 settings 失败: {e}"))?;
+    let client = crate::proxy::http_client::get();
+    let (detected, confident) = crate::ofox_apex::detect_apex_from_geo(&client).await;
+    if confident && detected != crate::ofox_apex::current_apex() {
+        apply_apex_switch(&app, detected, false).await?;
+    }
+    Ok(apex_state(confident))
 }

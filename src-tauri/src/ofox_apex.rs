@@ -379,97 +379,183 @@ pub async fn detect_apex_from_geo(client: &reqwest::Client) -> (&'static str, bo
     }
 }
 
-/// 启动钩子：如果 settings 里 `ofoxApexResolved == Some(true)`，立刻返回；
-/// 否则跑一次 ip-api 探测、把结果连同 `resolved=true` 持久化到 settings.json。
-///
-/// 持久化失败只记 warn 不抛——下次启动会重试探测，体验是"多一次 5 秒延迟"，
-/// 不会卡死任何流程。
-///
-/// 探测完成后通过 `app` emit `ofox-apex-changed` 事件，前端 hook 据此重读。
-/// 即便此时还没有打开任何窗口，emit 也是非阻塞的（Tauri 内部 channel 缓冲）。
-///
-/// **探测结果与探测前的 apex 不同时，会 reseed 所有 ofox-* provider 行**——
-/// 这一步不能省：本函数是 spawn 出去异步跑的，而 DB seeding 在启动早期就用
-/// 当时的 `current_apex()`（探测未完成时是 fallback `ofox.ai`）把 base_url
-/// 拼好写进了 `providers.settings_config`。探测随后判定 CN 改成 ofox.io，
-/// settings 是对的，但**已经落库的 6 条种子仍冻着 api.ofox.ai**——之后 bind
-/// 读种子写盘，Claude/Codex/Gemini 的配置文件全部指向境内不可达的 host，
-/// 现象是 CLI 一直 "Connection failed: error sending request"。
-pub async fn ensure_apex_resolved(app: &tauri::AppHandle, client: &reqwest::Client) {
-    let already_resolved = crate::settings::get_settings()
-        .ofox_apex_resolved
-        .unwrap_or(false);
-    if already_resolved {
-        log::debug!(
-            "[OfoxApex] already resolved (apex={}); skip probe",
-            current_apex()
-        );
-        return;
-    }
+/// 用户是否手动锁定了区域。
+pub fn apex_pinned() -> bool {
+    crate::settings::get_settings()
+        .ofox_apex_pinned
+        .unwrap_or(false)
+}
 
-    // 探测前的 apex —— DB 里的种子就是用这个值拼的 base_url。
+/// 启动探测之后该做什么。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StartupAction {
+    /// 探测失败，但已经有存过的值：保持不动，下次启动再探。
+    KeepCurrent,
+    /// 写入这个值（`resolved` 为假表示是探测失败时的回退猜测）。
+    Persist { apex: &'static str, resolved: bool },
+    /// 探测结果和现有值不同，又没有锁定：整体切换（会清掉旧域登录态）。
+    Switch(&'static str),
+}
+
+/// 纯决策。`stored` 是 settings 里存过的 apex，`pinned` 是用户是否手动锁定。
+pub(crate) fn startup_action(
+    stored: Option<&'static str>,
+    pinned: bool,
+    probe: (&'static str, bool),
+) -> StartupAction {
+    let (detected, confident) = probe;
+    match (stored, confident) {
+        (Some(_), false) => StartupAction::KeepCurrent,
+        (None, _) => StartupAction::Persist {
+            apex: detected,
+            resolved: confident,
+        },
+        (Some(current), true) if pinned || current == detected => StartupAction::Persist {
+            apex: current,
+            resolved: true,
+        },
+        (Some(_), true) => StartupAction::Switch(detected),
+    }
+}
+
+/// 启动钩子：每次启动都按出口 IP 探测一次区域。
+///
+/// - 探测失败：有存过的值就保持（回退值只是猜的，不该覆盖已知的值）；没有就
+///   先用默认值并标记为未确定，下次启动再探。
+/// - 探测结果和现有值一致，或者用户手动锁定过：只确认，不切换。
+/// - 探测结果不同且没锁定：走和手动切换相同的流程（持久化、清旧域登录态、
+///   重建种子、同步 WorkBuddy 地址、通知前端）。这就是「开不开代理都能自动选对」。
+///
+/// 需要 `OfoxAuthState` 已经注册（切换要清登录态），所以在它之后再 spawn。
+pub async fn probe_apex_on_startup(app: &tauri::AppHandle, client: &reqwest::Client) {
+    let settings = crate::settings::get_settings();
+    let stored = settings.ofox_apex.as_deref().map(|_| current_apex());
+    let pinned = settings.ofox_apex_pinned.unwrap_or(false);
     let apex_before = current_apex();
 
-    let (detected, confident) = detect_apex_from_geo(client).await;
-
-    // 只有探测**真的拿到 countryCode** 才固化（resolved=true）。探测失败时
-    // 写入 apex 值但保持 resolved=false，让下次启动重新探一遍。
-    //
-    // 否则：国内用户首次启动恰好网络抖动 → 回退 ofox.ai → 连同 resolved=true
-    // 落盘 → 之后每次启动都 skip 探测 → 永久卡在境内不可达的 api.ofox.ai，
-    // 现象是登录态 Active 但 bind 永远失败。回退值是猜的，不该有终局效力。
-    if let Err(e) = crate::settings::mutate_settings(|s| {
-        s.ofox_apex = Some(detected.to_string());
-        s.ofox_apex_resolved = Some(confident);
-    }) {
-        log::warn!("[OfoxApex] persist apex={detected} failed: {e}; will re-probe next launch");
-        return;
-    }
-
-    // apex 变了 → 把用旧 apex 拼好的 provider 种子重建一遍。不做的话
-    // settings 指向新 apex、DB 种子还冻着旧 apex，bind 会把旧 host 写进
-    // 工具配置文件（详见本函数 doc comment）。
-    if detected != apex_before {
-        use tauri::Manager;
-        match app.try_state::<crate::store::AppState>() {
-            Some(state) => {
-                match crate::database::dao::providers_seed::reseed_ofox_providers_with_current_apex(
-                    &state.db,
-                ) {
-                    Ok(n) => log::info!(
-                        "[OfoxApex] apex {apex_before} → {detected}: reseeded {n} provider rows"
-                    ),
-                    Err(e) => log::warn!(
-                        "[OfoxApex] apex {apex_before} → {detected}: reseed failed: {e}; \
-                         ofox-* providers may still carry the old base_url"
-                    ),
-                }
+    let probe = detect_apex_from_geo(client).await;
+    match startup_action(stored, pinned, probe) {
+        StartupAction::KeepCurrent => {
+            log::warn!("[OfoxApex] geo probe failed; keeping apex={apex_before}");
+        }
+        StartupAction::Persist { apex, resolved } => {
+            if pinned && probe.1 && probe.0 != apex {
+                log::info!(
+                    "[OfoxApex] apex pinned to {apex} by the user; network suggests {}",
+                    probe.0
+                );
             }
-            None => log::warn!(
-                "[OfoxApex] apex {apex_before} → {detected}: AppState unavailable; \
-                 skipped reseed — ofox-* providers may still carry the old base_url"
-            ),
+            let unchanged = settings.ofox_apex.as_deref() == Some(apex)
+                && settings.ofox_apex_resolved == Some(resolved);
+            if unchanged {
+                log::debug!("[OfoxApex] apex={apex} confirmed by probe");
+                return;
+            }
+            if let Err(e) = crate::settings::mutate_settings(move |s| {
+                s.ofox_apex = Some(apex.to_string());
+                s.ofox_apex_resolved = Some(resolved);
+            }) {
+                log::warn!("[OfoxApex] persist apex={apex} failed: {e}; will re-probe next launch");
+                return;
+            }
+            // 第一次启动：DB 种子是用探测前的默认值拼的，变了就重建。
+            if apex != apex_before {
+                reseed_after_apex_change(app, apex_before, apex);
+            }
+            if resolved {
+                log::info!("[OfoxApex] resolved apex={apex} (persisted)");
+            } else {
+                log::warn!(
+                    "[OfoxApex] apex={apex} is a fallback guess (geo probe failed); \
+                     not marking resolved — will re-probe on next launch"
+                );
+            }
+            use tauri::Emitter;
+            if let Err(e) = app.emit("ofox-apex-changed", apex) {
+                log::warn!("[OfoxApex] emit ofox-apex-changed failed: {e}");
+            }
+        }
+        StartupAction::Switch(next) => {
+            match crate::commands::ofox_apex::apply_apex_switch(app, next, false).await {
+                Ok(_) => log::info!("[OfoxApex] apex {apex_before} → {next} (network changed)"),
+                Err(e) => log::warn!(
+                    "[OfoxApex] apex {apex_before} → {next} failed: {e}; will retry next launch"
+                ),
+            }
         }
     }
+}
 
-    if confident {
-        log::info!("[OfoxApex] resolved apex={detected} (persisted)");
-    } else {
-        log::warn!(
-            "[OfoxApex] apex={detected} is a fallback guess (geo probe failed); \
-             not marking resolved — will re-probe on next launch"
-        );
-    }
-
-    use tauri::Emitter;
-    if let Err(e) = app.emit("ofox-apex-changed", detected) {
-        log::warn!("[OfoxApex] emit ofox-apex-changed failed: {e}");
+fn reseed_after_apex_change(app: &tauri::AppHandle, apex_before: &str, detected: &str) {
+    use tauri::Manager;
+    match app.try_state::<crate::store::AppState>() {
+        Some(state) => {
+            match crate::database::dao::providers_seed::reseed_ofox_providers_with_current_apex(
+                &state.db,
+            ) {
+                Ok(n) => log::info!(
+                    "[OfoxApex] apex {apex_before} → {detected}: reseeded {n} provider rows"
+                ),
+                Err(e) => log::warn!(
+                    "[OfoxApex] apex {apex_before} → {detected}: reseed failed: {e}; \
+                     ofox-* providers may still carry the old base_url"
+                ),
+            }
+        }
+        None => log::warn!(
+            "[OfoxApex] apex {apex_before} → {detected}: AppState unavailable; \
+             skipped reseed — ofox-* providers may still carry the old base_url"
+        ),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_probe_follows_the_network_unless_pinned() {
+        use StartupAction::*;
+        // 第一次启动
+        assert_eq!(
+            startup_action(None, false, ("ofox.io", true)),
+            Persist {
+                apex: "ofox.io",
+                resolved: true
+            }
+        );
+        assert_eq!(
+            startup_action(None, false, ("ofox.ai", false)),
+            Persist {
+                apex: "ofox.ai",
+                resolved: false
+            }
+        );
+        // 之后每次启动
+        assert_eq!(
+            startup_action(Some("ofox.io"), false, ("ofox.ai", false)),
+            KeepCurrent
+        );
+        assert_eq!(
+            startup_action(Some("ofox.io"), false, ("ofox.io", true)),
+            Persist {
+                apex: "ofox.io",
+                resolved: true
+            }
+        );
+        assert_eq!(
+            startup_action(Some("ofox.io"), false, ("ofox.ai", true)),
+            Switch("ofox.ai")
+        );
+        // 用户手动锁定过：网络变了也不动
+        assert_eq!(
+            startup_action(Some("ofox.io"), true, ("ofox.ai", true)),
+            Persist {
+                apex: "ofox.io",
+                resolved: true
+            }
+        );
+    }
 
     #[test]
     fn gateway_mentions_cover_every_apex_and_dev_gateway() {
