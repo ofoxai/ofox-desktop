@@ -5,6 +5,7 @@ import { ToolBadge } from "@/components/tools/ToolBadge";
 import { TOOL_META } from "@/config/toolMeta";
 import type { InstallProgress } from "@/hooks/useToolInstall";
 import { settingsApi } from "@/lib/api";
+import { useTranslation } from "react-i18next";
 
 /**
  * 工具卡的六态状态机。两个调用点共用：
@@ -29,7 +30,9 @@ export type ToolStatus =
   | "installing"
   | "selected"
   | "unselected"
-  | "bound";
+  | "bound"
+  | "boundMissing"
+  | "detectionFailed";
 
 interface ToolDiscoveryCardProps {
   toolId: string;
@@ -52,6 +55,8 @@ interface ToolDiscoveryCardProps {
    * AddToolsDialog 里某些不该让用户装的工具，如未来 hermes 临时不可装时）。
    */
   onInstall?: () => void;
+  onRetry?: () => void;
+  onManageBound?: () => void;
   /**
    * 安装进度，仅 installing 态使用。不传则版本位显示笼统的"安装中…"。
    *
@@ -82,6 +87,9 @@ const STATE_CLASSES: Record<ToolStatus, string> = {
   // cursor-default + button[disabled] 拦截点击。
   bound:
     "border-orange-400 bg-white shadow-sm shadow-orange-100 dark:bg-neutral-800 dark:shadow-orange-900/20 cursor-default",
+  boundMissing:
+    "border-orange-300/70 bg-muted/30 cursor-default dark:border-orange-500/40",
+  detectionFailed: "border-dashed border-border/60 bg-muted/20 cursor-default",
 };
 
 export function ToolDiscoveryCard({
@@ -92,12 +100,15 @@ export function ToolDiscoveryCard({
   autoSelectTick,
   onClick,
   onInstall,
+  onRetry,
+  onManageBound,
   progress,
 }: ToolDiscoveryCardProps) {
+  const { t } = useTranslation();
   const controls = useAnimationControls();
   const meta = TOOL_META[toolId];
   const projectUrl = meta?.projectUrl;
-  const downloadUrl = meta?.downloadUrl;
+  const downloadUrl = meta?.downloadUrl ?? projectUrl;
 
   const handleOpenProject = async () => {
     if (!projectUrl) return;
@@ -132,13 +143,15 @@ export function ToolDiscoveryCard({
   // dimmed 控制 ToolBadge + label 的灰显——只 missing 真灰显（"装不上"）。
   // installing 时品牌色高亮，让用户感知"这个卡正在被处理"。scanning 也
   // 不再 dimmed badge——pulse 已经传达"未知"含义，badge 灰显反而显得这工具不存在。
-  const dimmed = status === "missing";
+  const dimmed = status === "missing" || status === "boundMissing";
   // 所有"未确定/不可手动操作"态都 disabled。
   const disabled =
     status === "scanning" ||
     status === "missing" ||
     status === "installing" ||
-    status === "bound";
+    status === "bound" ||
+    status === "boundMissing" ||
+    status === "detectionFailed";
   // 安装耗时长（装 Node 动辄几分钟），只显示"安装中…"用户会以为卡死了。有进度
   // 就把"第几步 / 共几步 · 步骤名"摊开；waiting 阶段再补一个已用秒数，让用户
   // 看得出它确实在动。
@@ -158,7 +171,14 @@ export function ToolDiscoveryCard({
       ? "检测中…"
       : status === "installing"
         ? installingText
-        : (detectedVersion ?? "未安装");
+        : status === "boundMissing"
+          ? t("toolLifecycle.boundNotInstalled")
+          : status === "detectionFailed"
+            ? t("toolLifecycle.detectionFailed")
+            : (detectedVersion ??
+              (status === "bound"
+                ? t("toolLifecycle.bindingRetained")
+                : "未安装"));
 
   // 外层 div 是 "卡片本体（motion.button）+ 角标按钮" 的共同定位锚——把
   // 角标渲染到 button **外部**有两个关键作用：
@@ -176,7 +196,7 @@ export function ToolDiscoveryCard({
         whileTap={!disabled ? { scale: 0.97 } : undefined}
         className={`w-full ${BASE} ${STATE_CLASSES[status]}`}
       >
-        {status === "bound" && (
+        {(status === "bound" || status === "boundMissing") && (
           // 顶部居中绿勾——位置压在卡片顶边上（-top-2），让"已绑定"在一眼扫
           // 视时就能跟"选中"区分开。SVG 用 viewBox 内绘制对勾，避免依赖额外
           // icon 包。aria-hidden + 父按钮已 disabled，无需额外 a11y 文案。
@@ -241,7 +261,25 @@ export function ToolDiscoveryCard({
           onClick={() => void handleDownload()}
           className="absolute bottom-2 right-2 z-10 cursor-pointer rounded-md bg-orange-500 px-2 py-0.5 text-[10px] font-medium text-white shadow-sm hover:bg-orange-600"
         >
-          下载
+          {meta?.downloadUrl ? "下载" : t("toolLifecycle.upstreamInstructions")}
+        </button>
+      )}
+      {status === "boundMissing" && onManageBound && (
+        <button
+          type="button"
+          onClick={onManageBound}
+          className="absolute bottom-2 right-2 z-10 rounded-md bg-muted px-2 py-0.5 text-[10px] text-foreground hover:bg-accent"
+        >
+          {t("toolLifecycle.manageFromHome")}
+        </button>
+      )}
+      {status === "detectionFailed" && onRetry && (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="absolute bottom-2 right-2 z-10 rounded-md bg-muted px-2 py-0.5 text-[10px] text-foreground hover:bg-accent"
+        >
+          {t("toolLifecycle.retryDetection")}
         </button>
       )}
     </div>

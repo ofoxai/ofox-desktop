@@ -36,7 +36,7 @@ mod stream_check;
 mod subscription;
 mod sync_support;
 pub(crate) mod tool_update;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 mod windows_chatgpt;
 
 mod lightweight;

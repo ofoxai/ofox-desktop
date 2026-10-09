@@ -131,8 +131,16 @@ export async function updateTools(names: string[]) {
 export function useToolUpdates(enabled = true) {
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
   useEffect(() => {
-    if (enabled && Date.now() - checkedAt > 5 * 60_000 && !state.batch)
+    if (!enabled) return;
+    if (Date.now() - checkedAt > 5 * 60_000 && !state.batch)
       void checkToolUpdates();
+    // Tools can be upgraded in another terminal or desktop app while this
+    // window is in the background. The mount cache cannot detect that change.
+    const refresh = () => {
+      if (!state.batch) void checkToolUpdates();
+    };
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
   }, [enabled]);
   return snapshot;
 }

@@ -402,10 +402,10 @@ fn build_unix_command(args: &[String]) -> String {
 #[tauri::command]
 pub async fn launch_tool_cli(app: AppHandle, tool_id: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    if tool_id == "codex" && super::tool_update::probe("codex").await.is_err() {
-        if let Some((path, _)) = super::tool_update::codex_desktop_version().await {
+    if tool_id == "codex" && super::misc::cli_is_missing("codex").await? {
+        if let Some(installation) = super::tool_update::codex_desktop_version().await? {
             let status = tokio::process::Command::new("/usr/bin/open")
-                .arg(path)
+                .arg(installation.path)
                 .status()
                 .await
                 .map_err(|e| e.to_string())?;
@@ -493,7 +493,10 @@ pub async fn launch_tool(app: AppHandle, tool_id: String) -> Result<(), String> 
         return launch_tool_cli(app, tool_id).await;
     }
 
-    let (path, _) = crate::commands::misc::find_workbuddy_app()?;
+    let path = crate::commands::misc::find_workbuddy_app()
+        .await?
+        .ok_or("WorkBuddy is not installed")?
+        .path;
 
     #[cfg(target_os = "macos")]
     {

@@ -17,7 +17,7 @@ Ofox follows [cc-switch's lifecycle implementation](https://github.com/farion123
 - WorkBuddy and desktop-only Codex: use in-app updates or official download pages. App versions are not compared with CLI versions.
 - Windows/Linux: version checks only; no automatic updates in this release, except the ChatGPT desktop app on Windows.
 
-The settings panel and console share update state. Tools with updates appear first, highlighted in orange, with an update count and an automatic or manual action. Checks are cached for five minutes between mounts and can be refreshed manually. A failed query never means “up to date.” Updates do not change Ofox bindings, API keys or model settings.
+The settings panel and console share update state. Tools with updates appear first, highlighted in orange, with an update count and an automatic or manual action. Checks are cached for five minutes between mounts. Refreshing the console, completing an installation repair, or returning to the window also rechecks updates, including upgrades performed outside Ofox. Console update badges apply only to the same installed version and installation kind as the local tool row. A failed query never means “up to date.” Updates do not change Ofox bindings, API keys or model settings.
 
 ## API
 

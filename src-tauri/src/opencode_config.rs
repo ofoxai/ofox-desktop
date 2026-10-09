@@ -20,7 +20,8 @@ const GLM_53_CHAT_MODELS: [&str; 4] = [
     "z-ai/glm-5.3-flash",
 ];
 
-fn opencode_config_lock() -> &'static Mutex<()> {
+/// 所有读改写 opencode.json 的路径都要拿这把锁。
+pub(crate) fn opencode_config_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }

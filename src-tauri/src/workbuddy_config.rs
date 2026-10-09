@@ -11,8 +11,11 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::{atomic_write, get_home_dir};
+use crate::config::{get_home_dir, FileTxn};
 use crate::database::Database;
+use crate::ofox_apex::mentions_ofox_gateway;
+use crate::services::ofox_bind::report::{display_path, UnbindReport};
+use crate::services::ofox_bind::status::{BindingStatus, ToolBindingStatus};
 
 const BACKUP_VERSION: u32 = 2;
 const BACKUP_KEY: &str = "workbuddy";
@@ -109,16 +112,39 @@ fn model_id(value: &Value) -> Option<&str> {
     value.get("id").and_then(Value::as_str)
 }
 
-fn read_models_from(path: &Path) -> Result<Vec<Value>, String> {
-    if !path.exists() {
-        return Ok(Vec::new());
+/// 指向 Ofox 网关的条目。旧版本在绑定记录丢失后重新绑定时，会把上一次 Ofox 写的
+/// 条目当成「原条目」记下来；这种原条目不能再放回去。
+fn is_ofox_entry(entry: &Value) -> bool {
+    entry
+        .get("url")
+        .and_then(Value::as_str)
+        .is_some_and(mentions_ofox_gateway)
+}
+
+/// 换模型时，任何一条 Ofox 条目被外部改过都会让整次更新停下（`Strict`）；解绑则
+/// 一律还原（`Always`），Ofox 管理的条目不管被改成什么都拿掉。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreMode {
+    Strict,
+    Always,
+}
+
+fn read_models_text(path: &Path) -> Result<Option<String>, String> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "读取 WorkBuddy 模型配置失败（{}）：{error}",
+            path.display()
+        )),
     }
-    let raw = fs::read_to_string(path)
-        .map_err(|e| format!("读取 WorkBuddy 模型配置失败（{}）：{e}", path.display()))?;
+}
+
+fn parse_models(raw: &str, path: &Path) -> Result<Vec<Value>, String> {
     if raw.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let value: Value = serde_json::from_str(&raw)
+    let value: Value = serde_json::from_str(raw)
         .map_err(|e| format!("WorkBuddy 模型配置不是有效 JSON（{}）：{e}", path.display()))?;
     value
         .as_array()
@@ -126,57 +152,68 @@ fn read_models_from(path: &Path) -> Result<Vec<Value>, String> {
         .ok_or_else(|| "WorkBuddy models.json 必须是模型数组，已停止写入".to_string())
 }
 
-fn write_models_to(path: &Path, models: &[Value]) -> Result<(), String> {
-    // 只在 unix 才用 existed 做"新建文件才 chmod 600"的判断；Windows 上
-    // 文件权限走 ACL，我们不参与，变量本身也没意义。
-    #[cfg(unix)]
+fn read_models_from(path: &Path) -> Result<Vec<Value>, String> {
+    read_models_text(path)?
+        .map(|raw| parse_models(&raw, path))
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
+/// 写 models.json；新建的文件只给本人读写（Windows 上权限走 ACL，不参与）。
+/// 出错时由调用方回滚 `txn`。
+fn write_models(txn: &mut FileTxn, path: &Path, models: &[Value]) -> Result<(), String> {
     let existed = path.exists();
     let bytes = serde_json::to_vec_pretty(models)
         .map_err(|e| format!("序列化 WorkBuddy 模型配置失败：{e}"))?;
-    atomic_write(path, &bytes).map_err(|e| format!("写入 WorkBuddy 模型配置失败：{e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if !existed {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-                .map_err(|e| format!("设置 WorkBuddy 模型配置权限失败：{e}"))?;
-        }
+    txn.write(path, &bytes)
+        .map_err(|e| format!("写入 WorkBuddy 模型配置失败：{e}"))?;
+    if !existed {
+        txn.set_mode(path, 0o600)
+            .map_err(|e| format!("设置 WorkBuddy 模型配置权限失败：{e}"))?;
     }
     Ok(())
 }
 
-/// Validate every fingerprint before mutating the list. One external edit
-/// therefore blocks the entire selection update rather than partially
-/// restoring or overwriting user configuration.
+/// 拿掉 Ofox 管理的条目，再把被它们顶替的原条目放回原位置。
+///
+/// `Strict`：先核对所有指纹再动手，任何一条被外部改过或删掉就整次停下，不会只改
+/// 一半。`Always`：指纹对不上就按模型 ID 找，找不到说明已经被删，跳过。
 fn remove_managed_entries(
     models: &mut Vec<Value>,
     state: &WorkBuddyBindingState,
+    mode: RestoreMode,
 ) -> Result<(), String> {
     let mut indexes = Vec::with_capacity(state.managed_models.len());
     for managed in &state.managed_models {
-        let Some(index) = models
+        let by_fingerprint = models
             .iter()
-            .position(|entry| entry == &managed.last_written_entry)
-        else {
-            if models
+            .position(|entry| entry == &managed.last_written_entry);
+        let by_id = || {
+            models
                 .iter()
-                .any(|entry| model_id(entry) == Some(managed.model_id.as_str()))
-            {
+                .position(|entry| model_id(entry) == Some(managed.model_id.as_str()))
+        };
+        match (by_fingerprint, mode) {
+            (Some(index), _) => indexes.push(index),
+            (None, RestoreMode::Always) => indexes.extend(by_id()),
+            (None, RestoreMode::Strict) if by_id().is_some() => {
                 return Err(format!(
                     "WorkBuddy 模型 {} 已被外部修改，已停止覆盖；请先在 WorkBuddy 中确认配置",
                     managed.model_id
                 ));
             }
-            return Err(format!(
-                "WorkBuddy 中 Ofox 模型 {} 已被外部删除，已停止覆盖",
-                managed.model_id
-            ));
-        };
-        indexes.push(index);
+            (None, RestoreMode::Strict) => {
+                return Err(format!(
+                    "WorkBuddy 中 Ofox 模型 {} 已被外部删除，已停止覆盖",
+                    managed.model_id
+                ));
+            }
+        }
     }
     indexes.sort_unstable();
+    let found = indexes.len();
     indexes.dedup();
-    if indexes.len() != state.managed_models.len() {
+    if mode == RestoreMode::Strict && indexes.len() != found {
         return Err("WorkBuddy 绑定备份包含重复模型指纹，已停止覆盖".to_string());
     }
     for index in indexes.into_iter().rev() {
@@ -190,6 +227,7 @@ fn remove_managed_entries(
             managed
                 .original_entry
                 .clone()
+                .filter(|entry| !is_ofox_entry(entry))
                 .map(|entry| (managed.original_index, entry))
         })
         .collect();
@@ -209,7 +247,7 @@ fn sync_models(
 ) -> Result<(Vec<Value>, WorkBuddyBindingState), String> {
     validate_selections(selections)?;
     if let Some(state) = previous {
-        remove_managed_entries(&mut models, state)?;
+        remove_managed_entries(&mut models, state, RestoreMode::Strict)?;
     }
 
     let mut managed_models = Vec::with_capacity(selections.len());
@@ -220,7 +258,7 @@ fn sync_models(
             .position(|entry| model_id(entry) == Some(target_id))
             .unwrap_or(models.len());
         let original_entry = if original_index < models.len() {
-            Some(models.remove(original_index))
+            Some(models.remove(original_index)).filter(|entry| !is_ofox_entry(entry))
         } else {
             None
         };
@@ -243,8 +281,8 @@ fn sync_models(
     ))
 }
 
-/// Change only Ofox-managed URLs. The exact saved fingerprint must still be
-/// present for every model, so a WorkBuddy-side edit cannot be overwritten.
+/// Change only existing Ofox-managed URLs. Deleted entries remain deleted;
+/// every existing entry must still match its saved fingerprint.
 fn reconcile_models_endpoint(
     mut models: Vec<Value>,
     state: &WorkBuddyBindingState,
@@ -254,14 +292,20 @@ fn reconcile_models_endpoint(
     let mut indexes = HashSet::with_capacity(state.managed_models.len());
     let mut changed = false;
     for managed in &mut next_state.managed_models {
-        let Some(index) = models
+        let matches: Vec<_> = models
             .iter()
-            .position(|entry| entry == &managed.last_written_entry)
-        else {
-            return Err(format!(
-                "WorkBuddy 模型 {} 已被外部修改或删除，无法自动更新地址",
-                managed.model_id
-            ));
+            .enumerate()
+            .filter(|(_, entry)| model_id(entry) == Some(managed.model_id.as_str()))
+            .collect();
+        let index = match matches.as_slice() {
+            [] => continue,
+            [(index, entry)] if *entry == &managed.last_written_entry => *index,
+            _ => {
+                return Err(format!(
+                    "WorkBuddy 模型 {} 已被外部修改，无法自动更新地址",
+                    managed.model_id
+                ));
+            }
         };
         if !indexes.insert(index) {
             return Err("WorkBuddy 绑定备份包含重复模型指纹，无法自动更新地址".to_string());
@@ -282,8 +326,21 @@ fn restore_models(
     mut models: Vec<Value>,
     state: &WorkBuddyBindingState,
 ) -> Result<Vec<Value>, String> {
-    remove_managed_entries(&mut models, state)?;
+    remove_managed_entries(&mut models, state, RestoreMode::Always)?;
     Ok(models)
+}
+
+/// 没有绑定记录时的尽力清理：删掉所有指向 Ofox 的条目，返回它们的模型 ID。
+fn remove_ofox_entries(models: &mut Vec<Value>) -> Vec<String> {
+    let mut removed = Vec::new();
+    models.retain(|entry| {
+        let ofox = is_ofox_entry(entry);
+        if ofox {
+            removed.push(model_id(entry).unwrap_or_default().to_string());
+        }
+        !ofox
+    });
+    removed
 }
 
 fn parse_state(raw: &str) -> Result<WorkBuddyBindingState, String> {
@@ -316,31 +373,19 @@ fn parse_state(raw: &str) -> Result<WorkBuddyBindingState, String> {
 
 async fn load_state(db: &Database) -> Result<Option<WorkBuddyBindingState>, String> {
     let Some(backup) = db
-        .get_live_backup(BACKUP_KEY)
-        .await
+        .get_bind_record(BACKUP_KEY)
         .map_err(|e| format!("读取 WorkBuddy 绑定备份失败：{e}"))?
     else {
         return Ok(None);
     };
-    parse_state(&backup.original_config).map(Some)
+    parse_state(&backup.record).map(Some)
 }
 
-fn file_snapshot(path: &Path) -> Result<Option<Vec<u8>>, String> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    fs::read(path)
-        .map(Some)
-        .map_err(|e| format!("读取 WorkBuddy 配置快照失败（{}）：{e}", path.display()))
-}
-
-fn restore_file_snapshot(path: &Path, snapshot: Option<&[u8]>) -> Result<(), String> {
-    match snapshot {
-        Some(bytes) => atomic_write(path, bytes)
-            .map_err(|e| format!("回滚 WorkBuddy 配置失败（{}）：{e}", path.display())),
-        None if path.exists() => fs::remove_file(path)
-            .map_err(|e| format!("回滚 WorkBuddy 新配置失败（{}）：{e}", path.display())),
-        None => Ok(()),
+/// 回滚文件，把回滚结果附在 `error` 后面。
+fn rollback_with(txn: FileTxn, error: String) -> String {
+    match txn.rollback() {
+        Ok(()) => format!("{error}（已回滚配置）"),
+        Err(rollback_error) => format!("{error}；同时回滚 WorkBuddy 配置失败：{rollback_error}"),
     }
 }
 
@@ -352,16 +397,15 @@ async fn persist_binding_state(
 ) -> Result<(), String> {
     let state_json =
         serde_json::to_string(state).map_err(|e| format!("序列化 WorkBuddy 绑定备份失败：{e}"))?;
-    let snapshot = file_snapshot(path)?;
-    write_models_to(path, models)?;
-    if let Err(error) = db.save_live_backup(BACKUP_KEY, &state_json).await {
-        let rollback = restore_file_snapshot(path, snapshot.as_deref());
-        return Err(match rollback {
-            Ok(()) => format!("保存 WorkBuddy 绑定备份失败：{error}（已回滚配置）"),
-            Err(rollback_error) => {
-                format!("保存 WorkBuddy 绑定备份失败：{error}；同时{rollback_error}")
-            }
-        });
+    let mut txn = FileTxn::new();
+    if let Err(error) = write_models(&mut txn, path, models) {
+        return Err(rollback_with(txn, error));
+    }
+    if let Err(error) = db.upsert_bind_record(BACKUP_KEY, &state_json) {
+        return Err(rollback_with(
+            txn,
+            format!("保存 WorkBuddy 绑定备份失败：{error}"),
+        ));
     }
     Ok(())
 }
@@ -378,6 +422,35 @@ pub async fn sync_selected_models(
     let url = endpoint_url();
     let (next_models, next_state) =
         sync_models(models, previous.as_ref(), api_key, selections, &url)?;
+    persist_binding_state(db, &path, &next_models, &next_state).await
+}
+
+/// Ordinary model changes require the saved connection to still exist at the
+/// final write lock, including after an asynchronous key/catalog refresh.
+pub(crate) async fn update_selected_models(
+    db: &Database,
+    api_key: &str,
+    selections: &[WorkBuddyModelSelection],
+) -> Result<(), String> {
+    let _guard = CONFIG_LOCK.lock().await;
+    let health = inspect_binding(db)
+        .await
+        .map_err(|_| "无法确认现有 WorkBuddy 配置，已停止保存模型。".to_string())?;
+    if health.status != BindingStatus::Configured {
+        return Err(health
+            .message
+            .unwrap_or_else(|| "请先恢复 WorkBuddy 接入配置。".into()));
+    }
+    let path = models_path();
+    let previous = load_state(db).await?;
+    let models = read_models_from(&path)?;
+    let (next_models, next_state) = sync_models(
+        models,
+        previous.as_ref(),
+        api_key,
+        selections,
+        &endpoint_url(),
+    )?;
     persist_binding_state(db, &path, &next_models, &next_state).await
 }
 
@@ -454,31 +527,170 @@ pub async fn active_model(db: &Database) -> Result<String, String> {
         .unwrap_or_default())
 }
 
-pub async fn unbind(db: &Database) -> Result<(), String> {
-    let _guard = CONFIG_LOCK.lock().await;
+fn check_saved_entries(models: &[Value], state: &WorkBuddyBindingState) -> ToolBindingStatus {
+    if state.managed_models.is_empty() {
+        return ToolBindingStatus::unknown();
+    }
+    let mut missing = false;
+    for managed in &state.managed_models {
+        let matching: Vec<_> = models
+            .iter()
+            .filter(|entry| model_id(entry) == Some(managed.model_id.as_str()))
+            .collect();
+        let mut expected = managed.last_written_entry.clone();
+        if !expected.is_object() {
+            return ToolBindingStatus::unknown();
+        }
+        expected["url"] = endpoint_url().into();
+        match matching.as_slice() {
+            [] => missing = true,
+            [entry] if *entry == &expected => {}
+            _ => return ToolBindingStatus::modified(),
+        }
+    }
+    if missing {
+        ToolBindingStatus::missing(vec![display_path(&models_path())])
+    } else {
+        ToolBindingStatus::configured()
+    }
+}
+
+async fn inspect_binding(db: &Database) -> Result<ToolBindingStatus, String> {
     let Some(state) = load_state(db).await? else {
-        return Ok(());
+        return Ok(ToolBindingStatus::unknown());
     };
     let path = models_path();
     let models = read_models_from(&path)?;
-    let restored = restore_models(models, &state)?;
-    let snapshot = file_snapshot(&path)?;
-    write_models_to(&path, &restored)?;
-    if let Err(error) = db.delete_live_backup(BACKUP_KEY).await {
-        let rollback = restore_file_snapshot(&path, snapshot.as_deref());
-        return Err(match rollback {
-            Ok(()) => format!("删除 WorkBuddy 绑定备份失败：{error}（已回滚配置）"),
-            Err(rollback_error) => {
-                format!("删除 WorkBuddy 绑定备份失败：{error}；同时{rollback_error}")
-            }
-        });
+    Ok(check_saved_entries(&models, &state))
+}
+
+/// Read-only diagnostics never serialize model entries, saved keys, or parse errors.
+pub(crate) async fn binding_status(db: &Database) -> ToolBindingStatus {
+    let _guard = CONFIG_LOCK.lock().await;
+    inspect_binding(db)
+        .await
+        .unwrap_or_else(|_| ToolBindingStatus::unknown())
+}
+
+/// Re-create only deleted entries from the saved selection, preserving displaced
+/// user entries in the original backup. Existing entries are never overwritten.
+pub(crate) async fn restore_missing_binding(db: &Database, api_key: &str) -> Result<(), String> {
+    let _guard = CONFIG_LOCK.lock().await;
+    let health = inspect_binding(db)
+        .await
+        .map_err(|_| "无法确认 WorkBuddy 配置缺失，已停止恢复。".to_string())?;
+    if health.status != BindingStatus::Missing {
+        return Err(health
+            .message
+            .unwrap_or_else(|| "配置未缺失，无需恢复。".into()));
     }
-    Ok(())
+    let mut state = load_state(db)
+        .await?
+        .ok_or_else(|| "未找到保存的 WorkBuddy 模型，已停止恢复。".to_string())?;
+    let path = models_path();
+    let mut models = read_models_from(&path)?;
+    for managed in &mut state.managed_models {
+        let mut expected = managed.last_written_entry.clone();
+        if !expected.is_object() {
+            return Err("保存的 WorkBuddy 模型格式无效。".into());
+        }
+        expected["url"] = endpoint_url().into();
+        expected["apiKey"] = api_key.into();
+        if let Some(existing) = models
+            .iter()
+            .find(|entry| model_id(entry) == Some(&managed.model_id))
+        {
+            if existing != &expected {
+                return Err("WorkBuddy 接入配置已被修改，已停止恢复。".into());
+            }
+        } else {
+            models.push(expected.clone());
+        }
+        managed.last_written_entry = expected;
+    }
+    persist_binding_state(db, &path, &models, &state)
+        .await
+        .map_err(|_| "恢复 WorkBuddy 配置失败，请检查文件权限和本地绑定记录。".to_string())
+}
+
+/// 解除绑定：Ofox 管理的条目一律拿掉（被改过也一样），被顶替的原条目放回原位置；
+/// 其它模型不动。没有绑定记录（旧版本退出时清掉了）就尽力删掉指向 Ofox 的条目。
+/// `dry_run` 只算不写（预览）。
+pub async fn unbind(db: &Database, dry_run: bool) -> Result<UnbindReport, String> {
+    let _guard = CONFIG_LOCK.lock().await;
+    let path = models_path();
+    let shown = display_path(&path);
+    let mut report = UnbindReport::new(BACKUP_KEY, dry_run);
+    if read_models_text(&path)?.is_none() {
+        report.warn("configAlreadyMissing", Some(shown));
+        if !dry_run {
+            db.delete_bind_record(BACKUP_KEY)
+                .map_err(|e| format!("删除 WorkBuddy 绑定备份失败：{e}"))?;
+        }
+        return Ok(report);
+    }
+    let models = read_models_from(&path)?;
+    let restored = match load_state(db).await? {
+        Some(state) => {
+            for managed in &state.managed_models {
+                let key = format!("{shown}: {}", managed.model_id);
+                let has_original = managed
+                    .original_entry
+                    .as_ref()
+                    .is_some_and(|entry| !is_ofox_entry(entry));
+                if has_original {
+                    report.restored_keys.push(key);
+                } else {
+                    report.removed_keys.push(key);
+                }
+            }
+            let mut restored = restore_models(models.clone(), &state)?;
+            // 记录之外还指向 Ofox 的条目（更早的绑定留下的）一并去掉。
+            let leftover = remove_ofox_entries(&mut restored);
+            report
+                .removed_keys
+                .extend(leftover.iter().map(|id| format!("{shown}: {id}")));
+            restored
+        }
+        None => {
+            let mut cleaned = models.clone();
+            let removed = remove_ofox_entries(&mut cleaned);
+            report.legacy = !removed.is_empty();
+            report.already_unbound = removed.is_empty();
+            report
+                .removed_keys
+                .extend(removed.iter().map(|id| format!("{shown}: {id}")));
+            cleaned
+        }
+    };
+    if dry_run {
+        return Ok(report);
+    }
+
+    let mut txn = FileTxn::new();
+    if restored != models {
+        if let Err(error) = write_models(&mut txn, &path, &restored) {
+            return Err(rollback_with(txn, error));
+        }
+    }
+    if let Err(error) = db.delete_bind_record(BACKUP_KEY) {
+        return Err(rollback_with(
+            txn,
+            format!("删除 WorkBuddy 绑定备份失败：{error}"),
+        ));
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const URL: &str = "https://api.ofox.ai/v1/chat/completions";
+
+    fn write_models_to(path: &Path, models: &[Value]) -> Result<(), String> {
+        write_models(&mut FileTxn::new(), path, models)
+    }
 
     fn selection(id: &str) -> WorkBuddyModelSelection {
         WorkBuddyModelSelection {
@@ -557,6 +769,56 @@ mod tests {
         )
         .unwrap();
         assert_eq!(restore_models(models, &state).unwrap(), original);
+    }
+
+    #[test]
+    fn unbind_restores_even_after_external_edits() {
+        let original = vec![
+            json!({"id":"model-a", "vendor":"User A"}),
+            json!({"id":"local", "vendor":"Local"}),
+        ];
+        let (mut models, state) = sync_models(
+            original.clone(),
+            None,
+            "key",
+            &[selection("model-a"), selection("model-b")],
+            URL,
+        )
+        .unwrap();
+        models[0]["name"] = json!("Edited in WorkBuddy");
+        models.retain(|entry| model_id(entry) != Some("model-b"));
+        assert_eq!(restore_models(models, &state).unwrap(), original);
+    }
+
+    #[test]
+    fn ofox_entries_are_never_kept_as_originals() {
+        let leftover = managed_entry("sk-of-OLD", &selection("model-a"), URL);
+        let local = json!({"id":"local"});
+        let (models, mut state) = sync_models(
+            vec![leftover.clone(), local.clone()],
+            None,
+            "key",
+            &[selection("model-a")],
+            URL,
+        )
+        .unwrap();
+        assert_eq!(state.managed_models[0].original_entry, None);
+        // 旧版本记下的「原条目」本身就是 Ofox 的：解绑时也不放回去。
+        state.managed_models[0].original_entry = Some(leftover);
+        assert_eq!(restore_models(models, &state).unwrap(), vec![local]);
+    }
+
+    #[test]
+    fn leftover_ofox_entries_are_found_without_a_binding_state() {
+        let mut models = vec![
+            json!({"id":"local", "url":"http://localhost:11434/v1"}),
+            managed_entry("sk-of-OLD", &selection("model-a"), URL),
+        ];
+        assert_eq!(remove_ofox_entries(&mut models), ["model-a"]);
+        assert_eq!(
+            models,
+            [json!({"id":"local", "url":"http://localhost:11434/v1"})]
+        );
     }
 
     #[test]

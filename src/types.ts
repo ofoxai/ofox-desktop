@@ -352,6 +352,8 @@ export interface Settings {
   // 是否完成首次 ip-api 探测。`true` 后启动钩子不会再次 probe，用户切换
   // apex 也写 `true`。前端通常不读这个字段，仅作 settings 同步用。
   ofoxApexResolved?: boolean | null;
+  /** 用户手动选过区域（锁定）；否则每次启动按网络重新探测。 */
+  ofoxApexPinned?: boolean | null;
 }
 
 export interface SessionMeta {

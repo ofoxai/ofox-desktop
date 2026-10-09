@@ -71,6 +71,90 @@ pub(crate) struct Installation {
     pub search_path: String,
 }
 
+/// Missing is only emitted after a successful shell lookup. Other probe errors
+/// must not be presented as an uninstall, or cause Codex to change identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProbeError {
+    NotFound,
+    Failed(String),
+}
+
+impl std::fmt::Display for ProbeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => formatter.write_str("No executable in the launch shell PATH"),
+            Self::Failed(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl From<String> for ProbeError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<&str> for ProbeError {
+    fn from(error: &str) -> Self {
+        Self::Failed(error.to_string())
+    }
+}
+
+impl From<ProbeError> for String {
+    fn from(error: ProbeError) -> Self {
+        error.to_string()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DesktopInstallation {
+    pub path: PathBuf,
+    pub version: Option<String>,
+    pub error: Option<String>,
+}
+
+pub(crate) fn candidate_exists(path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("Could not inspect {}: {error}", path.display())),
+    }
+}
+
+pub(crate) fn shell_resolution(
+    output: &std::process::Output,
+) -> Result<(String, String), ProbeError> {
+    if !output.status.success() {
+        return Err(format!(
+            "Launch shell lookup failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+                .chars()
+                .take(2048)
+                .collect::<String>()
+        )
+        .into());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let path = text
+        .lines()
+        .find_map(|line| line.strip_prefix("__OFOX_BIN__"))
+        .ok_or("Launch shell did not return an executable lookup result")?;
+    let search_path = text
+        .lines()
+        .find_map(|line| line.strip_prefix("__OFOX_PATH__"))
+        .ok_or("Could not read launch shell PATH")?;
+    if path.is_empty() {
+        if !output.stderr.is_empty() {
+            return Err("Launch shell returned errors while looking up the executable".into());
+        }
+        return Err(ProbeError::NotFound);
+    }
+    if !path.starts_with('/') {
+        return Err("Launch shell resolved an alias or function instead of an executable".into());
+    }
+    Ok((path.to_string(), search_path.to_string()))
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct UpdatePlan {
     pub source: &'static str,
@@ -80,7 +164,7 @@ pub(crate) struct UpdatePlan {
 }
 
 /// Match the login + interactive shell used by launch_tool. Markers discard rc output.
-pub(crate) async fn probe(tool: &str) -> Result<Installation, String> {
+pub(crate) async fn probe(tool: &str) -> Result<Installation, ProbeError> {
     if npm_package(tool).is_none() && tool != "hermes" {
         return Err("Unsupported CLI".into());
     }
@@ -90,19 +174,23 @@ pub(crate) async fn probe(tool: &str) -> Result<Installation, String> {
         "printf '\\n__OFOX_BIN__%s\\n' \"$(command -v {tool})\"; printf '__OFOX_PATH__%s\\n' \"$PATH\""
     )]);
     let output = bounded_output(command).await?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let path = text
-        .lines()
-        .find_map(|s| s.strip_prefix("__OFOX_BIN__"))
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute() && p.is_file())
-        .ok_or("No executable in the launch shell PATH (aliases/functions are not auto-updated)")?;
-    let search_path = text
-        .lines()
-        .find_map(|s| s.strip_prefix("__OFOX_PATH__"))
-        .ok_or("Could not read launch shell PATH")?
-        .to_string();
-    let real = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+    let (path, search_path) = shell_resolution(&output)?;
+    let path = PathBuf::from(path);
+    if !candidate_exists(&path)? {
+        return Err("Executable disappeared after the launch shell lookup".into());
+    }
+    let real = match std::fs::canonicalize(&path) {
+        Ok(real) => real,
+        Err(error) => {
+            return Ok(Installation {
+                real: path.clone(),
+                path,
+                version: String::new(),
+                error: Some(format!("Active executable failed its path check: {error}")),
+                search_path,
+            });
+        }
+    };
     let mut command = Command::new(&path);
     command.arg("--version").env("PATH", &search_path);
     let output = bounded_output(command).await;
@@ -116,7 +204,9 @@ pub(crate) async fn probe(tool: &str) -> Result<Installation, String> {
     })
 }
 
-fn executable_version(output: Result<std::process::Output, String>) -> (String, Option<String>) {
+pub(crate) fn executable_version(
+    output: Result<std::process::Output, String>,
+) -> (String, Option<String>) {
     let output = match output {
         Ok(output) => output,
         Err(error) => {
@@ -149,14 +239,40 @@ fn executable_version(output: Result<std::process::Output, String>) -> (String, 
     )
 }
 
-async fn bounded_output(mut command: Command) -> Result<std::process::Output, String> {
+pub(crate) async fn bounded_output(command: Command) -> Result<std::process::Output, String> {
+    bounded_output_with_timeout(command, PROBE_TIMEOUT).await
+}
+
+pub(crate) async fn bounded_output_with_timeout(
+    mut command: Command,
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
     command
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null());
-    tokio::time::timeout(PROBE_TIMEOUT, command.output())
+    tokio::time::timeout(timeout, command.output())
         .await
         .map_err(|_| "Version probe timed out".to_string())?
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+pub(crate) fn probe_fixture_output(stdout: &str, stderr: &str, code: i32) -> std::process::Output {
+    #[cfg(unix)]
+    let status = {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(code << 8)
+    };
+    #[cfg(windows)]
+    let status = {
+        use std::os::windows::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(code as u32)
+    };
+    std::process::Output {
+        status,
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: stderr.as_bytes().to_vec(),
+    }
 }
 
 /// Pure source classification. Callers validate the resulting executable before use.
@@ -658,49 +774,241 @@ impl Drop for ProcessGroup {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) async fn codex_desktop_version() -> Option<(String, String)> {
-    for directory in [
+pub(crate) async fn codex_desktop_version() -> Result<Option<DesktopInstallation>, String> {
+    let candidates = [
         PathBuf::from("/Applications"),
         crate::config::get_home_dir().join("Applications"),
-    ] {
-        for name in ["ChatGPT.app", "Codex.app"] {
-            let path = directory.join(name);
+    ]
+    .into_iter()
+    .flat_map(|directory| [directory.join("ChatGPT.app"), directory.join("Codex.app")])
+    .collect::<Vec<_>>();
+    detect_macos_apps(&candidates, "com.openai.codex").await
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) async fn detect_macos_apps(
+    candidates: &[PathBuf],
+    bundle_id: &str,
+) -> Result<Option<DesktopInstallation>, String> {
+    let mut first_error = None;
+    for path in candidates {
+        let detected = async {
+            if !candidate_exists(path)? {
+                return Ok(None);
+            }
             let plist = path.join("Contents/Info.plist");
-            if !plist.is_file() {
-                continue;
-            }
-            let mut command = Command::new("/usr/libexec/PlistBuddy");
-            command
-                .args(["-c", "Print :CFBundleIdentifier"])
-                .arg(&plist);
-            let Ok(output) = bounded_output(command).await else {
-                continue;
-            };
-            if String::from_utf8_lossy(&output.stdout).trim() != "com.openai.codex" {
-                continue;
-            }
-            let mut command = Command::new("/usr/libexec/PlistBuddy");
-            command
-                .args(["-c", "Print :CFBundleShortVersionString"])
-                .arg(&plist);
-            let Ok(output) = bounded_output(command).await else {
-                continue;
-            };
+            let mut command = Command::new("/usr/bin/plutil");
+            command.args(["-convert", "json", "-o", "-"]).arg(&plist);
+            let output = bounded_output(command).await?;
             if !output.status.success() {
-                continue;
+                return Err(format!(
+                    "Could not read application metadata: {}",
+                    plist.display()
+                ));
             }
-            return Some((
-                path.to_string_lossy().into_owned(),
-                String::from_utf8_lossy(&output.stdout).trim().into(),
-            ));
+            let json: serde_json::Value =
+                serde_json::from_slice(&output.stdout).map_err(|error| {
+                    format!("Invalid application metadata {}: {error}", plist.display())
+                })?;
+            desktop_from_metadata(path, bundle_id, &json)
+        }
+        .await;
+        match detected {
+            Ok(Some(app)) => return Ok(Some(app)),
+            Ok(None) => {}
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
         }
     }
-    None
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(None),
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn desktop_from_metadata(
+    path: &Path,
+    bundle_id: &str,
+    json: &serde_json::Value,
+) -> Result<Option<DesktopInstallation>, String> {
+    let detected_id = json
+        .get("CFBundleIdentifier")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("Invalid bundle identifier in {}", path.display()))?;
+    if detected_id != bundle_id {
+        return Ok(None);
+    }
+    let version = ["CFBundleShortVersionString", "CFBundleVersion"]
+        .into_iter()
+        .filter_map(|key| json.get(key).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(str::to_string);
+    let error = version
+        .is_none()
+        .then(|| "Installed application has no version metadata".to_string());
+    Ok(Some(DesktopInstallation {
+        path: path.to_path_buf(),
+        version,
+        error,
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shell_output(stdout: &str, code: i32) -> std::process::Output {
+        probe_fixture_output(stdout, "", code)
+    }
+
+    #[test]
+    fn shell_lookup_only_reports_missing_after_a_complete_successful_lookup() {
+        let absent = "__OFOX_BIN__\n__OFOX_PATH__/usr/bin:/bin\n";
+        assert_eq!(
+            shell_resolution(&shell_output(absent, 0)),
+            Err(ProbeError::NotFound)
+        );
+        for output in [
+            shell_output(absent, 1),
+            shell_output("shell startup failed", 0),
+            shell_output("__OFOX_BIN__\n", 0),
+            shell_output("__OFOX_BIN__alias tool=other\n__OFOX_PATH__/bin\n", 0),
+            probe_fixture_output(absent, "profile: Permission denied", 0),
+        ] {
+            assert!(matches!(
+                shell_resolution(&output),
+                Err(ProbeError::Failed(_))
+            ));
+        }
+        assert_eq!(
+            shell_resolution(&shell_output(
+                "startup noise\n__OFOX_BIN__/opt/bin/codex\n__OFOX_PATH__/opt/bin:/bin\n",
+                0
+            )),
+            Ok(("/opt/bin/codex".into(), "/opt/bin:/bin".into()))
+        );
+    }
+
+    #[test]
+    fn failed_version_process_does_not_accept_a_version_from_its_error_message() {
+        let (version, error) = executable_version(Ok(probe_fixture_output(
+            "",
+            "node 22.1.0 could not start: Permission denied",
+            1,
+        )));
+        assert!(version.is_empty());
+        assert!(error.as_deref().unwrap().contains("Permission denied"));
+        let (version, error) = executable_version(Err("Access is denied. (os error 5)".into()));
+        assert!(version.is_empty());
+        assert!(error.as_deref().unwrap().contains("os error 5"));
+    }
+
+    #[test]
+    #[ignore = "Subprocess fixture; invoked only by bounded_probe_times_out_for_an_isolated_slow_child"]
+    fn probe_timeout_fixture_child() {
+        if std::env::var_os("OFOX_PROBE_TIMEOUT_FIXTURE_CHILD").is_some() {
+            std::thread::sleep(Duration::from_secs(3));
+        }
+    }
+
+    #[tokio::test]
+    async fn bounded_probe_times_out_for_an_isolated_slow_child() {
+        // Use this test executable instead of a shell, WSL, or an installed
+        // agent. The child is safe on every host and receives no user config.
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "commands::tool_update::tests::probe_timeout_fixture_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("OFOX_PROBE_TIMEOUT_FIXTURE_CHILD", "1");
+        let result = bounded_output_with_timeout(command, Duration::from_millis(100)).await;
+        assert!(result.unwrap_err().contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn a_missing_probe_program_is_a_query_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let command = Command::new(temp.path().join("missing-query.exe"));
+        let error = bounded_output_with_timeout(command, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        let (version, error) = executable_version(Err(error));
+        assert!(version.is_empty());
+        assert!(error.is_some());
+    }
+
+    #[test]
+    fn desktop_presence_does_not_depend_on_a_version_string() {
+        let path = Path::new("/Applications/Tool.app");
+        let app = desktop_from_metadata(
+            path,
+            "com.example.tool",
+            &serde_json::json!({
+                "CFBundleIdentifier": "com.example.tool"
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(app.path, path);
+        assert!(app.version.is_none());
+        assert!(app.error.is_some());
+        assert!(desktop_from_metadata(path, "com.example.tool", &serde_json::json!({})).is_err());
+        assert!(desktop_from_metadata(
+            path,
+            "com.example.tool",
+            &serde_json::json!({
+                "CFBundleIdentifier": "com.example.other"
+            })
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn desktop_probe_distinguishes_absence_from_invalid_metadata_and_accepts_another_valid_copy(
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("Missing.app");
+        assert!(detect_macos_apps(&[missing], "com.example.tool")
+            .await
+            .unwrap()
+            .is_none());
+        let broken = temp.path().join("Broken.app");
+        std::fs::create_dir_all(broken.join("Contents")).unwrap();
+        std::fs::write(broken.join("Contents/Info.plist"), "broken plist").unwrap();
+        assert!(
+            detect_macos_apps(std::slice::from_ref(&broken), "com.example.tool")
+                .await
+                .is_err()
+        );
+        let valid = temp.path().join("Valid.app");
+        std::fs::create_dir_all(valid.join("Contents")).unwrap();
+        std::fs::write(valid.join("Contents/Info.plist"), r#"<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.example.tool</string><key>CFBundleVersion</key><string>1.2.3</string></dict></plist>"#).unwrap();
+        let app = detect_macos_apps(&[broken, valid.clone()], "com.example.tool")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(app.path, valid);
+        assert_eq!(app.version.as_deref(), Some("1.2.3"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_cli_shim_is_evidence_of_a_broken_installation() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("tool");
+        assert!(!candidate_exists(&path).unwrap());
+        std::os::unix::fs::symlink(temp.path().join("missing-target"), &path).unwrap();
+        assert!(candidate_exists(&path).unwrap());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn broken_installation_preserves_diagnostic_not_a_version_from_error() {
@@ -897,6 +1205,8 @@ mod tests {
     }
     #[test]
     fn update_is_anchored_to_actual_npm_prefix() {
+        let prefix = PathBuf::from("/Users/O'Brien/node");
+        let directory = prefix.join("bin");
         let plan = plan(
             "codex",
             &install(
@@ -905,9 +1215,9 @@ mod tests {
             ),
         )
         .unwrap();
-        assert_eq!(plan.program, PathBuf::from("/Users/O'Brien/node/bin/npm"));
-        assert_eq!(plan.args[3], "/Users/O'Brien/node");
-        assert!(plan.path.starts_with("/Users/O'Brien/node/bin:"));
+        assert_eq!(plan.program, directory.join("npm"));
+        assert_eq!(plan.args[3], prefix.display().to_string());
+        assert!(plan.path.starts_with(&format!("{}:", directory.display())));
     }
     #[test]
     fn fnm_multishell_changes_keep_the_same_update_target() {

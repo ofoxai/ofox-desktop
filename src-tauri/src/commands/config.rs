@@ -158,7 +158,7 @@ pub async fn open_config_folder(handle: AppHandle, app: String) -> Result<bool, 
     };
 
     if !config_dir.exists() {
-        std::fs::create_dir_all(&config_dir).map_err(|e| format!("创建目录失败: {e}"))?;
+        return Err("配置目录不存在，请先恢复 OFox 接入配置或安装工具。".to_string());
     }
 
     handle

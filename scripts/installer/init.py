@@ -63,23 +63,30 @@ STATE_FILE = os.path.expanduser("~/.cc-switch-install-state.json")
 # 全装模式下默认装的工具（不含 hermes，hermes 走按需追加）。
 DEFAULT_INSTALL_TOOLS = ["claude", "codex", "gemini", "opencode", "openclaw"]
 
+# 磁盘空间门槛：只装一个工具时几百 MB 就够（npm 包或 uv 工具），留 2GB 余量；
+# 全量安装要装 nvm/Node 再加五个工具，留 5GB。
+MIN_FREE_GB_SINGLE_TOOL = 2
+MIN_FREE_GB_FULL_INSTALL = 5
+
 
 # ── 环境预检 ─────────────────────────────────────────────────────────────────
 
-def preflight_check() -> bool:
-    """环境预检：架构、磁盘空间"""
+def preflight_check(min_free_gb: float = MIN_FREE_GB_FULL_INSTALL) -> bool:
+    """环境预检：架构、磁盘空间（至少 `min_free_gb` GB）"""
     # 架构检查
     arch = platform.machine()
     if arch != "arm64":
         print_error(f"当前 CPU 架构为 {arch}，本工具仅支持 Apple Silicon (arm64) Mac。")
         return False
 
-    # 磁盘空间检查（至少 5GB）
+    # 磁盘空间检查
     try:
         usage = shutil.disk_usage("/")
         avail_gb = usage.free / (1024 ** 3)
-        if avail_gb < 5:
-            print_error(f"磁盘可用空间不足（{avail_gb:.1f}GB），至少需要 5GB。")
+        if avail_gb < min_free_gb:
+            print_error(
+                f"磁盘可用空间不足（{avail_gb:.1f}GB），至少需要 {min_free_gb:g}GB。"
+            )
             return False
     except OSError:
         pass  # 无法检查则跳过
@@ -197,7 +204,8 @@ def main() -> None:
     print_banner()
 
     # 1. 环境预检
-    if not preflight_check():
+    min_free_gb = MIN_FREE_GB_SINGLE_TOOL if args.tool else MIN_FREE_GB_FULL_INSTALL
+    if not preflight_check(min_free_gb):
         sys.exit(1)
 
     # 2. 地理位置检测

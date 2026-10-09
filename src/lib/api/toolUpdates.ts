@@ -1,11 +1,27 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export interface ToolUpdateInfo {
+export type InstallationStatus = "installed" | "notInstalled" | "unknown";
+
+export interface ToolInstallationInfo {
   name: string;
   version: string | null;
-  latest_version: string | null;
   error: string | null;
+  installationKind?: "desktopApp" | "cli";
+  installationStatus?: InstallationStatus;
+}
+
+/** Older responses without installation evidence must never imply uninstall. */
+export function getInstallationStatus(
+  info: ToolInstallationInfo | undefined,
+): InstallationStatus {
+  if (info?.installationStatus) return info.installationStatus;
+  return info?.version && !info.error ? "installed" : "unknown";
+}
+
+export interface ToolUpdateInfo extends ToolInstallationInfo {
+  latest_version: string | null;
   installationKind: "desktopApp" | "cli";
+  installationStatus: InstallationStatus;
   update_status:
     | "unchecked"
     | "notInstalled"
