@@ -1,9 +1,10 @@
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { exit } from "@tauri-apps/plugin-process";
 import { toast } from "sonner";
+import { isMac } from "@/lib/platform";
 
 /**
  * Tray popover 跟主窗口通信用的事件名。主窗口在 ConsolePage 内监听，
@@ -31,6 +32,24 @@ export default function BottomMenu() {
     }
   }, [hideSelf]);
 
+  // ⌘O on macOS, Ctrl+O elsewhere, as the menu item shows.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const modifier = isMac() ? event.metaKey : event.ctrlKey;
+      if (
+        modifier &&
+        !event.altKey &&
+        !event.shiftKey &&
+        event.key.toLowerCase() === "o"
+      ) {
+        event.preventDefault();
+        void handleOpenMain();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [handleOpenMain]);
+
   const handleOpenSettings = useCallback(async () => {
     try {
       await invoke("show_main_window");
@@ -57,7 +76,7 @@ export default function BottomMenu() {
   }> = [
     {
       label: "打开 Ofox 主窗口",
-      shortcut: "⌘O",
+      shortcut: isMac() ? "⌘O" : "Ctrl+O",
       onClick: handleOpenMain,
     },
     {

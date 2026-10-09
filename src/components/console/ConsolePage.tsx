@@ -12,6 +12,7 @@ import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { settingsApi } from "@/lib/api";
+import { isMac } from "@/lib/platform";
 import {
   ofoxGetUserInfo,
   isOfoxBillingManager,
@@ -629,32 +630,37 @@ export default function ConsolePage({
       {/* Title bar drag region — full 40px so it covers the macOS traffic-light
           row (titleBarStyle: "Overlay") with comfortable margin on either side.
           The previous 28px (h-7) was tall enough technically but felt fiddly:
-          users would aim for the visible "Ofox" text and miss. */}
-      <div className="relative h-10 shrink-0" data-tauri-drag-region="true">
-        <div
-          className="flex h-full items-center justify-center gap-1.5"
-          data-tauri-drag-region="true"
-        >
-          <img
-            src={ofoxLogo}
-            alt=""
-            aria-hidden
-            className="h-4 w-4"
-            data-tauri-drag-region="true"
-          />
-          <span
-            className="text-[13px] font-medium text-muted-foreground"
+          users would aim for the visible "Ofox" text and miss. Windows and
+          Linux draw a native title bar with the same title, so skip it there. */}
+      {isMac() && (
+        <div className="relative h-10 shrink-0" data-tauri-drag-region="true">
+          <div
+            className="flex h-full items-center justify-center gap-1.5"
             data-tauri-drag-region="true"
           >
-            Ofox Desktop
-          </span>
+            <img
+              src={ofoxLogo}
+              alt=""
+              aria-hidden
+              className="h-4 w-4"
+              data-tauri-drag-region="true"
+            />
+            <span
+              className="text-[13px] font-medium text-muted-foreground"
+              data-tauri-drag-region="true"
+            >
+              Ofox Desktop
+            </span>
+          </div>
+          {/* Apex (region) switcher 已迁入"设置"弹窗的"区域"卡——顶栏只保留
+              logo + 标题，更干净；apex 切换是低频操作，藏一层更合适。 */}
         </div>
-        {/* Apex (region) switcher 已迁入"设置"弹窗的"区域"卡——顶栏只保留
-            logo + 标题，更干净；apex 切换是低频操作，藏一层更合适。 */}
-      </div>
+      )}
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto px-5 pb-4">
+      <div
+        className={`flex-1 overflow-y-auto px-5 pb-4 ${isMac() ? "" : "pt-4"}`}
+      >
         {/* Profile + Balance Card */}
         <div className="mb-4 rounded-xl border border-border bg-background/80 px-5 py-4">
           <div className="flex items-center justify-between">

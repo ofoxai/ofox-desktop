@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { CheckCircle2, RotateCcw } from "lucide-react";
+import { isMac } from "@/lib/platform";
 import { toast } from "sonner";
 import { settingsApi } from "@/lib/api";
 import {
@@ -260,8 +261,11 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
       {/* Title bar drag region — same 40px strip ConsolePage uses, so the
           window stays movable while the user is on this page. Without this
           there is literally no draggable surface on the LoginPage and the
-          window gets stuck wherever it first opened. */}
-      <div className="h-10 shrink-0" data-tauri-drag-region="true" />
+          window gets stuck wherever it first opened. Windows and Linux have
+          a native title bar to drag instead. */}
+      {isMac() && (
+        <div className="h-10 shrink-0" data-tauri-drag-region="true" />
+      )}
 
       {/* Apex 切换器在 onboarding 阶段不显示：未授权用户从 OFox 官网下载客户端时
           已经决定了走 .io / .ai，登录前再暴露选择只会把 device flow 引到错误的
