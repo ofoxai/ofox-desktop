@@ -2035,9 +2035,10 @@ fn launch_windows_terminal(
 {cwd_command}
 echo Using provider-specific claude config:
 echo {}
-claude --settings \"{}\"
+rem `call` returns from npm's claude.cmd, so the API-key settings file is deleted.
+call claude --settings \"{}\"
 del \"{}\" >nul 2>&1
-del \"%~f0\" >nul 2>&1
+(goto) 2>nul & del \"%~f0\"
 ",
         config_path_for_batch,
         config_path_for_batch,
