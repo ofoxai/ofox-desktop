@@ -148,14 +148,46 @@ DMG_URL="${BASE_URL}/${DMG_KEY}"
 
 # ── 4. 生成 latest.json ───────────────────────────────────────────────
 # 保留其他平台（Windows 等由 CI 发布）的既有条目，只更新本平台，同 release.yml。
+# 旧清单走带认证的 R2 读取（不走公开 CDN），并且只保留指向本站 release 目录、
+# 文件名合规的已知平台条目，避免把被篡改的下载链接重新发布出去。
 PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-OLD_JSON=$(curl -fsS --max-time 20 "${BASE_URL}/latest.json" 2>/dev/null || echo '{}')
+OLD_FILE="$(mktemp -t ofox-old-latest-XXXX.json)"
+if wrangler r2 object get "${BUCKET}/latest.json" --file "$OLD_FILE" --remote >/dev/null 2>&1; then
+  OLD_JSON=$(cat "$OLD_FILE")
+elif [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "⚠️  [dry-run] 读不到 R2 上现有的 latest.json，按空清单预览" >&2
+  OLD_JSON='{}'
+elif [[ "${FRESH_MANIFEST:-0}" == "1" ]]; then
+  OLD_JSON='{}'
+else
+  rm -f "$OLD_FILE"
+  echo "❌ 读不到 R2 上现有的 latest.json；直接覆盖会丢掉其他平台的下载项。" >&2
+  echo "   确认是首次发布后，用 FRESH_MANIFEST=1 重试。" >&2
+  exit 1
+fi
+rm -f "$OLD_FILE"
 LATEST_JSON=$(OLD_JSON="$OLD_JSON" VERSION="$VERSION" PUB_DATE="$PUB_DATE" NOTES="$NOTES" \
-  PLATFORM_KEY="$PLATFORM_KEY" DMG_URL="$DMG_URL" DOWNLOAD_PAGE="$DOWNLOAD_PAGE" node <<'NODE'
+  PLATFORM_KEY="$PLATFORM_KEY" DMG_URL="$DMG_URL" DOWNLOAD_PAGE="$DOWNLOAD_PAGE" \
+  BASE_URL="$BASE_URL" node <<'NODE'
 const e = process.env;
 let old = {};
 try { old = JSON.parse(e.OLD_JSON); } catch {}
-const downloads = { ...(old.downloads || {}), [e.PLATFORM_KEY]: e.DMG_URL };
+const PREFIX = {
+  'darwin-aarch64': 'release/mac/arm/',
+  'windows-x86_64': 'release/windows/x64/',
+  'linux-x86_64': 'release/linux/x64/',
+};
+const FILE = /^ofox_desktop_\d+\.\d+\.\d+\.(dmg|exe|msi|AppImage)$/;
+const downloads = {};
+for (const [key, url] of Object.entries(old.downloads || {})) {
+  const base = PREFIX[key] && `${e.BASE_URL}/${PREFIX[key]}`;
+  if (base && typeof url === 'string' && url.startsWith(base) && FILE.test(url.slice(base.length))) {
+    downloads[key] = url;
+  } else {
+    console.error(`⚠️  丢弃不合规的旧下载项 ${key}: ${url}`);
+  }
+}
+downloads[e.PLATFORM_KEY] = e.DMG_URL;
 console.log(JSON.stringify({
   version: e.VERSION,
   pubDate: e.PUB_DATE,
