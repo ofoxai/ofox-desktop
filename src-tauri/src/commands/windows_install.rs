@@ -151,6 +151,163 @@ pub(crate) fn wrapper_script(inner: &str, done: &str, label: &str) -> String {
     )
 }
 
+#[cfg(target_os = "windows")]
+mod runner {
+    use super::{guarded_script, install_script, wrapper_script, InstallHost};
+    use crate::commands::windows_tools::{effective_path, find_tool};
+    use serde_json::json;
+    use std::os::windows::process::CommandExt;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+    use tauri::{AppHandle, Emitter};
+
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    const TIMEOUT: Duration = Duration::from_secs(15 * 60);
+    const POLL: Duration = Duration::from_secs(2);
+    const STEPS: u32 = 2;
+
+    fn emit_line(app: &AppHandle, tool: &str, line: &str) {
+        let _ = app.emit(
+            "install-tool-log",
+            json!({ "tool": tool, "stream": "stdout", "line": line }),
+        );
+    }
+
+    /// 与 `useToolInstall` 解析的 `ofox-install-progress` 行同格式。
+    fn emit_progress(app: &AppHandle, tool: &str, step: u32, name: &str, elapsed: Option<u64>) {
+        let mut progress = json!({
+            "type": "ofox-install-progress",
+            "step": step,
+            "total": STEPS,
+            "name": name,
+            "phase": if elapsed.is_some() { "waiting" } else { "start" },
+        });
+        if let Some(elapsed) = elapsed {
+            progress["elapsed"] = json!(elapsed);
+            progress["timeout"] = json!(TIMEOUT.as_secs());
+        }
+        emit_line(app, tool, &progress.to_string());
+    }
+
+    fn host() -> InstallHost {
+        let program_files_npm = std::env::var_os("ProgramFiles")
+            .map(|dir| PathBuf::from(dir).join("nodejs").join("npm.cmd"))
+            .is_some_and(|npm| npm.is_file());
+        InstallHost {
+            mainland: crate::ofox_apex::current_apex() == "ofox.io",
+            node_here: find_tool("npm").is_some() || program_files_npm,
+            winget_here: find_tool("winget").is_some(),
+        }
+    }
+
+    /// PowerShell 5.1 按系统代码页读没有 BOM 的脚本，中文会乱码。
+    fn write_with_bom(path: &Path, text: &str) -> Result<(), String> {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(text.as_bytes());
+        std::fs::write(path, bytes).map_err(|e| format!("写入安装脚本失败: {e}"))
+    }
+
+    fn read_text(path: &Path) -> Option<String> {
+        let text = std::fs::read_to_string(path).ok()?;
+        let text = text.trim_start_matches('\u{feff}').trim();
+        (!text.is_empty()).then(|| text.to_string())
+    }
+
+    /// 在可见的 PowerShell 窗口里安装 `tool`，返回退出码：0 表示装完后找得到 CLI。
+    /// 失败原因以 `错误: …` 行发给前端（`useToolInstall` 据此展示）。
+    pub(crate) async fn install_cli(
+        app: &AppHandle,
+        tool: &str,
+        label: &str,
+        proxy_env: Vec<(String, String)>,
+    ) -> i32 {
+        match run(app, tool, label, proxy_env).await {
+            Ok(()) => 0,
+            Err(message) => {
+                emit_line(app, tool, &format!("错误: {message}"));
+                1
+            }
+        }
+    }
+
+    async fn run(
+        app: &AppHandle,
+        tool: &str,
+        label: &str,
+        proxy_env: Vec<(String, String)>,
+    ) -> Result<(), String> {
+        let script = install_script(tool, host())?;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or_default();
+        let dir = std::env::temp_dir().join(format!("ofox-install-{tool}-{stamp}"));
+        std::fs::create_dir_all(&dir).map_err(|e| format!("创建安装目录失败: {e}"))?;
+        let inner = dir.join("inner.ps1");
+        let error_file = dir.join("error.txt");
+        let done = dir.join("done");
+        let wrapper = dir.join("wrapper.ps1");
+        write_with_bom(
+            &inner,
+            &guarded_script(&script, &error_file.to_string_lossy()),
+        )?;
+        write_with_bom(
+            &wrapper,
+            &wrapper_script(&inner.to_string_lossy(), &done.to_string_lossy(), label),
+        )?;
+
+        let step = format!("安装 {label}");
+        emit_progress(app, tool, 1, &step, None);
+        let mut child = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(&wrapper)
+            .env("PATH", effective_path())
+            .envs(proxy_env)
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .spawn()
+            .map_err(|e| format!("打开安装窗口失败: {e}"))?;
+
+        let started = Instant::now();
+        let finished = loop {
+            tokio::time::sleep(POLL).await;
+            if let Some(code) = read_text(&done) {
+                break Some(code);
+            }
+            match child.try_wait() {
+                // Without a done file the window was closed before the installer finished.
+                Ok(Some(_)) => break read_text(&done),
+                Ok(None) => {}
+                Err(e) => return Err(format!("安装窗口状态未知: {e}")),
+            }
+            if started.elapsed() > TIMEOUT {
+                return Err("安装超过 15 分钟仍未结束，请查看安装窗口".into());
+            }
+            emit_progress(app, tool, 1, &step, Some(started.elapsed().as_secs()));
+        };
+
+        emit_progress(app, tool, 2, "检查安装结果", None);
+        // magpie's rule: the install worked when the CLI is there now,
+        // whatever the installer's exit code says.
+        if find_tool(tool).is_some() {
+            return Ok(());
+        }
+        Err(match (read_text(&error_file), finished) {
+            (Some(reason), _) => reason,
+            (None, Some(code)) => format!("安装器已结束（退出码 {code}），但没有找到 {label}"),
+            (None, None) => "安装窗口已关闭，安装没有完成".into(),
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) use runner::install_cli;
+
 #[cfg(test)]
 mod tests {
     use super::*;

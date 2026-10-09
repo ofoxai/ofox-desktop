@@ -8,8 +8,10 @@
 //!     的状态行，详细 npm 日志在那个新开的 Terminal 窗口里给用户看。
 //!   - 结束时 emit `install-tool-done`，前端 hook 据此触发重新扫描工具版本。
 //!
-//! 仅 macOS：脚本入口 `init.sh` 第一行就 `uname -m != arm64 → exit 1`，
-//! Rust 这边也用 cfg 提前拦——Intel Mac / Windows 用户得到清晰错误。
+//! macOS（Apple Silicon）：脚本入口 `init.sh` 第一行就 `uname -m != arm64 → exit 1`，
+//! Rust 这边也用 cfg 提前拦——Intel Mac 用户得到清晰错误。
+//! Windows：`windows_install` 在可见的 PowerShell 窗口里跑厂商安装器或 npm，
+//! 进度与结束事件和 macOS 同格式。
 
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
@@ -37,7 +39,10 @@ const NATIVE_INSTALL_TOOLS: &[&str] = &["chatgpt"];
 #[tauri::command]
 pub fn get_tool_install_capabilities() -> Vec<String> {
     let mut tools = Vec::new();
-    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+    if cfg!(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        target_os = "windows"
+    )) {
         tools.extend(ALLOWED_TOOLS.iter().map(|tool| (*tool).to_string()));
     }
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) || cfg!(target_os = "windows") {
@@ -78,9 +83,8 @@ async fn install_tool_impl(
     }
 }
 
-/// Windows 上 chatgpt 走 Microsoft Store（winget 静默 + Store URI 兜底）；其他
-/// 工具的 Windows 支持（codex CLI on WSL、gemini 等）不在本 PR 的 code-only
-/// scope 内，给出明确错误。
+/// Windows 上 chatgpt 走 Microsoft Store（winget 静默 + Store URI 兜底）；CLI
+/// 在可见的 PowerShell 窗口里跑厂商安装器或 npm（见 `windows_install`）。
 #[cfg(target_os = "windows")]
 async fn install_tool_impl(
     app: AppHandle,
@@ -89,11 +93,39 @@ async fn install_tool_impl(
     is_native_tool: bool,
 ) -> Result<i32, String> {
     if is_native_tool {
-        native_install_windows(app, &tool_id).await
-    } else {
-        Err(format!(
-            "{tool_id} 在 Windows 上暂不支持一键安装；请按官方文档手动装或用 WSL"
-        ))
+        return native_install_windows(app, &tool_id).await;
+    }
+    let code = match super::launch_tool::terminal_proxy_env(&app) {
+        Ok(proxy_env) => {
+            super::windows_install::install_cli(&app, &tool_id, cli_label(&tool_id), proxy_env)
+                .await
+        }
+        Err(error) => {
+            let _ = app.emit(
+                "install-tool-log",
+                json!({ "tool": &tool_id, "stream": "stdout", "line": format!("错误: {error}") }),
+            );
+            1
+        }
+    };
+    let _ = app.emit(
+        "install-tool-done",
+        json!({ "tool": &tool_id, "code": code }),
+    );
+    Ok(code)
+}
+
+/// 安装窗口标题和提示里的工具名。
+#[cfg(target_os = "windows")]
+fn cli_label(tool_id: &str) -> &'static str {
+    match tool_id {
+        "claude" => "Claude Code",
+        "codex" => "Codex",
+        "gemini" => "Gemini CLI",
+        "opencode" => "OpenCode",
+        "openclaw" => "OpenClaw",
+        "hermes" => "Hermes",
+        _ => "CLI",
     }
 }
 
