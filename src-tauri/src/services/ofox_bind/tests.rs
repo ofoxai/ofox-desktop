@@ -1109,6 +1109,63 @@ async fn hermes_comes_back_byte_for_byte_when_nothing_else_changed() {
     assert_eq!(report.exact_files.len(), 1);
 }
 
+/// Hermes 0.21 migrated an earlier Ofox binding into its `providers:` dict.
+const HERMES_MIGRATED_CONFIG: &str = "# Hermes\nmodel:\n  default: qwen/qwen-flash\n  provider: ofox-hermes\n  context_length: 32000\nproviders:\n  deepseek:\n    api: https://api.deepseek.com/v1\n    api_key: sk-ds\n  ofox-hermes:\n    api: https://api.ofox.ai/v1\n    name: ofox-hermes\n    api_key: sk-of-OLD\n    models:\n      qwen/qwen-flash: {}\n    default_model: qwen/qwen-flash\n    transport: chat_completions\n_config_version: 50\n";
+
+#[tokio::test]
+#[serial]
+async fn hermes_binding_migrated_into_the_providers_dict_binds_and_unbinds_cleanly() {
+    let _home = Home::new();
+    let path = crate::hermes_config::get_hermes_config_path();
+    write(&path, HERMES_MIGRATED_CONFIG);
+    let db = db_for(Tool::Hermes, hermes_template());
+
+    bind(&db, Tool::Hermes, "hermes", KEY).await.expect("bind");
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("custom_providers"), "{text}");
+    assert!(!text.contains("sk-of-OLD"), "{text}");
+    let entry = crate::hermes_config::get_provider("ofox-hermes")
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry["api_key"], KEY);
+    assert_eq!(entry["api"], "https://api.ofox.ai/v1");
+    let model = crate::hermes_config::get_model_config().unwrap().unwrap();
+    assert_eq!(model.default.as_deref(), Some("openai/gpt-x"));
+
+    unbind(&db, Tool::Hermes, "hermes", &[], false)
+        .await
+        .expect("unbind");
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("ofox-hermes"), "{text}");
+    assert!(!text.contains(KEY), "{text}");
+    assert!(crate::hermes_config::get_provider("deepseek")
+        .unwrap()
+        .is_some());
+    let model = crate::hermes_config::get_model_config().unwrap().unwrap();
+    assert_eq!(model.context_length, Some(32000));
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_versioned_config_comes_back_byte_for_byte() {
+    let _home = Home::new();
+    let path = crate::hermes_config::get_hermes_config_path();
+    let config = "# Hermes\nmodel:\n  default: deepseek-chat\n  provider: deepseek\nproviders:\n  deepseek:\n    api: https://api.deepseek.com/v1\n    api_key: sk-ds\n_config_version: 50\n";
+    write(&path, config);
+    let db = db_for(Tool::Hermes, hermes_template());
+
+    bind(&db, Tool::Hermes, "hermes", KEY).await.expect("bind");
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("custom_providers"), "{text}");
+    assert!(text.contains(KEY));
+
+    let report = unbind(&db, Tool::Hermes, "hermes", &[], false)
+        .await
+        .expect("unbind");
+    assert_eq!(fs::read_to_string(&path).unwrap(), config);
+    assert_eq!(report.exact_files.len(), 1);
+}
+
 #[tokio::test]
 #[serial]
 async fn hermes_legacy_binding_without_a_routing_snapshot_clears_ofox_routing() {

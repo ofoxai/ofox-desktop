@@ -70,12 +70,12 @@ fn uses_dict_schema(config: &Yaml) -> bool {
         .is_some_and(|version| version >= DICT_SCHEMA_VERSION)
 }
 
-/// 去掉 `providers:` 字典里的 Ofox 条目，返回是否去掉了。
+/// 去掉 `providers:` 字典里的 Ofox 条目（其它条目保持顺序），返回是否去掉了。
 fn remove_dict_entry(config: &mut Yaml) -> bool {
     config
         .get_mut(DICT)
         .and_then(Yaml::as_mapping_mut)
-        .is_some_and(|dict| dict.remove(PROVIDER_NAME).is_some())
+        .is_some_and(|dict| dict.shift_remove(PROVIDER_NAME).is_some())
 }
 
 /// `ofox-hermes` 条目（列表或字典里）指向 Ofox 网关——当前（或旧版本）绑定留下的配置。
@@ -201,10 +201,53 @@ fn restore_providers(
     if !providers.is_empty() {
         return Some(Yaml::Sequence(providers));
     }
+    // Hermes 迁移时删掉了这个段落：不要再造一个空列表出来。
+    if current.get(PROVIDERS).is_none() {
+        return None;
+    }
     match original.get(PROVIDERS) {
         Some(Yaml::Sequence(_)) => Some(Yaml::Sequence(providers)),
         other => other.cloned(),
     }
+}
+
+/// 还原后的 `providers:` 字典：Ofox 条目放回绑定前的位置（原来没有就去掉，
+/// 包括 Hermes 从列表迁移过来的），其它条目保持当前状态和顺序。
+fn restore_dict(
+    original: &Yaml,
+    current: &Yaml,
+    restored_keys: &mut Vec<String>,
+    removed_keys: &mut Vec<String>,
+) -> Option<Yaml> {
+    let entry_key = format!("{DICT}.{PROVIDER_NAME}");
+    let Some(current_dict) = current.get(DICT).and_then(Yaml::as_mapping) else {
+        return current.get(DICT).cloned();
+    };
+    let mut dict = current_dict.clone();
+    let had_entry = dict.shift_remove(PROVIDER_NAME).is_some();
+    let original_entry = original
+        .get(DICT)
+        .and_then(Yaml::as_mapping)
+        .and_then(|dict| {
+            let index = dict
+                .keys()
+                .position(|key| key.as_str() == Some(PROVIDER_NAME))?;
+            Some((index, dict.get(PROVIDER_NAME)?.clone()))
+        });
+    match original_entry {
+        Some((index, entry)) => {
+            let mut entries: Vec<_> = dict.into_iter().collect();
+            entries.insert(index.min(entries.len()), (PROVIDER_NAME.into(), entry));
+            dict = entries.into_iter().collect();
+            restored_keys.push(entry_key);
+        }
+        None if had_entry => removed_keys.push(entry_key),
+        None => {}
+    }
+    if dict.is_empty() && original.get(DICT).is_none() {
+        return None;
+    }
+    Some(Yaml::Mapping(dict))
 }
 
 /// 还原后的 `model` 段落：路由字段回到绑定前，其它字段保持当前状态。
@@ -270,6 +313,13 @@ pub(crate) fn plan_restore(
         &mut removed_keys,
     );
     set_section(&mut restored, PROVIDERS, providers);
+    let dict = restore_dict(
+        &original_value,
+        &current_value,
+        &mut restored_keys,
+        &mut removed_keys,
+    );
+    set_section(&mut restored, DICT, dict);
     let model = restore_model(
         &original_value,
         &current_value,
@@ -337,6 +387,9 @@ pub(crate) fn legacy_edits(legacy: Option<&Value>) -> Result<Vec<FileEdit>, Stri
             providers.remove(index);
             removed_keys.push(format!("{PROVIDERS}[{PROVIDER_NAME}]"));
         }
+    }
+    if remove_dict_entry(&mut after) {
+        removed_keys.push(format!("{DICT}.{PROVIDER_NAME}"));
     }
     let routes_to_ofox = before
         .get(MODEL)
@@ -500,6 +553,38 @@ mod tests {
         );
         assert!(config[DICT].get(PROVIDER_NAME).is_none());
         assert!(config[DICT].get("other").is_some());
+    }
+
+    #[test]
+    fn restore_after_a_dict_bind_brings_back_the_file() {
+        let bound = bound_config(Some(VERSIONED_CONFIG), &template(), "sk-of-K").unwrap();
+        let plan = plan_restore(Some(VERSIONED_CONFIG), Some(&bound)).unwrap();
+        assert!(plan.exact);
+        assert_eq!(plan.content.as_deref(), Some(VERSIONED_CONFIG));
+    }
+
+    #[test]
+    fn restore_after_hermes_migrated_the_binding_leaves_no_ofox_entry() {
+        // Bound on the legacy list; Hermes then migrated everything into the dict and
+        // the user added another provider after the Ofox entry.
+        let migrated = "# Hermes config\nmodel:\n  default: openai/gpt-x\n  provider: ofox-hermes\n  context_length: 32000\nskills:\n  enabled: true\nproviders:\n  deepseek:\n    api: https://api.deepseek.com/v1\n    name: deepseek\n    api_key: sk-ds\n  ofox-hermes:\n    api: https://api.ofox.ai/v1\n    name: ofox-hermes\n    api_key: sk-of-K\n  zeta:\n    api: https://zeta.example/v1\n_config_version: 50\n";
+        let plan = plan_restore(Some(USER_CONFIG), Some(migrated)).unwrap();
+        let text = plan.content.unwrap();
+        let config = yaml(&text);
+        assert!(config.get(PROVIDERS).is_none(), "{text}");
+        let keys: Vec<_> = config[DICT]
+            .as_mapping()
+            .unwrap()
+            .keys()
+            .filter_map(Yaml::as_str)
+            .collect();
+        assert_eq!(keys, ["deepseek", "zeta"]);
+        assert_eq!(config[MODEL]["provider"].as_str(), Some("deepseek"));
+        assert_eq!(config[MODEL]["default"].as_str(), Some("deepseek-chat"));
+        assert!(!text.contains("sk-of-K"));
+        assert!(plan
+            .removed_keys
+            .contains(&format!("{DICT}.{PROVIDER_NAME}")));
     }
 
     #[test]
