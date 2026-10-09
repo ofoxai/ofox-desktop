@@ -22,7 +22,10 @@ $steps = New-Object 'System.Collections.Generic.List[object]'
 $nativeProgram = (Get-Process -Id $PID).Path
 try {
     # Native stderr is not a failed check when the process exits successfully.
-    Invoke-VerificationStep "native-progress" $nativeProgram @("-NoProfile", "-Command", '[Console]::Error.WriteLine("normal native progress"); exit 0')
+    # Windows PowerShell 5.1 strips embedded double quotes from native arguments.
+    # Encode the fixture so this check only exercises stderr and exit handling.
+    $progressCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('[Console]::Error.WriteLine("normal native progress"); exit 0'))
+    Invoke-VerificationStep "native-progress" $nativeProgram @("-NoProfile", "-EncodedCommand", $progressCommand)
     if ($steps[0].exitCode -ne 0) { throw "Successful native process failed." }
     if ((Get-Content (Join-Path $reportDirectory "native-progress.log") -Raw) -notmatch "normal native progress") {
         throw "Native stderr was not recorded."
