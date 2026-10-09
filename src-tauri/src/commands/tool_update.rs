@@ -144,8 +144,17 @@ pub(crate) fn shell_resolution(
         .find_map(|line| line.strip_prefix("__OFOX_PATH__"))
         .ok_or("Could not read launch shell PATH")?;
     if path.is_empty() {
+        // Interactive rc files routinely write to stderr (e.g. fnm's "Using Node ..."),
+        // so it is not evidence against the lookup. On macOS, a PATH left incomplete
+        // by a broken profile is still covered by the scan that follows NotFound.
         if !output.stderr.is_empty() {
-            return Err("Launch shell returned errors while looking up the executable".into());
+            log::debug!(
+                "Launch shell stderr during executable lookup: {}",
+                String::from_utf8_lossy(&output.stderr)
+                    .chars()
+                    .take(2048)
+                    .collect::<String>()
+            );
         }
         return Err(ProbeError::NotFound);
     }
@@ -876,7 +885,6 @@ mod tests {
             shell_output("shell startup failed", 0),
             shell_output("__OFOX_BIN__\n", 0),
             shell_output("__OFOX_BIN__alias tool=other\n__OFOX_PATH__/bin\n", 0),
-            probe_fixture_output(absent, "profile: Permission denied", 0),
         ] {
             assert!(matches!(
                 shell_resolution(&output),
@@ -890,6 +898,17 @@ mod tests {
             )),
             Ok(("/opt/bin/codex".into(), "/opt/bin:/bin".into()))
         );
+    }
+
+    #[test]
+    fn shell_startup_stderr_does_not_turn_a_complete_lookup_into_a_failure() {
+        let absent = "__OFOX_BIN__\n__OFOX_PATH__/usr/bin:/bin\n";
+        for stderr in ["Using Node v22.12.0\n", "profile: Permission denied"] {
+            assert_eq!(
+                shell_resolution(&probe_fixture_output(absent, stderr, 0)),
+                Err(ProbeError::NotFound)
+            );
+        }
     }
 
     #[test]

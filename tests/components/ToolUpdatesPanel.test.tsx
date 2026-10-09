@@ -231,7 +231,7 @@ describe("ChatGPT desktop updates", () => {
     expect(chat.getByText("发现新版")).toBeVisible();
     expect(chat.getByText("有可用更新")).toBeVisible();
     expect(chat.queryByText("请在客户端内检查更新")).not.toBeInTheDocument();
-    expect(chat.getByText(/选择「检查更新…」/)).toBeVisible();
+    expect(chat.getByText(/屏幕顶部菜单栏左侧的「ChatGPT」/)).toBeVisible();
   });
 
   it("opens ChatGPT for a Sparkle update instead of running an update", async () => {

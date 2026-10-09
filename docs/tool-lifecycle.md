@@ -52,6 +52,8 @@ when the renderer submits an older settings snapshot.
 - `get_tool_versions`: adds `installationStatus` (`installed`, `notInstalled`,
   `unknown`), independently of version/update status. Found installations can
   have an unavailable version or an error. Failed probes are not uninstall evidence.
+  Launch-shell startup stderr does not fail a completed lookup; when the lookup
+  itself fails, an executable found by the path scan still counts as installed.
 - `get_tool_install_capabilities`: returns tool IDs supported by this host's
   automatic installer. Other tools link to upstream download/instructions.
 - `get_tool_binding_status { app }`: returns `status` (`configured`, `missing`,
