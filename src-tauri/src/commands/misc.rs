@@ -709,7 +709,7 @@ async fn get_single_tool_version_impl(
             installation.error.clone(),
         ),
         Err(ProbeError::NotFound) => scan_cli_version(tool).await,
-        Err(error) => LocalDetection::failed(error.to_string()),
+        Err(error) => after_failed_shell_lookup(error.to_string(), scan_cli_version(tool).await),
     };
     #[cfg(not(unix))]
     let local = if let Some(distro) = wsl_distro.as_deref() {
@@ -799,6 +799,17 @@ async fn get_single_tool_version_impl(
         update_supported,
         update_reason,
         executable_path: local.path.map(|path| path.to_string_lossy().into_owned()),
+    }
+}
+
+/// A failed shell lookup is not uninstall evidence, but an executable found by
+/// the path scan (e.g. behind an alias or a slow rc file) still proves installation.
+#[cfg(any(unix, test))]
+fn after_failed_shell_lookup(probe_error: String, scanned: LocalDetection) -> LocalDetection {
+    if scanned.status == InstallationStatus::Installed {
+        scanned
+    } else {
+        LocalDetection::failed(probe_error)
     }
 }
 
@@ -2426,6 +2437,28 @@ mod tests {
         assert_eq!(result.status, InstallationStatus::Unknown);
         assert!(result.error.is_some());
         assert!(result.path.is_none());
+    }
+
+    #[test]
+    fn failed_shell_lookup_accepts_scan_evidence_but_not_scan_absence() {
+        let probe_error = "Launch shell resolved an alias or function instead of an executable";
+        let path = PathBuf::from("/opt/fixture/bin/agent");
+        let found = after_failed_shell_lookup(
+            probe_error.into(),
+            LocalDetection::found(path.clone(), Some("1.2.3".into()), None),
+        );
+        assert_eq!(found.status, InstallationStatus::Installed);
+        assert_eq!(found.path, Some(path));
+        assert_eq!(found.version.as_deref(), Some("1.2.3"));
+
+        for scanned in [
+            LocalDetection::missing(),
+            LocalDetection::failed("Could not inspect /opt/fixture/bin"),
+        ] {
+            let local = after_failed_shell_lookup(probe_error.into(), scanned);
+            assert_eq!(local.status, InstallationStatus::Unknown);
+            assert_eq!(local.error.as_deref(), Some(probe_error));
+        }
     }
 
     #[test]
