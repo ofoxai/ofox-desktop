@@ -63,7 +63,7 @@ jobs:
         run: cargo build --manifest-path src-tauri/Cargo.toml --release --bin verify_chatgpt_install --bin verify_tool_lifecycle
 
       - name: Upload probe artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: verify_chatgpt_install-${{ github.sha }}
           path: src-tauri/target/release/verify_chatgpt_install.exe
@@ -72,7 +72,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload read-only lifecycle probe
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: verify_tool_lifecycle-${{ github.sha }}
           path: src-tauri/target/release/verify_tool_lifecycle.exe
@@ -87,7 +87,7 @@ jobs:
 
       - name: Upload Windows verification logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: windows-test-results-${{ github.sha }}
           path: artifacts/windows-tests/ci/
