@@ -133,6 +133,29 @@ fn patch_template(tool: Tool, previous: &Value, next: &str) -> Result<Option<Val
     Ok(Some(updated))
 }
 
+/// Position of the single `ofox-hermes` entry in `custom_providers`.
+fn hermes_list_index(config: &serde_yaml::Value) -> Result<Option<usize>, String> {
+    let Some(providers) = config.get("custom_providers") else {
+        return Ok(None);
+    };
+    let providers = providers
+        .as_sequence()
+        .ok_or_else(|| CONFLICT.to_string())?;
+    let indexes: Vec<_> = providers
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            entry.get("name").and_then(serde_yaml::Value::as_str) == Some("ofox-hermes")
+        })
+        .map(|(index, _)| index)
+        .collect();
+    match indexes.as_slice() {
+        [] => Ok(None),
+        [index] => Ok(Some(*index)),
+        _ => Err(CONFLICT.into()),
+    }
+}
+
 fn patch_live(tool: Tool, source: &str, next: &str) -> Result<Option<String>, String> {
     match tool {
         Tool::Codex => patch_codex(source, next),
@@ -152,40 +175,33 @@ fn patch_live(tool: Tool, source: &str, next: &str) -> Result<Option<String>, St
         Tool::Hermes => {
             let mut config = crate::hermes_config::parse_config_text(source)
                 .map_err(|_| CONFLICT.to_string())?;
-            let Some(providers) = config.get_mut("custom_providers") else {
-                return Ok(None);
+            // Hermes v12+ migrates the list entry into `providers:` as `api`.
+            let (section, entry, field) = match hermes_list_index(&config)? {
+                Some(index) => (
+                    "custom_providers",
+                    &mut config["custom_providers"][index],
+                    "base_url",
+                ),
+                None if config
+                    .get("providers")
+                    .and_then(|providers| providers.get("ofox-hermes"))
+                    .is_some() =>
+                {
+                    ("providers", &mut config["providers"]["ofox-hermes"], "api")
+                }
+                None => return Ok(None),
             };
-            let providers = providers
-                .as_sequence_mut()
-                .ok_or_else(|| CONFLICT.to_string())?;
-            let indexes: Vec<_> = providers
-                .iter()
-                .enumerate()
-                .filter(|(_, entry)| {
-                    entry.get("name").and_then(serde_yaml::Value::as_str) == Some("ofox-hermes")
-                })
-                .map(|(index, _)| index)
-                .collect();
-            let index = match indexes.as_slice() {
-                [] => return Ok(None),
-                [index] => *index,
-                _ => return Err(CONFLICT.into()),
-            };
-            let Some(current) = providers[index].get("base_url") else {
+            let Some(current) = entry.get(field) else {
                 return Ok(None);
             };
             let current = current.as_str().ok_or_else(|| CONFLICT.to_string())?;
             if !changed_url(&Value::String(current.into()), next)? {
                 return Ok(None);
             }
-            providers[index]["base_url"] = serde_yaml::Value::String(next.into());
-            crate::hermes_config::render_section(
-                source,
-                "custom_providers",
-                config.get("custom_providers"),
-            )
-            .map(Some)
-            .map_err(|_| CONFLICT.to_string())
+            entry[field] = serde_yaml::Value::String(next.into());
+            crate::hermes_config::render_section(source, section, config.get(section))
+                .map(Some)
+                .map_err(|_| CONFLICT.to_string())
         }
         _ => {
             let before = json_file::parse_object(Some(source), tool.label())

@@ -868,6 +868,54 @@ pub(crate) fn upsert_custom_provider(
     Ok(serde_yaml::Value::Sequence(providers))
 }
 
+/// `providers:` 字典（Hermes v12+）里 `name` 条目写入后的样子，不读写磁盘。
+///
+/// 字段按 Hermes `_custom_provider_entry_to_provider_config` 映射：`base_url` → `api`、
+/// `api_mode` → `transport`、首个模型 → `default_model`。磁盘上已有的其它字段保留。
+pub(crate) fn provider_dict_entry(
+    existing: Option<&serde_yaml::Value>,
+    name: &str,
+    provider_config: serde_json::Value,
+) -> Result<serde_yaml::Value, AppError> {
+    let mut normalized = provider_config;
+    sanitize_hermes_provider_keys(&mut normalized);
+    normalize_provider_models_for_write(&mut normalized);
+    let Some(obj) = normalized.as_object_mut() else {
+        return Err(AppError::Config(format!(
+            "Hermes provider '{name}' config must be a mapping"
+        )));
+    };
+    for (legacy, field) in [("base_url", "api"), ("api_mode", "transport")] {
+        if let Some(value) = obj.remove(legacy) {
+            obj.insert(field.to_string(), value);
+        }
+    }
+    obj.remove("model");
+    let first_model_id = obj
+        .get("models")
+        .and_then(|v| v.as_object())
+        .and_then(|models| models.keys().next())
+        .cloned();
+    if let Some(model_id) = first_model_id {
+        obj.insert("default_model".to_string(), serde_json::json!(model_id));
+    }
+    obj.insert("name".to_string(), serde_json::json!(name));
+
+    let mut entry = json_to_yaml(&normalized)?;
+    if let (Some(existing), serde_yaml::Value::Mapping(new_map)) =
+        (existing.and_then(|e| e.as_mapping()), &mut entry)
+    {
+        for (k, v) in existing {
+            // Hermes reads `base_url` before `api`; a stale legacy field would win.
+            if matches!(k.as_str(), Some("base_url" | "url" | "api_mode" | "model")) {
+                continue;
+            }
+            new_map.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+    }
+    Ok(entry)
+}
+
 /// Remove a custom provider by name.
 ///
 /// Filters out the matching entry from the `custom_providers:` sequence.

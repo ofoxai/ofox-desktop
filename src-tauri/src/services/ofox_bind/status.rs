@@ -159,7 +159,7 @@ fn parse_yaml(text: &str) -> Result<Value, String> {
 }
 
 fn hermes_projection(value: &Value) -> Result<Value, String> {
-    let provider = match value.get("custom_providers") {
+    let listed = match value.get("custom_providers") {
         None => None,
         Some(Value::Array(providers)) => {
             let mut managed = providers
@@ -172,6 +172,16 @@ fn hermes_projection(value: &Value) -> Result<Value, String> {
             first
         }
         _ => return Err("受管配置字段的格式无效".into()),
+    };
+    // Hermes v12+ 把条目迁移进 `providers:` 字典。
+    let keyed = match value.get("providers") {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(providers)) => providers.get("ofox-hermes"),
+        _ => return Err("受管配置字段的格式无效".into()),
+    };
+    let provider = match (listed, keyed) {
+        (Some(_), Some(_)) => return Err("受管配置条目重复".into()),
+        (entry, None) | (None, entry) => entry,
     };
     let mut projected = json!({});
     if let Some(provider) = provider {
