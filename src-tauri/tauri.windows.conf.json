@@ -16,5 +16,8 @@
         "center": true
       }
     ]
+  },
+  "bundle": {
+    "resources": []
   }
 }

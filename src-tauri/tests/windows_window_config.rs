@@ -39,6 +39,24 @@ fn windows_main_window_repeats_every_base_field() {
     }
 }
 
+/// The bundled `scripts/installer` tree is the macOS one-click installer. As
+/// per-user WiX file components it fails ICE38/ICE64, and Windows never runs it.
+#[test]
+fn windows_bundle_drops_the_macos_installer_resources() {
+    let base = read("tauri.conf.json");
+    assert!(base["bundle"]["resources"]
+        .as_array()
+        .expect("base bundle.resources")
+        .iter()
+        .any(|resource| resource == "../scripts/installer/**/*"));
+    let windows = read("tauri.windows.conf.json");
+    let bundle = windows["bundle"]
+        .as_object()
+        .expect("Windows bundle override");
+    assert_eq!(bundle.keys().collect::<Vec<_>>(), ["resources"]);
+    assert_eq!(bundle["resources"], Value::Array(Vec::new()));
+}
+
 #[test]
 fn windows_main_window_is_titled_with_the_product_name() {
     let product = read("tauri.conf.json")["productName"].clone();
