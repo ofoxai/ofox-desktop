@@ -80,23 +80,23 @@ fn remove_dict_entry(config: &mut Yaml) -> bool {
 
 /// `ofox-hermes` 条目（列表或字典里）指向 Ofox 网关——当前（或旧版本）绑定留下的配置。
 pub(crate) fn is_ofox_bound(text: &str) -> bool {
-    let Ok(config) = parse(Some(text)) else {
-        return false;
-    };
+    parse(Some(text)).is_ok_and(|config| entry_points_to_ofox(&config))
+}
+
+fn entry_points_to_ofox(config: &Yaml) -> bool {
     let list_url =
-        entry_position(&config).and_then(|index| config[PROVIDERS][index].get("base_url"));
+        entry_position(config).and_then(|index| config[PROVIDERS][index].get("base_url"));
     // Hermes 迁移时按 `base_url` / `url` / `api` 取地址，写成 `api`。
-    let dict_url = dict_entry(&config).and_then(|entry| {
+    let dict_url = dict_entry(config).and_then(|entry| {
         ["api", "base_url", "url"]
             .iter()
             .find_map(|key| entry.get(*key))
     });
-    let bound = [list_url, dict_url]
+    [list_url, dict_url]
         .into_iter()
         .flatten()
         .filter_map(Yaml::as_str)
-        .any(mentions_ofox_gateway);
-    bound
+        .any(mentions_ofox_gateway)
 }
 
 /// 只把值有变化的段落写回 `raw`。
@@ -201,13 +201,11 @@ fn restore_providers(
     if !providers.is_empty() {
         return Some(Yaml::Sequence(providers));
     }
-    // Hermes 迁移时删掉了这个段落：不要再造一个空列表出来。
-    if current.get(PROVIDERS).is_none() {
-        return None;
-    }
-    match original.get(PROVIDERS) {
-        Some(Yaml::Sequence(_)) => Some(Yaml::Sequence(providers)),
-        other => other.cloned(),
+    match (original.get(PROVIDERS), current.get(PROVIDERS)) {
+        // Hermes 迁移时删掉了这个段落：不要再造一个空列表出来。
+        (_, None) => None,
+        (Some(Yaml::Sequence(_)), _) => Some(Yaml::Sequence(providers)),
+        (other, _) => other.cloned(),
     }
 }
 

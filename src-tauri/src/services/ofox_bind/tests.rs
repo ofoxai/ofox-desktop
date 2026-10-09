@@ -2313,6 +2313,92 @@ async fn region_reconciliation_changes_only_urls_and_restart_is_idempotent() {
     }
 }
 
+fn hermes_dict_endpoint() -> Option<String> {
+    let path = crate::hermes_config::get_hermes_config_path();
+    let config =
+        crate::hermes_config::parse_config_text(&fs::read_to_string(path).unwrap()).unwrap();
+    assert!(config.get("custom_providers").is_none());
+    assert_eq!(
+        config["providers"]["ofox-hermes"]["api_key"].as_str(),
+        Some(KEY)
+    );
+    config["providers"]["ofox-hermes"]["api"]
+        .as_str()
+        .map(str::to_string)
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_status_inspects_the_providers_dict_entry() {
+    let _home = Home::new();
+    let path = crate::hermes_config::get_hermes_config_path();
+    write(&path, HERMES_MIGRATED_CONFIG);
+    let db = db_for(Tool::Hermes, hermes_template());
+    bind(&db, Tool::Hermes, "hermes", KEY).await.expect("bind");
+    assert_eq!(
+        status::binding_status(&db, Tool::Hermes, Some(KEY))
+            .await
+            .status,
+        status::BindingStatus::Configured
+    );
+
+    let key_line = format!("api_key: {KEY}");
+    let text: String = fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .filter(|line| line.trim() != key_line)
+        .map(|line| format!("{line}\n"))
+        .collect();
+    fs::write(&path, text).unwrap();
+    assert_eq!(
+        status::binding_status(&db, Tool::Hermes, Some(KEY))
+            .await
+            .status,
+        status::BindingStatus::Missing
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn region_reconciliation_rewrites_the_hermes_providers_dict_endpoint() {
+    for (from, to) in [("ofox.ai", "ofox.io"), ("ofox.io", "ofox.ai")] {
+        let _home = Home::new();
+        crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(from.into()))
+            .unwrap();
+        write(
+            &crate::hermes_config::get_hermes_config_path(),
+            HERMES_MIGRATED_CONFIG,
+        );
+        let db = db_for(Tool::Hermes, hermes_template());
+        bind(&db, Tool::Hermes, "hermes", KEY).await.expect("bind");
+        assert!(crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+        assert_eq!(
+            hermes_dict_endpoint().as_deref(),
+            Some(format!("https://api.{from}/v1").as_str())
+        );
+        assert_eq!(
+            status::binding_status(&db, Tool::Hermes, Some(KEY))
+                .await
+                .status,
+            status::BindingStatus::Configured
+        );
+
+        crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(to.into())).unwrap();
+        assert!(crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+        assert_eq!(
+            hermes_dict_endpoint().as_deref(),
+            Some(format!("https://api.{to}/v1").as_str()),
+            "{from} -> {to}"
+        );
+        assert_eq!(
+            status::binding_status(&db, Tool::Hermes, Some(KEY))
+                .await
+                .status,
+            status::BindingStatus::Configured
+        );
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn region_reconciliation_preserves_missing_connection_fields_until_explicit_restore() {
