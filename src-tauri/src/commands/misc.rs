@@ -2549,11 +2549,6 @@ mod tests {
                 "",
                 1,
             )),
-            Ok(probe_fixture_output(
-                missing,
-                "profile: Permission denied",
-                0,
-            )),
             Ok(probe_fixture_output(missing, "shell startup failed", 1)),
             Ok(probe_fixture_output("", "", 0)),
             Ok(probe_fixture_output(
@@ -2570,10 +2565,15 @@ mod tests {
                 .unwrap()
                 .contains("[WSL:Fixture-Distro]"));
         }
-        let local = wsl_lookup_result("Fixture-Distro", Ok(probe_fixture_output(missing, "", 0)))
+        for stderr in ["", "Now using node v22.12.0 (npm v10.9.0)\n"] {
+            let local = wsl_lookup_result(
+                "Fixture-Distro",
+                Ok(probe_fixture_output(missing, stderr, 0)),
+            )
             .unwrap_err();
-        assert_eq!(local.status, InstallationStatus::NotInstalled);
-        assert!(local.error.is_none());
+            assert_eq!(local.status, InstallationStatus::NotInstalled);
+            assert!(local.error.is_none());
+        }
     }
 
     #[test]
