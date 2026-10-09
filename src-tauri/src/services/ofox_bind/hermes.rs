@@ -18,10 +18,14 @@ use super::plan::{read_text, FileEdit, RestorePlan};
 const LABEL: &str = "Hermes 的 config.yaml";
 const PROVIDER_NAME: &str = "ofox-hermes";
 const PROVIDERS: &str = "custom_providers";
+/// Hermes v12+ 的 `providers:` 字典；Hermes 升级时会把 `custom_providers` 迁移进来。
+const DICT: &str = "providers";
 const MODEL: &str = "model";
 /// `model` 段落里由绑定改写、解绑时还原的路由字段；上下文长度等其它字段不动。
 const ROUTING_KEYS: [&str; 2] = ["provider", "default"];
-const SECTIONS: &[&str] = &[PROVIDERS, MODEL];
+const SECTIONS: &[&str] = &[PROVIDERS, DICT, MODEL];
+/// 从这个版本起 Hermes 的正式格式是 `providers:` 字典，不再迁移 `custom_providers`。
+const DICT_SCHEMA_VERSION: u64 = 12;
 const TOKEN: JsonPath = &["api_key"];
 
 pub(crate) fn config_path() -> PathBuf {
@@ -55,18 +59,44 @@ fn entry_position(config: &Yaml) -> Option<usize> {
         .position(|provider| provider.get("name").and_then(Yaml::as_str) == Some(PROVIDER_NAME))
 }
 
-/// `ofox-hermes` 条目指向 Ofox 网关——当前（或旧版本）绑定留下的配置。
+fn dict_entry(config: &Yaml) -> Option<&Yaml> {
+    config.get(DICT)?.as_mapping()?.get(PROVIDER_NAME)
+}
+
+fn uses_dict_schema(config: &Yaml) -> bool {
+    config
+        .get("_config_version")
+        .and_then(Yaml::as_u64)
+        .is_some_and(|version| version >= DICT_SCHEMA_VERSION)
+}
+
+/// 去掉 `providers:` 字典里的 Ofox 条目，返回是否去掉了。
+fn remove_dict_entry(config: &mut Yaml) -> bool {
+    config
+        .get_mut(DICT)
+        .and_then(Yaml::as_mapping_mut)
+        .is_some_and(|dict| dict.remove(PROVIDER_NAME).is_some())
+}
+
+/// `ofox-hermes` 条目（列表或字典里）指向 Ofox 网关——当前（或旧版本）绑定留下的配置。
 pub(crate) fn is_ofox_bound(text: &str) -> bool {
-    parse(Some(text))
-        .ok()
-        .and_then(|config| {
-            let index = entry_position(&config)?;
-            config[PROVIDERS][index]
-                .get("base_url")?
-                .as_str()
-                .map(mentions_ofox_gateway)
-        })
-        .unwrap_or(false)
+    let Ok(config) = parse(Some(text)) else {
+        return false;
+    };
+    let list_url =
+        entry_position(&config).and_then(|index| config[PROVIDERS][index].get("base_url"));
+    // Hermes 迁移时按 `base_url` / `url` / `api` 取地址，写成 `api`。
+    let dict_url = dict_entry(&config).and_then(|entry| {
+        ["api", "base_url", "url"]
+            .iter()
+            .find_map(|key| entry.get(*key))
+    });
+    let bound = [list_url, dict_url]
+        .into_iter()
+        .flatten()
+        .filter_map(Yaml::as_str)
+        .any(mentions_ofox_gateway);
+    bound
 }
 
 /// 只把值有变化的段落写回 `raw`。
@@ -83,6 +113,9 @@ fn render_changed(raw: &str, before: &Yaml, after: &Yaml) -> Result<String, Stri
 }
 
 /// 由 DB 里 `ofox-hermes` 模板生成绑定后的配置：写入 Ofox 条目，路由指向它。
+///
+/// 条目在哪就更新哪；新条目在 v12+ 配置里写进 `providers:` 字典，否则写进
+/// `custom_providers` 列表（未标版本的配置之后由 Hermes 自己迁移）。
 pub(crate) fn bound_config(
     current: Option<&str>,
     template: &Value,
@@ -91,8 +124,31 @@ pub(crate) fn bound_config(
     let before = parse(current)?;
     let mut entry = template.clone();
     json_file::set(&mut entry, TOKEN, api_key.into());
-    let providers = hermes_config::upsert_custom_provider(&before, PROVIDER_NAME, entry.clone())
+    let mut after = before.clone();
+    let use_list = entry_position(&before).is_some()
+        || (dict_entry(&before).is_none() && !uses_dict_schema(&before));
+    if use_list {
+        let providers =
+            hermes_config::upsert_custom_provider(&before, PROVIDER_NAME, entry.clone())
+                .map_err(|e| e.to_string())?;
+        root(&mut after).insert(PROVIDERS.into(), providers);
+        // Hermes 先读列表；字典里再留一份 Ofox 条目只会重复。
+        remove_dict_entry(&mut after);
+    } else {
+        let mut dict = match before.get(DICT) {
+            None => Mapping::new(),
+            Some(Yaml::Mapping(dict)) => dict.clone(),
+            Some(_) => return Err(format!("{LABEL} 的 {DICT} 段落格式无效，请先修复后再操作")),
+        };
+        let updated = hermes_config::provider_dict_entry(
+            dict.get(PROVIDER_NAME),
+            PROVIDER_NAME,
+            entry.clone(),
+        )
         .map_err(|e| e.to_string())?;
+        dict.insert(PROVIDER_NAME.into(), updated);
+        root(&mut after).insert(DICT.into(), Yaml::Mapping(dict));
+    }
     let current_model = hermes_config::model_config_of(&before)
         .map_err(|e| e.to_string())?
         .unwrap_or_default();
@@ -100,9 +156,6 @@ pub(crate) fn bound_config(
     let model = serde_json::to_value(model)
         .map_err(|e| e.to_string())
         .and_then(|model| hermes_config::json_to_yaml(&model).map_err(|e| e.to_string()))?;
-
-    let mut after = before.clone();
-    root(&mut after).insert(PROVIDERS.into(), providers);
     root(&mut after).insert(MODEL.into(), model);
     render_changed(current.unwrap_or_default(), &before, &after)
 }
@@ -386,6 +439,73 @@ mod tests {
         assert_eq!(config[MODEL]["context_length"].as_u64(), Some(64000));
         assert_eq!(config["memory"]["enabled"].as_bool(), Some(true));
         assert!(entry_position(&config).is_none());
+    }
+
+    /// Hermes' 11 → 12 migration moved an earlier Ofox entry into `providers:`.
+    const MIGRATED_CONFIG: &str = "# Hermes config\nmodel:\n  default: qwen/qwen-flash\n  provider: ofox-hermes\n  context_length: 32000\nskills:\n  enabled: true\nproviders:\n  deepseek:\n    api: https://api.deepseek.com/v1\n    name: deepseek\n    api_key: sk-ds\n  ofox-hermes:\n    api: https://api.ofox.ai/v1\n    name: ofox-hermes\n    api_key: sk-of-OLD\n    models:\n      qwen/qwen-flash: {}\n    default_model: qwen/qwen-flash\n    transport: chat_completions\n_config_version: 50\n";
+
+    const VERSIONED_CONFIG: &str = "model:\n  default: deepseek-chat\n  provider: deepseek\nproviders:\n  deepseek:\n    api: https://api.deepseek.com/v1\n    api_key: sk-ds\n_config_version: 50\n";
+
+    fn assert_dict_entry(config: &Yaml, api_key: &str) {
+        let entry = &config[DICT][PROVIDER_NAME];
+        assert_eq!(entry["api"].as_str(), Some("https://api.ofox.ai/v1"));
+        assert_eq!(entry["api_key"].as_str(), Some(api_key));
+        assert_eq!(entry["transport"].as_str(), Some("chat_completions"));
+        assert_eq!(entry["default_model"].as_str(), Some("openai/gpt-x"));
+        assert!(entry["models"].get("openai/gpt-x").is_some());
+        assert!(entry["models"].get("qwen/qwen-flash").is_none());
+        for legacy in ["base_url", "api_mode", "model"] {
+            assert!(entry.get(legacy).is_none(), "{legacy} left in {entry:?}");
+        }
+    }
+
+    #[test]
+    fn bind_updates_an_entry_hermes_migrated_into_the_providers_dict() {
+        assert!(is_ofox_bound(MIGRATED_CONFIG));
+        let bound = bound_config(Some(MIGRATED_CONFIG), &template(), "sk-of-K").unwrap();
+        let config = yaml(&bound);
+        assert_dict_entry(&config, "sk-of-K");
+        assert!(config.get(PROVIDERS).is_none());
+        assert_eq!(
+            config[DICT]["deepseek"]["api"].as_str(),
+            Some("https://api.deepseek.com/v1")
+        );
+        assert_eq!(config[MODEL]["provider"].as_str(), Some(PROVIDER_NAME));
+        assert_eq!(config[MODEL]["default"].as_str(), Some("openai/gpt-x"));
+        assert_eq!(config["_config_version"].as_u64(), Some(50));
+        assert!(bound.contains("skills:\n  enabled: true\n"));
+        assert!(is_ofox_bound(&bound));
+    }
+
+    #[test]
+    fn bind_adds_a_new_entry_to_the_providers_dict_of_a_versioned_config() {
+        let bound = bound_config(Some(VERSIONED_CONFIG), &template(), "sk-of-K").unwrap();
+        let config = yaml(&bound);
+        assert_dict_entry(&config, "sk-of-K");
+        assert!(config.get(PROVIDERS).is_none());
+        assert!(config[DICT].get("deepseek").is_some());
+        assert!(is_ofox_bound(&bound));
+        assert!(!is_ofox_bound(VERSIONED_CONFIG));
+    }
+
+    #[test]
+    fn bind_keeps_a_single_ofox_entry_when_both_sections_hold_one() {
+        let both = "model:\n  provider: ofox-hermes\ncustom_providers:\n- name: ofox-hermes\n  base_url: https://api.ofox.ai/v1\n  api_key: sk-of-OLD\nproviders:\n  ofox-hermes:\n    api: https://api.ofox.ai/v1\n    api_key: sk-of-OLD\n  other:\n    api: https://example.com/v1\n_config_version: 50\n";
+        let bound = bound_config(Some(both), &template(), "sk-of-K").unwrap();
+        let config = yaml(&bound);
+        let index = entry_position(&config).unwrap();
+        assert_eq!(
+            config[PROVIDERS][index]["api_key"].as_str(),
+            Some("sk-of-K")
+        );
+        assert!(config[DICT].get(PROVIDER_NAME).is_none());
+        assert!(config[DICT].get("other").is_some());
+    }
+
+    #[test]
+    fn dict_entry_pointing_elsewhere_is_not_an_ofox_binding() {
+        let relay = VERSIONED_CONFIG.replace("deepseek:", "ofox-hermes:");
+        assert!(!is_ofox_bound(&relay));
     }
 
     #[test]
