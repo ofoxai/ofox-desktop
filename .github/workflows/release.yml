@@ -10,8 +10,10 @@ name: Release
 #      再补 required reviewers 审批门。
 #   4. 不 echo / 不 base64 变换后打印任何 secret —— 自动打码只对字面值生效。
 #
-# 扩展 Windows / Linux：在 build 的 matrix 里取消对应注释块，并补该平台的
-# 「打包产物 → 重命名」步骤。publish job 无需改动（它按 artifact 目录遍历）。
+# 平台：macOS（签名 + 公证的 DMG）与 Windows（暂不签名的 NSIS 安装包）。扩展 Linux：
+# 在 build 的 matrix 里取消对应注释块，并补「打包产物 → 重命名」步骤。publish job
+# 无需改动（它按 artifact 目录遍历）。任一平台构建失败都会阻止本次发布，打 tag 前
+# 先用 workflow_dispatch（dry_run）跑一遍。
 
 on:
   push:
@@ -52,11 +54,11 @@ jobs:
             os: macos-14
             r2_prefix: release/mac/arm
             ext: dmg
-          # ── 预留：Windows ──────────────────────────────────
-          # - platform: windows-x86_64
-          #   os: windows-2022
-          #   r2_prefix: release/windows/x64
-          #   ext: msi
+          # Windows：暂不签名的 NSIS 安装包（按用户安装，签名等证书到位后再加）
+          - platform: windows-x86_64
+            os: windows-2022
+            r2_prefix: release/windows/x64
+            ext: exe
           # ── 预留：Linux ────────────────────────────────────
           # - platform: linux-x86_64
           #   os: ubuntu-22.04
@@ -254,17 +256,28 @@ jobs:
           mkdir -p dist-release
           cp "$DMG" "dist-release/ofox_desktop_${VERSION}.dmg"
 
-      # ── 预留：Windows 打包 ───────────────────────────────────
-      # - name: Prepare artifact (Windows)
-      #   if: runner.os == 'Windows'
-      #   shell: bash
-      #   env:
-      #     VERSION: ${{ steps.version.outputs.version }}
-      #   run: |
-      #     set -euo pipefail
-      #     mkdir -p dist-release
-      #     MSI=$(find src-tauri/target -path "*/release/bundle/msi/*.msi" | head -1)
-      #     cp "$MSI" "dist-release/ofox_desktop_${VERSION}.msi"
+      # ── Windows：构建（暂不签名）──────────────────────────────
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        timeout-minutes: 60
+        run: pnpm tauri build --bundles nsis
+
+      - name: Prepare artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # cargo 缓存会带回旧版本的安装包：只认本次版本号，且必须唯一
+          mapfile -t found < <(find src-tauri/target -path "*/release/bundle/nsis/*_${VERSION}_*-setup.exe")
+          if [ "${#found[@]}" -ne 1 ]; then
+            echo "❌ 期望 1 个 v${VERSION} 的 NSIS 安装包，实际 ${#found[@]} 个：${found[*]:-无}" >&2
+            exit 1
+          fi
+          mkdir -p dist-release
+          cp "${found[0]}" "dist-release/ofox_desktop_${VERSION}.exe"
 
       # ── 预留：Linux 打包 ─────────────────────────────────────
       # - name: Prepare artifact (Linux)
@@ -351,6 +364,7 @@ jobs:
           declare -A CTYPE=(
             [dmg]="application/x-apple-diskimage"
             [msi]="application/x-msi"
+            [exe]="application/vnd.microsoft.portable-executable"
             [AppImage]="application/x-executable"
           )
 
@@ -414,7 +428,7 @@ jobs:
           };
           const EXT = {
             'darwin-aarch64': 'dmg',
-            'windows-x86_64': 'msi',
+            'windows-x86_64': 'exe',
             'linux-x86_64':   'AppImage',
           };
 
