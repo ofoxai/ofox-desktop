@@ -9,10 +9,19 @@ updates:
       - "frontend"
     commit-message:
       prefix: "chore(deps)"
+    # Majors stay apart so one breaking release cannot block routine updates.
     groups:
-      frontend-deps:
+      frontend-minor-patch:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      frontend-major:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
 
   - package-ecosystem: "cargo"
     directory: "/src-tauri"
@@ -24,9 +33,17 @@ updates:
     commit-message:
       prefix: "chore(deps)"
     groups:
-      cargo-deps:
+      cargo-minor-patch:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      cargo-major:
+        patterns:
+          - "*"
+        update-types:
+          - "major"
 
   - package-ecosystem: "github-actions"
     directory: "/"
