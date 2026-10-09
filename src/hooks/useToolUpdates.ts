@@ -4,13 +4,25 @@ import {
   toolUpdatesApi,
   type ToolUpdateInfo,
   type ToolUpdateProgress,
+  type ToolUpdateResult,
 } from "@/lib/api/toolUpdates";
+
+/** How one tool's update went; `error` is set only when it failed. */
+export interface ToolUpdateOutcome {
+  tool: string;
+  status: ToolUpdateResult["status"] | "failed";
+  before: string | null;
+  after: string | null;
+  error: string | null;
+}
 
 interface UpdateState {
   tools: ToolUpdateInfo[];
   checking: boolean;
   busy: string | null;
   batch: boolean;
+  /** Tools of the running update, in order; empty when none runs. */
+  queue: string[];
   error: string | null;
   logs: Record<string, string[]>;
   results: Record<string, string>;
@@ -22,6 +34,7 @@ let state: UpdateState = {
   checking: false,
   busy: null,
   batch: false,
+  queue: [],
   error: null,
   logs: {},
   results: {},
@@ -68,8 +81,10 @@ export function checkToolUpdates(): Promise<void> {
   return checking;
 }
 
-export async function updateTools(names: string[]) {
-  if (state.busy || state.batch || !names.length) return;
+export async function updateTools(
+  names: string[],
+): Promise<ToolUpdateOutcome[]> {
+  if (state.busy || state.batch || !names.length) return [];
   const eligible = [...new Set(names)].filter((name) =>
     state.tools.some(
       (tool) =>
@@ -78,13 +93,16 @@ export async function updateTools(names: string[]) {
         (tool.update_status === "available" || tool.update_status === "broken"),
     ),
   );
-  if (!eligible.length) return;
-  publish({ batch: true, results: {} });
+  if (!eligible.length) return [];
+  const outcomes: ToolUpdateOutcome[] = [];
+  publish({ batch: true, queue: eligible, results: {} });
   try {
     // Finish an older version scan before starting updates so it cannot overwrite verification.
     if (checking) await checking;
     for (const tool of eligible) {
       const operationId = crypto.randomUUID();
+      const before =
+        state.tools.find((entry) => entry.name === tool)?.version ?? null;
       publish({ busy: tool, logs: { ...state.logs, [tool]: [] } });
       let unlisten: (() => void) | undefined;
       try {
@@ -108,8 +126,22 @@ export async function updateTools(names: string[]) {
           },
         );
         const result = await toolUpdatesApi.update(tool, operationId);
+        outcomes.push({
+          tool,
+          status: result.status,
+          before: result.before || before,
+          after: result.after || null,
+          error: null,
+        });
         publish({ results: { ...state.results, [tool]: result.status } });
       } catch (error) {
+        outcomes.push({
+          tool,
+          status: "failed",
+          before,
+          after: null,
+          error: String(error),
+        });
         publish({
           results: { ...state.results, [tool]: "failed" },
           logs: {
@@ -123,9 +155,10 @@ export async function updateTools(names: string[]) {
     }
     await checkToolUpdates();
   } finally {
-    publish({ busy: null, batch: false });
+    publish({ busy: null, batch: false, queue: [] });
     window.dispatchEvent(new Event("tool-updates-complete"));
   }
+  return outcomes;
 }
 
 export function useToolUpdates(enabled = true) {

@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ToolUpdatesPanel } from "@/components/settings/ToolUpdatesPanel";
 import { toast } from "sonner";
 import { Loader2, X } from "lucide-react";
 import { emit } from "@tauri-apps/api/event";
@@ -438,7 +437,6 @@ export default function OfoxSettingsDialog({
             />
           </SectionCard>
 
-          {open && <ToolUpdatesPanel />}
           {/* ─── 关于 ─────────────────────────────────────────────────── */}
           <SectionCard title="关于">
             <div className="flex items-center justify-between px-4 py-3">

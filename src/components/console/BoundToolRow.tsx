@@ -1,8 +1,9 @@
 import {
   AppWindow,
-  ArrowUpCircle,
+  ArrowDownToLine,
   BarChart3,
   Download,
+  ExternalLink,
   Loader2,
   RefreshCw,
   SlidersHorizontal,
@@ -46,7 +47,13 @@ interface BoundToolRowProps {
   keyLabel?: string;
   model?: string;
   hasAnalytics: boolean;
-  hasUpdate: boolean;
+  /** The newer version that is out, if this installation is behind. */
+  updateTo: string | null;
+  /** The update leaves Ofox: the app's own updater or the vendor's page. */
+  updateExternal?: boolean;
+  updating?: boolean;
+  /** Another update runs; this one waits its turn. */
+  updateLocked?: boolean;
   canInstall: boolean;
   busy: boolean;
   progress?: string;
@@ -61,7 +68,10 @@ export default function BoundToolRow({
   keyLabel,
   model,
   hasAnalytics,
-  hasUpdate,
+  updateTo,
+  updateExternal = false,
+  updating = false,
+  updateLocked = false,
   canInstall,
   busy,
   progress,
@@ -134,6 +144,30 @@ export default function BoundToolRow({
               v{tool.version}
             </span>
           )}
+          {(updating ||
+            (updateTo &&
+              tool.installationStatus === "installed" &&
+              !tool.installationError)) && (
+            <button
+              type="button"
+              onClick={onUpdate}
+              disabled={busy || updating || updateLocked}
+              aria-busy={updating}
+              title={updateTo ? `v${tool.version} → v${updateTo}` : undefined}
+              className="inline-flex h-5 items-center gap-1 rounded-full border border-border bg-background pl-1.5 pr-2 text-[11px] font-medium text-foreground/80 transition hover:bg-accent hover:text-foreground active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {updating ? (
+                <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+              ) : updateExternal ? (
+                <ExternalLink className="h-3 w-3 text-muted-foreground" />
+              ) : (
+                <ArrowDownToLine className="h-3 w-3 text-muted-foreground" />
+              )}
+              {updating
+                ? t("toolUpdates.updating")
+                : t("toolUpdates.updateTo", { version: updateTo })}
+            </button>
+          )}
           {stateKey && (
             <span className="rounded-md bg-orange-50 px-1.5 py-0.5 text-[11px] font-normal text-orange-700 dark:bg-orange-950/40 dark:text-orange-300">
               {t(`toolLifecycle.${stateKey}`)}
@@ -160,19 +194,6 @@ export default function BoundToolRow({
         )}
       </div>
       <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1.5">
-        {hasUpdate &&
-          tool.installationStatus === "installed" &&
-          !tool.installationError &&
-          tool.binding.status === "configured" && (
-            <button
-              onClick={onUpdate}
-              disabled={busy}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-orange-400 px-2.5 py-1 text-[12px] font-medium text-orange-600 hover:bg-accent disabled:opacity-60"
-            >
-              <ArrowUpCircle className="h-3.5 w-3.5" />
-              {t("toolUpdates.available")}
-            </button>
-          )}
         {hasAnalytics && (
           <button onClick={onAnalytics} className={neutralButton}>
             <BarChart3 className="h-3.5 w-3.5" />

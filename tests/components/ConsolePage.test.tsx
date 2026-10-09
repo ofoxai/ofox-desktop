@@ -14,6 +14,12 @@ import { checkToolUpdates } from "@/hooks/useToolUpdates";
 import { toolUpdatesApi, type ToolUpdateInfo } from "@/lib/api/toolUpdates";
 
 const mocks = vi.hoisted(() => ({
+  toast: Object.assign(() => undefined, {
+    success: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+    warning: vi.fn(),
+  }),
   invoke: vi.fn(),
   install: vi.fn(),
   openExternal: vi.fn().mockResolvedValue(undefined),
@@ -23,6 +29,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
+vi.mock("sonner", () => ({ toast: mocks.toast }));
 vi.mock("@/lib/api/toolUpdates", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/toolUpdates")>()),
   toolUpdatesApi: { check: vi.fn(), update: vi.fn() },
@@ -121,6 +128,9 @@ beforeEach(async () => {
   i18n.addResourceBundle("zh", "translation", zh, true, true);
   localTools = [];
   mocks.onInstallDone = undefined;
+  vi.mocked(toolUpdatesApi.update).mockReset();
+  mocks.toast.success.mockClear();
+  mocks.toast.error.mockClear();
   mocks.invoke.mockImplementation(async (command: string) => {
     if (command === "get_tool_versions") return localTools;
     if (command === "ofox_list_api_keys") return [];
@@ -134,6 +144,91 @@ beforeEach(async () => {
 });
 
 describe("Console tool update badges", () => {
+  it("updates a tool in place from its row", async () => {
+    const available = availableTool("codex", "0.160.0", "0.161.0");
+    localTools = [localTool("codex", available.version)];
+    await cacheUpdates([available]);
+    vi.mocked(toolUpdatesApi.update).mockResolvedValue({
+      status: "updated",
+      before: "0.160.0",
+      after: "0.161.0",
+    });
+    vi.mocked(toolUpdatesApi.check).mockResolvedValue([
+      { ...available, version: "0.161.0", update_status: "current" },
+    ]);
+    render(<ConsolePage boundTools={["codex"]} />);
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "升级到 v0.161.0" }),
+    );
+
+    await waitFor(() =>
+      expect(toolUpdatesApi.update).toHaveBeenCalledWith(
+        "codex",
+        expect.any(String),
+      ),
+    );
+    await waitFor(() =>
+      expect(mocks.toast.success).toHaveBeenCalledWith(
+        "Codex 已升级：v0.160.0 → v0.161.0",
+      ),
+    );
+  });
+
+  it("offers one Update all for two tools behind and runs them in order", async () => {
+    const available = [
+      availableTool("claude", "2.1.292", "2.1.293"),
+      availableTool("codex", "0.160.0", "0.161.0"),
+    ];
+    localTools = available.map(({ name, version }) => localTool(name, version));
+    await cacheUpdates(available);
+    vi.mocked(toolUpdatesApi.update).mockImplementation(async (tool) => ({
+      status: "updated",
+      before: tool === "claude" ? "2.1.292" : "0.160.0",
+      after: tool === "claude" ? "2.1.293" : "0.161.0",
+    }));
+    vi.mocked(toolUpdatesApi.check).mockResolvedValue(
+      available.map((tool) => ({
+        ...tool,
+        version: tool.latest_version,
+        update_status: "current",
+      })),
+    );
+    render(<ConsolePage boundTools={["claude", "codex"]} />);
+
+    expect(
+      await screen.findByText("2 个工具有新版本：Claude Code, Codex"),
+    ).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "全部升级" }));
+
+    await waitFor(() => expect(toolUpdatesApi.update).toHaveBeenCalledTimes(2));
+    expect(
+      vi.mocked(toolUpdatesApi.update).mock.calls.map(([tool]) => tool),
+    ).toEqual(["claude", "codex"]);
+    await waitFor(() =>
+      expect(mocks.toast.success).toHaveBeenCalledWith(
+        "已升级 2 个工具：Claude Code 2.1.292 → 2.1.293, Codex 0.160.0 → 0.161.0",
+      ),
+    );
+  });
+
+  it("leaves a single tool behind to its row without an Update all line", async () => {
+    const available = availableTool("codex", "0.160.0", "0.161.0");
+    localTools = [
+      localTool("claude", "2.1.293"),
+      localTool("codex", "0.160.0"),
+    ];
+    await cacheUpdates([available]);
+    render(<ConsolePage boundTools={["claude", "codex"]} />);
+
+    expect(
+      await screen.findByRole("button", { name: "升级到 v0.161.0" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "全部升级" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("rechecks updates when refreshing externally upgraded Claude and Codex", async () => {
     const available = [
       availableTool("claude", "2.1.292", "2.1.293"),
@@ -143,7 +238,7 @@ describe("Console tool update badges", () => {
     await cacheUpdates(available);
     render(<ConsolePage boundTools={["claude", "codex"]} />);
     expect(await screen.findByText("v2.1.292")).toBeVisible();
-    expect(screen.getAllByRole("button", { name: "有可用更新" })).toHaveLength(
+    expect(screen.getAllByRole("button", { name: /^升级到 v/ })).toHaveLength(
       2,
     );
 
@@ -165,7 +260,7 @@ describe("Console tool update badges", () => {
     expect(screen.getByText("v0.161.0")).toBeVisible();
     await waitFor(() =>
       expect(
-        screen.queryByRole("button", { name: "有可用更新" }),
+        screen.queryByRole("button", { name: /^升级到 v/ }),
       ).not.toBeInTheDocument(),
     );
   });
@@ -186,7 +281,7 @@ describe("Console tool update badges", () => {
     await waitFor(() => expect(toolUpdatesApi.check).toHaveBeenCalledTimes(1));
     expect(await screen.findByText("v2.1.293")).toBeVisible();
     expect(
-      await screen.findByRole("button", { name: "有可用更新" }),
+      await screen.findByRole("button", { name: /^升级到 v/ }),
     ).toBeVisible();
   });
 
@@ -196,7 +291,7 @@ describe("Console tool update badges", () => {
     await cacheUpdates([available]);
     render(<ConsolePage boundTools={["codex"]} />);
     expect(await screen.findByText("v0.160.0")).toBeVisible();
-    expect(screen.getByRole("button", { name: "有可用更新" })).toBeVisible();
+    expect(screen.getByRole("button", { name: /^升级到 v/ })).toBeVisible();
 
     let finishCheck!: (tools: ToolUpdateInfo[]) => void;
     vi.mocked(toolUpdatesApi.check).mockReturnValue(
@@ -209,7 +304,7 @@ describe("Console tool update badges", () => {
 
     expect(await screen.findByText("v0.161.0")).toBeVisible();
     expect(
-      screen.queryByRole("button", { name: "有可用更新" }),
+      screen.queryByRole("button", { name: /^升级到 v/ }),
     ).not.toBeInTheDocument();
     await act(async () => {
       finishCheck([
@@ -232,7 +327,7 @@ describe("Console tool update badges", () => {
     render(<ConsolePage boundTools={["codex"]} />);
     expect(await screen.findByText("v0.161.0")).toBeVisible();
     expect(
-      screen.queryByRole("button", { name: "有可用更新" }),
+      screen.queryByRole("button", { name: /^升级到 v/ }),
     ).not.toBeInTheDocument();
   });
 
@@ -252,7 +347,7 @@ describe("Console tool update badges", () => {
     await waitFor(() => expect(toolUpdatesApi.check).toHaveBeenCalledTimes(1));
     expect(await screen.findByText("v0.161.0")).toBeVisible();
     expect(
-      screen.queryByRole("button", { name: "有可用更新" }),
+      screen.queryByRole("button", { name: /^升级到 v/ }),
     ).not.toBeInTheDocument();
   });
 
@@ -272,7 +367,7 @@ describe("Console tool update badges", () => {
     await waitFor(() => expect(toolUpdatesApi.check).toHaveBeenCalledTimes(1));
     await waitFor(() =>
       expect(
-        screen.queryByRole("button", { name: "有可用更新" }),
+        screen.queryByRole("button", { name: /^升级到 v/ }),
       ).not.toBeInTheDocument(),
     );
   });
