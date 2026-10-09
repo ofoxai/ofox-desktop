@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { toast } from "sonner";
 import {
   Loader2,
@@ -57,11 +58,16 @@ import {
   fetchOfoxModels,
   filterOfoxModelsByProtocol,
   filterOfoxModelsForWorkBuddy,
-  pickWorkBuddyCuratedModels,
   toWorkBuddyModelSelection,
   type FetchedModel,
 } from "@/lib/api/model-fetch";
-import { unbindTool } from "@/lib/bindTools";
+import { readBoundTools, unbindTool } from "@/lib/bindTools";
+import {
+  ofoxBindApi,
+  type ToolBindingStatus,
+  type UnbindReport,
+} from "@/lib/api/ofoxBind";
+import type { InstallationStatus } from "@/lib/api/toolUpdates";
 import { ToolBadge } from "@/components/tools/ToolBadge";
 import { TOOL_META } from "@/config/toolMeta";
 import type { AppId } from "@/lib/api/types";
@@ -75,6 +81,8 @@ export interface ManageToolTarget {
   color: string;
   version: string | null;
   installationKind?: "desktopApp" | "cli";
+  installationStatus?: InstallationStatus;
+  installationError?: string | null;
 }
 
 interface ManageToolDialogProps {
@@ -84,6 +92,38 @@ interface ManageToolDialogProps {
   /** Fired after a successful save or successful unbind so ConsolePage can
    *  refresh its list (status pill, monthly tokens, presence after unbind). */
   onChanged?: () => void;
+}
+
+function toolLabels(ids: string[]): string {
+  return ids.map((id) => TOOL_META[id]?.label ?? id).join(", ");
+}
+
+/** One-line summary of an unbind result for the toast; paths/counts only. */
+function describeUnbindResult(
+  report: UnbindReport | null,
+  t: TFunction,
+): string | undefined {
+  if (!report) return undefined;
+  const parts: string[] = [];
+  const changed = report.restoredKeys.length + report.removedKeys.length;
+  if (report.sharedKeptBy.length > 0) {
+    parts.push(
+      t("unbind.resultShared", { others: toolLabels(report.sharedKeptBy) }),
+    );
+  } else if (report.legacy) {
+    parts.push(t("unbind.resultLegacy"));
+  } else if (report.alreadyUnbound) {
+    parts.push(t("unbind.nothingToRestore"));
+  } else if (report.exactFiles.length > 0) {
+    parts.push(t("unbind.resultExact"));
+  } else if (changed > 0) {
+    parts.push(t("unbind.resultRestored", { count: changed }));
+  }
+  for (const warning of report.warnings) {
+    parts.push(t(`unbind.warning.${warning.code}`, { defaultValue: "" }));
+  }
+  const text = parts.filter(Boolean).join(" ");
+  return text || undefined;
 }
 
 function arraysEqual(left: string[], right: string[]): boolean {
@@ -146,8 +186,14 @@ export default function ManageToolDialog({
   const [workBuddyEndpointStatus, setWorkBuddyEndpointStatus] =
     useState<WorkBuddyEndpointStatus | null>(null);
   const [saving, setSaving] = useState(false);
+  const [bindingStatus, setBindingStatus] = useState<ToolBindingStatus | null>(
+    null,
+  );
+  const [restoring, setRestoring] = useState(false);
   const [unbindConfirming, setUnbindConfirming] = useState(false);
   const [unbindLoading, setUnbindLoading] = useState(false);
+  // What the unbind would restore; null until loaded (or if the preview failed).
+  const [unbindPreview, setUnbindPreview] = useState<UnbindReport | null>(null);
   // Connectivity probe — null means "未测试". The backend always resolves
   // with a PingResult, so we never put an exception here.
   const [pingResult, setPingResult] = useState<PingResult | null>(null);
@@ -166,6 +212,9 @@ export default function ManageToolDialog({
     useState<CompatibilityResult | null>(null);
   const [workBuddyTestLoading, setWorkBuddyTestLoading] = useState(false);
   const workBuddyTestRequest = useRef(0);
+  const configurationReady = bindingStatus?.status === "configured";
+  const operationBusy =
+    saving || restoring || unbindLoading || pingLoading || workBuddyTestLoading;
 
   // Today's stats (per-tool, midnight-local-time → now). null = 还没加载完。
   // 「今日统计」整段（含 today-stats fetch、loading state、cell renderer）已在
@@ -189,8 +238,11 @@ export default function ManageToolDialog({
     setWorkBuddyCatalogError(false);
     setWorkBuddyEndpointStatus(null);
     setSaving(false);
+    setBindingStatus(null);
+    setRestoring(false);
     setUnbindConfirming(false);
     setUnbindLoading(false);
+    setUnbindPreview(null);
     setPingResult(null);
     setPingLoading(false);
     setCompatibilityResults([]);
@@ -209,6 +261,20 @@ export default function ManageToolDialog({
         if (!cancelled) setFilePath(path);
       } catch (e) {
         if (!cancelled) setFilePathError(String(e));
+      }
+    };
+    const loadBindingStatus = async () => {
+      try {
+        const status = await ofoxBindApi.status(tool.id);
+        if (!cancelled) setBindingStatus(status);
+      } catch (e) {
+        console.warn(`[ManageToolDialog] binding status(${tool.id}) failed`, e);
+        if (!cancelled)
+          setBindingStatus({
+            status: "unknown",
+            message: null,
+            missingFiles: [],
+          });
       }
     };
     const loadModels = async () => {
@@ -254,7 +320,7 @@ export default function ManageToolDialog({
         if (!cancelled && tool.id === "workbuddy") setModelsLoading(false);
       }
     };
-    void Promise.all([loadPath(), loadModels()]);
+    void Promise.all([loadPath(), loadModels(), loadBindingStatus()]);
 
     return () => {
       cancelled = true;
@@ -309,7 +375,7 @@ export default function ManageToolDialog({
           : draftModel && draftModel !== currentModel && !desktopCodex
             ? [draftModel]
             : [];
-      if (!tool || ids.length === 0) {
+      if (!tool || !configurationReady || ids.length === 0) {
         setCompatibilityLoading(false);
         return;
       }
@@ -336,7 +402,7 @@ export default function ManageToolDialog({
       if (request === compatibilityRequest.current)
         setCompatibilityLoading(false);
     },
-    [tool?.id, draftModel, currentModel, desktopCodex, t],
+    [tool?.id, draftModel, currentModel, desktopCodex, configurationReady, t],
   );
 
   useEffect(() => {
@@ -357,7 +423,13 @@ export default function ManageToolDialog({
   }, [draftModels, tool?.id, workBuddyTestModel]);
 
   const handleWorkBuddyTest = useCallback(async () => {
-    if (tool?.id !== "workbuddy" || !workBuddyTestModel) return;
+    if (
+      tool?.id !== "workbuddy" ||
+      !workBuddyTestModel ||
+      !configurationReady ||
+      operationBusy
+    )
+      return;
     const request = ++workBuddyTestRequest.current;
     setWorkBuddyTestLoading(true);
     setWorkBuddyTestResult(null);
@@ -384,7 +456,7 @@ export default function ManageToolDialog({
       if (request === workBuddyTestRequest.current)
         setWorkBuddyTestLoading(false);
     }
-  }, [tool?.id, workBuddyTestModel, t]);
+  }, [tool?.id, workBuddyTestModel, configurationReady, operationBusy, t]);
 
   const handleOpenFolder = useCallback(async () => {
     if (!tool) return;
@@ -416,7 +488,7 @@ export default function ManageToolDialog({
           compatibilityResults[0]?.model === draftModel);
 
   const handleSave = useCallback(async () => {
-    if (!tool) return;
+    if (!tool || !configurationReady || operationBusy) return;
     const workBuddy = tool.id === "workbuddy";
     if (!isDirty && !currentModelLoaded) return;
     setSaving(true);
@@ -468,6 +540,8 @@ export default function ManageToolDialog({
     currentModel,
     isDirty,
     currentModelLoaded,
+    configurationReady,
+    operationBusy,
     draftModels,
     models,
     compatibilityResults,
@@ -491,7 +565,7 @@ export default function ManageToolDialog({
    * (cold starts, model warm-up) that a stale "✓ 1.2s" is misleading.
    */
   const handlePing = useCallback(async () => {
-    if (!tool) return;
+    if (!tool || !configurationReady || operationBusy) return;
     if (!probeModel) {
       toast.error("请先选择一个模型再测试连通性");
       return;
@@ -513,29 +587,63 @@ export default function ManageToolDialog({
     } finally {
       setPingLoading(false);
     }
-  }, [tool, probeModel]);
+  }, [tool, probeModel, configurationReady, operationBusy]);
+
+  const handleRestore = useCallback(async () => {
+    if (!tool || bindingStatus?.status !== "missing" || operationBusy) return;
+    setRestoring(true);
+    try {
+      const stillBound = readBoundTools().filter((id) => id !== tool.id);
+      await ofoxBindApi.restore(tool.id, stillBound);
+      toast.success(t("toolLifecycle.restoreSucceeded", { tool: tool.label }));
+      onChanged?.();
+      onOpenChange(false);
+    } catch (e) {
+      toast.error(t("toolLifecycle.restoreFailed", { error: String(e) }));
+    } finally {
+      setRestoring(false);
+    }
+  }, [tool, bindingStatus?.status, operationBusy, onChanged, onOpenChange, t]);
 
   const handleUnbind = useCallback(async () => {
-    if (!tool) return;
+    if (!tool || operationBusy) return;
     if (!unbindConfirming) {
-      // First click → arm the confirm state. The button label flips to make
-      // the destructive intent obvious before the second click commits.
-      setUnbindConfirming(true);
+      // First click → arm the confirm state and show what will be restored
+      // before the second click commits.
+      setUnbindLoading(true);
+      try {
+        const stillBound = readBoundTools().filter((id) => id !== tool.id);
+        setUnbindPreview(await ofoxBindApi.unbindPreview(tool.id, stillBound));
+      } catch (e) {
+        // A failed preview must not block unbinding; the panel falls back to
+        // the generic description.
+        console.warn("[ManageToolDialog] unbind preview failed", e);
+        setUnbindPreview(null);
+      } finally {
+        setUnbindLoading(false);
+        setUnbindConfirming(true);
+      }
       return;
     }
     setUnbindLoading(true);
     try {
-      await unbindTool(tool.id);
-      toast.success(`${tool.label} 已解除绑定`);
+      const report = await unbindTool(tool.id);
+      const message = t("unbind.success", { tool: tool.label });
+      const description = describeUnbindResult(report, t);
+      if (report?.legacy) {
+        toast.warning(message, { description, duration: 10_000 });
+      } else {
+        toast.success(message, { description });
+      }
       onChanged?.();
       onOpenChange(false);
     } catch (e) {
-      toast.error(`解除绑定失败：${String(e)}`);
+      toast.error(t("unbind.failed", { error: String(e) }));
       setUnbindConfirming(false);
     } finally {
       setUnbindLoading(false);
     }
-  }, [tool, unbindConfirming, onChanged, onOpenChange]);
+  }, [tool, unbindConfirming, operationBusy, onChanged, onOpenChange, t]);
 
   const hasIncompatible = compatibilityResults.some(
     (result) => result.status === "incompatible",
@@ -579,8 +687,12 @@ export default function ManageToolDialog({
                 </DialogTitle>
                 <div className="truncate text-[12px] text-muted-foreground">
                   {tool.version
-                    ? `${TOOL_META[tool.id]?.launchKind === "desktopApp" ? "桌面应用 · " : ""}v${tool.version}`
-                    : "未检测到"}
+                    ? `${TOOL_META[tool.id]?.launchKind === "desktopApp" || tool.installationKind === "desktopApp" ? `${t("toolLifecycle.desktopApp")} · ` : ""}v${tool.version}`
+                    : t(
+                        tool.installationStatus === "installed"
+                          ? "toolLifecycle.versionUnknown"
+                          : "toolLifecycle.noInstallationDetected",
+                      )}
                 </div>
               </div>
               {projectUrl && (
@@ -604,6 +716,66 @@ export default function ManageToolDialog({
             </DialogHeader>
 
             <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+              {((tool.installationStatus &&
+                tool.installationStatus !== "installed") ||
+                tool.installationError) && (
+                <div
+                  role="status"
+                  className="rounded-md border border-border-default bg-muted/20 p-3 text-[12px]"
+                >
+                  <p>
+                    {t(
+                      tool.installationStatus === "notInstalled"
+                        ? "toolLifecycle.boundNotInstalled"
+                        : tool.installationStatus === "installed"
+                          ? "toolLifecycle.installationBroken"
+                          : "toolLifecycle.detectionFailed",
+                    )}
+                  </p>
+                  {tool.installationError && (
+                    <p className="mt-1 break-words text-muted-foreground">
+                      {tool.installationError}
+                    </p>
+                  )}
+                </div>
+              )}
+              {!configurationReady && (
+                <div
+                  role="status"
+                  className="space-y-2 rounded-md border border-orange-300/60 bg-orange-50/40 p-3 text-[12px] dark:border-orange-500/40 dark:bg-orange-950/20"
+                >
+                  <p>
+                    {t(
+                      bindingStatus
+                        ? `toolLifecycle.configuration.${bindingStatus.status}`
+                        : "toolLifecycle.configuration.loading",
+                    )}
+                  </p>
+                  {bindingStatus?.missingFiles.map((path) => (
+                    <code key={path} className="block break-all text-[11px]">
+                      {path}
+                    </code>
+                  ))}
+                  {bindingStatus?.status === "missing" && (
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={() => void handleRestore()}
+                      disabled={operationBusy}
+                      className="bg-orange-500 text-white hover:bg-orange-600"
+                    >
+                      {restoring && (
+                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                      )}
+                      {t(
+                        restoring
+                          ? "toolLifecycle.restoringBinding"
+                          : "toolLifecycle.restoreBinding",
+                      )}
+                    </Button>
+                  )}
+                </div>
+              )}
               {/* ---- Model ---- */}
               <div className="space-y-2">
                 <Label htmlFor="manage-model" className="text-[13px]">
@@ -694,96 +866,101 @@ export default function ManageToolDialog({
                       : "该工具暂不支持模型管理"}
                   </div>
                 )}
-                {isDirty && !desktopCodex && tool.id !== "workbuddy" && (
-                  <div className="space-y-2 rounded-md border border-border-default bg-muted/20 p-3 text-[12px]">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-medium">
-                        {compatibilityLoading
-                          ? t("modelCompatibility.checking")
-                          : t("modelCompatibility.title")}
-                      </span>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        disabled={compatibilityLoading}
-                        onClick={() => void runCompatibility(true)}
-                      >
-                        <RefreshCw className="mr-1 h-3.5 w-3.5" />
-                        {t("modelCompatibility.retest")}
-                      </Button>
-                    </div>
-                    {compatibilityResults.map((result) => (
-                      <p key={result.model} className="text-muted-foreground">
-                        {result.model}:{" "}
-                        {t(`modelCompatibility.${result.status}`)}
-                        {result.protocol ? ` · ${result.protocol}` : ""}
-                        {result.reason ? ` · ${result.reason}` : ""}
-                      </p>
-                    ))}
-                    {hasInconclusive && (
-                      <div className="space-y-2">
-                        {tool.id === "opencode" && (
-                          <Select
-                            value={manualProtocol}
-                            onValueChange={(value) =>
-                              setManualProtocol(value as CompatibilityProtocol)
-                            }
-                          >
-                            <SelectTrigger
-                              aria-label={t(
-                                "modelCompatibility.chooseProtocol",
-                              )}
-                              className="h-9 text-[12px]"
+                {configurationReady &&
+                  isDirty &&
+                  !desktopCodex &&
+                  tool.id !== "workbuddy" && (
+                    <div className="space-y-2 rounded-md border border-border-default bg-muted/20 p-3 text-[12px]">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium">
+                          {compatibilityLoading
+                            ? t("modelCompatibility.checking")
+                            : t("modelCompatibility.title")}
+                        </span>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          disabled={compatibilityLoading}
+                          onClick={() => void runCompatibility(true)}
+                        >
+                          <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                          {t("modelCompatibility.retest")}
+                        </Button>
+                      </div>
+                      {compatibilityResults.map((result) => (
+                        <p key={result.model} className="text-muted-foreground">
+                          {result.model}:{" "}
+                          {t(`modelCompatibility.${result.status}`)}
+                          {result.protocol ? ` · ${result.protocol}` : ""}
+                          {result.reason ? ` · ${result.reason}` : ""}
+                        </p>
+                      ))}
+                      {hasInconclusive && (
+                        <div className="space-y-2">
+                          {tool.id === "opencode" && (
+                            <Select
+                              value={manualProtocol}
+                              onValueChange={(value) =>
+                                setManualProtocol(
+                                  value as CompatibilityProtocol,
+                                )
+                              }
                             >
-                              <SelectValue
-                                placeholder={t(
+                              <SelectTrigger
+                                aria-label={t(
                                   "modelCompatibility.chooseProtocol",
                                 )}
-                              />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem
-                                value="responses"
-                                disabled={
-                                  !!compatibilityResults[0]?.allowedProtocols
-                                    ?.length &&
-                                  !compatibilityResults[0].allowedProtocols.includes(
-                                    "responses",
-                                  )
-                                }
+                                className="h-9 text-[12px]"
                               >
-                                Responses
-                              </SelectItem>
-                              <SelectItem
-                                value="chatCompletions"
-                                disabled={
-                                  !!compatibilityResults[0]?.allowedProtocols
-                                    ?.length &&
-                                  !compatibilityResults[0].allowedProtocols.includes(
-                                    "chatCompletions",
-                                  )
-                                }
-                              >
-                                Chat Completions
-                              </SelectItem>
-                            </SelectContent>
-                          </Select>
-                        )}
-                        <label className="flex items-center gap-2">
-                          <input
-                            type="checkbox"
-                            checked={allowUnverified}
-                            onChange={(event) =>
-                              setAllowUnverified(event.target.checked)
-                            }
-                          />
-                          {t("modelCompatibility.continueUnverified")}
-                        </label>
-                      </div>
-                    )}
-                  </div>
-                )}
+                                <SelectValue
+                                  placeholder={t(
+                                    "modelCompatibility.chooseProtocol",
+                                  )}
+                                />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem
+                                  value="responses"
+                                  disabled={
+                                    !!compatibilityResults[0]?.allowedProtocols
+                                      ?.length &&
+                                    !compatibilityResults[0].allowedProtocols.includes(
+                                      "responses",
+                                    )
+                                  }
+                                >
+                                  Responses
+                                </SelectItem>
+                                <SelectItem
+                                  value="chatCompletions"
+                                  disabled={
+                                    !!compatibilityResults[0]?.allowedProtocols
+                                      ?.length &&
+                                    !compatibilityResults[0].allowedProtocols.includes(
+                                      "chatCompletions",
+                                    )
+                                  }
+                                >
+                                  Chat Completions
+                                </SelectItem>
+                              </SelectContent>
+                            </Select>
+                          )}
+                          <label className="flex items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={allowUnverified}
+                              onChange={(event) =>
+                                setAllowUnverified(event.target.checked)
+                              }
+                            />
+                            {t("modelCompatibility.continueUnverified")}
+                          </label>
+                        </div>
+                      )}
+                    </div>
+                  )}
               </div>
 
               {/* ---- Config file ---- */}
@@ -848,7 +1025,11 @@ export default function ManageToolDialog({
                       type="button"
                       size="sm"
                       onClick={() => void handleWorkBuddyTest()}
-                      disabled={!workBuddyTestModel || workBuddyTestLoading}
+                      disabled={
+                        !configurationReady ||
+                        !workBuddyTestModel ||
+                        operationBusy
+                      }
                     >
                       {workBuddyTestLoading && (
                         <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
@@ -889,7 +1070,12 @@ export default function ManageToolDialog({
                       type="button"
                       size="sm"
                       onClick={handlePing}
-                      disabled={pingLoading || !protocol || !probeModel}
+                      disabled={
+                        !configurationReady ||
+                        operationBusy ||
+                        !protocol ||
+                        !probeModel
+                      }
                       className="bg-orange-500 text-white shadow-sm shadow-orange-200/60 hover:bg-orange-600 disabled:bg-orange-500/60 disabled:text-white dark:shadow-orange-900/20"
                     >
                       {pingLoading ? (
@@ -909,13 +1095,15 @@ export default function ManageToolDialog({
               )}
             </div>
 
+            {unbindConfirming && <UnbindPreviewPanel preview={unbindPreview} />}
+
             <DialogFooter className="!items-center sm:!justify-between">
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
                 onClick={handleUnbind}
-                disabled={unbindLoading}
+                disabled={operationBusy}
                 className={cn(
                   unbindConfirming &&
                     "border-red-500 text-red-600 hover:bg-red-50 hover:text-red-700",
@@ -924,7 +1112,7 @@ export default function ManageToolDialog({
                 {unbindLoading && (
                   <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                 )}
-                {unbindConfirming ? "确认解除绑定？" : "解除绑定"}
+                {unbindConfirming ? t("unbind.confirm") : t("unbind.button")}
               </Button>
               <div className="flex gap-2">
                 <Button
@@ -932,7 +1120,7 @@ export default function ManageToolDialog({
                   variant="outline"
                   size="sm"
                   onClick={() => onOpenChange(false)}
-                  disabled={saving}
+                  disabled={operationBusy}
                 >
                   取消
                 </Button>
@@ -941,6 +1129,8 @@ export default function ManageToolDialog({
                   size="sm"
                   onClick={handleSave}
                   disabled={
+                    !configurationReady ||
+                    operationBusy ||
                     (!isDirty && !currentModelLoaded) ||
                     saving ||
                     !protocol ||
@@ -968,7 +1158,7 @@ export default function ManageToolDialog({
 }
 
 // ---------------------------------------------------------------------------
-// WorkBuddyModelPicker — searchable multi-select with curated/all shortcuts
+// WorkBuddyModelPicker — searchable multi-select with select-all / clear shortcuts
 // ---------------------------------------------------------------------------
 
 // cmdk becomes noticeably slow when every catalog entry is mounted at once.
@@ -1208,24 +1398,20 @@ function WorkBuddyModelPicker({
             variant="ghost"
             size="sm"
             className="h-7 px-2 text-[11px]"
-            disabled={loading || models.length === 0}
-            onClick={() =>
-              onChange(
-                pickWorkBuddyCuratedModels(models).map((model) => model.id),
-              )
-            }
+            disabled={loading || models.length === 0 || allSelected}
+            onClick={() => onChange(models.map((model) => model.id))}
           >
-            精选模型
+            全选兼容
           </Button>
           <Button
             type="button"
             variant="ghost"
             size="sm"
             className="h-7 px-2 text-[11px]"
-            disabled={loading || models.length === 0 || allSelected}
-            onClick={() => onChange(models.map((model) => model.id))}
+            disabled={loading || selectedIds.length === 0}
+            onClick={() => onChange([])}
           >
-            全选兼容
+            取消全选
           </Button>
         </span>
       </div>
@@ -1249,6 +1435,61 @@ interface PingStatusBoxProps {
   loading: boolean;
   result: PingResult | null;
   model: string;
+}
+
+/** Shown between the first and second "解除绑定" click: what will be restored. */
+function UnbindPreviewPanel({ preview }: { preview: UnbindReport | null }) {
+  const { t } = useTranslation();
+  const changedKeys = preview
+    ? [...preview.restoredKeys, ...preview.removedKeys]
+    : [];
+  return (
+    <div
+      role="note"
+      className="mx-6 mb-3 space-y-1.5 rounded-md border border-red-200 bg-red-50/60 px-3 py-2 text-[12px] text-foreground dark:border-red-500/30 dark:bg-red-500/10"
+    >
+      {preview && preview.sharedKeptBy.length > 0 ? (
+        <p>
+          {t("unbind.sharedNotice", {
+            others: toolLabels(preview.sharedKeptBy),
+          })}
+        </p>
+      ) : preview?.alreadyUnbound ? (
+        <p>{t("unbind.nothingToRestore")}</p>
+      ) : (
+        <>
+          <p className="font-medium">{t("unbind.willRestoreTitle")}</p>
+          {preview?.legacy && (
+            <p className="text-amber-700 dark:text-amber-300">
+              {t("unbind.legacyNotice")}
+            </p>
+          )}
+          {changedKeys.length > 0 ? (
+            <ul className="space-y-0.5 font-mono text-[11px] text-muted-foreground">
+              {changedKeys.map((key) => (
+                <li key={key}>{key}</li>
+              ))}
+            </ul>
+          ) : (
+            <p>{t("unbind.generic")}</p>
+          )}
+          {!preview?.legacy && <p>{t("unbind.forceRestoreNotice")}</p>}
+          <p className="text-muted-foreground">{t("unbind.keepNotice")}</p>
+        </>
+      )}
+      {preview?.warnings.map((warning, index) => (
+        <p
+          key={`${warning.code}-${warning.file ?? index}`}
+          className="break-words text-muted-foreground"
+        >
+          {t(`unbind.warning.${warning.code}`, { defaultValue: "" })}
+          {warning.file && (
+            <code className="ml-1 text-[11px]">{warning.file}</code>
+          )}
+        </p>
+      ))}
+    </div>
+  );
 }
 
 function PingStatusBox({ loading, result, model }: PingStatusBoxProps) {

@@ -20,6 +20,21 @@ describe("OfoxAI i18n keys", () => {
     });
   }
 
+  it("apexSwitch keys match across locales", () => {
+    const expected = Object.keys(zh.apexSwitch).sort();
+    for (const [lang, data] of Object.entries(locales)) {
+      expect(Object.keys(data.apexSwitch).sort(), `${lang} apexSwitch`).toEqual(
+        expected,
+      );
+      for (const key of expected) {
+        expect(
+          data.apexSwitch[key].length,
+          `${lang} apexSwitch.${key}`,
+        ).toBeGreaterThan(0);
+      }
+    }
+  });
+
   it("bodyOfox should mention ofox.ai in all locales", () => {
     for (const [lang, data] of Object.entries(locales)) {
       expect(

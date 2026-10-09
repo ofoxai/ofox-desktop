@@ -6,6 +6,13 @@ fn merge_settings_for_save(
     mut incoming: crate::settings::AppSettings,
     existing: &crate::settings::AppSettings,
 ) -> crate::settings::AppSettings {
+    // These fields are owned by binding/key/region commands. A preference
+    // dialog can hold a snapshot from before a bind or apex switch completed.
+    incoming.bound_tools = existing.bound_tools.clone();
+    incoming.ofox_apex = existing.ofox_apex.clone();
+    incoming.ofox_apex_resolved = existing.ofox_apex_resolved;
+    incoming.ofox_apex_pinned = existing.ofox_apex_pinned;
+    incoming.ofox_api_keys = existing.ofox_api_keys.clone();
     match (&mut incoming.webdav_sync, &existing.webdav_sync) {
         // incoming 没有 webdav → 保留现有
         (None, _) => {
@@ -54,9 +61,21 @@ pub async fn get_settings() -> Result<crate::settings::AppSettings, String> {
 /// 保存设置
 #[tauri::command]
 pub async fn save_settings(settings: crate::settings::AppSettings) -> Result<bool, String> {
-    let existing = crate::settings::get_settings();
-    let merged = merge_settings_for_save(settings, &existing);
-    crate::settings::update_settings(merged).map_err(|e| e.to_string())?;
+    crate::settings::mutate_settings(move |existing| {
+        *existing = merge_settings_for_save(settings, existing);
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// Mirror the renderer's binding registry without round-tripping unrelated
+/// backend-owned region, API-key metadata, or preference fields.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn save_bound_tools(bound_tools: Vec<String>) -> Result<bool, String> {
+    crate::settings::mutate_settings(move |settings| {
+        settings.bound_tools = Some(bound_tools);
+    })
+    .map_err(|e| e.to_string())?;
     Ok(true)
 }
 
@@ -102,17 +121,55 @@ pub async fn set_auto_launch(enabled: bool) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::merge_settings_for_save;
-    use crate::settings::{AppSettings, WebDavSyncSettings};
+    use crate::settings::{ApiKeyMeta, AppSettings, WebDavSyncSettings};
+
+    #[test]
+    fn stale_preference_snapshot_preserves_binding_region_and_key_metadata() {
+        let incoming = AppSettings {
+            ofox_apex: Some("ofox.ai".into()),
+            ofox_apex_resolved: Some(false),
+            ofox_apex_pinned: Some(false),
+            bound_tools: Some(vec!["codex".into()]),
+            low_balance_threshold_usd: Some(20.0),
+            ..AppSettings::default()
+        };
+
+        let existing = AppSettings {
+            ofox_apex: Some("ofox.io".into()),
+            ofox_apex_resolved: Some(true),
+            ofox_apex_pinned: Some(true),
+            bound_tools: Some(vec!["chatgpt".into(), "claude".into()]),
+            ofox_api_keys: vec![ApiKeyMeta {
+                tool: crate::app_config::BindableTool::Claude,
+                key_id: "new-key-id".into(),
+                name: Some("Claude on test".into()),
+                alias: None,
+                key_start: None,
+                created_at: 1,
+                last_used_at: Some(2),
+            }],
+            ..AppSettings::default()
+        };
+        let merged = merge_settings_for_save(incoming, &existing);
+        assert_eq!(merged.ofox_apex, existing.ofox_apex);
+        assert_eq!(merged.ofox_apex_resolved, existing.ofox_apex_resolved);
+        assert_eq!(merged.ofox_apex_pinned, existing.ofox_apex_pinned);
+        assert_eq!(merged.bound_tools, existing.bound_tools);
+        assert_eq!(merged.ofox_api_keys, existing.ofox_api_keys);
+        assert_eq!(merged.low_balance_threshold_usd, Some(20.0));
+    }
 
     #[test]
     fn save_settings_should_preserve_existing_webdav_when_payload_omits_it() {
-        let mut existing = AppSettings::default();
-        existing.webdav_sync = Some(WebDavSyncSettings {
-            base_url: "https://dav.example.com".to_string(),
-            username: "alice".to_string(),
-            password: "secret".to_string(),
-            ..WebDavSyncSettings::default()
-        });
+        let existing = AppSettings {
+            webdav_sync: Some(WebDavSyncSettings {
+                base_url: "https://dav.example.com".to_string(),
+                username: "alice".to_string(),
+                password: "secret".to_string(),
+                ..WebDavSyncSettings::default()
+            }),
+            ..AppSettings::default()
+        };
 
         let incoming = AppSettings::default();
         let merged = merge_settings_for_save(incoming, &existing);
@@ -126,21 +183,25 @@ mod tests {
 
     #[test]
     fn save_settings_should_keep_incoming_webdav_when_present() {
-        let mut existing = AppSettings::default();
-        existing.webdav_sync = Some(WebDavSyncSettings {
-            base_url: "https://dav.old.example.com".to_string(),
-            username: "old".to_string(),
-            password: "old-pass".to_string(),
-            ..WebDavSyncSettings::default()
-        });
+        let existing = AppSettings {
+            webdav_sync: Some(WebDavSyncSettings {
+                base_url: "https://dav.old.example.com".to_string(),
+                username: "old".to_string(),
+                password: "old-pass".to_string(),
+                ..WebDavSyncSettings::default()
+            }),
+            ..AppSettings::default()
+        };
 
-        let mut incoming = AppSettings::default();
-        incoming.webdav_sync = Some(WebDavSyncSettings {
-            base_url: "https://dav.new.example.com".to_string(),
-            username: "new".to_string(),
-            password: "new-pass".to_string(),
-            ..WebDavSyncSettings::default()
-        });
+        let incoming = AppSettings {
+            webdav_sync: Some(WebDavSyncSettings {
+                base_url: "https://dav.new.example.com".to_string(),
+                username: "new".to_string(),
+                password: "new-pass".to_string(),
+                ..WebDavSyncSettings::default()
+            }),
+            ..AppSettings::default()
+        };
 
         let merged = merge_settings_for_save(incoming, &existing);
 
@@ -156,22 +217,26 @@ mod tests {
     /// must NOT overwrite the existing one.
     #[test]
     fn save_settings_should_preserve_password_when_incoming_has_empty_password() {
-        let mut existing = AppSettings::default();
-        existing.webdav_sync = Some(WebDavSyncSettings {
-            base_url: "https://dav.example.com".to_string(),
-            username: "alice".to_string(),
-            password: "secret".to_string(),
-            ..WebDavSyncSettings::default()
-        });
+        let existing = AppSettings {
+            webdav_sync: Some(WebDavSyncSettings {
+                base_url: "https://dav.example.com".to_string(),
+                username: "alice".to_string(),
+                password: "secret".to_string(),
+                ..WebDavSyncSettings::default()
+            }),
+            ..AppSettings::default()
+        };
 
         // Simulate frontend sending settings with cleared password
-        let mut incoming = AppSettings::default();
-        incoming.webdav_sync = Some(WebDavSyncSettings {
-            base_url: "https://dav.example.com".to_string(),
-            username: "alice".to_string(),
-            password: "".to_string(),
-            ..WebDavSyncSettings::default()
-        });
+        let incoming = AppSettings {
+            webdav_sync: Some(WebDavSyncSettings {
+                base_url: "https://dav.example.com".to_string(),
+                username: "alice".to_string(),
+                password: "".to_string(),
+                ..WebDavSyncSettings::default()
+            }),
+            ..AppSettings::default()
+        };
 
         let merged = merge_settings_for_save(incoming, &existing);
 
@@ -186,21 +251,25 @@ mod tests {
     /// work without panicking and keep the empty state.
     #[test]
     fn save_settings_should_handle_both_empty_passwords() {
-        let mut existing = AppSettings::default();
-        existing.webdav_sync = Some(WebDavSyncSettings {
-            base_url: "https://dav.example.com".to_string(),
-            username: "alice".to_string(),
-            password: "".to_string(),
-            ..WebDavSyncSettings::default()
-        });
+        let existing = AppSettings {
+            webdav_sync: Some(WebDavSyncSettings {
+                base_url: "https://dav.example.com".to_string(),
+                username: "alice".to_string(),
+                password: "".to_string(),
+                ..WebDavSyncSettings::default()
+            }),
+            ..AppSettings::default()
+        };
 
-        let mut incoming = AppSettings::default();
-        incoming.webdav_sync = Some(WebDavSyncSettings {
-            base_url: "https://dav.example.com".to_string(),
-            username: "alice".to_string(),
-            password: "".to_string(),
-            ..WebDavSyncSettings::default()
-        });
+        let incoming = AppSettings {
+            webdav_sync: Some(WebDavSyncSettings {
+                base_url: "https://dav.example.com".to_string(),
+                username: "alice".to_string(),
+                password: "".to_string(),
+                ..WebDavSyncSettings::default()
+            }),
+            ..AppSettings::default()
+        };
 
         let merged = merge_settings_for_save(incoming, &existing);
 
@@ -214,17 +283,21 @@ mod tests {
 
     #[test]
     fn merge_should_preserve_latch_when_threshold_unchanged() {
-        let mut existing = AppSettings::default();
-        existing.low_balance_threshold_usd = Some(10.0);
-        existing.low_balance_enabled = Some(true);
-        existing.low_balance_last_alert_threshold = Some(10.0);
-        existing.low_balance_last_alert_at = Some(1_700_000_000_000);
+        let existing = AppSettings {
+            low_balance_threshold_usd: Some(10.0),
+            low_balance_enabled: Some(true),
+            low_balance_last_alert_threshold: Some(10.0),
+            low_balance_last_alert_at: Some(1_700_000_000_000),
+            ..AppSettings::default()
+        };
 
-        let mut incoming = AppSettings::default();
         // Frontend round-trips the threshold without changing it
-        incoming.low_balance_threshold_usd = Some(10.0);
-        incoming.low_balance_enabled = Some(true);
         // Frontend never sends the latch fields back
+        let incoming = AppSettings {
+            low_balance_threshold_usd: Some(10.0),
+            low_balance_enabled: Some(true),
+            ..AppSettings::default()
+        };
 
         let merged = merge_settings_for_save(incoming, &existing);
 
@@ -234,13 +307,17 @@ mod tests {
 
     #[test]
     fn merge_should_clear_latch_when_threshold_changes() {
-        let mut existing = AppSettings::default();
-        existing.low_balance_threshold_usd = Some(10.0);
-        existing.low_balance_last_alert_threshold = Some(10.0);
-        existing.low_balance_last_alert_at = Some(1_700_000_000_000);
+        let existing = AppSettings {
+            low_balance_threshold_usd: Some(10.0),
+            low_balance_last_alert_threshold: Some(10.0),
+            low_balance_last_alert_at: Some(1_700_000_000_000),
+            ..AppSettings::default()
+        };
 
-        let mut incoming = AppSettings::default();
-        incoming.low_balance_threshold_usd = Some(20.0); // user raised threshold
+        let incoming = AppSettings {
+            low_balance_threshold_usd: Some(20.0), // user raised threshold
+            ..AppSettings::default()
+        };
 
         let merged = merge_settings_for_save(incoming, &existing);
 
@@ -250,15 +327,19 @@ mod tests {
 
     #[test]
     fn merge_should_clear_latch_when_enabled_flips_on() {
-        let mut existing = AppSettings::default();
-        existing.low_balance_enabled = Some(false);
-        existing.low_balance_threshold_usd = Some(10.0);
-        existing.low_balance_last_alert_threshold = Some(10.0);
-        existing.low_balance_last_alert_at = Some(1_700_000_000_000);
+        let existing = AppSettings {
+            low_balance_enabled: Some(false),
+            low_balance_threshold_usd: Some(10.0),
+            low_balance_last_alert_threshold: Some(10.0),
+            low_balance_last_alert_at: Some(1_700_000_000_000),
+            ..AppSettings::default()
+        };
 
-        let mut incoming = AppSettings::default();
-        incoming.low_balance_enabled = Some(true);
-        incoming.low_balance_threshold_usd = Some(10.0);
+        let incoming = AppSettings {
+            low_balance_enabled: Some(true),
+            low_balance_threshold_usd: Some(10.0),
+            ..AppSettings::default()
+        };
 
         let merged = merge_settings_for_save(incoming, &existing);
 

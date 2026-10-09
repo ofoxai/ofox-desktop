@@ -34,6 +34,7 @@ function tool(
     latest_version: "1.1.0",
     error: null,
     installationKind: "cli",
+    installationStatus: "installed",
     update_status: "available",
     update_source: "npm",
     update_supported: true,

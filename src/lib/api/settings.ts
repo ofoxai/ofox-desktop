@@ -37,6 +37,10 @@ export const settingsApi = {
     return await invoke("save_settings", { settings });
   },
 
+  async saveBoundTools(boundTools: string[]): Promise<boolean> {
+    return await invoke("save_bound_tools", { boundTools });
+  },
+
   async restart(): Promise<boolean> {
     return await invoke("restart_app");
   },

@@ -8,12 +8,13 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 
 import shutil
 
 from app.shell import login_shell_argv, login_shell_env, login_shell_path
-from typing import Callable
+from typing import Callable, Optional
 
 # nvm 命令前缀：加载 nvm 环境
 # 全局区域设置，由 init.py 在启动时设置
@@ -307,22 +308,77 @@ echo "{self.bin_name} 版本: $({self.bin_name} --version 2>/dev/null || echo '?
 
 
 class CurlInstallerStep(Step):
-    """通过 `curl -fsSL <url> | bash` 安装的工具——opencode/hermes 共用。"""
+    """通过 `curl -fsSL <url> | bash` 安装的工具（目前只有 hermes）。
+
+    安装脚本退出 0 不等于工具能用：hermes 的镜像脚本就装出过一个起不来的
+    环境。所以 `check()` / `verify()` 不只看二进制在不在，还会按 `probe_args`
+    真正启动一次；起不来的视为未安装，再点「安装」会重装而不是直接报已安装。
+    """
 
     needs_terminal = True
     timeout = 300
     poll_interval = 3.0
     installer_url: str = ""
     bin_name: str = ""
-    # 额外的 binary 搜索路径——某些工具装到用户目录而非 PATH 里（OpenCode 落
-    # 到 ~/.opencode/bin，这正是 cc-switch get_tool_versions 的扫描路径）。
+    # 额外的 binary 搜索路径——某些工具装到用户目录而非 PATH 里。
     bin_search_paths: list[str] = []
+    # 安装后要真正跑一遍的参数组，例如 [["--version"], ["--help"]]；空表示只看文件。
+    probe_args: list[list[str]] = []
+    probe_timeout = 60
+
+    def __init__(self) -> None:
+        self._failure_cause = ""
+
+    def installed_path(self) -> Optional[str]:
+        for p in self.bin_search_paths:
+            expanded = os.path.expanduser(p)
+            if os.path.isfile(expanded):
+                return expanded
+        # 刚装完的脚本可能改了 rc 里的 PATH，缓存的那份不算数。
+        return shutil.which(self.bin_name, path=login_shell_path(refresh=True))
+
+    def _probe(self, path: str, args: list[str]) -> Optional[str]:
+        """跑一次 `path args`。成功返回 None，失败返回一行原因。"""
+        shown = " ".join([self.bin_name, *args])
+        try:
+            result = subprocess.run(
+                [path, *args],
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                # PATH 已在 installed_path() 里刷新过；这里复用缓存，不再起 shell。
+                env=login_shell_env(),
+                timeout=self.probe_timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return f"{shown} 超时（{self.probe_timeout}s）"
+        except OSError as e:
+            return f"{shown}: {e}"
+        if result.returncode == 0:
+            return None
+        lines = [line.strip() for line in (result.stderr or "").splitlines() if line.strip()]
+        if not lines:
+            lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+        return lines[-1] if lines else f"{shown} 退出码 {result.returncode}"
 
     def check(self) -> bool:
-        for p in self.bin_search_paths:
-            if os.path.isfile(os.path.expanduser(p)):
-                return True
-        return _cmd_exists(self.bin_name)
+        path = self.installed_path()
+        if path is None:
+            return False
+        return not self.probe_args or self._probe(path, self.probe_args[0]) is None
+
+    def verify(self) -> bool:
+        self._failure_cause = ""
+        path = self.installed_path()
+        if path is None:
+            self._failure_cause = f"未找到 {self.bin_name} 可执行文件"
+            return False
+        for args in self.probe_args:
+            cause = self._probe(path, args)
+            if cause is not None:
+                self._failure_cause = cause
+                return False
+        return True
 
     def terminal_command(self) -> str:
         return f"""
@@ -336,6 +392,13 @@ echo "{self.bin_name} 安装完成"
 """.strip()
 
     def failure_hint(self) -> str:
+        if self._failure_cause:
+            # 必须是一行：界面只取最后一条「提示:」。
+            cause = " ".join(self._failure_cause.split())
+            return (
+                f"{self.name} 已安装但无法启动: {cause}。"
+                f"请在终端运行 {self.bin_name} --version 查看详情。"
+            )
         return (
             f"{self.name} 安装失败。请手动运行: "
             f"curl -fsSL {self.installer_url} | bash"
@@ -385,15 +448,94 @@ class OpenCodeStep(NpmGlobalStep):
     bin_name = "opencode"
 
 
+HERMES_MIRROR_URL = "https://res1.hermesagent.org.cn/install.sh"
+HERMES_OFFICIAL_URL = "https://hermes-agent.nousresearch.com/install.sh"
+
+
+def parse_upstream_commit(script_text: str) -> Optional[str]:
+    """镜像安装脚本头部声明的、与它配套的上游 commit。"""
+    match = re.search(r'^UPSTREAM_COMMIT="([0-9a-f]{7,40})"', script_text, re.M)
+    return match.group(1) if match else None
+
+
 class HermesStep(CurlInstallerStep):
+    """Hermes Agent CLI。
+
+    国内走镜像脚本，并把代码锁到脚本自己声明的 `UPSTREAM_COMMIT`：镜像脚本写死
+    Python 3.11，却默认 clone 镜像仓库的最新代码（已要求 3.14），装出来的环境
+    一个运行时依赖都没有。锁到配套的 commit 后脚本和代码一致、全部下载走镜像；
+    commit 在运行时从脚本里解析，镜像更新脚本后自动跟上。装到的不是最新版，
+    之后由「升级」（hermes update）前进；更新器把代码拉到新版后 3.11 环境会
+    再次坏掉，那时 `check()` 会判成未安装，再点「安装」即重装修复。
+
+    海外走官方脚本（非交互、跳过浏览器组件）。
+    """
+
     name = "Hermes"
     description = "Hermes Agent CLI (Nous Research)"
-    installer_url = "https://res1.hermesagent.org.cn/install.sh"
+    installer_url = HERMES_MIRROR_URL
     bin_name = "hermes"
+    timeout = 900
     bin_search_paths = [
+        "~/.local/bin/hermes",
         "~/.hermes/bin/hermes",
         "/usr/local/bin/hermes",
     ]
+    # `--version` 和 Rust 侧探测一致；`--help` 会导入完整的 CLI 和配置模块，
+    # 依赖缺失正是在这一步暴露的。
+    probe_args = [["--version"], ["--help"]]
+
+    def _fetch_mirror_script(self) -> Optional[str]:
+        # 用 curl 取，和终端里真正执行安装的是同一条网络路径。urllib 会跟随 macOS
+        # 的系统代理设置，代理失效时这里会误判成「镜像不可用」。
+        try:
+            result = subprocess.run(
+                ["curl", "-fsSL", "--max-time", "20", HERMES_MIRROR_URL],
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0 or not result.stdout:
+            return None
+        return result.stdout.decode("utf-8", "replace")
+
+    def _official_command(self) -> str:
+        self.installer_url = HERMES_OFFICIAL_URL
+        return (
+            f"curl -fsSL {HERMES_OFFICIAL_URL} | "
+            "bash -s -- --non-interactive --skip-setup --skip-browser"
+        )
+
+    def _install_command(self) -> str:
+        if REGION != "CN":
+            return self._official_command()
+        script = self._fetch_mirror_script()
+        if script is None:
+            return (
+                'echo "镜像不可用，改用官方安装脚本"\n'
+                + self._official_command()
+            )
+        self.installer_url = HERMES_MIRROR_URL
+        commit = parse_upstream_commit(script)
+        if commit is None:
+            return f"curl -fsSL {HERMES_MIRROR_URL} | bash -s -- --skip-setup"
+        return (
+            f'echo "锁定上游提交 {commit}（与镜像安装脚本配套）"\n'
+            f"curl -fsSL {HERMES_MIRROR_URL} | bash -s -- --commit {commit} --skip-setup"
+        )
+
+    def terminal_command(self) -> str:
+        return f"""
+echo "安装 {self.bin_name}..."
+echo ""
+
+{self._install_command()}
+
+echo ""
+echo "{self.bin_name} 安装完成"
+""".strip()
 
 
 # ── 最终验证 ─────────────────────────────────────────────────────────────────

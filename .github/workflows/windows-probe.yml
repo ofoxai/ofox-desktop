@@ -5,8 +5,8 @@ name: Windows Probe
 # 主 CI（ci.yml）只在 pull_request→main 上跑，且 backend job 用 ubuntu-22.04
 # 跑 clippy，捕不到 Windows target 特有的 unused_imports / cfg mismatch 等
 # 问题。本 workflow 补两件事：
-#   1. Windows target 下的 clippy —— 与 ubuntu 那份互补
-#   2. `verify_chatgpt_install.exe` 探针产物 —— PR reviewer / 你可以直接
+#   1. Windows target 的完整 Rust 测试、fmt、all-targets clippy
+#   2. 安装状态只读探针和 ChatGPT 安装探针产物 —— reviewer 可以直接
 #      下载去干净 Windows 环境验收，不用现装 Rust/MSVC/Node
 #
 # 触发器故意宽——feat/chatgpt-* 分支上每次 push 都跑，避免"改了 Windows
@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   windows-probe:
-    name: Build probe + Windows clippy
+    name: Windows lifecycle tests + probes
     runs-on: windows-2022
     steps:
       - name: Checkout
@@ -39,7 +39,7 @@ jobs:
           # 显式声明 MSVC target——runner 默认就是它，这里写清楚免得 install-target
           # 步骤被跳过时找不到 std。
           targets: x86_64-pc-windows-msvc
-          components: clippy
+          components: rustfmt, clippy
 
       - name: Cache Cargo
         uses: actions/cache@v5
@@ -59,14 +59,11 @@ jobs:
         run: mkdir dist -Force
         shell: pwsh
 
-      - name: Clippy (Windows target)
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --lib --bins -- -D warnings
-
-      - name: Build verify_chatgpt_install.exe
-        run: cargo build --manifest-path src-tauri/Cargo.toml --release --bin verify_chatgpt_install
+      - name: Build Windows probes
+        run: cargo build --manifest-path src-tauri/Cargo.toml --release --bin verify_chatgpt_install --bin verify_tool_lifecycle
 
       - name: Upload probe artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: verify_chatgpt_install-${{ github.sha }}
           path: src-tauri/target/release/verify_chatgpt_install.exe
@@ -74,8 +71,25 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-      # 放在上传之后：lib 测试目标此前从没在 Windows 上编译过，万一其它模块的测试
-      # 不兼容 Windows，也不影响上面的探针产物。chatgpt 过滤只跑 chatgpt_updates /
-      # windows_chatgpt 两组——后者的测试只在 Windows 上编译。
-      - name: ChatGPT unit tests (Windows target)
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib chatgpt
+      - name: Upload read-only lifecycle probe
+        uses: actions/upload-artifact@v6
+        with:
+          name: verify_tool_lifecycle-${{ github.sha }}
+          path: src-tauri/target/release/verify_tool_lifecycle.exe
+          retention-days: 90
+          if-no-files-found: error
+
+      # Compile and run all tests, including Windows file-lock/cmd fixtures.
+      # Use Windows PowerShell 5.1, the same entry point as a fresh test host.
+      - name: Windows lifecycle checks
+        run: .\scripts\test-windows.ps1 -BackendOnly -OutputDirectory artifacts/windows-tests/ci
+        shell: powershell
+
+      - name: Upload Windows verification logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: windows-test-results-${{ github.sha }}
+          path: artifacts/windows-tests/ci/
+          retention-days: 30
+          if-no-files-found: warn

@@ -110,9 +110,13 @@ pub struct OfoxCatalog {
 }
 
 fn cached_catalog(url: &str, max_age: Duration) -> Option<OfoxCatalog> {
+    cached_catalog_at(url, max_age, Instant::now())
+}
+
+fn cached_catalog_at(url: &str, max_age: Duration, now: Instant) -> Option<OfoxCatalog> {
     let cache = CATALOG_CACHE.lock().ok()?;
     let entry = cache.get(url)?;
-    let age = entry.fetched_at.elapsed();
+    let age = now.saturating_duration_since(entry.fetched_at);
     (age <= max_age).then(|| OfoxCatalog {
         models: entry.models.clone(),
         stale: age > CATALOG_FRESH_FOR,
@@ -486,23 +490,25 @@ mod tests {
     #[test]
     fn stale_catalog_is_available_only_for_bounded_fallback() {
         let url = "test://stale-model-catalog";
+        // Advance the observation time: a fresh Windows runner may not have
+        // enough monotonic uptime to subtract a full stale-cache interval.
+        let fetched_at = Instant::now();
         CATALOG_CACHE.lock().unwrap().insert(
             url.into(),
             CatalogCacheEntry {
-                fetched_at: Instant::now() - CATALOG_FRESH_FOR - Duration::from_secs(1),
+                fetched_at,
                 models: vec![sample_model("cached-model")],
             },
         );
-        assert!(cached_catalog(url, CATALOG_FRESH_FOR).is_none());
-        assert!(cached_catalog(url, CATALOG_STALE_FOR).unwrap().stale);
-        CATALOG_CACHE.lock().unwrap().insert(
-            url.into(),
-            CatalogCacheEntry {
-                fetched_at: Instant::now() - CATALOG_STALE_FOR - Duration::from_secs(1),
-                models: vec![sample_model("expired-model")],
-            },
+        let stale_at = fetched_at + CATALOG_FRESH_FOR + Duration::from_secs(1);
+        assert!(cached_catalog_at(url, CATALOG_FRESH_FOR, stale_at).is_none());
+        assert!(
+            cached_catalog_at(url, CATALOG_STALE_FOR, stale_at)
+                .unwrap()
+                .stale
         );
-        assert!(cached_catalog(url, CATALOG_STALE_FOR).is_none());
+        let expired_at = fetched_at + CATALOG_STALE_FOR + Duration::from_secs(1);
+        assert!(cached_catalog_at(url, CATALOG_STALE_FOR, expired_at).is_none());
     }
 
     #[tokio::test]

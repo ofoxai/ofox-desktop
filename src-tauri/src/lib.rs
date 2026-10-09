@@ -13,6 +13,7 @@ mod gemini_config;
 mod gemini_mcp;
 pub mod hermes_config;
 mod init_status;
+mod json5_sections;
 mod lightweight;
 #[cfg(target_os = "linux")]
 mod linux_fix;
@@ -539,6 +540,21 @@ pub fn run() {
                 Err(e) => log::warn!("✗ Failed to seed OfoxAI providers: {e}"),
             }
 
+            // 旧版把 Ofox 绑定数据和接管备份混存在 proxy_live_backup，退出/崩溃
+            // 清理会整表删除。搬到本机专属的 ofox_bind_snapshot（可重复执行）。
+            // 必须早于下面异步任务里的 recover_from_crash——它会清空旧表。
+            match crate::services::ofox_bind::relocate::relocate_legacy_rows(&app_state.db, |app| {
+                app_state
+                    .proxy_service
+                    .detect_takeover_in_live_config_for_app(app)
+            }) {
+                Ok(moved) if !moved.is_empty() => {
+                    log::info!("✓ Relocated Ofox bind records: {moved:?}");
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("✗ Failed to relocate Ofox bind records: {e}"),
+            }
+
             // OpenCode's legacy compatible adapter expects streamed
             // `delta.content`, while Ofox's Chat Completions endpoint returns
             // a final `message.content` event. Migrate only the Ofox-managed
@@ -928,26 +944,6 @@ pub fn run() {
                 }
             }
 
-            // Reconcile managed WorkBuddy URLs as soon as the database is ready.
-            // Credential initialization below may wait for a macOS Keychain
-            // authorization prompt, but endpoint migration needs no secret.
-            let apex_handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let client = crate::proxy::http_client::get();
-                crate::ofox_apex::ensure_apex_resolved(&apex_handle, &client).await;
-                if let Some(state) = apex_handle.try_state::<crate::store::AppState>() {
-                    match crate::workbuddy_config::reconcile_managed_endpoint(&state.db).await {
-                        Ok(true) => log::info!(
-                            "[WorkBuddy] updated managed model endpoint for current apex"
-                        ),
-                        Ok(false) => {}
-                        Err(error) => {
-                            log::warn!("[WorkBuddy] endpoint reconciliation failed: {error}")
-                        }
-                    }
-                }
-            });
-
             // 初始化 OfoxAuthManager
             {
                 use crate::ofox_auth::OfoxAuthManager;
@@ -1022,6 +1018,24 @@ pub fn run() {
                 log::info!("✓ OfoxAuthManager initialized");
             }
 
+            // 每次启动按出口 IP 探测区域；结果变了就切换（会清旧域登录态，所以放在
+            // OfoxAuthState 注册之后）。再安全迁移各工具现存的 OFox 网关地址。
+            let apex_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let client = crate::proxy::http_client::get();
+                crate::ofox_apex::probe_apex_on_startup(&apex_handle, &client).await;
+                if let Some(state) = apex_handle.try_state::<crate::store::AppState>() {
+                    if !commands::ofox_apex::reconcile_tool_endpoints(&state.db).await {
+                        log::warn!("[OfoxApex] startup retained tool endpoint conflicts");
+                    }
+                    // The console may have checked the old endpoint before
+                    // asynchronous startup reconciliation completed.
+                    if let Err(error) = apex_handle.emit("ofox-prefs-updated", ()) {
+                        log::warn!("[OfoxApex] emit configuration refresh failed: {error}");
+                    }
+                }
+            });
+
             // 异常退出恢复 + 代理状态自动恢复
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -1051,6 +1065,10 @@ pub fn run() {
                 }
 
                 initialize_common_config_snippets(&state);
+
+                // 旧版本把 Codex 的 Ofox key 写进 auth.json 并要求 OpenAI 认证；用
+                // ChatGPT 登录的用户会把 ChatGPT 令牌发给 Ofox。迁成服务商自带 key。
+                crate::services::ofox_bind::migrate_codex_on_startup().await;
 
                 // 注：曾经在这里调 `restore_proxy_state_on_startup`——读
                 // `proxy_config.enabled` 然后无脑给所有标 true 的工具重跑
@@ -1102,12 +1120,16 @@ pub fn run() {
                         if !needs_heal {
                             continue;
                         }
-                        match commands::ofox_auth::bind_tool_to_ofox_internal(
+                        if !crate::services::ofox_bind::all_config_files_present(
+                            crate::services::ofox_bind::Tool::from_app(&app_type),
+                        ) {
+                            log::info!("self-heal: skipped {app}; configuration is not confirmed present");
+                            continue;
+                        }
+                        match commands::ofox_auth::bind_existing_tool_to_ofox_internal(
                             &state.db,
-                            &state.proxy_service,
                             &ofox_state.0,
                             app,
-                            None,
                         )
                         .await
                         {
@@ -1322,6 +1344,7 @@ pub fn run() {
             commands::read_live_provider_settings,
             commands::get_settings,
             commands::save_settings,
+            commands::save_bound_tools,
             commands::get_rectifier_config,
             commands::set_rectifier_config,
             commands::get_optimizer_config,
@@ -1601,15 +1624,21 @@ pub fn run() {
             commands::ofox_auth::ofox_logout,
             commands::ofox_auth::ofox_request_reauth,
             commands::ofox_auth::ofox_bind_tool,
+            commands::ofox_auth::ofox_restore_tool_binding,
             commands::ofox_auth::ofox_unbind_tool,
+            commands::ofox_auth::ofox_unbind_preview,
             // Ofox apex (region) switching
             commands::ofox_apex::ofox_get_apex,
+            commands::ofox_apex::ofox_get_apex_state,
             commands::ofox_apex::ofox_set_apex,
+            commands::ofox_apex::ofox_set_apex_auto,
             commands::ofox_api_keys::ofox_list_api_keys,
             commands::ofox_api_keys::ofox_create_api_key_for_tool,
             commands::ofox_api_keys::ofox_refresh_api_key_for_tool,
             commands::ofox_api_keys::ofox_revoke_api_key_for_tool,
             commands::manage_tool::get_tool_config_file_path,
+            commands::manage_tool::get_tool_binding_status,
+            commands::get_tool_install_capabilities,
             commands::manage_tool::get_active_ofox_model,
             commands::manage_tool::set_active_ofox_model,
             commands::manage_tool::get_workbuddy_managed_models,

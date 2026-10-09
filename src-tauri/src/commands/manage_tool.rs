@@ -69,6 +69,26 @@ pub fn get_tool_config_file_path(app: String) -> Result<String, String> {
     Ok(path.to_string_lossy().to_string())
 }
 
+/// Only safe diagnostics cross IPC; configuration values and parser excerpts stay local.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_tool_binding_status(
+    state: State<'_, AppState>,
+    app: String,
+) -> Result<crate::services::ofox_bind::status::ToolBindingStatus, String> {
+    if app.trim().eq_ignore_ascii_case("workbuddy") {
+        return Ok(crate::workbuddy_config::binding_status(&state.db).await);
+    }
+    let (tool, _) =
+        crate::services::ofox_bind::tool_for(&app).ok_or_else(|| "无效的应用类型".to_string())?;
+    let key = match crate::ofox_secret::default_store().load(crate::ofox_secret::Slot::ApiKey {
+        tool: tool.app().into(),
+    }) {
+        Ok(key) => key,
+        Err(_) => return Ok(crate::services::ofox_bind::status::ToolBindingStatus::unknown()),
+    };
+    Ok(crate::services::ofox_bind::status::binding_status(&state.db, tool, key.as_deref()).await)
+}
+
 // ---------------------------------------------------------------------------
 // 2) Read active model
 // ---------------------------------------------------------------------------
@@ -151,9 +171,8 @@ pub(crate) fn read_active_provider_and_model_for(
 /// Empty `model` removes the field — keeps the on-disk config clean and
 /// signals "fall back to OfoxAI's default routing".
 ///
-/// For ofox-* providers this goes through the **bind 直写** path
-/// ([`ProxyService::ofox_write_direct_to_live`])：读取已绑定的 sk-of-、
-/// 把 DB 里的 settings_config（含新 model）+ token 合成完整磁盘 config 写盘。
+/// For ofox-* providers this goes through `services::ofox_bind::persist_bound_settings`：
+/// 在绑定锁内核对原配置，再保存 DB 模型和工具接入字段。
 /// 不调老的 `refresh_takeover_for_app`——那条会写 `PROXY_MANAGED` 占位符把
 /// 真 sk-of- 覆盖掉，并触发 backup 删除（破坏 unbind 可恢复性）。
 ///
@@ -169,6 +188,7 @@ pub async fn set_active_ofox_model(
     allow_unverified: Option<bool>,
 ) -> Result<(), String> {
     if app.trim().eq_ignore_ascii_case("workbuddy") {
+        require_configured(crate::workbuddy_config::binding_status(&state.db).await)?;
         let selection = model_selection
             .ok_or_else(|| "切换 WorkBuddy 模型时缺少能力信息，请刷新模型列表后重试".to_string())?;
         if selection.id.trim() != model.trim() {
@@ -182,7 +202,7 @@ pub async fn set_active_ofox_model(
         )
         .await
         .map_err(|e| format!("获取 WorkBuddy OfoxAI API key 失败: {e}"))?;
-        crate::workbuddy_config::sync_selected_models(&state.db, &api_key, &[selection]).await?;
+        crate::workbuddy_config::update_selected_models(&state.db, &api_key, &[selection]).await?;
         crate::ofox_api_keys::mark_key_used(BindableTool::WorkBuddy);
         return Ok(());
     }
@@ -246,34 +266,46 @@ pub async fn set_active_ofox_model(
         None
     };
 
-    persist_with_rollback(
-        &state.db,
-        app_str,
-        &provider_id,
-        &previous_settings,
-        &provider.settings_config,
-        || async {
-            if provider_id.starts_with("ofox-") {
-                // ofox 直写路径：使用上面读取的已绑定 key。模型切换不会创建
-                // 新 key，也不会把密钥放入诊断日志。
-                state
-                    .proxy_service
-                    .ofox_write_direct_to_live(&app_type, api_key.as_deref().unwrap_or_default())
-                    .await
-                    .map_err(|e| format!("刷新 {app_str} live 配置失败: {e}"))
-            } else {
-                // 非 ofox provider 走老 takeover 路径——保留兼容形态。
+    if let Some(key) = api_key.as_deref() {
+        crate::services::ofox_bind::persist_bound_settings(
+            &state.db,
+            crate::services::ofox_bind::Tool::from_app(&app_type),
+            key,
+            &previous_settings,
+            &provider.settings_config,
+        )
+        .await?;
+    } else {
+        persist_with_rollback(
+            &state.db,
+            app_str,
+            &provider_id,
+            &previous_settings,
+            &provider.settings_config,
+            || async {
                 state
                     .proxy_service
                     .refresh_takeover_for_app(app_str)
                     .await
                     .map_err(|e| format!("刷新 {app_str} live 配置失败: {e}"))
-            }
-        },
-    )
-    .await?;
+            },
+        )
+        .await?;
+    }
 
     Ok(())
+}
+
+fn require_configured(
+    health: crate::services::ofox_bind::status::ToolBindingStatus,
+) -> Result<(), String> {
+    if health.status == crate::services::ofox_bind::status::BindingStatus::Configured {
+        Ok(())
+    } else {
+        Err(health
+            .message
+            .unwrap_or_else(|| "请先确认 OFox 接入配置。".into()))
+    }
 }
 
 async fn persist_with_rollback<F, Fut>(
@@ -306,6 +338,7 @@ pub async fn set_workbuddy_managed_models(
     ofox_state: State<'_, OfoxAuthState>,
     model_selections: Vec<crate::workbuddy_config::WorkBuddyModelSelection>,
 ) -> Result<(), String> {
+    require_configured(crate::workbuddy_config::binding_status(&state.db).await)?;
     crate::workbuddy_config::validate_selections(&model_selections)?;
     let api_key = crate::ofox_api_keys::fetch_or_create_api_key(
         BindableTool::WorkBuddy,
@@ -314,7 +347,7 @@ pub async fn set_workbuddy_managed_models(
     )
     .await
     .map_err(|e| format!("获取 WorkBuddy OfoxAI API key 失败: {e}"))?;
-    crate::workbuddy_config::sync_selected_models(&state.db, &api_key, &model_selections).await?;
+    crate::workbuddy_config::update_selected_models(&state.db, &api_key, &model_selections).await?;
     crate::ofox_api_keys::mark_key_used(BindableTool::WorkBuddy);
     Ok(())
 }

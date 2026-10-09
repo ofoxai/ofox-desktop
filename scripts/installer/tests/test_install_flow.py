@@ -84,6 +84,37 @@ class FreshInstallFlowTest(unittest.TestCase):
     def test_does_not_start_opencode_after_failed_node_install(self):
         self.assertEqual(self.run_flow(1), ["Node.js LTS"])
 
+    def test_fails_when_the_installed_tool_cannot_start(self):
+        """安装脚本退出 0 但工具起不来：整步失败，并把原因打成一行「提示:」。"""
+
+        class BrokenStep(FakeStep):
+            def verify(self) -> bool:
+                return False
+
+            def failure_hint(self) -> str:
+                return "Hermes 已安装但无法启动: ModuleNotFoundError: No module named 'ruamel'。请在终端运行 hermes --version 查看详情。"
+
+        hermes = BrokenStep("Hermes")
+        output = io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", ["init.py", "--tool", "hermes", "--skip-env", "--no-onboard"]),
+            mock.patch.object(installer, "preflight_check", return_value=True),
+            mock.patch.object(installer, "detect_region", return_value="CN"),
+            mock.patch.object(installer, "get_tool_step", return_value=hermes),
+            mock.patch.object(installer, "load_state", return_value={}),
+            mock.patch.object(installer, "save_state"),
+            mock.patch.object(installer, "clear_state"),
+            mock.patch.object(installer, "open_terminal_with_command", side_effect=lambda name, cmd: FakeHandle(hermes, 0)),
+            mock.patch.object(installer, "close_terminal_window"),
+            mock.patch.object(installer, "ask_continue", return_value=False),
+            mock.patch.object(sys, "stdin", io.StringIO()),
+            redirect_stdout(output),
+        ):
+            with self.assertRaises(SystemExit) as ended:
+                installer.main()
+        self.assertEqual(ended.exception.code, 1)
+        self.assertIn("提示: Hermes 已安装但无法启动", output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

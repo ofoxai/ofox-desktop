@@ -253,6 +253,18 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        // 16b. Ofox 绑定记录（本机专属：导出/同步不带，导入/恢复保留本机行）。
+        // 与 proxy_live_backup 分开，接管模式的退出/崩溃清理不会碰到它。
+        // 纯新增表，CREATE IF NOT EXISTS 每次打开都会跑，无需升级 SCHEMA_VERSION。
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ofox_bind_snapshot (
+            tool TEXT PRIMARY KEY, record TEXT NOT NULL,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
         // 17. Usage Daily Rollups 表 (日聚合统计)
         conn.execute(
             "CREATE TABLE IF NOT EXISTS usage_daily_rollups (
