@@ -1501,7 +1501,7 @@ where
 }
 
 #[cfg(target_os = "windows")]
-fn wsl_distro_for_tool(tool: &str) -> Option<String> {
+pub(crate) fn wsl_distro_for_tool(tool: &str) -> Option<String> {
     let override_dir = match tool {
         "claude" => crate::settings::get_claude_override_dir(),
         "codex" => crate::settings::get_codex_override_dir(),
@@ -2133,8 +2133,11 @@ fn run_windows_start_command(args: &[&str], terminal_name: &str) -> Result<(), S
     let mut full_args = vec!["/C", "start"];
     full_args.extend(args);
 
+    // The new terminal inherits this PATH: the registry's current one, so a
+    // CLI installed after Ofox started is found and npm shims find node.
     let output = Command::new("cmd")
         .args(&full_args)
+        .env("PATH", super::windows_tools::effective_path())
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("启动 {} 失败: {e}", terminal_name))?;
@@ -2215,6 +2218,44 @@ fn unix_launcher_env_lines(env_vars: &[(String, String)]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A batch-file command running `program` with `args`. The program, and any
+/// argument with characters cmd.exe treats specially, is quoted; `%` is doubled
+/// so no variable expands. `"` and line breaks cannot be passed safely.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn windows_batch_line(program: &Path, args: &[String]) -> Result<String, String> {
+    fn batch_word(value: &str, always_quote: bool) -> Result<String, String> {
+        if value.contains(['"', '\r', '\n']) {
+            return Err(format!("无法安全传递参数到 Windows 终端: {value}"));
+        }
+        let plain = !value.is_empty()
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_./:=@+,\\".contains(c));
+        let escaped = value.replace('%', "%%");
+        if plain && !always_quote {
+            return Ok(escaped);
+        }
+        // A trailing backslash would escape the closing quote for the program.
+        let tail = if escaped.ends_with('\\') { "\\" } else { "" };
+        Ok(format!("\"{escaped}{tail}\""))
+    }
+    let mut words = vec![batch_word(&program.to_string_lossy(), true)?];
+    for arg in args {
+        words.push(batch_word(arg, false)?);
+    }
+    Ok(words.join(" "))
+}
+
+/// The `.bat` a terminal runs: `call` returns from npm's `.cmd` shims so the
+/// pause and the self-delete run; `(goto)` deletes the running script without
+/// cmd.exe complaining that it vanished.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_launcher_script(command_line: &str, env_lines: &str) -> String {
+    format!(
+        "@echo off\r\nsetlocal DisableDelayedExpansion\r\necho [ofox-switch] Starting: {command_line}\r\necho.\r\n{env_lines}\r\ncall {command_line}\r\necho.\r\necho [ofox-switch] Command exited. Press any key to close.\r\npause >nul\r\n(goto) 2>nul & del \"%~f0\"\r\n"
+    )
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -2356,10 +2397,7 @@ read -n 1 -s
         let preferred = crate::settings::get_preferred_terminal();
         let terminal = preferred.as_deref().unwrap_or("cmd");
 
-        let content = format!(
-            "@echo off\r\nsetlocal DisableDelayedExpansion\r\necho [ofox-switch] Starting: {cmd}\r\necho.\r\n{env_lines}\r\n{cmd}\r\necho.\r\necho [ofox-switch] Command exited. Press any key to close.\r\npause >nul\r\ndel \"%~f0\" >nul 2>&1\r\n",
-            cmd = command_line,
-        );
+        let content = windows_launcher_script(command_line, &env_lines);
         let bat_file = write_terminal_launcher(label, ".bat", &content)?;
 
         let bat_path = bat_file.to_string_lossy();
@@ -2420,6 +2458,57 @@ pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<()
 mod tests {
     use super::*;
     use crate::commands::tool_update::probe_fixture_output;
+
+    #[test]
+    fn windows_batch_line_quotes_the_program_and_unsafe_arguments() {
+        let program = Path::new(r"C:\Users\Me Too\AppData\Roaming\npm\opencode.cmd");
+        let args = vec![
+            "--model".to_string(),
+            "ofox-opencode/qwen/qwen-flash".to_string(),
+        ];
+        assert_eq!(
+            windows_batch_line(program, &args).unwrap(),
+            r#""C:\Users\Me Too\AppData\Roaming\npm\opencode.cmd" --model ofox-opencode/qwen/qwen-flash"#
+        );
+        let tricky = vec![
+            "a b&c|d".to_string(),
+            "100%".to_string(),
+            r"C:\my dir\".to_string(),
+            r"C:\dir\".to_string(),
+        ];
+        assert_eq!(
+            windows_batch_line(Path::new(r"C:\bin\x.exe"), &tricky).unwrap(),
+            r#""C:\bin\x.exe" "a b&c|d" "100%%" "C:\my dir\\" C:\dir\"#
+        );
+        assert_eq!(
+            windows_batch_line(Path::new(r"C:\50% off\x.exe"), &[]).unwrap(),
+            r#""C:\50%% off\x.exe""#
+        );
+    }
+
+    #[test]
+    fn windows_batch_line_refuses_quotes_and_line_breaks() {
+        for bad in ["say \"hi\"", "line\r\nbreak"] {
+            assert!(windows_batch_line(Path::new(r"C:\x.exe"), &[bad.to_string()]).is_err());
+        }
+        assert!(windows_batch_line(Path::new("C:\\a\"b\\x.exe"), &[]).is_err());
+    }
+
+    #[test]
+    fn windows_launcher_script_calls_the_command_and_deletes_itself_cleanly() {
+        let script = windows_launcher_script(r#""C:\npm\codex.cmd""#, "set \"HTTPS_PROXY=x\"");
+        // `call` returns from npm's .cmd shims, so the pause and cleanup run.
+        assert!(
+            script.contains("\r\ncall \"C:\\npm\\codex.cmd\"\r\n"),
+            "{script}"
+        );
+        assert!(script.contains("set \"HTTPS_PROXY=x\"\r\n"));
+        assert!(script.contains("pause >nul\r\n"));
+        assert!(
+            script.ends_with("(goto) 2>nul & del \"%~f0\"\r\n"),
+            "{script}"
+        );
+    }
 
     #[tokio::test]
     async fn cli_scan_confirms_missing_binary_in_an_isolated_directory() {

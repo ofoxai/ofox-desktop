@@ -1,7 +1,8 @@
 {
   "toolLaunch": {
     "failed": "打开工具失败",
-    "proxyUnavailable": "本机代理 {{endpoint}} 未运行。请启动代理或恢复端口转发后重试。"
+    "proxyUnavailable": "本机代理 {{endpoint}} 未运行。请启动代理或恢复端口转发后重试。",
+    "notInstalled": "未找到 {{tool}}，请先安装或检查安装路径"
   },
   "toolInstall": {
     "exitCode": "安装未完成（退出码 {{code}}），请重试"

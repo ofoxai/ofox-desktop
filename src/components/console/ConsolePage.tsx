@@ -53,6 +53,7 @@ import {
   type ToolInstallationInfo,
 } from "@/lib/api/toolUpdates";
 import { ofoxBindApi, type ToolBindingStatus } from "@/lib/api/ofoxBind";
+import { launchErrorMessage } from "@/lib/launchErrors";
 import BoundToolRow, {
   type BoundToolRowData,
   type ToolRowAction,
@@ -91,17 +92,7 @@ export default function ConsolePage({
   // "打开"按钮：CLI 拉到独立终端，桌面客户端由系统直接启动。
   const { launching: launchingTools, launch: launchTool } = useToolLaunch(
     (_toolId, error) => {
-      const message = String(error);
-      const proxyError = "LOCAL_PROXY_UNAVAILABLE|";
-      if (message.startsWith(proxyError)) {
-        toast.error(
-          t("toolLaunch.proxyUnavailable", {
-            endpoint: message.slice(proxyError.length),
-          }),
-        );
-        return;
-      }
-      toast.error(t("toolLaunch.failed"));
+      toast.error(launchErrorMessage(error, t));
     },
   );
   // 应用自更新：底部栏提示按钮 + 首次发现弹窗。数据源 = UpdateContext

@@ -1,7 +1,8 @@
 {
   "toolLaunch": {
     "failed": "Could not open the tool",
-    "proxyUnavailable": "The local proxy at {{endpoint}} is unavailable. Start the proxy or restore the port forward, then try again."
+    "proxyUnavailable": "The local proxy at {{endpoint}} is unavailable. Start the proxy or restore the port forward, then try again.",
+    "notInstalled": "Could not find {{tool}}. Install it first or check where it is installed."
   },
   "toolInstall": {
     "exitCode": "Installation did not finish (exit code {{code}}); please retry"

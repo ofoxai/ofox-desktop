@@ -452,7 +452,19 @@ pub async fn launch_tool_cli(app: AppHandle, tool_id: String) -> Result<(), Stri
     let command_line = build_unix_command(&args);
 
     #[cfg(target_os = "windows")]
-    let command_line = args.join(" ");
+    let command_line = match super::misc::wsl_distro_for_tool(&tool_id) {
+        // A CLI bound to WSL is not on the Windows PATH; keep its old launch.
+        Some(_) => args.join(" "),
+        None => match super::windows_tools::find_tool(bin) {
+            Some(program) => super::misc::windows_batch_line(&program, &args[1..])?,
+            None => {
+                if tool_id == "codex" && super::windows_chatgpt::launch_chatgpt_desktop_app()? {
+                    return Ok(());
+                }
+                return Err(format!("TOOL_NOT_INSTALLED|{tool_id}"));
+            }
+        },
+    };
 
     let state = app.state::<crate::store::AppState>();
     let configured_proxy = state.db.get_global_proxy_url().ok().flatten();
