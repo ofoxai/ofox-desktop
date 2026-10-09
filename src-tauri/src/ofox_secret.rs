@@ -214,7 +214,7 @@ impl FileStore {
     }
 
     /// 测试专用：用来断言文件权限。
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }

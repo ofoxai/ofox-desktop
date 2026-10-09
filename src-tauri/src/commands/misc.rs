@@ -2808,12 +2808,12 @@ mod tests {
 
     #[test]
     fn launcher_can_clear_stale_proxy_vars_on_unix_and_windows() {
-        let vars = vec![
-            ("HTTPS_PROXY".to_string(), String::new()),
-            ("https_proxy".to_string(), String::new()),
-        ];
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
+            let vars = [
+                ("HTTPS_PROXY".to_string(), String::new()),
+                ("https_proxy".to_string(), String::new()),
+            ];
             let lines = unix_launcher_env_lines(&vars);
             assert!(lines.contains("export OFOX_LAUNCH_HTTPS_PROXY=''"));
             assert!(lines.contains("export OFOX_LAUNCH_https_proxy=''"));
