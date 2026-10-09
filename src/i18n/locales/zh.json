@@ -114,7 +114,18 @@
       "unchanged": "尚未升级至目标版本，请检查日志和安装路径",
       "current": "无需升级",
       "failed": "升级失败，请查看日志后重试"
-    }
+    },
+    "updateTo": "升级到 v{{version}}",
+    "manyAvailable": "{{count}} 个工具有新版本：{{names}}",
+    "batchProgress": "正在升级 {{tool}}…（{{index}}/{{count}}）",
+    "updatedTo": "{{tool}} 已升级到 v{{version}}",
+    "updatedFromTo": "{{tool}} 已升级：v{{from}} → v{{to}}",
+    "alreadyCurrent": "{{tool}} 已是最新版本",
+    "notReached": "{{tool}} 升级后仍是 v{{version}}，请检查安装路径后重试",
+    "updateFailed": "{{tool}} 升级失败：{{message}}",
+    "batchDone": "已升级 {{count}} 个工具：{{list}}",
+    "batchPartial": "已升级 {{ok}}/{{count}} 个工具，未完成：{{names}}",
+    "manualHint": "{{tool}} 无法由 Ofox 自动升级，已打开官方页面，请用原安装方式升级"
   },
   "app": {
     "title": "Ofox Desktop",

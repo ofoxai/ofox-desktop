@@ -4,6 +4,7 @@ import {
   RefreshCw,
   Loader2,
   ArrowUpCircle,
+  ArrowDownToLine,
   ChevronDown,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -43,7 +44,8 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useUpdate } from "@/contexts/UpdateContext";
 import { manageToolApi } from "@/lib/api/manageTool";
 import { useToolLaunch } from "@/hooks/useToolLaunch";
-import { checkToolUpdates, useToolUpdates } from "@/hooks/useToolUpdates";
+import { checkToolUpdates } from "@/hooks/useToolUpdates";
+import { batchable, useInlineToolUpdates } from "@/hooks/useInlineToolUpdates";
 import { useToolInstall } from "@/hooks/useToolInstall";
 import { useToolInstallCapabilities } from "@/hooks/useToolInstallCapabilities";
 import {
@@ -115,7 +117,8 @@ export default function ConsolePage({
   const [tools, setTools] = useState<BoundTool[]>([]);
   const [missingExpanded, setMissingExpanded] = useState(false);
   const installableTools = useToolInstallCapabilities();
-  const toolUpdates = useToolUpdates();
+  const inlineUpdates = useInlineToolUpdates();
+  const toolUpdates = inlineUpdates.state;
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   // null = manage dialog is closed. Holds the snapshot of the tool row that
@@ -549,6 +552,18 @@ export default function ConsolePage({
       tool.binding.status !== "configured",
   ).length;
 
+  // magpie's "Update all" line: with two or more listed tools behind, one
+  // line above the list says which and updates them one after another.
+  const behindTools = installedTools.filter(
+    (tool) => !tool.installationError && inlineUpdates.updateFor(tool),
+  );
+  const batchTools = behindTools.filter((tool) =>
+    batchable(inlineUpdates.updateFor(tool)!),
+  );
+  const batchRunning = toolUpdates.batch && toolUpdates.queue.length > 1;
+  const updatingNow = toolUpdates.busy ?? toolUpdates.queue[0];
+  const showUpdatesBar = batchRunning || behindTools.length >= 2;
+
   const installTarget = (tool: BoundTool) =>
     tool.id === "codex" && tool.installationKind === "desktopApp"
       ? "chatgpt"
@@ -556,6 +571,7 @@ export default function ConsolePage({
   const renderTool = (tool: BoundTool) => {
     const target = installTarget(tool);
     const canInstall = installableTools.includes(target);
+    const update = inlineUpdates.updateFor(tool);
     const busy =
       repairing.has(target) ||
       launchingTools.has(tool.id) ||
@@ -567,14 +583,13 @@ export default function ConsolePage({
         keyLabel={apiKeyLabelByTool[tool.id]}
         model={modelByTool[tool.id]}
         hasAnalytics={!!apiKeyIdByTool[tool.id]}
-        hasUpdate={toolUpdates.tools.some(
-          (entry) =>
-            entry.name === tool.id &&
-            entry.version === tool.version &&
-            (!tool.installationKind ||
-              entry.installationKind === tool.installationKind) &&
-            entry.update_status === "available",
-        )}
+        updateTo={update?.latest_version ?? null}
+        updateExternal={
+          !!update &&
+          (update.update_source === "sparkle" || !update.update_supported)
+        }
+        updating={toolUpdates.busy === tool.id}
+        updateLocked={toolUpdates.batch}
         canInstall={canInstall}
         busy={busy}
         progress={repairProgress[target]?.name}
@@ -583,7 +598,7 @@ export default function ConsolePage({
             .openExternal(ofoxAnalyticsUrl(apex, apiKeyIdByTool[tool.id]))
             .catch(() => toast.error(t("toolLifecycle.analyticsFailed")));
         }}
-        onUpdate={() => setSettingsDialogOpen(true)}
+        onUpdate={() => void inlineUpdates.updateOne(tool)}
         onManage={() => setManageTool(tool)}
         onAction={(action: ToolRowAction) => {
           if (action === "retry") {
@@ -782,6 +797,51 @@ export default function ConsolePage({
                   </button>
                 </div>
               )}
+              {showUpdatesBar && (
+                <div
+                  role="status"
+                  className="flex min-h-[40px] items-center gap-3 border-b border-border px-4 py-2 text-[12px] text-muted-foreground"
+                >
+                  <span className="min-w-0 flex-1 truncate">
+                    {batchRunning
+                      ? t("toolUpdates.batchProgress", {
+                          tool: TOOL_META[updatingNow]?.label ?? updatingNow,
+                          index: toolUpdates.queue.indexOf(updatingNow) + 1,
+                          count: toolUpdates.queue.length,
+                        })
+                      : t("toolUpdates.manyAvailable", {
+                          count: behindTools.length,
+                          names: behindTools
+                            .map((tool) => tool.label)
+                            .join(", "),
+                        })}
+                  </span>
+                  {batchRunning ? (
+                    <Loader2
+                      className="h-3.5 w-3.5 shrink-0 animate-spin"
+                      aria-hidden
+                    />
+                  ) : (
+                    batchTools.length >= 2 && (
+                      <button
+                        type="button"
+                        disabled={toolUpdates.batch}
+                        onClick={() => void inlineUpdates.updateAll(batchTools)}
+                        title={batchTools
+                          .map((tool) => {
+                            const update = inlineUpdates.updateFor(tool);
+                            return `${tool.label}: ${update?.version} → ${update?.latest_version}`;
+                          })
+                          .join("\n")}
+                        className="inline-flex h-6 shrink-0 items-center gap-1 rounded-full border border-border bg-background pl-2 pr-2.5 text-[12px] font-medium text-foreground/80 transition hover:bg-accent hover:text-foreground active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <ArrowDownToLine className="h-3.5 w-3.5 text-muted-foreground" />
+                        {t("toolUpdates.updateAll")}
+                      </button>
+                    )
+                  )}
+                </div>
+              )}
               {installedTools.length > 0 ? (
                 installedTools.map(renderTool)
               ) : (
@@ -929,6 +989,8 @@ export default function ConsolePage({
           void loadDataRef.current();
         }}
       />
+
+      {inlineUpdates.confirmDialog}
 
       <OfoxSettingsDialog
         open={settingsDialogOpen}

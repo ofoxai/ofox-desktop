@@ -114,7 +114,18 @@
       "unchanged": "対象バージョンが有効ではありません。ログとパスを確認してください",
       "current": "更新は不要です",
       "failed": "更新に失敗しました。ログを確認して再試行してください"
-    }
+    },
+    "updateTo": "v{{version}} に更新",
+    "manyAvailable": "{{count}} 個のツールに新バージョンがあります：{{names}}",
+    "batchProgress": "{{tool}} を更新中…（{{index}}/{{count}}）",
+    "updatedTo": "{{tool}} を v{{version}} に更新しました",
+    "updatedFromTo": "{{tool}} を更新しました：v{{from}} → v{{to}}",
+    "alreadyCurrent": "{{tool}} は最新です",
+    "notReached": "更新後も {{tool}} は v{{version}} のままです。インストール先を確認して再試行してください",
+    "updateFailed": "{{tool}} の更新に失敗しました：{{message}}",
+    "batchDone": "{{count}} 個のツールを更新しました：{{list}}",
+    "batchPartial": "{{count}} 個中 {{ok}} 個を更新しました。未完了：{{names}}",
+    "manualHint": "{{tool}} は Ofox から自動更新できません。公式ページを開きました。インストールした方法で更新してください"
   },
   "app": {
     "title": "Ofox Desktop",

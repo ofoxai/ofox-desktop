@@ -100,7 +100,7 @@ describe("useToolUpdates", () => {
       };
     });
     const { result } = renderHook(() => useToolUpdates());
-    let updating!: Promise<void>;
+    let updating!: Promise<unknown>;
     act(() => {
       updating = updateTools(["codex"]);
     });
@@ -115,5 +115,43 @@ describe("useToolUpdates", () => {
     });
     expect(result.current.tools).toEqual([current]);
     expect(toolUpdatesApi.check).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports each tool's versions before and after the update", async () => {
+    vi.mocked(toolUpdatesApi.update).mockResolvedValue({
+      status: "updated",
+      before: "0.160.0",
+      after: "0.161.0",
+    });
+    vi.mocked(toolUpdatesApi.check).mockResolvedValue([current]);
+
+    const outcomes = await updateTools(["codex"]);
+
+    expect(outcomes).toEqual([
+      {
+        tool: "codex",
+        status: "updated",
+        before: "0.160.0",
+        after: "0.161.0",
+        error: null,
+      },
+    ]);
+  });
+
+  it("reports why an update failed instead of throwing", async () => {
+    vi.mocked(toolUpdatesApi.update).mockRejectedValue("npm EACCES");
+    vi.mocked(toolUpdatesApi.check).mockResolvedValue([available]);
+
+    const outcomes = await updateTools(["codex"]);
+
+    expect(outcomes).toEqual([
+      {
+        tool: "codex",
+        status: "failed",
+        before: "0.160.0",
+        after: null,
+        error: "npm EACCES",
+      },
+    ]);
   });
 });

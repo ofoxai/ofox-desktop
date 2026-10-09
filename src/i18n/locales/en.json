@@ -114,7 +114,18 @@
       "unchanged": "Target version not active. Check logs and installation path",
       "current": "No update needed",
       "failed": "Update failed. Review the log and retry"
-    }
+    },
+    "updateTo": "Update to v{{version}}",
+    "manyAvailable": "{{count}} tools have updates: {{names}}",
+    "batchProgress": "Updating {{tool}}… ({{index}} of {{count}})",
+    "updatedTo": "{{tool}} updated to v{{version}}",
+    "updatedFromTo": "{{tool}} updated: v{{from}} → v{{to}}",
+    "alreadyCurrent": "{{tool}} is already up to date",
+    "notReached": "{{tool}} is still v{{version}} after the update. Check its install path and try again",
+    "updateFailed": "{{tool}} update failed: {{message}}",
+    "batchDone": "{{count}} tools updated: {{list}}",
+    "batchPartial": "{{ok}} of {{count}} tools updated. Not finished: {{names}}",
+    "manualHint": "Ofox can't update {{tool}} automatically. Its official page is open: update it the way you installed it"
   },
   "app": {
     "title": "Ofox Desktop",
