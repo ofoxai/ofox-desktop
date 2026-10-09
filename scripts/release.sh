@@ -147,18 +147,23 @@ DMG_KEY="${R2_PREFIX}/ofox_desktop_${VERSION}.dmg"
 DMG_URL="${BASE_URL}/${DMG_KEY}"
 
 # ── 4. 生成 latest.json ───────────────────────────────────────────────
+# 保留其他平台（Windows 等由 CI 发布）的既有条目，只更新本平台，同 release.yml。
 PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-LATEST_JSON=$(cat <<EOF
-{
-  "version": "${VERSION}",
-  "pubDate": "${PUB_DATE}",
-  "notes": $(node -p "JSON.stringify(process.argv[1])" "$NOTES"),
-  "downloads": {
-    "${PLATFORM_KEY}": "${DMG_URL}"
-  },
-  "downloadPage": "${DOWNLOAD_PAGE}"
-}
-EOF
+OLD_JSON=$(curl -fsS --max-time 20 "${BASE_URL}/latest.json" 2>/dev/null || echo '{}')
+LATEST_JSON=$(OLD_JSON="$OLD_JSON" VERSION="$VERSION" PUB_DATE="$PUB_DATE" NOTES="$NOTES" \
+  PLATFORM_KEY="$PLATFORM_KEY" DMG_URL="$DMG_URL" DOWNLOAD_PAGE="$DOWNLOAD_PAGE" node <<'NODE'
+const e = process.env;
+let old = {};
+try { old = JSON.parse(e.OLD_JSON); } catch {}
+const downloads = { ...(old.downloads || {}), [e.PLATFORM_KEY]: e.DMG_URL };
+console.log(JSON.stringify({
+  version: e.VERSION,
+  pubDate: e.PUB_DATE,
+  notes: e.NOTES,
+  downloads,
+  downloadPage: e.DOWNLOAD_PAGE,
+}, null, 2));
+NODE
 )
 echo "▶ latest.json:"
 echo "$LATEST_JSON" | sed 's/^/    /'
