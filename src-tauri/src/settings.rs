@@ -360,16 +360,19 @@ pub struct AppSettings {
     // ===== OFox 区域（apex）=====
     /// OFox 访问域名 apex："ofox.ai"（海外）或 "ofox.io"（国内镜像）。
     /// 影响所有 OAuth、LLM 网关、外链、ofox-* 工具的 base_url。
-    /// `None` 表示尚未通过 ip-api 探测过——`ofoxApexResolved == Some(true)` 后该值
-    /// 会被钉死，再次启动不会重新探测。Dev 模式下读这个值不会影响实际请求 URL
-    /// （所有 URL 都打 localhost），仅 release build 才生效。
+    /// `None` 表示还没探测过。每次启动都会按出口 IP 重新探测（见
+    /// `ofox_apex::probe_apex_on_startup`）；没锁定时探测结果和它不同就切换。
+    /// Dev 模式下读这个值不会影响实际请求 URL（所有 URL 都打 localhost）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ofox_apex: Option<String>,
-    /// 是否已完成首次区域探测。`Some(true)` 表示 `ofox_apex` 是当前权威值，
-    /// 启动钩子不会再次 probe ip-api；用户在 UI 里手动切换也写 `Some(true)`。
-    /// 删除 settings.json / 显式置 `None` 会让下一次启动重新探测。
+    /// `ofox_apex` 是不是可信的：`Some(true)` 表示它来自成功的探测或用户手动
+    /// 选择；`Some(false)` 表示探测失败时的回退猜测。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ofox_apex_resolved: Option<bool>,
+    /// 用户在界面里手动选过区域（锁定）：启动探测只记日志，不再改它。
+    /// `None` / `Some(false)` 表示跟随网络。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ofox_apex_pinned: Option<bool>,
 
     // ===== OFox 工具级 API key 元数据 =====
     /// 每个工具一把 ofox API key 的元数据列表（不含 key 本体——本体在
@@ -440,6 +443,7 @@ impl Default for AppSettings {
             bound_tools: None,
             ofox_apex: None,
             ofox_apex_resolved: None,
+            ofox_apex_pinned: None,
             ofox_api_keys: Vec::new(),
         }
     }
@@ -525,6 +529,7 @@ impl AppSettings {
         // ip-api 探测。
         if self.ofox_apex.is_none() {
             self.ofox_apex_resolved = None;
+            self.ofox_apex_pinned = None;
         }
     }
 

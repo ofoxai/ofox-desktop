@@ -211,10 +211,145 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
     Ok(())
 }
 
+/// 读文件原始字节；文件不存在返回 `None`。
+pub(crate) fn read_file_bytes(path: &Path) -> Result<Option<Vec<u8>>, AppError> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(AppError::io(path, e)),
+    }
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<(), AppError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(AppError::io(path, e)),
+    }
+}
+
+/// Unix 权限位；其它平台没有这个概念，返回 `None`。
+#[cfg(unix)]
+pub(crate) fn file_mode(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path)
+        .ok()
+        .map(|meta| meta.permissions().mode() & 0o7777)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn file_mode(_path: &Path) -> Option<u32> {
+    None
+}
+
+#[cfg(unix)]
+pub(crate) fn set_file_mode(path: &Path, mode: u32) -> Result<(), AppError> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|e| AppError::io(path, e))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn set_file_mode(_path: &Path, _mode: u32) -> Result<(), AppError> {
+    Ok(())
+}
+
+/// 多文件写入事务：每个文件第一次被改动前记下原来的字节和权限（不存在记为
+/// `None`），任一步失败时 [`FileTxn::rollback`] 按相反顺序全部还原。
+#[derive(Default)]
+pub(crate) struct FileTxn {
+    originals: Vec<(PathBuf, Option<Vec<u8>>, Option<u32>)>,
+}
+
+impl FileTxn {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    fn remember(&mut self, path: &Path) -> Result<(), AppError> {
+        if self.originals.iter().any(|(seen, _, _)| seen == path) {
+            return Ok(());
+        }
+        let original = read_file_bytes(path)?;
+        self.originals
+            .push((path.to_path_buf(), original, file_mode(path)));
+        Ok(())
+    }
+
+    pub(crate) fn write(&mut self, path: &Path, data: &[u8]) -> Result<(), AppError> {
+        self.remember(path)?;
+        atomic_write(path, data)
+    }
+
+    pub(crate) fn set_mode(&mut self, path: &Path, mode: u32) -> Result<(), AppError> {
+        self.remember(path)?;
+        set_file_mode(path, mode)
+    }
+
+    pub(crate) fn remove(&mut self, path: &Path) -> Result<(), AppError> {
+        self.remember(path)?;
+        remove_file_if_exists(path)
+    }
+
+    /// 把改过的文件全部还原成事务开始前的样子；尽量全部还原，返回第一个错误。
+    pub(crate) fn rollback(self) -> Result<(), AppError> {
+        let mut first_error = None;
+        for (path, original, mode) in self.originals.into_iter().rev() {
+            let result = match original {
+                Some(bytes) => atomic_write(&path, &bytes).and_then(|()| match mode {
+                    Some(mode) => set_file_mode(&path, mode),
+                    None => Ok(()),
+                }),
+                None => remove_file_if_exists(&path),
+            };
+            if let Err(error) = result {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn file_txn_rollback_restores_changed_created_and_removed_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let existing = dir.path().join("existing.toml");
+        let created = dir.path().join("nested/created.json");
+        let removed = dir.path().join("removed.env");
+        fs::write(&existing, b"original = 1\n").unwrap();
+        fs::write(&removed, b"KEEP=1\n").unwrap();
+
+        let mut txn = FileTxn::new();
+        txn.write(&existing, b"changed = 2\n").unwrap();
+        txn.write(&existing, b"changed again = 3\n").unwrap();
+        txn.write(&created, b"{}").unwrap();
+        txn.remove(&removed).unwrap();
+        txn.rollback().unwrap();
+
+        assert_eq!(fs::read(&existing).unwrap(), b"original = 1\n");
+        assert!(!created.exists());
+        assert_eq!(fs::read(&removed).unwrap(), b"KEEP=1\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_txn_rollback_restores_the_original_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, b"a = 1\n").unwrap();
+        set_file_mode(&path, 0o644).unwrap();
+
+        let mut txn = FileTxn::new();
+        txn.write(&path, b"a = 2\n").unwrap();
+        txn.set_mode(&path, 0o600).unwrap();
+        txn.rollback().unwrap();
+
+        assert_eq!(file_mode(&path), Some(0o644));
+    }
 
     /// 临时设置 `CC_SWITCH_TEST_HOME`，Drop 时还原。
     ///

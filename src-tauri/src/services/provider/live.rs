@@ -2,14 +2,12 @@
 //!
 //! Handles reading and writing live configuration files for Claude, Codex, and Gemini.
 
-use std::collections::HashMap;
-
 use serde_json::{json, Value};
 use toml_edit::{DocumentMut, Item, TableLike};
 
 use crate::app_config::AppType;
 use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
-use crate::config::{delete_file, get_claude_settings_path, read_json_file, write_json_file};
+use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
 use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::Provider;
@@ -368,176 +366,6 @@ pub(crate) fn provider_uses_common_config(
     }
 }
 
-/// 字段级反 patch：从 `settings` 里减去 `patch` 出现过的字段，原样保留 patch
-/// 没碰过的字段。用于 ofox bind 的 unbind 流程——bind 时记下注入了哪些字段
-/// （patch 形态 = `ProxyService::read_*_live` 的返回值），unbind 时把它们从当前
-/// 磁盘里减掉，**用户在 bind 期间手动加的字段不会被误删**。
-///
-/// 跟 [`remove_common_config_from_settings`] 的差异：
-/// - patch 是 `Value`（不是字符串 snippet）；Codex patch 形态是 `{auth, config:"<TOML>"}`
-///   包装结构，跟 [`crate::services::proxy::ProxyService::read_codex_live`] 对齐
-/// - 支持 OpenCode/OpenClaw/Hermes——patch 形态是单个 provider 子节
-///
-/// 数组语义复用 [`json_remove_array_items`]：source 数组里的每个元素去 target 里
-/// 找 subset 匹配后移除；空 source 数组不会清空 target 数组（这正是用户在
-/// `models` 里加的项不丢的原因）。
-pub(crate) fn remove_patch_from_settings(
-    app_type: &AppType,
-    settings: &Value,
-    patch: &Value,
-) -> Result<Value, AppError> {
-    match app_type {
-        AppType::Claude => {
-            let mut result = settings.clone();
-            json_deep_remove(&mut result, patch);
-            Ok(result)
-        }
-        AppType::Codex => {
-            // patch = { "auth": {...}, "config": "<TOML 字符串>" }
-            // settings 同形态。auth 走 JSON 反 patch；config 走 TOML 反 patch。
-            let mut result = settings.clone();
-            if let Some(result_obj) = result.as_object_mut() {
-                if let (Some(target_auth), Some(patch_auth)) =
-                    (result_obj.get_mut("auth"), patch.get("auth"))
-                {
-                    json_deep_remove(target_auth, patch_auth);
-                }
-                let target_toml = result_obj
-                    .get("config")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let patch_toml = patch.get("config").and_then(Value::as_str).unwrap_or("");
-                if !patch_toml.trim().is_empty() {
-                    let mut target_doc = if target_toml.trim().is_empty() {
-                        DocumentMut::new()
-                    } else {
-                        target_toml.parse::<DocumentMut>().map_err(|e| {
-                            AppError::Message(format!(
-                                "Invalid Codex config.toml while removing patch: {e}"
-                            ))
-                        })?
-                    };
-                    let patch_doc = patch_toml
-                        .parse::<DocumentMut>()
-                        .map_err(|e| AppError::Message(format!("Invalid Codex patch TOML: {e}")))?;
-                    remove_toml_table_like(target_doc.as_table_mut(), patch_doc.as_table());
-                    result_obj.insert("config".to_string(), Value::String(target_doc.to_string()));
-                }
-            }
-            Ok(result)
-        }
-        AppType::Gemini => {
-            // patch = { "env": {...} }
-            let mut result = settings.clone();
-            if let (Some(target_env), Some(patch_env)) = (result.get_mut("env"), patch.get("env")) {
-                json_deep_remove(target_env, patch_env);
-            }
-            Ok(result)
-        }
-        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => {
-            // patch / settings 都是单个 provider 子节的 Value（顶层是 object）。
-            let mut result = settings.clone();
-            json_deep_remove(&mut result, patch);
-            Ok(result)
-        }
-    }
-}
-
-/// 字段级正 patch：把 `patch` 出现过的字段 merge 进 `settings`，`settings` 里
-/// patch 没碰过的字段原样保留。这是 [`remove_patch_from_settings`] 的**对称
-/// 反操作**——ofox bind 直写时用它把 base_url/token/model 注入用户现有磁盘配置
-/// （不整文件覆盖），unbind 时 `remove_patch_from_settings` 把同一份 patch 减回去。
-///
-/// patch 形态与 [`remove_patch_from_settings`] 完全一致（per-app）：
-/// - Claude：`{env:{...}}` JSON 子集 → `json_deep_merge`
-/// - Codex：`{auth:{...}, config:"<TOML>"}` → auth 走 JSON merge、config 走 TOML merge
-/// - Gemini：`{env:{...}}` → merge 进 env map
-/// - OpenCode/OpenClaw/Hermes：单 provider 子节（bind 走 `set_provider` 整覆盖子节，
-///   不经过本函数；列在这里只为保持 match 完整 + 语义对称）
-pub(crate) fn merge_patch_into_settings(
-    app_type: &AppType,
-    settings: &Value,
-    patch: &Value,
-) -> Result<Value, AppError> {
-    match app_type {
-        AppType::Claude => {
-            let mut result = if settings.is_object() {
-                settings.clone()
-            } else {
-                json!({})
-            };
-            json_deep_merge(&mut result, patch);
-            Ok(result)
-        }
-        AppType::Codex => {
-            // patch = { "auth": {...}, "config": "<TOML 字符串>" }，settings 同形态。
-            let mut result = if settings.is_object() {
-                settings.clone()
-            } else {
-                json!({})
-            };
-            let result_obj = result.as_object_mut().expect("result is object");
-
-            if let Some(patch_auth) = patch.get("auth") {
-                match result_obj.get_mut("auth") {
-                    Some(target_auth) => json_deep_merge(target_auth, patch_auth),
-                    None => {
-                        result_obj.insert("auth".to_string(), patch_auth.clone());
-                    }
-                }
-            }
-
-            let patch_toml = patch.get("config").and_then(Value::as_str).unwrap_or("");
-            if !patch_toml.trim().is_empty() {
-                let target_toml = result_obj
-                    .get("config")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let mut target_doc = if target_toml.trim().is_empty() {
-                    DocumentMut::new()
-                } else {
-                    target_toml.parse::<DocumentMut>().map_err(|e| {
-                        AppError::Message(format!(
-                            "Invalid Codex config.toml while merging patch: {e}"
-                        ))
-                    })?
-                };
-                let patch_doc = patch_toml
-                    .parse::<DocumentMut>()
-                    .map_err(|e| AppError::Message(format!("Invalid Codex patch TOML: {e}")))?;
-                merge_toml_table_like(target_doc.as_table_mut(), patch_doc.as_table());
-                result_obj.insert("config".to_string(), Value::String(target_doc.to_string()));
-            }
-            Ok(result)
-        }
-        AppType::Gemini => {
-            // patch = { "env": {...} }
-            let mut result = if settings.is_object() {
-                settings.clone()
-            } else {
-                json!({})
-            };
-            if let Some(patch_env) = patch.get("env") {
-                match result.get_mut("env") {
-                    Some(target_env) => json_deep_merge(target_env, patch_env),
-                    None => {
-                        result
-                            .as_object_mut()
-                            .expect("result is object")
-                            .insert("env".to_string(), patch_env.clone());
-                    }
-                }
-            }
-            Ok(result)
-        }
-        AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => {
-            let mut result = settings.clone();
-            json_deep_merge(&mut result, patch);
-            Ok(result)
-        }
-    }
-}
-
 pub(crate) fn remove_common_config_from_settings(
     app_type: &AppType,
     settings: &Value,
@@ -677,6 +505,15 @@ pub(crate) fn write_live_with_common_config(
     app_type: &AppType,
     provider: &Provider,
 ) -> Result<(), AppError> {
+    // Ofox 服务商的磁盘配置只由绑定流程写（带真实 key、只改受管字段）。这里写的是
+    // DB 里的模板（key 为空），对 Codex 还会整份覆盖 auth.json、冲掉 ChatGPT 登录。
+    if crate::database::dao::providers_seed::is_ofox_seed_id(&provider.id) {
+        log::debug!(
+            "skip writing Ofox template {} to live config; bindings manage it",
+            provider.id
+        );
+        return Ok(());
+    }
     let mut effective_provider = provider.clone();
     effective_provider.settings_config =
         build_effective_settings_with_common_config(db, app_type, provider)?;
@@ -758,79 +595,6 @@ pub(crate) fn normalize_provider_common_config_for_storage(
     }
 
     Ok(())
-}
-
-/// Live configuration snapshot for backup/restore
-#[derive(Clone)]
-#[allow(dead_code)]
-pub(crate) enum LiveSnapshot {
-    Claude {
-        settings: Option<Value>,
-    },
-    Codex {
-        auth: Option<Value>,
-        config: Option<String>,
-    },
-    Gemini {
-        env: Option<HashMap<String, String>>,
-        config: Option<Value>,
-    },
-}
-
-impl LiveSnapshot {
-    #[allow(dead_code)]
-    pub(crate) fn restore(&self) -> Result<(), AppError> {
-        match self {
-            LiveSnapshot::Claude { settings } => {
-                let path = get_claude_settings_path();
-                if let Some(value) = settings {
-                    write_json_file(&path, value)?;
-                } else if path.exists() {
-                    delete_file(&path)?;
-                }
-            }
-            LiveSnapshot::Codex { auth, config } => {
-                let auth_path = get_codex_auth_path();
-                let config_path = get_codex_config_path();
-                if let Some(value) = auth {
-                    write_json_file(&auth_path, value)?;
-                } else if auth_path.exists() {
-                    delete_file(&auth_path)?;
-                }
-
-                if let Some(text) = config {
-                    crate::config::write_text_file(&config_path, text)?;
-                } else if config_path.exists() {
-                    delete_file(&config_path)?;
-                }
-            }
-            LiveSnapshot::Gemini { env, .. } => {
-                use crate::gemini_config::{
-                    get_gemini_env_path, get_gemini_settings_path, write_gemini_env_atomic,
-                };
-                let path = get_gemini_env_path();
-                if let Some(env_map) = env {
-                    write_gemini_env_atomic(env_map)?;
-                } else if path.exists() {
-                    delete_file(&path)?;
-                }
-
-                let settings_path = get_gemini_settings_path();
-                match self {
-                    LiveSnapshot::Gemini {
-                        config: Some(cfg), ..
-                    } => {
-                        write_json_file(&settings_path, cfg)?;
-                    }
-                    LiveSnapshot::Gemini { config: None, .. } if settings_path.exists() => {
-                        delete_file(&settings_path)?;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
 /// Write live configuration snapshot for a provider

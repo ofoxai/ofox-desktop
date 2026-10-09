@@ -15,6 +15,11 @@ use tempfile::NamedTempFile;
 
 const CC_SWITCH_SQL_EXPORT_HEADER: &str = "-- Ofox Switch SQLite 导出";
 
+/// Tables that describe this machine's files and never leave it: skipped by every
+/// export, and kept from the local database by every import or restore. A bind
+/// snapshot from another machine or an older backup would restore the wrong files.
+const MACHINE_LOCAL_TABLES: &[&str] = &["ofox_bind_snapshot"];
+
 /// Tables whose data rows are skipped when exporting for WebDAV sync.
 const SYNC_SKIP_TABLES: &[&str] = &[
     "proxy_request_logs",
@@ -22,6 +27,7 @@ const SYNC_SKIP_TABLES: &[&str] = &[
     "provider_health",
     "proxy_live_backup",
     "usage_daily_rollups",
+    "ofox_bind_snapshot",
 ];
 
 /// Tables whose local data is preserved (restored from local snapshot) during WebDAV import.
@@ -31,6 +37,7 @@ const SYNC_PRESERVE_TABLES: &[&str] = &[
     "stream_check_logs",
     "proxy_live_backup",
     "usage_daily_rollups",
+    "ofox_bind_snapshot",
 ];
 
 /// A database backup entry for the UI
@@ -46,7 +53,7 @@ impl Database {
     /// 导出为 SQLite 兼容的 SQL 文本（内存字符串，完整导出）
     pub fn export_sql_string(&self) -> Result<String, AppError> {
         let snapshot = self.snapshot_to_memory()?;
-        Self::dump_sql(&snapshot, &[])
+        Self::dump_sql(&snapshot, MACHINE_LOCAL_TABLES)
     }
 
     /// Export SQL for sync (WebDAV), skipping local-only tables' data
@@ -82,7 +89,7 @@ impl Database {
 
     /// 从 SQL 字符串导入，返回生成的备份 ID（若无备份则为空字符串）
     pub fn import_sql_string(&self, sql_raw: &str) -> Result<String, AppError> {
-        self.import_sql_string_inner(sql_raw, &[])
+        self.import_sql_string_inner(sql_raw, MACHINE_LOCAL_TABLES)
     }
 
     /// Import SQL generated for sync, then restore local-only tables from the
@@ -576,6 +583,10 @@ impl Database {
             .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
             .unwrap_or_default();
 
+        // Machine-local rows describe this machine's current files; an old backup
+        // must not bring back stale ones.
+        let local_snapshot = self.snapshot_to_memory()?;
+
         // Step 2: Open the backup file and restore it to the main database
         let source_conn =
             Connection::open(&backup_path).map_err(|e| AppError::Database(e.to_string()))?;
@@ -593,6 +604,10 @@ impl Database {
         self.create_tables()?;
         self.apply_schema_migrations()?;
         self.ensure_model_pricing_seeded()?;
+        {
+            let main_conn = lock_conn!(self.conn);
+            Self::restore_tables(&local_snapshot, &main_conn, MACHINE_LOCAL_TABLES)?;
+        }
 
         log::info!("Database restored from backup: {filename}, safety backup: {safety_id}");
         Ok(safety_id)
@@ -791,8 +806,10 @@ mod tests {
         std::fs::create_dir_all(&test_home).expect("create test home");
         std::env::set_var("CC_SWITCH_TEST_HOME", &test_home);
 
-        let mut settings = AppSettings::default();
-        settings.backup_interval_hours = Some(0);
+        let settings = AppSettings {
+            backup_interval_hours: Some(0),
+            ..AppSettings::default()
+        };
         update_settings(settings).expect("disable auto backup");
 
         let db = Database::memory()?;
@@ -853,6 +870,99 @@ mod tests {
             None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
         }
 
+        Ok(())
+    }
+
+    /// 临时把 `CC_SWITCH_TEST_HOME` 指向独立目录，Drop 时还原；配合 `#[serial]`。
+    struct TestHome {
+        previous: Option<std::ffi::OsString>,
+        dir: std::path::PathBuf,
+    }
+
+    impl TestHome {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("ofox-backup-test-{name}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create test home");
+            let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
+            std::env::set_var("CC_SWITCH_TEST_HOME", &dir);
+            Self { previous, dir }
+        }
+    }
+
+    impl Drop for TestHome {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn exports_never_include_bind_snapshots() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        db.upsert_bind_record("codex", "{\"secret\":\"local-only\"}")?;
+        for dump in [db.export_sql_string()?, db.export_sql_string_for_sync()?] {
+            assert!(
+                !dump.contains("local-only"),
+                "bind snapshot leaked into export"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn imports_keep_local_bind_snapshots() -> Result<(), AppError> {
+        let _home = TestHome::new("import-keeps-bind");
+        let remote = Database::memory()?;
+        {
+            // Import only accepts dumps that contain providers or MCP data.
+            let conn = crate::database::lock_conn!(remote.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('remote-provider', 'claude', 'Remote Provider', '{}', '{}')",
+                [],
+            )?;
+        }
+        remote.upsert_bind_record("codex", "remote")?;
+        let full = remote.export_sql_string()?;
+        let sync = remote.export_sql_string_for_sync()?;
+
+        let local = Database::memory()?;
+        local.upsert_bind_record("codex", "local")?;
+        local.import_sql_string(&full)?;
+        assert_eq!(local.get_bind_record("codex")?.unwrap().record, "local");
+        local.import_sql_string_for_sync(&sync)?;
+        assert_eq!(local.get_bind_record("codex")?.unwrap().record, "local");
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn restoring_a_backup_keeps_local_bind_snapshots() -> Result<(), AppError> {
+        let home = TestHome::new("restore-keeps-bind");
+        let backup_dir = crate::config::get_app_config_dir().join("backups");
+        std::fs::create_dir_all(&backup_dir).expect("create backups dir");
+
+        let old = Database::memory()?;
+        old.upsert_bind_record("claude", "stale-from-backup")?;
+        {
+            let conn = crate::database::lock_conn!(old.conn);
+            conn.execute(
+                "VACUUM INTO ?1",
+                [backup_dir.join("old.db").to_string_lossy().to_string()],
+            )?;
+        }
+
+        let db = Database::memory()?;
+        db.upsert_bind_record("codex", "current")?;
+        db.restore_from_backup("old.db")?;
+        assert!(db.get_bind_record("claude")?.is_none());
+        assert_eq!(db.get_bind_record("codex")?.unwrap().record, "current");
+        drop(home);
         Ok(())
     }
 }

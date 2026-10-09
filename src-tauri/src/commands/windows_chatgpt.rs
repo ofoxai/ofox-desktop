@@ -444,36 +444,44 @@ where
     Ok(())
 }
 
-/// PowerShell 探 AppxPackage 是否装了 OpenAI.Codex。返回 Some(version) 或 None。
 #[cfg(target_os = "windows")]
-pub(crate) fn detect_chatgpt_desktop_app() -> Result<Option<String>, String> {
+fn appx_probe_powershell() -> PathBuf {
     let system_root = std::env::var_os("SystemRoot")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-    let powershell = system_root
+    system_root
         .join("System32")
         .join("WindowsPowerShell")
         .join("v1.0")
-        .join("powershell.exe");
+        .join("powershell.exe")
+}
+
+#[cfg(target_os = "windows")]
+fn appx_probe_script() -> String {
     // Get-AppxPackage 返回多版本时按 version desc 排、取第一条，与用户"最新版
     // 即当前版"的直觉对齐。tab 分隔字段避免和空格路径打架。
     // PACKAGE_NAME 只允许字母数字点，脚本注入攻击面为零；这里 format! 拼进去
     // 让 PACKAGE_NAME 保持是"改名唯一入口"的角色。
-    let script = format!(
+    format!(
         "$ErrorActionPreference='Stop';\
          [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);\
-         $p=Get-AppxPackage -Name {PACKAGE_NAME} -ErrorAction SilentlyContinue | \
+         $p=Get-AppxPackage -Name {PACKAGE_NAME} -ErrorAction Stop | \
          Sort-Object {{[version]$_.Version}} -Descending | Select-Object -First 1;\
          if($p){{[Console]::Out.WriteLine(('{{0}}{{1}}{{2}}' -f $p.Version,[char]9,$p.PackageFamilyName))}}"
-    );
-    let output = Command::new(powershell)
+    )
+}
+
+/// Existing lifecycle operations require a readable version for update verification.
+#[cfg(target_os = "windows")]
+pub(crate) fn detect_chatgpt_desktop_app() -> Result<Option<String>, String> {
+    let output = Command::new(appx_probe_powershell())
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            &script,
+            &appx_probe_script(),
         ])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
@@ -485,6 +493,72 @@ pub(crate) fn detect_chatgpt_desktop_app() -> Result<Option<String>, String> {
         ));
     }
     parse_appx_identity(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Local presence is independent of version metadata and bounded separately
+/// from install/update operations, so a failed query cannot imply an uninstall.
+#[cfg(target_os = "windows")]
+pub(crate) async fn detect_chatgpt_installation(
+) -> Result<Option<super::tool_update::DesktopInstallation>, String> {
+    let mut command = tokio::process::Command::new(appx_probe_powershell());
+    command
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &appx_probe_script(),
+        ])
+        .creation_flags(CREATE_NO_WINDOW);
+    appx_presence_from_output(super::tool_update::bounded_output(command).await)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn appx_presence_from_output(
+    output: Result<std::process::Output, String>,
+) -> Result<Option<super::tool_update::DesktopInstallation>, String> {
+    let output = output?;
+    if !output.status.success() {
+        return Err(format!(
+            "Get-AppxPackage failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    if output.stdout.iter().all(u8::is_ascii_whitespace)
+        && !output.stderr.iter().all(u8::is_ascii_whitespace)
+    {
+        return Err("Get-AppxPackage returned errors without a package lookup result".into());
+    }
+    parse_appx_presence(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_appx_presence(
+    output: &str,
+) -> Result<Option<super::tool_update::DesktopInstallation>, String> {
+    let line = output
+        .lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .find(|line| !line.trim().is_empty());
+    let Some(line) = line else { return Ok(None) };
+    let (version, family) = line
+        .split_once('\t')
+        .ok_or("Get-AppxPackage did not return package identity")?;
+    if family.trim() != super::chatgpt_updates::PACKAGE_FAMILY {
+        return Err("Get-AppxPackage returned an unexpected package identity".into());
+    }
+    let version = super::chatgpt_updates::compare_dotted(version.trim(), version.trim())
+        .is_some()
+        .then(|| version.trim().to_string());
+    let error = version
+        .is_none()
+        .then(|| "Installed ChatGPT package has no valid version metadata".to_string());
+    Ok(Some(super::tool_update::DesktopInstallation {
+        path: std::path::PathBuf::from(super::chatgpt_updates::windows_launch_target()),
+        version,
+        error,
+    }))
 }
 
 /// 抽出来的纯函数——单测能直接喂假 stdout 打回归。
@@ -569,6 +643,54 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::tool_update::probe_fixture_output;
+
+    #[test]
+    fn appx_query_failures_cannot_imply_an_uninstall() {
+        for output in [
+            Err("Version probe timed out".into()),
+            Err("PowerShell could not start: Access is denied".into()),
+            Ok(probe_fixture_output(
+                "",
+                "Get-AppxPackage: Access is denied",
+                1,
+            )),
+            Ok(probe_fixture_output(
+                "",
+                "Get-AppxPackage: Access is denied",
+                0,
+            )),
+            Ok(probe_fixture_output(
+                "26.924.22138\tOpenAI.Codex_2p2nqsd0c76g0",
+                "query failed",
+                1,
+            )),
+            Ok(probe_fixture_output("unexpected PowerShell output", "", 0)),
+        ] {
+            assert!(appx_presence_from_output(output).is_err());
+        }
+        assert!(
+            appx_presence_from_output(Ok(probe_fixture_output("\r\n", "", 0)))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn registered_appx_identity_survives_invalid_version_metadata() {
+        for version in ["", "not-a-version", "26.924.x", "-1.924.1"] {
+            let output = format!("{version}\tOpenAI.Codex_2p2nqsd0c76g0\r\n");
+            let installed = appx_presence_from_output(Ok(probe_fixture_output(&output, "", 0)))
+                .unwrap()
+                .unwrap();
+            assert!(installed.version.is_none());
+            assert!(installed.error.is_some());
+            assert_eq!(
+                installed.path,
+                std::path::PathBuf::from(super::super::chatgpt_updates::windows_launch_target()),
+            );
+        }
+    }
 
     #[test]
     fn parses_version_from_appx_output() {
@@ -588,5 +710,30 @@ mod tests {
     #[test]
     fn missing_version_is_error() {
         assert!(parse_appx_identity("\tOpenAI.Codex_2p2nqsd0c76g0").is_err());
+    }
+
+    #[test]
+    fn package_presence_survives_missing_version_metadata() {
+        let installed = parse_appx_presence("\tOpenAI.Codex_2p2nqsd0c76g0\r\n")
+            .unwrap()
+            .unwrap();
+        assert!(installed.version.is_none());
+        assert!(installed.error.is_some());
+        assert_eq!(
+            installed.path,
+            std::path::PathBuf::from(super::super::chatgpt_updates::windows_launch_target())
+        );
+    }
+
+    #[test]
+    fn package_presence_requires_a_complete_valid_identity() {
+        assert!(parse_appx_presence("").unwrap().is_none());
+        assert!(parse_appx_presence("26.924.22138").is_err());
+        assert!(parse_appx_presence("26.924.22138\tOther.Package_family").is_err());
+        let installed = parse_appx_presence("26.924.22138\tOpenAI.Codex_2p2nqsd0c76g0")
+            .unwrap()
+            .unwrap();
+        assert_eq!(installed.version.as_deref(), Some("26.924.22138"));
+        assert!(installed.error.is_none());
     }
 }

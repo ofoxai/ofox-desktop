@@ -6,6 +6,44 @@
   "toolInstall": {
     "exitCode": "Installation did not finish (exit code {{code}}); please retry"
   },
+  "unbind": {
+    "button": "Unbind",
+    "confirm": "Confirm unbind?",
+    "willRestoreTitle": "Unbinding restores how this tool connected before Ofox:",
+    "generic": "Ofox's address, key and model will be removed and your previous setup restored.",
+    "keepNotice": "MCP servers, skills, plugins and other settings are kept.",
+    "forceRestoreNotice": "These settings return to their pre-Ofox values even if you changed them while bound.",
+    "legacyNotice": "This tool was bound by an older version, so its original settings weren't saved. Unbinding removes Ofox's address, key and model and returns the tool to its default sign-in; your earlier custom settings can't be restored.",
+    "sharedNotice": "{{others}} still uses Ofox, so the shared ~/.codex config stays until it is unbound too.",
+    "nothingToRestore": "No Ofox configuration was found; unbinding only removes it from the list.",
+    "success": "{{tool}} unbound",
+    "resultExact": "Config files are back exactly as they were before binding.",
+    "resultRestored": "Restored {{count}} connection settings.",
+    "resultShared": "{{others}} still uses Ofox, so ~/.codex was kept.",
+    "resultLegacy": "Bound by an older version: Ofox's settings were removed, but your earlier custom settings can't be restored.",
+    "failed": "Unbind failed: {{error}}",
+    "warning": {
+      "previousProviderMissing": "The provider you used before binding no longer exists; switched to the official default.",
+      "fileKeptHasOtherContent": "A config file Ofox created now has content you added, so it was kept.",
+      "recordCleanupFailed": "Failed to remove the binding record. The binding is retained; retry.",
+      "leftoverRemoved": "Ofox settings were also found in another location and have been removed.",
+      "configAlreadyMissing": "Configuration was deleted and will not be recreated."
+    }
+  },
+  "apexSwitch": {
+    "auto": "Auto-detect",
+    "autoLabel": "Auto · {{apex}}",
+    "pinned": "Pinned to {{apex}}; the region no longer follows your network at launch",
+    "switched": "Switched to {{apex}}",
+    "switchFailed": "Could not switch region, please try again later",
+    "autoDetected": "Selected {{apex}} from your current network; it will be re-detected at every launch",
+    "autoUndetected": "Could not detect your network's region; keeping {{apex}}. It will be retried at the next launch",
+    "confirmTitle": "Switching region requires signing in again",
+    "confirmMessage": "The current session will be cleared and you will need to authorize again on {{apex}}.\nBound tools keep their current gateway address until you bind them again.",
+    "confirmAutoMessage": "The region will be re-detected from your current network. If the result differs from {{apex}}, the current session is cleared and you will need to sign in again.",
+    "confirm": "Switch",
+    "cancel": "Keep current region"
+  },
   "modelCompatibility": {
     "title": "Streaming compatibility",
     "checking": "Checking streaming compatibility…",
@@ -26,7 +64,7 @@
     "workBuddyExpectedEndpoint": "Ofox endpoint for this region",
     "workBuddyEndpointMismatch": "WorkBuddy uses a different endpoint or its configuration was edited. Rebind or review the configuration.",
     "workBuddyEndpointCheckScope": "Model checks use Ofox's network route. If WorkBuddy still requests the old endpoint, quit and reopen it.",
-    "workBuddyEndpointSyncFailed": "Region changed, but WorkBuddy's endpoint could not be updated. Check it in WorkBuddy management.",
+    "workBuddyEndpointSyncFailed": "Region changed, but some tool endpoints could not be updated. Check their configuration in Manage.",
     "workBuddyTestModel": "Choose a WorkBuddy model to test",
     "workBuddyTest": "Test selected model",
     "workBuddySaveHint": "Catalog-compatible models can be saved now; streaming checks are optional.",
@@ -845,7 +883,14 @@
     "openConfigFolderFailed": "Failed to open config folder:",
     "selectConfigDirFailed": "Failed to select config directory:",
     "getDefaultConfigDirFailed": "Failed to get default config directory:",
-    "openReleaseNotesFailed": "Failed to open release notes:"
+    "openReleaseNotesFailed": "Failed to open release notes:",
+    "repair": "Repair",
+    "repairing": "Repairing…",
+    "repairInstallHint": "Reinstall {{tool}}",
+    "repairDownloadHint": "Open the download page for {{tool}}",
+    "repairUnavailable": "This tool has to be installed manually",
+    "repairFailed": "Repairing {{tool}} failed: {{message}}",
+    "repairDismiss": "Dismiss"
   },
   "providerForm": {
     "supplierName": "Provider Name",
@@ -2625,5 +2670,47 @@
     "expiredHint": "Run the {{tool}} command to refresh your login",
     "queryFailed": "Query failed",
     "refresh": "Refresh"
+  },
+  "toolLifecycle": {
+    "desktopApp": "Desktop app",
+    "modelUnset": "Model not set",
+    "analytics": "Usage",
+    "analyticsFailed": "Failed to open usage statistics",
+    "downloadFailed": "Failed to open installation page",
+    "notInstalled": "Not installed",
+    "installationBroken": "Installation problem",
+    "binding": {
+      "missing": "Binding configuration missing",
+      "modified": "Configuration conflict",
+      "unknown": "Configuration check failed"
+    },
+    "reinstall": "Reinstall",
+    "repairInstall": "Repair installation",
+    "download": "Download",
+    "open": "Open",
+    "manage": "Manage",
+    "needsAttention": "{{count}} need attention",
+    "noInstalledBoundTools": "No installed bound tools",
+    "missingTools": "Not installed ({{count}})",
+    "bindingRetained": "Bindings retained",
+    "boundNotInstalled": "Bound · Not installed",
+    "detectionFailed": "Detection failed",
+    "boundMissingHint": "Bindings for uninstalled tools are retained. Manage or reinstall them from the home page.",
+    "manageFromHome": "Manage on home",
+    "retryDetection": "Check again",
+    "restoreBinding": "Restore binding",
+    "restoringBinding": "Restoring…",
+    "restoreSucceeded": "Binding restored for {{tool}}",
+    "restoreFailed": "Failed to restore binding: {{error}}",
+    "bindFailed": "Some tools could not be bound: {{tools}}. Retry or check your sign-in.",
+    "upstreamInstructions": "Install instructions",
+    "configuration": {
+      "loading": "Checking binding configuration…",
+      "missing": "Binding configuration is missing. Saving and tests are paused; you can restore the binding.",
+      "modified": "Binding configuration was modified. Review the configuration conflict before making changes.",
+      "unknown": "Binding configuration could not be read. You can still unbind or retry later."
+    },
+    "versionUnknown": "Installed · Version unknown",
+    "noInstallationDetected": "No installation detected"
   }
 }

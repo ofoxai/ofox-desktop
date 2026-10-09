@@ -116,95 +116,6 @@ pub(crate) const OFOX_SEED_IDS: &[&str] = &[
     "ofox-hermes",
 ];
 
-/// 切换 OFox apex 后，把所有 ofox-* provider 的 settings_config 用**当前 apex**
-/// 的 seed 模板重新覆盖一遍。
-///
-/// **覆盖而不是 patch**：codex 那条 seed 把 `base_url` 嵌在 TOML 字符串里
-/// （不是 JSON path），用 regex 改 base_url 既脆又难维护；直接拿当前 apex
-/// 重新拼整段 settings_config，模板是唯一事实源，不会有"哪个字段我忘了改"
-/// 的暗坑。
-///
-/// 调用约束：
-/// - 必须在 [`crate::ofox_apex::current_apex`] 已经被切到**目标**值之后调用——
-///   `ofox_seeds()` 内部会按当前值拼 base_url，顺序错了等于没切。
-/// - 必须在 OFox logout（清 token）**之前或之后**都行：新 bind 直写架构下
-///   ofox-* provider 的 settings_config 里 `*_KEY`/`*_TOKEN` 字段永远是
-///   seed 模板的空字符串——本函数自身不读/写 token，token 注入只发生在
-///   `commands/ofox_auth.rs::bind_tool_to_ofox_internal` 内部、写到工具
-///   真实配置文件而非 DB。
-///
-/// 部分失败处理：单个 row 写失败 → log warn 继续下一个，整体返回成功条数。
-/// 半残总比整段崩好。
-pub fn reseed_ofox_providers_with_current_apex(
-    db: &crate::database::Database,
-) -> Result<usize, crate::error::AppError> {
-    let mut updated = 0_usize;
-    for seed in ofox_seeds() {
-        let app_type_str = seed.app_type.as_str();
-
-        // 仅处理已存在的 row：用户可能手动删除过某条 ofox-* seed（被
-        // `init_default_ofox_providers` 的 flag 保护），那种情况下不应该
-        // 重新插入——尊重用户的删除决定。
-        let existing = match db.get_provider_by_id(seed.id, app_type_str) {
-            Ok(Some(p)) => p,
-            Ok(None) => {
-                log::debug!(
-                    "[ofox_apex_reseed] {}/{} not in DB (deleted by user?), skip",
-                    app_type_str,
-                    seed.id
-                );
-                continue;
-            }
-            Err(e) => {
-                log::warn!(
-                    "[ofox_apex_reseed] read {}/{} failed: {e}; skip",
-                    app_type_str,
-                    seed.id
-                );
-                continue;
-            }
-        };
-
-        let settings_config: serde_json::Value =
-            match serde_json::from_str(&seed.settings_config_json) {
-                Ok(v) => v,
-                Err(e) => {
-                    log::warn!(
-                        "[ofox_apex_reseed] seed JSON for {} invalid: {e}; skip",
-                        seed.id
-                    );
-                    continue;
-                }
-            };
-
-        // 把旧值留一条 debug 日志便于事后追查（包括误切回的回滚）。
-        log::debug!(
-            "[ofox_apex_reseed] {}/{} OLD settings_config: {}",
-            app_type_str,
-            seed.id,
-            existing.settings_config
-        );
-
-        if let Err(e) = db.update_provider_settings_config(app_type_str, seed.id, &settings_config)
-        {
-            log::warn!(
-                "[ofox_apex_reseed] write {}/{} failed: {e}; skip",
-                app_type_str,
-                seed.id
-            );
-            continue;
-        }
-
-        updated += 1;
-        log::info!(
-            "[ofox_apex_reseed] reseeded {}/{} with current apex",
-            app_type_str,
-            seed.id
-        );
-    }
-    Ok(updated)
-}
-
 /// 6 个应用各一条 OfoxAI 种子。
 ///
 /// settings_config 与前端各 `*ProviderPresets.ts` 中的 OfoxAI 条目保持一致，
@@ -252,7 +163,7 @@ pub(crate) fn ofox_seeds() -> Vec<OfoxProviderSeed> {
             icon: "ofox",
             icon_color: "#D97706",
             settings_config_json: format!(
-                r#"{{"auth":{{"OPENAI_API_KEY":""}},"config":"model_provider = \"ofox\"\nmodel = \"\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\n\n[model_providers.ofox]\nname = \"ofox\"\nbase_url = \"{openai_v1}\"\nwire_api = \"responses\"\nrequires_openai_auth = true"}}"#
+                r#"{{"auth":{{}},"config":"model_provider = \"ofox\"\nmodel = \"\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\n\n[model_providers.ofox]\nname = \"ofox\"\nbase_url = \"{openai_v1}\"\nwire_api = \"responses\"\nrequires_openai_auth = false"}}"#
             ),
             meta_json: r#"{"providerType":"ofox"}"#,
         },
@@ -265,8 +176,8 @@ pub(crate) fn ofox_seeds() -> Vec<OfoxProviderSeed> {
             icon: "ofox",
             icon_color: "#D97706",
             // GEMINI_API_KEY 字段在 seed 里留空（占位）——bind 时由
-            // `ProxyService::ofox_write_direct_to_live` 把 sk-of- 注入到
-            // 工具真实配置文件（~/.gemini/.env），DB 行始终是 seed 模板态。
+            // `services::ofox_bind` 把 sk-of- 注入到工具真实配置文件
+            // （~/.gemini/.env），DB 行始终是 seed 模板态。
             // Gemini CLI 同时支持 Google OAuth 与 GEMINI_API_KEY 两种走法，
             // 这里走的是 GEMINI_API_KEY + base URL 重定向到 ofox gateway。
             settings_config_json: format!(
