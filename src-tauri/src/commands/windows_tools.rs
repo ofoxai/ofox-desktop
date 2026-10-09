@@ -11,24 +11,14 @@
 
 use std::path::{Path, PathBuf};
 
-/// 程序文件名的规则：Windows 认扩展名，Unix 只有裸名（让单测能在 macOS 上跑）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Flavor {
-    Windows,
-    Unix,
-}
-
 /// `dirs` 里第一个有 `name` 程序的：Windows 上依次 `X.exe`、`X.cmd`、`X`
 /// （安装器的二进制、npm 的 shim）。
-pub(crate) fn tool_in(name: &str, flavor: Flavor, dirs: &[PathBuf]) -> Option<PathBuf> {
-    let names = match flavor {
-        Flavor::Windows => vec![
-            format!("{name}.exe"),
-            format!("{name}.cmd"),
-            name.to_string(),
-        ],
-        Flavor::Unix => vec![name.to_string()],
-    };
+pub(crate) fn tool_in(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
+    let names = [
+        format!("{name}.exe"),
+        format!("{name}.cmd"),
+        name.to_string(),
+    ];
     dirs.iter()
         .filter(|dir| !dir.as_os_str().is_empty())
         .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
@@ -130,7 +120,7 @@ pub(crate) fn strip_verbatim(path: PathBuf) -> PathBuf {
 
 #[cfg(target_os = "windows")]
 mod system {
-    use super::{merge_path, split_path_value, strip_verbatim, tool_in, user_bin_dirs, Flavor};
+    use super::{merge_path, split_path_value, strip_verbatim, tool_in, user_bin_dirs};
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE};
@@ -154,7 +144,7 @@ mod system {
     }
 
     /// 检测、启动、升级共用的 PATH：注册表机器的、用户的，再补 Ofox 进程独有的目录。
-    pub(crate) fn effective_path_dirs() -> Vec<PathBuf> {
+    fn effective_path_dirs() -> Vec<PathBuf> {
         let process = std::env::var_os("PATH")
             .map(|path| std::env::split_paths(&path).collect())
             .unwrap_or_default();
@@ -181,7 +171,7 @@ mod system {
             appdata.as_deref(),
             local_appdata.as_deref(),
         ));
-        tool_in(name, Flavor::Windows, &dirs)
+        tool_in(name, &dirs)
     }
 
     /// 跟随符号链接和 junction 之后的真实路径（Codex 的 install.ps1 用 junction）。
@@ -191,7 +181,7 @@ mod system {
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) use system::{effective_path, effective_path_dirs, find_tool, real_path};
+pub(crate) use system::{effective_path, find_tool, real_path};
 
 #[cfg(test)]
 mod tests {
@@ -219,12 +209,9 @@ mod tests {
         let npm = temp.path().join("npm");
         touch(&npm, "codex");
         let shim = touch(&npm, "codex.cmd");
-        assert_eq!(
-            tool_in("codex", Flavor::Windows, std::slice::from_ref(&npm)),
-            Some(shim)
-        );
+        assert_eq!(tool_in("codex", std::slice::from_ref(&npm)), Some(shim));
         let exe = touch(&npm, "codex.exe");
-        assert_eq!(tool_in("codex", Flavor::Windows, &[npm]), Some(exe));
+        assert_eq!(tool_in("codex", &[npm]), Some(exe));
     }
 
     #[test]
@@ -236,20 +223,8 @@ mod tests {
         let found = touch(&second, "claude.cmd");
         touch(&temp.path().join("third"), "claude.exe");
         let dirs = [first, second, temp.path().join("third")];
-        assert_eq!(tool_in("claude", Flavor::Windows, &dirs), Some(found));
-        assert_eq!(tool_in("missing", Flavor::Windows, &dirs), None);
-    }
-
-    #[test]
-    fn tool_in_on_unix_only_takes_the_bare_name() {
-        let temp = tempfile::tempdir().unwrap();
-        touch(temp.path(), "gemini.cmd");
-        assert_eq!(tool_in("gemini", Flavor::Unix, &[temp.path().into()]), None);
-        let bare = touch(temp.path(), "gemini");
-        assert_eq!(
-            tool_in("gemini", Flavor::Unix, &[temp.path().into()]),
-            Some(bare)
-        );
+        assert_eq!(tool_in("claude", &dirs), Some(found));
+        assert_eq!(tool_in("missing", &dirs), None);
     }
 
     #[test]
