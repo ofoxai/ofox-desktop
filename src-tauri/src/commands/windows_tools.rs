@@ -128,6 +128,71 @@ pub(crate) fn strip_verbatim(path: PathBuf) -> PathBuf {
     }
 }
 
+#[cfg(target_os = "windows")]
+mod system {
+    use super::{merge_path, split_path_value, strip_verbatim, tool_in, user_bin_dirs, Flavor};
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE};
+    use winreg::{RegKey, HKEY};
+
+    const MACHINE_ENVIRONMENT: &str =
+        r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+    const USER_ENVIRONMENT: &str = "Environment";
+
+    fn env_var(name: &str) -> Option<String> {
+        std::env::var(name).ok()
+    }
+
+    /// 注册表里此刻的 `Path`；读不到当作空（例如被策略禁止读取 HKLM）。
+    fn registry_path(root: HKEY, subkey: &str) -> Vec<PathBuf> {
+        RegKey::predef(root)
+            .open_subkey_with_flags(subkey, KEY_QUERY_VALUE)
+            .and_then(|key| key.get_value::<String, _>("Path"))
+            .map(|raw| split_path_value(&raw, env_var))
+            .unwrap_or_default()
+    }
+
+    /// 检测、启动、升级共用的 PATH：注册表机器的、用户的，再补 Ofox 进程独有的目录。
+    pub(crate) fn effective_path_dirs() -> Vec<PathBuf> {
+        let process = std::env::var_os("PATH")
+            .map(|path| std::env::split_paths(&path).collect())
+            .unwrap_or_default();
+        merge_path(
+            registry_path(HKEY_LOCAL_MACHINE, MACHINE_ENVIRONMENT),
+            registry_path(HKEY_CURRENT_USER, USER_ENVIRONMENT),
+            process,
+        )
+    }
+
+    /// [`effective_path_dirs`] 拼成子进程可用的 `PATH`。
+    pub(crate) fn effective_path() -> OsString {
+        std::env::join_paths(effective_path_dirs())
+            .unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
+    }
+
+    /// 终端此刻会运行的 `name`：先按 [`effective_path_dirs`]，再看用户工具常装的目录。
+    pub(crate) fn find_tool(name: &str) -> Option<PathBuf> {
+        let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
+        let local_appdata = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        let mut dirs = effective_path_dirs();
+        dirs.extend(user_bin_dirs(
+            &crate::config::get_home_dir(),
+            appdata.as_deref(),
+            local_appdata.as_deref(),
+        ));
+        tool_in(name, Flavor::Windows, &dirs)
+    }
+
+    /// 跟随符号链接和 junction 之后的真实路径（Codex 的 install.ps1 用 junction）。
+    pub(crate) fn real_path(path: &Path) -> std::io::Result<PathBuf> {
+        std::fs::canonicalize(path).map(strip_verbatim)
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) use system::{effective_path, effective_path_dirs, find_tool, real_path};
+
 #[cfg(test)]
 mod tests {
     use super::*;

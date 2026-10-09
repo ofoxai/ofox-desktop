@@ -172,7 +172,44 @@ pub(crate) struct UpdatePlan {
     path: String,
 }
 
+/// Windows has no login shell: resolve the CLI the way a terminal opened now
+/// would (registry PATH first, see `windows_tools`), and run its version check
+/// with that PATH so npm shims find node.
+#[cfg(target_os = "windows")]
+pub(crate) async fn probe(tool: &str) -> Result<Installation, ProbeError> {
+    if npm_package(tool).is_none() && tool != "hermes" {
+        return Err("Unsupported CLI".into());
+    }
+    let path = super::windows_tools::find_tool(tool).ok_or(ProbeError::NotFound)?;
+    let search_path = super::windows_tools::effective_path()
+        .to_string_lossy()
+        .into_owned();
+    let real = match super::windows_tools::real_path(&path) {
+        Ok(real) => real,
+        Err(error) => {
+            return Ok(Installation {
+                real: path.clone(),
+                path,
+                version: String::new(),
+                error: Some(format!("Active executable failed its path check: {error}")),
+                search_path,
+            });
+        }
+    };
+    let mut command = super::misc::version_command(&path);
+    command.env("PATH", &search_path);
+    let (version, error) = executable_version(bounded_output(command).await);
+    Ok(Installation {
+        path,
+        real,
+        version,
+        error,
+        search_path,
+    })
+}
+
 /// Match the login + interactive shell used by launch_tool. Markers discard rc output.
+#[cfg(not(target_os = "windows"))]
 pub(crate) async fn probe(tool: &str) -> Result<Installation, ProbeError> {
     if npm_package(tool).is_none() && tool != "hermes" {
         return Err("Unsupported CLI".into());

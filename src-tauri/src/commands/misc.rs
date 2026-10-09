@@ -699,28 +699,31 @@ async fn get_single_tool_version_impl(
     }
 
     let (env_type, wsl_distro) = tool_env_type_and_wsl_distro(tool);
-    #[cfg(unix)]
-    let active_installation = super::tool_update::probe(tool).await;
-    #[cfg(unix)]
-    let local = match &active_installation {
-        Ok(installation) => LocalDetection::found(
+    // A CLI bound to WSL is detected inside WSL; everything else the way a
+    // terminal opened now would find it.
+    let active_installation = match wsl_distro {
+        Some(_) => Err(ProbeError::Failed(
+            "WSL installations are detected inside WSL".into(),
+        )),
+        None => super::tool_update::probe(tool).await,
+    };
+    let local = match (wsl_distro.as_deref(), &active_installation) {
+        #[cfg(not(unix))]
+        (Some(distro), _) => try_get_version_wsl(tool, distro, wsl_shell, wsl_shell_flag).await,
+        (_, Ok(installation)) => LocalDetection::found(
             installation.path.clone(),
             (!installation.version.is_empty()).then(|| installation.version.clone()),
             installation.error.clone(),
         ),
-        Err(ProbeError::NotFound) => scan_cli_version(tool).await,
-        Err(error) => after_failed_shell_lookup(error.to_string(), scan_cli_version(tool).await),
-    };
-    #[cfg(not(unix))]
-    let local = if let Some(distro) = wsl_distro.as_deref() {
-        try_get_version_wsl(tool, distro, wsl_shell, wsl_shell_flag).await
-    } else {
-        scan_cli_version(tool).await
+        (_, Err(ProbeError::NotFound)) => scan_cli_version(tool).await,
+        (_, Err(error)) => {
+            after_failed_shell_lookup(error.to_string(), scan_cli_version(tool).await)
+        }
     };
 
-    #[cfg(target_os = "macos")]
-    if tool == "codex" && local.status == InstallationStatus::NotInstalled {
-        match super::tool_update::codex_desktop_version().await {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if tool == "codex" && wsl_distro.is_none() && local.status == InstallationStatus::NotInstalled {
+        match codex_desktop_app().await {
             Ok(Some(app)) => {
                 return ToolVersion {
                     name: tool.into(),
@@ -802,9 +805,18 @@ async fn get_single_tool_version_impl(
     }
 }
 
+/// The Codex desktop app, counted as Codex when its CLI is absent:
+/// ChatGPT.app on macOS, the Microsoft Store package on Windows.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+async fn codex_desktop_app() -> Result<Option<DesktopInstallation>, String> {
+    #[cfg(target_os = "macos")]
+    return super::tool_update::codex_desktop_version().await;
+    #[cfg(target_os = "windows")]
+    return super::windows_chatgpt::detect_chatgpt_installation().await;
+}
+
 /// A failed shell lookup is not uninstall evidence, but an executable found by
 /// the path scan (e.g. behind an alias or a slow rc file) still proves installation.
-#[cfg(any(unix, test))]
 fn after_failed_shell_lookup(probe_error: String, scanned: LocalDetection) -> LocalDetection {
     if scanned.status == InstallationStatus::Installed {
         scanned
@@ -1064,38 +1076,45 @@ async fn cli_at_path(path: &Path, search_path: &str) -> LocalDetection {
             Some(format!("Active executable failed its path check: {error}")),
         );
     }
+    let mut command = version_command(path);
+    command.env("PATH", search_path);
+    cli_version_output(path, super::tool_update::bounded_output(command).await)
+}
+
+/// `<path> --version`, with a Windows `.cmd`/`.bat` shim run through cmd.exe
+/// without a console window.
+pub(crate) fn version_command(path: &Path) -> tokio::process::Command {
     #[cfg(target_os = "windows")]
-    let mut command = {
+    {
         let extension = path
             .extension()
             .and_then(|value| value.to_str())
             .unwrap_or_default();
-        if extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat") {
-            let mut command = tokio::process::Command::new("cmd");
-            // cmd.exe has different quoting rules than native argv. Expand a
-            // child-only variable once, so spaces and literal % in the path
-            // cannot alter the command used for the version check.
-            command
-                .args(["/D", "/V:OFF", "/S", "/C"])
-                .raw_arg("\"\"%OFOX_VERSION_EXECUTABLE%\" --version\"")
-                .env("OFOX_VERSION_EXECUTABLE", path);
-            command
-        } else {
-            let mut command = tokio::process::Command::new(path);
-            command.arg("--version");
-            command
-        }
-    };
+        let mut command =
+            if extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat") {
+                let mut command = tokio::process::Command::new("cmd");
+                // cmd.exe has different quoting rules than native argv. Expand a
+                // child-only variable once, so spaces and literal % in the path
+                // cannot alter the command used for the version check.
+                command
+                    .args(["/D", "/V:OFF", "/S", "/C"])
+                    .raw_arg("\"\"%OFOX_VERSION_EXECUTABLE%\" --version\"")
+                    .env("OFOX_VERSION_EXECUTABLE", path);
+                command
+            } else {
+                let mut command = tokio::process::Command::new(path);
+                command.arg("--version");
+                command
+            };
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    }
     #[cfg(not(target_os = "windows"))]
-    let mut command = {
+    {
         let mut command = tokio::process::Command::new(path);
         command.arg("--version");
         command
-    };
-    command.env("PATH", search_path);
-    #[cfg(target_os = "windows")]
-    command.creation_flags(CREATE_NO_WINDOW);
-    cli_version_output(path, super::tool_update::bounded_output(command).await)
+    }
 }
 
 fn cli_version_output(path: &Path, output: Result<std::process::Output, String>) -> LocalDetection {
@@ -1312,9 +1331,10 @@ fn opencode_extra_search_paths(
 fn tool_executable_candidates(tool: &str, dir: &Path) -> Vec<std::path::PathBuf> {
     #[cfg(target_os = "windows")]
     {
+        // Same order as `windows_tools::tool_in`: an installer's binary, then an npm shim.
         vec![
-            dir.join(format!("{tool}.cmd")),
             dir.join(format!("{tool}.exe")),
+            dir.join(format!("{tool}.cmd")),
             dir.join(tool),
         ]
     }
@@ -1380,6 +1400,16 @@ async fn scan_cli_version(tool: &str) -> LocalDetection {
             &mut search_paths,
             std::path::PathBuf::from("C:\\Program Files\\nodejs"),
         );
+        // Hermes' install.ps1 puts its launcher in <HermesHome>\bin.
+        for home in [
+            std::env::var_os("HERMES_HOME").map(PathBuf::from),
+            std::env::var_os("LOCALAPPDATA").map(|local| PathBuf::from(local).join("hermes")),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            push_unique_path(&mut search_paths, home.join("bin"));
+        }
     }
 
     for base in [
@@ -3035,15 +3065,15 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn tool_executable_candidates_windows_includes_cmd_exe_and_plain_name() {
+    fn tool_executable_candidates_windows_prefers_exe_then_cmd_then_plain_name() {
         let dir = PathBuf::from("C:\\tools");
         let candidates = tool_executable_candidates("opencode", &dir);
 
         assert_eq!(
             candidates,
             vec![
-                PathBuf::from("C:\\tools\\opencode.cmd"),
                 PathBuf::from("C:\\tools\\opencode.exe"),
+                PathBuf::from("C:\\tools\\opencode.cmd"),
                 PathBuf::from("C:\\tools\\opencode"),
             ]
         );
