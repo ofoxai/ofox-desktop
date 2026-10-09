@@ -79,6 +79,34 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
+      # Exercise the release upload/download pair and its separate artifact directories.
+      - name: Download probes with release artifact action
+        uses: actions/download-artifact@v8
+        with:
+          pattern: verify_*-${{ github.sha }}
+          path: ${{ runner.temp }}/probe-artifact-roundtrip
+
+      - name: Verify downloaded probe artifacts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $roundtripRoot = Join-Path $env:RUNNER_TEMP "probe-artifact-roundtrip"
+          $downloadedDirectories = @(Get-ChildItem -LiteralPath $roundtripRoot -Directory)
+          if ($downloadedDirectories.Count -ne 2) {
+            throw "Expected two separate probe artifact directories"
+          }
+          foreach ($probe in @("verify_chatgpt_install", "verify_tool_lifecycle")) {
+            $source = Join-Path "src-tauri/target/release" "$probe.exe"
+            $artifactDirectory = Join-Path $roundtripRoot "$probe-$env:GITHUB_SHA"
+            $downloaded = Join-Path $artifactDirectory "$probe.exe"
+            $expectedHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+            $downloadedHash = (Get-FileHash -LiteralPath $downloaded -Algorithm SHA256).Hash
+            if ($downloadedHash -ne $expectedHash) {
+              throw "Downloaded $probe artifact does not match the compiled probe"
+            }
+            Write-Host "Verified $probe artifact directory and SHA-256"
+          }
+
       # Compile and run all tests, including Windows file-lock/cmd fixtures.
       # Use Windows PowerShell 5.1, the same entry point as a fresh test host.
       - name: Windows lifecycle checks
