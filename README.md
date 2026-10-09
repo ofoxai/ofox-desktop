@@ -8,6 +8,72 @@
 git clone --branch test-builds --single-branch --depth 1 https://github.com/ofoxai/ofox-desktop.git ofox-test-builds
 ```
 
+## 1.3.4-c554707（Windows 功能对齐 macOS，待验证）
+
+源码：临时集成分支 `ci/test-installers` @ `c5547071`，在 main（`a642c00b`）上合并了下面这些分支，验证通过后再逐个提 PR 合并：
+
+| 分支 | 内容 |
+|---|---|
+| `fix/windows-window-layout` | 托盘弹窗不再被挡；主窗口 1000×650 居中、标题 Ofox Desktop；引导页可滚动（同 1.3.4-eb42785） |
+| `fix/windows-bundle-resources` | Windows 安装包不再带 macOS 安装脚本，MSI 能打出来 |
+| `fix/update-manifest-fields` | 「检查更新」能读到新版的发布时间和 Windows 下载链接 |
+| `ci/release-windows-nsis` | 正式发布流程会同时出 Windows setup.exe（未签名） |
+| `feat/windows-update`（含 tools / launch / install） | Windows 上的 CLI 检测、打开、一键安装、一键升级（移植自 magpie） |
+| `feat/windows-ui` | Windows 不再在系统标题栏下面重复画一条标题；托盘「Ctrl+O」、「任务栏通知区域」「打开所在文件夹」等文案 |
+
+文件：
+
+| 文件 | 平台 | 说明 |
+|---|---|---|
+| `ofox_desktop_1.3.4_macos_aarch64.dmg` | macOS 12+，Apple Silicon | ad-hoc 签名，未公证 |
+| `ofox_desktop_1.3.4_windows_x64-setup.exe` | Windows 10/11 x64 | NSIS，未签名，默认按当前用户安装 |
+| `ofox_desktop_1.3.4_windows_x64_en-US.msi` | Windows 10/11 x64 | MSI，仅用于验证能否安装，不会发布 |
+
+安装、校验方法同下面的 1.3.4-9274f52（校验文件 `1.3.4-c554707/SHA256SUMS.txt`）。
+
+### Windows 检查清单
+
+**检测**
+
+1. 已装的 Claude Code / Codex / Gemini / OpenCode / Hermes 都显示版本号，不再是「未安装」。
+2. Ofox 开着的时候，在另一个终端里装或升级一个 CLI（例如 `npm i -g @google/gemini-cli`，或 `claude update`），回到 Ofox 刷新后能识别新版本，不用重启 Ofox。
+3. 只装了 ChatGPT 桌面版（没有 Codex CLI）时，Codex 一行显示桌面 App。
+
+**打开**
+
+4. 在工具列表点「打开」，弹出的命令行窗口里 CLI 正常启动；退出 CLI 后出现「按任意键」，按键后窗口关闭。
+5. 打开后检查 `%TEMP%`，不残留 `cc_switch_*.bat`；「服务商终端」打开 Claude 后退出，不残留含 API Key 的 `.json`。
+6. 没装的工具点「打开」，提示「未找到 XXX，请先安装或检查安装路径」。
+
+**一键安装**（建议在没装过这些工具的 Windows 用户下测）
+
+7. 点「安装」会弹出一个 PowerShell 窗口执行安装；成功后窗口约 5 秒自动关闭，列表里出现版本号。
+8. 装 Gemini / OpenCode 时如果电脑没有 Node.js：会用 winget 装 Node LTS（可能弹 UAC），再继续装 CLI。
+9. 安装失败时窗口停住等按键，Ofox 里显示「错误: …」原因；中途关掉安装窗口，Ofox 几秒内结束「安装中」并给出结果。
+10. 区域切到 ofox.io 后装 Claude Code / Codex，走 npm + npmmirror 镜像。
+
+**一键升级**
+
+11. 先降级一个工具（例如 `npm i -g @google/gemini-cli@0.60.0`），Ofox 显示「升级到 vX」，点击后不弹外链、不弹黑窗口，直接升级完成并提示新版本。
+12. 原生安装的 Claude Code（`irm https://claude.ai/install.ps1 | iex`）、Codex、OpenCode、Hermes 都能一键升级。
+13. 两个以上工具有新版本时出现「全部升级」，能依次完成。
+14. 工具正在运行时去升级：如果失败，要给出错误提示，不能一直转圈。
+
+**界面**
+
+15. 主窗口只有系统标题栏，下面没有第二条「Ofox Desktop」标题。
+16. 引导完成页写「任务栏通知区域的 Ofox 图标」；管理工具里的按钮是「打开所在文件夹」，点击后打开资源管理器。
+17. 托盘弹窗显示「Ctrl+O」，按 Ctrl+O 打开主窗口。
+
+**之前的界面修复**（同 1.3.4-eb42785）
+
+18. 托盘弹窗完整显示在任务栏上方；窗口居中、标题 Ofox Desktop；引导页可以滚动。
+19. MSI 能装上并正常启动（只验证，不发布）。
+
+### macOS 回归
+
+macOS 包含同样的改动，检测/升级的公共代码有调整，请顺手确认：工具列表的版本检测、「升级到 vX」、「全部升级」、打开工具都和之前一致；窗口顶部仍有 Ofox Desktop 标题条且可以拖动。
+
 ## 1.3.4-eb42785（Windows 界面修复，待验证）
 
 源码：分支 `fix/windows-window-layout` @ `eb427854`，在 main（`a642c00b`）基础上增加 3 个修复，验证通过后再合并：
@@ -56,4 +122,4 @@ Get-FileHash .\1.3.4-9274f52\ofox_desktop_1.3.4_windows_x64-setup.exe -Algorithm
 
 ### 已知问题
 
-- 暂无 Windows MSI：自定义 WiX 模板（`src-tauri/wix/per-user-main.wxs`）里，安装到用户目录的资源文件组件以文件作为 KeyPath，且目录缺少 RemoveFolder，`light.exe` 报 ICE38 / ICE64 而失败。待修复后再提供 MSI。
+- （1.3.4-c554707 起已修复）暂无 Windows MSI：自定义 WiX 模板（`src-tauri/wix/per-user-main.wxs`）里，安装到用户目录的资源文件组件以文件作为 KeyPath，且目录缺少 RemoveFolder，`light.exe` 报 ICE38 / ICE64 而失败。待修复后再提供 MSI。
