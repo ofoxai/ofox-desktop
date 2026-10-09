@@ -25,8 +25,9 @@
     "warning": {
       "previousProviderMissing": "绑定前使用的服务商已不存在，已切换为官方默认。",
       "fileKeptHasOtherContent": "Ofox 新建的配置文件里有你后来添加的内容，文件已保留。",
-      "recordCleanupFailed": "配置已还原，但清理绑定记录失败；可以再解除绑定一次。",
-      "leftoverRemoved": "另一个位置也有 Ofox 的配置，已一并清除。"
+      "recordCleanupFailed": "绑定记录清理失败，绑定已保留，请重试。",
+      "leftoverRemoved": "另一个位置也有 Ofox 的配置，已一并清除。",
+      "configAlreadyMissing": "配置已删除，不再恢复。"
     }
   },
   "apexSwitch": {
@@ -63,7 +64,7 @@
     "workBuddyExpectedEndpoint": "Ofox 当前地区地址",
     "workBuddyEndpointMismatch": "WorkBuddy 配置与当前地区不一致，或已在 WorkBuddy 中修改；请重新绑定或检查配置。",
     "workBuddyEndpointCheckScope": "模型检测使用 Ofox 的网络路径；WorkBuddy 若仍请求旧地址，请完全退出后重开。",
-    "workBuddyEndpointSyncFailed": "地区已切换，但 WorkBuddy 地址未能自动更新。请在 WorkBuddy 工具管理中检查。",
+    "workBuddyEndpointSyncFailed": "地区已切换，但部分工具的接入地址未能自动更新。请在工具管理中检查配置。",
     "workBuddyTestModel": "选择待检测的 WorkBuddy 模型",
     "workBuddyTest": "检测选中模型",
     "workBuddySaveHint": "目录兼容即可保存；流式检测按需进行，不影响保存。",
@@ -2669,5 +2670,47 @@
     "expiredHint": "请运行 {{tool}} 命令刷新登录",
     "queryFailed": "查询失败",
     "refresh": "刷新"
+  },
+  "toolLifecycle": {
+    "desktopApp": "桌面应用",
+    "modelUnset": "未设置模型",
+    "analytics": "数据统计",
+    "analyticsFailed": "打开数据统计失败",
+    "downloadFailed": "打开安装页面失败",
+    "notInstalled": "未安装",
+    "installationBroken": "安装异常",
+    "binding": {
+      "missing": "绑定配置缺失",
+      "modified": "配置冲突",
+      "unknown": "配置读取失败"
+    },
+    "reinstall": "重新安装",
+    "repairInstall": "修复安装",
+    "download": "前往下载",
+    "open": "打开",
+    "manage": "管理",
+    "needsAttention": "{{count}} 个需处理",
+    "noInstalledBoundTools": "暂无已安装的绑定工具",
+    "missingTools": "未安装工具（{{count}}）",
+    "bindingRetained": "绑定已保留",
+    "boundNotInstalled": "已绑定 · 未安装",
+    "detectionFailed": "检测失败",
+    "boundMissingHint": "未安装工具的绑定已保留，请返回主页管理或重新安装。",
+    "manageFromHome": "在主页管理",
+    "retryDetection": "重新检测",
+    "restoreBinding": "恢复绑定",
+    "restoringBinding": "正在恢复…",
+    "restoreSucceeded": "已恢复 {{tool}} 的绑定",
+    "restoreFailed": "恢复绑定失败：{{error}}",
+    "bindFailed": "部分工具未绑定：{{tools}}（可重试或检查登录态）",
+    "upstreamInstructions": "安装说明",
+    "configuration": {
+      "loading": "正在检查绑定配置…",
+      "missing": "绑定配置缺失。保存和测试已暂停，可主动恢复绑定。",
+      "modified": "绑定配置已被修改。请检查配置冲突后再操作。",
+      "unknown": "无法读取绑定配置。你仍可解除绑定或稍后重试。"
+    },
+    "versionUnknown": "已安装 · 版本未知",
+    "noInstallationDetected": "未检测到安装"
   }
 }

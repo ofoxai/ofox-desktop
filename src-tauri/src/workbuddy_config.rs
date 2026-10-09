@@ -15,6 +15,7 @@ use crate::config::{get_home_dir, FileTxn};
 use crate::database::Database;
 use crate::ofox_apex::mentions_ofox_gateway;
 use crate::services::ofox_bind::report::{display_path, UnbindReport};
+use crate::services::ofox_bind::status::{BindingStatus, ToolBindingStatus};
 
 const BACKUP_VERSION: u32 = 2;
 const BACKUP_KEY: &str = "workbuddy";
@@ -128,21 +129,34 @@ enum RestoreMode {
     Always,
 }
 
-fn read_models_from(path: &Path) -> Result<Vec<Value>, String> {
-    if !path.exists() {
-        return Ok(Vec::new());
+fn read_models_text(path: &Path) -> Result<Option<String>, String> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "读取 WorkBuddy 模型配置失败（{}）：{error}",
+            path.display()
+        )),
     }
-    let raw = fs::read_to_string(path)
-        .map_err(|e| format!("读取 WorkBuddy 模型配置失败（{}）：{e}", path.display()))?;
+}
+
+fn parse_models(raw: &str, path: &Path) -> Result<Vec<Value>, String> {
     if raw.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let value: Value = serde_json::from_str(&raw)
+    let value: Value = serde_json::from_str(raw)
         .map_err(|e| format!("WorkBuddy 模型配置不是有效 JSON（{}）：{e}", path.display()))?;
     value
         .as_array()
         .cloned()
         .ok_or_else(|| "WorkBuddy models.json 必须是模型数组，已停止写入".to_string())
+}
+
+fn read_models_from(path: &Path) -> Result<Vec<Value>, String> {
+    read_models_text(path)?
+        .map(|raw| parse_models(&raw, path))
+        .transpose()
+        .map(Option::unwrap_or_default)
 }
 
 /// 写 models.json；新建的文件只给本人读写（Windows 上权限走 ACL，不参与）。
@@ -267,8 +281,8 @@ fn sync_models(
     ))
 }
 
-/// Change only Ofox-managed URLs. The exact saved fingerprint must still be
-/// present for every model, so a WorkBuddy-side edit cannot be overwritten.
+/// Change only existing Ofox-managed URLs. Deleted entries remain deleted;
+/// every existing entry must still match its saved fingerprint.
 fn reconcile_models_endpoint(
     mut models: Vec<Value>,
     state: &WorkBuddyBindingState,
@@ -278,14 +292,20 @@ fn reconcile_models_endpoint(
     let mut indexes = HashSet::with_capacity(state.managed_models.len());
     let mut changed = false;
     for managed in &mut next_state.managed_models {
-        let Some(index) = models
+        let matches: Vec<_> = models
             .iter()
-            .position(|entry| entry == &managed.last_written_entry)
-        else {
-            return Err(format!(
-                "WorkBuddy 模型 {} 已被外部修改或删除，无法自动更新地址",
-                managed.model_id
-            ));
+            .enumerate()
+            .filter(|(_, entry)| model_id(entry) == Some(managed.model_id.as_str()))
+            .collect();
+        let index = match matches.as_slice() {
+            [] => continue,
+            [(index, entry)] if *entry == &managed.last_written_entry => *index,
+            _ => {
+                return Err(format!(
+                    "WorkBuddy 模型 {} 已被外部修改，无法自动更新地址",
+                    managed.model_id
+                ));
+            }
         };
         if !indexes.insert(index) {
             return Err("WorkBuddy 绑定备份包含重复模型指纹，无法自动更新地址".to_string());
@@ -405,6 +425,35 @@ pub async fn sync_selected_models(
     persist_binding_state(db, &path, &next_models, &next_state).await
 }
 
+/// Ordinary model changes require the saved connection to still exist at the
+/// final write lock, including after an asynchronous key/catalog refresh.
+pub(crate) async fn update_selected_models(
+    db: &Database,
+    api_key: &str,
+    selections: &[WorkBuddyModelSelection],
+) -> Result<(), String> {
+    let _guard = CONFIG_LOCK.lock().await;
+    let health = inspect_binding(db)
+        .await
+        .map_err(|_| "无法确认现有 WorkBuddy 配置，已停止保存模型。".to_string())?;
+    if health.status != BindingStatus::Configured {
+        return Err(health
+            .message
+            .unwrap_or_else(|| "请先恢复 WorkBuddy 接入配置。".into()));
+    }
+    let path = models_path();
+    let previous = load_state(db).await?;
+    let models = read_models_from(&path)?;
+    let (next_models, next_state) = sync_models(
+        models,
+        previous.as_ref(),
+        api_key,
+        selections,
+        &endpoint_url(),
+    )?;
+    persist_binding_state(db, &path, &next_models, &next_state).await
+}
+
 /// Repair bindings created by older builds or left behind by an apex switch.
 /// No key refresh is needed: the existing key and every other model field stay
 /// exactly as they were. Startup and region switching both call this method.
@@ -478,6 +527,92 @@ pub async fn active_model(db: &Database) -> Result<String, String> {
         .unwrap_or_default())
 }
 
+fn check_saved_entries(models: &[Value], state: &WorkBuddyBindingState) -> ToolBindingStatus {
+    if state.managed_models.is_empty() {
+        return ToolBindingStatus::unknown();
+    }
+    let mut missing = false;
+    for managed in &state.managed_models {
+        let matching: Vec<_> = models
+            .iter()
+            .filter(|entry| model_id(entry) == Some(managed.model_id.as_str()))
+            .collect();
+        let mut expected = managed.last_written_entry.clone();
+        if !expected.is_object() {
+            return ToolBindingStatus::unknown();
+        }
+        expected["url"] = endpoint_url().into();
+        match matching.as_slice() {
+            [] => missing = true,
+            [entry] if *entry == &expected => {}
+            _ => return ToolBindingStatus::modified(),
+        }
+    }
+    if missing {
+        ToolBindingStatus::missing(vec![display_path(&models_path())])
+    } else {
+        ToolBindingStatus::configured()
+    }
+}
+
+async fn inspect_binding(db: &Database) -> Result<ToolBindingStatus, String> {
+    let Some(state) = load_state(db).await? else {
+        return Ok(ToolBindingStatus::unknown());
+    };
+    let path = models_path();
+    let models = read_models_from(&path)?;
+    Ok(check_saved_entries(&models, &state))
+}
+
+/// Read-only diagnostics never serialize model entries, saved keys, or parse errors.
+pub(crate) async fn binding_status(db: &Database) -> ToolBindingStatus {
+    let _guard = CONFIG_LOCK.lock().await;
+    inspect_binding(db)
+        .await
+        .unwrap_or_else(|_| ToolBindingStatus::unknown())
+}
+
+/// Re-create only deleted entries from the saved selection, preserving displaced
+/// user entries in the original backup. Existing entries are never overwritten.
+pub(crate) async fn restore_missing_binding(db: &Database, api_key: &str) -> Result<(), String> {
+    let _guard = CONFIG_LOCK.lock().await;
+    let health = inspect_binding(db)
+        .await
+        .map_err(|_| "无法确认 WorkBuddy 配置缺失，已停止恢复。".to_string())?;
+    if health.status != BindingStatus::Missing {
+        return Err(health
+            .message
+            .unwrap_or_else(|| "配置未缺失，无需恢复。".into()));
+    }
+    let mut state = load_state(db)
+        .await?
+        .ok_or_else(|| "未找到保存的 WorkBuddy 模型，已停止恢复。".to_string())?;
+    let path = models_path();
+    let mut models = read_models_from(&path)?;
+    for managed in &mut state.managed_models {
+        let mut expected = managed.last_written_entry.clone();
+        if !expected.is_object() {
+            return Err("保存的 WorkBuddy 模型格式无效。".into());
+        }
+        expected["url"] = endpoint_url().into();
+        expected["apiKey"] = api_key.into();
+        if let Some(existing) = models
+            .iter()
+            .find(|entry| model_id(entry) == Some(&managed.model_id))
+        {
+            if existing != &expected {
+                return Err("WorkBuddy 接入配置已被修改，已停止恢复。".into());
+            }
+        } else {
+            models.push(expected.clone());
+        }
+        managed.last_written_entry = expected;
+    }
+    persist_binding_state(db, &path, &models, &state)
+        .await
+        .map_err(|_| "恢复 WorkBuddy 配置失败，请检查文件权限和本地绑定记录。".to_string())
+}
+
 /// 解除绑定：Ofox 管理的条目一律拿掉（被改过也一样），被顶替的原条目放回原位置；
 /// 其它模型不动。没有绑定记录（旧版本退出时清掉了）就尽力删掉指向 Ofox 的条目。
 /// `dry_run` 只算不写（预览）。
@@ -486,6 +621,14 @@ pub async fn unbind(db: &Database, dry_run: bool) -> Result<UnbindReport, String
     let path = models_path();
     let shown = display_path(&path);
     let mut report = UnbindReport::new(BACKUP_KEY, dry_run);
+    if read_models_text(&path)?.is_none() {
+        report.warn("configAlreadyMissing", Some(shown));
+        if !dry_run {
+            db.delete_bind_record(BACKUP_KEY)
+                .map_err(|e| format!("删除 WorkBuddy 绑定备份失败：{e}"))?;
+        }
+        return Ok(report);
+    }
     let models = read_models_from(&path)?;
     let restored = match load_state(db).await? {
         Some(state) => {

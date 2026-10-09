@@ -25,8 +25,9 @@
     "warning": {
       "previousProviderMissing": "連携前のプロバイダーが見つからないため、公式の既定に切り替えました。",
       "fileKeptHasOtherContent": "Ofox が作成した設定ファイルに追加した内容があるため、ファイルは残しました。",
-      "recordCleanupFailed": "設定は戻しましたが連携記録を削除できませんでした。もう一度解除しても問題ありません。",
-      "leftoverRemoved": "別の場所にも Ofox の設定があったため、あわせて削除しました。"
+      "recordCleanupFailed": "連携記録の削除に失敗しました。連携は保持されています。再試行してください。",
+      "leftoverRemoved": "別の場所にも Ofox の設定があったため、あわせて削除しました。",
+      "configAlreadyMissing": "削除済みの設定は再作成しません。"
     }
   },
   "apexSwitch": {
@@ -63,7 +64,7 @@
     "workBuddyExpectedEndpoint": "現在の地域の Ofox 接続先",
     "workBuddyEndpointMismatch": "WorkBuddy の接続先が現在の地域と異なるか、設定が変更されています。再連携するか設定を確認してください。",
     "workBuddyEndpointCheckScope": "モデル検査は Ofox の通信経路を使用します。WorkBuddy が古い接続先を使い続ける場合は、完全に終了して再起動してください。",
-    "workBuddyEndpointSyncFailed": "地域は切り替わりましたが、WorkBuddy の接続先を自動更新できませんでした。WorkBuddy の管理画面で確認してください。",
+    "workBuddyEndpointSyncFailed": "地域は切り替わりましたが、一部のツールの接続先を自動更新できませんでした。ツールの管理画面で設定を確認してください。",
     "workBuddyTestModel": "検査する WorkBuddy モデルを選択",
     "workBuddyTest": "選択したモデルを検査",
     "workBuddySaveHint": "カタログで互換性が確認できれば保存できます。ストリーミング検査は任意です。",
@@ -2669,5 +2670,47 @@
     "expiredHint": "{{tool}}コマンドを実行してログインを更新してください",
     "queryFailed": "クエリに失敗しました",
     "refresh": "更新"
+  },
+  "toolLifecycle": {
+    "desktopApp": "デスクトップアプリ",
+    "modelUnset": "モデル未設定",
+    "analytics": "利用状況",
+    "analyticsFailed": "利用状況を開けませんでした",
+    "downloadFailed": "インストールページを開けませんでした",
+    "notInstalled": "未インストール",
+    "installationBroken": "インストールに問題あり",
+    "binding": {
+      "missing": "連携設定がありません",
+      "modified": "設定の競合",
+      "unknown": "設定の確認に失敗"
+    },
+    "reinstall": "再インストール",
+    "repairInstall": "インストールを修復",
+    "download": "ダウンロード",
+    "open": "開く",
+    "manage": "管理",
+    "needsAttention": "{{count}} 件の確認が必要",
+    "noInstalledBoundTools": "インストール済みの連携ツールはありません",
+    "missingTools": "未インストール（{{count}}）",
+    "bindingRetained": "連携は保持されています",
+    "boundNotInstalled": "連携済み · 未インストール",
+    "detectionFailed": "検出に失敗",
+    "boundMissingHint": "未インストールのツールの連携は保持されています。ホーム画面で管理または再インストールしてください。",
+    "manageFromHome": "ホームで管理",
+    "retryDetection": "再検出",
+    "restoreBinding": "連携を復元",
+    "restoringBinding": "復元中…",
+    "restoreSucceeded": "{{tool}} の連携を復元しました",
+    "restoreFailed": "連携の復元に失敗：{{error}}",
+    "bindFailed": "一部のツールを連携できませんでした：{{tools}}。再試行するかログイン状態を確認してください。",
+    "upstreamInstructions": "インストール手順",
+    "configuration": {
+      "loading": "連携設定を確認中…",
+      "missing": "連携設定がありません。保存とテストは停止中です。連携を復元できます。",
+      "modified": "連携設定が変更されています。設定の競合を確認してください。",
+      "unknown": "連携設定を読み取れません。連携解除または後で再試行できます。"
+    },
+    "versionUnknown": "インストール済み · バージョン不明",
+    "noInstallationDetected": "インストール未検出"
   }
 }

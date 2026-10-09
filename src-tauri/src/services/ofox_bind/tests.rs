@@ -14,7 +14,8 @@ const CODEX_RECORD: &str = "codex";
 const CODEX_PROVIDER: &str = "ofox-codex";
 const CODEX_OFFICIAL: &str = "codex-official";
 
-/// 临时 HOME：HOME / USERPROFILE / CC_SWITCH_TEST_HOME 都指过去，Drop 时还原。
+/// Isolate platform defaults before loading settings. In particular Windows
+/// Hermes uses LOCALAPPDATA, and an inherited HERMES_HOME can override HOME.
 struct Home {
     dir: tempfile::TempDir,
     saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
@@ -22,17 +23,56 @@ struct Home {
 
 impl Home {
     fn new() -> Self {
-        let dir = tempfile::tempdir().expect("temp home");
-        let saved = ["HOME", "USERPROFILE", "CC_SWITCH_TEST_HOME"]
+        let dir = tempfile::Builder::new()
+            .prefix("ofox binding 中文 ")
+            .tempdir()
+            .expect("temp home");
+        let isolated = [
+            ("HOME", Some(dir.path().to_path_buf())),
+            ("USERPROFILE", Some(dir.path().to_path_buf())),
+            ("CC_SWITCH_TEST_HOME", Some(dir.path().to_path_buf())),
+            (
+                "LOCALAPPDATA",
+                Some(dir.path().join("AppData").join("Local")),
+            ),
+            ("APPDATA", Some(dir.path().join("AppData").join("Roaming"))),
+            ("HERMES_HOME", None),
+            ("OFOX_USE_LOCAL", None),
+        ];
+        let saved = isolated
             .into_iter()
-            .map(|name| {
+            .map(|(name, isolated)| {
                 let previous = std::env::var_os(name);
-                std::env::set_var(name, dir.path());
+                match isolated {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
                 (name, previous)
             })
             .collect();
+        // Construct the RAII guard before assertions/reload, so a failure also
+        // restores the process environment instead of leaking it to later tests.
+        let home = Self { dir, saved };
+        assert!(crate::config::get_app_config_dir().starts_with(home.dir.path()));
         crate::settings::reload_settings().expect("reload settings");
-        Self { dir, saved }
+        for tool in [
+            Tool::Codex,
+            Tool::Claude,
+            Tool::Gemini,
+            Tool::OpenCode,
+            Tool::OpenClaw,
+            Tool::Hermes,
+        ] {
+            for file in tool.files() {
+                assert!(
+                    file.current_path().starts_with(home.dir.path()),
+                    "{} escaped temporary home",
+                    tool.label()
+                );
+            }
+        }
+        assert!(crate::workbuddy_config::models_path().starts_with(home.dir.path()));
+        home
     }
 
     fn codex(&self, file: &str) -> PathBuf {
@@ -1113,7 +1153,7 @@ async fn workbuddy_unbind_restores_even_after_edits_in_workbuddy() {
         .expect("preview");
     assert_eq!(
         preview.restored_keys,
-        ["~/.workbuddy/models.json: openai/gpt-x"]
+        [format!("{}: openai/gpt-x", display_path(&path))]
     );
     assert_eq!(fs::read_to_string(&path).unwrap(), edited);
 
@@ -1355,4 +1395,1702 @@ async fn workbuddy_unbind_drops_ofox_entries_the_record_does_not_track() {
         read_models(),
         [json!({ "id": "local", "url": "http://localhost:11434/v1" })]
     );
+}
+
+fn binding_cases() -> Vec<(Tool, Value)> {
+    vec![
+        (Tool::Codex, json!({"config": TEMPLATE})),
+        (
+            Tool::Claude,
+            claude_template(Some("anthropic/claude-saved")),
+        ),
+        (Tool::Gemini, gemini_template(Some("google/gemini-saved"))),
+        (Tool::OpenCode, opencode_template(Some("openai/gpt-saved"))),
+        (Tool::OpenClaw, openclaw_template()),
+        (Tool::Hermes, hermes_template()),
+    ]
+}
+
+fn original_for(file: ManagedFile) -> &'static str {
+    match file {
+        ManagedFile::CodexConfig => USER_CONFIG,
+        ManagedFile::ClaudeSettings => CLAUDE_RELAY,
+        ManagedFile::GeminiEnv => GEMINI_ENV,
+        ManagedFile::GeminiSettings => {
+            r#"{"security":{"auth":{"selectedType":"oauth-personal"}},"theme":"dark"}"#
+        }
+        ManagedFile::OpenCodeConfig => OPENCODE_CONFIG,
+        ManagedFile::OpenClawConfig => OPENCLAW_CONFIG,
+        ManagedFile::HermesConfig => HERMES_CONFIG,
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn deleted_configuration_is_not_recreated_by_preview_unbind_or_startup_checks() {
+    for (tool, template) in binding_cases() {
+        let home = Home::new();
+        let db = db_for(tool, template);
+        for file in tool.files() {
+            let path = file.current_path();
+            assert!(path.starts_with(home.dir.path()));
+            write(&path, original_for(*file));
+        }
+        let holder = tool.app().as_str();
+        bind(&db, tool, holder, KEY).await.unwrap();
+        assert!(all_config_files_present(tool));
+        let directory = tool.files()[0]
+            .current_path()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        fs::remove_dir_all(&directory).unwrap();
+        assert!(!all_config_files_present(tool));
+        for dry_run in [true, false] {
+            let report = unbind(&db, tool, holder, &[], dry_run).await.unwrap();
+            assert_eq!(
+                report
+                    .warnings
+                    .iter()
+                    .filter(|warning| warning.code == "configAlreadyMissing")
+                    .count(),
+                tool.files().len()
+            );
+            assert!(report.restored_keys.is_empty());
+            assert!(!directory.exists());
+        }
+        assert!(db.get_bind_record(tool.record_key()).unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn missing_bindings_restore_saved_models_and_selected_apex_without_replacing_snapshots() {
+    for apex in ["ofox.ai", "ofox.io"] {
+        for (tool, template) in binding_cases() {
+            let home = Home::new();
+            crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(apex.into()))
+                .unwrap();
+            let db = db_for(tool, template);
+            for file in tool.files() {
+                let path = file.current_path();
+                assert!(path.starts_with(home.dir.path()));
+                write(&path, original_for(*file));
+            }
+            let holder = tool.app().as_str();
+            bind(&db, tool, holder, KEY).await.unwrap();
+            let before: Vec<_> = tool
+                .files()
+                .iter()
+                .map(|file| fs::read(file.current_path()).unwrap())
+                .collect();
+            let record = db
+                .get_bind_record(tool.record_key())
+                .unwrap()
+                .unwrap()
+                .record;
+            assert_eq!(
+                status::binding_status(&db, tool, Some(KEY)).await.status,
+                status::BindingStatus::Configured
+            );
+            let directory = tool.files()[0]
+                .current_path()
+                .parent()
+                .unwrap()
+                .to_path_buf();
+            fs::remove_dir_all(&directory).unwrap();
+            assert_eq!(
+                status::binding_status(&db, tool, Some(KEY)).await.status,
+                status::BindingStatus::Missing
+            );
+            restore_missing_binding(&db, tool, holder, &[], KEY)
+                .await
+                .unwrap();
+            assert_eq!(
+                status::binding_status(&db, tool, Some(KEY)).await.status,
+                status::BindingStatus::Configured
+            );
+            assert_eq!(
+                db.get_bind_record(tool.record_key())
+                    .unwrap()
+                    .unwrap()
+                    .record,
+                record
+            );
+            for (file, original_bound) in tool.files().iter().zip(&before) {
+                let restored = fs::read_to_string(file.current_path()).unwrap();
+                // Every model/token-bearing value survived; unrelated deleted settings are not resurrected.
+                let expected = String::from_utf8(original_bound.clone()).unwrap();
+                match file {
+                    ManagedFile::CodexConfig => {
+                        assert_eq!(
+                            toml_at(&file.current_path())["model"],
+                            toml::from_str::<toml::Table>(&expected).unwrap()["model"]
+                        );
+                    }
+                    ManagedFile::ClaudeSettings => assert_eq!(
+                        json_at(&file.current_path())["env"]["ANTHROPIC_MODEL"],
+                        "anthropic/claude-saved"
+                    ),
+                    ManagedFile::GeminiEnv => {
+                        assert!(restored.contains("GEMINI_MODEL=gemini-saved"))
+                    }
+                    ManagedFile::OpenCodeConfig => assert!(restored.contains("openai/gpt-saved")),
+                    ManagedFile::OpenClawConfig => assert!(restored.contains("openai/gpt-x")),
+                    ManagedFile::HermesConfig => assert!(restored.contains("openai/gpt-x")),
+                    ManagedFile::GeminiSettings => continue,
+                }
+                assert!(restored.contains(&format!("https://api.{apex}")));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn status_and_restore_keep_modified_or_invalid_configuration_and_hide_secrets() {
+    let home = Home::new();
+    let path = home.claude("settings.json");
+    let db = db_for(
+        Tool::Claude,
+        claude_template(Some("anthropic/claude-saved")),
+    );
+    bind(&db, Tool::Claude, "claude", KEY).await.unwrap();
+    let mut current = json_at(&path);
+    current["permissions"] = json!({"allow":["Bash"]});
+    current["env"]["ANTHROPIC_MODEL"] = json!("user/other-model");
+    write(&path, &serde_json::to_string(&current).unwrap());
+    let edited = fs::read(&path).unwrap();
+    let record = db.get_bind_record("claude").unwrap().unwrap().record;
+    let health = status::binding_status(&db, Tool::Claude, Some(KEY)).await;
+    assert_eq!(health.status, status::BindingStatus::Modified);
+    assert!(!serde_json::to_string(&health).unwrap().contains(KEY));
+    assert!(
+        restore_missing_binding(&db, Tool::Claude, "claude", &[], KEY)
+            .await
+            .is_err()
+    );
+    assert_eq!(fs::read(&path).unwrap(), edited);
+    assert_eq!(
+        db.get_bind_record("claude").unwrap().unwrap().record,
+        record
+    );
+    write(&path, &format!("{{ token: '{KEY}' invalid"));
+    let health = status::binding_status(&db, Tool::Claude, Some(KEY)).await;
+    assert_eq!(health.status, status::BindingStatus::Unknown);
+    assert!(!serde_json::to_string(&health).unwrap().contains(KEY));
+    assert!(
+        restore_missing_binding(&db, Tool::Claude, "claude", &[], KEY)
+            .await
+            .is_err()
+    );
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    assert_eq!(
+        status::binding_status(&db, Tool::Claude, Some(KEY))
+            .await
+            .status,
+        status::BindingStatus::Unknown
+    );
+    assert!(
+        restore_missing_binding(&db, Tool::Claude, "claude", &[], KEY)
+            .await
+            .is_err()
+    );
+    assert!(path.is_dir());
+}
+
+#[tokio::test]
+#[serial]
+async fn partial_gemini_deletion_restores_only_missing_connection_and_unbind_skips_missing_file() {
+    let home = Home::new();
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+    let env = home.gemini(".env");
+    let settings = home.gemini("settings.json");
+    write(&env, GEMINI_ENV);
+    write(
+        &settings,
+        r#"{"security":{"auth":{"selectedType":"oauth-personal"}},"theme":"dark"}"#,
+    );
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    let kept_settings = fs::read(&settings).unwrap();
+    fs::remove_file(&env).unwrap();
+    assert_eq!(
+        status::binding_status(&db, Tool::Gemini, Some(KEY))
+            .await
+            .status,
+        status::BindingStatus::Missing
+    );
+    restore_missing_binding(&db, Tool::Gemini, "gemini", &[], KEY)
+        .await
+        .unwrap();
+    assert_eq!(fs::read(&settings).unwrap(), kept_settings);
+    fs::remove_file(&env).unwrap();
+    let report = unbind(&db, Tool::Gemini, "gemini", &[], false)
+        .await
+        .unwrap();
+    assert_eq!(report.warnings[0].code, "configAlreadyMissing");
+    assert!(!env.exists());
+    assert_eq!(
+        json_at(&settings)["security"]["auth"]["selectedType"],
+        "oauth-personal"
+    );
+    assert_eq!(json_at(&settings)["theme"], "dark");
+}
+
+#[tokio::test]
+#[serial]
+async fn shared_codex_restore_preserves_both_holders_and_deleted_config_stays_deleted_on_unbind() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let auth = home.codex("auth.json");
+    let db = db_with_default_provider();
+    write(&path, USER_CONFIG);
+    write(&auth, OAUTH_AUTH);
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    bind(&db, Tool::Codex, "chatgpt", KEY).await.unwrap();
+    fs::remove_file(&path).unwrap();
+    restore_missing_binding(&db, Tool::Codex, "codex", &["chatgpt".into()], KEY)
+        .await
+        .unwrap();
+    let (_, StoredRecord::Envelope(envelope)) = load_record(&db, Tool::Codex).unwrap().unwrap()
+    else {
+        panic!("envelope");
+    };
+    assert_eq!(
+        envelope.holders,
+        BTreeSet::from(["codex".into(), "chatgpt".into()])
+    );
+    assert_eq!(fs::read_to_string(&auth).unwrap(), OAUTH_AUTH);
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    let first = unbind(&db, Tool::Codex, "codex", &[], false).await.unwrap();
+    assert_eq!(first.shared_kept_by, ["chatgpt"]);
+    assert!(!path.parent().unwrap().exists());
+    let last = unbind(&db, Tool::Codex, "chatgpt", &[], false)
+        .await
+        .unwrap();
+    assert_eq!(last.warnings[0].code, "configAlreadyMissing");
+    assert!(!path.parent().unwrap().exists());
+    assert!(db.get_bind_record("codex").unwrap().is_none());
+}
+
+#[tokio::test]
+#[serial]
+async fn workbuddy_deleted_config_restores_saved_selection_or_unbinds_without_recreating_originals()
+{
+    for apex in ["ofox.ai", "ofox.io"] {
+        let home = Home::new();
+        crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(apex.into()))
+            .unwrap();
+        let db = Database::memory().unwrap();
+        let path = crate::workbuddy_config::models_path();
+        assert!(path.starts_with(home.dir.path()));
+        write(
+            &path,
+            r#"[{"id":"model-a","vendor":"User","url":"https://user.example"}]"#,
+        );
+        let selections: Vec<_> = ["model-a", "model-b"]
+            .into_iter()
+            .map(|id| crate::workbuddy_config::WorkBuddyModelSelection {
+                id: id.into(),
+                name: format!("Saved {id}"),
+                supports_tool_call: true,
+                supports_images: id == "model-b",
+                supports_reasoning: true,
+            })
+            .collect();
+        crate::workbuddy_config::sync_selected_models(&db, KEY, &selections)
+            .await
+            .unwrap();
+        let record = db.get_bind_record("workbuddy").unwrap().unwrap().record;
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        assert_eq!(
+            crate::workbuddy_config::binding_status(&db).await.status,
+            status::BindingStatus::Missing
+        );
+        crate::workbuddy_config::restore_missing_binding(&db, KEY)
+            .await
+            .unwrap();
+        let models: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(models.as_array().unwrap().len(), 2);
+        assert_eq!(models[0]["name"], "Saved model-a");
+        assert_eq!(models[1]["supportsImages"], true);
+        assert_eq!(
+            models[0]["url"],
+            format!("https://api.{apex}/v1/chat/completions")
+        );
+        assert_eq!(
+            db.get_bind_record("workbuddy").unwrap().unwrap().record,
+            record
+        );
+        assert_eq!(
+            crate::workbuddy_config::binding_status(&db).await.status,
+            status::BindingStatus::Configured
+        );
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        let preview = crate::workbuddy_config::unbind(&db, true).await.unwrap();
+        assert_eq!(preview.warnings[0].code, "configAlreadyMissing");
+        assert!(db.get_bind_record("workbuddy").unwrap().is_some());
+        let report = crate::workbuddy_config::unbind(&db, false).await.unwrap();
+        assert_eq!(report.warnings[0].code, "configAlreadyMissing");
+        assert!(!path.parent().unwrap().exists());
+        assert!(db.get_bind_record("workbuddy").unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn model_save_and_startup_repair_recheck_deleted_files_at_the_final_lock() {
+    for (tool, saved) in binding_cases() {
+        let _home = Home::new();
+        let db = db_for(tool, saved.clone());
+        for file in tool.files() {
+            write(&file.current_path(), original_for(*file));
+        }
+        bind(&db, tool, tool.app().as_str(), KEY).await.unwrap();
+        assert_eq!(
+            status::binding_status(&db, tool, Some(KEY)).await.status,
+            status::BindingStatus::Configured
+        );
+        let directory = tool.files()[0]
+            .current_path()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let record = db
+            .get_bind_record(tool.record_key())
+            .unwrap()
+            .unwrap()
+            .record;
+        fs::remove_dir_all(&directory).unwrap();
+        let mut updated = saved.clone();
+        updated["regressionModelSave"] = json!(true);
+        assert!(persist_bound_settings(&db, tool, KEY, &saved, &updated)
+            .await
+            .is_err());
+        assert_eq!(
+            db.get_provider_by_id(tool.provider_id(), tool.app().as_str())
+                .unwrap()
+                .unwrap()
+                .settings_config,
+            saved
+        );
+        assert!(rewrite_bound_config(&db, tool, KEY).await.is_err());
+        assert!(bind_existing(&db, tool, tool.app().as_str(), KEY)
+            .await
+            .is_err());
+        assert!(!directory.exists());
+        assert_eq!(
+            db.get_bind_record(tool.record_key())
+                .unwrap()
+                .unwrap()
+                .record,
+            record
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn atomic_model_save_preserves_user_fields_and_rejects_stale_or_unbound_requests() {
+    for apex in ["ofox.ai", "ofox.io"] {
+        let home = Home::new();
+        crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(apex.into()))
+            .unwrap();
+        let saved = claude_template(Some("anthropic/saved"));
+        let db = db_for(Tool::Claude, saved.clone());
+        let path = home.claude("settings.json");
+        write(&path, CLAUDE_RELAY);
+        bind(&db, Tool::Claude, "claude", KEY).await.unwrap();
+        let mut updated = saved.clone();
+        updated["env"]["ANTHROPIC_MODEL"] = json!("anthropic/next");
+        persist_bound_settings(&db, Tool::Claude, KEY, &saved, &updated)
+            .await
+            .unwrap();
+        let disk = json_at(&path);
+        assert_eq!(disk["env"]["ANTHROPIC_MODEL"], "anthropic/next");
+        assert_eq!(
+            disk["env"]["ANTHROPIC_BASE_URL"],
+            format!("https://api.{apex}/anthropic")
+        );
+        let original: Value = serde_json::from_str(CLAUDE_RELAY).unwrap();
+        assert_eq!(disk["permissions"], original["permissions"]);
+        let bytes = fs::read(&path).unwrap();
+        assert!(
+            persist_bound_settings(&db, Tool::Claude, KEY, &saved, &updated)
+                .await
+                .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+        unbind(&db, Tool::Claude, "claude", &[], false)
+            .await
+            .unwrap();
+        assert!(
+            persist_bound_settings(&db, Tool::Claude, KEY, &updated, &saved)
+                .await
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), CLAUDE_RELAY);
+        assert_eq!(
+            db.get_provider_by_id("ofox-claude", "claude")
+                .unwrap()
+                .unwrap()
+                .settings_config,
+            updated
+        );
+        assert!(bind_existing(&db, Tool::Claude, "claude", KEY)
+            .await
+            .is_err());
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn workbuddy_model_save_rechecks_deletion_and_external_modification_after_early_check() {
+    let home = Home::new();
+    let db = Database::memory().unwrap();
+    let path = crate::workbuddy_config::models_path();
+    let selection = |id: &str| crate::workbuddy_config::WorkBuddyModelSelection {
+        id: id.into(),
+        name: id.into(),
+        supports_tool_call: true,
+        supports_images: false,
+        supports_reasoning: false,
+    };
+    crate::workbuddy_config::sync_selected_models(&db, KEY, &[selection("saved")])
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::workbuddy_config::binding_status(&db).await.status,
+        status::BindingStatus::Configured
+    );
+    let record = db.get_bind_record("workbuddy").unwrap().unwrap().record;
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    assert!(
+        crate::workbuddy_config::update_selected_models(&db, KEY, &[selection("next")])
+            .await
+            .is_err()
+    );
+    assert!(!path.parent().unwrap().exists());
+    assert_eq!(
+        db.get_bind_record("workbuddy").unwrap().unwrap().record,
+        record
+    );
+    crate::workbuddy_config::restore_missing_binding(&db, KEY)
+        .await
+        .unwrap();
+    let mut models: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    models[0]["url"] = json!("https://user.example/v1");
+    write(&path, &serde_json::to_string(&models).unwrap());
+    let bytes = fs::read(&path).unwrap();
+    assert!(
+        crate::workbuddy_config::update_selected_models(&db, KEY, &[selection("next")])
+            .await
+            .is_err()
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(
+        db.get_bind_record("workbuddy").unwrap().unwrap().record,
+        record
+    );
+    assert!(path.starts_with(home.dir.path()));
+}
+
+#[tokio::test]
+#[serial]
+async fn workbuddy_partial_deletion_survives_region_switch_restart_and_explicit_restore() {
+    for (from, to) in [("ofox.ai", "ofox.io"), ("ofox.io", "ofox.ai")] {
+        let _home = Home::new();
+        crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(from.into()))
+            .unwrap();
+        let db = Database::memory().unwrap();
+        let path = crate::workbuddy_config::models_path();
+        let selections: Vec<_> = ["deleted", "kept"]
+            .into_iter()
+            .map(|id| crate::workbuddy_config::WorkBuddyModelSelection {
+                id: id.into(),
+                name: format!("Saved {id}"),
+                supports_tool_call: true,
+                supports_images: id == "kept",
+                supports_reasoning: true,
+            })
+            .collect();
+        crate::workbuddy_config::sync_selected_models(&db, KEY, &selections)
+            .await
+            .unwrap();
+        let mut models: Vec<Value> =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        models.remove(0);
+        write(&path, &serde_json::to_string(&models).unwrap());
+        crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(to.into())).unwrap();
+        assert!(crate::workbuddy_config::reconcile_managed_endpoint(&db)
+            .await
+            .unwrap());
+        let migrated: Vec<Value> =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(migrated.len(), 1);
+        assert_eq!(migrated[0]["id"], "kept");
+        assert_eq!(
+            migrated[0]["url"],
+            format!("https://api.{to}/v1/chat/completions")
+        );
+        let record: Value =
+            serde_json::from_str(&db.get_bind_record("workbuddy").unwrap().unwrap().record)
+                .unwrap();
+        assert_eq!(
+            record["managedModels"][0]["lastWrittenEntry"]["url"],
+            format!("https://api.{from}/v1/chat/completions")
+        );
+        assert_eq!(
+            record["managedModels"][1]["lastWrittenEntry"]["url"],
+            format!("https://api.{to}/v1/chat/completions")
+        );
+        crate::settings::reload_settings().unwrap();
+        assert!(!crate::workbuddy_config::reconcile_managed_endpoint(&db)
+            .await
+            .unwrap());
+        assert_eq!(
+            crate::workbuddy_config::binding_status(&db).await.status,
+            status::BindingStatus::Missing
+        );
+        crate::workbuddy_config::restore_missing_binding(&db, KEY)
+            .await
+            .unwrap();
+        let restored: Vec<Value> =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(restored.len(), 2);
+        assert!(restored
+            .iter()
+            .all(|entry| entry["url"] == format!("https://api.{to}/v1/chat/completions")));
+        assert_eq!(
+            crate::workbuddy_config::binding_status(&db).await.status,
+            status::BindingStatus::Configured
+        );
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        let record = db.get_bind_record("workbuddy").unwrap().unwrap().record;
+        assert!(!crate::workbuddy_config::reconcile_managed_endpoint(&db)
+            .await
+            .unwrap());
+        assert!(!path.parent().unwrap().exists());
+        assert_eq!(
+            db.get_bind_record("workbuddy").unwrap().unwrap().record,
+            record
+        );
+    }
+}
+
+fn region_expected_url(tool: Tool, apex: &str) -> String {
+    let protocol = match tool {
+        Tool::Claude => "anthropic",
+        Tool::Gemini => "gemini",
+        _ => "v1",
+    };
+    format!("https://api.{apex}/{protocol}")
+}
+
+fn region_mask_endpoint(tool: Tool, value: &mut Value, live: bool) {
+    let pointer = match (tool, live) {
+        (Tool::Codex, false) => "/config/model_providers/ofox/base_url",
+        (Tool::Codex, true) => "/model_providers/ofox/base_url",
+        (Tool::Claude, _) => "/env/ANTHROPIC_BASE_URL",
+        (Tool::Gemini, false) => "/env/GOOGLE_GEMINI_BASE_URL",
+        (Tool::Gemini, true) => "/endpoint",
+        (Tool::OpenCode, false) => "/options/baseURL",
+        (Tool::OpenCode, true) => "/provider/ofox-opencode/options/baseURL",
+        (Tool::OpenClaw, false) => "/baseUrl",
+        (Tool::OpenClaw, true) => "/models/providers/ofox-openclaw/baseUrl",
+        (Tool::Hermes, false) => "/base_url",
+        (Tool::Hermes, true) => {
+            if let Some(providers) = value
+                .get_mut("custom_providers")
+                .and_then(Value::as_array_mut)
+            {
+                for provider in providers {
+                    if provider["name"] == "ofox-hermes" {
+                        if let Some(endpoint) = provider.get_mut("base_url") {
+                            *endpoint = json!("REGION_ENDPOINT");
+                        }
+                    }
+                }
+            }
+            return;
+        }
+    };
+    if let Some(endpoint) = value.pointer_mut(pointer) {
+        *endpoint = json!("REGION_ENDPOINT");
+    }
+}
+
+fn region_provider_snapshot(db: &Database, tool: Tool) -> Value {
+    let provider = db
+        .get_provider_by_id(tool.provider_id(), tool.app().as_str())
+        .unwrap()
+        .unwrap();
+    let mut value = serde_json::to_value(provider).unwrap();
+    let settings = &mut value["settingsConfig"];
+    if tool == Tool::Codex {
+        settings["config"] = serde_json::to_value(
+            toml::from_str::<toml::Value>(settings["config"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+    }
+    region_mask_endpoint(tool, settings, false);
+    value
+}
+
+fn region_live_snapshot(tool: Tool) -> Vec<Value> {
+    tool.files()
+        .iter()
+        .map(|file| {
+            let text = fs::read_to_string(file.current_path()).unwrap();
+            let mut value = match file {
+                ManagedFile::CodexConfig => {
+                    serde_json::to_value(toml::from_str::<toml::Value>(&text).unwrap()).unwrap()
+                }
+                ManagedFile::GeminiEnv => json!({
+                    "endpoint": env_file::get_value(&text, "GOOGLE_GEMINI_BASE_URL"),
+                    "sourceWithoutEndpoint": env_file::set_value(&text, "GOOGLE_GEMINI_BASE_URL", None),
+                }),
+                ManagedFile::HermesConfig => serde_json::to_value(
+                    crate::hermes_config::parse_config_text(&text).unwrap(),
+                )
+                .unwrap(),
+                _ => json_file::parse_object(Some(&text), "region regression").unwrap(),
+            };
+            region_mask_endpoint(tool, &mut value, true);
+            value
+        })
+        .collect()
+}
+
+fn region_live_endpoint(tool: Tool) -> Option<String> {
+    let path = tool.files()[0].current_path();
+    let text = fs::read_to_string(path).unwrap();
+    if tool == Tool::Gemini {
+        return env_file::get_value(&text, "GOOGLE_GEMINI_BASE_URL");
+    }
+    if tool == Tool::Codex {
+        return toml::from_str::<toml::Value>(&text).unwrap()["model_providers"]["ofox"]
+            ["base_url"]
+            .as_str()
+            .map(str::to_string);
+    }
+    if tool == Tool::Hermes {
+        let config = crate::hermes_config::parse_config_text(&text).unwrap();
+        return config["custom_providers"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"].as_str() == Some("ofox-hermes"))
+            .and_then(|entry| entry["base_url"].as_str().map(str::to_string));
+    }
+    let config = json_file::parse_object(Some(&text), "region regression").unwrap();
+    let pointer = match tool {
+        Tool::Claude => "/env/ANTHROPIC_BASE_URL",
+        Tool::OpenCode => "/provider/ofox-opencode/options/baseURL",
+        Tool::OpenClaw => "/models/providers/ofox-openclaw/baseUrl",
+        _ => unreachable!(),
+    };
+    config
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn region_remove_connection_field(tool: Tool) {
+    let path = tool.files()[0].current_path();
+    let text = fs::read_to_string(&path).unwrap();
+    let missing = match tool {
+        Tool::Codex => {
+            let mut config = text.parse::<toml_edit::DocumentMut>().unwrap();
+            config["model_providers"]["ofox"]
+                .as_table_like_mut()
+                .unwrap()
+                .remove("experimental_bearer_token");
+            config.to_string()
+        }
+        Tool::Gemini => env_file::set_value(&text, "GEMINI_API_KEY", None),
+        Tool::Hermes => {
+            let mut config = crate::hermes_config::parse_config_text(&text).unwrap();
+            let provider = config["custom_providers"]
+                .as_sequence_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|entry| entry["name"].as_str() == Some("ofox-hermes"))
+                .unwrap();
+            provider
+                .as_mapping_mut()
+                .unwrap()
+                .remove(serde_yaml::Value::String("api_key".into()));
+            serde_yaml::to_string(&config).unwrap()
+        }
+        _ => {
+            let mut config = json_file::parse_object(Some(&text), "region regression").unwrap();
+            let field = match tool {
+                Tool::Claude => &["env", "ANTHROPIC_AUTH_TOKEN"][..],
+                Tool::OpenCode => &["provider", "ofox-opencode"][..],
+                Tool::OpenClaw => &["models", "providers", "ofox-openclaw", "apiKey"][..],
+                _ => unreachable!(),
+            };
+            assert!(json_file::remove(&mut config, field));
+            serde_json::to_string_pretty(&config).unwrap()
+        }
+    };
+    fs::write(&path, missing).unwrap();
+}
+
+async fn region_bind_saved_template(db: &Database, tool: Tool) {
+    let mut provider = db
+        .get_provider_by_id(tool.provider_id(), tool.app().as_str())
+        .unwrap()
+        .unwrap();
+    provider.notes = Some("Keep region regression metadata".into());
+    provider.icon = Some("saved-icon".into());
+    provider.meta = Some(serde_json::from_value(json!({ "providerType": "ofox" })).unwrap());
+    db.save_provider(tool.app().as_str(), &provider).unwrap();
+    for file in tool.files() {
+        write(&file.current_path(), original_for(*file));
+    }
+    bind(db, tool, tool.app().as_str(), KEY).await.unwrap();
+    if tool == Tool::Codex {
+        bind(db, tool, "chatgpt", KEY).await.unwrap();
+    }
+    // The fixture templates start on .ai; normalize the saved endpoint before
+    // taking the before-image, including a scenario that initially uses .io.
+    assert!(crate::commands::ofox_apex::reconcile_tool_endpoints(db).await);
+}
+
+#[tokio::test]
+#[serial]
+async fn region_reconciliation_changes_only_urls_and_restart_is_idempotent() {
+    for (from, to) in [("ofox.ai", "ofox.io"), ("ofox.io", "ofox.ai")] {
+        for (tool, saved) in binding_cases() {
+            let _home = Home::new();
+            crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(from.into()))
+                .unwrap();
+            let db = db_for(tool, saved);
+            region_bind_saved_template(&db, tool).await;
+            let provider = region_provider_snapshot(&db, tool);
+            let live = region_live_snapshot(tool);
+            let record = db
+                .get_bind_record(tool.record_key())
+                .unwrap()
+                .unwrap()
+                .record;
+            crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(to.into()))
+                .unwrap();
+            assert!(
+                crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await,
+                "{} {from} -> {to}",
+                tool.label()
+            );
+            assert_eq!(
+                region_live_endpoint(tool).as_deref(),
+                Some(region_expected_url(tool, to).as_str())
+            );
+            assert_eq!(
+                region_provider_snapshot(&db, tool),
+                provider,
+                "{} saved model and metadata",
+                tool.label()
+            );
+            assert_eq!(
+                region_live_snapshot(tool),
+                live,
+                "{} key, model and user fields",
+                tool.label()
+            );
+            assert_eq!(
+                db.get_bind_record(tool.record_key())
+                    .unwrap()
+                    .unwrap()
+                    .record,
+                record
+            );
+            let bytes: Vec<_> = tool
+                .files()
+                .iter()
+                .map(|file| fs::read(file.current_path()).unwrap())
+                .collect();
+            let settings = db
+                .get_provider_by_id(tool.provider_id(), tool.app().as_str())
+                .unwrap()
+                .unwrap()
+                .settings_config;
+            crate::settings::reload_settings().unwrap();
+            assert!(crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+            assert_eq!(
+                tool.files()
+                    .iter()
+                    .map(|file| fs::read(file.current_path()).unwrap())
+                    .collect::<Vec<_>>(),
+                bytes
+            );
+            assert_eq!(
+                db.get_provider_by_id(tool.provider_id(), tool.app().as_str())
+                    .unwrap()
+                    .unwrap()
+                    .settings_config,
+                settings
+            );
+            assert_eq!(
+                status::binding_status(&db, tool, Some(KEY)).await.status,
+                status::BindingStatus::Configured
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn region_reconciliation_preserves_missing_connection_fields_until_explicit_restore() {
+    for (from, to) in [("ofox.ai", "ofox.io"), ("ofox.io", "ofox.ai")] {
+        for (tool, saved) in binding_cases() {
+            let _home = Home::new();
+            crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(from.into()))
+                .unwrap();
+            let db = db_for(tool, saved);
+            region_bind_saved_template(&db, tool).await;
+            let provider = region_provider_snapshot(&db, tool);
+            let record = db
+                .get_bind_record(tool.record_key())
+                .unwrap()
+                .unwrap()
+                .record;
+            region_remove_connection_field(tool);
+            let partial = region_live_snapshot(tool);
+            crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(to.into()))
+                .unwrap();
+            assert!(crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+            assert_eq!(
+                region_live_snapshot(tool),
+                partial,
+                "{} does not restore missing fields",
+                tool.label()
+            );
+            assert_eq!(region_provider_snapshot(&db, tool), provider);
+            assert_eq!(
+                status::binding_status(&db, tool, Some(KEY)).await.status,
+                status::BindingStatus::Missing,
+                "{} {from} -> {to}",
+                tool.label()
+            );
+            let bytes: Vec<_> = tool
+                .files()
+                .iter()
+                .map(|file| fs::read(file.current_path()).unwrap())
+                .collect();
+            crate::settings::reload_settings().unwrap();
+            assert!(crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+            assert_eq!(
+                tool.files()
+                    .iter()
+                    .map(|file| fs::read(file.current_path()).unwrap())
+                    .collect::<Vec<_>>(),
+                bytes
+            );
+            restore_missing_binding(&db, tool, tool.app().as_str(), &[], KEY)
+                .await
+                .unwrap();
+            assert_eq!(
+                region_live_endpoint(tool).as_deref(),
+                Some(region_expected_url(tool, to).as_str())
+            );
+            assert_eq!(
+                region_provider_snapshot(&db, tool),
+                provider,
+                "{} restores saved model",
+                tool.label()
+            );
+            assert_eq!(
+                status::binding_status(&db, tool, Some(KEY)).await.status,
+                status::BindingStatus::Configured
+            );
+            assert_eq!(
+                db.get_bind_record(tool.record_key())
+                    .unwrap()
+                    .unwrap()
+                    .record,
+                record
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn region_reconciliation_keeps_deleted_directories_missing_until_explicit_restore() {
+    for (from, to) in [("ofox.ai", "ofox.io"), ("ofox.io", "ofox.ai")] {
+        for (tool, saved) in binding_cases() {
+            let _home = Home::new();
+            crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(from.into()))
+                .unwrap();
+            let db = db_for(tool, saved);
+            region_bind_saved_template(&db, tool).await;
+            let provider = region_provider_snapshot(&db, tool);
+            let record = db
+                .get_bind_record(tool.record_key())
+                .unwrap()
+                .unwrap()
+                .record;
+            let directory = tool.files()[0]
+                .current_path()
+                .parent()
+                .unwrap()
+                .to_path_buf();
+            fs::remove_dir_all(&directory).unwrap();
+            crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(to.into()))
+                .unwrap();
+            assert!(crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+            crate::settings::reload_settings().unwrap();
+            assert!(crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+            assert!(
+                !directory.exists(),
+                "{} region change must not mkdir",
+                tool.label()
+            );
+            assert_eq!(region_provider_snapshot(&db, tool), provider);
+            assert_eq!(
+                db.get_bind_record(tool.record_key())
+                    .unwrap()
+                    .unwrap()
+                    .record,
+                record
+            );
+            assert_eq!(
+                status::binding_status(&db, tool, Some(KEY)).await.status,
+                status::BindingStatus::Missing
+            );
+            restore_missing_binding(&db, tool, tool.app().as_str(), &[], KEY)
+                .await
+                .unwrap();
+            assert_eq!(
+                region_live_endpoint(tool).as_deref(),
+                Some(region_expected_url(tool, to).as_str())
+            );
+            assert_eq!(region_provider_snapshot(&db, tool), provider);
+            assert_eq!(
+                status::binding_status(&db, tool, Some(KEY)).await.status,
+                status::BindingStatus::Configured
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn region_reconciliation_preserves_custom_or_pseudo_live_endpoints_and_can_retry() {
+    for (from, to) in [("ofox.ai", "ofox.io"), ("ofox.io", "ofox.ai")] {
+        for (tool, saved) in binding_cases() {
+            for invalid in [
+                format!(
+                    "https://user.example/{}",
+                    region_expected_url(tool, from).rsplit('/').next().unwrap()
+                ),
+                format!(
+                    "https://api.{from}.evil.example/{}",
+                    region_expected_url(tool, from).rsplit('/').next().unwrap()
+                ),
+                format!(
+                    "{}?redirect=https://api.{from}",
+                    region_expected_url(tool, from)
+                ),
+            ] {
+                let _home = Home::new();
+                crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(from.into()))
+                    .unwrap();
+                let db = db_for(tool, saved.clone());
+                region_bind_saved_template(&db, tool).await;
+                let path = tool.files()[0].current_path();
+                let original = fs::read_to_string(&path).unwrap();
+                let conflicting = original.replace(&region_expected_url(tool, from), &invalid);
+                assert_ne!(conflicting, original);
+                fs::write(&path, &conflicting).unwrap();
+                let settings = db
+                    .get_provider_by_id(tool.provider_id(), tool.app().as_str())
+                    .unwrap()
+                    .unwrap()
+                    .settings_config;
+                let record = db
+                    .get_bind_record(tool.record_key())
+                    .unwrap()
+                    .unwrap()
+                    .record;
+                crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(to.into()))
+                    .unwrap();
+                assert!(!crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+                assert_eq!(fs::read_to_string(&path).unwrap(), conflicting);
+                assert_eq!(
+                    db.get_provider_by_id(tool.provider_id(), tool.app().as_str())
+                        .unwrap()
+                        .unwrap()
+                        .settings_config,
+                    settings
+                );
+                assert_eq!(
+                    db.get_bind_record(tool.record_key())
+                        .unwrap()
+                        .unwrap()
+                        .record,
+                    record
+                );
+                crate::settings::reload_settings().unwrap();
+                assert!(!crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+                assert_eq!(fs::read_to_string(&path).unwrap(), conflicting);
+                fs::write(&path, original).unwrap();
+                assert!(crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+                assert_eq!(
+                    region_live_endpoint(tool).as_deref(),
+                    Some(region_expected_url(tool, to).as_str())
+                );
+                assert_eq!(
+                    status::binding_status(&db, tool, Some(KEY)).await.status,
+                    status::BindingStatus::Configured
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn region_reconciliation_isolates_direct_tool_and_workbuddy_conflicts() {
+    for (from, to) in [("ofox.ai", "ofox.io"), ("ofox.io", "ofox.ai")] {
+        for conflict_is_workbuddy in [false, true] {
+            let _home = Home::new();
+            crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(from.into()))
+                .unwrap();
+            let db = db_for(Tool::Claude, claude_template(Some("saved/claude")));
+            region_bind_saved_template(&db, Tool::Claude).await;
+            let selection = crate::workbuddy_config::WorkBuddyModelSelection {
+                id: "saved/workbuddy".into(),
+                name: "Saved WorkBuddy".into(),
+                supports_tool_call: true,
+                supports_images: true,
+                supports_reasoning: true,
+            };
+            crate::workbuddy_config::sync_selected_models(&db, KEY, &[selection])
+                .await
+                .unwrap();
+            let path = if conflict_is_workbuddy {
+                crate::workbuddy_config::models_path()
+            } else {
+                claude::settings_path()
+            };
+            let original = fs::read_to_string(&path).unwrap();
+            let conflicting =
+                original.replace(&format!("https://api.{from}"), "https://user.example");
+            fs::write(&path, &conflicting).unwrap();
+            crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(to.into()))
+                .unwrap();
+            assert!(!crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+            assert_eq!(fs::read_to_string(&path).unwrap(), conflicting);
+            if conflict_is_workbuddy {
+                assert_eq!(
+                    region_live_endpoint(Tool::Claude).as_deref(),
+                    Some(region_expected_url(Tool::Claude, to).as_str())
+                );
+            } else {
+                let models: Value = serde_json::from_str(
+                    &fs::read_to_string(crate::workbuddy_config::models_path()).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    models[0]["url"],
+                    format!("https://api.{to}/v1/chat/completions")
+                );
+                assert_eq!(models[0]["apiKey"], KEY);
+                assert_eq!(models[0]["name"], "Saved WorkBuddy");
+                assert_eq!(models[0]["supportsImages"], true);
+            }
+            crate::settings::reload_settings().unwrap();
+            assert!(!crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+            assert_eq!(fs::read_to_string(&path).unwrap(), conflicting);
+            fs::write(&path, original).unwrap();
+            assert!(crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+            assert_eq!(
+                status::binding_status(&db, Tool::Claude, Some(KEY))
+                    .await
+                    .status,
+                status::BindingStatus::Configured
+            );
+            assert_eq!(
+                crate::workbuddy_config::binding_status(&db).await.status,
+                status::BindingStatus::Configured
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn startup_existing_repair_accepts_only_unchanged_saved_managed_fields() {
+    for tool in [Tool::Claude, Tool::Codex] {
+        for modified in [None, Some(KEY), Some("saved-model")] {
+            let _home = Home::new();
+            let saved = binding_cases()
+                .into_iter()
+                .find(|(case, _)| *case == tool)
+                .unwrap()
+                .1;
+            let db = db_for(tool, saved);
+            region_bind_saved_template(&db, tool).await;
+            let path = tool.files()[0].current_path();
+            let record = db
+                .get_bind_record(tool.record_key())
+                .unwrap()
+                .unwrap()
+                .record;
+            let original = fs::read_to_string(&path).unwrap();
+            let changed = match modified {
+                None => original,
+                Some(KEY) => original.replace(KEY, "sk-user-changed"),
+                Some(_) if tool == Tool::Claude => {
+                    original.replace("anthropic/claude-saved", "user/changed-model")
+                }
+                Some(_) => original.replace("openai/gpt-6-luna", "user/changed-model"),
+            };
+            fs::write(&path, &changed).unwrap();
+            set_current_provider(&db, &tool.app(), tool.official_id().unwrap()).unwrap();
+            let result = bind_existing(&db, tool, tool.app().as_str(), KEY).await;
+            if modified.is_none() {
+                result.unwrap();
+                assert_eq!(
+                    current_provider(&db, tool).as_deref(),
+                    Some(tool.provider_id())
+                );
+            } else {
+                assert!(result.is_err());
+                assert_eq!(current_provider(&db, tool).as_deref(), tool.official_id());
+            }
+            assert_eq!(fs::read_to_string(&path).unwrap(), changed);
+            assert_eq!(
+                db.get_bind_record(tool.record_key())
+                    .unwrap()
+                    .unwrap()
+                    .record,
+                record
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn region_reconciliation_preserves_external_models_and_keys_with_canonical_endpoints() {
+    for (from, to) in [("ofox.ai", "ofox.io"), ("ofox.io", "ofox.ai")] {
+        for (tool, saved) in binding_cases() {
+            let _home = Home::new();
+            crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(from.into()))
+                .unwrap();
+            let db = db_for(tool, saved);
+            region_bind_saved_template(&db, tool).await;
+            let path = tool.files()[0].current_path();
+            let original = fs::read_to_string(&path).unwrap();
+            let saved_model = match tool {
+                Tool::Codex => "openai/gpt-6-luna",
+                Tool::Claude => "anthropic/claude-saved",
+                Tool::Gemini => "gemini-saved",
+                Tool::OpenCode => "openai/gpt-saved",
+                Tool::OpenClaw | Tool::Hermes => "openai/gpt-x",
+            };
+            let changed = original
+                .replace(KEY, "sk-user-changed")
+                .replace(saved_model, "user/changed-model");
+            assert!(changed.contains("sk-user-changed"));
+            assert!(changed.contains("user/changed-model"));
+            fs::write(&path, changed).unwrap();
+            let live = region_live_snapshot(tool);
+            let provider = region_provider_snapshot(&db, tool);
+            let record = db
+                .get_bind_record(tool.record_key())
+                .unwrap()
+                .unwrap()
+                .record;
+            crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(to.into()))
+                .unwrap();
+            assert!(crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+            assert_eq!(
+                region_live_endpoint(tool).as_deref(),
+                Some(region_expected_url(tool, to).as_str())
+            );
+            assert_eq!(
+                region_live_snapshot(tool),
+                live,
+                "{} retains external model and key",
+                tool.label()
+            );
+            assert_eq!(region_provider_snapshot(&db, tool), provider);
+            assert_eq!(
+                db.get_bind_record(tool.record_key())
+                    .unwrap()
+                    .unwrap()
+                    .record,
+                record
+            );
+            assert_eq!(
+                status::binding_status(&db, tool, Some(KEY)).await.status,
+                status::BindingStatus::Modified
+            );
+            let bytes = fs::read(&path).unwrap();
+            assert!(
+                restore_missing_binding(&db, tool, tool.app().as_str(), &[], KEY)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            crate::settings::reload_settings().unwrap();
+            assert!(crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+            assert_eq!(
+                status::binding_status(&db, tool, Some(KEY)).await.status,
+                status::BindingStatus::Modified
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn region_reconciliation_preserves_custom_saved_template_endpoints_and_can_retry() {
+    for (from, to) in [("ofox.ai", "ofox.io"), ("ofox.io", "ofox.ai")] {
+        for (tool, saved) in binding_cases() {
+            let _home = Home::new();
+            crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(from.into()))
+                .unwrap();
+            let db = db_for(tool, saved);
+            region_bind_saved_template(&db, tool).await;
+            let original = db
+                .get_provider_by_id(tool.provider_id(), tool.app().as_str())
+                .unwrap()
+                .unwrap()
+                .settings_config;
+            let custom: Value =
+                serde_json::from_str(&serde_json::to_string(&original).unwrap().replace(
+                    &region_expected_url(tool, from),
+                    &format!("{}?source=user", region_expected_url(tool, from)),
+                ))
+                .unwrap();
+            db.update_provider_settings_config(tool.app().as_str(), tool.provider_id(), &custom)
+                .unwrap();
+            let files: Vec<_> = tool
+                .files()
+                .iter()
+                .map(|file| fs::read(file.current_path()).unwrap())
+                .collect();
+            crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(to.into()))
+                .unwrap();
+            assert!(!crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+            assert_eq!(
+                db.get_provider_by_id(tool.provider_id(), tool.app().as_str())
+                    .unwrap()
+                    .unwrap()
+                    .settings_config,
+                custom
+            );
+            assert_eq!(
+                tool.files()
+                    .iter()
+                    .map(|file| fs::read(file.current_path()).unwrap())
+                    .collect::<Vec<_>>(),
+                files
+            );
+            db.update_provider_settings_config(tool.app().as_str(), tool.provider_id(), &original)
+                .unwrap();
+            assert!(crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+            assert_eq!(
+                region_live_endpoint(tool).as_deref(),
+                Some(region_expected_url(tool, to).as_str())
+            );
+            assert_eq!(
+                status::binding_status(&db, tool, Some(KEY)).await.status,
+                status::BindingStatus::Configured
+            );
+        }
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn region_reconciliation_does_not_recreate_deleted_endpoint_fields() {
+    for (from, to) in [("ofox.ai", "ofox.io"), ("ofox.io", "ofox.ai")] {
+        for (tool, saved) in binding_cases() {
+            let _home = Home::new();
+            crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(from.into()))
+                .unwrap();
+            let db = db_for(tool, saved);
+            region_bind_saved_template(&db, tool).await;
+            let before_provider = region_provider_snapshot(&db, tool);
+            let path = tool.files()[0].current_path();
+            let source = fs::read_to_string(&path).unwrap();
+            let deleted = match tool {
+                Tool::Codex => {
+                    let mut doc = source.parse::<toml_edit::DocumentMut>().unwrap();
+                    doc["model_providers"]["ofox"]
+                        .as_table_like_mut()
+                        .unwrap()
+                        .remove("base_url");
+                    doc.to_string()
+                }
+                Tool::Gemini => env_file::set_value(&source, "GOOGLE_GEMINI_BASE_URL", None),
+                Tool::Hermes => {
+                    let mut config = crate::hermes_config::parse_config_text(&source).unwrap();
+                    let provider = config["custom_providers"]
+                        .as_sequence_mut()
+                        .unwrap()
+                        .iter_mut()
+                        .find(|provider| provider["name"].as_str() == Some("ofox-hermes"))
+                        .unwrap();
+                    provider
+                        .as_mapping_mut()
+                        .unwrap()
+                        .remove(serde_yaml::Value::String("base_url".into()));
+                    serde_yaml::to_string(&config).unwrap()
+                }
+                _ => {
+                    let mut config = json_file::parse_object(Some(&source), "regression").unwrap();
+                    let path: json_file::JsonPath = match tool {
+                        Tool::Claude => &["env", "ANTHROPIC_BASE_URL"],
+                        Tool::OpenCode => &["provider", "ofox-opencode", "options", "baseURL"],
+                        Tool::OpenClaw => &["models", "providers", "ofox-openclaw", "baseUrl"],
+                        _ => unreachable!(),
+                    };
+                    assert!(json_file::remove(&mut config, path));
+                    serde_json::to_string_pretty(&config).unwrap()
+                }
+            };
+            fs::write(&path, &deleted).unwrap();
+            crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(to.into()))
+                .unwrap();
+            assert!(crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+            assert_eq!(
+                fs::read_to_string(&path).unwrap(),
+                deleted,
+                "{} must not restore URL",
+                tool.label()
+            );
+            assert_eq!(region_provider_snapshot(&db, tool), before_provider);
+            assert_eq!(
+                status::binding_status(&db, tool, Some(KEY)).await.status,
+                status::BindingStatus::Missing
+            );
+            restore_missing_binding(&db, tool, tool.app().as_str(), &[], KEY)
+                .await
+                .unwrap();
+            assert_eq!(
+                region_live_endpoint(tool),
+                Some(region_expected_url(tool, to))
+            );
+            assert_eq!(
+                status::binding_status(&db, tool, Some(KEY)).await.status,
+                status::BindingStatus::Configured
+            );
+        }
+    }
+}
+
+#[test]
+#[serial]
+fn binding_test_home_isolates_platform_paths_and_restores_parent_environment() {
+    let names = [
+        "HOME",
+        "USERPROFILE",
+        "CC_SWITCH_TEST_HOME",
+        "LOCALAPPDATA",
+        "APPDATA",
+        "HERMES_HOME",
+        "OFOX_USE_LOCAL",
+    ];
+    let inherited: Vec<_> = names.iter().map(std::env::var_os).collect();
+    {
+        let home = Home::new();
+        assert_eq!(crate::config::get_home_dir(), home.dir.path());
+        assert_eq!(
+            std::env::var_os("LOCALAPPDATA"),
+            Some(
+                home.dir
+                    .path()
+                    .join("AppData")
+                    .join("Local")
+                    .into_os_string()
+            )
+        );
+        assert_eq!(
+            std::env::var_os("APPDATA"),
+            Some(
+                home.dir
+                    .path()
+                    .join("AppData")
+                    .join("Roaming")
+                    .into_os_string()
+            )
+        );
+        assert!(std::env::var_os("HERMES_HOME").is_none());
+        assert!(std::env::var_os("OFOX_USE_LOCAL").is_none());
+        assert_eq!(
+            crate::workbuddy_config::models_path(),
+            home.dir.path().join(".workbuddy").join("models.json")
+        );
+        assert_eq!(
+            tool_for("codex").unwrap().0.files()[0].current_path(),
+            tool_for("chatgpt").unwrap().0.files()[0].current_path()
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            crate::hermes_config::get_hermes_config_path(),
+            home.dir
+                .path()
+                .join("AppData")
+                .join("Local")
+                .join("hermes")
+                .join("config.yaml")
+        );
+        #[cfg(not(windows))]
+        assert_eq!(
+            crate::hermes_config::get_hermes_config_path(),
+            home.dir.path().join(".hermes").join("config.yaml")
+        );
+    }
+    assert_eq!(
+        names.iter().map(std::env::var_os).collect::<Vec<_>>(),
+        inherited
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn windows_crlf_configs_survive_region_changes_and_restore_original_bytes() {
+    for (tool, saved) in binding_cases() {
+        let _home = Home::new();
+        let db = db_for(tool, saved);
+        let originals: Vec<_> = tool
+            .files()
+            .iter()
+            .map(|file| original_for(*file).replace('\n', "\r\n"))
+            .collect();
+        for (file, original) in tool.files().iter().zip(&originals) {
+            write(&file.current_path(), original);
+        }
+        bind(&db, tool, tool.app().as_str(), KEY).await.unwrap();
+        let before = region_live_snapshot(tool);
+        crate::settings::mutate_settings(|settings| settings.ofox_apex = Some("ofox.io".into()))
+            .unwrap();
+        assert!(crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+        assert_eq!(
+            region_live_snapshot(tool),
+            before,
+            "{} CRLF user content",
+            tool.label()
+        );
+        assert_eq!(
+            status::binding_status(&db, tool, Some(KEY)).await.status,
+            status::BindingStatus::Configured
+        );
+        unbind(&db, tool, tool.app().as_str(), &[], false)
+            .await
+            .unwrap();
+        for (file, original) in tool.files().iter().zip(&originals) {
+            assert_eq!(
+                fs::read_to_string(file.current_path()).unwrap(),
+                *original,
+                "{} byte restore",
+                tool.label()
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_exclusive_config_handle(path: &Path) -> fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(0)
+        .open(path)
+        .expect("lock temporary configuration without sharing")
+}
+
+/// Sharing violations are real Windows read-access failures. They must not be
+/// confused with NotFound, which would permit recovery to overwrite the file.
+#[cfg(windows)]
+#[tokio::test]
+#[serial]
+async fn windows_locked_binding_is_unknown_and_cannot_restore_or_unbind() {
+    for (tool, saved) in binding_cases() {
+        let _home = Home::new();
+        let db = db_for(tool, saved);
+        for file in tool.files() {
+            write(&file.current_path(), original_for(*file));
+        }
+        bind(&db, tool, tool.app().as_str(), KEY).await.unwrap();
+        let path = tool.files()[0].current_path();
+        let bytes = fs::read(&path).unwrap();
+        let record = db
+            .get_bind_record(tool.record_key())
+            .unwrap()
+            .unwrap()
+            .record;
+        let previous = db
+            .get_provider_by_id(tool.provider_id(), tool.app().as_str())
+            .unwrap()
+            .unwrap()
+            .settings_config;
+        let locked = windows_exclusive_config_handle(&path);
+        let read_error = fs::read(&path).unwrap_err();
+        assert_ne!(read_error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            read_error.raw_os_error(),
+            Some(32),
+            "{} sharing violation",
+            tool.label()
+        );
+        let health = status::binding_status(&db, tool, Some(KEY)).await;
+        assert_eq!(health.status, status::BindingStatus::Unknown);
+        assert!(health.missing_files.is_empty());
+        assert!(!serde_json::to_string(&health).unwrap().contains(KEY));
+        assert!(
+            restore_missing_binding(&db, tool, tool.app().as_str(), &[], KEY)
+                .await
+                .is_err()
+        );
+        let mut updated = previous.clone();
+        updated["regressionModelSave"] = json!(true);
+        assert!(persist_bound_settings(&db, tool, KEY, &previous, &updated)
+            .await
+            .is_err());
+        assert!(unbind(&db, tool, tool.app().as_str(), &[], false)
+            .await
+            .is_err());
+        crate::settings::mutate_settings(|settings| settings.ofox_apex = Some("ofox.io".into()))
+            .unwrap();
+        assert!(!crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+        assert_eq!(
+            db.get_bind_record(tool.record_key())
+                .unwrap()
+                .unwrap()
+                .record,
+            record
+        );
+        assert_eq!(
+            db.get_provider_by_id(tool.provider_id(), tool.app().as_str())
+                .unwrap()
+                .unwrap()
+                .settings_config,
+            previous
+        );
+        assert_eq!(
+            current_provider(&db, tool).as_deref(),
+            Some(tool.provider_id())
+        );
+        drop(locked);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+#[serial]
+async fn windows_locked_workbuddy_is_unknown_and_keeps_saved_binding() {
+    let _home = Home::new();
+    let db = Database::memory().unwrap();
+    let selection = crate::workbuddy_config::WorkBuddyModelSelection {
+        id: "saved".into(),
+        name: "Saved model".into(),
+        supports_tool_call: true,
+        supports_images: false,
+        supports_reasoning: true,
+    };
+    crate::workbuddy_config::sync_selected_models(&db, KEY, std::slice::from_ref(&selection))
+        .await
+        .unwrap();
+    let path = crate::workbuddy_config::models_path();
+    let bytes = fs::read(&path).unwrap();
+    let record = db.get_bind_record("workbuddy").unwrap().unwrap().record;
+    let locked = windows_exclusive_config_handle(&path);
+    let read_error = fs::read(&path).unwrap_err();
+    assert_ne!(read_error.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(read_error.raw_os_error(), Some(32));
+    let health = crate::workbuddy_config::binding_status(&db).await;
+    assert_eq!(health.status, status::BindingStatus::Unknown);
+    assert!(health.missing_files.is_empty());
+    assert!(!serde_json::to_string(&health).unwrap().contains(KEY));
+    assert!(crate::workbuddy_config::restore_missing_binding(&db, KEY)
+        .await
+        .is_err());
+    assert!(
+        crate::workbuddy_config::update_selected_models(&db, KEY, &[selection])
+            .await
+            .is_err()
+    );
+    assert!(crate::workbuddy_config::unbind(&db, false).await.is_err());
+    crate::settings::mutate_settings(|settings| settings.ofox_apex = Some("ofox.io".into()))
+        .unwrap();
+    assert!(!crate::commands::ofox_apex::reconcile_tool_endpoints(&db).await);
+    assert_eq!(
+        db.get_bind_record("workbuddy").unwrap().unwrap().record,
+        record
+    );
+    drop(locked);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+#[serial]
+async fn windows_locked_partial_gemini_settings_blocks_recovery_and_model_saving() {
+    let home = Home::new();
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/saved")));
+    let env = home.gemini(".env");
+    let settings = home.gemini("settings.json");
+    write(&env, GEMINI_ENV);
+    write(&settings, GEMINI_GOOGLE_LOGIN_SETTINGS);
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    let env_bytes = fs::read(&env).unwrap();
+    let settings_bytes = fs::read(&settings).unwrap();
+    let record = db.get_bind_record("gemini").unwrap().unwrap().record;
+    let previous = db
+        .get_provider_by_id("ofox-gemini", "gemini")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let locked = windows_exclusive_config_handle(&settings);
+    assert_eq!(fs::read(&settings).unwrap_err().raw_os_error(), Some(32));
+    assert_eq!(fs::read(&env).unwrap(), env_bytes);
+    let health = status::binding_status(&db, Tool::Gemini, Some(KEY)).await;
+    assert_eq!(health.status, status::BindingStatus::Unknown);
+    assert!(health.missing_files.is_empty());
+    assert!(
+        restore_missing_binding(&db, Tool::Gemini, "gemini", &[], KEY)
+            .await
+            .is_err()
+    );
+    let mut updated = previous.clone();
+    updated["env"]["GEMINI_MODEL"] = json!("google/next");
+    assert!(
+        persist_bound_settings(&db, Tool::Gemini, KEY, &previous, &updated)
+            .await
+            .is_err()
+    );
+    assert!(unbind(&db, Tool::Gemini, "gemini", &[], false)
+        .await
+        .is_err());
+    assert_eq!(
+        db.get_provider_by_id("ofox-gemini", "gemini")
+            .unwrap()
+            .unwrap()
+            .settings_config,
+        previous
+    );
+    assert_eq!(
+        db.get_bind_record("gemini").unwrap().unwrap().record,
+        record
+    );
+    assert_eq!(
+        fs::read(&env).unwrap(),
+        env_bytes,
+        "failed multi-file unbind rolls back the readable file"
+    );
+    drop(locked);
+    assert_eq!(fs::read(&settings).unwrap(), settings_bytes);
 }

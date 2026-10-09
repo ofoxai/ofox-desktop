@@ -96,8 +96,7 @@ async function ensureDefaultModel(tool: string): Promise<void> {
  */
 async function mirrorBoundToolsToSettings(tools: string[]): Promise<void> {
   try {
-    const cur = await settingsApi.get();
-    await settingsApi.save({ ...cur, boundTools: tools });
+    await settingsApi.saveBoundTools(tools);
     await emit("ofox-prefs-updated");
   } catch (e) {
     // Swallow — local UI behavior is already correct via localStorage.
@@ -149,7 +148,7 @@ async function selectWorkBuddyDefaults(): Promise<WorkBuddyModelSelection[]> {
 }
 
 /**
- * Persist the bound-tool set and wire each tool through to OfoxAI.
+ * Bind new tools and merge successful additions into the existing bound set.
  *
  * Single source of truth for "what does binding a tool *do*?" — both the
  * Onboarding flow (first-time bind) and the in-Console "+ 添加" dialog
@@ -169,30 +168,16 @@ async function selectWorkBuddyDefaults(): Promise<WorkBuddyModelSelection[]> {
  * Hermes 这些 multi-provider 容器型工具也错挡在外。现在统一用
  * OFOX_AUTO_BIND_TOOLS 作为唯一 gate。
  *
- * `ofox_bind_tool` 后端幂等——重复 bind 已绑工具开销可忽略。
- *
- * Returns the same `tools` array it was given so callers can chain.
+ * Existing bindings are never rewritten here: their files may have been
+ * deliberately deleted, and restoring them requires an explicit action.
+ * Returns the complete retained binding set, including successful additions.
  */
 export async function bindTools(tools: string[]): Promise<string[]> {
-  // 写入顺序：**bind 完成后**才把成功条目落 localStorage。
-  //
-  // 历史问题：之前是"先写 localStorage 再调 ofox_bind_tool"——后端因 token
-  // 过期 / 网络 / 配额等失败时，前端 UI 仍以为绑成功（因为 localStorage 已
-  // 改），用户看到"绑定的工具"列表里多出一个幽灵条目，但磁盘配置完全没动。
-  // 解除绑定时后端日志 "没有 ofox bind 时的备份记录——视为 noop"，前端
-  // 列表却继续显示，反复"解绑也解不掉"。
-  //
-  // 现在每个工具单独 try：
-  //   - 不在 OFOX_AUTO_BIND_TOOLS 里的：默认认为成功（这些 tool 不走 ofox
-  //     接管，没有失败模式）
-  //   - 在集合里的：调 ofox_bind_tool；成功才计入 succeeded，失败 toast 报错
-  //
-  // 最后只把 succeeded 写 localStorage；mirror 也只 mirror 实际成功列表。
-  // 调用方（AddToolsDialog）传进来的是 "已绑 ∪ 本次新选"，所以这里 succeeded
-  // 自然包含了"之前就已绑的"工具——它们走幂等的二次 bind，正常情况都会过。
+  const existing = new Set(readBoundTools());
   const succeeded: string[] = [];
   const failed: string[] = [];
-  for (const tool of tools) {
+  for (const tool of new Set(tools)) {
+    if (existing.has(tool)) continue;
     if (!OFOX_AUTO_BIND_TOOLS.has(tool)) {
       // 非 ofox 接管类工具——本流程不操作其后端状态，视为成功记下来。
       succeeded.push(tool);
@@ -218,20 +203,23 @@ export async function bindTools(tools: string[]): Promise<string[]> {
     // 没出现在列表里"反推。常见原因是 token 过期：toast 文案不点破具体
     // 错因（后端错误对最终用户不友好），主流程仍然继续，已成功的工具会
     // 被正常持久化。
-    toast.error(`部分工具未绑定：${failed.join("、")}（可重试或检查登录态）`);
+    toast.error(
+      i18n.t("toolLifecycle.bindFailed", { tools: failed.join("、") }),
+    );
   }
 
-  localStorage.setItem(BOUND_TOOLS_STORAGE_KEY, JSON.stringify(succeeded));
+  const retained = Array.from(new Set([...readBoundTools(), ...succeeded]));
+  localStorage.setItem(BOUND_TOOLS_STORAGE_KEY, JSON.stringify(retained));
   // Mirror to backend after the bind round-trip so the settings.json 镜像
   // 也只看到已成功的工具——避免 health loop 去探一个根本没 bind 的 app。
-  void mirrorBoundToolsToSettings(succeeded);
+  void mirrorBoundToolsToSettings(retained);
 
   // 再 emit 一次 prefs-updated，唤醒 tool_health loop —— ofox_bind_tool 已
   // 完成、active provider 切到 ofox-<app>，health check 才能读到正确的
   // model。mirrorBoundToolsToSettings 内部也会 emit 一次（两次 emit 由订阅
   // 方节流去重）。
   void emit("ofox-prefs-updated");
-  return succeeded;
+  return retained;
 }
 
 /** Tools currently marked bound in this renderer (localStorage). */
@@ -257,6 +245,12 @@ export async function unbindTool(app: string): Promise<UnbindReport | null> {
   const report = OFOX_AUTO_BIND_TOOLS.has(app)
     ? await invoke<UnbindReport>("ofox_unbind_tool", { app, stillBound })
     : null;
+
+  if (
+    report?.warnings?.some((warning) => warning.code === "recordCleanupFailed")
+  ) {
+    throw new Error(i18n.t("unbind.warning.recordCleanupFailed"));
+  }
 
   localStorage.setItem(BOUND_TOOLS_STORAGE_KEY, JSON.stringify(stillBound));
   void mirrorBoundToolsToSettings(stillBound);

@@ -3,6 +3,11 @@ import { describe, expect, it, vi } from "vitest";
 import { ToolDiscoveryCard } from "@/components/onboarding/ToolDiscoveryCard";
 import type { InstallProgress } from "@/hooks/useToolInstall";
 import { settingsApi } from "@/lib/api";
+import i18n from "i18next";
+import zh from "@/i18n/locales/zh.json";
+import { beforeAll } from "vitest";
+
+beforeAll(() => i18n.addResourceBundle("zh", "translation", zh, true, true));
 
 const baseProps = {
   toolId: "codex",
@@ -106,5 +111,52 @@ describe("ToolDiscoveryCard 的安装进度展示", () => {
       );
     });
     openExternal.mockRestore();
+  });
+
+  it("shows retained missing bindings with a management action instead of reinstalling from Add", () => {
+    const manage = vi.fn();
+    const install = vi.fn();
+    render(
+      <ToolDiscoveryCard
+        {...baseProps}
+        status="boundMissing"
+        onManageBound={manage}
+        onInstall={install}
+      />,
+    );
+    expect(screen.getByText("已绑定 · 未安装")).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "安装" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "在主页管理" }));
+    expect(manage).toHaveBeenCalledOnce();
+    expect(install).not.toHaveBeenCalled();
+  });
+
+  it("offers a retry rather than installation when detection is uncertain", () => {
+    const retry = vi.fn();
+    const install = vi.fn();
+    render(
+      <ToolDiscoveryCard
+        {...baseProps}
+        status="detectionFailed"
+        onRetry={retry}
+        onInstall={install}
+      />,
+    );
+    expect(screen.getByText("检测失败")).toBeVisible();
+    expect(screen.queryByText("未安装")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "安装" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重新检测" }));
+    expect(retry).toHaveBeenCalledOnce();
+    expect(install).not.toHaveBeenCalled();
+  });
+
+  it("does not imply uninstall for a bound tool without a detected version", () => {
+    render(<ToolDiscoveryCard {...baseProps} status="bound" />);
+    expect(screen.getByText("绑定已保留")).toBeVisible();
+    expect(screen.queryByText("未安装")).not.toBeInTheDocument();
   });
 });

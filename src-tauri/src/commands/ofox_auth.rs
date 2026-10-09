@@ -197,6 +197,21 @@ pub async fn bind_tool_to_ofox_internal(
     Ok(())
 }
 
+/// Startup compatibility repair must not create configuration that the user
+/// deleted, or claim a connection that they changed to another provider.
+pub(crate) async fn bind_existing_tool_to_ofox_internal(
+    db: &crate::database::Database,
+    ofox_manager: &Arc<RwLock<crate::ofox_auth::OfoxAuthManager>>,
+    app: &str,
+) -> Result<(), String> {
+    let (tool, holder) =
+        crate::services::ofox_bind::tool_for(app).ok_or_else(|| "无效的应用类型".to_string())?;
+    let token = acquire_bind_token(tool.app().into(), ofox_manager).await?;
+    crate::services::ofox_bind::bind_existing(db, tool, holder, &token).await?;
+    crate::ofox_api_keys::mark_key_used(tool.app());
+    Ok(())
+}
+
 /// Bind an AI tool (claude/codex/...) to OfoxAI.
 ///
 /// 取（或签发）该工具的 Ofox API key，把工具配置文件里的接入方式改成 Ofox 网关，
@@ -214,6 +229,54 @@ pub async fn ofox_bind_tool(
     // builds while the multi-model UI sends `modelSelections`.
     let selections = model_selections.or_else(|| model_selection.map(|selection| vec![selection]));
     bind_tool_to_ofox_internal(&state.db, &ofox_state.0, &app, selections).await
+}
+
+/// Explicit recovery of deleted connection fields. Re-check after acquiring the
+/// key so concurrent model edits, unbinds, and external configuration changes
+/// cannot turn recovery into an overwrite.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn ofox_restore_tool_binding(
+    state: State<'_, AppState>,
+    ofox_state: State<'_, OfoxAuthState>,
+    app: String,
+    still_bound: Option<Vec<String>>,
+) -> Result<(), String> {
+    use crate::services::ofox_bind::status::BindingStatus;
+    if app.trim().eq_ignore_ascii_case("workbuddy") {
+        let health = crate::workbuddy_config::binding_status(&state.db).await;
+        if health.status != BindingStatus::Missing {
+            return Err(health
+                .message
+                .unwrap_or_else(|| "配置未缺失，无需恢复。".into()));
+        }
+        let key =
+            acquire_bind_token(crate::app_config::BindableTool::WorkBuddy, &ofox_state.0).await?;
+        return crate::workbuddy_config::restore_missing_binding(&state.db, &key).await;
+    }
+    let (tool, holder) =
+        crate::services::ofox_bind::tool_for(&app).ok_or_else(|| "无效的应用类型".to_string())?;
+    let cached_key = crate::ofox_secret::default_store()
+        .load(crate::ofox_secret::Slot::ApiKey {
+            tool: tool.app().into(),
+        })
+        .map_err(|_| "读取已保存的 OFox API Key 失败，已停止恢复。".to_string())?;
+    let health =
+        crate::services::ofox_bind::status::binding_status(&state.db, tool, cached_key.as_deref())
+            .await;
+    if health.status != BindingStatus::Missing {
+        return Err(health
+            .message
+            .unwrap_or_else(|| "配置未缺失，无需恢复。".into()));
+    }
+    let key = acquire_bind_token(tool.app().into(), &ofox_state.0).await?;
+    crate::services::ofox_bind::restore_missing_binding(
+        &state.db,
+        tool,
+        holder,
+        &still_bound.unwrap_or_default(),
+        &key,
+    )
+    .await
 }
 
 /// Mirror of [`bind_tool_to_ofox_internal`] — undo the OfoxAI bind for `app`.

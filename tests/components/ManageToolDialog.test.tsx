@@ -6,16 +6,25 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
 import ManageToolDialog from "@/components/console/ManageToolDialog";
-import { manageToolApi } from "@/lib/api/manageTool";
+import { manageToolApi, type CompatibilityResult } from "@/lib/api/manageTool";
 import * as modelFetch from "@/lib/api/model-fetch";
 import type { FetchedModel } from "@/lib/api/model-fetch";
 import * as bindToolsModule from "@/lib/bindTools";
 import { ofoxBindApi, type UnbindReport } from "@/lib/api/ofoxBind";
 import { toast } from "sonner";
+import { BOUND_TOOLS_STORAGE_KEY } from "@/config/toolMeta";
 
 function compatibleModel(id: string): FetchedModel {
   return {
@@ -31,6 +40,182 @@ function compatibleModel(id: string): FetchedModel {
 }
 
 afterEach(() => vi.restoreAllMocks());
+beforeEach(() => {
+  localStorage.clear();
+  vi.spyOn(ofoxBindApi, "status").mockResolvedValue({
+    status: "configured",
+    message: null,
+    missingFiles: [],
+  });
+});
+
+describe("ManageToolDialog binding lifecycle", () => {
+  const emptyReport: UnbindReport = {
+    tool: "codex",
+    dryRun: true,
+    legacy: false,
+    alreadyUnbound: true,
+    exactFiles: [],
+    restoredKeys: [],
+    removedKeys: [],
+    filesRemoved: [],
+    providerRestoredTo: null,
+    sharedKeptBy: [],
+    warnings: [],
+  };
+
+  async function renderLifecycleTool(
+    onChanged = vi.fn(),
+    onOpenChange = vi.fn(),
+  ) {
+    mockSingleTool(compatibleModel("test/model"));
+    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue("test/model");
+    await act(async () => {
+      render(
+        <ManageToolDialog
+          tool={{
+            id: "codex",
+            abbr: "Cx",
+            label: "Codex",
+            color: "",
+            version: null,
+            installationStatus: "notInstalled",
+          }}
+          onChanged={onChanged}
+          onOpenChange={onOpenChange}
+        />,
+      );
+    });
+    await screen.findByText("/Users/test/.config/tool/config.json");
+  }
+
+  it("blocks ordinary saving and connectivity checks when the configuration is missing", async () => {
+    vi.mocked(ofoxBindApi.status).mockResolvedValue({
+      status: "missing",
+      message: null,
+      missingFiles: ["~/.codex/config.toml"],
+    });
+    const save = vi.spyOn(manageToolApi, "setActiveModel").mockResolvedValue();
+    const ping = vi.spyOn(manageToolApi, "pingModel");
+    const compatibility = vi.spyOn(manageToolApi, "checkCompatibility");
+    await renderLifecycleTool();
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "测试连通性" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "解除绑定" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "恢复绑定" })).toBeEnabled();
+    expect(save).not.toHaveBeenCalled();
+    expect(ping).not.toHaveBeenCalled();
+    expect(compatibility).not.toHaveBeenCalled();
+  });
+
+  it("explicitly restores only the managed tool and retains shared binding parties", async () => {
+    localStorage.setItem(
+      BOUND_TOOLS_STORAGE_KEY,
+      JSON.stringify(["codex", "chatgpt", "claude"]),
+    );
+    vi.mocked(ofoxBindApi.status).mockResolvedValue({
+      status: "missing",
+      message: null,
+      missingFiles: [],
+    });
+    const restore = vi.spyOn(ofoxBindApi, "restore").mockResolvedValue();
+    const onChanged = vi.fn();
+    const onOpenChange = vi.fn();
+    await renderLifecycleTool(onChanged, onOpenChange);
+    expect(restore).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "恢复绑定" }));
+    await waitFor(() =>
+      expect(restore).toHaveBeenCalledWith("codex", ["chatgpt", "claude"]),
+    );
+    expect(onChanged).toHaveBeenCalledOnce();
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(JSON.parse(localStorage.getItem(BOUND_TOOLS_STORAGE_KEY)!)).toEqual([
+      "codex",
+      "chatgpt",
+      "claude",
+    ]);
+  });
+
+  it("keeps the binding and dialog available after a failed restore", async () => {
+    vi.mocked(ofoxBindApi.status).mockResolvedValue({
+      status: "missing",
+      message: null,
+      missingFiles: [],
+    });
+    vi.spyOn(ofoxBindApi, "restore").mockRejectedValue(
+      new Error("write failed"),
+    );
+    const error = vi.spyOn(toast, "error").mockImplementation(() => "");
+    const onChanged = vi.fn();
+    const onOpenChange = vi.fn();
+    await renderLifecycleTool(onChanged, onOpenChange);
+    fireEvent.click(screen.getByRole("button", { name: "恢复绑定" }));
+    await waitFor(() =>
+      expect(error).toHaveBeenCalledWith("恢复绑定失败：Error: write failed"),
+    );
+    expect(onChanged).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "恢复绑定" })).toBeEnabled();
+  });
+
+  it("does not offer restoration or model writes over a user-modified configuration", async () => {
+    vi.mocked(ofoxBindApi.status).mockResolvedValue({
+      status: "modified",
+      message: "Configuration conflict",
+      missingFiles: [],
+    });
+    const restore = vi.spyOn(ofoxBindApi, "restore");
+    await renderLifecycleTool();
+    expect(screen.getByText(/绑定配置已被修改/)).toBeVisible();
+    expect(
+      screen.queryByText("Configuration conflict"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "恢复绑定" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "解除绑定" })).toBeEnabled();
+    expect(restore).not.toHaveBeenCalled();
+  });
+
+  it("allows unbinding even when the configuration status cannot be read", async () => {
+    vi.mocked(ofoxBindApi.status).mockRejectedValue(
+      new Error("permission denied"),
+    );
+    vi.spyOn(ofoxBindApi, "unbindPreview").mockRejectedValue(
+      new Error("preview unavailable"),
+    );
+    const unbind = vi
+      .spyOn(bindToolsModule, "unbindTool")
+      .mockResolvedValue({ ...emptyReport, dryRun: false });
+    await renderLifecycleTool();
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "解除绑定" }));
+    const confirm = await screen.findByRole("button", {
+      name: "确认解除绑定？",
+    });
+    fireEvent.click(confirm);
+    await waitFor(() => expect(unbind).toHaveBeenCalledWith("codex"));
+  });
+
+  it("shows missing-file warnings before confirming unbind", async () => {
+    vi.mocked(ofoxBindApi.status).mockResolvedValue({
+      status: "missing",
+      message: null,
+      missingFiles: [],
+    });
+    vi.spyOn(ofoxBindApi, "unbindPreview").mockResolvedValue({
+      ...emptyReport,
+      warnings: [
+        { code: "configAlreadyMissing", file: "~/.codex/config.toml" },
+      ],
+    });
+    await renderLifecycleTool();
+    fireEvent.click(screen.getByRole("button", { name: "解除绑定" }));
+    expect(await screen.findByText(/配置已删除，不再恢复/)).toBeVisible();
+    expect(screen.getByText("~/.codex/config.toml")).toBeVisible();
+  });
+});
 beforeAll(() => {
   i18n.addResourceBundle("zh", "translation", zh, true, true);
   HTMLElement.prototype.scrollIntoView = vi.fn();
@@ -524,14 +709,18 @@ describe("ManageToolDialog WorkBuddy multi-model management", () => {
     expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
   });
 
-  it("can save while a manual WorkBuddy stream check is still running", async () => {
+  it("defers conflicting writes until a manual WorkBuddy stream check finishes", async () => {
     const models = [
       compatibleModel("openai/model-a"),
       compatibleModel("openai/model-b"),
     ];
     mockWorkBuddy(models);
+    let finishCheck!: (result: CompatibilityResult) => void;
     vi.spyOn(manageToolApi, "checkCompatibility").mockImplementation(
-      () => new Promise(() => {}),
+      () =>
+        new Promise((resolve) => {
+          finishCheck = resolve;
+        }),
     );
     const save = vi
       .spyOn(manageToolApi, "setWorkBuddyManagedModels")
@@ -545,7 +734,23 @@ describe("ManageToolDialog WorkBuddy multi-model management", () => {
     expect(
       screen.getByRole("button", { name: "正在验证流式兼容性…" }),
     ).toBeDisabled();
-    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "解除绑定" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(save).not.toHaveBeenCalled();
+    await act(async () =>
+      finishCheck({
+        app: "workbuddy",
+        model: models[0].id,
+        protocol: "chatCompletions",
+        status: "compatible",
+        source: "probe",
+        reason: null,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "保存" })).toBeEnabled(),
+    );
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
   });

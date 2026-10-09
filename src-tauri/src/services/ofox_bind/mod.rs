@@ -8,6 +8,7 @@
 
 pub(crate) mod claude;
 pub(crate) mod codex;
+pub(crate) mod endpoint;
 mod env_file;
 pub(crate) mod gemini;
 mod hermes;
@@ -18,6 +19,7 @@ mod plan;
 pub(crate) mod record;
 pub(crate) mod relocate;
 pub(crate) mod report;
+pub(crate) mod status;
 #[cfg(test)]
 mod tests;
 
@@ -211,12 +213,72 @@ fn bound_on_disk(tool: Tool) -> Result<bool, String> {
     Ok(read_text(&path)?.as_deref().is_some_and(is_bound))
 }
 
+/// Background migration must not recreate a configuration the user deleted.
+pub(crate) fn all_config_files_present(tool: Tool) -> bool {
+    tool.files()
+        .iter()
+        .all(|file| std::fs::metadata(file.current_path()).is_ok_and(|metadata| metadata.is_file()))
+}
+
 /// DB 里 `ofox-<app>` 服务商的 settings_config：Ofox 的地址和当前选的模型。
 fn template(db: &Database, tool: Tool) -> Result<Value, String> {
-    db.get_provider_by_id(tool.provider_id(), tool.app().as_str())
+    let mut value = db
+        .get_provider_by_id(tool.provider_id(), tool.app().as_str())
         .map_err(|e| format!("读取 Ofox {} 模板失败：{e}", tool.label()))?
         .map(|provider| provider.settings_config)
-        .ok_or_else(|| format!("Ofox {} 模板缺失", tool.label()))
+        .ok_or_else(|| format!("Ofox {} 模板缺失", tool.label()))?;
+    if !value.is_object() {
+        return Err("Ofox 模板格式无效".into());
+    }
+    // A saved model must survive restoration; runtime URLs always use the selected apex.
+    match tool {
+        Tool::Codex => {
+            let config = value
+                .get("config")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "Ofox Codex 模板缺少 config".to_string())?;
+            let mut doc = config
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|_| "Ofox Codex 模板无效".to_string())?;
+            let provider = doc
+                .get_mut("model_providers")
+                .and_then(toml_edit::Item::as_table_like_mut)
+                .and_then(|providers| providers.get_mut("ofox"))
+                .and_then(toml_edit::Item::as_table_like_mut)
+                .ok_or_else(|| "Ofox Codex 模板缺少服务商".to_string())?;
+            provider.insert(
+                "base_url",
+                toml_edit::value(crate::ofox_endpoints::openai_v1_base_url()),
+            );
+            value["config"] = Value::String(doc.to_string());
+        }
+        Tool::Claude => json_file::set(
+            &mut value,
+            &["env", "ANTHROPIC_BASE_URL"],
+            crate::ofox_endpoints::anthropic_base_url().into(),
+        ),
+        Tool::Gemini => json_file::set(
+            &mut value,
+            &["env", "GOOGLE_GEMINI_BASE_URL"],
+            crate::ofox_endpoints::gemini_base_url().into(),
+        ),
+        Tool::OpenCode => json_file::set(
+            &mut value,
+            &["options", "baseURL"],
+            crate::ofox_endpoints::openai_v1_base_url().into(),
+        ),
+        Tool::OpenClaw => json_file::set(
+            &mut value,
+            &["baseUrl"],
+            crate::ofox_endpoints::openai_v1_base_url().into(),
+        ),
+        Tool::Hermes => json_file::set(
+            &mut value,
+            &["base_url"],
+            crate::ofox_endpoints::openai_v1_base_url().into(),
+        ),
+    }
+    Ok(value)
 }
 
 fn write_bound(
@@ -306,6 +368,31 @@ fn provider_is_ofox(db: &Database, tool: Tool) -> Result<bool, String> {
     Ok([current.settings, current.db]
         .iter()
         .any(|id| id.as_deref() == Some(tool.provider_id())))
+}
+
+fn current_binding_is_ofox(db: &Database, tool: Tool) -> Result<bool, String> {
+    let current = previous_provider(db, &tool.app())?;
+    let ids: Vec<_> = [current.settings, current.db]
+        .into_iter()
+        .flatten()
+        .collect();
+    Ok(!ids.is_empty() && ids.iter().all(|id| id == tool.provider_id()))
+}
+
+fn require_existing_ofox_config(tool: Tool) -> Result<(), String> {
+    for file in tool.files() {
+        let path = file.current_path();
+        let text = read_text(&path)
+            .map_err(|_| "无法读取工具配置，已停止写入。".to_string())?
+            .ok_or_else(|| "工具配置已删除，请先恢复 OFox 接入配置。".to_string())?;
+        file.validate(&text)
+            .map_err(|_| "工具配置格式无效，已停止写入。".to_string())?;
+    }
+    if !bound_on_disk(tool).map_err(|_| "无法确认 OFox 接入配置，已停止写入。".to_string())?
+    {
+        return Err("工具接入配置已被修改，已停止自动覆盖。".into());
+    }
+    Ok(())
 }
 
 /// 解绑后当前服务商该是什么。
@@ -410,6 +497,7 @@ fn file_locks(tool: Tool) -> Vec<std::sync::MutexGuard<'static, ()>> {
 }
 
 /// 已经绑定的工具（切换模型时）：按 DB 模板重写接入字段，其余内容不动。
+#[cfg(test)]
 pub(crate) async fn rewrite_bound_config(
     db: &Database,
     tool: Tool,
@@ -417,6 +505,10 @@ pub(crate) async fn rewrite_bound_config(
 ) -> Result<(), String> {
     let _guard = BIND_LOCK.lock().await;
     let _file_locks = file_locks(tool);
+    if !current_binding_is_ofox(db, tool)? {
+        return Err("当前服务商已变化，已停止写入 OFox 配置。".into());
+    }
+    require_existing_ofox_config(tool)?;
     if tool == Tool::Codex {
         codex::migrate_legacy_shape(|| Some(api_key.to_string()))?;
     }
@@ -424,6 +516,52 @@ pub(crate) async fn rewrite_bound_config(
     let mut txn = FileTxn::new();
     if let Err(error) = write_bound(tool, &template, api_key, &mut txn) {
         return Err(rollback_with(txn, error));
+    }
+    Ok(())
+}
+
+/// Save a model and its live configuration under the same binding lock. The
+/// old DB template is still available while verifying the old on-disk model.
+pub(crate) async fn persist_bound_settings(
+    db: &Database,
+    tool: Tool,
+    api_key: &str,
+    previous: &Value,
+    updated: &Value,
+) -> Result<(), String> {
+    let _guard = BIND_LOCK.lock().await;
+    let _file_locks = file_locks(tool);
+    let current = db
+        .get_provider_by_id(tool.provider_id(), tool.app().as_str())
+        .map_err(|_| "读取当前 OFox 模型失败。".to_string())?
+        .ok_or_else(|| "未找到保存的 OFox 模型。".to_string())?;
+    if current.settings_config != *previous {
+        return Err("保存期间模型配置已变化，请刷新后重试。".into());
+    }
+    let health = status::inspect(db, tool, Some(api_key))
+        .map_err(|_| "无法确认现有配置，已停止保存模型。".to_string())?;
+    if health.status != status::BindingStatus::Configured {
+        return Err(health
+            .message
+            .unwrap_or_else(|| "请先恢复 OFox 接入配置。".into()));
+    }
+    db.update_provider_settings_config(tool.app().as_str(), tool.provider_id(), updated)
+        .map_err(|_| "保存 OFox 模型失败。".to_string())?;
+    let mut txn = FileTxn::new();
+    let result =
+        template(db, tool).and_then(|template| write_bound(tool, &template, api_key, &mut txn));
+    if result.is_err() {
+        let error = rollback_with(txn, "保存模型时写入工具配置失败。".into());
+        return Err(
+            match db.update_provider_settings_config(
+                tool.app().as_str(),
+                tool.provider_id(),
+                previous,
+            ) {
+                Ok(()) => error,
+                Err(_) => format!("{error}；还原已保存模型也失败，请刷新后重试。"),
+            },
+        );
     }
     Ok(())
 }
@@ -458,8 +596,37 @@ pub(crate) async fn bind(
     holder: &str,
     api_key: &str,
 ) -> Result<(), String> {
+    bind_inner(db, tool, holder, api_key, false).await
+}
+
+pub(crate) async fn bind_existing(
+    db: &Database,
+    tool: Tool,
+    holder: &str,
+    api_key: &str,
+) -> Result<(), String> {
+    bind_inner(db, tool, holder, api_key, true).await
+}
+
+async fn bind_inner(
+    db: &Database,
+    tool: Tool,
+    holder: &str,
+    api_key: &str,
+    require_existing: bool,
+) -> Result<(), String> {
     let _guard = BIND_LOCK.lock().await;
     let _file_locks = file_locks(tool);
+    if require_existing {
+        require_existing_ofox_config(tool)?;
+        let health = status::inspect_managed_fields(db, tool, Some(api_key))
+            .map_err(|_| "无法确认现有 OFox 接入配置，已停止启动修复。".to_string())?;
+        if health.status != status::BindingStatus::Configured {
+            return Err(health
+                .message
+                .unwrap_or_else(|| "OFox 接入配置已变化，已停止启动修复。".into()));
+        }
+    }
     if tool == Tool::Codex {
         codex::migrate_legacy_shape(|| Some(api_key.to_string()))?;
     }
@@ -516,6 +683,63 @@ pub(crate) async fn bind(
     Ok(())
 }
 
+/// Explicitly restore missing connection fields using the saved model. Existing
+/// managed values must agree with the saved binding before any file is written.
+pub(crate) async fn restore_missing_binding(
+    db: &Database,
+    tool: Tool,
+    holder: &str,
+    still_bound: &[String],
+    api_key: &str,
+) -> Result<(), String> {
+    let _guard = BIND_LOCK.lock().await;
+    let _file_locks = file_locks(tool);
+    let health = status::inspect(db, tool, Some(api_key))
+        .map_err(|_| "无法确认配置缺失，已停止恢复，请检查文件权限和格式。".to_string())?;
+    if health.status != status::BindingStatus::Missing {
+        return Err(health
+            .message
+            .unwrap_or_else(|| "配置未缺失，无需恢复。".into()));
+    }
+    let existing = load_record(db, tool)?;
+    let previous_text = existing.as_ref().map(|(text, _)| text.clone());
+    let mut envelope = match existing {
+        Some((_, StoredRecord::Envelope(envelope))) => envelope,
+        Some((_, StoredRecord::Legacy(value))) => BindEnvelope::legacy_adopted(holder, Some(value)),
+        None => BindEnvelope::legacy_adopted(holder, None),
+    };
+    envelope.holders.insert(holder.into());
+    envelope.holders.extend(
+        still_bound
+            .iter()
+            .filter_map(|app| tool_for(app))
+            .filter(|(other, _)| *other == tool)
+            .map(|(_, holder)| holder.to_string()),
+    );
+    let key = tool.record_key();
+    db.upsert_bind_record(key, &serialize_record(&envelope)?)
+        .map_err(|_| "保存绑定记录失败，已停止恢复。".to_string())?;
+    let mut txn = FileTxn::new();
+    let result = template(db, tool)
+        .and_then(|template| write_bound(tool, &template, api_key, &mut txn))
+        .and_then(|()| match status::inspect(db, tool, Some(api_key)) {
+            Ok(health) if health.status == status::BindingStatus::Configured => Ok(()),
+            _ => Err("恢复后的配置验证失败".to_string()),
+        });
+    if result.is_err() {
+        let error = rollback_with(txn, "恢复 OFox 接入配置失败，请检查文件权限和内容。".into());
+        let rollback = match previous_text {
+            Some(text) => db.upsert_bind_record(key, &text),
+            None => db.delete_bind_record(key),
+        };
+        return Err(match rollback {
+            Ok(()) => error,
+            Err(_) => format!("{error}；还原绑定记录也失败，请重试。"),
+        });
+    }
+    Ok(())
+}
+
 fn remove_dir_if_empty(path: &Path) {
     // 目录里还有别的东西（失败）就留着。
     let _ = std::fs::remove_dir(path);
@@ -539,6 +763,12 @@ fn restore_snapshot(
             let path = PathBuf::from(&baseline.path);
             let shown = display_path(&path);
             let current = read_text(&path)?;
+            // Deleting a configuration is a user action. Unbind clears our bookkeeping,
+            // but must never bring back a removed file or its containing directory.
+            if current.is_none() {
+                report.warn("configAlreadyMissing", Some(shown));
+                continue;
+            }
             let plan = baseline
                 .file
                 .plan_restore(baseline.original.as_deref(), current.as_deref())?;
@@ -688,6 +918,12 @@ pub(crate) async fn unbind(
             }
         }
         stored => {
+            for file in tool.files() {
+                let path = file.current_path();
+                if read_text(&path)?.is_none() {
+                    report.warn("configAlreadyMissing", Some(display_path(&path)));
+                }
+            }
             let legacy = match &stored {
                 Some(StoredRecord::Legacy(value)) => Some(value),
                 Some(StoredRecord::Envelope(envelope)) => envelope.legacy.as_ref(),
@@ -708,11 +944,8 @@ pub(crate) async fn unbind(
     }
 
     if !dry_run {
-        if let Err(e) = db.delete_bind_record(key) {
-            // 文件已经还原；下次绑定看到磁盘上不是 Ofox 的配置会重新拍快照。
-            log::warn!("[ofox_bind] 删除 {} 绑定记录失败：{e}", tool.label());
-            report.warn("recordCleanupFailed", None);
-        }
+        db.delete_bind_record(key)
+            .map_err(|_| "清理本地绑定记录失败，请重试解除绑定。".to_string())?;
     }
     Ok(report)
 }

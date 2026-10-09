@@ -45,14 +45,15 @@ describe("bindTools.mirrorBoundToolsToSettings", () => {
 
   it("bindTools writes localStorage AND mirrors boundTools to settings", async () => {
     let savedPayload: Record<string, unknown> | null = null;
+    let fullSettingsReads = 0;
 
     server.use(
-      http.post(`${TAURI_ENDPOINT}/get_settings`, () =>
-        HttpResponse.json(baseSettings),
-      ),
-      http.post(`${TAURI_ENDPOINT}/save_settings`, async ({ request }) => {
-        const body = (await request.json()) as { settings: unknown };
-        savedPayload = body.settings as Record<string, unknown>;
+      http.post(`${TAURI_ENDPOINT}/get_settings`, () => {
+        fullSettingsReads += 1;
+        return HttpResponse.json(baseSettings);
+      }),
+      http.post(`${TAURI_ENDPOINT}/save_bound_tools`, async ({ request }) => {
+        savedPayload = (await request.json()) as Record<string, unknown>;
         return HttpResponse.json(true);
       }),
       // bindTools calls ensureDefaultModel() after each bind, which reads the
@@ -82,10 +83,9 @@ describe("bindTools.mirrorBoundToolsToSettings", () => {
     expect(
       (savedPayload as unknown as { boundTools?: unknown })?.boundTools,
     ).toEqual(["claude", "codex"]);
-    // Spread should preserve every other field
-    expect(
-      (savedPayload as unknown as { showInTray?: boolean })?.showInTray,
-    ).toBe(true);
+    // No full snapshot can reset a concurrently changed region or key record.
+    expect(savedPayload).toEqual({ boundTools: ["claude", "codex"] });
+    expect(fullSettingsReads).toBe(0);
 
     // Emit hook fired
     expect(emitMock).toHaveBeenCalledWith("ofox-prefs-updated");
@@ -103,9 +103,8 @@ describe("bindTools.mirrorBoundToolsToSettings", () => {
           boundTools: ["claude", "codex"],
         }),
       ),
-      http.post(`${TAURI_ENDPOINT}/save_settings`, async ({ request }) => {
-        const body = (await request.json()) as { settings: unknown };
-        savedPayload = body.settings as Record<string, unknown>;
+      http.post(`${TAURI_ENDPOINT}/save_bound_tools`, async ({ request }) => {
+        savedPayload = (await request.json()) as Record<string, unknown>;
         return HttpResponse.json(true);
       }),
       http.post(`${TAURI_ENDPOINT}/ofox_unbind_tool`, () =>
@@ -155,7 +154,7 @@ describe("bindTools.mirrorBoundToolsToSettings", () => {
       http.post(`${TAURI_ENDPOINT}/get_settings`, () =>
         HttpResponse.json(baseSettings),
       ),
-      http.post(`${TAURI_ENDPOINT}/save_settings`, () =>
+      http.post(`${TAURI_ENDPOINT}/save_bound_tools`, () =>
         HttpResponse.json(true),
       ),
       http.post(
@@ -186,7 +185,7 @@ describe("bindTools.mirrorBoundToolsToSettings", () => {
       http.post(`${TAURI_ENDPOINT}/get_settings`, () =>
         HttpResponse.json(baseSettings),
       ),
-      http.post(`${TAURI_ENDPOINT}/save_settings`, () =>
+      http.post(`${TAURI_ENDPOINT}/save_bound_tools`, () =>
         HttpResponse.json(true),
       ),
       http.post(`${TAURI_ENDPOINT}/get_active_ofox_model`, () =>
@@ -203,5 +202,77 @@ describe("bindTools.mirrorBoundToolsToSettings", () => {
     await bindTools(["chatgpt"]);
 
     expect(bound).toEqual(["chatgpt"]);
+  });
+
+  it("adds only new bindings and never rewrites a retained tool's deleted configuration", async () => {
+    localStorage.setItem("bound_tools", JSON.stringify(["workbuddy", "codex"]));
+    const bound: string[] = [];
+    server.use(
+      http.post(`${TAURI_ENDPOINT}/get_settings`, () =>
+        HttpResponse.json(baseSettings),
+      ),
+      http.post(`${TAURI_ENDPOINT}/save_bound_tools`, () =>
+        HttpResponse.json(true),
+      ),
+      http.post(`${TAURI_ENDPOINT}/get_active_ofox_model`, () =>
+        HttpResponse.json("saved-model"),
+      ),
+      http.post(`${TAURI_ENDPOINT}/ofox_bind_tool`, async ({ request }) => {
+        bound.push(((await request.json()) as { app: string }).app);
+        return HttpResponse.json(undefined);
+      }),
+    );
+    const { bindTools } = await import("@/lib/bindTools");
+    const retained = await bindTools([
+      "workbuddy",
+      "codex",
+      "claude",
+      "claude",
+    ]);
+    expect(bound).toEqual(["claude"]);
+    expect(retained).toEqual(["workbuddy", "codex", "claude"]);
+    expect(JSON.parse(localStorage.getItem("bound_tools")!)).toEqual(retained);
+  });
+
+  it("retains every existing binding when adding a new tool fails", async () => {
+    localStorage.setItem(
+      "bound_tools",
+      JSON.stringify(["workbuddy", "chatgpt"]),
+    );
+    server.use(
+      http.post(`${TAURI_ENDPOINT}/get_settings`, () =>
+        HttpResponse.json(baseSettings),
+      ),
+      http.post(`${TAURI_ENDPOINT}/save_bound_tools`, () =>
+        HttpResponse.json(true),
+      ),
+      http.post(`${TAURI_ENDPOINT}/ofox_bind_tool`, () =>
+        HttpResponse.text("binding failed", { status: 500 }),
+      ),
+    );
+    const { bindTools } = await import("@/lib/bindTools");
+    expect(await bindTools(["codex"])).toEqual(["workbuddy", "chatgpt"]);
+    expect(JSON.parse(localStorage.getItem("bound_tools")!)).toEqual([
+      "workbuddy",
+      "chatgpt",
+    ]);
+  });
+
+  it("retains the UI binding when backend record cleanup reports a failure", async () => {
+    localStorage.setItem("bound_tools", JSON.stringify(["codex", "chatgpt"]));
+    server.use(
+      http.post(`${TAURI_ENDPOINT}/ofox_unbind_tool`, () =>
+        HttpResponse.json({
+          tool: "codex",
+          warnings: [{ code: "recordCleanupFailed" }],
+        }),
+      ),
+    );
+    const { unbindTool } = await import("@/lib/bindTools");
+    await expect(unbindTool("codex")).rejects.toThrow();
+    expect(JSON.parse(localStorage.getItem("bound_tools")!)).toEqual([
+      "codex",
+      "chatgpt",
+    ]);
   });
 });

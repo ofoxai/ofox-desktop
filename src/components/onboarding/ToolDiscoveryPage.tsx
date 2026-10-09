@@ -1,14 +1,13 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { INSTALLABLE_TOOLS, TOOL_META, TOOL_ORDER } from "@/config/toolMeta";
+import { TOOL_META, TOOL_ORDER } from "@/config/toolMeta";
 import { useToolInstall } from "@/hooks/useToolInstall";
+import { useToolInstallCapabilities } from "@/hooks/useToolInstallCapabilities";
+import {
+  getInstallationStatus,
+  type ToolInstallationInfo,
+} from "@/lib/api/toolUpdates";
 import { ToolDiscoveryCard, type ToolStatus } from "./ToolDiscoveryCard";
-
-interface ToolInfo {
-  name: string;
-  version: string | null;
-  error: string | null;
-}
 
 interface ToolEntry {
   id: string;
@@ -35,6 +34,7 @@ export default function ToolDiscoveryPage({
   onBack,
   onBind,
 }: ToolDiscoveryPageProps) {
+  const installableTools = useToolInstallCapabilities();
   // 初始就给 6 张 scanning 卡片占位——之前是 tools=[]，扫描期间整面什么也
   // 看不到，用户不知道有哪些可选工具。改成首屏即就位，扫描完成后从
   // scanning → missing/unselected → selected 渐进推进。
@@ -57,16 +57,25 @@ export default function ToolDiscoveryPage({
   // clearTimeout——否则 unmount 后 setEntries 会触发 setState-after-unmount
   // 警告（React 18 dev only，但读 console 时干扰排障）。
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const scanGeneration = useRef(0);
 
   const detectTools = useCallback(async () => {
+    const generation = ++scanGeneration.current;
+    setScanDone(false);
+    timersRef.current.forEach(clearTimeout);
+    timersRef.current = [];
     try {
       // Onboarding 只需要本地版本——不查 npm/GitHub 最新版（那是 console
       // 里的"有新版本"提示用的），跳过远程 fetch 让 invoke 更快返回。
-      const results = await invoke<ToolInfo[]>("get_tool_versions", {
-        tools: null,
-        wslShellByTool: null,
-        includeLatest: false,
-      });
+      const results = await invoke<ToolInstallationInfo[]>(
+        "get_tool_versions",
+        {
+          tools: null,
+          wslShellByTool: null,
+          includeLatest: false,
+        },
+      );
+      if (generation !== scanGeneration.current) return;
       const byName = new Map(results.map((r) => [r.name, r]));
 
       // Step 1：把 scanning 一次性翻成 missing（没装）或 unselected（装了）。
@@ -74,11 +83,16 @@ export default function ToolDiscoveryPage({
       // 落定，但 detected 的卡还都是 unselected——下一步才逐个翻 selected。
       const settled: ToolEntry[] = TOOL_ORDER.map((id) => {
         const info = byName.get(id);
-        const detected = !!info && !!info.version && !info.error;
+        const installationStatus = getInstallationStatus(info);
+        const detected = installationStatus === "installed" && !info?.error;
         return {
           id,
           label: TOOL_META[id].label,
-          status: detected ? ("unselected" as ToolStatus) : "missing",
+          status: detected
+            ? ("unselected" as ToolStatus)
+            : installationStatus === "notInstalled"
+              ? "missing"
+              : "detectionFailed",
           version: info?.version ?? null,
           autoSelectTick: 0,
         };
@@ -94,6 +108,7 @@ export default function ToolDiscoveryPage({
         .map((e) => e.id);
       detectedIds.forEach((id, i) => {
         const t = setTimeout(() => {
+          if (generation !== scanGeneration.current) return;
           setEntries((prev) =>
             prev.map((e) =>
               e.id === id
@@ -113,18 +128,21 @@ export default function ToolDiscoveryPage({
       // 跟着最后一张卡的高亮一起出现。Math.max(0, len-1) 处理 0 工具被检测
       // 到的边界（立刻 ready）。
       const doneT = setTimeout(
-        () => setScanDone(true),
+        () => {
+          if (generation === scanGeneration.current) setScanDone(true);
+        },
         Math.max(0, detectedIds.length - 1) * STAGGER_INTERVAL_MS,
       );
       timersRef.current.push(doneT);
     } catch (e) {
+      if (generation !== scanGeneration.current) return;
       console.error("Tool detection failed:", e);
       // 全部置 missing 让用户至少能"返回"或硬选 —— 不阻塞 onboarding。
       setEntries(
         TOOL_ORDER.map((id) => ({
           id,
           label: TOOL_META[id].label,
-          status: "missing",
+          status: "detectionFailed",
           version: null,
           autoSelectTick: 0,
         })),
@@ -136,6 +154,7 @@ export default function ToolDiscoveryPage({
   useEffect(() => {
     detectTools();
     return () => {
+      scanGeneration.current += 1;
       timersRef.current.forEach(clearTimeout);
       timersRef.current = [];
     };
@@ -177,7 +196,7 @@ export default function ToolDiscoveryPage({
   // detectedCount 包括 selected 和 unselected——只要不是 scanning/missing
   // 就算"扫描发现的工具"。文案"已发现 N 个" 不依赖用户最终选了几个。
   const detectedCount = entries.filter(
-    (e) => e.status !== "scanning" && e.status !== "missing",
+    (e) => e.status === "selected" || e.status === "unselected",
   ).length;
   const isScanning = entries.some((e) => e.status === "scanning");
 
@@ -210,8 +229,9 @@ export default function ToolDiscoveryPage({
                 autoSelectTick={e.autoSelectTick}
                 progress={installProgress[e.id]}
                 onClick={() => handleToggle(e.id)}
+                onRetry={() => void detectTools()}
                 onInstall={
-                  INSTALLABLE_TOOLS.includes(e.id)
+                  installableTools.includes(e.id)
                     ? () => install(e.id)
                     : undefined
                 }

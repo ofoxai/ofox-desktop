@@ -424,16 +424,18 @@ pub(crate) fn startup_action(
 ///   先用默认值并标记为未确定，下次启动再探。
 /// - 探测结果和现有值一致，或者用户手动锁定过：只确认，不切换。
 /// - 探测结果不同且没锁定：走和手动切换相同的流程（持久化、清旧域登录态、
-///   重建种子、同步 WorkBuddy 地址、通知前端）。这就是「开不开代理都能自动选对」。
+///   同步现存工具地址、通知前端）。这就是「开不开代理都能自动选对」。
 ///
 /// 需要 `OfoxAuthState` 已经注册（切换要清登录态），所以在它之后再 spawn。
 pub async fn probe_apex_on_startup(app: &tauri::AppHandle, client: &reqwest::Client) {
+    let probe = detect_apex_from_geo(client).await;
+    // The user can pin a region while the network probe is in flight. Base
+    // the decision on the latest settings so a late probe cannot undo it.
     let settings = crate::settings::get_settings();
     let stored = settings.ofox_apex.as_deref().map(|_| current_apex());
     let pinned = settings.ofox_apex_pinned.unwrap_or(false);
     let apex_before = current_apex();
 
-    let probe = detect_apex_from_geo(client).await;
     match startup_action(stored, pinned, probe) {
         StartupAction::KeepCurrent => {
             log::warn!("[OfoxApex] geo probe failed; keeping apex={apex_before}");
@@ -458,9 +460,9 @@ pub async fn probe_apex_on_startup(app: &tauri::AppHandle, client: &reqwest::Cli
                 log::warn!("[OfoxApex] persist apex={apex} failed: {e}; will re-probe next launch");
                 return;
             }
-            // 第一次启动：DB 种子是用探测前的默认值拼的，变了就重建。
+            // First-launch fallback URLs need the same safe migration as a switch.
             if apex != apex_before {
-                reseed_after_apex_change(app, apex_before, apex);
+                reconcile_after_apex_change(app, apex_before, apex).await;
             }
             if resolved {
                 log::info!("[OfoxApex] resolved apex={apex} (persisted)");
@@ -486,25 +488,23 @@ pub async fn probe_apex_on_startup(app: &tauri::AppHandle, client: &reqwest::Cli
     }
 }
 
-fn reseed_after_apex_change(app: &tauri::AppHandle, apex_before: &str, detected: &str) {
+async fn reconcile_after_apex_change(app: &tauri::AppHandle, apex_before: &str, detected: &str) {
     use tauri::Manager;
     match app.try_state::<crate::store::AppState>() {
         Some(state) => {
-            match crate::database::dao::providers_seed::reseed_ofox_providers_with_current_apex(
-                &state.db,
-            ) {
-                Ok(n) => log::info!(
-                    "[OfoxApex] apex {apex_before} → {detected}: reseeded {n} provider rows"
-                ),
-                Err(e) => log::warn!(
-                    "[OfoxApex] apex {apex_before} → {detected}: reseed failed: {e}; \
-                     ofox-* providers may still carry the old base_url"
-                ),
+            if crate::commands::ofox_apex::reconcile_tool_endpoints(&state.db).await {
+                log::info!(
+                    "[OfoxApex] apex {apex_before} → {detected}: reconciled present tool URLs"
+                );
+            } else {
+                log::warn!(
+                    "[OfoxApex] apex {apex_before} → {detected}: configuration conflicts retained"
+                );
             }
         }
         None => log::warn!(
             "[OfoxApex] apex {apex_before} → {detected}: AppState unavailable; \
-             skipped reseed — ofox-* providers may still carry the old base_url"
+             skipped endpoint reconciliation"
         ),
     }
 }

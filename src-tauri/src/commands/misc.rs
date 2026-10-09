@@ -12,6 +12,8 @@ use tauri::AppHandle;
 use tauri::State;
 use tauri_plugin_opener::OpenerExt;
 
+use super::tool_update::{DesktopInstallation, ProbeError};
+
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
@@ -189,11 +191,58 @@ pub struct ToolVersion {
     wsl_distro: Option<String>,
     #[serde(rename = "installationKind")]
     installation_kind: String,
+    #[serde(rename = "installationStatus")]
+    installation_status: InstallationStatus,
     update_status: String,
     update_source: Option<String>,
     update_supported: bool,
     update_reason: Option<String>,
     executable_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+enum InstallationStatus {
+    Installed,
+    NotInstalled,
+    Unknown,
+}
+
+#[derive(Debug)]
+struct LocalDetection {
+    status: InstallationStatus,
+    version: Option<String>,
+    error: Option<String>,
+    path: Option<PathBuf>,
+}
+
+impl LocalDetection {
+    fn missing() -> Self {
+        Self {
+            status: InstallationStatus::NotInstalled,
+            version: None,
+            error: None,
+            path: None,
+        }
+    }
+
+    fn failed(error: impl Into<String>) -> Self {
+        Self {
+            status: InstallationStatus::Unknown,
+            version: None,
+            error: Some(error.into()),
+            path: None,
+        }
+    }
+
+    fn found(path: PathBuf, version: Option<String>, error: Option<String>) -> Self {
+        Self {
+            status: InstallationStatus::Installed,
+            version,
+            error,
+            path: Some(path),
+        }
+    }
 }
 
 const VALID_TOOLS: [&str; 8] = [
@@ -245,137 +294,181 @@ fn tool_env_type_and_wsl_distro(_tool: &str) -> (String, Option<String>) {
 const WORKBUDDY_MACOS_BUNDLE_ID: &str = "com.tencent.workbuddy.mac";
 
 #[cfg(target_os = "macos")]
-fn workbuddy_macos_app_from_plist<F>(path: &Path, mut read_value: F) -> Option<(PathBuf, String)>
-where
-    F: FnMut(&str) -> Option<String>,
-{
-    if read_value("CFBundleIdentifier").as_deref() != Some(WORKBUDDY_MACOS_BUNDLE_ID) {
-        return None;
-    }
-
-    let version = read_value("CFBundleShortVersionString")
-        .or_else(|| read_value("CFBundleVersion"))
-        .unwrap_or_else(|| "已安装".to_string());
-    Some((path.to_path_buf(), version))
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn find_workbuddy_app() -> Result<(PathBuf, String), String> {
+pub(crate) async fn find_workbuddy_app() -> Result<Option<DesktopInstallation>, String> {
     let candidates = [
         PathBuf::from("/Applications/WorkBuddy.app"),
         crate::config::get_home_dir()
             .join("Applications")
             .join("WorkBuddy.app"),
     ];
-    for path in candidates {
-        let plist = path.join("Contents/Info.plist");
-        if !plist.is_file() {
-            continue;
-        }
-        let read_value = |key: &str| -> Option<String> {
-            std::process::Command::new("/usr/libexec/PlistBuddy")
-                .args(["-c", &format!("Print :{key}")])
-                .arg(&plist)
-                .output()
-                .ok()
-                .filter(|output| output.status.success())
-                .and_then(|output| String::from_utf8(output.stdout).ok())
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        };
-        if let Some(app) = workbuddy_macos_app_from_plist(&path, read_value) {
-            return Ok(app);
-        }
-    }
-    Err("未检测到官方 WorkBuddy.app".to_string())
+    super::tool_update::detect_macos_apps(&candidates, WORKBUDDY_MACOS_BUNDLE_ID).await
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn find_workbuddy_app() -> Result<(PathBuf, String), String> {
+pub(crate) async fn find_workbuddy_app() -> Result<Option<DesktopInstallation>, String> {
+    let (candidates, first_error) = workbuddy_discovery_sources(
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
+        workbuddy_registry_candidates(),
+    );
+    let Some(path) = select_workbuddy_candidate(&candidates, first_error)? else {
+        return Ok(None);
+    };
+    let escaped = path.to_string_lossy().replace('\'', "''");
+    let mut command = tokio::process::Command::new("powershell");
+    command
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!("(Get-Item -LiteralPath '{escaped}').VersionInfo.ProductVersion"),
+        ])
+        .creation_flags(CREATE_NO_WINDOW);
+    Ok(Some(workbuddy_version_output(
+        path,
+        super::tool_update::bounded_output(command).await,
+    )))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn workbuddy_discovery_sources(
+    local_app_data: Option<PathBuf>,
+    registry: Result<Vec<PathBuf>, String>,
+) -> (Vec<PathBuf>, Option<String>) {
     let mut candidates = Vec::new();
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+    let mut first_error = None;
+    if let Some(local) = local_app_data {
         candidates.push(
-            PathBuf::from(local)
+            local
                 .join("Programs")
                 .join("WorkBuddy")
                 .join("WorkBuddy.exe"),
         );
+    } else {
+        first_error = Some("Could not read LOCALAPPDATA for application discovery".into());
     }
+    // A failed registry read must not conceal an installation found at the
+    // usual path, but it prevents a conclusive missing result.
+    match registry {
+        Ok(paths) => candidates.extend(paths),
+        Err(error) => {
+            first_error.get_or_insert(error);
+        }
+    }
+    (candidates, first_error)
+}
 
-    let mut command = std::process::Command::new("reg");
-    command
-        .args([
-            "query",
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall",
-            "/s",
-            "/f",
-            "WorkBuddy",
-        ])
-        .creation_flags(CREATE_NO_WINDOW);
-    if let Ok(output) = command.output() {
-        if output.status.success() {
-            let text = String::from_utf8_lossy(&output.stdout);
-            for line in text.lines() {
-                let trimmed = line.trim();
-                for field in ["DisplayIcon", "InstallLocation"] {
-                    if let Some(index) = trimmed.find(field) {
-                        let value = trimmed[index + field.len()..]
-                            .trim_start_matches(|c: char| {
-                                c.is_whitespace()
-                                    || c == 'R'
-                                    || c == 'E'
-                                    || c == 'G'
-                                    || c == '_'
-                                    || c.is_ascii_digit()
-                            })
-                            .trim()
-                            .trim_matches('"')
-                            .split(',')
-                            .next()
-                            .unwrap_or_default();
-                        if !value.is_empty() {
-                            let path = PathBuf::from(value);
-                            candidates.push(if path.extension().is_some() {
-                                path
-                            } else {
-                                path.join("WorkBuddy.exe")
-                            });
-                        }
-                    }
-                }
+#[cfg(any(target_os = "windows", test))]
+fn select_workbuddy_candidate(
+    candidates: &[PathBuf],
+    mut first_error: Option<String>,
+) -> Result<Option<PathBuf>, String> {
+    for path in candidates {
+        match super::tool_update::candidate_exists(path) {
+            Ok(false) => continue,
+            Err(error) => {
+                first_error.get_or_insert(error);
+                continue;
+            }
+            Ok(true) => {}
+        }
+        return Ok(Some(path.clone()));
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(None),
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn workbuddy_version_output(
+    path: PathBuf,
+    output: Result<std::process::Output, String>,
+) -> DesktopInstallation {
+    let (version, error) = match output {
+        Ok(output) if output.status.success() => {
+            let version = Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+                .filter(|version| !version.is_empty());
+            let error = version
+                .is_none()
+                .then(|| "Installed WorkBuddy has no version metadata".into());
+            (version, error)
+        }
+        Ok(_) => (
+            None,
+            Some("WorkBuddy version metadata could not be read".into()),
+        ),
+        Err(error) => (None, Some(error)),
+    };
+    DesktopInstallation {
+        path,
+        version,
+        error,
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn workbuddy_registry_candidate(field: &str, value: &str) -> Option<PathBuf> {
+    let value = value.trim();
+    // DisplayIcon may end in an icon resource index; commas in a directory
+    // name or InstallLocation are part of the path.
+    let value = if field == "DisplayIcon" {
+        value
+            .rsplit_once(',')
+            .filter(|(_, index)| index.trim().parse::<i32>().is_ok())
+            .map_or(value, |(path, _)| path.trim())
+    } else {
+        value
+    };
+    let value = value.trim_matches('"');
+    if value.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(value);
+    Some(if field == "InstallLocation" {
+        path.join("WorkBuddy.exe")
+    } else {
+        path
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn workbuddy_registry_candidates() -> Result<Vec<PathBuf>, String> {
+    use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+    let root = match RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Uninstall")
+    {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("Could not query installed applications: {error}")),
+    };
+    let mut candidates = Vec::new();
+    for name in root.enum_keys() {
+        let name = name.map_err(|error| error.to_string())?;
+        let key = root.open_subkey(name).map_err(|error| error.to_string())?;
+        let display_name: String = match key.get_value("DisplayName") {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        if !display_name.to_ascii_lowercase().contains("workbuddy") {
+            continue;
+        }
+        for field in ["DisplayIcon", "InstallLocation"] {
+            let value: String = match key.get_value(field) {
+                Ok(value) => value,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.to_string()),
+            };
+            if let Some(path) = workbuddy_registry_candidate(field, &value) {
+                candidates.push(path);
             }
         }
     }
-
-    for path in candidates {
-        if !path.is_file() {
-            continue;
-        }
-        let escaped = path.to_string_lossy().replace('\'', "''");
-        let mut command = std::process::Command::new("powershell");
-        command
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                &format!("(Get-Item -LiteralPath '{escaped}').VersionInfo.ProductVersion"),
-            ])
-            .creation_flags(CREATE_NO_WINDOW);
-        let version = command
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "已安装".to_string());
-        return Ok((path, version));
-    }
-    Err("未检测到 WorkBuddy.exe".to_string())
+    Ok(candidates)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-pub(crate) fn find_workbuddy_app() -> Result<(PathBuf, String), String> {
+pub(crate) async fn find_workbuddy_app() -> Result<Option<DesktopInstallation>, String> {
     Err("WorkBuddy 首版仅支持 macOS 和 Windows".to_string())
 }
 
@@ -444,7 +537,8 @@ async fn chatgpt_update_fields(
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn desktop_tool_version(
     tool: &str,
-    version: String,
+    version: Option<String>,
+    error: Option<String>,
     update: super::chatgpt_updates::DesktopUpdateFields,
     env_type: String,
     wsl_distro: Option<String>,
@@ -452,12 +546,13 @@ fn desktop_tool_version(
 ) -> ToolVersion {
     ToolVersion {
         name: tool.to_string(),
-        version: Some(version),
+        version,
         latest_version: update.latest_version,
-        error: None,
+        error,
         env_type,
         wsl_distro,
         installation_kind: "desktopApp".into(),
+        installation_status: InstallationStatus::Installed,
         update_status: update.update_status.into(),
         update_source: update.update_source,
         update_supported: update.update_supported,
@@ -484,274 +579,287 @@ async fn get_single_tool_version_impl(
 
     if tool == "workbuddy" {
         let (env_type, wsl_distro) = tool_env_type_and_wsl_distro(tool);
-        return match find_workbuddy_app() {
-            Ok((_path, version)) => ToolVersion {
+        return match find_workbuddy_app().await {
+            Ok(Some(app)) => ToolVersion {
                 name: tool.to_string(),
-                version: Some(version),
+                version: app.version,
                 latest_version: None,
-                error: None,
+                error: app.error,
                 env_type,
                 wsl_distro,
-                installation_kind: "desktopApp".to_string(),
+                installation_kind: "desktopApp".into(),
+                installation_status: InstallationStatus::Installed,
                 update_status: "appManaged".into(),
                 update_source: None,
                 update_supported: false,
                 update_reason: None,
-                executable_path: None,
+                executable_path: Some(app.path.to_string_lossy().into_owned()),
             },
-            Err(error) => ToolVersion {
-                name: tool.to_string(),
-                version: None,
-                latest_version: None,
-                error: Some(error),
+            Ok(None) => unavailable_tool_version(
+                tool,
+                "desktopApp",
+                LocalDetection::missing(),
                 env_type,
                 wsl_distro,
-                installation_kind: "desktopApp".to_string(),
-                update_status: "appManaged".into(),
-                update_source: None,
-                update_supported: false,
-                update_reason: None,
-                executable_path: None,
-            },
+            ),
+            Err(error) => unavailable_tool_version(
+                tool,
+                "desktopApp",
+                LocalDetection::failed(error),
+                env_type,
+                wsl_distro,
+            ),
         };
     }
 
-    // 桌面 App 型工具 —— 复用 codex_desktop_version 的 Info.plist 探测，但不与
-    // codex CLI 检测共享 tool_id。这是 `chatgpt` 独立于 `codex` 的关键：codex
-    // 分支仍走 CLI probe + App 兜底，chatgpt 分支只看 App 本身在不在。
     if tool == "chatgpt" {
         let (env_type, wsl_distro) = tool_env_type_and_wsl_distro(tool);
         #[cfg(target_os = "macos")]
         {
-            if let Some((path, version)) = super::tool_update::codex_desktop_version().await {
-                // macOS 由 App 内置 Sparkle 升级，Ofox 只报告状态。
-                let update =
-                    chatgpt_update_fields("sparkle", &version, include_latest, false).await;
-                return desktop_tool_version(tool, version, update, env_type, wsl_distro, path);
-            }
-            return ToolVersion {
-                name: tool.to_string(),
-                version: None,
-                latest_version: None,
-                error: None,
-                env_type,
-                wsl_distro,
-                installation_kind: "desktopApp".into(),
-                update_status: "notInstalled".into(),
-                update_source: None,
-                update_supported: false,
-                update_reason: None,
-                executable_path: None,
+            return match super::tool_update::codex_desktop_version().await {
+                Ok(Some(app)) => {
+                    let update = chatgpt_update_fields(
+                        "sparkle",
+                        app.version.as_deref().unwrap_or(""),
+                        include_latest,
+                        false,
+                    )
+                    .await;
+                    desktop_tool_version(
+                        tool,
+                        app.version,
+                        app.error,
+                        update,
+                        env_type,
+                        wsl_distro,
+                        app.path.to_string_lossy().into_owned(),
+                    )
+                }
+                Ok(None) => unavailable_tool_version(
+                    tool,
+                    "desktopApp",
+                    LocalDetection::missing(),
+                    env_type,
+                    wsl_distro,
+                ),
+                Err(error) => unavailable_tool_version(
+                    tool,
+                    "desktopApp",
+                    LocalDetection::failed(error),
+                    env_type,
+                    wsl_distro,
+                ),
             };
         }
         #[cfg(target_os = "windows")]
         {
-            // AppxPackage 探不到 = 没装；探到 = 返回版本号。
-            // executable_path 用 shell:AppsFolder\<AUMID>——用户点"打开"时启动器
-            // 拿它拉起 Store app，跟检测口径一致。
-            // PowerShell 探测是阻塞调用，放到 blocking 线程，免得在 join_all 里拖住其它工具。
-            let detected =
-                tokio::task::spawn_blocking(super::windows_chatgpt::detect_chatgpt_desktop_app)
-                    .await
-                    .unwrap_or_else(|err| Err(format!("ChatGPT 检测任务失败: {err}")));
-            match detected {
-                Ok(Some(version)) => {
-                    // Windows 由 Ofox 一键升级（winget/Store），见 upgrade_chatgpt_desktop_app_with。
-                    let update =
-                        chatgpt_update_fields("msstore", &version, include_latest, true).await;
-                    return desktop_tool_version(
+            return match super::windows_chatgpt::detect_chatgpt_installation().await {
+                Ok(Some(app)) => {
+                    let update = chatgpt_update_fields(
+                        "msstore",
+                        app.version.as_deref().unwrap_or(""),
+                        include_latest,
+                        true,
+                    )
+                    .await;
+                    desktop_tool_version(
                         tool,
-                        version,
+                        app.version,
+                        app.error,
                         update,
                         env_type,
                         wsl_distro,
-                        super::chatgpt_updates::windows_launch_target(),
-                    );
+                        app.path.to_string_lossy().into_owned(),
+                    )
                 }
-                Ok(None) => {
-                    return ToolVersion {
-                        name: tool.to_string(),
-                        version: None,
-                        latest_version: None,
-                        error: None,
-                        env_type,
-                        wsl_distro,
-                        installation_kind: "desktopApp".into(),
-                        update_status: "notInstalled".into(),
-                        update_source: None,
-                        update_supported: false,
-                        update_reason: None,
-                        executable_path: None,
-                    };
-                }
-                Err(err) => {
-                    return ToolVersion {
-                        name: tool.to_string(),
-                        version: None,
-                        latest_version: None,
-                        error: Some(err),
-                        env_type,
-                        wsl_distro,
-                        installation_kind: "desktopApp".into(),
-                        update_status: "failed".into(),
-                        update_source: None,
-                        update_supported: false,
-                        update_reason: None,
-                        executable_path: None,
-                    };
-                }
-            }
+                Ok(None) => unavailable_tool_version(
+                    tool,
+                    "desktopApp",
+                    LocalDetection::missing(),
+                    env_type,
+                    wsl_distro,
+                ),
+                Err(error) => unavailable_tool_version(
+                    tool,
+                    "desktopApp",
+                    LocalDetection::failed(error),
+                    env_type,
+                    wsl_distro,
+                ),
+            };
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            return ToolVersion {
-                name: tool.to_string(),
-                version: None,
-                latest_version: None,
-                error: Some("ChatGPT App 目前仅支持 macOS / Windows".into()),
-                env_type,
-                wsl_distro,
-                installation_kind: "desktopApp".into(),
-                update_status: "unsupported".into(),
-                update_source: None,
-                update_supported: false,
-                update_reason: None,
-                executable_path: None,
-            };
-        }
+        return unavailable_tool_version(
+            tool,
+            "desktopApp",
+            LocalDetection::failed("ChatGPT App is not supported on this platform"),
+            env_type,
+            wsl_distro,
+        );
     }
 
-    // 判断该工具的运行环境 & WSL distro（如有）
     let (env_type, wsl_distro) = tool_env_type_and_wsl_distro(tool);
-
-    // 1. 获取本地版本
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     let active_installation = super::tool_update::probe(tool).await;
-    // Never compare a desktop calendar version with npm semver.
-    #[cfg(target_os = "macos")]
-    if tool == "codex" && active_installation.is_err() {
-        if let Some((path, version)) = super::tool_update::codex_desktop_version().await {
-            return ToolVersion {
-                name: tool.into(),
-                version: Some(version),
-                latest_version: None,
-                error: None,
-                env_type,
-                wsl_distro,
-                installation_kind: "desktopApp".into(),
-                update_status: "appManaged".into(),
-                update_source: None,
-                update_supported: false,
-                update_reason: None,
-                executable_path: Some(path),
-            };
-        }
-    }
-    #[cfg(target_os = "macos")]
-    let (local_version, local_error) = match &active_installation {
-        Ok(installation) => (
+    #[cfg(unix)]
+    let local = match &active_installation {
+        Ok(installation) => LocalDetection::found(
+            installation.path.clone(),
             (!installation.version.is_empty()).then(|| installation.version.clone()),
             installation.error.clone(),
         ),
-        // A found-but-broken active binary must not be hidden by an older copy.
-        Err(error) if !error.starts_with("No executable in the launch shell PATH") => {
-            (None, Some(error.clone()))
-        }
-        Err(error) => {
-            let tool = tool.to_string();
-            let fallback = tokio::task::spawn_blocking(move || {
-                let direct = try_get_version(&tool);
-                if direct.0.is_some() {
-                    direct
-                } else {
-                    scan_cli_version(&tool)
-                }
-            })
-            .await
-            .unwrap_or((None, None));
-            if fallback.0.is_some() {
-                fallback
-            } else {
-                (None, Some(error.clone()))
-            }
-        }
+        Err(ProbeError::NotFound) => scan_cli_version(tool).await,
+        Err(error) => LocalDetection::failed(error.to_string()),
     };
-    #[cfg(not(target_os = "macos"))]
-    let (local_version, local_error) = if let Some(distro) = wsl_distro.as_deref() {
-        try_get_version_wsl(tool, distro, wsl_shell, wsl_shell_flag)
+    #[cfg(not(unix))]
+    let local = if let Some(distro) = wsl_distro.as_deref() {
+        try_get_version_wsl(tool, distro, wsl_shell, wsl_shell_flag).await
     } else {
-        let direct_result = try_get_version(tool);
-        if direct_result.0.is_some() {
-            direct_result
-        } else {
-            scan_cli_version(tool)
-        }
+        scan_cli_version(tool).await
     };
 
-    // 2. 获取远程最新版本（按需）
+    #[cfg(target_os = "macos")]
+    if tool == "codex" && local.status == InstallationStatus::NotInstalled {
+        match super::tool_update::codex_desktop_version().await {
+            Ok(Some(app)) => {
+                return ToolVersion {
+                    name: tool.into(),
+                    version: app.version,
+                    latest_version: None,
+                    error: app.error,
+                    env_type,
+                    wsl_distro,
+                    installation_kind: "desktopApp".into(),
+                    installation_status: InstallationStatus::Installed,
+                    update_status: "appManaged".into(),
+                    update_source: None,
+                    update_supported: false,
+                    update_reason: None,
+                    executable_path: Some(app.path.to_string_lossy().into_owned()),
+                }
+            }
+            Err(error) => {
+                return unavailable_tool_version(
+                    tool,
+                    "cli",
+                    LocalDetection::failed(error),
+                    env_type,
+                    wsl_distro,
+                )
+            }
+            Ok(None) => {}
+        }
+    }
+
     let latest_version = if include_latest {
-        latest_tool_version(tool, local_version.as_deref()).await
+        latest_tool_version(tool, local.version.as_deref()).await
     } else {
         None
     };
-
-    let update_status = if local_version.is_none()
-        && local_error
-            .as_deref()
-            .is_some_and(|error| error.starts_with("Active executable failed"))
-    {
-        "broken"
-    } else if include_latest {
-        super::tool_update::version_status(local_version.as_deref(), latest_version.as_deref())
-    } else {
-        "unchecked"
-    }
-    .to_string();
+    let update_status =
+        cli_update_status(&local, latest_version.as_deref(), include_latest).to_string();
     #[cfg(target_os = "macos")]
-    let (update_source, update_supported, update_reason, executable_path) =
-        match &active_installation {
-            Ok(installation) => {
-                let path = Some(installation.path.to_string_lossy().into_owned());
-                let plan = if include_latest {
-                    super::tool_update::resolve_plan(tool, installation).await
-                } else {
-                    super::tool_update::verified_plan(tool, installation)
-                };
-                match plan {
-                    Ok(plan) => (
-                        Some(plan.source.to_string()),
-                        installation.error.is_none() || plan.source == "pnpm",
-                        installation.error.clone(),
-                        path,
-                    ),
-                    Err(reason) => (None, false, Some(reason), path),
-                }
+    let (update_source, update_supported, update_reason) = match &active_installation {
+        Ok(installation) => {
+            let plan = if include_latest {
+                super::tool_update::resolve_plan(tool, installation).await
+            } else {
+                super::tool_update::verified_plan(tool, installation)
+            };
+            match plan {
+                Ok(plan) => (
+                    Some(plan.source.to_string()),
+                    installation.error.is_none() || plan.source == "pnpm",
+                    installation.error.clone(),
+                ),
+                Err(reason) => (None, false, Some(reason)),
             }
-            Err(reason) => (None, false, Some(reason.clone()), None),
-        };
+        }
+        Err(reason) => (None, false, Some(reason.to_string())),
+    };
     #[cfg(not(target_os = "macos"))]
-    let (update_source, update_supported, update_reason, executable_path) = (
+    let (update_source, update_supported, update_reason) = (
         None,
         false,
         Some("Automatic updates are currently supported on macOS only".into()),
-        None,
     );
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     let _ = (wsl_shell, wsl_shell_flag);
-
     ToolVersion {
-        name: tool.to_string(),
-        version: local_version,
+        name: tool.into(),
+        version: local.version,
         latest_version,
-        error: local_error,
+        error: local.error,
         env_type,
         wsl_distro,
-        installation_kind: "cli".to_string(),
+        installation_kind: "cli".into(),
+        installation_status: local.status,
         update_status,
         update_source,
         update_supported,
         update_reason,
-        executable_path,
+        executable_path: local.path.map(|path| path.to_string_lossy().into_owned()),
+    }
+}
+
+fn unavailable_tool_version(
+    tool: &str,
+    kind: &str,
+    local: LocalDetection,
+    env_type: String,
+    wsl_distro: Option<String>,
+) -> ToolVersion {
+    ToolVersion {
+        name: tool.into(),
+        version: None,
+        latest_version: None,
+        error: local.error,
+        env_type,
+        wsl_distro,
+        installation_kind: kind.into(),
+        installation_status: local.status,
+        update_status: if local.status == InstallationStatus::NotInstalled {
+            "notInstalled"
+        } else {
+            "failed"
+        }
+        .into(),
+        update_source: None,
+        update_supported: false,
+        update_reason: None,
+        executable_path: None,
+    }
+}
+
+fn cli_update_status(
+    local: &LocalDetection,
+    latest: Option<&str>,
+    include_latest: bool,
+) -> &'static str {
+    match local.status {
+        InstallationStatus::Unknown => "failed",
+        InstallationStatus::Installed if local.error.is_some() => "broken",
+        _ if !include_latest => "unchecked",
+        InstallationStatus::Installed if local.version.is_none() => "unknown",
+        _ => super::tool_update::version_status(local.version.as_deref(), latest),
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) async fn cli_is_missing(tool: &str) -> Result<bool, String> {
+    match super::tool_update::probe(tool).await {
+        Ok(_) => Ok(false),
+        Err(ProbeError::NotFound) => {
+            let local = scan_cli_version(tool).await;
+            match local.status {
+                InstallationStatus::Installed => Ok(false),
+                InstallationStatus::NotInstalled => Ok(true),
+                InstallationStatus::Unknown => {
+                    Err(local.error.unwrap_or_else(|| "CLI detection failed".into()))
+                }
+            }
+        }
+        Err(error) => Err(error.to_string()),
     }
 }
 
@@ -934,51 +1042,58 @@ fn extract_version(raw: &str) -> String {
         .unwrap_or_else(|| raw.to_string())
 }
 
-/// 尝试直接执行命令获取版本
-fn try_get_version(tool: &str) -> (Option<String>, Option<String>) {
-    use std::process::Command;
-
-    #[cfg(target_os = "windows")]
-    let output = {
-        Command::new("cmd")
-            .args(["/C", &format!("{tool} --version")])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-    };
-
-    #[cfg(not(target_os = "windows"))]
-    let output = {
-        Command::new("sh")
-            .arg("-c")
-            .arg(format!("{tool} --version"))
-            .output()
-    };
-
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            if out.status.success() {
-                let raw = if stdout.is_empty() { &stderr } else { &stdout };
-                if raw.is_empty() {
-                    (None, Some("not installed or not executable".to_string()))
-                } else {
-                    (Some(extract_version(raw)), None)
-                }
-            } else {
-                let err = if stderr.is_empty() { stdout } else { stderr };
-                (
-                    None,
-                    Some(if err.is_empty() {
-                        "not installed or not executable".to_string()
-                    } else {
-                        err
-                    }),
-                )
-            }
-        }
-        Err(e) => (None, Some(e.to_string())),
+async fn cli_at_path(path: &Path, search_path: &str) -> LocalDetection {
+    if path.is_dir() {
+        return LocalDetection::failed(format!("Expected a CLI executable at {}", path.display()));
     }
+    if let Err(error) = std::fs::canonicalize(path) {
+        return LocalDetection::found(
+            path.to_path_buf(),
+            None,
+            Some(format!("Active executable failed its path check: {error}")),
+        );
+    }
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default();
+        if extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat") {
+            let mut command = tokio::process::Command::new("cmd");
+            // cmd.exe has different quoting rules than native argv. Expand a
+            // child-only variable once, so spaces and literal % in the path
+            // cannot alter the command used for the version check.
+            command
+                .args(["/D", "/V:OFF", "/S", "/C"])
+                .raw_arg("\"\"%OFOX_VERSION_EXECUTABLE%\" --version\"")
+                .env("OFOX_VERSION_EXECUTABLE", path);
+            command
+        } else {
+            let mut command = tokio::process::Command::new(path);
+            command.arg("--version");
+            command
+        }
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut command = {
+        let mut command = tokio::process::Command::new(path);
+        command.arg("--version");
+        command
+    };
+    command.env("PATH", search_path);
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    cli_version_output(path, super::tool_update::bounded_output(command).await)
+}
+
+fn cli_version_output(path: &Path, output: Result<std::process::Output, String>) -> LocalDetection {
+    let (version, error) = super::tool_update::executable_version(output);
+    LocalDetection::found(
+        path.to_path_buf(),
+        (!version.is_empty()).then_some(version),
+        error,
+    )
 }
 
 /// 校验 WSL 发行版名称是否合法
@@ -1018,116 +1133,92 @@ fn default_flag_for_shell(shell: &str) -> &'static str {
 }
 
 #[cfg(target_os = "windows")]
-fn try_get_version_wsl(
+async fn try_get_version_wsl(
     tool: &str,
     distro: &str,
     force_shell: Option<&str>,
     force_shell_flag: Option<&str>,
-) -> (Option<String>, Option<String>) {
-    use std::process::Command;
-
-    // 防御性断言：tool 只能是预定义的值
-    debug_assert!(
-        ["claude", "codex", "gemini", "opencode"].contains(&tool),
-        "unexpected tool name: {tool}"
-    );
-
-    // 校验 distro 名称，防止命令注入
+) -> LocalDetection {
     if !is_valid_wsl_distro_name(distro) {
-        return (None, Some(format!("[WSL:{distro}] invalid distro name")));
+        return LocalDetection::failed(format!("[WSL:{distro}] invalid distro name"));
     }
-
-    // 构建 Shell 脚本检测逻辑
-    let (shell, flag, cmd) = if let Some(shell) = force_shell {
-        // Defensive validation: never allow an arbitrary executable name here.
-        if !is_valid_shell(shell) {
-            return (None, Some(format!("[WSL:{distro}] invalid shell: {shell}")));
-        }
+    if force_shell.is_some_and(|shell| !is_valid_shell(shell))
+        || force_shell_flag.is_some_and(|flag| !is_valid_shell_flag(flag))
+    {
+        return LocalDetection::failed(format!("[WSL:{distro}] invalid shell preference"));
+    }
+    let lookup = format!("printf '\\n__OFOX_BIN__%s\\n' \"$(command -v {tool})\"; printf '__OFOX_PATH__%s\\n' \"$PATH\"");
+    let (shell, flag, script) = if let Some(shell) = force_shell {
         let shell = shell.rsplit('/').next().unwrap_or(shell);
-        let flag = if let Some(flag) = force_shell_flag {
-            if !is_valid_shell_flag(flag) {
-                return (
-                    None,
-                    Some(format!("[WSL:{distro}] invalid shell flag: {flag}")),
-                );
-            }
-            flag
-        } else {
-            default_flag_for_shell(shell)
-        };
-
-        (shell.to_string(), flag, format!("{tool} --version"))
+        (
+            shell.to_string(),
+            force_shell_flag
+                .unwrap_or_else(|| default_flag_for_shell(shell))
+                .to_string(),
+            lookup,
+        )
     } else {
-        let cmd = if let Some(flag) = force_shell_flag {
-            if !is_valid_shell_flag(flag) {
-                return (
-                    None,
-                    Some(format!("[WSL:{distro}] invalid shell flag: {flag}")),
-                );
-            }
-            format!("\"${{SHELL:-sh}}\" {flag} '{tool} --version'")
-        } else {
-            // 兜底：自动尝试 -lic, -lc, -c
+        let flag = force_shell_flag.unwrap_or("-lic");
+        (
+            "sh".into(),
+            "-c".into(),
             format!(
-                "\"${{SHELL:-sh}}\" -lic '{tool} --version' 2>/dev/null || \"${{SHELL:-sh}}\" -lc '{tool} --version' 2>/dev/null || \"${{SHELL:-sh}}\" -c '{tool} --version'"
-            )
-        };
-
-        ("sh".to_string(), "-c", cmd)
+                "\"${{SHELL:-sh}}\" {flag} '{}'",
+                lookup.replace('\'', "'\\''")
+            ),
+        )
     };
+    let mut command = tokio::process::Command::new("wsl.exe");
+    command
+        .args(["-d", distro, "--", &shell, &flag, &script])
+        .creation_flags(CREATE_NO_WINDOW);
+    let (path, search_path) =
+        match wsl_lookup_result(distro, super::tool_update::bounded_output(command).await) {
+            Ok(resolution) => resolution,
+            Err(detection) => return detection,
+        };
+    let mut command = tokio::process::Command::new("wsl.exe");
+    command
+        .args([
+            "-d",
+            distro,
+            "--",
+            "env",
+            &format!("PATH={search_path}"),
+            &path,
+            "--version",
+        ])
+        .creation_flags(CREATE_NO_WINDOW);
+    wsl_version_result(
+        &path,
+        distro,
+        super::tool_update::bounded_output(command).await,
+    )
+}
 
-    let output = Command::new("wsl.exe")
-        .args(["-d", distro, "--", &shell, flag, &cmd])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            if out.status.success() {
-                let raw = if stdout.is_empty() { &stderr } else { &stdout };
-                if raw.is_empty() {
-                    (
-                        None,
-                        Some(format!("[WSL:{distro}] not installed or not executable")),
-                    )
-                } else {
-                    (Some(extract_version(raw)), None)
-                }
-            } else {
-                let err = if stderr.is_empty() { stdout } else { stderr };
-                (
-                    None,
-                    Some(format!(
-                        "[WSL:{distro}] {}",
-                        if err.is_empty() {
-                            "not installed or not executable".to_string()
-                        } else {
-                            err
-                        }
-                    )),
-                )
-            }
-        }
-        Err(e) => (None, Some(format!("[WSL:{distro}] exec failed: {e}"))),
+#[cfg(any(target_os = "windows", test))]
+fn wsl_lookup_result(
+    distro: &str,
+    output: Result<std::process::Output, String>,
+) -> Result<(String, String), LocalDetection> {
+    let output =
+        output.map_err(|error| LocalDetection::failed(format!("[WSL:{distro}] {error}")))?;
+    match super::tool_update::shell_resolution(&output) {
+        Ok(resolution) => Ok(resolution),
+        Err(ProbeError::NotFound) => Err(LocalDetection::missing()),
+        Err(error) => Err(LocalDetection::failed(format!("[WSL:{distro}] {error}"))),
     }
 }
 
-/// 非 Windows 平台的 WSL 版本检测存根
-/// 注意：此函数实际上不会被调用，因为 `wsl_distro_from_path` 在非 Windows 平台总是返回 None。
-/// 保留此函数是为了保持 API 一致性，防止未来重构时遗漏。
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn try_get_version_wsl(
-    _tool: &str,
-    _distro: &str,
-    _force_shell: Option<&str>,
-    _force_shell_flag: Option<&str>,
-) -> (Option<String>, Option<String>) {
-    (
-        None,
-        Some("WSL check not supported on this platform".to_string()),
-    )
+#[cfg(any(target_os = "windows", test))]
+fn wsl_version_result(
+    path: &str,
+    distro: &str,
+    output: Result<std::process::Output, String>,
+) -> LocalDetection {
+    let mut local = cli_version_output(Path::new(path), output);
+    local.error = local.error.map(|error| format!("[WSL:{distro}] {error}"));
+    local
 }
 
 /// 用户目录下常见的 CLI 安装位置（登录 shell 的 PATH 里不一定有）。
@@ -1224,13 +1315,26 @@ fn tool_executable_candidates(tool: &str, dir: &Path) -> Vec<std::path::PathBuf>
 }
 
 /// 扫描常见路径查找 CLI
-fn scan_cli_version(tool: &str) -> (Option<String>, Option<String>) {
-    use std::process::Command;
-
+async fn scan_cli_version(tool: &str) -> LocalDetection {
     let home = dirs::home_dir().unwrap_or_default();
 
     // 常见的安装路径（原生安装优先）
     let mut search_paths: Vec<std::path::PathBuf> = Vec::new();
+    let mut first_error = home
+        .as_os_str()
+        .is_empty()
+        .then(|| "Could not read the home directory for CLI discovery".to_string());
+    let current_path = match std::env::var("PATH") {
+        Ok(path) => path,
+        Err(error) => {
+            first_error = Some(format!("Could not read PATH: {error}"));
+            String::new()
+        }
+    };
+    #[cfg(target_os = "windows")]
+    for path in std::env::split_paths(&current_path) {
+        push_unique_path(&mut search_paths, path);
+    }
     for path in home_bin_search_paths(&home) {
         push_unique_path(&mut search_paths, path);
     }
@@ -1267,30 +1371,27 @@ fn scan_cli_version(tool: &str) -> (Option<String>, Option<String>) {
         );
     }
 
-    let fnm_base = home.join(".local/state/fnm_multishells");
-    if fnm_base.exists() {
-        if let Ok(entries) = std::fs::read_dir(&fnm_base) {
-            for entry in entries.flatten() {
-                let bin_path = entry.path().join("bin");
-                if bin_path.exists() {
-                    push_unique_path(&mut search_paths, bin_path);
+    for base in [
+        home.join(".local/state/fnm_multishells"),
+        home.join(".nvm/versions/node"),
+    ] {
+        match std::fs::read_dir(&base) {
+            Ok(entries) => {
+                for entry in entries {
+                    match entry {
+                        Ok(entry) => push_unique_path(&mut search_paths, entry.path().join("bin")),
+                        Err(error) => {
+                            first_error.get_or_insert(error.to_string());
+                        }
+                    }
                 }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                first_error.get_or_insert(format!("Could not inspect {}: {error}", base.display()));
             }
         }
     }
-
-    let nvm_base = home.join(".nvm/versions/node");
-    if nvm_base.exists() {
-        if let Ok(entries) = std::fs::read_dir(&nvm_base) {
-            for entry in entries.flatten() {
-                let bin_path = entry.path().join("bin");
-                if bin_path.exists() {
-                    push_unique_path(&mut search_paths, bin_path);
-                }
-            }
-        }
-    }
-
     if tool == "opencode" {
         let extra_paths = opencode_extra_search_paths(
             &home,
@@ -1304,51 +1405,58 @@ fn scan_cli_version(tool: &str) -> (Option<String>, Option<String>) {
         }
     }
 
-    let current_path = std::env::var("PATH").unwrap_or_default();
+    #[cfg(not(target_os = "windows"))]
+    for path in std::env::split_paths(&current_path) {
+        push_unique_path(&mut search_paths, path);
+    }
+    scan_cli_paths(tool, &search_paths, &current_path, first_error).await
+}
 
-    for path in &search_paths {
+async fn scan_cli_paths(
+    tool: &str,
+    search_paths: &[PathBuf],
+    current_path: &str,
+    first_error: Option<String>,
+) -> LocalDetection {
+    scan_cli_paths_with(
+        tool,
+        search_paths,
+        current_path,
+        first_error,
+        super::tool_update::candidate_exists,
+    )
+    .await
+}
+
+async fn scan_cli_paths_with<F>(
+    tool: &str,
+    search_paths: &[PathBuf],
+    current_path: &str,
+    mut first_error: Option<String>,
+    mut inspect: F,
+) -> LocalDetection
+where
+    F: FnMut(&Path) -> Result<bool, String>,
+{
+    for directory in search_paths {
         #[cfg(target_os = "windows")]
-        let new_path = format!("{};{}", path.display(), current_path);
-
+        let new_path = format!("{};{}", directory.display(), current_path);
         #[cfg(not(target_os = "windows"))]
-        let new_path = format!("{}:{}", path.display(), current_path);
-
-        for tool_path in tool_executable_candidates(tool, path) {
-            if !tool_path.exists() {
-                continue;
-            }
-
-            #[cfg(target_os = "windows")]
-            let output = {
-                Command::new("cmd")
-                    .args(["/C", &format!("\"{}\" --version", tool_path.display())])
-                    .env("PATH", &new_path)
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .output()
-            };
-
-            #[cfg(not(target_os = "windows"))]
-            let output = {
-                Command::new(&tool_path)
-                    .arg("--version")
-                    .env("PATH", &new_path)
-                    .output()
-            };
-
-            if let Ok(out) = output {
-                let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                if out.status.success() {
-                    let raw = if stdout.is_empty() { &stderr } else { &stdout };
-                    if !raw.is_empty() {
-                        return (Some(extract_version(raw)), None);
-                    }
+        let new_path = format!("{}:{}", directory.display(), current_path);
+        for path in tool_executable_candidates(tool, directory) {
+            match inspect(&path) {
+                Ok(true) => return cli_at_path(&path, &new_path).await,
+                Ok(false) => {}
+                Err(error) => {
+                    first_error.get_or_insert(error);
                 }
             }
         }
     }
-
-    (None, Some("not installed or not executable".to_string()))
+    match first_error {
+        Some(error) => LocalDetection::failed(error),
+        None => LocalDetection::missing(),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -2269,6 +2377,399 @@ pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::tool_update::probe_fixture_output;
+
+    #[tokio::test]
+    async fn cli_scan_confirms_missing_binary_in_an_isolated_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let result = scan_cli_paths("fixture-agent", &[temp.path().into()], "", None).await;
+        assert_eq!(result.status, InstallationStatus::NotInstalled);
+        assert!(result.version.is_none());
+        assert!(result.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn cli_scan_retains_a_found_executable_that_cannot_start() {
+        let temp = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        let path = temp.path().join("fixture-agent.exe");
+        #[cfg(not(windows))]
+        let path = temp.path().join("fixture-agent");
+        // Deliberately invalid native executable, requiring no agent install
+        // or executable permission changes in the user's environment.
+        std::fs::write(&path, "invalid executable fixture").unwrap();
+        let result = scan_cli_paths("fixture-agent", &[temp.path().into()], "", None).await;
+        assert_eq!(result.status, InstallationStatus::Installed);
+        assert_eq!(result.path.as_deref(), Some(path.as_path()));
+        assert!(result.version.is_none());
+        assert!(result.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn cli_candidate_permission_failure_cannot_be_reported_as_uninstalled() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = tempfile::tempdir().unwrap();
+        let result = scan_cli_paths_with(
+            "fixture-agent",
+            &[temp.path().into(), missing.path().into()],
+            "",
+            None,
+            |path| {
+                if path.starts_with(temp.path()) {
+                    Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).to_string())
+                } else {
+                    super::super::tool_update::candidate_exists(path)
+                }
+            },
+        )
+        .await;
+        assert_eq!(result.status, InstallationStatus::Unknown);
+        assert!(result.error.is_some());
+        assert!(result.path.is_none());
+    }
+
+    #[test]
+    fn cli_version_failures_keep_the_installed_identity() {
+        let path = Path::new("fixture-agent.exe");
+        for output in [
+            Err("Version probe timed out".into()),
+            Err("Access is denied. (os error 5)".into()),
+            Ok(probe_fixture_output("1.2.3", "shell startup failed", 1)),
+            Ok(probe_fixture_output("not a version", "", 0)),
+        ] {
+            let result = cli_version_output(path, output);
+            assert_eq!(result.status, InstallationStatus::Installed);
+            assert_eq!(result.path.as_deref(), Some(path));
+            assert!(result.version.is_none());
+            assert!(result.error.is_some());
+        }
+    }
+
+    #[test]
+    fn workbuddy_stale_registry_paths_do_not_prove_installation() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = temp.path().join("Removed WorkBuddy");
+        std::fs::create_dir_all(&old).unwrap();
+        let exe = old.join("WorkBuddy.exe");
+        std::fs::write(&exe, "fixture").unwrap();
+        let icon = workbuddy_registry_candidate("DisplayIcon", &format!("\"{}\",0", exe.display()))
+            .unwrap();
+        let location =
+            workbuddy_registry_candidate("InstallLocation", &old.to_string_lossy()).unwrap();
+        std::fs::remove_file(&exe).unwrap();
+        let (paths, error) =
+            workbuddy_discovery_sources(Some(temp.path().into()), Ok(vec![icon, location]));
+        assert!(select_workbuddy_candidate(&paths, error).unwrap().is_none());
+    }
+
+    #[test]
+    fn workbuddy_registry_failure_is_unknown_unless_an_executable_is_found() {
+        let temp = tempfile::tempdir().unwrap();
+        let (paths, error) = workbuddy_discovery_sources(
+            Some(temp.path().into()),
+            Err("registry access denied".into()),
+        );
+        assert!(select_workbuddy_candidate(&paths, error)
+            .unwrap_err()
+            .contains("registry access denied"));
+        let exe = temp
+            .path()
+            .join("Programs")
+            .join("WorkBuddy")
+            .join("WorkBuddy.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "fixture").unwrap();
+        let (paths, error) = workbuddy_discovery_sources(
+            Some(temp.path().into()),
+            Err("registry access denied".into()),
+        );
+        assert_eq!(
+            select_workbuddy_candidate(&paths, error).unwrap(),
+            Some(exe.clone())
+        );
+        let installed = workbuddy_version_output(exe, Err("Version probe timed out".into()));
+        assert!(installed.version.is_none());
+        assert!(installed.error.as_deref().unwrap().contains("timed out"));
+        let (paths, error) = workbuddy_discovery_sources(None, Ok(vec![installed.path.clone()]));
+        assert_eq!(
+            select_workbuddy_candidate(&paths, error).unwrap(),
+            Some(installed.path)
+        );
+    }
+
+    #[test]
+    fn workbuddy_registry_paths_preserve_commas_spaces_and_icon_indexes() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("User, Name").join("WorkBuddy");
+        let exe = directory.join("WorkBuddy.exe");
+        for value in [
+            format!("\"{}\",0", exe.display()),
+            format!("\"{}\",-12", exe.display()),
+            exe.to_string_lossy().into_owned(),
+        ] {
+            assert_eq!(
+                workbuddy_registry_candidate("DisplayIcon", &value),
+                Some(exe.clone())
+            );
+        }
+        assert_eq!(
+            workbuddy_registry_candidate(
+                "InstallLocation",
+                &format!("\"{}\"", directory.display())
+            ),
+            Some(exe),
+        );
+        assert!(workbuddy_registry_candidate("DisplayIcon", " \"\" ").is_none());
+    }
+
+    #[test]
+    fn workbuddy_version_failures_preserve_the_found_application() {
+        let path = PathBuf::from("WorkBuddy.exe");
+        for output in [
+            Err("Version probe timed out".into()),
+            Err("Access is denied".into()),
+            Ok(probe_fixture_output("5.6.2", "Get-Item failed", 1)),
+            Ok(probe_fixture_output("", "", 0)),
+        ] {
+            let installed = workbuddy_version_output(path.clone(), output);
+            assert_eq!(installed.path, path);
+            assert!(installed.version.is_none());
+            assert!(installed.error.is_some());
+        }
+    }
+
+    #[test]
+    fn wsl_unreachable_or_failed_shell_is_unknown_rather_than_not_installed() {
+        let missing = "__OFOX_BIN__\n__OFOX_PATH__/usr/bin:/bin\n";
+        for output in [
+            Err("wsl.exe was not found".into()),
+            Err("Version probe timed out".into()),
+            Ok(probe_fixture_output(
+                "There is no distribution with the supplied name.",
+                "",
+                1,
+            )),
+            Ok(probe_fixture_output(
+                missing,
+                "profile: Permission denied",
+                0,
+            )),
+            Ok(probe_fixture_output(missing, "shell startup failed", 1)),
+            Ok(probe_fixture_output("", "", 0)),
+            Ok(probe_fixture_output(
+                "__OFOX_BIN__alias tool=other\n__OFOX_PATH__/bin\n",
+                "",
+                0,
+            )),
+        ] {
+            let local = wsl_lookup_result("Fixture-Distro", output).unwrap_err();
+            assert_eq!(local.status, InstallationStatus::Unknown);
+            assert!(local
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("[WSL:Fixture-Distro]"));
+        }
+        let local = wsl_lookup_result("Fixture-Distro", Ok(probe_fixture_output(missing, "", 0)))
+            .unwrap_err();
+        assert_eq!(local.status, InstallationStatus::NotInstalled);
+        assert!(local.error.is_none());
+    }
+
+    #[test]
+    fn wsl_found_cli_preserves_its_identity_when_the_version_query_fails() {
+        let path = "/home/fixture user/.local/bin/agent";
+        let stdout =
+            format!("__OFOX_BIN__{path}\n__OFOX_PATH__/home/fixture user/.local/bin:/usr/bin\n");
+        let (detected, search_path) =
+            wsl_lookup_result("Fixture-Distro", Ok(probe_fixture_output(&stdout, "", 0))).unwrap();
+        assert_eq!(detected, path);
+        assert!(search_path.contains("fixture user"));
+        for output in [
+            Err("Version probe timed out".into()),
+            Ok(probe_fixture_output(
+                "",
+                "permission denied; 2.1.3 cannot start",
+                126,
+            )),
+        ] {
+            let result = wsl_version_result(&detected, "Fixture-Distro", output);
+            assert_eq!(result.status, InstallationStatus::Installed);
+            assert_eq!(result.path.as_deref(), Some(Path::new(path)));
+            assert!(result.version.is_none());
+            assert!(result
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("[WSL:Fixture-Distro]"));
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_cmd_version_probe_quotes_space_percent_and_ampersand_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("space %PATH% & fixture");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("fixture-agent.cmd");
+        std::fs::write(&path, "@echo off\r\necho 2.1.3\r\nexit /b 0\r\n").unwrap();
+        let system_path = std::env::var("PATH").unwrap();
+        let result = scan_cli_paths("fixture-agent", &[directory], &system_path, None).await;
+        assert_eq!(result.status, InstallationStatus::Installed);
+        assert_eq!(result.path, Some(path));
+        assert_eq!(result.version.as_deref(), Some("2.1.3"));
+        assert!(result.error.is_none());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_broken_cmd_installation_is_not_hidden_by_an_older_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let older = tempfile::tempdir().unwrap();
+        let path = temp.path().join("fixture-agent.cmd");
+        std::fs::write(
+            &path,
+            "@echo off\r\necho node 22.1.0 could not start 1>&2\r\nexit /b 1\r\n",
+        )
+        .unwrap();
+        std::fs::write(
+            older.path().join("fixture-agent.cmd"),
+            "@echo off\r\necho 1.0.0\r\n",
+        )
+        .unwrap();
+        let result = scan_cli_paths(
+            "fixture-agent",
+            &[temp.path().into(), older.path().into()],
+            &std::env::var("PATH").unwrap(),
+            None,
+        )
+        .await;
+        assert_eq!(result.status, InstallationStatus::Installed);
+        assert_eq!(result.path, Some(path));
+        assert!(result.version.is_none());
+        assert!(result.error.as_deref().unwrap().contains("could not start"));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn invalid_wsl_preferences_fail_before_running_any_distribution() {
+        for (distro, shell, flag) in [
+            ("bad;name", None, None),
+            ("Fixture-Distro", Some("bash;echo"), None),
+            ("Fixture-Distro", Some("bash"), Some("-c;echo")),
+        ] {
+            let local = try_get_version_wsl("codex", distro, shell, flag).await;
+            assert_eq!(local.status, InstallationStatus::Unknown);
+            assert!(local.error.is_some());
+        }
+    }
+
+    #[test]
+    fn installation_detection_serializes_missing_and_failure_separately() {
+        for (detection, expected) in [
+            (LocalDetection::missing(), "notInstalled"),
+            (LocalDetection::failed("permission denied"), "unknown"),
+        ] {
+            let result = unavailable_tool_version(
+                "workbuddy",
+                "desktopApp",
+                detection,
+                "macos".into(),
+                None,
+            );
+            let json = serde_json::to_value(result).unwrap();
+            assert_eq!(json["installationStatus"], expected);
+            assert_eq!(json["installationKind"], "desktopApp");
+        }
+    }
+
+    #[test]
+    fn remote_update_results_cannot_change_local_installation_evidence() {
+        let found = LocalDetection::found("/opt/bin/tool".into(), Some("1.0.0".into()), None);
+        assert_eq!(cli_update_status(&found, None, true), "failed");
+        assert_eq!(cli_update_status(&found, Some("2.0.0"), true), "available");
+        assert_eq!(cli_update_status(&found, None, false), "unchecked");
+        assert_eq!(found.status, InstallationStatus::Installed);
+        let no_version = LocalDetection::found("/opt/bin/tool".into(), None, None);
+        assert_eq!(
+            cli_update_status(&no_version, Some("2.0.0"), true),
+            "unknown"
+        );
+        let failure = LocalDetection::failed("lookup timed out");
+        assert_eq!(cli_update_status(&failure, Some("2.0.0"), true), "failed");
+        assert_eq!(failure.status, InstallationStatus::Unknown);
+    }
+
+    #[cfg(unix)]
+    fn write_cli(path: &Path, script: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_scan_preserves_found_but_broken_installations_and_does_not_mask_with_an_older_copy(
+    ) {
+        let temp = tempfile::tempdir().unwrap();
+        let older = tempfile::tempdir().unwrap();
+        write_cli(
+            &temp.path().join("tool"),
+            "echo 'node: not found' >&2; exit 127",
+        );
+        write_cli(&older.path().join("tool"), "echo 1.0.0");
+        let result = scan_cli_paths(
+            "tool",
+            &[temp.path().into(), older.path().into()],
+            "/usr/bin:/bin",
+            None,
+        )
+        .await;
+        assert_eq!(result.status, InstallationStatus::Installed);
+        assert!(result.version.is_none());
+        assert!(result.error.as_deref().unwrap().contains("node: not found"));
+        assert_eq!(cli_update_status(&result, Some("2.0.0"), true), "broken");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_scan_only_reports_absent_when_every_supported_candidate_was_checked() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = [temp.path().to_path_buf()];
+        assert_eq!(
+            scan_cli_paths("tool", &paths, "/bin", None).await.status,
+            InstallationStatus::NotInstalled
+        );
+        assert_eq!(
+            scan_cli_paths("tool", &paths, "/bin", Some("permission denied".into()))
+                .await
+                .status,
+            InstallationStatus::Unknown
+        );
+        write_cli(&temp.path().join("tool"), "echo 2.1.3");
+        let installed = scan_cli_paths(
+            "tool",
+            &paths,
+            "/bin",
+            Some("another path unreadable".into()),
+        )
+        .await;
+        assert_eq!(installed.status, InstallationStatus::Installed);
+        assert_eq!(installed.version.as_deref(), Some("2.1.3"));
+        assert!(installed.error.is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_scan_keeps_a_broken_symlink_installed() {
+        let temp = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(temp.path().join("missing-target"), temp.path().join("tool"))
+            .unwrap();
+        let installed = scan_cli_paths("tool", &[temp.path().into()], "/bin", None).await;
+        assert_eq!(installed.status, InstallationStatus::Installed);
+        assert!(installed.version.is_none());
+        assert!(installed.error.is_some());
+    }
 
     #[test]
     fn home_bin_search_paths_include_hermes_bin() {
@@ -2347,41 +2848,51 @@ mod tests {
     #[cfg(target_os = "macos")]
     mod workbuddy_macos {
         use super::super::*;
+        use crate::commands::tool_update::desktop_from_metadata;
 
         #[test]
         fn accepts_the_official_bundle_identifier_and_reads_version() {
             let path = Path::new("/Applications/WorkBuddy.app");
-            let app = workbuddy_macos_app_from_plist(path, |key| match key {
-                "CFBundleIdentifier" => Some("com.tencent.workbuddy.mac".to_string()),
-                "CFBundleShortVersionString" => Some("5.5.6".to_string()),
-                _ => None,
-            });
-
-            assert_eq!(app, Some((path.to_path_buf(), "5.5.6".to_string())));
+            let app = desktop_from_metadata(
+                path,
+                WORKBUDDY_MACOS_BUNDLE_ID,
+                &serde_json::json!({
+                    "CFBundleIdentifier": "com.tencent.workbuddy.mac",
+                    "CFBundleShortVersionString": "5.5.6"
+                }),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(app.path, path);
+            assert_eq!(app.version.as_deref(), Some("5.5.6"));
         }
 
         #[test]
         fn rejects_the_previous_incorrect_bundle_identifier() {
-            let app =
-                workbuddy_macos_app_from_plist(Path::new("/Applications/WorkBuddy.app"), |key| {
-                    (key == "CFBundleIdentifier").then(|| "com.workbuddy.workbuddy".to_string())
-                });
-
-            assert_eq!(app, None);
+            assert!(desktop_from_metadata(
+                Path::new("/Applications/WorkBuddy.app"),
+                WORKBUDDY_MACOS_BUNDLE_ID,
+                &serde_json::json!({
+                    "CFBundleIdentifier": "com.workbuddy.workbuddy"
+                })
+            )
+            .unwrap()
+            .is_none());
         }
 
         #[test]
         fn falls_back_to_bundle_version() {
-            let app = workbuddy_macos_app_from_plist(
+            let app = desktop_from_metadata(
                 Path::new("/Users/tester/Applications/WorkBuddy.app"),
-                |key| match key {
-                    "CFBundleIdentifier" => Some(WORKBUDDY_MACOS_BUNDLE_ID.to_string()),
-                    "CFBundleVersion" => Some("42".to_string()),
-                    _ => None,
-                },
-            );
-
-            assert_eq!(app.map(|(_, version)| version), Some("42".to_string()));
+                WORKBUDDY_MACOS_BUNDLE_ID,
+                &serde_json::json!({
+                    "CFBundleIdentifier": WORKBUDDY_MACOS_BUNDLE_ID,
+                    "CFBundleVersion": "42"
+                }),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(app.version.as_deref(), Some("42"));
         }
     }
 
@@ -2463,7 +2974,7 @@ mod tests {
 
         let count = paths
             .iter()
-            .filter(|path| **path == PathBuf::from("/same/path"))
+            .filter(|path| path.as_path() == Path::new("/same/path"))
             .count();
         assert_eq!(count, 1);
     }
@@ -2475,7 +2986,7 @@ mod tests {
 
         let count = paths
             .iter()
-            .filter(|path| **path == PathBuf::from("/home/tester/.bun/bin"))
+            .filter(|path| path.as_path() == Path::new("/home/tester/.bun/bin"))
             .count();
         assert_eq!(count, 1);
     }

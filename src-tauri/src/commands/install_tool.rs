@@ -33,6 +33,19 @@ const ALLOWED_TOOLS: &[&str] = &[
 /// 与 `ALLOWED_TOOLS` 互斥——同一个 tool_id 不会两条路径都命中。
 const NATIVE_INSTALL_TOOLS: &[&str] = &["chatgpt"];
 
+/// Describe actual host support before offering an automatic install action.
+#[tauri::command]
+pub fn get_tool_install_capabilities() -> Vec<String> {
+    let mut tools = Vec::new();
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        tools.extend(ALLOWED_TOOLS.iter().map(|tool| (*tool).to_string()));
+    }
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) || cfg!(target_os = "windows") {
+        tools.extend(NATIVE_INSTALL_TOOLS.iter().map(|tool| (*tool).to_string()));
+    }
+    tools
+}
+
 #[tauri::command]
 pub async fn install_tool(
     app: AppHandle,

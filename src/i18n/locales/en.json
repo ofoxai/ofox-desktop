@@ -25,8 +25,9 @@
     "warning": {
       "previousProviderMissing": "The provider you used before binding no longer exists; switched to the official default.",
       "fileKeptHasOtherContent": "A config file Ofox created now has content you added, so it was kept.",
-      "recordCleanupFailed": "Settings were restored, but the binding record couldn't be cleared; unbinding again is safe.",
-      "leftoverRemoved": "Ofox settings were also found in another location and have been removed."
+      "recordCleanupFailed": "Failed to remove the binding record. The binding is retained; retry.",
+      "leftoverRemoved": "Ofox settings were also found in another location and have been removed.",
+      "configAlreadyMissing": "Configuration was deleted and will not be recreated."
     }
   },
   "apexSwitch": {
@@ -63,7 +64,7 @@
     "workBuddyExpectedEndpoint": "Ofox endpoint for this region",
     "workBuddyEndpointMismatch": "WorkBuddy uses a different endpoint or its configuration was edited. Rebind or review the configuration.",
     "workBuddyEndpointCheckScope": "Model checks use Ofox's network route. If WorkBuddy still requests the old endpoint, quit and reopen it.",
-    "workBuddyEndpointSyncFailed": "Region changed, but WorkBuddy's endpoint could not be updated. Check it in WorkBuddy management.",
+    "workBuddyEndpointSyncFailed": "Region changed, but some tool endpoints could not be updated. Check their configuration in Manage.",
     "workBuddyTestModel": "Choose a WorkBuddy model to test",
     "workBuddyTest": "Test selected model",
     "workBuddySaveHint": "Catalog-compatible models can be saved now; streaming checks are optional.",
@@ -2669,5 +2670,47 @@
     "expiredHint": "Run the {{tool}} command to refresh your login",
     "queryFailed": "Query failed",
     "refresh": "Refresh"
+  },
+  "toolLifecycle": {
+    "desktopApp": "Desktop app",
+    "modelUnset": "Model not set",
+    "analytics": "Usage",
+    "analyticsFailed": "Failed to open usage statistics",
+    "downloadFailed": "Failed to open installation page",
+    "notInstalled": "Not installed",
+    "installationBroken": "Installation problem",
+    "binding": {
+      "missing": "Binding configuration missing",
+      "modified": "Configuration conflict",
+      "unknown": "Configuration check failed"
+    },
+    "reinstall": "Reinstall",
+    "repairInstall": "Repair installation",
+    "download": "Download",
+    "open": "Open",
+    "manage": "Manage",
+    "needsAttention": "{{count}} need attention",
+    "noInstalledBoundTools": "No installed bound tools",
+    "missingTools": "Not installed ({{count}})",
+    "bindingRetained": "Bindings retained",
+    "boundNotInstalled": "Bound · Not installed",
+    "detectionFailed": "Detection failed",
+    "boundMissingHint": "Bindings for uninstalled tools are retained. Manage or reinstall them from the home page.",
+    "manageFromHome": "Manage on home",
+    "retryDetection": "Check again",
+    "restoreBinding": "Restore binding",
+    "restoringBinding": "Restoring…",
+    "restoreSucceeded": "Binding restored for {{tool}}",
+    "restoreFailed": "Failed to restore binding: {{error}}",
+    "bindFailed": "Some tools could not be bound: {{tools}}. Retry or check your sign-in.",
+    "upstreamInstructions": "Install instructions",
+    "configuration": {
+      "loading": "Checking binding configuration…",
+      "missing": "Binding configuration is missing. Saving and tests are paused; you can restore the binding.",
+      "modified": "Binding configuration was modified. Review the configuration conflict before making changes.",
+      "unknown": "Binding configuration could not be read. You can still unbind or retry later."
+    },
+    "versionUnknown": "Installed · Version unknown",
+    "noInstallationDetected": "No installation detected"
   }
 }

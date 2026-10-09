@@ -1019,20 +1019,19 @@ pub fn run() {
             }
 
             // 每次启动按出口 IP 探测区域；结果变了就切换（会清旧域登录态，所以放在
-            // OfoxAuthState 注册之后）。然后把 WorkBuddy 里的网关地址同步到当前区域。
+            // OfoxAuthState 注册之后）。再安全迁移各工具现存的 OFox 网关地址。
             let apex_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let client = crate::proxy::http_client::get();
                 crate::ofox_apex::probe_apex_on_startup(&apex_handle, &client).await;
                 if let Some(state) = apex_handle.try_state::<crate::store::AppState>() {
-                    match crate::workbuddy_config::reconcile_managed_endpoint(&state.db).await {
-                        Ok(true) => log::info!(
-                            "[WorkBuddy] updated managed model endpoint for current apex"
-                        ),
-                        Ok(false) => {}
-                        Err(error) => {
-                            log::warn!("[WorkBuddy] endpoint reconciliation failed: {error}")
-                        }
+                    if !commands::ofox_apex::reconcile_tool_endpoints(&state.db).await {
+                        log::warn!("[OfoxApex] startup retained tool endpoint conflicts");
+                    }
+                    // The console may have checked the old endpoint before
+                    // asynchronous startup reconciliation completed.
+                    if let Err(error) = apex_handle.emit("ofox-prefs-updated", ()) {
+                        log::warn!("[OfoxApex] emit configuration refresh failed: {error}");
                     }
                 }
             });
@@ -1121,11 +1120,16 @@ pub fn run() {
                         if !needs_heal {
                             continue;
                         }
-                        match commands::ofox_auth::bind_tool_to_ofox_internal(
+                        if !crate::services::ofox_bind::all_config_files_present(
+                            crate::services::ofox_bind::Tool::from_app(&app_type),
+                        ) {
+                            log::info!("self-heal: skipped {app}; configuration is not confirmed present");
+                            continue;
+                        }
+                        match commands::ofox_auth::bind_existing_tool_to_ofox_internal(
                             &state.db,
                             &ofox_state.0,
                             app,
-                            None,
                         )
                         .await
                         {
@@ -1340,6 +1344,7 @@ pub fn run() {
             commands::read_live_provider_settings,
             commands::get_settings,
             commands::save_settings,
+            commands::save_bound_tools,
             commands::get_rectifier_config,
             commands::set_rectifier_config,
             commands::get_optimizer_config,
@@ -1619,6 +1624,7 @@ pub fn run() {
             commands::ofox_auth::ofox_logout,
             commands::ofox_auth::ofox_request_reauth,
             commands::ofox_auth::ofox_bind_tool,
+            commands::ofox_auth::ofox_restore_tool_binding,
             commands::ofox_auth::ofox_unbind_tool,
             commands::ofox_auth::ofox_unbind_preview,
             // Ofox apex (region) switching
@@ -1631,6 +1637,8 @@ pub fn run() {
             commands::ofox_api_keys::ofox_refresh_api_key_for_tool,
             commands::ofox_api_keys::ofox_revoke_api_key_for_tool,
             commands::manage_tool::get_tool_config_file_path,
+            commands::manage_tool::get_tool_binding_status,
+            commands::get_tool_install_capabilities,
             commands::manage_tool::get_active_ofox_model,
             commands::manage_tool::set_active_ofox_model,
             commands::manage_tool::get_workbuddy_managed_models,

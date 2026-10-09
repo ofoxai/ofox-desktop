@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
+import { useTranslation } from "react-i18next";
 import {
   Dialog,
   DialogContent,
@@ -9,19 +10,18 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { INSTALLABLE_TOOLS, TOOL_META, TOOL_ORDER } from "@/config/toolMeta";
+import { TOOL_META, TOOL_ORDER } from "@/config/toolMeta";
 import { bindTools } from "@/lib/bindTools";
 import { useToolInstall } from "@/hooks/useToolInstall";
+import { useToolInstallCapabilities } from "@/hooks/useToolInstallCapabilities";
+import {
+  getInstallationStatus,
+  type ToolInstallationInfo,
+} from "@/lib/api/toolUpdates";
 import {
   ToolDiscoveryCard,
   type ToolStatus,
 } from "@/components/onboarding/ToolDiscoveryCard";
-
-interface ToolInfo {
-  name: string;
-  version: string | null;
-  error: string | null;
-}
 
 interface ToolEntry {
   id: string;
@@ -38,6 +38,7 @@ interface AddToolsDialogProps {
   alreadyBound: string[];
   /** 新增绑定成功后回调。返回的是 bindTools succeeded 列表（完整新绑定集）。 */
   onAdded: (newBoundList: string[]) => void;
+  onManageBound?: (toolId: string) => void;
 }
 
 /** stagger 翻 selected 的相邻间隔（ms）——和 onboarding 保持一致。 */
@@ -64,7 +65,10 @@ export default function AddToolsDialog({
   onOpenChange,
   alreadyBound,
   onAdded,
+  onManageBound,
 }: AddToolsDialogProps) {
+  const { t } = useTranslation();
+  const installableTools = useToolInstallCapabilities();
   const alreadyBoundSet = useMemo(() => new Set(alreadyBound), [alreadyBound]);
 
   // 初始 6 张 scanning——对话框打开瞬间不显示空白网格。
@@ -80,8 +84,10 @@ export default function AddToolsDialog({
   const [scanDone, setScanDone] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const scanGeneration = useRef(0);
 
   const detect = useCallback(async () => {
+    const generation = ++scanGeneration.current;
     setScanDone(false);
     // 把所有 timer 重置一次——detect 可能在用户关-开对话框时重跑。
     timersRef.current.forEach(clearTimeout);
@@ -99,27 +105,36 @@ export default function AddToolsDialog({
     );
 
     try {
-      const results = await invoke<ToolInfo[]>("get_tool_versions", {
-        tools: null,
-        wslShellByTool: null,
-        includeLatest: false,
-      });
+      const results = await invoke<ToolInstallationInfo[]>(
+        "get_tool_versions",
+        {
+          tools: null,
+          wslShellByTool: null,
+          includeLatest: false,
+        },
+      );
+      if (generation !== scanGeneration.current) return;
       const byName = new Map(results.map((r) => [r.name, r]));
 
       // Step 1：scanning → bound / missing / unselected
       const settled: ToolEntry[] = TOOL_ORDER.map((id) => {
         const info = byName.get(id);
-        const detected = !!info && !!info.version && !info.error;
+        const installationStatus = getInstallationStatus(info);
+        const detected = installationStatus === "installed" && !info?.error;
         let status: ToolStatus;
         if (alreadyBoundSet.has(id)) {
           // 已绑工具即便本机检测不到（极少见，比如卸载了 CLI 但配置还在）
           // 也保留 bound 态——用户对"是否已绑"的认知靠 ofox 端，不依赖
           // 本地 CLI 是否仍可用。
-          status = "bound";
+          status =
+            installationStatus === "notInstalled" ? "boundMissing" : "bound";
         } else if (detected) {
           status = "unselected";
         } else {
-          status = "missing";
+          status =
+            installationStatus === "notInstalled"
+              ? "missing"
+              : "detectionFailed";
         }
         return {
           id,
@@ -137,6 +152,7 @@ export default function AddToolsDialog({
         .map((e) => e.id);
       candidateIds.forEach((id, i) => {
         const t = setTimeout(() => {
+          if (generation !== scanGeneration.current) return;
           setEntries((prev) =>
             prev.map((e) =>
               e.id === id
@@ -154,18 +170,21 @@ export default function AddToolsDialog({
 
       // 最后一张卡翻 selected 的瞬间 scanDone=true。无候选时立即就绪。
       const doneT = setTimeout(
-        () => setScanDone(true),
+        () => {
+          if (generation === scanGeneration.current) setScanDone(true);
+        },
         Math.max(0, candidateIds.length - 1) * STAGGER_INTERVAL_MS,
       );
       timersRef.current.push(doneT);
     } catch (e) {
+      if (generation !== scanGeneration.current) return;
       console.error("[AddToolsDialog] detect failed", e);
       // 失败兜底：保留 bound 显示已绑、其它全 missing，让用户至少看到现状。
       setEntries(
         TOOL_ORDER.map((id) => ({
           id,
           label: TOOL_META[id].label,
-          status: alreadyBoundSet.has(id) ? "bound" : "missing",
+          status: alreadyBoundSet.has(id) ? "bound" : "detectionFailed",
           version: null,
           autoSelectTick: 0,
         })),
@@ -179,6 +198,7 @@ export default function AddToolsDialog({
       void detect();
     }
     return () => {
+      scanGeneration.current += 1;
       timersRef.current.forEach(clearTimeout);
       timersRef.current = [];
     };
@@ -225,13 +245,8 @@ export default function AddToolsDialog({
     if (selected.length === 0) return;
     setSubmitting(true);
     try {
-      // bindTools 按"完整列表"语义重写 localStorage，所以要带上已绑工具。
-      // 它对已绑做幂等二次 bind——失败会 toast 警告。
       const newlySelectedIds = selected.map((e) => e.id);
-      const merged = Array.from(
-        new Set([...alreadyBound, ...newlySelectedIds]),
-      );
-      const succeeded = await bindTools(merged);
+      const succeeded = await bindTools(newlySelectedIds);
       // 真实成功的"新增"——避免在用户选了 2 个、只成 1 个时谎报。
       const newlySucceeded = succeeded.filter((id) =>
         newlySelectedIds.includes(id),
@@ -261,6 +276,11 @@ export default function AddToolsDialog({
                 ? "没有可添加的工具——所有已识别的工具都已绑定。"
                 : `检测到 ${candidateCount} 个可绑定的工具，勾选后确认即可接入。`}
           </DialogDescription>
+          {entries.some((entry) => entry.status === "boundMissing") && (
+            <p className="text-xs text-muted-foreground">
+              {t("toolLifecycle.boundMissingHint")}
+            </p>
+          )}
         </DialogHeader>
 
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-6">
@@ -284,8 +304,13 @@ export default function AddToolsDialog({
                   autoSelectTick={e.autoSelectTick}
                   progress={installProgress[e.id]}
                   onClick={() => handleToggle(e.id)}
+                  onRetry={() => void detect()}
+                  onManageBound={() => {
+                    onOpenChange(false);
+                    onManageBound?.(e.id);
+                  }}
                   onInstall={
-                    INSTALLABLE_TOOLS.includes(e.id)
+                    installableTools.includes(e.id)
                       ? () => install(e.id)
                       : undefined
                   }

@@ -4,18 +4,13 @@ import {
   RefreshCw,
   Loader2,
   ArrowUpCircle,
-  BarChart3,
-  SlidersHorizontal,
-  Wrench,
-  Terminal,
-  AppWindow,
+  ChevronDown,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { settingsApi } from "@/lib/api";
-import { proxyApi } from "@/lib/api/proxy";
 import {
   ofoxGetUserInfo,
   isOfoxBillingManager,
@@ -29,11 +24,7 @@ import {
   ofoxMarketingUrl,
   ofoxWalletUrl,
 } from "@/lib/ofoxUrls";
-import {
-  TOOL_META,
-  TOOL_ORDER,
-  PROXY_SUPPORTED_TOOLS,
-} from "@/config/toolMeta";
+import { TOOL_META, TOOL_ORDER } from "@/config/toolMeta";
 // NOTE: ConsolePage previously rendered a read-only "已锁定" badge for tools
 // in `boundTools ∩ PROXY_SUPPORTED_TOOLS`, sourced from
 // `useLockedTakeoverTools`. The badge was retired once the manage-tool dialog
@@ -48,34 +39,25 @@ import OfoxSettingsDialog from "./OfoxSettingsDialog";
 // "区域" SectionCard。useOfoxApex() hook 仍保留：ofoxAnalyticsUrl(apex, ...)
 // 还要它来拼"数据统计"按钮的目标 URL。
 import { UserAvatar } from "@/components/UserAvatar";
-import { ToolBadge } from "@/components/tools/ToolBadge";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useUpdate } from "@/contexts/UpdateContext";
 import { manageToolApi } from "@/lib/api/manageTool";
 import { useToolLaunch } from "@/hooks/useToolLaunch";
-import { useToolUpdates } from "@/hooks/useToolUpdates";
+import { checkToolUpdates, useToolUpdates } from "@/hooks/useToolUpdates";
 import { useToolInstall } from "@/hooks/useToolInstall";
-import { repairActionFor } from "@/config/toolMeta";
+import { useToolInstallCapabilities } from "@/hooks/useToolInstallCapabilities";
+import {
+  getInstallationStatus,
+  type ToolInstallationInfo,
+} from "@/lib/api/toolUpdates";
+import { ofoxBindApi, type ToolBindingStatus } from "@/lib/api/ofoxBind";
+import BoundToolRow, {
+  type BoundToolRowData,
+  type ToolRowAction,
+} from "./BoundToolRow";
 import ofoxLogo from "@/assets/icons/ofox-logo.png";
 
-interface ToolInfo {
-  name: string;
-  version: string | null;
-  error: string | null;
-  installationKind?: "desktopApp" | "cli";
-}
-
-type ToolStatus = "active" | "idle" | "error";
-
-interface BoundTool {
-  id: string;
-  abbr: string;
-  label: string;
-  color: string;
-  version: string | null;
-  installationKind?: "desktopApp" | "cli";
-  status: ToolStatus;
-}
+type BoundTool = BoundToolRowData;
 
 /**
  * True when the user object came back from the backend with at least one
@@ -131,6 +113,8 @@ export default function ConsolePage({
     dismissUpdate,
   } = useUpdate();
   const [tools, setTools] = useState<BoundTool[]>([]);
+  const [missingExpanded, setMissingExpanded] = useState(false);
+  const installableTools = useToolInstallCapabilities();
   const toolUpdates = useToolUpdates();
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
@@ -235,8 +219,19 @@ export default function ConsolePage({
   // 进"管理"挑一个。loadData 时批量拉，bind 后 ofox-prefs-updated 触发
   // 重拉以反映 ensureDefaultModel 写入的默认值。
   const [modelByTool, setModelByTool] = useState<Record<string, string>>({});
+  const loadGeneration = useRef(0);
+  const boundToolsRef = useRef(boundTools);
+  boundToolsRef.current = boundTools;
+
+  useEffect(
+    () => () => {
+      loadGeneration.current += 1;
+    },
+    [],
+  );
 
   const loadData = useCallback(async () => {
+    const generation = ++loadGeneration.current;
     setLoading(true);
 
     // Two-stage load — the bound-tools list is the user's primary focus and
@@ -248,18 +243,27 @@ export default function ConsolePage({
     // intact and the header in its placeholder state — never spins forever.
 
     // ===== Stage 1: local-only, blocks list render =====
-    const [toolResults, takeoverStatus, apiKeyMetas] = await Promise.all([
+    const [toolResults, bindingEntries, apiKeyMetas] = await Promise.all([
       // includeLatest=false: skip the npm/GitHub fetch — we only need the
       // local "is it installed?" check here. That fetch was the main reason
       // this list took ~5s to render.
-      invoke<ToolInfo[]>("get_tool_versions", {
+      invoke<ToolInstallationInfo[]>("get_tool_versions", {
         tools: null,
         wslShellByTool: null,
         includeLatest: false,
-      }).catch(() => [] as ToolInfo[]),
-      proxyApi
-        .getProxyTakeoverStatus()
-        .catch(() => ({}) as Record<string, boolean>),
+      }).catch(() => [] as ToolInstallationInfo[]),
+      Promise.all(
+        boundTools.map(async (id) => {
+          const status = await ofoxBindApi.status(id).catch(
+            (): ToolBindingStatus => ({
+              status: "unknown",
+              message: null,
+              missingFiles: [],
+            }),
+          );
+          return [id, status] as const;
+        }),
+      ),
       // 本地 settings.json 里的 ofox API key 元数据——拿每个工具的 keyId 给
       // "数据统计"按钮拼 URL，顺带拿 name / alias 给工具行二级信息行显示。
       // 失败（如未绑定任何 key）静默回退空数组，按钮自然不显示，不阻塞列表
@@ -284,6 +288,14 @@ export default function ConsolePage({
       ),
     ]);
 
+    // A refresh started before an unbind must not resurrect its old row.
+    if (
+      generation !== loadGeneration.current ||
+      boundToolsRef.current !== boundTools
+    )
+      return;
+    const bindingByTool = new Map(bindingEntries);
+
     const keyIdMap: Record<string, string> = {};
     const keyLabelMap: Record<string, string> = {};
     for (const meta of apiKeyMetas) {
@@ -303,12 +315,10 @@ export default function ConsolePage({
     setApiKeyIdByTool(keyIdMap);
     setApiKeyLabelByTool(keyLabelMap);
 
-    const detectedMap = new Map<string, ToolInfo>();
+    const detectedMap = new Map<string, ToolInstallationInfo>();
     for (const r of toolResults) {
       detectedMap.set(r.name, r);
     }
-
-    const takeoverMap = takeoverStatus as Record<string, boolean>;
 
     const ordered = TOOL_ORDER.filter((id) => boundTools.includes(id));
     // Also include any bound tools not in TOOL_ORDER
@@ -323,27 +333,6 @@ export default function ConsolePage({
         color: "bg-gray-500",
       };
       const info = detectedMap.get(id);
-      const detected = !!info && !!info.version && !info.error;
-      const proxied = !!takeoverMap[id];
-      const proxySupported = PROXY_SUPPORTED_TOOLS.includes(id);
-
-      // Status 只用于决定状态点颜色 + "修复" vs "管理" 按钮分支：
-      //   - error  → 没检测到工具（提示用户去装/修）
-      //   - active → 检测到且 proxy 接管 OK
-      //   - idle   → 检测到、未走代理（OpenCode/OpenClaw/Hermes 这种 ofox 直写
-      //              的工具会落在这里——非错误状态，所以不展示"未开启代理"
-      //              等中文描述，避免误导用户以为有问题）
-      let status: ToolStatus;
-      if (!detected) {
-        status = "error";
-      } else if (proxied) {
-        status = "active";
-      } else {
-        status = "idle";
-      }
-      // proxySupported 仅参与上面的判定语义，本身不再 surface 到 UI
-      void proxySupported;
-
       return {
         id,
         abbr: meta.abbr,
@@ -351,7 +340,13 @@ export default function ConsolePage({
         color: meta.color,
         version: info?.version ?? null,
         installationKind: info?.installationKind,
-        status,
+        installationStatus: getInstallationStatus(info),
+        installationError: info?.error ?? null,
+        binding: bindingByTool.get(id) ?? {
+          status: "unknown",
+          message: null,
+          missingFiles: [],
+        },
       };
     });
 
@@ -375,7 +370,11 @@ export default function ConsolePage({
           }
         }),
       );
-      setModelByTool(Object.fromEntries(entries));
+      if (
+        generation === loadGeneration.current &&
+        boundToolsRef.current === boundTools
+      )
+        setModelByTool(Object.fromEntries(entries));
     })();
 
     // ===== Stage 2: remote / non-blocking =====
@@ -396,7 +395,7 @@ export default function ConsolePage({
         void retryUserInfoWithBackoff();
       }
     })();
-  }, [boundTools]);
+  }, [boundTools, apex]);
 
   /**
    * Retry `/openapi/me` up to 3 times with 2s/5s/15s backoff. Bails as soon
@@ -445,7 +444,7 @@ export default function ConsolePage({
   const refreshList = useCallback(async () => {
     setListRefreshing(true);
     try {
-      await loadData();
+      await Promise.all([loadData(), checkToolUpdates()]);
       toast.success("已刷新");
     } catch (e) {
       console.error("[ConsolePage] list refresh failed", e);
@@ -494,6 +493,7 @@ export default function ConsolePage({
   } = useToolInstall((toolId, code) => {
     if (code === 0) {
       void loadDataRef.current();
+      void checkToolUpdates();
     } else {
       console.warn(`[ConsolePage] repair ${toolId} exit=${code}`);
     }
@@ -503,7 +503,11 @@ export default function ConsolePage({
       void loadDataRef.current();
     };
     window.addEventListener("tool-updates-complete", refresh);
-    return () => window.removeEventListener("tool-updates-complete", refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      window.removeEventListener("tool-updates-complete", refresh);
+      window.removeEventListener("focus", refresh);
+    };
   }, []);
   useEffect(() => {
     loadDataRef.current = loadData;
@@ -532,7 +536,78 @@ export default function ConsolePage({
     };
   }, []);
 
-  const errorCount = tools.filter((t) => t.status === "error").length;
+  const installedTools = tools.filter(
+    (tool) => tool.installationStatus !== "notInstalled",
+  );
+  const missingTools = tools.filter(
+    (tool) => tool.installationStatus === "notInstalled",
+  );
+  const attentionCount = installedTools.filter(
+    (tool) =>
+      tool.installationStatus === "unknown" ||
+      tool.installationError ||
+      tool.binding.status !== "configured",
+  ).length;
+
+  const installTarget = (tool: BoundTool) =>
+    tool.id === "codex" && tool.installationKind === "desktopApp"
+      ? "chatgpt"
+      : tool.id;
+  const renderTool = (tool: BoundTool) => {
+    const target = installTarget(tool);
+    const canInstall = installableTools.includes(target);
+    const busy =
+      repairing.has(target) ||
+      launchingTools.has(tool.id) ||
+      toolUpdates.busy === tool.id;
+    return (
+      <BoundToolRow
+        key={tool.id}
+        tool={tool}
+        keyLabel={apiKeyLabelByTool[tool.id]}
+        model={modelByTool[tool.id]}
+        hasAnalytics={!!apiKeyIdByTool[tool.id]}
+        hasUpdate={toolUpdates.tools.some(
+          (entry) =>
+            entry.name === tool.id &&
+            entry.version === tool.version &&
+            (!tool.installationKind ||
+              entry.installationKind === tool.installationKind) &&
+            entry.update_status === "available",
+        )}
+        canInstall={canInstall}
+        busy={busy}
+        progress={repairProgress[target]?.name}
+        onAnalytics={() => {
+          void settingsApi
+            .openExternal(ofoxAnalyticsUrl(apex, apiKeyIdByTool[tool.id]))
+            .catch(() => toast.error(t("toolLifecycle.analyticsFailed")));
+        }}
+        onUpdate={() => setSettingsDialogOpen(true)}
+        onManage={() => setManageTool(tool)}
+        onAction={(action: ToolRowAction) => {
+          if (action === "retry") {
+            void loadDataRef.current();
+          } else if (action === "install") {
+            if (canInstall) {
+              void repair(target);
+            } else {
+              const meta = TOOL_META[target];
+              const url = meta?.downloadUrl ?? meta?.projectUrl;
+              if (url)
+                void settingsApi
+                  .openExternal(url)
+                  .catch(() => toast.error(t("toolLifecycle.downloadFailed")));
+            }
+          } else if (action === "open") {
+            void launchTool(tool.id);
+          } else {
+            setManageTool(tool);
+          }
+        }}
+      />
+    );
+  };
 
   return (
     <div className="flex h-screen w-full flex-col bg-gradient-to-br from-orange-50/50 via-white to-orange-50/30 dark:from-neutral-950 dark:via-neutral-900 dark:to-neutral-950">
@@ -646,9 +721,9 @@ export default function ConsolePage({
               <span className="rounded-md bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
                 {tools.length}
               </span>
-              {errorCount > 0 && (
+              {attentionCount > 0 && (
                 <span className="rounded-md bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-500 dark:bg-red-950/50">
-                  {errorCount} 个需修复
+                  {t("toolLifecycle.needsAttention", { count: attentionCount })}
                 </span>
               )}
             </div>
@@ -707,180 +782,39 @@ export default function ConsolePage({
                   </button>
                 </div>
               )}
-              {tools.map((tool) => {
-                const keyLabel = apiKeyLabelByTool[tool.id];
-                const model = modelByTool[tool.id];
-                const hasSecondary =
-                  tool.id === "chatgpt" || !!(keyLabel || model !== undefined);
-                return (
-                  <div
-                    key={tool.id}
-                    className="flex items-center gap-3 border-b border-border px-4 py-3 last:border-b-0"
+              {installedTools.length > 0 ? (
+                installedTools.map(renderTool)
+              ) : (
+                <div className="px-4 py-6 text-center text-sm text-muted-foreground">
+                  {t("toolLifecycle.noInstalledBoundTools")}
+                </div>
+              )}
+              {missingTools.length > 0 && (
+                <div className="border-t border-border">
+                  <button
+                    type="button"
+                    aria-expanded={missingExpanded}
+                    aria-controls="missing-bound-tools"
+                    onClick={() => setMissingExpanded((expanded) => !expanded)}
+                    className="flex w-full flex-wrap items-center gap-2 px-4 py-3 text-left text-[12px] text-muted-foreground hover:bg-accent"
                   >
-                    <ToolBadge toolId={tool.id} size={36} rounded="xl" />
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2 text-[13px] font-medium text-foreground">
-                        <span>{tool.label}</span>
-                        {tool.version && (
-                          <span className="text-[11px] font-normal text-muted-foreground">
-                            {TOOL_META[tool.id]?.launchKind === "desktopApp"
-                              ? "桌面应用 · "
-                              : ""}
-                            v{tool.version}
-                          </span>
-                        )}
-                      </div>
-                      {hasSecondary && (
-                        // 二级信息行——展示当前绑定的 API key 标签 + active model。
-                        // 任一为空时用 "—" / "未设置 model" 占位，让两段宽度
-                        // 稳定，避免行高跳动。`truncate` 防止长 model id 把
-                        // 右侧按钮挤变形。
-                        <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
-                          {tool.id === "chatgpt" ? (
-                            <>
-                              <span>
-                                {t("modelCompatibility.chatgptCodexMode")}
-                              </span>
-                              <span className="mx-1.5 opacity-50">·</span>
-                              <span>
-                                {model ||
-                                  t("modelCompatibility.chatgptCodexUnset")}
-                              </span>
-                            </>
-                          ) : (
-                            <>
-                              <span>{keyLabel ?? "—"}</span>
-                              <span className="mx-1.5 opacity-50">·</span>
-                              <span>{model || "未设置 model"}</span>
-                            </>
-                          )}
-                        </div>
-                      )}
+                    <ChevronDown
+                      className={`h-4 w-4 transition-transform ${missingExpanded ? "rotate-180" : ""}`}
+                    />
+                    <span className="font-medium text-foreground">
+                      {t("toolLifecycle.missingTools", {
+                        count: missingTools.length,
+                      })}
+                    </span>
+                    <span>{t("toolLifecycle.bindingRetained")}</span>
+                  </button>
+                  {missingExpanded && (
+                    <div id="missing-bound-tools">
+                      {missingTools.map(renderTool)}
                     </div>
-                    {/* Action column — "数据统计"（按是否拿到 keyId 决定渲染）
-                        + "打开"（拉起独立终端）+ 管理/修复。"延迟测试"按钮
-                        已下线——日常排障不需要，重要的连通性测试仍在"管理"
-                        弹窗里。 */}
-                    <div className="flex items-center justify-end gap-1.5">
-                      {toolUpdates.tools.some(
-                        (entry) =>
-                          entry.name === tool.id &&
-                          entry.update_status === "available",
-                      ) && (
-                        <button
-                          onClick={() => setSettingsDialogOpen(true)}
-                          className="inline-flex items-center gap-1.5 rounded-lg border border-orange-400 px-2.5 py-1 text-[12px] font-medium text-orange-600 hover:bg-accent"
-                        >
-                          <ArrowUpCircle className="h-3.5 w-3.5" />
-                          {t("toolUpdates.available")}
-                        </button>
-                      )}
-                      {apiKeyIdByTool[tool.id] && (
-                        <button
-                          onClick={() =>
-                            settingsApi
-                              .openExternal(
-                                ofoxAnalyticsUrl(apex, apiKeyIdByTool[tool.id]),
-                              )
-                              .catch((e) => {
-                                console.error(
-                                  "[ConsolePage] open analytics url failed",
-                                  e,
-                                );
-                                toast.error("打开数据统计失败");
-                              })
-                          }
-                          title="在浏览器中查看该工具 API key 的用量数据统计"
-                          className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1 text-[12px] font-medium text-muted-foreground hover:bg-accent"
-                        >
-                          <BarChart3 className="h-3.5 w-3.5" />
-                          数据统计
-                        </button>
-                      )}
-                      {(TOOL_META[tool.id]?.cliBin ||
-                        TOOL_META[tool.id]?.launchKind === "desktopApp") &&
-                        tool.status !== "error" && (
-                          <button
-                            onClick={() => launchTool(tool.id)}
-                            disabled={launchingTools.has(tool.id)}
-                            title={
-                              TOOL_META[tool.id]?.launchKind === "desktopApp"
-                                ? `打开 ${tool.label}`
-                                : `在新的终端窗口中运行 ${TOOL_META[tool.id]?.cliBin}（独立生命周期，关闭 Ofox 不影响）`
-                            }
-                            className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1 text-[12px] font-medium text-muted-foreground hover:bg-accent disabled:opacity-60"
-                          >
-                            {launchingTools.has(tool.id) ? (
-                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                            ) : TOOL_META[tool.id]?.launchKind ===
-                              "desktopApp" ? (
-                              <AppWindow className="h-3.5 w-3.5" />
-                            ) : (
-                              <Terminal className="h-3.5 w-3.5" />
-                            )}
-                            打开
-                          </button>
-                        )}
-                      {tool.status === "error" ? (
-                        <button
-                          onClick={() => {
-                            const action = repairActionFor(tool.id);
-                            if (action === "install") {
-                              void repair(tool.id);
-                            } else if (action === "download") {
-                              const url = TOOL_META[tool.id]?.downloadUrl;
-                              if (url) void settingsApi.openExternal(url);
-                            }
-                          }}
-                          disabled={
-                            repairing.has(tool.id) ||
-                            repairActionFor(tool.id) === "none"
-                          }
-                          title={
-                            repairActionFor(tool.id) === "install"
-                              ? t("console.repairInstallHint", {
-                                  tool: tool.label,
-                                })
-                              : repairActionFor(tool.id) === "download"
-                                ? t("console.repairDownloadHint", {
-                                    tool: tool.label,
-                                  })
-                                : t("console.repairUnavailable")
-                          }
-                          className="inline-flex items-center gap-1.5 rounded-lg bg-orange-500 px-2.5 py-1 text-[12px] font-medium text-white hover:bg-orange-600 disabled:cursor-default disabled:opacity-60"
-                        >
-                          {repairing.has(tool.id) ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          ) : (
-                            <Wrench className="h-3.5 w-3.5" />
-                          )}
-                          {repairing.has(tool.id)
-                            ? (repairProgress[tool.id]?.name ??
-                              t("console.repairing"))
-                            : t("console.repair")}
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() =>
-                            setManageTool({
-                              id: tool.id,
-                              abbr: tool.abbr,
-                              label: tool.label,
-                              color: tool.color,
-                              version: tool.version,
-                              installationKind: tool.installationKind,
-                            })
-                          }
-                          className="inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1 text-[12px] font-medium text-muted-foreground hover:bg-accent"
-                        >
-                          <SlidersHorizontal className="h-3.5 w-3.5" />
-                          管理
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
+                  )}
+                </div>
+              )}
               {(loading || listRefreshing) && (
                 <div
                   aria-busy="true"
@@ -965,6 +899,13 @@ export default function ConsolePage({
         open={addDialogOpen}
         onOpenChange={setAddDialogOpen}
         alreadyBound={boundTools}
+        onManageBound={(id) => {
+          const tool = tools.find((entry) => entry.id === id);
+          if (tool) {
+            setAddDialogOpen(false);
+            setManageTool(tool);
+          }
+        }}
         onAdded={() => {
           // localStorage is already updated by bindTools(); notify the
           // parent so MainApp's `boundTools` state re-reads and the
@@ -982,20 +923,10 @@ export default function ConsolePage({
           if (!open) setManageTool(null);
         }}
         onChanged={() => {
-          // Single trigger: bubble up to MainApp so it re-reads the
-          // bound-tools localStorage. The new boundTools prop flows
-          // back into our `loadData` (its useCallback deps include
-          // boundTools), so the row list re-renders without us
-          // having to call loadData() here.
-          //
-          // Calling loadData() inline used to "double up" the refresh,
-          // but the manual call captured a stale `boundTools` closure
-          // — for unbind, the in-flight stale loadData would race the
-          // prop-driven one and could win, leaving the just-unbound
-          // tool stuck in the list until the user bounced through
-          // 管理→解绑 a second time. The single prop-driven path is
-          // race-free.
           onBoundToolsChanged?.();
+          // Recovery does not change the bound set; reload its disk status too.
+          // Generation checks reject scans captured before an unbind prop update.
+          void loadDataRef.current();
         }}
       />
 
