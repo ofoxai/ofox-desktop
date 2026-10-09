@@ -14,6 +14,8 @@ mod env;
 mod failover;
 mod global_proxy;
 mod hermes;
+#[cfg(any(target_os = "windows", test))]
+pub(crate) mod how_installed;
 mod import_export;
 mod install_tool;
 mod launch_tool;

@@ -761,7 +761,7 @@ async fn get_single_tool_version_impl(
     };
     let update_status =
         cli_update_status(&local, latest_version.as_deref(), include_latest).to_string();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     let (update_source, update_supported, update_reason) = match &active_installation {
         Ok(installation) => {
             let plan = if include_latest {
@@ -780,11 +780,11 @@ async fn get_single_tool_version_impl(
         }
         Err(reason) => (None, false, Some(reason.to_string())),
     };
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let (update_source, update_supported, update_reason) = (
         None,
         false,
-        Some("Automatic updates are currently supported on macOS only".into()),
+        Some("Automatic updates are currently supported on macOS and Windows only".into()),
     );
     #[cfg(unix)]
     let _ = (wsl_shell, wsl_shell_flag);

@@ -321,7 +321,31 @@ pub(crate) fn probe_fixture_output(stdout: &str, stderr: &str, code: i32) -> std
     }
 }
 
+/// Windows: how the active installation was installed, read from where its
+/// executable is (`how_installed`, ported from magpie).
+#[cfg(target_os = "windows")]
+pub(crate) fn plan(tool: &str, install: &Installation) -> Result<UpdatePlan, String> {
+    let updater = super::how_installed::how_installed(
+        tool,
+        &install.path,
+        &install.real,
+        &super::windows_tools::find_tool,
+    )
+    .ok_or("Unknown installation source; update with the original installer/package manager")?;
+    let path = match &updater.path_first {
+        Some(dir) => format!("{};{}", dir.display(), install.search_path),
+        None => install.search_path.clone(),
+    };
+    Ok(UpdatePlan {
+        source: updater.source,
+        program: updater.program,
+        args: updater.args,
+        path,
+    })
+}
+
 /// Pure source classification. Callers validate the resulting executable before use.
+#[cfg(not(target_os = "windows"))]
 pub(crate) fn plan(tool: &str, install: &Installation) -> Result<UpdatePlan, String> {
     let make = |source, program: PathBuf, args: Vec<String>| {
         let directory = program.parent().unwrap_or(Path::new("/usr/bin"));
@@ -418,6 +442,9 @@ pub(crate) fn verified_plan(tool: &str, install: &Installation) -> Result<Update
     if !plan.program.is_file() {
         return Err("Original package manager is missing; update manually".into());
     }
+    // On Windows npm.cmd may live in %APPDATA%\npm after npm updated itself,
+    // away from node.exe; the update PATH supplies node there.
+    #[cfg(not(target_os = "windows"))]
     if plan.source == "npm" && !plan.program.with_file_name("node").is_file() {
         return Err("Original Node.js runtime is missing; update manually".into());
     }
@@ -436,7 +463,8 @@ pub(crate) async fn resolve_plan(tool: &str, install: &Installation) -> Result<U
 
 async fn resolve_plan_inner(tool: &str, install: &Installation) -> Result<UpdatePlan, String> {
     let original = verified_plan(tool, install);
-    if original.is_ok() {
+    // The pnpm 11 cache discovery below follows the Unix layout.
+    if original.is_ok() || cfg!(target_os = "windows") {
         return original;
     }
     let Some(package) = npm_package(tool) else {
@@ -612,8 +640,8 @@ pub async fn update_tool(
     if operation_id.is_empty() || operation_id.len() > 128 {
         return Err("Invalid operation ID".into());
     }
-    if tool != "chatgpt" && !cfg!(target_os = "macos") {
-        return Err("Automatic updates are currently supported on macOS only".into());
+    if tool != "chatgpt" && !cfg!(any(target_os = "macos", target_os = "windows")) {
+        return Err("Automatic updates are currently supported on macOS and Windows only".into());
     }
     let _guard = ToolOperationGuard::acquire(&tool)?;
     let emit = |stage: &str, detail: &str| {
@@ -759,6 +787,8 @@ pub(crate) async fn run_logged_process<F: Fn(&str)>(
         use std::os::unix::process::CommandExt;
         command.as_std_mut().process_group(0);
     }
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
     command
         .kill_on_drop(true)
         .stdin(std::process::Stdio::null())
@@ -767,6 +797,8 @@ pub(crate) async fn run_logged_process<F: Fn(&str)>(
     let mut child = command.spawn().map_err(|e| e.to_string())?;
     #[cfg(unix)]
     let _group = ProcessGroup(child.id().ok_or("Missing process ID")?);
+    #[cfg(target_os = "windows")]
+    let pid = child.id();
     let stdout = BufReader::new(child.stdout.take().ok_or("Missing stdout")?);
     let stderr = BufReader::new(child.stderr.take().ok_or("Missing stderr")?);
     let work = async {
@@ -779,9 +811,30 @@ pub(crate) async fn run_logged_process<F: Fn(&str)>(
         err?;
         status.map_err(|e| e.to_string())
     };
-    tokio::time::timeout(timeout, work)
-        .await
-        .map_err(|_| "Update timed out; inspect the installation before retrying".to_string())?
+    match tokio::time::timeout(timeout, work).await {
+        Ok(status) => status,
+        Err(_) => {
+            // kill_on_drop only ends the direct child; npm leaves node running.
+            #[cfg(target_os = "windows")]
+            if let Some(pid) = pid {
+                kill_process_tree(pid);
+            }
+            Err("Update timed out; inspect the installation before retrying".to_string())
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// End `pid` and every process it started.
+#[cfg(target_os = "windows")]
+fn kill_process_tree(pid: u32) {
+    use std::os::windows::process::CommandExt;
+    let _ = std::process::Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
 }
 
 async fn forward_lines<R, F>(mut reader: BufReader<R>, log: &F) -> Result<(), String>
@@ -1235,6 +1288,8 @@ mod tests {
             "Acceptance requires an actual version change"
         );
     }
+    // Unix install layouts; Windows plans are covered in `how_installed`.
+    #[cfg(not(target_os = "windows"))]
     fn install(path: &str, real: &str) -> Installation {
         Installation {
             path: path.into(),
@@ -1259,6 +1314,7 @@ mod tests {
         assert_eq!(version_status(Some("1.0.0"), None), "failed");
         assert_eq!(version_status(Some("installed"), Some("1.0.0")), "unknown");
     }
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn update_is_anchored_to_actual_npm_prefix() {
         let prefix = PathBuf::from("/Users/O'Brien/node");
@@ -1275,6 +1331,7 @@ mod tests {
         assert_eq!(plan.args[3], prefix.display().to_string());
         assert!(plan.path.starts_with(&format!("{}:", directory.display())));
     }
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn fnm_multishell_changes_keep_the_same_update_target() {
         let real = "/home/user/.local/share/fnm/node-versions/v24/installation/lib/node_modules/opencode-ai/bin/opencode";
@@ -1307,6 +1364,7 @@ mod tests {
         assert_ne!(first.program, other.program);
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn missing_original_package_manager_cannot_fall_back_to_path() {
         let directory = tempfile::tempdir().unwrap();
@@ -1318,6 +1376,7 @@ mod tests {
             .unwrap_err()
             .contains("package manager is missing"));
     }
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn brew_precedes_self_update_and_unknown_sources_stop() {
         let brew = plan(
