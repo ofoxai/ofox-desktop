@@ -2135,9 +2135,12 @@ fn run_windows_start_command(args: &[&str], terminal_name: &str) -> Result<(), S
 
     // The new terminal inherits this PATH: the registry's current one, so a
     // CLI installed after Ofox started is found and npm shims find node.
+    // It also inherits the folder: the user's home, as Terminal opens on macOS,
+    // not Ofox's install folder.
     let output = Command::new("cmd")
         .args(&full_args)
         .env("PATH", super::windows_tools::effective_path())
+        .current_dir(crate::config::get_home_dir())
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("启动 {} 失败: {e}", terminal_name))?;
