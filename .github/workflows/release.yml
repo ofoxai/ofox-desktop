@@ -65,7 +65,8 @@ jobs:
           #   r2_prefix: release/linux/x64
           #   ext: AppImage
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    # 公证排队慢时（新团队的首批提交要几十分钟）构建 + 两次公证会超过 90 分钟。
+    timeout-minutes: 240
     outputs:
       version: ${{ steps.version.outputs.version }}
 
@@ -216,7 +217,7 @@ jobs:
       - name: Build (macOS)
         if: runner.os == 'macOS'
         shell: bash
-        timeout-minutes: 60
+        timeout-minutes: 120
         env:
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -243,7 +244,7 @@ jobs:
       - name: Notarize & staple DMG (macOS)
         if: runner.os == 'macOS'
         shell: bash
-        timeout-minutes: 30
+        timeout-minutes: 150
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
@@ -254,23 +255,43 @@ jobs:
           DMG=$(find src-tauri/target -path "*/release/bundle/dmg/*.dmg" -name "*${VERSION}*" | head -1)
           [ -z "$DMG" ] && { echo "❌ 找不到 v${VERSION} 的 dmg 产物" >&2; exit 1; }
           echo "dmg: $DMG"
+          AUTH=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
+          json_field() { python3 -c "import json,sys; print(json.load(sys.stdin).get('$1') or '')"; }
 
           # stapler validate 判幂等：重跑不会重复公证
           if xcrun stapler validate "$DMG" >/dev/null 2>&1; then
             echo "▶ 已 staple，跳过公证"
           else
+            # 只在提交失败时重新提交；提交成功后只等这一个 ID。等待中网络抖动
+            # 就继续等同一个提交——重新提交会重新排队（1.3.4 首次发版就是这样超时的）。
+            ID=""
             for attempt in 1 2 3; do
-              echo "=== 公证尝试 $attempt/3 ==="
-              if xcrun notarytool submit "$DMG" \
-                  --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" \
-                  --team-id "$APPLE_TEAM_ID" --wait; then
-                xcrun stapler staple "$DMG"
-                echo "✅ 公证 + staple 完成"
+              echo "=== 提交公证 $attempt/3 ==="
+              if ID=$(xcrun notarytool submit "$DMG" "${AUTH[@]}" --output-format json | json_field id) && [ -n "$ID" ]; then
                 break
               fi
-              [ "$attempt" -eq 3 ] && { echo "❌ 公证失败（已重试 3 次）" >&2; exit 1; }
-              sleep $((attempt * 60))
+              [ "$attempt" -eq 3 ] && { echo "❌ 提交公证失败（已重试 3 次）" >&2; exit 1; }
+              sleep $((attempt * 30))
             done
+            echo "submission: $ID"
+
+            STATUS=""
+            for check in $(seq 1 60); do
+              xcrun notarytool wait "$ID" "${AUTH[@]}" --timeout 30m >/dev/null 2>&1 || true
+              STATUS=$(xcrun notarytool info "$ID" "${AUTH[@]}" --output-format json 2>/dev/null | json_field status || true)
+              echo "[$(date -u +%H:%M:%S)] 公证状态: ${STATUS:-（查询失败，稍后重试）}"
+              case "$STATUS" in
+                Accepted) break ;;
+                Invalid|Rejected)
+                  xcrun notarytool log "$ID" "${AUTH[@]}" || true
+                  echo "❌ 公证未通过: $STATUS" >&2
+                  exit 1 ;;
+              esac
+              sleep 30
+            done
+            [ "$STATUS" = "Accepted" ] || { echo "❌ 等待公证超时（状态: ${STATUS:-未知}）" >&2; exit 1; }
+            xcrun stapler staple "$DMG"
+            echo "✅ 公证 + staple 完成"
           fi
 
           echo "▶ Gatekeeper 验证"
