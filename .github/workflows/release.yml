@@ -382,7 +382,11 @@ jobs:
           if xcrun stapler validate "$DMG" >/dev/null 2>&1; then
             echo "▶ 已 staple"
           else
-            ID=$(cat notary/notary-darwin-aarch64/submission-id)
+            # 只匹配到一个 notary-* 时，download-artifact 直接解压到 notary/，
+            # 多个时才按产物名分子目录，所以按文件名找。
+            ID_FILE=$(find notary -type f -name submission-id | head -1)
+            [ -n "$ID_FILE" ] || { echo "❌ 找不到公证提交编号（notary-darwin-aarch64 产物）" >&2; exit 1; }
+            ID=$(cat "$ID_FILE")
             echo "submission: $ID"
             # 留出上传和清理的时间：约 5 小时后还没结果就停下，提示重跑本任务。
             DEADLINE=$((SECONDS + 300 * 60))
