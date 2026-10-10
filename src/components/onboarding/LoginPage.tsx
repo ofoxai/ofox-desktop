@@ -267,8 +267,8 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
           已经决定了走 .io / .ai，登录前再暴露选择只会把 device flow 引到错误的
           IDP。需要切换的用户登录后可以在设置弹窗里改。 */}
 
-      <div className="flex flex-1 w-full items-center justify-center">
-        <div className="flex w-full max-w-xl flex-col items-center px-8">
+      <div className="flex min-h-0 w-full flex-1 overflow-y-auto">
+        <div className="m-auto flex w-full max-w-xl flex-col items-center px-8 py-2">
           {/* Logo */}
           <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-[22px] bg-gradient-to-br from-orange-400 to-orange-600 text-4xl font-bold text-white shadow-lg shadow-orange-200 dark:shadow-orange-900/30">
             O

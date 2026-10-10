@@ -57,17 +57,19 @@ pub async fn copy_text_to_clipboard(text: String) -> Result<bool, String> {
 const OFOX_UPDATE_MANIFEST_URL: &str = "https://desktop.ofox.ai/latest.json";
 
 /// `latest.json` 的反序列化结构。`downloads` 的 key 形如 `darwin-aarch64`，
-/// 与 `current_platform_key()` 对齐。
+/// 与 `current_platform_key()` 对齐。发布脚本写的是 camelCase（`pubDate`、
+/// `downloadPage`），旧的 snake_case 字段名仍然兼容。
 #[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct UpdateManifest {
     version: String,
-    #[serde(default)]
+    #[serde(default, alias = "pub_date")]
     pub_date: Option<String>,
     #[serde(default)]
     notes: Option<String>,
     #[serde(default)]
     downloads: HashMap<String, String>,
-    #[serde(default)]
+    #[serde(default, alias = "download_page")]
     download_page: Option<String>,
 }
 
@@ -128,23 +130,37 @@ pub async fn check_for_updates() -> Result<UpdateCheckResult, String> {
         .await
         .map_err(|e| format!("解析更新清单失败: {e}"))?;
 
-    let has_update = is_newer(&manifest.version, &current_version);
+    Ok(resolve_update(
+        manifest,
+        &current_version,
+        &manifest_platform_key(),
+    ))
+}
 
-    // 命中当前平台的直链；否则回退到通用下载页。
-    let download_url = manifest
-        .downloads
-        .get(&manifest_platform_key())
+/// 清单与当前版本、平台比对。命中当前平台的直链；否则回退到通用下载页。
+///
+/// `version` 是全平台共用的：只重新构建了部分平台的发布会保留其他平台的旧条目，
+/// 直链里没有这个版本号时，这个平台还没有新包，不提示更新。
+fn resolve_update(
+    manifest: UpdateManifest,
+    current_version: &str,
+    platform_key: &str,
+) -> UpdateCheckResult {
+    let platform_build = manifest.downloads.get(platform_key);
+    let built_for_platform =
+        platform_build.is_none_or(|url| url.contains(&format!("_{}.", manifest.version)));
+    let download_url = platform_build
+        .filter(|_| built_for_platform)
         .cloned()
-        .or(manifest.download_page.clone());
-
-    Ok(UpdateCheckResult {
-        has_update,
-        current_version,
+        .or(manifest.download_page);
+    UpdateCheckResult {
+        has_update: built_for_platform && is_newer(&manifest.version, current_version),
+        current_version: current_version.to_string(),
         latest_version: manifest.version,
         download_url,
         notes: manifest.notes,
         pub_date: manifest.pub_date,
-    })
+    }
 }
 
 /// 判断是否为便携版（绿色版）运行
@@ -2461,6 +2477,71 @@ pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<()
 mod tests {
     use super::*;
     use crate::commands::tool_update::probe_fixture_output;
+
+    /// The manifest as `release.yml` publishes it, after a release that built
+    /// both platforms.
+    const RELEASED_MANIFEST: &str = r#"{
+      "version": "1.3.5",
+      "pubDate": "2026-10-10T08:00:00Z",
+      "notes": "",
+      "downloads": {
+        "darwin-aarch64": "https://desktop.ofox.ai/release/mac/arm/ofox_desktop_1.3.5.dmg",
+        "windows-x86_64": "https://desktop.ofox.ai/release/windows/x64/ofox_desktop_1.3.5.exe"
+      },
+      "downloadPage": "https://ofox.ai/download"
+    }"#;
+
+    fn manifest(json: &str) -> UpdateManifest {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn update_check_reads_the_camel_case_manifest_release_publishes() {
+        let result = resolve_update(manifest(RELEASED_MANIFEST), "1.3.4", "windows-x86_64");
+        assert!(result.has_update);
+        assert_eq!(result.latest_version, "1.3.5");
+        assert_eq!(
+            result.download_url.as_deref(),
+            Some("https://desktop.ofox.ai/release/windows/x64/ofox_desktop_1.3.5.exe")
+        );
+        assert_eq!(result.pub_date.as_deref(), Some("2026-10-10T08:00:00Z"));
+    }
+
+    #[test]
+    fn update_check_still_reads_a_snake_case_manifest() {
+        let legacy = r#"{"version":"1.3.5","pub_date":"2026-10-10T08:00:00Z","download_page":"https://ofox.ai/download"}"#;
+        let result = resolve_update(manifest(legacy), "1.3.4", "windows-x86_64");
+        assert_eq!(result.pub_date.as_deref(), Some("2026-10-10T08:00:00Z"));
+        assert_eq!(
+            result.download_url.as_deref(),
+            Some("https://ofox.ai/download")
+        );
+    }
+
+    #[test]
+    fn update_check_falls_back_to_the_download_page_without_a_platform_build() {
+        let mac_only = RELEASED_MANIFEST.replace(
+            r#",
+        "windows-x86_64": "https://desktop.ofox.ai/release/windows/x64/ofox_desktop_1.3.5.exe""#,
+            "",
+        );
+        let result = resolve_update(manifest(&mac_only), "1.3.4", "windows-x86_64");
+        assert!(result.has_update);
+        assert_eq!(
+            result.download_url.as_deref(),
+            Some("https://ofox.ai/download")
+        );
+    }
+
+    #[test]
+    fn update_check_ignores_a_platform_build_older_than_the_manifest_version() {
+        // A release that only rebuilt macOS keeps the older Windows entry.
+        let lagging = RELEASED_MANIFEST.replace("ofox_desktop_1.3.5.exe", "ofox_desktop_1.3.4.exe");
+        let result = resolve_update(manifest(&lagging), "1.3.4", "windows-x86_64");
+        assert!(!result.has_update);
+        let result = resolve_update(manifest(&lagging), "1.3.4", "darwin-aarch64");
+        assert!(result.has_update);
+    }
 
     #[test]
     fn windows_batch_line_quotes_the_program_and_unsafe_arguments() {
