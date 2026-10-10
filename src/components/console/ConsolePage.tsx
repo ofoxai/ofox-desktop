@@ -263,6 +263,7 @@ export default function ConsolePage({
               message: null,
               missingFiles: [],
               modifiedFields: [],
+              envOverrides: [],
             }),
           );
           return [id, status] as const;
@@ -351,6 +352,7 @@ export default function ConsolePage({
           message: null,
           missingFiles: [],
           modifiedFields: [],
+          envOverrides: [],
         },
       };
     });
@@ -551,7 +553,8 @@ export default function ConsolePage({
     (tool) =>
       tool.installationStatus === "unknown" ||
       tool.installationError ||
-      tool.binding.status !== "configured",
+      tool.binding.status !== "configured" ||
+      tool.binding.envOverrides.length > 0,
   ).length;
 
   // magpie's "Update all" line: with two or more listed tools behind, one

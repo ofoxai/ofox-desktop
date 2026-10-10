@@ -34,6 +34,8 @@ pub struct ToolBindingStatus {
     pub missing_files: Vec<String>,
     /// 与 Ofox 写入不一致的字段：`<文件> · <字段>`，只有名字，没有值。
     pub modified_fields: Vec<String>,
+    /// 会盖过这些配置的环境变量（由命令层填，见 `services::env_override`）。
+    pub env_overrides: Vec<crate::services::env_override::EnvOverride>,
 }
 
 impl ToolBindingStatus {
@@ -43,6 +45,7 @@ impl ToolBindingStatus {
             message: None,
             missing_files: Vec::new(),
             modified_fields: Vec::new(),
+            env_overrides: Vec::new(),
         }
     }
 
@@ -52,6 +55,7 @@ impl ToolBindingStatus {
             message: Some("部分 OFox 接入配置已删除，可恢复已保存的模型和绑定。".into()),
             missing_files: files,
             modified_fields: Vec::new(),
+            env_overrides: Vec::new(),
         }
     }
 
@@ -61,6 +65,7 @@ impl ToolBindingStatus {
             message: Some("OFox 接入配置已被修改，已停止自动覆盖，请检查现有配置。".into()),
             missing_files: Vec::new(),
             modified_fields: fields,
+            env_overrides: Vec::new(),
         }
     }
 
@@ -72,6 +77,7 @@ impl ToolBindingStatus {
             ),
             missing_files: Vec::new(),
             modified_fields: Vec::new(),
+            env_overrides: Vec::new(),
         }
     }
 }

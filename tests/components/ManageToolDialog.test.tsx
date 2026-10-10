@@ -47,6 +47,7 @@ beforeEach(() => {
     message: null,
     missingFiles: [],
     modifiedFields: [],
+    envOverrides: [],
   });
 });
 
@@ -96,6 +97,7 @@ describe("ManageToolDialog binding lifecycle", () => {
       message: null,
       missingFiles: ["~/.codex/config.toml"],
       modifiedFields: [],
+      envOverrides: [],
     });
     const save = vi.spyOn(manageToolApi, "setActiveModel").mockResolvedValue();
     const ping = vi.spyOn(manageToolApi, "pingModel");
@@ -120,6 +122,7 @@ describe("ManageToolDialog binding lifecycle", () => {
       message: null,
       missingFiles: [],
       modifiedFields: [],
+      envOverrides: [],
     });
     const restore = vi.spyOn(ofoxBindApi, "restore").mockResolvedValue();
     const onChanged = vi.fn();
@@ -145,6 +148,7 @@ describe("ManageToolDialog binding lifecycle", () => {
       message: null,
       missingFiles: [],
       modifiedFields: [],
+      envOverrides: [],
     });
     vi.spyOn(ofoxBindApi, "restore").mockRejectedValue(
       new Error("write failed"),
@@ -168,6 +172,7 @@ describe("ManageToolDialog binding lifecycle", () => {
       message: "Configuration conflict",
       missingFiles: [],
       modifiedFields: ["~/.codex/config.toml · model", "current-provider"],
+      envOverrides: [],
     });
     const restore = vi.spyOn(ofoxBindApi, "restore");
     await renderLifecycleTool();
@@ -183,6 +188,30 @@ describe("ManageToolDialog binding lifecycle", () => {
     expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "解除绑定" })).toBeEnabled();
     expect(restore).not.toHaveBeenCalled();
+  });
+
+  it("names the environment variables that override the binding and how to remove them", async () => {
+    vi.mocked(ofoxBindApi.status).mockResolvedValue({
+      status: "configured",
+      message: null,
+      missingFiles: [],
+      modifiedFields: [],
+      envOverrides: [
+        { name: "GEMINI_API_KEY", scope: "machine", location: null },
+        { name: "GEMINI_MODEL", scope: "file", location: "~/.zshrc:3" },
+      ],
+    });
+    await renderLifecycleTool();
+    expect(
+      screen.getByText(
+        /这些环境变量会盖过 Ofox 写入的配置，Codex 可能不会走 Ofox/,
+      ),
+    ).toBeVisible();
+    expect(screen.getByText("GEMINI_API_KEY")).toBeVisible();
+    expect(screen.getByText("Windows 系统环境变量")).toBeVisible();
+    expect(screen.getByText("~/.zshrc:3")).toBeVisible();
+    expect(screen.getByText(/系统属性 → 高级 → 环境变量/)).toBeVisible();
+    expect(screen.getByText(/删除上面配置文件里的这些行/)).toBeVisible();
   });
 
   it("allows unbinding even when the configuration status cannot be read", async () => {
@@ -211,6 +240,7 @@ describe("ManageToolDialog binding lifecycle", () => {
       message: null,
       missingFiles: [],
       modifiedFields: [],
+      envOverrides: [],
     });
     vi.spyOn(ofoxBindApi, "unbindPreview").mockResolvedValue({
       ...emptyReport,

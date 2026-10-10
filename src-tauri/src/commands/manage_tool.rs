@@ -80,13 +80,18 @@ pub async fn get_tool_binding_status(
     }
     let (tool, _) =
         crate::services::ofox_bind::tool_for(&app).ok_or_else(|| "无效的应用类型".to_string())?;
-    let key = match crate::ofox_secret::default_store().load(crate::ofox_secret::Slot::ApiKey {
-        tool: tool.app().into(),
-    }) {
-        Ok(key) => key,
-        Err(_) => return Ok(crate::services::ofox_bind::status::ToolBindingStatus::unknown()),
-    };
-    Ok(crate::services::ofox_bind::status::binding_status(&state.db, tool, key.as_deref()).await)
+    let mut status =
+        match crate::ofox_secret::default_store().load(crate::ofox_secret::Slot::ApiKey {
+            tool: tool.app().into(),
+        }) {
+            Ok(key) => {
+                crate::services::ofox_bind::status::binding_status(&state.db, tool, key.as_deref())
+                    .await
+            }
+            Err(_) => crate::services::ofox_bind::status::ToolBindingStatus::unknown(),
+        };
+    status.env_overrides = crate::services::env_override::find(tool.app().as_str());
+    Ok(status)
 }
 
 // ---------------------------------------------------------------------------

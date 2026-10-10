@@ -9,6 +9,15 @@ export interface ToolBindingStatus {
   missingFiles: string[];
   /** `<file> · <field>` that differ from what Ofox wrote, or `current-provider`. Names only. */
   modifiedFields: string[];
+  /** Environment variables that beat this configuration. Names and where they are set only. */
+  envOverrides: EnvOverride[];
+}
+
+/** `user` / `machine`: Windows environment variables; `process`: Ofox still carries one already removed; `file`: a shell profile at `location`. */
+export interface EnvOverride {
+  name: string;
+  scope: "user" | "machine" | "process" | "file";
+  location: string | null;
 }
 
 /** One thing the unbind could not do exactly; `code` maps to `unbind.warning.<code>`. */

@@ -2693,6 +2693,7 @@
     "binding": {
       "missing": "Binding configuration missing",
       "modified": "Configuration conflict",
+      "envOverride": "Env variable conflict",
       "unknown": "Configuration check failed"
     },
     "reinstall": "Reinstall",
@@ -2715,6 +2716,16 @@
     "restoreFailed": "Failed to restore binding: {{error}}",
     "bindFailed": "Some tools could not be bound: {{tools}}. Retry or check your sign-in.",
     "upstreamInstructions": "Install instructions",
+    "envOverride": {
+      "title": "These environment variables override the configuration Ofox wrote, so {{tool}} may not go through Ofox:",
+      "scope": {
+        "user": "Windows user environment variable",
+        "machine": "Windows system environment variable",
+        "process": "Removed from the system, but Ofox still has it until you restart Ofox"
+      },
+      "fixWindows": "Delete them in System Properties → Advanced → Environment Variables, quit Ofox from the tray and open it again, then open a new terminal.",
+      "fixShell": "Delete these lines from the files above, then open a new terminal."
+    },
     "configuration": {
       "loading": "Checking binding configuration…",
       "missing": "Binding configuration is missing. Saving and tests are paused; you can restore the binding.",
