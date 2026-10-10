@@ -8,6 +8,31 @@
 git clone --branch test-builds --single-branch --depth 1 https://github.com/ofoxai/ofox-desktop.git ofox-test-builds
 ```
 
+## 1.3.4-a7e6d00（托盘实体窗口 + 配置冲突误报修复，待验证）
+
+源码：临时集成分支 `ci/test-installers` @ `a7e6d004` = 1.3.4-c554707 + 两个修复：
+
+| 分支 | 内容 |
+|---|---|
+| `fix/windows-window-layout` | Windows 托盘弹窗改成实体窗口：不透明、铺满，外面不再多一圈虚线框；大小和原来的卡片一样。macOS 不变。 |
+| `fix/binding-conflict-fields` | 在 ChatGPT / Codex 里改推理强度后不再显示「配置冲突」，Ofox 切换模型时也保留你选的强度；真正有冲突时，「管理」里会列出是哪个文件的哪个字段不一致（只有字段名，不显示 key 或其他值）。macOS 和 Windows 都包含这个修复。 |
+
+| 文件 | 平台 | 说明 |
+|---|---|---|
+| `ofox_desktop_1.3.4_macos_aarch64.dmg` | macOS 12+，Apple Silicon | ad-hoc 签名，未公证 |
+| `ofox_desktop_1.3.4_windows_x64-setup.exe` | Windows 10/11 x64 | NSIS，未签名，默认按当前用户安装 |
+| `ofox_desktop_1.3.4_windows_x64_en-US.msi` | Windows 10/11 x64 | MSI，仅用于验证能否安装，不会发布 |
+
+安装、校验方法同下面的 1.3.4-9274f52（校验文件 `1.3.4-a7e6d00/SHA256SUMS.txt`）。
+
+在 Windows 上请看：
+
+1. 点击托盘图标，弹窗是一个完整的实体窗口：没有外圈框，背景不透明，Windows 11 上四角是系统圆角；浅色、深色模式都正常，点弹窗外面会收起。
+2. Codex、ChatGPT 不再显示「配置冲突」，Codex 一行重新出现「打开」。在 ChatGPT 里把推理强度换成「高」「低」等，刷新后仍然正常。
+3. 在 Ofox 里给 Codex 换一个模型并保存，再看 ChatGPT / Codex 里的推理强度，还是你之前选的那个。
+4. 如果 Gemini 仍显示「配置冲突」：点 Gemini 的「管理」，把橙色提示框里列出的字段截图发过来（例如 `~/.gemini/.env · GEMINI_API_KEY`，或「当前服务商已切换为其它服务商」）。
+5. 其余检查项同下面 1.3.4-c554707 的清单。
+
 ## 1.3.4-c554707（Windows 功能对齐 macOS，待验证）
 
 源码：临时集成分支 `ci/test-installers` @ `c5547071`，在 main（`a642c00b`）上合并了下面这些分支，验证通过后再逐个提 PR 合并：
