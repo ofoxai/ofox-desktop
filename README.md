@@ -20,7 +20,7 @@ git clone --branch test-builds --single-branch --depth 1 https://github.com/ofox
 
 | 文件 | 平台 | 说明 |
 |---|---|---|
-| `ofox_desktop_1.3.4_macos_aarch64.dmg` | macOS 12+，Apple Silicon | 公司证书（NICE TALK PTE. LTD.）签名；**Apple 公证中，通过后补上**，到时可以直接打开 |
+| `ofox_desktop_1.3.4_macos_aarch64.dmg` | macOS 12+，Apple Silicon | 公司证书（NICE TALK PTE. LTD.）签名，已提交 Apple 公证。公证通过前打开会被拦：在「系统设置 → 隐私与安全性」底部点「仍要打开」；通过后同一个文件可以直接打开 |
 | `ofox_desktop_1.3.4_windows_x64-setup.exe` | Windows 10/11 x64 | NSIS，未签名，默认按当前用户安装 |
 | `ofox_desktop_1.3.4_windows_x64_en-US.msi` | Windows 10/11 x64 | MSI，仅用于验证能否安装，不会发布 |
 
