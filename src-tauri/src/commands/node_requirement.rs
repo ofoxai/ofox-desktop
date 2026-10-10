@@ -438,10 +438,7 @@ async fn node_version(node: &Path, search_path: &str) -> Option<String> {
     let mut command = tokio::process::Command::new(node);
     command.arg("--version").env("PATH", search_path);
     #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
+    command.creation_flags(0x0800_0000);
     let output = super::tool_update::bounded_output(command).await.ok()?;
     let text = String::from_utf8_lossy(&output.stdout);
     let version = text.trim().trim_start_matches('v');
@@ -458,10 +455,7 @@ async fn tools_beside(node: &NodeInstall, except: &str) -> Vec<String> {
         .args(["ls", "-g", "--depth=0", "--json"])
         .env("PATH", &node.search_path);
     #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
+    command.creation_flags(0x0800_0000);
     match super::tool_update::bounded_output(command).await {
         Ok(output) => global_tools(&String::from_utf8_lossy(&output.stdout), except),
         Err(_) => Vec::new(),
@@ -469,7 +463,9 @@ async fn tools_beside(node: &NodeInstall, except: &str) -> Vec<String> {
 }
 
 /// 升级 Node 要用到的全部信息：命令、升级后要重装的包、升级后至少要到的版本。
+/// 只有 macOS / Windows 的安装器会读这些字段。
 #[derive(Debug, Clone)]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 pub(crate) struct NodeUpgrade {
     /// bash（macOS）或 PowerShell（Windows）命令，已经包含重装受影响的工具。
     pub command: String,

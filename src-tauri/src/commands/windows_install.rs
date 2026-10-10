@@ -30,7 +30,8 @@ fn npm_package(tool: &str) -> Option<&'static str> {
 }
 
 /// `tool` 的安装脚本（在一个独立的 PowerShell 5.1 进程里运行）。
-pub(crate) fn install_script(tool: &str, host: InstallHost) -> Result<String, String> {
+#[cfg(test)]
+fn install_script(tool: &str, host: InstallHost) -> Result<String, String> {
     install_script_with(tool, host, None)
 }
 
