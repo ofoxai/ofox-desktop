@@ -14,6 +14,8 @@ use super::{
 use crate::database::Database;
 
 const UNKNOWN_KEY: &str = "__ofox_saved_key_unavailable__";
+/// `modified_fields` 里表示「当前服务商已不是 Ofox」，前端翻译成文案。
+pub(crate) const CURRENT_PROVIDER_FIELD: &str = "current-provider";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -30,6 +32,10 @@ pub struct ToolBindingStatus {
     pub status: BindingStatus,
     pub message: Option<String>,
     pub missing_files: Vec<String>,
+    /// 与 Ofox 写入不一致的字段：`<文件> · <字段>`，只有名字，没有值。
+    pub modified_fields: Vec<String>,
+    /// 会盖过这些配置的环境变量（由命令层填，见 `services::env_override`）。
+    pub env_overrides: Vec<crate::services::env_override::EnvOverride>,
 }
 
 impl ToolBindingStatus {
@@ -38,6 +44,8 @@ impl ToolBindingStatus {
             status: BindingStatus::Configured,
             message: None,
             missing_files: Vec::new(),
+            modified_fields: Vec::new(),
+            env_overrides: Vec::new(),
         }
     }
 
@@ -46,14 +54,18 @@ impl ToolBindingStatus {
             status: BindingStatus::Missing,
             message: Some("部分 OFox 接入配置已删除，可恢复已保存的模型和绑定。".into()),
             missing_files: files,
+            modified_fields: Vec::new(),
+            env_overrides: Vec::new(),
         }
     }
 
-    pub(crate) fn modified() -> Self {
+    pub(crate) fn modified(fields: Vec<String>) -> Self {
         Self {
             status: BindingStatus::Modified,
             message: Some("OFox 接入配置已被修改，已停止自动覆盖，请检查现有配置。".into()),
             missing_files: Vec::new(),
+            modified_fields: fields,
+            env_overrides: Vec::new(),
         }
     }
 
@@ -64,6 +76,8 @@ impl ToolBindingStatus {
                 "无法确认 OFox 接入配置，请检查文件权限、配置格式和本地绑定记录。".into(),
             ),
             missing_files: Vec::new(),
+            modified_fields: Vec::new(),
+            env_overrides: Vec::new(),
         }
     }
 }
@@ -71,23 +85,34 @@ impl ToolBindingStatus {
 #[derive(Default)]
 struct Comparison {
     missing: BTreeSet<String>,
-    modified: bool,
+    /// `<文件> · <字段>`，只记名字。
+    modified: BTreeSet<String>,
     unknown: bool,
 }
 
 impl Comparison {
-    fn compare(&mut self, file: &str, actual: Option<&Value>, expected: Option<&Value>) {
+    /// `field` 是 `actual` 在文件里的位置（`env.ANTHROPIC_MODEL`），用来说明哪里不一致。
+    fn compare(
+        &mut self,
+        file: &str,
+        field: &str,
+        actual: Option<&Value>,
+        expected: Option<&Value>,
+    ) {
+        let mut modified = || {
+            self.modified.insert(format!("{file} · {field}"));
+        };
         match (actual, expected) {
             (None, None) => {}
             (None, Some(_)) => {
                 self.missing.insert(file.into());
             }
-            (Some(_), None) => self.modified = true,
+            (Some(_), None) => modified(),
             (Some(actual), Some(expected)) if expected.as_str() == Some(UNKNOWN_KEY) => {
                 if actual.as_str().is_some_and(|key| !key.is_empty()) {
                     self.unknown = true;
                 } else {
-                    self.modified = true;
+                    modified();
                 }
             }
             (Some(Value::Object(actual)), Some(Value::Object(expected))) => {
@@ -96,16 +121,22 @@ impl Comparison {
                     .chain(expected.keys())
                     .collect::<BTreeSet<_>>()
                 {
-                    self.compare(file, actual.get(key), expected.get(key));
+                    self.compare(
+                        file,
+                        &format!("{field}.{key}"),
+                        actual.get(key),
+                        expected.get(key),
+                    );
                 }
             }
-            (Some(actual), Some(expected)) => self.modified |= actual != expected,
+            (Some(actual), Some(expected)) if actual != expected => modified(),
+            (Some(_), Some(_)) => {}
         }
     }
 
     fn finish(self) -> ToolBindingStatus {
-        if self.modified {
-            ToolBindingStatus::modified()
+        if !self.modified.is_empty() {
+            ToolBindingStatus::modified(self.modified.into_iter().collect())
         } else if self.unknown {
             ToolBindingStatus::unknown()
         } else if !self.missing.is_empty() {
@@ -138,7 +169,12 @@ fn compare_paths(
     paths: &[JsonPath],
 ) -> Result<(), String> {
     for path in paths {
-        comparison.compare(shown, at_path(actual, path)?, at_path(expected, path)?);
+        comparison.compare(
+            shown,
+            &path.join("."),
+            at_path(actual, path)?,
+            at_path(expected, path)?,
+        );
     }
     Ok(())
 }
@@ -206,7 +242,9 @@ pub(super) fn inspect(
     api_key: Option<&str>,
 ) -> Result<ToolBindingStatus, String> {
     if !super::current_binding_is_ofox(db, tool)? {
-        return Ok(ToolBindingStatus::modified());
+        return Ok(ToolBindingStatus::modified(vec![
+            CURRENT_PROVIDER_FIELD.into()
+        ]));
     }
     inspect_managed_fields(db, tool, api_key)
 }
@@ -246,10 +284,10 @@ pub(super) fn inspect_managed_fields(
                     &shown,
                     &actual,
                     &expected,
+                    // 推理强度不比对：ChatGPT 和 Codex 会把界面里选的强度写回这里。
                     &[
                         &["model_provider"],
                         &["model"],
-                        &["model_reasoning_effort"],
                         &["disable_response_storage"],
                         &["model_providers", "ofox"],
                     ],
@@ -284,6 +322,7 @@ pub(super) fn inspect_managed_fields(
                 for variable in ["GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL", "GEMINI_MODEL"] {
                     comparison.compare(
                         &shown,
+                        variable,
                         env_file::get_value(text, variable)
                             .map(Value::String)
                             .as_ref(),
@@ -351,7 +390,13 @@ pub(super) fn inspect_managed_fields(
                     &template,
                     key,
                 )?)?)?;
-                comparison.compare(&shown, Some(&actual), Some(&expected));
+                for (key, field) in [
+                    ("entry", "ofox-hermes"),
+                    ("provider", "model.provider"),
+                    ("default", "model.default"),
+                ] {
+                    comparison.compare(&shown, field, actual.get(key), expected.get(key));
+                }
             }
         }
         if current.is_none() {

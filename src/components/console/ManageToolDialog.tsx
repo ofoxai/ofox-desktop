@@ -275,6 +275,8 @@ export default function ManageToolDialog({
             status: "unknown",
             message: null,
             missingFiles: [],
+            modifiedFields: [],
+            envOverrides: [],
           });
       }
     };
@@ -757,6 +759,13 @@ export default function ManageToolDialog({
                       {path}
                     </code>
                   ))}
+                  {bindingStatus?.modifiedFields.map((field) => (
+                    <code key={field} className="block break-all text-[11px]">
+                      {field === "current-provider"
+                        ? t("toolLifecycle.configuration.currentProvider")
+                        : field}
+                    </code>
+                  ))}
                   {bindingStatus?.status === "missing" && (
                     <Button
                       type="button"
@@ -775,6 +784,35 @@ export default function ManageToolDialog({
                       )}
                     </Button>
                   )}
+                </div>
+              )}
+              {!!bindingStatus?.envOverrides.length && (
+                <div
+                  role="status"
+                  className="space-y-2 rounded-md border border-orange-300/60 bg-orange-50/40 p-3 text-[12px] dark:border-orange-500/40 dark:bg-orange-950/20"
+                >
+                  <p>
+                    {t("toolLifecycle.envOverride.title", { tool: tool.label })}
+                  </p>
+                  {bindingStatus.envOverrides.map((found) => (
+                    <p
+                      key={`${found.name}-${found.scope}-${found.location}`}
+                      className="flex flex-wrap items-center gap-x-2 text-[11px]"
+                    >
+                      <code>{found.name}</code>
+                      <span className="text-muted-foreground">
+                        {found.scope === "file"
+                          ? found.location
+                          : t(`toolLifecycle.envOverride.scope.${found.scope}`)}
+                      </span>
+                    </p>
+                  ))}
+                  {bindingStatus.envOverrides.some(
+                    (found) => found.scope !== "file",
+                  ) && <p>{t("toolLifecycle.envOverride.fixWindows")}</p>}
+                  {bindingStatus.envOverrides.some(
+                    (found) => found.scope === "file",
+                  ) && <p>{t("toolLifecycle.envOverride.fixShell")}</p>}
                 </div>
               )}
               {/* ---- Model ---- */}

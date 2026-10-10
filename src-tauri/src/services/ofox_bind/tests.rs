@@ -3252,3 +3252,69 @@ async fn windows_locked_partial_gemini_settings_blocks_recovery_and_model_saving
     drop(locked);
     assert_eq!(fs::read(&settings).unwrap(), settings_bytes);
 }
+
+#[tokio::test]
+#[serial]
+async fn codex_reasoning_effort_picked_in_the_app_is_kept_and_not_a_conflict() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    // ChatGPT and Codex save the effort picked in their own UI into config.toml.
+    let tuned = fs::read_to_string(&path).unwrap().replace(
+        "model_reasoning_effort = \"high\"",
+        "model_reasoning_effort = \"medium\"",
+    );
+    write(&path, &tuned);
+    assert_eq!(
+        status::binding_status(&db, Tool::Codex, Some(KEY))
+            .await
+            .status,
+        status::BindingStatus::Configured
+    );
+
+    let saved = db
+        .get_provider_by_id(Tool::Codex.provider_id(), "codex")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let updated = json!({ "config": TEMPLATE.replace("openai/gpt-6-luna", "openai/gpt-other") });
+    persist_bound_settings(&db, Tool::Codex, KEY, &saved, &updated)
+        .await
+        .unwrap();
+    let config = toml_at(&path);
+    assert_eq!(config["model"].as_str(), Some("openai/gpt-other"));
+    assert_eq!(config["model_reasoning_effort"].as_str(), Some("medium"));
+}
+
+#[tokio::test]
+#[serial]
+async fn a_conflict_names_the_changed_fields_but_never_their_values() {
+    let home = Home::new();
+    let env = home.gemini(".env");
+    write(&env, GEMINI_ENV);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    write(
+        &env,
+        &fs::read_to_string(&env)
+            .unwrap()
+            .replace(KEY, "sk-of-OTHER"),
+    );
+    let health = status::binding_status(&db, Tool::Gemini, Some(KEY)).await;
+    assert_eq!(health.status, status::BindingStatus::Modified);
+    assert_eq!(
+        health.modified_fields,
+        [format!(
+            "{} · GEMINI_API_KEY",
+            super::report::display_path(&env)
+        )]
+    );
+    let shown = serde_json::to_string(&health).unwrap();
+    assert!(!shown.contains(KEY) && !shown.contains("sk-of-OTHER"));
+
+    set_current_provider(&db, &AppType::Gemini, "relay").unwrap();
+    let health = status::binding_status(&db, Tool::Gemini, Some(KEY)).await;
+    assert_eq!(health.status, status::BindingStatus::Modified);
+    assert_eq!(health.modified_fields, ["current-provider"]);
+}

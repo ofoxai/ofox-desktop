@@ -143,7 +143,13 @@ beforeEach(async () => {
     if (command === "get_tool_install_capabilities")
       return ["claude", "codex", "chatgpt"];
     if (command === "get_tool_binding_status")
-      return { status: "configured", message: null, missingFiles: [] };
+      return {
+        status: "configured",
+        message: null,
+        missingFiles: [],
+        modifiedFields: [],
+        envOverrides: [],
+      };
     throw new Error(`Unexpected command: ${command}`);
   });
   await cacheUpdates([]);
@@ -493,6 +499,8 @@ describe("Bound tool lifecycle", () => {
             status: "missing",
             message: null,
             missingFiles: ["~/.claude/settings.json"],
+            modifiedFields: [],
+            envOverrides: [],
           };
         return original(command, ...args);
       },
@@ -512,6 +520,30 @@ describe("Bound tool lifecycle", () => {
         ([command]) => command === "ofox_restore_tool_binding",
       ),
     ).toBe(false);
+  });
+
+  it("flags environment variables that bypass Ofox and counts them as needing attention", async () => {
+    localTools = [localTool("gemini", "0.63.0")];
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(
+      async (command: string, ...args: unknown[]) => {
+        if (command === "get_tool_binding_status")
+          return {
+            status: "configured",
+            message: null,
+            missingFiles: [],
+            modifiedFields: [],
+            envOverrides: [
+              { name: "GEMINI_API_KEY", scope: "machine", location: null },
+            ],
+          };
+        return original(command, ...args);
+      },
+    );
+    render(<ConsolePage boundTools={["gemini"]} />);
+    const row = await screen.findByRole("group", { name: "Gemini" });
+    expect(within(row).getByText("环境变量冲突")).toBeVisible();
+    expect(screen.getByText("1 个需处理")).toBeVisible();
   });
 
   it("moves a manually reinstalled app back on window focus", async () => {

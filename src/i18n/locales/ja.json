@@ -2694,6 +2694,7 @@
     "binding": {
       "missing": "連携設定がありません",
       "modified": "設定の競合",
+      "envOverride": "環境変数の競合",
       "unknown": "設定の確認に失敗"
     },
     "reinstall": "再インストール",
@@ -2716,10 +2717,21 @@
     "restoreFailed": "連携の復元に失敗：{{error}}",
     "bindFailed": "一部のツールを連携できませんでした：{{tools}}。再試行するかログイン状態を確認してください。",
     "upstreamInstructions": "インストール手順",
+    "envOverride": {
+      "title": "次の環境変数が Ofox の設定を上書きするため、{{tool}} は Ofox を経由しない可能性があります：",
+      "scope": {
+        "user": "Windows のユーザー環境変数",
+        "machine": "Windows のシステム環境変数",
+        "process": "システムからは削除済みですが、Ofox を再起動するまで Ofox に残っています"
+      },
+      "fixWindows": "「システムのプロパティ → 詳細設定 → 環境変数」で削除し、トレイから Ofox を終了して再度開き、新しいターミナルを開いてください。",
+      "fixShell": "上記ファイルからこれらの行を削除し、新しいターミナルを開いてください。"
+    },
     "configuration": {
       "loading": "連携設定を確認中…",
       "missing": "連携設定がありません。保存とテストは停止中です。連携を復元できます。",
       "modified": "連携設定が変更されています。設定の競合を確認してください。",
+      "currentProvider": "現在のプロバイダーが Ofox 以外に切り替わっています",
       "unknown": "連携設定を読み取れません。連携解除または後で再試行できます。"
     },
     "versionUnknown": "インストール済み · バージョン不明",

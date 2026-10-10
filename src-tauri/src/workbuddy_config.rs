@@ -545,7 +545,13 @@ fn check_saved_entries(models: &[Value], state: &WorkBuddyBindingState) -> ToolB
         match matching.as_slice() {
             [] => missing = true,
             [entry] if *entry == &expected => {}
-            _ => return ToolBindingStatus::modified(),
+            _ => {
+                return ToolBindingStatus::modified(vec![format!(
+                    "{} · {}",
+                    display_path(&models_path()),
+                    managed.model_id
+                )])
+            }
         }
     }
     if missing {

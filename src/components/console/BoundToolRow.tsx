@@ -92,7 +92,9 @@ export default function BoundToolRow({
           ? "installationBroken"
           : tool.binding.status !== "configured"
             ? `binding.${tool.binding.status}`
-            : null;
+            : tool.binding.envOverrides.length
+              ? "binding.envOverride"
+              : null;
   const actionKey =
     action === "install"
       ? download
