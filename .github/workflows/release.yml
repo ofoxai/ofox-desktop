@@ -105,6 +105,32 @@ jobs:
           echo "version=$VER_PKG" >> "$GITHUB_OUTPUT"
           echo "✅ 版本号一致: $VER_PKG"
 
+      # ── macOS：先确认能公证 ──────────────────────────────────
+      # 公证失败要等十几分钟的构建跑完才暴露，构建还会重试 3 轮。Apple 账号协议
+      # 过期（HTTP 403 "A required agreement is missing or has expired"）或 app
+      # 专用密码失效时，这里几秒内就停下并说明原因。
+      - name: Check notarization access (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -uo pipefail
+          if OUTPUT=$(xcrun notarytool history --apple-id "$APPLE_ID" \
+              --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID" 2>&1); then
+            echo "✅ 公证凭据可用"
+            exit 0
+          fi
+          echo "$OUTPUT" >&2
+          if echo "$OUTPUT" | grep -q "required agreement"; then
+            echo "::error title=Apple 开发者协议未签署::请 Apple 开发者账号持有人登录 https://developer.apple.com/account 接受更新后的协议，再重跑本次发版。"
+          else
+            echo "::error title=公证凭据不可用::请检查 release environment 里的 APPLE_ID、APPLE_PASSWORD（app 专用密码）和 APPLE_TEAM_ID。"
+          fi
+          exit 1
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
