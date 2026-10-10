@@ -271,7 +271,7 @@ jobs:
             sleep $((attempt * 30))
           done
           echo "$ID" > notary/submission-id
-          echo "✅ 已提交公证: $ID（在 Publish 里等结果）"
+          echo "✅ 已提交公证: ${ID}（在 Publish 里等结果）"
 
       - name: Upload notarization submission (macOS)
         if: runner.os == 'macOS'
@@ -397,7 +397,7 @@ jobs:
                   exit 1 ;;
               esac
               if [ "$SECONDS" -ge "$DEADLINE" ]; then
-                echo "::error title=公证仍在处理中::Apple 还没处理完提交 $ID。稍后在本页面对「Publish to R2」点 Re-run，会继续等同一个提交，不用重新构建。"
+                echo "::error title=公证仍在处理中::Apple 还没处理完提交 ${ID}。稍后在本页面对「Publish to R2」点 Re-run，会继续等同一个提交，不用重新构建。"
                 exit 1
               fi
               xcrun notarytool wait "$ID" "${AUTH[@]}" --timeout 30m >/dev/null 2>&1 || true
@@ -458,7 +458,7 @@ jobs:
             [ -d "$dir" ] || continue
             platform="${dir#artifacts/build-}"
             prefix="$(prefix_for "$platform")"
-            [ -z "$prefix" ] && { echo "❌ 未知平台 $platform，缺少 R2 前缀映射" >&2; exit 1; }
+            [ -z "$prefix" ] && { echo "❌ 未知平台 ${platform}，缺少 R2 前缀映射" >&2; exit 1; }
 
             for file in "$dir"/*; do
               [ -f "$file" ] || continue
