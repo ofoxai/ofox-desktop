@@ -866,6 +866,16 @@ pub fn run() {
             }
 
             let _tray = tray_builder.build(app)?;
+            // Windows：等启动完成后预先建好 popover，否则第一次点托盘图标只闪一下。
+            // 在后台线程里建：Windows 上在主线程同步创建 webview 窗口会卡死。
+            #[cfg(target_os = "windows")]
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    crate::tray_popover::prewarm(&handle);
+                });
+            }
             crate::services::webdav_auto_sync::start_worker(
                 app_state.db.clone(),
                 app.handle().clone(),

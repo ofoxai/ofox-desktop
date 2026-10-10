@@ -45,8 +45,38 @@ pub fn toggle_popover(app: &tauri::AppHandle, tray_rect: tauri::Rect) -> Result<
     Ok(())
 }
 
-/// 创建 popover 窗口
+/// 创建并显示 popover 窗口
 fn create_popover(app: &tauri::AppHandle, tray_rect: &tauri::Rect) -> Result<(), String> {
+    let window = build_popover(app, true)?;
+    position_window(&window, tray_rect)?;
+
+    window
+        .show()
+        .map_err(|e| format!("显示 popover 失败: {e}"))?;
+    window
+        .set_focus()
+        .map_err(|e| format!("聚焦 popover 失败: {e}"))?;
+
+    Ok(())
+}
+
+/// Windows：启动后先把 popover 建好藏着，第一次点托盘图标就只是显示它。
+///
+/// 当场创建时，WebView2 初始化期间会把焦点移进网页，窗口刚显示就收到一次
+/// `Focused(false)`，被下面的失焦隐藏立刻藏掉——第一次点击只闪一下，第二次
+/// （窗口已存在）才正常。预先建好、建的时候不抢焦点，就绕开了这一步。
+#[cfg(target_os = "windows")]
+pub fn prewarm(app: &tauri::AppHandle) {
+    if app.get_webview_window(POPOVER_LABEL).is_some() {
+        return;
+    }
+    if let Err(e) = build_popover(app, false) {
+        log::warn!("预先创建 tray popover 失败，首次点击时再创建: {e}");
+    }
+}
+
+/// 建一个隐藏的 popover 窗口；`focused` 决定创建时是否获取焦点。
+fn build_popover(app: &tauri::AppHandle, focused: bool) -> Result<tauri::WebviewWindow, String> {
     use tauri::WebviewUrl;
     use tauri::WebviewWindowBuilder;
 
@@ -62,7 +92,7 @@ fn create_popover(app: &tauri::AppHandle, tray_rect: &tauri::Rect) -> Result<(),
         .always_on_top(true)
         .skip_taskbar(true)
         .visible(false)
-        .focused(true)
+        .focused(focused)
         .build()
         .map_err(|e| format!("创建 popover 窗口失败: {e}"))?;
 
@@ -92,16 +122,7 @@ fn create_popover(app: &tauri::AppHandle, tray_rect: &tauri::Rect) -> Result<(),
         }
     }
 
-    position_window(&window, tray_rect)?;
-
-    window
-        .show()
-        .map_err(|e| format!("显示 popover 失败: {e}"))?;
-    window
-        .set_focus()
-        .map_err(|e| format!("聚焦 popover 失败: {e}"))?;
-
-    Ok(())
+    Ok(window)
 }
 
 /// popover 与托盘图标、屏幕可用区域边缘之间的间距（逻辑像素）。
