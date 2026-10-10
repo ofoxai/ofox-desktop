@@ -8,6 +8,40 @@
 git clone --branch test-builds --single-branch --depth 1 https://github.com/ofoxai/ofox-desktop.git ofox-test-builds
 ```
 
+## 1.3.4-49b2dab（Node.js 版本检查 + 钥匙串授权提示 + 切回窗口不再转圈，待验证）
+
+源码：临时集成分支 `ci/test-installers` @ `49b2dab0` = 正式版 1.3.4 之后的 main（`b9e80851`）+ 三个 PR。应用里显示的版本仍然是 1.3.4。
+
+| PR | 内容 |
+|---|---|
+| #40 | 切回 Ofox 窗口时在后台刷新工具状态，不再整页转圈、遮住工具列表；30 秒内反复切回不重复刷新。 |
+| #41 | 安装 npm 类工具（OpenClaw、Gemini CLI、OpenCode 等）前先检查 Node.js 版本（Fizzy #1021）。没有 Node.js 时照旧自动安装；版本太旧时弹窗说明要求的版本、当前版本、Node.js 的安装方式、会在终端里运行的命令、是否需要管理员授权、哪些工具要一并重装，你同意后才升级。Ofox 没法代为升级的安装方式（asdf、mise 等）只给出手动升级方法。macOS 安装失败时保留终端窗口，不再提示「请手动运行 npm install」。 |
+| #42 | 读取钥匙串被拒绝时，登录页说明原因并提供「重新授权」，允许后直接恢复原来的登录，不用重新登录（Fizzy #1022）。 |
+
+| 文件 | 平台 | 说明 |
+|---|---|---|
+| `ofox_desktop_1.3.4_macos_aarch64.dmg` | macOS 12+，Apple Silicon | 公司证书（NICE TALK PTE. LTD.）签名；**Apple 公证中，通过后补上**，到时可以直接打开 |
+| `ofox_desktop_1.3.4_windows_x64-setup.exe` | Windows 10/11 x64 | NSIS，未签名，默认按当前用户安装 |
+| `ofox_desktop_1.3.4_windows_x64_en-US.msi` | Windows 10/11 x64 | MSI，仅用于验证能否安装，不会发布 |
+
+安装前先从菜单栏 / 托盘弹窗里点「退出 Ofox」。校验文件 `1.3.4-49b2dab/SHA256SUMS.txt`。
+
+在 macOS 上请看：
+
+1. **钥匙串只弹一次（#1022）**：从 1.3.2 或以前的 ad-hoc 测试包换过来，第一次打开会按条弹钥匙串授权，每次都选「始终允许」。之后再换成正式版 1.3.4 或以后用公司证书签名的测试包，都不应再弹。
+2. **拒绝后的提示（#1022）**：在「钥匙串访问」里双击 `ai.ofox.desktop.oauth` 的任一条 →「访问控制」→ 把 Ofox Desktop 从列表里删掉 → 存储更改。重新打开 Ofox，在弹窗里点「拒绝」：登录页显示「读取钥匙串里的登录信息时被拒绝了……」和「重新授权」按钮，而不是普通的未登录页。点「重新授权」，输入开机密码并选「始终允许」：回到原来的账号和已绑定的工具，不需要重新登录。
+3. **Node.js 太旧时说清原因（#1021）**：fnm 默认 Node.js 是 24.15.0 时，在 Ofox 里安装或修复 OpenClaw，弹出「OpenClaw 需要更新的 Node.js」：要求 `>=24.16.0 <25 || >=26.1.0`，当前 24.15.0（由 fnm 管理），会运行 `fnm install 24 && fnm default 24` 等命令，并说明 claude、codex、gemini、opencode 会一并重新安装。
+4. 点「取消」：不安装，也不改 Node.js。
+5. 点「升级 Node.js 并安装」：终端里先升级 Node.js、重装上面那几个工具，再装 OpenClaw；完成后 Ofox 里 OpenClaw 显示已安装，Claude Code、Codex、Gemini CLI、OpenCode 仍能正常打开和对话。想退回原来的 Node.js 可以运行 `fnm default 24.15.0`。
+6. 安装失败时终端窗口保留，Ofox 显示具体原因，不再出现「请手动运行 npm install」。
+7. **切回窗口（#40）**：切到别的应用再切回 Ofox，工具列表不再被整页转圈遮住，版本和状态在后台更新。
+
+在 Windows 上请看：
+
+1. 用官方安装包装的旧版 Node.js（例如 22.x）时安装 OpenClaw：弹窗说明版本差距，并提示需要管理员授权（通过 winget 升级 Node.js LTS）。同意后 PowerShell 窗口里先升级 Node.js，再安装 OpenClaw。nvm-windows 管理的 Node.js 同样会提示需要管理员授权，并列出要重装的工具。
+2. 切回窗口不再整页转圈。
+3. 其余检查项同下面 1.3.4-3cf6d39 的清单。
+
 ## 1.3.4-3cf6d39（环境变量提示 + 托盘首次点击 + 终端目录，待验证）
 
 源码：临时集成分支 `ci/test-installers` @ `3cf6d391` = 1.3.4-a7e6d00 + 下面这些修复：

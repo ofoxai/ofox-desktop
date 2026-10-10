@@ -1,0 +1,2 @@
+2a6ceb6d2708df546c2d92e8f045d286ec63c03890d994c0666043f9285bc435  ofox_desktop_1.3.4_windows_x64-setup.exe
+689ebccea5e8473762c9218bbedd1e32d2fe35f653f7564dd17f0bc60eb02557  ofox_desktop_1.3.4_windows_x64_en-US.msi
