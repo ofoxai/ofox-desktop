@@ -2719,6 +2719,7 @@
       "loading": "Checking binding configuration…",
       "missing": "Binding configuration is missing. Saving and tests are paused; you can restore the binding.",
       "modified": "Binding configuration was modified. Review the configuration conflict before making changes.",
+      "currentProvider": "The current provider is no longer Ofox",
       "unknown": "Binding configuration could not be read. You can still unbind or retry later."
     },
     "versionUnknown": "Installed · Version unknown",

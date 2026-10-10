@@ -262,6 +262,7 @@ export default function ConsolePage({
               status: "unknown",
               message: null,
               missingFiles: [],
+              modifiedFields: [],
             }),
           );
           return [id, status] as const;
@@ -349,6 +350,7 @@ export default function ConsolePage({
           status: "unknown",
           message: null,
           missingFiles: [],
+          modifiedFields: [],
         },
       };
     });

@@ -7,6 +7,8 @@ export interface ToolBindingStatus {
   status: BindingStatus;
   message: string | null;
   missingFiles: string[];
+  /** `<file> · <field>` that differ from what Ofox wrote, or `current-provider`. Names only. */
+  modifiedFields: string[];
 }
 
 /** One thing the unbind could not do exactly; `code` maps to `unbind.warning.<code>`. */

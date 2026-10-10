@@ -274,6 +274,7 @@ export default function ManageToolDialog({
             status: "unknown",
             message: null,
             missingFiles: [],
+            modifiedFields: [],
           });
       }
     };
@@ -754,6 +755,13 @@ export default function ManageToolDialog({
                   {bindingStatus?.missingFiles.map((path) => (
                     <code key={path} className="block break-all text-[11px]">
                       {path}
+                    </code>
+                  ))}
+                  {bindingStatus?.modifiedFields.map((field) => (
+                    <code key={field} className="block break-all text-[11px]">
+                      {field === "current-provider"
+                        ? t("toolLifecycle.configuration.currentProvider")
+                        : field}
                     </code>
                   ))}
                   {bindingStatus?.status === "missing" && (

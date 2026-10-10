@@ -137,7 +137,12 @@ beforeEach(async () => {
     if (command === "get_tool_install_capabilities")
       return ["claude", "codex", "chatgpt"];
     if (command === "get_tool_binding_status")
-      return { status: "configured", message: null, missingFiles: [] };
+      return {
+        status: "configured",
+        message: null,
+        missingFiles: [],
+        modifiedFields: [],
+      };
     throw new Error(`Unexpected command: ${command}`);
   });
   await cacheUpdates([]);
@@ -473,6 +478,7 @@ describe("Bound tool lifecycle", () => {
             status: "missing",
             message: null,
             missingFiles: ["~/.claude/settings.json"],
+            modifiedFields: [],
           };
         return original(command, ...args);
       },

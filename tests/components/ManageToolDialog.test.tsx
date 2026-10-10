@@ -46,6 +46,7 @@ beforeEach(() => {
     status: "configured",
     message: null,
     missingFiles: [],
+    modifiedFields: [],
   });
 });
 
@@ -94,6 +95,7 @@ describe("ManageToolDialog binding lifecycle", () => {
       status: "missing",
       message: null,
       missingFiles: ["~/.codex/config.toml"],
+      modifiedFields: [],
     });
     const save = vi.spyOn(manageToolApi, "setActiveModel").mockResolvedValue();
     const ping = vi.spyOn(manageToolApi, "pingModel");
@@ -117,6 +119,7 @@ describe("ManageToolDialog binding lifecycle", () => {
       status: "missing",
       message: null,
       missingFiles: [],
+      modifiedFields: [],
     });
     const restore = vi.spyOn(ofoxBindApi, "restore").mockResolvedValue();
     const onChanged = vi.fn();
@@ -141,6 +144,7 @@ describe("ManageToolDialog binding lifecycle", () => {
       status: "missing",
       message: null,
       missingFiles: [],
+      modifiedFields: [],
     });
     vi.spyOn(ofoxBindApi, "restore").mockRejectedValue(
       new Error("write failed"),
@@ -163,10 +167,13 @@ describe("ManageToolDialog binding lifecycle", () => {
       status: "modified",
       message: "Configuration conflict",
       missingFiles: [],
+      modifiedFields: ["~/.codex/config.toml · model", "current-provider"],
     });
     const restore = vi.spyOn(ofoxBindApi, "restore");
     await renderLifecycleTool();
     expect(screen.getByText(/绑定配置已被修改/)).toBeVisible();
+    expect(screen.getByText("~/.codex/config.toml · model")).toBeVisible();
+    expect(screen.getByText("当前服务商已切换为其它服务商")).toBeVisible();
     expect(
       screen.queryByText("Configuration conflict"),
     ).not.toBeInTheDocument();
@@ -203,6 +210,7 @@ describe("ManageToolDialog binding lifecycle", () => {
       status: "missing",
       message: null,
       missingFiles: [],
+      modifiedFields: [],
     });
     vi.spyOn(ofoxBindApi, "unbindPreview").mockResolvedValue({
       ...emptyReport,

@@ -29,6 +29,9 @@ const MANAGED_KEYS: &[&str] = &[
     "model_reasoning_effort",
     "disable_response_storage",
 ];
+/// 绑定之后归用户的字段：ChatGPT 和 Codex 会把界面里选的推理强度写回 config.toml，
+/// Ofox 再写配置（比如切换模型）时保留，只在没有时写模板的默认值。
+const USER_TUNED_KEYS: &[&str] = &["model_reasoning_effort"];
 /// config.toml 里有 key，只给本人读写。
 const BOUND_CONFIG_MODE: u32 = 0o600;
 
@@ -87,7 +90,11 @@ pub(crate) fn bound_patch(template_config: &str, api_key: &str) -> Result<Docume
 /// 整表替换（用户自己写过的同名表不能和 key 混在一起），其余内容不动。
 pub(crate) fn apply_patch(current: &str, patch: &DocumentMut) -> Result<String, String> {
     let mut doc = parse_doc(current)?;
+    let bound = doc.get("model_provider").and_then(Item::as_str) == Some(OFOX_PROVIDER);
     for (key, item) in patch.as_table().iter() {
+        if bound && USER_TUNED_KEYS.contains(&key) && doc.contains_key(key) {
+            continue;
+        }
         if key == PROVIDERS_TABLE {
             let patch_providers = item
                 .as_table_like()
