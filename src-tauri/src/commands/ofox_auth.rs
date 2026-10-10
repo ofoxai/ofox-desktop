@@ -80,6 +80,16 @@ pub async fn ofox_get_auth_status(
     Ok(manager.get_auth_status().await)
 }
 
+/// 用户点「重新授权」：再读一次钥匙串里的登录信息（系统会再次询问），
+/// 允许后不必重新登录。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn ofox_retry_keychain(
+    state: State<'_, OfoxAuthState>,
+) -> Result<crate::ofox_auth::OfoxAuthStatus, String> {
+    let manager = state.0.read().await;
+    Ok(manager.retry_keychain().await)
+}
+
 /// Check if the user is currently authenticated with Ofox.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ofox_is_authenticated(state: State<'_, OfoxAuthState>) -> Result<bool, String> {
