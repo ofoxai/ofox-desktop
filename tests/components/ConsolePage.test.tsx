@@ -561,6 +561,9 @@ describe("Bound tool lifecycle", () => {
         installationKind: "desktopApp",
       },
     ];
+    // Focus re-detects at most every 30 seconds.
+    const startedAt = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(startedAt + 31_000);
     fireEvent.focus(window);
     const row = await screen.findByRole("group", { name: "WorkBuddy" });
     expect(within(row).getByRole("button", { name: "打开" })).toBeVisible();
@@ -570,6 +573,64 @@ describe("Bound tool lifecycle", () => {
     expect(
       mocks.invoke.mock.calls.some(([command]) => command === "ofox_bind_tool"),
     ).toBe(false);
+  });
+
+  it("detects only the bound tools", async () => {
+    localTools = [localTool("claude", "2.1.293")];
+    render(<ConsolePage boundTools={["claude"]} />);
+    await screen.findByRole("group", { name: "Claude Code" });
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "get_tool_versions",
+      expect.objectContaining({ tools: ["claude"] }),
+    );
+  });
+
+  it("refreshes on window focus in the background without covering the list", async () => {
+    localTools = [localTool("claude", "2.1.293")];
+    const original = mocks.invoke.getMockImplementation()!;
+    render(<ConsolePage boundTools={["claude"]} />);
+    const row = await screen.findByRole("group", { name: "Claude Code" });
+    await waitFor(() =>
+      expect(screen.queryByText("刷新中…")).not.toBeInTheDocument(),
+    );
+
+    let finish: (tools: LocalTool[]) => void = () => undefined;
+    mocks.invoke.mockImplementation(
+      async (command: string, ...args: unknown[]) =>
+        command === "get_tool_versions"
+          ? new Promise<LocalTool[]>((resolve) => (finish = resolve))
+          : original(command, ...args),
+    );
+    const startedAt = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(startedAt + 31_000);
+    fireEvent.focus(window);
+
+    await waitFor(() =>
+      expect(
+        mocks.invoke.mock.calls.filter(
+          ([command]) => command === "get_tool_versions",
+        ),
+      ).toHaveLength(2),
+    );
+    expect(screen.queryByText("刷新中…")).not.toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: "打开" })).toBeEnabled();
+    await act(async () => finish([localTool("claude", "2.1.294")]));
+    expect(await within(row).findByText("v2.1.294")).toBeVisible();
+  });
+
+  it("does not re-detect when the window regains focus within 30 seconds", async () => {
+    localTools = [localTool("claude", "2.1.293")];
+    render(<ConsolePage boundTools={["claude"]} />);
+    await screen.findByRole("group", { name: "Claude Code" });
+    const detections = () =>
+      mocks.invoke.mock.calls.filter(
+        ([command]) => command === "get_tool_versions",
+      ).length;
+    const before = detections();
+    fireEvent.focus(window);
+    fireEvent.focus(window);
+    await act(async () => undefined);
+    expect(detections()).toBe(before);
   });
 
   it("uses upstream instructions when the host cannot automatically install a CLI", async () => {

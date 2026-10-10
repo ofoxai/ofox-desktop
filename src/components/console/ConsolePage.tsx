@@ -63,6 +63,12 @@ import ofoxLogo from "@/assets/icons/ofox-logo.png";
 
 type BoundTool = BoundToolRowData;
 
+/** 切回窗口时最多每 30 秒重新检测一次工具。 */
+const FOCUS_REFRESH_INTERVAL_MS = 30_000;
+
+/** "quiet"：后台刷新，列表照常显示和操作，不叠「刷新中…」遮罩。 */
+type LoadMode = "shown" | "quiet";
+
 /**
  * True when the user object came back from the backend with at least one
  * identity field populated. False for `null` AND for the all-null
@@ -139,6 +145,8 @@ export default function ConsolePage({
   /** Spinner for the "绑定的工具" 刷新 button — re-runs `loadData` to refresh
    *  detection / takeover status / tool health. */
   const [listRefreshing, setListRefreshing] = useState(false);
+  /** 上一次开始检测的时间：切回窗口时据此节流，见 FOCUS_REFRESH_INTERVAL_MS。 */
+  const lastLoadStartedAt = useRef(0);
 
   // 监听 tray popover 发出的"打开偏好设置"事件，把当前 dialog 拉起来。
   // popover 是独立 webview，无法直接调用本组件的 setState，因此走 Tauri
@@ -225,176 +233,183 @@ export default function ConsolePage({
     [],
   );
 
-  const loadData = useCallback(async () => {
-    const generation = ++loadGeneration.current;
-    setLoading(true);
+  const loadData = useCallback(
+    async (mode?: LoadMode) => {
+      const generation = ++loadGeneration.current;
+      lastLoadStartedAt.current = Date.now();
+      // 首次加载和手动「刷新」显示遮罩；切回窗口等后台刷新检测完再替换。
+      if (mode !== "quiet") setLoading(true);
 
-    // Two-stage load — the bound-tools list is the user's primary focus and
-    // must not wait on the OFox profile/balance round-trip (which can be
-    // multi-second under flaky network). Stage 1 covers everything backed by
-    // local SQL (tool detection, takeover status) and flips loading→false.
-    // Stage 2 covers OFox profile/balance; it runs in the background and
-    // updates the header when ready. A failure in stage 2 leaves the list
-    // intact and the header in its placeholder state — never spins forever.
+      // Two-stage load — the bound-tools list is the user's primary focus and
+      // must not wait on the OFox profile/balance round-trip (which can be
+      // multi-second under flaky network). Stage 1 covers everything backed by
+      // local SQL (tool detection, takeover status) and flips loading→false.
+      // Stage 2 covers OFox profile/balance; it runs in the background and
+      // updates the header when ready. A failure in stage 2 leaves the list
+      // intact and the header in its placeholder state — never spins forever.
 
-    // ===== Stage 1: local-only, blocks list render =====
-    const [toolResults, bindingEntries, apiKeyMetas] = await Promise.all([
-      // includeLatest=false: skip the npm/GitHub fetch — we only need the
-      // local "is it installed?" check here. That fetch was the main reason
-      // this list took ~5s to render.
-      invoke<ToolInstallationInfo[]>("get_tool_versions", {
-        tools: null,
-        wslShellByTool: null,
-        includeLatest: false,
-      }).catch(() => [] as ToolInstallationInfo[]),
-      Promise.all(
-        boundTools.map(async (id) => {
-          const status = await ofoxBindApi.status(id).catch(
-            (): ToolBindingStatus => ({
-              status: "unknown",
-              message: null,
-              missingFiles: [],
-              modifiedFields: [],
-              envOverrides: [],
-            }),
-          );
-          return [id, status] as const;
-        }),
-      ),
-      // 本地 settings.json 里的 ofox API key 元数据——拿每个工具的 keyId 给
-      // "数据统计"按钮拼 URL，顺带拿 name / alias 给工具行二级信息行显示。
-      // 失败（如未绑定任何 key）静默回退空数组，按钮自然不显示，不阻塞列表
-      // 渲染。
-      invoke<
-        Array<{
-          tool: string;
-          keyId: string;
-          name?: string | null;
-          alias?: string | null;
-          keyStart?: string | null;
-        }>
-      >("ofox_list_api_keys").catch(
-        () =>
-          [] as Array<{
+      // ===== Stage 1: local-only, blocks list render =====
+      const [toolResults, bindingEntries, apiKeyMetas] = await Promise.all([
+        // includeLatest=false: skip the npm/GitHub fetch — we only need the
+        // local "is it installed?" check here. That fetch was the main reason
+        // this list took ~5s to render.
+        // 只检测已绑定的工具：每个工具都要起一次 `--version`，Windows 上经
+        // cmd 和 Node 启动的 CLI 一个就要一两秒。
+        invoke<ToolInstallationInfo[]>("get_tool_versions", {
+          tools: boundTools,
+          wslShellByTool: null,
+          includeLatest: false,
+        }).catch(() => [] as ToolInstallationInfo[]),
+        Promise.all(
+          boundTools.map(async (id) => {
+            const status = await ofoxBindApi.status(id).catch(
+              (): ToolBindingStatus => ({
+                status: "unknown",
+                message: null,
+                missingFiles: [],
+                modifiedFields: [],
+                envOverrides: [],
+              }),
+            );
+            return [id, status] as const;
+          }),
+        ),
+        // 本地 settings.json 里的 ofox API key 元数据——拿每个工具的 keyId 给
+        // "数据统计"按钮拼 URL，顺带拿 name / alias 给工具行二级信息行显示。
+        // 失败（如未绑定任何 key）静默回退空数组，按钮自然不显示，不阻塞列表
+        // 渲染。
+        invoke<
+          Array<{
             tool: string;
             keyId: string;
             name?: string | null;
             alias?: string | null;
             keyStart?: string | null;
-          }>,
-      ),
-    ]);
+          }>
+        >("ofox_list_api_keys").catch(
+          () =>
+            [] as Array<{
+              tool: string;
+              keyId: string;
+              name?: string | null;
+              alias?: string | null;
+              keyStart?: string | null;
+            }>,
+        ),
+      ]);
 
-    // A refresh started before an unbind must not resurrect its old row.
-    if (
-      generation !== loadGeneration.current ||
-      boundToolsRef.current !== boundTools
-    )
-      return;
-    const bindingByTool = new Map(bindingEntries);
-
-    const keyIdMap: Record<string, string> = {};
-    const keyLabelMap: Record<string, string> = {};
-    for (const meta of apiKeyMetas) {
-      if (meta.keyId) keyIdMap[meta.tool] = meta.keyId;
-      // 显示优先级：用户在 desktop 端起的 alias > bind 时落本地的 name
-      // （`<tool> on <host>`，更易识别"哪台机器哪个工具"）> keyStart 前缀
-      // 兼容老数据 > keyId 末 6 位兜底。任一非空都行。
-      const aliasTrim = meta.alias?.trim();
-      const nameTrim = meta.name?.trim();
-      const label =
-        (aliasTrim && aliasTrim) ||
-        (nameTrim && nameTrim) ||
-        meta.keyStart ||
-        (meta.keyId ? `…${meta.keyId.slice(-6)}` : "");
-      if (label) keyLabelMap[meta.tool] = label;
-    }
-    setApiKeyIdByTool(keyIdMap);
-    setApiKeyLabelByTool(keyLabelMap);
-
-    const detectedMap = new Map<string, ToolInstallationInfo>();
-    for (const r of toolResults) {
-      detectedMap.set(r.name, r);
-    }
-
-    const ordered = TOOL_ORDER.filter((id) => boundTools.includes(id));
-    // Also include any bound tools not in TOOL_ORDER
-    for (const id of boundTools) {
-      if (!ordered.includes(id)) ordered.push(id);
-    }
-
-    const list: BoundTool[] = ordered.map((id) => {
-      const meta = TOOL_META[id] ?? {
-        abbr: id.substring(0, 2).toUpperCase(),
-        label: id,
-        color: "bg-gray-500",
-      };
-      const info = detectedMap.get(id);
-      return {
-        id,
-        abbr: meta.abbr,
-        label: meta.label,
-        color: meta.color,
-        version: info?.version ?? null,
-        installationKind: info?.installationKind,
-        installationStatus: getInstallationStatus(info),
-        installationError: info?.error ?? null,
-        binding: bindingByTool.get(id) ?? {
-          status: "unknown",
-          message: null,
-          missingFiles: [],
-          modifiedFields: [],
-          envOverrides: [],
-        },
-      };
-    });
-
-    setTools(list);
-    setLoading(false);
-
-    // 工具行二级信息——批量读各 tool 的 active model。每个 invoke ≈ DB
-    // 单查询，6 个工具的总开销可忽略。失败的 tool 当 "" 处理（二级行显示
-    // "未设置 model"，引导用户去"管理"挑一个）。Promise.all 不阻塞列表
-    // 渲染：上面 setTools/setLoading 已让基础行先亮起来。
-    void (async () => {
-      const entries = await Promise.all(
-        ordered.map(async (id) => {
-          try {
-            return [
-              id,
-              (await manageToolApi.getActiveModel(id)).trim(),
-            ] as const;
-          } catch {
-            return [id, ""] as const;
-          }
-        }),
-      );
+      // A refresh started before an unbind must not resurrect its old row.
       if (
-        generation === loadGeneration.current &&
-        boundToolsRef.current === boundTools
+        generation !== loadGeneration.current ||
+        boundToolsRef.current !== boundTools
       )
-        setModelByTool(Object.fromEntries(entries));
-    })();
+        return;
+      const bindingByTool = new Map(bindingEntries);
 
-    // ===== Stage 2: remote / non-blocking =====
-    void (async () => {
-      const userInfo = await ofoxGetUserInfo().catch(() => null);
-
-      if (userInfo) setUser(userInfo);
-
-      // The backend's `poll_for_token` now returns a placeholder user
-      // (all-null fields) when /openapi/me was unreachable at login time
-      // — that prevents the LoginPage spinner trap, but it leaves the
-      // Console showing "用户" with an empty email until the user takes
-      // some action. Detect the placeholder and silently retry a few
-      // times with backoff before giving up. If the backend was just
-      // having a temporary blip (which is the common case), the user
-      // never sees the empty state at all.
-      if (!isMeaningfulUser(userInfo)) {
-        void retryUserInfoWithBackoff();
+      const keyIdMap: Record<string, string> = {};
+      const keyLabelMap: Record<string, string> = {};
+      for (const meta of apiKeyMetas) {
+        if (meta.keyId) keyIdMap[meta.tool] = meta.keyId;
+        // 显示优先级：用户在 desktop 端起的 alias > bind 时落本地的 name
+        // （`<tool> on <host>`，更易识别"哪台机器哪个工具"）> keyStart 前缀
+        // 兼容老数据 > keyId 末 6 位兜底。任一非空都行。
+        const aliasTrim = meta.alias?.trim();
+        const nameTrim = meta.name?.trim();
+        const label =
+          (aliasTrim && aliasTrim) ||
+          (nameTrim && nameTrim) ||
+          meta.keyStart ||
+          (meta.keyId ? `…${meta.keyId.slice(-6)}` : "");
+        if (label) keyLabelMap[meta.tool] = label;
       }
-    })();
-  }, [boundTools, apex]);
+      setApiKeyIdByTool(keyIdMap);
+      setApiKeyLabelByTool(keyLabelMap);
+
+      const detectedMap = new Map<string, ToolInstallationInfo>();
+      for (const r of toolResults) {
+        detectedMap.set(r.name, r);
+      }
+
+      const ordered = TOOL_ORDER.filter((id) => boundTools.includes(id));
+      // Also include any bound tools not in TOOL_ORDER
+      for (const id of boundTools) {
+        if (!ordered.includes(id)) ordered.push(id);
+      }
+
+      const list: BoundTool[] = ordered.map((id) => {
+        const meta = TOOL_META[id] ?? {
+          abbr: id.substring(0, 2).toUpperCase(),
+          label: id,
+          color: "bg-gray-500",
+        };
+        const info = detectedMap.get(id);
+        return {
+          id,
+          abbr: meta.abbr,
+          label: meta.label,
+          color: meta.color,
+          version: info?.version ?? null,
+          installationKind: info?.installationKind,
+          installationStatus: getInstallationStatus(info),
+          installationError: info?.error ?? null,
+          binding: bindingByTool.get(id) ?? {
+            status: "unknown",
+            message: null,
+            missingFiles: [],
+            modifiedFields: [],
+            envOverrides: [],
+          },
+        };
+      });
+
+      setTools(list);
+      setLoading(false);
+
+      // 工具行二级信息——批量读各 tool 的 active model。每个 invoke ≈ DB
+      // 单查询，6 个工具的总开销可忽略。失败的 tool 当 "" 处理（二级行显示
+      // "未设置 model"，引导用户去"管理"挑一个）。Promise.all 不阻塞列表
+      // 渲染：上面 setTools/setLoading 已让基础行先亮起来。
+      void (async () => {
+        const entries = await Promise.all(
+          ordered.map(async (id) => {
+            try {
+              return [
+                id,
+                (await manageToolApi.getActiveModel(id)).trim(),
+              ] as const;
+            } catch {
+              return [id, ""] as const;
+            }
+          }),
+        );
+        if (
+          generation === loadGeneration.current &&
+          boundToolsRef.current === boundTools
+        )
+          setModelByTool(Object.fromEntries(entries));
+      })();
+
+      // ===== Stage 2: remote / non-blocking =====
+      void (async () => {
+        const userInfo = await ofoxGetUserInfo().catch(() => null);
+
+        if (userInfo) setUser(userInfo);
+
+        // The backend's `poll_for_token` now returns a placeholder user
+        // (all-null fields) when /openapi/me was unreachable at login time
+        // — that prevents the LoginPage spinner trap, but it leaves the
+        // Console showing "用户" with an empty email until the user takes
+        // some action. Detect the placeholder and silently retry a few
+        // times with backoff before giving up. If the backend was just
+        // having a temporary blip (which is the common case), the user
+        // never sees the empty state at all.
+        if (!isMeaningfulUser(userInfo)) {
+          void retryUserInfoWithBackoff();
+        }
+      })();
+    },
+    [boundTools, apex],
+  );
 
   /**
    * Retry `/openapi/me` up to 3 times with 2s/5s/15s backoff. Bails as soon
@@ -498,14 +513,20 @@ export default function ConsolePage({
     }
   });
   useEffect(() => {
-    const refresh = () => {
-      void loadDataRef.current();
+    const refreshQuietly = () => {
+      void loadDataRef.current("quiet");
     };
-    window.addEventListener("tool-updates-complete", refresh);
-    window.addEventListener("focus", refresh);
+    // 切回窗口是为了看到在外面装好或升级的工具；频繁切换时不必每次都重新检测。
+    const refreshOnFocus = () => {
+      if (Date.now() - lastLoadStartedAt.current < FOCUS_REFRESH_INTERVAL_MS)
+        return;
+      refreshQuietly();
+    };
+    window.addEventListener("tool-updates-complete", refreshQuietly);
+    window.addEventListener("focus", refreshOnFocus);
     return () => {
-      window.removeEventListener("tool-updates-complete", refresh);
-      window.removeEventListener("focus", refresh);
+      window.removeEventListener("tool-updates-complete", refreshQuietly);
+      window.removeEventListener("focus", refreshOnFocus);
     };
   }, []);
   useEffect(() => {
