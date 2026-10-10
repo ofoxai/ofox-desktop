@@ -239,3 +239,90 @@ describe("useToolInstall 的失败反馈", () => {
     );
   });
 });
+
+describe("安装前的 Node.js 版本检查", () => {
+  const tooOld = {
+    status: "tooOld",
+    required: ">=24.16.0 <25 || >=26.1.0",
+    current: "24.15.0",
+    manager: "fnm",
+    canUpgrade: true,
+    needsAdmin: false,
+    reinstall: ["gemini"],
+    manual: "fnm install 24 && fnm default 24",
+  };
+  const installCalls = () =>
+    invokeMock.mock.calls.filter(([command]) => command === "install_tool");
+
+  beforeEach(() => {
+    invokeMock.mockReset();
+  });
+
+  it("Node 不够新时先停下来问，不直接安装", async () => {
+    invokeMock.mockImplementation(async (command: string) =>
+      command === "check_tool_node_requirement" ? tooOld : 0,
+    );
+    const { result } = renderHook(() => useToolInstall(vi.fn()));
+    await act(async () => result.current.install("openclaw"));
+
+    expect(installCalls()).toHaveLength(0);
+    expect(result.current.nodePrompt).toEqual({
+      toolId: "openclaw",
+      requirement: tooOld,
+    });
+    expect(result.current.installing.has("openclaw")).toBe(false);
+  });
+
+  it("用户同意后带着升级 Node 的要求安装", async () => {
+    invokeMock.mockImplementation(async (command: string) =>
+      command === "check_tool_node_requirement" ? tooOld : 0,
+    );
+    const { result } = renderHook(() => useToolInstall(vi.fn()));
+    await act(async () => result.current.install("openclaw"));
+    await act(async () => result.current.confirmNodeUpgrade());
+
+    expect(installCalls()).toEqual([
+      [
+        "install_tool",
+        { toolId: "openclaw", skipEnv: false, upgradeNode: true },
+      ],
+    ]);
+    expect(result.current.nodePrompt).toBeNull();
+  });
+
+  it("用户取消就不安装", async () => {
+    invokeMock.mockImplementation(async (command: string) =>
+      command === "check_tool_node_requirement" ? tooOld : 0,
+    );
+    const { result } = renderHook(() => useToolInstall(vi.fn()));
+    await act(async () => result.current.install("openclaw"));
+    act(() => result.current.dismissNodePrompt());
+
+    expect(result.current.nodePrompt).toBeNull();
+    expect(installCalls()).toHaveLength(0);
+  });
+
+  it("版本够用、或检查本身失败时照常安装", async () => {
+    invokeMock.mockImplementation(async (command: string) =>
+      command === "check_tool_node_requirement" ? { status: "ok" } : 0,
+    );
+    const { result } = renderHook(() => useToolInstall(vi.fn()));
+    await act(async () => result.current.install("gemini"));
+    expect(installCalls()).toEqual([
+      [
+        "install_tool",
+        { toolId: "gemini", skipEnv: false, upgradeNode: false },
+      ],
+    ]);
+
+    invokeMock.mockReset();
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "check_tool_node_requirement") throw new Error("offline");
+      return 0;
+    });
+    await act(async () => result.current.install("codex"));
+    expect(installCalls()).toEqual([
+      ["install_tool", { toolId: "codex", skipEnv: false, upgradeNode: false }],
+    ]);
+  });
+});

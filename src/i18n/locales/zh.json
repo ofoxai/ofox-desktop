@@ -5,7 +5,29 @@
     "notInstalled": "未找到 {{tool}}，请先安装或检查安装路径"
   },
   "toolInstall": {
-    "exitCode": "安装未完成（退出码 {{code}}），请重试"
+    "exitCode": "安装未完成（退出码 {{code}}），请重试",
+    "nodeUpgrade": {
+      "title": "{{tool}} 需要更新的 Node.js",
+      "body": "{{tool}} 最新版要求 Node.js {{required}}，你电脑上当前是 {{current}}（{{manager}}）。",
+      "willRun": "Ofox 会在终端里运行：",
+      "needsAdmin": "需要管理员授权，系统会弹出授权窗口。",
+      "reinstall": "切换 Node.js 版本后，{{tools}} 需要重新安装，Ofox 会一并装好。",
+      "listSeparator": "、",
+      "confirm": "升级 Node.js 并安装",
+      "manualOnly": "Ofox 无法替你升级这种方式安装的 Node.js，请先手动升级后再安装：",
+      "ok": "知道了",
+      "manager": {
+        "fnm": "由 fnm 管理",
+        "nvm": "由 nvm 管理",
+        "nvm-windows": "由 nvm-windows 管理",
+        "volta": "由 Volta 管理",
+        "homebrew": "通过 Homebrew 安装",
+        "nodejs": "通过 Node.js 官方安装包安装",
+        "asdf": "由 asdf 管理",
+        "mise": "由 mise 管理",
+        "unknown": "安装方式未知"
+      }
+    }
   },
   "unbind": {
     "button": "解除绑定",

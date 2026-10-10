@@ -5,7 +5,29 @@
     "notInstalled": "{{tool}} が見つかりません。インストールするか、インストール先を確認してください。"
   },
   "toolInstall": {
-    "exitCode": "インストールが完了しませんでした（終了コード {{code}}）。再試行してください"
+    "exitCode": "インストールが完了しませんでした（終了コード {{code}}）。再試行してください",
+    "nodeUpgrade": {
+      "title": "{{tool}} には新しい Node.js が必要です",
+      "body": "最新の {{tool}} は Node.js {{required}} を必要としますが、このコンピューターは {{current}}（{{manager}}）です。",
+      "willRun": "Ofox がターミナルで次を実行します：",
+      "needsAdmin": "管理者の承認が必要です。システムが確認を求めます。",
+      "reinstall": "Node.js のバージョンを切り替えると {{tools}} の再インストールが必要になります。Ofox がまとめて行います。",
+      "listSeparator": "、",
+      "confirm": "Node.js をアップグレードしてインストール",
+      "manualOnly": "この方法でインストールされた Node.js は Ofox ではアップグレードできません。手動でアップグレードしてから再度インストールしてください：",
+      "ok": "了解",
+      "manager": {
+        "fnm": "fnm で管理",
+        "nvm": "nvm で管理",
+        "nvm-windows": "nvm-windows で管理",
+        "volta": "Volta で管理",
+        "homebrew": "Homebrew でインストール",
+        "nodejs": "Node.js 公式インストーラーでインストール",
+        "asdf": "asdf で管理",
+        "mise": "mise で管理",
+        "unknown": "インストール方法不明"
+      }
+    }
   },
   "unbind": {
     "button": "連携を解除",

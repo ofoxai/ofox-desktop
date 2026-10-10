@@ -31,6 +31,15 @@ fn npm_package(tool: &str) -> Option<&'static str> {
 
 /// `tool` 的安装脚本（在一个独立的 PowerShell 5.1 进程里运行）。
 pub(crate) fn install_script(tool: &str, host: InstallHost) -> Result<String, String> {
+    install_script_with(tool, host, None)
+}
+
+/// 同上；`upgrade` 时先把 Node.js 升级到工具要求的版本（用户在 Ofox 里同意过）。
+pub(crate) fn install_script_with(
+    tool: &str,
+    host: InstallHost,
+    upgrade: Option<&super::node_requirement::NodeUpgrade>,
+) -> Result<String, String> {
     let body = match tool {
         "claude" if !host.mainland => "irm https://claude.ai/install.ps1 | iex\n".to_string(),
         "codex" if !host.mainland => concat!(
@@ -54,10 +63,31 @@ pub(crate) fn install_script(tool: &str, host: InstallHost) -> Result<String, St
             "$ProgressPreference = 'SilentlyContinue'\n",
             "[Net.ServicePointManager]::SecurityProtocol = ",
             "[Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12\n",
-            "{body}",
+            "{upgrade}{body}",
         ),
+        upgrade = upgrade.map(node_upgrade_prelude).unwrap_or_default(),
         body = body
     ))
+}
+
+/// 升级 Node.js，再确认版本真的够了；不够就带着原因停下，不去装注定失败的工具。
+fn node_upgrade_prelude(upgrade: &super::node_requirement::NodeUpgrade) -> String {
+    let below = upgrade
+        .below
+        .map(|major| format!(" -or $nodeVersion.Major -ge {major}"))
+        .unwrap_or_default();
+    format!(
+        concat!(
+            "{command}\n",
+            "$nodeVersion = [version]((node.exe --version).Trim().TrimStart('v'))\n",
+            "if ($nodeVersion -lt [version]'{minimum}'{below}) {{ ",
+            "throw \"升级后 Node.js 是 $nodeVersion，仍不满足要求（至少 {minimum}）。可以手动处理：{manual}\" }}\n",
+        ),
+        command = upgrade.command,
+        minimum = upgrade.minimum,
+        below = below,
+        manual = upgrade.manual.replace('"', "'"),
+    )
 }
 
 /// `npm.cmd install -g <package>@latest`；没有 npm 时先用 winget 装 Node.js LTS。
@@ -153,7 +183,8 @@ pub(crate) fn wrapper_script(inner: &str, done: &str, label: &str) -> String {
 
 #[cfg(target_os = "windows")]
 mod runner {
-    use super::{guarded_script, install_script, wrapper_script, InstallHost};
+    use super::{guarded_script, install_script_with, wrapper_script, InstallHost};
+    use crate::commands::node_requirement::NodeUpgrade;
     use crate::commands::windows_tools::{effective_path, find_tool};
     use serde_json::json;
     use std::os::windows::process::CommandExt;
@@ -220,8 +251,9 @@ mod runner {
         tool: &str,
         label: &str,
         proxy_env: Vec<(String, String)>,
+        node_upgrade: Option<NodeUpgrade>,
     ) -> i32 {
-        match run(app, tool, label, proxy_env).await {
+        match run(app, tool, label, proxy_env, node_upgrade).await {
             Ok(()) => 0,
             Err(message) => {
                 emit_line(app, tool, &format!("错误: {message}"));
@@ -235,8 +267,9 @@ mod runner {
         tool: &str,
         label: &str,
         proxy_env: Vec<(String, String)>,
+        node_upgrade: Option<NodeUpgrade>,
     ) -> Result<(), String> {
-        let script = install_script(tool, host())?;
+        let script = install_script_with(tool, host(), node_upgrade.as_ref())?;
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
@@ -424,6 +457,32 @@ mod tests {
             assert!(script.contains("Tls12"), "{tool}");
         }
         assert!(install_script("chatgpt", ABROAD).is_err());
+    }
+
+    #[test]
+    fn an_agreed_node_upgrade_runs_and_is_checked_before_the_install() {
+        let upgrade = crate::commands::node_requirement::NodeUpgrade {
+            command: "winget install -e --id OpenJS.NodeJS.LTS".into(),
+            minimum: semver::Version::new(24, 16, 0),
+            below: Some(25),
+            manual: "从 \"nodejs.org\" 安装".into(),
+        };
+        let script = install_script_with("openclaw", ABROAD, Some(&upgrade)).unwrap();
+        let upgrade_at = script
+            .find("winget install -e --id OpenJS.NodeJS.LTS")
+            .unwrap();
+        let check_at = script
+            .find("[version]'24.16.0' -or $nodeVersion.Major -ge 25")
+            .unwrap();
+        let npm_at = script.find("npm.cmd install -g openclaw@latest").unwrap();
+        assert!(upgrade_at < check_at && check_at < npm_at, "{script}");
+        assert!(script.starts_with("$ErrorActionPreference = 'Stop'"));
+        // The manual hint sits inside a double-quoted PowerShell string.
+        assert!(script.contains("从 'nodejs.org' 安装"));
+        assert_eq!(
+            install_script("openclaw", ABROAD).unwrap(),
+            install_script_with("openclaw", ABROAD, None).unwrap()
+        );
     }
 
     #[test]
