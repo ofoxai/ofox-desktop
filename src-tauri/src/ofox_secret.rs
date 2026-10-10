@@ -145,6 +145,32 @@ impl KeyringStore {
     }
 }
 
+/// 钥匙串读取被用户拒绝时错误信息的开头（见 [`is_keychain_denied`]）。
+pub const KEYCHAIN_DENIED: &str = "KEYCHAIN_DENIED";
+
+/// 读取失败是不是因为用户在系统弹窗里点了「拒绝」。
+///
+/// App 换了签名（例如 1.3.2 → 1.3.4 改用公司证书）后，macOS 会按条询问能否读取
+/// 旧条目；拒绝时界面不该显示成「未登录」却不说原因。
+pub fn is_keychain_denied(error: &str) -> bool {
+    error.starts_with(KEYCHAIN_DENIED)
+}
+
+/// macOS 把「拒绝」报成 errSecUserCanceled（-128）或 errSecAuthFailed（-25293），
+/// keyring 包成 `PlatformFailure`；按错误码认，不看会随系统语言变化的文字。
+fn denied_by_user(error: &keyring::Error) -> bool {
+    let keyring::Error::PlatformFailure(inner) = error else {
+        return false;
+    };
+    let debug = format!("{inner:?}");
+    debug
+        .split("code: ")
+        .nth(1)
+        .and_then(|rest| rest.split(|c: char| c != '-' && !c.is_ascii_digit()).next())
+        .and_then(|code| code.parse::<i32>().ok())
+        .is_some_and(|code| code == -128 || code == -25293)
+}
+
 impl SecretStore for KeyringStore {
     fn load(&self, slot: Slot) -> Result<Option<String>, String> {
         let entry = Self::entry(slot)?;
@@ -154,6 +180,10 @@ impl SecretStore for KeyringStore {
             Ok(v) if v.is_empty() => Ok(None),
             Ok(v) => Ok(Some(v)),
             Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) if denied_by_user(&e) => Err(format!(
+                "{KEYCHAIN_DENIED}: keychain access denied ({})",
+                slot.account()
+            )),
             Err(e) => Err(format!("keychain read failed ({}): {e}", slot.account())),
         }
     }
@@ -515,6 +545,41 @@ mod file_store_tests {
 
 #[cfg(test)]
 mod tests {
+    /// Mimics `security_framework::base::Error`'s Debug output.
+    struct OsStatus(i32);
+    impl std::fmt::Debug for OsStatus {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "Error {{ code: {}, message: \"用户已取消操作。\" }}",
+                self.0
+            )
+        }
+    }
+    impl std::fmt::Display for OsStatus {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "OSStatus {}", self.0)
+        }
+    }
+    impl std::error::Error for OsStatus {}
+
+    #[test]
+    fn a_denied_keychain_prompt_is_told_apart_from_other_failures() {
+        let failure = |code| keyring::Error::PlatformFailure(Box::new(OsStatus(code)));
+        assert!(super::denied_by_user(&failure(-128)));
+        assert!(super::denied_by_user(&failure(-25293)));
+        assert!(!super::denied_by_user(&failure(-25300)));
+        assert!(!super::denied_by_user(&failure(-1280)));
+        assert!(!super::denied_by_user(&keyring::Error::NoEntry));
+        assert!(super::is_keychain_denied(&format!(
+            "{}: keychain access denied (access_token)",
+            super::KEYCHAIN_DENIED
+        )));
+        assert!(!super::is_keychain_denied(
+            "keychain read failed (access_token): x"
+        ));
+    }
+
     use super::*;
     use crate::app_config::AppType;
 
