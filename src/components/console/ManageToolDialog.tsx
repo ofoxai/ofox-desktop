@@ -44,6 +44,7 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { cn } from "@/lib/utils";
+import { isMac } from "@/lib/platform";
 import { settingsApi } from "@/lib/api";
 import {
   manageToolApi,
@@ -979,7 +980,8 @@ export default function ManageToolDialog({
                     size="sm"
                     onClick={handleOpenFolder}
                   >
-                    <Folder className="mr-1 h-3.5 w-3.5" />在 Finder 打开
+                    <Folder className="mr-1 h-3.5 w-3.5" />
+                    {isMac() ? "在 Finder 打开" : "打开所在文件夹"}
                   </Button>
                 </div>
               </div>

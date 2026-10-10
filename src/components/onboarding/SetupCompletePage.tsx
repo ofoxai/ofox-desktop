@@ -1,4 +1,5 @@
 import { CheckCircle2 } from "lucide-react";
+import { isMac } from "@/lib/platform";
 
 interface SetupCompletePageProps {
   boundCount: number;
@@ -26,7 +27,7 @@ export default function SetupCompletePage({
           或其它工具就能直接使用。
         </p>
         <p className="mb-8 text-center text-sm text-muted-foreground">
-          菜单栏的{" "}
+          {isMac() ? "菜单栏" : "任务栏通知区域"}的{" "}
           <span className="font-semibold text-orange-500">Ofox 图标</span>{" "}
           可以随时查看余额和用量。
         </p>

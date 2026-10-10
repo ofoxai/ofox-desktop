@@ -14,6 +14,7 @@ import { checkToolUpdates } from "@/hooks/useToolUpdates";
 import { toolUpdatesApi, type ToolUpdateInfo } from "@/lib/api/toolUpdates";
 
 const mocks = vi.hoisted(() => ({
+  mac: true,
   toast: Object.assign(() => undefined, {
     success: vi.fn(),
     error: vi.fn(),
@@ -29,6 +30,10 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
+vi.mock("@/lib/platform", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/platform")>()),
+  isMac: () => mocks.mac,
+}));
 vi.mock("sonner", () => ({ toast: mocks.toast }));
 vi.mock("@/lib/api/toolUpdates", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/toolUpdates")>()),
@@ -127,6 +132,7 @@ async function cacheUpdates(tools: ToolUpdateInfo[]) {
 beforeEach(async () => {
   i18n.addResourceBundle("zh", "translation", zh, true, true);
   localTools = [];
+  mocks.mac = true;
   mocks.onInstallDone = undefined;
   vi.mocked(toolUpdatesApi.update).mockReset();
   mocks.toast.success.mockClear();
@@ -141,6 +147,20 @@ beforeEach(async () => {
     throw new Error(`Unexpected command: ${command}`);
   });
   await cacheUpdates([]);
+});
+
+describe("Console title bar", () => {
+  it("draws its own title strip under the macOS overlay title bar", async () => {
+    render(<ConsolePage boundTools={[]} />);
+    expect(await screen.findByText("Ofox Desktop")).toBeVisible();
+  });
+
+  it("leaves the title to the native title bar elsewhere", async () => {
+    mocks.mac = false;
+    render(<ConsolePage boundTools={[]} />);
+    await screen.findByText("Test User");
+    expect(screen.queryByText("Ofox Desktop")).toBeNull();
+  });
 });
 
 describe("Console tool update badges", () => {
