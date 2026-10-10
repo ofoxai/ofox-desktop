@@ -342,6 +342,8 @@ jobs:
     # 等；真超时了就在 Actions 页面重跑这个任务，构建产物和公证提交都还在。
     runs-on: macos-14
     timeout-minutes: 350
+    permissions:
+      contents: write # 创建 GitHub Release、上传附件
     # dry_run 时跳过（workflow_dispatch 默认 dry_run=true）
     if: github.event_name == 'push' || inputs.dry_run == false
 
@@ -567,6 +569,55 @@ jobs:
           echo "⚠️ 线上清单未在预期时间内更新到 $VERSION —— 可能是 CDN 缓存，请手动核对" >&2
           # 上传已成功，缓存滞后不应判定发版失败
           exit 0
+
+      # 把 R2 上的同一份安装包挂到 GitHub Release，tag 页面上就能直接下载。
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          for dir in artifacts/build-*; do
+            [ -d "$dir" ] || continue
+            platform="${dir#artifacts/build-}"
+            case "$platform" in
+              darwin-aarch64) suffix="macos_aarch64" ;;
+              windows-x86_64) suffix="windows_x64-setup" ;;
+              linux-x86_64) suffix="linux_x64" ;;
+              *) echo "❌ 未知平台 ${platform}，缺少 Release 文件名映射" >&2; exit 1 ;;
+            esac
+            for file in "$dir"/*; do
+              [ -f "$file" ] || continue
+              cp "$file" "release-assets/ofox_desktop_${VERSION}_${suffix}.${file##*.}"
+            done
+          done
+          (cd release-assets && shasum -a 256 ofox_desktop_* > SHA256SUMS.txt)
+          cat release-assets/SHA256SUMS.txt
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # 重跑本任务时 Release 已经在了：只替换附件，保留已写好的说明。
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            {
+              echo "## 下载"
+              echo ""
+              echo "macOS 选 \`_macos_aarch64.dmg\`（Apple Silicon），Windows 选 \`_windows_x64-setup.exe\`。也可以从 [ofox.ai/desktop](https://ofox.ai/desktop) 下载；已安装 Ofox 的，在「检查更新」里就能升级。校验值见 \`SHA256SUMS.txt\`。"
+              echo ""
+              echo "Windows 版暂未签名。第一次运行如果出现 SmartScreen 提示，点「更多信息」→「仍要运行」。"
+              echo ""
+            } > release-notes.md
+            gh release create "$TAG" release-assets/* \
+              --title "Ofox Desktop ${VERSION}" \
+              --notes-file release-notes.md \
+              --generate-notes \
+              --latest \
+              --verify-tag
+          fi
+          echo "✅ GitHub Release: $(gh release view "$TAG" --json url --jq .url)"
 
       - name: Clean up credentials
         if: always()
