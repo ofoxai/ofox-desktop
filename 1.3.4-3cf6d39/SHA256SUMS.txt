@@ -1,0 +1,3 @@
+d39130f8b57f1e41f1783af9a89baf77c632f57a28518773f5af8faa7e7bf2a9  ofox_desktop_1.3.4_macos_aarch64.dmg
+0712b783b32e72812ce3aae0853f5c026b6a186ea3359edef4bd2143643ee537  ofox_desktop_1.3.4_windows_x64-setup.exe
+7a964ac0b367a208a5583ccb9637ffa44600c332808017faca22c9958d022e94  ofox_desktop_1.3.4_windows_x64_en-US.msi

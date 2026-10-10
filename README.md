@@ -8,6 +8,33 @@
 git clone --branch test-builds --single-branch --depth 1 https://github.com/ofoxai/ofox-desktop.git ofox-test-builds
 ```
 
+## 1.3.4-3cf6d39（环境变量提示 + 托盘首次点击 + 终端目录，待验证）
+
+源码：临时集成分支 `ci/test-installers` @ `3cf6d391` = 1.3.4-a7e6d00 + 下面这些修复：
+
+| 分支 | 内容 |
+|---|---|
+| `feat/env-override-warning` | 系统环境变量会盖过 Ofox 配置时给出提示：Gemini 查 `GEMINI_API_KEY`、`GOOGLE_GEMINI_BASE_URL`、`GEMINI_MODEL`，Claude Code 查 `ANTHROPIC_API_KEY`。工具行显示「环境变量冲突」并计入「需处理」，「管理」里列出变量名、来源（Windows 用户 / 系统环境变量、shell 配置文件第几行）和删除方法。只显示变量名，不显示值。 |
+| `fix/windows-window-layout` | Windows 托盘第一次点击不再「闪一下就消失」：启动后在后台预先建好弹窗。另外，保存设置、切换服务商后右键不会再变成旧的原生菜单。 |
+| `feat/windows-launch` | Windows 上「打开」的终端改在用户主目录启动，不再在 Ofox 安装目录（如 `E:\Ofox Desktop`）里启动。 |
+
+| 文件 | 平台 | 说明 |
+|---|---|---|
+| `ofox_desktop_1.3.4_macos_aarch64.dmg` | macOS 12+，Apple Silicon | ad-hoc 签名，未公证 |
+| `ofox_desktop_1.3.4_windows_x64-setup.exe` | Windows 10/11 x64 | NSIS，未签名，默认按当前用户安装 |
+| `ofox_desktop_1.3.4_windows_x64_en-US.msi` | Windows 10/11 x64 | MSI，仅用于验证能否安装，不会发布 |
+
+安装前先在托盘弹窗里点「退出 Ofox」，确认 `Get-Process ofox-desktop` 没有输出再安装，否则运行的还是旧版本。校验文件 `1.3.4-3cf6d39/SHA256SUMS.txt`。
+
+在 Windows 上请看：
+
+1. 启动 Ofox 后等几秒，第一次左键或右键点托盘图标，弹窗直接出现，不再闪一下就消失（包括图标收在「^」溢出区里的情况）。
+2. 在设置里保存一次，或切换一次模型，再右键托盘图标：仍然是 Ofox 弹窗，不是旧的原生菜单。
+3. 系统环境变量 `GEMINI_API_KEY` 还在时：Gemini 一行显示「环境变量冲突」；「管理」里列出 `GEMINI_API_KEY` · Windows 系统环境变量，并说明删除方法。
+4. 删除这个变量，从托盘退出 Ofox 再打开：提示消失，`gemini` 能正常对话。如果只删了变量、没重启 Ofox，提示会写「已从系统删除，但 Ofox 启动时还带着」。
+5. 点 Gemini、OpenCode 等的「打开」，终端的当前目录是 `C:\Users\<你的用户名>`，不是 Ofox 安装目录。
+6. 其余检查项同下面 1.3.4-c554707 的清单。
+
 ## 1.3.4-a7e6d00（托盘实体窗口 + 配置冲突误报修复，待验证）
 
 源码：临时集成分支 `ci/test-installers` @ `a7e6d004` = 1.3.4-c554707 + 两个修复：
