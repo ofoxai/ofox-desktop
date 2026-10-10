@@ -14,6 +14,8 @@ mod env;
 mod failover;
 mod global_proxy;
 mod hermes;
+#[cfg(any(target_os = "windows", test))]
+pub(crate) mod how_installed;
 mod import_export;
 mod install_tool;
 mod launch_tool;
@@ -38,6 +40,10 @@ mod sync_support;
 pub(crate) mod tool_update;
 #[cfg(any(target_os = "windows", test))]
 mod windows_chatgpt;
+#[cfg(any(target_os = "windows", test))]
+pub(crate) mod windows_install;
+#[cfg(any(target_os = "windows", test))]
+pub(crate) mod windows_tools;
 
 mod lightweight;
 pub(crate) mod manage_tool;

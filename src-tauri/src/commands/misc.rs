@@ -715,28 +715,31 @@ async fn get_single_tool_version_impl(
     }
 
     let (env_type, wsl_distro) = tool_env_type_and_wsl_distro(tool);
-    #[cfg(unix)]
-    let active_installation = super::tool_update::probe(tool).await;
-    #[cfg(unix)]
-    let local = match &active_installation {
-        Ok(installation) => LocalDetection::found(
+    // A CLI bound to WSL is detected inside WSL; everything else the way a
+    // terminal opened now would find it.
+    let active_installation = match wsl_distro {
+        Some(_) => Err(ProbeError::Failed(
+            "WSL installations are detected inside WSL".into(),
+        )),
+        None => super::tool_update::probe(tool).await,
+    };
+    let local = match (wsl_distro.as_deref(), &active_installation) {
+        #[cfg(not(unix))]
+        (Some(distro), _) => try_get_version_wsl(tool, distro, wsl_shell, wsl_shell_flag).await,
+        (_, Ok(installation)) => LocalDetection::found(
             installation.path.clone(),
             (!installation.version.is_empty()).then(|| installation.version.clone()),
             installation.error.clone(),
         ),
-        Err(ProbeError::NotFound) => scan_cli_version(tool).await,
-        Err(error) => after_failed_shell_lookup(error.to_string(), scan_cli_version(tool).await),
-    };
-    #[cfg(not(unix))]
-    let local = if let Some(distro) = wsl_distro.as_deref() {
-        try_get_version_wsl(tool, distro, wsl_shell, wsl_shell_flag).await
-    } else {
-        scan_cli_version(tool).await
+        (_, Err(ProbeError::NotFound)) => scan_cli_version(tool).await,
+        (_, Err(error)) => {
+            after_failed_shell_lookup(error.to_string(), scan_cli_version(tool).await)
+        }
     };
 
-    #[cfg(target_os = "macos")]
-    if tool == "codex" && local.status == InstallationStatus::NotInstalled {
-        match super::tool_update::codex_desktop_version().await {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if tool == "codex" && wsl_distro.is_none() && local.status == InstallationStatus::NotInstalled {
+        match codex_desktop_app().await {
             Ok(Some(app)) => {
                 return ToolVersion {
                     name: tool.into(),
@@ -774,7 +777,7 @@ async fn get_single_tool_version_impl(
     };
     let update_status =
         cli_update_status(&local, latest_version.as_deref(), include_latest).to_string();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     let (update_source, update_supported, update_reason) = match &active_installation {
         Ok(installation) => {
             let plan = if include_latest {
@@ -793,11 +796,11 @@ async fn get_single_tool_version_impl(
         }
         Err(reason) => (None, false, Some(reason.to_string())),
     };
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let (update_source, update_supported, update_reason) = (
         None,
         false,
-        Some("Automatic updates are currently supported on macOS only".into()),
+        Some("Automatic updates are currently supported on macOS and Windows only".into()),
     );
     #[cfg(unix)]
     let _ = (wsl_shell, wsl_shell_flag);
@@ -818,9 +821,18 @@ async fn get_single_tool_version_impl(
     }
 }
 
+/// The Codex desktop app, counted as Codex when its CLI is absent:
+/// ChatGPT.app on macOS, the Microsoft Store package on Windows.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+async fn codex_desktop_app() -> Result<Option<DesktopInstallation>, String> {
+    #[cfg(target_os = "macos")]
+    return super::tool_update::codex_desktop_version().await;
+    #[cfg(target_os = "windows")]
+    return super::windows_chatgpt::detect_chatgpt_installation().await;
+}
+
 /// A failed shell lookup is not uninstall evidence, but an executable found by
 /// the path scan (e.g. behind an alias or a slow rc file) still proves installation.
-#[cfg(any(unix, test))]
 fn after_failed_shell_lookup(probe_error: String, scanned: LocalDetection) -> LocalDetection {
     if scanned.status == InstallationStatus::Installed {
         scanned
@@ -1080,38 +1092,45 @@ async fn cli_at_path(path: &Path, search_path: &str) -> LocalDetection {
             Some(format!("Active executable failed its path check: {error}")),
         );
     }
+    let mut command = version_command(path);
+    command.env("PATH", search_path);
+    cli_version_output(path, super::tool_update::bounded_output(command).await)
+}
+
+/// `<path> --version`, with a Windows `.cmd`/`.bat` shim run through cmd.exe
+/// without a console window.
+pub(crate) fn version_command(path: &Path) -> tokio::process::Command {
     #[cfg(target_os = "windows")]
-    let mut command = {
+    {
         let extension = path
             .extension()
             .and_then(|value| value.to_str())
             .unwrap_or_default();
-        if extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat") {
-            let mut command = tokio::process::Command::new("cmd");
-            // cmd.exe has different quoting rules than native argv. Expand a
-            // child-only variable once, so spaces and literal % in the path
-            // cannot alter the command used for the version check.
-            command
-                .args(["/D", "/V:OFF", "/S", "/C"])
-                .raw_arg("\"\"%OFOX_VERSION_EXECUTABLE%\" --version\"")
-                .env("OFOX_VERSION_EXECUTABLE", path);
-            command
-        } else {
-            let mut command = tokio::process::Command::new(path);
-            command.arg("--version");
-            command
-        }
-    };
+        let mut command =
+            if extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat") {
+                let mut command = tokio::process::Command::new("cmd");
+                // cmd.exe has different quoting rules than native argv. Expand a
+                // child-only variable once, so spaces and literal % in the path
+                // cannot alter the command used for the version check.
+                command
+                    .args(["/D", "/V:OFF", "/S", "/C"])
+                    .raw_arg("\"\"%OFOX_VERSION_EXECUTABLE%\" --version\"")
+                    .env("OFOX_VERSION_EXECUTABLE", path);
+                command
+            } else {
+                let mut command = tokio::process::Command::new(path);
+                command.arg("--version");
+                command
+            };
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    }
     #[cfg(not(target_os = "windows"))]
-    let mut command = {
+    {
         let mut command = tokio::process::Command::new(path);
         command.arg("--version");
         command
-    };
-    command.env("PATH", search_path);
-    #[cfg(target_os = "windows")]
-    command.creation_flags(CREATE_NO_WINDOW);
-    cli_version_output(path, super::tool_update::bounded_output(command).await)
+    }
 }
 
 fn cli_version_output(path: &Path, output: Result<std::process::Output, String>) -> LocalDetection {
@@ -1328,9 +1347,10 @@ fn opencode_extra_search_paths(
 fn tool_executable_candidates(tool: &str, dir: &Path) -> Vec<std::path::PathBuf> {
     #[cfg(target_os = "windows")]
     {
+        // Same order as `windows_tools::tool_in`: an installer's binary, then an npm shim.
         vec![
-            dir.join(format!("{tool}.cmd")),
             dir.join(format!("{tool}.exe")),
+            dir.join(format!("{tool}.cmd")),
             dir.join(tool),
         ]
     }
@@ -1396,6 +1416,16 @@ async fn scan_cli_version(tool: &str) -> LocalDetection {
             &mut search_paths,
             std::path::PathBuf::from("C:\\Program Files\\nodejs"),
         );
+        // Hermes' install.ps1 puts its launcher in <HermesHome>\bin.
+        for home in [
+            std::env::var_os("HERMES_HOME").map(PathBuf::from),
+            std::env::var_os("LOCALAPPDATA").map(|local| PathBuf::from(local).join("hermes")),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            push_unique_path(&mut search_paths, home.join("bin"));
+        }
     }
 
     for base in [
@@ -1487,7 +1517,7 @@ where
 }
 
 #[cfg(target_os = "windows")]
-fn wsl_distro_for_tool(tool: &str) -> Option<String> {
+pub(crate) fn wsl_distro_for_tool(tool: &str) -> Option<String> {
     let override_dir = match tool {
         "claude" => crate::settings::get_claude_override_dir(),
         "codex" => crate::settings::get_codex_override_dir(),
@@ -2021,9 +2051,10 @@ fn launch_windows_terminal(
 {cwd_command}
 echo Using provider-specific claude config:
 echo {}
-claude --settings \"{}\"
+rem `call` returns from npm's claude.cmd, so the API-key settings file is deleted.
+call claude --settings \"{}\"
 del \"{}\" >nul 2>&1
-del \"%~f0\" >nul 2>&1
+(goto) 2>nul & del \"%~f0\"
 ",
         config_path_for_batch,
         config_path_for_batch,
@@ -2118,8 +2149,14 @@ fn run_windows_start_command(args: &[&str], terminal_name: &str) -> Result<(), S
     let mut full_args = vec!["/C", "start"];
     full_args.extend(args);
 
+    // The new terminal inherits this PATH: the registry's current one, so a
+    // CLI installed after Ofox started is found and npm shims find node.
+    // It also inherits the folder: the user's home, as Terminal opens on macOS,
+    // not Ofox's install folder.
     let output = Command::new("cmd")
         .args(&full_args)
+        .env("PATH", super::windows_tools::effective_path())
+        .current_dir(crate::config::get_home_dir())
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("启动 {} 失败: {e}", terminal_name))?;
@@ -2200,6 +2237,44 @@ fn unix_launcher_env_lines(env_vars: &[(String, String)]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// A batch-file command running `program` with `args`. The program, and any
+/// argument with characters cmd.exe treats specially, is quoted; `%` is doubled
+/// so no variable expands. `"` and line breaks cannot be passed safely.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn windows_batch_line(program: &Path, args: &[String]) -> Result<String, String> {
+    fn batch_word(value: &str, always_quote: bool) -> Result<String, String> {
+        if value.contains(['"', '\r', '\n']) {
+            return Err(format!("无法安全传递参数到 Windows 终端: {value}"));
+        }
+        let plain = !value.is_empty()
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_./:=@+,\\".contains(c));
+        let escaped = value.replace('%', "%%");
+        if plain && !always_quote {
+            return Ok(escaped);
+        }
+        // A trailing backslash would escape the closing quote for the program.
+        let tail = if escaped.ends_with('\\') { "\\" } else { "" };
+        Ok(format!("\"{escaped}{tail}\""))
+    }
+    let mut words = vec![batch_word(&program.to_string_lossy(), true)?];
+    for arg in args {
+        words.push(batch_word(arg, false)?);
+    }
+    Ok(words.join(" "))
+}
+
+/// The `.bat` a terminal runs: `call` returns from npm's `.cmd` shims so the
+/// pause and the self-delete run; `(goto)` deletes the running script without
+/// cmd.exe complaining that it vanished.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_launcher_script(command_line: &str, env_lines: &str) -> String {
+    format!(
+        "@echo off\r\nsetlocal DisableDelayedExpansion\r\necho [ofox-switch] Starting: {command_line}\r\necho.\r\n{env_lines}\r\ncall {command_line}\r\necho.\r\necho [ofox-switch] Command exited. Press any key to close.\r\npause >nul\r\n(goto) 2>nul & del \"%~f0\"\r\n"
+    )
 }
 
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -2341,10 +2416,7 @@ read -n 1 -s
         let preferred = crate::settings::get_preferred_terminal();
         let terminal = preferred.as_deref().unwrap_or("cmd");
 
-        let content = format!(
-            "@echo off\r\nsetlocal DisableDelayedExpansion\r\necho [ofox-switch] Starting: {cmd}\r\necho.\r\n{env_lines}\r\n{cmd}\r\necho.\r\necho [ofox-switch] Command exited. Press any key to close.\r\npause >nul\r\ndel \"%~f0\" >nul 2>&1\r\n",
-            cmd = command_line,
-        );
+        let content = windows_launcher_script(command_line, &env_lines);
         let bat_file = write_terminal_launcher(label, ".bat", &content)?;
 
         let bat_path = bat_file.to_string_lossy();
@@ -2469,6 +2541,57 @@ mod tests {
         assert!(!result.has_update);
         let result = resolve_update(manifest(&lagging), "1.3.4", "darwin-aarch64");
         assert!(result.has_update);
+    }
+
+    #[test]
+    fn windows_batch_line_quotes_the_program_and_unsafe_arguments() {
+        let program = Path::new(r"C:\Users\Me Too\AppData\Roaming\npm\opencode.cmd");
+        let args = vec![
+            "--model".to_string(),
+            "ofox-opencode/qwen/qwen-flash".to_string(),
+        ];
+        assert_eq!(
+            windows_batch_line(program, &args).unwrap(),
+            r#""C:\Users\Me Too\AppData\Roaming\npm\opencode.cmd" --model ofox-opencode/qwen/qwen-flash"#
+        );
+        let tricky = vec![
+            "a b&c|d".to_string(),
+            "100%".to_string(),
+            r"C:\my dir\".to_string(),
+            r"C:\dir\".to_string(),
+        ];
+        assert_eq!(
+            windows_batch_line(Path::new(r"C:\bin\x.exe"), &tricky).unwrap(),
+            r#""C:\bin\x.exe" "a b&c|d" "100%%" "C:\my dir\\" C:\dir\"#
+        );
+        assert_eq!(
+            windows_batch_line(Path::new(r"C:\50% off\x.exe"), &[]).unwrap(),
+            r#""C:\50%% off\x.exe""#
+        );
+    }
+
+    #[test]
+    fn windows_batch_line_refuses_quotes_and_line_breaks() {
+        for bad in ["say \"hi\"", "line\r\nbreak"] {
+            assert!(windows_batch_line(Path::new(r"C:\x.exe"), &[bad.to_string()]).is_err());
+        }
+        assert!(windows_batch_line(Path::new("C:\\a\"b\\x.exe"), &[]).is_err());
+    }
+
+    #[test]
+    fn windows_launcher_script_calls_the_command_and_deletes_itself_cleanly() {
+        let script = windows_launcher_script(r#""C:\npm\codex.cmd""#, "set \"HTTPS_PROXY=x\"");
+        // `call` returns from npm's .cmd shims, so the pause and cleanup run.
+        assert!(
+            script.contains("\r\ncall \"C:\\npm\\codex.cmd\"\r\n"),
+            "{script}"
+        );
+        assert!(script.contains("set \"HTTPS_PROXY=x\"\r\n"));
+        assert!(script.contains("pause >nul\r\n"));
+        assert!(
+            script.ends_with("(goto) 2>nul & del \"%~f0\"\r\n"),
+            "{script}"
+        );
     }
 
     #[tokio::test]
@@ -3116,15 +3239,15 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn tool_executable_candidates_windows_includes_cmd_exe_and_plain_name() {
+    fn tool_executable_candidates_windows_prefers_exe_then_cmd_then_plain_name() {
         let dir = PathBuf::from("C:\\tools");
         let candidates = tool_executable_candidates("opencode", &dir);
 
         assert_eq!(
             candidates,
             vec![
-                PathBuf::from("C:\\tools\\opencode.cmd"),
                 PathBuf::from("C:\\tools\\opencode.exe"),
+                PathBuf::from("C:\\tools\\opencode.cmd"),
                 PathBuf::from("C:\\tools\\opencode"),
             ]
         );
