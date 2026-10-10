@@ -10,8 +10,8 @@ export default function SetupCompletePage({
   onOpenConsole,
 }: SetupCompletePageProps) {
   return (
-    <div className="flex h-screen w-full items-center justify-center bg-gradient-to-br from-orange-50/80 via-white to-orange-50/40 dark:from-neutral-950 dark:via-neutral-900 dark:to-neutral-950">
-      <div className="flex w-full max-w-xl flex-col items-center px-8">
+    <div className="flex h-screen w-full overflow-y-auto bg-gradient-to-br from-orange-50/80 via-white to-orange-50/40 dark:from-neutral-950 dark:via-neutral-900 dark:to-neutral-950">
+      <div className="m-auto flex w-full max-w-xl flex-col items-center px-8 py-2">
         {/* Success Icon */}
         <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-[22px] bg-emerald-500 text-4xl text-white shadow-lg shadow-emerald-200 dark:shadow-emerald-900/30">
           <CheckCircle2 className="h-10 w-10" strokeWidth={2.5} />

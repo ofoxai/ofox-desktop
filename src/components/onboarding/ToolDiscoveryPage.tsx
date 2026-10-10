@@ -201,8 +201,8 @@ export default function ToolDiscoveryPage({
   const isScanning = entries.some((e) => e.status === "scanning");
 
   return (
-    <div className="flex h-screen w-full items-center justify-center bg-gradient-to-br from-orange-50/80 via-white to-orange-50/40 dark:from-neutral-950 dark:via-neutral-900 dark:to-neutral-950">
-      <div className="flex w-full max-w-2xl flex-col items-center px-8">
+    <div className="flex h-screen w-full overflow-y-auto bg-gradient-to-br from-orange-50/80 via-white to-orange-50/40 dark:from-neutral-950 dark:via-neutral-900 dark:to-neutral-950">
+      <div className="m-auto flex w-full max-w-2xl flex-col items-center px-8 py-2">
         <h1 className="mb-2 text-3xl font-bold text-foreground">
           {isScanning
             ? "正在扫描 AI 工具…"
