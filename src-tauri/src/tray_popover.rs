@@ -5,8 +5,16 @@
 use tauri::Manager;
 
 const POPOVER_LABEL: &str = "tray-popover";
+/// macOS 的窗口透明，卡片四周留 16px 边距（前端 `PopoverFrame` 的 `p-4`）。
+#[cfg(target_os = "macos")]
 const POPOVER_WIDTH: f64 = 360.0;
+#[cfg(target_os = "macos")]
 const POPOVER_HEIGHT: f64 = 620.0;
+/// 其它平台窗口本身就是不透明面板，取 macOS 卡片的大小。
+#[cfg(not(target_os = "macos"))]
+const POPOVER_WIDTH: f64 = 328.0;
+#[cfg(not(target_os = "macos"))]
+const POPOVER_HEIGHT: f64 = 588.0;
 
 /// 切换 popover 窗口的显示/隐藏。
 ///
@@ -49,7 +57,8 @@ fn create_popover(app: &tauri::AppHandle, tray_rect: &tauri::Rect) -> Result<(),
         .inner_size(POPOVER_WIDTH, POPOVER_HEIGHT)
         .resizable(false)
         .decorations(false)
-        .transparent(true)
+        // Windows 给无边框窗口加边框和阴影，透明边距会被描成一圈框，所以只有 macOS 透明。
+        .transparent(cfg!(target_os = "macos"))
         .always_on_top(true)
         .skip_taskbar(true)
         .visible(false)

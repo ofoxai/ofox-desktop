@@ -8,12 +8,14 @@ import AccountBalance from "./AccountBalance";
 import ActionButtons from "./ActionButtons";
 import ToolStatusList from "./ToolStatusList";
 import BottomMenu from "./BottomMenu";
+import PopoverFrame from "./PopoverFrame";
 import BalanceWarningBanner from "./BalanceWarningBanner";
 import UpdateBanner from "./UpdateBanner";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
 import { useUpdate } from "@/contexts/UpdateContext";
 import { settingsApi } from "@/lib/api";
 import { BOUND_TOOLS_STORAGE_KEY } from "@/config/toolMeta";
+import { isMac } from "@/lib/platform";
 
 const DEFAULT_LOW_BALANCE_THRESHOLD = 10;
 
@@ -139,7 +141,8 @@ export default function TrayPopoverApp() {
   }, [refetch]);
 
   useEffect(() => {
-    // 设置透明背景
+    // 设置透明背景：只有 macOS 的弹窗窗口是透明的（见 PopoverFrame）
+    if (!isMac()) return;
     document.documentElement.classList.add("tray-popover");
     return () => {
       document.documentElement.classList.remove("tray-popover");
@@ -182,42 +185,37 @@ export default function TrayPopoverApp() {
     balanceUsd < lowBalanceThreshold;
 
   return (
-    <div className="h-screen w-full bg-transparent p-4">
-      <div
-        className="flex h-full flex-col overflow-hidden rounded-xl border border-border/50 shadow-[0_4px_12px_rgba(0,0,0,0.12)] backdrop-blur-xl"
-        style={{ backgroundColor: "hsl(var(--popover) / 0.92)" }}
-      >
-        {/* 固定区域：不滚动 */}
-        <div className="shrink-0">
-          <ProfileHeader status={status} />
-          {hasUpdate && !isDismissed && <UpdateBanner />}
-          {(isExpired || isLoggedOut) && (
-            <AuthExpiredBanner
-              variant={isExpired ? "expired" : "loggedOut"}
-              onReauth={handleReauth}
-            />
-          )}
-          <AccountBalance
-            state={status?.state ?? "loggedout"}
-            balanceUsd={isActive ? balanceUsd : null}
-            onRefresh={refreshBalance}
-            refreshing={balanceRefreshing}
+    <PopoverFrame>
+      {/* 固定区域：不滚动 */}
+      <div className="shrink-0">
+        <ProfileHeader status={status} />
+        {hasUpdate && !isDismissed && <UpdateBanner />}
+        {(isExpired || isLoggedOut) && (
+          <AuthExpiredBanner
+            variant={isExpired ? "expired" : "loggedOut"}
+            onReauth={handleReauth}
           />
-          {showLowBalanceBanner && (
-            <BalanceWarningBanner
-              threshold={lowBalanceThreshold}
-              balanceUsd={balanceUsd as number}
-            />
-          )}
-          <ActionButtons />
-        </div>
-        {/* 工具状态：标题固定，列表可滚动 */}
-        <ToolStatusList boundTools={boundTools} />
-        {/* 固定区域：底部菜单 */}
-        <div className="shrink-0">
-          <BottomMenu />
-        </div>
+        )}
+        <AccountBalance
+          state={status?.state ?? "loggedout"}
+          balanceUsd={isActive ? balanceUsd : null}
+          onRefresh={refreshBalance}
+          refreshing={balanceRefreshing}
+        />
+        {showLowBalanceBanner && (
+          <BalanceWarningBanner
+            threshold={lowBalanceThreshold}
+            balanceUsd={balanceUsd as number}
+          />
+        )}
+        <ActionButtons />
       </div>
-    </div>
+      {/* 工具状态：标题固定，列表可滚动 */}
+      <ToolStatusList boundTools={boundTools} />
+      {/* 固定区域：底部菜单 */}
+      <div className="shrink-0">
+        <BottomMenu />
+      </div>
+    </PopoverFrame>
   );
 }
