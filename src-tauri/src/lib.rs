@@ -178,26 +178,12 @@ fn handle_deeplink_url(
     true
 }
 
-/// 更新托盘菜单的Tauri命令
+/// 前端在切换服务商、保存设置后调用。托盘左右键都打开 popover，不再把原生
+/// 菜单装回托盘：装上后右键会弹出旧菜单而不是 popover（见 `tray::refresh_tray_menu`）。
 #[tauri::command]
-async fn update_tray_menu(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppState>,
-) -> Result<bool, String> {
-    match tray::create_tray_menu(&app, state.inner()) {
-        Ok(new_menu) => {
-            if let Some(tray) = app.tray_by_id(tray::TRAY_ID) {
-                tray.set_menu(Some(new_menu))
-                    .map_err(|e| format!("更新托盘菜单失败: {e}"))?;
-                return Ok(true);
-            }
-            Ok(false)
-        }
-        Err(err) => {
-            log::error!("创建托盘菜单失败: {err}");
-            Ok(false)
-        }
-    }
+async fn update_tray_menu(app: tauri::AppHandle) -> Result<bool, String> {
+    tray::refresh_tray_menu(&app);
+    Ok(true)
 }
 
 #[cfg(target_os = "macos")]
