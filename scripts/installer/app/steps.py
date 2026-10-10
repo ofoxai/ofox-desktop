@@ -197,6 +197,66 @@ echo "npm 版本: $(npm --version)"
         return "Node.js 安装失败。请确保 nvm 已安装，然后手动运行: nvm install --lts"
 
 
+# ── 升级 Node.js（用户在 Ofox 里同意过）────────────────────────────────────────
+
+def _node_version() -> Optional[tuple]:
+    """新开终端里 `node --version` 的 (major, minor, patch)；没有 Node 时为 None。"""
+    result = subprocess.run(
+        login_shell_argv("node --version"),
+        env=login_shell_env(refresh_path=True),
+        capture_output=True,
+        text=True,
+        stdin=subprocess.DEVNULL,
+    )
+    match = re.match(r"v?(\d+)\.(\d+)\.(\d+)", result.stdout.strip())
+    if result.returncode != 0 or match is None:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+class NodeUpgradeStep(Step):
+    """
+    把 Node.js 升级到工具要求的版本，再继续装工具（fizzy #1021）。
+
+    命令由 Ofox 后端按 Node 的管理方式生成（fnm / nvm / volta / Homebrew），已经
+    包含「重新安装因切换版本而消失的工具」；这里只负责执行，并确认升级后的版本
+    确实落在要求的范围里。
+    """
+
+    name = "升级 Node.js"
+    description = "工具要求更新的 Node.js 版本"
+    needs_terminal = True
+    timeout = 1200
+    poll_interval = 3.0
+
+    def __init__(self, command: str, minimum: str, below: Optional[int], manual: str) -> None:
+        self.command = command
+        self.minimum = tuple(int(part) for part in minimum.split("."))
+        self.minimum_text = minimum
+        self.below = below
+        self.manual = manual
+
+    def check(self) -> bool:
+        version = _node_version()
+        if version is None:
+            return False
+        return version >= self.minimum and (self.below is None or version[0] < self.below)
+
+    def terminal_command(self) -> str:
+        return f"""
+echo "升级 Node.js（Ofox 安装的工具要求 {self.minimum_text} 或更新）..."
+echo ""
+
+{self.command}
+
+echo ""
+echo "Node.js 版本: $(node --version)"
+""".strip()
+
+    def failure_hint(self) -> str:
+        return f"Node.js 没能升级到 {self.minimum_text} 或更新。可以手动运行: {self.manual}"
+
+
 # ── Step 3: 国内镜像配置 ─────────────────────────────────────────────────────
 
 class MirrorsStep(Step):
@@ -304,7 +364,11 @@ echo "{self.bin_name} 版本: $({self.bin_name} --version 2>/dev/null || echo '?
 """.strip()
 
     def failure_hint(self) -> str:
-        return f"{self.name} 安装失败。请手动运行: npm install -g {self.npm_pkg}"
+        # 原来提示「请手动运行 npm install -g …」：同一个 Node 下手动运行同样会失败。
+        return (
+            f"{self.name} 安装失败，原因见保留的终端窗口。常见原因：Node.js 版本低于"
+            f"它的要求，或无法访问 npm。"
+        )
 
 
 class CurlInstallerStep(Step):

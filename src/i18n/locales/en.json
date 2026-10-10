@@ -5,7 +5,29 @@
     "notInstalled": "Could not find {{tool}}. Install it first or check where it is installed."
   },
   "toolInstall": {
-    "exitCode": "Installation did not finish (exit code {{code}}); please retry"
+    "exitCode": "Installation did not finish (exit code {{code}}); please retry",
+    "nodeUpgrade": {
+      "title": "{{tool}} needs a newer Node.js",
+      "body": "The latest {{tool}} requires Node.js {{required}}; this computer has {{current}} ({{manager}}).",
+      "willRun": "Ofox will run this in a terminal:",
+      "needsAdmin": "Administrator approval is needed; the system will ask for it.",
+      "reinstall": "After switching Node.js versions, {{tools}} must be reinstalled; Ofox will do that too.",
+      "listSeparator": ", ",
+      "confirm": "Upgrade Node.js and install",
+      "manualOnly": "Ofox can't upgrade a Node.js installed this way. Upgrade it yourself, then install again:",
+      "ok": "Got it",
+      "manager": {
+        "fnm": "managed by fnm",
+        "nvm": "managed by nvm",
+        "nvm-windows": "managed by nvm-windows",
+        "volta": "managed by Volta",
+        "homebrew": "installed with Homebrew",
+        "nodejs": "installed with the official Node.js installer",
+        "asdf": "managed by asdf",
+        "mise": "managed by mise",
+        "unknown": "installed in an unknown way"
+      }
+    }
   },
   "unbind": {
     "button": "Unbind",

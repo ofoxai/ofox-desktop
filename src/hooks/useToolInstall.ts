@@ -2,6 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import i18n from "i18next";
+import {
+  checkToolNodeRequirement,
+  type NodeRequirement,
+} from "@/lib/api/nodeRequirement";
 
 /**
  * 调 Rust `install_tool` command，并订阅 `install-tool-log` /
@@ -124,6 +128,31 @@ export interface UseToolInstall {
    * 因为那部分跑在 osascript 弹出的独立 Terminal 里，与主进程没有管道关系。
    */
   progress: Record<string, InstallProgress>;
+  /**
+   * 工具要求更新的 Node.js：先停下来让用户确认（`NodeUpgradeDialog`），不悄悄升级
+   * ——Node 是整台电脑共用的。没有 Node 时不问，安装器会自动装。
+   */
+  nodePrompt: NodePrompt | null;
+  /** 用户同意升级 Node.js，接着安装。 */
+  confirmNodeUpgrade: () => Promise<void>;
+  dismissNodePrompt: () => void;
+}
+
+export interface NodePrompt {
+  toolId: string;
+  requirement: NodeRequirement;
+}
+
+/** 检查本身失败（离线、超时）就照常安装，不拦用户。 */
+async function nodeRequirementFor(
+  toolId: string,
+): Promise<NodeRequirement | null> {
+  try {
+    return await checkToolNodeRequirement(toolId);
+  } catch (e) {
+    console.warn(`[useToolInstall] Node.js 检查失败，照常安装 ${toolId}`, e);
+    return null;
+  }
 }
 
 export function useToolInstall(
@@ -135,6 +164,9 @@ export function useToolInstall(
     toolId: string;
     message: string;
   } | null>(null);
+  const [nodePrompt, setNodePrompt] = useState<
+    (NodePrompt & { skipEnv: boolean }) | null
+  >(null);
 
   // 把回调存进 ref，让 useEffect 的依赖列表保持空——否则 onDone 每次重渲染
   // 都会新建函数引用，导致 listen 不断重订阅（旧 listener 会泄漏，事件可能
@@ -202,7 +234,7 @@ export function useToolInstall(
   }, []);
 
   const install = useCallback(
-    async (toolId: string, skipEnv: boolean = false) => {
+    async (toolId: string, skipEnv: boolean = false, upgradeNode = false) => {
       // 幂等：同一工具已在装就直接 return，避免并发起两条 Terminal 窗口。
       let alreadyInstalling = false;
       setInstalling((prev) => {
@@ -220,8 +252,22 @@ export function useToolInstall(
       setError(null);
       delete reasonsRef.current[toolId];
 
+      if (!upgradeNode) {
+        const requirement = await nodeRequirementFor(toolId);
+        if (requirement?.status === "tooOld") {
+          setNodePrompt({ toolId, requirement, skipEnv });
+          setInstalling((prev) => {
+            if (!prev.has(toolId)) return prev;
+            const next = new Set(prev);
+            next.delete(toolId);
+            return next;
+          });
+          return;
+        }
+      }
+
       try {
-        await invoke<number>("install_tool", { toolId, skipEnv });
+        await invoke<number>("install_tool", { toolId, skipEnv, upgradeNode });
         // 真实完成态由 install-tool-done 事件兜底——这里 invoke resolve 时
         // 子进程已经退出，但事件 listener 也会被触发，去重交给上面的 has 检查。
       } catch (e) {
@@ -242,5 +288,24 @@ export function useToolInstall(
 
   const clearError = useCallback(() => setError(null), []);
 
-  return { installing, install, error, clearError, progress };
+  const confirmNodeUpgrade = useCallback(async () => {
+    if (!nodePrompt) return;
+    setNodePrompt(null);
+    await install(nodePrompt.toolId, nodePrompt.skipEnv, true);
+  }, [install, nodePrompt]);
+  const dismissNodePrompt = useCallback(() => setNodePrompt(null), []);
+
+  return {
+    installing,
+    install,
+    error,
+    clearError,
+    progress,
+    nodePrompt: nodePrompt && {
+      toolId: nodePrompt.toolId,
+      requirement: nodePrompt.requirement,
+    },
+    confirmNodeUpgrade,
+    dismissNodePrompt,
+  };
 }

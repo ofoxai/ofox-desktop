@@ -22,6 +22,7 @@ mod launch_tool;
 mod mcp;
 mod misc;
 mod model_fetch;
+pub(crate) mod node_requirement;
 pub(crate) mod ofox_apex;
 pub(crate) mod ofox_api_keys;
 pub(crate) mod ofox_auth;

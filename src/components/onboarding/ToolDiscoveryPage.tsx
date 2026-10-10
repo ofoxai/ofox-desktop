@@ -8,6 +8,7 @@ import {
   type ToolInstallationInfo,
 } from "@/lib/api/toolUpdates";
 import { ToolDiscoveryCard, type ToolStatus } from "./ToolDiscoveryCard";
+import NodeUpgradeDialog from "@/components/tools/NodeUpgradeDialog";
 
 interface ToolEntry {
   id: string;
@@ -168,6 +169,9 @@ export default function ToolDiscoveryPage({
     install,
     error: installError,
     progress: installProgress,
+    nodePrompt,
+    confirmNodeUpgrade,
+    dismissNodePrompt,
   } = useToolInstall((toolId, code) => {
     if (code === 0) {
       void detectTools();
@@ -270,6 +274,11 @@ export default function ToolDiscoveryPage({
           </button>
         </div>
       </div>
+      <NodeUpgradeDialog
+        prompt={nodePrompt}
+        onConfirm={() => void confirmNodeUpgrade()}
+        onCancel={dismissNodePrompt}
+      />
     </div>
   );
 }
