@@ -1710,6 +1710,26 @@ fn write_private_file(path: &std::path::Path, contents: &[u8]) -> std::io::Resul
     }
 }
 
+/// macOS / Linux「打开」CLI 的启动脚本。用 `open -a` 启动的第三方终端（Alacritty、
+/// WezTerm 等）从 `/` 开始，这时先回到主目录，和 Terminal.app 一样；终端自己配了
+/// 起始目录就不动。
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn unix_cli_launcher_script(label: &str, env_lines: &str, command_line: &str) -> String {
+    format!(
+        r#"#!/bin/bash
+trap 'rm -f -- "$0"' EXIT
+[ "$PWD" = / ] && cd "$HOME"
+echo "[ofox-switch] Starting: {label}"
+echo ""
+{env_lines}
+{command_line}
+echo ""
+echo "[ofox-switch] Command exited. Press any key to close."
+read -n 1 -s
+"#
+    )
+}
+
 /// macOS / Linux 服务商终端的启动脚本。`exec` 换掉 shell 后 EXIT trap 不会执行，
 /// 所以 Claude 退出后先删掉带 key 的配置和脚本本身；trap 只兜底中途关窗口的情况。
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -2223,19 +2243,7 @@ pub(crate) fn launch_terminal_running_with_env(
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     let script_file = {
         let env_lines = unix_launcher_env_lines(env_vars);
-        let content = format!(
-            r#"#!/bin/bash
-trap 'rm -f -- "$0"' EXIT
-echo "[ofox-switch] Starting: {label}"
-echo ""
-{env_lines}
-{cmd}
-echo ""
-echo "[ofox-switch] Command exited. Press any key to close."
-read -n 1 -s
-"#,
-            cmd = command_line,
-        );
+        let content = unix_cli_launcher_script(label, &env_lines, command_line);
         write_terminal_launcher(label, ".sh", &content)?
     };
 
@@ -3167,6 +3175,48 @@ mod provider_terminal_tests {
             "the provider key file must not outlive claude"
         );
         assert!(!script.exists());
+    }
+
+    /// The folder the CLI ran in, resolved (macOS `/var` is `/private/var`).
+    fn run_cli_launcher(from: &std::path::Path, home: &std::path::Path) -> std::path::PathBuf {
+        let script = home.join("launcher.sh");
+        std::fs::write(
+            &script,
+            unix_cli_launcher_script("Test", "", r#"pwd > "$HOME/where""#),
+        )
+        .unwrap();
+        // Its closing `read -n 1` fails on the empty stdin; only `where` matters.
+        std::process::Command::new("bash")
+            .arg(&script)
+            .current_dir(from)
+            .env("HOME", home)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        let ran_in = std::fs::read_to_string(home.join("where")).unwrap();
+        std::fs::canonicalize(ran_in.trim()).unwrap()
+    }
+
+    #[test]
+    fn a_cli_opened_from_the_root_folder_starts_in_home() {
+        // Terminals started with `open -a` (Alacritty, WezTerm…) begin in `/`.
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(
+            run_cli_launcher(std::path::Path::new("/"), home.path()),
+            std::fs::canonicalize(home.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_terminal_with_its_own_start_folder_keeps_it() {
+        let home = tempfile::tempdir().unwrap();
+        let project = home.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        assert_eq!(
+            run_cli_launcher(&project, home.path()),
+            std::fs::canonicalize(&project).unwrap()
+        );
     }
 
     #[test]
