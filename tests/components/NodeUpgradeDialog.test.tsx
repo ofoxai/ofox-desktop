@@ -5,6 +5,12 @@ import zh from "@/i18n/locales/zh.json";
 import NodeUpgradeDialog from "@/components/tools/NodeUpgradeDialog";
 import type { NodeRequirement } from "@/lib/api/nodeRequirement";
 
+const openExternal = vi.fn().mockResolvedValue(undefined);
+
+vi.mock("@/lib/api", () => ({
+  settingsApi: { openExternal: (url: string) => openExternal(url) },
+}));
+
 const requirement = (overrides: Partial<NodeRequirement>): NodeRequirement => ({
   status: "tooOld",
   required: ">=24.16.0 <25 || >=26.1.0",
@@ -14,15 +20,32 @@ const requirement = (overrides: Partial<NodeRequirement>): NodeRequirement => ({
   needsAdmin: false,
   reinstall: [],
   manual: "fnm install 24 && fnm default 24",
+  minimum: "24.16.0",
+  command: "fnm install 24 && fnm default 24 && fnm use 24",
   ...overrides,
 });
 
 beforeEach(() => {
   i18n.addResourceBundle("zh", "translation", zh, true, true);
+  openExternal.mockClear();
 });
 
 describe("NodeUpgradeDialog", () => {
-  it("explains the requirement, the command and the tools it reinstalls", () => {
+  it("compares the current Node.js with the minimum the tool needs", () => {
+    render(
+      <NodeUpgradeDialog
+        prompt={{ toolId: "openclaw", requirement: requirement({}) }}
+        onConfirm={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("安装 OpenClaw 前需要升级 Node.js")).toBeVisible();
+    expect(screen.getByText("24.15.0")).toBeVisible();
+    expect(screen.getByText("由 fnm 管理")).toBeVisible();
+    expect(screen.getByText("24.16.0")).toBeVisible();
+  });
+
+  it("lists the steps, and says why the other tools are reinstalled", () => {
     const onConfirm = vi.fn();
     render(
       <NodeUpgradeDialog
@@ -34,22 +57,47 @@ describe("NodeUpgradeDialog", () => {
         onCancel={vi.fn()}
       />,
     );
-    expect(screen.getByText("OpenClaw 需要更新的 Node.js")).toBeVisible();
+    const steps = screen.getAllByRole("listitem");
+    expect(steps.map((step) => step.querySelector("p")?.textContent)).toEqual([
+      "用 fnm 升级 Node.js",
+      "重新安装 Claude Code、Gemini",
+      "安装 OpenClaw",
+    ]);
     expect(
       screen.getByText(
-        "OpenClaw 最新版要求 Node.js >=24.16.0 <25 || >=26.1.0，你电脑上当前是 24.15.0（由 fnm 管理）。",
+        "fnm 给每个 Node.js 版本单独存放全局安装的工具，换了版本要重新装一遍才能继续用。它们的配置和登录不受影响。",
       ),
     ).toBeVisible();
-    expect(screen.getByText("fnm install 24 && fnm default 24")).toBeVisible();
-    expect(
-      screen.getByText(
-        "切换 Node.js 版本后，Claude Code、Gemini 需要重新安装，Ofox 会一并装好。",
-      ),
-    ).toBeVisible();
-    fireEvent.click(
-      screen.getByRole("button", { name: "升级 Node.js 并安装" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "升级并安装" }));
     expect(onConfirm).toHaveBeenCalled();
+  });
+
+  it("skips the reinstall step when nothing else depends on this Node.js", () => {
+    render(
+      <NodeUpgradeDialog
+        prompt={{ toolId: "openclaw", requirement: requirement({}) }}
+        onConfirm={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+  });
+
+  it("keeps the full command folded away until asked for", () => {
+    render(
+      <NodeUpgradeDialog
+        prompt={{ toolId: "openclaw", requirement: requirement({}) }}
+        onConfirm={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByText("fnm install 24 && fnm default 24 && fnm use 24"),
+    ).not.toBeVisible();
+    fireEvent.click(screen.getByText("查看要运行的命令"));
+    expect(
+      screen.getByText("fnm install 24 && fnm default 24 && fnm use 24"),
+    ).toBeVisible();
   });
 
   it("says when the upgrade asks for administrator approval", () => {
@@ -60,38 +108,62 @@ describe("NodeUpgradeDialog", () => {
           requirement: requirement({
             manager: "nodejs",
             needsAdmin: true,
-            manual: "winget install -e --id OpenJS.NodeJS.LTS",
+            command: "winget install -e --id OpenJS.NodeJS.LTS",
           }),
         }}
         onConfirm={vi.fn()}
         onCancel={vi.fn()}
       />,
     );
+    expect(screen.getByText("用 winget 升级 Node.js")).toBeVisible();
     expect(
       screen.getByText("需要管理员授权，系统会弹出授权窗口。"),
     ).toBeVisible();
   });
 
-  it("only explains how to upgrade by hand when Ofox cannot do it", () => {
+  it("falls back to the raw range when the minimum is unknown", () => {
+    render(
+      <NodeUpgradeDialog
+        prompt={{
+          toolId: "openclaw",
+          requirement: requirement({ minimum: null }),
+        }}
+        onConfirm={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getAllByText(/>=24\.16\.0 <25 \|\| >=26\.1\.0/)[0],
+    ).toBeVisible();
+  });
+
+  it("points to the Node.js website when Ofox cannot upgrade it", () => {
     const onCancel = vi.fn();
     render(
       <NodeUpgradeDialog
         prompt={{
           toolId: "openclaw",
           requirement: requirement({
-            manager: "unknown",
+            manager: "asdf",
             canUpgrade: false,
-            manual: "从 https://nodejs.org 下载安装",
+            command: null,
           }),
         }}
         onConfirm={vi.fn()}
         onCancel={onCancel}
       />,
     );
+    expect(screen.queryByRole("button", { name: "升级并安装" })).toBeNull();
+    expect(screen.queryByRole("listitem")).toBeNull();
     expect(
-      screen.queryByRole("button", { name: "升级 Node.js 并安装" }),
-    ).toBeNull();
-    expect(screen.getByText("从 https://nodejs.org 下载安装")).toBeVisible();
+      screen.getByText(
+        "Ofox 没法替你升级由 asdf 管理的 Node.js。请从 Node.js 官网下载安装最新的长期支持版，装好后再回来安装 OpenClaw。",
+      ),
+    ).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "打开 Node.js 官网" }));
+    expect(openExternal).toHaveBeenCalledWith(
+      "https://nodejs.org/zh-cn/download",
+    );
     fireEvent.click(screen.getByRole("button", { name: "知道了" }));
     expect(onCancel).toHaveBeenCalled();
   });

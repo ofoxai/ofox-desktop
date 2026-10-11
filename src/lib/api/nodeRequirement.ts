@@ -12,8 +12,12 @@ export interface NodeRequirement {
   needsAdmin: boolean;
   /** 升级后要重新安装的工具 id。 */
   reinstall: string[];
-  /** Ofox 会运行的命令，或用户自己升级的做法。 */
+  /** 用户自己升级的命令或做法。 */
   manual: string | null;
+  /** 至少要升到的版本（例如 `24.16.0`）；看不懂范围时为空。 */
+  minimum: string | null;
+  /** 同意后终端里运行的完整命令（含重装工具）；Ofox 升级不了时为空。 */
+  command: string | null;
 }
 
 export function checkToolNodeRequirement(

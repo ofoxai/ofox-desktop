@@ -35,6 +35,10 @@ pub struct NodeRequirement {
     pub reinstall: Vec<String>,
     /// 用户自己升级时可以运行的命令或做法。
     pub manual: Option<String>,
+    /// 至少要升到的版本（例如 `24.16.0`），给人看；范围看不懂时为空。
+    pub minimum: Option<String>,
+    /// 用户同意后终端里运行的完整命令（含重装工具）；Ofox 升级不了时为空。
+    pub command: Option<String>,
 }
 
 impl NodeRequirement {
@@ -48,6 +52,8 @@ impl NodeRequirement {
             needs_admin: false,
             reinstall: Vec::new(),
             manual: None,
+            minimum: None,
+            command: None,
         }
     }
 }
@@ -507,20 +513,19 @@ pub(crate) async fn check(tool: &str) -> NodeRequirement {
         Some(false) => {
             report.status = "tooOld";
             let manager = node_manager(&node.path, &node.real);
-            let plan = upgrade_plan(
-                manager,
-                &node.real,
-                upgrade_target(&range, &node.version),
-                windows,
-                winget_available(),
-            );
+            let target = upgrade_target(&range, &node.version);
+            let plan = upgrade_plan(manager, &node.real, target, windows, winget_available());
             report.manager = Some(manager);
+            report.minimum = target_bounds(&range, target).map(|(minimum, _)| minimum.to_string());
             report.can_upgrade = plan.command.is_some();
             report.needs_admin = plan.needs_admin;
             report.manual = Some(plan.manual);
             if plan.reinstalls {
                 report.reinstall = tools_beside(&node, tool).await;
             }
+            report.command = plan.command.map(|command| {
+                terminal_command(command, manager, target, &report.reinstall, windows)
+            });
         }
     }
     report
@@ -529,23 +534,31 @@ pub(crate) async fn check(tool: &str) -> NodeRequirement {
 /// 用户在 Ofox 里同意升级后，安装器要执行的升级。重新检查一遍，不用前端传来的内容。
 pub(crate) async fn upgrade_for_install(tool: &str) -> Result<NodeUpgrade, String> {
     let report = check(tool).await;
-    if report.status != "tooOld" || !report.can_upgrade {
-        return Err("当前不需要、或无法自动升级 Node.js，请刷新后重试。".into());
-    }
-    let node = current_node().await.ok_or("找不到 Node.js")?;
-    let range = report.required.clone().unwrap_or_default();
-    let target = upgrade_target(&range, &node.version);
-    let windows = cfg!(target_os = "windows");
-    let plan = upgrade_plan(
-        report.manager.unwrap_or("unknown"),
-        &node.real,
-        target,
-        windows,
-        winget_available(),
-    );
-    let mut command = plan.command.ok_or("无法自动升级 Node.js")?;
-    // fnm 切了默认版本后，这个终端里还是旧的；先切过来再重装旧版本下的工具。
-    if report.manager == Some("fnm") {
+    let command = match (report.status, report.command) {
+        ("tooOld", Some(command)) => command,
+        _ => return Err("当前不需要、或无法自动升级 Node.js，请刷新后重试。".into()),
+    };
+    let range = report.required.unwrap_or_default();
+    let target = upgrade_target(&range, report.current.as_deref().unwrap_or_default());
+    let (minimum, below) = target_bounds(&range, target).ok_or("看不懂工具要求的 Node.js 版本")?;
+    Ok(NodeUpgrade {
+        command,
+        minimum,
+        below,
+        manual: report.manual.unwrap_or_default(),
+    })
+}
+
+/// 用户同意后终端里跑的完整命令：先升级 Node；fnm 切了默认版本后这个终端里还是
+/// 旧的，要先切过来；再把旧版本下的工具装回来。
+pub(crate) fn terminal_command(
+    mut command: String,
+    manager: &str,
+    target: Option<u64>,
+    reinstall: &[String],
+    windows: bool,
+) -> String {
+    if manager == "fnm" {
         if let Some(target) = target {
             command.push_str(&format!(
                 "{}fnm use {target}",
@@ -553,8 +566,7 @@ pub(crate) async fn upgrade_for_install(tool: &str) -> Result<NodeUpgrade, Strin
             ));
         }
     }
-    let packages: Vec<&str> = report
-        .reinstall
+    let packages: Vec<&str> = reinstall
         .iter()
         .filter_map(|tool| super::tool_update::npm_package(tool))
         .collect();
@@ -572,13 +584,7 @@ pub(crate) async fn upgrade_for_install(tool: &str) -> Result<NodeUpgrade, Strin
             command.push_str(&format!(" && npm install -g {list}"));
         }
     }
-    let (minimum, below) = target_bounds(&range, target).ok_or("看不懂工具要求的 Node.js 版本")?;
-    Ok(NodeUpgrade {
-        command,
-        minimum,
-        below,
-        manual: plan.manual,
-    })
+    command
 }
 
 #[cfg(target_os = "windows")]
@@ -758,6 +764,38 @@ mod tests {
             assert_eq!(plan.command, None, "{manager}");
             assert!(plan.manual.contains("nodejs.org"));
         }
+    }
+
+    #[test]
+    fn the_terminal_switches_to_the_new_node_before_reinstalling_tools() {
+        let tools = ["gemini".to_string(), "opencode".to_string()];
+        assert_eq!(
+            terminal_command(
+                "fnm install 24 && fnm default 24".into(),
+                "fnm",
+                Some(24),
+                &tools,
+                false
+            ),
+            "fnm install 24 && fnm default 24 && fnm use 24 && npm install -g @google/gemini-cli@latest opencode-ai@latest"
+        );
+
+        let windows = terminal_command(
+            "nvm install 24; nvm use 24".into(),
+            "nvm-windows",
+            Some(24),
+            &tools,
+            true,
+        );
+        assert!(!windows.contains("fnm use"));
+        assert!(windows.ends_with(
+            "; npm.cmd install -g @google/gemini-cli@latest opencode-ai@latest; if ($LASTEXITCODE -ne 0) { throw '重新安装 @google/gemini-cli@latest opencode-ai@latest 失败' }"
+        ));
+
+        assert_eq!(
+            terminal_command("brew upgrade node".into(), "homebrew", Some(24), &[], false),
+            "brew upgrade node"
+        );
     }
 
     #[test]
