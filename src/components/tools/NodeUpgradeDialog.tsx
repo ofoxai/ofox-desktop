@@ -152,12 +152,17 @@ export default function NodeUpgradeDialog({
                       count: reinstall.length,
                     })}
                   >
-                    <p className="break-words">
-                      {reinstall
-                        .map((item) =>
-                          item.tool ? label(item.tool) : item.name,
-                        )
-                        .join(t("toolInstall.nodeUpgrade.listSeparator"))}
+                    {/* 每个名字不在中间断行（chrome-devtools-mcp 这类带连字符的名字），只在分隔符处换行。 */}
+                    <p>
+                      {reinstall.map((item, index) => (
+                        <span key={item.name}>
+                          {index > 0 &&
+                            t("toolInstall.nodeUpgrade.listSeparator")}
+                          <span className="whitespace-nowrap">
+                            {item.tool ? label(item.tool) : item.name}
+                          </span>
+                        </span>
+                      ))}
                     </p>
                     <p className="mt-1">
                       {t("toolInstall.nodeUpgrade.reinstallWhy", {

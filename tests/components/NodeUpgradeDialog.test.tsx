@@ -73,9 +73,9 @@ describe("NodeUpgradeDialog", () => {
       "把原来的 3 个全局工具装到新版本（版本不变）",
       "安装 OpenClaw",
     ]);
-    expect(
-      screen.getByText("Claude Code、@augmentcode/auggie、pnpm"),
-    ).toBeVisible();
+    expect(steps[1]).toHaveTextContent(
+      "Claude Code、@augmentcode/auggie、pnpm",
+    );
     expect(
       screen.getByText(
         "fnm 给每个 Node.js 版本单独存放全局安装的工具，不装回去的话，换版本后这些命令就找不到了。它们的配置和登录不受影响。",
