@@ -45,6 +45,15 @@
     "confirm": "Switch",
     "cancel": "Keep current region"
   },
+  "accountKeys": {
+    "loggedOut": "Signed out",
+    "loggedOutPaused": "Signed out. Your bound tools are paused and resume when you sign in again.",
+    "notRevoked": "The API key for {{tools}} could not be stopped on the server (you may be offline). Delete it in the Ofox console to stop it using this account's credits.",
+    "switched": "{{tools}} now use {{account}}'s credits.",
+    "switchedToCurrent": "{{tools}} now use this account's credits.",
+    "switchFailed": "{{tool}} still uses the previous account's API key: {{message}}",
+    "listSeparator": ", "
+  },
   "modelCompatibility": {
     "title": "Streaming compatibility",
     "checking": "Checking streaming compatibility…",

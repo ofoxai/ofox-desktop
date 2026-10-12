@@ -109,6 +109,24 @@ export async function ofoxIsAuthenticated(): Promise<boolean> {
   return invoke<boolean>("ofox_is_authenticated");
 }
 
-export async function ofoxLogout(): Promise<void> {
-  return invoke("ofox_logout");
+/** 退出登录时停用的 key（工具 id）；`notRevoked` 是服务器上没能吊销的。 */
+export interface LogoutReport {
+  stopped: string[];
+  notRevoked: string[];
+}
+
+/** 退出登录：先停用本账号在这台电脑上用的 API Key，工具保持绑定、暂停使用。 */
+export async function ofoxLogout(): Promise<LogoutReport> {
+  return invoke<LogoutReport>("ofox_logout");
+}
+
+export interface KeyReconcileReport {
+  /** 已经换成当前账号 key 的工具 id。 */
+  switched: string[];
+  failed: { tool: string; message: string }[];
+}
+
+/** 让已绑定的工具都用当前账号的 API Key（换了账号或退出过登录时才会真的换）。 */
+export async function ofoxReconcileToolKeys(): Promise<KeyReconcileReport> {
+  return invoke<KeyReconcileReport>("ofox_reconcile_tool_keys");
 }

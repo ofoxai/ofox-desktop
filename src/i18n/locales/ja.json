@@ -45,6 +45,15 @@
     "confirm": "切り替える",
     "cancel": "現在のリージョンを維持"
   },
+  "accountKeys": {
+    "loggedOut": "ログアウトしました",
+    "loggedOutPaused": "ログアウトしました。連携済みのツールは一時停止し、再ログインすると自動で再開します。",
+    "notRevoked": "{{tools}} の API キーをサーバーで停止できませんでした（オフラインの可能性があります）。Ofox コンソールで削除するまで、このアカウントの残高が使われます。",
+    "switched": "{{tools}} は {{account}} の残高を使うように切り替えました。",
+    "switchedToCurrent": "{{tools}} は現在のアカウントの残高を使うように切り替えました。",
+    "switchFailed": "{{tool}} はまだ以前のアカウントの API キーを使っています：{{message}}",
+    "listSeparator": "、"
+  },
   "modelCompatibility": {
     "title": "ストリーミング互換性",
     "checking": "ストリーミング互換性を確認中…",
