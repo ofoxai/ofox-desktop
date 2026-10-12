@@ -69,6 +69,9 @@ pub enum OfoxAuthState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OfoxUserInfo {
+    /// `/openapi/me` 的用户 id（形如 `user_abc`）。老版本缓存里没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub email: Option<String>,
     pub name: Option<String>,
     pub org_id: Option<String>,
@@ -101,6 +104,21 @@ pub struct OfoxUserInfo {
     pub spending: Option<OfoxSpending>,
 }
 
+impl OfoxUserInfo {
+    /// 这个账号的计费身份：组织 id 优先（余额接口给的比 `org_id` 可靠），
+    /// 再加上用户 id。
+    pub fn key_owner(&self) -> crate::settings::KeyOwner {
+        crate::settings::KeyOwner {
+            org_id: self
+                .balance
+                .as_ref()
+                .and_then(|balance| balance.organization_id.clone())
+                .or_else(|| self.org_id.clone()),
+            user_id: self.id.clone(),
+        }
+    }
+}
+
 /// Account wallet snapshot from `/openapi/orgs/me/balance`.
 ///
 /// All amounts are USD floating point — same convention as the ofox-chat
@@ -109,6 +127,9 @@ pub struct OfoxUserInfo {
 /// fail the whole balance fetch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OfoxBalance {
+    /// 余额所属的组织。API key 按组织计费，换账号时用它判断 key 还能不能用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
     #[serde(default)]
     pub balance: Option<f64>,
     #[serde(default)]
@@ -465,6 +486,7 @@ impl OfoxAuthManager {
                          profile; will be filled on next refresh."
                     );
                     OfoxUserInfo {
+                        id: None,
                         email: None,
                         name: None,
                         org_id: None,
@@ -880,6 +902,26 @@ impl OfoxAuthManager {
         self.user_info.try_read().ok().and_then(|ui| ui.clone())
     }
 
+    /// 当前登录的是哪个账号（API key 按它的组织计费）。没登录或还没取到
+    /// 用户信息时为 `None`。
+    pub async fn current_key_owner(&self) -> Option<crate::settings::KeyOwner> {
+        if *self.auth_state.read().await != OfoxAuthState::Active {
+            return None;
+        }
+        self.user_info
+            .read()
+            .await
+            .as_ref()
+            .map(OfoxUserInfo::key_owner)
+            .filter(|owner| owner.org_id.is_some() || owner.user_id.is_some())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_signed_in_for_test(&self, user: OfoxUserInfo) {
+        *self.user_info.write().await = Some(user);
+        *self.auth_state.write().await = OfoxAuthState::Active;
+    }
+
     /// Snapshot the current auth state and cached user info — the data the
     /// frontend needs to decide between "show profile", "show expired banner",
     /// and "show login page".
@@ -1260,6 +1302,37 @@ mod tests {
         );
         assert!(!manager.is_authenticated());
         assert!(manager.get_user_info().is_none());
+    }
+
+    #[tokio::test]
+    async fn api_keys_belong_to_the_billing_org_of_the_signed_in_user() {
+        // Bodies exactly as documented for /openapi/me and /openapi/orgs/me/balance.
+        let mut user: OfoxUserInfo = serde_json::from_str(
+            r#"{"id":"user_abc","email":"alice@example.com","name":"Alice","avatar_url":null,"role":"owner"}"#,
+        )
+        .unwrap();
+        user.balance = Some(
+            serde_json::from_str(
+                r#"{"organization_id":"org_xyz","balance":75.0,"total":100.0,"used":25.0,"currency":"USD"}"#,
+            )
+            .unwrap(),
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let manager = OfoxAuthManager::new_with_secret_store(
+            temp.path().to_path_buf(),
+            Arc::new(crate::ofox_secret::InMemoryStore::new()),
+        );
+        assert_eq!(manager.current_key_owner().await, None, "signed out");
+
+        manager.set_signed_in_for_test(user).await;
+        assert_eq!(
+            manager.current_key_owner().await,
+            Some(crate::settings::KeyOwner {
+                org_id: Some("org_xyz".into()),
+                user_id: Some("user_abc".into()),
+            })
+        );
     }
 
     /// 造一个"临期 AT + 可用 RT + Active"的 manager,复现刷新窗口内的状态。

@@ -147,6 +147,8 @@ mod tests {
                 key_start: None,
                 created_at: 1,
                 last_used_at: Some(2),
+                owner: None,
+                revoked: false,
             }],
             ..AppSettings::default()
         };

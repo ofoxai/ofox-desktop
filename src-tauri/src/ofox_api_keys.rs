@@ -112,8 +112,13 @@ pub async fn fetch_or_create_api_key_with_store<T: Into<BindableTool>>(
     manager: &Arc<RwLock<OfoxAuthManager>>,
 ) -> Result<String, ApiKeyError> {
     let tool = tool.into();
+    let current_owner = manager.read().await.current_key_owner().await;
     // CachedOk：命中直接返。ForceRefresh：跳过 keychain 走端点。
-    if matches!(mode, FetchMode::CachedOk) {
+    // 已停用的、别的账号的 key 不算命中：退出登录后换了账号，不能再用上一个
+    // 账号的额度。
+    let cached_usable =
+        settings::get_api_key_meta(tool).is_none_or(|meta| meta.usable_by(current_owner.as_ref()));
+    if matches!(mode, FetchMode::CachedOk) && cached_usable {
         match store.load(Slot::ApiKey { tool }) {
             Ok(Some(key)) => {
                 // Backfill：老 ApiKeyMeta 在加 `name` 字段之前签发，meta.name
@@ -142,16 +147,21 @@ pub async fn fetch_or_create_api_key_with_store<T: Into<BindableTool>>(
         }
     }
 
+    let (secret, meta) = create_unsaved(tool, current_owner, manager).await?;
+    save_key(&store, &secret, meta)?;
+    Ok(secret)
+}
+
+/// 用当前账号签发一把新 key，先不落盘：调用方确认工具配置写成功后再
+/// [`save_key`]，失败就 [`discard_remote`]，免得服务端留下没人用的 key。
+pub(crate) async fn create_unsaved(
+    tool: BindableTool,
+    owner: Option<settings::KeyOwner>,
+    manager: &Arc<RwLock<OfoxAuthManager>>,
+) -> Result<(String, ApiKeyMeta), ApiKeyError> {
     let name = default_key_name(tool);
     let created = call_create_endpoint(tool, &name, manager).await?;
-
-    // 先落 keychain 再落 settings：keychain 写失败时不希望 settings 里多一条
-    // 没有 key 本体的孤儿 meta（重启后 fetch 会再去 load → None → 又去创建
-    // 一把，旧的就泄漏在服务端了）。
-    store
-        .save(Slot::ApiKey { tool }, &created.secret)
-        .map_err(ApiKeyError::Storage)?;
-    settings::upsert_api_key_meta(ApiKeyMeta {
+    let meta = ApiKeyMeta {
         tool,
         key_id: created.key_id,
         // `name` 是我们 submit 给服务端的默认 name（`<tool> on <host>`），
@@ -162,10 +172,93 @@ pub async fn fetch_or_create_api_key_with_store<T: Into<BindableTool>>(
         key_start: created.key_start,
         created_at: chrono::Utc::now().timestamp(),
         last_used_at: None,
-    })
-    .map_err(|e| ApiKeyError::Storage(format!("settings: {e:?}")))?;
+        owner,
+        revoked: false,
+    };
+    Ok((created.secret, meta))
+}
 
-    Ok(created.secret)
+/// 落 keychain 和元数据。先落 keychain 再落 settings：keychain 写失败时不希望
+/// settings 里多一条没有 key 本体的孤儿 meta（重启后 fetch 会再去 load → None
+/// → 又去创建一把，旧的就泄漏在服务端了）。
+pub(crate) fn save_key(
+    store: &Arc<dyn SecretStore>,
+    secret: &str,
+    meta: ApiKeyMeta,
+) -> Result<(), ApiKeyError> {
+    store
+        .save(Slot::ApiKey { tool: meta.tool }, secret)
+        .map_err(ApiKeyError::Storage)?;
+    settings::upsert_api_key_meta(meta)
+        .map_err(|e| ApiKeyError::Storage(format!("settings: {e:?}")))
+}
+
+/// 在服务器上删掉一把当前账号的 key（尽力而为）：刚签发却没用上的，或换下来的旧 key。
+pub(crate) async fn discard_remote(key_id: &str, manager: &Arc<RwLock<OfoxAuthManager>>) {
+    let bearer = match manager.read().await.get_valid_access_token().await {
+        Ok(bearer) => bearer,
+        Err(e) => {
+            log::warn!("[ofox_api_keys] cannot delete key {key_id}: {e}");
+            return;
+        }
+    };
+    if let Err(e) = delete_remote(key_id, &bearer).await {
+        log::warn!("[ofox_api_keys] failed to delete key {key_id}: {e:?}");
+    }
+}
+
+/// 退出登录前调用（这时登录还有效）：在服务器上吊销本账号在这台电脑上用的
+/// key，并在本地标记停用，之后谁登录都不会再拿它们用。工具配置不动——登录后
+/// 换成当前账号的新 key。返回服务器上没能吊销的工具（例如没联网），这些 key
+/// 还能用，要提醒用户去 Ofox 控制台删除。
+pub async fn stop_keys_for_logout(manager: &Arc<RwLock<OfoxAuthManager>>) -> Vec<BindableTool> {
+    let bearer = manager.read().await.get_valid_access_token().await.ok();
+    let mut not_revoked = Vec::new();
+    for meta in settings::list_api_key_metas() {
+        if meta.revoked {
+            continue;
+        }
+        let revoked = match &bearer {
+            Some(bearer) => match delete_remote(&meta.key_id, bearer).await {
+                Ok(()) => true,
+                Err(e) => {
+                    log::warn!(
+                        "[ofox_api_keys] revoke {:?} on logout failed: {e:?}",
+                        meta.tool
+                    );
+                    false
+                }
+            },
+            None => false,
+        };
+        if !revoked {
+            not_revoked.push(meta.tool);
+        }
+        let tool = meta.tool;
+        if let Err(e) = settings::upsert_api_key_meta(ApiKeyMeta {
+            revoked: true,
+            ..meta
+        }) {
+            log::warn!("[ofox_api_keys] mark {tool:?} stopped failed: {e:?}");
+        }
+    }
+    not_revoked
+}
+
+/// 升级前创建的 key 没记账号：登录后记为当前账号（绝大多数用户从没换过账号）。
+pub fn adopt_unowned_keys(owner: &settings::KeyOwner) {
+    for meta in settings::list_api_key_metas() {
+        if meta.owner.is_some() || meta.revoked {
+            continue;
+        }
+        let tool = meta.tool;
+        if let Err(e) = settings::upsert_api_key_meta(ApiKeyMeta {
+            owner: Some(owner.clone()),
+            ..meta
+        }) {
+            log::warn!("[ofox_api_keys] record owner for {tool:?} failed: {e:?}");
+        }
+    }
 }
 
 /// 标记某把 key 刚被 bind 到工具——更新 `last_used_at`。失败只 warn，不影响
@@ -227,17 +320,22 @@ pub async fn revoke_remote<T: Into<BindableTool>>(
         .await
         .map_err(|e| ApiKeyError::Unauthorized(e.to_string()))?;
 
-    let url = crate::ofox_apex::openapi_api_key_url(&meta.key_id);
+    delete_remote(&meta.key_id, &bearer).await?;
+    revoke_local(tool).await
+}
+
+/// `DELETE /openapi/api-keys/{id}`。404 视为成功（服务端已经没有这把 key）。
+async fn delete_remote(key_id: &str, bearer: &str) -> Result<(), ApiKeyError> {
+    let url = crate::ofox_apex::openapi_api_key_url(key_id);
     let resp = crate::proxy::http_client::get()
         .delete(url)
-        .bearer_auth(&bearer)
+        .bearer_auth(bearer)
         .send()
         .await
         .map_err(|e| ApiKeyError::RemoteRejected(format!("network: {e}")))?;
 
     let status = resp.status();
     if status.is_success() || status == StatusCode::NOT_FOUND {
-        revoke_local(tool).await?;
         return Ok(());
     }
     if status == StatusCode::UNAUTHORIZED {

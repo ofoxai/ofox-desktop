@@ -1618,6 +1618,7 @@ pub fn run() {
             commands::ofox_auth::ofox_get_auth_status,
             commands::ofox_auth::ofox_is_authenticated,
             commands::ofox_auth::ofox_logout,
+            commands::ofox_auth::ofox_reconcile_tool_keys,
             commands::ofox_auth::ofox_request_reauth,
             commands::ofox_auth::ofox_bind_tool,
             commands::ofox_auth::ofox_restore_tool_binding,

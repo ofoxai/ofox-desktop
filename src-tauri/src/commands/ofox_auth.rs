@@ -88,11 +88,27 @@ pub async fn ofox_is_authenticated(state: State<'_, OfoxAuthState>) -> Result<bo
 }
 
 /// Log out from Ofox (clears tokens and persisted state).
+///
+/// 先趁登录还有效，把本账号在这台电脑上用的 API key 停掉（服务器上吊销），
+/// 工具保持绑定但暂停使用；登录后由 [`ofox_reconcile_tool_keys`] 换上当前账号
+/// 的新 key。切换地区也会退出登录，但走的是 `manager.logout()`，不停 key。
 #[tauri::command(rename_all = "camelCase")]
-pub async fn ofox_logout(state: State<'_, OfoxAuthState>) -> Result<(), String> {
-    let mut manager = state.0.write().await;
-    manager.logout();
-    Ok(())
+pub async fn ofox_logout(
+    state: State<'_, OfoxAuthState>,
+) -> Result<crate::services::account_keys::LogoutReport, String> {
+    let report = crate::services::account_keys::stop_for_logout(&state.0).await;
+    state.0.write().await.logout();
+    Ok(report)
+}
+
+/// 登录后、进入主页时调用：已绑定的工具如果用的不是当前账号的 key（换了账号，
+/// 或退出时停用了），换成当前账号新签发的 key。没有要换的时不访问网络。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn ofox_reconcile_tool_keys(
+    state: State<'_, AppState>,
+    ofox_state: State<'_, OfoxAuthState>,
+) -> Result<crate::services::account_keys::KeyReconcileReport, String> {
+    Ok(crate::services::account_keys::reconcile(&state.db, &ofox_state.0).await)
 }
 
 /// Show the main window and emit `ofox-reauth-requested` so the renderer

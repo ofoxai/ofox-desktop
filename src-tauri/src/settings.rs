@@ -210,6 +210,51 @@ pub struct ApiKeyMeta {
     /// （刚创建尚未 bind）。每次 bind 成功时由调用方更新。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_used_at: Option<i64>,
+    /// 创建这把 key 的账号。key 按组织计费，换了账号就不能再用。`None` 是升级前
+    /// 创建的，登录后记为当前账号。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<KeyOwner>,
+    /// 退出登录时已停用（服务器上吊销，或至少本地不再使用）。工具配置里还留着
+    /// 它，登录后换成当前账号的新 key；keychain 里保留原文，用来核对配置没被改过。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub revoked: bool,
+}
+
+impl ApiKeyMeta {
+    /// 当前账号能不能直接用这把缓存的 key：没停用，而且不是别的账号的。
+    /// 判断不了（老数据、还没取到账号信息）时照旧可用。
+    pub fn usable_by(&self, current: Option<&KeyOwner>) -> bool {
+        if self.revoked {
+            return false;
+        }
+        match (self.owner.as_ref(), current) {
+            (Some(owner), Some(current)) => owner.same_account(current) != Some(false),
+            _ => true,
+        }
+    }
+}
+
+/// 一把 Ofox API key 属于哪个账号。按组织计费，所以优先比组织。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyOwner {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+}
+
+impl KeyOwner {
+    /// 两边都知道组织就比组织（同组织共用余额），否则比用户；都比不了返回 `None`。
+    pub fn same_account(&self, other: &KeyOwner) -> Option<bool> {
+        match (&self.org_id, &other.org_id) {
+            (Some(a), Some(b)) => Some(a == b),
+            _ => match (&self.user_id, &other.user_id) {
+                (Some(a), Some(b)) => Some(a == b),
+                _ => None,
+            },
+        }
+    }
 }
 
 /// 应用设置结构
@@ -1012,7 +1057,64 @@ mod api_key_meta_tests {
             key_start: None,
             created_at: 1_700_000_000,
             last_used_at: None,
+            owner: None,
+            revoked: false,
         }
+    }
+
+    fn owner(org: Option<&str>, user: Option<&str>) -> KeyOwner {
+        KeyOwner {
+            org_id: org.map(str::to_string),
+            user_id: user.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn accounts_in_the_same_org_share_keys_and_others_do_not() {
+        let alice = owner(Some("org_a"), Some("user_alice"));
+        let bob_same_org = owner(Some("org_a"), Some("user_bob"));
+        let bob_other_org = owner(Some("org_b"), Some("user_bob"));
+        assert_eq!(alice.same_account(&bob_same_org), Some(true));
+        assert_eq!(alice.same_account(&bob_other_org), Some(false));
+        // Without an org on one side, fall back to the user.
+        assert_eq!(
+            owner(None, Some("user_alice")).same_account(&bob_other_org),
+            Some(false)
+        );
+        assert_eq!(owner(None, None).same_account(&alice), None);
+    }
+
+    #[test]
+    fn a_cached_key_is_usable_only_by_its_account_and_not_after_logout() {
+        let alice = owner(Some("org_a"), Some("user_alice"));
+        let bob = owner(Some("org_b"), Some("user_bob"));
+        let key = ApiKeyMeta {
+            owner: Some(alice.clone()),
+            ..sample_meta(AppType::Claude, "key-a")
+        };
+        assert!(key.usable_by(Some(&alice)));
+        assert!(!key.usable_by(Some(&bob)));
+        // Unknown current account: keep today's behaviour.
+        assert!(key.usable_by(None));
+
+        let revoked = ApiKeyMeta {
+            revoked: true,
+            ..key.clone()
+        };
+        assert!(!revoked.usable_by(Some(&alice)));
+
+        // Keys created before ownership was recorded stay usable until adopted.
+        assert!(sample_meta(AppType::Claude, "legacy").usable_by(Some(&bob)));
+    }
+
+    #[test]
+    fn older_settings_without_owner_fields_still_load() {
+        let legacy = r#"{"tool":"claude","keyId":"k","createdAt":1}"#;
+        let meta: ApiKeyMeta = serde_json::from_str(legacy).expect("legacy meta");
+        assert_eq!(meta.owner, None);
+        assert!(!meta.revoked);
+        let saved = serde_json::to_string(&meta).unwrap();
+        assert!(!saved.contains("revoked"), "{saved}");
     }
 
     #[test]
