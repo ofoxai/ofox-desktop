@@ -14,7 +14,7 @@
       "stepsTitle": "Ofox 会在终端里依次完成：",
       "stepUpgrade": "用 {{manager}} 升级 Node.js",
       "needsAdmin": "需要管理员授权，系统会弹出授权窗口。",
-      "stepReinstall": "把原来的 {{count}} 个全局工具装到新版本（版本不变）",
+      "stepReinstall": "把原来的 {{count}} 个全局工具装到新的 Node.js 里（工具版本不变）",
       "reinstallWhy": "{{manager}} 给每个 Node.js 版本单独存放全局安装的工具，不装回去的话，换版本后这些命令就找不到了。它们的配置和登录不受影响。",
       "stepInstall": "安装 {{tool}}",
       "showCommand": "查看要运行的命令",

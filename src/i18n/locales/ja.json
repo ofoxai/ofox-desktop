@@ -14,7 +14,7 @@
       "stepsTitle": "Ofox がターミナルで次の順に実行します：",
       "stepUpgrade": "{{manager}} で Node.js を更新",
       "needsAdmin": "管理者の承認が必要です。システムが確認を求めます。",
-      "stepReinstall": "これまでのグローバルツール {{count}} 個を新しいバージョンに入れ直す（バージョンは同じ）",
+      "stepReinstall": "これまでのグローバルツール {{count}} 個を新しい Node.js に入れ直す（ツールのバージョンは同じ）",
       "reinstallWhy": "{{manager}} は Node.js のバージョンごとにグローバルツールを別々に保存するため、入れ直さないと切り替え後にこれらのコマンドが見つからなくなります。設定とログイン状態はそのまま残ります。",
       "stepInstall": "{{tool}} をインストール",
       "showCommand": "実行するコマンドを表示",

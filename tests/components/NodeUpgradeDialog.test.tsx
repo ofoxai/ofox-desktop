@@ -70,7 +70,7 @@ describe("NodeUpgradeDialog", () => {
     const steps = screen.getAllByRole("listitem");
     expect(steps.map((step) => step.querySelector("p")?.textContent)).toEqual([
       "用 fnm 升级 Node.js",
-      "把原来的 3 个全局工具装到新版本（版本不变）",
+      "把原来的 3 个全局工具装到新的 Node.js 里（工具版本不变）",
       "安装 OpenClaw",
     ]);
     expect(steps[1]).toHaveTextContent(
