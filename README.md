@@ -8,7 +8,40 @@
 git clone --branch test-builds --single-branch --depth 1 https://github.com/ofoxai/ofox-desktop.git ofox-test-builds
 ```
 
-## 1.3.4-49b2dab（Node.js 版本检查 + 钥匙串授权提示 + 切回窗口不再转圈，待验证）
+## 1.3.4-cb770ee（Node.js 升级弹窗新样式，待验证）
+
+源码：临时集成分支 `ci/test-installers` @ `cb770ee8` = 1.3.4-49b2dab + PR #41 的新提交 `b505d230`。#40、#42 和 49b2dab 相同。应用里显示的版本仍然是 1.3.4。
+
+| PR | 和 1.3.4-49b2dab 相比 |
+|---|---|
+| #41 | Node.js 升级弹窗改版（Fizzy #1021）：上面是「当前版本 → 最低要求」的对比，下面按顺序列出 Ofox 要做的几步（升级 Node.js → 重新安装其它工具 → 安装 OpenClaw），并说明为什么要重装其它工具。完整命令折叠在「查看要运行的命令」里，命令里也包含了重装步骤。Ofox 没法代为升级时，提供「打开 Node.js 官网」按钮。按钮改为 Ofox 的橙色。 |
+| #40、#42 | 没有变化，说明见下面的 1.3.4-49b2dab。 |
+
+| 文件 | 平台 | 说明 |
+|---|---|---|
+| `ofox_desktop_1.3.4_macos_aarch64.dmg` | macOS 12+，Apple Silicon | 公司证书（NICE TALK PTE. LTD.）签名，已通过 Apple 公证并附上公证票据，双击就能打开（离线也可以） |
+| `ofox_desktop_1.3.4_windows_x64-setup.exe` | Windows 10/11 x64 | NSIS，未签名，默认按当前用户安装 |
+| `ofox_desktop_1.3.4_windows_x64_en-US.msi` | Windows 10/11 x64 | MSI，仅用于验证能否安装，不会发布 |
+
+安装前先从菜单栏 / 托盘弹窗里点「退出 Ofox」。校验文件 `1.3.4-cb770ee/SHA256SUMS.txt`。
+
+在 macOS 上请看：
+
+1. **确认装的是新包**：弹窗标题应该是「安装 OpenClaw 前需要升级 Node.js」，下面有版本对比卡片，按钮是橙色的。如果还是「OpenClaw 需要更新的 Node.js」和蓝色按钮，说明装的还是旧包。
+2. **钥匙串不再弹（#1022）**：从 1.3.4-49b2dab 或正式版 1.3.4 换成这个包，都是同一张公司证书签名，打开后不应弹钥匙串授权，账号和已绑定的工具照常显示。
+3. **Node.js 太旧时说清原因（#1021）**：fnm 默认 Node.js 是 24.15.0 时，在 Ofox 里安装或修复 OpenClaw，弹窗显示：当前版本 24.15.0（由 fnm 管理）→ 最低要求 24.16.0；三步分别是「用 fnm 升级 Node.js」「重新安装 Claude Code、Codex、Gemini、OpenCode」（附原因：配置和登录不受影响）「安装 OpenClaw」。展开「查看要运行的命令」，能看到完整命令和 OpenClaw 支持的版本范围 `>=24.16.0 <25 || >=26.1.0`。
+4. 点「取消」：不安装，也不改 Node.js。
+5. 点「升级并安装」：终端里依次升级 Node.js、重装上面那几个工具、安装 OpenClaw；完成后 Ofox 里 OpenClaw 显示已安装，Claude Code、Codex、Gemini CLI、OpenCode 仍能正常打开和对话。想退回原来的 Node.js，可以运行 `fnm default 24.15.0`。
+6. 安装失败时终端窗口保留，Ofox 显示具体原因，不再出现「请手动运行 npm install」。
+7. 拒绝钥匙串授权后的提示（#1022）和切回窗口（#40）：测法同下面 1.3.4-49b2dab 的第 2 条和第 7 条。
+
+在 Windows 上请看：
+
+1. 用官方安装包装的旧版 Node.js（例如 22.x）时安装 OpenClaw：弹窗显示版本对比，第 1 步「用 winget 升级 Node.js」下面注明需要管理员授权。同意后 PowerShell 窗口里先升级 Node.js，再安装 OpenClaw。nvm-windows 管理的 Node.js 同样会提示需要管理员授权，并在第 2 步列出要重装的工具。
+2. 切回窗口不再整页转圈。
+3. 其余检查项同下面 1.3.4-3cf6d39 的清单。
+
+## 1.3.4-49b2dab（Node.js 版本检查 + 钥匙串授权提示 + 切回窗口不再转圈，已被 1.3.4-cb770ee 取代）
 
 源码：临时集成分支 `ci/test-installers` @ `49b2dab0` = 正式版 1.3.4 之后的 main（`b9e80851`）+ 三个 PR。应用里显示的版本仍然是 1.3.4。
 
