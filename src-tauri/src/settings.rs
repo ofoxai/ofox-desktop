@@ -257,6 +257,25 @@ impl KeyOwner {
     }
 }
 
+/// 本地已不再使用、服务器上却可能还能用的 key（例如退出登录时没联网，没删掉）。
+/// 只有它所属的账号能删，等那个账号在这台电脑上登录时删掉。不含 key 本体。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyToDelete {
+    pub key_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<KeyOwner>,
+}
+
+impl KeyToDelete {
+    /// 当前账号该不该去删它。没记账号的老 key 交给登录的账号试。
+    pub fn deletable_by(&self, current: &KeyOwner) -> bool {
+        self.owner
+            .as_ref()
+            .is_none_or(|owner| owner.same_account(current) != Some(false))
+    }
+}
+
 /// 应用设置结构
 ///
 /// 存储设备级别设置，保存在本地 `~/.ofox-desktop/settings.json`，不随数据库同步。
@@ -431,6 +450,9 @@ pub struct AppSettings {
     /// 是空 Vec，向后兼容。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ofox_api_keys: Vec<ApiKeyMeta>,
+    /// 等对应账号登录时要在服务器上删掉的 key，见 [`KeyToDelete`]。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ofox_keys_to_delete: Vec<KeyToDelete>,
 }
 
 fn default_show_in_tray() -> bool {
@@ -490,6 +512,7 @@ impl Default for AppSettings {
             ofox_apex_resolved: None,
             ofox_apex_pinned: None,
             ofox_api_keys: Vec::new(),
+            ofox_keys_to_delete: Vec::new(),
         }
     }
 }
@@ -1040,6 +1063,62 @@ pub fn remove_api_key_meta<T: Into<BindableTool>>(tool: T) -> Result<(), AppErro
     })
 }
 
+/// 记下一把等它的账号登录时要删的 key。同一个 key 只记一次。
+pub fn queue_key_deletion(key: KeyToDelete) -> Result<(), AppError> {
+    mutate_settings(|s| {
+        if !s.ofox_keys_to_delete.iter().any(|k| k.key_id == key.key_id) {
+            s.ofox_keys_to_delete.push(key);
+        }
+    })
+}
+
+pub fn list_keys_to_delete() -> Vec<KeyToDelete> {
+    settings_store()
+        .read()
+        .map(|s| s.ofox_keys_to_delete.clone())
+        .unwrap_or_default()
+}
+
+/// 服务器上已经删掉了，不用再记。
+pub fn forget_key_deletion(key_id: &str) -> Result<(), AppError> {
+    mutate_settings(|s| {
+        s.ofox_keys_to_delete.retain(|k| k.key_id != key_id);
+    })
+}
+
+/// 测试专用：把 settings.json（以及同目录的 dev-secrets.json）放进临时 home，
+/// Drop 时还原环境变量并重新加载。环境变量是进程全局的，配合 `#[serial]` 用。
+#[cfg(test)]
+pub(crate) struct TempSettingsHome {
+    dir: tempfile::TempDir,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl TempSettingsHome {
+    pub(crate) fn new() -> Self {
+        let dir = tempfile::tempdir().expect("temp home");
+        let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+        // 先构造 guard：下面的断言失败也会还原环境变量。
+        let home = Self { dir, previous };
+        assert!(crate::config::get_app_config_dir().starts_with(home.dir.path()));
+        reload_settings().expect("reload settings");
+        home
+    }
+}
+
+#[cfg(test)]
+impl Drop for TempSettingsHome {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+        let _ = reload_settings();
+    }
+}
+
 #[cfg(test)]
 mod api_key_meta_tests {
     //! 这组测试只覆盖 helpers 对 `AppSettings.ofox_api_keys` 字段的纯函数
@@ -1115,6 +1194,24 @@ mod api_key_meta_tests {
         assert!(!meta.revoked);
         let saved = serde_json::to_string(&meta).unwrap();
         assert!(!saved.contains("revoked"), "{saved}");
+    }
+
+    #[test]
+    fn a_key_waiting_for_deletion_is_deleted_only_by_its_account() {
+        let alice = owner(Some("org_a"), Some("user_alice"));
+        let bob = owner(Some("org_b"), Some("user_bob"));
+        let key = KeyToDelete {
+            key_id: "key-a".into(),
+            owner: Some(alice.clone()),
+        };
+        assert!(key.deletable_by(&alice));
+        assert!(!key.deletable_by(&bob));
+        // Owner never recorded (legacy key): whoever signs in tries.
+        let legacy = KeyToDelete {
+            key_id: "legacy".into(),
+            owner: None,
+        };
+        assert!(legacy.deletable_by(&bob));
     }
 
     #[test]

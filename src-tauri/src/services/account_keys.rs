@@ -4,6 +4,9 @@
 //! 停掉（见 [`stop_for_logout`]）；登录后逐个检查已绑定的工具，不是当前账号的
 //! key 就换成当前账号新签发的（见 [`reconcile`]）。只换 key：先用旧 key 核对
 //! 配置没被用户改过，模型等其它设置一律不动；改过就停下来告诉用户。
+//!
+//! 服务器上没删掉的旧 key（退出时没联网、切换区域时没停等）记在待删列表里，
+//! 等它的账号在这台电脑上登录时删掉。
 
 use std::sync::Arc;
 
@@ -25,7 +28,8 @@ static RECONCILE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(()
 pub struct LogoutReport {
     /// 停用了 key 的工具（工具 id）。
     pub stopped: Vec<String>,
-    /// 服务器上没能吊销的（例如没联网）：这些 key 还能用，要提醒用户去控制台删。
+    /// 服务器上没能吊销的（例如没联网）：这些 key 还能用，直到这个账号下次登录时
+    /// 被自动删掉，要提醒用户。
     pub not_revoked: Vec<String>,
 }
 
@@ -114,16 +118,18 @@ pub async fn reconcile(
         return report;
     };
     crate::ofox_api_keys::adopt_unowned_keys(&owner);
+    crate::ofox_api_keys::delete_queued_keys(&owner, manager).await;
     let store = crate::ofox_secret::default_store();
     for meta in settings::list_api_key_metas() {
         let tool = meta.tool;
         match key_action(&meta, is_bound(db, tool).await, &owner) {
             KeyAction::Keep => {}
             KeyAction::DropStale => {
-                if let Err(e) =
-                    crate::ofox_api_keys::revoke_local_with_store(tool, store.clone()).await
-                {
-                    log::warn!("[account_keys] drop stale key for {tool:?} failed: {e:?}");
+                match crate::ofox_api_keys::revoke_local_with_store(tool, store.clone()).await {
+                    Ok(()) => crate::ofox_api_keys::queue_deletion_unless_stopped(&meta),
+                    Err(e) => {
+                        log::warn!("[account_keys] drop stale key for {tool:?} failed: {e:?}")
+                    }
                 }
             }
             KeyAction::Replace => match replace(db, manager, &store, &meta, &owner).await {
@@ -173,21 +179,13 @@ async fn replace(
         None => crate::workbuddy_config::replace_key(db, &new_key).await,
     };
     if let Err(error) = written {
-        crate::ofox_api_keys::discard_remote(&meta.key_id, manager).await;
+        crate::ofox_api_keys::discard_remote(&meta, manager).await;
         return Err(error);
     }
     crate::ofox_api_keys::save_key(store, &new_key, meta)
         .map_err(|e| format!("保存新 key 失败：{e}"))?;
     crate::ofox_api_keys::mark_key_used(tool);
-    // 同一个账号重新登录：退出时没能在服务器上吊销的旧 key 这时可以删掉。
-    // 别的账号的 key 删不了（没有它的登录），退出时已提示用户去控制台删。
-    let same_account = old
-        .owner
-        .as_ref()
-        .and_then(|previous| previous.same_account(owner));
-    if same_account == Some(true) {
-        crate::ofox_api_keys::discard_remote(&old.key_id, manager).await;
-    }
+    crate::ofox_api_keys::queue_deletion_unless_stopped(old);
     Ok(())
 }
 
@@ -232,6 +230,50 @@ mod tests {
         assert_eq!(
             key_action(&meta(Some(a.clone()), true), true, &a),
             KeyAction::Replace
+        );
+    }
+
+    /// 切换区域会退出登录但不停 key，于是换账号登录时可能遇到别的账号还能用的 key。
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn signing_in_keeps_a_dropped_live_key_of_another_account_for_deletion() {
+        let _home = crate::settings::TempSettingsHome::new();
+        let db = Database::memory().expect("db");
+        let user: crate::ofox_auth::OfoxUserInfo = serde_json::from_str(
+            r#"{"id":"user_a","email":"a@example.com","name":"A","org_id":"org_a"}"#,
+        )
+        .unwrap();
+        let manager = OfoxAuthManager::new_with_secret_store(
+            crate::config::get_app_config_dir(),
+            Arc::new(crate::ofox_secret::InMemoryStore::new()),
+        );
+        manager.set_signed_in_for_test(user).await;
+        let manager = Arc::new(RwLock::new(manager));
+        crate::ofox_secret::default_store()
+            .save(
+                Slot::ApiKey {
+                    tool: BindableTool::Codex,
+                },
+                "sk-of-B",
+            )
+            .unwrap();
+        settings::upsert_api_key_meta(ApiKeyMeta {
+            tool: BindableTool::Codex,
+            key_id: "key-b".into(),
+            ..meta(Some(org("org_b")), false)
+        })
+        .unwrap();
+
+        let report = reconcile(&db, &manager).await;
+
+        assert!(report.switched.is_empty() && report.failed.is_empty());
+        assert_eq!(settings::get_api_key_meta(BindableTool::Codex), None);
+        assert_eq!(
+            settings::list_keys_to_delete(),
+            [crate::settings::KeyToDelete {
+                key_id: "key-b".into(),
+                owner: Some(org("org_b")),
+            }]
         );
     }
 

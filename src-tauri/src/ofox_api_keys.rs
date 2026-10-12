@@ -18,6 +18,7 @@
 //! ——没法静默自愈。本模块通过 [`FetchMode::ForceRefresh`] 提供"跳过 keychain
 //! 命中、强制走端点重建"的入口；触发时机（401 兜底）由调用方决定。
 
+use std::future::Future;
 use std::sync::Arc;
 
 use reqwest::StatusCode;
@@ -28,7 +29,7 @@ use crate::app_config::BindableTool;
 use crate::error::AppError;
 use crate::ofox_auth::OfoxAuthManager;
 use crate::ofox_secret::{SecretStore, Slot};
-use crate::settings::{self, ApiKeyMeta};
+use crate::settings::{self, ApiKeyMeta, KeyOwner, KeyToDelete};
 
 /// 上层（command / bind 流程）能拿到的强类型错误。
 ///
@@ -116,8 +117,10 @@ pub async fn fetch_or_create_api_key_with_store<T: Into<BindableTool>>(
     // CachedOk：命中直接返。ForceRefresh：跳过 keychain 走端点。
     // 已停用的、别的账号的 key 不算命中：退出登录后换了账号，不能再用上一个
     // 账号的额度。
-    let cached_usable =
-        settings::get_api_key_meta(tool).is_none_or(|meta| meta.usable_by(current_owner.as_ref()));
+    let previous = settings::get_api_key_meta(tool);
+    let cached_usable = previous
+        .as_ref()
+        .is_none_or(|meta| meta.usable_by(current_owner.as_ref()));
     if matches!(mode, FetchMode::CachedOk) && cached_usable {
         match store.load(Slot::ApiKey { tool }) {
             Ok(Some(key)) => {
@@ -149,6 +152,10 @@ pub async fn fetch_or_create_api_key_with_store<T: Into<BindableTool>>(
 
     let (secret, meta) = create_unsaved(tool, current_owner, manager).await?;
     save_key(&store, &secret, meta)?;
+    // 覆盖掉的是别的账号的 key：它的记录没了，服务器上还能用的话等那个账号删。
+    if let Some(previous) = previous.filter(|_| !cached_usable) {
+        queue_deletion_unless_stopped(&previous);
+    }
     Ok(secret)
 }
 
@@ -156,7 +163,7 @@ pub async fn fetch_or_create_api_key_with_store<T: Into<BindableTool>>(
 /// [`save_key`]，失败就 [`discard_remote`]，免得服务端留下没人用的 key。
 pub(crate) async fn create_unsaved(
     tool: BindableTool,
-    owner: Option<settings::KeyOwner>,
+    owner: Option<KeyOwner>,
     manager: &Arc<RwLock<OfoxAuthManager>>,
 ) -> Result<(String, ApiKeyMeta), ApiKeyError> {
     let name = default_key_name(tool);
@@ -193,45 +200,53 @@ pub(crate) fn save_key(
         .map_err(|e| ApiKeyError::Storage(format!("settings: {e:?}")))
 }
 
-/// 在服务器上删掉一把当前账号的 key（尽力而为）：刚签发却没用上的，或换下来的旧 key。
-pub(crate) async fn discard_remote(key_id: &str, manager: &Arc<RwLock<OfoxAuthManager>>) {
-    let bearer = match manager.read().await.get_valid_access_token().await {
-        Ok(bearer) => bearer,
-        Err(e) => {
-            log::warn!("[ofox_api_keys] cannot delete key {key_id}: {e}");
-            return;
-        }
+/// 在服务器上删掉一把刚签发却没用上的 key；删不掉就等它的账号下次登录时再删。
+pub(crate) async fn discard_remote(meta: &ApiKeyMeta, manager: &Arc<RwLock<OfoxAuthManager>>) {
+    let deleted = match manager.read().await.get_valid_access_token().await {
+        Ok(bearer) => delete_remote(&meta.key_id, &bearer).await,
+        Err(e) => Err(ApiKeyError::Unauthorized(e.to_string())),
     };
-    if let Err(e) = delete_remote(key_id, &bearer).await {
-        log::warn!("[ofox_api_keys] failed to delete key {key_id}: {e:?}");
-    }
+    queue_unless_deleted(meta, None, deleted);
 }
 
 /// 退出登录前调用（这时登录还有效）：在服务器上吊销本账号在这台电脑上用的
 /// key，并在本地标记停用，之后谁登录都不会再拿它们用。工具配置不动——登录后
-/// 换成当前账号的新 key。返回服务器上没能吊销的工具（例如没联网），这些 key
-/// 还能用，要提醒用户去 Ofox 控制台删除。
+/// 换成当前账号的新 key。返回服务器上没能吊销的工具（例如没联网）：这些 key
+/// 还能用，直到这个账号下次在这台电脑上登录时被删掉（见 [`delete_queued_keys`]），
+/// 要提醒用户。
 pub async fn stop_keys_for_logout(manager: &Arc<RwLock<OfoxAuthManager>>) -> Vec<BindableTool> {
-    let bearer = manager.read().await.get_valid_access_token().await.ok();
+    let (bearer, current) = {
+        let manager = manager.read().await;
+        (
+            manager.get_valid_access_token().await.ok(),
+            manager.current_key_owner().await,
+        )
+    };
+    stop_keys_with(current.as_ref(), |key_id| {
+        let bearer = bearer.clone();
+        async move {
+            match bearer {
+                Some(bearer) => delete_remote(&key_id, &bearer).await,
+                None => Err(ApiKeyError::Unauthorized("signed out".into())),
+            }
+        }
+    })
+    .await
+}
+
+/// [`stop_keys_for_logout`] 的主体；删 key 的请求由调用方传入，测试不走网络。
+async fn stop_keys_with<F, Fut>(current: Option<&KeyOwner>, delete: F) -> Vec<BindableTool>
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Result<(), ApiKeyError>>,
+{
     let mut not_revoked = Vec::new();
     for meta in settings::list_api_key_metas() {
         if meta.revoked {
             continue;
         }
-        let revoked = match &bearer {
-            Some(bearer) => match delete_remote(&meta.key_id, bearer).await {
-                Ok(()) => true,
-                Err(e) => {
-                    log::warn!(
-                        "[ofox_api_keys] revoke {:?} on logout failed: {e:?}",
-                        meta.tool
-                    );
-                    false
-                }
-            },
-            None => false,
-        };
-        if !revoked {
+        let deleted = delete(meta.key_id.clone()).await;
+        if !queue_unless_deleted(&meta, current, deleted) {
             not_revoked.push(meta.tool);
         }
         let tool = meta.tool;
@@ -245,8 +260,93 @@ pub async fn stop_keys_for_logout(manager: &Arc<RwLock<OfoxAuthManager>>) -> Vec
     not_revoked
 }
 
+/// 服务器上没删掉的 key 记进待删列表，等它的账号登录时删；没记账号的老 key
+/// 记为 `fallback_owner`。返回是否删掉了。
+fn queue_unless_deleted(
+    meta: &ApiKeyMeta,
+    fallback_owner: Option<&KeyOwner>,
+    deleted: Result<(), ApiKeyError>,
+) -> bool {
+    let Err(e) = deleted else {
+        return true;
+    };
+    log::warn!(
+        "[ofox_api_keys] could not delete {:?} key {}: {e:?}",
+        meta.tool,
+        meta.key_id
+    );
+    queue_deletion(KeyToDelete {
+        key_id: meta.key_id.clone(),
+        owner: meta.owner.clone().or_else(|| fallback_owner.cloned()),
+    });
+    false
+}
+
+/// 本地要丢掉或覆盖一把 key 的记录时调用。没停用的 key 在服务器上还能用，记下来
+/// 等它的账号登录时删；已停用的要么删掉了，要么退出登录时已经记过。
+pub(crate) fn queue_deletion_unless_stopped(old: &ApiKeyMeta) {
+    if !old.revoked {
+        queue_deletion(KeyToDelete {
+            key_id: old.key_id.clone(),
+            owner: old.owner.clone(),
+        });
+    }
+}
+
+fn queue_deletion(key: KeyToDelete) {
+    if let Err(e) = settings::queue_key_deletion(key) {
+        log::warn!("[ofox_api_keys] remember key to delete failed: {e:?}");
+    }
+}
+
+/// 登录后调用：删掉等这个账号来删的 key（例如退出登录时没联网而没删掉的）。
+pub async fn delete_queued_keys(owner: &KeyOwner, manager: &Arc<RwLock<OfoxAuthManager>>) {
+    if !settings::list_keys_to_delete()
+        .iter()
+        .any(|key| key.deletable_by(owner))
+    {
+        return;
+    }
+    let bearer = match manager.read().await.get_valid_access_token().await {
+        Ok(bearer) => bearer,
+        Err(e) => {
+            log::warn!("[ofox_api_keys] cannot delete queued keys: {e}");
+            return;
+        }
+    };
+    delete_queued_keys_with(owner, |key_id| {
+        let bearer = bearer.clone();
+        async move { delete_remote(&key_id, &bearer).await }
+    })
+    .await;
+}
+
+/// [`delete_queued_keys`] 的主体；删 key 的请求由调用方传入，测试不走网络。
+async fn delete_queued_keys_with<F, Fut>(owner: &KeyOwner, delete: F)
+where
+    F: Fn(String) -> Fut,
+    Fut: Future<Output = Result<(), ApiKeyError>>,
+{
+    for key in settings::list_keys_to_delete() {
+        if !key.deletable_by(owner) {
+            continue;
+        }
+        match delete(key.key_id.clone()).await {
+            Ok(()) => {
+                if let Err(e) = settings::forget_key_deletion(&key.key_id) {
+                    log::warn!("[ofox_api_keys] forget deleted key failed: {e:?}");
+                }
+            }
+            Err(e) => log::warn!(
+                "[ofox_api_keys] delete queued key {} failed: {e:?}",
+                key.key_id
+            ),
+        }
+    }
+}
+
 /// 升级前创建的 key 没记账号：登录后记为当前账号（绝大多数用户从没换过账号）。
-pub fn adopt_unowned_keys(owner: &settings::KeyOwner) {
+pub fn adopt_unowned_keys(owner: &KeyOwner) {
     for meta in settings::list_api_key_metas() {
         if meta.owner.is_some() || meta.revoked {
             continue;
@@ -519,7 +619,9 @@ mod tests {
     use super::*;
     use crate::app_config::AppType;
     use crate::ofox_secret::InMemoryStore;
+    use crate::settings::TempSettingsHome;
     use serde_json::json;
+    use serial_test::serial;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -800,6 +902,142 @@ mod tests {
         // 长度上限：tool 前缀 ≤ 16 char + " on " 4 char + host 24 char = 44 char，
         // 远小于服务端 100 char 上限。
         assert!(name.len() <= 44, "name 超长 ({} chars): {name}", name.len());
+    }
+
+    // ─── 没删掉的 key：等它的账号登录时再删 ────────────────────────────────
+
+    fn org(id: &str) -> KeyOwner {
+        KeyOwner {
+            org_id: Some(id.into()),
+            user_id: None,
+        }
+    }
+
+    fn meta_of(tool: AppType, key_id: &str, owner: Option<KeyOwner>) -> ApiKeyMeta {
+        ApiKeyMeta {
+            tool: tool.into(),
+            key_id: key_id.into(),
+            name: None,
+            alias: None,
+            key_start: None,
+            created_at: 1,
+            last_used_at: None,
+            owner,
+            revoked: false,
+        }
+    }
+
+    fn waiting(key_id: &str, owner: Option<KeyOwner>) -> KeyToDelete {
+        KeyToDelete {
+            key_id: key_id.into(),
+            owner,
+        }
+    }
+
+    async fn offline(_key_id: String) -> Result<(), ApiKeyError> {
+        Err(ApiKeyError::RemoteRejected("network: offline".into()))
+    }
+
+    async fn deleted(_key_id: String) -> Result<(), ApiKeyError> {
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_key_not_stopped_at_logout_waits_for_its_account() {
+        let _home = TempSettingsHome::new();
+        settings::upsert_api_key_meta(meta_of(AppType::Claude, "key-a", Some(org("org_a"))))
+            .unwrap();
+
+        let not_revoked = stop_keys_with(Some(&org("org_a")), offline).await;
+
+        assert_eq!(not_revoked, [BindableTool::from(AppType::Claude)]);
+        assert_eq!(
+            settings::list_keys_to_delete(),
+            [waiting("key-a", Some(org("org_a")))]
+        );
+        assert!(settings::get_api_key_meta(AppType::Claude).unwrap().revoked);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_key_stopped_at_logout_is_not_kept_for_deletion() {
+        let _home = TempSettingsHome::new();
+        settings::upsert_api_key_meta(meta_of(AppType::Claude, "key-a", Some(org("org_a"))))
+            .unwrap();
+
+        let not_revoked = stop_keys_with(Some(&org("org_a")), deleted).await;
+
+        assert!(not_revoked.is_empty());
+        assert!(settings::list_keys_to_delete().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_legacy_key_not_stopped_at_logout_waits_for_the_account_signing_out() {
+        let _home = TempSettingsHome::new();
+        settings::upsert_api_key_meta(meta_of(AppType::Codex, "legacy", None)).unwrap();
+
+        stop_keys_with(Some(&org("org_a")), offline).await;
+
+        assert_eq!(
+            settings::list_keys_to_delete(),
+            [waiting("legacy", Some(org("org_a")))]
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn waiting_keys_are_deleted_when_their_account_signs_in() {
+        let _home = TempSettingsHome::new();
+        settings::queue_key_deletion(waiting("key-a", Some(org("org_a")))).unwrap();
+        settings::queue_key_deletion(waiting("key-b", Some(org("org_b")))).unwrap();
+        let attempted = std::sync::Mutex::new(Vec::new());
+
+        delete_queued_keys_with(&org("org_a"), |key_id| {
+            attempted.lock().unwrap().push(key_id.clone());
+            deleted(key_id)
+        })
+        .await;
+
+        assert_eq!(*attempted.lock().unwrap(), ["key-a"]);
+        assert_eq!(
+            settings::list_keys_to_delete(),
+            [waiting("key-b", Some(org("org_b")))]
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_waiting_key_stays_when_deleting_it_fails_again() {
+        let _home = TempSettingsHome::new();
+        settings::queue_key_deletion(waiting("key-a", Some(org("org_a")))).unwrap();
+
+        delete_queued_keys_with(&org("org_a"), offline).await;
+
+        assert_eq!(
+            settings::list_keys_to_delete(),
+            [waiting("key-a", Some(org("org_a")))]
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn dropping_a_record_keeps_only_a_key_that_was_never_stopped() {
+        let _home = TempSettingsHome::new();
+        let live = meta_of(AppType::Claude, "live", Some(org("org_b")));
+        let stopped = ApiKeyMeta {
+            revoked: true,
+            ..meta_of(AppType::Codex, "stopped", Some(org("org_b")))
+        };
+
+        queue_deletion_unless_stopped(&live);
+        queue_deletion_unless_stopped(&stopped);
+
+        assert_eq!(
+            settings::list_keys_to_delete(),
+            [waiting("live", Some(org("org_b")))]
+        );
     }
 
     // ─── helpers ─────────────────────────────────────────────────────────

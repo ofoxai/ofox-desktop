@@ -24,11 +24,11 @@ describe("logging out", () => {
     );
   });
 
-  it("asks to delete keys that could not be stopped on the server", () => {
+  it("says a key not stopped on the server is deleted at the next sign-in", () => {
     toast.warning.mockClear();
     announceLogout({ stopped: ["claude", "codex"], notRevoked: ["codex"] }, t);
     expect(toast.warning).toHaveBeenCalledWith(
-      "Codex 的 API Key 没能在服务器上停用（可能没联网），在 Ofox 控制台删除后才会停止使用这个账号的额度。",
+      "Codex 的 API Key 没能在服务器上停用（可能没联网），暂时还会用这个账号的额度。下次用这个账号在本机登录时会自动删除，也可以现在去 Ofox 控制台删除。",
       expect.anything(),
     );
   });
