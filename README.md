@@ -8,7 +8,36 @@
 git clone --branch test-builds --single-branch --depth 1 https://github.com/ofoxai/ofox-desktop.git ofox-test-builds
 ```
 
-## 1.3.4-7ae801b（工具卡片对齐 + 模型列表自动加载 + 去掉兼容性确认 + 余额不足提示，待验证）
+## 1.3.4-22022d0（升级 Node.js 时按原版本装回全部全局工具，待验证）
+
+源码：临时集成分支 `ci/test-installers` @ `22022d0b` = 1.3.4-7ae801b + PR #41 的两个新提交（`b765425f`、`3be87a07`）。应用里显示的版本仍然是 1.3.4。
+
+| PR | 和 1.3.4-7ae801b 相比 |
+|---|---|
+| #41 | 升级 Node.js 后，把旧版本下**所有**全局安装的工具按**原来的版本**装回新版本，不再只重装 Ofox 认识的 4 个、也不再顺手升级到最新版。只跳过 Node.js 自带的 npm、corepack。弹窗第 2 步写成「把原来的 N 个全局工具装到新版本（版本不变）」，下面列出全部工具。 |
+| #40、#42、#44 | 没有变化，说明见下面的 1.3.4-7ae801b 和更早的版本。 |
+
+| 文件 | 平台 | 说明 |
+|---|---|---|
+| `ofox_desktop_1.3.4_macos_aarch64.dmg` | macOS 12+，Apple Silicon | 公司证书（NICE TALK PTE. LTD.）签名，已通过 Apple 公证并附上公证票据，双击就能打开（离线也可以） |
+| `ofox_desktop_1.3.4_windows_x64-setup.exe` | Windows 10/11 x64 | NSIS，未签名，默认按当前用户安装 |
+| `ofox_desktop_1.3.4_windows_x64_en-US.msi` | Windows 10/11 x64 | MSI，仅用于验证能否安装，不会发布 |
+
+安装前先从菜单栏 / 托盘弹窗里点「退出 Ofox」。校验文件 `1.3.4-22022d0/SHA256SUMS.txt`。
+
+在 macOS 上请看（fnm 默认 Node.js 24.15.0）：
+
+1. 先记下现在的版本：终端运行 `npm ls -g --depth=0`。
+2. 在 Ofox 里安装或修复 OpenClaw，弹窗第 2 步是「把原来的 N 个全局工具装到新版本（版本不变）」，下面列出 Claude Code、Codex、Gemini、OpenCode 和其它全局工具（例如 @augmentcode/auggie、@larksuite/cli、pnpm），不含 npm、corepack。展开「查看要运行的命令」，每个包都写着具体版本号，例如 `'@anthropic-ai/claude-code@2.1.296'`，没有 `@latest`。
+3. 点「升级并安装」，完成后新开终端：`node -v` 是新的 24.x；`npm ls -g --depth=0` 里原来的工具都在、版本和第 1 步一样，另外多了 openclaw；`auggie`、`lark-cli`、`pnpm` 等命令都还能用。
+4. Claude Code、Codex 里配置的 MCP（例如 augment-context-engine）照常可用；Claude Code、Codex 的登录状态和配置不变。
+5. 想退回原来的 Node.js：`fnm default 24.15.0`。
+
+在 Windows 上请看：用 nvm-windows 或 fnm 管理的旧版 Node.js 时安装 OpenClaw，弹窗同样列出要装回去的全局工具，升级后它们都还在、版本不变。官方安装包装的 Node.js 换版本不影响全局工具，所以没有这一步。
+
+其余检查项同下面的 1.3.4-7ae801b。
+
+## 1.3.4-7ae801b（工具卡片对齐 + 模型列表自动加载 + 去掉兼容性确认 + 余额不足提示，已被 1.3.4-22022d0 取代）
 
 源码：临时集成分支 `ci/test-installers` @ `7ae801be` = 1.3.4-cb770ee + PR #44。应用里显示的版本仍然是 1.3.4。
 
