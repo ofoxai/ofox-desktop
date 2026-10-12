@@ -1361,6 +1361,76 @@ fn tool_executable_candidates(tool: &str, dir: &Path) -> Vec<std::path::PathBuf>
     }
 }
 
+/// 版本号按数值比较（v10 > v9）；解析不了的排最后。
+fn node_version_key(name: &str) -> Vec<u64> {
+    name.trim_start_matches('v')
+        .split('.')
+        .map(|part| part.parse().unwrap_or(0))
+        .collect()
+}
+
+/// `root` 下每个 Node 版本目录的 `<suffix>`，新版本在前。
+fn versioned_bin_dirs(root: &Path, suffix: &str, first_error: &mut Option<String>) -> Vec<PathBuf> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            first_error.get_or_insert(format!("Could not inspect {}: {error}", root.display()));
+            return Vec::new();
+        }
+    };
+    let mut versions = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) => versions.push(entry.file_name().to_string_lossy().into_owned()),
+            Err(error) => {
+                first_error.get_or_insert(error.to_string());
+            }
+        }
+    }
+    versions.sort_by_key(|name| std::cmp::Reverse(node_version_key(name)));
+    versions
+        .iter()
+        .map(|version| root.join(version).join(suffix))
+        .collect()
+}
+
+/// fnm / nvm 真实的 Node 安装目录里的 bin：fnm 默认版本在前，其余新版本优先。
+/// 不扫 `fnm_multishells`：那是每开一个 shell 新建的临时链接，只增不减
+/// （实测 5000+ 个），顺序不定，还可能指向已被替换的旧 Node。
+fn node_manager_bin_dirs(
+    home: &Path,
+    fnm_dir: Option<std::ffi::OsString>,
+) -> (Vec<PathBuf>, Option<String>) {
+    let mut dirs = Vec::new();
+    let mut first_error = None;
+
+    let mut fnm_roots = Vec::new();
+    push_env_single_dir(&mut fnm_roots, fnm_dir);
+    if !home.as_os_str().is_empty() {
+        push_unique_path(&mut fnm_roots, home.join(".local/share/fnm"));
+        push_unique_path(&mut fnm_roots, home.join("Library/Application Support/fnm"));
+    }
+    for root in &fnm_roots {
+        if root.join("aliases/default").exists() {
+            push_unique_path(&mut dirs, root.join("aliases/default/bin"));
+        }
+        for dir in versioned_bin_dirs(
+            &root.join("node-versions"),
+            "installation/bin",
+            &mut first_error,
+        ) {
+            push_unique_path(&mut dirs, dir);
+        }
+    }
+    if !home.as_os_str().is_empty() {
+        for dir in versioned_bin_dirs(&home.join(".nvm/versions/node"), "bin", &mut first_error) {
+            push_unique_path(&mut dirs, dir);
+        }
+    }
+    (dirs, first_error)
+}
+
 /// 扫描常见路径查找 CLI
 async fn scan_cli_version(tool: &str) -> LocalDetection {
     let home = dirs::home_dir().unwrap_or_default();
@@ -1428,26 +1498,13 @@ async fn scan_cli_version(tool: &str) -> LocalDetection {
         }
     }
 
-    for base in [
-        home.join(".local/state/fnm_multishells"),
-        home.join(".nvm/versions/node"),
-    ] {
-        match std::fs::read_dir(&base) {
-            Ok(entries) => {
-                for entry in entries {
-                    match entry {
-                        Ok(entry) => push_unique_path(&mut search_paths, entry.path().join("bin")),
-                        Err(error) => {
-                            first_error.get_or_insert(error.to_string());
-                        }
-                    }
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                first_error.get_or_insert(format!("Could not inspect {}: {error}", base.display()));
-            }
-        }
+    let (node_manager_dirs, node_manager_error) =
+        node_manager_bin_dirs(&home, std::env::var_os("FNM_DIR"));
+    if let Some(error) = node_manager_error {
+        first_error.get_or_insert(error);
+    }
+    for path in node_manager_dirs {
+        push_unique_path(&mut search_paths, path);
     }
     if tool == "opencode" {
         let extra_paths = opencode_extra_search_paths(
@@ -3032,6 +3089,99 @@ mod tests {
         assert_eq!(installed.status, InstallationStatus::Installed);
         assert!(installed.version.is_none());
         assert!(installed.error.is_some());
+    }
+
+    fn make_node_version(root: &Path, version: &str) -> PathBuf {
+        let bin = root.join(version).join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        bin
+    }
+
+    #[test]
+    fn node_manager_dirs_list_fnm_versions_newest_first() {
+        let home = tempfile::tempdir().unwrap();
+        let versions = home.path().join(".local/share/fnm/node-versions");
+        for version in ["v9.0.0", "v22.12.0", "v24.21.0"] {
+            make_node_version(&versions, &format!("{version}/installation"));
+        }
+
+        let (dirs, error) = node_manager_bin_dirs(home.path(), None);
+
+        assert!(error.is_none(), "{error:?}");
+        let expected: Vec<_> = ["v24.21.0", "v22.12.0", "v9.0.0"]
+            .iter()
+            .map(|v| versions.join(v).join("installation/bin"))
+            .collect();
+        assert_eq!(dirs, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn node_manager_dirs_put_fnm_default_first() {
+        let home = tempfile::tempdir().unwrap();
+        let fnm = home.path().join(".local/share/fnm");
+        for version in ["v22.12.0", "v24.21.0"] {
+            make_node_version(
+                &fnm.join("node-versions"),
+                &format!("{version}/installation"),
+            );
+        }
+        std::fs::create_dir_all(fnm.join("aliases")).unwrap();
+        let old = fnm.join("node-versions/v22.12.0/installation");
+        std::os::unix::fs::symlink(&old, fnm.join("aliases/default")).unwrap();
+
+        let (dirs, _) = node_manager_bin_dirs(home.path(), None);
+
+        assert_eq!(dirs[0], fnm.join("aliases/default/bin"));
+    }
+
+    #[test]
+    fn node_manager_dirs_ignore_fnm_multishells() {
+        let home = tempfile::tempdir().unwrap();
+        let multishells = home.path().join(".local/state/fnm_multishells");
+        for index in 0..50 {
+            make_node_version(&multishells, &index.to_string());
+        }
+
+        let (dirs, error) = node_manager_bin_dirs(home.path(), None);
+
+        assert!(dirs.is_empty(), "{dirs:?}");
+        assert!(error.is_none(), "{error:?}");
+    }
+
+    #[test]
+    fn node_manager_dirs_list_nvm_versions_newest_first() {
+        let home = tempfile::tempdir().unwrap();
+        let versions = home.path().join(".nvm/versions/node");
+        for version in ["v18.20.0", "v20.1.0"] {
+            make_node_version(&versions, version);
+        }
+
+        let (dirs, _) = node_manager_bin_dirs(home.path(), None);
+
+        assert_eq!(
+            dirs,
+            vec![versions.join("v20.1.0/bin"), versions.join("v18.20.0/bin")]
+        );
+    }
+
+    #[test]
+    fn node_manager_dirs_honor_fnm_dir_env() {
+        let home = tempfile::tempdir().unwrap();
+        let custom = tempfile::tempdir().unwrap();
+        make_node_version(
+            &custom.path().join("node-versions"),
+            "v24.21.0/installation",
+        );
+
+        let (dirs, _) = node_manager_bin_dirs(home.path(), Some(custom.path().into()));
+
+        assert_eq!(
+            dirs,
+            vec![custom
+                .path()
+                .join("node-versions/v24.21.0/installation/bin")]
+        );
     }
 
     #[test]
