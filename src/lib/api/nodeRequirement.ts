@@ -1,5 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 
+/** 旧 Node 下的一个全局包；`tool` 是 Ofox 认识的工具 id，不认识时为 null。 */
+export interface GlobalPackage {
+  name: string;
+  version: string;
+  tool: string | null;
+}
+
 /** 装 npm 工具前，本机 Node.js 是否满足它最新版的要求（见 `node_requirement.rs`）。 */
 export interface NodeRequirement {
   /** `missing` 时安装器会自动装 Node；`unknown` 查不到，照常安装。 */
@@ -10,8 +17,8 @@ export interface NodeRequirement {
   manager: string | null;
   canUpgrade: boolean;
   needsAdmin: boolean;
-  /** 升级后要重新安装的工具 id。 */
-  reinstall: string[];
+  /** 升级后按原版本装回新 Node 的全局包（不只是 Ofox 的工具）。 */
+  reinstall: GlobalPackage[];
   /** 用户自己升级的命令或做法。 */
   manual: string | null;
   /** 至少要升到的版本（例如 `24.16.0`）；看不懂范围时为空。 */

@@ -45,13 +45,23 @@ describe("NodeUpgradeDialog", () => {
     expect(screen.getByText("24.16.0")).toBeVisible();
   });
 
-  it("lists the steps, and says why the other tools are reinstalled", () => {
+  it("puts every global tool back at its version, and says why", () => {
     const onConfirm = vi.fn();
     render(
       <NodeUpgradeDialog
         prompt={{
           toolId: "openclaw",
-          requirement: requirement({ reinstall: ["claude", "gemini"] }),
+          requirement: requirement({
+            reinstall: [
+              {
+                name: "@anthropic-ai/claude-code",
+                version: "2.1.296",
+                tool: "claude",
+              },
+              { name: "@augmentcode/auggie", version: "0.28.0", tool: null },
+              { name: "pnpm", version: "10.34.5", tool: null },
+            ],
+          }),
         }}
         onConfirm={onConfirm}
         onCancel={vi.fn()}
@@ -60,12 +70,15 @@ describe("NodeUpgradeDialog", () => {
     const steps = screen.getAllByRole("listitem");
     expect(steps.map((step) => step.querySelector("p")?.textContent)).toEqual([
       "用 fnm 升级 Node.js",
-      "重新安装 Claude Code、Gemini",
+      "把原来的 3 个全局工具装到新版本（版本不变）",
       "安装 OpenClaw",
     ]);
     expect(
+      screen.getByText("Claude Code、@augmentcode/auggie、pnpm"),
+    ).toBeVisible();
+    expect(
       screen.getByText(
-        "fnm 给每个 Node.js 版本单独存放全局安装的工具，换了版本要重新装一遍才能继续用。它们的配置和登录不受影响。",
+        "fnm 给每个 Node.js 版本单独存放全局安装的工具，不装回去的话，换版本后这些命令就找不到了。它们的配置和登录不受影响。",
       ),
     ).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "升级并安装" }));

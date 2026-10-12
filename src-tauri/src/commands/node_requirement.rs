@@ -6,7 +6,7 @@
 //!
 //! 规则：没有 Node 由安装器自动装（不问）；有 Node 但不够新，不悄悄升级——它是
 //! 整台电脑共用的，版本管理器切了默认版本，之前装在旧版本下的 CLI 还会「消失」。
-//! 先告诉用户原因，用户同意后再升级，并把受影响的工具重新装回来。
+//! 先告诉用户原因，用户同意后再升级，并把旧版本下的全局工具按原版本装回来。
 
 use std::path::{Path, PathBuf};
 
@@ -31,8 +31,8 @@ pub struct NodeRequirement {
     pub can_upgrade: bool,
     /// 升级会弹管理员授权（UAC）。
     pub needs_admin: bool,
-    /// 升级后要重新安装的工具：版本管理器按 Node 版本分开放全局包。
-    pub reinstall: Vec<String>,
+    /// 升级后要按原版本装回新 Node 的全局包：版本管理器按 Node 版本分开放全局包。
+    pub reinstall: Vec<GlobalPackage>,
     /// 用户自己升级时可以运行的命令或做法。
     pub manual: Option<String>,
     /// 至少要升到的版本（例如 `24.16.0`），给人看；范围看不懂时为空。
@@ -56,6 +56,17 @@ impl NodeRequirement {
             command: None,
         }
     }
+}
+
+/// 旧 Node 下的一个全局包，升级后按原版本装回新 Node。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalPackage {
+    /// npm 包名，例如 `@augmentcode/auggie`。
+    pub name: String,
+    pub version: String,
+    /// Ofox 认识的工具 id（界面上用它的名字），不认识时为空。
+    pub tool: Option<String>,
 }
 
 /// `node --version` 的输出满足 npm 的版本范围吗？范围看不懂时返回 `None`。
@@ -298,23 +309,58 @@ pub(crate) fn upgrade_plan(
     }
 }
 
-/// `npm ls -g --depth=0 --json` 里 Ofox 认识的工具（不含 `except`）。
-pub(crate) fn global_tools(npm_ls_json: &str, except: &str) -> Vec<String> {
+const OFOX_NPM_TOOLS: [&str; 5] = ["claude", "codex", "gemini", "opencode", "openclaw"];
+
+/// `npm ls -g --depth=0 --json` 里换版本后要装回来的全局包：除了 Node 自带的
+/// npm、corepack，和马上要装最新版的 `except`。不只是 Ofox 认识的工具——用户自己
+/// 装的 CLI（MCP 服务器、pnpm 等）换了版本一样会消失。本地链接的包（`file:`）
+/// 装不回来，跳过；名字或版本里有引号、空格这类字符的也跳过，免得拼进命令出问题。
+/// Ofox 的工具排在前面。
+pub(crate) fn global_packages(npm_ls_json: &str, except: &str) -> Vec<GlobalPackage> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(npm_ls_json) else {
         return Vec::new();
     };
     let Some(dependencies) = value.get("dependencies").and_then(|d| d.as_object()) else {
         return Vec::new();
     };
-    ["claude", "codex", "gemini", "opencode", "openclaw"]
-        .into_iter()
-        .filter(|tool| *tool != except)
-        .filter(|tool| {
-            super::tool_update::npm_package(tool)
-                .is_some_and(|package| dependencies.contains_key(package))
+    let except = super::tool_update::npm_package(except);
+    let safe = |text: &str| {
+        !text.is_empty()
+            && text
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "@/._-+~".contains(c))
+    };
+    let mut packages: Vec<GlobalPackage> = dependencies
+        .iter()
+        .filter(|(name, _)| !matches!(name.as_str(), "npm" | "corepack"))
+        .filter(|(name, _)| Some(name.as_str()) != except)
+        .filter(|(_, entry)| {
+            !entry
+                .get("resolved")
+                .and_then(|r| r.as_str())
+                .is_some_and(|r| r.starts_with("file:"))
         })
-        .map(str::to_string)
-        .collect()
+        .filter_map(|(name, entry)| {
+            let version = entry.get("version")?.as_str()?;
+            (safe(name) && safe(version)).then(|| GlobalPackage {
+                name: name.clone(),
+                version: version.to_string(),
+                tool: OFOX_NPM_TOOLS
+                    .into_iter()
+                    .find(|tool| super::tool_update::npm_package(tool) == Some(name.as_str()))
+                    .map(str::to_string),
+            })
+        })
+        .collect();
+    let rank = |package: &GlobalPackage| {
+        package
+            .tool
+            .as_deref()
+            .and_then(|tool| OFOX_NPM_TOOLS.iter().position(|known| *known == tool))
+            .unwrap_or(OFOX_NPM_TOOLS.len())
+    };
+    packages.sort_by_key(|package| rank(package));
+    packages
 }
 
 /// 这台机器上装 `tool` 走不走 npm：macOS 上除了 Hermes 都走；Windows 上 Gemini、
@@ -451,8 +497,8 @@ async fn node_version(node: &Path, search_path: &str) -> Option<String> {
     (output.status.success() && Version::parse(version).is_ok()).then(|| version.to_string())
 }
 
-/// 和这个 Node 装在一起的 Ofox 工具（不含 `except`）。
-async fn tools_beside(node: &NodeInstall, except: &str) -> Vec<String> {
+/// 和这个 Node 装在一起、换版本后要装回来的全局包（不含 `except`）。
+async fn packages_beside(node: &NodeInstall, except: &str) -> Vec<GlobalPackage> {
     let npm = node
         .path
         .with_file_name(if cfg!(windows) { "npm.cmd" } else { "npm" });
@@ -463,7 +509,7 @@ async fn tools_beside(node: &NodeInstall, except: &str) -> Vec<String> {
     #[cfg(target_os = "windows")]
     command.creation_flags(0x0800_0000);
     match super::tool_update::bounded_output(command).await {
-        Ok(output) => global_tools(&String::from_utf8_lossy(&output.stdout), except),
+        Ok(output) => global_packages(&String::from_utf8_lossy(&output.stdout), except),
         Err(_) => Vec::new(),
     }
 }
@@ -521,7 +567,7 @@ pub(crate) async fn check(tool: &str) -> NodeRequirement {
             report.needs_admin = plan.needs_admin;
             report.manual = Some(plan.manual);
             if plan.reinstalls {
-                report.reinstall = tools_beside(&node, tool).await;
+                report.reinstall = packages_beside(&node, tool).await;
             }
             report.command = plan.command.map(|command| {
                 terminal_command(command, manager, target, &report.reinstall, windows)
@@ -550,12 +596,13 @@ pub(crate) async fn upgrade_for_install(tool: &str) -> Result<NodeUpgrade, Strin
 }
 
 /// 用户同意后终端里跑的完整命令：先升级 Node；fnm 切了默认版本后这个终端里还是
-/// 旧的，要先切过来；再把旧版本下的工具装回来。
+/// 旧的，要先切过来；再把旧版本下的全局包按原版本装回来（版本不变，不顺手升级）。
+/// 每个包都加单引号，bash 和 PowerShell 都按字面处理（`global_packages` 已排除带引号的名字）。
 pub(crate) fn terminal_command(
     mut command: String,
     manager: &str,
     target: Option<u64>,
-    reinstall: &[String],
+    reinstall: &[GlobalPackage],
     windows: bool,
 ) -> String {
     if manager == "fnm" {
@@ -566,19 +613,15 @@ pub(crate) fn terminal_command(
             ));
         }
     }
-    let packages: Vec<&str> = reinstall
-        .iter()
-        .filter_map(|tool| super::tool_update::npm_package(tool))
-        .collect();
-    if !packages.is_empty() {
-        let list = packages
+    if !reinstall.is_empty() {
+        let list = reinstall
             .iter()
-            .map(|package| format!("{package}@latest"))
+            .map(|package| format!("'{}@{}'", package.name, package.version))
             .collect::<Vec<_>>()
             .join(" ");
         if windows {
             command.push_str(&format!(
-                "; npm.cmd install -g {list}; if ($LASTEXITCODE -ne 0) {{ throw '重新安装 {list} 失败' }}"
+                "; npm.cmd install -g {list}; if ($LASTEXITCODE -ne 0) {{ throw '把原来的全局工具装到新版本时失败' }}"
             ));
         } else {
             command.push_str(&format!(" && npm install -g {list}"));
@@ -766,30 +809,41 @@ mod tests {
         }
     }
 
+    fn package(name: &str, version: &str, tool: Option<&str>) -> GlobalPackage {
+        GlobalPackage {
+            name: name.into(),
+            version: version.into(),
+            tool: tool.map(str::to_string),
+        }
+    }
+
     #[test]
-    fn the_terminal_switches_to_the_new_node_before_reinstalling_tools() {
-        let tools = ["gemini".to_string(), "opencode".to_string()];
+    fn the_terminal_switches_node_then_puts_back_the_same_versions() {
+        let packages = [
+            package("@google/gemini-cli", "0.63.0", Some("gemini")),
+            package("@augmentcode/auggie", "0.28.0-prerelease.10", None),
+        ];
         assert_eq!(
             terminal_command(
                 "fnm install 24 && fnm default 24".into(),
                 "fnm",
                 Some(24),
-                &tools,
+                &packages,
                 false
             ),
-            "fnm install 24 && fnm default 24 && fnm use 24 && npm install -g @google/gemini-cli@latest opencode-ai@latest"
+            "fnm install 24 && fnm default 24 && fnm use 24 && npm install -g '@google/gemini-cli@0.63.0' '@augmentcode/auggie@0.28.0-prerelease.10'"
         );
 
         let windows = terminal_command(
             "nvm install 24; nvm use 24".into(),
             "nvm-windows",
             Some(24),
-            &tools,
+            &packages,
             true,
         );
         assert!(!windows.contains("fnm use"));
         assert!(windows.ends_with(
-            "; npm.cmd install -g @google/gemini-cli@latest opencode-ai@latest; if ($LASTEXITCODE -ne 0) { throw '重新安装 @google/gemini-cli@latest opencode-ai@latest 失败' }"
+            "; npm.cmd install -g '@google/gemini-cli@0.63.0' '@augmentcode/auggie@0.28.0-prerelease.10'; if ($LASTEXITCODE -ne 0) { throw '把原来的全局工具装到新版本时失败' }"
         ));
 
         assert_eq!(
@@ -799,11 +853,35 @@ mod tests {
     }
 
     #[test]
-    fn only_tools_installed_beside_this_node_need_reinstalling() {
-        let json = r#"{"dependencies":{"@google/gemini-cli":{"version":"0.63.0"},"opencode-ai":{"version":"1.18.33"},"typescript":{"version":"5.0.0"}}}"#;
-        assert_eq!(global_tools(json, "openclaw"), ["gemini", "opencode"]);
-        assert_eq!(global_tools(json, "gemini"), ["opencode"]);
-        assert!(global_tools("not json", "gemini").is_empty());
+    fn every_global_package_beside_this_node_is_put_back_at_its_version() {
+        let json = r#"{"dependencies":{
+            "@augmentcode/auggie":{"version":"0.28.0-prerelease.10"},
+            "@google/gemini-cli":{"version":"0.63.0"},
+            "@larksuite/cli":{"version":"1.0.86"},
+            "corepack":{"version":"0.34.0"},
+            "my-local-tool":{"version":"1.0.0","resolved":"file:../../../../code/my-local-tool"},
+            "npm":{"version":"11.6.2"},
+            "openclaw":{"version":"2026.8.1"},
+            "opencode-ai":{"version":"1.19.0"},
+            "pnpm":{"version":"10.34.5"}
+        }}"#;
+        assert_eq!(
+            global_packages(json, "openclaw"),
+            [
+                package("@google/gemini-cli", "0.63.0", Some("gemini")),
+                package("opencode-ai", "1.19.0", Some("opencode")),
+                package("@augmentcode/auggie", "0.28.0-prerelease.10", None),
+                package("@larksuite/cli", "1.0.86", None),
+                package("pnpm", "10.34.5", None),
+            ]
+        );
+        assert!(global_packages("not json", "gemini").is_empty());
+    }
+
+    #[test]
+    fn a_package_spec_that_needs_shell_quoting_is_left_out() {
+        let json = r#"{"dependencies":{"evil'name":{"version":"1.0.0"},"ok":{"version":"1.0.0; rm -rf ~"}}}"#;
+        assert!(global_packages(json, "openclaw").is_empty());
     }
 
     #[test]

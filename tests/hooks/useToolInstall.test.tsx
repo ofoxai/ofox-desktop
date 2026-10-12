@@ -248,11 +248,13 @@ describe("安装前的 Node.js 版本检查", () => {
     manager: "fnm",
     canUpgrade: true,
     needsAdmin: false,
-    reinstall: ["gemini"],
+    reinstall: [
+      { name: "@google/gemini-cli", version: "0.63.0", tool: "gemini" },
+    ],
     manual: "fnm install 24 && fnm default 24",
     minimum: "24.16.0",
     command:
-      "fnm install 24 && fnm default 24 && fnm use 24 && npm install -g @google/gemini-cli@latest",
+      "fnm install 24 && fnm default 24 && fnm use 24 && npm install -g '@google/gemini-cli@0.63.0'",
   };
   const installCalls = () =>
     invokeMock.mock.calls.filter(([command]) => command === "install_tool");

@@ -149,14 +149,21 @@ export default function NodeUpgradeDialog({
                   <Step
                     index={2}
                     title={t("toolInstall.nodeUpgrade.stepReinstall", {
-                      tools: reinstall
-                        .map(label)
-                        .join(t("toolInstall.nodeUpgrade.listSeparator")),
+                      count: reinstall.length,
                     })}
                   >
-                    {t("toolInstall.nodeUpgrade.reinstallWhy", {
-                      manager: upgrader,
-                    })}
+                    <p className="break-words">
+                      {reinstall
+                        .map((item) =>
+                          item.tool ? label(item.tool) : item.name,
+                        )
+                        .join(t("toolInstall.nodeUpgrade.listSeparator"))}
+                    </p>
+                    <p className="mt-1">
+                      {t("toolInstall.nodeUpgrade.reinstallWhy", {
+                        manager: upgrader,
+                      })}
+                    </p>
                   </Step>
                 )}
                 <Step
