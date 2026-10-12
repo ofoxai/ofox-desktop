@@ -1630,7 +1630,7 @@ async fn status_and_restore_keep_modified_or_invalid_configuration_and_hide_secr
     bind(&db, Tool::Claude, "claude", KEY).await.unwrap();
     let mut current = json_at(&path);
     current["permissions"] = json!({"allow":["Bash"]});
-    current["env"]["ANTHROPIC_MODEL"] = json!("user/other-model");
+    current["env"]["ANTHROPIC_BASE_URL"] = json!("https://my-proxy.example");
     write(&path, &serde_json::to_string(&current).unwrap());
     let edited = fs::read(&path).unwrap();
     let record = db.get_bind_record("claude").unwrap().unwrap().record;
@@ -2684,7 +2684,8 @@ async fn region_reconciliation_isolates_direct_tool_and_workbuddy_conflicts() {
 #[serial]
 async fn startup_existing_repair_accepts_only_unchanged_saved_managed_fields() {
     for tool in [Tool::Claude, Tool::Codex] {
-        for modified in [None, Some(KEY), Some("saved-model")] {
+        // A model changed by the user is not a modification; Stage 2 covers it.
+        for modified in [None, Some(KEY)] {
             let _home = Home::new();
             let saved = binding_cases()
                 .into_iter()
@@ -2702,11 +2703,7 @@ async fn startup_existing_repair_accepts_only_unchanged_saved_managed_fields() {
             let original = fs::read_to_string(&path).unwrap();
             let changed = match modified {
                 None => original,
-                Some(KEY) => original.replace(KEY, "sk-user-changed"),
-                Some(_) if tool == Tool::Claude => {
-                    original.replace("anthropic/claude-saved", "user/changed-model")
-                }
-                Some(_) => original.replace("openai/gpt-6-luna", "user/changed-model"),
+                Some(_) => original.replace(KEY, "sk-user-changed"),
             };
             fs::write(&path, &changed).unwrap();
             set_current_provider(&db, &tool.app(), tool.official_id().unwrap()).unwrap();
@@ -3285,6 +3282,106 @@ async fn codex_reasoning_effort_picked_in_the_app_is_kept_and_not_a_conflict() {
     let config = toml_at(&path);
     assert_eq!(config["model"].as_str(), Some("openai/gpt-other"));
     assert_eq!(config["model_reasoning_effort"].as_str(), Some("medium"));
+}
+
+#[tokio::test]
+#[serial]
+async fn codex_model_changed_in_the_cli_is_still_configured() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    // `/model` in the Codex CLI rewrites the top-level model.
+    let switched = fs::read_to_string(&path)
+        .unwrap()
+        .replace("model = \"openai/gpt-6-luna\"", "model = \"gpt-other\"");
+    write(&path, &switched);
+
+    let health = status::binding_status(&db, Tool::Codex, Some(KEY)).await;
+
+    assert_eq!(health.status, status::BindingStatus::Configured);
+    assert!(
+        health.modified_fields.is_empty(),
+        "{:?}",
+        health.modified_fields
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn codex_provider_changed_is_still_a_conflict() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    let elsewhere = fs::read_to_string(&path)
+        .unwrap()
+        .replace("model_provider = \"ofox\"", "model_provider = \"other\"");
+    write(&path, &elsewhere);
+
+    let health = status::binding_status(&db, Tool::Codex, Some(KEY)).await;
+
+    assert_eq!(health.status, status::BindingStatus::Modified);
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_model_changed_by_the_user_is_still_configured() {
+    let home = Home::new();
+    let settings = home.claude("settings.json");
+    write(&settings, CLAUDE_RELAY);
+    let db = db_for(Tool::Claude, claude_template(Some("anthropic/claude-x")));
+    bind(&db, Tool::Claude, "claude", KEY).await.unwrap();
+    let mut edited = json_at(&settings);
+    edited["env"]["ANTHROPIC_MODEL"] = "anthropic/claude-other".into();
+    write(&settings, &serde_json::to_string_pretty(&edited).unwrap());
+
+    let health = status::binding_status(&db, Tool::Claude, Some(KEY)).await;
+
+    assert_eq!(health.status, status::BindingStatus::Configured);
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_base_url_changed_is_still_a_conflict() {
+    let home = Home::new();
+    let settings = home.claude("settings.json");
+    write(&settings, CLAUDE_RELAY);
+    let db = db_for(Tool::Claude, claude_template(Some("anthropic/claude-x")));
+    bind(&db, Tool::Claude, "claude", KEY).await.unwrap();
+    let mut edited = json_at(&settings);
+    edited["env"]["ANTHROPIC_BASE_URL"] = "https://my-proxy.example".into();
+    write(&settings, &serde_json::to_string_pretty(&edited).unwrap());
+
+    let health = status::binding_status(&db, Tool::Claude, Some(KEY)).await;
+
+    assert_eq!(health.status, status::BindingStatus::Modified);
+}
+
+#[tokio::test]
+#[serial]
+async fn gemini_model_changed_by_the_user_is_still_configured() {
+    let home = Home::new();
+    let env = home.gemini(".env");
+    write(&env, GEMINI_ENV);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    let switched: Vec<String> = fs::read_to_string(&env)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            if line.starts_with("GEMINI_MODEL=") {
+                "GEMINI_MODEL=gemini-other".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    write(&env, &format!("{}\n", switched.join("\n")));
+
+    let health = status::binding_status(&db, Tool::Gemini, Some(KEY)).await;
+
+    assert_eq!(health.status, status::BindingStatus::Configured);
 }
 
 #[tokio::test]
