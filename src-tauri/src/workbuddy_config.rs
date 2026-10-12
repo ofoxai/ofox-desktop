@@ -322,6 +322,42 @@ fn reconcile_models_endpoint(
     Ok(changed.then_some((models, next_state)))
 }
 
+/// 换了账号后把托管模型里的 key 换成当前账号的。任何一个托管模型被外部改过
+/// （或删掉）就整体放弃，不覆盖用户的修改；其它模型不动。
+fn replace_models_key(
+    mut models: Vec<Value>,
+    state: &WorkBuddyBindingState,
+    new_key: &str,
+) -> Result<(Vec<Value>, WorkBuddyBindingState), String> {
+    let mut next_state = state.clone();
+    let mut indexes = HashSet::with_capacity(state.managed_models.len());
+    for managed in &mut next_state.managed_models {
+        let matches: Vec<_> = models
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| model_id(entry) == Some(managed.model_id.as_str()))
+            .collect();
+        let index = match matches.as_slice() {
+            [(index, entry)] if *entry == &managed.last_written_entry => *index,
+            _ => {
+                return Err(format!(
+                    "WorkBuddy 模型 {} 已被外部修改，已停止更换 key",
+                    managed.model_id
+                ));
+            }
+        };
+        if !indexes.insert(index) {
+            return Err("WorkBuddy 绑定备份包含重复模型指纹，已停止更换 key".to_string());
+        }
+        let entry = models[index]
+            .as_object_mut()
+            .ok_or_else(|| "WorkBuddy 托管模型配置不是对象".to_string())?;
+        entry.insert("apiKey".to_string(), Value::String(new_key.to_string()));
+        managed.last_written_entry = models[index].clone();
+    }
+    Ok((models, next_state))
+}
+
 fn restore_models(
     mut models: Vec<Value>,
     state: &WorkBuddyBindingState,
@@ -470,6 +506,23 @@ pub async fn reconcile_managed_endpoint(db: &Database) -> Result<bool, String> {
     };
     persist_binding_state(db, &path, &next_models, &next_state).await?;
     Ok(true)
+}
+
+/// WorkBuddy 是否绑定在 Ofox 上（有托管模型的绑定记录）。
+pub(crate) async fn is_bound(db: &Database) -> bool {
+    matches!(load_state(db).await, Ok(Some(_)))
+}
+
+/// 换了账号后把 WorkBuddy 托管模型里的 key 换成当前账号的，其余不动。
+pub(crate) async fn replace_key(db: &Database, new_key: &str) -> Result<(), String> {
+    let _guard = CONFIG_LOCK.lock().await;
+    let state = load_state(db)
+        .await?
+        .ok_or_else(|| "未找到 WorkBuddy 绑定记录，已停止更换 key。".to_string())?;
+    let path = models_path();
+    let models = read_models_from(&path)?;
+    let (next_models, next_state) = replace_models_key(models, &state, new_key)?;
+    persist_binding_state(db, &path, &next_models, &next_state).await
 }
 
 /// Return only URLs for display; API keys never cross the IPC boundary.
@@ -918,6 +971,50 @@ mod tests {
             restore_models(updated, &next_state).unwrap(),
             vec![unrelated]
         );
+    }
+
+    #[test]
+    fn switching_accounts_replaces_only_the_managed_keys() {
+        let unrelated = json!({"id":"local", "apiKey":"local-key"});
+        let (models, state) = sync_models(
+            vec![unrelated.clone()],
+            None,
+            "sk-of-account-a",
+            &[selection("model-a"), selection("model-b")],
+            URL,
+        )
+        .unwrap();
+        let (updated, next_state) = replace_models_key(models, &state, "sk-of-account-b").unwrap();
+        assert_eq!(updated[0], unrelated);
+        for managed in &next_state.managed_models {
+            let entry = updated
+                .iter()
+                .find(|entry| model_id(entry) == Some(managed.model_id.as_str()))
+                .unwrap();
+            assert_eq!(entry["apiKey"], "sk-of-account-b");
+            assert_eq!(entry["url"], URL);
+            assert_eq!(entry, &managed.last_written_entry);
+        }
+        assert_eq!(
+            restore_models(updated, &next_state).unwrap(),
+            vec![unrelated]
+        );
+    }
+
+    #[test]
+    fn replacing_keys_stops_on_an_externally_edited_model() {
+        let (mut models, state) = sync_models(
+            Vec::new(),
+            None,
+            "sk-of-account-a",
+            &[selection("model-a")],
+            URL,
+        )
+        .unwrap();
+        models[0]["name"] = json!("renamed by user");
+        let error = replace_models_key(models, &state, "sk-of-account-b").unwrap_err();
+        assert!(error.contains("外部修改"), "{error}");
+        assert!(!error.contains("sk-of"), "{error}");
     }
 
     #[test]

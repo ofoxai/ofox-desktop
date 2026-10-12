@@ -520,6 +520,36 @@ pub(crate) async fn rewrite_bound_config(
     Ok(())
 }
 
+/// 这个工具现在是不是绑定在 Ofox 上（当前服务商是 `ofox-<tool>`）。
+pub(crate) fn is_bound(db: &Database, tool: Tool) -> bool {
+    current_binding_is_ofox(db, tool).unwrap_or(false)
+}
+
+/// 换了账号后，把工具配置里的 key 换成当前账号的。先用旧 key 核对配置没被
+/// 改过——改过就停下，不覆盖用户的修改；其余内容（模型等）一律不动。
+pub(crate) async fn replace_key(
+    db: &Database,
+    tool: Tool,
+    old_key: &str,
+    new_key: &str,
+) -> Result<(), String> {
+    let _guard = BIND_LOCK.lock().await;
+    let _file_locks = file_locks(tool);
+    let health = status::inspect(db, tool, Some(old_key))
+        .map_err(|_| "无法确认现有 OFox 接入配置，已停止更换 key。".to_string())?;
+    if health.status != status::BindingStatus::Configured {
+        return Err(health
+            .message
+            .unwrap_or_else(|| "OFox 接入配置已变化，已停止更换 key。".into()));
+    }
+    let template = template(db, tool)?;
+    let mut txn = FileTxn::new();
+    if let Err(error) = write_bound(tool, &template, new_key, &mut txn) {
+        return Err(rollback_with(txn, error));
+    }
+    Ok(())
+}
+
 /// Save a model and its live configuration under the same binding lock. The
 /// old DB template is still available while verifying the old on-disk model.
 pub(crate) async fn persist_bound_settings(

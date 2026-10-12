@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { useTranslation } from "react-i18next";
 import { Loader2, X } from "lucide-react";
 import { emit } from "@tauri-apps/api/event";
 
@@ -7,6 +8,7 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { settingsApi } from "@/lib/api";
 import { ofoxLogout } from "@/lib/api/ofoxAuth";
+import { announceLogout } from "@/lib/accountKeys";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
 import { UserAvatar } from "@/components/UserAvatar";
 import { ofoxAvatarUrl } from "@/lib/ofoxUrls";
@@ -87,6 +89,7 @@ export default function OfoxSettingsDialog({
   );
 
   // ── Logout / version state
+  const { t } = useTranslation();
   const [loggingOut, setLoggingOut] = useState(false);
   const [version, setVersion] = useState<string | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -247,9 +250,9 @@ export default function OfoxSettingsDialog({
     if (loggingOut) return;
     setLoggingOut(true);
     try {
-      await ofoxLogout();
+      const report = await ofoxLogout();
       await refetch();
-      toast.success("已退出登录");
+      announceLogout(report, t);
       // Close the settings dialog first so the LoginPage isn't fighting the
       // dialog overlay for focus when the route flips.
       onOpenChange(false);
@@ -267,7 +270,7 @@ export default function OfoxSettingsDialog({
     } finally {
       setLoggingOut(false);
     }
-  }, [loggingOut, refetch, onOpenChange]);
+  }, [loggingOut, refetch, onOpenChange, t]);
 
   const handleCheckUpdate = useCallback(async () => {
     // 查自托管清单（Cloudflare R2 上的 desktop.ofox.ai/latest.json），与当前

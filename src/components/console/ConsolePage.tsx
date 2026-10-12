@@ -9,12 +9,14 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
+import { announceKeyReconcile } from "@/lib/accountKeys";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { settingsApi } from "@/lib/api";
 import { isMac } from "@/lib/platform";
 import {
   ofoxGetUserInfo,
+  ofoxReconcileToolKeys,
   isOfoxBillingManager,
   type OfoxUserInfo,
 } from "@/lib/api/ofoxAuth";
@@ -396,6 +398,18 @@ export default function ConsolePage({
 
         if (userInfo) setUser(userInfo);
 
+        // 账号信息刚刷新：已绑定的工具如果还在用别的账号的 key（换了账号，或
+        // 退出登录时停用了），换成当前账号的。没有要换的时后端不访问网络。
+        const keyReport = await ofoxReconcileToolKeys().catch((e) => {
+          console.error("[ConsolePage] reconcile tool keys failed", e);
+          return null;
+        });
+        if (keyReport) {
+          announceKeyReconcile(keyReport, t, userInfo?.email);
+          // 新 key 的标签和统计链接要重新读。
+          if (keyReport.switched.length > 0) void loadDataRef.current();
+        }
+
         // The backend's `poll_for_token` now returns a placeholder user
         // (all-null fields) when /openapi/me was unreachable at login time
         // — that prevents the LoginPage spinner trap, but it leaves the
@@ -409,7 +423,7 @@ export default function ConsolePage({
         }
       })();
     },
-    [boundTools, apex],
+    [boundTools, apex, t],
   );
 
   /**

@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
     warning: vi.fn(),
   }),
   invoke: vi.fn(),
+  reconcileKeys: vi.fn(),
   install: vi.fn(),
   openExternal: vi.fn().mockResolvedValue(undefined),
   onInstallDone: undefined as
@@ -47,6 +48,7 @@ vi.mock("@/lib/api/proxy", () => ({
 }));
 vi.mock("@/lib/api/ofoxAuth", () => ({
   ofoxGetUserInfo: vi.fn().mockResolvedValue({ name: "Test User" }),
+  ofoxReconcileToolKeys: mocks.reconcileKeys,
   isOfoxBillingManager: () => false,
 }));
 vi.mock("@/lib/api/manageTool", () => ({
@@ -137,6 +139,9 @@ beforeEach(async () => {
   vi.mocked(toolUpdatesApi.update).mockReset();
   mocks.toast.success.mockClear();
   mocks.toast.error.mockClear();
+  mocks.toast.warning.mockClear();
+  mocks.reconcileKeys.mockReset();
+  mocks.reconcileKeys.mockResolvedValue({ switched: [], failed: [] });
   mocks.invoke.mockImplementation(async (command: string) => {
     if (command === "get_tool_versions") return localTools;
     if (command === "ofox_list_api_keys") return [];
@@ -166,6 +171,44 @@ describe("Console title bar", () => {
     render(<ConsolePage boundTools={[]} />);
     await screen.findByText("Test User");
     expect(screen.queryByText("Ofox Desktop")).toBeNull();
+  });
+});
+
+describe("Console after switching accounts", () => {
+  it("moves bound tools to this account's key and reloads their key labels", async () => {
+    mocks.reconcileKeys.mockResolvedValueOnce({
+      switched: ["claude"],
+      failed: [],
+    });
+    render(<ConsolePage boundTools={["claude"]} />);
+
+    await waitFor(() =>
+      expect(mocks.toast.success).toHaveBeenCalledWith(
+        "Claude Code 已改用当前账号的额度。",
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        mocks.invoke.mock.calls.filter(
+          ([command]) => command === "ofox_list_api_keys",
+        ),
+      ).toHaveLength(2),
+    );
+  });
+
+  it("says which tool still uses the previous account's key", async () => {
+    mocks.reconcileKeys.mockResolvedValueOnce({
+      switched: [],
+      failed: [{ tool: "codex", message: "接入配置已被修改，没有自动更换。" }],
+    });
+    render(<ConsolePage boundTools={["codex"]} />);
+
+    await waitFor(() =>
+      expect(mocks.toast.warning).toHaveBeenCalledWith(
+        "Codex 还在用之前账号的 API Key：接入配置已被修改，没有自动更换。",
+        expect.anything(),
+      ),
+    );
   });
 });
 

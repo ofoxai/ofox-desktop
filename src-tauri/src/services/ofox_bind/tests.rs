@@ -3318,3 +3318,53 @@ async fn a_conflict_names_the_changed_fields_but_never_their_values() {
     assert_eq!(health.status, status::BindingStatus::Modified);
     assert_eq!(health.modified_fields, ["current-provider"]);
 }
+
+#[tokio::test]
+#[serial]
+async fn switching_accounts_replaces_only_the_key_and_unbind_still_restores() {
+    let home = Home::new();
+    let settings = home.claude("settings.json");
+    write(&settings, CLAUDE_RELAY);
+    let db = db_for(Tool::Claude, claude_template(Some("anthropic/claude-x")));
+    bind(&db, Tool::Claude, "claude", KEY).await.expect("bind");
+    let before = json_at(&settings);
+
+    replace_key(&db, Tool::Claude, KEY, "sk-of-ACCOUNT-B")
+        .await
+        .expect("replace key");
+    let after = json_at(&settings);
+    assert_eq!(after["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-of-ACCOUNT-B");
+    let mut expected = before.clone();
+    expected["env"]["ANTHROPIC_AUTH_TOKEN"] = "sk-of-ACCOUNT-B".into();
+    assert_eq!(after, expected, "nothing but the key may change");
+    assert!(is_bound(&db, Tool::Claude));
+
+    unbind(&db, Tool::Claude, "claude", &[], false)
+        .await
+        .expect("unbind");
+    assert_eq!(fs::read_to_string(&settings).unwrap(), CLAUDE_RELAY);
+    assert!(!is_bound(&db, Tool::Claude));
+}
+
+#[tokio::test]
+#[serial]
+async fn replacing_the_key_stops_when_the_user_changed_the_configuration() {
+    let home = Home::new();
+    let settings = home.claude("settings.json");
+    write(&settings, CLAUDE_RELAY);
+    let db = db_for(Tool::Claude, claude_template(None));
+    bind(&db, Tool::Claude, "claude", KEY).await.expect("bind");
+    let mut edited = json_at(&settings);
+    edited["env"]["ANTHROPIC_BASE_URL"] = "https://my-proxy.example".into();
+    write(&settings, &serde_json::to_string_pretty(&edited).unwrap());
+    let on_disk = fs::read_to_string(&settings).unwrap();
+
+    let error = replace_key(&db, Tool::Claude, KEY, "sk-of-ACCOUNT-B")
+        .await
+        .unwrap_err();
+    assert!(
+        !error.contains("sk-of"),
+        "keys must not leak into messages: {error}"
+    );
+    assert_eq!(fs::read_to_string(&settings).unwrap(), on_disk);
+}

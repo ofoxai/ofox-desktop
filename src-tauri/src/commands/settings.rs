@@ -13,6 +13,7 @@ fn merge_settings_for_save(
     incoming.ofox_apex_resolved = existing.ofox_apex_resolved;
     incoming.ofox_apex_pinned = existing.ofox_apex_pinned;
     incoming.ofox_api_keys = existing.ofox_api_keys.clone();
+    incoming.ofox_keys_to_delete = existing.ofox_keys_to_delete.clone();
     match (&mut incoming.webdav_sync, &existing.webdav_sync) {
         // incoming 没有 webdav → 保留现有
         (None, _) => {
@@ -121,7 +122,7 @@ pub async fn set_auto_launch(enabled: bool) -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::merge_settings_for_save;
-    use crate::settings::{ApiKeyMeta, AppSettings, WebDavSyncSettings};
+    use crate::settings::{ApiKeyMeta, AppSettings, KeyToDelete, WebDavSyncSettings};
 
     #[test]
     fn stale_preference_snapshot_preserves_binding_region_and_key_metadata() {
@@ -147,6 +148,12 @@ mod tests {
                 key_start: None,
                 created_at: 1,
                 last_used_at: Some(2),
+                owner: None,
+                revoked: false,
+            }],
+            ofox_keys_to_delete: vec![KeyToDelete {
+                key_id: "offline-logout-key".into(),
+                owner: None,
             }],
             ..AppSettings::default()
         };
@@ -156,6 +163,7 @@ mod tests {
         assert_eq!(merged.ofox_apex_pinned, existing.ofox_apex_pinned);
         assert_eq!(merged.bound_tools, existing.bound_tools);
         assert_eq!(merged.ofox_api_keys, existing.ofox_api_keys);
+        assert_eq!(merged.ofox_keys_to_delete, existing.ofox_keys_to_delete);
         assert_eq!(merged.low_balance_threshold_usd, Some(20.0));
     }
 

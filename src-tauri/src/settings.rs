@@ -210,6 +210,70 @@ pub struct ApiKeyMeta {
     /// （刚创建尚未 bind）。每次 bind 成功时由调用方更新。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_used_at: Option<i64>,
+    /// 创建这把 key 的账号。key 按组织计费，换了账号就不能再用。`None` 是升级前
+    /// 创建的，登录后记为当前账号。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<KeyOwner>,
+    /// 退出登录时已停用（服务器上吊销，或至少本地不再使用）。工具配置里还留着
+    /// 它，登录后换成当前账号的新 key；keychain 里保留原文，用来核对配置没被改过。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub revoked: bool,
+}
+
+impl ApiKeyMeta {
+    /// 当前账号能不能直接用这把缓存的 key：没停用，而且不是别的账号的。
+    /// 判断不了（老数据、还没取到账号信息）时照旧可用。
+    pub fn usable_by(&self, current: Option<&KeyOwner>) -> bool {
+        if self.revoked {
+            return false;
+        }
+        match (self.owner.as_ref(), current) {
+            (Some(owner), Some(current)) => owner.same_account(current) != Some(false),
+            _ => true,
+        }
+    }
+}
+
+/// 一把 Ofox API key 属于哪个账号。按组织计费，所以优先比组织。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyOwner {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+}
+
+impl KeyOwner {
+    /// 两边都知道组织就比组织（同组织共用余额），否则比用户；都比不了返回 `None`。
+    pub fn same_account(&self, other: &KeyOwner) -> Option<bool> {
+        match (&self.org_id, &other.org_id) {
+            (Some(a), Some(b)) => Some(a == b),
+            _ => match (&self.user_id, &other.user_id) {
+                (Some(a), Some(b)) => Some(a == b),
+                _ => None,
+            },
+        }
+    }
+}
+
+/// 本地已不再使用、服务器上却可能还能用的 key（例如退出登录时没联网，没删掉）。
+/// 只有它所属的账号能删，等那个账号在这台电脑上登录时删掉。不含 key 本体。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyToDelete {
+    pub key_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<KeyOwner>,
+}
+
+impl KeyToDelete {
+    /// 当前账号该不该去删它。没记账号的老 key 交给登录的账号试。
+    pub fn deletable_by(&self, current: &KeyOwner) -> bool {
+        self.owner
+            .as_ref()
+            .is_none_or(|owner| owner.same_account(current) != Some(false))
+    }
 }
 
 /// 应用设置结构
@@ -386,6 +450,9 @@ pub struct AppSettings {
     /// 是空 Vec，向后兼容。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ofox_api_keys: Vec<ApiKeyMeta>,
+    /// 等对应账号登录时要在服务器上删掉的 key，见 [`KeyToDelete`]。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ofox_keys_to_delete: Vec<KeyToDelete>,
 }
 
 fn default_show_in_tray() -> bool {
@@ -445,6 +512,7 @@ impl Default for AppSettings {
             ofox_apex_resolved: None,
             ofox_apex_pinned: None,
             ofox_api_keys: Vec::new(),
+            ofox_keys_to_delete: Vec::new(),
         }
     }
 }
@@ -995,6 +1063,62 @@ pub fn remove_api_key_meta<T: Into<BindableTool>>(tool: T) -> Result<(), AppErro
     })
 }
 
+/// 记下一把等它的账号登录时要删的 key。同一个 key 只记一次。
+pub fn queue_key_deletion(key: KeyToDelete) -> Result<(), AppError> {
+    mutate_settings(|s| {
+        if !s.ofox_keys_to_delete.iter().any(|k| k.key_id == key.key_id) {
+            s.ofox_keys_to_delete.push(key);
+        }
+    })
+}
+
+pub fn list_keys_to_delete() -> Vec<KeyToDelete> {
+    settings_store()
+        .read()
+        .map(|s| s.ofox_keys_to_delete.clone())
+        .unwrap_or_default()
+}
+
+/// 服务器上已经删掉了，不用再记。
+pub fn forget_key_deletion(key_id: &str) -> Result<(), AppError> {
+    mutate_settings(|s| {
+        s.ofox_keys_to_delete.retain(|k| k.key_id != key_id);
+    })
+}
+
+/// 测试专用：把 settings.json（以及同目录的 dev-secrets.json）放进临时 home，
+/// Drop 时还原环境变量并重新加载。环境变量是进程全局的，配合 `#[serial]` 用。
+#[cfg(test)]
+pub(crate) struct TempSettingsHome {
+    dir: tempfile::TempDir,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
+impl TempSettingsHome {
+    pub(crate) fn new() -> Self {
+        let dir = tempfile::tempdir().expect("temp home");
+        let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
+        std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+        // 先构造 guard：下面的断言失败也会还原环境变量。
+        let home = Self { dir, previous };
+        assert!(crate::config::get_app_config_dir().starts_with(home.dir.path()));
+        reload_settings().expect("reload settings");
+        home
+    }
+}
+
+#[cfg(test)]
+impl Drop for TempSettingsHome {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+        let _ = reload_settings();
+    }
+}
+
 #[cfg(test)]
 mod api_key_meta_tests {
     //! 这组测试只覆盖 helpers 对 `AppSettings.ofox_api_keys` 字段的纯函数
@@ -1012,7 +1136,82 @@ mod api_key_meta_tests {
             key_start: None,
             created_at: 1_700_000_000,
             last_used_at: None,
+            owner: None,
+            revoked: false,
         }
+    }
+
+    fn owner(org: Option<&str>, user: Option<&str>) -> KeyOwner {
+        KeyOwner {
+            org_id: org.map(str::to_string),
+            user_id: user.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn accounts_in_the_same_org_share_keys_and_others_do_not() {
+        let alice = owner(Some("org_a"), Some("user_alice"));
+        let bob_same_org = owner(Some("org_a"), Some("user_bob"));
+        let bob_other_org = owner(Some("org_b"), Some("user_bob"));
+        assert_eq!(alice.same_account(&bob_same_org), Some(true));
+        assert_eq!(alice.same_account(&bob_other_org), Some(false));
+        // Without an org on one side, fall back to the user.
+        assert_eq!(
+            owner(None, Some("user_alice")).same_account(&bob_other_org),
+            Some(false)
+        );
+        assert_eq!(owner(None, None).same_account(&alice), None);
+    }
+
+    #[test]
+    fn a_cached_key_is_usable_only_by_its_account_and_not_after_logout() {
+        let alice = owner(Some("org_a"), Some("user_alice"));
+        let bob = owner(Some("org_b"), Some("user_bob"));
+        let key = ApiKeyMeta {
+            owner: Some(alice.clone()),
+            ..sample_meta(AppType::Claude, "key-a")
+        };
+        assert!(key.usable_by(Some(&alice)));
+        assert!(!key.usable_by(Some(&bob)));
+        // Unknown current account: keep today's behaviour.
+        assert!(key.usable_by(None));
+
+        let revoked = ApiKeyMeta {
+            revoked: true,
+            ..key.clone()
+        };
+        assert!(!revoked.usable_by(Some(&alice)));
+
+        // Keys created before ownership was recorded stay usable until adopted.
+        assert!(sample_meta(AppType::Claude, "legacy").usable_by(Some(&bob)));
+    }
+
+    #[test]
+    fn older_settings_without_owner_fields_still_load() {
+        let legacy = r#"{"tool":"claude","keyId":"k","createdAt":1}"#;
+        let meta: ApiKeyMeta = serde_json::from_str(legacy).expect("legacy meta");
+        assert_eq!(meta.owner, None);
+        assert!(!meta.revoked);
+        let saved = serde_json::to_string(&meta).unwrap();
+        assert!(!saved.contains("revoked"), "{saved}");
+    }
+
+    #[test]
+    fn a_key_waiting_for_deletion_is_deleted_only_by_its_account() {
+        let alice = owner(Some("org_a"), Some("user_alice"));
+        let bob = owner(Some("org_b"), Some("user_bob"));
+        let key = KeyToDelete {
+            key_id: "key-a".into(),
+            owner: Some(alice.clone()),
+        };
+        assert!(key.deletable_by(&alice));
+        assert!(!key.deletable_by(&bob));
+        // Owner never recorded (legacy key): whoever signs in tries.
+        let legacy = KeyToDelete {
+            key_id: "legacy".into(),
+            owner: None,
+        };
+        assert!(legacy.deletable_by(&bob));
     }
 
     #[test]
