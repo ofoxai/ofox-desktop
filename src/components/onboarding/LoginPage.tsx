@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { CheckCircle2, RotateCcw } from "lucide-react";
+import { CheckCircle2, KeyRound, RotateCcw } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { isMac } from "@/lib/platform";
 import { toast } from "sonner";
 import { settingsApi } from "@/lib/api";
@@ -7,6 +8,7 @@ import {
   ofoxStartLogin,
   ofoxPollForToken,
   ofoxGetAuthStatus,
+  ofoxRetryKeychain,
   type OfoxDeviceCodeResponse,
   type OfoxUserInfo,
 } from "@/lib/api/ofoxAuth";
@@ -26,6 +28,31 @@ interface LoginPageProps {
 }
 
 export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
+  const { t } = useTranslation();
+  // 上次读取钥匙串被用户拒绝：登录其实还在，重新授权就能恢复，不必重新登录。
+  const [keychainDenied, setKeychainDenied] = useState(false);
+  const [keychainRetrying, setKeychainRetrying] = useState(false);
+  useEffect(() => {
+    ofoxGetAuthStatus()
+      .then((status) => setKeychainDenied(Boolean(status.keychain_denied)))
+      .catch(() => undefined);
+  }, []);
+  const retryKeychain = async () => {
+    setKeychainRetrying(true);
+    try {
+      const status = await ofoxRetryKeychain();
+      if (status.state === "active" && status.user) {
+        onLoginSuccess(status.user);
+        return;
+      }
+      setKeychainDenied(Boolean(status.keychain_denied));
+      toast.error(t("keychainDenied.stillDenied"));
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setKeychainRetrying(false);
+    }
+  };
   const { apex } = useOfoxApex();
   const [loginState, setLoginState] = useState<LoginState>("idle");
   const [deviceCode, setDeviceCode] = useState<OfoxDeviceCodeResponse | null>(
@@ -273,6 +300,29 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
 
       <div className="flex min-h-0 w-full flex-1 overflow-y-auto">
         <div className="m-auto flex w-full max-w-xl flex-col items-center px-8 py-2">
+          {keychainDenied && (
+            <div
+              role="alert"
+              className="mb-6 flex w-full items-start gap-3 rounded-xl border border-orange-300/60 bg-orange-50/60 p-4 text-sm dark:border-orange-500/40 dark:bg-orange-950/20"
+            >
+              <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-orange-500" />
+              <div className="flex-1 space-y-3">
+                <p className="leading-relaxed">{t("keychainDenied.message")}</p>
+                <button
+                  type="button"
+                  onClick={() => void retryKeychain()}
+                  disabled={keychainRetrying}
+                  className="rounded-md bg-orange-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-orange-600 disabled:opacity-60"
+                >
+                  {t(
+                    keychainRetrying
+                      ? "keychainDenied.retrying"
+                      : "keychainDenied.retry",
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
           {/* Logo */}
           <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-[22px] bg-gradient-to-br from-orange-400 to-orange-600 text-4xl font-bold text-white shadow-lg shadow-orange-200 dark:shadow-orange-900/30">
             O

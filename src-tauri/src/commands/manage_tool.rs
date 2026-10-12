@@ -190,12 +190,11 @@ pub async fn set_active_ofox_model(
     model: String,
     model_selection: Option<crate::workbuddy_config::WorkBuddyModelSelection>,
     compatibility_protocol: Option<String>,
-    allow_unverified: Option<bool>,
 ) -> Result<(), String> {
     if app.trim().eq_ignore_ascii_case("workbuddy") {
         require_configured(crate::workbuddy_config::binding_status(&state.db).await)?;
         let selection = model_selection
-            .ok_or_else(|| "切换 WorkBuddy 模型时缺少能力信息，请刷新模型列表后重试".to_string())?;
+            .ok_or_else(|| "切换 WorkBuddy 模型时缺少能力信息，请重新打开窗口后重试".to_string())?;
         if selection.id.trim() != model.trim() {
             return Err("WorkBuddy 模型 ID 与能力信息不一致，请刷新后重试".to_string());
         }
@@ -226,17 +225,12 @@ pub async fn set_active_ofox_model(
         .map_err(|e| format!("读取 {provider_id} 失败: {e}"))?
         .ok_or_else(|| format!("供应商 {provider_id} 不存在"))?;
 
-    let catalog_token = if provider_id.starts_with("ofox-") && !model.trim().is_empty() {
-        catalog_access_token(&ofox_state.0).await
-    } else {
-        None
-    };
-    let resolved_protocol = if provider_id.starts_with("ofox-") && !model.trim().is_empty() {
+    let resolved_protocol = if needs_compatibility_check(&app_type, &provider_id, &model) {
+        let catalog_token = catalog_access_token(&ofox_state.0).await;
         validate_compatibility(
             app_type.into(),
             &model,
             compatibility_protocol.as_deref(),
-            allow_unverified.unwrap_or(false),
             catalog_token.as_deref(),
         )
         .await?
@@ -393,22 +387,29 @@ async fn catalog_access_token(manager: &Arc<RwLock<OfoxAuthManager>>) -> Option<
     manager.read().await.get_valid_access_token().await.ok()
 }
 
+/// Codex 只能走 Responses（Ofox 写死 `wire_api = "responses"`，新版 Codex 也
+/// 不再支持 chat），检测既选不了协议，也没什么可拦的，所以不查。
+fn needs_compatibility_check(app: &AppType, provider_id: &str, model: &str) -> bool {
+    provider_id.starts_with("ofox-") && !model.trim().is_empty() && *app != AppType::Codex
+}
+
 async fn validate_compatibility(
     tool: BindableTool,
     model: &str,
     selected: Option<&str>,
-    allow_unverified: bool,
     catalog_access_token: Option<&str>,
 ) -> Result<Option<String>, String> {
     let result = crate::model_compat::check(tool, model, false, catalog_access_token).await;
-    accept_compatibility_result(tool, result, selected, allow_unverified)
+    accept_compatibility_result(tool, result, selected)
 }
 
+/// 只有确定不兼容才拦保存。余额不足、鉴权、限流、网络这类原因查不出结果时
+/// 照常保存：用户没法据此做决定，拦下来只会让人困惑。OpenCode 这时按模型目录
+/// 选协议，Responses 优先。
 fn accept_compatibility_result(
     tool: BindableTool,
     result: crate::model_compat::CompatibilityResult,
     selected: Option<&str>,
-    allow_unverified: bool,
 ) -> Result<Option<String>, String> {
     if let Some(selected) = selected {
         if !result.allowed_protocols.is_empty()
@@ -424,19 +425,16 @@ fn accept_compatibility_result(
         "compatible" if selected.is_none() || selected == result.protocol.as_deref() => {
             Ok(result.protocol)
         }
-        "inconclusive"
-            if allow_unverified
-                && (tool != BindableTool::OpenCode
-                    || matches!(selected, Some("responses" | "chatCompletions"))) =>
-        {
-            Ok(selected.map(str::to_string))
-        }
         "incompatible" => Err(result
             .reason
             .unwrap_or_else(|| "模型与客户端协议不兼容".into())),
-        "inconclusive" => Err(result
-            .reason
-            .unwrap_or_else(|| "流式兼容性尚未确定，请重试或显式继续".into())),
+        "inconclusive" if tool == BindableTool::OpenCode => Ok(Some(
+            selected
+                .map(str::to_string)
+                .or_else(|| result.allowed_protocols.first().cloned())
+                .unwrap_or_else(|| "responses".into()),
+        )),
+        "inconclusive" => Ok(selected.map(str::to_string)),
         _ => Err("所选协议与检测结果不一致，请重新检测".into()),
     }
 }
@@ -629,6 +627,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ping_says_the_balance_ran_out_instead_of_dumping_the_body() {
+        let body = r#"{"error":{"message":"Insufficient credits. Current balance: $0. Please top up to continue.","type":"insufficient_credits","code":402,"request_id":"6340bd36"}}"#;
+        assert_eq!(
+            ping_failure_message(402, body),
+            "OFOX 账户余额不足，充值后即可使用。"
+        );
+    }
+
+    #[test]
+    fn ping_shows_only_the_gateway_message_from_a_json_error() {
+        let body = r#"{"error":{"message":"model not found","type":"invalid_request_error"}}"#;
+        assert_eq!(
+            ping_failure_message(404, body),
+            "未找到该模型，可能已下线或拼写有误。（HTTP 404）model not found"
+        );
+        assert_eq!(
+            ping_failure_message(400, r#"{"message":"bad request"}"#),
+            "请求失败（HTTP 400）bad request"
+        );
+    }
+
+    #[test]
+    fn ping_truncates_a_long_non_json_body_on_a_character_boundary() {
+        let body = "网关错误".repeat(200);
+        let message = ping_failure_message(502, &body);
+        assert!(message.starts_with("OfoxAI 网关返回 5xx，请稍后再试。（HTTP 502）"));
+        assert!(message.ends_with('…'));
+        assert!(message.chars().count() < 260);
+    }
+
+    #[test]
     fn opencode_model_entry_remains_typed_config_compatible() {
         let mut settings = serde_json::json!({
             "npm": "@ai-sdk/openai",
@@ -689,43 +718,84 @@ mod tests {
             BindableTool::OpenCode,
             result,
             Some("chatCompletions"),
-            true
         )
         .is_err());
     }
 
-    #[test]
-    fn inconclusive_opencode_requires_explicit_valid_choice() {
-        let result = crate::model_compat::CompatibilityResult {
-            app: "opencode".into(),
+    fn inconclusive(app: &str, allowed: &[&str]) -> crate::model_compat::CompatibilityResult {
+        crate::model_compat::CompatibilityResult {
+            app: app.into(),
             model: "x".into(),
-            protocol: Some("chatCompletions".into()),
+            protocol: allowed.first().map(|p| p.to_string()),
             status: "inconclusive".into(),
             source: "probe".into(),
-            reason: None,
-            allowed_protocols: vec!["chatCompletions".into()],
-        };
-        assert!(
-            accept_compatibility_result(BindableTool::OpenCode, result.clone(), None, true)
-                .is_err()
-        );
-        assert!(accept_compatibility_result(
-            BindableTool::OpenCode,
-            result.clone(),
-            Some("responses"),
-            true
-        )
-        .is_err());
+            reason: Some("网关暂时无法完成检测，请稍后重试".into()),
+            allowed_protocols: allowed.iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn inconclusive_check_does_not_block_saving() {
         assert_eq!(
             accept_compatibility_result(
-                BindableTool::OpenCode,
-                result,
-                Some("chatCompletions"),
-                true
-            )
-            .unwrap(),
-            Some("chatCompletions".into())
+                BindableTool::OpenClaw,
+                inconclusive("openclaw", &["chatCompletions"]),
+                None,
+            ),
+            Ok(None)
         );
+    }
+
+    #[test]
+    fn inconclusive_opencode_defaults_to_responses_when_the_catalog_allows_it() {
+        let both = inconclusive("opencode", &["responses", "chatCompletions"]);
+        assert_eq!(
+            accept_compatibility_result(BindableTool::OpenCode, both, None),
+            Ok(Some("responses".into()))
+        );
+        let chat_only = inconclusive("opencode", &["chatCompletions"]);
+        assert_eq!(
+            accept_compatibility_result(BindableTool::OpenCode, chat_only, None),
+            Ok(Some("chatCompletions".into()))
+        );
+        let unknown = inconclusive("opencode", &[]);
+        assert_eq!(
+            accept_compatibility_result(BindableTool::OpenCode, unknown, None),
+            Ok(Some("responses".into()))
+        );
+    }
+
+    #[test]
+    fn inconclusive_opencode_still_rejects_a_protocol_the_catalog_lacks() {
+        let chat_only = inconclusive("opencode", &["chatCompletions"]);
+        assert!(
+            accept_compatibility_result(BindableTool::OpenCode, chat_only, Some("responses"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn codex_models_skip_the_stream_check() {
+        assert!(!needs_compatibility_check(
+            &AppType::Codex,
+            "ofox-codex",
+            "deepseek/x"
+        ));
+        assert!(needs_compatibility_check(
+            &AppType::OpenCode,
+            "ofox-opencode",
+            "deepseek/x"
+        ));
+        assert!(!needs_compatibility_check(
+            &AppType::OpenCode,
+            "ofox-opencode",
+            "  "
+        ));
+        assert!(!needs_compatibility_check(
+            &AppType::OpenCode,
+            "custom",
+            "deepseek/x"
+        ));
     }
 
     #[tokio::test]
@@ -770,7 +840,7 @@ mod tests {
 /// `success` is the only field the happy path needs; `latencyMs` powers the
 /// "✓ 连通成功（123 ms）" subtitle, and `error` carries the human-readable
 /// reason when `success = false`. Status code is surfaced separately so the
-/// front-end can special-case 401 ("session expired, re-login") without
+/// front-end can special-case 402 (out of credits → top-up) without
 /// pattern-matching on Chinese error text.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1092,32 +1162,47 @@ async fn ping_result_from_response(
         };
     }
 
-    // Failure path: read and trim the body so error messages stay glanceable.
     let body = response.text().await.unwrap_or_default();
-    let trimmed = if body.len() > 400 {
-        format!("{}…", &body[..400])
-    } else {
-        body
-    };
-    let hint = match status.as_u16() {
+    PingResult {
+        success: false,
+        latency_ms,
+        status_code: Some(status.as_u16()),
+        error: Some(ping_failure_message(status.as_u16(), &body)),
+    }
+}
+
+const PING_DETAIL_MAX_CHARS: usize = 200;
+
+/// One readable sentence for a failed ping: a hint for the status plus the
+/// gateway's own `message`, never the raw JSON body. A 402 means the Ofox
+/// balance ran out; the dialog adds the top-up action for that status.
+fn ping_failure_message(status: u16, body: &str) -> String {
+    if status == 402 {
+        return "OFOX 账户余额不足，充值后即可使用。".into();
+    }
+    let hint = match status {
         401 => "API Key 无效或已过期，请尝试解除绑定后重新绑定该工具。",
         403 => "请求被拒绝，请检查账户权限或额度。",
         404 => "未找到该模型，可能已下线或拼写有误。",
         429 => "请求过于频繁，请稍后再试。",
         500..=599 => "OfoxAI 网关返回 5xx，请稍后再试。",
-        _ => "",
+        _ => "请求失败",
     };
-
-    PingResult {
-        success: false,
-        latency_ms,
-        status_code: Some(status.as_u16()),
-        error: Some(if hint.is_empty() {
-            format!("HTTP {status}: {trimmed}")
-        } else {
-            format!("{hint}（HTTP {status}）{trimmed}")
-        }),
-    }
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    let detail = parsed
+        .as_ref()
+        .and_then(|json| {
+            json.pointer("/error/message")
+                .or_else(|| json.get("message"))
+                .and_then(|message| message.as_str())
+        })
+        .unwrap_or(body)
+        .trim();
+    let detail = match detail.char_indices().nth(PING_DETAIL_MAX_CHARS) {
+        Some((cut, _)) => format!("{}…", &detail[..cut]),
+        None => detail.to_string(),
+    };
+    format!("{hint}（HTTP {status}）{detail}")
 }
 
 /// Read the API key (or auth token) that the proxy would inject when

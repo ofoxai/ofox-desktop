@@ -4,13 +4,13 @@ import type { TFunction } from "i18next";
 import { toast } from "sonner";
 import {
   Loader2,
-  RefreshCw,
   Check,
   ChevronsUpDown,
   Folder,
   Zap,
   CheckCircle2,
   XCircle,
+  Wallet,
   Github,
   ExternalLink,
 } from "lucide-react";
@@ -51,7 +51,6 @@ import {
   managedToolId,
   TOOL_PROTOCOL,
   type PingResult,
-  type CompatibilityProtocol,
   type CompatibilityResult,
   type WorkBuddyEndpointStatus,
 } from "@/lib/api/manageTool";
@@ -71,6 +70,10 @@ import {
 import type { InstallationStatus } from "@/lib/api/toolUpdates";
 import { ToolBadge } from "@/components/tools/ToolBadge";
 import { TOOL_META } from "@/config/toolMeta";
+import { useOfoxApex } from "@/hooks/useOfoxApex";
+import { useOfoxAuth } from "@/hooks/useOfoxAuth";
+import { isOfoxBillingManager } from "@/lib/api/ofoxAuth";
+import { ofoxWalletUrl } from "@/lib/ofoxUrls";
 import type { AppId } from "@/lib/api/types";
 
 /** Subset of `ConsolePage`'s `BoundTool` that the dialog actually needs.
@@ -153,6 +156,8 @@ export default function ManageToolDialog({
   const protocol = tool ? TOOL_PROTOCOL[tool.id] : undefined;
   const desktopCodex =
     tool?.id === "codex" && tool.installationKind === "desktopApp";
+  // Codex（含 ChatGPT 的 Codex 模式）只能走 Responses，不做流式检测。
+  const codexModels = !!tool && managedToolId(tool.id) === "codex";
   const projectUrl = tool ? TOOL_META[tool.id]?.projectUrl : undefined;
   const projectLinkLabel = tool
     ? TOOL_META[tool.id]?.projectLinkLabel
@@ -183,7 +188,8 @@ export default function ManageToolDialog({
   const [currentModelLoaded, setCurrentModelLoaded] = useState(false);
   const [models, setModels] = useState<FetchedModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
-  const [workBuddyCatalogError, setWorkBuddyCatalogError] = useState(false);
+  const [modelsError, setModelsError] = useState(false);
+  const modelsRequest = useRef(0);
   const [workBuddyEndpointStatus, setWorkBuddyEndpointStatus] =
     useState<WorkBuddyEndpointStatus | null>(null);
   const [saving, setSaving] = useState(false);
@@ -203,10 +209,6 @@ export default function ManageToolDialog({
     CompatibilityResult[]
   >([]);
   const [compatibilityLoading, setCompatibilityLoading] = useState(false);
-  const [manualProtocol, setManualProtocol] = useState<
-    CompatibilityProtocol | ""
-  >("");
-  const [allowUnverified, setAllowUnverified] = useState(false);
   const compatibilityRequest = useRef(0);
   const [workBuddyTestModel, setWorkBuddyTestModel] = useState("");
   const [workBuddyTestResult, setWorkBuddyTestResult] =
@@ -236,7 +238,8 @@ export default function ManageToolDialog({
     setCurrentModelLoaded(false);
     setModels([]);
     setModelsLoading(tool.id === "workbuddy");
-    setWorkBuddyCatalogError(false);
+    setModelsError(false);
+    modelsRequest.current += 1;
     setWorkBuddyEndpointStatus(null);
     setSaving(false);
     setBindingStatus(null);
@@ -248,8 +251,6 @@ export default function ManageToolDialog({
     setPingLoading(false);
     setCompatibilityResults([]);
     setCompatibilityLoading(false);
-    setManualProtocol("");
-    setAllowUnverified(false);
     compatibilityRequest.current += 1;
     setWorkBuddyTestModel("");
     setWorkBuddyTestResult(null);
@@ -297,9 +298,9 @@ export default function ManageToolDialog({
             }
             if (catalogResult.status === "fulfilled") {
               setModels(filterOfoxModelsForWorkBuddy(catalogResult.value));
-              setWorkBuddyCatalogError(false);
+              setModelsError(false);
             } else {
-              setWorkBuddyCatalogError(true);
+              setModelsError(true);
             }
             if (endpointResult.status === "fulfilled") {
               setWorkBuddyEndpointStatus(endpointResult.value);
@@ -330,8 +331,9 @@ export default function ManageToolDialog({
     };
   }, [tool]);
 
-  // Lazy model fetch for CLI tools. WorkBuddy preloads because its current
-  // value is a set that must be reconciled with the compatible catalog.
+  // 模型列表在打开窗口时就加载（见下面的 effect），不让用户去点刷新。WorkBuddy
+  // 在上面的初始加载里一起取，因为它的当前值要和兼容目录对上。加载失败时在
+  // 选择框下面说明并给出「重试」，重试跳过缓存。
   //
   // Codex CLI 强绑 responses 协议（codex_config.rs 里 wire_api="responses"
   // 是硬编码），选到只支持 chat/completions 的模型会导致 CLI 报
@@ -346,36 +348,41 @@ export default function ManageToolDialog({
   const fetchModels = useCallback(
     async (forceRefresh = false) => {
       if (!protocol) return;
+      const request = ++modelsRequest.current;
       setModelsLoading(true);
+      setModelsError(false);
       try {
         const all = await fetchOfoxModels(protocol, forceRefresh);
+        if (request !== modelsRequest.current) return;
         setModels(
           tool?.id === "workbuddy"
             ? filterOfoxModelsForWorkBuddy(all)
             : filterOfoxModelsByProtocol(all, protocol, requiredEndpoint),
         );
-        if (tool?.id === "workbuddy") setWorkBuddyCatalogError(false);
       } catch (e) {
         console.error("[ManageToolDialog] fetchOfoxModels failed", e);
-        if (tool?.id === "workbuddy") setWorkBuddyCatalogError(true);
-        toast.error(`获取模型列表失败：${String(e)}`);
+        if (request === modelsRequest.current) setModelsError(true);
       } finally {
-        setModelsLoading(false);
+        if (request === modelsRequest.current) setModelsLoading(false);
       }
     },
     [protocol, requiredEndpoint, tool?.id],
   );
 
+  useEffect(() => {
+    if (!tool || tool.id === "workbuddy" || desktopCodex) return;
+    void fetchModels();
+  }, [tool, desktopCodex, fetchModels]);
+
   const runCompatibility = useCallback(
     async (forceRetest: boolean) => {
       const request = ++compatibilityRequest.current;
       setCompatibilityResults([]);
-      setManualProtocol("");
-      setAllowUnverified(false);
-      const ids =
-        tool?.id === "opencode" && draftModel
+      const ids = codexModels
+        ? []
+        : tool?.id === "opencode" && draftModel
           ? [draftModel]
-          : draftModel && draftModel !== currentModel && !desktopCodex
+          : draftModel && draftModel !== currentModel
             ? [draftModel]
             : [];
       if (!tool || !configurationReady || ids.length === 0) {
@@ -405,7 +412,7 @@ export default function ManageToolDialog({
       if (request === compatibilityRequest.current)
         setCompatibilityLoading(false);
     },
-    [tool?.id, draftModel, currentModel, desktopCodex, configurationReady, t],
+    [tool?.id, draftModel, currentModel, codexModels, configurationReady, t],
   );
 
   useEffect(() => {
@@ -504,23 +511,23 @@ export default function ManageToolDialog({
           models.find((model) => model.id === id),
         );
         if (selections.some((model) => !model)) {
-          throw new Error("部分所选模型已不在兼容列表中，请刷新后重试");
+          throw new Error("部分所选模型已不在可用列表中，请移除后再保存");
         }
         await manageToolApi.setWorkBuddyManagedModels(
           selections.map((model) => toWorkBuddyModelSelection(model!)),
         );
         setCurrentModels(draftModels);
       } else {
+        // 没查出结果时不传协议，由后端按模型目录选（Responses 优先）。
         const selectedProtocol =
           compatibilityResults[0]?.status === "compatible"
             ? (compatibilityResults[0].protocol ?? undefined)
-            : manualProtocol || undefined;
+            : undefined;
         await manageToolApi.setActiveModel(
           tool.id,
           draftModel,
           undefined,
           selectedProtocol,
-          allowUnverified,
         );
         setCurrentModel(draftModel);
       }
@@ -548,8 +555,6 @@ export default function ManageToolDialog({
     draftModels,
     models,
     compatibilityResults,
-    manualProtocol,
-    allowUnverified,
     onChanged,
     onOpenChange,
   ]);
@@ -651,15 +656,12 @@ export default function ManageToolDialog({
   const hasIncompatible = compatibilityResults.some(
     (result) => result.status === "incompatible",
   );
-  const hasInconclusive = compatibilityResults.some(
-    (result) => result.status === "inconclusive",
-  );
+  // 只有确定不兼容才拦保存；查不出结果（余额、鉴权、网络等）照常保存。
   const compatibilityReady =
     tool?.id === "workbuddy" ||
+    codexModels ||
     (!compatibilityLoading &&
       !hasIncompatible &&
-      (!hasInconclusive ||
-        (allowUnverified && (tool?.id !== "opencode" || !!manualProtocol))) &&
       (!draftModel ||
         draftModel === currentModel ||
         compatibilityResults[0]?.model === draftModel));
@@ -669,7 +671,7 @@ export default function ManageToolDialog({
   );
   const workBuddyCatalogReady =
     !modelsLoading &&
-    !workBuddyCatalogError &&
+    !modelsError &&
     draftModels.length > 0 &&
     workBuddyMissingIds.length === 0;
 
@@ -875,13 +877,14 @@ export default function ManageToolDialog({
                         </p>
                       </div>
                     )}
-                    {!modelsLoading && workBuddyCatalogError && (
-                      <p className="text-[11px] text-red-600">
-                        {t("modelCompatibility.workBuddyCatalogFailed")}
-                      </p>
+                    {!modelsLoading && modelsError && (
+                      <ModelsLoadError
+                        message={t("modelCompatibility.workBuddyCatalogFailed")}
+                        onRetry={() => void fetchModels(true)}
+                      />
                     )}
                     {!modelsLoading &&
-                      !workBuddyCatalogError &&
+                      !modelsError &&
                       workBuddyMissingIds.length > 0 && (
                         <p className="text-[11px] text-red-600">
                           {t("modelCompatibility.workBuddyMissingCatalog")}
@@ -889,15 +892,23 @@ export default function ManageToolDialog({
                       )}
                   </>
                 ) : protocol && !desktopCodex ? (
-                  <ModelPicker
-                    id="manage-model"
-                    value={draftModel}
-                    onChange={setDraftModel}
-                    models={models}
-                    loading={modelsLoading}
-                    onFetch={fetchModels}
-                    portalContainer={dialogContentNode}
-                  />
+                  <>
+                    <ModelPicker
+                      id="manage-model"
+                      value={draftModel}
+                      onChange={setDraftModel}
+                      models={models}
+                      loading={modelsLoading}
+                      onFetch={fetchModels}
+                      portalContainer={dialogContentNode}
+                    />
+                    {!modelsLoading && modelsError && (
+                      <ModelsLoadError
+                        message={t("modelCatalog.loadFailed")}
+                        onRetry={() => void fetchModels(true)}
+                      />
+                    )}
+                  </>
                 ) : (
                   <div className="rounded-md border border-dashed border-border-default px-3 py-2 text-[12px] text-muted-foreground">
                     {desktopCodex
@@ -905,101 +916,35 @@ export default function ManageToolDialog({
                       : "该工具暂不支持模型管理"}
                   </div>
                 )}
+                {/* 只在检查中和确定不兼容时出现；查不出结果的情况（余额、
+                    鉴权、网络等）用户没法据此决定，不显示也不拦保存。 */}
                 {configurationReady &&
                   isDirty &&
-                  !desktopCodex &&
-                  tool.id !== "workbuddy" && (
-                    <div className="space-y-2 rounded-md border border-border-default bg-muted/20 p-3 text-[12px]">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-medium">
-                          {compatibilityLoading
-                            ? t("modelCompatibility.checking")
-                            : t("modelCompatibility.title")}
-                        </span>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          disabled={compatibilityLoading}
-                          onClick={() => void runCompatibility(true)}
+                  !codexModels &&
+                  tool.id !== "workbuddy" &&
+                  (compatibilityLoading ? (
+                    <p className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      {t("modelCompatibility.checkingModel")}
+                    </p>
+                  ) : (
+                    compatibilityResults
+                      .filter((result) => result.status === "incompatible")
+                      .map((result) => (
+                        <p
+                          key={result.model}
+                          className="text-[12px] text-red-600"
                         >
-                          <RefreshCw className="mr-1 h-3.5 w-3.5" />
-                          {t("modelCompatibility.retest")}
-                        </Button>
-                      </div>
-                      {compatibilityResults.map((result) => (
-                        <p key={result.model} className="text-muted-foreground">
-                          {result.model}:{" "}
-                          {t(`modelCompatibility.${result.status}`)}
-                          {result.protocol ? ` · ${result.protocol}` : ""}
-                          {result.reason ? ` · ${result.reason}` : ""}
+                          {t("modelCompatibility.incompatibleModel", {
+                            model: result.model,
+                            tool: tool.label,
+                            reason:
+                              result.reason ??
+                              t("modelCompatibility.incompatibleFallback"),
+                          })}
                         </p>
-                      ))}
-                      {hasInconclusive && (
-                        <div className="space-y-2">
-                          {tool.id === "opencode" && (
-                            <Select
-                              value={manualProtocol}
-                              onValueChange={(value) =>
-                                setManualProtocol(
-                                  value as CompatibilityProtocol,
-                                )
-                              }
-                            >
-                              <SelectTrigger
-                                aria-label={t(
-                                  "modelCompatibility.chooseProtocol",
-                                )}
-                                className="h-9 text-[12px]"
-                              >
-                                <SelectValue
-                                  placeholder={t(
-                                    "modelCompatibility.chooseProtocol",
-                                  )}
-                                />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem
-                                  value="responses"
-                                  disabled={
-                                    !!compatibilityResults[0]?.allowedProtocols
-                                      ?.length &&
-                                    !compatibilityResults[0].allowedProtocols.includes(
-                                      "responses",
-                                    )
-                                  }
-                                >
-                                  Responses
-                                </SelectItem>
-                                <SelectItem
-                                  value="chatCompletions"
-                                  disabled={
-                                    !!compatibilityResults[0]?.allowedProtocols
-                                      ?.length &&
-                                    !compatibilityResults[0].allowedProtocols.includes(
-                                      "chatCompletions",
-                                    )
-                                  }
-                                >
-                                  Chat Completions
-                                </SelectItem>
-                              </SelectContent>
-                            </Select>
-                          )}
-                          <label className="flex items-center gap-2">
-                            <input
-                              type="checkbox"
-                              checked={allowUnverified}
-                              onChange={(event) =>
-                                setAllowUnverified(event.target.checked)
-                              }
-                            />
-                            {t("modelCompatibility.continueUnverified")}
-                          </label>
-                        </div>
-                      )}
-                    </div>
-                  )}
+                      ))
+                  ))}
               </div>
 
               {/* ---- Config file ---- */}
@@ -1415,20 +1360,6 @@ function WorkBuddyModelPicker({
             </Command>
           </PopoverContent>
         </Popover>
-        <Button
-          type="button"
-          variant="outline"
-          size="icon"
-          onClick={() => onFetch(true)}
-          disabled={loading}
-          title="刷新模型列表"
-        >
-          {loading ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <RefreshCw className="h-3.5 w-3.5" />
-          )}
-        </Button>
       </div>
       <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
         <span>共 {models.length} 个兼容模型，共用一个 Ofox Key</span>
@@ -1549,6 +1480,7 @@ function PingStatusBox({ loading, result, model }: PingStatusBoxProps) {
       </div>
     );
   }
+  if (result.statusCode === 402) return <InsufficientCreditsNotice />;
   if (result.success) {
     return (
       <div className="flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-[12px] text-emerald-700 dark:text-emerald-400">
@@ -1571,6 +1503,46 @@ function PingStatusBox({ loading, result, model }: PingStatusBoxProps) {
           {result.error || "未知错误"}
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * 余额不足（HTTP 402）时不显示网关原文，直接说清原因：owner / admin 给出按当前
+ * 地区打开钱包的「去充值」，member 没有充值权限，请他联系管理员。
+ */
+function InsufficientCreditsNotice() {
+  const { t } = useTranslation();
+  const { apex } = useOfoxApex();
+  const { status, isLoading } = useOfoxAuth();
+  const canTopUp = isOfoxBillingManager(status?.user);
+  const openWallet = () =>
+    void settingsApi
+      .openExternal(ofoxWalletUrl(apex))
+      .catch(() => toast.error(t("notifications.openLinkFailed")));
+
+  return (
+    <div className="flex items-start gap-2 rounded-md border border-orange-500/30 bg-orange-500/5 px-3 py-2 text-[12px] text-orange-800 dark:text-orange-300">
+      <Wallet className="mt-0.5 h-4 w-4 shrink-0" />
+      <div className="min-w-0 flex-1">
+        <div className="font-medium">
+          {t("connectivity.insufficientCreditsTitle")}
+        </div>
+        <div className="mt-0.5 text-[11.5px] text-orange-800/80 dark:text-orange-300/80">
+          {t("connectivity.insufficientCreditsHint")}
+          {!isLoading && !canTopUp && ` ${t("connectivity.askAdminToTopUp")}`}
+        </div>
+      </div>
+      {canTopUp && (
+        <Button
+          type="button"
+          size="sm"
+          onClick={openWallet}
+          className="shrink-0 bg-orange-500 text-white hover:bg-orange-600"
+        >
+          {t("connectivity.topUp")}
+        </Button>
+      )}
     </div>
   );
 }
@@ -1613,9 +1585,8 @@ function ModelPicker({
   const { search, updateSearch, filtered, grouped, vendors, loadMore } =
     usePickerResults(models);
 
-  // Trigger an initial fetch the first time the user opens the dropdown.
-  // Subsequent opens reuse the cached list; the explicit refresh button
-  // re-fetches on demand.
+  // The dialog loads the list when it opens; opening the dropdown with an
+  // empty list (the first load failed) tries once more.
   const handleOpenChange = useCallback(
     (next: boolean) => {
       setOpen(next);
@@ -1703,20 +1674,29 @@ function ModelPicker({
           </Command>
         </PopoverContent>
       </Popover>
-      <Button
-        type="button"
-        variant="outline"
-        size="icon"
-        onClick={() => onFetch(true)}
-        disabled={loading}
-        title="刷新模型列表"
-      >
-        {loading ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        ) : (
-          <RefreshCw className="h-3.5 w-3.5" />
-        )}
-      </Button>
     </div>
+  );
+}
+
+/** 模型列表加载失败时的说明和「重试」（跳过缓存重新拉取）。 */
+function ModelsLoadError({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <p className="flex items-center gap-2 text-[11px] text-red-600">
+      <span>{message}</span>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="font-medium underline underline-offset-2 hover:text-red-700"
+      >
+        {t("modelCatalog.retry")}
+      </button>
+    </p>
   );
 }

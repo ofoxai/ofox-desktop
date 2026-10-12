@@ -65,7 +65,8 @@ jobs:
           #   r2_prefix: release/linux/x64
           #   ext: AppImage
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    # 构建只签名并提交公证，不在这里等结果（见 Publish）。
+    timeout-minutes: 120
     outputs:
       version: ${{ steps.version.outputs.version }}
 
@@ -213,15 +214,14 @@ jobs:
           rm -f "$CERT_PATH"
 
       # ── macOS：构建（Tauri 内部完成 codesign + 公证 + staple .app）──
+      # 只签名，不在这里公证：Apple 处理新团队的提交可能要几个小时，超过单个
+      # 任务的时限（1.3.4 两次都因此超时）。公证在下面提交、在 Publish 里等。
       - name: Build (macOS)
         if: runner.os == 'macOS'
         shell: bash
         timeout-minutes: 60
         env:
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
           # 公证服务偶发超时/限流，重试而非直接失败
@@ -236,11 +236,11 @@ jobs:
             sleep "${attempt}0"
           done
 
-      # ── macOS：公证 dmg 容器本身 ─────────────────────────────
-      # 关键坑：Tauri 只公证并 staple 了 dmg **内含的 .app**，dmg 文件本身没
-      # staple。用户下载 dmg 双击挂载时 Gatekeeper 仍判 Unnotarized。
-      # 这里对容器单独公证 + staple（内含 app 已公证，这步很快）。
-      - name: Notarize & staple DMG (macOS)
+      # ── macOS：提交 DMG 公证，不等结果 ────────────────────────
+      # 公证最外层的 DMG 会把里面的 App 一并登记：DMG 钉上凭证；用户第一次打开
+      # 拖出来的 App 时，macOS 联网就能查到它的凭证。结果在 Publish 里等，那里
+      # 超时了可以单独重跑，不用重新构建、重新排队。
+      - name: Submit DMG for notarization (macOS)
         if: runner.os == 'macOS'
         shell: bash
         timeout-minutes: 30
@@ -254,33 +254,33 @@ jobs:
           DMG=$(find src-tauri/target -path "*/release/bundle/dmg/*.dmg" -name "*${VERSION}*" | head -1)
           [ -z "$DMG" ] && { echo "❌ 找不到 v${VERSION} 的 dmg 产物" >&2; exit 1; }
           echo "dmg: $DMG"
+          # 归一化文件名：Ofox Desktop_1.3.2_aarch64.dmg → ofox_desktop_1.3.2.dmg。
+          # 提交的就是要上传的这一份，Publish 给它钉凭证时内容不变。
+          mkdir -p dist-release notary
+          OUT="dist-release/ofox_desktop_${VERSION}.dmg"
+          cp "$DMG" "$OUT"
+          AUTH=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
+          json_field() { python3 -c "import json,sys; print(json.load(sys.stdin).get('$1') or '')"; }
+          ID=""
+          for attempt in 1 2 3; do
+            echo "=== 提交公证 $attempt/3 ==="
+            if ID=$(xcrun notarytool submit "$OUT" "${AUTH[@]}" --output-format json | json_field id) && [ -n "$ID" ]; then
+              break
+            fi
+            [ "$attempt" -eq 3 ] && { echo "❌ 提交公证失败（已重试 3 次）" >&2; exit 1; }
+            sleep $((attempt * 30))
+          done
+          echo "$ID" > notary/submission-id
+          echo "✅ 已提交公证: ${ID}（在 Publish 里等结果）"
 
-          # stapler validate 判幂等：重跑不会重复公证
-          if xcrun stapler validate "$DMG" >/dev/null 2>&1; then
-            echo "▶ 已 staple，跳过公证"
-          else
-            for attempt in 1 2 3; do
-              echo "=== 公证尝试 $attempt/3 ==="
-              if xcrun notarytool submit "$DMG" \
-                  --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" \
-                  --team-id "$APPLE_TEAM_ID" --wait; then
-                xcrun stapler staple "$DMG"
-                echo "✅ 公证 + staple 完成"
-                break
-              fi
-              [ "$attempt" -eq 3 ] && { echo "❌ 公证失败（已重试 3 次）" >&2; exit 1; }
-              sleep $((attempt * 60))
-            done
-          fi
-
-          echo "▶ Gatekeeper 验证"
-          spctl -a -vvv -t open --context context:primary-signature "$DMG"
-          xcrun stapler validate "$DMG"
-          echo "✅ 验证通过"
-
-          # 归一化文件名：Ofox Desktop_1.3.2_aarch64.dmg → ofox_desktop_1.3.2.dmg
-          mkdir -p dist-release
-          cp "$DMG" "dist-release/ofox_desktop_${VERSION}.dmg"
+      - name: Upload notarization submission (macOS)
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v6
+        with:
+          name: notary-${{ matrix.platform }}
+          path: notary/submission-id
+          if-no-files-found: error
+          retention-days: 30
 
       # ── Windows：构建（暂不签名）──────────────────────────────
       - name: Build (Windows)
@@ -338,8 +338,12 @@ jobs:
     name: Publish to R2
     needs: build
     environment: release
-    runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    # 要等公证结果并给 DMG 钉凭证（xcrun），所以在 macOS 上跑。Apple 慢时在这里
+    # 等；真超时了就在 Actions 页面重跑这个任务，构建产物和公证提交都还在。
+    runs-on: macos-14
+    timeout-minutes: 350
+    permissions:
+      contents: write # 创建 GitHub Release、上传附件
     # dry_run 时跳过（workflow_dispatch 默认 dry_run=true）
     if: github.event_name == 'push' || inputs.dry_run == false
 
@@ -356,6 +360,62 @@ jobs:
           pattern: build-*
           path: artifacts
 
+      - name: Download notarization submissions
+        uses: actions/download-artifact@v8
+        with:
+          pattern: notary-*
+          path: notary
+
+      - name: Wait for notarization and staple (macOS)
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          DMG="artifacts/build-darwin-aarch64/ofox_desktop_${VERSION}.dmg"
+          if [ ! -f "$DMG" ]; then
+            echo "▶ 本次没有 macOS 产物，跳过"
+            exit 0
+          fi
+          AUTH=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
+          json_field() { python3 -c "import json,sys; print(json.load(sys.stdin).get('$1') or '')"; }
+          if xcrun stapler validate "$DMG" >/dev/null 2>&1; then
+            echo "▶ 已 staple"
+          else
+            # 只匹配到一个 notary-* 时，download-artifact 直接解压到 notary/，
+            # 多个时才按产物名分子目录，所以按文件名找。
+            ID_FILE=$(find notary -type f -name submission-id | head -1)
+            [ -n "$ID_FILE" ] || { echo "❌ 找不到公证提交编号（notary-darwin-aarch64 产物）" >&2; exit 1; }
+            ID=$(cat "$ID_FILE")
+            echo "submission: $ID"
+            # 留出上传和清理的时间：约 5 小时后还没结果就停下，提示重跑本任务。
+            DEADLINE=$((SECONDS + 300 * 60))
+            while true; do
+              STATUS=$(xcrun notarytool info "$ID" "${AUTH[@]}" --output-format json 2>/dev/null | json_field status || true)
+              echo "[$(date -u +%H:%M:%S)] 公证状态: ${STATUS:-（查询失败，稍后重试）}"
+              case "$STATUS" in
+                Accepted) break ;;
+                Invalid|Rejected)
+                  xcrun notarytool log "$ID" "${AUTH[@]}" || true
+                  echo "❌ 公证未通过: $STATUS" >&2
+                  exit 1 ;;
+              esac
+              if [ "$SECONDS" -ge "$DEADLINE" ]; then
+                echo "::error title=公证仍在处理中::Apple 还没处理完提交 ${ID}。稍后在本页面对「Publish to R2」点 Re-run，会继续等同一个提交，不用重新构建。"
+                exit 1
+              fi
+              xcrun notarytool wait "$ID" "${AUTH[@]}" --timeout 30m >/dev/null 2>&1 || true
+            done
+            xcrun stapler staple "$DMG"
+            echo "✅ 公证通过并已 staple"
+          fi
+          echo "▶ Gatekeeper 验证"
+          spctl -a -vvv -t open --context context:primary-signature "$DMG"
+          xcrun stapler validate "$DMG"
+          echo "✅ 验证通过"
+
       - name: Configure R2 credentials
         shell: bash
         env:
@@ -363,6 +423,7 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
+          command -v aws >/dev/null || brew install awscli
           mkdir -p ~/.aws
           # 写文件而非 export，避免出现在进程列表 / 子进程环境里
           {
@@ -380,31 +441,36 @@ jobs:
           set -euo pipefail
           ENDPOINT="https://${ACCOUNT_ID}.r2.cloudflarestorage.com"
 
-          # platform → (R2 前缀, content-type) 映射。
-          # 新增平台时在这里加一行即可。
-          declare -A PREFIX=(
-            [darwin-aarch64]="release/mac/arm"
-            [windows-x86_64]="release/windows/x64"
-            [linux-x86_64]="release/linux/x64"
-          )
-          declare -A CTYPE=(
-            [dmg]="application/x-apple-diskimage"
-            [msi]="application/x-msi"
-            [exe]="application/vnd.microsoft.portable-executable"
-            [AppImage]="application/x-executable"
-          )
+          # platform → R2 前缀、扩展名 → content-type。新增平台时在这里加一行。
+          # 用 case 而非关联数组：本任务跑在 macOS 上，系统 bash 是 3.2。
+          prefix_for() {
+            case "$1" in
+              darwin-aarch64) echo "release/mac/arm" ;;
+              windows-x86_64) echo "release/windows/x64" ;;
+              linux-x86_64) echo "release/linux/x64" ;;
+            esac
+          }
+          ctype_for() {
+            case "$1" in
+              dmg) echo "application/x-apple-diskimage" ;;
+              msi) echo "application/x-msi" ;;
+              exe) echo "application/vnd.microsoft.portable-executable" ;;
+              AppImage) echo "application/x-executable" ;;
+              *) echo "application/octet-stream" ;;
+            esac
+          }
 
           for dir in artifacts/build-*; do
             [ -d "$dir" ] || continue
             platform="${dir#artifacts/build-}"
-            prefix="${PREFIX[$platform]:-}"
-            [ -z "$prefix" ] && { echo "❌ 未知平台 $platform，缺少 R2 前缀映射" >&2; exit 1; }
+            prefix="$(prefix_for "$platform")"
+            [ -z "$prefix" ] && { echo "❌ 未知平台 ${platform}，缺少 R2 前缀映射" >&2; exit 1; }
 
             for file in "$dir"/*; do
               [ -f "$file" ] || continue
               fname=$(basename "$file")
               ext="${fname##*.}"
-              ctype="${CTYPE[$ext]:-application/octet-stream}"
+              ctype="$(ctype_for "$ext")"
 
               echo "▶ ${fname} → r2://${BUCKET}/${prefix}/${fname}"
               aws s3 cp "$file" "s3://${BUCKET}/${prefix}/${fname}" \
@@ -503,6 +569,55 @@ jobs:
           echo "⚠️ 线上清单未在预期时间内更新到 $VERSION —— 可能是 CDN 缓存，请手动核对" >&2
           # 上传已成功，缓存滞后不应判定发版失败
           exit 0
+
+      # 把 R2 上的同一份安装包挂到 GitHub Release，tag 页面上就能直接下载。
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          for dir in artifacts/build-*; do
+            [ -d "$dir" ] || continue
+            platform="${dir#artifacts/build-}"
+            case "$platform" in
+              darwin-aarch64) suffix="macos_aarch64" ;;
+              windows-x86_64) suffix="windows_x64-setup" ;;
+              linux-x86_64) suffix="linux_x64" ;;
+              *) echo "❌ 未知平台 ${platform}，缺少 Release 文件名映射" >&2; exit 1 ;;
+            esac
+            for file in "$dir"/*; do
+              [ -f "$file" ] || continue
+              cp "$file" "release-assets/ofox_desktop_${VERSION}_${suffix}.${file##*.}"
+            done
+          done
+          (cd release-assets && shasum -a 256 ofox_desktop_* > SHA256SUMS.txt)
+          cat release-assets/SHA256SUMS.txt
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # 重跑本任务时 Release 已经在了：只替换附件，保留已写好的说明。
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            {
+              echo "## 下载"
+              echo ""
+              echo "macOS 选 \`_macos_aarch64.dmg\`（Apple Silicon），Windows 选 \`_windows_x64-setup.exe\`。也可以从 [ofox.ai/desktop](https://ofox.ai/desktop) 下载；已安装 Ofox 的，在「检查更新」里就能升级。校验值见 \`SHA256SUMS.txt\`。"
+              echo ""
+              echo "Windows 版暂未签名。第一次运行如果出现 SmartScreen 提示，点「更多信息」→「仍要运行」。"
+              echo ""
+            } > release-notes.md
+            gh release create "$TAG" release-assets/* \
+              --title "Ofox Desktop ${VERSION}" \
+              --notes-file release-notes.md \
+              --generate-notes \
+              --latest \
+              --verify-tag
+          fi
+          echo "✅ GitHub Release: $(gh release view "$TAG" --json url --jq .url)"
 
       - name: Clean up credentials
         if: always()

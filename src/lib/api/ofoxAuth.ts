@@ -71,6 +71,8 @@ export type OfoxAuthStateValue = "active" | "expired" | "loggedout";
 export interface OfoxAuthStatus {
   state: OfoxAuthStateValue;
   user: OfoxUserInfo | null;
+  /** The user denied the keychain prompt; `ofoxRetryKeychain` can restore the session. */
+  keychain_denied?: boolean;
 }
 
 export interface OfoxDeviceCodeResponse {
@@ -103,6 +105,11 @@ export async function ofoxGetUserInfo(): Promise<OfoxUserInfo | null> {
 
 export async function ofoxGetAuthStatus(): Promise<OfoxAuthStatus> {
   return invoke<OfoxAuthStatus>("ofox_get_auth_status");
+}
+
+/** Read the stored login from the keychain again; macOS asks the user once more. */
+export async function ofoxRetryKeychain(): Promise<OfoxAuthStatus> {
+  return invoke<OfoxAuthStatus>("ofox_retry_keychain");
 }
 
 export async function ofoxIsAuthenticated(): Promise<boolean> {

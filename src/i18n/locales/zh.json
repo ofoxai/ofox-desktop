@@ -1,11 +1,48 @@
 {
+  "keychainDenied": {
+    "message": "读取钥匙串里的登录信息时被拒绝了，所以这里显示为未登录。点「重新授权」，在系统弹窗里输入开机密码并选择「始终允许」，就能恢复原来的登录。",
+    "retry": "重新授权",
+    "retrying": "正在读取…",
+    "stillDenied": "还是没能读取钥匙串。请在弹窗里选择「始终允许」，或者直接重新登录。"
+  },
   "toolLaunch": {
     "failed": "打开工具失败",
     "proxyUnavailable": "本机代理 {{endpoint}} 未运行。请启动代理或恢复端口转发后重试。",
     "notInstalled": "未找到 {{tool}}，请先安装或检查安装路径"
   },
   "toolInstall": {
-    "exitCode": "安装未完成（退出码 {{code}}），请重试"
+    "exitCode": "安装未完成（退出码 {{code}}），请重试",
+    "nodeUpgrade": {
+      "title": "安装 {{tool}} 前需要升级 Node.js",
+      "summary": "{{tool}} 最新版不支持你电脑上的 Node.js 版本。",
+      "current": "当前版本",
+      "minimum": "最低要求",
+      "stepsTitle": "Ofox 会在终端里依次完成：",
+      "stepUpgrade": "用 {{manager}} 升级 Node.js",
+      "needsAdmin": "需要管理员授权，系统会弹出授权窗口。",
+      "stepReinstall": "把原来的 {{count}} 个全局工具装到新的 Node.js 里（工具版本不变）",
+      "reinstallWhy": "{{manager}} 给每个 Node.js 版本单独存放全局安装的工具，不装回去的话，换版本后这些命令就找不到了。它们的配置和登录不受影响。",
+      "stepInstall": "安装 {{tool}}",
+      "showCommand": "查看要运行的命令",
+      "fullRequirement": "{{tool}} 支持的 Node.js 版本：{{range}}",
+      "listSeparator": "、",
+      "confirm": "升级并安装",
+      "manualOnly": "Ofox 没法替你升级{{manager}}的 Node.js。请从 Node.js 官网下载安装最新的长期支持版，装好后再回来安装 {{tool}}。",
+      "openDownload": "打开 Node.js 官网",
+      "downloadUrl": "https://nodejs.org/zh-cn/download",
+      "ok": "知道了",
+      "manager": {
+        "fnm": "由 fnm 管理",
+        "nvm": "由 nvm 管理",
+        "nvm-windows": "由 nvm-windows 管理",
+        "volta": "由 Volta 管理",
+        "homebrew": "通过 Homebrew 安装",
+        "nodejs": "通过 Node.js 官方安装包安装",
+        "asdf": "由 asdf 管理",
+        "mise": "由 mise 管理",
+        "unknown": "安装方式未知"
+      }
+    }
   },
   "unbind": {
     "button": "解除绑定",
@@ -54,15 +91,25 @@
     "switchFailed": "{{tool}} 还在用之前账号的 API Key：{{message}}",
     "listSeparator": "、"
   },
+  "connectivity": {
+    "insufficientCreditsTitle": "余额不足",
+    "insufficientCreditsHint": "OFOX 账户余额不足，充值后即可使用。",
+    "askAdminToTopUp": "请联系团队管理员充值。",
+    "topUp": "去充值"
+  },
+  "modelCatalog": {
+    "loadFailed": "模型列表加载失败",
+    "retry": "重试"
+  },
   "modelCompatibility": {
     "title": "流式兼容性",
     "checking": "正在验证流式兼容性…",
-    "retest": "重新检测",
+    "checkingModel": "正在确认这个模型能否使用…",
+    "incompatibleModel": "{{model}} 不能在 {{tool}} 中使用（{{reason}}），请换一个模型。",
+    "incompatibleFallback": "协议不兼容",
     "compatible": "兼容",
     "incompatible": "不兼容，无法保存",
     "inconclusive": "暂时无法确定",
-    "chooseProtocol": "手动选择 OpenCode 协议",
-    "continueUnverified": "我了解风险，仍要保存未验证的模型",
     "requestFailed": "检测请求失败，请重试",
     "desktopCodex": "Codex 桌面版使用应用内模型设置，不进行 CLI 协议检测",
     "chatgptCodexMode": "Codex 模式",
@@ -79,8 +126,8 @@
     "workBuddyTest": "检测选中模型",
     "workBuddySaveHint": "目录兼容即可保存；流式检测按需进行，不影响保存。",
     "workBuddyIncompatible": "流式检测不兼容（仍可保存）",
-    "workBuddyCatalogFailed": "模型目录加载失败，请刷新后重试。",
-    "workBuddyMissingCatalog": "部分已选模型不在当前兼容目录中，请刷新或移除后保存。",
+    "workBuddyCatalogFailed": "模型列表加载失败，加载后才能保存。",
+    "workBuddyMissingCatalog": "部分已选模型已不在可用列表中，请移除后再保存。",
     "defaultModelFailed": "{{tool}} 已绑定，但默认模型未通过流式验证；请在管理中选择模型"
   },
   "toolUpdates": {

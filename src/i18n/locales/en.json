@@ -1,11 +1,48 @@
 {
+  "keychainDenied": {
+    "message": "Access to the login saved in your keychain was denied, so you appear signed out. Choose “Allow again”, enter your Mac password in the system prompt and pick “Always Allow” to restore it.",
+    "retry": "Allow again",
+    "retrying": "Reading…",
+    "stillDenied": "The keychain still couldn't be read. Choose “Always Allow” in the prompt, or sign in again."
+  },
   "toolLaunch": {
     "failed": "Could not open the tool",
     "proxyUnavailable": "The local proxy at {{endpoint}} is unavailable. Start the proxy or restore the port forward, then try again.",
     "notInstalled": "Could not find {{tool}}. Install it first or check where it is installed."
   },
   "toolInstall": {
-    "exitCode": "Installation did not finish (exit code {{code}}); please retry"
+    "exitCode": "Installation did not finish (exit code {{code}}); please retry",
+    "nodeUpgrade": {
+      "title": "Update Node.js to install {{tool}}",
+      "summary": "The latest {{tool}} doesn't support the Node.js version on this computer.",
+      "current": "Current",
+      "minimum": "Minimum required",
+      "stepsTitle": "Ofox will do this in a terminal:",
+      "stepUpgrade": "Update Node.js with {{manager}}",
+      "needsAdmin": "Administrator approval is needed; the system will ask for it.",
+      "stepReinstall": "Reinstall your global tools on the new Node.js ({{count}}, same tool versions)",
+      "reinstallWhy": "{{manager}} keeps globally installed tools separately for each Node.js version, so without this their commands would be missing after the switch. Their settings and sign-ins stay as they are.",
+      "stepInstall": "Install {{tool}}",
+      "showCommand": "Show the command",
+      "fullRequirement": "Node.js versions {{tool}} supports: {{range}}",
+      "listSeparator": ", ",
+      "confirm": "Update and install",
+      "manualOnly": "Ofox can't update Node.js {{manager}}. Install the latest LTS from the Node.js website, then come back to install {{tool}}.",
+      "openDownload": "Open nodejs.org",
+      "downloadUrl": "https://nodejs.org/en/download",
+      "ok": "Got it",
+      "manager": {
+        "fnm": "managed by fnm",
+        "nvm": "managed by nvm",
+        "nvm-windows": "managed by nvm-windows",
+        "volta": "managed by Volta",
+        "homebrew": "installed with Homebrew",
+        "nodejs": "installed with the official Node.js installer",
+        "asdf": "managed by asdf",
+        "mise": "managed by mise",
+        "unknown": "installed in an unknown way"
+      }
+    }
   },
   "unbind": {
     "button": "Unbind",
@@ -54,15 +91,25 @@
     "switchFailed": "{{tool}} still uses the previous account's API key: {{message}}",
     "listSeparator": ", "
   },
+  "connectivity": {
+    "insufficientCreditsTitle": "Out of credits",
+    "insufficientCreditsHint": "Your OFOX balance has run out. Top up to keep using it.",
+    "askAdminToTopUp": "Ask your team admin to top up.",
+    "topUp": "Top up"
+  },
+  "modelCatalog": {
+    "loadFailed": "Couldn't load the model list",
+    "retry": "Retry"
+  },
   "modelCompatibility": {
     "title": "Streaming compatibility",
     "checking": "Checking streaming compatibility…",
-    "retest": "Retest",
+    "checkingModel": "Checking that this model works…",
+    "incompatibleModel": "{{model}} can't be used with {{tool}} ({{reason}}). Choose another model.",
+    "incompatibleFallback": "incompatible protocol",
     "compatible": "Compatible",
     "incompatible": "Incompatible; cannot save",
     "inconclusive": "Could not determine",
-    "chooseProtocol": "Choose OpenCode protocol manually",
-    "continueUnverified": "I understand the risk and want to save without verification",
     "requestFailed": "Check failed; try again",
     "desktopCodex": "Codex desktop manages models in the app; CLI protocol checks do not apply",
     "chatgptCodexMode": "Codex mode",
@@ -79,8 +126,8 @@
     "workBuddyTest": "Test selected model",
     "workBuddySaveHint": "Catalog-compatible models can be saved now; streaming checks are optional.",
     "workBuddyIncompatible": "Streaming check failed (saving is still available)",
-    "workBuddyCatalogFailed": "Could not load the model catalog. Refresh and try again.",
-    "workBuddyMissingCatalog": "Some selected models are missing from the compatible catalog. Refresh or remove them before saving.",
+    "workBuddyCatalogFailed": "Couldn't load the model list. It must load before you can save.",
+    "workBuddyMissingCatalog": "Some selected models are no longer available. Remove them before saving.",
     "defaultModelFailed": "{{tool}} was bound, but its default model could not be stream-verified. Choose a model in Manage."
   },
   "toolUpdates": {
