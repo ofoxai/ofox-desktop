@@ -82,15 +82,25 @@
     "confirm": "Switch",
     "cancel": "Keep current region"
   },
+  "connectivity": {
+    "insufficientCreditsTitle": "Out of credits",
+    "insufficientCreditsHint": "Your OFOX balance has run out. Top up to keep using it.",
+    "askAdminToTopUp": "Ask your team admin to top up.",
+    "topUp": "Top up"
+  },
+  "modelCatalog": {
+    "loadFailed": "Couldn't load the model list",
+    "retry": "Retry"
+  },
   "modelCompatibility": {
     "title": "Streaming compatibility",
     "checking": "Checking streaming compatibility…",
-    "retest": "Retest",
+    "checkingModel": "Checking that this model works…",
+    "incompatibleModel": "{{model}} can't be used with {{tool}} ({{reason}}). Choose another model.",
+    "incompatibleFallback": "incompatible protocol",
     "compatible": "Compatible",
     "incompatible": "Incompatible; cannot save",
     "inconclusive": "Could not determine",
-    "chooseProtocol": "Choose OpenCode protocol manually",
-    "continueUnverified": "I understand the risk and want to save without verification",
     "requestFailed": "Check failed; try again",
     "desktopCodex": "Codex desktop manages models in the app; CLI protocol checks do not apply",
     "chatgptCodexMode": "Codex mode",
@@ -107,8 +117,8 @@
     "workBuddyTest": "Test selected model",
     "workBuddySaveHint": "Catalog-compatible models can be saved now; streaming checks are optional.",
     "workBuddyIncompatible": "Streaming check failed (saving is still available)",
-    "workBuddyCatalogFailed": "Could not load the model catalog. Refresh and try again.",
-    "workBuddyMissingCatalog": "Some selected models are missing from the compatible catalog. Refresh or remove them before saving.",
+    "workBuddyCatalogFailed": "Couldn't load the model list. It must load before you can save.",
+    "workBuddyMissingCatalog": "Some selected models are no longer available. Remove them before saving.",
     "defaultModelFailed": "{{tool}} was bound, but its default model could not be stream-verified. Choose a model in Manage."
   },
   "toolUpdates": {

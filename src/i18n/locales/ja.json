@@ -82,15 +82,25 @@
     "confirm": "切り替える",
     "cancel": "現在のリージョンを維持"
   },
+  "connectivity": {
+    "insufficientCreditsTitle": "残高不足",
+    "insufficientCreditsHint": "OFOX アカウントの残高が不足しています。チャージすると使えます。",
+    "askAdminToTopUp": "チームの管理者にチャージを依頼してください。",
+    "topUp": "チャージする"
+  },
+  "modelCatalog": {
+    "loadFailed": "モデル一覧を読み込めませんでした",
+    "retry": "再試行"
+  },
   "modelCompatibility": {
     "title": "ストリーミング互換性",
     "checking": "ストリーミング互換性を確認中…",
-    "retest": "再確認",
+    "checkingModel": "このモデルが使えるか確認しています…",
+    "incompatibleModel": "{{model}} は {{tool}} では使えません（{{reason}}）。別のモデルを選んでください。",
+    "incompatibleFallback": "プロトコル非互換",
     "compatible": "互換",
     "incompatible": "非互換のため保存不可",
     "inconclusive": "判定できません",
-    "chooseProtocol": "OpenCode のプロトコルを選択",
-    "continueUnverified": "リスクを理解した上で未検証のまま保存する",
     "requestFailed": "確認に失敗しました。再試行してください",
     "desktopCodex": "Codex デスクトップのモデルはアプリ内で管理され、CLI の確認は対象外です",
     "chatgptCodexMode": "Codex モード",
@@ -107,8 +117,8 @@
     "workBuddyTest": "選択したモデルを検査",
     "workBuddySaveHint": "カタログで互換性が確認できれば保存できます。ストリーミング検査は任意です。",
     "workBuddyIncompatible": "ストリーミング非互換（保存は可能）",
-    "workBuddyCatalogFailed": "モデルカタログを読み込めませんでした。更新して再試行してください。",
-    "workBuddyMissingCatalog": "選択したモデルの一部が互換カタログにありません。更新するか削除してから保存してください。",
+    "workBuddyCatalogFailed": "モデル一覧を読み込めませんでした。読み込むまで保存できません。",
+    "workBuddyMissingCatalog": "選択したモデルの一部が利用できなくなりました。削除してから保存してください。",
     "defaultModelFailed": "{{tool}} の連携は完了しましたが、既定モデルのストリーミングを確認できませんでした。管理画面でモデルを選択してください"
   },
   "toolUpdates": {

@@ -162,10 +162,17 @@ export function ToolDiscoveryCard({
         : "")
     : "安装中…";
 
+  // 桌面应用的“类型 · 版本”在三列的添加窗口里放不下一行，会在“·”后面随意
+  // 折行，所以固定分成两行。
   const detectedVersion =
-    meta?.launchKind === "desktopApp" && version
-      ? `桌面应用 · v${version}`
-      : version;
+    meta?.launchKind === "desktopApp" && version ? (
+      <>
+        <span className="block">{t("toolLifecycle.desktopApp")}</span>
+        <span className="block">v{version}</span>
+      </>
+    ) : (
+      version
+    );
   const versionText =
     status === "scanning"
       ? "检测中…"
@@ -186,15 +193,17 @@ export function ToolDiscoveryCard({
   //      内的子元素 click 直接不派发，stopPropagation 也无解）
   //   2. missing 卡片整体 opacity-50 不会拉低按钮饱和度——按钮独立在
   //      "灰色蒙层"之外，颜色保持品牌橙原色
+  // 外层和卡片都 h-full：同一行里有卡片更高时，其它卡片跟着拉齐，底部的角标
+  // 按钮也就落在卡片里，而不是格子底边。
   return (
-    <div className="relative">
+    <div className="relative h-full">
       <motion.button
         type="button"
         onClick={onClick}
         disabled={disabled}
         animate={controls}
         whileTap={!disabled ? { scale: 0.97 } : undefined}
-        className={`w-full ${BASE} ${STATE_CLASSES[status]}`}
+        className={`h-full w-full ${BASE} ${STATE_CLASSES[status]}`}
       >
         {(status === "bound" || status === "boundMissing") && (
           // 顶部居中绿勾——位置压在卡片顶边上（-top-2），让"已绑定"在一眼扫

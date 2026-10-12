@@ -154,6 +154,33 @@ describe("ToolDiscoveryCard 的安装进度展示", () => {
     expect(install).not.toHaveBeenCalled();
   });
 
+  it("桌面应用把类型和版本分两行显示，不在“·”处随意折行", () => {
+    render(
+      <ToolDiscoveryCard
+        {...baseProps}
+        toolId="chatgpt"
+        label="ChatGPT"
+        status="selected"
+        version="26.1002.52244"
+      />,
+    );
+
+    expect(screen.getByText("桌面应用")).toBeVisible();
+    expect(screen.getByText("v26.1002.52244")).toBeVisible();
+    expect(screen.queryByText(/·/)).not.toBeInTheDocument();
+  });
+
+  it("卡片撑满所在格子，角标按钮和卡片底边对齐", () => {
+    const { container } = render(
+      <ToolDiscoveryCard {...baseProps} status="missing" onInstall={vi.fn()} />,
+    );
+    const cell = container.firstElementChild as HTMLElement;
+    const card = cell.querySelector("button[disabled]") as HTMLElement;
+
+    expect(cell.className).toContain("h-full");
+    expect(card.className).toContain("h-full");
+  });
+
   it("does not imply uninstall for a bound tool without a detected version", () => {
     render(<ToolDiscoveryCard {...baseProps} status="bound" />);
     expect(screen.getByText("绑定已保留")).toBeVisible();
