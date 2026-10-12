@@ -5,6 +5,7 @@ use crate::provider::Provider;
 use serde_json::json;
 use serial_test::serial;
 use std::fs;
+use std::sync::Arc;
 
 const TEMPLATE: &str = "model_provider = \"ofox\"\nmodel = \"openai/gpt-6-luna\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\n\n[model_providers.ofox]\nname = \"ofox\"\nbase_url = \"https://api.ofox.ai/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n";
 const OAUTH_AUTH: &str = "{\n  \"auth_mode\": \"chatgpt\",\n  \"OPENAI_API_KEY\": null,\n  \"tokens\": {\n    \"id_token\": \"eyJid\",\n    \"access_token\": \"eyJaccess\",\n    \"refresh_token\": \"rt\",\n    \"account_id\": \"acct\"\n  },\n  \"last_refresh\": \"2026-09-30T00:00:00Z\"\n}\n";
@@ -3531,6 +3532,196 @@ async fn replacing_the_key_keeps_the_claude_model_chosen_by_the_user() {
     let after = json_at(&path);
     assert_eq!(after["env"]["ANTHROPIC_MODEL"], "anthropic/claude-other");
     assert_eq!(after["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-of-ACCOUNT-B");
+}
+
+fn fake_new_key(tool: crate::app_config::BindableTool) -> crate::settings::ApiKeyMeta {
+    crate::settings::ApiKeyMeta {
+        tool,
+        key_id: "key-new".into(),
+        name: Some("codex on test".into()),
+        alias: None,
+        key_start: None,
+        created_at: 1,
+        last_used_at: None,
+        owner: Some(crate::settings::KeyOwner {
+            org_id: Some("org_a".into()),
+            user_id: None,
+        }),
+        revoked: false,
+    }
+}
+
+fn unrecorded_key_fixture() -> (
+    Database,
+    Arc<tokio::sync::RwLock<crate::ofox_auth::OfoxAuthManager>>,
+    Arc<dyn crate::ofox_secret::SecretStore>,
+) {
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    let manager = crate::ofox_auth::OfoxAuthManager::new_with_secret_store(
+        crate::config::get_app_config_dir(),
+        Arc::new(crate::ofox_secret::InMemoryStore::new()),
+    );
+    let store = crate::ofox_secret::default_store();
+    store
+        .save(
+            crate::ofox_secret::Slot::ApiKey {
+                tool: crate::app_config::BindableTool::Codex,
+            },
+            KEY,
+        )
+        .unwrap();
+    (db, Arc::new(tokio::sync::RwLock::new(manager)), store)
+}
+
+#[tokio::test]
+#[serial]
+async fn a_bound_tool_with_a_key_but_no_record_gets_a_new_recorded_key() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let (db, manager, store) = unrecorded_key_fixture();
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    assert_eq!(
+        crate::settings::get_api_key_meta(crate::app_config::BindableTool::Codex),
+        None
+    );
+    let mut report = crate::services::account_keys::KeyReconcileReport::default();
+
+    crate::services::account_keys::rekey_unrecorded(
+        &db,
+        &manager,
+        &store,
+        |tool| async move { Ok(("sk-of-NEW".to_string(), fake_new_key(tool))) },
+        &mut report,
+    )
+    .await;
+
+    assert_eq!(report.switched, ["codex"]);
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    let meta = crate::settings::get_api_key_meta(crate::app_config::BindableTool::Codex).unwrap();
+    assert_eq!(meta.key_id, "key-new");
+    let written = fs::read_to_string(&path).unwrap();
+    assert!(written.contains("sk-of-NEW") && !written.contains(KEY));
+    let stored = store
+        .load(crate::ofox_secret::Slot::ApiKey {
+            tool: crate::app_config::BindableTool::Codex,
+        })
+        .unwrap();
+    assert_eq!(stored.as_deref(), Some("sk-of-NEW"));
+}
+
+#[tokio::test]
+#[serial]
+async fn an_unrecorded_key_is_left_alone_when_the_binding_was_modified() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let (db, manager, store) = unrecorded_key_fixture();
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    let elsewhere = fs::read_to_string(&path)
+        .unwrap()
+        .replace("model_provider = \"ofox\"", "model_provider = \"other\"");
+    write(&path, &elsewhere);
+    let issued = std::sync::atomic::AtomicUsize::new(0);
+    let mut report = crate::services::account_keys::KeyReconcileReport::default();
+
+    crate::services::account_keys::rekey_unrecorded(
+        &db,
+        &manager,
+        &store,
+        |tool| {
+            issued.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { Ok(("sk-of-NEW".to_string(), fake_new_key(tool))) }
+        },
+        &mut report,
+    )
+    .await;
+
+    assert_eq!(issued.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(report.switched.is_empty() && report.failed.is_empty());
+    assert_eq!(fs::read_to_string(&path).unwrap(), elsewhere);
+    assert_eq!(
+        crate::settings::get_api_key_meta(crate::app_config::BindableTool::Codex),
+        None
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn an_unrecorded_key_of_a_tool_that_is_not_bound_is_not_replaced() {
+    let _home = Home::new();
+    let (db, manager, store) = unrecorded_key_fixture();
+    let issued = std::sync::atomic::AtomicUsize::new(0);
+    let mut report = crate::services::account_keys::KeyReconcileReport::default();
+
+    crate::services::account_keys::rekey_unrecorded(
+        &db,
+        &manager,
+        &store,
+        |tool| {
+            issued.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { Ok(("sk-of-NEW".to_string(), fake_new_key(tool))) }
+        },
+        &mut report,
+    )
+    .await;
+
+    assert_eq!(issued.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(report.switched.is_empty() && report.failed.is_empty());
+}
+
+#[tokio::test]
+#[serial]
+async fn a_tool_that_already_has_a_record_is_not_rekeyed_as_unrecorded() {
+    let _home = Home::new();
+    let (db, manager, store) = unrecorded_key_fixture();
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    crate::settings::upsert_api_key_meta(fake_new_key(crate::app_config::BindableTool::Codex))
+        .unwrap();
+    let issued = std::sync::atomic::AtomicUsize::new(0);
+    let mut report = crate::services::account_keys::KeyReconcileReport::default();
+
+    crate::services::account_keys::rekey_unrecorded(
+        &db,
+        &manager,
+        &store,
+        |tool| {
+            issued.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { Ok(("sk-of-NEW".to_string(), fake_new_key(tool))) }
+        },
+        &mut report,
+    )
+    .await;
+
+    assert_eq!(issued.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(report.switched.is_empty() && report.failed.is_empty());
+}
+
+#[tokio::test]
+#[serial]
+async fn a_failed_issue_for_an_unrecorded_key_is_reported_and_changes_nothing() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let (db, manager, store) = unrecorded_key_fixture();
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    let before = fs::read_to_string(&path).unwrap();
+    let mut report = crate::services::account_keys::KeyReconcileReport::default();
+
+    crate::services::account_keys::rekey_unrecorded(
+        &db,
+        &manager,
+        &store,
+        |_| async { Err("签发新 key 失败：offline".to_string()) },
+        &mut report,
+    )
+    .await;
+
+    assert!(report.switched.is_empty());
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(report.failed[0].tool, "codex");
+    assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    assert_eq!(
+        crate::settings::get_api_key_meta(crate::app_config::BindableTool::Codex),
+        None
+    );
 }
 
 #[tokio::test]
