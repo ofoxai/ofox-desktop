@@ -322,7 +322,6 @@ describe("ManageToolDialog streaming compatibility", () => {
         model.id,
         undefined,
         "chatCompletions",
-        false,
       ),
     );
   });
@@ -352,12 +351,11 @@ describe("ManageToolDialog streaming compatibility", () => {
         model.id,
         undefined,
         "chatCompletions",
-        false,
       ),
     );
   });
 
-  it("requires a manual protocol and explicit acknowledgement when inconclusive", async () => {
+  it("saves without asking anything when the check cannot finish", async () => {
     const model = compatibleModel("z-ai/glm-5.3");
     mockSingleTool(model);
     vi.spyOn(manageToolApi, "checkCompatibility").mockResolvedValue({
@@ -366,20 +364,56 @@ describe("ManageToolDialog streaming compatibility", () => {
       protocol: "responses",
       status: "inconclusive",
       source: "probe",
-      reason: "网络错误",
+      reason: "网关暂时无法完成检测，请稍后重试",
     });
+    const save = vi.spyOn(manageToolApi, "setActiveModel").mockResolvedValue();
     await renderTool("opencode", "OpenCode");
     await chooseModel(model.id);
-    await screen.findByText(/暂时无法确定/);
-    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
-    fireEvent.click(
-      screen.getByRole("combobox", { name: "手动选择 OpenCode 协议" }),
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "保存" })).toBeEnabled(),
     );
-    fireEvent.click(
-      await screen.findByRole("option", { name: "Chat Completions" }),
+    expect(screen.queryByText(/暂时无法确定/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/网关暂时无法完成检测/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("combobox", { name: "手动选择 OpenCode 协议" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith(
+        "opencode",
+        model.id,
+        undefined,
+        undefined,
+      ),
     );
-    fireEvent.click(screen.getByRole("checkbox"));
-    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+  });
+
+  it("does not check Codex or ChatGPT models before saving", async () => {
+    const model = compatibleModel("deepseek/deepseek-v4.1-flash");
+    model.supportedEndpoints = ["/v1/responses"];
+    mockSingleTool(model);
+    const check = vi.spyOn(manageToolApi, "checkCompatibility");
+    const save = vi.spyOn(manageToolApi, "setActiveModel").mockResolvedValue();
+
+    await renderTool("chatgpt", "ChatGPT");
+    await chooseModel(model.id);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "保存" })).toBeEnabled(),
+    );
+    expect(check).not.toHaveBeenCalled();
+    expect(screen.queryByText(/流式兼容性/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith(
+        "chatgpt",
+        model.id,
+        undefined,
+        undefined,
+      ),
+    );
   });
 
   it("blocks a fixed-protocol client when its stream is incompatible", async () => {
@@ -395,7 +429,11 @@ describe("ManageToolDialog streaming compatibility", () => {
     });
     await renderTool("openclaw", "OpenClaw");
     await chooseModel(model.id);
-    await screen.findByText(/不兼容，无法保存/);
+    expect(
+      await screen.findByText(
+        "openai/model-a 不能在 OpenClaw 中使用（流式正文不可读取），请换一个模型。",
+      ),
+    ).toBeVisible();
     expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
   });
 
@@ -432,7 +470,12 @@ describe("ManageToolDialog streaming compatibility", () => {
       expect(check).toHaveBeenCalledWith("openclaw", first.id, false),
     );
     await chooseModel(second.id);
-    await screen.findByText(new RegExp(`${second.id}: 兼容`));
+    await waitFor(() =>
+      expect(check).toHaveBeenCalledWith("openclaw", second.id, false),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "保存" })).toBeEnabled(),
+    );
     await act(async () => {
       finishFirst({
         app: "openclaw",
@@ -469,7 +512,6 @@ describe("ManageToolDialog re-saving an unchanged model", () => {
         model.id,
         undefined,
         undefined,
-        false,
       ),
     );
     expect(check).not.toHaveBeenCalled();
@@ -535,13 +577,7 @@ describe("ManageToolDialog re-saving an unchanged model", () => {
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() =>
-      expect(save).toHaveBeenCalledWith(
-        "opencode",
-        "",
-        undefined,
-        undefined,
-        false,
-      ),
+      expect(save).toHaveBeenCalledWith("opencode", "", undefined, undefined),
     );
   });
 });

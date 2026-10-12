@@ -221,7 +221,7 @@ pub async fn check(
                 "inconclusive",
                 "catalog",
                 Some(&format!(
-                    "{error}（{}），请检查代理或地区设置后刷新模型目录",
+                    "{error}（{}），请检查代理或地区设置后重试",
                     crate::ofox_apex::current_apex()
                 )),
             )
@@ -239,7 +239,7 @@ pub async fn check(
             },
             "catalog",
             Some(if catalog.stale {
-                "模型不在最近缓存的目录中，请刷新后重试"
+                "模型不在最近缓存的目录中，请稍后重试"
             } else {
                 "模型不在当前客户端的 Ofox 目录中"
             }),
@@ -259,7 +259,7 @@ pub async fn check(
                 },
                 "catalog",
                 Some(if catalog.stale {
-                    "最近缓存的模型目录未声明所需协议，请刷新后重试"
+                    "最近缓存的模型目录未声明所需协议，请稍后重试"
                 } else {
                     reason
                 }),

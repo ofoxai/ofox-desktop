@@ -4,7 +4,6 @@ import type { TFunction } from "i18next";
 import { toast } from "sonner";
 import {
   Loader2,
-  RefreshCw,
   Check,
   ChevronsUpDown,
   Folder,
@@ -51,7 +50,6 @@ import {
   managedToolId,
   TOOL_PROTOCOL,
   type PingResult,
-  type CompatibilityProtocol,
   type CompatibilityResult,
   type WorkBuddyEndpointStatus,
 } from "@/lib/api/manageTool";
@@ -153,6 +151,8 @@ export default function ManageToolDialog({
   const protocol = tool ? TOOL_PROTOCOL[tool.id] : undefined;
   const desktopCodex =
     tool?.id === "codex" && tool.installationKind === "desktopApp";
+  // Codex（含 ChatGPT 的 Codex 模式）只能走 Responses，不做流式检测。
+  const codexModels = !!tool && managedToolId(tool.id) === "codex";
   const projectUrl = tool ? TOOL_META[tool.id]?.projectUrl : undefined;
   const projectLinkLabel = tool
     ? TOOL_META[tool.id]?.projectLinkLabel
@@ -204,10 +204,6 @@ export default function ManageToolDialog({
     CompatibilityResult[]
   >([]);
   const [compatibilityLoading, setCompatibilityLoading] = useState(false);
-  const [manualProtocol, setManualProtocol] = useState<
-    CompatibilityProtocol | ""
-  >("");
-  const [allowUnverified, setAllowUnverified] = useState(false);
   const compatibilityRequest = useRef(0);
   const [workBuddyTestModel, setWorkBuddyTestModel] = useState("");
   const [workBuddyTestResult, setWorkBuddyTestResult] =
@@ -250,8 +246,6 @@ export default function ManageToolDialog({
     setPingLoading(false);
     setCompatibilityResults([]);
     setCompatibilityLoading(false);
-    setManualProtocol("");
-    setAllowUnverified(false);
     compatibilityRequest.current += 1;
     setWorkBuddyTestModel("");
     setWorkBuddyTestResult(null);
@@ -379,12 +373,11 @@ export default function ManageToolDialog({
     async (forceRetest: boolean) => {
       const request = ++compatibilityRequest.current;
       setCompatibilityResults([]);
-      setManualProtocol("");
-      setAllowUnverified(false);
-      const ids =
-        tool?.id === "opencode" && draftModel
+      const ids = codexModels
+        ? []
+        : tool?.id === "opencode" && draftModel
           ? [draftModel]
-          : draftModel && draftModel !== currentModel && !desktopCodex
+          : draftModel && draftModel !== currentModel
             ? [draftModel]
             : [];
       if (!tool || !configurationReady || ids.length === 0) {
@@ -414,7 +407,7 @@ export default function ManageToolDialog({
       if (request === compatibilityRequest.current)
         setCompatibilityLoading(false);
     },
-    [tool?.id, draftModel, currentModel, desktopCodex, configurationReady, t],
+    [tool?.id, draftModel, currentModel, codexModels, configurationReady, t],
   );
 
   useEffect(() => {
@@ -520,16 +513,16 @@ export default function ManageToolDialog({
         );
         setCurrentModels(draftModels);
       } else {
+        // 没查出结果时不传协议，由后端按模型目录选（Responses 优先）。
         const selectedProtocol =
           compatibilityResults[0]?.status === "compatible"
             ? (compatibilityResults[0].protocol ?? undefined)
-            : manualProtocol || undefined;
+            : undefined;
         await manageToolApi.setActiveModel(
           tool.id,
           draftModel,
           undefined,
           selectedProtocol,
-          allowUnverified,
         );
         setCurrentModel(draftModel);
       }
@@ -557,8 +550,6 @@ export default function ManageToolDialog({
     draftModels,
     models,
     compatibilityResults,
-    manualProtocol,
-    allowUnverified,
     onChanged,
     onOpenChange,
   ]);
@@ -660,15 +651,12 @@ export default function ManageToolDialog({
   const hasIncompatible = compatibilityResults.some(
     (result) => result.status === "incompatible",
   );
-  const hasInconclusive = compatibilityResults.some(
-    (result) => result.status === "inconclusive",
-  );
+  // 只有确定不兼容才拦保存；查不出结果（余额、鉴权、网络等）照常保存。
   const compatibilityReady =
     tool?.id === "workbuddy" ||
+    codexModels ||
     (!compatibilityLoading &&
       !hasIncompatible &&
-      (!hasInconclusive ||
-        (allowUnverified && (tool?.id !== "opencode" || !!manualProtocol))) &&
       (!draftModel ||
         draftModel === currentModel ||
         compatibilityResults[0]?.model === draftModel));
@@ -923,101 +911,35 @@ export default function ManageToolDialog({
                       : "该工具暂不支持模型管理"}
                   </div>
                 )}
+                {/* 只在检查中和确定不兼容时出现；查不出结果的情况（余额、
+                    鉴权、网络等）用户没法据此决定，不显示也不拦保存。 */}
                 {configurationReady &&
                   isDirty &&
-                  !desktopCodex &&
-                  tool.id !== "workbuddy" && (
-                    <div className="space-y-2 rounded-md border border-border-default bg-muted/20 p-3 text-[12px]">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-medium">
-                          {compatibilityLoading
-                            ? t("modelCompatibility.checking")
-                            : t("modelCompatibility.title")}
-                        </span>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          disabled={compatibilityLoading}
-                          onClick={() => void runCompatibility(true)}
+                  !codexModels &&
+                  tool.id !== "workbuddy" &&
+                  (compatibilityLoading ? (
+                    <p className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      {t("modelCompatibility.checkingModel")}
+                    </p>
+                  ) : (
+                    compatibilityResults
+                      .filter((result) => result.status === "incompatible")
+                      .map((result) => (
+                        <p
+                          key={result.model}
+                          className="text-[12px] text-red-600"
                         >
-                          <RefreshCw className="mr-1 h-3.5 w-3.5" />
-                          {t("modelCompatibility.retest")}
-                        </Button>
-                      </div>
-                      {compatibilityResults.map((result) => (
-                        <p key={result.model} className="text-muted-foreground">
-                          {result.model}:{" "}
-                          {t(`modelCompatibility.${result.status}`)}
-                          {result.protocol ? ` · ${result.protocol}` : ""}
-                          {result.reason ? ` · ${result.reason}` : ""}
+                          {t("modelCompatibility.incompatibleModel", {
+                            model: result.model,
+                            tool: tool.label,
+                            reason:
+                              result.reason ??
+                              t("modelCompatibility.incompatibleFallback"),
+                          })}
                         </p>
-                      ))}
-                      {hasInconclusive && (
-                        <div className="space-y-2">
-                          {tool.id === "opencode" && (
-                            <Select
-                              value={manualProtocol}
-                              onValueChange={(value) =>
-                                setManualProtocol(
-                                  value as CompatibilityProtocol,
-                                )
-                              }
-                            >
-                              <SelectTrigger
-                                aria-label={t(
-                                  "modelCompatibility.chooseProtocol",
-                                )}
-                                className="h-9 text-[12px]"
-                              >
-                                <SelectValue
-                                  placeholder={t(
-                                    "modelCompatibility.chooseProtocol",
-                                  )}
-                                />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem
-                                  value="responses"
-                                  disabled={
-                                    !!compatibilityResults[0]?.allowedProtocols
-                                      ?.length &&
-                                    !compatibilityResults[0].allowedProtocols.includes(
-                                      "responses",
-                                    )
-                                  }
-                                >
-                                  Responses
-                                </SelectItem>
-                                <SelectItem
-                                  value="chatCompletions"
-                                  disabled={
-                                    !!compatibilityResults[0]?.allowedProtocols
-                                      ?.length &&
-                                    !compatibilityResults[0].allowedProtocols.includes(
-                                      "chatCompletions",
-                                    )
-                                  }
-                                >
-                                  Chat Completions
-                                </SelectItem>
-                              </SelectContent>
-                            </Select>
-                          )}
-                          <label className="flex items-center gap-2">
-                            <input
-                              type="checkbox"
-                              checked={allowUnverified}
-                              onChange={(event) =>
-                                setAllowUnverified(event.target.checked)
-                              }
-                            />
-                            {t("modelCompatibility.continueUnverified")}
-                          </label>
-                        </div>
-                      )}
-                    </div>
-                  )}
+                      ))
+                  ))}
               </div>
 
               {/* ---- Config file ---- */}

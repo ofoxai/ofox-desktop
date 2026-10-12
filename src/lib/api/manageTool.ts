@@ -112,14 +112,12 @@ export const manageToolApi = {
     model: string,
     modelSelection?: WorkBuddyModelSelection,
     compatibilityProtocol?: CompatibilityProtocol,
-    allowUnverified?: boolean,
   ): Promise<void> {
     await invoke("set_active_ofox_model", {
       app: managedToolId(app),
       model,
       modelSelection,
       compatibilityProtocol,
-      allowUnverified,
     });
   },
 

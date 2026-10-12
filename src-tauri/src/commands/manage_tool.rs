@@ -190,12 +190,11 @@ pub async fn set_active_ofox_model(
     model: String,
     model_selection: Option<crate::workbuddy_config::WorkBuddyModelSelection>,
     compatibility_protocol: Option<String>,
-    allow_unverified: Option<bool>,
 ) -> Result<(), String> {
     if app.trim().eq_ignore_ascii_case("workbuddy") {
         require_configured(crate::workbuddy_config::binding_status(&state.db).await)?;
         let selection = model_selection
-            .ok_or_else(|| "切换 WorkBuddy 模型时缺少能力信息，请刷新模型列表后重试".to_string())?;
+            .ok_or_else(|| "切换 WorkBuddy 模型时缺少能力信息，请重新打开窗口后重试".to_string())?;
         if selection.id.trim() != model.trim() {
             return Err("WorkBuddy 模型 ID 与能力信息不一致，请刷新后重试".to_string());
         }
@@ -226,17 +225,12 @@ pub async fn set_active_ofox_model(
         .map_err(|e| format!("读取 {provider_id} 失败: {e}"))?
         .ok_or_else(|| format!("供应商 {provider_id} 不存在"))?;
 
-    let catalog_token = if provider_id.starts_with("ofox-") && !model.trim().is_empty() {
-        catalog_access_token(&ofox_state.0).await
-    } else {
-        None
-    };
-    let resolved_protocol = if provider_id.starts_with("ofox-") && !model.trim().is_empty() {
+    let resolved_protocol = if needs_compatibility_check(&app_type, &provider_id, &model) {
+        let catalog_token = catalog_access_token(&ofox_state.0).await;
         validate_compatibility(
             app_type.into(),
             &model,
             compatibility_protocol.as_deref(),
-            allow_unverified.unwrap_or(false),
             catalog_token.as_deref(),
         )
         .await?
@@ -393,22 +387,29 @@ async fn catalog_access_token(manager: &Arc<RwLock<OfoxAuthManager>>) -> Option<
     manager.read().await.get_valid_access_token().await.ok()
 }
 
+/// Codex 只能走 Responses（Ofox 写死 `wire_api = "responses"`，新版 Codex 也
+/// 不再支持 chat），检测既选不了协议，也没什么可拦的，所以不查。
+fn needs_compatibility_check(app: &AppType, provider_id: &str, model: &str) -> bool {
+    provider_id.starts_with("ofox-") && !model.trim().is_empty() && *app != AppType::Codex
+}
+
 async fn validate_compatibility(
     tool: BindableTool,
     model: &str,
     selected: Option<&str>,
-    allow_unverified: bool,
     catalog_access_token: Option<&str>,
 ) -> Result<Option<String>, String> {
     let result = crate::model_compat::check(tool, model, false, catalog_access_token).await;
-    accept_compatibility_result(tool, result, selected, allow_unverified)
+    accept_compatibility_result(tool, result, selected)
 }
 
+/// 只有确定不兼容才拦保存。余额不足、鉴权、限流、网络这类原因查不出结果时
+/// 照常保存：用户没法据此做决定，拦下来只会让人困惑。OpenCode 这时按模型目录
+/// 选协议，Responses 优先。
 fn accept_compatibility_result(
     tool: BindableTool,
     result: crate::model_compat::CompatibilityResult,
     selected: Option<&str>,
-    allow_unverified: bool,
 ) -> Result<Option<String>, String> {
     if let Some(selected) = selected {
         if !result.allowed_protocols.is_empty()
@@ -424,19 +425,16 @@ fn accept_compatibility_result(
         "compatible" if selected.is_none() || selected == result.protocol.as_deref() => {
             Ok(result.protocol)
         }
-        "inconclusive"
-            if allow_unverified
-                && (tool != BindableTool::OpenCode
-                    || matches!(selected, Some("responses" | "chatCompletions"))) =>
-        {
-            Ok(selected.map(str::to_string))
-        }
         "incompatible" => Err(result
             .reason
             .unwrap_or_else(|| "模型与客户端协议不兼容".into())),
-        "inconclusive" => Err(result
-            .reason
-            .unwrap_or_else(|| "流式兼容性尚未确定，请重试或显式继续".into())),
+        "inconclusive" if tool == BindableTool::OpenCode => Ok(Some(
+            selected
+                .map(str::to_string)
+                .or_else(|| result.allowed_protocols.first().cloned())
+                .unwrap_or_else(|| "responses".into()),
+        )),
+        "inconclusive" => Ok(selected.map(str::to_string)),
         _ => Err("所选协议与检测结果不一致，请重新检测".into()),
     }
 }
@@ -689,43 +687,84 @@ mod tests {
             BindableTool::OpenCode,
             result,
             Some("chatCompletions"),
-            true
         )
         .is_err());
     }
 
-    #[test]
-    fn inconclusive_opencode_requires_explicit_valid_choice() {
-        let result = crate::model_compat::CompatibilityResult {
-            app: "opencode".into(),
+    fn inconclusive(app: &str, allowed: &[&str]) -> crate::model_compat::CompatibilityResult {
+        crate::model_compat::CompatibilityResult {
+            app: app.into(),
             model: "x".into(),
-            protocol: Some("chatCompletions".into()),
+            protocol: allowed.first().map(|p| p.to_string()),
             status: "inconclusive".into(),
             source: "probe".into(),
-            reason: None,
-            allowed_protocols: vec!["chatCompletions".into()],
-        };
-        assert!(
-            accept_compatibility_result(BindableTool::OpenCode, result.clone(), None, true)
-                .is_err()
-        );
-        assert!(accept_compatibility_result(
-            BindableTool::OpenCode,
-            result.clone(),
-            Some("responses"),
-            true
-        )
-        .is_err());
+            reason: Some("网关暂时无法完成检测，请稍后重试".into()),
+            allowed_protocols: allowed.iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn inconclusive_check_does_not_block_saving() {
         assert_eq!(
             accept_compatibility_result(
-                BindableTool::OpenCode,
-                result,
-                Some("chatCompletions"),
-                true
-            )
-            .unwrap(),
-            Some("chatCompletions".into())
+                BindableTool::OpenClaw,
+                inconclusive("openclaw", &["chatCompletions"]),
+                None,
+            ),
+            Ok(None)
         );
+    }
+
+    #[test]
+    fn inconclusive_opencode_defaults_to_responses_when_the_catalog_allows_it() {
+        let both = inconclusive("opencode", &["responses", "chatCompletions"]);
+        assert_eq!(
+            accept_compatibility_result(BindableTool::OpenCode, both, None),
+            Ok(Some("responses".into()))
+        );
+        let chat_only = inconclusive("opencode", &["chatCompletions"]);
+        assert_eq!(
+            accept_compatibility_result(BindableTool::OpenCode, chat_only, None),
+            Ok(Some("chatCompletions".into()))
+        );
+        let unknown = inconclusive("opencode", &[]);
+        assert_eq!(
+            accept_compatibility_result(BindableTool::OpenCode, unknown, None),
+            Ok(Some("responses".into()))
+        );
+    }
+
+    #[test]
+    fn inconclusive_opencode_still_rejects_a_protocol_the_catalog_lacks() {
+        let chat_only = inconclusive("opencode", &["chatCompletions"]);
+        assert!(
+            accept_compatibility_result(BindableTool::OpenCode, chat_only, Some("responses"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn codex_models_skip_the_stream_check() {
+        assert!(!needs_compatibility_check(
+            &AppType::Codex,
+            "ofox-codex",
+            "deepseek/x"
+        ));
+        assert!(needs_compatibility_check(
+            &AppType::OpenCode,
+            "ofox-opencode",
+            "deepseek/x"
+        ));
+        assert!(!needs_compatibility_check(
+            &AppType::OpenCode,
+            "ofox-opencode",
+            "  "
+        ));
+        assert!(!needs_compatibility_check(
+            &AppType::OpenCode,
+            "custom",
+            "deepseek/x"
+        ));
     }
 
     #[tokio::test]
