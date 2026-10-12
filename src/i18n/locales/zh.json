@@ -5,7 +5,38 @@
     "notInstalled": "未找到 {{tool}}，请先安装或检查安装路径"
   },
   "toolInstall": {
-    "exitCode": "安装未完成（退出码 {{code}}），请重试"
+    "exitCode": "安装未完成（退出码 {{code}}），请重试",
+    "nodeUpgrade": {
+      "title": "安装 {{tool}} 前需要升级 Node.js",
+      "summary": "{{tool}} 最新版不支持你电脑上的 Node.js 版本。",
+      "current": "当前版本",
+      "minimum": "最低要求",
+      "stepsTitle": "Ofox 会在终端里依次完成：",
+      "stepUpgrade": "用 {{manager}} 升级 Node.js",
+      "needsAdmin": "需要管理员授权，系统会弹出授权窗口。",
+      "stepReinstall": "把原来的 {{count}} 个全局工具装到新的 Node.js 里（工具版本不变）",
+      "reinstallWhy": "{{manager}} 给每个 Node.js 版本单独存放全局安装的工具，不装回去的话，换版本后这些命令就找不到了。它们的配置和登录不受影响。",
+      "stepInstall": "安装 {{tool}}",
+      "showCommand": "查看要运行的命令",
+      "fullRequirement": "{{tool}} 支持的 Node.js 版本：{{range}}",
+      "listSeparator": "、",
+      "confirm": "升级并安装",
+      "manualOnly": "Ofox 没法替你升级{{manager}}的 Node.js。请从 Node.js 官网下载安装最新的长期支持版，装好后再回来安装 {{tool}}。",
+      "openDownload": "打开 Node.js 官网",
+      "downloadUrl": "https://nodejs.org/zh-cn/download",
+      "ok": "知道了",
+      "manager": {
+        "fnm": "由 fnm 管理",
+        "nvm": "由 nvm 管理",
+        "nvm-windows": "由 nvm-windows 管理",
+        "volta": "由 Volta 管理",
+        "homebrew": "通过 Homebrew 安装",
+        "nodejs": "通过 Node.js 官方安装包安装",
+        "asdf": "由 asdf 管理",
+        "mise": "由 mise 管理",
+        "unknown": "安装方式未知"
+      }
+    }
   },
   "unbind": {
     "button": "解除绑定",

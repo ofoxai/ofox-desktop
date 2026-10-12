@@ -51,11 +51,14 @@ pub fn get_tool_install_capabilities() -> Vec<String> {
     tools
 }
 
+/// `upgrade_node`：用户在 Ofox 里同意先把 Node.js 升级到工具要求的版本
+/// （见 `node_requirement`）。升级命令由后端重新生成，不用前端传来的内容。
 #[tauri::command]
 pub async fn install_tool(
     app: AppHandle,
     tool_id: String,
     skip_env: Option<bool>,
+    upgrade_node: Option<bool>,
 ) -> Result<i32, String> {
     let is_script_tool = ALLOWED_TOOLS.contains(&tool_id.as_str());
     let is_native_tool = NATIVE_INSTALL_TOOLS.contains(&tool_id.as_str());
@@ -63,7 +66,12 @@ pub async fn install_tool(
         return Err(format!("不支持的工具: {tool_id}"));
     }
     let _guard = super::tool_update::ToolOperationGuard::acquire(&tool_id)?;
-    install_tool_impl(app, tool_id, skip_env, is_native_tool).await
+    let node_upgrade = if upgrade_node == Some(true) && is_script_tool {
+        Some(super::node_requirement::upgrade_for_install(&tool_id).await?)
+    } else {
+        None
+    };
+    install_tool_impl(app, tool_id, skip_env, is_native_tool, node_upgrade).await
 }
 
 /// 拆分入口以避免主命令函数在 Linux CI 下踩 clippy 的 needless_return
@@ -74,12 +82,13 @@ async fn install_tool_impl(
     tool_id: String,
     skip_env: Option<bool>,
     is_native_tool: bool,
+    node_upgrade: Option<super::node_requirement::NodeUpgrade>,
 ) -> Result<i32, String> {
     if is_native_tool {
         let _ = skip_env;
         native_install(app, &tool_id).await
     } else {
-        run_installer(app, tool_id, skip_env.unwrap_or(false)).await
+        run_installer(app, tool_id, skip_env.unwrap_or(false), node_upgrade).await
     }
 }
 
@@ -91,14 +100,21 @@ async fn install_tool_impl(
     tool_id: String,
     _skip_env: Option<bool>,
     is_native_tool: bool,
+    node_upgrade: Option<super::node_requirement::NodeUpgrade>,
 ) -> Result<i32, String> {
     if is_native_tool {
         return native_install_windows(app, &tool_id).await;
     }
     let code = match super::launch_tool::terminal_proxy_env(&app) {
         Ok(proxy_env) => {
-            super::windows_install::install_cli(&app, &tool_id, cli_label(&tool_id), proxy_env)
-                .await
+            super::windows_install::install_cli(
+                &app,
+                &tool_id,
+                cli_label(&tool_id),
+                proxy_env,
+                node_upgrade,
+            )
+            .await
         }
         Err(error) => {
             let _ = app.emit(
@@ -135,6 +151,7 @@ async fn install_tool_impl(
     tool_id: String,
     _skip_env: Option<bool>,
     is_native_tool: bool,
+    _node_upgrade: Option<super::node_requirement::NodeUpgrade>,
 ) -> Result<i32, String> {
     if is_native_tool {
         Err(format!("{tool_id} 自动安装目前仅支持 macOS/Windows"))
@@ -184,8 +201,30 @@ async fn native_install_windows(app: AppHandle, tool_id: &str) -> Result<i32, St
     result
 }
 
+/// 交给 `init.py` 的「先升级 Node.js」参数（见 `NodeUpgradeStep`）。
+#[cfg(any(target_os = "macos", test))]
+fn installer_upgrade_args(upgrade: &super::node_requirement::NodeUpgrade) -> Vec<String> {
+    let mut args = vec![
+        "--node-upgrade-cmd".to_string(),
+        upgrade.command.clone(),
+        "--node-min".to_string(),
+        upgrade.minimum.to_string(),
+        "--node-manual".to_string(),
+        upgrade.manual.clone(),
+    ];
+    if let Some(below) = upgrade.below {
+        args.extend(["--node-below".to_string(), below.to_string()]);
+    }
+    args
+}
+
 #[cfg(target_os = "macos")]
-async fn run_installer(app: AppHandle, tool_id: String, skip_env: bool) -> Result<i32, String> {
+async fn run_installer(
+    app: AppHandle,
+    tool_id: String,
+    skip_env: bool,
+    node_upgrade: Option<super::node_requirement::NodeUpgrade>,
+) -> Result<i32, String> {
     use tokio::process::Command;
 
     let script_path = resolve_init_sh(&app)?;
@@ -200,6 +239,9 @@ async fn run_installer(app: AppHandle, tool_id: String, skip_env: bool) -> Resul
         .arg("--no-onboard");
     if skip_env {
         cmd.arg("--skip-env");
+    }
+    if let Some(upgrade) = node_upgrade {
+        cmd.args(installer_upgrade_args(&upgrade));
     }
     // The GUI has no place to answer init.py's fallback "continue?" prompt.
     // In dev mode stdin can otherwise be inherited from the launching shell
@@ -296,4 +338,38 @@ fn resolve_init_sh(app: &AppHandle) -> Result<PathBuf, String> {
          scripts/installer/），也不在 {}",
         dev.display()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::node_requirement::NodeUpgrade;
+
+    #[test]
+    fn the_installer_gets_the_upgrade_and_the_version_it_must_reach() {
+        let upgrade = NodeUpgrade {
+            command: "fnm install 24 && fnm default 24 && fnm use 24".into(),
+            minimum: semver::Version::new(24, 16, 0),
+            below: Some(25),
+            manual: "fnm install 24 && fnm default 24".into(),
+        };
+        assert_eq!(
+            installer_upgrade_args(&upgrade),
+            [
+                "--node-upgrade-cmd",
+                "fnm install 24 && fnm default 24 && fnm use 24",
+                "--node-min",
+                "24.16.0",
+                "--node-manual",
+                "fnm install 24 && fnm default 24",
+                "--node-below",
+                "25",
+            ]
+        );
+        let open_ended = NodeUpgrade {
+            below: None,
+            ..upgrade
+        };
+        assert!(!installer_upgrade_args(&open_ended).contains(&"--node-below".to_string()));
+    }
 }

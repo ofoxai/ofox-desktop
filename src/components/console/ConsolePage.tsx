@@ -60,6 +60,7 @@ import BoundToolRow, {
   type ToolRowAction,
 } from "./BoundToolRow";
 import ofoxLogo from "@/assets/icons/ofox-logo.png";
+import NodeUpgradeDialog from "@/components/tools/NodeUpgradeDialog";
 
 type BoundTool = BoundToolRowData;
 
@@ -504,6 +505,9 @@ export default function ConsolePage({
     error: repairError,
     clearError: clearRepairError,
     progress: repairProgress,
+    nodePrompt: repairNodePrompt,
+    confirmNodeUpgrade: confirmRepairNodeUpgrade,
+    dismissNodePrompt: dismissRepairNodePrompt,
   } = useToolInstall((toolId, code) => {
     if (code === 0) {
       void loadDataRef.current();
@@ -1014,6 +1018,12 @@ export default function ConsolePage({
       />
 
       {inlineUpdates.confirmDialog}
+
+      <NodeUpgradeDialog
+        prompt={repairNodePrompt}
+        onConfirm={() => void confirmRepairNodeUpgrade()}
+        onCancel={dismissRepairNodePrompt}
+      />
 
       <OfoxSettingsDialog
         open={settingsDialogOpen}

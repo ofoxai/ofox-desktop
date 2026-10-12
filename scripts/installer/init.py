@@ -54,7 +54,15 @@ from app.display import (
 from app.terminal import open_terminal_with_command, close_terminal_window, TerminalHandle
 from app.monitor import wait_for_condition
 from app.progress import emit_progress, make_poll_callback
-from app.steps import Step, set_region, get_env_steps, get_tool_step, TOOL_STEPS, VerifyStep
+from app.steps import (
+    NodeUpgradeStep,
+    Step,
+    TOOL_STEPS,
+    VerifyStep,
+    get_env_steps,
+    get_tool_step,
+    set_region,
+)
 
 # 与 openclaw-launcher 的 ~/.openclaw-init-state.json 隔离——同一台机器上
 # 两个安装器可共存，各自独立断点续装。
@@ -194,6 +202,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="不启 onboard-server（cc-switch 不需要这个后端）",
     )
+    # 工具要求更新的 Node.js、用户在 Ofox 里同意升级时，由 Tauri 后端传入
+    # （见 src-tauri/src/commands/node_requirement.rs）。
+    p.add_argument("--node-upgrade-cmd", help="升级 Node.js 的命令（含重装受影响的工具）")
+    p.add_argument("--node-min", help="升级后 Node.js 至少要到的版本，如 24.16.0")
+    p.add_argument("--node-below", type=int, help="升级后 Node.js 的大版本要小于它")
+    p.add_argument("--node-manual", default="", help="升级失败时提示用户手动运行的命令")
     return p.parse_args()
 
 
@@ -221,6 +235,15 @@ def main() -> None:
     steps: list[Step] = []
     if not args.skip_env:
         steps.extend(get_env_steps())
+    if args.node_upgrade_cmd and args.node_min:
+        steps.append(
+            NodeUpgradeStep(
+                command=args.node_upgrade_cmd,
+                minimum=args.node_min,
+                below=args.node_below,
+                manual=args.node_manual,
+            )
+        )
 
     if args.tool:
         tool = get_tool_step(args.tool)
@@ -324,8 +347,9 @@ def main() -> None:
                 success = done and handle.exit_code() == 0 and step.verify()
                 if not done:
                     print_failure_hint("安装命令超时；终端仍保持打开，请检查其中的日志。")
-                else:
+                elif success:
                     close_terminal_window(handle.window_id)
+                # 失败时保留终端窗口：真正的报错（npm、版本要求…）只在那里。
                 handle.cleanup()
         else:
             # 在主进程中直接执行

@@ -5,7 +5,38 @@
     "notInstalled": "Could not find {{tool}}. Install it first or check where it is installed."
   },
   "toolInstall": {
-    "exitCode": "Installation did not finish (exit code {{code}}); please retry"
+    "exitCode": "Installation did not finish (exit code {{code}}); please retry",
+    "nodeUpgrade": {
+      "title": "Update Node.js to install {{tool}}",
+      "summary": "The latest {{tool}} doesn't support the Node.js version on this computer.",
+      "current": "Current",
+      "minimum": "Minimum required",
+      "stepsTitle": "Ofox will do this in a terminal:",
+      "stepUpgrade": "Update Node.js with {{manager}}",
+      "needsAdmin": "Administrator approval is needed; the system will ask for it.",
+      "stepReinstall": "Reinstall your global tools on the new Node.js ({{count}}, same tool versions)",
+      "reinstallWhy": "{{manager}} keeps globally installed tools separately for each Node.js version, so without this their commands would be missing after the switch. Their settings and sign-ins stay as they are.",
+      "stepInstall": "Install {{tool}}",
+      "showCommand": "Show the command",
+      "fullRequirement": "Node.js versions {{tool}} supports: {{range}}",
+      "listSeparator": ", ",
+      "confirm": "Update and install",
+      "manualOnly": "Ofox can't update Node.js {{manager}}. Install the latest LTS from the Node.js website, then come back to install {{tool}}.",
+      "openDownload": "Open nodejs.org",
+      "downloadUrl": "https://nodejs.org/en/download",
+      "ok": "Got it",
+      "manager": {
+        "fnm": "managed by fnm",
+        "nvm": "managed by nvm",
+        "nvm-windows": "managed by nvm-windows",
+        "volta": "managed by Volta",
+        "homebrew": "installed with Homebrew",
+        "nodejs": "installed with the official Node.js installer",
+        "asdf": "managed by asdf",
+        "mise": "managed by mise",
+        "unknown": "installed in an unknown way"
+      }
+    }
   },
   "unbind": {
     "button": "Unbind",

@@ -22,6 +22,7 @@ import {
   ToolDiscoveryCard,
   type ToolStatus,
 } from "@/components/onboarding/ToolDiscoveryCard";
+import NodeUpgradeDialog from "@/components/tools/NodeUpgradeDialog";
 
 interface ToolEntry {
   id: string;
@@ -212,6 +213,9 @@ export default function AddToolsDialog({
     install,
     error: installError,
     progress: installProgress,
+    nodePrompt,
+    confirmNodeUpgrade,
+    dismissNodePrompt,
   } = useToolInstall((toolId, code) => {
     if (code === 0 && open) {
       void detect();
@@ -352,6 +356,11 @@ export default function AddToolsDialog({
                 : `确认（${selected.length}）`}
           </button>
         </DialogFooter>
+        <NodeUpgradeDialog
+          prompt={nodePrompt}
+          onConfirm={() => void confirmNodeUpgrade()}
+          onCancel={dismissNodePrompt}
+        />
       </DialogContent>
     </Dialog>
   );
