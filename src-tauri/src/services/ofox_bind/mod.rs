@@ -13,6 +13,7 @@ mod env_file;
 pub(crate) mod gemini;
 mod hermes;
 mod json_file;
+mod live_model;
 mod openclaw;
 mod opencode;
 mod plan;
@@ -542,12 +543,29 @@ pub(crate) async fn replace_key(
             .message
             .unwrap_or_else(|| "OFox 接入配置已变化，已停止更换 key。".into()));
     }
+    // 重写前先采纳用户在 CLI 里选的模型，否则会被模板里的旧模型盖回去。
+    live_model::adopt_live_model(db, tool)?;
     let template = template(db, tool)?;
     let mut txn = FileTxn::new();
     if let Err(error) = write_bound(tool, &template, new_key, &mut txn) {
         return Err(rollback_with(txn, error));
     }
     Ok(())
+}
+
+/// 用户在 CLI 里换了模型：配置仍是 Ofox 的接入方式时，把它采纳进模板，主页显示的
+/// 模型才和实际一致。出错只记日志——这只是展示用的同步，不该让状态查询失败。
+pub(crate) async fn sync_live_model(db: &Database, tool: Tool, api_key: Option<&str>) {
+    let _guard = BIND_LOCK.lock().await;
+    let _file_locks = file_locks(tool);
+    match status::inspect(db, tool, api_key) {
+        Ok(health) if health.status == status::BindingStatus::Configured => {
+            if let Err(error) = live_model::adopt_live_model(db, tool) {
+                log::warn!("[ofox_bind] 采纳 {} 的模型失败：{error}", tool.label());
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Save a model and its live configuration under the same binding lock. The
@@ -656,6 +674,8 @@ async fn bind_inner(
                 .message
                 .unwrap_or_else(|| "OFox 接入配置已变化，已停止启动修复。".into()));
         }
+        // 修复会按模板重写，先采纳用户在 CLI 里选的模型。
+        live_model::adopt_live_model(db, tool)?;
     }
     if tool == Tool::Codex {
         codex::migrate_legacy_shape(|| Some(api_key.to_string()))?;

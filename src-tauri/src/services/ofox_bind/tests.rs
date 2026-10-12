@@ -2684,8 +2684,7 @@ async fn region_reconciliation_isolates_direct_tool_and_workbuddy_conflicts() {
 #[serial]
 async fn startup_existing_repair_accepts_only_unchanged_saved_managed_fields() {
     for tool in [Tool::Claude, Tool::Codex] {
-        // A model changed by the user is not a modification; Stage 2 covers it.
-        for modified in [None, Some(KEY)] {
+        for modified in [None, Some(KEY), Some("saved-model")] {
             let _home = Home::new();
             let saved = binding_cases()
                 .into_iter()
@@ -2703,12 +2702,17 @@ async fn startup_existing_repair_accepts_only_unchanged_saved_managed_fields() {
             let original = fs::read_to_string(&path).unwrap();
             let changed = match modified {
                 None => original,
-                Some(_) => original.replace(KEY, "sk-user-changed"),
+                Some(KEY) => original.replace(KEY, "sk-user-changed"),
+                // A model the user picked in the CLI is theirs, not a modification.
+                Some(_) if tool == Tool::Claude => {
+                    original.replace("anthropic/claude-saved", "user/changed-model")
+                }
+                Some(_) => original.replace("openai/gpt-6-luna", "user/changed-model"),
             };
             fs::write(&path, &changed).unwrap();
             set_current_provider(&db, &tool.app(), tool.official_id().unwrap()).unwrap();
             let result = bind_existing(&db, tool, tool.app().as_str(), KEY).await;
-            if modified.is_none() {
+            if modified != Some(KEY) {
                 result.unwrap();
                 assert_eq!(
                     current_provider(&db, tool).as_deref(),
@@ -3382,6 +3386,151 @@ async fn gemini_model_changed_by_the_user_is_still_configured() {
     let health = status::binding_status(&db, Tool::Gemini, Some(KEY)).await;
 
     assert_eq!(health.status, status::BindingStatus::Configured);
+}
+
+fn saved_model(db: &Database, tool: Tool) -> String {
+    let settings = db
+        .get_provider_by_id(tool.provider_id(), tool.app().as_str())
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    crate::commands::manage_tool::read_model_from_settings(&tool.app(), &settings)
+}
+
+fn switch_codex_model_in_cli(path: &Path, model: &str) {
+    let switched = fs::read_to_string(path).unwrap().replace(
+        "model = \"openai/gpt-6-luna\"",
+        &format!("model = \"{model}\""),
+    );
+    write(path, &switched);
+}
+
+fn switch_claude_model_in_cli(path: &Path, model: &str) {
+    let mut edited = json_at(path);
+    edited["env"]["ANTHROPIC_MODEL"] = model.into();
+    write(path, &serde_json::to_string_pretty(&edited).unwrap());
+}
+
+#[tokio::test]
+#[serial]
+async fn adopt_live_model_updates_the_template_only_when_it_differs() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    assert!(!super::live_model::adopt_live_model(&db, Tool::Codex).unwrap());
+
+    switch_codex_model_in_cli(&path, "gpt-other");
+
+    assert!(super::live_model::adopt_live_model(&db, Tool::Codex).unwrap());
+    assert_eq!(saved_model(&db, Tool::Codex), "gpt-other");
+    assert!(!super::live_model::adopt_live_model(&db, Tool::Codex).unwrap());
+}
+
+#[tokio::test]
+#[serial]
+async fn adopt_live_model_ignores_a_missing_model_line() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    let without_model = fs::read_to_string(&path)
+        .unwrap()
+        .replace("model = \"openai/gpt-6-luna\"\n", "");
+    assert!(!without_model.contains("gpt-6-luna"));
+    write(&path, &without_model);
+
+    assert!(!super::live_model::adopt_live_model(&db, Tool::Codex).unwrap());
+    assert_eq!(saved_model(&db, Tool::Codex), "openai/gpt-6-luna");
+}
+
+#[tokio::test]
+#[serial]
+async fn gemini_model_chosen_in_the_cli_is_adopted() {
+    let home = Home::new();
+    let env = home.gemini(".env");
+    write(&env, GEMINI_ENV);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    let switched = fs::read_to_string(&env)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            if line.starts_with("GEMINI_MODEL=") {
+                "GEMINI_MODEL=gemini-other".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    write(&env, &format!("{switched}\n"));
+
+    assert!(super::live_model::adopt_live_model(&db, Tool::Gemini).unwrap());
+    assert_eq!(saved_model(&db, Tool::Gemini), "gemini-other");
+    assert!(!super::live_model::adopt_live_model(&db, Tool::Gemini).unwrap());
+}
+
+#[tokio::test]
+#[serial]
+async fn sync_live_model_adopts_only_while_the_binding_is_configured() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+
+    switch_codex_model_in_cli(&path, "gpt-other");
+    super::sync_live_model(&db, Tool::Codex, Some(KEY)).await;
+    assert_eq!(saved_model(&db, Tool::Codex), "gpt-other");
+
+    // Pointed at another provider: its model is none of our business.
+    let elsewhere = fs::read_to_string(&path)
+        .unwrap()
+        .replace("model_provider = \"ofox\"", "model_provider = \"other\"")
+        .replace("model = \"gpt-other\"", "model = \"someone-elses-model\"");
+    write(&path, &elsewhere);
+    super::sync_live_model(&db, Tool::Codex, Some(KEY)).await;
+    assert_eq!(saved_model(&db, Tool::Codex), "gpt-other");
+}
+
+#[tokio::test]
+#[serial]
+async fn replacing_the_key_keeps_the_codex_model_chosen_in_the_cli() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    switch_codex_model_in_cli(&path, "gpt-other");
+
+    replace_key(&db, Tool::Codex, KEY, "sk-of-ACCOUNT-B")
+        .await
+        .expect("replace key");
+
+    let config = toml_at(&path);
+    assert_eq!(config["model"].as_str(), Some("gpt-other"));
+    assert!(fs::read_to_string(&path)
+        .unwrap()
+        .contains("sk-of-ACCOUNT-B"));
+    assert!(!fs::read_to_string(&path).unwrap().contains(KEY));
+}
+
+#[tokio::test]
+#[serial]
+async fn replacing_the_key_keeps_the_claude_model_chosen_by_the_user() {
+    let home = Home::new();
+    let path = home.claude("settings.json");
+    write(&path, CLAUDE_RELAY);
+    let db = db_for(Tool::Claude, claude_template(Some("anthropic/claude-x")));
+    bind(&db, Tool::Claude, "claude", KEY).await.unwrap();
+    switch_claude_model_in_cli(&path, "anthropic/claude-other");
+
+    replace_key(&db, Tool::Claude, KEY, "sk-of-ACCOUNT-B")
+        .await
+        .expect("replace key");
+
+    let after = json_at(&path);
+    assert_eq!(after["env"]["ANTHROPIC_MODEL"], "anthropic/claude-other");
+    assert_eq!(after["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-of-ACCOUNT-B");
 }
 
 #[tokio::test]
