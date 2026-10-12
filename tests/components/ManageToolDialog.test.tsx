@@ -547,17 +547,40 @@ describe("ManageToolDialog re-saving an unchanged model", () => {
 });
 
 describe("ManageToolDialog model picker", () => {
-  it("bypasses the catalog cache only for an explicit refresh", async () => {
+  it("loads the model list when the dialog opens, with no refresh button", async () => {
     const model = compatibleModel("openai/gpt-6-luna");
     mockSingleTool(model);
     const fetch = vi.spyOn(modelFetch, "fetchOfoxModels");
 
     await renderTool("opencode", "OpenCode");
-    fireEvent.click(screen.getByRole("combobox"));
     await waitFor(() => expect(fetch).toHaveBeenCalledWith("openai", false));
+    expect(
+      screen.queryByRole("button", { name: "刷新模型列表" }),
+    ).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "刷新模型列表" }));
+    fireEvent.click(screen.getByRole("combobox"));
+    expect(await screen.findByRole("option", { name: model.id })).toBeVisible();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("says the list failed to load and retries without the cache", async () => {
+    const model = compatibleModel("openai/gpt-6-luna");
+    mockSingleTool(model);
+    const fetch = vi
+      .spyOn(modelFetch, "fetchOfoxModels")
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue([model]);
+    const toastError = vi.spyOn(toast, "error");
+
+    await renderTool("opencode", "OpenCode");
+    expect(await screen.findByText("模型列表加载失败")).toBeVisible();
+    expect(toastError).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
     await waitFor(() => expect(fetch).toHaveBeenCalledWith("openai", true));
+    await waitFor(() =>
+      expect(screen.queryByText("模型列表加载失败")).not.toBeInTheDocument(),
+    );
   });
 
   it("explains that ChatGPT desktop shares only its Codex mode with the CLI", async () => {
@@ -867,9 +890,20 @@ describe("ManageToolDialog WorkBuddy multi-model management", () => {
 
     await renderTool("workbuddy", "WorkBuddy");
     expect(
-      await screen.findByText("模型目录加载失败，请刷新后重试。"),
+      await screen.findByText("模型列表加载失败，加载后才能保存。"),
     ).toBeVisible();
     expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "刷新模型列表" }),
+    ).not.toBeInTheDocument();
+
+    vi.mocked(modelFetch.fetchOfoxModels).mockResolvedValue([
+      compatibleModel("openai/model-a"),
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "保存" })).toBeEnabled(),
+    );
   });
 
   it("reports a manual timeout while keeping catalog-based save available", async () => {

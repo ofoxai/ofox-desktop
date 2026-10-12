@@ -45,6 +45,10 @@
     "confirm": "继续切换",
     "cancel": "保留当前区域"
   },
+  "modelCatalog": {
+    "loadFailed": "模型列表加载失败",
+    "retry": "重试"
+  },
   "modelCompatibility": {
     "title": "流式兼容性",
     "checking": "正在验证流式兼容性…",
@@ -70,8 +74,8 @@
     "workBuddyTest": "检测选中模型",
     "workBuddySaveHint": "目录兼容即可保存；流式检测按需进行，不影响保存。",
     "workBuddyIncompatible": "流式检测不兼容（仍可保存）",
-    "workBuddyCatalogFailed": "模型目录加载失败，请刷新后重试。",
-    "workBuddyMissingCatalog": "部分已选模型不在当前兼容目录中，请刷新或移除后保存。",
+    "workBuddyCatalogFailed": "模型列表加载失败，加载后才能保存。",
+    "workBuddyMissingCatalog": "部分已选模型已不在可用列表中，请移除后再保存。",
     "defaultModelFailed": "{{tool}} 已绑定，但默认模型未通过流式验证；请在管理中选择模型"
   },
   "toolUpdates": {

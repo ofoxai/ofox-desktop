@@ -45,6 +45,10 @@
     "confirm": "Switch",
     "cancel": "Keep current region"
   },
+  "modelCatalog": {
+    "loadFailed": "Couldn't load the model list",
+    "retry": "Retry"
+  },
   "modelCompatibility": {
     "title": "Streaming compatibility",
     "checking": "Checking streaming compatibility…",
@@ -70,8 +74,8 @@
     "workBuddyTest": "Test selected model",
     "workBuddySaveHint": "Catalog-compatible models can be saved now; streaming checks are optional.",
     "workBuddyIncompatible": "Streaming check failed (saving is still available)",
-    "workBuddyCatalogFailed": "Could not load the model catalog. Refresh and try again.",
-    "workBuddyMissingCatalog": "Some selected models are missing from the compatible catalog. Refresh or remove them before saving.",
+    "workBuddyCatalogFailed": "Couldn't load the model list. It must load before you can save.",
+    "workBuddyMissingCatalog": "Some selected models are no longer available. Remove them before saving.",
     "defaultModelFailed": "{{tool}} was bound, but its default model could not be stream-verified. Choose a model in Manage."
   },
   "toolUpdates": {
