@@ -44,8 +44,8 @@ export function managedToolId(app: string): string {
  * line up for a 2xx to come back.
  *
  * `success === true` when the gateway returned 2xx. On failure, the dialog
- * surfaces `error` verbatim (already includes a Chinese hint plus the raw
- * HTTP status / body), and a 401 in `statusCode` triggers a reauth nudge.
+ * shows `error` (a hint, the HTTP status and the gateway's own message);
+ * a 402 in `statusCode` shows the out-of-credits notice with a top-up link.
  */
 export interface PingResult {
   success: boolean;

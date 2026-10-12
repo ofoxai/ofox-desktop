@@ -10,6 +10,7 @@ import {
   Zap,
   CheckCircle2,
   XCircle,
+  Wallet,
   Github,
   ExternalLink,
 } from "lucide-react";
@@ -69,6 +70,10 @@ import {
 import type { InstallationStatus } from "@/lib/api/toolUpdates";
 import { ToolBadge } from "@/components/tools/ToolBadge";
 import { TOOL_META } from "@/config/toolMeta";
+import { useOfoxApex } from "@/hooks/useOfoxApex";
+import { useOfoxAuth } from "@/hooks/useOfoxAuth";
+import { isOfoxBillingManager } from "@/lib/api/ofoxAuth";
+import { ofoxWalletUrl } from "@/lib/ofoxUrls";
 import type { AppId } from "@/lib/api/types";
 
 /** Subset of `ConsolePage`'s `BoundTool` that the dialog actually needs.
@@ -1475,6 +1480,7 @@ function PingStatusBox({ loading, result, model }: PingStatusBoxProps) {
       </div>
     );
   }
+  if (result.statusCode === 402) return <InsufficientCreditsNotice />;
   if (result.success) {
     return (
       <div className="flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-[12px] text-emerald-700 dark:text-emerald-400">
@@ -1497,6 +1503,46 @@ function PingStatusBox({ loading, result, model }: PingStatusBoxProps) {
           {result.error || "未知错误"}
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * 余额不足（HTTP 402）时不显示网关原文，直接说清原因：owner / admin 给出按当前
+ * 地区打开钱包的「去充值」，member 没有充值权限，请他联系管理员。
+ */
+function InsufficientCreditsNotice() {
+  const { t } = useTranslation();
+  const { apex } = useOfoxApex();
+  const { status, isLoading } = useOfoxAuth();
+  const canTopUp = isOfoxBillingManager(status?.user);
+  const openWallet = () =>
+    void settingsApi
+      .openExternal(ofoxWalletUrl(apex))
+      .catch(() => toast.error(t("notifications.openLinkFailed")));
+
+  return (
+    <div className="flex items-start gap-2 rounded-md border border-orange-500/30 bg-orange-500/5 px-3 py-2 text-[12px] text-orange-800 dark:text-orange-300">
+      <Wallet className="mt-0.5 h-4 w-4 shrink-0" />
+      <div className="min-w-0 flex-1">
+        <div className="font-medium">
+          {t("connectivity.insufficientCreditsTitle")}
+        </div>
+        <div className="mt-0.5 text-[11.5px] text-orange-800/80 dark:text-orange-300/80">
+          {t("connectivity.insufficientCreditsHint")}
+          {!isLoading && !canTopUp && ` ${t("connectivity.askAdminToTopUp")}`}
+        </div>
+      </div>
+      {canTopUp && (
+        <Button
+          type="button"
+          size="sm"
+          onClick={openWallet}
+          className="shrink-0 bg-orange-500 text-white hover:bg-orange-600"
+        >
+          {t("connectivity.topUp")}
+        </Button>
+      )}
     </div>
   );
 }

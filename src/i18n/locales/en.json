@@ -45,6 +45,12 @@
     "confirm": "Switch",
     "cancel": "Keep current region"
   },
+  "connectivity": {
+    "insufficientCreditsTitle": "Out of credits",
+    "insufficientCreditsHint": "Your OFOX balance has run out. Top up to keep using it.",
+    "askAdminToTopUp": "Ask your team admin to top up.",
+    "topUp": "Top up"
+  },
   "modelCatalog": {
     "loadFailed": "Couldn't load the model list",
     "retry": "Retry"

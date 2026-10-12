@@ -45,6 +45,12 @@
     "confirm": "继续切换",
     "cancel": "保留当前区域"
   },
+  "connectivity": {
+    "insufficientCreditsTitle": "余额不足",
+    "insufficientCreditsHint": "OFOX 账户余额不足，充值后即可使用。",
+    "askAdminToTopUp": "请联系团队管理员充值。",
+    "topUp": "去充值"
+  },
   "modelCatalog": {
     "loadFailed": "模型列表加载失败",
     "retry": "重试"

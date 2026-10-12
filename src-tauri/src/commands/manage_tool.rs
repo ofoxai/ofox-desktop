@@ -627,6 +627,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ping_says_the_balance_ran_out_instead_of_dumping_the_body() {
+        let body = r#"{"error":{"message":"Insufficient credits. Current balance: $0. Please top up to continue.","type":"insufficient_credits","code":402,"request_id":"6340bd36"}}"#;
+        assert_eq!(
+            ping_failure_message(402, body),
+            "OFOX 账户余额不足，充值后即可使用。"
+        );
+    }
+
+    #[test]
+    fn ping_shows_only_the_gateway_message_from_a_json_error() {
+        let body = r#"{"error":{"message":"model not found","type":"invalid_request_error"}}"#;
+        assert_eq!(
+            ping_failure_message(404, body),
+            "未找到该模型，可能已下线或拼写有误。（HTTP 404）model not found"
+        );
+        assert_eq!(
+            ping_failure_message(400, r#"{"message":"bad request"}"#),
+            "请求失败（HTTP 400）bad request"
+        );
+    }
+
+    #[test]
+    fn ping_truncates_a_long_non_json_body_on_a_character_boundary() {
+        let body = "网关错误".repeat(200);
+        let message = ping_failure_message(502, &body);
+        assert!(message.starts_with("OfoxAI 网关返回 5xx，请稍后再试。（HTTP 502）"));
+        assert!(message.ends_with('…'));
+        assert!(message.chars().count() < 260);
+    }
+
+    #[test]
     fn opencode_model_entry_remains_typed_config_compatible() {
         let mut settings = serde_json::json!({
             "npm": "@ai-sdk/openai",
@@ -809,7 +840,7 @@ mod tests {
 /// `success` is the only field the happy path needs; `latencyMs` powers the
 /// "✓ 连通成功（123 ms）" subtitle, and `error` carries the human-readable
 /// reason when `success = false`. Status code is surfaced separately so the
-/// front-end can special-case 401 ("session expired, re-login") without
+/// front-end can special-case 402 (out of credits → top-up) without
 /// pattern-matching on Chinese error text.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1131,32 +1162,47 @@ async fn ping_result_from_response(
         };
     }
 
-    // Failure path: read and trim the body so error messages stay glanceable.
     let body = response.text().await.unwrap_or_default();
-    let trimmed = if body.len() > 400 {
-        format!("{}…", &body[..400])
-    } else {
-        body
-    };
-    let hint = match status.as_u16() {
+    PingResult {
+        success: false,
+        latency_ms,
+        status_code: Some(status.as_u16()),
+        error: Some(ping_failure_message(status.as_u16(), &body)),
+    }
+}
+
+const PING_DETAIL_MAX_CHARS: usize = 200;
+
+/// One readable sentence for a failed ping: a hint for the status plus the
+/// gateway's own `message`, never the raw JSON body. A 402 means the Ofox
+/// balance ran out; the dialog adds the top-up action for that status.
+fn ping_failure_message(status: u16, body: &str) -> String {
+    if status == 402 {
+        return "OFOX 账户余额不足，充值后即可使用。".into();
+    }
+    let hint = match status {
         401 => "API Key 无效或已过期，请尝试解除绑定后重新绑定该工具。",
         403 => "请求被拒绝，请检查账户权限或额度。",
         404 => "未找到该模型，可能已下线或拼写有误。",
         429 => "请求过于频繁，请稍后再试。",
         500..=599 => "OfoxAI 网关返回 5xx，请稍后再试。",
-        _ => "",
+        _ => "请求失败",
     };
-
-    PingResult {
-        success: false,
-        latency_ms,
-        status_code: Some(status.as_u16()),
-        error: Some(if hint.is_empty() {
-            format!("HTTP {status}: {trimmed}")
-        } else {
-            format!("{hint}（HTTP {status}）{trimmed}")
-        }),
-    }
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    let detail = parsed
+        .as_ref()
+        .and_then(|json| {
+            json.pointer("/error/message")
+                .or_else(|| json.get("message"))
+                .and_then(|message| message.as_str())
+        })
+        .unwrap_or(body)
+        .trim();
+    let detail = match detail.char_indices().nth(PING_DETAIL_MAX_CHARS) {
+        Some((cut, _)) => format!("{}…", &detail[..cut]),
+        None => detail.to_string(),
+    };
+    format!("{hint}（HTTP {status}）{detail}")
 }
 
 /// Read the API key (or auth token) that the proxy would inject when

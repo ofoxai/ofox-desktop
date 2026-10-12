@@ -45,6 +45,12 @@
     "confirm": "切り替える",
     "cancel": "現在のリージョンを維持"
   },
+  "connectivity": {
+    "insufficientCreditsTitle": "残高不足",
+    "insufficientCreditsHint": "OFOX アカウントの残高が不足しています。チャージすると使えます。",
+    "askAdminToTopUp": "チームの管理者にチャージを依頼してください。",
+    "topUp": "チャージする"
+  },
   "modelCatalog": {
     "loadFailed": "モデル一覧を読み込めませんでした",
     "retry": "再試行"

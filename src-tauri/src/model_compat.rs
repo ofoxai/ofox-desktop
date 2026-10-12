@@ -378,6 +378,7 @@ fn failed_http(status: u16) -> ProbeOutcome {
     match status {
         404 => ProbeOutcome::Incompatible("模型或协议端点不存在"),
         401 | 403 => ProbeOutcome::Inconclusive("鉴权或权限不足，无法判定兼容性"),
+        402 => ProbeOutcome::Inconclusive("账户余额不足，充值后才能检测"),
         429 => ProbeOutcome::Inconclusive("请求被限流，请稍后重试"),
         _ => ProbeOutcome::Inconclusive("网关暂时无法完成检测，请稍后重试"),
     }
@@ -698,9 +699,13 @@ mod tests {
 
     #[test]
     fn transient_http_and_truncated_streams_are_not_declared_incompatible() {
-        for status in [400, 401, 429, 500] {
+        for status in [400, 401, 402, 429, 500] {
             assert!(matches!(failed_http(status), ProbeOutcome::Inconclusive(_)));
         }
+        assert!(matches!(
+            failed_http(402),
+            ProbeOutcome::Inconclusive("账户余额不足，充值后才能检测")
+        ));
         let chat = "data: {\"choices\":[{\"delta\":{\"content\":\"OK\"},\"finish_reason\":\"length\"}]}\n\n";
         assert!(matches!(
             evaluate_stream(CHAT, chat),

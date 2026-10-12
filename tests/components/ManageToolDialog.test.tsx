@@ -25,6 +25,28 @@ import * as bindToolsModule from "@/lib/bindTools";
 import { ofoxBindApi, type UnbindReport } from "@/lib/api/ofoxBind";
 import { toast } from "sonner";
 import { BOUND_TOOLS_STORAGE_KEY } from "@/config/toolMeta";
+import { settingsApi } from "@/lib/api";
+
+const account = vi.hoisted(() => ({
+  apex: "ofox.io" as "ofox.ai" | "ofox.io",
+  role: "owner" as "owner" | "admin" | "member",
+}));
+
+vi.mock("@/hooks/useOfoxApex", () => ({
+  useOfoxApex: () => ({
+    apex: account.apex,
+    pinned: false,
+    isLoading: false,
+    refetch: vi.fn(),
+  }),
+}));
+
+vi.mock("@/hooks/useOfoxAuth", () => ({
+  useOfoxAuth: () => ({
+    status: { user: { role: account.role } },
+    isLoading: false,
+  }),
+}));
 
 function compatibleModel(id: string): FetchedModel {
   return {
@@ -964,6 +986,50 @@ describe("ManageToolDialog WorkBuddy multi-model management", () => {
 
     expect(await screen.findByText(/网络错误或检测超时/)).toBeVisible();
     expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+  });
+});
+
+describe("ManageToolDialog connectivity", () => {
+  async function pingWithEmptyBalance() {
+    const model = compatibleModel("deepseek/deepseek-v4.1-flash");
+    mockSingleTool(model);
+    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue(model.id);
+    vi.spyOn(manageToolApi, "pingModel").mockResolvedValue({
+      success: false,
+      latencyMs: 120,
+      statusCode: 402,
+      error: "OFOX 账户余额不足，充值后即可使用。",
+    });
+    await renderTool("openclaw", "OpenClaw");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "测试连通性" })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "测试连通性" }));
+    await screen.findByText("余额不足");
+  }
+
+  it("tells an owner the balance ran out and opens the wallet for their region", async () => {
+    account.role = "owner";
+    account.apex = "ofox.io";
+    const open = vi.spyOn(settingsApi, "openExternal").mockResolvedValue();
+    await pingWithEmptyBalance();
+
+    expect(screen.queryByText("连通失败")).not.toBeInTheDocument();
+    expect(screen.queryByText(/HTTP 402|insufficient_credits/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "去充值" }));
+    await waitFor(() =>
+      expect(open).toHaveBeenCalledWith("https://app.ofox.io/manage/wallet"),
+    );
+  });
+
+  it("asks a member to contact an admin instead of offering a top-up", async () => {
+    account.role = "member";
+    await pingWithEmptyBalance();
+
+    expect(
+      screen.queryByRole("button", { name: "去充值" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/请联系团队管理员充值/)).toBeVisible();
   });
 });
 
