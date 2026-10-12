@@ -1,4 +1,10 @@
 {
+  "keychainDenied": {
+    "message": "Access to the login saved in your keychain was denied, so you appear signed out. Choose “Allow again”, enter your Mac password in the system prompt and pick “Always Allow” to restore it.",
+    "retry": "Allow again",
+    "retrying": "Reading…",
+    "stillDenied": "The keychain still couldn't be read. Choose “Always Allow” in the prompt, or sign in again."
+  },
   "toolLaunch": {
     "failed": "Could not open the tool",
     "proxyUnavailable": "The local proxy at {{endpoint}} is unavailable. Start the proxy or restore the port forward, then try again.",

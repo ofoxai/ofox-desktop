@@ -161,6 +161,9 @@ struct SpendingLimitsResponse {
 pub struct OfoxAuthStatus {
     pub state: OfoxAuthState,
     pub user: Option<OfoxUserInfo>,
+    /// 读取钥匙串里的登录信息时，用户在系统弹窗里点了「拒绝」：显示为未登录，
+    /// 但可以重新授权（`retry_keychain`）恢复，不必重新登录。
+    pub keychain_denied: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,6 +288,8 @@ pub struct OfoxAuthManager {
     /// OAuth token 落到 OS 钥匙串的后端。`Arc<dyn …>` 是为了测试时能注入
     /// `InMemoryStore` 跳过真实 Keychain（CI 环境没钥匙串守护进程）。
     secret_store: Arc<dyn crate::ofox_secret::SecretStore>,
+    /// 上次读取钥匙串时被用户拒绝（见 [`OfoxAuthStatus::keychain_denied`]）。
+    keychain_denied: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl OfoxAuthManager {
@@ -313,13 +318,34 @@ impl OfoxAuthManager {
             http_client: Client::new(),
             app_handle: Arc::new(RwLock::new(None)),
             secret_store,
+            keychain_denied: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
-        if let Err(e) = manager.load_from_disk_sync() {
-            log::warn!("[OfoxAuth] Failed to load stored auth: {e}");
-        }
-
+        manager.load_stored_session();
         manager
+    }
+
+    /// 读回上次的登录；记下是不是因为钥匙串被拒绝才读不到。
+    fn load_stored_session(&self) {
+        let denied = match self.load_from_disk_sync() {
+            Ok(()) => false,
+            Err(e) => {
+                log::warn!("[OfoxAuth] Failed to load stored auth: {e}");
+                crate::ofox_secret::is_keychain_denied(&e)
+            }
+        };
+        self.keychain_denied
+            .store(denied, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// 用户点「重新授权」：再读一次钥匙串（系统会再次弹窗），返回读完后的状态。
+    pub async fn retry_keychain(&self) -> OfoxAuthStatus {
+        self.load_stored_session();
+        if self.is_authenticated() {
+            // 和登录成功走同一条路：老用户回主界面，新用户去选工具（MainApp）。
+            self.emit_state_event("ofox-auth-restored").await;
+        }
+        self.get_auth_status().await
     }
 
     /// Wire up the AppHandle so we can emit lifecycle events to the frontend.
@@ -887,6 +913,9 @@ impl OfoxAuthManager {
         OfoxAuthStatus {
             state: *self.auth_state.read().await,
             user: self.user_info.read().await.clone(),
+            keychain_denied: self
+                .keychain_denied
+                .load(std::sync::atomic::Ordering::SeqCst),
         }
     }
 
@@ -1359,6 +1388,71 @@ mod tests {
             manager.get_valid_access_token().await.unwrap_err(),
             "session_expired"
         );
+    }
+
+    /// A keychain whose prompt the user denied, until they allow it.
+    struct DeniedKeychain {
+        allowed: std::sync::atomic::AtomicBool,
+        tokens: crate::ofox_secret::InMemoryStore,
+    }
+
+    impl crate::ofox_secret::SecretStore for DeniedKeychain {
+        fn load(&self, slot: crate::ofox_secret::Slot) -> Result<Option<String>, String> {
+            if self.allowed.load(std::sync::atomic::Ordering::SeqCst) {
+                self.tokens.load(slot)
+            } else {
+                Err(format!(
+                    "{}: keychain access denied",
+                    crate::ofox_secret::KEYCHAIN_DENIED
+                ))
+            }
+        }
+        fn save(&self, slot: crate::ofox_secret::Slot, value: &str) -> Result<(), String> {
+            self.tokens.save(slot, value)
+        }
+        fn clear(&self, slot: crate::ofox_secret::Slot) -> Result<(), String> {
+            self.tokens.clear(slot)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_denied_keychain_is_reported_and_allowing_it_restores_the_session() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("ofox_auth.json"),
+            serde_json::json!({
+                "schema_version": 1,
+                "expires_at": 0,
+                "scope": "",
+                "user": null,
+                "expired": false,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let keychain = Arc::new(DeniedKeychain {
+            allowed: std::sync::atomic::AtomicBool::new(false),
+            tokens: crate::ofox_secret::InMemoryStore::new(),
+        });
+        keychain
+            .tokens
+            .save(crate::ofox_secret::Slot::RefreshToken, "rt")
+            .unwrap();
+        let manager = OfoxAuthManager::new_with_secret_store(
+            temp.path().to_path_buf(),
+            Arc::clone(&keychain) as Arc<dyn crate::ofox_secret::SecretStore>,
+        );
+
+        let denied = manager.get_auth_status().await;
+        assert_eq!(denied.state, OfoxAuthState::LoggedOut);
+        assert!(denied.keychain_denied);
+
+        keychain
+            .allowed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let restored = manager.retry_keychain().await;
+        assert_eq!(restored.state, OfoxAuthState::Active);
+        assert!(!restored.keychain_denied);
     }
 
     #[tokio::test]
