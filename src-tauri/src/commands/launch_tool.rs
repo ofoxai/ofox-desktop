@@ -342,6 +342,8 @@ fn resolve_cli_bin(tool_id: &str) -> Option<&'static str> {
         "codex" => Some("codex"),
         "gemini" => Some("gemini"),
         "opencode" => Some("opencode"),
+        "dsh" => Some("dsh"),
+        "pi" => Some("pi"),
         _ => None,
     }
 }
@@ -400,6 +402,8 @@ fn build_unix_command(args: &[String]) -> String {
         "all_proxy",
         "NO_PROXY",
         "no_proxy",
+        "PI_CODING_AGENT_DIR",
+        "DSH_HOME",
     ]
         .iter()
         .map(|name| {
@@ -448,18 +452,19 @@ pub async fn launch_tool_cli(app: AppHandle, tool_id: String) -> Result<(), Stri
 
     // 以前版本给 Codex 的 MCP 条目写了 `type`，Codex 不认，每次启动都警告。只删这个键。
     if tool_id == "codex" {
+        // Warm the process-based probe before taking the configuration write lock.
+        match tokio::task::spawn_blocking(crate::services::ofox_bind::codex_probe::flag_support)
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => log::warn!("Codex compatibility probe failed: {e}"),
+        }
+        let _guard = crate::services::ofox_bind::BIND_LOCK.lock().await;
         if let Err(e) = crate::mcp::strip_ignored_type_from_codex_config() {
             log::warn!("清理 Codex MCP 配置里的 type 失败: {e}");
         }
-        // 探测 Codex 认不认 `disable_response_storage` 要起一次 Codex 进程，别堵住异步运行时。
-        match tokio::task::spawn_blocking(
-            crate::services::ofox_bind::codex::strip_flag_codex_ignores,
-        )
-        .await
-        {
-            Ok(Err(e)) => log::warn!("清理 Codex 配置里被忽略的设置失败: {e}"),
-            Err(e) => log::warn!("清理 Codex 配置的任务异常结束: {e}"),
-            Ok(Ok(_)) => {}
+        if let Err(e) = crate::services::ofox_bind::codex::strip_flag_codex_ignores() {
+            log::warn!("清理 Codex 配置里被忽略的设置失败: {e}");
         }
     }
 
@@ -511,8 +516,32 @@ pub async fn launch_tool_cli(app: AppHandle, tool_id: String) -> Result<(), Stri
         },
     };
 
-    let proxy_env = terminal_proxy_env(&app)?;
+    let mut proxy_env = terminal_proxy_env(&app)?;
+    if let Some(config) = native_config_env(&tool_id)? {
+        proxy_env.push(config);
+    }
     launch_terminal_running_with_env(&command_line, &format!("launch_{tool_id}"), &proxy_env)
+}
+
+/// Launch with the same native config directory used by binding and sessions,
+/// even when the login shell's profile changes an inherited override.
+pub(crate) fn native_config_env(tool: &str) -> Result<Option<(String, String)>, String> {
+    let Some(tool) = crate::app_config::BindableTool::native(tool) else {
+        return Ok(None);
+    };
+    let directory = crate::native_tools::config_dir(tool)?;
+    let directory = directory
+        .to_str()
+        .ok_or_else(|| "原生工具目录不是有效的 UTF-8 路径".to_string())?;
+    Ok(Some((
+        if tool == crate::app_config::BindableTool::Pi {
+            "PI_CODING_AGENT_DIR"
+        } else {
+            "DSH_HOME"
+        }
+        .into(),
+        directory.into(),
+    )))
 }
 
 /// Proxy variables for a terminal Ofox opens (to launch or install a CLI):

@@ -1,11 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { toast } from "sonner";
 import {
   Loader2,
-  Check,
-  ChevronsUpDown,
   Folder,
   Zap,
   CheckCircle2,
@@ -31,18 +29,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
-import {
-  Command,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-} from "@/components/ui/command";
+  ModelPicker,
+  MultiModelPicker,
+} from "@/components/model-picker/ModelPicker";
 import { cn } from "@/lib/utils";
 import { isMac } from "@/lib/platform";
 import { settingsApi } from "@/lib/api";
@@ -60,7 +49,6 @@ import {
   filterOfoxModelsByProtocol,
   filterOfoxModelsForOpenCode,
   filterOfoxModelsForWorkBuddy,
-  toWorkBuddyModelSelection,
   type FetchedModel,
 } from "@/lib/api/model-fetch";
 import { readBoundTools, unbindTool } from "@/lib/bindTools";
@@ -76,7 +64,12 @@ import { useOfoxApex } from "@/hooks/useOfoxApex";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
 import { isOfoxBillingManager } from "@/lib/api/ofoxAuth";
 import { ofoxWalletUrl } from "@/lib/ofoxUrls";
-import type { AppId } from "@/lib/api/types";
+import {
+  useModelSelection,
+  useSaveModelSelection,
+  filterModelsForNativeTool,
+} from "@/hooks/useModelSelection";
+import type { ToolModelSnapshot } from "@/lib/api/modelSelection";
 
 /** Subset of `ConsolePage`'s `BoundTool` that the dialog actually needs.
  *  Kept structural so we can call it with the full BoundTool object. */
@@ -155,6 +148,11 @@ export default function ManageToolDialog({
 }: ManageToolDialogProps) {
   const { t } = useTranslation();
   const open = !!tool;
+  const snapshotQuery = useModelSelection(tool ? [tool.id] : [], open);
+  const saveSelection = useSaveModelSelection();
+  const [editSnapshot, setEditSnapshot] = useState<ToolModelSnapshot | null>(
+    null,
+  );
   const protocol = tool ? TOOL_PROTOCOL[tool.id] : undefined;
   const desktopCodex =
     tool?.id === "codex" && tool.installationKind === "desktopApp";
@@ -219,6 +217,7 @@ export default function ManageToolDialog({
   const [workBuddyTestLoading, setWorkBuddyTestLoading] = useState(false);
   const workBuddyTestRequest = useRef(0);
   const configurationReady = bindingStatus?.status === "configured";
+  const modelWritable = configurationReady && editSnapshot?.canWrite !== false;
   const operationBusy =
     saving || restoring || unbindLoading || pingLoading || workBuddyTestLoading;
 
@@ -239,6 +238,7 @@ export default function ManageToolDialog({
     setCurrentModels([]);
     setDraftModels([]);
     setCurrentModelLoaded(false);
+    setEditSnapshot(null);
     setModels([]);
     setModelsLoading(tool.id === "workbuddy");
     setModelsError(false);
@@ -268,89 +268,52 @@ export default function ManageToolDialog({
         if (!cancelled) setFilePathError(String(e));
       }
     };
-    const loadBindingStatus = async () => {
-      try {
-        const status = await ofoxBindApi.status(tool.id);
-        if (!cancelled) setBindingStatus(status);
-      } catch (e) {
-        console.warn(`[ManageToolDialog] binding status(${tool.id}) failed`, e);
-        if (!cancelled)
-          setBindingStatus({
-            status: "unknown",
-            message: null,
-            missingFiles: [],
-            modifiedFields: [],
-            envOverrides: [],
-          });
+    const loadDetails = async () => {
+      if (tool.id === "workbuddy") {
+        const [catalog, endpoint] = await Promise.allSettled([
+          fetchOfoxModels("openai"),
+          manageToolApi.getWorkBuddyEndpointStatus(),
+        ]);
+        if (cancelled) return;
+        if (catalog.status === "fulfilled") {
+          setModels(filterOfoxModelsForWorkBuddy(catalog.value));
+        } else setModelsError(true);
+        if (endpoint.status === "fulfilled")
+          setWorkBuddyEndpointStatus(endpoint.value);
+        setModelsLoading(false);
+      } else if (tool.id === "opencode") {
+        const hints = await manageToolApi
+          .getOpenCodeProtocolHints()
+          .catch(() => []);
+        if (!cancelled) setProtocolHints(hints);
       }
     };
-    const loadModels = async () => {
-      try {
-        if (tool.id === "workbuddy") {
-          const [managedResult, catalogResult, endpointResult] =
-            await Promise.allSettled([
-              manageToolApi.getWorkBuddyManagedModels(),
-              fetchOfoxModels("openai"),
-              manageToolApi.getWorkBuddyEndpointStatus(),
-            ]);
-          if (!cancelled) {
-            if (managedResult.status === "fulfilled") {
-              setCurrentModels(managedResult.value);
-              setDraftModels(managedResult.value);
-              setCurrentModelLoaded(true);
-            }
-            if (catalogResult.status === "fulfilled") {
-              setModels(filterOfoxModelsForWorkBuddy(catalogResult.value));
-              setModelsError(false);
-            } else {
-              setModelsError(true);
-            }
-            if (endpointResult.status === "fulfilled") {
-              setWorkBuddyEndpointStatus(endpointResult.value);
-            }
-            setModelsLoading(false);
-          }
-          if (managedResult.status === "rejected") throw managedResult.reason;
-          if (catalogResult.status === "rejected") throw catalogResult.reason;
-          return;
-        }
-        if (tool.id === "opencode") {
-          const saved = await manageToolApi.getActiveModels(tool.id);
-          if (!cancelled) {
-            setCurrentModels(saved);
-            setDraftModels(saved);
-            setCurrentModelLoaded(true);
-          }
-          // 后台检测的结果只是提示，读不出来不影响管理。
-          const hints = await manageToolApi
-            .getOpenCodeProtocolHints()
-            .catch(() => []);
-          if (!cancelled) setProtocolHints(hints);
-          return;
-        }
-        // ChatGPT 桌面 App 的模型记在它自己的状态文件里，和首页同一个来源，免得两边不一致。
-        const m =
-          tool.id === "chatgpt"
-            ? await manageToolApi.getChatGptModel()
-            : await manageToolApi.getActiveModel(tool.id);
-        if (!cancelled) {
-          setCurrentModel(m);
-          setDraftModel(m);
-          setCurrentModelLoaded(true);
-        }
-      } catch (e) {
-        // Soft-fail: an empty model just means "OfoxAI default routing",
-        // which is a valid state. Don't block the dialog over it.
-        console.warn(`[ManageToolDialog] getActiveModel(${tool.id}) failed`, e);
-        if (!cancelled && tool.id === "workbuddy") setModelsLoading(false);
-      }
-    };
-    void Promise.all([loadPath(), loadModels(), loadBindingStatus()]);
+    void loadPath();
+    void loadDetails();
 
     return () => {
       cancelled = true;
     };
   }, [tool]);
+
+  // Freeze the initial revision while editing. Event refreshes never overwrite a draft.
+  useEffect(() => {
+    if (!tool || editSnapshot) return;
+    const snapshot = snapshotQuery.data?.tools.find(
+      (item) => item.toolId === tool.id,
+    );
+    if (!snapshot) return;
+    setEditSnapshot(snapshot);
+    setBindingStatus(snapshot.binding);
+    if (snapshot.managedSelection.kind === "models") {
+      setCurrentModels(snapshot.managedSelection.models);
+      setDraftModels(snapshot.managedSelection.models);
+    } else {
+      setCurrentModel(snapshot.managedSelection.model);
+      setDraftModel(snapshot.managedSelection.model);
+    }
+    setCurrentModelLoaded(true);
+  }, [tool, editSnapshot, snapshotQuery.data]);
 
   // 模型列表在打开窗口时就加载（见下面的 effect），不让用户去点刷新。WorkBuddy
   // 在上面的初始加载里一起取，因为它的当前值要和兼容目录对上。加载失败时在
@@ -383,9 +346,11 @@ export default function ManageToolDialog({
           // 模型不列出来。WorkBuddy 只走 chat；OpenCode chat、responses 都行。
           tool?.id === "workbuddy"
             ? filterOfoxModelsForWorkBuddy(all)
-            : multiModel
-              ? filterOfoxModelsForOpenCode(all)
-              : filterOfoxModelsByProtocol(all, protocol, requiredEndpoint),
+            : tool?.id === "pi" || tool?.id === "dsh"
+              ? filterModelsForNativeTool(all)
+              : multiModel
+                ? filterOfoxModelsForOpenCode(all)
+                : filterOfoxModelsByProtocol(all, protocol, requiredEndpoint),
         );
       } catch (e) {
         console.error("[ManageToolDialog] fetchOfoxModels failed", e);
@@ -506,7 +471,7 @@ export default function ManageToolDialog({
   const handleOpenFolder = useCallback(async () => {
     if (!tool) return;
     try {
-      await settingsApi.openConfigFolder(managedToolId(tool.id) as AppId);
+      await settingsApi.openConfigFolder(managedToolId(tool.id));
     } catch (e) {
       toast.error(`打开配置目录失败：${String(e)}`);
     }
@@ -526,65 +491,54 @@ export default function ManageToolDialog({
     : draftModel !== currentModel;
 
   const handleSave = useCallback(async () => {
-    if (!tool || !configurationReady || operationBusy) return;
+    if (!tool || !modelWritable || operationBusy) return;
     const workBuddy = tool.id === "workbuddy";
     if (!isDirty && !currentModelLoaded) return;
     let savedCount = draftModels.length;
     setSaving(true);
     try {
-      if (workBuddy) {
-        if (draftModels.length === 0) {
-          throw new Error("请至少选择一个 WorkBuddy 模型");
-        }
-        const selections = draftModels.map((id) =>
-          models.find((model) => model.id === id),
+      if (!editSnapshot) return;
+      if (multiModel && draftModels.length === 0)
+        throw new Error(t("modelExperience.chooseModels"));
+      if (
+        workBuddy &&
+        draftModels.some((id) => !models.some((model) => model.id === id))
+      ) {
+        throw new Error(t("modelExperience.missingCatalogModels"));
+      }
+      if (!multiModel && !editSnapshot.supportsDefault && !draftModel.trim()) {
+        throw new Error(t("modelExperience.chooseModel"));
+      }
+      const report = await saveSelection.mutateAsync({
+        tool: tool.id,
+        selection: multiModel
+          ? { kind: "models", models: draftModels }
+          : { kind: "single", model: draftModel },
+        expectedRevision: editSnapshot.revision,
+      });
+      setEditSnapshot(report.snapshot);
+      if (report.snapshot.managedSelection.kind === "models") {
+        setCurrentModels(report.snapshot.managedSelection.models);
+        savedCount = report.snapshot.managedSelection.models.length;
+      } else setCurrentModel(report.snapshot.managedSelection.model);
+      if (report.skipped.length) {
+        toast.warning(
+          t("modelExperience.skippedModels", {
+            names: report.skipped
+              .map((item) => `${item.id}: ${item.reason}`)
+              .join("; "),
+          }),
         );
-        if (selections.some((model) => !model)) {
-          throw new Error("部分所选模型已不在可用列表中，请移除后再保存");
-        }
-        await manageToolApi.setWorkBuddyManagedModels(
-          selections.map((model) => toWorkBuddyModelSelection(model!)),
-        );
-        setCurrentModels(draftModels);
-      } else if (tool.id === "opencode") {
-        if (draftModels.length === 0) {
-          throw new Error("请至少选择一个 OpenCode 模型");
-        }
-        // 协议由后端按缓存和目录选，不发检测请求；没有可用端点的模型会被跳过。
-        const report = await manageToolApi.setActiveModels(
-          tool.id,
-          draftModels,
-        );
-        setCurrentModels(report.saved);
-        if (report.skipped.length > 0) {
-          toast.warning(
-            t("modelCompatibility.openCodeSkipped", {
-              count: report.skipped.length,
-              names: report.skipped.map((model) => model.id).join("、"),
-            }),
-          );
-        }
-        savedCount = report.saved.length;
-      } else {
-        // 没查出结果时不传协议，由后端按模型目录选（Responses 优先）。
-        const selectedProtocol =
-          compatibilityResults[0]?.status === "compatible"
-            ? (compatibilityResults[0].protocol ?? undefined)
-            : undefined;
-        await manageToolApi.setActiveModel(
-          tool.id,
-          draftModel,
-          undefined,
-          selectedProtocol,
-        );
-        setCurrentModel(draftModel);
       }
       toast.success(
-        workBuddy
-          ? `已同步 ${draftModels.length} 个模型`
-          : tool.id === "opencode"
-            ? `已保存 ${savedCount} 个模型`
-            : "模型已更新",
+        t(
+          multiModel
+            ? "modelExperience.modelsSaved"
+            : tool.id === "chatgpt"
+              ? "modelExperience.defaultSaved"
+              : "modelExperience.saved",
+          { count: savedCount },
+        ),
       );
       onChanged?.();
       // Close on success — mirrors handleUnbind's收尾 sequence and
@@ -592,7 +546,7 @@ export default function ManageToolDialog({
       // keep the dialog open so the user can fix and retry.
       onOpenChange(false);
     } catch (e) {
-      toast.error(`保存失败：${String(e)}`);
+      toast.error(t("modelExperience.saveFailed", { error: String(e) }));
     } finally {
       setSaving(false);
     }
@@ -602,36 +556,55 @@ export default function ManageToolDialog({
     currentModel,
     isDirty,
     currentModelLoaded,
-    configurationReady,
+    modelWritable,
     operationBusy,
     draftModels,
     models,
-    compatibilityResults,
+    editSnapshot,
+    multiModel,
+    saveSelection,
+    t,
     onChanged,
     onOpenChange,
   ]);
 
   const handleApplyProtocolHints = useCallback(async () => {
-    if (tool?.id !== "opencode" || operationBusy) return;
+    if (tool?.id !== "opencode" || !modelWritable || operationBusy) return;
     setSaving(true);
     try {
-      const report = await manageToolApi.setActiveModels(
-        tool.id,
-        currentModels,
-      );
-      setCurrentModels(report.saved);
-      setDraftModels(report.saved);
+      if (!editSnapshot) return;
+      const report = await saveSelection.mutateAsync({
+        tool: tool.id,
+        selection: { kind: "models", models: currentModels },
+        expectedRevision: editSnapshot.revision,
+      });
+      setEditSnapshot(report.snapshot);
+      const saved =
+        report.snapshot.managedSelection.kind === "models"
+          ? report.snapshot.managedSelection.models
+          : report.saved;
+      setCurrentModels(saved);
+      setDraftModels(saved);
       setProtocolHints(
         await manageToolApi.getOpenCodeProtocolHints().catch(() => []),
       );
       toast.success(t("modelCompatibility.openCodeHintApplied"));
       onChanged?.();
     } catch (e) {
-      toast.error(`保存失败：${String(e)}`);
+      toast.error(t("modelExperience.saveFailed", { error: String(e) }));
     } finally {
       setSaving(false);
     }
-  }, [tool?.id, operationBusy, currentModels, onChanged, t]);
+  }, [
+    tool?.id,
+    modelWritable,
+    operationBusy,
+    currentModels,
+    onChanged,
+    t,
+    editSnapshot,
+    saveSelection,
+  ]);
 
   const probeModel =
     tool?.id === "opencode" ? (draftModels[0] ?? "") : draftModel;
@@ -796,6 +769,38 @@ export default function ManageToolDialog({
             </DialogHeader>
 
             <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+              {snapshotQuery.isError && (
+                <div
+                  role="alert"
+                  className="rounded-md border border-destructive/30 p-3 text-[12px] text-destructive"
+                >
+                  {t("modelExperience.stateFailed")}{" "}
+                  <button
+                    type="button"
+                    className="underline"
+                    onClick={() => void snapshotQuery.refetch()}
+                  >
+                    {t("modelExperience.retry")}
+                  </button>
+                </div>
+              )}
+              {tool.id === "chatgpt" && editSnapshot && (
+                <p className="text-[12px] text-muted-foreground">
+                  {t("modelExperience.observed", {
+                    model:
+                      editSnapshot.observedSelection.model ||
+                      t("modelExperience.unknown"),
+                  })}{" "}
+                  · {t("modelExperience.writableDefault")}
+                </p>
+              )}
+              {!!editSnapshot?.scopeModels?.length &&
+                !editSnapshot.supportsDefault &&
+                !currentModel && (
+                  <p className="text-[12px] text-muted-foreground">
+                    {t("modelExperience.mixedScopes")}
+                  </p>
+                )}
               {((tool.installationStatus &&
                 tool.installationStatus !== "installed") ||
                 tool.installationError) && (
@@ -904,7 +909,7 @@ export default function ManageToolDialog({
                 )}
                 {protocol && !desktopCodex && multiModel ? (
                   <>
-                    <WorkBuddyModelPicker
+                    <MultiModelPicker
                       id="manage-model"
                       selectedIds={draftModels}
                       onChange={setDraftModels}
@@ -912,9 +917,14 @@ export default function ManageToolDialog({
                       loading={modelsLoading}
                       onFetch={fetchModels}
                       portalContainer={dialogContentNode}
+                      disabled={
+                        !modelWritable || !currentModelLoaded || operationBusy
+                      }
                       summary={
                         tool.id === "opencode"
-                          ? `共 ${models.length} 个可选模型`
+                          ? t("modelPicker.availableCount", {
+                              count: models.length,
+                            })
                           : undefined
                       }
                     />
@@ -1007,6 +1017,15 @@ export default function ManageToolDialog({
                     <ModelPicker
                       id="manage-model"
                       value={draftModel}
+                      allowDefault={editSnapshot?.supportsDefault ?? false}
+                      emptyLabel={
+                        editSnapshot?.supportsDefault === false
+                          ? t("modelExperience.chooseModel")
+                          : undefined
+                      }
+                      disabled={
+                        !modelWritable || !currentModelLoaded || operationBusy
+                      }
                       onChange={setDraftModel}
                       models={models}
                       loading={modelsLoading}
@@ -1248,7 +1267,7 @@ export default function ManageToolDialog({
                   size="sm"
                   onClick={handleSave}
                   disabled={
-                    !configurationReady ||
+                    !modelWritable ||
                     operationBusy ||
                     (!isDirty && !currentModelLoaded) ||
                     saving ||
@@ -1271,259 +1290,6 @@ export default function ManageToolDialog({
         )}
       </DialogContent>
     </Dialog>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// WorkBuddyModelPicker — searchable multi-select with select-all / clear shortcuts
-// ---------------------------------------------------------------------------
-
-// cmdk becomes noticeably slow when every catalog entry is mounted at once.
-// Search the full catalog, but render it in small batches as the user scrolls.
-const MODEL_PICKER_BATCH_SIZE = 80;
-
-function filterPickerModels(
-  models: FetchedModel[],
-  query: string,
-): FetchedModel[] {
-  const search = query.trim().toLocaleLowerCase();
-  if (!search) return models;
-  return models.filter((model) =>
-    `${model.id} ${model.name ?? ""} ${model.ownedBy ?? ""}`
-      .toLocaleLowerCase()
-      .includes(search),
-  );
-}
-
-function groupPickerModels(
-  models: FetchedModel[],
-): Record<string, FetchedModel[]> {
-  const grouped: Record<string, FetchedModel[]> = {};
-  for (const model of models) {
-    const slash = model.id.indexOf("/");
-    const vendor =
-      slash > 0 ? model.id.slice(0, slash) : model.ownedBy || "Other";
-    (grouped[vendor] ||= []).push(model);
-  }
-  return grouped;
-}
-
-function usePickerResults(models: FetchedModel[]) {
-  const [search, setSearch] = useState("");
-  const [visibleCount, setVisibleCount] = useState(MODEL_PICKER_BATCH_SIZE);
-  const filtered = useMemo(
-    () => filterPickerModels(models, search),
-    [models, search],
-  );
-  const visible = useMemo(
-    () => filtered.slice(0, visibleCount),
-    [filtered, visibleCount],
-  );
-  const grouped = useMemo(() => groupPickerModels(visible), [visible]);
-  const vendors = useMemo(() => Object.keys(grouped).sort(), [grouped]);
-
-  const updateSearch = useCallback((value: string) => {
-    setSearch(value);
-    setVisibleCount(MODEL_PICKER_BATCH_SIZE);
-  }, []);
-  const loadMore = useCallback(
-    (event: React.UIEvent<HTMLDivElement>) => {
-      const list = event.currentTarget;
-      if (
-        visibleCount < filtered.length &&
-        list.scrollTop + list.clientHeight >= list.scrollHeight - 48
-      ) {
-        setVisibleCount((count) => count + MODEL_PICKER_BATCH_SIZE);
-      }
-    },
-    [filtered.length, visibleCount],
-  );
-
-  return { search, updateSearch, filtered, grouped, vendors, loadMore };
-}
-
-interface WorkBuddyModelPickerProps {
-  id: string;
-  selectedIds: string[];
-  onChange: (ids: string[]) => void;
-  models: FetchedModel[];
-  loading: boolean;
-  onFetch: (forceRefresh?: boolean) => void;
-  portalContainer?: HTMLElement | null;
-  /** 列表下方的统计文字；不传就是 WorkBuddy 的「共用一个 Ofox Key」。 */
-  summary?: string;
-}
-
-function WorkBuddyModelPicker({
-  id,
-  selectedIds,
-  onChange,
-  models,
-  loading,
-  onFetch,
-  portalContainer,
-  summary,
-}: WorkBuddyModelPickerProps) {
-  const [open, setOpen] = useState(false);
-  const selected = useMemo(() => new Set(selectedIds), [selectedIds]);
-  const allSelected =
-    models.length > 0 && models.every((model) => selected.has(model.id));
-  const { search, updateSearch, filtered, grouped, vendors, loadMore } =
-    usePickerResults(models);
-
-  const handleOpenChange = useCallback(
-    (next: boolean) => {
-      setOpen(next);
-      if (next) {
-        updateSearch("");
-        if (models.length === 0 && !loading) onFetch();
-      }
-    },
-    [loading, models.length, onFetch, updateSearch],
-  );
-
-  const toggle = useCallback(
-    (id: string) => {
-      if (selected.has(id)) {
-        onChange(selectedIds.filter((selectedId) => selectedId !== id));
-      } else {
-        onChange([...selectedIds, id]);
-      }
-    },
-    [onChange, selected, selectedIds],
-  );
-
-  return (
-    <div className="space-y-2">
-      <div className="flex gap-1">
-        <Popover open={open} onOpenChange={handleOpenChange}>
-          <PopoverTrigger asChild>
-            <Button
-              id={id}
-              type="button"
-              variant="outline"
-              role="combobox"
-              aria-expanded={open}
-              className="flex-1 justify-between font-normal"
-            >
-              <span
-                className={cn(
-                  "truncate",
-                  selectedIds.length === 0 && "text-muted-foreground",
-                )}
-              >
-                {selectedIds.length > 0
-                  ? `已选择 ${selectedIds.length} 个兼容模型`
-                  : "请选择至少一个兼容模型"}
-              </span>
-              <ChevronsUpDown className="ml-2 h-3.5 w-3.5 shrink-0 opacity-50" />
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent
-            className="p-0"
-            align="start"
-            style={{ width: "var(--radix-popover-trigger-width)" }}
-            container={portalContainer ?? undefined}
-          >
-            <Command shouldFilter={false}>
-              <CommandInput
-                placeholder="搜索模型或供应商…"
-                className="h-9"
-                value={search}
-                onValueChange={updateSearch}
-              />
-              <CommandList className="max-h-72" onScroll={loadMore}>
-                {loading ? (
-                  <div className="flex items-center justify-center py-6 text-[12px] text-muted-foreground">
-                    <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                    加载中…
-                  </div>
-                ) : (
-                  <>
-                    {filtered.length === 0 && (
-                      <CommandEmpty>未找到兼容模型</CommandEmpty>
-                    )}
-                    {vendors.map((vendor) => (
-                      <CommandGroup key={vendor} heading={vendor}>
-                        {grouped[vendor].map((model) => (
-                          <CommandItem
-                            key={model.id}
-                            value={`${model.id} ${model.name ?? ""} ${vendor}`}
-                            onSelect={() => toggle(model.id)}
-                          >
-                            <span
-                              className={cn(
-                                "mr-2 flex h-4 w-4 shrink-0 items-center justify-center rounded border",
-                                selected.has(model.id)
-                                  ? "border-orange-500 bg-orange-500 text-white"
-                                  : "border-border-default",
-                              )}
-                            >
-                              {selected.has(model.id) && (
-                                <Check className="h-3 w-3" />
-                              )}
-                            </span>
-                            <span className="min-w-0 flex-1">
-                              <span className="block truncate text-[12px] font-medium">
-                                {model.name?.trim() || model.id}
-                              </span>
-                              <span className="block truncate text-[10px] text-muted-foreground">
-                                {model.id}
-                              </span>
-                            </span>
-                            {(model.supportedParameters ?? []).includes(
-                              "reasoning",
-                            ) && (
-                              <span className="ml-2 rounded bg-violet-500/10 px-1.5 py-0.5 text-[9px] text-violet-600">
-                                推理
-                              </span>
-                            )}
-                            {(model.inputModalities ?? []).includes(
-                              "image",
-                            ) && (
-                              <span className="ml-1 rounded bg-sky-500/10 px-1.5 py-0.5 text-[9px] text-sky-600">
-                                视觉
-                              </span>
-                            )}
-                          </CommandItem>
-                        ))}
-                      </CommandGroup>
-                    ))}
-                  </>
-                )}
-              </CommandList>
-            </Command>
-          </PopoverContent>
-        </Popover>
-      </div>
-      <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-        <span>
-          {summary ?? `共 ${models.length} 个兼容模型，共用一个 Ofox Key`}
-        </span>
-        <span className="flex shrink-0 gap-1">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7 px-2 text-[11px]"
-            disabled={loading || models.length === 0 || allSelected}
-            onClick={() => onChange(models.map((model) => model.id))}
-          >
-            全选兼容
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7 px-2 text-[11px]"
-            disabled={loading || selectedIds.length === 0}
-            onClick={() => onChange([])}
-          >
-            取消全选
-          </Button>
-        </span>
-      </div>
-    </div>
   );
 }
 
@@ -1680,137 +1446,6 @@ function InsufficientCreditsNotice() {
           {t("connectivity.topUp")}
         </Button>
       )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// ModelPicker — local searchable dropdown
-// ---------------------------------------------------------------------------
-//
-// We don't reuse `ModelSelectFromApi` here because that component is wired to
-// the i18n stack and the larger provider-form lifecycle. The manage dialog
-// only needs a simple controlled picker, so a local component keeps the
-// dependency graph clean and the empty/loading states tuned to *this* UX.
-
-interface ModelPickerProps {
-  id: string;
-  value: string;
-  onChange: (v: string) => void;
-  models: FetchedModel[];
-  loading: boolean;
-  onFetch: (forceRefresh?: boolean) => void;
-  /**
-   * Portal target for the popover. Defaults to `document.body` when omitted.
-   * Pass the dialog's content node when this picker is rendered inside a
-   * Radix Dialog, so the popover lands inside the dialog's scroll-lock
-   * shard and the search/option list stays scrollable.
-   */
-  portalContainer?: HTMLElement | null;
-}
-
-function ModelPicker({
-  id,
-  value,
-  onChange,
-  models,
-  loading,
-  onFetch,
-  portalContainer,
-}: ModelPickerProps) {
-  const [open, setOpen] = useState(false);
-  const { search, updateSearch, filtered, grouped, vendors, loadMore } =
-    usePickerResults(models);
-
-  // The dialog loads the list when it opens; opening the dropdown with an
-  // empty list (the first load failed) tries once more.
-  const handleOpenChange = useCallback(
-    (next: boolean) => {
-      setOpen(next);
-      if (next) {
-        updateSearch("");
-        if (models.length === 0 && !loading) onFetch();
-      }
-    },
-    [models.length, loading, onFetch, updateSearch],
-  );
-
-  return (
-    <div className="flex gap-1">
-      <Popover open={open} onOpenChange={handleOpenChange}>
-        <PopoverTrigger asChild>
-          <Button
-            id={id}
-            type="button"
-            variant="outline"
-            role="combobox"
-            aria-expanded={open}
-            className="flex-1 justify-between font-normal"
-          >
-            <span className={cn("truncate", !value && "text-muted-foreground")}>
-              {value || "未设置（使用 OfoxAI 默认路由）"}
-            </span>
-            <ChevronsUpDown className="ml-2 h-3.5 w-3.5 shrink-0 opacity-50" />
-          </Button>
-        </PopoverTrigger>
-        <PopoverContent
-          className="p-0"
-          align="start"
-          // Match the trigger width so the list never visually mismatches
-          // its anchor (Radix exposes this via CSS var).
-          style={{ width: "var(--radix-popover-trigger-width)" }}
-          // Portal into the dialog's content node so this popover lives
-          // inside Radix Dialog's scroll-lock shard — otherwise wheel
-          // events on the model list get swallowed and the dropdown looks
-          // "stuck" (see `ModelPickerProps.portalContainer` above).
-          container={portalContainer ?? undefined}
-        >
-          <Command shouldFilter={false}>
-            <CommandInput
-              placeholder="搜索模型…"
-              className="h-9"
-              value={search}
-              onValueChange={updateSearch}
-            />
-            <CommandList onScroll={loadMore}>
-              {loading ? (
-                <div className="flex items-center justify-center py-6 text-[12px] text-muted-foreground">
-                  <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                  加载中…
-                </div>
-              ) : (
-                <>
-                  {filtered.length === 0 && (
-                    <CommandEmpty>未找到模型</CommandEmpty>
-                  )}
-                  {vendors.map((vendor) => (
-                    <CommandGroup key={vendor} heading={vendor}>
-                      {grouped[vendor].map((m) => (
-                        <CommandItem
-                          key={m.id}
-                          value={m.id}
-                          onSelect={() => {
-                            onChange(m.id);
-                            setOpen(false);
-                          }}
-                        >
-                          <Check
-                            className={cn(
-                              "mr-2 h-3.5 w-3.5",
-                              value === m.id ? "opacity-100" : "opacity-0",
-                            )}
-                          />
-                          <span className="truncate">{m.id}</span>
-                        </CommandItem>
-                      ))}
-                    </CommandGroup>
-                  ))}
-                </>
-              )}
-            </CommandList>
-          </Command>
-        </PopoverContent>
-      </Popover>
     </div>
   );
 }

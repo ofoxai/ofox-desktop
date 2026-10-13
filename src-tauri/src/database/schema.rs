@@ -266,6 +266,18 @@ impl Database {
         .map_err(|e| AppError::Database(e.to_string()))?;
 
         // 17. Usage Daily Rollups 表 (日聚合统计)
+        // Portable model-only recipes; additive like ofox_bind_snapshot.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS model_profiles (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, name_key TEXT NOT NULL UNIQUE,
+                revision TEXT NOT NULL, targets TEXT NOT NULL,
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        // 17. Usage Daily Rollups 表 (日聚合统计)
         conn.execute(
             "CREATE TABLE IF NOT EXISTS usage_daily_rollups (
                 date TEXT NOT NULL,

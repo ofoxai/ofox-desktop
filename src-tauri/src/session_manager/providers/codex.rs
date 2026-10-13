@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -23,8 +22,12 @@ static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 pub fn scan_sessions() -> Vec<SessionMeta> {
     let root = get_codex_config_dir().join("sessions");
+    scan_in(&root)
+}
+
+pub(crate) fn scan_in(root: &Path) -> Vec<SessionMeta> {
     let mut files = Vec::new();
-    collect_jsonl_files(&root, &mut files);
+    collect_jsonl_files(root, &mut files);
 
     let mut sessions = Vec::new();
     for path in files {
@@ -37,7 +40,7 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
 }
 
 pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
-    let file = File::open(path).map_err(|e| format!("Failed to open session file: {e}"))?;
+    let file = super::dsh::open(path)?;
     let reader = BufReader::new(file);
     let mut messages = Vec::new();
 
@@ -78,7 +81,16 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
                     .get("name")
                     .and_then(Value::as_str)
                     .unwrap_or("unknown");
-                ("assistant".to_string(), format!("[Tool: {name}]"))
+                (
+                    "assistant".to_string(),
+                    format!(
+                        "[Tool: {name}]\n{}",
+                        payload
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                    ),
+                )
             }
             "function_call_output" => {
                 let output = payload
@@ -88,6 +100,10 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
                     .to_string();
                 ("tool".to_string(), output)
             }
+            "reasoning" => (
+                "thinking".into(),
+                payload.get("summary").map(extract_text).unwrap_or_default(),
+            ),
             _ => continue,
         };
 
@@ -103,6 +119,7 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
     Ok(messages)
 }
 
+#[cfg(test)]
 pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<bool, String> {
     let meta = parse_session(path)
         .ok_or_else(|| format!("Failed to parse Codex session metadata: {}", path.display()))?;
@@ -124,7 +141,7 @@ pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<boo
     Ok(true)
 }
 
-fn parse_session(path: &Path) -> Option<SessionMeta> {
+pub(crate) fn parse_session(path: &Path) -> Option<SessionMeta> {
     let (head, tail) = read_head_tail_lines(path, 10, 30).ok()?;
 
     let mut session_id: Option<String> = None;
@@ -256,9 +273,15 @@ fn collect_jsonl_files(root: &Path, files: &mut Vec<PathBuf>) {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
             collect_jsonl_files(&path, files);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+        } else if entry.file_type().is_ok_and(|t| t.is_file())
+            && (path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+                || path.file_name().is_some_and(|n| {
+                    n.to_string_lossy().ends_with(".jsonl.zst")
+                        || n.to_string_lossy().ends_with(".jsonl.zstd")
+                }))
+        {
             files.push(path);
         }
     }

@@ -22,6 +22,8 @@ mod launch_tool;
 mod mcp;
 mod misc;
 mod model_fetch;
+mod model_profiles;
+pub(crate) mod model_selection;
 pub(crate) mod node_requirement;
 pub(crate) mod ofox_apex;
 pub(crate) mod ofox_api_keys;
@@ -72,6 +74,8 @@ pub use launch_tool::*;
 pub use mcp::*;
 pub use misc::*;
 pub use model_fetch::*;
+pub use model_profiles::*;
+pub use model_selection::*;
 pub use tool_update::*;
 #[cfg(target_os = "windows")]
 pub use windows_chatgpt::{install_chatgpt_desktop_app_with, upgrade_chatgpt_desktop_app_with};

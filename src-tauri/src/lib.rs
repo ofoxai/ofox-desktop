@@ -23,6 +23,9 @@ mod ofox_auth;
 // access_token 不再被当 LLM key 写进 ofox-* provider 的 settings_config。
 // 历史实现见 git log。
 mod model_compat;
+mod model_profiles;
+mod model_selection;
+mod native_tools;
 mod ofox_apex;
 mod ofox_api_keys;
 mod ofox_endpoints;
@@ -1305,6 +1308,20 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::model_selection_snapshot,
+            commands::model_selection_save,
+            commands::model_profiles_list,
+            commands::model_profiles_save,
+            commands::model_profiles_delete,
+            commands::model_profiles_preview,
+            commands::model_profiles_apply,
+            commands::model_profiles_undo,
+            commands::export_session_markdown,
+            commands::resume_session,
+            commands::trash_sessions,
+            commands::list_session_trash,
+            commands::restore_session_trash,
+            commands::purge_session_trash,
             commands::get_providers,
             commands::get_current_provider,
             commands::add_provider,

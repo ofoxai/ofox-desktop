@@ -470,7 +470,9 @@ pub async fn sync_selected_models(
     let url = endpoint_url();
     let (next_models, next_state) =
         sync_models(models, previous.as_ref(), api_key, selections, &url)?;
-    persist_binding_state(db, &path, &next_models, &next_state).await
+    persist_binding_state(db, &path, &next_models, &next_state).await?;
+    crate::model_selection::record_write_receipt(db, "workbuddy");
+    Ok(())
 }
 
 /// Ordinary model changes require the saved connection to still exist at the
@@ -481,6 +483,7 @@ pub(crate) async fn update_selected_models(
     selections: &[WorkBuddyModelSelection],
 ) -> Result<(), String> {
     let _guard = CONFIG_LOCK.lock().await;
+    crate::model_selection::check_write_revision(db, "workbuddy")?;
     let health = inspect_binding(db)
         .await
         .map_err(|_| "无法确认现有 WorkBuddy 配置，已停止保存模型。".to_string())?;
@@ -499,7 +502,9 @@ pub(crate) async fn update_selected_models(
         selections,
         &endpoint_url(),
     )?;
-    persist_binding_state(db, &path, &next_models, &next_state).await
+    persist_binding_state(db, &path, &next_models, &next_state).await?;
+    crate::model_selection::record_write_receipt(db, "workbuddy");
+    Ok(())
 }
 
 /// Repair bindings created by older builds or left behind by an apex switch.
@@ -641,6 +646,40 @@ pub(crate) async fn binding_status(db: &Database) -> ToolBindingStatus {
     inspect_binding(db)
         .await
         .unwrap_or_else(|_| ToolBindingStatus::unknown())
+}
+
+pub(crate) async fn model_snapshot(
+    db: &Database,
+) -> Result<crate::model_selection::ToolModelSnapshot, String> {
+    let _guard = CONFIG_LOCK.lock().await;
+    let binding = inspect_binding(db)
+        .await
+        .unwrap_or_else(|_| ToolBindingStatus::unknown());
+    let models = load_state(db)
+        .await?
+        .map(|state| {
+            state
+                .managed_models
+                .into_iter()
+                .map(|model| model.model_id)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(crate::model_selection::ToolModelSnapshot {
+        tool_id: "workbuddy".into(),
+        write_target: "workbuddy".into(),
+        revision: crate::model_selection::revision(db, "workbuddy")?,
+        binding,
+        managed_selection: crate::model_selection::ModelSelection::Models { models },
+        observed_selection: crate::model_selection::ObservedSelection {
+            model: None,
+            source: "unknown".into(),
+        },
+        supports_default: false,
+        can_write: true,
+        scope: vec![models_path().to_string_lossy().into_owned()],
+        scope_models: Vec::new(),
+    })
 }
 
 /// Re-create only deleted entries from the saved selection, preserving displaced

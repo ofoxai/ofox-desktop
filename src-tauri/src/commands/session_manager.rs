@@ -3,8 +3,8 @@
 use crate::session_manager;
 
 #[tauri::command]
-pub async fn list_sessions() -> Result<Vec<session_manager::SessionMeta>, String> {
-    let sessions = tauri::async_runtime::spawn_blocking(session_manager::scan_sessions)
+pub async fn list_sessions() -> Result<Vec<session_manager::managed::ManagedSession>, String> {
+    let sessions = tauri::async_runtime::spawn_blocking(session_manager::managed::list)
         .await
         .map_err(|e| format!("Failed to scan sessions: {e}"))?;
     Ok(sessions)
@@ -12,16 +12,11 @@ pub async fn list_sessions() -> Result<Vec<session_manager::SessionMeta>, String
 
 #[tauri::command]
 pub async fn get_session_messages(
-    providerId: String,
-    sourcePath: String,
+    sessionKey: String,
 ) -> Result<Vec<session_manager::SessionMessage>, String> {
-    let provider_id = providerId.clone();
-    let source_path = sourcePath.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        session_manager::load_messages(&provider_id, &source_path)
-    })
-    .await
-    .map_err(|e| format!("Failed to load session messages: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || session_manager::managed::messages(&sessionKey))
+        .await
+        .map_err(|e| format!("Failed to load session messages: {e}"))?
 }
 
 #[tauri::command]
@@ -30,32 +25,8 @@ pub async fn launch_session_terminal(
     cwd: Option<String>,
     custom_config: Option<String>,
 ) -> Result<bool, String> {
-    let command = command.clone();
-    let cwd = cwd.clone();
-    let custom_config = custom_config.clone();
-
-    // Read preferred terminal from global settings
-    let preferred = crate::settings::get_preferred_terminal();
-    // Map global setting terminal names to session terminal names
-    // Global uses "iterm2", session terminal uses "iterm"
-    let target = match preferred.as_deref() {
-        Some("iterm2") => "iterm".to_string(),
-        Some(t) => t.to_string(),
-        None => "terminal".to_string(), // Default to Terminal.app on macOS
-    };
-
-    tauri::async_runtime::spawn_blocking(move || {
-        session_manager::terminal::launch_terminal(
-            &target,
-            &command,
-            cwd.as_deref(),
-            custom_config.as_deref(),
-        )
-    })
-    .await
-    .map_err(|e| format!("Failed to launch terminal: {e}"))??;
-
-    Ok(true)
+    let _ = (command, cwd, custom_config);
+    Err("Raw terminal commands are disabled; use the server-owned resume_session action".into())
 }
 
 #[tauri::command]
@@ -64,22 +35,83 @@ pub async fn delete_session(
     sessionId: String,
     sourcePath: String,
 ) -> Result<bool, String> {
-    let provider_id = providerId.clone();
-    let session_id = sessionId.clone();
-    let source_path = sourcePath.clone();
+    let _ = (providerId, sessionId, sourcePath);
+    Err("Permanent session deletion is disabled; use the reversible session trash".into())
+}
 
+#[tauri::command]
+pub async fn export_session_markdown(
+    sessionKey: String,
+    destination: Option<String>,
+) -> Result<session_manager::managed::MarkdownExport, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        session_manager::delete_session(&provider_id, &session_id, &source_path)
+        session_manager::managed::export_markdown(
+            &sessionKey,
+            destination.as_deref().map(std::path::Path::new),
+        )
     })
     .await
-    .map_err(|e| format!("Failed to delete session: {e}"))?
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn resume_session(
+    sessionKey: String,
+    launch: bool,
+) -> Result<session_manager::managed::ResumeResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        session_manager::managed::resume(&sessionKey, launch)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn trash_sessions(
+    items: Vec<session_manager::trash::TrashRequest>,
+) -> Result<Vec<session_manager::trash::TrashOutcome>, String> {
+    tauri::async_runtime::spawn_blocking(move || session_manager::trash::trash_many(&items))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_session_trash() -> Result<Vec<session_manager::trash::TrashEntry>, String> {
+    tauri::async_runtime::spawn_blocking(session_manager::trash::list)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn restore_session_trash(
+    key: String,
+) -> Result<session_manager::trash::TrashEntry, String> {
+    tauri::async_runtime::spawn_blocking(move || session_manager::trash::restore(&key))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn purge_session_trash(key: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || session_manager::trash::purge(&key))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 pub async fn delete_sessions(
     items: Vec<session_manager::DeleteSessionRequest>,
 ) -> Result<Vec<session_manager::DeleteSessionOutcome>, String> {
-    tauri::async_runtime::spawn_blocking(move || session_manager::delete_sessions(&items))
-        .await
-        .map_err(|e| format!("Failed to delete sessions: {e}"))
+    Ok(items
+        .into_iter()
+        .map(|item| session_manager::DeleteSessionOutcome {
+            provider_id: item.provider_id,
+            session_id: item.session_id,
+            source_path: item.source_path,
+            success: false,
+            error: Some(
+                "Permanent session deletion is disabled; use the reversible session trash".into(),
+            ),
+        })
+        .collect())
 }

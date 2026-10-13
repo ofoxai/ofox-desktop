@@ -73,6 +73,22 @@ export const TOOL_META: Record<
     projectUrl: "https://github.com/NousResearch/hermes-agent",
     projectLinkLabel: "GitHub",
   },
+  dsh: {
+    abbr: "DS",
+    label: "DeepSeek Harness",
+    color: "bg-blue-600",
+    projectUrl: "https://github.com/deepseek-ai/deepseek-harness",
+    projectLinkLabel: "GitHub",
+    cliBin: "dsh",
+  },
+  pi: {
+    abbr: "π",
+    label: "Pi",
+    color: "bg-orange-600",
+    projectUrl: "https://github.com/earendil-works/pi",
+    projectLinkLabel: "GitHub",
+    cliBin: "pi",
+  },
   workbuddy: {
     abbr: "WB",
     label: "WorkBuddy",
@@ -100,6 +116,8 @@ export const TOOL_ORDER = [
   "hermes",
   "gemini",
   "workbuddy",
+  "dsh",
+  "pi",
 ];
 
 export const BOUND_TOOLS_STORAGE_KEY = "ofox-bound-tools";
@@ -129,4 +147,6 @@ export const INSTALLABLE_TOOLS: readonly string[] = [
   "opencode",
   "openclaw",
   "hermes",
+  "dsh",
+  "pi",
 ];

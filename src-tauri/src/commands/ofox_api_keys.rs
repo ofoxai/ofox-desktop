@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tauri::State;
 use tokio::sync::RwLock;
 
-use crate::app_config::AppType;
+use crate::app_config::BindableTool;
 use crate::ofox_api_keys::{ApiKeyError, FetchMode};
 use crate::ofox_auth::OfoxAuthManager;
 use crate::settings::{self, ApiKeyMeta};
@@ -53,19 +53,22 @@ pub async fn ofox_list_api_keys() -> Result<Vec<ApiKeyMeta>, String> {
 /// 自定义 alias"的扩展位（届时同时写入 ofox 后台 name + 本地 ApiKeyMeta.alias）。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ofox_create_api_key_for_tool(
+    app_handle: tauri::AppHandle,
     tool: String,
     _name: Option<String>,
     ofox_manager: State<'_, crate::commands::ofox_auth::OfoxAuthState>,
 ) -> Result<ApiKeyMeta, String> {
-    let tool: AppType = tool
+    let tool: BindableTool = tool
         .parse()
-        .map_err(|e: crate::error::AppError| format!("无效的工具类型: {e}"))?;
+        .map_err(|e: String| format!("无效的工具类型: {e}"))?;
 
     let manager: Arc<RwLock<OfoxAuthManager>> = ofox_manager.0.clone();
 
     crate::ofox_api_keys::fetch_or_create_api_key(tool, FetchMode::CachedOk, &manager)
         .await
         .map_err(explain)?;
+
+    crate::commands::model_selection::notify(&app_handle, vec![tool.as_str().into()]);
 
     // 成功后元数据必然已 upsert（除非走的是 keychain 命中分支——那时元数据已
     // 经存在）。若仍 None 说明协议被破坏。
@@ -84,18 +87,55 @@ pub async fn ofox_create_api_key_for_tool(
 /// 用户想清理旧 key 时走单独的 [`ofox_revoke_api_key_for_tool`] command。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ofox_refresh_api_key_for_tool(
+    app_handle: tauri::AppHandle,
+    state: State<'_, crate::store::AppState>,
     tool: String,
     ofox_manager: State<'_, crate::commands::ofox_auth::OfoxAuthState>,
 ) -> Result<ApiKeyMeta, String> {
-    let tool: AppType = tool
+    let tool: BindableTool = tool
         .parse()
-        .map_err(|e: crate::error::AppError| format!("无效的工具类型: {e}"))?;
+        .map_err(|e: String| format!("无效的工具类型: {e}"))?;
 
     let manager: Arc<RwLock<OfoxAuthManager>> = ofox_manager.0.clone();
 
-    crate::ofox_api_keys::fetch_or_create_api_key(tool, FetchMode::ForceRefresh, &manager)
+    if matches!(tool, BindableTool::Pi | BindableTool::Dsh)
+        && crate::native_tools::is_bound(&state.db, tool).await
+    {
+        let store = crate::ofox_secret::default_store();
+        let old = store
+            .load(crate::ofox_secret::Slot::ApiKey { tool })
+            .map_err(|_| "读取原 key 失败".to_string())?
+            .ok_or_else(|| "找不到原 key，请重新绑定工具".to_string())?;
+        if crate::native_tools::binding_status(&state.db, tool)
+            .await
+            .status
+            != crate::services::ofox_bind::status::BindingStatus::Configured
+        {
+            return Err("接入配置已修改，未自动更换 key".into());
+        }
+        let owner = manager.read().await.current_key_owner().await;
+        let (key, meta) = crate::ofox_api_keys::create_unsaved(tool, owner, &manager)
+            .await
+            .map_err(explain)?;
+        if let Err(error) = crate::native_tools::replace_key_with_metadata(
+            &state.db,
+            tool,
+            &old,
+            &key,
+            meta.clone(),
+            &store,
+        )
         .await
-        .map_err(explain)?;
+        {
+            crate::ofox_api_keys::discard_remote(&meta, &manager).await;
+            return Err(error);
+        }
+    } else {
+        crate::ofox_api_keys::fetch_or_create_api_key(tool, FetchMode::ForceRefresh, &manager)
+            .await
+            .map_err(explain)?;
+    }
+    crate::commands::model_selection::notify(&app_handle, vec![tool.as_str().into()]);
 
     settings::get_api_key_meta(tool).ok_or_else(|| {
         format!(
@@ -115,15 +155,16 @@ pub async fn ofox_refresh_api_key_for_tool(
 /// "仅清本地"用于用户在 ofox 后台手动撤销过、本地状态需要追平的场景。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ofox_revoke_api_key_for_tool(
+    app_handle: tauri::AppHandle,
     tool: String,
     remote: bool,
     ofox_manager: State<'_, crate::commands::ofox_auth::OfoxAuthState>,
 ) -> Result<(), String> {
-    let tool: AppType = tool
+    let tool: BindableTool = tool
         .parse()
-        .map_err(|e: crate::error::AppError| format!("无效的工具类型: {e}"))?;
+        .map_err(|e: String| format!("无效的工具类型: {e}"))?;
 
-    if remote {
+    let result = if remote {
         let manager: Arc<RwLock<OfoxAuthManager>> = ofox_manager.0.clone();
         crate::ofox_api_keys::revoke_remote(tool, &manager)
             .await
@@ -132,5 +173,8 @@ pub async fn ofox_revoke_api_key_for_tool(
         crate::ofox_api_keys::revoke_local(tool)
             .await
             .map_err(explain)
-    }
+    };
+    result?;
+    crate::commands::model_selection::notify(&app_handle, vec![tool.as_str().into()]);
+    Ok(())
 }

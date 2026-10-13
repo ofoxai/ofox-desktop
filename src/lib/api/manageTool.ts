@@ -26,6 +26,8 @@ export const TOOL_PROTOCOL: Readonly<Record<string, ToolProtocol>> = {
   openclaw: "openai",
   hermes: "openai",
   workbuddy: "openai",
+  dsh: "openai",
+  pi: "openai",
 };
 
 /** Route the desktop app's Codex view to the CLI's single shared config. */

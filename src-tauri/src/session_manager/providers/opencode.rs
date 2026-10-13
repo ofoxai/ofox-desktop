@@ -9,6 +9,15 @@ use super::utils::{parse_timestamp_to_ms, path_basename, truncate_summary};
 
 const PROVIDER_ID: &str = "opencode";
 
+fn safe_storage_id(id: &str) -> bool {
+    !id.is_empty()
+        && id != "."
+        && id != ".."
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
 /// Return the OpenCode base directory (`$XDG_DATA_HOME/opencode`).
 ///
 /// Respects `XDG_DATA_HOME` on all platforms; falls back to
@@ -183,8 +192,8 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
         };
 
         let msg_id = match value.get("id").and_then(Value::as_str) {
-            Some(id) => id.to_string(),
-            None => continue,
+            Some(id) if safe_storage_id(id) => id.to_string(),
+            _ => continue,
         };
 
         let role = value
@@ -313,6 +322,7 @@ pub fn load_messages_sqlite(source: &str) -> Result<Vec<SessionMessage>, String>
     Ok(messages)
 }
 
+#[cfg(test)]
 pub fn delete_session(storage: &Path, path: &Path, session_id: &str) -> Result<bool, String> {
     if path.file_name().and_then(|name| name.to_str()) != Some(session_id) {
         return Err(format!(
@@ -379,6 +389,7 @@ pub fn delete_session(storage: &Path, path: &Path, session_id: &str) -> Result<b
 }
 
 /// Delete a session from the OpenCode SQLite database.
+#[cfg(test)]
 pub fn delete_session_sqlite(session_id: &str, source: &str) -> Result<bool, String> {
     let (db_path, ref_session_id) = parse_sqlite_source(source)
         .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))?;
@@ -479,7 +490,11 @@ fn parse_session(storage: &Path, path: &Path) -> Option<SessionMeta> {
 
 /// Read the first user message's first text part to use as summary.
 fn get_first_user_summary(storage: &Path, session_id: &str) -> Option<String> {
+    if !safe_storage_id(session_id) {
+        return None;
+    }
     let msg_dir = storage.join("message").join(session_id);
+    crate::session_manager::managed::validate_path(&msg_dir, &[storage.to_path_buf()]).ok()?;
     if !msg_dir.is_dir() {
         return None;
     }
@@ -504,8 +519,8 @@ fn get_first_user_summary(storage: &Path, session_id: &str) -> Option<String> {
         }
 
         let msg_id = match value.get("id").and_then(Value::as_str) {
-            Some(id) => id.to_string(),
-            None => continue,
+            Some(id) if safe_storage_id(id) => id.to_string(),
+            _ => continue,
         };
 
         let ts = value
@@ -549,6 +564,12 @@ fn extract_part_text(part_value: &Value) -> Option<String> {
 }
 
 fn collect_parts_text(part_dir: &Path) -> String {
+    let Some(storage) = part_dir.parent().and_then(Path::parent) else {
+        return String::new();
+    };
+    if crate::session_manager::managed::validate_path(part_dir, &[storage.to_path_buf()]).is_err() {
+        return String::new();
+    }
     if !part_dir.is_dir() {
         return String::new();
     }
@@ -587,14 +608,17 @@ fn collect_json_files(root: &Path, files: &mut Vec<PathBuf>) {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
             collect_json_files(&path, files);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+        } else if entry.file_type().is_ok_and(|t| t.is_file())
+            && path.extension().and_then(|ext| ext.to_str()) == Some("json")
+        {
             files.push(path);
         }
     }
 }
 
+#[cfg(test)]
 fn find_session_file(storage: &Path, session_id: &str) -> Option<PathBuf> {
     let session_root = storage.join("session");
     let mut files = Vec::new();
@@ -606,6 +630,7 @@ fn find_session_file(storage: &Path, session_id: &str) -> Option<PathBuf> {
         .find(|path| path.file_name().and_then(|name| name.to_str()) == Some(expected.as_str()))
 }
 
+#[cfg(test)]
 fn remove_file_if_exists(path: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -614,6 +639,7 @@ fn remove_file_if_exists(path: &Path) -> std::io::Result<()> {
     }
 }
 
+#[cfg(test)]
 fn remove_dir_all_if_exists(path: &Path) -> std::io::Result<()> {
     match std::fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
