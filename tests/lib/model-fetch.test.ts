@@ -56,6 +56,7 @@ describe("WorkBuddy model compatibility", () => {
       supportsToolCall: true,
       supportsImages: true,
       supportsReasoning: true,
+      supportedEndpoints: ["/v1/chat/completions"],
     });
   });
 

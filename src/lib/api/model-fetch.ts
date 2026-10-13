@@ -36,6 +36,7 @@ export interface WorkBuddyModelSelection {
   supportsToolCall: boolean;
   supportsImages: boolean;
   supportsReasoning: boolean;
+  supportedEndpoints: string[] | null;
 }
 
 /**
@@ -225,6 +226,7 @@ export function toWorkBuddyModelSelection(
     supportsToolCall: parameters.includes("tools"),
     supportsImages: (model.inputModalities ?? []).includes("image"),
     supportsReasoning: parameters.includes("reasoning"),
+    supportedEndpoints: model.supportedEndpoints,
   };
 }
 

@@ -33,6 +33,9 @@ pub struct WorkBuddyModelSelection {
     pub supports_tool_call: bool,
     pub supports_images: bool,
     pub supports_reasoning: bool,
+    /// 目录里声明的端点；`None` 表示未知（旧调用方），不拦截。
+    #[serde(default)]
+    pub supported_endpoints: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -85,6 +88,15 @@ pub(crate) fn validate_selections(selections: &[WorkBuddyModelSelection]) -> Res
         if !selection.supports_tool_call {
             return Err(format!(
                 "WorkBuddy 模型 {id} 不具备工具调用能力，不能加入模型列表"
+            ));
+        }
+        if selection
+            .supported_endpoints
+            .as_ref()
+            .is_some_and(|endpoints| !endpoints.iter().any(|e| e == "/v1/chat/completions"))
+        {
+            return Err(format!(
+                "WorkBuddy 模型 {id} 不支持 Chat Completions 协议，不能加入模型列表"
             ));
         }
         if !ids.insert(id) {
@@ -758,7 +770,27 @@ mod tests {
             supports_tool_call: true,
             supports_images: true,
             supports_reasoning: false,
+            supported_endpoints: None,
         }
+    }
+
+    #[test]
+    fn selection_without_chat_completions_endpoint_is_rejected() {
+        let mut responses_only = selection("openai/gpt-5.2-codex");
+        responses_only.supported_endpoints = Some(vec!["/v1/responses".to_string()]);
+        let error = validate_selections(&[selection("model-a"), responses_only]).unwrap_err();
+        assert!(error.contains("openai/gpt-5.2-codex"), "{error}");
+        assert!(error.contains("Chat Completions"), "{error}");
+    }
+
+    #[test]
+    fn selection_with_chat_completions_or_unknown_endpoints_is_accepted() {
+        let mut chat = selection("model-a");
+        chat.supported_endpoints = Some(vec![
+            "/v1/chat/completions".to_string(),
+            "/v1/responses".to_string(),
+        ]);
+        assert!(validate_selections(&[chat, selection("model-b")]).is_ok());
     }
 
     #[test]

@@ -1211,6 +1211,7 @@ async fn workbuddy_unbind_restores_even_after_edits_in_workbuddy() {
         supports_tool_call: true,
         supports_images: false,
         supports_reasoning: false,
+        supported_endpoints: None,
     };
     crate::workbuddy_config::sync_selected_models(&db, KEY, &[selection])
         .await
@@ -1448,6 +1449,7 @@ async fn workbuddy_unbind_drops_ofox_entries_the_record_does_not_track() {
         supports_tool_call: true,
         supports_images: false,
         supports_reasoning: false,
+        supported_endpoints: None,
     };
     crate::workbuddy_config::sync_selected_models(&db, KEY, &[selection("openai/gpt-x")])
         .await
@@ -1771,6 +1773,7 @@ async fn workbuddy_deleted_config_restores_saved_selection_or_unbinds_without_re
                 supports_tool_call: true,
                 supports_images: id == "model-b",
                 supports_reasoning: true,
+                supported_endpoints: None,
             })
             .collect();
         crate::workbuddy_config::sync_selected_models(&db, KEY, &selections)
@@ -1930,6 +1933,7 @@ async fn workbuddy_model_save_rechecks_deletion_and_external_modification_after_
         supports_tool_call: true,
         supports_images: false,
         supports_reasoning: false,
+        supported_endpoints: None,
     };
     crate::workbuddy_config::sync_selected_models(&db, KEY, &[selection("saved")])
         .await
@@ -1987,6 +1991,7 @@ async fn workbuddy_partial_deletion_survives_region_switch_restart_and_explicit_
                 supports_tool_call: true,
                 supports_images: id == "kept",
                 supports_reasoning: true,
+                supported_endpoints: None,
             })
             .collect();
         crate::workbuddy_config::sync_selected_models(&db, KEY, &selections)
@@ -2628,6 +2633,7 @@ async fn region_reconciliation_isolates_direct_tool_and_workbuddy_conflicts() {
                 supports_tool_call: true,
                 supports_images: true,
                 supports_reasoning: true,
+                supported_endpoints: None,
             };
             crate::workbuddy_config::sync_selected_models(&db, KEY, &[selection])
                 .await
@@ -3161,6 +3167,7 @@ async fn windows_locked_workbuddy_is_unknown_and_keeps_saved_binding() {
         supports_tool_call: true,
         supports_images: false,
         supports_reasoning: true,
+        supported_endpoints: None,
     };
     crate::workbuddy_config::sync_selected_models(&db, KEY, std::slice::from_ref(&selection))
         .await
