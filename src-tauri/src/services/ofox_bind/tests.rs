@@ -3805,3 +3805,247 @@ async fn replacing_the_key_stops_when_the_user_changed_the_configuration() {
     );
     assert_eq!(fs::read_to_string(&settings).unwrap(), on_disk);
 }
+
+// ---- Stage 4：OpenCode / OpenClaw / Hermes 在 agent 里做的事不算冲突 ----
+
+async fn bind_with_user_config(
+    tool: Tool,
+    record: &str,
+    config: &str,
+) -> (Home, Database, PathBuf) {
+    let home = Home::new();
+    let path = match tool {
+        Tool::OpenCode => crate::opencode_config::get_opencode_config_path(),
+        Tool::OpenClaw => crate::openclaw_config::get_openclaw_config_path(),
+        Tool::Hermes => crate::hermes_config::get_hermes_config_path(),
+        _ => unreachable!("only the file-based agents"),
+    };
+    write(&path, config);
+    let template = match tool {
+        Tool::OpenCode => opencode_template(Some("openai/gpt-x")),
+        Tool::OpenClaw => openclaw_template(),
+        _ => hermes_template(),
+    };
+    let db = db_for(tool, template);
+    bind(&db, tool, record, KEY).await.expect("bind");
+    (home, db, path)
+}
+
+fn edit_text(path: &Path, from: &str, to: &str) {
+    let text = fs::read_to_string(path).unwrap();
+    assert!(text.contains(from), "{from:?} not in {text}");
+    write(path, &text.replace(from, to));
+}
+
+async fn status_of(db: &Database, tool: Tool) -> status::BindingStatus {
+    status::binding_status(db, tool, Some(KEY)).await.status
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_models_added_to_the_entry_are_not_a_conflict() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    let mut config = json_at(&path);
+    config["provider"]["ofox-opencode"]["models"]["anthropic/other"] = json!({ "name": "other" });
+    write(&path, &serde_json::to_string_pretty(&config).unwrap());
+
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Configured
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_base_url_changed_is_a_conflict() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    edit_text(&path, "https://api.ofox.ai/v1", "https://relay.example/v1");
+
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Modified
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn replacing_the_key_keeps_the_opencode_models_and_selected_model() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    let mut config = json_at(&path);
+    config["provider"]["ofox-opencode"]["models"]["anthropic/other"] = json!({ "name": "other" });
+    config["model"] = "ofox-opencode/anthropic/other".into();
+    write(&path, &serde_json::to_string_pretty(&config).unwrap());
+
+    replace_key(&db, Tool::OpenCode, KEY, "sk-of-ACCOUNT-B")
+        .await
+        .expect("replace key");
+
+    let config = json_at(&path);
+    assert_eq!(
+        config["provider"]["ofox-opencode"]["options"]["apiKey"],
+        "sk-of-ACCOUNT-B"
+    );
+    assert!(config["provider"]["ofox-opencode"]["models"]
+        .get("anthropic/other")
+        .is_some());
+    assert!(config["provider"]["ofox-opencode"]["models"]
+        .get("openai/gpt-x")
+        .is_some());
+    assert_eq!(config["model"], "ofox-opencode/anthropic/other");
+}
+
+#[tokio::test]
+#[serial]
+async fn openclaw_model_switched_to_another_ofox_model_is_not_a_conflict() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(
+        &path,
+        "ofox-openclaw/openai/gpt-x",
+        "ofox-openclaw/anthropic/other",
+    );
+
+    assert_eq!(
+        status_of(&db, Tool::OpenClaw).await,
+        status::BindingStatus::Configured
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn openclaw_model_switched_to_another_provider_is_a_conflict() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(&path, "ofox-openclaw/openai/gpt-x", "anthropic/claude");
+
+    assert_eq!(
+        status_of(&db, Tool::OpenClaw).await,
+        status::BindingStatus::Modified
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn openclaw_entry_base_url_changed_is_a_conflict() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(&path, "https://api.ofox.ai/v1", "https://relay.example/v1");
+
+    assert_eq!(
+        status_of(&db, Tool::OpenClaw).await,
+        status::BindingStatus::Modified
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn replacing_the_key_keeps_the_openclaw_model_chosen_in_the_agent() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(
+        &path,
+        "ofox-openclaw/openai/gpt-x",
+        "ofox-openclaw/anthropic/other",
+    );
+
+    replace_key(&db, Tool::OpenClaw, KEY, "sk-of-ACCOUNT-B")
+        .await
+        .expect("replace key");
+
+    let default = crate::openclaw_config::get_default_model()
+        .unwrap()
+        .unwrap();
+    assert_eq!(default.primary, "ofox-openclaw/anthropic/other");
+    assert_eq!(default.fallbacks, ["existing/fallback"]);
+    let entry = crate::openclaw_config::get_provider("ofox-openclaw")
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry["apiKey"], "sk-of-ACCOUNT-B");
+}
+
+#[tokio::test]
+#[serial]
+async fn replacing_the_key_keeps_models_added_to_the_openclaw_entry() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(
+        &path,
+        "\"id\": \"openai/gpt-x\"",
+        "\"id\": \"anthropic/other\", \"name\": \"other\" }, { \"id\": \"openai/gpt-x\"",
+    );
+    assert_eq!(
+        status_of(&db, Tool::OpenClaw).await,
+        status::BindingStatus::Configured
+    );
+
+    replace_key(&db, Tool::OpenClaw, KEY, "sk-of-ACCOUNT-B")
+        .await
+        .expect("replace key");
+
+    let entry = crate::openclaw_config::get_provider("ofox-openclaw")
+        .unwrap()
+        .unwrap();
+    let ids: Vec<_> = entry["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&"anthropic/other"), "{ids:?}");
+    assert!(ids.contains(&"openai/gpt-x"), "{ids:?}");
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_model_switched_in_the_agent_is_not_a_conflict() {
+    let (_home, db, path) = bind_with_user_config(Tool::Hermes, "hermes", HERMES_CONFIG).await;
+    edit_text(&path, "default: openai/gpt-x", "default: anthropic/other");
+
+    assert_eq!(
+        status_of(&db, Tool::Hermes).await,
+        status::BindingStatus::Configured
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_provider_switched_away_is_a_conflict() {
+    let (_home, db, path) = bind_with_user_config(Tool::Hermes, "hermes", HERMES_CONFIG).await;
+    edit_text(&path, "provider: ofox-hermes", "provider: deepseek");
+
+    assert_eq!(
+        status_of(&db, Tool::Hermes).await,
+        status::BindingStatus::Modified
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_entry_base_url_changed_is_a_conflict() {
+    let (_home, db, path) = bind_with_user_config(Tool::Hermes, "hermes", HERMES_CONFIG).await;
+    edit_text(&path, "https://api.ofox.ai/v1", "https://relay.example/v1");
+
+    assert_eq!(
+        status_of(&db, Tool::Hermes).await,
+        status::BindingStatus::Modified
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn replacing_the_key_keeps_the_hermes_model_chosen_in_the_agent() {
+    let (_home, db, path) = bind_with_user_config(Tool::Hermes, "hermes", HERMES_CONFIG).await;
+    edit_text(&path, "default: openai/gpt-x", "default: anthropic/other");
+
+    replace_key(&db, Tool::Hermes, KEY, "sk-of-ACCOUNT-B")
+        .await
+        .expect("replace key");
+
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains("default: anthropic/other"), "{text}");
+    assert!(text.contains("sk-of-ACCOUNT-B"));
+    assert!(text.contains("provider: ofox-hermes"));
+}

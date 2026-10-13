@@ -236,6 +236,26 @@ fn hermes_projection(value: &Value) -> Result<Value, String> {
     Ok(projected)
 }
 
+/// Hermes 条目里决定「连到哪、怎么连」的字段：列表写法和 `providers:` 字典写法
+/// 的名字不同，两种都列上，没有的字段两边都是空。
+const HERMES_ACCESS_FIELDS: [&str; 5] = ["base_url", "api", "api_key", "api_mode", "transport"];
+
+/// OpenClaw 默认模型指向哪个服务商（`agents.defaults.model` 可以是字符串，也可以
+/// 是 `{primary, fallbacks}`）。
+fn openclaw_route(config: &Value) -> Result<Option<Value>, String> {
+    let Some(model) = at_path(config, &["agents", "defaults", "model"])? else {
+        return Ok(None);
+    };
+    let primary = match model {
+        Value::String(primary) => primary.as_str(),
+        Value::Object(_) => model.get("primary").and_then(Value::as_str).unwrap_or(""),
+        _ => return Err("受管配置字段的格式无效".into()),
+    };
+    Ok(Some(Value::String(
+        primary.split('/').next().unwrap_or_default().to_string(),
+    )))
+}
+
 pub(super) fn inspect(
     db: &Database,
     tool: Tool,
@@ -359,7 +379,13 @@ pub(super) fn inspect_managed_fields(
                     &shown,
                     &actual,
                     &expected,
-                    &[&["provider", "ofox-opencode"]],
+                    // 只比接入字段。条目里的模型列表是用户的选择，agent 里加模型、
+                    // 切模型都不算冲突。
+                    &[
+                        &["provider", "ofox-opencode", "npm"],
+                        &["provider", "ofox-opencode", "options", "baseURL"],
+                        &["provider", "ofox-opencode", "options", "apiKey"],
+                    ],
                 )?;
             }
             ManagedFile::OpenClawConfig => {
@@ -369,6 +395,7 @@ pub(super) fn inspect_managed_fields(
                         current.as_deref(),
                         &template,
                         key,
+                        false,
                     )?),
                     "OpenClaw",
                 )?;
@@ -377,11 +404,20 @@ pub(super) fn inspect_managed_fields(
                     &shown,
                     &actual,
                     &expected,
+                    // 条目只比接入字段；默认模型只要还指向 Ofox 条目就行，具体选哪个
+                    // 模型是用户的选择。
                     &[
-                        &["models", "providers", "ofox-openclaw"],
-                        &["agents", "defaults", "model"],
+                        &["models", "providers", "ofox-openclaw", "baseUrl"],
+                        &["models", "providers", "ofox-openclaw", "apiKey"],
+                        &["models", "providers", "ofox-openclaw", "api"],
                     ],
                 )?;
+                comparison.compare(
+                    &shown,
+                    "agents.defaults.model",
+                    openclaw_route(&actual)?.as_ref(),
+                    openclaw_route(&expected)?.as_ref(),
+                );
             }
             ManagedFile::HermesConfig => {
                 let actual =
@@ -390,14 +426,23 @@ pub(super) fn inspect_managed_fields(
                     current.as_deref(),
                     &template,
                     key,
+                    false,
                 )?)?)?;
-                for (key, field) in [
-                    ("entry", "ofox-hermes"),
-                    ("provider", "model.provider"),
-                    ("default", "model.default"),
-                ] {
-                    comparison.compare(&shown, field, actual.get(key), expected.get(key));
+                // 条目只比接入字段；`model.default`、条目里的模型列表是用户的选择。
+                for field in HERMES_ACCESS_FIELDS {
+                    comparison.compare(
+                        &shown,
+                        &format!("ofox-hermes.{field}"),
+                        actual.get("entry").and_then(|entry| entry.get(field)),
+                        expected.get("entry").and_then(|entry| entry.get(field)),
+                    );
                 }
+                comparison.compare(
+                    &shown,
+                    "model.provider",
+                    actual.get("provider"),
+                    expected.get("provider"),
+                );
             }
         }
         if current.is_none() {

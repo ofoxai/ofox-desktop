@@ -62,7 +62,11 @@ pub(crate) fn bound_config(
         Some(_) => before.clone(),
         None => json!({ "$schema": SCHEMA_URL }),
     };
-    json_file::set(&mut value, ENTRY, bound_entry(template, api_key));
+    let entry = json_file::merge_provider_entry(
+        json_file::get(&before, ENTRY),
+        bound_entry(template, api_key),
+    );
+    json_file::set(&mut value, ENTRY, entry);
     json_file::render_changed(current.unwrap_or_default(), KeyStyle::Json, &before, &value)
 }
 
