@@ -101,6 +101,23 @@
     "loadFailed": "モデル一覧を読み込めませんでした",
     "retry": "再試行"
   },
+  "modelPicker": {
+    "defaultRoute": "未設定（OfoxAI の既定ルートを使用）",
+    "searchModel": "モデルを検索…",
+    "searchModelOrProvider": "モデルまたはプロバイダーを検索…",
+    "loading": "読み込み中…",
+    "noModels": "モデルが見つかりません",
+    "noCompatibleModels": "互換モデルが見つかりません",
+    "selectedCount": "互換モデルを {{count}} 個選択済み",
+    "selectAtLeastOne": "互換モデルを 1 個以上選択してください",
+    "compatibleCountWithSharedKey": "{{count}} 個の互換モデルで 1 つの Ofox キーを共有",
+    "availableCount": "{{count}} 個のモデルを選択可能",
+    "selectAllCompatible": "互換モデルをすべて選択",
+    "clearSelection": "選択を解除",
+    "reasoning": "推論",
+    "vision": "画像入力",
+    "otherVendor": "その他"
+  },
   "modelCompatibility": {
     "title": "ストリーミング互換性",
     "checking": "ストリーミング互換性を確認中…",

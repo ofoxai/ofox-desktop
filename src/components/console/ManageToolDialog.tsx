@@ -1,11 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { toast } from "sonner";
 import {
   Loader2,
-  Check,
-  ChevronsUpDown,
   Folder,
   Zap,
   CheckCircle2,
@@ -31,18 +29,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
-import {
-  Command,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-} from "@/components/ui/command";
+  ModelPicker,
+  MultiModelPicker,
+} from "@/components/model-picker/ModelPicker";
 import { cn } from "@/lib/utils";
 import { isMac } from "@/lib/platform";
 import { settingsApi } from "@/lib/api";
@@ -904,7 +893,7 @@ export default function ManageToolDialog({
                 )}
                 {protocol && !desktopCodex && multiModel ? (
                   <>
-                    <WorkBuddyModelPicker
+                    <MultiModelPicker
                       id="manage-model"
                       selectedIds={draftModels}
                       onChange={setDraftModels}
@@ -914,7 +903,9 @@ export default function ManageToolDialog({
                       portalContainer={dialogContentNode}
                       summary={
                         tool.id === "opencode"
-                          ? `共 ${models.length} 个可选模型`
+                          ? t("modelPicker.availableCount", {
+                              count: models.length,
+                            })
                           : undefined
                       }
                     />
@@ -1275,259 +1266,6 @@ export default function ManageToolDialog({
 }
 
 // ---------------------------------------------------------------------------
-// WorkBuddyModelPicker — searchable multi-select with select-all / clear shortcuts
-// ---------------------------------------------------------------------------
-
-// cmdk becomes noticeably slow when every catalog entry is mounted at once.
-// Search the full catalog, but render it in small batches as the user scrolls.
-const MODEL_PICKER_BATCH_SIZE = 80;
-
-function filterPickerModels(
-  models: FetchedModel[],
-  query: string,
-): FetchedModel[] {
-  const search = query.trim().toLocaleLowerCase();
-  if (!search) return models;
-  return models.filter((model) =>
-    `${model.id} ${model.name ?? ""} ${model.ownedBy ?? ""}`
-      .toLocaleLowerCase()
-      .includes(search),
-  );
-}
-
-function groupPickerModels(
-  models: FetchedModel[],
-): Record<string, FetchedModel[]> {
-  const grouped: Record<string, FetchedModel[]> = {};
-  for (const model of models) {
-    const slash = model.id.indexOf("/");
-    const vendor =
-      slash > 0 ? model.id.slice(0, slash) : model.ownedBy || "Other";
-    (grouped[vendor] ||= []).push(model);
-  }
-  return grouped;
-}
-
-function usePickerResults(models: FetchedModel[]) {
-  const [search, setSearch] = useState("");
-  const [visibleCount, setVisibleCount] = useState(MODEL_PICKER_BATCH_SIZE);
-  const filtered = useMemo(
-    () => filterPickerModels(models, search),
-    [models, search],
-  );
-  const visible = useMemo(
-    () => filtered.slice(0, visibleCount),
-    [filtered, visibleCount],
-  );
-  const grouped = useMemo(() => groupPickerModels(visible), [visible]);
-  const vendors = useMemo(() => Object.keys(grouped).sort(), [grouped]);
-
-  const updateSearch = useCallback((value: string) => {
-    setSearch(value);
-    setVisibleCount(MODEL_PICKER_BATCH_SIZE);
-  }, []);
-  const loadMore = useCallback(
-    (event: React.UIEvent<HTMLDivElement>) => {
-      const list = event.currentTarget;
-      if (
-        visibleCount < filtered.length &&
-        list.scrollTop + list.clientHeight >= list.scrollHeight - 48
-      ) {
-        setVisibleCount((count) => count + MODEL_PICKER_BATCH_SIZE);
-      }
-    },
-    [filtered.length, visibleCount],
-  );
-
-  return { search, updateSearch, filtered, grouped, vendors, loadMore };
-}
-
-interface WorkBuddyModelPickerProps {
-  id: string;
-  selectedIds: string[];
-  onChange: (ids: string[]) => void;
-  models: FetchedModel[];
-  loading: boolean;
-  onFetch: (forceRefresh?: boolean) => void;
-  portalContainer?: HTMLElement | null;
-  /** 列表下方的统计文字；不传就是 WorkBuddy 的「共用一个 Ofox Key」。 */
-  summary?: string;
-}
-
-function WorkBuddyModelPicker({
-  id,
-  selectedIds,
-  onChange,
-  models,
-  loading,
-  onFetch,
-  portalContainer,
-  summary,
-}: WorkBuddyModelPickerProps) {
-  const [open, setOpen] = useState(false);
-  const selected = useMemo(() => new Set(selectedIds), [selectedIds]);
-  const allSelected =
-    models.length > 0 && models.every((model) => selected.has(model.id));
-  const { search, updateSearch, filtered, grouped, vendors, loadMore } =
-    usePickerResults(models);
-
-  const handleOpenChange = useCallback(
-    (next: boolean) => {
-      setOpen(next);
-      if (next) {
-        updateSearch("");
-        if (models.length === 0 && !loading) onFetch();
-      }
-    },
-    [loading, models.length, onFetch, updateSearch],
-  );
-
-  const toggle = useCallback(
-    (id: string) => {
-      if (selected.has(id)) {
-        onChange(selectedIds.filter((selectedId) => selectedId !== id));
-      } else {
-        onChange([...selectedIds, id]);
-      }
-    },
-    [onChange, selected, selectedIds],
-  );
-
-  return (
-    <div className="space-y-2">
-      <div className="flex gap-1">
-        <Popover open={open} onOpenChange={handleOpenChange}>
-          <PopoverTrigger asChild>
-            <Button
-              id={id}
-              type="button"
-              variant="outline"
-              role="combobox"
-              aria-expanded={open}
-              className="flex-1 justify-between font-normal"
-            >
-              <span
-                className={cn(
-                  "truncate",
-                  selectedIds.length === 0 && "text-muted-foreground",
-                )}
-              >
-                {selectedIds.length > 0
-                  ? `已选择 ${selectedIds.length} 个兼容模型`
-                  : "请选择至少一个兼容模型"}
-              </span>
-              <ChevronsUpDown className="ml-2 h-3.5 w-3.5 shrink-0 opacity-50" />
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent
-            className="p-0"
-            align="start"
-            style={{ width: "var(--radix-popover-trigger-width)" }}
-            container={portalContainer ?? undefined}
-          >
-            <Command shouldFilter={false}>
-              <CommandInput
-                placeholder="搜索模型或供应商…"
-                className="h-9"
-                value={search}
-                onValueChange={updateSearch}
-              />
-              <CommandList className="max-h-72" onScroll={loadMore}>
-                {loading ? (
-                  <div className="flex items-center justify-center py-6 text-[12px] text-muted-foreground">
-                    <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                    加载中…
-                  </div>
-                ) : (
-                  <>
-                    {filtered.length === 0 && (
-                      <CommandEmpty>未找到兼容模型</CommandEmpty>
-                    )}
-                    {vendors.map((vendor) => (
-                      <CommandGroup key={vendor} heading={vendor}>
-                        {grouped[vendor].map((model) => (
-                          <CommandItem
-                            key={model.id}
-                            value={`${model.id} ${model.name ?? ""} ${vendor}`}
-                            onSelect={() => toggle(model.id)}
-                          >
-                            <span
-                              className={cn(
-                                "mr-2 flex h-4 w-4 shrink-0 items-center justify-center rounded border",
-                                selected.has(model.id)
-                                  ? "border-orange-500 bg-orange-500 text-white"
-                                  : "border-border-default",
-                              )}
-                            >
-                              {selected.has(model.id) && (
-                                <Check className="h-3 w-3" />
-                              )}
-                            </span>
-                            <span className="min-w-0 flex-1">
-                              <span className="block truncate text-[12px] font-medium">
-                                {model.name?.trim() || model.id}
-                              </span>
-                              <span className="block truncate text-[10px] text-muted-foreground">
-                                {model.id}
-                              </span>
-                            </span>
-                            {(model.supportedParameters ?? []).includes(
-                              "reasoning",
-                            ) && (
-                              <span className="ml-2 rounded bg-violet-500/10 px-1.5 py-0.5 text-[9px] text-violet-600">
-                                推理
-                              </span>
-                            )}
-                            {(model.inputModalities ?? []).includes(
-                              "image",
-                            ) && (
-                              <span className="ml-1 rounded bg-sky-500/10 px-1.5 py-0.5 text-[9px] text-sky-600">
-                                视觉
-                              </span>
-                            )}
-                          </CommandItem>
-                        ))}
-                      </CommandGroup>
-                    ))}
-                  </>
-                )}
-              </CommandList>
-            </Command>
-          </PopoverContent>
-        </Popover>
-      </div>
-      <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-        <span>
-          {summary ?? `共 ${models.length} 个兼容模型，共用一个 Ofox Key`}
-        </span>
-        <span className="flex shrink-0 gap-1">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7 px-2 text-[11px]"
-            disabled={loading || models.length === 0 || allSelected}
-            onClick={() => onChange(models.map((model) => model.id))}
-          >
-            全选兼容
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7 px-2 text-[11px]"
-            disabled={loading || selectedIds.length === 0}
-            onClick={() => onChange([])}
-          >
-            取消全选
-          </Button>
-        </span>
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // PingStatusBox — connectivity result card
 // ---------------------------------------------------------------------------
 //
@@ -1680,137 +1418,6 @@ function InsufficientCreditsNotice() {
           {t("connectivity.topUp")}
         </Button>
       )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// ModelPicker — local searchable dropdown
-// ---------------------------------------------------------------------------
-//
-// We don't reuse `ModelSelectFromApi` here because that component is wired to
-// the i18n stack and the larger provider-form lifecycle. The manage dialog
-// only needs a simple controlled picker, so a local component keeps the
-// dependency graph clean and the empty/loading states tuned to *this* UX.
-
-interface ModelPickerProps {
-  id: string;
-  value: string;
-  onChange: (v: string) => void;
-  models: FetchedModel[];
-  loading: boolean;
-  onFetch: (forceRefresh?: boolean) => void;
-  /**
-   * Portal target for the popover. Defaults to `document.body` when omitted.
-   * Pass the dialog's content node when this picker is rendered inside a
-   * Radix Dialog, so the popover lands inside the dialog's scroll-lock
-   * shard and the search/option list stays scrollable.
-   */
-  portalContainer?: HTMLElement | null;
-}
-
-function ModelPicker({
-  id,
-  value,
-  onChange,
-  models,
-  loading,
-  onFetch,
-  portalContainer,
-}: ModelPickerProps) {
-  const [open, setOpen] = useState(false);
-  const { search, updateSearch, filtered, grouped, vendors, loadMore } =
-    usePickerResults(models);
-
-  // The dialog loads the list when it opens; opening the dropdown with an
-  // empty list (the first load failed) tries once more.
-  const handleOpenChange = useCallback(
-    (next: boolean) => {
-      setOpen(next);
-      if (next) {
-        updateSearch("");
-        if (models.length === 0 && !loading) onFetch();
-      }
-    },
-    [models.length, loading, onFetch, updateSearch],
-  );
-
-  return (
-    <div className="flex gap-1">
-      <Popover open={open} onOpenChange={handleOpenChange}>
-        <PopoverTrigger asChild>
-          <Button
-            id={id}
-            type="button"
-            variant="outline"
-            role="combobox"
-            aria-expanded={open}
-            className="flex-1 justify-between font-normal"
-          >
-            <span className={cn("truncate", !value && "text-muted-foreground")}>
-              {value || "未设置（使用 OfoxAI 默认路由）"}
-            </span>
-            <ChevronsUpDown className="ml-2 h-3.5 w-3.5 shrink-0 opacity-50" />
-          </Button>
-        </PopoverTrigger>
-        <PopoverContent
-          className="p-0"
-          align="start"
-          // Match the trigger width so the list never visually mismatches
-          // its anchor (Radix exposes this via CSS var).
-          style={{ width: "var(--radix-popover-trigger-width)" }}
-          // Portal into the dialog's content node so this popover lives
-          // inside Radix Dialog's scroll-lock shard — otherwise wheel
-          // events on the model list get swallowed and the dropdown looks
-          // "stuck" (see `ModelPickerProps.portalContainer` above).
-          container={portalContainer ?? undefined}
-        >
-          <Command shouldFilter={false}>
-            <CommandInput
-              placeholder="搜索模型…"
-              className="h-9"
-              value={search}
-              onValueChange={updateSearch}
-            />
-            <CommandList onScroll={loadMore}>
-              {loading ? (
-                <div className="flex items-center justify-center py-6 text-[12px] text-muted-foreground">
-                  <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                  加载中…
-                </div>
-              ) : (
-                <>
-                  {filtered.length === 0 && (
-                    <CommandEmpty>未找到模型</CommandEmpty>
-                  )}
-                  {vendors.map((vendor) => (
-                    <CommandGroup key={vendor} heading={vendor}>
-                      {grouped[vendor].map((m) => (
-                        <CommandItem
-                          key={m.id}
-                          value={m.id}
-                          onSelect={() => {
-                            onChange(m.id);
-                            setOpen(false);
-                          }}
-                        >
-                          <Check
-                            className={cn(
-                              "mr-2 h-3.5 w-3.5",
-                              value === m.id ? "opacity-100" : "opacity-0",
-                            )}
-                          />
-                          <span className="truncate">{m.id}</span>
-                        </CommandItem>
-                      ))}
-                    </CommandGroup>
-                  ))}
-                </>
-              )}
-            </CommandList>
-          </Command>
-        </PopoverContent>
-      </Popover>
     </div>
   );
 }
