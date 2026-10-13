@@ -3390,6 +3390,18 @@ async fn gemini_model_changed_by_the_user_is_still_configured() {
     assert_eq!(health.status, status::BindingStatus::Configured);
 }
 
+fn saved_models(db: &Database, tool: Tool) -> Vec<String> {
+    let settings = db
+        .get_provider_by_id(tool.provider_id(), tool.app().as_str())
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    settings["models"]
+        .as_object()
+        .map(|models| models.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
 fn saved_model(db: &Database, tool: Tool) -> String {
     let settings = db
         .get_provider_by_id(tool.provider_id(), tool.app().as_str())
@@ -4120,7 +4132,13 @@ async fn opencode_model_chosen_in_the_tui_is_adopted_for_display() {
     );
     sync_live_model(&db, Tool::OpenCode, Some(KEY)).await;
 
-    assert_eq!(saved_model(&db, Tool::OpenCode), "anthropic/other");
+    assert!(saved_models(&db, Tool::OpenCode).contains(&"anthropic/other".to_string()));
+    assert_eq!(
+        live_model::display_model(Tool::OpenCode)
+            .unwrap()
+            .as_deref(),
+        Some("anthropic/other")
+    );
 }
 
 #[tokio::test]
@@ -4447,7 +4465,7 @@ async fn opencode_jsonc_wins_over_json_and_an_ofox_model_there_is_adopted() {
         status::BindingStatus::Configured
     );
     sync_live_model(&db, Tool::OpenCode, Some(KEY)).await;
-    assert_eq!(saved_model(&db, Tool::OpenCode), "anthropic/other");
+    assert!(saved_models(&db, Tool::OpenCode).contains(&"anthropic/other".to_string()));
 }
 
 // ---- Claude / Gemini：用户在 agent 里「记住」的模型（settings 里的 model）----
@@ -4642,4 +4660,135 @@ async fn opencode_last_tui_choice_wins_over_the_model_in_the_config() {
             .as_deref(),
         Some("openai/gpt-6-luna")
     );
+}
+
+// ---- OpenCode 多模型：模板里的 models 是用户选的一组 ----
+
+fn opencode_models_template(ids: &[&str]) -> Value {
+    let models: serde_json::Map<String, Value> = ids
+        .iter()
+        .map(|id| (id.to_string(), json!({ "name": id })))
+        .collect();
+    json!({
+        "npm": "@ai-sdk/openai",
+        "name": "OfoxAI",
+        "options": { "baseURL": "https://api.ofox.ai/v1", "apiKey": "" },
+        "models": models,
+    })
+}
+
+fn opencode_entry_models(path: &Path) -> Vec<String> {
+    json_at(path)["provider"]["ofox-opencode"]["models"]
+        .as_object()
+        .map(|models| models.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+async fn bound_opencode_with(ids: &[&str]) -> (Home, Database, PathBuf) {
+    let home = Home::new();
+    let path = crate::opencode_config::get_opencode_config_path();
+    write(&path, OPENCODE_CONFIG);
+    let db = db_for(Tool::OpenCode, opencode_models_template(ids));
+    bind(&db, Tool::OpenCode, "opencode", KEY).await.unwrap();
+    (home, db, path)
+}
+
+#[tokio::test]
+#[serial]
+async fn saving_a_set_of_models_writes_exactly_that_set_to_the_entry() {
+    let (_home, db, path) = bound_opencode_with(&["a/one", "a/two"]).await;
+    let mut config = json_at(&path);
+    config["provider"]["ofox-opencode"]["models"]["user/added"] = json!({ "name": "added" });
+    write(&path, &serde_json::to_string_pretty(&config).unwrap());
+    let saved = db
+        .get_provider_by_id(Tool::OpenCode.provider_id(), "opencode")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let updated = opencode_models_template(&["b/three", "a/one"]);
+    let mut merged = saved.clone();
+    merged["models"] = updated["models"].clone();
+
+    persist_bound_settings(&db, Tool::OpenCode, KEY, &saved, &merged)
+        .await
+        .expect("save");
+
+    assert_eq!(opencode_entry_models(&path), ["b/three", "a/one"]);
+}
+
+#[tokio::test]
+#[serial]
+async fn the_tui_choice_is_kept_when_it_is_still_in_the_saved_set() {
+    let (home, db, _path) = bound_opencode_with(&["a/one", "a/two"]).await;
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "ofox-opencode", "modelID": "a/two" }]),
+    );
+    let saved = db
+        .get_provider_by_id(Tool::OpenCode.provider_id(), "opencode")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let mut updated = saved.clone();
+    updated["models"] = opencode_models_template(&["a/one", "a/two", "a/three"])["models"].clone();
+
+    persist_bound_settings(&db, Tool::OpenCode, KEY, &saved, &updated)
+        .await
+        .expect("save");
+
+    assert_eq!(
+        json_at(&opencode_state_path(&home))["recent"][0]["modelID"],
+        "a/two"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn the_first_saved_model_becomes_current_when_the_tui_choice_was_removed() {
+    let (home, db, _path) = bound_opencode_with(&["a/one", "a/two"]).await;
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "ofox-opencode", "modelID": "a/two" }]),
+    );
+    let saved = db
+        .get_provider_by_id(Tool::OpenCode.provider_id(), "opencode")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let mut updated = saved.clone();
+    updated["models"] = opencode_models_template(&["b/three", "a/one"])["models"].clone();
+
+    persist_bound_settings(&db, Tool::OpenCode, KEY, &saved, &updated)
+        .await
+        .expect("save");
+
+    assert_eq!(
+        json_at(&opencode_state_path(&home))["recent"][0]["modelID"],
+        "b/three"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn adopting_a_tui_model_adds_it_without_dropping_the_other_saved_models() {
+    let (home, db, _path) = bound_opencode_with(&["a/one", "a/two"]).await;
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "ofox-opencode", "modelID": "a/three" }]),
+    );
+
+    sync_live_model(&db, Tool::OpenCode, Some(KEY)).await;
+
+    let settings = db
+        .get_provider_by_id(Tool::OpenCode.provider_id(), "opencode")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let ids: Vec<_> = settings["models"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(ids, ["a/one", "a/two", "a/three"]);
 }

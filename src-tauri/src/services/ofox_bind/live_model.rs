@@ -165,6 +165,20 @@ pub(super) fn adopt_live_model(db: &Database, tool: Tool) -> Result<bool, String
         .map_err(|e| format!("读取 Ofox {} 模板失败：{e}", tool.label()))?
         .ok_or_else(|| format!("Ofox {} 模板缺失", tool.label()))?;
     let mut updated = provider.settings_config.clone();
+    if tool == Tool::OpenCode {
+        // 模板里是用户选的一组模型：在 TUI 里选了组外的就加进去，不能把别的丢掉。
+        let models = updated
+            .get_mut("models")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| "Ofox OpenCode 模板缺少 models".to_string())?;
+        if models.contains_key(&live) {
+            return Ok(false);
+        }
+        models.insert(live.clone(), serde_json::json!({ "name": live }));
+        db.update_provider_settings_config(app.as_str(), tool.provider_id(), &updated)
+            .map_err(|e| format!("保存 {} 的模型失败：{e}", tool.label()))?;
+        return Ok(true);
+    }
     write_model_into_settings(&app, &mut updated, &live)?;
     // 比的是读出来的模型：Gemini 会把前缀规整掉，直接比文件里的值会永远「不同」。
     if read_model_from_settings(&app, &updated)
@@ -177,17 +191,18 @@ pub(super) fn adopt_live_model(db: &Database, tool: Tool) -> Result<bool, String
     Ok(true)
 }
 
-/// 用户在 agent 里选了自己配的、同样指向 Ofox 网关的条目：返回它的模型，主页刷新后
-/// 显示它（不写进模板，那个条目不归桌面端管）。选的是 Ofox 条目、别家，或者不是
-/// 这几个工具，都返回 `None`。
+/// 主页显示用：用户在 agent 里实际选的模型。OpenCode 的模板里是一组模型，当前用哪个
+/// 以 TUI 里选的为准（Ofox 条目或用户自己配的、同样指向 Ofox 网关的条目）；OpenClaw、
+/// Hermes 选了自己配的 Ofox 网关条目时显示它的模型（不写进模板，那个条目不归桌面端
+/// 管）。选了别家，或者不是这几个工具，返回 `None`。
 pub(super) fn display_model(tool: Tool) -> Result<Option<String>, String> {
     let model = match tool {
         Tool::OpenCode => {
             let Some(selection) = super::opencode_state::live_selection()? else {
                 return Ok(None);
             };
-            (selection.provider != super::opencode_state::PROVIDER_ID
-                && super::opencode_state::is_gateway(&selection.provider))
+            (selection.provider == super::opencode_state::PROVIDER_ID
+                || super::opencode_state::is_gateway(&selection.provider))
             .then_some(selection.model)
         }
         Tool::OpenClaw => {

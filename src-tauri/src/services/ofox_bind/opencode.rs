@@ -53,20 +53,25 @@ fn bound_entry(template: &Value, api_key: &str) -> Value {
     entry
 }
 
+///
+/// `select_route`：保存模型时条目里的模型就是用户选的这一组，去掉的要真的去掉；换 key、
+/// 修复时保留用户在 agent 里加的模型。
 pub(crate) fn bound_config(
     current: Option<&str>,
     template: &Value,
     api_key: &str,
+    select_route: bool,
 ) -> Result<String, String> {
     let before = json_file::parse_object(current, LABEL)?;
     let mut value = match current {
         Some(_) => before.clone(),
         None => json!({ "$schema": SCHEMA_URL }),
     };
-    let entry = json_file::merge_provider_entry(
-        json_file::get(&before, ENTRY),
-        bound_entry(template, api_key),
-    );
+    let mut existing = json_file::get(&before, ENTRY).cloned();
+    if let (true, Some(Value::Object(existing))) = (select_route, existing.as_mut()) {
+        existing.remove("models");
+    }
+    let entry = json_file::merge_provider_entry(existing.as_ref(), bound_entry(template, api_key));
     json_file::set(&mut value, ENTRY, entry);
     json_file::render_changed(current.unwrap_or_default(), KeyStyle::Json, &before, &value)
 }
@@ -82,12 +87,19 @@ pub(crate) fn write_bound(
     txn: &mut FileTxn,
 ) -> Result<(), String> {
     let path = config_path();
-    let bound = bound_config(read_text(&path)?.as_deref(), template, api_key)?;
+    let bound = bound_config(
+        read_text(&path)?.as_deref(),
+        template,
+        api_key,
+        select_route,
+    )?;
     txn.write(&path, bound.as_bytes())
         .map_err(|e| format!("写入 OpenCode 配置失败：{e}"))?;
-    if let (true, Some(model)) = (select_route, opencode_state::template_model(template)) {
+    if select_route {
         let state = opencode_state::state_path();
-        if let Some(text) = opencode_state::select_ofox_model(read_text(&state)?.as_deref(), model)?
+        let models = opencode_state::template_models(template);
+        if let Some(text) =
+            opencode_state::select_ofox_model(read_text(&state)?.as_deref(), &models)?
         {
             txn.write(&state, text.as_bytes())
                 .map_err(|e| format!("写入 OpenCode 状态失败：{e}"))?;
@@ -150,7 +162,7 @@ mod tests {
 
     #[test]
     fn bind_adds_only_the_ofox_entry() {
-        let bound = bound_config(Some(USER_CONFIG), &template(), "sk-of-K").unwrap();
+        let bound = bound_config(Some(USER_CONFIG), &template(), "sk-of-K", true).unwrap();
         assert!(
             bound.contains("// my providers"),
             "comments stay while bound: {bound}"
@@ -168,7 +180,7 @@ mod tests {
 
     #[test]
     fn restore_brings_back_the_commented_file() {
-        let bound = bound_config(Some(USER_CONFIG), &template(), "sk-of-K").unwrap();
+        let bound = bound_config(Some(USER_CONFIG), &template(), "sk-of-K", true).unwrap();
         let plan = plan_restore(Some(USER_CONFIG), Some(&bound)).unwrap();
         assert!(plan.exact);
         assert_eq!(plan.content.as_deref(), Some(USER_CONFIG));
@@ -176,7 +188,7 @@ mod tests {
 
     #[test]
     fn restore_deletes_a_file_bind_created() {
-        let bound = bound_config(None, &template(), "sk-of-K").unwrap();
+        let bound = bound_config(None, &template(), "sk-of-K", true).unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&bound).unwrap()["$schema"],
             SCHEMA_URL

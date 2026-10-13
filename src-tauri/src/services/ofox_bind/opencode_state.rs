@@ -107,37 +107,56 @@ fn recent_selection() -> Result<Option<(String, String)>, String> {
     Ok(field("providerID").zip(field("modelID")))
 }
 
-/// 把 Ofox 的模型放到 `recent` 最前面，返回新的文件内容；没有变化返回 `None`。
+/// 保存模型后让 Ofox 的模型成为 OpenCode 下次启动用的：用户在 TUI 里当前选的如果还在
+/// 这一组里就不动，否则把这一组的第一个放到 `recent` 最前面。没有变化返回 `None`。
 pub(super) fn select_ofox_model(
     current: Option<&str>,
-    model: &str,
+    models: &[&str],
 ) -> Result<Option<String>, String> {
+    let Some(&first) = models.first() else {
+        return Ok(None);
+    };
     let mut state = match current {
         Some(text) => parse(text)?,
         None => json!({}),
     };
-    let chosen = json!({ "providerID": PROVIDER_ID, "modelID": model });
+    let current_is_kept = state
+        .get("recent")
+        .and_then(Value::as_array)
+        .and_then(|recent| recent.first())
+        .is_some_and(|entry| {
+            entry.get("providerID").and_then(Value::as_str) == Some(PROVIDER_ID)
+                && entry
+                    .get("modelID")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| models.contains(&id))
+        });
+    if current_is_kept {
+        return Ok(None);
+    }
+    let chosen = json!({ "providerID": PROVIDER_ID, "modelID": first });
     let mut recent = vec![chosen.clone()];
     if let Some(old) = state.get("recent").and_then(Value::as_array) {
         recent.extend(old.iter().filter(|entry| **entry != chosen).cloned());
     }
     recent.truncate(MAX_RECENT);
-    if state.get("recent") == Some(&Value::Array(recent.clone())) {
-        return Ok(None);
-    }
     state["recent"] = Value::Array(recent);
     serde_json::to_string_pretty(&state)
         .map(Some)
         .map_err(|e| e.to_string())
 }
 
-/// 模板里的第一个模型 id（对象写法的 key）。
-pub(super) fn template_model(template: &Value) -> Option<&str> {
+/// 模板里的模型 id（对象写法的 key），按保存的顺序。
+pub(super) fn template_models(template: &Value) -> Vec<&str> {
     template
-        .get("models")?
-        .as_object()?
-        .keys()
-        .next()
-        .map(String::as_str)
-        .filter(|id| !id.trim().is_empty())
+        .get("models")
+        .and_then(Value::as_object)
+        .map(|models| {
+            models
+                .keys()
+                .map(String::as_str)
+                .filter(|id| !id.trim().is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
 }
