@@ -53,6 +53,51 @@ fn entry_transport(entry: &toml::value::Table) -> &str {
     }
 }
 
+/// 去掉已有 MCP 条目里 Codex 不认的 `type`（以前版本写进去的），其余原样不动。
+/// 只处理有 `command` 或 `url` 的条目：Codex 靠它们判断怎么连，没有的话 `type` 是
+/// 仅有的线索，留着。返回是否改了。
+fn strip_ignored_type(doc: &mut toml_edit::DocumentMut) -> bool {
+    let Some(servers) = doc
+        .get_mut("mcp_servers")
+        .and_then(|item| item.as_table_like_mut())
+    else {
+        return false;
+    };
+    let mut changed = false;
+    for (_, entry) in servers.iter_mut() {
+        let Some(entry) = entry.as_table_like_mut() else {
+            continue;
+        };
+        if entry.contains_key("type")
+            && (entry.contains_key("command") || entry.contains_key("url"))
+        {
+            entry.remove("type");
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// 启动 Codex 前调用：清掉 `~/.codex/config.toml` 里已有 MCP 条目的 `type`，免得每次启动
+/// 都警告「type 被忽略」。文件不存在、不是有效 TOML 时什么都不做，不会覆盖用户的文件。
+pub fn strip_ignored_type_from_codex_config() -> Result<bool, AppError> {
+    if !should_sync_codex_mcp() {
+        return Ok(false);
+    }
+    let path = crate::codex_config::get_codex_config_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(false);
+    };
+    let Ok(mut doc) = text.parse::<toml_edit::DocumentMut>() else {
+        return Ok(false);
+    };
+    if !strip_ignored_type(&mut doc) {
+        return Ok(false);
+    }
+    crate::config::write_text_file(&path, &doc.to_string())?;
+    Ok(true)
+}
+
 /// 从 ~/.codex/config.toml 导入 MCP 到统一结构（v3.7.0+）
 ///
 /// 格式支持：
@@ -740,5 +785,47 @@ mod tests {
         assert_eq!(entry_transport(&entry("url = \"https://x\"")), "http");
         assert_eq!(entry_transport(&entry("command = \"npx\"")), "stdio");
         assert_eq!(entry_transport(&entry("args = []")), "stdio");
+    }
+    fn stripped(text: &str) -> (bool, String) {
+        let mut doc: toml_edit::DocumentMut = text.parse().unwrap();
+        let changed = strip_ignored_type(&mut doc);
+        (changed, doc.to_string())
+    }
+
+    #[test]
+    fn strip_removes_type_only_from_entries_with_command_or_url() {
+        let (changed, text) = stripped(
+            "[mcp_servers.a]\ntype = \"stdio\"\ncommand = \"npx\"\n\n[mcp_servers.b]\ntype = \"http\"\nurl = \"https://x\"\n\n[mcp_servers.c]\ntype = \"stdio\"\n",
+        );
+        assert!(changed);
+        let doc: toml::Table = toml::from_str(&text).unwrap();
+        let servers = doc["mcp_servers"].as_table().unwrap();
+        assert!(servers["a"].as_table().unwrap().get("type").is_none());
+        assert!(servers["b"].as_table().unwrap().get("type").is_none());
+        // Nothing tells Codex how to start `c`, so it is left alone.
+        assert!(servers["c"].as_table().unwrap().get("type").is_some());
+    }
+
+    #[test]
+    fn strip_keeps_everything_else_byte_for_byte() {
+        let before = "# my notes\nmodel = \"gpt-6-sol\"\n\n[mcp_servers.a]\ntype = \"stdio\"\ncommand = \"npx\" # keep me\nargs = [\"-y\"]\n\n[mcp_servers.own]\ncommand = \"x\"\nenabled = false\n";
+        let (changed, text) = stripped(before);
+        assert!(changed);
+        assert_eq!(
+            text,
+            "# my notes\nmodel = \"gpt-6-sol\"\n\n[mcp_servers.a]\ncommand = \"npx\" # keep me\nargs = [\"-y\"]\n\n[mcp_servers.own]\ncommand = \"x\"\nenabled = false\n"
+        );
+    }
+
+    #[test]
+    fn strip_handles_inline_tables_and_reports_no_change_when_clean() {
+        let (changed, text) =
+            stripped("[mcp_servers]\nd = { type = \"stdio\", command = \"noop\" }\n");
+        assert!(changed);
+        assert!(!text.contains("type"));
+        let (changed, _) = stripped("[mcp_servers.a]\ncommand = \"npx\"\n");
+        assert!(!changed);
+        let (changed, _) = stripped("model = \"x\"\n");
+        assert!(!changed);
     }
 }

@@ -446,6 +446,13 @@ pub async fn launch_tool_cli(app: AppHandle, tool_id: String) -> Result<(), Stri
         crate::commands::manage_tool::follow_live_model(&state, &tool_id).await;
     }
 
+    // 以前版本给 Codex 的 MCP 条目写了 `type`，Codex 不认，每次启动都警告。只删这个键。
+    if tool_id == "codex" {
+        if let Err(e) = crate::mcp::strip_ignored_type_from_codex_config() {
+            log::warn!("清理 Codex MCP 配置里的 type 失败: {e}");
+        }
+    }
+
     let selection = if tool_id == "opencode" {
         let state = app.state::<crate::store::AppState>();
         let saved = crate::commands::manage_tool::read_active_provider_and_model_for(
