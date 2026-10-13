@@ -147,6 +147,24 @@ export function filterOfoxModelsForWorkBuddy(
   });
 }
 
+/** OpenCode speaks both Chat Completions and Responses, so a model is usable
+ * when the catalog lists either endpoint (Responses-only models included). */
+export function filterOfoxModelsForOpenCode(
+  models: FetchedModel[],
+): FetchedModel[] {
+  return models.filter((model) => {
+    const endpoints = model.supportedEndpoints ?? [];
+    const outputs = model.outputModalities ?? [];
+    const parameters = model.supportedParameters ?? [];
+    return (
+      (endpoints.includes("/v1/chat/completions") ||
+        endpoints.includes("/v1/responses")) &&
+      outputs.includes("text") &&
+      parameters.includes("tools")
+    );
+  });
+}
+
 /**
  * Build WorkBuddy's recommended starter set. Prefer paid models with known
  * pricing, then balance cost with useful capabilities and vendor diversity.

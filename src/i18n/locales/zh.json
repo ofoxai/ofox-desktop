@@ -127,8 +127,10 @@
     "workBuddySaveHint": "目录兼容即可保存；流式检测按需进行，不影响保存。",
     "workBuddyIncompatible": "流式检测不兼容（仍可保存）",
     "openCodeTestModel": "选择待检测的 OpenCode 模型",
-    "openCodeSaveHint": "可以先检测选中的模型能用哪种协议；保存时会再检测一次，检测过的有缓存，保存更快。",
-    "openCodeIncompatible": "流式检测不兼容，保存时会被拒绝",
+    "openCodeSaveHint": "保存时不再检测，会按模型目录选协议（OpenAI 模型用 Responses，其他用 Chat）。可以先检测选中的模型，检测过的结果会优先使用。",
+    "openCodeIncompatible": "流式检测未通过，仍可保存，但这个模型可能无法使用",
+    "openCodeProtocol": "选中的模型都会写进 OpenCode，之后可以在 OpenCode 里用 /model 切换。保存时按模型目录选协议，不会逐个检测。",
+    "openCodeSkipped": "有 {{count}} 个模型没有可用的协议端点，已跳过：{{names}}",
     "workBuddyCatalogFailed": "模型列表加载失败，加载后才能保存。",
     "workBuddyMissingCatalog": "部分已选模型已不在可用列表中，请移除后再保存。",
     "defaultModelFailed": "{{tool}} 已绑定，但默认模型未通过流式验证；请在管理中选择模型"

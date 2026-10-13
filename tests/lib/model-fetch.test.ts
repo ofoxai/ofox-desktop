@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  filterOfoxModelsForOpenCode,
   filterOfoxModelsForWorkBuddy,
   pickWorkBuddyCuratedModels,
   toWorkBuddyModelSelection,
@@ -31,6 +32,21 @@ describe("WorkBuddy model compatibility", () => {
     ]);
 
     expect(result).toEqual([compatible]);
+  });
+
+  it("lists Responses-only models for OpenCode but not for WorkBuddy", () => {
+    const responsesOnly = model({
+      id: "openai/codex",
+      supportedEndpoints: ["/v1/responses"],
+    });
+    const embeddings = model({
+      id: "x/embed",
+      supportedEndpoints: ["/v1/embeddings"],
+    });
+    expect(
+      filterOfoxModelsForOpenCode([model(), responsesOnly, embeddings]),
+    ).toEqual([model(), responsesOnly]);
+    expect(filterOfoxModelsForWorkBuddy([responsesOnly])).toEqual([]);
   });
 
   it("maps catalog capabilities into the native WorkBuddy entry", () => {

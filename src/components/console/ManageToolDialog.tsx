@@ -57,6 +57,7 @@ import {
 import {
   fetchOfoxModels,
   filterOfoxModelsByProtocol,
+  filterOfoxModelsForOpenCode,
   filterOfoxModelsForWorkBuddy,
   toWorkBuddyModelSelection,
   type FetchedModel,
@@ -367,11 +368,13 @@ export default function ManageToolDialog({
         const all = await fetchOfoxModels(protocol, forceRefresh);
         if (request !== modelsRequest.current) return;
         setModels(
-          // OpenCode 和 WorkBuddy 一样：凡是能走 chat completions 输出文字的模型都
-          // 能选（含 Claude、Gemini），图片、视频生成模型不列出来。
-          multiModel
+          // 能输出文字且带工具调用的模型都能选（含 Claude、Gemini），图片、视频生成
+          // 模型不列出来。WorkBuddy 只走 chat；OpenCode chat、responses 都行。
+          tool?.id === "workbuddy"
             ? filterOfoxModelsForWorkBuddy(all)
-            : filterOfoxModelsByProtocol(all, protocol, requiredEndpoint),
+            : multiModel
+              ? filterOfoxModelsForOpenCode(all)
+              : filterOfoxModelsByProtocol(all, protocol, requiredEndpoint),
         );
       } catch (e) {
         console.error("[ManageToolDialog] fetchOfoxModels failed", e);
@@ -380,7 +383,7 @@ export default function ManageToolDialog({
         if (request === modelsRequest.current) setModelsLoading(false);
       }
     },
-    [protocol, requiredEndpoint, multiModel],
+    [protocol, requiredEndpoint, multiModel, tool?.id],
   );
 
   useEffect(() => {
@@ -515,6 +518,7 @@ export default function ManageToolDialog({
     if (!tool || !configurationReady || operationBusy) return;
     const workBuddy = tool.id === "workbuddy";
     if (!isDirty && !currentModelLoaded) return;
+    let savedCount = draftModels.length;
     setSaving(true);
     try {
       if (workBuddy) {
@@ -535,9 +539,21 @@ export default function ManageToolDialog({
         if (draftModels.length === 0) {
           throw new Error("请至少选择一个 OpenCode 模型");
         }
-        // 协议由后端按每个模型分别检测。
-        await manageToolApi.setActiveModels(tool.id, draftModels);
-        setCurrentModels(draftModels);
+        // 协议由后端按缓存和目录选，不发检测请求；没有可用端点的模型会被跳过。
+        const report = await manageToolApi.setActiveModels(
+          tool.id,
+          draftModels,
+        );
+        setCurrentModels(report.saved);
+        if (report.skipped.length > 0) {
+          toast.warning(
+            t("modelCompatibility.openCodeSkipped", {
+              count: report.skipped.length,
+              names: report.skipped.map((model) => model.id).join("、"),
+            }),
+          );
+        }
+        savedCount = report.saved.length;
       } else {
         // 没查出结果时不传协议，由后端按模型目录选（Responses 优先）。
         const selectedProtocol =
@@ -556,7 +572,7 @@ export default function ManageToolDialog({
         workBuddy
           ? `已同步 ${draftModels.length} 个模型`
           : tool.id === "opencode"
-            ? `已保存 ${draftModels.length} 个模型`
+            ? `已保存 ${savedCount} 个模型`
             : "模型已更新",
       );
       onChanged?.();
@@ -868,12 +884,11 @@ export default function ManageToolDialog({
                           ? `共 ${models.length} 个可选模型`
                           : undefined
                       }
-                      allowSelectAll={tool.id !== "opencode"}
                     />
                     <p className="text-[11px] text-muted-foreground">
                       {tool.id === "workbuddy"
                         ? t("modelCompatibility.workBuddyProtocol")
-                        : "选中的模型都会写进 OpenCode，之后可以在 OpenCode 里用 /model 切换。保存时会逐个检测可用的协议。"}
+                        : t("modelCompatibility.openCodeProtocol")}
                     </p>
                     {workBuddyEndpointStatus && (
                       <div className="space-y-1 rounded-md border border-border-default bg-muted/20 p-3 text-[11px]">
@@ -1277,8 +1292,6 @@ interface WorkBuddyModelPickerProps {
   portalContainer?: HTMLElement | null;
   /** 列表下方的统计文字；不传就是 WorkBuddy 的「共用一个 Ofox Key」。 */
   summary?: string;
-  /** 目录很大的工具（OpenCode）不提供「全选」，免得一次选上几百个。 */
-  allowSelectAll?: boolean;
 }
 
 function WorkBuddyModelPicker({
@@ -1290,7 +1303,6 @@ function WorkBuddyModelPicker({
   onFetch,
   portalContainer,
   summary,
-  allowSelectAll = true,
 }: WorkBuddyModelPickerProps) {
   const [open, setOpen] = useState(false);
   const selected = useMemo(() => new Set(selectedIds), [selectedIds]);
@@ -1429,18 +1441,16 @@ function WorkBuddyModelPicker({
           {summary ?? `共 ${models.length} 个兼容模型，共用一个 Ofox Key`}
         </span>
         <span className="flex shrink-0 gap-1">
-          {allowSelectAll && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-7 px-2 text-[11px]"
-              disabled={loading || models.length === 0 || allSelected}
-              onClick={() => onChange(models.map((model) => model.id))}
-            >
-              全选兼容
-            </Button>
-          )}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-[11px]"
+            disabled={loading || models.length === 0 || allSelected}
+            onClick={() => onChange(models.map((model) => model.id))}
+          >
+            全选兼容
+          </Button>
           <Button
             type="button"
             variant="ghost"

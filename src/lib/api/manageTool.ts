@@ -96,6 +96,11 @@ export interface CompatibilityResult {
  *   - All writes target the *active* provider for the app — the dialog
  *     never switches providers; that's `switch_provider`'s job.
  */
+export interface SaveModelsReport {
+  saved: string[];
+  skipped: { id: string; reason: string }[];
+}
+
 export const manageToolApi = {
   async getConfigFilePath(app: string): Promise<string> {
     return await invoke("get_tool_config_file_path", {
@@ -112,9 +117,12 @@ export const manageToolApi = {
     return await invoke("get_active_ofox_models", { app: managedToolId(app) });
   },
 
-  /** OpenCode 保存一组模型；协议由后端按每个模型分别检测。 */
-  async setActiveModels(app: string, models: string[]): Promise<void> {
-    await invoke("set_active_ofox_models", {
+  /** OpenCode 保存一组模型；协议由后端按缓存和目录选，不发检测请求。 */
+  async setActiveModels(
+    app: string,
+    models: string[],
+  ): Promise<SaveModelsReport> {
+    return await invoke("set_active_ofox_models", {
       app: managedToolId(app),
       models,
     });

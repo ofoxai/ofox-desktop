@@ -1033,7 +1033,10 @@ describe("ManageToolDialog OpenCode multi-model management", () => {
       compatibleModel("google/model-c"),
     ];
     mockOpenCode(models, ["openai/model-a"]);
-    const save = vi.spyOn(manageToolApi, "setActiveModels").mockResolvedValue();
+    const save = vi.spyOn(manageToolApi, "setActiveModels").mockResolvedValue({
+      saved: [],
+      skipped: [],
+    });
     const single = vi.spyOn(manageToolApi, "setActiveModel");
 
     await renderTool("opencode", "OpenCode");
@@ -1054,21 +1057,69 @@ describe("ManageToolDialog OpenCode multi-model management", () => {
     expect(single).not.toHaveBeenCalled();
   });
 
-  it("does not offer select-all for the large OpenCode catalog", async () => {
-    mockOpenCode([compatibleModel("openai/model-a")], ["openai/model-a"]);
+  it("offers select-all for OpenCode and saves every listed model", async () => {
+    const models = [
+      compatibleModel("openai/model-a"),
+      compatibleModel("anthropic/model-b"),
+      compatibleModel("google/model-c"),
+    ];
+    mockOpenCode(models, ["openai/model-a"]);
+    const save = vi.spyOn(manageToolApi, "setActiveModels").mockResolvedValue({
+      saved: models.map((model) => model.id),
+      skipped: [],
+    });
 
     await renderTool("opencode", "OpenCode");
     await screen.findByText("已选择 1 个兼容模型");
+    fireEvent.click(screen.getByRole("button", { name: "全选兼容" }));
+    await waitFor(() =>
+      expect(screen.getByText("已选择 3 个兼容模型")).toBeVisible(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
-    expect(
-      screen.queryByRole("button", { name: "全选兼容" }),
-    ).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "取消全选" })).toBeVisible();
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith("opencode", [
+        "openai/model-a",
+        "anthropic/model-b",
+        "google/model-c",
+      ]),
+    );
+  });
+
+  it("warns about the models the backend skipped but still closes after saving the rest", async () => {
+    mockOpenCode(
+      [compatibleModel("openai/model-a"), compatibleModel("anthropic/model-b")],
+      ["openai/model-a"],
+    );
+    vi.spyOn(manageToolApi, "setActiveModels").mockResolvedValue({
+      saved: ["openai/model-a"],
+      skipped: [
+        { id: "anthropic/model-b", reason: "模型不在当前 Ofox 目录中" },
+      ],
+    });
+    const toastWarning = vi.spyOn(toast, "warning");
+
+    await renderTool("opencode", "OpenCode");
+    await screen.findByText("已选择 1 个兼容模型");
+    await pick("anthropic/model-b");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "保存" })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(toastWarning).toHaveBeenCalledWith(
+        expect.stringContaining("anthropic/model-b"),
+      ),
+    );
   });
 
   it("does not save an empty selection", async () => {
     mockOpenCode([compatibleModel("openai/model-a")], ["openai/model-a"]);
-    const save = vi.spyOn(manageToolApi, "setActiveModels").mockResolvedValue();
+    const save = vi.spyOn(manageToolApi, "setActiveModels").mockResolvedValue({
+      saved: [],
+      skipped: [],
+    });
 
     await renderTool("opencode", "OpenCode");
     await screen.findByText("已选择 1 个兼容模型");
@@ -1080,7 +1131,7 @@ describe("ManageToolDialog OpenCode multi-model management", () => {
     expect(save).not.toHaveBeenCalled();
   });
 
-  it("does not run a per-model check in the dialog; the backend checks each model on save", async () => {
+  it("does not run a per-model check in the dialog or on save", async () => {
     mockOpenCode([compatibleModel("openai/model-a")], ["openai/model-a"]);
     const check = vi.spyOn(manageToolApi, "checkCompatibility");
 
@@ -1150,7 +1201,7 @@ describe("ManageToolDialog OpenCode multi-model management", () => {
     expect(await screen.findByText(/Chat Completions/)).toBeVisible();
   });
 
-  it("says a model that fails the stream check will be refused on save", async () => {
+  it("says a model that fails the stream check may not work but can still be saved", async () => {
     mockOpenCode([compatibleModel("openai/model-a")], ["openai/model-a"]);
     vi.spyOn(manageToolApi, "checkCompatibility").mockResolvedValue({
       app: "opencode",
@@ -1165,7 +1216,7 @@ describe("ManageToolDialog OpenCode multi-model management", () => {
     await screen.findByText("已选择 1 个兼容模型");
     fireEvent.click(screen.getByRole("button", { name: "检测选中模型" }));
 
-    expect(await screen.findByText(/保存时会被拒绝/)).toBeVisible();
-    expect(screen.queryByText(/仍可保存/)).not.toBeInTheDocument();
+    expect(await screen.findByText(/仍可保存/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
   });
 });

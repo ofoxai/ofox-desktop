@@ -400,12 +400,17 @@ pub struct SaveModelsReport {
     pub skipped: Vec<SkippedModel>,
 }
 
+struct ResolvedModels {
+    resolved: Vec<(String, Option<String>)>,
+    skipped: Vec<SkippedModel>,
+}
+
 /// 保存时给每个模型选协议，不发探测请求：先用 7 天内的检测缓存，没有就按目录声明和
 /// 默认规则选。目录里没有可用端点的模型跳过并告知，不拖累其余模型；一个都存不了才报错。
 fn resolve_opencode_models(
     ids: &[String],
     catalog: &[crate::services::model_fetch::FetchedModel],
-) -> Result<(Vec<(String, Option<String>)>, Vec<SkippedModel>), String> {
+) -> Result<ResolvedModels, String> {
     let mut resolved = Vec::with_capacity(ids.len());
     let mut skipped = Vec::new();
     for id in ids {
@@ -424,7 +429,7 @@ fn resolve_opencode_models(
     if resolved.is_empty() {
         return Err("所选模型在 Ofox 目录里都没有 OpenCode 可用的协议端点".into());
     }
-    Ok((resolved, skipped))
+    Ok(ResolvedModels { resolved, skipped })
 }
 
 /// OpenCode 保存用户选的一组模型。协议见 [`resolve_opencode_models`]；真正的流式检测
@@ -461,7 +466,7 @@ pub async fn set_active_ofox_models(
         crate::services::model_fetch::fetch_ofox_catalog("openai", catalog_token.as_deref(), false)
             .await
             .map_err(|e| format!("读取模型目录失败，请稍后重试：{e}"))?;
-    let (resolved, skipped) = resolve_opencode_models(&ids, &catalog.models)?;
+    let ResolvedModels { resolved, skipped } = resolve_opencode_models(&ids, &catalog.models)?;
 
     let previous_settings = provider.settings_config.clone();
     write_opencode_models(&mut provider.settings_config, &resolved)?;
@@ -846,7 +851,7 @@ mod tests {
         .iter()
         .map(|s| s.to_string())
         .collect();
-        let (resolved, skipped) = resolve_opencode_models(&ids, &catalog).unwrap();
+        let ResolvedModels { resolved, skipped } = resolve_opencode_models(&ids, &catalog).unwrap();
         assert_eq!(
             resolved,
             vec![
