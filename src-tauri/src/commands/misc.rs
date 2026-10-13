@@ -929,7 +929,7 @@ pub(crate) async fn cli_is_missing(tool: &str) -> Result<bool, String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) async fn latest_tool_version(tool: &str, local: Option<&str>) -> Option<String> {
     latest_tool_version_for_package(tool, local, super::tool_update::npm_package(tool)).await
 }
