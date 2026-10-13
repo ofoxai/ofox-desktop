@@ -42,6 +42,17 @@ fn collect_enabled_servers(cfg: &McpConfig) -> HashMap<String, Value> {
     out
 }
 
+/// Codex 的 MCP 条目靠 `command`（本地进程）或 `url`（远程）判断怎么连，不认 `type`，
+/// 新版 Codex 还会在启动时警告「type 被忽略」。所以我们不再写它；读的时候旧文件里有
+/// 就照它，没有就按字段推断：有 `url` 是 http，其余是 stdio。
+fn entry_transport(entry: &toml::value::Table) -> &str {
+    match entry.get("type").and_then(|v| v.as_str()) {
+        Some(typ) => typ,
+        None if entry.contains_key("url") => "http",
+        None => "stdio",
+    }
+}
+
 /// 从 ~/.codex/config.toml 导入 MCP 到统一结构（v3.7.0+）
 ///
 /// 格式支持：
@@ -71,11 +82,7 @@ pub fn import_from_codex(config: &mut MultiAppConfig) -> Result<usize, AppError>
                 continue;
             };
 
-            // type 缺省为 stdio
-            let typ = entry_tbl
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("stdio");
+            let typ = entry_transport(entry_tbl);
 
             // 构建 JSON 规范
             let mut spec = serde_json::Map::new();
@@ -556,7 +563,8 @@ fn json_value_to_toml_item(value: &Value, field_name: &str) -> Option<toml_edit:
 /// Helper: 将 JSON MCP 服务器规范转换为 toml_edit::Table
 ///
 /// 策略：
-/// 1. 核心字段（type, command, args, url, headers, env, cwd）使用强类型处理
+/// 1. 核心字段（command, args, url, headers, env, cwd）使用强类型处理；`type` 只用来决定
+///    写哪组字段，不写进 TOML
 /// 2. 扩展字段（timeout、retry 等）通过白名单列表自动转换
 /// 3. 其他未知字段使用通用转换器尝试转换
 fn json_server_to_toml_table(spec: &Value) -> Result<toml_edit::Table, AppError> {
@@ -564,7 +572,7 @@ fn json_server_to_toml_table(spec: &Value) -> Result<toml_edit::Table, AppError>
 
     let mut t = Table::new();
     let typ = spec.get("type").and_then(|v| v.as_str()).unwrap_or("stdio");
-    t["type"] = toml_edit::value(typ);
+    // 不写 `type`：Codex 不认它（见 [`entry_transport`]）。
 
     // 定义核心字段（已在下方处理，跳过通用转换）
     let core_fields = match typ {
@@ -677,4 +685,60 @@ fn json_server_to_toml_table(spec: &Value) -> Result<toml_edit::Table, AppError>
     }
 
     Ok(t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stdio_table_has_no_type_key() {
+        let table = json_server_to_toml_table(&json!({
+            "type": "stdio",
+            "command": "npx",
+            "args": ["-y", "pkg"],
+            "env": {"TOKEN": "x"},
+        }))
+        .unwrap();
+        assert!(!table.contains_key("type"));
+        assert_eq!(table["command"].as_str(), Some("npx"));
+        assert!(table.contains_key("args"));
+        assert!(table.contains_key("env"));
+    }
+
+    #[test]
+    fn http_table_has_no_type_key() {
+        let table = json_server_to_toml_table(&json!({
+            "type": "http",
+            "url": "https://example.com/mcp",
+            "headers": {"K": "v"},
+        }))
+        .unwrap();
+        assert!(!table.contains_key("type"));
+        assert_eq!(table["url"].as_str(), Some("https://example.com/mcp"));
+        assert!(table.contains_key("http_headers"));
+    }
+
+    fn entry(toml_text: &str) -> toml::value::Table {
+        toml::from_str(toml_text).unwrap()
+    }
+
+    #[test]
+    fn transport_follows_an_explicit_type() {
+        assert_eq!(
+            entry_transport(&entry("type = \"sse\"\nurl = \"u\"")),
+            "sse"
+        );
+        assert_eq!(
+            entry_transport(&entry("type = \"stdio\"\ncommand = \"c\"")),
+            "stdio"
+        );
+    }
+
+    #[test]
+    fn transport_without_type_comes_from_url_or_command() {
+        assert_eq!(entry_transport(&entry("url = \"https://x\"")), "http");
+        assert_eq!(entry_transport(&entry("command = \"npx\"")), "stdio");
+        assert_eq!(entry_transport(&entry("args = []")), "stdio");
+    }
 }
