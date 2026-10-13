@@ -337,6 +337,31 @@ describe("ManageToolDialog streaming compatibility", () => {
     );
   });
 
+  it("opens ChatGPT on the model the app is using, not the Codex config default", async () => {
+    mockSingleTool(compatibleModel("openai/gpt-6-luna"));
+    // The Codex config still says the old default; the ChatGPT app moved on.
+    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue("gpt-5.6-luna");
+    vi.spyOn(manageToolApi, "getChatGptModel").mockResolvedValue("gpt-6-luna");
+
+    await renderTool("chatgpt", "ChatGPT");
+
+    expect(await screen.findByText("gpt-6-luna")).toBeVisible();
+    expect(screen.queryByText("gpt-5.6-luna")).not.toBeInTheDocument();
+  });
+
+  it("still reads the Codex config model for Codex itself", async () => {
+    mockSingleTool(compatibleModel("openai/gpt-6-luna"));
+    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue("gpt-5.6-luna");
+    const chatgpt = vi
+      .spyOn(manageToolApi, "getChatGptModel")
+      .mockResolvedValue("gpt-6-luna");
+
+    await renderTool("codex", "Codex");
+
+    expect(await screen.findByText("gpt-5.6-luna")).toBeVisible();
+    expect(chatgpt).not.toHaveBeenCalled();
+  });
+
   it("blocks a fixed-protocol client when its stream is incompatible", async () => {
     const model = compatibleModel("openai/model-a");
     mockSingleTool(model);
@@ -496,7 +521,7 @@ describe("ManageToolDialog model picker", () => {
     const model = compatibleModel("openai/gpt-6-luna");
     model.supportedEndpoints = ["/v1/responses"];
     mockSingleTool(model);
-    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue(model.id);
+    vi.spyOn(manageToolApi, "getChatGptModel").mockResolvedValue(model.id);
 
     await renderTool("chatgpt", "ChatGPT");
     await screen.findByText(model.id);
@@ -504,7 +529,8 @@ describe("ManageToolDialog model picker", () => {
     expect(
       screen.getByText(/Chat 和 Work 使用 OpenAI 账号/),
     ).toBeInTheDocument();
-    expect(manageToolApi.getActiveModel).toHaveBeenCalledWith("chatgpt");
+    expect(manageToolApi.getChatGptModel).toHaveBeenCalled();
+    expect(screen.getByText(/保存的是 Codex 的默认模型/)).toBeInTheDocument();
     expect(screen.getByRole("combobox")).toBeInTheDocument();
   });
 

@@ -251,7 +251,7 @@ pub(crate) struct DesktopUpdateFields {
 
 /// App 自己按安装 ID 分批灰度；公开 feed 里的新版发布后，过了这么久还没推到，就更可能是
 /// 这台机器真的落后了，而不是还没轮到。
-const ROLLOUT_GRACE_DAYS: i64 = 3;
+const ROLLOUT_GRACE_DAYS: i64 = 1;
 
 /// 判断「公开 feed 比本机新」算不算更新所需的现场信息。
 pub(crate) struct SparkleContext {
@@ -882,7 +882,7 @@ mod tests {
 
     #[test]
     fn a_fresh_public_build_is_left_to_the_app() {
-        let fields = newer_sparkle(ctx(Some("Wed, 07 Oct 2026 12:00:00 +0000"), Some(true)));
+        let fields = newer_sparkle(ctx(Some("Thu, 08 Oct 2026 02:00:00 +0000"), Some(true)));
         assert_eq!(fields.update_status, "appManaged");
     }
 
@@ -897,17 +897,17 @@ mod tests {
 
     #[test]
     fn a_public_build_that_has_been_out_for_days_is_an_update() {
-        // Three days is the grace period for the app's gradual rollout.
-        let fields = newer_sparkle(ctx(Some("Mon, 05 Oct 2026 12:00:00 +0000"), Some(true)));
+        // One day is the grace period for the app's gradual rollout.
+        let fields = newer_sparkle(ctx(Some("Wed, 07 Oct 2026 12:00:00 +0000"), Some(true)));
         assert_eq!(fields.update_status, "available");
         assert_eq!(fields.latest_version.as_deref(), Some("26.928.21956"));
-        let almost = newer_sparkle(ctx(Some("Mon, 05 Oct 2026 12:00:01 +0000"), Some(true)));
+        let almost = newer_sparkle(ctx(Some("Wed, 07 Oct 2026 12:00:01 +0000"), Some(true)));
         assert_eq!(almost.update_status, "appManaged");
     }
 
     #[test]
     fn an_app_that_never_checks_for_updates_is_told_about_a_fresh_build() {
-        let fields = newer_sparkle(ctx(Some("Wed, 07 Oct 2026 12:00:00 +0000"), Some(false)));
+        let fields = newer_sparkle(ctx(Some("Thu, 08 Oct 2026 02:00:00 +0000"), Some(false)));
         assert_eq!(fields.update_status, "available");
     }
 

@@ -128,6 +128,7 @@
     "openCodeProtocol": "选中的模型都会写进 OpenCode，可用 /model 切换。",
     "openCodeSkipped": "有 {{count}} 个模型没有可用的协议端点，已跳过：{{names}}",
     "geminiRememberHint": "在 Gemini 里切换模型时，按 Tab 打开「记住」才会保存",
+    "chatgptDefaultHint": "显示的是 ChatGPT 当前在用的模型。在这里保存的是 Codex 的默认模型，与 Codex CLI 共用。",
     "openCodeHint": "后台检测发现 {{count}} 个模型的协议建议调整：{{names}}",
     "openCodeHintApply": "应用建议",
     "openCodeHintApplied": "已按检测结果更新协议",

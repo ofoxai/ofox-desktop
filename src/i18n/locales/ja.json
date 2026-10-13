@@ -128,6 +128,7 @@
     "openCodeProtocol": "選択したモデルはすべて OpenCode に書き込まれ、/model で切り替えられます。",
     "openCodeSkipped": "使えるプロトコルのエンドポイントがない {{count}} 個のモデルをスキップしました：{{names}}",
     "geminiRememberHint": "Gemini でモデルを切り替えるときは、Tab で「記憶」をオンにすると保存されます",
+    "chatgptDefaultHint": "ChatGPT が現在使っているモデルを表示しています。ここで保存するのは Codex の既定モデルで、Codex CLI と共通です。",
     "openCodeHint": "バックグラウンド検査で {{count}} 個のモデルのプロトコル変更を推奨します：{{names}}",
     "openCodeHintApply": "適用",
     "openCodeHintApplied": "検査結果に合わせてプロトコルを更新しました",

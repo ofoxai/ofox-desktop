@@ -328,7 +328,11 @@ export default function ManageToolDialog({
           if (!cancelled) setProtocolHints(hints);
           return;
         }
-        const m = await manageToolApi.getActiveModel(tool.id);
+        // ChatGPT 桌面 App 的模型记在它自己的状态文件里，和首页同一个来源，免得两边不一致。
+        const m =
+          tool.id === "chatgpt"
+            ? await manageToolApi.getChatGptModel()
+            : await manageToolApi.getActiveModel(tool.id);
         if (!cancelled) {
           setCurrentModel(m);
           setDraftModel(m);
@@ -1018,6 +1022,11 @@ export default function ManageToolDialog({
                     {tool.id === "gemini" && (
                       <p className="text-[11px] text-muted-foreground">
                         {t("modelCompatibility.geminiRememberHint")}
+                      </p>
+                    )}
+                    {tool.id === "chatgpt" && (
+                      <p className="text-[11px] text-muted-foreground">
+                        {t("modelCompatibility.chatgptDefaultHint")}
                       </p>
                     )}
                   </>
