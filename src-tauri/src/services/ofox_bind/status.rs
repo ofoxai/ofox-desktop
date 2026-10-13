@@ -284,10 +284,10 @@ pub(super) fn inspect_managed_fields(
                     &shown,
                     &actual,
                     &expected,
-                    // 推理强度不比对：ChatGPT 和 Codex 会把界面里选的强度写回这里。
+                    // 推理强度、模型都不比对：它们是用户的选择，ChatGPT 和 Codex 会把
+                    // 界面或 `/model` 里选的值写回这里。
                     &[
                         &["model_provider"],
-                        &["model"],
                         &["disable_response_storage"],
                         &["model_providers", "ofox"],
                     ],
@@ -308,10 +308,10 @@ pub(super) fn inspect_managed_fields(
                     &shown,
                     &actual,
                     &expected,
+                    // 模型是用户的选择，不比对。
                     &[
                         &["env", "ANTHROPIC_BASE_URL"],
                         &["env", "ANTHROPIC_AUTH_TOKEN"],
-                        &["env", "ANTHROPIC_MODEL"],
                         &["env", "ANTHROPIC_API_KEY"],
                     ],
                 )?;
@@ -319,7 +319,8 @@ pub(super) fn inspect_managed_fields(
             ManagedFile::GeminiEnv => {
                 let text = current.as_deref().unwrap_or_default();
                 let expected = gemini::bound_env(text, &template, key)?;
-                for variable in ["GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL", "GEMINI_MODEL"] {
+                // 模型是用户的选择，不比对。
+                for variable in ["GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL"] {
                     comparison.compare(
                         &shown,
                         variable,

@@ -8,6 +8,7 @@
 //! 服务器上没删掉的旧 key（退出时没联网、切换区域时没停等）记在待删列表里，
 //! 等它的账号在这台电脑上登录时删掉。
 
+use std::future::Future;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -89,6 +90,16 @@ async fn is_bound(db: &Database, tool: BindableTool) -> bool {
     }
 }
 
+const ALL_TOOLS: [BindableTool; 7] = [
+    BindableTool::Claude,
+    BindableTool::Codex,
+    BindableTool::Gemini,
+    BindableTool::OpenCode,
+    BindableTool::OpenClaw,
+    BindableTool::Hermes,
+    BindableTool::WorkBuddy,
+];
+
 /// 退出登录前（登录还有效时）调用。
 pub async fn stop_for_logout(manager: &Arc<RwLock<OfoxAuthManager>>) -> LogoutReport {
     let stopped = settings::list_api_key_metas()
@@ -132,16 +143,78 @@ pub async fn reconcile(
                     }
                 }
             }
-            KeyAction::Replace => match replace(db, manager, &store, &meta, &owner).await {
-                Ok(()) => report.switched.push(tool.as_str().to_string()),
-                Err(message) => report.failed.push(KeyReconcileFailure {
-                    tool: tool.as_str().to_string(),
-                    message,
-                }),
-            },
+            KeyAction::Replace => {
+                let issue = || issue_new_key(tool, &owner, manager);
+                match replace(db, manager, &store, tool, Some(&meta), issue).await {
+                    Ok(()) => report.switched.push(tool.as_str().to_string()),
+                    Err(message) => report.failed.push(KeyReconcileFailure {
+                        tool: tool.as_str().to_string(),
+                        message,
+                    }),
+                }
+            }
         }
     }
+    rekey_unrecorded(
+        db,
+        manager,
+        &store,
+        |tool| {
+            let owner = owner.clone();
+            async move { issue_new_key(tool, &owner, manager).await }
+        },
+        &mut report,
+    )
+    .await;
     report
+}
+
+async fn issue_new_key(
+    tool: BindableTool,
+    owner: &KeyOwner,
+    manager: &Arc<RwLock<OfoxAuthManager>>,
+) -> Result<(String, ApiKeyMeta), String> {
+    crate::ofox_api_keys::create_unsaved(tool, Some(owner.clone()), manager)
+        .await
+        .map_err(|e| format!("签发新 key 失败：{e}"))
+}
+
+/// 已绑定、钥匙串里有 key，却没有 key 记录的工具：没有记录就没有 key id，主页没有
+/// 数据统计，上面按记录遍历的对账也看不见它。换成当前账号新签发的 key 并补上记录。
+/// 配置已被用户改成别的（不再是 Ofox 的接入方式）就不动，也不报错：这不是 key 的问题。
+/// 旧 key 没有 id，没法排队删除，会留在服务器上。
+pub(crate) async fn rekey_unrecorded<I, Fut>(
+    db: &Database,
+    manager: &Arc<RwLock<OfoxAuthManager>>,
+    store: &Arc<dyn SecretStore>,
+    issue: I,
+    report: &mut KeyReconcileReport,
+) where
+    I: Fn(BindableTool) -> Fut,
+    Fut: Future<Output = Result<(String, ApiKeyMeta), String>>,
+{
+    for tool in ALL_TOOLS {
+        if settings::get_api_key_meta(tool).is_some() || !is_bound(db, tool).await {
+            continue;
+        }
+        let key = match store.load(Slot::ApiKey { tool }) {
+            Ok(Some(key)) if !key.is_empty() => key,
+            _ => continue,
+        };
+        if binding_status(db, tool, &key).await != BindingStatus::Configured {
+            log::info!(
+                "[account_keys] {tool:?} has a key but no record and a changed config; skipped"
+            );
+            continue;
+        }
+        match replace(db, manager, store, tool, None, || issue(tool)).await {
+            Ok(()) => report.switched.push(tool.as_str().to_string()),
+            Err(message) => report.failed.push(KeyReconcileFailure {
+                tool: tool.as_str().to_string(),
+                message,
+            }),
+        }
+    }
 }
 
 async fn binding_status(db: &Database, tool: BindableTool, old_key: &str) -> BindingStatus {
@@ -155,14 +228,20 @@ async fn binding_status(db: &Database, tool: BindableTool, old_key: &str) -> Bin
     }
 }
 
-async fn replace(
+/// 把工具用的 key 换成 `issue` 新签发的。`old` 是原来的记录；没有记录（见
+/// [`rekey_unrecorded`]）就没有旧 key 的 id，不排队删除。
+async fn replace<I, Fut>(
     db: &Database,
     manager: &Arc<RwLock<OfoxAuthManager>>,
     store: &Arc<dyn SecretStore>,
-    old: &ApiKeyMeta,
-    owner: &KeyOwner,
-) -> Result<(), String> {
-    let tool = old.tool;
+    tool: BindableTool,
+    old: Option<&ApiKeyMeta>,
+    issue: I,
+) -> Result<(), String>
+where
+    I: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(String, ApiKeyMeta), String>>,
+{
     let old_key = store
         .load(Slot::ApiKey { tool })
         .map_err(|_| "读取原来的 key 失败。".to_string())?
@@ -171,9 +250,7 @@ async fn replace(
     if binding_status(db, tool, &old_key).await != BindingStatus::Configured {
         return Err("接入配置已被修改，没有自动更换。请在管理窗口检查或重新绑定。".into());
     }
-    let (new_key, meta) = crate::ofox_api_keys::create_unsaved(tool, Some(owner.clone()), manager)
-        .await
-        .map_err(|e| format!("签发新 key 失败：{e}"))?;
+    let (new_key, meta) = issue().await?;
     let written = match file_tool(tool) {
         Some(file_tool) => ofox_bind::replace_key(db, file_tool, &old_key, &new_key).await,
         None => crate::workbuddy_config::replace_key(db, &new_key).await,
@@ -185,7 +262,9 @@ async fn replace(
     crate::ofox_api_keys::save_key(store, &new_key, meta)
         .map_err(|e| format!("保存新 key 失败：{e}"))?;
     crate::ofox_api_keys::mark_key_used(tool);
-    crate::ofox_api_keys::queue_deletion_unless_stopped(old);
+    if let Some(old) = old {
+        crate::ofox_api_keys::queue_deletion_unless_stopped(old);
+    }
     Ok(())
 }
 

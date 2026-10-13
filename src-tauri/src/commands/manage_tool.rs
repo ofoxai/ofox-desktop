@@ -85,8 +85,18 @@ pub async fn get_tool_binding_status(
             tool: tool.app().into(),
         }) {
             Ok(key) => {
-                crate::services::ofox_bind::status::binding_status(&state.db, tool, key.as_deref())
-                    .await
+                let status = crate::services::ofox_bind::status::binding_status(
+                    &state.db,
+                    tool,
+                    key.as_deref(),
+                )
+                .await;
+                // 用户在 CLI 里换了模型：让主页显示的模型跟着变。
+                if status.status == crate::services::ofox_bind::status::BindingStatus::Configured {
+                    crate::services::ofox_bind::sync_live_model(&state.db, tool, key.as_deref())
+                        .await;
+                }
+                status
             }
             Err(_) => crate::services::ofox_bind::status::ToolBindingStatus::unknown(),
         };
@@ -446,7 +456,7 @@ fn accept_compatibility_result(
 /// Read the model from a settings_config JSON, returning `""` for any
 /// "absent / wrong shape" case rather than erroring — see [`get_active_ofox_model`]
 /// for the rationale.
-fn read_model_from_settings(app: &AppType, settings: &serde_json::Value) -> String {
+pub(crate) fn read_model_from_settings(app: &AppType, settings: &serde_json::Value) -> String {
     match app {
         AppType::Claude => settings
             .get("env")
@@ -499,7 +509,7 @@ fn read_model_from_settings(app: &AppType, settings: &serde_json::Value) -> Stri
 /// Write `model` into the right slot for `app`. Empty `model` removes the
 /// field (keeps the stored JSON tidy and lets OfoxAI fall back to its
 /// default-route behavior). Mutates `settings` in place.
-fn write_model_into_settings(
+pub(crate) fn write_model_into_settings(
     app: &AppType,
     settings: &mut serde_json::Value,
     model: &str,

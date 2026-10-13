@@ -5,6 +5,7 @@ use crate::provider::Provider;
 use serde_json::json;
 use serial_test::serial;
 use std::fs;
+use std::sync::Arc;
 
 const TEMPLATE: &str = "model_provider = \"ofox\"\nmodel = \"openai/gpt-6-luna\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\n\n[model_providers.ofox]\nname = \"ofox\"\nbase_url = \"https://api.ofox.ai/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n";
 const OAUTH_AUTH: &str = "{\n  \"auth_mode\": \"chatgpt\",\n  \"OPENAI_API_KEY\": null,\n  \"tokens\": {\n    \"id_token\": \"eyJid\",\n    \"access_token\": \"eyJaccess\",\n    \"refresh_token\": \"rt\",\n    \"account_id\": \"acct\"\n  },\n  \"last_refresh\": \"2026-09-30T00:00:00Z\"\n}\n";
@@ -1630,7 +1631,7 @@ async fn status_and_restore_keep_modified_or_invalid_configuration_and_hide_secr
     bind(&db, Tool::Claude, "claude", KEY).await.unwrap();
     let mut current = json_at(&path);
     current["permissions"] = json!({"allow":["Bash"]});
-    current["env"]["ANTHROPIC_MODEL"] = json!("user/other-model");
+    current["env"]["ANTHROPIC_BASE_URL"] = json!("https://my-proxy.example");
     write(&path, &serde_json::to_string(&current).unwrap());
     let edited = fs::read(&path).unwrap();
     let record = db.get_bind_record("claude").unwrap().unwrap().record;
@@ -2703,6 +2704,7 @@ async fn startup_existing_repair_accepts_only_unchanged_saved_managed_fields() {
             let changed = match modified {
                 None => original,
                 Some(KEY) => original.replace(KEY, "sk-user-changed"),
+                // A model the user picked in the CLI is theirs, not a modification.
                 Some(_) if tool == Tool::Claude => {
                     original.replace("anthropic/claude-saved", "user/changed-model")
                 }
@@ -2711,7 +2713,7 @@ async fn startup_existing_repair_accepts_only_unchanged_saved_managed_fields() {
             fs::write(&path, &changed).unwrap();
             set_current_provider(&db, &tool.app(), tool.official_id().unwrap()).unwrap();
             let result = bind_existing(&db, tool, tool.app().as_str(), KEY).await;
-            if modified.is_none() {
+            if modified != Some(KEY) {
                 result.unwrap();
                 assert_eq!(
                     current_provider(&db, tool).as_deref(),
@@ -3285,6 +3287,441 @@ async fn codex_reasoning_effort_picked_in_the_app_is_kept_and_not_a_conflict() {
     let config = toml_at(&path);
     assert_eq!(config["model"].as_str(), Some("openai/gpt-other"));
     assert_eq!(config["model_reasoning_effort"].as_str(), Some("medium"));
+}
+
+#[tokio::test]
+#[serial]
+async fn codex_model_changed_in_the_cli_is_still_configured() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    // `/model` in the Codex CLI rewrites the top-level model.
+    let switched = fs::read_to_string(&path)
+        .unwrap()
+        .replace("model = \"openai/gpt-6-luna\"", "model = \"gpt-other\"");
+    write(&path, &switched);
+
+    let health = status::binding_status(&db, Tool::Codex, Some(KEY)).await;
+
+    assert_eq!(health.status, status::BindingStatus::Configured);
+    assert!(
+        health.modified_fields.is_empty(),
+        "{:?}",
+        health.modified_fields
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn codex_provider_changed_is_still_a_conflict() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    let elsewhere = fs::read_to_string(&path)
+        .unwrap()
+        .replace("model_provider = \"ofox\"", "model_provider = \"other\"");
+    write(&path, &elsewhere);
+
+    let health = status::binding_status(&db, Tool::Codex, Some(KEY)).await;
+
+    assert_eq!(health.status, status::BindingStatus::Modified);
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_model_changed_by_the_user_is_still_configured() {
+    let home = Home::new();
+    let settings = home.claude("settings.json");
+    write(&settings, CLAUDE_RELAY);
+    let db = db_for(Tool::Claude, claude_template(Some("anthropic/claude-x")));
+    bind(&db, Tool::Claude, "claude", KEY).await.unwrap();
+    let mut edited = json_at(&settings);
+    edited["env"]["ANTHROPIC_MODEL"] = "anthropic/claude-other".into();
+    write(&settings, &serde_json::to_string_pretty(&edited).unwrap());
+
+    let health = status::binding_status(&db, Tool::Claude, Some(KEY)).await;
+
+    assert_eq!(health.status, status::BindingStatus::Configured);
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_base_url_changed_is_still_a_conflict() {
+    let home = Home::new();
+    let settings = home.claude("settings.json");
+    write(&settings, CLAUDE_RELAY);
+    let db = db_for(Tool::Claude, claude_template(Some("anthropic/claude-x")));
+    bind(&db, Tool::Claude, "claude", KEY).await.unwrap();
+    let mut edited = json_at(&settings);
+    edited["env"]["ANTHROPIC_BASE_URL"] = "https://my-proxy.example".into();
+    write(&settings, &serde_json::to_string_pretty(&edited).unwrap());
+
+    let health = status::binding_status(&db, Tool::Claude, Some(KEY)).await;
+
+    assert_eq!(health.status, status::BindingStatus::Modified);
+}
+
+#[tokio::test]
+#[serial]
+async fn gemini_model_changed_by_the_user_is_still_configured() {
+    let home = Home::new();
+    let env = home.gemini(".env");
+    write(&env, GEMINI_ENV);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    let switched: Vec<String> = fs::read_to_string(&env)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            if line.starts_with("GEMINI_MODEL=") {
+                "GEMINI_MODEL=gemini-other".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    write(&env, &format!("{}\n", switched.join("\n")));
+
+    let health = status::binding_status(&db, Tool::Gemini, Some(KEY)).await;
+
+    assert_eq!(health.status, status::BindingStatus::Configured);
+}
+
+fn saved_model(db: &Database, tool: Tool) -> String {
+    let settings = db
+        .get_provider_by_id(tool.provider_id(), tool.app().as_str())
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    crate::commands::manage_tool::read_model_from_settings(&tool.app(), &settings)
+}
+
+fn switch_codex_model_in_cli(path: &Path, model: &str) {
+    let switched = fs::read_to_string(path).unwrap().replace(
+        "model = \"openai/gpt-6-luna\"",
+        &format!("model = \"{model}\""),
+    );
+    write(path, &switched);
+}
+
+fn switch_claude_model_in_cli(path: &Path, model: &str) {
+    let mut edited = json_at(path);
+    edited["env"]["ANTHROPIC_MODEL"] = model.into();
+    write(path, &serde_json::to_string_pretty(&edited).unwrap());
+}
+
+#[tokio::test]
+#[serial]
+async fn adopt_live_model_updates_the_template_only_when_it_differs() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    assert!(!super::live_model::adopt_live_model(&db, Tool::Codex).unwrap());
+
+    switch_codex_model_in_cli(&path, "gpt-other");
+
+    assert!(super::live_model::adopt_live_model(&db, Tool::Codex).unwrap());
+    assert_eq!(saved_model(&db, Tool::Codex), "gpt-other");
+    assert!(!super::live_model::adopt_live_model(&db, Tool::Codex).unwrap());
+}
+
+#[tokio::test]
+#[serial]
+async fn adopt_live_model_ignores_a_missing_model_line() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    let without_model = fs::read_to_string(&path)
+        .unwrap()
+        .replace("model = \"openai/gpt-6-luna\"\n", "");
+    assert!(!without_model.contains("gpt-6-luna"));
+    write(&path, &without_model);
+
+    assert!(!super::live_model::adopt_live_model(&db, Tool::Codex).unwrap());
+    assert_eq!(saved_model(&db, Tool::Codex), "openai/gpt-6-luna");
+}
+
+#[tokio::test]
+#[serial]
+async fn gemini_model_chosen_in_the_cli_is_adopted() {
+    let home = Home::new();
+    let env = home.gemini(".env");
+    write(&env, GEMINI_ENV);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    let switched = fs::read_to_string(&env)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            if line.starts_with("GEMINI_MODEL=") {
+                "GEMINI_MODEL=gemini-other".to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    write(&env, &format!("{switched}\n"));
+
+    assert!(super::live_model::adopt_live_model(&db, Tool::Gemini).unwrap());
+    assert_eq!(saved_model(&db, Tool::Gemini), "gemini-other");
+    assert!(!super::live_model::adopt_live_model(&db, Tool::Gemini).unwrap());
+}
+
+#[tokio::test]
+#[serial]
+async fn sync_live_model_adopts_only_while_the_binding_is_configured() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+
+    switch_codex_model_in_cli(&path, "gpt-other");
+    super::sync_live_model(&db, Tool::Codex, Some(KEY)).await;
+    assert_eq!(saved_model(&db, Tool::Codex), "gpt-other");
+
+    // Pointed at another provider: its model is none of our business.
+    let elsewhere = fs::read_to_string(&path)
+        .unwrap()
+        .replace("model_provider = \"ofox\"", "model_provider = \"other\"")
+        .replace("model = \"gpt-other\"", "model = \"someone-elses-model\"");
+    write(&path, &elsewhere);
+    super::sync_live_model(&db, Tool::Codex, Some(KEY)).await;
+    assert_eq!(saved_model(&db, Tool::Codex), "gpt-other");
+}
+
+#[tokio::test]
+#[serial]
+async fn replacing_the_key_keeps_the_codex_model_chosen_in_the_cli() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    switch_codex_model_in_cli(&path, "gpt-other");
+
+    replace_key(&db, Tool::Codex, KEY, "sk-of-ACCOUNT-B")
+        .await
+        .expect("replace key");
+
+    let config = toml_at(&path);
+    assert_eq!(config["model"].as_str(), Some("gpt-other"));
+    assert!(fs::read_to_string(&path)
+        .unwrap()
+        .contains("sk-of-ACCOUNT-B"));
+    assert!(!fs::read_to_string(&path).unwrap().contains(KEY));
+}
+
+#[tokio::test]
+#[serial]
+async fn replacing_the_key_keeps_the_claude_model_chosen_by_the_user() {
+    let home = Home::new();
+    let path = home.claude("settings.json");
+    write(&path, CLAUDE_RELAY);
+    let db = db_for(Tool::Claude, claude_template(Some("anthropic/claude-x")));
+    bind(&db, Tool::Claude, "claude", KEY).await.unwrap();
+    switch_claude_model_in_cli(&path, "anthropic/claude-other");
+
+    replace_key(&db, Tool::Claude, KEY, "sk-of-ACCOUNT-B")
+        .await
+        .expect("replace key");
+
+    let after = json_at(&path);
+    assert_eq!(after["env"]["ANTHROPIC_MODEL"], "anthropic/claude-other");
+    assert_eq!(after["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-of-ACCOUNT-B");
+}
+
+fn fake_new_key(tool: crate::app_config::BindableTool) -> crate::settings::ApiKeyMeta {
+    crate::settings::ApiKeyMeta {
+        tool,
+        key_id: "key-new".into(),
+        name: Some("codex on test".into()),
+        alias: None,
+        key_start: None,
+        created_at: 1,
+        last_used_at: None,
+        owner: Some(crate::settings::KeyOwner {
+            org_id: Some("org_a".into()),
+            user_id: None,
+        }),
+        revoked: false,
+    }
+}
+
+fn unrecorded_key_fixture() -> (
+    Database,
+    Arc<tokio::sync::RwLock<crate::ofox_auth::OfoxAuthManager>>,
+    Arc<dyn crate::ofox_secret::SecretStore>,
+) {
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    let manager = crate::ofox_auth::OfoxAuthManager::new_with_secret_store(
+        crate::config::get_app_config_dir(),
+        Arc::new(crate::ofox_secret::InMemoryStore::new()),
+    );
+    let store = crate::ofox_secret::default_store();
+    store
+        .save(
+            crate::ofox_secret::Slot::ApiKey {
+                tool: crate::app_config::BindableTool::Codex,
+            },
+            KEY,
+        )
+        .unwrap();
+    (db, Arc::new(tokio::sync::RwLock::new(manager)), store)
+}
+
+#[tokio::test]
+#[serial]
+async fn a_bound_tool_with_a_key_but_no_record_gets_a_new_recorded_key() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let (db, manager, store) = unrecorded_key_fixture();
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    assert_eq!(
+        crate::settings::get_api_key_meta(crate::app_config::BindableTool::Codex),
+        None
+    );
+    let mut report = crate::services::account_keys::KeyReconcileReport::default();
+
+    crate::services::account_keys::rekey_unrecorded(
+        &db,
+        &manager,
+        &store,
+        |tool| async move { Ok(("sk-of-NEW".to_string(), fake_new_key(tool))) },
+        &mut report,
+    )
+    .await;
+
+    assert_eq!(report.switched, ["codex"]);
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    let meta = crate::settings::get_api_key_meta(crate::app_config::BindableTool::Codex).unwrap();
+    assert_eq!(meta.key_id, "key-new");
+    let written = fs::read_to_string(&path).unwrap();
+    assert!(written.contains("sk-of-NEW") && !written.contains(KEY));
+    let stored = store
+        .load(crate::ofox_secret::Slot::ApiKey {
+            tool: crate::app_config::BindableTool::Codex,
+        })
+        .unwrap();
+    assert_eq!(stored.as_deref(), Some("sk-of-NEW"));
+}
+
+#[tokio::test]
+#[serial]
+async fn an_unrecorded_key_is_left_alone_when_the_binding_was_modified() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let (db, manager, store) = unrecorded_key_fixture();
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    let elsewhere = fs::read_to_string(&path)
+        .unwrap()
+        .replace("model_provider = \"ofox\"", "model_provider = \"other\"");
+    write(&path, &elsewhere);
+    let issued = std::sync::atomic::AtomicUsize::new(0);
+    let mut report = crate::services::account_keys::KeyReconcileReport::default();
+
+    crate::services::account_keys::rekey_unrecorded(
+        &db,
+        &manager,
+        &store,
+        |tool| {
+            issued.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { Ok(("sk-of-NEW".to_string(), fake_new_key(tool))) }
+        },
+        &mut report,
+    )
+    .await;
+
+    assert_eq!(issued.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(report.switched.is_empty() && report.failed.is_empty());
+    assert_eq!(fs::read_to_string(&path).unwrap(), elsewhere);
+    assert_eq!(
+        crate::settings::get_api_key_meta(crate::app_config::BindableTool::Codex),
+        None
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn an_unrecorded_key_of_a_tool_that_is_not_bound_is_not_replaced() {
+    let _home = Home::new();
+    let (db, manager, store) = unrecorded_key_fixture();
+    let issued = std::sync::atomic::AtomicUsize::new(0);
+    let mut report = crate::services::account_keys::KeyReconcileReport::default();
+
+    crate::services::account_keys::rekey_unrecorded(
+        &db,
+        &manager,
+        &store,
+        |tool| {
+            issued.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { Ok(("sk-of-NEW".to_string(), fake_new_key(tool))) }
+        },
+        &mut report,
+    )
+    .await;
+
+    assert_eq!(issued.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(report.switched.is_empty() && report.failed.is_empty());
+}
+
+#[tokio::test]
+#[serial]
+async fn a_tool_that_already_has_a_record_is_not_rekeyed_as_unrecorded() {
+    let _home = Home::new();
+    let (db, manager, store) = unrecorded_key_fixture();
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    crate::settings::upsert_api_key_meta(fake_new_key(crate::app_config::BindableTool::Codex))
+        .unwrap();
+    let issued = std::sync::atomic::AtomicUsize::new(0);
+    let mut report = crate::services::account_keys::KeyReconcileReport::default();
+
+    crate::services::account_keys::rekey_unrecorded(
+        &db,
+        &manager,
+        &store,
+        |tool| {
+            issued.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { Ok(("sk-of-NEW".to_string(), fake_new_key(tool))) }
+        },
+        &mut report,
+    )
+    .await;
+
+    assert_eq!(issued.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(report.switched.is_empty() && report.failed.is_empty());
+}
+
+#[tokio::test]
+#[serial]
+async fn a_failed_issue_for_an_unrecorded_key_is_reported_and_changes_nothing() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let (db, manager, store) = unrecorded_key_fixture();
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    let before = fs::read_to_string(&path).unwrap();
+    let mut report = crate::services::account_keys::KeyReconcileReport::default();
+
+    crate::services::account_keys::rekey_unrecorded(
+        &db,
+        &manager,
+        &store,
+        |_| async { Err("签发新 key 失败：offline".to_string()) },
+        &mut report,
+    )
+    .await;
+
+    assert!(report.switched.is_empty());
+    assert_eq!(report.failed.len(), 1);
+    assert_eq!(report.failed[0].tool, "codex");
+    assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    assert_eq!(
+        crate::settings::get_api_key_meta(crate::app_config::BindableTool::Codex),
+        None
+    );
 }
 
 #[tokio::test]
