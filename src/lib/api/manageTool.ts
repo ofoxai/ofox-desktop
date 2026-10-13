@@ -107,6 +107,19 @@ export const manageToolApi = {
     return await invoke("get_active_ofox_model", { app: managedToolId(app) });
   },
 
+  /** 已保存的模型列表。OpenCode 是用户选的一组，其余工具最多一个。 */
+  async getActiveModels(app: string): Promise<string[]> {
+    return await invoke("get_active_ofox_models", { app: managedToolId(app) });
+  },
+
+  /** OpenCode 保存一组模型；协议由后端按每个模型分别检测。 */
+  async setActiveModels(app: string, models: string[]): Promise<void> {
+    await invoke("set_active_ofox_models", {
+      app: managedToolId(app),
+      models,
+    });
+  },
+
   async setActiveModel(
     app: string,
     model: string,

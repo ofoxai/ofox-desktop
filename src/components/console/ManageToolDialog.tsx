@@ -311,6 +311,15 @@ export default function ManageToolDialog({
           if (catalogResult.status === "rejected") throw catalogResult.reason;
           return;
         }
+        if (tool.id === "opencode") {
+          const saved = await manageToolApi.getActiveModels(tool.id);
+          if (!cancelled) {
+            setCurrentModels(saved);
+            setDraftModels(saved);
+            setCurrentModelLoaded(true);
+          }
+          return;
+        }
         const m = await manageToolApi.getActiveModel(tool.id);
         if (!cancelled) {
           setCurrentModel(m);
@@ -339,6 +348,9 @@ export default function ManageToolDialog({
   // 是硬编码），选到只支持 chat/completions 的模型会导致 CLI 报
   // `wire_api not supported`——按端点二次过滤，UI 层就不给用户选到
   // 不兼容的模型。其他固定 Chat 客户端也按端点过滤。
+  // OpenCode 和 WorkBuddy 一样让用户选一组模型（OpenCode 的 `/model` 能在条目里的
+  // 模型之间切换）。OpenCode 的协议由后端按每个模型分别检测，界面不单独检测。
+  const multiModel = tool?.id === "workbuddy" || tool?.id === "opencode";
   const requiredEndpoint =
     tool?.id === "codex" || tool?.id === "chatgpt"
       ? "/v1/responses"
@@ -355,7 +367,9 @@ export default function ManageToolDialog({
         const all = await fetchOfoxModels(protocol, forceRefresh);
         if (request !== modelsRequest.current) return;
         setModels(
-          tool?.id === "workbuddy"
+          // OpenCode 和 WorkBuddy 一样：凡是能走 chat completions 输出文字的模型都
+          // 能选（含 Claude、Gemini），图片、视频生成模型不列出来。
+          multiModel
             ? filterOfoxModelsForWorkBuddy(all)
             : filterOfoxModelsByProtocol(all, protocol, requiredEndpoint),
         );
@@ -366,7 +380,7 @@ export default function ManageToolDialog({
         if (request === modelsRequest.current) setModelsLoading(false);
       }
     },
-    [protocol, requiredEndpoint, tool?.id],
+    [protocol, requiredEndpoint, multiModel],
   );
 
   useEffect(() => {
@@ -416,12 +430,12 @@ export default function ManageToolDialog({
   );
 
   useEffect(() => {
-    if (tool?.id === "workbuddy") return;
+    if (multiModel) return;
     void runCompatibility(false);
     return () => {
       compatibilityRequest.current += 1;
     };
-  }, [runCompatibility, tool?.id]);
+  }, [runCompatibility, multiModel]);
 
   useEffect(() => {
     if (tool?.id !== "workbuddy" || draftModels.includes(workBuddyTestModel))
@@ -486,16 +500,9 @@ export default function ManageToolDialog({
     }
   }, [projectUrl]);
 
-  // A selected OpenCode model may keep the same ID while its transport needs
-  // to change (for example GLM Responses -> Chat). Allow applying the probe
-  // result without forcing the user to pick another model first.
-  const isDirty =
-    tool?.id === "workbuddy"
-      ? !arraysEqual(draftModels, currentModels)
-      : draftModel !== currentModel ||
-        (tool?.id === "opencode" &&
-          !!draftModel &&
-          compatibilityResults[0]?.model === draftModel);
+  const isDirty = multiModel
+    ? !arraysEqual(draftModels, currentModels)
+    : draftModel !== currentModel;
 
   const handleSave = useCallback(async () => {
     if (!tool || !configurationReady || operationBusy) return;
@@ -517,6 +524,13 @@ export default function ManageToolDialog({
           selections.map((model) => toWorkBuddyModelSelection(model!)),
         );
         setCurrentModels(draftModels);
+      } else if (tool.id === "opencode") {
+        if (draftModels.length === 0) {
+          throw new Error("请至少选择一个 OpenCode 模型");
+        }
+        // 协议由后端按每个模型分别检测。
+        await manageToolApi.setActiveModels(tool.id, draftModels);
+        setCurrentModels(draftModels);
       } else {
         // 没查出结果时不传协议，由后端按模型目录选（Responses 优先）。
         const selectedProtocol =
@@ -532,7 +546,11 @@ export default function ManageToolDialog({
         setCurrentModel(draftModel);
       }
       toast.success(
-        workBuddy ? `已同步 ${draftModels.length} 个模型` : "模型已更新",
+        workBuddy
+          ? `已同步 ${draftModels.length} 个模型`
+          : tool.id === "opencode"
+            ? `已保存 ${draftModels.length} 个模型`
+            : "模型已更新",
       );
       onChanged?.();
       // Close on success — mirrors handleUnbind's收尾 sequence and
@@ -559,7 +577,8 @@ export default function ManageToolDialog({
     onOpenChange,
   ]);
 
-  const probeModel = draftModel;
+  const probeModel =
+    tool?.id === "opencode" ? (draftModels[0] ?? "") : draftModel;
 
   /**
    * Probe the OfoxAI gateway end-to-end with the currently-drafted model.
@@ -658,7 +677,7 @@ export default function ManageToolDialog({
   );
   // 只有确定不兼容才拦保存；查不出结果（余额、鉴权、网络等）照常保存。
   const compatibilityReady =
-    tool?.id === "workbuddy" ||
+    multiModel ||
     codexModels ||
     (!compatibilityLoading &&
       !hasIncompatible &&
@@ -827,7 +846,7 @@ export default function ManageToolDialog({
                     {t("modelCompatibility.chatgptCodexShared")}
                   </p>
                 )}
-                {protocol && !desktopCodex && tool.id === "workbuddy" ? (
+                {protocol && !desktopCodex && multiModel ? (
                   <>
                     <WorkBuddyModelPicker
                       id="manage-model"
@@ -837,9 +856,17 @@ export default function ManageToolDialog({
                       loading={modelsLoading}
                       onFetch={fetchModels}
                       portalContainer={dialogContentNode}
+                      summary={
+                        tool.id === "opencode"
+                          ? `共 ${models.length} 个可选模型`
+                          : undefined
+                      }
+                      allowSelectAll={tool.id !== "opencode"}
                     />
                     <p className="text-[11px] text-muted-foreground">
-                      {t("modelCompatibility.workBuddyProtocol")}
+                      {tool.id === "workbuddy"
+                        ? t("modelCompatibility.workBuddyProtocol")
+                        : "选中的模型都会写进 OpenCode，之后可以在 OpenCode 里用 /model 切换。保存时会逐个检测可用的协议。"}
                     </p>
                     {workBuddyEndpointStatus && (
                       <div className="space-y-1 rounded-md border border-border-default bg-muted/20 p-3 text-[11px]">
@@ -879,11 +906,16 @@ export default function ManageToolDialog({
                     )}
                     {!modelsLoading && modelsError && (
                       <ModelsLoadError
-                        message={t("modelCompatibility.workBuddyCatalogFailed")}
+                        message={
+                          tool.id === "workbuddy"
+                            ? t("modelCompatibility.workBuddyCatalogFailed")
+                            : t("modelCatalog.loadFailed")
+                        }
                         onRetry={() => void fetchModels(true)}
                       />
                     )}
-                    {!modelsLoading &&
+                    {tool.id === "workbuddy" &&
+                      !modelsLoading &&
                       !modelsError &&
                       workBuddyMissingIds.length > 0 && (
                         <p className="text-[11px] text-red-600">
@@ -921,7 +953,7 @@ export default function ManageToolDialog({
                 {configurationReady &&
                   isDirty &&
                   !codexModels &&
-                  tool.id !== "workbuddy" &&
+                  !multiModel &&
                   (compatibilityLoading ? (
                     <p className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1121,17 +1153,15 @@ export default function ManageToolDialog({
                     !protocol ||
                     !compatibilityReady ||
                     desktopCodex ||
+                    (tool.id === "opencode" &&
+                      (draftModels.length === 0 || modelsLoading)) ||
                     (tool.id === "workbuddy" && !workBuddyCatalogReady)
                   }
                 >
                   {saving && (
                     <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                   )}
-                  {tool.id === "opencode" &&
-                  draftModel === currentModel &&
-                  isDirty
-                    ? t("modelCompatibility.applyProtocol")
-                    : "保存"}
+                  保存
                 </Button>
               </div>
             </DialogFooter>
@@ -1218,6 +1248,10 @@ interface WorkBuddyModelPickerProps {
   loading: boolean;
   onFetch: (forceRefresh?: boolean) => void;
   portalContainer?: HTMLElement | null;
+  /** 列表下方的统计文字；不传就是 WorkBuddy 的「共用一个 Ofox Key」。 */
+  summary?: string;
+  /** 目录很大的工具（OpenCode）不提供「全选」，免得一次选上几百个。 */
+  allowSelectAll?: boolean;
 }
 
 function WorkBuddyModelPicker({
@@ -1228,6 +1262,8 @@ function WorkBuddyModelPicker({
   loading,
   onFetch,
   portalContainer,
+  summary,
+  allowSelectAll = true,
 }: WorkBuddyModelPickerProps) {
   const [open, setOpen] = useState(false);
   const selected = useMemo(() => new Set(selectedIds), [selectedIds]);
@@ -1362,18 +1398,22 @@ function WorkBuddyModelPicker({
         </Popover>
       </div>
       <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-        <span>共 {models.length} 个兼容模型，共用一个 Ofox Key</span>
+        <span>
+          {summary ?? `共 ${models.length} 个兼容模型，共用一个 Ofox Key`}
+        </span>
         <span className="flex shrink-0 gap-1">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7 px-2 text-[11px]"
-            disabled={loading || models.length === 0 || allSelected}
-            onClick={() => onChange(models.map((model) => model.id))}
-          >
-            全选兼容
-          </Button>
+          {allowSelectAll && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-[11px]"
+              disabled={loading || models.length === 0 || allSelected}
+              onClick={() => onChange(models.map((model) => model.id))}
+            >
+              全选兼容
+            </Button>
+          )}
           <Button
             type="button"
             variant="ghost"
