@@ -4,8 +4,9 @@
 //! 「启动修复」会按模板整份重写受管字段，模板里还是旧模型的话，用户选的模型就被
 //! 改回去了。所以重写之前先把配置文件里的模型采纳进模板。
 //!
-//! 只管 Codex、Claude、Gemini：它们的「当前模型」就是配置里的一个值。其余工具的
-//! 当前模型和模板里的模型列表不是同一个位置，不在这里处理。
+//! Codex、Claude、Gemini 的「当前模型」就是配置里的一个值。OpenClaw、Hermes 是默认
+//! 路由里 Ofox 条目下的模型 id（模板里是只有这一个模型的列表）。OpenCode 的当前模型
+//! 在 TUI 状态里，不在配置里，不处理。
 
 use serde_json::Value;
 
@@ -44,7 +45,33 @@ fn read_live_model(tool: Tool) -> Result<Option<String>, String> {
             };
             env_file::get_value(&text, "GEMINI_MODEL")
         }
-        _ => None,
+        Tool::OpenClaw => {
+            let Some(text) = read_text(&ManagedFile::OpenClawConfig.current_path())? else {
+                return Ok(None);
+            };
+            let config = json_file::parse_object(Some(&text), "OpenClaw")?;
+            json_file::get(&config, &["agents", "defaults", "model"])
+                .and_then(|model| model.as_str().or_else(|| model.get("primary")?.as_str()))
+                .and_then(|primary| primary.strip_prefix("ofox-openclaw/"))
+                .map(str::to_string)
+        }
+        Tool::Hermes => {
+            let Some(text) = read_text(&ManagedFile::HermesConfig.current_path())? else {
+                return Ok(None);
+            };
+            let config = crate::hermes_config::parse_config_text(&text)
+                .map_err(|_| "Hermes 配置不是有效的 YAML".to_string())?;
+            let model = config.get("model");
+            let routed = model
+                .and_then(|m| m.get("provider"))
+                .and_then(|p| p.as_str())
+                == Some("ofox-hermes");
+            model
+                .filter(|_| routed)
+                .and_then(|m| m.get("default")?.as_str())
+                .map(str::to_string)
+        }
+        Tool::OpenCode => None,
     };
     Ok(model.filter(|model| !model.trim().is_empty()))
 }

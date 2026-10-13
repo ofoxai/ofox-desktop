@@ -4049,3 +4049,42 @@ async fn replacing_the_key_keeps_the_hermes_model_chosen_in_the_agent() {
     assert!(text.contains("sk-of-ACCOUNT-B"));
     assert!(text.contains("provider: ofox-hermes"));
 }
+
+#[tokio::test]
+#[serial]
+async fn openclaw_model_chosen_in_the_agent_is_adopted_for_display() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(
+        &path,
+        "ofox-openclaw/openai/gpt-x",
+        "ofox-openclaw/anthropic/other",
+    );
+
+    sync_live_model(&db, Tool::OpenClaw, Some(KEY)).await;
+
+    assert_eq!(saved_model(&db, Tool::OpenClaw), "anthropic/other");
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_model_chosen_in_the_agent_is_adopted_for_display() {
+    let (_home, db, path) = bind_with_user_config(Tool::Hermes, "hermes", HERMES_CONFIG).await;
+    edit_text(&path, "default: openai/gpt-x", "default: anthropic/other");
+
+    sync_live_model(&db, Tool::Hermes, Some(KEY)).await;
+
+    assert_eq!(saved_model(&db, Tool::Hermes), "anthropic/other");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_model_of_another_provider_is_not_adopted_for_openclaw() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(&path, "ofox-openclaw/openai/gpt-x", "anthropic/claude");
+
+    sync_live_model(&db, Tool::OpenClaw, Some(KEY)).await;
+
+    assert_eq!(saved_model(&db, Tool::OpenClaw), "openai/gpt-x");
+}
