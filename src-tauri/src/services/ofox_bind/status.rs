@@ -387,12 +387,23 @@ pub(super) fn inspect_managed_fields(
                         &["provider", "ofox-opencode", "options", "apiKey"],
                     ],
                 )?;
-                // 用户在 TUI 里选了别家的模型：下次启动就不走 Ofox 了。
+                // 用户在 TUI 里选了别家的模型：下次启动就不走 Ofox 了。用户自己配的
+                // 条目只要也指向 Ofox 网关（比如自带 key 的 `ofox`），仍然是在用 Ofox。
                 if let Some((provider, _)) = super::opencode_state::live_selection()? {
+                    let still_ofox = provider == super::opencode_state::PROVIDER_ID
+                        || at_path(&actual, &["provider"])?
+                            .and_then(|providers| providers.get(&provider))
+                            .and_then(|entry| entry.get("options")?.get("baseURL")?.as_str())
+                            .is_some_and(crate::ofox_apex::mentions_ofox_gateway);
+                    let shown_provider = if still_ofox {
+                        super::opencode_state::PROVIDER_ID.to_string()
+                    } else {
+                        provider
+                    };
                     comparison.compare(
                         &shown,
                         "model.json · recent[0]",
-                        Some(&Value::String(provider)),
+                        Some(&Value::String(shown_provider)),
                         Some(&Value::String(super::opencode_state::PROVIDER_ID.into())),
                     );
                 }

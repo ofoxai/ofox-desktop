@@ -4217,3 +4217,24 @@ async fn replacing_the_key_leaves_the_opencode_state_alone() {
         before
     );
 }
+
+#[tokio::test]
+#[serial]
+async fn opencode_model_of_the_users_own_ofox_gateway_entry_is_not_a_conflict() {
+    let (home, db, path) = bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    let mut config = json_at(&path);
+    config["provider"]["ofox"] =
+        json!({ "options": { "baseURL": "https://api.ofox.io/v1", "apiKey": "sk-own" } });
+    write(&path, &serde_json::to_string_pretty(&config).unwrap());
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "ofox", "modelID": "openai/gpt-6-luna" }]),
+    );
+
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Configured
+    );
+    sync_live_model(&db, Tool::OpenCode, Some(KEY)).await;
+    assert_eq!(saved_model(&db, Tool::OpenCode), "openai/gpt-x");
+}
