@@ -101,6 +101,23 @@
     "loadFailed": "模型列表加载失败",
     "retry": "重试"
   },
+  "modelPicker": {
+    "defaultRoute": "未设置（使用 OfoxAI 默认路由）",
+    "searchModel": "搜索模型…",
+    "searchModelOrProvider": "搜索模型或供应商…",
+    "loading": "加载中…",
+    "noModels": "未找到模型",
+    "noCompatibleModels": "未找到兼容模型",
+    "selectedCount": "已选择 {{count}} 个兼容模型",
+    "selectAtLeastOne": "请选择至少一个兼容模型",
+    "compatibleCountWithSharedKey": "共 {{count}} 个兼容模型，共用一个 Ofox Key",
+    "availableCount": "共 {{count}} 个可选模型",
+    "selectAllCompatible": "全选兼容",
+    "clearSelection": "取消全选",
+    "reasoning": "推理",
+    "vision": "视觉",
+    "otherVendor": "Other"
+  },
   "modelCompatibility": {
     "title": "流式兼容性",
     "checking": "正在验证流式兼容性…",

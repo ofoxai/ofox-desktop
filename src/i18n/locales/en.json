@@ -101,6 +101,23 @@
     "loadFailed": "Couldn't load the model list",
     "retry": "Retry"
   },
+  "modelPicker": {
+    "defaultRoute": "Not set (use the OfoxAI default route)",
+    "searchModel": "Search models…",
+    "searchModelOrProvider": "Search models or providers…",
+    "loading": "Loading…",
+    "noModels": "No models found",
+    "noCompatibleModels": "No compatible models found",
+    "selectedCount": "{{count}} compatible models selected",
+    "selectAtLeastOne": "Select at least one compatible model",
+    "compatibleCountWithSharedKey": "{{count}} compatible models share one Ofox key",
+    "availableCount": "{{count}} models available",
+    "selectAllCompatible": "Select all compatible",
+    "clearSelection": "Clear selection",
+    "reasoning": "Reasoning",
+    "vision": "Vision",
+    "otherVendor": "Other"
+  },
   "modelCompatibility": {
     "title": "Streaming compatibility",
     "checking": "Checking streaming compatibility…",
