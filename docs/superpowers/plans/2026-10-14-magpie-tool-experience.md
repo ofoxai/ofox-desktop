@@ -6,7 +6,7 @@
 
 开发分支为 `codex/magpie-tool-experience`，起点为 `71c885f8d64df6b24413a63794e671e650292e2e`。它包含本轮最新工具管理与兼容修复。创建时，发布分支 `release/1.3.6` 的 `5466546d` 在该提交上只增加四个版本文件的变更。
 
-开发使用独立 worktree。当前发布 checkout、版本号、tag 和发布工作流保持隔离；发布版本定稿后，先核对实际发布提交，再将开发分支对齐最终基线。实施进度和验证结果记录在本文的阶段检查项中。
+开发使用独立 worktree。已核对实际发布 tag `1.3.6_20261014_0219` 指向 `5466546d`，并将开发分支 rebase 到该提交。四处版本文件继承 1.3.6，不增加发布版本；当前发布 checkout、tag 和发布工作流保持隔离。实施进度和验证结果记录在本文的阶段检查项中。
 
 用户要求完成后先交付测试，确认测试结果后再发布。开发阶段不触发正式发布，不创建发布 tag，也不更新正式更新源。
 
@@ -145,7 +145,9 @@ dsh 选择最高 generation，同代按修改时间决定来源，避免重复�
 - [x] 完成 Profiles 存储、预览、应用、结果报告与撤销。
 - [x] 将会话中心接入 Console，增加 Pi/dsh parser 和能力声明。
 - [x] 完成首批回收站；新工具分别通过 bundle 验证后开放。
-- [ ] 对齐最终发布基线，完成整体验收。
+- [x] 对齐最终发布基线。
+- [x] 完成本地自动化检查、浏览器验收与 macOS 测试 App。
+- [ ] 用户实机验收与正式发布。
 
 前端检查使用 `pnpm typecheck`、`pnpm format:check`、相关 Vitest 和 `pnpm build:renderer`。Rust 改动执行 `cargo test`、`cargo fmt --check`、`cargo clippy -- -D warnings`，均指定 `src-tauri/Cargo.toml`。
 
@@ -157,6 +159,10 @@ dsh 选择最高 generation，同代按修改时间决定来源，避免重复�
 
 会话回收站开放 Claude/Codex/Gemini/Pi/dsh；Gemini 同时支持旧 JSON 与现代 JSONL，并处理主会话、子 Agent 与独立附属文件。共享数据库与索引保持原状。OpenClaw 仅开放浏览/导出；dsh 首版仅元数据。Pi 按当前 JSONL 分支读取、导出和续聊。
 
-macOS 完整 Rust 检查：`cargo test` 共 1702 个测试通过、7 个既有人工/网络测试忽略，`cargo clippy --all-targets -- -D warnings` 通过。包含真实文件+数据库的“Profile 保存→CLI 改模型→诊断采纳→拒绝旧撤销”回归。现代 Pi/dsh CLI 与真实 OFox 请求尚需用户验收；当前机器没有 Pi，dsh 是旧布局 0.1.2-rc.1，未用它作为现代适配验证。
+macOS 完整 Rust 检查：`cargo test` 共 1705 个测试通过、7 个既有人工/网络测试忽略，`cargo clippy --all-targets -- -D warnings` 通过。包含真实文件+数据库的“Profile 保存→CLI 改模型→诊断采纳→拒绝旧撤销”、删除配置后双向区域切换恢复、原项目目录续聊预览回归。现代 Pi/dsh CLI 与真实 OFox 请求尚需用户验收；当前机器没有 Pi，dsh 是旧布局 0.1.2-rc.1，未用它作为现代适配验证。
+
+前端最终检查：typecheck、全量 format:check、61 文件 / 451 项 Vitest、renderer build 全部通过。浏览器验收修复了 360×620 托盘多选弹层裁切；保存 before/after 和 picker/Profiles/会话/回收站/托盘共 8 张截图，使用真实组件与合成 IPC 数据，临时 fixture 与 server 已移除。
+
+本地已构建 ad-hoc 签名的 debug `Ofox Desktop Test.app`，不创建发行安装包、不上传 release。Linux / Windows 检查由 Draft PR 的现有 CI 与 Windows Probe 工作流运行，结果以 PR 检查状态为准。
 
 用户验收步骤见 [测试说明](../../magpie-tool-experience-testing.md)。正式发布继续等待用户测试结果。

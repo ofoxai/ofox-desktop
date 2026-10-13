@@ -13,6 +13,8 @@ pnpm dev
 
 开发版本使用 debug 凭据存储。工具配置仍是当前选择的真实配置目录；测试绑定、切模型、区域切换和解绑会按界面操作修改相应工具配置。需要隔离时，使用测试用户目录与独立工具配置目录，并检查设置页的应用数据目录。测试真实配置时，先退出已安装版本，避免两个进程同时管理同一配置。
 
+macOS 本地测试包通过 `pnpm tauri build --debug --bundles app --ci --config '{"productName":"Ofox Desktop Test","bundle":{"macOS":{"signingIdentity":"-"}}}'` 生成，位于 `src-tauri/target/debug/bundle/macos/Ofox Desktop Test.app`。这只生成本地产物，不上传发行文件。
+
 ## 验收顺序
 
 1. **快捷选择**：从工具行、托盘和管理弹窗修改模型，确认三处同步更新。单模型选择后保存；OpenCode / WorkBuddy 保留多选及顺序。取消选择器不写入。配置被 CLI 修改后，旧选择器保存应要求刷新。
