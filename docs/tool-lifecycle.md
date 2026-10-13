@@ -47,6 +47,36 @@ The bound-tools settings mirror uses an atomic field update. Ordinary preference
 saves retain the backend's current region, key metadata, and binding list, even
 when the renderer submits an older settings snapshot.
 
+## Sign-out and account switching
+
+API keys are billed to the organization that created them, so a signed-out
+account must stop paying and a new account must not silently spend another's
+credits. Signing out does not restore pre-bind settings; Unbind does that.
+
+- **Sign out** revokes this account's keys on the server and marks them revoked
+  locally. Tool configuration files are left untouched: they still point at OFox
+  with a key that no longer works, so bound tools stop until the next sign-in.
+  The keychain secret is kept only so the configuration can be verified later.
+- **Offline sign-out** cannot revoke on the server. Those keys keep working, and
+  the sign-out result lists them. They are queued and deleted the next time the
+  owning account signs in on this machine.
+- **Sign-in** is followed by a check of every bound tool when the home page loads
+  (the renderer calls `ofox_reconcile_tool_keys` after refreshing the profile; there is
+  no separate backend startup hook). A key that is revoked or owned
+  by another account is replaced with a new key issued for the current account,
+  including when the same account signs back in. Only the key is replaced; model
+  and protocol settings stay. The configuration is verified with the old key
+  first, and a tool whose configuration was edited by the user is reported, not
+  overwritten.
+- **Keys of tools that are no longer bound** are dropped locally and queued for
+  deletion rather than replaced.
+- **Legacy keys** without a recorded owner are adopted by whichever account signs
+  in first.
+- **Region changes** do not revoke keys. They only reconcile OFox endpoint fields
+  (see Configuration changes above).
+- **Unbind** restores the pre-bind connection settings but does not revoke the
+  key.
+
 ## Local interfaces
 
 - `get_tool_versions`: adds `installationStatus` (`installed`, `notInstalled`,
@@ -63,6 +93,11 @@ when the renderer submits an older settings snapshot.
   OFox configuration, revalidating it under the same locks used for binding writes.
 - Existing unbind reports add the `configAlreadyMissing` warning. The binding
   list and snapshot storage formats are unchanged.
+- `ofox_logout`: revokes this account's keys, then clears the sign-in. Returns
+  `stopped` tools and `notRevoked` tools (server revoke failed, queued for deletion).
+- `ofox_reconcile_tool_keys`: called after sign-in; replaces keys that are revoked
+  or owned by another account. Returns `switched` and `failed` tools. Makes no
+  network request when nothing needs replacing.
 - `save_bound_tools { boundTools }`: updates only the settings mirror of the bound
   tool list, without round-tripping unrelated preferences or backend state.
 
