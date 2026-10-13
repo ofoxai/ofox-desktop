@@ -55,9 +55,9 @@ pub use deeplink::{import_provider_from_deeplink, parse_deeplink_url, DeepLinkIm
 pub use error::AppError;
 pub use mcp::{
     import_from_claude, import_from_codex, import_from_gemini, remove_server_from_claude,
-    remove_server_from_codex, remove_server_from_gemini, sync_enabled_to_claude,
-    sync_enabled_to_codex, sync_enabled_to_gemini, sync_single_server_to_claude,
-    sync_single_server_to_codex, sync_single_server_to_gemini,
+    remove_server_from_codex, remove_server_from_gemini, strip_ignored_type_from_codex_config,
+    sync_enabled_to_claude, sync_enabled_to_codex, sync_enabled_to_gemini,
+    sync_single_server_to_claude, sync_single_server_to_codex, sync_single_server_to_gemini,
 };
 pub use provider::{Provider, ProviderMeta};
 pub use services::{
@@ -1639,6 +1639,10 @@ pub fn run() {
             commands::get_tool_install_capabilities,
             commands::node_requirement::check_tool_node_requirement,
             commands::manage_tool::get_active_ofox_model,
+            commands::manage_tool::get_active_ofox_models,
+            commands::manage_tool::get_chatgpt_active_model,
+            commands::manage_tool::set_active_ofox_models,
+            commands::manage_tool::get_opencode_protocol_hints,
             commands::manage_tool::set_active_ofox_model,
             commands::manage_tool::get_workbuddy_managed_models,
             commands::manage_tool::set_workbuddy_managed_models,

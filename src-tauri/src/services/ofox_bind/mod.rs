@@ -6,16 +6,21 @@
 //! 解绑时只把接入方式（地址、key、登录方式、模型）还原成绑定前的样子，MCP、
 //! skills、插件等其余配置一律不动。WorkBuddy 走 `workbuddy_config`。
 
+pub(crate) mod chatgpt_state;
 pub(crate) mod claude;
 pub(crate) mod codex;
+pub(crate) mod codex_probe;
 pub(crate) mod endpoint;
 mod env_file;
 pub(crate) mod gemini;
 mod hermes;
 mod json_file;
 mod live_model;
+mod route;
+pub(crate) use live_model::display_model_or;
 mod openclaw;
 mod opencode;
+pub(crate) mod opencode_state;
 mod plan;
 pub(crate) mod record;
 pub(crate) mod relocate;
@@ -282,10 +287,13 @@ fn template(db: &Database, tool: Tool) -> Result<Value, String> {
     Ok(value)
 }
 
+/// `select_route`：让工具的默认模型/路由指向 Ofox（绑定、保存模型）；否则（换 key、
+/// 修复、重写）路由已经指向 Ofox 时不动，保留用户在 agent 里选的模型。
 fn write_bound(
     tool: Tool,
     template: &Value,
     api_key: &str,
+    select_route: bool,
     txn: &mut FileTxn,
 ) -> Result<(), String> {
     match tool {
@@ -296,11 +304,11 @@ fn write_bound(
                 .ok_or_else(|| "Ofox Codex 模板缺少 config".to_string())?;
             codex::write_bound_config(config, api_key, txn)
         }
-        Tool::Claude => claude::write_bound(template, api_key, txn),
-        Tool::Gemini => gemini::write_bound(template, api_key, txn),
-        Tool::OpenCode => opencode::write_bound(template, api_key, txn),
-        Tool::OpenClaw => openclaw::write_bound(template, api_key, txn),
-        Tool::Hermes => hermes::write_bound(template, api_key, txn),
+        Tool::Claude => claude::write_bound(template, api_key, select_route, txn),
+        Tool::Gemini => gemini::write_bound(template, api_key, select_route, txn),
+        Tool::OpenCode => opencode::write_bound(template, api_key, select_route, txn),
+        Tool::OpenClaw => openclaw::write_bound(template, api_key, select_route, txn),
+        Tool::Hermes => hermes::write_bound(template, api_key, select_route, txn),
     }
 }
 
@@ -515,7 +523,7 @@ pub(crate) async fn rewrite_bound_config(
     }
     let template = template(db, tool)?;
     let mut txn = FileTxn::new();
-    if let Err(error) = write_bound(tool, &template, api_key, &mut txn) {
+    if let Err(error) = write_bound(tool, &template, api_key, false, &mut txn) {
         return Err(rollback_with(txn, error));
     }
     Ok(())
@@ -547,7 +555,7 @@ pub(crate) async fn replace_key(
     live_model::adopt_live_model(db, tool)?;
     let template = template(db, tool)?;
     let mut txn = FileTxn::new();
-    if let Err(error) = write_bound(tool, &template, new_key, &mut txn) {
+    if let Err(error) = write_bound(tool, &template, new_key, false, &mut txn) {
         return Err(rollback_with(txn, error));
     }
     Ok(())
@@ -596,8 +604,8 @@ pub(crate) async fn persist_bound_settings(
     db.update_provider_settings_config(tool.app().as_str(), tool.provider_id(), updated)
         .map_err(|_| "保存 OFox 模型失败。".to_string())?;
     let mut txn = FileTxn::new();
-    let result =
-        template(db, tool).and_then(|template| write_bound(tool, &template, api_key, &mut txn));
+    let result = template(db, tool)
+        .and_then(|template| write_bound(tool, &template, api_key, true, &mut txn));
     if result.is_err() {
         let error = rollback_with(txn, "保存模型时写入工具配置失败。".into());
         return Err(
@@ -714,7 +722,7 @@ async fn bind_inner(
         .map_err(|e| format!("保存 {} 绑定记录失败：{e}", tool.label()))?;
 
     let mut txn = FileTxn::new();
-    let result = write_bound(tool, &template, api_key, &mut txn)
+    let result = write_bound(tool, &template, api_key, true, &mut txn)
         .and_then(|()| set_current_provider(db, &app, tool.provider_id()));
     if let Err(error) = result {
         let mut error = rollback_with(txn, error);
@@ -771,7 +779,7 @@ pub(crate) async fn restore_missing_binding(
         .map_err(|_| "保存绑定记录失败，已停止恢复。".to_string())?;
     let mut txn = FileTxn::new();
     let result = template(db, tool)
-        .and_then(|template| write_bound(tool, &template, api_key, &mut txn))
+        .and_then(|template| write_bound(tool, &template, api_key, false, &mut txn))
         .and_then(|()| match status::inspect(db, tool, Some(api_key)) {
             Ok(health) if health.status == status::BindingStatus::Configured => Ok(()),
             _ => Err("恢复后的配置验证失败".to_string()),

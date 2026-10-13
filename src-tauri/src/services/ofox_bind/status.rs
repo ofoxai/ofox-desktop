@@ -232,8 +232,46 @@ fn hermes_projection(value: &Value) -> Result<Value, String> {
                 projected[key] = value.clone();
             }
         }
+        // 用户自己配的、同样指向 Ofox 网关的条目：用的还是 Ofox。
+        let own_gateway = model
+            .get("provider")
+            .and_then(Value::as_str)
+            .is_some_and(|name| {
+                name != "ofox-hermes" && super::route::hermes_is_gateway(value, name)
+            });
+        if own_gateway {
+            projected["provider"] = Value::String("ofox-hermes".into());
+        }
     }
     Ok(projected)
+}
+
+/// Hermes 条目里决定「连到哪、怎么连」的字段：列表写法和 `providers:` 字典写法
+/// 的名字不同，两种都列上，没有的字段两边都是空。
+const HERMES_ACCESS_FIELDS: [&str; 5] = ["base_url", "api", "api_key", "api_mode", "transport"];
+
+/// OpenClaw 默认模型指向哪个服务商（`agents.defaults.model` 可以是字符串，也可以
+/// 是 `{primary, fallbacks}`）。
+const OPENCLAW_PROVIDER: &str = "ofox-openclaw";
+
+fn openclaw_route(config: &Value) -> Result<Option<Value>, String> {
+    let Some(model) = at_path(config, &["agents", "defaults", "model"])? else {
+        return Ok(None);
+    };
+    let primary = match model {
+        Value::String(primary) => primary.as_str(),
+        Value::Object(_) => model.get("primary").and_then(Value::as_str).unwrap_or(""),
+        _ => return Err("受管配置字段的格式无效".into()),
+    };
+    let provider = primary.split('/').next().unwrap_or_default();
+    // 用户自己配的、同样指向 Ofox 网关的条目：用的还是 Ofox。
+    let provider =
+        if provider != OPENCLAW_PROVIDER && super::route::openclaw_is_gateway(config, provider) {
+            OPENCLAW_PROVIDER
+        } else {
+            provider
+        };
+    Ok(Some(Value::String(provider.to_string())))
 }
 
 pub(super) fn inspect(
@@ -274,7 +312,17 @@ pub(super) fn inspect_managed_fields(
                     .get("config")
                     .and_then(Value::as_str)
                     .ok_or_else(|| "Ofox 模板无效".to_string())?;
-                let actual = parse_toml(current.as_deref().unwrap_or_default())?;
+                let mut actual = parse_toml(current.as_deref().unwrap_or_default())?;
+                // 默认服务商是用户自己配的、同样指向 Ofox 网关的条目：用的还是 Ofox。
+                let own_gateway = actual
+                    .get("model_provider")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| {
+                        name != "ofox" && super::route::codex_is_gateway(&actual, name)
+                    });
+                if own_gateway {
+                    actual["model_provider"] = Value::String("ofox".into());
+                }
                 let expected = parse_toml(&codex::apply_patch(
                     current.as_deref().unwrap_or_default(),
                     &codex::bound_patch(config, key)?,
@@ -286,11 +334,7 @@ pub(super) fn inspect_managed_fields(
                     &expected,
                     // 推理强度、模型都不比对：它们是用户的选择，ChatGPT 和 Codex 会把
                     // 界面或 `/model` 里选的值写回这里。
-                    &[
-                        &["model_provider"],
-                        &["disable_response_storage"],
-                        &["model_providers", "ofox"],
-                    ],
+                    &compared_codex_paths(),
                 )?;
             }
             ManagedFile::ClaudeSettings => {
@@ -351,6 +395,7 @@ pub(super) fn inspect_managed_fields(
                         current.as_deref(),
                         &template,
                         key,
+                        false,
                     )?),
                     "OpenCode",
                 )?;
@@ -359,8 +404,36 @@ pub(super) fn inspect_managed_fields(
                     &shown,
                     &actual,
                     &expected,
-                    &[&["provider", "ofox-opencode"]],
+                    // 只比接入字段。条目里的模型列表是用户的选择，agent 里加模型、
+                    // 切模型都不算冲突。
+                    &[
+                        &["provider", "ofox-opencode", "npm"],
+                        &["provider", "ofox-opencode", "options", "baseURL"],
+                        &["provider", "ofox-opencode", "options", "apiKey"],
+                    ],
                 )?;
+                // 用户在 TUI 里选了别家的模型：下次启动就不走 Ofox 了。用户自己配的
+                // 条目只要也指向 Ofox 网关（比如自带 key 的 `ofox`），仍然是在用 Ofox。
+                if let Some(selection) = super::opencode_state::live_selection()? {
+                    let provider = selection.provider;
+                    let still_ofox = provider == super::opencode_state::PROVIDER_ID
+                        || super::opencode_state::is_gateway(&provider);
+                    let shown_provider = if still_ofox {
+                        super::opencode_state::PROVIDER_ID.to_string()
+                    } else {
+                        provider
+                    };
+                    comparison.compare(
+                        &shown,
+                        if selection.from_config {
+                            "model"
+                        } else {
+                            "model.json · recent[0]"
+                        },
+                        Some(&Value::String(shown_provider)),
+                        Some(&Value::String(super::opencode_state::PROVIDER_ID.into())),
+                    );
+                }
             }
             ManagedFile::OpenClawConfig => {
                 let actual = json_file::parse_object(current.as_deref(), "OpenClaw")?;
@@ -369,6 +442,7 @@ pub(super) fn inspect_managed_fields(
                         current.as_deref(),
                         &template,
                         key,
+                        false,
                     )?),
                     "OpenClaw",
                 )?;
@@ -377,11 +451,20 @@ pub(super) fn inspect_managed_fields(
                     &shown,
                     &actual,
                     &expected,
+                    // 条目只比接入字段；默认模型只要还指向 Ofox 条目就行，具体选哪个
+                    // 模型是用户的选择。
                     &[
-                        &["models", "providers", "ofox-openclaw"],
-                        &["agents", "defaults", "model"],
+                        &["models", "providers", "ofox-openclaw", "baseUrl"],
+                        &["models", "providers", "ofox-openclaw", "apiKey"],
+                        &["models", "providers", "ofox-openclaw", "api"],
                     ],
                 )?;
+                comparison.compare(
+                    &shown,
+                    "agents.defaults.model",
+                    openclaw_route(&actual)?.as_ref(),
+                    openclaw_route(&expected)?.as_ref(),
+                );
             }
             ManagedFile::HermesConfig => {
                 let actual =
@@ -390,14 +473,23 @@ pub(super) fn inspect_managed_fields(
                     current.as_deref(),
                     &template,
                     key,
+                    false,
                 )?)?)?;
-                for (key, field) in [
-                    ("entry", "ofox-hermes"),
-                    ("provider", "model.provider"),
-                    ("default", "model.default"),
-                ] {
-                    comparison.compare(&shown, field, actual.get(key), expected.get(key));
+                // 条目只比接入字段；`model.default`、条目里的模型列表是用户的选择。
+                for field in HERMES_ACCESS_FIELDS {
+                    comparison.compare(
+                        &shown,
+                        &format!("ofox-hermes.{field}"),
+                        actual.get("entry").and_then(|entry| entry.get(field)),
+                        expected.get("entry").and_then(|entry| entry.get(field)),
+                    );
                 }
+                comparison.compare(
+                    &shown,
+                    "model.provider",
+                    actual.get("provider"),
+                    expected.get("provider"),
+                );
             }
         }
         if current.is_none() {
@@ -415,4 +507,15 @@ pub(crate) async fn binding_status(
     let _guard = BIND_LOCK.lock().await;
     let _file_locks = file_locks(tool);
     inspect(db, tool, api_key).unwrap_or_else(|_| ToolBindingStatus::unknown())
+}
+
+/// Codex 配置里要和 Ofox 模板比对的字段。Codex 明确不认的 `disable_response_storage`
+/// 我们不再写，老版本留下的也不算被改动，所以只有 Codex 认它时才比。
+fn compared_codex_paths() -> Vec<&'static [&'static str]> {
+    let mut paths: Vec<&'static [&'static str]> =
+        vec![&["model_provider"], &["model_providers", "ofox"]];
+    if super::codex_probe::should_write_flag() {
+        paths.push(&["disable_response_storage"]);
+    }
+    paths
 }

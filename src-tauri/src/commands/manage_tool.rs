@@ -104,6 +104,28 @@ pub async fn get_tool_binding_status(
     Ok(status)
 }
 
+/// 从 Desktop 启动 Claude、Gemini 前，先采纳用户在 agent 里「记住」的模型：它们启动时
+/// env 里的模型比 settings 里的优先，不先对齐，刚换的模型下次启动会被盖回去。
+/// 只是同步展示和 env，出错不拦启动。
+pub(crate) async fn follow_live_model(state: &AppState, app: &str) {
+    let Some((tool, _)) = crate::services::ofox_bind::tool_for(app) else {
+        return;
+    };
+    let Ok(key) = crate::ofox_secret::default_store().load(crate::ofox_secret::Slot::ApiKey {
+        tool: tool.app().into(),
+    }) else {
+        return;
+    };
+    let configured =
+        crate::services::ofox_bind::status::binding_status(&state.db, tool, key.as_deref())
+            .await
+            .status
+            == crate::services::ofox_bind::status::BindingStatus::Configured;
+    if configured {
+        crate::services::ofox_bind::sync_live_model(&state.db, tool, key.as_deref()).await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 2) Read active model
 // ---------------------------------------------------------------------------
@@ -127,7 +149,22 @@ pub async fn get_active_ofox_model(
         return crate::workbuddy_config::active_model(&state.db).await;
     }
     let app_type = AppType::from_str(&app).map_err(|e| format!("无效的应用类型: {e}"))?;
-    read_active_model_for(&state, &app_type)
+    let saved = read_active_model_for(&state, &app_type)?;
+    // 用户在 agent 里选了自己配的、同样指向 Ofox 的条目：显示它实际在用的模型。
+    Ok(match crate::services::ofox_bind::tool_for(&app) {
+        Some((tool, _)) => crate::services::ofox_bind::display_model_or(tool, saved),
+        None => saved,
+    })
+}
+
+/// 主页 ChatGPT 桌面 App 那一行显示的模型：优先用户在 App 里最近选的（App 把它记在自己的
+/// 状态文件里，不写 config.toml），没有就用 Codex 配置里的。
+#[tauri::command]
+pub async fn get_chatgpt_active_model(state: State<'_, AppState>) -> Result<String, String> {
+    if let Some(model) = crate::services::ofox_bind::chatgpt_state::recent_model() {
+        return Ok(model);
+    }
+    get_active_ofox_model(state, "codex".to_string()).await
 }
 
 /// Return every WorkBuddy model currently managed by Ofox, in display order.
@@ -303,6 +340,263 @@ pub async fn set_active_ofox_model(
     }
 
     Ok(())
+}
+
+/// 去掉空白和重复，保持选择的顺序；一个都没有就报错。
+fn clean_model_ids(models: &[String]) -> Result<Vec<String>, String> {
+    let mut ids: Vec<String> = Vec::new();
+    for model in models {
+        let id = model.trim();
+        if !id.is_empty() && !ids.iter().any(|existing| existing == id) {
+            ids.push(id.to_string());
+        }
+    }
+    if ids.is_empty() {
+        Err("请至少选择一个模型".into())
+    } else {
+        Ok(ids)
+    }
+}
+
+/// OpenCode 条目的 `models`：用户选的这一组，按选择的顺序；每个模型按各自检测出的协议
+/// 单独指定传输方式（没检测出结果就不指定，用条目默认的）。
+fn write_opencode_models(
+    settings: &mut serde_json::Value,
+    models: &[(String, Option<String>)],
+) -> Result<(), String> {
+    let mut dict = serde_json::Map::new();
+    for (id, protocol) in models {
+        let mut model = serde_json::json!({ "name": id });
+        if let Some(protocol) = protocol {
+            let npm = match protocol.as_str() {
+                "responses" => crate::opencode_config::OFOX_RESPONSES_NPM,
+                "chatCompletions" => crate::opencode_config::OFOX_CHAT_NPM,
+                _ => return Err("OpenCode 协议选择无效".into()),
+            };
+            model["provider"] = serde_json::json!({ "npm": npm });
+        }
+        dict.insert(id.clone(), model);
+    }
+    settings
+        .as_object_mut()
+        .ok_or_else(|| "settings_config 不是对象".to_string())?
+        .insert("models".into(), serde_json::Value::Object(dict));
+    Ok(())
+}
+
+/// 已保存的模型列表。OpenCode 是用户选的一组，其余工具只有一个。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_active_ofox_models(
+    state: State<'_, AppState>,
+    app: String,
+) -> Result<Vec<String>, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| format!("无效的应用类型: {e}"))?;
+    if app_type != AppType::OpenCode {
+        let model = read_active_model_for(&state, &app_type)?;
+        return Ok(if model.is_empty() {
+            vec![]
+        } else {
+            vec![model]
+        });
+    }
+    let provider_id = state
+        .db
+        .get_current_provider(app_type.as_str())
+        .map_err(|e| format!("读取当前供应商失败: {e}"))?
+        .ok_or_else(|| "opencode 暂无活跃供应商".to_string())?;
+    let provider = state
+        .db
+        .get_provider_by_id(&provider_id, app_type.as_str())
+        .map_err(|e| format!("读取 {provider_id} 失败: {e}"))?
+        .ok_or_else(|| format!("供应商 {provider_id} 不存在"))?;
+    Ok(provider
+        .settings_config
+        .get("models")
+        .and_then(|models| models.as_object())
+        .map(|models| models.keys().cloned().collect())
+        .unwrap_or_default())
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippedModel {
+    pub id: String,
+    pub reason: String,
+}
+
+/// 保存结果：写进配置的模型，和因为目录里没有可用端点而没写的模型。
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveModelsReport {
+    pub saved: Vec<String>,
+    pub skipped: Vec<SkippedModel>,
+}
+
+struct ResolvedModels {
+    resolved: Vec<(String, Option<String>)>,
+    skipped: Vec<SkippedModel>,
+}
+
+/// 保存时给每个模型选协议，不发探测请求：先用 7 天内的检测缓存，没有就按目录声明和
+/// 默认规则选。目录里没有可用端点的模型跳过并告知，不拖累其余模型；一个都存不了才报错。
+fn resolve_opencode_models(
+    ids: &[String],
+    catalog: &[crate::services::model_fetch::FetchedModel],
+) -> Result<ResolvedModels, String> {
+    let mut resolved = Vec::with_capacity(ids.len());
+    let mut skipped = Vec::new();
+    for id in ids {
+        let outcome = match catalog.iter().find(|model| &model.id == id) {
+            Some(model) => crate::model_compat::opencode_protocol_for_save(model),
+            None => Err("模型不在当前 Ofox 目录中"),
+        };
+        match outcome {
+            Ok(protocol) => resolved.push((id.clone(), Some(protocol.to_string()))),
+            Err(reason) => skipped.push(SkippedModel {
+                id: id.clone(),
+                reason: reason.to_string(),
+            }),
+        }
+    }
+    if resolved.is_empty() {
+        return Err("所选模型在 Ofox 目录里都没有 OpenCode 可用的协议端点".into());
+    }
+    Ok(ResolvedModels { resolved, skipped })
+}
+
+/// 保存的协议和后台检测结果不一致的模型，供弹窗提示「建议改协议」。
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProtocolHint {
+    pub id: String,
+    pub current: String,
+    pub suggested: String,
+}
+
+/// 条目里这个模型现在走的协议；没单独指定的用条目默认的 Responses。
+fn configured_opencode_protocol(settings: &serde_json::Value, model_id: &str) -> &'static str {
+    match settings
+        .pointer(&format!(
+            "/models/{}/provider/npm",
+            model_id.replace('~', "~0").replace('/', "~1")
+        ))
+        .and_then(|npm| npm.as_str())
+    {
+        Some(crate::opencode_config::OFOX_CHAT_NPM) => "chatCompletions",
+        _ => "responses",
+    }
+}
+
+fn protocol_hints(
+    settings: &serde_json::Value,
+    catalog: &[crate::services::model_fetch::FetchedModel],
+) -> Vec<ProtocolHint> {
+    let Some(models) = settings.get("models").and_then(|m| m.as_object()) else {
+        return Vec::new();
+    };
+    models
+        .keys()
+        .filter_map(|id| {
+            let model = catalog.iter().find(|m| &m.id == id)?;
+            let suggested = crate::model_compat::cached_opencode_protocol(model)?;
+            let current = configured_opencode_protocol(settings, id);
+            (suggested != current).then(|| ProtocolHint {
+                id: id.clone(),
+                current: current.to_string(),
+                suggested: suggested.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// 后台检测发现和已保存协议不一致的模型。再保存一次就会按检测结果改过来。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_opencode_protocol_hints(
+    state: State<'_, AppState>,
+    ofox_state: State<'_, OfoxAuthState>,
+) -> Result<Vec<ProtocolHint>, String> {
+    let provider_id = state
+        .db
+        .get_current_provider("opencode")
+        .map_err(|e| format!("读取当前供应商失败: {e}"))?
+        .ok_or_else(|| "opencode 暂无活跃供应商".to_string())?;
+    let Some(provider) = state
+        .db
+        .get_provider_by_id(&provider_id, "opencode")
+        .map_err(|e| format!("读取 {provider_id} 失败: {e}"))?
+    else {
+        return Ok(Vec::new());
+    };
+    let token = catalog_access_token(&ofox_state.0).await;
+    let Ok(catalog) =
+        crate::services::model_fetch::fetch_ofox_catalog("openai", token.as_deref(), false).await
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(protocol_hints(&provider.settings_config, &catalog.models))
+}
+
+/// OpenCode 保存用户选的一组模型。协议见 [`resolve_opencode_models`]；真正的流式检测
+/// 留给用户手动点「检测选中模型」，保存不等也不花钱。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn set_active_ofox_models(
+    state: State<'_, AppState>,
+    ofox_state: State<'_, OfoxAuthState>,
+    app: String,
+    models: Vec<String>,
+) -> Result<SaveModelsReport, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| format!("无效的应用类型: {e}"))?;
+    if app_type != AppType::OpenCode {
+        return Err("只有 OpenCode 支持选择多个模型".into());
+    }
+    let ids = clean_model_ids(&models)?;
+    let app_str = app_type.as_str();
+    let provider_id = state
+        .db
+        .get_current_provider(app_str)
+        .map_err(|e| format!("读取当前供应商失败: {e}"))?
+        .ok_or_else(|| format!("{app_str} 暂无活跃供应商"))?;
+    if !provider_id.starts_with("ofox-") {
+        return Err("当前不是 Ofox 服务商，已停止保存模型。".into());
+    }
+    let mut provider = state
+        .db
+        .get_provider_by_id(&provider_id, app_str)
+        .map_err(|e| format!("读取 {provider_id} 失败: {e}"))?
+        .ok_or_else(|| format!("供应商 {provider_id} 不存在"))?;
+
+    let catalog_token = catalog_access_token(&ofox_state.0).await;
+    let catalog =
+        crate::services::model_fetch::fetch_ofox_catalog("openai", catalog_token.as_deref(), false)
+            .await
+            .map_err(|e| format!("读取模型目录失败，请稍后重试：{e}"))?;
+    let ResolvedModels { resolved, skipped } = resolve_opencode_models(&ids, &catalog.models)?;
+
+    let previous_settings = provider.settings_config.clone();
+    write_opencode_models(&mut provider.settings_config, &resolved)?;
+    let api_key = crate::ofox_secret::default_store()
+        .load(crate::ofox_secret::Slot::ApiKey {
+            tool: app_type.into(),
+        })
+        .map_err(|_| "读取已绑定的 API Key 失败".to_string())?
+        .ok_or_else(|| "未找到已绑定的 API Key，请重新绑定".to_string())?;
+    crate::services::ofox_bind::persist_bound_settings(
+        &state.db,
+        crate::services::ofox_bind::Tool::from_app(&app_type),
+        &api_key,
+        &previous_settings,
+        &provider.settings_config,
+    )
+    .await?;
+    // 保存已完成；默认走 Responses 的模型在后台验证，不阻塞也不改配置。
+    tauri::async_runtime::spawn(crate::model_compat::verify_in_background(
+        catalog.models,
+        catalog_token,
+    ));
+    Ok(SaveModelsReport {
+        saved: resolved.into_iter().map(|(id, _)| id).collect(),
+        skipped,
+    })
 }
 
 fn require_configured(
@@ -635,6 +929,127 @@ fn set_codex_model(settings: &mut serde_json::Value, model: &str) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn catalog_model(id: &str, endpoints: &[&str]) -> crate::services::model_fetch::FetchedModel {
+        crate::services::model_fetch::FetchedModel {
+            id: id.into(),
+            name: None,
+            owned_by: None,
+            pricing_prompt: None,
+            supported_endpoints: Some(endpoints.iter().map(|e| e.to_string()).collect()),
+            supported_parameters: None,
+            input_modalities: None,
+            output_modalities: None,
+        }
+    }
+
+    #[test]
+    fn a_model_without_its_own_transport_runs_on_the_entry_default_responses() {
+        let settings = serde_json::json!({"models": {
+            "openai/a": {"name": "openai/a"},
+            "z-ai/b": {"name": "z-ai/b", "provider": {"npm": crate::opencode_config::OFOX_CHAT_NPM}},
+        }});
+        assert_eq!(
+            configured_opencode_protocol(&settings, "openai/a"),
+            "responses"
+        );
+        assert_eq!(
+            configured_opencode_protocol(&settings, "z-ai/b"),
+            "chatCompletions"
+        );
+    }
+
+    #[test]
+    fn opencode_save_skips_unusable_models_instead_of_failing_the_batch() {
+        let both = ["/v1/chat/completions", "/v1/responses"];
+        let catalog = vec![
+            catalog_model("openai/gpt-5.4", &both),
+            catalog_model("moonshotai/kimi-k2.6", &both),
+            catalog_model("x/embed", &["/v1/embeddings"]),
+        ];
+        let ids: Vec<String> = [
+            "openai/gpt-5.4",
+            "x/embed",
+            "moonshotai/kimi-k2.6",
+            "gone/model",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let ResolvedModels { resolved, skipped } = resolve_opencode_models(&ids, &catalog).unwrap();
+        assert_eq!(
+            resolved,
+            vec![
+                ("openai/gpt-5.4".to_string(), Some("responses".to_string())),
+                (
+                    "moonshotai/kimi-k2.6".to_string(),
+                    Some("chatCompletions".to_string())
+                ),
+            ]
+        );
+        assert_eq!(
+            skipped.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["x/embed", "gone/model"]
+        );
+    }
+
+    #[test]
+    fn opencode_save_with_nothing_usable_is_an_error() {
+        let ids = vec!["gone/model".to_string()];
+        assert!(resolve_opencode_models(&ids, &[]).is_err());
+    }
+
+    #[test]
+    fn opencode_models_keep_the_order_and_each_gets_its_own_transport() {
+        let mut settings =
+            serde_json::json!({ "npm": "x", "models": { "old": { "name": "old" } } });
+        write_opencode_models(
+            &mut settings,
+            &[
+                ("a/one".into(), Some("responses".into())),
+                ("b/two".into(), Some("chatCompletions".into())),
+                ("c/three".into(), None),
+            ],
+        )
+        .unwrap();
+        let ids: Vec<_> = settings["models"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(ids, ["a/one", "b/two", "c/three"]);
+        assert_eq!(
+            settings["models"]["a/one"]["provider"]["npm"],
+            crate::opencode_config::OFOX_RESPONSES_NPM
+        );
+        assert_eq!(
+            settings["models"]["b/two"]["provider"]["npm"],
+            crate::opencode_config::OFOX_CHAT_NPM
+        );
+        assert!(settings["models"]["c/three"].get("provider").is_none());
+        assert_eq!(settings["models"]["c/three"]["name"], "c/three");
+    }
+
+    #[test]
+    fn an_unknown_opencode_protocol_is_rejected() {
+        let mut settings = serde_json::json!({});
+        assert!(
+            write_opencode_models(&mut settings, &[("a/one".into(), Some("bogus".into()))])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn selected_model_ids_are_trimmed_deduplicated_and_must_not_be_empty() {
+        assert_eq!(
+            clean_model_ids(&[" a/one ".into(), "a/one".into(), "".into(), "b/two".into()])
+                .unwrap(),
+            ["a/one", "b/two"]
+        );
+        assert!(clean_model_ids(&["  ".into()]).is_err());
+        assert!(clean_model_ids(&[]).is_err());
+    }
 
     #[test]
     fn ping_says_the_balance_ran_out_instead_of_dumping_the_body() {

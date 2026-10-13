@@ -462,6 +462,115 @@ command = "noop"
 }
 
 #[test]
+fn codex_mcp_entries_are_written_without_type_and_import_back_unchanged() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let path = cc_switch_lib::get_codex_config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create codex dir");
+    }
+
+    let mut config = MultiAppConfig::default();
+    config.mcp.codex.servers.insert(
+        "local".into(),
+        json!({
+            "id": "local",
+            "enabled": true,
+            "server": {"type": "stdio", "command": "npx", "args": ["-y", "pkg"]}
+        }),
+    );
+    config.mcp.codex.servers.insert(
+        "remote".into(),
+        json!({
+            "id": "remote",
+            "enabled": true,
+            "server": {"type": "http", "url": "https://example.com/mcp", "headers": {"K": "v"}}
+        }),
+    );
+    cc_switch_lib::sync_enabled_to_codex(&config).expect("sync codex");
+
+    // Codex ignores `type` and warns about it at startup.
+    let text = fs::read_to_string(&path).expect("read config.toml");
+    assert!(!text.contains("type"), "no type key expected:\n{text}");
+    assert!(text.contains("command = \"npx\""));
+    assert!(text.contains("url = \"https://example.com/mcp\""));
+
+    // Without `type` the entries must still be read back as the right kind.
+    let mut imported = MultiAppConfig::default();
+    cc_switch_lib::import_from_codex(&mut imported).expect("import codex");
+    let servers = imported.mcp.servers.as_ref().expect("servers");
+    let local = servers
+        .get("local")
+        .expect("local")
+        .server
+        .as_object()
+        .unwrap()
+        .clone();
+    assert_eq!(local.get("type").and_then(|v| v.as_str()), Some("stdio"));
+    assert_eq!(local.get("command").and_then(|v| v.as_str()), Some("npx"));
+    let remote = servers
+        .get("remote")
+        .expect("remote")
+        .server
+        .as_object()
+        .unwrap()
+        .clone();
+    assert_eq!(remote.get("type").and_then(|v| v.as_str()), Some("http"));
+    assert_eq!(
+        remote.get("url").and_then(|v| v.as_str()),
+        Some("https://example.com/mcp")
+    );
+    assert_eq!(
+        remote
+            .get("headers")
+            .and_then(|v| v.get("K"))
+            .and_then(|v| v.as_str()),
+        Some("v")
+    );
+}
+
+#[test]
+fn launching_codex_cleanup_removes_only_the_ignored_type_keys() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let path = cc_switch_lib::get_codex_config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create codex dir");
+    }
+    fs::write(
+        &path,
+        "model = \"gpt-6-sol\"\n\n[mcp_servers.a]\ntype = \"stdio\"\ncommand = \"npx\"\n\n[mcp_servers.node_repl]\ncommand = \"/x/node_repl\"\n",
+    )
+    .expect("write codex config");
+
+    assert!(cc_switch_lib::strip_ignored_type_from_codex_config().expect("cleanup"));
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "model = \"gpt-6-sol\"\n\n[mcp_servers.a]\ncommand = \"npx\"\n\n[mcp_servers.node_repl]\ncommand = \"/x/node_repl\"\n"
+    );
+    // Already clean: no rewrite.
+    assert!(!cc_switch_lib::strip_ignored_type_from_codex_config().expect("cleanup again"));
+}
+
+#[test]
+fn launching_codex_cleanup_leaves_an_invalid_or_missing_config_alone() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    let path = cc_switch_lib::get_codex_config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create codex dir");
+    }
+    assert!(!cc_switch_lib::strip_ignored_type_from_codex_config().expect("missing file"));
+    assert!(!path.exists(), "must not create the file");
+    fs::write(&path, "[mcp_servers.a\ntype = ").expect("write invalid toml");
+    assert!(!cc_switch_lib::strip_ignored_type_from_codex_config().expect("invalid file"));
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        "[mcp_servers.a\ntype = "
+    );
+}
+
+#[test]
 fn import_from_codex_adds_servers_from_mcp_servers_table() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();

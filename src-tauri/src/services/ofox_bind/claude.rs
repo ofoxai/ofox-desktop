@@ -70,14 +70,26 @@ pub(crate) fn bound_settings(
 }
 
 /// 绑定和切换模型共用。
+///
+/// `select_route`：在应用里选了模型时，用户在 agent 里「记住」的 `model` 也要跟着改，
+/// 不然之后刷新会把它当成用户的新选择改回来。没有这个字段就不加。
 pub(crate) fn write_bound(
     template: &Value,
     api_key: &str,
+    select_route: bool,
     txn: &mut FileTxn,
 ) -> Result<(), String> {
     let path = settings_path();
     let current = read_text(&path)?;
-    let bound = bound_settings(current.as_deref(), template, api_key)?;
+    let mut bound = bound_settings(current.as_deref(), template, api_key)?;
+    if let (true, Some(model)) = (select_route, template_str(template, MODEL)) {
+        let before = json_file::parse_object(Some(&bound), LABEL)?;
+        if before.get("model").is_some() {
+            let mut after = before.clone();
+            json_file::set(&mut after, &["model"], model.into());
+            bound = json_file::render_changed(&bound, KeyStyle::Json, &before, &after)?;
+        }
+    }
     txn.write(&path, bound.as_bytes())
         .map_err(|e| format!("写入 Claude 配置失败：{e}"))
 }

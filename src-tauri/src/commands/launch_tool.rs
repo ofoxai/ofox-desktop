@@ -351,17 +351,33 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn cli_args(tool_id: &str, bin: &str, selection: Option<(&str, &str)>) -> Vec<String> {
+/// OpenCode 的当前模型记在它自己的状态里（`recent` 第一项），配置里写了 `model` 时它会
+/// 盖住 TUI 的选择，所以用 `--model` 把用户最近的选择带上：选的是 Ofox 的条目（桌面端
+/// 管的，或用户自己配的、同样指向 Ofox 网关的）就带上；选了别家的不覆盖。没选过才用
+/// 桌面端保存的。返回完整的 `<服务商>/<模型>`。
+fn opencode_launch_selection(
+    live: Option<(String, String)>,
+    live_is_ofox: bool,
+    saved: Option<(String, String)>,
+) -> Option<String> {
+    match live {
+        Some((provider, model)) if live_is_ofox => Some(format!("{provider}/{model}")),
+        Some(_) => None,
+        None => saved
+            .filter(|(provider, model)| {
+                provider.trim().starts_with("ofox-") && !model.trim().is_empty()
+            })
+            .map(|(provider, model)| format!("{}/{}", provider.trim(), model.trim())),
+    }
+}
+
+fn cli_args(tool_id: &str, bin: &str, model: Option<&str>) -> Vec<String> {
     let mut args = vec![bin.to_string()];
 
     if tool_id == "opencode" {
-        if let Some((provider_id, model)) = selection {
-            let provider_id = provider_id.trim();
-            let model = model.trim();
-            if provider_id.starts_with("ofox-") && !model.is_empty() {
-                args.push("--model".to_string());
-                args.push(format!("{provider_id}/{model}"));
-            }
+        if let Some(model) = model {
+            args.push("--model".to_string());
+            args.push(model.to_string());
         }
     }
 
@@ -425,21 +441,50 @@ pub async fn launch_tool_cli(app: AppHandle, tool_id: String) -> Result<(), Stri
             .map_err(|e| format!("同步 Gemini 认证方式失败: {e}"))?;
     }
 
+    if matches!(tool_id.as_str(), "claude" | "gemini") {
+        let state = app.state::<crate::store::AppState>();
+        crate::commands::manage_tool::follow_live_model(&state, &tool_id).await;
+    }
+
+    // 以前版本给 Codex 的 MCP 条目写了 `type`，Codex 不认，每次启动都警告。只删这个键。
+    if tool_id == "codex" {
+        if let Err(e) = crate::mcp::strip_ignored_type_from_codex_config() {
+            log::warn!("清理 Codex MCP 配置里的 type 失败: {e}");
+        }
+        // 探测 Codex 认不认 `disable_response_storage` 要起一次 Codex 进程，别堵住异步运行时。
+        match tokio::task::spawn_blocking(
+            crate::services::ofox_bind::codex::strip_flag_codex_ignores,
+        )
+        .await
+        {
+            Ok(Err(e)) => log::warn!("清理 Codex 配置里被忽略的设置失败: {e}"),
+            Err(e) => log::warn!("清理 Codex 配置的任务异常结束: {e}"),
+            Ok(Ok(_)) => {}
+        }
+    }
+
     let selection = if tool_id == "opencode" {
         let state = app.state::<crate::store::AppState>();
-        crate::commands::manage_tool::read_active_provider_and_model_for(&state, &AppType::OpenCode)
-            .ok()
+        let saved = crate::commands::manage_tool::read_active_provider_and_model_for(
+            &state,
+            &AppType::OpenCode,
+        )
+        .ok();
+        let live = crate::services::ofox_bind::opencode_state::live_selection().unwrap_or(None);
+        let live_is_ofox = live.as_ref().is_some_and(|selection| {
+            selection.provider == crate::services::ofox_bind::opencode_state::PROVIDER_ID
+                || crate::services::ofox_bind::opencode_state::is_gateway(&selection.provider)
+        });
+        opencode_launch_selection(
+            live.map(|selection| (selection.provider, selection.model)),
+            live_is_ofox,
+            saved,
+        )
     } else {
         None
     };
 
-    let args = cli_args(
-        &tool_id,
-        bin,
-        selection
-            .as_ref()
-            .map(|(provider, model)| (provider.as_str(), model.as_str())),
-    );
+    let args = cli_args(&tool_id, bin, selection.as_deref());
 
     // `$SHELL -l -i -c "…"`：交给用户的 login shell 处理 rc 加载，
     // 避开 bash 硬 source zshrc 会踩到 zsh 语法（`(N)` glob 修饰符、
@@ -709,22 +754,63 @@ mod tests {
     }
 
     #[test]
-    fn opencode_launch_uses_active_ofox_model() {
+    fn opencode_launch_passes_the_selected_model() {
         let args = cli_args(
             "opencode",
             "opencode",
-            Some(("ofox-opencode", "openai/gpt-5.6-terra")),
+            Some("ofox-opencode/openai/gpt-5.6-terra"),
         );
         assert_eq!(
             args,
             ["opencode", "--model", "ofox-opencode/openai/gpt-5.6-terra"]
         );
+        assert_eq!(cli_args("opencode", "opencode", None), ["opencode"]);
+    }
+
+    fn pair(provider: &str, model: &str) -> Option<(String, String)> {
+        Some((provider.to_string(), model.to_string()))
     }
 
     #[test]
-    fn opencode_launch_does_not_override_non_ofox_provider() {
-        let args = cli_args("opencode", "opencode", Some(("openai", "gpt-5.6-luna")));
-        assert_eq!(args, ["opencode"]);
+    fn opencode_launch_uses_the_saved_ofox_model() {
+        let chosen = opencode_launch_selection(None, false, pair("ofox-opencode", "openai/gpt-x"));
+        assert_eq!(chosen.as_deref(), Some("ofox-opencode/openai/gpt-x"));
+    }
+
+    #[test]
+    fn opencode_launch_does_not_override_when_the_saved_provider_is_not_ofox() {
+        let chosen = opencode_launch_selection(None, false, pair("openai", "gpt-5.6-luna"));
+        assert_eq!(chosen, None);
+    }
+
+    #[test]
+    fn opencode_launch_follows_the_model_chosen_in_the_tui() {
+        let chosen = opencode_launch_selection(
+            pair("ofox-opencode", "anthropic/other"),
+            true,
+            pair("ofox-opencode", "openai/gpt-x"),
+        );
+        assert_eq!(chosen.as_deref(), Some("ofox-opencode/anthropic/other"));
+    }
+
+    #[test]
+    fn opencode_launch_passes_a_tui_choice_of_the_users_own_ofox_entry() {
+        let chosen = opencode_launch_selection(
+            pair("ofox", "openai/gpt-6-luna"),
+            true,
+            pair("ofox-opencode", "openai/gpt-x"),
+        );
+        assert_eq!(chosen.as_deref(), Some("ofox/openai/gpt-6-luna"));
+    }
+
+    #[test]
+    fn opencode_launch_does_not_override_a_tui_choice_of_another_provider() {
+        let chosen = opencode_launch_selection(
+            pair("anthropic", "claude"),
+            false,
+            pair("ofox-opencode", "openai/gpt-x"),
+        );
+        assert_eq!(chosen, None);
     }
 
     #[cfg(target_os = "macos")]
@@ -745,7 +831,7 @@ mod tests {
         let args = cli_args(
             "opencode",
             "opencode",
-            Some(("ofox-opencode", "openai/gpt-5.6-terra")),
+            Some("ofox-opencode/openai/gpt-5.6-terra"),
         );
         let command = build_unix_command(&args);
         assert!(command.contains("exec \"$@\""));

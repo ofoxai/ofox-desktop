@@ -311,107 +311,6 @@ async function renderTool(id: string, label: string, version = "1.0") {
 }
 
 describe("ManageToolDialog streaming compatibility", () => {
-  it("reapplies the detected transport to an already-selected OpenCode model", async () => {
-    const model = compatibleModel("z-ai/glm-5.3");
-    model.supportedEndpoints = ["/v1/responses", "/v1/chat/completions"];
-    mockSingleTool(model);
-    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue(model.id);
-    const check = vi
-      .spyOn(manageToolApi, "checkCompatibility")
-      .mockResolvedValue({
-        app: "opencode",
-        model: model.id,
-        protocol: "chatCompletions",
-        status: "compatible",
-        source: "probe",
-        reason: null,
-      });
-    const save = vi.spyOn(manageToolApi, "setActiveModel").mockResolvedValue();
-
-    await renderTool("opencode", "OpenCode");
-    await waitFor(() =>
-      expect(check).toHaveBeenCalledWith("opencode", model.id, false),
-    );
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "应用检测结果" }),
-      ).toBeEnabled(),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "应用检测结果" }));
-    await waitFor(() =>
-      expect(save).toHaveBeenCalledWith(
-        "opencode",
-        model.id,
-        undefined,
-        "chatCompletions",
-      ),
-    );
-  });
-
-  it("saves OpenCode with the detected Chat transport", async () => {
-    const model = compatibleModel("z-ai/glm-5.3");
-    model.supportedEndpoints = ["/v1/responses", "/v1/chat/completions"];
-    mockSingleTool(model);
-    vi.spyOn(manageToolApi, "checkCompatibility").mockResolvedValue({
-      app: "opencode",
-      model: model.id,
-      protocol: "chatCompletions",
-      status: "compatible",
-      source: "probe",
-      reason: null,
-    });
-    const save = vi.spyOn(manageToolApi, "setActiveModel").mockResolvedValue();
-    await renderTool("opencode", "OpenCode");
-    await chooseModel(model.id);
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "保存" })).toBeEnabled(),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    await waitFor(() =>
-      expect(save).toHaveBeenCalledWith(
-        "opencode",
-        model.id,
-        undefined,
-        "chatCompletions",
-      ),
-    );
-  });
-
-  it("saves without asking anything when the check cannot finish", async () => {
-    const model = compatibleModel("z-ai/glm-5.3");
-    mockSingleTool(model);
-    vi.spyOn(manageToolApi, "checkCompatibility").mockResolvedValue({
-      app: "opencode",
-      model: model.id,
-      protocol: "responses",
-      status: "inconclusive",
-      source: "probe",
-      reason: "网关暂时无法完成检测，请稍后重试",
-    });
-    const save = vi.spyOn(manageToolApi, "setActiveModel").mockResolvedValue();
-    await renderTool("opencode", "OpenCode");
-    await chooseModel(model.id);
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "保存" })).toBeEnabled(),
-    );
-    expect(screen.queryByText(/暂时无法确定/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/网关暂时无法完成检测/)).not.toBeInTheDocument();
-    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("combobox", { name: "手动选择 OpenCode 协议" }),
-    ).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    await waitFor(() =>
-      expect(save).toHaveBeenCalledWith(
-        "opencode",
-        model.id,
-        undefined,
-        undefined,
-      ),
-    );
-  });
-
   it("does not check Codex or ChatGPT models before saving", async () => {
     const model = compatibleModel("deepseek/deepseek-v4.1-flash");
     model.supportedEndpoints = ["/v1/responses"];
@@ -436,6 +335,31 @@ describe("ManageToolDialog streaming compatibility", () => {
         undefined,
       ),
     );
+  });
+
+  it("opens ChatGPT on the model the app is using, not the Codex config default", async () => {
+    mockSingleTool(compatibleModel("openai/gpt-6-luna"));
+    // The Codex config still says the old default; the ChatGPT app moved on.
+    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue("gpt-5.6-luna");
+    vi.spyOn(manageToolApi, "getChatGptModel").mockResolvedValue("gpt-6-luna");
+
+    await renderTool("chatgpt", "ChatGPT");
+
+    expect(await screen.findByText("gpt-6-luna")).toBeVisible();
+    expect(screen.queryByText("gpt-5.6-luna")).not.toBeInTheDocument();
+  });
+
+  it("still reads the Codex config model for Codex itself", async () => {
+    mockSingleTool(compatibleModel("openai/gpt-6-luna"));
+    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue("gpt-5.6-luna");
+    const chatgpt = vi
+      .spyOn(manageToolApi, "getChatGptModel")
+      .mockResolvedValue("gpt-6-luna");
+
+    await renderTool("codex", "Codex");
+
+    expect(await screen.findByText("gpt-5.6-luna")).toBeVisible();
+    expect(chatgpt).not.toHaveBeenCalled();
   });
 
   it("blocks a fixed-protocol client when its stream is incompatible", async () => {
@@ -554,54 +478,6 @@ describe("ManageToolDialog re-saving an unchanged model", () => {
     expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
     expect(save).not.toHaveBeenCalled();
   });
-
-  it("keeps an unchanged OpenCode save gated on its running check", async () => {
-    const model = compatibleModel("z-ai/glm-5.3");
-    mockSingleTool(model);
-    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue(model.id);
-    let finish!: (
-      value: Awaited<ReturnType<typeof manageToolApi.checkCompatibility>>,
-    ) => void;
-    vi.spyOn(manageToolApi, "checkCompatibility").mockReturnValue(
-      new Promise((resolve) => {
-        finish = resolve;
-      }),
-    );
-
-    await renderTool("opencode", "OpenCode");
-    await waitFor(() =>
-      expect(screen.getByRole("combobox")).toHaveTextContent(model.id),
-    );
-    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
-
-    await act(async () => {
-      finish({
-        app: "opencode",
-        model: model.id,
-        protocol: "chatCompletions",
-        status: "compatible",
-        source: "probe",
-        reason: null,
-      });
-    });
-    expect(screen.getByRole("button", { name: "应用检测结果" })).toBeEnabled();
-  });
-
-  it("labels an unset OpenCode model as a plain save", async () => {
-    mockSingleTool(compatibleModel("z-ai/glm-5.3"));
-    const save = vi.spyOn(manageToolApi, "setActiveModel").mockResolvedValue();
-
-    await renderTool("opencode", "OpenCode");
-    await screen.findByText("/Users/test/.config/tool/config.json");
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "保存" })).toBeEnabled(),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
-
-    await waitFor(() =>
-      expect(save).toHaveBeenCalledWith("opencode", "", undefined, undefined),
-    );
-  });
 });
 
 describe("ManageToolDialog model picker", () => {
@@ -610,7 +486,7 @@ describe("ManageToolDialog model picker", () => {
     mockSingleTool(model);
     const fetch = vi.spyOn(modelFetch, "fetchOfoxModels");
 
-    await renderTool("opencode", "OpenCode");
+    await renderTool("openclaw", "OpenClaw");
     await waitFor(() => expect(fetch).toHaveBeenCalledWith("openai", false));
     expect(
       screen.queryByRole("button", { name: "刷新模型列表" }),
@@ -645,7 +521,7 @@ describe("ManageToolDialog model picker", () => {
     const model = compatibleModel("openai/gpt-6-luna");
     model.supportedEndpoints = ["/v1/responses"];
     mockSingleTool(model);
-    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue(model.id);
+    vi.spyOn(manageToolApi, "getChatGptModel").mockResolvedValue(model.id);
 
     await renderTool("chatgpt", "ChatGPT");
     await screen.findByText(model.id);
@@ -653,7 +529,8 @@ describe("ManageToolDialog model picker", () => {
     expect(
       screen.getByText(/Chat 和 Work 使用 OpenAI 账号/),
     ).toBeInTheDocument();
-    expect(manageToolApi.getActiveModel).toHaveBeenCalledWith("chatgpt");
+    expect(manageToolApi.getChatGptModel).toHaveBeenCalled();
+    expect(screen.getByText(/保存的是 Codex 的默认模型/)).toBeInTheDocument();
     expect(screen.getByRole("combobox")).toBeInTheDocument();
   });
 
@@ -718,11 +595,11 @@ describe("ManageToolDialog WorkBuddy multi-model management", () => {
 
     await renderTool("workbuddy", "WorkBuddy");
 
-    expect(await screen.findByText("WorkBuddy 当前配置地址")).toBeVisible();
+    expect(await screen.findByText("当前地址")).toBeVisible();
     expect(
       screen.getByText("https://api.ofox.ai/v1/chat/completions"),
     ).toBeVisible();
-    expect(screen.getByText(/WorkBuddy 配置与当前地区不一致/)).toBeVisible();
+    expect(screen.getByText(/与当前地区不一致/)).toBeVisible();
   });
 
   it("saves every catalog-compatible model without automatic probes", async () => {
@@ -1153,5 +1030,259 @@ describe("ManageToolDialog unbind", () => {
       expect(error).toHaveBeenCalledWith("解除绑定失败：Error: restore failed"),
     );
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
+  });
+});
+
+describe("ManageToolDialog OpenCode multi-model management", () => {
+  function mockOpenCode(models: FetchedModel[], saved: string[] = []) {
+    vi.spyOn(manageToolApi, "getConfigFilePath").mockResolvedValue(
+      "/Users/test/.config/opencode/opencode.json",
+    );
+    vi.spyOn(manageToolApi, "getActiveModels").mockResolvedValue(saved);
+    vi.spyOn(modelFetch, "fetchOfoxModels").mockResolvedValue(models);
+  }
+
+  async function pick(...ids: string[]) {
+    fireEvent.click(screen.getByRole("combobox", { name: "模型" }));
+    const listbox = await screen.findByRole("listbox");
+    for (const id of ids) {
+      fireEvent.click(
+        within(listbox).getByRole("option", { name: new RegExp(id) }),
+      );
+    }
+  }
+
+  it("shows the saved set and lets the user save several models at once", async () => {
+    const models = [
+      compatibleModel("openai/model-a"),
+      compatibleModel("anthropic/model-b"),
+      compatibleModel("google/model-c"),
+    ];
+    mockOpenCode(models, ["openai/model-a"]);
+    const save = vi.spyOn(manageToolApi, "setActiveModels").mockResolvedValue({
+      saved: [],
+      skipped: [],
+    });
+    const single = vi.spyOn(manageToolApi, "setActiveModel");
+
+    await renderTool("opencode", "OpenCode");
+    expect(await screen.findByText("已选择 1 个兼容模型")).toBeVisible();
+
+    await pick("anthropic/model-b");
+    await waitFor(() =>
+      expect(screen.getByText("已选择 2 个兼容模型")).toBeVisible(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith("opencode", [
+        "openai/model-a",
+        "anthropic/model-b",
+      ]),
+    );
+    expect(single).not.toHaveBeenCalled();
+  });
+
+  it("offers to apply a protocol the background check preferred, by saving the saved set again", async () => {
+    mockOpenCode([compatibleModel("openai/model-a")], ["openai/model-a"]);
+    const hints = vi
+      .spyOn(manageToolApi, "getOpenCodeProtocolHints")
+      .mockResolvedValueOnce([
+        {
+          id: "openai/model-a",
+          current: "responses",
+          suggested: "chatCompletions",
+        },
+      ])
+      .mockResolvedValue([]);
+    const save = vi.spyOn(manageToolApi, "setActiveModels").mockResolvedValue({
+      saved: ["openai/model-a"],
+      skipped: [],
+    });
+
+    await renderTool("opencode", "OpenCode");
+    expect(await screen.findByText(/openai\/model-a → Chat/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "应用建议" }));
+
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith("opencode", ["openai/model-a"]),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText(/openai\/model-a → Chat/)).toBeNull(),
+    );
+    expect(hints).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows no protocol suggestion when the background check agrees", async () => {
+    mockOpenCode([compatibleModel("openai/model-a")], ["openai/model-a"]);
+    vi.spyOn(manageToolApi, "getOpenCodeProtocolHints").mockResolvedValue([]);
+
+    await renderTool("opencode", "OpenCode");
+    await screen.findByText("已选择 1 个兼容模型");
+
+    expect(screen.queryByRole("button", { name: "应用建议" })).toBeNull();
+  });
+
+  it("offers select-all for OpenCode and saves every listed model", async () => {
+    const models = [
+      compatibleModel("openai/model-a"),
+      compatibleModel("anthropic/model-b"),
+      compatibleModel("google/model-c"),
+    ];
+    mockOpenCode(models, ["openai/model-a"]);
+    const save = vi.spyOn(manageToolApi, "setActiveModels").mockResolvedValue({
+      saved: models.map((model) => model.id),
+      skipped: [],
+    });
+
+    await renderTool("opencode", "OpenCode");
+    await screen.findByText("已选择 1 个兼容模型");
+    fireEvent.click(screen.getByRole("button", { name: "全选兼容" }));
+    await waitFor(() =>
+      expect(screen.getByText("已选择 3 个兼容模型")).toBeVisible(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith("opencode", [
+        "openai/model-a",
+        "anthropic/model-b",
+        "google/model-c",
+      ]),
+    );
+  });
+
+  it("warns about the models the backend skipped but still closes after saving the rest", async () => {
+    mockOpenCode(
+      [compatibleModel("openai/model-a"), compatibleModel("anthropic/model-b")],
+      ["openai/model-a"],
+    );
+    vi.spyOn(manageToolApi, "setActiveModels").mockResolvedValue({
+      saved: ["openai/model-a"],
+      skipped: [
+        { id: "anthropic/model-b", reason: "模型不在当前 Ofox 目录中" },
+      ],
+    });
+    const toastWarning = vi.spyOn(toast, "warning");
+
+    await renderTool("opencode", "OpenCode");
+    await screen.findByText("已选择 1 个兼容模型");
+    await pick("anthropic/model-b");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "保存" })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(toastWarning).toHaveBeenCalledWith(
+        expect.stringContaining("anthropic/model-b"),
+      ),
+    );
+  });
+
+  it("does not save an empty selection", async () => {
+    mockOpenCode([compatibleModel("openai/model-a")], ["openai/model-a"]);
+    const save = vi.spyOn(manageToolApi, "setActiveModels").mockResolvedValue({
+      saved: [],
+      skipped: [],
+    });
+
+    await renderTool("opencode", "OpenCode");
+    await screen.findByText("已选择 1 个兼容模型");
+    fireEvent.click(screen.getByRole("button", { name: "取消全选" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "保存" })).toBeDisabled(),
+    );
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it("does not run a per-model check in the dialog or on save", async () => {
+    mockOpenCode([compatibleModel("openai/model-a")], ["openai/model-a"]);
+    const check = vi.spyOn(manageToolApi, "checkCompatibility");
+
+    await renderTool("opencode", "OpenCode");
+    await screen.findByText("已选择 1 个兼容模型");
+
+    expect(check).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+  });
+
+  it("reports the model the backend rejected and keeps the dialog open", async () => {
+    mockOpenCode(
+      [compatibleModel("openai/model-a"), compatibleModel("anthropic/model-b")],
+      ["openai/model-a"],
+    );
+    vi.spyOn(manageToolApi, "setActiveModels").mockRejectedValue(
+      "anthropic/model-b：模型与客户端协议不兼容",
+    );
+    const toastError = vi.spyOn(toast, "error");
+
+    await renderTool("opencode", "OpenCode");
+    await screen.findByText("已选择 1 个兼容模型");
+    await pick("anthropic/model-b");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "保存" })).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() =>
+      expect(toastError).toHaveBeenCalledWith(
+        expect.stringContaining("anthropic/model-b"),
+      ),
+    );
+  });
+
+  it("checks one chosen model's stream on demand and shows the protocol it found", async () => {
+    mockOpenCode(
+      [compatibleModel("openai/model-a"), compatibleModel("anthropic/model-b")],
+      ["openai/model-a", "anthropic/model-b"],
+    );
+    const check = vi
+      .spyOn(manageToolApi, "checkCompatibility")
+      .mockResolvedValue({
+        app: "opencode",
+        model: "anthropic/model-b",
+        protocol: "chatCompletions",
+        status: "compatible",
+        source: "probe",
+        reason: null,
+      });
+
+    await renderTool("opencode", "OpenCode");
+    await screen.findByText("已选择 2 个兼容模型");
+    expect(check).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByRole("combobox", { name: "选择待检测的 OpenCode 模型" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("option", { name: "anthropic/model-b" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "检测选中模型" }));
+
+    await waitFor(() =>
+      expect(check).toHaveBeenCalledWith("opencode", "anthropic/model-b", true),
+    );
+    expect(await screen.findByText(/Chat Completions/)).toBeVisible();
+  });
+
+  it("says a model that fails the stream check may not work but can still be saved", async () => {
+    mockOpenCode([compatibleModel("openai/model-a")], ["openai/model-a"]);
+    vi.spyOn(manageToolApi, "checkCompatibility").mockResolvedValue({
+      app: "opencode",
+      model: "openai/model-a",
+      protocol: null,
+      status: "incompatible",
+      source: "probe",
+      reason: "流式输出不完整",
+    });
+
+    await renderTool("opencode", "OpenCode");
+    await screen.findByText("已选择 1 个兼容模型");
+    fireEvent.click(screen.getByRole("button", { name: "检测选中模型" }));
+
+    expect(await screen.findByText(/仍可保存/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
   });
 });

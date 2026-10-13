@@ -52,11 +52,13 @@ import {
   TOOL_PROTOCOL,
   type PingResult,
   type CompatibilityResult,
+  type ProtocolHint,
   type WorkBuddyEndpointStatus,
 } from "@/lib/api/manageTool";
 import {
   fetchOfoxModels,
   filterOfoxModelsByProtocol,
+  filterOfoxModelsForOpenCode,
   filterOfoxModelsForWorkBuddy,
   toWorkBuddyModelSelection,
   type FetchedModel,
@@ -182,6 +184,7 @@ export default function ManageToolDialog({
   const [currentModel, setCurrentModel] = useState<string>("");
   const [draftModel, setDraftModel] = useState<string>("");
   const [currentModels, setCurrentModels] = useState<string[]>([]);
+  const [protocolHints, setProtocolHints] = useState<ProtocolHint[]>([]);
   const [draftModels, setDraftModels] = useState<string[]>([]);
   // Re-saving an unchanged model is allowed only after the current value was
   // actually read — otherwise an empty draft would wipe the configured model.
@@ -311,7 +314,25 @@ export default function ManageToolDialog({
           if (catalogResult.status === "rejected") throw catalogResult.reason;
           return;
         }
-        const m = await manageToolApi.getActiveModel(tool.id);
+        if (tool.id === "opencode") {
+          const saved = await manageToolApi.getActiveModels(tool.id);
+          if (!cancelled) {
+            setCurrentModels(saved);
+            setDraftModels(saved);
+            setCurrentModelLoaded(true);
+          }
+          // 后台检测的结果只是提示，读不出来不影响管理。
+          const hints = await manageToolApi
+            .getOpenCodeProtocolHints()
+            .catch(() => []);
+          if (!cancelled) setProtocolHints(hints);
+          return;
+        }
+        // ChatGPT 桌面 App 的模型记在它自己的状态文件里，和首页同一个来源，免得两边不一致。
+        const m =
+          tool.id === "chatgpt"
+            ? await manageToolApi.getChatGptModel()
+            : await manageToolApi.getActiveModel(tool.id);
         if (!cancelled) {
           setCurrentModel(m);
           setDraftModel(m);
@@ -339,6 +360,9 @@ export default function ManageToolDialog({
   // 是硬编码），选到只支持 chat/completions 的模型会导致 CLI 报
   // `wire_api not supported`——按端点二次过滤，UI 层就不给用户选到
   // 不兼容的模型。其他固定 Chat 客户端也按端点过滤。
+  // OpenCode 和 WorkBuddy 一样让用户选一组模型（OpenCode 的 `/model` 能在条目里的
+  // 模型之间切换）。OpenCode 的协议由后端按每个模型分别检测，界面不单独检测。
+  const multiModel = tool?.id === "workbuddy" || tool?.id === "opencode";
   const requiredEndpoint =
     tool?.id === "codex" || tool?.id === "chatgpt"
       ? "/v1/responses"
@@ -355,9 +379,13 @@ export default function ManageToolDialog({
         const all = await fetchOfoxModels(protocol, forceRefresh);
         if (request !== modelsRequest.current) return;
         setModels(
+          // 能输出文字且带工具调用的模型都能选（含 Claude、Gemini），图片、视频生成
+          // 模型不列出来。WorkBuddy 只走 chat；OpenCode chat、responses 都行。
           tool?.id === "workbuddy"
             ? filterOfoxModelsForWorkBuddy(all)
-            : filterOfoxModelsByProtocol(all, protocol, requiredEndpoint),
+            : multiModel
+              ? filterOfoxModelsForOpenCode(all)
+              : filterOfoxModelsByProtocol(all, protocol, requiredEndpoint),
         );
       } catch (e) {
         console.error("[ManageToolDialog] fetchOfoxModels failed", e);
@@ -366,7 +394,7 @@ export default function ManageToolDialog({
         if (request === modelsRequest.current) setModelsLoading(false);
       }
     },
-    [protocol, requiredEndpoint, tool?.id],
+    [protocol, requiredEndpoint, multiModel, tool?.id],
   );
 
   useEffect(() => {
@@ -416,25 +444,25 @@ export default function ManageToolDialog({
   );
 
   useEffect(() => {
-    if (tool?.id === "workbuddy") return;
+    if (multiModel) return;
     void runCompatibility(false);
     return () => {
       compatibilityRequest.current += 1;
     };
-  }, [runCompatibility, tool?.id]);
+  }, [runCompatibility, multiModel]);
 
   useEffect(() => {
-    if (tool?.id !== "workbuddy" || draftModels.includes(workBuddyTestModel))
-      return;
+    if (!multiModel || draftModels.includes(workBuddyTestModel)) return;
     workBuddyTestRequest.current += 1;
     setWorkBuddyTestModel(draftModels[0] ?? "");
     setWorkBuddyTestResult(null);
     setWorkBuddyTestLoading(false);
-  }, [draftModels, tool?.id, workBuddyTestModel]);
+  }, [draftModels, multiModel, workBuddyTestModel]);
 
   const handleWorkBuddyTest = useCallback(async () => {
     if (
-      tool?.id !== "workbuddy" ||
+      !tool ||
+      !multiModel ||
       !workBuddyTestModel ||
       !configurationReady ||
       operationBusy
@@ -445,7 +473,7 @@ export default function ManageToolDialog({
     setWorkBuddyTestResult(null);
     try {
       const result = await manageToolApi.checkCompatibility(
-        "workbuddy",
+        tool.id,
         workBuddyTestModel,
         true,
       );
@@ -454,7 +482,7 @@ export default function ManageToolDialog({
     } catch {
       if (request === workBuddyTestRequest.current) {
         setWorkBuddyTestResult({
-          app: "workbuddy",
+          app: tool.id,
           model: workBuddyTestModel,
           protocol: null,
           status: "inconclusive",
@@ -466,7 +494,14 @@ export default function ManageToolDialog({
       if (request === workBuddyTestRequest.current)
         setWorkBuddyTestLoading(false);
     }
-  }, [tool?.id, workBuddyTestModel, configurationReady, operationBusy, t]);
+  }, [
+    tool,
+    multiModel,
+    workBuddyTestModel,
+    configurationReady,
+    operationBusy,
+    t,
+  ]);
 
   const handleOpenFolder = useCallback(async () => {
     if (!tool) return;
@@ -486,21 +521,15 @@ export default function ManageToolDialog({
     }
   }, [projectUrl]);
 
-  // A selected OpenCode model may keep the same ID while its transport needs
-  // to change (for example GLM Responses -> Chat). Allow applying the probe
-  // result without forcing the user to pick another model first.
-  const isDirty =
-    tool?.id === "workbuddy"
-      ? !arraysEqual(draftModels, currentModels)
-      : draftModel !== currentModel ||
-        (tool?.id === "opencode" &&
-          !!draftModel &&
-          compatibilityResults[0]?.model === draftModel);
+  const isDirty = multiModel
+    ? !arraysEqual(draftModels, currentModels)
+    : draftModel !== currentModel;
 
   const handleSave = useCallback(async () => {
     if (!tool || !configurationReady || operationBusy) return;
     const workBuddy = tool.id === "workbuddy";
     if (!isDirty && !currentModelLoaded) return;
+    let savedCount = draftModels.length;
     setSaving(true);
     try {
       if (workBuddy) {
@@ -517,6 +546,25 @@ export default function ManageToolDialog({
           selections.map((model) => toWorkBuddyModelSelection(model!)),
         );
         setCurrentModels(draftModels);
+      } else if (tool.id === "opencode") {
+        if (draftModels.length === 0) {
+          throw new Error("请至少选择一个 OpenCode 模型");
+        }
+        // 协议由后端按缓存和目录选，不发检测请求；没有可用端点的模型会被跳过。
+        const report = await manageToolApi.setActiveModels(
+          tool.id,
+          draftModels,
+        );
+        setCurrentModels(report.saved);
+        if (report.skipped.length > 0) {
+          toast.warning(
+            t("modelCompatibility.openCodeSkipped", {
+              count: report.skipped.length,
+              names: report.skipped.map((model) => model.id).join("、"),
+            }),
+          );
+        }
+        savedCount = report.saved.length;
       } else {
         // 没查出结果时不传协议，由后端按模型目录选（Responses 优先）。
         const selectedProtocol =
@@ -532,7 +580,11 @@ export default function ManageToolDialog({
         setCurrentModel(draftModel);
       }
       toast.success(
-        workBuddy ? `已同步 ${draftModels.length} 个模型` : "模型已更新",
+        workBuddy
+          ? `已同步 ${draftModels.length} 个模型`
+          : tool.id === "opencode"
+            ? `已保存 ${savedCount} 个模型`
+            : "模型已更新",
       );
       onChanged?.();
       // Close on success — mirrors handleUnbind's收尾 sequence and
@@ -559,7 +611,30 @@ export default function ManageToolDialog({
     onOpenChange,
   ]);
 
-  const probeModel = draftModel;
+  const handleApplyProtocolHints = useCallback(async () => {
+    if (tool?.id !== "opencode" || operationBusy) return;
+    setSaving(true);
+    try {
+      const report = await manageToolApi.setActiveModels(
+        tool.id,
+        currentModels,
+      );
+      setCurrentModels(report.saved);
+      setDraftModels(report.saved);
+      setProtocolHints(
+        await manageToolApi.getOpenCodeProtocolHints().catch(() => []),
+      );
+      toast.success(t("modelCompatibility.openCodeHintApplied"));
+      onChanged?.();
+    } catch (e) {
+      toast.error(`保存失败：${String(e)}`);
+    } finally {
+      setSaving(false);
+    }
+  }, [tool?.id, operationBusy, currentModels, onChanged, t]);
+
+  const probeModel =
+    tool?.id === "opencode" ? (draftModels[0] ?? "") : draftModel;
 
   /**
    * Probe the OfoxAI gateway end-to-end with the currently-drafted model.
@@ -658,7 +733,7 @@ export default function ManageToolDialog({
   );
   // 只有确定不兼容才拦保存；查不出结果（余额、鉴权、网络等）照常保存。
   const compatibilityReady =
-    tool?.id === "workbuddy" ||
+    multiModel ||
     codexModels ||
     (!compatibilityLoading &&
       !hasIncompatible &&
@@ -827,7 +902,7 @@ export default function ManageToolDialog({
                     {t("modelCompatibility.chatgptCodexShared")}
                   </p>
                 )}
-                {protocol && !desktopCodex && tool.id === "workbuddy" ? (
+                {protocol && !desktopCodex && multiModel ? (
                   <>
                     <WorkBuddyModelPicker
                       id="manage-model"
@@ -837,17 +912,60 @@ export default function ManageToolDialog({
                       loading={modelsLoading}
                       onFetch={fetchModels}
                       portalContainer={dialogContentNode}
+                      summary={
+                        tool.id === "opencode"
+                          ? `共 ${models.length} 个可选模型`
+                          : undefined
+                      }
                     />
-                    <p className="text-[11px] text-muted-foreground">
-                      {t("modelCompatibility.workBuddyProtocol")}
-                    </p>
-                    {workBuddyEndpointStatus && (
-                      <div className="space-y-1 rounded-md border border-border-default bg-muted/20 p-3 text-[11px]">
-                        <p className="font-medium">
-                          {t("modelCompatibility.workBuddyConfiguredEndpoint")}
-                        </p>
-                        {workBuddyEndpointStatus.configuredUrls.length > 0 ? (
-                          workBuddyEndpointStatus.configuredUrls.map((url) => (
+                    {tool.id === "opencode" && (
+                      <p className="text-[11px] text-muted-foreground">
+                        {t("modelCompatibility.openCodeProtocol")}
+                      </p>
+                    )}
+                    {tool.id === "opencode" &&
+                      protocolHints.length > 0 &&
+                      !isDirty && (
+                        <div className="flex items-center justify-between gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-[11px]">
+                          <span>
+                            {t("modelCompatibility.openCodeHint", {
+                              count: protocolHints.length,
+                              names: protocolHints
+                                .map(
+                                  (hint) =>
+                                    `${hint.id} → ${
+                                      hint.suggested === "responses"
+                                        ? "Responses"
+                                        : "Chat"
+                                    }`,
+                                )
+                                .join("、"),
+                            })}
+                          </span>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-7 shrink-0 px-2 text-[11px]"
+                            disabled={operationBusy}
+                            onClick={() => void handleApplyProtocolHints()}
+                          >
+                            {t("modelCompatibility.openCodeHintApply")}
+                          </Button>
+                        </div>
+                      )}
+                    {workBuddyEndpointStatus &&
+                      (workBuddyEndpointStatus.externallyModified ||
+                        workBuddyEndpointStatus.configuredUrls.some(
+                          (url) => url !== workBuddyEndpointStatus.expectedUrl,
+                        )) && (
+                        <div className="space-y-1 rounded-md border border-red-500/30 bg-muted/20 p-3 text-[11px]">
+                          <p className="font-medium">
+                            {t(
+                              "modelCompatibility.workBuddyConfiguredEndpoint",
+                            )}
+                          </p>
+                          {workBuddyEndpointStatus.configuredUrls.map((url) => (
                             <code
                               key={url}
                               className="block break-all"
@@ -855,35 +973,28 @@ export default function ManageToolDialog({
                             >
                               {url}
                             </code>
-                          ))
-                        ) : (
-                          <p className="text-muted-foreground">—</p>
-                        )}
-                        <p className="break-all text-muted-foreground">
-                          {t("modelCompatibility.workBuddyExpectedEndpoint")}:{" "}
-                          {workBuddyEndpointStatus.expectedUrl}
-                        </p>
-                        {(workBuddyEndpointStatus.externallyModified ||
-                          workBuddyEndpointStatus.configuredUrls.some(
-                            (url) =>
-                              url !== workBuddyEndpointStatus.expectedUrl,
-                          )) && (
+                          ))}
+                          <p className="break-all text-muted-foreground">
+                            {t("modelCompatibility.workBuddyExpectedEndpoint")}:{" "}
+                            {workBuddyEndpointStatus.expectedUrl}
+                          </p>
                           <p className="text-red-600">
                             {t("modelCompatibility.workBuddyEndpointMismatch")}
                           </p>
-                        )}
-                        <p className="text-muted-foreground">
-                          {t("modelCompatibility.workBuddyEndpointCheckScope")}
-                        </p>
-                      </div>
-                    )}
+                        </div>
+                      )}
                     {!modelsLoading && modelsError && (
                       <ModelsLoadError
-                        message={t("modelCompatibility.workBuddyCatalogFailed")}
+                        message={
+                          tool.id === "workbuddy"
+                            ? t("modelCompatibility.workBuddyCatalogFailed")
+                            : t("modelCatalog.loadFailed")
+                        }
                         onRetry={() => void fetchModels(true)}
                       />
                     )}
-                    {!modelsLoading &&
+                    {tool.id === "workbuddy" &&
+                      !modelsLoading &&
                       !modelsError &&
                       workBuddyMissingIds.length > 0 && (
                         <p className="text-[11px] text-red-600">
@@ -908,6 +1019,16 @@ export default function ManageToolDialog({
                         onRetry={() => void fetchModels(true)}
                       />
                     )}
+                    {tool.id === "gemini" && (
+                      <p className="text-[11px] text-muted-foreground">
+                        {t("modelCompatibility.geminiRememberHint")}
+                      </p>
+                    )}
+                    {tool.id === "chatgpt" && (
+                      <p className="text-[11px] text-muted-foreground">
+                        {t("modelCompatibility.chatgptDefaultHint")}
+                      </p>
+                    )}
                   </>
                 ) : (
                   <div className="rounded-md border border-dashed border-border-default px-3 py-2 text-[12px] text-muted-foreground">
@@ -921,7 +1042,7 @@ export default function ManageToolDialog({
                 {configurationReady &&
                   isDirty &&
                   !codexModels &&
-                  tool.id !== "workbuddy" &&
+                  !multiModel &&
                   (compatibilityLoading ? (
                     <p className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -971,7 +1092,7 @@ export default function ManageToolDialog({
 
               {/* WorkBuddy checks one chosen stream on demand. Other tools
                   keep their separate, optional 1-token connectivity ping. */}
-              {tool.id === "workbuddy" ? (
+              {multiModel ? (
                 <div className="space-y-2">
                   <Label htmlFor="workbuddy-test-model" className="text-[13px]">
                     {t("modelCompatibility.title")}
@@ -989,7 +1110,11 @@ export default function ManageToolDialog({
                     >
                       <SelectTrigger
                         id="workbuddy-test-model"
-                        aria-label={t("modelCompatibility.workBuddyTestModel")}
+                        aria-label={t(
+                          tool.id === "opencode"
+                            ? "modelCompatibility.openCodeTestModel"
+                            : "modelCompatibility.workBuddyTestModel",
+                        )}
                         className="min-w-0 flex-1 text-[12px]"
                       >
                         <SelectValue placeholder="—" />
@@ -1024,9 +1149,6 @@ export default function ManageToolDialog({
                         : t("modelCompatibility.workBuddyTest")}
                     </Button>
                   </div>
-                  <p className="text-[11px] text-muted-foreground">
-                    {t("modelCompatibility.workBuddySaveHint")}
-                  </p>
                   {workBuddyTestResult && (
                     <div
                       className={cn(
@@ -1040,8 +1162,20 @@ export default function ManageToolDialog({
                     >
                       {workBuddyTestResult.model}:{" "}
                       {workBuddyTestResult.status === "incompatible"
-                        ? t("modelCompatibility.workBuddyIncompatible")
+                        ? t(
+                            tool.id === "opencode"
+                              ? "modelCompatibility.openCodeIncompatible"
+                              : "modelCompatibility.workBuddyIncompatible",
+                          )
                         : t(`modelCompatibility.${workBuddyTestResult.status}`)}
+                      {tool.id === "opencode" &&
+                        workBuddyTestResult.status === "compatible" &&
+                        workBuddyTestResult.protocol &&
+                        ` · ${
+                          workBuddyTestResult.protocol === "responses"
+                            ? "Responses"
+                            : "Chat Completions"
+                        }`}
                       {workBuddyTestResult.reason &&
                         ` · ${workBuddyTestResult.reason}`}
                     </div>
@@ -1121,17 +1255,15 @@ export default function ManageToolDialog({
                     !protocol ||
                     !compatibilityReady ||
                     desktopCodex ||
+                    (tool.id === "opencode" &&
+                      (draftModels.length === 0 || modelsLoading)) ||
                     (tool.id === "workbuddy" && !workBuddyCatalogReady)
                   }
                 >
                   {saving && (
                     <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                   )}
-                  {tool.id === "opencode" &&
-                  draftModel === currentModel &&
-                  isDirty
-                    ? t("modelCompatibility.applyProtocol")
-                    : "保存"}
+                  保存
                 </Button>
               </div>
             </DialogFooter>
@@ -1218,6 +1350,8 @@ interface WorkBuddyModelPickerProps {
   loading: boolean;
   onFetch: (forceRefresh?: boolean) => void;
   portalContainer?: HTMLElement | null;
+  /** 列表下方的统计文字；不传就是 WorkBuddy 的「共用一个 Ofox Key」。 */
+  summary?: string;
 }
 
 function WorkBuddyModelPicker({
@@ -1228,6 +1362,7 @@ function WorkBuddyModelPicker({
   loading,
   onFetch,
   portalContainer,
+  summary,
 }: WorkBuddyModelPickerProps) {
   const [open, setOpen] = useState(false);
   const selected = useMemo(() => new Set(selectedIds), [selectedIds]);
@@ -1362,7 +1497,9 @@ function WorkBuddyModelPicker({
         </Popover>
       </div>
       <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-        <span>共 {models.length} 个兼容模型，共用一个 Ofox Key</span>
+        <span>
+          {summary ?? `共 ${models.length} 个兼容模型，共用一个 Ofox Key`}
+        </span>
         <span className="flex shrink-0 gap-1">
           <Button
             type="button"

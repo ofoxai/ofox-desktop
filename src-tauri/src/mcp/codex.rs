@@ -42,6 +42,62 @@ fn collect_enabled_servers(cfg: &McpConfig) -> HashMap<String, Value> {
     out
 }
 
+/// Codex 的 MCP 条目靠 `command`（本地进程）或 `url`（远程）判断怎么连，不认 `type`，
+/// 新版 Codex 还会在启动时警告「type 被忽略」。所以我们不再写它；读的时候旧文件里有
+/// 就照它，没有就按字段推断：有 `url` 是 http，其余是 stdio。
+fn entry_transport(entry: &toml::value::Table) -> &str {
+    match entry.get("type").and_then(|v| v.as_str()) {
+        Some(typ) => typ,
+        None if entry.contains_key("url") => "http",
+        None => "stdio",
+    }
+}
+
+/// 去掉已有 MCP 条目里 Codex 不认的 `type`（以前版本写进去的），其余原样不动。
+/// 只处理有 `command` 或 `url` 的条目：Codex 靠它们判断怎么连，没有的话 `type` 是
+/// 仅有的线索，留着。返回是否改了。
+fn strip_ignored_type(doc: &mut toml_edit::DocumentMut) -> bool {
+    let Some(servers) = doc
+        .get_mut("mcp_servers")
+        .and_then(|item| item.as_table_like_mut())
+    else {
+        return false;
+    };
+    let mut changed = false;
+    for (_, entry) in servers.iter_mut() {
+        let Some(entry) = entry.as_table_like_mut() else {
+            continue;
+        };
+        if entry.contains_key("type")
+            && (entry.contains_key("command") || entry.contains_key("url"))
+        {
+            entry.remove("type");
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// 启动 Codex 前调用：清掉 `~/.codex/config.toml` 里已有 MCP 条目的 `type`，免得每次启动
+/// 都警告「type 被忽略」。文件不存在、不是有效 TOML 时什么都不做，不会覆盖用户的文件。
+pub fn strip_ignored_type_from_codex_config() -> Result<bool, AppError> {
+    if !should_sync_codex_mcp() {
+        return Ok(false);
+    }
+    let path = crate::codex_config::get_codex_config_path();
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(false);
+    };
+    let Ok(mut doc) = text.parse::<toml_edit::DocumentMut>() else {
+        return Ok(false);
+    };
+    if !strip_ignored_type(&mut doc) {
+        return Ok(false);
+    }
+    crate::config::write_text_file(&path, &doc.to_string())?;
+    Ok(true)
+}
+
 /// 从 ~/.codex/config.toml 导入 MCP 到统一结构（v3.7.0+）
 ///
 /// 格式支持：
@@ -71,11 +127,7 @@ pub fn import_from_codex(config: &mut MultiAppConfig) -> Result<usize, AppError>
                 continue;
             };
 
-            // type 缺省为 stdio
-            let typ = entry_tbl
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("stdio");
+            let typ = entry_transport(entry_tbl);
 
             // 构建 JSON 规范
             let mut spec = serde_json::Map::new();
@@ -556,7 +608,8 @@ fn json_value_to_toml_item(value: &Value, field_name: &str) -> Option<toml_edit:
 /// Helper: 将 JSON MCP 服务器规范转换为 toml_edit::Table
 ///
 /// 策略：
-/// 1. 核心字段（type, command, args, url, headers, env, cwd）使用强类型处理
+/// 1. 核心字段（command, args, url, headers, env, cwd）使用强类型处理；`type` 只用来决定
+///    写哪组字段，不写进 TOML
 /// 2. 扩展字段（timeout、retry 等）通过白名单列表自动转换
 /// 3. 其他未知字段使用通用转换器尝试转换
 fn json_server_to_toml_table(spec: &Value) -> Result<toml_edit::Table, AppError> {
@@ -564,12 +617,13 @@ fn json_server_to_toml_table(spec: &Value) -> Result<toml_edit::Table, AppError>
 
     let mut t = Table::new();
     let typ = spec.get("type").and_then(|v| v.as_str()).unwrap_or("stdio");
-    t["type"] = toml_edit::value(typ);
+    // 不写 `type`：Codex 不认它（见 [`entry_transport`]）。
 
-    // 定义核心字段（已在下方处理，跳过通用转换）
+    // 定义核心字段（已在下方处理，跳过通用转换）。`headers` 在下面写成 `http_headers`，
+    // 不在这里列出的话会被当成自定义字段再原样写一遍，Codex 不认它。
     let core_fields = match typ {
         "stdio" => vec!["type", "command", "args", "env", "cwd"],
-        "http" | "sse" => vec!["type", "url", "http_headers"],
+        "http" | "sse" => vec!["type", "url", "headers", "http_headers"],
         _ => vec!["type"],
     };
 
@@ -677,4 +731,114 @@ fn json_server_to_toml_table(spec: &Value) -> Result<toml_edit::Table, AppError>
     }
 
     Ok(t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stdio_table_has_no_type_key() {
+        let table = json_server_to_toml_table(&json!({
+            "type": "stdio",
+            "command": "npx",
+            "args": ["-y", "pkg"],
+            "env": {"TOKEN": "x"},
+        }))
+        .unwrap();
+        assert!(!table.contains_key("type"));
+        assert_eq!(table["command"].as_str(), Some("npx"));
+        assert!(table.contains_key("args"));
+        assert!(table.contains_key("env"));
+    }
+
+    #[test]
+    fn http_headers_are_written_once_under_the_name_codex_knows() {
+        let table = json_server_to_toml_table(&json!({
+            "type": "http",
+            "url": "https://example.com/mcp",
+            "headers": {"K": "v"},
+        }))
+        .unwrap();
+        assert!(table.contains_key("http_headers"));
+        assert!(!table.contains_key("headers"), "{table}");
+    }
+
+    #[test]
+    fn http_table_has_no_type_key() {
+        let table = json_server_to_toml_table(&json!({
+            "type": "http",
+            "url": "https://example.com/mcp",
+            "headers": {"K": "v"},
+        }))
+        .unwrap();
+        assert!(!table.contains_key("type"));
+        assert_eq!(table["url"].as_str(), Some("https://example.com/mcp"));
+        assert!(table.contains_key("http_headers"));
+    }
+
+    fn entry(toml_text: &str) -> toml::value::Table {
+        toml::from_str(toml_text).unwrap()
+    }
+
+    #[test]
+    fn transport_follows_an_explicit_type() {
+        assert_eq!(
+            entry_transport(&entry("type = \"sse\"\nurl = \"u\"")),
+            "sse"
+        );
+        assert_eq!(
+            entry_transport(&entry("type = \"stdio\"\ncommand = \"c\"")),
+            "stdio"
+        );
+    }
+
+    #[test]
+    fn transport_without_type_comes_from_url_or_command() {
+        assert_eq!(entry_transport(&entry("url = \"https://x\"")), "http");
+        assert_eq!(entry_transport(&entry("command = \"npx\"")), "stdio");
+        assert_eq!(entry_transport(&entry("args = []")), "stdio");
+    }
+    fn stripped(text: &str) -> (bool, String) {
+        let mut doc: toml_edit::DocumentMut = text.parse().unwrap();
+        let changed = strip_ignored_type(&mut doc);
+        (changed, doc.to_string())
+    }
+
+    #[test]
+    fn strip_removes_type_only_from_entries_with_command_or_url() {
+        let (changed, text) = stripped(
+            "[mcp_servers.a]\ntype = \"stdio\"\ncommand = \"npx\"\n\n[mcp_servers.b]\ntype = \"http\"\nurl = \"https://x\"\n\n[mcp_servers.c]\ntype = \"stdio\"\n",
+        );
+        assert!(changed);
+        let doc: toml::Table = toml::from_str(&text).unwrap();
+        let servers = doc["mcp_servers"].as_table().unwrap();
+        assert!(servers["a"].as_table().unwrap().get("type").is_none());
+        assert!(servers["b"].as_table().unwrap().get("type").is_none());
+        // Nothing tells Codex how to start `c`, so it is left alone.
+        assert!(servers["c"].as_table().unwrap().get("type").is_some());
+    }
+
+    #[test]
+    fn strip_keeps_everything_else_byte_for_byte() {
+        let before = "# my notes\nmodel = \"gpt-6-sol\"\n\n[mcp_servers.a]\ntype = \"stdio\"\ncommand = \"npx\" # keep me\nargs = [\"-y\"]\n\n[mcp_servers.own]\ncommand = \"x\"\nenabled = false\n";
+        let (changed, text) = stripped(before);
+        assert!(changed);
+        assert_eq!(
+            text,
+            "# my notes\nmodel = \"gpt-6-sol\"\n\n[mcp_servers.a]\ncommand = \"npx\" # keep me\nargs = [\"-y\"]\n\n[mcp_servers.own]\ncommand = \"x\"\nenabled = false\n"
+        );
+    }
+
+    #[test]
+    fn strip_handles_inline_tables_and_reports_no_change_when_clean() {
+        let (changed, text) =
+            stripped("[mcp_servers]\nd = { type = \"stdio\", command = \"noop\" }\n");
+        assert!(changed);
+        assert!(!text.contains("type"));
+        let (changed, _) = stripped("[mcp_servers.a]\ncommand = \"npx\"\n");
+        assert!(!changed);
+        let (changed, _) = stripped("model = \"x\"\n");
+        assert!(!changed);
+    }
 }

@@ -63,6 +63,14 @@ fn dict_entry(config: &Yaml) -> Option<&Yaml> {
     config.get(DICT)?.as_mapping()?.get(PROVIDER_NAME)
 }
 
+/// 配置里已有的 Ofox 条目（列表或字典写法）。
+fn existing_entry(config: &Yaml) -> Option<&Yaml> {
+    match entry_position(config) {
+        Some(index) => config.get(PROVIDERS)?.as_sequence()?.get(index),
+        None => dict_entry(config),
+    }
+}
+
 fn uses_dict_schema(config: &Yaml) -> bool {
     config
         .get("_config_version")
@@ -116,20 +124,41 @@ fn render_changed(raw: &str, before: &Yaml, after: &Yaml) -> Result<String, Stri
 ///
 /// 条目在哪就更新哪；新条目在 v12+ 配置里写进 `providers:` 字典，否则写进
 /// `custom_providers` 列表（未标版本的配置之后由 Hermes 自己迁移）。
+///
+/// `select_route`：绑定、保存模型时要让路由指向 Ofox 条目；其余（换 key、修复）
+/// 路由已经指向 Ofox 就不动，用户在 agent 里选的模型要留着。
 pub(crate) fn bound_config(
     current: Option<&str>,
     template: &Value,
     api_key: &str,
+    select_route: bool,
 ) -> Result<String, String> {
     let before = parse(current)?;
     let mut entry = template.clone();
     json_file::set(&mut entry, TOKEN, api_key.into());
+    let routed_to_ofox = before
+        .get(MODEL)
+        .and_then(|model| model.get("provider"))
+        .and_then(Yaml::as_str)
+        == Some(PROVIDER_NAME);
+    // 用户在 agent 里加的字段、模型留着；保存模型时以模板的模型列表为准。
+    let existing = existing_entry(&before)
+        .and_then(|entry| serde_json::to_value(entry).ok())
+        .map(|mut existing| {
+            if select_route {
+                if let Some(existing) = existing.as_object_mut() {
+                    existing.remove("models");
+                }
+            }
+            existing
+        });
+    let upsert = json_file::merge_provider_entry(existing.as_ref(), entry.clone());
     let mut after = before.clone();
     let use_list = entry_position(&before).is_some()
         || (dict_entry(&before).is_none() && !uses_dict_schema(&before));
     if use_list {
         let providers =
-            hermes_config::upsert_custom_provider(&before, PROVIDER_NAME, entry.clone())
+            hermes_config::upsert_custom_provider(&before, PROVIDER_NAME, upsert.clone())
                 .map_err(|e| e.to_string())?;
         root(&mut after).insert(PROVIDERS.into(), providers);
         // Hermes 先读列表；字典里再留一份 Ofox 条目只会重复。
@@ -143,20 +172,22 @@ pub(crate) fn bound_config(
         let updated = hermes_config::provider_dict_entry(
             dict.get(PROVIDER_NAME),
             PROVIDER_NAME,
-            entry.clone(),
+            upsert.clone(),
         )
         .map_err(|e| e.to_string())?;
         dict.insert(PROVIDER_NAME.into(), updated);
         root(&mut after).insert(DICT.into(), Yaml::Mapping(dict));
     }
-    let current_model = hermes_config::model_config_of(&before)
-        .map_err(|e| e.to_string())?
-        .unwrap_or_default();
-    let model = hermes_config::switch_defaults(current_model, PROVIDER_NAME, &entry);
-    let model = serde_json::to_value(model)
-        .map_err(|e| e.to_string())
-        .and_then(|model| hermes_config::json_to_yaml(&model).map_err(|e| e.to_string()))?;
-    root(&mut after).insert(MODEL.into(), model);
+    if select_route || !routed_to_ofox {
+        let current_model = hermes_config::model_config_of(&before)
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        let model = hermes_config::switch_defaults(current_model, PROVIDER_NAME, &entry);
+        let model = serde_json::to_value(model)
+            .map_err(|e| e.to_string())
+            .and_then(|model| hermes_config::json_to_yaml(&model).map_err(|e| e.to_string()))?;
+        root(&mut after).insert(MODEL.into(), model);
+    }
     render_changed(current.unwrap_or_default(), &before, &after)
 }
 
@@ -164,10 +195,16 @@ pub(crate) fn bound_config(
 pub(crate) fn write_bound(
     template: &Value,
     api_key: &str,
+    select_route: bool,
     txn: &mut FileTxn,
 ) -> Result<(), String> {
     let path = config_path();
-    let bound = bound_config(read_text(&path)?.as_deref(), template, api_key)?;
+    let bound = bound_config(
+        read_text(&path)?.as_deref(),
+        template,
+        api_key,
+        select_route,
+    )?;
     txn.write(&path, bound.as_bytes())
         .map_err(|e| format!("写入 Hermes 配置失败：{e}"))
 }
@@ -447,7 +484,7 @@ mod tests {
 
     #[test]
     fn bind_adds_the_entry_and_routes_to_it() {
-        let bound = bound_config(Some(USER_CONFIG), &template(), "sk-of-K").unwrap();
+        let bound = bound_config(Some(USER_CONFIG), &template(), "sk-of-K", true).unwrap();
         let config = yaml(&bound);
         let index = entry_position(&config).unwrap();
         assert_eq!(
@@ -465,7 +502,7 @@ mod tests {
 
     #[test]
     fn restore_brings_back_the_commented_file() {
-        let bound = bound_config(Some(USER_CONFIG), &template(), "sk-of-K").unwrap();
+        let bound = bound_config(Some(USER_CONFIG), &template(), "sk-of-K", true).unwrap();
         let plan = plan_restore(Some(USER_CONFIG), Some(&bound)).unwrap();
         assert!(plan.exact);
         assert_eq!(plan.content.as_deref(), Some(USER_CONFIG));
@@ -473,7 +510,7 @@ mod tests {
 
     #[test]
     fn restore_keeps_other_edits_and_copies_untouched_sections_verbatim() {
-        let bound = bound_config(Some(USER_CONFIG), &template(), "sk-of-K").unwrap();
+        let bound = bound_config(Some(USER_CONFIG), &template(), "sk-of-K", true).unwrap();
         // 绑定期间用户改了上下文长度，还加了新段落。
         let edited = bound.replace("context_length: 32000", "context_length: 64000")
             + "memory:\n  enabled: true\n";
@@ -513,7 +550,7 @@ mod tests {
     #[test]
     fn bind_updates_an_entry_hermes_migrated_into_the_providers_dict() {
         assert!(is_ofox_bound(MIGRATED_CONFIG));
-        let bound = bound_config(Some(MIGRATED_CONFIG), &template(), "sk-of-K").unwrap();
+        let bound = bound_config(Some(MIGRATED_CONFIG), &template(), "sk-of-K", true).unwrap();
         let config = yaml(&bound);
         assert_dict_entry(&config, "sk-of-K");
         assert!(config.get(PROVIDERS).is_none());
@@ -530,7 +567,7 @@ mod tests {
 
     #[test]
     fn bind_adds_a_new_entry_to_the_providers_dict_of_a_versioned_config() {
-        let bound = bound_config(Some(VERSIONED_CONFIG), &template(), "sk-of-K").unwrap();
+        let bound = bound_config(Some(VERSIONED_CONFIG), &template(), "sk-of-K", true).unwrap();
         let config = yaml(&bound);
         assert_dict_entry(&config, "sk-of-K");
         assert!(config.get(PROVIDERS).is_none());
@@ -542,7 +579,7 @@ mod tests {
     #[test]
     fn bind_keeps_a_single_ofox_entry_when_both_sections_hold_one() {
         let both = "model:\n  provider: ofox-hermes\ncustom_providers:\n- name: ofox-hermes\n  base_url: https://api.ofox.ai/v1\n  api_key: sk-of-OLD\nproviders:\n  ofox-hermes:\n    api: https://api.ofox.ai/v1\n    api_key: sk-of-OLD\n  other:\n    api: https://example.com/v1\n_config_version: 50\n";
-        let bound = bound_config(Some(both), &template(), "sk-of-K").unwrap();
+        let bound = bound_config(Some(both), &template(), "sk-of-K", true).unwrap();
         let config = yaml(&bound);
         let index = entry_position(&config).unwrap();
         assert_eq!(
@@ -555,7 +592,7 @@ mod tests {
 
     #[test]
     fn restore_after_a_dict_bind_brings_back_the_file() {
-        let bound = bound_config(Some(VERSIONED_CONFIG), &template(), "sk-of-K").unwrap();
+        let bound = bound_config(Some(VERSIONED_CONFIG), &template(), "sk-of-K", true).unwrap();
         let plan = plan_restore(Some(VERSIONED_CONFIG), Some(&bound)).unwrap();
         assert!(plan.exact);
         assert_eq!(plan.content.as_deref(), Some(VERSIONED_CONFIG));
@@ -593,7 +630,7 @@ mod tests {
 
     #[test]
     fn restore_deletes_a_file_bind_created() {
-        let bound = bound_config(None, &template(), "sk-of-K").unwrap();
+        let bound = bound_config(None, &template(), "sk-of-K", true).unwrap();
         assert_eq!(plan_restore(None, Some(&bound)).unwrap().content, None);
     }
 }

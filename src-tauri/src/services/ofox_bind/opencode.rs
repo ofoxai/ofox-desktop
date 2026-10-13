@@ -10,6 +10,7 @@ use crate::ofox_apex::mentions_ofox_gateway;
 use crate::opencode_config::{get_opencode_config_path, normalize_ofox_provider_transport};
 
 use super::json_file::{self, JsonPath, KeyStyle};
+use super::opencode_state;
 use super::plan::{read_text, FileEdit, RestorePlan};
 
 const LABEL: &str = "OpenCode 的 opencode.json";
@@ -52,30 +53,59 @@ fn bound_entry(template: &Value, api_key: &str) -> Value {
     entry
 }
 
+///
+/// `select_route`：保存模型时条目里的模型就是用户选的这一组，去掉的要真的去掉；换 key、
+/// 修复时保留用户在 agent 里加的模型。
 pub(crate) fn bound_config(
     current: Option<&str>,
     template: &Value,
     api_key: &str,
+    select_route: bool,
 ) -> Result<String, String> {
     let before = json_file::parse_object(current, LABEL)?;
     let mut value = match current {
         Some(_) => before.clone(),
         None => json!({ "$schema": SCHEMA_URL }),
     };
-    json_file::set(&mut value, ENTRY, bound_entry(template, api_key));
+    let mut existing = json_file::get(&before, ENTRY).cloned();
+    if let (true, Some(Value::Object(existing))) = (select_route, existing.as_mut()) {
+        existing.remove("models");
+    }
+    let entry = json_file::merge_provider_entry(existing.as_ref(), bound_entry(template, api_key));
+    json_file::set(&mut value, ENTRY, entry);
     json_file::render_changed(current.unwrap_or_default(), KeyStyle::Json, &before, &value)
 }
 
 /// 绑定和切换模型共用。
+///
+/// `select_route`：绑定、保存模型时让 OpenCode 下次启动就用 Ofox 的模型（它记在 TUI
+/// 状态文件里）；换 key、修复不碰，用户在 TUI 里选的要留着。
 pub(crate) fn write_bound(
     template: &Value,
     api_key: &str,
+    select_route: bool,
     txn: &mut FileTxn,
 ) -> Result<(), String> {
     let path = config_path();
-    let bound = bound_config(read_text(&path)?.as_deref(), template, api_key)?;
+    let bound = bound_config(
+        read_text(&path)?.as_deref(),
+        template,
+        api_key,
+        select_route,
+    )?;
     txn.write(&path, bound.as_bytes())
-        .map_err(|e| format!("写入 OpenCode 配置失败：{e}"))
+        .map_err(|e| format!("写入 OpenCode 配置失败：{e}"))?;
+    if select_route {
+        let state = opencode_state::state_path();
+        let models = opencode_state::template_models(template);
+        if let Some(text) =
+            opencode_state::select_ofox_model(read_text(&state)?.as_deref(), &models)?
+        {
+            txn.write(&state, text.as_bytes())
+                .map_err(|e| format!("写入 OpenCode 状态失败：{e}"))?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn plan_restore(
@@ -132,7 +162,7 @@ mod tests {
 
     #[test]
     fn bind_adds_only_the_ofox_entry() {
-        let bound = bound_config(Some(USER_CONFIG), &template(), "sk-of-K").unwrap();
+        let bound = bound_config(Some(USER_CONFIG), &template(), "sk-of-K", true).unwrap();
         assert!(
             bound.contains("// my providers"),
             "comments stay while bound: {bound}"
@@ -150,7 +180,7 @@ mod tests {
 
     #[test]
     fn restore_brings_back_the_commented_file() {
-        let bound = bound_config(Some(USER_CONFIG), &template(), "sk-of-K").unwrap();
+        let bound = bound_config(Some(USER_CONFIG), &template(), "sk-of-K", true).unwrap();
         let plan = plan_restore(Some(USER_CONFIG), Some(&bound)).unwrap();
         assert!(plan.exact);
         assert_eq!(plan.content.as_deref(), Some(USER_CONFIG));
@@ -158,7 +188,7 @@ mod tests {
 
     #[test]
     fn restore_deletes_a_file_bind_created() {
-        let bound = bound_config(None, &template(), "sk-of-K").unwrap();
+        let bound = bound_config(None, &template(), "sk-of-K", true).unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&bound).unwrap()["$schema"],
             SCHEMA_URL

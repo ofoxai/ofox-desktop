@@ -55,6 +55,43 @@ pub(crate) fn set(value: &mut Value, path: JsonPath, new_value: Value) {
     node[*last] = new_value;
 }
 
+/// 把模板生成的服务商条目合并进配置里已有的同名条目：接入字段取模板的值，用户
+/// 在 agent 里加的其它字段、模型原样保留。`models` 按 id（对象写法按 key）合并，
+/// 同一个模型以模板为准。已有条目不是对象就整条用模板的。
+pub(crate) fn merge_provider_entry(existing: Option<&Value>, fresh: Value) -> Value {
+    let (Some(Value::Object(existing)), Value::Object(fresh)) = (existing, &fresh) else {
+        return fresh;
+    };
+    let mut merged = existing.clone();
+    for (key, value) in fresh {
+        let value = match (key.as_str(), merged.get(key), value) {
+            ("models", Some(Value::Object(old)), Value::Object(new)) => {
+                let mut models = old.clone();
+                models.extend(new.iter().map(|(id, model)| (id.clone(), model.clone())));
+                Value::Object(models)
+            }
+            ("models", Some(Value::Array(old)), Value::Array(new)) => {
+                let id =
+                    |model: &Value| model.get("id").and_then(Value::as_str).map(str::to_string);
+                let mut models = old.clone();
+                for model in new {
+                    match models
+                        .iter()
+                        .position(|old| id(old).is_some() && id(old) == id(model))
+                    {
+                        Some(at) => models[at] = model.clone(),
+                        None => models.push(model.clone()),
+                    }
+                }
+                Value::Array(models)
+            }
+            _ => value.clone(),
+        };
+        merged.insert(key.clone(), value);
+    }
+    Value::Object(merged)
+}
+
 pub(crate) fn remove(value: &mut Value, path: JsonPath) -> bool {
     let (last, parents) = path.split_last().expect("non-empty path");
     let mut node = value;

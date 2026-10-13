@@ -107,6 +107,12 @@ jobs:
             Write-Host "Verified $probe artifact directory and SHA-256"
           }
 
+      # The fresh-install test asks the real Codex to validate the config Ofox writes
+      # (`codex app-server --strict-config`). Without Codex on PATH it is skipped.
+      - name: Install Codex CLI
+        run: npm install -g @openai/codex
+        shell: powershell
+
       # Compile and run all tests, including Windows file-lock/cmd fixtures.
       # Use Windows PowerShell 5.1, the same entry point as a fresh test host.
       - name: Windows lifecycle checks

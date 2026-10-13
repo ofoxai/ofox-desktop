@@ -6,8 +6,10 @@
 //!
 //! 下面三个 URL 是 OpenAI 的固定基础设施地址，不属于 AGENTS.md 里按 ofox apex
 //! 派生 URL 的规则，属于显式例外。个性化灰度接口
-//! `updates.oaistatic.com/codex/app/appcast?installation_id=…` 故意不用：公开 feed
-//! 可能比某台机器实际收到的版本更新，这一点在 update_reason 里说明。
+//! `updates.oaistatic.com/codex/app/appcast?installation_id=…` 故意不用（要把安装 ID
+//! 发给 OpenAI）：公开 feed 可能比某台机器实际收到的版本更新。因此 macOS 上公开 feed
+//! 比本机新时只标 `appManaged`（请在客户端内检查更新），不标 `available`，免得提示了
+//! 却在 App 里找不到更新；Windows Store 仍可一键尝试，标 `available`。
 
 // Linux 上 chatgpt 分支直接返回 unsupported，整个模块都用不到。
 #![cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
@@ -73,6 +75,7 @@ fn dotted_parts(version: &str) -> Option<Vec<u64>> {
 #[derive(Default)]
 struct AppcastItem {
     short_version: Option<String>,
+    published: Option<chrono::DateTime<chrono::Utc>>,
     minimum_os: Option<String>,
     arm64_only: bool,
 }
@@ -81,6 +84,12 @@ impl AppcastItem {
     fn set(&mut self, name: &[u8], value: &str) {
         match name {
             b"shortVersionString" => self.short_version = Some(value.to_string()),
+            // 读不出来就当不知道，不影响版本判断。
+            b"pubDate" => {
+                self.published = chrono::DateTime::parse_from_rfc2822(value)
+                    .ok()
+                    .map(|date| date.with_timezone(&chrono::Utc))
+            }
             b"minimumSystemVersion" => self.minimum_os = Some(value.to_string()),
             b"hardwareRequirements" => {
                 self.arm64_only = value.split(',').any(|item| item.trim() == "arm64")
@@ -89,7 +98,7 @@ impl AppcastItem {
         }
     }
 
-    fn installable_version(self, host_arch: &str, host_os: Option<&str>) -> Option<String> {
+    fn installable_release(self, host_arch: &str, host_os: Option<&str>) -> Option<Release> {
         if self.arm64_only && host_arch != "aarch64" {
             return None;
         }
@@ -99,19 +108,40 @@ impl AppcastItem {
             }
         }
         let version = self.short_version?;
-        dotted_parts(&version).map(|_| version)
+        dotted_parts(&version)?;
+        Some(Release {
+            version,
+            published: self.published,
+        })
     }
+}
+
+/// 更新源里的一个版本，和它的发布时间（源里没写或读不出来时是 `None`）。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Release {
+    pub version: String,
+    pub published: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// 从 Sparkle appcast 里挑出本机可装的最高版本（`shortVersionString`）。
 /// 只读 `<item>` 的直接子节点，嵌套的 delta enclosure 和 CDATA 说明都不看。
+#[cfg(test)]
 pub(crate) fn parse_appcast(
     xml: &str,
     host_arch: &str,
     host_os: Option<&str>,
 ) -> Result<Option<String>, String> {
+    parse_appcast_release(xml, host_arch, host_os).map(|release| release.map(|r| r.version))
+}
+
+/// 同上，连带发布时间一起返回。
+pub(crate) fn parse_appcast_release(
+    xml: &str,
+    host_arch: &str,
+    host_os: Option<&str>,
+) -> Result<Option<Release>, String> {
     let mut reader = Reader::from_str(xml);
-    let mut best: Option<String> = None;
+    let mut best: Option<Release> = None;
     // Depth below the current <item>; None while outside any item.
     let mut item_depth: Option<usize> = None;
     // Local name of the direct <item> child whose text is being read.
@@ -133,13 +163,14 @@ pub(crate) fn parse_appcast(
             }
             Event::End(_) => match item_depth {
                 Some(0) => {
-                    if let Some(version) =
-                        std::mem::take(&mut item).installable_version(host_arch, host_os)
+                    if let Some(release) =
+                        std::mem::take(&mut item).installable_release(host_arch, host_os)
                     {
-                        if best.as_deref().is_none_or(|best| {
-                            compare_dotted(&version, best) == Some(Ordering::Greater)
+                        if best.as_ref().is_none_or(|best| {
+                            compare_dotted(&release.version, &best.version)
+                                == Some(Ordering::Greater)
                         }) {
-                            best = Some(version);
+                            best = Some(release);
                         }
                     }
                     item_depth = None;
@@ -218,13 +249,63 @@ pub(crate) struct DesktopUpdateFields {
     pub update_reason: Option<String>,
 }
 
+/// App 自己按安装 ID 分批灰度；公开 feed 里的新版发布后，过了这么久还没推到，就更可能是
+/// 这台机器真的落后了，而不是还没轮到。
+const ROLLOUT_GRACE_DAYS: i64 = 1;
+
+/// 判断「公开 feed 比本机新」算不算更新所需的现场信息。
+pub(crate) struct SparkleContext {
+    /// 公开 feed 里那个新版的发布时间；不知道就是 `None`。
+    pub published_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// App 是否开着自动检查更新（`SUEnableAutomaticChecks`）；读不到就是 `None`。
+    pub auto_checks_enabled: Option<bool>,
+    pub now: chrono::DateTime<chrono::Utc>,
+}
+
+impl SparkleContext {
+    /// 什么都不知道：不会把新版说成可更新。
+    pub(crate) fn unknown() -> Self {
+        Self {
+            published_at: None,
+            auto_checks_enabled: None,
+            now: chrono::Utc::now(),
+        }
+    }
+
+    /// 新版值得在 Ofox 里提醒：App 明确关了自动检查（它自己不会发现），或者新版发布已超过
+    /// 灰度宽限期还没升上来。其余情况交给 App 自己的更新。
+    fn worth_announcing(&self) -> bool {
+        self.auto_checks_enabled == Some(false)
+            || self.published_at.is_some_and(|published| {
+                self.now - published >= chrono::Duration::days(ROLLOUT_GRACE_DAYS)
+            })
+    }
+}
+
 /// 已安装桌面 App 的更新字段。`latest = None` 表示调用方没联网（include_latest=false）。
 /// 查询失败不报 failed，也不冒充 current：保留「请在客户端内检查更新」并在 reason 里写原因。
+#[cfg(test)]
 pub(crate) fn desktop_update_fields(
     source: &str,
     installed: &str,
     latest: Option<Result<String, String>>,
     one_click: bool,
+) -> DesktopUpdateFields {
+    desktop_update_fields_with(
+        source,
+        installed,
+        latest,
+        one_click,
+        &SparkleContext::unknown(),
+    )
+}
+
+pub(crate) fn desktop_update_fields_with(
+    source: &str,
+    installed: &str,
+    latest: Option<Result<String, String>>,
+    one_click: bool,
+    context: &SparkleContext,
 ) -> DesktopUpdateFields {
     let update_source = Some(source.to_string());
     let latest = match latest {
@@ -249,6 +330,13 @@ pub(crate) fn desktop_update_fields(
         Some(Ok(latest)) => latest,
     };
     let (update_status, update_reason) = match compare_dotted(&latest, installed) {
+        // macOS：App 自己按安装 ID 分批灰度，公开 feed 里更新的版本这台机器不一定收得到，
+        // App 内检查会说「已是最新」。刚发布的版本说「有更新」只会把用户带到一个没有更新
+        // 按钮的地方，所以交给 App 自己判断；发布已久、或 App 不自己检查时才提醒。
+        // Store 那边还能一键尝试，保持原样。
+        Some(Ordering::Greater) if source == "sparkle" && !context.worth_announcing() => {
+            ("appManaged", Some(rollout_note(source).to_string()))
+        }
         Some(Ordering::Greater) => ("available", Some(rollout_note(source).to_string())),
         Some(_) => ("current", None),
         None => (
@@ -304,6 +392,7 @@ async fn fetch_text(
     String::from_utf8(body.to_vec()).map_err(|_| format!("{url} is not UTF-8"))
 }
 
+#[cfg(test)]
 pub(crate) async fn fetch_macos_latest(
     client: &reqwest::Client,
     url: &str,
@@ -311,8 +400,20 @@ pub(crate) async fn fetch_macos_latest(
     host_os: Option<&str>,
     timeout: Duration,
 ) -> Result<String, String> {
+    fetch_macos_release(client, url, host_arch, host_os, timeout)
+        .await
+        .map(|release| release.version)
+}
+
+pub(crate) async fn fetch_macos_release(
+    client: &reqwest::Client,
+    url: &str,
+    host_arch: &str,
+    host_os: Option<&str>,
+    timeout: Duration,
+) -> Result<Release, String> {
     let xml = fetch_text(client, url, timeout).await?;
-    parse_appcast(&xml, host_arch, host_os)?
+    parse_appcast_release(&xml, host_arch, host_os)?
         .ok_or_else(|| format!("No release in {url} can run on this Mac"))
 }
 
@@ -322,6 +423,25 @@ pub(crate) async fn fetch_windows_latest(
     timeout: Duration,
 ) -> Result<String, String> {
     parse_windows_manifest(&fetch_text(client, url, timeout).await?)
+}
+
+/// ChatGPT App 是否开着自动检查更新（Sparkle 的 `SUEnableAutomaticChecks`）。键不存在
+/// 或读不出来时是 `None`，不当成「关了」。
+#[cfg(target_os = "macos")]
+pub(crate) async fn app_auto_checks_enabled(bundle_id: &str) -> Option<bool> {
+    let output = tokio::process::Command::new("/usr/bin/defaults")
+        .args(["read", bundle_id, "SUEnableAutomaticChecks"])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -334,12 +454,14 @@ fn host_macos_version() -> Option<String> {
     None
 }
 
-/// 本机平台对应的最新版本。
-pub(crate) async fn fetch_latest_for_host(client: &reqwest::Client) -> Result<String, String> {
+/// 本机平台对应的最新版本，连带发布时间（Windows 的清单里没有，是 `None`）。
+pub(crate) async fn fetch_latest_release_for_host(
+    client: &reqwest::Client,
+) -> Result<Release, String> {
     if cfg!(target_os = "macos") {
         let arch = std::env::consts::ARCH;
         let host_os = host_macos_version();
-        fetch_macos_latest(
+        fetch_macos_release(
             client,
             macos_feed_url(arch),
             arch,
@@ -348,7 +470,12 @@ pub(crate) async fn fetch_latest_for_host(client: &reqwest::Client) -> Result<St
         )
         .await
     } else if cfg!(target_os = "windows") {
-        fetch_windows_latest(client, WINDOWS_MANIFEST_URL, FETCH_TIMEOUT).await
+        fetch_windows_latest(client, WINDOWS_MANIFEST_URL, FETCH_TIMEOUT)
+            .await
+            .map(|version| Release {
+                version,
+                published: None,
+            })
     } else {
         Err("ChatGPT desktop updates are only tracked on macOS and Windows".into())
     }
@@ -667,15 +794,134 @@ mod tests {
     }
 
     #[test]
-    fn desktop_fields_report_available_and_one_click_support() {
-        let latest = || Some(Ok("26.928.21956".to_string()));
-        let manual = desktop_update_fields("sparkle", "26.924.22138", latest(), false);
-        assert_eq!(manual.update_status, "available");
-        assert_eq!(manual.latest_version.as_deref(), Some("26.928.21956"));
-        assert!(!manual.update_supported);
-        assert!(manual.update_reason.is_some());
-        let one_click = desktop_update_fields("msstore", "26.924.22138", latest(), true);
+    fn a_newer_public_sparkle_build_is_left_to_the_app_not_called_an_update() {
+        // The app checks a per-installation feed and may not be offered this build yet,
+        // so claiming "available" sends the user to an updater that says "up to date".
+        let latest = Some(Ok("26.928.21956".to_string()));
+        let fields = desktop_update_fields("sparkle", "26.924.22138", latest, false);
+        assert_eq!(fields.update_status, "appManaged");
+        assert_eq!(fields.latest_version.as_deref(), Some("26.928.21956"));
+        assert!(!fields.update_supported);
+        assert!(fields.update_reason.is_some());
+    }
+
+    #[test]
+    fn a_newer_store_build_is_still_reported_available_with_one_click_support() {
+        let latest = || Some(Ok("26.928.2636".to_string()));
+        let one_click = desktop_update_fields("msstore", "26.924.2636.0", latest(), true);
+        assert_eq!(one_click.update_status, "available");
         assert!(one_click.update_supported);
+    }
+
+    fn at(text: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc2822(text)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    fn ctx(published: Option<&str>, auto_checks: Option<bool>) -> SparkleContext {
+        SparkleContext {
+            published_at: published.map(at),
+            auto_checks_enabled: auto_checks,
+            now: at("Thu, 08 Oct 2026 12:00:00 +0000"),
+        }
+    }
+
+    fn newer_sparkle(context: SparkleContext) -> DesktopUpdateFields {
+        desktop_update_fields_with(
+            "sparkle",
+            "26.924.22138",
+            Some(Ok("26.928.21956".into())),
+            false,
+            &context,
+        )
+    }
+
+    #[test]
+    fn the_release_date_of_the_chosen_item_is_returned_with_its_version() {
+        let dated = |version: &str, date: &str| {
+            format!(
+                "<item><title>{version}</title><pubDate>{date}</pubDate>\
+                 <sparkle:shortVersionString>{version}</sparkle:shortVersionString>\
+                 <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion></item>"
+            )
+        };
+        let xml = feed(&[
+            dated("26.928.21956", "Wed, 30 Sep 2026 05:40:37 +0000"),
+            dated("26.924.22138", "Fri, 25 Sep 2026 10:00:00 +0000"),
+        ]);
+        let release = parse_appcast_release(&xml, "aarch64", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(release.version, "26.928.21956");
+        assert_eq!(
+            release.published,
+            Some(at("Wed, 30 Sep 2026 05:40:37 +0000"))
+        );
+        // The plain version lookup is unchanged.
+        assert_eq!(
+            parse_appcast(&xml, "aarch64", None).unwrap().as_deref(),
+            Some("26.928.21956")
+        );
+    }
+
+    #[test]
+    fn a_missing_or_unreadable_release_date_is_just_unknown() {
+        let xml = feed(&[item("26.928.21956", "12404", "13.0", true)]);
+        let release = parse_appcast_release(&xml, "aarch64", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(release.published, None);
+        let bad = "<item><pubDate>sometime</pubDate>\
+                   <sparkle:shortVersionString>1.2.3</sparkle:shortVersionString></item>";
+        let release = parse_appcast_release(&feed(&[bad.into()]), "aarch64", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(release.published, None);
+    }
+
+    #[test]
+    fn a_fresh_public_build_is_left_to_the_app() {
+        let fields = newer_sparkle(ctx(Some("Thu, 08 Oct 2026 02:00:00 +0000"), Some(true)));
+        assert_eq!(fields.update_status, "appManaged");
+    }
+
+    #[test]
+    fn a_build_with_no_known_date_is_left_to_the_app() {
+        assert_eq!(newer_sparkle(ctx(None, None)).update_status, "appManaged");
+        assert_eq!(
+            newer_sparkle(ctx(None, Some(true))).update_status,
+            "appManaged"
+        );
+    }
+
+    #[test]
+    fn a_public_build_that_has_been_out_for_days_is_an_update() {
+        // One day is the grace period for the app's gradual rollout.
+        let fields = newer_sparkle(ctx(Some("Wed, 07 Oct 2026 12:00:00 +0000"), Some(true)));
+        assert_eq!(fields.update_status, "available");
+        assert_eq!(fields.latest_version.as_deref(), Some("26.928.21956"));
+        let almost = newer_sparkle(ctx(Some("Wed, 07 Oct 2026 12:00:01 +0000"), Some(true)));
+        assert_eq!(almost.update_status, "appManaged");
+    }
+
+    #[test]
+    fn an_app_that_never_checks_for_updates_is_told_about_a_fresh_build() {
+        let fields = newer_sparkle(ctx(Some("Thu, 08 Oct 2026 02:00:00 +0000"), Some(false)));
+        assert_eq!(fields.update_status, "available");
+    }
+
+    #[test]
+    fn being_current_or_unknown_is_not_changed_by_the_rollout_rules() {
+        let context = ctx(Some("Mon, 05 Oct 2026 12:00:00 +0000"), Some(false));
+        let current = desktop_update_fields_with(
+            "sparkle",
+            "26.928.21956",
+            Some(Ok("26.928.21956".into())),
+            false,
+            &context,
+        );
+        assert_eq!(current.update_status, "current");
     }
 
     #[test]

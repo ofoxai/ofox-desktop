@@ -96,6 +96,17 @@ export interface CompatibilityResult {
  *   - All writes target the *active* provider for the app — the dialog
  *     never switches providers; that's `switch_provider`'s job.
  */
+export interface ProtocolHint {
+  id: string;
+  current: string;
+  suggested: string;
+}
+
+export interface SaveModelsReport {
+  saved: string[];
+  skipped: { id: string; reason: string }[];
+}
+
 export const manageToolApi = {
   async getConfigFilePath(app: string): Promise<string> {
     return await invoke("get_tool_config_file_path", {
@@ -105,6 +116,32 @@ export const manageToolApi = {
 
   async getActiveModel(app: string): Promise<string> {
     return await invoke("get_active_ofox_model", { app: managedToolId(app) });
+  },
+
+  /** ChatGPT 桌面 App 里最近选的模型；没有就是 Codex 配置里的。 */
+  async getChatGptModel(): Promise<string> {
+    return await invoke("get_chatgpt_active_model");
+  },
+
+  /** 已保存的模型列表。OpenCode 是用户选的一组，其余工具最多一个。 */
+  async getActiveModels(app: string): Promise<string[]> {
+    return await invoke("get_active_ofox_models", { app: managedToolId(app) });
+  },
+
+  /** OpenCode 保存一组模型；协议由后端按缓存和目录选，不发检测请求。 */
+  async setActiveModels(
+    app: string,
+    models: string[],
+  ): Promise<SaveModelsReport> {
+    return await invoke("set_active_ofox_models", {
+      app: managedToolId(app),
+      models,
+    });
+  },
+
+  /** 后台检测发现和已保存协议不一致的 OpenCode 模型；再保存一次即按检测结果改。 */
+  async getOpenCodeProtocolHints(): Promise<ProtocolHint[]> {
+    return await invoke("get_opencode_protocol_hints");
   },
 
   async setActiveModel(

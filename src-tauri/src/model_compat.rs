@@ -186,6 +186,73 @@ fn tool_protocol(tool: BindableTool) -> &'static str {
     }
 }
 
+/// 目录里 Gemini 的模型 id 带 `google/` 前缀，写进 Gemini 配置时会去掉（见
+/// `normalize_gemini_env_model`）。配置里读回来的 id 也要能对上目录。
+fn matches_catalog_id(tool: BindableTool, catalog_id: &str, model_id: &str) -> bool {
+    catalog_id == model_id
+        || (tool == BindableTool::Gemini && catalog_id.strip_prefix("google/") == Some(model_id))
+}
+
+/// OpenCode 保存时不发请求：先用 7 天内检测出的协议，没有就按目录声明和默认规则选。
+/// 默认规则来自实测：两个协议都声明的模型里，Responses 对推理型模型常有「推理分片
+/// ID 不一致」的问题，Chat 则都能用；只有 `openai/` 原生的模型默认走 Responses。
+pub fn opencode_protocol_for_save(model: &FetchedModel) -> Result<&'static str, &'static str> {
+    let advertised = protocols_for(BindableTool::OpenCode, model)?;
+    let key = cache_key(BindableTool::OpenCode, model);
+    if let Some(cached) = cached_protocol(&load_cache(), &key, Utc::now()) {
+        if let Some(protocol) = advertised.iter().find(|p| **p == cached) {
+            return Ok(protocol);
+        }
+    }
+    Ok(default_opencode_protocol(&model.id, &advertised))
+}
+
+fn default_opencode_protocol(model_id: &str, advertised: &[&'static str]) -> &'static str {
+    let native_openai = model_id.starts_with("openai/");
+    if native_openai && advertised.contains(&RESPONSES) {
+        RESPONSES
+    } else if advertised.contains(&CHAT) {
+        CHAT
+    } else {
+        RESPONSES
+    }
+}
+
+/// 7 天内检测出、且目录仍声明支持的协议；没有就是 `None`。
+pub fn cached_opencode_protocol(model: &FetchedModel) -> Option<&'static str> {
+    let advertised = protocols_for(BindableTool::OpenCode, model).ok()?;
+    let key = cache_key(BindableTool::OpenCode, model);
+    let cached = cached_protocol(&load_cache(), &key, Utc::now())?;
+    advertised.into_iter().find(|p| *p == cached)
+}
+
+/// 保存后要在后台验证的模型：两个协议都声明、默认走 Responses、还没有检测结果。
+/// 默认走 Chat 的不验证——实测 Chat 全部可用，没必要为它们发请求。
+pub fn needs_background_check(model: &FetchedModel) -> bool {
+    let Ok(advertised) = protocols_for(BindableTool::OpenCode, model) else {
+        return false;
+    };
+    advertised.len() > 1
+        && default_opencode_protocol(&model.id, &advertised) == RESPONSES
+        && cached_opencode_protocol(model).is_none()
+}
+
+/// 后台逐个检测（并发 2），结果由 [`check`] 写进缓存，不改任何配置；用户下次打开管理
+/// 窗口时会看到「建议改协议」的提示。
+pub async fn verify_in_background(models: Vec<FetchedModel>, catalog_access_token: Option<String>) {
+    let ids: Vec<String> = models
+        .iter()
+        .filter(|model| needs_background_check(model))
+        .map(|model| model.id.clone())
+        .collect();
+    let token = catalog_access_token.as_deref();
+    futures::stream::iter(ids)
+        .for_each_concurrent(2, |id| async move {
+            let _ = check(BindableTool::OpenCode, &id, false, token).await;
+        })
+        .await;
+}
+
 pub async fn check(
     tool: BindableTool,
     model_id: &str,
@@ -227,7 +294,11 @@ pub async fn check(
             )
         }
     };
-    let Some(model) = catalog.models.into_iter().find(|m| m.id == model_id) else {
+    let Some(model) = catalog
+        .models
+        .into_iter()
+        .find(|m| matches_catalog_id(tool, &m.id, model_id))
+    else {
         return CompatibilityResult::new(
             tool,
             model_id,
@@ -580,6 +651,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gemini_model_read_back_from_the_config_matches_the_prefixed_catalog_id() {
+        assert!(matches_catalog_id(
+            BindableTool::Gemini,
+            "google/gemini-2.5-flash-lite",
+            "gemini-2.5-flash-lite"
+        ));
+        assert!(matches_catalog_id(
+            BindableTool::Gemini,
+            "google/gemini-2.5-flash-lite",
+            "google/gemini-2.5-flash-lite"
+        ));
+        assert!(!matches_catalog_id(
+            BindableTool::Gemini,
+            "google/gemini-2.5-flash-lite",
+            "gemini-2.5-flash"
+        ));
+        assert!(!matches_catalog_id(
+            BindableTool::Claude,
+            "google/gemini-2.5-flash-lite",
+            "gemini-2.5-flash-lite"
+        ));
+    }
+
+    #[test]
     fn responses_reasoning_id_mismatch_is_rejected() {
         let stream = "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"signed-id\"}}\n\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"unsigned-id\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"OK\"}\n\ndata: {\"type\":\"response.completed\"}\n\n";
         assert!(matches!(
@@ -647,6 +742,82 @@ mod tests {
             evaluate_stream(CHAT, stream),
             ProbeOutcome::Incompatible(_)
         ));
+    }
+
+    #[test]
+    fn opencode_defaults_to_chat_unless_the_model_is_native_openai() {
+        let both = [RESPONSES, CHAT];
+        assert_eq!(
+            default_opencode_protocol("openai/gpt-5.4", &both),
+            RESPONSES
+        );
+        assert_eq!(
+            default_opencode_protocol("moonshotai/kimi-k2.6", &both),
+            CHAT
+        );
+        assert_eq!(
+            default_opencode_protocol("anthropic/claude-fable-5", &both),
+            CHAT
+        );
+    }
+
+    #[test]
+    fn opencode_default_follows_the_only_advertised_endpoint() {
+        assert_eq!(
+            default_opencode_protocol("openai/gpt-5.2-codex", &[RESPONSES]),
+            RESPONSES
+        );
+        assert_eq!(
+            default_opencode_protocol("google/gemini-3.8-flash", &[CHAT]),
+            CHAT
+        );
+        assert_eq!(
+            default_opencode_protocol("z-ai/glm-5.3", &[RESPONSES]),
+            RESPONSES
+        );
+    }
+
+    #[test]
+    fn opencode_save_rejects_a_model_with_no_usable_endpoint() {
+        let model = FetchedModel {
+            id: "x/embed".into(),
+            name: None,
+            owned_by: None,
+            pricing_prompt: None,
+            supported_endpoints: Some(vec!["/v1/embeddings".into()]),
+            supported_parameters: None,
+            input_modalities: None,
+            output_modalities: None,
+        };
+        assert!(opencode_protocol_for_save(&model).is_err());
+    }
+
+    #[test]
+    fn background_check_covers_only_dual_endpoint_models_that_default_to_responses() {
+        let model = |id: &str, endpoints: &[&str]| FetchedModel {
+            id: id.into(),
+            name: None,
+            owned_by: None,
+            pricing_prompt: None,
+            supported_endpoints: Some(endpoints.iter().map(|e| e.to_string()).collect()),
+            supported_parameters: None,
+            input_modalities: None,
+            output_modalities: None,
+        };
+        let both = ["/v1/chat/completions", "/v1/responses"];
+        assert!(needs_background_check(&model("openai/zz-test-a", &both)));
+        assert!(!needs_background_check(&model(
+            "moonshotai/zz-test-b",
+            &both
+        )));
+        assert!(!needs_background_check(&model(
+            "openai/zz-test-c",
+            &["/v1/responses"]
+        )));
+        assert!(!needs_background_check(&model(
+            "x/zz-test-d",
+            &["/v1/embeddings"]
+        )));
     }
 
     #[test]

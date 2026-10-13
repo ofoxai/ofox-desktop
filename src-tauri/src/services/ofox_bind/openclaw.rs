@@ -72,10 +72,13 @@ fn first_model_id(entry: &Value) -> Option<&str> {
 }
 
 /// 由 DB 里 `ofox-openclaw` 模板生成绑定后的配置：写入 Ofox 条目，默认模型指向它。
+/// `select_route`：绑定、保存模型时要让默认模型指向 Ofox；其余（换 key、修复）
+/// 默认模型已经指向 Ofox 就不动，用户在 agent 里选的模型要留着。
 pub(crate) fn bound_config(
     current: Option<&str>,
     template: &Value,
     api_key: &str,
+    select_route: bool,
 ) -> Result<String, String> {
     // 文件不存在时从 OpenClaw 自己的默认配置开始。
     let source = current.unwrap_or(openclaw_config::OPENCLAW_DEFAULT_SOURCE);
@@ -90,7 +93,10 @@ pub(crate) fn bound_config(
     }
     let mut entry = template.clone();
     json_file::set(&mut entry, TOKEN, api_key.into());
-    if let Some(model_id) = first_model_id(&entry) {
+    let routed_to_ofox = json_file::get(&after, DEFAULT_MODEL)
+        .and_then(|model| model.as_str().or_else(|| model.get("primary")?.as_str()))
+        .is_some_and(|primary| primary.starts_with(&format!("{PROVIDER_ID}/")));
+    if let Some(model_id) = first_model_id(&entry).filter(|_| select_route || !routed_to_ofox) {
         let mut default = match json_file::get(&after, DEFAULT_MODEL) {
             Some(value) => serde_json::from_value::<OpenClawDefaultModel>(value.clone())
                 .map_err(|e| format!("解析 OpenClaw 默认模型失败：{e}"))?,
@@ -107,6 +113,7 @@ pub(crate) fn bound_config(
             serde_json::to_value(default).map_err(|e| e.to_string())?,
         );
     }
+    let entry = json_file::merge_provider_entry(json_file::get(&before, ENTRY), entry);
     json_file::set(&mut after, ENTRY, entry);
     render_changed(source, &before, &after)
 }
@@ -115,10 +122,16 @@ pub(crate) fn bound_config(
 pub(crate) fn write_bound(
     template: &Value,
     api_key: &str,
+    select_route: bool,
     txn: &mut FileTxn,
 ) -> Result<(), String> {
     let path = config_path();
-    let bound = bound_config(read_text(&path)?.as_deref(), template, api_key)?;
+    let bound = bound_config(
+        read_text(&path)?.as_deref(),
+        template,
+        api_key,
+        select_route,
+    )?;
     txn.write(&path, bound.as_bytes())
         .map_err(|e| format!("写入 OpenClaw 配置失败：{e}"))
 }
@@ -206,6 +219,7 @@ mod tests {
             Some(USER_CONFIG),
             &template(Some("openai/gpt-x")),
             "sk-of-K",
+            true,
         )
         .unwrap();
         let value = parse(&bound).unwrap();
@@ -229,6 +243,7 @@ mod tests {
             Some(USER_CONFIG),
             &template(Some("openai/gpt-x")),
             "sk-of-K",
+            true,
         )
         .unwrap();
         let plan = plan_restore(Some(USER_CONFIG), Some(&bound)).unwrap();
@@ -242,6 +257,7 @@ mod tests {
             Some(USER_CONFIG),
             &template(Some("openai/gpt-x")),
             "sk-of-K",
+            true,
         )
         .unwrap();
         // OpenClaw 自己在绑定期间写了别的段落。
@@ -266,7 +282,7 @@ mod tests {
 
     #[test]
     fn restore_deletes_a_file_bind_created() {
-        let bound = bound_config(None, &template(Some("openai/gpt-x")), "sk-of-K").unwrap();
+        let bound = bound_config(None, &template(Some("openai/gpt-x")), "sk-of-K", true).unwrap();
         assert_eq!(plan_restore(None, Some(&bound)).unwrap().content, None);
     }
 }

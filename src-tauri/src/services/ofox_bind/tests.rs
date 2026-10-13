@@ -38,6 +38,7 @@ impl Home {
             ),
             ("APPDATA", Some(dir.path().join("AppData").join("Roaming"))),
             ("HERMES_HOME", None),
+            ("XDG_STATE_HOME", None),
             ("OFOX_USE_LOCAL", None),
         ];
         let saved = isolated
@@ -1210,6 +1211,7 @@ async fn workbuddy_unbind_restores_even_after_edits_in_workbuddy() {
         supports_tool_call: true,
         supports_images: false,
         supports_reasoning: false,
+        supported_endpoints: None,
     };
     crate::workbuddy_config::sync_selected_models(&db, KEY, &[selection])
         .await
@@ -1447,6 +1449,7 @@ async fn workbuddy_unbind_drops_ofox_entries_the_record_does_not_track() {
         supports_tool_call: true,
         supports_images: false,
         supports_reasoning: false,
+        supported_endpoints: None,
     };
     crate::workbuddy_config::sync_selected_models(&db, KEY, &[selection("openai/gpt-x")])
         .await
@@ -1770,6 +1773,7 @@ async fn workbuddy_deleted_config_restores_saved_selection_or_unbinds_without_re
                 supports_tool_call: true,
                 supports_images: id == "model-b",
                 supports_reasoning: true,
+                supported_endpoints: None,
             })
             .collect();
         crate::workbuddy_config::sync_selected_models(&db, KEY, &selections)
@@ -1929,6 +1933,7 @@ async fn workbuddy_model_save_rechecks_deletion_and_external_modification_after_
         supports_tool_call: true,
         supports_images: false,
         supports_reasoning: false,
+        supported_endpoints: None,
     };
     crate::workbuddy_config::sync_selected_models(&db, KEY, &[selection("saved")])
         .await
@@ -1986,6 +1991,7 @@ async fn workbuddy_partial_deletion_survives_region_switch_restart_and_explicit_
                 supports_tool_call: true,
                 supports_images: id == "kept",
                 supports_reasoning: true,
+                supported_endpoints: None,
             })
             .collect();
         crate::workbuddy_config::sync_selected_models(&db, KEY, &selections)
@@ -2627,6 +2633,7 @@ async fn region_reconciliation_isolates_direct_tool_and_workbuddy_conflicts() {
                 supports_tool_call: true,
                 supports_images: true,
                 supports_reasoning: true,
+                supported_endpoints: None,
             };
             crate::workbuddy_config::sync_selected_models(&db, KEY, &[selection])
                 .await
@@ -3160,6 +3167,7 @@ async fn windows_locked_workbuddy_is_unknown_and_keeps_saved_binding() {
         supports_tool_call: true,
         supports_images: false,
         supports_reasoning: true,
+        supported_endpoints: None,
     };
     crate::workbuddy_config::sync_selected_models(&db, KEY, std::slice::from_ref(&selection))
         .await
@@ -3289,6 +3297,224 @@ async fn codex_reasoning_effort_picked_in_the_app_is_kept_and_not_a_conflict() {
     assert_eq!(config["model_reasoning_effort"].as_str(), Some("medium"));
 }
 
+/// `codex` as the shell resolves it. On Windows npm installs `codex.cmd`, which
+/// `Command::new("codex")` cannot find (it only tries `.exe`), so go through `cmd`.
+fn codex_command(args: &[&str]) -> std::process::Command {
+    if cfg!(windows) {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", "codex"]).args(args);
+        command
+    } else {
+        let mut command = std::process::Command::new("codex");
+        command.args(args);
+        command
+    }
+}
+
+/// Runs the installed Codex's own config validation (`app-server --strict-config` fails on
+/// any field this version does not recognize). `None` when no suitable `codex` is on PATH,
+/// so the check is skipped (not failed) on machines and CI runners without it.
+fn codex_strict_config_check(codex_home: &std::path::Path) -> Option<Result<(), String>> {
+    use std::process::Stdio;
+    let help = codex_command(&["app-server", "--help"]).output().ok()?;
+    if !String::from_utf8_lossy(&help.stdout).contains("--strict-config") {
+        return None;
+    }
+    let mut child = codex_command(&["app-server", "--strict-config"])
+        .env("CODEX_HOME", codex_home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match child.try_wait().ok()? {
+            Some(status) if status.success() => return Some(Ok(())),
+            Some(_) => {
+                let mut message = String::new();
+                if let Some(mut stderr) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = stderr.read_to_string(&mut message);
+                }
+                return Some(Err(message.trim().to_string()));
+            }
+            // Still running means the config loaded; an unknown field fails immediately.
+            None if std::time::Instant::now() > deadline => {
+                let _ = child.kill();
+                return Some(Ok(()));
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
+}
+
+#[test]
+#[serial]
+fn the_strict_config_check_rejects_the_fields_older_ofox_versions_wrote() {
+    let home = Home::new();
+    let dir = home.codex("");
+    fs::create_dir_all(&dir).unwrap();
+    write(
+        &home.codex("config.toml"),
+        "disable_response_storage = true\n[mcp_servers.a]\ntype = \"stdio\"\ncommand = \"npx\"\n",
+    );
+    match codex_strict_config_check(&dir) {
+        None => eprintln!("skipped: no codex with --strict-config on PATH"),
+        Some(result) => assert!(result.is_err(), "the check must catch unknown fields"),
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn a_fresh_codex_install_is_accepted_by_the_real_codex() {
+    let home = Home::new();
+    // Use the real probe, as a new user's app would: if the installed Codex ignores
+    // `disable_response_storage` it must not be written, so strict mode accepts the file.
+    let probed = super::codex_probe::probe_now();
+    eprintln!("real Codex probe for disable_response_storage: {probed:?}");
+    super::codex_probe::set_override(Some(probed));
+    // What a new user gets: the real seed template, then the MCP servers Ofox syncs.
+    let seed = crate::database::dao::providers_seed::ofox_seeds()
+        .into_iter()
+        .find(|seed| seed.id == "ofox-codex")
+        .expect("codex seed");
+    let template: Value = serde_json::from_str(&seed.settings_config_json).unwrap();
+    let db = db_for(Tool::Codex, template);
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+
+    let mut config = crate::app_config::MultiAppConfig::default();
+    for (id, server) in [
+        (
+            "local",
+            json!({"type": "stdio", "command": "npx", "args": ["-y", "pkg"], "env": {"A": "b"}}),
+        ),
+        (
+            "remote",
+            json!({"type": "http", "url": "https://example.com/mcp", "headers": {"K": "v"}}),
+        ),
+    ] {
+        config.mcp.codex.servers.insert(
+            id.into(),
+            json!({"id": id, "enabled": true, "server": server}),
+        );
+    }
+    crate::mcp::sync_enabled_to_codex(&config).unwrap();
+
+    match codex_strict_config_check(&home.codex("")) {
+        None => eprintln!("skipped: no codex with --strict-config on PATH"),
+        Some(result) => {
+            let text = fs::read_to_string(home.codex("config.toml")).unwrap();
+            assert!(
+                result.is_ok(),
+                "Codex rejected a fresh install: {result:?}\n{text}"
+            );
+        }
+    }
+    super::codex_probe::set_override(None);
+}
+
+fn codex_flag_is_known_to_be_ignored() -> super::codex_probe::FlagSupport {
+    super::codex_probe::set_override(Some(super::codex_probe::FlagSupport::Unknown));
+    super::codex_probe::FlagSupport::Unknown
+}
+
+#[tokio::test]
+#[serial]
+async fn binding_omits_the_flag_when_codex_ignores_it_and_keeps_it_otherwise() {
+    for (support, expect_flag) in [
+        (super::codex_probe::FlagSupport::Unknown, false),
+        (super::codex_probe::FlagSupport::Known, true),
+        (super::codex_probe::FlagSupport::Undetermined, true),
+    ] {
+        let home = Home::new();
+        let path = home.codex("config.toml");
+        let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+        super::codex_probe::set_override(Some(support));
+        bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+        assert_eq!(
+            toml_at(&path).get("disable_response_storage").is_some(),
+            expect_flag,
+            "{support:?}"
+        );
+        let health = status::binding_status(&db, Tool::Codex, Some(KEY)).await;
+        assert_eq!(
+            health.status,
+            status::BindingStatus::Configured,
+            "{support:?}"
+        );
+    }
+    super::codex_probe::set_override(None);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_flag_left_by_an_older_ofox_is_not_a_modification_once_codex_ignores_it() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    super::codex_probe::set_override(Some(super::codex_probe::FlagSupport::Undetermined));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    assert!(toml_at(&path).get("disable_response_storage").is_some());
+
+    codex_flag_is_known_to_be_ignored();
+    let health = status::binding_status(&db, Tool::Codex, Some(KEY)).await;
+    super::codex_probe::set_override(None);
+
+    assert_eq!(health.status, status::BindingStatus::Configured);
+    assert!(
+        health.modified_fields.is_empty(),
+        "{:?}",
+        health.modified_fields
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn deleting_the_flag_is_still_a_modification_while_codex_honors_it() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    super::codex_probe::set_override(Some(super::codex_probe::FlagSupport::Known));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    let edited = fs::read_to_string(&path)
+        .unwrap()
+        .replace("disable_response_storage = true\n", "");
+    write(&path, &edited);
+
+    let health = status::binding_status(&db, Tool::Codex, Some(KEY)).await;
+    super::codex_probe::set_override(None);
+
+    assert_ne!(health.status, status::BindingStatus::Configured);
+}
+
+#[test]
+#[serial]
+fn launching_strips_the_flag_only_when_codex_ignores_it() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let text = "model = \"gpt-6-luna\"\ndisable_response_storage = true\n";
+    for (support, expect_flag) in [
+        (super::codex_probe::FlagSupport::Known, true),
+        (super::codex_probe::FlagSupport::Undetermined, true),
+        (super::codex_probe::FlagSupport::Unknown, false),
+    ] {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write(&path, text);
+        super::codex_probe::set_override(Some(support));
+        let changed = super::codex::strip_flag_codex_ignores().unwrap();
+        assert_eq!(changed, !expect_flag, "{support:?}");
+        assert_eq!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("disable_response_storage"),
+            expect_flag,
+            "{support:?}"
+        );
+    }
+    super::codex_probe::set_override(None);
+}
+
 #[tokio::test]
 #[serial]
 async fn codex_model_changed_in_the_cli_is_still_configured() {
@@ -3387,6 +3613,18 @@ async fn gemini_model_changed_by_the_user_is_still_configured() {
     let health = status::binding_status(&db, Tool::Gemini, Some(KEY)).await;
 
     assert_eq!(health.status, status::BindingStatus::Configured);
+}
+
+fn saved_models(db: &Database, tool: Tool) -> Vec<String> {
+    let settings = db
+        .get_provider_by_id(tool.provider_id(), tool.app().as_str())
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    settings["models"]
+        .as_object()
+        .map(|models| models.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 fn saved_model(db: &Database, tool: Tool) -> String {
@@ -3804,4 +4042,978 @@ async fn replacing_the_key_stops_when_the_user_changed_the_configuration() {
         "keys must not leak into messages: {error}"
     );
     assert_eq!(fs::read_to_string(&settings).unwrap(), on_disk);
+}
+
+// ---- Stage 4：OpenCode / OpenClaw / Hermes 在 agent 里做的事不算冲突 ----
+
+async fn bind_with_user_config(
+    tool: Tool,
+    record: &str,
+    config: &str,
+) -> (Home, Database, PathBuf) {
+    let home = Home::new();
+    let path = match tool {
+        Tool::OpenCode => crate::opencode_config::get_opencode_config_path(),
+        Tool::OpenClaw => crate::openclaw_config::get_openclaw_config_path(),
+        Tool::Hermes => crate::hermes_config::get_hermes_config_path(),
+        _ => unreachable!("only the file-based agents"),
+    };
+    write(&path, config);
+    let template = match tool {
+        Tool::OpenCode => opencode_template(Some("openai/gpt-x")),
+        Tool::OpenClaw => openclaw_template(),
+        _ => hermes_template(),
+    };
+    let db = db_for(tool, template);
+    bind(&db, tool, record, KEY).await.expect("bind");
+    (home, db, path)
+}
+
+fn edit_text(path: &Path, from: &str, to: &str) {
+    let text = fs::read_to_string(path).unwrap();
+    assert!(text.contains(from), "{from:?} not in {text}");
+    write(path, &text.replace(from, to));
+}
+
+async fn status_of(db: &Database, tool: Tool) -> status::BindingStatus {
+    status::binding_status(db, tool, Some(KEY)).await.status
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_models_added_to_the_entry_are_not_a_conflict() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    let mut config = json_at(&path);
+    config["provider"]["ofox-opencode"]["models"]["anthropic/other"] = json!({ "name": "other" });
+    write(&path, &serde_json::to_string_pretty(&config).unwrap());
+
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Configured
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_base_url_changed_is_a_conflict() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    edit_text(&path, "https://api.ofox.ai/v1", "https://relay.example/v1");
+
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Modified
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn replacing_the_key_keeps_the_opencode_models_and_selected_model() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    let mut config = json_at(&path);
+    config["provider"]["ofox-opencode"]["models"]["anthropic/other"] = json!({ "name": "other" });
+    config["model"] = "ofox-opencode/anthropic/other".into();
+    write(&path, &serde_json::to_string_pretty(&config).unwrap());
+
+    replace_key(&db, Tool::OpenCode, KEY, "sk-of-ACCOUNT-B")
+        .await
+        .expect("replace key");
+
+    let config = json_at(&path);
+    assert_eq!(
+        config["provider"]["ofox-opencode"]["options"]["apiKey"],
+        "sk-of-ACCOUNT-B"
+    );
+    assert!(config["provider"]["ofox-opencode"]["models"]
+        .get("anthropic/other")
+        .is_some());
+    assert!(config["provider"]["ofox-opencode"]["models"]
+        .get("openai/gpt-x")
+        .is_some());
+    assert_eq!(config["model"], "ofox-opencode/anthropic/other");
+}
+
+#[tokio::test]
+#[serial]
+async fn openclaw_model_switched_to_another_ofox_model_is_not_a_conflict() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(
+        &path,
+        "ofox-openclaw/openai/gpt-x",
+        "ofox-openclaw/anthropic/other",
+    );
+
+    assert_eq!(
+        status_of(&db, Tool::OpenClaw).await,
+        status::BindingStatus::Configured
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn openclaw_model_switched_to_another_provider_is_a_conflict() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(&path, "ofox-openclaw/openai/gpt-x", "anthropic/claude");
+
+    assert_eq!(
+        status_of(&db, Tool::OpenClaw).await,
+        status::BindingStatus::Modified
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn openclaw_entry_base_url_changed_is_a_conflict() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(&path, "https://api.ofox.ai/v1", "https://relay.example/v1");
+
+    assert_eq!(
+        status_of(&db, Tool::OpenClaw).await,
+        status::BindingStatus::Modified
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn replacing_the_key_keeps_the_openclaw_model_chosen_in_the_agent() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(
+        &path,
+        "ofox-openclaw/openai/gpt-x",
+        "ofox-openclaw/anthropic/other",
+    );
+
+    replace_key(&db, Tool::OpenClaw, KEY, "sk-of-ACCOUNT-B")
+        .await
+        .expect("replace key");
+
+    let default = crate::openclaw_config::get_default_model()
+        .unwrap()
+        .unwrap();
+    assert_eq!(default.primary, "ofox-openclaw/anthropic/other");
+    assert_eq!(default.fallbacks, ["existing/fallback"]);
+    let entry = crate::openclaw_config::get_provider("ofox-openclaw")
+        .unwrap()
+        .unwrap();
+    assert_eq!(entry["apiKey"], "sk-of-ACCOUNT-B");
+}
+
+#[tokio::test]
+#[serial]
+async fn replacing_the_key_keeps_models_added_to_the_openclaw_entry() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(
+        &path,
+        "\"id\": \"openai/gpt-x\"",
+        "\"id\": \"anthropic/other\", \"name\": \"other\" }, { \"id\": \"openai/gpt-x\"",
+    );
+    assert_eq!(
+        status_of(&db, Tool::OpenClaw).await,
+        status::BindingStatus::Configured
+    );
+
+    replace_key(&db, Tool::OpenClaw, KEY, "sk-of-ACCOUNT-B")
+        .await
+        .expect("replace key");
+
+    let entry = crate::openclaw_config::get_provider("ofox-openclaw")
+        .unwrap()
+        .unwrap();
+    let ids: Vec<_> = entry["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&"anthropic/other"), "{ids:?}");
+    assert!(ids.contains(&"openai/gpt-x"), "{ids:?}");
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_model_switched_in_the_agent_is_not_a_conflict() {
+    let (_home, db, path) = bind_with_user_config(Tool::Hermes, "hermes", HERMES_CONFIG).await;
+    edit_text(&path, "default: openai/gpt-x", "default: anthropic/other");
+
+    assert_eq!(
+        status_of(&db, Tool::Hermes).await,
+        status::BindingStatus::Configured
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_provider_switched_away_is_a_conflict() {
+    let (_home, db, path) = bind_with_user_config(Tool::Hermes, "hermes", HERMES_CONFIG).await;
+    edit_text(&path, "provider: ofox-hermes", "provider: deepseek");
+
+    assert_eq!(
+        status_of(&db, Tool::Hermes).await,
+        status::BindingStatus::Modified
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_entry_base_url_changed_is_a_conflict() {
+    let (_home, db, path) = bind_with_user_config(Tool::Hermes, "hermes", HERMES_CONFIG).await;
+    edit_text(&path, "https://api.ofox.ai/v1", "https://relay.example/v1");
+
+    assert_eq!(
+        status_of(&db, Tool::Hermes).await,
+        status::BindingStatus::Modified
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn replacing_the_key_keeps_the_hermes_model_chosen_in_the_agent() {
+    let (_home, db, path) = bind_with_user_config(Tool::Hermes, "hermes", HERMES_CONFIG).await;
+    edit_text(&path, "default: openai/gpt-x", "default: anthropic/other");
+
+    replace_key(&db, Tool::Hermes, KEY, "sk-of-ACCOUNT-B")
+        .await
+        .expect("replace key");
+
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains("default: anthropic/other"), "{text}");
+    assert!(text.contains("sk-of-ACCOUNT-B"));
+    assert!(text.contains("provider: ofox-hermes"));
+}
+
+#[tokio::test]
+#[serial]
+async fn openclaw_model_chosen_in_the_agent_is_adopted_for_display() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(
+        &path,
+        "ofox-openclaw/openai/gpt-x",
+        "ofox-openclaw/anthropic/other",
+    );
+
+    sync_live_model(&db, Tool::OpenClaw, Some(KEY)).await;
+
+    assert_eq!(saved_model(&db, Tool::OpenClaw), "anthropic/other");
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_model_chosen_in_the_agent_is_adopted_for_display() {
+    let (_home, db, path) = bind_with_user_config(Tool::Hermes, "hermes", HERMES_CONFIG).await;
+    edit_text(&path, "default: openai/gpt-x", "default: anthropic/other");
+
+    sync_live_model(&db, Tool::Hermes, Some(KEY)).await;
+
+    assert_eq!(saved_model(&db, Tool::Hermes), "anthropic/other");
+}
+
+#[tokio::test]
+#[serial]
+async fn a_model_of_another_provider_is_not_adopted_for_openclaw() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(&path, "ofox-openclaw/openai/gpt-x", "anthropic/claude");
+
+    sync_live_model(&db, Tool::OpenClaw, Some(KEY)).await;
+
+    assert_eq!(saved_model(&db, Tool::OpenClaw), "openai/gpt-x");
+}
+
+// ---- OpenCode 的当前模型记在 TUI 状态文件（model.json）里 ----
+
+fn opencode_state_path(home: &Home) -> PathBuf {
+    home.dir.path().join(".local/state/opencode/model.json")
+}
+
+fn write_opencode_recent(home: &Home, recent: Value) {
+    write(
+        &opencode_state_path(home),
+        &json!({ "recent": recent, "favorite": [{ "providerID": "x", "modelID": "y" }], "variant": { "x/y": "high" } })
+            .to_string(),
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_model_chosen_in_the_tui_is_adopted_for_display() {
+    let (home, db, _path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "ofox-opencode", "modelID": "anthropic/other" }]),
+    );
+
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Configured
+    );
+    sync_live_model(&db, Tool::OpenCode, Some(KEY)).await;
+
+    assert!(saved_models(&db, Tool::OpenCode).contains(&"anthropic/other".to_string()));
+    assert_eq!(
+        live_model::display_model(Tool::OpenCode)
+            .unwrap()
+            .as_deref(),
+        Some("anthropic/other")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_model_of_another_provider_in_the_tui_is_a_conflict() {
+    let (home, db, _path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "openai", "modelID": "gpt-5" }, { "providerID": "ofox-opencode", "modelID": "openai/gpt-x" }]),
+    );
+
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Modified
+    );
+    sync_live_model(&db, Tool::OpenCode, Some(KEY)).await;
+    assert_eq!(saved_model(&db, Tool::OpenCode), "openai/gpt-x");
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_without_a_state_file_is_configured() {
+    let (_home, db, _path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Configured
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn binding_opencode_puts_the_ofox_model_first_and_keeps_the_rest_of_the_state() {
+    let home = Home::new();
+    write(
+        &crate::opencode_config::get_opencode_config_path(),
+        OPENCODE_CONFIG,
+    );
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "openai", "modelID": "gpt-5" }]),
+    );
+    let db = db_for(Tool::OpenCode, opencode_template(Some("openai/gpt-x")));
+
+    bind(&db, Tool::OpenCode, "opencode", KEY)
+        .await
+        .expect("bind");
+
+    let state = json_at(&opencode_state_path(&home));
+    assert_eq!(
+        state["recent"],
+        json!([
+            { "providerID": "ofox-opencode", "modelID": "openai/gpt-x" },
+            { "providerID": "openai", "modelID": "gpt-5" }
+        ])
+    );
+    assert_eq!(state["variant"]["x/y"], "high");
+    assert_eq!(state["favorite"][0]["providerID"], "x");
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Configured
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn binding_opencode_creates_the_state_file_when_there_is_none() {
+    let (home, _db, _path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+
+    let state = json_at(&opencode_state_path(&home));
+    assert_eq!(state["recent"][0]["modelID"], "openai/gpt-x");
+}
+
+#[tokio::test]
+#[serial]
+async fn replacing_the_key_leaves_the_opencode_state_alone() {
+    let (home, db, _path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "ofox-opencode", "modelID": "anthropic/other" }]),
+    );
+    let before = fs::read_to_string(opencode_state_path(&home)).unwrap();
+
+    replace_key(&db, Tool::OpenCode, KEY, "sk-of-ACCOUNT-B")
+        .await
+        .expect("replace key");
+
+    assert_eq!(
+        fs::read_to_string(opencode_state_path(&home)).unwrap(),
+        before
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_model_of_the_users_own_ofox_gateway_entry_is_not_a_conflict() {
+    let (home, db, path) = bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    let mut config = json_at(&path);
+    config["provider"]["ofox"] =
+        json!({ "options": { "baseURL": "https://api.ofox.io/v1", "apiKey": "sk-own" } });
+    write(&path, &serde_json::to_string_pretty(&config).unwrap());
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "ofox", "modelID": "openai/gpt-6-luna" }]),
+    );
+
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Configured
+    );
+    sync_live_model(&db, Tool::OpenCode, Some(KEY)).await;
+    assert_eq!(saved_model(&db, Tool::OpenCode), "openai/gpt-x");
+}
+
+// ---- 路由指向用户自己配的、同样指向 Ofox 网关的条目：不算冲突，刷新后显示它的模型 ----
+
+#[tokio::test]
+#[serial]
+async fn opencode_refresh_shows_the_model_of_the_users_own_ofox_entry() {
+    let (home, _db, path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    let mut config = json_at(&path);
+    config["provider"]["ofox"] =
+        json!({ "options": { "baseURL": "https://api.ofox.io/v1", "apiKey": "sk-own" } });
+    write(&path, &serde_json::to_string_pretty(&config).unwrap());
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "ofox", "modelID": "z-ai/glm-5.3-flash" }]),
+    );
+
+    assert_eq!(
+        live_model::display_model(Tool::OpenCode)
+            .unwrap()
+            .as_deref(),
+        Some("z-ai/glm-5.3-flash")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_display_ignores_a_provider_that_is_not_ofox() {
+    let (home, _db, _path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "openai", "modelID": "gpt-5" }]),
+    );
+
+    assert_eq!(live_model::display_model(Tool::OpenCode).unwrap(), None);
+}
+
+#[tokio::test]
+#[serial]
+async fn openclaw_model_of_the_users_own_ofox_entry_is_not_a_conflict() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(
+        &path,
+        "\"providers\": {",
+        "\"providers\": { \"mine\": { \"baseUrl\": \"https://api.ofox.io/v1\", \"apiKey\": \"sk-own\", \"models\": [] },",
+    );
+    edit_text(
+        &path,
+        "ofox-openclaw/openai/gpt-x",
+        "mine/z-ai/glm-5.3-flash",
+    );
+
+    assert_eq!(
+        status_of(&db, Tool::OpenClaw).await,
+        status::BindingStatus::Configured
+    );
+    assert_eq!(
+        live_model::display_model(Tool::OpenClaw)
+            .unwrap()
+            .as_deref(),
+        Some("z-ai/glm-5.3-flash")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_model_of_the_users_own_ofox_entry_is_not_a_conflict() {
+    let (_home, db, path) = bind_with_user_config(Tool::Hermes, "hermes", HERMES_CONFIG).await;
+    edit_text(
+        &path,
+        "custom_providers:",
+        "custom_providers:\n- name: mine\n  base_url: https://api.ofox.io/v1\n  api_key: sk-own",
+    );
+    edit_text(&path, "provider: ofox-hermes", "provider: mine");
+    edit_text(
+        &path,
+        "default: openai/gpt-x",
+        "default: z-ai/glm-5.3-flash",
+    );
+
+    assert_eq!(
+        status_of(&db, Tool::Hermes).await,
+        status::BindingStatus::Configured
+    );
+    assert_eq!(
+        live_model::display_model(Tool::Hermes).unwrap().as_deref(),
+        Some("z-ai/glm-5.3-flash")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn codex_provider_of_the_users_own_ofox_entry_is_not_a_conflict() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    let mut text = fs::read_to_string(&path)
+        .unwrap()
+        .replace("model_provider = \"ofox\"", "model_provider = \"mine\"");
+    text.push_str(
+        "\n[model_providers.mine]\nname = \"mine\"\nbase_url = \"https://api.ofox.io/v1\"\n",
+    );
+    write(&path, &text);
+
+    assert_eq!(
+        status_of(&db, Tool::Codex).await,
+        status::BindingStatus::Configured
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_route_to_a_provider_outside_ofox_is_still_a_conflict_for_every_agent() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(
+        &path,
+        "\"providers\": {",
+        "\"providers\": { \"mine\": { \"baseUrl\": \"https://relay.example/v1\", \"apiKey\": \"k\", \"models\": [] },",
+    );
+    edit_text(&path, "ofox-openclaw/openai/gpt-x", "mine/some-model");
+    assert_eq!(
+        status_of(&db, Tool::OpenClaw).await,
+        status::BindingStatus::Modified
+    );
+
+    let (_home2, db2, path2) = bind_with_user_config(Tool::Hermes, "hermes", HERMES_CONFIG).await;
+    edit_text(
+        &path2,
+        "custom_providers:",
+        "custom_providers:\n- name: mine\n  base_url: https://relay.example/v1\n  api_key: k",
+    );
+    edit_text(&path2, "provider: ofox-hermes", "provider: mine");
+    assert_eq!(
+        status_of(&db2, Tool::Hermes).await,
+        status::BindingStatus::Modified
+    );
+}
+
+fn remove_opencode_state(home: &Home) {
+    let _ = fs::remove_file(opencode_state_path(home));
+}
+
+fn write_opencode_jsonc(config: &str) {
+    write(
+        &crate::opencode_config::get_opencode_dir().join("opencode.jsonc"),
+        config,
+    );
+}
+
+const OWN_GATEWAY_JSONC: &str = "{\n  // my setup\n  \"model\": \"openai/gpt-5.6-luna\",\n  \"provider\": { \"openai\": { \"options\": { \"baseURL\": \"https://api.ofox.ai/v1\", \"apiKey\": \"sk-own\" } } },\n}\n";
+
+#[tokio::test]
+#[serial]
+async fn opencode_jsonc_model_of_the_users_own_ofox_entry_is_not_a_conflict_and_is_shown() {
+    let (home, db, _path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    write_opencode_jsonc(OWN_GATEWAY_JSONC);
+    remove_opencode_state(&home);
+
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Configured
+    );
+    assert_eq!(
+        live_model::display_model(Tool::OpenCode)
+            .unwrap()
+            .as_deref(),
+        Some("gpt-5.6-luna")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_jsonc_model_of_another_provider_is_a_conflict() {
+    let (home, db, _path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    remove_opencode_state(&home);
+    write_opencode_jsonc(
+        "{ \"model\": \"anthropic/claude\", \"provider\": { \"anthropic\": { \"options\": { \"baseURL\": \"https://api.anthropic.com\" } } } }",
+    );
+
+    let health = status::binding_status(&db, Tool::OpenCode, Some(KEY)).await;
+    assert_eq!(health.status, status::BindingStatus::Modified);
+    assert!(
+        health.modified_fields.iter().any(|f| f.ends_with("model")),
+        "{:?}",
+        health.modified_fields
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_jsonc_wins_over_json_and_an_ofox_model_there_is_adopted() {
+    let (home, db, path) = bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    remove_opencode_state(&home);
+    let mut config = json_at(&path);
+    config["model"] = "anthropic/claude".into();
+    write(&path, &serde_json::to_string_pretty(&config).unwrap());
+    write_opencode_jsonc("{ \"model\": \"ofox-opencode/anthropic/other\" }");
+
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Configured
+    );
+    sync_live_model(&db, Tool::OpenCode, Some(KEY)).await;
+    assert!(saved_models(&db, Tool::OpenCode).contains(&"anthropic/other".to_string()));
+}
+
+// ---- Claude / Gemini：用户在 agent 里「记住」的模型（settings 里的 model）----
+// 这两个工具启动时 env 里的模型优先级高于 settings 里的，所以要把 env 对齐过去。
+
+async fn bound_claude(model: &str) -> (Home, Database, PathBuf) {
+    let home = Home::new();
+    let settings = home.claude("settings.json");
+    write(&settings, CLAUDE_RELAY);
+    let db = db_for(Tool::Claude, claude_template(Some(model)));
+    bind(&db, Tool::Claude, "claude", KEY).await.unwrap();
+    (home, db, settings)
+}
+
+fn set_json_field(path: &Path, field: &[&str], value: &str) {
+    let mut config = json_at(path);
+    let mut node = &mut config;
+    for key in &field[..field.len() - 1] {
+        if !node[*key].is_object() {
+            node[*key] = json!({});
+        }
+        node = &mut node[*key];
+    }
+    node[field[field.len() - 1]] = value.into();
+    write(path, &serde_json::to_string_pretty(&config).unwrap());
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_model_remembered_by_the_agent_takes_over_the_env_model() {
+    let (_home, db, settings) = bound_claude("anthropic/claude-x").await;
+    set_json_field(&settings, &["model"], "anthropic/claude-other");
+
+    sync_live_model(&db, Tool::Claude, Some(KEY)).await;
+
+    assert_eq!(
+        json_at(&settings)["env"]["ANTHROPIC_MODEL"],
+        "anthropic/claude-other"
+    );
+    assert_eq!(saved_model(&db, Tool::Claude), "anthropic/claude-other");
+    assert_eq!(
+        status_of(&db, Tool::Claude).await,
+        status::BindingStatus::Configured
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_model_alias_is_not_taken_over() {
+    let (_home, db, settings) = bound_claude("anthropic/claude-x").await;
+    set_json_field(&settings, &["model"], "sonnet");
+
+    sync_live_model(&db, Tool::Claude, Some(KEY)).await;
+
+    assert_eq!(
+        json_at(&settings)["env"]["ANTHROPIC_MODEL"],
+        "anthropic/claude-x"
+    );
+    assert_eq!(saved_model(&db, Tool::Claude), "anthropic/claude-x");
+}
+
+#[tokio::test]
+#[serial]
+async fn replacing_the_key_keeps_the_claude_model_remembered_by_the_agent() {
+    let (_home, db, settings) = bound_claude("anthropic/claude-x").await;
+    set_json_field(&settings, &["model"], "anthropic/claude-other");
+
+    replace_key(&db, Tool::Claude, KEY, "sk-of-ACCOUNT-B")
+        .await
+        .expect("replace key");
+
+    assert_eq!(
+        json_at(&settings)["env"]["ANTHROPIC_MODEL"],
+        "anthropic/claude-other"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn saving_a_model_in_the_app_updates_the_claude_remembered_model_too() {
+    let (_home, db, settings) = bound_claude("anthropic/claude-x").await;
+    set_json_field(&settings, &["model"], "anthropic/claude-other");
+    let saved = db
+        .get_provider_by_id(Tool::Claude.provider_id(), "claude")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let mut updated = saved.clone();
+    updated["env"]["ANTHROPIC_MODEL"] = "anthropic/claude-app".into();
+
+    persist_bound_settings(&db, Tool::Claude, KEY, &saved, &updated)
+        .await
+        .expect("save");
+    // 之后刷新不能把 app 里刚选的又改回去。
+    sync_live_model(&db, Tool::Claude, Some(KEY)).await;
+
+    let config = json_at(&settings);
+    assert_eq!(config["model"], "anthropic/claude-app");
+    assert_eq!(config["env"]["ANTHROPIC_MODEL"], "anthropic/claude-app");
+    assert_eq!(saved_model(&db, Tool::Claude), "anthropic/claude-app");
+}
+
+#[tokio::test]
+#[serial]
+async fn gemini_model_remembered_by_the_agent_takes_over_the_env_model() {
+    let home = Home::new();
+    write(&home.gemini(".env"), GEMINI_ENV);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    set_json_field(
+        &home.gemini("settings.json"),
+        &["model", "name"],
+        "gemini-3.8-flash",
+    );
+
+    sync_live_model(&db, Tool::Gemini, Some(KEY)).await;
+
+    let env = fs::read_to_string(home.gemini(".env")).unwrap();
+    assert!(env.contains("GEMINI_MODEL=gemini-3.8-flash\n"), "{env}");
+    assert_eq!(saved_model(&db, Tool::Gemini), "gemini-3.8-flash");
+}
+
+#[tokio::test]
+#[serial]
+async fn gemini_auto_model_alias_is_not_taken_over() {
+    let home = Home::new();
+    write(&home.gemini(".env"), GEMINI_ENV);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    set_json_field(
+        &home.gemini("settings.json"),
+        &["model", "name"],
+        "auto-gemini-3",
+    );
+
+    sync_live_model(&db, Tool::Gemini, Some(KEY)).await;
+
+    assert_eq!(saved_model(&db, Tool::Gemini), "gemini-saved");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn aligning_the_gemini_env_keeps_it_private_to_the_user() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new();
+    write(&home.gemini(".env"), GEMINI_ENV);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    set_json_field(
+        &home.gemini("settings.json"),
+        &["model", "name"],
+        "gemini-3.8-flash",
+    );
+
+    sync_live_model(&db, Tool::Gemini, Some(KEY)).await;
+
+    let mode = fs::metadata(home.gemini(".env"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_last_tui_choice_wins_over_the_model_in_the_config() {
+    let (home, db, _path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    write_opencode_jsonc(OWN_GATEWAY_JSONC);
+    // 在 TUI 里切到了用户自己的 `ofox` 条目；配置里的 model 是更早的默认值。
+    let mut config = json_at(&crate::opencode_config::get_opencode_config_path());
+    config["provider"]["ofox"] =
+        json!({ "options": { "baseURL": "https://api.ofox.io/v1", "apiKey": "sk-own" } });
+    write(
+        &crate::opencode_config::get_opencode_config_path(),
+        &serde_json::to_string_pretty(&config).unwrap(),
+    );
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "ofox", "modelID": "openai/gpt-6-luna" }]),
+    );
+
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Configured
+    );
+    assert_eq!(
+        live_model::display_model(Tool::OpenCode)
+            .unwrap()
+            .as_deref(),
+        Some("openai/gpt-6-luna")
+    );
+}
+
+// ---- OpenCode 多模型：模板里的 models 是用户选的一组 ----
+
+fn opencode_models_template(ids: &[&str]) -> Value {
+    let models: serde_json::Map<String, Value> = ids
+        .iter()
+        .map(|id| (id.to_string(), json!({ "name": id })))
+        .collect();
+    json!({
+        "npm": "@ai-sdk/openai",
+        "name": "OfoxAI",
+        "options": { "baseURL": "https://api.ofox.ai/v1", "apiKey": "" },
+        "models": models,
+    })
+}
+
+fn opencode_entry_models(path: &Path) -> Vec<String> {
+    json_at(path)["provider"]["ofox-opencode"]["models"]
+        .as_object()
+        .map(|models| models.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+async fn bound_opencode_with(ids: &[&str]) -> (Home, Database, PathBuf) {
+    let home = Home::new();
+    let path = crate::opencode_config::get_opencode_config_path();
+    write(&path, OPENCODE_CONFIG);
+    let db = db_for(Tool::OpenCode, opencode_models_template(ids));
+    bind(&db, Tool::OpenCode, "opencode", KEY).await.unwrap();
+    (home, db, path)
+}
+
+#[tokio::test]
+#[serial]
+async fn saving_a_set_of_models_writes_exactly_that_set_to_the_entry() {
+    let (_home, db, path) = bound_opencode_with(&["a/one", "a/two"]).await;
+    let mut config = json_at(&path);
+    config["provider"]["ofox-opencode"]["models"]["user/added"] = json!({ "name": "added" });
+    write(&path, &serde_json::to_string_pretty(&config).unwrap());
+    let saved = db
+        .get_provider_by_id(Tool::OpenCode.provider_id(), "opencode")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let updated = opencode_models_template(&["b/three", "a/one"]);
+    let mut merged = saved.clone();
+    merged["models"] = updated["models"].clone();
+
+    persist_bound_settings(&db, Tool::OpenCode, KEY, &saved, &merged)
+        .await
+        .expect("save");
+
+    assert_eq!(opencode_entry_models(&path), ["b/three", "a/one"]);
+}
+
+#[tokio::test]
+#[serial]
+async fn the_tui_choice_is_kept_when_it_is_still_in_the_saved_set() {
+    let (home, db, _path) = bound_opencode_with(&["a/one", "a/two"]).await;
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "ofox-opencode", "modelID": "a/two" }]),
+    );
+    let saved = db
+        .get_provider_by_id(Tool::OpenCode.provider_id(), "opencode")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let mut updated = saved.clone();
+    updated["models"] = opencode_models_template(&["a/one", "a/two", "a/three"])["models"].clone();
+
+    persist_bound_settings(&db, Tool::OpenCode, KEY, &saved, &updated)
+        .await
+        .expect("save");
+
+    assert_eq!(
+        json_at(&opencode_state_path(&home))["recent"][0]["modelID"],
+        "a/two"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn the_first_saved_model_becomes_current_when_the_tui_choice_was_removed() {
+    let (home, db, _path) = bound_opencode_with(&["a/one", "a/two"]).await;
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "ofox-opencode", "modelID": "a/two" }]),
+    );
+    let saved = db
+        .get_provider_by_id(Tool::OpenCode.provider_id(), "opencode")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let mut updated = saved.clone();
+    updated["models"] = opencode_models_template(&["b/three", "a/one"])["models"].clone();
+
+    persist_bound_settings(&db, Tool::OpenCode, KEY, &saved, &updated)
+        .await
+        .expect("save");
+
+    assert_eq!(
+        json_at(&opencode_state_path(&home))["recent"][0]["modelID"],
+        "b/three"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn adopting_a_tui_model_adds_it_without_dropping_the_other_saved_models() {
+    let (home, db, _path) = bound_opencode_with(&["a/one", "a/two"]).await;
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "ofox-opencode", "modelID": "a/three" }]),
+    );
+
+    sync_live_model(&db, Tool::OpenCode, Some(KEY)).await;
+
+    let settings = db
+        .get_provider_by_id(Tool::OpenCode.provider_id(), "opencode")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let ids: Vec<_> = settings["models"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(ids, ["a/one", "a/two", "a/three"]);
 }

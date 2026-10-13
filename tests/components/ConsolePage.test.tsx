@@ -23,6 +23,9 @@ const mocks = vi.hoisted(() => ({
   }),
   invoke: vi.fn(),
   reconcileKeys: vi.fn(),
+  getUserInfo: vi.fn(),
+  workBuddyModels: vi.fn(),
+  chatGptModel: vi.fn(),
   install: vi.fn(),
   openExternal: vi.fn().mockResolvedValue(undefined),
   onInstallDone: undefined as
@@ -47,12 +50,16 @@ vi.mock("@/lib/api/proxy", () => ({
   proxyApi: { getProxyTakeoverStatus: vi.fn().mockResolvedValue({}) },
 }));
 vi.mock("@/lib/api/ofoxAuth", () => ({
-  ofoxGetUserInfo: vi.fn().mockResolvedValue({ name: "Test User" }),
+  ofoxGetUserInfo: mocks.getUserInfo,
   ofoxReconcileToolKeys: mocks.reconcileKeys,
   isOfoxBillingManager: () => false,
 }));
 vi.mock("@/lib/api/manageTool", () => ({
-  manageToolApi: { getActiveModel: vi.fn().mockResolvedValue("") },
+  manageToolApi: {
+    getActiveModel: vi.fn().mockResolvedValue(""),
+    getWorkBuddyManagedModels: mocks.workBuddyModels,
+    getChatGptModel: mocks.chatGptModel,
+  },
 }));
 vi.mock("@/hooks/useOfoxApex", () => ({
   useOfoxApex: () => ({ apex: "ofox.ai" }),
@@ -140,6 +147,12 @@ beforeEach(async () => {
   mocks.toast.success.mockClear();
   mocks.toast.error.mockClear();
   mocks.toast.warning.mockClear();
+  mocks.chatGptModel.mockReset();
+  mocks.chatGptModel.mockResolvedValue("");
+  mocks.workBuddyModels.mockReset();
+  mocks.workBuddyModels.mockResolvedValue([]);
+  mocks.getUserInfo.mockReset();
+  mocks.getUserInfo.mockResolvedValue({ name: "Test User" });
   mocks.reconcileKeys.mockReset();
   mocks.reconcileKeys.mockResolvedValue({ switched: [], failed: [] });
   mocks.invoke.mockImplementation(async (command: string) => {
@@ -171,6 +184,99 @@ describe("Console title bar", () => {
     render(<ConsolePage boundTools={[]} />);
     await screen.findByText("Test User");
     expect(screen.queryByText("Ofox Desktop")).toBeNull();
+  });
+});
+
+describe("Console balance card", () => {
+  it("highlights the card when the balance is zero", async () => {
+    mocks.getUserInfo.mockResolvedValue({
+      name: "Test User",
+      balance: { balance: 0 },
+    });
+    render(<ConsolePage boundTools={[]} />);
+
+    expect(await screen.findByText("$0.00")).toBeVisible();
+    expect(screen.getByTestId("balance-card")).toHaveAttribute(
+      "data-empty",
+      "true",
+    );
+  });
+
+  it("does not highlight a positive or unknown balance", async () => {
+    mocks.getUserInfo.mockResolvedValue({
+      name: "Test User",
+      balance: { balance: 12.5 },
+    });
+    const { unmount } = render(<ConsolePage boundTools={[]} />);
+    expect(await screen.findByText("$12.50")).toBeVisible();
+    expect(screen.getByTestId("balance-card")).not.toHaveAttribute(
+      "data-empty",
+    );
+    unmount();
+
+    mocks.getUserInfo.mockResolvedValue({ name: "Test User" });
+    render(<ConsolePage boundTools={[]} />);
+    expect(await screen.findByText("—")).toBeVisible();
+    expect(screen.getByTestId("balance-card")).not.toHaveAttribute(
+      "data-empty",
+    );
+  });
+});
+
+describe("Console WorkBuddy model label", () => {
+  it("shows how many models are selected instead of a single current model", async () => {
+    mocks.workBuddyModels.mockResolvedValue(["a/one", "b/two", "c/three"]);
+    localTools = [localTool("workbuddy", "5.7.7")];
+    render(<ConsolePage boundTools={["workbuddy"]} />);
+
+    expect(await screen.findByText(/已选 3 个模型/)).toBeVisible();
+    expect(screen.queryByText("a/one")).toBeNull();
+  });
+
+  it("shows the model itself when only one is selected", async () => {
+    mocks.workBuddyModels.mockResolvedValue(["a/one"]);
+    localTools = [localTool("workbuddy", "5.7.7")];
+    render(<ConsolePage boundTools={["workbuddy"]} />);
+
+    expect(await screen.findByText(/a\/one/)).toBeVisible();
+  });
+});
+
+describe("Console ChatGPT row model", () => {
+  it("shows the model picked inside the ChatGPT app, not the Codex config model", async () => {
+    mocks.chatGptModel.mockResolvedValue("gpt-5.6-sol");
+    localTools = [localTool("chatgpt", "26.1007.30912")];
+    render(<ConsolePage boundTools={["chatgpt"]} />);
+
+    expect(await screen.findByText(/gpt-5\.6-sol/)).toBeVisible();
+  });
+});
+
+describe("Console ChatGPT update badge", () => {
+  it("shows no upgrade button when the app manages its own update", async () => {
+    const chatgpt: ToolUpdateInfo = {
+      ...availableTool("chatgpt", "26.1007.30912", "26.1007.41230"),
+      installationKind: "desktopApp",
+      update_status: "appManaged",
+      update_source: "sparkle",
+      update_supported: false,
+      update_reason:
+        "Public Sparkle feed; ChatGPT may roll this release out gradually",
+    };
+    localTools = [
+      {
+        ...localTool("chatgpt", "26.1007.30912"),
+        installationKind: "desktopApp",
+      },
+    ];
+    await cacheUpdates([chatgpt]);
+    render(<ConsolePage boundTools={["chatgpt"]} />);
+
+    expect(await screen.findByText(/v26\.1007\.30912/)).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: /v26\.1007\.41230/ }),
+    ).toBeNull();
+    expect(screen.queryByRole("button", { name: /升级到/ })).toBeNull();
   });
 });
 
