@@ -6,8 +6,10 @@
 //!
 //! 下面三个 URL 是 OpenAI 的固定基础设施地址，不属于 AGENTS.md 里按 ofox apex
 //! 派生 URL 的规则，属于显式例外。个性化灰度接口
-//! `updates.oaistatic.com/codex/app/appcast?installation_id=…` 故意不用：公开 feed
-//! 可能比某台机器实际收到的版本更新，这一点在 update_reason 里说明。
+//! `updates.oaistatic.com/codex/app/appcast?installation_id=…` 故意不用（要把安装 ID
+//! 发给 OpenAI）：公开 feed 可能比某台机器实际收到的版本更新。因此 macOS 上公开 feed
+//! 比本机新时只标 `appManaged`（请在客户端内检查更新），不标 `available`，免得提示了
+//! 却在 App 里找不到更新；Windows Store 仍可一键尝试，标 `available`。
 
 // Linux 上 chatgpt 分支直接返回 unsupported，整个模块都用不到。
 #![cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
@@ -249,6 +251,12 @@ pub(crate) fn desktop_update_fields(
         Some(Ok(latest)) => latest,
     };
     let (update_status, update_reason) = match compare_dotted(&latest, installed) {
+        // macOS：App 自己按安装 ID 分批灰度，公开 feed 里更新的版本这台机器不一定收得到，
+        // App 内检查会说「已是最新」。这里说「有更新」只会把用户带到一个没有更新按钮的地方，
+        // 所以交给 App 自己判断，不标成可更新。Store 那边还能一键尝试，保持原样。
+        Some(Ordering::Greater) if source == "sparkle" => {
+            ("appManaged", Some(rollout_note(source).to_string()))
+        }
         Some(Ordering::Greater) => ("available", Some(rollout_note(source).to_string())),
         Some(_) => ("current", None),
         None => (
@@ -667,14 +675,22 @@ mod tests {
     }
 
     #[test]
-    fn desktop_fields_report_available_and_one_click_support() {
-        let latest = || Some(Ok("26.928.21956".to_string()));
-        let manual = desktop_update_fields("sparkle", "26.924.22138", latest(), false);
-        assert_eq!(manual.update_status, "available");
-        assert_eq!(manual.latest_version.as_deref(), Some("26.928.21956"));
-        assert!(!manual.update_supported);
-        assert!(manual.update_reason.is_some());
-        let one_click = desktop_update_fields("msstore", "26.924.22138", latest(), true);
+    fn a_newer_public_sparkle_build_is_left_to_the_app_not_called_an_update() {
+        // The app checks a per-installation feed and may not be offered this build yet,
+        // so claiming "available" sends the user to an updater that says "up to date".
+        let latest = Some(Ok("26.928.21956".to_string()));
+        let fields = desktop_update_fields("sparkle", "26.924.22138", latest, false);
+        assert_eq!(fields.update_status, "appManaged");
+        assert_eq!(fields.latest_version.as_deref(), Some("26.928.21956"));
+        assert!(!fields.update_supported);
+        assert!(fields.update_reason.is_some());
+    }
+
+    #[test]
+    fn a_newer_store_build_is_still_reported_available_with_one_click_support() {
+        let latest = || Some(Ok("26.928.2636".to_string()));
+        let one_click = desktop_update_fields("msstore", "26.924.2636.0", latest(), true);
+        assert_eq!(one_click.update_status, "available");
         assert!(one_click.update_supported);
     }
 

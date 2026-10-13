@@ -252,6 +252,34 @@ describe("Console ChatGPT row model", () => {
   });
 });
 
+describe("Console ChatGPT update badge", () => {
+  it("shows no upgrade button when the app manages its own update", async () => {
+    const chatgpt: ToolUpdateInfo = {
+      ...availableTool("chatgpt", "26.1007.30912", "26.1007.41230"),
+      installationKind: "desktopApp",
+      update_status: "appManaged",
+      update_source: "sparkle",
+      update_supported: false,
+      update_reason:
+        "Public Sparkle feed; ChatGPT may roll this release out gradually",
+    };
+    localTools = [
+      {
+        ...localTool("chatgpt", "26.1007.30912"),
+        installationKind: "desktopApp",
+      },
+    ];
+    await cacheUpdates([chatgpt]);
+    render(<ConsolePage boundTools={["chatgpt"]} />);
+
+    expect(await screen.findByText(/v26\.1007\.30912/)).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: /v26\.1007\.41230/ }),
+    ).toBeNull();
+    expect(screen.queryByRole("button", { name: /升级到/ })).toBeNull();
+  });
+});
+
 describe("Console after switching accounts", () => {
   it("moves bound tools to this account's key and reloads their key labels", async () => {
     mocks.reconcileKeys.mockResolvedValueOnce({
