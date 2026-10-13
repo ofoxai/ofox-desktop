@@ -29,6 +29,8 @@ const MANAGED_KEYS: &[&str] = &[
     "model_reasoning_effort",
     "disable_response_storage",
 ];
+/// 以前版本写进模板和用户配置、现在的 Codex 不认的顶层字段。
+pub(crate) const LEGACY_IGNORED_KEY: &str = "disable_response_storage";
 /// 绑定之后归用户的字段：ChatGPT 和 Codex 会把界面里选的推理强度写回 config.toml，
 /// Ofox 再写配置（比如切换模型）时保留，只在没有时写模板的默认值。
 const USER_TUNED_KEYS: &[&str] = &["model_reasoning_effort"];
@@ -83,6 +85,9 @@ pub(crate) fn bound_patch(template_config: &str, api_key: &str) -> Result<Docume
     provider.remove("auth");
     provider.insert("requires_openai_auth", toml_edit::value(false));
     provider.insert("experimental_bearer_token", toml_edit::value(api_key));
+    // Codex 已经不认 `disable_response_storage`（启动时警告「被忽略」），旧模板里还带着，
+    // 不再写进用户的配置。
+    doc.remove(LEGACY_IGNORED_KEY);
     Ok(doc)
 }
 
@@ -407,6 +412,17 @@ mod tests {
 
     fn bound(current: &str) -> String {
         apply_patch(current, &bound_patch(TEMPLATE, "sk-of-TEST").unwrap()).unwrap()
+    }
+
+    #[test]
+    fn binding_never_writes_the_setting_codex_no_longer_knows() {
+        // TEMPLATE still carries it (older templates in the DB do).
+        let text = bound(USER_CONFIG);
+        let doc: toml::Table = toml::from_str(&text).unwrap();
+        assert!(doc.get("disable_response_storage").is_none(), "{text}");
+        // The rest of the template is still applied.
+        assert_eq!(doc["model_provider"].as_str(), Some("ofox"));
+        assert_eq!(doc["model"].as_str(), Some("openai/gpt-6-luna"));
     }
 
     #[test]

@@ -539,17 +539,17 @@ fn launching_codex_cleanup_removes_only_the_ignored_type_keys() {
     }
     fs::write(
         &path,
-        "model = \"gpt-6-sol\"\n\n[mcp_servers.a]\ntype = \"stdio\"\ncommand = \"npx\"\n\n[mcp_servers.node_repl]\ncommand = \"/x/node_repl\"\n",
+        "model = \"gpt-6-sol\"\ndisable_response_storage = true\n\n[mcp_servers.a]\ntype = \"stdio\"\ncommand = \"npx\"\n\n[mcp_servers.node_repl]\ncommand = \"/x/node_repl\"\n",
     )
     .expect("write codex config");
 
-    assert!(cc_switch_lib::strip_ignored_type_from_codex_config().expect("cleanup"));
+    assert!(cc_switch_lib::strip_ignored_settings_from_codex_config().expect("cleanup"));
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
         "model = \"gpt-6-sol\"\n\n[mcp_servers.a]\ncommand = \"npx\"\n\n[mcp_servers.node_repl]\ncommand = \"/x/node_repl\"\n"
     );
     // Already clean: no rewrite.
-    assert!(!cc_switch_lib::strip_ignored_type_from_codex_config().expect("cleanup again"));
+    assert!(!cc_switch_lib::strip_ignored_settings_from_codex_config().expect("cleanup again"));
 }
 
 #[test]
@@ -560,10 +560,10 @@ fn launching_codex_cleanup_leaves_an_invalid_or_missing_config_alone() {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create codex dir");
     }
-    assert!(!cc_switch_lib::strip_ignored_type_from_codex_config().expect("missing file"));
+    assert!(!cc_switch_lib::strip_ignored_settings_from_codex_config().expect("missing file"));
     assert!(!path.exists(), "must not create the file");
     fs::write(&path, "[mcp_servers.a\ntype = ").expect("write invalid toml");
-    assert!(!cc_switch_lib::strip_ignored_type_from_codex_config().expect("invalid file"));
+    assert!(!cc_switch_lib::strip_ignored_settings_from_codex_config().expect("invalid file"));
     assert_eq!(
         fs::read_to_string(&path).unwrap(),
         "[mcp_servers.a\ntype = "

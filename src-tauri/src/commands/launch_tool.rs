@@ -446,10 +446,11 @@ pub async fn launch_tool_cli(app: AppHandle, tool_id: String) -> Result<(), Stri
         crate::commands::manage_tool::follow_live_model(&state, &tool_id).await;
     }
 
-    // 以前版本给 Codex 的 MCP 条目写了 `type`，Codex 不认，每次启动都警告。只删这个键。
+    // 以前版本给 Codex 配置写了它不认的 `type`（MCP 条目）和 `disable_response_storage`，每次启动都
+    // 警告「被忽略」。只删这两处。
     if tool_id == "codex" {
-        if let Err(e) = crate::mcp::strip_ignored_type_from_codex_config() {
-            log::warn!("清理 Codex MCP 配置里的 type 失败: {e}");
+        if let Err(e) = crate::mcp::strip_ignored_settings_from_codex_config() {
+            log::warn!("清理 Codex 配置里被忽略的设置失败: {e}");
         }
     }
 
