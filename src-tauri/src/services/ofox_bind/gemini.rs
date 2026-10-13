@@ -27,7 +27,7 @@ const SETTINGS_CONTAINERS: &[JsonPath] = &[&["security", "auth"], &["security"]]
 const API_KEY_AUTH: &str = "gemini-api-key";
 const GOOGLE_LOGIN_AUTH: &str = "oauth-personal";
 /// `.env` 里有 key，只给本人读写。
-const ENV_MODE: u32 = 0o600;
+pub(super) const ENV_MODE: u32 = 0o600;
 
 pub(crate) fn env_path() -> PathBuf {
     get_gemini_env_path()

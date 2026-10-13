@@ -4586,3 +4586,28 @@ async fn gemini_auto_model_alias_is_not_taken_over() {
 
     assert_eq!(saved_model(&db, Tool::Gemini), "gemini-saved");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn aligning_the_gemini_env_keeps_it_private_to_the_user() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Home::new();
+    write(&home.gemini(".env"), GEMINI_ENV);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    set_json_field(
+        &home.gemini("settings.json"),
+        &["model", "name"],
+        "gemini-3.8-flash",
+    );
+
+    sync_live_model(&db, Tool::Gemini, Some(KEY)).await;
+
+    let mode = fs::metadata(home.gemini(".env"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
+}
