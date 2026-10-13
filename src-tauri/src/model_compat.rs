@@ -186,6 +186,13 @@ fn tool_protocol(tool: BindableTool) -> &'static str {
     }
 }
 
+/// 目录里 Gemini 的模型 id 带 `google/` 前缀，写进 Gemini 配置时会去掉（见
+/// `normalize_gemini_env_model`）。配置里读回来的 id 也要能对上目录。
+fn matches_catalog_id(tool: BindableTool, catalog_id: &str, model_id: &str) -> bool {
+    catalog_id == model_id
+        || (tool == BindableTool::Gemini && catalog_id.strip_prefix("google/") == Some(model_id))
+}
+
 pub async fn check(
     tool: BindableTool,
     model_id: &str,
@@ -227,7 +234,11 @@ pub async fn check(
             )
         }
     };
-    let Some(model) = catalog.models.into_iter().find(|m| m.id == model_id) else {
+    let Some(model) = catalog
+        .models
+        .into_iter()
+        .find(|m| matches_catalog_id(tool, &m.id, model_id))
+    else {
         return CompatibilityResult::new(
             tool,
             model_id,
@@ -578,6 +589,30 @@ fn is_reasoning_part_error(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gemini_model_read_back_from_the_config_matches_the_prefixed_catalog_id() {
+        assert!(matches_catalog_id(
+            BindableTool::Gemini,
+            "google/gemini-2.5-flash-lite",
+            "gemini-2.5-flash-lite"
+        ));
+        assert!(matches_catalog_id(
+            BindableTool::Gemini,
+            "google/gemini-2.5-flash-lite",
+            "google/gemini-2.5-flash-lite"
+        ));
+        assert!(!matches_catalog_id(
+            BindableTool::Gemini,
+            "google/gemini-2.5-flash-lite",
+            "gemini-2.5-flash"
+        ));
+        assert!(!matches_catalog_id(
+            BindableTool::Claude,
+            "google/gemini-2.5-flash-lite",
+            "gemini-2.5-flash-lite"
+        ));
+    }
 
     #[test]
     fn responses_reasoning_id_mismatch_is_rejected() {
