@@ -9,6 +9,7 @@
 pub(crate) mod chatgpt_state;
 pub(crate) mod claude;
 pub(crate) mod codex;
+pub(crate) mod codex_probe;
 pub(crate) mod endpoint;
 mod env_file;
 pub(crate) mod gemini;

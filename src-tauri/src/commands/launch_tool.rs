@@ -451,6 +451,16 @@ pub async fn launch_tool_cli(app: AppHandle, tool_id: String) -> Result<(), Stri
         if let Err(e) = crate::mcp::strip_ignored_type_from_codex_config() {
             log::warn!("清理 Codex MCP 配置里的 type 失败: {e}");
         }
+        // 探测 Codex 认不认 `disable_response_storage` 要起一次 Codex 进程，别堵住异步运行时。
+        match tokio::task::spawn_blocking(
+            crate::services::ofox_bind::codex::strip_flag_codex_ignores,
+        )
+        .await
+        {
+            Ok(Err(e)) => log::warn!("清理 Codex 配置里被忽略的设置失败: {e}"),
+            Err(e) => log::warn!("清理 Codex 配置的任务异常结束: {e}"),
+            Ok(Ok(_)) => {}
+        }
     }
 
     let selection = if tool_id == "opencode" {

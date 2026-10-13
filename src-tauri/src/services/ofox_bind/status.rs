@@ -334,11 +334,7 @@ pub(super) fn inspect_managed_fields(
                     &expected,
                     // 推理强度、模型都不比对：它们是用户的选择，ChatGPT 和 Codex 会把
                     // 界面或 `/model` 里选的值写回这里。
-                    &[
-                        &["model_provider"],
-                        &["disable_response_storage"],
-                        &["model_providers", "ofox"],
-                    ],
+                    &compared_codex_paths(),
                 )?;
             }
             ManagedFile::ClaudeSettings => {
@@ -511,4 +507,15 @@ pub(crate) async fn binding_status(
     let _guard = BIND_LOCK.lock().await;
     let _file_locks = file_locks(tool);
     inspect(db, tool, api_key).unwrap_or_else(|_| ToolBindingStatus::unknown())
+}
+
+/// Codex 配置里要和 Ofox 模板比对的字段。Codex 明确不认的 `disable_response_storage`
+/// 我们不再写，老版本留下的也不算被改动，所以只有 Codex 认它时才比。
+fn compared_codex_paths() -> Vec<&'static [&'static str]> {
+    let mut paths: Vec<&'static [&'static str]> =
+        vec![&["model_provider"], &["model_providers", "ofox"]];
+    if super::codex_probe::should_write_flag() {
+        paths.push(&["disable_response_storage"]);
+    }
+    paths
 }

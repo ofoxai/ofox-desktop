@@ -3369,6 +3369,11 @@ fn the_strict_config_check_rejects_the_fields_older_ofox_versions_wrote() {
 #[serial]
 async fn a_fresh_codex_install_is_accepted_by_the_real_codex() {
     let home = Home::new();
+    // Use the real probe, as a new user's app would: if the installed Codex ignores
+    // `disable_response_storage` it must not be written, so strict mode accepts the file.
+    let probed = super::codex_probe::probe_now();
+    eprintln!("real Codex probe for disable_response_storage: {probed:?}");
+    super::codex_probe::set_override(Some(probed));
     // What a new user gets: the real seed template, then the MCP servers Ofox syncs.
     let seed = crate::database::dao::providers_seed::ofox_seeds()
         .into_iter()
@@ -3396,17 +3401,6 @@ async fn a_fresh_codex_install_is_accepted_by_the_real_codex() {
     }
     crate::mcp::sync_enabled_to_codex(&config).unwrap();
 
-    // `disable_response_storage` is a Codex flag for zero-data-retention accounts. Ofox
-    // still writes it because older Codex versions honor it, but current Codex does not
-    // know it and strict mode stops at the first unknown field. Take that one known key
-    // out so the check can still catch every other field.
-    let path = home.codex("config.toml");
-    let text = fs::read_to_string(&path).unwrap();
-    write(
-        &path,
-        &text.replace("disable_response_storage = true\n", ""),
-    );
-
     match codex_strict_config_check(&home.codex("")) {
         None => eprintln!("skipped: no codex with --strict-config on PATH"),
         Some(result) => {
@@ -3417,6 +3411,108 @@ async fn a_fresh_codex_install_is_accepted_by_the_real_codex() {
             );
         }
     }
+    super::codex_probe::set_override(None);
+}
+
+fn codex_flag_is_known_to_be_ignored() -> super::codex_probe::FlagSupport {
+    super::codex_probe::set_override(Some(super::codex_probe::FlagSupport::Unknown));
+    super::codex_probe::FlagSupport::Unknown
+}
+
+#[tokio::test]
+#[serial]
+async fn binding_omits_the_flag_when_codex_ignores_it_and_keeps_it_otherwise() {
+    for (support, expect_flag) in [
+        (super::codex_probe::FlagSupport::Unknown, false),
+        (super::codex_probe::FlagSupport::Known, true),
+        (super::codex_probe::FlagSupport::Undetermined, true),
+    ] {
+        let home = Home::new();
+        let path = home.codex("config.toml");
+        let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+        super::codex_probe::set_override(Some(support));
+        bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+        assert_eq!(
+            toml_at(&path).get("disable_response_storage").is_some(),
+            expect_flag,
+            "{support:?}"
+        );
+        let health = status::binding_status(&db, Tool::Codex, Some(KEY)).await;
+        assert_eq!(
+            health.status,
+            status::BindingStatus::Configured,
+            "{support:?}"
+        );
+    }
+    super::codex_probe::set_override(None);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_flag_left_by_an_older_ofox_is_not_a_modification_once_codex_ignores_it() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    super::codex_probe::set_override(Some(super::codex_probe::FlagSupport::Undetermined));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    assert!(toml_at(&path).get("disable_response_storage").is_some());
+
+    codex_flag_is_known_to_be_ignored();
+    let health = status::binding_status(&db, Tool::Codex, Some(KEY)).await;
+    super::codex_probe::set_override(None);
+
+    assert_eq!(health.status, status::BindingStatus::Configured);
+    assert!(
+        health.modified_fields.is_empty(),
+        "{:?}",
+        health.modified_fields
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn deleting_the_flag_is_still_a_modification_while_codex_honors_it() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    super::codex_probe::set_override(Some(super::codex_probe::FlagSupport::Known));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    let edited = fs::read_to_string(&path)
+        .unwrap()
+        .replace("disable_response_storage = true\n", "");
+    write(&path, &edited);
+
+    let health = status::binding_status(&db, Tool::Codex, Some(KEY)).await;
+    super::codex_probe::set_override(None);
+
+    assert_ne!(health.status, status::BindingStatus::Configured);
+}
+
+#[test]
+#[serial]
+fn launching_strips_the_flag_only_when_codex_ignores_it() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let text = "model = \"gpt-6-luna\"\ndisable_response_storage = true\n";
+    for (support, expect_flag) in [
+        (super::codex_probe::FlagSupport::Known, true),
+        (super::codex_probe::FlagSupport::Undetermined, true),
+        (super::codex_probe::FlagSupport::Unknown, false),
+    ] {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write(&path, text);
+        super::codex_probe::set_override(Some(support));
+        let changed = super::codex::strip_flag_codex_ignores().unwrap();
+        assert_eq!(changed, !expect_flag, "{support:?}");
+        assert_eq!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("disable_response_storage"),
+            expect_flag,
+            "{support:?}"
+        );
+    }
+    super::codex_probe::set_override(None);
 }
 
 #[tokio::test]

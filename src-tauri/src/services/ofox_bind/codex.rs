@@ -76,7 +76,23 @@ pub(crate) fn is_ofox_bound(config: &str) -> bool {
 /// 由 DB 里 `ofox-codex` 模板的 config 生成绑定补丁：Ofox 服务商自带 key，不依赖
 /// auth.json。旧模板里的 `requires_openai_auth = true` 在这里一并纠正。
 pub(crate) fn bound_patch(template_config: &str, api_key: &str) -> Result<DocumentMut, String> {
+    bound_patch_with(
+        template_config,
+        api_key,
+        super::codex_probe::should_write_flag(),
+    )
+}
+
+/// 同上；`write_flag = false` 时不带 `disable_response_storage`（Codex 明确不认它）。
+fn bound_patch_with(
+    template_config: &str,
+    api_key: &str,
+    write_flag: bool,
+) -> Result<DocumentMut, String> {
     let mut doc = parse_doc(template_config)?;
+    if !write_flag {
+        doc.remove(super::codex_probe::FLAG);
+    }
     let providers = child_table(doc.as_table_mut(), PROVIDERS_TABLE)?;
     let provider = child_table(providers, OFOX_PROVIDER)?;
     provider.remove("env_key");
@@ -397,6 +413,40 @@ pub(crate) fn config_path() -> PathBuf {
     get_codex_config_path()
 }
 
+/// 顶层 `disable_response_storage = true`（以前的 Ofox 写的）。用户自己设成别的值的不动。
+fn strip_flag(doc: &mut DocumentMut) -> bool {
+    let flag = super::codex_probe::FLAG;
+    if doc.get(flag).and_then(Item::as_bool) == Some(true) {
+        doc.remove(flag);
+        return true;
+    }
+    false
+}
+
+/// 启动 Codex 前调用：只有 Codex 明确不认 `disable_response_storage` 时，才把配置里残留的
+/// 去掉（否则每次启动都警告「被忽略」）；认的、查不出的都不动。返回是否改了文件。
+pub(crate) fn strip_flag_codex_ignores() -> Result<bool, String> {
+    if super::codex_probe::flag_support() != super::codex_probe::FlagSupport::Unknown {
+        return Ok(false);
+    }
+    let path = get_codex_config_path();
+    let Some(text) = read_text(&path)? else {
+        return Ok(false);
+    };
+    // 不是有效的 TOML 就别碰用户的文件。
+    let Ok(mut doc) = text.parse::<DocumentMut>() else {
+        return Ok(false);
+    };
+    if !strip_flag(&mut doc) {
+        return Ok(false);
+    }
+    let mut txn = FileTxn::new();
+    txn.write(&path, doc.to_string().as_bytes())
+        .and_then(|()| txn.set_mode(&path, BOUND_CONFIG_MODE))
+        .map_err(|e| format!("写入 Codex 配置失败：{e}"))?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,6 +457,36 @@ mod tests {
 
     fn bound(current: &str) -> String {
         apply_patch(current, &bound_patch(TEMPLATE, "sk-of-TEST").unwrap()).unwrap()
+    }
+
+    #[test]
+    fn the_flag_is_dropped_from_the_patch_only_when_codex_is_known_to_ignore_it() {
+        let patch = |write_flag| {
+            bound_patch_with(TEMPLATE, "sk-of-TEST", write_flag)
+                .unwrap()
+                .to_string()
+        };
+        assert!(patch(true).contains("disable_response_storage = true"));
+        let without = patch(false);
+        assert!(!without.contains("disable_response_storage"), "{without}");
+        // Everything else in the template is still applied.
+        assert!(without.contains("model_provider = \"ofox\""));
+        assert!(without.contains("experimental_bearer_token"));
+    }
+
+    #[test]
+    fn stripping_removes_only_a_true_flag() {
+        let strip = |text: &str| {
+            let mut doc: DocumentMut = text.parse().unwrap();
+            let changed = strip_flag(&mut doc);
+            (changed, doc.to_string())
+        };
+        let (changed, text) = strip("model = \"x\"\ndisable_response_storage = true\n[a]\nb = 1\n");
+        assert!(changed);
+        assert_eq!(text, "model = \"x\"\n[a]\nb = 1\n");
+        // A value the user chose is theirs.
+        assert!(!strip("disable_response_storage = false\n").0);
+        assert!(!strip("model = \"x\"\n").0);
     }
 
     #[test]
