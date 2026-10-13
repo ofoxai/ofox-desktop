@@ -4448,3 +4448,141 @@ async fn opencode_jsonc_wins_over_json_and_an_ofox_model_there_is_adopted() {
     sync_live_model(&db, Tool::OpenCode, Some(KEY)).await;
     assert_eq!(saved_model(&db, Tool::OpenCode), "anthropic/other");
 }
+
+// ---- Claude / Gemini：用户在 agent 里「记住」的模型（settings 里的 model）----
+// 这两个工具启动时 env 里的模型优先级高于 settings 里的，所以要把 env 对齐过去。
+
+async fn bound_claude(model: &str) -> (Home, Database, PathBuf) {
+    let home = Home::new();
+    let settings = home.claude("settings.json");
+    write(&settings, CLAUDE_RELAY);
+    let db = db_for(Tool::Claude, claude_template(Some(model)));
+    bind(&db, Tool::Claude, "claude", KEY).await.unwrap();
+    (home, db, settings)
+}
+
+fn set_json_field(path: &Path, field: &[&str], value: &str) {
+    let mut config = json_at(path);
+    let mut node = &mut config;
+    for key in &field[..field.len() - 1] {
+        if !node[*key].is_object() {
+            node[*key] = json!({});
+        }
+        node = &mut node[*key];
+    }
+    node[field[field.len() - 1]] = value.into();
+    write(path, &serde_json::to_string_pretty(&config).unwrap());
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_model_remembered_by_the_agent_takes_over_the_env_model() {
+    let (_home, db, settings) = bound_claude("anthropic/claude-x").await;
+    set_json_field(&settings, &["model"], "anthropic/claude-other");
+
+    sync_live_model(&db, Tool::Claude, Some(KEY)).await;
+
+    assert_eq!(
+        json_at(&settings)["env"]["ANTHROPIC_MODEL"],
+        "anthropic/claude-other"
+    );
+    assert_eq!(saved_model(&db, Tool::Claude), "anthropic/claude-other");
+    assert_eq!(
+        status_of(&db, Tool::Claude).await,
+        status::BindingStatus::Configured
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_model_alias_is_not_taken_over() {
+    let (_home, db, settings) = bound_claude("anthropic/claude-x").await;
+    set_json_field(&settings, &["model"], "sonnet");
+
+    sync_live_model(&db, Tool::Claude, Some(KEY)).await;
+
+    assert_eq!(
+        json_at(&settings)["env"]["ANTHROPIC_MODEL"],
+        "anthropic/claude-x"
+    );
+    assert_eq!(saved_model(&db, Tool::Claude), "anthropic/claude-x");
+}
+
+#[tokio::test]
+#[serial]
+async fn replacing_the_key_keeps_the_claude_model_remembered_by_the_agent() {
+    let (_home, db, settings) = bound_claude("anthropic/claude-x").await;
+    set_json_field(&settings, &["model"], "anthropic/claude-other");
+
+    replace_key(&db, Tool::Claude, KEY, "sk-of-ACCOUNT-B")
+        .await
+        .expect("replace key");
+
+    assert_eq!(
+        json_at(&settings)["env"]["ANTHROPIC_MODEL"],
+        "anthropic/claude-other"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn saving_a_model_in_the_app_updates_the_claude_remembered_model_too() {
+    let (_home, db, settings) = bound_claude("anthropic/claude-x").await;
+    set_json_field(&settings, &["model"], "anthropic/claude-other");
+    let saved = db
+        .get_provider_by_id(Tool::Claude.provider_id(), "claude")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let mut updated = saved.clone();
+    updated["env"]["ANTHROPIC_MODEL"] = "anthropic/claude-app".into();
+
+    persist_bound_settings(&db, Tool::Claude, KEY, &saved, &updated)
+        .await
+        .expect("save");
+    // 之后刷新不能把 app 里刚选的又改回去。
+    sync_live_model(&db, Tool::Claude, Some(KEY)).await;
+
+    let config = json_at(&settings);
+    assert_eq!(config["model"], "anthropic/claude-app");
+    assert_eq!(config["env"]["ANTHROPIC_MODEL"], "anthropic/claude-app");
+    assert_eq!(saved_model(&db, Tool::Claude), "anthropic/claude-app");
+}
+
+#[tokio::test]
+#[serial]
+async fn gemini_model_remembered_by_the_agent_takes_over_the_env_model() {
+    let home = Home::new();
+    write(&home.gemini(".env"), GEMINI_ENV);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    set_json_field(
+        &home.gemini("settings.json"),
+        &["model", "name"],
+        "gemini-3.8-flash",
+    );
+
+    sync_live_model(&db, Tool::Gemini, Some(KEY)).await;
+
+    let env = fs::read_to_string(home.gemini(".env")).unwrap();
+    assert!(env.contains("GEMINI_MODEL=gemini-3.8-flash\n"), "{env}");
+    assert_eq!(saved_model(&db, Tool::Gemini), "gemini-3.8-flash");
+}
+
+#[tokio::test]
+#[serial]
+async fn gemini_auto_model_alias_is_not_taken_over() {
+    let home = Home::new();
+    write(&home.gemini(".env"), GEMINI_ENV);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    set_json_field(
+        &home.gemini("settings.json"),
+        &["model", "name"],
+        "auto-gemini-3",
+    );
+
+    sync_live_model(&db, Tool::Gemini, Some(KEY)).await;
+
+    assert_eq!(saved_model(&db, Tool::Gemini), "gemini-saved");
+}

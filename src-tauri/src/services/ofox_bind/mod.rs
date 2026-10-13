@@ -302,8 +302,8 @@ fn write_bound(
                 .ok_or_else(|| "Ofox Codex 模板缺少 config".to_string())?;
             codex::write_bound_config(config, api_key, txn)
         }
-        Tool::Claude => claude::write_bound(template, api_key, txn),
-        Tool::Gemini => gemini::write_bound(template, api_key, txn),
+        Tool::Claude => claude::write_bound(template, api_key, select_route, txn),
+        Tool::Gemini => gemini::write_bound(template, api_key, select_route, txn),
         Tool::OpenCode => opencode::write_bound(template, api_key, select_route, txn),
         Tool::OpenClaw => openclaw::write_bound(template, api_key, select_route, txn),
         Tool::Hermes => hermes::write_bound(template, api_key, select_route, txn),

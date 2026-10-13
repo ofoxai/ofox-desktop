@@ -77,9 +77,13 @@ pub(crate) fn bound_settings(current: Option<&str>) -> Result<Option<String>, St
 }
 
 /// 绑定和切换模型共用。两个文件都算好再写，任何一个解析失败都不动磁盘。
+///
+/// `select_route`：在应用里选了模型时，用户在 agent 里「记住」的 `model.name` 也要跟着改，
+/// 不然之后刷新会把它当成用户的新选择改回来。没有这个字段就不加。
 pub(crate) fn write_bound(
     template: &Value,
     api_key: &str,
+    select_route: bool,
     txn: &mut FileTxn,
 ) -> Result<(), String> {
     let (env_path, settings_path) = (env_path(), settings_path());
@@ -88,7 +92,26 @@ pub(crate) fn write_bound(
         template,
         api_key,
     )?;
-    let settings = bound_settings(read_text(&settings_path)?.as_deref())?;
+    let current_settings = read_text(&settings_path)?;
+    let mut settings = bound_settings(current_settings.as_deref())?;
+    if let (true, Some(model)) = (select_route, template_env(template, MODEL)) {
+        let text = settings.as_deref().or(current_settings.as_deref());
+        let before = json_file::parse_object(text, SETTINGS_LABEL)?;
+        if json_file::get(&before, &["model", "name"]).is_some() {
+            let mut after = before.clone();
+            json_file::set(
+                &mut after,
+                &["model", "name"],
+                normalize_gemini_env_model(model).into(),
+            );
+            settings = Some(json_file::render_changed(
+                text.unwrap_or_default(),
+                KeyStyle::Json,
+                &before,
+                &after,
+            )?);
+        }
+    }
     txn.write(&env_path, env.as_bytes())
         .and_then(|()| txn.set_mode(&env_path, ENV_MODE))
         .and_then(|()| match settings {

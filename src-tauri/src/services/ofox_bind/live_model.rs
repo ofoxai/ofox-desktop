@@ -10,8 +10,10 @@
 
 use serde_json::Value;
 
+use super::json_file::KeyStyle;
 use super::{env_file, json_file, read_text, ManagedFile, Tool};
 use crate::commands::manage_tool::{read_model_from_settings, write_model_into_settings};
+use crate::config::FileTxn;
 use crate::database::Database;
 
 /// 配置文件里当前选的模型；没有这个字段（或是空的）、文件不在、不是支持的工具，
@@ -78,9 +80,80 @@ fn read_live_model(tool: Tool) -> Result<Option<String>, String> {
     Ok(model.filter(|model| !model.trim().is_empty()))
 }
 
+/// Claude、Gemini 启动时 env 里的模型优先级比 settings 里的高，而用户在 agent 里
+/// 「记住」的模型（Claude 的 `model`、Gemini 的 `model.name`）写在 settings 里。这里把
+/// env 对齐到它，不然用户的选择下次启动不生效。只认具体的模型名，别名（`sonnet`、
+/// `auto-gemini-3` 之类）由 agent 自己解析，不动。返回是否改了文件。
+fn align_env_with_remembered_model(tool: Tool) -> Result<bool, String> {
+    let mut txn = FileTxn::new();
+    let changed = match tool {
+        Tool::Claude => {
+            let path = ManagedFile::ClaudeSettings.current_path();
+            let Some(text) = read_text(&path)? else {
+                return Ok(false);
+            };
+            let before = json_file::parse_object(Some(&text), "Claude")?;
+            let Some(model) = before
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|model| model.contains('/'))
+            else {
+                return Ok(false);
+            };
+            let env_model =
+                json_file::get(&before, &["env", "ANTHROPIC_MODEL"]).and_then(Value::as_str);
+            if env_model == Some(model) {
+                return Ok(false);
+            }
+            let mut after = before.clone();
+            json_file::set(&mut after, &["env", "ANTHROPIC_MODEL"], model.into());
+            let rendered = json_file::render_changed(&text, KeyStyle::Json, &before, &after)?;
+            txn.write(&path, rendered.as_bytes())
+                .map_err(|e| format!("写入 Claude 配置失败：{e}"))?;
+            true
+        }
+        Tool::Gemini => {
+            let settings_path = ManagedFile::GeminiSettings.current_path();
+            let Some(settings) = read_text(&settings_path)? else {
+                return Ok(false);
+            };
+            let settings = json_file::parse_object(Some(&settings), "Gemini")?;
+            let Some(model) = json_file::get(&settings, &["model", "name"])
+                .and_then(Value::as_str)
+                .map(crate::gemini_config::normalize_gemini_env_model)
+                .map(|model| model.trim().to_string())
+                .filter(|model| is_concrete_gemini_model(model))
+            else {
+                return Ok(false);
+            };
+            let env_path = ManagedFile::GeminiEnv.current_path();
+            let Some(env) = read_text(&env_path)? else {
+                return Ok(false);
+            };
+            if env_file::get_value(&env, "GEMINI_MODEL").as_deref() == Some(model.as_str()) {
+                return Ok(false);
+            }
+            let updated = env_file::set_value(&env, "GEMINI_MODEL", Some(&model));
+            txn.write(&env_path, updated.as_bytes())
+                .map_err(|e| format!("写入 Gemini 配置失败：{e}"))?;
+            true
+        }
+        _ => false,
+    };
+    Ok(changed)
+}
+
+fn is_concrete_gemini_model(model: &str) -> bool {
+    !model.is_empty()
+        && !model.starts_with("auto")
+        && !matches!(model, "pro" | "flash" | "flash-lite")
+}
+
 /// 把配置文件里的模型写进模板（数据库里的 `ofox-<app>` 服务商）；模板已经是它就
 /// 不动。返回是否改了模板。调用方要先确认配置还是 Ofox 的接入方式。
 pub(super) fn adopt_live_model(db: &Database, tool: Tool) -> Result<bool, String> {
+    align_env_with_remembered_model(tool)?;
     let Some(live) = read_live_model(tool)? else {
         return Ok(false);
     };
