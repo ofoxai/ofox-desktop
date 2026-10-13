@@ -541,13 +541,27 @@ async fn chatgpt_update_fields(
     include_latest: bool,
     one_click: bool,
 ) -> super::chatgpt_updates::DesktopUpdateFields {
+    let mut context = super::chatgpt_updates::SparkleContext::unknown();
     let latest = if include_latest {
         let client = crate::proxy::http_client::get();
-        Some(super::chatgpt_updates::fetch_latest_for_host(&client).await)
+        match super::chatgpt_updates::fetch_latest_release_for_host(&client).await {
+            Ok(release) => {
+                context.published_at = release.published;
+                Some(Ok(release.version))
+            }
+            Err(error) => Some(Err(error)),
+        }
     } else {
         None
     };
-    super::chatgpt_updates::desktop_update_fields(source, installed, latest, one_click)
+    #[cfg(target_os = "macos")]
+    if source == "sparkle" {
+        context.auto_checks_enabled =
+            super::chatgpt_updates::app_auto_checks_enabled("com.openai.codex").await;
+    }
+    super::chatgpt_updates::desktop_update_fields_with(
+        source, installed, latest, one_click, &context,
+    )
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
