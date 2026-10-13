@@ -334,7 +334,11 @@ pub(super) fn inspect_managed_fields(
                     &expected,
                     // 推理强度、模型都不比对：它们是用户的选择，ChatGPT 和 Codex 会把
                     // 界面或 `/model` 里选的值写回这里。
-                    &[&["model_provider"], &["model_providers", "ofox"]],
+                    &[
+                        &["model_provider"],
+                        &["disable_response_storage"],
+                        &["model_providers", "ofox"],
+                    ],
                 )?;
             }
             ManagedFile::ClaudeSettings => {

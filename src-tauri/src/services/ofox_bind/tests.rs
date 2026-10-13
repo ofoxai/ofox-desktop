@@ -3410,44 +3410,6 @@ async fn a_fresh_codex_install_is_accepted_by_the_real_codex() {
 
 #[tokio::test]
 #[serial]
-async fn codex_binding_no_longer_writes_the_ignored_response_storage_flag() {
-    let home = Home::new();
-    let path = home.codex("config.toml");
-    // TEMPLATE is an older template that still carries the flag.
-    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
-    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
-
-    assert!(toml_at(&path).get("disable_response_storage").is_none());
-    let health = status::binding_status(&db, Tool::Codex, Some(KEY)).await;
-    assert_eq!(health.status, status::BindingStatus::Configured);
-}
-
-#[tokio::test]
-#[serial]
-async fn codex_config_that_still_has_the_flag_is_not_reported_as_modified() {
-    let home = Home::new();
-    let path = home.codex("config.toml");
-    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
-    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
-    // A config written by an older Ofox version.
-    let legacy = format!(
-        "disable_response_storage = true\n{}",
-        fs::read_to_string(&path).unwrap()
-    );
-    write(&path, &legacy);
-
-    let health = status::binding_status(&db, Tool::Codex, Some(KEY)).await;
-
-    assert_eq!(health.status, status::BindingStatus::Configured);
-    assert!(
-        health.modified_fields.is_empty(),
-        "{:?}",
-        health.modified_fields
-    );
-}
-
-#[tokio::test]
-#[serial]
 async fn codex_model_changed_in_the_cli_is_still_configured() {
     let home = Home::new();
     let path = home.codex("config.toml");

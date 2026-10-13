@@ -53,28 +53,17 @@ fn entry_transport(entry: &toml::value::Table) -> &str {
     }
 }
 
-/// 顶层 `disable_response_storage = true`（以前 Ofox 的模板写的）。用户自己设成别的值的不动。
-fn strip_legacy_top_level(doc: &mut toml_edit::DocumentMut) -> bool {
-    let key = crate::services::ofox_bind::codex::LEGACY_IGNORED_KEY;
-    if doc.get(key).and_then(|item| item.as_bool()) == Some(true) {
-        doc.remove(key);
-        return true;
-    }
-    false
-}
-
-/// 去掉以前版本写进去、现在的 Codex 不认的内容：MCP 条目里的 `type`，和顶层的
-/// `disable_response_storage = true`。其余原样不动。
+/// 去掉已有 MCP 条目里 Codex 不认的 `type`（以前版本写进去的），其余原样不动。
 /// 只处理有 `command` 或 `url` 的条目：Codex 靠它们判断怎么连，没有的话 `type` 是
 /// 仅有的线索，留着。返回是否改了。
 fn strip_ignored_type(doc: &mut toml_edit::DocumentMut) -> bool {
-    let mut changed = strip_legacy_top_level(doc);
     let Some(servers) = doc
         .get_mut("mcp_servers")
         .and_then(|item| item.as_table_like_mut())
     else {
-        return changed;
+        return false;
     };
+    let mut changed = false;
     for (_, entry) in servers.iter_mut() {
         let Some(entry) = entry.as_table_like_mut() else {
             continue;
@@ -91,7 +80,7 @@ fn strip_ignored_type(doc: &mut toml_edit::DocumentMut) -> bool {
 
 /// 启动 Codex 前调用：清掉 `~/.codex/config.toml` 里已有 MCP 条目的 `type`，免得每次启动
 /// 都警告「type 被忽略」。文件不存在、不是有效 TOML 时什么都不做，不会覆盖用户的文件。
-pub fn strip_ignored_settings_from_codex_config() -> Result<bool, AppError> {
+pub fn strip_ignored_type_from_codex_config() -> Result<bool, AppError> {
     if !should_sync_codex_mcp() {
         return Ok(false);
     }
@@ -851,23 +840,5 @@ mod tests {
         assert!(!changed);
         let (changed, _) = stripped("model = \"x\"\n");
         assert!(!changed);
-    }
-    #[test]
-    fn strip_also_removes_the_response_storage_flag_ofox_used_to_write() {
-        let (changed, text) = stripped(
-            "model = \"gpt-6-sol\"\ndisable_response_storage = true\n\n[model_providers.ofox]\nname = \"ofox\"\n",
-        );
-        assert!(changed);
-        assert_eq!(
-            text,
-            "model = \"gpt-6-sol\"\n\n[model_providers.ofox]\nname = \"ofox\"\n"
-        );
-    }
-
-    #[test]
-    fn strip_leaves_a_response_storage_flag_the_user_set_to_false() {
-        let (changed, text) = stripped("disable_response_storage = false\n");
-        assert!(!changed);
-        assert!(text.contains("disable_response_storage = false"));
     }
 }
