@@ -110,7 +110,7 @@ pub fn list() -> Vec<ManagedSession> {
                 return None;
             }
             let readable = meta.provider_id != "dsh";
-            let resume = resume_args(&meta).is_ok() && resume_project(&meta).is_ok();
+            let resume = can_resume(&meta);
             let plan = super::trash::plan_from_listing(&meta, &listing);
             let revision = plan
                 .as_ref()
@@ -251,11 +251,19 @@ fn resume_project(meta: &SessionMeta) -> Result<&str, String> {
     Ok(cwd)
 }
 
+fn can_resume(meta: &SessionMeta) -> bool {
+    resume_args(meta).is_ok() && resume_project(meta).is_ok()
+}
+
 pub fn resume(session_key: &str, launch: bool) -> Result<ResumeResult, String> {
     let record = resolve(session_key)?;
-    let args = resume_args(&record.meta)?;
-    let cwd = Some(resume_project(&record.meta)?);
-    let pi_dir = if record.meta.provider_id == "pi" {
+    resume_record(&record.meta, launch)
+}
+
+fn resume_record(meta: &SessionMeta, launch: bool) -> Result<ResumeResult, String> {
+    let args = resume_args(meta)?;
+    let cwd = Some(resume_project(meta)?);
+    let pi_dir = if meta.provider_id == "pi" {
         Some(providers::pi::agent_dir()?.to_string_lossy().into_owned())
     } else {
         None
@@ -419,23 +427,51 @@ mod tests {
     #[test]
     fn resume_requires_the_known_existing_absolute_project() {
         let temp = tempfile::tempdir().unwrap();
-        let mut meta = SessionMeta {
-            provider_id: "pi".into(),
-            session_id: "s".into(),
-            title: None,
-            summary: None,
-            project_dir: None,
-            created_at: None,
-            last_active_at: None,
-            source_path: None,
-            resume_command: None,
-        };
-        assert!(resume_project(&meta).is_err());
-        meta.project_dir = Some(".".into());
-        assert!(resume_project(&meta).is_err());
-        meta.project_dir = Some(temp.path().join("missing").to_string_lossy().into());
-        assert!(resume_project(&meta).is_err());
-        meta.project_dir = Some(temp.path().to_string_lossy().into());
-        assert!(resume_project(&meta).is_ok());
+        let project = temp.path().join("project ' with spaces");
+        std::fs::create_dir(&project).unwrap();
+        let missing = temp.path().join("missing").to_string_lossy().into_owned();
+        let existing = project.to_string_lossy().into_owned();
+        let id = "12345678-1234-1234-1234-123456789abc";
+        for (name, cwd, allowed) in [
+            ("unknown", None, false),
+            ("relative", Some("."), false),
+            ("missing", Some(missing.as_str()), false),
+            ("existing", Some(existing.as_str()), true),
+        ] {
+            let path = temp.path().join(format!("rollout-{name}.jsonl"));
+            let mut payload = serde_json::json!({"id": id});
+            if let Some(cwd) = cwd {
+                payload["cwd"] = serde_json::json!(cwd);
+            }
+            let record = serde_json::json!({
+                "type": "session_meta",
+                "timestamp": "2026-10-14T00:00:00Z",
+                "payload": payload,
+            });
+            std::fs::write(&path, format!("{record}\n")).unwrap();
+            let meta = providers::codex::parse_session(&path).unwrap();
+            assert_eq!(meta.project_dir.as_deref(), cwd, "{name}");
+            assert_eq!(can_resume(&meta), allowed, "{name}");
+            let result = resume_record(&meta, false);
+            if allowed {
+                let preview = result.unwrap();
+                assert!(!preview.launched);
+                assert_eq!(
+                    preview.command,
+                    render_resume_command(
+                        &["codex".into(), "resume".into(), id.into()],
+                        cwd,
+                        None,
+                        cfg!(target_os = "windows"),
+                    )
+                );
+            } else {
+                let error = result.err().expect("Invalid project must reject resume");
+                assert!(
+                    error.contains("Session project directory"),
+                    "{name}: {error}"
+                );
+            }
+        }
     }
 }
