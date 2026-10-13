@@ -72,8 +72,8 @@ fn read_live_model(tool: Tool) -> Result<Option<String>, String> {
                 .map(str::to_string)
         }
         Tool::OpenCode => super::opencode_state::live_selection()?
-            .filter(|(provider, _)| provider == super::opencode_state::PROVIDER_ID)
-            .map(|(_, model)| model),
+            .filter(|selection| selection.provider == super::opencode_state::PROVIDER_ID)
+            .map(|selection| selection.model),
     };
     Ok(model.filter(|model| !model.trim().is_empty()))
 }
@@ -108,13 +108,12 @@ pub(super) fn adopt_live_model(db: &Database, tool: Tool) -> Result<bool, String
 pub(super) fn display_model(tool: Tool) -> Result<Option<String>, String> {
     let model = match tool {
         Tool::OpenCode => {
-            let Some((provider, model)) = super::opencode_state::live_selection()? else {
+            let Some(selection) = super::opencode_state::live_selection()? else {
                 return Ok(None);
             };
-            let config = own_config(&ManagedFile::OpenCodeConfig, "OpenCode")?;
-            (provider != super::opencode_state::PROVIDER_ID
-                && super::route::opencode_is_gateway(&config, &provider))
-            .then_some(model)
+            (selection.provider != super::opencode_state::PROVIDER_ID
+                && super::opencode_state::is_gateway(&selection.provider))
+            .then_some(selection.model)
         }
         Tool::OpenClaw => {
             let config = own_config(&ManagedFile::OpenClawConfig, "OpenClaw")?;

@@ -4379,3 +4379,72 @@ async fn a_route_to_a_provider_outside_ofox_is_still_a_conflict_for_every_agent(
         status::BindingStatus::Modified
     );
 }
+
+fn write_opencode_jsonc(config: &str) {
+    write(
+        &crate::opencode_config::get_opencode_dir().join("opencode.jsonc"),
+        config,
+    );
+}
+
+const OWN_GATEWAY_JSONC: &str = "{\n  // my setup\n  \"model\": \"openai/gpt-5.6-luna\",\n  \"provider\": { \"openai\": { \"options\": { \"baseURL\": \"https://api.ofox.ai/v1\", \"apiKey\": \"sk-own\" } } },\n}\n";
+
+#[tokio::test]
+#[serial]
+async fn opencode_jsonc_model_of_the_users_own_ofox_entry_is_not_a_conflict_and_is_shown() {
+    let (home, db, _path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    write_opencode_jsonc(OWN_GATEWAY_JSONC);
+    // 配置里的 model 优先于 TUI 记的。
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "ofox-opencode", "modelID": "anthropic/other" }]),
+    );
+
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Configured
+    );
+    assert_eq!(
+        live_model::display_model(Tool::OpenCode)
+            .unwrap()
+            .as_deref(),
+        Some("gpt-5.6-luna")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_jsonc_model_of_another_provider_is_a_conflict() {
+    let (_home, db, _path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    write_opencode_jsonc(
+        "{ \"model\": \"anthropic/claude\", \"provider\": { \"anthropic\": { \"options\": { \"baseURL\": \"https://api.anthropic.com\" } } } }",
+    );
+
+    let health = status::binding_status(&db, Tool::OpenCode, Some(KEY)).await;
+    assert_eq!(health.status, status::BindingStatus::Modified);
+    assert!(
+        health.modified_fields.iter().any(|f| f.ends_with("model")),
+        "{:?}",
+        health.modified_fields
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_jsonc_wins_over_json_and_an_ofox_model_there_is_adopted() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    let mut config = json_at(&path);
+    config["model"] = "anthropic/claude".into();
+    write(&path, &serde_json::to_string_pretty(&config).unwrap());
+    write_opencode_jsonc("{ \"model\": \"ofox-opencode/anthropic/other\" }");
+
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Configured
+    );
+    sync_live_model(&db, Tool::OpenCode, Some(KEY)).await;
+    assert_eq!(saved_model(&db, Tool::OpenCode), "anthropic/other");
+}

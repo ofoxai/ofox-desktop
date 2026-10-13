@@ -1,10 +1,11 @@
-//! OpenCode 的当前模型不在 `opencode.json` 里，而是记在 TUI 状态文件
-//! `<state>/opencode/model.json` 的 `recent` 里（第一项就是下次启动用的模型；
-//! 命令行 `--model` 和配置里的 `model` 优先级更高，Ofox 两者都不写）。
+//! OpenCode 下次启动用哪个模型，按优先级是：命令行 `--model`、配置里的顶层 `model`、
+//! TUI 状态文件 `<state>/opencode/model.json` 的 `recent` 第一项。Ofox 不写配置里的
+//! `model`，只读它；`recent` 在绑定 / 保存模型时把 Ofox 的模型放到最前面，其余字段
+//! （收藏、思考强度）原样保留。
 //!
-//! 在 TUI 里切模型，OpenCode 会把它放到 `recent` 最前面。这里只读这一项来判断用户
-//! 选了哪个模型，绑定 / 保存模型时把 Ofox 的模型放到最前面；其余字段（收藏、思考
-//! 强度）原样保留。
+//! 全局配置有 `config.json`、`opencode.json`、`opencode.jsonc` 三种文件，OpenCode
+//! 按这个顺序合并，后面的覆盖前面的。用户自己配的服务商条目（比如指向 Ofox 网关的
+//! `openai`）也可能在 jsonc 里，所以查条目也要看这几个文件。
 
 use std::path::PathBuf;
 
@@ -32,8 +33,59 @@ fn parse(text: &str) -> Result<Value, String> {
         .ok_or_else(|| "OpenCode 的 model.json 格式无效".to_string())
 }
 
+/// OpenCode 实际会选的模型。
+pub(crate) struct Selection {
+    pub provider: String,
+    pub model: String,
+    /// 来自配置里的 `model`（不是 TUI 记的）。
+    pub from_config: bool,
+}
+
+/// 全局配置文件，按 OpenCode 的合并顺序（后面的覆盖前面的）。
+fn config_values() -> Vec<Value> {
+    let dir = crate::opencode_config::get_opencode_dir();
+    ["config.json", "opencode.json", "opencode.jsonc"]
+        .iter()
+        .filter_map(|name| read_text(&dir.join(name)).ok().flatten())
+        .filter_map(|text| super::json_file::parse_object(Some(&text), "OpenCode").ok())
+        .collect()
+}
+
+fn split_model(model: &str) -> Option<(String, String)> {
+    let (provider, model) = model.split_once('/')?;
+    (!provider.is_empty() && !model.is_empty()).then(|| (provider.into(), model.into()))
+}
+
+/// 下次启动会选的模型：配置里的 `model` 优先，其次 TUI 记的第一项。
+pub(crate) fn live_selection() -> Result<Option<Selection>, String> {
+    let configured = config_values()
+        .iter()
+        .rev()
+        .find_map(|config| config.get("model")?.as_str().and_then(split_model));
+    if let Some((provider, model)) = configured {
+        return Ok(Some(Selection {
+            provider,
+            model,
+            from_config: true,
+        }));
+    }
+    Ok(recent_selection()?.map(|(provider, model)| Selection {
+        provider,
+        model,
+        from_config: false,
+    }))
+}
+
+/// 这个服务商条目（任一全局配置文件里）是不是指向 Ofox 网关。
+pub(crate) fn is_gateway(provider: &str) -> bool {
+    config_values()
+        .iter()
+        .rev()
+        .any(|config| super::route::opencode_is_gateway(config, provider))
+}
+
 /// `recent` 第一项：(服务商, 模型)。文件不在、没有这一项都返回 `None`。
-pub(crate) fn live_selection() -> Result<Option<(String, String)>, String> {
+fn recent_selection() -> Result<Option<(String, String)>, String> {
     let Some(text) = read_text(&state_path())? else {
         return Ok(None);
     };

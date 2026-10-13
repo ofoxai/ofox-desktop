@@ -446,7 +446,9 @@ pub async fn launch_tool_cli(app: AppHandle, tool_id: String) -> Result<(), Stri
             &AppType::OpenCode,
         )
         .ok();
-        let live = crate::services::ofox_bind::opencode_state::live_selection().unwrap_or(None);
+        let live = crate::services::ofox_bind::opencode_state::live_selection()
+            .unwrap_or(None)
+            .map(|selection| (selection.provider, selection.model));
         opencode_launch_selection(live, saved)
     } else {
         None
