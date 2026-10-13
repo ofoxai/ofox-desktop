@@ -569,11 +569,11 @@ describe("ManageToolDialog WorkBuddy multi-model management", () => {
 
     await renderTool("workbuddy", "WorkBuddy");
 
-    expect(await screen.findByText("WorkBuddy 当前配置地址")).toBeVisible();
+    expect(await screen.findByText("当前地址")).toBeVisible();
     expect(
       screen.getByText("https://api.ofox.ai/v1/chat/completions"),
     ).toBeVisible();
-    expect(screen.getByText(/WorkBuddy 配置与当前地区不一致/)).toBeVisible();
+    expect(screen.getByText(/与当前地区不一致/)).toBeVisible();
   });
 
   it("saves every catalog-compatible model without automatic probes", async () => {

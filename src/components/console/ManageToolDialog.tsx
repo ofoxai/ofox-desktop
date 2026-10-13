@@ -914,11 +914,11 @@ export default function ManageToolDialog({
                           : undefined
                       }
                     />
-                    <p className="text-[11px] text-muted-foreground">
-                      {tool.id === "workbuddy"
-                        ? t("modelCompatibility.workBuddyProtocol")
-                        : t("modelCompatibility.openCodeProtocol")}
-                    </p>
+                    {tool.id === "opencode" && (
+                      <p className="text-[11px] text-muted-foreground">
+                        {t("modelCompatibility.openCodeProtocol")}
+                      </p>
+                    )}
                     {tool.id === "opencode" &&
                       protocolHints.length > 0 &&
                       !isDirty && (
@@ -950,13 +950,18 @@ export default function ManageToolDialog({
                           </Button>
                         </div>
                       )}
-                    {workBuddyEndpointStatus && (
-                      <div className="space-y-1 rounded-md border border-border-default bg-muted/20 p-3 text-[11px]">
-                        <p className="font-medium">
-                          {t("modelCompatibility.workBuddyConfiguredEndpoint")}
-                        </p>
-                        {workBuddyEndpointStatus.configuredUrls.length > 0 ? (
-                          workBuddyEndpointStatus.configuredUrls.map((url) => (
+                    {workBuddyEndpointStatus &&
+                      (workBuddyEndpointStatus.externallyModified ||
+                        workBuddyEndpointStatus.configuredUrls.some(
+                          (url) => url !== workBuddyEndpointStatus.expectedUrl,
+                        )) && (
+                        <div className="space-y-1 rounded-md border border-red-500/30 bg-muted/20 p-3 text-[11px]">
+                          <p className="font-medium">
+                            {t(
+                              "modelCompatibility.workBuddyConfiguredEndpoint",
+                            )}
+                          </p>
+                          {workBuddyEndpointStatus.configuredUrls.map((url) => (
                             <code
                               key={url}
                               className="block break-all"
@@ -964,28 +969,16 @@ export default function ManageToolDialog({
                             >
                               {url}
                             </code>
-                          ))
-                        ) : (
-                          <p className="text-muted-foreground">—</p>
-                        )}
-                        <p className="break-all text-muted-foreground">
-                          {t("modelCompatibility.workBuddyExpectedEndpoint")}:{" "}
-                          {workBuddyEndpointStatus.expectedUrl}
-                        </p>
-                        {(workBuddyEndpointStatus.externallyModified ||
-                          workBuddyEndpointStatus.configuredUrls.some(
-                            (url) =>
-                              url !== workBuddyEndpointStatus.expectedUrl,
-                          )) && (
+                          ))}
+                          <p className="break-all text-muted-foreground">
+                            {t("modelCompatibility.workBuddyExpectedEndpoint")}:{" "}
+                            {workBuddyEndpointStatus.expectedUrl}
+                          </p>
                           <p className="text-red-600">
                             {t("modelCompatibility.workBuddyEndpointMismatch")}
                           </p>
-                        )}
-                        <p className="text-muted-foreground">
-                          {t("modelCompatibility.workBuddyEndpointCheckScope")}
-                        </p>
-                      </div>
-                    )}
+                        </div>
+                      )}
                     {!modelsLoading && modelsError && (
                       <ModelsLoadError
                         message={
@@ -1142,13 +1135,6 @@ export default function ManageToolDialog({
                         : t("modelCompatibility.workBuddyTest")}
                     </Button>
                   </div>
-                  <p className="text-[11px] text-muted-foreground">
-                    {t(
-                      tool.id === "opencode"
-                        ? "modelCompatibility.openCodeSaveHint"
-                        : "modelCompatibility.workBuddySaveHint",
-                    )}
-                  </p>
                   {workBuddyTestResult && (
                     <div
                       className={cn(
