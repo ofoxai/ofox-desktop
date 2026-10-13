@@ -3297,20 +3297,30 @@ async fn codex_reasoning_effort_picked_in_the_app_is_kept_and_not_a_conflict() {
     assert_eq!(config["model_reasoning_effort"].as_str(), Some("medium"));
 }
 
+/// `codex` as the shell resolves it. On Windows npm installs `codex.cmd`, which
+/// `Command::new("codex")` cannot find (it only tries `.exe`), so go through `cmd`.
+fn codex_command(args: &[&str]) -> std::process::Command {
+    if cfg!(windows) {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", "codex"]).args(args);
+        command
+    } else {
+        let mut command = std::process::Command::new("codex");
+        command.args(args);
+        command
+    }
+}
+
 /// Runs the installed Codex's own config validation (`app-server --strict-config` fails on
 /// any field this version does not recognize). `None` when no suitable `codex` is on PATH,
 /// so the check is skipped (not failed) on machines and CI runners without it.
 fn codex_strict_config_check(codex_home: &std::path::Path) -> Option<Result<(), String>> {
-    use std::process::{Command, Stdio};
-    let help = Command::new("codex")
-        .args(["app-server", "--help"])
-        .output()
-        .ok()?;
+    use std::process::Stdio;
+    let help = codex_command(&["app-server", "--help"]).output().ok()?;
     if !String::from_utf8_lossy(&help.stdout).contains("--strict-config") {
         return None;
     }
-    let mut child = Command::new("codex")
-        .args(["app-server", "--strict-config"])
+    let mut child = codex_command(&["app-server", "--strict-config"])
         .env("CODEX_HOME", codex_home)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
