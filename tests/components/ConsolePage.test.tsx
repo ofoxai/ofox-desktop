@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   reconcileKeys: vi.fn(),
   getUserInfo: vi.fn(),
+  workBuddyModels: vi.fn(),
   install: vi.fn(),
   openExternal: vi.fn().mockResolvedValue(undefined),
   onInstallDone: undefined as
@@ -53,7 +54,10 @@ vi.mock("@/lib/api/ofoxAuth", () => ({
   isOfoxBillingManager: () => false,
 }));
 vi.mock("@/lib/api/manageTool", () => ({
-  manageToolApi: { getActiveModel: vi.fn().mockResolvedValue("") },
+  manageToolApi: {
+    getActiveModel: vi.fn().mockResolvedValue(""),
+    getWorkBuddyManagedModels: mocks.workBuddyModels,
+  },
 }));
 vi.mock("@/hooks/useOfoxApex", () => ({
   useOfoxApex: () => ({ apex: "ofox.ai" }),
@@ -141,6 +145,8 @@ beforeEach(async () => {
   mocks.toast.success.mockClear();
   mocks.toast.error.mockClear();
   mocks.toast.warning.mockClear();
+  mocks.workBuddyModels.mockReset();
+  mocks.workBuddyModels.mockResolvedValue([]);
   mocks.getUserInfo.mockReset();
   mocks.getUserInfo.mockResolvedValue({ name: "Test User" });
   mocks.reconcileKeys.mockReset();
@@ -210,6 +216,25 @@ describe("Console balance card", () => {
     expect(screen.getByTestId("balance-card")).not.toHaveAttribute(
       "data-empty",
     );
+  });
+});
+
+describe("Console WorkBuddy model label", () => {
+  it("shows how many models are selected instead of a single current model", async () => {
+    mocks.workBuddyModels.mockResolvedValue(["a/one", "b/two", "c/three"]);
+    localTools = [localTool("workbuddy", "5.7.7")];
+    render(<ConsolePage boundTools={["workbuddy"]} />);
+
+    expect(await screen.findByText(/已选 3 个模型/)).toBeVisible();
+    expect(screen.queryByText("a/one")).toBeNull();
+  });
+
+  it("shows the model itself when only one is selected", async () => {
+    mocks.workBuddyModels.mockResolvedValue(["a/one"]);
+    localTools = [localTool("workbuddy", "5.7.7")];
+    render(<ConsolePage boundTools={["workbuddy"]} />);
+
+    expect(await screen.findByText(/a\/one/)).toBeVisible();
   });
 });
 

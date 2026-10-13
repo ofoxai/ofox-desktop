@@ -127,6 +127,7 @@
     "openCodeIncompatible": "流式检测未通过，仍可保存，但这个模型可能无法使用",
     "openCodeProtocol": "选中的模型都会写进 OpenCode，可用 /model 切换。",
     "openCodeSkipped": "有 {{count}} 个模型没有可用的协议端点，已跳过：{{names}}",
+    "geminiRememberHint": "在 Gemini 里切换模型时，按 Tab 打开「记住」才会保存",
     "openCodeHint": "后台检测发现 {{count}} 个模型的协议建议调整：{{names}}",
     "openCodeHintApply": "应用建议",
     "openCodeHintApplied": "已按检测结果更新协议",
@@ -939,6 +940,7 @@
     "collapseContent": "收起"
   },
   "console": {
+    "modelCount": "已选 {{count}} 个模型",
     "providerSwitchReceived": "收到供应商切换事件:",
     "setupListenerFailed": "设置供应商切换监听器失败:",
     "updateProviderFailed": "更新供应商失败:",

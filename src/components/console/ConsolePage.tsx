@@ -376,6 +376,17 @@ export default function ConsolePage({
         const entries = await Promise.all(
           ordered.map(async (id) => {
             try {
+              if (id === "workbuddy") {
+                // WorkBuddy 的模型是在它里面按对话选的，这里只知道我们写进去的一组，
+                // 多于一个时不假装有「当前模型」。
+                const models = await manageToolApi.getWorkBuddyManagedModels();
+                return [
+                  id,
+                  models.length > 1
+                    ? t("console.modelCount", { count: models.length })
+                    : (models[0] ?? "").trim(),
+                ] as const;
+              }
               return [
                 id,
                 (await manageToolApi.getActiveModel(id)).trim(),

@@ -104,6 +104,28 @@ pub async fn get_tool_binding_status(
     Ok(status)
 }
 
+/// 从 Desktop 启动 Claude、Gemini 前，先采纳用户在 agent 里「记住」的模型：它们启动时
+/// env 里的模型比 settings 里的优先，不先对齐，刚换的模型下次启动会被盖回去。
+/// 只是同步展示和 env，出错不拦启动。
+pub(crate) async fn follow_live_model(state: &AppState, app: &str) {
+    let Some((tool, _)) = crate::services::ofox_bind::tool_for(app) else {
+        return;
+    };
+    let Ok(key) = crate::ofox_secret::default_store().load(crate::ofox_secret::Slot::ApiKey {
+        tool: tool.app().into(),
+    }) else {
+        return;
+    };
+    let configured =
+        crate::services::ofox_bind::status::binding_status(&state.db, tool, key.as_deref())
+            .await
+            .status
+            == crate::services::ofox_bind::status::BindingStatus::Configured;
+    if configured {
+        crate::services::ofox_bind::sync_live_model(&state.db, tool, key.as_deref()).await;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 2) Read active model
 // ---------------------------------------------------------------------------

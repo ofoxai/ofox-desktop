@@ -441,6 +441,11 @@ pub async fn launch_tool_cli(app: AppHandle, tool_id: String) -> Result<(), Stri
             .map_err(|e| format!("同步 Gemini 认证方式失败: {e}"))?;
     }
 
+    if matches!(tool_id.as_str(), "claude" | "gemini") {
+        let state = app.state::<crate::store::AppState>();
+        crate::commands::manage_tool::follow_live_model(&state, &tool_id).await;
+    }
+
     let selection = if tool_id == "opencode" {
         let state = app.state::<crate::store::AppState>();
         let saved = crate::commands::manage_tool::read_active_provider_and_model_for(

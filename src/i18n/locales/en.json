@@ -127,6 +127,7 @@
     "openCodeIncompatible": "Streaming check failed. You can still save, but this model may not work",
     "openCodeProtocol": "Every selected model is written to OpenCode; switch with /model.",
     "openCodeSkipped": "{{count}} model(s) have no usable protocol endpoint and were skipped: {{names}}",
+    "geminiRememberHint": "In Gemini, press Tab in the model dialog to remember your choice",
     "openCodeHint": "Background checks suggest changing the protocol of {{count}} model(s): {{names}}",
     "openCodeHintApply": "Apply",
     "openCodeHintApplied": "Protocols updated from the check results",
@@ -939,6 +940,7 @@
     "collapseContent": "Collapse"
   },
   "console": {
+    "modelCount": "{{count}} models selected",
     "providerSwitchReceived": "Received provider switch event:",
     "setupListenerFailed": "Failed to setup provider switch listener:",
     "updateProviderFailed": "Update provider failed:",

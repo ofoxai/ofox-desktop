@@ -1015,6 +1015,11 @@ export default function ManageToolDialog({
                         onRetry={() => void fetchModels(true)}
                       />
                     )}
+                    {tool.id === "gemini" && (
+                      <p className="text-[11px] text-muted-foreground">
+                        {t("modelCompatibility.geminiRememberHint")}
+                      </p>
+                    )}
                   </>
                 ) : (
                   <div className="rounded-md border border-dashed border-border-default px-3 py-2 text-[12px] text-muted-foreground">

@@ -127,6 +127,7 @@
     "openCodeIncompatible": "ストリーミング検査に失敗しました。保存はできますが、このモデルは使えない可能性があります",
     "openCodeProtocol": "選択したモデルはすべて OpenCode に書き込まれ、/model で切り替えられます。",
     "openCodeSkipped": "使えるプロトコルのエンドポイントがない {{count}} 個のモデルをスキップしました：{{names}}",
+    "geminiRememberHint": "Gemini でモデルを切り替えるときは、Tab で「記憶」をオンにすると保存されます",
     "openCodeHint": "バックグラウンド検査で {{count}} 個のモデルのプロトコル変更を推奨します：{{names}}",
     "openCodeHintApply": "適用",
     "openCodeHintApplied": "検査結果に合わせてプロトコルを更新しました",
@@ -939,6 +940,7 @@
     "collapseContent": "折りたたむ"
   },
   "console": {
+    "modelCount": "{{count}} 個のモデルを選択中",
     "providerSwitchReceived": "プロバイダー切り替えイベントを受信:",
     "setupListenerFailed": "プロバイダー切り替えリスナーの設定に失敗:",
     "updateProviderFailed": "プロバイダー更新に失敗:",
