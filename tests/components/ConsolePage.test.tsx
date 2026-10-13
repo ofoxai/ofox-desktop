@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   }),
   invoke: vi.fn(),
   reconcileKeys: vi.fn(),
+  getUserInfo: vi.fn(),
   install: vi.fn(),
   openExternal: vi.fn().mockResolvedValue(undefined),
   onInstallDone: undefined as
@@ -47,7 +48,7 @@ vi.mock("@/lib/api/proxy", () => ({
   proxyApi: { getProxyTakeoverStatus: vi.fn().mockResolvedValue({}) },
 }));
 vi.mock("@/lib/api/ofoxAuth", () => ({
-  ofoxGetUserInfo: vi.fn().mockResolvedValue({ name: "Test User" }),
+  ofoxGetUserInfo: mocks.getUserInfo,
   ofoxReconcileToolKeys: mocks.reconcileKeys,
   isOfoxBillingManager: () => false,
 }));
@@ -140,6 +141,8 @@ beforeEach(async () => {
   mocks.toast.success.mockClear();
   mocks.toast.error.mockClear();
   mocks.toast.warning.mockClear();
+  mocks.getUserInfo.mockReset();
+  mocks.getUserInfo.mockResolvedValue({ name: "Test User" });
   mocks.reconcileKeys.mockReset();
   mocks.reconcileKeys.mockResolvedValue({ switched: [], failed: [] });
   mocks.invoke.mockImplementation(async (command: string) => {
@@ -171,6 +174,42 @@ describe("Console title bar", () => {
     render(<ConsolePage boundTools={[]} />);
     await screen.findByText("Test User");
     expect(screen.queryByText("Ofox Desktop")).toBeNull();
+  });
+});
+
+describe("Console balance card", () => {
+  it("highlights the card when the balance is zero", async () => {
+    mocks.getUserInfo.mockResolvedValue({
+      name: "Test User",
+      balance: { balance: 0 },
+    });
+    render(<ConsolePage boundTools={[]} />);
+
+    expect(await screen.findByText("$0.00")).toBeVisible();
+    expect(screen.getByTestId("balance-card")).toHaveAttribute(
+      "data-empty",
+      "true",
+    );
+  });
+
+  it("does not highlight a positive or unknown balance", async () => {
+    mocks.getUserInfo.mockResolvedValue({
+      name: "Test User",
+      balance: { balance: 12.5 },
+    });
+    const { unmount } = render(<ConsolePage boundTools={[]} />);
+    expect(await screen.findByText("$12.50")).toBeVisible();
+    expect(screen.getByTestId("balance-card")).not.toHaveAttribute(
+      "data-empty",
+    );
+    unmount();
+
+    mocks.getUserInfo.mockResolvedValue({ name: "Test User" });
+    render(<ConsolePage boundTools={[]} />);
+    expect(await screen.findByText("—")).toBeVisible();
+    expect(screen.getByTestId("balance-card")).not.toHaveAttribute(
+      "data-empty",
+    );
   });
 });
 

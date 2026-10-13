@@ -660,6 +660,10 @@ export default function ConsolePage({
     );
   };
 
+  // 只有明确查到余额且不大于 0 才算没钱；还没查到（—）不报警。
+  const balance = user?.balance?.balance;
+  const balanceEmpty = typeof balance === "number" && balance <= 0;
+
   return (
     <div className="flex h-screen w-full flex-col bg-gradient-to-br from-orange-50/50 via-white to-orange-50/30 dark:from-neutral-950 dark:via-neutral-900 dark:to-neutral-950">
       {/* Title bar drag region — full 40px so it covers the macOS traffic-light
@@ -697,7 +701,15 @@ export default function ConsolePage({
         className={`flex-1 overflow-y-auto px-5 pb-4 ${isMac() ? "" : "pt-4"}`}
       >
         {/* Profile + Balance Card */}
-        <div className="mb-4 rounded-xl border border-border bg-background/80 px-5 py-4">
+        <div
+          data-testid="balance-card"
+          data-empty={balanceEmpty ? "true" : undefined}
+          className={`mb-4 rounded-xl border px-5 py-4 ${
+            balanceEmpty
+              ? "border-red-500/40 bg-red-500/5"
+              : "border-border bg-background/80"
+          }`}
+        >
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <UserAvatar
@@ -751,14 +763,22 @@ export default function ConsolePage({
                     />
                   </button>
                 </div>
-                <div className="text-2xl font-bold text-foreground">
+                <div
+                  className={`text-2xl font-bold ${
+                    balanceEmpty ? "text-red-600" : "text-foreground"
+                  }`}
+                >
                   {formatBalance(user?.balance?.balance)}
                 </div>
               </div>
               {isOfoxBillingManager(user) && (
                 <button
                   onClick={() => settingsApi.openExternal(ofoxWalletUrl(apex))}
-                  className="rounded-lg bg-orange-500 px-4 py-1.5 text-[13px] font-medium text-white hover:bg-orange-600"
+                  className={`rounded-lg px-4 py-1.5 text-[13px] font-medium text-white ${
+                    balanceEmpty
+                      ? "bg-orange-600 shadow-md ring-2 ring-orange-500/40 hover:bg-orange-700"
+                      : "bg-orange-500 hover:bg-orange-600"
+                  }`}
                 >
                   充值
                 </button>
