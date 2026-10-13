@@ -351,31 +351,33 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-/// OpenCode 的当前模型记在它自己的状态里。用户在 TUI 里选过模型就以那个为准：选了
-/// Ofox 的就带上它；选了别家的不再用保存的模型去覆盖（`--model` 优先级最高）。没选过
-/// 才用桌面端保存的。
+/// OpenCode 的当前模型记在它自己的状态里（`recent` 第一项），配置里写了 `model` 时它会
+/// 盖住 TUI 的选择，所以用 `--model` 把用户最近的选择带上：选的是 Ofox 的条目（桌面端
+/// 管的，或用户自己配的、同样指向 Ofox 网关的）就带上；选了别家的不覆盖。没选过才用
+/// 桌面端保存的。返回完整的 `<服务商>/<模型>`。
 fn opencode_launch_selection(
     live: Option<(String, String)>,
+    live_is_ofox: bool,
     saved: Option<(String, String)>,
-) -> Option<(String, String)> {
+) -> Option<String> {
     match live {
-        Some((provider, _)) if !provider.starts_with("ofox-") => None,
-        Some(live) => Some(live),
-        None => saved,
+        Some((provider, model)) if live_is_ofox => Some(format!("{provider}/{model}")),
+        Some(_) => None,
+        None => saved
+            .filter(|(provider, model)| {
+                provider.trim().starts_with("ofox-") && !model.trim().is_empty()
+            })
+            .map(|(provider, model)| format!("{}/{}", provider.trim(), model.trim())),
     }
 }
 
-fn cli_args(tool_id: &str, bin: &str, selection: Option<(&str, &str)>) -> Vec<String> {
+fn cli_args(tool_id: &str, bin: &str, model: Option<&str>) -> Vec<String> {
     let mut args = vec![bin.to_string()];
 
     if tool_id == "opencode" {
-        if let Some((provider_id, model)) = selection {
-            let provider_id = provider_id.trim();
-            let model = model.trim();
-            if provider_id.starts_with("ofox-") && !model.is_empty() {
-                args.push("--model".to_string());
-                args.push(format!("{provider_id}/{model}"));
-            }
+        if let Some(model) = model {
+            args.push("--model".to_string());
+            args.push(model.to_string());
         }
     }
 
@@ -446,21 +448,21 @@ pub async fn launch_tool_cli(app: AppHandle, tool_id: String) -> Result<(), Stri
             &AppType::OpenCode,
         )
         .ok();
-        let live = crate::services::ofox_bind::opencode_state::live_selection()
-            .unwrap_or(None)
-            .map(|selection| (selection.provider, selection.model));
-        opencode_launch_selection(live, saved)
+        let live = crate::services::ofox_bind::opencode_state::live_selection().unwrap_or(None);
+        let live_is_ofox = live.as_ref().is_some_and(|selection| {
+            selection.provider == crate::services::ofox_bind::opencode_state::PROVIDER_ID
+                || crate::services::ofox_bind::opencode_state::is_gateway(&selection.provider)
+        });
+        opencode_launch_selection(
+            live.map(|selection| (selection.provider, selection.model)),
+            live_is_ofox,
+            saved,
+        )
     } else {
         None
     };
 
-    let args = cli_args(
-        &tool_id,
-        bin,
-        selection
-            .as_ref()
-            .map(|(provider, model)| (provider.as_str(), model.as_str())),
-    );
+    let args = cli_args(&tool_id, bin, selection.as_deref());
 
     // `$SHELL -l -i -c "…"`：交给用户的 login shell 处理 rc 加载，
     // 避开 bash 硬 source zshrc 会踩到 zsh 语法（`(N)` glob 修饰符、
@@ -730,22 +732,17 @@ mod tests {
     }
 
     #[test]
-    fn opencode_launch_uses_active_ofox_model() {
+    fn opencode_launch_passes_the_selected_model() {
         let args = cli_args(
             "opencode",
             "opencode",
-            Some(("ofox-opencode", "openai/gpt-5.6-terra")),
+            Some("ofox-opencode/openai/gpt-5.6-terra"),
         );
         assert_eq!(
             args,
             ["opencode", "--model", "ofox-opencode/openai/gpt-5.6-terra"]
         );
-    }
-
-    #[test]
-    fn opencode_launch_does_not_override_non_ofox_provider() {
-        let args = cli_args("opencode", "opencode", Some(("openai", "gpt-5.6-luna")));
-        assert_eq!(args, ["opencode"]);
+        assert_eq!(cli_args("opencode", "opencode", None), ["opencode"]);
     }
 
     fn pair(provider: &str, model: &str) -> Option<(String, String)> {
@@ -753,27 +750,45 @@ mod tests {
     }
 
     #[test]
+    fn opencode_launch_uses_the_saved_ofox_model() {
+        let chosen = opencode_launch_selection(None, false, pair("ofox-opencode", "openai/gpt-x"));
+        assert_eq!(chosen.as_deref(), Some("ofox-opencode/openai/gpt-x"));
+    }
+
+    #[test]
+    fn opencode_launch_does_not_override_when_the_saved_provider_is_not_ofox() {
+        let chosen = opencode_launch_selection(None, false, pair("openai", "gpt-5.6-luna"));
+        assert_eq!(chosen, None);
+    }
+
+    #[test]
     fn opencode_launch_follows_the_model_chosen_in_the_tui() {
         let chosen = opencode_launch_selection(
             pair("ofox-opencode", "anthropic/other"),
+            true,
             pair("ofox-opencode", "openai/gpt-x"),
         );
-        assert_eq!(chosen, pair("ofox-opencode", "anthropic/other"));
+        assert_eq!(chosen.as_deref(), Some("ofox-opencode/anthropic/other"));
+    }
+
+    #[test]
+    fn opencode_launch_passes_a_tui_choice_of_the_users_own_ofox_entry() {
+        let chosen = opencode_launch_selection(
+            pair("ofox", "openai/gpt-6-luna"),
+            true,
+            pair("ofox-opencode", "openai/gpt-x"),
+        );
+        assert_eq!(chosen.as_deref(), Some("ofox/openai/gpt-6-luna"));
     }
 
     #[test]
     fn opencode_launch_does_not_override_a_tui_choice_of_another_provider() {
         let chosen = opencode_launch_selection(
-            pair("openai", "gpt-5"),
+            pair("anthropic", "claude"),
+            false,
             pair("ofox-opencode", "openai/gpt-x"),
         );
         assert_eq!(chosen, None);
-    }
-
-    #[test]
-    fn opencode_launch_uses_the_saved_model_before_any_tui_choice() {
-        let chosen = opencode_launch_selection(None, pair("ofox-opencode", "openai/gpt-x"));
-        assert_eq!(chosen, pair("ofox-opencode", "openai/gpt-x"));
     }
 
     #[cfg(target_os = "macos")]
@@ -794,7 +809,7 @@ mod tests {
         let args = cli_args(
             "opencode",
             "opencode",
-            Some(("ofox-opencode", "openai/gpt-5.6-terra")),
+            Some("ofox-opencode/openai/gpt-5.6-terra"),
         );
         let command = build_unix_command(&args);
         assert!(command.contains("exec \"$@\""));

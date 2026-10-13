@@ -4380,6 +4380,10 @@ async fn a_route_to_a_provider_outside_ofox_is_still_a_conflict_for_every_agent(
     );
 }
 
+fn remove_opencode_state(home: &Home) {
+    let _ = fs::remove_file(opencode_state_path(home));
+}
+
 fn write_opencode_jsonc(config: &str) {
     write(
         &crate::opencode_config::get_opencode_dir().join("opencode.jsonc"),
@@ -4395,11 +4399,7 @@ async fn opencode_jsonc_model_of_the_users_own_ofox_entry_is_not_a_conflict_and_
     let (home, db, _path) =
         bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
     write_opencode_jsonc(OWN_GATEWAY_JSONC);
-    // 配置里的 model 优先于 TUI 记的。
-    write_opencode_recent(
-        &home,
-        json!([{ "providerID": "ofox-opencode", "modelID": "anthropic/other" }]),
-    );
+    remove_opencode_state(&home);
 
     assert_eq!(
         status_of(&db, Tool::OpenCode).await,
@@ -4416,8 +4416,9 @@ async fn opencode_jsonc_model_of_the_users_own_ofox_entry_is_not_a_conflict_and_
 #[tokio::test]
 #[serial]
 async fn opencode_jsonc_model_of_another_provider_is_a_conflict() {
-    let (_home, db, _path) =
+    let (home, db, _path) =
         bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    remove_opencode_state(&home);
     write_opencode_jsonc(
         "{ \"model\": \"anthropic/claude\", \"provider\": { \"anthropic\": { \"options\": { \"baseURL\": \"https://api.anthropic.com\" } } } }",
     );
@@ -4434,8 +4435,8 @@ async fn opencode_jsonc_model_of_another_provider_is_a_conflict() {
 #[tokio::test]
 #[serial]
 async fn opencode_jsonc_wins_over_json_and_an_ofox_model_there_is_adopted() {
-    let (_home, db, path) =
-        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    let (home, db, path) = bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    remove_opencode_state(&home);
     let mut config = json_at(&path);
     config["model"] = "anthropic/claude".into();
     write(&path, &serde_json::to_string_pretty(&config).unwrap());
@@ -4610,4 +4611,35 @@ async fn aligning_the_gemini_env_keeps_it_private_to_the_user() {
         .mode()
         & 0o777;
     assert_eq!(mode, 0o600);
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_last_tui_choice_wins_over_the_model_in_the_config() {
+    let (home, db, _path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    write_opencode_jsonc(OWN_GATEWAY_JSONC);
+    // 在 TUI 里切到了用户自己的 `ofox` 条目；配置里的 model 是更早的默认值。
+    let mut config = json_at(&crate::opencode_config::get_opencode_config_path());
+    config["provider"]["ofox"] =
+        json!({ "options": { "baseURL": "https://api.ofox.io/v1", "apiKey": "sk-own" } });
+    write(
+        &crate::opencode_config::get_opencode_config_path(),
+        &serde_json::to_string_pretty(&config).unwrap(),
+    );
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "ofox", "modelID": "openai/gpt-6-luna" }]),
+    );
+
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Configured
+    );
+    assert_eq!(
+        live_model::display_model(Tool::OpenCode)
+            .unwrap()
+            .as_deref(),
+        Some("openai/gpt-6-luna")
+    );
 }

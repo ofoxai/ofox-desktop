@@ -1,7 +1,9 @@
-//! OpenCode 下次启动用哪个模型，按优先级是：命令行 `--model`、配置里的顶层 `model`、
-//! TUI 状态文件 `<state>/opencode/model.json` 的 `recent` 第一项。Ofox 不写配置里的
-//! `model`，只读它；`recent` 在绑定 / 保存模型时把 Ofox 的模型放到最前面，其余字段
-//! （收藏、思考强度）原样保留。
+//! OpenCode 自己的优先级是：命令行 `--model`、配置里的顶层 `model`、TUI 状态文件
+//! `<state>/opencode/model.json` 的 `recent` 第一项。用户在 TUI 里选的模型只进
+//! `recent`，所以用户配置里写了 `model` 时，直接启动 opencode 会被它盖住；桌面端打开
+//! 终端时用 `--model` 带上 `recent` 第一项，让用户最近的选择生效。Ofox 不写配置里的
+//! `model`，只读它（没有 `recent` 时才看）；绑定 / 保存模型时把 Ofox 的模型放到
+//! `recent` 最前面，其余字段（收藏、思考强度）原样保留。
 //!
 //! 全局配置有 `config.json`、`opencode.json`、`opencode.jsonc` 三种文件，OpenCode
 //! 按这个顺序合并，后面的覆盖前面的。用户自己配的服务商条目（比如指向 Ofox 网关的
@@ -56,23 +58,24 @@ fn split_model(model: &str) -> Option<(String, String)> {
     (!provider.is_empty() && !model.is_empty()).then(|| (provider.into(), model.into()))
 }
 
-/// 下次启动会选的模型：配置里的 `model` 优先，其次 TUI 记的第一项。
+/// 用户最近一次选的模型：TUI 记的第一项优先（那是用户最近的明确选择，桌面端启动时
+/// 会用 `--model` 带上它），没有才看配置里的 `model`。
 pub(crate) fn live_selection() -> Result<Option<Selection>, String> {
+    if let Some((provider, model)) = recent_selection()? {
+        return Ok(Some(Selection {
+            provider,
+            model,
+            from_config: false,
+        }));
+    }
     let configured = config_values()
         .iter()
         .rev()
         .find_map(|config| config.get("model")?.as_str().and_then(split_model));
-    if let Some((provider, model)) = configured {
-        return Ok(Some(Selection {
-            provider,
-            model,
-            from_config: true,
-        }));
-    }
-    Ok(recent_selection()?.map(|(provider, model)| Selection {
+    Ok(configured.map(|(provider, model)| Selection {
         provider,
         model,
-        from_config: false,
+        from_config: true,
     }))
 }
 
