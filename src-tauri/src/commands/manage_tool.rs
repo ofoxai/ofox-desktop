@@ -310,6 +310,148 @@ pub async fn set_active_ofox_model(
     Ok(())
 }
 
+/// 去掉空白和重复，保持选择的顺序；一个都没有就报错。
+fn clean_model_ids(models: &[String]) -> Result<Vec<String>, String> {
+    let mut ids: Vec<String> = Vec::new();
+    for model in models {
+        let id = model.trim();
+        if !id.is_empty() && !ids.iter().any(|existing| existing == id) {
+            ids.push(id.to_string());
+        }
+    }
+    if ids.is_empty() {
+        Err("请至少选择一个模型".into())
+    } else {
+        Ok(ids)
+    }
+}
+
+/// OpenCode 条目的 `models`：用户选的这一组，按选择的顺序；每个模型按各自检测出的协议
+/// 单独指定传输方式（没检测出结果就不指定，用条目默认的）。
+fn write_opencode_models(
+    settings: &mut serde_json::Value,
+    models: &[(String, Option<String>)],
+) -> Result<(), String> {
+    let mut dict = serde_json::Map::new();
+    for (id, protocol) in models {
+        let mut model = serde_json::json!({ "name": id });
+        if let Some(protocol) = protocol {
+            let npm = match protocol.as_str() {
+                "responses" => crate::opencode_config::OFOX_RESPONSES_NPM,
+                "chatCompletions" => crate::opencode_config::OFOX_CHAT_NPM,
+                _ => return Err("OpenCode 协议选择无效".into()),
+            };
+            model["provider"] = serde_json::json!({ "npm": npm });
+        }
+        dict.insert(id.clone(), model);
+    }
+    settings
+        .as_object_mut()
+        .ok_or_else(|| "settings_config 不是对象".to_string())?
+        .insert("models".into(), serde_json::Value::Object(dict));
+    Ok(())
+}
+
+/// 已保存的模型列表。OpenCode 是用户选的一组，其余工具只有一个。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_active_ofox_models(
+    state: State<'_, AppState>,
+    app: String,
+) -> Result<Vec<String>, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| format!("无效的应用类型: {e}"))?;
+    if app_type != AppType::OpenCode {
+        let model = read_active_model_for(&state, &app_type)?;
+        return Ok(if model.is_empty() {
+            vec![]
+        } else {
+            vec![model]
+        });
+    }
+    let provider_id = state
+        .db
+        .get_current_provider(app_type.as_str())
+        .map_err(|e| format!("读取当前供应商失败: {e}"))?
+        .ok_or_else(|| "opencode 暂无活跃供应商".to_string())?;
+    let provider = state
+        .db
+        .get_provider_by_id(&provider_id, app_type.as_str())
+        .map_err(|e| format!("读取 {provider_id} 失败: {e}"))?
+        .ok_or_else(|| format!("供应商 {provider_id} 不存在"))?;
+    Ok(provider
+        .settings_config
+        .get("models")
+        .and_then(|models| models.as_object())
+        .map(|models| models.keys().cloned().collect())
+        .unwrap_or_default())
+}
+
+/// OpenCode 保存用户选的一组模型：每个模型各自检测协议（有缓存就不用重测），
+/// 任何一个确定不兼容就整体不保存，并指出是哪个。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn set_active_ofox_models(
+    state: State<'_, AppState>,
+    ofox_state: State<'_, OfoxAuthState>,
+    app: String,
+    models: Vec<String>,
+) -> Result<(), String> {
+    use futures::StreamExt;
+
+    let app_type = AppType::from_str(&app).map_err(|e| format!("无效的应用类型: {e}"))?;
+    if app_type != AppType::OpenCode {
+        return Err("只有 OpenCode 支持选择多个模型".into());
+    }
+    let ids = clean_model_ids(&models)?;
+    let app_str = app_type.as_str();
+    let provider_id = state
+        .db
+        .get_current_provider(app_str)
+        .map_err(|e| format!("读取当前供应商失败: {e}"))?
+        .ok_or_else(|| format!("{app_str} 暂无活跃供应商"))?;
+    if !provider_id.starts_with("ofox-") {
+        return Err("当前不是 Ofox 服务商，已停止保存模型。".into());
+    }
+    let mut provider = state
+        .db
+        .get_provider_by_id(&provider_id, app_str)
+        .map_err(|e| format!("读取 {provider_id} 失败: {e}"))?
+        .ok_or_else(|| format!("供应商 {provider_id} 不存在"))?;
+
+    let catalog_token = catalog_access_token(&ofox_state.0).await;
+    let checked: Vec<Result<Option<String>, String>> =
+        futures::stream::iter(ids.iter().cloned().map(|id| {
+            let token = catalog_token.clone();
+            async move {
+                validate_compatibility(BindableTool::OpenCode, &id, None, token.as_deref())
+                    .await
+                    .map_err(|e| format!("{id}：{e}"))
+            }
+        }))
+        .buffered(4)
+        .collect()
+        .await;
+    let mut resolved = Vec::with_capacity(ids.len());
+    for (id, result) in ids.iter().zip(checked) {
+        resolved.push((id.clone(), result?));
+    }
+
+    let previous_settings = provider.settings_config.clone();
+    write_opencode_models(&mut provider.settings_config, &resolved)?;
+    let api_key = crate::ofox_secret::default_store()
+        .load(crate::ofox_secret::Slot::ApiKey {
+            tool: app_type.into(),
+        })
+        .map_err(|_| "读取已绑定的 API Key 失败".to_string())?
+        .ok_or_else(|| "未找到已绑定的 API Key，请重新绑定".to_string())?;
+    crate::services::ofox_bind::persist_bound_settings(
+        &state.db,
+        crate::services::ofox_bind::Tool::from_app(&app_type),
+        &api_key,
+        &previous_settings,
+        &provider.settings_config,
+    )
+    .await
+}
+
 fn require_configured(
     health: crate::services::ofox_bind::status::ToolBindingStatus,
 ) -> Result<(), String> {
@@ -640,6 +782,58 @@ fn set_codex_model(settings: &mut serde_json::Value, model: &str) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_models_keep_the_order_and_each_gets_its_own_transport() {
+        let mut settings =
+            serde_json::json!({ "npm": "x", "models": { "old": { "name": "old" } } });
+        write_opencode_models(
+            &mut settings,
+            &[
+                ("a/one".into(), Some("responses".into())),
+                ("b/two".into(), Some("chatCompletions".into())),
+                ("c/three".into(), None),
+            ],
+        )
+        .unwrap();
+        let ids: Vec<_> = settings["models"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(ids, ["a/one", "b/two", "c/three"]);
+        assert_eq!(
+            settings["models"]["a/one"]["provider"]["npm"],
+            crate::opencode_config::OFOX_RESPONSES_NPM
+        );
+        assert_eq!(
+            settings["models"]["b/two"]["provider"]["npm"],
+            crate::opencode_config::OFOX_CHAT_NPM
+        );
+        assert!(settings["models"]["c/three"].get("provider").is_none());
+        assert_eq!(settings["models"]["c/three"]["name"], "c/three");
+    }
+
+    #[test]
+    fn an_unknown_opencode_protocol_is_rejected() {
+        let mut settings = serde_json::json!({});
+        assert!(
+            write_opencode_models(&mut settings, &[("a/one".into(), Some("bogus".into()))])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn selected_model_ids_are_trimmed_deduplicated_and_must_not_be_empty() {
+        assert_eq!(
+            clean_model_ids(&[" a/one ".into(), "a/one".into(), "".into(), "b/two".into()])
+                .unwrap(),
+            ["a/one", "b/two"]
+        );
+        assert!(clean_model_ids(&["  ".into()]).is_err());
+        assert!(clean_model_ids(&[]).is_err());
+    }
 
     #[test]
     fn ping_says_the_balance_ran_out_instead_of_dumping_the_body() {

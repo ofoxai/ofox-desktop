@@ -1639,6 +1639,8 @@ pub fn run() {
             commands::get_tool_install_capabilities,
             commands::node_requirement::check_tool_node_requirement,
             commands::manage_tool::get_active_ofox_model,
+            commands::manage_tool::get_active_ofox_models,
+            commands::manage_tool::set_active_ofox_models,
             commands::manage_tool::set_active_ofox_model,
             commands::manage_tool::get_workbuddy_managed_models,
             commands::manage_tool::set_workbuddy_managed_models,
