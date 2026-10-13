@@ -160,6 +160,10 @@ fn protocols_for(
             .unwrap_or(true)
     };
     let protocols = match tool {
+        BindableTool::Dsh | BindableTool::Pi => [ANTHROPIC, RESPONSES, CHAT]
+            .into_iter()
+            .filter(|p| advertised(p))
+            .collect(),
         BindableTool::OpenCode => [RESPONSES, CHAT]
             .into_iter()
             .filter(|p| advertised(p))
@@ -205,6 +209,26 @@ pub fn opencode_protocol_for_save(model: &FetchedModel) -> Result<&'static str, 
         }
     }
     Ok(default_opencode_protocol(&model.id, &advertised))
+}
+
+/// Native clients preserve their protocol-specific successful probe, or use explicit catalog metadata.
+pub(crate) fn native_protocol_for_save(
+    tool: BindableTool,
+    model: &FetchedModel,
+) -> Result<&'static str, String> {
+    let allowed = protocols_for(tool, model).map_err(str::to_string)?;
+    if let Some(cached) = cached_protocol(&load_cache(), &cache_key(tool, model), Utc::now()) {
+        if let Some(protocol) = allowed.iter().find(|p| **p == cached) {
+            return Ok(*protocol);
+        }
+    }
+    if model.supported_endpoints.is_none() {
+        return Err("模型目录没有声明协议，请先检测兼容性".into());
+    }
+    allowed
+        .first()
+        .copied()
+        .ok_or_else(|| "模型没有受支持的协议".into())
 }
 
 fn default_opencode_protocol(model_id: &str, advertised: &[&'static str]) -> &'static str {
@@ -409,7 +433,11 @@ pub async fn check(
                 .with_allowed(&allowed)
             }
             ProbeOutcome::Incompatible(reason)
-                if protocol == CHAT || tool != BindableTool::OpenCode =>
+                if protocol == CHAT
+                    || !matches!(
+                        tool,
+                        BindableTool::OpenCode | BindableTool::Pi | BindableTool::Dsh
+                    ) =>
             {
                 return CompatibilityResult::new(
                     tool,

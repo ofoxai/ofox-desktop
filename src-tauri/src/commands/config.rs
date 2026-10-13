@@ -120,6 +120,11 @@ pub async fn get_claude_code_config_path() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn get_config_dir(app: String) -> Result<String, String> {
+    if let Some(tool) = crate::app_config::BindableTool::native(&app) {
+        return Ok(crate::native_tools::config_dir(tool)?
+            .to_string_lossy()
+            .into_owned());
+    }
     if app.trim().eq_ignore_ascii_case("workbuddy") {
         return Ok(crate::workbuddy_config::models_path()
             .parent()
@@ -141,7 +146,9 @@ pub async fn get_config_dir(app: String) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn open_config_folder(handle: AppHandle, app: String) -> Result<bool, String> {
-    let config_dir = if app.trim().eq_ignore_ascii_case("workbuddy") {
+    let config_dir = if let Some(tool) = crate::app_config::BindableTool::native(&app) {
+        crate::native_tools::config_dir(tool)?
+    } else if app.trim().eq_ignore_ascii_case("workbuddy") {
         crate::workbuddy_config::models_path()
             .parent()
             .expect("models path has a parent")

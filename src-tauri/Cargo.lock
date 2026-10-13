@@ -3556,6 +3556,7 @@ dependencies = [
  "winreg 0.52.0",
  "wiremock",
  "zip 2.4.2",
+ "zstd",
 ]
 
 [[package]]

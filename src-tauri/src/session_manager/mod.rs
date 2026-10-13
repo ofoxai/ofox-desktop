@@ -1,12 +1,16 @@
+pub mod managed;
 pub mod providers;
 pub mod terminal;
+pub mod trash;
 
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 use providers::{claude, codex, gemini, hermes, openclaw, opencode};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMeta {
     pub provider_id: String,
@@ -80,6 +84,8 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
     sessions.extend(r4);
     sessions.extend(r5);
     sessions.extend(r6);
+    sessions.extend(providers::pi::scan_sessions());
+    sessions.extend(providers::dsh::scan_sessions());
 
     sessions.sort_by(|a, b| {
         let a_ts = a.last_active_at.or(a.created_at).unwrap_or(0);
@@ -90,7 +96,10 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
     sessions
 }
 
-pub fn load_messages(provider_id: &str, source_path: &str) -> Result<Vec<SessionMessage>, String> {
+pub(crate) fn load_messages_unchecked(
+    provider_id: &str,
+    source_path: &str,
+) -> Result<Vec<SessionMessage>, String> {
     // SQLite sessions use a "sqlite:" prefixed source_path
     if provider_id == "opencode" && source_path.starts_with("sqlite:") {
         return opencode::load_messages_sqlite(source_path);
@@ -107,37 +116,12 @@ pub fn load_messages(provider_id: &str, source_path: &str) -> Result<Vec<Session
         "openclaw" => openclaw::load_messages(path),
         "gemini" => gemini::load_messages(path),
         "hermes" => hermes::load_messages(path),
+        "pi" => providers::pi::load_messages(path),
         _ => Err(format!("Unsupported provider: {provider_id}")),
     }
 }
 
-pub fn delete_session(
-    provider_id: &str,
-    session_id: &str,
-    source_path: &str,
-) -> Result<bool, String> {
-    // SQLite sessions bypass the file-based deletion path
-    if provider_id == "opencode" && source_path.starts_with("sqlite:") {
-        return opencode::delete_session_sqlite(session_id, source_path);
-    }
-    if provider_id == "hermes" && source_path.starts_with("sqlite:") {
-        return hermes::delete_session_sqlite(session_id, source_path);
-    }
-
-    let root = provider_root(provider_id)?;
-    delete_session_with_root(provider_id, session_id, Path::new(source_path), &root)
-}
-
-pub fn delete_sessions(requests: &[DeleteSessionRequest]) -> Vec<DeleteSessionOutcome> {
-    collect_delete_session_outcomes(requests, |request| {
-        delete_session(
-            &request.provider_id,
-            &request.session_id,
-            &request.source_path,
-        )
-    })
-}
-
+#[cfg(test)]
 fn delete_session_with_root(
     provider_id: &str,
     session_id: &str,
@@ -165,20 +149,7 @@ fn delete_session_with_root(
     }
 }
 
-fn provider_root(provider_id: &str) -> Result<PathBuf, String> {
-    let root = match provider_id {
-        "codex" => crate::codex_config::get_codex_config_dir().join("sessions"),
-        "claude" => crate::config::get_claude_config_dir().join("projects"),
-        "opencode" => opencode::get_opencode_data_dir(),
-        "openclaw" => crate::openclaw_config::get_openclaw_dir().join("agents"),
-        "gemini" => crate::gemini_config::get_gemini_dir().join("tmp"),
-        "hermes" => crate::hermes_config::get_hermes_dir().join("sessions"),
-        _ => return Err(format!("Unsupported provider: {provider_id}")),
-    };
-
-    Ok(root)
-}
-
+#[cfg(test)]
 fn canonicalize_existing_path(path: &Path, label: &str) -> Result<PathBuf, String> {
     if !path.exists() {
         return Err(format!("{label} not found: {}", path.display()));
@@ -188,6 +159,7 @@ fn canonicalize_existing_path(path: &Path, label: &str) -> Result<PathBuf, Strin
         .map_err(|e| format!("Failed to resolve {label} {}: {e}", path.display()))
 }
 
+#[cfg(test)]
 fn collect_delete_session_outcomes<F>(
     requests: &[DeleteSessionRequest],
     mut deleter: F,

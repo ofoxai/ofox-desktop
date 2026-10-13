@@ -10,6 +10,7 @@ import {
   Terminal,
   Wrench,
 } from "lucide-react";
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { TOOL_META } from "@/config/toolMeta";
 import { ToolBadge } from "@/components/tools/ToolBadge";
@@ -46,6 +47,7 @@ interface BoundToolRowProps {
   tool: BoundToolRowData;
   keyLabel?: string;
   model?: string;
+  modelControl?: ReactNode;
   hasAnalytics: boolean;
   /** The newer version that is out, if this installation is behind. */
   updateTo: string | null;
@@ -67,6 +69,7 @@ export default function BoundToolRow({
   tool,
   keyLabel,
   model,
+  modelControl,
   hasAnalytics,
   updateTo,
   updateExternal = false,
@@ -183,17 +186,22 @@ export default function BoundToolRow({
                 ? t("modelCompatibility.chatgptCodexMode")
                 : (keyLabel ?? "—")}
             </span>
-            <span className="mx-1.5 opacity-50">·</span>
-            <span>
-              {model ||
-                t(
-                  tool.id === "chatgpt"
-                    ? "modelCompatibility.chatgptCodexUnset"
-                    : "toolLifecycle.modelUnset",
-                )}
-            </span>
+            {!modelControl && (
+              <>
+                <span className="mx-1.5 opacity-50">·</span>
+                <span>
+                  {model ||
+                    t(
+                      tool.id === "chatgpt"
+                        ? "modelCompatibility.chatgptCodexUnset"
+                        : "toolLifecycle.modelUnset",
+                    )}
+                </span>
+              </>
+            )}
           </div>
         )}
+        {modelControl}
       </div>
       <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1.5">
         {hasAnalytics && (

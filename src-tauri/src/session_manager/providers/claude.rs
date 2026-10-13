@@ -85,6 +85,7 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
     Ok(messages)
 }
 
+#[cfg(test)]
 pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<bool, String> {
     let meta = parse_session(path).ok_or_else(|| {
         format!(
@@ -277,14 +278,17 @@ fn collect_jsonl_files(root: &Path, files: &mut Vec<PathBuf>) {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
             collect_jsonl_files(&path, files);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+        } else if entry.file_type().is_ok_and(|t| t.is_file())
+            && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+        {
             files.push(path);
         }
     }
 }
 
+#[cfg(test)]
 fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
     match std::fs::metadata(path) {
         Ok(meta) => {

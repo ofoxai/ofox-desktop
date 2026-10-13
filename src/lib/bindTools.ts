@@ -128,6 +128,8 @@ const OFOX_AUTO_BIND_TOOLS: ReadonlySet<string> = new Set([
   "openclaw",
   "hermes",
   "workbuddy",
+  "dsh",
+  "pi",
 ]);
 
 async function selectWorkBuddyDefaults(): Promise<WorkBuddyModelSelection[]> {
@@ -190,7 +192,8 @@ export async function bindTools(tools: string[]): Promise<string[]> {
       // bind 之后立即挑默认 model：必须在 ofox_bind_tool 完成后才跑，
       // 因为 setActiveModel 依赖 active provider 已切到 ofox-<tool>。
       // 单条失败不影响 bind 结果——ensureDefaultModel 内部自吞异常。
-      if (tool !== "workbuddy") await ensureDefaultModel(tool);
+      if (!["workbuddy", "pi", "dsh"].includes(tool))
+        await ensureDefaultModel(tool);
       succeeded.push(tool);
     } catch (e) {
       console.error(`[bindTools] bind ${tool} failed`, e);

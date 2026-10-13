@@ -229,46 +229,6 @@ pub fn load_messages_sqlite(source: &str) -> Result<Vec<SessionMessage>, String>
     Ok(messages)
 }
 
-/// Delete a session from the Hermes SQLite database.
-pub fn delete_session_sqlite(session_id: &str, source: &str) -> Result<bool, String> {
-    let (db_path, ref_session_id) = parse_sqlite_source(source)
-        .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))?;
-    let db_path = db_path
-        .canonicalize()
-        .map_err(|e| format!("Failed to canonicalize Hermes database path: {e}"))?;
-    let expected_db_path = get_hermes_db_path()
-        .canonicalize()
-        .map_err(|e| format!("Failed to canonicalize expected Hermes database path: {e}"))?;
-
-    if ref_session_id != session_id {
-        return Err(format!(
-            "Hermes SQLite session ID mismatch: expected {session_id}, found {ref_session_id}"
-        ));
-    }
-    if db_path != expected_db_path {
-        return Err("SQLite path does not match expected Hermes database".to_string());
-    }
-
-    let conn =
-        Connection::open(&db_path).map_err(|e| format!("Failed to open Hermes database: {e}"))?;
-
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
-
-    // Delete messages first (child records)
-    let _ = tx.execute("DELETE FROM messages WHERE session_id = ?1", [session_id]);
-
-    let deleted = tx
-        .execute("DELETE FROM sessions WHERE id = ?1", [session_id])
-        .map_err(|e| format!("Failed to delete Hermes session: {e}"))?;
-
-    tx.commit()
-        .map_err(|e| format!("Failed to commit session deletion: {e}"))?;
-
-    Ok(deleted > 0)
-}
-
 fn parse_sqlite_source(source: &str) -> Option<(PathBuf, String)> {
     let rest = source.strip_prefix("sqlite:")?;
     let hash_pos = rest.rfind('#')?;
@@ -295,6 +255,9 @@ fn scan_sessions_jsonl() -> Vec<SessionMeta> {
 
     let mut sessions = Vec::new();
     for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
         let path = entry.path();
         let ext = path.extension().and_then(|e| e.to_str());
         if ext != Some("jsonl") && ext != Some("json") {
@@ -485,6 +448,7 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
 }
 
 /// Delete a Hermes JSONL session file.
+#[cfg(test)]
 pub fn delete_session(_root: &Path, path: &Path, _session_id: &str) -> Result<bool, String> {
     std::fs::remove_file(path).map_err(|e| {
         format!(

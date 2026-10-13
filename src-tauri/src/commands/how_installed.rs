@@ -54,7 +54,7 @@ pub(crate) fn how_installed(
             path_first: None,
         });
     }
-    let pkg = super::tool_update::npm_package(tool)?;
+    let pkg = super::tool_update::installed_npm_package(tool, bin, real)?;
     from_node_modules(pkg, bin, real, lookup)
 }
 
@@ -155,6 +155,27 @@ mod tests {
 
     fn none(_: &str) -> Option<PathBuf> {
         None
+    }
+
+    #[test]
+    fn native_tools_and_both_pi_channels_keep_their_windows_npm_source() {
+        for (tool, pkg) in [
+            ("dsh", "@deepseek-ai/dsh"),
+            ("pi", "@earendil-works/pi-coding-agent"),
+            ("pi", "@mariozechner/pi-coding-agent"),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let (prefix, bin) = npm_prefix(temp.path(), pkg, tool);
+            let updater = how_installed(tool, &bin, &bin, &|name| {
+                (name == "npm").then(|| temp.path().join("node/npm.cmd"))
+            })
+            .unwrap();
+            assert_eq!(updater.source, "npm");
+            assert!(updater.args.contains(&format!("{pkg}@latest")));
+            assert!(updater
+                .args
+                .contains(&prefix.to_string_lossy().into_owned()));
+        }
     }
 
     /// `%APPDATA%\npm` as npm lays it out: shims beside `node_modules`.

@@ -15,6 +15,24 @@ pub fn read_head_tail_lines(
     head_n: usize,
     tail_n: usize,
 ) -> io::Result<(Vec<String>, Vec<String>)> {
+    if path.extension().is_some_and(|e| e == "zst" || e == "zstd") {
+        let reader = super::dsh::open(path).map_err(io::Error::other)?;
+        let mut head = Vec::new();
+        let mut tail = std::collections::VecDeque::with_capacity(tail_n);
+        for line in BufReader::new(reader).lines() {
+            let line = line?;
+            if head.len() < head_n {
+                head.push(line.clone());
+            }
+            if tail_n > 0 {
+                if tail.len() == tail_n {
+                    tail.pop_front();
+                }
+                tail.push_back(line);
+            }
+        }
+        return Ok((head, tail.into()));
+    }
     let file = File::open(path)?;
     let file_len = file.metadata()?.len();
 
@@ -91,7 +109,22 @@ fn extract_text_from_item(item: &Value) -> Option<String> {
             .get("name")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
-        return Some(format!("[Tool: {name}]"));
+        return Some(format!(
+            "[Tool: {name}]\n{}",
+            item.get("input")
+                .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+                .unwrap_or_default()
+        ));
+    }
+
+    if item_type == "thinking" {
+        return item
+            .get("thinking")
+            .and_then(Value::as_str)
+            .map(|s| format!("[Thinking]\n{s}"));
+    }
+    if item_type == "image" || item_type == "input_image" {
+        return Some("[Image]".into());
     }
 
     // tool_result: extract nested content

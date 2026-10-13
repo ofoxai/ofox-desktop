@@ -408,6 +408,24 @@ mod tests {
     }
 
     #[test]
+    fn pi_and_dsh_install_from_the_official_npm_packages_in_both_regions() {
+        for (tool, package) in [
+            ("pi", "@earendil-works/pi-coding-agent"),
+            ("dsh", "@deepseek-ai/dsh"),
+        ] {
+            for mainland in [false, true] {
+                let script = install_script(tool, InstallHost { mainland, ..ABROAD }).unwrap();
+                assert!(script.contains(&format!("npm.cmd install -g {package}@latest")));
+                assert!(script.contains("if ($LASTEXITCODE -ne 0)"));
+                assert_eq!(
+                    script.contains("--registry=https://registry.npmmirror.com"),
+                    mainland
+                );
+            }
+        }
+    }
+
+    #[test]
     fn npm_tools_install_node_with_winget_first_when_npm_is_missing() {
         let host = InstallHost {
             node_here: false,

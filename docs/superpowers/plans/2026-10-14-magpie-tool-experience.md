@@ -8,6 +8,8 @@
 
 开发使用独立 worktree。当前发布 checkout、版本号、tag 和发布工作流保持隔离；发布版本定稿后，先核对实际发布提交，再将开发分支对齐最终基线。实施进度和验证结果记录在本文的阶段检查项中。
 
+用户要求完成后先交付测试，确认测试结果后再发布。开发阶段不触发正式发布，不创建发布 tag，也不更新正式更新源。
+
 ## 已确认的产品范围
 
 - 第 1 项：工具行、托盘和管理弹窗的模型选择体验。普通单模型工具选择后自动保存；多模型工具保留完整受管集合。
@@ -137,12 +139,12 @@ dsh 选择最高 generation，同代按修改时间决定来源，避免重复�
 - [x] 创建独立开发 worktree，核对最新 main 和 release/1.3.6 的差异。
 - [x] 修正规划中的 OpenCode 多模型和 ChatGPT 显示/写入语义。
 - [x] 提取共用模型选择器，保持管理弹窗行为并通过前端检查。
-- [ ] 完成统一快照、跨窗口刷新和模型写入并发校验。
-- [ ] 完成 Pi/dsh 适配与工具、Key、区域生命周期接入。
-- [ ] 接入工具行和托盘的模型选择。
-- [ ] 完成 Profiles 存储、预览、应用、结果报告与撤销。
-- [ ] 将会话中心接入 Console，增加 Pi/dsh parser 和能力声明。
-- [ ] 完成首批回收站；新工具分别通过 bundle 验证后开放。
+- [x] 完成统一快照、跨窗口刷新和模型写入并发校验。
+- [x] 完成 Pi/dsh 适配与工具、Key、区域生命周期接入。
+- [x] 接入工具行和托盘的模型选择。
+- [x] 完成 Profiles 存储、预览、应用、结果报告与撤销。
+- [x] 将会话中心接入 Console，增加 Pi/dsh parser 和能力声明。
+- [x] 完成首批回收站；新工具分别通过 bundle 验证后开放。
 - [ ] 对齐最终发布基线，完成整体验收。
 
 前端检查使用 `pnpm typecheck`、`pnpm format:check`、相关 Vitest 和 `pnpm build:renderer`。Rust 改动执行 `cargo test`、`cargo fmt --check`、`cargo clippy -- -D warnings`，均指定 `src-tauri/Cargo.toml`。
@@ -150,3 +152,11 @@ dsh 选择最高 generation，同代按修改时间决定来源，避免重复�
 首个实施单元验证：类型检查、全 src 格式检查、renderer 构建通过；ManageToolDialog、ConsolePage、model-fetch、manageToolChatgpt 四个测试文件共 82 个测试通过。该阶段修改共用 picker、管理弹窗接入和 zh/en/ja 文案，后端写入与发布文件保持现有状态。
 
 新适配器重点覆盖目录 override、未初始化布局、原配置保留、同名冲突、多文件失败回滚、Key 对账、两个 apex、首次启动、区域切换、重启、macOS/Windows 和实际写入 URL。CLI 与网络实测在适合的隔离环境执行；真实 agent 请求需要具备可用环境。UI 改动完成时补截图；版本更新在后续发布阶段统一处理。
+
+本轮实现已完成：统一模型快照和锁内提交版本、跨窗口刷新、快捷单选与有序多选、Profiles 乐观更新/预览/逐目标应用/部分结果/15 分钟模型撤销、Pi/dsh 独立适配与生命周期、Console 会话中心和安全文件回收站。模型提交凭据在实际 writer 锁内捕获；后续 CLI 选择被采纳后仍会阻止旧撤销。WorkBuddy 模型保存仅使用现有绑定 Key。
+
+会话回收站开放 Claude/Codex/Gemini/Pi/dsh；Gemini 同时支持旧 JSON 与现代 JSONL，并处理主会话、子 Agent 与独立附属文件。共享数据库与索引保持原状。OpenClaw 仅开放浏览/导出；dsh 首版仅元数据。Pi 按当前 JSONL 分支读取、导出和续聊。
+
+macOS 完整 Rust 检查：`cargo test` 共 1702 个测试通过、7 个既有人工/网络测试忽略，`cargo clippy --all-targets -- -D warnings` 通过。包含真实文件+数据库的“Profile 保存→CLI 改模型→诊断采纳→拒绝旧撤销”回归。现代 Pi/dsh CLI 与真实 OFox 请求尚需用户验收；当前机器没有 Pi，dsh 是旧布局 0.1.2-rc.1，未用它作为现代适配验证。
+
+用户验收步骤见 [测试说明](../../magpie-tool-experience-testing.md)。正式发布继续等待用户测试结果。

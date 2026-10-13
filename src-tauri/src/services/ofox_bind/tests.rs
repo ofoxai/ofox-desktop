@@ -3644,6 +3644,109 @@ fn switch_codex_model_in_cli(path: &Path, model: &str) {
     write(path, &switched);
 }
 
+/// Undo must identify the committed write even if a diagnostic read adopts a
+/// later CLI preference. Exercise the actual file/DB adapter, not a fake writer.
+#[tokio::test]
+#[serial]
+async fn committed_model_receipt_cannot_undo_a_later_cli_preference() {
+    use crate::model_selection::{
+        revision, ExpectedWrite, ModelSelection, EXPECTED_WRITE, WRITE_RECEIPT,
+    };
+    let home = Home::new();
+    let db = db_with_default_provider();
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    let previous = db
+        .get_provider_by_id(CODEX_PROVIDER, "codex")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let mut updated = previous.clone();
+    crate::commands::manage_tool::write_model_into_settings(
+        &AppType::Codex,
+        &mut updated,
+        "model-from-profile",
+    )
+    .unwrap();
+    let before = revision(&db, "codex").unwrap();
+    let receipt = Arc::new(std::sync::Mutex::new(None));
+    EXPECTED_WRITE
+        .scope(
+            ExpectedWrite {
+                target: "codex".into(),
+                revision: before,
+            },
+            WRITE_RECEIPT.scope(
+                receipt.clone(),
+                persist_bound_settings(&db, Tool::Codex, KEY, &previous, &updated),
+            ),
+        )
+        .await
+        .unwrap();
+    let committed = receipt.lock().unwrap().clone().expect("write receipt");
+    assert_eq!(committed, revision(&db, "codex").unwrap());
+
+    let path = home.codex("config.toml");
+    let cli_edit = fs::read_to_string(&path)
+        .unwrap()
+        .replace("model-from-profile", "model-from-cli");
+    write(&path, &cli_edit);
+    let observed = super::model_state::snapshot(&db, Tool::Codex, "codex", Some(KEY))
+        .await
+        .unwrap();
+    assert_eq!(
+        observed.managed_selection,
+        ModelSelection::Single {
+            model: "model-from-cli".into(),
+        }
+    );
+    assert_ne!(committed, observed.revision);
+    let current = db
+        .get_provider_by_id(CODEX_PROVIDER, "codex")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let error = EXPECTED_WRITE
+        .scope(
+            ExpectedWrite {
+                target: "codex".into(),
+                revision: committed,
+            },
+            persist_bound_settings(&db, Tool::Codex, KEY, &current, &previous),
+        )
+        .await;
+    assert!(error.is_err());
+    assert_eq!(fs::read_to_string(&path).unwrap(), cli_edit);
+    assert_eq!(saved_model(&db, Tool::Codex), "model-from-cli");
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_snapshot_observes_real_route_without_inventing_a_tui_choice() {
+    let _home = Home::new();
+    let db = db_for(Tool::OpenCode, opencode_template(Some("openai/gpt-x")));
+    bind(&db, Tool::OpenCode, "opencode", KEY).await.unwrap();
+    let state = super::opencode_state::state_path();
+    fs::remove_file(&state).unwrap();
+    let snapshot = super::model_state::snapshot(&db, Tool::OpenCode, "opencode", Some(KEY))
+        .await
+        .unwrap();
+    assert_eq!(snapshot.observed_selection.model, None);
+    assert_eq!(snapshot.observed_selection.source, "unknown");
+    write(
+        &state,
+        r#"{"recent":[{"providerID":"custom-route","modelID":"actual-current"}]}"#,
+    );
+    let snapshot = super::model_state::snapshot(&db, Tool::OpenCode, "opencode", Some(KEY))
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.observed_selection.model.as_deref(),
+        Some("actual-current")
+    );
+    assert_eq!(snapshot.observed_selection.source, "tui");
+    assert_eq!(saved_models(&db, Tool::OpenCode), vec!["openai/gpt-x"]);
+}
+
 fn switch_claude_model_in_cli(path: &Path, model: &str) {
     let mut edited = json_at(path);
     edited["env"]["ANTHROPIC_MODEL"] = model.into();
