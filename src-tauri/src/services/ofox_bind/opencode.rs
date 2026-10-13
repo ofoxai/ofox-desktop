@@ -10,6 +10,7 @@ use crate::ofox_apex::mentions_ofox_gateway;
 use crate::opencode_config::{get_opencode_config_path, normalize_ofox_provider_transport};
 
 use super::json_file::{self, JsonPath, KeyStyle};
+use super::opencode_state;
 use super::plan::{read_text, FileEdit, RestorePlan};
 
 const LABEL: &str = "OpenCode 的 opencode.json";
@@ -71,15 +72,28 @@ pub(crate) fn bound_config(
 }
 
 /// 绑定和切换模型共用。
+///
+/// `select_route`：绑定、保存模型时让 OpenCode 下次启动就用 Ofox 的模型（它记在 TUI
+/// 状态文件里）；换 key、修复不碰，用户在 TUI 里选的要留着。
 pub(crate) fn write_bound(
     template: &Value,
     api_key: &str,
+    select_route: bool,
     txn: &mut FileTxn,
 ) -> Result<(), String> {
     let path = config_path();
     let bound = bound_config(read_text(&path)?.as_deref(), template, api_key)?;
     txn.write(&path, bound.as_bytes())
-        .map_err(|e| format!("写入 OpenCode 配置失败：{e}"))
+        .map_err(|e| format!("写入 OpenCode 配置失败：{e}"))?;
+    if let (true, Some(model)) = (select_route, opencode_state::template_model(template)) {
+        let state = opencode_state::state_path();
+        if let Some(text) = opencode_state::select_ofox_model(read_text(&state)?.as_deref(), model)?
+        {
+            txn.write(&state, text.as_bytes())
+                .map_err(|e| format!("写入 OpenCode 状态失败：{e}"))?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn plan_restore(

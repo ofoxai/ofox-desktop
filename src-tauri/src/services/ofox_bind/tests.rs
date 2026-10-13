@@ -38,6 +38,7 @@ impl Home {
             ),
             ("APPDATA", Some(dir.path().join("AppData").join("Roaming"))),
             ("HERMES_HOME", None),
+            ("XDG_STATE_HOME", None),
             ("OFOX_USE_LOCAL", None),
         ];
         let saved = isolated
@@ -4087,4 +4088,132 @@ async fn a_model_of_another_provider_is_not_adopted_for_openclaw() {
     sync_live_model(&db, Tool::OpenClaw, Some(KEY)).await;
 
     assert_eq!(saved_model(&db, Tool::OpenClaw), "openai/gpt-x");
+}
+
+// ---- OpenCode 的当前模型记在 TUI 状态文件（model.json）里 ----
+
+fn opencode_state_path(home: &Home) -> PathBuf {
+    home.dir.path().join(".local/state/opencode/model.json")
+}
+
+fn write_opencode_recent(home: &Home, recent: Value) {
+    write(
+        &opencode_state_path(home),
+        &json!({ "recent": recent, "favorite": [{ "providerID": "x", "modelID": "y" }], "variant": { "x/y": "high" } })
+            .to_string(),
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_model_chosen_in_the_tui_is_adopted_for_display() {
+    let (home, db, _path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "ofox-opencode", "modelID": "anthropic/other" }]),
+    );
+
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Configured
+    );
+    sync_live_model(&db, Tool::OpenCode, Some(KEY)).await;
+
+    assert_eq!(saved_model(&db, Tool::OpenCode), "anthropic/other");
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_model_of_another_provider_in_the_tui_is_a_conflict() {
+    let (home, db, _path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "openai", "modelID": "gpt-5" }, { "providerID": "ofox-opencode", "modelID": "openai/gpt-x" }]),
+    );
+
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Modified
+    );
+    sync_live_model(&db, Tool::OpenCode, Some(KEY)).await;
+    assert_eq!(saved_model(&db, Tool::OpenCode), "openai/gpt-x");
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_without_a_state_file_is_configured() {
+    let (_home, db, _path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Configured
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn binding_opencode_puts_the_ofox_model_first_and_keeps_the_rest_of_the_state() {
+    let home = Home::new();
+    write(
+        &crate::opencode_config::get_opencode_config_path(),
+        OPENCODE_CONFIG,
+    );
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "openai", "modelID": "gpt-5" }]),
+    );
+    let db = db_for(Tool::OpenCode, opencode_template(Some("openai/gpt-x")));
+
+    bind(&db, Tool::OpenCode, "opencode", KEY)
+        .await
+        .expect("bind");
+
+    let state = json_at(&opencode_state_path(&home));
+    assert_eq!(
+        state["recent"],
+        json!([
+            { "providerID": "ofox-opencode", "modelID": "openai/gpt-x" },
+            { "providerID": "openai", "modelID": "gpt-5" }
+        ])
+    );
+    assert_eq!(state["variant"]["x/y"], "high");
+    assert_eq!(state["favorite"][0]["providerID"], "x");
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Configured
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn binding_opencode_creates_the_state_file_when_there_is_none() {
+    let (home, _db, _path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+
+    let state = json_at(&opencode_state_path(&home));
+    assert_eq!(state["recent"][0]["modelID"], "openai/gpt-x");
+}
+
+#[tokio::test]
+#[serial]
+async fn replacing_the_key_leaves_the_opencode_state_alone() {
+    let (home, db, _path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "ofox-opencode", "modelID": "anthropic/other" }]),
+    );
+    let before = fs::read_to_string(opencode_state_path(&home)).unwrap();
+
+    replace_key(&db, Tool::OpenCode, KEY, "sk-of-ACCOUNT-B")
+        .await
+        .expect("replace key");
+
+    assert_eq!(
+        fs::read_to_string(opencode_state_path(&home)).unwrap(),
+        before
+    );
 }

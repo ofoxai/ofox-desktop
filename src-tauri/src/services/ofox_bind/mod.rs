@@ -16,6 +16,7 @@ mod json_file;
 mod live_model;
 mod openclaw;
 mod opencode;
+pub(crate) mod opencode_state;
 mod plan;
 pub(crate) mod record;
 pub(crate) mod relocate;
@@ -301,7 +302,7 @@ fn write_bound(
         }
         Tool::Claude => claude::write_bound(template, api_key, txn),
         Tool::Gemini => gemini::write_bound(template, api_key, txn),
-        Tool::OpenCode => opencode::write_bound(template, api_key, txn),
+        Tool::OpenCode => opencode::write_bound(template, api_key, select_route, txn),
         Tool::OpenClaw => openclaw::write_bound(template, api_key, select_route, txn),
         Tool::Hermes => hermes::write_bound(template, api_key, select_route, txn),
     }

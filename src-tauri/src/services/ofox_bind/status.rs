@@ -387,6 +387,15 @@ pub(super) fn inspect_managed_fields(
                         &["provider", "ofox-opencode", "options", "apiKey"],
                     ],
                 )?;
+                // 用户在 TUI 里选了别家的模型：下次启动就不走 Ofox 了。
+                if let Some((provider, _)) = super::opencode_state::live_selection()? {
+                    comparison.compare(
+                        &shown,
+                        "model.json · recent[0]",
+                        Some(&Value::String(provider)),
+                        Some(&Value::String(super::opencode_state::PROVIDER_ID.into())),
+                    );
+                }
             }
             ManagedFile::OpenClawConfig => {
                 let actual = json_file::parse_object(current.as_deref(), "OpenClaw")?;

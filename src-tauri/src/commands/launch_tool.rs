@@ -351,6 +351,20 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+/// OpenCode 的当前模型记在它自己的状态里。用户在 TUI 里选过模型就以那个为准：选了
+/// Ofox 的就带上它；选了别家的不再用保存的模型去覆盖（`--model` 优先级最高）。没选过
+/// 才用桌面端保存的。
+fn opencode_launch_selection(
+    live: Option<(String, String)>,
+    saved: Option<(String, String)>,
+) -> Option<(String, String)> {
+    match live {
+        Some((provider, _)) if !provider.starts_with("ofox-") => None,
+        Some(live) => Some(live),
+        None => saved,
+    }
+}
+
 fn cli_args(tool_id: &str, bin: &str, selection: Option<(&str, &str)>) -> Vec<String> {
     let mut args = vec![bin.to_string()];
 
@@ -427,8 +441,13 @@ pub async fn launch_tool_cli(app: AppHandle, tool_id: String) -> Result<(), Stri
 
     let selection = if tool_id == "opencode" {
         let state = app.state::<crate::store::AppState>();
-        crate::commands::manage_tool::read_active_provider_and_model_for(&state, &AppType::OpenCode)
-            .ok()
+        let saved = crate::commands::manage_tool::read_active_provider_and_model_for(
+            &state,
+            &AppType::OpenCode,
+        )
+        .ok();
+        let live = crate::services::ofox_bind::opencode_state::live_selection().unwrap_or(None);
+        opencode_launch_selection(live, saved)
     } else {
         None
     };
@@ -725,6 +744,34 @@ mod tests {
     fn opencode_launch_does_not_override_non_ofox_provider() {
         let args = cli_args("opencode", "opencode", Some(("openai", "gpt-5.6-luna")));
         assert_eq!(args, ["opencode"]);
+    }
+
+    fn pair(provider: &str, model: &str) -> Option<(String, String)> {
+        Some((provider.to_string(), model.to_string()))
+    }
+
+    #[test]
+    fn opencode_launch_follows_the_model_chosen_in_the_tui() {
+        let chosen = opencode_launch_selection(
+            pair("ofox-opencode", "anthropic/other"),
+            pair("ofox-opencode", "openai/gpt-x"),
+        );
+        assert_eq!(chosen, pair("ofox-opencode", "anthropic/other"));
+    }
+
+    #[test]
+    fn opencode_launch_does_not_override_a_tui_choice_of_another_provider() {
+        let chosen = opencode_launch_selection(
+            pair("openai", "gpt-5"),
+            pair("ofox-opencode", "openai/gpt-x"),
+        );
+        assert_eq!(chosen, None);
+    }
+
+    #[test]
+    fn opencode_launch_uses_the_saved_model_before_any_tui_choice() {
+        let chosen = opencode_launch_selection(None, pair("ofox-opencode", "openai/gpt-x"));
+        assert_eq!(chosen, pair("ofox-opencode", "openai/gpt-x"));
     }
 
     #[cfg(target_os = "macos")]

@@ -6,7 +6,7 @@
 //!
 //! Codex、Claude、Gemini 的「当前模型」就是配置里的一个值。OpenClaw、Hermes 是默认
 //! 路由里 Ofox 条目下的模型 id（模板里是只有这一个模型的列表）。OpenCode 的当前模型
-//! 在 TUI 状态里，不在配置里，不处理。
+//! 在 TUI 状态文件里（见 `opencode_state`），也是 Ofox 条目下的模型 id。
 
 use serde_json::Value;
 
@@ -71,7 +71,9 @@ fn read_live_model(tool: Tool) -> Result<Option<String>, String> {
                 .and_then(|m| m.get("default")?.as_str())
                 .map(str::to_string)
         }
-        Tool::OpenCode => None,
+        Tool::OpenCode => super::opencode_state::live_selection()?
+            .filter(|(provider, _)| provider == super::opencode_state::PROVIDER_ID)
+            .map(|(_, model)| model),
     };
     Ok(model.filter(|model| !model.trim().is_empty()))
 }
