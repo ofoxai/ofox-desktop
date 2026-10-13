@@ -232,6 +232,16 @@ fn hermes_projection(value: &Value) -> Result<Value, String> {
                 projected[key] = value.clone();
             }
         }
+        // 用户自己配的、同样指向 Ofox 网关的条目：用的还是 Ofox。
+        let own_gateway = model
+            .get("provider")
+            .and_then(Value::as_str)
+            .is_some_and(|name| {
+                name != "ofox-hermes" && super::route::hermes_is_gateway(value, name)
+            });
+        if own_gateway {
+            projected["provider"] = Value::String("ofox-hermes".into());
+        }
     }
     Ok(projected)
 }
@@ -242,6 +252,8 @@ const HERMES_ACCESS_FIELDS: [&str; 5] = ["base_url", "api", "api_key", "api_mode
 
 /// OpenClaw 默认模型指向哪个服务商（`agents.defaults.model` 可以是字符串，也可以
 /// 是 `{primary, fallbacks}`）。
+const OPENCLAW_PROVIDER: &str = "ofox-openclaw";
+
 fn openclaw_route(config: &Value) -> Result<Option<Value>, String> {
     let Some(model) = at_path(config, &["agents", "defaults", "model"])? else {
         return Ok(None);
@@ -251,9 +263,15 @@ fn openclaw_route(config: &Value) -> Result<Option<Value>, String> {
         Value::Object(_) => model.get("primary").and_then(Value::as_str).unwrap_or(""),
         _ => return Err("受管配置字段的格式无效".into()),
     };
-    Ok(Some(Value::String(
-        primary.split('/').next().unwrap_or_default().to_string(),
-    )))
+    let provider = primary.split('/').next().unwrap_or_default();
+    // 用户自己配的、同样指向 Ofox 网关的条目：用的还是 Ofox。
+    let provider =
+        if provider != OPENCLAW_PROVIDER && super::route::openclaw_is_gateway(config, provider) {
+            OPENCLAW_PROVIDER
+        } else {
+            provider
+        };
+    Ok(Some(Value::String(provider.to_string())))
 }
 
 pub(super) fn inspect(
@@ -294,7 +312,17 @@ pub(super) fn inspect_managed_fields(
                     .get("config")
                     .and_then(Value::as_str)
                     .ok_or_else(|| "Ofox 模板无效".to_string())?;
-                let actual = parse_toml(current.as_deref().unwrap_or_default())?;
+                let mut actual = parse_toml(current.as_deref().unwrap_or_default())?;
+                // 默认服务商是用户自己配的、同样指向 Ofox 网关的条目：用的还是 Ofox。
+                let own_gateway = actual
+                    .get("model_provider")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| {
+                        name != "ofox" && super::route::codex_is_gateway(&actual, name)
+                    });
+                if own_gateway {
+                    actual["model_provider"] = Value::String("ofox".into());
+                }
                 let expected = parse_toml(&codex::apply_patch(
                     current.as_deref().unwrap_or_default(),
                     &codex::bound_patch(config, key)?,
@@ -391,10 +419,7 @@ pub(super) fn inspect_managed_fields(
                 // 条目只要也指向 Ofox 网关（比如自带 key 的 `ofox`），仍然是在用 Ofox。
                 if let Some((provider, _)) = super::opencode_state::live_selection()? {
                     let still_ofox = provider == super::opencode_state::PROVIDER_ID
-                        || at_path(&actual, &["provider"])?
-                            .and_then(|providers| providers.get(&provider))
-                            .and_then(|entry| entry.get("options")?.get("baseURL")?.as_str())
-                            .is_some_and(crate::ofox_apex::mentions_ofox_gateway);
+                        || super::route::opencode_is_gateway(&actual, &provider);
                     let shown_provider = if still_ofox {
                         super::opencode_state::PROVIDER_ID.to_string()
                     } else {

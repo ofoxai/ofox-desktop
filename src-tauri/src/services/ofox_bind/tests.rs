@@ -4238,3 +4238,144 @@ async fn opencode_model_of_the_users_own_ofox_gateway_entry_is_not_a_conflict() 
     sync_live_model(&db, Tool::OpenCode, Some(KEY)).await;
     assert_eq!(saved_model(&db, Tool::OpenCode), "openai/gpt-x");
 }
+
+// ---- 路由指向用户自己配的、同样指向 Ofox 网关的条目：不算冲突，刷新后显示它的模型 ----
+
+#[tokio::test]
+#[serial]
+async fn opencode_refresh_shows_the_model_of_the_users_own_ofox_entry() {
+    let (home, _db, path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    let mut config = json_at(&path);
+    config["provider"]["ofox"] =
+        json!({ "options": { "baseURL": "https://api.ofox.io/v1", "apiKey": "sk-own" } });
+    write(&path, &serde_json::to_string_pretty(&config).unwrap());
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "ofox", "modelID": "z-ai/glm-5.3-flash" }]),
+    );
+
+    assert_eq!(
+        live_model::display_model(Tool::OpenCode)
+            .unwrap()
+            .as_deref(),
+        Some("z-ai/glm-5.3-flash")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_display_ignores_a_provider_that_is_not_ofox() {
+    let (home, _db, _path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    write_opencode_recent(
+        &home,
+        json!([{ "providerID": "openai", "modelID": "gpt-5" }]),
+    );
+
+    assert_eq!(live_model::display_model(Tool::OpenCode).unwrap(), None);
+}
+
+#[tokio::test]
+#[serial]
+async fn openclaw_model_of_the_users_own_ofox_entry_is_not_a_conflict() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(
+        &path,
+        "\"providers\": {",
+        "\"providers\": { \"mine\": { \"baseUrl\": \"https://api.ofox.io/v1\", \"apiKey\": \"sk-own\", \"models\": [] },",
+    );
+    edit_text(
+        &path,
+        "ofox-openclaw/openai/gpt-x",
+        "mine/z-ai/glm-5.3-flash",
+    );
+
+    assert_eq!(
+        status_of(&db, Tool::OpenClaw).await,
+        status::BindingStatus::Configured
+    );
+    assert_eq!(
+        live_model::display_model(Tool::OpenClaw)
+            .unwrap()
+            .as_deref(),
+        Some("z-ai/glm-5.3-flash")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_model_of_the_users_own_ofox_entry_is_not_a_conflict() {
+    let (_home, db, path) = bind_with_user_config(Tool::Hermes, "hermes", HERMES_CONFIG).await;
+    edit_text(
+        &path,
+        "custom_providers:",
+        "custom_providers:\n- name: mine\n  base_url: https://api.ofox.io/v1\n  api_key: sk-own",
+    );
+    edit_text(&path, "provider: ofox-hermes", "provider: mine");
+    edit_text(
+        &path,
+        "default: openai/gpt-x",
+        "default: z-ai/glm-5.3-flash",
+    );
+
+    assert_eq!(
+        status_of(&db, Tool::Hermes).await,
+        status::BindingStatus::Configured
+    );
+    assert_eq!(
+        live_model::display_model(Tool::Hermes).unwrap().as_deref(),
+        Some("z-ai/glm-5.3-flash")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn codex_provider_of_the_users_own_ofox_entry_is_not_a_conflict() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    let mut text = fs::read_to_string(&path)
+        .unwrap()
+        .replace("model_provider = \"ofox\"", "model_provider = \"mine\"");
+    text.push_str(
+        "\n[model_providers.mine]\nname = \"mine\"\nbase_url = \"https://api.ofox.io/v1\"\n",
+    );
+    write(&path, &text);
+
+    assert_eq!(
+        status_of(&db, Tool::Codex).await,
+        status::BindingStatus::Configured
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_route_to_a_provider_outside_ofox_is_still_a_conflict_for_every_agent() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(
+        &path,
+        "\"providers\": {",
+        "\"providers\": { \"mine\": { \"baseUrl\": \"https://relay.example/v1\", \"apiKey\": \"k\", \"models\": [] },",
+    );
+    edit_text(&path, "ofox-openclaw/openai/gpt-x", "mine/some-model");
+    assert_eq!(
+        status_of(&db, Tool::OpenClaw).await,
+        status::BindingStatus::Modified
+    );
+
+    let (_home2, db2, path2) = bind_with_user_config(Tool::Hermes, "hermes", HERMES_CONFIG).await;
+    edit_text(
+        &path2,
+        "custom_providers:",
+        "custom_providers:\n- name: mine\n  base_url: https://relay.example/v1\n  api_key: k",
+    );
+    edit_text(&path2, "provider: ofox-hermes", "provider: mine");
+    assert_eq!(
+        status_of(&db2, Tool::Hermes).await,
+        status::BindingStatus::Modified
+    );
+}

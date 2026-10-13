@@ -14,6 +14,8 @@ pub(crate) mod gemini;
 mod hermes;
 mod json_file;
 mod live_model;
+mod route;
+pub(crate) use live_model::display_model_or;
 mod openclaw;
 mod opencode;
 pub(crate) mod opencode_state;

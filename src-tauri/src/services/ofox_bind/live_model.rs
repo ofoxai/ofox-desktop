@@ -101,3 +101,62 @@ pub(super) fn adopt_live_model(db: &Database, tool: Tool) -> Result<bool, String
         .map_err(|e| format!("保存 {} 的模型失败：{e}", tool.label()))?;
     Ok(true)
 }
+
+/// 用户在 agent 里选了自己配的、同样指向 Ofox 网关的条目：返回它的模型，主页刷新后
+/// 显示它（不写进模板，那个条目不归桌面端管）。选的是 Ofox 条目、别家，或者不是
+/// 这几个工具，都返回 `None`。
+pub(super) fn display_model(tool: Tool) -> Result<Option<String>, String> {
+    let model = match tool {
+        Tool::OpenCode => {
+            let Some((provider, model)) = super::opencode_state::live_selection()? else {
+                return Ok(None);
+            };
+            let config = own_config(&ManagedFile::OpenCodeConfig, "OpenCode")?;
+            (provider != super::opencode_state::PROVIDER_ID
+                && super::route::opencode_is_gateway(&config, &provider))
+            .then_some(model)
+        }
+        Tool::OpenClaw => {
+            let config = own_config(&ManagedFile::OpenClawConfig, "OpenClaw")?;
+            json_file::get(&config, &["agents", "defaults", "model"])
+                .and_then(|model| model.as_str().or_else(|| model.get("primary")?.as_str()))
+                .and_then(|primary| primary.split_once('/'))
+                .filter(|(provider, _)| {
+                    *provider != "ofox-openclaw"
+                        && super::route::openclaw_is_gateway(&config, provider)
+                })
+                .map(|(_, model)| model.to_string())
+        }
+        Tool::Hermes => {
+            let Some(text) = read_text(&ManagedFile::HermesConfig.current_path())? else {
+                return Ok(None);
+            };
+            let config = crate::hermes_config::parse_config_text(&text)
+                .map_err(|_| "Hermes 配置不是有效的 YAML".to_string())
+                .and_then(|yaml| serde_json::to_value(yaml).map_err(|e| e.to_string()))?;
+            let model = config.get("model");
+            let provider = model.and_then(|m| m.get("provider")?.as_str());
+            provider
+                .filter(|name| {
+                    *name != "ofox-hermes" && super::route::hermes_is_gateway(&config, name)
+                })
+                .and_then(|_| model?.get("default")?.as_str())
+                .map(str::to_string)
+        }
+        _ => None,
+    };
+    Ok(model.filter(|model| !model.trim().is_empty()))
+}
+
+fn own_config(file: &ManagedFile, label: &str) -> Result<Value, String> {
+    let text = read_text(&file.current_path())?;
+    json_file::parse_object(text.as_deref(), label)
+}
+
+/// 主页显示用：用户选的是自己配的 Ofox 网关条目时显示它的模型，否则用 `saved`。
+pub(crate) fn display_model_or(tool: Tool, saved: String) -> String {
+    match display_model(tool) {
+        Ok(Some(live)) => live,
+        _ => saved,
+    }
+}

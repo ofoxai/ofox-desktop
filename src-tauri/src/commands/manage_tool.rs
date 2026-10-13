@@ -127,7 +127,12 @@ pub async fn get_active_ofox_model(
         return crate::workbuddy_config::active_model(&state.db).await;
     }
     let app_type = AppType::from_str(&app).map_err(|e| format!("无效的应用类型: {e}"))?;
-    read_active_model_for(&state, &app_type)
+    let saved = read_active_model_for(&state, &app_type)?;
+    // 用户在 agent 里选了自己配的、同样指向 Ofox 的条目：显示它实际在用的模型。
+    Ok(match crate::services::ofox_bind::tool_for(&app) {
+        Some((tool, _)) => crate::services::ofox_bind::display_model_or(tool, saved),
+        None => saved,
+    })
 }
 
 /// Return every WorkBuddy model currently managed by Ofox, in display order.
