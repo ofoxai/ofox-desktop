@@ -28,7 +28,7 @@ use tauri::Manager;
 
 /// 与 `scripts/installer/app/steps.py::TOOL_STEPS` 字典 key 对齐。
 const ALLOWED_TOOLS: &[&str] = &[
-    "claude", "codex", "gemini", "opencode", "openclaw", "hermes",
+    "claude", "codex", "gemini", "opencode", "openclaw", "hermes", "dsh", "pi",
 ];
 
 /// 走 Rust 原生下载 + DMG 安装，不经过 Python installer / osascript Terminal。

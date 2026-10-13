@@ -104,10 +104,12 @@ pub async fn ofox_is_authenticated(state: State<'_, OfoxAuthState>) -> Result<bo
 /// 的新 key。切换地区也会退出登录，但走的是 `manager.logout()`，不停 key。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ofox_logout(
+    app_handle: tauri::AppHandle,
     state: State<'_, OfoxAuthState>,
 ) -> Result<crate::services::account_keys::LogoutReport, String> {
     let report = crate::services::account_keys::stop_for_logout(&state.0).await;
     state.0.write().await.logout();
+    crate::commands::model_selection::notify(&app_handle, report.stopped.clone());
     Ok(report)
 }
 
@@ -115,10 +117,13 @@ pub async fn ofox_logout(
 /// 或退出时停用了），换成当前账号新签发的 key。没有要换的时不访问网络。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ofox_reconcile_tool_keys(
+    app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     ofox_state: State<'_, OfoxAuthState>,
 ) -> Result<crate::services::account_keys::KeyReconcileReport, String> {
-    Ok(crate::services::account_keys::reconcile(&state.db, &ofox_state.0).await)
+    let report = crate::services::account_keys::reconcile(&state.db, &ofox_state.0).await;
+    crate::commands::model_selection::notify(&app_handle, report.switched.clone());
+    Ok(report)
 }
 
 /// Show the main window and emit `ofox-reauth-requested` so the renderer
@@ -202,6 +207,51 @@ pub async fn bind_tool_to_ofox_internal(
     app: &str,
     model_selections: Option<Vec<crate::workbuddy_config::WorkBuddyModelSelection>>,
 ) -> Result<(), String> {
+    if let Some(tool) = crate::app_config::BindableTool::native(app) {
+        let access = ofox_manager
+            .read()
+            .await
+            .get_valid_access_token()
+            .await
+            .ok();
+        let catalog =
+            crate::services::model_fetch::fetch_ofox_catalog("openai", access.as_deref(), false)
+                .await?;
+        let model = catalog
+            .models
+            .iter()
+            .filter(|m| crate::native_tools::model_api(tool, m).is_ok())
+            .filter(|m| {
+                m.pricing_prompt
+                    .as_deref()
+                    .and_then(|p| p.parse::<f64>().ok())
+                    .is_some_and(|p| p > 0.0)
+            })
+            .min_by(|a, b| {
+                a.pricing_prompt
+                    .as_deref()
+                    .and_then(|p| p.parse::<f64>().ok())
+                    .unwrap_or(f64::MAX)
+                    .total_cmp(
+                        &b.pricing_prompt
+                            .as_deref()
+                            .and_then(|p| p.parse::<f64>().ok())
+                            .unwrap_or(f64::MAX),
+                    )
+            })
+            .or_else(|| {
+                catalog
+                    .models
+                    .iter()
+                    .find(|m| crate::native_tools::model_api(tool, m).is_ok())
+            })
+            .ok_or_else(|| "当前目录没有 Pi/dsh 可用的模型".to_string())?;
+        crate::native_tools::validate_bind(tool, model, &catalog.models)?;
+        let key = acquire_bind_token(tool, ofox_manager).await?;
+        crate::native_tools::bind_with_catalog(db, tool, &key, model, &catalog.models).await?;
+        crate::ofox_api_keys::mark_key_used(tool);
+        return Ok(());
+    }
     // 直接改配置文件的工具：第一次绑定时记下受管文件原样，只改接入字段，解绑时
     // 精确还原（见 services::ofox_bind）。Codex 和 ChatGPT 共用 ~/.codex。
     if let Some((tool, holder)) = crate::services::ofox_bind::tool_for(app) {
@@ -230,6 +280,13 @@ pub(crate) async fn bind_existing_tool_to_ofox_internal(
     ofox_manager: &Arc<RwLock<crate::ofox_auth::OfoxAuthManager>>,
     app: &str,
 ) -> Result<(), String> {
+    if let Some(tool) = crate::app_config::BindableTool::native(app) {
+        let status = crate::native_tools::binding_status(db, tool).await;
+        if status.status != crate::services::ofox_bind::status::BindingStatus::Configured {
+            return Err("原生工具配置已修改或缺失，未自动修复".into());
+        }
+        return Ok(());
+    }
     let (tool, holder) =
         crate::services::ofox_bind::tool_for(app).ok_or_else(|| "无效的应用类型".to_string())?;
     let token = acquire_bind_token(tool.app().into(), ofox_manager).await?;
@@ -245,16 +302,64 @@ pub(crate) async fn bind_existing_tool_to_ofox_internal(
 /// 详见 [`bind_tool_to_ofox_internal`]。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ofox_bind_tool(
+    app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     ofox_state: State<'_, OfoxAuthState>,
     app: String,
     model_selection: Option<crate::workbuddy_config::WorkBuddyModelSelection>,
     model_selections: Option<Vec<crate::workbuddy_config::WorkBuddyModelSelection>>,
 ) -> Result<(), String> {
+    let settings = crate::settings::get_settings();
+    if native_bind_needs_apex_probe(&app, &settings) {
+        // New native configurations must use the completed region decision.
+        // The existing probe retains the documented fallback when offline and
+        // reconciles managed URLs on the next successful startup detection.
+        let client = crate::proxy::http_client::get();
+        crate::ofox_apex::probe_apex_on_startup(&app_handle, &client).await;
+    }
     // `modelSelection` remains accepted for compatibility with older renderer
     // builds while the multi-model UI sends `modelSelections`.
     let selections = model_selections.or_else(|| model_selection.map(|selection| vec![selection]));
-    bind_tool_to_ofox_internal(&state.db, &ofox_state.0, &app, selections).await
+    bind_tool_to_ofox_internal(&state.db, &ofox_state.0, &app, selections).await?;
+    crate::commands::model_selection::notify(
+        &app_handle,
+        vec![crate::model_selection::canonical_tool(&app)?],
+    );
+    Ok(())
+}
+
+fn native_bind_needs_apex_probe(app: &str, settings: &crate::settings::AppSettings) -> bool {
+    crate::app_config::BindableTool::native(app).is_some()
+        && !settings.ofox_apex_resolved.unwrap_or(false)
+        && !settings.ofox_apex_pinned.unwrap_or(false)
+}
+
+#[cfg(test)]
+mod native_bind_apex_tests {
+    use super::native_bind_needs_apex_probe;
+
+    #[test]
+    fn native_first_bind_waits_for_auto_region_but_respects_resolved_or_pinned_apex() {
+        for tool in ["pi", "dsh"] {
+            let mut settings = crate::settings::AppSettings::default();
+            assert!(native_bind_needs_apex_probe(tool, &settings));
+            for apex in ["ofox.ai", "ofox.io"] {
+                settings.ofox_apex = Some(apex.into());
+                settings.ofox_apex_resolved = Some(false);
+                settings.ofox_apex_pinned = Some(false);
+                assert!(native_bind_needs_apex_probe(tool, &settings));
+                settings.ofox_apex_pinned = Some(true);
+                assert!(!native_bind_needs_apex_probe(tool, &settings));
+                settings.ofox_apex_pinned = Some(false);
+                settings.ofox_apex_resolved = Some(true);
+                assert!(!native_bind_needs_apex_probe(tool, &settings));
+            }
+        }
+        assert!(!native_bind_needs_apex_probe(
+            "codex",
+            &crate::settings::AppSettings::default(),
+        ));
+    }
 }
 
 /// Explicit recovery of deleted connection fields. Re-check after acquiring the
@@ -262,12 +367,27 @@ pub async fn ofox_bind_tool(
 /// cannot turn recovery into an overwrite.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ofox_restore_tool_binding(
+    app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     ofox_state: State<'_, OfoxAuthState>,
     app: String,
     still_bound: Option<Vec<String>>,
 ) -> Result<(), String> {
     use crate::services::ofox_bind::status::BindingStatus;
+    if let Some(tool) = crate::app_config::BindableTool::native(&app) {
+        if crate::native_tools::binding_status(&state.db, tool)
+            .await
+            .status
+            != BindingStatus::Missing
+        {
+            return Err("配置未缺失或已修改，无需恢复".into());
+        }
+        let key = acquire_bind_token(tool, &ofox_state.0).await?;
+        crate::native_tools::restore_missing(&state.db, tool, &key).await?;
+        crate::commands::model_selection::notify(&app_handle, vec![tool.as_str().into()]);
+        return Ok(());
+    }
+
     if app.trim().eq_ignore_ascii_case("workbuddy") {
         let health = crate::workbuddy_config::binding_status(&state.db).await;
         if health.status != BindingStatus::Missing {
@@ -277,7 +397,9 @@ pub async fn ofox_restore_tool_binding(
         }
         let key =
             acquire_bind_token(crate::app_config::BindableTool::WorkBuddy, &ofox_state.0).await?;
-        return crate::workbuddy_config::restore_missing_binding(&state.db, &key).await;
+        crate::workbuddy_config::restore_missing_binding(&state.db, &key).await?;
+        crate::commands::model_selection::notify(&app_handle, vec!["workbuddy".into()]);
+        return Ok(());
     }
     let (tool, holder) =
         crate::services::ofox_bind::tool_for(&app).ok_or_else(|| "无效的应用类型".to_string())?;
@@ -302,7 +424,9 @@ pub async fn ofox_restore_tool_binding(
         &still_bound.unwrap_or_default(),
         &key,
     )
-    .await
+    .await?;
+    crate::commands::model_selection::notify(&app_handle, vec![tool.app().as_str().into()]);
+    Ok(())
 }
 
 /// Mirror of [`bind_tool_to_ofox_internal`] — undo the OfoxAI bind for `app`.
@@ -326,6 +450,9 @@ pub async fn unbind_tool_from_ofox_internal(
     still_bound: &[String],
     dry_run: bool,
 ) -> Result<UnbindReport, String> {
+    if let Some(tool) = crate::app_config::BindableTool::native(app) {
+        return crate::native_tools::unbind(db, tool, dry_run).await;
+    }
     if let Some((tool, holder)) = crate::services::ofox_bind::tool_for(app) {
         return crate::services::ofox_bind::unbind(db, tool, holder, still_bound, dry_run).await;
     }
@@ -341,12 +468,18 @@ pub async fn unbind_tool_from_ofox_internal(
 /// 另一方还绑定着时只解除这一方，不还原配置。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ofox_unbind_tool(
+    app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     app: String,
     still_bound: Option<Vec<String>>,
 ) -> Result<UnbindReport, String> {
     let still_bound = still_bound.unwrap_or_default();
-    unbind_tool_from_ofox_internal(&state.db, &app, &still_bound, false).await
+    let report = unbind_tool_from_ofox_internal(&state.db, &app, &still_bound, false).await?;
+    crate::commands::model_selection::notify(
+        &app_handle,
+        vec![crate::model_selection::canonical_tool(&app)?],
+    );
+    Ok(report)
 }
 
 /// 解绑预览：返回解绑会还原/删除哪些内容，不做任何改动。

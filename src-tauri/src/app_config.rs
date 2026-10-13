@@ -328,6 +328,8 @@ pub enum BindableTool {
     OpenClaw,
     Hermes,
     WorkBuddy,
+    Dsh,
+    Pi,
 }
 
 impl BindableTool {
@@ -340,7 +342,36 @@ impl BindableTool {
             Self::OpenClaw => "openclaw",
             Self::Hermes => "hermes",
             Self::WorkBuddy => "workbuddy",
+            Self::Dsh => "dsh",
+            Self::Pi => "pi",
         }
+    }
+
+    pub fn native(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "dsh" => Some(Self::Dsh),
+            "pi" => Some(Self::Pi),
+            _ => None,
+        }
+    }
+}
+
+impl FromStr for BindableTool {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if let Some(tool) = Self::native(value) {
+            return Ok(tool);
+        }
+        if value.trim().eq_ignore_ascii_case("workbuddy") {
+            return Ok(Self::WorkBuddy);
+        }
+        if value.trim().eq_ignore_ascii_case("chatgpt") {
+            return Ok(Self::Codex);
+        }
+        AppType::from_str(value)
+            .map(Into::into)
+            .map_err(|_| "无效的工具类型".into())
     }
 }
 

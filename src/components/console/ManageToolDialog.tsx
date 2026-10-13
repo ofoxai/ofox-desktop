@@ -49,7 +49,6 @@ import {
   filterOfoxModelsByProtocol,
   filterOfoxModelsForOpenCode,
   filterOfoxModelsForWorkBuddy,
-  toWorkBuddyModelSelection,
   type FetchedModel,
 } from "@/lib/api/model-fetch";
 import { readBoundTools, unbindTool } from "@/lib/bindTools";
@@ -65,7 +64,12 @@ import { useOfoxApex } from "@/hooks/useOfoxApex";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
 import { isOfoxBillingManager } from "@/lib/api/ofoxAuth";
 import { ofoxWalletUrl } from "@/lib/ofoxUrls";
-import type { AppId } from "@/lib/api/types";
+import {
+  useModelSelection,
+  useSaveModelSelection,
+  filterModelsForNativeTool,
+} from "@/hooks/useModelSelection";
+import type { ToolModelSnapshot } from "@/lib/api/modelSelection";
 
 /** Subset of `ConsolePage`'s `BoundTool` that the dialog actually needs.
  *  Kept structural so we can call it with the full BoundTool object. */
@@ -144,6 +148,11 @@ export default function ManageToolDialog({
 }: ManageToolDialogProps) {
   const { t } = useTranslation();
   const open = !!tool;
+  const snapshotQuery = useModelSelection(tool ? [tool.id] : [], open);
+  const saveSelection = useSaveModelSelection();
+  const [editSnapshot, setEditSnapshot] = useState<ToolModelSnapshot | null>(
+    null,
+  );
   const protocol = tool ? TOOL_PROTOCOL[tool.id] : undefined;
   const desktopCodex =
     tool?.id === "codex" && tool.installationKind === "desktopApp";
@@ -208,6 +217,7 @@ export default function ManageToolDialog({
   const [workBuddyTestLoading, setWorkBuddyTestLoading] = useState(false);
   const workBuddyTestRequest = useRef(0);
   const configurationReady = bindingStatus?.status === "configured";
+  const modelWritable = configurationReady && editSnapshot?.canWrite !== false;
   const operationBusy =
     saving || restoring || unbindLoading || pingLoading || workBuddyTestLoading;
 
@@ -228,6 +238,7 @@ export default function ManageToolDialog({
     setCurrentModels([]);
     setDraftModels([]);
     setCurrentModelLoaded(false);
+    setEditSnapshot(null);
     setModels([]);
     setModelsLoading(tool.id === "workbuddy");
     setModelsError(false);
@@ -257,89 +268,52 @@ export default function ManageToolDialog({
         if (!cancelled) setFilePathError(String(e));
       }
     };
-    const loadBindingStatus = async () => {
-      try {
-        const status = await ofoxBindApi.status(tool.id);
-        if (!cancelled) setBindingStatus(status);
-      } catch (e) {
-        console.warn(`[ManageToolDialog] binding status(${tool.id}) failed`, e);
-        if (!cancelled)
-          setBindingStatus({
-            status: "unknown",
-            message: null,
-            missingFiles: [],
-            modifiedFields: [],
-            envOverrides: [],
-          });
+    const loadDetails = async () => {
+      if (tool.id === "workbuddy") {
+        const [catalog, endpoint] = await Promise.allSettled([
+          fetchOfoxModels("openai"),
+          manageToolApi.getWorkBuddyEndpointStatus(),
+        ]);
+        if (cancelled) return;
+        if (catalog.status === "fulfilled") {
+          setModels(filterOfoxModelsForWorkBuddy(catalog.value));
+        } else setModelsError(true);
+        if (endpoint.status === "fulfilled")
+          setWorkBuddyEndpointStatus(endpoint.value);
+        setModelsLoading(false);
+      } else if (tool.id === "opencode") {
+        const hints = await manageToolApi
+          .getOpenCodeProtocolHints()
+          .catch(() => []);
+        if (!cancelled) setProtocolHints(hints);
       }
     };
-    const loadModels = async () => {
-      try {
-        if (tool.id === "workbuddy") {
-          const [managedResult, catalogResult, endpointResult] =
-            await Promise.allSettled([
-              manageToolApi.getWorkBuddyManagedModels(),
-              fetchOfoxModels("openai"),
-              manageToolApi.getWorkBuddyEndpointStatus(),
-            ]);
-          if (!cancelled) {
-            if (managedResult.status === "fulfilled") {
-              setCurrentModels(managedResult.value);
-              setDraftModels(managedResult.value);
-              setCurrentModelLoaded(true);
-            }
-            if (catalogResult.status === "fulfilled") {
-              setModels(filterOfoxModelsForWorkBuddy(catalogResult.value));
-              setModelsError(false);
-            } else {
-              setModelsError(true);
-            }
-            if (endpointResult.status === "fulfilled") {
-              setWorkBuddyEndpointStatus(endpointResult.value);
-            }
-            setModelsLoading(false);
-          }
-          if (managedResult.status === "rejected") throw managedResult.reason;
-          if (catalogResult.status === "rejected") throw catalogResult.reason;
-          return;
-        }
-        if (tool.id === "opencode") {
-          const saved = await manageToolApi.getActiveModels(tool.id);
-          if (!cancelled) {
-            setCurrentModels(saved);
-            setDraftModels(saved);
-            setCurrentModelLoaded(true);
-          }
-          // 后台检测的结果只是提示，读不出来不影响管理。
-          const hints = await manageToolApi
-            .getOpenCodeProtocolHints()
-            .catch(() => []);
-          if (!cancelled) setProtocolHints(hints);
-          return;
-        }
-        // ChatGPT 桌面 App 的模型记在它自己的状态文件里，和首页同一个来源，免得两边不一致。
-        const m =
-          tool.id === "chatgpt"
-            ? await manageToolApi.getChatGptModel()
-            : await manageToolApi.getActiveModel(tool.id);
-        if (!cancelled) {
-          setCurrentModel(m);
-          setDraftModel(m);
-          setCurrentModelLoaded(true);
-        }
-      } catch (e) {
-        // Soft-fail: an empty model just means "OfoxAI default routing",
-        // which is a valid state. Don't block the dialog over it.
-        console.warn(`[ManageToolDialog] getActiveModel(${tool.id}) failed`, e);
-        if (!cancelled && tool.id === "workbuddy") setModelsLoading(false);
-      }
-    };
-    void Promise.all([loadPath(), loadModels(), loadBindingStatus()]);
+    void loadPath();
+    void loadDetails();
 
     return () => {
       cancelled = true;
     };
   }, [tool]);
+
+  // Freeze the initial revision while editing. Event refreshes never overwrite a draft.
+  useEffect(() => {
+    if (!tool || editSnapshot) return;
+    const snapshot = snapshotQuery.data?.tools.find(
+      (item) => item.toolId === tool.id,
+    );
+    if (!snapshot) return;
+    setEditSnapshot(snapshot);
+    setBindingStatus(snapshot.binding);
+    if (snapshot.managedSelection.kind === "models") {
+      setCurrentModels(snapshot.managedSelection.models);
+      setDraftModels(snapshot.managedSelection.models);
+    } else {
+      setCurrentModel(snapshot.managedSelection.model);
+      setDraftModel(snapshot.managedSelection.model);
+    }
+    setCurrentModelLoaded(true);
+  }, [tool, editSnapshot, snapshotQuery.data]);
 
   // 模型列表在打开窗口时就加载（见下面的 effect），不让用户去点刷新。WorkBuddy
   // 在上面的初始加载里一起取，因为它的当前值要和兼容目录对上。加载失败时在
@@ -372,9 +346,11 @@ export default function ManageToolDialog({
           // 模型不列出来。WorkBuddy 只走 chat；OpenCode chat、responses 都行。
           tool?.id === "workbuddy"
             ? filterOfoxModelsForWorkBuddy(all)
-            : multiModel
-              ? filterOfoxModelsForOpenCode(all)
-              : filterOfoxModelsByProtocol(all, protocol, requiredEndpoint),
+            : tool?.id === "pi" || tool?.id === "dsh"
+              ? filterModelsForNativeTool(all)
+              : multiModel
+                ? filterOfoxModelsForOpenCode(all)
+                : filterOfoxModelsByProtocol(all, protocol, requiredEndpoint),
         );
       } catch (e) {
         console.error("[ManageToolDialog] fetchOfoxModels failed", e);
@@ -495,7 +471,7 @@ export default function ManageToolDialog({
   const handleOpenFolder = useCallback(async () => {
     if (!tool) return;
     try {
-      await settingsApi.openConfigFolder(managedToolId(tool.id) as AppId);
+      await settingsApi.openConfigFolder(managedToolId(tool.id));
     } catch (e) {
       toast.error(`打开配置目录失败：${String(e)}`);
     }
@@ -515,65 +491,54 @@ export default function ManageToolDialog({
     : draftModel !== currentModel;
 
   const handleSave = useCallback(async () => {
-    if (!tool || !configurationReady || operationBusy) return;
+    if (!tool || !modelWritable || operationBusy) return;
     const workBuddy = tool.id === "workbuddy";
     if (!isDirty && !currentModelLoaded) return;
     let savedCount = draftModels.length;
     setSaving(true);
     try {
-      if (workBuddy) {
-        if (draftModels.length === 0) {
-          throw new Error("请至少选择一个 WorkBuddy 模型");
-        }
-        const selections = draftModels.map((id) =>
-          models.find((model) => model.id === id),
+      if (!editSnapshot) return;
+      if (multiModel && draftModels.length === 0)
+        throw new Error(t("modelExperience.chooseModels"));
+      if (
+        workBuddy &&
+        draftModels.some((id) => !models.some((model) => model.id === id))
+      ) {
+        throw new Error(t("modelExperience.missingCatalogModels"));
+      }
+      if (!multiModel && !editSnapshot.supportsDefault && !draftModel.trim()) {
+        throw new Error(t("modelExperience.chooseModel"));
+      }
+      const report = await saveSelection.mutateAsync({
+        tool: tool.id,
+        selection: multiModel
+          ? { kind: "models", models: draftModels }
+          : { kind: "single", model: draftModel },
+        expectedRevision: editSnapshot.revision,
+      });
+      setEditSnapshot(report.snapshot);
+      if (report.snapshot.managedSelection.kind === "models") {
+        setCurrentModels(report.snapshot.managedSelection.models);
+        savedCount = report.snapshot.managedSelection.models.length;
+      } else setCurrentModel(report.snapshot.managedSelection.model);
+      if (report.skipped.length) {
+        toast.warning(
+          t("modelExperience.skippedModels", {
+            names: report.skipped
+              .map((item) => `${item.id}: ${item.reason}`)
+              .join("; "),
+          }),
         );
-        if (selections.some((model) => !model)) {
-          throw new Error("部分所选模型已不在可用列表中，请移除后再保存");
-        }
-        await manageToolApi.setWorkBuddyManagedModels(
-          selections.map((model) => toWorkBuddyModelSelection(model!)),
-        );
-        setCurrentModels(draftModels);
-      } else if (tool.id === "opencode") {
-        if (draftModels.length === 0) {
-          throw new Error("请至少选择一个 OpenCode 模型");
-        }
-        // 协议由后端按缓存和目录选，不发检测请求；没有可用端点的模型会被跳过。
-        const report = await manageToolApi.setActiveModels(
-          tool.id,
-          draftModels,
-        );
-        setCurrentModels(report.saved);
-        if (report.skipped.length > 0) {
-          toast.warning(
-            t("modelCompatibility.openCodeSkipped", {
-              count: report.skipped.length,
-              names: report.skipped.map((model) => model.id).join("、"),
-            }),
-          );
-        }
-        savedCount = report.saved.length;
-      } else {
-        // 没查出结果时不传协议，由后端按模型目录选（Responses 优先）。
-        const selectedProtocol =
-          compatibilityResults[0]?.status === "compatible"
-            ? (compatibilityResults[0].protocol ?? undefined)
-            : undefined;
-        await manageToolApi.setActiveModel(
-          tool.id,
-          draftModel,
-          undefined,
-          selectedProtocol,
-        );
-        setCurrentModel(draftModel);
       }
       toast.success(
-        workBuddy
-          ? `已同步 ${draftModels.length} 个模型`
-          : tool.id === "opencode"
-            ? `已保存 ${savedCount} 个模型`
-            : "模型已更新",
+        t(
+          multiModel
+            ? "modelExperience.modelsSaved"
+            : tool.id === "chatgpt"
+              ? "modelExperience.defaultSaved"
+              : "modelExperience.saved",
+          { count: savedCount },
+        ),
       );
       onChanged?.();
       // Close on success — mirrors handleUnbind's收尾 sequence and
@@ -581,7 +546,7 @@ export default function ManageToolDialog({
       // keep the dialog open so the user can fix and retry.
       onOpenChange(false);
     } catch (e) {
-      toast.error(`保存失败：${String(e)}`);
+      toast.error(t("modelExperience.saveFailed", { error: String(e) }));
     } finally {
       setSaving(false);
     }
@@ -591,36 +556,55 @@ export default function ManageToolDialog({
     currentModel,
     isDirty,
     currentModelLoaded,
-    configurationReady,
+    modelWritable,
     operationBusy,
     draftModels,
     models,
-    compatibilityResults,
+    editSnapshot,
+    multiModel,
+    saveSelection,
+    t,
     onChanged,
     onOpenChange,
   ]);
 
   const handleApplyProtocolHints = useCallback(async () => {
-    if (tool?.id !== "opencode" || operationBusy) return;
+    if (tool?.id !== "opencode" || !modelWritable || operationBusy) return;
     setSaving(true);
     try {
-      const report = await manageToolApi.setActiveModels(
-        tool.id,
-        currentModels,
-      );
-      setCurrentModels(report.saved);
-      setDraftModels(report.saved);
+      if (!editSnapshot) return;
+      const report = await saveSelection.mutateAsync({
+        tool: tool.id,
+        selection: { kind: "models", models: currentModels },
+        expectedRevision: editSnapshot.revision,
+      });
+      setEditSnapshot(report.snapshot);
+      const saved =
+        report.snapshot.managedSelection.kind === "models"
+          ? report.snapshot.managedSelection.models
+          : report.saved;
+      setCurrentModels(saved);
+      setDraftModels(saved);
       setProtocolHints(
         await manageToolApi.getOpenCodeProtocolHints().catch(() => []),
       );
       toast.success(t("modelCompatibility.openCodeHintApplied"));
       onChanged?.();
     } catch (e) {
-      toast.error(`保存失败：${String(e)}`);
+      toast.error(t("modelExperience.saveFailed", { error: String(e) }));
     } finally {
       setSaving(false);
     }
-  }, [tool?.id, operationBusy, currentModels, onChanged, t]);
+  }, [
+    tool?.id,
+    modelWritable,
+    operationBusy,
+    currentModels,
+    onChanged,
+    t,
+    editSnapshot,
+    saveSelection,
+  ]);
 
   const probeModel =
     tool?.id === "opencode" ? (draftModels[0] ?? "") : draftModel;
@@ -785,6 +769,38 @@ export default function ManageToolDialog({
             </DialogHeader>
 
             <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+              {snapshotQuery.isError && (
+                <div
+                  role="alert"
+                  className="rounded-md border border-destructive/30 p-3 text-[12px] text-destructive"
+                >
+                  {t("modelExperience.stateFailed")}{" "}
+                  <button
+                    type="button"
+                    className="underline"
+                    onClick={() => void snapshotQuery.refetch()}
+                  >
+                    {t("modelExperience.retry")}
+                  </button>
+                </div>
+              )}
+              {tool.id === "chatgpt" && editSnapshot && (
+                <p className="text-[12px] text-muted-foreground">
+                  {t("modelExperience.observed", {
+                    model:
+                      editSnapshot.observedSelection.model ||
+                      t("modelExperience.unknown"),
+                  })}{" "}
+                  · {t("modelExperience.writableDefault")}
+                </p>
+              )}
+              {!!editSnapshot?.scopeModels?.length &&
+                !editSnapshot.supportsDefault &&
+                !currentModel && (
+                  <p className="text-[12px] text-muted-foreground">
+                    {t("modelExperience.mixedScopes")}
+                  </p>
+                )}
               {((tool.installationStatus &&
                 tool.installationStatus !== "installed") ||
                 tool.installationError) && (
@@ -901,6 +917,9 @@ export default function ManageToolDialog({
                       loading={modelsLoading}
                       onFetch={fetchModels}
                       portalContainer={dialogContentNode}
+                      disabled={
+                        !modelWritable || !currentModelLoaded || operationBusy
+                      }
                       summary={
                         tool.id === "opencode"
                           ? t("modelPicker.availableCount", {
@@ -998,6 +1017,15 @@ export default function ManageToolDialog({
                     <ModelPicker
                       id="manage-model"
                       value={draftModel}
+                      allowDefault={editSnapshot?.supportsDefault ?? false}
+                      emptyLabel={
+                        editSnapshot?.supportsDefault === false
+                          ? t("modelExperience.chooseModel")
+                          : undefined
+                      }
+                      disabled={
+                        !modelWritable || !currentModelLoaded || operationBusy
+                      }
                       onChange={setDraftModel}
                       models={models}
                       loading={modelsLoading}
@@ -1239,7 +1267,7 @@ export default function ManageToolDialog({
                   size="sm"
                   onClick={handleSave}
                   disabled={
-                    !configurationReady ||
+                    !modelWritable ||
                     operationBusy ||
                     (!isDirty && !currentModelLoaded) ||
                     saving ||

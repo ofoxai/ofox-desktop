@@ -261,7 +261,7 @@ impl LocalDetection {
     }
 }
 
-const VALID_TOOLS: [&str; 8] = [
+const VALID_TOOLS: [&str; 10] = [
     "claude",
     "codex",
     "chatgpt",
@@ -270,6 +270,8 @@ const VALID_TOOLS: [&str; 8] = [
     "openclaw",
     "hermes",
     "workbuddy",
+    "dsh",
+    "pi",
 ];
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -785,7 +787,18 @@ async fn get_single_tool_version_impl(
     }
 
     let latest_version = if include_latest {
-        latest_tool_version(tool, local.version.as_deref()).await
+        let package = active_installation
+            .as_ref()
+            .ok()
+            .and_then(|installation| {
+                super::tool_update::installed_npm_package(
+                    tool,
+                    &installation.path,
+                    &installation.real,
+                )
+            })
+            .or_else(|| super::tool_update::npm_package(tool));
+        latest_tool_version_for_package(tool, local.version.as_deref(), package).await
     } else {
         None
     };
@@ -916,10 +929,19 @@ pub(crate) async fn cli_is_missing(tool: &str) -> Result<bool, String> {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn latest_tool_version(tool: &str, local: Option<&str>) -> Option<String> {
+    latest_tool_version_for_package(tool, local, super::tool_update::npm_package(tool)).await
+}
+
+pub(crate) async fn latest_tool_version_for_package(
+    tool: &str,
+    local: Option<&str>,
+    package: Option<&str>,
+) -> Option<String> {
     let client = crate::proxy::http_client::get();
     let query = async {
-        if let Some(package) = super::tool_update::npm_package(tool) {
+        if let Some(package) = package {
             let version = fetch_npm_latest_version(&client, package).await;
             if version.is_some() || tool != "opencode" {
                 return version;
@@ -2330,6 +2352,8 @@ fn launcher_env_name(name: &str) -> bool {
             | "all_proxy"
             | "NO_PROXY"
             | "no_proxy"
+            | "PI_CODING_AGENT_DIR"
+            | "DSH_HOME"
     )
 }
 

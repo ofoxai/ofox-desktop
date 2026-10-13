@@ -309,7 +309,9 @@ pub(crate) fn upgrade_plan(
     }
 }
 
-const OFOX_NPM_TOOLS: [&str; 5] = ["claude", "codex", "gemini", "opencode", "openclaw"];
+const OFOX_NPM_TOOLS: [&str; 7] = [
+    "claude", "codex", "gemini", "opencode", "openclaw", "dsh", "pi",
+];
 
 /// `npm ls -g --depth=0 --json` 里换版本后要装回来的全局包：除了 Node 自带的
 /// npm、corepack，和马上要装最新版的 `except`。不只是 Ofox 认识的工具——用户自己
@@ -323,6 +325,7 @@ pub(crate) fn global_packages(npm_ls_json: &str, except: &str) -> Vec<GlobalPack
     let Some(dependencies) = value.get("dependencies").and_then(|d| d.as_object()) else {
         return Vec::new();
     };
+    let except_tool = except;
     let except = super::tool_update::npm_package(except);
     let safe = |text: &str| {
         !text.is_empty()
@@ -333,7 +336,10 @@ pub(crate) fn global_packages(npm_ls_json: &str, except: &str) -> Vec<GlobalPack
     let mut packages: Vec<GlobalPackage> = dependencies
         .iter()
         .filter(|(name, _)| !matches!(name.as_str(), "npm" | "corepack"))
-        .filter(|(name, _)| Some(name.as_str()) != except)
+        .filter(|(name, _)| {
+            Some(name.as_str()) != except
+                && !(except_tool == "pi" && name.as_str() == "@mariozechner/pi-coding-agent")
+        })
         .filter(|(_, entry)| {
             !entry
                 .get("resolved")
@@ -347,7 +353,10 @@ pub(crate) fn global_packages(npm_ls_json: &str, except: &str) -> Vec<GlobalPack
                 version: version.to_string(),
                 tool: OFOX_NPM_TOOLS
                     .into_iter()
-                    .find(|tool| super::tool_update::npm_package(tool) == Some(name.as_str()))
+                    .find(|tool| {
+                        super::tool_update::npm_package(tool) == Some(name.as_str())
+                            || (*tool == "pi" && name == "@mariozechner/pi-coding-agent")
+                    })
                     .map(str::to_string),
             })
         })
@@ -649,6 +658,28 @@ pub async fn check_tool_node_requirement(tool: String) -> Result<NodeRequirement
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pi_node_engine_and_legacy_channel_are_preserved_when_upgrading() {
+        assert_eq!(engine_satisfied("22.18.0", ">=22.19.0"), Some(false));
+        assert_eq!(engine_satisfied("22.19.0", ">=22.19.0"), Some(true));
+        let packages = global_packages(
+            r#"{"dependencies":{"@mariozechner/pi-coding-agent":{"version":"0.1.0"},"@deepseek-ai/dsh":{"version":"0.2.0"}}}"#,
+            "claude",
+        );
+        assert!(packages
+            .iter()
+            .any(|p| p.name == "@mariozechner/pi-coding-agent" && p.tool.as_deref() == Some("pi")));
+        assert!(packages
+            .iter()
+            .any(|p| p.name == "@deepseek-ai/dsh" && p.tool.as_deref() == Some("dsh")));
+        assert!(!global_packages(
+            r#"{"dependencies":{"@mariozechner/pi-coding-agent":{"version":"0.1.0"}}}"#,
+            "pi"
+        )
+        .iter()
+        .any(|p| p.tool.as_deref() == Some("pi")));
+    }
 
     const OPENCLAW: &str = ">=24.16.0 <25 || >=26.1.0";
 

@@ -4,13 +4,33 @@ use serde_json::Value;
 
 use crate::session_manager::{SessionMessage, SessionMeta};
 
-use super::utils::{parse_timestamp_to_ms, truncate_summary};
+use super::utils::{extract_text, parse_timestamp_to_ms, truncate_summary};
 
 const PROVIDER_ID: &str = "gemini";
+
+pub(crate) fn session_identity(path: &Path) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Identity {
+        #[serde(rename = "sessionId")]
+        id: String,
+    }
+    let file = std::fs::File::open(path).ok()?;
+    // Parse just the first JSON value. Unknown legacy body fields are skipped;
+    // a JSONL header does not require replaying the entire conversation.
+    serde_json::Deserializer::from_reader(std::io::BufReader::new(file))
+        .into_iter::<Identity>()
+        .next()?
+        .ok()
+        .map(|identity| identity.id)
+}
 
 pub fn scan_sessions() -> Vec<SessionMeta> {
     let gemini_dir = crate::gemini_config::get_gemini_dir();
     let tmp_dir = gemini_dir.join("tmp");
+    scan_in(&tmp_dir)
+}
+
+pub(crate) fn scan_in(tmp_dir: &Path) -> Vec<SessionMeta> {
     if !tmp_dir.exists() {
         return Vec::new();
     }
@@ -18,14 +38,19 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
     let mut sessions = Vec::new();
 
     // Iterate over project directories: tmp/<project_name>/chats/session-*.json
-    let project_dirs = match std::fs::read_dir(&tmp_dir) {
+    let project_dirs = match std::fs::read_dir(tmp_dir) {
         Ok(entries) => entries,
         Err(_) => return Vec::new(),
     };
 
     for entry in project_dirs.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
         let chats_dir = entry.path().join("chats");
-        if !chats_dir.is_dir() {
+        if !std::fs::symlink_metadata(&chats_dir)
+            .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+        {
             continue;
         }
 
@@ -35,11 +60,23 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
         };
 
         let project_root_file = entry.path().join(".project_root");
-        let project_dir = std::fs::read_to_string(project_root_file).ok();
+        let project_dir = if std::fs::symlink_metadata(&project_root_file)
+            .is_ok_and(|m| m.is_file() && !m.file_type().is_symlink())
+        {
+            std::fs::read_to_string(project_root_file).ok()
+        } else {
+            None
+        };
 
         for file_entry in chat_files.flatten() {
+            if !file_entry.file_type().is_ok_and(|t| t.is_file()) {
+                continue;
+            }
             let path = file_entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            if !path
+                .extension()
+                .is_some_and(|e| e == "json" || e == "jsonl")
+            {
                 continue;
             }
             if let Some(meta) = parse_session(&path) {
@@ -55,9 +92,7 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
 }
 
 pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
-    let data = std::fs::read_to_string(path).map_err(|e| format!("Failed to read session: {e}"))?;
-    let value: Value =
-        serde_json::from_str(&data).map_err(|e| format!("Failed to parse session JSON: {e}"))?;
+    let value = read_conversation(path)?;
 
     let messages = value
         .get("messages")
@@ -92,7 +127,25 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
                         content.push('\n');
                     }
                     content.push_str(&format!("[Tool: {name}]"));
+                    if let Some(args) = call.get("args") {
+                        content.push_str(&format!(
+                            "\n{}",
+                            serde_json::to_string_pretty(args).unwrap_or_default()
+                        ));
+                    }
+                    if let Some(result) = call.get("result") {
+                        content.push_str(&format!("\n{}", extract_text(result)));
+                    }
                 }
+            }
+        }
+
+        if let Some(thoughts) = msg.get("thoughts").and_then(Value::as_array) {
+            for thought in thoughts {
+                content.push_str(&format!(
+                    "\n[Thinking]\n{}",
+                    serde_json::to_string_pretty(thought).unwrap_or_default()
+                ));
             }
         }
 
@@ -112,6 +165,7 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
     Ok(result)
 }
 
+#[cfg(test)]
 pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<bool, String> {
     let meta = parse_session(path).ok_or_else(|| {
         format!(
@@ -137,9 +191,8 @@ pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<boo
     Ok(true)
 }
 
-fn parse_session(path: &Path) -> Option<SessionMeta> {
-    let data = std::fs::read_to_string(path).ok()?;
-    let value: Value = serde_json::from_str(&data).ok()?;
+pub(crate) fn parse_session(path: &Path) -> Option<SessionMeta> {
+    let value = read_conversation(path).ok()?;
 
     let session_id = value.get("sessionId").and_then(Value::as_str)?.to_string();
 
@@ -153,9 +206,9 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
         .and_then(|msgs| {
             msgs.iter()
                 .find(|m| m.get("type").and_then(Value::as_str) == Some("user"))
-                .and_then(|m| m.get("content").and_then(Value::as_str))
+                .map(|m| extract_text(&m["content"]))
                 .filter(|s| !s.trim().is_empty())
-                .map(|s| truncate_summary(s, 160))
+                .map(|s| truncate_summary(&s, 160))
         });
 
     let source_path = path.to_string_lossy().to_string();
@@ -173,10 +226,139 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
     })
 }
 
+// The JSONL schema is documented by Gemini CLI chatRecordingService.ts:
+// https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/services/chatRecordingService.ts
+// This independent reader preserves current message order after rewind/patch/set.
+pub(crate) fn read_conversation(path: &Path) -> Result<Value, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    if let Ok(value) = serde_json::from_str::<Value>(&text) {
+        if value.get("messages").is_some() || path.extension().is_some_and(|e| e == "json") {
+            return Ok(value);
+        }
+    }
+    let mut metadata = serde_json::Map::new();
+    let mut messages: Vec<Value> = Vec::new();
+    for line in text.lines() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(id) = record["$rewindTo"].as_str() {
+            let index = messages
+                .iter()
+                .position(|m| m["id"].as_str() == Some(id))
+                .unwrap_or(0);
+            messages.truncate(index);
+        } else if let Some(patch) = record.get("$patch") {
+            apply_patch(&mut messages, patch);
+        } else if let Some(set) = record["$set"].as_object() {
+            if let Some(replacement) = set.get("messages").and_then(Value::as_array) {
+                messages = replacement.clone();
+            }
+            metadata.extend(set.clone());
+        } else if record["id"].is_string() && record["type"].is_string() {
+            if let Some(existing) = messages.iter_mut().find(|m| m["id"] == record["id"]) {
+                *existing = record;
+            } else {
+                messages.push(record);
+            }
+        } else if let Some(object) = record
+            .as_object()
+            .filter(|object| object.get("sessionId").is_some())
+        {
+            if let Some(initial) = object.get("messages").and_then(Value::as_array) {
+                messages.extend(initial.clone());
+            }
+            metadata.extend(object.clone());
+        }
+    }
+    if !metadata.get("sessionId").is_some_and(Value::is_string) {
+        return Err("Gemini session metadata is missing".into());
+    }
+    metadata.insert("messages".into(), Value::Array(messages));
+    Ok(Value::Object(metadata))
+}
+
+fn apply_patch(messages: &mut Vec<Value>, patch: &Value) {
+    if let Some(id) = patch["id"].as_str() {
+        if let Some(message) = messages.iter_mut().find(|m| m["id"].as_str() == Some(id)) {
+            if let Some(content) = patch.get("content") {
+                message["content"] = content.clone();
+            }
+            if let (Some(updates), Some(calls)) = (
+                patch["toolCalls"].as_array(),
+                message["toolCalls"].as_array_mut(),
+            ) {
+                for update in updates {
+                    if let Some(call) = calls.iter_mut().find(|call| call["id"] == update["id"]) {
+                        if let Some(result) = update.get("result") {
+                            call["result"] = result.clone();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(updates) = patch["updates"].as_array() {
+        for update in updates {
+            apply_patch(messages, update);
+        }
+    }
+    if let Some(ids) = patch["removeIds"].as_array() {
+        messages.retain(|m| !ids.contains(&m["id"]));
+    }
+    if let Some(ids) = patch["orderIds"].as_array() {
+        let mut ordered = Vec::new();
+        for id in ids {
+            if let Some(index) = messages.iter().position(|m| m["id"] == *id) {
+                ordered.push(messages.remove(index));
+            }
+        }
+        messages.extend(ordered);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn jsonl_rewind_patch_order_and_set_keep_only_current_conversation() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("session-s.jsonl");
+        let lines = [
+            r#"{"sessionId":"s","projectHash":"p","startTime":"2026-01-01T00:00:00Z"}"#,
+            r#"{"id":"a","type":"user","content":[{"text":"first prompt"}]}"#,
+            r#"{"id":"discard","type":"gemini","content":"abandoned"}"#,
+            r#"{"$rewindTo":"discard"}"#,
+            r#"{"id":"b","type":"gemini","content":"initial","toolCalls":[{"id":"tool","name":"read_file","args":{"path":"a.rs"},"result":[{"text":"old result"}]}]}"#,
+            r#"{"$patch":{"id":"b","content":"updated","toolCalls":[{"id":"tool","result":[{"text":"full result"}]}]}}"#,
+            r#"{"id":"c","type":"user","content":"to remove"}"#,
+            r#"{"$patch":{"removeIds":["c"],"orderIds":["a"]}}"#,
+            r#"{"$set":{"lastUpdated":"2026-01-02T00:00:00Z"}}"#,
+            "{incomplete",
+        ];
+        let before = lines.join("\n");
+        std::fs::write(&path, &before).unwrap();
+        let record = read_conversation(&path).unwrap();
+        assert_eq!(record["messages"][0]["id"], "b");
+        assert_eq!(record["messages"][1]["id"], "a");
+        let messages = load_messages(&path).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].content.contains("updated"));
+        assert!(messages[0].content.contains("full result"));
+        assert!(messages[0].content.contains("a.rs"));
+        assert!(!messages
+            .iter()
+            .any(|m| m.content.contains("abandoned") || m.content.contains("to remove")));
+        assert_eq!(
+            parse_session(&path).unwrap().last_active_at,
+            Some(1_767_312_000_000)
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        std::fs::write(&path, "{\"sessionId\":\"s\",\"projectHash\":\"p\"}\n{\"$set\":{\"messages\":[{\"id\":\"x\",\"type\":\"user\",\"content\":\"reset\"}]}}\n").unwrap();
+        assert_eq!(load_messages(&path).unwrap()[0].content, "reset");
+    }
 
     #[test]
     fn delete_session_removes_json_file() {

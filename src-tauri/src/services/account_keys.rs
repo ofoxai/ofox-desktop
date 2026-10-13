@@ -78,19 +78,23 @@ fn file_tool(tool: BindableTool) -> Option<Tool> {
         BindableTool::OpenCode => AppType::OpenCode,
         BindableTool::OpenClaw => AppType::OpenClaw,
         BindableTool::Hermes => AppType::Hermes,
-        BindableTool::WorkBuddy => return None,
+        BindableTool::WorkBuddy | BindableTool::Dsh | BindableTool::Pi => return None,
     };
     Some(Tool::from_app(&app))
 }
 
 async fn is_bound(db: &Database, tool: BindableTool) -> bool {
+    if matches!(tool, BindableTool::Pi | BindableTool::Dsh) {
+        return crate::native_tools::is_bound(db, tool).await;
+    }
     match file_tool(tool) {
         Some(tool) => ofox_bind::is_bound(db, tool),
-        None => crate::workbuddy_config::is_bound(db).await,
+        None if tool == BindableTool::WorkBuddy => crate::workbuddy_config::is_bound(db).await,
+        None => false,
     }
 }
 
-const ALL_TOOLS: [BindableTool; 7] = [
+const ALL_TOOLS: [BindableTool; 9] = [
     BindableTool::Claude,
     BindableTool::Codex,
     BindableTool::Gemini,
@@ -98,6 +102,8 @@ const ALL_TOOLS: [BindableTool; 7] = [
     BindableTool::OpenClaw,
     BindableTool::Hermes,
     BindableTool::WorkBuddy,
+    BindableTool::Dsh,
+    BindableTool::Pi,
 ];
 
 /// 退出登录前（登录还有效时）调用。
@@ -218,13 +224,19 @@ pub(crate) async fn rekey_unrecorded<I, Fut>(
 }
 
 async fn binding_status(db: &Database, tool: BindableTool, old_key: &str) -> BindingStatus {
+    if matches!(tool, BindableTool::Pi | BindableTool::Dsh) {
+        return crate::native_tools::binding_status(db, tool).await.status;
+    }
     match file_tool(tool) {
         Some(file_tool) => {
             ofox_bind::status::binding_status(db, file_tool, Some(old_key))
                 .await
                 .status
         }
-        None => crate::workbuddy_config::binding_status(db).await.status,
+        None if tool == BindableTool::WorkBuddy => {
+            crate::workbuddy_config::binding_status(db).await.status
+        }
+        None => BindingStatus::Unknown,
     }
 }
 
@@ -251,16 +263,34 @@ where
         return Err("接入配置已被修改，没有自动更换。请在管理窗口检查或重新绑定。".into());
     }
     let (new_key, meta) = issue().await?;
-    let written = match file_tool(tool) {
-        Some(file_tool) => ofox_bind::replace_key(db, file_tool, &old_key, &new_key).await,
-        None => crate::workbuddy_config::replace_key(db, &new_key).await,
+    let native = matches!(tool, BindableTool::Pi | BindableTool::Dsh);
+    let written = if native {
+        crate::native_tools::replace_key_with_metadata(
+            db,
+            tool,
+            &old_key,
+            &new_key,
+            meta.clone(),
+            store,
+        )
+        .await
+    } else {
+        match file_tool(tool) {
+            Some(file_tool) => ofox_bind::replace_key(db, file_tool, &old_key, &new_key).await,
+            None if tool == BindableTool::WorkBuddy => {
+                crate::workbuddy_config::replace_key(db, &new_key).await
+            }
+            None => Err("不支持的密钥适配器".into()),
+        }
     };
     if let Err(error) = written {
         crate::ofox_api_keys::discard_remote(&meta, manager).await;
         return Err(error);
     }
-    crate::ofox_api_keys::save_key(store, &new_key, meta)
-        .map_err(|e| format!("保存新 key 失败：{e}"))?;
+    if !native {
+        crate::ofox_api_keys::save_key(store, &new_key, meta)
+            .map_err(|e| format!("保存新 key 失败：{e}"))?;
+    }
     crate::ofox_api_keys::mark_key_used(tool);
     if let Some(old) = old {
         crate::ofox_api_keys::queue_deletion_unless_stopped(old);

@@ -2,6 +2,8 @@ import type { ComponentType } from "react";
 
 import {
   ClaudeIcon,
+  DshIcon,
+  PiIcon,
   CodexIcon,
   GeminiIcon,
   HermesIcon,
@@ -39,6 +41,8 @@ type BrandIconComponent = ComponentType<{
  */
 const TOOL_ICON: Record<string, BrandIconComponent> = {
   claude: ClaudeIcon,
+  dsh: DshIcon,
+  pi: PiIcon,
   codex: CodexIcon,
   // ChatGPT App 复用 OpenAI 单色 logo —— 与 Codex 同厂牌，靠背景色（绿底）
   // 和 label（"ChatGPT" vs "Codex"）而不是图标本身区分开。
@@ -56,6 +60,8 @@ const TOOL_ICON: Record<string, BrandIconComponent> = {
  * 略低明度的版本兜底。
  */
 const TOOL_BADGE_BG: Record<string, string> = {
+  dsh: "bg-white dark:bg-neutral-100",
+  pi: "bg-orange-200 dark:bg-orange-950",
   claude: "bg-[#E8DCC8] dark:bg-[#2D2419]",
   codex: "bg-neutral-900 dark:bg-neutral-900",
   // ChatGPT 品牌绿（近 OpenAI 官网 accent），让"Codex vs ChatGPT"两张

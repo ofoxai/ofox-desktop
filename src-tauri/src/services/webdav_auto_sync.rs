@@ -51,6 +51,7 @@ pub fn should_trigger_for_table(table: &str) -> bool {
             | "skills"
             | "skill_repos"
             | "settings"
+            | "model_profiles"
             | "proxy_config"
     )
 }

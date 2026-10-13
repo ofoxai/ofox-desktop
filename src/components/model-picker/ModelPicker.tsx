@@ -96,6 +96,7 @@ export interface MultiModelPickerProps {
   portalContainer?: HTMLElement | null;
   /** Optional catalog summary; defaults to the count and shared-key notice. */
   summary?: string;
+  disabled?: boolean;
 }
 
 export function MultiModelPicker({
@@ -107,6 +108,7 @@ export function MultiModelPicker({
   onFetch,
   portalContainer,
   summary,
+  disabled = false,
 }: MultiModelPickerProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -149,6 +151,7 @@ export function MultiModelPicker({
               variant="outline"
               role="combobox"
               aria-expanded={open}
+              disabled={disabled}
               className="flex-1 justify-between font-normal"
             >
               <span
@@ -265,7 +268,7 @@ export function MultiModelPicker({
             variant="ghost"
             size="sm"
             className="h-7 px-2 text-[11px]"
-            disabled={loading || models.length === 0 || allSelected}
+            disabled={disabled || loading || models.length === 0 || allSelected}
             onClick={() => onChange(models.map((model) => model.id))}
           >
             {t("modelPicker.selectAllCompatible")}
@@ -275,7 +278,7 @@ export function MultiModelPicker({
             variant="ghost"
             size="sm"
             className="h-7 px-2 text-[11px]"
-            disabled={loading || selectedIds.length === 0}
+            disabled={disabled || loading || selectedIds.length === 0}
             onClick={() => onChange([])}
           >
             {t("modelPicker.clearSelection")}
@@ -293,6 +296,9 @@ export interface ModelPickerProps {
   models: FetchedModel[];
   loading: boolean;
   onFetch: (forceRefresh?: boolean) => void;
+  disabled?: boolean;
+  allowDefault?: boolean;
+  emptyLabel?: string;
   /**
    * Portal target for the popover. Defaults to `document.body` when omitted.
    * Pass the dialog's content node when this picker is rendered inside a
@@ -310,6 +316,9 @@ export function ModelPicker({
   loading,
   onFetch,
   portalContainer,
+  disabled = false,
+  allowDefault = false,
+  emptyLabel,
 }: ModelPickerProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -338,10 +347,11 @@ export function ModelPicker({
             variant="outline"
             role="combobox"
             aria-expanded={open}
+            disabled={disabled}
             className="flex-1 justify-between font-normal"
           >
             <span className={cn("truncate", !value && "text-muted-foreground")}>
-              {value || t("modelPicker.defaultRoute")}
+              {value || emptyLabel || t("modelPicker.defaultRoute")}
             </span>
             <ChevronsUpDown className="ml-2 h-3.5 w-3.5 shrink-0 opacity-50" />
           </Button>
@@ -373,6 +383,25 @@ export function ModelPicker({
                 </div>
               ) : (
                 <>
+                  {allowDefault && !search && (
+                    <CommandGroup>
+                      <CommandItem
+                        value="__ofox_default_route__"
+                        onSelect={() => {
+                          onChange("");
+                          setOpen(false);
+                        }}
+                      >
+                        <Check
+                          className={cn(
+                            "mr-2 h-3.5 w-3.5",
+                            !value ? "opacity-100" : "opacity-0",
+                          )}
+                        />
+                        {t("modelPicker.defaultRoute")}
+                      </CommandItem>
+                    </CommandGroup>
+                  )}
                   {filtered.length === 0 && (
                     <CommandEmpty>{t("modelPicker.noModels")}</CommandEmpty>
                   )}

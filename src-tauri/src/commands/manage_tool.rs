@@ -52,6 +52,11 @@ use crate::store::AppState;
 /// "settings/config" file — that's the one users would actually inspect.
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_tool_config_file_path(app: String) -> Result<String, String> {
+    if let Some(tool) = BindableTool::native(&app) {
+        return Ok(crate::native_tools::primary_path(tool)?
+            .to_string_lossy()
+            .into_owned());
+    }
     if app.trim().eq_ignore_ascii_case("workbuddy") {
         return Ok(crate::workbuddy_config::models_path()
             .to_string_lossy()
@@ -75,6 +80,9 @@ pub async fn get_tool_binding_status(
     state: State<'_, AppState>,
     app: String,
 ) -> Result<crate::services::ofox_bind::status::ToolBindingStatus, String> {
+    if let Some(tool) = BindableTool::native(&app) {
+        return Ok(crate::native_tools::binding_status(&state.db, tool).await);
+    }
     if app.trim().eq_ignore_ascii_case("workbuddy") {
         return Ok(crate::workbuddy_config::binding_status(&state.db).await);
     }
@@ -145,6 +153,12 @@ pub async fn get_active_ofox_model(
     state: State<'_, AppState>,
     app: String,
 ) -> Result<String, String> {
+    if let Some(tool) = BindableTool::native(&app) {
+        return Ok(crate::native_tools::snapshot(&state.db, tool)
+            .await?
+            .observed_model
+            .unwrap_or_default());
+    }
     if app.trim().eq_ignore_ascii_case("workbuddy") {
         return crate::workbuddy_config::active_model(&state.db).await;
     }
@@ -238,6 +252,32 @@ pub async fn set_active_ofox_model(
     model_selection: Option<crate::workbuddy_config::WorkBuddyModelSelection>,
     compatibility_protocol: Option<String>,
 ) -> Result<(), String> {
+    if let Some(tool) = BindableTool::native(&app) {
+        require_configured(crate::native_tools::binding_status(&state.db, tool).await)?;
+        let token = catalog_access_token(&ofox_state.0).await;
+        validate_compatibility(
+            tool,
+            &model,
+            compatibility_protocol.as_deref(),
+            token.as_deref(),
+        )
+        .await?;
+        let catalog =
+            crate::services::model_fetch::fetch_ofox_catalog("openai", token.as_deref(), false)
+                .await?;
+        let selected = catalog
+            .models
+            .iter()
+            .find(|m| m.id == model.trim())
+            .ok_or_else(|| "模型不在当前目录中".to_string())?;
+        let key = crate::ofox_secret::default_store()
+            .load(crate::ofox_secret::Slot::ApiKey { tool })
+            .map_err(|_| "读取已绑定的 API Key 失败".to_string())?
+            .ok_or_else(|| "未找到已绑定的 API Key".to_string())?;
+        crate::native_tools::set_model(&state.db, tool, &key, selected).await?;
+        crate::ofox_api_keys::mark_key_used(tool);
+        return Ok(());
+    }
     if app.trim().eq_ignore_ascii_case("workbuddy") {
         require_configured(crate::workbuddy_config::binding_status(&state.db).await)?;
         let selection = model_selection
@@ -390,6 +430,11 @@ pub async fn get_active_ofox_models(
     state: State<'_, AppState>,
     app: String,
 ) -> Result<Vec<String>, String> {
+    if let Some(tool) = BindableTool::native(&app) {
+        return Ok(crate::native_tools::snapshot(&state.db, tool)
+            .await?
+            .model_ids);
+    }
     let app_type = AppType::from_str(&app).map_err(|e| format!("无效的应用类型: {e}"))?;
     if app_type != AppType::OpenCode {
         let model = read_active_model_for(&state, &app_type)?;
@@ -432,14 +477,14 @@ pub struct SaveModelsReport {
     pub skipped: Vec<SkippedModel>,
 }
 
-struct ResolvedModels {
-    resolved: Vec<(String, Option<String>)>,
-    skipped: Vec<SkippedModel>,
+pub(crate) struct ResolvedModels {
+    pub(crate) resolved: Vec<(String, Option<String>)>,
+    pub(crate) skipped: Vec<SkippedModel>,
 }
 
 /// 保存时给每个模型选协议，不发探测请求：先用 7 天内的检测缓存，没有就按目录声明和
 /// 默认规则选。目录里没有可用端点的模型跳过并告知，不拖累其余模型；一个都存不了才报错。
-fn resolve_opencode_models(
+pub(crate) fn resolve_opencode_models(
     ids: &[String],
     catalog: &[crate::services::model_fetch::FetchedModel],
 ) -> Result<ResolvedModels, String> {
@@ -638,18 +683,17 @@ where
 #[tauri::command(rename_all = "camelCase")]
 pub async fn set_workbuddy_managed_models(
     state: State<'_, AppState>,
-    ofox_state: State<'_, OfoxAuthState>,
+    _ofox_state: State<'_, OfoxAuthState>,
     model_selections: Vec<crate::workbuddy_config::WorkBuddyModelSelection>,
 ) -> Result<(), String> {
     require_configured(crate::workbuddy_config::binding_status(&state.db).await)?;
     crate::workbuddy_config::validate_selections(&model_selections)?;
-    let api_key = crate::ofox_api_keys::fetch_or_create_api_key(
-        BindableTool::WorkBuddy,
-        crate::ofox_api_keys::FetchMode::CachedOk,
-        &ofox_state.0,
-    )
-    .await
-    .map_err(|e| format!("获取 WorkBuddy OfoxAI API key 失败: {e}"))?;
+    let api_key = crate::ofox_secret::default_store()
+        .load(crate::ofox_secret::Slot::ApiKey {
+            tool: BindableTool::WorkBuddy,
+        })
+        .map_err(|_| "读取已绑定的 API Key 失败".to_string())?
+        .ok_or_else(|| "未找到已绑定的 API Key，请重新绑定".to_string())?;
     crate::workbuddy_config::update_selected_models(&state.db, &api_key, &model_selections).await?;
     crate::ofox_api_keys::mark_key_used(BindableTool::WorkBuddy);
     Ok(())
@@ -671,12 +715,7 @@ pub async fn check_ofox_model_compatibility(
     force_retest: Option<bool>,
     ofox_state: State<'_, OfoxAuthState>,
 ) -> Result<crate::model_compat::CompatibilityResult, String> {
-    let tool = match app.as_str() {
-        "workbuddy" => BindableTool::WorkBuddy,
-        _ => AppType::from_str(&app)
-            .map(BindableTool::from)
-            .map_err(|e| e.to_string())?,
-    };
+    let tool = BindableTool::from_str(&app)?;
     let catalog_token = catalog_access_token(&ofox_state.0).await;
     Ok(crate::model_compat::check(
         tool,
@@ -1321,6 +1360,17 @@ async fn ofox_ping_model_internal(
             latency_ms: 0,
             status_code: None,
             error: Some("请先选择一个模型再测试连通性".to_string()),
+        };
+    }
+
+    if let Some(tool) = BindableTool::native(app) {
+        let token = catalog_access_token(manager_arc).await;
+        let result = crate::model_compat::check(tool, &model, true, token.as_deref()).await;
+        return PingResult {
+            success: result.status == "compatible",
+            latency_ms: 0,
+            status_code: None,
+            error: result.reason,
         };
     }
 

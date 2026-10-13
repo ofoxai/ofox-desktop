@@ -211,7 +211,7 @@ export default function TrayPopoverApp() {
         <ActionButtons />
       </div>
       {/* 工具状态：标题固定，列表可滚动 */}
-      <ToolStatusList boundTools={boundTools} />
+      <ToolStatusList boundTools={boundTools} disabled={!isActive} />
       {/* 固定区域：底部菜单 */}
       <div className="shrink-0">
         <BottomMenu />

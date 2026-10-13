@@ -43,6 +43,29 @@ describe("bindTools.mirrorBoundToolsToSettings", () => {
     localStorage.clear();
   });
 
+  it("binds Pi and dsh through their native backend without a legacy default-model rewrite", async () => {
+    const bound: string[] = [];
+    let legacyReads = 0;
+    server.use(
+      http.post(`${TAURI_ENDPOINT}/ofox_bind_tool`, async ({ request }) => {
+        const payload = (await request.json()) as { app: string };
+        bound.push(payload.app);
+        return HttpResponse.json(undefined);
+      }),
+      http.post(`${TAURI_ENDPOINT}/get_active_ofox_model`, () => {
+        legacyReads += 1;
+        return HttpResponse.json("native-model");
+      }),
+      http.post(`${TAURI_ENDPOINT}/save_bound_tools`, () =>
+        HttpResponse.json(true),
+      ),
+    );
+    const { bindTools } = await import("@/lib/bindTools");
+    expect(await bindTools(["pi", "dsh"])).toEqual(["pi", "dsh"]);
+    expect(bound).toEqual(["pi", "dsh"]);
+    expect(legacyReads).toBe(0);
+  });
+
   it("bindTools writes localStorage AND mirrors boundTools to settings", async () => {
     let savedPayload: Record<string, unknown> | null = null;
     let fullSettingsReads = 0;

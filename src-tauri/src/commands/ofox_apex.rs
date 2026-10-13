@@ -69,7 +69,11 @@ pub(crate) async fn reconcile_tool_endpoints(db: &crate::database::Database) -> 
     if workbuddy.is_err() {
         log::warn!("[OfoxApex] WorkBuddy endpoint conflict; existing configuration retained");
     }
-    direct.is_ok() && workbuddy.is_ok()
+    let native = crate::native_tools::reconcile_endpoints(db).await;
+    if native.is_err() {
+        log::warn!("[OfoxApex] Pi/dsh endpoint conflict; existing configuration retained");
+    }
+    direct.is_ok() && workbuddy.is_ok() && native.is_ok()
 }
 
 /// 切换 apex 并完成关联副作用（持久化 → 清旧域 token → 同步现存工具地址 →

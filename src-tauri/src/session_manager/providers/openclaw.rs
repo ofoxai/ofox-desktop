@@ -5,11 +5,10 @@ use std::path::Path;
 
 use serde_json::Value;
 
+#[cfg(test)]
+use crate::config::write_json_file;
 use crate::openclaw_config::get_openclaw_dir;
-use crate::{
-    config::write_json_file,
-    session_manager::{SessionMessage, SessionMeta},
-};
+use crate::session_manager::{SessionMessage, SessionMeta};
 
 use super::utils::{
     extract_text, parse_timestamp_to_ms, path_basename, read_head_tail_lines, truncate_summary,
@@ -43,12 +42,14 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
 
     for agent_entry in agent_entries.flatten() {
         let agent_path = agent_entry.path();
-        if !agent_path.is_dir() {
+        if !agent_entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
 
         let sessions_dir = agent_path.join("sessions");
-        if !sessions_dir.is_dir() {
+        if !std::fs::symlink_metadata(&sessions_dir)
+            .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+        {
             continue;
         }
 
@@ -60,6 +61,9 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
         let display_names = load_display_names(&sessions_dir);
 
         for entry in session_entries.flatten() {
+            if !entry.file_type().is_ok_and(|t| t.is_file()) {
+                continue;
+            }
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
                 continue;
@@ -122,6 +126,7 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
     Ok(messages)
 }
 
+#[cfg(test)]
 pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<bool, String> {
     let meta = parse_session(path, None).ok_or_else(|| {
         format!(
@@ -157,6 +162,11 @@ pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<boo
 /// Returns an empty map if the file does not exist or cannot be parsed.
 fn load_display_names(sessions_dir: &Path) -> HashMap<String, String> {
     let index_path = sessions_dir.join("sessions.json");
+    if !std::fs::symlink_metadata(&index_path)
+        .is_ok_and(|m| m.is_file() && !m.file_type().is_symlink())
+    {
+        return HashMap::new();
+    }
     let content = match std::fs::read_to_string(&index_path) {
         Ok(c) => c,
         Err(_) => return HashMap::new(),
@@ -299,6 +309,7 @@ fn parse_session(
     })
 }
 
+#[cfg(test)]
 fn prune_sessions_index(
     index_path: &Path,
     session_id: &str,

@@ -14,8 +14,9 @@ pub(crate) mod endpoint;
 mod env_file;
 pub(crate) mod gemini;
 mod hermes;
-mod json_file;
+pub(crate) mod json_file;
 mod live_model;
+pub(crate) mod model_state;
 mod route;
 pub(crate) use live_model::display_model_or;
 mod openclaw;
@@ -587,6 +588,7 @@ pub(crate) async fn persist_bound_settings(
 ) -> Result<(), String> {
     let _guard = BIND_LOCK.lock().await;
     let _file_locks = file_locks(tool);
+    crate::model_selection::check_write_revision(db, tool.record_key())?;
     let current = db
         .get_provider_by_id(tool.provider_id(), tool.app().as_str())
         .map_err(|_| "读取当前 OFox 模型失败。".to_string())?
@@ -619,6 +621,7 @@ pub(crate) async fn persist_bound_settings(
             },
         );
     }
+    crate::model_selection::record_write_receipt(db, tool.record_key());
     Ok(())
 }
 

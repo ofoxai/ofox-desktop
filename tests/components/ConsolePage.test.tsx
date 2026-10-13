@@ -9,6 +9,7 @@ import {
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
+import { queryClient } from "@/lib/query/queryClient";
 import ConsolePage from "@/components/console/ConsolePage";
 import { checkToolUpdates } from "@/hooks/useToolUpdates";
 import { toolUpdatesApi, type ToolUpdateInfo } from "@/lib/api/toolUpdates";
@@ -54,7 +55,8 @@ vi.mock("@/lib/api/ofoxAuth", () => ({
   ofoxReconcileToolKeys: mocks.reconcileKeys,
   isOfoxBillingManager: () => false,
 }));
-vi.mock("@/lib/api/manageTool", () => ({
+vi.mock("@/lib/api/manageTool", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api/manageTool")>()),
   manageToolApi: {
     getActiveModel: vi.fn().mockResolvedValue(""),
     getWorkBuddyManagedModels: mocks.workBuddyModels,
@@ -99,6 +101,9 @@ vi.mock("@/components/console/OfoxSettingsDialog", () => ({
 vi.mock("@/components/ConfirmDialog", () => ({ ConfirmDialog: () => null }));
 vi.mock("@/components/UserAvatar", () => ({ UserAvatar: () => null }));
 vi.mock("@/components/tools/ToolBadge", () => ({ ToolBadge: () => null }));
+vi.mock("@/components/sessions/SessionsPanel", () => ({
+  SessionsPanel: () => <div>Session panel</div>,
+}));
 
 interface LocalTool {
   name: string;
@@ -140,6 +145,7 @@ async function cacheUpdates(tools: ToolUpdateInfo[]) {
 
 beforeEach(async () => {
   i18n.addResourceBundle("zh", "translation", zh, true, true);
+  queryClient.clear();
   localTools = [];
   mocks.mac = true;
   mocks.onInstallDone = undefined;
@@ -155,21 +161,59 @@ beforeEach(async () => {
   mocks.getUserInfo.mockResolvedValue({ name: "Test User" });
   mocks.reconcileKeys.mockReset();
   mocks.reconcileKeys.mockResolvedValue({ switched: [], failed: [] });
-  mocks.invoke.mockImplementation(async (command: string) => {
-    if (command === "get_tool_versions") return localTools;
-    if (command === "ofox_list_api_keys") return [];
-    if (command === "get_tool_install_capabilities")
-      return ["claude", "codex", "chatgpt"];
-    if (command === "get_tool_binding_status")
-      return {
-        status: "configured",
-        message: null,
-        missingFiles: [],
-        modifiedFields: [],
-        envOverrides: [],
-      };
-    throw new Error(`Unexpected command: ${command}`);
-  });
+  mocks.invoke.mockImplementation(
+    async (command: string, args: { tools?: string[] } = {}) => {
+      if (command === "ofox_get_apex_state")
+        return { apex: "ofox.ai", pinned: true };
+      if (command === "fetch_ofox_models") return [];
+      if (command === "model_selection_snapshot")
+        return {
+          tools: await Promise.all(
+            (args.tools ?? []).map(async (toolId) => ({
+              toolId,
+              writeTarget: toolId === "chatgpt" ? "codex" : toolId,
+              revision: `revision-${toolId}`,
+              binding: {
+                status: "configured",
+                message: null,
+                missingFiles: [],
+                modifiedFields: [],
+                envOverrides: [],
+              },
+              managedSelection:
+                toolId === "workbuddy" || toolId === "opencode"
+                  ? {
+                      kind: "models",
+                      models:
+                        toolId === "workbuddy"
+                          ? await mocks.workBuddyModels()
+                          : [],
+                    }
+                  : { kind: "single", model: "" },
+              observedSelection: {
+                model: toolId === "chatgpt" ? await mocks.chatGptModel() : null,
+                source: "config",
+              },
+              supportsDefault: toolId !== "workbuddy" && toolId !== "opencode",
+              scope: [],
+            })),
+          ),
+        };
+      if (command === "get_tool_versions") return localTools;
+      if (command === "ofox_list_api_keys") return [];
+      if (command === "get_tool_install_capabilities")
+        return ["claude", "codex", "chatgpt"];
+      if (command === "get_tool_binding_status")
+        return {
+          status: "configured",
+          message: null,
+          missingFiles: [],
+          modifiedFields: [],
+          envOverrides: [],
+        };
+      throw new Error(`Unexpected command: ${command}`);
+    },
+  );
   await cacheUpdates([]);
 });
 
@@ -184,6 +228,26 @@ describe("Console title bar", () => {
     render(<ConsolePage boundTools={[]} />);
     await screen.findByText("Test User");
     expect(screen.queryByText("Ofox Desktop")).toBeNull();
+  });
+});
+
+describe("Console navigation", () => {
+  it("keeps tools mounted and retains the missing-tools expansion across Sessions", async () => {
+    localTools = [
+      localTool("claude", "1.0"),
+      { ...localTool("workbuddy", null), installationStatus: "notInstalled" },
+    ];
+    render(<ConsolePage boundTools={["claude", "workbuddy"]} />);
+    const fold = await screen.findByRole("button", { name: /未安装工具（1）/ });
+    fireEvent.click(fold);
+    const row = screen.getByRole("group", { name: "WorkBuddy" });
+    fireEvent.click(screen.getByRole("tab", { name: "会话" }));
+    expect(row).toBeInTheDocument();
+    expect(row).not.toBeVisible();
+    expect(screen.getByText("Session panel")).toBeVisible();
+    fireEvent.click(screen.getByRole("tab", { name: "工具" }));
+    expect(screen.getByRole("group", { name: "WorkBuddy" })).toBe(row);
+    expect(fold).toHaveAttribute("aria-expanded", "true");
   });
 });
 
@@ -229,16 +293,16 @@ describe("Console WorkBuddy model label", () => {
     localTools = [localTool("workbuddy", "5.7.7")];
     render(<ConsolePage boundTools={["workbuddy"]} />);
 
-    expect(await screen.findByText(/已选 3 个模型/)).toBeVisible();
+    expect(await screen.findByText("3 个模型")).toBeVisible();
     expect(screen.queryByText("a/one")).toBeNull();
   });
 
-  it("shows the model itself when only one is selected", async () => {
+  it("keeps a one-model OpenCode or WorkBuddy set as a multiple-selection entry", async () => {
     mocks.workBuddyModels.mockResolvedValue(["a/one"]);
     localTools = [localTool("workbuddy", "5.7.7")];
     render(<ConsolePage boundTools={["workbuddy"]} />);
 
-    expect(await screen.findByText(/a\/one/)).toBeVisible();
+    expect(await screen.findByText("1 个模型")).toBeVisible();
   });
 });
 
@@ -574,7 +638,7 @@ describe("Bound tool lifecycle", () => {
       within(row)
         .getAllByRole("button")
         .map((button) => button.textContent),
-    ).toEqual(["前往下载", "管理"]);
+    ).toEqual(["0 个模型", "前往下载", "管理"]);
     fireEvent.click(within(row).getByRole("button", { name: "管理" }));
     expect(screen.getByRole("dialog")).toHaveTextContent("管理：WorkBuddy");
     expect(mocks.invoke).not.toHaveBeenCalledWith(

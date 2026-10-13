@@ -45,7 +45,13 @@ import OfoxSettingsDialog from "./OfoxSettingsDialog";
 import { UserAvatar } from "@/components/UserAvatar";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useUpdate } from "@/contexts/UpdateContext";
-import { manageToolApi } from "@/lib/api/manageTool";
+import { QuickModelPicker } from "@/components/model-picker/QuickModelPicker";
+import {
+  invalidateModelState,
+  useModelSelection,
+} from "@/hooks/useModelSelection";
+import { ModelProfilesPanel } from "@/components/model-profiles/ModelProfilesPanel";
+import { SessionsPanel } from "@/components/sessions/SessionsPanel";
 import { useToolLaunch } from "@/hooks/useToolLaunch";
 import { checkToolUpdates } from "@/hooks/useToolUpdates";
 import { batchable, useInlineToolUpdates } from "@/hooks/useInlineToolUpdates";
@@ -99,6 +105,14 @@ export default function ConsolePage({
 }: ConsolePageProps) {
   const { apex } = useOfoxApex();
   const { t } = useTranslation();
+  const [activeView, setActiveView] = useState<
+    "tools" | "profiles" | "sessions"
+  >("tools");
+  const [visited, setVisited] = useState({ profiles: false, sessions: false });
+  const modelState = useModelSelection(boundTools);
+  const snapshotByTool = new Map(
+    modelState.data?.tools.map((snapshot) => [snapshot.toolId, snapshot]),
+  );
   // "打开"按钮：CLI 拉到独立终端，桌面客户端由系统直接启动。
   const { launching: launchingTools, launch: launchTool } = useToolLaunch(
     (_toolId, error) => {
@@ -224,7 +238,6 @@ export default function ConsolePage({
   // 空字符串表示"未设置"——工具行二级信息会显示"未设置 model"提示用户
   // 进"管理"挑一个。loadData 时批量拉，bind 后 ofox-prefs-updated 触发
   // 重拉以反映 ensureDefaultModel 写入的默认值。
-  const [modelByTool, setModelByTool] = useState<Record<string, string>>({});
   const loadGeneration = useRef(0);
   const boundToolsRef = useRef(boundTools);
   boundToolsRef.current = boundTools;
@@ -368,48 +381,6 @@ export default function ConsolePage({
       setTools(list);
       setLoading(false);
 
-      // 工具行二级信息——批量读各 tool 的 active model。每个 invoke ≈ DB
-      // 单查询，6 个工具的总开销可忽略。失败的 tool 当 "" 处理（二级行显示
-      // "未设置 model"，引导用户去"管理"挑一个）。Promise.all 不阻塞列表
-      // 渲染：上面 setTools/setLoading 已让基础行先亮起来。
-      void (async () => {
-        const entries = await Promise.all(
-          ordered.map(async (id) => {
-            try {
-              if (id === "workbuddy") {
-                // WorkBuddy 的模型是在它里面按对话选的，这里只知道我们写进去的一组，
-                // 多于一个时不假装有「当前模型」。
-                const models = await manageToolApi.getWorkBuddyManagedModels();
-                return [
-                  id,
-                  models.length > 1
-                    ? t("console.modelCount", { count: models.length })
-                    : (models[0] ?? "").trim(),
-                ] as const;
-              }
-              if (id === "chatgpt") {
-                // App 里换的模型记在它自己的状态文件里，不在 Codex 的配置里。
-                return [
-                  id,
-                  (await manageToolApi.getChatGptModel()).trim(),
-                ] as const;
-              }
-              return [
-                id,
-                (await manageToolApi.getActiveModel(id)).trim(),
-              ] as const;
-            } catch {
-              return [id, ""] as const;
-            }
-          }),
-        );
-        if (
-          generation === loadGeneration.current &&
-          boundToolsRef.current === boundTools
-        )
-          setModelByTool(Object.fromEntries(entries));
-      })();
-
       // ===== Stage 2: remote / non-blocking =====
       void (async () => {
         const userInfo = await ofoxGetUserInfo().catch(() => null);
@@ -424,6 +395,8 @@ export default function ConsolePage({
         });
         if (keyReport) {
           announceKeyReconcile(keyReport, t, userInfo?.email);
+          if (keyReport.switched.length > 0 || keyReport.failed.length > 0)
+            void invalidateModelState();
           // 新 key 的标签和统计链接要重新读。
           if (keyReport.switched.length > 0) void loadDataRef.current();
         }
@@ -635,7 +608,21 @@ export default function ConsolePage({
         key={tool.id}
         tool={tool}
         keyLabel={apiKeyLabelByTool[tool.id]}
-        model={modelByTool[tool.id]}
+        modelControl={
+          <QuickModelPicker
+            toolId={tool.id}
+            snapshot={snapshotByTool.get(tool.id)}
+            loading={modelState.isPending}
+            error={modelState.isError}
+            disabled={
+              busy ||
+              tool.installationStatus !== "installed" ||
+              !!tool.installationError ||
+              (tool.id === "codex" && tool.installationKind === "desktopApp")
+            }
+            onRetry={() => void modelState.refetch()}
+          />
+        }
         hasAnalytics={!!apiKeyIdByTool[tool.id]}
         updateTo={update?.latest_version ?? null}
         updateExternal={
@@ -714,9 +701,61 @@ export default function ConsolePage({
         </div>
       )}
 
+      <div
+        role="tablist"
+        aria-label={t("modelExperience.navigation")}
+        className="flex shrink-0 gap-1 border-b border-border px-5 pb-2"
+      >
+        {(["tools", "profiles", "sessions"] as const).map((view) => (
+          <button
+            key={view}
+            id={`console-tab-${view}`}
+            type="button"
+            role="tab"
+            aria-selected={activeView === view}
+            tabIndex={activeView === view ? 0 : -1}
+            aria-controls={`console-panel-${view}`}
+            onKeyDown={(event) => {
+              const tabs = Array.from(
+                event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
+                  '[role="tab"]',
+                ) ?? [],
+              );
+              const index = tabs.indexOf(event.currentTarget);
+              const next =
+                event.key === "ArrowRight"
+                  ? (index + 1) % tabs.length
+                  : event.key === "ArrowLeft"
+                    ? (index - 1 + tabs.length) % tabs.length
+                    : event.key === "Home"
+                      ? 0
+                      : event.key === "End"
+                        ? tabs.length - 1
+                        : null;
+              if (next !== null) {
+                event.preventDefault();
+                tabs[next]?.focus();
+              }
+            }}
+            onClick={() => {
+              setActiveView(view);
+              if (view !== "tools")
+                setVisited((previous) => ({ ...previous, [view]: true }));
+            }}
+            className={`rounded-lg px-3 py-1.5 text-[12px] font-medium ${activeView === view ? "bg-orange-500 text-white" : "text-muted-foreground hover:bg-accent hover:text-foreground"}`}
+          >
+            {t(`modelExperience.nav.${view}`)}
+          </button>
+        ))}
+      </div>
+
       {/* Content */}
       <div
-        className={`flex-1 overflow-y-auto px-5 pb-4 ${isMac() ? "" : "pt-4"}`}
+        role="tabpanel"
+        id="console-panel-tools"
+        aria-labelledby="console-tab-tools"
+        hidden={activeView !== "tools"}
+        className={`min-h-0 flex-1 overflow-y-auto px-5 pb-4 pt-4 ${activeView !== "tools" ? "hidden" : ""}`}
       >
         {/* Profile + Balance Card */}
         <div
@@ -969,6 +1008,29 @@ export default function ConsolePage({
           )}
         </div>
       </div>
+
+      {visited.profiles && (
+        <div
+          role="tabpanel"
+          id="console-panel-profiles"
+          aria-labelledby="console-tab-profiles"
+          hidden={activeView !== "profiles"}
+          className={`min-h-0 flex-1 overflow-y-auto p-5 ${activeView !== "profiles" ? "hidden" : ""}`}
+        >
+          <ModelProfilesPanel boundTools={boundTools} />
+        </div>
+      )}
+      {visited.sessions && (
+        <div
+          role="tabpanel"
+          id="console-panel-sessions"
+          aria-labelledby="console-tab-sessions"
+          hidden={activeView !== "sessions"}
+          className={`min-h-0 flex-1 ${activeView !== "sessions" ? "hidden" : ""}`}
+        >
+          <SessionsPanel className="h-full min-h-0" />
+        </div>
+      )}
 
       {/* Bottom Bar */}
       <div className="flex shrink-0 items-center justify-between border-t border-border px-5 py-2.5">
