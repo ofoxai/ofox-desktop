@@ -6,6 +6,7 @@
 //! 解绑时只把接入方式（地址、key、登录方式、模型）还原成绑定前的样子，MCP、
 //! skills、插件等其余配置一律不动。WorkBuddy 走 `workbuddy_config`。
 
+pub(crate) mod chatgpt_state;
 pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod endpoint;

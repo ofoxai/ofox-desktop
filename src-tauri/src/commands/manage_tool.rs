@@ -157,6 +157,16 @@ pub async fn get_active_ofox_model(
     })
 }
 
+/// 主页 ChatGPT 桌面 App 那一行显示的模型：优先用户在 App 里最近选的（App 把它记在自己的
+/// 状态文件里，不写 config.toml），没有就用 Codex 配置里的。
+#[tauri::command]
+pub async fn get_chatgpt_active_model(state: State<'_, AppState>) -> Result<String, String> {
+    if let Some(model) = crate::services::ofox_bind::chatgpt_state::recent_model() {
+        return Ok(model);
+    }
+    get_active_ofox_model(state, "codex".to_string()).await
+}
+
 /// Return every WorkBuddy model currently managed by Ofox, in display order.
 #[tauri::command]
 pub async fn get_workbuddy_managed_models(

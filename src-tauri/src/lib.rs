@@ -1640,6 +1640,7 @@ pub fn run() {
             commands::node_requirement::check_tool_node_requirement,
             commands::manage_tool::get_active_ofox_model,
             commands::manage_tool::get_active_ofox_models,
+            commands::manage_tool::get_chatgpt_active_model,
             commands::manage_tool::set_active_ofox_models,
             commands::manage_tool::get_opencode_protocol_hints,
             commands::manage_tool::set_active_ofox_model,

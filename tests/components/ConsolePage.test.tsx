@@ -25,6 +25,7 @@ const mocks = vi.hoisted(() => ({
   reconcileKeys: vi.fn(),
   getUserInfo: vi.fn(),
   workBuddyModels: vi.fn(),
+  chatGptModel: vi.fn(),
   install: vi.fn(),
   openExternal: vi.fn().mockResolvedValue(undefined),
   onInstallDone: undefined as
@@ -57,6 +58,7 @@ vi.mock("@/lib/api/manageTool", () => ({
   manageToolApi: {
     getActiveModel: vi.fn().mockResolvedValue(""),
     getWorkBuddyManagedModels: mocks.workBuddyModels,
+    getChatGptModel: mocks.chatGptModel,
   },
 }));
 vi.mock("@/hooks/useOfoxApex", () => ({
@@ -145,6 +147,8 @@ beforeEach(async () => {
   mocks.toast.success.mockClear();
   mocks.toast.error.mockClear();
   mocks.toast.warning.mockClear();
+  mocks.chatGptModel.mockReset();
+  mocks.chatGptModel.mockResolvedValue("");
   mocks.workBuddyModels.mockReset();
   mocks.workBuddyModels.mockResolvedValue([]);
   mocks.getUserInfo.mockReset();
@@ -235,6 +239,16 @@ describe("Console WorkBuddy model label", () => {
     render(<ConsolePage boundTools={["workbuddy"]} />);
 
     expect(await screen.findByText(/a\/one/)).toBeVisible();
+  });
+});
+
+describe("Console ChatGPT row model", () => {
+  it("shows the model picked inside the ChatGPT app, not the Codex config model", async () => {
+    mocks.chatGptModel.mockResolvedValue("gpt-5.6-sol");
+    localTools = [localTool("chatgpt", "26.1007.30912")];
+    render(<ConsolePage boundTools={["chatgpt"]} />);
+
+    expect(await screen.findByText(/gpt-5\.6-sol/)).toBeVisible();
   });
 });
 

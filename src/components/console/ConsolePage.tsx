@@ -387,6 +387,13 @@ export default function ConsolePage({
                     : (models[0] ?? "").trim(),
                 ] as const;
               }
+              if (id === "chatgpt") {
+                // App 里换的模型记在它自己的状态文件里，不在 Codex 的配置里。
+                return [
+                  id,
+                  (await manageToolApi.getChatGptModel()).trim(),
+                ] as const;
+              }
               return [
                 id,
                 (await manageToolApi.getActiveModel(id)).trim(),

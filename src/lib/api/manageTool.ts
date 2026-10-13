@@ -118,6 +118,11 @@ export const manageToolApi = {
     return await invoke("get_active_ofox_model", { app: managedToolId(app) });
   },
 
+  /** ChatGPT 桌面 App 里最近选的模型；没有就是 Codex 配置里的。 */
+  async getChatGptModel(): Promise<string> {
+    return await invoke("get_chatgpt_active_model");
+  },
+
   /** 已保存的模型列表。OpenCode 是用户选的一组，其余工具最多一个。 */
   async getActiveModels(app: string): Promise<string[]> {
     return await invoke("get_active_ofox_models", { app: managedToolId(app) });
