@@ -630,10 +630,11 @@ fn json_server_to_toml_table(spec: &Value) -> Result<toml_edit::Table, AppError>
     let typ = spec.get("type").and_then(|v| v.as_str()).unwrap_or("stdio");
     // 不写 `type`：Codex 不认它（见 [`entry_transport`]）。
 
-    // 定义核心字段（已在下方处理，跳过通用转换）
+    // 定义核心字段（已在下方处理，跳过通用转换）。`headers` 在下面写成 `http_headers`，
+    // 不在这里列出的话会被当成自定义字段再原样写一遍，Codex 不认它。
     let core_fields = match typ {
         "stdio" => vec!["type", "command", "args", "env", "cwd"],
-        "http" | "sse" => vec!["type", "url", "http_headers"],
+        "http" | "sse" => vec!["type", "url", "headers", "http_headers"],
         _ => vec!["type"],
     };
 
@@ -760,6 +761,18 @@ mod tests {
         assert_eq!(table["command"].as_str(), Some("npx"));
         assert!(table.contains_key("args"));
         assert!(table.contains_key("env"));
+    }
+
+    #[test]
+    fn http_headers_are_written_once_under_the_name_codex_knows() {
+        let table = json_server_to_toml_table(&json!({
+            "type": "http",
+            "url": "https://example.com/mcp",
+            "headers": {"K": "v"},
+        }))
+        .unwrap();
+        assert!(table.contains_key("http_headers"));
+        assert!(!table.contains_key("headers"), "{table}");
     }
 
     #[test]

@@ -3297,6 +3297,107 @@ async fn codex_reasoning_effort_picked_in_the_app_is_kept_and_not_a_conflict() {
     assert_eq!(config["model_reasoning_effort"].as_str(), Some("medium"));
 }
 
+/// Runs the installed Codex's own config validation (`app-server --strict-config` fails on
+/// any field this version does not recognize). `None` when no suitable `codex` is on PATH,
+/// so the check is skipped (not failed) on machines and CI runners without it.
+fn codex_strict_config_check(codex_home: &std::path::Path) -> Option<Result<(), String>> {
+    use std::process::{Command, Stdio};
+    let help = Command::new("codex")
+        .args(["app-server", "--help"])
+        .output()
+        .ok()?;
+    if !String::from_utf8_lossy(&help.stdout).contains("--strict-config") {
+        return None;
+    }
+    let mut child = Command::new("codex")
+        .args(["app-server", "--strict-config"])
+        .env("CODEX_HOME", codex_home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match child.try_wait().ok()? {
+            Some(status) if status.success() => return Some(Ok(())),
+            Some(_) => {
+                let mut message = String::new();
+                if let Some(mut stderr) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = stderr.read_to_string(&mut message);
+                }
+                return Some(Err(message.trim().to_string()));
+            }
+            // Still running means the config loaded; an unknown field fails immediately.
+            None if std::time::Instant::now() > deadline => {
+                let _ = child.kill();
+                return Some(Ok(()));
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(100)),
+        }
+    }
+}
+
+#[test]
+#[serial]
+fn the_strict_config_check_rejects_the_fields_older_ofox_versions_wrote() {
+    let home = Home::new();
+    let dir = home.codex("");
+    fs::create_dir_all(&dir).unwrap();
+    write(
+        &home.codex("config.toml"),
+        "disable_response_storage = true\n[mcp_servers.a]\ntype = \"stdio\"\ncommand = \"npx\"\n",
+    );
+    match codex_strict_config_check(&dir) {
+        None => eprintln!("skipped: no codex with --strict-config on PATH"),
+        Some(result) => assert!(result.is_err(), "the check must catch unknown fields"),
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn a_fresh_codex_install_is_accepted_by_the_real_codex() {
+    let home = Home::new();
+    // What a new user gets: the real seed template, then the MCP servers Ofox syncs.
+    let seed = crate::database::dao::providers_seed::ofox_seeds()
+        .into_iter()
+        .find(|seed| seed.id == "ofox-codex")
+        .expect("codex seed");
+    let template: Value = serde_json::from_str(&seed.settings_config_json).unwrap();
+    let db = db_for(Tool::Codex, template);
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+
+    let mut config = crate::app_config::MultiAppConfig::default();
+    for (id, server) in [
+        (
+            "local",
+            json!({"type": "stdio", "command": "npx", "args": ["-y", "pkg"], "env": {"A": "b"}}),
+        ),
+        (
+            "remote",
+            json!({"type": "http", "url": "https://example.com/mcp", "headers": {"K": "v"}}),
+        ),
+    ] {
+        config.mcp.codex.servers.insert(
+            id.into(),
+            json!({"id": id, "enabled": true, "server": server}),
+        );
+    }
+    crate::mcp::sync_enabled_to_codex(&config).unwrap();
+
+    match codex_strict_config_check(&home.codex("")) {
+        None => eprintln!("skipped: no codex with --strict-config on PATH"),
+        Some(result) => {
+            let text = fs::read_to_string(home.codex("config.toml")).unwrap();
+            assert!(
+                result.is_ok(),
+                "Codex rejected a fresh install: {result:?}\n{text}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn codex_binding_no_longer_writes_the_ignored_response_storage_flag() {
