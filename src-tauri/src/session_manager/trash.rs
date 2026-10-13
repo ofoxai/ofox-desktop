@@ -1252,7 +1252,10 @@ mod tests {
         assert!(reject_active(&bundle.paths, SystemTime::now()).is_err());
         assert!(reject_active(&bundle.paths, idle_now()).is_ok());
         let child = root.join("projects/p/s/subagents/agent.jsonl");
-        fs::File::open(&child)
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&child)
             .unwrap()
             .set_times(
                 fs::FileTimes::new().set_modified(SystemTime::now() + Duration::from_secs(600)),
