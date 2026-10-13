@@ -438,17 +438,17 @@ export default function ManageToolDialog({
   }, [runCompatibility, multiModel]);
 
   useEffect(() => {
-    if (tool?.id !== "workbuddy" || draftModels.includes(workBuddyTestModel))
-      return;
+    if (!multiModel || draftModels.includes(workBuddyTestModel)) return;
     workBuddyTestRequest.current += 1;
     setWorkBuddyTestModel(draftModels[0] ?? "");
     setWorkBuddyTestResult(null);
     setWorkBuddyTestLoading(false);
-  }, [draftModels, tool?.id, workBuddyTestModel]);
+  }, [draftModels, multiModel, workBuddyTestModel]);
 
   const handleWorkBuddyTest = useCallback(async () => {
     if (
-      tool?.id !== "workbuddy" ||
+      !tool ||
+      !multiModel ||
       !workBuddyTestModel ||
       !configurationReady ||
       operationBusy
@@ -459,7 +459,7 @@ export default function ManageToolDialog({
     setWorkBuddyTestResult(null);
     try {
       const result = await manageToolApi.checkCompatibility(
-        "workbuddy",
+        tool.id,
         workBuddyTestModel,
         true,
       );
@@ -468,7 +468,7 @@ export default function ManageToolDialog({
     } catch {
       if (request === workBuddyTestRequest.current) {
         setWorkBuddyTestResult({
-          app: "workbuddy",
+          app: tool.id,
           model: workBuddyTestModel,
           protocol: null,
           status: "inconclusive",
@@ -480,7 +480,14 @@ export default function ManageToolDialog({
       if (request === workBuddyTestRequest.current)
         setWorkBuddyTestLoading(false);
     }
-  }, [tool?.id, workBuddyTestModel, configurationReady, operationBusy, t]);
+  }, [
+    tool,
+    multiModel,
+    workBuddyTestModel,
+    configurationReady,
+    operationBusy,
+    t,
+  ]);
 
   const handleOpenFolder = useCallback(async () => {
     if (!tool) return;
@@ -1003,7 +1010,7 @@ export default function ManageToolDialog({
 
               {/* WorkBuddy checks one chosen stream on demand. Other tools
                   keep their separate, optional 1-token connectivity ping. */}
-              {tool.id === "workbuddy" ? (
+              {multiModel ? (
                 <div className="space-y-2">
                   <Label htmlFor="workbuddy-test-model" className="text-[13px]">
                     {t("modelCompatibility.title")}
@@ -1021,7 +1028,11 @@ export default function ManageToolDialog({
                     >
                       <SelectTrigger
                         id="workbuddy-test-model"
-                        aria-label={t("modelCompatibility.workBuddyTestModel")}
+                        aria-label={t(
+                          tool.id === "opencode"
+                            ? "modelCompatibility.openCodeTestModel"
+                            : "modelCompatibility.workBuddyTestModel",
+                        )}
                         className="min-w-0 flex-1 text-[12px]"
                       >
                         <SelectValue placeholder="—" />
@@ -1057,7 +1068,11 @@ export default function ManageToolDialog({
                     </Button>
                   </div>
                   <p className="text-[11px] text-muted-foreground">
-                    {t("modelCompatibility.workBuddySaveHint")}
+                    {t(
+                      tool.id === "opencode"
+                        ? "modelCompatibility.openCodeSaveHint"
+                        : "modelCompatibility.workBuddySaveHint",
+                    )}
                   </p>
                   {workBuddyTestResult && (
                     <div
@@ -1072,8 +1087,20 @@ export default function ManageToolDialog({
                     >
                       {workBuddyTestResult.model}:{" "}
                       {workBuddyTestResult.status === "incompatible"
-                        ? t("modelCompatibility.workBuddyIncompatible")
+                        ? t(
+                            tool.id === "opencode"
+                              ? "modelCompatibility.openCodeIncompatible"
+                              : "modelCompatibility.workBuddyIncompatible",
+                          )
                         : t(`modelCompatibility.${workBuddyTestResult.status}`)}
+                      {tool.id === "opencode" &&
+                        workBuddyTestResult.status === "compatible" &&
+                        workBuddyTestResult.protocol &&
+                        ` · ${
+                          workBuddyTestResult.protocol === "responses"
+                            ? "Responses"
+                            : "Chat Completions"
+                        }`}
                       {workBuddyTestResult.reason &&
                         ` · ${workBuddyTestResult.reason}`}
                     </div>

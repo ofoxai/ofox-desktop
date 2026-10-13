@@ -1115,4 +1115,57 @@ describe("ManageToolDialog OpenCode multi-model management", () => {
       ),
     );
   });
+
+  it("checks one chosen model's stream on demand and shows the protocol it found", async () => {
+    mockOpenCode(
+      [compatibleModel("openai/model-a"), compatibleModel("anthropic/model-b")],
+      ["openai/model-a", "anthropic/model-b"],
+    );
+    const check = vi
+      .spyOn(manageToolApi, "checkCompatibility")
+      .mockResolvedValue({
+        app: "opencode",
+        model: "anthropic/model-b",
+        protocol: "chatCompletions",
+        status: "compatible",
+        source: "probe",
+        reason: null,
+      });
+
+    await renderTool("opencode", "OpenCode");
+    await screen.findByText("已选择 2 个兼容模型");
+    expect(check).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByRole("combobox", { name: "选择待检测的 OpenCode 模型" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("option", { name: "anthropic/model-b" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "检测选中模型" }));
+
+    await waitFor(() =>
+      expect(check).toHaveBeenCalledWith("opencode", "anthropic/model-b", true),
+    );
+    expect(await screen.findByText(/Chat Completions/)).toBeVisible();
+  });
+
+  it("says a model that fails the stream check will be refused on save", async () => {
+    mockOpenCode([compatibleModel("openai/model-a")], ["openai/model-a"]);
+    vi.spyOn(manageToolApi, "checkCompatibility").mockResolvedValue({
+      app: "opencode",
+      model: "openai/model-a",
+      protocol: null,
+      status: "incompatible",
+      source: "probe",
+      reason: "流式输出不完整",
+    });
+
+    await renderTool("opencode", "OpenCode");
+    await screen.findByText("已选择 1 个兼容模型");
+    fireEvent.click(screen.getByRole("button", { name: "检测选中模型" }));
+
+    expect(await screen.findByText(/保存时会被拒绝/)).toBeVisible();
+    expect(screen.queryByText(/仍可保存/)).not.toBeInTheDocument();
+  });
 });

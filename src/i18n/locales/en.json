@@ -126,6 +126,9 @@
     "workBuddyTest": "Test selected model",
     "workBuddySaveHint": "Catalog-compatible models can be saved now; streaming checks are optional.",
     "workBuddyIncompatible": "Streaming check failed (saving is still available)",
+    "openCodeTestModel": "Choose the OpenCode model to check",
+    "openCodeSaveHint": "Check which protocol a selected model supports. Saving checks again, and a model you already checked is cached so saving is faster.",
+    "openCodeIncompatible": "Streaming check failed; saving will refuse this model",
     "workBuddyCatalogFailed": "Couldn't load the model list. It must load before you can save.",
     "workBuddyMissingCatalog": "Some selected models are no longer available. Remove them before saving.",
     "defaultModelFailed": "{{tool}} was bound, but its default model could not be stream-verified. Choose a model in Manage."

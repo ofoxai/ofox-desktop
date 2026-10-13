@@ -126,6 +126,9 @@
     "workBuddyTest": "選択したモデルを検査",
     "workBuddySaveHint": "カタログで互換性が確認できれば保存できます。ストリーミング検査は任意です。",
     "workBuddyIncompatible": "ストリーミング非互換（保存は可能）",
+    "openCodeTestModel": "検査する OpenCode のモデルを選択",
+    "openCodeSaveHint": "選択したモデルが使えるプロトコルを先に確認できます。保存時にも再検査しますが、検査済みならキャッシュで速くなります。",
+    "openCodeIncompatible": "ストリーミング非互換のため、保存時に拒否されます",
     "workBuddyCatalogFailed": "モデル一覧を読み込めませんでした。読み込むまで保存できません。",
     "workBuddyMissingCatalog": "選択したモデルの一部が利用できなくなりました。削除してから保存してください。",
     "defaultModelFailed": "{{tool}} の連携は完了しましたが、既定モデルのストリーミングを確認できませんでした。管理画面でモデルを選択してください"
