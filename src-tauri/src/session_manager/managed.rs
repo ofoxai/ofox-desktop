@@ -415,4 +415,27 @@ mod tests {
         ));
         assert!(windows.contains("'C:\\sessions\\a''$(bad).jsonl'"));
     }
+
+    #[test]
+    fn resume_requires_the_known_existing_absolute_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut meta = SessionMeta {
+            provider_id: "pi".into(),
+            session_id: "s".into(),
+            title: None,
+            summary: None,
+            project_dir: None,
+            created_at: None,
+            last_active_at: None,
+            source_path: None,
+            resume_command: None,
+        };
+        assert!(resume_project(&meta).is_err());
+        meta.project_dir = Some(".".into());
+        assert!(resume_project(&meta).is_err());
+        meta.project_dir = Some(temp.path().join("missing").to_string_lossy().into());
+        assert!(resume_project(&meta).is_err());
+        meta.project_dir = Some(temp.path().to_string_lossy().into());
+        assert!(resume_project(&meta).is_ok());
+    }
 }
