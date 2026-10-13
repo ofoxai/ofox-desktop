@@ -52,6 +52,7 @@ import {
   TOOL_PROTOCOL,
   type PingResult,
   type CompatibilityResult,
+  type ProtocolHint,
   type WorkBuddyEndpointStatus,
 } from "@/lib/api/manageTool";
 import {
@@ -183,6 +184,7 @@ export default function ManageToolDialog({
   const [currentModel, setCurrentModel] = useState<string>("");
   const [draftModel, setDraftModel] = useState<string>("");
   const [currentModels, setCurrentModels] = useState<string[]>([]);
+  const [protocolHints, setProtocolHints] = useState<ProtocolHint[]>([]);
   const [draftModels, setDraftModels] = useState<string[]>([]);
   // Re-saving an unchanged model is allowed only after the current value was
   // actually read — otherwise an empty draft would wipe the configured model.
@@ -319,6 +321,11 @@ export default function ManageToolDialog({
             setDraftModels(saved);
             setCurrentModelLoaded(true);
           }
+          // 后台检测的结果只是提示，读不出来不影响管理。
+          const hints = await manageToolApi
+            .getOpenCodeProtocolHints()
+            .catch(() => []);
+          if (!cancelled) setProtocolHints(hints);
           return;
         }
         const m = await manageToolApi.getActiveModel(tool.id);
@@ -599,6 +606,28 @@ export default function ManageToolDialog({
     onChanged,
     onOpenChange,
   ]);
+
+  const handleApplyProtocolHints = useCallback(async () => {
+    if (tool?.id !== "opencode" || operationBusy) return;
+    setSaving(true);
+    try {
+      const report = await manageToolApi.setActiveModels(
+        tool.id,
+        currentModels,
+      );
+      setCurrentModels(report.saved);
+      setDraftModels(report.saved);
+      setProtocolHints(
+        await manageToolApi.getOpenCodeProtocolHints().catch(() => []),
+      );
+      toast.success(t("modelCompatibility.openCodeHintApplied"));
+      onChanged?.();
+    } catch (e) {
+      toast.error(`保存失败：${String(e)}`);
+    } finally {
+      setSaving(false);
+    }
+  }, [tool?.id, operationBusy, currentModels, onChanged, t]);
 
   const probeModel =
     tool?.id === "opencode" ? (draftModels[0] ?? "") : draftModel;
@@ -890,6 +919,37 @@ export default function ManageToolDialog({
                         ? t("modelCompatibility.workBuddyProtocol")
                         : t("modelCompatibility.openCodeProtocol")}
                     </p>
+                    {tool.id === "opencode" &&
+                      protocolHints.length > 0 &&
+                      !isDirty && (
+                        <div className="flex items-center justify-between gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-[11px]">
+                          <span>
+                            {t("modelCompatibility.openCodeHint", {
+                              count: protocolHints.length,
+                              names: protocolHints
+                                .map(
+                                  (hint) =>
+                                    `${hint.id} → ${
+                                      hint.suggested === "responses"
+                                        ? "Responses"
+                                        : "Chat"
+                                    }`,
+                                )
+                                .join("、"),
+                            })}
+                          </span>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-7 shrink-0 px-2 text-[11px]"
+                            disabled={operationBusy}
+                            onClick={() => void handleApplyProtocolHints()}
+                          >
+                            {t("modelCompatibility.openCodeHintApply")}
+                          </Button>
+                        </div>
+                      )}
                     {workBuddyEndpointStatus && (
                       <div className="space-y-1 rounded-md border border-border-default bg-muted/20 p-3 text-[11px]">
                         <p className="font-medium">

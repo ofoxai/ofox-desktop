@@ -131,6 +131,9 @@
     "openCodeIncompatible": "ストリーミング検査に失敗しました。保存はできますが、このモデルは使えない可能性があります",
     "openCodeProtocol": "選択したモデルはすべて OpenCode に書き込まれ、/model で切り替えられます。保存時はカタログからプロトコルを選び、1 つずつ検査はしません。",
     "openCodeSkipped": "使えるプロトコルのエンドポイントがない {{count}} 個のモデルをスキップしました：{{names}}",
+    "openCodeHint": "バックグラウンド検査で {{count}} 個のモデルのプロトコル変更を推奨します：{{names}}",
+    "openCodeHintApply": "適用",
+    "openCodeHintApplied": "検査結果に合わせてプロトコルを更新しました",
     "workBuddyCatalogFailed": "モデル一覧を読み込めませんでした。読み込むまで保存できません。",
     "workBuddyMissingCatalog": "選択したモデルの一部が利用できなくなりました。削除してから保存してください。",
     "defaultModelFailed": "{{tool}} の連携は完了しましたが、既定モデルのストリーミングを確認できませんでした。管理画面でモデルを選択してください"

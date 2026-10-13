@@ -131,6 +131,9 @@
     "openCodeIncompatible": "Streaming check failed. You can still save, but this model may not work",
     "openCodeProtocol": "Every selected model is written to OpenCode; switch between them with /model. Saving picks each protocol from the model catalog and does not check them one by one.",
     "openCodeSkipped": "{{count}} model(s) have no usable protocol endpoint and were skipped: {{names}}",
+    "openCodeHint": "Background checks suggest changing the protocol of {{count}} model(s): {{names}}",
+    "openCodeHintApply": "Apply",
+    "openCodeHintApplied": "Protocols updated from the check results",
     "workBuddyCatalogFailed": "Couldn't load the model list. It must load before you can save.",
     "workBuddyMissingCatalog": "Some selected models are no longer available. Remove them before saving.",
     "defaultModelFailed": "{{tool}} was bound, but its default model could not be stream-verified. Choose a model in Manage."

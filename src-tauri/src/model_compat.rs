@@ -218,6 +218,41 @@ fn default_opencode_protocol(model_id: &str, advertised: &[&'static str]) -> &'s
     }
 }
 
+/// 7 天内检测出、且目录仍声明支持的协议；没有就是 `None`。
+pub fn cached_opencode_protocol(model: &FetchedModel) -> Option<&'static str> {
+    let advertised = protocols_for(BindableTool::OpenCode, model).ok()?;
+    let key = cache_key(BindableTool::OpenCode, model);
+    let cached = cached_protocol(&load_cache(), &key, Utc::now())?;
+    advertised.into_iter().find(|p| *p == cached)
+}
+
+/// 保存后要在后台验证的模型：两个协议都声明、默认走 Responses、还没有检测结果。
+/// 默认走 Chat 的不验证——实测 Chat 全部可用，没必要为它们发请求。
+pub fn needs_background_check(model: &FetchedModel) -> bool {
+    let Ok(advertised) = protocols_for(BindableTool::OpenCode, model) else {
+        return false;
+    };
+    advertised.len() > 1
+        && default_opencode_protocol(&model.id, &advertised) == RESPONSES
+        && cached_opencode_protocol(model).is_none()
+}
+
+/// 后台逐个检测（并发 2），结果由 [`check`] 写进缓存，不改任何配置；用户下次打开管理
+/// 窗口时会看到「建议改协议」的提示。
+pub async fn verify_in_background(models: Vec<FetchedModel>, catalog_access_token: Option<String>) {
+    let ids: Vec<String> = models
+        .iter()
+        .filter(|model| needs_background_check(model))
+        .map(|model| model.id.clone())
+        .collect();
+    let token = catalog_access_token.as_deref();
+    futures::stream::iter(ids)
+        .for_each_concurrent(2, |id| async move {
+            let _ = check(BindableTool::OpenCode, &id, false, token).await;
+        })
+        .await;
+}
+
 pub async fn check(
     tool: BindableTool,
     model_id: &str,
@@ -755,6 +790,34 @@ mod tests {
             output_modalities: None,
         };
         assert!(opencode_protocol_for_save(&model).is_err());
+    }
+
+    #[test]
+    fn background_check_covers_only_dual_endpoint_models_that_default_to_responses() {
+        let model = |id: &str, endpoints: &[&str]| FetchedModel {
+            id: id.into(),
+            name: None,
+            owned_by: None,
+            pricing_prompt: None,
+            supported_endpoints: Some(endpoints.iter().map(|e| e.to_string()).collect()),
+            supported_parameters: None,
+            input_modalities: None,
+            output_modalities: None,
+        };
+        let both = ["/v1/chat/completions", "/v1/responses"];
+        assert!(needs_background_check(&model("openai/zz-test-a", &both)));
+        assert!(!needs_background_check(&model(
+            "moonshotai/zz-test-b",
+            &both
+        )));
+        assert!(!needs_background_check(&model(
+            "openai/zz-test-c",
+            &["/v1/responses"]
+        )));
+        assert!(!needs_background_check(&model(
+            "x/zz-test-d",
+            &["/v1/embeddings"]
+        )));
     }
 
     #[test]

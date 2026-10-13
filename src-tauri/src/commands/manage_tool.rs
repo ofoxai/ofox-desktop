@@ -432,6 +432,78 @@ fn resolve_opencode_models(
     Ok(ResolvedModels { resolved, skipped })
 }
 
+/// 保存的协议和后台检测结果不一致的模型，供弹窗提示「建议改协议」。
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProtocolHint {
+    pub id: String,
+    pub current: String,
+    pub suggested: String,
+}
+
+/// 条目里这个模型现在走的协议；没单独指定的用条目默认的 Responses。
+fn configured_opencode_protocol(settings: &serde_json::Value, model_id: &str) -> &'static str {
+    match settings
+        .pointer(&format!(
+            "/models/{}/provider/npm",
+            model_id.replace('~', "~0").replace('/', "~1")
+        ))
+        .and_then(|npm| npm.as_str())
+    {
+        Some(crate::opencode_config::OFOX_CHAT_NPM) => "chatCompletions",
+        _ => "responses",
+    }
+}
+
+fn protocol_hints(
+    settings: &serde_json::Value,
+    catalog: &[crate::services::model_fetch::FetchedModel],
+) -> Vec<ProtocolHint> {
+    let Some(models) = settings.get("models").and_then(|m| m.as_object()) else {
+        return Vec::new();
+    };
+    models
+        .keys()
+        .filter_map(|id| {
+            let model = catalog.iter().find(|m| &m.id == id)?;
+            let suggested = crate::model_compat::cached_opencode_protocol(model)?;
+            let current = configured_opencode_protocol(settings, id);
+            (suggested != current).then(|| ProtocolHint {
+                id: id.clone(),
+                current: current.to_string(),
+                suggested: suggested.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// 后台检测发现和已保存协议不一致的模型。再保存一次就会按检测结果改过来。
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_opencode_protocol_hints(
+    state: State<'_, AppState>,
+    ofox_state: State<'_, OfoxAuthState>,
+) -> Result<Vec<ProtocolHint>, String> {
+    let provider_id = state
+        .db
+        .get_current_provider("opencode")
+        .map_err(|e| format!("读取当前供应商失败: {e}"))?
+        .ok_or_else(|| "opencode 暂无活跃供应商".to_string())?;
+    let Some(provider) = state
+        .db
+        .get_provider_by_id(&provider_id, "opencode")
+        .map_err(|e| format!("读取 {provider_id} 失败: {e}"))?
+    else {
+        return Ok(Vec::new());
+    };
+    let token = catalog_access_token(&ofox_state.0).await;
+    let Ok(catalog) =
+        crate::services::model_fetch::fetch_ofox_catalog("openai", token.as_deref(), false).await
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(protocol_hints(&provider.settings_config, &catalog.models))
+}
+
 /// OpenCode 保存用户选的一组模型。协议见 [`resolve_opencode_models`]；真正的流式检测
 /// 留给用户手动点「检测选中模型」，保存不等也不花钱。
 #[tauri::command(rename_all = "camelCase")]
@@ -484,6 +556,11 @@ pub async fn set_active_ofox_models(
         &provider.settings_config,
     )
     .await?;
+    // 保存已完成；默认走 Responses 的模型在后台验证，不阻塞也不改配置。
+    tauri::async_runtime::spawn(crate::model_compat::verify_in_background(
+        catalog.models,
+        catalog_token,
+    ));
     Ok(SaveModelsReport {
         saved: resolved.into_iter().map(|(id, _)| id).collect(),
         skipped,
@@ -832,6 +909,22 @@ mod tests {
             input_modalities: None,
             output_modalities: None,
         }
+    }
+
+    #[test]
+    fn a_model_without_its_own_transport_runs_on_the_entry_default_responses() {
+        let settings = serde_json::json!({"models": {
+            "openai/a": {"name": "openai/a"},
+            "z-ai/b": {"name": "z-ai/b", "provider": {"npm": crate::opencode_config::OFOX_CHAT_NPM}},
+        }});
+        assert_eq!(
+            configured_opencode_protocol(&settings, "openai/a"),
+            "responses"
+        );
+        assert_eq!(
+            configured_opencode_protocol(&settings, "z-ai/b"),
+            "chatCompletions"
+        );
     }
 
     #[test]

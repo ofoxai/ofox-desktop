@@ -1641,6 +1641,7 @@ pub fn run() {
             commands::manage_tool::get_active_ofox_model,
             commands::manage_tool::get_active_ofox_models,
             commands::manage_tool::set_active_ofox_models,
+            commands::manage_tool::get_opencode_protocol_hints,
             commands::manage_tool::set_active_ofox_model,
             commands::manage_tool::get_workbuddy_managed_models,
             commands::manage_tool::set_workbuddy_managed_models,

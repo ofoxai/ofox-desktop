@@ -1057,6 +1057,46 @@ describe("ManageToolDialog OpenCode multi-model management", () => {
     expect(single).not.toHaveBeenCalled();
   });
 
+  it("offers to apply a protocol the background check preferred, by saving the saved set again", async () => {
+    mockOpenCode([compatibleModel("openai/model-a")], ["openai/model-a"]);
+    const hints = vi
+      .spyOn(manageToolApi, "getOpenCodeProtocolHints")
+      .mockResolvedValueOnce([
+        {
+          id: "openai/model-a",
+          current: "responses",
+          suggested: "chatCompletions",
+        },
+      ])
+      .mockResolvedValue([]);
+    const save = vi.spyOn(manageToolApi, "setActiveModels").mockResolvedValue({
+      saved: ["openai/model-a"],
+      skipped: [],
+    });
+
+    await renderTool("opencode", "OpenCode");
+    expect(await screen.findByText(/openai\/model-a → Chat/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "应用建议" }));
+
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith("opencode", ["openai/model-a"]),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText(/openai\/model-a → Chat/)).toBeNull(),
+    );
+    expect(hints).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows no protocol suggestion when the background check agrees", async () => {
+    mockOpenCode([compatibleModel("openai/model-a")], ["openai/model-a"]);
+    vi.spyOn(manageToolApi, "getOpenCodeProtocolHints").mockResolvedValue([]);
+
+    await renderTool("opencode", "OpenCode");
+    await screen.findByText("已选择 1 个兼容模型");
+
+    expect(screen.queryByRole("button", { name: "应用建议" })).toBeNull();
+  });
+
   it("offers select-all for OpenCode and saves every listed model", async () => {
     const models = [
       compatibleModel("openai/model-a"),

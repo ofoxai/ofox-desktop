@@ -96,6 +96,12 @@ export interface CompatibilityResult {
  *   - All writes target the *active* provider for the app — the dialog
  *     never switches providers; that's `switch_provider`'s job.
  */
+export interface ProtocolHint {
+  id: string;
+  current: string;
+  suggested: string;
+}
+
 export interface SaveModelsReport {
   saved: string[];
   skipped: { id: string; reason: string }[];
@@ -126,6 +132,11 @@ export const manageToolApi = {
       app: managedToolId(app),
       models,
     });
+  },
+
+  /** 后台检测发现和已保存协议不一致的 OpenCode 模型；再保存一次即按检测结果改。 */
+  async getOpenCodeProtocolHints(): Promise<ProtocolHint[]> {
+    return await invoke("get_opencode_protocol_hints");
   },
 
   async setActiveModel(
