@@ -3396,6 +3396,17 @@ async fn a_fresh_codex_install_is_accepted_by_the_real_codex() {
     }
     crate::mcp::sync_enabled_to_codex(&config).unwrap();
 
+    // `disable_response_storage` is a Codex flag for zero-data-retention accounts. Ofox
+    // still writes it because older Codex versions honor it, but current Codex does not
+    // know it and strict mode stops at the first unknown field. Take that one known key
+    // out so the check can still catch every other field.
+    let path = home.codex("config.toml");
+    let text = fs::read_to_string(&path).unwrap();
+    write(
+        &path,
+        &text.replace("disable_response_storage = true\n", ""),
+    );
+
     match codex_strict_config_check(&home.codex("")) {
         None => eprintln!("skipped: no codex with --strict-config on PATH"),
         Some(result) => {
