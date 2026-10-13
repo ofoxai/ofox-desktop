@@ -385,17 +385,57 @@ pub async fn get_active_ofox_models(
         .unwrap_or_default())
 }
 
-/// OpenCode 保存用户选的一组模型：每个模型各自检测协议（有缓存就不用重测），
-/// 任何一个确定不兼容就整体不保存，并指出是哪个。
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippedModel {
+    pub id: String,
+    pub reason: String,
+}
+
+/// 保存结果：写进配置的模型，和因为目录里没有可用端点而没写的模型。
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveModelsReport {
+    pub saved: Vec<String>,
+    pub skipped: Vec<SkippedModel>,
+}
+
+/// 保存时给每个模型选协议，不发探测请求：先用 7 天内的检测缓存，没有就按目录声明和
+/// 默认规则选。目录里没有可用端点的模型跳过并告知，不拖累其余模型；一个都存不了才报错。
+fn resolve_opencode_models(
+    ids: &[String],
+    catalog: &[crate::services::model_fetch::FetchedModel],
+) -> Result<(Vec<(String, Option<String>)>, Vec<SkippedModel>), String> {
+    let mut resolved = Vec::with_capacity(ids.len());
+    let mut skipped = Vec::new();
+    for id in ids {
+        let outcome = match catalog.iter().find(|model| &model.id == id) {
+            Some(model) => crate::model_compat::opencode_protocol_for_save(model),
+            None => Err("模型不在当前 Ofox 目录中"),
+        };
+        match outcome {
+            Ok(protocol) => resolved.push((id.clone(), Some(protocol.to_string()))),
+            Err(reason) => skipped.push(SkippedModel {
+                id: id.clone(),
+                reason: reason.to_string(),
+            }),
+        }
+    }
+    if resolved.is_empty() {
+        return Err("所选模型在 Ofox 目录里都没有 OpenCode 可用的协议端点".into());
+    }
+    Ok((resolved, skipped))
+}
+
+/// OpenCode 保存用户选的一组模型。协议见 [`resolve_opencode_models`]；真正的流式检测
+/// 留给用户手动点「检测选中模型」，保存不等也不花钱。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn set_active_ofox_models(
     state: State<'_, AppState>,
     ofox_state: State<'_, OfoxAuthState>,
     app: String,
     models: Vec<String>,
-) -> Result<(), String> {
-    use futures::StreamExt;
-
+) -> Result<SaveModelsReport, String> {
     let app_type = AppType::from_str(&app).map_err(|e| format!("无效的应用类型: {e}"))?;
     if app_type != AppType::OpenCode {
         return Err("只有 OpenCode 支持选择多个模型".into());
@@ -417,22 +457,11 @@ pub async fn set_active_ofox_models(
         .ok_or_else(|| format!("供应商 {provider_id} 不存在"))?;
 
     let catalog_token = catalog_access_token(&ofox_state.0).await;
-    let checked: Vec<Result<Option<String>, String>> =
-        futures::stream::iter(ids.iter().cloned().map(|id| {
-            let token = catalog_token.clone();
-            async move {
-                validate_compatibility(BindableTool::OpenCode, &id, None, token.as_deref())
-                    .await
-                    .map_err(|e| format!("{id}：{e}"))
-            }
-        }))
-        .buffered(4)
-        .collect()
-        .await;
-    let mut resolved = Vec::with_capacity(ids.len());
-    for (id, result) in ids.iter().zip(checked) {
-        resolved.push((id.clone(), result?));
-    }
+    let catalog =
+        crate::services::model_fetch::fetch_ofox_catalog("openai", catalog_token.as_deref(), false)
+            .await
+            .map_err(|e| format!("读取模型目录失败，请稍后重试：{e}"))?;
+    let (resolved, skipped) = resolve_opencode_models(&ids, &catalog.models)?;
 
     let previous_settings = provider.settings_config.clone();
     write_opencode_models(&mut provider.settings_config, &resolved)?;
@@ -449,7 +478,11 @@ pub async fn set_active_ofox_models(
         &previous_settings,
         &provider.settings_config,
     )
-    .await
+    .await?;
+    Ok(SaveModelsReport {
+        saved: resolved.into_iter().map(|(id, _)| id).collect(),
+        skipped,
+    })
 }
 
 fn require_configured(
@@ -782,6 +815,59 @@ fn set_codex_model(settings: &mut serde_json::Value, model: &str) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn catalog_model(id: &str, endpoints: &[&str]) -> crate::services::model_fetch::FetchedModel {
+        crate::services::model_fetch::FetchedModel {
+            id: id.into(),
+            name: None,
+            owned_by: None,
+            pricing_prompt: None,
+            supported_endpoints: Some(endpoints.iter().map(|e| e.to_string()).collect()),
+            supported_parameters: None,
+            input_modalities: None,
+            output_modalities: None,
+        }
+    }
+
+    #[test]
+    fn opencode_save_skips_unusable_models_instead_of_failing_the_batch() {
+        let both = ["/v1/chat/completions", "/v1/responses"];
+        let catalog = vec![
+            catalog_model("openai/gpt-5.4", &both),
+            catalog_model("moonshotai/kimi-k2.6", &both),
+            catalog_model("x/embed", &["/v1/embeddings"]),
+        ];
+        let ids: Vec<String> = [
+            "openai/gpt-5.4",
+            "x/embed",
+            "moonshotai/kimi-k2.6",
+            "gone/model",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let (resolved, skipped) = resolve_opencode_models(&ids, &catalog).unwrap();
+        assert_eq!(
+            resolved,
+            vec![
+                ("openai/gpt-5.4".to_string(), Some("responses".to_string())),
+                (
+                    "moonshotai/kimi-k2.6".to_string(),
+                    Some("chatCompletions".to_string())
+                ),
+            ]
+        );
+        assert_eq!(
+            skipped.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["x/embed", "gone/model"]
+        );
+    }
+
+    #[test]
+    fn opencode_save_with_nothing_usable_is_an_error() {
+        let ids = vec!["gone/model".to_string()];
+        assert!(resolve_opencode_models(&ids, &[]).is_err());
+    }
 
     #[test]
     fn opencode_models_keep_the_order_and_each_gets_its_own_transport() {

@@ -193,6 +193,31 @@ fn matches_catalog_id(tool: BindableTool, catalog_id: &str, model_id: &str) -> b
         || (tool == BindableTool::Gemini && catalog_id.strip_prefix("google/") == Some(model_id))
 }
 
+/// OpenCode 保存时不发请求：先用 7 天内检测出的协议，没有就按目录声明和默认规则选。
+/// 默认规则来自实测：两个协议都声明的模型里，Responses 对推理型模型常有「推理分片
+/// ID 不一致」的问题，Chat 则都能用；只有 `openai/` 原生的模型默认走 Responses。
+pub fn opencode_protocol_for_save(model: &FetchedModel) -> Result<&'static str, &'static str> {
+    let advertised = protocols_for(BindableTool::OpenCode, model)?;
+    let key = cache_key(BindableTool::OpenCode, model);
+    if let Some(cached) = cached_protocol(&load_cache(), &key, Utc::now()) {
+        if let Some(protocol) = advertised.iter().find(|p| **p == cached) {
+            return Ok(protocol);
+        }
+    }
+    Ok(default_opencode_protocol(&model.id, &advertised))
+}
+
+fn default_opencode_protocol(model_id: &str, advertised: &[&'static str]) -> &'static str {
+    let native_openai = model_id.starts_with("openai/");
+    if native_openai && advertised.contains(&RESPONSES) {
+        RESPONSES
+    } else if advertised.contains(&CHAT) {
+        CHAT
+    } else {
+        RESPONSES
+    }
+}
+
 pub async fn check(
     tool: BindableTool,
     model_id: &str,
@@ -682,6 +707,54 @@ mod tests {
             evaluate_stream(CHAT, stream),
             ProbeOutcome::Incompatible(_)
         ));
+    }
+
+    #[test]
+    fn opencode_defaults_to_chat_unless_the_model_is_native_openai() {
+        let both = [RESPONSES, CHAT];
+        assert_eq!(
+            default_opencode_protocol("openai/gpt-5.4", &both),
+            RESPONSES
+        );
+        assert_eq!(
+            default_opencode_protocol("moonshotai/kimi-k2.6", &both),
+            CHAT
+        );
+        assert_eq!(
+            default_opencode_protocol("anthropic/claude-fable-5", &both),
+            CHAT
+        );
+    }
+
+    #[test]
+    fn opencode_default_follows_the_only_advertised_endpoint() {
+        assert_eq!(
+            default_opencode_protocol("openai/gpt-5.2-codex", &[RESPONSES]),
+            RESPONSES
+        );
+        assert_eq!(
+            default_opencode_protocol("google/gemini-3.8-flash", &[CHAT]),
+            CHAT
+        );
+        assert_eq!(
+            default_opencode_protocol("z-ai/glm-5.3", &[RESPONSES]),
+            RESPONSES
+        );
+    }
+
+    #[test]
+    fn opencode_save_rejects_a_model_with_no_usable_endpoint() {
+        let model = FetchedModel {
+            id: "x/embed".into(),
+            name: None,
+            owned_by: None,
+            pricing_prompt: None,
+            supported_endpoints: Some(vec!["/v1/embeddings".into()]),
+            supported_parameters: None,
+            input_modalities: None,
+            output_modalities: None,
+        };
+        assert!(opencode_protocol_for_save(&model).is_err());
     }
 
     #[test]
