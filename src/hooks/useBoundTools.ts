@@ -214,6 +214,7 @@ export function useBoundTools(
       // ===== Stage 2: remote / non-blocking =====
       void (async () => {
         const userInfo = await loadUser();
+        if (generation !== loadGeneration.current) return;
 
         // 账号信息刚刷新：已绑定的工具如果还在用别的账号的 key（换了账号，或
         // 退出登录时停用了），换成当前账号的。没有要换的时后端不访问网络。
@@ -221,6 +222,7 @@ export function useBoundTools(
           console.error("[useBoundTools] reconcile tool keys failed", e);
           return null;
         });
+        if (generation !== loadGeneration.current) return;
         if (keyReport) {
           announceKeyReconcile(keyReport, t, userInfo?.email);
           if (keyReport.switched.length > 0 || keyReport.failed.length > 0)
@@ -314,21 +316,25 @@ export function useBoundTools(
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     let pending: ReturnType<typeof setTimeout> | null = null;
+    let disposed = false;
     (async () => {
       try {
         const off = await listen("ofox-prefs-updated", () => {
+          if (disposed) return;
           if (pending) clearTimeout(pending);
           pending = setTimeout(() => {
             pending = null;
-            void loadDataRef.current();
+            if (!disposed) void loadDataRef.current();
           }, 500);
         });
-        unlisten = off;
+        if (disposed) off();
+        else unlisten = off;
       } catch (e) {
         console.error("[useBoundTools] listen ofox-prefs-updated failed", e);
       }
     })();
     return () => {
+      disposed = true;
       if (pending) clearTimeout(pending);
       if (unlisten) unlisten();
     };

@@ -27,6 +27,7 @@ interface ToolDiscoveryPageProps {
    */
   onBack?: () => void;
   onBind: (selectedTools: string[]) => void;
+  onEnterLocal?: () => void;
 }
 
 /** Stagger 翻 selected 的相邻间隔（ms）。跳过 missing 不占 tick。 */
@@ -35,6 +36,7 @@ const STAGGER_INTERVAL_MS = 200;
 export default function ToolDiscoveryPage({
   onBack,
   onBind,
+  onEnterLocal,
 }: ToolDiscoveryPageProps) {
   const { t } = useTranslation();
   const installableTools = useToolInstallCapabilities();
@@ -279,6 +281,15 @@ export default function ToolDiscoveryPage({
               : t("uiCopy.startBinding", { value1: selected.length })}
           </button>
         </div>
+        {onEnterLocal && (
+          <button
+            type="button"
+            className="mb-4 self-center text-sub text-ink-muted hover:underline"
+            onClick={onEnterLocal}
+          >
+            {t("toolCatalog.skipBinding")}
+          </button>
+        )}
       </div>
       <NodeUpgradeDialog
         prompt={nodePrompt}

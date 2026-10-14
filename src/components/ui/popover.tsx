@@ -2,6 +2,7 @@ import * as React from "react";
 import * as PopoverPrimitive from "@radix-ui/react-popover";
 import { useDialogContainer } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { useInteractionActive } from "./interaction-scope";
 
 const Popover = PopoverPrimitive.Root;
 const PopoverTrigger = PopoverPrimitive.Trigger;
@@ -29,6 +30,8 @@ const PopoverContent = React.forwardRef<
     ref,
   ) => {
     const dialogContainer = useDialogContainer();
+    const active = useInteractionActive();
+    if (!active) return null;
     return (
       <PopoverPrimitive.Portal container={container ?? dialogContainer}>
         <PopoverPrimitive.Content

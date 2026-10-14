@@ -17,6 +17,7 @@ mod hermes;
 #[cfg(any(target_os = "windows", test))]
 pub(crate) mod how_installed;
 mod import_export;
+mod install_catalog;
 mod install_tool;
 mod launch_tool;
 mod mcp;
@@ -71,6 +72,7 @@ pub use failover::*;
 pub use global_proxy::*;
 pub use hermes::*;
 pub use import_export::*;
+pub use install_catalog::*;
 pub use install_tool::*;
 pub use launch_tool::*;
 pub use mcp::*;

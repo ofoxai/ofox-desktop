@@ -1545,6 +1545,7 @@ pub fn run() {
             commands::delete_sessions,
             commands::launch_session_terminal,
             commands::get_tool_versions,
+            commands::get_install_catalog_inventory,
             // Provider terminal
             commands::open_provider_terminal,
             // Universal Provider management

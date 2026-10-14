@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Loader2, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
@@ -38,6 +38,10 @@ import ManageToolDialog, { type ManageToolTarget } from "./ManageToolDialog";
 import { UninstallToolDialog } from "./UninstallToolDialog";
 import { MissingToolsFold } from "./MissingToolsFold";
 import { UpdateAllLine } from "./UpdateAllLine";
+import {
+  OptionalToolsCatalog,
+  type InstallCatalogHandle,
+} from "@/components/tools/OptionalToolsCatalog";
 
 interface ToolsPanelProps {
   boundTools: string[];
@@ -79,7 +83,10 @@ export function ToolsPanel({
     reload,
   } = useBoundTools(boundTools, account);
   // 顶栏的刷新在工具页 = 重新检测工具并检查更新。
-  useShellRefresh("tools", refreshList);
+  const catalog = useRef<InstallCatalogHandle>(null);
+  useShellRefresh("tools", async () => {
+    await Promise.all([refreshList(), catalog.current?.refresh()]);
+  });
   const [uninstallTool, setUninstallTool] = useState<string | null>(null);
   const [uninstallFromManage, setUninstallFromManage] = useState<string | null>(
     null,
@@ -300,6 +307,7 @@ export function ToolsPanel({
         </div>
       )}
 
+      <OptionalToolsCatalog boundTools={boundTools} ref={catalog} />
       <AddToolsDialog
         open={addDialogOpen}
         onOpenChange={setAddDialogOpen}

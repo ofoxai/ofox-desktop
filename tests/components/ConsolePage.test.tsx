@@ -123,6 +123,64 @@ function localTool(name: string, version: string | null): LocalTool {
   return { name, version, error: null, installationKind: "cli" };
 }
 
+it("local mode does not load accounts, reconcile keys or query binding/model state", async () => {
+  render(<ConsolePage boundTools={["codex"]} localOnly />);
+  expect(await screen.findByText("本机工具管理")).toBeVisible();
+  await act(async () => undefined);
+  expect(mocks.getUserInfo).not.toHaveBeenCalled();
+  expect(mocks.reconcileKeys).not.toHaveBeenCalled();
+  const commands = mocks.invoke.mock.calls.map(([name]) => name);
+  expect(commands).not.toContain("ofox_list_api_keys");
+  expect(commands).not.toContain("get_tool_binding_status");
+  expect(commands).not.toContain("model_selection_snapshot");
+});
+
+it("keeps the header refreshing until the local inventory scan completes", async () => {
+  let resolve!: (value: unknown[]) => void;
+  mocks.invoke.mockImplementation((name: string) =>
+    name === "get_install_catalog_inventory"
+      ? new Promise((r) => {
+          resolve = r;
+        })
+      : Promise.resolve(null),
+  );
+  render(<ConsolePage boundTools={[]} localOnly />);
+  const refresh = screen.getByRole("button", { name: "刷新" });
+  fireEvent.click(refresh);
+  expect(refresh).toHaveAttribute("aria-busy", "true");
+  fireEvent.click(refresh);
+  expect(
+    mocks.invoke.mock.calls.filter(
+      ([name]) => name === "get_install_catalog_inventory",
+    ),
+  ).toHaveLength(1);
+  await act(async () => resolve([]));
+  await waitFor(() => expect(refresh).not.toHaveAttribute("aria-busy"));
+});
+
+it("closes settings when reauthentication suspends the retained console", async () => {
+  const { rerender } = render(<ConsolePage boundTools={[]} localOnly />);
+  fireEvent.click(screen.getByRole("button", { name: "设置" }));
+  expect(screen.getByRole("dialog")).toBeVisible();
+  rerender(<ConsolePage boundTools={[]} localOnly active={false} />);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  await act(async () => undefined);
+});
+
+it("does not reconcile keys after leaving a tools scan waiting for its account", async () => {
+  let resolve!: (value: { name: string }) => void;
+  mocks.getUserInfo.mockReturnValue(
+    new Promise((r) => {
+      resolve = r;
+    }),
+  );
+  const view = render(<ConsolePage boundTools={["codex"]} />);
+  await waitFor(() => expect(mocks.getUserInfo).toHaveBeenCalled());
+  view.unmount();
+  await act(async () => resolve({ name: "Old account" }));
+  expect(mocks.reconcileKeys).not.toHaveBeenCalled();
+});
+
 function availableTool(
   name: string,
   version: string,

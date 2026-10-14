@@ -19,10 +19,18 @@ type LoginState = "idle" | "polling" | "success" | "error";
 
 interface LoginPageProps {
   onLoginSuccess: (user: OfoxUserInfo) => void;
+  onEnterLocal?: () => void;
 }
 
-export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
+export default function LoginPage({
+  onLoginSuccess,
+  onEnterLocal,
+}: LoginPageProps) {
   const { t } = useTranslation();
+  const lifetime = useRef(0);
+  const mounted = useRef(true);
+  const isCurrent = (version: number) =>
+    mounted.current && lifetime.current === version;
   const FEATURES = [
     t("uiCopy.featureDetect"),
     t("uiCopy.featureModels"),
@@ -37,9 +45,11 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
       .catch(() => undefined);
   }, []);
   const retryKeychain = async () => {
+    const version = lifetime.current;
     setKeychainRetrying(true);
     try {
       const status = await ofoxRetryKeychain();
+      if (!isCurrent(version)) return;
       if (status.state === "active" && status.user) {
         onLoginSuccess(status.user);
         return;
@@ -47,9 +57,10 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
       setKeychainDenied(Boolean(status.keychain_denied));
       toast.error(t("keychainDenied.stillDenied"));
     } catch (e) {
+      if (!isCurrent(version)) return;
       toast.error(String(e));
     } finally {
-      setKeychainRetrying(false);
+      if (isCurrent(version)) setKeychainRetrying(false);
     }
   };
   const { apex } = useOfoxApex();
@@ -91,10 +102,18 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
   }, []);
 
   useEffect(() => {
-    return () => stopPolling();
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      lifetime.current += 1;
+      stopPolling();
+    };
   }, [stopPolling]);
 
   const startLogin = async () => {
+    const version = ++lifetime.current;
+    setCheckingStatus(false);
+    setKeychainRetrying(false);
     setError(null);
     setLoginState("idle");
     stopPolling();
@@ -103,6 +122,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
 
     try {
       const resp = await ofoxStartLogin();
+      if (!isCurrent(version)) return;
       setDeviceCode(resp);
       setLoginState("polling");
       intervalRef.current = Math.max((resp.interval || 5) + 3, 8);
@@ -117,13 +137,16 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
       }
 
       // Open verification URL
+      if (!isCurrent(version)) return;
       const url = resp.verification_uri_complete || resp.verification_uri;
       await settingsApi.openExternal(url);
+      if (!isCurrent(version)) return;
 
       // Start polling
       const expiresAt = Date.now() + resp.expires_in * 1000;
 
       pollingRef.current = setInterval(async () => {
+        if (!isCurrent(version)) return;
         if (Date.now() > expiresAt) {
           stopPolling();
           setLoginState("error");
@@ -133,6 +156,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
 
         try {
           const user = await ofoxPollForToken(resp.device_code);
+          if (!isCurrent(version)) return;
           if (user) {
             stopPolling();
             setLoginState("success");
@@ -141,14 +165,17 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
           // null = still pending, keep polling
           unknownErrorCountRef.current = 0;
         } catch (e) {
+          if (!isCurrent(version)) return;
           const msg = String(e);
           if (msg.includes("slow_down")) {
             intervalRef.current += 5;
             // Restart with new interval
             stopPolling();
             pollingRef.current = setInterval(async () => {
+              if (!isCurrent(version)) return;
               try {
                 const user = await ofoxPollForToken(resp.device_code);
+                if (!isCurrent(version)) return;
                 if (user) {
                   stopPolling();
                   setLoginState("success");
@@ -194,6 +221,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
 
       // Auto-expire timeout
       timeoutRef.current = setTimeout(() => {
+        if (!isCurrent(version)) return;
         stopPolling();
         if (loginState === "polling") {
           setLoginState("error");
@@ -201,6 +229,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
         }
       }, resp.expires_in * 1000);
     } catch (e) {
+      if (!isCurrent(version)) return;
       setLoginState("error");
       setError(String(e));
     }
@@ -232,10 +261,12 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
    * call `onLoginSuccess`, mirroring what the polling success path does.
    */
   const handleAlreadyAuthorized = useCallback(async () => {
+    const version = lifetime.current;
     if (checkingStatus) return;
     setCheckingStatus(true);
     try {
       const status = await ofoxGetAuthStatus();
+      if (!isCurrent(version)) return;
       if (status.state === "active") {
         stopPolling();
         setLoginState("success");
@@ -256,13 +287,14 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
         toast.info(t("uiCopy.authPending"));
       }
     } catch (e) {
+      if (!isCurrent(version)) return;
       console.error("[LoginPage] handleAlreadyAuthorized failed", e);
       // Network/IPC failure — same UX: offer the regenerate path so the
       // user isn't stuck if the backend is temporarily unreachable.
       setShowRegenerate(true);
       toast.error(t("uiCopy.authCheckFailed"));
     } finally {
-      setCheckingStatus(false);
+      if (isCurrent(version)) setCheckingStatus(false);
     }
   }, [checkingStatus, onLoginSuccess, stopPolling]);
 
@@ -421,6 +453,19 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
           </button>
 
           {/* Secondary Actions */}
+          {onEnterLocal && (
+            <button
+              type="button"
+              className="mb-4 text-sub text-ink-muted hover:underline"
+              onClick={() => {
+                lifetime.current += 1;
+                stopPolling();
+                onEnterLocal();
+              }}
+            >
+              {t("toolCatalog.enterLocal")}
+            </button>
+          )}
           <div className="mb-6 flex items-center gap-3 text-[13px]">
             <span className="text-ink-muted">{t("uiCopy.notRegistered")}</span>
             <button

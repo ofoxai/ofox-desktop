@@ -1,6 +1,7 @@
 import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { cn } from "@/lib/utils";
+import { useInteractionActive } from "./interaction-scope";
 
 const Dialog = DialogPrimitive.Root;
 
@@ -64,6 +65,7 @@ const DialogContent = React.forwardRef<
     },
     ref,
   ) => {
+    const active = useInteractionActive();
     // Kept in state, not a ref, so popovers re-render with the node once it
     // exists and never portal to the body on the first open.
     const [container, setContainer] = React.useState<HTMLDivElement | null>(
@@ -85,6 +87,7 @@ const DialogContent = React.forwardRef<
         "fixed inset-0 flex flex-col w-screen h-screen translate-x-0 translate-y-0 bg-background text-foreground p-0 rounded-none shadow-none",
     }[variant];
 
+    if (!active) return null;
     return (
       <DialogPortal>
         <DialogOverlay zIndex={zIndex} className={overlayClassName} />

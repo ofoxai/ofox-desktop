@@ -18,16 +18,24 @@ interface OnboardingAppProps {
    */
   initialStep?: Step;
   onComplete: () => void;
+  onEnterLocal?: () => void;
+  returnToLocal?: boolean;
 }
 
 export default function OnboardingApp({
   initialStep = "login",
   onComplete,
+  onEnterLocal,
+  returnToLocal = false,
 }: OnboardingAppProps) {
   const [step, setStep] = useState<Step>(initialStep);
   const [boundTools, setBoundTools] = useState<string[]>([]);
 
   const handleLoginSuccess = (_user: OfoxUserInfo) => {
+    if (returnToLocal) {
+      onComplete();
+      return;
+    }
     setStep("toolDiscovery");
   };
 
@@ -41,7 +49,12 @@ export default function OnboardingApp({
 
   switch (step) {
     case "login":
-      return <LoginPage onLoginSuccess={handleLoginSuccess} />;
+      return (
+        <LoginPage
+          onLoginSuccess={handleLoginSuccess}
+          onEnterLocal={onEnterLocal}
+        />
+      );
     case "toolDiscovery":
       // If we entered the wizard at toolDiscovery (already-logged-in user with
       // empty bind list), the LoginPage isn't a meaningful "back" target — the
@@ -51,6 +64,7 @@ export default function OnboardingApp({
         <ToolDiscoveryPage
           onBack={initialStep === "login" ? () => setStep("login") : undefined}
           onBind={handleBind}
+          onEnterLocal={onEnterLocal}
         />
       );
     case "setupComplete":

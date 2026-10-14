@@ -118,12 +118,16 @@ export function useUsageOverview(
     // Keep every failed source visible while still refreshing the other sources.
     const results = await Promise.allSettled([
       usageApi.syncSessionUsage(),
-      balance.refetch({ throwOnError: true }),
-      spending.refetch({ throwOnError: true }),
+      ...(user
+        ? [
+            balance.refetch({ throwOnError: true }),
+            spending.refetch({ throwOnError: true }),
+          ]
+        : []),
     ]);
     const next = await Promise.allSettled([
       overview.refetch({ throwOnError: true }),
-      trend.refetch({ throwOnError: true }),
+      ...(user ? [trend.refetch({ throwOnError: true })] : []),
     ]);
     const failed = [...results, ...next].filter(
       (r): r is PromiseRejectedResult => r.status === "rejected",

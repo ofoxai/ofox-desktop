@@ -2,6 +2,7 @@ import * as React from "react";
 import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
 import { useDialogContainer } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { useInteractionActive } from "./interaction-scope";
 
 // magpie's pop: frosted, 11px radius, 4px padding, items 7px / 12.5px with a
 // pill behind the highlighted one. It grows out of its trigger.
@@ -65,6 +66,8 @@ const DropdownMenuContent = React.forwardRef<
   }
 >(({ className, sideOffset = 4, container, ...props }, ref) => {
   const dialogContainer = useDialogContainer();
+  const active = useInteractionActive();
+  if (!active) return null;
   return (
     <DropdownMenuPrimitive.Portal container={container ?? dialogContainer}>
       <DropdownMenuPrimitive.Content

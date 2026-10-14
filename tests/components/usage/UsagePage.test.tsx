@@ -76,6 +76,23 @@ function Page({ value = account }: { value?: OfoxAccount }) {
     </ShellProvider>
   );
 }
+
+it("refreshes only local statistics when there is no authenticated account", async () => {
+  render(<Page value={{ ...account, user: null }} />);
+  await screen.findAllByText("1.2K");
+  mocks.invoke.mockClear();
+  fireEvent.click(screen.getByText("refresh-page"));
+  await waitFor(() =>
+    expect(
+      mocks.invoke.mock.calls.some(([name]) => name === "get_usage_overview"),
+    ).toBe(true),
+  );
+  const commands = mocks.invoke.mock.calls.map(([name]) => name);
+  expect(commands).toContain("sync_session_usage");
+  expect(commands).not.toContain("ofox_refresh_user_info");
+  expect(commands).not.toContain("ofox_get_spending");
+  expect(commands).not.toContain("ofox_get_balance_trend");
+});
 beforeEach(() => {
   queryClient.clear();
   localStorage.clear();

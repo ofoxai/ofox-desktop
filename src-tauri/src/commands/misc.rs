@@ -224,12 +224,69 @@ enum InstallationStatus {
     Unknown,
 }
 
+impl ToolVersion {
+    pub(crate) fn into_catalog_inventory(self) -> super::install_catalog::InventoryEntry {
+        // The binding detector accepts ChatGPT as a legacy Codex fallback.
+        // The installation catalog lists these two products separately.
+        if self.name == "codex" && self.installation_kind == "desktopApp" {
+            return super::install_catalog::InventoryEntry {
+                tool_id: self.name,
+                status: "notInstalled".into(),
+                version: None,
+                path: None,
+                error: None,
+            };
+        }
+        super::install_catalog::InventoryEntry {
+            tool_id: self.name,
+            status: match self.installation_status {
+                InstallationStatus::Installed => "installed",
+                InstallationStatus::NotInstalled => "notInstalled",
+                InstallationStatus::Unknown => "unknown",
+            }
+            .into(),
+            version: self.version,
+            path: self.executable_path,
+            error: self.error,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct LocalDetection {
     status: InstallationStatus,
     version: Option<String>,
     error: Option<String>,
     path: Option<PathBuf>,
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    #[test]
+    fn codex_desktop_fallback_is_not_evidence_of_a_codex_cli() {
+        let row = ToolVersion {
+            name: "codex".into(),
+            version: Some("1.0".into()),
+            latest_version: None,
+            error: None,
+            env_type: "macos".into(),
+            wsl_distro: None,
+            installation_kind: "desktopApp".into(),
+            installation_status: InstallationStatus::Installed,
+            update_status: "appManaged".into(),
+            update_source: None,
+            update_supported: false,
+            update_reason: None,
+            executable_path: Some("fixture/ChatGPT.app".into()),
+        }
+        .into_catalog_inventory();
+        assert_eq!(row.tool_id, "codex");
+        assert_eq!(row.status, "notInstalled");
+        assert!(row.path.is_none());
+        assert!(row.version.is_none());
+    }
 }
 
 impl LocalDetection {

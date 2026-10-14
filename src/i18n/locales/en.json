@@ -3265,5 +3265,37 @@
     "macHint": "Use the OFox menu bar icon to check balance and usage.",
     "trayHint": "Use the OFox notification area icon to check balance and usage.",
     "open": "Open console →"
+  },
+  "toolCatalog": {
+    "title": "Tool installation",
+    "installedFold": "Other installed tools",
+    "installFold": "Install other tools",
+    "installed": "Installed",
+    "notInstalled": "Not installed",
+    "unknown": "Not yet verified",
+    "noInstalled": "No other installed tools",
+    "manualOnly": "Choose a tool, run its official command in a terminal, or open its installation guide. Installation does not bind it to OFox.",
+    "search": "Search tools",
+    "refresh": "Detect again",
+    "detectFailed": "Detection is unavailable. Official installation guides remain available.",
+    "noMatches": "No matching tools",
+    "copyCommand": "Copy installation command for {{name}}",
+    "official": "Official guide",
+    "officialFor": "Open official guide for {{name}}",
+    "localTitle": "Local tool management",
+    "localDescription": "Install and manage local tools, and view local sessions and usage.",
+    "enterLocal": "Continue without signing in",
+    "skipBinding": "Manage local tools without binding",
+    "login": "Sign in to OFox",
+    "bindOptional": "Choose tools to bind",
+    "dependencies": {
+      "node22": "npm installation requires Node.js 22 or newer",
+      "node": "npm installation requires the Node.js version specified by the publisher",
+      "bun": "Requires Bun 1.3.14 or newer",
+      "python": "Uses an isolated environment; the official installer may also install Python 3.12",
+      "platform": "Platform and runtime requirements are not yet verified; see the official guide"
+    },
+    "probeIncomplete": "Version detection incomplete",
+    "retryFor": "Detect {{name}} again"
   }
 }

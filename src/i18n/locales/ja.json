@@ -3265,5 +3265,37 @@
     "macHint": "メニューバーの OFox アイコンで残高と使用量を確認できます。",
     "trayHint": "通知領域の OFox アイコンで残高と使用量を確認できます。",
     "open": "コンソールを開く →"
+  },
+  "toolCatalog": {
+    "title": "ツールのインストール",
+    "installedFold": "その他のインストール済みツール",
+    "installFold": "その他のツールをインストール",
+    "installed": "インストール済み",
+    "notInstalled": "未インストール",
+    "unknown": "未確認",
+    "noInstalled": "その他のインストール済みツールはありません",
+    "manualOnly": "ツールを選び、公式コマンドをターミナルで実行するか、インストール手順をご覧ください。インストールだけでは OFox に連携されません。",
+    "search": "ツールを検索",
+    "refresh": "再検出",
+    "detectFailed": "現在は検出できません。公式のインストール手順は確認できます。",
+    "noMatches": "一致するツールがありません",
+    "copyCommand": "{{name}} のインストールコマンドをコピー",
+    "official": "公式の手順",
+    "officialFor": "{{name}} の公式手順を開く",
+    "localTitle": "ローカルツール管理",
+    "localDescription": "ローカルツールのインストールと管理、セッションと使用量の確認ができます。",
+    "enterLocal": "ログインせずにローカルツールを管理",
+    "skipBinding": "連携せずにローカル管理へ",
+    "login": "OFox にログイン",
+    "bindOptional": "連携するツールを選択",
+    "dependencies": {
+      "node22": "npm インストールには Node.js 22 以降が必要です",
+      "node": "npm インストールには公式指定の Node.js が必要です",
+      "bun": "Bun 1.3.14 以降が必要です",
+      "python": "分離環境を使用します。公式インストーラーが Python 3.12 を追加する場合があります",
+      "platform": "対応環境とランタイム要件は未確認です。公式手順をご覧ください"
+    },
+    "probeIncomplete": "バージョン検出が未完了",
+    "retryFor": "{{name}} を再検出"
   }
 }

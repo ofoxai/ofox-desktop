@@ -210,6 +210,12 @@ pub(crate) async fn probe(tool: &str) -> Result<Installation, ProbeError> {
     if npm_package(tool).is_none() && tool != "hermes" {
         return Err("Unsupported CLI".into());
     }
+    probe_executable(tool).await
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) async fn probe_executable(tool: &str) -> Result<Installation, ProbeError> {
+    validate_executable_name(tool)?;
     let path = super::windows_tools::find_tool(tool).ok_or(ProbeError::NotFound)?;
     let search_path = super::windows_tools::effective_path()
         .to_string_lossy()
@@ -244,6 +250,12 @@ pub(crate) async fn probe(tool: &str) -> Result<Installation, ProbeError> {
     if npm_package(tool).is_none() && tool != "hermes" {
         return Err("Unsupported CLI".into());
     }
+    probe_executable(tool).await
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) async fn probe_executable(tool: &str) -> Result<Installation, ProbeError> {
+    validate_executable_name(tool)?;
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let mut command = Command::new(shell);
     command.args(["-l", "-i", "-c", &format!(
@@ -278,6 +290,17 @@ pub(crate) async fn probe(tool: &str) -> Result<Installation, ProbeError> {
         error,
         search_path,
     })
+}
+
+fn validate_executable_name(tool: &str) -> Result<(), ProbeError> {
+    if tool.is_empty()
+        || !tool
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        return Err("Invalid executable name".into());
+    }
+    Ok(())
 }
 
 pub(crate) fn executable_version(
