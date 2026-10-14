@@ -564,6 +564,10 @@ pub(crate) fn set_file_mode(_path: &Path, _mode: u32) -> Result<(), AppError> {
 
 /// 多文件写入事务：每个文件第一次被改动前记下原来的字节和权限（不存在记为
 /// `None`），任一步失败时 [`FileTxn::rollback`] 按相反顺序全部还原。
+///
+/// 一切按真正会被写到的文件记账（符号链接解析到它指向的文件，见 [`write_target`]）：链接本身
+/// 不动，指向不存在文件的悬空链接也一样——写入建出来的目标（里面可能有 API key），
+/// 回滚或删除时删的是这个目标，而不是把链接删掉、把带 key 的目标留下。
 #[derive(Default)]
 pub(crate) struct FileTxn {
     originals: Vec<(PathBuf, Option<Vec<u8>>, Option<u32>)>,
@@ -574,20 +578,22 @@ impl FileTxn {
         Self::default()
     }
 
-    fn remember(&mut self, path: &Path) -> Result<(), AppError> {
-        if self.originals.iter().any(|(seen, _, _)| seen == path) {
-            return Ok(());
+    /// 记下 `path` 指向的文件现在的样子（只记第一次），返回要操作的真实路径。
+    fn remember(&mut self, path: &Path) -> Result<PathBuf, AppError> {
+        let target = write_target(path)?;
+        if self.originals.iter().any(|(seen, _, _)| *seen == target) {
+            return Ok(target);
         }
-        // 这里的 `None` 会让回滚删文件，先等一等别人正在进行的 rename（Windows），别把假的“不存在”记下来。
-        let original = read_file_bytes_waiting_out_replace(path)?;
-        self.originals
-            .push((path.to_path_buf(), original, file_mode(path)));
-        Ok(())
+        // 这里的 `None` 会让回滚删文件，所以要先等一等别人正在进行的 rename（Windows），别把假的“不存在”记下来。
+        let original = read_file_bytes_waiting_out_replace(&target)?;
+        let mode = file_mode(&target);
+        self.originals.push((target.clone(), original, mode));
+        Ok(target)
     }
 
     pub(crate) fn write(&mut self, path: &Path, data: &[u8]) -> Result<(), AppError> {
-        self.remember(path)?;
-        atomic_write(path, data)
+        let target = self.remember(path)?;
+        atomic_write(&target, data)
     }
 
     /// 写文件并在创建时就给定权限（见 [`AtomicOpts::mode`]）：含 API key 的文件不会有
@@ -598,18 +604,19 @@ impl FileTxn {
         data: &[u8],
         mode: u32,
     ) -> Result<(), AppError> {
-        self.remember(path)?;
-        atomic_write_with(path, data, AtomicOpts { mode: Some(mode) })
+        let target = self.remember(path)?;
+        atomic_write_with(&target, data, AtomicOpts { mode: Some(mode) })
     }
 
     pub(crate) fn set_mode(&mut self, path: &Path, mode: u32) -> Result<(), AppError> {
-        self.remember(path)?;
-        set_file_mode(path, mode)
+        let target = self.remember(path)?;
+        set_file_mode(&target, mode)
     }
 
+    /// 删文件。`path` 是符号链接时删的是它指向的文件，链接留着（回滚时内容会经由链接写回去）。
     pub(crate) fn remove(&mut self, path: &Path) -> Result<(), AppError> {
-        self.remember(path)?;
-        remove_file_if_exists(path)
+        let target = self.remember(path)?;
+        remove_file_if_exists(&target)
     }
 
     /// 把改过的文件全部还原成事务开始前的样子；尽量全部还原，返回第一个错误。
@@ -699,6 +706,77 @@ mod tests {
 
         assert_eq!(fs::read(&path).unwrap(), b"key = 0\n");
         assert_eq!(file_mode(&path), Some(0o644));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_txn_rollback_removes_the_file_a_dangling_symlink_pointed_at_and_keeps_the_link() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(dir.path().join("store")).unwrap();
+        let target = dir.path().join("store/config.toml");
+        let link = dir.path().join("config.toml");
+        std::os::unix::fs::symlink("store/config.toml", &link).unwrap();
+
+        let mut txn = FileTxn::new();
+        txn.write_with_mode(&link, b"experimental_bearer_token = \"sk\"\n", 0o600)
+            .unwrap();
+        assert!(target.exists(), "the write went through the link");
+        txn.rollback().unwrap();
+
+        assert!(!target.exists(), "the key file the write created is gone");
+        let meta = fs::symlink_metadata(&link).unwrap();
+        assert!(meta.file_type().is_symlink(), "the link stays as it was");
+        assert_eq!(
+            fs::read_link(&link).unwrap(),
+            Path::new("store/config.toml")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_txn_remove_deletes_the_file_behind_a_symlink_and_rollback_puts_it_back_through_the_link(
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("dotfiles-auth.json");
+        let link = dir.path().join("auth.json");
+        fs::write(&target, b"{\"k\":1}").unwrap();
+        set_file_mode(&target, 0o640).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let mut txn = FileTxn::new();
+        txn.remove(&link).unwrap();
+        assert!(!target.exists(), "the content behind the link is removed");
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        txn.rollback().unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"{\"k\":1}");
+        assert_eq!(file_mode(&target), Some(0o640));
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_txn_treats_two_links_to_one_file_as_one_original() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("real.toml");
+        fs::write(&target, b"a = 0\n").unwrap();
+        let first = dir.path().join("first.toml");
+        let second = dir.path().join("second.toml");
+        std::os::unix::fs::symlink(&target, &first).unwrap();
+        std::os::unix::fs::symlink(&target, &second).unwrap();
+
+        let mut txn = FileTxn::new();
+        txn.write(&first, b"a = 1\n").unwrap();
+        txn.write(&second, b"a = 2\n").unwrap();
+        txn.rollback().unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"a = 0\n");
     }
 
     #[test]
