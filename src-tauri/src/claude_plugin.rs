@@ -3,17 +3,11 @@ use std::path::PathBuf;
 
 use crate::error::AppError;
 
-const CLAUDE_DIR: &str = ".claude";
 const CLAUDE_CONFIG_FILE: &str = "config.json";
 
+/// 设置里的覆盖目录 → `CLAUDE_CONFIG_DIR` → `~/.claude`（见 `agent_env`）。
 fn claude_dir() -> Result<PathBuf, AppError> {
-    // 优先使用设置中的覆盖目录
-    if let Some(dir) = crate::settings::get_claude_override_dir() {
-        return Ok(dir);
-    }
-    let home = crate::config::try_get_home_dir()
-        .ok_or_else(|| AppError::Config("无法获取用户主目录".into()))?;
-    Ok(home.join(CLAUDE_DIR))
+    Ok(crate::config::get_claude_config_dir())
 }
 
 pub fn claude_config_path() -> Result<PathBuf, AppError> {
@@ -128,6 +122,38 @@ pub fn is_claude_config_applied() -> Result<bool, AppError> {
     match read_claude_config()? {
         Some(content) => Ok(is_managed_config(&content)),
         None => Ok(false),
+    }
+}
+
+#[cfg(test)]
+mod dir_tests {
+    use super::*;
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn the_config_is_in_the_default_directory_without_claude_config_dir() {
+        let sandbox = crate::test_sandbox::sandbox();
+
+        assert_eq!(
+            claude_config_path().unwrap(),
+            sandbox.home().join(".claude").join("config.json")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn claude_config_dir_moves_the_config_and_nothing_is_written_to_the_default() {
+        let sandbox = crate::test_sandbox::sandbox();
+        let moved = sandbox.home().join("data").join("claude-state");
+        std::env::set_var("CLAUDE_CONFIG_DIR", &moved);
+
+        assert_eq!(claude_config_path().unwrap(), moved.join("config.json"));
+        assert!(write_claude_config().unwrap());
+
+        assert!(is_claude_config_applied().unwrap());
+        assert!(moved.join("config.json").is_file());
+        assert!(!sandbox.home().join(".claude").exists());
     }
 }
 
