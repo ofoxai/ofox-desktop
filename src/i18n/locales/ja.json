@@ -3039,5 +3039,48 @@
     "reasonInstallationUnknown": "インストール状態を確認できません。ツールの検出を更新してください。",
     "reasonStopped": "前のツールで失敗したため、後続の適用を停止しました。",
     "reasonUndoUnavailable": "モデルは保存されましたが、取り消し状態を確認できません。設定を確認してください。"
+  },
+  "balanceWarning": {
+    "title": "残高が {{threshold}} を下回っています",
+    "runsOutDays": "現在のペースでは約 {{days}} 日で使い切ります",
+    "runsOutSoon": "現在のペースでは 1 日以内に使い切ります。早めにチャージしてください",
+    "recharge": "チャージ"
+  },
+  "usagePage": {
+    "period": "期間",
+    "estimate": "OFox 料金による概算",
+    "balance": "OFox 残高",
+    "recharge": "チャージ",
+    "trend": "残高推移",
+    "runsOutDays": "最近のペースで、残り約 {{count}} 日",
+    "runsOutHours": "最近のペースで、残り約 {{count}} 時間",
+    "monthly": "今月の使用額 {{used}} / {{limit}}",
+    "io": "入力 {{input}} · 出力 {{output}}",
+    "cacheRead": "キャッシュ読み取り",
+    "cacheWrite": "キャッシュ書き込み {{value}}",
+    "hitRate": "ヒット率 {{rate}}",
+    "cost": "費用",
+    "requests": "リクエスト",
+    "chart": "トークン使用量",
+    "chartLegend": "薄色: 新規入力 · 濃色: 出力。キャッシュは別集計",
+    "tools": "ツール",
+    "models": "モデル",
+    "actions": "{{name}} の操作",
+    "hide": "非表示",
+    "show": "表示",
+    "showItem": "{{name}} を表示",
+    "hiddenCount": "{{count}} 件を非表示",
+    "refreshFailed": "一部の更新に失敗しました。前回の結果を表示しています。再試行またはウェブで確認できます。",
+    "errorDetails": "エラー詳細",
+    "unavailable": "ローカル使用量を取得できません",
+    "empty": "この期間の使用量はありません",
+    "unsupported": "未対応のツール: {{tools}}",
+    "disclaimer": "費用は OFox 料金による概算です。実際の請求額を確認してください。",
+    "periods": {
+      "today": "今日",
+      "7d": "7 日間",
+      "30d": "30 日間",
+      "all": "全期間"
+    }
   }
 }

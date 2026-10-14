@@ -1,0 +1,135 @@
+import { useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { listen } from "@tauri-apps/api/event";
+import {
+  getBalanceTrend,
+  getSpending,
+  getUsageOverview,
+  type UsagePeriod,
+} from "@/lib/api/usageOverview";
+import { ofoxRefreshUserInfo, type OfoxUserInfo } from "@/lib/api/ofoxAuth";
+import { usageApi } from "@/lib/api/usage";
+import { queryClient } from "@/lib/query/queryClient";
+import { OFOX_USER_KEY } from "@/hooks/useOfoxAccount";
+const STALE_MS = 60_000;
+export const BALANCE_TREND_KEY = ["balanceTrend"] as const;
+export function accountIdentity(
+  user: OfoxUserInfo | null | undefined,
+  apex: string,
+) {
+  return `${apex}:${user?.balance?.organization_id ?? user?.org_id ?? ""}:${user?.id ?? user?.email ?? user?.name ?? ""}`;
+}
+export function useBalanceTrend(enabled = true, identity = "") {
+  return useQuery(
+    {
+      queryKey: [...BALANCE_TREND_KEY, identity],
+      queryFn: getBalanceTrend,
+      staleTime: STALE_MS,
+      gcTime: 0,
+      retry: false,
+      enabled,
+    },
+    queryClient,
+  );
+}
+export function useUsageOverview(
+  period: UsagePeriod,
+  user: OfoxUserInfo | null,
+  apex: string,
+) {
+  const identity = accountIdentity(user, apex);
+  const overview = useQuery(
+    {
+      queryKey: ["usageOverview", identity, period],
+      queryFn: () => getUsageOverview(period),
+      staleTime: STALE_MS,
+      gcTime: 0,
+      retry: false,
+    },
+    queryClient,
+  );
+  const balance = useQuery(
+    {
+      queryKey: ["usageUser", identity],
+      // `previous` is an ownership snapshot; preserve its reference on refetch.
+      structuralSharing: false,
+      queryFn: async () => {
+        const previous = queryClient.getQueryData<OfoxUserInfo | null>(
+          OFOX_USER_KEY,
+        );
+        const fresh = await ofoxRefreshUserInfo();
+        return { fresh, previous };
+      },
+      staleTime: STALE_MS,
+      gcTime: 0,
+      retry: false,
+      enabled: !!user,
+    },
+    queryClient,
+  );
+  const trend = useBalanceTrend(!!user, identity);
+  const spending = useQuery(
+    {
+      queryKey: ["spending", identity],
+      queryFn: getSpending,
+      staleTime: STALE_MS,
+      gcTime: 0,
+      retry: false,
+      enabled: !!user,
+    },
+    queryClient,
+  );
+  // Only publish a fresh reply to the same still-observed account.
+  useEffect(() => {
+    const fresh = balance.data?.fresh;
+    if (!fresh || accountIdentity(fresh, apex) !== identity) return;
+    const current = queryClient.getQueryData<OfoxUserInfo | null>(
+      OFOX_USER_KEY,
+    );
+    if (
+      current &&
+      current === balance.data?.previous &&
+      accountIdentity(current, apex) === identity
+    )
+      queryClient.setQueryData(OFOX_USER_KEY, fresh);
+    void queryClient.invalidateQueries({
+      queryKey: [...BALANCE_TREND_KEY, identity],
+    });
+  }, [balance.data, identity, apex]);
+  useEffect(() => {
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    void listen("usage-synced", () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["usageOverview", identity],
+      });
+    })
+      .then((off) => {
+        if (disposed) off();
+        else stop = off;
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      stop?.();
+    };
+  }, [identity]);
+  const refresh = async () => {
+    // Keep every failed source visible while still refreshing the other sources.
+    const results = await Promise.allSettled([
+      usageApi.syncSessionUsage(),
+      balance.refetch({ throwOnError: true }),
+      spending.refetch({ throwOnError: true }),
+    ]);
+    const next = await Promise.allSettled([
+      overview.refetch({ throwOnError: true }),
+      trend.refetch({ throwOnError: true }),
+    ]);
+    const failed = [...results, ...next].filter(
+      (r): r is PromiseRejectedResult => r.status === "rejected",
+    );
+    if (failed.length)
+      throw new Error(failed.map((r) => String(r.reason)).join("\n"));
+  };
+  return { overview, balance, trend, spending, user, refresh };
+}

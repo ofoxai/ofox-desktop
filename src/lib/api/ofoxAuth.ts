@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
  * upstream schema is still in flux — render "—" for missing values.
  */
 export interface OfoxBalance {
+  organization_id?: string | null;
   balance?: number | null;
   total?: number | null;
   used?: number | null;
@@ -26,6 +27,8 @@ export interface OfoxSpending {
 }
 
 export interface OfoxUserInfo {
+  /** Stable account identifier, absent in older cached users. */
+  id?: string | null;
   email: string | null;
   name: string | null;
   org_id: string | null;
@@ -101,6 +104,11 @@ export async function ofoxPollForToken(
 
 export async function ofoxGetUserInfo(): Promise<OfoxUserInfo | null> {
   return invoke<OfoxUserInfo | null>("ofox_get_user_info");
+}
+
+/** Refresh from the service and record a balance history sample. */
+export async function ofoxRefreshUserInfo(): Promise<OfoxUserInfo> {
+  return invoke<OfoxUserInfo>("ofox_refresh_user_info");
 }
 
 export async function ofoxGetAuthStatus(): Promise<OfoxAuthStatus> {
