@@ -5,8 +5,13 @@
 //!
 //! ## 数据流
 //! ```text
-//! ~/.claude/projects/*/*.jsonl → 增量解析 → 去重 → 费用计算 → proxy_request_logs 表
+//! ~/.claude/projects/<p>/<sid>.jsonl            ┐
+//! ~/.claude/projects/<p>/<sid>/subagents/*.jsonl ┴→ 增量解析 → 去重 → 费用计算 → proxy_request_logs 表
 //! ```
+//!
+//! A subagent's transcript carries its parent's `sessionId`, so its calls count
+//! toward the parent session. `input_tokens` is Claude's own: fresh input, without
+//! the cache reads and writes.
 
 use crate::config::get_claude_config_dir;
 use crate::database::{lock_conn, Database};
@@ -104,32 +109,47 @@ pub fn sync_claude_session_logs(db: &Database) -> Result<SessionSyncResult, AppE
     Ok(result)
 }
 
-/// 收集目录下所有 .jsonl 文件
+/// Directory levels below `projects/` that are searched: `<p>` (1), `<sid>` (2)
+/// and `subagents` (3), so `projects/<p>/<sid>/subagents/*.jsonl` is read.
+const PROJECTS_MAX_DEPTH: u32 = 3;
+
+/// 收集 `projects/` 下各级目录（最多 3 层）中的 .jsonl 文件
 fn collect_jsonl_files(projects_dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
+    collect_jsonl_under(projects_dir, 0, &mut files);
+    files
+}
 
-    let entries = match fs::read_dir(projects_dir) {
-        Ok(e) => e,
-        Err(_) => return files,
+fn collect_jsonl_under(dir: &Path, depth: u32, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
     };
-
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        // 每个项目目录下的 .jsonl 文件
-        if let Ok(sub_entries) = fs::read_dir(&path) {
-            for sub_entry in sub_entries.flatten() {
-                let sub_path = sub_entry.path();
-                if sub_path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                    files.push(sub_path);
-                }
+        if path.is_dir() {
+            if depth < PROJECTS_MAX_DEPTH {
+                collect_jsonl_under(&path, depth + 1, files);
             }
+        } else if depth >= 1 && path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+            files.push(path);
         }
     }
+}
 
-    files
+/// The session a transcript belongs to by its path, for lines that carry no
+/// `sessionId`: `<sid>` of `<sid>/subagents/<agent>.jsonl`, else the file stem.
+fn session_of_path(path: &Path) -> Option<String> {
+    let dir = path.parent()?;
+    if dir.file_name().and_then(|n| n.to_str()) == Some("subagents") {
+        return dir
+            .parent()?
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string);
+    }
+    path.file_stem()
+        .and_then(|n| n.to_str())
+        .map(str::to_string)
 }
 
 /// 同步单个 JSONL 文件，返回 (imported, skipped)
@@ -243,7 +263,9 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
                 .get("timestamp")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
-            session_id: current_session_id.clone(),
+            session_id: current_session_id
+                .clone()
+                .or_else(|| session_of_path(file_path)),
         };
 
         // 按 message.id 去重：优先保留有 stop_reason 的条目，否则保留最新的
@@ -273,11 +295,9 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
     let mut skipped: u32 = 0;
 
     for msg in messages.values() {
-        // 只导入有 stop_reason 的最终条目（完整的 API 调用）
-        if msg.stop_reason.is_none() {
-            continue;
-        }
-
+        // A reply without a stop_reason is still a call: a subagent's replies
+        // mostly never get one, and a reply still streaming gets its final line
+        // later, which then updates the row (see insert_session_log_entry).
         let request_id = format!(
             "{}{}",
             crate::proxy::usage::parser::SESSION_REQUEST_ID_PREFIX,
@@ -338,26 +358,17 @@ fn update_sync_state(
     Ok(())
 }
 
-/// 插入单条会话日志到 proxy_request_logs，返回是否成功插入 (true=新插入, false=已存在)
+/// 插入单条会话日志到 proxy_request_logs，返回是否写入 (true=新插入或更新, false=未变)
+///
+/// A row this parser wrote earlier from a reply's unfinished lines is updated
+/// when a later line reports more output; a proxy row sharing the message id
+/// is never touched.
 fn insert_session_log_entry(
     db: &Database,
     request_id: &str,
     msg: &ParsedAssistantUsage,
 ) -> Result<bool, AppError> {
     let conn = lock_conn!(db.conn);
-
-    // 检查是否已存在
-    let exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = ?1",
-            rusqlite::params![request_id],
-            |row| row.get::<_, i64>(0).map(|c| c > 0),
-        )
-        .unwrap_or(false);
-
-    if exists {
-        return Ok(false);
-    }
 
     // 解析时间戳
     let created_at = msg
@@ -409,14 +420,25 @@ fn insert_session_log_entry(
         ),
     };
 
-    conn.execute(
-        "INSERT OR IGNORE INTO proxy_request_logs (
+    let changed = conn.execute(
+        "INSERT INTO proxy_request_logs (
             request_id, provider_id, app_type, model, request_model,
             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
             input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
             latency_ms, first_token_ms, status_code, error_message, session_id,
             provider_type, is_streaming, cost_multiplier, created_at, data_source
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+        ON CONFLICT(request_id) DO UPDATE SET
+            input_tokens = excluded.input_tokens,
+            output_tokens = excluded.output_tokens,
+            cache_read_tokens = excluded.cache_read_tokens,
+            cache_creation_tokens = excluded.cache_creation_tokens,
+            input_cost_usd = excluded.input_cost_usd,
+            output_cost_usd = excluded.output_cost_usd,
+            cache_read_cost_usd = excluded.cache_read_cost_usd,
+            cache_creation_cost_usd = excluded.cache_creation_cost_usd,
+            total_cost_usd = excluded.total_cost_usd
+        WHERE data_source = 'session_log' AND excluded.output_tokens > output_tokens",
         rusqlite::params![
             request_id,
             "_session",         // provider_id: 标记为会话来源
@@ -434,7 +456,7 @@ fn insert_session_log_entry(
             total_cost,
             0i64,               // latency_ms: 会话日志无此数据
             Option::<i64>::None, // first_token_ms
-            200i64,             // status_code: 有 stop_reason 说明请求成功
+            200i64,             // status_code: 会话日志只记录成功的回复
             Option::<String>::None, // error_message
             msg.session_id,
             Some("session_log"), // provider_type
@@ -446,7 +468,7 @@ fn insert_session_log_entry(
     )
     .map_err(|e| AppError::Database(format!("插入会话日志失败: {e}")))?;
 
-    Ok(true)
+    Ok(changed > 0)
 }
 
 /// 从 model_pricing 表查找模型定价（支持模糊匹配）
@@ -635,5 +657,173 @@ mod tests {
 
         messages.insert("msg_1".to_string(), final_entry);
         assert_eq!(messages.get("msg_1").unwrap().output_tokens, 1349);
+    }
+
+    use crate::test_sandbox::sandbox;
+    use serial_test::serial;
+    use std::time::{Duration, SystemTime};
+
+    const PARENT: &str = "0f3a1c2d-1111-4222-8333-444455556666";
+
+    /// An assistant JSONL line as Claude Code writes it.
+    fn assistant_line(msg_id: &str, output: u32, stop: Option<&str>, ts: &str) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "sessionId": PARENT,
+            "timestamp": ts,
+            "message": {
+                "id": msg_id,
+                "model": "claude-opus-4-6",
+                "stop_reason": stop,
+                "usage": {
+                    "input_tokens": 2,
+                    "output_tokens": output,
+                    "cache_read_input_tokens": 2894,
+                    "cache_creation_input_tokens": 64985
+                }
+            }
+        })
+        .to_string()
+    }
+
+    fn write_lines(path: &Path, lines: &[String]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, lines.join("\n") + "\n").unwrap();
+    }
+
+    /// Push a file's mtime forward so the next sync sees it as changed even
+    /// within the same second.
+    fn touch_later(path: &Path, secs: u64) {
+        let file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        file.set_modified(SystemTime::now() + Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    fn logged(db: &Database) -> Vec<(String, Option<String>, i64)> {
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT request_id, session_id, output_tokens FROM proxy_request_logs
+                 WHERE data_source = 'session_log' ORDER BY request_id",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    #[test]
+    #[serial]
+    fn subagent_transcripts_count_toward_the_parent_session() {
+        let sandbox = sandbox();
+        let project = sandbox.home().join(".claude/projects/-work-app");
+        write_lines(
+            &project.join(format!("{PARENT}.jsonl")),
+            &[assistant_line(
+                "msg_main",
+                300,
+                Some("end_turn"),
+                "2026-10-10T18:07:30Z",
+            )],
+        );
+        // a subagent's own transcript: its lines carry the parent's sessionId, and
+        // most of its replies never get a stop_reason (only their first usage)
+        write_lines(
+            &project.join(format!("{PARENT}/subagents/agent-a2c17cdb.jsonl")),
+            &[
+                assistant_line("msg_sub_1", 7, None, "2026-10-10T18:07:36Z"),
+                assistant_line("msg_sub_1", 7, None, "2026-10-10T18:07:37Z"),
+                assistant_line("msg_sub_2", 124, Some("tool_use"), "2026-10-10T18:07:39Z"),
+            ],
+        );
+        let db = Database::memory().unwrap();
+
+        let result = sync_claude_session_logs(&db).unwrap();
+
+        assert_eq!(result.files_scanned, 2);
+        let parent = Some(PARENT.to_string());
+        assert_eq!(
+            logged(&db),
+            vec![
+                ("session:msg_main".to_string(), parent.clone(), 300),
+                ("session:msg_sub_1".to_string(), parent.clone(), 7),
+                ("session:msg_sub_2".to_string(), parent, 124),
+            ]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn a_reply_read_before_it_finished_is_updated_when_its_final_line_arrives() {
+        let sandbox = sandbox();
+        let file = sandbox
+            .home()
+            .join(format!(".claude/projects/-work-app/{PARENT}.jsonl"));
+        let first = assistant_line("msg_live", 5, None, "2026-10-10T18:07:30Z");
+        write_lines(&file, std::slice::from_ref(&first));
+        let db = Database::memory().unwrap();
+        sync_claude_session_logs(&db).unwrap();
+
+        write_lines(
+            &file,
+            &[
+                first,
+                assistant_line("msg_live", 480, Some("end_turn"), "2026-10-10T18:07:42Z"),
+            ],
+        );
+        touch_later(&file, 5);
+        sync_claude_session_logs(&db).unwrap();
+
+        assert_eq!(
+            logged(&db),
+            vec![(
+                "session:msg_live".to_string(),
+                Some(PARENT.to_string()),
+                480
+            )]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn a_proxy_row_with_the_same_message_id_is_left_alone() {
+        let sandbox = sandbox();
+        write_lines(
+            &sandbox
+                .home()
+                .join(format!(".claude/projects/-work-app/{PARENT}.jsonl")),
+            &[assistant_line(
+                "msg_proxied",
+                900,
+                Some("end_turn"),
+                "2026-10-10T18:07:30Z",
+            )],
+        );
+        let db = Database::memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO proxy_request_logs (request_id, provider_id, app_type, model,
+                    output_tokens, latency_ms, status_code, created_at, data_source)
+                 VALUES ('session:msg_proxied', 'ofox', 'claude', 'claude-opus-4-6', 10, 5, 200,
+                    1, 'proxy')",
+                [],
+            )
+            .unwrap();
+        }
+
+        sync_claude_session_logs(&db).unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let (source, output): (String, i64) = conn
+            .query_row(
+                "SELECT data_source, output_tokens FROM proxy_request_logs
+                 WHERE request_id = 'session:msg_proxied'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((source.as_str(), output), ("proxy", 10));
     }
 }
