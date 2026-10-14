@@ -27,6 +27,36 @@ export interface UpdateCheckResult {
   pubDate: string | null;
 }
 
+/** Event the backend emits when {@link SettingsHealth} changes. */
+export const SETTINGS_HEALTH_EVENT = "settings-health-changed";
+
+/**
+ * How `settings.json` was read. `recovered`: it did not parse and its last good
+ * copy was loaded (the bad bytes are kept at `badCopy`). `unreadable`: neither it
+ * nor its backup parses, so nothing is saved until the user resets it.
+ */
+export interface SettingsHealth {
+  state: "ok" | "recovered" | "unreadable";
+  path: string;
+  /** Where the unreadable bytes were copied aside. */
+  badCopy: string | null;
+  /** What was wrong with the file (English, for display and logs). */
+  detail: string | null;
+}
+
+/** Read the settings file's health; ask on mount, then follow {@link SETTINGS_HEALTH_EVENT}. */
+export async function getSettingsHealth(): Promise<SettingsHealth> {
+  return await invoke("get_settings_health");
+}
+
+/**
+ * Keep the unreadable file aside and write default settings. Does nothing when
+ * the settings are not `unreadable`. Resolves to the health afterwards.
+ */
+export async function resetUnreadableSettings(): Promise<SettingsHealth> {
+  return await invoke("reset_unreadable_settings");
+}
+
 export const settingsApi = {
   async get(): Promise<Settings> {
     return await invoke("get_settings");
