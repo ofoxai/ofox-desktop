@@ -280,7 +280,8 @@
     "openFailed": "无法打开链接",
     "usage": {
       "webDetails": "在网页查看详细用量 ↗"
-    }
+    },
+    "website": "Ofox 网站 ↗"
   },
   "firstRunNotice": {
     "title": "欢迎使用 Ofox Desktop",

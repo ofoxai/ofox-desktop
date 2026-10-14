@@ -280,7 +280,8 @@
     "openFailed": "リンクを開けませんでした",
     "usage": {
       "webDetails": "ウェブで詳しい使用量を見る ↗"
-    }
+    },
+    "website": "Ofox ウェブサイト ↗"
   },
   "firstRunNotice": {
     "title": "Ofox Desktop へようこそ",

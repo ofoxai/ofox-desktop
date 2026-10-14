@@ -280,7 +280,8 @@
     "openFailed": "Couldn't open the link",
     "usage": {
       "webDetails": "View detailed usage on the web ↗"
-    }
+    },
+    "website": "Ofox website ↗"
   },
   "firstRunNotice": {
     "title": "Welcome to Ofox Desktop",

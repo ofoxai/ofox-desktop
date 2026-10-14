@@ -11,7 +11,9 @@ import { ofoxLogout } from "@/lib/api/ofoxAuth";
 import { announceLogout } from "@/lib/accountKeys";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
 import { UserAvatar } from "@/components/UserAvatar";
-import { ofoxAvatarUrl } from "@/lib/ofoxUrls";
+import { ofoxAvatarUrl, ofoxMarketingUrl } from "@/lib/ofoxUrls";
+import { useOfoxApex } from "@/hooks/useOfoxApex";
+import { Button } from "@/components/ui/button";
 import { getCurrentVersion } from "@/lib/updater";
 import { OfoxApexSwitch } from "@/components/OfoxApexSwitch";
 import type { Settings } from "@/types";
@@ -22,7 +24,8 @@ import type { Settings } from "@/types";
  *
  *   · Account     — show identity, allow logout
  *   · Preferences — auto-launch, low-balance threshold
- *   · About       — app version + check-for-updates entry point
+ *   · About       — app version + check-for-updates entry point, and the
+ *                   link to the Ofox website (it left the console footer)
  *
  * The "检查更新" button calls the OFox-native self-hosted update check
  * (`check_for_updates` → desktop.ofox.ai/latest.json on Cloudflare R2), NOT
@@ -74,6 +77,7 @@ export default function OfoxSettingsDialog({
 }: OfoxSettingsDialogProps) {
   const { status, refetch } = useOfoxAuth();
   const user = status?.user ?? null;
+  const { apex } = useOfoxApex();
 
   // ── Auto-launch (sourced from backend so the toggle reflects reality even
   // if it was changed elsewhere — e.g. macOS System Settings). Reads on open;
@@ -316,6 +320,13 @@ export default function OfoxSettingsDialog({
     }
   }, [checkingUpdate, onOpenChange]);
 
+  const openWebsite = useCallback(() => {
+    settingsApi.openExternal(ofoxMarketingUrl(apex)).catch((e) => {
+      console.error("[OfoxSettingsDialog] open website failed", e);
+      toast.error(t("shell.openFailed"));
+    });
+  }, [apex, t]);
+
   // ── Render ─────────────────────────────────────────────────────────────
 
   return (
@@ -458,6 +469,15 @@ export default function OfoxSettingsDialog({
                 {checkingUpdate && <Loader2 className="h-3 w-3 animate-spin" />}
                 检查更新
               </button>
+            </div>
+            <div className="px-4 py-2">
+              <Button
+                variant="link"
+                className="h-auto px-0 text-ctl"
+                onClick={openWebsite}
+              >
+                {t("shell.website")}
+              </Button>
             </div>
           </SectionCard>
         </div>
