@@ -1,25 +1,21 @@
-## Summary / 概述
+## Behavior
 
-<!-- Briefly describe what this PR does and why. / 简要描述这个 PR 做了什么以及为什么。 -->
+<!-- Explain the concrete trigger, previous behavior, and resulting behavior. Link the issue. -->
 
-## Related Issue / 关联 Issue
+## Verification
 
-<!-- Link the related issue. Use "Fixes #123" to auto-close it when merged. -->
-<!-- 关联相关 Issue。使用 "Fixes #123" 可在合并时自动关闭。 -->
+<!-- Record exact HEAD SHA, OS/toolchain, commands, results, skipped checks, and screenshots for UI changes. -->
 
-Fixes #
-
-## Screenshots / 截图
-
-<!-- If applicable, add before/after screenshots. / 如有需要，请添加修改前后的截图。 -->
-
-| Before / 修改前 | After / 修改后 |
-|-----------------|---------------|
-|                 |               |
-
-## Checklist / 检查清单
-
-- [ ] `pnpm typecheck` passes / 通过 TypeScript 类型检查
-- [ ] `pnpm format:check` passes / 通过代码格式检查
-- [ ] `cargo clippy` passes (if Rust code changed) / 通过 Clippy 检查（如修改了 Rust 代码）
-- [ ] Updated i18n files if user-facing text changed / 如修改了用户可见文本，已更新国际化文件
+- [ ] Regression test fails without the change and passes with it.
+- [ ] Frontend: `pnpm typecheck`, `pnpm format:check`, `pnpm test:unit`.
+- [ ] Rust: fmt, `cargo clippy --all-targets -- -D warnings`, full tests on each affected OS.
+- [ ] Windows-specific paths ran natively; otherwise Windows is explicitly pending.
+- [ ] Every sibling agent affected by the same invariant is covered.
+- [ ] Real installed agent/version verified, or explicitly marked unverified.
+- [ ] User files use `atomic_write` / `FileTxn`; tests are sandboxed and shared environment/settings use the common serial lock.
+- [ ] No secrets in logs, errors, screenshots or committed fixtures.
+- [ ] zh/en/ja keys and placeholders match; both OFox apex values verified.
+- [ ] UI light/dark, 900px and keyboard focus checked where affected.
+- [ ] `docs/agent-wiring.md`, lessons and limitations updated as needed.
+- [ ] Independent review completed; accepted limitations are recorded, not described as fixed.
+- [ ] Release changes preserve dry-run and require CI plus Windows Probe at the same SHA.

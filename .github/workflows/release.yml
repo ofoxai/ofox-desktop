@@ -40,11 +40,33 @@ env:
   PNPM_VERSION: "10.12.3"
 
 jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  windows-probe:
+    name: Verify Windows Probe at release SHA
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Require successful Windows Probe for this exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+        run: node scripts/check-windows-probe.mjs
+
   # ─────────────────────────────────────────────────────────────
   # 构建：按平台 fan out，产物以 artifact 形式交给 publish
   # ─────────────────────────────────────────────────────────────
   build:
     name: Build (${{ matrix.platform }})
+    needs: [verify, windows-probe]
     environment: release # ← secrets 边界
     strategy:
       fail-fast: false
