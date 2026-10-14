@@ -883,6 +883,81 @@ mod v10_upgrade {
     use super::*;
     use serial_test::serial;
 
+    /// Calls of `session` counted by live rows plus the archive.
+    fn session_calls(db: &Database, session: &str) -> i64 {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM proxy_request_logs WHERE session_id = ?1)
+                  + (SELECT COALESCE(SUM(request_count), 0) FROM session_usage_archive
+                     WHERE session_id = ?1)",
+            [session],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    #[serial]
+    fn restoring_the_pre_migration_backup_counts_each_call_once_and_reprices_claude() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db_path = get_app_config_dir().join("ofox-desktop.db");
+        std::fs::create_dir_all(get_app_config_dir()).unwrap();
+        {
+            let conn = Connection::open(&db_path).expect("create v10 db");
+            conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
+                .unwrap();
+            conn.execute_batch(V10_USAGE_SCHEMA_SQL)
+                .expect("v10 schema");
+            let now = chrono::Utc::now().timestamp();
+            // v10 priced Claude input as (3 - 5000 -> 0): no input cost
+            for (id, created_at) in [("claude-old", now - 40 * 86400), ("claude-new", now)] {
+                conn.execute(
+                    "INSERT INTO proxy_request_logs (request_id, provider_id, app_type, model,
+                        input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                        input_cost_usd, total_cost_usd, latency_ms, status_code, session_id,
+                        created_at, data_source)
+                     VALUES (?1, '_session', 'claude', 'claude-opus-4-7', 3, 150, 5000, 10000,
+                        '0', '0.06', 0, 200, 's-old', ?2, 'session_log')",
+                    params![id, created_at],
+                )
+                .unwrap();
+            }
+            Database::set_user_version(&conn, 10).unwrap();
+        }
+        // upgrade: backup, migrate, prune (claude-old moves into the archive)
+        let db = Database::init().expect("init upgrades v10");
+        let backups: Vec<String> = std::fs::read_dir(get_app_config_dir().join("backups"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(backups.len(), 1, "{backups:?}");
+        crate::services::usage_maintenance::run_pending(&db).unwrap();
+        assert_eq!(session_calls(&db, "s-old"), 2);
+
+        db.restore_from_backup(&backups[0])
+            .expect("restore v10 backup");
+
+        // claude-old is live again; the archive must not still hold it
+        assert_eq!(session_calls(&db, "s-old"), 2);
+        crate::services::usage_maintenance::run_pending(&db).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            let input_cost: String = conn
+                .query_row(
+                    "SELECT input_cost_usd FROM proxy_request_logs WHERE request_id = 'claude-old'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                input_cost, "0.000015",
+                "restored Claude rows are priced again"
+            );
+        }
+        db.rollup_and_prune(30).unwrap();
+        assert_eq!(session_calls(&db, "s-old"), 2);
+    }
+
     #[test]
     #[serial]
     fn init_backs_up_a_v10_database_before_normalizing_it() {
