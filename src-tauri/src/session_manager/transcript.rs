@@ -330,26 +330,33 @@ pub fn codex(path: &Path) -> Result<Vec<SessionMessage>, String> {
 /// A user message's items: harness context (the environment, instructions,
 /// AGENTS.md, any tagged block) as `system`, the rest as what was typed.
 fn codex_user(content: Option<&Value>, ts: Option<i64>, out: &mut Vec<SessionMessage>) {
-    let items = match content {
-        Some(Value::Array(items)) => items.clone(),
-        Some(Value::String(text)) => vec![serde_json::json!({"type": "input_text", "text": text})],
+    let field = |item: &'_ Value, key: &str| -> String {
+        item.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    // (kind, text) of each item; a message that is one string is one text item
+    let items: Vec<(String, String)> = match content {
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| (field(item, "type"), field(item, "text")))
+            .collect(),
+        Some(Value::String(text)) => vec![("input_text".into(), text.clone())],
         _ => return,
     };
     let mut pending = Pending::new(USER);
-    for item in &items {
-        match item.get("type").and_then(Value::as_str).unwrap_or("") {
+    for (kind, text) in &items {
+        match kind.as_str() {
             "input_image" | "image" => pending.push("[Image]"),
             "input_text" | "text" => {
-                let text = item.get("text").and_then(Value::as_str).unwrap_or("");
                 let trimmed = text.trim();
                 if IMAGE_TAG.is_match(trimmed) {
                     continue;
                 }
                 if trimmed.starts_with('<') || trimmed.starts_with("# AGENTS.md") {
                     pending.flush(ts, out);
-                    if !trimmed.is_empty() {
-                        out.push(message(SYSTEM, trimmed, ts));
-                    }
+                    out.push(message(SYSTEM, trimmed, ts));
                 } else {
                     pending.push(text);
                 }
