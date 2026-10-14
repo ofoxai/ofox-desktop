@@ -339,6 +339,8 @@ pub fn run() {
                         // 单文件大小限制 1GB
                         .max_file_size(1024 * 1024 * 1024)
                         .timezone_strategy(TimezoneStrategy::UseLocal)
+                        // 放在 timezone_strategy 之后（它会重设行格式）：每条日志先脱敏再落盘
+                        .format(redact::log_format)
                         .build(),
                 )?;
             }

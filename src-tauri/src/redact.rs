@@ -90,6 +90,24 @@ fn redact_value(caps: &Captures, value: &str, prefix: &str, quote: &str) -> Stri
     }
 }
 
+/// 日志文件和 stdout 共用的行格式：`[日期][时间][级别][来源] 内容`，内容先过 [`scrub`]。
+/// 在 `tauri_plugin_log::Builder` 里 `.timezone_strategy(..)` 之后用 `.format(log_format)`
+/// 挂上；前端经 `plugin:log` 命令写进来的日志也走这条路。
+pub fn log_format(
+    out: tauri_plugin_log::fern::FormatCallback,
+    message: &std::fmt::Arguments,
+    record: &log::Record,
+) {
+    let now = chrono::Local::now().format("[%Y-%m-%d][%H:%M:%S]");
+    let message = message.to_string();
+    out.finish(format_args!(
+        "{now}[{}][{}] {}",
+        record.level(),
+        record.target(),
+        scrub(&message)
+    ));
+}
+
 /// 配置文件解析失败时给用户看的描述：只留行列和错误类型，**不带出错那一行的原文**。
 /// `toml_edit` / `serde_json` 自带的 `Display` 会把出错的源码行（里面可能就是 key）
 /// 原样打出来，错误字符串经 UI 和日志流出去之前必须走这里。
@@ -397,5 +415,62 @@ mod tests {
             describe_json_error(&error),
             "line 1, column 2: missing field `key`"
         );
+    }
+
+    fn format_with_log_format(
+        level: log::Level,
+        target: &str,
+        message: std::fmt::Arguments,
+    ) -> String {
+        use std::sync::{Arc, Mutex};
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&lines);
+        let (_, logger) = tauri_plugin_log::fern::Dispatch::new()
+            .format(log_format)
+            .chain(tauri_plugin_log::fern::Output::call(move |record| {
+                sink.lock().unwrap().push(record.args().to_string());
+            }))
+            .into_log();
+        log::Log::log(
+            &*logger,
+            &log::Record::builder()
+                .args(message)
+                .level(level)
+                .target(target)
+                .build(),
+        );
+        let lines = lines.lock().unwrap();
+        assert_eq!(lines.len(), 1);
+        lines[0].clone()
+    }
+
+    #[test]
+    fn log_lines_have_the_secrets_scrubbed() {
+        let line = format_with_log_format(
+            log::Level::Warn,
+            "ofox::bind",
+            format_args!(
+                "codex bind failed: {} / Bearer abcdefgh12345678",
+                "experimental_bearer_token = \"sk-of-abc123456789\""
+            ),
+        );
+        assert!(!line.contains("abc123456789"), "{line}");
+        assert!(!line.contains("abcdefgh12345678"), "{line}");
+        assert!(
+            line.contains("[WARN][ofox::bind] codex bind failed: "),
+            "{line}"
+        );
+        assert!(
+            line.contains("experimental_bearer_token = \"«redacted»\""),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn log_lines_keep_a_timestamp_level_and_target() {
+        let line = format_with_log_format(log::Level::Info, "app", format_args!("started"));
+        let re = Regex::new(r"^\[\d{4}-\d{2}-\d{2}\]\[\d{2}:\d{2}:\d{2}\]\[INFO\]\[app\] started$")
+            .unwrap();
+        assert!(re.is_match(&line), "{line}");
     }
 }
