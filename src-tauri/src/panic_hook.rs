@@ -66,6 +66,60 @@ fn get_system_info() -> String {
     )
 }
 
+/// 把一条崩溃记录追加到崩溃日志。
+fn append_crash_entry(log_path: &std::path::Path, entry: &str) -> std::io::Result<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
+    file.write_all(entry.as_bytes())?;
+    file.flush()
+}
+
+/// 拼出一条崩溃记录。panic 消息里可能带着 key（比如对一个含 key 的 `Err` 做 `unwrap`），
+/// 系统信息里也可能有，这两段先脱敏。位置和调用栈**不脱敏**：函数名、文件名里常有
+/// `secret` / `token`（`ofox_secret::KeychainStore::load`，`src/ofox_secret.rs:44:9`），
+/// 按键值规则处理会把帧抹成 `ofox_secret:«redacted»`，崩溃日志就没法用了；它们是代码
+/// 位置，不带运行时数据。
+fn format_crash_entry(
+    timestamp: &str,
+    system_info: &str,
+    message: &str,
+    location: &str,
+    backtrace: &str,
+) -> String {
+    let separator = "=".repeat(80);
+    let sub_separator = "-".repeat(40);
+    let system_info = crate::redact::scrub(system_info);
+    let message = crate::redact::scrub(message);
+    format!(
+        r#"
+{separator}
+[CRASH REPORT] {timestamp}
+{separator}
+
+{sub_separator}
+System Information
+{sub_separator}
+{system_info}
+
+{sub_separator}
+Error Details
+{sub_separator}
+Message: {message}
+
+Location: {location}
+
+{sub_separator}
+Stack Trace (Backtrace)
+{sub_separator}
+{backtrace}
+
+{separator}
+"#
+    )
+}
+
 /// 设置 panic hook，捕获崩溃信息并写入日志文件
 ///
 /// 在应用启动时调用此函数，确保任何 panic 都会被记录。
@@ -136,40 +190,16 @@ pub fn setup_panic_hook() {
         let backtrace_str = format!("{backtrace}");
 
         // 格式化日志条目
-        let separator = "=".repeat(80);
-        let sub_separator = "-".repeat(40);
-        let crash_entry = format!(
-            r#"
-{separator}
-[CRASH REPORT] {timestamp}
-{separator}
-
-{sub_separator}
-System Information
-{sub_separator}
-{system_info}
-
-{sub_separator}
-Error Details
-{sub_separator}
-Message: {message}
-
-Location: {location}
-
-{sub_separator}
-Stack Trace (Backtrace)
-{sub_separator}
-{backtrace_str}
-
-{separator}
-"#
+        let crash_entry = format_crash_entry(
+            &timestamp,
+            &system_info,
+            &message,
+            &location,
+            &backtrace_str,
         );
 
         // 写入文件（追加模式）
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
-            let _ = file.write_all(crash_entry.as_bytes());
-            let _ = file.flush();
-
+        if append_crash_entry(&log_path, &crash_entry).is_ok() {
             // 记录日志文件位置到 stderr
             eprintln!("\n[Ofox-Switch] Crash log saved to: {}", log_path.display());
         }
@@ -191,6 +221,69 @@ mod tests {
         let path = get_crash_log_path();
         assert!(path.ends_with("crash.log"));
         assert!(path.to_string_lossy().contains(".ofox-desktop"));
+    }
+
+    const FRAMES: &str = "   7: ofox_desktop::ofox_secret::KeychainStore::load\n             at ./src/ofox_secret.rs:44:9\n   8: ofox_desktop::ofox_auth::token_refresh::run\n             at ./src/ofox_auth.rs:210:17";
+
+    fn entry(message: &str, location: &str, backtrace: &str) -> String {
+        format_crash_entry(
+            "2026-10-14 10:00:00.000",
+            "OS: macos (unix)\nWorking Dir: /tmp/work",
+            message,
+            location,
+            backtrace,
+        )
+    }
+
+    #[test]
+    fn crash_entry_never_holds_a_key_from_the_panic_message() {
+        let written = entry(
+            "called `Result::unwrap()` on an `Err` value: \"401 for Bearer abcdefgh12345678 (sk-of-abc123456789)\"",
+            "File: src/x.rs",
+            FRAMES,
+        );
+
+        assert!(!written.contains("abc123456789"), "{written}");
+        assert!(!written.contains("abcdefgh12345678"), "{written}");
+        assert!(written.contains("(«redacted»)"), "{written}");
+    }
+
+    #[test]
+    fn crash_entry_scrubs_the_system_info() {
+        let written = format_crash_entry(
+            "2026-10-14 10:00:00.000",
+            "Working Dir: /home/u/sk-of-abc123456789",
+            "boom",
+            "File: src/x.rs",
+            FRAMES,
+        );
+
+        assert!(!written.contains("abc123456789"), "{written}");
+    }
+
+    #[test]
+    fn crash_entry_keeps_the_location_and_backtrace_frames_intact() {
+        let location = "File: src/ofox_secret.rs\n         Line: 44\n         Column: 9";
+
+        let written = entry("boom", location, FRAMES);
+
+        assert!(written.contains(FRAMES), "{written}");
+        assert!(written.contains(location), "{written}");
+        assert!(written.contains("Message: boom"), "{written}");
+    }
+
+    #[test]
+    fn crash_log_appends_entries_as_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("crash.log");
+
+        append_crash_entry(&log_path, "first\n").unwrap();
+        append_crash_entry(&log_path, "second\n").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&log_path).unwrap(),
+            "first\nsecond\n"
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Claude Code 的绑定配置：只改 `settings.json` 里 `env` 下的接入字段，
 //! `mcpServers`、hooks、permissions、其它 env 一律不动。
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use serde_json::Value;
@@ -9,6 +10,7 @@ use crate::config::{get_claude_settings_path, FileTxn};
 use crate::ofox_apex::mentions_ofox_gateway;
 
 use super::json_file::{self, JsonPath, KeyStyle};
+use super::ownership::{self, Leaf, Leaves};
 use super::plan::{read_text, FileEdit, RestorePlan};
 
 const LABEL: &str = "Claude 的 settings.json";
@@ -17,8 +19,17 @@ const AUTH_TOKEN: JsonPath = &["env", "ANTHROPIC_AUTH_TOKEN"];
 const MODEL: JsonPath = &["env", "ANTHROPIC_MODEL"];
 /// 中转站常用的 x-api-key。绑定期间拿掉，免得和 Ofox 的 key 一起发给 Ofox。
 const API_KEY: JsonPath = &["env", "ANTHROPIC_API_KEY"];
-/// 解绑时一律还原成绑定前的值（原来没有就删掉）。
-const LEAVES: &[JsonPath] = &[BASE_URL, AUTH_TOKEN, MODEL, API_KEY];
+/// 用户在 agent 里「记住」的模型（`/model`）。绑定、在应用里保存模型时，原来有就改成
+/// Ofox 的模型（见 [`write_bound`]）。
+const REMEMBERED_MODEL: JsonPath = &["model"];
+/// 解绑时还原成绑定前的值（原来没有就删掉）；用户之后改过的按规则留着。
+pub(crate) const LEAVES: &[Leaf] = &[
+    Leaf::route(BASE_URL, ownership::ofox_url),
+    Leaf::route(AUTH_TOKEN, ownership::ofox_key),
+    Leaf::model(MODEL, BASE_URL),
+    Leaf::route(API_KEY, ownership::ofox_key),
+    Leaf::model(REMEMBERED_MODEL, BASE_URL),
+];
 const CONTAINERS: &[JsonPath] = &[&["env"]];
 
 pub(crate) fn settings_path() -> PathBuf {
@@ -84,9 +95,9 @@ pub(crate) fn write_bound(
     let mut bound = bound_settings(current.as_deref(), template, api_key)?;
     if let (true, Some(model)) = (select_route, template_str(template, MODEL)) {
         let before = json_file::parse_object(Some(&bound), LABEL)?;
-        if before.get("model").is_some() {
+        if json_file::get(&before, REMEMBERED_MODEL).is_some() {
             let mut after = before.clone();
-            json_file::set(&mut after, &["model"], model.into());
+            json_file::set(&mut after, REMEMBERED_MODEL, model.into());
             bound = json_file::render_changed(&bound, KeyStyle::Json, &before, &after)?;
         }
     }
@@ -94,11 +105,24 @@ pub(crate) fn write_bound(
         .map_err(|e| format!("写入 Claude 配置失败：{e}"))
 }
 
+pub(crate) fn leaves(text: Option<&str>) -> Result<Leaves, String> {
+    json_file::leaves(text, LABEL, LEAVES)
+}
+
 pub(crate) fn plan_restore(
     original: Option<&str>,
     current: Option<&str>,
+    keep: &BTreeSet<String>,
 ) -> Result<RestorePlan, String> {
-    json_file::plan_restore(original, current, LABEL, KeyStyle::Json, LEAVES, CONTAINERS)
+    json_file::plan_restore(
+        original,
+        current,
+        LABEL,
+        KeyStyle::Json,
+        LEAVES,
+        CONTAINERS,
+        keep,
+    )
 }
 
 /// 没有绑定前快照时的尽力清理：去掉 Ofox 的地址、key 和 Ofox 的模型名，
@@ -197,7 +221,7 @@ mod tests {
     #[test]
     fn restore_puts_the_relay_setup_back_byte_for_byte() {
         let bound = bound_settings(Some(RELAY), &template(Some("anthropic/x")), "sk-of-K").unwrap();
-        let plan = plan_restore(Some(RELAY), Some(&bound)).unwrap();
+        let plan = plan_restore(Some(RELAY), Some(&bound), &BTreeSet::new()).unwrap();
         assert!(plan.exact);
         assert_eq!(plan.content.as_deref(), Some(RELAY));
     }

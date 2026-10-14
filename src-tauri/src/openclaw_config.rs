@@ -6,6 +6,7 @@
 use crate::config::{atomic_write, get_app_config_dir};
 use crate::error::AppError;
 use crate::json5_sections::{self, KeyStyle};
+use crate::redact::describe_json_error;
 use crate::settings::{effective_backup_retain_count, get_openclaw_override_dir};
 use chrono::Local;
 use indexmap::IndexMap;
@@ -571,8 +572,12 @@ pub fn get_default_model() -> Result<Option<OpenClawDefaultModel>, AppError> {
         return Ok(None);
     };
 
-    let model = serde_json::from_value(model_value.clone())
-        .map_err(|e| AppError::Config(format!("Failed to parse agents.defaults.model: {e}")))?;
+    let model = serde_json::from_value(model_value.clone()).map_err(|e| {
+        AppError::Config(format!(
+            "Failed to parse agents.defaults.model: {}",
+            describe_json_error(&e)
+        ))
+    })?;
     Ok(Some(model))
 }
 
@@ -610,8 +615,12 @@ pub fn get_model_catalog() -> Result<Option<HashMap<String, OpenClawModelCatalog
         return Ok(None);
     };
 
-    let catalog = serde_json::from_value(models_value.clone())
-        .map_err(|e| AppError::Config(format!("Failed to parse agents.defaults.models: {e}")))?;
+    let catalog = serde_json::from_value(models_value.clone()).map_err(|e| {
+        AppError::Config(format!(
+            "Failed to parse agents.defaults.models: {}",
+            describe_json_error(&e)
+        ))
+    })?;
     Ok(Some(catalog))
 }
 
@@ -651,8 +660,12 @@ pub fn get_agents_defaults() -> Result<Option<OpenClawAgentsDefaults>, AppError>
         return Ok(None);
     };
 
-    let defaults = serde_json::from_value(defaults_value.clone())
-        .map_err(|e| AppError::Config(format!("Failed to parse agents.defaults: {e}")))?;
+    let defaults = serde_json::from_value(defaults_value.clone()).map_err(|e| {
+        AppError::Config(format!(
+            "Failed to parse agents.defaults: {}",
+            describe_json_error(&e)
+        ))
+    })?;
     Ok(Some(defaults))
 }
 
@@ -692,8 +705,12 @@ pub fn get_env_config() -> Result<OpenClawEnvConfig, AppError> {
         });
     };
 
-    serde_json::from_value(env_value.clone())
-        .map_err(|e| AppError::Config(format!("Failed to parse env config: {e}")))
+    serde_json::from_value(env_value.clone()).map_err(|e| {
+        AppError::Config(format!(
+            "Failed to parse env config: {}",
+            describe_json_error(&e)
+        ))
+    })
 }
 
 /// Write the env config section
@@ -719,8 +736,12 @@ pub fn get_tools_config() -> Result<OpenClawToolsConfig, AppError> {
         });
     };
 
-    serde_json::from_value(tools_value.clone())
-        .map_err(|e| AppError::Config(format!("Failed to parse tools config: {e}")))
+    serde_json::from_value(tools_value.clone()).map_err(|e| {
+        AppError::Config(format!(
+            "Failed to parse tools config: {}",
+            describe_json_error(&e)
+        ))
+    })
 }
 
 /// Write the tools config section

@@ -897,7 +897,7 @@ mod tests {
                 "sync_live_model"
             );
             assert!(
-                awaits_ready(ofox_bind::migrate_codex_on_startup()).await,
+                awaits_ready(ofox_bind::migrate_codex_on_startup(&db)).await,
                 "migrate_codex_on_startup"
             );
         }

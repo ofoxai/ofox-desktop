@@ -40,6 +40,7 @@ mod prompt_files;
 mod provider;
 mod provider_defaults;
 mod proxy;
+mod redact;
 mod services;
 mod session_manager;
 mod settings;
@@ -339,6 +340,8 @@ pub fn run() {
                         // 单文件大小限制 1GB
                         .max_file_size(1024 * 1024 * 1024)
                         .timezone_strategy(TimezoneStrategy::UseLocal)
+                        // 放在 timezone_strategy 之后（它会重设行格式）：每条日志先脱敏再落盘
+                        .format(redact::log_format)
                         .build(),
                 )?;
             }
@@ -1093,7 +1096,7 @@ pub fn run() {
 
                 // 旧版本把 Codex 的 Ofox key 写进 auth.json 并要求 OpenAI 认证；用
                 // ChatGPT 登录的用户会把 ChatGPT 令牌发给 Ofox。迁成服务商自带 key。
-                crate::services::ofox_bind::migrate_codex_on_startup().await;
+                crate::services::ofox_bind::migrate_codex_on_startup(&state.db).await;
 
                 // 注：曾经在这里调 `restore_proxy_state_on_startup`——读
                 // `proxy_config.enabled` 然后无脑给所有标 true 的工具重跑

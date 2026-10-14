@@ -28,6 +28,7 @@ use tokio::sync::RwLock;
 use crate::app_config::{AppType, BindableTool};
 use crate::commands::ofox_auth::OfoxAuthState;
 use crate::ofox_apex::gateway_base;
+use crate::ofox_api_keys::ApiKeyError;
 use crate::ofox_auth::OfoxAuthManager;
 use crate::store::AppState;
 
@@ -274,7 +275,9 @@ pub async fn set_active_ofox_model(
             .load(crate::ofox_secret::Slot::ApiKey { tool })
             .map_err(|_| "读取已绑定的 API Key 失败".to_string())?
             .ok_or_else(|| "未找到已绑定的 API Key".to_string())?;
-        crate::native_tools::set_model(&state.db, tool, &key, selected).await?;
+        crate::native_tools::set_model(&state.db, tool, &key, selected)
+            .await
+            .map_err(crate::redact::scrub_error)?;
         crate::ofox_api_keys::mark_key_used(tool);
         return Ok(());
     }
@@ -292,8 +295,10 @@ pub async fn set_active_ofox_model(
             &ofox_state.0,
         )
         .await
-        .map_err(|e| format!("获取 WorkBuddy OfoxAI API key 失败: {e}"))?;
-        crate::workbuddy_config::update_selected_models(&state.db, &api_key, &[selection]).await?;
+        .map_err(|e| api_key_failure("获取 WorkBuddy OfoxAI API key 失败: ", &e))?;
+        crate::workbuddy_config::update_selected_models(&state.db, &api_key, &[selection])
+            .await
+            .map_err(crate::redact::scrub_error)?;
         crate::ofox_api_keys::mark_key_used(BindableTool::WorkBuddy);
         return Ok(());
     }
@@ -360,7 +365,8 @@ pub async fn set_active_ofox_model(
             &previous_settings,
             &provider.settings_config,
         )
-        .await?;
+        .await
+        .map_err(crate::redact::scrub_error)?;
     } else {
         persist_with_rollback(
             &state.db,
@@ -632,7 +638,8 @@ pub async fn set_active_ofox_models(
         &previous_settings,
         &provider.settings_config,
     )
-    .await?;
+    .await
+    .map_err(crate::redact::scrub_error)?;
     // 保存已完成；默认走 Responses 的模型在后台验证，不阻塞也不改配置。
     tauri::async_runtime::spawn(crate::model_compat::verify_in_background(
         catalog.models,
@@ -642,6 +649,11 @@ pub async fn set_active_ofox_models(
         saved: resolved.into_iter().map(|(id, _)| id).collect(),
         skipped,
     })
+}
+
+/// 取 key 失败的提示。服务端的拒绝文案里可能回显请求里的 key，抹掉再给前端。
+fn api_key_failure(context: &str, error: &ApiKeyError) -> String {
+    crate::redact::scrub_error(format!("{context}{error}"))
 }
 
 fn require_configured(
@@ -694,7 +706,9 @@ pub async fn set_workbuddy_managed_models(
         })
         .map_err(|_| "读取已绑定的 API Key 失败".to_string())?
         .ok_or_else(|| "未找到已绑定的 API Key，请重新绑定".to_string())?;
-    crate::workbuddy_config::update_selected_models(&state.db, &api_key, &model_selections).await?;
+    crate::workbuddy_config::update_selected_models(&state.db, &api_key, &model_selections)
+        .await
+        .map_err(crate::redact::scrub_error)?;
     crate::ofox_api_keys::mark_key_used(BindableTool::WorkBuddy);
     Ok(())
 }
@@ -950,9 +964,12 @@ fn set_codex_model(settings: &mut serde_json::Value, model: &str) -> Result<(), 
     let mut doc = if cfg_text.is_empty() {
         DocumentMut::new()
     } else {
-        cfg_text
-            .parse::<DocumentMut>()
-            .map_err(|e| format!("解析 Codex config TOML 失败: {e}"))?
+        cfg_text.parse::<DocumentMut>().map_err(|e| {
+            format!(
+                "解析 Codex config TOML 失败: {}",
+                crate::redact::describe_toml_error(&cfg_text, &e)
+            )
+        })?
     };
 
     if model.is_empty() {
@@ -1110,6 +1127,42 @@ mod tests {
             ping_failure_message(400, r#"{"message":"bad request"}"#),
             "请求失败（HTTP 400）bad request"
         );
+    }
+
+    #[test]
+    fn a_broken_codex_config_error_never_echoes_the_key_in_it() {
+        let broken = "model = \"gpt-5\"\nexperimental_bearer_token = \"sk-of-abc123456789\" oops\n";
+        let mut settings = serde_json::json!({ "config": broken });
+
+        let error = write_model_into_settings(&AppType::Codex, &mut settings, "gpt-6").unwrap_err();
+
+        assert!(error.contains("line 2, column"), "{error}");
+        assert!(!error.contains("abc123456789"), "{error}");
+        assert_eq!(settings["config"], broken, "settings left untouched");
+    }
+
+    #[test]
+    fn key_fetch_failures_never_repeat_a_key_the_server_echoes_back() {
+        let rejected = ApiKeyError::RemoteRejected("400: bad key sk-of-abc123456789".into());
+        let unauthorized = ApiKeyError::Unauthorized("Bearer abcdefgh12345678 expired".into());
+
+        for error in [rejected, unauthorized] {
+            let message = api_key_failure("获取 OfoxAI API key 失败：", &error);
+            assert!(
+                message.starts_with("获取 OfoxAI API key 失败："),
+                "{message}"
+            );
+            assert!(!message.contains("abc123456789"), "{message}");
+            assert!(!message.contains("abcdefgh12345678"), "{message}");
+        }
+    }
+
+    #[test]
+    fn ping_never_repeats_a_key_the_gateway_echoes_back() {
+        let body = r#"{"error":{"message":"Incorrect API key provided: sk-of-abc123456789xyz"}}"#;
+        let message = ping_failure_message(401, body);
+        assert!(!message.contains("abc123456789"), "{message}");
+        assert!(message.contains("Incorrect API key provided"), "{message}");
     }
 
     #[test]
@@ -1388,7 +1441,10 @@ async fn ofox_ping_model_internal(
                     success: false,
                     latency_ms: 0,
                     status_code: Some(401),
-                    error: Some(format!("获取 WorkBuddy OfoxAI API key 失败：{error}")),
+                    error: Some(api_key_failure(
+                        "获取 WorkBuddy OfoxAI API key 失败：",
+                        &error,
+                    )),
                 };
             }
         };
@@ -1497,7 +1553,7 @@ async fn ofox_ping_model_internal(
                     success: false,
                     latency_ms: 0,
                     status_code: Some(401),
-                    error: Some(format!("获取 OfoxAI API key 失败：{e}")),
+                    error: Some(api_key_failure("获取 OfoxAI API key 失败：", &e)),
                 };
             }
         }
@@ -1673,9 +1729,11 @@ fn ping_failure_message(status: u16, body: &str) -> String {
         })
         .unwrap_or(body)
         .trim();
+    // 网关可能把请求里的 key 原样回显在报错里；先抹掉再截断，免得截断把它切成抹不掉的残段。
+    let detail = crate::redact::scrub(detail);
     let detail = match detail.char_indices().nth(PING_DETAIL_MAX_CHARS) {
         Some((cut, _)) => format!("{}…", &detail[..cut]),
-        None => detail.to_string(),
+        None => detail.into_owned(),
     };
     format!("{hint}（HTTP {status}）{detail}")
 }

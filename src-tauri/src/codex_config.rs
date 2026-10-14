@@ -86,7 +86,8 @@ pub fn write_codex_live_atomic(
         None => String::new(),
     };
     if !cfg_text.trim().is_empty() {
-        toml::from_str::<toml::Table>(&cfg_text).map_err(|e| AppError::toml(&config_path, e))?;
+        toml::from_str::<toml::Table>(&cfg_text)
+            .map_err(|e| AppError::toml(&config_path, &cfg_text, e))?;
     }
 
     // 第一步：写 auth.json
@@ -150,7 +151,7 @@ pub fn validate_config_toml(text: &str) -> Result<(), AppError> {
     }
     toml::from_str::<toml::Table>(text)
         .map(|_| ())
-        .map_err(|e| AppError::toml(Path::new("config.toml"), e))
+        .map_err(|e| AppError::toml(Path::new("config.toml"), text, e))
 }
 
 /// 读取并校验 `~/.codex/config.toml`，返回文本（可能为空）
@@ -171,9 +172,12 @@ pub fn read_and_validate_codex_config_text() -> Result<String, AppError> {
 ///
 /// Empty value removes the field.
 pub fn update_codex_toml_field(toml_str: &str, field: &str, value: &str) -> Result<String, String> {
-    let mut doc = toml_str
-        .parse::<DocumentMut>()
-        .map_err(|e| format!("TOML parse error: {e}"))?;
+    let mut doc = toml_str.parse::<DocumentMut>().map_err(|e| {
+        format!(
+            "TOML parse error: {}",
+            crate::redact::describe_toml_error(toml_str, &e)
+        )
+    })?;
 
     let trimmed = value.trim();
 
@@ -529,6 +533,19 @@ base_url = "https://production.api/v1"
                 .and_then(|v| v.as_str());
             assert_eq!(base_url, Some("https://api.ofox.ai/v1"));
         });
+    }
+
+    #[test]
+    fn config_toml_errors_never_echo_the_key_in_the_broken_file() {
+        let broken = "model = \"gpt-5\"\nexperimental_bearer_token = \"sk-of-abc123456789\" oops\n";
+
+        let validate = validate_config_toml(broken).unwrap_err().to_string();
+        let update = update_codex_toml_field(broken, "model", "gpt-6").unwrap_err();
+
+        for error in [validate, update] {
+            assert!(error.contains("line 2, column"), "{error}");
+            assert!(!error.contains("abc123456789"), "{error}");
+        }
     }
 
     #[test]

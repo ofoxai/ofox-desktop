@@ -50,7 +50,7 @@
     "willRestoreTitle": "Unbinding restores how this tool connected before Ofox:",
     "generic": "Ofox's address, key and model will be removed and your previous setup restored.",
     "keepNotice": "MCP servers, skills, plugins and other settings are kept.",
-    "forceRestoreNotice": "These settings return to their pre-Ofox values even if you changed them while bound.",
+    "forceRestoreNotice": "Settings Ofox wrote are removed or returned to their pre-Ofox values; settings you changed yourself after binding are kept.",
     "legacyNotice": "This tool was bound by an older version, so its original settings weren't saved. Unbinding removes Ofox's address, key and model and returns the tool to its default sign-in; your earlier custom settings can't be restored.",
     "sharedNotice": "{{others}} still uses Ofox, so the shared ~/.codex config stays until it is unbound too.",
     "nothingToRestore": "No Ofox configuration was found; unbinding only removes it from the list.",
@@ -65,7 +65,8 @@
       "fileKeptHasOtherContent": "A config file Ofox created now has content you added, so it was kept.",
       "recordCleanupFailed": "Failed to remove the binding record. The binding is retained; retry.",
       "leftoverRemoved": "Ofox settings were also found in another location and have been removed.",
-      "configAlreadyMissing": "Configuration was deleted and will not be recreated."
+      "configAlreadyMissing": "Configuration was deleted and will not be recreated.",
+      "userValueKept": "Settings you changed after binding stay as you set them: {{keys}}"
     }
   },
   "apexSwitch": {
