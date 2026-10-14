@@ -2146,6 +2146,7 @@ Would inspect/remove:
     }
 
     #[test]
+    #[serial]
     fn hermes_data_is_listed_by_what_it_keeps_not_as_its_whole_home() {
         let home = sandbox();
         let hermes = home.home().join(".hermes");
@@ -2356,6 +2357,8 @@ Would inspect/remove:
     use crate::ofox_secret::{InMemoryStore, Slot};
     use crate::settings::{self, ApiKeyMeta, KeyToDelete};
     use crate::test_sandbox::sandbox;
+    // Also serialize with tests that change HOME/settings without sandbox().
+    use serial_test::serial;
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
@@ -2482,6 +2485,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn unbind_comes_before_the_key_is_revoked_before_the_program_is_removed() {
         let _home = sandbox();
         bind(&["claude", "codex"]);
@@ -2507,6 +2511,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn preview_and_uninstall_wait_for_the_shell_snapshot_before_they_read_agent_dirs() {
         let _home = sandbox();
         let ready_calls = || crate::agent_env::READY_CALLS.with(|calls| calls.get());
@@ -2524,6 +2529,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn a_failed_unbind_stops_before_anything_else_is_done() {
         let _home = sandbox();
         let mut fake = Fake::new([Ok(codex_by_npm())]);
@@ -2538,6 +2544,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn a_key_still_used_by_another_bound_tool_is_kept() {
         let _home = sandbox();
         let mut fake = Fake::new([Ok(codex_by_npm()), Ok(Inspection::NotInstalled)]);
@@ -2555,6 +2562,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn a_key_that_could_not_be_deleted_remotely_is_reported_queued() {
         let _home = sandbox();
         let mut fake = Fake::new([Ok(codex_by_npm()), Ok(Inspection::NotInstalled)]);
@@ -2564,6 +2572,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn a_program_still_found_after_the_command_is_reported_with_its_path() {
         let _home = sandbox();
         let mut fake = Fake::new([Ok(codex_by_npm()), Ok(codex_by_npm())]);
@@ -2576,6 +2585,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn a_program_that_is_gone_counts_as_removed_even_if_the_command_complained() {
         let _home = sandbox();
         let mut fake = Fake::new([Ok(codex_by_npm()), Ok(Inspection::NotInstalled)]);
@@ -2585,6 +2595,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn a_failed_recheck_is_not_reported_as_removed() {
         let _home = sandbox();
         let fake = Fake::new([Ok(codex_by_npm()), Err("shell lookup failed".into())]);
@@ -2594,6 +2605,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn nothing_is_changed_when_the_tool_cannot_be_uninstalled_from_here() {
         let _home = sandbox();
         let unknown = Inspection::Cli {
@@ -2620,6 +2632,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn an_unsupported_tool_or_a_busy_one_is_refused_before_any_probe() {
         let _home = sandbox();
         let fake = Fake::new([Ok(codex_by_npm())]);
@@ -2633,6 +2646,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn progress_lines_are_numbered_by_step_and_all_go_through_the_sink() {
         let _home = sandbox();
         let mut fake = Fake::new([Ok(codex_by_npm()), Ok(Inspection::NotInstalled)]);
@@ -2661,6 +2675,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn the_result_lists_the_data_that_was_kept() {
         let home = sandbox();
         fs::create_dir_all(home.home().join(".codex")).unwrap();
@@ -2672,6 +2687,7 @@ Would inspect/remove:
     // ---- what the frontend says is still bound ------------------------------
 
     #[tokio::test]
+    #[serial]
     async fn what_the_frontend_says_is_still_bound_joins_the_settings_mirror() {
         let _home = sandbox();
         bind(&["claude"]);
@@ -2799,6 +2815,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn codex_keeps_its_key_and_shared_config_while_the_frontend_has_chatgpt_bound() {
         let home = sandbox();
         let effects = codex_bound_by_an_old_record(home.home()).await;
@@ -2829,6 +2846,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn without_another_bound_tool_codex_is_restored_and_its_key_retired() {
         let home = sandbox();
         let effects = codex_bound_by_an_old_record(home.home()).await;
@@ -2866,6 +2884,7 @@ Would inspect/remove:
 
     #[cfg(unix)]
     #[tokio::test]
+    #[serial]
     async fn a_preview_does_nothing_but_look() {
         let home = sandbox();
         let active = native_claude(home.home());
@@ -2906,6 +2925,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn a_preview_says_which_tool_shares_the_config_and_keeps_the_key() {
         let _home = sandbox();
         bind(&["codex", "chatgpt"]);
@@ -2928,6 +2948,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn a_preview_without_a_key_or_binding_has_nothing_to_revoke() {
         let _home = sandbox();
         let fake = Fake::new([Ok(codex_by_npm())]);
@@ -2938,6 +2959,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn a_preview_names_why_an_uninstall_is_blocked() {
         let _home = sandbox();
         let bundle = Path::new("/Applications/ChatGPT.app");
@@ -2972,6 +2994,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn a_blocked_preview_offers_the_manual_command() {
         let _home = sandbox();
         let fake = Fake::new([Ok(Inspection::Cli {
@@ -2993,6 +3016,7 @@ Would inspect/remove:
     // ---- bound registry ---------------------------------------------------
 
     #[test]
+    #[serial]
     fn forgetting_a_tool_leaves_the_others_bound() {
         let _home = sandbox();
         bind(&["claude", "codex", "chatgpt"]);
@@ -3016,6 +3040,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn a_key_deleted_on_the_server_is_gone_locally_too() {
         let _home = sandbox();
         let tool = BindableTool::Claude;
@@ -3037,6 +3062,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn a_key_the_server_could_not_delete_is_queued_and_dropped_locally() {
         let _home = sandbox();
         let tool = BindableTool::Claude;
@@ -3061,6 +3087,7 @@ Would inspect/remove:
     }
 
     #[tokio::test]
+    #[serial]
     async fn there_is_nothing_to_revoke_without_a_recorded_key_or_for_a_stopped_one() {
         let _home = sandbox();
         let tool = BindableTool::Claude;
