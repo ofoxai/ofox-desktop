@@ -72,13 +72,14 @@ pub fn sandbox() -> Sandbox {
     sandbox
 }
 
-/// `home` itself for an empty `relative` (no trailing separator), else `home/relative`.
+/// `home` itself for an empty `relative` (no trailing separator), else `home` plus
+/// the `/`-separated components of `relative` (joined one by one so Windows paths
+/// do not end up with mixed separators).
 fn location(home: &Path, relative: &str) -> PathBuf {
-    if relative.is_empty() {
-        home.to_path_buf()
-    } else {
-        home.join(relative)
-    }
+    relative
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .fold(home.to_path_buf(), |path, part| path.join(part))
 }
 
 impl Drop for Sandbox {
