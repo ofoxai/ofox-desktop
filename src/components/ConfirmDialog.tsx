@@ -57,7 +57,7 @@ export function ConfirmDialog({
       }}
     >
       <DialogContent className="max-w-sm" zIndex={zIndex}>
-        <DialogHeader className="space-y-3 border-b-0 bg-transparent pb-0">
+        <DialogHeader className="gap-2 border-b-0 pb-0 pt-[18px]">
           <DialogTitle className="flex items-center gap-2">
             <IconComponent className={iconClass} />
             {title}
@@ -67,7 +67,7 @@ export function ConfirmDialog({
           </DialogDescription>
         </DialogHeader>
         {details && <div className="px-[18px] pt-3 text-ctl">{details}</div>}
-        <DialogFooter className="flex gap-2 border-t-0 bg-transparent pt-4 sm:justify-end">
+        <DialogFooter className="border-t-0 pb-[18px] pt-4">
           <Button variant="secondary" onClick={onCancel} disabled={busy}>
             {cancelText || t("common.cancel")}
           </Button>
