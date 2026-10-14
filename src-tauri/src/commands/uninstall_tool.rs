@@ -8,9 +8,18 @@
 //! tests can check the order of the steps without touching a real tool.
 
 use serde::Serialize;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
-use super::tool_update::{installed_npm_package, DesktopInstallation, Installation, UpdatePlan};
+use super::tool_update::{
+    installed_npm_package, DesktopInstallation, Installation, ToolOperationGuard, UpdatePlan,
+};
+use crate::app_config::BindableTool;
+use crate::ofox_api_keys::ApiKeyError;
+use crate::ofox_secret::SecretStore;
+use crate::services::ofox_bind::report::UnbindReport;
 
 /// How the program was installed, as the frontend sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -472,6 +481,495 @@ pub(crate) fn bundle_in_use(ps_output: &str, bundle: &Path) -> bool {
     ps_output
         .lines()
         .any(|line| line.trim_start().starts_with(&inside))
+}
+
+// ---- what the frontend sees ---------------------------------------------
+
+/// What the key step will do (preview).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UninstallKey {
+    Revoke,
+    KeepShared,
+    None,
+}
+
+/// What the key step did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UninstallKeyOutcome {
+    Revoked,
+    Queued,
+    KeptShared,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UninstallStatus {
+    Removed,
+    StillPresent,
+}
+
+/// A dry run of an uninstall: nothing is changed to produce it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UninstallPreview {
+    pub tool: String,
+    pub installed: bool,
+    pub source: UninstallSource,
+    pub command: Option<String>,
+    pub removes: Vec<String>,
+    pub keeps: Vec<String>,
+    pub manual_command: Option<String>,
+    pub bound: bool,
+    pub shared_with: Vec<String>,
+    pub key: UninstallKey,
+    pub blocked_reason: Option<UninstallBlock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UninstallResult {
+    pub unbind: Option<UnbindReport>,
+    pub key: UninstallKeyOutcome,
+    pub status: UninstallStatus,
+    pub remaining_path: Option<String>,
+    pub kept: Vec<String>,
+}
+
+// ---- side effects -------------------------------------------------------
+
+/// What the machine looks like for one tool.
+#[derive(Debug, Clone)]
+pub(crate) enum Inspection {
+    NotInstalled,
+    Cli {
+        install: Installation,
+        owner: Result<UpdatePlan, String>,
+        hermes_help: Option<String>,
+    },
+    App {
+        app: DesktopInstallation,
+        running: bool,
+    },
+}
+
+/// Everything an uninstall does to the outside world, so tests can stand in.
+pub(crate) trait Effects {
+    fn os(&self) -> Os;
+    async fn inspect(&self, tool: &str) -> Result<Inspection, String>;
+    async fn unbind(
+        &self,
+        tool: &str,
+        still_bound: &[String],
+        dry_run: bool,
+    ) -> Result<UnbindReport, String>;
+    /// Revoke the tool's Ofox key (or queue its deletion) and clear the local copy.
+    async fn retire_key(&self, tool: &str) -> UninstallKeyOutcome;
+    fn forget_bound(&self, tool: &str) -> Result<(), String>;
+    /// Run the removal; every line it prints goes to `log`.
+    async fn execute(&self, action: &Action, log: &(dyn Fn(&str) + Sync)) -> Result<(), String>;
+}
+
+/// Receives `(step, line)`.
+pub(crate) type Sink<'a> = &'a (dyn Fn(u32, &str) + Sync);
+
+pub(crate) const TOTAL_STEPS: u32 = 3;
+const STEP_UNBIND: u32 = 1;
+const STEP_KEY: u32 = 2;
+const STEP_REMOVE: u32 = 3;
+pub(crate) const UNINSTALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+const UNINSTALLABLE: [&str; 10] = [
+    "claude",
+    "codex",
+    "chatgpt",
+    "gemini",
+    "opencode",
+    "openclaw",
+    "hermes",
+    "workbuddy",
+    "dsh",
+    "pi",
+];
+
+/// Every line shown to the user, ours and the process's, reaches the sink here
+/// and nowhere else.
+fn emit_line(sink: Sink<'_>, step: u32, line: &str) {
+    sink(step, line);
+}
+
+// ---- orchestration ------------------------------------------------------
+
+impl UninstallBlock {
+    fn code(self) -> &'static str {
+        match self {
+            Self::UnknownSource => "unknownSource",
+            Self::AppRunning => "appRunning",
+            Self::Busy => "busy",
+            Self::UnsupportedPlatform => "unsupportedPlatform",
+        }
+    }
+}
+
+fn check_tool(tool: &str) -> Result<(), String> {
+    if UNINSTALLABLE.contains(&tool) {
+        Ok(())
+    } else {
+        Err(format!("Unsupported tool: {tool}"))
+    }
+}
+
+/// The agent's own data that exists on this machine. Nothing here is ever removed.
+fn kept_data(tool: &str) -> Vec<PathBuf> {
+    use crate::{
+        codex_config, config, gemini_config, hermes_config, native_tools, openclaw_config,
+        opencode_config,
+    };
+    let home = config::get_home_dir();
+    let native = |tool: BindableTool| native_tools::config_dir(tool).ok();
+    let candidates: Vec<PathBuf> = match tool {
+        "claude" => vec![
+            config::get_claude_config_dir(),
+            config::get_claude_mcp_path(),
+        ],
+        "codex" | "chatgpt" => vec![codex_config::get_codex_config_dir()],
+        "gemini" => vec![gemini_config::get_gemini_dir()],
+        "opencode" => vec![
+            opencode_config::get_opencode_dir(),
+            home.join(".local/share/opencode"),
+        ],
+        "openclaw" => vec![openclaw_config::get_openclaw_dir()],
+        "hermes" => vec![hermes_config::get_hermes_dir()],
+        "pi" => native(BindableTool::Pi).into_iter().collect(),
+        "dsh" => native(BindableTool::Dsh).into_iter().collect(),
+        "workbuddy" => vec![home.join(".workbuddy")],
+        _ => vec![],
+    };
+    candidates
+        .into_iter()
+        .filter(|path| std::fs::symlink_metadata(path).is_ok())
+        .collect()
+}
+
+fn bound_registry() -> Vec<String> {
+    crate::settings::get_settings()
+        .bound_tools
+        .unwrap_or_default()
+}
+
+/// The registry without `tool`: what the unbind step is told is still bound.
+fn others(registry: &[String], tool: &str) -> Vec<String> {
+    registry
+        .iter()
+        .filter(|other| other.as_str() != tool)
+        .cloned()
+        .collect()
+}
+
+fn has_recorded_key(tool: &str) -> bool {
+    tool.parse::<BindableTool>()
+        .ok()
+        .and_then(crate::settings::get_api_key_meta)
+        .is_some()
+}
+
+enum Decision {
+    NotInstalled,
+    Plan(UninstallPlan),
+    Manual(ManualOnly),
+    AppRunning,
+}
+
+fn decide(
+    tool: &str,
+    inspection: &Inspection,
+    home: &Path,
+    keeps: Vec<PathBuf>,
+    os: Os,
+) -> Decision {
+    match inspection {
+        Inspection::NotInstalled => Decision::NotInstalled,
+        Inspection::Cli {
+            install,
+            owner,
+            hermes_help,
+        } => {
+            let facts = Facts {
+                home: home.to_path_buf(),
+                keeps,
+                owner: owner.clone(),
+                hermes_help: hermes_help.clone(),
+            };
+            match uninstall_plan(tool, install, &facts) {
+                Ok(plan) => Decision::Plan(plan),
+                Err(manual) => Decision::Manual(manual),
+            }
+        }
+        Inspection::App { app, running } => {
+            let facts = Facts {
+                home: home.to_path_buf(),
+                keeps,
+                owner: Err("a desktop app has no package manager".into()),
+                hermes_help: None,
+            };
+            match app_plan(tool, app, *running, os, &facts) {
+                Ok(plan) => Decision::Plan(plan),
+                Err(Blocked::Manual(manual)) => Decision::Manual(manual),
+                Err(Blocked::AppRunning) => Decision::AppRunning,
+            }
+        }
+    }
+}
+
+pub(crate) async fn preview<E: Effects>(
+    effects: &E,
+    tool: &str,
+) -> Result<UninstallPreview, String> {
+    check_tool(tool)?;
+    let home = crate::config::get_home_dir();
+    let keeps = kept_data(tool);
+    let inspection = effects.inspect(tool).await?;
+    let decision = decide(tool, &inspection, &home, keeps.clone(), effects.os());
+
+    let registry = bound_registry();
+    let report = effects.unbind(tool, &others(&registry, tool), true).await?;
+    let key = if !report.shared_kept_by.is_empty() {
+        UninstallKey::KeepShared
+    } else if has_recorded_key(tool) {
+        UninstallKey::Revoke
+    } else {
+        UninstallKey::None
+    };
+
+    let mut preview = UninstallPreview {
+        tool: tool.to_string(),
+        installed: !matches!(inspection, Inspection::NotInstalled),
+        source: UninstallSource::Unknown,
+        command: None,
+        removes: vec![],
+        keeps: keeps.iter().map(|keep| shown(keep, &home)).collect(),
+        manual_command: None,
+        bound: registry.iter().any(|bound| bound == tool),
+        shared_with: report.shared_kept_by,
+        key,
+        blocked_reason: None,
+    };
+    match decision {
+        Decision::NotInstalled => {}
+        Decision::Plan(plan) => {
+            preview.source = plan.source;
+            preview.command = plan.command;
+            preview.removes = plan.removes;
+            preview.keeps = plan.keeps;
+        }
+        Decision::Manual(manual) => {
+            preview.source = manual.source;
+            preview.manual_command = manual.command;
+            preview.blocked_reason = Some(manual.reason);
+        }
+        Decision::AppRunning => {
+            preview.source = UninstallSource::App;
+            preview.blocked_reason = Some(UninstallBlock::AppRunning);
+        }
+    }
+    if ToolOperationGuard::acquire(tool).is_err() {
+        preview.blocked_reason = Some(UninstallBlock::Busy);
+    }
+    Ok(preview)
+}
+
+fn remaining_path(inspection: &Inspection, home: &Path) -> Option<String> {
+    match inspection {
+        Inspection::NotInstalled => None,
+        Inspection::Cli { install, .. } => Some(shown(&install.path, home)),
+        Inspection::App { app, .. } => Some(shown(&app.path, home)),
+    }
+}
+
+/// Unbind, retire the key, remove the program. The unbind comes first and
+/// stops everything if it fails: a tool must never be left configured for a key
+/// that is gone, or for a program that is gone.
+pub(crate) async fn uninstall<E: Effects>(
+    effects: &E,
+    tool: &str,
+    sink: Sink<'_>,
+) -> Result<UninstallResult, String> {
+    check_tool(tool)?;
+    let _guard = ToolOperationGuard::acquire(tool)?;
+    let home = crate::config::get_home_dir();
+    let inspection = effects.inspect(tool).await?;
+    let plan = match decide(tool, &inspection, &home, kept_data(tool), effects.os()) {
+        Decision::Plan(plan) => plan,
+        Decision::NotInstalled => return Err("Tool is not installed".into()),
+        Decision::Manual(manual) => {
+            return Err(format!("Uninstall blocked: {}", manual.reason.code()))
+        }
+        Decision::AppRunning => {
+            return Err(format!(
+                "Uninstall blocked: {}",
+                UninstallBlock::AppRunning.code()
+            ))
+        }
+    };
+
+    emit_line(sink, STEP_UNBIND, "Restoring the tool's configuration");
+    let report = effects
+        .unbind(tool, &others(&bound_registry(), tool), false)
+        .await?;
+
+    emit_line(sink, STEP_KEY, "Revoking the Ofox key");
+    let key = if report.shared_kept_by.is_empty() {
+        effects.retire_key(tool).await
+    } else {
+        UninstallKeyOutcome::KeptShared
+    };
+    if let Err(error) = effects.forget_bound(tool) {
+        log::warn!("[uninstall] could not update the bound-tools registry for {tool}: {error}");
+        emit_line(
+            sink,
+            STEP_KEY,
+            &format!("Could not update the bound tools: {error}"),
+        );
+    }
+
+    emit_line(sink, STEP_REMOVE, "Removing the program");
+    let log = |line: &str| emit_line(sink, STEP_REMOVE, line);
+    if let Err(error) = effects.execute(&plan.action, &log).await {
+        emit_line(sink, STEP_REMOVE, &error);
+    }
+    // Ask the machine, not the exit code: a second copy elsewhere still counts.
+    let (status, remaining_path) = match effects.inspect(tool).await {
+        Ok(Inspection::NotInstalled) => (UninstallStatus::Removed, None),
+        Ok(found) => (UninstallStatus::StillPresent, remaining_path(&found, &home)),
+        Err(_) => (UninstallStatus::StillPresent, None),
+    };
+    Ok(UninstallResult {
+        unbind: Some(report),
+        key,
+        status,
+        remaining_path,
+        kept: plan.keeps,
+    })
+}
+
+/// Remove this tool from the registry the frontend mirrors into the settings.
+pub(crate) fn forget_bound_tool(tool: &str) -> Result<(), String> {
+    crate::settings::mutate_settings(|settings| {
+        if let Some(bound) = settings.bound_tools.as_mut() {
+            bound.retain(|other| other != tool);
+        }
+    })
+    .map_err(|error| error.to_string())
+}
+
+/// Delete the tool's key on the server (`delete` gets its id), or queue the
+/// deletion for when its account next signs in; either way the local copy goes.
+pub(crate) async fn retire_key_with<F, Fut>(
+    tool: BindableTool,
+    store: Arc<dyn SecretStore>,
+    delete: F,
+) -> UninstallKeyOutcome
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = Result<(), ApiKeyError>>,
+{
+    let Some(meta) = crate::settings::get_api_key_meta(tool) else {
+        return UninstallKeyOutcome::None;
+    };
+    // A key stopped at sign-out was already deleted, or already queued then.
+    let outcome = if meta.revoked {
+        UninstallKeyOutcome::None
+    } else {
+        match delete(meta.key_id.clone()).await {
+            Ok(()) => UninstallKeyOutcome::Revoked,
+            Err(error) => {
+                log::warn!("[uninstall] could not delete the {tool:?} key now: {error}");
+                crate::ofox_api_keys::queue_deletion_unless_stopped(&meta);
+                UninstallKeyOutcome::Queued
+            }
+        }
+    };
+    if let Err(error) = crate::ofox_api_keys::revoke_local_with_store(tool, store).await {
+        log::warn!("[uninstall] could not clear the local {tool:?} key: {error}");
+    }
+    outcome
+}
+
+fn remove_paths(paths: &[PathBuf], log: &(dyn Fn(&str) + Sync)) -> Result<(), String> {
+    for path in paths {
+        let meta = match std::fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("Could not inspect {}: {error}", path.display())),
+        };
+        // A link is removed as itself, never what it points to.
+        let removed = if meta.is_dir() {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        };
+        removed.map_err(|error| format!("Could not remove {}: {error}", path.display()))?;
+        log(&format!("Removed {}", path.display()));
+    }
+    Ok(())
+}
+
+async fn run_command(
+    command: tokio::process::Command,
+    log: &(dyn Fn(&str) + Sync),
+    timeout: Duration,
+) -> Result<(), String> {
+    let status = super::tool_update::run_logged_process(command, |line| log(line), timeout)
+        .await
+        .map_err(|error| {
+            if error.contains("timed out") {
+                "Uninstall timed out; check whether the program is still installed".to_string()
+            } else {
+                error
+            }
+        })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Uninstall process exited with {status}"))
+    }
+}
+
+/// Run one removal. Agent data is guarded when the plan is made, not here.
+pub(crate) async fn perform(
+    action: &Action,
+    log: &(dyn Fn(&str) + Sync),
+    timeout: Duration,
+) -> Result<(), String> {
+    match action {
+        Action::RemovePaths(paths) => remove_paths(paths, log),
+        Action::Run {
+            program,
+            args,
+            path,
+        } => {
+            let mut command = tokio::process::Command::new(program);
+            command.args(args).env("PATH", path).env("CI", "1");
+            run_command(command, log, timeout).await
+        }
+        Action::Trash(bundle) => {
+            trash_bundle(bundle)?;
+            log(&format!("Moved {} to the Trash", bundle.display()));
+            Ok(())
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn trash_bundle(_bundle: &Path) -> Result<(), String> {
+    Err("Moving an app to the Trash is only supported on macOS".into())
+}
+
+#[cfg(target_os = "macos")]
+fn trash_bundle(_bundle: &Path) -> Result<(), String> {
+    Err("not yet".into())
 }
 
 #[cfg(test)]
@@ -1040,5 +1538,605 @@ options:
         let ps = "/sbin/launchd\n/Applications/ChatGPT.app.backup/Contents/MacOS/x\n/usr/bin/ChatGPT.app\n";
         assert!(!bundle_in_use(ps, bundle));
         assert!(!bundle_in_use("", bundle));
+    }
+
+    // ---- orchestration ----------------------------------------------------
+
+    use crate::ofox_secret::{InMemoryStore, Slot};
+    use crate::settings::{self, ApiKeyMeta, KeyToDelete};
+    use crate::test_sandbox::sandbox;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    /// Records every effect, in order, and answers from what the test set up.
+    struct Fake {
+        calls: Mutex<Vec<String>>,
+        inspections: Mutex<VecDeque<Result<Inspection, String>>>,
+        unbind: Result<UnbindReport, String>,
+        key: UninstallKeyOutcome,
+        execute: Result<(), String>,
+        output: Vec<&'static str>,
+    }
+
+    impl Fake {
+        fn new(inspections: impl IntoIterator<Item = Result<Inspection, String>>) -> Self {
+            Self {
+                calls: Mutex::default(),
+                inspections: Mutex::new(inspections.into_iter().collect()),
+                unbind: Ok(UnbindReport::new("codex", false)),
+                key: UninstallKeyOutcome::Revoked,
+                execute: Ok(()),
+                output: vec![],
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn record(&self, call: impl Into<String>) {
+            self.calls.lock().unwrap().push(call.into());
+        }
+    }
+
+    impl Effects for Fake {
+        fn os(&self) -> Os {
+            Os::Mac
+        }
+
+        async fn inspect(&self, _tool: &str) -> Result<Inspection, String> {
+            self.record("inspect");
+            let mut queue = self.inspections.lock().unwrap();
+            if queue.len() > 1 {
+                queue.pop_front().unwrap()
+            } else {
+                queue.front().cloned().unwrap()
+            }
+        }
+
+        async fn unbind(
+            &self,
+            tool: &str,
+            still_bound: &[String],
+            dry_run: bool,
+        ) -> Result<UnbindReport, String> {
+            self.record(format!("unbind:{tool}:{dry_run}:{}", still_bound.join(",")));
+            self.unbind.clone()
+        }
+
+        async fn retire_key(&self, tool: &str) -> UninstallKeyOutcome {
+            self.record(format!("retire_key:{tool}"));
+            self.key
+        }
+
+        fn forget_bound(&self, tool: &str) -> Result<(), String> {
+            self.record(format!("forget_bound:{tool}"));
+            Ok(())
+        }
+
+        async fn execute(
+            &self,
+            _action: &Action,
+            log: &(dyn Fn(&str) + Sync),
+        ) -> Result<(), String> {
+            self.record("execute");
+            self.output.iter().for_each(|line| log(line));
+            self.execute.clone()
+        }
+    }
+
+    /// A Codex installed by npm under `/n`.
+    fn codex_by_npm() -> Inspection {
+        Inspection::Cli {
+            install: install(
+                Path::new("/n/bin/codex"),
+                Path::new("/n/lib/node_modules/@openai/codex/bin/codex.js"),
+            ),
+            owner: Ok(UpdatePlan {
+                source: "npm",
+                program: PathBuf::from("/n/bin/npm"),
+                args: [
+                    "install",
+                    "--global",
+                    "--prefix",
+                    "/n",
+                    "@openai/codex@latest",
+                ]
+                .map(String::from)
+                .to_vec(),
+                path: "/n/bin:/usr/bin".into(),
+            }),
+            hermes_help: None,
+        }
+    }
+
+    fn bind(tools: &[&str]) {
+        let tools: Vec<String> = tools.iter().map(|tool| tool.to_string()).collect();
+        settings::mutate_settings(|s| s.bound_tools = Some(tools)).unwrap();
+    }
+
+    fn key_of(tool: BindableTool, key_id: &str) -> ApiKeyMeta {
+        ApiKeyMeta {
+            tool,
+            key_id: key_id.into(),
+            name: None,
+            alias: None,
+            key_start: None,
+            created_at: 1,
+            last_used_at: None,
+            owner: None,
+            revoked: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn unbind_comes_before_the_key_is_revoked_before_the_program_is_removed() {
+        let _home = sandbox();
+        bind(&["claude", "codex"]);
+        let fake = Fake::new([Ok(codex_by_npm()), Ok(Inspection::NotInstalled)]);
+
+        let result = uninstall(&fake, "codex", &|_, _| {}).await.unwrap();
+
+        assert_eq!(
+            fake.calls(),
+            [
+                "inspect",
+                "unbind:codex:false:claude",
+                "retire_key:codex",
+                "forget_bound:codex",
+                "execute",
+                "inspect",
+            ]
+        );
+        assert_eq!(result.status, UninstallStatus::Removed);
+        assert_eq!(result.key, UninstallKeyOutcome::Revoked);
+        assert_eq!(result.remaining_path, None);
+        assert!(result.unbind.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_failed_unbind_stops_before_anything_else_is_done() {
+        let _home = sandbox();
+        let mut fake = Fake::new([Ok(codex_by_npm())]);
+        fake.unbind = Err("config is locked".into());
+
+        let error = uninstall(&fake, "codex", &|_, _| {}).await.unwrap_err();
+
+        assert!(error.contains("config is locked"), "{error}");
+        assert_eq!(fake.calls(), ["inspect", "unbind:codex:false:"]);
+    }
+
+    #[tokio::test]
+    async fn a_key_still_used_by_another_bound_tool_is_kept() {
+        let _home = sandbox();
+        let mut fake = Fake::new([Ok(codex_by_npm()), Ok(Inspection::NotInstalled)]);
+        let mut report = UnbindReport::new("codex", false);
+        report.shared_kept_by = vec!["chatgpt".into()];
+        fake.unbind = Ok(report);
+
+        let result = uninstall(&fake, "codex", &|_, _| {}).await.unwrap();
+
+        assert_eq!(result.key, UninstallKeyOutcome::KeptShared);
+        assert!(!fake
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("retire_key")));
+    }
+
+    #[tokio::test]
+    async fn a_key_that_could_not_be_deleted_remotely_is_reported_queued() {
+        let _home = sandbox();
+        let mut fake = Fake::new([Ok(codex_by_npm()), Ok(Inspection::NotInstalled)]);
+        fake.key = UninstallKeyOutcome::Queued;
+        let result = uninstall(&fake, "codex", &|_, _| {}).await.unwrap();
+        assert_eq!(result.key, UninstallKeyOutcome::Queued);
+    }
+
+    #[tokio::test]
+    async fn a_program_still_found_after_the_command_is_reported_with_its_path() {
+        let _home = sandbox();
+        let mut fake = Fake::new([Ok(codex_by_npm()), Ok(codex_by_npm())]);
+        fake.execute = Err("Uninstall process exited with exit status: 1".into());
+
+        let result = uninstall(&fake, "codex", &|_, _| {}).await.unwrap();
+
+        assert_eq!(result.status, UninstallStatus::StillPresent);
+        assert_eq!(result.remaining_path.as_deref(), Some("/n/bin/codex"));
+    }
+
+    #[tokio::test]
+    async fn a_program_that_is_gone_counts_as_removed_even_if_the_command_complained() {
+        let _home = sandbox();
+        let mut fake = Fake::new([Ok(codex_by_npm()), Ok(Inspection::NotInstalled)]);
+        fake.execute = Err("exit status: 1".into());
+        let result = uninstall(&fake, "codex", &|_, _| {}).await.unwrap();
+        assert_eq!(result.status, UninstallStatus::Removed);
+    }
+
+    #[tokio::test]
+    async fn a_failed_recheck_is_not_reported_as_removed() {
+        let _home = sandbox();
+        let fake = Fake::new([Ok(codex_by_npm()), Err("shell lookup failed".into())]);
+        let result = uninstall(&fake, "codex", &|_, _| {}).await.unwrap();
+        assert_eq!(result.status, UninstallStatus::StillPresent);
+        assert_eq!(result.remaining_path, None);
+    }
+
+    #[tokio::test]
+    async fn nothing_is_changed_when_the_tool_cannot_be_uninstalled_from_here() {
+        let _home = sandbox();
+        let unknown = Inspection::Cli {
+            install: install(Path::new("/custom/codex"), Path::new("/custom/codex")),
+            owner: unknown(),
+            hermes_help: None,
+        };
+        let running = Inspection::App {
+            app: app(Path::new("/Applications/ChatGPT.app")),
+            running: true,
+        };
+        let cases = [
+            (Inspection::NotInstalled, "codex", "not installed"),
+            (unknown, "codex", "unknownSource"),
+            (running, "chatgpt", "appRunning"),
+        ];
+        for (inspection, tool, reason) in cases {
+            let fake = Fake::new([Ok(inspection)]);
+            let error = uninstall(&fake, tool, &|_, _| {}).await.unwrap_err();
+            assert!(error.contains(reason), "{error}");
+            assert_eq!(fake.calls(), ["inspect"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unsupported_tool_or_a_busy_one_is_refused_before_any_probe() {
+        let _home = sandbox();
+        let fake = Fake::new([Ok(codex_by_npm())]);
+        assert!(uninstall(&fake, "vim", &|_, _| {}).await.is_err());
+        let _running = ToolOperationGuard::acquire("codex").unwrap();
+        let error = uninstall(&fake, "codex", &|_, _| {}).await.unwrap_err();
+        assert!(error.contains("already running"), "{error}");
+        assert!(fake.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn progress_lines_are_numbered_by_step_and_all_go_through_the_sink() {
+        let _home = sandbox();
+        let mut fake = Fake::new([Ok(codex_by_npm()), Ok(Inspection::NotInstalled)]);
+        fake.output = vec!["removed 12 packages", "done"];
+        let lines = Mutex::new(Vec::new());
+
+        uninstall(&fake, "codex", &|step, line| {
+            lines.lock().unwrap().push((step, line.to_string()));
+        })
+        .await
+        .unwrap();
+
+        let lines = lines.into_inner().unwrap();
+        let steps: Vec<u32> = lines.iter().map(|(step, _)| *step).collect();
+        assert_eq!(steps.first(), Some(&1));
+        assert!(steps.contains(&2));
+        assert_eq!(steps.last(), Some(&3));
+        assert!(steps.windows(2).all(|pair| pair[0] <= pair[1]));
+        let process: Vec<&str> = lines
+            .iter()
+            .filter(|(step, _)| *step == 3)
+            .map(|(_, line)| line.as_str())
+            .collect();
+        assert!(process.contains(&"removed 12 packages") && process.contains(&"done"));
+        assert_eq!(TOTAL_STEPS, 3);
+    }
+
+    #[tokio::test]
+    async fn the_result_lists_the_data_that_was_kept() {
+        let home = sandbox();
+        fs::create_dir_all(home.home().join(".codex")).unwrap();
+        let fake = Fake::new([Ok(codex_by_npm()), Ok(Inspection::NotInstalled)]);
+        let result = uninstall(&fake, "codex", &|_, _| {}).await.unwrap();
+        assert_eq!(result.kept, ["~/.codex"]);
+    }
+
+    // ---- preview ----------------------------------------------------------
+
+    /// Every file below `dir` with its content, to prove nothing changed.
+    fn snapshot(dir: &Path) -> Vec<(PathBuf, String)> {
+        let mut found = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(path) = pending.pop() {
+            let meta = fs::symlink_metadata(&path).unwrap();
+            if meta.is_dir() {
+                pending.extend(fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+            } else {
+                let text = fs::read_to_string(&path).unwrap_or_else(|_| "link".into());
+                found.push((path, text));
+            }
+        }
+        found.sort();
+        found
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_preview_does_nothing_but_look() {
+        let home = sandbox();
+        let active = native_claude(home.home());
+        fs::create_dir_all(home.home().join(".claude")).unwrap();
+        bind(&["claude"]);
+        settings::upsert_api_key_meta(key_of(BindableTool::Claude, "key-1")).unwrap();
+        let owner = native_owner(&active);
+        let fake = Fake::new([Ok(Inspection::Cli {
+            install: active,
+            owner,
+            hermes_help: None,
+        })]);
+        let before = snapshot(home.home());
+        let registry = settings::get_settings().bound_tools;
+
+        let preview = preview(&fake, "claude").await.unwrap();
+
+        assert_eq!(fake.calls(), ["inspect", "unbind:claude:true:"]);
+        assert_eq!(snapshot(home.home()), before);
+        assert_eq!(settings::get_settings().bound_tools, registry);
+        assert!(settings::get_api_key_meta(BindableTool::Claude).is_some());
+        assert!(settings::list_keys_to_delete().is_empty());
+        assert!(preview.installed && preview.bound);
+        assert_eq!(preview.source, UninstallSource::Native);
+        assert_eq!(preview.command, None);
+        assert_eq!(preview.key, UninstallKey::Revoke);
+        assert_eq!(
+            preview.removes,
+            ["~/.local/bin/claude", "~/.local/share/claude"]
+        );
+        assert_eq!(preview.keeps, ["~/.claude"]);
+        assert_eq!(preview.blocked_reason, None);
+    }
+
+    #[tokio::test]
+    async fn a_preview_says_which_tool_shares_the_config_and_keeps_the_key() {
+        let _home = sandbox();
+        bind(&["codex", "chatgpt"]);
+        settings::upsert_api_key_meta(key_of(BindableTool::Codex, "key-1")).unwrap();
+        let mut fake = Fake::new([Ok(codex_by_npm())]);
+        let mut report = UnbindReport::new("codex", true);
+        report.shared_kept_by = vec!["chatgpt".into()];
+        fake.unbind = Ok(report);
+
+        let preview = preview(&fake, "codex").await.unwrap();
+
+        assert_eq!(preview.shared_with, ["chatgpt"]);
+        assert_eq!(preview.key, UninstallKey::KeepShared);
+        assert_eq!(preview.source, UninstallSource::Npm);
+        assert_eq!(
+            preview.command.as_deref(),
+            Some("npm uninstall --global --prefix /n @openai/codex")
+        );
+        assert_eq!(fake.calls(), ["inspect", "unbind:codex:true:chatgpt"]);
+    }
+
+    #[tokio::test]
+    async fn a_preview_without_a_key_or_binding_has_nothing_to_revoke() {
+        let _home = sandbox();
+        let fake = Fake::new([Ok(codex_by_npm())]);
+        let preview = preview(&fake, "codex").await.unwrap();
+        assert!(!preview.bound);
+        assert_eq!(preview.key, UninstallKey::None);
+        assert!(preview.shared_with.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_preview_names_why_an_uninstall_is_blocked() {
+        let _home = sandbox();
+        let bundle = Path::new("/Applications/ChatGPT.app");
+        let unknown = Inspection::Cli {
+            install: install(Path::new("/custom/gemini"), Path::new("/custom/gemini")),
+            owner: unknown(),
+            hermes_help: None,
+        };
+        let cases = [
+            (unknown, "gemini", Some(UninstallBlock::UnknownSource)),
+            (
+                Inspection::App {
+                    app: app(bundle),
+                    running: true,
+                },
+                "chatgpt",
+                Some(UninstallBlock::AppRunning),
+            ),
+            (Inspection::NotInstalled, "gemini", None),
+        ];
+        for (inspection, tool, reason) in cases {
+            let fake = Fake::new([Ok(inspection)]);
+            let preview = preview(&fake, tool).await.unwrap();
+            assert_eq!(preview.blocked_reason, reason, "{tool}");
+            assert_eq!(preview.installed, !matches!(reason, None));
+        }
+        let fake = Fake::new([Ok(codex_by_npm())]);
+        let _running = ToolOperationGuard::acquire("codex").unwrap();
+        let preview = preview(&fake, "codex").await.unwrap();
+        assert_eq!(preview.blocked_reason, Some(UninstallBlock::Busy));
+    }
+
+    #[tokio::test]
+    async fn a_blocked_preview_offers_the_manual_command() {
+        let _home = sandbox();
+        let fake = Fake::new([Ok(Inspection::Cli {
+            install: install(Path::new("/custom/gemini"), Path::new("/custom/gemini")),
+            owner: unknown(),
+            hermes_help: None,
+        })]);
+        let preview = preview(&fake, "gemini").await.unwrap();
+        assert_eq!(preview.source, UninstallSource::Unknown);
+        assert_eq!(preview.command, None);
+        assert_eq!(
+            preview.manual_command.as_deref(),
+            Some("npm uninstall --global @google/gemini-cli")
+        );
+        assert!(preview.removes.is_empty());
+    }
+
+    // ---- bound registry ---------------------------------------------------
+
+    #[test]
+    fn forgetting_a_tool_leaves_the_others_bound() {
+        let _home = sandbox();
+        bind(&["claude", "codex", "chatgpt"]);
+        forget_bound_tool("codex").unwrap();
+        assert_eq!(
+            settings::get_settings().bound_tools,
+            Some(vec!["claude".to_string(), "chatgpt".to_string()])
+        );
+        // A registry that was never written stays unwritten.
+        settings::mutate_settings(|s| s.bound_tools = None).unwrap();
+        forget_bound_tool("codex").unwrap();
+        assert_eq!(settings::get_settings().bound_tools, None);
+    }
+
+    // ---- key --------------------------------------------------------------
+
+    fn secrets(tool: BindableTool) -> Arc<dyn SecretStore> {
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        store.save(Slot::ApiKey { tool }, "sk-of-secret").unwrap();
+        store
+    }
+
+    #[tokio::test]
+    async fn a_key_deleted_on_the_server_is_gone_locally_too() {
+        let _home = sandbox();
+        let tool = BindableTool::Claude;
+        let store = secrets(tool);
+        settings::upsert_api_key_meta(key_of(tool, "key-1")).unwrap();
+        let asked = Mutex::new(Vec::new());
+
+        let outcome = retire_key_with(tool, store.clone(), |key_id| {
+            asked.lock().unwrap().push(key_id);
+            async { Ok::<(), ApiKeyError>(()) }
+        })
+        .await;
+
+        assert_eq!(outcome, UninstallKeyOutcome::Revoked);
+        assert_eq!(*asked.lock().unwrap(), ["key-1"]);
+        assert_eq!(store.load(Slot::ApiKey { tool }).unwrap(), None);
+        assert!(settings::get_api_key_meta(tool).is_none());
+        assert!(settings::list_keys_to_delete().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_key_the_server_could_not_delete_is_queued_and_dropped_locally() {
+        let _home = sandbox();
+        let tool = BindableTool::Claude;
+        let store = secrets(tool);
+        settings::upsert_api_key_meta(key_of(tool, "key-1")).unwrap();
+
+        let outcome = retire_key_with(tool, store.clone(), |_| async {
+            Err::<(), _>(ApiKeyError::RemoteRejected("network: offline".into()))
+        })
+        .await;
+
+        assert_eq!(outcome, UninstallKeyOutcome::Queued);
+        assert_eq!(
+            settings::list_keys_to_delete(),
+            [KeyToDelete {
+                key_id: "key-1".into(),
+                owner: None
+            }]
+        );
+        assert_eq!(store.load(Slot::ApiKey { tool }).unwrap(), None);
+        assert!(settings::get_api_key_meta(tool).is_none());
+    }
+
+    #[tokio::test]
+    async fn there_is_nothing_to_revoke_without_a_recorded_key_or_for_a_stopped_one() {
+        let _home = sandbox();
+        let tool = BindableTool::Claude;
+        let store = secrets(tool);
+        let untouched = |_: String| async { panic!("no request expected") };
+        let outcome = retire_key_with(tool, store.clone(), untouched).await;
+        assert_eq!(outcome, UninstallKeyOutcome::None);
+        assert_eq!(
+            store.load(Slot::ApiKey { tool }).unwrap().as_deref(),
+            Some("sk-of-secret")
+        );
+
+        // Stopped at sign-out: already deleted or already queued then.
+        let stopped = ApiKeyMeta {
+            revoked: true,
+            ..key_of(tool, "key-2")
+        };
+        settings::upsert_api_key_meta(stopped).unwrap();
+        let outcome = retire_key_with(tool, store.clone(), untouched).await;
+        assert_eq!(outcome, UninstallKeyOutcome::None);
+        assert!(settings::get_api_key_meta(tool).is_none());
+        assert_eq!(store.load(Slot::ApiKey { tool }).unwrap(), None);
+        assert!(settings::list_keys_to_delete().is_empty());
+    }
+
+    // ---- running the removal ----------------------------------------------
+
+    fn lines_of(lines: &Mutex<Vec<String>>) -> Vec<String> {
+        lines.lock().unwrap().clone()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn removing_paths_removes_a_link_not_what_it_points_to() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = temp.path().join("keep/data");
+        touch(&outside, "mine");
+        let link = temp.path().join("bin/claude");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let tree = temp.path().join("share/claude");
+        touch(&tree.join("versions/1/claude"), "binary");
+        let missing = temp.path().join("never/there");
+        let lines = Mutex::new(Vec::new());
+
+        perform(
+            &Action::RemovePaths(vec![link.clone(), tree.clone(), missing]),
+            &|line| lines.lock().unwrap().push(line.to_string()),
+            UNINSTALL_TIMEOUT,
+        )
+        .await
+        .unwrap();
+
+        assert!(fs::symlink_metadata(&link).is_err());
+        assert!(!tree.exists());
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "mine");
+        assert_eq!(lines_of(&lines).len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_streams_its_output_and_a_failure_is_an_error() {
+        let run = |script: &str| Action::Run {
+            program: PathBuf::from("/bin/sh"),
+            args: vec!["-c".into(), script.into()],
+            path: "/usr/bin:/bin".into(),
+        };
+        let lines = Mutex::new(Vec::new());
+        let log = |line: &str| lines.lock().unwrap().push(line.to_string());
+
+        perform(&run("echo out; echo err >&2"), &log, UNINSTALL_TIMEOUT)
+            .await
+            .unwrap();
+        assert_eq!(lines_of(&lines).len(), 2);
+
+        let error = perform(&run("exit 3"), &log, UNINSTALL_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert!(error.contains("exited"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_that_hangs_is_stopped_at_the_timeout() {
+        let action = Action::Run {
+            program: PathBuf::from("/bin/sh"),
+            args: vec!["-c".into(), "exec sleep 5".into()],
+            path: "/usr/bin:/bin".into(),
+        };
+        let error = perform(&action, &|_| {}, Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert!(error.contains("Uninstall timed out"), "{error}");
+        assert_eq!(UNINSTALL_TIMEOUT, Duration::from_secs(300));
     }
 }
