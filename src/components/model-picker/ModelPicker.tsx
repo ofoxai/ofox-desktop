@@ -240,7 +240,7 @@ export function MultiModelPicker({
                             {(model.inputModalities ?? []).includes(
                               "image",
                             ) && (
-                              <span className="ml-1 rounded bg-sky-500/10 px-1.5 py-0.5 text-[9px] text-sky-600">
+                              <span className="ml-1 rounded bg-pill px-1.5 py-0.5 text-[9px] text-ink-2">
                                 {t("modelPicker.vision")}
                               </span>
                             )}
