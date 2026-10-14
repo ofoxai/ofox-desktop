@@ -59,6 +59,8 @@ pub(crate) enum Action {
         program: PathBuf,
         args: Vec<String>,
         path: String,
+        /// Environment variables set for this run only.
+        env: Vec<(String, String)>,
     },
     /// Delete these files and directories (a native installer's own layout).
     RemovePaths(Vec<PathBuf>),
@@ -347,6 +349,13 @@ fn manager_plan(
             (args, package.to_string())
         }
     };
+    // `brew uninstall` also removes dependencies nothing else needs any more;
+    // Node.js can be one of them, and every npm-installed agent runs on it.
+    let env = if source == UninstallSource::Homebrew {
+        vec![("HOMEBREW_NO_AUTOREMOVE".to_string(), "1".to_string())]
+    } else {
+        vec![]
+    };
     Ok(UninstallPlan {
         source,
         command: Some(render_command(&update.program, &args)),
@@ -354,6 +363,7 @@ fn manager_plan(
             program: update.program.clone(),
             args,
             path: update.path.clone(),
+            env,
         },
         removes: vec![removes],
         keeps: keeps_shown(facts),
@@ -408,6 +418,7 @@ fn native_plan(
                     program: install.path.clone(),
                     args,
                     path: path_with(install.path.parent(), &install.search_path),
+                    env: vec![],
                 },
                 removes: vec![shown(&install.path, home)],
                 keeps: keeps_shown(facts),
@@ -976,9 +987,11 @@ pub(crate) async fn perform(
             program,
             args,
             path,
+            env,
         } => {
             let mut command = tokio::process::Command::new(program);
             command.args(args).env("PATH", path).env("CI", "1");
+            command.envs(env.iter().map(|(name, value)| (name, value)));
             run_command(command, log, timeout).await
         }
         Action::Trash(bundle) => {
@@ -1319,6 +1332,13 @@ mod tests {
         })
     }
 
+    fn env_of(plan: &UninstallPlan) -> &[(String, String)] {
+        match &plan.action {
+            Action::Run { env, .. } => env,
+            other => panic!("expected a command, got {other:?}"),
+        }
+    }
+
     fn run_of(plan: &UninstallPlan) -> (&Path, &[String]) {
         match &plan.action {
             Action::Run { program, args, .. } => (program, args),
@@ -1359,6 +1379,12 @@ mod tests {
                 Some(format!("brew {}", expected.join(" ")).as_str())
             );
             assert_eq!(plan.removes, [keg]);
+            // brew would otherwise also remove dependencies nothing else needs
+            // any more, and Node.js may be one of them.
+            assert_eq!(
+                env_of(&plan),
+                [("HOMEBREW_NO_AUTOREMOVE".to_string(), "1".to_string())]
+            );
         }
     }
 
@@ -1377,6 +1403,7 @@ mod tests {
             let owner = super::super::tool_update::plan(tool, &active);
             let plan = uninstall_plan(tool, &active, &facts(temp.path(), owner)).unwrap();
             assert_eq!(plan.source, UninstallSource::Npm);
+            assert!(env_of(&plan).is_empty());
             let (program, args) = run_of(&plan);
             assert_eq!(program, prefix.join("bin/npm"));
             assert_eq!(
@@ -2429,6 +2456,7 @@ options:
             program: PathBuf::from("/bin/sh"),
             args: vec!["-c".into(), script.into()],
             path: "/usr/bin:/bin".into(),
+            env: vec![],
         };
         let lines = Mutex::new(Vec::new());
         let log = |line: &str| lines.lock().unwrap().push(line.to_string());
@@ -2446,11 +2474,32 @@ options:
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn a_command_runs_with_the_environment_its_plan_carries() {
+        let action = Action::Run {
+            program: PathBuf::from("/bin/sh"),
+            args: vec!["-c".into(), "echo \"$OFOX_PROBE_VALUE\"".into()],
+            path: "/usr/bin:/bin".into(),
+            env: vec![("OFOX_PROBE_VALUE".into(), "carried".into())],
+        };
+        let lines = Mutex::new(Vec::new());
+        perform(
+            &action,
+            &|line| lines.lock().unwrap().push(line.to_string()),
+            UNINSTALL_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        assert_eq!(lines_of(&lines), ["carried"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn a_command_that_hangs_is_stopped_at_the_timeout() {
         let action = Action::Run {
             program: PathBuf::from("/bin/sh"),
             args: vec!["-c".into(), "exec sleep 5".into()],
             path: "/usr/bin:/bin".into(),
+            env: vec![],
         };
         let error = perform(&action, &|_| {}, Duration::from_millis(50))
             .await
