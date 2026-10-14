@@ -2859,7 +2859,17 @@
       "unknown": "无法读取绑定配置。你仍可解除绑定或稍后重试。"
     },
     "versionUnknown": "已安装 · 版本未知",
-    "noInstallationDetected": "未检测到安装"
+    "noInstallationDetected": "未检测到安装",
+    "more": "更多操作",
+    "installedVia": "通过 {{method}} 安装",
+    "installMethod": {
+      "homebrew": "Homebrew",
+      "npm": "npm",
+      "pnpm": "pnpm",
+      "native": "官方安装程序",
+      "sparkle": "官网安装包",
+      "msstore": "Microsoft Store"
+    }
   },
   "modelExperience": {
     "multiDescription": "保存一组模型，顺序按选择顺序保留。工具内可在这组模型间切换。",

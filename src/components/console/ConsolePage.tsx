@@ -218,9 +218,11 @@ function ConsoleShell({ boundTools, onBoundToolsChanged }: ConsolePageProps) {
               (tool.id === "codex" && tool.installationKind === "desktopApp")
             }
             onRetry={() => void modelState.refetch()}
+            variant="pill"
           />
         }
         hasAnalytics={!!apiKeyIdByTool[tool.id]}
+        installVia={inlineUpdates.entryFor(tool)?.update_source}
         updateTo={update?.latest_version ?? null}
         updateExternal={
           !!update &&

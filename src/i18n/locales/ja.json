@@ -2859,7 +2859,17 @@
       "unknown": "連携設定を読み取れません。連携解除または後で再試行できます。"
     },
     "versionUnknown": "インストール済み · バージョン不明",
-    "noInstallationDetected": "インストール未検出"
+    "noInstallationDetected": "インストール未検出",
+    "more": "その他の操作",
+    "installedVia": "{{method}} でインストール",
+    "installMethod": {
+      "homebrew": "Homebrew",
+      "npm": "npm",
+      "pnpm": "pnpm",
+      "native": "公式インストーラー",
+      "sparkle": "公式サイトのインストーラー",
+      "msstore": "Microsoft Store"
+    }
   },
   "modelExperience": {
     "multiDescription": "選択順にモデル集合を保存します。ツール内でこれらのモデルを切り替えられます。",

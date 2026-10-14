@@ -2859,7 +2859,17 @@
       "unknown": "Binding configuration could not be read. You can still unbind or retry later."
     },
     "versionUnknown": "Installed · Version unknown",
-    "noInstallationDetected": "No installation detected"
+    "noInstallationDetected": "No installation detected",
+    "more": "More actions",
+    "installedVia": "Installed with {{method}}",
+    "installMethod": {
+      "homebrew": "Homebrew",
+      "npm": "npm",
+      "pnpm": "pnpm",
+      "native": "the official installer",
+      "sparkle": "the download from its website",
+      "msstore": "the Microsoft Store"
+    }
   },
   "modelExperience": {
     "multiDescription": "Save a model set in selection order. Switch among these models inside the tool.",
