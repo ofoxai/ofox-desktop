@@ -960,8 +960,12 @@ pub(crate) fn model_config_of(
         return Ok(None);
     };
     let json_val = yaml_to_json(model_value)?;
-    let model = serde_json::from_value(json_val)
-        .map_err(|e| AppError::Config(format!("Failed to parse Hermes model config: {e}")))?;
+    let model = serde_json::from_value(json_val).map_err(|e| {
+        AppError::Config(format!(
+            "Failed to parse Hermes model config: {}",
+            crate::redact::describe_json_error(&e)
+        ))
+    })?;
     Ok(Some(model))
 }
 
@@ -1220,6 +1224,19 @@ pub fn read_memory_limits() -> Result<HermesMemoryLimits, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_malformed_model_section_error_never_echoes_the_values_in_it() {
+        let config: serde_yaml::Value = serde_yaml::from_str(
+            "model:\n  default: sk-of-abc123456789\n  context_length: sk-of-abc123456789\n",
+        )
+        .unwrap();
+
+        let error = model_config_of(&config).unwrap_err().to_string();
+
+        assert!(error.contains("invalid type"), "{error}");
+        assert!(!error.contains("abc123456789"), "{error}");
+    }
 
     #[test]
     fn copy_section_uses_the_active_duplicate() {
