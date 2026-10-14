@@ -46,14 +46,18 @@ const CommandList = React.forwardRef<
   <CommandPrimitive.List
     ref={ref}
     className={cn(
-      // Tailwind arbitrary props override the global `* { scrollbar-width:
-      // none }` / `::-webkit-scrollbar { display: none }` rules in
-      // index.css. Without these, the cmdk list scrolls but the user has
-      // no visual indicator that more items exist below the fold.
+      // Tailwind arbitrary props override index.css's platform scrollbar
+      // rules (`:where(html.mac) * { scrollbar-width: none }`, the Mac's
+      // hidden `::-webkit-scrollbar`, and the other platforms' 10px bar with
+      // a 3px transparent thumb border, which would leave nothing of a 6px
+      // thumb); those rules are kept at zero specificity so these win.
+      // Without them the cmdk list scrolls but the user has no visual
+      // indicator that more items exist below the fold.
       "max-h-[300px] overflow-y-auto overflow-x-hidden " +
         "[scrollbar-width:thin] " +
         "[&::-webkit-scrollbar]:block [&::-webkit-scrollbar]:w-1.5 " +
         "[&::-webkit-scrollbar-thumb]:rounded-full " +
+        "[&::-webkit-scrollbar-thumb]:border-0 " +
         "[&::-webkit-scrollbar-thumb]:bg-ink-faint",
       className,
     )}

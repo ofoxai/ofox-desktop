@@ -233,53 +233,56 @@ html.dark {
 /* Scrollbars. Windows and Linux draw a classic bar, arrows and all: a thin
    rounded thumb instead. The Mac keeps them hidden, except on a page that
    runs longer than the window (`.page-scroll`), which shows an 8px thumb —
-   the WebView draws the overlay bar only while a trackpad scrolls. */
-html.mac * {
+   the WebView draws the overlay bar only while a trackpad scrolls.
+   The platform class sits in :where() so these rules weigh no more than the
+   bare element/pseudo-element: `.page-scroll` and a component's own opt-in
+   (e.g. the command list's `[&::-webkit-scrollbar]:block`) always win. */
+:where(html.mac) * {
   scrollbar-width: none;
 }
 
-html.mac ::-webkit-scrollbar {
+:where(html.mac) ::-webkit-scrollbar {
   display: none;
 }
 
-html.mac .page-scroll {
+:where(html.mac) .page-scroll {
   scrollbar-width: auto;
 }
 
-html.mac .page-scroll::-webkit-scrollbar {
+:where(html.mac) .page-scroll::-webkit-scrollbar {
   display: block;
   width: 8px;
   height: 8px;
   background: transparent;
 }
 
-html.mac .page-scroll::-webkit-scrollbar-thumb {
+:where(html.mac) .page-scroll::-webkit-scrollbar-thumb {
   background: rgb(var(--ink-faint));
   border: 2px solid transparent;
   border-radius: 8px;
   background-clip: padding-box;
 }
 
-html:not(.mac) ::-webkit-scrollbar {
+:where(html:not(.mac)) ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
   background: transparent;
 }
 
-html:not(.mac) ::-webkit-scrollbar-thumb {
+:where(html:not(.mac)) ::-webkit-scrollbar-thumb {
   background: rgb(var(--ink-faint));
   border: 3px solid transparent;
   border-radius: 10px;
   background-clip: padding-box;
 }
 
-html.mac .page-scroll::-webkit-scrollbar-thumb:hover,
-html:not(.mac) ::-webkit-scrollbar-thumb:hover {
+:where(html.mac) .page-scroll::-webkit-scrollbar-thumb:hover,
+:where(html:not(.mac)) ::-webkit-scrollbar-thumb:hover {
   background-color: rgb(var(--ink-muted));
 }
 
-html:not(.mac) ::-webkit-scrollbar-button,
-html:not(.mac) ::-webkit-scrollbar-corner {
+:where(html:not(.mac)) ::-webkit-scrollbar-button,
+:where(html:not(.mac)) ::-webkit-scrollbar-corner {
   display: none;
   background: transparent;
 }
