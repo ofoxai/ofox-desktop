@@ -263,6 +263,21 @@
     "bannerTitle": "发现新版本",
     "bannerHint": "前往下载页获取最新版本"
   },
+  "shell": {
+    "nav": "页面",
+    "tabs": {
+      "tools": "工具",
+      "sessions": "会话",
+      "usage": "用量"
+    },
+    "refresh": "刷新",
+    "settings": "设置",
+    "update": {
+      "pill": "新版本 v{{version}}",
+      "now": "立即更新",
+      "openFailed": "无法打开下载页面"
+    }
+  },
   "firstRunNotice": {
     "title": "欢迎使用 Ofox Desktop",
     "bodyDefault": "Ofox Desktop 可以帮你在 Claude Code / Codex / Gemini CLI 的多个供应商之间一键切换。如果你之前已经配置过这些工具，Ofox Desktop 会自动把现有设置保存为名为 “default” 的供应商，保证你的配置不会丢失。",
