@@ -8,12 +8,10 @@ use serde_json::Value;
 #[cfg(test)]
 use crate::config::write_json_file;
 use crate::openclaw_config::get_openclaw_dir;
+use crate::session_manager::title::{titled, TitleCandidates};
 use crate::session_manager::{SessionMessage, SessionMeta};
 
-use super::utils::{
-    extract_text, parse_timestamp_to_ms, path_basename, read_head_tail_lines, truncate_summary,
-    TITLE_MAX_CHARS,
-};
+use super::utils::{extract_text, parse_timestamp_to_ms, read_head_tail_lines, truncate_summary};
 
 const PROVIDER_ID: &str = "openclaw";
 
@@ -120,7 +118,12 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
 
         let ts = value.get("timestamp").and_then(parse_timestamp_to_ms);
 
-        messages.push(SessionMessage { role, content, ts });
+        messages.push(SessionMessage {
+            role,
+            content,
+            ts,
+            name: None,
+        });
     }
 
     Ok(messages)
@@ -283,16 +286,11 @@ fn parse_session(
     let session_id = session_id?;
 
     // Title priority: displayName (from sessions.json) > first user message > dir basename
-    let title = display_names
-        .and_then(|m| m.get(&session_id))
-        .filter(|s| !s.is_empty())
-        .map(|t| truncate_summary(t, TITLE_MAX_CHARS))
-        .or_else(|| first_user_message.map(|t| truncate_summary(&t, TITLE_MAX_CHARS)))
-        .or_else(|| {
-            cwd.as_deref()
-                .and_then(path_basename)
-                .map(|s| s.to_string())
-        });
+    let mut candidates = TitleCandidates::default()
+        .with_first_user_text(first_user_message.as_deref())
+        .with_directory(cwd.as_deref());
+    candidates.agent = display_names.and_then(|m| m.get(&session_id)).cloned();
+    let (title, title_source) = titled(&candidates);
 
     let summary = summary.map(|text| truncate_summary(&text, 160));
 
@@ -306,6 +304,8 @@ fn parse_session(
         last_active_at,
         source_path: Some(path.to_string_lossy().to_string()),
         resume_command: None, // OpenClaw sessions are gateway-managed, no CLI resume
+        title_source,
+        message_count: None,
     })
 }
 
@@ -436,8 +436,8 @@ mod tests {
 
         let meta = parse_session(&path, None).unwrap();
         let title = meta.title.unwrap();
-        assert!(title.len() <= TITLE_MAX_CHARS + 3); // +3 for "..."
-        assert!(title.ends_with("..."));
+        assert_eq!(title.chars().count(), 161);
+        assert!(title.ends_with('…'));
     }
 
     #[test]

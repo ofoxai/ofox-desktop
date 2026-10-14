@@ -1,15 +1,18 @@
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::borrow::Cow;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use serde::de::IgnoredAny;
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::config::get_claude_config_dir;
+use crate::session_manager::meta_cache::SessionDetails;
+use crate::session_manager::title::{clean_prompt, one_line, titled, untagged, TitleCandidates};
 use crate::session_manager::{SessionMessage, SessionMeta};
 
 use super::utils::{
-    extract_text, parse_timestamp_to_ms, path_basename, read_head_tail_lines, truncate_summary,
-    TITLE_MAX_CHARS,
+    extract_text, for_each_line, parse_timestamp_to_ms, read_head_tail_lines, truncate_summary,
 };
 
 const PROVIDER_ID: &str = "claude";
@@ -30,59 +33,7 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
 }
 
 pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
-    let file = File::open(path).map_err(|e| format!("Failed to open session file: {e}"))?;
-    let reader = BufReader::new(file);
-    let mut messages = Vec::new();
-
-    for line in reader.lines() {
-        let line = match line {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        let value: Value = match serde_json::from_str(&line) {
-            Ok(parsed) => parsed,
-            Err(_) => continue,
-        };
-
-        if value.get("isMeta").and_then(Value::as_bool) == Some(true) {
-            continue;
-        }
-
-        let message = match value.get("message") {
-            Some(message) => message,
-            None => continue,
-        };
-
-        let mut role = message
-            .get("role")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-
-        // Claude wraps tool_result inside user messages; reclassify as "tool" role
-        if role == "user" {
-            if let Some(Value::Array(items)) = message.get("content") {
-                let all_tool_results = !items.is_empty()
-                    && items.iter().all(|item| {
-                        item.get("type").and_then(Value::as_str) == Some("tool_result")
-                    });
-                if all_tool_results {
-                    role = "tool".to_string();
-                }
-            }
-        }
-
-        let content = message.get("content").map(extract_text).unwrap_or_default();
-        if content.trim().is_empty() {
-            continue;
-        }
-
-        let ts = value.get("timestamp").and_then(parse_timestamp_to_ms);
-
-        messages.push(SessionMessage { role, content, ts });
-    }
-
-    Ok(messages)
+    crate::session_manager::transcript::claude(path)
 }
 
 #[cfg(test)]
@@ -121,6 +72,175 @@ pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<boo
     Ok(true)
 }
 
+/// What a Claude Code session file's lines say about its title and length.
+/// Title rules adapted from Magpie internal/sessions/claude.go (MIT).
+#[derive(Debug, Default)]
+pub(crate) struct ClaudeScan {
+    pub candidates: TitleCandidates,
+    prompts: u32,
+    replies: HashSet<String>,
+    unnamed_replies: u32,
+}
+
+/// The parts of an assistant line a scan needs, read without the content.
+#[derive(Deserialize)]
+struct AssistantLine<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    message: Option<AssistantMessage<'a>>,
+}
+
+#[derive(Deserialize)]
+struct AssistantMessage<'a> {
+    #[serde(borrow)]
+    id: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    model: Option<Cow<'a, str>>,
+    usage: Option<IgnoredAny>,
+}
+
+impl ClaudeScan {
+    pub(crate) fn line(&mut self, value: &Value) {
+        let kind = value.get("type").and_then(Value::as_str);
+        let message = value.get("message");
+        let role = message.and_then(|m| m.get("role")).and_then(Value::as_str);
+        match kind {
+            // the agent renames a session as it goes: the last name stands
+            Some("ai-title") => last_text(&mut self.candidates.agent, value.get("aiTitle")),
+            Some("custom-title") => {
+                last_text(&mut self.candidates.custom, value.get("customTitle"))
+            }
+            Some("summary") if self.candidates.summary.is_none() => {
+                last_text(&mut self.candidates.summary, value.get("summary"))
+            }
+            Some("assistant") => {
+                let field = |key| message.and_then(|m| m.get(key));
+                self.reply(
+                    field("id").and_then(Value::as_str),
+                    field("model").and_then(Value::as_str),
+                    field("usage").is_some(),
+                );
+            }
+            Some("user") | None if role == Some("user") => {
+                let flagged = |key| value.get(key).and_then(Value::as_bool) == Some(true);
+                if flagged("isMeta") || flagged("isSidechain") {
+                    return;
+                }
+                let text = message.and_then(|m| m.get("content")).and_then(user_text);
+                let prompt = text.as_deref().and_then(clean_prompt);
+                if prompt.is_some() {
+                    self.prompts += 1;
+                }
+                let candidates = &mut self.candidates;
+                if candidates.prompt.is_none() {
+                    if prompt.is_some() {
+                        candidates.prompt = prompt;
+                    } else if candidates.message.is_none() {
+                        candidates.message = text.map(|t| untagged(&t)).filter(|t| !t.is_empty());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// An assistant line: a reply when it spent tokens (a message streamed
+    /// over several lines repeats its id and counts once).
+    fn reply(&mut self, id: Option<&str>, model: Option<&str>, usage: bool) {
+        if !usage || model == Some("<synthetic>") {
+            return;
+        }
+        match id {
+            Some(id) => {
+                self.replies.insert(id.to_string());
+            }
+            None => self.unnamed_replies += 1,
+        }
+    }
+
+    /// Prompts typed plus replies made.
+    pub(crate) fn message_count(&self) -> u32 {
+        let replies = u32::try_from(self.replies.len()).unwrap_or(u32::MAX);
+        self.prompts
+            .saturating_add(replies)
+            .saturating_add(self.unnamed_replies)
+    }
+}
+
+/// The whole file's title candidates and message count. Assistant lines, the
+/// bulk of a file, are read without their content.
+pub(crate) fn details(path: &Path) -> Option<SessionDetails> {
+    let mut scan = ClaudeScan::default();
+    for_each_line(path, |line| {
+        if line.contains("\"type\":\"assistant\"") {
+            if let Ok(AssistantLine {
+                kind: Some(kind),
+                message: Some(message),
+            }) = serde_json::from_str(line)
+            {
+                if kind == "assistant" {
+                    scan.reply(
+                        message.id.as_deref(),
+                        message.model.as_deref(),
+                        message.usage.is_some(),
+                    );
+                    return;
+                }
+            }
+        }
+        if ["\"role\":\"user\"", "-title\"", "\"type\":\"summary\""]
+            .iter()
+            .any(|key| line.contains(key))
+        {
+            if let Ok(value) = serde_json::from_str::<Value>(line) {
+                scan.line(&value);
+            }
+        }
+    })
+    .ok()?;
+    Some(SessionDetails {
+        message_count: scan.message_count(),
+        candidates: scan.candidates,
+    })
+}
+
+fn last_text(slot: &mut Option<String>, value: Option<&Value>) {
+    if let Some(text) = value
+        .and_then(Value::as_str)
+        .map(one_line)
+        .filter(|t| !t.is_empty())
+    {
+        *slot = Some(text);
+    }
+}
+
+/// The text of a user message, or `None` for a tool's result. Image blocks
+/// are left out.
+fn user_text(content: &Value) -> Option<String> {
+    let text = match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => {
+            if blocks
+                .iter()
+                .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
+            {
+                return None;
+            }
+            blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        _ => return None,
+    };
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
 fn parse_session(path: &Path) -> Option<SessionMeta> {
     if is_agent_session(path) {
         return None;
@@ -131,9 +251,7 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
     let mut session_id: Option<String> = None;
     let mut project_dir: Option<String> = None;
     let mut created_at: Option<i64> = None;
-    let mut first_user_message: Option<String> = None;
 
-    // Extract metadata and first user message from head lines
     for line in &head {
         let value: Value = match serde_json::from_str(line) {
             Ok(parsed) => parsed,
@@ -154,41 +272,14 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
         if created_at.is_none() {
             created_at = value.get("timestamp").and_then(parse_timestamp_to_ms);
         }
-        // Extract first real user message as title candidate
-        // Skip system-injected caveats and slash commands (e.g. /clear, /compact)
-        if first_user_message.is_none() {
-            let is_user = value.get("type").and_then(Value::as_str) == Some("user")
-                || value
-                    .get("message")
-                    .and_then(|m| m.get("role"))
-                    .and_then(Value::as_str)
-                    == Some("user");
-            if is_user {
-                if let Some(message) = value.get("message") {
-                    let text = message.get("content").map(extract_text).unwrap_or_default();
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty()
-                        && !trimmed.contains("<local-command-caveat>")
-                        && !trimmed.starts_with("<command-name>")
-                    {
-                        first_user_message = Some(trimmed.to_string());
-                    }
-                }
-            }
-        }
-        if session_id.is_some()
-            && project_dir.is_some()
-            && created_at.is_some()
-            && first_user_message.is_some()
-        {
+        if session_id.is_some() && project_dir.is_some() && created_at.is_some() {
             break;
         }
     }
 
-    // Extract last_active_at, summary, and custom-title from tail lines (reverse order)
+    // Extract last_active_at and summary from tail lines (reverse order)
     let mut last_active_at: Option<i64> = None;
     let mut summary: Option<String> = None;
-    let mut custom_title: Option<String> = None;
 
     for line in tail.iter().rev() {
         let value: Value = match serde_json::from_str(line) {
@@ -197,16 +288,6 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
         };
         if last_active_at.is_none() {
             last_active_at = value.get("timestamp").and_then(parse_timestamp_to_ms);
-        }
-        // Look for custom-title entry (take the last one, i.e. first in reverse)
-        if custom_title.is_none()
-            && value.get("type").and_then(Value::as_str) == Some("custom-title")
-        {
-            custom_title = value
-                .get("customTitle")
-                .and_then(Value::as_str)
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
         }
         if summary.is_none() {
             if value.get("isMeta").and_then(Value::as_bool) == Some(true) {
@@ -219,24 +300,24 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
                 }
             }
         }
-        if last_active_at.is_some() && summary.is_some() && custom_title.is_some() {
+        if last_active_at.is_some() && summary.is_some() {
             break;
+        }
+    }
+
+    // The head and tail are all that is read here; the session listing reads
+    // the whole file once per change (meta cache) for the full candidates.
+    let mut scan = ClaudeScan::default();
+    for line in head.iter().chain(&tail) {
+        if let Ok(value) = serde_json::from_str::<Value>(line) {
+            scan.line(&value);
         }
     }
 
     let session_id = session_id.or_else(|| infer_session_id_from_filename(path));
     let session_id = session_id?;
 
-    // Title priority: custom-title > first user message > directory basename
-    let title = custom_title
-        .map(|t| truncate_summary(&t, TITLE_MAX_CHARS))
-        .or_else(|| first_user_message.map(|t| truncate_summary(&t, TITLE_MAX_CHARS)))
-        .or_else(|| {
-            project_dir
-                .as_deref()
-                .and_then(path_basename)
-                .map(|v| v.to_string())
-        });
+    let (title, title_source) = titled(&scan.candidates.with_directory(project_dir.as_deref()));
 
     let summary = summary.map(|text| truncate_summary(&text, 160));
 
@@ -250,6 +331,8 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
         last_active_at,
         source_path: Some(path.to_string_lossy().to_string()),
         resume_command: Some(format!("claude --resume {session_id}")),
+        title_source,
+        message_count: None,
     })
 }
 
@@ -306,7 +389,182 @@ fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_manager::title::TitleSource;
     use tempfile::tempdir;
+
+    fn write_session(dir: &Path, lines: &[serde_json::Value]) -> PathBuf {
+        let path = dir.join("11111111-2222-3333-4444-555555555555.jsonl");
+        let body = lines
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect::<String>();
+        std::fs::write(&path, body).expect("write session");
+        path
+    }
+
+    fn user(content: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": content},
+            "sessionId": "11111111-2222-3333-4444-555555555555",
+            "cwd": "/work/app",
+            "timestamp": "2026-10-14T10:00:00Z",
+        })
+    }
+
+    fn title_of(lines: &[serde_json::Value]) -> Option<String> {
+        let temp = tempdir().expect("tempdir");
+        parse_session(&write_session(temp.path(), lines)).and_then(|meta| meta.title)
+    }
+
+    #[test]
+    fn the_title_claude_code_made_beats_the_first_prompt() {
+        let title = title_of(&[
+            user(serde_json::json!("fix the login")),
+            serde_json::json!({"type": "ai-title", "aiTitle": "Old name", "sessionId": "s"}),
+            serde_json::json!({"type": "ai-title", "aiTitle": "Fix login bug", "sessionId": "s"}),
+        ]);
+        assert_eq!(title.as_deref(), Some("Fix login bug"));
+    }
+
+    #[test]
+    fn a_summary_names_the_session_only_when_claude_made_no_title() {
+        let summary =
+            serde_json::json!({"type": "summary", "summary": "Login summary", "leafUuid": "u"});
+        let ai =
+            serde_json::json!({"type": "ai-title", "aiTitle": "Fix login bug", "sessionId": "s"});
+        let prompt = user(serde_json::json!("fix the login"));
+        assert_eq!(
+            title_of(&[summary.clone(), prompt.clone()]).as_deref(),
+            Some("Login summary")
+        );
+        assert_eq!(
+            title_of(&[summary, prompt, ai]).as_deref(),
+            Some("Fix login bug")
+        );
+    }
+
+    #[test]
+    fn a_slash_command_is_titled_by_its_name_and_args() {
+        let title = title_of(&[
+            user(serde_json::json!("<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>42</command-args>")),
+            user(serde_json::json!("later prompt")),
+        ]);
+        assert_eq!(title.as_deref(), Some("/review 42"));
+    }
+
+    #[test]
+    fn images_meta_lines_and_interruptions_stay_out_of_the_title() {
+        let mut meta =
+            user(serde_json::json!([{"type": "text", "text": "[Image: source: /tmp/1.png]"}]));
+        meta["isMeta"] = serde_json::json!(true);
+        let title = title_of(&[
+            meta,
+            user(serde_json::json!("[Request interrupted by user]")),
+            user(serde_json::json!([
+                {"type": "text", "text": "look at this [Image #24]"},
+                {"type": "image", "source": {"type": "base64", "data": "AAAA"}}
+            ])),
+        ]);
+        assert_eq!(title.as_deref(), Some("look at this [Image #24]"));
+    }
+
+    #[test]
+    fn a_session_with_only_tagged_messages_is_titled_by_their_words() {
+        let title = title_of(&[user(serde_json::json!(
+            "<task-notification>\n<summary>Agent finished</summary>\n</task-notification>"
+        ))]);
+        assert_eq!(title.as_deref(), Some("Agent finished"));
+    }
+
+    fn assistant(content: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": content},
+            "timestamp": "2026-10-14T10:00:01Z",
+        })
+    }
+
+    fn roles_and_texts(lines: &[serde_json::Value]) -> Vec<(String, String)> {
+        let temp = tempdir().expect("tempdir");
+        load_messages(&write_session(temp.path(), lines))
+            .expect("load")
+            .into_iter()
+            .map(|m| (m.role, m.content))
+            .collect()
+    }
+
+    fn pair(role: &str, text: &str) -> (String, String) {
+        (role.to_string(), text.to_string())
+    }
+
+    #[test]
+    fn transcript_shows_slash_commands_and_their_output_without_tags() {
+        let mut meta_caveat = user(serde_json::json!(
+            "<local-command-caveat>Caveat: The messages below were generated by the user while running local commands.</local-command-caveat>"
+        ));
+        meta_caveat["isMeta"] = serde_json::json!(true);
+        let messages = roles_and_texts(&[
+            meta_caveat,
+            user(serde_json::json!(
+                "<local-command-caveat>Caveat: The messages below were generated by the user while running local commands.</local-command-caveat>"
+            )),
+            user(serde_json::json!(
+                "<command-name>/clear</command-name>\n            <command-message>clear</command-message>\n            <command-args></command-args>"
+            )),
+            user(serde_json::json!("<local-command-stdout></local-command-stdout>")),
+            user(serde_json::json!(
+                "<command-message>model</command-message>\n<command-name>/model</command-name>\n<command-args>opus</command-args>"
+            )),
+            user(serde_json::json!(
+                "<local-command-stdout>Set model to Opus</local-command-stdout>"
+            )),
+        ]);
+        assert_eq!(
+            messages,
+            vec![
+                pair("command", "/clear"),
+                pair("command", "/model opus"),
+                pair("command_output", "Set model to Opus"),
+            ]
+        );
+    }
+
+    #[test]
+    fn transcript_strips_reminders_and_drops_empty_thinking() {
+        let messages = roles_and_texts(&[
+            user(serde_json::json!([
+                {"type": "text", "text": "<system-reminder>\nThe date is 2026-10-14.\n</system-reminder>"},
+                {"type": "text", "text": "fix the bug"}
+            ])),
+            user(serde_json::json!(
+                "<system-reminder>\nBackground review found 2 issues\n</system-reminder>"
+            )),
+            assistant(serde_json::json!([{"type": "thinking", "thinking": "", "signature": "s"}])),
+            assistant(serde_json::json!([{"type": "redacted_thinking", "data": "opaque"}])),
+            assistant(
+                serde_json::json!([{"type": "thinking", "thinking": "look at main.rs first"}]),
+            ),
+            assistant(serde_json::json!([
+                {"type": "text", "text": "Reading it."},
+                {"type": "tool_use", "id": "toolu_1", "name": "Read", "input": {"file_path": "src/main.rs"}}
+            ])),
+            user(serde_json::json!([
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "fn main() {}"}
+            ])),
+        ]);
+        assert_eq!(
+            messages,
+            vec![
+                pair("user", "fix the bug"),
+                pair("system", "Background review found 2 issues"),
+                pair("thinking", "look at main.rs first"),
+                pair("assistant", "Reading it."),
+                pair("tool_call", "{\n  \"file_path\": \"src/main.rs\"\n}"),
+                pair("tool", "fn main() {}"),
+            ]
+        );
+    }
 
     #[test]
     fn delete_session_removes_main_file_and_sidecar_directory() {
@@ -336,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn load_messages_tool_use_shows_as_assistant() {
+    fn load_messages_tool_use_is_a_named_tool_call_and_its_result_is_named_too() {
         let temp = tempdir().expect("tempdir");
         let path = temp.path().join("session.jsonl");
         std::fs::write(
@@ -350,9 +608,11 @@ mod tests {
 
         let msgs = load_messages(&path).expect("load");
         assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0].role, "assistant");
-        assert!(msgs[0].content.contains("[Tool: Write]"));
+        assert_eq!(msgs[0].role, "tool_call");
+        assert_eq!(msgs[0].name.as_deref(), Some("Write"));
+        assert!(msgs[0].content.contains("\"file_path\": \"a.txt\""));
         assert_eq!(msgs[1].role, "tool");
+        assert_eq!(msgs[1].name.as_deref(), Some("Write"));
         assert_eq!(msgs[1].content, "File written");
     }
 
@@ -367,14 +627,15 @@ mod tests {
         .expect("write");
 
         let msgs = load_messages(&path).expect("load");
-        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "assistant");
-        assert!(msgs[0].content.contains("Let me help."));
-        assert!(msgs[0].content.contains("[Tool: Read]"));
+        assert_eq!(msgs[0].content, "Let me help.");
+        assert_eq!(msgs[1].role, "tool_call");
+        assert_eq!(msgs[1].name.as_deref(), Some("Read"));
     }
 
     #[test]
-    fn load_messages_mixed_user_tool_result_and_text_stays_user() {
+    fn load_messages_mixed_user_tool_result_and_text_splits_into_tool_and_user() {
         let temp = tempdir().expect("tempdir");
         let path = temp.path().join("session.jsonl");
         std::fs::write(
@@ -384,9 +645,11 @@ mod tests {
         .expect("write");
 
         let msgs = load_messages(&path).expect("load");
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].role, "user");
-        assert!(msgs[0].content.contains("Please continue"));
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "tool");
+        assert_eq!(msgs[0].content, "result");
+        assert_eq!(msgs[1].role, "user");
+        assert_eq!(msgs[1].content, "Please continue");
     }
 
     #[test]
@@ -424,6 +687,7 @@ mod tests {
 
         let meta = parse_session(&path).unwrap();
         assert_eq!(meta.title.as_deref(), Some("fix-login-bug"));
+        assert_eq!(meta.title_source, Some(TitleSource::Custom));
     }
 
     #[test]
@@ -442,6 +706,7 @@ mod tests {
         let meta = parse_session(&path).unwrap();
         // No user message and no custom-title → falls back to dir basename
         assert_eq!(meta.title.as_deref(), Some("my-project"));
+        assert_eq!(meta.title_source, Some(TitleSource::Directory));
     }
 
     #[test]
@@ -460,8 +725,8 @@ mod tests {
 
         let meta = parse_session(&path).unwrap();
         let title = meta.title.unwrap();
-        assert!(title.len() <= TITLE_MAX_CHARS + 3); // +3 for "..."
-        assert!(title.ends_with("..."));
+        assert_eq!(title.chars().count(), 161);
+        assert!(title.ends_with('…'));
     }
 
     #[test]
@@ -483,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_session_skips_command_caveat_and_slash_commands() {
+    fn parse_session_skips_command_caveat_and_titles_by_the_slash_command() {
         let temp = tempdir().expect("tempdir");
         let path = temp.path().join("session-clear.jsonl");
         std::fs::write(
@@ -499,6 +764,7 @@ mod tests {
         .expect("write");
 
         let meta = parse_session(&path).unwrap();
-        assert_eq!(meta.title.as_deref(), Some("帮我看看工作区的改动"));
+        // Magpie's ccPrompt: a slash command someone typed is the first prompt
+        assert_eq!(meta.title.as_deref(), Some("/clear"));
     }
 }

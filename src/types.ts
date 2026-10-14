@@ -356,22 +356,46 @@ export interface Settings {
   ofoxApexPinned?: boolean | null;
 }
 
+/** Where a session's title came from (session_manager/title.rs). */
+export type SessionTitleSource =
+  | "custom"
+  | "agent"
+  | "prompt"
+  | "message"
+  | "directory";
+
 export interface SessionMeta {
   providerId: string;
   sessionId: string;
   title?: string;
+  titleSource?: SessionTitleSource;
   summary?: string;
   projectDir?: string | null;
   createdAt?: number;
   lastActiveAt?: number;
   sourcePath?: string;
   resumeCommand?: string;
+  /** Prompts typed plus replies; only where the whole file was read. */
+  messageCount?: number;
 }
 
+/** Transcript roles (session_manager/transcript.rs). */
+export type SessionMessageRole =
+  | "user"
+  | "assistant"
+  | "thinking"
+  | "tool_call"
+  | "tool"
+  | "command"
+  | "command_output"
+  | "system";
+
 export interface SessionMessage {
-  role: string;
+  role: SessionMessageRole;
   content: string;
   ts?: number;
+  /** The tool's name, of a tool call or its result. */
+  name?: string;
 }
 
 // MCP 服务器连接参数（宽松：允许扩展字段）

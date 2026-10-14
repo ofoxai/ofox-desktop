@@ -339,15 +339,17 @@ fn write_pricing_rows(db: &Database, models: &[NormalizedModel]) -> Result<usize
 /// 修正这些行。本函数兜底处理：扫描 cost=0 但 token>0 且 data_source 来自
 /// 离线日志的行，按当前 `model_pricing` 表重新计算。
 ///
-/// 只动这三种 data_source（pure-proxy 行不动 —— 那些是真的没 token 数据）：
+/// 只动这几种 data_source（pure-proxy 行不动 —— 那些是真的没 token 数据）：
 /// - `session_log` (claude)
 /// - `codex_session`
 /// - `gemini_session`
+/// - `opencode_session`
 ///
-/// 计费公式与 `proxy::usage::CostCalculator::calculate` 完全对齐：
-/// `billable_input = input - cache_read`（缓存命中部分按 cache_read 价计费，
-/// 不再算 input 价）。
+/// 费用由 `proxy::usage::CostCalculator::calculate` 计算（唯一的计费公式；
+/// `input_tokens` 已是不含缓存的 fresh input）。
 fn backfill_zero_cost_session_logs(db: &Database) -> Result<usize, AppError> {
+    use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
+    use crate::proxy::usage::parser::TokenUsage;
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
@@ -366,7 +368,7 @@ fn backfill_zero_cost_session_logs(db: &Database) -> Result<usize, AppError> {
                         cache_read_tokens, cache_creation_tokens,
                         cost_multiplier
                  FROM proxy_request_logs
-                 WHERE data_source IN ('session_log','codex_session','gemini_session')
+                 WHERE data_source IN ('session_log','codex_session','gemini_session','opencode_session')
                    AND CAST(total_cost_usd AS REAL) = 0
                    AND (input_tokens > 0 OR output_tokens > 0
                         OR cache_read_tokens > 0 OR cache_creation_tokens > 0)",
@@ -415,33 +417,29 @@ fn backfill_zero_cost_session_logs(db: &Database) -> Result<usize, AppError> {
             let (input_per_m, output_per_m, cache_r_per_m, cache_w_per_m) = pricing;
 
             // 失败一行就 skip，不阻塞批量
-            let parse = |s: &str| -> Option<Decimal> { Decimal::from_str(s.trim()).ok() };
-            let (
-                Some(input_per_m),
-                Some(output_per_m),
-                Some(cache_r_per_m),
-                Some(cache_w_per_m),
-                Some(mult),
-            ) = (
-                parse(&input_per_m),
-                parse(&output_per_m),
-                parse(&cache_r_per_m),
-                parse(&cache_w_per_m),
-                parse(&multiplier_s),
-            )
-            else {
+            let (Ok(pricing), Ok(mult)) = (
+                ModelPricing::from_strings(
+                    input_per_m.trim(),
+                    output_per_m.trim(),
+                    cache_r_per_m.trim(),
+                    cache_w_per_m.trim(),
+                ),
+                Decimal::from_str(multiplier_s.trim()),
+            ) else {
                 log::warn!("backfill: decimal parse failed for `{model}`, skipping");
                 continue;
             };
 
-            let million = Decimal::from(1_000_000_u64);
-            // 与 CostCalculator::calculate 完全一致：billable_input 减掉 cache_read
-            let billable_in = input_t.saturating_sub(cache_r_t).max(0);
-            let in_cost = Decimal::from(billable_in) * input_per_m / million;
-            let out_cost = Decimal::from(output_t) * output_per_m / million;
-            let cr_cost = Decimal::from(cache_r_t) * cache_r_per_m / million;
-            let cw_cost = Decimal::from(cache_w_t) * cache_w_per_m / million;
-            let total = (in_cost + out_cost + cr_cost + cw_cost) * mult;
+            let usage = TokenUsage {
+                input_tokens: input_t.max(0) as u32,
+                output_tokens: output_t.max(0) as u32,
+                cache_read_tokens: cache_r_t.max(0) as u32,
+                cache_creation_tokens: cache_w_t.max(0) as u32,
+                model: Some(model.clone()),
+                message_id: None,
+            };
+            let cost = CostCalculator::calculate(&usage, &pricing, mult);
+            let total = cost.total_cost;
 
             if total.is_zero() {
                 // 价格本身全 0（极少见）—— 不更新，避免噪声
@@ -451,10 +449,10 @@ fn backfill_zero_cost_session_logs(db: &Database) -> Result<usize, AppError> {
             stmt_update
                 .execute(rusqlite::params![
                     request_id,
-                    in_cost.to_string(),
-                    out_cost.to_string(),
-                    cr_cost.to_string(),
-                    cw_cost.to_string(),
+                    cost.input_cost.to_string(),
+                    cost.output_cost.to_string(),
+                    cost.cache_read_cost.to_string(),
+                    cost.cache_creation_cost.to_string(),
                     total.to_string(),
                 ])
                 .map_err(|e| AppError::Database(format!("backfill update: {e}")))?;

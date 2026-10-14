@@ -3,9 +3,10 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 use serde_json::Value;
 
+use crate::session_manager::title::{titled, TitleCandidates};
 use crate::session_manager::{SessionMessage, SessionMeta};
 
-use super::utils::{parse_timestamp_to_ms, path_basename, truncate_summary};
+use super::utils::{parse_timestamp_to_ms, truncate_summary};
 
 const PROVIDER_ID: &str = "opencode";
 
@@ -140,15 +141,15 @@ fn scan_sessions_sqlite() -> Vec<SessionMeta> {
     let mut sessions = Vec::new();
     for row in iter.flatten() {
         let (session_id, title, directory, created, updated) = row;
-        let display_title = if title.is_empty() {
-            path_basename(&directory)
-        } else {
-            Some(title)
-        };
+        let mut candidates = TitleCandidates::default().with_directory(Some(&directory));
+        candidates.agent = Some(title);
+        let (display_title, title_source) = titled(&candidates);
         sessions.push(SessionMeta {
             provider_id: PROVIDER_ID.to_string(),
             session_id: session_id.clone(),
             title: display_title.clone(),
+            title_source,
+            message_count: None,
             summary: display_title,
             project_dir: if directory.is_empty() {
                 None
@@ -227,6 +228,7 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
             role,
             content,
             ts: if ts > 0 { Some(ts) } else { None },
+            name: None,
         })
         .collect();
 
@@ -316,6 +318,7 @@ pub fn load_messages_sqlite(source: &str) -> Result<Vec<SessionMessage>, String>
             role,
             content,
             ts: Some(ts),
+            name: None,
         });
     }
 
@@ -457,12 +460,9 @@ fn parse_session(storage: &Path, path: &Path) -> Option<SessionMeta> {
 
     // Derive title from directory basename if no explicit title
     let has_title = title.is_some();
-    let display_title = title.or_else(|| {
-        directory
-            .as_deref()
-            .and_then(path_basename)
-            .map(|s| s.to_string())
-    });
+    let mut candidates = TitleCandidates::default().with_directory(directory.as_deref());
+    candidates.agent = title;
+    let (display_title, title_source) = titled(&candidates);
 
     // Build source_path = message directory for this session
     let msg_dir = storage.join("message").join(&session_id);
@@ -485,6 +485,8 @@ fn parse_session(storage: &Path, path: &Path) -> Option<SessionMeta> {
         last_active_at: updated_at.or(created_at),
         source_path: Some(source_path),
         resume_command: Some(format!("opencode session resume {session_id}")),
+        title_source,
+        message_count: None,
     })
 }
 

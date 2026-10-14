@@ -1,16 +1,18 @@
-use std::io::{BufRead, BufReader};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::SystemTime;
 
 use regex::Regex;
 use serde_json::Value;
 
 use crate::codex_config::get_codex_config_dir;
+use crate::session_manager::meta_cache::SessionDetails;
+use crate::session_manager::title::{clean_prompt, one_line, titled, untagged, TitleCandidates};
 use crate::session_manager::{SessionMessage, SessionMeta};
 
 use super::utils::{
-    extract_text, parse_timestamp_to_ms, path_basename, read_head_tail_lines, truncate_summary,
-    TITLE_MAX_CHARS,
+    extract_text, for_each_line, parse_timestamp_to_ms, read_head_tail_lines, truncate_summary,
 };
 
 const PROVIDER_ID: &str = "codex";
@@ -28,10 +30,15 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
 pub(crate) fn scan_in(root: &Path) -> Vec<SessionMeta> {
     let mut files = Vec::new();
     collect_jsonl_files(root, &mut files);
+    // `<codex home>/sessions` sits beside the thread-name index
+    let names = root
+        .parent()
+        .map(|home| thread_names(&home.join("session_index.jsonl")))
+        .unwrap_or_default();
 
     let mut sessions = Vec::new();
     for path in files {
-        if let Some(meta) = parse_session(&path) {
+        if let Some(meta) = parse_with_names(&path, &names) {
             sessions.push(meta);
         }
     }
@@ -39,84 +46,62 @@ pub(crate) fn scan_in(root: &Path) -> Vec<SessionMeta> {
     sessions
 }
 
-pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
-    let file = super::dsh::open(path)?;
-    let reader = BufReader::new(file);
-    let mut messages = Vec::new();
+type ThreadNames = Arc<HashMap<String, String>>;
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        let value: Value = match serde_json::from_str(&line) {
-            Ok(parsed) => parsed,
-            Err(_) => continue,
-        };
+static THREAD_NAMES: Mutex<Option<(PathBuf, u64, SystemTime, ThreadNames)>> = Mutex::new(None);
 
-        if value.get("type").and_then(Value::as_str) != Some("response_item") {
-            continue;
+/// Codex's names for its threads (`session_index.jsonl`, append-only: the
+/// last row for an id is its name). Read again only when the file changes.
+/// Adapted from Magpie internal/sessions/codex_titles.go (MIT).
+pub(crate) fn thread_names(index: &Path) -> ThreadNames {
+    let Some(stat) = std::fs::metadata(index).ok().filter(|m| m.is_file()) else {
+        return ThreadNames::default();
+    };
+    let modified = stat.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut cache = THREAD_NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((path, size, at, names)) = cache.as_ref() {
+        if path == index && *size == stat.len() && *at == modified {
+            return Arc::clone(names);
         }
-
-        let payload = match value.get("payload") {
-            Some(payload) => payload,
-            None => continue,
-        };
-
-        let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
-
-        // Codex uses separate payload types for tool interactions
-        let (role, content) = match payload_type {
-            "message" => {
-                let role = payload
-                    .get("role")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_string();
-                let content = payload.get("content").map(extract_text).unwrap_or_default();
-                (role, content)
-            }
-            "function_call" => {
-                let name = payload
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown");
-                (
-                    "assistant".to_string(),
-                    format!(
-                        "[Tool: {name}]\n{}",
-                        payload
-                            .get("arguments")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                    ),
-                )
-            }
-            "function_call_output" => {
-                let output = payload
-                    .get("output")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                ("tool".to_string(), output)
-            }
-            "reasoning" => (
-                "thinking".into(),
-                payload.get("summary").map(extract_text).unwrap_or_default(),
-            ),
-            _ => continue,
-        };
-
-        if content.trim().is_empty() {
-            continue;
-        }
-
-        let ts = value.get("timestamp").and_then(parse_timestamp_to_ms);
-
-        messages.push(SessionMessage { role, content, ts });
     }
+    let Ok(text) = std::fs::read_to_string(index) else {
+        return ThreadNames::default();
+    };
+    let mut names = HashMap::new();
+    for line in text.lines() {
+        let Ok(row) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let (Some(id), Some(name)) = (
+            row.get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty()),
+            row.get("thread_name")
+                .and_then(Value::as_str)
+                .map(one_line)
+                .filter(|name| !name.is_empty()),
+        ) else {
+            continue;
+        };
+        names.insert(id.to_string(), name);
+    }
+    let names = Arc::new(names);
+    *cache = Some((
+        index.to_path_buf(),
+        stat.len(),
+        modified,
+        Arc::clone(&names),
+    ));
+    names
+}
 
-    Ok(messages)
+/// The thread names of the Codex home in use.
+pub(crate) fn current_thread_names() -> ThreadNames {
+    thread_names(&get_codex_config_dir().join("session_index.jsonl"))
+}
+
+pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
+    crate::session_manager::transcript::codex(path)
 }
 
 #[cfg(test)]
@@ -141,15 +126,112 @@ pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<boo
     Ok(true)
 }
 
+/// What a Codex rollout's lines say about its title and length. Title rules
+/// adapted from Magpie internal/sessions/codex.go (MIT).
+#[derive(Debug, Default)]
+pub(crate) struct CodexScan {
+    pub candidates: TitleCandidates,
+    prompts: u32,
+    replies: u32,
+}
+
+impl CodexScan {
+    pub(crate) fn line(&mut self, value: &Value) {
+        let Some(payload) = value.get("payload") else {
+            return;
+        };
+        let payload_type = payload.get("type").and_then(Value::as_str);
+        match value.get("type").and_then(Value::as_str) {
+            Some("response_item") if payload_type == Some("message") => {
+                match payload.get("role").and_then(Value::as_str) {
+                    Some("user") => {
+                        let mut typed = false;
+                        for text in user_texts(payload.get("content")) {
+                            let prompt = clean_prompt(text);
+                            typed |= prompt.is_some();
+                            if self.candidates.prompt.is_none() {
+                                self.candidates.prompt = prompt;
+                            }
+                        }
+                        if typed {
+                            self.prompts += 1;
+                        }
+                    }
+                    Some("assistant") => self.replies += 1,
+                    _ => {}
+                }
+            }
+            Some("event_msg") if payload_type == Some("user_message") => {
+                let text = payload.get("message").and_then(Value::as_str).unwrap_or("");
+                let candidates = &mut self.candidates;
+                if candidates.prompt.is_none() {
+                    candidates.prompt = clean_prompt(text);
+                }
+                if candidates.prompt.is_none() && candidates.message.is_none() {
+                    candidates.message = Some(untagged(text)).filter(|t| !t.is_empty());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Typed prompts plus the agent's messages back.
+    pub(crate) fn message_count(&self) -> u32 {
+        self.prompts.saturating_add(self.replies)
+    }
+}
+
+/// The whole rollout's title candidates and message count (the thread name
+/// is not in the rollout: see `thread_names`).
+pub(crate) fn details(path: &Path) -> Option<SessionDetails> {
+    let mut scan = CodexScan::default();
+    for_each_line(path, |line| {
+        let message =
+            line.contains("\"type\":\"response_item\"") && line.contains("\"type\":\"message\"");
+        if message || line.contains("\"type\":\"user_message\"") {
+            if let Ok(value) = serde_json::from_str::<Value>(line) {
+                scan.line(&value);
+            }
+        }
+    })
+    .ok()?;
+    Some(SessionDetails {
+        message_count: scan.message_count(),
+        candidates: scan.candidates,
+    })
+}
+
+/// The texts of a user message: each text item, or the message when it is
+/// one string. Images are left out.
+fn user_texts(content: Option<&Value>) -> Vec<&str> {
+    match content {
+        Some(Value::String(text)) => vec![text.as_str()],
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.get("type").and_then(Value::as_str),
+                    Some("input_text" | "text")
+                )
+            })
+            .filter_map(|item| item.get("text").and_then(Value::as_str))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 pub(crate) fn parse_session(path: &Path) -> Option<SessionMeta> {
+    parse_with_names(path, &HashMap::new())
+}
+
+fn parse_with_names(path: &Path, names: &HashMap<String, String>) -> Option<SessionMeta> {
     let (head, tail) = read_head_tail_lines(path, 10, 30).ok()?;
 
     let mut session_id: Option<String> = None;
     let mut project_dir: Option<String> = None;
     let mut created_at: Option<i64> = None;
-    let mut first_user_message: Option<String> = None;
+    let mut scan = CodexScan::default();
 
-    // Extract metadata and first user message from head lines
     for line in &head {
         let value: Value = match serde_json::from_str(line) {
             Ok(parsed) => parsed,
@@ -177,29 +259,7 @@ pub(crate) fn parse_session(path: &Path) -> Option<SessionMeta> {
                 }
             }
         }
-        // Extract first user message as title candidate
-        if first_user_message.is_none()
-            && value.get("type").and_then(Value::as_str) == Some("response_item")
-        {
-            if let Some(payload) = value.get("payload") {
-                if payload.get("type").and_then(Value::as_str) == Some("message")
-                    && payload.get("role").and_then(Value::as_str) == Some("user")
-                {
-                    let text = payload.get("content").map(extract_text).unwrap_or_default();
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() && !trimmed.starts_with("# AGENTS.md") {
-                        first_user_message = Some(trimmed.to_string());
-                    }
-                }
-            }
-        }
-        if session_id.is_some()
-            && project_dir.is_some()
-            && created_at.is_some()
-            && first_user_message.is_some()
-        {
-            break;
-        }
+        scan.line(&value);
     }
 
     // Extract last_active_at and summary from tail lines (reverse order)
@@ -228,18 +288,20 @@ pub(crate) fn parse_session(path: &Path) -> Option<SessionMeta> {
             break;
         }
     }
+    if scan.candidates.prompt.is_none() {
+        for line in &tail {
+            if let Ok(value) = serde_json::from_str::<Value>(line) {
+                scan.line(&value);
+            }
+        }
+    }
 
     let session_id = session_id.or_else(|| infer_session_id_from_filename(path));
     let session_id = session_id?;
 
-    let title = first_user_message
-        .map(|t| truncate_summary(&t, TITLE_MAX_CHARS))
-        .or_else(|| {
-            project_dir
-                .as_deref()
-                .and_then(path_basename)
-                .map(|v| v.to_string())
-        });
+    let mut candidates = scan.candidates.with_directory(project_dir.as_deref());
+    candidates.agent = names.get(&session_id).cloned();
+    let (title, title_source) = titled(&candidates);
 
     let summary = summary.map(|text| truncate_summary(&text, 160));
 
@@ -253,6 +315,8 @@ pub(crate) fn parse_session(path: &Path) -> Option<SessionMeta> {
         last_active_at,
         source_path: Some(path.to_string_lossy().to_string()),
         resume_command: Some(format!("codex resume {session_id}")),
+        title_source,
+        message_count: None,
     })
 }
 
@@ -290,7 +354,152 @@ fn collect_jsonl_files(root: &Path, files: &mut Vec<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_manager::title::TitleSource;
     use tempfile::tempdir;
+
+    const THREAD: &str = "01a0bdc9-b5fd-7e63-9658-68bc8dce5ecd";
+
+    fn rollout(root: &Path, lines: &[serde_json::Value]) -> PathBuf {
+        let dir = root.join("sessions/2026/10/14");
+        std::fs::create_dir_all(&dir).expect("create sessions");
+        let path = dir.join(format!("rollout-2026-10-14T10-00-00-{THREAD}.jsonl"));
+        let mut body = format!(
+            "{}\n",
+            serde_json::json!({"timestamp": "2026-10-14T10:00:00Z", "type": "session_meta",
+                "payload": {"id": THREAD, "cwd": "/work/app"}})
+        );
+        for line in lines {
+            body.push_str(&format!("{line}\n"));
+        }
+        std::fs::write(&path, body).expect("write rollout");
+        path
+    }
+
+    fn user_items(texts: &[serde_json::Value]) -> serde_json::Value {
+        serde_json::json!({"timestamp": "2026-10-14T10:00:01Z", "type": "response_item",
+            "payload": {"type": "message", "role": "user", "content": texts}})
+    }
+
+    fn input_text(text: &str) -> serde_json::Value {
+        serde_json::json!({"type": "input_text", "text": text})
+    }
+
+    #[test]
+    fn the_codex_thread_name_beats_the_first_prompt() {
+        let temp = tempdir().expect("tempdir");
+        rollout(
+            temp.path(),
+            &[user_items(&[input_text("how do I deploy?")])],
+        );
+        std::fs::write(
+            temp.path().join("session_index.jsonl"),
+            format!(
+                "{}\n{}\n{}\n",
+                serde_json::json!({"id": THREAD, "thread_name": "查询长沙天气", "updated_at": "2026-10-14T10:00:30Z"}),
+                serde_json::json!({"id": "other", "thread_name": "另一个聊天"}),
+                serde_json::json!({"id": THREAD, "thread_name": "  长沙天气更新  \n ", "updated_at": "2026-10-14T10:01:00Z"}),
+            ),
+        )
+        .expect("write index");
+
+        let sessions = scan_in(&temp.path().join("sessions"));
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].title.as_deref(), Some("长沙天气更新"));
+        assert_eq!(sessions[0].title_source, Some(TitleSource::Agent));
+    }
+
+    #[test]
+    fn harness_items_are_not_prompts() {
+        let temp = tempdir().expect("tempdir");
+        let path = rollout(
+            temp.path(),
+            &[
+                user_items(&[input_text("<environment_context>\n  <cwd>/work/app</cwd>\n</environment_context>")]),
+                serde_json::json!({"timestamp": "2026-10-14T10:00:02Z", "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "<external_codex_apps_open_page>{\"page_id\":null}</external_codex_apps_open_page>"}}),
+                user_items(&[input_text("<external_codex_apps_open_page>{\"page_id\":null}</external_codex_apps_open_page>")]),
+                user_items(&[
+                    input_text("<image name=[Image #1] path=\"/tmp/a.png\">"),
+                    serde_json::json!({"type": "input_image", "image_url": "data:image/png;base64,AAAA"}),
+                    input_text("</image>"),
+                    input_text("make the button green"),
+                ]),
+            ],
+        );
+
+        let meta = parse_session(&path).expect("parse");
+        assert_eq!(meta.title.as_deref(), Some("make the button green"));
+        assert_eq!(meta.title_source, Some(TitleSource::Prompt));
+    }
+
+    fn item(payload: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"timestamp": "2026-10-14T10:00:03Z", "type": "response_item", "payload": payload})
+    }
+
+    #[test]
+    fn transcript_marks_harness_context_as_system_and_reasoning_as_thinking() {
+        let temp = tempdir().expect("tempdir");
+        let path = rollout(
+            temp.path(),
+            &[
+                item(serde_json::json!({"type": "message", "role": "developer",
+                    "content": [{"type": "input_text", "text": "<permissions instructions>sandboxed</permissions instructions>"}]})),
+                user_items(&[input_text(
+                    "<environment_context>\n  <cwd>/work/app</cwd>\n</environment_context>",
+                )]),
+                user_items(&[input_text(
+                    "<user_instructions>be brief</user_instructions>",
+                )]),
+                user_items(&[
+                    input_text("<image name=[Image #1] path=\"/tmp/a.png\">"),
+                    serde_json::json!({"type": "input_image", "image_url": "data:image/png;base64,AAAA"}),
+                    input_text("</image>"),
+                    input_text("make it green"),
+                ]),
+                item(
+                    serde_json::json!({"type": "reasoning", "summary": [], "encrypted_content": "opaque"}),
+                ),
+                item(serde_json::json!({"type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "Checking the CSS"}], "encrypted_content": "opaque"})),
+                item(
+                    serde_json::json!({"type": "custom_tool_call", "call_id": "c1", "name": "apply_patch",
+                    "input": "*** Begin Patch"}),
+                ),
+                item(
+                    serde_json::json!({"type": "custom_tool_call_output", "call_id": "c1",
+                    "output": [{"type": "input_text", "text": "Done"}]}),
+                ),
+                item(serde_json::json!({"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "It is green."}]})),
+            ],
+        );
+
+        let messages = load_messages(&path)
+            .expect("load")
+            .into_iter()
+            .map(|m| (m.role, m.content))
+            .collect::<Vec<_>>();
+        let pair = |role: &str, text: &str| (role.to_string(), text.to_string());
+        assert_eq!(
+            messages,
+            vec![
+                pair(
+                    "system",
+                    "<permissions instructions>sandboxed</permissions instructions>"
+                ),
+                pair(
+                    "system",
+                    "<environment_context>\n  <cwd>/work/app</cwd>\n</environment_context>"
+                ),
+                pair("system", "<user_instructions>be brief</user_instructions>"),
+                pair("user", "[Image]\nmake it green"),
+                pair("thinking", "Checking the CSS"),
+                pair("tool_call", "*** Begin Patch"),
+                pair("tool", "Done"),
+                pair("assistant", "It is green."),
+            ]
+        );
+    }
 
     #[test]
     fn delete_session_removes_jsonl_file() {
@@ -385,8 +594,8 @@ mod tests {
 
         let meta = parse_session(&path).unwrap();
         let title = meta.title.unwrap();
-        assert!(title.len() <= TITLE_MAX_CHARS + 3); // +3 for "..."
-        assert!(title.ends_with("..."));
+        assert_eq!(title.chars().count(), 161);
+        assert!(title.ends_with('…'));
     }
 
     #[test]
@@ -411,10 +620,12 @@ mod tests {
         assert_eq!(msgs[0].role, "user");
         assert_eq!(msgs[0].content, "list files");
 
-        assert_eq!(msgs[1].role, "assistant");
-        assert!(msgs[1].content.contains("[Tool: shell]"));
+        assert_eq!(msgs[1].role, "tool_call");
+        assert_eq!(msgs[1].name.as_deref(), Some("shell"));
+        assert_eq!(msgs[1].content, "{\n  \"cmd\": [\n    \"ls\"\n  ]\n}");
 
         assert_eq!(msgs[2].role, "tool");
+        assert_eq!(msgs[2].name.as_deref(), Some("shell"));
         assert!(msgs[2].content.contains("file1.txt"));
 
         assert_eq!(msgs[3].role, "assistant");
