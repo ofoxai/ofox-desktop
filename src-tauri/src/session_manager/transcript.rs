@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 
 use super::providers::{extract_text, parse_timestamp_to_ms};
-use super::title::slash_command;
+use super::title::{is_context, slash_command, without_context};
 use super::SessionMessage;
 
 pub const USER: &str = "user";
@@ -149,8 +149,16 @@ fn user_text(text: &str, ts: Option<i64>) -> Option<SessionMessage> {
         return (!reminders.is_empty()).then(|| message(SYSTEM, reminders, ts));
     }
     // what the agent put in itself (a notification, a context block)
-    let role = if typed.starts_with('<') { SYSTEM } else { USER };
-    Some(message(role, typed, ts))
+    let role = if is_context(typed) { SYSTEM } else { USER };
+    Some(message(
+        role,
+        if role == USER {
+            without_context(typed)
+        } else {
+            typed.to_string()
+        },
+        ts,
+    ))
 }
 
 fn pretty(value: &Value) -> String {
@@ -354,11 +362,11 @@ fn codex_user(content: Option<&Value>, ts: Option<i64>, out: &mut Vec<SessionMes
                 if IMAGE_TAG.is_match(trimmed) {
                     continue;
                 }
-                if trimmed.starts_with('<') || trimmed.starts_with("# AGENTS.md") {
+                if is_context(trimmed) {
                     pending.flush(ts, out);
                     out.push(message(SYSTEM, trimmed, ts));
                 } else {
-                    pending.push(text);
+                    pending.push(&without_context(text));
                 }
             }
             _ => {}
@@ -385,6 +393,21 @@ fn codex_output(output: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn genuine_tagged_questions_remain_user_messages() {
+        for text in [
+            "<div>fix this component</div>",
+            "<user_query>why?</user_query>",
+            "< 5 means what?",
+        ] {
+            assert_eq!(user_text(text, None).unwrap().role, USER);
+            let mut parts = Vec::new();
+            codex_user(Some(&serde_json::json!(text)), None, &mut parts);
+            assert_eq!(parts[0].role, USER);
+            assert_eq!(parts[0].content, text);
+        }
+    }
 
     #[test]
     fn provider_roles_map_to_transcript_roles() {

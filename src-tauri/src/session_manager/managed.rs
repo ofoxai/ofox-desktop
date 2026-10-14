@@ -592,6 +592,23 @@ mod tests {
     use super::*;
     use crate::test_sandbox::sandbox;
 
+    #[test]
+    #[serial_test::serial]
+    fn six_hundred_sessions_share_one_usage_query() {
+        let home = sandbox();
+        let project = home.home().join(".claude/projects/-work-app");
+        std::fs::create_dir_all(&project).unwrap();
+        for n in 0..601 {
+            let id = format!("11111111-2222-3333-4444-{n:012}");
+            let line = serde_json::json!({"type":"user", "sessionId":id, "cwd":"/work/app", "timestamp":"2026-10-14T10:00:00Z", "message":{"role":"user","content":"hello"}});
+            std::fs::write(project.join(format!("{id}.jsonl")), format!("{line}\n")).unwrap();
+        }
+        let db = crate::database::Database::memory().unwrap();
+        usage::LOAD_COUNT.with(|count| count.set(0));
+        assert_eq!(list_with(Some(&db)).len(), 601);
+        assert_eq!(usage::LOAD_COUNT.with(|count| count.get()), 1);
+    }
+
     const CLAUDE_ID: &str = "11111111-2222-3333-4444-555555555555";
 
     /// A Claude Code session in the sandbox home: its file, a subagent's
@@ -625,6 +642,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn a_listed_session_reports_its_size_and_its_transcript_files() {
         let sandbox = sandbox();
         let (main, subagent, result) = claude_session(sandbox.home());
@@ -691,6 +709,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn a_listed_session_is_titled_and_counted_from_its_whole_file() {
         let sandbox = sandbox();
         long_claude_session(sandbox.home());
@@ -709,6 +728,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn a_listed_session_carries_what_it_spent() {
         let sandbox = sandbox();
         claude_session(sandbox.home());
@@ -737,7 +757,7 @@ mod tests {
         assert_eq!(usage["outputTokens"], 5);
         assert_eq!(usage["cacheReadTokens"], 700);
         assert_eq!(usage["cacheWriteTokens"], 11);
-        assert_eq!(usage["totalTokens"], 719);
+        assert_eq!(usage["totalTokens"], 8);
         assert_eq!(usage["costUsd"], 0.42);
         assert_eq!(usage["unpricedModels"], 0);
     }
@@ -812,6 +832,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn resolve_fingerprints_the_matched_session_again_from_the_cached_listing() {
         let sandbox = sandbox();
         let (main, _, _) = claude_session(sandbox.home());

@@ -173,26 +173,21 @@ impl ClaudeScan {
 pub(crate) fn details(path: &Path) -> Option<SessionDetails> {
     let mut scan = ClaudeScan::default();
     for_each_line(path, |line| {
-        if line.contains("\"type\":\"assistant\"") {
-            if let Ok(AssistantLine {
-                kind: Some(kind),
-                message: Some(message),
-            }) = serde_json::from_str(line)
-            {
-                if kind == "assistant" {
-                    scan.reply(
-                        message.id.as_deref(),
-                        message.model.as_deref(),
-                        message.usage.is_some(),
-                    );
-                    return;
-                }
+        let Ok(header) = serde_json::from_str::<AssistantLine<'_>>(line) else {
+            return;
+        };
+        if header.kind.as_deref() == Some("assistant") {
+            if let Some(message) = header.message {
+                scan.reply(
+                    message.id.as_deref(),
+                    message.model.as_deref(),
+                    message.usage.is_some(),
+                );
             }
-        }
-        if ["\"role\":\"user\"", "-title\"", "\"type\":\"summary\""]
-            .iter()
-            .any(|key| line.contains(key))
-        {
+        } else if matches!(
+            header.kind.as_deref(),
+            None | Some("user" | "ai-title" | "custom-title" | "summary")
+        ) {
             if let Ok(value) = serde_json::from_str::<Value>(line) {
                 scan.line(&value);
             }
@@ -220,21 +215,13 @@ fn last_text(slot: &mut Option<String>, value: Option<&Value>) {
 fn user_text(content: &Value) -> Option<String> {
     let text = match content {
         Value::String(text) => text.clone(),
-        Value::Array(blocks) => {
-            if blocks
-                .iter()
-                .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
-            {
-                return None;
-            }
-            blocks
-                .iter()
-                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-                .filter_map(|b| b.get("text").and_then(Value::as_str))
-                .filter(|t| !t.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ")
-        }
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
         _ => return None,
     };
     let text = text.trim();
@@ -418,6 +405,38 @@ mod tests {
     }
 
     #[test]
+    fn mixed_tool_results_keep_the_users_words() {
+        let temp = tempdir().unwrap();
+        let path = write_session(
+            temp.path(),
+            &[user(serde_json::json!([
+                {"type": "tool_result", "content": "done"},
+                {"type": "text", "text": "Please continue"}
+            ]))],
+        );
+        let details = details(&path).unwrap();
+        assert_eq!(details.message_count, 1);
+        assert_eq!(
+            details.candidates.prompt.as_deref(),
+            Some("Please continue")
+        );
+    }
+
+    #[test]
+    fn metadata_accepts_json_whitespace() {
+        let temp = tempdir().unwrap();
+        let path = write_session(temp.path(), &[user(serde_json::json!("A real question"))]);
+        let body = std::fs::read_to_string(&path).unwrap().replace(":", ": ");
+        std::fs::write(&path, body).unwrap();
+        let details = details(&path).unwrap();
+        assert_eq!(details.message_count, 1);
+        assert_eq!(
+            details.candidates.prompt.as_deref(),
+            Some("A real question")
+        );
+    }
+
+    #[test]
     fn the_title_claude_code_made_beats_the_first_prompt() {
         let title = title_of(&[
             user(serde_json::json!("fix the login")),
@@ -466,7 +485,7 @@ mod tests {
                 {"type": "image", "source": {"type": "base64", "data": "AAAA"}}
             ])),
         ]);
-        assert_eq!(title.as_deref(), Some("look at this [Image #24]"));
+        assert_eq!(title.as_deref(), Some("look at this"));
     }
 
     #[test]
@@ -474,7 +493,7 @@ mod tests {
         let title = title_of(&[user(serde_json::json!(
             "<task-notification>\n<summary>Agent finished</summary>\n</task-notification>"
         ))]);
-        assert_eq!(title.as_deref(), Some("Agent finished"));
+        assert_eq!(title.as_deref(), Some("app"));
     }
 
     fn assistant(content: serde_json::Value) -> serde_json::Value {

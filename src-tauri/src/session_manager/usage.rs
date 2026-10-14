@@ -74,8 +74,15 @@ const SESSION_USAGE_SQL: &str = "
     )
     GROUP BY app_type, session_id, model";
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LOAD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Every session's usage, by (app type, session id).
 pub fn load(db: &Database) -> Result<UsageBySession, AppError> {
+    #[cfg(test)]
+    LOAD_COUNT.with(|count| count.set(count.get() + 1));
     let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
     let query = || -> rusqlite::Result<Vec<(String, String, ModelUsage)>> {
         let mut stmt = conn.prepare(SESSION_USAGE_SQL)?;
@@ -136,7 +143,7 @@ fn total(mut models: Vec<ModelUsage>) -> SessionUsage {
         output_tokens: output,
         cache_read_tokens: cache_read,
         cache_write_tokens: cache_write,
-        total_tokens: input + output + cache_read + cache_write,
+        total_tokens: input + output,
         cost_usd: models.iter().filter_map(|m| m.cost_usd).sum(),
         unpriced_models: models.iter().filter(|m| m.cost_usd.is_none()).count() as u32,
         models,
@@ -188,6 +195,18 @@ mod tests {
                 rusqlite::params![app, session, model, tokens[0], tokens[1], tokens[2], tokens[3], requests, cost],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn exponent_costs_and_cache_buckets_remain_separate() {
+        let db = Database::memory().unwrap();
+        live(&db, "exp", "codex", "s", "m", [3, 4, 100, 200], "1e-7");
+        archived(&db, "codex", "s", "m", [5, 6, 300, 400], 1, "2e-7");
+        let all = load(&db).unwrap();
+        let s = &all[&("codex".into(), "s".into())];
+        assert_eq!(s.total_tokens, 18);
+        assert_eq!((s.cache_read_tokens, s.cache_write_tokens), (400, 600));
+        assert!((s.cost_usd - 3e-7).abs() < 1e-15);
     }
 
     #[test]
@@ -263,7 +282,7 @@ mod tests {
                 output_tokens: 230,
                 cache_read_tokens: 3303,
                 cache_write_tokens: 444,
-                total_tokens: 118 + 230 + 3303 + 444,
+                total_tokens: 118 + 230,
                 cost_usd: 2.0,
                 unpriced_models: 1,
             }
