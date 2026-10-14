@@ -35,6 +35,9 @@ const MACHINE_LOCAL_TABLES: &[&str] = &[
 ];
 
 /// Tables whose data rows are skipped when exporting for WebDAV sync.
+/// `session_log_sync` is how far this machine read its own transcripts: another
+/// machine's progress would make every local transcript be read from the start
+/// again and its old, already archived calls stored a second time.
 const SYNC_SKIP_TABLES: &[&str] = &[
     "proxy_request_logs",
     "stream_check_logs",
@@ -46,6 +49,7 @@ const SYNC_SKIP_TABLES: &[&str] = &[
     "session_meta_cache",
     "balance_samples",
     "maintenance_flags",
+    "session_log_sync",
 ];
 
 /// Tables whose local data is preserved (restored from local snapshot) during WebDAV import.
@@ -60,6 +64,7 @@ const SYNC_PRESERVE_TABLES: &[&str] = &[
     "session_meta_cache",
     "balance_samples",
     "maintenance_flags",
+    "session_log_sync",
 ];
 
 /// A database backup entry for the UI
@@ -1115,6 +1120,48 @@ mod tests {
         for (table, column) in USAGE_MACHINE_LOCAL.iter().chain(USAGE_LOG_BOUND.iter()) {
             assert_eq!(column_values(&local, table, column)?, ["local"], "{table}");
         }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn webdav_sync_keeps_this_machines_session_sync_progress() -> Result<(), AppError> {
+        let _home = TestHome::new("sync-keeps-session-log-sync");
+        let remote = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(remote.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('remote-provider', 'claude', 'Remote Provider', '{}', '{}')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO session_log_sync VALUES ('/remote/transcript.jsonl', 1, 99, 1)",
+                [],
+            )?;
+        }
+        let sync = remote.export_sql_string_for_sync()?;
+        assert!(
+            !sync.contains("/remote/transcript.jsonl"),
+            "sync progress leaked into a WebDAV export"
+        );
+
+        let local = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(local.conn);
+            conn.execute(
+                "INSERT INTO session_log_sync VALUES ('/local/transcript.jsonl', 1, 42, 1)",
+                [],
+            )?;
+        }
+        local.import_sql_string_for_sync(&sync)?;
+
+        let conn = crate::database::lock_conn!(local.conn);
+        let rows: Vec<(String, i64)> = conn
+            .prepare("SELECT file_path, last_line_offset FROM session_log_sync")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        assert_eq!(rows, [("/local/transcript.jsonl".to_string(), 42)]);
         Ok(())
     }
 }
