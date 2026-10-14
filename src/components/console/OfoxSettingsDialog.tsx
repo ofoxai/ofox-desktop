@@ -19,10 +19,11 @@ import { OfoxApexSwitch } from "@/components/OfoxApexSwitch";
 import type { Settings } from "@/types";
 
 /**
- * OFox-flavored settings dialog launched from the bottom-left "设置" button on
- * `ConsolePage`.
+ * OFox-flavored settings dialog, opened by the settings icon in the console
+ * header (`AppHeader`) or by the tray popover's `ofox-open-settings` event.
  *
  *   · Account     — show identity, allow logout
+ *   · Region      — ofox.ai / ofox.io (`OfoxApexSwitch`)
  *   · Preferences — auto-launch, low-balance threshold
  *   · About       — app version + check-for-updates entry point, and the
  *                   link to the Ofox website (it left the console footer)
