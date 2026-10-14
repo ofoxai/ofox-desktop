@@ -10,8 +10,10 @@ import {
   SlidersHorizontal,
   Terminal,
   Wrench,
+  Trash2,
 } from "lucide-react";
-import type { ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
+import { useUninstallPreview } from "@/hooks/useUninstallPreview";
 import { useTranslation } from "react-i18next";
 import { TOOL_META } from "@/config/toolMeta";
 import { ToolBadge } from "@/components/tools/ToolBadge";
@@ -84,6 +86,7 @@ interface BoundToolRowProps {
   onUpdate: () => void;
   onAction: (action: ToolRowAction) => void;
   onManage: () => void;
+  onUninstall?: () => void;
 }
 
 /**
@@ -108,8 +111,19 @@ export default function BoundToolRow({
   onUpdate,
   onAction,
   onManage,
+  onUninstall,
 }: BoundToolRowProps) {
   const { t } = useTranslation();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const openingUninstall = useRef(false);
+  const uninstallTarget =
+    tool.id === "codex" && tool.installationKind === "desktopApp"
+      ? "chatgpt"
+      : tool.id;
+  const uninstallPreview = useUninstallPreview(
+    uninstallTarget,
+    menuOpen && !!onUninstall && tool.installationStatus === "installed",
+  );
   const action = toolRowAction(tool);
   const download = action === "install" && !canInstall;
   const stateKey =
@@ -274,7 +288,7 @@ export default function BoundToolRow({
           <SlidersHorizontal aria-hidden className="h-3.5 w-3.5" />
           {t("toolLifecycle.manage")}
         </Button>
-        <DropdownMenu modal={false}>
+        <DropdownMenu modal={false} open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild>
             <Button
               variant="icon"
@@ -285,7 +299,17 @@ export default function BoundToolRow({
               <Ellipsis aria-hidden className="h-4 w-4" />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="min-w-[160px]">
+          <DropdownMenuContent
+            align="end"
+            className="min-w-[160px]"
+            onCloseAutoFocus={(event) => {
+              if (openingUninstall.current) {
+                event.preventDefault();
+                openingUninstall.current = false;
+                onUninstall?.();
+              }
+            }}
+          >
             <DropdownMenuItem disabled={!hasAnalytics} onSelect={onAnalytics}>
               <BarChart3 aria-hidden className="h-3.5 w-3.5 text-ink-muted" />
               <span className="flex-1">{t("toolLifecycle.analytics")}</span>
@@ -293,6 +317,18 @@ export default function BoundToolRow({
                 ↗
               </span>
             </DropdownMenuItem>
+            {uninstallPreview.available && (
+              <DropdownMenuItem
+                disabled={busy}
+                className="text-danger"
+                onSelect={() => {
+                  openingUninstall.current = true;
+                }}
+              >
+                <Trash2 aria-hidden className="h-3.5 w-3.5" />
+                {t("toolUninstall.entry")}
+              </DropdownMenuItem>
+            )}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>

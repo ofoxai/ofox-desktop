@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { UnlistenFn } from "@tauri-apps/api/event";
+import {
+  useToolJob,
+  parseProgressLine,
+  type InstallProgress,
+} from "./useToolJob";
+export type { InstallProgress } from "./useToolJob";
 import i18n from "i18next";
 import {
   checkToolNodeRequirement,
@@ -28,64 +34,6 @@ interface InstallDone {
   tool: string;
   /** 0 = 成功；非 0 = 失败（init.py 退出码契约见 init.py 顶部注释）。 */
   code: number;
-}
-
-/**
- * 安装器 `app/progress.py` 打出来的结构化进度行的标识。
- * 改这个值要同步改 `scripts/installer/app/progress.py` 的 `PROGRESS_TYPE`。
- */
-const PROGRESS_TYPE = "ofox-install-progress";
-
-export interface InstallProgress {
-  /** 当前第几步，从 1 开始。 */
-  step: number;
-  /** 总步数。单工具安装通常是 4 步：nvm → Node → 镜像 → 目标工具。 */
-  total: number;
-  /** 步骤名，直接来自 steps.py，可展示给用户。 */
-  name: string;
-  phase: "start" | "waiting" | "done" | "skipped" | "failed";
-  /** 该步已等待秒数，仅 waiting 阶段有。 */
-  elapsed?: number;
-  /** 该步的超时预算秒数，仅 waiting 阶段有。 */
-  timeout?: number;
-}
-
-/**
- * 从一行安装器输出里提取进度，不是进度行就返回 null。
- *
- * 安装器 stdout 是人类可读文本和进度 JSON 混在一起的，所以这里必须对任何输入
- * 都安全：普通日志、半截 JSON、别的 type 的 JSON 都只能返回 null，不能抛错——
- * 一旦抛错会中断 listen 回调，后续事件全部丢失。
- */
-function parseProgressLine(line: string): InstallProgress | null {
-  const trimmed = line.trim();
-  // 绝大多数行不是 JSON，先做一次廉价判断，省掉 try/catch 开销。
-  if (!trimmed.startsWith("{")) return null;
-
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(trimmed) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-
-  if (parsed.type !== PROGRESS_TYPE) return null;
-  if (typeof parsed.step !== "number" || typeof parsed.total !== "number") {
-    return null;
-  }
-
-  // 显式挑字段而不是展开剩余属性：既剥掉了 type，也保证多出来的字段不会漏进
-  // state（将来安装器加字段时，前端不会静默接收未知内容）。
-  const progress: InstallProgress = {
-    step: parsed.step,
-    total: parsed.total,
-    name: String(parsed.name ?? ""),
-    phase: parsed.phase as InstallProgress["phase"],
-  };
-  if (typeof parsed.elapsed === "number") progress.elapsed = parsed.elapsed;
-  if (typeof parsed.timeout === "number") progress.timeout = parsed.timeout;
-
-  return progress;
 }
 
 const ANSI_ESCAPE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
@@ -158,6 +106,9 @@ async function nodeRequirementFor(
 export function useToolInstall(
   onDone: (toolId: string, code: number) => void,
 ): UseToolInstall {
+  const { subscribe } = useToolJob();
+  const ready = useRef<Promise<void>>(Promise.resolve());
+  const busy = useRef(new Set<string>());
   const [installing, setInstalling] = useState<Set<string>>(new Set());
   const [progress, setProgress] = useState<Record<string, InstallProgress>>({});
   const [error, setError] = useState<{
@@ -182,9 +133,10 @@ export function useToolInstall(
     let un1: UnlistenFn | undefined;
     let un2: UnlistenFn | undefined;
 
-    (async () => {
-      un1 = await listen<InstallLog>("install-tool-log", (e) => {
-        const { tool, stream, line } = e.payload;
+    let cancelled = false;
+    const pending = (async () => {
+      un1 = await subscribe<InstallLog>("install-tool-log", (payload) => {
+        const { tool, stream, line } = payload;
 
         const parsed = parseProgressLine(line);
         if (parsed) {
@@ -200,8 +152,13 @@ export function useToolInstall(
         console.log(`[install:${tool}:${stream}] ${line}`);
       });
 
-      un2 = await listen<InstallDone>("install-tool-done", (e) => {
-        const { tool, code } = e.payload;
+      if (cancelled) {
+        un1();
+        return;
+      }
+      un2 = await subscribe<InstallDone>("install-tool-done", (payload) => {
+        const { tool, code } = payload;
+        busy.current.delete(tool);
         const reason = reasonsRef.current[tool];
         delete reasonsRef.current[tool];
         if (code !== 0) {
@@ -225,28 +182,23 @@ export function useToolInstall(
         });
         onDoneRef.current(tool, code);
       });
+      if (cancelled) un2();
     })();
-
+    ready.current = pending;
+    // Retain rejection for install(), without an unhandled mount-time promise.
+    void pending.catch(() => undefined);
     return () => {
+      cancelled = true;
       un1?.();
       un2?.();
     };
-  }, []);
+  }, [subscribe]);
 
   const install = useCallback(
     async (toolId: string, skipEnv: boolean = false, upgradeNode = false) => {
-      // 幂等：同一工具已在装就直接 return，避免并发起两条 Terminal 窗口。
-      let alreadyInstalling = false;
-      setInstalling((prev) => {
-        if (prev.has(toolId)) {
-          alreadyInstalling = true;
-          return prev;
-        }
-        const next = new Set(prev);
-        next.add(toolId);
-        return next;
-      });
-      if (alreadyInstalling) return;
+      if (busy.current.has(toolId)) return;
+      busy.current.add(toolId);
+      setInstalling((prev) => new Set(prev).add(toolId));
 
       // 重试前先清掉上一次的错误和残留原因，否则旧提示会一直挂着。
       setError(null);
@@ -255,6 +207,7 @@ export function useToolInstall(
       if (!upgradeNode) {
         const requirement = await nodeRequirementFor(toolId);
         if (requirement?.status === "tooOld") {
+          busy.current.delete(toolId);
           setNodePrompt({ toolId, requirement, skipEnv });
           setInstalling((prev) => {
             if (!prev.has(toolId)) return prev;
@@ -267,10 +220,12 @@ export function useToolInstall(
       }
 
       try {
+        await ready.current;
         await invoke<number>("install_tool", { toolId, skipEnv, upgradeNode });
         // 真实完成态由 install-tool-done 事件兜底——这里 invoke resolve 时
         // 子进程已经退出，但事件 listener 也会被触发，去重交给上面的 has 检查。
       } catch (e) {
+        busy.current.delete(toolId);
         console.error(`[useToolInstall] install_tool(${toolId}) 调用失败`, e);
         // Rust 端 `Result<_, String>` 的 Err 到这里就是那个 String 本身。
         setError({ toolId, message: typeof e === "string" ? e : String(e) });

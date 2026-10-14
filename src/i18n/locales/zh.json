@@ -3082,5 +3082,45 @@
       "30d": "30 天",
       "all": "全部"
     }
+  },
+  "toolUninstall": {
+    "entry": "卸载…",
+    "title": "卸载 {{tool}}",
+    "description": "确认移除程序前，请检查以下影响。",
+    "restore": "解除绑定并恢复可安全恢复的原配置",
+    "remove": "移除程序（方式：{{source}}）",
+    "keeps": "保留：会话记录与配置文件",
+    "confirm": "卸载",
+    "success": "卸载完成",
+    "partial": "程序仍存在，请完成以下手动步骤",
+    "unbound": "已解除 OFox 绑定",
+    "copyCommand": "复制命令",
+    "starting": "正在准备卸载…",
+    "progress": "第 {{step}}/{{total}} 步：{{name}}",
+    "logs": "卸载日志",
+    "notInstalled": "未检测到已安装的程序",
+    "keptChanges": "保留的用户改动：{{keys}}",
+    "keyPlan": {
+      "revoke": "吊销该工具的 OFox API Key",
+      "keepShared": "保留：其他工具仍在使用此配置和 Key",
+      "none": "没有需要吊销的 Key"
+    },
+    "keyResult": {
+      "revoked": "Key 已吊销",
+      "queued": "Key 已停用，将在下次登录时重试远程吊销",
+      "keptShared": "已保留其他工具共享的配置和 Key",
+      "none": "没有需要吊销的 Key"
+    },
+    "blocked": {
+      "unknownSource": "无法确认安装来源，请按手动步骤移除",
+      "appRunning": "请先退出工具，再重试",
+      "busy": "工具正在执行其他操作，请稍后重试",
+      "unsupportedPlatform": "当前平台不支持自动卸载"
+    },
+    "step": {
+      "1": "恢复配置",
+      "2": "处理 API Key",
+      "3": "移除程序"
+    }
   }
 }

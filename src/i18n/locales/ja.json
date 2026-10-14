@@ -3082,5 +3082,45 @@
       "30d": "30 日間",
       "all": "全期間"
     }
+  },
+  "toolUninstall": {
+    "entry": "アンインストール…",
+    "title": "{{tool}} をアンインストール",
+    "description": "プログラムを削除する前に、以下の影響を確認してください。",
+    "restore": "連携を解除し、安全に復元できる設定を戻す",
+    "remove": "プログラムを削除（方式：{{source}}）",
+    "keeps": "保持：セッションと設定ファイル",
+    "confirm": "アンインストール",
+    "success": "アンインストール完了",
+    "partial": "プログラムが残っています。以下の手動操作を完了してください。",
+    "unbound": "OFox の連携を解除しました",
+    "copyCommand": "コマンドをコピー",
+    "starting": "アンインストールを準備中…",
+    "progress": "ステップ {{step}}/{{total}}：{{name}}",
+    "logs": "アンインストールログ",
+    "notInstalled": "インストール済みのプログラムが見つかりません",
+    "keptChanges": "保持したユーザーの変更：{{keys}}",
+    "keyPlan": {
+      "revoke": "このツールの OFox API Key を失効",
+      "keepShared": "保持：他のツールがこの設定と Key を使用中",
+      "none": "失効する Key はありません"
+    },
+    "keyResult": {
+      "revoked": "Key を失効しました",
+      "queued": "Key は無効です。次回ログイン時にリモート失効を再試行します",
+      "keptShared": "他のツールが共有する設定と Key を保持しました",
+      "none": "失効する Key はありません"
+    },
+    "blocked": {
+      "unknownSource": "インストール元が不明です。手動で削除してください",
+      "appRunning": "ツールを終了してから再試行してください",
+      "busy": "他の操作を実行中です。後で再試行してください",
+      "unsupportedPlatform": "このプラットフォームは自動アンインストールに対応していません"
+    },
+    "step": {
+      "1": "設定を復元",
+      "2": "API Key を処理",
+      "3": "プログラムを削除"
+    }
   }
 }

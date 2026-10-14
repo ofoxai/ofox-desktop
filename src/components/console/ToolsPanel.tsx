@@ -11,7 +11,10 @@ import { useShellRefresh } from "@/components/shell/ShellContext";
 import { TOOL_META } from "@/config/toolMeta";
 import { useBoundTools, type BoundTool } from "@/hooks/useBoundTools";
 import { useInlineToolUpdates } from "@/hooks/useInlineToolUpdates";
-import { useModelSelection } from "@/hooks/useModelSelection";
+import {
+  useModelSelection,
+  invalidateModelState,
+} from "@/hooks/useModelSelection";
 import type { OfoxAccount } from "@/hooks/useOfoxAccount";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
 import { useToolInstall } from "@/hooks/useToolInstall";
@@ -32,6 +35,7 @@ import AddToolsDialog from "./AddToolsDialog";
 import { BalanceCard } from "./BalanceCard";
 import BoundToolRow, { type ToolRowAction } from "./BoundToolRow";
 import ManageToolDialog, { type ManageToolTarget } from "./ManageToolDialog";
+import { UninstallToolDialog } from "./UninstallToolDialog";
 import { MissingToolsFold } from "./MissingToolsFold";
 import { UpdateAllLine } from "./UpdateAllLine";
 
@@ -76,6 +80,10 @@ export function ToolsPanel({
   } = useBoundTools(boundTools, account);
   // 顶栏的刷新在工具页 = 重新检测工具并检查更新。
   useShellRefresh("tools", refreshList);
+  const [uninstallTool, setUninstallTool] = useState<string | null>(null);
+  const [uninstallFromManage, setUninstallFromManage] = useState<string | null>(
+    null,
+  );
   const [missingExpanded, setMissingExpanded] = useState(false);
   const installableTools = useToolInstallCapabilities();
   const inlineUpdates = useInlineToolUpdates();
@@ -170,7 +178,11 @@ export function ToolsPanel({
             .catch(() => toast.error(t("toolLifecycle.analyticsFailed")));
         }}
         onUpdate={() => void inlineUpdates.updateOne(tool)}
-        onManage={() => setManageTool(tool)}
+        onUninstall={() => setUninstallTool(target)}
+        onManage={() => {
+          setUninstallFromManage(target);
+          setManageTool(tool);
+        }}
         onAction={(action: ToolRowAction) => {
           if (action === "retry") {
             void reload();
@@ -188,6 +200,7 @@ export function ToolsPanel({
           } else if (action === "open") {
             void launchTool(tool.id);
           } else {
+            setUninstallFromManage(installTarget(tool));
             setManageTool(tool);
           }
         }}
@@ -295,6 +308,7 @@ export function ToolsPanel({
           const tool = tools.find((entry) => entry.id === id);
           if (tool) {
             setAddDialogOpen(false);
+            setUninstallFromManage(installTarget(tool));
             setManageTool(tool);
           }
         }}
@@ -311,6 +325,7 @@ export function ToolsPanel({
 
       <ManageToolDialog
         tool={manageTool}
+        onUninstall={() => setUninstallTool(uninstallFromManage)}
         onOpenChange={(open) => {
           if (!open) setManageTool(null);
         }}
@@ -322,6 +337,18 @@ export function ToolsPanel({
         }}
       />
 
+      <UninstallToolDialog
+        tool={uninstallTool}
+        onOpenChange={(open) => {
+          if (!open) setUninstallTool(null);
+        }}
+        onCompleted={() => {
+          onBoundToolsChanged?.();
+          void reload();
+          void checkToolUpdates();
+          void invalidateModelState();
+        }}
+      />
       {inlineUpdates.confirmDialog}
 
       <NodeUpgradeDialog

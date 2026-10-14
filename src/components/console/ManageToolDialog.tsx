@@ -63,6 +63,7 @@ import {
   useSaveModelSelection,
   filterModelsForNativeTool,
 } from "@/hooks/useModelSelection";
+import { useUninstallPreview } from "@/hooks/useUninstallPreview";
 import type { ToolModelSnapshot } from "@/lib/api/modelSelection";
 
 /** Subset of `ConsolePage`'s `BoundTool` that the dialog actually needs.
@@ -85,6 +86,7 @@ interface ManageToolDialogProps {
   /** Fired after a successful save or successful unbind so ConsolePage can
    *  refresh its list (status pill, monthly tokens, presence after unbind). */
   onChanged?: () => void;
+  onUninstall?: () => void;
 }
 
 function toolLabels(ids: string[]): string {
@@ -144,9 +146,17 @@ export default function ManageToolDialog({
   tool,
   onOpenChange,
   onChanged,
+  onUninstall,
 }: ManageToolDialogProps) {
   const { t } = useTranslation();
   const open = !!tool;
+  const uninstallPending = useRef(false);
+  const uninstallPreview = useUninstallPreview(
+    tool?.id === "codex" && tool.installationKind === "desktopApp"
+      ? "chatgpt"
+      : (tool?.id ?? null),
+    open && !!onUninstall && tool?.installationStatus !== "notInstalled",
+  );
   const snapshotQuery = useModelSelection(tool ? [tool.id] : [], open);
   const saveSelection = useSaveModelSelection();
   const [editSnapshot, setEditSnapshot] = useState<ToolModelSnapshot | null>(
@@ -726,6 +736,13 @@ export default function ManageToolDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         ref={setDialogContentNode}
+        onCloseAutoFocus={(event) => {
+          if (uninstallPending.current) {
+            event.preventDefault();
+            uninstallPending.current = false;
+            onUninstall?.();
+          }
+        }}
         className="max-w-lg gap-0 p-0"
         aria-describedby={undefined}
       >
@@ -1227,22 +1244,37 @@ export default function ManageToolDialog({
             {unbindConfirming && <UnbindPreviewPanel preview={unbindPreview} />}
 
             <DialogFooter className="!items-center sm:!justify-between">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={handleUnbind}
-                disabled={operationBusy}
-                className={cn(
-                  unbindConfirming &&
-                    "border-red-500 text-red-600 hover:bg-red-50 hover:text-red-700",
+              <div className="flex gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleUnbind}
+                  disabled={operationBusy}
+                  className={cn(
+                    unbindConfirming &&
+                      "border-red-500 text-red-600 hover:bg-red-50 hover:text-red-700",
+                  )}
+                >
+                  {unbindLoading && (
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  )}
+                  {unbindConfirming ? t("unbind.confirm") : t("unbind.button")}
+                </Button>
+                {uninstallPreview.available && (
+                  <Button
+                    variant="dangerGhost"
+                    size="sm"
+                    disabled={operationBusy}
+                    onClick={() => {
+                      uninstallPending.current = true;
+                      onOpenChange(false);
+                    }}
+                  >
+                    {t("toolUninstall.entry")}
+                  </Button>
                 )}
-              >
-                {unbindLoading && (
-                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                )}
-                {unbindConfirming ? t("unbind.confirm") : t("unbind.button")}
-              </Button>
+              </div>
               <div className="flex gap-2">
                 <Button
                   type="button"

@@ -259,3 +259,14 @@ export async function unbindTool(app: string): Promise<UnbindReport | null> {
   void mirrorBoundToolsToSettings(stillBound);
   return report;
 }
+
+/** The backend already unbound the tool; never run unbind a second time. */
+export async function forgetUninstalledTool(
+  tool: string,
+  result: import("./api/toolUninstall").UninstallResult,
+): Promise<void> {
+  if (!result.unbind && result.status !== "removed") return;
+  const retained = readBoundTools().filter((id) => id !== tool);
+  localStorage.setItem(BOUND_TOOLS_STORAGE_KEY, JSON.stringify(retained));
+  await mirrorBoundToolsToSettings(retained);
+}

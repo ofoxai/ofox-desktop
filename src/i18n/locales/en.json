@@ -3082,5 +3082,45 @@
       "30d": "30 days",
       "all": "All time"
     }
+  },
+  "toolUninstall": {
+    "entry": "Uninstall…",
+    "title": "Uninstall {{tool}}",
+    "description": "Review these changes before removing the program.",
+    "restore": "Unbind and restore configuration where safe",
+    "remove": "Remove program (method: {{source}})",
+    "keeps": "Keep: sessions and configuration files",
+    "confirm": "Uninstall",
+    "success": "Uninstall complete",
+    "partial": "The program is still present. Complete the manual steps below.",
+    "unbound": "OFox binding removed",
+    "copyCommand": "Copy command",
+    "starting": "Preparing uninstall…",
+    "progress": "Step {{step}}/{{total}}: {{name}}",
+    "logs": "Uninstall logs",
+    "notInstalled": "No installed program detected",
+    "keptChanges": "User changes kept: {{keys}}",
+    "keyPlan": {
+      "revoke": "Revoke this tool’s OFox API key",
+      "keepShared": "Keep: other tools still use this configuration and key",
+      "none": "No key to revoke"
+    },
+    "keyResult": {
+      "revoked": "Key revoked",
+      "queued": "Key disabled; remote revocation will retry at next sign-in",
+      "keptShared": "Shared configuration and key kept for other tools",
+      "none": "No key to revoke"
+    },
+    "blocked": {
+      "unknownSource": "Installation source is unknown. Remove it manually.",
+      "appRunning": "Quit the tool, then retry",
+      "busy": "Another operation is running. Retry later.",
+      "unsupportedPlatform": "Automatic uninstall is unavailable on this platform"
+    },
+    "step": {
+      "1": "Restore configuration",
+      "2": "Handle API key",
+      "3": "Remove program"
+    }
   }
 }

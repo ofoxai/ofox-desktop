@@ -299,3 +299,43 @@ describe("bindTools.mirrorBoundToolsToSettings", () => {
     ]);
   });
 });
+
+it("mirrors successful unbind after partial uninstall without losing newly bound siblings", async () => {
+  localStorage.setItem(
+    "bound_tools",
+    JSON.stringify(["codex", "chatgpt", "pi"]),
+  );
+  let saved: unknown;
+  server.use(
+    http.post(`${TAURI_ENDPOINT}/save_bound_tools`, async ({ request }) => {
+      saved = await request.json();
+      return HttpResponse.json(true);
+    }),
+  );
+  const { forgetUninstalledTool } = await import("@/lib/bindTools");
+  await forgetUninstalledTool("codex", {
+    status: "stillPresent",
+    key: "keptShared",
+    remainingPath: "/sandbox/codex",
+    kept: ["~/.codex"],
+    unbind: {
+      tool: "codex",
+      dryRun: false,
+      filesRemoved: [],
+      providerRestoredTo: null,
+      legacy: false,
+      alreadyUnbound: false,
+      restoredKeys: [],
+      removedKeys: [],
+      keptKeys: [],
+      exactFiles: [],
+      sharedKeptBy: ["chatgpt"],
+      warnings: [],
+    },
+  });
+  expect(JSON.parse(localStorage.getItem("bound_tools")!)).toEqual([
+    "chatgpt",
+    "pi",
+  ]);
+  expect(saved).toEqual({ boundTools: ["chatgpt", "pi"] });
+});
