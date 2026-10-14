@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 fn merge_settings_for_save(
     mut incoming: crate::settings::AppSettings,
@@ -67,6 +67,29 @@ pub async fn save_settings(settings: crate::settings::AppSettings) -> Result<boo
     })
     .map_err(|e| e.to_string())?;
     Ok(true)
+}
+
+/// How settings.json was read at startup: `ok`, `recovered` from its backup, or
+/// `unreadable` (nothing is saved until it is reset).
+#[tauri::command]
+pub async fn get_settings_health() -> Result<crate::settings::SettingsHealth, String> {
+    Ok(crate::settings::settings_health())
+}
+
+/// The way out of `unreadable` settings: keep the bad file aside, write defaults.
+/// Does nothing when the settings are not unreadable.
+#[tauri::command]
+pub async fn reset_unreadable_settings(
+    app: AppHandle,
+) -> Result<crate::settings::SettingsHealth, String> {
+    let health = crate::settings::reset_unreadable().map_err(|e| e.to_string())?;
+    if let Err(e) = app.emit(crate::settings::SETTINGS_HEALTH_EVENT, &health) {
+        log::warn!(
+            "emit {} failed: {e}",
+            crate::settings::SETTINGS_HEALTH_EVENT
+        );
+    }
+    Ok(health)
 }
 
 /// Mirror the renderer's binding registry without round-tripping unrelated

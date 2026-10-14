@@ -6,9 +6,11 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
+import en from "@/i18n/locales/en.json";
 import { queryClient } from "@/lib/query/queryClient";
 import ConsolePage from "@/components/console/ConsolePage";
 import { checkToolUpdates } from "@/hooks/useToolUpdates";
@@ -138,6 +140,13 @@ function availableTool(
   };
 }
 
+/** A row's buttons by accessible name: an icon button by its label. */
+function buttonNames(row: HTMLElement) {
+  return within(row)
+    .getAllByRole("button")
+    .map((button) => button.getAttribute("aria-label") ?? button.textContent);
+}
+
 async function cacheUpdates(tools: ToolUpdateInfo[]) {
   vi.mocked(toolUpdatesApi.check).mockResolvedValue(tools);
   await checkToolUpdates();
@@ -202,6 +211,7 @@ beforeEach(async () => {
         };
       if (command === "get_tool_versions") return localTools;
       if (command === "ofox_list_api_keys") return [];
+      if (command === "model_profiles_list") return [];
       if (command === "get_tool_install_capabilities")
         return ["claude", "codex", "chatgpt"];
       if (command === "get_tool_binding_status")
@@ -285,6 +295,91 @@ describe("Console navigation", () => {
     expect(tools).toBeVisible();
     expect(usage).toBeInTheDocument();
     expect(usage).not.toBeVisible();
+  });
+});
+
+describe("Console model profiles", () => {
+  it("reaches the model profiles from 方案 in the tools toolbar, loading them only when it opens", async () => {
+    localTools = [localTool("claude", "2.1.293")];
+    render(<ConsolePage boundTools={["claude"]} />);
+    await screen.findByRole("group", { name: "Claude Code" });
+    const profilesCalls = () =>
+      mocks.invoke.mock.calls.filter(
+        ([command]) => command === "model_profiles_list",
+      );
+    expect(profilesCalls()).toHaveLength(0);
+
+    await userEvent.click(screen.getByRole("button", { name: "方案" }));
+
+    expect(
+      await screen.findByRole("menuitem", { name: "管理方案…" }),
+    ).toBeVisible();
+    expect(await screen.findByText("还没有方案")).toBeVisible();
+    expect(profilesCalls()).toHaveLength(1);
+  });
+});
+
+describe("Console tools page", () => {
+  it("heads the list 已绑定的工具 with its count, the 方案 menu and 添加", async () => {
+    localTools = [localTool("claude", "2.1.293")];
+    render(<ConsolePage boundTools={["claude"]} />);
+    await screen.findByRole("group", { name: "Claude Code" });
+    const tools = screen.getByRole("tabpanel", { name: "工具" });
+    const heading = within(tools).getByRole("heading", {
+      name: "已绑定的工具",
+    });
+    const toolbar = heading.parentElement!;
+    expect(within(toolbar).getByText("1")).toBeVisible();
+    expect(
+      within(toolbar)
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).toEqual(["方案", "添加"]);
+  });
+
+  it("folds the tools that are not installed into a card of their own", async () => {
+    localTools = [
+      localTool("claude", "2.1.293"),
+      { ...localTool("workbuddy", null), installationStatus: "notInstalled" },
+    ];
+    render(<ConsolePage boundTools={["claude", "workbuddy"]} />);
+    const fold = await screen.findByRole("button", { name: /未安装工具（1）/ });
+    fireEvent.click(fold);
+    const card = document.getElementById(fold.getAttribute("aria-controls")!)!;
+    expect(
+      within(card).getByRole("group", { name: "WorkBuddy" }),
+    ).toBeVisible();
+    expect(
+      within(card).queryByRole("group", { name: "Claude Code" }),
+    ).toBeNull();
+  });
+
+  it("speaks the app's language, with no Chinese left on the page", async () => {
+    i18n.addResourceBundle("en", "translation", en, true, true);
+    await i18n.changeLanguage("en");
+    try {
+      mocks.getUserInfo.mockResolvedValue({
+        name: "Test User",
+        balance: { balance: 12.5 },
+      });
+      localTools = [
+        localTool("claude", "2.1.293"),
+        { ...localTool("workbuddy", null), installationStatus: "notInstalled" },
+      ];
+      render(<ConsolePage boundTools={["claude", "workbuddy"]} />);
+      await screen.findByRole("group", { name: "Claude Code" });
+      const tools = screen.getByRole("tabpanel", { name: "Tools" });
+      fireEvent.click(
+        within(tools).getByRole("button", { name: /^Not installed/ }),
+      );
+      await within(tools).findByText("$12.50");
+      expect(
+        within(tools).getByRole("heading", { name: "Bound tools" }),
+      ).toBeVisible();
+      expect(tools.textContent).not.toMatch(/[\u4e00-\u9fff]/);
+    } finally {
+      await i18n.changeLanguage("zh");
+    }
   });
 });
 
@@ -541,10 +636,16 @@ describe("Console tool update badges", () => {
     );
     render(<ConsolePage boundTools={["claude", "codex"]} />);
 
+    const line = (
+      await screen.findByText("2 个工具有更新：Claude Code, Codex")
+    ).closest<HTMLElement>('[role="status"]')!;
+    expect(line).toBeVisible();
     expect(
-      await screen.findByText("2 个工具有新版本：Claude Code, Codex"),
-    ).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "全部升级" }));
+      line.compareDocumentPosition(
+        screen.getByRole("group", { name: "Claude Code" }),
+      ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    fireEvent.click(within(line).getByRole("button", { name: "全部升级" }));
 
     await waitFor(() => expect(toolUpdatesApi.update).toHaveBeenCalledTimes(2));
     expect(
@@ -721,6 +822,106 @@ describe("Console tool update badges", () => {
   });
 });
 
+describe("Console tool rows", () => {
+  it("opens the tool's usage on the web from its ⋯ menu, with its key on the sub-line", async () => {
+    localTools = [localTool("claude", "2.1.293")];
+    const original = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(
+      async (command: string, ...args: unknown[]) => {
+        if (command === "ofox_list_api_keys")
+          return [{ tool: "claude", keyId: "key-1", name: "Claude on mac" }];
+        return original(command, ...args);
+      },
+    );
+    render(<ConsolePage boundTools={["claude"]} />);
+    const row = await screen.findByRole("group", { name: "Claude Code" });
+    expect(await within(row).findByText("Claude on mac")).toBeVisible();
+
+    await userEvent.click(
+      within(row).getByRole("button", { name: "更多操作" }),
+    );
+    await userEvent.click(
+      await screen.findByRole("menuitem", { name: "数据统计" }),
+    );
+
+    expect(mocks.openExternal).toHaveBeenCalledWith(
+      "https://app.ofox.ai/analytics?apiKeys=key-1",
+    );
+  });
+
+  it("keeps 数据统计 in the ⋯ menu but unavailable while the tool has no key", async () => {
+    localTools = [localTool("claude", "2.1.293")];
+    render(<ConsolePage boundTools={["claude"]} />);
+    const row = await screen.findByRole("group", { name: "Claude Code" });
+
+    await userEvent.click(
+      within(row).getByRole("button", { name: "更多操作" }),
+    );
+
+    expect(
+      await screen.findByRole("menuitem", { name: "数据统计" }),
+    ).toHaveAttribute("data-disabled");
+  });
+
+  it("names how the version was installed when it is known", async () => {
+    localTools = [
+      localTool("claude", "2.1.293"),
+      localTool("codex", "0.161.0"),
+    ];
+    await cacheUpdates([
+      {
+        ...availableTool("claude", "2.1.293", "2.1.293"),
+        update_status: "current",
+      },
+      {
+        ...availableTool("codex", "0.161.0", "0.161.0"),
+        update_status: "current",
+        update_source: null,
+      },
+    ]);
+    render(<ConsolePage boundTools={["claude", "codex"]} />);
+
+    const claude = await screen.findByRole("group", { name: "Claude Code" });
+    expect(within(claude).getByText("v2.1.293")).toHaveAttribute(
+      "title",
+      "通过 npm 安装",
+    );
+    const codex = screen.getByRole("group", { name: "Codex" });
+    expect(within(codex).getByText("v0.161.0")).not.toHaveAttribute("title");
+  });
+
+  it("styles repair as the primary action and the others as secondary", async () => {
+    localTools = [
+      localTool("claude", "2.1.293"),
+      {
+        ...localTool("codex", null),
+        installationStatus: "installed",
+        error: "version process failed",
+      },
+    ];
+    render(<ConsolePage boundTools={["claude", "codex"]} />);
+    const codex = await screen.findByRole("group", { name: "Codex" });
+    const claude = screen.getByRole("group", { name: "Claude Code" });
+
+    expect(within(codex).getByRole("button", { name: "修复安装" })).toHaveClass(
+      "bg-brand",
+    );
+    expect(
+      within(claude).getByRole("button", { name: "打开" }),
+    ).not.toHaveClass("bg-brand");
+    expect(
+      within(claude).getByRole("button", { name: "管理" }),
+    ).not.toHaveClass("bg-brand");
+  });
+
+  it("puts the model picker on the sub-line as a pill", async () => {
+    localTools = [localTool("claude", "2.1.293")];
+    render(<ConsolePage boundTools={["claude"]} />);
+    const row = await screen.findByRole("group", { name: "Claude Code" });
+    expect(await within(row).findByRole("combobox")).toHaveClass("bg-pill");
+  });
+});
+
 describe("Bound tool lifecycle", () => {
   it("folds confirmed missing tools while retaining management and the bound count", async () => {
     localTools = [
@@ -743,11 +944,12 @@ describe("Bound tool lifecycle", () => {
     expect(screen.getByText("2")).toBeVisible();
     fireEvent.click(fold);
     const row = screen.getByRole("group", { name: "WorkBuddy" });
-    expect(
-      within(row)
-        .getAllByRole("button")
-        .map((button) => button.textContent),
-    ).toEqual(["0 个模型", "前往下载", "管理"]);
+    expect(buttonNames(row)).toEqual([
+      "0 个模型",
+      "前往下载",
+      "管理",
+      "更多操作",
+    ]);
     fireEvent.click(within(row).getByRole("button", { name: "管理" }));
     expect(screen.getByRole("dialog")).toHaveTextContent("管理：WorkBuddy");
     expect(mocks.invoke).not.toHaveBeenCalledWith(
@@ -771,11 +973,7 @@ describe("Bound tool lifecycle", () => {
     render(<ConsolePage boundTools={["codex"]} />);
     const row = await screen.findByRole("group", { name: "Codex" });
     expect(within(row).getByText("检测失败")).toBeVisible();
-    expect(
-      within(row)
-        .getAllByRole("button")
-        .map((button) => button.textContent),
-    ).toEqual(["重新检测", "管理"]);
+    expect(buttonNames(row)).toEqual(["重新检测", "管理", "更多操作"]);
     expect(
       screen.queryByRole("button", { name: /未安装工具/ }),
     ).not.toBeInTheDocument();
@@ -802,11 +1000,7 @@ describe("Bound tool lifecycle", () => {
       ).toBeEnabled(),
     );
     expect(within(row).getByText("安装异常")).toBeVisible();
-    expect(
-      within(row)
-        .getAllByRole("button")
-        .map((button) => button.textContent),
-    ).toEqual(["修复安装", "管理"]);
+    expect(buttonNames(row)).toEqual(["修复安装", "管理", "更多操作"]);
     fireEvent.click(within(row).getByRole("button", { name: "修复安装" }));
     expect(mocks.install).toHaveBeenCalledWith("codex");
   });
@@ -830,11 +1024,7 @@ describe("Bound tool lifecycle", () => {
     render(<ConsolePage boundTools={["claude"]} />);
     const row = await screen.findByRole("group", { name: "Claude Code" });
     expect(within(row).getByText("绑定配置缺失")).toBeVisible();
-    expect(
-      within(row)
-        .getAllByRole("button")
-        .map((button) => button.textContent),
-    ).toEqual(["恢复绑定", "管理"]);
+    expect(buttonNames(row)).toEqual(["恢复绑定", "管理", "更多操作"]);
     fireEvent.click(within(row).getByRole("button", { name: "恢复绑定" }));
     expect(screen.getByRole("dialog")).toHaveTextContent("管理：Claude Code");
     expect(

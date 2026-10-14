@@ -1,3 +1,7 @@
+import { useEffect } from "react";
+import userEvent from "@testing-library/user-event";
+import { emitTauriEvent } from "../msw/tauriMocks";
+import { ShellProvider, useShell } from "@/components/shell/ShellContext";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   fireEvent,
@@ -10,10 +14,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
 import {
-  SessionsPanel,
+  SessionsPage,
   groupSessions,
-} from "@/components/sessions/SessionsPanel";
+} from "@/components/sessions/SessionsPage";
 import { sessionsApi, type ManagedSession } from "@/lib/api/sessions";
+import * as clipboard from "@/lib/clipboard";
 import * as platform from "@/lib/platform";
 
 const toastError = vi.hoisted(() => vi.fn());
@@ -72,6 +77,11 @@ function session(
     },
   };
 }
+function RefreshControl() {
+  const shell = useShell();
+  useEffect(() => shell.setActive("sessions"), [shell.setActive]);
+  return <button onClick={() => void shell.refresh()}>refresh-page</button>;
+}
 function renderPanel(sessions: ManagedSession[]) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
@@ -80,7 +90,10 @@ function renderPanel(sessions: ManagedSession[]) {
   vi.spyOn(sessionsApi, "list").mockResolvedValue(sessions);
   render(
     <QueryClientProvider client={client}>
-      <SessionsPanel className="h-full" />
+      <ShellProvider openSettings={() => undefined}>
+        <RefreshControl />
+        <SessionsPage className="h-full" />
+      </ShellProvider>
     </QueryClientProvider>,
   );
   return client;
@@ -88,12 +101,18 @@ function renderPanel(sessions: ManagedSession[]) {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  localStorage.clear();
+  HTMLElement.prototype.scrollIntoView = vi.fn();
   i18n.addResourceBundle("zh", "translation", zh, true, true);
+  vi.spyOn(sessionsApi, "resume").mockResolvedValue({
+    command: "safe command",
+    launched: false,
+  });
   vi.spyOn(sessionsApi, "getMessagesByKey").mockResolvedValue([]);
   vi.spyOn(sessionsApi, "listTrash").mockResolvedValue([]);
 });
 
-describe("SessionsPanel capabilities and reversible actions", () => {
+describe("SessionsPage capabilities and reversible actions", () => {
   it("keeps dsh metadata-only and shared-index providers out of trash", async () => {
     renderPanel([session("d", "dsh", false)]);
     expect(
@@ -116,7 +135,9 @@ describe("SessionsPanel capabilities and reversible actions", () => {
     const b = { ...session("b", "pi"), projectDir: "/other/project" };
     expect(groupSessions([a, b]).size).toBe(2);
     renderPanel([a, b]);
-    fireEvent.change(screen.getByRole("textbox"), { target: { value: "pi" } });
+    fireEvent.change(screen.getByRole("searchbox"), {
+      target: { value: "pi" },
+    });
     await waitFor(() =>
       expect(screen.queryByText("title-a")).not.toBeInTheDocument(),
     );
@@ -136,7 +157,7 @@ describe("SessionsPanel capabilities and reversible actions", () => {
     const client = renderPanel([a, b]);
     vi.mocked(sessionsApi.list).mockResolvedValue([b]);
     fireEvent.click(
-      screen.getByRole("checkbox", { name: "选择项目 /project" }),
+      screen.getByRole("checkbox", { name: "选择 /project 中的全部会话" }),
     );
     fireEvent.click(screen.getByRole("button", { name: "移至回收站（2）" }));
     fireEvent.click(within(screen.getByTestId("confirm")).getByText("confirm"));
@@ -160,14 +181,13 @@ describe("SessionsPanel capabilities and reversible actions", () => {
     renderPanel([session("a"), session("b", "pi")]);
     fireEvent.click(screen.getByRole("checkbox", { name: "选择会话 title-a" }));
     const project = screen.getByRole("checkbox", {
-      name: "选择项目 /project",
+      name: "选择 /project 中的全部会话",
     }) as HTMLInputElement;
-    expect(project.indeterminate).toBe(true);
+    expect(project).toHaveAttribute("aria-checked", "mixed");
     fireEvent.click(screen.getByRole("checkbox", { name: "选择会话 title-b" }));
     expect(project).toBeChecked();
-    fireEvent.change(screen.getByRole("combobox", { name: "工具" }), {
-      target: { value: "claude" },
-    });
+    await userEvent.click(screen.getByRole("combobox", { name: "工具" }));
+    await userEvent.click(screen.getByRole("option", { name: /Claude/ }));
     await waitFor(() =>
       expect(
         screen.getByRole("button", { name: "移至回收站（1）" }),
@@ -177,7 +197,9 @@ describe("SessionsPanel capabilities and reversible actions", () => {
 
   it("copies a backend-generated command when macOS terminal launch fails", async () => {
     vi.spyOn(platform, "isMac").mockReturnValue(true);
-    const writeText = vi.fn().mockResolvedValue(undefined);
+    const writeText = vi
+      .spyOn(clipboard, "copyText")
+      .mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: { writeText },
@@ -206,6 +228,7 @@ describe("SessionsPanel capabilities and reversible actions", () => {
       .mockResolvedValue({ filename: "session.md", content: "full body" });
     saveDialog.mockResolvedValue(null);
     renderPanel([a]);
+    fireEvent.click(screen.getByRole("button", { name: /title-a/ }));
     fireEvent.click(
       await screen.findByRole("button", { name: "导出 Markdown" }),
     );
@@ -230,7 +253,7 @@ describe("SessionsPanel capabilities and reversible actions", () => {
       .mockRejectedValue("Restore destination is occupied");
     const purge = vi.spyOn(sessionsApi, "purge").mockResolvedValue();
     renderPanel([]);
-    fireEvent.click(screen.getByRole("button", { name: "回收站" }));
+    fireEvent.click(screen.getByRole("button", { name: /^回收站/ }));
     fireEvent.click(await screen.findByRole("button", { name: "恢复" }));
     await waitFor(() => expect(restore).toHaveBeenCalledWith("trash"));
     await waitFor(() =>
@@ -243,4 +266,149 @@ describe("SessionsPanel capabilities and reversible actions", () => {
     fireEvent.click(within(screen.getByTestId("confirm")).getByText("confirm"));
     await waitFor(() => expect(purge).toHaveBeenCalledWith("trash"));
   });
+});
+
+it("shows fresh tokens, separate cache, readable costs, and lazy inline bodies", async () => {
+  const a = {
+    ...session("a"),
+    models: ["model-a"],
+    messageCount: 33,
+    sizeBytes: 11000000,
+    usage: {
+      models: [],
+      inputTokens: 1000,
+      outputTokens: 200,
+      cacheReadTokens: 5000,
+      cacheWriteTokens: 50,
+      totalTokens: 1200,
+      costUsd: 0.02,
+      unpricedModels: 0,
+    },
+  };
+  renderPanel([a, session("b")]);
+  expect(screen.getByText("1.2K")).toBeVisible();
+  expect(screen.getByText("≈$0.020")).toBeVisible();
+  expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+  expect(screen.getByText(/33 条消息.*11 MB/)).toBeVisible();
+  expect(sessionsApi.getMessagesByKey).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: /title-a/ }));
+  expect(sessionsApi.getMessagesByKey).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "查看会话" }));
+  await waitFor(() =>
+    expect(sessionsApi.getMessagesByKey).toHaveBeenCalledWith(a.sessionKey),
+  );
+});
+
+it("opens only the newest folder and allows revealing older folders", async () => {
+  renderPanel([
+    { ...session("a"), lastActiveAt: 20 },
+    { ...session("b"), projectDir: "/older", lastActiveAt: 10 },
+  ]);
+  expect(screen.getByText("title-a")).toBeVisible();
+  expect(screen.queryByText("title-b")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: /older/ }));
+  expect(screen.getByText("title-b")).toBeVisible();
+});
+
+it("refreshes the index and updates metadata on usage events", async () => {
+  const updated = { ...session("a"), title: "updated" };
+  const refresh = vi
+    .spyOn(sessionsApi, "refreshIndex")
+    .mockResolvedValue([updated]);
+  renderPanel([session("a")]);
+  fireEvent.click(screen.getByText("refresh-page"));
+  await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+  expect(await screen.findByText("updated")).toBeVisible();
+  vi.mocked(sessionsApi.list).mockResolvedValue([
+    { ...updated, title: "event-title" },
+  ]);
+  emitTauriEvent("usage-synced", {});
+  expect(await screen.findByText("event-title")).toBeVisible();
+});
+it("launches safely, exports to the chosen destination, and searches model names", async () => {
+  const row = {
+    ...session("a"),
+    usage: {
+      models: [
+        {
+          model: "special-model",
+          requests: 1,
+          inputTokens: 1,
+          outputTokens: 1,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          costUsd: 0.1,
+        },
+      ],
+      inputTokens: 1,
+      outputTokens: 1,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 2,
+      costUsd: 0.1,
+      unpricedModels: 0,
+    },
+  };
+  vi.mocked(sessionsApi.resume).mockResolvedValue({
+    command: "safe command",
+    launched: true,
+  });
+  const exp = vi
+    .spyOn(sessionsApi, "exportMarkdown")
+    .mockResolvedValue({ filename: "a.md", content: "content" });
+  saveDialog.mockResolvedValue("/sandbox/a.md");
+  renderPanel([row, session("b")]);
+  fireEvent.change(screen.getByRole("searchbox"), {
+    target: { value: "special-model" },
+  });
+  await waitFor(() => expect(screen.queryByText("title-b")).toBeNull());
+  fireEvent.click(screen.getByRole("button", { name: "继续对话" }));
+  await waitFor(() =>
+    expect(sessionsApi.resume).toHaveBeenCalledWith(row.sessionKey, true),
+  );
+  fireEvent.click(screen.getByRole("button", { name: /title-a/ }));
+  fireEvent.click(screen.getByRole("button", { name: "导出 Markdown" }));
+  await waitFor(() =>
+    expect(exp).toHaveBeenCalledWith(row.sessionKey, "/sandbox/a.md"),
+  );
+});
+it("restores sessions and confirms clearing every trash entry", async () => {
+  const entries = ["one", "two"].map((key) => ({
+    key,
+    providerId: "claude",
+    sessionId: key,
+    deletedAt: Date.now(),
+    state: "trashed" as const,
+    itemCount: 1,
+  }));
+  vi.mocked(sessionsApi.listTrash).mockResolvedValue(entries);
+  const restore = vi
+    .spyOn(sessionsApi, "restore")
+    .mockResolvedValue(entries[0]);
+  const purge = vi.spyOn(sessionsApi, "purge").mockResolvedValue();
+  renderPanel([]);
+  fireEvent.click(screen.getByRole("button", { name: /^回收站/ }));
+  fireEvent.click((await screen.findAllByRole("button", { name: "恢复" }))[0]);
+  await waitFor(() => expect(restore).toHaveBeenCalledWith("one"));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "清空回收站" })).toBeEnabled(),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "清空回收站" }));
+  expect(purge).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByText("confirm"));
+  await waitFor(() => expect(purge).toHaveBeenCalledTimes(2));
+});
+
+it("refreshes an open transcript when its revision changes", async () => {
+  const a = session("a");
+  vi.mocked(sessionsApi.getMessagesByKey)
+    .mockResolvedValueOnce([{ role: "user", content: "old body" }])
+    .mockResolvedValue([{ role: "user", content: "new body" }]);
+  const client = renderPanel([a]);
+  fireEvent.click(screen.getByRole("button", { name: /title-a/ }));
+  fireEvent.click(screen.getByRole("button", { name: "查看会话" }));
+  expect(await screen.findByText("old body")).toBeVisible();
+  client.setQueryData(["sessions"], [{ ...a, revision: "changed" }]);
+  expect(await screen.findByText("new body")).toBeVisible();
+  expect(sessionsApi.getMessagesByKey).toHaveBeenCalledTimes(2);
 });

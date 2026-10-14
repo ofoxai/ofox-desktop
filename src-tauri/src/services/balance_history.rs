@@ -243,11 +243,15 @@ pub fn trend(points: &[BalancePoint], now_ms: i64) -> BalanceTrend {
     let per_day = round4(-slope);
     trend.per_day = Some(if per_day == 0.0 { 0.0 } else { per_day });
     if slope < 0.0 {
-        let zero_at = t0 + (-intercept / slope * DAY_MS as f64) as i64; // where the line meets zero
-        let runs_out_at = zero_at.max(now_ms);
-        if runs_out_at - now_ms <= RUNS_OUT_MAX_MS {
-            trend.runs_out_at = Some(runs_out_at);
-            trend.days_left = Some(round4((runs_out_at - now_ms) as f64 / DAY_MS as f64));
+        // A tiny burn can put the zero crossing beyond i64 milliseconds. Check
+        // the remaining days before converting, including non-finite fits.
+        let days_left = -intercept / slope - days_since(now_ms);
+        if days_left.is_finite() && days_left <= RUNS_OUT_MAX_MS as f64 / DAY_MS as f64 {
+            let remaining_ms = (days_left.max(0.0) * DAY_MS as f64) as i64;
+            if let Some(runs_out_at) = now_ms.checked_add(remaining_ms) {
+                trend.runs_out_at = Some(runs_out_at);
+                trend.days_left = Some(round4(remaining_ms as f64 / DAY_MS as f64));
+            }
         }
     }
     trend
@@ -533,6 +537,20 @@ mod tests {
         let t = trend(&points, NOW);
 
         assert!(t.per_day.unwrap() > 0.0);
+        assert_eq!((t.runs_out_at, t.days_left), (None, None));
+    }
+
+    #[test]
+    fn a_tiny_burn_does_not_overflow_the_run_out_timestamp() {
+        let points = [
+            point(hours_ago(48.0), 100.0),
+            point(hours_ago(24.0), 100.0 - 1e-10),
+            point(hours_ago(0.0), 100.0 - 2e-10),
+        ];
+
+        let t = trend(&points, NOW);
+
+        assert_eq!(t.per_day, Some(0.0));
         assert_eq!((t.runs_out_at, t.days_left), (None, None));
     }
 

@@ -369,8 +369,17 @@ fn hash_path(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
-pub(crate) fn fingerprint(paths: &[PathBuf]) -> Result<String, String> {
+/// A bundle's listing revision, and its size and regular files, from one walk.
+pub(crate) struct Fingerprint {
+    pub hash: String,
+    pub size: u64,
+    pub files: Vec<(PathBuf, u64)>,
+}
+
+pub(crate) fn fingerprint(paths: &[PathBuf]) -> Result<Fingerprint, String> {
     let mut hash = Sha256::new();
+    let mut size = 0;
+    let mut files = Vec::new();
     for path in paths {
         hash.update(path.to_string_lossy().as_bytes());
         // Listing revisions use recursive stat fingerprints, avoiding a body scan
@@ -395,6 +404,10 @@ pub(crate) fn fingerprint(paths: &[PathBuf]) -> Result<String, String> {
                 u8::from(meta.is_dir()),
                 u8::from(meta.file_type().is_symlink()),
             ]);
+            if meta.is_file() {
+                size += meta.len();
+                files.push((p.to_path_buf(), meta.len()));
+            }
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
@@ -412,7 +425,11 @@ pub(crate) fn fingerprint(paths: &[PathBuf]) -> Result<String, String> {
             Ok(())
         })?;
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(Fingerprint {
+        hash: format!("{:x}", hash.finalize()),
+        size,
+        files,
+    })
 }
 
 fn reject_active(paths: &[PathBuf], now: SystemTime) -> Result<(), String> {
@@ -449,6 +466,8 @@ struct Manifest {
     roots: Vec<PathBuf>,
     member_ids: Vec<String>,
     deleted_at: i64,
+    #[serde(default)]
+    size_bytes: Option<u64>,
     state: String,
     items: Vec<Item>,
     error: Option<String>,
@@ -466,6 +485,7 @@ pub struct TrashEntry {
     pub state: String,
     pub error: Option<String>,
     pub item_count: usize,
+    pub size_bytes: Option<u64>,
 }
 
 impl Manifest {
@@ -480,6 +500,7 @@ impl Manifest {
             state: self.state.clone(),
             error: self.error.clone(),
             item_count: self.items.len(),
+            size_bytes: self.size_bytes,
         }
     }
 }
@@ -998,6 +1019,7 @@ fn list_in(root: &Path) -> Result<Vec<TrashEntry>, String> {
                 state: "recoveryRequired".into(),
                 error: Some(error),
                 item_count: 0,
+                size_bytes: None,
             },
         });
     }
@@ -1048,13 +1070,15 @@ fn trash_one(request: &TrashRequest) -> Result<TrashEntry, String> {
     recover(&root)?;
     let record = managed::resolve(&request.session_key)?;
     let bundle = plan(&record.meta)?;
-    trash_bundle(
+    let trashed = trash_bundle(
         &root,
         record.meta,
         bundle,
         &request.revision,
         SystemTime::now(),
-    )
+    );
+    managed::forget_listing();
+    trashed
 }
 
 fn trash_bundle(
@@ -1065,7 +1089,8 @@ fn trash_bundle(
     now: SystemTime,
 ) -> Result<TrashEntry, String> {
     reject_active(&bundle.paths, now)?;
-    if fingerprint(&bundle.paths)? != revision {
+    let bundle_fingerprint = fingerprint(&bundle.paths)?;
+    if bundle_fingerprint.hash != revision {
         return Err("Session bundle changed; refresh before moving it to trash".into());
     }
     let key = uuid::Uuid::new_v4().to_string();
@@ -1092,6 +1117,7 @@ fn trash_bundle(
         roots: bundle.roots,
         member_ids: bundle.member_ids,
         deleted_at: chrono::Utc::now().timestamp_millis(),
+        size_bytes: Some(bundle_fingerprint.size),
         state: "preparing".into(),
         items,
         error: None,
@@ -1137,7 +1163,9 @@ pub fn restore(key: &str) -> Result<TrashEntry, String> {
     let _guard = LOCK.lock().map_err(|e| e.to_string())?;
     let root = trash_root();
     recover(&root)?;
-    restore_in(&root, key)
+    let restored = restore_in(&root, key);
+    managed::forget_listing();
+    restored
 }
 
 fn restore_in(root: &Path, key: &str) -> Result<TrashEntry, String> {
@@ -1223,6 +1251,8 @@ mod tests {
             last_active_at: None,
             source_path: Some(source.to_string_lossy().into()),
             resume_command: None,
+            title_source: None,
+            message_count: None,
         }
     }
     // Advance comparison time instead of touching process-global env or personal configs.
@@ -1270,9 +1300,9 @@ mod tests {
         let path = home.path().join("s.json");
         fs::write(&path, "before").unwrap();
         let paths = vec![path.clone()];
-        let before = fingerprint(&paths).unwrap();
+        let before = fingerprint(&paths).unwrap().hash;
         fs::write(&path, "after").unwrap();
-        assert_ne!(before, fingerprint(&paths).unwrap());
+        assert_ne!(before, fingerprint(&paths).unwrap().hash);
         assert!(plan_in(&meta("hermes", "s", &path), vec![home.path().into()]).is_err());
     }
     #[test]
@@ -1363,7 +1393,7 @@ mod tests {
         let roots = vec![home.path().into()];
         let session = meta("claude", "s", &source);
         let bundle = plan_in(&session, roots.clone()).unwrap();
-        let revision = fingerprint(&bundle.paths).unwrap();
+        let revision = fingerprint(&bundle.paths).unwrap().hash;
         let entry = trash_bundle(trash.path(), session, bundle, &revision, idle_now()).unwrap();
         assert!(!source.exists());
         fs::write(&source, "occupied").unwrap();
@@ -1450,7 +1480,7 @@ mod tests {
             .unwrap();
         let bundle = plan_in(&session, roots.clone()).unwrap();
         assert_eq!(bundle.paths.len(), 4);
-        let revision = fingerprint(&bundle.paths).unwrap();
+        let revision = fingerprint(&bundle.paths).unwrap().hash;
         let entry = trash_bundle(trash.path(), session, bundle, &revision, idle_now()).unwrap();
         assert!(home
             .path()
@@ -1473,6 +1503,19 @@ mod tests {
     }
 
     #[test]
+    fn trash_listing_keeps_bundle_size_without_reading_live_files() {
+        let home = tempfile::tempdir().unwrap();
+        let trash = tempfile::tempdir().unwrap();
+        let source = home.path().join("s.jsonl");
+        fs::write(&source, "original").unwrap();
+        let session = meta("pi", "s", &source);
+        let bundle = plan_in(&session, vec![home.path().into()]).unwrap();
+        let revision = fingerprint(&bundle.paths).unwrap().hash;
+        let entry = trash_bundle(trash.path(), session, bundle, &revision, idle_now()).unwrap();
+        assert_eq!(serde_json::to_value(entry).unwrap()["sizeBytes"], 8);
+    }
+
+    #[test]
     fn crash_between_move_and_manifest_progress_is_compensated() {
         let home = tempfile::tempdir().unwrap();
         let trash = tempfile::tempdir().unwrap();
@@ -1489,6 +1532,7 @@ mod tests {
             roots: roots.clone(),
             member_ids: vec!["s".into()],
             deleted_at: 1,
+            size_bytes: None,
             state: "preparing".into(),
             items: vec![Item {
                 original: source.clone(),
@@ -1565,7 +1609,7 @@ mod tests {
             let roots = vec![home.path().into()];
             let session = meta(provider, "s", &source);
             let bundle = plan_in(&session, roots.clone()).unwrap();
-            let stale = fingerprint(&bundle.paths).unwrap();
+            let stale = fingerprint(&bundle.paths).unwrap().hash;
             fs::write(&source, edited).unwrap();
             assert!(
                 trash_bundle(trash.path(), session.clone(), bundle, &stale, idle_now())
@@ -1574,7 +1618,7 @@ mod tests {
             );
             assert_eq!(fs::read_dir(trash.path()).unwrap().count(), 0);
             let bundle = plan_in(&session, roots.clone()).unwrap();
-            let revision = fingerprint(&bundle.paths).unwrap();
+            let revision = fingerprint(&bundle.paths).unwrap().hash;
             let entry = trash_bundle(trash.path(), session, bundle, &revision, idle_now()).unwrap();
             assert!(!source.exists());
             restore_with_roots(trash.path(), &entry.key, Some(&roots)).unwrap();
@@ -1598,6 +1642,7 @@ mod tests {
             roots: vec![home.path().into()],
             member_ids: vec!["s".into()],
             deleted_at: 1,
+            size_bytes: None,
             state: "trashed".into(),
             items: vec![Item {
                 original: home.path().join("state.db"),
@@ -1660,7 +1705,7 @@ mod tests {
         assert_eq!(bundle.paths.len(), 9);
         assert_eq!(bundle.member_ids, ["s", "child"]);
         assert!(reject_active(&bundle.paths, SystemTime::now()).is_err());
-        let revision = fingerprint(&bundle.paths).unwrap();
+        let revision = fingerprint(&bundle.paths).unwrap().hash;
         let entry = trash_bundle(trash.path(), session, bundle, &revision, idle_now()).unwrap();
         assert!(project.join("checkpoints/named.json").exists());
         assert!(project.join("plans/shared.md").exists());

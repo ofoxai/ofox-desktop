@@ -306,6 +306,8 @@ export interface ModelPickerProps {
    * shard and the search/option list stays scrollable.
    */
   portalContainer?: HTMLElement | null;
+  /** Merged over the trigger's menu look, e.g. a tool row's pill. */
+  triggerClassName?: string;
 }
 
 export function ModelPicker({
@@ -319,6 +321,7 @@ export function ModelPicker({
   disabled = false,
   allowDefault = false,
   emptyLabel,
+  triggerClassName,
 }: ModelPickerProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -352,6 +355,7 @@ export function ModelPicker({
               menuTriggerClassName,
               "max-w-none flex-1",
               value && "text-ink",
+              triggerClassName,
             )}
           >
             <span className="min-w-0 flex-1 truncate text-left">

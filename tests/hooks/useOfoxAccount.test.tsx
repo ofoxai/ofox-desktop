@@ -1,3 +1,4 @@
+import { StrictMode, useEffect, type ReactNode } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
@@ -21,6 +22,7 @@ beforeEach(() => {
   i18n.addResourceBundle("en", "translation", en, true, true);
   queryClient.clear();
   mocks.getUserInfo.mockReset();
+  Object.values(mocks.toast).forEach((mock) => mock.mockClear());
 });
 
 afterEach(async () => {
@@ -95,6 +97,60 @@ describe("useOfoxAccount", () => {
       expect(next.result.current.user).toBeNull();
     },
   );
+
+  it("does not toast the previous account balance after unmount", async () => {
+    let reply!: (user: unknown) => void;
+    mocks.getUserInfo.mockReturnValueOnce(
+      new Promise((resolve) => {
+        reply = resolve;
+      }),
+    );
+    const previous = renderHook(() => useOfoxAccount());
+    const pending = previous.result.current.refreshBalance();
+    previous.unmount();
+    await act(async () => {
+      reply({ ...ADA, balance: { balance: 9 } });
+      await pending;
+    });
+    expect(mocks.toast.success).not.toHaveBeenCalled();
+    expect(mocks.toast.warning).not.toHaveBeenCalled();
+  });
+
+  it("drops the abandoned effect request during StrictMode replay", async () => {
+    let reply!: (user: unknown) => void;
+    mocks.getUserInfo
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          reply = resolve;
+        }),
+      )
+      .mockResolvedValue({ ...ADA, name: "Current" });
+    renderHook(
+      () => {
+        const account = useOfoxAccount();
+        useEffect(() => {
+          void account.loadUser();
+        }, [account.loadUser]);
+        return account;
+      },
+      {
+        wrapper: ({ children }: { children: ReactNode }) => (
+          <StrictMode>{children}</StrictMode>
+        ),
+      },
+    );
+    await waitFor(() =>
+      expect(queryClient.getQueryData(OFOX_USER_KEY)).toMatchObject({
+        name: "Current",
+      }),
+    );
+    await act(async () => {
+      reply(ADA);
+    });
+    expect(queryClient.getQueryData(OFOX_USER_KEY)).toMatchObject({
+      name: "Current",
+    });
+  });
 
   it("stops retrying once the console closed and stores nothing", async () => {
     vi.useFakeTimers();

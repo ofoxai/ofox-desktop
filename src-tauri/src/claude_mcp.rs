@@ -629,6 +629,21 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn onboarding_skip_is_written_to_the_claude_json_inside_claude_config_dir() {
+        let sandbox = crate::test_sandbox::sandbox();
+        let moved = sandbox.home().join("data").join("claude-state");
+        std::env::set_var("CLAUDE_CONFIG_DIR", &moved);
+
+        assert!(set_has_completed_onboarding().unwrap());
+
+        let written: Value =
+            serde_json::from_str(&fs::read_to_string(moved.join(".claude.json")).unwrap()).unwrap();
+        assert_eq!(written["hasCompletedOnboarding"], true);
+        assert!(!sandbox.home().join(".claude.json").exists());
+    }
+
+    #[test]
     fn test_is_wsl_path_non_wsl() {
         // 非 WSL 路径
         assert!(!is_wsl_path(Path::new(r"C:\Users\user\.claude")));

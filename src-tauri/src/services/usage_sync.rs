@@ -61,6 +61,8 @@ impl UsageSync {
                 }
             }
         }
+        // Codex / Claude sessions may live in CODEX_HOME / CLAUDE_CONFIG_DIR.
+        crate::agent_env::ready().await;
         let db = Arc::clone(db);
         let result = tokio::task::spawn_blocking(move || sync_sources(&db))
             .await

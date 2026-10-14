@@ -10,12 +10,65 @@ export interface SessionCapabilities {
   readOnlyReason?: string | null;
 }
 
+export type SessionFileKind = "main" | "subagent" | "segment" | "database";
+
+export interface SessionFile {
+  path: string;
+  sizeBytes: number;
+  kind: SessionFileKind;
+}
+
+/** One model's share of a session's usage. */
+export interface SessionModelUsage {
+  model: string;
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /** null: the model spent tokens at no known price. */
+  costUsd?: number | null;
+}
+
+export interface SessionUsage {
+  models: SessionModelUsage[];
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+  costUsd: number;
+  unpricedModels: number;
+}
+
+/** Emitted when titles, counts or usage of the listing may have changed. */
+export const SESSIONS_INDEX_UPDATED_EVENT = "sessions-index-updated";
+
 export interface ManagedSession extends SessionMeta {
   sessionKey: string;
   revision?: string | null;
   capabilities: SessionCapabilities;
   models?: string[];
   subagentCount?: number;
+  /** Bytes of every file of the session (0 for a shared database). */
+  sizeBytes?: number;
+  files?: SessionFile[];
+  usage?: SessionUsage;
+}
+
+/** Providers may expose observed models or the usage database's model breakdown. */
+export function sessionModelNames(
+  session: SessionMeta & {
+    models?: string[];
+    usage?: Pick<SessionUsage, "models">;
+  },
+): string[] {
+  return [
+    ...new Set([
+      ...(session.models ?? []),
+      ...(session.usage?.models.map((m) => m.model) ?? []),
+    ]),
+  ];
 }
 
 export interface SessionTrashEntry {
@@ -28,6 +81,8 @@ export interface SessionTrashEntry {
   state: "trashed" | "preparing" | "restoring" | "recoveryRequired";
   error?: string | null;
   itemCount: number;
+  /** Absent for trash written by older app versions. */
+  sizeBytes?: number | null;
 }
 
 export interface TrashSessionResult {
@@ -51,6 +106,11 @@ export interface DeleteSessionResult extends DeleteSessionOptions {
 export const sessionsApi = {
   async list(): Promise<ManagedSession[]> {
     return await invoke("list_sessions");
+  },
+
+  /** Sync usage now, read changed session files again, return the listing. */
+  async refreshIndex(): Promise<ManagedSession[]> {
+    return await invoke("refresh_session_index");
   },
 
   async exportMarkdown(sessionKey: string, destination?: string) {

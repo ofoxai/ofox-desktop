@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use tempfile::TempDir;
 
-use crate::settings::{reload_settings, update_settings, AppSettings};
+use crate::settings::{clear_settings_health, reload_settings, update_settings, AppSettings};
 
 /// Variables set into the sandbox home, with their location below it.
 const SANDBOX_VARS: &[(&str, &str)] = &[
@@ -96,7 +96,10 @@ impl Drop for Sandbox {
         // Reset the in-memory settings while the environment still points into the
         // sandbox: saving defaults must land in the sandbox, and reloading after the
         // restore below would read whatever home the environment goes back to (the
-        // real one, in an integration-test binary).
+        // real one, in an integration-test binary). A test that corrupted
+        // settings.json left the health unreadable, which refuses that save: forget
+        // it first, so the reset lands and the next test starts clean.
+        clear_settings_health();
         if let Err(err) = update_settings(AppSettings::default()) {
             eprintln!("sandbox: could not reset the settings: {err}");
         }

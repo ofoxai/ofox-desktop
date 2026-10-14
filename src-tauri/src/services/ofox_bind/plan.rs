@@ -13,6 +13,8 @@ pub(crate) struct RestorePlan {
     pub exact: bool,
     pub restored_keys: Vec<String>,
     pub removed_keys: Vec<String>,
+    /// 绑定后用户改过、所以没有还原的字段（只有名字）。
+    pub kept_keys: Vec<String>,
 }
 
 impl RestorePlan {
@@ -34,6 +36,7 @@ impl RestorePlan {
             exact,
             restored_keys,
             removed_keys,
+            kept_keys: Vec::new(),
         }
     }
 }

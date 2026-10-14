@@ -1,12 +1,73 @@
 #![allow(non_snake_case)]
 
-use crate::session_manager;
+use std::sync::Arc;
 
-#[tauri::command]
-pub async fn list_sessions() -> Result<Vec<session_manager::managed::ManagedSession>, String> {
-    let sessions = tauri::async_runtime::spawn_blocking(session_manager::managed::list)
+use tauri::{AppHandle, Emitter, State};
+
+use crate::database::Database;
+use crate::services::session_usage::SessionSyncResult;
+use crate::services::usage_sync;
+use crate::session_manager;
+use crate::session_manager::managed::ManagedSession;
+use crate::store::AppState;
+
+/// Emitted when the session listing may have changed (titles, counts, usage):
+/// after `refresh_session_index`, and after a usage sync the listing started
+/// wrote new rows.
+pub const SESSIONS_INDEX_UPDATED_EVENT: &str = "sessions-index-updated";
+
+pub(crate) async fn listing(db: Arc<Database>) -> Result<Vec<ManagedSession>, String> {
+    // Resolve custom agent directories before scanning or caching metadata.
+    crate::agent_env::ready().await;
+    tauri::async_runtime::spawn_blocking(move || session_manager::managed::list_with(Some(&db)))
         .await
-        .map_err(|e| format!("Failed to scan sessions: {e}"))?;
+        .map_err(|e| format!("Failed to scan sessions: {e}"))
+}
+
+/// A sync that wrote rows changed what the listing shows.
+fn sync_changed_usage(result: &Option<SessionSyncResult>) -> bool {
+    result.as_ref().is_some_and(|r| r.imported > 0)
+}
+
+/// The session listing: titles and message counts from the meta cache (only
+/// changed files are read), usage from the database. It also starts a usage
+/// sync, skipped when one ran in the last minute.
+#[tauri::command]
+pub async fn list_sessions(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<ManagedSession>, String> {
+    let db = Arc::clone(&state.db);
+    let sync_db = Arc::clone(&db);
+    tauri::async_runtime::spawn(async move {
+        match usage_sync::sync_all_and_emit(&app, &sync_db, false).await {
+            Ok(result) if sync_changed_usage(&result) => {
+                if let Err(e) = app.emit(SESSIONS_INDEX_UPDATED_EVENT, ()) {
+                    log::debug!("[SESSIONS] emit {SESSIONS_INDEX_UPDATED_EVENT} failed: {e}");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => log::debug!("[SESSIONS] usage sync from the listing failed: {e}"),
+        }
+    });
+    listing(db).await
+}
+
+/// Sync usage now (never skipped), read the changed session files again and
+/// return the new listing; emits `sessions-index-updated`.
+#[tauri::command]
+pub async fn refresh_session_index(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<ManagedSession>, String> {
+    let db = Arc::clone(&state.db);
+    if let Err(e) = usage_sync::sync_all_and_emit(&app, &db, true).await {
+        log::warn!("[SESSIONS] usage sync for the session index failed: {e}");
+    }
+    let sessions = listing(db).await?;
+    if let Err(e) = app.emit(SESSIONS_INDEX_UPDATED_EVENT, ()) {
+        log::debug!("[SESSIONS] emit {SESSIONS_INDEX_UPDATED_EVENT} failed: {e}");
+    }
     Ok(sessions)
 }
 
@@ -114,4 +175,26 @@ pub async fn delete_sessions(
             ),
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn synced(imported: u32) -> Option<SessionSyncResult> {
+        Some(SessionSyncResult {
+            imported,
+            skipped: 0,
+            files_scanned: 1,
+            errors: vec![],
+        })
+    }
+
+    #[test]
+    fn only_a_sync_that_wrote_rows_changes_the_listing() {
+        assert!(sync_changed_usage(&synced(2)));
+        assert!(!sync_changed_usage(&synced(0)));
+        // skipped: a sync ran in the last minute
+        assert!(!sync_changed_usage(&None));
+    }
 }

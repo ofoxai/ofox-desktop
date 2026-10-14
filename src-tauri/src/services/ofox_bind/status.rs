@@ -504,6 +504,7 @@ pub(crate) async fn binding_status(
     tool: Tool,
     api_key: Option<&str>,
 ) -> ToolBindingStatus {
+    crate::agent_env::ready().await;
     let _guard = BIND_LOCK.lock().await;
     let _file_locks = file_locks(tool);
     inspect(db, tool, api_key).unwrap_or_else(|_| ToolBindingStatus::unknown())

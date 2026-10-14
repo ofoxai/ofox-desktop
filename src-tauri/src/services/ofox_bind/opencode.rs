@@ -1,6 +1,7 @@
 //! OpenCode 的绑定配置：只动 `opencode.json` 里的 `provider."ofox-opencode"`，
 //! 其它 provider、mcp、agents、plugin 一律不动。
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
@@ -11,6 +12,7 @@ use crate::opencode_config::{get_opencode_config_path, normalize_ofox_provider_t
 
 use super::json_file::{self, JsonPath, KeyStyle};
 use super::opencode_state;
+use super::ownership::{self, Leaf, Leaves};
 use super::plan::{read_text, FileEdit, RestorePlan};
 
 const LABEL: &str = "OpenCode 的 opencode.json";
@@ -20,8 +22,12 @@ const BASE_URL: JsonPath = &["options", "baseURL"];
 /// 文件原本不存在时绑定会顺带写上 `$schema`（与 OpenCode 自己的默认配置一致）。
 const SCHEMA: JsonPath = &["$schema"];
 const SCHEMA_URL: &str = "https://opencode.ai/config.json";
-/// 解绑时一律还原成绑定前的值（原来没有就删掉）：Ofox 的条目整条还原。
-const LEAVES: &[JsonPath] = &[ENTRY, SCHEMA];
+/// 解绑时还原成绑定前的值（原来没有就删掉）：Ofox 的条目整条还原；用户之后改过的
+/// 按规则留着。
+pub(crate) const LEAVES: &[Leaf] = &[
+    Leaf::route(ENTRY, ownership::ofox_entry),
+    Leaf::preference(SCHEMA),
+];
 const CONTAINERS: &[JsonPath] = &[&["provider"]];
 
 pub(crate) fn config_path() -> PathBuf {
@@ -108,11 +114,24 @@ pub(crate) fn write_bound(
     Ok(())
 }
 
+pub(crate) fn leaves(text: Option<&str>) -> Result<Leaves, String> {
+    json_file::leaves(text, LABEL, LEAVES)
+}
+
 pub(crate) fn plan_restore(
     original: Option<&str>,
     current: Option<&str>,
+    keep: &BTreeSet<String>,
 ) -> Result<RestorePlan, String> {
-    json_file::plan_restore(original, current, LABEL, KeyStyle::Json, LEAVES, CONTAINERS)
+    json_file::plan_restore(
+        original,
+        current,
+        LABEL,
+        KeyStyle::Json,
+        LEAVES,
+        CONTAINERS,
+        keep,
+    )
 }
 
 /// 没有绑定前快照时的尽力清理：`ofox-opencode` 是 Ofox 专用的条目，整条删掉。
@@ -181,7 +200,7 @@ mod tests {
     #[test]
     fn restore_brings_back_the_commented_file() {
         let bound = bound_config(Some(USER_CONFIG), &template(), "sk-of-K", true).unwrap();
-        let plan = plan_restore(Some(USER_CONFIG), Some(&bound)).unwrap();
+        let plan = plan_restore(Some(USER_CONFIG), Some(&bound), &BTreeSet::new()).unwrap();
         assert!(plan.exact);
         assert_eq!(plan.content.as_deref(), Some(USER_CONFIG));
     }
@@ -193,6 +212,11 @@ mod tests {
             serde_json::from_str::<Value>(&bound).unwrap()["$schema"],
             SCHEMA_URL
         );
-        assert_eq!(plan_restore(None, Some(&bound)).unwrap().content, None);
+        assert_eq!(
+            plan_restore(None, Some(&bound), &BTreeSet::new())
+                .unwrap()
+                .content,
+            None
+        );
     }
 }

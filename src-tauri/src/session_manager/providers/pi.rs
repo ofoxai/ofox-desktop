@@ -2,6 +2,7 @@
 //! internal/sessions/{pi,transcript}.go. Copyright (c) 2026 yetone, MIT;
 //! the complete license is in ../MAGPIE_LICENSE.
 use super::utils::{extract_text, parse_timestamp_to_ms, truncate_summary};
+use crate::session_manager::title::{titled, TitleCandidates};
 use crate::session_manager::{SessionMessage, SessionMeta};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -134,27 +135,29 @@ pub(crate) fn parse_session(path: &Path) -> Option<SessionMeta> {
     let id = head.get("id")?.as_str()?.to_string();
     let branch = active_branch(&all);
     let messages = messages_from_branch(&branch);
-    let title = branch
-        .iter()
-        .rev()
-        .find_map(|v| {
-            (v.get("type").and_then(Value::as_str) == Some("session_info"))
-                .then(|| v.get("name").and_then(Value::as_str))
-                .flatten()
-        })
-        .map(str::to_string)
-        .or_else(|| {
+    let project_dir = head.get("cwd").and_then(Value::as_str);
+    let mut candidates = TitleCandidates::default()
+        .with_first_user_text(
             messages
                 .iter()
                 .find(|m| m.role == "user")
-                .map(|m| m.content.clone())
-        });
+                .map(|m| m.content.as_str()),
+        )
+        .with_directory(project_dir);
+    // the name given with /name
+    candidates.custom = branch.iter().rev().find_map(|v| {
+        (v.get("type").and_then(Value::as_str) == Some("session_info"))
+            .then(|| v.get("name").and_then(Value::as_str))
+            .flatten()
+            .map(str::to_string)
+    });
+    let (title, title_source) = titled(&candidates);
     Some(SessionMeta {
         provider_id: "pi".into(),
         session_id: id,
-        title: title.map(|s| truncate_summary(&s, 80)),
+        title,
         summary: messages.last().map(|m| truncate_summary(&m.content, 160)),
-        project_dir: head.get("cwd").and_then(Value::as_str).map(str::to_string),
+        project_dir: project_dir.map(str::to_string),
         created_at: head.get("timestamp").and_then(parse_timestamp_to_ms),
         last_active_at: all
             .iter()
@@ -162,6 +165,8 @@ pub(crate) fn parse_session(path: &Path) -> Option<SessionMeta> {
             .find_map(|v| v.get("timestamp").and_then(parse_timestamp_to_ms)),
         source_path: Some(path.to_string_lossy().into()),
         resume_command: None,
+        title_source,
+        message_count: None,
     })
 }
 
@@ -201,6 +206,7 @@ fn messages_from_branch(branch: &[&Value]) -> Vec<SessionMessage> {
                     role: "context".into(),
                     content: summary.into(),
                     ts,
+                    name: None,
                 });
             }
             continue;
@@ -226,6 +232,7 @@ fn messages_from_branch(branch: &[&Value]) -> Vec<SessionMessage> {
         if let Some(parts) = content.as_array() {
             for part in parts {
                 let kind = part.get("type").and_then(Value::as_str).unwrap_or("");
+                let mut name = None;
                 let (role, text) = match kind {
                     "thinking" => (
                         "thinking",
@@ -234,16 +241,18 @@ fn messages_from_branch(branch: &[&Value]) -> Vec<SessionMessage> {
                             .unwrap_or("")
                             .into(),
                     ),
-                    "toolCall" => (
-                        "tool",
-                        format!(
-                            "[Tool: {}]\n{}",
+                    "toolCall" => {
+                        name = Some(
                             part.get("name")
                                 .and_then(Value::as_str)
-                                .unwrap_or("unknown"),
-                            serde_json::to_string_pretty(&part["arguments"]).unwrap_or_default()
-                        ),
-                    ),
+                                .unwrap_or("unknown")
+                                .to_string(),
+                        );
+                        (
+                            "tool_call",
+                            serde_json::to_string_pretty(&part["arguments"]).unwrap_or_default(),
+                        )
+                    }
                     "image" => (role, "[Image]".into()),
                     _ => (role, extract_text(part)),
                 };
@@ -252,6 +261,7 @@ fn messages_from_branch(branch: &[&Value]) -> Vec<SessionMessage> {
                         role: role.into(),
                         content: text,
                         ts,
+                        name,
                     });
                 }
             }
@@ -262,6 +272,7 @@ fn messages_from_branch(branch: &[&Value]) -> Vec<SessionMessage> {
                     role: role.into(),
                     content: text,
                     ts,
+                    name: None,
                 });
             }
         }

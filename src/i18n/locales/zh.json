@@ -50,7 +50,7 @@
     "willRestoreTitle": "解除绑定会把接入方式恢复到绑定前：",
     "generic": "将移除 Ofox 写入的地址、密钥和模型，恢复绑定前的配置。",
     "keepNotice": "MCP、skills、插件等其它配置不受影响。",
-    "forceRestoreNotice": "绑定期间手动改过的这些设置，也会恢复为绑定前的值。",
+    "forceRestoreNotice": "Ofox 写入的设置会移除或恢复为绑定前的值；绑定后你自己改过的设置会保留。",
     "legacyNotice": "该工具在旧版本中绑定，没有保存绑定前的配置。解除绑定会移除 Ofox 写入的地址、密钥和模型，并恢复工具默认的登录方式；原有的自定义配置无法自动恢复。",
     "sharedNotice": "{{others}} 仍在使用 Ofox，共用的 ~/.codex 配置会保留，等它也解除绑定后再恢复。",
     "nothingToRestore": "没有发现 Ofox 写入的配置，解除绑定只会把它从列表中移除。",
@@ -65,7 +65,8 @@
       "fileKeptHasOtherContent": "Ofox 新建的配置文件里有你后来添加的内容，文件已保留。",
       "recordCleanupFailed": "绑定记录清理失败，绑定已保留，请重试。",
       "leftoverRemoved": "另一个位置也有 Ofox 的配置，已一并清除。",
-      "configAlreadyMissing": "配置已删除，不再恢复。"
+      "configAlreadyMissing": "配置已删除，不再恢复。",
+      "userValueKept": "绑定后你改过的设置保持不变：{{keys}}"
     }
   },
   "apexSwitch": {
@@ -197,7 +198,7 @@
       "failed": "升级失败，请查看日志后重试"
     },
     "updateTo": "升级到 v{{version}}",
-    "manyAvailable": "{{count}} 个工具有新版本：{{names}}",
+    "manyAvailable": "{{count}} 个工具有更新：{{names}}",
     "batchProgress": "正在升级 {{tool}}…（{{index}}/{{count}}）",
     "updatedTo": "{{tool}} 已升级到 v{{version}}",
     "updatedFromTo": "{{tool}} 已升级：v{{from}} → v{{to}}",
@@ -1012,7 +1013,31 @@
     "balanceNoData": "余额已刷新，但暂无可用数据",
     "balanceRefreshFailed": "余额刷新失败，请稍后重试",
     "listRefreshed": "已刷新",
-    "listRefreshFailed": "刷新失败：{{error}}"
+    "listRefreshFailed": "刷新失败：{{error}}",
+    "profiles": {
+      "menu": "方案",
+      "loading": "正在读取方案…",
+      "empty": "还没有方案",
+      "toolCount": "{{count}} 个工具",
+      "capture": "保存当前组合…",
+      "manage": "管理方案…"
+    },
+    "balance": {
+      "label": "OFOX 账户余额",
+      "topUp": "充值",
+      "userFallback": "用户",
+      "loadingName": "加载中…",
+      "loadingUser": "正在加载用户信息…",
+      "loadingUserAttempt": "正在加载用户信息（{{attempt}}/3）",
+      "loadFailed": "无法加载用户信息，点击重试"
+    },
+    "tools": {
+      "title": "已绑定的工具",
+      "add": "添加",
+      "loading": "正在加载…",
+      "empty": "暂无绑定的工具",
+      "refreshing": "刷新中…"
+    }
   },
   "providerForm": {
     "supplierName": "供应商名称",
@@ -2842,13 +2867,20 @@
       "unknown": "无法读取绑定配置。你仍可解除绑定或稍后重试。"
     },
     "versionUnknown": "已安装 · 版本未知",
-    "noInstallationDetected": "未检测到安装"
+    "noInstallationDetected": "未检测到安装",
+    "more": "更多操作",
+    "installedVia": "通过 {{method}} 安装",
+    "installMethod": {
+      "homebrew": "Homebrew",
+      "npm": "npm",
+      "pnpm": "pnpm",
+      "native": "官方安装程序",
+      "sparkle": "官网安装包",
+      "msstore": "Microsoft Store"
+    }
   },
   "modelExperience": {
     "multiDescription": "保存一组模型，顺序按选择顺序保留。工具内可在这组模型间切换。",
-    "nav": {
-      "profiles": "模型方案"
-    },
     "loading": "正在读取模型状态…",
     "stateFailed": "无法读取模型状态",
     "retry": "重试",
@@ -2960,7 +2992,43 @@
     "exported": "Markdown 已导出",
     "commandCopied": "续聊命令已复制",
     "subagents": "包含 {{count}} 个子 Agent",
-    "fileTrashUnavailable": "此来源暂不支持安全文件回收。"
+    "fileTrashUnavailable": "此来源暂不支持安全文件回收。",
+    "filter": "筛选会话",
+    "untitled": "无标题",
+    "messageCount": "{{count}} 条消息",
+    "selectFolder": "选择 {{project}} 中的全部会话",
+    "selectAll": "选择全部显示的会话",
+    "sessionCount": "{{count}} 个会话",
+    "selectedCount": "已选 {{count}} 个",
+    "showRemaining": "显示其余 {{count}} 个",
+    "moreCount": "还有 {{count}} 个",
+    "estimated": "按 OFox 价格估算；缓存读取与写入单列",
+    "tokenShort": "输入 {{input}} · 输出 {{output}} · 缓存 {{cache}}",
+    "tokenDetails": "输入 {{input}} · 输出 {{output}} · 缓存 {{cache}} · 写入 {{write}}",
+    "time": "时间",
+    "folder": "文件夹",
+    "id": "会话 ID",
+    "copyId": "复制会话 ID",
+    "files": "文件",
+    "viewContent": "查看会话",
+    "hideContent": "收起会话",
+    "expandText": "显示全部",
+    "collapseText": "收起",
+    "emptyContent": "暂无可显示的内容",
+    "deletedCount": "{{count}} 个已删除会话",
+    "deletedAt": "删除于 {{ago}}",
+    "clearTrash": "清空回收站",
+    "purgeManyConfirm": "永久清除 {{count}} 个会话及其附属文件？此操作无法撤销。",
+    "roles": {
+      "user": "用户",
+      "assistant": "助手",
+      "thinking": "思考",
+      "tool_call": "工具调用",
+      "tool": "工具结果",
+      "command": "命令",
+      "command_output": "命令输出",
+      "system": "系统"
+    }
   },
   "modelProfiles": {
     "reasonNotInstalled": "工具未安装，已跳过。",

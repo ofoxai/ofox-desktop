@@ -5,7 +5,9 @@ use serde_json::Value;
 
 use super::json_file::{self, JsonPath, KeyStyle};
 use super::plan::read_text;
-use super::{env_file, file_locks, load_record, rollback_with, Tool, BIND_LOCK};
+use super::{
+    env_file, file_locks, load_record, read_leaves, record_written, rollback_with, Tool, BIND_LOCK,
+};
 use crate::config::FileTxn;
 use crate::database::Database;
 
@@ -255,6 +257,10 @@ fn reconcile_tool(db: &Database, tool: Tool) -> Result<bool, String> {
     if updated.is_none() && live.is_none() {
         return Ok(false);
     }
+    let before = match live {
+        Some(_) => Some(read_leaves(tool).map_err(|_| CONFLICT.to_string())?),
+        None => None,
+    };
     let mut txn = FileTxn::new();
     if let Some(text) = live.as_deref() {
         if txn.write(&path, text.as_bytes()).is_err() {
@@ -266,6 +272,25 @@ fn reconcile_tool(db: &Database, tool: Tool) -> Result<bool, String> {
             .update_provider_settings_config(tool.app().as_str(), tool.provider_id(), updated)
             .is_err()
         {
+            return Err(rollback_with(txn, CONFLICT.into()));
+        }
+    }
+    // The new endpoint is what OFox wrote now; a record that cannot say so
+    // must not outlive the files and template it describes.
+    if let Some(before) = before {
+        if record_written(db, tool, &before).is_err() {
+            if updated.is_some() {
+                if let Err(error) = db.update_provider_settings_config(
+                    tool.app().as_str(),
+                    tool.provider_id(),
+                    &provider.settings_config,
+                ) {
+                    log::warn!(
+                        "[ofox_bind] {} 区域同步失败后还原模板也失败：{error}",
+                        tool.label()
+                    );
+                }
+            }
             return Err(rollback_with(txn, CONFLICT.into()));
         }
     }

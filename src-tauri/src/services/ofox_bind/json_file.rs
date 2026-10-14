@@ -2,10 +2,13 @@
 //! JSON5）的字段级绑定与还原。写回时只重写有变化的顶层段落，其余段落的注释和格式
 //! 原样保留（见 [`crate::json5_sections`]）。
 
+use std::collections::BTreeSet;
+
 use serde_json::{Map, Value};
 
 pub(crate) use crate::json5_sections::KeyStyle;
 
+use super::ownership::{self, Leaf, Leaves};
 use super::plan::RestorePlan;
 
 /// 从根对象出发的字段路径，例如 `["env", "ANTHROPIC_BASE_URL"]`。
@@ -20,7 +23,12 @@ pub(crate) fn parse_object(text: Option<&str>, label: &str) -> Result<Value, Str
     }
     let value: Value = serde_json::from_str(text)
         .or_else(|error| json5::from_str(text).map_err(|_| error))
-        .map_err(|e| format!("{label} 不是有效的 JSON，请先修复后再操作：{e}"))?;
+        .map_err(|e| {
+            format!(
+                "{label} 不是有效的 JSON，请先修复后再操作：{}",
+                crate::redact::describe_json_error(&e)
+            )
+        })?;
     if value.is_object() {
         Ok(value)
     } else {
@@ -34,9 +42,12 @@ pub(crate) fn parse_object(text: Option<&str>, label: &str) -> Result<Value, Str
 /// 文件拒绝绑定。
 pub(crate) fn validate(text: &str, label: &str) -> Result<(), String> {
     parse_object(Some(text), label)?;
-    crate::json5_sections::parse(text)
-        .map(drop)
-        .map_err(|e| format!("{label} 解析失败，请先修复后再操作：{e}"))
+    crate::json5_sections::parse(text).map(drop).map_err(|e| {
+        format!(
+            "{label} 解析失败，请先修复后再操作：{}",
+            crate::redact::scrub(&e.to_string())
+        )
+    })
 }
 
 pub(crate) fn get(value: &Value, path: JsonPath) -> Option<&Value> {
@@ -105,6 +116,11 @@ pub(crate) fn remove(value: &mut Value, path: JsonPath) -> bool {
         .is_some_and(|object| object.remove(*last).is_some())
 }
 
+/// 文件里各受管字段现在的值。
+pub(crate) fn leaves(text: Option<&str>, label: &str, leaves: &[Leaf]) -> Result<Leaves, String> {
+    Ok(ownership::leaves_at(&parse_object(text, label)?, leaves))
+}
+
 /// 按绑定前的值还原后的结果，以及还原 / 删除了哪些字段。
 pub(crate) struct Restored {
     pub value: Value,
@@ -112,26 +128,27 @@ pub(crate) struct Restored {
     pub removed_keys: Vec<String>,
 }
 
-/// 受管字段一律还原成绑定前的值（原来没有就删掉）；`containers` 里的对象只在
-/// 绑定前不存在、现在又空了时删除（按给定顺序，先深后浅）。
+/// 受管字段还原成绑定前的值（原来没有就删掉），`keep` 里的（用户改过的）除外；
+/// `containers` 里的对象只在绑定前不存在、现在又空了时删除（按给定顺序，先深后浅）。
 pub(crate) fn restore_value(
     original: &Value,
     current: &Value,
-    leaves: &[JsonPath],
+    leaves: &[Leaf],
     containers: &[JsonPath],
+    keep: &BTreeSet<String>,
 ) -> Restored {
     let mut value = current.clone();
     let mut restored_keys = Vec::new();
     let mut removed_keys = Vec::new();
-    for leaf in leaves {
-        match get(original, leaf) {
+    for leaf in leaves.iter().filter(|leaf| !keep.contains(&leaf.id())) {
+        match get(original, leaf.path) {
             Some(item) => {
-                set(&mut value, leaf, item.clone());
-                restored_keys.push(leaf.join("."));
+                set(&mut value, leaf.path, item.clone());
+                restored_keys.push(leaf.id());
             }
             None => {
-                if remove(&mut value, leaf) {
-                    removed_keys.push(leaf.join("."));
+                if remove(&mut value, leaf.path) {
+                    removed_keys.push(leaf.id());
                 }
             }
         }
@@ -192,18 +209,20 @@ pub(crate) fn plan_restore(
     current: Option<&str>,
     label: &str,
     style: KeyStyle,
-    leaves: &[JsonPath],
+    leaves: &[Leaf],
     containers: &[JsonPath],
+    keep: &BTreeSet<String>,
 ) -> Result<RestorePlan, String> {
     let original_value = parse_object(original, label)?;
     let current_value = parse_object(current, label)?;
-    let restored = restore_value(&original_value, &current_value, leaves, containers);
+    let restored = restore_value(&original_value, &current_value, leaves, containers, keep);
     if restored.value == original_value {
         return Ok(RestorePlan {
             content: original.map(str::to_string),
             exact: true,
             restored_keys: restored.restored_keys,
             removed_keys: restored.removed_keys,
+            kept_keys: Vec::new(),
         });
     }
     let mut text = current.unwrap_or_default().to_string();
@@ -222,6 +241,7 @@ pub(crate) fn plan_restore(
         exact: false,
         restored_keys: restored.restored_keys,
         removed_keys: restored.removed_keys,
+        kept_keys: Vec::new(),
     })
 }
 
@@ -229,8 +249,22 @@ pub(crate) fn plan_restore(
 mod tests {
     use super::*;
 
-    const LEAVES: &[JsonPath] = &[&["env", "BASE"], &["env", "TOKEN"]];
+    const LEAVES: &[Leaf] = &[
+        Leaf::route(&["env", "BASE"], ownership::ofox_url),
+        Leaf::route(&["env", "TOKEN"], ownership::ofox_key),
+    ];
     const CONTAINERS: &[JsonPath] = &[&["env"]];
+
+    #[test]
+    fn unparseable_json_error_keeps_the_position_and_never_echoes_the_key_in_it() {
+        let broken = r#"{"env": {"TOKEN": "sk-of-abc123456789" oops}}"#;
+
+        let error = parse_object(Some(broken), "settings.json").unwrap_err();
+
+        assert!(error.contains("settings.json"), "{error}");
+        assert!(error.contains("line 1, column"), "{error}");
+        assert!(!error.contains("abc123456789"), "{error}");
+    }
 
     #[test]
     fn restores_original_bytes_when_only_managed_fields_changed() {
@@ -243,6 +277,7 @@ mod tests {
             KeyStyle::Json,
             LEAVES,
             CONTAINERS,
+            &BTreeSet::new(),
         )
         .unwrap();
         assert!(plan.exact);
@@ -260,6 +295,7 @@ mod tests {
             KeyStyle::Json,
             LEAVES,
             CONTAINERS,
+            &BTreeSet::new(),
         )
         .unwrap();
         let value: Value = serde_json::from_str(plan.content.as_deref().unwrap()).unwrap();
@@ -277,6 +313,7 @@ mod tests {
             KeyStyle::Json,
             LEAVES,
             CONTAINERS,
+            &BTreeSet::new(),
         )
         .unwrap();
         assert_eq!(plan.content, None);
@@ -293,6 +330,7 @@ mod tests {
             KeyStyle::Json,
             LEAVES,
             CONTAINERS,
+            &BTreeSet::new(),
         )
         .unwrap();
         assert!(!plan.exact);

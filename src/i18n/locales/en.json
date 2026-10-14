@@ -50,7 +50,7 @@
     "willRestoreTitle": "Unbinding restores how this tool connected before Ofox:",
     "generic": "Ofox's address, key and model will be removed and your previous setup restored.",
     "keepNotice": "MCP servers, skills, plugins and other settings are kept.",
-    "forceRestoreNotice": "These settings return to their pre-Ofox values even if you changed them while bound.",
+    "forceRestoreNotice": "Settings Ofox wrote are removed or returned to their pre-Ofox values; settings you changed yourself after binding are kept.",
     "legacyNotice": "This tool was bound by an older version, so its original settings weren't saved. Unbinding removes Ofox's address, key and model and returns the tool to its default sign-in; your earlier custom settings can't be restored.",
     "sharedNotice": "{{others}} still uses Ofox, so the shared ~/.codex config stays until it is unbound too.",
     "nothingToRestore": "No Ofox configuration was found; unbinding only removes it from the list.",
@@ -65,7 +65,8 @@
       "fileKeptHasOtherContent": "A config file Ofox created now has content you added, so it was kept.",
       "recordCleanupFailed": "Failed to remove the binding record. The binding is retained; retry.",
       "leftoverRemoved": "Ofox settings were also found in another location and have been removed.",
-      "configAlreadyMissing": "Configuration was deleted and will not be recreated."
+      "configAlreadyMissing": "Configuration was deleted and will not be recreated.",
+      "userValueKept": "Settings you changed after binding stay as you set them: {{keys}}"
     }
   },
   "apexSwitch": {
@@ -1012,7 +1013,31 @@
     "balanceNoData": "Balance refreshed, but no figure is available yet",
     "balanceRefreshFailed": "Couldn't refresh the balance. Try again later",
     "listRefreshed": "Refreshed",
-    "listRefreshFailed": "Refresh failed: {{error}}"
+    "listRefreshFailed": "Refresh failed: {{error}}",
+    "profiles": {
+      "menu": "Profiles",
+      "loading": "Loading profiles…",
+      "empty": "No profiles yet",
+      "toolCount": "{{count}} tools",
+      "capture": "Save current combination…",
+      "manage": "Manage profiles…"
+    },
+    "balance": {
+      "label": "OFOX balance",
+      "topUp": "Top up",
+      "userFallback": "User",
+      "loadingName": "Loading…",
+      "loadingUser": "Loading your account…",
+      "loadingUserAttempt": "Loading your account ({{attempt}}/3)",
+      "loadFailed": "Couldn't load your account. Click to retry"
+    },
+    "tools": {
+      "title": "Bound tools",
+      "add": "Add",
+      "loading": "Loading…",
+      "empty": "No tools bound yet",
+      "refreshing": "Refreshing…"
+    }
   },
   "providerForm": {
     "supplierName": "Provider Name",
@@ -2842,13 +2867,20 @@
       "unknown": "Binding configuration could not be read. You can still unbind or retry later."
     },
     "versionUnknown": "Installed · Version unknown",
-    "noInstallationDetected": "No installation detected"
+    "noInstallationDetected": "No installation detected",
+    "more": "More actions",
+    "installedVia": "Installed with {{method}}",
+    "installMethod": {
+      "homebrew": "Homebrew",
+      "npm": "npm",
+      "pnpm": "pnpm",
+      "native": "the official installer",
+      "sparkle": "the download from its website",
+      "msstore": "the Microsoft Store"
+    }
   },
   "modelExperience": {
     "multiDescription": "Save a model set in selection order. Switch among these models inside the tool.",
-    "nav": {
-      "profiles": "Model profiles"
-    },
     "loading": "Loading model state…",
     "stateFailed": "Unable to read model state",
     "retry": "Retry",
@@ -2960,7 +2992,43 @@
     "exported": "Markdown exported",
     "commandCopied": "Resume command copied",
     "subagents": "Includes {{count}} subagents",
-    "fileTrashUnavailable": "Safe file trash is unavailable for this source."
+    "fileTrashUnavailable": "Safe file trash is unavailable for this source.",
+    "filter": "Filter sessions",
+    "untitled": "Untitled",
+    "messageCount": "{{count}} messages",
+    "selectFolder": "Select all sessions in {{project}}",
+    "selectAll": "Select all displayed sessions",
+    "sessionCount": "{{count}} sessions",
+    "selectedCount": "{{count}} selected",
+    "showRemaining": "Show remaining {{count}}",
+    "moreCount": "{{count}} more",
+    "estimated": "Estimated using OFox prices; cache reads and writes shown separately",
+    "tokenShort": "In {{input}} · Out {{output}} · Cache {{cache}}",
+    "tokenDetails": "In {{input}} · Out {{output}} · Cache {{cache}} · Write {{write}}",
+    "time": "Time",
+    "folder": "Folder",
+    "id": "Session ID",
+    "copyId": "Copy session ID",
+    "files": "Files",
+    "viewContent": "View conversation",
+    "hideContent": "Hide conversation",
+    "expandText": "Show all",
+    "collapseText": "Collapse",
+    "emptyContent": "No content to display",
+    "deletedCount": "{{count}} deleted sessions",
+    "deletedAt": "Deleted {{ago}}",
+    "clearTrash": "Empty trash",
+    "purgeManyConfirm": "Permanently delete {{count}} sessions and their files? This cannot be undone.",
+    "roles": {
+      "user": "User",
+      "assistant": "Assistant",
+      "thinking": "Thinking",
+      "tool_call": "Tool call",
+      "tool": "Tool result",
+      "command": "Command",
+      "command_output": "Command output",
+      "system": "System"
+    }
   },
   "modelProfiles": {
     "reasonNotInstalled": "Tool is not installed; skipped.",

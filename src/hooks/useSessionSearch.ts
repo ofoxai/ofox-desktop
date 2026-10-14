@@ -1,5 +1,6 @@
 import { useCallback, useMemo } from "react";
 import FlexSearch from "flexsearch";
+import { sessionModelNames } from "@/lib/api/sessions";
 import type { SessionMeta } from "@/types";
 
 interface UseSessionSearchOptions {
@@ -38,7 +39,7 @@ export function useSessionSearch({
         session.summary,
         session.projectDir,
         session.sourcePath,
-        ...((session as SessionMeta & { models?: string[] }).models ?? []),
+        ...sessionModelNames(session),
       ]
         .filter(Boolean)
         .join(" ");
