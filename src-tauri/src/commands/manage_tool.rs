@@ -28,6 +28,7 @@ use tokio::sync::RwLock;
 use crate::app_config::{AppType, BindableTool};
 use crate::commands::ofox_auth::OfoxAuthState;
 use crate::ofox_apex::gateway_base;
+use crate::ofox_api_keys::ApiKeyError;
 use crate::ofox_auth::OfoxAuthManager;
 use crate::store::AppState;
 
@@ -294,7 +295,7 @@ pub async fn set_active_ofox_model(
             &ofox_state.0,
         )
         .await
-        .map_err(|e| format!("获取 WorkBuddy OfoxAI API key 失败: {e}"))?;
+        .map_err(|e| api_key_failure("获取 WorkBuddy OfoxAI API key 失败: ", &e))?;
         crate::workbuddy_config::update_selected_models(&state.db, &api_key, &[selection])
             .await
             .map_err(crate::redact::scrub_error)?;
@@ -650,6 +651,11 @@ pub async fn set_active_ofox_models(
     })
 }
 
+/// 取 key 失败的提示。服务端的拒绝文案里可能回显请求里的 key，抹掉再给前端。
+fn api_key_failure(context: &str, error: &ApiKeyError) -> String {
+    crate::redact::scrub_error(format!("{context}{error}"))
+}
+
 fn require_configured(
     health: crate::services::ofox_bind::status::ToolBindingStatus,
 ) -> Result<(), String> {
@@ -958,9 +964,12 @@ fn set_codex_model(settings: &mut serde_json::Value, model: &str) -> Result<(), 
     let mut doc = if cfg_text.is_empty() {
         DocumentMut::new()
     } else {
-        cfg_text
-            .parse::<DocumentMut>()
-            .map_err(|e| format!("解析 Codex config TOML 失败: {e}"))?
+        cfg_text.parse::<DocumentMut>().map_err(|e| {
+            format!(
+                "解析 Codex config TOML 失败: {}",
+                crate::redact::describe_toml_error(&cfg_text, &e)
+            )
+        })?
     };
 
     if model.is_empty() {
@@ -1118,6 +1127,34 @@ mod tests {
             ping_failure_message(400, r#"{"message":"bad request"}"#),
             "请求失败（HTTP 400）bad request"
         );
+    }
+
+    #[test]
+    fn a_broken_codex_config_error_never_echoes_the_key_in_it() {
+        let broken = "model = \"gpt-5\"\nexperimental_bearer_token = \"sk-of-abc123456789\" oops\n";
+        let mut settings = serde_json::json!({ "config": broken });
+
+        let error = write_model_into_settings(&AppType::Codex, &mut settings, "gpt-6").unwrap_err();
+
+        assert!(error.contains("line 2, column"), "{error}");
+        assert!(!error.contains("abc123456789"), "{error}");
+        assert_eq!(settings["config"], broken, "settings left untouched");
+    }
+
+    #[test]
+    fn key_fetch_failures_never_repeat_a_key_the_server_echoes_back() {
+        let rejected = ApiKeyError::RemoteRejected("400: bad key sk-of-abc123456789".into());
+        let unauthorized = ApiKeyError::Unauthorized("Bearer abcdefgh12345678 expired".into());
+
+        for error in [rejected, unauthorized] {
+            let message = api_key_failure("获取 OfoxAI API key 失败：", &error);
+            assert!(
+                message.starts_with("获取 OfoxAI API key 失败："),
+                "{message}"
+            );
+            assert!(!message.contains("abc123456789"), "{message}");
+            assert!(!message.contains("abcdefgh12345678"), "{message}");
+        }
     }
 
     #[test]
@@ -1404,7 +1441,10 @@ async fn ofox_ping_model_internal(
                     success: false,
                     latency_ms: 0,
                     status_code: Some(401),
-                    error: Some(format!("获取 WorkBuddy OfoxAI API key 失败：{error}")),
+                    error: Some(api_key_failure(
+                        "获取 WorkBuddy OfoxAI API key 失败：",
+                        &error,
+                    )),
                 };
             }
         };
@@ -1513,7 +1553,7 @@ async fn ofox_ping_model_internal(
                     success: false,
                     latency_ms: 0,
                     status_code: Some(401),
-                    error: Some(format!("获取 OfoxAI API key 失败：{e}")),
+                    error: Some(api_key_failure("获取 OfoxAI API key 失败：", &e)),
                 };
             }
         }

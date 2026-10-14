@@ -1703,7 +1703,12 @@ impl ProxyService {
         } else {
             target_config
                 .parse::<toml_edit::DocumentMut>()
-                .map_err(|e| format!("解析新的 Codex config.toml 失败: {e}"))?
+                .map_err(|e| {
+                    format!(
+                        "解析新的 Codex config.toml 失败: {}",
+                        crate::redact::describe_toml_error(target_config, &e)
+                    )
+                })?
         };
 
         let existing_config = existing_backup
@@ -1717,7 +1722,12 @@ impl ProxyService {
 
         let existing_doc = existing_config
             .parse::<toml_edit::DocumentMut>()
-            .map_err(|e| format!("解析现有 Codex 备份失败: {e}"))?;
+            .map_err(|e| {
+                format!(
+                    "解析现有 Codex 备份失败: {}",
+                    crate::redact::describe_toml_error(existing_config, &e)
+                )
+            })?;
 
         if let Some(existing_mcp_servers) = existing_doc.get("mcp_servers") {
             match target_doc.get_mut("mcp_servers") {
@@ -2103,6 +2113,30 @@ model = "gpt-5.1-codex"
         );
         assert!(parsed.get("model_providers").is_none());
         assert_eq!(output.trim(), input.trim());
+    }
+
+    #[test]
+    fn broken_codex_config_errors_never_echo_the_key_in_them() {
+        let broken = "model = \"gpt-5\"\nexperimental_bearer_token = \"sk-of-abc123456789\" oops\n";
+
+        let mut target = json!({ "config": broken });
+        let new_error = ProxyService::preserve_codex_mcp_servers_in_backup(
+            &mut target,
+            &json!({ "config": "" }),
+        )
+        .unwrap_err();
+
+        let mut target = json!({ "config": "model = \"gpt-6\"\n" });
+        let existing_error = ProxyService::preserve_codex_mcp_servers_in_backup(
+            &mut target,
+            &json!({ "config": broken }),
+        )
+        .unwrap_err();
+
+        for error in [new_error, existing_error] {
+            assert!(error.contains("line 2, column"), "{error}");
+            assert!(!error.contains("abc123456789"), "{error}");
+        }
     }
 
     #[tokio::test]

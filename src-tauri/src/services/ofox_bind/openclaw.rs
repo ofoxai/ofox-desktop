@@ -105,8 +105,14 @@ pub(crate) fn bound_config(
         .is_some_and(|primary| primary.starts_with(&format!("{PROVIDER_ID}/")));
     if let Some(model_id) = first_model_id(&entry).filter(|_| select_route || !routed_to_ofox) {
         let mut default = match json_file::get(&after, DEFAULT_MODEL) {
-            Some(value) => serde_json::from_value::<OpenClawDefaultModel>(value.clone())
-                .map_err(|e| format!("解析 OpenClaw 默认模型失败：{e}"))?,
+            Some(value) => {
+                serde_json::from_value::<OpenClawDefaultModel>(value.clone()).map_err(|e| {
+                    format!(
+                        "解析 OpenClaw 默认模型失败：{}",
+                        crate::redact::describe_json_error(&e)
+                    )
+                })?
+            }
             None => OpenClawDefaultModel {
                 primary: String::new(),
                 fallbacks: Vec::new(),
@@ -232,6 +238,22 @@ mod tests {
             "api": "openai-completions",
             "models": models,
         })
+    }
+
+    #[test]
+    fn a_malformed_default_model_error_never_echoes_the_value_in_it() {
+        let current = "{ agents: { defaults: { model: 'sk-of-abc123456789' } } }";
+
+        let error = bound_config(
+            Some(current),
+            &template(Some("openai/gpt-x")),
+            "sk-of-K",
+            true,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("invalid type"), "{error}");
+        assert!(!error.contains("abc123456789"), "{error}");
     }
 
     #[test]
