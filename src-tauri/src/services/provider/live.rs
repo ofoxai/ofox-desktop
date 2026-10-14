@@ -7,7 +7,7 @@ use toml_edit::{DocumentMut, Item, TableLike};
 
 use crate::app_config::AppType;
 use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
-use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
+use crate::config::{get_claude_settings_path, read_json_file, write_json_file, write_text_file};
 use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::Provider;
@@ -620,7 +620,7 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
             let auth_path = get_codex_auth_path();
             write_json_file(&auth_path, auth)?;
             let config_path = get_codex_config_path();
-            std::fs::write(&config_path, config_str).map_err(|e| AppError::io(&config_path, e))?;
+            write_text_file(&config_path, config_str)?;
         }
         AppType::Gemini => {
             // Delegate to write_gemini_live which handles env file writing correctly
@@ -1360,6 +1360,30 @@ pub fn remove_openclaw_provider_from_live(provider_id: &str) -> Result<(), AppEr
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn the_codex_live_snapshot_creates_config_toml_private_and_without_leftovers() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let provider = Provider::with_id(
+            "codex-test".to_string(),
+            "Codex Test".to_string(),
+            json!({ "auth": { "OPENAI_API_KEY": "sk-test" }, "config": "model = \"new\"\n" }),
+            None,
+        );
+
+        write_live_snapshot(&AppType::Codex, &provider).unwrap();
+
+        let config = get_codex_config_path();
+        assert_eq!(crate::config::file_mode(&config), Some(0o600));
+        let mut names: Vec<_> = std::fs::read_dir(config.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["auth.json", "config.toml"]);
+    }
 
     #[test]
     fn claude_common_config_apply_and_remove_roundtrip_for_non_overlapping_fields() {
