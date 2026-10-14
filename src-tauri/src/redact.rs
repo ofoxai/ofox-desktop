@@ -43,6 +43,8 @@ static BEARER: Lazy<Regex> = Lazy::new(|| {
 /// 写法有 `k=v`、`k: v`、`"k": "v"`（含 JSON 被转义进字符串里的 `\"k\": \"v\"`）。
 /// 值是带引号的整段，或不带引号时到空白、引号、`& , ; ) } ]` 为止；不带引号的值前面
 /// 可以有 `Bearer ` / `Basic ` 这样的认证方案，方案保留、后面的凭据抹掉。
+/// 开引号后没有闭引号的（日志里被截断的 JSON、写了一半的行）整段抹到行尾：宁可多抹，
+/// 不能因为引号没闭上就原样放过。空值 `""` 不算，不会连累后面的内容。
 static KEY_VALUE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(concat!(
         r#"(?i)(?P<name>(?:api[_-]?key|token|secret|password|authorization)[A-Za-z0-9_.-]*"#,
@@ -50,10 +52,23 @@ static KEY_VALUE: Lazy<Regex> = Lazy::new(|| {
         r#"(?:"(?P<dq>(?:[^"\\\n]|\\.)+)""#,
         r#"|\\"(?P<edq>(?:[^"\\\n]|\\[^"])+)\\""#,
         r#"|'(?P<sq>[^'\n]+)'"#,
+        r#"|"(?P<udq>(?:[^"\\\n]|\\.)+)(?m:$)"#,
+        r#"|\\"(?P<uedq>(?:[^"\\\n]|\\[^"])+)(?m:$)"#,
+        r#"|'(?P<usq>[^'\n]+)(?m:$)"#,
         r#"|(?P<scheme>(?:bearer|basic)[ \t]+)?(?P<bare>[^\s"',;&)}\]\\]+))"#,
     ))
     .expect("key-value pattern")
 });
+
+/// 带引号的值各写法：(分组名, 开引号, 闭引号)。后三个是没闭上引号的，输出也不补闭引号。
+const QUOTED_VALUES: [(&str, &str, &str); 6] = [
+    ("dq", r#"""#, r#"""#),
+    ("edq", r#"\""#, r#"\""#),
+    ("sq", "'", "'"),
+    ("udq", r#"""#, ""),
+    ("uedq", r#"\""#, ""),
+    ("usq", "'", ""),
+];
 
 /// 抹掉 `s` 里的 OFox / Anthropic / 通用 `sk-` / Google / Groq key、Bearer 令牌、JWT，以及名字像
 /// `api_key` / `token` / `secret` / `password` / `authorization` 的键值对里的值。
@@ -87,25 +102,21 @@ fn replace(text: &mut Cow<'_, str>, pattern: &Regex, with: impl Fn(&Captures) ->
 
 fn redact_key_value(caps: &Captures) -> String {
     let name = &caps["name"];
-    let (value, quote) = if let Some(value) = caps.name("dq") {
-        (value.as_str(), r#"""#)
-    } else if let Some(value) = caps.name("edq") {
-        (value.as_str(), r#"\""#)
-    } else if let Some(value) = caps.name("sq") {
-        (value.as_str(), "'")
-    } else {
-        let scheme = caps.name("scheme").map_or("", |m| m.as_str());
-        return redact_value(caps, &caps["bare"], &format!("{name}{scheme}"), "");
-    };
-    redact_value(caps, value, name, quote)
+    for (group, open, close) in QUOTED_VALUES {
+        if let Some(value) = caps.name(group) {
+            return redact_value(caps, value.as_str(), &format!("{name}{open}"), close);
+        }
+    }
+    let scheme = caps.name("scheme").map_or("", |m| m.as_str());
+    redact_value(caps, &caps["bare"], &format!("{name}{scheme}"), "")
 }
 
-/// `{prefix}{quote}«redacted»{quote}`；值已经是占位文字时原样留下（再抹一遍结果一样，不必改写）。
-fn redact_value(caps: &Captures, value: &str, prefix: &str, quote: &str) -> String {
+/// `{prefix}«redacted»{suffix}`；值已经是占位文字时原样留下（再抹一遍结果一样，不必改写）。
+fn redact_value(caps: &Captures, value: &str, prefix: &str, suffix: &str) -> String {
     if value == REDACTED {
         caps[0].to_string()
     } else {
-        format!("{prefix}{quote}{REDACTED}{quote}")
+        format!("{prefix}{REDACTED}{suffix}")
     }
 }
 
@@ -347,6 +358,38 @@ mod tests {
         ] {
             assert_scrubs(input, expected);
         }
+    }
+
+    #[test]
+    fn unterminated_quoted_values_are_redacted_to_the_end_of_the_line() {
+        for (input, expected) in [
+            (
+                r#"{"api_key": "abcdef0123456789zzz"#,
+                r#"{"api_key": "«redacted»"#,
+            ),
+            (r#"token="abc def"#, r#"token="«redacted»"#),
+            ("password: 'p w", "password: '«redacted»"),
+            (
+                r#"{\"token\": \"abcdef0123456789"#,
+                r#"{\"token\": \"«redacted»"#,
+            ),
+            (r#""api_key": "abc\"def"#, r#""api_key": "«redacted»"#),
+            (
+                "\"token\": \"abc 123\nnext \"line\" stays",
+                "\"token\": \"«redacted»\nnext \"line\" stays",
+            ),
+        ] {
+            assert_scrubs(input, expected);
+        }
+    }
+
+    #[test]
+    fn an_empty_value_does_not_swallow_the_rest_of_the_line() {
+        assert_scrubs(
+            r#"{"token": "", "name": "visible"}"#,
+            r#"{"token": "", "name": "visible"}"#,
+        );
+        assert_scrubs(r#"token='' other='x'"#, r#"token='' other='x'"#);
     }
 
     #[test]
