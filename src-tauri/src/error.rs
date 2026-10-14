@@ -115,9 +115,10 @@ impl From<rusqlite::Error> for AppError {
     }
 }
 
+// 错误到 UI 的出口：任何变体里带着的 key（比如服务端把请求里的 key 回显在报错里）在这里抹掉。
 impl From<AppError> for String {
     fn from(err: AppError) -> Self {
-        err.to_string()
+        crate::redact::scrub(&err.to_string()).into_owned()
     }
 }
 
@@ -126,7 +127,7 @@ impl serde::Serialize for AppError {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(&self.to_string())
+        serializer.serialize_str(&crate::redact::scrub(&self.to_string()))
     }
 }
 
@@ -184,5 +185,19 @@ mod tests {
 
         assert!(error.contains("auth.json"), "{error}");
         assert!(!error.contains("abc123456789"), "{error}");
+    }
+
+    #[test]
+    fn errors_sent_to_the_ui_are_scrubbed() {
+        let error = AppError::HttpStatus {
+            status: 401,
+            body: "bad key sk-of-abc123456789".into(),
+        };
+
+        let as_string = String::from(AppError::Message("Bearer abcdefgh12345678".into()));
+        let serialized = serde_json::to_string(&error).unwrap();
+
+        assert_eq!(as_string, "Bearer «redacted»");
+        assert!(!serialized.contains("abc123456789"), "{serialized}");
     }
 }
