@@ -11,6 +11,7 @@ use crate::settings;
 
 #[tauri::command]
 pub async fn get_claude_config_status() -> Result<ConfigStatus, String> {
+    crate::agent_env::ready().await;
     Ok(config::get_claude_config_status())
 }
 
@@ -120,6 +121,7 @@ pub async fn get_claude_code_config_path() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn get_config_dir(app: String) -> Result<String, String> {
+    crate::agent_env::ready().await;
     if let Some(tool) = crate::app_config::BindableTool::native(&app) {
         return Ok(crate::native_tools::config_dir(tool)?
             .to_string_lossy()
@@ -146,6 +148,7 @@ pub async fn get_config_dir(app: String) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn open_config_folder(handle: AppHandle, app: String) -> Result<bool, String> {
+    crate::agent_env::ready().await;
     let config_dir = if let Some(tool) = crate::app_config::BindableTool::native(&app) {
         crate::native_tools::config_dir(tool)?
     } else if app.trim().eq_ignore_ascii_case("workbuddy") {

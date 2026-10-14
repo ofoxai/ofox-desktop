@@ -543,6 +543,7 @@ pub(crate) async fn replace_key(
     old_key: &str,
     new_key: &str,
 ) -> Result<(), String> {
+    crate::agent_env::ready().await;
     let _guard = BIND_LOCK.lock().await;
     let _file_locks = file_locks(tool);
     let health = status::inspect(db, tool, Some(old_key))
@@ -565,6 +566,7 @@ pub(crate) async fn replace_key(
 /// 用户在 CLI 里换了模型：配置仍是 Ofox 的接入方式时，把它采纳进模板，主页显示的
 /// 模型才和实际一致。出错只记日志——这只是展示用的同步，不该让状态查询失败。
 pub(crate) async fn sync_live_model(db: &Database, tool: Tool, api_key: Option<&str>) {
+    crate::agent_env::ready().await;
     let _guard = BIND_LOCK.lock().await;
     let _file_locks = file_locks(tool);
     match status::inspect(db, tool, api_key) {
@@ -586,6 +588,7 @@ pub(crate) async fn persist_bound_settings(
     previous: &Value,
     updated: &Value,
 ) -> Result<(), String> {
+    crate::agent_env::ready().await;
     let _guard = BIND_LOCK.lock().await;
     let _file_locks = file_locks(tool);
     crate::model_selection::check_write_revision(db, tool.record_key())?;
@@ -627,6 +630,7 @@ pub(crate) async fn persist_bound_settings(
 
 /// 启动时把旧版本绑定的 Codex 迁成「服务商自带 key」，堵住 ChatGPT 令牌外发。
 pub(crate) async fn migrate_codex_on_startup() {
+    crate::agent_env::ready().await;
     let _guard = BIND_LOCK.lock().await;
     let stored_key = || {
         let slot = crate::ofox_secret::Slot::ApiKey {
@@ -674,6 +678,7 @@ async fn bind_inner(
     api_key: &str,
     require_existing: bool,
 ) -> Result<(), String> {
+    crate::agent_env::ready().await;
     let _guard = BIND_LOCK.lock().await;
     let _file_locks = file_locks(tool);
     if require_existing {
@@ -753,6 +758,7 @@ pub(crate) async fn restore_missing_binding(
     still_bound: &[String],
     api_key: &str,
 ) -> Result<(), String> {
+    crate::agent_env::ready().await;
     let _guard = BIND_LOCK.lock().await;
     let _file_locks = file_locks(tool);
     let health = status::inspect(db, tool, Some(api_key))
@@ -929,6 +935,7 @@ pub(crate) async fn unbind(
     still_bound: &[String],
     dry_run: bool,
 ) -> Result<UnbindReport, String> {
+    crate::agent_env::ready().await;
     let _guard = BIND_LOCK.lock().await;
     let mut report = UnbindReport::new(holder, dry_run);
     let stored = load_record(db, tool)?.map(|(_, record)| record);

@@ -4,6 +4,8 @@ use crate::session_manager;
 
 #[tauri::command]
 pub async fn list_sessions() -> Result<Vec<session_manager::managed::ManagedSession>, String> {
+    // Codex and Claude sessions live under CODEX_HOME / CLAUDE_CONFIG_DIR when set.
+    crate::agent_env::ready().await;
     let sessions = tauri::async_runtime::spawn_blocking(session_manager::managed::list)
         .await
         .map_err(|e| format!("Failed to scan sessions: {e}"))?;

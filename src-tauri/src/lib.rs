@@ -1,3 +1,4 @@
+mod agent_env;
 mod app_config;
 mod app_store;
 mod auto_launch;
@@ -341,6 +342,10 @@ pub fn run() {
                         .build(),
                 )?;
             }
+
+            // Ask the login shell for CODEX_HOME / CLAUDE_CONFIG_DIR in the background:
+            // everything that reads or writes those agents' files awaits the answer.
+            tauri::async_runtime::spawn(crate::agent_env::ready());
 
             // 初始化数据库
             let app_config_dir = crate::config::get_app_config_dir();
@@ -1203,6 +1208,8 @@ pub fn run() {
 
                     // 首次同步——给 UsageDashboard / tray 启动时有数据可看，
                     // 之后再要新数据需要用户主动触发。
+                    // Codex / Claude sessions may live in CODEX_HOME / CLAUDE_CONFIG_DIR.
+                    crate::agent_env::ready().await;
                     if let Err(e) =
                         crate::services::session_usage::sync_claude_session_logs(
                             &db_for_session_sync,

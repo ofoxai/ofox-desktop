@@ -37,6 +37,8 @@ impl Home {
                 Some(dir.path().join("AppData").join("Local")),
             ),
             ("APPDATA", Some(dir.path().join("AppData").join("Roaming"))),
+            ("CODEX_HOME", None),
+            ("CLAUDE_CONFIG_DIR", None),
             ("HERMES_HOME", None),
             ("XDG_STATE_HOME", None),
             ("OFOX_USE_LOCAL", None),

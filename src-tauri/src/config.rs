@@ -8,11 +8,11 @@ use crate::error::AppError;
 /// 各 agent CLI 用来改写自己配置目录的环境变量。
 ///
 /// 测试沙箱（`test_sandbox::sandbox()`，单元测试与集成测试共用）会清空这些变量：开发者 shell 里残留的任何一个都会让测试读写真实 agent
-/// 的目录。只列出确实会被读到的变量：`HERMES_HOME`、`PI_CODING_AGENT_DIR`、`DSH_HOME`
-/// 由本应用直接读取；`CODEX_HOME`、`CLAUDE_CONFIG_DIR` 由应用启动 / 探测的 Codex、
-/// Claude Code CLI 解析（也是应用要遵循的目录）。`GEMINI_CLI_HOME`、`OPENCODE_CONFIG_DIR`、
-/// `OPENCODE_CONFIG`、`WORKBUDDY_CONFIG_DIR` 目前没有任何代码读取，故不在列；
-/// 新增读取某个 agent 目录变量时，在这里补上。
+/// 的目录。只列出本应用确实会读取的变量：`CODEX_HOME`、`CLAUDE_CONFIG_DIR` 由
+/// `agent_env` 读取（进程环境，以及登录 shell / 注册表里的快照），`HERMES_HOME`、
+/// `PI_CODING_AGENT_DIR`、`DSH_HOME` 由各自的配置模块直接读取。`GEMINI_CLI_HOME`、
+/// `OPENCODE_CONFIG_DIR`、`OPENCODE_CONFIG`、`WORKBUDDY_CONFIG_DIR` 目前没有任何代码读取，
+/// 故不在列；新增读取某个 agent 目录变量时，在这里补上。
 pub const AGENT_DIR_VARS: &[&str] = &[
     "CODEX_HOME",
     "CLAUDE_CONFIG_DIR",
@@ -26,6 +26,11 @@ fn home_override() -> Option<PathBuf> {
     let home = std::env::var("CC_SWITCH_TEST_HOME").ok()?;
     let trimmed = home.trim();
     (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+}
+
+/// 是否用 `CC_SWITCH_TEST_HOME` 显式指定了 home（测试 / 调试用的隔离环境）。
+pub(crate) fn is_home_overridden() -> bool {
+    home_override().is_some()
 }
 
 #[cfg(not(test))]
@@ -77,13 +82,10 @@ pub fn get_home_dir() -> PathBuf {
     })
 }
 
-/// 获取 Claude Code 配置目录路径
+/// 获取 Claude Code 配置目录路径：设置里的覆盖目录 → `CLAUDE_CONFIG_DIR` → `~/.claude`
+/// （见 [`crate::agent_env`]）。
 pub fn get_claude_config_dir() -> PathBuf {
-    if let Some(custom) = crate::settings::get_claude_override_dir() {
-        return custom;
-    }
-
-    get_home_dir().join(".claude")
+    crate::agent_env::dir(crate::agent_env::AgentTool::Claude).dir
 }
 
 /// 默认 Claude MCP 配置文件路径 (~/.claude.json)

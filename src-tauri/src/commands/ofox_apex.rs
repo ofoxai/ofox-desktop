@@ -61,6 +61,9 @@ pub async fn ofox_get_apex_state() -> Result<ApexState, String> {
 /// cannot prevent safe migrations in another tool. The returned flag drives
 /// the renderer's region synchronization warning.
 pub(crate) async fn reconcile_tool_endpoints(db: &crate::database::Database) -> bool {
+    // Codex and Claude may live in CODEX_HOME / CLAUDE_CONFIG_DIR, known once the
+    // login shell has been asked.
+    crate::agent_env::ready().await;
     let direct = crate::services::ofox_bind::endpoint::reconcile_managed_endpoints(db).await;
     let workbuddy = crate::workbuddy_config::reconcile_managed_endpoint(db).await;
     if let Err(error) = &direct {

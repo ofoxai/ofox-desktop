@@ -438,6 +438,9 @@ pub async fn launch_tool_cli(app: AppHandle, tool_id: String) -> Result<(), Stri
     }
     let bin = resolve_cli_bin(&tool_id).ok_or_else(|| format!("工具 {tool_id} 不支持一键打开"))?;
 
+    // Codex and Claude may live in CODEX_HOME / CLAUDE_CONFIG_DIR.
+    crate::agent_env::ready().await;
+
     // Self-heal bindings created by older Ofox versions. Gemini CLI otherwise
     // stops at its first-run auth chooser despite GEMINI_API_KEY being present.
     if tool_id == "gemini" {
