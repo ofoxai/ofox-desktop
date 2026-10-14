@@ -197,7 +197,7 @@
       "failed": "更新に失敗しました。ログを確認して再試行してください"
     },
     "updateTo": "v{{version}} に更新",
-    "manyAvailable": "{{count}} 個のツールに新バージョンがあります：{{names}}",
+    "manyAvailable": "{{count}} 個のツールに更新があります：{{names}}",
     "batchProgress": "{{tool}} を更新中…（{{index}}/{{count}}）",
     "updatedTo": "{{tool}} を v{{version}} に更新しました",
     "updatedFromTo": "{{tool}} を更新しました：v{{from}} → v{{to}}",
@@ -1029,6 +1029,13 @@
       "loadingUser": "アカウント情報を読み込み中…",
       "loadingUserAttempt": "アカウント情報を読み込み中（{{attempt}}/3）",
       "loadFailed": "アカウント情報を読み込めません。クリックして再試行"
+    },
+    "tools": {
+      "title": "連携済みのツール",
+      "add": "追加",
+      "loading": "読み込み中…",
+      "empty": "連携済みのツールはありません",
+      "refreshing": "更新中…"
     }
   },
   "providerForm": {

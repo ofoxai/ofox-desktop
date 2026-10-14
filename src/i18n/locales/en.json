@@ -1029,6 +1029,13 @@
       "loadingUser": "Loading your account…",
       "loadingUserAttempt": "Loading your account ({{attempt}}/3)",
       "loadFailed": "Couldn't load your account. Click to retry"
+    },
+    "tools": {
+      "title": "Bound tools",
+      "add": "Add",
+      "loading": "Loading…",
+      "empty": "No tools bound yet",
+      "refreshing": "Refreshing…"
     }
   },
   "providerForm": {

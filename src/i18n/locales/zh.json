@@ -197,7 +197,7 @@
       "failed": "升级失败，请查看日志后重试"
     },
     "updateTo": "升级到 v{{version}}",
-    "manyAvailable": "{{count}} 个工具有新版本：{{names}}",
+    "manyAvailable": "{{count}} 个工具有更新：{{names}}",
     "batchProgress": "正在升级 {{tool}}…（{{index}}/{{count}}）",
     "updatedTo": "{{tool}} 已升级到 v{{version}}",
     "updatedFromTo": "{{tool}} 已升级：v{{from}} → v{{to}}",
@@ -1029,6 +1029,13 @@
       "loadingUser": "正在加载用户信息…",
       "loadingUserAttempt": "正在加载用户信息（{{attempt}}/3）",
       "loadFailed": "无法加载用户信息，点击重试"
+    },
+    "tools": {
+      "title": "已绑定的工具",
+      "add": "添加",
+      "loading": "正在加载…",
+      "empty": "暂无绑定的工具",
+      "refreshing": "刷新中…"
     }
   },
   "providerForm": {

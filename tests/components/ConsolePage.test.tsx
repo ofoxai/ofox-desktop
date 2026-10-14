@@ -10,6 +10,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
+import en from "@/i18n/locales/en.json";
 import { queryClient } from "@/lib/query/queryClient";
 import ConsolePage from "@/components/console/ConsolePage";
 import { checkToolUpdates } from "@/hooks/useToolUpdates";
@@ -318,6 +319,70 @@ describe("Console model profiles", () => {
   });
 });
 
+describe("Console tools page", () => {
+  it("heads the list 已绑定的工具 with its count, the 方案 menu and 添加", async () => {
+    localTools = [localTool("claude", "2.1.293")];
+    render(<ConsolePage boundTools={["claude"]} />);
+    await screen.findByRole("group", { name: "Claude Code" });
+    const tools = screen.getByRole("tabpanel", { name: "工具" });
+    const heading = within(tools).getByRole("heading", {
+      name: "已绑定的工具",
+    });
+    const toolbar = heading.parentElement!;
+    expect(within(toolbar).getByText("1")).toBeVisible();
+    expect(
+      within(toolbar)
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).toEqual(["方案", "添加"]);
+  });
+
+  it("folds the tools that are not installed into a card of their own", async () => {
+    localTools = [
+      localTool("claude", "2.1.293"),
+      { ...localTool("workbuddy", null), installationStatus: "notInstalled" },
+    ];
+    render(<ConsolePage boundTools={["claude", "workbuddy"]} />);
+    const fold = await screen.findByRole("button", { name: /未安装工具（1）/ });
+    fireEvent.click(fold);
+    const card = document.getElementById(fold.getAttribute("aria-controls")!)!;
+    expect(
+      within(card).getByRole("group", { name: "WorkBuddy" }),
+    ).toBeVisible();
+    expect(
+      within(card).queryByRole("group", { name: "Claude Code" }),
+    ).toBeNull();
+  });
+
+  it("speaks the app's language, with no Chinese left on the page", async () => {
+    i18n.addResourceBundle("en", "translation", en, true, true);
+    await i18n.changeLanguage("en");
+    try {
+      mocks.getUserInfo.mockResolvedValue({
+        name: "Test User",
+        balance: { balance: 12.5 },
+      });
+      localTools = [
+        localTool("claude", "2.1.293"),
+        { ...localTool("workbuddy", null), installationStatus: "notInstalled" },
+      ];
+      render(<ConsolePage boundTools={["claude", "workbuddy"]} />);
+      await screen.findByRole("group", { name: "Claude Code" });
+      const tools = screen.getByRole("tabpanel", { name: "Tools" });
+      fireEvent.click(
+        within(tools).getByRole("button", { name: /^Not installed/ }),
+      );
+      await within(tools).findByText("$12.50");
+      expect(
+        within(tools).getByRole("heading", { name: "Bound tools" }),
+      ).toBeVisible();
+      expect(tools.textContent).not.toMatch(/[\u4e00-\u9fff]/);
+    } finally {
+      await i18n.changeLanguage("zh");
+    }
+  });
+});
+
 describe("Console header", () => {
   it("has the one refresh, in the header, and no footer links", async () => {
     render(<ConsolePage boundTools={[]} />);
@@ -571,10 +636,16 @@ describe("Console tool update badges", () => {
     );
     render(<ConsolePage boundTools={["claude", "codex"]} />);
 
+    const line = (
+      await screen.findByText("2 个工具有更新：Claude Code, Codex")
+    ).closest<HTMLElement>('[role="status"]')!;
+    expect(line).toBeVisible();
     expect(
-      await screen.findByText("2 个工具有新版本：Claude Code, Codex"),
-    ).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "全部升级" }));
+      line.compareDocumentPosition(
+        screen.getByRole("group", { name: "Claude Code" }),
+      ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    fireEvent.click(within(line).getByRole("button", { name: "全部升级" }));
 
     await waitFor(() => expect(toolUpdatesApi.update).toHaveBeenCalledTimes(2));
     expect(
