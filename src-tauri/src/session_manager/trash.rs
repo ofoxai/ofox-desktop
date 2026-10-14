@@ -466,6 +466,8 @@ struct Manifest {
     roots: Vec<PathBuf>,
     member_ids: Vec<String>,
     deleted_at: i64,
+    #[serde(default)]
+    size_bytes: Option<u64>,
     state: String,
     items: Vec<Item>,
     error: Option<String>,
@@ -483,6 +485,7 @@ pub struct TrashEntry {
     pub state: String,
     pub error: Option<String>,
     pub item_count: usize,
+    pub size_bytes: Option<u64>,
 }
 
 impl Manifest {
@@ -497,6 +500,7 @@ impl Manifest {
             state: self.state.clone(),
             error: self.error.clone(),
             item_count: self.items.len(),
+            size_bytes: self.size_bytes,
         }
     }
 }
@@ -1015,6 +1019,7 @@ fn list_in(root: &Path) -> Result<Vec<TrashEntry>, String> {
                 state: "recoveryRequired".into(),
                 error: Some(error),
                 item_count: 0,
+                size_bytes: None,
             },
         });
     }
@@ -1084,7 +1089,8 @@ fn trash_bundle(
     now: SystemTime,
 ) -> Result<TrashEntry, String> {
     reject_active(&bundle.paths, now)?;
-    if fingerprint(&bundle.paths)?.hash != revision {
+    let bundle_fingerprint = fingerprint(&bundle.paths)?;
+    if bundle_fingerprint.hash != revision {
         return Err("Session bundle changed; refresh before moving it to trash".into());
     }
     let key = uuid::Uuid::new_v4().to_string();
@@ -1111,6 +1117,7 @@ fn trash_bundle(
         roots: bundle.roots,
         member_ids: bundle.member_ids,
         deleted_at: chrono::Utc::now().timestamp_millis(),
+        size_bytes: Some(bundle_fingerprint.size),
         state: "preparing".into(),
         items,
         error: None,
@@ -1496,6 +1503,19 @@ mod tests {
     }
 
     #[test]
+    fn trash_listing_keeps_bundle_size_without_reading_live_files() {
+        let home = tempfile::tempdir().unwrap();
+        let trash = tempfile::tempdir().unwrap();
+        let source = home.path().join("s.jsonl");
+        fs::write(&source, "original").unwrap();
+        let session = meta("pi", "s", &source);
+        let bundle = plan_in(&session, vec![home.path().into()]).unwrap();
+        let revision = fingerprint(&bundle.paths).unwrap().hash;
+        let entry = trash_bundle(trash.path(), session, bundle, &revision, idle_now()).unwrap();
+        assert_eq!(serde_json::to_value(entry).unwrap()["sizeBytes"], 8);
+    }
+
+    #[test]
     fn crash_between_move_and_manifest_progress_is_compensated() {
         let home = tempfile::tempdir().unwrap();
         let trash = tempfile::tempdir().unwrap();
@@ -1512,6 +1532,7 @@ mod tests {
             roots: roots.clone(),
             member_ids: vec!["s".into()],
             deleted_at: 1,
+            size_bytes: None,
             state: "preparing".into(),
             items: vec![Item {
                 original: source.clone(),
@@ -1621,6 +1642,7 @@ mod tests {
             roots: vec![home.path().into()],
             member_ids: vec!["s".into()],
             deleted_at: 1,
+            size_bytes: None,
             state: "trashed".into(),
             items: vec![Item {
                 original: home.path().join("state.db"),
