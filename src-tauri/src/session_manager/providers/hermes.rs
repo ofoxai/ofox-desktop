@@ -6,11 +6,10 @@ use rusqlite::Connection;
 use serde_json::Value;
 
 use crate::hermes_config::get_hermes_dir;
+use crate::session_manager::title::{titled, TitleCandidates};
 use crate::session_manager::{SessionMessage, SessionMeta};
 
-use super::utils::{
-    extract_text, parse_timestamp_to_ms, read_head_tail_lines, truncate_summary, TITLE_MAX_CHARS,
-};
+use super::utils::{extract_text, parse_timestamp_to_ms, read_head_tail_lines, truncate_summary};
 
 const PROVIDER_ID: &str = "hermes";
 
@@ -113,7 +112,7 @@ fn sqlite_row_to_session_meta(row: &Value, db_source: &str) -> Option<SessionMet
         .get("title")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-        .map(|s| truncate_summary(s, TITLE_MAX_CHARS).to_string());
+        .map(str::to_string);
 
     let cwd = obj
         .get("cwd")
@@ -134,6 +133,10 @@ fn sqlite_row_to_session_meta(row: &Value, db_source: &str) -> Option<SessionMet
 
     let source_path = format!("{}#{}", db_source, session_id);
 
+    let mut candidates = TitleCandidates::default().with_directory(cwd.as_deref());
+    candidates.agent = title;
+    let (title, title_source) = titled(&candidates);
+
     Some(SessionMeta {
         provider_id: PROVIDER_ID.to_string(),
         session_id,
@@ -144,6 +147,7 @@ fn sqlite_row_to_session_meta(row: &Value, db_source: &str) -> Option<SessionMet
         last_active_at: ended_at.or(started_at),
         source_path: Some(source_path),
         resume_command: None,
+        title_source,
     })
 }
 
@@ -342,7 +346,7 @@ fn parse_jsonl_session(path: &Path) -> Option<SessionMeta> {
                 if let Some(c) = content {
                     let text = extract_text(c);
                     if !text.trim().is_empty() {
-                        first_user_msg = Some(truncate_summary(&text, TITLE_MAX_CHARS).to_string());
+                        first_user_msg = Some(text);
                     }
                 }
             }
@@ -377,12 +381,18 @@ fn parse_jsonl_session(path: &Path) -> Option<SessionMeta> {
     });
 
     let source_path = path.to_string_lossy().to_string();
+    let mut candidates = TitleCandidates::default()
+        .with_first_user_text(first_user_msg.as_deref())
+        .with_directory(cwd.as_deref());
+    candidates.agent = title;
+    let (title, title_source) = titled(&candidates);
 
     Some(SessionMeta {
         provider_id: PROVIDER_ID.to_string(),
         session_id,
-        title: title.or_else(|| first_user_msg.clone()),
-        summary: first_user_msg,
+        title,
+        title_source,
+        summary: first_user_msg.map(|text| truncate_summary(&text, 160)),
         project_dir: cwd,
         created_at: first_ts,
         last_active_at: last_ts.or(first_ts),

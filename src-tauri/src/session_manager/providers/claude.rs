@@ -5,12 +5,10 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use crate::config::get_claude_config_dir;
+use crate::session_manager::title::{clean_prompt, one_line, titled, untagged, TitleCandidates};
 use crate::session_manager::{SessionMessage, SessionMeta};
 
-use super::utils::{
-    extract_text, parse_timestamp_to_ms, path_basename, read_head_tail_lines, truncate_summary,
-    TITLE_MAX_CHARS,
-};
+use super::utils::{extract_text, parse_timestamp_to_ms, read_head_tail_lines, truncate_summary};
 
 const PROVIDER_ID: &str = "claude";
 
@@ -121,6 +119,84 @@ pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<boo
     Ok(true)
 }
 
+/// What a Claude Code session file's lines say about its title.
+/// Title rules adapted from Magpie internal/sessions/claude.go (MIT).
+#[derive(Debug, Default)]
+pub(crate) struct ClaudeScan {
+    pub candidates: TitleCandidates,
+}
+
+impl ClaudeScan {
+    pub(crate) fn line(&mut self, value: &Value) {
+        let kind = value.get("type").and_then(Value::as_str);
+        let message = value.get("message");
+        let role = message.and_then(|m| m.get("role")).and_then(Value::as_str);
+        match kind {
+            // the agent renames a session as it goes: the last name stands
+            Some("ai-title") => last_text(&mut self.candidates.agent, value.get("aiTitle")),
+            Some("custom-title") => {
+                last_text(&mut self.candidates.custom, value.get("customTitle"))
+            }
+            Some("summary") if self.candidates.summary.is_none() => {
+                last_text(&mut self.candidates.summary, value.get("summary"))
+            }
+            Some("user") | None if role == Some("user") => {
+                let flagged = |key| value.get(key).and_then(Value::as_bool) == Some(true);
+                if flagged("isMeta") || flagged("isSidechain") {
+                    return;
+                }
+                let text = message.and_then(|m| m.get("content")).and_then(user_text);
+                let prompt = text.as_deref().and_then(clean_prompt);
+                let candidates = &mut self.candidates;
+                if candidates.prompt.is_none() {
+                    if prompt.is_some() {
+                        candidates.prompt = prompt;
+                    } else if candidates.message.is_none() {
+                        candidates.message = text.map(|t| untagged(&t)).filter(|t| !t.is_empty());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn last_text(slot: &mut Option<String>, value: Option<&Value>) {
+    if let Some(text) = value
+        .and_then(Value::as_str)
+        .map(one_line)
+        .filter(|t| !t.is_empty())
+    {
+        *slot = Some(text);
+    }
+}
+
+/// The text of a user message, or `None` for a tool's result. Image blocks
+/// are left out.
+fn user_text(content: &Value) -> Option<String> {
+    let text = match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => {
+            if blocks
+                .iter()
+                .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
+            {
+                return None;
+            }
+            blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        _ => return None,
+    };
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
 fn parse_session(path: &Path) -> Option<SessionMeta> {
     if is_agent_session(path) {
         return None;
@@ -131,9 +207,7 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
     let mut session_id: Option<String> = None;
     let mut project_dir: Option<String> = None;
     let mut created_at: Option<i64> = None;
-    let mut first_user_message: Option<String> = None;
 
-    // Extract metadata and first user message from head lines
     for line in &head {
         let value: Value = match serde_json::from_str(line) {
             Ok(parsed) => parsed,
@@ -154,41 +228,14 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
         if created_at.is_none() {
             created_at = value.get("timestamp").and_then(parse_timestamp_to_ms);
         }
-        // Extract first real user message as title candidate
-        // Skip system-injected caveats and slash commands (e.g. /clear, /compact)
-        if first_user_message.is_none() {
-            let is_user = value.get("type").and_then(Value::as_str) == Some("user")
-                || value
-                    .get("message")
-                    .and_then(|m| m.get("role"))
-                    .and_then(Value::as_str)
-                    == Some("user");
-            if is_user {
-                if let Some(message) = value.get("message") {
-                    let text = message.get("content").map(extract_text).unwrap_or_default();
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty()
-                        && !trimmed.contains("<local-command-caveat>")
-                        && !trimmed.starts_with("<command-name>")
-                    {
-                        first_user_message = Some(trimmed.to_string());
-                    }
-                }
-            }
-        }
-        if session_id.is_some()
-            && project_dir.is_some()
-            && created_at.is_some()
-            && first_user_message.is_some()
-        {
+        if session_id.is_some() && project_dir.is_some() && created_at.is_some() {
             break;
         }
     }
 
-    // Extract last_active_at, summary, and custom-title from tail lines (reverse order)
+    // Extract last_active_at and summary from tail lines (reverse order)
     let mut last_active_at: Option<i64> = None;
     let mut summary: Option<String> = None;
-    let mut custom_title: Option<String> = None;
 
     for line in tail.iter().rev() {
         let value: Value = match serde_json::from_str(line) {
@@ -197,16 +244,6 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
         };
         if last_active_at.is_none() {
             last_active_at = value.get("timestamp").and_then(parse_timestamp_to_ms);
-        }
-        // Look for custom-title entry (take the last one, i.e. first in reverse)
-        if custom_title.is_none()
-            && value.get("type").and_then(Value::as_str) == Some("custom-title")
-        {
-            custom_title = value
-                .get("customTitle")
-                .and_then(Value::as_str)
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
         }
         if summary.is_none() {
             if value.get("isMeta").and_then(Value::as_bool) == Some(true) {
@@ -219,24 +256,24 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
                 }
             }
         }
-        if last_active_at.is_some() && summary.is_some() && custom_title.is_some() {
+        if last_active_at.is_some() && summary.is_some() {
             break;
+        }
+    }
+
+    // The head and tail are all that is read here; the session listing reads
+    // the whole file once per change (meta cache) for the full candidates.
+    let mut scan = ClaudeScan::default();
+    for line in head.iter().chain(&tail) {
+        if let Ok(value) = serde_json::from_str::<Value>(line) {
+            scan.line(&value);
         }
     }
 
     let session_id = session_id.or_else(|| infer_session_id_from_filename(path));
     let session_id = session_id?;
 
-    // Title priority: custom-title > first user message > directory basename
-    let title = custom_title
-        .map(|t| truncate_summary(&t, TITLE_MAX_CHARS))
-        .or_else(|| first_user_message.map(|t| truncate_summary(&t, TITLE_MAX_CHARS)))
-        .or_else(|| {
-            project_dir
-                .as_deref()
-                .and_then(path_basename)
-                .map(|v| v.to_string())
-        });
+    let (title, title_source) = titled(&scan.candidates.with_directory(project_dir.as_deref()));
 
     let summary = summary.map(|text| truncate_summary(&text, 160));
 
@@ -250,6 +287,7 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
         last_active_at,
         source_path: Some(path.to_string_lossy().to_string()),
         resume_command: Some(format!("claude --resume {session_id}")),
+        title_source,
     })
 }
 
@@ -306,7 +344,93 @@ fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session_manager::title::TitleSource;
     use tempfile::tempdir;
+
+    fn write_session(dir: &Path, lines: &[serde_json::Value]) -> PathBuf {
+        let path = dir.join("11111111-2222-3333-4444-555555555555.jsonl");
+        let body = lines
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect::<String>();
+        std::fs::write(&path, body).expect("write session");
+        path
+    }
+
+    fn user(content: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": content},
+            "sessionId": "11111111-2222-3333-4444-555555555555",
+            "cwd": "/work/app",
+            "timestamp": "2026-10-14T10:00:00Z",
+        })
+    }
+
+    fn title_of(lines: &[serde_json::Value]) -> Option<String> {
+        let temp = tempdir().expect("tempdir");
+        parse_session(&write_session(temp.path(), lines)).and_then(|meta| meta.title)
+    }
+
+    #[test]
+    fn the_title_claude_code_made_beats_the_first_prompt() {
+        let title = title_of(&[
+            user(serde_json::json!("fix the login")),
+            serde_json::json!({"type": "ai-title", "aiTitle": "Old name", "sessionId": "s"}),
+            serde_json::json!({"type": "ai-title", "aiTitle": "Fix login bug", "sessionId": "s"}),
+        ]);
+        assert_eq!(title.as_deref(), Some("Fix login bug"));
+    }
+
+    #[test]
+    fn a_summary_names_the_session_only_when_claude_made_no_title() {
+        let summary =
+            serde_json::json!({"type": "summary", "summary": "Login summary", "leafUuid": "u"});
+        let ai =
+            serde_json::json!({"type": "ai-title", "aiTitle": "Fix login bug", "sessionId": "s"});
+        let prompt = user(serde_json::json!("fix the login"));
+        assert_eq!(
+            title_of(&[summary.clone(), prompt.clone()]).as_deref(),
+            Some("Login summary")
+        );
+        assert_eq!(
+            title_of(&[summary, prompt, ai]).as_deref(),
+            Some("Fix login bug")
+        );
+    }
+
+    #[test]
+    fn a_slash_command_is_titled_by_its_name_and_args() {
+        let title = title_of(&[
+            user(serde_json::json!("<command-message>review</command-message>\n<command-name>/review</command-name>\n<command-args>42</command-args>")),
+            user(serde_json::json!("later prompt")),
+        ]);
+        assert_eq!(title.as_deref(), Some("/review 42"));
+    }
+
+    #[test]
+    fn images_meta_lines_and_interruptions_stay_out_of_the_title() {
+        let mut meta =
+            user(serde_json::json!([{"type": "text", "text": "[Image: source: /tmp/1.png]"}]));
+        meta["isMeta"] = serde_json::json!(true);
+        let title = title_of(&[
+            meta,
+            user(serde_json::json!("[Request interrupted by user]")),
+            user(serde_json::json!([
+                {"type": "text", "text": "look at this [Image #24]"},
+                {"type": "image", "source": {"type": "base64", "data": "AAAA"}}
+            ])),
+        ]);
+        assert_eq!(title.as_deref(), Some("look at this [Image #24]"));
+    }
+
+    #[test]
+    fn a_session_with_only_tagged_messages_is_titled_by_their_words() {
+        let title = title_of(&[user(serde_json::json!(
+            "<task-notification>\n<summary>Agent finished</summary>\n</task-notification>"
+        ))]);
+        assert_eq!(title.as_deref(), Some("Agent finished"));
+    }
 
     #[test]
     fn delete_session_removes_main_file_and_sidecar_directory() {
@@ -424,6 +548,7 @@ mod tests {
 
         let meta = parse_session(&path).unwrap();
         assert_eq!(meta.title.as_deref(), Some("fix-login-bug"));
+        assert_eq!(meta.title_source, Some(TitleSource::Custom));
     }
 
     #[test]
@@ -442,6 +567,7 @@ mod tests {
         let meta = parse_session(&path).unwrap();
         // No user message and no custom-title → falls back to dir basename
         assert_eq!(meta.title.as_deref(), Some("my-project"));
+        assert_eq!(meta.title_source, Some(TitleSource::Directory));
     }
 
     #[test]
@@ -460,8 +586,8 @@ mod tests {
 
         let meta = parse_session(&path).unwrap();
         let title = meta.title.unwrap();
-        assert!(title.len() <= TITLE_MAX_CHARS + 3); // +3 for "..."
-        assert!(title.ends_with("..."));
+        assert_eq!(title.chars().count(), 161);
+        assert!(title.ends_with('…'));
     }
 
     #[test]
@@ -483,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_session_skips_command_caveat_and_slash_commands() {
+    fn parse_session_skips_command_caveat_and_titles_by_the_slash_command() {
         let temp = tempdir().expect("tempdir");
         let path = temp.path().join("session-clear.jsonl");
         std::fs::write(
@@ -499,6 +625,7 @@ mod tests {
         .expect("write");
 
         let meta = parse_session(&path).unwrap();
-        assert_eq!(meta.title.as_deref(), Some("帮我看看工作区的改动"));
+        // Magpie's ccPrompt: a slash command someone typed is the first prompt
+        assert_eq!(meta.title.as_deref(), Some("/clear"));
     }
 }

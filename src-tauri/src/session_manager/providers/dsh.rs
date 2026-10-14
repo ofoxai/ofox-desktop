@@ -1,7 +1,8 @@
 //! dsh metadata/generation/grouping adapted from Magpie internal/sessions/dsh.go.
 //! Copyright (c) 2026 yetone, MIT; see ../MAGPIE_LICENSE.
 //! dsh is intentionally metadata-only: no transcript or generic resume adapter.
-use super::utils::{extract_text, truncate_summary};
+use super::utils::extract_text;
+use crate::session_manager::title::{titled, TitleCandidates};
 use crate::session_manager::SessionMeta;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -94,22 +95,34 @@ fn parse_file(path: &Path) -> Option<FileMeta> {
     if id.is_empty() {
         return None;
     }
-    let mut title = None;
+    let mut agent_title = None;
+    let mut first_user = None;
     let mut last_active = head["createdAt"].as_i64();
     for v in values {
         if let Some(time) = v["time"].as_i64() {
             last_active = Some(last_active.unwrap_or(0).max(time));
         }
         if v["type"] == "session/title" {
-            title = v["data"]["title"].as_str().map(str::to_string).or(title);
+            agent_title = v["data"]["title"]
+                .as_str()
+                .map(str::to_string)
+                .or(agent_title);
         }
-        if title.is_none() && v["type"] == "user/message" && v["data"]["source"]["kind"] == "user" {
+        if first_user.is_none()
+            && v["type"] == "user/message"
+            && v["data"]["source"]["kind"] == "user"
+        {
             let text = extract_text(&v["data"]["content"]);
             if !text.trim().is_empty() {
-                title = Some(text);
+                first_user = Some(text);
             }
         }
     }
+    let mut candidates = TitleCandidates::default()
+        .with_first_user_text(first_user.as_deref())
+        .with_directory(head["cwd"].as_str());
+    candidates.agent = agent_title;
+    let (title, title_source) = titled(&candidates);
     Some(FileMeta {
         parent: (head["delegationDepth"].as_i64().unwrap_or(0) > 0)
             .then(|| head["parentSession"].as_str().map(str::to_string))
@@ -117,7 +130,8 @@ fn parse_file(path: &Path) -> Option<FileMeta> {
         meta: SessionMeta {
             provider_id: "dsh".into(),
             session_id: id,
-            title: title.map(|t| truncate_summary(&t, 80)),
+            title,
+            title_source,
             summary: None,
             project_dir: head["cwd"].as_str().map(str::to_string),
             created_at: head["createdAt"].as_i64(),

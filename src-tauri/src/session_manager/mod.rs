@@ -1,6 +1,7 @@
 pub mod managed;
 pub mod providers;
 pub mod terminal;
+pub mod title;
 pub mod trash;
 
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,8 @@ pub struct SessionMeta {
     pub source_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resume_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_source: Option<title::TitleSource>,
 }
 
 #[derive(Debug, Clone, Serialize)]

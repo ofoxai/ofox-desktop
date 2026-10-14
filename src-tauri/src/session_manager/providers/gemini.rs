@@ -5,6 +5,7 @@ use serde_json::Value;
 use crate::session_manager::{SessionMessage, SessionMeta};
 
 use super::utils::{extract_text, parse_timestamp_to_ms, truncate_summary};
+use crate::session_manager::title::{titled, TitleCandidates};
 
 const PROVIDER_ID: &str = "gemini";
 
@@ -79,11 +80,13 @@ pub(crate) fn scan_in(tmp_dir: &Path) -> Vec<SessionMeta> {
             {
                 continue;
             }
-            if let Some(meta) = parse_session(&path) {
-                sessions.push(SessionMeta {
-                    project_dir: project_dir.clone(),
-                    ..meta
-                });
+            if let Some(mut meta) = parse_session(&path) {
+                meta.project_dir = project_dir.clone();
+                if meta.title.is_none() {
+                    (meta.title, meta.title_source) =
+                        titled(&TitleCandidates::default().with_directory(project_dir.as_deref()));
+                }
+                sessions.push(meta);
             }
         }
     }
@@ -200,7 +203,7 @@ pub(crate) fn parse_session(path: &Path) -> Option<SessionMeta> {
     let last_active_at = value.get("lastUpdated").and_then(parse_timestamp_to_ms);
 
     // Derive title from first user message
-    let title = value
+    let first_user = value
         .get("messages")
         .and_then(Value::as_array)
         .and_then(|msgs| {
@@ -208,21 +211,23 @@ pub(crate) fn parse_session(path: &Path) -> Option<SessionMeta> {
                 .find(|m| m.get("type").and_then(Value::as_str) == Some("user"))
                 .map(|m| extract_text(&m["content"]))
                 .filter(|s| !s.trim().is_empty())
-                .map(|s| truncate_summary(&s, 160))
         });
+    let (title, title_source) =
+        titled(&TitleCandidates::default().with_first_user_text(first_user.as_deref()));
 
     let source_path = path.to_string_lossy().to_string();
 
     Some(SessionMeta {
         provider_id: PROVIDER_ID.to_string(),
         session_id: session_id.clone(),
-        title: title.clone(),
-        summary: title,
+        title,
+        summary: first_user.map(|s| truncate_summary(&s, 160)),
         project_dir: None, // (optionally) populated later
         created_at,
         last_active_at: last_active_at.or(created_at),
         source_path: Some(source_path),
         resume_command: Some(format!("gemini --resume {session_id}")),
+        title_source,
     })
 }
 

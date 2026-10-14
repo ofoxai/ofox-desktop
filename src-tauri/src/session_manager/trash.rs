@@ -1223,6 +1223,7 @@ mod tests {
             last_active_at: None,
             source_path: Some(source.to_string_lossy().into()),
             resume_command: None,
+            title_source: None,
         }
     }
     // Advance comparison time instead of touching process-global env or personal configs.
