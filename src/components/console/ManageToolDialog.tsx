@@ -21,13 +21,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { MenuSelect } from "@/components/ui/menu-select";
 import {
   ModelPicker,
   MultiModelPicker,
@@ -1117,39 +1111,31 @@ export default function ManageToolDialog({
                     {t("modelCompatibility.title")}
                   </Label>
                   <div className="flex gap-2">
-                    <Select
+                    <MenuSelect
+                      id="workbuddy-test-model"
+                      aria-label={t(
+                        tool.id === "opencode"
+                          ? "modelCompatibility.openCodeTestModel"
+                          : "modelCompatibility.workBuddyTestModel",
+                      )}
                       value={workBuddyTestModel}
-                      onValueChange={(value) => {
+                      onChange={(value) => {
                         workBuddyTestRequest.current += 1;
                         setWorkBuddyTestModel(value);
                         setWorkBuddyTestResult(null);
                         setWorkBuddyTestLoading(false);
                       }}
+                      options={draftModels.map((id) => ({
+                        value: id,
+                        label: id,
+                      }))}
+                      placeholder="—"
+                      searchable={draftModels.length > 8}
+                      searchPlaceholder={t("modelPicker.searchModel")}
                       disabled={draftModels.length === 0}
-                    >
-                      <SelectTrigger
-                        id="workbuddy-test-model"
-                        aria-label={t(
-                          tool.id === "opencode"
-                            ? "modelCompatibility.openCodeTestModel"
-                            : "modelCompatibility.workBuddyTestModel",
-                        )}
-                        className="min-w-0 flex-1 text-[12px]"
-                      >
-                        <SelectValue placeholder="—" />
-                      </SelectTrigger>
-                      <SelectContent className="max-h-60">
-                        {draftModels.map((id) => (
-                          <SelectItem
-                            key={id}
-                            value={id}
-                            className="text-[12px]"
-                          >
-                            {id}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                      width={300}
+                      triggerClassName="min-w-0 max-w-none flex-1"
+                    />
                     <Button
                       type="button"
                       size="sm"
