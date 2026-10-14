@@ -197,9 +197,9 @@ pub(crate) fn shell_resolution(
 #[derive(Debug, Clone)]
 pub(crate) struct UpdatePlan {
     pub source: &'static str,
-    program: PathBuf,
-    args: Vec<String>,
-    path: String,
+    pub(crate) program: PathBuf,
+    pub(crate) args: Vec<String>,
+    pub(crate) path: String,
 }
 
 /// Windows has no login shell: resolve the CLI the way a terminal opened now
