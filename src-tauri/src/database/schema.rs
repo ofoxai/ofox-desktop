@@ -1286,7 +1286,10 @@ impl Database {
 
     /// Tables added in v11 (also created by `create_tables_on_conn`): per-session
     /// totals that outlive the 30-day prune, the session metadata cache, balance
-    /// samples and one-shot maintenance flags. All machine-local (see backup.rs).
+    /// samples and one-shot maintenance flags. The metadata cache and balance
+    /// samples are machine-local; the archive and the flags travel with the
+    /// request logs in exports, imports and restores, and WebDAV sync skips and
+    /// keeps all four (see backup.rs).
     pub(crate) fn create_usage_archive_tables(conn: &Connection) -> Result<(), AppError> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS session_usage_archive (
