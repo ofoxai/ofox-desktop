@@ -16,7 +16,7 @@
 //! A step marks its flag `done` only after it succeeded; a missing flag (a
 //! database that never went through the v11 migration) means nothing to do.
 
-use crate::database::dao::usage_rollup::usage_prune_cutoff;
+use crate::database::dao::usage_rollup::{parse_cost_usd, usage_prune_cutoff};
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
@@ -434,7 +434,7 @@ fn live_totals(
     let mut totals: HashMap<(String, String), Totals> = HashMap::new();
     for row in rows {
         let (session_id, model, tokens, cost, at) = row.map_err(db_err)?;
-        let cost = Decimal::from_str(cost.trim()).unwrap_or(Decimal::ZERO);
+        let cost = parse_cost_usd(&cost);
         totals
             .entry((session_id, model))
             .or_default()
