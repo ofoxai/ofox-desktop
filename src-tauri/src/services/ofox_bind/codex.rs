@@ -470,7 +470,12 @@ fn strip_flag(doc: &mut DocumentMut) -> bool {
 
 /// 启动 Codex 前调用：只有 Codex 明确不认 `disable_response_storage` 时，才把配置里残留的
 /// 去掉（否则每次启动都警告「被忽略」）；认的、查不出的都不动。返回是否改了文件。
-pub(crate) fn strip_flag_codex_ignores() -> Result<bool, String> {
+///
+/// `record` 在文件写好之后调用（参数是改之前的 config.toml），把这次写了什么记进绑定
+/// 记录；它失败时这次改动回滚。
+pub(crate) fn strip_flag_codex_ignores(
+    record: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<bool, String> {
     if super::codex_probe::flag_support() != super::codex_probe::FlagSupport::Unknown {
         return Ok(false);
     }
@@ -486,8 +491,13 @@ pub(crate) fn strip_flag_codex_ignores() -> Result<bool, String> {
         return Ok(false);
     }
     let mut txn = FileTxn::new();
-    txn.write_with_mode(&path, doc.to_string().as_bytes(), BOUND_CONFIG_MODE)
-        .map_err(|e| format!("写入 Codex 配置失败：{e}"))?;
+    let result = txn
+        .write_with_mode(&path, doc.to_string().as_bytes(), BOUND_CONFIG_MODE)
+        .map_err(|e| format!("写入 Codex 配置失败：{e}"))
+        .and_then(|()| record(&text));
+    if let Err(error) = result {
+        return Err(super::rollback_with(txn, error));
+    }
     Ok(true)
 }
 

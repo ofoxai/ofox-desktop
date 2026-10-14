@@ -463,7 +463,8 @@ pub async fn launch_tool_cli(app: AppHandle, tool_id: String) -> Result<(), Stri
         if let Err(e) = crate::mcp::strip_ignored_type_from_codex_config() {
             log::warn!("清理 Codex MCP 配置里的 type 失败: {e}");
         }
-        if let Err(e) = crate::services::ofox_bind::codex::strip_flag_codex_ignores() {
+        let state = app.state::<crate::store::AppState>();
+        if let Err(e) = crate::services::ofox_bind::strip_codex_flag_ignored(&state.db) {
             log::warn!("清理 Codex 配置里被忽略的设置失败: {e}");
         }
     }

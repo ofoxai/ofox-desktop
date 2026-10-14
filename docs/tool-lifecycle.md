@@ -34,13 +34,17 @@ delete conversations/caches, or revoke remote API keys.
 
 ### Unbind restores only what OFox still owns
 
-Every OFox write to a bound tool (bind, key replacement, model save, missing
-binding restore, region reconciliation, the legacy Codex migration) records the
-managed fields it wrote in the binding record (`written`, per managed file). Keys
-and tokens are stored as SHA-256 digests only. A field OFox left untouched keeps
-its earlier entry, so a value the user changed is never recorded as OFox's when
-OFox later rewrites the file around it. If the record cannot be saved, the write
-is rolled back.
+Each write OFox makes to a bound tool's managed fields records what it wrote in
+the binding record (`written`, per managed file): bind (including repair and
+rebind), key replacement, model save, missing-binding restore, rewriting a
+bound configuration from its template, region reconciliation, the legacy Codex
+migration, aligning the Claude/Gemini env model with the model the agent
+remembers, and removing the `disable_response_storage` flag a Codex launch finds
+ignored. The one other managed write, Gemini's launch self-heal of the API-key
+sign-in, sets the value bind already recorded. Keys and tokens are stored as
+SHA-256 digests only. A field OFox left untouched keeps its earlier entry, so a
+value the user changed is never recorded as OFox's when OFox later rewrites the
+file around it. If the record cannot be saved, the write is rolled back.
 
 On unbind each managed field is judged on its own:
 

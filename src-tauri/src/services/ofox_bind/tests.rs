@@ -3875,7 +3875,7 @@ fn launching_strips_the_flag_only_when_codex_ignores_it() {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         write(&path, text);
         super::codex_probe::set_override(Some(support));
-        let changed = super::codex::strip_flag_codex_ignores().unwrap();
+        let changed = super::codex::strip_flag_codex_ignores(|_| Ok(())).unwrap();
         assert_eq!(changed, !expect_flag, "{support:?}");
         assert_eq!(
             fs::read_to_string(&path)
@@ -5582,4 +5582,87 @@ async fn hermes_ofox_model_does_not_stay_under_the_users_own_provider() {
     assert_eq!(model.provider.as_deref(), Some("deepseek"));
     assert_eq!(model.default.as_deref(), Some("existing/old-model"));
     assert_eq!(report.kept_keys, [shown_at(&path, "model.provider")]);
+}
+
+#[tokio::test]
+#[serial]
+async fn the_claude_model_aligned_from_the_agent_does_not_stay_under_the_users_endpoint() {
+    let home = Home::new();
+    let settings = home.claude("settings.json");
+    write(&settings, CLAUDE_RELAY);
+    let db = db_for(Tool::Claude, claude_template(Some("anthropic/claude-x")));
+    bind(&db, Tool::Claude, "claude", KEY).await.expect("bind");
+    set_json_field(&settings, &["model"], "anthropic/claude-y");
+    sync_live_model(&db, Tool::Claude, Some(KEY)).await;
+    assert_eq!(
+        json_at(&settings)["env"]["ANTHROPIC_MODEL"],
+        "anthropic/claude-y"
+    );
+    set_json_field(
+        &settings,
+        &["env", "ANTHROPIC_BASE_URL"],
+        "https://my-relay.example",
+    );
+
+    unbind_now(&db, Tool::Claude, "claude").await;
+
+    assert_eq!(
+        json_at(&settings)["env"]["ANTHROPIC_MODEL"],
+        "claude-opus-x"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn the_gemini_model_aligned_from_the_agent_does_not_stay_under_the_users_endpoint() {
+    let home = Home::new();
+    let env = home.gemini(".env");
+    write(&env, GEMINI_ENV);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.expect("bind");
+    set_json_field(
+        &home.gemini("settings.json"),
+        &["model", "name"],
+        "gemini-3.8-flash",
+    );
+    sync_live_model(&db, Tool::Gemini, Some(KEY)).await;
+    edit_text(
+        &env,
+        "GOOGLE_GEMINI_BASE_URL=https://api.ofox.ai/gemini",
+        "GOOGLE_GEMINI_BASE_URL=https://my-relay.example",
+    );
+
+    unbind_now(&db, Tool::Gemini, "gemini").await;
+
+    let restored = fs::read_to_string(&env).unwrap();
+    assert!(!restored.contains("GEMINI_MODEL"), "{restored}");
+    assert!(
+        restored.contains("GOOGLE_GEMINI_BASE_URL=https://my-relay.example"),
+        "{restored}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_flag_launch_removed_and_the_user_set_again_is_the_users() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    super::codex_probe::set_override(Some(super::codex_probe::FlagSupport::Known));
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    super::codex_probe::set_override(Some(super::codex_probe::FlagSupport::Unknown));
+    assert!(strip_codex_flag_ignored(&db).unwrap());
+    super::codex_probe::set_override(None);
+    let set_again =
+        "disable_response_storage = true\n".to_string() + &fs::read_to_string(&config).unwrap();
+    write(&config, &set_again);
+
+    let report = unbind_now(&db, Tool::Codex, "codex").await;
+
+    assert_eq!(
+        toml_at(&config)["disable_response_storage"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(report.kept_keys, [shown("disable_response_storage")]);
 }

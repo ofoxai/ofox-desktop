@@ -305,6 +305,15 @@ fn migrate_codex(
     })
 }
 
+/// 启动 Codex 前去掉它明确不认的 `disable_response_storage`（见
+/// [`codex::strip_flag_codex_ignores`]），去掉的也记进绑定记录。
+pub(crate) fn strip_codex_flag_ignored(db: &Database) -> Result<bool, String> {
+    codex::strip_flag_codex_ignores(|before| {
+        let before = [(ManagedFile::CodexConfig, codex::leaves(Some(before))?)];
+        record_written(db, Tool::Codex, &before)
+    })
+}
+
 /// 绑定前的文件原样。解析不了就拒绝绑定——不能把一份坏掉的文件当成原样保存，
 /// 再在它上面写配置。
 fn capture_baseline(file: ManagedFile) -> Result<FileBaseline, String> {
