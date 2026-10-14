@@ -8,6 +8,7 @@
 //! tests can check the order of the steps without touching a real tool.
 
 use serde::Serialize;
+use serde_json::json;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,10 +17,16 @@ use std::time::Duration;
 use super::tool_update::{
     installed_npm_package, DesktopInstallation, Installation, ToolOperationGuard, UpdatePlan,
 };
+use tauri::{AppHandle, Emitter, State};
+use tokio::sync::RwLock;
+
+use super::ofox_auth::OfoxAuthState;
 use crate::app_config::BindableTool;
 use crate::ofox_api_keys::ApiKeyError;
+use crate::ofox_auth::OfoxAuthManager;
 use crate::ofox_secret::SecretStore;
 use crate::services::ofox_bind::report::UnbindReport;
+use crate::store::AppState;
 
 /// How the program was installed, as the frontend sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -492,6 +499,7 @@ pub(crate) fn hermes_uninstall_args(help: &str) -> Option<Vec<String>> {
 }
 
 /// Whether any process runs from inside the app bundle (`ps -axo comm=` output).
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn bundle_in_use(ps_output: &str, bundle: &Path) -> bool {
     let inside = format!(
         "{}/Contents/",
@@ -986,9 +994,273 @@ fn trash_bundle(_bundle: &Path) -> Result<(), String> {
     Err("Moving an app to the Trash is only supported on macOS".into())
 }
 
+/// `NSFileManager trashItemAtURL:`: the same call Finder's Move to Trash makes. A
+/// plain rename into `~/.Trash` is refused by macOS for apps without Full Disk
+/// Access, and Finder scripting asks the user for Automation permission.
 #[cfg(target_os = "macos")]
-fn trash_bundle(_bundle: &Path) -> Result<(), String> {
-    Err("not yet".into())
+fn trash_bundle(bundle: &Path) -> Result<(), String> {
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyObject, Bool};
+    use objc2::{class, msg_send, msg_send_id};
+    use std::ffi::{c_char, CStr, CString};
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = CString::new(bundle.as_os_str().as_bytes())
+        .map_err(|_| format!("Invalid app path: {}", bundle.display()))?;
+    // SAFETY: Foundation calls on objects created here and used only on this
+    // thread; every pointer passed is either one of those objects or a valid
+    // out-parameter, and the selectors are the documented ones.
+    unsafe {
+        let ns_path: Option<Retained<AnyObject>> =
+            msg_send_id![class!(NSString), stringWithUTF8String: path.as_ptr()];
+        let ns_path = ns_path.ok_or("Could not read the app path")?;
+        let url: Option<Retained<AnyObject>> =
+            msg_send_id![class!(NSURL), fileURLWithPath: &*ns_path];
+        let url = url.ok_or("Could not read the app path")?;
+        let manager: Retained<AnyObject> = msg_send_id![class!(NSFileManager), defaultManager];
+        let mut error: *mut AnyObject = std::ptr::null_mut();
+        let moved: Bool = msg_send![
+            &*manager,
+            trashItemAtURL: &*url,
+            resultingItemURL: std::ptr::null_mut::<*mut AnyObject>(),
+            error: &mut error
+        ];
+        if moved.as_bool() {
+            return Ok(());
+        }
+        let reason = if error.is_null() {
+            "unknown error".to_string()
+        } else {
+            let text: Option<Retained<AnyObject>> = msg_send_id![&*error, localizedDescription];
+            let utf8: *const c_char = match &text {
+                Some(text) => msg_send![&**text, UTF8String],
+                None => std::ptr::null(),
+            };
+            if utf8.is_null() {
+                "unknown error".to_string()
+            } else {
+                CStr::from_ptr(utf8).to_string_lossy().into_owned()
+            }
+        };
+        Err(format!(
+            "Could not move {} to the Trash: {reason}",
+            bundle.display()
+        ))
+    }
+}
+
+// ---- the real machine ---------------------------------------------------
+
+/// Whether any process runs from inside `bundle`.
+#[cfg(target_os = "macos")]
+async fn bundle_running(bundle: &Path) -> Result<bool, String> {
+    let mut command = tokio::process::Command::new("/bin/ps");
+    command.args(["-axo", "comm="]);
+    let output = super::tool_update::bounded_output(command).await?;
+    if !output.status.success() {
+        return Err("Could not list the running processes".into());
+    }
+    Ok(bundle_in_use(
+        &String::from_utf8_lossy(&output.stdout),
+        bundle,
+    ))
+}
+
+#[cfg(target_os = "macos")]
+async fn detect_chatgpt() -> Result<Option<DesktopInstallation>, String> {
+    super::tool_update::codex_desktop_version().await
+}
+
+#[cfg(target_os = "windows")]
+async fn detect_chatgpt() -> Result<Option<DesktopInstallation>, String> {
+    super::windows_chatgpt::detect_chatgpt_installation().await
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+async fn detect_chatgpt() -> Result<Option<DesktopInstallation>, String> {
+    Ok(None)
+}
+
+async fn inspect_app(tool: &str) -> Result<Inspection, String> {
+    let found = if tool == "chatgpt" {
+        detect_chatgpt().await?
+    } else {
+        super::misc::find_workbuddy_app().await?
+    };
+    let Some(app) = found else {
+        return Ok(Inspection::NotInstalled);
+    };
+    #[cfg(target_os = "macos")]
+    let running = bundle_running(&app.path).await?;
+    // Windows removes it by hand, so whether it runs does not matter.
+    #[cfg(not(target_os = "macos"))]
+    let running = false;
+    Ok(Inspection::App { app, running })
+}
+
+/// `hermes uninstall --help`, to learn whether this Hermes can keep its data
+/// without asking questions. Not asked on Windows, where Hermes is left to the user.
+#[cfg(not(target_os = "windows"))]
+async fn hermes_uninstall_help(install: &Installation) -> Option<String> {
+    let mut command = tokio::process::Command::new(&install.path);
+    command
+        .args(["uninstall", "--help"])
+        .env("PATH", &install.search_path);
+    let output = super::tool_update::bounded_output(command).await.ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(target_os = "windows")]
+async fn hermes_uninstall_help(_install: &Installation) -> Option<String> {
+    None
+}
+
+async fn inspect_cli(tool: &str) -> Result<Inspection, String> {
+    use super::tool_update::{probe, resolve_plan, ProbeError};
+    let install = match probe(tool).await {
+        Ok(install) => install,
+        Err(ProbeError::NotFound) => return Ok(Inspection::NotInstalled),
+        Err(error) => return Err(error.to_string()),
+    };
+    let owner = resolve_plan(tool, &install).await;
+    let hermes_help = if tool == "hermes" {
+        hermes_uninstall_help(&install).await
+    } else {
+        None
+    };
+    Ok(Inspection::Cli {
+        install,
+        owner,
+        hermes_help,
+    })
+}
+
+struct Live {
+    app: AppHandle,
+    db: Arc<crate::database::Database>,
+    manager: Arc<RwLock<OfoxAuthManager>>,
+}
+
+impl Live {
+    fn new(app: AppHandle, state: &State<'_, AppState>, auth: &State<'_, OfoxAuthState>) -> Self {
+        Self {
+            app,
+            db: state.db.clone(),
+            manager: auth.0.clone(),
+        }
+    }
+}
+
+async fn inspect_machine(tool: &str) -> Result<Inspection, String> {
+    match tool {
+        "chatgpt" | "workbuddy" => inspect_app(tool).await,
+        _ => inspect_cli(tool).await,
+    }
+}
+
+impl Effects for Live {
+    fn os(&self) -> Os {
+        Os::current()
+    }
+
+    async fn inspect(&self, tool: &str) -> Result<Inspection, String> {
+        inspect_machine(tool).await
+    }
+
+    async fn unbind(
+        &self,
+        tool: &str,
+        still_bound: &[String],
+        dry_run: bool,
+    ) -> Result<UnbindReport, String> {
+        let report =
+            super::ofox_auth::unbind_tool_from_ofox_internal(&self.db, tool, still_bound, dry_run)
+                .await?;
+        if !dry_run {
+            super::model_selection::notify(
+                &self.app,
+                vec![crate::model_selection::canonical_tool(tool)?],
+            );
+        }
+        Ok(report)
+    }
+
+    async fn retire_key(&self, tool: &str) -> UninstallKeyOutcome {
+        let Ok(bindable) = tool.parse::<BindableTool>() else {
+            return UninstallKeyOutcome::None;
+        };
+        let manager = self.manager.clone();
+        let outcome = retire_key_with(
+            bindable,
+            crate::ofox_secret::default_store(),
+            |key_id| async move {
+                let bearer = manager
+                    .read()
+                    .await
+                    .get_valid_access_token()
+                    .await
+                    .map_err(|error| ApiKeyError::Unauthorized(error.to_string()))?;
+                crate::ofox_api_keys::delete_remote(&key_id, &bearer).await
+            },
+        )
+        .await;
+        super::model_selection::notify(&self.app, vec![bindable.as_str().into()]);
+        outcome
+    }
+
+    fn forget_bound(&self, tool: &str) -> Result<(), String> {
+        forget_bound_tool(tool)?;
+        // The tray popover and the health loop re-read the bound tools on this.
+        let _ = self.app.emit("ofox-prefs-updated", ());
+        Ok(())
+    }
+
+    async fn execute(&self, action: &Action, log: &(dyn Fn(&str) + Sync)) -> Result<(), String> {
+        perform(action, log, UNINSTALL_TIMEOUT).await
+    }
+}
+
+/// What an uninstall would do to `tool`, without doing any of it.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn uninstall_tool_preview(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ofox_state: State<'_, OfoxAuthState>,
+    tool: String,
+) -> Result<UninstallPreview, String> {
+    preview(&Live::new(app, &state, &ofox_state), &tool).await
+}
+
+/// Unbind `tool`, revoke its Ofox key, and remove the program by how it was
+/// installed. The agent's own data is kept. Progress goes out as
+/// `tool-uninstall-progress` events.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn uninstall_tool(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    ofox_state: State<'_, OfoxAuthState>,
+    tool: String,
+    operation_id: String,
+) -> Result<UninstallResult, String> {
+    if operation_id.is_empty() || operation_id.len() > 128 {
+        return Err("Invalid operation ID".into());
+    }
+    let live = Live::new(app.clone(), &state, &ofox_state);
+    let sink = |step: u32, line: &str| {
+        let _ = app.emit(
+            "tool-uninstall-progress",
+            json!({
+                "operationId": operation_id,
+                "line": line,
+                "step": step,
+                "totalSteps": TOTAL_STEPS,
+            }),
+        );
+    };
+    uninstall(&live, &tool, &sink).await
 }
 
 #[cfg(test)]
@@ -1994,7 +2266,7 @@ options:
             let fake = Fake::new([Ok(inspection)]);
             let preview = preview(&fake, tool).await.unwrap();
             assert_eq!(preview.blocked_reason, reason, "{tool}");
-            assert_eq!(preview.installed, !matches!(reason, None));
+            assert_eq!(preview.installed, reason.is_some());
         }
         let fake = Fake::new([Ok(codex_by_npm())]);
         let _running = ToolOperationGuard::acquire("codex").unwrap();
@@ -2185,5 +2457,43 @@ options:
             .unwrap_err();
         assert!(error.contains("Uninstall timed out"), "{error}");
         assert_eq!(UNINSTALL_TIMEOUT, Duration::from_secs(300));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "Manual acceptance: moves a throwaway app bundle to the real Trash"]
+    fn manual_trash_moves_a_bundle_into_the_users_trash() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = temp.path().join("Ofox Uninstall Probe.app");
+        touch(&bundle.join("Contents/Info.plist"), "probe");
+        trash_bundle(&bundle).unwrap();
+        assert!(!bundle.exists());
+        assert!(
+            trash_bundle(&bundle).is_err(),
+            "a bundle that is gone is an error"
+        );
+    }
+
+    /// Read-only: shows what an uninstall would do to each tool installed here.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore = "Manual probe of the installed tools; changes nothing"]
+    async fn manual_plan_installed_tools() {
+        let home = crate::config::get_home_dir();
+        for tool in UNINSTALLABLE {
+            let decision = match inspect_machine(tool).await {
+                Ok(inspection) => decide(tool, &inspection, &home, kept_data(tool), Os::current()),
+                Err(error) => {
+                    println!("{tool}: {error}");
+                    continue;
+                }
+            };
+            match decision {
+                Decision::NotInstalled => println!("{tool}: not installed"),
+                Decision::Plan(plan) => println!("{tool}: {plan:#?}"),
+                Decision::Manual(manual) => println!("{tool}: manual {manual:?}"),
+                Decision::AppRunning => println!("{tool}: app running"),
+            }
+        }
     }
 }

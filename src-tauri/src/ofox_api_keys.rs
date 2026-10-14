@@ -425,7 +425,7 @@ pub async fn revoke_remote<T: Into<BindableTool>>(
 }
 
 /// `DELETE /openapi/api-keys/{id}`。404 视为成功（服务端已经没有这把 key）。
-async fn delete_remote(key_id: &str, bearer: &str) -> Result<(), ApiKeyError> {
+pub(crate) async fn delete_remote(key_id: &str, bearer: &str) -> Result<(), ApiKeyError> {
     let url = crate::ofox_apex::openapi_api_key_url(key_id);
     let resp = crate::proxy::http_client::get()
         .delete(url)
