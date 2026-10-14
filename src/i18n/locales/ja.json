@@ -276,6 +276,10 @@
       "pill": "新バージョン v{{version}}",
       "now": "今すぐ更新",
       "openFailed": "ダウンロードページを開けませんでした"
+    },
+    "openFailed": "リンクを開けませんでした",
+    "usage": {
+      "webDetails": "ウェブで詳しい使用量を見る ↗"
     }
   },
   "firstRunNotice": {
@@ -2836,11 +2840,8 @@
   },
   "modelExperience": {
     "multiDescription": "選択順にモデル集合を保存します。ツール内でこれらのモデルを切り替えられます。",
-    "navigation": "ツールとセッション",
     "nav": {
-      "tools": "ツール",
-      "profiles": "モデルプラン",
-      "sessions": "セッション"
+      "profiles": "モデルプラン"
     },
     "loading": "モデル状態を読み込み中…",
     "stateFailed": "モデル状態を読み込めません",

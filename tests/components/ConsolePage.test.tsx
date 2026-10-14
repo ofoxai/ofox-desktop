@@ -96,7 +96,8 @@ vi.mock("@/components/console/ManageToolDialog", () => ({
     tool ? <div role="dialog">管理：{tool.label}</div> : null,
 }));
 vi.mock("@/components/console/OfoxSettingsDialog", () => ({
-  default: () => null,
+  default: ({ open }: { open: boolean }) =>
+    open ? <div role="dialog">偏好设置</div> : null,
 }));
 vi.mock("@/components/ConfirmDialog", () => ({ ConfirmDialog: () => null }));
 vi.mock("@/components/UserAvatar", () => ({ UserAvatar: () => null }));
@@ -218,7 +219,7 @@ beforeEach(async () => {
 });
 
 describe("Console title bar", () => {
-  it("draws its own title strip under the macOS overlay title bar", async () => {
+  it("draws its own brand under the macOS overlay title bar", async () => {
     render(<ConsolePage boundTools={[]} />);
     expect(await screen.findByText("Ofox Desktop")).toBeVisible();
   });
@@ -229,9 +230,26 @@ describe("Console title bar", () => {
     await screen.findByText("Test User");
     expect(screen.queryByText("Ofox Desktop")).toBeNull();
   });
+
+  it("draws on the canvas, without the orange gradient", async () => {
+    const { container } = render(<ConsolePage boundTools={[]} />);
+    await screen.findByText("Test User");
+    expect(container.firstChild).toHaveClass("bg-canvas");
+    expect(container.firstChild).not.toHaveClass("bg-gradient-to-br");
+  });
 });
 
 describe("Console navigation", () => {
+  it("offers 工具, 会话 and 用量, and no 模型方案 tab", async () => {
+    render(<ConsolePage boundTools={[]} />);
+    await screen.findByText("Test User");
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+      "工具",
+      "会话",
+      "用量",
+    ]);
+  });
+
   it("keeps tools mounted and retains the missing-tools expansion across Sessions", async () => {
     localTools = [
       localTool("claude", "1.0"),
@@ -248,6 +266,94 @@ describe("Console navigation", () => {
     fireEvent.click(screen.getByRole("tab", { name: "工具" }));
     expect(screen.getByRole("group", { name: "WorkBuddy" })).toBe(row);
     expect(fold).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("mounts 用量 on its first visit and keeps it, hidden, after", async () => {
+    render(<ConsolePage boundTools={[]} />);
+    await screen.findByText("Test User");
+    const tools = screen.getByRole("tabpanel", { name: "工具" });
+    expect(document.getElementById("shell-panel-usage")).toBeNull();
+
+    fireEvent.click(screen.getByRole("tab", { name: "用量" }));
+    const usage = screen.getByRole("tabpanel", { name: "用量" });
+    expect(usage).toBeVisible();
+    expect(tools).toBeInTheDocument();
+    expect(tools).not.toBeVisible();
+
+    fireEvent.click(screen.getByRole("tab", { name: "工具" }));
+    expect(screen.getByRole("tabpanel", { name: "工具" })).toBe(tools);
+    expect(tools).toBeVisible();
+    expect(usage).toBeInTheDocument();
+    expect(usage).not.toBeVisible();
+  });
+});
+
+describe("Console header", () => {
+  it("has the one refresh, in the header, and no footer links", async () => {
+    render(<ConsolePage boundTools={[]} />);
+    await screen.findByText("Test User");
+    const refresh = screen.getAllByRole("button", { name: "刷新" });
+    expect(refresh).toHaveLength(1);
+    expect(refresh[0].closest("header")).not.toBeNull();
+    expect(screen.queryByText("查看详细用量 ↗")).toBeNull();
+    expect(screen.queryByText("Ofox 网站 ↗")).toBeNull();
+  });
+
+  it("opens the settings from the header", async () => {
+    render(<ConsolePage boundTools={[]} />);
+    await screen.findByText("Test User");
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    expect(screen.getByRole("dialog")).toHaveTextContent("偏好设置");
+  });
+
+  it("refreshes the balance, not the tools, while 用量 is open", async () => {
+    mocks.getUserInfo.mockResolvedValue({
+      name: "Test User",
+      balance: { balance: 12.5 },
+    });
+    localTools = [localTool("claude", "2.1.293")];
+    render(<ConsolePage boundTools={["claude"]} />);
+    await screen.findByRole("group", { name: "Claude Code" });
+    await waitFor(() => expect(mocks.getUserInfo).toHaveBeenCalled());
+    const detections = mocks.invoke.mock.calls.filter(
+      ([command]) => command === "get_tool_versions",
+    ).length;
+
+    fireEvent.click(screen.getByRole("tab", { name: "用量" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+
+    await waitFor(() =>
+      expect(mocks.toast.success).toHaveBeenCalledWith("余额已更新：$12.50"),
+    );
+    expect(
+      mocks.invoke.mock.calls.filter(
+        ([command]) => command === "get_tool_versions",
+      ),
+    ).toHaveLength(detections);
+    expect(toolUpdatesApi.check).not.toHaveBeenCalled();
+  });
+});
+
+describe("Console usage page", () => {
+  it("shows the balance and links to the detailed usage on the web", async () => {
+    mocks.getUserInfo.mockResolvedValue({
+      name: "Test User",
+      balance: { balance: 12.5 },
+    });
+    render(<ConsolePage boundTools={[]} />);
+    await screen.findAllByText("$12.50");
+
+    fireEvent.click(screen.getByRole("tab", { name: "用量" }));
+    const usage = screen.getByRole("tabpanel", { name: "用量" });
+    expect(within(usage).getByTestId("balance-card")).toHaveTextContent(
+      "$12.50",
+    );
+    fireEvent.click(
+      within(usage).getByRole("button", { name: "在网页查看详细用量 ↗" }),
+    );
+    expect(mocks.openExternal).toHaveBeenCalledWith(
+      "https://app.ofox.ai/dashboard",
+    );
   });
 });
 

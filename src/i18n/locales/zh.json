@@ -276,6 +276,10 @@
       "pill": "新版本 v{{version}}",
       "now": "立即更新",
       "openFailed": "无法打开下载页面"
+    },
+    "openFailed": "无法打开链接",
+    "usage": {
+      "webDetails": "在网页查看详细用量 ↗"
     }
   },
   "firstRunNotice": {
@@ -2836,11 +2840,8 @@
   },
   "modelExperience": {
     "multiDescription": "保存一组模型，顺序按选择顺序保留。工具内可在这组模型间切换。",
-    "navigation": "工具与会话导航",
     "nav": {
-      "tools": "工具",
-      "profiles": "模型方案",
-      "sessions": "会话"
+      "profiles": "模型方案"
     },
     "loading": "正在读取模型状态…",
     "stateFailed": "无法读取模型状态",

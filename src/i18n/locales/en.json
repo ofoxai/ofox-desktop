@@ -276,6 +276,10 @@
       "pill": "New v{{version}}",
       "now": "Update now",
       "openFailed": "Couldn't open the download page"
+    },
+    "openFailed": "Couldn't open the link",
+    "usage": {
+      "webDetails": "View detailed usage on the web ↗"
     }
   },
   "firstRunNotice": {
@@ -2836,11 +2840,8 @@
   },
   "modelExperience": {
     "multiDescription": "Save a model set in selection order. Switch among these models inside the tool.",
-    "navigation": "Tools and sessions",
     "nav": {
-      "tools": "Tools",
-      "profiles": "Model profiles",
-      "sessions": "Sessions"
+      "profiles": "Model profiles"
     },
     "loading": "Loading model state…",
     "stateFailed": "Unable to read model state",
