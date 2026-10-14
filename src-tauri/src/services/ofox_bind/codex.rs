@@ -135,8 +135,7 @@ pub(crate) fn write_bound_config(
     let path = get_codex_config_path();
     let current = read_text(&path)?.unwrap_or_default();
     let merged = apply_patch(&current, &bound_patch(template_config, api_key)?)?;
-    txn.write(&path, merged.as_bytes())
-        .and_then(|()| txn.set_mode(&path, BOUND_CONFIG_MODE))
+    txn.write_with_mode(&path, merged.as_bytes(), BOUND_CONFIG_MODE)
         .map_err(|e| format!("写入 Codex 配置失败：{e}"))
 }
 
@@ -313,9 +312,12 @@ pub(crate) fn migrate_legacy_shape(
 
     let mut txn = FileTxn::new();
     let result = (|| {
-        txn.write(&config_path, migrated.to_string().as_bytes())
-            .and_then(|()| txn.set_mode(&config_path, BOUND_CONFIG_MODE))
-            .map_err(|e| format!("迁移 Codex 配置失败：{e}"))?;
+        txn.write_with_mode(
+            &config_path,
+            migrated.to_string().as_bytes(),
+            BOUND_CONFIG_MODE,
+        )
+        .map_err(|e| format!("迁移 Codex 配置失败：{e}"))?;
         if let (Some(text), Some(key)) = (auth_text.as_deref(), key.as_deref()) {
             if let Some(edit) = strip_ofox_key_from_auth(text, Some(key))? {
                 apply_auth_edit(&mut txn, &auth_path, edit)?;
@@ -441,8 +443,7 @@ pub(crate) fn strip_flag_codex_ignores() -> Result<bool, String> {
         return Ok(false);
     }
     let mut txn = FileTxn::new();
-    txn.write(&path, doc.to_string().as_bytes())
-        .and_then(|()| txn.set_mode(&path, BOUND_CONFIG_MODE))
+    txn.write_with_mode(&path, doc.to_string().as_bytes(), BOUND_CONFIG_MODE)
         .map_err(|e| format!("写入 Codex 配置失败：{e}"))?;
     Ok(true)
 }

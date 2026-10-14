@@ -216,6 +216,48 @@ async fn bind_never_creates_auth_json_and_unbind_removes_what_bind_created() {
     assert_eq!(report.files_removed.len(), 1);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn a_codex_config_created_by_bind_is_private_and_leaves_no_temp_file() {
+    let home = Home::new();
+    let db = db_with_default_provider();
+
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+
+    assert_eq!(
+        crate::config::file_mode(&home.codex("config.toml")),
+        Some(0o600)
+    );
+    let names: Vec<_> = fs::read_dir(home.codex(""))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["config.toml"]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn bind_writes_through_a_symlinked_codex_config_and_keeps_the_link() {
+    let home = Home::new();
+    let dotfiles = home.dir.path().join("dotfiles/codex.toml");
+    write(&dotfiles, USER_CONFIG);
+    fs::create_dir_all(home.codex("")).unwrap();
+    std::os::unix::fs::symlink(&dotfiles, home.codex("config.toml")).unwrap();
+    let db = db_with_default_provider();
+
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+
+    let link = fs::symlink_metadata(home.codex("config.toml")).unwrap();
+    assert!(link.file_type().is_symlink(), "the link was replaced");
+    let bound = toml_at(&dotfiles);
+    assert_eq!(
+        bound["model_providers"]["ofox"]["experimental_bearer_token"].as_str(),
+        Some(KEY)
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn managed_keys_revert_even_if_edited_while_bound_and_new_mcp_is_kept() {

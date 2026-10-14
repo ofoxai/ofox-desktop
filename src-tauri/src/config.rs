@@ -540,6 +540,18 @@ impl FileTxn {
         atomic_write(path, data)
     }
 
+    /// 写文件并在创建时就给定权限（见 [`AtomicOpts::mode`]）：含 API key 的文件不会有
+    /// 先按 umask 落盘、再收紧的空窗；已有文件会被改成这个权限，回滚时还原。
+    pub(crate) fn write_with_mode(
+        &mut self,
+        path: &Path,
+        data: &[u8],
+        mode: u32,
+    ) -> Result<(), AppError> {
+        self.remember(path)?;
+        atomic_write_with(path, data, AtomicOpts { mode: Some(mode) })
+    }
+
     pub(crate) fn set_mode(&mut self, path: &Path, mode: u32) -> Result<(), AppError> {
         self.remember(path)?;
         set_file_mode(path, mode)
@@ -605,6 +617,37 @@ mod tests {
         txn.set_mode(&path, 0o600).unwrap();
         txn.rollback().unwrap();
 
+        assert_eq!(file_mode(&path), Some(0o644));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_txn_write_with_mode_creates_the_file_private_and_rollback_removes_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+
+        let mut txn = FileTxn::new();
+        txn.write_with_mode(&path, b"key = 1\n", 0o600).unwrap();
+
+        assert_eq!(file_mode(&path), Some(0o600));
+        txn.rollback().unwrap();
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_txn_write_with_mode_tightens_an_existing_file_and_rollback_restores_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, b"key = 0\n").unwrap();
+        set_file_mode(&path, 0o644).unwrap();
+
+        let mut txn = FileTxn::new();
+        txn.write_with_mode(&path, b"key = 1\n", 0o600).unwrap();
+        assert_eq!(file_mode(&path), Some(0o600));
+        txn.rollback().unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"key = 0\n");
         assert_eq!(file_mode(&path), Some(0o644));
     }
 

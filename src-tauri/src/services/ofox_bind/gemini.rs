@@ -112,8 +112,7 @@ pub(crate) fn write_bound(
             )?);
         }
     }
-    txn.write(&env_path, env.as_bytes())
-        .and_then(|()| txn.set_mode(&env_path, ENV_MODE))
+    txn.write_with_mode(&env_path, env.as_bytes(), ENV_MODE)
         .and_then(|()| match settings {
             Some(text) => txn.write(&settings_path, text.as_bytes()),
             None => Ok(()),

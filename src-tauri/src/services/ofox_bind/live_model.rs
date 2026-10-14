@@ -136,8 +136,7 @@ fn align_env_with_remembered_model(tool: Tool) -> Result<bool, String> {
             }
             let updated = env_file::set_value(&env, "GEMINI_MODEL", Some(&model));
             // `.env` 里有 key，和绑定时一样只给自己读写。
-            txn.write(&env_path, updated.as_bytes())
-                .and_then(|()| txn.set_mode(&env_path, super::gemini::ENV_MODE))
+            txn.write_with_mode(&env_path, updated.as_bytes(), super::gemini::ENV_MODE)
                 .map_err(|e| format!("写入 Gemini 配置失败：{e}"))?;
             true
         }
