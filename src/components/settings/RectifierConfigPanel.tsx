@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import { MenuSelect } from "@/components/ui/menu-select";
 import {
   settingsApi,
   type RectifierConfig,
@@ -178,23 +179,26 @@ export function RectifierConfigPanel() {
                 <div className="space-y-0.5">
                   <Label>{t("settings.advanced.optimizer.cacheTtl")}</Label>
                 </div>
-                <select
-                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                <MenuSelect
+                  aria-label={t("settings.advanced.optimizer.cacheTtl")}
                   value={optimizerConfig.cacheTtl}
                   disabled={
                     !optimizerConfig.enabled || !optimizerConfig.cacheInjection
                   }
-                  onChange={(e) =>
-                    handleOptimizerChange({ cacheTtl: e.target.value })
-                  }
-                >
-                  <option value="5m">
-                    {t("settings.advanced.optimizer.cacheTtl5m")}
-                  </option>
-                  <option value="1h">
-                    {t("settings.advanced.optimizer.cacheTtl1h")}
-                  </option>
-                </select>
+                  onChange={(cacheTtl) => handleOptimizerChange({ cacheTtl })}
+                  options={[
+                    {
+                      value: "5m",
+                      label: t("settings.advanced.optimizer.cacheTtl5m"),
+                    },
+                    {
+                      value: "1h",
+                      label: t("settings.advanced.optimizer.cacheTtl1h"),
+                    },
+                  ]}
+                  width={160}
+                  align="end"
+                />
               </div>
             )}
           </div>

@@ -9,7 +9,6 @@ const SRC = path.join(ROOT, "src");
 // task that gives it the app's own menu; nothing may be added here.
 const ALLOWLIST = new Set<string>([
   "src/components/sessions/SessionsPanel.tsx",
-  "src/components/settings/RectifierConfigPanel.tsx",
 ]);
 
 function relative(file: string): string {
