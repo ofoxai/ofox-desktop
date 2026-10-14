@@ -1002,6 +1002,29 @@ async fn claude_endpoint_the_user_repointed_is_kept_but_the_ofox_model_and_key_g
 
 #[tokio::test]
 #[serial]
+async fn claude_settings_the_user_deleted_while_bound_come_back_as_before_binding() {
+    let home = Home::new();
+    let settings = home.claude("settings.json");
+    write(&settings, CLAUDE_RELAY);
+    let db = db_for(Tool::Claude, claude_template(Some("anthropic/claude-x")));
+    bind(&db, Tool::Claude, "claude", KEY).await.expect("bind");
+    let mut edited = json_at(&settings);
+    let env = edited["env"].as_object_mut().unwrap();
+    env.remove("ANTHROPIC_BASE_URL");
+    env.remove("ANTHROPIC_MODEL");
+    write(&settings, &serde_json::to_string_pretty(&edited).unwrap());
+
+    let report = unbind(&db, Tool::Claude, "claude", &[], false)
+        .await
+        .expect("unbind");
+
+    let original: Value = serde_json::from_str(CLAUDE_RELAY).unwrap();
+    assert_eq!(json_at(&settings)["env"], original["env"]);
+    assert!(report.kept_keys.is_empty(), "{:?}", report.kept_keys);
+}
+
+#[tokio::test]
+#[serial]
 async fn claude_bind_refuses_settings_it_cannot_parse() {
     let home = Home::new();
     let settings = home.claude("settings.json");

@@ -2,7 +2,9 @@
 //!
 //! Ofox 每次写配置都记下自己写了什么（[`super::record::BindEnvelope::written`]）。
 //! 解绑时逐个字段比对：还是 Ofox 写的样子、或者一看就是 Ofox 的，才还原成绑定前；
-//! 绑定之后用户自己改过的值留给用户。没有这份记录的旧绑定照旧全部还原。
+//! 绑定之后用户自己改过的值留给用户。字段被删掉了（没有值）就补回绑定前的值——
+//! 和 magpie 的 Disconnect 一样，空着的字段回到连接前的样子。没有这份记录的旧绑定
+//! 照旧全部还原。
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -153,7 +155,7 @@ pub(crate) fn record_write(
     }
 }
 
-/// 解绑时留给用户、不还原的字段。`written` 里没记的字段照旧还原。
+/// 解绑时留给用户、不还原的字段。`written` 里没记的字段、现在没有值的字段都还原。
 pub(crate) fn kept(leaves: &[Leaf], current: &Leaves, written: &Leaves) -> BTreeSet<String> {
     leaves
         .iter()
@@ -168,7 +170,9 @@ fn restores(leaf: &Leaf, leaves: &[Leaf], current: &Leaves, written: &Leaves) ->
     let as_written = written
         .get(&id)
         .is_none_or(|was| recorded(&id, now) == *was);
-    as_written
+    // 删掉的字段补回绑定前的值（原来也没有就还是没有）。
+    now.is_null()
+        || as_written
         || match leaf.policy {
             LeafPolicy::Route(ofox) => ofox(now),
             LeafPolicy::Model { route } => leaves
@@ -242,6 +246,16 @@ mod tests {
         );
 
         assert!(!kept(LEAVES, &leaves("ofox", "m", "high"), &written).contains("provider"));
+    }
+
+    #[test]
+    fn a_field_left_absent_goes_back_to_its_value_before_binding() {
+        let current = leaves_at(&json!({ "model": "relay-model" }), LEAVES);
+
+        let kept = kept(LEAVES, &current, &written());
+
+        assert!(!kept.contains("provider"), "{kept:?}");
+        assert!(!kept.contains("effort"), "{kept:?}");
     }
 
     #[test]

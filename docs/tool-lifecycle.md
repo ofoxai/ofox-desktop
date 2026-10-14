@@ -57,6 +57,10 @@ On unbind each managed field is judged on its own:
   Gemini's sign-in type, OpenClaw `models.mode`, OpenCode `$schema`): restored only
   when it is still what OFox wrote.
 
+A managed field that is absent at unbind (deleted while bound, or moved away by
+the agent) gets its pre-bind value back, as magpie's Disconnect refills an empty
+field; one that had no pre-bind value stays absent.
+
 Kept fields that differ from the pre-bind value are listed in the report's
 `keptKeys` (names only, no values) with the `userValueKept` warning; preview and
 unbind report the same. Records written before this rule (no `written`), and
