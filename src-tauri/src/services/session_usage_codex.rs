@@ -247,10 +247,14 @@ fn collect_jsonl_recursive(dir: &Path, files: &mut Vec<PathBuf>, depth: u32, max
 /// 同步单�� Codex JSONL 文件，返回 (imported, skipped)
 fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppError> {
     let file_path_str = file_path.to_string_lossy().to_string();
+    let file_stem = file_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("rollout");
 
     // 获取文件元数据
     let metadata = fs::metadata(file_path)
-        .map_err(|e| AppError::Config(format!("无法读取文���元数据: {e}")))?;
+        .map_err(|e| AppError::Config(format!("无法读取文件元数据: {e}")))?;
     let file_modified = metadata
         .modified()
         .ok()
@@ -414,7 +418,7 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
 
                 // 生成唯一 request_id
                 let session_id_str = state.session_id.as_deref().unwrap_or("unknown");
-                let request_id = format!("codex_session:{}:{}", session_id_str, state.event_index);
+                let ids = CodexRequestIds::new(session_id_str, file_stem, state.event_index);
 
                 // 提取时间戳
                 let timestamp = value
@@ -424,7 +428,7 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
 
                 match insert_codex_session_entry(
                     db,
-                    &request_id,
+                    &ids,
                     &delta,
                     &state.current_model,
                     state.session_id.as_deref(),
@@ -433,7 +437,7 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
                     Ok(true) => imported += 1,
                     Ok(false) => skipped += 1,
                     Err(e) => {
-                        log::warn!("[CODEX-SYNC] 插入失败 ({}): {e}", request_id);
+                        log::warn!("[CODEX-SYNC] 插入失败 ({}): {e}", ids.request_id);
                         skipped += 1;
                     }
                 }
@@ -448,16 +452,36 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
     Ok((imported, skipped))
 }
 
+/// The request id of a Codex call, and the one versions before v11 gave it.
+///
+/// A thread picked up again later may go on in another rollout file under the
+/// same thread id, which numbers its calls from 1 again, so the file's stem is
+/// part of the id. The old id (`codex_session:{thread}:{n}`) did not have it.
+struct CodexRequestIds {
+    request_id: String,
+    legacy_id: String,
+}
+
+impl CodexRequestIds {
+    fn new(session_id: &str, file_stem: &str, event_index: u32) -> Self {
+        Self {
+            request_id: format!("codex_session:{session_id}:{file_stem}:{event_index}"),
+            legacy_id: format!("codex_session:{session_id}:{event_index}"),
+        }
+    }
+}
+
 /// 插入单条 Codex 会话记录到 proxy_request_logs
 fn insert_codex_session_entry(
     db: &Database,
-    request_id: &str,
+    ids: &CodexRequestIds,
     delta: &DeltaTokens,
     model: &str,
     session_id: Option<&str>,
     timestamp: Option<&str>,
 ) -> Result<bool, AppError> {
     let conn = lock_conn!(db.conn);
+    let request_id = ids.request_id.as_str();
 
     // 检查是否已存在
     let exists: bool = conn
@@ -485,6 +509,19 @@ fn insert_codex_session_entry(
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0)
         });
+
+    // The same call stored by an earlier version under its old id (a file read
+    // again from its new path in archived_sessions/): same number, same time.
+    let logged_under_legacy_id: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = ?1 AND created_at = ?2",
+            rusqlite::params![ids.legacy_id, created_at],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+    if logged_under_legacy_id {
+        return Ok(false);
+    }
 
     // 计算费用
     let usage = TokenUsage {
@@ -883,5 +920,82 @@ mod tests {
             stored_tokens(&db, "codex_session:sess-fresh:%"),
             vec![(150, 120, 800, 50)]
         );
+    }
+
+    /// A rollout file of thread `sid` with one call at `ts`.
+    fn write_rollout(dir: &Path, name: &str, sid: &str, ts: &str, input: u64) -> PathBuf {
+        let path = dir.join(name);
+        let lines = [
+            serde_json::json!({"timestamp": ts, "type": "session_meta", "payload": {"id": sid}}),
+            serde_json::json!({"timestamp": ts, "type": "turn_context", "payload": {"model": "gpt-5.4"}}),
+            serde_json::json!({"timestamp": ts, "type": "event_msg", "payload": {"type": "token_count",
+                "info": {"total_token_usage": {"input_tokens": input, "cached_input_tokens": 0,
+                    "output_tokens": 10}}}}),
+        ];
+        let body: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        std::fs::write(&path, body.join("\n") + "\n").unwrap();
+        path
+    }
+
+    #[test]
+    fn a_thread_continued_in_a_second_rollout_file_keeps_both_files_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = write_rollout(
+            dir.path(),
+            "rollout-2026-05-22T09-57-31-thread-1.jsonl",
+            "thread-1",
+            "2026-05-22T02:00:34Z",
+            100,
+        );
+        let resumed = write_rollout(
+            dir.path(),
+            "rollout-2026-05-23T08-00-00-thread-1.jsonl",
+            "thread-1",
+            "2026-05-23T01:00:00Z",
+            300,
+        );
+        let db = Database::memory().unwrap();
+
+        sync_single_codex_file(&db, &first).unwrap();
+        sync_single_codex_file(&db, &resumed).unwrap();
+
+        let inputs: Vec<i64> = stored_tokens(&db, "codex_session:thread-1:%")
+            .into_iter()
+            .map(|t| t.0)
+            .collect();
+        assert_eq!(inputs, vec![100, 300]);
+    }
+
+    #[test]
+    fn a_call_logged_under_the_old_request_id_is_not_logged_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_rollout(
+            dir.path(),
+            "rollout-2026-05-22T09-57-31-thread-2.jsonl",
+            "thread-2",
+            "2026-05-22T02:00:34Z",
+            100,
+        );
+        let db = Database::memory().unwrap();
+        {
+            // what an earlier version stored for this call, before the file was
+            // moved to archived_sessions/ (a new path, so it is read again)
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO proxy_request_logs (request_id, provider_id, app_type, model,
+                    input_tokens, output_tokens, latency_ms, status_code, session_id,
+                    created_at, data_source)
+                 VALUES ('codex_session:thread-2:1', '_codex_session', 'codex', 'gpt-5.4',
+                    100, 10, 0, 200, 'thread-2', ?1, 'codex_session')",
+                [chrono::DateTime::parse_from_rfc3339("2026-05-22T02:00:34Z")
+                    .unwrap()
+                    .timestamp()],
+            )
+            .unwrap();
+        }
+
+        sync_single_codex_file(&db, &file).unwrap();
+
+        assert_eq!(stored_tokens(&db, "codex_session:thread-2:%").len(), 1);
     }
 }
