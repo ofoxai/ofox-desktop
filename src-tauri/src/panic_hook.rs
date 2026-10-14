@@ -66,6 +66,17 @@ fn get_system_info() -> String {
     )
 }
 
+/// 把一条崩溃记录追加到崩溃日志。panic 消息里可能带着 key（比如对一个含 key 的
+/// `Err` 做 `unwrap`），所以落盘前先脱敏。
+fn append_crash_entry(log_path: &std::path::Path, entry: &str) -> std::io::Result<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?;
+    file.write_all(crate::redact::scrub(entry).as_bytes())?;
+    file.flush()
+}
+
 /// 设置 panic hook，捕获崩溃信息并写入日志文件
 ///
 /// 在应用启动时调用此函数，确保任何 panic 都会被记录。
@@ -166,16 +177,13 @@ Stack Trace (Backtrace)
         );
 
         // 写入文件（追加模式）
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
-            let _ = file.write_all(crash_entry.as_bytes());
-            let _ = file.flush();
-
+        if append_crash_entry(&log_path, &crash_entry).is_ok() {
             // 记录日志文件位置到 stderr
             eprintln!("\n[Ofox-Switch] Crash log saved to: {}", log_path.display());
         }
 
         // 同时输出到 stderr（便于开发调试）
-        eprintln!("{crash_entry}");
+        eprintln!("{}", crate::redact::scrub(&crash_entry));
 
         // 调用默认 hook
         default_hook(panic_info);
@@ -191,6 +199,25 @@ mod tests {
         let path = get_crash_log_path();
         assert!(path.ends_with("crash.log"));
         assert!(path.to_string_lossy().contains(".ofox-desktop"));
+    }
+
+    #[test]
+    fn crash_log_never_holds_a_key_from_the_panic_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("crash.log");
+
+        append_crash_entry(
+            &log_path,
+            "Message: called `Result::unwrap()` on an `Err` value: \"401 for Bearer abcdefgh12345678 (sk-of-abc123456789)\"\n",
+        )
+        .unwrap();
+        append_crash_entry(&log_path, "Message: second crash, no secret\n").unwrap();
+
+        let written = std::fs::read_to_string(&log_path).unwrap();
+        assert!(!written.contains("abc123456789"), "{written}");
+        assert!(!written.contains("abcdefgh12345678"), "{written}");
+        assert!(written.contains("(«redacted»)"), "{written}");
+        assert!(written.contains("second crash, no secret"), "{written}");
     }
 
     #[test]
