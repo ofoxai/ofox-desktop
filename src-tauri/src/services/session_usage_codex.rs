@@ -630,7 +630,10 @@ fn update_sync_state(
 }
 
 /// ��找 Codex 模型定价（带归一化）
-fn find_codex_pricing(conn: &rusqlite::Connection, model_id: &str) -> Option<ModelPricing> {
+pub(crate) fn find_codex_pricing(
+    conn: &rusqlite::Connection,
+    model_id: &str,
+) -> Option<ModelPricing> {
     let normalized = normalize_codex_model(model_id);
 
     // 1. 精确匹配（归一化后的名称）

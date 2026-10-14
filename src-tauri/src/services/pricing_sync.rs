@@ -339,10 +339,11 @@ fn write_pricing_rows(db: &Database, models: &[NormalizedModel]) -> Result<usize
 /// 修正这些行。本函数兜底处理：扫描 cost=0 但 token>0 且 data_source 来自
 /// 离线日志的行，按当前 `model_pricing` 表重新计算。
 ///
-/// 只动这三种 data_source（pure-proxy 行不动 —— 那些是真的没 token 数据）：
+/// 只动这几种 data_source（pure-proxy 行不动 —— 那些是真的没 token 数据）：
 /// - `session_log` (claude)
 /// - `codex_session`
 /// - `gemini_session`
+/// - `opencode_session`
 ///
 /// 费用由 `proxy::usage::CostCalculator::calculate` 计算（唯一的计费公式；
 /// `input_tokens` 已是不含缓存的 fresh input）。
@@ -367,7 +368,7 @@ fn backfill_zero_cost_session_logs(db: &Database) -> Result<usize, AppError> {
                         cache_read_tokens, cache_creation_tokens,
                         cost_multiplier
                  FROM proxy_request_logs
-                 WHERE data_source IN ('session_log','codex_session','gemini_session')
+                 WHERE data_source IN ('session_log','codex_session','gemini_session','opencode_session')
                    AND CAST(total_cost_usd AS REAL) = 0
                    AND (input_tokens > 0 OR output_tokens > 0
                         OR cache_read_tokens > 0 OR cache_creation_tokens > 0)",

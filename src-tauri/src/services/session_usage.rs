@@ -326,7 +326,7 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
 }
 
 /// 获取文件的同步状态
-fn get_sync_state(db: &Database, file_path: &str) -> Result<(i64, i64), AppError> {
+pub(crate) fn get_sync_state(db: &Database, file_path: &str) -> Result<(i64, i64), AppError> {
     let conn = lock_conn!(db.conn);
     let result = conn.query_row(
         "SELECT last_modified, last_line_offset FROM session_log_sync WHERE file_path = ?1",
@@ -337,7 +337,7 @@ fn get_sync_state(db: &Database, file_path: &str) -> Result<(i64, i64), AppError
 }
 
 /// 更新文件的同步状态
-fn update_sync_state(
+pub(crate) fn update_sync_state(
     db: &Database,
     file_path: &str,
     last_modified: i64,
