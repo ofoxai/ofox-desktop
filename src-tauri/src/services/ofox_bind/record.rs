@@ -9,6 +9,8 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::redact::describe_json_error;
+
 pub(crate) const RECORD_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,13 +113,13 @@ pub(crate) enum StoredRecord {
 }
 
 pub(crate) fn parse_record(text: &str) -> Result<StoredRecord, String> {
-    let value: Value =
-        serde_json::from_str(text).map_err(|e| format!("绑定记录不是有效 JSON：{e}"))?;
+    let value: Value = serde_json::from_str(text)
+        .map_err(|e| format!("绑定记录不是有效 JSON：{}", describe_json_error(&e)))?;
     if value.get("v").is_none() {
         return Ok(StoredRecord::Legacy(value));
     }
-    let envelope: BindEnvelope =
-        serde_json::from_value(value).map_err(|e| format!("绑定记录格式无效：{e}"))?;
+    let envelope: BindEnvelope = serde_json::from_value(value)
+        .map_err(|e| format!("绑定记录格式无效：{}", describe_json_error(&e)))?;
     if envelope.v != RECORD_VERSION {
         return Err(format!("不支持的绑定记录版本：{}", envelope.v));
     }
@@ -182,6 +184,16 @@ mod tests {
                 StoredRecord::Legacy(_)
             ));
         }
+    }
+
+    #[test]
+    fn a_malformed_record_error_never_echoes_the_values_in_it() {
+        let text = r#"{"v":1,"kind":"snapshot","files":"sk-of-abc123456789"}"#;
+
+        let error = parse_record(text).unwrap_err();
+
+        assert!(error.contains("invalid type"), "{error}");
+        assert!(!error.contains("abc123456789"), "{error}");
     }
 
     #[test]

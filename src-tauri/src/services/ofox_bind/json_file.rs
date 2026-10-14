@@ -20,7 +20,12 @@ pub(crate) fn parse_object(text: Option<&str>, label: &str) -> Result<Value, Str
     }
     let value: Value = serde_json::from_str(text)
         .or_else(|error| json5::from_str(text).map_err(|_| error))
-        .map_err(|e| format!("{label} 不是有效的 JSON，请先修复后再操作：{e}"))?;
+        .map_err(|e| {
+            format!(
+                "{label} 不是有效的 JSON，请先修复后再操作：{}",
+                crate::redact::describe_json_error(&e)
+            )
+        })?;
     if value.is_object() {
         Ok(value)
     } else {
@@ -34,9 +39,12 @@ pub(crate) fn parse_object(text: Option<&str>, label: &str) -> Result<Value, Str
 /// 文件拒绝绑定。
 pub(crate) fn validate(text: &str, label: &str) -> Result<(), String> {
     parse_object(Some(text), label)?;
-    crate::json5_sections::parse(text)
-        .map(drop)
-        .map_err(|e| format!("{label} 解析失败，请先修复后再操作：{e}"))
+    crate::json5_sections::parse(text).map(drop).map_err(|e| {
+        format!(
+            "{label} 解析失败，请先修复后再操作：{}",
+            crate::redact::scrub(&e.to_string())
+        )
+    })
 }
 
 pub(crate) fn get(value: &Value, path: JsonPath) -> Option<&Value> {
@@ -231,6 +239,17 @@ mod tests {
 
     const LEAVES: &[JsonPath] = &[&["env", "BASE"], &["env", "TOKEN"]];
     const CONTAINERS: &[JsonPath] = &[&["env"]];
+
+    #[test]
+    fn unparseable_json_error_keeps_the_position_and_never_echoes_the_key_in_it() {
+        let broken = r#"{"env": {"TOKEN": "sk-of-abc123456789" oops}}"#;
+
+        let error = parse_object(Some(broken), "settings.json").unwrap_err();
+
+        assert!(error.contains("settings.json"), "{error}");
+        assert!(error.contains("line 1, column"), "{error}");
+        assert!(!error.contains("abc123456789"), "{error}");
+    }
 
     #[test]
     fn restores_original_bytes_when_only_managed_fields_changed() {

@@ -141,6 +141,29 @@ fn toml_at(path: &Path) -> toml::Table {
     toml::from_str(&fs::read_to_string(path).unwrap()).unwrap()
 }
 
+/// 解析不了的配置文件里有用户自己的 key：报错只说行列和原因，不能把那一行带出来。
+const LEAKY_KEY: &str = "sk-of-abc123456789";
+
+#[tokio::test]
+#[serial]
+async fn bind_error_for_an_unparseable_codex_config_does_not_echo_the_key_in_it() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    let broken = format!("model = \"gpt-5\"\nexperimental_bearer_token = \"{LEAKY_KEY}\" oops\n");
+    write(&config, &broken);
+    let db = db_with_default_provider();
+
+    let error = bind(&db, Tool::Codex, "codex", KEY).await.unwrap_err();
+
+    assert!(error.contains("line 2, column"), "{error}");
+    assert!(!error.contains("abc123456789"), "{error}");
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        broken,
+        "file untouched"
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn chatgpt_oauth_login_is_untouched_and_config_restored_byte_for_byte() {

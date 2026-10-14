@@ -36,8 +36,12 @@ const USER_TUNED_KEYS: &[&str] = &["model_reasoning_effort"];
 const BOUND_CONFIG_MODE: u32 = 0o600;
 
 fn parse_doc(text: &str) -> Result<DocumentMut, String> {
-    text.parse::<DocumentMut>()
-        .map_err(|e| format!("~/.codex/config.toml 不是有效的 TOML，请先修复后再操作：{e}"))
+    text.parse::<DocumentMut>().map_err(|e| {
+        format!(
+            "~/.codex/config.toml 不是有效的 TOML，请先修复后再操作：{}",
+            crate::redact::describe_toml_error(text, &e)
+        )
+    })
 }
 
 fn child_table<'a>(
@@ -229,8 +233,12 @@ pub(crate) fn strip_ofox_key_from_auth(
     auth_text: &str,
     ofox_key: Option<&str>,
 ) -> Result<Option<Option<String>>, String> {
-    let mut auth: Value =
-        serde_json::from_str(auth_text).map_err(|e| format!("auth.json 不是有效 JSON：{e}"))?;
+    let mut auth: Value = serde_json::from_str(auth_text).map_err(|e| {
+        format!(
+            "auth.json 不是有效 JSON：{}",
+            crate::redact::describe_json_error(&e)
+        )
+    })?;
     let Some(object) = auth.as_object_mut() else {
         return Ok(None);
     };
@@ -473,6 +481,27 @@ mod tests {
         // Everything else in the template is still applied.
         assert!(without.contains("model_provider = \"ofox\""));
         assert!(without.contains("experimental_bearer_token"));
+    }
+
+    #[test]
+    fn broken_auth_json_error_never_echoes_the_key_in_it() {
+        let auth = r#"{"OPENAI_API_KEY": "sk-of-abc123456789", "x": }"#;
+
+        let error = strip_ofox_key_from_auth(auth, Some("sk-of-abc123456789")).unwrap_err();
+
+        assert!(error.contains("line 1, column 47"), "{error}");
+        assert!(!error.contains("abc123456789"), "{error}");
+    }
+
+    #[test]
+    fn broken_config_error_never_echoes_the_key_in_it() {
+        let config =
+            "[model_providers.ofox]\nexperimental_bearer_token = \"sk-of-abc123456789\" oops\n";
+
+        let error = apply_patch(config, &bound_patch(TEMPLATE, "sk-of-TEST").unwrap()).unwrap_err();
+
+        assert!(error.contains("line 2, column"), "{error}");
+        assert!(!error.contains("abc123456789"), "{error}");
     }
 
     #[test]

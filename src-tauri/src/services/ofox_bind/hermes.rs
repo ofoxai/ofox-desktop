@@ -33,8 +33,12 @@ pub(crate) fn config_path() -> PathBuf {
 }
 
 fn parse(text: Option<&str>) -> Result<Yaml, String> {
-    let value = hermes_config::parse_config_text(text.unwrap_or_default())
-        .map_err(|e| format!("{LABEL} 不是有效的 YAML，请先修复后再操作：{e}"))?;
+    let value = hermes_config::parse_config_text(text.unwrap_or_default()).map_err(|e| {
+        format!(
+            "{LABEL} 不是有效的 YAML，请先修复后再操作：{}",
+            crate::redact::scrub(&e.to_string())
+        )
+    })?;
     match value {
         Yaml::Mapping(_) => Ok(value),
         // 只有注释的文件。
@@ -467,6 +471,15 @@ mod tests {
     use serde_json::json;
 
     const USER_CONFIG: &str = "# Hermes config\nmodel:\n  default: deepseek-chat\n  provider: deepseek\n  context_length: 32000\ncustom_providers:\n# my relay\n- name: deepseek\n  base_url: https://api.deepseek.com/v1\n  api_key: sk-ds\nskills:\n  enabled: true\n";
+
+    #[test]
+    fn unparseable_yaml_error_never_echoes_the_key_in_it() {
+        let broken = "api_key: sk-of-abc123456789\nmodel: [unclosed\n";
+
+        let error = parse(Some(broken)).unwrap_err();
+
+        assert!(!error.contains("abc123456789"), "{error}");
+    }
 
     fn template() -> Value {
         json!({

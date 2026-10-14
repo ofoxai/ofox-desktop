@@ -112,43 +112,47 @@ pub fn log_format(
 /// `toml_edit` / `serde_json` 自带的 `Display` 会把出错的源码行（里面可能就是 key）
 /// 原样打出来，错误字符串经 UI 和日志流出去之前必须走这里。
 pub fn describe_toml_error(source: &str, error: &toml_edit::TomlError) -> String {
-    let message = one_line(error.message());
-    match error
-        .span()
-        .and_then(|span| line_column(source, span.start))
-    {
+    describe_toml(source, error.message(), error.span())
+}
+
+/// 同 [`describe_toml_error`]，给 `toml` crate 的解析错误。
+pub fn describe_toml_de_error(source: &str, error: &toml::de::Error) -> String {
+    describe_toml(source, error.message(), error.span())
+}
+
+fn describe_toml(source: &str, message: &str, span: Option<std::ops::Range<usize>>) -> String {
+    let position = span.and_then(|span| line_column(source, span.start));
+    describe(position, message)
+}
+
+/// 同 [`describe_toml_error`]，给 `serde_json` 的解析错误。
+pub fn describe_json_error(error: &serde_json::Error) -> String {
+    let text = error.to_string();
+    // `Display` 在末尾附 ` at line L column C`，位置另行给出。
+    let message = text.rfind(" at line ").map_or(&*text, |at| &text[..at]);
+    let message = match error.classify() {
+        serde_json::error::Category::Io => "I/O error",
+        _ => message,
+    };
+    let position = (error.line() != 0).then(|| (error.line(), error.column()));
+    describe(position, message)
+}
+
+fn describe(position: Option<(usize, usize)>, message: &str) -> String {
+    let message = one_line(without_values(message));
+    match position {
         Some((line, column)) => format!("line {line}, column {column}: {message}"),
         None => message,
     }
 }
 
-/// 同 [`describe_toml_error`]，给 `serde_json` 的解析错误。
-pub fn describe_json_error(error: &serde_json::Error) -> String {
-    let message = match error.classify() {
-        // 语法错误只说哪里不对，不带内容。
-        serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
-            let text = error.to_string();
-            let without_position = text.rfind(" at line ").map_or(&*text, |at| &text[..at]);
-            one_line(without_position)
-        }
-        // 类型错误形如 `invalid type: string "sk-…", expected a boolean`：冒号后面是值，丢掉。
-        // `missing field `x`` 这类没有冒号的原样保留。
-        serde_json::error::Category::Data => {
-            let text = error.to_string();
-            let without_position = text.rfind(" at line ").map_or(&*text, |at| &text[..at]);
-            one_line(without_position.split(':').next().unwrap_or_default())
-        }
-        serde_json::error::Category::Io => "I/O error".to_string(),
-    };
-    if error.line() == 0 {
-        message
-    } else {
-        format!(
-            "line {}, column {}: {message}",
-            error.line(),
-            error.column()
-        )
-    }
+/// serde 的类型错误形如 `invalid type: string "sk-…", expected a boolean`：冒号后面是
+/// 出错的值，丢掉。语法错误和 `missing field `x`` 这类不带值的信息原样保留。
+fn without_values(message: &str) -> &str {
+    ["invalid type", "invalid value"]
+        .into_iter()
+        .find(|prefix| message.starts_with(&format!("{prefix}:")))
+        .unwrap_or(message)
 }
 
 /// 多行的错误信息合成一行，并保险起见再过一遍 [`scrub`]。
@@ -472,5 +476,32 @@ mod tests {
         let re = Regex::new(r"^\[\d{4}-\d{2}-\d{2}\]\[\d{2}:\d{2}:\d{2}\]\[INFO\]\[app\] started$")
             .unwrap();
         assert!(re.is_match(&line), "{line}");
+    }
+
+    #[test]
+    fn toml_de_error_keeps_position_and_message_but_not_the_source_line() {
+        let source = format!("model = \"gpt-5\"\n{KEY_LINE} oops\n");
+        let error = toml::from_str::<toml::Table>(&source).unwrap_err();
+        assert!(error.to_string().contains("abc123456789"));
+
+        let described = describe_toml_de_error(&source, &error);
+        assert!(described.starts_with("line 2, column "), "{described}");
+        assert!(!described.contains("abc123456789"), "{described}");
+    }
+
+    #[test]
+    fn toml_de_type_error_never_echoes_the_offending_value() {
+        #[derive(Debug, serde::Deserialize)]
+        struct Config {
+            #[allow(dead_code)]
+            flag: bool,
+        }
+        let source = "flag = \"sk-of-abc123456789\"\n";
+        let error = toml::from_str::<Config>(source).unwrap_err();
+        assert!(error.to_string().contains("abc123456789"));
+
+        let described = describe_toml_de_error(source, &error);
+        assert!(!described.contains("abc123456789"), "{described}");
+        assert!(described.contains("invalid type"), "{described}");
     }
 }
