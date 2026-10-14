@@ -22,8 +22,9 @@ export function AppHeader() {
   const { t } = useTranslation();
   const shell = useShell();
   const mac = isMac();
-  // wry looks only for the attribute's presence, and only on the element
-  // pressed: the tabs and buttons, which lack it, stay clickable.
+  // Tauri's drag script looks only at the element pressed, so the tabs and
+  // buttons, which lack the attribute, stay clickable. `no-drag` (index.css)
+  // also keeps them out of a CSS `-webkit-app-region: drag` area.
   const drag = mac ? { "data-tauri-drag-region": true } : {};
 
   return (
@@ -59,10 +60,10 @@ export function AppHeader() {
         }))}
         value={shell.active}
         onChange={shell.setActive}
-        className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
+        className="no-drag absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
       />
 
-      <div className="ml-auto flex items-center gap-0.5">
+      <div className="no-drag ml-auto flex items-center gap-0.5">
         <UpdatePill />
         <Button
           variant="icon"
