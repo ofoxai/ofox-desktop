@@ -42,6 +42,8 @@ mod services;
 mod session_manager;
 mod settings;
 mod store;
+#[cfg(test)]
+mod test_support;
 
 mod tray;
 mod tray_popover;

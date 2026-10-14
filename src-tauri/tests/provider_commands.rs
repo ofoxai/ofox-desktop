@@ -8,13 +8,11 @@ use cc_switch_lib::{
 #[path = "support.rs"]
 mod support;
 use std::collections::HashMap;
-use support::{create_test_state_with_config, ensure_test_home, reset_test_fs, test_mutex};
+use support::{create_test_state_with_config, sandbox};
 
 #[test]
 fn switch_provider_updates_codex_live_and_state() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let legacy_auth = json!({"OPENAI_API_KEY": "legacy-key"});
     let legacy_config = r#"[mcp_servers.legacy]
@@ -157,8 +155,7 @@ command = "say"
 
 #[test]
 fn switch_provider_missing_provider_returns_error() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
+    let _sandbox = sandbox();
 
     let mut config = MultiAppConfig::default();
     config
@@ -182,9 +179,7 @@ fn switch_provider_missing_provider_returns_error() {
 
 #[test]
 fn switch_provider_updates_claude_live_and_state() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let settings_path = cc_switch_lib::get_claude_settings_path();
     if let Some(parent) = settings_path.parent() {
@@ -289,7 +284,7 @@ fn switch_provider_updates_claude_live_and_state() {
 
     // v3.7.0+ 使用 SQLite 数据库而非 config.json
     // 验证数据已持久化到数据库
-    let home_dir = std::env::var("HOME").expect("HOME should be set by ensure_test_home");
+    let home_dir = std::env::var("HOME").expect("HOME should be set by the sandbox");
     let db_path = std::path::Path::new(&home_dir)
         .join(".ofox-desktop")
         .join("ofox-desktop.db");
@@ -312,9 +307,7 @@ fn switch_provider_updates_claude_live_and_state() {
 
 #[test]
 fn switch_provider_codex_missing_auth_returns_error_and_keeps_state() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let mut config = MultiAppConfig::default();
     {

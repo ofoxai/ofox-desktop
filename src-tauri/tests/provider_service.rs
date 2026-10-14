@@ -7,9 +7,7 @@ use cc_switch_lib::{
 
 #[path = "support.rs"]
 mod support;
-use support::{
-    create_test_state, create_test_state_with_config, ensure_test_home, reset_test_fs, test_mutex,
-};
+use support::{create_test_state, create_test_state_with_config, sandbox};
 
 fn sanitize_provider_name(name: &str) -> String {
     name.chars()
@@ -23,9 +21,7 @@ fn sanitize_provider_name(name: &str) -> String {
 
 #[test]
 fn migrate_legacy_common_config_usage_marks_historical_provider_enabled() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let mut config = MultiAppConfig::default();
     {
@@ -97,9 +93,7 @@ fn migrate_legacy_common_config_usage_marks_historical_provider_enabled() {
 
 #[test]
 fn provider_service_switch_codex_updates_live_and_config() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let legacy_auth = json!({ "OPENAI_API_KEY": "legacy-key" });
     let legacy_config = r#"[mcp_servers.legacy]
@@ -241,9 +235,7 @@ command = "say"
 
 #[test]
 fn sync_current_provider_for_app_keeps_live_takeover_and_updates_restore_backup() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let mut config = MultiAppConfig::default();
     {
@@ -340,9 +332,7 @@ fn sync_current_provider_for_app_keeps_live_takeover_and_updates_restore_backup(
 
 #[test]
 fn explicitly_cleared_common_snippet_is_not_auto_extracted() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let state = create_test_state().expect("create test state");
     state
@@ -378,9 +368,7 @@ fn explicitly_cleared_common_snippet_is_not_auto_extracted() {
 
 #[test]
 fn legacy_common_config_migration_flag_roundtrip() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let state = create_test_state().expect("create test state");
 
@@ -419,9 +407,8 @@ fn legacy_common_config_migration_flag_roundtrip() {
 
 #[test]
 fn switch_packycode_gemini_updates_security_selected_type() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let home = ensure_test_home();
+    let sandbox = sandbox();
+    let home = sandbox.home();
 
     let mut config = MultiAppConfig::default();
     {
@@ -472,9 +459,8 @@ fn switch_packycode_gemini_updates_security_selected_type() {
 
 #[test]
 fn packycode_partner_meta_triggers_security_flag_even_without_keywords() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let home = ensure_test_home();
+    let sandbox = sandbox();
+    let home = sandbox.home();
 
     let mut config = MultiAppConfig::default();
     {
@@ -527,9 +513,8 @@ fn packycode_partner_meta_triggers_security_flag_even_without_keywords() {
 
 #[test]
 fn switch_google_official_gemini_preserves_env_vars() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let home = ensure_test_home();
+    let sandbox = sandbox();
+    let home = sandbox.home();
 
     let mut config = MultiAppConfig::default();
     {
@@ -590,9 +575,7 @@ fn switch_google_official_gemini_preserves_env_vars() {
 
 #[test]
 fn provider_service_switch_claude_updates_live_and_state() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let settings_path = get_claude_settings_path();
     if let Some(parent) = settings_path.parent() {
@@ -684,9 +667,7 @@ fn provider_service_switch_claude_updates_live_and_state() {
 
 #[test]
 fn provider_service_switch_missing_provider_returns_error() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let state = create_test_state().expect("create test state");
 
@@ -705,9 +686,7 @@ fn provider_service_switch_missing_provider_returns_error() {
 
 #[test]
 fn provider_service_switch_codex_missing_auth_returns_error() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let mut config = MultiAppConfig::default();
     {
@@ -742,9 +721,8 @@ fn provider_service_switch_codex_missing_auth_returns_error() {
 
 #[test]
 fn provider_service_delete_codex_removes_provider_and_files() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let home = ensure_test_home();
+    let sandbox = sandbox();
+    let home = sandbox.home();
 
     let mut config = MultiAppConfig::default();
     {
@@ -805,9 +783,8 @@ fn provider_service_delete_codex_removes_provider_and_files() {
 
 #[test]
 fn provider_service_delete_claude_removes_provider_files() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let home = ensure_test_home();
+    let sandbox = sandbox();
+    let home = sandbox.home();
 
     let mut config = MultiAppConfig::default();
     {
@@ -865,9 +842,7 @@ fn provider_service_delete_claude_removes_provider_files() {
 
 #[test]
 fn provider_service_delete_current_provider_returns_error() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let mut config = MultiAppConfig::default();
     {

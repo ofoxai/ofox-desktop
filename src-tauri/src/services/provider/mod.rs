@@ -58,90 +58,19 @@ mod tests {
     use crate::provider::ProviderMeta;
     use crate::proxy::types::ProxyConfig;
     use crate::store::AppState;
+    use crate::test_support::sandbox;
     use serde_json::json;
     use serial_test::serial;
-    use std::env;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex, OnceLock};
-    use tempfile::TempDir;
-
-    struct TempHome {
-        #[allow(dead_code)]
-        dir: TempDir,
-        original_home: Option<String>,
-        original_userprofile: Option<String>,
-        original_test_home: Option<String>,
-    }
-
-    impl TempHome {
-        fn new() -> Self {
-            let dir = TempDir::new().expect("failed to create temp home");
-            let original_home = env::var("HOME").ok();
-            let original_userprofile = env::var("USERPROFILE").ok();
-            let original_test_home = env::var("CC_SWITCH_TEST_HOME").ok();
-
-            env::set_var("HOME", dir.path());
-            env::set_var("USERPROFILE", dir.path());
-            env::set_var("CC_SWITCH_TEST_HOME", dir.path());
-
-            Self {
-                dir,
-                original_home,
-                original_userprofile,
-                original_test_home,
-            }
-        }
-    }
-
-    impl Drop for TempHome {
-        fn drop(&mut self) {
-            match &self.original_home {
-                Some(value) => env::set_var("HOME", value),
-                None => env::remove_var("HOME"),
-            }
-
-            match &self.original_userprofile {
-                Some(value) => env::set_var("USERPROFILE", value),
-                None => env::remove_var("USERPROFILE"),
-            }
-
-            match &self.original_test_home {
-                Some(value) => env::set_var("CC_SWITCH_TEST_HOME", value),
-                None => env::remove_var("CC_SWITCH_TEST_HOME"),
-            }
-        }
-    }
-
-    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-    }
+    use std::sync::Arc;
 
     fn with_test_home<T>(test: impl FnOnce(&AppState, &Path) -> T) -> T {
-        let _guard = test_guard();
-        let temp = tempfile::tempdir().expect("tempdir");
-        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
-        let old_home = std::env::var_os("HOME");
-        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
-        std::env::set_var("HOME", temp.path());
+        let sandbox = sandbox();
 
         let db = Arc::new(Database::memory().expect("in-memory database"));
         let state = AppState::new(db);
-        let result = test(&state, temp.path());
-
-        match old_test_home {
-            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
-            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
-        }
-        match old_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-
-        result
+        test(&state, sandbox.home())
     }
 
     fn openclaw_provider(id: &str) -> Provider {
@@ -324,7 +253,7 @@ base_url = "http://localhost:8080"
     #[serial]
     async fn update_current_claude_provider_syncs_live_when_proxy_takeover_detected_without_backup()
     {
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));

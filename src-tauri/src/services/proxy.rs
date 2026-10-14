@@ -2034,56 +2034,8 @@ impl ProxyService {
 mod tests {
     use super::*;
     use crate::provider::ProviderMeta;
+    use crate::test_support::sandbox;
     use serial_test::serial;
-    use std::env;
-    use tempfile::TempDir;
-
-    struct TempHome {
-        #[allow(dead_code)]
-        dir: TempDir,
-        original_home: Option<String>,
-        original_userprofile: Option<String>,
-        original_test_home: Option<String>,
-    }
-
-    impl TempHome {
-        fn new() -> Self {
-            let dir = TempDir::new().expect("failed to create temp home");
-            let original_home = env::var("HOME").ok();
-            let original_userprofile = env::var("USERPROFILE").ok();
-            let original_test_home = env::var("CC_SWITCH_TEST_HOME").ok();
-
-            env::set_var("HOME", dir.path());
-            env::set_var("USERPROFILE", dir.path());
-            env::set_var("CC_SWITCH_TEST_HOME", dir.path());
-
-            Self {
-                dir,
-                original_home,
-                original_userprofile,
-                original_test_home,
-            }
-        }
-    }
-
-    impl Drop for TempHome {
-        fn drop(&mut self) {
-            match &self.original_home {
-                Some(value) => env::set_var("HOME", value),
-                None => env::remove_var("HOME"),
-            }
-
-            match &self.original_userprofile {
-                Some(value) => env::set_var("USERPROFILE", value),
-                None => env::remove_var("USERPROFILE"),
-            }
-
-            match &self.original_test_home {
-                Some(value) => env::set_var("CC_SWITCH_TEST_HOME", value),
-                None => env::remove_var("CC_SWITCH_TEST_HOME"),
-            }
-        }
-    }
 
     #[test]
     fn update_toml_base_url_updates_active_model_provider_base_url() {
@@ -2161,7 +2113,7 @@ model = "gpt-5.1-codex"
         // 模板）时，seed_live_from_active_provider 必须把模板原封写到磁盘的
         // ~/.codex/auth.json + config.toml，否则后续 update_toml_base_url 没
         // model_provider 可写，整条 takeover 链对 codex CLI v0.140 失效。
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2220,7 +2172,7 @@ model = "gpt-5.1-codex"
         // 接 seed_live_from_active_provider 之后的 takeover 改写一步：
         // update_toml_base_url 应该把代理 URL 落到 [model_providers.ofox].base_url，
         // 不再触发"无 model_provider → 顶层 fallback"那条已废弃路径。
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2266,7 +2218,7 @@ model = "gpt-5.1-codex"
     #[serial]
     async fn seed_live_from_active_provider_no_op_for_non_codex() {
         // Claude/Gemini 不在本次修复范围；helper 直接 Ok 返回，不写盘。
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2292,7 +2244,7 @@ model = "gpt-5.1-codex"
     #[tokio::test]
     #[serial]
     async fn sync_claude_token_does_not_add_anthropic_api_key() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2348,7 +2300,7 @@ model = "gpt-5.1-codex"
     #[tokio::test]
     #[serial]
     async fn sync_claude_token_respects_existing_api_key_field() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2404,7 +2356,7 @@ model = "gpt-5.1-codex"
     #[tokio::test]
     #[serial]
     async fn switch_proxy_target_updates_live_backup_when_taken_over() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2466,7 +2418,7 @@ model = "gpt-5.1-codex"
     #[tokio::test]
     #[serial]
     async fn hot_switch_provider_updates_claude_live_while_preserving_takeover_fields() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2570,7 +2522,7 @@ model = "gpt-5.1-codex"
     async fn hot_switch_provider_serializes_same_app_switches() {
         use tokio::time::{sleep, Duration};
 
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2663,7 +2615,7 @@ model = "gpt-5.1-codex"
     async fn restore_waits_for_hot_switch_and_restores_latest_backup() {
         use tokio::time::{sleep, Duration};
 
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2747,7 +2699,7 @@ model = "gpt-5.1-codex"
     #[tokio::test]
     #[serial]
     async fn update_live_backup_from_provider_applies_claude_common_config() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2803,7 +2755,7 @@ model = "gpt-5.1-codex"
     #[tokio::test]
     #[serial]
     async fn update_live_backup_from_provider_applies_codex_common_config() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2862,7 +2814,7 @@ base_url = "https://codex.example/v1"
     #[tokio::test]
     #[serial]
     async fn update_live_backup_from_provider_preserves_codex_mcp_servers() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2937,7 +2889,7 @@ base_url = "https://new.example/v1"
     #[tokio::test]
     #[serial]
     async fn update_live_backup_from_provider_keeps_new_codex_mcp_entries_on_conflict() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -3072,7 +3024,7 @@ command = "latest-command"
     async fn quit_and_crash_cleanup_keep_ofox_bind_records() {
         // 退出、停止、崩溃恢复都会整表清 proxy_live_backup。绑定记录在独立的表里，
         // 必须保留下来；「有绑定」也不能被当成「需要做接管清理」。
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
         let db = Arc::new(Database::memory().expect("init db"));
         let service = ProxyService::new(db.clone());

@@ -4,13 +4,11 @@ use cc_switch_lib::{import_provider_from_deeplink, parse_deeplink_url, AppState,
 
 #[path = "support.rs"]
 mod support;
-use support::{ensure_test_home, reset_test_fs, test_mutex};
+use support::sandbox;
 
 #[test]
 fn deeplink_import_claude_provider_persists_to_db() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let url = "ccswitch://v1/import?resource=provider&app=claude&name=DeepLink%20Claude&homepage=https%3A%2F%2Fexample.com&endpoint=https%3A%2F%2Fapi.example.com%2Fv1&apiKey=sk-test-claude-key&model=claude-sonnet-4&icon=claude";
     let request = parse_deeplink_url(url).expect("parse deeplink url");
@@ -44,9 +42,7 @@ fn deeplink_import_claude_provider_persists_to_db() {
 
 #[test]
 fn deeplink_import_codex_provider_builds_auth_and_config() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let url = "ccswitch://v1/import?resource=provider&app=codex&name=DeepLink%20Codex&homepage=https%3A%2F%2Fopenai.example&endpoint=https%3A%2F%2Fapi.openai.example%2Fv1&apiKey=sk-test-codex-key&model=gpt-4o&icon=openai";
     let request = parse_deeplink_url(url).expect("parse deeplink url");

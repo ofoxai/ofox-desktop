@@ -5,15 +5,13 @@ use cc_switch_lib::{
 
 #[path = "support.rs"]
 mod support;
-use support::{create_test_state, ensure_test_home, reset_test_fs, test_mutex};
+use support::{create_test_state, sandbox};
 
 // 测试使用 Mutex 进行串行化，跨 await 持锁是预期行为
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn default_cost_multiplier_commands_round_trip() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let state = create_test_state().expect("create test state");
 
@@ -46,9 +44,7 @@ async fn default_cost_multiplier_commands_round_trip() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn pricing_model_source_commands_round_trip() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let state = create_test_state().expect("create test state");
 

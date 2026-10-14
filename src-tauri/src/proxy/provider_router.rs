@@ -262,63 +262,14 @@ impl ProviderRouter {
 mod tests {
     use super::*;
     use crate::database::Database;
+    use crate::test_support::sandbox;
     use serde_json::json;
     use serial_test::serial;
-    use std::env;
-    use tempfile::TempDir;
-
-    struct TempHome {
-        #[allow(dead_code)]
-        dir: TempDir,
-        original_home: Option<String>,
-        original_userprofile: Option<String>,
-        original_test_home: Option<String>,
-    }
-
-    impl TempHome {
-        fn new() -> Self {
-            let dir = TempDir::new().expect("failed to create temp home");
-            let original_home = env::var("HOME").ok();
-            let original_userprofile = env::var("USERPROFILE").ok();
-            let original_test_home = env::var("CC_SWITCH_TEST_HOME").ok();
-
-            env::set_var("HOME", dir.path());
-            env::set_var("USERPROFILE", dir.path());
-            env::set_var("CC_SWITCH_TEST_HOME", dir.path());
-            crate::settings::reload_settings().expect("reload settings");
-
-            Self {
-                dir,
-                original_home,
-                original_userprofile,
-                original_test_home,
-            }
-        }
-    }
-
-    impl Drop for TempHome {
-        fn drop(&mut self) {
-            match &self.original_home {
-                Some(value) => env::set_var("HOME", value),
-                None => env::remove_var("HOME"),
-            }
-
-            match &self.original_userprofile {
-                Some(value) => env::set_var("USERPROFILE", value),
-                None => env::remove_var("USERPROFILE"),
-            }
-
-            match &self.original_test_home {
-                Some(value) => env::set_var("CC_SWITCH_TEST_HOME", value),
-                None => env::remove_var("CC_SWITCH_TEST_HOME"),
-            }
-        }
-    }
 
     #[tokio::test]
     #[serial]
     async fn test_provider_router_creation() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         let db = Arc::new(Database::memory().unwrap());
         let router = ProviderRouter::new(db);
 
@@ -329,7 +280,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_failover_disabled_uses_current_provider() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         let db = Arc::new(Database::memory().unwrap());
 
         let provider_a =
@@ -352,7 +303,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_failover_enabled_uses_queue_order_ignoring_current() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         let db = Arc::new(Database::memory().unwrap());
 
         // 设置 sort_index 来控制顺序：b=1, a=2
@@ -387,7 +338,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_failover_enabled_uses_queue_only_even_if_current_not_in_queue() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         let db = Arc::new(Database::memory().unwrap());
 
         let provider_a =
@@ -417,7 +368,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_select_providers_does_not_consume_half_open_permit() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         let db = Arc::new(Database::memory().unwrap());
 
         db.update_circuit_breaker_config(&CircuitBreakerConfig {
@@ -460,7 +411,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn test_release_permit_neutral_frees_half_open_slot() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         let db = Arc::new(Database::memory().unwrap());
 
         // 配置熔断器：1 次失败即熔断，0 秒超时立即进入 HalfOpen

@@ -7,7 +7,7 @@ use cc_switch_lib::AppType;
 
 #[path = "support.rs"]
 mod support;
-use support::{create_test_state, ensure_test_home, reset_test_fs, test_mutex};
+use support::{create_test_state, sandbox};
 
 // --------------------------------------------------------------------------
 // 辅助：所有 6 个 AppType
@@ -35,9 +35,7 @@ const OFOX_SEED_IDS: &[&str] = &[
 // --------------------------------------------------------------------------
 #[test]
 fn init_ofox_providers_inserts_six_seeds() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let state = create_test_state().expect("create test state");
     let count = state
@@ -82,9 +80,7 @@ fn init_ofox_providers_inserts_six_seeds() {
 // --------------------------------------------------------------------------
 #[test]
 fn init_ofox_providers_is_idempotent() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let state = create_test_state().expect("create test state");
 
@@ -113,9 +109,7 @@ fn init_ofox_providers_is_idempotent() {
 // --------------------------------------------------------------------------
 #[test]
 fn has_non_official_seed_returns_false_with_only_seeds() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let state = create_test_state().expect("create test state");
 
@@ -156,9 +150,7 @@ fn has_non_official_seed_returns_false_with_only_seeds() {
 // --------------------------------------------------------------------------
 #[test]
 fn has_non_official_seed_returns_true_with_user_provider() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let state = create_test_state().expect("create test state");
 
@@ -203,9 +195,7 @@ fn has_non_official_seed_returns_true_with_user_provider() {
 // --------------------------------------------------------------------------
 #[test]
 fn ofox_seed_settings_config_is_valid_json() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let state = create_test_state().expect("create test state");
     state.db.init_default_ofox_providers().expect("init ofox");

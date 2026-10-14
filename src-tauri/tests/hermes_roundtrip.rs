@@ -6,12 +6,9 @@ use cc_switch_lib::{hermes_config, update_settings, AppSettings};
 /// （例如 `rate_limit_delay`、`key_env`）必须透传，不能因为 UI 不感知就静默丢弃。
 /// 否则用户在 Hermes Web UI 配置的高级字段会在 CC Switch 编辑后消失。
 fn with_temp_hermes_dir<F: FnOnce(&std::path::Path)>(f: F) {
-    let guard = support::test_mutex().lock().expect("test mutex poisoned");
-    let home = support::ensure_test_home();
-    support::reset_test_fs();
+    let sandbox = support::sandbox();
 
-    let hermes_dir = home.join(".hermes-roundtrip");
-    let _ = std::fs::remove_dir_all(&hermes_dir);
+    let hermes_dir = sandbox.home().join(".hermes-roundtrip");
     std::fs::create_dir_all(&hermes_dir).expect("create temp hermes dir");
 
     update_settings(AppSettings {
@@ -22,10 +19,10 @@ fn with_temp_hermes_dir<F: FnOnce(&std::path::Path)>(f: F) {
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&hermes_dir)));
 
-    // Always restore settings and drop fixture dir, even on test failure.
+    // Always reset the settings override, even on test failure; the sandbox
+    // removes the fixture dir with the rest of its home.
     let _ = update_settings(AppSettings::default());
-    let _ = std::fs::remove_dir_all(&hermes_dir);
-    drop(guard);
+    drop(sandbox);
 
     if let Err(err) = result {
         std::panic::resume_unwind(err);

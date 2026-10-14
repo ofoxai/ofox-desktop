@@ -651,14 +651,10 @@ fn remove_dir_all_if_exists(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::sandbox;
     use rusqlite::Connection;
-    use std::sync::{Mutex, OnceLock};
+    use serial_test::serial;
     use tempfile::tempdir;
-
-    fn opencode_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     fn create_sqlite_schema(conn: &Connection) {
         conn.execute_batch(
@@ -806,14 +802,11 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)] // set_var/remove_var deprecated since Rust 1.81; safe here under mutex
+    #[serial]
     fn scan_sessions_sqlite_reads_temp_database() {
-        let _guard = opencode_env_lock().lock().expect("lock");
-        let temp = tempdir().expect("tempdir");
-        let original_xdg = std::env::var_os("XDG_DATA_HOME");
-        std::env::set_var("XDG_DATA_HOME", temp.path());
+        let sandbox = sandbox();
 
-        let base_dir = temp.path().join("opencode");
+        let base_dir = sandbox.home().join(".local/share/opencode");
         std::fs::create_dir_all(&base_dir).expect("create base dir");
         let db_path = base_dir.join("opencode.db");
         let conn = Connection::open(&db_path).expect("open sqlite db");
@@ -832,13 +825,6 @@ mod tests {
         drop(conn);
 
         let sessions = scan_sessions_sqlite();
-
-        #[allow(deprecated)]
-        if let Some(value) = original_xdg {
-            std::env::set_var("XDG_DATA_HOME", value);
-        } else {
-            std::env::remove_var("XDG_DATA_HOME");
-        }
 
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].session_id, "ses_2");
@@ -917,14 +903,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn delete_session_sqlite_removes_session() {
-        let _guard = opencode_env_lock().lock().expect("lock");
-        let temp = tempdir().expect("tempdir");
-        let original_xdg = std::env::var_os("XDG_DATA_HOME");
-        #[allow(deprecated)]
-        std::env::set_var("XDG_DATA_HOME", temp.path());
+        let sandbox = sandbox();
 
-        let base_dir = temp.path().join("opencode");
+        let base_dir = sandbox.home().join(".local/share/opencode");
         std::fs::create_dir_all(&base_dir).expect("create base dir");
         let db_path = base_dir.join("opencode.db");
         let conn = Connection::open(&db_path).expect("open sqlite db");
@@ -977,29 +960,19 @@ mod tests {
         assert_eq!(remaining_sessions, 0);
         assert_eq!(remaining_messages, 0);
         assert_eq!(remaining_parts, 0);
-
-        #[allow(deprecated)]
-        if let Some(value) = original_xdg {
-            std::env::set_var("XDG_DATA_HOME", value);
-        } else {
-            std::env::remove_var("XDG_DATA_HOME");
-        }
     }
 
     #[test]
+    #[serial]
     fn delete_session_sqlite_rejects_foreign_db_path() {
-        let _guard = opencode_env_lock().lock().expect("lock");
-        let temp = tempdir().expect("tempdir");
-        let original_xdg = std::env::var_os("XDG_DATA_HOME");
-        #[allow(deprecated)]
-        std::env::set_var("XDG_DATA_HOME", temp.path());
+        let sandbox = sandbox();
 
-        let expected_base_dir = temp.path().join("opencode");
+        let expected_base_dir = sandbox.home().join(".local/share/opencode");
         std::fs::create_dir_all(&expected_base_dir).expect("create expected base dir");
         let expected_db_path = expected_base_dir.join("opencode.db");
         Connection::open(&expected_db_path).expect("create expected sqlite db");
 
-        let db_path = temp.path().join("foreign.db");
+        let db_path = sandbox.home().join("foreign.db");
         let conn = Connection::open(&db_path).expect("open sqlite db");
         create_sqlite_schema(&conn);
         conn.execute(
@@ -1012,12 +985,5 @@ mod tests {
         let source = format!("sqlite:{}:ses_1", db_path.display());
         let err = delete_session_sqlite("ses_1", &source).expect_err("should reject foreign db");
         assert!(err.contains("expected OpenCode database"));
-
-        #[allow(deprecated)]
-        if let Some(value) = original_xdg {
-            std::env::set_var("XDG_DATA_HOME", value);
-        } else {
-            std::env::remove_var("XDG_DATA_HOME");
-        }
     }
 }
