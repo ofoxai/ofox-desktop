@@ -24,6 +24,7 @@
 //! storage/message/<sid>/*.json (mtime ≥ watermark) ┴→ 费用计算 → proxy_request_logs (opencode_session)
 //! ```
 
+use crate::database::dao::usage_rollup::usage_prune_cutoff;
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::proxy::usage::calculator::CostCalculator;
@@ -104,6 +105,10 @@ struct OcCall {
     usage: TokenUsage,
     created_at: i64,
     latency_ms: i64,
+    /// Read from a source (the database, or a session's JSON directory) for the
+    /// first time: every call may be stored. On later reads a missing row older
+    /// than the prune cutoff is one the prune already archived.
+    first_read: bool,
 }
 
 /// 同步 OpenCode 使用数据（数据库优先，否则读 storage/ 下的 JSON 文件）
@@ -123,7 +128,14 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
         read_storage_calls(db, &base.join("storage"), &mut result)?
     };
 
+    let cutoff = usage_prune_cutoff()?;
     for call in &calls {
+        // A message rewritten after the prune folded it into the rollups and the
+        // archive moves past the watermark again; it is not stored a second time.
+        if !call.first_read && call.created_at < cutoff && !row_exists(db, &call.msg_id)? {
+            result.skipped += 1;
+            continue;
+        }
         match upsert_call(db, call) {
             Ok(true) => result.imported += 1,
             Ok(false) => result.skipped += 1,
@@ -151,6 +163,10 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
 fn read_db_calls(db: &Database, db_path: &Path) -> Result<Vec<OcCall>, AppError> {
     let key = db_path.to_string_lossy().to_string();
     let (watermark, _) = get_sync_state(db, &key)?;
+    // OpenCode 1.2 builds its database from the JSON files: when those were read
+    // already, the database's first read is not a first read of these calls.
+    let json_dir = db_path.with_file_name("storage").join("message");
+    let first_read = !has_progress(db, &key)? && !has_progress_under(db, &json_dir)?;
 
     let conn = Connection::open_with_flags(
         db_path,
@@ -188,7 +204,7 @@ fn read_db_calls(db: &Database, db_path: &Path) -> Result<Vec<OcCall>, AppError>
         // the database keeps the ids in their columns, not in the document
         message.id = id;
         message.session_id = session_id;
-        if let Some(call) = to_call(&message, &parents) {
+        if let Some(call) = to_call(&message, &parents, first_read) {
             calls.push(call);
         }
     }
@@ -236,6 +252,7 @@ fn read_storage_calls(
     {
         let key = dir.to_string_lossy().to_string();
         let (watermark, _) = get_sync_state(db, &key)?;
+        let first_read = !has_progress(db, &key)?;
         let mut newest = watermark;
         for (path, modified) in json_files_with_mtime(&dir) {
             if modified < watermark {
@@ -255,11 +272,11 @@ fn read_storage_calls(
             if message.session_id.is_empty() {
                 message.session_id = file_name(&dir);
             }
-            if let Some(call) = to_call(&message, &parents) {
+            if let Some(call) = to_call(&message, &parents, first_read) {
                 calls.push(call);
             }
         }
-        if newest > watermark {
+        if newest > watermark || first_read {
             update_sync_state(db, &key, newest, 0)?;
         }
     }
@@ -347,7 +364,11 @@ fn root_session(session: &str, parents: &HashMap<String, String>) -> String {
 
 /// An assistant message as a call: its tokens and model, its time the reply's end
 /// (else its start). None for any other message, or one with no tokens or model.
-fn to_call(message: &OcMessage, parents: &HashMap<String, String>) -> Option<OcCall> {
+fn to_call(
+    message: &OcMessage,
+    parents: &HashMap<String, String>,
+    first_read: bool,
+) -> Option<OcCall> {
     if message.role != "assistant" || message.model_id.is_empty() || message.id.is_empty() {
         return None;
     }
@@ -384,7 +405,45 @@ fn to_call(message: &OcMessage, parents: &HashMap<String, String>) -> Option<OcC
         usage,
         created_at: at_ms / 1000,
         latency_ms,
+        first_read,
     })
+}
+
+/// Whether progress was ever recorded for `key`.
+fn has_progress(db: &Database, key: &str) -> Result<bool, AppError> {
+    let conn = lock_conn!(db.conn);
+    conn.query_row(
+        "SELECT COUNT(*) FROM session_log_sync WHERE file_path = ?1",
+        [key],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .map_err(|e| AppError::Database(format!("查询同步状态失败: {e}")))
+}
+
+/// Whether progress was ever recorded for a path inside `dir`.
+fn has_progress_under(db: &Database, dir: &Path) -> Result<bool, AppError> {
+    let prefix = format!("{}{}", dir.to_string_lossy(), std::path::MAIN_SEPARATOR);
+    let conn = lock_conn!(db.conn);
+    conn.query_row(
+        "SELECT COUNT(*) FROM session_log_sync WHERE substr(file_path, 1, length(?1)) = ?1",
+        [prefix],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .map_err(|e| AppError::Database(format!("查询同步状态失败: {e}")))
+}
+
+/// Whether the call of OpenCode message `msg_id` has a row.
+fn row_exists(db: &Database, msg_id: &str) -> Result<bool, AppError> {
+    let conn = lock_conn!(db.conn);
+    conn.query_row(
+        "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = ?1",
+        [format!("opencode:{msg_id}")],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .map_err(|e| AppError::Database(format!("查询 OpenCode 会话用量失败: {e}")))
 }
 
 /// Insert a call, or update its row when the reply has gone on since; returns
@@ -654,5 +713,119 @@ mod tests {
         let rows = rows(&db);
         assert_eq!(rows.len(), 3);
         assert_eq!((rows[0].3, rows[0].4), (9999, 420));
+    }
+
+    const LONG: &str = "ses_long";
+
+    fn now_ms() -> i64 {
+        chrono::Utc::now().timestamp_millis()
+    }
+
+    fn days_ago_ms(days: i64) -> i64 {
+        now_ms() - days * 86_400_000
+    }
+
+    /// An assistant message document as the JSON storage keeps it.
+    fn message_doc(id: &str, at_ms: i64) -> serde_json::Value {
+        serde_json::json!({"id": id, "sessionID": LONG, "role": "assistant",
+            "modelID": "gpt-5.4", "tokens": {"input": 10, "output": 5, "reasoning": 0,
+                "cache": {"read": 0, "write": 0}},
+            "time": {"created": at_ms - 1000, "completed": at_ms}})
+    }
+
+    /// OpenCode's database holding `LONG` with a reply 40 days old and one from
+    /// yesterday, each stamped when it was written.
+    fn make_long_db(path: &Path) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (id text PRIMARY KEY, parent_id text);
+             CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL,
+                time_created integer NOT NULL, time_updated integer NOT NULL,
+                data text NOT NULL);",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO session VALUES (?1, NULL)", [LONG])
+            .unwrap();
+        for (id, at) in [("msg_old", days_ago_ms(40)), ("msg_new", days_ago_ms(1))] {
+            let mut doc = message_doc(id, at);
+            doc.as_object_mut().unwrap().remove("id");
+            conn.execute(
+                "INSERT INTO message VALUES (?1, ?2, ?3, ?3, ?4)",
+                rusqlite::params![id, LONG, at, doc.to_string()],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    /// Calls of `LONG`: live rows plus the archive.
+    fn long_session_calls(db: &Database) -> i64 {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM proxy_request_logs WHERE session_id = ?1)
+                  + (SELECT COALESCE(SUM(request_count), 0) FROM session_usage_archive
+                     WHERE session_id = ?1)",
+            [LONG],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    #[serial]
+    fn a_first_read_imports_old_replies_so_the_prune_can_archive_them() {
+        let _sandbox = sandbox();
+        fs::create_dir_all(opencode_dir()).unwrap();
+        make_long_db(&opencode_dir().join("opencode.db"));
+        let db = Database::memory().unwrap();
+
+        sync_opencode_usage(&db).unwrap();
+        db.rollup_and_prune(30).unwrap();
+
+        assert_eq!(long_session_calls(&db), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn an_old_reply_written_again_after_the_prune_is_not_stored_again() {
+        let _sandbox = sandbox();
+        fs::create_dir_all(opencode_dir()).unwrap();
+        let oc = make_long_db(&opencode_dir().join("opencode.db"));
+        let db = Database::memory().unwrap();
+        sync_opencode_usage(&db).unwrap();
+        db.rollup_and_prune(30).unwrap();
+
+        // OpenCode writes the old message again: it moves past the watermark
+        oc.execute(
+            "UPDATE message SET time_updated = ?1 WHERE id = 'msg_old'",
+            [now_ms()],
+        )
+        .unwrap();
+        sync_opencode_usage(&db).unwrap();
+        db.rollup_and_prune(30).unwrap();
+
+        assert_eq!(long_session_calls(&db), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn replies_read_from_json_are_not_stored_again_when_opencode_moves_to_its_database() {
+        let _sandbox = sandbox();
+        let storage = opencode_dir().join("storage");
+        for (id, at) in [("msg_old", days_ago_ms(40)), ("msg_new", days_ago_ms(1))] {
+            let path = storage.join(format!("message/{LONG}/{id}.json"));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, message_doc(id, at).to_string()).unwrap();
+        }
+        let db = Database::memory().unwrap();
+        sync_opencode_usage(&db).unwrap();
+        db.rollup_and_prune(30).unwrap();
+
+        // OpenCode 1.2 copies the JSON files into its new database
+        make_long_db(&opencode_dir().join("opencode.db"));
+        sync_opencode_usage(&db).unwrap();
+        db.rollup_and_prune(30).unwrap();
+
+        assert_eq!(long_session_calls(&db), 2);
     }
 }
