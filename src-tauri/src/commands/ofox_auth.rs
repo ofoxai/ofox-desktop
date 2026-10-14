@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tauri::State;
 use tokio::sync::RwLock;
 
+use crate::services::balance_history::{self, BalanceTrend};
 use crate::services::ofox_bind::report::UnbindReport;
 use crate::store::AppState;
 
@@ -41,17 +42,22 @@ pub async fn ofox_poll_for_token(
 ///
 /// Attempts to fetch fresh data from the API (which includes the latest
 /// account balance), falling back to the in-memory cache on failure so the
-/// UI never has to wait for the network to render the user.
+/// UI never has to wait for the network to render the user. A fresh balance
+/// is also kept as a point of the balance history.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ofox_get_user_info(
     state: State<'_, OfoxAuthState>,
+    app_state: State<'_, AppState>,
 ) -> Result<Option<crate::ofox_auth::OfoxUserInfo>, String> {
     let manager = state.0.read().await;
     if !manager.is_authenticated() {
         return Ok(None);
     }
     match manager.refresh_user_info().await {
-        Ok(user) => Ok(Some(user)),
+        Ok(user) => {
+            balance_history::record(&app_state.db, &user, now_ms());
+            Ok(Some(user))
+        }
         Err(e) => {
             log::warn!("[OfoxAuth] refresh_user_info failed, falling back to cache: {e}");
             Ok(manager.get_user_info())
@@ -59,13 +65,36 @@ pub async fn ofox_get_user_info(
     }
 }
 
-/// Force a refresh of the cached Ofox user info from the API.
+/// Force a refresh of the cached Ofox user info from the API, and keep the
+/// fresh balance as a point of the balance history.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ofox_refresh_user_info(
     state: State<'_, OfoxAuthState>,
+    app_state: State<'_, AppState>,
 ) -> Result<crate::ofox_auth::OfoxUserInfo, String> {
     let manager = state.0.read().await;
-    manager.refresh_user_info().await
+    let user = manager.refresh_user_info().await?;
+    balance_history::record(&app_state.db, &user, now_ms());
+    Ok(user)
+}
+
+/// The balance history of the signed-in account's org and what it says: the
+/// points of the last 14 days, the burn rate, and when the balance runs out.
+/// Reads what the refreshes kept; it does not call OFox. Empty when signed out.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn ofox_get_balance_trend(
+    state: State<'_, OfoxAuthState>,
+    app_state: State<'_, AppState>,
+) -> Result<BalanceTrend, String> {
+    let owner = state.0.read().await.current_key_owner().await;
+    let Some(org_id) = owner.and_then(|owner| owner.org_id) else {
+        return Ok(BalanceTrend::default());
+    };
+    balance_history::trend_for(&app_state.db, &org_id, now_ms()).map_err(|e| e.to_string())
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
 }
 
 /// Get the current Ofox auth snapshot — the single source of truth for any
