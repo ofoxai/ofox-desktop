@@ -71,6 +71,7 @@
   "apexSwitch": {
     "auto": "Auto-detect",
     "autoLabel": "Auto · {{apex}}",
+    "label": "Region",
     "pinned": "Pinned to {{apex}}; the region no longer follows your network at launch",
     "switched": "Switched to {{apex}}",
     "switchFailed": "Could not switch region, please try again later",

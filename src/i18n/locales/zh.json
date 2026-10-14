@@ -71,6 +71,7 @@
   "apexSwitch": {
     "auto": "自动检测",
     "autoLabel": "自动 · {{apex}}",
+    "label": "区域",
     "pinned": "已固定为 {{apex}}，启动时不再按网络自动切换",
     "switched": "已切换到 {{apex}}",
     "switchFailed": "切换区域失败，请稍后重试",

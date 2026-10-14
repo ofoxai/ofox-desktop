@@ -384,9 +384,7 @@ export default function OfoxSettingsDialog({
             <Row
               label="OFox apex"
               hint="切换 ofox.ai / ofox.io；已登录态切换会触发重新登录"
-              control={
-                <OfoxApexSwitch triggerClassName="h-8 w-[140px] text-[13px]" />
-              }
+              control={<OfoxApexSwitch />}
               isLast
             />
           </SectionCard>

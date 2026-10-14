@@ -71,6 +71,7 @@
   "apexSwitch": {
     "auto": "自動検出",
     "autoLabel": "自動 · {{apex}}",
+    "label": "リージョン",
     "pinned": "{{apex}} に固定しました。起動時にネットワークで自動切替しなくなります",
     "switched": "{{apex}} に切り替えました",
     "switchFailed": "リージョンを切り替えられませんでした。後でもう一度お試しください",
