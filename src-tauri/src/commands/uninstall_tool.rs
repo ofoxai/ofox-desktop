@@ -950,6 +950,8 @@ pub(crate) async fn preview<E: Effects>(
     still_bound: &[String],
 ) -> Result<UninstallPreview, String> {
     check_tool(tool)?;
+    // Codex and Claude may live in CODEX_HOME / CLAUDE_CONFIG_DIR.
+    crate::agent_env::ready().await;
     let home = crate::config::get_home_dir();
     let keeps = kept_data(tool);
     let inspection = effects.inspect(tool).await?;
@@ -1021,6 +1023,8 @@ pub(crate) async fn uninstall<E: Effects>(
 ) -> Result<UninstallResult, String> {
     check_tool(tool)?;
     let _guard = ToolOperationGuard::acquire(tool)?;
+    // Codex and Claude may live in CODEX_HOME / CLAUDE_CONFIG_DIR.
+    crate::agent_env::ready().await;
     let home = crate::config::get_home_dir();
     let inspection = effects.inspect(tool).await?;
     let plan = match decide(tool, &inspection, &home, kept_data(tool), effects.os()) {
@@ -2500,6 +2504,23 @@ Would inspect/remove:
         assert_eq!(result.key, UninstallKeyOutcome::Revoked);
         assert_eq!(result.remaining_path, None);
         assert!(result.unbind.is_some());
+    }
+
+    #[tokio::test]
+    async fn preview_and_uninstall_wait_for_the_shell_snapshot_before_they_read_agent_dirs() {
+        let _home = sandbox();
+        let ready_calls = || crate::agent_env::READY_CALLS.with(|calls| calls.get());
+
+        let before = ready_calls();
+        preview(&Fake::new([Ok(codex_by_npm())]), "codex", &[])
+            .await
+            .unwrap();
+        assert!(ready_calls() > before, "preview");
+
+        let fake = Fake::new([Ok(codex_by_npm()), Ok(Inspection::NotInstalled)]);
+        let before = ready_calls();
+        uninstall(&fake, "codex", &[], &|_, _| {}).await.unwrap();
+        assert!(ready_calls() > before, "uninstall");
     }
 
     #[tokio::test]

@@ -235,7 +235,7 @@ pub async fn ready() {
 thread_local! {
     /// How often [`ready`] was awaited on this thread, so a test can check that an
     /// entry point waits for the snapshot (a `#[tokio::test]` runs on one thread).
-    static READY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static READY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The shell command that prints each agent variable on a marker line. The leading
