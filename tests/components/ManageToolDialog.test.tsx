@@ -1104,6 +1104,40 @@ describe("ManageToolDialog unbind", () => {
     ).toBeVisible();
   });
 
+  it("says settings changed after binding are kept and lists them", async () => {
+    const kept = report({
+      exactFiles: [],
+      keptKeys: ["~/.codex/config.toml: model_reasoning_effort"],
+      warnings: [{ code: "userValueKept" }],
+    });
+    vi.spyOn(ofoxBindApi, "unbindPreview").mockResolvedValue(kept);
+    const unbind = vi
+      .spyOn(bindToolsModule, "unbindTool")
+      .mockResolvedValue({ ...kept, dryRun: false });
+    const success = vi.spyOn(toast, "success").mockImplementation(() => "");
+    await renderCodex();
+
+    fireEvent.click(screen.getByRole("button", { name: "解除绑定" }));
+
+    expect(
+      await screen.findByText(/绑定后你自己改过的设置会保留/),
+    ).toBeVisible();
+    expect(screen.queryByText(/也会恢复为绑定前的值/)).not.toBeInTheDocument();
+    const listed =
+      "绑定后你改过的设置保持不变：~/.codex/config.toml: model_reasoning_effort";
+    expect(screen.getByText(listed)).toBeVisible();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认解除绑定？" }),
+    );
+    await waitFor(() => expect(unbind).toHaveBeenCalledWith("codex"));
+    await waitFor(() =>
+      expect(success).toHaveBeenCalledWith("Codex 已解除绑定", {
+        description: expect.stringContaining(listed),
+      }),
+    );
+  });
+
   it("warns that an older binding cannot be fully restored", async () => {
     vi.spyOn(ofoxBindApi, "unbindPreview").mockResolvedValue(
       report({ legacy: true, exactFiles: [], restoredKeys: [] }),

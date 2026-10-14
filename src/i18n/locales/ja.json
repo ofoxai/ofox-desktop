@@ -50,7 +50,7 @@
     "willRestoreTitle": "解除すると接続方法を連携前の状態に戻します：",
     "generic": "Ofox が書き込んだアドレス・キー・モデルを削除し、連携前の設定に戻します。",
     "keepNotice": "MCP・スキル・プラグインなどの設定はそのまま残ります。",
-    "forceRestoreNotice": "連携中に手動で変更していても、これらの設定は連携前の値に戻ります。",
+    "forceRestoreNotice": "Ofox が書き込んだ設定は削除するか連携前の値に戻します。連携後にご自身で変更した設定はそのまま残ります。",
     "legacyNotice": "このツールは旧バージョンで連携されたため、連携前の設定は保存されていません。Ofox のアドレス・キー・モデルを削除して既定のログイン方法に戻しますが、元のカスタム設定は復元できません。",
     "sharedNotice": "{{others}} がまだ Ofox を使っているため、共有の ~/.codex 設定は残し、そちらも解除したときに戻します。",
     "nothingToRestore": "Ofox の設定は見つかりませんでした。一覧から削除するだけです。",
@@ -65,7 +65,8 @@
       "fileKeptHasOtherContent": "Ofox が作成した設定ファイルに追加した内容があるため、ファイルは残しました。",
       "recordCleanupFailed": "連携記録の削除に失敗しました。連携は保持されています。再試行してください。",
       "leftoverRemoved": "別の場所にも Ofox の設定があったため、あわせて削除しました。",
-      "configAlreadyMissing": "削除済みの設定は再作成しません。"
+      "configAlreadyMissing": "削除済みの設定は再作成しません。",
+      "userValueKept": "連携後に変更した設定は変更後のまま残ります：{{keys}}"
     }
   },
   "apexSwitch": {

@@ -119,7 +119,12 @@ function describeUnbindResult(
     parts.push(t("unbind.resultRestored", { count: changed }));
   }
   for (const warning of report.warnings) {
-    parts.push(t(`unbind.warning.${warning.code}`, { defaultValue: "" }));
+    parts.push(
+      t(`unbind.warning.${warning.code}`, {
+        defaultValue: "",
+        keys: report.keptKeys.join(", "),
+      }),
+    );
   }
   const text = parts.filter(Boolean).join(" ");
   return text || undefined;
@@ -1356,7 +1361,10 @@ function UnbindPreviewPanel({ preview }: { preview: UnbindReport | null }) {
           key={`${warning.code}-${warning.file ?? index}`}
           className="break-words text-muted-foreground"
         >
-          {t(`unbind.warning.${warning.code}`, { defaultValue: "" })}
+          {t(`unbind.warning.${warning.code}`, {
+            defaultValue: "",
+            keys: preview.keptKeys.join(", "),
+          })}
           {warning.file && (
             <code className="ml-1 text-[11px]">{warning.file}</code>
           )}
