@@ -113,6 +113,14 @@ impl UsageSums {
     }
 }
 
+/// 序列的一个桶：从 `start`（秒）起，到下一个桶的 `start`（最后一个到 `end`）；
+/// `first_date` 是 `start` 的本地日期，日聚合行按日期落进桶里。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SeriesBucket {
+    pub start: i64,
+    pub first_date: NaiveDate,
+}
+
 /// 请求日志过滤器
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1031,6 +1039,114 @@ impl Database {
                 .then_with(|| a.app_type.cmp(&b.app_type))
         });
         Ok(stats)
+    }
+
+    /// 最早的一条用量：实时日志里最早的 `created_at`（秒）、日聚合里最早的日期。
+    pub(crate) fn get_earliest_usage(&self) -> Result<(Option<i64>, Option<NaiveDate>), AppError> {
+        let conn = lock_conn!(self.conn);
+        let created_at: Option<i64> = conn.query_row(
+            "SELECT MIN(created_at) FROM proxy_request_logs",
+            [],
+            |row| row.get(0),
+        )?;
+        let date: Option<String> =
+            conn.query_row("SELECT MIN(date) FROM usage_daily_rollups", [], |row| {
+                row.get(0)
+            })?;
+        let date = date
+            .map(|d| {
+                NaiveDate::parse_from_str(&d, "%Y-%m-%d")
+                    .map_err(|e| AppError::Database(format!("解析 rollup 日期失败: {e}")))
+            })
+            .transpose()?;
+        Ok((created_at, date))
+    }
+
+    /// 按桶求和：`buckets` 从早到晚，桶 i 覆盖 `[buckets[i].start, buckets[i+1].start)`，
+    /// 最后一个到 `end_date`（含）。`start_date`/`end_date` 决定哪些日聚合行算数（同
+    /// [`get_usage_summary`]：只算整天），算数的行按日期落进桶里。返回和 `buckets`
+    /// 等长，没有数据的桶全 0。
+    pub(crate) fn get_usage_series(
+        &self,
+        buckets: &[SeriesBucket],
+        start_date: Option<i64>,
+        end_date: i64,
+    ) -> Result<Vec<UsageSums>, AppError> {
+        if buckets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = lock_conn!(self.conn);
+
+        // 桶边界是整数，直接写进 SQL；用 LEFT JOIN 让空桶也有一行
+        let bounds = buckets
+            .iter()
+            .enumerate()
+            .map(|(i, bucket)| {
+                let end = buckets.get(i + 1).map_or(end_date + 1, |next| next.start);
+                format!("({i}, {}, {end})", bucket.start)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "WITH b(idx, s, e) AS (VALUES {bounds})
+            SELECT b.idx,
+                COUNT(l.request_id),
+                COALESCE(SUM(l.input_tokens), 0),
+                COALESCE(SUM(l.output_tokens), 0),
+                COALESCE(SUM(l.cache_read_tokens), 0),
+                COALESCE(SUM(l.cache_creation_tokens), 0),
+                COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0),
+                COALESCE(MAX(CAST(l.total_cost_usd AS REAL) > 0), 0)
+            FROM b
+            LEFT JOIN proxy_request_logs l ON l.created_at >= b.s AND l.created_at < b.e
+            GROUP BY b.idx
+            ORDER BY b.idx"
+        );
+        let mut series = vec![UsageSums::default(); buckets.len()];
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)? as usize, usage_sums_from_row(row, 1)?))
+        })?;
+        for row in rows {
+            let (idx, sums) = row?;
+            series[idx].add(&sums);
+        }
+
+        let RangeFilters {
+            rollup_where,
+            rollup_params,
+            ..
+        } = RangeFilters::new(start_date, Some(end_date), None)?;
+        let rollup_sql = format!(
+            "SELECT date,
+                COALESCE(SUM(request_count), 0),
+                COALESCE(SUM(input_tokens), 0),
+                COALESCE(SUM(output_tokens), 0),
+                COALESCE(SUM(cache_read_tokens), 0),
+                COALESCE(SUM(cache_creation_tokens), 0),
+                COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0),
+                COALESCE(MAX(CAST(total_cost_usd AS REAL) > 0), 0)
+            FROM usage_daily_rollups
+            {rollup_where}
+            GROUP BY date"
+        );
+        let mut stmt = conn.prepare(&rollup_sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> =
+            rollup_params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, usage_sums_from_row(row, 1)?))
+        })?;
+        for row in rows {
+            let (date, sums) = row?;
+            let date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+                .map_err(|e| AppError::Database(format!("解析 rollup 日期失败: {e}")))?;
+            // the bucket whose first day is the latest one not after `date`
+            let after = buckets.partition_point(|bucket| bucket.first_date <= date);
+            if let Some(idx) = after.checked_sub(1) {
+                series[idx].add(&sums);
+            }
+        }
+        Ok(series)
     }
 
     /// 获取请求日志列表（分页）
@@ -2344,6 +2460,111 @@ mod tests {
         let models: Vec<&str> = stats.iter().map(|s| s.model.as_str()).collect();
         assert_eq!(models, ["gpt-5", "free-model"]);
         assert_eq!(stats[0].request_count, 2);
+        Ok(())
+    }
+
+    fn day_bucket(year: i32, month: u32, day: u32) -> SeriesBucket {
+        SeriesBucket {
+            start: local_ts(year, month, day, 0, 0, 0),
+            first_date: NaiveDate::from_ymd_opt(year, month, day).unwrap(),
+        }
+    }
+
+    #[test]
+    fn the_series_puts_each_call_and_rollup_day_in_its_bucket() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        seed_overview(&db);
+        let (start, end) = overview_range();
+        let buckets: Vec<SeriesBucket> = (1..=8).map(|d| day_bucket(2024, 1, d)).collect();
+
+        let series = db.get_usage_series(&buckets, Some(start), end)?;
+
+        let got: Vec<(u64, u64, u64)> = series
+            .iter()
+            .map(|b| (b.requests, b.input_tokens, b.cache_creation_tokens))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (4, 1000, 100), // 01-01: the rollup
+                (1, 100, 200),  // 01-02: r1
+                (2, 310, 0),    // 01-03: r2 and r3
+                (0, 0, 0),
+                (0, 0, 0),
+                (0, 0, 0),
+                (2, 20, 0), // 01-07: the opencode rollup
+                (1, 1, 4),  // 01-08: r4; r5 is after the end
+            ]
+        );
+        assert!((series[2].cost - 0.21).abs() < 1e-9);
+        assert!(series[2].priced && !series[7].priced);
+        Ok(())
+    }
+
+    #[test]
+    fn the_series_adds_up_to_the_summary_the_tools_and_the_models() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        seed_overview(&db);
+        let (start, end) = overview_range();
+        let buckets: Vec<SeriesBucket> = (1..=8).map(|d| day_bucket(2024, 1, d)).collect();
+
+        let series = db.get_usage_series(&buckets, Some(start), end)?;
+        let summary = db.get_usage_summary(Some(start), Some(end), None)?;
+        let tools = db.get_app_type_stats(Some(start), Some(end))?;
+        let models = db.get_model_stats(Some(start), Some(end), None)?;
+
+        let requests: u64 = series.iter().map(|b| b.requests).sum();
+        let output: u64 = series.iter().map(|b| b.output_tokens).sum();
+        let cost: f64 = series.iter().map(|b| b.cost).sum();
+        assert_eq!(requests, summary.total_requests);
+        assert_eq!(output, summary.total_output_tokens);
+        assert!((cost - summary.total_cost.parse::<f64>().unwrap()).abs() < 1e-9);
+        assert_eq!(requests, tools.iter().map(|s| s.request_count).sum::<u64>());
+        assert_eq!(
+            requests,
+            models.iter().map(|s| s.request_count).sum::<u64>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_weekly_bucket_holds_the_rollup_days_of_its_week() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        seed_overview(&db);
+        let (start, end) = overview_range();
+        // 2024-01-01 is a Monday
+        let buckets = [day_bucket(2024, 1, 1), day_bucket(2024, 1, 8)];
+
+        let series = db.get_usage_series(&buckets, Some(start), end)?;
+
+        let got: Vec<u64> = series.iter().map(|b| b.requests).collect();
+        // rollup 01-01 (4), r1, r2, r3, rollup 01-07 (2); then r4
+        assert_eq!(got, [9, 1]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_series_without_buckets_is_empty() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        assert!(db.get_usage_series(&[], None, 0)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn the_earliest_usage_is_the_older_of_the_calls_and_the_rollups() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        assert_eq!(db.get_earliest_usage()?, (None, None));
+
+        insert_log(&db, "r1", "claude", "m", 5000, [1, 1, 0, 0], "0");
+        insert_log(&db, "r2", "claude", "m", 3000, [1, 1, 0, 0], "0");
+        insert_rollup(&db, "2024-01-05", "claude", "m", 1, [1, 1, 0, 0], "0");
+        insert_rollup(&db, "2024-01-02", "claude", "m", 1, [1, 1, 0, 0], "0");
+
+        assert_eq!(
+            db.get_earliest_usage()?,
+            (Some(3000), NaiveDate::from_ymd_opt(2024, 1, 2))
+        );
         Ok(())
     }
 }

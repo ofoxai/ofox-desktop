@@ -1477,6 +1477,7 @@ pub fn run() {
             commands::get_auto_failover_enabled,
             commands::set_auto_failover_enabled,
             // Usage statistics
+            commands::get_usage_overview,
             commands::get_usage_summary,
             commands::get_usage_trends,
             commands::get_provider_stats,
