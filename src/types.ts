@@ -356,16 +356,27 @@ export interface Settings {
   ofoxApexPinned?: boolean | null;
 }
 
+/** Where a session's title came from (session_manager/title.rs). */
+export type SessionTitleSource =
+  | "custom"
+  | "agent"
+  | "prompt"
+  | "message"
+  | "directory";
+
 export interface SessionMeta {
   providerId: string;
   sessionId: string;
   title?: string;
+  titleSource?: SessionTitleSource;
   summary?: string;
   projectDir?: string | null;
   createdAt?: number;
   lastActiveAt?: number;
   sourcePath?: string;
   resumeCommand?: string;
+  /** Prompts typed plus replies; only where the whole file was read. */
+  messageCount?: number;
 }
 
 /** Transcript roles (session_manager/transcript.rs). */
