@@ -236,6 +236,8 @@
     "formatSuccess": "格式化成功",
     "formatError": "格式化失败：{{error}}",
     "copy": "复制",
+    "copied": "已复制",
+    "copyFailed": "复制失败，请手动复制",
     "view": "查看",
     "back": "返回",
     "refresh": "刷新",

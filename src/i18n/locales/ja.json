@@ -236,6 +236,8 @@
     "formatSuccess": "整形しました",
     "formatError": "整形に失敗しました: {{error}}",
     "copy": "コピー",
+    "copied": "コピーしました",
+    "copyFailed": "コピーできませんでした。手動でコピーしてください",
     "view": "表示",
     "back": "戻る",
     "refresh": "更新",

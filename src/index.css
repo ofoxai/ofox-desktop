@@ -314,10 +314,24 @@ html:not(.mac) ::-webkit-scrollbar-corner {
   }
 }
 
+/* A copy button's check pops in: small, a little too big, then settled. */
+@keyframes copy-pop {
+  0% {
+    transform: scale(0.55);
+  }
+  55% {
+    transform: scale(1.16);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-pop-in,
   .animate-fade,
-  .animate-dialog-in {
+  .animate-dialog-in,
+  .animate-copy-pop {
     animation: none !important;
   }
 }

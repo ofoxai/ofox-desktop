@@ -236,6 +236,8 @@
     "formatSuccess": "Formatted successfully",
     "formatError": "Format failed: {{error}}",
     "copy": "Copy",
+    "copied": "Copied",
+    "copyFailed": "Could not copy; please copy it by hand",
     "view": "View",
     "back": "Back",
     "refresh": "Refresh",

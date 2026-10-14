@@ -152,12 +152,13 @@ module.exports = {
         "pulse-slow": "pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite",
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
-        // keyframes for these three are in src/index.css, beside their
+        // keyframes for these are in src/index.css, beside their
         // prefers-reduced-motion opt-out
         "pop-in":
           "pop-fade .18s ease-out, pop-in .42s cubic-bezier(.16, 1, .3, 1)",
         fade: "fade .2s cubic-bezier(.2, .8, .2, 1)",
         "dialog-in": "dialog-in .24s cubic-bezier(.2, .8, .2, 1)",
+        "copy-pop": "copy-pop .36s cubic-bezier(.2, .8, .2, 1)",
       },
       keyframes: {
         fadeIn: {
