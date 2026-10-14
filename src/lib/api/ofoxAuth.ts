@@ -21,8 +21,8 @@ export interface OfoxBalance {
  */
 export interface OfoxSpending {
   forbidden: boolean;
-  monthly_used_usd?: number | null;
-  monthly_limit_usd?: number | null;
+  monthlyUsedUsd?: number | null;
+  monthlyLimitUsd?: number | null;
 }
 
 export interface OfoxUserInfo {

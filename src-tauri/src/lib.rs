@@ -1222,7 +1222,7 @@ pub fn run() {
                 }
             }
 
-            // ─── OFox 后台循环：低余额提醒 ─────────────────────────────────
+            // ─── OFox 后台循环：余额采样 + 低余额提醒 ──────────────────────
             //
             // 在 OFox auth 初始化后运行，与 token 静默刷新循环同节奏（30 min 桶）。
             // 设计要点见 services/low_balance.rs 的模块文档。
@@ -1251,10 +1251,12 @@ pub fn run() {
                     loop {
                         ticker.tick().await;
                         let ofox_state = lb_app.state::<OfoxAuthState>();
+                        let db = lb_app.state::<AppState>().db.clone();
                         let now_ms = chrono::Utc::now().timestamp_millis();
-                        let _ = crate::services::low_balance::evaluate_and_notify(
+                        let _ = crate::services::low_balance::run_tick(
                             &lb_app,
                             &ofox_state.0,
+                            &db,
                             now_ms,
                         )
                         .await;
@@ -1516,6 +1518,7 @@ pub fn run() {
             commands::get_auto_failover_enabled,
             commands::set_auto_failover_enabled,
             // Usage statistics
+            commands::get_usage_overview,
             commands::get_usage_summary,
             commands::get_usage_trends,
             commands::get_provider_stats,
@@ -1636,6 +1639,8 @@ pub fn run() {
             commands::ofox_auth::ofox_poll_for_token,
             commands::ofox_auth::ofox_get_user_info,
             commands::ofox_auth::ofox_refresh_user_info,
+            commands::ofox_auth::ofox_get_balance_trend,
+            commands::ofox_auth::ofox_get_spending,
             commands::ofox_auth::ofox_get_auth_status,
             commands::ofox_auth::ofox_retry_keychain,
             commands::ofox_auth::ofox_is_authenticated,

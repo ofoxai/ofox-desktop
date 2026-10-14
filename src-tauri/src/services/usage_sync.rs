@@ -13,6 +13,7 @@ use crate::services::{
     pricing_sync, session_usage, session_usage_codex, session_usage_gemini, session_usage_opencode,
     usage_maintenance,
 };
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
@@ -27,12 +28,22 @@ pub const USAGE_SYNCED_EVENT: &str = "usage-synced";
 /// Serializes runs and remembers when the last one finished.
 struct UsageSync {
     last_run: tokio::sync::Mutex<Option<Instant>>,
+    /// When the last run finished, in epoch milliseconds; 0 before the first.
+    last_synced_ms: AtomicI64,
 }
 
 impl UsageSync {
     const fn new() -> Self {
         Self {
             last_run: tokio::sync::Mutex::const_new(None),
+            last_synced_ms: AtomicI64::new(0),
+        }
+    }
+
+    fn last_synced_at(&self) -> Option<i64> {
+        match self.last_synced_ms.load(Ordering::Relaxed) {
+            0 => None,
+            ms => Some(ms),
         }
     }
 
@@ -57,6 +68,8 @@ impl UsageSync {
             .await
             .map_err(|e| AppError::Message(format!("usage sync task failed: {e}")))?;
         *last_run = Some(Instant::now());
+        self.last_synced_ms
+            .store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
         Ok(Some(result))
     }
 }
@@ -70,6 +83,12 @@ pub async fn sync_all(
     force: bool,
 ) -> Result<Option<SessionSyncResult>, AppError> {
     USAGE_SYNC.run(db, force).await
+}
+
+/// When the last sync run finished (epoch milliseconds); `None` before the first
+/// run of this process.
+pub fn last_synced_at_ms() -> Option<i64> {
+    USAGE_SYNC.last_synced_at()
 }
 
 /// `sync_all`, then `usage-synced` with the result when a run happened.
@@ -254,6 +273,23 @@ mod tests {
         assert!(sync.run(&db, false).await.unwrap().is_some());
         assert!(sync.run(&db, false).await.unwrap().is_none());
         assert!(sync.run(&db, true).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_run_records_when_it_finished_and_a_skipped_one_keeps_it() {
+        let _sandbox = sandbox();
+        let db = Arc::new(Database::memory().unwrap());
+        let sync = UsageSync::new();
+        assert_eq!(sync.last_synced_at(), None);
+
+        let before = chrono::Utc::now().timestamp_millis();
+        sync.run(&db, false).await.unwrap();
+        let first = sync.last_synced_at().expect("a run happened");
+        sync.run(&db, false).await.unwrap(); // debounced
+
+        assert!(first >= before);
+        assert_eq!(sync.last_synced_at(), Some(first));
     }
 
     #[tokio::test]

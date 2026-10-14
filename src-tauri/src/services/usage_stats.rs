@@ -54,14 +54,71 @@ pub struct ProviderStats {
 }
 
 /// 模型统计
+///
+/// `total_tokens` = 输入 + 输出（不含缓存）。`app_types` 是用过该模型的工具，
+/// 用量大的在前。`priced` 为 false 表示该模型没有任何一次调用算出过价格
+/// （费用恒为 0，界面应显示 "—" 而不是 $0）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelStats {
     pub model: String,
     pub request_count: u64,
     pub total_tokens: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
     pub total_cost: String,
     pub avg_cost_per_request: String,
+    pub app_types: Vec<String>,
+    pub priced: bool,
+}
+
+/// 按工具（`app_type`）统计，口径同 [`ModelStats`]。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppTypeStats {
+    pub app_type: String,
+    pub request_count: u64,
+    pub total_tokens: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub total_cost: String,
+}
+
+/// 一组调用的求和（实时日志 + 日聚合）。
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct UsageSums {
+    pub requests: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
+    pub cost: f64,
+    /// 其中有调用算出了价格（`cost > 0`）。
+    pub priced: bool,
+}
+
+impl UsageSums {
+    fn add(&mut self, other: &UsageSums) {
+        self.requests += other.requests;
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cache_read_tokens += other.cache_read_tokens;
+        self.cache_creation_tokens += other.cache_creation_tokens;
+        self.cost += other.cost;
+        self.priced |= other.priced;
+    }
+}
+
+/// 序列的一个桶：从 `start`（秒）起，到下一个桶的 `start`（最后一个到 `end`）；
+/// `first_date` 是 `start` 的本地日期，日聚合行按日期落进桶里。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SeriesBucket {
+    pub start: i64,
+    pub first_date: NaiveDate,
 }
 
 /// 请求日志过滤器
@@ -220,6 +277,145 @@ fn local_day_start_rfc3339(day: NaiveDate) -> String {
         .unwrap_or_else(Local::now);
 
     local_midnight.to_rfc3339()
+}
+
+/// 同一时间范围的两半：实时日志的 WHERE 和日聚合的 WHERE（只含整天，见
+/// [`compute_rollup_date_bounds`]），各自的参数。列名不带别名。
+struct RangeFilters {
+    detail_where: String,
+    detail_params: Vec<Box<dyn rusqlite::ToSql>>,
+    rollup_where: String,
+    rollup_params: Vec<Box<dyn rusqlite::ToSql>>,
+}
+
+impl RangeFilters {
+    fn new(
+        start_date: Option<i64>,
+        end_date: Option<i64>,
+        app_type: Option<&str>,
+    ) -> Result<Self, AppError> {
+        let mut detail_conditions: Vec<String> = Vec::new();
+        let mut detail_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(start) = start_date {
+            detail_conditions.push("created_at >= ?".to_string());
+            detail_params.push(Box::new(start));
+        }
+        if let Some(end) = end_date {
+            detail_conditions.push("created_at <= ?".to_string());
+            detail_params.push(Box::new(end));
+        }
+
+        let mut rollup_conditions: Vec<String> = Vec::new();
+        let mut rollup_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        let rollup_bounds = compute_rollup_date_bounds(start_date, end_date)?;
+        push_rollup_date_filters(
+            &mut rollup_conditions,
+            &mut rollup_params,
+            "date",
+            &rollup_bounds,
+        );
+
+        if let Some(at) = app_type {
+            detail_conditions.push("app_type = ?".to_string());
+            detail_params.push(Box::new(at.to_string()));
+            rollup_conditions.push("app_type = ?".to_string());
+            rollup_params.push(Box::new(at.to_string()));
+        }
+
+        let where_of = |conditions: &[String]| {
+            if conditions.is_empty() {
+                String::new()
+            } else {
+                format!("WHERE {}", conditions.join(" AND "))
+            }
+        };
+        Ok(Self {
+            detail_where: where_of(&detail_conditions),
+            detail_params,
+            rollup_where: where_of(&rollup_conditions),
+            rollup_params,
+        })
+    }
+
+    /// 实时日志的参数在前、日聚合的在后，与"先实时后聚合"的查询对应。
+    fn into_params(self) -> (String, String, Vec<Box<dyn rusqlite::ToSql>>) {
+        let mut params = self.detail_params;
+        params.extend(self.rollup_params);
+        (self.detail_where, self.rollup_where, params)
+    }
+}
+
+fn usage_sums_from_row(row: &rusqlite::Row, first: usize) -> rusqlite::Result<UsageSums> {
+    let cost: f64 = row.get(first + 5)?;
+    Ok(UsageSums {
+        requests: row.get::<_, i64>(first)?.max(0) as u64,
+        input_tokens: row.get::<_, i64>(first + 1)?.max(0) as u64,
+        output_tokens: row.get::<_, i64>(first + 2)?.max(0) as u64,
+        cache_read_tokens: row.get::<_, i64>(first + 3)?.max(0) as u64,
+        cache_creation_tokens: row.get::<_, i64>(first + 4)?.max(0) as u64,
+        cost,
+        priced: row.get::<_, i64>(first + 6)? > 0,
+    })
+}
+
+/// 实时日志 + 日聚合按 `group_cols`（`model`、`app_type` 里的几列）分组求和。
+fn query_usage_sums(
+    conn: &Connection,
+    group_cols: &[&str],
+    start_date: Option<i64>,
+    end_date: Option<i64>,
+    app_type: Option<&str>,
+) -> Result<Vec<(Vec<String>, UsageSums)>, AppError> {
+    let (detail_where, rollup_where, params) =
+        RangeFilters::new(start_date, end_date, app_type)?.into_params();
+    let cols = group_cols.join(", ");
+    let sql = format!(
+        "SELECT {cols},
+            SUM(request_count), SUM(input_tokens), SUM(output_tokens),
+            SUM(cache_read_tokens), SUM(cache_creation_tokens), SUM(total_cost),
+            MAX(priced)
+        FROM (
+            SELECT {cols},
+                COUNT(*) as request_count,
+                COALESCE(SUM(input_tokens), 0) as input_tokens,
+                COALESCE(SUM(output_tokens), 0) as output_tokens,
+                COALESCE(SUM(cache_read_tokens), 0) as cache_read_tokens,
+                COALESCE(SUM(cache_creation_tokens), 0) as cache_creation_tokens,
+                COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0) as total_cost,
+                COALESCE(MAX(CAST(total_cost_usd AS REAL) > 0), 0) as priced
+            FROM proxy_request_logs
+            {detail_where}
+            GROUP BY {cols}
+            UNION ALL
+            SELECT {cols},
+                COALESCE(SUM(request_count), 0),
+                COALESCE(SUM(input_tokens), 0),
+                COALESCE(SUM(output_tokens), 0),
+                COALESCE(SUM(cache_read_tokens), 0),
+                COALESCE(SUM(cache_creation_tokens), 0),
+                COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0),
+                COALESCE(MAX(CAST(total_cost_usd AS REAL) > 0), 0)
+            FROM usage_daily_rollups
+            {rollup_where}
+            GROUP BY {cols}
+        )
+        GROUP BY {cols}"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+    let rows = stmt.query_map(param_refs.as_slice(), |row| {
+        let keys = (0..group_cols.len())
+            .map(|i| row.get::<_, String>(i))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok((keys, usage_sums_from_row(row, group_cols.len())?))
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(AppError::from)
+}
+
+fn cost_string(cost: f64) -> String {
+    format!("{cost:.6}")
 }
 
 impl Database {
@@ -756,7 +952,7 @@ impl Database {
         Ok(stats)
     }
 
-    /// 获取模型统计
+    /// 获取模型统计（按费用从高到低）
     pub fn get_model_stats(
         &self,
         start_date: Option<i64>,
@@ -764,104 +960,193 @@ impl Database {
         app_type: Option<&str>,
     ) -> Result<Vec<ModelStats>, AppError> {
         let conn = lock_conn!(self.conn);
+        let rows = query_usage_sums(
+            &conn,
+            &["model", "app_type"],
+            start_date,
+            end_date,
+            app_type,
+        )?;
 
-        let mut detail_conditions = Vec::new();
-        let mut detail_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        if let Some(start) = start_date {
-            detail_conditions.push("l.created_at >= ?");
-            detail_params.push(Box::new(start));
+        // 一个模型可能被几个工具用过：合并成一行，工具按用量排
+        let mut by_model: HashMap<String, (UsageSums, Vec<(String, u64)>)> = HashMap::new();
+        for (keys, sums) in rows {
+            let [model, app_type] = <[String; 2]>::try_from(keys)
+                .map_err(|_| AppError::Database("模型统计分组列数不对".to_string()))?;
+            let (total, apps) = by_model.entry(model).or_default();
+            total.add(&sums);
+            apps.push((app_type, sums.input_tokens + sums.output_tokens));
         }
-        if let Some(end) = end_date {
-            detail_conditions.push("l.created_at <= ?");
-            detail_params.push(Box::new(end));
-        }
-        if let Some(at) = app_type {
-            detail_conditions.push("l.app_type = ?");
-            detail_params.push(Box::new(at.to_string()));
-        }
-        let detail_where = if detail_conditions.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", detail_conditions.join(" AND "))
-        };
 
-        let mut rollup_conditions = Vec::new();
-        let mut rollup_params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        let rollup_bounds = compute_rollup_date_bounds(start_date, end_date)?;
-        push_rollup_date_filters(
-            &mut rollup_conditions,
-            &mut rollup_params,
-            "r.date",
-            &rollup_bounds,
-        );
-        if let Some(at) = app_type {
-            rollup_conditions.push("r.app_type = ?".to_string());
-            rollup_params.push(Box::new(at.to_string()));
-        }
-        let rollup_where = if rollup_conditions.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", rollup_conditions.join(" AND "))
-        };
-
-        // UNION detail logs + rollup data
-        let sql = format!(
-            "SELECT
-                model,
-                SUM(request_count) as request_count,
-                SUM(total_tokens) as total_tokens,
-                SUM(total_cost) as total_cost
-            FROM (
-                SELECT l.model,
-                    COUNT(*) as request_count,
-                    COALESCE(SUM(l.input_tokens + l.output_tokens), 0) as total_tokens,
-                    COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as total_cost
-                FROM proxy_request_logs l
-                {detail_where}
-                GROUP BY l.model
-                UNION ALL
-                SELECT r.model,
-                    COALESCE(SUM(request_count), 0),
-                    COALESCE(SUM(input_tokens + output_tokens), 0),
-                    COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0)
-                FROM usage_daily_rollups r
-                {rollup_where}
-                GROUP BY r.model
-            )
-            GROUP BY model
-            ORDER BY total_cost DESC"
-        );
-
-        let mut stmt = conn.prepare(&sql)?;
-        let mut params: Vec<Box<dyn rusqlite::ToSql>> = detail_params;
-        params.extend(rollup_params);
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let row_mapper = |row: &rusqlite::Row| {
-            let request_count: i64 = row.get(1)?;
-            let total_cost: f64 = row.get(3)?;
-            let avg_cost = if request_count > 0 {
-                total_cost / request_count as f64
-            } else {
-                0.0
-            };
-
-            Ok(ModelStats {
-                model: row.get(0)?,
-                request_count: request_count as u64,
-                total_tokens: row.get::<_, i64>(2)? as u64,
-                total_cost: format!("{total_cost:.6}"),
-                avg_cost_per_request: format!("{avg_cost:.6}"),
+        let mut stats: Vec<ModelStats> = by_model
+            .into_iter()
+            .map(|(model, (sums, mut apps))| {
+                apps.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                let avg_cost = if sums.requests > 0 {
+                    sums.cost / sums.requests as f64
+                } else {
+                    0.0
+                };
+                ModelStats {
+                    model,
+                    request_count: sums.requests,
+                    total_tokens: sums.input_tokens + sums.output_tokens,
+                    input_tokens: sums.input_tokens,
+                    output_tokens: sums.output_tokens,
+                    cache_read_tokens: sums.cache_read_tokens,
+                    cache_creation_tokens: sums.cache_creation_tokens,
+                    total_cost: cost_string(sums.cost),
+                    avg_cost_per_request: cost_string(avg_cost),
+                    app_types: apps.into_iter().map(|(app_type, _)| app_type).collect(),
+                    priced: sums.priced,
+                }
             })
-        };
+            .collect();
+        stats.sort_by(|a, b| {
+            let cost = |s: &ModelStats| s.total_cost.parse::<f64>().unwrap_or(0.0);
+            cost(b)
+                .total_cmp(&cost(a))
+                .then_with(|| a.model.cmp(&b.model))
+        });
+        Ok(stats)
+    }
 
-        let rows = stmt.query_map(param_refs.as_slice(), row_mapper)?;
+    /// 按工具（`app_type`）统计，实时日志 + 日聚合。
+    pub fn get_app_type_stats(
+        &self,
+        start_date: Option<i64>,
+        end_date: Option<i64>,
+    ) -> Result<Vec<AppTypeStats>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let rows = query_usage_sums(&conn, &["app_type"], start_date, end_date, None)?;
 
-        let mut stats = Vec::new();
+        let mut stats: Vec<AppTypeStats> = rows
+            .into_iter()
+            .map(|(mut keys, sums)| AppTypeStats {
+                app_type: keys.remove(0),
+                request_count: sums.requests,
+                total_tokens: sums.input_tokens + sums.output_tokens,
+                input_tokens: sums.input_tokens,
+                output_tokens: sums.output_tokens,
+                cache_read_tokens: sums.cache_read_tokens,
+                cache_creation_tokens: sums.cache_creation_tokens,
+                total_cost: cost_string(sums.cost),
+            })
+            .collect();
+        stats.sort_by(|a, b| {
+            b.total_tokens
+                .cmp(&a.total_tokens)
+                .then_with(|| a.app_type.cmp(&b.app_type))
+        });
+        Ok(stats)
+    }
+
+    /// 最早的一条用量：实时日志里最早的 `created_at`（秒）、日聚合里最早的日期。
+    pub(crate) fn get_earliest_usage(&self) -> Result<(Option<i64>, Option<NaiveDate>), AppError> {
+        let conn = lock_conn!(self.conn);
+        let created_at: Option<i64> = conn.query_row(
+            "SELECT MIN(created_at) FROM proxy_request_logs",
+            [],
+            |row| row.get(0),
+        )?;
+        let date: Option<String> =
+            conn.query_row("SELECT MIN(date) FROM usage_daily_rollups", [], |row| {
+                row.get(0)
+            })?;
+        let date = date
+            .map(|d| {
+                NaiveDate::parse_from_str(&d, "%Y-%m-%d")
+                    .map_err(|e| AppError::Database(format!("解析 rollup 日期失败: {e}")))
+            })
+            .transpose()?;
+        Ok((created_at, date))
+    }
+
+    /// 按桶求和：`buckets` 从早到晚，桶 i 覆盖 `[buckets[i].start, buckets[i+1].start)`，
+    /// 最后一个到 `end_date`（含）。`start_date`/`end_date` 决定哪些日聚合行算数（同
+    /// [`get_usage_summary`]：只算整天），算数的行按日期落进桶里。返回和 `buckets`
+    /// 等长，没有数据的桶全 0。
+    pub(crate) fn get_usage_series(
+        &self,
+        buckets: &[SeriesBucket],
+        start_date: Option<i64>,
+        end_date: i64,
+    ) -> Result<Vec<UsageSums>, AppError> {
+        if buckets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = lock_conn!(self.conn);
+
+        // 桶边界是整数，直接写进 SQL；用 LEFT JOIN 让空桶也有一行
+        let bounds = buckets
+            .iter()
+            .enumerate()
+            .map(|(i, bucket)| {
+                let end = buckets.get(i + 1).map_or(end_date + 1, |next| next.start);
+                format!("({i}, {}, {end})", bucket.start)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "WITH b(idx, s, e) AS (VALUES {bounds})
+            SELECT b.idx,
+                COUNT(l.request_id),
+                COALESCE(SUM(l.input_tokens), 0),
+                COALESCE(SUM(l.output_tokens), 0),
+                COALESCE(SUM(l.cache_read_tokens), 0),
+                COALESCE(SUM(l.cache_creation_tokens), 0),
+                COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0),
+                COALESCE(MAX(CAST(l.total_cost_usd AS REAL) > 0), 0)
+            FROM b
+            LEFT JOIN proxy_request_logs l ON l.created_at >= b.s AND l.created_at < b.e
+            GROUP BY b.idx
+            ORDER BY b.idx"
+        );
+        let mut series = vec![UsageSums::default(); buckets.len()];
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)? as usize, usage_sums_from_row(row, 1)?))
+        })?;
         for row in rows {
-            stats.push(row?);
+            let (idx, sums) = row?;
+            series[idx].add(&sums);
         }
 
-        Ok(stats)
+        let RangeFilters {
+            rollup_where,
+            rollup_params,
+            ..
+        } = RangeFilters::new(start_date, Some(end_date), None)?;
+        let rollup_sql = format!(
+            "SELECT date,
+                COALESCE(SUM(request_count), 0),
+                COALESCE(SUM(input_tokens), 0),
+                COALESCE(SUM(output_tokens), 0),
+                COALESCE(SUM(cache_read_tokens), 0),
+                COALESCE(SUM(cache_creation_tokens), 0),
+                COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0),
+                COALESCE(MAX(CAST(total_cost_usd AS REAL) > 0), 0)
+            FROM usage_daily_rollups
+            {rollup_where}
+            GROUP BY date"
+        );
+        let mut stmt = conn.prepare(&rollup_sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> =
+            rollup_params.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, usage_sums_from_row(row, 1)?))
+        })?;
+        for row in rows {
+            let (date, sums) = row?;
+            let date = NaiveDate::parse_from_str(&date, "%Y-%m-%d")
+                .map_err(|e| AppError::Database(format!("解析 rollup 日期失败: {e}")))?;
+            // the bucket whose first day is the latest one not after `date`
+            let after = buckets.partition_point(|bucket| bucket.first_date <= date);
+            if let Some(idx) = after.checked_sub(1) {
+                series[idx].add(&sums);
+            }
+        }
+        Ok(series)
     }
 
     /// 获取请求日志列表（分页）
@@ -1921,6 +2206,365 @@ mod tests {
         let result = find_model_pricing_row(&conn, "unknown-model-123")?;
         assert!(result.is_none(), "不应该匹配不存在的模型");
 
+        Ok(())
+    }
+
+    // ── overview queries: by tool, by model, series ─────────────────────
+
+    /// A call: `tokens` is [input, output, cache read, cache write].
+    fn insert_log(
+        db: &Database,
+        id: &str,
+        app_type: &str,
+        model: &str,
+        created_at: i64,
+        tokens: [i64; 4],
+        cost: &str,
+    ) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, provider_id, app_type, model,
+                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                total_cost_usd, latency_ms, status_code, created_at
+            ) VALUES (?, 'p', ?, ?, ?, ?, ?, ?, ?, 0, 200, ?)",
+            params![
+                id, app_type, model, tokens[0], tokens[1], tokens[2], tokens[3], cost, created_at
+            ],
+        )
+        .unwrap();
+    }
+
+    fn insert_rollup(
+        db: &Database,
+        date: &str,
+        app_type: &str,
+        model: &str,
+        requests: i64,
+        tokens: [i64; 4],
+        cost: &str,
+    ) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO usage_daily_rollups (
+                date, app_type, provider_id, model, request_count, success_count,
+                input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                total_cost_usd, avg_latency_ms
+            ) VALUES (?, ?, 'p', ?, ?, ?, ?, ?, ?, ?, ?, 0)",
+            params![
+                date, app_type, model, requests, requests, tokens[0], tokens[1], tokens[2],
+                tokens[3], cost
+            ],
+        )
+        .unwrap();
+    }
+
+    /// The range is 2024-01-01 00:00 to 2024-01-08 12:00 (local). Rollup days count
+    /// from 01-01 to 01-07; what lies outside is seeded to be left out.
+    fn overview_range() -> (i64, i64) {
+        (
+            local_ts(2024, 1, 1, 0, 0, 0),
+            local_ts(2024, 1, 8, 12, 0, 0),
+        )
+    }
+
+    fn seed_overview(db: &Database) {
+        insert_log(
+            db,
+            "r1",
+            "claude",
+            "claude-sonnet",
+            local_ts(2024, 1, 2, 10, 0, 0),
+            [100, 50, 1000, 200],
+            "0.10",
+        );
+        insert_log(
+            db,
+            "r2",
+            "claude",
+            "claude-sonnet",
+            local_ts(2024, 1, 3, 9, 0, 0),
+            [10, 5, 0, 0],
+            "0.01",
+        );
+        insert_log(
+            db,
+            "r3",
+            "codex",
+            "gpt-5",
+            local_ts(2024, 1, 3, 10, 0, 0),
+            [300, 100, 2000, 0],
+            "0.20",
+        );
+        insert_log(
+            db,
+            "r4",
+            "opencode",
+            "free-model",
+            local_ts(2024, 1, 8, 11, 0, 0),
+            [1, 2, 3, 4],
+            "0",
+        );
+        // outside the range: after its end, and before its start
+        insert_log(
+            db,
+            "r5",
+            "claude",
+            "claude-sonnet",
+            local_ts(2024, 1, 8, 13, 0, 0),
+            [9, 9, 9, 9],
+            "9",
+        );
+        insert_log(
+            db,
+            "r6",
+            "claude",
+            "claude-sonnet",
+            local_ts(2023, 12, 31, 23, 0, 0),
+            [9, 9, 9, 9],
+            "9",
+        );
+
+        insert_rollup(
+            db,
+            "2024-01-01",
+            "claude",
+            "claude-sonnet",
+            4,
+            [1000, 500, 5000, 100],
+            "1.00",
+        );
+        insert_rollup(
+            db,
+            "2024-01-07",
+            "opencode",
+            "gpt-5",
+            2,
+            [20, 10, 0, 0],
+            "0.50",
+        );
+        // the end day is only partly in the range, and one day lies before it
+        insert_rollup(
+            db,
+            "2024-01-08",
+            "claude",
+            "claude-sonnet",
+            9,
+            [9, 9, 9, 9],
+            "9",
+        );
+        insert_rollup(
+            db,
+            "2023-12-31",
+            "claude",
+            "claude-sonnet",
+            9,
+            [9, 9, 9, 9],
+            "9",
+        );
+    }
+
+    #[test]
+    fn app_type_stats_sum_live_rows_and_rollups_by_tool() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        seed_overview(&db);
+        let (start, end) = overview_range();
+
+        let stats = db.get_app_type_stats(Some(start), Some(end))?;
+
+        let got: Vec<(&str, u64, u64, u64, u64, u64, &str)> = stats
+            .iter()
+            .map(|s| {
+                (
+                    s.app_type.as_str(),
+                    s.request_count,
+                    s.input_tokens,
+                    s.output_tokens,
+                    s.cache_read_tokens,
+                    s.cache_creation_tokens,
+                    s.total_cost.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("claude", 6, 1110, 555, 6000, 300, "1.110000"),
+                ("codex", 1, 300, 100, 2000, 0, "0.200000"),
+                ("opencode", 3, 21, 12, 3, 4, "0.500000"),
+            ]
+        );
+        assert_eq!(stats[0].total_tokens, 1665);
+        Ok(())
+    }
+
+    #[test]
+    fn model_stats_carry_the_token_breakdown_tools_and_whether_priced() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        seed_overview(&db);
+        let (start, end) = overview_range();
+
+        let stats = db.get_model_stats(Some(start), Some(end), None)?;
+
+        let got: Vec<String> = stats
+            .iter()
+            .map(|s| {
+                format!(
+                    "{} x{} in={} out={} read={} write={} cost={} tools={} priced={}",
+                    s.model,
+                    s.request_count,
+                    s.input_tokens,
+                    s.output_tokens,
+                    s.cache_read_tokens,
+                    s.cache_creation_tokens,
+                    s.total_cost,
+                    s.app_types.join("+"),
+                    s.priced
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                "claude-sonnet x6 in=1110 out=555 read=6000 write=300 cost=1.110000 tools=claude priced=true",
+                // codex used it more than opencode, so it comes first
+                "gpt-5 x3 in=320 out=110 read=2000 write=0 cost=0.700000 tools=codex+opencode priced=true",
+                "free-model x1 in=1 out=2 read=3 write=4 cost=0.000000 tools=opencode priced=false",
+            ]
+        );
+        assert_eq!(stats[0].total_tokens, 1665);
+        assert_eq!(stats[1].avg_cost_per_request, "0.233333");
+        Ok(())
+    }
+
+    #[test]
+    fn a_models_tools_are_ordered_by_how_much_each_used_it() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        insert_log(&db, "a", "codex", "m", 1000, [10, 10, 0, 0], "0.01");
+        insert_log(&db, "b", "gemini", "m", 1000, [500, 500, 0, 0], "0.01");
+
+        let stats = db.get_model_stats(None, None, None)?;
+
+        assert_eq!(stats[0].app_types, ["gemini", "codex"]);
+        Ok(())
+    }
+
+    #[test]
+    fn model_stats_can_still_be_limited_to_one_tool() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        seed_overview(&db);
+        let (start, end) = overview_range();
+
+        let stats = db.get_model_stats(Some(start), Some(end), Some("opencode"))?;
+
+        let models: Vec<&str> = stats.iter().map(|s| s.model.as_str()).collect();
+        assert_eq!(models, ["gpt-5", "free-model"]);
+        assert_eq!(stats[0].request_count, 2);
+        Ok(())
+    }
+
+    fn day_bucket(year: i32, month: u32, day: u32) -> SeriesBucket {
+        SeriesBucket {
+            start: local_ts(year, month, day, 0, 0, 0),
+            first_date: NaiveDate::from_ymd_opt(year, month, day).unwrap(),
+        }
+    }
+
+    #[test]
+    fn the_series_puts_each_call_and_rollup_day_in_its_bucket() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        seed_overview(&db);
+        let (start, end) = overview_range();
+        let buckets: Vec<SeriesBucket> = (1..=8).map(|d| day_bucket(2024, 1, d)).collect();
+
+        let series = db.get_usage_series(&buckets, Some(start), end)?;
+
+        let got: Vec<(u64, u64, u64)> = series
+            .iter()
+            .map(|b| (b.requests, b.input_tokens, b.cache_creation_tokens))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (4, 1000, 100), // 01-01: the rollup
+                (1, 100, 200),  // 01-02: r1
+                (2, 310, 0),    // 01-03: r2 and r3
+                (0, 0, 0),
+                (0, 0, 0),
+                (0, 0, 0),
+                (2, 20, 0), // 01-07: the opencode rollup
+                (1, 1, 4),  // 01-08: r4; r5 is after the end
+            ]
+        );
+        assert!((series[2].cost - 0.21).abs() < 1e-9);
+        assert!(series[2].priced && !series[7].priced);
+        Ok(())
+    }
+
+    #[test]
+    fn the_series_adds_up_to_the_summary_the_tools_and_the_models() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        seed_overview(&db);
+        let (start, end) = overview_range();
+        let buckets: Vec<SeriesBucket> = (1..=8).map(|d| day_bucket(2024, 1, d)).collect();
+
+        let series = db.get_usage_series(&buckets, Some(start), end)?;
+        let summary = db.get_usage_summary(Some(start), Some(end), None)?;
+        let tools = db.get_app_type_stats(Some(start), Some(end))?;
+        let models = db.get_model_stats(Some(start), Some(end), None)?;
+
+        let requests: u64 = series.iter().map(|b| b.requests).sum();
+        let output: u64 = series.iter().map(|b| b.output_tokens).sum();
+        let cost: f64 = series.iter().map(|b| b.cost).sum();
+        assert_eq!(requests, summary.total_requests);
+        assert_eq!(output, summary.total_output_tokens);
+        assert!((cost - summary.total_cost.parse::<f64>().unwrap()).abs() < 1e-9);
+        assert_eq!(requests, tools.iter().map(|s| s.request_count).sum::<u64>());
+        assert_eq!(
+            requests,
+            models.iter().map(|s| s.request_count).sum::<u64>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_weekly_bucket_holds_the_rollup_days_of_its_week() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        seed_overview(&db);
+        let (start, end) = overview_range();
+        // 2024-01-01 is a Monday
+        let buckets = [day_bucket(2024, 1, 1), day_bucket(2024, 1, 8)];
+
+        let series = db.get_usage_series(&buckets, Some(start), end)?;
+
+        let got: Vec<u64> = series.iter().map(|b| b.requests).collect();
+        // rollup 01-01 (4), r1, r2, r3, rollup 01-07 (2); then r4
+        assert_eq!(got, [9, 1]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_series_without_buckets_is_empty() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        assert!(db.get_usage_series(&[], None, 0)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn the_earliest_usage_is_the_older_of_the_calls_and_the_rollups() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        assert_eq!(db.get_earliest_usage()?, (None, None));
+
+        insert_log(&db, "r1", "claude", "m", 5000, [1, 1, 0, 0], "0");
+        insert_log(&db, "r2", "claude", "m", 3000, [1, 1, 0, 0], "0");
+        insert_rollup(&db, "2024-01-05", "claude", "m", 1, [1, 1, 0, 0], "0");
+        insert_rollup(&db, "2024-01-02", "claude", "m", 1, [1, 1, 0, 0], "0");
+
+        assert_eq!(
+            db.get_earliest_usage()?,
+            (Some(3000), NaiveDate::from_ymd_opt(2024, 1, 2))
+        );
         Ok(())
     }
 }
