@@ -459,8 +459,20 @@ fn parse_codex_file(file_path: &Path) -> Result<(Vec<CodexCall>, i64), AppError>
                 };
 
                 let delta = if is_total {
-                    // 累计值模式：计算与上次的 delta
-                    let d = compute_delta(&state.prev_total, &cumulative);
+                    // 累计值模式：计算与上次的 delta。A file's first count has no
+                    // earlier total here, and a thread continued in this file
+                    // carries its running total over: that call is its
+                    // last_token_usage (equal to the total in a fresh file).
+                    let first_call = match state.prev_total {
+                        None => info
+                            .get("last_token_usage")
+                            .and_then(parse_cumulative_tokens),
+                        Some(_) => None,
+                    };
+                    let d = match first_call {
+                        Some(last) => compute_delta(&None, &last),
+                        None => compute_delta(&state.prev_total, &cumulative),
+                    };
                     state.prev_total = Some(cumulative);
                     d
                 } else {
@@ -1148,5 +1160,54 @@ mod tests {
             )
             .unwrap();
         assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn a_continued_rollout_counts_its_first_call_not_the_threads_running_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = write_rollout(
+            dir.path(),
+            "rollout-2026-05-22T09-57-31-thread-4.jsonl",
+            "thread-4",
+            "2026-05-22T02:00:34Z",
+            100,
+        );
+        // the thread goes on in a second file whose running total carries the
+        // first file's 100 input tokens; its own call is the last_token_usage
+        let resumed = dir
+            .path()
+            .join("rollout-2026-05-23T08-00-00-thread-4.jsonl");
+        std::fs::write(
+            &resumed,
+            [
+                serde_json::json!({"timestamp": "2026-05-23T01:00:00Z", "type": "session_meta",
+                    "payload": {"id": "thread-4"}}),
+                serde_json::json!({"timestamp": "2026-05-23T01:00:01Z", "type": "event_msg",
+                    "payload": {"type": "token_count", "info": {
+                        "total_token_usage": {"input_tokens": 400, "cached_input_tokens": 0,
+                            "output_tokens": 30},
+                        "last_token_usage": {"input_tokens": 300, "cached_input_tokens": 0,
+                            "output_tokens": 20}}}}),
+                serde_json::json!({"timestamp": "2026-05-23T01:00:09Z", "type": "event_msg",
+                    "payload": {"type": "token_count", "info": {
+                        "total_token_usage": {"input_tokens": 900, "cached_input_tokens": 0,
+                            "output_tokens": 70},
+                        "last_token_usage": {"input_tokens": 500, "cached_input_tokens": 0,
+                            "output_tokens": 40}}}}),
+            ]
+            .map(|l| l.to_string())
+            .join("\n"),
+        )
+        .unwrap();
+        let db = Database::memory().unwrap();
+
+        sync_single_codex_file(&db, &first).unwrap();
+        sync_single_codex_file(&db, &resumed).unwrap();
+
+        let calls: Vec<(i64, i64)> = stored_tokens(&db, "codex_session:thread-4:%")
+            .into_iter()
+            .map(|t| (t.0, t.1))
+            .collect();
+        assert_eq!(calls, vec![(100, 10), (300, 20), (500, 40)]);
     }
 }
