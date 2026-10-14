@@ -5,7 +5,9 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
+  DialogFooter,
 } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import type { ModelProfilesController } from "@/hooks/useModelProfiles";
 import { ModelProfilesPanel } from "./ModelProfilesPanel";
 
@@ -38,6 +40,15 @@ export function ProfilesDialog({
         <div className="min-h-0 overflow-y-auto px-[18px] py-4">
           <ModelProfilesPanel controller={controller} />
         </div>
+        <DialogFooter>
+          <Button
+            variant="secondary"
+            disabled={controller.busy}
+            onClick={() => onOpenChange(false)}
+          >
+            {t("common.close")}
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

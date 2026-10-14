@@ -144,6 +144,18 @@ describe("ProfilesMenu", () => {
     ).toBeVisible();
   });
 
+  it("lets mouse users close profile management and return to tools", async () => {
+    render(<ProfilesMenu boundTools={["codex"]} />);
+    await openMenu();
+    await userEvent.click(
+      await screen.findByRole("menuitem", { name: "管理方案…" }),
+    );
+    const dialog = await screen.findByRole("dialog", { name: "模型方案" });
+    await userEvent.click(within(dialog).getByRole("button", { name: "关闭" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.getByRole("button", { name: "方案" })).toBeVisible();
+  });
+
   it("offers no undo before anything was applied", async () => {
     render(<ProfilesMenu boundTools={["codex", "claude"]} />);
     await openMenu();

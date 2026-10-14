@@ -31,7 +31,7 @@ export function MissingToolsFold({
         onOpenChange={onOpenChange}
         aria-controls={MISSING_TOOLS_ID}
         note={
-          <span className="ml-1 font-normal">
+          <span className="font-normal">
             · {t("toolLifecycle.bindingRetained")}
           </span>
         }
