@@ -56,6 +56,21 @@ export interface ManagedSession extends SessionMeta {
   usage?: SessionUsage;
 }
 
+/** Providers may expose observed models or the usage database's model breakdown. */
+export function sessionModelNames(
+  session: SessionMeta & {
+    models?: string[];
+    usage?: Pick<SessionUsage, "models">;
+  },
+): string[] {
+  return [
+    ...new Set([
+      ...(session.models ?? []),
+      ...(session.usage?.models.map((m) => m.model) ?? []),
+    ]),
+  ];
+}
+
 export interface SessionTrashEntry {
   key: string;
   providerId: string;
@@ -66,6 +81,8 @@ export interface SessionTrashEntry {
   state: "trashed" | "preparing" | "restoring" | "recoveryRequired";
   error?: string | null;
   itemCount: number;
+  /** Absent for trash written by older app versions. */
+  sizeBytes?: number | null;
 }
 
 export interface TrashSessionResult {

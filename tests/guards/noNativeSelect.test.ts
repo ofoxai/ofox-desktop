@@ -7,9 +7,7 @@ const SRC = path.join(ROOT, "src");
 
 // Screens that still draw an OS-native <select>. Each entry is removed by the
 // task that gives it the app's own menu; nothing may be added here.
-const ALLOWLIST = new Set<string>([
-  "src/components/sessions/SessionsPanel.tsx",
-]);
+const ALLOWLIST = new Set<string>([]);
 
 function relative(file: string): string {
   return path.relative(ROOT, file).split(path.sep).join("/");
