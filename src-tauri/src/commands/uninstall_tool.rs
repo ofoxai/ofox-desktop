@@ -206,14 +206,33 @@ fn manual(source: UninstallSource, command: Option<String>) -> ManualOnly {
     }
 }
 
-/// What the user could run themselves when the source is not known. A guess at
-/// the usual package manager is only offered when nothing is known about it.
+/// What the user could run themselves when the source is not known: the manager
+/// the location points to, npm when it says nothing.
 fn suggested_command(tool: &str, install: &Installation) -> Option<String> {
     if tool == "hermes" {
         return Some("hermes uninstall".into());
     }
-    installed_npm_package(tool, &install.path, &install.real)
-        .map(|package| format!("npm uninstall --global {package}"))
+    let package = installed_npm_package(tool, &install.path, &install.real)?;
+    let located = format!(
+        "{}|{}",
+        install.real.to_string_lossy(),
+        install.path.to_string_lossy()
+    )
+    .replace('\\', "/")
+    .to_lowercase();
+    let in_any = |markers: &[&str]| markers.iter().any(|marker| located.contains(marker));
+    let remove = if in_any(&["/pnpm/", "/.pnpm/"]) {
+        "pnpm remove --global"
+    } else if in_any(&["/.bun/"]) {
+        "bun remove --global"
+    } else if in_any(&["/.volta/", "/volta/"]) {
+        "volta uninstall"
+    } else if in_any(&["/yarn/", "/.yarn/"]) {
+        "yarn global remove"
+    } else {
+        "npm uninstall --global"
+    };
+    Some(format!("{remove} {package}"))
 }
 
 pub(crate) fn uninstall_plan(
@@ -1437,6 +1456,34 @@ options:
             manual.command.as_deref(),
             Some("npm uninstall --global @google/gemini-cli")
         );
+    }
+
+    #[test]
+    fn the_suggested_command_follows_the_manager_the_path_points_to() {
+        let temp = tempfile::tempdir().unwrap();
+        let facts = facts(temp.path(), unknown());
+        for (path, expected) in [
+            (
+                "/Users/me/.local/share/pnpm/gemini",
+                "pnpm remove --global @google/gemini-cli",
+            ),
+            (
+                "/Users/me/.bun/bin/gemini",
+                "bun remove --global @google/gemini-cli",
+            ),
+            (
+                "/Users/me/.volta/bin/gemini",
+                "volta uninstall @google/gemini-cli",
+            ),
+            (
+                "/Users/me/.yarn/bin/gemini",
+                "yarn global remove @google/gemini-cli",
+            ),
+        ] {
+            let active = install(Path::new(path), Path::new(path));
+            let manual = uninstall_plan("gemini", &active, &facts).unwrap_err();
+            assert_eq!(manual.command.as_deref(), Some(expected), "{path}");
+        }
     }
 
     #[test]
