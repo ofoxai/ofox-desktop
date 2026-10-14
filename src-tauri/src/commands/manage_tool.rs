@@ -274,7 +274,9 @@ pub async fn set_active_ofox_model(
             .load(crate::ofox_secret::Slot::ApiKey { tool })
             .map_err(|_| "读取已绑定的 API Key 失败".to_string())?
             .ok_or_else(|| "未找到已绑定的 API Key".to_string())?;
-        crate::native_tools::set_model(&state.db, tool, &key, selected).await?;
+        crate::native_tools::set_model(&state.db, tool, &key, selected)
+            .await
+            .map_err(crate::redact::scrub_error)?;
         crate::ofox_api_keys::mark_key_used(tool);
         return Ok(());
     }
@@ -293,7 +295,9 @@ pub async fn set_active_ofox_model(
         )
         .await
         .map_err(|e| format!("获取 WorkBuddy OfoxAI API key 失败: {e}"))?;
-        crate::workbuddy_config::update_selected_models(&state.db, &api_key, &[selection]).await?;
+        crate::workbuddy_config::update_selected_models(&state.db, &api_key, &[selection])
+            .await
+            .map_err(crate::redact::scrub_error)?;
         crate::ofox_api_keys::mark_key_used(BindableTool::WorkBuddy);
         return Ok(());
     }
@@ -360,7 +364,8 @@ pub async fn set_active_ofox_model(
             &previous_settings,
             &provider.settings_config,
         )
-        .await?;
+        .await
+        .map_err(crate::redact::scrub_error)?;
     } else {
         persist_with_rollback(
             &state.db,
@@ -632,7 +637,8 @@ pub async fn set_active_ofox_models(
         &previous_settings,
         &provider.settings_config,
     )
-    .await?;
+    .await
+    .map_err(crate::redact::scrub_error)?;
     // 保存已完成；默认走 Responses 的模型在后台验证，不阻塞也不改配置。
     tauri::async_runtime::spawn(crate::model_compat::verify_in_background(
         catalog.models,
@@ -694,7 +700,9 @@ pub async fn set_workbuddy_managed_models(
         })
         .map_err(|_| "读取已绑定的 API Key 失败".to_string())?
         .ok_or_else(|| "未找到已绑定的 API Key，请重新绑定".to_string())?;
-    crate::workbuddy_config::update_selected_models(&state.db, &api_key, &model_selections).await?;
+    crate::workbuddy_config::update_selected_models(&state.db, &api_key, &model_selections)
+        .await
+        .map_err(crate::redact::scrub_error)?;
     crate::ofox_api_keys::mark_key_used(BindableTool::WorkBuddy);
     Ok(())
 }
@@ -1110,6 +1118,14 @@ mod tests {
             ping_failure_message(400, r#"{"message":"bad request"}"#),
             "请求失败（HTTP 400）bad request"
         );
+    }
+
+    #[test]
+    fn ping_never_repeats_a_key_the_gateway_echoes_back() {
+        let body = r#"{"error":{"message":"Incorrect API key provided: sk-of-abc123456789xyz"}}"#;
+        let message = ping_failure_message(401, body);
+        assert!(!message.contains("abc123456789"), "{message}");
+        assert!(message.contains("Incorrect API key provided"), "{message}");
     }
 
     #[test]
@@ -1673,9 +1689,11 @@ fn ping_failure_message(status: u16, body: &str) -> String {
         })
         .unwrap_or(body)
         .trim();
+    // 网关可能把请求里的 key 原样回显在报错里；先抹掉再截断，免得截断把它切成抹不掉的残段。
+    let detail = crate::redact::scrub(detail);
     let detail = match detail.char_indices().nth(PING_DETAIL_MAX_CHARS) {
         Some((cut, _)) => format!("{}…", &detail[..cut]),
-        None => detail.to_string(),
+        None => detail.into_owned(),
     };
     format!("{hint}（HTTP {status}）{detail}")
 }

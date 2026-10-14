@@ -59,6 +59,15 @@ pub fn scrub(s: &str) -> Cow<'_, str> {
     text
 }
 
+/// 给 `Result<_, String>` 的 `map_err` 用：命令返回给前端的错误字符串先过 [`scrub`]。
+pub fn scrub_error(error: String) -> String {
+    match scrub(&error) {
+        // 没有要抹的内容：原字符串直接还回去，不复制。
+        Cow::Borrowed(_) => error,
+        Cow::Owned(scrubbed) => scrubbed,
+    }
+}
+
 fn replace(text: &mut Cow<'_, str>, pattern: &Regex, with: impl Fn(&Captures) -> String) {
     // 没有匹配时 `replace_all` 返回 `Borrowed`，原字符串不被复制。
     if let Cow::Owned(replaced) = pattern.replace_all(text, with) {
@@ -503,5 +512,17 @@ mod tests {
         let described = describe_toml_de_error(source, &error);
         assert!(!described.contains("abc123456789"), "{described}");
         assert!(described.contains("invalid type"), "{described}");
+    }
+
+    #[test]
+    fn scrub_error_redacts_secrets_and_keeps_plain_errors() {
+        assert_eq!(
+            scrub_error("rejected sk-of-abc123456789".to_string()),
+            "rejected «redacted»"
+        );
+        assert_eq!(
+            scrub_error("无效的应用类型: x".to_string()),
+            "无效的应用类型: x"
+        );
     }
 }

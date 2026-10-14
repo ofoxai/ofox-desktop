@@ -166,6 +166,26 @@ async fn bind_error_for_an_unparseable_codex_config_does_not_echo_the_key_in_it(
 
 #[tokio::test]
 #[serial]
+async fn unbind_error_for_a_codex_config_broken_after_binding_does_not_echo_the_key_in_it() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    let broken = format!("experimental_bearer_token = \"{LEAKY_KEY}\" oops\n");
+    write(&config, &broken);
+
+    let outcome = unbind(&db, Tool::Codex, "codex", &[], false).await;
+
+    let shown = match outcome {
+        Ok(report) => format!("{report:?}"),
+        Err(error) => error,
+    };
+    assert!(!shown.contains("abc123456789"), "{shown}");
+}
+
+#[tokio::test]
+#[serial]
 async fn chatgpt_oauth_login_is_untouched_and_config_restored_byte_for_byte() {
     let home = Home::new();
     let (auth, config) = (home.codex("auth.json"), home.codex("config.toml"));

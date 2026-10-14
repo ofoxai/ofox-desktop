@@ -147,7 +147,17 @@ pub async fn ofox_request_reauth(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// 取要写到工具配置里的 LLM 凭据（keychain 命中直接用，否则向 Ofox 签发）。
+/// 取要写进工具配置的 key。失败原因里可能有服务端回显的 key，抹掉再往外传。
 async fn acquire_bind_token(
+    key_tool: crate::app_config::BindableTool,
+    ofox_manager: &Arc<RwLock<crate::ofox_auth::OfoxAuthManager>>,
+) -> Result<String, String> {
+    fetch_bind_token(key_tool, ofox_manager)
+        .await
+        .map_err(crate::redact::scrub_error)
+}
+
+async fn fetch_bind_token(
     key_tool: crate::app_config::BindableTool,
     ofox_manager: &Arc<RwLock<crate::ofox_auth::OfoxAuthManager>>,
 ) -> Result<String, String> {
@@ -320,7 +330,9 @@ pub async fn ofox_bind_tool(
     // `modelSelection` remains accepted for compatibility with older renderer
     // builds while the multi-model UI sends `modelSelections`.
     let selections = model_selections.or_else(|| model_selection.map(|selection| vec![selection]));
-    bind_tool_to_ofox_internal(&state.db, &ofox_state.0, &app, selections).await?;
+    bind_tool_to_ofox_internal(&state.db, &ofox_state.0, &app, selections)
+        .await
+        .map_err(crate::redact::scrub_error)?;
     crate::commands::model_selection::notify(
         &app_handle,
         vec![crate::model_selection::canonical_tool(&app)?],
@@ -383,7 +395,9 @@ pub async fn ofox_restore_tool_binding(
             return Err("配置未缺失或已修改，无需恢复".into());
         }
         let key = acquire_bind_token(tool, &ofox_state.0).await?;
-        crate::native_tools::restore_missing(&state.db, tool, &key).await?;
+        crate::native_tools::restore_missing(&state.db, tool, &key)
+            .await
+            .map_err(crate::redact::scrub_error)?;
         crate::commands::model_selection::notify(&app_handle, vec![tool.as_str().into()]);
         return Ok(());
     }
@@ -397,7 +411,9 @@ pub async fn ofox_restore_tool_binding(
         }
         let key =
             acquire_bind_token(crate::app_config::BindableTool::WorkBuddy, &ofox_state.0).await?;
-        crate::workbuddy_config::restore_missing_binding(&state.db, &key).await?;
+        crate::workbuddy_config::restore_missing_binding(&state.db, &key)
+            .await
+            .map_err(crate::redact::scrub_error)?;
         crate::commands::model_selection::notify(&app_handle, vec!["workbuddy".into()]);
         return Ok(());
     }
@@ -424,7 +440,8 @@ pub async fn ofox_restore_tool_binding(
         &still_bound.unwrap_or_default(),
         &key,
     )
-    .await?;
+    .await
+    .map_err(crate::redact::scrub_error)?;
     crate::commands::model_selection::notify(&app_handle, vec![tool.app().as_str().into()]);
     Ok(())
 }
@@ -474,7 +491,9 @@ pub async fn ofox_unbind_tool(
     still_bound: Option<Vec<String>>,
 ) -> Result<UnbindReport, String> {
     let still_bound = still_bound.unwrap_or_default();
-    let report = unbind_tool_from_ofox_internal(&state.db, &app, &still_bound, false).await?;
+    let report = unbind_tool_from_ofox_internal(&state.db, &app, &still_bound, false)
+        .await
+        .map_err(crate::redact::scrub_error)?;
     crate::commands::model_selection::notify(
         &app_handle,
         vec![crate::model_selection::canonical_tool(&app)?],
@@ -490,5 +509,7 @@ pub async fn ofox_unbind_preview(
     still_bound: Option<Vec<String>>,
 ) -> Result<UnbindReport, String> {
     let still_bound = still_bound.unwrap_or_default();
-    unbind_tool_from_ofox_internal(&state.db, &app, &still_bound, true).await
+    unbind_tool_from_ofox_internal(&state.db, &app, &still_bound, true)
+        .await
+        .map_err(crate::redact::scrub_error)
 }
