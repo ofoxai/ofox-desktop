@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState } from "react";
 import {
   Settings,
   RefreshCw,
@@ -9,18 +9,13 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
-import { announceKeyReconcile } from "@/lib/accountKeys";
-import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { settingsApi } from "@/lib/api";
 import { isMac } from "@/lib/platform";
-import {
-  ofoxGetUserInfo,
-  ofoxReconcileToolKeys,
-  isOfoxBillingManager,
-  type OfoxUserInfo,
-} from "@/lib/api/ofoxAuth";
+import { isOfoxBillingManager } from "@/lib/api/ofoxAuth";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
+import { useOfoxAccount } from "@/hooks/useOfoxAccount";
+import { useBoundTools, type BoundTool } from "@/hooks/useBoundTools";
 import {
   ofoxAnalyticsUrl,
   ofoxAvatarUrl,
@@ -28,7 +23,7 @@ import {
   ofoxMarketingUrl,
   ofoxWalletUrl,
 } from "@/lib/ofoxUrls";
-import { TOOL_META, TOOL_ORDER } from "@/config/toolMeta";
+import { TOOL_META } from "@/config/toolMeta";
 // NOTE: ConsolePage previously rendered a read-only "已锁定" badge for tools
 // in `boundTools ∩ PROXY_SUPPORTED_TOOLS`, sourced from
 // `useLockedTakeoverTools`. The badge was retired once the manage-tool dialog
@@ -46,10 +41,7 @@ import { UserAvatar } from "@/components/UserAvatar";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useUpdate } from "@/contexts/UpdateContext";
 import { QuickModelPicker } from "@/components/model-picker/QuickModelPicker";
-import {
-  invalidateModelState,
-  useModelSelection,
-} from "@/hooks/useModelSelection";
+import { useModelSelection } from "@/hooks/useModelSelection";
 import { ModelProfilesPanel } from "@/components/model-profiles/ModelProfilesPanel";
 import { SessionsPanel } from "@/components/sessions/SessionsPanel";
 import { useToolLaunch } from "@/hooks/useToolLaunch";
@@ -57,40 +49,10 @@ import { checkToolUpdates } from "@/hooks/useToolUpdates";
 import { batchable, useInlineToolUpdates } from "@/hooks/useInlineToolUpdates";
 import { useToolInstall } from "@/hooks/useToolInstall";
 import { useToolInstallCapabilities } from "@/hooks/useToolInstallCapabilities";
-import {
-  getInstallationStatus,
-  type ToolInstallationInfo,
-} from "@/lib/api/toolUpdates";
-import { ofoxBindApi, type ToolBindingStatus } from "@/lib/api/ofoxBind";
 import { launchErrorMessage } from "@/lib/launchErrors";
-import BoundToolRow, {
-  type BoundToolRowData,
-  type ToolRowAction,
-} from "./BoundToolRow";
+import BoundToolRow, { type ToolRowAction } from "./BoundToolRow";
 import ofoxLogo from "@/assets/icons/ofox-logo.png";
 import NodeUpgradeDialog from "@/components/tools/NodeUpgradeDialog";
-
-type BoundTool = BoundToolRowData;
-
-/** 切回窗口时最多每 30 秒重新检测一次工具。 */
-const FOCUS_REFRESH_INTERVAL_MS = 30_000;
-
-/** "quiet"：后台刷新，列表照常显示和操作，不叠「刷新中…」遮罩。 */
-type LoadMode = "shown" | "quiet";
-
-/**
- * True when the user object came back from the backend with at least one
- * identity field populated. False for `null` AND for the all-null
- * placeholder the backend returns when `/openapi/me` was unreachable
- * during the login flow (see `ofox_auth.rs::poll_for_token`).
- *
- * We treat email or name presence as the signal — `org_id` alone wouldn't
- * give the header anything useful to render.
- */
-function isMeaningfulUser(u: OfoxUserInfo | null | undefined): boolean {
-  if (!u) return false;
-  return Boolean(u.email || u.name);
-}
 
 interface ConsolePageProps {
   boundTools: string[];
@@ -129,7 +91,17 @@ export default function ConsolePage({
     markPrompted,
     dismissUpdate,
   } = useUpdate();
-  const [tools, setTools] = useState<BoundTool[]>([]);
+  const account = useOfoxAccount();
+  const { user } = account;
+  const {
+    tools,
+    loading,
+    listRefreshing,
+    apiKeyIdByTool,
+    apiKeyLabelByTool,
+    refreshList,
+    reload,
+  } = useBoundTools(boundTools, account);
   const [missingExpanded, setMissingExpanded] = useState(false);
   const installableTools = useToolInstallCapabilities();
   const inlineUpdates = useInlineToolUpdates();
@@ -140,30 +112,6 @@ export default function ConsolePage({
   // was clicked, so the dialog stays consistent even if `tools` reloads
   // mid-edit (e.g. monthly token refetch).
   const [manageTool, setManageTool] = useState<ManageToolTarget | null>(null);
-  const [user, setUser] = useState<OfoxUserInfo | null>(null);
-  // True while the post-mount retry loop is actively probing because the
-  // initial /openapi/me came back empty (backend's `poll_for_token` now
-  // returns a placeholder user when the API is unreachable, instead of
-  // hard-failing — see `ofox_auth.rs`). The loop tries 3 times with
-  // 1s/3s/8s backoff (total ~12s) so the user doesn't sit through the
-  // earlier 22s window before seeing a definitive failure state.
-  const [userRetrying, setUserRetrying] = useState(false);
-  // Which retry attempt we're currently on, for the "重试中 (1/3)" hint.
-  // 0 means "not retrying"; 1..3 maps to the three backoff tiers.
-  const [userRetryAttempt, setUserRetryAttempt] = useState(0);
-  // Set to true after the retry loop exhausts without ever seeing a real
-  // user. Surfaces a manual "重新加载" link in the header so the user has
-  // an explicit recovery path when the OFox backend was unreachable at
-  // login time but came back later.
-  const [userLoadFailed, setUserLoadFailed] = useState(false);
-  const [loading, setLoading] = useState(true);
-  /** Standalone spinner for the manual balance refresh button. */
-  const [balanceRefreshing, setBalanceRefreshing] = useState(false);
-  /** Spinner for the "绑定的工具" 刷新 button — re-runs `loadData` to refresh
-   *  detection / takeover status / tool health. */
-  const [listRefreshing, setListRefreshing] = useState(false);
-  /** 上一次开始检测的时间：切回窗口时据此节流，见 FOCUS_REFRESH_INTERVAL_MS。 */
-  const lastLoadStartedAt = useRef(0);
 
   // 监听 tray popover 发出的"打开偏好设置"事件，把当前 dialog 拉起来。
   // popover 是独立 webview，无法直接调用本组件的 setState，因此走 Tauri
@@ -191,318 +139,6 @@ export default function ConsolePage({
     };
   }, []);
 
-  /**
-   * Refetch *only* the user/wallet snapshot. Decoupled from `loadData` so the
-   * 🔄 button next to the balance doesn't also re-scan tools/usage stats.
-   *
-   * Surfaces an explicit toast on completion so the user knows the network
-   * round-trip actually happened — without it the only feedback is the
-   * spinner stopping, which is too easy to miss when the number didn't move.
-   */
-  const refreshBalance = useCallback(async () => {
-    setBalanceRefreshing(true);
-    try {
-      const fresh = await ofoxGetUserInfo();
-      setUser(fresh);
-      const value = fresh?.balance?.balance;
-      if (typeof value === "number") {
-        toast.success(`余额已更新：$${value.toFixed(2)}`);
-      } else {
-        // Auth was fine but the balance endpoint returned no number.
-        toast.warning("余额已刷新，但暂无可用数据");
-      }
-    } catch (e) {
-      console.error("[ConsolePage] balance refresh failed", e);
-      toast.error("余额刷新失败，请稍后重试");
-    } finally {
-      setBalanceRefreshing(false);
-    }
-  }, []);
-
-  // tool.id → 该工具绑定时 ofox 签发的 API key id。来源 `ofox_list_api_keys`
-  // 命令（读 settings.json 的 ofoxApiKeys，`ApiKeyMeta.tool` 是小写工具名、
-  // `keyId` 是服务端 id）。用于"数据统计"按钮拼 analytics URL；没拿到 id 的
-  // 工具不展示该按钮（按钮要求 key id 作为查询参数）。
-  const [apiKeyIdByTool, setApiKeyIdByTool] = useState<Record<string, string>>(
-    {},
-  );
-
-  // tool.id → 工具行二级信息要显示的 API key 标签。显示优先级：
-  // user 起的 alias > 服务端返回的 keyStart 前缀（如 "sk-of-Ab12"）>
-  // keyId 末 6 位 fallback。从同一份 ApiKeyMeta 拿到，所以和 keyId 一起填。
-  const [apiKeyLabelByTool, setApiKeyLabelByTool] = useState<
-    Record<string, string>
-  >({});
-
-  // tool.id → 当前 active model id（来自 manageToolApi.getActiveModel）。
-  // 空字符串表示"未设置"——工具行二级信息会显示"未设置 model"提示用户
-  // 进"管理"挑一个。loadData 时批量拉，bind 后 ofox-prefs-updated 触发
-  // 重拉以反映 ensureDefaultModel 写入的默认值。
-  const loadGeneration = useRef(0);
-  const boundToolsRef = useRef(boundTools);
-  boundToolsRef.current = boundTools;
-
-  useEffect(
-    () => () => {
-      loadGeneration.current += 1;
-    },
-    [],
-  );
-
-  const loadData = useCallback(
-    async (mode?: LoadMode) => {
-      const generation = ++loadGeneration.current;
-      lastLoadStartedAt.current = Date.now();
-      // 首次加载和手动「刷新」显示遮罩；切回窗口等后台刷新检测完再替换。
-      if (mode !== "quiet") setLoading(true);
-
-      // Two-stage load — the bound-tools list is the user's primary focus and
-      // must not wait on the OFox profile/balance round-trip (which can be
-      // multi-second under flaky network). Stage 1 covers everything backed by
-      // local SQL (tool detection, takeover status) and flips loading→false.
-      // Stage 2 covers OFox profile/balance; it runs in the background and
-      // updates the header when ready. A failure in stage 2 leaves the list
-      // intact and the header in its placeholder state — never spins forever.
-
-      // ===== Stage 1: local-only, blocks list render =====
-      const [toolResults, bindingEntries, apiKeyMetas] = await Promise.all([
-        // includeLatest=false: skip the npm/GitHub fetch — we only need the
-        // local "is it installed?" check here. That fetch was the main reason
-        // this list took ~5s to render.
-        // 只检测已绑定的工具：每个工具都要起一次 `--version`，Windows 上经
-        // cmd 和 Node 启动的 CLI 一个就要一两秒。
-        invoke<ToolInstallationInfo[]>("get_tool_versions", {
-          tools: boundTools,
-          wslShellByTool: null,
-          includeLatest: false,
-        }).catch(() => [] as ToolInstallationInfo[]),
-        Promise.all(
-          boundTools.map(async (id) => {
-            const status = await ofoxBindApi.status(id).catch(
-              (): ToolBindingStatus => ({
-                status: "unknown",
-                message: null,
-                missingFiles: [],
-                modifiedFields: [],
-                envOverrides: [],
-              }),
-            );
-            return [id, status] as const;
-          }),
-        ),
-        // 本地 settings.json 里的 ofox API key 元数据——拿每个工具的 keyId 给
-        // "数据统计"按钮拼 URL，顺带拿 name / alias 给工具行二级信息行显示。
-        // 失败（如未绑定任何 key）静默回退空数组，按钮自然不显示，不阻塞列表
-        // 渲染。
-        invoke<
-          Array<{
-            tool: string;
-            keyId: string;
-            name?: string | null;
-            alias?: string | null;
-            keyStart?: string | null;
-          }>
-        >("ofox_list_api_keys").catch(
-          () =>
-            [] as Array<{
-              tool: string;
-              keyId: string;
-              name?: string | null;
-              alias?: string | null;
-              keyStart?: string | null;
-            }>,
-        ),
-      ]);
-
-      // A refresh started before an unbind must not resurrect its old row.
-      if (
-        generation !== loadGeneration.current ||
-        boundToolsRef.current !== boundTools
-      )
-        return;
-      const bindingByTool = new Map(bindingEntries);
-
-      const keyIdMap: Record<string, string> = {};
-      const keyLabelMap: Record<string, string> = {};
-      for (const meta of apiKeyMetas) {
-        if (meta.keyId) keyIdMap[meta.tool] = meta.keyId;
-        // 显示优先级：用户在 desktop 端起的 alias > bind 时落本地的 name
-        // （`<tool> on <host>`，更易识别"哪台机器哪个工具"）> keyStart 前缀
-        // 兼容老数据 > keyId 末 6 位兜底。任一非空都行。
-        const aliasTrim = meta.alias?.trim();
-        const nameTrim = meta.name?.trim();
-        const label =
-          (aliasTrim && aliasTrim) ||
-          (nameTrim && nameTrim) ||
-          meta.keyStart ||
-          (meta.keyId ? `…${meta.keyId.slice(-6)}` : "");
-        if (label) keyLabelMap[meta.tool] = label;
-      }
-      setApiKeyIdByTool(keyIdMap);
-      setApiKeyLabelByTool(keyLabelMap);
-
-      const detectedMap = new Map<string, ToolInstallationInfo>();
-      for (const r of toolResults) {
-        detectedMap.set(r.name, r);
-      }
-
-      const ordered = TOOL_ORDER.filter((id) => boundTools.includes(id));
-      // Also include any bound tools not in TOOL_ORDER
-      for (const id of boundTools) {
-        if (!ordered.includes(id)) ordered.push(id);
-      }
-
-      const list: BoundTool[] = ordered.map((id) => {
-        const meta = TOOL_META[id] ?? {
-          abbr: id.substring(0, 2).toUpperCase(),
-          label: id,
-          color: "bg-gray-500",
-        };
-        const info = detectedMap.get(id);
-        return {
-          id,
-          abbr: meta.abbr,
-          label: meta.label,
-          color: meta.color,
-          version: info?.version ?? null,
-          installationKind: info?.installationKind,
-          installationStatus: getInstallationStatus(info),
-          installationError: info?.error ?? null,
-          binding: bindingByTool.get(id) ?? {
-            status: "unknown",
-            message: null,
-            missingFiles: [],
-            modifiedFields: [],
-            envOverrides: [],
-          },
-        };
-      });
-
-      setTools(list);
-      setLoading(false);
-
-      // ===== Stage 2: remote / non-blocking =====
-      void (async () => {
-        const userInfo = await ofoxGetUserInfo().catch(() => null);
-
-        if (userInfo) setUser(userInfo);
-
-        // 账号信息刚刷新：已绑定的工具如果还在用别的账号的 key（换了账号，或
-        // 退出登录时停用了），换成当前账号的。没有要换的时后端不访问网络。
-        const keyReport = await ofoxReconcileToolKeys().catch((e) => {
-          console.error("[ConsolePage] reconcile tool keys failed", e);
-          return null;
-        });
-        if (keyReport) {
-          announceKeyReconcile(keyReport, t, userInfo?.email);
-          if (keyReport.switched.length > 0 || keyReport.failed.length > 0)
-            void invalidateModelState();
-          // 新 key 的标签和统计链接要重新读。
-          if (keyReport.switched.length > 0) void loadDataRef.current();
-        }
-
-        // The backend's `poll_for_token` now returns a placeholder user
-        // (all-null fields) when /openapi/me was unreachable at login time
-        // — that prevents the LoginPage spinner trap, but it leaves the
-        // Console showing "用户" with an empty email until the user takes
-        // some action. Detect the placeholder and silently retry a few
-        // times with backoff before giving up. If the backend was just
-        // having a temporary blip (which is the common case), the user
-        // never sees the empty state at all.
-        if (!isMeaningfulUser(userInfo)) {
-          void retryUserInfoWithBackoff();
-        }
-      })();
-    },
-    [boundTools, apex, t],
-  );
-
-  /**
-   * Retry `/openapi/me` up to 3 times with 2s/5s/15s backoff. Bails as soon
-   * as a meaningful user comes back (anything with email or name set).
-   *
-   * Sets `userRetrying` while a probe is in flight so the header can show
-   * a "正在加载用户信息…" hint instead of the empty-state ghost. After all
-   * 3 attempts return placeholders, sets `userLoadFailed` so the user
-   * gets an explicit "重新加载" button rather than living with the silent
-   * empty card.
-   *
-   * Safe to call multiple times — caller already guarded with the
-   * isMeaningfulUser check, and the backoff is bounded.
-   */
-  const retryUserInfoWithBackoff = useCallback(async () => {
-    setUserLoadFailed(false);
-    setUserRetrying(true);
-    setUserRetryAttempt(0);
-    // 1s/3s/8s — total ~12s. Picked over the original 2s/5s/15s because
-    // 22s with no UI progress feels broken; 12s is short enough that the
-    // user is still expecting a result and long enough that genuine
-    // backend recovery (a few hundred ms after a glitch) lands inside.
-    const delays = [1000, 3000, 8000];
-    try {
-      for (let i = 0; i < delays.length; i++) {
-        setUserRetryAttempt(i + 1);
-        await new Promise((r) => setTimeout(r, delays[i]));
-        const fresh = await ofoxGetUserInfo().catch(() => null);
-        if (isMeaningfulUser(fresh)) {
-          setUser(fresh);
-          return;
-        }
-      }
-      setUserLoadFailed(true);
-    } finally {
-      setUserRetrying(false);
-      setUserRetryAttempt(0);
-    }
-  }, []);
-
-  /**
-   * Re-run `loadData()` to refresh tool detection / takeover status / health.
-   * Uses its own spinner so existing rows stay visible mid-refresh instead of
-   * bouncing to the loading skeleton.
-   */
-  const refreshList = useCallback(async () => {
-    setListRefreshing(true);
-    try {
-      await Promise.all([loadData(), checkToolUpdates()]);
-      toast.success("已刷新");
-    } catch (e) {
-      console.error("[ConsolePage] list refresh failed", e);
-      toast.error(`刷新失败：${String(e)}`);
-    } finally {
-      setListRefreshing(false);
-    }
-  }, [loadData]);
-
-  useEffect(() => {
-    // `loadData` fires both the local stage and the background stage-2
-    // updates. We don't have a cancel handle into the latter (it's a
-    // fire-and-forget IIFE inside `loadData` to keep loading→false on the
-    // critical path), so on unmount the setters in stage 2 can fire after
-    // React has dropped this component. That's harmless with React 18's
-    // auto-batching but does log a dev-only warning; the cost of plumbing
-    // an AbortController through every fetch isn't justified for what is
-    // a couple of state updates. Leave as-is intentionally.
-    loadData();
-  }, [loadData]);
-
-  // 监听 ofox-prefs-updated —— bindTools.ts 在每次 bind 完一组工具后会
-  // emit 一次（ensureDefaultModel 可能已异步写了默认 model）；unbindTool 也
-  // 经由 mirrorBoundToolsToSettings 异步 emit 一次。节流 500ms 防 burst。
-  //
-  // 关键陷阱：**listener 必须用 ref 持有最新 loadData**，不能把 loadData 直接
-  // 写进 useEffect 依赖。原因——emit 是 Tauri IPC fire-and-forget，发出与回
-  // 调到达 listener 之间有时延；这段时延里 React 已经完成 boundTools 变化的
-  // reconcile，旧 useEffect 已经 cleanup（clearTimeout 看到的是空 pending），
-  // 新 listener 还没来得及 setup。emit 回调命中 still-alive 的旧 listener，
-  // 起了一个 500ms 后跑**旧 closure 里旧 loadData** 的 timer，没人能 clear。
-  // 结果就是 unbind 后 React state 已经 `[]`，但 500ms 后旧 loadData
-  // 把 `tools` setTools 回 `["codex"]`——UI 残留幽灵条目，无法消除。
-  //
-  // useRef 保证 listener 总是调到最新的 loadData，useEffect 只跑一次绑定，
-  // 不再依赖 loadData，没有 cleanup race。
-  const loadDataRef = useRef(loadData);
-
   // 「修复」= 用安装器重装这个工具。装完重新检测，卡片自己从「需修复」翻回正常。
   const {
     installing: repairing,
@@ -515,55 +151,12 @@ export default function ConsolePage({
     dismissNodePrompt: dismissRepairNodePrompt,
   } = useToolInstall((toolId, code) => {
     if (code === 0) {
-      void loadDataRef.current();
+      void reload();
       void checkToolUpdates();
     } else {
       console.warn(`[ConsolePage] repair ${toolId} exit=${code}`);
     }
   });
-  useEffect(() => {
-    const refreshQuietly = () => {
-      void loadDataRef.current("quiet");
-    };
-    // 切回窗口是为了看到在外面装好或升级的工具；频繁切换时不必每次都重新检测。
-    const refreshOnFocus = () => {
-      if (Date.now() - lastLoadStartedAt.current < FOCUS_REFRESH_INTERVAL_MS)
-        return;
-      refreshQuietly();
-    };
-    window.addEventListener("tool-updates-complete", refreshQuietly);
-    window.addEventListener("focus", refreshOnFocus);
-    return () => {
-      window.removeEventListener("tool-updates-complete", refreshQuietly);
-      window.removeEventListener("focus", refreshOnFocus);
-    };
-  }, []);
-  useEffect(() => {
-    loadDataRef.current = loadData;
-  }, [loadData]);
-
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-    let pending: ReturnType<typeof setTimeout> | null = null;
-    (async () => {
-      try {
-        const off = await listen("ofox-prefs-updated", () => {
-          if (pending) clearTimeout(pending);
-          pending = setTimeout(() => {
-            pending = null;
-            void loadDataRef.current();
-          }, 500);
-        });
-        unlisten = off;
-      } catch (e) {
-        console.error("[ConsolePage] listen ofox-prefs-updated failed", e);
-      }
-    })();
-    return () => {
-      if (pending) clearTimeout(pending);
-      if (unlisten) unlisten();
-    };
-  }, []);
 
   const installedTools = tools.filter(
     (tool) => tool.installationStatus !== "notInstalled",
@@ -643,7 +236,7 @@ export default function ConsolePage({
         onManage={() => setManageTool(tool)}
         onAction={(action: ToolRowAction) => {
           if (action === "retry") {
-            void loadDataRef.current();
+            void reload();
           } else if (action === "install") {
             if (canInstall) {
               void repair(target);
@@ -778,21 +371,23 @@ export default function ConsolePage({
               />
               <div>
                 <div className="text-[14px] font-semibold text-foreground">
-                  {user?.name ?? (userRetrying ? "加载中…" : "用户")}
+                  {user?.name ?? (account.retrying ? "加载中…" : "用户")}
                 </div>
                 <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
                   {user?.email ? (
                     <span className="truncate">{user.email}</span>
-                  ) : userRetrying ? (
+                  ) : account.retrying ? (
                     <span className="inline-flex items-center gap-1">
                       <Loader2 className="h-3 w-3 animate-spin" />
                       正在加载用户信息
-                      {userRetryAttempt > 0 ? `（${userRetryAttempt}/3）` : "…"}
+                      {account.retryAttempt > 0
+                        ? `（${account.retryAttempt}/3）`
+                        : "…"}
                     </span>
-                  ) : userLoadFailed ? (
+                  ) : account.loadFailed ? (
                     <button
                       type="button"
-                      onClick={retryUserInfoWithBackoff}
+                      onClick={() => void account.retryUser()}
                       className="inline-flex items-center gap-1 text-orange-500 hover:text-orange-600 hover:underline"
                       title="无法加载用户信息，点击重试"
                     >
@@ -808,14 +403,14 @@ export default function ConsolePage({
                 <div className="flex items-center justify-end gap-1.5 text-[11px] text-muted-foreground">
                   <span>OFOX 账户余额</span>
                   <button
-                    onClick={refreshBalance}
-                    disabled={balanceRefreshing}
+                    onClick={() => void account.refreshBalance()}
+                    disabled={account.balanceRefreshing}
                     title="刷新余额"
                     className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
                   >
                     <RefreshCw
                       className={`h-3 w-3 ${
-                        balanceRefreshing ? "animate-spin" : ""
+                        account.balanceRefreshing ? "animate-spin" : ""
                       }`}
                     />
                   </button>
@@ -1127,7 +722,7 @@ export default function ConsolePage({
           onBoundToolsChanged?.();
           // Recovery does not change the bound set; reload its disk status too.
           // Generation checks reject scans captured before an unbind prop update.
-          void loadDataRef.current();
+          void reload();
         }}
       />
 

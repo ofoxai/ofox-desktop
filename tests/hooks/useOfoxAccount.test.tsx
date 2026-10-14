@@ -1,0 +1,115 @@
+import { act, renderHook, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { queryClient } from "@/lib/query/queryClient";
+import { OFOX_USER_KEY, useOfoxAccount } from "@/hooks/useOfoxAccount";
+
+const mocks = vi.hoisted(() => ({
+  getUserInfo: vi.fn(),
+  toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn() },
+}));
+
+vi.mock("@/lib/api/ofoxAuth", () => ({ ofoxGetUserInfo: mocks.getUserInfo }));
+vi.mock("sonner", () => ({ toast: mocks.toast }));
+
+const ADA = { name: "Ada", email: "ada@example.com" };
+
+beforeEach(() => {
+  queryClient.clear();
+  mocks.getUserInfo.mockReset();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("useOfoxAccount", () => {
+  it("shares the loaded user with every consumer through the ofoxUser query", async () => {
+    mocks.getUserInfo.mockResolvedValue(ADA);
+    const tools = renderHook(() => useOfoxAccount());
+    const usage = renderHook(() => useOfoxAccount());
+
+    await act(() => tools.result.current.loadUser());
+
+    await waitFor(() => expect(usage.result.current.user).toEqual(ADA));
+    expect(queryClient.getQueryData(OFOX_USER_KEY)).toEqual(ADA);
+  });
+
+  it("keeps the last user when a reload fails", async () => {
+    mocks.getUserInfo.mockResolvedValueOnce(ADA);
+    const { result } = renderHook(() => useOfoxAccount());
+    await act(() => result.current.loadUser());
+    await waitFor(() => expect(result.current.user).toEqual(ADA));
+
+    mocks.getUserInfo.mockRejectedValueOnce(new Error("offline"));
+    let loaded: unknown = "unset";
+    await act(async () => {
+      loaded = await result.current.loadUser();
+    });
+
+    expect(loaded).toBeNull();
+    expect(queryClient.getQueryData(OFOX_USER_KEY)).toEqual(ADA);
+    expect(result.current.user).toEqual(ADA);
+  });
+
+  it("forgets the user once nothing shows it, so the next sign-in starts blank", async () => {
+    mocks.getUserInfo.mockResolvedValue(ADA);
+    const page = renderHook(() => useOfoxAccount());
+    await act(() => page.result.current.loadUser());
+
+    page.unmount();
+
+    await waitFor(() =>
+      expect(queryClient.getQueryData(OFOX_USER_KEY)).toBeUndefined(),
+    );
+  });
+
+  it("retries an empty user after 1s, 3s and 8s, then offers a manual retry", async () => {
+    vi.useFakeTimers();
+    mocks.getUserInfo.mockResolvedValue({ name: null, email: null });
+    const { result } = renderHook(() => useOfoxAccount());
+
+    act(() => void result.current.retryUser());
+    expect(result.current.retrying).toBe(true);
+    expect(result.current.retryAttempt).toBe(1);
+
+    await act(() => vi.advanceTimersByTimeAsync(1000));
+    expect(mocks.getUserInfo).toHaveBeenCalledTimes(1);
+    expect(result.current.retryAttempt).toBe(2);
+    await act(() => vi.advanceTimersByTimeAsync(3000));
+    expect(mocks.getUserInfo).toHaveBeenCalledTimes(2);
+    await act(() => vi.advanceTimersByTimeAsync(8000));
+    expect(mocks.getUserInfo).toHaveBeenCalledTimes(3);
+
+    expect(result.current.retrying).toBe(false);
+    expect(result.current.loadFailed).toBe(true);
+    expect(result.current.user).toBeNull();
+  });
+
+  it("stops retrying as soon as a real user comes back", async () => {
+    vi.useFakeTimers();
+    mocks.getUserInfo
+      .mockResolvedValueOnce({ name: null, email: null })
+      .mockResolvedValueOnce(ADA);
+    const { result } = renderHook(() => useOfoxAccount());
+
+    act(() => void result.current.retryUser());
+    await act(() => vi.advanceTimersByTimeAsync(1000 + 3000));
+
+    expect(result.current.user).toEqual(ADA);
+    expect(result.current.retrying).toBe(false);
+    expect(result.current.loadFailed).toBe(false);
+    await act(() => vi.advanceTimersByTimeAsync(8000));
+    expect(mocks.getUserInfo).toHaveBeenCalledTimes(2);
+  });
+
+  it("refreshes the balance on request and says what it is now", async () => {
+    mocks.getUserInfo.mockResolvedValue({ ...ADA, balance: { balance: 3.5 } });
+    const { result } = renderHook(() => useOfoxAccount());
+
+    await act(() => result.current.refreshBalance());
+
+    expect(result.current.user?.balance?.balance).toBe(3.5);
+    expect(result.current.balanceRefreshing).toBe(false);
+    expect(mocks.toast.success).toHaveBeenCalledWith("余额已更新：$3.50");
+  });
+});
