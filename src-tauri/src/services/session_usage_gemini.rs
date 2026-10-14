@@ -133,7 +133,7 @@ fn sync_single_gemini_file(db: &Database, file_path: &Path) -> Result<(u32, u32)
         .unwrap_or(0);
 
     // 检查同步状态
-    let (last_modified, _last_offset) = get_sync_state(db, &file_path_str)?;
+    let (last_modified, last_offset) = get_sync_state(db, &file_path_str)?;
 
     // 文件未变化则跳过
     if file_modified <= last_modified {
@@ -147,10 +147,19 @@ fn sync_single_gemini_file(db: &Database, file_path: &Path) -> Result<(u32, u32)
     let mut skipped: u32 = 0;
     let gemini_msg_count = calls.len() as i64;
 
-    for call in &calls {
+    for (index, call) in calls.iter().enumerate() {
         // 生成唯一 request_id
         let session_id_str = session_id.as_deref().unwrap_or("unknown");
         let request_id = format!("gemini_session:{session_id_str}:{}", call.message_id);
+
+        // The file is read whole each time it changes. A reply an earlier sync
+        // stored (its messages only grow) is updated if its row is still there,
+        // but not stored again once the 30-day prune folded it into the rollups
+        // and the session archive.
+        if (index as i64) < last_offset && !row_exists(db, &request_id)? {
+            skipped += 1;
+            continue;
+        }
 
         match insert_gemini_session_entry(
             db,
@@ -300,6 +309,17 @@ pub(crate) fn session_entries() -> Vec<SessionUsageEntry> {
         }
     }
     entries
+}
+
+fn row_exists(db: &Database, request_id: &str) -> Result<bool, AppError> {
+    let conn = lock_conn!(db.conn);
+    conn.query_row(
+        "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = ?1",
+        [request_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .map_err(|e| AppError::Database(format!("查询 Gemini 会话日志失败: {e}")))
 }
 
 /// 从 tokens JSON 对象中提取 token 数据
@@ -593,5 +613,52 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, (300, 40, 600));
+    }
+
+    fn chat_file(messages: &[(&str, i64)]) -> String {
+        let msgs: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|(id, days)| {
+                serde_json::json!({"id": id, "type": "gemini", "model": "gemini-2.5-pro",
+                    "timestamp": (chrono::Utc::now() - chrono::Duration::days(*days)).to_rfc3339(),
+                    "tokens": {"input": 100, "output": 10}})
+            })
+            .collect();
+        serde_json::json!({"sessionId": "g-long", "messages": msgs}).to_string()
+    }
+
+    fn session_calls(db: &Database) -> i64 {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM proxy_request_logs WHERE session_id = 'g-long')
+                  + (SELECT COALESCE(SUM(request_count), 0) FROM session_usage_archive
+                     WHERE session_id = 'g-long')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_pruned_reply_is_not_logged_again_when_its_chat_file_grows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-long.json");
+        std::fs::write(&path, chat_file(&[("old", 40), ("new", 1)])).unwrap();
+        let db = Database::memory().unwrap();
+        sync_single_gemini_file(&db, &path).unwrap();
+        db.rollup_and_prune(30).unwrap();
+        assert_eq!(session_calls(&db), 2);
+
+        std::fs::write(&path, chat_file(&[("old", 40), ("new", 1), ("newer", 0)])).unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(SystemTime::now() + std::time::Duration::from_secs(5))
+            .unwrap();
+        sync_single_gemini_file(&db, &path).unwrap();
+        db.rollup_and_prune(30).unwrap();
+
+        assert_eq!(session_calls(&db), 3);
     }
 }
