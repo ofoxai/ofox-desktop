@@ -5666,3 +5666,71 @@ async fn a_flag_launch_removed_and_the_user_set_again_is_the_users() {
     );
     assert_eq!(report.kept_keys, [shown("disable_response_storage")]);
 }
+
+fn repoint_codex_to_users_relay(config: &Path) {
+    edit_text(
+        config,
+        "model_provider = \"ofox\"",
+        "model_provider = \"myrelay\"",
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_model_saved_in_the_app_does_not_stay_under_the_users_relay() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    let saved = db
+        .get_provider_by_id(CODEX_PROVIDER, "codex")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let mut updated = saved.clone();
+    updated["config"] = json!(TEMPLATE.replace("openai/gpt-6-luna", "openai/gpt-x-saved"));
+    persist_bound_settings(&db, Tool::Codex, KEY, &saved, &updated)
+        .await
+        .expect("save model");
+    assert_eq!(
+        toml_at(&config)["model"].as_str(),
+        Some("openai/gpt-x-saved")
+    );
+    repoint_codex_to_users_relay(&config);
+
+    unbind_now(&db, Tool::Codex, "codex").await;
+
+    let restored = toml_at(&config);
+    assert_eq!(restored["model_provider"].as_str(), Some("myrelay"));
+    assert_eq!(restored["model"].as_str(), Some("gpt-5-codex"));
+}
+
+#[tokio::test]
+#[serial]
+async fn a_model_written_by_restoring_a_missing_binding_does_not_stay_under_the_users_relay() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    save_template(
+        &db,
+        &TEMPLATE.replace("openai/gpt-6-luna", "openai/gpt-x-saved"),
+    );
+    fs::remove_file(&config).unwrap();
+    restore_missing_binding(&db, Tool::Codex, "codex", &[], KEY)
+        .await
+        .expect("restore");
+    assert_eq!(
+        toml_at(&config)["model"].as_str(),
+        Some("openai/gpt-x-saved")
+    );
+    repoint_codex_to_users_relay(&config);
+
+    unbind_now(&db, Tool::Codex, "codex").await;
+
+    let restored = toml_at(&config);
+    assert_eq!(restored["model_provider"].as_str(), Some("myrelay"));
+    assert_eq!(restored["model"].as_str(), Some("gpt-5-codex"));
+}
