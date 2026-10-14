@@ -249,7 +249,7 @@ describe("QuickModelPicker", () => {
       />,
     );
     const trigger = screen.getByRole("combobox");
-    expect(trigger).toHaveAttribute("aria-haspopup", "listbox");
+    expect(trigger).toHaveAttribute("aria-haspopup", "dialog");
     expect(trigger).toHaveClass(
       "h-[26px]",
       "rounded-ctl",

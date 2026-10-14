@@ -1,3 +1,4 @@
+import { ThemeProvider } from "@/components/theme-provider";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -37,13 +38,24 @@ vi.mock("sonner", () => ({
 
 beforeEach(() => {
   i18n.addResourceBundle("zh", "translation", zh, true, true);
+  window.matchMedia = vi
+    .fn()
+    .mockReturnValue({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
   mocks.openExternal.mockReset();
   mocks.openExternal.mockResolvedValue(undefined);
 });
 
 describe("OfoxSettingsDialog about", () => {
   it("links to the Ofox website of the current region", async () => {
-    render(<OfoxSettingsDialog open onOpenChange={vi.fn()} />);
+    render(
+      <ThemeProvider>
+        <OfoxSettingsDialog open onOpenChange={vi.fn()} />
+      </ThemeProvider>,
+    );
     await screen.findByText("Ofox Desktop v1.3.6");
 
     await userEvent.click(screen.getByRole("button", { name: "Ofox 网站 ↗" }));
@@ -54,7 +66,11 @@ describe("OfoxSettingsDialog about", () => {
   it("says so when the website cannot be opened", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     mocks.openExternal.mockRejectedValueOnce(new Error("denied"));
-    render(<OfoxSettingsDialog open onOpenChange={vi.fn()} />);
+    render(
+      <ThemeProvider>
+        <OfoxSettingsDialog open onOpenChange={vi.fn()} />
+      </ThemeProvider>,
+    );
 
     await userEvent.click(
       await screen.findByRole("button", { name: "Ofox 网站 ↗" }),
@@ -64,4 +80,16 @@ describe("OfoxSettingsDialog about", () => {
       expect(mocks.toastError).toHaveBeenCalledWith("无法打开链接"),
     );
   });
+});
+
+it("switches appearance through the ThemeProvider", async () => {
+  const { ThemeProvider } = await import("@/components/theme-provider");
+  render(
+    <ThemeProvider>
+      <OfoxSettingsDialog open onOpenChange={vi.fn()} />
+    </ThemeProvider>,
+  );
+  await userEvent.click(screen.getByRole("radio", { name: "深色" }));
+  await waitFor(() => expect(document.documentElement).toHaveClass("dark"));
+  expect(localStorage.getItem("ofox-switch-theme")).toBe("dark");
 });

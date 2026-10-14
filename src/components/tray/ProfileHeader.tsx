@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { UserAvatar } from "@/components/UserAvatar";
 import type { OfoxAuthStatus } from "@/lib/api/ofoxAuth";
 import { ofoxAvatarUrl } from "@/lib/ofoxUrls";
@@ -16,18 +17,22 @@ interface ProfileHeaderProps {
  * 显式提醒；正常态用户看到自己的账号就足够了。
  */
 export default function ProfileHeader({ status }: ProfileHeaderProps) {
+  const { t } = useTranslation();
   const user = status?.user ?? null;
   const state = status?.state ?? "loggedout";
 
-  const displayName = user?.name?.trim() || user?.email || "未登录";
+  const displayName =
+    user?.name?.trim() || user?.email || t("uiCopy.loggedOut");
   const subline = (() => {
     if (state === "active") {
       return user?.email ?? "";
     }
     if (state === "expired") {
-      return user?.email ? `${user.email} · 登录已过期` : "登录已过期";
+      return user?.email
+        ? t("uiCopy.expiredEmail", { value1: user.email })
+        : t("uiCopy.expired");
     }
-    return "请登录 Ofox 账号";
+    return t("uiCopy.loginHint");
   })();
 
   return (
@@ -42,12 +47,10 @@ export default function ProfileHeader({ status }: ProfileHeaderProps) {
 
       {/* 用户信息 */}
       <div className="min-w-0 flex-1">
-        <div className="truncate text-[13px] font-semibold leading-tight text-foreground">
+        <div className="truncate text-[13px] font-semibold leading-tight text-ink">
           {displayName}
         </div>
-        <div className="truncate text-[11px] text-muted-foreground">
-          {subline}
-        </div>
+        <div className="truncate text-[11px] text-ink-muted">{subline}</div>
       </div>
     </div>
   );

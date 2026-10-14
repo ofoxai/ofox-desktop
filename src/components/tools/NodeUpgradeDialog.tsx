@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useRef, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -30,11 +31,6 @@ const UPGRADER: Record<string, string> = {
   nodejs: "winget",
 };
 
-const primaryButton =
-  "rounded-md bg-gradient-to-r from-orange-400 to-orange-500 px-4 py-2 text-sm font-medium text-white shadow-sm hover:from-orange-500 hover:to-orange-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-400/50 focus-visible:ring-offset-2 focus-visible:ring-offset-background";
-const secondaryButton =
-  "rounded-md px-4 py-2 text-sm text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-orange-400/50";
-
 function Step({
   index,
   title,
@@ -46,13 +42,13 @@ function Step({
 }) {
   return (
     <li className="flex gap-3">
-      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-orange-100 text-xs font-semibold text-orange-600 dark:bg-orange-500/15 dark:text-orange-400">
+      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-warn-soft text-xs font-semibold text-brand ">
         {index}
       </span>
       <div className="min-w-0 space-y-1">
         <p className="font-medium leading-5">{title}</p>
         {children && (
-          <div className="text-xs leading-relaxed text-muted-foreground">
+          <div className="text-xs leading-relaxed text-ink-muted">
             {children}
           </div>
         )}
@@ -107,24 +103,22 @@ export default function NodeUpgradeDialog({
         </DialogHeader>
 
         <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5 text-sm">
-          <div className="flex items-start gap-4 rounded-lg border border-border-default bg-muted/30 px-4 py-3">
+          <div className="flex items-start gap-4 rounded-lg border border-line bg-muted/30 px-4 py-3">
             <div className="min-w-0 flex-1">
-              <p className="text-xs text-muted-foreground">
+              <p className="text-xs text-ink-muted">
                 {t("toolInstall.nodeUpgrade.current")}
               </p>
               <p className="mt-1 font-mono text-base font-semibold">
                 {requirement.current}
               </p>
-              <p className="mt-0.5 text-xs text-muted-foreground">
-                {managedBy}
-              </p>
+              <p className="mt-0.5 text-xs text-ink-muted">{managedBy}</p>
             </div>
-            <ArrowRight className="mt-6 h-4 w-4 shrink-0 text-muted-foreground" />
+            <ArrowRight className="mt-6 h-4 w-4 shrink-0 text-ink-muted" />
             <div className="min-w-0 flex-1">
-              <p className="text-xs text-muted-foreground">
+              <p className="text-xs text-ink-muted">
                 {t("toolInstall.nodeUpgrade.minimum")}
               </p>
-              <p className="mt-1 break-all font-mono text-base font-semibold text-orange-600 dark:text-orange-400">
+              <p className="mt-1 break-all font-mono text-base font-semibold text-brand ">
                 {requirement.minimum ?? requirement.required}
               </p>
             </div>
@@ -132,7 +126,7 @@ export default function NodeUpgradeDialog({
 
           {requirement.canUpgrade ? (
             <div className="space-y-3">
-              <p className="text-muted-foreground">
+              <p className="text-ink-muted">
                 {t("toolInstall.nodeUpgrade.stepsTitle")}
               </p>
               <ol className="space-y-3">
@@ -178,7 +172,7 @@ export default function NodeUpgradeDialog({
               </ol>
               {requirement.command && (
                 <details className="group">
-                  <summary className="flex w-fit cursor-pointer list-none items-center gap-1 rounded text-xs text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-orange-400/50 [&::-webkit-details-marker]:hidden">
+                  <summary className="flex w-fit cursor-pointer list-none items-center gap-1 rounded text-xs text-ink-muted outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-brand/40 [&::-webkit-details-marker]:hidden">
                     <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" />
                     {t("toolInstall.nodeUpgrade.showCommand")}
                   </summary>
@@ -186,7 +180,7 @@ export default function NodeUpgradeDialog({
                     {requirement.command}
                   </pre>
                   {requirement.required && (
-                    <p className="mt-2 text-xs text-muted-foreground">
+                    <p className="mt-2 text-xs text-ink-muted">
                       {t("toolInstall.nodeUpgrade.fullRequirement", {
                         tool,
                         range: requirement.required,
@@ -197,7 +191,7 @@ export default function NodeUpgradeDialog({
               )}
             </div>
           ) : (
-            <p className="leading-relaxed text-muted-foreground">
+            <p className="leading-relaxed text-ink-muted">
               {t("toolInstall.nodeUpgrade.manualOnly", {
                 manager: managedBy,
                 tool,
@@ -209,39 +203,31 @@ export default function NodeUpgradeDialog({
         <DialogFooter className="py-4">
           {requirement.canUpgrade ? (
             <>
-              <button
-                type="button"
-                onClick={onCancel}
-                className={secondaryButton}
-              >
+              <Button type="button" onClick={onCancel} variant="secondary">
                 {t("common.cancel")}
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
                 onClick={onConfirm}
                 ref={primaryRef}
-                className={primaryButton}
+                variant="primary"
               >
                 {t("toolInstall.nodeUpgrade.confirm")}
-              </button>
+              </Button>
             </>
           ) : (
             <>
-              <button
-                type="button"
-                onClick={openDownload}
-                className={secondaryButton}
-              >
+              <Button type="button" onClick={openDownload} variant="secondary">
                 {t("toolInstall.nodeUpgrade.openDownload")}
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
                 onClick={onCancel}
                 ref={primaryRef}
-                className={primaryButton}
+                variant="primary"
               >
                 {t("toolInstall.nodeUpgrade.ok")}
-              </button>
+              </Button>
             </>
           )}
         </DialogFooter>

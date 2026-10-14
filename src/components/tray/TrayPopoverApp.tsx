@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -50,6 +51,7 @@ function readBoundToolsFromStorage(): string[] {
  * That avoids the popover height jumping when the state changes.
  */
 export default function TrayPopoverApp() {
+  const { t } = useTranslation();
   const { status, refetch, isActive, isExpired, isLoggedOut } = useOfoxAuth();
   const { hasUpdate, isDismissed } = useUpdate();
   const [balanceRefreshing, setBalanceRefreshing] = useState(false);
@@ -128,13 +130,13 @@ export default function TrayPopoverApp() {
       await refetch();
       const value = fresh?.balance?.balance;
       if (typeof value === "number") {
-        toast.success(`余额已更新：$${value.toFixed(2)}`);
+        toast.success(t("uiCopy.balanceUpdated", { value1: value.toFixed(2) }));
       } else {
-        toast.warning("余额已刷新，但暂无可用数据");
+        toast.warning(t("uiCopy.balanceUnavailable"));
       }
     } catch (e) {
       console.error("[TrayPopover] balance refresh failed", e);
-      toast.error("余额刷新失败，请稍后重试");
+      toast.error(t("uiCopy.balanceFailed"));
     } finally {
       setBalanceRefreshing(false);
     }

@@ -122,6 +122,8 @@ function describeUnbindResult(
       }),
     );
   }
+  if (report.keptKeys.length > 0)
+    parts.push(t("uiCopy.keptChanges", { keys: report.keptKeys.join(", ") }));
   const text = parts.filter(Boolean).join(" ");
   return text || undefined;
 }
@@ -482,7 +484,7 @@ export default function ManageToolDialog({
     try {
       await settingsApi.openConfigFolder(managedToolId(tool.id));
     } catch (e) {
-      toast.error(`打开配置目录失败：${String(e)}`);
+      toast.error(t("uiCopy.folderFailed", { value1: String(e) }));
     }
   }, [tool]);
 
@@ -491,7 +493,7 @@ export default function ManageToolDialog({
     try {
       await settingsApi.openExternal(projectUrl);
     } catch (e) {
-      toast.error(`打开项目链接失败：${String(e)}`);
+      toast.error(t("uiCopy.projectFailed", { value1: String(e) }));
     }
   }, [projectUrl]);
 
@@ -632,7 +634,7 @@ export default function ManageToolDialog({
   const handlePing = useCallback(async () => {
     if (!tool || !configurationReady || operationBusy) return;
     if (!probeModel) {
-      toast.error("请先选择一个模型再测试连通性");
+      toast.error(t("uiCopy.selectModel"));
       return;
     }
     setPingLoading(true);
@@ -751,10 +753,10 @@ export default function ManageToolDialog({
             <DialogHeader className="flex-row items-center gap-3 space-y-0">
               <ToolBadge toolId={tool.id} size={40} rounded="xl" />
               <div className="min-w-0 flex-1 text-left">
-                <DialogTitle className="text-[15px] font-semibold text-foreground">
+                <DialogTitle className="text-[15px] font-semibold text-ink">
                   {tool.label}
                 </DialogTitle>
-                <div className="truncate text-[12px] text-muted-foreground">
+                <div className="truncate text-[12px] text-ink-muted">
                   {tool.version
                     ? `${TOOL_META[tool.id]?.launchKind === "desktopApp" || tool.installationKind === "desktopApp" ? `${t("toolLifecycle.desktopApp")} · ` : ""}v${tool.version}`
                     : t(
@@ -770,9 +772,15 @@ export default function ManageToolDialog({
                   variant="ghost"
                   size="sm"
                   onClick={() => void handleOpenProject()}
-                  aria-label={`查看 ${tool.label} ${projectLinkLabel}`}
-                  title={`查看 ${tool.label} ${projectLinkLabel}`}
-                  className="shrink-0 text-muted-foreground"
+                  aria-label={t("uiCopy.viewProject", {
+                    value1: tool.label,
+                    value2: projectLinkLabel,
+                  })}
+                  title={t("uiCopy.viewProject", {
+                    value1: tool.label,
+                    value2: projectLinkLabel,
+                  })}
+                  className="shrink-0 text-ink-muted"
                 >
                   {projectLinkLabel === "GitHub" ? (
                     <Github className="mr-1.5 h-4 w-4" />
@@ -801,7 +809,7 @@ export default function ManageToolDialog({
                 </div>
               )}
               {tool.id === "chatgpt" && editSnapshot && (
-                <p className="text-[12px] text-muted-foreground">
+                <p className="text-[12px] text-ink-muted">
                   {t("modelExperience.observed", {
                     model:
                       editSnapshot.observedSelection.model ||
@@ -813,7 +821,7 @@ export default function ManageToolDialog({
               {!!editSnapshot?.scopeModels?.length &&
                 !editSnapshot.supportsDefault &&
                 !currentModel && (
-                  <p className="text-[12px] text-muted-foreground">
+                  <p className="text-[12px] text-ink-muted">
                     {t("modelExperience.mixedScopes")}
                   </p>
                 )}
@@ -822,7 +830,7 @@ export default function ManageToolDialog({
                 tool.installationError) && (
                 <div
                   role="status"
-                  className="rounded-md border border-border-default bg-muted/20 p-3 text-[12px]"
+                  className="rounded-md border border-line bg-muted/20 p-3 text-[12px]"
                 >
                   <p>
                     {t(
@@ -834,7 +842,7 @@ export default function ManageToolDialog({
                     )}
                   </p>
                   {tool.installationError && (
-                    <p className="mt-1 break-words text-muted-foreground">
+                    <p className="mt-1 break-words text-ink-muted">
                       {tool.installationError}
                     </p>
                   )}
@@ -843,7 +851,7 @@ export default function ManageToolDialog({
               {!configurationReady && (
                 <div
                   role="status"
-                  className="space-y-2 rounded-md border border-orange-300/60 bg-orange-50/40 p-3 text-[12px] dark:border-orange-500/40 dark:bg-orange-950/20"
+                  className="space-y-2 rounded-md border border-brand/30 bg-warn-soft p-3 text-[12px] "
                 >
                   <p>
                     {t(
@@ -870,7 +878,7 @@ export default function ManageToolDialog({
                       size="sm"
                       onClick={() => void handleRestore()}
                       disabled={operationBusy}
-                      className="bg-orange-500 text-white hover:bg-orange-600"
+                      variant="primary"
                     >
                       {restoring && (
                         <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
@@ -887,7 +895,7 @@ export default function ManageToolDialog({
               {!!bindingStatus?.envOverrides.length && (
                 <div
                   role="status"
-                  className="space-y-2 rounded-md border border-orange-300/60 bg-orange-50/40 p-3 text-[12px] dark:border-orange-500/40 dark:bg-orange-950/20"
+                  className="space-y-2 rounded-md border border-brand/30 bg-warn-soft p-3 text-[12px] "
                 >
                   <p>
                     {t("toolLifecycle.envOverride.title", { tool: tool.label })}
@@ -898,7 +906,7 @@ export default function ManageToolDialog({
                       className="flex flex-wrap items-center gap-x-2 text-[11px]"
                     >
                       <code>{found.name}</code>
-                      <span className="text-muted-foreground">
+                      <span className="text-ink-muted">
                         {found.scope === "file"
                           ? found.location
                           : t(`toolLifecycle.envOverride.scope.${found.scope}`)}
@@ -916,10 +924,10 @@ export default function ManageToolDialog({
               {/* ---- Model ---- */}
               <div className="space-y-2">
                 <Label htmlFor="manage-model" className="text-[13px]">
-                  模型
+                  {t("uiCopy.model")}
                 </Label>
                 {tool.id === "chatgpt" && (
-                  <p className="text-[11px] text-muted-foreground">
+                  <p className="text-[11px] text-ink-muted">
                     {t("modelCompatibility.chatgptCodexShared")}
                   </p>
                 )}
@@ -945,14 +953,14 @@ export default function ManageToolDialog({
                       }
                     />
                     {tool.id === "opencode" && (
-                      <p className="text-[11px] text-muted-foreground">
+                      <p className="text-[11px] text-ink-muted">
                         {t("modelCompatibility.openCodeProtocol")}
                       </p>
                     )}
                     {tool.id === "opencode" &&
                       protocolHints.length > 0 &&
                       !isDirty && (
-                        <div className="flex items-center justify-between gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-[11px]">
+                        <div className="flex items-center justify-between gap-3 rounded-md border border-warn/30 bg-warn-soft p-3 text-[11px]">
                           <span>
                             {t("modelCompatibility.openCodeHint", {
                               count: protocolHints.length,
@@ -971,7 +979,7 @@ export default function ManageToolDialog({
                           <Button
                             type="button"
                             size="sm"
-                            variant="outline"
+                            variant="secondary"
                             className="h-7 shrink-0 px-2 text-[11px]"
                             disabled={operationBusy}
                             onClick={() => void handleApplyProtocolHints()}
@@ -985,7 +993,7 @@ export default function ManageToolDialog({
                         workBuddyEndpointStatus.configuredUrls.some(
                           (url) => url !== workBuddyEndpointStatus.expectedUrl,
                         )) && (
-                        <div className="space-y-1 rounded-md border border-red-500/30 bg-muted/20 p-3 text-[11px]">
+                        <div className="space-y-1 rounded-md border border-danger/30 bg-muted/20 p-3 text-[11px]">
                           <p className="font-medium">
                             {t(
                               "modelCompatibility.workBuddyConfiguredEndpoint",
@@ -1000,11 +1008,11 @@ export default function ManageToolDialog({
                               {url}
                             </code>
                           ))}
-                          <p className="break-all text-muted-foreground">
+                          <p className="break-all text-ink-muted">
                             {t("modelCompatibility.workBuddyExpectedEndpoint")}:{" "}
                             {workBuddyEndpointStatus.expectedUrl}
                           </p>
-                          <p className="text-red-600">
+                          <p className="text-danger">
                             {t("modelCompatibility.workBuddyEndpointMismatch")}
                           </p>
                         </div>
@@ -1023,7 +1031,7 @@ export default function ManageToolDialog({
                       !modelsLoading &&
                       !modelsError &&
                       workBuddyMissingIds.length > 0 && (
-                        <p className="text-[11px] text-red-600">
+                        <p className="text-[11px] text-danger">
                           {t("modelCompatibility.workBuddyMissingCatalog")}
                         </p>
                       )}
@@ -1055,21 +1063,21 @@ export default function ManageToolDialog({
                       />
                     )}
                     {tool.id === "gemini" && (
-                      <p className="text-[11px] text-muted-foreground">
+                      <p className="text-[11px] text-ink-muted">
                         {t("modelCompatibility.geminiRememberHint")}
                       </p>
                     )}
                     {tool.id === "chatgpt" && (
-                      <p className="text-[11px] text-muted-foreground">
+                      <p className="text-[11px] text-ink-muted">
                         {t("modelCompatibility.chatgptDefaultHint")}
                       </p>
                     )}
                   </>
                 ) : (
-                  <div className="rounded-md border border-dashed border-border-default px-3 py-2 text-[12px] text-muted-foreground">
+                  <div className="rounded-md border border-dashed border-line px-3 py-2 text-[12px] text-ink-muted">
                     {desktopCodex
                       ? t("modelCompatibility.desktopCodex")
-                      : "该工具暂不支持模型管理"}
+                      : t("uiCopy.noModelManagement")}
                   </div>
                 )}
                 {/* 只在检查中和确定不兼容时出现；查不出结果的情况（余额、
@@ -1079,7 +1087,7 @@ export default function ManageToolDialog({
                   !codexModels &&
                   !multiModel &&
                   (compatibilityLoading ? (
-                    <p className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
+                    <p className="flex items-center gap-1.5 text-[12px] text-ink-muted">
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       {t("modelCompatibility.checkingModel")}
                     </p>
@@ -1089,7 +1097,7 @@ export default function ManageToolDialog({
                       .map((result) => (
                         <p
                           key={result.model}
-                          className="text-[12px] text-red-600"
+                          className="text-[12px] text-danger"
                         >
                           {t("modelCompatibility.incompatibleModel", {
                             model: result.model,
@@ -1105,22 +1113,22 @@ export default function ManageToolDialog({
 
               {/* ---- Config file ---- */}
               <div className="space-y-2">
-                <Label className="text-[13px]">配置文件</Label>
+                <Label className="text-[13px]">{t("uiCopy.configFile")}</Label>
                 <div className="flex items-center gap-2">
                   <code
-                    className="flex-1 truncate rounded-md border border-border-default bg-muted/30 px-3 py-2 text-[12px] text-foreground"
+                    className="flex-1 truncate rounded-md border border-line bg-muted/30 px-3 py-2 text-[12px] text-ink"
                     title={filePath ?? filePathError ?? ""}
                   >
-                    {filePath ?? filePathError ?? "加载中…"}
+                    {filePath ?? filePathError ?? t("uiCopy.loading")}
                   </code>
                   <Button
                     type="button"
-                    variant="outline"
+                    variant="secondary"
                     size="sm"
                     onClick={handleOpenFolder}
                   >
                     <Folder className="mr-1 h-3.5 w-3.5" />
-                    {isMac() ? "在 Finder 打开" : "打开所在文件夹"}
+                    {isMac() ? t("uiCopy.openFinder") : t("uiCopy.openFolder")}
                   </Button>
                 </div>
               </div>
@@ -1155,7 +1163,7 @@ export default function ManageToolDialog({
                       searchable={draftModels.length > 8}
                       searchPlaceholder={t("modelPicker.searchModel")}
                       disabled={draftModels.length === 0}
-                      width={300}
+                      width={262}
                       triggerClassName="min-w-0 max-w-none flex-1"
                     />
                     <Button
@@ -1181,10 +1189,10 @@ export default function ManageToolDialog({
                       className={cn(
                         "rounded-md border px-3 py-2 text-[12px]",
                         workBuddyTestResult.status === "compatible"
-                          ? "border-emerald-500/30 text-emerald-700"
+                          ? "border-ok/30 text-ok"
                           : workBuddyTestResult.status === "incompatible"
-                            ? "border-red-500/30 text-red-700"
-                            : "border-border-default text-muted-foreground",
+                            ? "border-danger/30 text-danger"
+                            : "border-line text-ink-muted",
                       )}
                     >
                       {workBuddyTestResult.model}:{" "}
@@ -1211,7 +1219,9 @@ export default function ManageToolDialog({
               ) : (
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <Label className="text-[13px]">连通性</Label>
+                    <Label className="text-[13px]">
+                      {t("uiCopy.connectivity")}
+                    </Label>
                     <Button
                       type="button"
                       size="sm"
@@ -1222,14 +1232,16 @@ export default function ManageToolDialog({
                         !protocol ||
                         !probeModel
                       }
-                      className="bg-orange-500 text-white shadow-sm shadow-orange-200/60 hover:bg-orange-600 disabled:bg-orange-500/60 disabled:text-white dark:shadow-orange-900/20"
+                      className="bg-brand text-brand-on shadow-sm hover:bg-brand disabled:bg-brand disabled:text-brand-on "
                     >
                       {pingLoading ? (
                         <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                       ) : (
                         <Zap className="mr-1.5 h-3.5 w-3.5" />
                       )}
-                      {pingLoading ? "测试中…" : "测试连通性"}
+                      {pingLoading
+                        ? t("uiCopy.checking")
+                        : t("uiCopy.checkConnection")}
                     </Button>
                   </div>
                   <PingStatusBox
@@ -1247,13 +1259,13 @@ export default function ManageToolDialog({
               <div className="flex gap-2">
                 <Button
                   type="button"
-                  variant="outline"
+                  variant="secondary"
                   size="sm"
                   onClick={handleUnbind}
                   disabled={operationBusy}
                   className={cn(
                     unbindConfirming &&
-                      "border-red-500 text-red-600 hover:bg-red-50 hover:text-red-700",
+                      "border-danger/30 text-danger hover:bg-danger-soft hover:text-danger",
                   )}
                 >
                   {unbindLoading && (
@@ -1278,12 +1290,12 @@ export default function ManageToolDialog({
               <div className="flex gap-2">
                 <Button
                   type="button"
-                  variant="outline"
+                  variant="secondary"
                   size="sm"
                   onClick={() => onOpenChange(false)}
                   disabled={operationBusy}
                 >
-                  取消
+                  {t("uiCopy.cancel")}
                 </Button>
                 <Button
                   type="button"
@@ -1305,7 +1317,7 @@ export default function ManageToolDialog({
                   {saving && (
                     <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                   )}
-                  保存
+                  {t("uiCopy.save")}
                 </Button>
               </div>
             </DialogFooter>
@@ -1343,7 +1355,7 @@ function UnbindPreviewPanel({ preview }: { preview: UnbindReport | null }) {
   return (
     <div
       role="note"
-      className="mx-6 mb-3 space-y-1.5 rounded-md border border-red-200 bg-red-50/60 px-3 py-2 text-[12px] text-foreground dark:border-red-500/30 dark:bg-red-500/10"
+      className="mx-6 mb-3 space-y-1.5 rounded-md border border-danger/30 bg-danger-soft px-3 py-2 text-[12px] text-ink "
     >
       {preview && preview.sharedKeptBy.length > 0 ? (
         <p>
@@ -1357,12 +1369,10 @@ function UnbindPreviewPanel({ preview }: { preview: UnbindReport | null }) {
         <>
           <p className="font-medium">{t("unbind.willRestoreTitle")}</p>
           {preview?.legacy && (
-            <p className="text-amber-700 dark:text-amber-300">
-              {t("unbind.legacyNotice")}
-            </p>
+            <p className="text-warn ">{t("unbind.legacyNotice")}</p>
           )}
           {changedKeys.length > 0 ? (
-            <ul className="space-y-0.5 font-mono text-[11px] text-muted-foreground">
+            <ul className="space-y-0.5 font-mono text-[11px] text-ink-muted">
               {changedKeys.map((key) => (
                 <li key={key}>{key}</li>
               ))}
@@ -1371,13 +1381,13 @@ function UnbindPreviewPanel({ preview }: { preview: UnbindReport | null }) {
             <p>{t("unbind.generic")}</p>
           )}
           {!preview?.legacy && <p>{t("unbind.forceRestoreNotice")}</p>}
-          <p className="text-muted-foreground">{t("unbind.keepNotice")}</p>
+          <p className="text-ink-muted">{t("unbind.keepNotice")}</p>
         </>
       )}
       {preview?.warnings.map((warning, index) => (
         <p
           key={`${warning.code}-${warning.file ?? index}`}
-          className="break-words text-muted-foreground"
+          className="break-words text-ink-muted"
         >
           {t(`unbind.warning.${warning.code}`, {
             defaultValue: "",
@@ -1393,43 +1403,41 @@ function UnbindPreviewPanel({ preview }: { preview: UnbindReport | null }) {
 }
 
 function PingStatusBox({ loading, result, model }: PingStatusBoxProps) {
+  const { t } = useTranslation();
   if (loading) {
     return (
-      <div className="flex items-center gap-2 rounded-md border border-border-default bg-muted/30 px-3 py-2 text-[12px] text-muted-foreground">
+      <div className="flex items-center gap-2 rounded-md border border-line bg-muted/30 px-3 py-2 text-[12px] text-ink-muted">
         <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        <span>正在请求 OfoxAI 网关…</span>
+        <span>{t("uiCopy.requestingGateway")}</span>
       </div>
     );
   }
   if (!result) {
     return (
-      <div className="rounded-md border border-dashed border-border-default px-3 py-2 text-[12px] text-muted-foreground">
-        尚未测试。点击右上方「测试连通性」可向所选模型发送一次 1-token
-        验证请求。
+      <div className="rounded-md border border-dashed border-line px-3 py-2 text-[12px] text-ink-muted">
+        {t("uiCopy.notTested")}
       </div>
     );
   }
   if (result.statusCode === 402) return <InsufficientCreditsNotice />;
   if (result.success) {
     return (
-      <div className="flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-[12px] text-emerald-700 dark:text-emerald-400">
+      <div className="flex items-center gap-2 rounded-md border border-ok/30 bg-ok-soft px-3 py-2 text-[12px] text-ok ">
         <CheckCircle2 className="h-4 w-4 shrink-0" />
         <span className="flex-1 truncate">
-          连通成功（{result.latencyMs} ms）
-          {model && (
-            <span className="ml-1 text-muted-foreground">· {model}</span>
-          )}
+          {t("uiCopy.connectionSuccess", { ms: result.latencyMs })}
+          {model && <span className="ml-1 text-ink-muted">· {model}</span>}
         </span>
       </div>
     );
   }
   return (
-    <div className="flex items-start gap-2 rounded-md border border-red-500/30 bg-red-500/5 px-3 py-2 text-[12px] text-red-700 dark:text-red-400">
+    <div className="flex items-start gap-2 rounded-md border border-danger/30 bg-danger-soft px-3 py-2 text-[12px] text-danger ">
       <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
       <div className="min-w-0 flex-1">
-        <div className="font-medium">连通失败</div>
-        <div className="mt-0.5 break-words text-[11.5px] text-red-700/80 dark:text-red-400/80">
-          {result.error || "未知错误"}
+        <div className="font-medium">{t("uiCopy.connectionFailed")}</div>
+        <div className="mt-0.5 break-words text-[11.5px] text-danger ">
+          {result.error || t("uiCopy.unknownError")}
         </div>
       </div>
     </div>
@@ -1451,13 +1459,13 @@ function InsufficientCreditsNotice() {
       .catch(() => toast.error(t("notifications.openLinkFailed")));
 
   return (
-    <div className="flex items-start gap-2 rounded-md border border-orange-500/30 bg-orange-500/5 px-3 py-2 text-[12px] text-orange-800 dark:text-orange-300">
+    <div className="flex items-start gap-2 rounded-md border border-brand/30 bg-warn-soft px-3 py-2 text-[12px] text-brand ">
       <Wallet className="mt-0.5 h-4 w-4 shrink-0" />
       <div className="min-w-0 flex-1">
         <div className="font-medium">
           {t("connectivity.insufficientCreditsTitle")}
         </div>
-        <div className="mt-0.5 text-[11.5px] text-orange-800/80 dark:text-orange-300/80">
+        <div className="mt-0.5 text-[11.5px] text-brand ">
           {t("connectivity.insufficientCreditsHint")}
           {!isLoading && !canTopUp && ` ${t("connectivity.askAdminToTopUp")}`}
         </div>
@@ -1467,7 +1475,7 @@ function InsufficientCreditsNotice() {
           type="button"
           size="sm"
           onClick={openWallet}
-          className="shrink-0 bg-orange-500 text-white hover:bg-orange-600"
+          className="shrink-0 bg-brand text-brand-on hover:bg-brand"
         >
           {t("connectivity.topUp")}
         </Button>
@@ -1486,12 +1494,12 @@ function ModelsLoadError({
 }) {
   const { t } = useTranslation();
   return (
-    <p className="flex items-center gap-2 text-[11px] text-red-600">
+    <p className="flex items-center gap-2 text-[11px] text-danger">
       <span>{message}</span>
       <button
         type="button"
         onClick={onRetry}
-        className="font-medium underline underline-offset-2 hover:text-red-700"
+        className="font-medium underline underline-offset-2 hover:text-danger"
       >
         {t("modelCatalog.retry")}
       </button>

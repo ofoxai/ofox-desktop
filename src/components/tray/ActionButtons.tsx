@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { settingsApi } from "@/lib/api";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
@@ -15,6 +16,7 @@ import { ofoxActivityUrl, ofoxWalletUrl } from "@/lib/ofoxUrls";
  * tray 立刻指向对的域。
  */
 export default function ActionButtons() {
+  const { t } = useTranslation();
   const { apex } = useOfoxApex();
   const { status } = useOfoxAuth();
   const canRecharge = isOfoxBillingManager(status?.user);
@@ -24,16 +26,16 @@ export default function ActionButtons() {
       {canRecharge && (
         <button
           onClick={() => settingsApi.openExternal(ofoxWalletUrl(apex))}
-          className="flex-1 rounded-lg bg-orange-500 py-1.5 text-[12px] font-medium text-white hover:bg-orange-600"
+          className="flex-1 rounded-lg bg-brand py-1.5 text-[12px] font-medium text-brand-on hover:bg-brand"
         >
-          充值
+          {t("uiCopy.topUp")}
         </button>
       )}
       <button
         onClick={() => settingsApi.openExternal(ofoxActivityUrl(apex))}
-        className="flex-1 rounded-lg border border-border py-1.5 text-[12px] font-medium text-foreground hover:bg-accent"
+        className="flex-1 rounded-lg border border-line py-1.5 text-[12px] font-medium text-ink hover:bg-accent"
       >
-        用量详情
+        {t("uiCopy.usageDetails")}
       </button>
     </div>
   );

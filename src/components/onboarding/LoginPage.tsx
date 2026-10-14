@@ -15,12 +15,6 @@ import {
 import { useOfoxApex } from "@/hooks/useOfoxApex";
 import { ofoxPrivacyUrl, ofoxRegisterUrl, ofoxTermsUrl } from "@/lib/ofoxUrls";
 
-const FEATURES = [
-  "自动检测本机 AI 工具，一键接入",
-  "Claude / GPT / Gemini 等 100+ 模型",
-  "统一用量与账单，一键查看详情",
-];
-
 type LoginState = "idle" | "polling" | "success" | "error";
 
 interface LoginPageProps {
@@ -29,6 +23,11 @@ interface LoginPageProps {
 
 export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
   const { t } = useTranslation();
+  const FEATURES = [
+    t("uiCopy.featureDetect"),
+    t("uiCopy.featureModels"),
+    t("uiCopy.featureUsage"),
+  ];
   // 上次读取钥匙串被用户拒绝：登录其实还在，重新授权就能恢复，不必重新登录。
   const [keychainDenied, setKeychainDenied] = useState(false);
   const [keychainRetrying, setKeychainRetrying] = useState(false);
@@ -128,7 +127,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
         if (Date.now() > expiresAt) {
           stopPolling();
           setLoginState("error");
-          setError("验证码已过期，请重试");
+          setError(t("uiCopy.codeExpired"));
           return;
         }
 
@@ -167,8 +166,8 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
             setLoginState("error");
             setError(
               msg.includes("access_denied")
-                ? "授权被拒绝"
-                : "验证码已过期，请重试",
+                ? t("uiCopy.authDenied")
+                : t("uiCopy.codeExpired"),
             );
           } else {
             // Anything we don't recognize — bad network, OFox backend
@@ -187,9 +186,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
             if (unknownErrorCountRef.current >= 3) {
               stopPolling();
               setLoginState("error");
-              setError(
-                "授权检查异常，请尝试「重新生成验证码」或「我已完成授权」",
-              );
+              setError(t("uiCopy.authError"));
             }
           }
         }
@@ -200,7 +197,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
         stopPolling();
         if (loginState === "polling") {
           setLoginState("error");
-          setError("验证码已过期，请重试");
+          setError(t("uiCopy.codeExpired"));
         }
       }, resp.expires_in * 1000);
     } catch (e) {
@@ -256,14 +253,14 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
         // device code is most likely stale, and continuing to wait silently
         // is the worst option. A fresh code is one click away.
         setShowRegenerate(true);
-        toast.info("尚未检测到授权，可尝试重新生成验证码");
+        toast.info(t("uiCopy.authPending"));
       }
     } catch (e) {
       console.error("[LoginPage] handleAlreadyAuthorized failed", e);
       // Network/IPC failure — same UX: offer the regenerate path so the
       // user isn't stuck if the backend is temporarily unreachable.
       setShowRegenerate(true);
-      toast.error("检查授权状态失败，请稍后再试");
+      toast.error(t("uiCopy.authCheckFailed"));
     } finally {
       setCheckingStatus(false);
     }
@@ -284,7 +281,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
   }, []);
 
   return (
-    <div className="relative flex h-screen w-full flex-col bg-gradient-to-br from-orange-50/80 via-white to-orange-50/40 dark:from-neutral-950 dark:via-neutral-900 dark:to-neutral-950">
+    <div className="relative flex h-screen w-full flex-col bg-canvas">
       {/* Title bar drag region — same 40px strip ConsolePage uses, so the
           window stays movable while the user is on this page. Without this
           there is literally no draggable surface on the LoginPage and the
@@ -303,16 +300,16 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
           {keychainDenied && (
             <div
               role="alert"
-              className="mb-6 flex w-full items-start gap-3 rounded-xl border border-orange-300/60 bg-orange-50/60 p-4 text-sm dark:border-orange-500/40 dark:bg-orange-950/20"
+              className="mb-6 flex w-full items-start gap-3 rounded-xl border border-brand/30 bg-warn-soft p-4 text-sm "
             >
-              <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-orange-500" />
+              <KeyRound className="mt-0.5 h-4 w-4 shrink-0 text-brand" />
               <div className="flex-1 space-y-3">
                 <p className="leading-relaxed">{t("keychainDenied.message")}</p>
                 <button
                   type="button"
                   onClick={() => void retryKeychain()}
                   disabled={keychainRetrying}
-                  className="rounded-md bg-orange-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-orange-600 disabled:opacity-60"
+                  className="rounded-md bg-brand px-3 py-1.5 text-xs font-medium text-brand-on hover:bg-brand disabled:opacity-60"
                 >
                   {t(
                     keychainRetrying
@@ -324,18 +321,18 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
             </div>
           )}
           {/* Logo */}
-          <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-[22px] bg-gradient-to-br from-orange-400 to-orange-600 text-4xl font-bold text-white shadow-lg shadow-orange-200 dark:shadow-orange-900/30">
+          <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-[22px] bg-brand text-4xl font-bold text-brand-on shadow-lg ">
             O
           </div>
 
           {/* Title */}
-          <h1 className="mb-2 text-3xl font-bold text-foreground">
-            欢迎使用 Ofox
+          <h1 className="mb-2 text-3xl font-bold text-ink">
+            {t("uiCopy.welcome")}
           </h1>
-          <p className="mb-8 text-center text-sm leading-relaxed text-muted-foreground">
-            为本机所有 AI 编程工具接入 Ofox 统一 API。
+          <p className="mb-8 text-center text-sm leading-relaxed text-ink-muted">
+            {t("uiCopy.welcomeLead")}
             <br />
-            告别配置文件、API Key 和多账单。
+            {t("uiCopy.welcomeHint")}
           </p>
 
           {/* Features (only show when idle) */}
@@ -344,7 +341,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
               {FEATURES.map((feature) => (
                 <div key={feature} className="flex items-start gap-2">
                   <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-green-500" />
-                  <span className="text-[13px] leading-snug text-foreground/80">
+                  <span className="text-[13px] leading-snug text-ink/80">
                     {feature}
                   </span>
                 </div>
@@ -355,21 +352,19 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
           {/* Device Code Display (polling state) */}
           {loginState === "polling" && deviceCode && (
             <div className="mb-8 flex flex-col items-center gap-3">
-              <p className="text-sm text-muted-foreground">
-                请在浏览器中输入以下验证码
-              </p>
+              <p className="text-sm text-ink-muted">{t("uiCopy.enterCode")}</p>
               <button
                 onClick={copyUserCode}
-                className="rounded-xl border-2 border-dashed border-orange-300 bg-orange-50 px-8 py-4 text-3xl font-mono font-bold tracking-[0.3em] text-orange-600 transition-colors hover:border-orange-400 hover:bg-orange-100 dark:border-orange-500/30 dark:bg-orange-950/30 dark:text-orange-400"
+                className="rounded-xl border-2 border-dashed border-brand/30 bg-warn-soft px-8 py-4 text-3xl font-mono font-bold tracking-[0.3em] text-brand transition-colors hover:border-brand/30 hover:bg-warn-soft "
               >
                 {deviceCode.user_code}
               </button>
-              <p className="text-xs text-muted-foreground">
-                {copied ? "已复制到剪贴板 ✓" : "点击复制"}
+              <p className="text-xs text-ink-muted">
+                {copied ? t("uiCopy.copied") : t("uiCopy.clickCopy")}
               </p>
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <div className="h-4 w-4 animate-spin rounded-full border-2 border-orange-400 border-t-transparent" />
-                等待授权中...
+              <div className="flex items-center gap-2 text-sm text-ink-muted">
+                <div className="h-4 w-4 animate-spin rounded-full border-2 border-brand/30 border-t-transparent" />
+                {t("uiCopy.waitingAuth")}
               </div>
 
               {/* Rescue actions — visible only while polling so users have an
@@ -385,18 +380,20 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
                   type="button"
                   onClick={handleAlreadyAuthorized}
                   disabled={checkingStatus}
-                  className="rounded-md border border-border bg-background px-3 py-1.5 font-medium text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+                  className="rounded-md border border-line bg-background px-3 py-1.5 font-medium text-ink transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {checkingStatus ? "检查中…" : "我已完成授权 →"}
+                  {checkingStatus
+                    ? t("uiCopy.checkingAuth")
+                    : t("uiCopy.authorized")}
                 </button>
                 {showRegenerate && (
                   <button
                     type="button"
                     onClick={handleRegenerate}
-                    className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-3 py-1.5 font-medium text-foreground transition-colors hover:bg-accent"
+                    className="inline-flex items-center gap-1 rounded-md border border-line bg-background px-3 py-1.5 font-medium text-ink transition-colors hover:bg-accent"
                   >
                     <RotateCcw className="h-3 w-3" />
-                    重新生成验证码
+                    {t("uiCopy.regenerate")}
                   </button>
                 )}
               </div>
@@ -405,7 +402,7 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
 
           {/* Error */}
           {error && (
-            <div className="mb-4 w-full rounded-lg bg-red-50 px-4 py-2 text-sm text-red-600 dark:bg-red-950/50 dark:text-red-400">
+            <div className="mb-4 w-full rounded-lg bg-danger-soft px-4 py-2 text-sm text-danger ">
               {error}
             </div>
           )}
@@ -414,41 +411,41 @@ export default function LoginPage({ onLoginSuccess }: LoginPageProps) {
           <button
             onClick={startLogin}
             disabled={loginState === "polling"}
-            className="mb-4 w-full max-w-sm rounded-xl bg-gradient-to-r from-orange-400 to-orange-500 px-6 py-3 text-base font-semibold text-white shadow-md shadow-orange-200 transition-all hover:from-orange-500 hover:to-orange-600 hover:shadow-lg disabled:opacity-50 dark:shadow-orange-900/20"
+            className="mb-4 w-full max-w-sm rounded-xl bg-brand px-6 py-3 text-base font-semibold text-brand-on shadow-md transition-all hover:shadow-lg disabled:opacity-50 "
           >
             {loginState === "polling"
-              ? "等待浏览器授权..."
+              ? t("uiCopy.waitingBrowser")
               : loginState === "error"
-                ? "重新登录 →"
-                : "使用 Ofox 账户登录 →"}
+                ? t("uiCopy.reauthArrow")
+                : t("uiCopy.loginArrow")}
           </button>
 
           {/* Secondary Actions */}
           <div className="mb-6 flex items-center gap-3 text-[13px]">
-            <span className="text-muted-foreground">未注册？</span>
+            <span className="text-ink-muted">{t("uiCopy.notRegistered")}</span>
             <button
               onClick={() => settingsApi.openExternal(ofoxRegisterUrl(apex))}
-              className="text-orange-500 hover:text-orange-600 hover:underline"
+              className="text-brand hover:text-brand hover:underline"
             >
-              免费注册
+              {t("uiCopy.register")}
             </button>
           </div>
 
           {/* Footer */}
-          <p className="text-[11px] text-muted-foreground/60">
-            继续登录即表示同意{" "}
+          <p className="text-[11px] text-ink-muted/60">
+            {t("uiCopy.agreement")}{" "}
             <button
               onClick={() => settingsApi.openExternal(ofoxTermsUrl(apex))}
-              className="underline hover:text-muted-foreground"
+              className="underline hover:text-ink-muted"
             >
-              服务条款
+              {t("uiCopy.terms")}
             </button>{" "}
-            与{" "}
+            {t("uiCopy.and")}{" "}
             <button
               onClick={() => settingsApi.openExternal(ofoxPrivacyUrl(apex))}
-              className="underline hover:text-muted-foreground"
+              className="underline hover:text-ink-muted"
             >
-              隐私政策
+              {t("uiCopy.privacy")}
             </button>
           </p>
         </div>

@@ -25,7 +25,7 @@ export default function OnboardingApp({
   onComplete,
 }: OnboardingAppProps) {
   const [step, setStep] = useState<Step>(initialStep);
-  const [boundCount, setBoundCount] = useState(0);
+  const [boundTools, setBoundTools] = useState<string[]>([]);
 
   const handleLoginSuccess = (_user: OfoxUserInfo) => {
     setStep("toolDiscovery");
@@ -35,7 +35,7 @@ export default function OnboardingApp({
     // bindTools 返回真实成功列表（失败的工具已 toast 警告并被剔除）。
     // 用 succeeded.length 做完成页计数才不会在部分失败时谎报"绑了 N 个"。
     const succeeded = await bindTools(selectedTools);
-    setBoundCount(succeeded.length);
+    setBoundTools(succeeded);
     setStep("setupComplete");
   };
 
@@ -55,7 +55,7 @@ export default function OnboardingApp({
       );
     case "setupComplete":
       return (
-        <SetupCompletePage boundCount={boundCount} onOpenConsole={onComplete} />
+        <SetupCompletePage boundTools={boundTools} onOpenConsole={onComplete} />
       );
   }
 }

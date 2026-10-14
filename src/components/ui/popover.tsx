@@ -35,6 +35,8 @@ const PopoverContent = React.forwardRef<
           ref={ref}
           align={align}
           sideOffset={sideOffset}
+          collisionBoundary={dialogContainer ?? undefined}
+          collisionPadding={8}
           className={cn(
             "z-50 origin-[var(--radix-popover-content-transform-origin)] animate-pop-in rounded-pop bg-pop-bg p-1 text-popover-foreground shadow-pop outline-none backdrop-blur-xl data-[side=top]:[--pop-dy:6px]",
             className,

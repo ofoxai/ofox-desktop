@@ -17,7 +17,7 @@ export interface SearchInputProps
 /**
  * magpie's `.sess-filter`: a 26px field with a search icon whose border turns
  * brand while focused. A clear button shows while there is text, and Escape
- * clears it (only Escape on an empty field goes on to close what holds it).
+ * clears it. Enclosing Radix layers may handle Escape first to dismiss their popup.
  */
 export const SearchInput = React.forwardRef<HTMLInputElement, SearchInputProps>(
   (

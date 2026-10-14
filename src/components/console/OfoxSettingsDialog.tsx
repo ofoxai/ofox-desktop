@@ -5,6 +5,9 @@ import { Loader2, X } from "lucide-react";
 import { emit } from "@tauri-apps/api/event";
 
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import { useTheme } from "@/components/theme-provider";
+import { SegmentedControl } from "@/components/ui/segmented";
+import { ListCard, ListHead, ListRow } from "@/components/ui/list";
 import { Switch } from "@/components/ui/switch";
 import { settingsApi } from "@/lib/api";
 import { ofoxLogout } from "@/lib/api/ofoxAuth";
@@ -176,7 +179,7 @@ export default function OfoxSettingsDialog({
       await emit("ofox-prefs-updated");
     } catch (e) {
       console.error("[OfoxSettingsDialog] persistPrefsPatch failed", e);
-      toast.error("保存偏好失败，请稍后重试");
+      toast.error(t("uiCopy.savePrefsFailed"));
     }
   }, []);
 
@@ -197,7 +200,7 @@ export default function OfoxSettingsDialog({
       const next = await requestPermission();
       if (next !== "granted" && !notifPermissionWarned) {
         setNotifPermissionWarned(true);
-        toast.warning("系统通知权限未授予，低余额提醒将无法弹出");
+        toast.warning(t("uiCopy.notificationsDenied"));
       }
     } catch (e) {
       console.warn(
@@ -216,7 +219,7 @@ export default function OfoxSettingsDialog({
       } catch (e) {
         console.error("[OfoxSettingsDialog] setAutoLaunch failed", e);
         setAutoLaunch(prev ?? false);
-        toast.error("开机自动启动设置失败，请稍后再试");
+        toast.error(t("uiCopy.autoLaunchFailed"));
       }
     },
     [autoLaunch],
@@ -271,7 +274,7 @@ export default function OfoxSettingsDialog({
       await emit("ofox-reauth-requested");
     } catch (e) {
       console.error("[OfoxSettingsDialog] ofoxLogout failed", e);
-      toast.error("退出登录失败，请稍后重试");
+      toast.error(t("uiCopy.logoutFailed"));
     } finally {
       setLoggingOut(false);
     }
@@ -287,13 +290,13 @@ export default function OfoxSettingsDialog({
       const result = await settingsApi.checkUpdates();
       if (result.hasUpdate) {
         const url = result.downloadUrl;
-        toast.info(`发现新版本 v${result.latestVersion}`, {
+        toast.info(t("uiCopy.newVersion", { value1: result.latestVersion }), {
           description: result.notes || undefined,
           duration: 12000,
           closeButton: true,
           action: url
             ? {
-                label: "前往下载",
+                label: t("uiCopy.download"),
                 onClick: () => {
                   // 先关掉设置弹窗——Radix Dialog 的 focus trap / pointer-events
                   // 锁定会吞掉浮在它之上的 sonner toast action 点击，关闭后再
@@ -304,18 +307,18 @@ export default function OfoxSettingsDialog({
                       "[OfoxSettingsDialog] openExternal failed",
                       err,
                     );
-                    toast.error("无法打开下载页面");
+                    toast.error(t("uiCopy.openDownloadFailed"));
                   });
                 },
               }
             : undefined,
         });
       } else {
-        toast.success("已是最新版本");
+        toast.success(t("uiCopy.upToDate"));
       }
     } catch (e) {
       console.error("[OfoxSettingsDialog] checkUpdates failed", e);
-      toast.error("检查更新失败，请稍后重试");
+      toast.error(t("uiCopy.updateFailed"));
     } finally {
       setCheckingUpdate(false);
     }
@@ -333,21 +336,22 @@ export default function OfoxSettingsDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="max-w-[560px] gap-0 overflow-hidden rounded-2xl p-0"
+        className="max-w-[560px] gap-0 p-0"
         zIndex="nested"
+        aria-describedby={undefined}
       >
         {/* Header — custom layout (no bottom border, larger padding) so it
             matches the floating-card feel of the spec instead of the standard
             DialogHeader divider. */}
         <div className="flex items-center justify-between px-6 pt-5 pb-3">
           <DialogTitle className="text-[18px] font-semibold tracking-tight">
-            设置
+            {t("uiCopy.settings")}
           </DialogTitle>
           <button
             type="button"
             onClick={() => onOpenChange(false)}
-            className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-            aria-label="关闭"
+            className="rounded-md p-1 text-ink-muted transition-colors hover:bg-accent hover:text-ink"
+            aria-label={t("uiCopy.close")}
           >
             <X className="h-4 w-4" />
           </button>
@@ -357,7 +361,7 @@ export default function OfoxSettingsDialog({
             short windows; sections separate via gap-4 to mirror the mock. */}
         <div className="flex max-h-[70vh] flex-col gap-4 overflow-y-auto px-6 pb-4">
           {/* ─── 账户 ─────────────────────────────────────────────────── */}
-          <SectionCard title="账户">
+          <SectionCard title={t("uiCopy.account")}>
             <div className="flex items-center justify-between px-4 py-3">
               <div className="flex min-w-0 items-center gap-3">
                 <UserAvatar
@@ -368,10 +372,10 @@ export default function OfoxSettingsDialog({
                   fallbackTextClassName="text-base"
                 />
                 <div className="min-w-0">
-                  <div className="truncate text-[14px] font-semibold text-foreground">
-                    {user?.name ?? "未登录"}
+                  <div className="truncate text-[14px] font-semibold text-ink">
+                    {user?.name ?? t("uiCopy.loggedOut")}
                   </div>
-                  <div className="truncate text-[12px] text-muted-foreground">
+                  <div className="truncate text-[12px] text-ink-muted">
                     {user?.email ?? ""}
                   </div>
                 </div>
@@ -380,10 +384,10 @@ export default function OfoxSettingsDialog({
                 type="button"
                 onClick={handleLogout}
                 disabled={loggingOut || !user}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-[12px] font-medium text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-[12px] font-medium text-ink transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {loggingOut && <Loader2 className="h-3 w-3 animate-spin" />}
-                退出登录
+                {t("uiCopy.logout")}
               </button>
             </div>
           </SectionCard>
@@ -392,22 +396,29 @@ export default function OfoxSettingsDialog({
           {/* 之前 apex 选择器在主页右上角；为了让顶栏更干净（apex 切换是
               低频操作），收回到设置里。已登录态切换 ofox.ai ↔ ofox.io 会
               在 OfoxApexSwitch 内部触发 ConfirmDialog → 重新登录流程。 */}
-          <SectionCard title="区域">
+          <SectionCard title={t("uiCopy.region")}>
             <Row
               label="OFox apex"
-              hint="切换 ofox.ai / ofox.io；已登录态切换会触发重新登录"
+              hint={t("uiCopy.regionHint")}
               control={<OfoxApexSwitch />}
               isLast
             />
           </SectionCard>
 
+          <SectionCard title={t("settingsAppearance.title")}>
+            <Row
+              label={t("settingsAppearance.theme")}
+              control={<AppearanceControl />}
+            />
+          </SectionCard>
           {/* ─── 偏好 ─────────────────────────────────────────────────── */}
-          <SectionCard title="偏好">
+          <SectionCard title={t("uiCopy.preferences")}>
             {/* Auto-launch */}
             <Row
-              label="开机自动启动"
+              label={t("uiCopy.autoLaunch")}
               control={
                 <Switch
+                  aria-label={t("uiCopy.autoLaunch")}
                   checked={autoLaunch === true}
                   // While the initial fetch is in-flight we still show the
                   // switch (defaulted off) but disable it — flipping it now
@@ -420,15 +431,16 @@ export default function OfoxSettingsDialog({
 
             {/* Low-balance alert */}
             <Row
-              label="低余额提醒"
-              hint="余额低于阈值时通知"
+              label={t("uiCopy.lowBalance")}
+              hint={t("uiCopy.lowBalanceHint")}
               control={
                 <div className="flex items-center gap-2">
                   <div className="relative">
-                    <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[13px] text-muted-foreground">
+                    <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[13px] text-ink-muted">
                       $
                     </span>
                     <input
+                      aria-label={t("uiCopy.lowBalance")}
                       type="number"
                       inputMode="numeric"
                       min={1}
@@ -437,10 +449,11 @@ export default function OfoxSettingsDialog({
                         handleLowBalThresholdChange(e.target.value)
                       }
                       disabled={!lowBalEnabled}
-                      className="h-7 w-[72px] rounded-md border border-border bg-background pl-5 pr-2 text-right text-[13px] font-medium text-foreground outline-none transition-colors focus:border-orange-400 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="h-7 w-[72px] rounded-md border border-line bg-background pl-5 pr-2 text-right text-[13px] font-medium text-ink outline-none transition-colors focus:border-brand/30 disabled:cursor-not-allowed disabled:opacity-50"
                     />
                   </div>
                   <Switch
+                    aria-label={t("uiCopy.lowBalance")}
                     checked={lowBalEnabled}
                     onCheckedChange={handleLowBalToggle}
                   />
@@ -451,24 +464,24 @@ export default function OfoxSettingsDialog({
           </SectionCard>
 
           {/* ─── 关于 ─────────────────────────────────────────────────── */}
-          <SectionCard title="关于">
+          <SectionCard title={t("uiCopy.about")}>
             <div className="flex items-center justify-between px-4 py-3">
               <div className="min-w-0">
-                <div className="text-[14px] font-semibold text-foreground">
+                <div className="text-[14px] font-semibold text-ink">
                   Ofox Desktop {version ? `v${version}` : ""}
                 </div>
-                <div className="text-[12px] text-muted-foreground">
-                  最新版本
+                <div className="text-[12px] text-ink-muted">
+                  {t("uiCopy.currentVersion")}
                 </div>
               </div>
               <button
                 type="button"
                 onClick={handleCheckUpdate}
                 disabled={checkingUpdate}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-[12px] font-medium text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 rounded-lg border border-line px-3 py-1.5 text-[12px] font-medium text-ink transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {checkingUpdate && <Loader2 className="h-3 w-3 animate-spin" />}
-                检查更新
+                {t("uiCopy.checkUpdates")}
               </button>
             </div>
             <div className="px-4 py-2">
@@ -485,14 +498,10 @@ export default function OfoxSettingsDialog({
 
         {/* Footer — only the primary "完成" action; the spec's "在浏览器中
             打开设置" link is intentionally omitted (see top-of-file comment). */}
-        <div className="flex items-center justify-end border-t border-border-default bg-muted/20 px-6 py-3">
-          <button
-            type="button"
-            onClick={() => onOpenChange(false)}
-            className="rounded-lg bg-orange-500 px-5 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-orange-600"
-          >
-            完成
-          </button>
+        <div className="flex items-center justify-end border-t border-line bg-muted/20 px-6 py-3">
+          <Button variant="primary" onClick={() => onOpenChange(false)}>
+            {t("uiCopy.done")}
+          </Button>
         </div>
       </DialogContent>
     </Dialog>
@@ -519,14 +528,30 @@ interface SectionCardProps {
  *  This is the standard fix for `max-h + overflow + flex-col` in Tailwind. */
 function SectionCard({ title, children }: SectionCardProps) {
   return (
-    <section className="shrink-0 overflow-hidden rounded-xl border border-border bg-background">
-      <div className="border-b border-border bg-muted/40 px-4 py-2">
-        <h3 className="text-[12px] font-medium uppercase tracking-wider text-muted-foreground">
-          {title}
-        </h3>
-      </div>
-      <div className="divide-y divide-border">{children}</div>
+    <section className="shrink-0">
+      <ListCard>
+        <ListHead>
+          <h3>{title}</h3>
+        </ListHead>
+        {children}
+      </ListCard>
     </section>
+  );
+}
+function AppearanceControl() {
+  const { t } = useTranslation();
+  const { theme, setTheme } = useTheme();
+  return (
+    <SegmentedControl
+      aria-label={t("settingsAppearance.title")}
+      value={theme}
+      onChange={setTheme}
+      options={[
+        { value: "system", label: t("settingsAppearance.system") },
+        { value: "light", label: t("settingsAppearance.light") },
+        { value: "dark", label: t("settingsAppearance.dark") },
+      ]}
+    />
   );
 }
 
@@ -544,14 +569,12 @@ function Row({ label, hint, control, isLast }: RowProps) {
   // `divide-y` on the parent draws between rows; nothing to do for isLast.
   void isLast;
   return (
-    <div className="flex items-center justify-between px-4 py-3">
+    <ListRow className="justify-between gap-3">
       <div className="min-w-0">
-        <div className="text-[14px] font-medium text-foreground">{label}</div>
-        {hint && (
-          <div className="text-[12px] text-muted-foreground">{hint}</div>
-        )}
+        <div className="text-[14px] font-medium text-ink">{label}</div>
+        {hint && <div className="text-[12px] text-ink-muted">{hint}</div>}
       </div>
       <div className="flex shrink-0 items-center">{control}</div>
-    </div>
+    </ListRow>
   );
 }

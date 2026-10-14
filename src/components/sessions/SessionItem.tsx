@@ -58,9 +58,7 @@ export function SessionItem({
           <Checkbox
             checked={isChecked}
             disabled={isCheckDisabled}
-            aria-label={t("sessionManager.selectForBatch", {
-              defaultValue: "选择会话",
-            })}
+            aria-label={t("sessionManager.selectForBatch", {})}
             onCheckedChange={(checked) => onToggleChecked(Boolean(checked))}
           />
         </div>

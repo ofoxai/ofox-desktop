@@ -7,6 +7,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { useMenuTab } from "@/hooks/useMenuTab";
 import { cn } from "@/lib/utils";
 
 export interface MenuSelectOption<T extends string = string> {
@@ -120,6 +121,7 @@ export function MenuSelect<T extends string>({
 }: MenuSelectProps<T>) {
   const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
+  const menuTab = useMenuTab(() => setOpen(false));
   const [query, setQuery] = React.useState("");
   // The highlighted option's key. Kept here rather than in cmdk: cmdk only
   // records which element is highlighted (for aria-activedescendant) when a
@@ -140,13 +142,12 @@ export function MenuSelect<T extends string>({
   const handleOpenChange = (next: boolean) => {
     if (next) {
       setQuery("");
-      // A menu opens on the chosen option, as magpie's does; a filter on the
-      // first option, which Enter takes.
+      // Both searchable and plain menus open on the current selection.
       const at = options.findIndex(
         (option) => option.value === value && !option.disabled,
       );
       const all = filterOptions(options, "");
-      setActive(!searchable && at >= 0 ? itemKey(at) : firstKey(all));
+      setActive(at >= 0 ? itemKey(at) : firstKey(all));
     }
     setOpen(next);
   };
@@ -162,9 +163,9 @@ export function MenuSelect<T extends string>({
   // stays in the field, which points at the option instead.
   const followHighlight = React.useCallback(() => {
     const item = itemRefs.current.get(active);
+    setListId(listRef.current?.id);
     if (searchable) {
       setActiveId(item?.id);
-      setListId(listRef.current?.id);
     } else {
       (item ?? listRef.current)?.focus({ preventScroll: true });
     }
@@ -174,7 +175,7 @@ export function MenuSelect<T extends string>({
   // first focus comes from onOpenAutoFocus below; this follows the moves.
   React.useLayoutEffect(() => {
     if (open) followHighlight();
-  }, [open, followHighlight, shown]);
+  }, [open, followHighlight, query]);
 
   const choose = (option: MenuSelectOption<T>) => {
     setOpen(false);
@@ -186,6 +187,8 @@ export function MenuSelect<T extends string>({
       <PopoverTrigger asChild>
         <button
           type="button"
+          ref={menuTab.triggerRef}
+          aria-controls={open ? listId : undefined}
           id={id}
           role="combobox"
           aria-label={ariaLabel}
@@ -224,6 +227,8 @@ export function MenuSelect<T extends string>({
         </button>
       </PopoverTrigger>
       <PopoverContent
+        onKeyDown={menuTab.onKeyDown}
+        onCloseAutoFocus={menuTab.onCloseAutoFocus}
         // A listbox popup, not a dialog: the trigger says so with
         // aria-haspopup, and the list inside carries the options.
         role="presentation"

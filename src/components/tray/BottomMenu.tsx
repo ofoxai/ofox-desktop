@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
@@ -13,6 +14,7 @@ import { isMac } from "@/lib/platform";
 const OFOX_OPEN_SETTINGS_EVENT = "ofox-open-settings";
 
 export default function BottomMenu() {
+  const { t } = useTranslation();
   const hideSelf = useCallback(async () => {
     try {
       await getCurrentWindow().hide();
@@ -28,7 +30,7 @@ export default function BottomMenu() {
       await hideSelf();
     } catch (e) {
       console.error("[BottomMenu] show_main_window failed", e);
-      toast.error("打开主窗口失败");
+      toast.error(t("uiCopy.openMainFailed"));
     }
   }, [hideSelf]);
 
@@ -57,7 +59,7 @@ export default function BottomMenu() {
       await hideSelf();
     } catch (e) {
       console.error("[BottomMenu] open settings failed", e);
-      toast.error("打开偏好设置失败");
+      toast.error(t("uiCopy.openSettingsFailed"));
     }
   }, [hideSelf]);
 
@@ -75,37 +77,35 @@ export default function BottomMenu() {
     onClick: () => void | Promise<void>;
   }> = [
     {
-      label: "打开 Ofox 主窗口",
+      label: t("uiCopy.openMain"),
       shortcut: isMac() ? "⌘O" : "Ctrl+O",
       onClick: handleOpenMain,
     },
     {
-      label: "偏好设置...",
+      label: t("uiCopy.openPreferences"),
       onClick: handleOpenSettings,
     },
   ];
 
   return (
-    <div className="border-t border-border">
+    <div className="border-t border-line">
       {items.map((item) => (
         <button
           key={item.label}
           onClick={() => void item.onClick()}
-          className="flex w-full items-center justify-between px-3.5 py-2 text-[12px] text-foreground hover:bg-accent/50"
+          className="flex w-full items-center justify-between px-3.5 py-2 text-[12px] text-ink hover:bg-accent/50"
         >
           <span>{item.label}</span>
           {item.shortcut && (
-            <span className="text-[11px] text-muted-foreground">
-              {item.shortcut}
-            </span>
+            <span className="text-[11px] text-ink-muted">{item.shortcut}</span>
           )}
         </button>
       ))}
       <button
         onClick={() => void handleQuit()}
-        className="flex w-full items-center px-3.5 py-2 text-[12px] text-muted-foreground hover:bg-accent/50"
+        className="flex w-full items-center px-3.5 py-2 text-[12px] text-ink-muted hover:bg-accent/50"
       >
-        退出 Ofox
+        {t("uiCopy.quit")}
       </button>
     </div>
   );

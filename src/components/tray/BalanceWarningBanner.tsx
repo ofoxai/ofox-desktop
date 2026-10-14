@@ -46,17 +46,17 @@ export default function BalanceWarningBanner({
     // 直接贴在一起，banner 的金色描边压在按钮顶边上视觉很挤。margin 加在
     // banner 而不是 ActionButtons 上，是因为 ActionButtons 在没 banner 时
     // 紧贴 AccountBalance 是 intended look。
-    <div className="mx-3.5 mb-2 flex items-center gap-2.5 rounded-lg border border-[#e8d5a3] bg-gradient-to-l from-[#f5dfa0] to-[#faf3e0] px-2.5 py-2 dark:border-yellow-500/30 dark:from-yellow-600/25 dark:to-yellow-500/5">
+    <div className="mx-3.5 mb-2 flex items-center gap-2.5 rounded-lg border border-warn/25 bg-warn-soft px-2.5 py-2 ">
       {/* 圆形感叹号图标 */}
-      <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-amber-400 text-[13px] font-bold text-white">
+      <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-warn text-[13px] font-bold text-brand-on">
         !
       </div>
       <div className="min-w-0 flex-1">
-        <div className="text-[11px] font-semibold text-amber-800 dark:text-amber-300">
+        <div className="text-[11px] font-semibold text-warn ">
           {t("balanceWarning.title", { threshold: `$${threshold}` })}
         </div>
         {runsOut && (
-          <div className="text-[10px] leading-tight text-amber-700/80 dark:text-amber-400/70">
+          <div className="text-[10px] leading-tight text-warn ">
             {"days" in runsOut
               ? t("balanceWarning.runsOutDays", { days: runsOut.days })
               : t("balanceWarning.runsOutSoon")}
@@ -66,7 +66,7 @@ export default function BalanceWarningBanner({
       {canRecharge && (
         <button
           onClick={() => settingsApi.openExternal(ofoxWalletUrl(apex))}
-          className="shrink-0 rounded-md bg-orange-500 px-2.5 py-0.5 text-[11px] font-medium text-white hover:bg-orange-600"
+          className="shrink-0 rounded-md bg-brand px-2.5 py-0.5 text-[11px] font-medium text-brand-on hover:bg-brand"
         >
           {t("balanceWarning.recharge")}
         </button>

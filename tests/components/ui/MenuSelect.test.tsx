@@ -237,7 +237,7 @@ describe("MenuSelect", () => {
     await waitFor(() =>
       expect(search).toHaveAttribute(
         "aria-activedescendant",
-        option(/^Claude Code/).id,
+        option(/^Codex/).id,
       ),
     );
 
@@ -313,4 +313,46 @@ describe("MenuSelect", () => {
     expect(screen.getByRole("dialog", { name: "Tool" })).toBeInTheDocument();
     expect(trigger).toHaveFocus();
   });
+});
+
+it("starts a searchable menu on the chosen value and points controls at its listbox", async () => {
+  render(<Harness searchable searchPlaceholder="Filter tools" />);
+  const trigger = screen.getByRole("combobox");
+  await userEvent.click(trigger);
+  const input = screen.getByRole("combobox", { name: "Filter tools" });
+  expect(
+    document.getElementById(input.getAttribute("aria-activedescendant")!),
+  ).toHaveTextContent("Codex");
+  expect(
+    document.getElementById(trigger.getAttribute("aria-controls")!),
+  ).toHaveAttribute("role", "listbox");
+});
+it("Tab closes a menu and moves past the trigger without picking", async () => {
+  const picked = vi.fn();
+  render(
+    <>
+      <Harness searchable onPick={picked} />
+      <button>After menu</button>
+    </>,
+  );
+  await userEvent.click(screen.getByRole("combobox"));
+  await userEvent.tab();
+  expect(screen.queryByRole("listbox")).toBeNull();
+  expect(screen.getByRole("button", { name: "After menu" })).toHaveFocus();
+  expect(picked).not.toHaveBeenCalled();
+});
+
+it("Shift+Tab returns to the previous control without selecting", async () => {
+  const picked = vi.fn();
+  render(
+    <>
+      <button>Before menu</button>
+      <Harness onPick={picked} />
+    </>,
+  );
+  await userEvent.click(screen.getByRole("combobox"));
+  await userEvent.tab({ shift: true });
+  expect(screen.queryByRole("listbox")).toBeNull();
+  expect(screen.getByRole("button", { name: "Before menu" })).toHaveFocus();
+  expect(picked).not.toHaveBeenCalled();
 });

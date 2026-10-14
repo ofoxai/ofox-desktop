@@ -1149,7 +1149,7 @@ describe("ManageToolDialog unbind", () => {
     fireEvent.click(screen.getByRole("button", { name: "解除绑定" }));
 
     expect(
-      await screen.findByText(/绑定后你自己改过的设置会保留/),
+      await screen.findByText(/OFox 能判断是你修改过的设置会保留/),
     ).toBeVisible();
     expect(screen.queryByText(/也会恢复为绑定前的值/)).not.toBeInTheDocument();
     const listed =

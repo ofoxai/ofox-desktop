@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { RefreshCw } from "lucide-react";
 import type { OfoxAuthStateValue } from "@/lib/api/ofoxAuth";
 
@@ -29,6 +30,7 @@ export default function AccountBalance({
   onRefresh,
   refreshing = false,
 }: AccountBalanceProps) {
+  const { t } = useTranslation();
   const isActive = state === "active";
   const hasNumber = isActive && typeof balanceUsd === "number";
   const displayValue = hasNumber
@@ -39,22 +41,24 @@ export default function AccountBalance({
 
   const helperLine = (() => {
     if (!isActive) {
-      return state === "expired" ? "需重新登录后更新" : "请登录后查看余额";
+      return state === "expired"
+        ? t("uiCopy.balanceReauth")
+        : t("uiCopy.balanceLogin");
     }
-    return hasNumber ? "实时余额" : "正在同步…";
+    return hasNumber ? t("uiCopy.liveBalance") : t("uiCopy.syncing");
   })();
 
   return (
     <div className="px-3.5 pt-3 pb-2">
-      <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-        <span>OFOX 账户余额</span>
+      <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wider text-ink-muted">
+        <span>{t("uiCopy.accountBalance")}</span>
         {onRefresh && (
           <button
             type="button"
             onClick={onRefresh}
             disabled={!isActive || refreshing}
-            title="刷新余额"
-            className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
+            title={t("uiCopy.refreshBalance")}
+            className="rounded p-0.5 text-ink-muted hover:bg-accent hover:text-ink disabled:opacity-50"
           >
             <RefreshCw
               className={`h-3 w-3 ${refreshing ? "animate-spin" : ""}`}
@@ -64,14 +68,12 @@ export default function AccountBalance({
       </div>
       <div
         className={`mt-0.5 text-2xl font-bold ${
-          isActive ? "text-foreground" : "text-muted-foreground"
+          isActive ? "text-ink" : "text-ink-muted"
         }`}
       >
         {displayValue}
       </div>
-      <div className="mt-0.5 text-[11px] text-muted-foreground">
-        {helperLine}
-      </div>
+      <div className="mt-0.5 text-[11px] text-ink-muted">{helperLine}</div>
     </div>
   );
 }

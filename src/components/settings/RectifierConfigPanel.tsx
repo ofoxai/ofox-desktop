@@ -182,6 +182,7 @@ export function RectifierConfigPanel() {
                 <MenuSelect
                   aria-label={t("settings.advanced.optimizer.cacheTtl")}
                   value={optimizerConfig.cacheTtl}
+                  placeholder={optimizerConfig.cacheTtl || "—"}
                   disabled={
                     !optimizerConfig.enabled || !optimizerConfig.cacheInjection
                   }

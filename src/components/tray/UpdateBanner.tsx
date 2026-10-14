@@ -37,30 +37,30 @@ export default function UpdateBanner() {
   };
 
   return (
-    <div className="mx-3.5 flex items-center gap-2.5 rounded-lg border border-emerald-300 bg-gradient-to-l from-emerald-100 to-emerald-50 px-2.5 py-2 dark:border-emerald-500/30 dark:from-emerald-600/25 dark:to-emerald-500/5">
-      <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-white">
+    <div className="mx-3.5 flex items-center gap-2.5 rounded-lg border border-ok/30 bg-ok-soft px-2.5 py-2 ">
+      <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-ok text-white">
         <ArrowUpCircle className="h-4 w-4" />
       </div>
       <div className="min-w-0 flex-1">
-        <div className="text-[11px] font-semibold text-emerald-800 dark:text-emerald-300">
-          {t("update.bannerTitle", { defaultValue: "发现新版本" })}
+        <div className="text-[11px] font-semibold text-ok ">
+          {t("update.bannerTitle", {})}
           {version ? ` v${version}` : ""}
         </div>
-        <div className="text-[10px] leading-tight text-emerald-700/80 dark:text-emerald-400/70">
-          {t("update.bannerHint", { defaultValue: "前往下载页获取最新版本" })}
+        <div className="text-[10px] leading-tight text-ok ">
+          {t("update.bannerHint", {})}
         </div>
       </div>
       <button
         onClick={() => void handleDownload()}
-        className="shrink-0 rounded-md bg-emerald-500 px-2.5 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-600"
+        className="shrink-0 rounded-md bg-ok px-2.5 py-0.5 text-[11px] font-medium text-white hover:bg-ok"
       >
-        {t("settings.goDownload", { defaultValue: "前往下载" })}
+        {t("settings.goDownload", {})}
       </button>
       <button
         onClick={() => dismissUpdate()}
-        title={t("update.skipThisVersion", { defaultValue: "跳过此版本" })}
-        aria-label={t("update.skipThisVersion", { defaultValue: "跳过此版本" })}
-        className="shrink-0 rounded p-0.5 text-emerald-700/60 hover:bg-emerald-500/10 hover:text-emerald-800 dark:text-emerald-400/60 dark:hover:text-emerald-300"
+        title={t("update.skipThisVersion", {})}
+        aria-label={t("update.skipThisVersion", {})}
+        className="shrink-0 rounded p-0.5 text-ok hover:bg-ok-soft hover:text-ok "
       >
         <X className="h-3.5 w-3.5" />
       </button>

@@ -48,3 +48,25 @@ describe("no native <select>", () => {
     expect(stale).toEqual([]);
   });
 });
+
+it("main-window choices use shared checkbox and radio controls", () => {
+  const scopes = [
+    "console",
+    "shell",
+    "sessions",
+    "usage-overview",
+    "tray",
+    "onboarding",
+    "model-profiles",
+    "ui",
+  ];
+  const offenders = scopes
+    .flatMap((scope) => tsxFiles(path.join(SRC, "components", scope)))
+    .flatMap((file) => {
+      const text = fs.readFileSync(file, "utf8");
+      return /<input\b[^>]*\btype=["'](?:checkbox|radio)["']/s.test(text)
+        ? [relative(file)]
+        : [];
+    });
+  expect(offenders).toEqual([]);
+});

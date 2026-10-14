@@ -1,68 +1,49 @@
 import { CheckCircle2 } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { isMac } from "@/lib/platform";
-
+import { TOOL_META } from "@/config/toolMeta";
+import { Button } from "@/components/ui/button";
+import { ToolBadge } from "@/components/tools/ToolBadge";
+import { ListCard, ListRow } from "@/components/ui/list";
 interface SetupCompletePageProps {
-  boundCount: number;
+  boundTools: string[];
   onOpenConsole: () => void;
 }
-
 export default function SetupCompletePage({
-  boundCount,
+  boundTools,
   onOpenConsole,
 }: SetupCompletePageProps) {
+  const { t } = useTranslation();
+  const tools = [...new Set(boundTools)];
   return (
-    <div className="flex h-screen w-full overflow-y-auto bg-gradient-to-br from-orange-50/80 via-white to-orange-50/40 dark:from-neutral-950 dark:via-neutral-900 dark:to-neutral-950">
-      <div className="m-auto flex w-full max-w-xl flex-col items-center px-8 py-2">
-        {/* Success Icon */}
-        <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-[22px] bg-emerald-500 text-4xl text-white shadow-lg shadow-emerald-200 dark:shadow-emerald-900/30">
-          <CheckCircle2 className="h-10 w-10" strokeWidth={2.5} />
+    <div className="flex h-screen w-full overflow-y-auto bg-canvas">
+      <div className="m-auto flex w-full max-w-xl flex-col items-center px-8 py-8">
+        <div className="mb-6 grid h-16 w-16 place-items-center rounded-dialog bg-ok-soft text-ok">
+          <CheckCircle2 className="h-9 w-9" />
         </div>
-
-        {/* Title */}
-        <h1 className="mb-3 text-3xl font-bold text-foreground">
-          全部设置完成
+        <h1 className="mb-3 text-2xl font-semibold text-ink">
+          {t("setupComplete.title")}
         </h1>
-        <p className="mb-2 text-center text-sm leading-relaxed text-muted-foreground">
-          已为 {boundCount} 个工具绑定 Ofox。打开 Claude Code、Cursor
-          或其它工具就能直接使用。
+        <p className="mb-2 text-center text-ui text-ink-muted">
+          {t("setupComplete.bound", { count: tools.length })}
         </p>
-        <p className="mb-8 text-center text-sm text-muted-foreground">
-          {isMac() ? "菜单栏" : "任务栏通知区域"}的{" "}
-          <span className="font-semibold text-orange-500">Ofox 图标</span>{" "}
-          可以随时查看余额和用量。
+        <p className="mb-6 text-center text-ui text-ink-muted">
+          {t(isMac() ? "setupComplete.macHint" : "setupComplete.trayHint")}
         </p>
-
-        {/* Stats */}
-        <div className="mb-8 grid w-full grid-cols-2 gap-4">
-          <div className="flex flex-col items-start rounded-xl border border-border px-4 py-3">
-            <span className="text-[11px] text-muted-foreground">
-              工具已绑定
-            </span>
-            <span className="text-2xl font-bold text-foreground">
-              {boundCount}
-            </span>
-          </div>
-          <div className="flex flex-col items-start rounded-xl border border-border px-4 py-3">
-            <span className="text-[11px] text-muted-foreground">可用模型</span>
-            <span className="text-2xl font-bold text-foreground">100+</span>
-          </div>
-          {/* 「赠送额度 $5.00」卡片暂时隐藏 —— 实际赠送策略未定，避免给用户硬编码承诺 */}
-        </div>
-
-        {/* Actions */}
-        <div className="flex w-full max-w-sm items-center justify-center">
-          <button
-            onClick={onOpenConsole}
-            className="flex-1 rounded-xl bg-gradient-to-r from-orange-400 to-orange-500 px-6 py-3 text-base font-semibold text-white shadow-md shadow-orange-200 transition-all hover:from-orange-500 hover:to-orange-600 dark:shadow-orange-900/20"
-          >
-            打开控制台 →
-          </button>
-        </div>
-
-        {/* Tip */}
-        <p className="mt-6 text-[12px] text-muted-foreground/60">
-          💡 在终端运行 claude 或 cursor 立即试试
-        </p>
+        <ListCard className="mb-6 w-full">
+          {tools.map((id) => (
+            <ListRow key={id}>
+              <ToolBadge toolId={id} size={24} />
+              <span className="text-ui text-ink">
+                {TOOL_META[id]?.label ?? id}
+              </span>
+              <CheckCircle2 aria-hidden className="ml-auto h-4 w-4 text-ok" />
+            </ListRow>
+          ))}
+        </ListCard>
+        <Button variant="primary" onClick={onOpenConsole}>
+          {t("setupComplete.open")}
+        </Button>
       </div>
     </div>
   );

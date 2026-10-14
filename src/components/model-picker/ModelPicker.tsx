@@ -16,6 +16,7 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command";
+import { useMenuTab } from "@/hooks/useMenuTab";
 import { cn } from "@/lib/utils";
 import type { FetchedModel } from "@/lib/api/model-fetch";
 
@@ -113,6 +114,7 @@ export function MultiModelPicker({
 }: MultiModelPickerProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const menuTab = useMenuTab(() => setOpen(false));
   const selected = useMemo(() => new Set(selectedIds), [selectedIds]);
   const allSelected =
     models.length > 0 && models.every((model) => selected.has(model.id));
@@ -147,11 +149,12 @@ export function MultiModelPicker({
         <Popover open={open} onOpenChange={handleOpenChange}>
           <PopoverTrigger asChild>
             <button
+              ref={menuTab.triggerRef}
               id={id}
               type="button"
               role="combobox"
               aria-expanded={open}
-              aria-haspopup="listbox"
+              aria-haspopup="dialog"
               disabled={disabled}
               className={cn(
                 menuTriggerClassName,
@@ -170,6 +173,8 @@ export function MultiModelPicker({
             </button>
           </PopoverTrigger>
           <PopoverContent
+            onKeyDown={menuTab.onKeyDown}
+            onCloseAutoFocus={menuTab.onCloseAutoFocus}
             className="p-0"
             align="start"
             style={{ width: "var(--radix-popover-trigger-width)" }}
@@ -325,6 +330,7 @@ export function ModelPicker({
 }: ModelPickerProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const menuTab = useMenuTab(() => setOpen(false));
   const { search, updateSearch, filtered, grouped, vendors, loadMore } =
     usePickerResults(models);
 
@@ -345,11 +351,12 @@ export function ModelPicker({
       <Popover open={open} onOpenChange={handleOpenChange}>
         <PopoverTrigger asChild>
           <button
+            ref={menuTab.triggerRef}
             id={id}
             type="button"
             role="combobox"
             aria-expanded={open}
-            aria-haspopup="listbox"
+            aria-haspopup="dialog"
             disabled={disabled}
             className={cn(
               menuTriggerClassName,
@@ -365,6 +372,8 @@ export function ModelPicker({
           </button>
         </PopoverTrigger>
         <PopoverContent
+          onKeyDown={menuTab.onKeyDown}
+          onCloseAutoFocus={menuTab.onCloseAutoFocus}
           className="p-0"
           align="start"
           // Match the trigger width so the list never visually mismatches

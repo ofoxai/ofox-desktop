@@ -1,3 +1,4 @@
+import { SettingsHealthBanner } from "./SettingsHealthBanner";
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
@@ -89,6 +90,9 @@ function ConsoleShell({ boundTools, onBoundToolsChanged }: ConsolePageProps) {
   return (
     <div className="flex h-screen w-full flex-col bg-canvas">
       <AppHeader />
+      <div className="px-4">
+        <SettingsHealthBanner />
+      </div>
 
       <main className="min-h-0 flex-1">
         <div
