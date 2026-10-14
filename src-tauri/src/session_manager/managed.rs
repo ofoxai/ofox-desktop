@@ -175,6 +175,8 @@ fn shown(listing: &[SessionMeta]) -> impl Iterator<Item = &SessionMeta> {
     })
 }
 
+/// The listing without a database: every file read whole, no usage.
+#[cfg(test)]
 pub fn list() -> Vec<ManagedSession> {
     list_with(None)
 }
