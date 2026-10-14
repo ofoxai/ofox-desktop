@@ -69,6 +69,11 @@ impl Database {
     /// Returns the number of deleted detail rows.
     pub fn rollup_and_prune(&self, retain_days: i64) -> Result<u64, AppError> {
         let cutoff = compute_local_midnight_cutoff(Local::now(), retain_days)?;
+        self.rollup_and_prune_before(cutoff)
+    }
+
+    /// `rollup_and_prune` for the rows older than `cutoff`.
+    pub(crate) fn rollup_and_prune_before(&self, cutoff: i64) -> Result<u64, AppError> {
         let conn = lock_conn!(self.conn);
 
         // Check if there are any rows to process
@@ -96,7 +101,7 @@ impl Database {
                     .map_err(|e| AppError::Database(e.to_string()))?;
                 if deleted > 0 {
                     log::info!(
-                        "Rolled up and pruned {deleted} proxy_request_logs (retain={retain_days}d)"
+                        "Rolled up and pruned {deleted} proxy_request_logs (before {cutoff})"
                     );
                 }
                 Ok(deleted)
