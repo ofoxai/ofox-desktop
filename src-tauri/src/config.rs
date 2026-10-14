@@ -106,14 +106,27 @@ fn derive_mcp_path_from_override(dir: &Path) -> Option<PathBuf> {
     Some(parent.join(format!("{file_name}.json")))
 }
 
-/// 获取 Claude MCP 配置文件路径，若设置了目录覆盖则与覆盖目录同级
+/// 获取 Claude MCP / 全局配置文件路径（`.claude.json`）：
+///
+/// - 设置里的覆盖目录：与覆盖目录同级（`<父目录>/<目录名>.json`）；
+/// - `CLAUDE_CONFIG_DIR`（进程环境或登录 shell）：Claude Code 把它放在该目录里面，
+///   即 `<目录>/.claude.json`；
+/// - 都没有：`~/.claude.json`。
 pub fn get_claude_mcp_path() -> PathBuf {
-    if let Some(custom_dir) = crate::settings::get_claude_override_dir() {
-        if let Some(path) = derive_mcp_path_from_override(&custom_dir) {
-            return path;
+    let claude = crate::agent_env::dir(crate::agent_env::AgentTool::Claude);
+    claude_mcp_path_for(&claude, &get_home_dir())
+}
+
+fn claude_mcp_path_for(claude: &crate::agent_env::AgentDir, home: &Path) -> PathBuf {
+    use crate::agent_env::DirSource;
+
+    match claude.source {
+        DirSource::Settings => {
+            derive_mcp_path_from_override(&claude.dir).unwrap_or_else(|| home.join(".claude.json"))
         }
+        DirSource::Env | DirSource::LoginShell => claude.dir.join(".claude.json"),
+        DirSource::Default => home.join(".claude.json"),
     }
-    get_default_claude_mcp_path()
 }
 
 /// 获取 Claude Code 主配置文件路径
@@ -1249,6 +1262,86 @@ mod tests {
     fn derive_mcp_path_from_root_like_dir_returns_none() {
         let override_dir = PathBuf::from("/");
         assert!(derive_mcp_path_from_override(&override_dir).is_none());
+    }
+
+    /// Claude Code keeps `.claude.json` inside `CLAUDE_CONFIG_DIR` when it is set.
+    mod claude_mcp_path {
+        use super::*;
+        use crate::agent_env::{self, AgentTool, EnvMap};
+        use crate::test_sandbox::sandbox;
+
+        fn moved_dir(home: &Path) -> PathBuf {
+            home.join("data").join("claude-state")
+        }
+
+        fn set_claude_override(dir: &Path) {
+            let mut settings = crate::settings::get_settings();
+            settings.claude_config_dir = Some(dir.to_string_lossy().into_owned());
+            crate::settings::update_settings(settings).expect("save the override");
+        }
+
+        #[test]
+        #[serial]
+        fn without_any_override_it_is_the_dot_claude_json_in_the_home() {
+            let sandbox = sandbox();
+
+            assert_eq!(get_claude_mcp_path(), sandbox.home().join(".claude.json"));
+        }
+
+        #[test]
+        #[serial]
+        fn with_claude_config_dir_in_the_environment_it_is_inside_that_directory() {
+            let sandbox = sandbox();
+            let moved = moved_dir(sandbox.home());
+            std::env::set_var("CLAUDE_CONFIG_DIR", &moved);
+
+            assert_eq!(get_claude_mcp_path(), moved.join(".claude.json"));
+        }
+
+        #[test]
+        #[serial]
+        fn a_settings_override_still_puts_it_beside_the_override_directory() {
+            let sandbox = sandbox();
+            let typed = sandbox.home().join("profiles").join("work-claude");
+            set_claude_override(&typed);
+
+            assert_eq!(
+                get_claude_mcp_path(),
+                sandbox.home().join("profiles").join("work-claude.json")
+            );
+        }
+
+        #[test]
+        #[serial]
+        fn the_settings_override_beats_the_environment_variable() {
+            let sandbox = sandbox();
+            let typed = sandbox.home().join("profiles").join("work-claude");
+            set_claude_override(&typed);
+            std::env::set_var("CLAUDE_CONFIG_DIR", moved_dir(sandbox.home()));
+
+            assert_eq!(
+                get_claude_mcp_path(),
+                sandbox.home().join("profiles").join("work-claude.json")
+            );
+        }
+
+        #[test]
+        fn a_directory_from_the_login_shell_holds_it_too() {
+            let home = Path::new("/h");
+            let shell_dir = std::env::temp_dir().join("shell-claude");
+            let mut shell = EnvMap::new();
+            shell.insert(
+                "CLAUDE_CONFIG_DIR".into(),
+                shell_dir.to_string_lossy().into_owned(),
+            );
+            let resolved =
+                agent_env::resolve(AgentTool::Claude, None, &EnvMap::new(), &shell, home);
+
+            assert_eq!(
+                claude_mcp_path_for(&resolved, home),
+                shell_dir.join(".claude.json")
+            );
+        }
     }
 }
 
