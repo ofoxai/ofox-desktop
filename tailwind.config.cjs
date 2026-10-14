@@ -1,4 +1,8 @@
 /** @type {import('tailwindcss').Config} */
+
+// magpie's tokens are RGB channels (src/index.css) so opacity modifiers work.
+const channel = (name) => `rgb(var(--${name}) / <alpha-value>)`;
+
 module.exports = {
   content: ["./src/index.html", "./src/**/*.{js,ts,jsx,tsx}"],
   darkMode: ["selector", ".dark"],
@@ -38,6 +42,40 @@ module.exports = {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",
+        canvas: channel("canvas"),
+        "card-2": channel("card-2"),
+        pill: channel("pill"),
+        "pill-hover": channel("pill-hover"),
+        line: channel("line"),
+        "line-2": channel("line-2"),
+        ink: {
+          DEFAULT: channel("ink"),
+          2: channel("ink-2"),
+          muted: channel("ink-muted"),
+          faint: channel("ink-faint"),
+          ctl: channel("ink-ctl"),
+        },
+        brand: {
+          DEFAULT: channel("brand"),
+          ink: channel("brand-ink"),
+          soft: channel("brand-soft"),
+          on: channel("on-brand"),
+        },
+        sel: channel("sel"),
+        ok: {
+          DEFAULT: channel("ok"),
+          soft: channel("ok-soft"),
+        },
+        danger: {
+          DEFAULT: channel("danger"),
+          soft: channel("danger-soft"),
+        },
+        warn: {
+          DEFAULT: channel("warn"),
+          soft: channel("warn-soft"),
+        },
+        "pop-bg": "var(--pop-bg)",
+        "seg-thumb": "var(--seg-thumb)",
         blue: {
           400: "#409CFF",
           500: "#0A84FF",
@@ -73,33 +111,38 @@ module.exports = {
         sm: "0 1px 2px 0 rgb(0 0 0 / 0.05)",
         md: "0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)",
         lg: "0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)",
+        pop: "var(--shadow-pop)",
+        dialog: "var(--shadow-dialog)",
       },
       borderRadius: {
         sm: "0.375rem",
         md: "0.5rem",
         lg: "0.75rem",
         xl: "0.875rem",
+        list: "12px",
+        card: "10px",
+        ctl: "7px",
+        pop: "11px",
+        dialog: "14px",
+      },
+      fontSize: {
+        ui: "13px",
+        nav: "12.5px",
+        ctl: "12px",
+        sub: "11.5px",
+        note: "11px",
+        micro: "10.5px",
+        title: "15px",
+        kpi: "20px",
+      },
+      transitionTimingFunction: {
+        soft: "cubic-bezier(.2, .8, .2, 1)",
       },
       fontFamily: {
-        // 使用与之前版本保持一致的系统字体栈
-        sans: [
-          "-apple-system",
-          "BlinkMacSystemFont",
-          '"Segoe UI"',
-          "Roboto",
-          '"Helvetica Neue"',
-          "Arial",
-          "sans-serif",
-        ],
-        mono: [
-          "ui-monospace",
-          "SFMono-Regular",
-          '"SF Mono"',
-          "Consolas",
-          '"Liberation Mono"',
-          "Menlo",
-          "monospace",
-        ],
+        // The stacks live in src/index.css (--font-ui is Segoe UI Variable on
+        // Windows, the system face elsewhere).
+        sans: ["var(--font-ui)"],
+        mono: ["var(--font-code)"],
       },
       animation: {
         "fade-in": "fadeIn 0.5s ease-out",
@@ -109,6 +152,12 @@ module.exports = {
         "pulse-slow": "pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite",
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
+        // keyframes for these three are in src/index.css, beside their
+        // prefers-reduced-motion opt-out
+        "pop-in":
+          "pop-fade .18s ease-out, pop-in .42s cubic-bezier(.16, 1, .3, 1)",
+        fade: "fade .2s cubic-bezier(.2, .8, .2, 1)",
+        "dialog-in": "dialog-in .24s cubic-bezier(.2, .8, .2, 1)",
       },
       keyframes: {
         fadeIn: {
@@ -170,4 +219,3 @@ module.exports = {
   },
   plugins: [],
 };
-

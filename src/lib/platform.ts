@@ -30,6 +30,15 @@ export const isLinux = (): boolean => {
   }
 };
 
+/** The class `main.tsx` puts on `<html>` so CSS can follow the platform's
+ *  own conventions (fonts, scrollbars). Anything not Mac or Windows is
+ *  treated as Linux. */
+export const platformClass = (): "mac" | "win" | "linux" => {
+  if (isMac()) return "mac";
+  if (isWindows()) return "win";
+  return "linux";
+};
+
 // Linux 上禁用所有 drag region，规避 Wayland 下 gtk_window_begin_move_drag
 // 相关的窗口事件异常（Tauri #13440）。macOS 上保留原有拖动行为；Windows
 // 项目原本就不依赖这个。
