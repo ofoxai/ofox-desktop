@@ -90,6 +90,68 @@ fn redact_value(caps: &Captures, value: &str, prefix: &str, quote: &str) -> Stri
     }
 }
 
+/// 配置文件解析失败时给用户看的描述：只留行列和错误类型，**不带出错那一行的原文**。
+/// `toml_edit` / `serde_json` 自带的 `Display` 会把出错的源码行（里面可能就是 key）
+/// 原样打出来，错误字符串经 UI 和日志流出去之前必须走这里。
+pub fn describe_toml_error(source: &str, error: &toml_edit::TomlError) -> String {
+    let message = one_line(error.message());
+    match error
+        .span()
+        .and_then(|span| line_column(source, span.start))
+    {
+        Some((line, column)) => format!("line {line}, column {column}: {message}"),
+        None => message,
+    }
+}
+
+/// 同 [`describe_toml_error`]，给 `serde_json` 的解析错误。
+pub fn describe_json_error(error: &serde_json::Error) -> String {
+    let message = match error.classify() {
+        // 语法错误只说哪里不对，不带内容。
+        serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
+            let text = error.to_string();
+            let without_position = text.rfind(" at line ").map_or(&*text, |at| &text[..at]);
+            one_line(without_position)
+        }
+        // 类型错误形如 `invalid type: string "sk-…", expected a boolean`：冒号后面是值，丢掉。
+        // `missing field `x`` 这类没有冒号的原样保留。
+        serde_json::error::Category::Data => {
+            let text = error.to_string();
+            let without_position = text.rfind(" at line ").map_or(&*text, |at| &text[..at]);
+            one_line(without_position.split(':').next().unwrap_or_default())
+        }
+        serde_json::error::Category::Io => "I/O error".to_string(),
+    };
+    if error.line() == 0 {
+        message
+    } else {
+        format!(
+            "line {}, column {}: {message}",
+            error.line(),
+            error.column()
+        )
+    }
+}
+
+/// 多行的错误信息合成一行，并保险起见再过一遍 [`scrub`]。
+fn one_line(message: &str) -> String {
+    let joined = message
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+    scrub(&joined).into_owned()
+}
+
+/// 字节偏移 `offset` 在 `source` 里的行号和列号（都从 1 起，列按字符数）。
+fn line_column(source: &str, offset: usize) -> Option<(usize, usize)> {
+    let before = source.get(..offset)?;
+    let line = before.matches('\n').count() + 1;
+    let line_start = before.rfind('\n').map_or(0, |newline| newline + 1);
+    Some((line, before[line_start..].chars().count() + 1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +302,100 @@ mod tests {
     fn already_redacted_text_is_stable() {
         let text = "api_key=«redacted» Bearer «redacted» \"token\": \"«redacted»\"";
         assert_eq!(scrub(text), text);
+    }
+
+    const KEY_LINE: &str = r#"experimental_bearer_token = "sk-of-abc123456789""#;
+
+    #[test]
+    fn toml_error_keeps_position_and_message_but_not_the_source_line() {
+        let source = format!("model = \"gpt-5\"\n\n{KEY_LINE} oops\n");
+        let error = source.parse::<toml_edit::DocumentMut>().unwrap_err();
+        // 自带的 Display 会带出源码行，这正是要避开的
+        assert!(error.to_string().contains("sk-of-abc123456789"));
+
+        let described = describe_toml_error(&source, &error);
+        assert!(!described.contains("sk-of"), "{described}");
+        assert!(!described.contains("abc123456789"), "{described}");
+        assert!(described.starts_with("line 3, column "), "{described}");
+        assert!(described.len() > "line 3, column 1: ".len(), "{described}");
+    }
+
+    #[test]
+    fn toml_error_on_the_key_line_itself_does_not_echo_the_key() {
+        let source = format!("{KEY_LINE} oops\n");
+        let error = source.parse::<toml_edit::DocumentMut>().unwrap_err();
+
+        let described = describe_toml_error(&source, &error);
+        assert!(described.starts_with("line 1, column "), "{described}");
+        assert!(!described.contains("abc123456789"), "{described}");
+    }
+
+    #[test]
+    fn toml_error_column_counts_characters_not_bytes() {
+        let source = "name = \"中文\" oops\n";
+        let error = source.parse::<toml_edit::DocumentMut>().unwrap_err();
+
+        let described = describe_toml_error(source, &error);
+        assert!(described.starts_with("line 1, column 13: "), "{described}");
+    }
+
+    #[test]
+    fn toml_error_message_is_one_line() {
+        let source = "a = = 1\n";
+        let error = source.parse::<toml_edit::DocumentMut>().unwrap_err();
+
+        assert!(!describe_toml_error(source, &error).contains('\n'));
+    }
+
+    #[test]
+    fn json_syntax_error_keeps_position_and_message() {
+        let source = r#"{"OPENAI_API_KEY": "sk-of-abc123456789", "x": }"#;
+        let error = serde_json::from_str::<serde_json::Value>(source).unwrap_err();
+
+        let described = describe_json_error(&error);
+        assert_eq!(described, "line 1, column 47: expected value");
+    }
+
+    #[test]
+    fn json_eof_error_keeps_position() {
+        let error = serde_json::from_str::<serde_json::Value>("{\"a\": ").unwrap_err();
+
+        assert_eq!(
+            describe_json_error(&error),
+            "line 1, column 6: EOF while parsing a value"
+        );
+    }
+
+    #[test]
+    fn json_data_error_never_echoes_the_offending_value() {
+        #[derive(Debug, serde::Deserialize)]
+        struct Auth {
+            #[allow(dead_code)]
+            key: bool,
+        }
+        let source = r#"{"key": "sk-of-abc123456789"}"#;
+        let error = serde_json::from_str::<Auth>(source).unwrap_err();
+        // 自带的 Display 会带出值
+        assert!(error.to_string().contains("sk-of-abc123456789"));
+
+        let described = describe_json_error(&error);
+        assert!(!described.contains("abc123456789"), "{described}");
+        assert!(described.starts_with("line 1, column "), "{described}");
+        assert!(described.contains("invalid type"), "{described}");
+    }
+
+    #[test]
+    fn json_missing_field_keeps_the_field_name() {
+        #[derive(Debug, serde::Deserialize)]
+        struct Auth {
+            #[allow(dead_code)]
+            key: String,
+        }
+        let error = serde_json::from_str::<Auth>("{}").unwrap_err();
+
+        assert_eq!(
+            describe_json_error(&error),
+            "line 1, column 2: missing field `key`"
+        );
     }
 }
