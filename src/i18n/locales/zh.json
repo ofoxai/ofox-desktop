@@ -1012,7 +1012,15 @@
     "balanceNoData": "余额已刷新，但暂无可用数据",
     "balanceRefreshFailed": "余额刷新失败，请稍后重试",
     "listRefreshed": "已刷新",
-    "listRefreshFailed": "刷新失败：{{error}}"
+    "listRefreshFailed": "刷新失败：{{error}}",
+    "profiles": {
+      "menu": "方案",
+      "loading": "正在读取方案…",
+      "empty": "还没有方案",
+      "toolCount": "{{count}} 个工具",
+      "capture": "保存当前组合…",
+      "manage": "管理方案…"
+    }
   },
   "providerForm": {
     "supplierName": "供应商名称",
@@ -2846,9 +2854,6 @@
   },
   "modelExperience": {
     "multiDescription": "保存一组模型，顺序按选择顺序保留。工具内可在这组模型间切换。",
-    "nav": {
-      "profiles": "模型方案"
-    },
     "loading": "正在读取模型状态…",
     "stateFailed": "无法读取模型状态",
     "retry": "重试",

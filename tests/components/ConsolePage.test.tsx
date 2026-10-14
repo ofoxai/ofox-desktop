@@ -6,6 +6,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
@@ -202,6 +203,7 @@ beforeEach(async () => {
         };
       if (command === "get_tool_versions") return localTools;
       if (command === "ofox_list_api_keys") return [];
+      if (command === "model_profiles_list") return [];
       if (command === "get_tool_install_capabilities")
         return ["claude", "codex", "chatgpt"];
       if (command === "get_tool_binding_status")
@@ -285,6 +287,27 @@ describe("Console navigation", () => {
     expect(tools).toBeVisible();
     expect(usage).toBeInTheDocument();
     expect(usage).not.toBeVisible();
+  });
+});
+
+describe("Console model profiles", () => {
+  it("reaches the model profiles from 方案 in the tools toolbar, loading them only when it opens", async () => {
+    localTools = [localTool("claude", "2.1.293")];
+    render(<ConsolePage boundTools={["claude"]} />);
+    await screen.findByRole("group", { name: "Claude Code" });
+    const profilesCalls = () =>
+      mocks.invoke.mock.calls.filter(
+        ([command]) => command === "model_profiles_list",
+      );
+    expect(profilesCalls()).toHaveLength(0);
+
+    await userEvent.click(screen.getByRole("button", { name: "方案" }));
+
+    expect(
+      await screen.findByRole("menuitem", { name: "管理方案…" }),
+    ).toBeVisible();
+    expect(await screen.findByText("还没有方案")).toBeVisible();
+    expect(profilesCalls()).toHaveLength(1);
   });
 });
 

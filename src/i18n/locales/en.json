@@ -1012,7 +1012,15 @@
     "balanceNoData": "Balance refreshed, but no figure is available yet",
     "balanceRefreshFailed": "Couldn't refresh the balance. Try again later",
     "listRefreshed": "Refreshed",
-    "listRefreshFailed": "Refresh failed: {{error}}"
+    "listRefreshFailed": "Refresh failed: {{error}}",
+    "profiles": {
+      "menu": "Profiles",
+      "loading": "Loading profiles…",
+      "empty": "No profiles yet",
+      "toolCount": "{{count}} tools",
+      "capture": "Save current combination…",
+      "manage": "Manage profiles…"
+    }
   },
   "providerForm": {
     "supplierName": "Provider Name",
@@ -2846,9 +2854,6 @@
   },
   "modelExperience": {
     "multiDescription": "Save a model set in selection order. Switch among these models inside the tool.",
-    "nav": {
-      "profiles": "Model profiles"
-    },
     "loading": "Loading model state…",
     "stateFailed": "Unable to read model state",
     "retry": "Retry",

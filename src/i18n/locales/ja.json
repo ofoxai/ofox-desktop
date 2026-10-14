@@ -1012,7 +1012,15 @@
     "balanceNoData": "残高を更新しましたが、まだ数値がありません",
     "balanceRefreshFailed": "残高を更新できませんでした。しばらくしてから再試行してください",
     "listRefreshed": "更新しました",
-    "listRefreshFailed": "更新に失敗しました：{{error}}"
+    "listRefreshFailed": "更新に失敗しました：{{error}}",
+    "profiles": {
+      "menu": "プラン",
+      "loading": "プランを読み込み中…",
+      "empty": "プランはまだありません",
+      "toolCount": "{{count}} 個のツール",
+      "capture": "現在の組み合わせを保存…",
+      "manage": "プランを管理…"
+    }
   },
   "providerForm": {
     "supplierName": "プロバイダー名",
@@ -2846,9 +2854,6 @@
   },
   "modelExperience": {
     "multiDescription": "選択順にモデル集合を保存します。ツール内でこれらのモデルを切り替えられます。",
-    "nav": {
-      "profiles": "モデルプラン"
-    },
     "loading": "モデル状態を読み込み中…",
     "stateFailed": "モデル状態を読み込めません",
     "retry": "再試行",

@@ -34,6 +34,7 @@ import {
   type ShellPage,
 } from "@/components/shell/ShellContext";
 import { UsagePage } from "@/components/usage-overview/UsagePage";
+import { ProfilesMenu } from "@/components/model-profiles/ProfilesMenu";
 import { useToolLaunch } from "@/hooks/useToolLaunch";
 import { checkToolUpdates } from "@/hooks/useToolUpdates";
 import { batchable, useInlineToolUpdates } from "@/hooks/useInlineToolUpdates";
@@ -291,6 +292,7 @@ function ConsoleShell({ boundTools, onBoundToolsChanged }: ConsolePageProps) {
                 )}
               </div>
               <div className="flex items-center gap-2">
+                <ProfilesMenu boundTools={boundTools} />
                 <button
                   onClick={() => setAddDialogOpen(true)}
                   className="rounded-md border border-border px-3 py-1 text-[12px] text-foreground hover:bg-accent"
