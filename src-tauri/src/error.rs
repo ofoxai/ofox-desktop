@@ -56,6 +56,10 @@ pub enum AppError {
     Database(String),
     #[error("OMO 配置文件不存在")]
     OmoConfigNotFound,
+    /// settings.json is there but neither it nor its backup parses, so nothing is
+    /// saved over it. The message starts with the code the renderer matches on.
+    #[error("settings_unreadable: {path} can't be read ({detail}) and has no good backup")]
+    SettingsUnreadable { path: String, detail: String },
     #[error("所有供应商已熔断，无可用渠道")]
     AllProvidersCircuitOpen,
     #[error("未配置供应商")]

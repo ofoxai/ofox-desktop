@@ -14,6 +14,7 @@ mod gemini_mcp;
 pub mod hermes_config;
 mod init_status;
 mod json5_sections;
+mod lastgood;
 mod lightweight;
 #[cfg(target_os = "linux")]
 mod linux_fix;
@@ -72,7 +73,10 @@ pub use services::{
     ConfigService, EndpointLatency, McpService, PromptService, ProviderService, ProxyService,
     SkillService, SpeedtestService,
 };
-pub use settings::{update_settings, AppSettings};
+pub use settings::{
+    reload_settings, reset_unreadable, settings_health, update_settings, AppSettings,
+    SettingsHealth, SettingsHealthState,
+};
 pub use store::AppState;
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -1278,6 +1282,16 @@ pub fn run() {
                 });
             }
 
+            // settings.json 读不出来（用 .bak 恢复了，或没有可用备份）时告诉前端；
+            // 前端起得比这里晚时再用 get_settings_health 主动取一次。
+            let health = crate::settings::settings_health();
+            if health.state != crate::settings::SettingsHealthState::Ok {
+                log::warn!("settings.json health at startup: {health:?}");
+                if let Err(e) = app.emit(crate::settings::SETTINGS_HEALTH_EVENT, &health) {
+                    log::warn!("emit {} failed: {e}", crate::settings::SETTINGS_HEALTH_EVENT);
+                }
+            }
+
             // 静默启动：根据设置决定是否显示主窗口
             let settings = crate::settings::get_settings();
             if let Some(window) = app.get_webview_window("main") {
@@ -1360,6 +1374,8 @@ pub fn run() {
             commands::extract_common_config_snippet,
             commands::read_live_provider_settings,
             commands::get_settings,
+            commands::get_settings_health,
+            commands::reset_unreadable_settings,
             commands::save_settings,
             commands::save_bound_tools,
             commands::get_rectifier_config,
