@@ -34,10 +34,13 @@ mod tests;
 // DAO 类型导出供外部使用
 pub use dao::FailoverQueueItem;
 
-use crate::config::get_app_config_dir;
+use crate::config::{
+    create_private_dir_all, ensure_private_file, get_app_config_dir, set_file_mode,
+};
 use crate::error::AppError;
 use rusqlite::{hooks::Action, Connection};
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 // DAO 方法通过 impl Database 提供，无需额外导出
@@ -83,6 +86,27 @@ fn register_db_change_hook(conn: &Connection) {
     ));
 }
 
+/// SQLite 在主库旁边放的辅助文件的后缀。
+const SQLITE_SIDE_FILE_SUFFIXES: [&str; 3] = ["-journal", "-wal", "-shm"];
+
+/// 数据库里有 API key 和用量记录：主库和已经存在的 `-journal` / `-wal` / `-shm` 都只给自己读写（Unix 0o600）。
+/// 不存在的不会创建；改权限失败只记日志，不能因此让应用起不来。
+fn restrict_database_files(db_path: &Path) {
+    let side_files = SQLITE_SIDE_FILE_SUFFIXES.iter().map(|suffix| {
+        let mut name = db_path.as_os_str().to_owned();
+        name.push(suffix);
+        PathBuf::from(name)
+    });
+    for path in std::iter::once(db_path.to_path_buf()).chain(side_files) {
+        if !path.exists() {
+            continue;
+        }
+        if let Err(e) = set_file_mode(&path, 0o600) {
+            log::warn!("Could not restrict {} to its owner: {e}", path.display());
+        }
+    }
+}
+
 impl Database {
     /// 初始化数据库连接并创建表
     ///
@@ -91,9 +115,16 @@ impl Database {
         let db_path = get_app_config_dir().join("ofox-desktop.db");
         let db_exists = db_path.exists();
 
-        // 确保父目录存在
+        // 确保父目录存在（新建的目录只给自己，已有的目录不动）
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+            create_private_dir_all(parent)?;
+        }
+        // 打开之前就把权限定好：新库先建成 0o600 的空文件（SQLite 当它是新库，journal 也跟着这个权限），
+        // 老版本留下的 0o644 库收紧。
+        if db_exists {
+            restrict_database_files(&db_path);
+        } else {
+            ensure_private_file(&db_path)?;
         }
 
         let conn = Connection::open(&db_path).map_err(|e| AppError::Database(e.to_string()))?;
@@ -149,6 +180,9 @@ impl Database {
                 log::warn!("Startup incremental vacuum failed: {e}");
             }
         }
+
+        // 打开并写过之后，`-wal` / `-shm` 这类辅助文件才会出现。
+        restrict_database_files(&db_path);
 
         Ok(db)
     }

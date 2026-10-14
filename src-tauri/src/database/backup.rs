@@ -3,7 +3,9 @@
 //! 提供 SQL 导出/导入和二进制快照备份功能。
 
 use super::{lock_conn, Database};
-use crate::config::get_app_config_dir;
+use crate::config::{
+    create_private_dir_all, ensure_private_file, get_app_config_dir, set_file_mode,
+};
 use crate::error::AppError;
 use chrono::{Local, Utc};
 use rusqlite::backup::Backup;
@@ -313,7 +315,9 @@ impl Database {
             .ok_or_else(|| AppError::Config("无效的数据库路径".to_string()))?
             .join("backups");
 
-        fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
+        // 备份里有完整的库（含 API key）：目录只给自己；老版本建的 0o755 目录也收紧。
+        create_private_dir_all(&backup_dir)?;
+        set_file_mode(&backup_dir, 0o700)?;
 
         let base_id = format!("db_backup_{}", Local::now().format("%Y%m%d_%H%M%S"));
         let mut backup_id = base_id.clone();
@@ -325,6 +329,8 @@ impl Database {
             counter += 1;
         }
 
+        // 先建成 0o600 的空文件，备份内容写进去时就已经是私有的。
+        ensure_private_file(&backup_path)?;
         {
             let conn = lock_conn!(self.conn);
             let mut dest_conn =

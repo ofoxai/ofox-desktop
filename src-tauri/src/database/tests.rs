@@ -690,3 +690,137 @@ fn ensure_incremental_auto_vacuum_rebuilds_existing_file_db() {
         "file db should persist INCREMENTAL auto_vacuum after VACUUM rebuild"
     );
 }
+
+#[cfg(unix)]
+mod private_files {
+    use super::*;
+    use crate::config::{file_mode, set_file_mode};
+    use serial_test::serial;
+    use std::path::PathBuf;
+
+    fn db_path() -> PathBuf {
+        get_app_config_dir().join("ofox-desktop.db")
+    }
+
+    #[test]
+    #[serial]
+    fn init_creates_the_app_dir_0700_and_the_database_0600() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        assert!(!get_app_config_dir().exists(), "the sandbox home is fresh");
+
+        let _db = Database::init().expect("init");
+
+        assert_eq!(file_mode(&get_app_config_dir()), Some(0o700));
+        assert_eq!(file_mode(&db_path()), Some(0o600));
+    }
+
+    #[test]
+    #[serial]
+    fn init_leaves_every_sqlite_file_it_made_owner_only() {
+        let _sandbox = crate::test_sandbox::sandbox();
+
+        let _db = Database::init().expect("init");
+
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            let mut name = db_path().into_os_string();
+            name.push(suffix);
+            let path = PathBuf::from(name);
+            if path.exists() {
+                assert_eq!(file_mode(&path), Some(0o600), "{}", path.display());
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn init_tightens_a_database_an_older_version_left_world_readable() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        drop(Database::init().expect("first init"));
+        set_file_mode(&db_path(), 0o644).unwrap();
+
+        let _db = Database::init().expect("second init");
+
+        assert_eq!(file_mode(&db_path()), Some(0o600));
+    }
+
+    #[test]
+    #[serial]
+    fn init_keeps_an_existing_app_dir_as_the_user_has_it() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let dir = get_app_config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        set_file_mode(&dir, 0o755).unwrap();
+
+        let _db = Database::init().expect("init");
+
+        assert_eq!(file_mode(&dir), Some(0o755));
+        assert_eq!(file_mode(&db_path()), Some(0o600));
+    }
+
+    #[test]
+    fn restricting_the_database_files_covers_the_journal_wal_and_shm() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("ofox-desktop.db");
+        let present = ["", "-journal", "-wal", "-shm"].map(|suffix| {
+            let mut name = main.clone().into_os_string();
+            name.push(suffix);
+            PathBuf::from(name)
+        });
+        for path in &present {
+            std::fs::write(path, b"x").unwrap();
+            set_file_mode(path, 0o644).unwrap();
+        }
+        let unrelated = dir.path().join("config.json");
+        std::fs::write(&unrelated, b"{}").unwrap();
+        set_file_mode(&unrelated, 0o644).unwrap();
+
+        restrict_database_files(&main);
+
+        for path in &present {
+            assert_eq!(file_mode(path), Some(0o600), "{}", path.display());
+        }
+        assert_eq!(file_mode(&unrelated), Some(0o644));
+    }
+
+    #[test]
+    fn restricting_the_database_files_does_not_create_missing_ones() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("ofox-desktop.db");
+        std::fs::write(&main, b"x").unwrap();
+
+        restrict_database_files(&main);
+
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "only the main file exists"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn a_backup_lands_in_a_0700_dir_as_a_0600_file() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Database::init().expect("init");
+
+        let backup = db.backup_database_file().unwrap().expect("a backup");
+
+        let backup_dir = get_app_config_dir().join("backups");
+        assert_eq!(file_mode(&backup_dir), Some(0o700));
+        assert_eq!(file_mode(&backup), Some(0o600));
+    }
+
+    #[test]
+    #[serial]
+    fn a_backup_tightens_a_backups_dir_an_older_version_made_0755() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Database::init().expect("init");
+        let backup_dir = get_app_config_dir().join("backups");
+        std::fs::create_dir_all(&backup_dir).unwrap();
+        set_file_mode(&backup_dir, 0o755).unwrap();
+
+        db.backup_database_file().unwrap().expect("a backup");
+
+        assert_eq!(file_mode(&backup_dir), Some(0o700));
+    }
+}

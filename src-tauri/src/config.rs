@@ -454,6 +454,47 @@ fn sync_dir(dir: &Path) {
     let _ = dir;
 }
 
+/// 创建目录（含缺的上级），新建出来的每一级在 Unix 上都是 0o700；已有的目录不动。
+pub(crate) fn create_private_dir_all(path: &Path) -> Result<(), AppError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+            .map_err(|e| AppError::io(path, e))
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(path).map_err(|e| AppError::io(path, e))
+    }
+}
+
+/// 让 `path` 在 Unix 上是 0o600：已存在就收紧权限，不存在就按 0o600 建一个空文件
+/// （SQLite 会把空文件当成新库，它的 journal/wal 也跟主文件同权限）。内容不动。
+pub(crate) fn ensure_private_file(path: &Path) -> Result<(), AppError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+        {
+            Ok(file) => apply_exact_mode(&file, 0o600).map_err(|e| AppError::io(path, e)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => set_file_mode(path, 0o600),
+            Err(e) => Err(AppError::io(path, e)),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
 /// 读文件原始字节；文件不存在返回 `None`。
 ///
 /// Windows 上别的进程正在用 rename 替换这个文件时，它会有一瞬间“不存在”（实测约 2 毫秒），
@@ -873,6 +914,40 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(calls, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_private_dir_all_makes_every_new_level_0700_and_leaves_old_ones() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let existing = dir.path().join("existing");
+        fs::create_dir(&existing).unwrap();
+        set_file_mode(&existing, 0o755).unwrap();
+        let leaf = existing.join("a/b");
+
+        create_private_dir_all(&leaf).unwrap();
+
+        assert_eq!(file_mode(&existing), Some(0o755));
+        assert_eq!(file_mode(&existing.join("a")), Some(0o700));
+        assert_eq!(file_mode(&leaf), Some(0o700));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_private_file_creates_or_tightens_without_touching_content() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fresh = dir.path().join("fresh.db");
+        let old = dir.path().join("old.db");
+        fs::write(&old, b"data").unwrap();
+        set_file_mode(&old, 0o644).unwrap();
+
+        ensure_private_file(&fresh).unwrap();
+        ensure_private_file(&old).unwrap();
+
+        assert_eq!(file_mode(&fresh), Some(0o600));
+        assert_eq!(fs::read(&fresh).unwrap(), b"");
+        assert_eq!(file_mode(&old), Some(0o600));
+        assert_eq!(fs::read(&old).unwrap(), b"data");
     }
 
     /// 临时设置 `CC_SWITCH_TEST_HOME`，Drop 时还原。
