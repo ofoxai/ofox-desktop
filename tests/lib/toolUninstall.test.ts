@@ -16,14 +16,31 @@ beforeEach(() => {
 describe("toolUninstallApi", () => {
   it("asks for a preview and starts an uninstall under the backend command names", async () => {
     tauri.invoke.mockResolvedValue({});
-    await toolUninstallApi.preview("codex");
-    await toolUninstallApi.uninstall("codex", "op-1");
+    await toolUninstallApi.preview("codex", ["chatgpt"]);
+    await toolUninstallApi.uninstall("codex", "op-1", ["chatgpt"]);
     expect(tauri.invoke).toHaveBeenNthCalledWith(1, "uninstall_tool_preview", {
       tool: "codex",
+      stillBound: ["chatgpt"],
     });
     expect(tauri.invoke).toHaveBeenNthCalledWith(2, "uninstall_tool", {
       tool: "codex",
       operationId: "op-1",
+      stillBound: ["chatgpt"],
+    });
+  });
+
+  it("sends an empty list when the caller has none to report", async () => {
+    tauri.invoke.mockResolvedValue({});
+    await toolUninstallApi.preview("claude");
+    await toolUninstallApi.uninstall("claude", "op-2");
+    expect(tauri.invoke).toHaveBeenNthCalledWith(1, "uninstall_tool_preview", {
+      tool: "claude",
+      stillBound: [],
+    });
+    expect(tauri.invoke).toHaveBeenNthCalledWith(2, "uninstall_tool", {
+      tool: "claude",
+      operationId: "op-2",
+      stillBound: [],
     });
   });
 

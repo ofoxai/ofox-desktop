@@ -62,15 +62,25 @@ export interface UninstallProgress {
   totalSteps: number;
 }
 
+/**
+ * `stillBound` is the renderer's own list of bound tools (`ofox-bound-tools`,
+ * the real one). The backend only keeps a best-effort mirror, so it merges
+ * this list in to see that Codex and ChatGPT share a key and a configuration.
+ * Passing every bound tool, this one included, is fine.
+ */
 export const toolUninstallApi = {
-  preview: (tool: string) =>
-    invoke<UninstallPreview>("uninstall_tool_preview", { tool }),
+  preview: (tool: string, stillBound: string[] = []) =>
+    invoke<UninstallPreview>("uninstall_tool_preview", { tool, stillBound }),
   /**
    * Unbinds the tool, revokes its Ofox key and removes the program by how it was
    * installed. A failed unbind rejects before anything else is done.
    */
-  uninstall: (tool: string, operationId: string) =>
-    invoke<UninstallResult>("uninstall_tool", { tool, operationId }),
+  uninstall: (tool: string, operationId: string, stillBound: string[] = []) =>
+    invoke<UninstallResult>("uninstall_tool", {
+      tool,
+      operationId,
+      stillBound,
+    }),
   onProgress: (
     operationId: string,
     handler: (progress: UninstallProgress) => void,
