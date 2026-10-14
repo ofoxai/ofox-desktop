@@ -311,6 +311,21 @@ fn package_dir(install: &Installation, package: &str) -> Option<PathBuf> {
     Some(PathBuf::from(&real[..index + marker.len()]))
 }
 
+/// The Homebrew formulas and casks that really are this agent. `tool_update`
+/// matches a package by its name alone, but a package that only shares the name
+/// is not ours to remove: Homebrew's `dsh` is a distributed shell, not DeepSeek's.
+fn is_homebrew_agent(tool: &str, name: &str) -> bool {
+    let known: &[&str] = match tool {
+        "claude" => &["claude-code"],
+        "codex" => &["codex"],
+        "gemini" => &["gemini-cli"],
+        "opencode" => &["opencode"],
+        "openclaw" => &["openclaw"],
+        _ => &[],
+    };
+    known.contains(&name)
+}
+
 fn manager_plan(
     source: UninstallSource,
     tool: &str,
@@ -325,7 +340,7 @@ fn manager_plan(
             let [verb, kind, formula] = update.args.as_slice() else {
                 return Err(unsupported());
             };
-            if verb != "upgrade" {
+            if verb != "upgrade" || !is_homebrew_agent(tool, formula) {
                 return Err(unsupported());
             }
             let kept = keg_dir(install, formula)
@@ -1385,6 +1400,41 @@ mod tests {
                 env_of(&plan),
                 [("HOMEBREW_NO_AUTOREMOVE".to_string(), "1".to_string())]
             );
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn only_homebrew_packages_that_really_are_the_agent_are_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        // The agents' real Homebrew names (checked with `brew info`).
+        for (tool, real) in [
+            ("claude", "/opt/homebrew/Caskroom/claude-code/1.0/claude"),
+            ("claude", "/opt/homebrew/Cellar/claude-code/1.0/bin/claude"),
+            ("codex", "/opt/homebrew/Cellar/codex/1.0/bin/codex"),
+            ("gemini", "/opt/homebrew/Cellar/gemini-cli/1.0/bin/gemini"),
+            ("opencode", "/opt/homebrew/Cellar/opencode/1.0/bin/opencode"),
+            ("openclaw", "/opt/homebrew/Caskroom/openclaw/1.0/openclaw"),
+        ] {
+            let active = install(Path::new("/opt/homebrew/bin/x"), Path::new(real));
+            let owner = super::super::tool_update::plan(tool, &active);
+            let plan = uninstall_plan(tool, &active, &facts(temp.path(), owner));
+            assert!(plan.is_ok(), "{tool} {real}");
+        }
+        // A package that only shares the name is not ours: Homebrew's `dsh` is
+        // a distributed shell.
+        for (tool, real) in [
+            ("dsh", "/opt/homebrew/Cellar/dsh/0.2.4/bin/dsh"),
+            ("pi", "/opt/homebrew/Cellar/pi/3.0/bin/pi"),
+            ("hermes", "/opt/homebrew/Cellar/hermes/1.0/bin/hermes"),
+        ] {
+            let active = install(Path::new("/opt/homebrew/bin/x"), Path::new(real));
+            let owner = super::super::tool_update::plan(tool, &active);
+            assert_eq!(owner.as_ref().unwrap().source, "homebrew");
+            let manual = uninstall_plan(tool, &active, &facts(temp.path(), owner)).unwrap_err();
+            assert_eq!(manual.source, UninstallSource::Homebrew, "{tool}");
+            assert_eq!(manual.command, None, "{tool}");
+            assert_eq!(manual.reason, UninstallBlock::UnknownSource, "{tool}");
         }
     }
 
