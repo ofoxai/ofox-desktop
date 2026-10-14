@@ -436,6 +436,13 @@ pub fn run() {
             // 设置 AppHandle 用于代理故障转移时的 UI 更新
             app_state.proxy_service.set_app_handle(app.handle().clone());
 
+            // The steps below read Codex / Claude files (skills migration, importing
+            // the live config, relocating legacy bind rows, and the takeover check they
+            // run), and everything after setup relies on the snapshot existing too.
+            // The shell was asked before the database was opened, so this normally
+            // returns at once; it is bounded by the probe's own 5 s limit.
+            tauri::async_runtime::block_on(crate::agent_env::ready());
+
             // ============================================================
             // 按表独立判断的导入逻辑（各类数据独立检查，互不影响）
             // ============================================================
@@ -1052,6 +1059,9 @@ pub fn run() {
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
+
+                // Everything below reads or writes Codex / Claude files.
+                crate::agent_env::ready().await;
 
                 // 启动自愈：检测 Live 配置里是否有 takeover 占位符残留
                 // （`PROXY_MANAGED` token / `127.0.0.1:port` baseURL）。
