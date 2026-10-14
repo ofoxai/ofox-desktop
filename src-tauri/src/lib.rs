@@ -1539,6 +1539,7 @@ pub fn run() {
             commands::save_stream_check_config,
             // Session manager
             commands::list_sessions,
+            commands::refresh_session_index,
             commands::get_session_messages,
             commands::delete_session,
             commands::delete_sessions,

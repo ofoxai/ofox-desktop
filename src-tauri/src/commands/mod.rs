@@ -34,7 +34,7 @@ mod plugin;
 mod prompt;
 mod provider;
 mod proxy;
-mod session_manager;
+pub(crate) mod session_manager;
 mod settings;
 pub mod skill;
 mod stream_check;

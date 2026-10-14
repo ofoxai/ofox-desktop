@@ -936,7 +936,12 @@ mod tests {
             );
             assert!(awaits_ready(crate::commands::get_agent_dirs()).await);
             assert!(awaits_ready(crate::commands::get_config_dir("codex".into())).await);
-            assert!(awaits_ready(crate::commands::list_sessions()).await);
+            assert!(
+                awaits_ready(crate::commands::session_manager::listing(
+                    std::sync::Arc::new(Database::memory().expect("db"))
+                ))
+                .await
+            );
             assert!(awaits_ready(crate::commands::get_claude_config_status()).await);
         }
 

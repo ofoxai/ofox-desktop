@@ -1,7 +1,11 @@
 pub mod managed;
+pub mod meta_cache;
 pub mod providers;
 pub mod terminal;
+pub mod title;
+pub mod transcript;
 pub mod trash;
+pub mod usage;
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -10,7 +14,7 @@ use std::path::PathBuf;
 
 use providers::{claude, codex, gemini, hermes, openclaw, opencode};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMeta {
     pub provider_id: String,
@@ -29,15 +33,25 @@ pub struct SessionMeta {
     pub source_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resume_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_source: Option<title::TitleSource>,
+    /// Prompts typed plus replies, where the whole file was read for them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMessage {
+    /// One of the `transcript` roles: user, assistant, thinking, tool_call,
+    /// tool, command, command_output or system.
     pub role: String,
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ts: Option<i64>,
+    /// The tool's name, of a tool call or its result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -97,6 +111,13 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
 }
 
 pub(crate) fn load_messages_unchecked(
+    provider_id: &str,
+    source_path: &str,
+) -> Result<Vec<SessionMessage>, String> {
+    load_provider_messages(provider_id, source_path).map(transcript::normalized)
+}
+
+fn load_provider_messages(
     provider_id: &str,
     source_path: &str,
 ) -> Result<Vec<SessionMessage>, String> {

@@ -5,9 +5,6 @@ use std::path::Path;
 use chrono::{DateTime, FixedOffset};
 use serde_json::Value;
 
-/// Maximum number of characters for session titles (shared across providers).
-pub const TITLE_MAX_CHARS: usize = 80;
-
 /// Read the first `head_n` lines and last `tail_n` lines from a file.
 /// For small files (< 16 KB), reads all lines once to avoid unnecessary seeking.
 pub fn read_head_tail_lines(
@@ -64,6 +61,23 @@ pub fn read_head_tail_lines(
     let tail = usable.into_iter().skip(skip).collect();
 
     Ok((head, tail))
+}
+
+/// Each line of a session file (a zstd one decompressed), in order. A line
+/// that is not UTF-8 is skipped.
+pub fn for_each_line(path: &Path, mut visit: impl FnMut(&str)) -> io::Result<()> {
+    let reader = super::dsh::open(path).map_err(io::Error::other)?;
+    let mut reader = BufReader::with_capacity(256 * 1024, reader);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        if reader.read_until(b'\n', &mut buf)? == 0 {
+            return Ok(());
+        }
+        if let Ok(line) = std::str::from_utf8(&buf) {
+            visit(line.trim_end());
+        }
+    }
 }
 
 pub fn parse_timestamp_to_ms(value: &Value) -> Option<i64> {
