@@ -1,5 +1,6 @@
 pub(crate) mod account_keys;
 pub mod balance;
+pub mod balance_history;
 pub mod coding_plan;
 pub mod config;
 pub mod env_checker;
@@ -17,6 +18,7 @@ pub mod proxy;
 pub mod session_usage;
 pub mod session_usage_codex;
 pub mod session_usage_gemini;
+pub mod session_usage_opencode;
 pub mod skill;
 // Test-only fake clock. The production loops in `lib.rs::run` currently
 // use `tokio::time::sleep` directly; this trait is kept ready so future
@@ -28,7 +30,10 @@ pub mod speedtest;
 pub mod stream_check;
 pub mod subscription;
 pub mod usage_cache;
+pub mod usage_maintenance;
+pub mod usage_overview;
 pub mod usage_stats;
+pub mod usage_sync;
 pub mod webdav;
 pub mod webdav_auto_sync;
 pub mod webdav_sync;

@@ -145,7 +145,8 @@ pub struct OfoxBalance {
 /// The raw response is `{ spending_limits: [{ period, used_usd, limit_usd, ... }] }`.
 /// We surface only what the dashboard renders today; raw items are not
 /// needed by the frontend and would be churn-prone.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OfoxSpending {
     /// True when the endpoint returned 403 — caller's role lacks access
     /// (member role per docs). Drives the UI's "无权限" placeholder so we
@@ -156,8 +157,7 @@ pub struct OfoxSpending {
     /// no monthly limit is configured or `forbidden` is true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monthly_used_usd: Option<f64>,
-    /// `limit_usd` from the same monthly entry (rendering hint for
-    /// "X.XX / Y.YY" — currently unused, kept for forward-compat).
+    /// `limit_usd` from the same monthly entry (rendered as "X.XX / Y.YY").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monthly_limit_usd: Option<f64>,
 }
@@ -826,8 +826,8 @@ impl OfoxAuthManager {
 
         // NOTE: spending-limits fetch is intentionally NOT chained in here.
         // The endpoint tracks *configured caps*, not month-to-date usage,
-        // so it can't satisfy the "本月消耗" card. `fetch_spending` is kept
-        // around for future quota-alert features but only called on demand.
+        // so it can't satisfy the "本月消耗" card. `get_spending` is called on
+        // demand by the usage page.
 
         Ok(user)
     }
@@ -859,21 +859,26 @@ impl OfoxAuthManager {
             .map_err(|e| format!("Failed to parse balance: {e}"))
     }
 
-    /// Fetch the org's spending limits and reduce them to the single
-    /// monthly figure the UI cares about.
+    /// The org's monthly spending limit, for the usage page's "本月已用 a / b".
     ///
-    /// **Currently unused.** Kept for future quota-alert features (e.g.
-    /// "you've hit 80% of your monthly cap"). NOT a source for "本月消耗" —
-    /// that needs a real usage endpoint, which the OAuth API doesn't expose.
+    /// `Ok(None)` when no monthly limit is configured; `forbidden: true` when the
+    /// caller's role may not read it. This is NOT a source for month-to-date
+    /// usage: the OAuth API exposes configured caps, not a usage total.
+    pub async fn get_spending(&self) -> Result<Option<OfoxSpending>, String> {
+        let access_token = self.get_valid_access_token().await?;
+        self.fetch_spending(&access_token).await
+    }
+
+    /// Fetch the org's spending limits from `/openapi/orgs/me/spending-limits`
+    /// and reduce them to the single monthly figure the UI cares about.
     ///
     /// Returns:
     ///   - `Ok(Some(spending))` when the endpoint responded; populates
-    ///     `forbidden=true` for member role's 403, or `monthly_used_usd`
+    ///     `forbidden=true` for member role's 403, or the monthly figures
     ///     when a `period == "monthly"` entry exists.
     ///   - `Ok(None)` when the response succeeded but no monthly entry is
     ///     configured.
     ///   - `Err(_)` for transport / parse failures — caller logs and moves on.
-    #[allow(dead_code)]
     async fn fetch_spending(&self, access_token: &str) -> Result<Option<OfoxSpending>, String> {
         let response = self
             .http_client
@@ -907,21 +912,7 @@ impl OfoxAuthManager {
             .map_err(|e| format!("Failed to read spending body: {e}"))?;
         log::debug!("[OfoxAuth] /openapi/orgs/me/spending-limits response: {body}");
 
-        let parsed: SpendingLimitsResponse =
-            serde_json::from_str(&body).map_err(|e| format!("Failed to parse spending: {e}"))?;
-
-        // Find the monthly entry. The endpoint can return multiple periods
-        // (`daily`, `weekly`, `monthly`); we only surface monthly here.
-        let monthly = parsed
-            .spending_limits
-            .into_iter()
-            .find(|e| e.period.as_deref() == Some("monthly"));
-
-        Ok(monthly.map(|entry| OfoxSpending {
-            forbidden: false,
-            monthly_used_usd: entry.used_usd,
-            monthly_limit_usd: entry.limit_usd,
-        }))
+        spending_from_limits_body(&body)
     }
 
     pub fn get_user_info(&self) -> Option<OfoxUserInfo> {
@@ -1301,6 +1292,24 @@ impl OfoxAuthManager {
     }
 }
 
+/// Reduce a `/openapi/orgs/me/spending-limits` body to its `monthly` entry.
+///
+/// The endpoint can return multiple periods (`daily`, `weekly`, `monthly`); only
+/// monthly is surfaced. `Ok(None)` when no monthly limit is configured.
+fn spending_from_limits_body(body: &str) -> Result<Option<OfoxSpending>, String> {
+    let parsed: SpendingLimitsResponse =
+        serde_json::from_str(body).map_err(|e| format!("Failed to parse spending: {e}"))?;
+    let monthly = parsed
+        .spending_limits
+        .into_iter()
+        .find(|e| e.period.as_deref() == Some("monthly"));
+    Ok(monthly.map(|entry| OfoxSpending {
+        forbidden: false,
+        monthly_used_usd: entry.used_usd,
+        monthly_limit_usd: entry.limit_usd,
+    }))
+}
+
 fn compute_expires_at_ms(expires_in: Option<i64>) -> i64 {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let secs = expires_in.unwrap_or(3600);
@@ -1318,6 +1327,53 @@ mod tests {
         let now = chrono::Utc::now().timestamp_millis();
         assert!(result > now + 3500 * 1000);
         assert!(result < now + 3700 * 1000);
+    }
+
+    #[test]
+    fn spending_serializes_in_camel_case() {
+        let spending = OfoxSpending {
+            forbidden: false,
+            monthly_used_usd: Some(12.5),
+            monthly_limit_usd: Some(100.0),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&spending).unwrap(),
+            serde_json::json!({
+                "forbidden": false,
+                "monthlyUsedUsd": 12.5,
+                "monthlyLimitUsd": 100.0,
+            })
+        );
+    }
+
+    #[test]
+    fn spending_is_the_monthly_entry_of_the_limits() {
+        let body = r#"{"spending_limits":[
+            {"period":"daily","used_usd":1.0,"limit_usd":5.0},
+            {"period":"monthly","used_usd":12.5,"limit_usd":100.0}]}"#;
+
+        assert_eq!(
+            spending_from_limits_body(body).unwrap(),
+            Some(OfoxSpending {
+                forbidden: false,
+                monthly_used_usd: Some(12.5),
+                monthly_limit_usd: Some(100.0),
+            })
+        );
+    }
+
+    #[test]
+    fn no_monthly_limit_is_no_spending() {
+        let body = r#"{"spending_limits":[{"period":"daily","used_usd":1.0,"limit_usd":5.0}]}"#;
+
+        assert_eq!(spending_from_limits_body(body).unwrap(), None);
+        assert_eq!(spending_from_limits_body(r#"{}"#).unwrap(), None);
+    }
+
+    #[test]
+    fn a_body_that_is_not_limits_is_an_error() {
+        assert!(spending_from_limits_body("<html>").is_err());
     }
 
     #[tokio::test]

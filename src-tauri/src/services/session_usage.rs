@@ -5,8 +5,13 @@
 //!
 //! ## 数据流
 //! ```text
-//! ~/.claude/projects/*/*.jsonl → 增量解析 → 去重 → 费用计算 → proxy_request_logs 表
+//! ~/.claude/projects/<p>/<sid>.jsonl            ┐
+//! ~/.claude/projects/<p>/<sid>/subagents/*.jsonl ┴→ 增量解析 → 去重 → 费用计算 → proxy_request_logs 表
 //! ```
+//!
+//! A subagent's transcript carries its parent's `sessionId`, so its calls count
+//! toward the parent session. `input_tokens` is Claude's own: fresh input, without
+//! the cache reads and writes.
 
 use crate::config::get_claude_config_dir;
 use crate::database::{lock_conn, Database};
@@ -93,7 +98,7 @@ pub fn sync_claude_session_logs(db: &Database) -> Result<SessionSyncResult, AppE
     }
 
     if result.imported > 0 {
-        log::info!(
+        log::debug!(
             "[SESSION-SYNC] 同步完成: 导入 {} 条, 跳过 {} 条, 扫描 {} 个文件",
             result.imported,
             result.skipped,
@@ -104,70 +109,71 @@ pub fn sync_claude_session_logs(db: &Database) -> Result<SessionSyncResult, AppE
     Ok(result)
 }
 
-/// 收集目录下所有 .jsonl 文件
+/// Directory levels below `projects/` that are searched: `<p>` (1), `<sid>` (2)
+/// and `subagents` (3), so `projects/<p>/<sid>/subagents/*.jsonl` is read.
+const PROJECTS_MAX_DEPTH: u32 = 3;
+
+/// 收集 `projects/` 下各级目录（最多 3 层）中的 .jsonl 文件
 fn collect_jsonl_files(projects_dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
-
-    let entries = match fs::read_dir(projects_dir) {
-        Ok(e) => e,
-        Err(_) => return files,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        // 每个项目目录下的 .jsonl 文件
-        if let Ok(sub_entries) = fs::read_dir(&path) {
-            for sub_entry in sub_entries.flatten() {
-                let sub_path = sub_entry.path();
-                if sub_path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                    files.push(sub_path);
-                }
-            }
-        }
-    }
-
+    collect_jsonl_under(projects_dir, 0, &mut files);
     files
 }
 
-/// 同步单个 JSONL 文件，返回 (imported, skipped)
-fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppError> {
-    let file_path_str = file_path.to_string_lossy().to_string();
-
-    // 获取文件元数据
-    let metadata = fs::metadata(file_path)
-        .map_err(|e| AppError::Config(format!("无法读取文件元数据: {e}")))?;
-    let file_modified = metadata
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    // 检查同步状态
-    let (last_modified, last_offset) = get_sync_state(db, &file_path_str)?;
-
-    // 文件未变化则跳过
-    if file_modified <= last_modified {
-        return Ok((0, 0));
+fn collect_jsonl_under(dir: &Path, depth: u32, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if depth < PROJECTS_MAX_DEPTH {
+                collect_jsonl_under(&path, depth + 1, files);
+            }
+        } else if depth >= 1 && path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+            files.push(path);
+        }
     }
+}
 
-    // 从上次偏移位置开始增量解析
+/// The session a transcript belongs to by its path, for lines that carry no
+/// `sessionId`: `<sid>` of `<sid>/subagents/<agent>.jsonl`, else the file stem.
+fn session_of_path(path: &Path) -> Option<String> {
+    let dir = path.parent()?;
+    if dir.file_name().and_then(|n| n.to_str()) == Some("subagents") {
+        return dir
+            .parent()?
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string);
+    }
+    path.file_stem()
+        .and_then(|n| n.to_str())
+        .map(str::to_string)
+}
+
+/// The replies in a transcript after its first `skip_lines` lines, one per
+/// message id (the line that best stands for it: one with a stop_reason, else the
+/// one with the most output), in the order they first appear; and the file's
+/// line count.
+fn parse_claude_file(
+    file_path: &Path,
+    skip_lines: i64,
+) -> Result<(Vec<ParsedAssistantUsage>, i64), AppError> {
     let file =
         fs::File::open(file_path).map_err(|e| AppError::Config(format!("无法打开文件: {e}")))?;
     let reader = BufReader::new(file);
 
     let mut line_offset: i64 = 0;
-    let mut messages: HashMap<String, ParsedAssistantUsage> = HashMap::new();
+    let mut messages: Vec<ParsedAssistantUsage> = Vec::new();
+    let mut index_of: HashMap<String, usize> = HashMap::new();
     let mut current_session_id: Option<String> = None;
 
     for line_result in reader.lines() {
         line_offset += 1;
 
         // 跳过已处理的行
-        if line_offset <= last_offset {
+        if line_offset <= skip_lines {
             continue;
         }
 
@@ -243,41 +249,139 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
                 .get("timestamp")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
-            session_id: current_session_id.clone(),
+            session_id: current_session_id
+                .clone()
+                .or_else(|| session_of_path(file_path)),
         };
 
         // 按 message.id 去重：优先保留有 stop_reason 的条目，否则保留最新的
-        let should_replace = match messages.get(&msg_id) {
-            None => true,
-            Some(existing) => {
+        match index_of.get(&msg_id) {
+            None => {
+                index_of.insert(msg_id, messages.len());
+                messages.push(parsed);
+            }
+            Some(&i) => {
+                let existing = &messages[i];
                 // 新条目有 stop_reason 而旧条目没有 → 替换
-                if parsed.stop_reason.is_some() && existing.stop_reason.is_none() {
-                    true
-                }
                 // 两个都有或都没有 stop_reason → 取 output_tokens 更大的
-                else if parsed.stop_reason.is_some() == existing.stop_reason.is_some() {
-                    parsed.output_tokens > existing.output_tokens
-                } else {
-                    false
+                let should_replace =
+                    if parsed.stop_reason.is_some() && existing.stop_reason.is_none() {
+                        true
+                    } else if parsed.stop_reason.is_some() == existing.stop_reason.is_some() {
+                        parsed.output_tokens > existing.output_tokens
+                    } else {
+                        false
+                    };
+                if should_replace {
+                    messages[i] = parsed;
                 }
             }
-        };
-
-        if should_replace {
-            messages.insert(msg_id, parsed);
         }
     }
+
+    Ok((messages, line_offset))
+}
+
+/// When a reply happened: its line's timestamp, else now.
+fn created_at_of(timestamp: Option<&str>) -> i64 {
+    timestamp
+        .and_then(|ts| {
+            chrono::DateTime::parse_from_rfc3339(ts)
+                .ok()
+                .map(|dt| dt.timestamp())
+        })
+        .unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
+        })
+}
+
+/// One call as a session transcript records it, read whole for the archive
+/// backfill; `usage.input_tokens` is fresh input like the stored rows.
+#[derive(Debug, Clone)]
+pub(crate) struct SessionUsageEntry {
+    pub session_id: String,
+    pub model: String,
+    pub usage: TokenUsage,
+    pub created_at: i64,
+}
+
+/// Every Claude call the sync would store, read from every transcript in full:
+/// a message id counts once, in the first file that has it (as the sync keeps the
+/// first row for an id). Calls with no output or no session are left out, as
+/// neither is stored nor archived.
+pub(crate) fn session_entries() -> Vec<SessionUsageEntry> {
+    let projects_dir = get_claude_config_dir().join("projects");
+    let mut seen = std::collections::HashSet::new();
+    let mut entries = Vec::new();
+    for file_path in collect_jsonl_files(&projects_dir) {
+        let messages = match parse_claude_file(&file_path, 0) {
+            Ok((messages, _)) => messages,
+            Err(e) => {
+                log::debug!("[SESSION-SYNC] 归档回填跳过 {}: {e}", file_path.display());
+                continue;
+            }
+        };
+        for msg in messages {
+            if msg.output_tokens == 0 || !seen.insert(msg.message_id.clone()) {
+                continue;
+            }
+            let Some(session_id) = msg.session_id.clone() else {
+                continue;
+            };
+            entries.push(SessionUsageEntry {
+                session_id,
+                created_at: created_at_of(msg.timestamp.as_deref()),
+                usage: TokenUsage {
+                    input_tokens: msg.input_tokens,
+                    output_tokens: msg.output_tokens,
+                    cache_read_tokens: msg.cache_read_tokens,
+                    cache_creation_tokens: msg.cache_creation_tokens,
+                    model: Some(msg.model.clone()),
+                    message_id: None,
+                },
+                model: msg.model,
+            });
+        }
+    }
+    entries
+}
+
+/// 同步单个 JSONL 文件，返回 (imported, skipped)
+fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppError> {
+    let file_path_str = file_path.to_string_lossy().to_string();
+
+    // 获取文件元数据
+    let metadata = fs::metadata(file_path)
+        .map_err(|e| AppError::Config(format!("无法读取文件元数据: {e}")))?;
+    let file_modified = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    // 检查同步状态
+    let (last_modified, last_offset) = get_sync_state(db, &file_path_str)?;
+
+    // 文件未变化则跳过
+    if file_modified <= last_modified {
+        return Ok((0, 0));
+    }
+
+    // 从上次偏移位置开始增量解析
+    let (messages, line_offset) = parse_claude_file(file_path, last_offset)?;
 
     // 写入数据库
     let mut imported: u32 = 0;
     let mut skipped: u32 = 0;
 
-    for msg in messages.values() {
-        // 只导入有 stop_reason 的最终条目（完整的 API 调用）
-        if msg.stop_reason.is_none() {
-            continue;
-        }
-
+    for msg in &messages {
+        // A reply without a stop_reason is still a call: a subagent's replies
+        // mostly never get one, and a reply still streaming gets its final line
+        // later, which then updates the row (see insert_session_log_entry).
         let request_id = format!(
             "{}{}",
             crate::proxy::usage::parser::SESSION_REQUEST_ID_PREFIX,
@@ -306,7 +410,7 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
 }
 
 /// 获取文件的同步状态
-fn get_sync_state(db: &Database, file_path: &str) -> Result<(i64, i64), AppError> {
+pub(crate) fn get_sync_state(db: &Database, file_path: &str) -> Result<(i64, i64), AppError> {
     let conn = lock_conn!(db.conn);
     let result = conn.query_row(
         "SELECT last_modified, last_line_offset FROM session_log_sync WHERE file_path = ?1",
@@ -317,7 +421,7 @@ fn get_sync_state(db: &Database, file_path: &str) -> Result<(i64, i64), AppError
 }
 
 /// 更新文件的同步状态
-fn update_sync_state(
+pub(crate) fn update_sync_state(
     db: &Database,
     file_path: &str,
     last_modified: i64,
@@ -338,7 +442,11 @@ fn update_sync_state(
     Ok(())
 }
 
-/// 插入单条会话日志到 proxy_request_logs，返回是否成功插入 (true=新插入, false=已存在)
+/// 插入单条会话日志到 proxy_request_logs，返回是否写入 (true=新插入或更新, false=未变)
+///
+/// A row this parser wrote earlier from a reply's unfinished lines is updated
+/// when a later line reports more output; a proxy row sharing the message id
+/// is never touched.
 fn insert_session_log_entry(
     db: &Database,
     request_id: &str,
@@ -346,35 +454,8 @@ fn insert_session_log_entry(
 ) -> Result<bool, AppError> {
     let conn = lock_conn!(db.conn);
 
-    // 检查是否已存在
-    let exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = ?1",
-            rusqlite::params![request_id],
-            |row| row.get::<_, i64>(0).map(|c| c > 0),
-        )
-        .unwrap_or(false);
-
-    if exists {
-        return Ok(false);
-    }
-
-    // 解析时间戳
-    let created_at = msg
-        .timestamp
-        .as_ref()
-        .and_then(|ts| {
-            // 尝试解析 ISO 8601 时间戳
-            chrono::DateTime::parse_from_rfc3339(ts)
-                .ok()
-                .map(|dt| dt.timestamp())
-        })
-        .unwrap_or_else(|| {
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0)
-        });
+    // 解析时间戳（ISO 8601）
+    let created_at = created_at_of(msg.timestamp.as_deref());
 
     // 计算费用
     let usage = TokenUsage {
@@ -409,14 +490,25 @@ fn insert_session_log_entry(
         ),
     };
 
-    conn.execute(
-        "INSERT OR IGNORE INTO proxy_request_logs (
+    let changed = conn.execute(
+        "INSERT INTO proxy_request_logs (
             request_id, provider_id, app_type, model, request_model,
             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
             input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
             latency_ms, first_token_ms, status_code, error_message, session_id,
             provider_type, is_streaming, cost_multiplier, created_at, data_source
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+        ON CONFLICT(request_id) DO UPDATE SET
+            input_tokens = excluded.input_tokens,
+            output_tokens = excluded.output_tokens,
+            cache_read_tokens = excluded.cache_read_tokens,
+            cache_creation_tokens = excluded.cache_creation_tokens,
+            input_cost_usd = excluded.input_cost_usd,
+            output_cost_usd = excluded.output_cost_usd,
+            cache_read_cost_usd = excluded.cache_read_cost_usd,
+            cache_creation_cost_usd = excluded.cache_creation_cost_usd,
+            total_cost_usd = excluded.total_cost_usd
+        WHERE data_source = 'session_log' AND excluded.output_tokens > output_tokens",
         rusqlite::params![
             request_id,
             "_session",         // provider_id: 标记为会话来源
@@ -434,7 +526,7 @@ fn insert_session_log_entry(
             total_cost,
             0i64,               // latency_ms: 会话日志无此数据
             Option::<i64>::None, // first_token_ms
-            200i64,             // status_code: 有 stop_reason 说明请求成功
+            200i64,             // status_code: 会话日志只记录成功的回复
             Option::<String>::None, // error_message
             msg.session_id,
             Some("session_log"), // provider_type
@@ -446,11 +538,11 @@ fn insert_session_log_entry(
     )
     .map_err(|e| AppError::Database(format!("插入会话日志失败: {e}")))?;
 
-    Ok(true)
+    Ok(changed > 0)
 }
 
 /// 从 model_pricing 表查找模型定价（支持模糊匹配）
-fn find_model_pricing_for_session(
+pub(crate) fn find_model_pricing_for_session(
     conn: &rusqlite::Connection,
     model_id: &str,
 ) -> Option<ModelPricing> {
@@ -635,5 +727,173 @@ mod tests {
 
         messages.insert("msg_1".to_string(), final_entry);
         assert_eq!(messages.get("msg_1").unwrap().output_tokens, 1349);
+    }
+
+    use crate::test_sandbox::sandbox;
+    use serial_test::serial;
+    use std::time::{Duration, SystemTime};
+
+    const PARENT: &str = "0f3a1c2d-1111-4222-8333-444455556666";
+
+    /// An assistant JSONL line as Claude Code writes it.
+    fn assistant_line(msg_id: &str, output: u32, stop: Option<&str>, ts: &str) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "sessionId": PARENT,
+            "timestamp": ts,
+            "message": {
+                "id": msg_id,
+                "model": "claude-opus-4-6",
+                "stop_reason": stop,
+                "usage": {
+                    "input_tokens": 2,
+                    "output_tokens": output,
+                    "cache_read_input_tokens": 2894,
+                    "cache_creation_input_tokens": 64985
+                }
+            }
+        })
+        .to_string()
+    }
+
+    fn write_lines(path: &Path, lines: &[String]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, lines.join("\n") + "\n").unwrap();
+    }
+
+    /// Push a file's mtime forward so the next sync sees it as changed even
+    /// within the same second.
+    fn touch_later(path: &Path, secs: u64) {
+        let file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        file.set_modified(SystemTime::now() + Duration::from_secs(secs))
+            .unwrap();
+    }
+
+    fn logged(db: &Database) -> Vec<(String, Option<String>, i64)> {
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT request_id, session_id, output_tokens FROM proxy_request_logs
+                 WHERE data_source = 'session_log' ORDER BY request_id",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    #[test]
+    #[serial]
+    fn subagent_transcripts_count_toward_the_parent_session() {
+        let sandbox = sandbox();
+        let project = sandbox.home().join(".claude/projects/-work-app");
+        write_lines(
+            &project.join(format!("{PARENT}.jsonl")),
+            &[assistant_line(
+                "msg_main",
+                300,
+                Some("end_turn"),
+                "2026-10-10T18:07:30Z",
+            )],
+        );
+        // a subagent's own transcript: its lines carry the parent's sessionId, and
+        // most of its replies never get a stop_reason (only their first usage)
+        write_lines(
+            &project.join(format!("{PARENT}/subagents/agent-a2c17cdb.jsonl")),
+            &[
+                assistant_line("msg_sub_1", 7, None, "2026-10-10T18:07:36Z"),
+                assistant_line("msg_sub_1", 7, None, "2026-10-10T18:07:37Z"),
+                assistant_line("msg_sub_2", 124, Some("tool_use"), "2026-10-10T18:07:39Z"),
+            ],
+        );
+        let db = Database::memory().unwrap();
+
+        let result = sync_claude_session_logs(&db).unwrap();
+
+        assert_eq!(result.files_scanned, 2);
+        let parent = Some(PARENT.to_string());
+        assert_eq!(
+            logged(&db),
+            vec![
+                ("session:msg_main".to_string(), parent.clone(), 300),
+                ("session:msg_sub_1".to_string(), parent.clone(), 7),
+                ("session:msg_sub_2".to_string(), parent, 124),
+            ]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn a_reply_read_before_it_finished_is_updated_when_its_final_line_arrives() {
+        let sandbox = sandbox();
+        let file = sandbox
+            .home()
+            .join(format!(".claude/projects/-work-app/{PARENT}.jsonl"));
+        let first = assistant_line("msg_live", 5, None, "2026-10-10T18:07:30Z");
+        write_lines(&file, std::slice::from_ref(&first));
+        let db = Database::memory().unwrap();
+        sync_claude_session_logs(&db).unwrap();
+
+        write_lines(
+            &file,
+            &[
+                first,
+                assistant_line("msg_live", 480, Some("end_turn"), "2026-10-10T18:07:42Z"),
+            ],
+        );
+        touch_later(&file, 5);
+        sync_claude_session_logs(&db).unwrap();
+
+        assert_eq!(
+            logged(&db),
+            vec![(
+                "session:msg_live".to_string(),
+                Some(PARENT.to_string()),
+                480
+            )]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn a_proxy_row_with_the_same_message_id_is_left_alone() {
+        let sandbox = sandbox();
+        write_lines(
+            &sandbox
+                .home()
+                .join(format!(".claude/projects/-work-app/{PARENT}.jsonl")),
+            &[assistant_line(
+                "msg_proxied",
+                900,
+                Some("end_turn"),
+                "2026-10-10T18:07:30Z",
+            )],
+        );
+        let db = Database::memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO proxy_request_logs (request_id, provider_id, app_type, model,
+                    output_tokens, latency_ms, status_code, created_at, data_source)
+                 VALUES ('session:msg_proxied', 'ofox', 'claude', 'claude-opus-4-6', 10, 5, 200,
+                    1, 'proxy')",
+                [],
+            )
+            .unwrap();
+        }
+
+        sync_claude_session_logs(&db).unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let (source, output): (String, i64) = conn
+            .query_row(
+                "SELECT data_source, output_tokens FROM proxy_request_logs
+                 WHERE request_id = 'session:msg_proxied'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((source.as_str(), output), ("proxy", 10));
     }
 }
