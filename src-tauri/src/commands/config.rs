@@ -146,6 +146,15 @@ pub async fn get_config_dir(app: String) -> Result<String, String> {
     Ok(dir.to_string_lossy().to_string())
 }
 
+/// Where Codex and Claude Code keep their files, and which source decided it:
+/// Ofox's settings, the `CODEX_HOME` / `CLAUDE_CONFIG_DIR` variable (from Ofox's own
+/// environment or the login shell), or the default directory in the home.
+#[tauri::command]
+pub async fn get_agent_dirs() -> Result<Vec<crate::agent_env::AgentDir>, String> {
+    crate::agent_env::ready().await;
+    Ok(crate::agent_env::dirs())
+}
+
 #[tauri::command]
 pub async fn open_config_folder(handle: AppHandle, app: String) -> Result<bool, String> {
     crate::agent_env::ready().await;
@@ -357,7 +366,28 @@ pub async fn set_common_config_snippet(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_common_config_snippet;
+    use super::{get_agent_dirs, validate_common_config_snippet};
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn get_agent_dirs_reports_each_agent_directory_and_where_it_came_from() {
+        let sandbox = crate::test_sandbox::sandbox();
+        let moved = sandbox.home().join("elsewhere");
+        std::env::set_var("CLAUDE_CONFIG_DIR", &moved);
+
+        let dirs = serde_json::to_value(get_agent_dirs().await.expect("dirs")).unwrap();
+
+        assert_eq!(dirs[0]["tool"], "codex");
+        assert_eq!(dirs[0]["source"], "default");
+        assert_eq!(
+            dirs[0]["dir"],
+            sandbox.home().join(".codex").to_string_lossy().as_ref()
+        );
+        assert_eq!(dirs[1]["tool"], "claude");
+        assert_eq!(dirs[1]["source"], "env");
+        assert_eq!(dirs[1]["envVar"], "CLAUDE_CONFIG_DIR");
+        assert_eq!(dirs[1]["dir"], moved.to_string_lossy().as_ref());
+    }
 
     #[test]
     fn validate_common_config_snippet_accepts_comment_only_codex_snippet() {

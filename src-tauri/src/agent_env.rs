@@ -271,6 +271,11 @@ pub fn dir(tool: AgentTool) -> AgentDir {
     resolve_with(tool, login_shell_env())
 }
 
+/// Both agents' directories, for the renderer.
+pub fn dirs() -> Vec<AgentDir> {
+    AgentTool::ALL.into_iter().map(dir).collect()
+}
+
 fn resolve_with(tool: AgentTool, shell_env: &EnvMap) -> AgentDir {
     let process_env: EnvMap = std::env::var(tool.env_var())
         .map(|value| (tool.env_var().to_string(), value))
@@ -614,6 +619,16 @@ mod tests {
             let got = resolve_with(AgentTool::Codex, &env(&[]));
 
             assert_eq!(got.dir, sandbox.home().join(".codex"));
+        }
+
+        #[test]
+        #[serial]
+        fn dirs_lists_codex_then_claude() {
+            let _sandbox = sandbox();
+
+            let tools: Vec<_> = dirs().into_iter().map(|d| d.tool).collect();
+
+            assert_eq!(tools, [AgentTool::Codex, AgentTool::Claude]);
         }
     }
 
