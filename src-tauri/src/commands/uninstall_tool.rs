@@ -9,6 +9,7 @@
 
 use serde::Serialize;
 use serde_json::json;
+use std::borrow::Cow;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -629,8 +630,22 @@ const MAX_LINE_CHARS: usize = 300;
 /// A line of someone else's output, made safe to show. Every such line passes
 /// through here (progress lines through `emit_line`, the Hermes listing through
 /// `hermes_dry_run_actions`), so this is the one place to filter it further.
+/// The scrub runs first, on the raw line.
 fn present(line: &str) -> String {
-    line.chars()
+    present_with(line, scrub_line)
+}
+
+/// The secret scrub. It returns the line unchanged until the shared redaction
+/// lands; the merge replaces only this body with `crate::redact::scrub`.
+fn scrub_line(line: &str) -> Cow<'_, str> {
+    Cow::Borrowed(line)
+}
+
+fn present_with(line: &str, scrub: for<'a> fn(&'a str) -> Cow<'a, str>) -> String {
+    // Scrub the raw line: cutting or cleaning it first could leave half a key
+    // that the scrub no longer recognises.
+    scrub(line)
+        .chars()
         .filter(|c| !c.is_control())
         .collect::<String>()
         .trim()
@@ -2013,6 +2028,24 @@ Would inspect/remove:
             expected
         );
         assert!(hermes_dry_run_actions("usage: hermes", Path::new("/home/me")).is_empty());
+    }
+
+    #[test]
+    fn the_scrub_sees_the_raw_line_before_it_is_cleaned_or_cut() {
+        fn hide(line: &str) -> Cow<'_, str> {
+            Cow::Owned(line.replace("sk-of-ABCDEFGH", "[redacted]"))
+        }
+        // Cut to 300 characters first, the key would be left as `sk-of-ABCDE`,
+        // which no longer matches the scrub; scrubbed first, the line fits.
+        let long = format!("{} sk-of-ABCDEFGH", "a".repeat(288));
+        let shown = present_with(&long, hide);
+        assert!(!shown.contains("sk-of"), "{shown}");
+        assert!(shown.ends_with("[redacted]"), "{shown}");
+        // Control characters inside the key would hide it from the scrub too.
+        let split = present_with("key sk-of-ABCDEFGH\n", hide);
+        assert_eq!(split, "key [redacted]");
+        // With no scrub wired in, the line is only cleaned and cut.
+        assert_eq!(present("  hi\u{7}  "), "hi");
     }
 
     #[test]
