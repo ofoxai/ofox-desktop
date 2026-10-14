@@ -2696,10 +2696,17 @@ options:
         assert_eq!(UNINSTALL_TIMEOUT, Duration::from_secs(300));
     }
 
+    /// Moves a throwaway bundle into the REAL Trash, so `--ignored` alone must not
+    /// run it: the variable has to be set on purpose, like `OFOX_TEST_UPDATE_TOOL`.
     #[cfg(target_os = "macos")]
     #[test]
-    #[ignore = "Manual acceptance: moves a throwaway app bundle to the real Trash"]
+    #[ignore = "Manual acceptance: needs OFOX_TEST_TRASH_PROBE=1; moves a throwaway app bundle to the real Trash"]
     fn manual_trash_moves_a_bundle_into_the_users_trash() {
+        assert_eq!(
+            std::env::var("OFOX_TEST_TRASH_PROBE").as_deref(),
+            Ok("1"),
+            "Set OFOX_TEST_TRASH_PROBE=1 explicitly: this puts a throwaway app bundle in your real Trash"
+        );
         let temp = tempfile::tempdir().unwrap();
         let bundle = temp.path().join("Ofox Uninstall Probe.app");
         touch(&bundle.join("Contents/Info.plist"), "probe");
