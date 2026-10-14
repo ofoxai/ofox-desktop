@@ -343,9 +343,10 @@ pub fn run() {
                 )?;
             }
 
-            // Ask the login shell for CODEX_HOME / CLAUDE_CONFIG_DIR in the background:
-            // everything that reads or writes those agents' files awaits the answer.
-            tauri::async_runtime::spawn(crate::agent_env::ready());
+            // CODEX_HOME / CLAUDE_CONFIG_DIR as the user's login shell has them: use the
+            // snapshot saved by the last run now and refresh it in the background, or,
+            // on a first launch, ask the shell now (in parallel with the steps below).
+            crate::agent_env::start();
 
             // 初始化数据库
             let app_config_dir = crate::config::get_app_config_dir();
@@ -439,8 +440,10 @@ pub fn run() {
             // The steps below read Codex / Claude files (skills migration, importing
             // the live config, relocating legacy bind rows, and the takeover check they
             // run), and everything after setup relies on the snapshot existing too.
-            // The shell was asked before the database was opened, so this normally
-            // returns at once; it is bounded by the probe's own 5 s limit.
+            // With a snapshot saved by an earlier run this returns at once. Only a first
+            // launch (or one after the saved file is gone) waits for the login shell:
+            // about a second with a typical zsh rc (measured 0.9-1.2 s), at most 5 s,
+            // minus the time DB init above already used while the shell ran in parallel.
             tauri::async_runtime::block_on(crate::agent_env::ready());
 
             // ============================================================

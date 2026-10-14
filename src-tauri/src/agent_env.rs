@@ -15,15 +15,23 @@
 //! one would mean whatever folder the agent is started in, so it is ignored.
 //!
 //! [`resolve`] is the pure decision. [`dir`] feeds it the live inputs; the shell
-//! snapshot is taken by [`ready`], which every entry point that reads or writes an
-//! agent's files awaits first. Before the snapshot exists [`dir`] simply skips that
-//! source, so synchronous callers keep working.
+//! snapshot comes from [`start`] (called once at startup) and [`ready`], which every
+//! entry point that reads or writes an agent's files awaits first. Asking a login
+//! shell takes about a second, so the last successful answer is kept on disk (see
+//! `snapshot`): a launch that has it starts from it and refreshes in the background,
+//! and only a launch without it waits. Before any snapshot exists [`dir`] simply skips
+//! that source, so synchronous callers keep working.
+
+mod snapshot;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Serialize, Serializer};
-use tokio::sync::OnceCell;
+
+use snapshot::{Refresh, Snapshot};
 
 /// Variable name to value; only non-empty values are kept.
 pub type EnvMap = BTreeMap<String, String>;
@@ -124,18 +132,24 @@ fn absolute_dir(value: Option<&String>) -> Option<PathBuf> {
 }
 
 /// The variables the login-shell probe printed in `output`; everything else the
-/// shell's rc files wrote is ignored. Empty values are dropped.
+/// shell's rc files wrote is ignored. Empty values are dropped. `None` when a variable's
+/// marker line is missing, which means the shell never reached the probe (an rc file
+/// that exits, a crash): that is a failed probe, not an empty answer.
 #[cfg(any(not(windows), test))]
-pub fn parse_snapshot(output: &str) -> EnvMap {
-    output
+pub fn parse_snapshot(output: &str) -> Option<EnvMap> {
+    let printed: BTreeMap<&str, &str> = output
         .lines()
         .filter_map(|line| line.strip_prefix(MARKER))
         .filter_map(|pair| pair.split_once('='))
-        .filter(|(name, value)| {
-            AgentTool::ALL.iter().any(|tool| tool.env_var() == *name) && !value.trim().is_empty()
-        })
-        .map(|(name, value)| (name.to_string(), value.to_string()))
-        .collect()
+        .collect();
+    let mut env = EnvMap::new();
+    for tool in AgentTool::ALL {
+        let value = printed.get(tool.env_var())?;
+        if !value.trim().is_empty() {
+            env.insert(tool.env_var().to_string(), value.to_string());
+        }
+    }
+    Some(env)
 }
 
 // ---- the login-shell snapshot ----
@@ -143,20 +157,78 @@ pub fn parse_snapshot(output: &str) -> EnvMap {
 /// A login shell that has not answered by now is left behind: the default directory
 /// is used rather than keeping a bind waiting.
 #[cfg(not(windows))]
-const SNAPSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Taken once per run; see [`ready`].
-static LOGIN_SHELL_ENV: OnceCell<EnvMap> = OnceCell::const_new();
+/// After a failed probe with nothing to fall back on, how long before `ready` asks again.
+const RETRY_AFTER: Duration = Duration::from_secs(60);
+
+static SNAPSHOT: Snapshot = Snapshot::new(RETRY_AFTER);
 static NO_VARS: EnvMap = EnvMap::new();
 
-/// Take the login-shell snapshot if it has not been taken yet. Awaited by every entry
-/// point that reads or writes an agent's files, so they never see the directory
-/// before the variable a terminal would have exported is known. Never fails: a shell
-/// that cannot be run just leaves the snapshot empty.
+/// A test (or a run pointed at a throwaway home) must not read the developer's own
+/// shell rc files, which would leak their CODEX_HOME into it, nor write the cache.
+fn probing_disabled() -> bool {
+    cfg!(test) || crate::config::is_home_overridden()
+}
+
+fn cache_path() -> PathBuf {
+    crate::config::get_app_config_dir().join("agent-env.json")
+}
+
+/// Called once at startup, before anything reads an agent directory. With a snapshot
+/// from an earlier run the value is in place at once and a background probe refreshes
+/// it; without one the probe starts now, in parallel with the rest of startup, and
+/// [`ready`] waits for it.
+pub fn start() {
+    if probing_disabled() {
+        return;
+    }
+    if SNAPSHOT.seed_from_cache(&cache_path()) {
+        tauri::async_runtime::spawn(refresh());
+    } else {
+        tauri::async_runtime::spawn(ready());
+    }
+}
+
+/// Probe again and, if the answer is different, adopt it. Does not re-run anything
+/// that already read the old directory; it only logs that the directory moved.
+async fn refresh() {
+    match SNAPSHOT.refresh(&cache_path(), probe).await {
+        Refresh::Updated { previous } => {
+            let previous = previous.as_deref().unwrap_or(&NO_VARS);
+            for tool in AgentTool::ALL {
+                let (was, now) = (resolve_with(tool, previous), dir(tool));
+                if was.dir != now.dir {
+                    log::info!(
+                        "[agent_env] the {tool:?} directory is now {} (was {})",
+                        now.dir.display(),
+                        was.dir.display()
+                    );
+                }
+            }
+        }
+        Refresh::Failed => {
+            log::warn!("[agent_env] the login shell did not answer; keeping the saved snapshot");
+        }
+    }
+}
+
+/// Return once a snapshot (saved or fresh) is available. Awaited by every entry point
+/// that reads or writes an agent's files, so they never see the directory before the
+/// variable a terminal would have exported is known. With a saved snapshot this
+/// returns at once; otherwise it waits for one probe (5 s at most). Never fails: a shell
+/// that cannot be run just leaves no snapshot (the default directories apply), and is
+/// asked again after a minute.
 pub async fn ready() {
     #[cfg(test)]
     READY_CALLS.with(|calls| calls.set(calls.get() + 1));
-    LOGIN_SHELL_ENV.get_or_init(load_login_shell_env).await;
+    if probing_disabled() {
+        if SNAPSHOT.get().is_none() {
+            SNAPSHOT.set(Arc::new(EnvMap::new()));
+        }
+        return;
+    }
+    SNAPSHOT.ready(&cache_path(), probe).await;
 }
 
 #[cfg(test)]
@@ -164,20 +236,6 @@ thread_local! {
     /// How often [`ready`] was awaited on this thread, so a test can check that an
     /// entry point waits for the snapshot (a `#[tokio::test]` runs on one thread).
     static READY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// The snapshot, or nothing before [`ready`] has finished.
-fn login_shell_env() -> &'static EnvMap {
-    LOGIN_SHELL_ENV.get().unwrap_or(&NO_VARS)
-}
-
-async fn load_login_shell_env() -> EnvMap {
-    // A test (or a run pointed at a throwaway home) must not read the developer's own
-    // shell rc files: they would leak their CODEX_HOME into it.
-    if cfg!(test) || crate::config::is_home_overridden() {
-        return EnvMap::new();
-    }
-    snapshot().await
 }
 
 /// The shell command that prints each agent variable on a marker line. The leading
@@ -192,15 +250,16 @@ fn probe_script() -> String {
 }
 
 /// Ask the user's login shell, the way `launch_tool` and `tool_update::probe` do, so a
-/// variable exported in `.zshrc` / `.bash_profile` is seen.
+/// variable exported in `.zshrc` / `.bash_profile` is seen. `None` when it could not be
+/// asked.
 #[cfg(not(windows))]
-async fn snapshot() -> EnvMap {
+async fn probe() -> Option<EnvMap> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-    snapshot_from_shell(&shell, SNAPSHOT_TIMEOUT).await
+    snapshot_from_shell(&shell, PROBE_TIMEOUT).await
 }
 
 #[cfg(not(windows))]
-async fn snapshot_from_shell(shell: &str, timeout: std::time::Duration) -> EnvMap {
+async fn snapshot_from_shell(shell: &str, timeout: Duration) -> Option<EnvMap> {
     let mut command = tokio::process::Command::new(shell);
     command.args(["-l", "-i", "-c", &probe_script()]);
     match crate::commands::tool_update::bounded_output_with_timeout(command, timeout).await {
@@ -213,11 +272,15 @@ async fn snapshot_from_shell(shell: &str, timeout: std::time::Duration) -> EnvMa
             }
             // Interactive rc files write to stderr (fnm's "Using Node ..."); only the
             // marker lines of stdout are read.
-            parse_snapshot(&String::from_utf8_lossy(&output.stdout))
+            let parsed = parse_snapshot(&String::from_utf8_lossy(&output.stdout));
+            if parsed.is_none() {
+                log::warn!("[agent_env] {shell} never printed the agent variables");
+            }
+            parsed
         }
         Err(error) => {
             log::warn!("[agent_env] could not read the agent variables from {shell}: {error}");
-            EnvMap::new()
+            None
         }
     }
 }
@@ -225,7 +288,7 @@ async fn snapshot_from_shell(shell: &str, timeout: std::time::Duration) -> EnvMa
 /// Windows has no login shell: a terminal opened now starts from the persistent
 /// environment in the registry, the user's over the machine's.
 #[cfg(windows)]
-async fn snapshot() -> EnvMap {
+async fn probe() -> Option<EnvMap> {
     use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE};
     use winreg::{RegKey, HKEY};
 
@@ -243,11 +306,11 @@ async fn snapshot() -> EnvMap {
         key.as_ref()
             .and_then(|key| key.get_value::<String, _>(name).ok())
     };
-    registry_snapshot(
+    Some(registry_snapshot(
         |name| read(&user, name),
         |name| read(&machine, name),
         |name| std::env::var(name).ok(),
-    )
+    ))
 }
 
 /// The agent variables of the registry's environment: the user's value beats the
@@ -275,9 +338,10 @@ fn registry_snapshot(
 // ---- the live answer ----
 
 /// The directory `tool` keeps its files in right now: Ofox's settings, the process
-/// environment, the login-shell snapshot (once [`ready`]), else the default.
+/// environment, the login-shell snapshot (once there is one), else the default.
 pub fn dir(tool: AgentTool) -> AgentDir {
-    resolve_with(tool, login_shell_env())
+    let shell_env = SNAPSHOT.get();
+    resolve_with(tool, shell_env.as_deref().unwrap_or(&NO_VARS))
 }
 
 /// Both agents' directories, for the renderer.
@@ -439,19 +503,38 @@ mod tests {
             some rc banner CODEX_HOME=/not/this\n\
             __OFOX_ENV__UNRELATED=/x\n";
         let parsed = parse_snapshot(output);
-        assert_eq!(parsed, env(&[("CODEX_HOME", "/data/codex")]));
+        assert_eq!(parsed, Some(env(&[("CODEX_HOME", "/data/codex")])));
     }
 
     #[test]
     fn a_marker_after_unterminated_noise_is_still_found() {
-        let parsed = parse_snapshot("no newline here\n__OFOX_ENV__CLAUDE_CONFIG_DIR=/c\r\n");
-        assert_eq!(parsed, env(&[("CLAUDE_CONFIG_DIR", "/c")]));
+        let parsed = parse_snapshot(
+            "no newline here\n__OFOX_ENV__CODEX_HOME=\n__OFOX_ENV__CLAUDE_CONFIG_DIR=/c\r\n",
+        );
+        assert_eq!(parsed, Some(env(&[("CLAUDE_CONFIG_DIR", "/c")])));
     }
 
     #[test]
     fn a_value_may_contain_an_equals_sign() {
-        let parsed = parse_snapshot("__OFOX_ENV__CODEX_HOME=/a=b\n");
-        assert_eq!(parsed, env(&[("CODEX_HOME", "/a=b")]));
+        let parsed =
+            parse_snapshot("__OFOX_ENV__CODEX_HOME=/a=b\n__OFOX_ENV__CLAUDE_CONFIG_DIR=\n");
+        assert_eq!(parsed, Some(env(&[("CODEX_HOME", "/a=b")])));
+    }
+
+    #[test]
+    fn nothing_exported_is_an_empty_answer_not_a_failure() {
+        let parsed = parse_snapshot("__OFOX_ENV__CODEX_HOME=\n__OFOX_ENV__CLAUDE_CONFIG_DIR=\n");
+        assert_eq!(parsed, Some(env(&[])));
+    }
+
+    #[test]
+    fn a_shell_that_never_reached_the_probe_is_a_failure() {
+        assert_eq!(parse_snapshot("Using Node v22.1.0\n"), None);
+        assert_eq!(
+            parse_snapshot("__OFOX_ENV__CODEX_HOME=/data/codex\n"),
+            None,
+            "a variable's marker line is missing"
+        );
     }
 
     #[cfg(not(windows))]
@@ -523,38 +606,49 @@ mod tests {
 
             let got = snapshot_from_shell("/bin/sh", Duration::from_secs(10)).await;
 
-            assert_eq!(got, env(&[("CODEX_HOME", "/data/codex")]));
+            assert_eq!(got, Some(env(&[("CODEX_HOME", "/data/codex")])));
         }
 
         #[tokio::test]
         #[serial]
-        async fn a_login_shell_that_exports_nothing_gives_an_empty_snapshot() {
+        async fn a_login_shell_that_exports_nothing_gives_an_empty_answer() {
             let sandbox = sandbox();
             write_profile(sandbox.home(), "echo hello\n");
 
             let got = snapshot_from_shell("/bin/sh", Duration::from_secs(10)).await;
 
-            assert!(got.is_empty(), "{got:?}");
+            assert_eq!(got, Some(EnvMap::new()), "nothing exported is an answer");
         }
 
         #[tokio::test]
         #[serial]
-        async fn a_login_shell_that_hangs_is_given_up_on() {
+        async fn an_rc_file_that_exits_early_is_a_failed_probe() {
+            let sandbox = sandbox();
+            write_profile(sandbox.home(), "export CODEX_HOME=/data/codex\nexit 3\n");
+
+            let got = snapshot_from_shell("/bin/sh", Duration::from_secs(10)).await;
+
+            assert_eq!(got, None, "the shell never got to the probe");
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn a_login_shell_that_hangs_is_a_failed_probe() {
             let sandbox = sandbox();
             write_profile(sandbox.home(), "sleep 3\nexport CODEX_HOME=/late\n");
 
             let started = std::time::Instant::now();
             let got = snapshot_from_shell("/bin/sh", Duration::from_millis(200)).await;
 
-            assert!(got.is_empty(), "{got:?}");
+            assert_eq!(got, None, "a probe that timed out is a failure");
             assert!(started.elapsed() < Duration::from_secs(2));
         }
 
         #[tokio::test]
-        async fn a_shell_that_cannot_be_started_gives_an_empty_snapshot() {
+        async fn a_shell_that_cannot_be_started_is_a_failed_probe() {
             let got = snapshot_from_shell("/nonexistent/shell", Duration::from_secs(1)).await;
 
-            assert!(got.is_empty());
+            assert_eq!(got, None);
         }
     }
 
