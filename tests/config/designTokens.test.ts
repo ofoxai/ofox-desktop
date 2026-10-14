@@ -98,3 +98,33 @@ describe("design tokens", () => {
     expect(css).not.toMatch(/outline-blue/);
   });
 });
+
+// jsdom cannot compute scrollbar styles, so pin the selectors instead: the
+// platform rules must stay at zero specificity (`:where(...)`) so that a
+// component's own opt-in — `.page-scroll`, or the command list's
+// `[&::-webkit-scrollbar]:block` / `[scrollbar-width:thin]` — still wins.
+describe("platform scrollbar rules", () => {
+  const uncommented = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  const selectors = [...uncommented.matchAll(/(^|[{}])\s*([^{}@]+?)\s*{/g)].map(
+    (m) => m[2].trim(),
+  );
+  const platformSelectors = selectors.filter((s) =>
+    /html(?:\.mac|:not\(\.mac\))/.test(s),
+  );
+
+  it("exist for both the Mac and the other platforms", () => {
+    expect(platformSelectors.some((s) => s.includes(":not(.mac)"))).toBe(true);
+    expect(platformSelectors.some((s) => /\(html\.mac\)/.test(s))).toBe(true);
+  });
+
+  it("wrap the platform class in :where() so component opt-ins win", () => {
+    const bare = platformSelectors.flatMap((selector) =>
+      selector
+        .split(",")
+        .map((part) => part.trim())
+        .filter((part) => /html(?:\.mac|:not\(\.mac\))/.test(part))
+        .filter((part) => !/^:where\(html(?:\.mac|:not\(\.mac\))\)/.test(part)),
+    );
+    expect(bare).toEqual([]);
+  });
+});
