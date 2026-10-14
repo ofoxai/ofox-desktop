@@ -93,6 +93,19 @@ pub async fn ofox_get_balance_trend(
     balance_history::trend_for(&app_state.db, &org_id, now_ms()).map_err(|e| e.to_string())
 }
 
+/// The org's monthly spending limit (`forbidden` for a member role), for the
+/// usage page. `None` when signed out or when no monthly limit is configured.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn ofox_get_spending(
+    state: State<'_, OfoxAuthState>,
+) -> Result<Option<crate::ofox_auth::OfoxSpending>, String> {
+    let manager = state.0.read().await;
+    if !manager.is_authenticated() {
+        return Ok(None);
+    }
+    manager.get_spending().await
+}
+
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }

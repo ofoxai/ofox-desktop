@@ -1598,6 +1598,7 @@ pub fn run() {
             commands::ofox_auth::ofox_get_user_info,
             commands::ofox_auth::ofox_refresh_user_info,
             commands::ofox_auth::ofox_get_balance_trend,
+            commands::ofox_auth::ofox_get_spending,
             commands::ofox_auth::ofox_get_auth_status,
             commands::ofox_auth::ofox_retry_keychain,
             commands::ofox_auth::ofox_is_authenticated,
