@@ -327,11 +327,22 @@ html:not(.mac) ::-webkit-scrollbar-corner {
   }
 }
 
+/* A loading placeholder: a lighter band sweeps across it. */
+@keyframes skeleton-shift {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-pop-in,
   .animate-fade,
   .animate-dialog-in,
-  .animate-copy-pop {
+  .animate-copy-pop,
+  .animate-skeleton {
     animation: none !important;
   }
 }

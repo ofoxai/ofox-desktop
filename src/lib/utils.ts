@@ -11,7 +11,7 @@ const twMerge = extendTailwindMerge({
       radius: ["list", "card", "ctl", "pop", "dialog"],
       shadow: ["pop", "dialog"],
       ease: ["soft"],
-      animate: ["pop-in", "fade", "dialog-in", "copy-pop"],
+      animate: ["pop-in", "fade", "dialog-in", "copy-pop", "skeleton"],
     },
   },
 });

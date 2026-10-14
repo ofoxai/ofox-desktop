@@ -159,6 +159,7 @@ module.exports = {
         fade: "fade .2s cubic-bezier(.2, .8, .2, 1)",
         "dialog-in": "dialog-in .24s cubic-bezier(.2, .8, .2, 1)",
         "copy-pop": "copy-pop .36s cubic-bezier(.2, .8, .2, 1)",
+        skeleton: "skeleton-shift 1.4s ease-in-out infinite",
       },
       keyframes: {
         fadeIn: {
