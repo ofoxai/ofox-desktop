@@ -26,24 +26,38 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// 累计 token 用量（跟踪 total_token_usage 字段）
+///
+/// Codex's `input_tokens` is the whole prompt: the cached part
+/// (`cached_input_tokens`) and, in newer versions, what was written to the cache
+/// (`cache_write_input_tokens`) are counted in it.
 #[derive(Debug, Clone, Default)]
 struct CumulativeTokens {
     input: u64,
     cached_input: u64,
+    cache_write: u64,
     output: u64,
 }
 
-/// 单次 API 调用的 token 增量
+/// 单次 API 调用的 token 增量（input 仍是 Codex 口径：含缓存部分）
 #[derive(Debug)]
 struct DeltaTokens {
     input: u32,
     cached_input: u32,
+    cache_write: u32,
     output: u32,
 }
 
 impl DeltaTokens {
     fn is_zero(&self) -> bool {
-        self.input == 0 && self.cached_input == 0 && self.output == 0
+        self.input == 0 && self.cached_input == 0 && self.cache_write == 0 && self.output == 0
+    }
+
+    /// Fresh input as every source stores it: the prompt without what was read
+    /// from or written to the cache.
+    fn fresh_input(&self) -> u32 {
+        self.input
+            .saturating_sub(self.cached_input)
+            .saturating_sub(self.cache_write)
     }
 }
 
@@ -106,11 +120,13 @@ fn compute_delta(prev: &Option<CumulativeTokens>, current: &CumulativeTokens) ->
         None => DeltaTokens {
             input: current.input as u32,
             cached_input: current.cached_input as u32,
+            cache_write: current.cache_write as u32,
             output: current.output as u32,
         },
         Some(p) => DeltaTokens {
             input: current.input.saturating_sub(p.input) as u32,
             cached_input: current.cached_input.saturating_sub(p.cached_input) as u32,
+            cache_write: current.cache_write.saturating_sub(p.cache_write) as u32,
             output: current.output.saturating_sub(p.output) as u32,
         },
     }
@@ -129,6 +145,10 @@ fn parse_cumulative_tokens(total_usage: &serde_json::Value) -> Option<Cumulative
         cached_input: total_usage
             .get("cached_input_tokens")
             .or_else(|| total_usage.get("cache_read_input_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        cache_write: total_usage
+            .get("cache_write_input_tokens")
             .and_then(|v| v.as_u64())
             .unwrap_or(0),
         output: total_usage
@@ -370,6 +390,7 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
                     DeltaTokens {
                         input: cumulative.input as u32,
                         cached_input: cumulative.cached_input as u32,
+                        cache_write: cumulative.cache_write as u32,
                         output: cumulative.output as u32,
                     }
                 };
@@ -467,10 +488,10 @@ fn insert_codex_session_entry(
 
     // 计算费用
     let usage = TokenUsage {
-        input_tokens: delta.input,
+        input_tokens: delta.fresh_input(),
         output_tokens: delta.output,
         cache_read_tokens: delta.cached_input,
-        cache_creation_tokens: 0,
+        cache_creation_tokens: delta.cache_write,
         model: Some(model.to_string()),
         message_id: None,
     };
@@ -512,10 +533,10 @@ fn insert_codex_session_entry(
             "codex",             // app_type
             model,
             model,               // request_model = model
-            delta.input,
+            usage.input_tokens,  // fresh input
             delta.output,
             delta.cached_input,
-            0i64,                // cache_creation_tokens: Codex 日志无此数据
+            delta.cache_write,
             input_cost,
             output_cost,
             cache_read_cost,
@@ -630,6 +651,7 @@ mod tests {
         let current = CumulativeTokens {
             input: 17934,
             cached_input: 9600,
+            cache_write: 0,
             output: 454,
         };
         let delta = compute_delta(&prev, &current);
@@ -644,11 +666,13 @@ mod tests {
         let prev = Some(CumulativeTokens {
             input: 17934,
             cached_input: 9600,
+            cache_write: 0,
             output: 454,
         });
         let current = CumulativeTokens {
             input: 36722,
             cached_input: 27904,
+            cache_write: 0,
             output: 804,
         };
         let delta = compute_delta(&prev, &current);
@@ -662,12 +686,14 @@ mod tests {
         let prev = Some(CumulativeTokens {
             input: 58346,
             cached_input: 46976,
+            cache_write: 0,
             output: 1045,
         });
         // task 边界：相同的累计值
         let current = CumulativeTokens {
             input: 58346,
             cached_input: 46976,
+            cache_write: 0,
             output: 1045,
         };
         let delta = compute_delta(&prev, &current);
@@ -680,11 +706,13 @@ mod tests {
         let prev = Some(CumulativeTokens {
             input: 100,
             cached_input: 50,
+            cache_write: 0,
             output: 30,
         });
         let current = CumulativeTokens {
             input: 80,
             cached_input: 40,
+            cache_write: 0,
             output: 20,
         };
         let delta = compute_delta(&prev, &current);
@@ -795,11 +823,13 @@ mod tests {
         let prev = Some(CumulativeTokens {
             input: 100,
             cached_input: 0,
+            cache_write: 0,
             output: 50,
         });
         let current = CumulativeTokens {
             input: 110,       // delta = 10
             cached_input: 80, // delta = 80（异常：大于 input delta）
+            cache_write: 0,
             output: 60,
         };
         let delta = compute_delta(&prev, &current);
@@ -809,5 +839,49 @@ mod tests {
         // 实际钳制在调用侧：delta.cached_input.min(delta.input)
         let clamped = delta.cached_input.min(delta.input);
         assert_eq!(clamped, 10);
+    }
+
+    fn stored_tokens(db: &Database, request_id_like: &str) -> Vec<(i64, i64, i64, i64)> {
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+                 FROM proxy_request_logs WHERE request_id LIKE ?1 ORDER BY created_at",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([request_id_like], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    #[test]
+    fn codex_rows_store_fresh_input_without_cache_reads_or_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("rollout-2026-05-22T09-57-31-sess-fresh.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"timestamp":"2026-05-22T02:00:30Z","type":"session_meta","payload":{"id":"sess-fresh"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-22T02:00:31Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-22T02:00:34Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"cache_write_input_tokens":50,"output_tokens":120}}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let db = Database::memory().unwrap();
+
+        sync_single_codex_file(&db, &path).unwrap();
+
+        assert_eq!(
+            stored_tokens(&db, "codex_session:sess-fresh:%"),
+            vec![(150, 120, 800, 50)]
+        );
     }
 }

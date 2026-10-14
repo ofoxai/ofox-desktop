@@ -4,6 +4,8 @@
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
+use crate::proxy::usage::calculator::{CostBreakdown, CostCalculator, ModelPricing};
+use crate::proxy::usage::parser::TokenUsage;
 use chrono::{Local, NaiveDate, TimeZone, Timelike};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -1162,20 +1164,12 @@ pub struct ProviderLimitStatus {
     pub monthly_exceeded: bool,
 }
 
-#[derive(Clone)]
-struct PricingInfo {
-    input: rust_decimal::Decimal,
-    output: rust_decimal::Decimal,
-    cache_read: rust_decimal::Decimal,
-    cache_creation: rust_decimal::Decimal,
-}
-
 impl Database {
     fn maybe_backfill_log_costs(
         conn: &Connection,
         log: &mut RequestLogDetail,
         provider_cache: &mut HashMap<(String, String), rust_decimal::Decimal>,
-        pricing_cache: &mut HashMap<String, PricingInfo>,
+        pricing_cache: &mut HashMap<String, ModelPricing>,
     ) -> Result<(), AppError> {
         let total_cost = rust_decimal::Decimal::from_str(&log.total_cost_usd)
             .unwrap_or(rust_decimal::Decimal::ZERO);
@@ -1200,27 +1194,21 @@ impl Database {
             &log.app_type,
         )?;
 
-        let million = rust_decimal::Decimal::from(1_000_000u64);
-
-        // 与 CostCalculator::calculate 保持一致的计算逻辑：
-        // 1. input_cost 需要扣除 cache_read_tokens（避免缓存部分被重复计费）
-        // 2. 各项成本是基础成本（不含倍率）
-        // 3. 倍率只作用于最终总价
-        let billable_input_tokens =
-            (log.input_tokens as u64).saturating_sub(log.cache_read_tokens as u64);
-        let input_cost =
-            rust_decimal::Decimal::from(billable_input_tokens) * pricing.input / million;
-        let output_cost =
-            rust_decimal::Decimal::from(log.output_tokens as u64) * pricing.output / million;
-        let cache_read_cost = rust_decimal::Decimal::from(log.cache_read_tokens as u64)
-            * pricing.cache_read
-            / million;
-        let cache_creation_cost = rust_decimal::Decimal::from(log.cache_creation_tokens as u64)
-            * pricing.cache_creation
-            / million;
-        // 总成本 = 基础成本之和 × 倍率
-        let base_total = input_cost + output_cost + cache_read_cost + cache_creation_cost;
-        let total_cost = base_total * multiplier;
+        let usage = TokenUsage {
+            input_tokens: log.input_tokens,
+            output_tokens: log.output_tokens,
+            cache_read_tokens: log.cache_read_tokens,
+            cache_creation_tokens: log.cache_creation_tokens,
+            model: Some(log.model.clone()),
+            message_id: None,
+        };
+        let CostBreakdown {
+            input_cost,
+            output_cost,
+            cache_read_cost,
+            cache_creation_cost,
+            total_cost,
+        } = CostCalculator::calculate(&usage, &pricing, multiplier);
 
         log.input_cost_usd = format!("{input_cost:.6}");
         log.output_cost_usd = format!("{output_cost:.6}");
@@ -1285,9 +1273,9 @@ impl Database {
 
     fn get_model_pricing_cached(
         conn: &Connection,
-        cache: &mut HashMap<String, PricingInfo>,
+        cache: &mut HashMap<String, ModelPricing>,
         model: &str,
-    ) -> Result<Option<PricingInfo>, AppError> {
+    ) -> Result<Option<ModelPricing>, AppError> {
         if let Some(info) = cache.get(model) {
             return Ok(Some(info.clone()));
         }
@@ -1297,16 +1285,8 @@ impl Database {
             return Ok(None);
         };
 
-        let pricing = PricingInfo {
-            input: rust_decimal::Decimal::from_str(&input)
-                .map_err(|e| AppError::Database(format!("解析输入价格失败: {e}")))?,
-            output: rust_decimal::Decimal::from_str(&output)
-                .map_err(|e| AppError::Database(format!("解析输出价格失败: {e}")))?,
-            cache_read: rust_decimal::Decimal::from_str(&cache_read)
-                .map_err(|e| AppError::Database(format!("解析缓存读取价格失败: {e}")))?,
-            cache_creation: rust_decimal::Decimal::from_str(&cache_creation)
-                .map_err(|e| AppError::Database(format!("解析缓存写入价格失败: {e}")))?,
-        };
+        let pricing = ModelPricing::from_strings(&input, &output, &cache_read, &cache_creation)
+            .map_err(|e| AppError::Database(format!("解析模型定价失败: {e}")))?;
 
         cache.insert(model.to_string(), pricing.clone());
         Ok(Some(pricing))

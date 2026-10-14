@@ -253,10 +253,12 @@ fn insert_gemini_session_entry(
 
     // 合并 thoughts 到 output（思考 token 按输出计费）
     let output_tokens = tokens.output + tokens.thoughts;
+    // Gemini's input (promptTokenCount) includes the cached tokens: store fresh input
+    let fresh_input = tokens.input.saturating_sub(tokens.cached);
 
     // 计算费用
     let usage = TokenUsage {
-        input_tokens: tokens.input,
+        input_tokens: fresh_input,
         output_tokens,
         cache_read_tokens: tokens.cached,
         cache_creation_tokens: 0,
@@ -316,7 +318,7 @@ fn insert_gemini_session_entry(
             "gemini",            // app_type
             model,
             model,               // request_model = model
-            tokens.input,
+            fresh_input,
             output_tokens,
             tokens.cached,
             0i64,                // cache_creation_tokens
@@ -500,5 +502,30 @@ mod tests {
         let should_skip =
             tokens.input == 0 && tokens.output == 0 && tokens.thoughts == 0 && tokens.cached == 0;
         assert!(!should_skip, "纯缓存命中记录不应被跳过");
+    }
+
+    #[test]
+    fn gemini_rows_store_fresh_input_without_cached_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-fresh.json");
+        std::fs::write(
+            &path,
+            r#"{"sessionId":"g-fresh","messages":[{"id":"m1","type":"gemini","model":"gemini-2.5-pro","timestamp":"2026-05-22T02:00:00Z","tokens":{"input":900,"output":30,"cached":600,"thoughts":10}}]}"#,
+        )
+        .unwrap();
+        let db = Database::memory().unwrap();
+
+        sync_single_gemini_file(&db, &path).unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let row: (i64, i64, i64) = conn
+            .query_row(
+                "SELECT input_tokens, output_tokens, cache_read_tokens FROM proxy_request_logs
+                 WHERE request_id = 'gemini_session:g-fresh:m1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (300, 40, 600));
     }
 }
