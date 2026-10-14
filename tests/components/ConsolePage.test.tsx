@@ -755,14 +755,14 @@ describe("Console tool update badges", () => {
     expect(
       screen.queryByRole("button", { name: /^升级到 v/ }),
     ).not.toBeInTheDocument();
+    const refresh = screen.getByRole("button", { name: "刷新" });
+    expect(refresh).toHaveAttribute("aria-busy", "true");
     await act(async () => {
       finishCheck([
         { ...available, version: "0.161.0", update_status: "current" },
       ]);
     });
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "刷新" })).toBeEnabled(),
-    );
+    await waitFor(() => expect(refresh).not.toHaveAttribute("aria-busy"));
   });
 
   it("does not use a desktop update result for a CLI with the same version", async () => {

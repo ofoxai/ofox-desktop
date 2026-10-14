@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
@@ -51,6 +51,11 @@ export interface OfoxAccount {
  * the balance refresh and the retry below fetch it, as the console always
  * did. It is dropped when the last consumer unmounts (gcTime 0), so the next
  * account to sign in never sees the previous one's name or balance.
+ *
+ * A reply that lands after this consumer unmounted is dropped too: writing
+ * it would recreate the query with the default 5-minute gcTime (a later
+ * observer's gcTime 0 cannot shorten it), and the next account would be
+ * shown it.
  */
 export function useOfoxAccount(): OfoxAccount {
   const { t } = useTranslation();
@@ -73,12 +78,24 @@ export function useOfoxAccount(): OfoxAccount {
   const [retryAttempt, setRetryAttempt] = useState(0);
   const [loadFailed, setLoadFailed] = useState(false);
   const [balanceRefreshing, setBalanceRefreshing] = useState(false);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  /** Store a fetched user unless the console has closed meanwhile. */
+  const keep = useCallback((fresh: OfoxUserInfo | null) => {
+    if (mounted.current) storeUser(fresh);
+  }, []);
 
   const loadUser = useCallback(async () => {
     const fresh = await ofoxGetUserInfo().catch(() => null);
-    if (fresh) storeUser(fresh);
+    if (fresh) keep(fresh);
     return fresh;
-  }, []);
+  }, [keep]);
 
   /**
    * 1s/3s/8s — total ~12s. Picked over the original 2s/5s/15s because 22s
@@ -95,9 +112,10 @@ export function useOfoxAccount(): OfoxAccount {
       for (let i = 0; i < RETRY_DELAYS_MS.length; i++) {
         setRetryAttempt(i + 1);
         await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[i]));
+        if (!mounted.current) return;
         const fresh = await ofoxGetUserInfo().catch(() => null);
         if (isMeaningfulUser(fresh)) {
-          storeUser(fresh);
+          keep(fresh);
           return;
         }
       }
@@ -106,7 +124,7 @@ export function useOfoxAccount(): OfoxAccount {
       setRetrying(false);
       setRetryAttempt(0);
     }
-  }, []);
+  }, [keep]);
 
   /**
    * Refetch *only* the user/wallet snapshot, not the tools. The toast tells
@@ -116,7 +134,7 @@ export function useOfoxAccount(): OfoxAccount {
     setBalanceRefreshing(true);
     try {
       const fresh = await ofoxGetUserInfo();
-      storeUser(fresh);
+      keep(fresh);
       const value = fresh?.balance?.balance;
       if (typeof value === "number") {
         toast.success(
@@ -132,7 +150,7 @@ export function useOfoxAccount(): OfoxAccount {
     } finally {
       setBalanceRefreshing(false);
     }
-  }, [t]);
+  }, [keep, t]);
 
   return {
     user,

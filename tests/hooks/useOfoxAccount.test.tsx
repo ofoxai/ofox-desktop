@@ -69,6 +69,46 @@ describe("useOfoxAccount", () => {
     );
   });
 
+  it.each(["loadUser", "refreshBalance"] as const)(
+    "drops a %s reply that lands after the console closed, so the next account never sees it",
+    async (call) => {
+      let reply!: (user: unknown) => void;
+      mocks.getUserInfo.mockReturnValueOnce(
+        new Promise((resolve) => (reply = resolve)),
+      );
+      const previous = renderHook(() => useOfoxAccount());
+      const pending = previous.result.current[call]();
+
+      previous.unmount();
+      await waitFor(() =>
+        expect(
+          queryClient.getQueryCache().find({ queryKey: OFOX_USER_KEY }),
+        ).toBeUndefined(),
+      );
+      await act(async () => {
+        reply({ ...ADA, balance: { balance: 7 } });
+        await pending;
+      });
+
+      expect(queryClient.getQueryData(OFOX_USER_KEY)).toBeUndefined();
+      const next = renderHook(() => useOfoxAccount());
+      expect(next.result.current.user).toBeNull();
+    },
+  );
+
+  it("stops retrying once the console closed and stores nothing", async () => {
+    vi.useFakeTimers();
+    mocks.getUserInfo.mockResolvedValue(ADA);
+    const previous = renderHook(() => useOfoxAccount());
+    act(() => void previous.result.current.retryUser());
+
+    previous.unmount();
+    await act(() => vi.advanceTimersByTimeAsync(1000 + 3000 + 8000));
+
+    expect(mocks.getUserInfo).not.toHaveBeenCalled();
+    expect(queryClient.getQueryData(OFOX_USER_KEY)).toBeUndefined();
+  });
+
   it("retries an empty user after 1s, 3s and 8s, then offers a manual retry", async () => {
     vi.useFakeTimers();
     mocks.getUserInfo.mockResolvedValue({ name: null, email: null });

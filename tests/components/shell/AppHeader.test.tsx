@@ -121,6 +121,26 @@ describe("AppHeader title area", () => {
     expect(screen.getByText("Ofox Desktop")).toBeVisible();
   });
 
+  it("keeps the tabs and the buttons out of the macOS drag region", () => {
+    mocks.update.hasUpdate = true;
+    mocks.update.updateInfo = { availableVersion: "1.4.0" };
+    const { container } = renderHeader();
+    const header = container.querySelector("header")!;
+    const tablist = screen.getByRole("tablist", { name: "页面" });
+    const actions = screen.getByRole("button", { name: "设置" }).parentElement!;
+
+    expect(tablist).toHaveClass("no-drag");
+    expect(actions).toHaveClass("no-drag");
+    expect(actions).toContainElement(
+      screen.getByRole("button", { name: "新版本 v1.4.0" }),
+    );
+    for (const control of header.querySelectorAll("button")) {
+      expect(control).not.toHaveAttribute("data-tauri-drag-region");
+    }
+    expect(tablist).not.toHaveAttribute("data-tauri-drag-region");
+    expect(actions).not.toHaveAttribute("data-tauri-drag-region");
+  });
+
   it("leaves the brand and dragging to the native title bar elsewhere", () => {
     mocks.mac = false;
     const { container } = renderHeader();
