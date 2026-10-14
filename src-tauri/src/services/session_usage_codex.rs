@@ -18,7 +18,7 @@ use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
 use crate::proxy::usage::parser::TokenUsage;
-use crate::services::session_usage::SessionSyncResult;
+use crate::services::session_usage::{SessionSyncResult, SessionUsageEntry};
 use rust_decimal::Decimal;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -247,10 +247,6 @@ fn collect_jsonl_recursive(dir: &Path, files: &mut Vec<PathBuf>, depth: u32, max
 /// 同步单�� Codex JSONL 文件，返回 (imported, skipped)
 fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppError> {
     let file_path_str = file_path.to_string_lossy().to_string();
-    let file_stem = file_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("rollout");
 
     // 获取文件元数据
     let metadata = fs::metadata(file_path)
@@ -270,6 +266,51 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
         return Ok((0, 0));
     }
 
+    // 整个文件都要解析以恢复累计值状态，只写入上次偏移之后的调用
+    let (calls, line_offset) = parse_codex_file(file_path)?;
+    let mut imported: u32 = 0;
+    let mut skipped: u32 = 0;
+    for call in calls.iter().filter(|c| c.line > last_offset) {
+        match insert_codex_session_entry(
+            db,
+            &call.ids,
+            &call.delta,
+            &call.model,
+            call.session_id.as_deref(),
+            call.timestamp.as_deref(),
+        ) {
+            Ok(true) => imported += 1,
+            Ok(false) => skipped += 1,
+            Err(e) => {
+                log::warn!("[CODEX-SYNC] 插入失败 ({}): {e}", call.ids.request_id);
+                skipped += 1;
+            }
+        }
+    }
+
+    // 更新同步状态
+    update_sync_state(db, &file_path_str, file_modified, line_offset)?;
+
+    Ok((imported, skipped))
+}
+
+/// One call in a rollout file: the line it was reported on and its token delta.
+struct CodexCall {
+    line: i64,
+    ids: CodexRequestIds,
+    delta: DeltaTokens,
+    model: String,
+    session_id: Option<String>,
+    timestamp: Option<String>,
+}
+
+/// Every call in a rollout file, in order, and the file's line count.
+fn parse_codex_file(file_path: &Path) -> Result<(Vec<CodexCall>, i64), AppError> {
+    let file_stem = file_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("rollout");
+
     // 打开文件逐行解析
     let file =
         fs::File::open(file_path).map_err(|e| AppError::Config(format!("无法打开文件: {e}")))?;
@@ -283,8 +324,7 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
     };
 
     let mut line_offset: i64 = 0;
-    let mut imported: u32 = 0;
-    let mut skipped: u32 = 0;
+    let mut calls = Vec::new();
 
     for line_result in reader.lines() {
         line_offset += 1;
@@ -411,45 +451,81 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
 
                 state.event_index += 1;
 
-                // 跳过已处理的行（但仍需解析以恢复状态）
-                if line_offset <= last_offset {
-                    continue;
-                }
-
                 // 生成唯一 request_id
                 let session_id_str = state.session_id.as_deref().unwrap_or("unknown");
-                let ids = CodexRequestIds::new(session_id_str, file_stem, state.event_index);
-
-                // 提取时间戳
-                let timestamp = value
-                    .get("timestamp")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-
-                match insert_codex_session_entry(
-                    db,
-                    &ids,
-                    &delta,
-                    &state.current_model,
-                    state.session_id.as_deref(),
-                    timestamp.as_deref(),
-                ) {
-                    Ok(true) => imported += 1,
-                    Ok(false) => skipped += 1,
-                    Err(e) => {
-                        log::warn!("[CODEX-SYNC] 插入失败 ({}): {e}", ids.request_id);
-                        skipped += 1;
-                    }
-                }
+                calls.push(CodexCall {
+                    line: line_offset,
+                    ids: CodexRequestIds::new(session_id_str, file_stem, state.event_index),
+                    delta,
+                    model: state.current_model.clone(),
+                    session_id: state.session_id.clone(),
+                    // 提取时间戳
+                    timestamp: value
+                        .get("timestamp")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                });
             }
             _ => {}
         }
     }
 
-    // 更新同步状态
-    update_sync_state(db, &file_path_str, file_modified, line_offset)?;
+    Ok((calls, line_offset))
+}
 
-    Ok((imported, skipped))
+/// When a call happened: its event's timestamp, else now.
+fn created_at_of(timestamp: Option<&str>) -> i64 {
+    timestamp
+        .and_then(|ts| {
+            chrono::DateTime::parse_from_rfc3339(ts)
+                .ok()
+                .map(|dt| dt.timestamp())
+        })
+        .unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
+        })
+}
+
+/// Every Codex call the sync would store, read from every rollout file in full
+/// (a request id counts once, as the insert keeps the first row for it). Calls
+/// of a file with no thread id are left out: they have no session to archive.
+pub(crate) fn session_entries() -> Vec<SessionUsageEntry> {
+    let mut seen = std::collections::HashSet::new();
+    let mut entries = Vec::new();
+    for file_path in collect_codex_session_files(&get_codex_config_dir()) {
+        let calls = match parse_codex_file(&file_path) {
+            Ok((calls, _)) => calls,
+            Err(e) => {
+                log::debug!("[CODEX-SYNC] 归档回填跳过 {}: {e}", file_path.display());
+                continue;
+            }
+        };
+        for call in calls {
+            let Some(session_id) = call.session_id else {
+                continue;
+            };
+            if !seen.insert(call.ids.request_id) {
+                continue;
+            }
+            entries.push(SessionUsageEntry {
+                session_id,
+                created_at: created_at_of(call.timestamp.as_deref()),
+                usage: TokenUsage {
+                    input_tokens: call.delta.fresh_input(),
+                    output_tokens: call.delta.output,
+                    cache_read_tokens: call.delta.cached_input,
+                    cache_creation_tokens: call.delta.cache_write,
+                    model: Some(call.model.clone()),
+                    message_id: None,
+                },
+                model: call.model,
+            });
+        }
+    }
+    entries
 }
 
 /// The request id of a Codex call, and the one versions before v11 gave it.
@@ -497,18 +573,7 @@ fn insert_codex_session_entry(
     }
 
     // 解析时间戳
-    let created_at = timestamp
-        .and_then(|ts| {
-            chrono::DateTime::parse_from_rfc3339(ts)
-                .ok()
-                .map(|dt| dt.timestamp())
-        })
-        .unwrap_or_else(|| {
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0)
-        });
+    let created_at = created_at_of(timestamp);
 
     // The same call stored by an earlier version under its old id (a file read
     // again from its new path in archived_sessions/): same number, same time.

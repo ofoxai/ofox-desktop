@@ -247,6 +247,11 @@ pub async fn sync_session_usage(
         }
     }
 
+    // v11 一次性维护（重算 Claude 会话费用、回填会话归档）：在定价与同步之后跑
+    if let Err(e) = crate::services::usage_maintenance::run_pending(&state.db) {
+        result.errors.push(format!("用量维护失败: {e}"));
+    }
+
     Ok(result)
 }
 

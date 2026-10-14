@@ -301,7 +301,7 @@ impl Database {
                 log::warn!("Periodic stream_check_logs cleanup failed: {e}");
             }
         }
-        match self.rollup_and_prune(30) {
+        match self.rollup_and_prune(super::dao::usage_rollup::USAGE_DETAIL_RETAIN_DAYS) {
             Ok(deleted) => {
                 reclaimed_rows += deleted;
             }

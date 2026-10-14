@@ -7,6 +7,15 @@ use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use chrono::{Duration, Local, TimeZone};
 
+/// How long request-log detail rows are kept before they are rolled up and
+/// pruned (session rows are archived first).
+pub(crate) const USAGE_DETAIL_RETAIN_DAYS: i64 = 30;
+
+/// The cutoff the prune uses now: rows older than it are rolled up and deleted.
+pub(crate) fn usage_prune_cutoff() -> Result<i64, AppError> {
+    compute_local_midnight_cutoff(Local::now(), USAGE_DETAIL_RETAIN_DAYS)
+}
+
 /// Compute the rollup/prune cutoff aligned to a local-day boundary.
 ///
 /// Anything strictly older than the returned timestamp will be aggregated into

@@ -18,7 +18,7 @@ use crate::error::AppError;
 use crate::gemini_config::get_gemini_dir;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
 use crate::proxy::usage::parser::TokenUsage;
-use crate::services::session_usage::SessionSyncResult;
+use crate::services::session_usage::{SessionSyncResult, SessionUsageEntry};
 use rust_decimal::Decimal;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -141,6 +141,50 @@ fn sync_single_gemini_file(db: &Database, file_path: &Path) -> Result<(u32, u32)
     }
 
     // 读取并解析整个 JSON 文件
+    let (session_id, calls) = parse_gemini_file(file_path)?;
+
+    let mut imported: u32 = 0;
+    let mut skipped: u32 = 0;
+    let gemini_msg_count = calls.len() as i64;
+
+    for call in &calls {
+        // 生成唯一 request_id
+        let session_id_str = session_id.as_deref().unwrap_or("unknown");
+        let request_id = format!("gemini_session:{session_id_str}:{}", call.message_id);
+
+        match insert_gemini_session_entry(
+            db,
+            &request_id,
+            &call.tokens,
+            &call.model,
+            session_id.as_deref(),
+            call.timestamp.as_deref(),
+        ) {
+            Ok(true) => imported += 1,
+            Ok(false) => skipped += 1,
+            Err(e) => {
+                log::warn!("[GEMINI-SYNC] 插入失败 ({}): {e}", request_id);
+                skipped += 1;
+            }
+        }
+    }
+
+    // 更新同步状态
+    update_sync_state(db, &file_path_str, file_modified, gemini_msg_count)?;
+
+    Ok((imported, skipped))
+}
+
+/// One Gemini reply with tokens.
+struct GeminiCall {
+    message_id: String,
+    model: String,
+    tokens: GeminiTokens,
+    timestamp: Option<String>,
+}
+
+/// A chat file's session id and its replies with tokens, in order.
+fn parse_gemini_file(file_path: &Path) -> Result<(Option<String>, Vec<GeminiCall>), AppError> {
     let content = fs::read_to_string(file_path)
         .map_err(|e| AppError::Config(format!("无法读取文件: {e}")))?;
     let value: serde_json::Value = serde_json::from_str(&content)
@@ -153,15 +197,11 @@ fn sync_single_gemini_file(db: &Database, file_path: &Path) -> Result<(u32, u32)
         .map(|s| s.to_string());
 
     // 遍历 messages 数组
-    let messages = match value.get("messages").and_then(|v| v.as_array()) {
-        Some(msgs) => msgs,
-        None => return Ok((0, 0)),
+    let Some(messages) = value.get("messages").and_then(|v| v.as_array()) else {
+        return Ok((session_id, Vec::new()));
     };
 
-    let mut imported: u32 = 0;
-    let mut skipped: u32 = 0;
-    let mut gemini_msg_count: i64 = 0;
-
+    let mut calls = Vec::new();
     for msg in messages {
         // 只处理 type == "gemini" 的消息
         if msg.get("type").and_then(|t| t.as_str()) != Some("gemini") {
@@ -179,41 +219,87 @@ fn sync_single_gemini_file(db: &Database, file_path: &Path) -> Result<(u32, u32)
             continue; // 跳过全零的空 token 消息
         }
 
-        gemini_msg_count += 1;
-
         // 提取消息 ID 和模型
-        let message_id = msg.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
-        let model = msg
-            .get("model")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        let timestamp = msg.get("timestamp").and_then(|v| v.as_str());
+        calls.push(GeminiCall {
+            message_id: msg
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            model: msg
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            tokens,
+            timestamp: msg
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        });
+    }
+    Ok((session_id, calls))
+}
 
-        // 生成唯一 request_id
-        let session_id_str = session_id.as_deref().unwrap_or("unknown");
-        let request_id = format!("gemini_session:{session_id_str}:{message_id}");
+/// When a reply happened: its timestamp, else now.
+fn created_at_of(timestamp: Option<&str>) -> i64 {
+    timestamp
+        .and_then(|ts| {
+            chrono::DateTime::parse_from_rfc3339(ts)
+                .ok()
+                .map(|dt| dt.timestamp())
+        })
+        .unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
+        })
+}
 
-        match insert_gemini_session_entry(
-            db,
-            &request_id,
-            &tokens,
-            model,
-            session_id.as_deref(),
-            timestamp,
-        ) {
-            Ok(true) => imported += 1,
-            Ok(false) => skipped += 1,
+/// Fresh input as every source stores it: Gemini's input (promptTokenCount)
+/// counts the cached tokens.
+fn usage_of(tokens: &GeminiTokens, model: &str) -> TokenUsage {
+    TokenUsage {
+        input_tokens: tokens.input.saturating_sub(tokens.cached),
+        // 合并 thoughts 到 output（思考 token 按输出计费）
+        output_tokens: tokens.output + tokens.thoughts,
+        cache_read_tokens: tokens.cached,
+        cache_creation_tokens: 0,
+        model: Some(model.to_string()),
+        message_id: None,
+    }
+}
+
+/// Every Gemini reply the sync would store, read from every chat file in full
+/// (a request id counts once). Files without a sessionId are left out.
+pub(crate) fn session_entries() -> Vec<SessionUsageEntry> {
+    let mut seen = std::collections::HashSet::new();
+    let mut entries = Vec::new();
+    for file_path in collect_gemini_session_files(&get_gemini_dir()) {
+        let (session_id, calls) = match parse_gemini_file(&file_path) {
+            Ok(parsed) => parsed,
             Err(e) => {
-                log::warn!("[GEMINI-SYNC] 插入失败 ({}): {e}", request_id);
-                skipped += 1;
+                log::debug!("[GEMINI-SYNC] 归档回填跳过 {}: {e}", file_path.display());
+                continue;
             }
+        };
+        let Some(session_id) = session_id else {
+            continue;
+        };
+        for call in calls {
+            if !seen.insert(format!("{session_id}:{}", call.message_id)) {
+                continue;
+            }
+            entries.push(SessionUsageEntry {
+                session_id: session_id.clone(),
+                created_at: created_at_of(call.timestamp.as_deref()),
+                usage: usage_of(&call.tokens, &call.model),
+                model: call.model,
+            });
         }
     }
-
-    // 更新同步状态
-    update_sync_state(db, &file_path_str, file_modified, gemini_msg_count)?;
-
-    Ok((imported, skipped))
+    entries
 }
 
 /// 从 tokens JSON 对象中提取 token 数据
@@ -238,33 +324,10 @@ fn insert_gemini_session_entry(
     let conn = lock_conn!(db.conn);
 
     // 解析时间戳
-    let created_at = timestamp
-        .and_then(|ts| {
-            chrono::DateTime::parse_from_rfc3339(ts)
-                .ok()
-                .map(|dt| dt.timestamp())
-        })
-        .unwrap_or_else(|| {
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0)
-        });
-
-    // 合并 thoughts 到 output（思考 token 按输出计费）
-    let output_tokens = tokens.output + tokens.thoughts;
-    // Gemini's input (promptTokenCount) includes the cached tokens: store fresh input
-    let fresh_input = tokens.input.saturating_sub(tokens.cached);
+    let created_at = created_at_of(timestamp);
 
     // 计算费用
-    let usage = TokenUsage {
-        input_tokens: fresh_input,
-        output_tokens,
-        cache_read_tokens: tokens.cached,
-        cache_creation_tokens: 0,
-        model: Some(model.to_string()),
-        message_id: None,
-    };
+    let usage = usage_of(tokens, model);
 
     let pricing = find_gemini_pricing(&conn, model);
     let multiplier = Decimal::from(1);
@@ -318,8 +381,8 @@ fn insert_gemini_session_entry(
             "gemini",            // app_type
             model,
             model,               // request_model = model
-            fresh_input,
-            output_tokens,
+            usage.input_tokens,  // fresh input
+            usage.output_tokens,
             tokens.cached,
             0i64,                // cache_creation_tokens
             input_cost,
@@ -379,7 +442,10 @@ fn update_sync_state(
 }
 
 /// 查找 Gemini 模型定价
-fn find_gemini_pricing(conn: &rusqlite::Connection, model_id: &str) -> Option<ModelPricing> {
+pub(crate) fn find_gemini_pricing(
+    conn: &rusqlite::Connection,
+    model_id: &str,
+) -> Option<ModelPricing> {
     // 精确匹配
     if let Some(pricing) = try_find_pricing(conn, model_id) {
         return Some(pricing);

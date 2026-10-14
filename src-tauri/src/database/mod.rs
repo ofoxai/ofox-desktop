@@ -170,7 +170,7 @@ impl Database {
         if let Err(e) = db.cleanup_old_stream_check_logs(7) {
             log::warn!("Startup stream_check_logs cleanup failed: {e}");
         }
-        if let Err(e) = db.rollup_and_prune(30) {
+        if let Err(e) = db.rollup_and_prune(dao::usage_rollup::USAGE_DETAIL_RETAIN_DAYS) {
             log::warn!("Startup rollup_and_prune failed: {e}");
         }
         // Reclaim disk space after cleanup

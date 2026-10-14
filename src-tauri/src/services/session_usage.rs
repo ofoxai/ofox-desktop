@@ -152,42 +152,28 @@ fn session_of_path(path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-/// 同步单个 JSONL 文件，返回 (imported, skipped)
-fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppError> {
-    let file_path_str = file_path.to_string_lossy().to_string();
-
-    // 获取文件元数据
-    let metadata = fs::metadata(file_path)
-        .map_err(|e| AppError::Config(format!("无法读取文件元数据: {e}")))?;
-    let file_modified = metadata
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    // 检查同步状态
-    let (last_modified, last_offset) = get_sync_state(db, &file_path_str)?;
-
-    // 文件未变化则跳过
-    if file_modified <= last_modified {
-        return Ok((0, 0));
-    }
-
-    // 从上次偏移位置开始增量解析
+/// The replies in a transcript after its first `skip_lines` lines, one per
+/// message id (the line that best stands for it: one with a stop_reason, else the
+/// one with the most output), in the order they first appear; and the file's
+/// line count.
+fn parse_claude_file(
+    file_path: &Path,
+    skip_lines: i64,
+) -> Result<(Vec<ParsedAssistantUsage>, i64), AppError> {
     let file =
         fs::File::open(file_path).map_err(|e| AppError::Config(format!("无法打开文件: {e}")))?;
     let reader = BufReader::new(file);
 
     let mut line_offset: i64 = 0;
-    let mut messages: HashMap<String, ParsedAssistantUsage> = HashMap::new();
+    let mut messages: Vec<ParsedAssistantUsage> = Vec::new();
+    let mut index_of: HashMap<String, usize> = HashMap::new();
     let mut current_session_id: Option<String> = None;
 
     for line_result in reader.lines() {
         line_offset += 1;
 
         // 跳过已处理的行
-        if line_offset <= last_offset {
+        if line_offset <= skip_lines {
             continue;
         }
 
@@ -269,32 +255,130 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
         };
 
         // 按 message.id 去重：优先保留有 stop_reason 的条目，否则保留最新的
-        let should_replace = match messages.get(&msg_id) {
-            None => true,
-            Some(existing) => {
+        match index_of.get(&msg_id) {
+            None => {
+                index_of.insert(msg_id, messages.len());
+                messages.push(parsed);
+            }
+            Some(&i) => {
+                let existing = &messages[i];
                 // 新条目有 stop_reason 而旧条目没有 → 替换
-                if parsed.stop_reason.is_some() && existing.stop_reason.is_none() {
-                    true
-                }
                 // 两个都有或都没有 stop_reason → 取 output_tokens 更大的
-                else if parsed.stop_reason.is_some() == existing.stop_reason.is_some() {
-                    parsed.output_tokens > existing.output_tokens
-                } else {
-                    false
+                let should_replace =
+                    if parsed.stop_reason.is_some() && existing.stop_reason.is_none() {
+                        true
+                    } else if parsed.stop_reason.is_some() == existing.stop_reason.is_some() {
+                        parsed.output_tokens > existing.output_tokens
+                    } else {
+                        false
+                    };
+                if should_replace {
+                    messages[i] = parsed;
                 }
             }
-        };
-
-        if should_replace {
-            messages.insert(msg_id, parsed);
         }
     }
+
+    Ok((messages, line_offset))
+}
+
+/// When a reply happened: its line's timestamp, else now.
+fn created_at_of(timestamp: Option<&str>) -> i64 {
+    timestamp
+        .and_then(|ts| {
+            chrono::DateTime::parse_from_rfc3339(ts)
+                .ok()
+                .map(|dt| dt.timestamp())
+        })
+        .unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
+        })
+}
+
+/// One call as a session transcript records it, read whole for the archive
+/// backfill; `usage.input_tokens` is fresh input like the stored rows.
+#[derive(Debug, Clone)]
+pub(crate) struct SessionUsageEntry {
+    pub session_id: String,
+    pub model: String,
+    pub usage: TokenUsage,
+    pub created_at: i64,
+}
+
+/// Every Claude call the sync would store, read from every transcript in full:
+/// a message id counts once, in the first file that has it (as the sync keeps the
+/// first row for an id). Calls with no output or no session are left out, as
+/// neither is stored nor archived.
+pub(crate) fn session_entries() -> Vec<SessionUsageEntry> {
+    let projects_dir = get_claude_config_dir().join("projects");
+    let mut seen = std::collections::HashSet::new();
+    let mut entries = Vec::new();
+    for file_path in collect_jsonl_files(&projects_dir) {
+        let messages = match parse_claude_file(&file_path, 0) {
+            Ok((messages, _)) => messages,
+            Err(e) => {
+                log::debug!("[SESSION-SYNC] 归档回填跳过 {}: {e}", file_path.display());
+                continue;
+            }
+        };
+        for msg in messages {
+            if msg.output_tokens == 0 || !seen.insert(msg.message_id.clone()) {
+                continue;
+            }
+            let Some(session_id) = msg.session_id.clone() else {
+                continue;
+            };
+            entries.push(SessionUsageEntry {
+                session_id,
+                created_at: created_at_of(msg.timestamp.as_deref()),
+                usage: TokenUsage {
+                    input_tokens: msg.input_tokens,
+                    output_tokens: msg.output_tokens,
+                    cache_read_tokens: msg.cache_read_tokens,
+                    cache_creation_tokens: msg.cache_creation_tokens,
+                    model: Some(msg.model.clone()),
+                    message_id: None,
+                },
+                model: msg.model,
+            });
+        }
+    }
+    entries
+}
+
+/// 同步单个 JSONL 文件，返回 (imported, skipped)
+fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppError> {
+    let file_path_str = file_path.to_string_lossy().to_string();
+
+    // 获取文件元数据
+    let metadata = fs::metadata(file_path)
+        .map_err(|e| AppError::Config(format!("无法读取文件元数据: {e}")))?;
+    let file_modified = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    // 检查同步状态
+    let (last_modified, last_offset) = get_sync_state(db, &file_path_str)?;
+
+    // 文件未变化则跳过
+    if file_modified <= last_modified {
+        return Ok((0, 0));
+    }
+
+    // 从上次偏移位置开始增量解析
+    let (messages, line_offset) = parse_claude_file(file_path, last_offset)?;
 
     // 写入数据库
     let mut imported: u32 = 0;
     let mut skipped: u32 = 0;
 
-    for msg in messages.values() {
+    for msg in &messages {
         // A reply without a stop_reason is still a call: a subagent's replies
         // mostly never get one, and a reply still streaming gets its final line
         // later, which then updates the row (see insert_session_log_entry).
@@ -370,22 +454,8 @@ fn insert_session_log_entry(
 ) -> Result<bool, AppError> {
     let conn = lock_conn!(db.conn);
 
-    // 解析时间戳
-    let created_at = msg
-        .timestamp
-        .as_ref()
-        .and_then(|ts| {
-            // 尝试解析 ISO 8601 时间戳
-            chrono::DateTime::parse_from_rfc3339(ts)
-                .ok()
-                .map(|dt| dt.timestamp())
-        })
-        .unwrap_or_else(|| {
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0)
-        });
+    // 解析时间戳（ISO 8601）
+    let created_at = created_at_of(msg.timestamp.as_deref());
 
     // 计算费用
     let usage = TokenUsage {
@@ -472,7 +542,7 @@ fn insert_session_log_entry(
 }
 
 /// 从 model_pricing 表查找模型定价（支持模糊匹配）
-fn find_model_pricing_for_session(
+pub(crate) fn find_model_pricing_for_session(
     conn: &rusqlite::Connection,
     model_id: &str,
 ) -> Option<ModelPricing> {
