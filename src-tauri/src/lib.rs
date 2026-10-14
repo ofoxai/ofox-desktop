@@ -42,8 +42,10 @@ mod services;
 mod session_manager;
 mod settings;
 mod store;
-#[cfg(test)]
-mod test_support;
+// Shared by the unit tests and (re-exported by tests/support.rs) the integration
+// tests; the app never calls it.
+#[doc(hidden)]
+pub mod test_sandbox;
 
 mod tray;
 mod tray_popover;

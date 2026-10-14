@@ -651,10 +651,23 @@ fn remove_dir_all_if_exists(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::sandbox;
+    use crate::test_sandbox::sandbox;
     use rusqlite::Connection;
     use serial_test::serial;
     use tempfile::tempdir;
+
+    /// The OpenCode data directory as the code under test resolves it. Tests build
+    /// their database inside it rather than re-deriving the path by hand, so the two
+    /// agree on separators on every platform (`source_path` is compared as a string).
+    fn opencode_dir_in(home: &Path) -> PathBuf {
+        let base_dir = get_opencode_base_dir();
+        assert!(
+            base_dir.starts_with(home),
+            "OpenCode data must resolve inside the sandbox home, got {}",
+            base_dir.display()
+        );
+        base_dir
+    }
 
     fn create_sqlite_schema(conn: &Connection) {
         conn.execute_batch(
@@ -806,7 +819,7 @@ mod tests {
     fn scan_sessions_sqlite_reads_temp_database() {
         let sandbox = sandbox();
 
-        let base_dir = sandbox.home().join(".local/share/opencode");
+        let base_dir = opencode_dir_in(sandbox.home());
         std::fs::create_dir_all(&base_dir).expect("create base dir");
         let db_path = base_dir.join("opencode.db");
         let conn = Connection::open(&db_path).expect("open sqlite db");
@@ -907,7 +920,7 @@ mod tests {
     fn delete_session_sqlite_removes_session() {
         let sandbox = sandbox();
 
-        let base_dir = sandbox.home().join(".local/share/opencode");
+        let base_dir = opencode_dir_in(sandbox.home());
         std::fs::create_dir_all(&base_dir).expect("create base dir");
         let db_path = base_dir.join("opencode.db");
         let conn = Connection::open(&db_path).expect("open sqlite db");
@@ -967,7 +980,7 @@ mod tests {
     fn delete_session_sqlite_rejects_foreign_db_path() {
         let sandbox = sandbox();
 
-        let expected_base_dir = sandbox.home().join(".local/share/opencode");
+        let expected_base_dir = opencode_dir_in(sandbox.home());
         std::fs::create_dir_all(&expected_base_dir).expect("create expected base dir");
         let expected_db_path = expected_base_dir.join("opencode.db");
         Connection::open(&expected_db_path).expect("create expected sqlite db");

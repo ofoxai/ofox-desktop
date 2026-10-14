@@ -480,9 +480,9 @@ fn the_scanner_flags_what_it_should_and_only_that() {
     assert_eq!(
         test_module_files(
             "lib.rs",
-            test_module_declarations("#[cfg(test)] pub(crate) mod test_support;")
+            test_module_declarations("#[cfg(test)] pub(crate) mod fixtures;")
         )[0],
-        "test_support.rs"
+        "fixtures.rs"
     );
 
     // Other variables, helper names, comments and strings are not reads.

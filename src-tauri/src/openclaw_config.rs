@@ -732,7 +732,7 @@ pub fn set_tools_config(tools: &OpenClawToolsConfig) -> Result<OpenClawWriteOutc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::sandbox;
+    use crate::test_sandbox::sandbox;
     use serial_test::serial;
 
     fn with_test_paths<T>(source: &str, test: impl FnOnce(&Path) -> T) -> T {

@@ -2034,7 +2034,7 @@ impl ProxyService {
 mod tests {
     use super::*;
     use crate::provider::ProviderMeta;
-    use crate::test_support::sandbox;
+    use crate::test_sandbox::sandbox;
     use serial_test::serial;
 
     #[test]

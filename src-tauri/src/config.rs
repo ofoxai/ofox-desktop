@@ -7,8 +7,7 @@ use crate::error::AppError;
 
 /// 各 agent CLI 用来改写自己配置目录的环境变量。
 ///
-/// 测试沙箱会清空这些变量（见 `tests/support.rs` 的 `sandbox()` 与 crate 内的
-/// `test_support::sandbox()`）：开发者 shell 里残留的任何一个都会让测试读写真实 agent
+/// 测试沙箱（`test_sandbox::sandbox()`，单元测试与集成测试共用）会清空这些变量：开发者 shell 里残留的任何一个都会让测试读写真实 agent
 /// 的目录。只列出确实会被读到的变量：`HERMES_HOME`、`PI_CODING_AGENT_DIR`、`DSH_HOME`
 /// 由本应用直接读取；`CODEX_HOME`、`CLAUDE_CONFIG_DIR` 由应用启动 / 探测的 Codex、
 /// Claude Code CLI 解析（也是应用要遵循的目录）。`GEMINI_CLI_HOME`、`OPENCODE_CONFIG_DIR`、

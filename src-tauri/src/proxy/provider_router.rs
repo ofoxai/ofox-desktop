@@ -262,7 +262,7 @@ impl ProviderRouter {
 mod tests {
     use super::*;
     use crate::database::Database;
-    use crate::test_support::sandbox;
+    use crate::test_sandbox::sandbox;
     use serde_json::json;
     use serial_test::serial;
 

@@ -1,16 +1,22 @@
-//! Process-environment sandbox for unit tests.
+//! Process-environment sandbox shared by every test harness.
 //!
 //! Anything that resolves a user directory (the home, `%APPDATA%`, the XDG dirs,
 //! an agent's own `CODEX_HOME`...) reads the process environment, which is shared
 //! by every test thread. [`sandbox`] serializes the tests that need a private
 //! home, points all of those variables at a fresh temp dir, and puts the
-//! environment back when the guard drops. `tests/support.rs` has the same helper
-//! for the integration tests; keep the two variable tables in step.
+//! environment back when the guard drops.
+//!
+//! This is the single implementation: the in-crate unit tests use it as
+//! `crate::test_sandbox::sandbox`, and `tests/support.rs` re-exports it for the
+//! integration tests (they link the library built without `cfg(test)`, so the
+//! module cannot be `#[cfg(test)]`). The application never calls it.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use tempfile::TempDir;
+
+use crate::settings::{reload_settings, update_settings, AppSettings};
 
 /// Variables set into the sandbox home, with their location below it.
 const SANDBOX_VARS: &[(&str, &str)] = &[
@@ -29,7 +35,7 @@ static SANDBOX_LOCK: Mutex<()> = Mutex::new(());
 
 /// Guard returned by [`sandbox`]. Field order matters: the temp dir is removed
 /// after the environment is restored, and the lock is released last.
-pub(crate) struct Sandbox {
+pub struct Sandbox {
     dir: TempDir,
     saved: Vec<(&'static str, Option<OsString>)>,
     _lock: MutexGuard<'static, ()>,
@@ -37,14 +43,15 @@ pub(crate) struct Sandbox {
 
 impl Sandbox {
     /// The sandbox home directory.
-    pub(crate) fn home(&self) -> &Path {
+    pub fn home(&self) -> &Path {
         self.dir.path()
     }
 }
 
-/// Take the global sandbox lock, create a fresh home, and route the process
-/// environment into it until the returned guard drops.
-pub(crate) fn sandbox() -> Sandbox {
+/// Serialize the test, give it a fresh home, and route every user-directory
+/// variable into it (the agents' own `AGENT_DIR_VARS` are cleared). The real home
+/// is never read. Everything is put back when the guard drops.
+pub fn sandbox() -> Sandbox {
     enter(SANDBOX_LOCK.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
@@ -70,7 +77,7 @@ fn enter(lock: MutexGuard<'static, ()>) -> Sandbox {
         saved,
         _lock: lock,
     };
-    crate::settings::reload_settings().expect("reload settings for the sandbox");
+    reload_settings().expect("reload settings for the sandbox");
     sandbox
 }
 
@@ -86,13 +93,19 @@ fn location(home: &Path, relative: &str) -> PathBuf {
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
+        // Reset the in-memory settings while the environment still points into the
+        // sandbox: saving defaults must land in the sandbox, and reloading after the
+        // restore below would read whatever home the environment goes back to (the
+        // real one, in an integration-test binary).
+        if let Err(err) = update_settings(AppSettings::default()) {
+            eprintln!("sandbox: could not reset the settings: {err}");
+        }
         for (name, value) in self.saved.iter().rev() {
             match value {
                 Some(value) => std::env::set_var(name, value),
                 None => std::env::remove_var(name),
             }
         }
-        let _ = crate::settings::reload_settings();
     }
 }
 
@@ -165,5 +178,19 @@ mod tests {
 
         assert_ne!(sandbox.home(), first);
         assert!(!sandbox.home().join("marker").exists());
+    }
+
+    #[test]
+    #[serial]
+    fn settings_a_test_changed_do_not_outlive_its_sandbox() {
+        {
+            let _sandbox = sandbox();
+            let mut changed = crate::settings::get_settings();
+            changed.use_app_window_controls = true;
+            update_settings(changed).expect("change a setting");
+            assert!(crate::settings::get_settings().use_app_window_controls);
+        }
+
+        assert!(!crate::settings::get_settings().use_app_window_controls);
     }
 }

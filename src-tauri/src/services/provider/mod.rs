@@ -58,7 +58,7 @@ mod tests {
     use crate::provider::ProviderMeta;
     use crate::proxy::types::ProxyConfig;
     use crate::store::AppState;
-    use crate::test_support::sandbox;
+    use crate::test_sandbox::sandbox;
     use serde_json::json;
     use serial_test::serial;
     use std::fs;
