@@ -154,7 +154,16 @@ static NO_VARS: EnvMap = EnvMap::new();
 /// before the variable a terminal would have exported is known. Never fails: a shell
 /// that cannot be run just leaves the snapshot empty.
 pub async fn ready() {
+    #[cfg(test)]
+    READY_CALLS.with(|calls| calls.set(calls.get() + 1));
     LOGIN_SHELL_ENV.get_or_init(load_login_shell_env).await;
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How often [`ready`] was awaited on this thread, so a test can check that an
+    /// entry point waits for the snapshot (a `#[tokio::test]` runs on one thread).
+    static READY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The snapshot, or nothing before [`ready`] has finished.
@@ -729,6 +738,122 @@ mod tests {
                 original
             );
             assert!(!sandbox.home().join(".claude").exists());
+        }
+    }
+
+    /// Every entry point that reads or writes an agent's files waits for the login-shell
+    /// snapshot before it looks at the directory.
+    mod gates {
+        use super::READY_CALLS;
+        use crate::database::Database;
+        use crate::services::ofox_bind::{self, Tool};
+        use crate::test_sandbox::sandbox;
+        use serde_json::json;
+        use serial_test::serial;
+        use std::future::Future;
+
+        /// Runs `call` and reports whether `ready()` was awaited meanwhile.
+        async fn awaits_ready<T>(call: impl Future<Output = T>) -> bool {
+            let before = READY_CALLS.with(|calls| calls.get());
+            call.await;
+            READY_CALLS.with(|calls| calls.get()) > before
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn the_bind_operations_wait_for_the_snapshot() {
+            let _sandbox = sandbox();
+            let db = Database::memory().expect("db");
+            let key = "sk-of-TEST";
+
+            assert!(awaits_ready(ofox_bind::bind(&db, Tool::Codex, "codex", key)).await);
+            assert!(awaits_ready(ofox_bind::bind_existing(&db, Tool::Codex, "codex", key)).await);
+            assert!(
+                awaits_ready(ofox_bind::unbind(&db, Tool::Codex, "codex", &[], true)).await,
+                "unbind"
+            );
+            assert!(
+                awaits_ready(ofox_bind::restore_missing_binding(
+                    &db,
+                    Tool::Codex,
+                    "codex",
+                    &[],
+                    key
+                ))
+                .await,
+                "restore_missing_binding"
+            );
+            assert!(
+                awaits_ready(ofox_bind::replace_key(&db, Tool::Codex, "old", "new")).await,
+                "replace_key"
+            );
+            assert!(
+                awaits_ready(ofox_bind::persist_bound_settings(
+                    &db,
+                    Tool::Codex,
+                    key,
+                    &json!({}),
+                    &json!({})
+                ))
+                .await,
+                "persist_bound_settings"
+            );
+            assert!(
+                awaits_ready(ofox_bind::sync_live_model(&db, Tool::Codex, Some(key))).await,
+                "sync_live_model"
+            );
+            assert!(
+                awaits_ready(ofox_bind::migrate_codex_on_startup()).await,
+                "migrate_codex_on_startup"
+            );
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn the_status_readers_wait_for_the_snapshot() {
+            let _sandbox = sandbox();
+            let db = Database::memory().expect("db");
+
+            assert!(
+                awaits_ready(ofox_bind::status::binding_status(&db, Tool::Claude, None)).await,
+                "binding_status"
+            );
+            assert!(
+                awaits_ready(ofox_bind::model_state::snapshot(
+                    &db,
+                    Tool::Claude,
+                    "claude",
+                    None
+                ))
+                .await,
+                "model_state::snapshot"
+            );
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn endpoint_reconcile_and_the_config_commands_wait_for_the_snapshot() {
+            let _sandbox = sandbox();
+            let db = Database::memory().expect("db");
+
+            assert!(
+                awaits_ready(crate::commands::ofox_apex::reconcile_tool_endpoints(&db)).await,
+                "reconcile_tool_endpoints"
+            );
+            assert!(awaits_ready(crate::commands::get_agent_dirs()).await);
+            assert!(awaits_ready(crate::commands::get_config_dir("codex".into())).await);
+            assert!(awaits_ready(crate::commands::list_sessions()).await);
+            assert!(awaits_ready(crate::commands::get_claude_config_status()).await);
+        }
+
+        #[tokio::test]
+        #[serial]
+        async fn the_skill_service_waits_for_the_snapshot_before_it_writes_app_dirs() {
+            let _sandbox = sandbox();
+            let db = std::sync::Arc::new(Database::memory().expect("db"));
+            let service = crate::services::skill::SkillService::new();
+
+            assert!(awaits_ready(service.update_skill(&db, "missing")).await);
         }
     }
 }
