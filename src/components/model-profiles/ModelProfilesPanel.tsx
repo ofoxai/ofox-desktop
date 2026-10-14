@@ -1,6 +1,9 @@
 import { useTranslation } from "react-i18next";
 import { Plus, Save, Pencil, Trash2, Undo2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ListCard, ListRow } from "@/components/ui/list";
+import type { ModelProfile } from "@/lib/api/modelProfiles";
+import { cn } from "@/lib/utils";
 import {
   useModelProfiles,
   type ModelProfilesController,
@@ -51,56 +54,48 @@ export function ProfileDialogs({
   );
 }
 
+/** A profile's match as a soft chip: in use is green, partial amber. */
+const MATCH_TONE: Record<ModelProfile["match"], string> = {
+  inUse: "bg-ok-soft text-ok",
+  partial: "bg-warn-soft text-warn",
+  different: "bg-pill text-ink-muted",
+  unavailable: "bg-pill text-ink-faint",
+};
+
 function ProfilesList({ controller }: { controller: ModelProfilesController }) {
   const { t } = useTranslation();
   const { snapshots, profiles, busy, error, lastUndo } = controller;
   const sharedLabel = t("modelExperience.profiles.sharedCodex");
 
   return (
-    <div className="mx-auto max-w-4xl space-y-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-lg font-semibold">
-            {t("modelExperience.profiles.title")}
-          </h1>
-          <p className="mt-1 max-w-xl text-[12px] text-muted-foreground">
-            {t("modelExperience.profiles.description")}
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {lastUndo && (
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={busy}
-              onClick={controller.undo}
-            >
-              <Undo2 className="mr-1.5 h-3.5 w-3.5" />
-              {t("modelExperience.profiles.undo")}
-            </Button>
-          )}
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={busy || !controller.canCapture}
-            onClick={controller.startCapture}
-          >
-            <Save className="mr-1.5 h-3.5 w-3.5" />
-            {t("modelExperience.profiles.capture")}
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {lastUndo && (
+          <Button variant="secondary" disabled={busy} onClick={controller.undo}>
+            <Undo2 aria-hidden className="h-3.5 w-3.5" />
+            {t("modelExperience.profiles.undo")}
           </Button>
-          <Button size="sm" disabled={busy} onClick={controller.startCreate}>
-            <Plus className="mr-1.5 h-3.5 w-3.5" />
-            {t("modelExperience.profiles.create")}
-          </Button>
-        </div>
+        )}
+        <Button
+          variant="secondary"
+          disabled={busy || !controller.canCapture}
+          onClick={controller.startCapture}
+        >
+          <Save aria-hidden className="h-3.5 w-3.5" />
+          {t("modelExperience.profiles.capture")}
+        </Button>
+        <Button disabled={busy} onClick={controller.startCreate}>
+          <Plus aria-hidden className="h-3.5 w-3.5" />
+          {t("modelExperience.profiles.create")}
+        </Button>
       </div>
       {controller.mixedDsh && (
-        <p className="text-[12px] text-muted-foreground">
+        <p className="text-ctl text-ink-muted">
           {t("modelExperience.profiles.mixedDsh")}
         </p>
       )}
       {snapshots.isError && (
-        <div role="alert" className="text-[12px] text-destructive">
+        <div role="alert" className="text-ctl text-danger">
           {t("modelExperience.stateFailed")}{" "}
           <button
             type="button"
@@ -112,89 +107,84 @@ function ProfilesList({ controller }: { controller: ModelProfilesController }) {
         </div>
       )}
       {error && !controller.review && !controller.deleting && (
-        <p role="alert" className="text-[12px] text-destructive">
+        <p role="alert" className="break-words text-ctl text-danger">
           {error}
         </p>
       )}
       {profiles.isPending ? (
-        <p
-          role="status"
-          className="py-8 text-center text-sm text-muted-foreground"
-        >
+        <p role="status" className="py-8 text-center text-ui text-ink-muted">
           {t("modelExperience.loading")}
         </p>
       ) : profiles.isError ? (
-        <div role="alert" className="rounded-xl border p-5 text-sm">
-          {t("modelExperience.profiles.loadFailed")}{" "}
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => void profiles.refetch()}
-          >
+        <div
+          role="alert"
+          className="flex items-center justify-between gap-3 rounded-list border border-line bg-card py-3 pl-[14px] pr-3 text-ui text-ink-2"
+        >
+          {t("modelExperience.profiles.loadFailed")}
+          <Button variant="secondary" onClick={() => void profiles.refetch()}>
             {t("modelExperience.retry")}
           </Button>
         </div>
       ) : !profiles.data?.length ? (
-        <div className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
+        <div className="rounded-list border border-dashed border-line px-6 py-8 text-center text-ui text-ink-muted">
           {t("modelExperience.profiles.empty")}
         </div>
       ) : (
         profiles.data.map((profile) => (
-          <article
-            key={profile.id}
-            className="rounded-xl border border-border bg-background/80 p-4"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex min-w-0 items-center gap-2">
-                <h2 className="truncate text-sm font-semibold">
+          <ListCard key={profile.id} role="group" aria-label={profile.name}>
+            <ListRow>
+              <div className="flex min-w-0 flex-1 items-center gap-2">
+                <h3 className="truncate text-ui font-medium text-ink">
                   {profile.name}
-                </h2>
+                </h3>
                 <span
-                  className={`shrink-0 rounded-md px-2 py-0.5 text-[11px] ${profile.match === "inUse" ? "bg-emerald-500/10 text-emerald-600" : "bg-muted text-muted-foreground"}`}
+                  className={cn(
+                    "flex-none rounded-full px-2 py-px text-note font-medium",
+                    MATCH_TONE[profile.match],
+                  )}
                 >
                   {t(`modelExperience.profiles.match.${profile.match}`)}
                 </span>
               </div>
-              <div className="flex gap-1">
+              <div className="flex flex-none items-center gap-1">
                 <Button
+                  variant="secondary"
                   size="sm"
-                  variant="outline"
                   disabled={busy}
                   onClick={() => controller.preview(profile)}
                 >
                   {t("modelExperience.profiles.preview")}
                 </Button>
                 <Button
-                  size="icon"
-                  variant="ghost"
+                  variant="icon"
                   aria-label={t("modelExperience.profiles.edit", {
                     name: profile.name,
                   })}
                   disabled={busy}
                   onClick={() => controller.startEdit(profile)}
                 >
-                  <Pencil className="h-3.5 w-3.5" />
+                  <Pencil aria-hidden className="h-3.5 w-3.5" />
                 </Button>
                 <Button
+                  variant="dangerGhost"
                   size="icon"
-                  variant="ghost"
                   aria-label={t("modelExperience.profiles.delete", {
                     name: profile.name,
                   })}
                   disabled={busy}
                   onClick={() => controller.askDelete(profile)}
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
+                  <Trash2 aria-hidden className="h-3.5 w-3.5" />
                 </Button>
               </div>
-            </div>
-            <dl className="mt-3 space-y-1.5 text-[12px]">
+            </ListRow>
+            <dl className="space-y-1 py-2.5 pl-[14px] pr-3 text-ctl">
               {profile.targets.map((item) => (
                 <div key={item.target} className="flex gap-3">
-                  <dt className="w-36 shrink-0 text-muted-foreground">
+                  <dt className="w-36 flex-none text-ink-muted">
                     {targetLabel(item.target, sharedLabel)}
                   </dt>
-                  <dd className="min-w-0 break-words">
+                  <dd className="min-w-0 break-words text-ink-2">
                     {selectionText(
                       item.selection,
                       t("modelPicker.defaultRoute"),
@@ -205,7 +195,7 @@ function ProfilesList({ controller }: { controller: ModelProfilesController }) {
                 </div>
               ))}
             </dl>
-          </article>
+          </ListCard>
         ))
       )}
     </div>
