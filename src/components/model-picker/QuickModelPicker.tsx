@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { Loader2, Layers } from "lucide-react";
 import { ModelPicker, MultiModelPicker } from "./ModelPicker";
 import { Button } from "@/components/ui/button";
+import { menuTriggerClassName } from "@/components/ui/menu-select";
 import {
   Dialog,
   DialogContent,
@@ -18,6 +19,7 @@ import {
 } from "@/hooks/useModelSelection";
 import type { ToolModelSnapshot } from "@/lib/api/modelSelection";
 import { TOOL_META } from "@/config/toolMeta";
+import { cn } from "@/lib/utils";
 
 interface QuickModelPickerProps {
   snapshot?: ToolModelSnapshot;
@@ -136,23 +138,23 @@ export function QuickModelPicker({
         </div>
       )}
       {multi ? (
-        <Button
+        <button
           type="button"
-          variant="outline"
-          size="sm"
           disabled={!writable || save.isPending}
           onClick={() => {
             setEditing(snapshot);
             setDraft([...selectedModels]);
             setSaveError(null);
           }}
-          className="h-7 max-w-full gap-1.5 text-[11px] font-normal"
+          className={cn(menuTriggerClassName, "max-w-full text-ink")}
         >
-          <Layers className="h-3 w-3" />
-          {t("modelExperience.modelCount", { count: selectedModels.length })}
-        </Button>
+          <Layers aria-hidden className="h-[13px] w-[13px] flex-none" />
+          <span className="min-w-0 truncate">
+            {t("modelExperience.modelCount", { count: selectedModels.length })}
+          </span>
+        </button>
       ) : (
-        <div className="[&_button[role=combobox]]:h-7 [&_button[role=combobox]]:text-[11px]">
+        <div>
           {toolId === "chatgpt" && (
             <div className="mb-1 text-muted-foreground">
               {t("modelExperience.writableDefault")}

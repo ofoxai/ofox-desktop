@@ -1,7 +1,8 @@
 import { useCallback, useMemo, useState, type UIEvent } from "react";
 import { useTranslation } from "react-i18next";
-import { Check, ChevronsUpDown, Loader2 } from "lucide-react";
+import { Check, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { MenuChevron, menuTriggerClassName } from "@/components/ui/menu-select";
 import {
   Popover,
   PopoverContent,
@@ -145,29 +146,28 @@ export function MultiModelPicker({
       <div className="flex gap-1">
         <Popover open={open} onOpenChange={handleOpenChange}>
           <PopoverTrigger asChild>
-            <Button
+            <button
               id={id}
               type="button"
-              variant="outline"
               role="combobox"
               aria-expanded={open}
+              aria-haspopup="listbox"
               disabled={disabled}
-              className="flex-1 justify-between font-normal"
+              className={cn(
+                menuTriggerClassName,
+                "max-w-none flex-1",
+                selectedIds.length > 0 && "text-ink",
+              )}
             >
-              <span
-                className={cn(
-                  "truncate",
-                  selectedIds.length === 0 && "text-muted-foreground",
-                )}
-              >
+              <span className="min-w-0 flex-1 truncate text-left">
                 {selectedIds.length > 0
                   ? t("modelPicker.selectedCount", {
                       count: selectedIds.length,
                     })
                   : t("modelPicker.selectAtLeastOne")}
               </span>
-              <ChevronsUpDown className="ml-2 h-3.5 w-3.5 shrink-0 opacity-50" />
-            </Button>
+              <MenuChevron />
+            </button>
           </PopoverTrigger>
           <PopoverContent
             className="p-0"
@@ -341,20 +341,24 @@ export function ModelPicker({
     <div className="flex gap-1">
       <Popover open={open} onOpenChange={handleOpenChange}>
         <PopoverTrigger asChild>
-          <Button
+          <button
             id={id}
             type="button"
-            variant="outline"
             role="combobox"
             aria-expanded={open}
+            aria-haspopup="listbox"
             disabled={disabled}
-            className="flex-1 justify-between font-normal"
+            className={cn(
+              menuTriggerClassName,
+              "max-w-none flex-1",
+              value && "text-ink",
+            )}
           >
-            <span className={cn("truncate", !value && "text-muted-foreground")}>
+            <span className="min-w-0 flex-1 truncate text-left">
               {value || emptyLabel || t("modelPicker.defaultRoute")}
             </span>
-            <ChevronsUpDown className="ml-2 h-3.5 w-3.5 shrink-0 opacity-50" />
-          </Button>
+            <MenuChevron />
+          </button>
         </PopoverTrigger>
         <PopoverContent
           className="p-0"
