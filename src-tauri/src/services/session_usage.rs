@@ -98,7 +98,7 @@ pub fn sync_claude_session_logs(db: &Database) -> Result<SessionSyncResult, AppE
     }
 
     if result.imported > 0 {
-        log::info!(
+        log::debug!(
             "[SESSION-SYNC] 同步完成: 导入 {} 条, 跳过 {} 条, 扫描 {} 个文件",
             result.imported,
             result.skipped,

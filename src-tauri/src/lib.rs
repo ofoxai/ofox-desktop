@@ -1176,51 +1176,10 @@ pub fn run() {
                     }
                 });
 
-                // Session log usage sync: 启动时同步一次。**60s 定期 loop 已移除**
-                // —— 主窗口不再展示统计，定时扫描会持续打日志、浪费 IO。
-                // 解析函数 (`session_usage::sync_claude_session_logs` /
-                // `session_usage_codex::sync_codex_usage` /
-                // `session_usage_gemini::sync_gemini_usage`) 保留：UsageDashboard /
-                // tray popover / `sync_session_usage` Tauri 命令仍可主动调，让用户
-                // 在自己想看时按需触发一次新鲜的扫描。
-                let db_for_session_sync = state.db.clone();
-                tauri::async_runtime::spawn(async move {
-                    // Pricing sync 必须先于 session 解析跑：session_usage_*
-                    // 在写入每条 proxy_request_logs 时按 model 查 model_pricing
-                    // 算 total_cost_usd。先 refresh 一次 pricing，新模型才不会
-                    // 落到本月 0 美元的洞里。cooldown 24h 门控避免重启刷屏。
-                    if let Err(e) = crate::services::pricing_sync::sync_pricing_if_needed(
-                        &db_for_session_sync,
-                    )
-                    .await
-                    {
-                        log::warn!("Pricing sync initial tick failed: {e}");
-                    }
-
-                    // 首次同步——给 UsageDashboard / tray 启动时有数据可看，
-                    // 之后再要新数据需要用户主动触发。
-                    if let Err(e) =
-                        crate::services::session_usage::sync_claude_session_logs(
-                            &db_for_session_sync,
-                        )
-                    {
-                        log::warn!("Session usage initial sync failed: {e}");
-                    }
-                    if let Err(e) =
-                        crate::services::session_usage_codex::sync_codex_usage(
-                            &db_for_session_sync,
-                        )
-                    {
-                        log::warn!("Codex usage initial sync failed: {e}");
-                    }
-                    if let Err(e) =
-                        crate::services::session_usage_gemini::sync_gemini_usage(
-                            &db_for_session_sync,
-                        )
-                    {
-                        log::warn!("Gemini usage initial sync failed: {e}");
-                    }
-                });
+                // Usage sync (Claude/Codex/Gemini/OpenCode session logs): once at
+                // startup after the pricing sync, then every 10 minutes; each run
+                // that happens emits `usage-synced`. See services/usage_sync.rs.
+                crate::services::usage_sync::spawn_periodic(app_handle.clone(), state.db.clone());
             });
 
             // Linux: 禁用 WebKitGTK 硬件加速，防止 EGL 初始化失败导致白屏

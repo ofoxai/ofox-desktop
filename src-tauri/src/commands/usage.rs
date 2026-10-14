@@ -194,8 +194,11 @@ pub fn delete_model_pricing(state: State<'_, AppState>, model_id: String) -> Res
 ///
 /// 兼带 Ofox pricing 强制刷新（无 cooldown）—— 用户点「刷新」就是想看到
 /// 最新的成本估算，包括新上线模型的 pricing。pricing 失败不阻塞日志同步。
+/// The sync itself is `usage_sync::sync_all` forced (never skipped), which reads
+/// every session source, runs pending maintenance and emits `usage-synced`.
 #[tauri::command]
 pub async fn sync_session_usage(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<crate::services::session_usage::SessionSyncResult, AppError> {
     // Pricing 刷新放在 session 解析之前：session_usage_* 在写入每条
@@ -205,54 +208,15 @@ pub async fn sync_session_usage(
         log::warn!("Pricing sync during manual refresh failed: {e}");
     }
 
-    // 同步 Claude 会话日志
-    let mut result = crate::services::session_usage::sync_claude_session_logs(&state.db)?;
-
-    // 同步 Codex 使用数据
-    match crate::services::session_usage_codex::sync_codex_usage(&state.db) {
-        Ok(codex_result) => {
-            result.imported += codex_result.imported;
-            result.skipped += codex_result.skipped;
-            result.files_scanned += codex_result.files_scanned;
-            result.errors.extend(codex_result.errors);
-        }
-        Err(e) => {
-            result.errors.push(format!("Codex 同步失败: {e}"));
-        }
-    }
-
-    // 同步 Gemini 使用数据
-    match crate::services::session_usage_gemini::sync_gemini_usage(&state.db) {
-        Ok(gemini_result) => {
-            result.imported += gemini_result.imported;
-            result.skipped += gemini_result.skipped;
-            result.files_scanned += gemini_result.files_scanned;
-            result.errors.extend(gemini_result.errors);
-        }
-        Err(e) => {
-            result.errors.push(format!("Gemini 同步失败: {e}"));
-        }
-    }
-
-    // 同步 OpenCode 使用数据
-    match crate::services::session_usage_opencode::sync_opencode_usage(&state.db) {
-        Ok(opencode_result) => {
-            result.imported += opencode_result.imported;
-            result.skipped += opencode_result.skipped;
-            result.files_scanned += opencode_result.files_scanned;
-            result.errors.extend(opencode_result.errors);
-        }
-        Err(e) => {
-            result.errors.push(format!("OpenCode 同步失败: {e}"));
-        }
-    }
-
-    // v11 一次性维护（重算 Claude 会话费用、回填会话归档）：在定价与同步之后跑
-    if let Err(e) = crate::services::usage_maintenance::run_pending(&state.db) {
-        result.errors.push(format!("用量维护失败: {e}"));
-    }
-
-    Ok(result)
+    let result = crate::services::usage_sync::sync_all_and_emit(&app, &state.db, true).await?;
+    Ok(
+        result.unwrap_or(crate::services::session_usage::SessionSyncResult {
+            imported: 0,
+            skipped: 0,
+            files_scanned: 0,
+            errors: vec![],
+        }),
+    )
 }
 
 /// 获取数据来源分布

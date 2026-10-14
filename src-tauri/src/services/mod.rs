@@ -31,6 +31,7 @@ pub mod subscription;
 pub mod usage_cache;
 pub mod usage_maintenance;
 pub mod usage_stats;
+pub mod usage_sync;
 pub mod webdav;
 pub mod webdav_auto_sync;
 pub mod webdav_sync;

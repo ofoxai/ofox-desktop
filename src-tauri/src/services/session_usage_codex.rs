@@ -190,7 +190,7 @@ pub fn sync_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
     }
 
     if result.imported > 0 {
-        log::info!(
+        log::debug!(
             "[CODEX-SYNC] 同步完成: 导入 {} 条, 跳过 {} 条, ��描 {} 个文件",
             result.imported,
             result.skipped,
