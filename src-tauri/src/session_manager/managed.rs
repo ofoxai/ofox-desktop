@@ -172,7 +172,14 @@ fn shown(listing: &[SessionMeta]) -> impl Iterator<Item = &SessionMeta> {
 }
 
 pub fn list() -> Vec<ManagedSession> {
-    let listing = remember(super::scan_sessions());
+    list_with(None)
+}
+
+/// The listing, titled and counted from whole files (cached in `db`).
+pub fn list_with(db: Option<&crate::database::Database>) -> Vec<ManagedSession> {
+    let mut listing = super::scan_sessions();
+    super::meta_cache::enrich(&mut listing, db);
+    let listing = remember(listing);
     shown(&listing)
         .map(|meta| record(meta.clone(), &listing))
         .collect()
@@ -617,6 +624,65 @@ mod tests {
                 {"path": subagent.to_string_lossy(), "sizeBytes": size(&subagent), "kind": "subagent"},
             ])
         );
+    }
+
+    /// A long Claude Code session: its title made by Claude Code sits past the
+    /// head the quick scan reads, and its lines count 3 messages.
+    fn long_claude_session(home: &Path) -> PathBuf {
+        let project = home.join(".claude/projects/-work-app");
+        std::fs::create_dir_all(&project).unwrap();
+        let path = project.join(format!("{CLAUDE_ID}.jsonl"));
+        let user = |content: serde_json::Value| {
+            serde_json::json!({"type": "user", "sessionId": CLAUDE_ID, "cwd": "/work/app",
+                "timestamp": "2026-10-14T10:00:00Z", "message": {"role": "user", "content": content}})
+        };
+        let reply = |id: &str, model: &str| {
+            serde_json::json!({"type": "assistant", "sessionId": CLAUDE_ID, "timestamp": "2026-10-14T10:00:01Z",
+                "message": {"id": id, "role": "assistant", "model": model,
+                    "content": [{"type": "text", "text": "ok"}],
+                    "usage": {"input_tokens": 1, "output_tokens": 1}}})
+        };
+        let mut lines = vec![user(serde_json::json!("fix the login"))];
+        let mut meta = user(serde_json::json!("[Image: source: /tmp/1.png]"));
+        meta["isMeta"] = serde_json::json!(true);
+        lines.push(meta);
+        // one reply streamed over three lines
+        lines.extend((0..3).map(|_| reply("msg_1", "claude-opus-5-5")));
+        lines.push(reply("msg_synthetic", "<synthetic>"));
+        lines.push(user(serde_json::json!([
+            {"type": "tool_result", "tool_use_id": "t", "content": "done"}
+        ])));
+        lines.extend(
+            (0..8).map(|_| serde_json::json!({"type": "progress", "sessionId": CLAUDE_ID})),
+        );
+        lines.push(serde_json::json!({"type": "ai-title", "aiTitle": "Fix login bug", "sessionId": CLAUDE_ID}));
+        lines.extend(
+            (0..40).map(|_| serde_json::json!({"type": "progress", "sessionId": CLAUDE_ID})),
+        );
+        lines.push(user(serde_json::json!(
+            "<command-name>/compact</command-name>\n<command-args></command-args>"
+        )));
+        let body = lines.iter().map(|l| format!("{l}\n")).collect::<String>();
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_listed_session_is_titled_and_counted_from_its_whole_file() {
+        let sandbox = sandbox();
+        long_claude_session(sandbox.home());
+
+        let listed = list();
+        let record = listed
+            .iter()
+            .find(|r| r.meta.session_id == CLAUDE_ID)
+            .expect("listed");
+        let json = serde_json::to_value(record).unwrap();
+
+        assert_eq!(json["title"], "Fix login bug");
+        assert_eq!(json["titleSource"], "agent");
+        // two prompts (one a slash command) and one reply
+        assert_eq!(json["messageCount"], 3);
     }
 
     #[test]

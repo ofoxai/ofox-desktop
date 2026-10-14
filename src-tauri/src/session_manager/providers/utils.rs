@@ -63,6 +63,23 @@ pub fn read_head_tail_lines(
     Ok((head, tail))
 }
 
+/// Each line of a session file (a zstd one decompressed), in order. A line
+/// that is not UTF-8 is skipped.
+pub fn for_each_line(path: &Path, mut visit: impl FnMut(&str)) -> io::Result<()> {
+    let reader = super::dsh::open(path).map_err(io::Error::other)?;
+    let mut reader = BufReader::with_capacity(256 * 1024, reader);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        if reader.read_until(b'\n', &mut buf)? == 0 {
+            return Ok(());
+        }
+        if let Ok(line) = std::str::from_utf8(&buf) {
+            visit(line.trim_end());
+        }
+    }
+}
+
 pub fn parse_timestamp_to_ms(value: &Value) -> Option<i64> {
     // Integer: milliseconds (>1e12) or seconds
     if let Some(n) = value.as_i64() {

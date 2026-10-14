@@ -1,4 +1,5 @@
 pub mod managed;
+pub mod meta_cache;
 pub mod providers;
 pub mod terminal;
 pub mod title;
@@ -33,6 +34,9 @@ pub struct SessionMeta {
     pub resume_command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_source: Option<title::TitleSource>,
+    /// Prompts typed plus replies, where the whole file was read for them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]

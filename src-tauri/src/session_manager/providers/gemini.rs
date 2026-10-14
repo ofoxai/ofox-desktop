@@ -229,6 +229,7 @@ pub(crate) fn parse_session(path: &Path) -> Option<SessionMeta> {
         source_path: Some(source_path),
         resume_command: Some(format!("gemini --resume {session_id}")),
         title_source,
+        message_count: None,
     })
 }
 

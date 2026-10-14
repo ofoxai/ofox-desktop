@@ -166,6 +166,7 @@ pub(crate) fn parse_session(path: &Path) -> Option<SessionMeta> {
         source_path: Some(path.to_string_lossy().into()),
         resume_command: None,
         title_source,
+        message_count: None,
     })
 }
 

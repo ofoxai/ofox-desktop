@@ -7,10 +7,13 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::codex_config::get_codex_config_dir;
+use crate::session_manager::meta_cache::SessionDetails;
 use crate::session_manager::title::{clean_prompt, one_line, titled, untagged, TitleCandidates};
 use crate::session_manager::{SessionMessage, SessionMeta};
 
-use super::utils::{extract_text, parse_timestamp_to_ms, read_head_tail_lines, truncate_summary};
+use super::utils::{
+    extract_text, for_each_line, parse_timestamp_to_ms, read_head_tail_lines, truncate_summary,
+};
 
 const PROVIDER_ID: &str = "codex";
 
@@ -92,6 +95,11 @@ pub(crate) fn thread_names(index: &Path) -> ThreadNames {
     names
 }
 
+/// The thread names of the Codex home in use.
+pub(crate) fn current_thread_names() -> ThreadNames {
+    thread_names(&get_codex_config_dir().join("session_index.jsonl"))
+}
+
 pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
     crate::session_manager::transcript::codex(path)
 }
@@ -118,11 +126,13 @@ pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<boo
     Ok(true)
 }
 
-/// What a Codex rollout's lines say about its title. Title rules adapted
-/// from Magpie internal/sessions/codex.go (MIT).
+/// What a Codex rollout's lines say about its title and length. Title rules
+/// adapted from Magpie internal/sessions/codex.go (MIT).
 #[derive(Debug, Default)]
 pub(crate) struct CodexScan {
     pub candidates: TitleCandidates,
+    prompts: u32,
+    replies: u32,
 }
 
 impl CodexScan {
@@ -132,14 +142,23 @@ impl CodexScan {
         };
         let payload_type = payload.get("type").and_then(Value::as_str);
         match value.get("type").and_then(Value::as_str) {
-            Some("response_item")
-                if payload_type == Some("message")
-                    && payload.get("role").and_then(Value::as_str) == Some("user") =>
-            {
-                for text in user_texts(payload.get("content")) {
-                    if self.candidates.prompt.is_none() {
-                        self.candidates.prompt = clean_prompt(text);
+            Some("response_item") if payload_type == Some("message") => {
+                match payload.get("role").and_then(Value::as_str) {
+                    Some("user") => {
+                        let mut typed = false;
+                        for text in user_texts(payload.get("content")) {
+                            let prompt = clean_prompt(text);
+                            typed |= prompt.is_some();
+                            if self.candidates.prompt.is_none() {
+                                self.candidates.prompt = prompt;
+                            }
+                        }
+                        if typed {
+                            self.prompts += 1;
+                        }
                     }
+                    Some("assistant") => self.replies += 1,
+                    _ => {}
                 }
             }
             Some("event_msg") if payload_type == Some("user_message") => {
@@ -155,6 +174,31 @@ impl CodexScan {
             _ => {}
         }
     }
+
+    /// Typed prompts plus the agent's messages back.
+    pub(crate) fn message_count(&self) -> u32 {
+        self.prompts.saturating_add(self.replies)
+    }
+}
+
+/// The whole rollout's title candidates and message count (the thread name
+/// is not in the rollout: see `thread_names`).
+pub(crate) fn details(path: &Path) -> Option<SessionDetails> {
+    let mut scan = CodexScan::default();
+    for_each_line(path, |line| {
+        let message =
+            line.contains("\"type\":\"response_item\"") && line.contains("\"type\":\"message\"");
+        if message || line.contains("\"type\":\"user_message\"") {
+            if let Ok(value) = serde_json::from_str::<Value>(line) {
+                scan.line(&value);
+            }
+        }
+    })
+    .ok()?;
+    Some(SessionDetails {
+        message_count: scan.message_count(),
+        candidates: scan.candidates,
+    })
 }
 
 /// The texts of a user message: each text item, or the message when it is
@@ -272,6 +316,7 @@ fn parse_with_names(path: &Path, names: &HashMap<String, String>) -> Option<Sess
         source_path: Some(path.to_string_lossy().to_string()),
         resume_command: Some(format!("codex resume {session_id}")),
         title_source,
+        message_count: None,
     })
 }
 

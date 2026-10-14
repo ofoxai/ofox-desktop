@@ -1245,6 +1245,7 @@ mod tests {
             source_path: Some(source.to_string_lossy().into()),
             resume_command: None,
             title_source: None,
+            message_count: None,
         }
     }
     // Advance comparison time instead of touching process-global env or personal configs.

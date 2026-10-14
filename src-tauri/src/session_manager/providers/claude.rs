@@ -1,12 +1,19 @@
+use std::borrow::Cow;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use serde::de::IgnoredAny;
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::config::get_claude_config_dir;
+use crate::session_manager::meta_cache::SessionDetails;
 use crate::session_manager::title::{clean_prompt, one_line, titled, untagged, TitleCandidates};
 use crate::session_manager::{SessionMessage, SessionMeta};
 
-use super::utils::{extract_text, parse_timestamp_to_ms, read_head_tail_lines, truncate_summary};
+use super::utils::{
+    extract_text, for_each_line, parse_timestamp_to_ms, read_head_tail_lines, truncate_summary,
+};
 
 const PROVIDER_ID: &str = "claude";
 
@@ -65,11 +72,32 @@ pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<boo
     Ok(true)
 }
 
-/// What a Claude Code session file's lines say about its title.
+/// What a Claude Code session file's lines say about its title and length.
 /// Title rules adapted from Magpie internal/sessions/claude.go (MIT).
 #[derive(Debug, Default)]
 pub(crate) struct ClaudeScan {
     pub candidates: TitleCandidates,
+    prompts: u32,
+    replies: HashSet<String>,
+    unnamed_replies: u32,
+}
+
+/// The parts of an assistant line a scan needs, read without the content.
+#[derive(Deserialize)]
+struct AssistantLine<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    message: Option<AssistantMessage<'a>>,
+}
+
+#[derive(Deserialize)]
+struct AssistantMessage<'a> {
+    #[serde(borrow)]
+    id: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    model: Option<Cow<'a, str>>,
+    usage: Option<IgnoredAny>,
 }
 
 impl ClaudeScan {
@@ -86,6 +114,14 @@ impl ClaudeScan {
             Some("summary") if self.candidates.summary.is_none() => {
                 last_text(&mut self.candidates.summary, value.get("summary"))
             }
+            Some("assistant") => {
+                let field = |key| message.and_then(|m| m.get(key));
+                self.reply(
+                    field("id").and_then(Value::as_str),
+                    field("model").and_then(Value::as_str),
+                    field("usage").is_some(),
+                );
+            }
             Some("user") | None if role == Some("user") => {
                 let flagged = |key| value.get(key).and_then(Value::as_bool) == Some(true);
                 if flagged("isMeta") || flagged("isSidechain") {
@@ -93,6 +129,9 @@ impl ClaudeScan {
                 }
                 let text = message.and_then(|m| m.get("content")).and_then(user_text);
                 let prompt = text.as_deref().and_then(clean_prompt);
+                if prompt.is_some() {
+                    self.prompts += 1;
+                }
                 let candidates = &mut self.candidates;
                 if candidates.prompt.is_none() {
                     if prompt.is_some() {
@@ -105,6 +144,65 @@ impl ClaudeScan {
             _ => {}
         }
     }
+
+    /// An assistant line: a reply when it spent tokens (a message streamed
+    /// over several lines repeats its id and counts once).
+    fn reply(&mut self, id: Option<&str>, model: Option<&str>, usage: bool) {
+        if !usage || model == Some("<synthetic>") {
+            return;
+        }
+        match id {
+            Some(id) => {
+                self.replies.insert(id.to_string());
+            }
+            None => self.unnamed_replies += 1,
+        }
+    }
+
+    /// Prompts typed plus replies made.
+    pub(crate) fn message_count(&self) -> u32 {
+        let replies = u32::try_from(self.replies.len()).unwrap_or(u32::MAX);
+        self.prompts
+            .saturating_add(replies)
+            .saturating_add(self.unnamed_replies)
+    }
+}
+
+/// The whole file's title candidates and message count. Assistant lines, the
+/// bulk of a file, are read without their content.
+pub(crate) fn details(path: &Path) -> Option<SessionDetails> {
+    let mut scan = ClaudeScan::default();
+    for_each_line(path, |line| {
+        if line.contains("\"type\":\"assistant\"") {
+            if let Ok(AssistantLine {
+                kind: Some(kind),
+                message: Some(message),
+            }) = serde_json::from_str(line)
+            {
+                if kind == "assistant" {
+                    scan.reply(
+                        message.id.as_deref(),
+                        message.model.as_deref(),
+                        message.usage.is_some(),
+                    );
+                    return;
+                }
+            }
+        }
+        if ["\"role\":\"user\"", "-title\"", "\"type\":\"summary\""]
+            .iter()
+            .any(|key| line.contains(key))
+        {
+            if let Ok(value) = serde_json::from_str::<Value>(line) {
+                scan.line(&value);
+            }
+        }
+    })
+    .ok()?;
+    Some(SessionDetails {
+        message_count: scan.message_count(),
+        candidates: scan.candidates,
+    })
 }
 
 fn last_text(slot: &mut Option<String>, value: Option<&Value>) {
@@ -234,6 +332,7 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
         source_path: Some(path.to_string_lossy().to_string()),
         resume_command: Some(format!("claude --resume {session_id}")),
         title_source,
+        message_count: None,
     })
 }
 

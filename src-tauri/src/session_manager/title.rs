@@ -58,6 +58,22 @@ impl TitleCandidates {
         self
     }
 
+    /// Fill every candidate this one lacks from `other`.
+    pub fn fill_from(&mut self, other: &TitleCandidates) {
+        for (mine, theirs) in [
+            (&mut self.custom, &other.custom),
+            (&mut self.agent, &other.agent),
+            (&mut self.summary, &other.summary),
+            (&mut self.prompt, &other.prompt),
+            (&mut self.message, &other.message),
+            (&mut self.directory, &other.directory),
+        ] {
+            if mine.is_none() {
+                mine.clone_from(theirs);
+            }
+        }
+    }
+
     /// The folder candidate: the last component of the project directory.
     pub fn with_directory(mut self, project_dir: Option<&str>) -> Self {
         self.directory = project_dir.and_then(super::providers::path_basename);

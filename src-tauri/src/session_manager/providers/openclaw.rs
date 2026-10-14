@@ -305,6 +305,7 @@ fn parse_session(
         source_path: Some(path.to_string_lossy().to_string()),
         resume_command: None, // OpenClaw sessions are gateway-managed, no CLI resume
         title_source,
+        message_count: None,
     })
 }
 
