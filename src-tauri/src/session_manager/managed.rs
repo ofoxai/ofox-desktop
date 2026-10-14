@@ -1,5 +1,6 @@
 //! Server-owned session references and capabilities. Paths and shell commands from
 //! the renderer are never authoritative for reads, resume, or file management.
+use super::usage::{self, SessionUsage};
 use super::{providers, SessionMessage, SessionMeta};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -55,6 +56,9 @@ pub struct ManagedSession {
     pub size_bytes: u64,
     /// Its conversation files.
     pub files: Vec<SessionFile>,
+    /// What it spent, where its agent's usage is read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<SessionUsage>,
 }
 
 pub fn roots(provider: &str) -> Result<Vec<PathBuf>, String> {
@@ -175,13 +179,29 @@ pub fn list() -> Vec<ManagedSession> {
     list_with(None)
 }
 
-/// The listing, titled and counted from whole files (cached in `db`).
+/// The listing, titled and counted from whole files (cached in `db`), with
+/// each session's usage from `db`.
 pub fn list_with(db: Option<&crate::database::Database>) -> Vec<ManagedSession> {
     let mut listing = super::scan_sessions();
     super::meta_cache::enrich(&mut listing, db);
     let listing = remember(listing);
+    let mut usage = db
+        .map(|db| {
+            usage::load(db).unwrap_or_else(|e| {
+                log::warn!("[SESSIONS] {e}");
+                Default::default()
+            })
+        })
+        .unwrap_or_default();
     shown(&listing)
-        .map(|meta| record(meta.clone(), &listing))
+        .map(|meta| {
+            let spent = usage::app_type(&meta.provider_id)
+                .and_then(|app| usage.remove(&(app.to_string(), meta.session_id.clone())));
+            ManagedSession {
+                usage: spent,
+                ..record(meta.clone(), &listing)
+            }
+        })
         .collect()
 }
 
@@ -233,6 +253,7 @@ fn record(meta: SessionMeta, listing: &[SessionMeta]) -> ManagedSession {
         subagent_count,
         size_bytes,
         files,
+        usage: None,
         meta,
     }
 }
@@ -683,6 +704,40 @@ mod tests {
         assert_eq!(json["titleSource"], "agent");
         // two prompts (one a slash command) and one reply
         assert_eq!(json["messageCount"], 3);
+    }
+
+    #[test]
+    fn a_listed_session_carries_what_it_spent() {
+        let sandbox = sandbox();
+        claude_session(sandbox.home());
+        let db = crate::database::Database::memory().unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO proxy_request_logs (request_id, provider_id, app_type, model,
+                    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                    total_cost_usd, latency_ms, status_code, session_id, created_at)
+                 VALUES ('r1', '_session', 'claude', 'claude-opus-5-5', 3, 5, 700, 11, '0.42', 0, 200, ?1, 1)",
+                [CLAUDE_ID],
+            )
+            .unwrap();
+
+        let listed = list_with(Some(&db));
+        let record = listed
+            .iter()
+            .find(|r| r.meta.session_id == CLAUDE_ID)
+            .expect("listed");
+        let usage = &serde_json::to_value(record).unwrap()["usage"];
+        assert_eq!(usage["models"][0]["model"], "claude-opus-5-5");
+        assert_eq!(usage["models"][0]["requests"], 1);
+        assert_eq!(usage["inputTokens"], 3);
+        assert_eq!(usage["outputTokens"], 5);
+        assert_eq!(usage["cacheReadTokens"], 700);
+        assert_eq!(usage["cacheWriteTokens"], 11);
+        assert_eq!(usage["totalTokens"], 719);
+        assert_eq!(usage["costUsd"], 0.42);
+        assert_eq!(usage["unpricedModels"], 0);
     }
 
     #[test]

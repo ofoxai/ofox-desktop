@@ -5,6 +5,7 @@ pub mod terminal;
 pub mod title;
 pub mod transcript;
 pub mod trash;
+pub mod usage;
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
