@@ -248,7 +248,8 @@
     "deleting": "削除中...",
     "auto": "自動",
     "enabled": "有効",
-    "notSet": "未設定"
+    "notSet": "未設定",
+    "noMatches": "一致する項目はありません"
   },
   "update": {
     "promptTitle": "新しいバージョンがあります",

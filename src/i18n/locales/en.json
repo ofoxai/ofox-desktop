@@ -248,7 +248,8 @@
     "deleting": "Deleting...",
     "auto": "Auto",
     "enabled": "Enabled",
-    "notSet": "Not Set"
+    "notSet": "Not Set",
+    "noMatches": "No matches"
   },
   "update": {
     "promptTitle": "Update available",
