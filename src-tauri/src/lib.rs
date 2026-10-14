@@ -39,6 +39,7 @@ mod prompt_files;
 mod provider;
 mod provider_defaults;
 mod proxy;
+mod redact;
 mod services;
 mod session_manager;
 mod settings;
