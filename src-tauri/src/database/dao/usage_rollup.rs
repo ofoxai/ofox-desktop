@@ -1,10 +1,24 @@
 //! Usage rollup DAO
 //!
-//! Aggregates proxy_request_logs into daily rollups and prunes old detail rows.
+//! Aggregates proxy_request_logs into daily rollups and prunes old detail rows;
+//! rows of a session are also folded into `session_usage_archive` first.
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use chrono::{Duration, Local, TimeZone};
+use rusqlite::{params, OptionalExtension};
+use rust_decimal::Decimal;
+use std::collections::BTreeMap;
+use std::str::FromStr;
+
+/// How long request-log detail rows are kept before they are rolled up and
+/// pruned (session rows are archived first).
+pub(crate) const USAGE_DETAIL_RETAIN_DAYS: i64 = 30;
+
+/// The cutoff the prune uses now: rows older than it are rolled up and deleted.
+pub(crate) fn usage_prune_cutoff() -> Result<i64, AppError> {
+    compute_local_midnight_cutoff(Local::now(), USAGE_DETAIL_RETAIN_DAYS)
+}
 
 /// Compute the rollup/prune cutoff aligned to a local-day boundary.
 ///
@@ -53,12 +67,54 @@ fn compute_local_midnight_cutoff(
     Ok(local_dt.timestamp())
 }
 
+/// A cost stored as text, read as a decimal: plain (`0.000009`), or the
+/// exponent form SQLite gives a REAL cast to text (`9.0e-06`). Unreadable text
+/// counts as 0.
+pub(crate) fn parse_cost_usd(text: &str) -> Decimal {
+    let text = text.trim();
+    Decimal::from_str(text)
+        .or_else(|_| Decimal::from_scientific(text))
+        .ok()
+        .or_else(|| {
+            text.parse::<f64>()
+                .ok()
+                .and_then(|f| Decimal::try_from(f).ok())
+        })
+        .unwrap_or(Decimal::ZERO)
+}
+
+/// One session/model's archived usage while it is being summed.
+struct ArchiveTotals {
+    tokens: [i64; 4],
+    count: i64,
+    cost: Decimal,
+    first_at: i64,
+    last_at: i64,
+}
+
+impl ArchiveTotals {
+    fn add(&mut self, other: &ArchiveTotals) {
+        for (sum, n) in self.tokens.iter_mut().zip(other.tokens) {
+            *sum += n;
+        }
+        self.count += other.count;
+        self.cost += other.cost;
+        self.first_at = self.first_at.min(other.first_at);
+        self.last_at = self.last_at.max(other.last_at);
+    }
+}
+
 impl Database {
     /// Aggregate proxy_request_logs older than `retain_days` into usage_daily_rollups,
     /// then delete the aggregated detail rows.
     /// Returns the number of deleted detail rows.
     pub fn rollup_and_prune(&self, retain_days: i64) -> Result<u64, AppError> {
         let cutoff = compute_local_midnight_cutoff(Local::now(), retain_days)?;
+        self.rollup_and_prune_before(cutoff)
+    }
+
+    /// `rollup_and_prune` for the rows older than `cutoff`.
+    pub(crate) fn rollup_and_prune_before(&self, cutoff: i64) -> Result<u64, AppError> {
         let conn = lock_conn!(self.conn);
 
         // Check if there are any rows to process
@@ -86,7 +142,7 @@ impl Database {
                     .map_err(|e| AppError::Database(e.to_string()))?;
                 if deleted > 0 {
                     log::info!(
-                        "Rolled up and pruned {deleted} proxy_request_logs (retain={retain_days}d)"
+                        "Rolled up and pruned {deleted} proxy_request_logs (before {cutoff})"
                     );
                 }
                 Ok(deleted)
@@ -97,6 +153,98 @@ impl Database {
                 Err(e)
             }
         }
+    }
+
+    /// Fold the rows about to be pruned that belong to a session into
+    /// `session_usage_archive`, so a session's totals (live rows + archive) stay
+    /// whole after the detail rows go. Costs are summed as decimals and stored as
+    /// plain decimal text (never SQLite's `9.0e-06` form of a REAL).
+    fn archive_session_rows(conn: &rusqlite::Connection, cutoff: i64) -> Result<(), AppError> {
+        let db_err =
+            |e: rusqlite::Error| AppError::Database(format!("Archiving session usage failed: {e}"));
+        let mut totals: BTreeMap<(String, String, String), ArchiveTotals> = BTreeMap::new();
+        {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT app_type, session_id, model, input_tokens, output_tokens,
+                            cache_read_tokens, cache_creation_tokens, total_cost_usd, created_at
+                     FROM proxy_request_logs
+                     WHERE created_at < ?1 AND session_id IS NOT NULL AND session_id != ''",
+                )
+                .map_err(db_err)?;
+            let rows = stmt
+                .query_map([cutoff], |r| {
+                    Ok((
+                        (r.get(0)?, r.get(1)?, r.get(2)?),
+                        ArchiveTotals {
+                            tokens: [r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?],
+                            count: 1,
+                            cost: parse_cost_usd(&r.get::<_, String>(7)?),
+                            first_at: r.get(8)?,
+                            last_at: r.get(8)?,
+                        },
+                    ))
+                })
+                .map_err(db_err)?;
+            for row in rows {
+                let (key, row) = row.map_err(db_err)?;
+                match totals.get_mut(&key) {
+                    Some(sum) => sum.add(&row),
+                    None => {
+                        totals.insert(key, row);
+                    }
+                }
+            }
+        }
+
+        for ((app_type, session_id, model), mut sum) in totals {
+            let archived = conn
+                .query_row(
+                    "SELECT COALESCE(input_tokens, 0), COALESCE(output_tokens, 0),
+                            COALESCE(cache_read_tokens, 0), COALESCE(cache_creation_tokens, 0),
+                            COALESCE(request_count, 0), COALESCE(cost_usd, '0'),
+                            first_at, last_at
+                     FROM session_usage_archive
+                     WHERE app_type = ?1 AND session_id = ?2 AND model = ?3",
+                    params![app_type, session_id, model],
+                    |r| {
+                        Ok(ArchiveTotals {
+                            tokens: [r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?],
+                            count: r.get(4)?,
+                            cost: parse_cost_usd(&r.get::<_, String>(5)?),
+                            first_at: r.get::<_, Option<i64>>(6)?.unwrap_or(i64::MAX),
+                            last_at: r.get::<_, Option<i64>>(7)?.unwrap_or(i64::MIN),
+                        })
+                    },
+                )
+                .optional()
+                .map_err(db_err)?;
+            if let Some(archived) = archived {
+                sum.add(&archived);
+            }
+            conn.execute(
+                "INSERT OR REPLACE INTO session_usage_archive
+                    (app_type, session_id, model, input_tokens, output_tokens,
+                     cache_read_tokens, cache_creation_tokens, request_count, cost_usd,
+                     first_at, last_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    app_type,
+                    session_id,
+                    model,
+                    sum.tokens[0],
+                    sum.tokens[1],
+                    sum.tokens[2],
+                    sum.tokens[3],
+                    sum.count,
+                    sum.cost.normalize().to_string(),
+                    sum.first_at,
+                    sum.last_at,
+                ],
+            )
+            .map_err(db_err)?;
+        }
+        Ok(())
     }
 
     fn do_rollup_and_prune(conn: &rusqlite::Connection, cutoff: i64) -> Result<u64, AppError> {
@@ -143,6 +291,8 @@ impl Database {
             [cutoff],
         )
         .map_err(|e| AppError::Database(format!("Rollup aggregation failed: {e}")))?;
+
+        Self::archive_session_rows(conn, cutoff)?;
 
         // Delete the aggregated detail rows
         let deleted = conn
@@ -306,6 +456,269 @@ mod tests {
         )?;
         assert_eq!(count, 13, "10 existing + 3 new");
         assert_eq!(input, 1300, "1000 existing + 300 new");
+        Ok(())
+    }
+
+    /// (app_type, session_id, model) -> (input, output, cache read, cache write,
+    /// requests, cost, first_at, last_at): live rows plus the archive.
+    type SessionTotals = std::collections::BTreeMap<
+        (String, String, String),
+        (i64, i64, i64, i64, i64, f64, i64, i64),
+    >;
+
+    fn session_totals(db: &Database) -> Result<SessionTotals, AppError> {
+        let conn = crate::database::lock_conn!(db.conn);
+        let mut stmt = conn.prepare(
+            "SELECT app_type, session_id, model,
+                    SUM(i), SUM(o), SUM(cr), SUM(cc), SUM(n), SUM(cost), MIN(f), MAX(l)
+             FROM (
+                SELECT app_type, session_id, model, input_tokens i, output_tokens o,
+                       cache_read_tokens cr, cache_creation_tokens cc, 1 n,
+                       CAST(total_cost_usd AS REAL) cost, created_at f, created_at l
+                FROM proxy_request_logs WHERE session_id IS NOT NULL AND session_id != ''
+                UNION ALL
+                SELECT app_type, session_id, model, input_tokens, output_tokens,
+                       cache_read_tokens, cache_creation_tokens, request_count,
+                       CAST(cost_usd AS REAL), first_at, last_at
+                FROM session_usage_archive
+             ) GROUP BY app_type, session_id, model",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                (r.get(0)?, r.get(1)?, r.get(2)?),
+                (
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                    r.get(9)?,
+                    r.get(10)?,
+                ),
+            ))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    fn insert_log(
+        db: &Database,
+        id: &str,
+        session: Option<&str>,
+        model: &str,
+        tokens: (i64, i64, i64, i64),
+        cost: &str,
+        created_at: i64,
+    ) -> Result<(), AppError> {
+        let conn = crate::database::lock_conn!(db.conn);
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, provider_id, app_type, model, input_tokens, output_tokens,
+                cache_read_tokens, cache_creation_tokens, total_cost_usd, latency_ms,
+                status_code, session_id, created_at, data_source
+            ) VALUES (?1, '_session', 'claude', ?2, ?3, ?4, ?5, ?6, ?7, 0, 200, ?8, ?9, 'session_log')",
+            rusqlite::params![
+                id, model, tokens.0, tokens.1, tokens.2, tokens.3, cost, session, created_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn prune_moves_session_rows_into_the_archive_and_keeps_session_totals() -> Result<(), AppError>
+    {
+        let db = Database::memory()?;
+        let now = chrono::Utc::now().timestamp();
+        let old = now - 40 * 86400;
+        let older = now - 50 * 86400;
+        let recent = now - 2 * 86400;
+        insert_log(
+            &db,
+            "a1",
+            Some("sess-a"),
+            "opus",
+            (3, 100, 5000, 200),
+            "0.25",
+            older,
+        )?;
+        insert_log(
+            &db,
+            "a2",
+            Some("sess-a"),
+            "opus",
+            (5, 50, 6000, 0),
+            "0.5",
+            old,
+        )?;
+        insert_log(
+            &db,
+            "a3",
+            Some("sess-a"),
+            "haiku",
+            (1, 10, 0, 0),
+            "0.125",
+            old,
+        )?;
+        insert_log(
+            &db,
+            "a4",
+            Some("sess-a"),
+            "opus",
+            (2, 20, 100, 0),
+            "0.0625",
+            recent,
+        )?;
+        insert_log(
+            &db,
+            "b1",
+            Some("sess-b"),
+            "opus",
+            (7, 70, 700, 70),
+            "1.5",
+            old,
+        )?;
+        insert_log(&db, "no-session", None, "opus", (9, 9, 9, 9), "2", old)?;
+        insert_log(
+            &db,
+            "empty-session",
+            Some(""),
+            "opus",
+            (9, 9, 9, 9),
+            "2",
+            old,
+        )?;
+        let before = session_totals(&db)?;
+
+        let deleted = db.rollup_and_prune(30)?;
+
+        assert_eq!(deleted, 6);
+        assert_eq!(
+            session_totals(&db)?,
+            before,
+            "per-session totals survive the prune"
+        );
+        let conn = crate::database::lock_conn!(db.conn);
+        let archived: (i64, i64, i64, i64, i64, String, i64, i64) = conn.query_row(
+            "SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                    request_count, cost_usd, first_at, last_at
+             FROM session_usage_archive
+             WHERE app_type = 'claude' AND session_id = 'sess-a' AND model = 'opus'",
+            [],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                ))
+            },
+        )?;
+        assert_eq!(
+            archived,
+            (8, 150, 11000, 200, 2, "0.75".to_string(), older, old),
+            "only the pruned rows are archived"
+        );
+        let archive_rows: i64 =
+            conn.query_row("SELECT COUNT(*) FROM session_usage_archive", [], |r| {
+                r.get(0)
+            })?;
+        assert_eq!(archive_rows, 3, "rows without a session are not archived");
+        Ok(())
+    }
+
+    #[test]
+    fn a_later_prune_adds_to_the_archived_session_totals() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let now = chrono::Utc::now().timestamp();
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO session_usage_archive VALUES
+                    ('claude', 'sess-a', 'opus', 10, 20, 30, 40, 3, '1.5', ?1, ?2)",
+                [now - 90 * 86400, now - 80 * 86400],
+            )?;
+        }
+        insert_log(
+            &db,
+            "a5",
+            Some("sess-a"),
+            "opus",
+            (1, 2, 3, 4),
+            "0.25",
+            now - 40 * 86400,
+        )?;
+        let before = session_totals(&db)?;
+
+        db.rollup_and_prune(30)?;
+
+        assert_eq!(session_totals(&db)?, before);
+        Ok(())
+    }
+
+    fn archived_cost(db: &Database, session: &str) -> Result<String, AppError> {
+        let conn = crate::database::lock_conn!(db.conn);
+        Ok(conn.query_row(
+            "SELECT cost_usd FROM session_usage_archive WHERE session_id = ?1",
+            [session],
+            |r| r.get(0),
+        )?)
+    }
+
+    #[test]
+    fn a_tiny_cost_is_archived_as_a_plain_decimal() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let old = chrono::Utc::now().timestamp() - 40 * 86400;
+        insert_log(
+            &db,
+            "tiny",
+            Some("sess-tiny"),
+            "opus",
+            (3, 0, 0, 0),
+            "0.000009",
+            old,
+        )?;
+
+        db.rollup_and_prune(30)?;
+
+        let cost = archived_cost(&db, "sess-tiny")?;
+        assert_eq!(cost, "0.000009");
+        assert_eq!(
+            rust_decimal::Decimal::from_str_exact(&cost).ok(),
+            rust_decimal::Decimal::from_str_exact("0.000009").ok()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_prune_adds_to_an_archived_cost_written_in_exponent_form() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let now = chrono::Utc::now().timestamp();
+        {
+            // what SQLite's CAST(REAL AS TEXT) wrote before
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO session_usage_archive VALUES
+                    ('claude', 'sess-exp', 'opus', 1, 0, 0, 0, 1, '1.0e-06', ?1, ?1)",
+                [now - 60 * 86400],
+            )?;
+        }
+        insert_log(
+            &db,
+            "exp",
+            Some("sess-exp"),
+            "opus",
+            (3, 0, 0, 0),
+            "0.000009",
+            now - 40 * 86400,
+        )?;
+
+        db.rollup_and_prune(30)?;
+
+        assert_eq!(archived_cost(&db, "sess-exp")?, "0.00001");
         Ok(())
     }
 }

@@ -691,6 +691,309 @@ fn ensure_incremental_auto_vacuum_rebuilds_existing_file_db() {
     );
 }
 
+/// The usage tables exactly as schema v10 created them (`create_tables_on_conn`
+/// at v10): the v10 -> v11 migration reads and rewrites these.
+const V10_USAGE_SCHEMA_SQL: &str = r#"
+    CREATE TABLE proxy_request_logs (
+        request_id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, app_type TEXT NOT NULL, model TEXT NOT NULL,
+        request_model TEXT,
+        input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+        input_cost_usd TEXT NOT NULL DEFAULT '0', output_cost_usd TEXT NOT NULL DEFAULT '0',
+        cache_read_cost_usd TEXT NOT NULL DEFAULT '0', cache_creation_cost_usd TEXT NOT NULL DEFAULT '0',
+        total_cost_usd TEXT NOT NULL DEFAULT '0', latency_ms INTEGER NOT NULL, first_token_ms INTEGER,
+        duration_ms INTEGER, status_code INTEGER NOT NULL, error_message TEXT, session_id TEXT,
+        provider_type TEXT, is_streaming INTEGER NOT NULL DEFAULT 0,
+        cost_multiplier TEXT NOT NULL DEFAULT '1.0', created_at INTEGER NOT NULL,
+        data_source TEXT NOT NULL DEFAULT 'proxy'
+    );
+    CREATE INDEX idx_request_logs_session ON proxy_request_logs(session_id);
+    CREATE TABLE usage_daily_rollups (
+        date TEXT NOT NULL, app_type TEXT NOT NULL, provider_id TEXT NOT NULL, model TEXT NOT NULL,
+        request_count INTEGER NOT NULL DEFAULT 0, success_count INTEGER NOT NULL DEFAULT 0,
+        input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+        total_cost_usd TEXT NOT NULL DEFAULT '0', avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (date, app_type, provider_id, model)
+    );
+"#;
+
+/// v10 rows as v10 wrote them: Codex/Gemini input still counts the cached tokens.
+fn seed_v10_usage_rows(conn: &Connection) {
+    // (request_id, app_type, data_source, input, cache_read)
+    let rows = [
+        ("codex-session", "codex", "codex_session", 1000, 800),
+        ("gemini-session", "gemini", "gemini_session", 100, 300),
+        ("codex-proxy", "codex", "proxy", 500, 100),
+        ("gemini-proxy", "gemini", "proxy", 900, 600),
+        ("claude-proxy", "claude", "proxy", 3, 5000),
+        ("claude-session", "claude", "session_log", 3, 5000),
+    ];
+    for (id, app, source, input, cache_read) in rows {
+        conn.execute(
+            "INSERT INTO proxy_request_logs (request_id, provider_id, app_type, model,
+                input_tokens, output_tokens, cache_read_tokens, latency_ms, status_code,
+                created_at, data_source)
+             VALUES (?1, 'p', ?2, 'm', ?3, 10, ?4, 0, 200, ?5, ?6)",
+            // recent, so the startup prune leaves the rows in place
+            params![
+                id,
+                app,
+                input,
+                cache_read,
+                chrono::Utc::now().timestamp(),
+                source
+            ],
+        )
+        .expect("seed v10 log row");
+    }
+    for (app, input, cache_read) in [
+        ("codex", 5000, 4000),
+        ("gemini", 10, 50),
+        ("claude", 7, 9000),
+    ] {
+        conn.execute(
+            "INSERT INTO usage_daily_rollups (date, app_type, provider_id, model,
+                request_count, input_tokens, cache_read_tokens)
+             VALUES ('2026-01-01', ?1, 'p', 'm', 1, ?2, ?3)",
+            params![app, input, cache_read],
+        )
+        .expect("seed v10 rollup row");
+    }
+}
+
+fn input_tokens_of(conn: &Connection, request_id: &str) -> i64 {
+    conn.query_row(
+        "SELECT input_tokens FROM proxy_request_logs WHERE request_id = ?1",
+        [request_id],
+        |row| row.get(0),
+    )
+    .expect("read input tokens")
+}
+
+fn rollup_input_tokens_of(conn: &Connection, app_type: &str) -> i64 {
+    conn.query_row(
+        "SELECT input_tokens FROM usage_daily_rollups WHERE app_type = ?1",
+        [app_type],
+        |row| row.get(0),
+    )
+    .expect("read rollup input tokens")
+}
+
+#[test]
+fn schema_migration_v10_to_v11_stores_fresh_input_and_adds_usage_tables() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(V10_USAGE_SCHEMA_SQL)
+        .expect("v10 schema");
+    seed_v10_usage_rows(&conn);
+    Database::set_user_version(&conn, 10).expect("set user_version=10");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    assert_eq!(Database::get_user_version(&conn).unwrap(), 11);
+    // Codex/Gemini (session logs and proxy rows) lose the cached part, clamped at 0
+    assert_eq!(input_tokens_of(&conn, "codex-session"), 200);
+    assert_eq!(input_tokens_of(&conn, "gemini-session"), 0);
+    assert_eq!(input_tokens_of(&conn, "codex-proxy"), 400);
+    assert_eq!(input_tokens_of(&conn, "gemini-proxy"), 300);
+    // Claude already reported fresh input
+    assert_eq!(input_tokens_of(&conn, "claude-proxy"), 3);
+    assert_eq!(input_tokens_of(&conn, "claude-session"), 3);
+    assert_eq!(rollup_input_tokens_of(&conn, "codex"), 1000);
+    assert_eq!(rollup_input_tokens_of(&conn, "gemini"), 0);
+    assert_eq!(rollup_input_tokens_of(&conn, "claude"), 7);
+
+    for table in [
+        "session_usage_archive",
+        "session_meta_cache",
+        "balance_samples",
+        "maintenance_flags",
+    ] {
+        assert!(
+            Database::table_exists(&conn, table).unwrap(),
+            "{table} should exist"
+        );
+    }
+    for (key, value) in [
+        ("recompute_claude_costs", "pending"),
+        ("backfill_session_archive", "pending"),
+    ] {
+        let stored: String = conn
+            .query_row(
+                "SELECT value FROM maintenance_flags WHERE key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .expect("flag row");
+        assert_eq!(stored, value, "{key}");
+    }
+    let index: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'index' AND name = 'idx_request_logs_app_session'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(index, 1);
+    let archive_cols: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT name FROM pragma_table_info('session_usage_archive')")
+            .unwrap();
+        let cols = stmt.query_map([], |row| row.get(0)).unwrap();
+        cols.map(|c| c.unwrap()).collect()
+    };
+    assert_eq!(
+        archive_cols,
+        [
+            "app_type",
+            "session_id",
+            "model",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_creation_tokens",
+            "request_count",
+            "cost_usd",
+            "first_at",
+            "last_at"
+        ]
+    );
+}
+
+#[test]
+fn schema_migration_v10_to_v11_rolls_back_whole_when_a_step_fails() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(V10_USAGE_SCHEMA_SQL)
+        .expect("v10 schema");
+    seed_v10_usage_rows(&conn);
+    // a conflicting object makes the migration's index creation fail
+    conn.execute_batch("CREATE TABLE idx_request_logs_app_session (x INTEGER);")
+        .expect("conflicting name");
+    Database::set_user_version(&conn, 10).expect("set user_version=10");
+
+    assert!(Database::apply_schema_migrations_on_conn(&conn).is_err());
+
+    assert_eq!(Database::get_user_version(&conn).unwrap(), 10);
+    assert_eq!(input_tokens_of(&conn, "codex-session"), 1000);
+    assert!(!Database::table_exists(&conn, "maintenance_flags").unwrap());
+}
+
+mod v10_upgrade {
+    use super::*;
+    use serial_test::serial;
+
+    /// Calls of `session` counted by live rows plus the archive.
+    fn session_calls(db: &Database, session: &str) -> i64 {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM proxy_request_logs WHERE session_id = ?1)
+                  + (SELECT COALESCE(SUM(request_count), 0) FROM session_usage_archive
+                     WHERE session_id = ?1)",
+            [session],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    #[serial]
+    fn restoring_the_pre_migration_backup_counts_each_call_once_and_reprices_claude() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db_path = get_app_config_dir().join("ofox-desktop.db");
+        std::fs::create_dir_all(get_app_config_dir()).unwrap();
+        {
+            let conn = Connection::open(&db_path).expect("create v10 db");
+            conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
+                .unwrap();
+            conn.execute_batch(V10_USAGE_SCHEMA_SQL)
+                .expect("v10 schema");
+            let now = chrono::Utc::now().timestamp();
+            // v10 priced Claude input as (3 - 5000 -> 0): no input cost
+            for (id, created_at) in [("claude-old", now - 40 * 86400), ("claude-new", now)] {
+                conn.execute(
+                    "INSERT INTO proxy_request_logs (request_id, provider_id, app_type, model,
+                        input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                        input_cost_usd, total_cost_usd, latency_ms, status_code, session_id,
+                        created_at, data_source)
+                     VALUES (?1, '_session', 'claude', 'claude-opus-4-7', 3, 150, 5000, 10000,
+                        '0', '0.06', 0, 200, 's-old', ?2, 'session_log')",
+                    params![id, created_at],
+                )
+                .unwrap();
+            }
+            Database::set_user_version(&conn, 10).unwrap();
+        }
+        // upgrade: backup, migrate, prune (claude-old moves into the archive)
+        let db = Database::init().expect("init upgrades v10");
+        let backups: Vec<String> = std::fs::read_dir(get_app_config_dir().join("backups"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(backups.len(), 1, "{backups:?}");
+        crate::services::usage_maintenance::run_pending(&db).unwrap();
+        assert_eq!(session_calls(&db, "s-old"), 2);
+
+        db.restore_from_backup(&backups[0])
+            .expect("restore v10 backup");
+
+        // claude-old is live again; the archive must not still hold it
+        assert_eq!(session_calls(&db, "s-old"), 2);
+        crate::services::usage_maintenance::run_pending(&db).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            let input_cost: String = conn
+                .query_row(
+                    "SELECT input_cost_usd FROM proxy_request_logs WHERE request_id = 'claude-old'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                input_cost, "0.000015",
+                "restored Claude rows are priced again"
+            );
+        }
+        db.rollup_and_prune(30).unwrap();
+        assert_eq!(session_calls(&db, "s-old"), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn init_backs_up_a_v10_database_before_normalizing_it() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db_path = get_app_config_dir().join("ofox-desktop.db");
+        std::fs::create_dir_all(get_app_config_dir()).unwrap();
+        {
+            let conn = Connection::open(&db_path).expect("create v10 db");
+            // as v10 left it: incremental auto-vacuum already on, so init's only
+            // backup is the pre-migration one
+            conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
+                .unwrap();
+            conn.execute_batch(V10_USAGE_SCHEMA_SQL)
+                .expect("v10 schema");
+            seed_v10_usage_rows(&conn);
+            Database::set_user_version(&conn, 10).unwrap();
+        }
+
+        let db = Database::init().expect("init upgrades v10");
+
+        {
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(Database::get_user_version(&conn).unwrap(), 11);
+            assert_eq!(input_tokens_of(&conn, "codex-session"), 200);
+        }
+        let backups: Vec<_> = std::fs::read_dir(get_app_config_dir().join("backups"))
+            .expect("a backups dir")
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(backups.len(), 1, "{backups:?}");
+        let backup = Connection::open(&backups[0]).unwrap();
+        assert_eq!(Database::get_user_version(&backup).unwrap(), 10);
+        assert_eq!(input_tokens_of(&backup, "codex-session"), 1000);
+    }
+}
+
 #[cfg(unix)]
 mod private_files {
     use super::*;

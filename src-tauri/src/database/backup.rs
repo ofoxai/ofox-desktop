@@ -20,9 +20,24 @@ const CC_SWITCH_SQL_EXPORT_HEADER: &str = "-- Ofox Switch SQLite 导出";
 /// Tables that describe this machine's files and never leave it: skipped by every
 /// export, and kept from the local database by every import or restore. A bind
 /// snapshot from another machine or an older backup would restore the wrong files.
-const MACHINE_LOCAL_TABLES: &[&str] = &["ofox_bind_snapshot"];
+/// The session-file metadata cache and balance samples are this machine's too.
+///
+/// `session_usage_archive` and `maintenance_flags` are not: they describe the
+/// request logs, so a full export, import or restore carries them with
+/// `proxy_request_logs` (an old backup's logs with this machine's archive would
+/// count the archived calls twice, and its unrepriced Claude rows would never be
+/// repriced under this machine's `done` flags). WebDAV sync skips and keeps them
+/// along with the logs.
+const MACHINE_LOCAL_TABLES: &[&str] = &[
+    "ofox_bind_snapshot",
+    "session_meta_cache",
+    "balance_samples",
+];
 
 /// Tables whose data rows are skipped when exporting for WebDAV sync.
+/// `session_log_sync` is how far this machine read its own transcripts: another
+/// machine's progress would make every local transcript be read from the start
+/// again and its old, already archived calls stored a second time.
 const SYNC_SKIP_TABLES: &[&str] = &[
     "proxy_request_logs",
     "stream_check_logs",
@@ -30,6 +45,11 @@ const SYNC_SKIP_TABLES: &[&str] = &[
     "proxy_live_backup",
     "usage_daily_rollups",
     "ofox_bind_snapshot",
+    "session_usage_archive",
+    "session_meta_cache",
+    "balance_samples",
+    "maintenance_flags",
+    "session_log_sync",
 ];
 
 /// Tables whose local data is preserved (restored from local snapshot) during WebDAV import.
@@ -40,6 +60,11 @@ const SYNC_PRESERVE_TABLES: &[&str] = &[
     "proxy_live_backup",
     "usage_daily_rollups",
     "ofox_bind_snapshot",
+    "session_usage_archive",
+    "session_meta_cache",
+    "balance_samples",
+    "maintenance_flags",
+    "session_log_sync",
 ];
 
 /// A database backup entry for the UI
@@ -285,7 +310,7 @@ impl Database {
                 log::warn!("Periodic stream_check_logs cleanup failed: {e}");
             }
         }
-        match self.rollup_and_prune(30) {
+        match self.rollup_and_prune(super::dao::usage_rollup::USAGE_DETAIL_RETAIN_DAYS) {
             Ok(deleted) => {
                 reclaimed_rows += deleted;
             }
@@ -969,6 +994,174 @@ mod tests {
         assert!(db.get_bind_record("claude")?.is_none());
         assert_eq!(db.get_bind_record("codex")?.unwrap().record, "current");
         drop(home);
+        Ok(())
+    }
+
+    /// One row in each v11 usage table, tagged with `tag`.
+    fn insert_usage_local_rows(db: &Database, tag: &str) -> Result<(), AppError> {
+        let conn = crate::database::lock_conn!(db.conn);
+        conn.execute(
+            "INSERT INTO session_usage_archive (app_type, session_id, model, input_tokens,
+                output_tokens, cache_read_tokens, cache_creation_tokens, request_count,
+                cost_usd, first_at, last_at)
+             VALUES ('claude', ?1, 'm', 1, 1, 0, 0, 1, '0.1', 1, 2)",
+            [tag],
+        )?;
+        conn.execute(
+            "INSERT INTO session_meta_cache (source_path, provider_id, session_id, stamp,
+                parser_version, meta_json, updated_at)
+             VALUES (?1, 'claude', 's', 'st', 1, '{}', 1)",
+            [tag],
+        )?;
+        conn.execute(
+            "INSERT INTO balance_samples (org_id, at_ms, amount) VALUES (?1, 1, 2.5)",
+            [tag],
+        )?;
+        conn.execute(
+            "INSERT INTO maintenance_flags (key, value) VALUES ('backfill_session_archive', ?1)",
+            [tag],
+        )?;
+        Ok(())
+    }
+
+    /// Machine-local: never exported, always kept.
+    const USAGE_MACHINE_LOCAL: [(&str, &str); 2] = [
+        ("session_meta_cache", "source_path"),
+        ("balance_samples", "org_id"),
+    ];
+    /// Bound to the request logs: carried by full exports and imports, skipped and
+    /// kept by WebDAV sync.
+    const USAGE_LOG_BOUND: [(&str, &str); 2] = [
+        ("session_usage_archive", "session_id"),
+        ("maintenance_flags", "value"),
+    ];
+
+    fn column_values(db: &Database, table: &str, column: &str) -> Result<Vec<String>, AppError> {
+        let conn = crate::database::lock_conn!(db.conn);
+        let values = conn
+            .prepare(&format!("SELECT {column} FROM {table}"))?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(values)
+    }
+
+    fn remote_with_usage_rows() -> Result<Database, AppError> {
+        let remote = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(remote.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('remote-provider', 'claude', 'Remote Provider', '{}', '{}')",
+                [],
+            )?;
+            // an export from a current install, so importing it migrates nothing
+            Database::set_user_version(&conn, crate::database::SCHEMA_VERSION)?;
+        }
+        insert_usage_local_rows(&remote, "remote")?;
+        Ok(remote)
+    }
+
+    #[test]
+    fn exports_never_include_machine_local_usage_tables() -> Result<(), AppError> {
+        let db = remote_with_usage_rows()?;
+        let full = db.export_sql_string()?;
+        let sync = db.export_sql_string_for_sync()?;
+        for (table, _) in USAGE_MACHINE_LOCAL {
+            for dump in [&full, &sync] {
+                assert!(
+                    !dump.contains(&format!("INSERT INTO \"{table}\"")),
+                    "{table} leaked into an export"
+                );
+            }
+        }
+        for (table, _) in USAGE_LOG_BOUND {
+            assert!(
+                full.contains(&format!("INSERT INTO \"{table}\"")),
+                "{table} full"
+            );
+            assert!(
+                !sync.contains(&format!("INSERT INTO \"{table}\"")),
+                "{table} sync"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn a_full_import_brings_the_archive_with_the_logs_and_keeps_local_caches(
+    ) -> Result<(), AppError> {
+        let _home = TestHome::new("import-usage-archive");
+        let full = remote_with_usage_rows()?.export_sql_string()?;
+        let local = Database::memory()?;
+        insert_usage_local_rows(&local, "local")?;
+
+        local.import_sql_string(&full)?;
+
+        for (table, column) in USAGE_MACHINE_LOCAL {
+            assert_eq!(column_values(&local, table, column)?, ["local"], "{table}");
+        }
+        for (table, column) in USAGE_LOG_BOUND {
+            assert_eq!(column_values(&local, table, column)?, ["remote"], "{table}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn a_webdav_import_keeps_every_local_usage_table() -> Result<(), AppError> {
+        let _home = TestHome::new("sync-import-usage-archive");
+        let sync = remote_with_usage_rows()?.export_sql_string_for_sync()?;
+        let local = Database::memory()?;
+        insert_usage_local_rows(&local, "local")?;
+
+        local.import_sql_string_for_sync(&sync)?;
+
+        for (table, column) in USAGE_MACHINE_LOCAL.iter().chain(USAGE_LOG_BOUND.iter()) {
+            assert_eq!(column_values(&local, table, column)?, ["local"], "{table}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn webdav_sync_keeps_this_machines_session_sync_progress() -> Result<(), AppError> {
+        let _home = TestHome::new("sync-keeps-session-log-sync");
+        let remote = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(remote.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('remote-provider', 'claude', 'Remote Provider', '{}', '{}')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO session_log_sync VALUES ('/remote/transcript.jsonl', 1, 99, 1)",
+                [],
+            )?;
+        }
+        let sync = remote.export_sql_string_for_sync()?;
+        assert!(
+            !sync.contains("/remote/transcript.jsonl"),
+            "sync progress leaked into a WebDAV export"
+        );
+
+        let local = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(local.conn);
+            conn.execute(
+                "INSERT INTO session_log_sync VALUES ('/local/transcript.jsonl', 1, 42, 1)",
+                [],
+            )?;
+        }
+        local.import_sql_string_for_sync(&sync)?;
+
+        let conn = crate::database::lock_conn!(local.conn);
+        let rows: Vec<(String, i64)> = conn
+            .prepare("SELECT file_path, last_line_offset FROM session_log_sync")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        assert_eq!(rows, [("/local/transcript.jsonl".to_string(), 42)]);
         Ok(())
     }
 }

@@ -942,6 +942,15 @@ mod tests {
 
         #[tokio::test]
         #[serial]
+        async fn the_usage_sync_waits_for_the_snapshot_before_it_reads_sessions() {
+            let _sandbox = sandbox();
+            let db = std::sync::Arc::new(Database::memory().expect("db"));
+
+            assert!(awaits_ready(crate::services::usage_sync::sync_all(&db, true)).await);
+        }
+
+        #[tokio::test]
+        #[serial]
         async fn the_skill_service_waits_for_the_snapshot_before_it_writes_app_dirs() {
             let _sandbox = sandbox();
             let db = std::sync::Arc::new(Database::memory().expect("db"));

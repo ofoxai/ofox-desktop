@@ -18,7 +18,7 @@ use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
 use crate::proxy::usage::parser::TokenUsage;
-use crate::services::session_usage::SessionSyncResult;
+use crate::services::session_usage::{SessionSyncResult, SessionUsageEntry};
 use rust_decimal::Decimal;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -26,24 +26,38 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// 累计 token 用量（跟踪 total_token_usage 字段）
+///
+/// Codex's `input_tokens` is the whole prompt: the cached part
+/// (`cached_input_tokens`) and, in newer versions, what was written to the cache
+/// (`cache_write_input_tokens`) are counted in it.
 #[derive(Debug, Clone, Default)]
 struct CumulativeTokens {
     input: u64,
     cached_input: u64,
+    cache_write: u64,
     output: u64,
 }
 
-/// 单次 API 调用的 token 增量
+/// 单次 API 调用的 token 增量（input 仍是 Codex 口径：含缓存部分）
 #[derive(Debug)]
 struct DeltaTokens {
     input: u32,
     cached_input: u32,
+    cache_write: u32,
     output: u32,
 }
 
 impl DeltaTokens {
     fn is_zero(&self) -> bool {
-        self.input == 0 && self.cached_input == 0 && self.output == 0
+        self.input == 0 && self.cached_input == 0 && self.cache_write == 0 && self.output == 0
+    }
+
+    /// Fresh input as every source stores it: the prompt without what was read
+    /// from or written to the cache.
+    fn fresh_input(&self) -> u32 {
+        self.input
+            .saturating_sub(self.cached_input)
+            .saturating_sub(self.cache_write)
     }
 }
 
@@ -106,11 +120,13 @@ fn compute_delta(prev: &Option<CumulativeTokens>, current: &CumulativeTokens) ->
         None => DeltaTokens {
             input: current.input as u32,
             cached_input: current.cached_input as u32,
+            cache_write: current.cache_write as u32,
             output: current.output as u32,
         },
         Some(p) => DeltaTokens {
             input: current.input.saturating_sub(p.input) as u32,
             cached_input: current.cached_input.saturating_sub(p.cached_input) as u32,
+            cache_write: current.cache_write.saturating_sub(p.cache_write) as u32,
             output: current.output.saturating_sub(p.output) as u32,
         },
     }
@@ -129,6 +145,10 @@ fn parse_cumulative_tokens(total_usage: &serde_json::Value) -> Option<Cumulative
         cached_input: total_usage
             .get("cached_input_tokens")
             .or_else(|| total_usage.get("cache_read_input_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        cache_write: total_usage
+            .get("cache_write_input_tokens")
             .and_then(|v| v.as_u64())
             .unwrap_or(0),
         output: total_usage
@@ -170,7 +190,7 @@ pub fn sync_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
     }
 
     if result.imported > 0 {
-        log::info!(
+        log::debug!(
             "[CODEX-SYNC] 同步完成: 导入 {} 条, 跳过 {} 条, ��描 {} 个文件",
             result.imported,
             result.skipped,
@@ -230,7 +250,7 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
 
     // 获取文件元数据
     let metadata = fs::metadata(file_path)
-        .map_err(|e| AppError::Config(format!("无法读取文���元数据: {e}")))?;
+        .map_err(|e| AppError::Config(format!("无法读取文件元数据: {e}")))?;
     let file_modified = metadata
         .modified()
         .ok()
@@ -239,12 +259,91 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
         .unwrap_or(0);
 
     // 检查同步状态
-    let (last_modified, last_offset) = get_sync_state(db, &file_path_str)?;
+    let (last_modified, mut last_offset) = get_sync_state(db, &file_path_str)?;
 
     // 文件未变化则跳过
     if file_modified <= last_modified {
         return Ok((0, 0));
     }
+
+    // A rollout Codex moved (sessions/ -> archived_sessions/) goes on from where
+    // it was read at its old path: its pruned calls must not be stored again.
+    if last_modified == 0 {
+        last_offset = offset_at_another_path(db, file_path)?.unwrap_or(0);
+    }
+
+    // 整个文件都要解析以恢复累计值状态，只写入上次偏移之后的调用
+    let (calls, line_offset) = parse_codex_file(file_path)?;
+    let mut imported: u32 = 0;
+    let mut skipped: u32 = 0;
+    for call in calls.iter().filter(|c| c.line > last_offset) {
+        match insert_codex_session_entry(
+            db,
+            &call.ids,
+            &call.delta,
+            &call.model,
+            call.session_id.as_deref(),
+            call.timestamp.as_deref(),
+        ) {
+            Ok(true) => imported += 1,
+            Ok(false) => skipped += 1,
+            Err(e) => {
+                log::warn!("[CODEX-SYNC] 插入失败 ({}): {e}", call.ids.request_id);
+                skipped += 1;
+            }
+        }
+    }
+
+    // 更新同步状态
+    update_sync_state(db, &file_path_str, file_modified, line_offset)?;
+
+    Ok((imported, skipped))
+}
+
+/// How far the same rollout file (same file name) was read at another path.
+fn offset_at_another_path(db: &Database, file_path: &Path) -> Result<Option<i64>, AppError> {
+    let Some(name) = file_path.file_name() else {
+        return Ok(None);
+    };
+    let name_str = name.to_string_lossy().to_string();
+    let conn = lock_conn!(db.conn);
+    let mut stmt = conn
+        .prepare(
+            "SELECT file_path, last_line_offset FROM session_log_sync
+             WHERE file_path != ?1 AND substr(file_path, -length(?2)) = ?2",
+        )
+        .map_err(|e| AppError::Database(format!("查询同步状态失败: {e}")))?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![file_path.to_string_lossy(), name_str],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .map_err(|e| AppError::Database(format!("查询同步状态失败: {e}")))?;
+    let mut offset = None;
+    for (other, other_offset) in rows.flatten() {
+        if Path::new(&other).file_name() == Some(name) {
+            offset = Some(offset.unwrap_or(0).max(other_offset));
+        }
+    }
+    Ok(offset)
+}
+
+/// One call in a rollout file: the line it was reported on and its token delta.
+struct CodexCall {
+    line: i64,
+    ids: CodexRequestIds,
+    delta: DeltaTokens,
+    model: String,
+    session_id: Option<String>,
+    timestamp: Option<String>,
+}
+
+/// Every call in a rollout file, in order, and the file's line count.
+fn parse_codex_file(file_path: &Path) -> Result<(Vec<CodexCall>, i64), AppError> {
+    let file_stem = file_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("rollout");
 
     // 打开文件逐行解析
     let file =
@@ -259,8 +358,7 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
     };
 
     let mut line_offset: i64 = 0;
-    let mut imported: u32 = 0;
-    let mut skipped: u32 = 0;
+    let mut calls = Vec::new();
 
     for line_result in reader.lines() {
         line_offset += 1;
@@ -361,8 +459,20 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
                 };
 
                 let delta = if is_total {
-                    // 累计值模式：计算与上次的 delta
-                    let d = compute_delta(&state.prev_total, &cumulative);
+                    // 累计值模式：计算与上次的 delta。A file's first count has no
+                    // earlier total here, and a thread continued in this file
+                    // carries its running total over: that call is its
+                    // last_token_usage (equal to the total in a fresh file).
+                    let first_call = match state.prev_total {
+                        None => info
+                            .get("last_token_usage")
+                            .and_then(parse_cumulative_tokens),
+                        Some(_) => None,
+                    };
+                    let d = match first_call {
+                        Some(last) => compute_delta(&None, &last),
+                        None => compute_delta(&state.prev_total, &cumulative),
+                    };
                     state.prev_total = Some(cumulative);
                     d
                 } else {
@@ -370,6 +480,7 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
                     DeltaTokens {
                         input: cumulative.input as u32,
                         cached_input: cumulative.cached_input as u32,
+                        cache_write: cumulative.cache_write as u32,
                         output: cumulative.output as u32,
                     }
                 };
@@ -386,57 +497,113 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
 
                 state.event_index += 1;
 
-                // 跳过已处理的行（但仍需解析以恢复状态）
-                if line_offset <= last_offset {
-                    continue;
-                }
-
                 // 生成唯一 request_id
                 let session_id_str = state.session_id.as_deref().unwrap_or("unknown");
-                let request_id = format!("codex_session:{}:{}", session_id_str, state.event_index);
-
-                // 提取时间戳
-                let timestamp = value
-                    .get("timestamp")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-
-                match insert_codex_session_entry(
-                    db,
-                    &request_id,
-                    &delta,
-                    &state.current_model,
-                    state.session_id.as_deref(),
-                    timestamp.as_deref(),
-                ) {
-                    Ok(true) => imported += 1,
-                    Ok(false) => skipped += 1,
-                    Err(e) => {
-                        log::warn!("[CODEX-SYNC] 插入失败 ({}): {e}", request_id);
-                        skipped += 1;
-                    }
-                }
+                calls.push(CodexCall {
+                    line: line_offset,
+                    ids: CodexRequestIds::new(session_id_str, file_stem, state.event_index),
+                    delta,
+                    model: state.current_model.clone(),
+                    session_id: state.session_id.clone(),
+                    // 提取时间戳
+                    timestamp: value
+                        .get("timestamp")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                });
             }
             _ => {}
         }
     }
 
-    // 更新同步状态
-    update_sync_state(db, &file_path_str, file_modified, line_offset)?;
+    Ok((calls, line_offset))
+}
 
-    Ok((imported, skipped))
+/// When a call happened: its event's timestamp, else now.
+fn created_at_of(timestamp: Option<&str>) -> i64 {
+    timestamp
+        .and_then(|ts| {
+            chrono::DateTime::parse_from_rfc3339(ts)
+                .ok()
+                .map(|dt| dt.timestamp())
+        })
+        .unwrap_or_else(|| {
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
+        })
+}
+
+/// Every Codex call the sync would store, read from every rollout file in full
+/// (a request id counts once, as the insert keeps the first row for it). Calls
+/// of a file with no thread id are left out: they have no session to archive.
+pub(crate) fn session_entries() -> Vec<SessionUsageEntry> {
+    let mut seen = std::collections::HashSet::new();
+    let mut entries = Vec::new();
+    for file_path in collect_codex_session_files(&get_codex_config_dir()) {
+        let calls = match parse_codex_file(&file_path) {
+            Ok((calls, _)) => calls,
+            Err(e) => {
+                log::debug!("[CODEX-SYNC] 归档回填跳过 {}: {e}", file_path.display());
+                continue;
+            }
+        };
+        for call in calls {
+            let Some(session_id) = call.session_id else {
+                continue;
+            };
+            if !seen.insert(call.ids.request_id) {
+                continue;
+            }
+            entries.push(SessionUsageEntry {
+                session_id,
+                created_at: created_at_of(call.timestamp.as_deref()),
+                usage: TokenUsage {
+                    input_tokens: call.delta.fresh_input(),
+                    output_tokens: call.delta.output,
+                    cache_read_tokens: call.delta.cached_input,
+                    cache_creation_tokens: call.delta.cache_write,
+                    model: Some(call.model.clone()),
+                    message_id: None,
+                },
+                model: call.model,
+            });
+        }
+    }
+    entries
+}
+
+/// The request id of a Codex call, and the one versions before v11 gave it.
+///
+/// A thread picked up again later may go on in another rollout file under the
+/// same thread id, which numbers its calls from 1 again, so the file's stem is
+/// part of the id. The old id (`codex_session:{thread}:{n}`) did not have it.
+struct CodexRequestIds {
+    request_id: String,
+    legacy_id: String,
+}
+
+impl CodexRequestIds {
+    fn new(session_id: &str, file_stem: &str, event_index: u32) -> Self {
+        Self {
+            request_id: format!("codex_session:{session_id}:{file_stem}:{event_index}"),
+            legacy_id: format!("codex_session:{session_id}:{event_index}"),
+        }
+    }
 }
 
 /// 插入单条 Codex 会话记录到 proxy_request_logs
 fn insert_codex_session_entry(
     db: &Database,
-    request_id: &str,
+    ids: &CodexRequestIds,
     delta: &DeltaTokens,
     model: &str,
     session_id: Option<&str>,
     timestamp: Option<&str>,
 ) -> Result<bool, AppError> {
     let conn = lock_conn!(db.conn);
+    let request_id = ids.request_id.as_str();
 
     // 检查是否已存在
     let exists: bool = conn
@@ -452,25 +619,27 @@ fn insert_codex_session_entry(
     }
 
     // 解析时间戳
-    let created_at = timestamp
-        .and_then(|ts| {
-            chrono::DateTime::parse_from_rfc3339(ts)
-                .ok()
-                .map(|dt| dt.timestamp())
-        })
-        .unwrap_or_else(|| {
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0)
-        });
+    let created_at = created_at_of(timestamp);
+
+    // The same call stored by an earlier version under its old id (a file read
+    // again from its new path in archived_sessions/): same number, same time.
+    let logged_under_legacy_id: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = ?1 AND created_at = ?2",
+            rusqlite::params![ids.legacy_id, created_at],
+            |row| row.get::<_, i64>(0).map(|c| c > 0),
+        )
+        .unwrap_or(false);
+    if logged_under_legacy_id {
+        return Ok(false);
+    }
 
     // 计算费用
     let usage = TokenUsage {
-        input_tokens: delta.input,
+        input_tokens: delta.fresh_input(),
         output_tokens: delta.output,
         cache_read_tokens: delta.cached_input,
-        cache_creation_tokens: 0,
+        cache_creation_tokens: delta.cache_write,
         model: Some(model.to_string()),
         message_id: None,
     };
@@ -512,10 +681,10 @@ fn insert_codex_session_entry(
             "codex",             // app_type
             model,
             model,               // request_model = model
-            delta.input,
+            usage.input_tokens,  // fresh input
             delta.output,
             delta.cached_input,
-            0i64,                // cache_creation_tokens: Codex 日志无此数据
+            delta.cache_write,
             input_cost,
             output_cost,
             cache_read_cost,
@@ -572,7 +741,10 @@ fn update_sync_state(
 }
 
 /// ��找 Codex 模型定价（带归一化）
-fn find_codex_pricing(conn: &rusqlite::Connection, model_id: &str) -> Option<ModelPricing> {
+pub(crate) fn find_codex_pricing(
+    conn: &rusqlite::Connection,
+    model_id: &str,
+) -> Option<ModelPricing> {
     let normalized = normalize_codex_model(model_id);
 
     // 1. 精确匹配（归一化后的名称）
@@ -630,6 +802,7 @@ mod tests {
         let current = CumulativeTokens {
             input: 17934,
             cached_input: 9600,
+            cache_write: 0,
             output: 454,
         };
         let delta = compute_delta(&prev, &current);
@@ -644,11 +817,13 @@ mod tests {
         let prev = Some(CumulativeTokens {
             input: 17934,
             cached_input: 9600,
+            cache_write: 0,
             output: 454,
         });
         let current = CumulativeTokens {
             input: 36722,
             cached_input: 27904,
+            cache_write: 0,
             output: 804,
         };
         let delta = compute_delta(&prev, &current);
@@ -662,12 +837,14 @@ mod tests {
         let prev = Some(CumulativeTokens {
             input: 58346,
             cached_input: 46976,
+            cache_write: 0,
             output: 1045,
         });
         // task 边界：相同的累计值
         let current = CumulativeTokens {
             input: 58346,
             cached_input: 46976,
+            cache_write: 0,
             output: 1045,
         };
         let delta = compute_delta(&prev, &current);
@@ -680,11 +857,13 @@ mod tests {
         let prev = Some(CumulativeTokens {
             input: 100,
             cached_input: 50,
+            cache_write: 0,
             output: 30,
         });
         let current = CumulativeTokens {
             input: 80,
             cached_input: 40,
+            cache_write: 0,
             output: 20,
         };
         let delta = compute_delta(&prev, &current);
@@ -795,11 +974,13 @@ mod tests {
         let prev = Some(CumulativeTokens {
             input: 100,
             cached_input: 0,
+            cache_write: 0,
             output: 50,
         });
         let current = CumulativeTokens {
             input: 110,       // delta = 10
             cached_input: 80, // delta = 80（异常：大于 input delta）
+            cache_write: 0,
             output: 60,
         };
         let delta = compute_delta(&prev, &current);
@@ -809,5 +990,224 @@ mod tests {
         // 实际钳制在调用侧：delta.cached_input.min(delta.input)
         let clamped = delta.cached_input.min(delta.input);
         assert_eq!(clamped, 10);
+    }
+
+    fn stored_tokens(db: &Database, request_id_like: &str) -> Vec<(i64, i64, i64, i64)> {
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens
+                 FROM proxy_request_logs WHERE request_id LIKE ?1 ORDER BY created_at",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([request_id_like], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    #[test]
+    fn codex_rows_store_fresh_input_without_cache_reads_or_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("rollout-2026-05-22T09-57-31-sess-fresh.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"timestamp":"2026-05-22T02:00:30Z","type":"session_meta","payload":{"id":"sess-fresh"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-22T02:00:31Z","type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-22T02:00:34Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"cache_write_input_tokens":50,"output_tokens":120}}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let db = Database::memory().unwrap();
+
+        sync_single_codex_file(&db, &path).unwrap();
+
+        assert_eq!(
+            stored_tokens(&db, "codex_session:sess-fresh:%"),
+            vec![(150, 120, 800, 50)]
+        );
+    }
+
+    /// A rollout file of thread `sid` with one call at `ts`.
+    fn write_rollout(dir: &Path, name: &str, sid: &str, ts: &str, input: u64) -> PathBuf {
+        let path = dir.join(name);
+        let lines = [
+            serde_json::json!({"timestamp": ts, "type": "session_meta", "payload": {"id": sid}}),
+            serde_json::json!({"timestamp": ts, "type": "turn_context", "payload": {"model": "gpt-5.4"}}),
+            serde_json::json!({"timestamp": ts, "type": "event_msg", "payload": {"type": "token_count",
+                "info": {"total_token_usage": {"input_tokens": input, "cached_input_tokens": 0,
+                    "output_tokens": 10}}}}),
+        ];
+        let body: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        std::fs::write(&path, body.join("\n") + "\n").unwrap();
+        path
+    }
+
+    #[test]
+    fn a_thread_continued_in_a_second_rollout_file_keeps_both_files_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = write_rollout(
+            dir.path(),
+            "rollout-2026-05-22T09-57-31-thread-1.jsonl",
+            "thread-1",
+            "2026-05-22T02:00:34Z",
+            100,
+        );
+        let resumed = write_rollout(
+            dir.path(),
+            "rollout-2026-05-23T08-00-00-thread-1.jsonl",
+            "thread-1",
+            "2026-05-23T01:00:00Z",
+            300,
+        );
+        let db = Database::memory().unwrap();
+
+        sync_single_codex_file(&db, &first).unwrap();
+        sync_single_codex_file(&db, &resumed).unwrap();
+
+        let inputs: Vec<i64> = stored_tokens(&db, "codex_session:thread-1:%")
+            .into_iter()
+            .map(|t| t.0)
+            .collect();
+        assert_eq!(inputs, vec![100, 300]);
+    }
+
+    #[test]
+    fn a_call_logged_under_the_old_request_id_is_not_logged_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write_rollout(
+            dir.path(),
+            "rollout-2026-05-22T09-57-31-thread-2.jsonl",
+            "thread-2",
+            "2026-05-22T02:00:34Z",
+            100,
+        );
+        let db = Database::memory().unwrap();
+        {
+            // what an earlier version stored for this call, before the file was
+            // moved to archived_sessions/ (a new path, so it is read again)
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO proxy_request_logs (request_id, provider_id, app_type, model,
+                    input_tokens, output_tokens, latency_ms, status_code, session_id,
+                    created_at, data_source)
+                 VALUES ('codex_session:thread-2:1', '_codex_session', 'codex', 'gpt-5.4',
+                    100, 10, 0, 200, 'thread-2', ?1, 'codex_session')",
+                [chrono::DateTime::parse_from_rfc3339("2026-05-22T02:00:34Z")
+                    .unwrap()
+                    .timestamp()],
+            )
+            .unwrap();
+        }
+
+        sync_single_codex_file(&db, &file).unwrap();
+
+        assert_eq!(stored_tokens(&db, "codex_session:thread-2:%").len(), 1);
+    }
+
+    #[test]
+    fn a_rollout_moved_to_archived_sessions_is_not_counted_again() {
+        let home = tempfile::tempdir().unwrap();
+        let ago = |days: i64| (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+        let count = |days: i64, input: u64| {
+            serde_json::json!({"timestamp": ago(days), "type": "event_msg", "payload": {
+                "type": "token_count", "info": {"total_token_usage": {"input_tokens": input,
+                    "cached_input_tokens": 0, "output_tokens": 10}}}})
+            .to_string()
+        };
+        let name = "rollout-2026-08-01T10-00-00-thread-3.jsonl";
+        let live = home.path().join("sessions/2026/08/01").join(name);
+        std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+        std::fs::write(
+            &live,
+            [
+                serde_json::json!({"timestamp": ago(40), "type": "session_meta",
+                    "payload": {"id": "thread-3"}})
+                .to_string(),
+                count(40, 100),
+                count(1, 300),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let db = Database::memory().unwrap();
+        sync_single_codex_file(&db, &live).unwrap();
+        db.rollup_and_prune(30).unwrap();
+
+        // Codex archives a thread by moving its file
+        let archived = home.path().join("archived_sessions").join(name);
+        std::fs::create_dir_all(archived.parent().unwrap()).unwrap();
+        std::fs::rename(&live, &archived).unwrap();
+        sync_single_codex_file(&db, &archived).unwrap();
+        db.rollup_and_prune(30).unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let calls: i64 = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM proxy_request_logs WHERE session_id = 'thread-3')
+                      + (SELECT COALESCE(SUM(request_count), 0) FROM session_usage_archive
+                         WHERE session_id = 'thread-3')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn a_continued_rollout_counts_its_first_call_not_the_threads_running_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = write_rollout(
+            dir.path(),
+            "rollout-2026-05-22T09-57-31-thread-4.jsonl",
+            "thread-4",
+            "2026-05-22T02:00:34Z",
+            100,
+        );
+        // the thread goes on in a second file whose running total carries the
+        // first file's 100 input tokens; its own call is the last_token_usage
+        let resumed = dir
+            .path()
+            .join("rollout-2026-05-23T08-00-00-thread-4.jsonl");
+        std::fs::write(
+            &resumed,
+            [
+                serde_json::json!({"timestamp": "2026-05-23T01:00:00Z", "type": "session_meta",
+                    "payload": {"id": "thread-4"}}),
+                serde_json::json!({"timestamp": "2026-05-23T01:00:01Z", "type": "event_msg",
+                    "payload": {"type": "token_count", "info": {
+                        "total_token_usage": {"input_tokens": 400, "cached_input_tokens": 0,
+                            "output_tokens": 30},
+                        "last_token_usage": {"input_tokens": 300, "cached_input_tokens": 0,
+                            "output_tokens": 20}}}}),
+                serde_json::json!({"timestamp": "2026-05-23T01:00:09Z", "type": "event_msg",
+                    "payload": {"type": "token_count", "info": {
+                        "total_token_usage": {"input_tokens": 900, "cached_input_tokens": 0,
+                            "output_tokens": 70},
+                        "last_token_usage": {"input_tokens": 500, "cached_input_tokens": 0,
+                            "output_tokens": 40}}}}),
+            ]
+            .map(|l| l.to_string())
+            .join("\n"),
+        )
+        .unwrap();
+        let db = Database::memory().unwrap();
+
+        sync_single_codex_file(&db, &first).unwrap();
+        sync_single_codex_file(&db, &resumed).unwrap();
+
+        let calls: Vec<(i64, i64)> = stored_tokens(&db, "codex_session:thread-4:%")
+            .into_iter()
+            .map(|t| (t.0, t.1))
+            .collect();
+        assert_eq!(calls, vec![(100, 10), (300, 20), (500, 40)]);
     }
 }
