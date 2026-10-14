@@ -654,10 +654,9 @@ fn present(line: &str) -> String {
     present_with(line, scrub_line)
 }
 
-/// The secret scrub. It returns the line unchanged until the shared redaction
-/// lands; the merge replaces only this body with `crate::redact::scrub`.
+/// The secret scrub: keys, tokens and secret key-values are redacted.
 fn scrub_line(line: &str) -> Cow<'_, str> {
-    Cow::Borrowed(line)
+    crate::redact::scrub(line)
 }
 
 fn present_with(line: &str, scrub: for<'a> fn(&'a str) -> Cow<'a, str>) -> String {
@@ -2051,19 +2050,16 @@ Would inspect/remove:
 
     #[test]
     fn the_scrub_sees_the_raw_line_before_it_is_cleaned_or_cut() {
-        fn hide(line: &str) -> Cow<'_, str> {
-            Cow::Owned(line.replace("sk-of-ABCDEFGH", "[redacted]"))
-        }
+        use crate::redact::REDACTED;
         // Cut to 300 characters first, the key would be left as `sk-of-ABCDE`,
         // which no longer matches the scrub; scrubbed first, the line fits.
         let long = format!("{} sk-of-ABCDEFGH", "a".repeat(288));
-        let shown = present_with(&long, hide);
+        let shown = present(&long);
         assert!(!shown.contains("sk-of"), "{shown}");
-        assert!(shown.ends_with("[redacted]"), "{shown}");
+        assert!(shown.ends_with(REDACTED), "{shown}");
         // Control characters inside the key would hide it from the scrub too.
-        let split = present_with("key sk-of-ABCDEFGH\n", hide);
-        assert_eq!(split, "key [redacted]");
-        // With no scrub wired in, the line is only cleaned and cut.
+        assert_eq!(present("key sk-of-ABCDEFGH\n"), format!("key {REDACTED}"));
+        // A line with nothing secret in it is only cleaned and cut.
         assert_eq!(present("  hi\u{7}  "), "hi");
     }
 
