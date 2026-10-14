@@ -1020,6 +1020,15 @@
       "toolCount": "{{count}} 个工具",
       "capture": "保存当前组合…",
       "manage": "管理方案…"
+    },
+    "balance": {
+      "label": "OFOX 账户余额",
+      "topUp": "充值",
+      "userFallback": "用户",
+      "loadingName": "加载中…",
+      "loadingUser": "正在加载用户信息…",
+      "loadingUserAttempt": "正在加载用户信息（{{attempt}}/3）",
+      "loadFailed": "无法加载用户信息，点击重试"
     }
   },
   "providerForm": {

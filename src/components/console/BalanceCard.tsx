@@ -1,5 +1,7 @@
 import { Loader2, RefreshCw } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { UserAvatar } from "@/components/UserAvatar";
+import { Button } from "@/components/ui/button";
 import type { OfoxAccount } from "@/hooks/useOfoxAccount";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
 import { settingsApi } from "@/lib/api";
@@ -12,8 +14,12 @@ interface BalanceCardProps {
   className?: string;
 }
 
-/** The signed-in user and the OFox wallet balance, red once it is spent. */
+/**
+ * The signed-in user and the OFox wallet balance, red once it is spent.
+ * The header's refresh reloads it; the card has no refresh of its own.
+ */
 export function BalanceCard({ account, className }: BalanceCardProps) {
+  const { t } = useTranslation();
   const { apex } = useOfoxApex();
   const { user } = account;
   // 只有明确查到余额且不大于 0 才算没钱；还没查到（—）不报警。
@@ -25,90 +31,74 @@ export function BalanceCard({ account, className }: BalanceCardProps) {
       data-testid="balance-card"
       data-empty={balanceEmpty ? "true" : undefined}
       className={cn(
-        "rounded-xl border px-5 py-4",
+        "flex items-center gap-3 rounded-card border py-3 pl-4 pr-3.5",
         balanceEmpty
-          ? "border-red-500/40 bg-red-500/5"
-          : "border-border bg-background/80",
+          ? "border-danger/40 bg-danger-soft/60"
+          : "border-line bg-card",
         className,
       )}
     >
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <UserAvatar
-            avatarUrl={ofoxAvatarUrl(user?.avatar_url)}
-            name={user?.name}
-            email={user?.email}
-            className="h-10 w-10"
-            fallbackTextClassName="text-lg"
-          />
-          <div>
-            <div className="text-[14px] font-semibold text-foreground">
-              {user?.name ?? (account.retrying ? "加载中…" : "用户")}
-            </div>
-            <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
-              {user?.email ? (
-                <span className="truncate">{user.email}</span>
-              ) : account.retrying ? (
-                <span className="inline-flex items-center gap-1">
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                  正在加载用户信息
-                  {account.retryAttempt > 0
-                    ? `（${account.retryAttempt}/3）`
-                    : "…"}
-                </span>
-              ) : account.loadFailed ? (
-                <button
-                  type="button"
-                  onClick={() => void account.retryUser()}
-                  className="inline-flex items-center gap-1 text-orange-500 hover:text-orange-600 hover:underline"
-                  title="无法加载用户信息，点击重试"
-                >
-                  <RefreshCw className="h-3 w-3" />
-                  无法加载用户信息，点击重试
-                </button>
-              ) : null}
-            </div>
-          </div>
+      <UserAvatar
+        avatarUrl={ofoxAvatarUrl(user?.avatar_url)}
+        name={user?.name}
+        email={user?.email}
+        className="h-9 w-9"
+        fallbackTextClassName="text-ui"
+      />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-ui font-semibold text-ink">
+          {user?.name ??
+            t(
+              account.retrying
+                ? "console.balance.loadingName"
+                : "console.balance.userFallback",
+            )}
         </div>
-        <div className="flex items-center gap-3">
-          <div className="text-right">
-            <div className="flex items-center justify-end gap-1.5 text-[11px] text-muted-foreground">
-              <span>OFOX 账户余额</span>
-              <button
-                onClick={() => void account.refreshBalance()}
-                disabled={account.balanceRefreshing}
-                title="刷新余额"
-                className="rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
-              >
-                <RefreshCw
-                  className={`h-3 w-3 ${
-                    account.balanceRefreshing ? "animate-spin" : ""
-                  }`}
-                />
-              </button>
-            </div>
-            <div
-              className={`text-2xl font-bold ${
-                balanceEmpty ? "text-red-600" : "text-foreground"
-              }`}
-            >
-              {formatBalance(user?.balance?.balance)}
-            </div>
-          </div>
-          {isOfoxBillingManager(user) && (
+        <div className="mt-px flex min-w-0 items-center text-sub text-ink-muted">
+          {user?.email ? (
+            <span className="truncate">{user.email}</span>
+          ) : account.retrying ? (
+            <span className="inline-flex items-center gap-1">
+              <Loader2 aria-hidden className="h-3 w-3 animate-spin" />
+              {account.retryAttempt > 0
+                ? t("console.balance.loadingUserAttempt", {
+                    attempt: account.retryAttempt,
+                  })
+                : t("console.balance.loadingUser")}
+            </span>
+          ) : account.loadFailed ? (
             <button
-              onClick={() => settingsApi.openExternal(ofoxWalletUrl(apex))}
-              className={`rounded-lg px-4 py-1.5 text-[13px] font-medium text-white ${
-                balanceEmpty
-                  ? "bg-orange-600 shadow-md ring-2 ring-orange-500/40 hover:bg-orange-700"
-                  : "bg-orange-500 hover:bg-orange-600"
-              }`}
+              type="button"
+              onClick={() => void account.retryUser()}
+              className="inline-flex items-center gap-1 text-brand-ink underline-offset-2 hover:underline"
             >
-              充值
+              <RefreshCw aria-hidden className="h-3 w-3" />
+              {t("console.balance.loadFailed")}
             </button>
-          )}
+          ) : null}
         </div>
       </div>
+      <div className="flex-none text-right">
+        <div className="text-note text-ink-muted">
+          {t("console.balance.label")}
+        </div>
+        <div
+          className={cn(
+            "text-kpi font-semibold leading-tight tabular-nums",
+            balanceEmpty ? "text-danger" : "text-ink",
+          )}
+        >
+          {formatBalance(balance)}
+        </div>
+      </div>
+      {isOfoxBillingManager(user) && (
+        <Button
+          className="ml-1 flex-none"
+          onClick={() => void settingsApi.openExternal(ofoxWalletUrl(apex))}
+        >
+          {t("console.balance.topUp")}
+        </Button>
+      )}
     </div>
   );
 }

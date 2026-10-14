@@ -1020,6 +1020,15 @@
       "toolCount": "{{count}} tools",
       "capture": "Save current combination…",
       "manage": "Manage profiles…"
+    },
+    "balance": {
+      "label": "OFOX balance",
+      "topUp": "Top up",
+      "userFallback": "User",
+      "loadingName": "Loading…",
+      "loadingUser": "Loading your account…",
+      "loadingUserAttempt": "Loading your account ({{attempt}}/3)",
+      "loadFailed": "Couldn't load your account. Click to retry"
     }
   },
   "providerForm": {
