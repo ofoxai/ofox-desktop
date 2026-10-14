@@ -112,7 +112,7 @@ function ConsoleShell({ boundTools, onBoundToolsChanged }: ConsolePageProps) {
             {...panel("usage")}
             className="h-full overflow-y-auto px-4 pb-4 pt-1"
           >
-            <UsagePage account={account} />
+            <UsagePage account={account} boundTools={boundTools} />
           </div>
         )}
       </main>

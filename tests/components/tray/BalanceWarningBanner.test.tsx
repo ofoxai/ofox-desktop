@@ -73,9 +73,9 @@ describe("tray low-balance banner", () => {
       expect(mocks.invoke).toHaveBeenCalledWith("ofox_get_balance_trend"),
     );
     await waitFor(() =>
-      expect(queryClient.getQueryState(["balanceTrend"])?.status).toBe(
-        "success",
-      ),
+      expect(
+        queryClient.getQueryState(["balanceTrend", "ofox.io::"])?.status,
+      ).toBe("success"),
     );
     expect(screen.queryByText(/用完|不足 1 天/)).toBeNull();
   });
@@ -84,7 +84,9 @@ describe("tray low-balance banner", () => {
     mocks.invoke.mockRejectedValue(new Error("not signed in"));
     render(<BalanceWarningBanner threshold={10} balanceUsd={1} />);
     await waitFor(() =>
-      expect(queryClient.getQueryState(["balanceTrend"])?.status).toBe("error"),
+      expect(
+        queryClient.getQueryState(["balanceTrend", "ofox.io::"])?.status,
+      ).toBe("error"),
     );
     expect(screen.queryByText(/用完|不足 1 天/)).toBeNull();
   });

@@ -2,7 +2,7 @@ import { useTranslation } from "react-i18next";
 import { settingsApi } from "@/lib/api";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
-import { useBalanceTrend } from "@/hooks/useUsageOverview";
+import { useBalanceTrend, accountIdentity } from "@/hooks/useUsageOverview";
 import { isOfoxBillingManager } from "@/lib/api/ofoxAuth";
 import { ofoxWalletUrl } from "@/lib/ofoxUrls";
 import { runsOutIn } from "@/lib/usageFormat";
@@ -32,7 +32,10 @@ export default function BalanceWarningBanner({
   const { t } = useTranslation();
   const { apex } = useOfoxApex();
   const { status } = useOfoxAuth();
-  const { data: trend } = useBalanceTrend();
+  const { data: trend } = useBalanceTrend(
+    !!status?.user,
+    accountIdentity(status?.user, apex),
+  );
   const canRecharge = isOfoxBillingManager(status?.user);
   const runsOut = runsOutIn(trend?.daysLeft);
 

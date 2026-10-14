@@ -3045,5 +3045,42 @@
     "runsOutDays": "At this pace it runs out in about {{days}}d",
     "runsOutSoon": "At this pace it runs out within a day. Top up soon.",
     "recharge": "Top up"
+  },
+  "usagePage": {
+    "period": "Time range",
+    "estimate": "Estimated at OFox prices",
+    "balance": "OFox balance",
+    "recharge": "Add funds",
+    "trend": "Balance trend",
+    "runsOutDays": "At the recent pace, about {{count}} days left",
+    "runsOutHours": "At the recent pace, about {{count}} hours left",
+    "monthly": "This month {{used}} / {{limit}}",
+    "io": "In {{input}} · Out {{output}}",
+    "cacheRead": "Cache reads",
+    "cacheWrite": "Cache writes {{value}}",
+    "hitRate": "Hit rate {{rate}}",
+    "cost": "Cost",
+    "requests": "Requests",
+    "chart": "Token usage",
+    "chartLegend": "Light: fresh input · Dark: output; cache traffic counted separately",
+    "tools": "Tools",
+    "models": "Models",
+    "actions": "Actions for {{name}}",
+    "hide": "Hide",
+    "show": "Show",
+    "showItem": "Show {{name}}",
+    "hiddenCount": "{{count}} hidden",
+    "refreshFailed": "Some data could not refresh. Last results are kept; retry or view on the web.",
+    "errorDetails": "Error details",
+    "unavailable": "Local usage is unavailable",
+    "empty": "No usage in this period",
+    "unsupported": "Usage is not yet available for: {{tools}}",
+    "disclaimer": "Costs are estimates using OFox prices. Your bill is authoritative.",
+    "periods": {
+      "today": "Today",
+      "7d": "7 days",
+      "30d": "30 days",
+      "all": "All time"
+    }
   }
 }

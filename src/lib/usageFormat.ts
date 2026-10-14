@@ -14,6 +14,7 @@ export function runsOutIn(
   daysLeft: number | null | undefined,
 ): RunsOutIn | null {
   if (typeof daysLeft !== "number" || !Number.isFinite(daysLeft)) return null;
+  if (daysLeft <= 0) return null;
   if (daysLeft >= 1) return { days: Math.round(daysLeft) };
   return { hours: Math.max(1, Math.round(Math.max(daysLeft, 0) * 24)) };
 }

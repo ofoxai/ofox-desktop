@@ -54,6 +54,7 @@ vi.mock("@/lib/api/proxy", () => ({
 }));
 vi.mock("@/lib/api/ofoxAuth", () => ({
   ofoxGetUserInfo: mocks.getUserInfo,
+  ofoxRefreshUserInfo: mocks.getUserInfo,
   ofoxReconcileToolKeys: mocks.reconcileKeys,
   isOfoxBillingManager: () => false,
 }));
@@ -418,7 +419,7 @@ describe("Console header", () => {
     fireEvent.click(screen.getByRole("button", { name: "刷新" }));
 
     await waitFor(() =>
-      expect(mocks.toast.success).toHaveBeenCalledWith("余额已更新：$12.50"),
+      expect(mocks.invoke).toHaveBeenCalledWith("sync_session_usage"),
     );
     expect(
       mocks.invoke.mock.calls.filter(
@@ -440,9 +441,9 @@ describe("Console usage page", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "用量" }));
     const usage = screen.getByRole("tabpanel", { name: "用量" });
-    expect(within(usage).getByTestId("balance-card")).toHaveTextContent(
-      "$12.50",
-    );
+    expect(
+      within(usage).getByRole("region", { name: "OFox 余额" }),
+    ).toHaveTextContent("$12.50");
     fireEvent.click(
       within(usage).getByRole("button", { name: "在网页查看详细用量 ↗" }),
     );
