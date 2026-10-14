@@ -112,13 +112,8 @@ pub fn untagged(text: &str) -> String {
 /// command reads as its name and what was typed after it.
 pub fn clean_prompt(text: &str) -> Option<String> {
     let text = text.trim();
-    if let Some(command) = COMMAND.captures(text) {
-        let mut line = command[1].to_string();
-        if let Some(args) = ARGS.captures(text).filter(|a| !a[1].is_empty()) {
-            line.push(' ');
-            line.push_str(&args[1]);
-        }
-        return non_empty(one_line(&line));
+    if let Some(command) = slash_command(text) {
+        return non_empty(one_line(&command));
     }
     if text.is_empty()
         || ["<", "[Request interrupted", "Caveat:", "# AGENTS.md"]
@@ -128,6 +123,18 @@ pub fn clean_prompt(text: &str) -> Option<String> {
         return None;
     }
     non_empty(one_line(text))
+}
+
+/// A slash command (`<command-name>`) as its name and what was typed after
+/// it (`<command-args>`), or `None` when the text holds none.
+pub(crate) fn slash_command(text: &str) -> Option<String> {
+    let command = COMMAND.captures(text)?;
+    let mut line = command[1].to_string();
+    if let Some(args) = ARGS.captures(text).filter(|a| !a[1].is_empty()) {
+        line.push(' ');
+        line.push_str(&args[1]);
+    }
+    Some(line)
 }
 
 fn non_empty(text: String) -> Option<String> {

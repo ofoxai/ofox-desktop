@@ -368,10 +368,23 @@ export interface SessionMeta {
   resumeCommand?: string;
 }
 
+/** Transcript roles (session_manager/transcript.rs). */
+export type SessionMessageRole =
+  | "user"
+  | "assistant"
+  | "thinking"
+  | "tool_call"
+  | "tool"
+  | "command"
+  | "command_output"
+  | "system";
+
 export interface SessionMessage {
-  role: string;
+  role: SessionMessageRole;
   content: string;
   ts?: number;
+  /** The tool's name, of a tool call or its result. */
+  name?: string;
 }
 
 // MCP 服务器连接参数（宽松：允许扩展字段）

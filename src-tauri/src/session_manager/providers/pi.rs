@@ -205,6 +205,7 @@ fn messages_from_branch(branch: &[&Value]) -> Vec<SessionMessage> {
                     role: "context".into(),
                     content: summary.into(),
                     ts,
+                    name: None,
                 });
             }
             continue;
@@ -230,6 +231,7 @@ fn messages_from_branch(branch: &[&Value]) -> Vec<SessionMessage> {
         if let Some(parts) = content.as_array() {
             for part in parts {
                 let kind = part.get("type").and_then(Value::as_str).unwrap_or("");
+                let mut name = None;
                 let (role, text) = match kind {
                     "thinking" => (
                         "thinking",
@@ -238,16 +240,18 @@ fn messages_from_branch(branch: &[&Value]) -> Vec<SessionMessage> {
                             .unwrap_or("")
                             .into(),
                     ),
-                    "toolCall" => (
-                        "tool",
-                        format!(
-                            "[Tool: {}]\n{}",
+                    "toolCall" => {
+                        name = Some(
                             part.get("name")
                                 .and_then(Value::as_str)
-                                .unwrap_or("unknown"),
-                            serde_json::to_string_pretty(&part["arguments"]).unwrap_or_default()
-                        ),
-                    ),
+                                .unwrap_or("unknown")
+                                .to_string(),
+                        );
+                        (
+                            "tool_call",
+                            serde_json::to_string_pretty(&part["arguments"]).unwrap_or_default(),
+                        )
+                    }
                     "image" => (role, "[Image]".into()),
                     _ => (role, extract_text(part)),
                 };
@@ -256,6 +260,7 @@ fn messages_from_branch(branch: &[&Value]) -> Vec<SessionMessage> {
                         role: role.into(),
                         content: text,
                         ts,
+                        name,
                     });
                 }
             }
@@ -266,6 +271,7 @@ fn messages_from_branch(branch: &[&Value]) -> Vec<SessionMessage> {
                     role: role.into(),
                     content: text,
                     ts,
+                    name: None,
                 });
             }
         }

@@ -227,6 +227,7 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
             role,
             content,
             ts: if ts > 0 { Some(ts) } else { None },
+            name: None,
         })
         .collect();
 
@@ -316,6 +317,7 @@ pub fn load_messages_sqlite(source: &str) -> Result<Vec<SessionMessage>, String>
             role,
             content,
             ts: Some(ts),
+            name: None,
         });
     }
 

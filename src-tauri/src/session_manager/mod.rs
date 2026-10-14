@@ -2,6 +2,7 @@ pub mod managed;
 pub mod providers;
 pub mod terminal;
 pub mod title;
+pub mod transcript;
 pub mod trash;
 
 use serde::{Deserialize, Serialize};
@@ -37,10 +38,15 @@ pub struct SessionMeta {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionMessage {
+    /// One of the `transcript` roles: user, assistant, thinking, tool_call,
+    /// tool, command, command_output or system.
     pub role: String,
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ts: Option<i64>,
+    /// The tool's name, of a tool call or its result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -100,6 +106,13 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
 }
 
 pub(crate) fn load_messages_unchecked(
+    provider_id: &str,
+    source_path: &str,
+) -> Result<Vec<SessionMessage>, String> {
+    load_provider_messages(provider_id, source_path).map(transcript::normalized)
+}
+
+fn load_provider_messages(
     provider_id: &str,
     source_path: &str,
 ) -> Result<Vec<SessionMessage>, String> {

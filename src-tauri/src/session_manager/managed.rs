@@ -358,9 +358,13 @@ pub fn export_markdown(
     }
     for message in messages {
         let fence = fence(&message.content);
+        let heading = match &message.name {
+            Some(name) => format!("{} ({name})", message.role),
+            None => message.role.clone(),
+        };
         content.push_str(&format!(
             "\n## {}\n\n{fence}\n{}\n{fence}\n",
-            message.role.replace(['\r', '\n'], " "),
+            heading.replace(['\r', '\n'], " "),
             message.content
         ));
     }

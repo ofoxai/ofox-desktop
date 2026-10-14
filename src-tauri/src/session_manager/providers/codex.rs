@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
@@ -94,83 +93,7 @@ pub(crate) fn thread_names(index: &Path) -> ThreadNames {
 }
 
 pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
-    let file = super::dsh::open(path)?;
-    let reader = BufReader::new(file);
-    let mut messages = Vec::new();
-
-    for line in reader.lines() {
-        let line = match line {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        let value: Value = match serde_json::from_str(&line) {
-            Ok(parsed) => parsed,
-            Err(_) => continue,
-        };
-
-        if value.get("type").and_then(Value::as_str) != Some("response_item") {
-            continue;
-        }
-
-        let payload = match value.get("payload") {
-            Some(payload) => payload,
-            None => continue,
-        };
-
-        let payload_type = payload.get("type").and_then(Value::as_str).unwrap_or("");
-
-        // Codex uses separate payload types for tool interactions
-        let (role, content) = match payload_type {
-            "message" => {
-                let role = payload
-                    .get("role")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_string();
-                let content = payload.get("content").map(extract_text).unwrap_or_default();
-                (role, content)
-            }
-            "function_call" => {
-                let name = payload
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown");
-                (
-                    "assistant".to_string(),
-                    format!(
-                        "[Tool: {name}]\n{}",
-                        payload
-                            .get("arguments")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                    ),
-                )
-            }
-            "function_call_output" => {
-                let output = payload
-                    .get("output")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                ("tool".to_string(), output)
-            }
-            "reasoning" => (
-                "thinking".into(),
-                payload.get("summary").map(extract_text).unwrap_or_default(),
-            ),
-            _ => continue,
-        };
-
-        if content.trim().is_empty() {
-            continue;
-        }
-
-        let ts = value.get("timestamp").and_then(parse_timestamp_to_ms);
-
-        messages.push(SessionMessage { role, content, ts });
-    }
-
-    Ok(messages)
+    crate::session_manager::transcript::codex(path)
 }
 
 #[cfg(test)]
@@ -464,6 +387,75 @@ mod tests {
         assert_eq!(meta.title_source, Some(TitleSource::Prompt));
     }
 
+    fn item(payload: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"timestamp": "2026-10-14T10:00:03Z", "type": "response_item", "payload": payload})
+    }
+
+    #[test]
+    fn transcript_marks_harness_context_as_system_and_reasoning_as_thinking() {
+        let temp = tempdir().expect("tempdir");
+        let path = rollout(
+            temp.path(),
+            &[
+                item(serde_json::json!({"type": "message", "role": "developer",
+                    "content": [{"type": "input_text", "text": "<permissions instructions>sandboxed</permissions instructions>"}]})),
+                user_items(&[input_text(
+                    "<environment_context>\n  <cwd>/work/app</cwd>\n</environment_context>",
+                )]),
+                user_items(&[input_text(
+                    "<user_instructions>be brief</user_instructions>",
+                )]),
+                user_items(&[
+                    input_text("<image name=[Image #1] path=\"/tmp/a.png\">"),
+                    serde_json::json!({"type": "input_image", "image_url": "data:image/png;base64,AAAA"}),
+                    input_text("</image>"),
+                    input_text("make it green"),
+                ]),
+                item(
+                    serde_json::json!({"type": "reasoning", "summary": [], "encrypted_content": "opaque"}),
+                ),
+                item(serde_json::json!({"type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "Checking the CSS"}], "encrypted_content": "opaque"})),
+                item(
+                    serde_json::json!({"type": "custom_tool_call", "call_id": "c1", "name": "apply_patch",
+                    "input": "*** Begin Patch"}),
+                ),
+                item(
+                    serde_json::json!({"type": "custom_tool_call_output", "call_id": "c1",
+                    "output": [{"type": "input_text", "text": "Done"}]}),
+                ),
+                item(serde_json::json!({"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "It is green."}]})),
+            ],
+        );
+
+        let messages = load_messages(&path)
+            .expect("load")
+            .into_iter()
+            .map(|m| (m.role, m.content))
+            .collect::<Vec<_>>();
+        let pair = |role: &str, text: &str| (role.to_string(), text.to_string());
+        assert_eq!(
+            messages,
+            vec![
+                pair(
+                    "system",
+                    "<permissions instructions>sandboxed</permissions instructions>"
+                ),
+                pair(
+                    "system",
+                    "<environment_context>\n  <cwd>/work/app</cwd>\n</environment_context>"
+                ),
+                pair("system", "<user_instructions>be brief</user_instructions>"),
+                pair("user", "[Image]\nmake it green"),
+                pair("thinking", "Checking the CSS"),
+                pair("tool_call", "*** Begin Patch"),
+                pair("tool", "Done"),
+                pair("assistant", "It is green."),
+            ]
+        );
+    }
+
     #[test]
     fn delete_session_removes_jsonl_file() {
         let temp = tempdir().expect("tempdir");
@@ -583,10 +575,12 @@ mod tests {
         assert_eq!(msgs[0].role, "user");
         assert_eq!(msgs[0].content, "list files");
 
-        assert_eq!(msgs[1].role, "assistant");
-        assert!(msgs[1].content.contains("[Tool: shell]"));
+        assert_eq!(msgs[1].role, "tool_call");
+        assert_eq!(msgs[1].name.as_deref(), Some("shell"));
+        assert_eq!(msgs[1].content, "{\n  \"cmd\": [\n    \"ls\"\n  ]\n}");
 
         assert_eq!(msgs[2].role, "tool");
+        assert_eq!(msgs[2].name.as_deref(), Some("shell"));
         assert!(msgs[2].content.contains("file1.txt"));
 
         assert_eq!(msgs[3].role, "assistant");
