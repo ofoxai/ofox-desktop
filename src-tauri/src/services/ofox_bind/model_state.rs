@@ -29,6 +29,7 @@ pub(crate) async fn snapshot(
     display_id: &str,
     api_key: Option<&str>,
 ) -> Result<ToolModelSnapshot, String> {
+    crate::agent_env::ready().await;
     let _guard = BIND_LOCK.lock().await;
     let _file_locks = file_locks(tool);
     let mut health =

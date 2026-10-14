@@ -169,6 +169,8 @@ pub async fn migrate_skill_storage(
     target: SkillStorageLocation,
     app_state: State<'_, AppState>,
 ) -> Result<MigrationResult, String> {
+    // Skills are re-synced into the agents' own directories (CODEX_HOME, ...).
+    crate::agent_env::ready().await;
     SkillService::migrate_storage(&app_state.db, target).map_err(|e| e.to_string())
 }
 

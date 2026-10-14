@@ -1,6 +1,8 @@
 //! `.env` 文件的按行编辑与还原：只动受管的那几行，注释和其它变量保持原样。
 //! 解析规则与 `gemini_config::parse_env_file` 一致。
 
+use std::collections::BTreeSet;
+
 use super::plan::RestorePlan;
 
 fn key_of(line: &str) -> Option<&str> {
@@ -70,17 +72,18 @@ fn same_env(a: &str, b: &str) -> bool {
         && others(a) == others(b)
 }
 
-/// 受管变量一律还原成绑定前的那一行（原来没有就删掉）。
+/// 受管变量还原成绑定前的那一行（原来没有就删掉），`keep` 里的（用户改过的）除外。
 pub(crate) fn plan_restore(
     original: Option<&str>,
     current: Option<&str>,
     keys: &[&str],
+    keep: &BTreeSet<String>,
 ) -> RestorePlan {
     let original_text = original.unwrap_or_default();
     let mut restored = current.unwrap_or_default().to_string();
     let mut restored_keys = Vec::new();
     let mut removed_keys = Vec::new();
-    for key in keys {
+    for key in keys.iter().filter(|key| !keep.contains(**key)) {
         match find_line(original_text, key) {
             Some(line) => {
                 restored = set_line(&restored, key, Some(line));
@@ -123,7 +126,7 @@ mod tests {
             Some("https://api.ofox.ai/gemini"),
         );
         current = set_value(&current, "GEMINI_MODEL", Some("gemini-x"));
-        let plan = plan_restore(Some(original), Some(&current), KEYS);
+        let plan = plan_restore(Some(original), Some(&current), KEYS, &BTreeSet::new());
         assert!(plan.exact);
         assert_eq!(plan.content.as_deref(), Some(original));
         assert_eq!(plan.restored_keys, ["GEMINI_API_KEY"]);
@@ -132,14 +135,19 @@ mod tests {
     #[test]
     fn restore_keeps_lines_added_while_bound() {
         let current = "GEMINI_API_KEY=sk-of-x\n# added later\nDEBUG=1\n";
-        let plan = plan_restore(None, Some(current), KEYS);
+        let plan = plan_restore(None, Some(current), KEYS, &BTreeSet::new());
         assert_eq!(plan.content.as_deref(), Some("# added later\nDEBUG=1\n"));
         assert!(!plan.exact);
     }
 
     #[test]
     fn restore_deletes_an_env_file_bind_created() {
-        let plan = plan_restore(None, Some("GEMINI_API_KEY=sk-of-x\n"), KEYS);
+        let plan = plan_restore(
+            None,
+            Some("GEMINI_API_KEY=sk-of-x\n"),
+            KEYS,
+            &BTreeSet::new(),
+        );
         assert_eq!(plan.content, None);
         assert!(plan.exact);
     }

@@ -38,16 +38,21 @@ export function useInlineToolUpdates() {
 
   const label = (id: string) => TOOL_META[id]?.label ?? id;
 
-  /** The newer version of exactly this installation, if one is out. */
-  const updateFor = (tool: UpdatableTool) =>
+  /** The last check's entry for exactly this installation. */
+  const entryFor = (tool: UpdatableTool) =>
     state.tools.find(
       (entry) =>
         entry.name === tool.id &&
         entry.version === tool.version &&
         (!tool.installationKind ||
-          entry.installationKind === tool.installationKind) &&
-        entry.update_status === "available",
+          entry.installationKind === tool.installationKind),
     );
+
+  /** The newer version of exactly this installation, if one is out. */
+  const updateFor = (tool: UpdatableTool) => {
+    const entry = entryFor(tool);
+    return entry?.update_status === "available" ? entry : undefined;
+  };
 
   const sayOne = (o: ToolUpdateOutcome) => {
     const tool = label(o.tool);
@@ -171,5 +176,5 @@ export function useInlineToolUpdates() {
     />
   );
 
-  return { state, updateFor, updateOne, updateAll, confirmDialog };
+  return { state, entryFor, updateFor, updateOne, updateAll, confirmDialog };
 }

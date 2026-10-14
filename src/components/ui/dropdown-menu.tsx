@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 const MENU_SURFACE =
   "z-50 min-w-[8rem] overflow-hidden rounded-pop bg-pop-bg p-1 text-popover-foreground shadow-pop backdrop-blur-xl animate-pop-in origin-[var(--radix-dropdown-menu-content-transform-origin)] data-[side=top]:[--pop-dy:6px]";
 const MENU_ITEM =
-  "relative flex min-h-[30px] cursor-default select-none items-center gap-2 rounded-ctl px-2 py-1 text-nav outline-none transition-colors focus:bg-pill focus:text-ink data-[disabled]:pointer-events-none data-[disabled]:opacity-50";
+  "relative flex min-h-[30px] cursor-default select-none items-center gap-2 rounded-ctl px-2 py-1 text-nav outline-none transition-colors focus:bg-pill focus-visible:outline-none focus:text-ink data-[disabled]:pointer-events-none data-[disabled]:opacity-50";
 
 const DropdownMenu = DropdownMenuPrimitive.Root;
 

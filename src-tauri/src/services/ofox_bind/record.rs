@@ -4,10 +4,12 @@
 //! OpenClaw/Hermes 的 `__ofoxDirectBackupVersion` 外层、WorkBuddy 状态）没有
 //! 这两个字段，读出来归为 [`StoredRecord::Legacy`]。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::redact::describe_json_error;
 
 pub(crate) const RECORD_VERSION: u32 = 1;
 
@@ -39,6 +41,21 @@ pub(crate) enum ManagedFile {
     OpenCodeConfig,
     OpenClawConfig,
     HermesConfig,
+}
+
+impl ManagedFile {
+    /// 在 [`BindEnvelope::written`] 里的名字（和序列化的名字相同）。
+    pub(crate) const fn id(self) -> &'static str {
+        match self {
+            Self::CodexConfig => "codexConfig",
+            Self::ClaudeSettings => "claudeSettings",
+            Self::GeminiEnv => "geminiEnv",
+            Self::GeminiSettings => "geminiSettings",
+            Self::OpenCodeConfig => "openCodeConfig",
+            Self::OpenClawConfig => "openClawConfig",
+            Self::HermesConfig => "hermesConfig",
+        }
+    }
 }
 
 /// 一个受管文件在绑定前的样子。`original` 是原文件的完整文本：受管字段的原值
@@ -73,6 +90,11 @@ pub(crate) struct BindEnvelope {
     /// 解绑时还要用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy: Option<Value>,
+    /// Ofox 最近一次写进各受管文件（[`ManagedFile::id`]）的受管字段（按字段路径），
+    /// key 只存摘要。解绑时只还原还是这个样子、或者一看就是 Ofox 的字段，用户之后
+    /// 改过的留给用户（见 `ownership`）。旧记录没有这一项，照旧全部还原。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub written: BTreeMap<String, BTreeMap<String, Value>>,
 }
 
 impl BindEnvelope {
@@ -88,6 +110,7 @@ impl BindEnvelope {
             previous_provider,
             files,
             legacy: None,
+            written: BTreeMap::new(),
         }
     }
 
@@ -99,6 +122,7 @@ impl BindEnvelope {
             previous_provider: PreviousProvider::default(),
             files: Vec::new(),
             legacy,
+            written: BTreeMap::new(),
         }
     }
 }
@@ -111,13 +135,13 @@ pub(crate) enum StoredRecord {
 }
 
 pub(crate) fn parse_record(text: &str) -> Result<StoredRecord, String> {
-    let value: Value =
-        serde_json::from_str(text).map_err(|e| format!("绑定记录不是有效 JSON：{e}"))?;
+    let value: Value = serde_json::from_str(text)
+        .map_err(|e| format!("绑定记录不是有效 JSON：{}", describe_json_error(&e)))?;
     if value.get("v").is_none() {
         return Ok(StoredRecord::Legacy(value));
     }
-    let envelope: BindEnvelope =
-        serde_json::from_value(value).map_err(|e| format!("绑定记录格式无效：{e}"))?;
+    let envelope: BindEnvelope = serde_json::from_value(value)
+        .map_err(|e| format!("绑定记录格式无效：{}", describe_json_error(&e)))?;
     if envelope.v != RECORD_VERSION {
         return Err(format!("不支持的绑定记录版本：{}", envelope.v));
     }
@@ -171,6 +195,54 @@ mod tests {
     }
 
     #[test]
+    fn what_ofox_wrote_round_trips_and_older_records_read_without_it() {
+        let mut envelope = BindEnvelope::snapshot(
+            "codex",
+            PreviousProvider::default(),
+            vec![FileBaseline {
+                file: ManagedFile::CodexConfig,
+                path: "/home/u/.codex/config.toml".into(),
+                existed: false,
+                dir_existed: true,
+                mode: None,
+                original: None,
+            }],
+        );
+        let older = serialize_record(&envelope).unwrap();
+        assert!(!older.contains("written"), "empty is not written: {older}");
+        envelope.written.insert(
+            ManagedFile::CodexConfig.id().to_string(),
+            BTreeMap::from([("model".to_string(), json!("openai/gpt-x"))]),
+        );
+
+        let text = serialize_record(&envelope).unwrap();
+
+        assert_eq!(
+            parse_record(&text).unwrap(),
+            StoredRecord::Envelope(envelope)
+        );
+        match parse_record(&older).unwrap() {
+            StoredRecord::Envelope(parsed) => assert!(parsed.written.is_empty()),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn managed_file_ids_are_their_serialized_names() {
+        for file in [
+            ManagedFile::CodexConfig,
+            ManagedFile::ClaudeSettings,
+            ManagedFile::GeminiEnv,
+            ManagedFile::GeminiSettings,
+            ManagedFile::OpenCodeConfig,
+            ManagedFile::OpenClawConfig,
+            ManagedFile::HermesConfig,
+        ] {
+            assert_eq!(serde_json::to_value(file).unwrap(), json!(file.id()));
+        }
+    }
+
+    #[test]
     fn rows_without_version_and_kind_are_legacy() {
         for text in [
             r#"{"auth":{"OPENAI_API_KEY":"sk-of-x"},"config":""}"#,
@@ -182,6 +254,16 @@ mod tests {
                 StoredRecord::Legacy(_)
             ));
         }
+    }
+
+    #[test]
+    fn a_malformed_record_error_never_echoes_the_values_in_it() {
+        let text = r#"{"v":1,"kind":"snapshot","files":"sk-of-abc123456789"}"#;
+
+        let error = parse_record(text).unwrap_err();
+
+        assert!(error.contains("invalid type"), "{error}");
+        assert!(!error.contains("abc123456789"), "{error}");
     }
 
     #[test]

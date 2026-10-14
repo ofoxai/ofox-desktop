@@ -41,6 +41,8 @@ export interface UnbindReport {
   exactFiles: string[];
   restoredKeys: string[];
   removedKeys: string[];
+  /** Fields the user changed after binding, left as they are rather than restored (`<file>: <field>`). */
+  keptKeys: string[];
   filesRemoved: string[];
   providerRestoredTo: string | null;
   /** Other tools sharing this config (Codex ⇄ ChatGPT) still use Ofox, so it was kept. */

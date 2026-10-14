@@ -2,8 +2,7 @@
 use std::path::PathBuf;
 
 use crate::config::{
-    atomic_write, delete_file, get_home_dir, sanitize_provider_name, write_json_file,
-    write_text_file,
+    atomic_write, delete_file, sanitize_provider_name, write_json_file, write_text_file,
 };
 use crate::error::AppError;
 use serde_json::Value;
@@ -11,13 +10,10 @@ use std::fs;
 use std::path::Path;
 use toml_edit::DocumentMut;
 
-/// 获取 Codex 配置目录路径
+/// 获取 Codex 配置目录路径：设置里的覆盖目录 → `CODEX_HOME` → `~/.codex`
+/// （见 [`crate::agent_env`]）。
 pub fn get_codex_config_dir() -> PathBuf {
-    if let Some(custom) = crate::settings::get_codex_override_dir() {
-        return custom;
-    }
-
-    get_home_dir().join(".codex")
+    crate::agent_env::dir(crate::agent_env::AgentTool::Codex).dir
 }
 
 /// 获取 Codex auth.json 路径
@@ -90,7 +86,8 @@ pub fn write_codex_live_atomic(
         None => String::new(),
     };
     if !cfg_text.trim().is_empty() {
-        toml::from_str::<toml::Table>(&cfg_text).map_err(|e| AppError::toml(&config_path, e))?;
+        toml::from_str::<toml::Table>(&cfg_text)
+            .map_err(|e| AppError::toml(&config_path, &cfg_text, e))?;
     }
 
     // 第一步：写 auth.json
@@ -154,7 +151,7 @@ pub fn validate_config_toml(text: &str) -> Result<(), AppError> {
     }
     toml::from_str::<toml::Table>(text)
         .map(|_| ())
-        .map_err(|e| AppError::toml(Path::new("config.toml"), e))
+        .map_err(|e| AppError::toml(Path::new("config.toml"), text, e))
 }
 
 /// 读取并校验 `~/.codex/config.toml`，返回文本（可能为空）
@@ -175,9 +172,12 @@ pub fn read_and_validate_codex_config_text() -> Result<String, AppError> {
 ///
 /// Empty value removes the field.
 pub fn update_codex_toml_field(toml_str: &str, field: &str, value: &str) -> Result<String, String> {
-    let mut doc = toml_str
-        .parse::<DocumentMut>()
-        .map_err(|e| format!("TOML parse error: {e}"))?;
+    let mut doc = toml_str.parse::<DocumentMut>().map_err(|e| {
+        format!(
+            "TOML parse error: {}",
+            crate::redact::describe_toml_error(toml_str, &e)
+        )
+    })?;
 
     let trimmed = value.trim();
 
@@ -494,29 +494,11 @@ base_url = "https://production.api/v1"
 
     // ---- write_codex_live_from_provider_settings ----
 
-    use std::sync::{Mutex, OnceLock};
-
-    fn home_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-    }
-
-    /// Run a test with an isolated temp home (matches the helper used in
-    /// hermes_config tests). Callers also need `#[serial]`: other modules'
-    /// tests swap `CC_SWITCH_TEST_HOME` under that lock, not this one.
+    /// Run a test in the shared sandbox: a private home, and `CODEX_HOME` and the
+    /// other agent directory variables cleared. Callers also need `#[serial]`.
     fn with_test_home<T>(test_fn: impl FnOnce() -> T) -> T {
-        let _guard = home_test_guard();
-        let tmp = tempfile::tempdir().unwrap();
-        let old = std::env::var_os("CC_SWITCH_TEST_HOME");
-        std::env::set_var("CC_SWITCH_TEST_HOME", tmp.path());
-        let result = test_fn();
-        match old {
-            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
-            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
-        }
-        result
+        let _sandbox = crate::test_sandbox::sandbox();
+        test_fn()
     }
 
     #[test]
@@ -551,6 +533,19 @@ base_url = "https://production.api/v1"
                 .and_then(|v| v.as_str());
             assert_eq!(base_url, Some("https://api.ofox.ai/v1"));
         });
+    }
+
+    #[test]
+    fn config_toml_errors_never_echo_the_key_in_the_broken_file() {
+        let broken = "model = \"gpt-5\"\nexperimental_bearer_token = \"sk-of-abc123456789\" oops\n";
+
+        let validate = validate_config_toml(broken).unwrap_err().to_string();
+        let update = update_codex_toml_field(broken, "model", "gpt-6").unwrap_err();
+
+        for error in [validate, update] {
+            assert!(error.contains("line 2, column"), "{error}");
+            assert!(!error.contains("abc123456789"), "{error}");
+        }
     }
 
     #[test]

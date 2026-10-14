@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tauri::State;
 use tokio::sync::RwLock;
 
+use crate::services::balance_history::{self, BalanceTrend};
 use crate::services::ofox_bind::report::UnbindReport;
 use crate::store::AppState;
 
@@ -41,17 +42,22 @@ pub async fn ofox_poll_for_token(
 ///
 /// Attempts to fetch fresh data from the API (which includes the latest
 /// account balance), falling back to the in-memory cache on failure so the
-/// UI never has to wait for the network to render the user.
+/// UI never has to wait for the network to render the user. A fresh balance
+/// is also kept as a point of the balance history.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ofox_get_user_info(
     state: State<'_, OfoxAuthState>,
+    app_state: State<'_, AppState>,
 ) -> Result<Option<crate::ofox_auth::OfoxUserInfo>, String> {
     let manager = state.0.read().await;
     if !manager.is_authenticated() {
         return Ok(None);
     }
     match manager.refresh_user_info().await {
-        Ok(user) => Ok(Some(user)),
+        Ok(user) => {
+            balance_history::record(&app_state.db, &user, now_ms());
+            Ok(Some(user))
+        }
         Err(e) => {
             log::warn!("[OfoxAuth] refresh_user_info failed, falling back to cache: {e}");
             Ok(manager.get_user_info())
@@ -59,13 +65,49 @@ pub async fn ofox_get_user_info(
     }
 }
 
-/// Force a refresh of the cached Ofox user info from the API.
+/// Force a refresh of the cached Ofox user info from the API, and keep the
+/// fresh balance as a point of the balance history.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ofox_refresh_user_info(
     state: State<'_, OfoxAuthState>,
+    app_state: State<'_, AppState>,
 ) -> Result<crate::ofox_auth::OfoxUserInfo, String> {
     let manager = state.0.read().await;
-    manager.refresh_user_info().await
+    let user = manager.refresh_user_info().await?;
+    balance_history::record(&app_state.db, &user, now_ms());
+    Ok(user)
+}
+
+/// The balance history of the signed-in account's org and what it says: the
+/// points of the last 14 days, the burn rate, and when the balance runs out.
+/// Reads what the refreshes kept; it does not call OFox. Empty when signed out.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn ofox_get_balance_trend(
+    state: State<'_, OfoxAuthState>,
+    app_state: State<'_, AppState>,
+) -> Result<BalanceTrend, String> {
+    let owner = state.0.read().await.current_key_owner().await;
+    let Some(org_id) = owner.and_then(|owner| owner.org_id) else {
+        return Ok(BalanceTrend::default());
+    };
+    balance_history::trend_for(&app_state.db, &org_id, now_ms()).map_err(|e| e.to_string())
+}
+
+/// The org's monthly spending limit (`forbidden` for a member role), for the
+/// usage page. `None` when signed out or when no monthly limit is configured.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn ofox_get_spending(
+    state: State<'_, OfoxAuthState>,
+) -> Result<Option<crate::ofox_auth::OfoxSpending>, String> {
+    let manager = state.0.read().await;
+    if !manager.is_authenticated() {
+        return Ok(None);
+    }
+    manager.get_spending().await
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
 }
 
 /// Get the current Ofox auth snapshot — the single source of truth for any
@@ -147,7 +189,17 @@ pub async fn ofox_request_reauth(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 /// 取要写到工具配置里的 LLM 凭据（keychain 命中直接用，否则向 Ofox 签发）。
+/// 取要写进工具配置的 key。失败原因里可能有服务端回显的 key，抹掉再往外传。
 async fn acquire_bind_token(
+    key_tool: crate::app_config::BindableTool,
+    ofox_manager: &Arc<RwLock<crate::ofox_auth::OfoxAuthManager>>,
+) -> Result<String, String> {
+    fetch_bind_token(key_tool, ofox_manager)
+        .await
+        .map_err(crate::redact::scrub_error)
+}
+
+async fn fetch_bind_token(
     key_tool: crate::app_config::BindableTool,
     ofox_manager: &Arc<RwLock<crate::ofox_auth::OfoxAuthManager>>,
 ) -> Result<String, String> {
@@ -320,7 +372,9 @@ pub async fn ofox_bind_tool(
     // `modelSelection` remains accepted for compatibility with older renderer
     // builds while the multi-model UI sends `modelSelections`.
     let selections = model_selections.or_else(|| model_selection.map(|selection| vec![selection]));
-    bind_tool_to_ofox_internal(&state.db, &ofox_state.0, &app, selections).await?;
+    bind_tool_to_ofox_internal(&state.db, &ofox_state.0, &app, selections)
+        .await
+        .map_err(crate::redact::scrub_error)?;
     crate::commands::model_selection::notify(
         &app_handle,
         vec![crate::model_selection::canonical_tool(&app)?],
@@ -383,7 +437,9 @@ pub async fn ofox_restore_tool_binding(
             return Err("配置未缺失或已修改，无需恢复".into());
         }
         let key = acquire_bind_token(tool, &ofox_state.0).await?;
-        crate::native_tools::restore_missing(&state.db, tool, &key).await?;
+        crate::native_tools::restore_missing(&state.db, tool, &key)
+            .await
+            .map_err(crate::redact::scrub_error)?;
         crate::commands::model_selection::notify(&app_handle, vec![tool.as_str().into()]);
         return Ok(());
     }
@@ -397,7 +453,9 @@ pub async fn ofox_restore_tool_binding(
         }
         let key =
             acquire_bind_token(crate::app_config::BindableTool::WorkBuddy, &ofox_state.0).await?;
-        crate::workbuddy_config::restore_missing_binding(&state.db, &key).await?;
+        crate::workbuddy_config::restore_missing_binding(&state.db, &key)
+            .await
+            .map_err(crate::redact::scrub_error)?;
         crate::commands::model_selection::notify(&app_handle, vec!["workbuddy".into()]);
         return Ok(());
     }
@@ -424,7 +482,8 @@ pub async fn ofox_restore_tool_binding(
         &still_bound.unwrap_or_default(),
         &key,
     )
-    .await?;
+    .await
+    .map_err(crate::redact::scrub_error)?;
     crate::commands::model_selection::notify(&app_handle, vec![tool.app().as_str().into()]);
     Ok(())
 }
@@ -474,7 +533,9 @@ pub async fn ofox_unbind_tool(
     still_bound: Option<Vec<String>>,
 ) -> Result<UnbindReport, String> {
     let still_bound = still_bound.unwrap_or_default();
-    let report = unbind_tool_from_ofox_internal(&state.db, &app, &still_bound, false).await?;
+    let report = unbind_tool_from_ofox_internal(&state.db, &app, &still_bound, false)
+        .await
+        .map_err(crate::redact::scrub_error)?;
     crate::commands::model_selection::notify(
         &app_handle,
         vec![crate::model_selection::canonical_tool(&app)?],
@@ -490,5 +551,7 @@ pub async fn ofox_unbind_preview(
     still_bound: Option<Vec<String>>,
 ) -> Result<UnbindReport, String> {
     let still_bound = still_bound.unwrap_or_default();
-    unbind_tool_from_ofox_internal(&state.db, &app, &still_bound, true).await
+    unbind_tool_from_ofox_internal(&state.db, &app, &still_bound, true)
+        .await
+        .map_err(crate::redact::scrub_error)
 }

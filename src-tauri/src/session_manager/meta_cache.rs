@@ -16,7 +16,7 @@ use super::SessionMeta;
 use crate::database::Database;
 
 /// Bump to read every cached file again after a change to what is read.
-pub const PARSER_VERSION: i64 = 1;
+pub const PARSER_VERSION: i64 = 2;
 
 /// Providers whose files are read whole for their details.
 const PROVIDERS: [&str; 2] = ["claude", "codex"];
@@ -294,6 +294,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn an_unchanged_file_is_not_read_again() {
         let sandbox = sandbox();
         let db = Database::memory().unwrap();
@@ -333,6 +334,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn a_row_an_older_parser_wrote_is_read_again() {
         let sandbox = sandbox();
         let db = Database::memory().unwrap();
@@ -357,6 +359,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn the_row_of_a_file_no_longer_listed_is_forgotten() {
         let sandbox = sandbox();
         let db = Database::memory().unwrap();
@@ -375,6 +378,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn a_codex_thread_is_named_by_its_earliest_rollout_and_counts_every_one() {
         let sandbox = sandbox();
         let thread = "01a0bdc9-b5fd-7e63-9658-68bc8dce5ecd";

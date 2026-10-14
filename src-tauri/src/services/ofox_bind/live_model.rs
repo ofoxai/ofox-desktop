@@ -8,6 +8,8 @@
 //! 路由里 Ofox 条目下的模型 id（模板里是只有这一个模型的列表）。OpenCode 的当前模型
 //! 在 TUI 状态文件里（见 `opencode_state`），也是 Ofox 条目下的模型 id。
 
+use std::path::PathBuf;
+
 use serde_json::Value;
 
 use super::json_file::KeyStyle;
@@ -83,14 +85,33 @@ fn read_live_model(tool: Tool) -> Result<Option<String>, String> {
 /// Claude、Gemini 启动时 env 里的模型优先级比 settings 里的高，而用户在 agent 里
 /// 「记住」的模型（Claude 的 `model`、Gemini 的 `model.name`）写在 settings 里。这里把
 /// env 对齐到它，不然用户的选择下次启动不生效。只认具体的模型名，别名（`sonnet`、
-/// `auto-gemini-3` 之类）由 agent 自己解析，不动。返回是否改了文件。
-fn align_env_with_remembered_model(tool: Tool) -> Result<bool, String> {
+/// `auto-gemini-3` 之类）由 agent 自己解析，不动。写了就和其它 Ofox 写入一样记进绑定
+/// 记录（记不进去就回滚）。返回是否改了文件。
+fn align_env_with_remembered_model(db: &Database, tool: Tool) -> Result<bool, String> {
+    let Some((path, text, mode)) = aligned_env(tool)? else {
+        return Ok(false);
+    };
+    let before = super::read_leaves(tool)?;
     let mut txn = FileTxn::new();
-    let changed = match tool {
+    let result = match mode {
+        Some(mode) => txn.write_with_mode(&path, text.as_bytes(), mode),
+        None => txn.write(&path, text.as_bytes()),
+    }
+    .map_err(|e| format!("写入 {} 配置失败：{e}", tool.label()))
+    .and_then(|()| super::record_written(db, tool, &before));
+    if let Err(error) = result {
+        return Err(super::rollback_with(txn, error));
+    }
+    Ok(true)
+}
+
+/// 对齐后要写的文件、内容和权限；不需要改时是 `None`。
+fn aligned_env(tool: Tool) -> Result<Option<(PathBuf, String, Option<u32>)>, String> {
+    match tool {
         Tool::Claude => {
             let path = ManagedFile::ClaudeSettings.current_path();
             let Some(text) = read_text(&path)? else {
-                return Ok(false);
+                return Ok(None);
             };
             let before = json_file::parse_object(Some(&text), "Claude")?;
             let Some(model) = before
@@ -99,24 +120,22 @@ fn align_env_with_remembered_model(tool: Tool) -> Result<bool, String> {
                 .map(str::trim)
                 .filter(|model| model.contains('/'))
             else {
-                return Ok(false);
+                return Ok(None);
             };
             let env_model =
                 json_file::get(&before, &["env", "ANTHROPIC_MODEL"]).and_then(Value::as_str);
             if env_model == Some(model) {
-                return Ok(false);
+                return Ok(None);
             }
             let mut after = before.clone();
             json_file::set(&mut after, &["env", "ANTHROPIC_MODEL"], model.into());
             let rendered = json_file::render_changed(&text, KeyStyle::Json, &before, &after)?;
-            txn.write(&path, rendered.as_bytes())
-                .map_err(|e| format!("写入 Claude 配置失败：{e}"))?;
-            true
+            Ok(Some((path, rendered, None)))
         }
         Tool::Gemini => {
             let settings_path = ManagedFile::GeminiSettings.current_path();
             let Some(settings) = read_text(&settings_path)? else {
-                return Ok(false);
+                return Ok(None);
             };
             let settings = json_file::parse_object(Some(&settings), "Gemini")?;
             let Some(model) = json_file::get(&settings, &["model", "name"])
@@ -125,24 +144,21 @@ fn align_env_with_remembered_model(tool: Tool) -> Result<bool, String> {
                 .map(|model| model.trim().to_string())
                 .filter(|model| is_concrete_gemini_model(model))
             else {
-                return Ok(false);
+                return Ok(None);
             };
             let env_path = ManagedFile::GeminiEnv.current_path();
             let Some(env) = read_text(&env_path)? else {
-                return Ok(false);
+                return Ok(None);
             };
             if env_file::get_value(&env, "GEMINI_MODEL").as_deref() == Some(model.as_str()) {
-                return Ok(false);
+                return Ok(None);
             }
             let updated = env_file::set_value(&env, "GEMINI_MODEL", Some(&model));
             // `.env` 里有 key，和绑定时一样只给自己读写。
-            txn.write_with_mode(&env_path, updated.as_bytes(), super::gemini::ENV_MODE)
-                .map_err(|e| format!("写入 Gemini 配置失败：{e}"))?;
-            true
+            Ok(Some((env_path, updated, Some(super::gemini::ENV_MODE))))
         }
-        _ => false,
-    };
-    Ok(changed)
+        _ => Ok(None),
+    }
 }
 
 fn is_concrete_gemini_model(model: &str) -> bool {
@@ -154,7 +170,7 @@ fn is_concrete_gemini_model(model: &str) -> bool {
 /// 把配置文件里的模型写进模板（数据库里的 `ofox-<app>` 服务商）；模板已经是它就
 /// 不动。返回是否改了模板。调用方要先确认配置还是 Ofox 的接入方式。
 pub(super) fn adopt_live_model(db: &Database, tool: Tool) -> Result<bool, String> {
-    align_env_with_remembered_model(tool)?;
+    align_env_with_remembered_model(db, tool)?;
     let Some(live) = read_live_model(tool)? else {
         return Ok(false);
     };

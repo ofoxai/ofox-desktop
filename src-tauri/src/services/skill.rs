@@ -490,16 +490,9 @@ impl SkillService {
     pub fn get_app_skills_dir(app: &AppType) -> Result<PathBuf> {
         // 目录覆盖：优先使用用户在 settings.json 中配置的 override 目录
         match app {
-            AppType::Claude => {
-                if let Some(custom) = crate::settings::get_claude_override_dir() {
-                    return Ok(custom.join("skills"));
-                }
-            }
-            AppType::Codex => {
-                if let Some(custom) = crate::settings::get_codex_override_dir() {
-                    return Ok(custom.join("skills"));
-                }
-            }
+            // Claude Code and Codex are resolved below through `agent_env` (the settings
+            // override, else CLAUDE_CONFIG_DIR / CODEX_HOME, else the default directory).
+            AppType::Claude | AppType::Codex => {}
             AppType::Gemini => {
                 if let Some(custom) = crate::settings::get_gemini_override_dir() {
                     return Ok(custom.join("skills"));
@@ -527,8 +520,8 @@ impl SkillService {
         let home = get_home_dir();
 
         Ok(match app {
-            AppType::Claude => home.join(".claude").join("skills"),
-            AppType::Codex => home.join(".codex").join("skills"),
+            AppType::Claude => crate::config::get_claude_config_dir().join("skills"),
+            AppType::Codex => crate::codex_config::get_codex_config_dir().join("skills"),
             AppType::Gemini => home.join(".gemini").join("skills"),
             AppType::OpenCode => home.join(".config").join("opencode").join("skills"),
             AppType::OpenClaw => home.join(".openclaw").join("skills"),
@@ -556,6 +549,8 @@ impl SkillService {
         skill: &DiscoverableSkill,
         current_app: &AppType,
     ) -> Result<InstalledSkill> {
+        // The skill is synced into the agents' own directories (CODEX_HOME, ...).
+        crate::agent_env::ready().await;
         let ssot_dir = Self::get_ssot_dir()?;
 
         // 允许多级目录（如 a/b/c），但必须是安全的相对路径。
@@ -969,6 +964,8 @@ impl SkillService {
 
     /// 更新单个 Skill（重新下载并替换本地文件）
     pub async fn update_skill(&self, db: &Arc<Database>, skill_id: &str) -> Result<InstalledSkill> {
+        // The new files are synced into the agents' own directories (CODEX_HOME, ...).
+        crate::agent_env::ready().await;
         let skill = db
             .get_installed_skill(skill_id)?
             .ok_or_else(|| anyhow!("Skill not found: {skill_id}"))?;
@@ -2974,6 +2971,66 @@ pub fn migrate_skills_to_ssot(db: &Arc<Database>) -> Result<usize> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// The agents' skills live inside the directory they were told to use.
+    mod app_skills_dir {
+        use super::*;
+        use crate::test_sandbox::sandbox;
+        use serial_test::serial;
+
+        #[test]
+        #[serial]
+        fn the_defaults_are_below_the_home() {
+            let sandbox = sandbox();
+
+            assert_eq!(
+                SkillService::get_app_skills_dir(&AppType::Claude).unwrap(),
+                sandbox.home().join(".claude").join("skills")
+            );
+            assert_eq!(
+                SkillService::get_app_skills_dir(&AppType::Codex).unwrap(),
+                sandbox.home().join(".codex").join("skills")
+            );
+        }
+
+        #[test]
+        #[serial]
+        fn claude_config_dir_and_codex_home_move_the_skills() {
+            let sandbox = sandbox();
+            let claude = sandbox.home().join("data").join("claude-state");
+            let codex = sandbox.home().join("data").join("codex-state");
+            std::env::set_var("CLAUDE_CONFIG_DIR", &claude);
+            std::env::set_var("CODEX_HOME", &codex);
+
+            assert_eq!(
+                SkillService::get_app_skills_dir(&AppType::Claude).unwrap(),
+                claude.join("skills")
+            );
+            assert_eq!(
+                SkillService::get_app_skills_dir(&AppType::Codex).unwrap(),
+                codex.join("skills")
+            );
+        }
+
+        #[test]
+        #[serial]
+        fn a_settings_override_beats_the_environment_variable() {
+            let sandbox = sandbox();
+            let typed = sandbox.home().join("typed-codex");
+            let mut settings = crate::settings::get_settings();
+            settings.codex_config_dir = Some(typed.to_string_lossy().into_owned());
+            crate::settings::update_settings(settings).expect("save the override");
+            std::env::set_var(
+                "CODEX_HOME",
+                sandbox.home().join("data").join("codex-state"),
+            );
+
+            assert_eq!(
+                SkillService::get_app_skills_dir(&AppType::Codex).unwrap(),
+                typed.join("skills")
+            );
+        }
+    }
 
     fn write_skill(dir: &Path, name: &str) {
         fs::create_dir_all(dir).expect("create skill dir");

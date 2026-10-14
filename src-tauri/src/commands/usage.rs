@@ -201,6 +201,9 @@ pub async fn sync_session_usage(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<crate::services::session_usage::SessionSyncResult, AppError> {
+    // Codex / Claude sessions may live in CODEX_HOME / CLAUDE_CONFIG_DIR.
+    crate::agent_env::ready().await;
+
     // Pricing 刷新放在 session 解析之前：session_usage_* 在写入每条
     // proxy_request_logs 时按 model 查 model_pricing 算费用，先把表更新
     // 到最新版本，刚刚还没收录的模型这次同步即可正确计费。

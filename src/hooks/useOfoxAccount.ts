@@ -79,21 +79,25 @@ export function useOfoxAccount(): OfoxAccount {
   const [loadFailed, setLoadFailed] = useState(false);
   const [balanceRefreshing, setBalanceRefreshing] = useState(false);
   const mounted = useRef(false);
+  const lifetime = useRef(0);
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
+      lifetime.current += 1;
     };
   }, []);
 
   /** Store a fetched user unless the console has closed meanwhile. */
-  const keep = useCallback((fresh: OfoxUserInfo | null) => {
-    if (mounted.current) storeUser(fresh);
+  const keep = useCallback((fresh: OfoxUserInfo | null, generation: number) => {
+    if (mounted.current && lifetime.current === generation) storeUser(fresh);
   }, []);
 
   const loadUser = useCallback(async () => {
+    const generation = lifetime.current;
     const fresh = await ofoxGetUserInfo().catch(() => null);
-    if (fresh) keep(fresh);
+    if (!mounted.current || lifetime.current !== generation) return null;
+    if (fresh) keep(fresh, generation);
     return fresh;
   }, [keep]);
 
@@ -105,6 +109,7 @@ export function useOfoxAccount(): OfoxAccount {
    * meaningful user comes back.
    */
   const retryUser = useCallback(async () => {
+    const generation = lifetime.current;
     setLoadFailed(false);
     setRetrying(true);
     setRetryAttempt(0);
@@ -112,17 +117,20 @@ export function useOfoxAccount(): OfoxAccount {
       for (let i = 0; i < RETRY_DELAYS_MS.length; i++) {
         setRetryAttempt(i + 1);
         await new Promise((r) => setTimeout(r, RETRY_DELAYS_MS[i]));
-        if (!mounted.current) return;
+        if (!mounted.current || lifetime.current !== generation) return;
         const fresh = await ofoxGetUserInfo().catch(() => null);
+        if (!mounted.current || lifetime.current !== generation) return;
         if (isMeaningfulUser(fresh)) {
-          keep(fresh);
+          keep(fresh, generation);
           return;
         }
       }
       setLoadFailed(true);
     } finally {
-      setRetrying(false);
-      setRetryAttempt(0);
+      if (mounted.current && lifetime.current === generation) {
+        setRetrying(false);
+        setRetryAttempt(0);
+      }
     }
   }, [keep]);
 
@@ -131,10 +139,12 @@ export function useOfoxAccount(): OfoxAccount {
    * the user the round-trip happened even when the number didn't move.
    */
   const refreshBalance = useCallback(async () => {
+    const generation = lifetime.current;
     setBalanceRefreshing(true);
     try {
       const fresh = await ofoxGetUserInfo();
-      keep(fresh);
+      if (!mounted.current || lifetime.current !== generation) return;
+      keep(fresh, generation);
       const value = fresh?.balance?.balance;
       if (typeof value === "number") {
         toast.success(
@@ -145,10 +155,12 @@ export function useOfoxAccount(): OfoxAccount {
         toast.warning(t("console.balanceNoData"));
       }
     } catch (e) {
+      if (!mounted.current || lifetime.current !== generation) return;
       console.error("[useOfoxAccount] balance refresh failed", e);
       toast.error(t("console.balanceRefreshFailed"));
     } finally {
-      setBalanceRefreshing(false);
+      if (mounted.current && lifetime.current === generation)
+        setBalanceRefreshing(false);
     }
   }, [keep, t]);
 

@@ -24,6 +24,7 @@
 //! storage/message/<sid>/*.json (mtime ≥ watermark) ┴→ 费用计算 → proxy_request_logs (opencode_session)
 //! ```
 
+use crate::database::dao::usage_rollup::usage_prune_cutoff;
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::proxy::usage::calculator::CostCalculator;
@@ -55,6 +56,17 @@ struct OcMessage {
     #[serde(default)]
     time: OcTime,
     tokens: Option<OcTokens>,
+}
+
+impl OcMessage {
+    /// When the message was created (else completed), in milliseconds.
+    fn created_ms(&self) -> i64 {
+        if self.time.created > 0 {
+            self.time.created
+        } else {
+            self.time.completed
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -104,6 +116,10 @@ struct OcCall {
     usage: TokenUsage,
     created_at: i64,
     latency_ms: i64,
+    /// The message was created before what an earlier read already covered (the
+    /// previous watermark of its source), so that read stored it: if its row is
+    /// gone now and it is older than the prune cutoff, the prune archived it.
+    covered_before: bool,
 }
 
 /// 同步 OpenCode 使用数据（数据库优先，否则读 storage/ 下的 JSON 文件）
@@ -123,7 +139,15 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
         read_storage_calls(db, &base.join("storage"), &mut result)?
     };
 
+    let cutoff = usage_prune_cutoff()?;
     for call in &calls {
+        // A message rewritten after the prune folded it into the rollups and the
+        // archive moves past the watermark again; it is not stored a second time.
+        // One read for the first time is stored however old it is.
+        if call.covered_before && call.created_at < cutoff && !row_exists(db, &call.msg_id)? {
+            result.skipped += 1;
+            continue;
+        }
         match upsert_call(db, call) {
             Ok(true) => result.imported += 1,
             Ok(false) => result.skipped += 1,
@@ -151,6 +175,10 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
 fn read_db_calls(db: &Database, db_path: &Path) -> Result<Vec<OcCall>, AppError> {
     let key = db_path.to_string_lossy().to_string();
     let (watermark, _) = get_sync_state(db, &key)?;
+    // OpenCode 1.2 builds its database from the JSON files: a message the JSON
+    // read covered (created before its session directory's watermark) was read.
+    let json_dir = db_path.with_file_name("storage").join("message");
+    let mut json_watermarks: HashMap<String, i64> = HashMap::new();
 
     let conn = Connection::open_with_flags(
         db_path,
@@ -161,7 +189,7 @@ fn read_db_calls(db: &Database, db_path: &Path) -> Result<Vec<OcCall>, AppError>
     let parents = db_session_parents(&conn)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, session_id, time_updated, data FROM message
+            "SELECT id, session_id, time_created, time_updated, data FROM message
              WHERE time_updated >= ?1 ORDER BY time_updated",
         )
         .map_err(|e| AppError::Database(format!("查询 OpenCode 消息失败: {e}")))?;
@@ -171,7 +199,8 @@ fn read_db_calls(db: &Database, db_path: &Path) -> Result<Vec<OcCall>, AppError>
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
-                row.get::<_, String>(3)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
             ))
         })
         .map_err(|e| AppError::Database(format!("查询 OpenCode 消息失败: {e}")))?;
@@ -179,16 +208,26 @@ fn read_db_calls(db: &Database, db_path: &Path) -> Result<Vec<OcCall>, AppError>
     let mut calls = Vec::new();
     let mut newest = watermark;
     for row in rows {
-        let (id, session_id, updated, data) =
+        let (id, session_id, created, updated, data) =
             row.map_err(|e| AppError::Database(format!("读取 OpenCode 消息失败: {e}")))?;
         newest = newest.max(updated);
+        let json_watermark = match json_watermarks.get(&session_id) {
+            Some(w) => *w,
+            None => {
+                let dir_key = json_dir.join(&session_id).to_string_lossy().to_string();
+                let (w, _) = get_sync_state(db, &dir_key)?;
+                json_watermarks.insert(session_id.clone(), w);
+                w
+            }
+        };
+        let covered_before = covered_by(created, watermark.max(json_watermark));
         let Ok(mut message) = serde_json::from_str::<OcMessage>(&data) else {
             continue;
         };
         // the database keeps the ids in their columns, not in the document
         message.id = id;
         message.session_id = session_id;
-        if let Some(call) = to_call(&message, &parents) {
+        if let Some(call) = to_call(&message, &parents, covered_before) {
             calls.push(call);
         }
     }
@@ -255,7 +294,10 @@ fn read_storage_calls(
             if message.session_id.is_empty() {
                 message.session_id = file_name(&dir);
             }
-            if let Some(call) = to_call(&message, &parents) {
+            // a file read again (written since) whose message was created before
+            // the directory's watermark was read before
+            let covered_before = covered_by(message.created_ms(), watermark);
+            if let Some(call) = to_call(&message, &parents, covered_before) {
                 calls.push(call);
             }
         }
@@ -347,7 +389,11 @@ fn root_session(session: &str, parents: &HashMap<String, String>) -> String {
 
 /// An assistant message as a call: its tokens and model, its time the reply's end
 /// (else its start). None for any other message, or one with no tokens or model.
-fn to_call(message: &OcMessage, parents: &HashMap<String, String>) -> Option<OcCall> {
+fn to_call(
+    message: &OcMessage,
+    parents: &HashMap<String, String>,
+    covered_before: bool,
+) -> Option<OcCall> {
     if message.role != "assistant" || message.model_id.is_empty() || message.id.is_empty() {
         return None;
     }
@@ -384,7 +430,27 @@ fn to_call(message: &OcMessage, parents: &HashMap<String, String>) -> Option<OcC
         usage,
         created_at: at_ms / 1000,
         latency_ms,
+        covered_before,
     })
+}
+
+/// Whether a message created at `created_ms` was covered by the read that left
+/// `watermark` (the newest time it read; messages at it are read again, so they
+/// were read then too). No watermark: nothing was read.
+fn covered_by(created_ms: i64, watermark: i64) -> bool {
+    watermark > 0 && created_ms <= watermark
+}
+
+/// Whether the call of OpenCode message `msg_id` has a row.
+fn row_exists(db: &Database, msg_id: &str) -> Result<bool, AppError> {
+    let conn = lock_conn!(db.conn);
+    conn.query_row(
+        "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = ?1",
+        [format!("opencode:{msg_id}")],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|n| n > 0)
+    .map_err(|e| AppError::Database(format!("查询 OpenCode 会话用量失败: {e}")))
 }
 
 /// Insert a call, or update its row when the reply has gone on since; returns
@@ -654,5 +720,192 @@ mod tests {
         let rows = rows(&db);
         assert_eq!(rows.len(), 3);
         assert_eq!((rows[0].3, rows[0].4), (9999, 420));
+    }
+
+    const LONG: &str = "ses_long";
+
+    fn now_ms() -> i64 {
+        chrono::Utc::now().timestamp_millis()
+    }
+
+    fn days_ago_ms(days: i64) -> i64 {
+        now_ms() - days * 86_400_000
+    }
+
+    /// An assistant message document as the JSON storage keeps it.
+    fn message_doc(id: &str, at_ms: i64) -> serde_json::Value {
+        serde_json::json!({"id": id, "sessionID": LONG, "role": "assistant",
+            "modelID": "gpt-5.4", "tokens": {"input": 10, "output": 5, "reasoning": 0,
+                "cache": {"read": 0, "write": 0}},
+            "time": {"created": at_ms - 1000, "completed": at_ms}})
+    }
+
+    /// OpenCode's database holding `LONG` with a reply 40 days old and one from
+    /// yesterday, each stamped when it was written.
+    fn make_long_db(path: &Path) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (id text PRIMARY KEY, parent_id text);
+             CREATE TABLE message (id text PRIMARY KEY, session_id text NOT NULL,
+                time_created integer NOT NULL, time_updated integer NOT NULL,
+                data text NOT NULL);",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO session VALUES (?1, NULL)", [LONG])
+            .unwrap();
+        for (id, at) in [("msg_old", days_ago_ms(40)), ("msg_new", days_ago_ms(1))] {
+            let mut doc = message_doc(id, at);
+            doc.as_object_mut().unwrap().remove("id");
+            conn.execute(
+                "INSERT INTO message VALUES (?1, ?2, ?3, ?3, ?4)",
+                rusqlite::params![id, LONG, at, doc.to_string()],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    /// Calls of `LONG`: live rows plus the archive.
+    fn long_session_calls(db: &Database) -> i64 {
+        let conn = db.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM proxy_request_logs WHERE session_id = ?1)
+                  + (SELECT COALESCE(SUM(request_count), 0) FROM session_usage_archive
+                     WHERE session_id = ?1)",
+            [LONG],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    #[serial]
+    fn a_first_read_imports_old_replies_so_the_prune_can_archive_them() {
+        let _sandbox = sandbox();
+        fs::create_dir_all(opencode_dir()).unwrap();
+        make_long_db(&opencode_dir().join("opencode.db"));
+        let db = Database::memory().unwrap();
+
+        sync_opencode_usage(&db).unwrap();
+        db.rollup_and_prune(30).unwrap();
+
+        assert_eq!(long_session_calls(&db), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn an_old_reply_written_again_after_the_prune_is_not_stored_again() {
+        let _sandbox = sandbox();
+        fs::create_dir_all(opencode_dir()).unwrap();
+        let oc = make_long_db(&opencode_dir().join("opencode.db"));
+        let db = Database::memory().unwrap();
+        sync_opencode_usage(&db).unwrap();
+        db.rollup_and_prune(30).unwrap();
+
+        // OpenCode writes the old message again: it moves past the watermark
+        oc.execute(
+            "UPDATE message SET time_updated = ?1 WHERE id = 'msg_old'",
+            [now_ms()],
+        )
+        .unwrap();
+        sync_opencode_usage(&db).unwrap();
+        db.rollup_and_prune(30).unwrap();
+
+        assert_eq!(long_session_calls(&db), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn replies_read_from_json_are_not_stored_again_when_opencode_moves_to_its_database() {
+        let _sandbox = sandbox();
+        let storage = opencode_dir().join("storage");
+        for (id, at) in [("msg_old", days_ago_ms(40)), ("msg_new", days_ago_ms(1))] {
+            let path = storage.join(format!("message/{LONG}/{id}.json"));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, message_doc(id, at).to_string()).unwrap();
+        }
+        let db = Database::memory().unwrap();
+        sync_opencode_usage(&db).unwrap();
+        db.rollup_and_prune(30).unwrap();
+
+        // OpenCode 1.2 copies the JSON files into its new database
+        make_long_db(&opencode_dir().join("opencode.db"));
+        sync_opencode_usage(&db).unwrap();
+        db.rollup_and_prune(30).unwrap();
+
+        assert_eq!(long_session_calls(&db), 2);
+    }
+
+    /// Write `doc` as a JSON storage message of `LONG`, its file last written at `at_ms`.
+    fn write_json_message(storage: &Path, doc: &serde_json::Value, at_ms: i64) {
+        let path = storage.join(format!(
+            "message/{LONG}/{}.json",
+            doc["id"].as_str().unwrap()
+        ));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, doc.to_string()).unwrap();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(at_ms as u64))
+            .unwrap();
+    }
+
+    #[test]
+    #[serial]
+    fn a_reply_first_seen_after_a_long_gap_is_counted_once_in_the_database() {
+        let _sandbox = sandbox();
+        fs::create_dir_all(opencode_dir()).unwrap();
+        let oc = make_long_db(&opencode_dir().join("opencode.db"));
+        // the last read was 45 days ago: only a reply from then existed
+        oc.execute("DELETE FROM message WHERE id = 'msg_new'", [])
+            .unwrap();
+        oc.execute(
+            "UPDATE message SET time_created = ?1, time_updated = ?1 WHERE id = 'msg_old'",
+            [days_ago_ms(45)],
+        )
+        .unwrap();
+        let db = Database::memory().unwrap();
+        sync_opencode_usage(&db).unwrap();
+        db.rollup_and_prune(30).unwrap();
+
+        // Ofox did not run since; a reply completed 40 days ago appears
+        let mut doc = message_doc("msg_gap", days_ago_ms(40));
+        doc.as_object_mut().unwrap().remove("id");
+        oc.execute(
+            "INSERT INTO message VALUES ('msg_gap', ?1, ?2, ?2, ?3)",
+            rusqlite::params![LONG, days_ago_ms(40), doc.to_string()],
+        )
+        .unwrap();
+        sync_opencode_usage(&db).unwrap();
+        db.rollup_and_prune(30).unwrap();
+
+        assert_eq!(long_session_calls(&db), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn a_reply_first_seen_after_a_long_gap_is_counted_once_in_json_storage() {
+        let _sandbox = sandbox();
+        let storage = opencode_dir().join("storage");
+        write_json_message(
+            &storage,
+            &message_doc("msg_old", days_ago_ms(45)),
+            days_ago_ms(45),
+        );
+        let db = Database::memory().unwrap();
+        sync_opencode_usage(&db).unwrap();
+        db.rollup_and_prune(30).unwrap();
+
+        write_json_message(
+            &storage,
+            &message_doc("msg_gap", days_ago_ms(40)),
+            days_ago_ms(40),
+        );
+        sync_opencode_usage(&db).unwrap();
+        db.rollup_and_prune(30).unwrap();
+
+        assert_eq!(long_session_calls(&db), 2);
     }
 }

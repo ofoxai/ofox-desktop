@@ -1,5 +1,6 @@
 pub(crate) mod account_keys;
 pub mod balance;
+pub mod balance_history;
 pub mod coding_plan;
 pub mod config;
 pub mod env_checker;
@@ -30,6 +31,7 @@ pub mod stream_check;
 pub mod subscription;
 pub mod usage_cache;
 pub mod usage_maintenance;
+pub mod usage_overview;
 pub mod usage_stats;
 pub mod usage_sync;
 pub mod webdav;

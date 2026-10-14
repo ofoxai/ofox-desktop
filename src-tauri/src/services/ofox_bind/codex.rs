@@ -9,6 +9,7 @@
 //! 解绑只还原「接入方式」这几个字段（[`MANAGED_KEYS`] + `[model_providers.ofox]`），
 //! MCP、项目、插件等其余内容一律不动。
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -18,11 +19,13 @@ use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
 use crate::config::FileTxn;
 use crate::ofox_apex::mentions_ofox_gateway;
 
+use super::ownership::{self, Leaf, Leaves};
 use super::plan::{read_text, FileEdit, RestorePlan};
 
 const OFOX_PROVIDER: &str = "ofox";
 const PROVIDERS_TABLE: &str = "model_providers";
-/// Ofox 管理的顶层字段：解绑时一律还原成绑定前的值（原来没有就删掉）。
+/// Ofox 管理的顶层字段：解绑时还原成绑定前的值（原来没有就删掉），用户之后改过的
+/// 按 [`LEAVES`] 的规则留着。
 const MANAGED_KEYS: &[&str] = &[
     "model_provider",
     "model",
@@ -32,12 +35,24 @@ const MANAGED_KEYS: &[&str] = &[
 /// 绑定之后归用户的字段：ChatGPT 和 Codex 会把界面里选的推理强度写回 config.toml，
 /// Ofox 再写配置（比如切换模型）时保留，只在没有时写模板的默认值。
 const USER_TUNED_KEYS: &[&str] = &["model_reasoning_effort"];
+/// 受管字段（[`MANAGED_KEYS`] 和整张 `[model_providers.ofox]`）解绑时的还原规则。
+pub(crate) const LEAVES: &[Leaf] = &[
+    Leaf::route(&["model_provider"], selects_ofox),
+    Leaf::route(&[PROVIDERS_TABLE, OFOX_PROVIDER], ownership::ofox_entry),
+    Leaf::model(&["model"], &["model_provider"]),
+    Leaf::preference(&["model_reasoning_effort"]),
+    Leaf::preference(&["disable_response_storage"]),
+];
 /// config.toml 里有 key，只给本人读写。
 const BOUND_CONFIG_MODE: u32 = 0o600;
 
 fn parse_doc(text: &str) -> Result<DocumentMut, String> {
-    text.parse::<DocumentMut>()
-        .map_err(|e| format!("~/.codex/config.toml 不是有效的 TOML，请先修复后再操作：{e}"))
+    text.parse::<DocumentMut>().map_err(|e| {
+        format!(
+            "~/.codex/config.toml 不是有效的 TOML，请先修复后再操作：{}",
+            crate::redact::describe_toml_error(text, &e)
+        )
+    })
 }
 
 fn child_table<'a>(
@@ -143,6 +158,24 @@ pub(crate) fn validate(text: &str) -> Result<(), String> {
     parse_doc(text).map(drop)
 }
 
+fn selects_ofox(value: &Value) -> bool {
+    value.as_str() == Some(OFOX_PROVIDER)
+}
+
+/// config.toml 里各受管字段现在的值。
+pub(crate) fn leaves(text: Option<&str>) -> Result<Leaves, String> {
+    let text = text.unwrap_or_default();
+    let table = toml::from_str::<toml::Table>(text).map_err(|e| {
+        format!(
+            "~/.codex/config.toml 不是有效的 TOML，请先修复后再操作：{}",
+            crate::redact::describe_toml_de_error(text, &e)
+        )
+    })?;
+    let value = serde_json::to_value(table)
+        .map_err(|_| "~/.codex/config.toml 无法读取受管字段".to_string())?;
+    Ok(ownership::leaves_at(&value, LEAVES))
+}
+
 fn same_toml(a: &str, b: &str) -> bool {
     match (
         toml::from_str::<toml::Table>(a),
@@ -153,18 +186,19 @@ fn same_toml(a: &str, b: &str) -> bool {
     }
 }
 
-/// 受管字段一律还原成绑定前的值（原来没有就删掉），即使绑定期间被改过；
+/// 受管字段还原成绑定前的值（原来没有就删掉），`keep` 里的（用户改过的）除外；
 /// 其余内容保持当前状态。
 pub(crate) fn plan_restore(
     original: Option<&str>,
     current: Option<&str>,
+    keep: &BTreeSet<String>,
 ) -> Result<RestorePlan, String> {
     let original_doc = parse_doc(original.unwrap_or_default())?;
     let mut doc = parse_doc(current.unwrap_or_default())?;
     let mut restored_keys = Vec::new();
     let mut removed_keys = Vec::new();
 
-    for key in MANAGED_KEYS {
+    for key in MANAGED_KEYS.iter().filter(|key| !keep.contains(**key)) {
         match original_doc.get(key) {
             Some(item) => {
                 doc.insert(key, item.clone());
@@ -184,6 +218,7 @@ pub(crate) fn plan_restore(
         .and_then(Item::as_table_like)
         .and_then(|providers| providers.get(OFOX_PROVIDER));
     match original_provider {
+        _ if keep.contains(&provider_key) => {}
         Some(item) => {
             child_table(doc.as_table_mut(), PROVIDERS_TABLE)?.insert(OFOX_PROVIDER, item.clone());
             restored_keys.push(provider_key);
@@ -229,8 +264,12 @@ pub(crate) fn strip_ofox_key_from_auth(
     auth_text: &str,
     ofox_key: Option<&str>,
 ) -> Result<Option<Option<String>>, String> {
-    let mut auth: Value =
-        serde_json::from_str(auth_text).map_err(|e| format!("auth.json 不是有效 JSON：{e}"))?;
+    let mut auth: Value = serde_json::from_str(auth_text).map_err(|e| {
+        format!(
+            "auth.json 不是有效 JSON：{}",
+            crate::redact::describe_json_error(&e)
+        )
+    })?;
     let Some(object) = auth.as_object_mut() else {
         return Ok(None);
     };
@@ -267,8 +306,12 @@ fn apply_auth_edit(txn: &mut FileTxn, path: &Path, edit: Option<String>) -> Resu
 ///
 /// `stored_key` 只在确实要迁移、且 auth.json 里没有 Ofox key 时才调用——读钥匙串
 /// 可能弹系统授权窗口，不能在每次启动时无条件去读。
+///
+/// `record` 在文件写好之后调用（参数是迁移前的 config.toml），把这次写了什么记进
+/// 绑定记录；它失败时迁移整个回滚。
 pub(crate) fn migrate_legacy_shape(
     stored_key: impl FnOnce() -> Option<String>,
+    record: impl FnOnce(&str) -> Result<(), String>,
 ) -> Result<bool, String> {
     let config_path = get_codex_config_path();
     let Some(config) = read_text(&config_path)? else {
@@ -323,7 +366,7 @@ pub(crate) fn migrate_legacy_shape(
                 apply_auth_edit(&mut txn, &auth_path, edit)?;
             }
         }
-        Ok(())
+        record(&config)
     })();
     if let Err(error) = result {
         return Err(super::rollback_with(txn, error));
@@ -427,7 +470,12 @@ fn strip_flag(doc: &mut DocumentMut) -> bool {
 
 /// 启动 Codex 前调用：只有 Codex 明确不认 `disable_response_storage` 时，才把配置里残留的
 /// 去掉（否则每次启动都警告「被忽略」）；认的、查不出的都不动。返回是否改了文件。
-pub(crate) fn strip_flag_codex_ignores() -> Result<bool, String> {
+///
+/// `record` 在文件写好之后调用（参数是改之前的 config.toml），把这次写了什么记进绑定
+/// 记录；它失败时这次改动回滚。
+pub(crate) fn strip_flag_codex_ignores(
+    record: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<bool, String> {
     if super::codex_probe::flag_support() != super::codex_probe::FlagSupport::Unknown {
         return Ok(false);
     }
@@ -443,8 +491,13 @@ pub(crate) fn strip_flag_codex_ignores() -> Result<bool, String> {
         return Ok(false);
     }
     let mut txn = FileTxn::new();
-    txn.write_with_mode(&path, doc.to_string().as_bytes(), BOUND_CONFIG_MODE)
-        .map_err(|e| format!("写入 Codex 配置失败：{e}"))?;
+    let result = txn
+        .write_with_mode(&path, doc.to_string().as_bytes(), BOUND_CONFIG_MODE)
+        .map_err(|e| format!("写入 Codex 配置失败：{e}"))
+        .and_then(|()| record(&text));
+    if let Err(error) = result {
+        return Err(super::rollback_with(txn, error));
+    }
     Ok(true)
 }
 
@@ -473,6 +526,27 @@ mod tests {
         // Everything else in the template is still applied.
         assert!(without.contains("model_provider = \"ofox\""));
         assert!(without.contains("experimental_bearer_token"));
+    }
+
+    #[test]
+    fn broken_auth_json_error_never_echoes_the_key_in_it() {
+        let auth = r#"{"OPENAI_API_KEY": "sk-of-abc123456789", "x": }"#;
+
+        let error = strip_ofox_key_from_auth(auth, Some("sk-of-abc123456789")).unwrap_err();
+
+        assert!(error.contains("line 1, column 47"), "{error}");
+        assert!(!error.contains("abc123456789"), "{error}");
+    }
+
+    #[test]
+    fn broken_config_error_never_echoes_the_key_in_it() {
+        let config =
+            "[model_providers.ofox]\nexperimental_bearer_token = \"sk-of-abc123456789\" oops\n";
+
+        let error = apply_patch(config, &bound_patch(TEMPLATE, "sk-of-TEST").unwrap()).unwrap_err();
+
+        assert!(error.contains("line 2, column"), "{error}");
+        assert!(!error.contains("abc123456789"), "{error}");
     }
 
     #[test]
@@ -522,7 +596,7 @@ mod tests {
     fn restore_returns_the_original_bytes_after_bind_and_model_change() {
         let mut current = bound(USER_CONFIG);
         current = current.replace("openai/gpt-6-luna", "anthropic/claude-x");
-        let plan = plan_restore(Some(USER_CONFIG), Some(&current)).unwrap();
+        let plan = plan_restore(Some(USER_CONFIG), Some(&current), &BTreeSet::new()).unwrap();
         assert!(plan.exact);
         assert_eq!(plan.content.as_deref(), Some(USER_CONFIG));
     }
@@ -535,7 +609,7 @@ mod tests {
             "model_reasoning_effort = \"low\"",
         );
         current.push_str("\n[mcp_servers.added_while_bound]\ncommand = \"x\"\n");
-        let plan = plan_restore(Some(USER_CONFIG), Some(&current)).unwrap();
+        let plan = plan_restore(Some(USER_CONFIG), Some(&current), &BTreeSet::new()).unwrap();
         assert!(!plan.exact);
         let doc: toml::Table = toml::from_str(plan.content.as_deref().unwrap()).unwrap();
         assert_eq!(doc["model"].as_str(), Some("gpt-5-codex"));
@@ -551,7 +625,7 @@ mod tests {
 
     #[test]
     fn restore_deletes_a_config_that_bind_created() {
-        let plan = plan_restore(None, Some(&bound(""))).unwrap();
+        let plan = plan_restore(None, Some(&bound("")), &BTreeSet::new()).unwrap();
         assert_eq!(plan.content, None);
         assert!(plan.exact);
     }
@@ -559,7 +633,7 @@ mod tests {
     #[test]
     fn restore_puts_back_a_pre_existing_ofox_provider() {
         let original = "[model_providers.ofox]\nbase_url = \"https://my-relay/v1\"\n";
-        let plan = plan_restore(Some(original), Some(&bound(original))).unwrap();
+        let plan = plan_restore(Some(original), Some(&bound(original)), &BTreeSet::new()).unwrap();
         assert_eq!(plan.content.as_deref(), Some(original));
     }
 
@@ -599,6 +673,39 @@ mod tests {
         );
         assert!(removed.contains(&"model_provider".to_string()));
         assert_eq!(legacy_cleanup_config(USER_CONFIG).unwrap(), (None, vec![]));
+    }
+
+    #[test]
+    fn every_managed_field_has_a_restore_rule() {
+        let ruled: Vec<String> = LEAVES.iter().map(Leaf::id).collect();
+        let managed: Vec<String> = MANAGED_KEYS
+            .iter()
+            .map(|key| key.to_string())
+            .chain([format!("{PROVIDERS_TABLE}.{OFOX_PROVIDER}")])
+            .collect();
+        assert_eq!(
+            ruled.iter().collect::<BTreeSet<_>>(),
+            managed.iter().collect::<BTreeSet<_>>()
+        );
+    }
+
+    #[test]
+    fn a_kept_field_is_left_as_the_user_has_it() {
+        let current = bound(USER_CONFIG).replace(
+            "model_reasoning_effort = \"high\"",
+            "model_reasoning_effort = \"low\"",
+        );
+        let keep = BTreeSet::from(["model_reasoning_effort".to_string()]);
+
+        let plan = plan_restore(Some(USER_CONFIG), Some(&current), &keep).unwrap();
+
+        let doc: toml::Table = toml::from_str(plan.content.as_deref().unwrap()).unwrap();
+        assert_eq!(doc["model_reasoning_effort"].as_str(), Some("low"));
+        assert_eq!(doc["model"].as_str(), Some("gpt-5-codex"));
+        assert!(doc.get("model_providers").is_none());
+        assert!(!plan
+            .restored_keys
+            .contains(&"model_reasoning_effort".into()));
     }
 
     #[test]

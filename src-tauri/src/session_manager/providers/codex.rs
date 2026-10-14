@@ -186,9 +186,27 @@ impl CodexScan {
 pub(crate) fn details(path: &Path) -> Option<SessionDetails> {
     let mut scan = CodexScan::default();
     for_each_line(path, |line| {
-        let message =
-            line.contains("\"type\":\"response_item\"") && line.contains("\"type\":\"message\"");
-        if message || line.contains("\"type\":\"user_message\"") {
+        // Read discriminators without allocating potentially large content blocks.
+        #[derive(serde::Deserialize)]
+        struct Header<'a> {
+            #[serde(rename = "type", borrow)]
+            kind: Option<std::borrow::Cow<'a, str>>,
+            #[serde(borrow)]
+            payload: Option<Payload<'a>>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Payload<'a> {
+            #[serde(rename = "type", borrow)]
+            kind: Option<std::borrow::Cow<'a, str>>,
+        }
+        let Ok(header) = serde_json::from_str::<Header<'_>>(line) else {
+            return;
+        };
+        let payload = header.payload.as_ref().and_then(|p| p.kind.as_deref());
+        if matches!(
+            (header.kind.as_deref(), payload),
+            (Some("response_item"), Some("message")) | (Some("event_msg"), Some("user_message"))
+        ) {
             if let Ok(value) = serde_json::from_str::<Value>(line) {
                 scan.line(&value);
             }
@@ -382,6 +400,20 @@ mod tests {
 
     fn input_text(text: &str) -> serde_json::Value {
         serde_json::json!({"type": "input_text", "text": text})
+    }
+
+    #[test]
+    fn metadata_accepts_json_whitespace() {
+        let temp = tempdir().unwrap();
+        let path = rollout(temp.path(), &[user_items(&[input_text("A real question")])]);
+        let body = std::fs::read_to_string(&path).unwrap().replace(":", ": ");
+        std::fs::write(&path, body).unwrap();
+        let details = details(&path).unwrap();
+        assert_eq!(details.message_count, 1);
+        assert_eq!(
+            details.candidates.prompt.as_deref(),
+            Some("A real question")
+        );
     }
 
     #[test]

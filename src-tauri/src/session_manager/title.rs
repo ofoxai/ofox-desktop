@@ -19,6 +19,40 @@ static COMMAND: LazyLock<Regex> =
 static ARGS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"<command-args>\s*([^<]*?)\s*</command-args>").unwrap());
 
+// Only known harness blocks are metadata. Arbitrary HTML/XML is user content.
+static CONTEXT: LazyLock<Regex> = LazyLock::new(|| {
+    let tags = [
+        "environment_context",
+        "user_instructions",
+        "external_codex_apps_open_page",
+        "task-notification",
+        "turn_aborted",
+        "system-reminder",
+        "local-command-caveat",
+        "local-command-stdout",
+        "local-command-stderr",
+    ];
+    Regex::new(&format!(
+        "(?s){}",
+        tags.iter()
+            .map(|tag| format!("<{tag}(?:\\s[^>]*)?>.*?</{tag}>"))
+            .collect::<Vec<_>>()
+            .join("|")
+    ))
+    .unwrap()
+});
+static IMAGE_MARKER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[Image(?: #\d+|: [^\]]*)?\]").unwrap());
+
+pub(crate) fn without_context(text: &str) -> String {
+    CONTEXT.replace_all(text, " ").into_owned()
+}
+
+pub(crate) fn is_context(text: &str) -> bool {
+    let text = text.trim();
+    text.starts_with("# AGENTS.md") || (!text.is_empty() && without_context(text).trim().is_empty())
+}
+
 /// Where a session's title came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -120,7 +154,7 @@ pub fn one_line(text: &str) -> String {
 
 /// A message the agent or a harness wrapped in tags, as words.
 pub fn untagged(text: &str) -> String {
-    one_line(&TAG.replace_all(text, " "))
+    one_line(&IMAGE_MARKER.replace_all(&TAG.replace_all(&without_context(text), " "), " "))
 }
 
 /// The words of a prompt someone typed, or `None` for what the agent put in
@@ -132,13 +166,13 @@ pub fn clean_prompt(text: &str) -> Option<String> {
         return non_empty(one_line(&command));
     }
     if text.is_empty()
-        || ["<", "[Request interrupted", "Caveat:", "# AGENTS.md"]
+        || ["[Request interrupted", "Caveat:", "# AGENTS.md"]
             .iter()
             .any(|prefix| text.starts_with(prefix))
     {
         return None;
     }
-    non_empty(one_line(text))
+    non_empty(untagged(text))
 }
 
 /// A slash command (`<command-name>`) as its name and what was typed after
@@ -163,6 +197,28 @@ mod tests {
 
     fn some(text: &str) -> Option<String> {
         Some(text.to_string())
+    }
+
+    #[test]
+    fn harness_and_image_markers_never_name_a_session() {
+        for (text, expected) in [
+            (
+                "<external_codex_apps_open_page>{\"page_id\":null}</external_codex_apps_open_page>",
+                "project",
+            ),
+            ("[Image #24] claude有问题 [Image]", "claude有问题"),
+            ("<command-name>/clear</command-name>", "/clear"),
+            ("<div>fix this component</div>", "fix this component"),
+            (
+                "<environment_context>cwd: /tmp</environment_context> fix the bug",
+                "fix the bug",
+            ),
+        ] {
+            let c = TitleCandidates::default()
+                .with_first_user_text(Some(text))
+                .with_directory(Some("/work/project"));
+            assert_eq!(pick_title(&c).unwrap().0, expected, "{text}");
+        }
     }
 
     // Ported from Magpie sessions_test.go TestPrompt.
@@ -204,11 +260,11 @@ mod tests {
             untagged(
                 "<external_codex_apps_open_page>{\"page_id\":null}</external_codex_apps_open_page>"
             ),
-            "{\"page_id\":null}"
+            ""
         );
         assert_eq!(
             untagged("<task-notification>\n<summary>done</summary>\n</task-notification>"),
-            "done"
+            ""
         );
     }
 
@@ -266,16 +322,16 @@ mod tests {
     fn the_first_user_text_gives_a_prompt_and_a_message() {
         let typed =
             TitleCandidates::default().with_first_user_text(Some("look at this [Image #2]"));
-        assert_eq!(typed.prompt, some("look at this [Image #2]"));
+        assert_eq!(typed.prompt, some("look at this"));
         let tagged = TitleCandidates::default()
             .with_first_user_text(Some("<user_query>why</user_query>"))
             .with_directory(Some("/work/my-app/"));
-        assert_eq!(tagged.prompt, None);
+        assert_eq!(tagged.prompt, some("why"));
         assert_eq!(tagged.message, some("why"));
         assert_eq!(tagged.directory, some("my-app"));
         assert_eq!(
             pick_title(&tagged),
-            Some(("why".to_string(), TitleSource::Message))
+            Some(("why".to_string(), TitleSource::Prompt))
         );
     }
 }

@@ -22,13 +22,15 @@ use crate::settings::{self, ApiKeyMeta};
 /// 把 ApiKeyError 转成给前端的 String。**集中一处分类**避免每个 command 都
 /// 重复 match 一遍——文案变更点也收敛在这里。
 fn explain(e: ApiKeyError) -> String {
-    match e {
+    let message = match e {
         ApiKeyError::Unauthorized(msg) => {
             format!("OFox 授权失效：{msg}。请退出登录后重新走 device flow。")
         }
         ApiKeyError::RemoteRejected(msg) => format!("OFox API key 服务端拒绝：{msg}"),
         ApiKeyError::Storage(msg) => format!("本地 keychain / settings 读写失败：{msg}"),
-    }
+    };
+    // 服务端的拒绝文案可能回显请求里的 key。
+    crate::redact::scrub_error(message)
 }
 
 /// 列出所有工具的 API key 元数据。
@@ -177,4 +179,23 @@ pub async fn ofox_revoke_api_key_for_tool(
     result?;
     crate::commands::model_selection::notify(&app_handle, vec![tool.as_str().into()]);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explained_errors_never_repeat_a_key_the_server_echoes_back() {
+        for error in [
+            ApiKeyError::Unauthorized("Bearer abcdefgh12345678 expired".into()),
+            ApiKeyError::RemoteRejected("400: bad key sk-of-abc123456789".into()),
+            ApiKeyError::Storage("settings: token=abcdefgh12345678".into()),
+        ] {
+            let message = explain(error);
+            assert!(!message.contains("abc123456789"), "{message}");
+            assert!(!message.contains("abcdefgh12345678"), "{message}");
+            assert!(message.contains("«redacted»"), "{message}");
+        }
+    }
 }

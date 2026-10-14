@@ -1,3 +1,4 @@
+mod agent_env;
 mod app_config;
 mod app_store;
 mod auto_launch;
@@ -14,6 +15,7 @@ mod gemini_mcp;
 pub mod hermes_config;
 mod init_status;
 mod json5_sections;
+mod lastgood;
 mod lightweight;
 #[cfg(target_os = "linux")]
 mod linux_fix;
@@ -38,6 +40,7 @@ mod prompt_files;
 mod provider;
 mod provider_defaults;
 mod proxy;
+mod redact;
 mod services;
 mod session_manager;
 mod settings;
@@ -72,7 +75,10 @@ pub use services::{
     ConfigService, EndpointLatency, McpService, PromptService, ProviderService, ProxyService,
     SkillService, SpeedtestService,
 };
-pub use settings::{update_settings, AppSettings};
+pub use settings::{
+    reload_settings, reset_unreadable, settings_health, update_settings, AppSettings,
+    SettingsHealth, SettingsHealthState,
+};
 pub use store::AppState;
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -334,9 +340,16 @@ pub fn run() {
                         // 单文件大小限制 1GB
                         .max_file_size(1024 * 1024 * 1024)
                         .timezone_strategy(TimezoneStrategy::UseLocal)
+                        // 放在 timezone_strategy 之后（它会重设行格式）：每条日志先脱敏再落盘
+                        .format(redact::log_format)
                         .build(),
                 )?;
             }
+
+            // CODEX_HOME / CLAUDE_CONFIG_DIR as the user's login shell has them: use the
+            // snapshot saved by the last run now and refresh it in the background, or,
+            // on a first launch, ask the shell now (in parallel with the steps below).
+            crate::agent_env::start();
 
             // 初始化数据库
             let app_config_dir = crate::config::get_app_config_dir();
@@ -426,6 +439,15 @@ pub fn run() {
 
             // 设置 AppHandle 用于代理故障转移时的 UI 更新
             app_state.proxy_service.set_app_handle(app.handle().clone());
+
+            // The steps below read Codex / Claude files (skills migration, importing
+            // the live config, relocating legacy bind rows, and the takeover check they
+            // run), and everything after setup relies on the snapshot existing too.
+            // With a snapshot saved by an earlier run this returns at once. Only a first
+            // launch (or one after the saved file is gone) waits for the login shell:
+            // about a second with a typical zsh rc (measured 0.9-1.2 s), at most 5 s,
+            // minus the time DB init above already used while the shell ran in parallel.
+            tauri::async_runtime::block_on(crate::agent_env::ready());
 
             // ============================================================
             // 按表独立判断的导入逻辑（各类数据独立检查，互不影响）
@@ -1044,6 +1066,9 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
 
+                // Everything below reads or writes Codex / Claude files.
+                crate::agent_env::ready().await;
+
                 // 启动自愈：检测 Live 配置里是否有 takeover 占位符残留
                 // （`PROXY_MANAGED` token / `127.0.0.1:port` baseURL）。
                 //
@@ -1071,7 +1096,7 @@ pub fn run() {
 
                 // 旧版本把 Codex 的 Ofox key 写进 auth.json 并要求 OpenAI 认证；用
                 // ChatGPT 登录的用户会把 ChatGPT 令牌发给 Ofox。迁成服务商自带 key。
-                crate::services::ofox_bind::migrate_codex_on_startup().await;
+                crate::services::ofox_bind::migrate_codex_on_startup(&state.db).await;
 
                 // 注：曾经在这里调 `restore_proxy_state_on_startup`——读
                 // `proxy_config.enabled` 然后无脑给所有标 true 的工具重跑
@@ -1197,7 +1222,7 @@ pub fn run() {
                 }
             }
 
-            // ─── OFox 后台循环：低余额提醒 ─────────────────────────────────
+            // ─── OFox 后台循环：余额采样 + 低余额提醒 ──────────────────────
             //
             // 在 OFox auth 初始化后运行，与 token 静默刷新循环同节奏（30 min 桶）。
             // 设计要点见 services/low_balance.rs 的模块文档。
@@ -1226,15 +1251,27 @@ pub fn run() {
                     loop {
                         ticker.tick().await;
                         let ofox_state = lb_app.state::<OfoxAuthState>();
+                        let db = lb_app.state::<AppState>().db.clone();
                         let now_ms = chrono::Utc::now().timestamp_millis();
-                        let _ = crate::services::low_balance::evaluate_and_notify(
+                        let _ = crate::services::low_balance::run_tick(
                             &lb_app,
                             &ofox_state.0,
+                            &db,
                             now_ms,
                         )
                         .await;
                     }
                 });
+            }
+
+            // settings.json 读不出来（用 .bak 恢复了，或没有可用备份）时告诉前端；
+            // 前端起得比这里晚时再用 get_settings_health 主动取一次。
+            let health = crate::settings::settings_health();
+            if health.state != crate::settings::SettingsHealthState::Ok {
+                log::warn!("settings.json health at startup: {health:?}");
+                if let Err(e) = app.emit(crate::settings::SETTINGS_HEALTH_EVENT, &health) {
+                    log::warn!("emit {} failed: {e}", crate::settings::SETTINGS_HEALTH_EVENT);
+                }
             }
 
             // 静默启动：根据设置决定是否显示主窗口
@@ -1297,6 +1334,7 @@ pub fn run() {
             commands::get_config_status,
             commands::get_claude_code_config_path,
             commands::get_config_dir,
+            commands::get_agent_dirs,
             commands::open_config_folder,
             commands::pick_directory,
             commands::open_external,
@@ -1304,6 +1342,9 @@ pub fn run() {
             commands::install_tool,
             commands::update_tool,
             commands::is_tool_app_running,
+            // Uninstall a tool: unbind, revoke its key, remove the program
+            commands::uninstall_tool_preview,
+            commands::uninstall_tool,
             // 主页"打开"按钮：在系统终端里拉起工具 CLI，独立生命周期
             commands::launch_tool_cli,
             commands::launch_tool,
@@ -1319,6 +1360,8 @@ pub fn run() {
             commands::extract_common_config_snippet,
             commands::read_live_provider_settings,
             commands::get_settings,
+            commands::get_settings_health,
+            commands::reset_unreadable_settings,
             commands::save_settings,
             commands::save_bound_tools,
             commands::get_rectifier_config,
@@ -1475,6 +1518,7 @@ pub fn run() {
             commands::get_auto_failover_enabled,
             commands::set_auto_failover_enabled,
             // Usage statistics
+            commands::get_usage_overview,
             commands::get_usage_summary,
             commands::get_usage_trends,
             commands::get_provider_stats,
@@ -1596,6 +1640,8 @@ pub fn run() {
             commands::ofox_auth::ofox_poll_for_token,
             commands::ofox_auth::ofox_get_user_info,
             commands::ofox_auth::ofox_refresh_user_info,
+            commands::ofox_auth::ofox_get_balance_trend,
+            commands::ofox_auth::ofox_get_spending,
             commands::ofox_auth::ofox_get_auth_status,
             commands::ofox_auth::ofox_retry_keychain,
             commands::ofox_auth::ofox_is_authenticated,

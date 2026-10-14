@@ -16,7 +16,9 @@ use crate::store::AppState;
 /// wrote new rows.
 pub const SESSIONS_INDEX_UPDATED_EVENT: &str = "sessions-index-updated";
 
-async fn listing(db: Arc<Database>) -> Result<Vec<ManagedSession>, String> {
+pub(crate) async fn listing(db: Arc<Database>) -> Result<Vec<ManagedSession>, String> {
+    // Resolve custom agent directories before scanning or caching metadata.
+    crate::agent_env::ready().await;
     tauri::async_runtime::spawn_blocking(move || session_manager::managed::list_with(Some(&db)))
         .await
         .map_err(|e| format!("Failed to scan sessions: {e}"))

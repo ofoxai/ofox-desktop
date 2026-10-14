@@ -3,9 +3,10 @@
 //! skills、`.env`、`auth.json` 一律不动。写回时只改有变化的顶层段落，其余段落的
 //! 注释和格式原样保留。
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use serde_yaml::{Mapping, Value as Yaml};
 
 use crate::config::FileTxn;
@@ -13,6 +14,7 @@ use crate::hermes_config::{self, get_hermes_config_path};
 use crate::ofox_apex::mentions_ofox_gateway;
 
 use super::json_file::{self, JsonPath};
+use super::ownership::{self, Leaf, Leaves};
 use super::plan::{read_text, FileEdit, RestorePlan};
 
 const LABEL: &str = "Hermes 的 config.yaml";
@@ -27,14 +29,27 @@ const SECTIONS: &[&str] = &[PROVIDERS, DICT, MODEL];
 /// 从这个版本起 Hermes 的正式格式是 `providers:` 字典，不再迁移 `custom_providers`。
 const DICT_SCHEMA_VERSION: u64 = 12;
 const TOKEN: JsonPath = &["api_key"];
+/// `custom_providers` 列表里的 Ofox 条目（按 `name` 找）在报告和记录里的名字。
+const LIST_ENTRY: &str = "custom_providers[ofox-hermes]";
+/// 解绑时还原成绑定前的值（原来没有就删掉）；用户之后改过的按规则留着。
+pub(crate) const LEAVES: &[Leaf] = &[
+    Leaf::route(&[LIST_ENTRY], ownership::ofox_entry),
+    Leaf::route(&[DICT, PROVIDER_NAME], ownership::ofox_entry),
+    Leaf::route(&[MODEL, "provider"], routes_to_ofox),
+    Leaf::model(&[MODEL, "default"], &[MODEL, "provider"]),
+];
 
 pub(crate) fn config_path() -> PathBuf {
     get_hermes_config_path()
 }
 
 fn parse(text: Option<&str>) -> Result<Yaml, String> {
-    let value = hermes_config::parse_config_text(text.unwrap_or_default())
-        .map_err(|e| format!("{LABEL} 不是有效的 YAML，请先修复后再操作：{e}"))?;
+    let value = hermes_config::parse_config_text(text.unwrap_or_default()).map_err(|e| {
+        format!(
+            "{LABEL} 不是有效的 YAML，请先修复后再操作：{}",
+            crate::redact::scrub(&e.to_string())
+        )
+    })?;
     match value {
         Yaml::Mapping(_) => Ok(value),
         // 只有注释的文件。
@@ -105,6 +120,37 @@ fn entry_points_to_ofox(config: &Yaml) -> bool {
         .flatten()
         .filter_map(Yaml::as_str)
         .any(mentions_ofox_gateway)
+}
+
+fn routes_to_ofox(provider: &Value) -> bool {
+    provider.as_str() == Some(PROVIDER_NAME)
+}
+
+/// config.yaml 里各受管字段现在的值。
+pub(crate) fn leaves(text: Option<&str>) -> Result<Leaves, String> {
+    let config = parse(text)?;
+    let to_json = |yaml: Option<&Yaml>| match yaml {
+        Some(yaml) => serde_json::to_value(yaml)
+            .map_err(|_| format!("{LABEL} 的 Ofox 条目无法读取，请先修复后再操作")),
+        None => Ok(Value::Null),
+    };
+    let model = config.get(MODEL).filter(|model| model.is_mapping());
+    let projected = json!({
+        LIST_ENTRY: to_json(existing_list_entry(&config))?,
+        DICT: { PROVIDER_NAME: to_json(dict_entry(&config))? },
+        MODEL: {
+            "provider": to_json(model.and_then(|model| model.get("provider")))?,
+            "default": to_json(model.and_then(|model| model.get("default")))?,
+        },
+    });
+    Ok(ownership::leaves_at(&projected, LEAVES))
+}
+
+fn existing_list_entry(config: &Yaml) -> Option<&Yaml> {
+    config
+        .get(PROVIDERS)?
+        .as_sequence()?
+        .get(entry_position(config)?)
 }
 
 /// 只把值有变化的段落写回 `raw`。
@@ -214,10 +260,14 @@ pub(crate) fn write_bound(
 fn restore_providers(
     original: &Yaml,
     current: &Yaml,
+    keep: &BTreeSet<String>,
     restored_keys: &mut Vec<String>,
     removed_keys: &mut Vec<String>,
 ) -> Option<Yaml> {
-    let entry_key = format!("{PROVIDERS}[{PROVIDER_NAME}]");
+    if keep.contains(LIST_ENTRY) {
+        return current.get(PROVIDERS).cloned();
+    }
+    let entry_key = LIST_ENTRY.to_string();
     let mut providers = current
         .get(PROVIDERS)
         .and_then(Yaml::as_sequence)
@@ -251,10 +301,14 @@ fn restore_providers(
 fn restore_dict(
     original: &Yaml,
     current: &Yaml,
+    keep: &BTreeSet<String>,
     restored_keys: &mut Vec<String>,
     removed_keys: &mut Vec<String>,
 ) -> Option<Yaml> {
     let entry_key = format!("{DICT}.{PROVIDER_NAME}");
+    if keep.contains(&entry_key) {
+        return current.get(DICT).cloned();
+    }
     let Some(current_dict) = current.get(DICT).and_then(Yaml::as_mapping) else {
         return current.get(DICT).cloned();
     };
@@ -285,22 +339,30 @@ fn restore_dict(
     Some(Yaml::Mapping(dict))
 }
 
-/// 还原后的 `model` 段落：路由字段回到绑定前，其它字段保持当前状态。
+/// 还原后的 `model` 段落：路由字段回到绑定前（`keep` 里用户改过的除外），其它字段
+/// 保持当前状态。
 fn restore_model(
     original: &Yaml,
     current: &Yaml,
+    keep: &BTreeSet<String>,
     restored_keys: &mut Vec<String>,
     removed_keys: &mut Vec<String>,
 ) -> Option<Yaml> {
     let original_model = original.get(MODEL);
+    let kept = |key: &str| keep.contains(&format!("{MODEL}.{key}"));
+    let keeps_any = ROUTING_KEYS.into_iter().any(kept);
     let Some(current_model) = current.get(MODEL).and_then(Yaml::as_mapping) else {
-        return original_model.cloned();
+        return if keeps_any {
+            current.get(MODEL).cloned()
+        } else {
+            original_model.cloned()
+        };
     };
-    if original_model.is_some_and(|model| !model.is_mapping()) {
+    if original_model.is_some_and(|model| !model.is_mapping()) && !keeps_any {
         return original_model.cloned();
     }
     let mut model = current_model.clone();
-    for key in ROUTING_KEYS {
+    for key in ROUTING_KEYS.into_iter().filter(|key| !kept(key)) {
         match original_model.and_then(|model| model.get(key)) {
             Some(value) => {
                 model.insert(key.into(), value.clone());
@@ -330,11 +392,12 @@ fn set_section(config: &mut Yaml, key: &str, value: Option<Yaml>) {
     }
 }
 
-/// 受管内容还原成绑定前的样子。语义上等于绑定前时写回原文本；否则只改有变化的
-/// 段落，和绑定前一样的段落原样搬回（含注释）。
+/// 受管内容还原成绑定前的样子（`keep` 里用户改过的除外）。语义上等于绑定前时写回
+/// 原文本；否则只改有变化的段落，和绑定前一样的段落原样搬回（含注释）。
 pub(crate) fn plan_restore(
     original: Option<&str>,
     current: Option<&str>,
+    keep: &BTreeSet<String>,
 ) -> Result<RestorePlan, String> {
     let original_value = parse(original)?;
     let current_value = parse(current)?;
@@ -344,6 +407,7 @@ pub(crate) fn plan_restore(
     let providers = restore_providers(
         &original_value,
         &current_value,
+        keep,
         &mut restored_keys,
         &mut removed_keys,
     );
@@ -351,6 +415,7 @@ pub(crate) fn plan_restore(
     let dict = restore_dict(
         &original_value,
         &current_value,
+        keep,
         &mut restored_keys,
         &mut removed_keys,
     );
@@ -358,6 +423,7 @@ pub(crate) fn plan_restore(
     let model = restore_model(
         &original_value,
         &current_value,
+        keep,
         &mut restored_keys,
         &mut removed_keys,
     );
@@ -369,6 +435,7 @@ pub(crate) fn plan_restore(
             exact: true,
             restored_keys,
             removed_keys,
+            kept_keys: Vec::new(),
         });
     }
     let mut text = current.unwrap_or_default().to_string();
@@ -395,6 +462,7 @@ pub(crate) fn plan_restore(
         exact: false,
         restored_keys,
         removed_keys,
+        kept_keys: Vec::new(),
     })
 }
 
@@ -420,7 +488,7 @@ pub(crate) fn legacy_edits(legacy: Option<&Value>) -> Result<Vec<FileEdit>, Stri
     if let Some(index) = entry_position(&after) {
         if let Some(providers) = after.get_mut(PROVIDERS).and_then(Yaml::as_sequence_mut) {
             providers.remove(index);
-            removed_keys.push(format!("{PROVIDERS}[{PROVIDER_NAME}]"));
+            removed_keys.push(LIST_ENTRY.to_string());
         }
     }
     if remove_dict_entry(&mut after) {
@@ -468,6 +536,15 @@ mod tests {
 
     const USER_CONFIG: &str = "# Hermes config\nmodel:\n  default: deepseek-chat\n  provider: deepseek\n  context_length: 32000\ncustom_providers:\n# my relay\n- name: deepseek\n  base_url: https://api.deepseek.com/v1\n  api_key: sk-ds\nskills:\n  enabled: true\n";
 
+    #[test]
+    fn unparseable_yaml_error_never_echoes_the_key_in_it() {
+        let broken = "api_key: sk-of-abc123456789\nmodel: [unclosed\n";
+
+        let error = parse(Some(broken)).unwrap_err();
+
+        assert!(!error.contains("abc123456789"), "{error}");
+    }
+
     fn template() -> Value {
         json!({
             "name": "ofox",
@@ -503,7 +580,7 @@ mod tests {
     #[test]
     fn restore_brings_back_the_commented_file() {
         let bound = bound_config(Some(USER_CONFIG), &template(), "sk-of-K", true).unwrap();
-        let plan = plan_restore(Some(USER_CONFIG), Some(&bound)).unwrap();
+        let plan = plan_restore(Some(USER_CONFIG), Some(&bound), &BTreeSet::new()).unwrap();
         assert!(plan.exact);
         assert_eq!(plan.content.as_deref(), Some(USER_CONFIG));
     }
@@ -514,7 +591,7 @@ mod tests {
         // 绑定期间用户改了上下文长度，还加了新段落。
         let edited = bound.replace("context_length: 32000", "context_length: 64000")
             + "memory:\n  enabled: true\n";
-        let plan = plan_restore(Some(USER_CONFIG), Some(&edited)).unwrap();
+        let plan = plan_restore(Some(USER_CONFIG), Some(&edited), &BTreeSet::new()).unwrap();
         assert!(!plan.exact);
         let text = plan.content.unwrap();
         assert!(
@@ -593,7 +670,7 @@ mod tests {
     #[test]
     fn restore_after_a_dict_bind_brings_back_the_file() {
         let bound = bound_config(Some(VERSIONED_CONFIG), &template(), "sk-of-K", true).unwrap();
-        let plan = plan_restore(Some(VERSIONED_CONFIG), Some(&bound)).unwrap();
+        let plan = plan_restore(Some(VERSIONED_CONFIG), Some(&bound), &BTreeSet::new()).unwrap();
         assert!(plan.exact);
         assert_eq!(plan.content.as_deref(), Some(VERSIONED_CONFIG));
     }
@@ -603,7 +680,7 @@ mod tests {
         // Bound on the legacy list; Hermes then migrated everything into the dict and
         // the user added another provider after the Ofox entry.
         let migrated = "# Hermes config\nmodel:\n  default: openai/gpt-x\n  provider: ofox-hermes\n  context_length: 32000\nskills:\n  enabled: true\nproviders:\n  deepseek:\n    api: https://api.deepseek.com/v1\n    name: deepseek\n    api_key: sk-ds\n  ofox-hermes:\n    api: https://api.ofox.ai/v1\n    name: ofox-hermes\n    api_key: sk-of-K\n  zeta:\n    api: https://zeta.example/v1\n_config_version: 50\n";
-        let plan = plan_restore(Some(USER_CONFIG), Some(migrated)).unwrap();
+        let plan = plan_restore(Some(USER_CONFIG), Some(migrated), &BTreeSet::new()).unwrap();
         let text = plan.content.unwrap();
         let config = yaml(&text);
         assert!(config.get(PROVIDERS).is_none(), "{text}");
@@ -629,8 +706,18 @@ mod tests {
     }
 
     #[test]
+    fn the_list_entry_name_is_the_one_in_reports() {
+        assert_eq!(LIST_ENTRY, format!("{PROVIDERS}[{PROVIDER_NAME}]"));
+    }
+
+    #[test]
     fn restore_deletes_a_file_bind_created() {
         let bound = bound_config(None, &template(), "sk-of-K", true).unwrap();
-        assert_eq!(plan_restore(None, Some(&bound)).unwrap().content, None);
+        assert_eq!(
+            plan_restore(None, Some(&bound), &BTreeSet::new())
+                .unwrap()
+                .content,
+            None
+        );
     }
 }

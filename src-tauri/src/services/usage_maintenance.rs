@@ -16,7 +16,7 @@
 //! A step marks its flag `done` only after it succeeded; a missing flag (a
 //! database that never went through the v11 migration) means nothing to do.
 
-use crate::database::dao::usage_rollup::usage_prune_cutoff;
+use crate::database::dao::usage_rollup::{parse_cost_usd, usage_prune_cutoff};
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
@@ -275,9 +275,12 @@ struct Source {
 /// Set the archive of every session the transcripts hold to (its calls before
 /// the prune cutoff) minus (those still live). Returns the rows written.
 pub(crate) fn backfill_session_archive(db: &Database) -> Result<usize, AppError> {
-    let cutoff = usage_prune_cutoff()?;
-    // read the files before taking the database lock
-    let sources = [
+    backfill_with(db, read_sources, usage_prune_cutoff)
+}
+
+/// Every session source's calls, read from its files.
+fn read_sources() -> Vec<Source> {
+    vec![
         Source {
             app_type: "claude",
             data_source: "session_log",
@@ -296,9 +299,23 @@ pub(crate) fn backfill_session_archive(db: &Database) -> Result<usize, AppError>
             price: find_gemini_pricing,
             entries: session_usage_gemini::session_entries(),
         },
-    ];
+    ]
+}
+
+/// The backfill with its file reading and its cutoff given.
+fn backfill_with(
+    db: &Database,
+    read: impl FnOnce() -> Vec<Source>,
+    cutoff: impl FnOnce() -> Result<i64, AppError>,
+) -> Result<usize, AppError> {
+    // read the files before taking the database lock
+    let sources = read();
 
     let mut conn = lock_conn!(db.conn);
+    // Taken under the lock, after the read: a prune that ran meanwhile (its
+    // cutoff a day later) already archived the calls up to its cutoff, and the
+    // archive set here must cover them.
+    let cutoff = cutoff()?;
     let tx = conn
         .transaction()
         .map_err(|e| AppError::Database(format!("backfill begin tx: {e}")))?;
@@ -417,7 +434,7 @@ fn live_totals(
     let mut totals: HashMap<(String, String), Totals> = HashMap::new();
     for row in rows {
         let (session_id, model, tokens, cost, at) = row.map_err(db_err)?;
-        let cost = Decimal::from_str(cost.trim()).unwrap_or(Decimal::ZERO);
+        let cost = parse_cost_usd(&cost);
         totals
             .entry((session_id, model))
             .or_default()
@@ -760,5 +777,67 @@ mod tests {
             )
             .unwrap();
         assert_eq!(archived, "0.041259");
+    }
+
+    #[test]
+    fn a_prune_while_the_files_are_read_is_not_overwritten() {
+        let db = database_with_prices();
+        let now = Utc::now().timestamp();
+        let (t1, t2) = (now - 5 * 86400, now - 3 * 86400);
+        let (yesterdays_cutoff, todays_cutoff) = (now - 4 * 86400, now - 2 * 86400);
+        let entry = |at: i64| SessionUsageEntry {
+            session_id: SESSION.to_string(),
+            model: "test-opus".to_string(),
+            usage: usage_of([3, 100, 5000, 1000]),
+            created_at: at,
+        };
+        {
+            let conn = db.conn.lock().unwrap();
+            for (id, at) in [("m1", t1), ("m2", t2)] {
+                conn.execute(
+                    "INSERT INTO proxy_request_logs (request_id, provider_id, app_type, model,
+                        input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                        total_cost_usd, latency_ms, status_code, session_id, created_at,
+                        data_source)
+                     VALUES (?1, '_session', 'claude', 'test-opus', 3, 100, 5000, 1000, '0.01',
+                        0, 200, ?2, ?3, 'session_log')",
+                    params![id, SESSION, at],
+                )
+                .unwrap();
+            }
+        }
+        // yesterday's prune archived m1; m2 is still live
+        db.rollup_and_prune_before(yesterdays_cutoff).unwrap();
+        let cutoff = std::cell::Cell::new(yesterdays_cutoff);
+
+        backfill_with(
+            &db,
+            || {
+                // midnight passes while the files are read: today's prune archives m2
+                cutoff.set(todays_cutoff);
+                db.rollup_and_prune_before(todays_cutoff).unwrap();
+                vec![Source {
+                    app_type: "claude",
+                    data_source: "session_log",
+                    price: find_model_pricing_for_session,
+                    entries: vec![entry(t1), entry(t2)],
+                }]
+            },
+            || Ok(cutoff.get()),
+        )
+        .unwrap();
+
+        let calls: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COALESCE(SUM(request_count), 0) FROM session_usage_archive
+                 WHERE session_id = ?1",
+                [SESSION],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(calls, 2, "the call archived during the read is kept");
     }
 }
