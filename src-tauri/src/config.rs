@@ -207,6 +207,7 @@ pub struct AtomicOpts {
 }
 
 /// 新建文件的默认权限：agent 的配置里常有 API key，只给自己读写。
+#[cfg(unix)]
 const NEW_FILE_MODE: u32 = 0o600;
 
 /// 跟随符号链接时最多走几步，防止环。
@@ -855,6 +856,55 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(names_in(dir.path()), ["settings.json"]);
+    }
+
+    /// Windows 专属，只在 Windows CI 上跑：rename 目标被别的进程以“不共享删除”的方式开着时，
+    /// 对方放手之前 rename 会失败（5/32/33），写入要等它而不是报错。
+    #[cfg(windows)]
+    #[test]
+    fn atomic_write_waits_for_a_reader_that_blocks_the_rename_and_then_replaces_the_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.json");
+        fs::write(&path, b"old").unwrap();
+        // FILE_SHARE_READ | FILE_SHARE_WRITE, but not FILE_SHARE_DELETE: a rename over it is refused.
+        let holder = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x3)
+            .open(&path)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(holder);
+        });
+
+        atomic_write(&path, b"new").unwrap();
+
+        release.join().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(names_in(dir.path()), ["config.json"]);
+    }
+
+    /// Windows 专属，只在 Windows CI 上跑：对方以 FILE_SHARE_DELETE 开着文件（Rust、Node 的默认）时，
+    /// 写入立刻就能替换它。
+    #[cfg(windows)]
+    #[test]
+    fn atomic_write_replaces_a_file_held_open_with_share_delete() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.json");
+        fs::write(&path, b"old").unwrap();
+        let _holder = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x7)
+            .open(&path)
+            .unwrap();
+
+        atomic_write(&path, b"new").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new");
     }
 
     #[test]
