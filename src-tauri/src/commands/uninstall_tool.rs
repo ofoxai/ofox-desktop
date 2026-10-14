@@ -829,10 +829,19 @@ fn kept_data(tool: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-fn bound_registry() -> Vec<String> {
-    crate::settings::get_settings()
+/// The tools known to be bound: the settings mirror plus what the frontend says.
+/// The mirror is best effort. The renderer's own list is the real one, which is
+/// why `ofox_unbind_tool` takes it as well.
+fn bound_registry(still_bound: &[String]) -> Vec<String> {
+    let mut registry = crate::settings::get_settings()
         .bound_tools
-        .unwrap_or_default()
+        .unwrap_or_default();
+    for tool in still_bound {
+        if !registry.contains(tool) {
+            registry.push(tool.clone());
+        }
+    }
+    registry
 }
 
 /// The registry without `tool`: what the unbind step is told is still bound.
@@ -905,6 +914,7 @@ fn decide(
 pub(crate) async fn preview<E: Effects>(
     effects: &E,
     tool: &str,
+    still_bound: &[String],
 ) -> Result<UninstallPreview, String> {
     check_tool(tool)?;
     let home = crate::config::get_home_dir();
@@ -912,7 +922,7 @@ pub(crate) async fn preview<E: Effects>(
     let inspection = effects.inspect(tool).await?;
     let decision = decide(tool, &inspection, &home, keeps.clone(), effects.os());
 
-    let registry = bound_registry();
+    let registry = bound_registry(still_bound);
     let report = effects.unbind(tool, &others(&registry, tool), true).await?;
     let key = if !report.shared_kept_by.is_empty() {
         UninstallKey::KeepShared
@@ -973,6 +983,7 @@ fn remaining_path(inspection: &Inspection, home: &Path) -> Option<String> {
 pub(crate) async fn uninstall<E: Effects>(
     effects: &E,
     tool: &str,
+    still_bound: &[String],
     sink: Sink<'_>,
 ) -> Result<UninstallResult, String> {
     check_tool(tool)?;
@@ -995,7 +1006,7 @@ pub(crate) async fn uninstall<E: Effects>(
 
     emit_line(sink, STEP_UNBIND, "Restoring the tool's configuration");
     let report = effects
-        .unbind(tool, &others(&bound_registry(), tool), false)
+        .unbind(tool, &others(&bound_registry(still_bound), tool), false)
         .await?;
 
     emit_line(sink, STEP_KEY, "Revoking the Ofox key");
@@ -1417,8 +1428,10 @@ pub async fn uninstall_tool_preview(
     state: State<'_, AppState>,
     ofox_state: State<'_, OfoxAuthState>,
     tool: String,
+    still_bound: Option<Vec<String>>,
 ) -> Result<UninstallPreview, String> {
-    preview(&Live::new(app, &state, &ofox_state), &tool).await
+    let still_bound = still_bound.unwrap_or_default();
+    preview(&Live::new(app, &state, &ofox_state), &tool, &still_bound).await
 }
 
 /// Unbind `tool`, revoke its Ofox key, and remove the program by how it was
@@ -1431,7 +1444,9 @@ pub async fn uninstall_tool(
     ofox_state: State<'_, OfoxAuthState>,
     tool: String,
     operation_id: String,
+    still_bound: Option<Vec<String>>,
 ) -> Result<UninstallResult, String> {
+    let still_bound = still_bound.unwrap_or_default();
     if operation_id.is_empty() || operation_id.len() > 128 {
         return Err("Invalid operation ID".into());
     }
@@ -1447,7 +1462,7 @@ pub async fn uninstall_tool(
             }),
         );
     };
-    uninstall(&live, &tool, &sink).await
+    uninstall(&live, &tool, &still_bound, &sink).await
 }
 
 #[cfg(test)]
@@ -2392,7 +2407,7 @@ Would inspect/remove:
         bind(&["claude", "codex"]);
         let fake = Fake::new([Ok(codex_by_npm()), Ok(Inspection::NotInstalled)]);
 
-        let result = uninstall(&fake, "codex", &|_, _| {}).await.unwrap();
+        let result = uninstall(&fake, "codex", &[], &|_, _| {}).await.unwrap();
 
         assert_eq!(
             fake.calls(),
@@ -2417,7 +2432,9 @@ Would inspect/remove:
         let mut fake = Fake::new([Ok(codex_by_npm())]);
         fake.unbind = Err("config is locked".into());
 
-        let error = uninstall(&fake, "codex", &|_, _| {}).await.unwrap_err();
+        let error = uninstall(&fake, "codex", &[], &|_, _| {})
+            .await
+            .unwrap_err();
 
         assert!(error.contains("config is locked"), "{error}");
         assert_eq!(fake.calls(), ["inspect", "unbind:codex:false:"]);
@@ -2431,7 +2448,7 @@ Would inspect/remove:
         report.shared_kept_by = vec!["chatgpt".into()];
         fake.unbind = Ok(report);
 
-        let result = uninstall(&fake, "codex", &|_, _| {}).await.unwrap();
+        let result = uninstall(&fake, "codex", &[], &|_, _| {}).await.unwrap();
 
         assert_eq!(result.key, UninstallKeyOutcome::KeptShared);
         assert!(!fake
@@ -2445,7 +2462,7 @@ Would inspect/remove:
         let _home = sandbox();
         let mut fake = Fake::new([Ok(codex_by_npm()), Ok(Inspection::NotInstalled)]);
         fake.key = UninstallKeyOutcome::Queued;
-        let result = uninstall(&fake, "codex", &|_, _| {}).await.unwrap();
+        let result = uninstall(&fake, "codex", &[], &|_, _| {}).await.unwrap();
         assert_eq!(result.key, UninstallKeyOutcome::Queued);
     }
 
@@ -2455,7 +2472,7 @@ Would inspect/remove:
         let mut fake = Fake::new([Ok(codex_by_npm()), Ok(codex_by_npm())]);
         fake.execute = Err("Uninstall process exited with exit status: 1".into());
 
-        let result = uninstall(&fake, "codex", &|_, _| {}).await.unwrap();
+        let result = uninstall(&fake, "codex", &[], &|_, _| {}).await.unwrap();
 
         assert_eq!(result.status, UninstallStatus::StillPresent);
         assert_eq!(result.remaining_path.as_deref(), Some("/n/bin/codex"));
@@ -2466,7 +2483,7 @@ Would inspect/remove:
         let _home = sandbox();
         let mut fake = Fake::new([Ok(codex_by_npm()), Ok(Inspection::NotInstalled)]);
         fake.execute = Err("exit status: 1".into());
-        let result = uninstall(&fake, "codex", &|_, _| {}).await.unwrap();
+        let result = uninstall(&fake, "codex", &[], &|_, _| {}).await.unwrap();
         assert_eq!(result.status, UninstallStatus::Removed);
     }
 
@@ -2474,7 +2491,7 @@ Would inspect/remove:
     async fn a_failed_recheck_is_not_reported_as_removed() {
         let _home = sandbox();
         let fake = Fake::new([Ok(codex_by_npm()), Err("shell lookup failed".into())]);
-        let result = uninstall(&fake, "codex", &|_, _| {}).await.unwrap();
+        let result = uninstall(&fake, "codex", &[], &|_, _| {}).await.unwrap();
         assert_eq!(result.status, UninstallStatus::StillPresent);
         assert_eq!(result.remaining_path, None);
     }
@@ -2499,7 +2516,7 @@ Would inspect/remove:
         ];
         for (inspection, tool, reason) in cases {
             let fake = Fake::new([Ok(inspection)]);
-            let error = uninstall(&fake, tool, &|_, _| {}).await.unwrap_err();
+            let error = uninstall(&fake, tool, &[], &|_, _| {}).await.unwrap_err();
             assert!(error.contains(reason), "{error}");
             assert_eq!(fake.calls(), ["inspect"]);
         }
@@ -2509,9 +2526,11 @@ Would inspect/remove:
     async fn an_unsupported_tool_or_a_busy_one_is_refused_before_any_probe() {
         let _home = sandbox();
         let fake = Fake::new([Ok(codex_by_npm())]);
-        assert!(uninstall(&fake, "vim", &|_, _| {}).await.is_err());
+        assert!(uninstall(&fake, "vim", &[], &|_, _| {}).await.is_err());
         let _running = ToolOperationGuard::acquire("codex").unwrap();
-        let error = uninstall(&fake, "codex", &|_, _| {}).await.unwrap_err();
+        let error = uninstall(&fake, "codex", &[], &|_, _| {})
+            .await
+            .unwrap_err();
         assert!(error.contains("already running"), "{error}");
         assert!(fake.calls().is_empty());
     }
@@ -2523,7 +2542,7 @@ Would inspect/remove:
         fake.output = vec!["removed 12 packages", "done"];
         let lines = Mutex::new(Vec::new());
 
-        uninstall(&fake, "codex", &|step, line| {
+        uninstall(&fake, "codex", &[], &|step, line| {
             lines.lock().unwrap().push((step, line.to_string()));
         })
         .await
@@ -2549,8 +2568,184 @@ Would inspect/remove:
         let home = sandbox();
         fs::create_dir_all(home.home().join(".codex")).unwrap();
         let fake = Fake::new([Ok(codex_by_npm()), Ok(Inspection::NotInstalled)]);
-        let result = uninstall(&fake, "codex", &|_, _| {}).await.unwrap();
+        let result = uninstall(&fake, "codex", &[], &|_, _| {}).await.unwrap();
         assert_eq!(result.kept, ["~/.codex"]);
+    }
+
+    // ---- what the frontend says is still bound ------------------------------
+
+    #[tokio::test]
+    async fn what_the_frontend_says_is_still_bound_joins_the_settings_mirror() {
+        let _home = sandbox();
+        bind(&["claude"]);
+        let fake = Fake::new([Ok(codex_by_npm()), Ok(Inspection::NotInstalled)]);
+
+        uninstall(
+            &fake,
+            "codex",
+            &["chatgpt".into(), "claude".into()],
+            &|_, _| {},
+        )
+        .await
+        .unwrap();
+
+        // The tool itself never counts as another holder of its own config.
+        let hint = |calls: Vec<String>| calls.into_iter().find(|c| c.starts_with("unbind"));
+        assert_eq!(
+            hint(fake.calls()).as_deref(),
+            Some("unbind:codex:false:claude,chatgpt")
+        );
+
+        let fake = Fake::new([Ok(codex_by_npm())]);
+        let preview = preview(&fake, "codex", &["codex".into(), "chatgpt".into()])
+            .await
+            .unwrap();
+        assert!(preview.bound, "the frontend's list also says it is bound");
+        assert_eq!(
+            hint(fake.calls()).as_deref(),
+            Some("unbind:codex:true:claude,chatgpt")
+        );
+    }
+
+    /// Codex bound for real, in the backend's records, while the renderer alone
+    /// remembers that ChatGPT is bound too and the settings mirror is stale.
+    struct RealUnbind {
+        fake: Fake,
+        db: crate::database::Database,
+    }
+
+    impl Effects for RealUnbind {
+        fn os(&self) -> Os {
+            self.fake.os()
+        }
+
+        async fn inspect(&self, tool: &str) -> Result<Inspection, String> {
+            self.fake.inspect(tool).await
+        }
+
+        async fn unbind(
+            &self,
+            tool: &str,
+            still_bound: &[String],
+            dry_run: bool,
+        ) -> Result<UnbindReport, String> {
+            self.fake
+                .record(format!("unbind:{tool}:{dry_run}:{}", still_bound.join(",")));
+            super::super::ofox_auth::unbind_tool_from_ofox_internal(
+                &self.db,
+                tool,
+                still_bound,
+                dry_run,
+            )
+            .await
+        }
+
+        async fn retire_key(&self, tool: &str) -> UninstallKeyOutcome {
+            self.fake.retire_key(tool).await
+        }
+
+        fn forget_bound(&self, tool: &str) -> Result<(), String> {
+            self.fake.forget_bound(tool)
+        }
+
+        async fn execute(
+            &self,
+            action: &Action,
+            log: &(dyn Fn(&str) + Sync),
+        ) -> Result<(), String> {
+            self.fake.execute(action, log).await
+        }
+    }
+
+    const USER_CODEX_CONFIG: &str = "# my codex setup\nmodel = \"gpt-5-codex\"\n";
+    const OFOX_CODEX_TEMPLATE: &str = "model_provider = \"ofox\"\nmodel = \"openai/gpt-6-luna\"\n\n[model_providers.ofox]\nname = \"ofox\"\nbase_url = \"https://api.ofox.ai/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n";
+
+    async fn codex_bound_by_an_old_record(home: &Path) -> RealUnbind {
+        use crate::provider::Provider;
+        let db = crate::database::Database::memory().unwrap();
+        let provider = |id: &str, settings: serde_json::Value| {
+            Provider::with_id(id.into(), id.into(), settings, None)
+        };
+        db.save_provider(
+            "codex",
+            &provider(
+                "ofox-codex",
+                serde_json::json!({ "auth": { "OPENAI_API_KEY": "" }, "config": OFOX_CODEX_TEMPLATE }),
+            ),
+        )
+        .unwrap();
+        db.save_provider("codex", &provider("default", serde_json::json!({})))
+            .unwrap();
+        db.save_provider("codex", &provider("codex-official", serde_json::json!({})))
+            .unwrap();
+        crate::settings::set_current_provider(&crate::app_config::AppType::Codex, Some("default"))
+            .unwrap();
+        db.set_current_provider("codex", "default").unwrap();
+        touch(&home.join(".codex/config.toml"), USER_CODEX_CONFIG);
+        crate::services::ofox_bind::bind(
+            &db,
+            crate::services::ofox_bind::Tool::Codex,
+            "codex",
+            "sk-of-TEST",
+        )
+        .await
+        .unwrap();
+        RealUnbind {
+            // One look for the preview, one before the uninstall, one after it.
+            fake: Fake::new([
+                Ok(codex_by_npm()),
+                Ok(codex_by_npm()),
+                Ok(Inspection::NotInstalled),
+            ]),
+            db,
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_keeps_its_key_and_shared_config_while_the_frontend_has_chatgpt_bound() {
+        let home = sandbox();
+        let effects = codex_bound_by_an_old_record(home.home()).await;
+        let bound = fs::read_to_string(home.home().join(".codex/config.toml")).unwrap();
+        assert_ne!(bound, USER_CODEX_CONFIG);
+        // The settings mirror never heard of ChatGPT.
+        assert_eq!(settings::get_settings().bound_tools, None);
+
+        let preview = preview(&effects, "codex", &["chatgpt".into()])
+            .await
+            .unwrap();
+        assert_eq!(preview.shared_with, ["chatgpt"]);
+        assert_eq!(preview.key, UninstallKey::KeepShared);
+
+        let result = uninstall(&effects, "codex", &["chatgpt".into()], &|_, _| {})
+            .await
+            .unwrap();
+
+        assert_eq!(result.key, UninstallKeyOutcome::KeptShared);
+        assert_eq!(result.unbind.unwrap().shared_kept_by, ["chatgpt"]);
+        assert!(!effects
+            .fake
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("retire_key")));
+        let after = fs::read_to_string(home.home().join(".codex/config.toml")).unwrap();
+        assert_eq!(after, bound, "ChatGPT still uses this configuration");
+    }
+
+    #[tokio::test]
+    async fn without_another_bound_tool_codex_is_restored_and_its_key_retired() {
+        let home = sandbox();
+        let effects = codex_bound_by_an_old_record(home.home()).await;
+
+        let result = uninstall(&effects, "codex", &[], &|_, _| {}).await.unwrap();
+
+        assert_eq!(result.key, UninstallKeyOutcome::Revoked);
+        assert!(effects
+            .fake
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("retire_key")));
+        let after = fs::read_to_string(home.home().join(".codex/config.toml")).unwrap();
+        assert_eq!(after, USER_CODEX_CONFIG);
     }
 
     // ---- preview ----------------------------------------------------------
@@ -2590,7 +2785,7 @@ Would inspect/remove:
         let before = snapshot(home.home());
         let registry = settings::get_settings().bound_tools;
 
-        let preview = preview(&fake, "claude").await.unwrap();
+        let preview = preview(&fake, "claude", &[]).await.unwrap();
 
         assert_eq!(fake.calls(), ["inspect", "unbind:claude:true:"]);
         assert_eq!(snapshot(home.home()), before);
@@ -2623,7 +2818,7 @@ Would inspect/remove:
         report.shared_kept_by = vec!["chatgpt".into()];
         fake.unbind = Ok(report);
 
-        let preview = preview(&fake, "codex").await.unwrap();
+        let preview = preview(&fake, "codex", &[]).await.unwrap();
 
         assert_eq!(preview.shared_with, ["chatgpt"]);
         assert_eq!(preview.key, UninstallKey::KeepShared);
@@ -2639,7 +2834,7 @@ Would inspect/remove:
     async fn a_preview_without_a_key_or_binding_has_nothing_to_revoke() {
         let _home = sandbox();
         let fake = Fake::new([Ok(codex_by_npm())]);
-        let preview = preview(&fake, "codex").await.unwrap();
+        let preview = preview(&fake, "codex", &[]).await.unwrap();
         assert!(!preview.bound);
         assert_eq!(preview.key, UninstallKey::None);
         assert!(preview.shared_with.is_empty());
@@ -2669,13 +2864,13 @@ Would inspect/remove:
         ];
         for (inspection, tool, reason) in cases {
             let fake = Fake::new([Ok(inspection)]);
-            let preview = preview(&fake, tool).await.unwrap();
+            let preview = preview(&fake, tool, &[]).await.unwrap();
             assert_eq!(preview.blocked_reason, reason, "{tool}");
             assert_eq!(preview.installed, reason.is_some());
         }
         let fake = Fake::new([Ok(codex_by_npm())]);
         let _running = ToolOperationGuard::acquire("codex").unwrap();
-        let preview = preview(&fake, "codex").await.unwrap();
+        let preview = preview(&fake, "codex", &[]).await.unwrap();
         assert_eq!(preview.blocked_reason, Some(UninstallBlock::Busy));
     }
 
@@ -2688,7 +2883,7 @@ Would inspect/remove:
             hermes_help: None,
             hermes_dry_run: None,
         })]);
-        let preview = preview(&fake, "gemini").await.unwrap();
+        let preview = preview(&fake, "gemini", &[]).await.unwrap();
         assert_eq!(preview.source, UninstallSource::Unknown);
         assert_eq!(preview.command, None);
         assert_eq!(
