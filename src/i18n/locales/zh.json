@@ -1007,7 +1007,12 @@
     "repairDownloadHint": "打开 {{tool}} 的下载页面",
     "repairUnavailable": "这个工具需要手动安装",
     "repairFailed": "修复 {{tool}} 失败：{{message}}",
-    "repairDismiss": "关闭"
+    "repairDismiss": "关闭",
+    "balanceUpdated": "余额已更新：{{amount}}",
+    "balanceNoData": "余额已刷新，但暂无可用数据",
+    "balanceRefreshFailed": "余额刷新失败，请稍后重试",
+    "listRefreshed": "已刷新",
+    "listRefreshFailed": "刷新失败：{{error}}"
   },
   "providerForm": {
     "supplierName": "供应商名称",

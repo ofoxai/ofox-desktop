@@ -269,14 +269,14 @@ export function useBoundTools(
     setListRefreshing(true);
     try {
       await Promise.all([loadData(), checkToolUpdates()]);
-      toast.success("已刷新");
+      toast.success(t("console.listRefreshed"));
     } catch (e) {
       console.error("[useBoundTools] list refresh failed", e);
-      toast.error(`刷新失败：${String(e)}`);
+      toast.error(t("console.listRefreshFailed", { error: String(e) }));
     } finally {
       setListRefreshing(false);
     }
-  }, [loadData]);
+  }, [loadData, t]);
 
   useEffect(() => {
     // `loadData` fires both the local stage and the background stage-2

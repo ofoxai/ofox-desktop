@@ -1007,7 +1007,12 @@
     "repairDownloadHint": "{{tool}} のダウンロードページを開く",
     "repairUnavailable": "このツールは手動でインストールしてください",
     "repairFailed": "{{tool}} の修復に失敗しました：{{message}}",
-    "repairDismiss": "閉じる"
+    "repairDismiss": "閉じる",
+    "balanceUpdated": "残高を更新しました：{{amount}}",
+    "balanceNoData": "残高を更新しましたが、まだ数値がありません",
+    "balanceRefreshFailed": "残高を更新できませんでした。しばらくしてから再試行してください",
+    "listRefreshed": "更新しました",
+    "listRefreshFailed": "更新に失敗しました：{{error}}"
   },
   "providerForm": {
     "supplierName": "プロバイダー名",

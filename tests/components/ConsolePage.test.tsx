@@ -604,6 +604,9 @@ describe("Console tool update badges", () => {
     expect(await screen.findByText("v2.1.293")).toBeVisible();
     expect(screen.getByText("v0.161.0")).toBeVisible();
     await waitFor(() =>
+      expect(mocks.toast.success).toHaveBeenCalledWith("已刷新"),
+    );
+    await waitFor(() =>
       expect(
         screen.queryByRole("button", { name: /^升级到 v/ }),
       ).not.toBeInTheDocument(),

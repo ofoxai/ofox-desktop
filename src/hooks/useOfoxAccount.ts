@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { useTranslation } from "react-i18next";
 import { ofoxGetUserInfo, type OfoxUserInfo } from "@/lib/api/ofoxAuth";
 import { queryClient } from "@/lib/query/queryClient";
 
@@ -52,6 +53,7 @@ export interface OfoxAccount {
  * account to sign in never sees the previous one's name or balance.
  */
 export function useOfoxAccount(): OfoxAccount {
+  const { t } = useTranslation();
   const { data: user = null } = useQuery<OfoxUserInfo | null>(
     {
       queryKey: OFOX_USER_KEY,
@@ -117,18 +119,20 @@ export function useOfoxAccount(): OfoxAccount {
       storeUser(fresh);
       const value = fresh?.balance?.balance;
       if (typeof value === "number") {
-        toast.success(`余额已更新：$${value.toFixed(2)}`);
+        toast.success(
+          t("console.balanceUpdated", { amount: `$${value.toFixed(2)}` }),
+        );
       } else {
         // Auth was fine but the balance endpoint returned no number.
-        toast.warning("余额已刷新，但暂无可用数据");
+        toast.warning(t("console.balanceNoData"));
       }
     } catch (e) {
       console.error("[useOfoxAccount] balance refresh failed", e);
-      toast.error("余额刷新失败，请稍后重试");
+      toast.error(t("console.balanceRefreshFailed"));
     } finally {
       setBalanceRefreshing(false);
     }
-  }, []);
+  }, [t]);
 
   return {
     user,

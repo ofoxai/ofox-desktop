@@ -1,5 +1,8 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import i18n from "i18next";
+import en from "@/i18n/locales/en.json";
+import zh from "@/i18n/locales/zh.json";
 import { queryClient } from "@/lib/query/queryClient";
 import { OFOX_USER_KEY, useOfoxAccount } from "@/hooks/useOfoxAccount";
 
@@ -14,12 +17,15 @@ vi.mock("sonner", () => ({ toast: mocks.toast }));
 const ADA = { name: "Ada", email: "ada@example.com" };
 
 beforeEach(() => {
+  i18n.addResourceBundle("zh", "translation", zh, true, true);
+  i18n.addResourceBundle("en", "translation", en, true, true);
   queryClient.clear();
   mocks.getUserInfo.mockReset();
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.useRealTimers();
+  await i18n.changeLanguage("zh");
 });
 
 describe("useOfoxAccount", () => {
@@ -111,5 +117,15 @@ describe("useOfoxAccount", () => {
     expect(result.current.user?.balance?.balance).toBe(3.5);
     expect(result.current.balanceRefreshing).toBe(false);
     expect(mocks.toast.success).toHaveBeenCalledWith("余额已更新：$3.50");
+  });
+
+  it("says the new balance in the app's language", async () => {
+    await i18n.changeLanguage("en");
+    mocks.getUserInfo.mockResolvedValue({ ...ADA, balance: { balance: 3.5 } });
+    const { result } = renderHook(() => useOfoxAccount());
+
+    await act(() => result.current.refreshBalance());
+
+    expect(mocks.toast.success).toHaveBeenCalledWith("Balance updated: $3.50");
   });
 });
