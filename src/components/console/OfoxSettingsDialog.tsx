@@ -397,7 +397,7 @@ export default function OfoxSettingsDialog({
             <Row
               label="开机自动启动"
               control={
-                <OrangeSwitch
+                <Switch
                   checked={autoLaunch === true}
                   // While the initial fetch is in-flight we still show the
                   // switch (defaulted off) but disable it — flipping it now
@@ -430,7 +430,7 @@ export default function OfoxSettingsDialog({
                       className="h-7 w-[72px] rounded-md border border-border bg-background pl-5 pr-2 text-right text-[13px] font-medium text-foreground outline-none transition-colors focus:border-orange-400 disabled:cursor-not-allowed disabled:opacity-50"
                     />
                   </div>
-                  <OrangeSwitch
+                  <Switch
                     checked={lowBalEnabled}
                     onCheckedChange={handleLowBalToggle}
                   />
@@ -534,19 +534,5 @@ function Row({ label, hint, control, isLast }: RowProps) {
       </div>
       <div className="flex shrink-0 items-center">{control}</div>
     </div>
-  );
-}
-
-/** Switch with the spec's orange "on" tint. The shared `<Switch>` defaults to
- *  emerald — overriding via className keeps the rest of the codebase's
- *  emerald switches intact. */
-function OrangeSwitch(props: React.ComponentProps<typeof Switch>) {
-  return (
-    <Switch
-      {...props}
-      className={`data-[state=checked]:bg-orange-500 dark:data-[state=checked]:bg-orange-500 ${
-        props.className ?? ""
-      }`}
-    />
   );
 }
