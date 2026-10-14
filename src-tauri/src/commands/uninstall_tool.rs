@@ -125,6 +125,8 @@ pub(crate) struct Facts {
     pub owner: Result<UpdatePlan, String>,
     /// Output of `hermes uninstall --help`, when it could be read.
     pub hermes_help: Option<String>,
+    /// Output of `hermes uninstall --dry-run`, when this Hermes has one.
+    pub hermes_dry_run: Option<String>,
 }
 
 /// `~/...` for anything under `home`, the plain path otherwise.
@@ -402,6 +404,36 @@ fn manager_plan(
     })
 }
 
+/// What `hermes uninstall --yes` does even though it keeps the user's data: it
+/// deletes its code checkout (inside `~/.hermes`), edits shell rc files, removes
+/// the desktop app, the gateway service and caches. Its own dry run says exactly
+/// what; when it has none, this is what its uninstaller is known to do.
+fn hermes_removes(install: &Installation, facts: &Facts) -> Vec<String> {
+    let listed = facts
+        .hermes_dry_run
+        .as_deref()
+        .map(|output| hermes_dry_run_actions(output, &facts.home))
+        .unwrap_or_default();
+    if !listed.is_empty() {
+        return listed;
+    }
+    let checkout = install
+        .real
+        .ancestors()
+        .find(|dir| dir.file_name().is_some_and(|name| name == "hermes-agent"))
+        .map_or_else(
+            || "the Hermes code checkout".to_string(),
+            |dir| shown(dir, &facts.home),
+        );
+    vec![
+        format!("Code checkout: {checkout}"),
+        "Hermes PATH entries in shell configs".to_string(),
+        "Hermes wrapper scripts and Hermes-managed node/npm/npx symlinks".to_string(),
+        "Desktop Chat GUI artifacts and caches".to_string(),
+        "Gateway services and standalone gateway processes".to_string(),
+    ]
+}
+
 fn native_plan(
     tool: &str,
     install: &Installation,
@@ -458,7 +490,7 @@ fn native_plan(
                     path: path_with(install.path.parent(), &install.search_path),
                     env: vec![],
                 },
-                removes: vec![shown(&install.path, home)],
+                removes: hermes_removes(install, facts),
                 keeps: keeps_shown(facts),
             });
         }
@@ -527,15 +559,18 @@ pub(crate) fn app_plan(
     }
 }
 
+/// Whether `hermes uninstall --help` advertises `flag`.
+pub(crate) fn hermes_offers(help: &str, flag: &str) -> bool {
+    help.split(|c: char| c.is_whitespace() || "[]|,".contains(c))
+        .any(|word| word == flag)
+}
+
 /// The arguments that remove Hermes but keep its data, if this Hermes can do it
 /// without asking questions. Hermes keeps configs and data unless told `--full`,
 /// so the option is only trusted when the help also documents `--full`; `--yes`
 /// is what spares it the prompts it cannot get here.
 pub(crate) fn hermes_uninstall_args(help: &str) -> Option<Vec<String>> {
-    let offers = |flag: &str| {
-        help.split(|c: char| c.is_whitespace() || "[]|,".contains(c))
-            .any(|word| word == flag)
-    };
+    let offers = |flag: &str| hermes_offers(help, flag);
     if !(offers("--yes") || offers("-y")) {
         return None;
     }
@@ -553,6 +588,55 @@ pub(crate) fn hermes_uninstall_args(help: &str) -> Option<Vec<String>> {
         return Some(args(&[keep, "--yes"]));
     }
     offers("--full").then(|| args(&["--yes"]))
+}
+
+/// What Hermes lists under "Would inspect/remove:" in `uninstall --dry-run`,
+/// minus the line that claims its whole home is kept (its code checkout lives
+/// inside that home and does go).
+pub(crate) fn hermes_dry_run_actions(output: &str, home: &Path) -> Vec<String> {
+    let home = home.to_string_lossy();
+    let mut listed = false;
+    let mut actions = Vec::new();
+    for line in output.lines() {
+        let line = line.trim();
+        if line.starts_with("Would inspect/remove") {
+            listed = true;
+            continue;
+        }
+        if !listed {
+            continue;
+        }
+        let text = line.trim_start_matches(|c: char| !c.is_alphanumeric());
+        if text.is_empty() || text.starts_with("Keep ") {
+            continue;
+        }
+        let text = if home.is_empty() {
+            text.to_string()
+        } else {
+            text.replace(&*home, "~")
+        };
+        actions.push(present(&text));
+        if actions.len() == MAX_LISTED_ACTIONS {
+            break;
+        }
+    }
+    actions
+}
+
+const MAX_LISTED_ACTIONS: usize = 20;
+const MAX_LINE_CHARS: usize = 300;
+
+/// A line of someone else's output, made safe to show. Every such line passes
+/// through here (progress lines through `emit_line`, the Hermes listing through
+/// `hermes_dry_run_actions`), so this is the one place to filter it further.
+fn present(line: &str) -> String {
+    line.chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(MAX_LINE_CHARS)
+        .collect()
 }
 
 /// Whether any process runs from inside the app bundle (`ps -axo comm=` output).
@@ -632,6 +716,7 @@ pub(crate) enum Inspection {
         install: Installation,
         owner: Result<UpdatePlan, String>,
         hermes_help: Option<String>,
+        hermes_dry_run: Option<String>,
     },
     App {
         app: DesktopInstallation,
@@ -681,7 +766,7 @@ const UNINSTALLABLE: [&str; 10] = [
 /// Every line shown to the user, ours and the process's, reaches the sink here
 /// and nowhere else.
 fn emit_line(sink: Sink<'_>, step: u32, line: &str) {
-    sink(step, line);
+    sink(step, &present(line));
 }
 
 // ---- orchestration ------------------------------------------------------
@@ -725,7 +810,14 @@ fn kept_data(tool: &str) -> Vec<PathBuf> {
             home.join(".local/share/opencode"),
         ],
         "openclaw" => vec![openclaw_config::get_openclaw_dir()],
-        "hermes" => vec![hermes_config::get_hermes_dir()],
+        // Its home also holds the code checkout, which its uninstaller deletes:
+        // only the user's own files are kept.
+        "hermes" => {
+            let hermes = hermes_config::get_hermes_dir();
+            ["config.yaml", ".env", "cron", "sessions", "logs"]
+                .map(|name| hermes.join(name))
+                .to_vec()
+        }
         "pi" => native(BindableTool::Pi).into_iter().collect(),
         "dsh" => native(BindableTool::Dsh).into_iter().collect(),
         "workbuddy" => vec![home.join(".workbuddy")],
@@ -779,12 +871,14 @@ fn decide(
             install,
             owner,
             hermes_help,
+            hermes_dry_run,
         } => {
             let facts = Facts {
                 home: home.to_path_buf(),
                 keeps,
                 owner: owner.clone(),
                 hermes_help: hermes_help.clone(),
+                hermes_dry_run: hermes_dry_run.clone(),
             };
             match uninstall_plan(tool, install, &facts) {
                 Ok(plan) => Decision::Plan(plan),
@@ -797,6 +891,7 @@ fn decide(
                 keeps,
                 owner: Err("a desktop app has no package manager".into()),
                 hermes_help: None,
+                hermes_dry_run: None,
             };
             match app_plan(tool, app, *running, os, &facts) {
                 Ok(plan) => Decision::Plan(plan),
@@ -1175,14 +1270,17 @@ async fn inspect_app(tool: &str) -> Result<Inspection, String> {
     Ok(Inspection::App { app, running })
 }
 
-/// `hermes uninstall --help`, to learn whether this Hermes can keep its data
-/// without asking questions. Not asked on Windows, where Hermes is left to the user.
+/// `hermes uninstall --help` (can this Hermes keep its data without asking
+/// questions?) and, when it advertises one, `hermes uninstall --dry-run` (what
+/// would it remove?). Both only print. Not asked on Windows, where Hermes is left
+/// to the user.
 #[cfg(not(target_os = "windows"))]
-async fn hermes_uninstall_help(install: &Installation) -> Option<String> {
+async fn hermes_uninstall_output(install: &Installation, flag: &str) -> Option<String> {
     let mut command = tokio::process::Command::new(&install.path);
     command
-        .args(["uninstall", "--help"])
-        .env("PATH", &install.search_path);
+        .args(["uninstall", flag])
+        .env("PATH", &install.search_path)
+        .env("PYTHONIOENCODING", "utf-8");
     let output = super::tool_update::bounded_output(command).await.ok()?;
     output
         .status
@@ -1191,8 +1289,19 @@ async fn hermes_uninstall_help(install: &Installation) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
-async fn hermes_uninstall_help(_install: &Installation) -> Option<String> {
+async fn hermes_uninstall_output(_install: &Installation, _flag: &str) -> Option<String> {
     None
+}
+
+async fn hermes_probe(install: &Installation) -> (Option<String>, Option<String>) {
+    let help = hermes_uninstall_output(install, "--help").await;
+    let dry_run = match &help {
+        Some(help) if hermes_offers(help, "--dry-run") => {
+            hermes_uninstall_output(install, "--dry-run").await
+        }
+        _ => None,
+    };
+    (help, dry_run)
 }
 
 async fn inspect_cli(tool: &str) -> Result<Inspection, String> {
@@ -1203,15 +1312,16 @@ async fn inspect_cli(tool: &str) -> Result<Inspection, String> {
         Err(error) => return Err(error.to_string()),
     };
     let owner = resolve_plan(tool, &install).await;
-    let hermes_help = if tool == "hermes" {
-        hermes_uninstall_help(&install).await
+    let (hermes_help, hermes_dry_run) = if tool == "hermes" {
+        hermes_probe(&install).await
     } else {
-        None
+        (None, None)
     };
     Ok(Inspection::Cli {
         install,
         owner,
         hermes_help,
+        hermes_dry_run,
     })
 }
 
@@ -1367,6 +1477,7 @@ mod tests {
             keeps: vec![home.join(".codex")],
             owner,
             hermes_help: None,
+            hermes_dry_run: None,
         }
     }
 
@@ -1854,6 +1965,113 @@ options:
         assert!(!args.contains(&"--full".to_string()));
     }
 
+    /// `hermes uninstall --dry-run` of Hermes 0.21.7.
+    const HERMES_DRY_RUN: &str = "
+Dry run: no files, services, or environment entries will be changed.
+
+Would inspect/remove:
+  \u{2022} Gateway services and standalone gateway processes
+  \u{2022} Hermes PATH entries from shell configs / Windows User PATH
+  \u{2022} Hermes wrapper scripts and Hermes-managed node/npm/npx symlinks
+  \u{2022} Desktop Chat GUI artifacts
+  \u{2022} Code checkout: /home/me/.hermes/hermes-agent
+  \u{2022} Keep Hermes config/data: /home/me/.hermes
+";
+
+    #[test]
+    fn the_hermes_dry_run_lists_what_goes_but_not_the_line_that_keeps_its_whole_home() {
+        let expected = [
+            "Gateway services and standalone gateway processes",
+            "Hermes PATH entries from shell configs / Windows User PATH",
+            "Hermes wrapper scripts and Hermes-managed node/npm/npx symlinks",
+            "Desktop Chat GUI artifacts",
+            "Code checkout: ~/.hermes/hermes-agent",
+        ];
+        assert_eq!(
+            hermes_dry_run_actions(HERMES_DRY_RUN, Path::new("/home/me")),
+            expected
+        );
+        // Output that lost its bullets to a console encoding still parses.
+        let garbled = HERMES_DRY_RUN.replace('\u{2022}', "?");
+        assert_eq!(
+            hermes_dry_run_actions(&garbled, Path::new("/home/me")),
+            expected
+        );
+        assert!(hermes_dry_run_actions("usage: hermes", Path::new("/home/me")).is_empty());
+    }
+
+    #[test]
+    fn output_shown_to_the_user_has_no_control_characters_and_a_bounded_length() {
+        assert_eq!(present("  done\u{1b}[31m red\r\n"), "done[31m red");
+        assert_eq!(present(&"x".repeat(1000)).chars().count(), 300);
+    }
+
+    #[test]
+    fn hermes_is_only_asked_for_a_dry_run_when_it_advertises_one() {
+        assert!(hermes_offers(HERMES_HELP, "--dry-run"));
+        let old = HERMES_HELP.replace("--dry-run", "").replace("[]", "");
+        assert!(!hermes_offers(&old, "--dry-run"));
+    }
+
+    #[test]
+    fn the_hermes_preview_lists_everything_its_uninstaller_removes() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let bin = home.join(".local/bin/hermes");
+        let real = home.join(".hermes/hermes-agent/venv/bin/hermes");
+        let active = install(&bin, &real);
+        let mut facts = facts(home, native_owner(&active));
+        facts.hermes_help = Some(HERMES_HELP.into());
+
+        // Its own dry run, when it has one.
+        let listing = HERMES_DRY_RUN.replace("/home/me", home.to_str().unwrap());
+        facts.hermes_dry_run = Some(listing);
+        let plan = uninstall_plan("hermes", &active, &facts).unwrap();
+        assert_eq!(plan.removes.len(), 5);
+        assert!(plan
+            .removes
+            .contains(&"Code checkout: ~/.hermes/hermes-agent".to_string()));
+        assert!(plan.removes.iter().all(|line| !line.starts_with("Keep")));
+
+        // Otherwise what it is known to do, never just the launcher.
+        facts.hermes_dry_run = None;
+        let plan = uninstall_plan("hermes", &active, &facts).unwrap();
+        assert!(plan
+            .removes
+            .contains(&"Code checkout: ~/.hermes/hermes-agent".to_string()));
+        assert!(plan
+            .removes
+            .iter()
+            .any(|line| line.contains("PATH entries")));
+        assert!(plan
+            .removes
+            .iter()
+            .any(|line| line.contains("Desktop Chat GUI")));
+        assert!(plan.removes.iter().any(|line| line.contains("Gateway")));
+    }
+
+    #[test]
+    fn hermes_data_is_listed_by_what_it_keeps_not_as_its_whole_home() {
+        let home = sandbox();
+        let hermes = home.home().join(".hermes");
+        touch(&hermes.join("config.yaml"), "model: x");
+        touch(&hermes.join(".env"), "KEY=1");
+        touch(&hermes.join("sessions/one.json"), "{}");
+        touch(&hermes.join("hermes-agent/venv/bin/hermes"), "code");
+        let kept: Vec<String> = kept_data("hermes")
+            .iter()
+            .map(|path| shown(path, home.home()))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                "~/.hermes/config.yaml",
+                "~/.hermes/.env",
+                "~/.hermes/sessions"
+            ]
+        );
+    }
+
     #[test]
     fn a_hermes_that_would_ask_questions_or_cannot_keep_data_is_left_to_the_user() {
         let interactive_only = HERMES_HELP.replace("--yes, -y      Skip confirmation prompts", "");
@@ -2145,6 +2363,7 @@ options:
                 path: "/n/bin:/usr/bin".into(),
             }),
             hermes_help: None,
+            hermes_dry_run: None,
         }
     }
 
@@ -2267,6 +2486,7 @@ options:
             install: install(Path::new("/custom/codex"), Path::new("/custom/codex")),
             owner: unknown(),
             hermes_help: None,
+            hermes_dry_run: None,
         };
         let running = Inspection::App {
             app: app(Path::new("/Applications/ChatGPT.app")),
@@ -2365,6 +2585,7 @@ options:
             install: active,
             owner,
             hermes_help: None,
+            hermes_dry_run: None,
         })]);
         let before = snapshot(home.home());
         let registry = settings::get_settings().bound_tools;
@@ -2432,6 +2653,7 @@ options:
             install: install(Path::new("/custom/gemini"), Path::new("/custom/gemini")),
             owner: unknown(),
             hermes_help: None,
+            hermes_dry_run: None,
         };
         let cases = [
             (unknown, "gemini", Some(UninstallBlock::UnknownSource)),
@@ -2464,6 +2686,7 @@ options:
             install: install(Path::new("/custom/gemini"), Path::new("/custom/gemini")),
             owner: unknown(),
             hermes_help: None,
+            hermes_dry_run: None,
         })]);
         let preview = preview(&fake, "gemini").await.unwrap();
         assert_eq!(preview.source, UninstallSource::Unknown);
