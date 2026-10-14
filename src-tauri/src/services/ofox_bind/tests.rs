@@ -258,6 +258,28 @@ async fn bind_writes_through_a_symlinked_codex_config_and_keeps_the_link() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn unbind_leaves_no_key_file_behind_a_dangling_codex_config_symlink() {
+    let home = Home::new();
+    let target = home.dir.path().join("dotfiles/codex.toml");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::create_dir_all(home.codex("")).unwrap();
+    std::os::unix::fs::symlink(&target, home.codex("config.toml")).unwrap();
+    let db = db_with_default_provider();
+
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    assert!(fs::read_to_string(&target).unwrap().contains(KEY));
+    unbind(&db, Tool::Codex, "codex", &[], false)
+        .await
+        .expect("unbind");
+
+    assert!(!target.exists(), "the file holding the key is gone");
+    let link = fs::symlink_metadata(home.codex("config.toml")).unwrap();
+    assert!(link.file_type().is_symlink(), "the link is as it was");
+}
+
 #[tokio::test]
 #[serial]
 async fn managed_keys_revert_even_if_edited_while_bound_and_new_mcp_is_kept() {
