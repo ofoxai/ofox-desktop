@@ -425,7 +425,6 @@ fn is_sharing_violation(error: &std::io::Error) -> bool {
 
 /// 先试一次；失败且 `is_transient` 认为值得再试，就按 `backoff` 逐项等待后重试，
 /// 最多共 `backoff.len() + 1` 次，最后一次的结果原样返回。
-#[cfg(any(windows, test))]
 fn retry_transient<T>(
     mut op: impl FnMut() -> std::io::Result<T>,
     is_transient: impl Fn(&std::io::Error) -> bool,
@@ -496,30 +495,38 @@ pub(crate) fn ensure_private_file(path: &Path) -> Result<(), AppError> {
     }
 }
 
-/// 读文件原始字节；文件不存在返回 `None`。
-///
-/// Windows 上别的进程正在用 rename 替换这个文件时，它会有一瞬间“不存在”（实测约 2 毫秒），
-/// 读成 `None` 会让调用方以为用户没有配置；所以先短暂重试，真不存在的文件要多等 100 毫秒。
+/// 读文件原始字节；文件不存在返回 `None`。普通读取和探测都用它，不会等待。
 pub(crate) fn read_file_bytes(path: &Path) -> Result<Option<Vec<u8>>, AppError> {
-    match read_waiting_out_replace(path) {
+    read_file_bytes_retrying(path, &[])
+}
+
+/// Windows 上别的进程正在用 rename 替换一个文件时，它会有一瞬间“不存在”（实测约 2 毫秒）。
+/// 其它平台的 rename 是原子的，没有这个窗口，所以不等。
+const REPLACE_WINDOW_BACKOFF: &[std::time::Duration] = if cfg!(windows) {
+    &[std::time::Duration::from_millis(20); 5]
+} else {
+    &[]
+};
+
+/// 同 [`read_file_bytes`]，但文件“不存在”时先等一等再下结论（Windows 上最多 100 毫秒）。
+///
+/// 只给读了之后会据此动手的调用方用——[`FileTxn`] 把 `None` 记成“原来没有这个文件”，
+/// 回滚时就会删掉它，读到瞬间的假 `None` 会删掉用户的文件。状态探测这类热路径上
+/// 大量文件本来就不存在，用 [`read_file_bytes`]，不要为它们每个多等 100 毫秒。
+fn read_file_bytes_waiting_out_replace(path: &Path) -> Result<Option<Vec<u8>>, AppError> {
+    read_file_bytes_retrying(path, REPLACE_WINDOW_BACKOFF)
+}
+
+fn read_file_bytes_retrying(
+    path: &Path,
+    backoff: &[std::time::Duration],
+) -> Result<Option<Vec<u8>>, AppError> {
+    let not_found = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+    match retry_transient(|| fs::read(path), not_found, backoff) {
         Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) if not_found(&e) => Ok(None),
         Err(e) => Err(AppError::io(path, e)),
     }
-}
-
-#[cfg(windows)]
-fn read_waiting_out_replace(path: &Path) -> std::io::Result<Vec<u8>> {
-    retry_transient(
-        || fs::read(path),
-        |e| e.kind() == std::io::ErrorKind::NotFound,
-        &[std::time::Duration::from_millis(20); 5],
-    )
-}
-
-#[cfg(not(windows))]
-fn read_waiting_out_replace(path: &Path) -> std::io::Result<Vec<u8>> {
-    fs::read(path)
 }
 
 fn remove_file_if_exists(path: &Path) -> Result<(), AppError> {
@@ -571,7 +578,8 @@ impl FileTxn {
         if self.originals.iter().any(|(seen, _, _)| seen == path) {
             return Ok(());
         }
-        let original = read_file_bytes(path)?;
+        // 这里的 `None` 会让回滚删文件，先等一等别人正在进行的 rename（Windows），别把假的“不存在”记下来。
+        let original = read_file_bytes_waiting_out_replace(path)?;
         self.originals
             .push((path.to_path_buf(), original, file_mode(path)));
         Ok(())
@@ -691,6 +699,44 @@ mod tests {
 
         assert_eq!(fs::read(&path).unwrap(), b"key = 0\n");
         assert_eq!(file_mode(&path), Some(0o644));
+    }
+
+    #[test]
+    fn a_file_that_appears_while_the_replace_window_is_waited_out_is_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let writer = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                fs::write(&path, b"back").unwrap();
+            })
+        };
+
+        let read = read_file_bytes_retrying(&path, &[std::time::Duration::from_millis(10); 100]);
+
+        writer.join().unwrap();
+        assert_eq!(read.unwrap(), Some(b"back".to_vec()));
+    }
+
+    #[test]
+    fn a_file_that_never_appears_is_none_once_the_wait_is_used_up() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("missing.toml");
+
+        let read = read_file_bytes_retrying(&path, &[std::time::Duration::ZERO; 3]);
+
+        assert_eq!(read.unwrap(), None);
+    }
+
+    #[test]
+    fn other_read_errors_are_reported_not_retried_into_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // A directory is not a readable file: not NotFound, so an error, not `None`.
+        let read = read_file_bytes_retrying(dir.path(), &[std::time::Duration::ZERO; 3]);
+
+        assert!(read.is_err());
     }
 
     fn names_in(dir: &Path) -> Vec<String> {
