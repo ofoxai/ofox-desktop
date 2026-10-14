@@ -62,8 +62,12 @@ pub(crate) enum Action {
         /// Environment variables set for this run only.
         env: Vec<(String, String)>,
     },
-    /// Delete these files and directories (a native installer's own layout).
-    RemovePaths(Vec<PathBuf>),
+    /// Delete these files and directories (a native installer's own layout),
+    /// then each of `empty_dirs` only if nothing else is left in it.
+    Remove {
+        paths: Vec<PathBuf>,
+        empty_dirs: Vec<PathBuf>,
+    },
     /// Move a macOS app bundle to the Trash.
     Trash(PathBuf),
 }
@@ -164,6 +168,19 @@ fn links_into(link: &Path, dir: &Path) -> bool {
         _ => target,
     };
     within(&target, dir)
+}
+
+/// Whether `dir` can be read and holds nothing but the entries named.
+fn holds_only(dir: &Path, names: &[&str]) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.into_iter().all(|entry| {
+        entry.is_ok_and(|entry| {
+            let name = entry.file_name();
+            names.iter().any(|allowed| name == *allowed)
+        })
+    })
 }
 
 fn quote(argument: &str) -> String {
@@ -397,11 +414,16 @@ fn native_plan(
             (tool == "hermes").then(|| "hermes uninstall".to_string()),
         )
     };
-    let paths = match tool {
+    let (paths, empty_dirs) = match tool {
         "claude" => {
             let share = home.join(".local/share/claude");
             let versions = share.join("versions");
             if !within(&install.real, &versions) {
+                return Err(unrecognised());
+            }
+            // Only the installer's own layout is removed. Anything else in
+            // there is not ours, and deleting a directory is not undoable.
+            if !holds_only(&share, &["versions"]) {
                 return Err(unrecognised());
             }
             // The launcher is ours only while it points into the versions.
@@ -410,15 +432,16 @@ fn native_plan(
             if links_into(&launcher, &versions) {
                 paths.push(launcher);
             }
-            paths.push(share);
-            paths
+            paths.push(versions);
+            (paths, vec![share])
         }
         "opencode" => {
             let bin = home.join(".opencode/bin");
-            if !within(&install.real, &bin) {
+            let binary = bin.join("opencode");
+            if !within(&install.real, &binary) {
                 return Err(unrecognised());
             }
-            vec![bin]
+            (vec![binary], vec![bin])
         }
         "hermes" => {
             let args = facts
@@ -441,14 +464,22 @@ fn native_plan(
         }
         _ => return Err(unrecognised()),
     };
-    if paths.iter().any(|path| reaches_data(path, &facts.keeps)) {
+    if paths
+        .iter()
+        .chain(&empty_dirs)
+        .any(|path| reaches_data(path, &facts.keeps))
+    {
         return Err(unrecognised());
     }
     Ok(UninstallPlan {
         source: UninstallSource::Native,
         command: None,
-        removes: paths.iter().map(|path| shown(path, home)).collect(),
-        action: Action::RemovePaths(paths),
+        removes: paths
+            .iter()
+            .chain(&empty_dirs)
+            .map(|path| shown(path, home))
+            .collect(),
+        action: Action::Remove { paths, empty_dirs },
         keeps: keeps_shown(facts),
     })
 }
@@ -969,6 +1000,21 @@ fn remove_paths(paths: &[PathBuf], log: &(dyn Fn(&str) + Sync)) -> Result<(), St
     Ok(())
 }
 
+/// Remove each directory only if nothing is left in it.
+fn remove_empty_dirs(dirs: &[PathBuf], log: &(dyn Fn(&str) + Sync)) -> Result<(), String> {
+    for dir in dirs {
+        match std::fs::remove_dir(dir) {
+            Ok(()) => log(&format!("Removed {}", dir.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                log(&format!("Kept {}: it holds other files", dir.display()));
+            }
+            Err(error) => return Err(format!("Could not remove {}: {error}", dir.display())),
+        }
+    }
+    Ok(())
+}
+
 async fn run_command(
     command: tokio::process::Command,
     log: &(dyn Fn(&str) + Sync),
@@ -997,7 +1043,10 @@ pub(crate) async fn perform(
     timeout: Duration,
 ) -> Result<(), String> {
     match action {
-        Action::RemovePaths(paths) => remove_paths(paths, log),
+        Action::Remove { paths, empty_dirs } => {
+            remove_paths(paths, log)?;
+            remove_empty_dirs(empty_dirs, log)
+        }
         Action::Run {
             program,
             args,
@@ -1633,19 +1682,56 @@ mod tests {
         facts.keeps = vec![home.join(".claude"), home.join(".claude.json")];
         let plan = uninstall_plan("claude", &active, &facts).unwrap();
         assert_eq!(plan.source, UninstallSource::Native);
+        // Only what the installer makes; the share directory goes only if it is
+        // empty by then.
         assert_eq!(
             plan.action,
-            Action::RemovePaths(vec![
-                home.join(".local/bin/claude"),
-                home.join(".local/share/claude"),
-            ])
+            Action::Remove {
+                paths: vec![
+                    home.join(".local/bin/claude"),
+                    home.join(".local/share/claude/versions"),
+                ],
+                empty_dirs: vec![home.join(".local/share/claude")],
+            }
         );
         assert_eq!(plan.command, None);
         assert_eq!(plan.keeps, ["~/.claude", "~/.claude.json"]);
         assert_eq!(
             plan.removes,
-            ["~/.local/bin/claude", "~/.local/share/claude"]
+            [
+                "~/.local/bin/claude",
+                "~/.local/share/claude/versions",
+                "~/.local/share/claude"
+            ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_claude_share_directory_with_anything_but_versions_is_left_to_the_user() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let active = native_claude(home);
+        for extra in ["config.json", "cache/entry", "versions.bak"] {
+            let extra = home.join(".local/share/claude").join(extra);
+            touch(&extra, "not the installer's");
+            let manual =
+                uninstall_plan("claude", &active, &facts(home, native_owner(&active))).unwrap_err();
+            assert_eq!(manual.source, UninstallSource::Native);
+            assert_eq!(manual.command, None);
+            let top = extra
+                .strip_prefix(home.join(".local/share/claude"))
+                .unwrap();
+            let top = home
+                .join(".local/share/claude")
+                .join(top.components().next().unwrap());
+            if top.is_dir() {
+                fs::remove_dir_all(top).unwrap();
+            } else {
+                fs::remove_file(top).unwrap();
+            }
+        }
+        assert!(uninstall_plan("claude", &active, &facts(home, native_owner(&active))).is_ok());
     }
 
     #[cfg(unix)]
@@ -1661,7 +1747,10 @@ mod tests {
         let plan = uninstall_plan("claude", &active, &facts(home, native_owner(&active))).unwrap();
         assert_eq!(
             plan.action,
-            Action::RemovePaths(vec![home.join(".local/share/claude")])
+            Action::Remove {
+                paths: vec![home.join(".local/share/claude/versions")],
+                empty_dirs: vec![home.join(".local/share/claude")],
+            }
         );
     }
 
@@ -1678,7 +1767,7 @@ mod tests {
         )
         .unwrap();
         let plan = uninstall_plan("claude", &active, &facts(home, native_owner(&active))).unwrap();
-        let Action::RemovePaths(paths) = plan.action else {
+        let Action::Remove { paths, .. } = plan.action else {
             panic!("expected removal");
         };
         assert_eq!(paths[0], home.join(".local/bin/claude"));
@@ -1698,7 +1787,7 @@ mod tests {
     }
 
     #[test]
-    fn native_opencode_removes_its_bin_directory() {
+    fn native_opencode_removes_its_binary_and_then_the_bin_directory_if_empty() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path();
         let real = home.join(".opencode/bin/opencode");
@@ -1708,8 +1797,21 @@ mod tests {
             uninstall_plan("opencode", &active, &facts(home, native_owner(&active))).unwrap();
         assert_eq!(
             plan.action,
-            Action::RemovePaths(vec![home.join(".opencode/bin")])
+            Action::Remove {
+                paths: vec![home.join(".opencode/bin/opencode")],
+                empty_dirs: vec![home.join(".opencode/bin")],
+            }
         );
+        assert_eq!(
+            plan.removes,
+            ["~/.opencode/bin/opencode", "~/.opencode/bin"]
+        );
+
+        // Something other than the installer's binary is not ours to remove.
+        let stray = home.join(".opencode/bin/notes");
+        touch(&stray, "mine");
+        let active = install(&stray, &stray);
+        assert!(uninstall_plan("opencode", &active, &facts(home, native_owner(&active))).is_err());
     }
 
     #[test]
@@ -2280,7 +2382,11 @@ options:
         assert_eq!(preview.key, UninstallKey::Revoke);
         assert_eq!(
             preview.removes,
-            ["~/.local/bin/claude", "~/.local/share/claude"]
+            [
+                "~/.local/bin/claude",
+                "~/.local/share/claude/versions",
+                "~/.local/share/claude"
+            ]
         );
         assert_eq!(preview.keeps, ["~/.claude"]);
         assert_eq!(preview.blocked_reason, None);
@@ -2486,7 +2592,10 @@ options:
         let lines = Mutex::new(Vec::new());
 
         perform(
-            &Action::RemovePaths(vec![link.clone(), tree.clone(), missing]),
+            &Action::Remove {
+                paths: vec![link.clone(), tree.clone(), missing],
+                empty_dirs: vec![],
+            },
             &|line| lines.lock().unwrap().push(line.to_string()),
             UNINSTALL_TIMEOUT,
         )
@@ -2497,6 +2606,35 @@ options:
         assert!(!tree.exists());
         assert_eq!(fs::read_to_string(&outside).unwrap(), "mine");
         assert_eq!(lines_of(&lines).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_emptied_directory_is_removed_but_one_with_other_files_stays() {
+        let temp = tempfile::tempdir().unwrap();
+        let emptied = temp.path().join("claude");
+        touch(&emptied.join("versions/1/claude"), "binary");
+        let shared = temp.path().join("bin");
+        touch(&shared.join("opencode"), "binary");
+        touch(&shared.join("notes"), "mine");
+        let lines = Mutex::new(Vec::new());
+
+        perform(
+            &Action::Remove {
+                paths: vec![emptied.join("versions"), shared.join("opencode")],
+                empty_dirs: vec![emptied.clone(), shared.clone(), temp.path().join("gone")],
+            },
+            &|line| lines.lock().unwrap().push(line.to_string()),
+            UNINSTALL_TIMEOUT,
+        )
+        .await
+        .unwrap();
+
+        assert!(!emptied.exists());
+        assert_eq!(fs::read_to_string(shared.join("notes")).unwrap(), "mine");
+        assert!(!shared.join("opencode").exists());
+        assert!(lines_of(&lines)
+            .iter()
+            .any(|line| line.starts_with("Kept") && line.contains("bin")));
     }
 
     #[cfg(unix)]
