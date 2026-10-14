@@ -20,7 +20,9 @@ impl ToolOperationGuard {
     pub(crate) fn acquire(tool: &str) -> Result<Self, String> {
         let mut busy = BUSY.lock().map_err(|e| e.to_string())?;
         if !busy.insert(tool.to_string()) {
-            return Err("An installation or update is already running for this tool".into());
+            return Err(
+                "An installation, update or uninstall is already running for this tool".into(),
+            );
         }
         Ok(Self(tool.to_string()))
     }
@@ -1458,6 +1460,16 @@ mod tests {
         assert!(ToolOperationGuard::acquire("test-guard").is_err());
         drop(first);
         assert!(ToolOperationGuard::acquire("test-guard").is_ok());
+    }
+    #[test]
+    fn the_busy_message_names_every_operation_that_takes_the_lock() {
+        let _first = ToolOperationGuard::acquire("test-busy-message").unwrap();
+        let message = ToolOperationGuard::acquire("test-busy-message")
+            .err()
+            .unwrap();
+        for operation in ["installation", "update", "uninstall"] {
+            assert!(message.contains(operation), "{message}");
+        }
     }
     #[test]
     fn successful_exit_does_not_prove_update() {
