@@ -41,6 +41,7 @@ mod stream_check;
 mod subscription;
 mod sync_support;
 pub(crate) mod tool_update;
+mod uninstall_tool;
 #[cfg(any(target_os = "windows", test))]
 mod windows_chatgpt;
 #[cfg(any(target_os = "windows", test))]
@@ -77,6 +78,7 @@ pub use model_fetch::*;
 pub use model_profiles::*;
 pub use model_selection::*;
 pub use tool_update::*;
+pub use uninstall_tool::*;
 #[cfg(target_os = "windows")]
 pub use windows_chatgpt::{install_chatgpt_desktop_app_with, upgrade_chatgpt_desktop_app_with};
 // Note: ofox_auth items are accessed via commands::ofox_auth:: to avoid

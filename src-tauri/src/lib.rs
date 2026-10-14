@@ -1383,6 +1383,9 @@ pub fn run() {
             commands::install_tool,
             commands::update_tool,
             commands::is_tool_app_running,
+            // Uninstall a tool: unbind, revoke its key, remove the program
+            commands::uninstall_tool_preview,
+            commands::uninstall_tool,
             // 主页"打开"按钮：在系统终端里拉起工具 CLI，独立生命周期
             commands::launch_tool_cli,
             commands::launch_tool,
