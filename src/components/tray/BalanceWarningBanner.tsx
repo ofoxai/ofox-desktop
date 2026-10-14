@@ -1,8 +1,11 @@
+import { useTranslation } from "react-i18next";
 import { settingsApi } from "@/lib/api";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
+import { useBalanceTrend } from "@/hooks/useUsageOverview";
 import { isOfoxBillingManager } from "@/lib/api/ofoxAuth";
 import { ofoxWalletUrl } from "@/lib/ofoxUrls";
+import { runsOutIn } from "@/lib/usageFormat";
 
 interface BalanceWarningBannerProps {
   /** 用户在偏好里设置的低余额阈值，单位 USD。 */
@@ -15,7 +18,8 @@ interface BalanceWarningBannerProps {
  * 余额低于阈值时显示的警告条。
  *
  * 显示条件由父组件 `TrayPopoverApp` 控制（`active` + 阈值 + 开关），
- * 这里只负责渲染。
+ * 这里只负责渲染。第二行说按当前速度多久用完，来自余额走势
+ * （`ofox_get_balance_trend`）；还没有足够的余额记录算出速度时不说。
  *
  * 充值按钮的可见性按 role 控制——member 看到余额不足时也能从警告里得知
  * 风险，但没有充值权限，所以按钮收起；owner / admin 可以一键跳到
@@ -25,14 +29,12 @@ export default function BalanceWarningBanner({
   threshold,
   balanceUsd,
 }: BalanceWarningBannerProps) {
+  const { t } = useTranslation();
   const { apex } = useOfoxApex();
   const { status } = useOfoxAuth();
+  const { data: trend } = useBalanceTrend();
   const canRecharge = isOfoxBillingManager(status?.user);
-
-  // 阈值显示规则：整数（10）显 $10，带小数（5.5）显 $5.5
-  const thresholdLabel = Number.isInteger(threshold)
-    ? `$${threshold}`
-    : `$${threshold}`;
+  const runsOut = runsOutIn(trend?.daysLeft);
 
   void balanceUsd; // 当前未在 UI 文案里直接展示，但留作签名稳定，将来可加"剩余 $1.23"
 
@@ -48,18 +50,22 @@ export default function BalanceWarningBanner({
       </div>
       <div className="min-w-0 flex-1">
         <div className="text-[11px] font-semibold text-amber-800 dark:text-amber-300">
-          余额不足 {thresholdLabel}
+          {t("balanceWarning.title", { threshold: `$${threshold}` })}
         </div>
-        <div className="text-[10px] leading-tight text-amber-700/80 dark:text-amber-400/70">
-          按当前速率可用不足 1 天，建议尽快充值
-        </div>
+        {runsOut && (
+          <div className="text-[10px] leading-tight text-amber-700/80 dark:text-amber-400/70">
+            {"days" in runsOut
+              ? t("balanceWarning.runsOutDays", { days: runsOut.days })
+              : t("balanceWarning.runsOutSoon")}
+          </div>
+        )}
       </div>
       {canRecharge && (
         <button
           onClick={() => settingsApi.openExternal(ofoxWalletUrl(apex))}
           className="shrink-0 rounded-md bg-orange-500 px-2.5 py-0.5 text-[11px] font-medium text-white hover:bg-orange-600"
         >
-          充值
+          {t("balanceWarning.recharge")}
         </button>
       )}
     </div>

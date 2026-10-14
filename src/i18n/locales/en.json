@@ -2971,5 +2971,11 @@
     "reasonInstallationUnknown": "Unable to confirm installation. Refresh tool detection.",
     "reasonStopped": "A previous tool failed. Remaining applications stopped.",
     "reasonUndoUnavailable": "The model was saved, but its undo state could not be confirmed. Check the configuration."
+  },
+  "balanceWarning": {
+    "title": "Balance below {{threshold}}",
+    "runsOutDays": "At this pace it runs out in about {{days}}d",
+    "runsOutSoon": "At this pace it runs out within a day. Top up soon.",
+    "recharge": "Top up"
   }
 }

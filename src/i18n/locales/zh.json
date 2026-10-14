@@ -2971,5 +2971,11 @@
     "reasonInstallationUnknown": "无法确认安装状态，请刷新工具检测。",
     "reasonStopped": "前一个工具失败，已停止后续应用。",
     "reasonUndoUnavailable": "模型已保存，但无法确认撤销状态，请检查配置。"
+  },
+  "balanceWarning": {
+    "title": "余额不足 {{threshold}}",
+    "runsOutDays": "按当前速度，约 {{days}} 天后用完",
+    "runsOutSoon": "按当前速度可用不足 1 天，建议尽快充值",
+    "recharge": "充值"
   }
 }

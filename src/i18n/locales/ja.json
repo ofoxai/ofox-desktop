@@ -2971,5 +2971,11 @@
     "reasonInstallationUnknown": "インストール状態を確認できません。ツールの検出を更新してください。",
     "reasonStopped": "前のツールで失敗したため、後続の適用を停止しました。",
     "reasonUndoUnavailable": "モデルは保存されましたが、取り消し状態を確認できません。設定を確認してください。"
+  },
+  "balanceWarning": {
+    "title": "残高が {{threshold}} を下回っています",
+    "runsOutDays": "現在のペースでは約 {{days}} 日で使い切ります",
+    "runsOutSoon": "現在のペースでは 1 日以内に使い切ります。早めにチャージしてください",
+    "recharge": "チャージ"
   }
 }
