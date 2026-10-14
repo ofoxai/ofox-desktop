@@ -259,11 +259,17 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
         .unwrap_or(0);
 
     // 检查同步状态
-    let (last_modified, last_offset) = get_sync_state(db, &file_path_str)?;
+    let (last_modified, mut last_offset) = get_sync_state(db, &file_path_str)?;
 
     // 文件未变化则跳过
     if file_modified <= last_modified {
         return Ok((0, 0));
+    }
+
+    // A rollout Codex moved (sessions/ -> archived_sessions/) goes on from where
+    // it was read at its old path: its pruned calls must not be stored again.
+    if last_modified == 0 {
+        last_offset = offset_at_another_path(db, file_path)?.unwrap_or(0);
     }
 
     // 整个文件都要解析以恢复累计值状态，只写入上次偏移之后的调用
@@ -292,6 +298,34 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
     update_sync_state(db, &file_path_str, file_modified, line_offset)?;
 
     Ok((imported, skipped))
+}
+
+/// How far the same rollout file (same file name) was read at another path.
+fn offset_at_another_path(db: &Database, file_path: &Path) -> Result<Option<i64>, AppError> {
+    let Some(name) = file_path.file_name() else {
+        return Ok(None);
+    };
+    let name_str = name.to_string_lossy().to_string();
+    let conn = lock_conn!(db.conn);
+    let mut stmt = conn
+        .prepare(
+            "SELECT file_path, last_line_offset FROM session_log_sync
+             WHERE file_path != ?1 AND substr(file_path, -length(?2)) = ?2",
+        )
+        .map_err(|e| AppError::Database(format!("查询同步状态失败: {e}")))?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![file_path.to_string_lossy(), name_str],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .map_err(|e| AppError::Database(format!("查询同步状态失败: {e}")))?;
+    let mut offset = None;
+    for (other, other_offset) in rows.flatten() {
+        if Path::new(&other).file_name() == Some(name) {
+            offset = Some(offset.unwrap_or(0).max(other_offset));
+        }
+    }
+    Ok(offset)
 }
 
 /// One call in a rollout file: the line it was reported on and its token delta.
@@ -1065,5 +1099,54 @@ mod tests {
         sync_single_codex_file(&db, &file).unwrap();
 
         assert_eq!(stored_tokens(&db, "codex_session:thread-2:%").len(), 1);
+    }
+
+    #[test]
+    fn a_rollout_moved_to_archived_sessions_is_not_counted_again() {
+        let home = tempfile::tempdir().unwrap();
+        let ago = |days: i64| (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+        let count = |days: i64, input: u64| {
+            serde_json::json!({"timestamp": ago(days), "type": "event_msg", "payload": {
+                "type": "token_count", "info": {"total_token_usage": {"input_tokens": input,
+                    "cached_input_tokens": 0, "output_tokens": 10}}}})
+            .to_string()
+        };
+        let name = "rollout-2026-08-01T10-00-00-thread-3.jsonl";
+        let live = home.path().join("sessions/2026/08/01").join(name);
+        std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+        std::fs::write(
+            &live,
+            [
+                serde_json::json!({"timestamp": ago(40), "type": "session_meta",
+                    "payload": {"id": "thread-3"}})
+                .to_string(),
+                count(40, 100),
+                count(1, 300),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let db = Database::memory().unwrap();
+        sync_single_codex_file(&db, &live).unwrap();
+        db.rollup_and_prune(30).unwrap();
+
+        // Codex archives a thread by moving its file
+        let archived = home.path().join("archived_sessions").join(name);
+        std::fs::create_dir_all(archived.parent().unwrap()).unwrap();
+        std::fs::rename(&live, &archived).unwrap();
+        sync_single_codex_file(&db, &archived).unwrap();
+        db.rollup_and_prune(30).unwrap();
+
+        let conn = db.conn.lock().unwrap();
+        let calls: i64 = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM proxy_request_logs WHERE session_id = 'thread-3')
+                      + (SELECT COALESCE(SUM(request_count), 0) FROM session_usage_archive
+                         WHERE session_id = 'thread-3')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(calls, 2);
     }
 }
