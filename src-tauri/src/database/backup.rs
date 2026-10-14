@@ -20,14 +20,18 @@ const CC_SWITCH_SQL_EXPORT_HEADER: &str = "-- Ofox Switch SQLite 导出";
 /// Tables that describe this machine's files and never leave it: skipped by every
 /// export, and kept from the local database by every import or restore. A bind
 /// snapshot from another machine or an older backup would restore the wrong files.
-/// The v11 usage tables are this machine's usage history, session-file cache,
-/// balance samples and maintenance state.
+/// The session-file metadata cache and balance samples are this machine's too.
+///
+/// `session_usage_archive` and `maintenance_flags` are not: they describe the
+/// request logs, so a full export, import or restore carries them with
+/// `proxy_request_logs` (an old backup's logs with this machine's archive would
+/// count the archived calls twice, and its unrepriced Claude rows would never be
+/// repriced under this machine's `done` flags). WebDAV sync skips and keeps them
+/// along with the logs.
 const MACHINE_LOCAL_TABLES: &[&str] = &[
     "ofox_bind_snapshot",
-    "session_usage_archive",
     "session_meta_cache",
     "balance_samples",
-    "maintenance_flags",
 ];
 
 /// Tables whose data rows are skipped when exporting for WebDAV sync.
@@ -988,7 +992,7 @@ mod tests {
         Ok(())
     }
 
-    /// One row in each v11 machine-local table, tagged with `tag`.
+    /// One row in each v11 usage table, tagged with `tag`.
     fn insert_usage_local_rows(db: &Database, tag: &str) -> Result<(), AppError> {
         let conn = crate::database::lock_conn!(db.conn);
         conn.execute(
@@ -1015,30 +1019,28 @@ mod tests {
         Ok(())
     }
 
-    const USAGE_LOCAL_TABLES: [(&str, &str); 4] = [
-        ("session_usage_archive", "session_id"),
+    /// Machine-local: never exported, always kept.
+    const USAGE_MACHINE_LOCAL: [(&str, &str); 2] = [
         ("session_meta_cache", "source_path"),
         ("balance_samples", "org_id"),
+    ];
+    /// Bound to the request logs: carried by full exports and imports, skipped and
+    /// kept by WebDAV sync.
+    const USAGE_LOG_BOUND: [(&str, &str); 2] = [
+        ("session_usage_archive", "session_id"),
         ("maintenance_flags", "value"),
     ];
 
-    #[test]
-    fn exports_never_include_usage_archive_tables() -> Result<(), AppError> {
-        let db = Database::memory()?;
-        insert_usage_local_rows(&db, "machine-local-marker")?;
-        for dump in [db.export_sql_string()?, db.export_sql_string_for_sync()?] {
-            assert!(
-                !dump.contains("machine-local-marker"),
-                "a machine-local usage table leaked into an export"
-            );
-        }
-        Ok(())
+    fn column_values(db: &Database, table: &str, column: &str) -> Result<Vec<String>, AppError> {
+        let conn = crate::database::lock_conn!(db.conn);
+        let values = conn
+            .prepare(&format!("SELECT {column} FROM {table}"))?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(values)
     }
 
-    #[test]
-    #[serial]
-    fn imports_keep_local_usage_archive_tables() -> Result<(), AppError> {
-        let _home = TestHome::new("import-keeps-usage-archive");
+    fn remote_with_usage_rows() -> Result<Database, AppError> {
         let remote = Database::memory()?;
         {
             let conn = crate::database::lock_conn!(remote.conn);
@@ -1047,31 +1049,71 @@ mod tests {
                  VALUES ('remote-provider', 'claude', 'Remote Provider', '{}', '{}')",
                 [],
             )?;
+            // an export from a current install, so importing it migrates nothing
+            Database::set_user_version(&conn, crate::database::SCHEMA_VERSION)?;
         }
         insert_usage_local_rows(&remote, "remote")?;
-        let full = remote.export_sql_string()?;
-        let sync = remote.export_sql_string_for_sync()?;
+        Ok(remote)
+    }
 
-        let local = Database::memory()?;
-        insert_usage_local_rows(&local, "local")?;
-        for (dump, import_sync) in [(&full, false), (&sync, true)] {
-            if import_sync {
-                local.import_sql_string_for_sync(dump)?;
-            } else {
-                local.import_sql_string(dump)?;
-            }
-            let conn = crate::database::lock_conn!(local.conn);
-            for (table, column) in USAGE_LOCAL_TABLES {
-                let values: Vec<String> = conn
-                    .prepare(&format!("SELECT {column} FROM {table}"))?
-                    .query_map([], |row| row.get(0))?
-                    .collect::<Result<_, _>>()?;
-                assert_eq!(
-                    values,
-                    ["local"],
-                    "{table} after import (sync={import_sync})"
+    #[test]
+    fn exports_never_include_machine_local_usage_tables() -> Result<(), AppError> {
+        let db = remote_with_usage_rows()?;
+        let full = db.export_sql_string()?;
+        let sync = db.export_sql_string_for_sync()?;
+        for (table, _) in USAGE_MACHINE_LOCAL {
+            for dump in [&full, &sync] {
+                assert!(
+                    !dump.contains(&format!("INSERT INTO \"{table}\"")),
+                    "{table} leaked into an export"
                 );
             }
+        }
+        for (table, _) in USAGE_LOG_BOUND {
+            assert!(
+                full.contains(&format!("INSERT INTO \"{table}\"")),
+                "{table} full"
+            );
+            assert!(
+                !sync.contains(&format!("INSERT INTO \"{table}\"")),
+                "{table} sync"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn a_full_import_brings_the_archive_with_the_logs_and_keeps_local_caches(
+    ) -> Result<(), AppError> {
+        let _home = TestHome::new("import-usage-archive");
+        let full = remote_with_usage_rows()?.export_sql_string()?;
+        let local = Database::memory()?;
+        insert_usage_local_rows(&local, "local")?;
+
+        local.import_sql_string(&full)?;
+
+        for (table, column) in USAGE_MACHINE_LOCAL {
+            assert_eq!(column_values(&local, table, column)?, ["local"], "{table}");
+        }
+        for (table, column) in USAGE_LOG_BOUND {
+            assert_eq!(column_values(&local, table, column)?, ["remote"], "{table}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn a_webdav_import_keeps_every_local_usage_table() -> Result<(), AppError> {
+        let _home = TestHome::new("sync-import-usage-archive");
+        let sync = remote_with_usage_rows()?.export_sql_string_for_sync()?;
+        let local = Database::memory()?;
+        insert_usage_local_rows(&local, "local")?;
+
+        local.import_sql_string_for_sync(&sync)?;
+
+        for (table, column) in USAGE_MACHINE_LOCAL.iter().chain(USAGE_LOG_BOUND.iter()) {
+            assert_eq!(column_values(&local, table, column)?, ["local"], "{table}");
         }
         Ok(())
     }
