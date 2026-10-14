@@ -231,6 +231,7 @@
     "unknown": "Unknown",
     "enterValidValue": "Please enter a valid value",
     "clear": "Clear",
+    "clearSearch": "Clear search",
     "toggleTheme": "Toggle theme",
     "format": "Format",
     "formatSuccess": "Formatted successfully",

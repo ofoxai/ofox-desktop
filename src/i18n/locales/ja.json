@@ -231,6 +231,7 @@
     "unknown": "不明",
     "enterValidValue": "有効な値を入力してください",
     "clear": "クリア",
+    "clearSearch": "検索をクリア",
     "toggleTheme": "テーマを切り替え",
     "format": "フォーマット",
     "formatSuccess": "整形しました",

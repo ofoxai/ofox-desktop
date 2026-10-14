@@ -231,6 +231,7 @@
     "unknown": "未知",
     "enterValidValue": "请输入有效的内容",
     "clear": "清除",
+    "clearSearch": "清除搜索",
     "toggleTheme": "切换主题",
     "format": "格式化",
     "formatSuccess": "格式化成功",
