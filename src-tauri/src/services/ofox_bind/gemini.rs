@@ -2,6 +2,7 @@
 //! 保留）和 `settings.json` 的 `security.auth.selectedType`。`oauth_creds.json`
 //! 和其它设置一律不动。
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use serde_json::Value;
@@ -14,15 +15,22 @@ use crate::ofox_apex::mentions_ofox_gateway;
 
 use super::env_file;
 use super::json_file::{self, JsonPath, KeyStyle};
+use super::ownership::{self, Leaf, Leaves};
 use super::plan::{read_text, FileEdit, RestorePlan};
 
 const API_KEY: &str = "GEMINI_API_KEY";
 const BASE_URL: &str = "GOOGLE_GEMINI_BASE_URL";
 const MODEL: &str = "GEMINI_MODEL";
-/// 解绑时一律还原成绑定前的那一行（原来没有就删掉）。
-const ENV_KEYS: &[&str] = &[API_KEY, BASE_URL, MODEL];
+/// 解绑时还原成绑定前的那一行（原来没有就删掉）；用户之后改过的按规则留着。
+pub(crate) const ENV_LEAVES: &[Leaf] = &[
+    Leaf::route(&[API_KEY], ownership::ofox_key),
+    Leaf::route(&[BASE_URL], ownership::ofox_url),
+    Leaf::model(&[MODEL], &[BASE_URL]),
+];
 const SETTINGS_LABEL: &str = "Gemini 的 settings.json";
 const SELECTED_TYPE: JsonPath = &["security", "auth", "selectedType"];
+/// 登录方式：绑定后用户自己换了登录方式就留着。
+pub(crate) const SETTINGS_LEAVES: &[Leaf] = &[Leaf::preference(SELECTED_TYPE)];
 const SETTINGS_CONTAINERS: &[JsonPath] = &[&["security", "auth"], &["security"]];
 const API_KEY_AUTH: &str = "gemini-api-key";
 const GOOGLE_LOGIN_AUTH: &str = "oauth-personal";
@@ -120,21 +128,44 @@ pub(crate) fn write_bound(
         .map_err(|e| format!("写入 Gemini 配置失败：{e}"))
 }
 
-pub(crate) fn plan_restore_env(original: Option<&str>, current: Option<&str>) -> RestorePlan {
-    env_file::plan_restore(original, current, ENV_KEYS)
+/// `.env` 里各受管变量现在的值（按行读，没有「解析失败」）。
+pub(crate) fn env_leaves(text: Option<&str>) -> Leaves {
+    let text = text.unwrap_or_default();
+    ENV_LEAVES
+        .iter()
+        .map(|leaf| {
+            let value = env_file::get_value(text, &leaf.id()).map_or(Value::Null, Value::String);
+            (leaf.id(), value)
+        })
+        .collect()
+}
+
+pub(crate) fn settings_leaves(text: Option<&str>) -> Result<Leaves, String> {
+    json_file::leaves(text, SETTINGS_LABEL, SETTINGS_LEAVES)
+}
+
+pub(crate) fn plan_restore_env(
+    original: Option<&str>,
+    current: Option<&str>,
+    keep: &BTreeSet<String>,
+) -> RestorePlan {
+    let keys: Vec<&str> = ENV_LEAVES.iter().map(|leaf| leaf.path[0]).collect();
+    env_file::plan_restore(original, current, &keys, keep)
 }
 
 pub(crate) fn plan_restore_settings(
     original: Option<&str>,
     current: Option<&str>,
+    keep: &BTreeSet<String>,
 ) -> Result<RestorePlan, String> {
     json_file::plan_restore(
         original,
         current,
         SETTINGS_LABEL,
         KeyStyle::Json,
-        &[SELECTED_TYPE],
+        SETTINGS_LEAVES,
         SETTINGS_CONTAINERS,
+        keep,
     )
 }
 
@@ -229,7 +260,7 @@ mod tests {
     #[test]
     fn restore_puts_the_env_back_byte_for_byte() {
         let bound = bound_env(USER_ENV, &template(Some("gemini-x")), "sk-of-K").unwrap();
-        let plan = plan_restore_env(Some(USER_ENV), Some(&bound));
+        let plan = plan_restore_env(Some(USER_ENV), Some(&bound), &BTreeSet::new());
         assert!(plan.exact);
         assert_eq!(plan.content.as_deref(), Some(USER_ENV));
     }
@@ -240,7 +271,7 @@ mod tests {
         let bound = bound_settings(Some(original)).unwrap().unwrap();
         let value: Value = serde_json::from_str(&bound).unwrap();
         assert_eq!(value["security"]["auth"]["selectedType"], API_KEY_AUTH);
-        let plan = plan_restore_settings(Some(original), Some(&bound)).unwrap();
+        let plan = plan_restore_settings(Some(original), Some(&bound), &BTreeSet::new()).unwrap();
         assert!(plan.exact);
         assert_eq!(plan.content.as_deref(), Some(original));
     }

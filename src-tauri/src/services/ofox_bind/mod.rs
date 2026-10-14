@@ -4,7 +4,8 @@
 //! 所有直接改配置文件的工具（Codex 含 ChatGPT 桌面版的 Codex 模式、Claude Code、
 //! Gemini CLI、OpenCode、OpenClaw、Hermes）都走这里的「绑定前快照 + 精确还原」：
 //! 解绑时只把接入方式（地址、key、登录方式、模型）还原成绑定前的样子，MCP、
-//! skills、插件等其余配置一律不动。WorkBuddy 走 `workbuddy_config`。
+//! skills、插件等其余配置一律不动；绑定之后用户自己改过的值也留给用户（见
+//! [`ownership`]）。WorkBuddy 走 `workbuddy_config`。
 
 pub(crate) mod chatgpt_state;
 pub(crate) mod claude;
@@ -22,6 +23,7 @@ pub(crate) use live_model::display_model_or;
 mod openclaw;
 mod opencode;
 pub(crate) mod opencode_state;
+mod ownership;
 mod plan;
 pub(crate) mod record;
 pub(crate) mod relocate;
@@ -39,6 +41,7 @@ use crate::app_config::AppType;
 use crate::config::{file_mode, FileTxn};
 use crate::database::Database;
 
+use ownership::Leaves;
 use plan::{read_text, FileEdit, RestorePlan};
 use record::{
     parse_record, serialize_record, BindEnvelope, FileBaseline, ManagedFile, PreviousProvider,
@@ -172,21 +175,134 @@ impl ManagedFile {
         }
     }
 
+    /// 受管字段和它们解绑时的还原规则。
+    fn leaf_rules(self) -> &'static [ownership::Leaf] {
+        match self {
+            Self::CodexConfig => codex::LEAVES,
+            Self::ClaudeSettings => claude::LEAVES,
+            Self::GeminiEnv => gemini::ENV_LEAVES,
+            Self::GeminiSettings => gemini::SETTINGS_LEAVES,
+            Self::OpenCodeConfig => opencode::LEAVES,
+            Self::OpenClawConfig => openclaw::LEAVES,
+            Self::HermesConfig => hermes::LEAVES,
+        }
+    }
+
+    /// 文件里各受管字段的值（文件不存在时全是 `Null`）。
+    fn leaves(self, text: Option<&str>) -> Result<Leaves, String> {
+        match self {
+            Self::CodexConfig => codex::leaves(text),
+            Self::ClaudeSettings => claude::leaves(text),
+            Self::GeminiEnv => Ok(gemini::env_leaves(text)),
+            Self::GeminiSettings => gemini::settings_leaves(text),
+            Self::OpenCodeConfig => opencode::leaves(text),
+            Self::OpenClawConfig => openclaw::leaves(text),
+            Self::HermesConfig => hermes::leaves(text),
+        }
+    }
+
+    /// `written` 是 Ofox 最近写进这个文件的受管字段（旧记录没有：照旧全部还原）。
+    /// 用户之后改过、又和绑定前不一样的字段留着，记在 `kept_keys` 里。
     fn plan_restore(
         self,
         original: Option<&str>,
         current: Option<&str>,
+        written: Option<&Leaves>,
     ) -> Result<RestorePlan, String> {
-        match self {
-            Self::CodexConfig => codex::plan_restore(original, current),
-            Self::ClaudeSettings => claude::plan_restore(original, current),
-            Self::GeminiEnv => Ok(gemini::plan_restore_env(original, current)),
-            Self::GeminiSettings => gemini::plan_restore_settings(original, current),
-            Self::OpenCodeConfig => opencode::plan_restore(original, current),
-            Self::OpenClawConfig => openclaw::plan_restore(original, current),
-            Self::HermesConfig => hermes::plan_restore(original, current),
-        }
+        let keep: BTreeSet<String> = match written {
+            Some(written) => {
+                let now = self.leaves(current)?;
+                let before_binding = self.leaves(original)?;
+                ownership::kept(self.leaf_rules(), &now, written)
+                    .into_iter()
+                    .filter(|id| now.get(id) != before_binding.get(id))
+                    .collect()
+            }
+            None => BTreeSet::new(),
+        };
+        let mut plan = match self {
+            Self::CodexConfig => codex::plan_restore(original, current, &keep),
+            Self::ClaudeSettings => claude::plan_restore(original, current, &keep),
+            Self::GeminiEnv => Ok(gemini::plan_restore_env(original, current, &keep)),
+            Self::GeminiSettings => gemini::plan_restore_settings(original, current, &keep),
+            Self::OpenCodeConfig => opencode::plan_restore(original, current, &keep),
+            Self::OpenClawConfig => openclaw::plan_restore(original, current, &keep),
+            Self::HermesConfig => hermes::plan_restore(original, current, &keep),
+        }?;
+        plan.kept_keys = keep.into_iter().collect();
+        Ok(plan)
     }
+}
+
+/// 工具每个受管文件现在的受管字段；Ofox 写配置之前读一次，写完后和写入后的比对。
+fn read_leaves(tool: Tool) -> Result<Vec<(ManagedFile, Leaves)>, String> {
+    tool.files()
+        .iter()
+        .map(|file| {
+            let text = read_text(&file.current_path())?;
+            Ok((*file, file.leaves(text.as_deref())?))
+        })
+        .collect()
+}
+
+/// Ofox 写完配置之后（`before` 是写之前读的 [`read_leaves`]），把这次写了什么记进
+/// `envelope.written`。
+fn capture_written(
+    envelope: &mut BindEnvelope,
+    before: &[(ManagedFile, Leaves)],
+) -> Result<(), String> {
+    for (file, before) in before {
+        let path = file.current_path();
+        let after = file.leaves(read_text(&path)?.as_deref())?;
+        // 绑定前的样子：配置目录没换过时才有意义。
+        let original = envelope
+            .files
+            .iter()
+            .find(|baseline| baseline.file == *file && Path::new(&baseline.path) == path)
+            .map(|baseline| file.leaves(baseline.original.as_deref()))
+            .transpose()?;
+        let written = envelope.written.entry(file.id().to_string()).or_default();
+        ownership::record_write(written, before, &after, original.as_ref());
+    }
+    Ok(())
+}
+
+/// [`capture_written`] 并保存记录。失败时调用方回滚这次写的文件。
+fn store_written(
+    db: &Database,
+    tool: Tool,
+    envelope: &mut BindEnvelope,
+    before: &[(ManagedFile, Leaves)],
+) -> Result<(), String> {
+    capture_written(envelope, before)?;
+    db.upsert_bind_record(tool.record_key(), &serialize_record(envelope)?)
+        .map_err(|e| format!("保存 {} 绑定记录失败：{e}", tool.label()))
+}
+
+/// 已经绑定的工具又被 Ofox 写了一次（换 key、保存模型、换区域、迁移）：更新记录里
+/// Ofox 写了什么。旧格式的记录、没有记录的，没有可更新的。
+fn record_written(
+    db: &Database,
+    tool: Tool,
+    before: &[(ManagedFile, Leaves)],
+) -> Result<(), String> {
+    match load_record(db, tool)? {
+        Some((_, StoredRecord::Envelope(mut envelope))) => {
+            store_written(db, tool, &mut envelope, before)
+        }
+        _ => Ok(()),
+    }
+}
+
+/// [`codex::migrate_legacy_shape`]，迁移写下的也记进绑定记录。
+fn migrate_codex(
+    db: &Database,
+    stored_key: impl FnOnce() -> Option<String>,
+) -> Result<bool, String> {
+    codex::migrate_legacy_shape(stored_key, |before| {
+        let before = [(ManagedFile::CodexConfig, codex::leaves(Some(before))?)];
+        record_written(db, Tool::Codex, &before)
+    })
 }
 
 /// 绑定前的文件原样。解析不了就拒绝绑定——不能把一份坏掉的文件当成原样保存，
@@ -520,11 +636,14 @@ pub(crate) async fn rewrite_bound_config(
     }
     require_existing_ofox_config(tool)?;
     if tool == Tool::Codex {
-        codex::migrate_legacy_shape(|| Some(api_key.to_string()))?;
+        migrate_codex(db, || Some(api_key.to_string()))?;
     }
     let template = template(db, tool)?;
+    let before = read_leaves(tool)?;
     let mut txn = FileTxn::new();
-    if let Err(error) = write_bound(tool, &template, api_key, false, &mut txn) {
+    let result = write_bound(tool, &template, api_key, false, &mut txn)
+        .and_then(|()| record_written(db, tool, &before));
+    if let Err(error) = result {
         return Err(rollback_with(txn, error));
     }
     Ok(())
@@ -555,8 +674,11 @@ pub(crate) async fn replace_key(
     // 重写前先采纳用户在 CLI 里选的模型，否则会被模板里的旧模型盖回去。
     live_model::adopt_live_model(db, tool)?;
     let template = template(db, tool)?;
+    let before = read_leaves(tool)?;
     let mut txn = FileTxn::new();
-    if let Err(error) = write_bound(tool, &template, new_key, false, &mut txn) {
+    let result = write_bound(tool, &template, new_key, false, &mut txn)
+        .and_then(|()| record_written(db, tool, &before));
+    if let Err(error) = result {
         return Err(rollback_with(txn, error));
     }
     Ok(())
@@ -603,11 +725,13 @@ pub(crate) async fn persist_bound_settings(
             .message
             .unwrap_or_else(|| "请先恢复 OFox 接入配置。".into()));
     }
+    let before = read_leaves(tool).map_err(|_| "无法确认现有配置，已停止保存模型。".to_string())?;
     db.update_provider_settings_config(tool.app().as_str(), tool.provider_id(), updated)
         .map_err(|_| "保存 OFox 模型失败。".to_string())?;
     let mut txn = FileTxn::new();
     let result = template(db, tool)
-        .and_then(|template| write_bound(tool, &template, api_key, true, &mut txn));
+        .and_then(|template| write_bound(tool, &template, api_key, true, &mut txn))
+        .and_then(|()| record_written(db, tool, &before));
     if result.is_err() {
         let error = rollback_with(txn, "保存模型时写入工具配置失败。".into());
         return Err(
@@ -626,7 +750,7 @@ pub(crate) async fn persist_bound_settings(
 }
 
 /// 启动时把旧版本绑定的 Codex 迁成「服务商自带 key」，堵住 ChatGPT 令牌外发。
-pub(crate) async fn migrate_codex_on_startup() {
+pub(crate) async fn migrate_codex_on_startup(db: &Database) {
     let _guard = BIND_LOCK.lock().await;
     let stored_key = || {
         let slot = crate::ofox_secret::Slot::ApiKey {
@@ -640,7 +764,7 @@ pub(crate) async fn migrate_codex_on_startup() {
             }
         }
     };
-    match codex::migrate_legacy_shape(stored_key) {
+    match migrate_codex(db, stored_key) {
         Ok(true) => log::info!("✓ Migrated legacy Codex Ofox binding"),
         Ok(false) => {}
         Err(e) => log::warn!("✗ Failed to migrate legacy Codex Ofox binding: {e}"),
@@ -689,7 +813,7 @@ async fn bind_inner(
         live_model::adopt_live_model(db, tool)?;
     }
     if tool == Tool::Codex {
-        codex::migrate_legacy_shape(|| Some(api_key.to_string()))?;
+        migrate_codex(db, || Some(api_key.to_string()))?;
     }
     let template = template(db, tool)?;
     let app = tool.app();
@@ -698,7 +822,7 @@ async fn bind_inner(
     let existing = load_record(db, tool)?;
     let previous_text = existing.as_ref().map(|(text, _)| text.clone());
     let bound = bound_on_disk(tool)?;
-    let envelope = match existing {
+    let mut envelope = match existing {
         // 磁盘上还是 Ofox 的配置：沿用记录，只加绑定方。
         Some((_, StoredRecord::Envelope(mut envelope))) if bound => {
             envelope.holders.insert(holder.to_string());
@@ -720,12 +844,14 @@ async fn bind_inner(
                 .collect::<Result<_, _>>()?,
         ),
     };
+    let before = read_leaves(tool)?;
     let key = tool.record_key();
     db.upsert_bind_record(key, &serialize_record(&envelope)?)
         .map_err(|e| format!("保存 {} 绑定记录失败：{e}", tool.label()))?;
 
     let mut txn = FileTxn::new();
     let result = write_bound(tool, &template, api_key, true, &mut txn)
+        .and_then(|()| store_written(db, tool, &mut envelope, &before))
         .and_then(|()| set_current_provider(db, &app, tool.provider_id()));
     if let Err(error) = result {
         let mut error = rollback_with(txn, error);
@@ -778,6 +904,8 @@ pub(crate) async fn restore_missing_binding(
             .map(|(_, holder)| holder.to_string()),
     );
     let key = tool.record_key();
+    let before = read_leaves(tool)
+        .map_err(|_| "无法确认配置缺失，已停止恢复，请检查文件权限和格式。".to_string())?;
     db.upsert_bind_record(key, &serialize_record(&envelope)?)
         .map_err(|_| "保存绑定记录失败，已停止恢复。".to_string())?;
     let mut txn = FileTxn::new();
@@ -786,7 +914,8 @@ pub(crate) async fn restore_missing_binding(
         .and_then(|()| match status::inspect(db, tool, Some(api_key)) {
             Ok(health) if health.status == status::BindingStatus::Configured => Ok(()),
             _ => Err("恢复后的配置验证失败".to_string()),
-        });
+        })
+        .and_then(|()| store_written(db, tool, &mut envelope, &before));
     if result.is_err() {
         let error = rollback_with(txn, "恢复 OFox 接入配置失败，请检查文件权限和内容。".into());
         let rollback = match previous_text {
@@ -830,15 +959,23 @@ fn restore_snapshot(
                 report.warn("configAlreadyMissing", Some(shown));
                 continue;
             }
-            let plan = baseline
-                .file
-                .plan_restore(baseline.original.as_deref(), current.as_deref())?;
+            // 记录里 Ofox 写了什么，只对它写的那个文件有意义（配置目录换过就照旧全部还原）。
+            let written = envelope
+                .written
+                .get(baseline.file.id())
+                .filter(|_| baseline.file.current_path() == path);
+            let plan = baseline.file.plan_restore(
+                baseline.original.as_deref(),
+                current.as_deref(),
+                written,
+            )?;
             report
                 .restored_keys
                 .extend(prefixed(&shown, &plan.restored_keys));
             report
                 .removed_keys
                 .extend(prefixed(&shown, &plan.removed_keys));
+            report.kept_keys.extend(prefixed(&shown, &plan.kept_keys));
             match plan.content {
                 Some(text) => {
                     if plan.exact {
@@ -874,6 +1011,9 @@ fn restore_snapshot(
     })();
     if let Err(error) = result {
         return Err(rollback_with(txn, error));
+    }
+    if !report.kept_keys.is_empty() {
+        report.warn("userValueKept", None);
     }
     Ok(dirs_to_prune)
 }

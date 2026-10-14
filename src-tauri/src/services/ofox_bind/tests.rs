@@ -323,29 +323,47 @@ async fn unbind_leaves_no_key_file_behind_a_dangling_codex_config_symlink() {
     assert!(link.file_type().is_symlink(), "the link is as it was");
 }
 
+const SHOWN_CONFIG: &str = "~/.codex/config.toml";
+
+fn shown(key: &str) -> String {
+    format!("{SHOWN_CONFIG}: {key}")
+}
+
+fn kept_warning(report: &UnbindReport) -> bool {
+    report
+        .warnings
+        .iter()
+        .any(|warning| warning.code == "userValueKept")
+}
+
 #[tokio::test]
 #[serial]
-async fn managed_keys_revert_even_if_edited_while_bound_and_new_mcp_is_kept() {
+async fn effort_the_user_changed_while_bound_is_kept_and_reported_and_new_mcp_stays() {
     let home = Home::new();
     let config = home.codex("config.toml");
     write(&config, USER_CONFIG);
     let db = db_with_default_provider();
     bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
-
-    let edited = fs::read_to_string(&config).unwrap().replace(
+    edit_text(
+        &config,
         "model_reasoning_effort = \"high\"",
         "model_reasoning_effort = \"low\"",
-    ) + "\n[mcp_servers.added]\ncommand = \"x\"\n";
+    );
+    let edited = fs::read_to_string(&config).unwrap() + "\n[mcp_servers.added]\ncommand = \"x\"\n";
     write(&config, &edited);
-    // 再绑一次（添加工具会重绑所有工具）：快照不能被覆盖。
+    // 再绑一次（添加工具会重绑所有工具）：Ofox 留下的用户的值不能变成「Ofox 写的」。
     bind(&db, Tool::Codex, "codex", KEY).await.expect("rebind");
 
-    unbind(&db, Tool::Codex, "codex", &[], false)
+    let preview = unbind(&db, Tool::Codex, "codex", &[], true)
+        .await
+        .expect("preview");
+    let report = unbind(&db, Tool::Codex, "codex", &[], false)
         .await
         .expect("unbind");
+
     let restored = toml_at(&config);
+    assert_eq!(restored["model_reasoning_effort"].as_str(), Some("low"));
     assert_eq!(restored["model"].as_str(), Some("gpt-5-codex"));
-    assert_eq!(restored["model_reasoning_effort"].as_str(), Some("medium"));
     assert!(restored.get("model_provider").is_none());
     assert!(restored.get("model_providers").is_none());
     assert_eq!(
@@ -356,6 +374,207 @@ async fn managed_keys_revert_even_if_edited_while_bound_and_new_mcp_is_kept() {
         restored["mcp_servers"]["docs"]["command"].as_str(),
         Some("docs-mcp")
     );
+    for report in [&preview, &report] {
+        assert_eq!(report.kept_keys, [shown("model_reasoning_effort")]);
+        assert!(kept_warning(report), "{report:?}");
+        assert!(!format!("{report:?}").contains("\"low\""), "names only");
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn an_effort_left_as_ofox_wrote_it_is_restored_while_a_changed_flag_is_kept() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    super::codex_probe::set_override(Some(super::codex_probe::FlagSupport::Known));
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    super::codex_probe::set_override(None);
+    edit_text(
+        &config,
+        "disable_response_storage = true",
+        "disable_response_storage = false",
+    );
+
+    let report = unbind(&db, Tool::Codex, "codex", &[], false)
+        .await
+        .expect("unbind");
+
+    let restored = toml_at(&config);
+    assert_eq!(restored["model_reasoning_effort"].as_str(), Some("medium"));
+    assert_eq!(restored["disable_response_storage"].as_bool(), Some(false));
+    assert_eq!(report.kept_keys, [shown("disable_response_storage")]);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_model_picked_in_the_cli_goes_back_with_the_ofox_provider() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    switch_codex_model_in_cli(&config, "anthropic/claude-x");
+    edit_text(
+        &config,
+        "model_reasoning_effort = \"high\"",
+        "model_reasoning_effort = \"low\"",
+    );
+
+    let report = unbind(&db, Tool::Codex, "codex", &[], false)
+        .await
+        .expect("unbind");
+
+    let restored = toml_at(&config);
+    assert_eq!(restored["model"].as_str(), Some("gpt-5-codex"));
+    assert_eq!(restored["model_reasoning_effort"].as_str(), Some("low"));
+    assert_eq!(report.kept_keys, [shown("model_reasoning_effort")]);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_provider_the_user_repointed_to_their_own_relay_is_kept_with_its_model() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    edit_text(
+        &config,
+        "model_provider = \"ofox\"",
+        "model_provider = \"myrelay\"",
+    );
+    switch_codex_model_in_cli(&config, "relay-model");
+    let relay = fs::read_to_string(&config).unwrap()
+        + "\n[model_providers.myrelay]\nbase_url = \"https://relay.example/v1\"\n";
+    write(&config, &relay);
+
+    let report = unbind(&db, Tool::Codex, "codex", &[], false)
+        .await
+        .expect("unbind");
+
+    let restored = toml_at(&config);
+    assert_eq!(restored["model_provider"].as_str(), Some("myrelay"));
+    assert_eq!(restored["model"].as_str(), Some("relay-model"));
+    assert_eq!(
+        restored["model_providers"]["myrelay"]["base_url"].as_str(),
+        Some("https://relay.example/v1")
+    );
+    assert!(restored["model_providers"].get("ofox").is_none());
+    assert_eq!(restored["model_reasoning_effort"].as_str(), Some("medium"));
+    assert_eq!(report.kept_keys, [shown("model"), shown("model_provider")]);
+}
+
+#[tokio::test]
+#[serial]
+async fn the_ofox_model_does_not_stay_under_the_users_own_provider() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    edit_text(
+        &config,
+        "model_provider = \"ofox\"",
+        "model_provider = \"myrelay\"",
+    );
+
+    unbind(&db, Tool::Codex, "codex", &[], false)
+        .await
+        .expect("unbind");
+
+    let restored = toml_at(&config);
+    assert_eq!(restored["model_provider"].as_str(), Some("myrelay"));
+    assert_eq!(restored["model"].as_str(), Some("gpt-5-codex"));
+}
+
+/// 绑定记录里绑定前的快照：不含 Ofox 最近写了什么（`written` 随每次写入更新）。
+fn snapshot_of(record: &str) -> Value {
+    let mut record: Value = serde_json::from_str(record).unwrap();
+    record.as_object_mut().unwrap().remove("written");
+    record
+}
+
+/// 记录里去掉 Ofox 写了什么：和新版本之前的记录一样。
+fn forget_what_ofox_wrote(db: &Database, key: &str) {
+    let row = db.get_bind_record(key).unwrap().expect("record");
+    let mut record: Value = serde_json::from_str(&row.record).unwrap();
+    assert!(
+        record.get("written").is_some(),
+        "binding recorded what Ofox wrote: {}",
+        row.record
+    );
+    record.as_object_mut().unwrap().remove("written");
+    db.upsert_bind_record(key, &record.to_string()).unwrap();
+}
+
+#[tokio::test]
+#[serial]
+async fn an_older_record_without_what_ofox_wrote_restores_everything_as_before() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    forget_what_ofox_wrote(&db, CODEX_RECORD);
+    edit_text(
+        &config,
+        "model_reasoning_effort = \"high\"",
+        "model_reasoning_effort = \"low\"",
+    );
+
+    let report = unbind(&db, Tool::Codex, "codex", &[], false)
+        .await
+        .expect("unbind");
+
+    assert_eq!(fs::read_to_string(&config).unwrap(), USER_CONFIG);
+    assert!(report.kept_keys.is_empty());
+    assert!(!kept_warning(&report));
+}
+
+#[tokio::test]
+#[serial]
+async fn the_record_of_what_ofox_wrote_holds_no_key() {
+    let home = Home::new();
+    write(&home.codex("config.toml"), USER_CONFIG);
+    write(&home.claude("settings.json"), CLAUDE_RELAY);
+    let db = db_with_default_provider();
+    save_tool_template(&db, Tool::Claude, claude_template(Some("anthropic/x")));
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    bind(&db, Tool::Claude, "claude", KEY).await.expect("bind");
+
+    for key in [CODEX_RECORD, "claude"] {
+        let record = db.get_bind_record(key).unwrap().unwrap().record;
+        assert!(record.contains("\"written\""), "{record}");
+        assert!(!record.contains(KEY), "{record}");
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn a_key_replacement_whose_record_cannot_be_saved_leaves_the_config_as_it_was() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    let bound = fs::read_to_string(&config).unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER record_failure BEFORE UPDATE ON ofox_bind_snapshot \
+             BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;",
+        )
+        .unwrap();
+
+    let error = replace_key(&db, Tool::Codex, KEY, "sk-of-NEW")
+        .await
+        .unwrap_err();
+
+    assert!(error.contains("已回滚"), "{error}");
+    assert_eq!(fs::read_to_string(&config).unwrap(), bound);
 }
 
 #[tokio::test]
@@ -526,7 +745,7 @@ async fn legacy_migration_moves_the_key_once_and_ignores_user_keys() {
     write(&config, TEMPLATE);
     write(&auth, "{\"OPENAI_API_KEY\": \"sk-proj-mine\"}");
     assert!(
-        codex::migrate_legacy_shape(|| None).unwrap(),
+        codex::migrate_legacy_shape(|| None, |_| Ok(())).unwrap(),
         "no Ofox key anywhere: still stops relying on the user's login"
     );
     assert_eq!(
@@ -538,7 +757,7 @@ async fn legacy_migration_moves_the_key_once_and_ignores_user_keys() {
         "{\"OPENAI_API_KEY\": \"sk-proj-mine\"}",
         "the user's own key is untouched"
     );
-    assert!(!codex::migrate_legacy_shape(|| None).unwrap());
+    assert!(!codex::migrate_legacy_shape(|| None, |_| Ok(())).unwrap());
 
     write(
         &auth,
@@ -547,13 +766,13 @@ async fn legacy_migration_moves_the_key_once_and_ignores_user_keys() {
             "\"OPENAI_API_KEY\": \"sk-of-OLD\"",
         ),
     );
-    assert!(codex::migrate_legacy_shape(|| None).unwrap());
+    assert!(codex::migrate_legacy_shape(|| None, |_| Ok(())).unwrap());
     assert_eq!(
         toml_at(&config)["model_providers"]["ofox"]["experimental_bearer_token"].as_str(),
         Some("sk-of-OLD")
     );
     assert!(
-        !codex::migrate_legacy_shape(|| None).unwrap(),
+        !codex::migrate_legacy_shape(|| None, |_| Ok(())).unwrap(),
         "second run is a no-op"
     );
 }
@@ -567,19 +786,22 @@ async fn legacy_migration_reads_the_keychain_only_when_it_has_to() {
     let keychain = || -> Option<String> { panic!("keychain must not be read") };
 
     write(&config, USER_CONFIG);
-    assert!(!codex::migrate_legacy_shape(keychain).unwrap());
+    assert!(!codex::migrate_legacy_shape(keychain, |_| Ok(())).unwrap());
 
     write(&config, TEMPLATE);
     write(&auth, "{\"OPENAI_API_KEY\": \"sk-of-OLD\"}");
-    assert!(codex::migrate_legacy_shape(keychain).unwrap());
+    assert!(codex::migrate_legacy_shape(keychain, |_| Ok(())).unwrap());
     assert!(!auth.exists(), "auth.json held only the Ofox key");
 
     let mut asked = false;
     write(&config, TEMPLATE);
-    assert!(codex::migrate_legacy_shape(|| {
-        asked = true;
-        Some("sk-of-STORED".to_string())
-    })
+    assert!(codex::migrate_legacy_shape(
+        || {
+            asked = true;
+            Some("sk-of-STORED".to_string())
+        },
+        |_| Ok(())
+    )
     .unwrap());
     assert!(
         asked,
@@ -747,7 +969,7 @@ async fn claude_relay_setup_comes_back_byte_for_byte_after_a_model_change() {
 
 #[tokio::test]
 #[serial]
-async fn claude_edits_while_bound_are_reverted_and_new_settings_are_kept() {
+async fn claude_endpoint_the_user_repointed_is_kept_but_the_ofox_model_and_key_go() {
     let home = Home::new();
     let settings = home.claude("settings.json");
     write(&settings, CLAUDE_RELAY);
@@ -759,13 +981,23 @@ async fn claude_edits_while_bound_are_reverted_and_new_settings_are_kept() {
     edited["statusLine"] = json!({ "type": "command", "command": "echo hi" });
     write(&settings, &serde_json::to_string_pretty(&edited).unwrap());
 
-    unbind(&db, Tool::Claude, "claude", &[], false)
+    let report = unbind(&db, Tool::Claude, "claude", &[], false)
         .await
         .expect("unbind");
     let restored = json_at(&settings);
-    let original: Value = serde_json::from_str(CLAUDE_RELAY).unwrap();
-    assert_eq!(restored["env"], original["env"]);
+    assert_eq!(
+        restored["env"],
+        json!({
+            "ANTHROPIC_BASE_URL": "https://hand-edited.example",
+            "ANTHROPIC_API_KEY": "sk-relay",
+            "ANTHROPIC_MODEL": "claude-opus-x",
+        })
+    );
     assert_eq!(restored["statusLine"]["command"], "echo hi");
+    assert_eq!(
+        report.kept_keys,
+        ["~/.claude/settings.json: env.ANTHROPIC_BASE_URL"]
+    );
 }
 
 #[tokio::test]
@@ -1481,14 +1713,17 @@ async fn legacy_codex_without_a_key_stops_using_the_chatgpt_login() {
     write(&config, TEMPLATE);
     write(&auth, OAUTH_AUTH);
 
-    assert!(codex::migrate_legacy_shape(|| None).unwrap());
+    assert!(codex::migrate_legacy_shape(|| None, |_| Ok(())).unwrap());
     let provider = &toml_at(&config)["model_providers"]["ofox"];
     assert_eq!(provider["requires_openai_auth"].as_bool(), Some(false));
     assert!(provider.get("experimental_bearer_token").is_none());
     assert_eq!(fs::read_to_string(&auth).unwrap(), OAUTH_AUTH);
-    assert!(!codex::migrate_legacy_shape(|| None).unwrap(), "idempotent");
+    assert!(
+        !codex::migrate_legacy_shape(|| None, |_| Ok(())).unwrap(),
+        "idempotent"
+    );
 
-    assert!(codex::migrate_legacy_shape(|| Some("sk-of-LATER".into())).unwrap());
+    assert!(codex::migrate_legacy_shape(|| Some("sk-of-LATER".into()), |_| Ok(())).unwrap());
     assert_eq!(
         toml_at(&config)["model_providers"]["ofox"]["experimental_bearer_token"].as_str(),
         Some("sk-of-LATER")
@@ -1694,11 +1929,13 @@ async fn missing_bindings_restore_saved_models_and_selected_apex_without_replaci
                 status::BindingStatus::Configured
             );
             assert_eq!(
-                db.get_bind_record(tool.record_key())
-                    .unwrap()
-                    .unwrap()
-                    .record,
-                record
+                snapshot_of(
+                    &db.get_bind_record(tool.record_key())
+                        .unwrap()
+                        .unwrap()
+                        .record
+                ),
+                snapshot_of(&record)
             );
             for (file, original_bound) in tool.files().iter().zip(&before) {
                 let restored = fs::read_to_string(file.current_path()).unwrap();
@@ -2387,11 +2624,13 @@ async fn region_reconciliation_changes_only_urls_and_restart_is_idempotent() {
                 tool.label()
             );
             assert_eq!(
-                db.get_bind_record(tool.record_key())
-                    .unwrap()
-                    .unwrap()
-                    .record,
-                record
+                snapshot_of(
+                    &db.get_bind_record(tool.record_key())
+                        .unwrap()
+                        .unwrap()
+                        .record
+                ),
+                snapshot_of(&record)
             );
             let bytes: Vec<_> = tool
                 .files()
@@ -2579,11 +2818,13 @@ async fn region_reconciliation_preserves_missing_connection_fields_until_explici
                 status::BindingStatus::Configured
             );
             assert_eq!(
-                db.get_bind_record(tool.record_key())
-                    .unwrap()
-                    .unwrap()
-                    .record,
-                record
+                snapshot_of(
+                    &db.get_bind_record(tool.record_key())
+                        .unwrap()
+                        .unwrap()
+                        .record
+                ),
+                snapshot_of(&record)
             );
         }
     }
@@ -2896,11 +3137,13 @@ async fn region_reconciliation_preserves_external_models_and_keys_with_canonical
             );
             assert_eq!(region_provider_snapshot(&db, tool), provider);
             assert_eq!(
-                db.get_bind_record(tool.record_key())
-                    .unwrap()
-                    .unwrap()
-                    .record,
-                record
+                snapshot_of(
+                    &db.get_bind_record(tool.record_key())
+                        .unwrap()
+                        .unwrap()
+                        .record
+                ),
+                snapshot_of(&record)
             );
             assert_eq!(
                 status::binding_status(&db, tool, Some(KEY)).await.status,
@@ -5226,4 +5469,94 @@ async fn adopting_a_tui_model_adds_it_without_dropping_the_other_saved_models() 
         .cloned()
         .collect();
     assert_eq!(ids, ["a/one", "a/two", "a/three"]);
+}
+
+// ─── Unbind keeps what the user changed after binding ───────────────────────
+
+async fn unbind_now(db: &Database, tool: Tool, holder: &str) -> UnbindReport {
+    unbind(db, tool, holder, &[], false).await.expect("unbind")
+}
+
+fn shown_at(path: &Path, key: &str) -> String {
+    format!("{}: {key}", report::display_path(path))
+}
+
+#[tokio::test]
+#[serial]
+async fn openclaw_default_model_moved_to_the_users_own_provider_is_kept() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(&path, "ofox-openclaw/openai/gpt-x", "anthropic/claude");
+
+    let report = unbind_now(&db, Tool::OpenClaw, "openclaw").await;
+
+    let config = crate::openclaw_config::read_openclaw_config().unwrap();
+    assert_eq!(
+        config["agents"]["defaults"]["model"]["primary"],
+        "anthropic/claude"
+    );
+    assert!(config["models"]["providers"].get("ofox-openclaw").is_none());
+    assert_eq!(report.kept_keys, [shown_at(&path, "agents.defaults.model")]);
+}
+
+#[tokio::test]
+#[serial]
+async fn openclaw_another_ofox_model_picked_in_the_agent_goes_back_but_a_changed_mode_stays() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(
+        &path,
+        "ofox-openclaw/openai/gpt-x",
+        "ofox-openclaw/anthropic/other",
+    );
+    edit_text(&path, "\"mode\": \"merge\"", "\"mode\": \"replace\"");
+
+    let report = unbind_now(&db, Tool::OpenClaw, "openclaw").await;
+
+    let config = crate::openclaw_config::read_openclaw_config().unwrap();
+    assert_eq!(
+        config["agents"]["defaults"]["model"],
+        json!({ "primary": "existing/old-model", "fallbacks": ["existing/fallback"] })
+    );
+    assert_eq!(config["models"]["mode"], "replace");
+    assert_eq!(report.kept_keys, [shown_at(&path, "models.mode")]);
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_routing_the_user_moved_to_their_own_provider_is_kept() {
+    let (_home, db, path) = bind_with_user_config(Tool::Hermes, "hermes", HERMES_CONFIG).await;
+    edit_text(&path, "provider: ofox-hermes", "provider: deepseek");
+    edit_text(&path, "default: openai/gpt-x", "default: deepseek-chat");
+
+    let report = unbind_now(&db, Tool::Hermes, "hermes").await;
+
+    let model = crate::hermes_config::get_model_config().unwrap().unwrap();
+    assert_eq!(model.provider.as_deref(), Some("deepseek"));
+    assert_eq!(model.default.as_deref(), Some("deepseek-chat"));
+    assert_eq!(model.context_length, Some(32000));
+    assert!(crate::hermes_config::get_provider("ofox-hermes")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        report.kept_keys,
+        [
+            shown_at(&path, "model.default"),
+            shown_at(&path, "model.provider")
+        ]
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_ofox_model_does_not_stay_under_the_users_own_provider() {
+    let (_home, db, path) = bind_with_user_config(Tool::Hermes, "hermes", HERMES_CONFIG).await;
+    edit_text(&path, "provider: ofox-hermes", "provider: deepseek");
+
+    let report = unbind_now(&db, Tool::Hermes, "hermes").await;
+
+    let model = crate::hermes_config::get_model_config().unwrap().unwrap();
+    assert_eq!(model.provider.as_deref(), Some("deepseek"));
+    assert_eq!(model.default.as_deref(), Some("existing/old-model"));
+    assert_eq!(report.kept_keys, [shown_at(&path, "model.provider")]);
 }

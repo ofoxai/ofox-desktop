@@ -2,7 +2,7 @@
 //! 和默认模型 `agents.defaults.model`。其它 provider、skills、auth-profile 一律不动。
 //! 写回时只重写有变化的顶层段落，其余段落的注释和格式原样保留。
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
@@ -12,6 +12,7 @@ use crate::ofox_apex::mentions_ofox_gateway;
 use crate::openclaw_config::{self, get_openclaw_config_path, OpenClawDefaultModel};
 
 use super::json_file::{self, JsonPath, KeyStyle};
+use super::ownership::{self, Leaf, Leaves};
 use super::plan::{read_text, FileEdit, RestorePlan};
 
 const LABEL: &str = "OpenClaw 的 openclaw.json";
@@ -22,8 +23,14 @@ const MODE: JsonPath = &["models", "mode"];
 const DEFAULT_MODEL: JsonPath = &["agents", "defaults", "model"];
 const TOKEN: JsonPath = &["apiKey"];
 const BASE_URL: JsonPath = &["baseUrl"];
-/// 解绑时一律还原成绑定前的值（原来没有就删掉）。
-const LEAVES: &[JsonPath] = &[ENTRY, MODE, DEFAULT_MODEL];
+/// 解绑时还原成绑定前的值（原来没有就删掉）；用户之后改过的按规则留着。默认模型
+/// （`ofox-openclaw/<模型>`）自己就说明了走哪个服务商：还指向 Ofox 条目就还原（在
+/// agent 里换成别的 Ofox 模型也一样），指向用户自己的服务商就留着。
+pub(crate) const LEAVES: &[Leaf] = &[
+    Leaf::route(ENTRY, ownership::ofox_entry),
+    Leaf::preference(MODE),
+    Leaf::route(DEFAULT_MODEL, routes_to_ofox),
+];
 const CONTAINERS: &[JsonPath] = &[
     &["models", "providers"],
     &["models"],
@@ -136,9 +143,22 @@ pub(crate) fn write_bound(
         .map_err(|e| format!("写入 OpenClaw 配置失败：{e}"))
 }
 
+/// 默认模型（字符串或 `{primary, fallbacks}`）指向 Ofox 条目。
+fn routes_to_ofox(model: &Value) -> bool {
+    model
+        .as_str()
+        .or_else(|| model.get("primary")?.as_str())
+        .is_some_and(|primary| primary.starts_with(&format!("{PROVIDER_ID}/")))
+}
+
+pub(crate) fn leaves(text: Option<&str>) -> Result<Leaves, String> {
+    json_file::leaves(text, LABEL, LEAVES)
+}
+
 pub(crate) fn plan_restore(
     original: Option<&str>,
     current: Option<&str>,
+    keep: &BTreeSet<String>,
 ) -> Result<RestorePlan, String> {
     json_file::plan_restore(
         original,
@@ -147,6 +167,7 @@ pub(crate) fn plan_restore(
         KeyStyle::Json5,
         LEAVES,
         CONTAINERS,
+        keep,
     )
 }
 
@@ -246,7 +267,7 @@ mod tests {
             true,
         )
         .unwrap();
-        let plan = plan_restore(Some(USER_CONFIG), Some(&bound)).unwrap();
+        let plan = plan_restore(Some(USER_CONFIG), Some(&bound), &BTreeSet::new()).unwrap();
         assert!(plan.exact);
         assert_eq!(plan.content.as_deref(), Some(USER_CONFIG));
     }
@@ -267,7 +288,7 @@ mod tests {
             &[("meta", Some(&json!({ "lastTouchedAt": "2026-10-01" })))],
         )
         .unwrap();
-        let plan = plan_restore(Some(USER_CONFIG), Some(&touched)).unwrap();
+        let plan = plan_restore(Some(USER_CONFIG), Some(&touched), &BTreeSet::new()).unwrap();
         assert!(!plan.exact);
         let text = plan.content.unwrap();
         assert!(
@@ -283,6 +304,11 @@ mod tests {
     #[test]
     fn restore_deletes_a_file_bind_created() {
         let bound = bound_config(None, &template(Some("openai/gpt-x")), "sk-of-K", true).unwrap();
-        assert_eq!(plan_restore(None, Some(&bound)).unwrap().content, None);
+        assert_eq!(
+            plan_restore(None, Some(&bound), &BTreeSet::new())
+                .unwrap()
+                .content,
+            None
+        );
     }
 }

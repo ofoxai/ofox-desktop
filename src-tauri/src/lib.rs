@@ -1078,7 +1078,7 @@ pub fn run() {
 
                 // 旧版本把 Codex 的 Ofox key 写进 auth.json 并要求 OpenAI 认证；用
                 // ChatGPT 登录的用户会把 ChatGPT 令牌发给 Ofox。迁成服务商自带 key。
-                crate::services::ofox_bind::migrate_codex_on_startup().await;
+                crate::services::ofox_bind::migrate_codex_on_startup(&state.db).await;
 
                 // 注：曾经在这里调 `restore_proxy_state_on_startup`——读
                 // `proxy_config.enabled` 然后无脑给所有标 true 的工具重跑

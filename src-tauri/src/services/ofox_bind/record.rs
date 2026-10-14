@@ -4,7 +4,7 @@
 //! OpenClaw/Hermes 的 `__ofoxDirectBackupVersion` 外层、WorkBuddy 状态）没有
 //! 这两个字段，读出来归为 [`StoredRecord::Legacy`]。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -43,6 +43,21 @@ pub(crate) enum ManagedFile {
     HermesConfig,
 }
 
+impl ManagedFile {
+    /// 在 [`BindEnvelope::written`] 里的名字（和序列化的名字相同）。
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            Self::CodexConfig => "codexConfig",
+            Self::ClaudeSettings => "claudeSettings",
+            Self::GeminiEnv => "geminiEnv",
+            Self::GeminiSettings => "geminiSettings",
+            Self::OpenCodeConfig => "openCodeConfig",
+            Self::OpenClawConfig => "openClawConfig",
+            Self::HermesConfig => "hermesConfig",
+        }
+    }
+}
+
 /// 一个受管文件在绑定前的样子。`original` 是原文件的完整文本：受管字段的原值
 /// 在还原时从这里现场解析，所以之后才写进去的字段（比如模型）也在还原范围内。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -75,6 +90,11 @@ pub(crate) struct BindEnvelope {
     /// 解绑时还要用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy: Option<Value>,
+    /// Ofox 最近一次写进各受管文件（[`ManagedFile::id`]）的受管字段（按字段路径），
+    /// key 只存摘要。解绑时只还原还是这个样子、或者一看就是 Ofox 的字段，用户之后
+    /// 改过的留给用户（见 `ownership`）。旧记录没有这一项，照旧全部还原。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub written: BTreeMap<String, BTreeMap<String, Value>>,
 }
 
 impl BindEnvelope {
@@ -90,6 +110,7 @@ impl BindEnvelope {
             previous_provider,
             files,
             legacy: None,
+            written: BTreeMap::new(),
         }
     }
 
@@ -101,6 +122,7 @@ impl BindEnvelope {
             previous_provider: PreviousProvider::default(),
             files: Vec::new(),
             legacy,
+            written: BTreeMap::new(),
         }
     }
 }
@@ -170,6 +192,54 @@ mod tests {
             parse_record(&text).unwrap(),
             StoredRecord::Envelope(envelope)
         );
+    }
+
+    #[test]
+    fn what_ofox_wrote_round_trips_and_older_records_read_without_it() {
+        let mut envelope = BindEnvelope::snapshot(
+            "codex",
+            PreviousProvider::default(),
+            vec![FileBaseline {
+                file: ManagedFile::CodexConfig,
+                path: "/home/u/.codex/config.toml".into(),
+                existed: false,
+                dir_existed: true,
+                mode: None,
+                original: None,
+            }],
+        );
+        let older = serialize_record(&envelope).unwrap();
+        assert!(!older.contains("written"), "empty is not written: {older}");
+        envelope.written.insert(
+            ManagedFile::CodexConfig.id().to_string(),
+            BTreeMap::from([("model".to_string(), json!("openai/gpt-x"))]),
+        );
+
+        let text = serialize_record(&envelope).unwrap();
+
+        assert_eq!(
+            parse_record(&text).unwrap(),
+            StoredRecord::Envelope(envelope)
+        );
+        match parse_record(&older).unwrap() {
+            StoredRecord::Envelope(parsed) => assert!(parsed.written.is_empty()),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn managed_file_ids_are_their_serialized_names() {
+        for file in [
+            ManagedFile::CodexConfig,
+            ManagedFile::ClaudeSettings,
+            ManagedFile::GeminiEnv,
+            ManagedFile::GeminiSettings,
+            ManagedFile::OpenCodeConfig,
+            ManagedFile::OpenClawConfig,
+            ManagedFile::HermesConfig,
+        ] {
+            assert_eq!(serde_json::to_value(file).unwrap(), json!(file.id()));
+        }
     }
 
     #[test]
