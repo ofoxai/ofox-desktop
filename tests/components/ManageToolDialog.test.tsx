@@ -904,6 +904,35 @@ describe("ManageToolDialog WorkBuddy multi-model management", () => {
     expect(check).toHaveBeenCalledWith("workbuddy", models[1].id, true);
   });
 
+  it("picks the model to check from the app's own menu inside the dialog, the chosen one ticked", async () => {
+    const models = [
+      compatibleModel("openai/model-a"),
+      compatibleModel("openai/model-b"),
+    ];
+    mockWorkBuddy(
+      models,
+      models.map((model) => model.id),
+    );
+
+    await renderTool("workbuddy", "WorkBuddy");
+    await screen.findByText("共 2 个兼容模型，共用一个 Ofox Key");
+    const picker = screen.getByRole("combobox", {
+      name: "选择待检测的 WorkBuddy 模型",
+    });
+    expect(picker).toHaveAttribute("aria-haspopup", "listbox");
+    expect(picker).toHaveTextContent("openai/model-a");
+
+    fireEvent.click(picker);
+    const listbox = await screen.findByRole("listbox");
+    expect(listbox.closest('[role="dialog"]')).toContainElement(picker);
+    expect(
+      within(listbox).getByRole("option", { name: "openai/model-a" }),
+    ).toHaveAttribute("data-checked", "true");
+    expect(
+      within(listbox).getByRole("option", { name: "openai/model-b" }),
+    ).not.toHaveAttribute("data-checked");
+  });
+
   it("keeps save disabled when the catalog lacks a selected model", async () => {
     const models = [compatibleModel("openai/model-a")];
     mockWorkBuddy(models, ["missing/model"]);

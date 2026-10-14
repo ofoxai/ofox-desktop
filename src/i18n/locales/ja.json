@@ -72,6 +72,7 @@
   "apexSwitch": {
     "auto": "自動検出",
     "autoLabel": "自動 · {{apex}}",
+    "label": "リージョン",
     "pinned": "{{apex}} に固定しました。起動時にネットワークで自動切替しなくなります",
     "switched": "{{apex}} に切り替えました",
     "switchFailed": "リージョンを切り替えられませんでした。後でもう一度お試しください",
@@ -197,7 +198,7 @@
       "failed": "更新に失敗しました。ログを確認して再試行してください"
     },
     "updateTo": "v{{version}} に更新",
-    "manyAvailable": "{{count}} 個のツールに新バージョンがあります：{{names}}",
+    "manyAvailable": "{{count}} 個のツールに更新があります：{{names}}",
     "batchProgress": "{{tool}} を更新中…（{{index}}/{{count}}）",
     "updatedTo": "{{tool}} を v{{version}} に更新しました",
     "updatedFromTo": "{{tool}} を更新しました：v{{from}} → v{{to}}",
@@ -232,11 +233,14 @@
     "unknown": "不明",
     "enterValidValue": "有効な値を入力してください",
     "clear": "クリア",
+    "clearSearch": "検索をクリア",
     "toggleTheme": "テーマを切り替え",
     "format": "フォーマット",
     "formatSuccess": "整形しました",
     "formatError": "整形に失敗しました: {{error}}",
     "copy": "コピー",
+    "copied": "コピーしました",
+    "copyFailed": "コピーできませんでした。手動でコピーしてください",
     "view": "表示",
     "back": "戻る",
     "refresh": "更新",
@@ -249,7 +253,8 @@
     "deleting": "削除中...",
     "auto": "自動",
     "enabled": "有効",
-    "notSet": "未設定"
+    "notSet": "未設定",
+    "noMatches": "一致する項目はありません"
   },
   "update": {
     "promptTitle": "新しいバージョンがあります",
@@ -258,6 +263,26 @@
     "skipThisVersion": "このバージョンをスキップ",
     "bannerTitle": "新しいバージョンがあります",
     "bannerHint": "ダウンロードページで最新版を入手してください"
+  },
+  "shell": {
+    "nav": "ページ",
+    "tabs": {
+      "tools": "ツール",
+      "sessions": "セッション",
+      "usage": "使用量"
+    },
+    "refresh": "再読み込み",
+    "settings": "設定",
+    "update": {
+      "pill": "新バージョン v{{version}}",
+      "now": "今すぐ更新",
+      "openFailed": "ダウンロードページを開けませんでした"
+    },
+    "openFailed": "リンクを開けませんでした",
+    "usage": {
+      "webDetails": "ウェブで詳しい使用量を見る ↗"
+    },
+    "website": "Ofox ウェブサイト ↗"
   },
   "firstRunNotice": {
     "title": "Ofox Desktop へようこそ",
@@ -983,7 +1008,36 @@
     "repairDownloadHint": "{{tool}} のダウンロードページを開く",
     "repairUnavailable": "このツールは手動でインストールしてください",
     "repairFailed": "{{tool}} の修復に失敗しました：{{message}}",
-    "repairDismiss": "閉じる"
+    "repairDismiss": "閉じる",
+    "balanceUpdated": "残高を更新しました：{{amount}}",
+    "balanceNoData": "残高を更新しましたが、まだ数値がありません",
+    "balanceRefreshFailed": "残高を更新できませんでした。しばらくしてから再試行してください",
+    "listRefreshed": "更新しました",
+    "listRefreshFailed": "更新に失敗しました：{{error}}",
+    "profiles": {
+      "menu": "プラン",
+      "loading": "プランを読み込み中…",
+      "empty": "プランはまだありません",
+      "toolCount": "{{count}} 個のツール",
+      "capture": "現在の組み合わせを保存…",
+      "manage": "プランを管理…"
+    },
+    "balance": {
+      "label": "OFOX 残高",
+      "topUp": "チャージ",
+      "userFallback": "ユーザー",
+      "loadingName": "読み込み中…",
+      "loadingUser": "アカウント情報を読み込み中…",
+      "loadingUserAttempt": "アカウント情報を読み込み中（{{attempt}}/3）",
+      "loadFailed": "アカウント情報を読み込めません。クリックして再試行"
+    },
+    "tools": {
+      "title": "連携済みのツール",
+      "add": "追加",
+      "loading": "読み込み中…",
+      "empty": "連携済みのツールはありません",
+      "refreshing": "更新中…"
+    }
   },
   "providerForm": {
     "supplierName": "プロバイダー名",
@@ -1078,9 +1132,6 @@
     "anthropicDefaultHaikuModel": "既定 Haiku モデル",
     "anthropicDefaultSonnetModel": "既定 Sonnet モデル",
     "anthropicDefaultOpusModel": "既定 Opus モデル",
-    "modelPlaceholder": "",
-    "smallModelPlaceholder": "",
-    "haikuModelPlaceholder": "",
     "modelHelper": "任意: 既定で使いたい Claude モデルを指定。空欄ならシステム既定を使用します。",
     "modelMappingLabel": "モデルマッピング",
     "modelMappingHint": "プロバイダーが Claude モデルをネイティブ提供している場合、通常は設定不要です。リクエストを別のモデル名にマッピングする場合のみ設定してください。",
@@ -2816,16 +2867,20 @@
       "unknown": "連携設定を読み取れません。連携解除または後で再試行できます。"
     },
     "versionUnknown": "インストール済み · バージョン不明",
-    "noInstallationDetected": "インストール未検出"
+    "noInstallationDetected": "インストール未検出",
+    "more": "その他の操作",
+    "installedVia": "{{method}} でインストール",
+    "installMethod": {
+      "homebrew": "Homebrew",
+      "npm": "npm",
+      "pnpm": "pnpm",
+      "native": "公式インストーラー",
+      "sparkle": "公式サイトのインストーラー",
+      "msstore": "Microsoft Store"
+    }
   },
   "modelExperience": {
     "multiDescription": "選択順にモデル集合を保存します。ツール内でこれらのモデルを切り替えられます。",
-    "navigation": "ツールとセッション",
-    "nav": {
-      "tools": "ツール",
-      "profiles": "モデルプラン",
-      "sessions": "セッション"
-    },
     "loading": "モデル状態を読み込み中…",
     "stateFailed": "モデル状態を読み込めません",
     "retry": "再試行",

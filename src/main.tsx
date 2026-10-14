@@ -14,13 +14,14 @@ import { exit } from "@tauri-apps/plugin-process";
 import TrayPopoverApp from "@/components/tray/TrayPopoverApp";
 import { Toaster } from "@/components/ui/sonner";
 import { UpdateProvider } from "@/contexts/UpdateContext";
+import { platformClass } from "@/lib/platform";
 
-// 根据平台添加 body class，便于平台特定样式
+// 根据平台添加 class，便于平台特定样式：<html> 上的 mac/win/linux 决定字体
+// 与滚动条（见 index.css），body 上的 is-mac 保留给既有样式
 try {
-  const ua = navigator.userAgent || "";
-  const plat = (navigator.platform || "").toLowerCase();
-  const isMac = /mac/i.test(ua) || plat.includes("mac");
-  if (isMac) {
+  const platform = platformClass();
+  document.documentElement.classList.add(platform);
+  if (platform === "mac") {
     document.body.classList.add("is-mac");
   }
 } catch {

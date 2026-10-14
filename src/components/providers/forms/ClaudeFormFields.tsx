@@ -786,7 +786,6 @@ export function ClaudeFormFields({
                   "claudeModel",
                   claudeModel,
                   "ANTHROPIC_MODEL",
-                  t("providerForm.modelPlaceholder", { defaultValue: "" }),
                 )}
               </div>
 
@@ -801,7 +800,6 @@ export function ClaudeFormFields({
                   "claudeDefaultHaikuModel",
                   defaultHaikuModel,
                   "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-                  t("providerForm.haikuModelPlaceholder", { defaultValue: "" }),
                 )}
               </div>
 
@@ -816,7 +814,6 @@ export function ClaudeFormFields({
                   "claudeDefaultSonnetModel",
                   defaultSonnetModel,
                   "ANTHROPIC_DEFAULT_SONNET_MODEL",
-                  t("providerForm.modelPlaceholder", { defaultValue: "" }),
                 )}
               </div>
 
@@ -831,7 +828,6 @@ export function ClaudeFormFields({
                   "claudeDefaultOpusModel",
                   defaultOpusModel,
                   "ANTHROPIC_DEFAULT_OPUS_MODEL",
-                  t("providerForm.modelPlaceholder", { defaultValue: "" }),
                 )}
               </div>
             </div>

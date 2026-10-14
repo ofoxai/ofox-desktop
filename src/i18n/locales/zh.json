@@ -72,6 +72,7 @@
   "apexSwitch": {
     "auto": "自动检测",
     "autoLabel": "自动 · {{apex}}",
+    "label": "区域",
     "pinned": "已固定为 {{apex}}，启动时不再按网络自动切换",
     "switched": "已切换到 {{apex}}",
     "switchFailed": "切换区域失败，请稍后重试",
@@ -197,7 +198,7 @@
       "failed": "升级失败，请查看日志后重试"
     },
     "updateTo": "升级到 v{{version}}",
-    "manyAvailable": "{{count}} 个工具有新版本：{{names}}",
+    "manyAvailable": "{{count}} 个工具有更新：{{names}}",
     "batchProgress": "正在升级 {{tool}}…（{{index}}/{{count}}）",
     "updatedTo": "{{tool}} 已升级到 v{{version}}",
     "updatedFromTo": "{{tool}} 已升级：v{{from}} → v{{to}}",
@@ -232,11 +233,14 @@
     "unknown": "未知",
     "enterValidValue": "请输入有效的内容",
     "clear": "清除",
+    "clearSearch": "清除搜索",
     "toggleTheme": "切换主题",
     "format": "格式化",
     "formatSuccess": "格式化成功",
     "formatError": "格式化失败：{{error}}",
     "copy": "复制",
+    "copied": "已复制",
+    "copyFailed": "复制失败，请手动复制",
     "view": "查看",
     "back": "返回",
     "refresh": "刷新",
@@ -249,7 +253,8 @@
     "deleting": "删除中...",
     "auto": "自动",
     "enabled": "已开启",
-    "notSet": "未设置"
+    "notSet": "未设置",
+    "noMatches": "无匹配项"
   },
   "update": {
     "promptTitle": "发现新版本",
@@ -258,6 +263,26 @@
     "skipThisVersion": "跳过此版本",
     "bannerTitle": "发现新版本",
     "bannerHint": "前往下载页获取最新版本"
+  },
+  "shell": {
+    "nav": "页面",
+    "tabs": {
+      "tools": "工具",
+      "sessions": "会话",
+      "usage": "用量"
+    },
+    "refresh": "刷新",
+    "settings": "设置",
+    "update": {
+      "pill": "新版本 v{{version}}",
+      "now": "立即更新",
+      "openFailed": "无法打开下载页面"
+    },
+    "openFailed": "无法打开链接",
+    "usage": {
+      "webDetails": "在网页查看详细用量 ↗"
+    },
+    "website": "Ofox 网站 ↗"
   },
   "firstRunNotice": {
     "title": "欢迎使用 Ofox Desktop",
@@ -983,7 +1008,36 @@
     "repairDownloadHint": "打开 {{tool}} 的下载页面",
     "repairUnavailable": "这个工具需要手动安装",
     "repairFailed": "修复 {{tool}} 失败：{{message}}",
-    "repairDismiss": "关闭"
+    "repairDismiss": "关闭",
+    "balanceUpdated": "余额已更新：{{amount}}",
+    "balanceNoData": "余额已刷新，但暂无可用数据",
+    "balanceRefreshFailed": "余额刷新失败，请稍后重试",
+    "listRefreshed": "已刷新",
+    "listRefreshFailed": "刷新失败：{{error}}",
+    "profiles": {
+      "menu": "方案",
+      "loading": "正在读取方案…",
+      "empty": "还没有方案",
+      "toolCount": "{{count}} 个工具",
+      "capture": "保存当前组合…",
+      "manage": "管理方案…"
+    },
+    "balance": {
+      "label": "OFOX 账户余额",
+      "topUp": "充值",
+      "userFallback": "用户",
+      "loadingName": "加载中…",
+      "loadingUser": "正在加载用户信息…",
+      "loadingUserAttempt": "正在加载用户信息（{{attempt}}/3）",
+      "loadFailed": "无法加载用户信息，点击重试"
+    },
+    "tools": {
+      "title": "已绑定的工具",
+      "add": "添加",
+      "loading": "正在加载…",
+      "empty": "暂无绑定的工具",
+      "refreshing": "刷新中…"
+    }
   },
   "providerForm": {
     "supplierName": "供应商名称",
@@ -1078,9 +1132,6 @@
     "anthropicDefaultHaikuModel": "Haiku 默认模型",
     "anthropicDefaultSonnetModel": "Sonnet 默认模型",
     "anthropicDefaultOpusModel": "Opus 默认模型",
-    "modelPlaceholder": "",
-    "smallModelPlaceholder": "",
-    "haikuModelPlaceholder": "",
     "modelHelper": "可选：指定默认使用的 Claude 模型，留空则使用系统默认。",
     "modelMappingLabel": "模型映射",
     "modelMappingHint": "如果供应商原生提供 Claude 系列模型，通常无需配置。仅在需要将请求映射到不同模型名称时填写。",
@@ -2816,16 +2867,20 @@
       "unknown": "无法读取绑定配置。你仍可解除绑定或稍后重试。"
     },
     "versionUnknown": "已安装 · 版本未知",
-    "noInstallationDetected": "未检测到安装"
+    "noInstallationDetected": "未检测到安装",
+    "more": "更多操作",
+    "installedVia": "通过 {{method}} 安装",
+    "installMethod": {
+      "homebrew": "Homebrew",
+      "npm": "npm",
+      "pnpm": "pnpm",
+      "native": "官方安装程序",
+      "sparkle": "官网安装包",
+      "msstore": "Microsoft Store"
+    }
   },
   "modelExperience": {
     "multiDescription": "保存一组模型，顺序按选择顺序保留。工具内可在这组模型间切换。",
-    "navigation": "工具与会话导航",
-    "nav": {
-      "tools": "工具",
-      "profiles": "模型方案",
-      "sessions": "会话"
-    },
     "loading": "正在读取模型状态…",
     "stateFailed": "无法读取模型状态",
     "retry": "重试",

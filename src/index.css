@@ -3,60 +3,140 @@
 @tailwind utilities;
 
 @layer base {
+  /* One quiet surface (magpie's neutrals) and one accent: OFox orange.
+     The shadcn tokens below stay HSL because components and inline styles
+     read them as `hsl(var(--x))`; the magpie tokens are RGB channels so
+     Tailwind can apply opacity (`bg-brand/10`). */
   :root {
-    --background: 0 0% 100%;
-    --foreground: 240 10% 3.9%;
+    --background: 240 10% 96.1%;
+    --foreground: 240 8.2% 12%;
     --card: 0 0% 100%;
-    --card-foreground: 240 10% 3.9%;
+    --card-foreground: 240 8.2% 12%;
     --popover: 0 0% 100%;
-    --popover-foreground: 240 10% 3.9%;
+    --popover-foreground: 240 8.2% 12%;
 
-    --primary: 210 100% 56%;
+    --primary: 20.5 90.2% 48.2%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 240 4.8% 95.9%;
-    --secondary-foreground: 240 5.9% 10%;
+    --secondary: 240 12% 95.1%;
+    --secondary-foreground: 240 8.2% 12%;
 
-    --muted: 240 4.8% 95.9%;
-    --muted-foreground: 240 3.8% 46.1%;
-    --accent: 240 4.8% 95.9%;
-    --accent-foreground: 240 5.9% 10%;
+    --muted: 240 12% 95.1%;
+    --muted-foreground: 240 3.4% 53.7%;
+    --accent: 240 12% 95.1%;
+    --accent-foreground: 240 8.2% 12%;
 
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 0 0% 98%;
+    --destructive: 0 63.9% 55.5%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 240 5.9% 90%;
-    --input: 240 5.9% 90%;
-    --ring: 210 100% 56%;
+    --border: 240 9.8% 90%;
+    --input: 240 9.8% 90%;
+    --ring: 20.5 90.2% 48.2%;
 
     --radius: 0.5rem;
+
+    --canvas: 244 244 246;
+    --card-2: 249 249 251;
+    --pill: 241 241 244;
+    --pill-hover: 233 233 238;
+    --line: 227 227 232;
+    --line-2: 236 236 240;
+    --ink: 28 28 33;
+    --ink-2: 75 75 83;
+    --ink-muted: 133 133 141;
+    --ink-faint: 185 185 194;
+    --ink-ctl: 99 99 107;
+    --brand: 234 88 12;
+    --brand-ink: 194 65 12;
+    --brand-soft: 255 241 232;
+    --on-brand: 255 255 255;
+    --sel: 255 230 213;
+    --ok: 24 154 88;
+    --ok-soft: 228 246 236;
+    --danger: 214 69 69;
+    --danger-soft: 251 233 233;
+    --warn: 180 83 9;
+    --warn-soft: 251 240 223;
+
+    /* full colours, not channels: they carry their own alpha */
+    --pop-bg: rgba(255, 255, 255, 0.94);
+    --seg-thumb: #ffffff;
+    --shadow-pop:
+      0 16px 44px rgba(20, 22, 30, 0.16), 0 2px 8px rgba(20, 22, 30, 0.06),
+      0 0 0 0.5px rgba(20, 22, 30, 0.1);
+    --shadow-dialog:
+      0 0 0 1px rgb(var(--line)), 0 24px 60px rgba(0, 0, 0, 0.32),
+      0 2px 8px rgba(0, 0, 0, 0.12);
+
+    --ease-soft: cubic-bezier(0.2, 0.8, 0.2, 1);
+    --font-ui:
+      -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui,
+      sans-serif;
+    --font-code: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   }
 
   .dark {
-    --background: 240 5% 12%;
-    --foreground: 0 0% 98%;
-    --card: 240 5% 16%;
-    --card-foreground: 0 0% 98%;
-    --popover: 240 5% 16%;
-    --popover-foreground: 0 0% 98%;
+    --background: 240 7.1% 11%;
+    --foreground: 240 12.5% 93.7%;
+    --card: 240 5.4% 14.5%;
+    --card-foreground: 240 12.5% 93.7%;
+    --popover: 240 5.4% 14.5%;
+    --popover-foreground: 240 12.5% 93.7%;
 
-    --primary: 210 100% 54%;
-    --primary-foreground: 0 0% 100%;
+    --primary: 27 96% 61%;
+    --primary-foreground: 240 8.2% 12%;
 
-    --secondary: 240 5% 18%;
-    --secondary-foreground: 0 0% 98%;
+    --secondary: 240 6.3% 18.8%;
+    --secondary-foreground: 240 12.5% 93.7%;
 
-    --muted: 240 5% 18%;
-    --muted-foreground: 240 5% 64.9%;
-    --accent: 240 5% 18%;
-    --accent-foreground: 0 0% 98%;
+    --muted: 240 6.3% 18.8%;
+    --muted-foreground: 240 4% 56.3%;
+    --accent: 240 6.3% 18.8%;
+    --accent-foreground: 240 12.5% 93.7%;
 
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 0 0% 98%;
+    --destructive: 4.8 81.2% 72.9%;
+    --destructive-foreground: 240 8.2% 12%;
 
-    --border: 240 5% 24%;
-    --input: 240 5% 24%;
-    --ring: 210 100% 54%;
+    --border: 240 5.6% 21.2%;
+    --input: 240 5.6% 21.2%;
+    --ring: 27 96% 61%;
+
+    --canvas: 26 26 30;
+    --card-2: 31 31 35;
+    --pill: 45 45 51;
+    --pill-hover: 54 54 61;
+    --line: 51 51 57;
+    --line-2: 44 44 50;
+    --ink: 237 237 241;
+    --ink-2: 185 185 193;
+    --ink-muted: 139 139 148;
+    --ink-faint: 86 86 95;
+    --ink-ctl: 161 161 170;
+    --brand: 251 146 60;
+    --brand-ink: 253 186 116;
+    --brand-soft: 58 38 24;
+    --on-brand: 28 28 33;
+    --sel: 74 46 27;
+    --ok: 111 217 155;
+    --ok-soft: 30 58 43;
+    --danger: 242 139 130;
+    --danger-soft: 69 39 42;
+    --warn: 242 181 68;
+    --warn-soft: 63 50 32;
+
+    --pop-bg: rgba(35, 35, 39, 0.94);
+    --seg-thumb: rgba(255, 255, 255, 0.15);
+    --shadow-pop:
+      0 16px 44px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.3),
+      0 0 0 0.5px rgba(255, 255, 255, 0.1);
+  }
+
+  /* Windows' own text face, with YaHei UI for Chinese rather than the
+     webview's fallback; the Mac and Linux use the stack above. */
+  html.win {
+    --font-ui:
+      "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui,
+      sans-serif;
   }
 }
 
@@ -90,13 +170,13 @@
 }
 
 .glass-card-active {
-  background: rgba(59, 130, 246, 0.08);
-  border: 1px solid rgba(59, 130, 246, 0.4);
+  background: rgb(var(--brand) / 0.08);
+  border: 1px solid rgb(var(--brand) / 0.4);
 }
 
 .dark .glass-card-active {
-  background: rgba(59, 130, 246, 0.12);
-  border: 1px solid rgba(59, 130, 246, 0.3);
+  background: rgb(var(--brand) / 0.12);
+  border: 1px solid rgb(var(--brand) / 0.3);
 }
 
 .glass-header {
@@ -124,19 +204,19 @@
 
 * {
   box-sizing: border-box;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
 }
 
 html {
   @apply font-sans antialiased;
-  line-height: 1.5;
+  line-height: 1.4;
   color-scheme: light;
   overscroll-behavior: none;
 }
 
 body {
-  @apply m-0 p-0 text-sm;
+  @apply m-0 p-0;
+  font-size: 13px;
+  line-height: 1.4;
   background-color: hsl(var(--background));
   color: hsl(var(--foreground));
 }
@@ -145,12 +225,129 @@ html.dark {
   color-scheme: dark;
 }
 
-::-webkit-scrollbar {
+*:focus-visible {
+  outline: 2px solid rgb(var(--brand));
+  outline-offset: 1px;
+}
+
+/* Scrollbars. Windows and Linux draw a classic bar, arrows and all: a thin
+   rounded thumb instead. The Mac keeps them hidden, except on a page that
+   runs longer than the window (`.page-scroll`), which shows an 8px thumb —
+   the WebView draws the overlay bar only while a trackpad scrolls.
+   The platform class sits in :where() so these rules weigh no more than the
+   bare element/pseudo-element: `.page-scroll` and a component's own opt-in
+   (e.g. the command list's `[&::-webkit-scrollbar]:block`) always win. */
+:where(html.mac) * {
+  scrollbar-width: none;
+}
+
+:where(html.mac) ::-webkit-scrollbar {
   display: none;
 }
 
-*:focus-visible {
-  @apply outline-2 outline-blue-500 outline-offset-2;
+:where(html.mac) .page-scroll {
+  scrollbar-width: auto;
+}
+
+:where(html.mac) .page-scroll::-webkit-scrollbar {
+  display: block;
+  width: 8px;
+  height: 8px;
+  background: transparent;
+}
+
+:where(html.mac) .page-scroll::-webkit-scrollbar-thumb {
+  background: rgb(var(--ink-faint));
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background-clip: padding-box;
+}
+
+:where(html:not(.mac)) ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  background: transparent;
+}
+
+:where(html:not(.mac)) ::-webkit-scrollbar-thumb {
+  background: rgb(var(--ink-faint));
+  border: 3px solid transparent;
+  border-radius: 10px;
+  background-clip: padding-box;
+}
+
+:where(html.mac) .page-scroll::-webkit-scrollbar-thumb:hover,
+:where(html:not(.mac)) ::-webkit-scrollbar-thumb:hover {
+  background-color: rgb(var(--ink-muted));
+}
+
+:where(html:not(.mac)) ::-webkit-scrollbar-button,
+:where(html:not(.mac)) ::-webkit-scrollbar-corner {
+  display: none;
+  background: transparent;
+}
+
+/* Motion: popovers grow out of their trigger (and sink back toward it when
+   they open upward), dialogs lift, everything else fades. */
+@keyframes pop-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes pop-in {
+  from {
+    transform: translateY(var(--pop-dy, -6px)) scale(0.94);
+  }
+}
+
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+}
+
+/* `translate` and `scale` rather than `transform`: a dialog is centred with
+   a transform, which an animated `transform` would replace. */
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    translate: 0 6px;
+    scale: 0.97;
+  }
+}
+
+/* A copy button's check pops in: small, a little too big, then settled. */
+@keyframes copy-pop {
+  0% {
+    transform: scale(0.55);
+  }
+  55% {
+    transform: scale(1.16);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* A loading placeholder: a lighter band sweeps across it. */
+@keyframes skeleton-shift {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-pop-in,
+  .animate-fade,
+  .animate-dialog-in,
+  .animate-copy-pop,
+  .animate-skeleton {
+    animation: none !important;
+  }
 }
 
 @layer utilities {

@@ -3,40 +3,50 @@ import { Slot } from "@radix-ui/react-slot";
 import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
+// magpie's controls: one brand action, quiet bordered secondaries, text
+// buttons that gain a pill on hover. Every press gives a little.
+const primary = "bg-brand font-medium text-brand-on hover:brightness-[1.08]";
+const secondary =
+  "border border-line bg-card text-ink-2 shadow-[0_1px_1px_rgba(0,0,0,.04)] hover:border-ink-muted hover:bg-card-2 hover:text-ink";
+const danger =
+  "bg-danger font-medium text-destructive-foreground hover:brightness-[1.08]";
+
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50",
+  "inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-ctl text-ctl transition-[background-color,color,border-color,box-shadow,filter,opacity,transform] duration-150 ease-soft active:scale-[.96] disabled:pointer-events-none disabled:opacity-50",
   {
     variants: {
       variant: {
-        // 主按钮：蓝底白字（对应旧版 primary）
-        default:
-          "bg-blue-500 text-white hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700",
-        // 危险按钮：红底白字（对应旧版 danger）
-        destructive:
-          "bg-red-500 text-white hover:bg-red-600 dark:bg-red-600 dark:hover:bg-red-700",
-        // 轮廓按钮
-        outline:
-          "border border-border-default bg-background text-muted-foreground hover:bg-gray-100 hover:text-gray-900 hover:border-border-hover dark:hover:bg-gray-800 dark:hover:text-gray-100",
-        // 次按钮：灰色（对应旧版 secondary）
-        secondary:
-          "text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200",
-        // 幽灵按钮（对应旧版 ghost）
-        ghost:
-          "text-gray-500 hover:text-gray-900 hover:bg-gray-100 dark:text-gray-400 dark:hover:text-gray-100 dark:hover:bg-gray-800",
-        // MCP 专属按钮：祖母绿
-        mcp: "bg-emerald-500 text-white hover:bg-emerald-600 dark:bg-emerald-600 dark:hover:bg-emerald-700",
-        // 链接按钮
-        link: "text-blue-500 underline-offset-4 hover:underline dark:text-blue-400",
+        primary,
+        secondary,
+        ghost: "text-ink-ctl hover:bg-pill hover:text-ink",
+        danger,
+        dangerGhost: "text-ink-ctl hover:bg-danger-soft hover:text-danger",
+        pill: "bg-pill font-medium text-ink-2 hover:bg-pill-hover hover:text-ink",
+        icon: "text-ink-muted hover:bg-pill hover:text-ink",
+        copy: "text-ink-muted hover:bg-pill-hover hover:text-ink",
+        link: "text-brand-ink underline-offset-4 hover:underline",
+        // Older names, kept so existing screens compile while they are
+        // restyled one by one.
+        default: primary,
+        outline: secondary,
+        destructive: danger,
+        mcp: primary,
       },
       size: {
-        default: "h-9 px-4 py-2",
-        sm: "h-8 rounded-md px-3 text-xs",
-        lg: "h-10 rounded-md px-8",
-        icon: "h-9 w-9 p-1.5",
+        default: "h-[27px] px-2.5",
+        sm: "h-6 px-2",
+        lg: "h-8 px-3.5 text-ui",
+        icon: "h-[26px] w-[26px] p-0",
       },
     },
+    // These shapes are part of the variant: they win over any size.
+    compoundVariants: [
+      { variant: "pill", class: "h-6 rounded-full px-2.5 text-sub" },
+      { variant: "icon", class: "h-[26px] w-[26px] rounded-ctl p-0" },
+      { variant: "copy", class: "h-[22px] w-[22px] rounded-[5px] p-0" },
+    ],
     defaultVariants: {
-      variant: "default",
+      variant: "primary",
       size: "default",
     },
   },

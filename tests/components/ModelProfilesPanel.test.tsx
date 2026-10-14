@@ -324,6 +324,19 @@ describe("ModelProfilesPanel", () => {
     ).toHaveLength(0);
   });
 
+  it("lists each profile as its own card, with 新建方案 as the one primary action", async () => {
+    render(<ModelProfilesPanel boundTools={["codex"]} />);
+    const card = await screen.findByRole("group", { name: "Daily" });
+    expect(within(card).getByText("未使用")).toBeVisible();
+    expect(within(card).getByText("Codex / ChatGPT")).toBeVisible();
+    expect(
+      screen
+        .getAllByRole("button")
+        .filter((button) => button.className.includes("bg-brand"))
+        .map((button) => button.textContent),
+    ).toEqual(["新建方案"]);
+  });
+
   it("deletes only the saved recipe with its revision", async () => {
     render(<ModelProfilesPanel boundTools={["codex"]} />);
     fireEvent.click(await screen.findByRole("button", { name: "删除 Daily" }));

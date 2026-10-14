@@ -11,18 +11,22 @@ import { ofoxLogout } from "@/lib/api/ofoxAuth";
 import { announceLogout } from "@/lib/accountKeys";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
 import { UserAvatar } from "@/components/UserAvatar";
-import { ofoxAvatarUrl } from "@/lib/ofoxUrls";
+import { ofoxAvatarUrl, ofoxMarketingUrl } from "@/lib/ofoxUrls";
+import { useOfoxApex } from "@/hooks/useOfoxApex";
+import { Button } from "@/components/ui/button";
 import { getCurrentVersion } from "@/lib/updater";
 import { OfoxApexSwitch } from "@/components/OfoxApexSwitch";
 import type { Settings } from "@/types";
 
 /**
- * OFox-flavored settings dialog launched from the bottom-left "设置" button on
- * `ConsolePage`.
+ * OFox-flavored settings dialog, opened by the settings icon in the console
+ * header (`AppHeader`) or by the tray popover's `ofox-open-settings` event.
  *
  *   · Account     — show identity, allow logout
+ *   · Region      — ofox.ai / ofox.io (`OfoxApexSwitch`)
  *   · Preferences — auto-launch, low-balance threshold
- *   · About       — app version + check-for-updates entry point
+ *   · About       — app version + check-for-updates entry point, and the
+ *                   link to the Ofox website (it left the console footer)
  *
  * The "检查更新" button calls the OFox-native self-hosted update check
  * (`check_for_updates` → desktop.ofox.ai/latest.json on Cloudflare R2), NOT
@@ -74,6 +78,7 @@ export default function OfoxSettingsDialog({
 }: OfoxSettingsDialogProps) {
   const { status, refetch } = useOfoxAuth();
   const user = status?.user ?? null;
+  const { apex } = useOfoxApex();
 
   // ── Auto-launch (sourced from backend so the toggle reflects reality even
   // if it was changed elsewhere — e.g. macOS System Settings). Reads on open;
@@ -316,6 +321,13 @@ export default function OfoxSettingsDialog({
     }
   }, [checkingUpdate, onOpenChange]);
 
+  const openWebsite = useCallback(() => {
+    settingsApi.openExternal(ofoxMarketingUrl(apex)).catch((e) => {
+      console.error("[OfoxSettingsDialog] open website failed", e);
+      toast.error(t("shell.openFailed"));
+    });
+  }, [apex, t]);
+
   // ── Render ─────────────────────────────────────────────────────────────
 
   return (
@@ -384,9 +396,7 @@ export default function OfoxSettingsDialog({
             <Row
               label="OFox apex"
               hint="切换 ofox.ai / ofox.io；已登录态切换会触发重新登录"
-              control={
-                <OfoxApexSwitch triggerClassName="h-8 w-[140px] text-[13px]" />
-              }
+              control={<OfoxApexSwitch />}
               isLast
             />
           </SectionCard>
@@ -397,7 +407,7 @@ export default function OfoxSettingsDialog({
             <Row
               label="开机自动启动"
               control={
-                <OrangeSwitch
+                <Switch
                   checked={autoLaunch === true}
                   // While the initial fetch is in-flight we still show the
                   // switch (defaulted off) but disable it — flipping it now
@@ -430,7 +440,7 @@ export default function OfoxSettingsDialog({
                       className="h-7 w-[72px] rounded-md border border-border bg-background pl-5 pr-2 text-right text-[13px] font-medium text-foreground outline-none transition-colors focus:border-orange-400 disabled:cursor-not-allowed disabled:opacity-50"
                     />
                   </div>
-                  <OrangeSwitch
+                  <Switch
                     checked={lowBalEnabled}
                     onCheckedChange={handleLowBalToggle}
                   />
@@ -460,6 +470,15 @@ export default function OfoxSettingsDialog({
                 {checkingUpdate && <Loader2 className="h-3 w-3 animate-spin" />}
                 检查更新
               </button>
+            </div>
+            <div className="px-4 py-2">
+              <Button
+                variant="link"
+                className="h-auto px-0 text-ctl"
+                onClick={openWebsite}
+              >
+                {t("shell.website")}
+              </Button>
             </div>
           </SectionCard>
         </div>
@@ -534,19 +553,5 @@ function Row({ label, hint, control, isLast }: RowProps) {
       </div>
       <div className="flex shrink-0 items-center">{control}</div>
     </div>
-  );
-}
-
-/** Switch with the spec's orange "on" tint. The shared `<Switch>` defaults to
- *  emerald — overriding via className keeps the rest of the codebase's
- *  emerald switches intact. */
-function OrangeSwitch(props: React.ComponentProps<typeof Switch>) {
-  return (
-    <Switch
-      {...props}
-      className={`data-[state=checked]:bg-orange-500 dark:data-[state=checked]:bg-orange-500 ${
-        props.className ?? ""
-      }`}
-    />
   );
 }

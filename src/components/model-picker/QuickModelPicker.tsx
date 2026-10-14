@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { Loader2, Layers } from "lucide-react";
 import { ModelPicker, MultiModelPicker } from "./ModelPicker";
 import { Button } from "@/components/ui/button";
+import { menuTriggerClassName } from "@/components/ui/menu-select";
 import {
   Dialog,
   DialogContent,
@@ -18,6 +19,7 @@ import {
 } from "@/hooks/useModelSelection";
 import type { ToolModelSnapshot } from "@/lib/api/modelSelection";
 import { TOOL_META } from "@/config/toolMeta";
+import { cn } from "@/lib/utils";
 
 interface QuickModelPickerProps {
   snapshot?: ToolModelSnapshot;
@@ -27,7 +29,13 @@ interface QuickModelPickerProps {
   error?: boolean;
   onRetry: () => void;
   compact?: boolean;
+  /** "pill": a tool row's filled chip, its notes below it. */
+  variant?: "menu" | "pill";
 }
+
+/** magpie's `.field`: a filled 25px chip, ringed in brand while open. */
+const pillTriggerClassName =
+  "h-[25px] max-w-[260px] flex-none gap-[5px] rounded-[6px] border-0 bg-pill pl-2 pr-[5px] text-nav font-medium hover:bg-pill-hover data-[state=open]:bg-pill-hover data-[state=open]:shadow-[inset_0_0_0_1px_rgb(var(--brand))]";
 
 /** A model change writes only the selected tool, guarded by its snapshot revision. */
 export function QuickModelPicker({
@@ -38,7 +46,9 @@ export function QuickModelPicker({
   error = false,
   onRetry,
   compact = false,
+  variant = "menu",
 }: QuickModelPickerProps) {
+  const pill = variant === "pill";
   const { t } = useTranslation();
   const catalog = useModelCatalog(
     toolId,
@@ -124,64 +134,97 @@ export function QuickModelPicker({
       </div>
     );
 
-  return (
-    <div
-      className={compact ? "mt-1 text-[11px]" : "mt-1.5 max-w-sm text-[11px]"}
-    >
+  // Above the picker in a list of its own; below it as a row's pill.
+  const noteGap = pill ? "mt-1" : "mb-1";
+  const chatgptObserved = toolId === "chatgpt" && (
+    <div className={cn("truncate text-muted-foreground", noteGap)}>
+      {t("modelExperience.observed", {
+        model: observed || t("modelExperience.unknown"),
+      })}
+    </div>
+  );
+  const singleNotes = (
+    <>
       {toolId === "chatgpt" && (
-        <div className="mb-1 truncate text-muted-foreground">
-          {t("modelExperience.observed", {
-            model: observed || t("modelExperience.unknown"),
-          })}
+        <div className={cn("text-muted-foreground", noteGap)}>
+          {t("modelExperience.writableDefault")}
         </div>
       )}
-      {multi ? (
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={!writable || save.isPending}
-          onClick={() => {
-            setEditing(snapshot);
-            setDraft([...selectedModels]);
-            setSaveError(null);
-          }}
-          className="h-7 max-w-full gap-1.5 text-[11px] font-normal"
-        >
-          <Layers className="h-3 w-3" />
-          {t("modelExperience.modelCount", { count: selectedModels.length })}
-        </Button>
-      ) : (
-        <div className="[&_button[role=combobox]]:h-7 [&_button[role=combobox]]:text-[11px]">
-          {toolId === "chatgpt" && (
-            <div className="mb-1 text-muted-foreground">
-              {t("modelExperience.writableDefault")}
-            </div>
-          )}
-          {mixed && (
-            <div className="mb-1 text-muted-foreground">
-              {t("modelExperience.mixedScopes")}
-            </div>
-          )}
-          <ModelPicker
-            id={`quick-model-${toolId}`}
-            value={mixed ? t("modelExperience.mixedSelection") : selectedModel}
-            onChange={(model) => {
-              if (model !== selectedModel || mixed)
-                void persist(snapshot, { kind: "single", model });
-            }}
-            models={catalog.models}
-            loading={catalog.loading}
-            onFetch={catalog.fetch}
-            allowDefault={snapshot.supportsDefault}
-            emptyLabel={
-              !snapshot.supportsDefault
-                ? t("modelExperience.chooseModel")
-                : undefined
-            }
-            disabled={!writable || save.isPending}
-          />
+      {mixed && (
+        <div className={cn("text-muted-foreground", noteGap)}>
+          {t("modelExperience.mixedScopes")}
         </div>
+      )}
+    </>
+  );
+  const picker = multi ? (
+    <button
+      type="button"
+      disabled={!writable || save.isPending}
+      onClick={() => {
+        setEditing(snapshot);
+        setDraft([...selectedModels]);
+        setSaveError(null);
+      }}
+      className={cn(
+        menuTriggerClassName,
+        "max-w-full text-ink",
+        pill && pillTriggerClassName,
+      )}
+    >
+      <Layers aria-hidden className="h-[13px] w-[13px] flex-none" />
+      <span className="min-w-0 truncate">
+        {t("modelExperience.modelCount", { count: selectedModels.length })}
+      </span>
+    </button>
+  ) : (
+    <ModelPicker
+      id={`quick-model-${toolId}`}
+      value={mixed ? t("modelExperience.mixedSelection") : selectedModel}
+      onChange={(model) => {
+        if (model !== selectedModel || mixed)
+          void persist(snapshot, { kind: "single", model });
+      }}
+      models={catalog.models}
+      loading={catalog.loading}
+      onFetch={catalog.fetch}
+      allowDefault={snapshot.supportsDefault}
+      emptyLabel={
+        !snapshot.supportsDefault ? t("modelExperience.chooseModel") : undefined
+      }
+      disabled={!writable || save.isPending}
+      triggerClassName={pill ? pillTriggerClassName : undefined}
+    />
+  );
+
+  return (
+    <div
+      className={
+        pill
+          ? "flex min-w-0 flex-col items-start text-[11px]"
+          : compact
+            ? "mt-1 text-[11px]"
+            : "mt-1.5 max-w-sm text-[11px]"
+      }
+    >
+      {pill ? (
+        <>
+          {picker}
+          {chatgptObserved}
+          {!multi && singleNotes}
+        </>
+      ) : (
+        <>
+          {chatgptObserved}
+          {multi ? (
+            picker
+          ) : (
+            <div>
+              {singleNotes}
+              {picker}
+            </div>
+          )}
+        </>
       )}
       {snapshot.canWrite === false && (
         <p className="mt-1 text-muted-foreground">

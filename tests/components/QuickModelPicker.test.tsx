@@ -240,6 +240,63 @@ describe("QuickModelPicker", () => {
     expect(screen.queryByText("OfoxAI 默认路由")).toBeNull();
   });
 
+  it("draws the single-model trigger as the app's 26px picker, in ink once a model is set", () => {
+    render(
+      <QuickModelPicker
+        toolId="codex"
+        snapshot={snapshot()}
+        onRetry={vi.fn()}
+      />,
+    );
+    const trigger = screen.getByRole("combobox");
+    expect(trigger).toHaveAttribute("aria-haspopup", "listbox");
+    expect(trigger).toHaveClass(
+      "h-[26px]",
+      "rounded-ctl",
+      "border-line",
+      "bg-card",
+      "text-ctl",
+      "text-ink",
+    );
+    expect(trigger.querySelector("svg.lucide-chevron-down")).toHaveClass(
+      "group-data-[state=open]:rotate-180",
+    );
+  });
+
+  it("shows the default route in the control colour while no model is set", () => {
+    render(
+      <QuickModelPicker
+        toolId="codex"
+        snapshot={snapshot("codex", { kind: "single", model: "" })}
+        onRetry={vi.fn()}
+      />,
+    );
+    const trigger = screen.getByRole("combobox");
+    expect(trigger).toHaveTextContent("OfoxAI 默认路由");
+    expect(trigger).toHaveClass("text-ink-ctl");
+    expect(trigger).not.toHaveClass("text-ink");
+  });
+
+  it("draws the model-set button in the same 26px picker look", () => {
+    render(
+      <QuickModelPicker
+        toolId="opencode"
+        snapshot={snapshot("opencode", {
+          kind: "models",
+          models: ["openai/new", "openai/old"],
+        })}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "2 个模型" })).toHaveClass(
+      "h-[26px]",
+      "rounded-ctl",
+      "border-line",
+      "bg-card",
+      "text-ctl",
+    );
+  });
+
   it("requires a readable state and a writable binding before opening a picker", () => {
     const state = snapshot();
     state.binding.status = "modified";

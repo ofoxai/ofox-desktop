@@ -72,6 +72,7 @@
   "apexSwitch": {
     "auto": "Auto-detect",
     "autoLabel": "Auto · {{apex}}",
+    "label": "Region",
     "pinned": "Pinned to {{apex}}; the region no longer follows your network at launch",
     "switched": "Switched to {{apex}}",
     "switchFailed": "Could not switch region, please try again later",
@@ -232,11 +233,14 @@
     "unknown": "Unknown",
     "enterValidValue": "Please enter a valid value",
     "clear": "Clear",
+    "clearSearch": "Clear search",
     "toggleTheme": "Toggle theme",
     "format": "Format",
     "formatSuccess": "Formatted successfully",
     "formatError": "Format failed: {{error}}",
     "copy": "Copy",
+    "copied": "Copied",
+    "copyFailed": "Could not copy; please copy it by hand",
     "view": "View",
     "back": "Back",
     "refresh": "Refresh",
@@ -249,7 +253,8 @@
     "deleting": "Deleting...",
     "auto": "Auto",
     "enabled": "Enabled",
-    "notSet": "Not Set"
+    "notSet": "Not Set",
+    "noMatches": "No matches"
   },
   "update": {
     "promptTitle": "Update available",
@@ -258,6 +263,26 @@
     "skipThisVersion": "Skip this version",
     "bannerTitle": "Update available",
     "bannerHint": "Visit the download page for the latest version"
+  },
+  "shell": {
+    "nav": "Pages",
+    "tabs": {
+      "tools": "Tools",
+      "sessions": "Sessions",
+      "usage": "Usage"
+    },
+    "refresh": "Refresh",
+    "settings": "Settings",
+    "update": {
+      "pill": "New v{{version}}",
+      "now": "Update now",
+      "openFailed": "Couldn't open the download page"
+    },
+    "openFailed": "Couldn't open the link",
+    "usage": {
+      "webDetails": "View detailed usage on the web ↗"
+    },
+    "website": "Ofox website ↗"
   },
   "firstRunNotice": {
     "title": "Welcome to Ofox Desktop",
@@ -983,7 +1008,36 @@
     "repairDownloadHint": "Open the download page for {{tool}}",
     "repairUnavailable": "This tool has to be installed manually",
     "repairFailed": "Repairing {{tool}} failed: {{message}}",
-    "repairDismiss": "Dismiss"
+    "repairDismiss": "Dismiss",
+    "balanceUpdated": "Balance updated: {{amount}}",
+    "balanceNoData": "Balance refreshed, but no figure is available yet",
+    "balanceRefreshFailed": "Couldn't refresh the balance. Try again later",
+    "listRefreshed": "Refreshed",
+    "listRefreshFailed": "Refresh failed: {{error}}",
+    "profiles": {
+      "menu": "Profiles",
+      "loading": "Loading profiles…",
+      "empty": "No profiles yet",
+      "toolCount": "{{count}} tools",
+      "capture": "Save current combination…",
+      "manage": "Manage profiles…"
+    },
+    "balance": {
+      "label": "OFOX balance",
+      "topUp": "Top up",
+      "userFallback": "User",
+      "loadingName": "Loading…",
+      "loadingUser": "Loading your account…",
+      "loadingUserAttempt": "Loading your account ({{attempt}}/3)",
+      "loadFailed": "Couldn't load your account. Click to retry"
+    },
+    "tools": {
+      "title": "Bound tools",
+      "add": "Add",
+      "loading": "Loading…",
+      "empty": "No tools bound yet",
+      "refreshing": "Refreshing…"
+    }
   },
   "providerForm": {
     "supplierName": "Provider Name",
@@ -1078,9 +1132,6 @@
     "anthropicDefaultHaikuModel": "Default Haiku Model",
     "anthropicDefaultSonnetModel": "Default Sonnet Model",
     "anthropicDefaultOpusModel": "Default Opus Model",
-    "modelPlaceholder": "",
-    "smallModelPlaceholder": "",
-    "haikuModelPlaceholder": "",
     "modelHelper": "Optional: Specify default Claude model to use, leave blank to use system default.",
     "modelMappingLabel": "Model Mapping",
     "modelMappingHint": "Usually not needed if the provider natively serves Claude models. Only configure when you need to map requests to different model names.",
@@ -2816,16 +2867,20 @@
       "unknown": "Binding configuration could not be read. You can still unbind or retry later."
     },
     "versionUnknown": "Installed · Version unknown",
-    "noInstallationDetected": "No installation detected"
+    "noInstallationDetected": "No installation detected",
+    "more": "More actions",
+    "installedVia": "Installed with {{method}}",
+    "installMethod": {
+      "homebrew": "Homebrew",
+      "npm": "npm",
+      "pnpm": "pnpm",
+      "native": "the official installer",
+      "sparkle": "the download from its website",
+      "msstore": "the Microsoft Store"
+    }
   },
   "modelExperience": {
     "multiDescription": "Save a model set in selection order. Switch among these models inside the tool.",
-    "navigation": "Tools and sessions",
-    "nav": {
-      "tools": "Tools",
-      "profiles": "Model profiles",
-      "sessions": "Sessions"
-    },
     "loading": "Loading model state…",
     "stateFailed": "Unable to read model state",
     "retry": "Retry",

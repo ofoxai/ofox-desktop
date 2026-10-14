@@ -9,12 +9,7 @@ import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 
 import { ConfirmDialog } from "@/components/ConfirmDialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-} from "@/components/ui/select";
+import { MenuSelect, type MenuSelectOption } from "@/components/ui/menu-select";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
 import { ofoxSetApex, ofoxSetApexAuto } from "@/lib/api/ofoxApex";
@@ -23,25 +18,13 @@ import type { OfoxApex } from "@/lib/ofoxUrls";
 type LucideIcon = ComponentType<SVGProps<SVGSVGElement>>;
 
 interface OfoxApexSwitchProps {
-  /**
-   * Tailwind size token for the select trigger. Default `"h-8 w-[140px]"`,
-   * 适合设置弹窗里的 Row 控件；登录页头部用 `"h-7 w-[120px]"` 更紧凑。
-   */
+  /** 额外的 trigger class（宽度等）；默认是 MenuSelect 的 26px 外观。 */
   triggerClassName?: string;
 }
 
 /** 下拉里的「自动检测」项：不锁定，每次启动按网络重新探测。 */
 export const AUTO_SELECTION = "auto";
 export type ApexSelection = typeof AUTO_SELECTION | OfoxApex;
-
-const APEX_OPTIONS: ReadonlyArray<{
-  value: OfoxApex;
-  label: string;
-  icon: LucideIcon;
-}> = [
-  { value: "ofox.ai", label: "ofox.ai", icon: Globe2 },
-  { value: "ofox.io", label: "ofox.io", icon: Flag },
-];
 
 const APEX_LABEL: Record<OfoxApex, string> = {
   "ofox.ai": "ofox.ai",
@@ -93,9 +76,7 @@ function isSelection(value: string): value is ApexSelection {
  *
  * 失败处理：toast 报错，UI state 不动（pending 选项不会被锁定为已选）。
  */
-export function OfoxApexSwitch({
-  triggerClassName = "h-8 w-[140px] text-[13px]",
-}: OfoxApexSwitchProps) {
+export function OfoxApexSwitch({ triggerClassName }: OfoxApexSwitchProps) {
   const { t } = useTranslation();
   const { apex, pinned, refetch } = useOfoxApex();
   const { isActive } = useOfoxAuth();
@@ -166,9 +147,20 @@ export function OfoxApexSwitch({
     setPendingPlan(null);
   }, []);
 
-  const TriggerIcon = pinned ? APEX_ICON[apex] : Compass;
+  const options: MenuSelectOption<ApexSelection>[] = [
+    {
+      value: AUTO_SELECTION,
+      label: t("apexSwitch.auto"),
+      icon: <Compass />,
+    },
+    ...(["ofox.ai", "ofox.io"] as const).map((value) => {
+      const Icon = APEX_ICON[value];
+      return { value, label: APEX_LABEL[value], icon: <Icon /> };
+    }),
+  ];
+  // 自动模式下 trigger 显示「自动 · 当前探测到的区域」，菜单里仍是「自动检测」。
   const triggerLabel = pinned
-    ? APEX_LABEL[apex]
+    ? undefined
     : t("apexSwitch.autoLabel", { apex: APEX_LABEL[apex] });
   const confirmMessage =
     pendingPlan?.kind === "switch"
@@ -179,43 +171,17 @@ export function OfoxApexSwitch({
 
   return (
     <>
-      <Select
+      <MenuSelect<ApexSelection>
+        aria-label={t("apexSwitch.label")}
         value={pinned ? apex : AUTO_SELECTION}
-        onValueChange={handleSelectChange}
+        onChange={handleSelectChange}
+        options={options}
+        valueLabel={triggerLabel}
         disabled={submitting}
-      >
-        <SelectTrigger className={triggerClassName}>
-          {/* 显式渲染 trigger：图标 + 纯 label。不能用 `<SelectValue />`——它会
-              回显选中 SelectItem 的全部 children，包含我们 absolute 放进 pl-7
-              槽里的图标，导致 trigger 和 item 叠出两个图标。SelectTrigger 自身
-              已暴露 role=combobox + value，读屏不受影响。 */}
-          <span className="flex items-center gap-1.5 truncate">
-            <TriggerIcon className="h-3.5 w-3.5 shrink-0 opacity-70" />
-            <span className="truncate">{triggerLabel}</span>
-          </span>
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value={AUTO_SELECTION}>
-            <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2">
-              <Compass className="h-3.5 w-3.5 opacity-70" />
-            </span>
-            {t("apexSwitch.auto")}
-          </SelectItem>
-          {APEX_OPTIONS.map((opt) => {
-            const Icon = opt.icon;
-            return (
-              <SelectItem key={opt.value} value={opt.value}>
-                {/* 绝对定位到 SelectItem 自带的 pl-7 空白槽里，和原本预留给
-                    勾选标记的位置对齐；文字保持基线不动。 */}
-                <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2">
-                  <Icon className="h-3.5 w-3.5 opacity-70" />
-                </span>
-                {opt.label}
-              </SelectItem>
-            );
-          })}
-        </SelectContent>
-      </Select>
+        width={200}
+        align="end"
+        triggerClassName={triggerClassName}
+      />
 
       <ConfirmDialog
         isOpen={pendingPlan !== null}
