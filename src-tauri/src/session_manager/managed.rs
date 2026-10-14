@@ -5,6 +5,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +19,28 @@ pub struct Capabilities {
     pub read_only_reason: Option<String>,
 }
 
+/// What a file of a session holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileKind {
+    /// The session's own file.
+    Main,
+    /// A subagent's transcript.
+    Subagent,
+    /// Another file of the same session (a continued rollout, a compressed twin).
+    Segment,
+    /// A database the session shares with others.
+    Database,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFile {
+    pub path: String,
+    pub size_bytes: u64,
+    pub kind: FileKind,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagedSession {
@@ -27,6 +51,10 @@ pub struct ManagedSession {
     pub capabilities: Capabilities,
     pub models: Vec<String>,
     pub subagent_count: usize,
+    /// Bytes of every file of the session (0 for one kept in a shared database).
+    pub size_bytes: u64,
+    /// Its conversation files.
+    pub files: Vec<SessionFile>,
 }
 
 pub fn roots(provider: &str) -> Result<Vec<PathBuf>, String> {
@@ -95,74 +123,213 @@ pub(crate) fn key(meta: &SessionMeta) -> String {
     format!("{:x}", hash.finalize())
 }
 
-pub fn list() -> Vec<ManagedSession> {
-    let mut seen = HashSet::new();
-    let listing = super::scan_sessions();
+/// How long `resolve` reuses the last listing; the matched record is still
+/// planned and fingerprinted afresh.
+const LISTING_TTL: Duration = Duration::from_secs(5);
+
+static LISTING: Mutex<Option<(Instant, Arc<Vec<SessionMeta>>)>> = Mutex::new(None);
+
+fn remember(listing: Vec<SessionMeta>) -> Arc<Vec<SessionMeta>> {
+    let listing = Arc::new(listing);
+    *LISTING.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((Instant::now(), Arc::clone(&listing)));
     listing
+}
+
+/// The last listing when it is less than 5 s old, else a new scan.
+fn recent_listing() -> Arc<Vec<SessionMeta>> {
+    if let Some((at, listing)) = LISTING.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if at.elapsed() < LISTING_TTL {
+            return Arc::clone(listing);
+        }
+    }
+    remember(super::scan_sessions())
+}
+
+/// Drop the cached listing (after sessions were moved to or from the trash).
+pub(crate) fn forget_listing() {
+    *LISTING.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// The listing's sessions that are shown: inside their provider's roots, and
+/// one per (provider, session id).
+fn shown(listing: &[SessionMeta]) -> impl Iterator<Item = &SessionMeta> {
+    let mut seen = HashSet::new();
+    listing.iter().filter(move |meta| {
+        let Ok(roots) = roots(&meta.provider_id) else {
+            return false;
+        };
+        if source_file(meta)
+            .and_then(|source| validate_path(&source, &roots))
+            .is_err()
+        {
+            return false;
+        }
+        // Codex may have several rollout segments for the same session. One UI row,
+        // and a bundle planner that retains every segment, including compressed twins.
+        seen.insert((meta.provider_id.clone(), meta.session_id.clone()))
+    })
+}
+
+pub fn list() -> Vec<ManagedSession> {
+    let listing = remember(super::scan_sessions());
+    shown(&listing)
+        .map(|meta| record(meta.clone(), &listing))
+        .collect()
+}
+
+fn record(meta: SessionMeta, listing: &[SessionMeta]) -> ManagedSession {
+    let readable = meta.provider_id != "dsh";
+    let resume = can_resume(&meta);
+    let plan = super::trash::plan_from_listing(&meta, listing);
+    let walked = plan
+        .as_ref()
+        .ok()
+        .and_then(|p| super::trash::fingerprint(&p.paths).ok());
+    let revision = walked.as_ref().map(|w| w.hash.clone());
+    let (size_bytes, files) = match &walked {
+        Some(walked) => (walked.size, session_files(&meta, &walked.files)),
+        None => loose_files(&meta),
+    };
+    let subagent_count = if matches!(meta.provider_id.as_str(), "dsh" | "gemini") {
+        plan.as_ref()
+            .map(|p| p.member_ids.len().saturating_sub(1))
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    ManagedSession {
+        session_key: key(&meta),
+        revision: revision.clone(),
+        capabilities: Capabilities {
+            can_read_messages: readable,
+            can_export: readable,
+            can_resume: resume,
+            can_trash: plan.is_ok() && revision.is_some(),
+            resume_uses_session_model: meta.provider_id == "pi",
+            read_only_reason: plan.err().or_else(|| {
+                revision
+                    .is_none()
+                    .then(|| "Session bundle cannot be safely fingerprinted".into())
+            }),
+        },
+        models: meta
+            .source_path
+            .as_deref()
+            .map(Path::new)
+            .map(|path| match meta.provider_id.as_str() {
+                "pi" => providers::pi::models(path),
+                "dsh" => providers::dsh::models(path),
+                _ => Vec::new(),
+            })
+            .unwrap_or_default(),
+        subagent_count,
+        size_bytes,
+        files,
+        meta,
+    }
+}
+
+/// What a file of a session's bundle is, when it holds conversation: the
+/// session's own file, a subagent's, or another segment of the session.
+fn file_kind(meta: &SessionMeta, path: &Path) -> Option<FileKind> {
+    let source = Path::new(meta.source_path.as_deref()?);
+    if path == source {
+        return Some(FileKind::Main);
+    }
+    let name = path.file_name()?.to_str()?;
+    let transcript = [".jsonl", ".json", ".jsonl.zst", ".jsonl.zstd"]
         .iter()
-        .cloned()
-        .filter_map(|meta| {
-            let roots = roots(&meta.provider_id).ok()?;
-            validate_path(&source_file(&meta).ok()?, &roots).ok()?;
-            // Codex may have several rollout segments for the same session. One UI row,
-            // and a bundle planner that retains every segment, including compressed twins.
-            if !seen.insert((meta.provider_id.clone(), meta.session_id.clone())) {
-                return None;
-            }
-            let readable = meta.provider_id != "dsh";
-            let resume = can_resume(&meta);
-            let plan = super::trash::plan_from_listing(&meta, &listing);
-            let revision = plan
-                .as_ref()
-                .ok()
-                .and_then(|p| super::trash::fingerprint(&p.paths).ok());
-            let subagent_count = if matches!(meta.provider_id.as_str(), "dsh" | "gemini") {
-                plan.as_ref()
-                    .map(|p| p.member_ids.len().saturating_sub(1))
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-            Some(ManagedSession {
-                session_key: key(&meta),
-                revision: revision.clone(),
-                capabilities: Capabilities {
-                    can_read_messages: readable,
-                    can_export: readable,
-                    can_resume: resume,
-                    can_trash: plan.is_ok() && revision.is_some(),
-                    resume_uses_session_model: meta.provider_id == "pi",
-                    read_only_reason: plan.err().or_else(|| {
-                        revision
-                            .is_none()
-                            .then(|| "Session bundle cannot be safely fingerprinted".into())
-                    }),
-                },
-                models: meta
-                    .source_path
-                    .as_deref()
-                    .map(Path::new)
-                    .map(|path| match meta.provider_id.as_str() {
-                        "pi" => providers::pi::models(path),
-                        "dsh" => providers::dsh::models(path),
-                        _ => Vec::new(),
-                    })
-                    .unwrap_or_default(),
-                subagent_count,
-                meta,
+        .any(|ext| name.ends_with(ext));
+    if !transcript {
+        return None;
+    }
+    let beside_source = path.parent() == source.parent();
+    match meta.provider_id.as_str() {
+        // a Codex bundle holds only the thread's rollouts
+        "codex" => Some(FileKind::Segment),
+        "claude" => path
+            .components()
+            .any(|c| c.as_os_str() == "subagents")
+            .then_some(FileKind::Subagent),
+        // chats/<id>.json(l) beside it, chats/<id>/<child>.json(l) below it
+        "gemini" if beside_source => Some(FileKind::Segment),
+        "gemini" => {
+            (path.parent().and_then(Path::parent) == source.parent()).then_some(FileKind::Subagent)
+        }
+        "dsh" if !name.starts_with("session") => None,
+        "dsh" if beside_source => Some(FileKind::Segment),
+        "dsh" => Some(FileKind::Subagent),
+        _ => None,
+    }
+}
+
+fn session_files(meta: &SessionMeta, walked: &[(PathBuf, u64)]) -> Vec<SessionFile> {
+    let mut files = walked
+        .iter()
+        .filter_map(|(path, size)| {
+            Some(SessionFile {
+                kind: file_kind(meta, path)?,
+                path: path.to_string_lossy().into_owned(),
+                size_bytes: *size,
             })
         })
-        .collect()
+        .collect::<Vec<_>>();
+    files.sort_by_key(|f| f.kind);
+    files
+}
+
+/// A session that is not a movable bundle: its own file (or folder), or the
+/// database it shares with others, which is not its size.
+fn loose_files(meta: &SessionMeta) -> (u64, Vec<SessionFile>) {
+    let Ok(path) = source_file(meta) else {
+        return (0, Vec::new());
+    };
+    let size = tree_size(&path);
+    let shared = meta
+        .source_path
+        .as_deref()
+        .is_some_and(|s| s.starts_with("sqlite:"));
+    let file = SessionFile {
+        path: path.to_string_lossy().into_owned(),
+        size_bytes: size,
+        kind: if shared {
+            FileKind::Database
+        } else {
+            FileKind::Main
+        },
+    };
+    (if shared { 0 } else { size }, vec![file])
+}
+
+/// The bytes of a file, or of the files below a folder (links not followed).
+fn tree_size(path: &Path) -> u64 {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if !meta.is_dir() {
+        return if meta.is_file() { meta.len() } else { 0 };
+    }
+    std::fs::read_dir(path)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| tree_size(&entry.path()))
+                .sum()
+        })
+        .unwrap_or(0)
 }
 
 pub(crate) fn resolve(session_key: &str) -> Result<ManagedSession, String> {
     if session_key.len() != 64 || !session_key.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("Invalid session reference".into());
     }
-    list()
-        .into_iter()
-        .find(|record| record.session_key == session_key)
-        .ok_or("Session is no longer available; refresh the listing".into())
+    let listing = recent_listing();
+    let meta = shown(&listing)
+        .find(|meta| key(meta) == session_key)
+        .cloned()
+        .ok_or("Session is no longer available; refresh the listing")?;
+    Ok(record(meta, &listing))
 }
 
 pub fn messages(session_key: &str) -> Result<Vec<SessionMessage>, String> {
@@ -393,6 +560,155 @@ pub fn export_markdown(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_sandbox::sandbox;
+
+    const CLAUDE_ID: &str = "11111111-2222-3333-4444-555555555555";
+
+    /// A Claude Code session in the sandbox home: its file, a subagent's
+    /// transcript and a tool result kept beside it.
+    fn claude_session(home: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let project = home.join(".claude/projects/-work-app");
+        let subagents = project.join(CLAUDE_ID).join("subagents");
+        let results = project.join(CLAUDE_ID).join("tool-results");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::create_dir_all(&results).unwrap();
+        let main = project.join(format!("{CLAUDE_ID}.jsonl"));
+        std::fs::write(
+            &main,
+            format!(
+                "{}\n",
+                serde_json::json!({"type": "user", "sessionId": CLAUDE_ID, "cwd": "/work/app",
+                    "timestamp": "2026-10-14T10:00:00Z",
+                    "message": {"role": "user", "content": "fix the login"}})
+            ),
+        )
+        .unwrap();
+        let subagent = subagents.join("agent-a1.jsonl");
+        std::fs::write(&subagent, "{\"sessionId\":\"x\"}\n").unwrap();
+        let result = results.join("toolu_1.txt");
+        std::fs::write(&result, "a tool result").unwrap();
+        (main, subagent, result)
+    }
+
+    fn size(path: &Path) -> u64 {
+        std::fs::metadata(path).unwrap().len()
+    }
+
+    #[test]
+    fn a_listed_session_reports_its_size_and_its_transcript_files() {
+        let sandbox = sandbox();
+        let (main, subagent, result) = claude_session(sandbox.home());
+
+        let listed = list();
+        let record = listed
+            .iter()
+            .find(|r| r.meta.session_id == CLAUDE_ID)
+            .expect("listed");
+        let json = serde_json::to_value(record).unwrap();
+
+        assert_eq!(
+            json["sizeBytes"],
+            serde_json::json!(size(&main) + size(&subagent) + size(&result))
+        );
+        assert_eq!(
+            json["files"],
+            serde_json::json!([
+                {"path": main.to_string_lossy(), "sizeBytes": size(&main), "kind": "main"},
+                {"path": subagent.to_string_lossy(), "sizeBytes": size(&subagent), "kind": "subagent"},
+            ])
+        );
+    }
+
+    #[test]
+    fn bundle_files_are_told_apart_by_what_they_hold() {
+        let meta = |provider: &str, source: &str| SessionMeta {
+            provider_id: provider.into(),
+            source_path: Some(source.into()),
+            ..Default::default()
+        };
+        let cases = [
+            (
+                "claude",
+                "/c/p/s.jsonl",
+                "/c/p/s.jsonl",
+                Some(FileKind::Main),
+            ),
+            (
+                "claude",
+                "/c/p/s.jsonl",
+                "/c/p/s/subagents/agent-1.jsonl",
+                Some(FileKind::Subagent),
+            ),
+            ("claude", "/c/p/s.jsonl", "/c/p/s/tool-results/t.json", None),
+            ("claude", "/c/p/s.jsonl", "/c/todos/s-agent.json", None),
+            (
+                "codex",
+                "/x/rollout-b.jsonl",
+                "/x/rollout-a.jsonl.zst",
+                Some(FileKind::Segment),
+            ),
+            (
+                "gemini",
+                "/g/p/chats/s.jsonl",
+                "/g/p/chats/s.json",
+                Some(FileKind::Segment),
+            ),
+            (
+                "gemini",
+                "/g/p/chats/s.jsonl",
+                "/g/p/chats/s/child.json",
+                Some(FileKind::Subagent),
+            ),
+            (
+                "gemini",
+                "/g/p/chats/s.jsonl",
+                "/g/p/logs/session-s.jsonl",
+                None,
+            ),
+            (
+                "dsh",
+                "/d/a/session.v2.jsonl.zstd",
+                "/d/a/session.jsonl",
+                Some(FileKind::Segment),
+            ),
+            (
+                "dsh",
+                "/d/a/session.v2.jsonl.zstd",
+                "/d/b/session.jsonl",
+                Some(FileKind::Subagent),
+            ),
+            ("dsh", "/d/a/session.v2.jsonl.zstd", "/d/cache/a.json", None),
+        ];
+        for (provider, source, path, want) in cases {
+            assert_eq!(
+                file_kind(&meta(provider, source), Path::new(path)),
+                want,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_fingerprints_the_matched_session_again_from_the_cached_listing() {
+        let sandbox = sandbox();
+        let (main, _, _) = claude_session(sandbox.home());
+        let listed = list();
+        let record = listed
+            .iter()
+            .find(|r| r.meta.session_id == CLAUDE_ID)
+            .expect("listed");
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&main)
+            .unwrap();
+        std::io::Write::write_all(&mut file, b"{\"type\":\"summary\"}\n").unwrap();
+        let resolved = resolve(&record.session_key).expect("resolve");
+        assert_ne!(resolved.revision, record.revision);
+
+        std::fs::remove_file(&main).unwrap();
+        assert!(resolve(&record.session_key).is_err());
+    }
     #[test]
     fn fences_and_shell_literals_preserve_untrusted_text() {
         assert_eq!(fence("nested ```` code"), "`````");
