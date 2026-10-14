@@ -45,7 +45,7 @@ pub(crate) enum ManagedFile {
 
 impl ManagedFile {
     /// 在 [`BindEnvelope::written`] 里的名字（和序列化的名字相同）。
-    pub(crate) fn id(self) -> &'static str {
+    pub(crate) const fn id(self) -> &'static str {
         match self {
             Self::CodexConfig => "codexConfig",
             Self::ClaudeSettings => "claudeSettings",

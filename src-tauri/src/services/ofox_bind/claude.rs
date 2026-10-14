@@ -19,12 +19,16 @@ const AUTH_TOKEN: JsonPath = &["env", "ANTHROPIC_AUTH_TOKEN"];
 const MODEL: JsonPath = &["env", "ANTHROPIC_MODEL"];
 /// 中转站常用的 x-api-key。绑定期间拿掉，免得和 Ofox 的 key 一起发给 Ofox。
 const API_KEY: JsonPath = &["env", "ANTHROPIC_API_KEY"];
+/// 用户在 agent 里「记住」的模型（`/model`）。绑定、在应用里保存模型时，原来有就改成
+/// Ofox 的模型（见 [`write_bound`]）。
+const REMEMBERED_MODEL: JsonPath = &["model"];
 /// 解绑时还原成绑定前的值（原来没有就删掉）；用户之后改过的按规则留着。
 pub(crate) const LEAVES: &[Leaf] = &[
     Leaf::route(BASE_URL, ownership::ofox_url),
     Leaf::route(AUTH_TOKEN, ownership::ofox_key),
     Leaf::model(MODEL, BASE_URL),
     Leaf::route(API_KEY, ownership::ofox_key),
+    Leaf::model(REMEMBERED_MODEL, BASE_URL),
 ];
 const CONTAINERS: &[JsonPath] = &[&["env"]];
 
@@ -91,9 +95,9 @@ pub(crate) fn write_bound(
     let mut bound = bound_settings(current.as_deref(), template, api_key)?;
     if let (true, Some(model)) = (select_route, template_str(template, MODEL)) {
         let before = json_file::parse_object(Some(&bound), LABEL)?;
-        if before.get("model").is_some() {
+        if json_file::get(&before, REMEMBERED_MODEL).is_some() {
             let mut after = before.clone();
-            json_file::set(&mut after, &["model"], model.into());
+            json_file::set(&mut after, REMEMBERED_MODEL, model.into());
             bound = json_file::render_changed(&bound, KeyStyle::Json, &before, &after)?;
         }
     }

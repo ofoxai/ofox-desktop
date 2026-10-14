@@ -25,9 +25,18 @@ pub(crate) enum LeafPolicy {
     Route(fn(&Value) -> bool),
     /// 模型：还是 Ofox 写的样子，或者它所属的接入方式（`route`）要还原，就还原——
     /// Ofox 的模型名不能留在用户自己的服务商下面。
-    Model { route: &'static [&'static str] },
+    Model { route: RouteRef },
     /// 偏好（推理强度等）：只有还是 Ofox 写的样子才还原。
     Preference,
+}
+
+/// 模型所属的接入方式：同一个文件里的字段，或者（`file` 是另一个受管文件的
+/// [`super::record::ManagedFile::id`]）别的文件里的，比如 Gemini settings.json 里的模型
+/// 跟着 `.env` 里的地址走。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RouteRef {
+    pub file: Option<&'static str>,
+    pub path: &'static [&'static str],
 }
 
 /// 一个受管字段：从文件根出发的路径和它的还原规则。
@@ -51,7 +60,29 @@ impl Leaf {
     ) -> Self {
         Self {
             path,
-            policy: LeafPolicy::Model { route },
+            policy: LeafPolicy::Model {
+                route: RouteRef {
+                    file: None,
+                    path: route,
+                },
+            },
+        }
+    }
+
+    /// 模型的接入方式在另一个受管文件（`file`）里。
+    pub(crate) const fn model_in(
+        path: &'static [&'static str],
+        file: &'static str,
+        route: &'static [&'static str],
+    ) -> Self {
+        Self {
+            path,
+            policy: LeafPolicy::Model {
+                route: RouteRef {
+                    file: Some(file),
+                    path: route,
+                },
+            },
         }
     }
 
@@ -155,18 +186,43 @@ pub(crate) fn record_write(
     }
 }
 
-/// 解绑时留给用户、不还原的字段。`written` 里没记的字段、现在没有值的字段都还原。
-pub(crate) fn kept(leaves: &[Leaf], current: &Leaves, written: &Leaves) -> BTreeSet<String> {
-    leaves
+/// 解绑时一个受管文件的样子。
+pub(crate) struct FileState<'a> {
+    /// [`super::record::ManagedFile::id`]。
+    pub file: &'static str,
+    pub rules: &'static [Leaf],
+    pub current: Leaves,
+    /// 绑定前的值。
+    pub original: Leaves,
+    /// Ofox 最近写的；没有（旧记录）就全部还原。
+    pub written: Option<&'a Leaves>,
+}
+
+/// 解绑时每个文件里留给用户、不还原的字段（按文件 id）：用户改过、又和绑定前不一样
+/// 的。`written` 里没记的字段、现在没有值的字段都还原。模型跟着它的接入方式走，
+/// 接入方式可以在同一个工具的另一个文件里。
+pub(crate) fn kept(files: &[FileState]) -> BTreeMap<&'static str, BTreeSet<String>> {
+    files
         .iter()
-        .filter(|leaf| !restores(leaf, leaves, current, written))
-        .map(Leaf::id)
+        .map(|state| {
+            let kept = state
+                .rules
+                .iter()
+                .filter(|leaf| !restores(files, state, leaf))
+                .map(Leaf::id)
+                .filter(|id| state.current.get(id) != state.original.get(id))
+                .collect();
+            (state.file, kept)
+        })
         .collect()
 }
 
-fn restores(leaf: &Leaf, leaves: &[Leaf], current: &Leaves, written: &Leaves) -> bool {
+fn restores(files: &[FileState], state: &FileState, leaf: &Leaf) -> bool {
+    let Some(written) = state.written else {
+        return true;
+    };
     let id = leaf.id();
-    let now = current.get(&id).unwrap_or(&Value::Null);
+    let now = state.current.get(&id).unwrap_or(&Value::Null);
     let as_written = written
         .get(&id)
         .is_none_or(|was| recorded(&id, now) == *was);
@@ -175,12 +231,25 @@ fn restores(leaf: &Leaf, leaves: &[Leaf], current: &Leaves, written: &Leaves) ->
         || as_written
         || match leaf.policy {
             LeafPolicy::Route(ofox) => ofox(now),
-            LeafPolicy::Model { route } => leaves
-                .iter()
-                .find(|other| other.path == route)
-                .is_none_or(|route| restores(route, leaves, current, written)),
+            LeafPolicy::Model { route } => route_restored(files, state, route),
             LeafPolicy::Preference => false,
         }
+}
+
+/// 模型所属的接入方式要不要还原。那个文件已经不在了（解绑不会再建它），或者找不到
+/// 这个字段，都按还原算：Ofox 的模型不留给用户。
+fn route_restored(files: &[FileState], state: &FileState, route: RouteRef) -> bool {
+    let holder = match route.file {
+        None => Some(state),
+        Some(file) => files.iter().find(|other| other.file == file),
+    };
+    holder.is_none_or(|holder| {
+        holder
+            .rules
+            .iter()
+            .find(|leaf| leaf.path == route.path)
+            .is_none_or(|leaf| restores(files, holder, leaf))
+    })
 }
 
 #[cfg(test)]
@@ -201,6 +270,22 @@ mod tests {
         )
     }
 
+    /// 绑定前：用户自己的服务商、模型和推理强度。
+    fn original() -> Leaves {
+        leaves("mine", "my-model", "medium")
+    }
+
+    fn kept_in(current: Leaves, written: &Leaves) -> BTreeSet<String> {
+        let state = FileState {
+            file: "f",
+            rules: LEAVES,
+            current,
+            original: original(),
+            written: Some(written),
+        };
+        kept(&[state]).remove("f").unwrap()
+    }
+
     fn written() -> Leaves {
         let mut written = Leaves::new();
         record_write(
@@ -214,7 +299,7 @@ mod tests {
 
     #[test]
     fn only_values_the_user_changed_are_kept() {
-        let kept = |current| kept(LEAVES, &current, &written());
+        let kept = |current| kept_in(current, &written());
 
         assert!(kept(leaves("ofox", "ofox/model", "high")).is_empty());
         assert_eq!(
@@ -245,22 +330,58 @@ mod tests {
             None,
         );
 
-        assert!(!kept(LEAVES, &leaves("ofox", "m", "high"), &written).contains("provider"));
+        assert!(!kept_in(leaves("ofox", "m", "high"), &written).contains("provider"));
     }
 
     #[test]
     fn a_field_left_absent_goes_back_to_its_value_before_binding() {
         let current = leaves_at(&json!({ "model": "relay-model" }), LEAVES);
 
-        let kept = kept(LEAVES, &current, &written());
+        let kept = kept_in(current, &written());
 
         assert!(!kept.contains("provider"), "{kept:?}");
         assert!(!kept.contains("effort"), "{kept:?}");
     }
 
     #[test]
+    fn a_model_follows_its_route_in_another_file() {
+        const ROUTE: &[Leaf] = &[Leaf::route(&["url"], |url| url == "ofox")];
+        const MODEL: &[Leaf] = &[Leaf::model_in(&["model"], "env", &["url"])];
+        let state = |file, rules, current: Value, original: Value, written| FileState {
+            file,
+            rules,
+            current: leaves_at(&current, rules),
+            original: leaves_at(&original, rules),
+            written: Some(written),
+        };
+        let route_written = leaves_at(&json!({ "url": "ofox" }), ROUTE);
+        let model_written = leaves_at(&json!({ "model": "ofox/m" }), MODEL);
+        let unbind = |url: &str| {
+            kept(&[
+                state(
+                    "env",
+                    ROUTE,
+                    json!({ "url": url }),
+                    json!({ "url": "mine" }),
+                    &route_written,
+                ),
+                state(
+                    "settings",
+                    MODEL,
+                    json!({ "model": "picked" }),
+                    json!({ "model": "before" }),
+                    &model_written,
+                ),
+            ])
+        };
+
+        assert!(unbind("ofox")["settings"].is_empty());
+        assert_eq!(unbind("relay")["settings"], ["model".to_string()].into());
+    }
+
+    #[test]
     fn unrecorded_fields_are_restored_as_before() {
-        assert!(kept(LEAVES, &leaves("relay", "x", "low"), &Leaves::new()).is_empty());
+        assert!(kept_in(leaves("relay", "x", "low"), &Leaves::new()).is_empty());
     }
 
     #[test]
@@ -269,7 +390,7 @@ mod tests {
         let tuned = leaves("ofox", "ofox/model", "low");
         record_write(&mut written, &tuned, &tuned, None);
 
-        assert_eq!(kept(LEAVES, &tuned, &written), ["effort".into()].into());
+        assert_eq!(kept_in(tuned, &written), ["effort".into()].into());
     }
 
     #[test]

@@ -17,6 +17,7 @@ use super::env_file;
 use super::json_file::{self, JsonPath, KeyStyle};
 use super::ownership::{self, Leaf, Leaves};
 use super::plan::{read_text, FileEdit, RestorePlan};
+use super::record::ManagedFile;
 
 const API_KEY: &str = "GEMINI_API_KEY";
 const BASE_URL: &str = "GOOGLE_GEMINI_BASE_URL";
@@ -29,9 +30,15 @@ pub(crate) const ENV_LEAVES: &[Leaf] = &[
 ];
 const SETTINGS_LABEL: &str = "Gemini 的 settings.json";
 const SELECTED_TYPE: JsonPath = &["security", "auth", "selectedType"];
-/// 登录方式：绑定后用户自己换了登录方式就留着。
-pub(crate) const SETTINGS_LEAVES: &[Leaf] = &[Leaf::preference(SELECTED_TYPE)];
-const SETTINGS_CONTAINERS: &[JsonPath] = &[&["security", "auth"], &["security"]];
+/// 登录方式：绑定后用户自己换了登录方式就留着。记住的模型跟着 `.env` 里的地址走。
+pub(crate) const SETTINGS_LEAVES: &[Leaf] = &[
+    Leaf::preference(SELECTED_TYPE),
+    Leaf::model_in(REMEMBERED_MODEL, ManagedFile::GeminiEnv.id(), &[BASE_URL]),
+];
+/// 用户在 agent 里「记住」的模型。绑定、在应用里保存模型时，原来有就改成 Ofox 的
+/// 模型（见 [`write_bound`]）。
+const REMEMBERED_MODEL: JsonPath = &["model", "name"];
+const SETTINGS_CONTAINERS: &[JsonPath] = &[&["security", "auth"], &["security"], &["model"]];
 const API_KEY_AUTH: &str = "gemini-api-key";
 const GOOGLE_LOGIN_AUTH: &str = "oauth-personal";
 /// `.env` 里有 key，只给本人读写。
@@ -105,11 +112,11 @@ pub(crate) fn write_bound(
     if let (true, Some(model)) = (select_route, template_env(template, MODEL)) {
         let text = settings.as_deref().or(current_settings.as_deref());
         let before = json_file::parse_object(text, SETTINGS_LABEL)?;
-        if json_file::get(&before, &["model", "name"]).is_some() {
+        if json_file::get(&before, REMEMBERED_MODEL).is_some() {
             let mut after = before.clone();
             json_file::set(
                 &mut after,
-                &["model", "name"],
+                REMEMBERED_MODEL,
                 normalize_gemini_env_model(model).into(),
             );
             settings = Some(json_file::render_changed(

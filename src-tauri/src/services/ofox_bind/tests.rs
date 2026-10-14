@@ -5734,3 +5734,70 @@ async fn a_model_written_by_restoring_a_missing_binding_does_not_stay_under_the_
     assert_eq!(restored["model_provider"].as_str(), Some("myrelay"));
     assert_eq!(restored["model"].as_str(), Some("gpt-5-codex"));
 }
+
+#[tokio::test]
+#[serial]
+async fn the_claude_model_the_agent_remembered_before_binding_comes_back() {
+    let home = Home::new();
+    let settings = home.claude("settings.json");
+    let mut original: Value = serde_json::from_str(CLAUDE_RELAY).unwrap();
+    original["model"] = json!("opus");
+    write(&settings, &serde_json::to_string_pretty(&original).unwrap());
+    let db = db_for(Tool::Claude, claude_template(Some("anthropic/claude-x")));
+    bind(&db, Tool::Claude, "claude", KEY).await.expect("bind");
+    assert_eq!(json_at(&settings)["model"], "anthropic/claude-x");
+
+    unbind_now(&db, Tool::Claude, "claude").await;
+
+    assert_eq!(json_at(&settings), original);
+}
+
+const GEMINI_REMEMBERED_SETTINGS: &str = "{\n  \"security\": { \"auth\": { \"selectedType\": \"oauth-personal\" } },\n  \"model\": { \"name\": \"gemini-2.5-pro\" }\n}\n";
+
+#[tokio::test]
+#[serial]
+async fn the_gemini_model_the_agent_remembered_before_binding_comes_back() {
+    let home = Home::new();
+    let settings = home.gemini("settings.json");
+    write(&home.gemini(".env"), GEMINI_ENV);
+    write(&settings, GEMINI_REMEMBERED_SETTINGS);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-x")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.expect("bind");
+    assert_eq!(json_at(&settings)["model"]["name"], "gemini-x");
+
+    unbind_now(&db, Tool::Gemini, "gemini").await;
+
+    assert_eq!(
+        fs::read_to_string(&settings).unwrap(),
+        GEMINI_REMEMBERED_SETTINGS
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_gemini_model_picked_for_the_users_own_endpoint_is_kept() {
+    let home = Home::new();
+    let settings = home.gemini("settings.json");
+    let env = home.gemini(".env");
+    write(&env, GEMINI_ENV);
+    write(&settings, GEMINI_REMEMBERED_SETTINGS);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-x")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.expect("bind");
+    edit_text(
+        &env,
+        "GOOGLE_GEMINI_BASE_URL=https://api.ofox.ai/gemini",
+        "GOOGLE_GEMINI_BASE_URL=https://my-relay.example",
+    );
+    set_json_field(&settings, &["model", "name"], "my-relay-model");
+
+    let report = unbind_now(&db, Tool::Gemini, "gemini").await;
+
+    assert_eq!(json_at(&settings)["model"]["name"], "my-relay-model");
+    assert!(
+        report
+            .kept_keys
+            .contains(&shown_at(&settings, "model.name")),
+        "{:?}",
+        report.kept_keys
+    );
+}

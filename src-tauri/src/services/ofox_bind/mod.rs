@@ -201,25 +201,13 @@ impl ManagedFile {
         }
     }
 
-    /// `written` 是 Ofox 最近写进这个文件的受管字段（旧记录没有：照旧全部还原）。
-    /// 用户之后改过、又和绑定前不一样的字段留着，记在 `kept_keys` 里。
+    /// `keep` 是留给用户、不还原的字段（见 [`kept_fields`]），记在 `kept_keys` 里。
     fn plan_restore(
         self,
         original: Option<&str>,
         current: Option<&str>,
-        written: Option<&Leaves>,
+        keep: BTreeSet<String>,
     ) -> Result<RestorePlan, String> {
-        let keep: BTreeSet<String> = match written {
-            Some(written) => {
-                let now = self.leaves(current)?;
-                let before_binding = self.leaves(original)?;
-                ownership::kept(self.leaf_rules(), &now, written)
-                    .into_iter()
-                    .filter(|id| now.get(id) != before_binding.get(id))
-                    .collect()
-            }
-            None => BTreeSet::new(),
-        };
         let mut plan = match self {
             Self::CodexConfig => codex::plan_restore(original, current, &keep),
             Self::ClaudeSettings => claude::plan_restore(original, current, &keep),
@@ -232,6 +220,37 @@ impl ManagedFile {
         plan.kept_keys = keep.into_iter().collect();
         Ok(plan)
     }
+}
+
+/// 解绑时每个受管文件里留给用户的字段（和 `envelope.files` 一一对应；`currents` 是各
+/// 文件现在的内容）。一起算，因为模型可以跟着另一个文件里的接入方式走。
+fn kept_fields(
+    envelope: &BindEnvelope,
+    currents: &[Option<String>],
+) -> Result<Vec<BTreeSet<String>>, String> {
+    let mut states = Vec::new();
+    for (baseline, current) in envelope.files.iter().zip(currents) {
+        // 已经删掉的文件解绑不会再建，不用判断。
+        let Some(current) = current else { continue };
+        // 记录里 Ofox 写了什么，只对它写的那个文件有意义（配置目录换过就照旧全部还原）。
+        let written = envelope
+            .written
+            .get(baseline.file.id())
+            .filter(|_| baseline.file.current_path() == Path::new(&baseline.path));
+        states.push(ownership::FileState {
+            file: baseline.file.id(),
+            rules: baseline.file.leaf_rules(),
+            current: baseline.file.leaves(Some(current))?,
+            original: baseline.file.leaves(baseline.original.as_deref())?,
+            written,
+        });
+    }
+    let mut kept = ownership::kept(&states);
+    Ok(envelope
+        .files
+        .iter()
+        .map(|baseline| kept.remove(baseline.file.id()).unwrap_or_default())
+        .collect())
 }
 
 /// 工具每个受管文件现在的受管字段；Ofox 写配置之前读一次，写完后和写入后的比对。
@@ -955,28 +974,28 @@ fn restore_snapshot(
     report: &mut UnbindReport,
     dry_run: bool,
 ) -> Result<Vec<PathBuf>, String> {
+    let currents = envelope
+        .files
+        .iter()
+        .map(|baseline| read_text(Path::new(&baseline.path)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let keeps = kept_fields(envelope, &currents)?;
     let mut txn = FileTxn::new();
     let mut dirs_to_prune = Vec::new();
     let result = (|| {
-        for baseline in &envelope.files {
+        for ((baseline, current), keep) in envelope.files.iter().zip(currents).zip(keeps) {
             let path = PathBuf::from(&baseline.path);
             let shown = display_path(&path);
-            let current = read_text(&path)?;
             // Deleting a configuration is a user action. Unbind clears our bookkeeping,
             // but must never bring back a removed file or its containing directory.
             if current.is_none() {
                 report.warn("configAlreadyMissing", Some(shown));
                 continue;
             }
-            // 记录里 Ofox 写了什么，只对它写的那个文件有意义（配置目录换过就照旧全部还原）。
-            let written = envelope
-                .written
-                .get(baseline.file.id())
-                .filter(|_| baseline.file.current_path() == path);
             let plan = baseline.file.plan_restore(
                 baseline.original.as_deref(),
                 current.as_deref(),
-                written,
+                keep,
             )?;
             report
                 .restored_keys
