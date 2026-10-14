@@ -14,13 +14,21 @@ use regex::{Captures, Regex};
 /// 密钥被换成的占位文字。
 pub const REDACTED: &str = "«redacted»";
 
-/// OFox（`sk-of-`）、Anthropic（`sk-ant-`）和通用 `sk-` key。前面不能紧贴字母数字，
-/// 免得把 `task-…`、`disk-…` 这类词里的 `sk-` 当成 key；前面的那个字符原样保留。
-static SK_KEY: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(
-        r"(^|[^A-Za-z0-9])(?:sk-of-[A-Za-z0-9_-]{8,}|sk-ant-[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9]{16,})",
-    )
-    .expect("sk- key pattern")
+/// 带前缀的 key：OFox（`sk-of-`）、Anthropic（`sk-ant-`）、其余 `sk-…`（含 `sk-proj-` /
+/// `sk-svcacct-` / `sk-or-v1-` 这类带连字符的第三方 key）、Google（`AIza…`）、Groq（`gsk_…`）。
+/// 前面不能紧贴字母数字，免得把 `task-…`、`disk-…` 这类词里的 `sk-` 当成 key；前面的那个
+/// 字符原样保留。
+static PREFIXED_KEY: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(concat!(
+        r"(^|[^A-Za-z0-9])(?:",
+        r"sk-of-[A-Za-z0-9_-]{8,}",
+        r"|sk-ant-[A-Za-z0-9_-]{8,}",
+        r"|sk-[A-Za-z0-9_-]{16,}",
+        r"|AIza[0-9A-Za-z_-]{30,}",
+        r"|gsk_[A-Za-z0-9]{20,}",
+        r")",
+    ))
+    .expect("prefixed key pattern")
 });
 
 static JWT: Lazy<Regex> = Lazy::new(|| {
@@ -47,13 +55,15 @@ static KEY_VALUE: Lazy<Regex> = Lazy::new(|| {
     .expect("key-value pattern")
 });
 
-/// 抹掉 `s` 里的 OFox / Anthropic / 通用 `sk-` key、Bearer 令牌、JWT，以及名字像
+/// 抹掉 `s` 里的 OFox / Anthropic / 通用 `sk-` / Google / Groq key、Bearer 令牌、JWT，以及名字像
 /// `api_key` / `token` / `secret` / `password` / `authorization` 的键值对里的值。
 /// 没有需要抹的内容时借用原字符串，不分配。
 pub fn scrub(s: &str) -> Cow<'_, str> {
     let mut text = Cow::Borrowed(s);
     replace(&mut text, &JWT, |_| REDACTED.to_string());
-    replace(&mut text, &SK_KEY, |caps| format!("{}{REDACTED}", &caps[1]));
+    replace(&mut text, &PREFIXED_KEY, |caps| {
+        format!("{}{REDACTED}", &caps[1])
+    });
     replace(&mut text, &BEARER, |caps| format!("{}{REDACTED}", &caps[1]));
     replace(&mut text, &KEY_VALUE, redact_key_value);
     text
@@ -216,6 +226,46 @@ mod tests {
             "using sk-0123456789abcdefABCDEF now",
             "using «redacted» now",
         );
+    }
+
+    #[test]
+    fn third_party_key_shapes_are_redacted_on_their_own() {
+        for (input, expected) in [
+            (
+                "key sk-proj-AbCdEf0123456789_xyz-QWERTY rejected",
+                "key «redacted» rejected",
+            ),
+            ("sk-svcacct-AbCdEf0123456789xyzQWERTY", "«redacted»"),
+            (
+                "(sk-or-v1-0123456789abcdef0123456789abcdef)",
+                "(«redacted»)",
+            ),
+            (
+                "Google AIzaSyA-1234567890abcdefghijklmnopqrstu failed",
+                "Google «redacted» failed",
+            ),
+            (
+                "groq gsk_AbCdEf0123456789xyzQWERTY12 failed",
+                "groq «redacted» failed",
+            ),
+        ] {
+            assert_scrubs(input, expected);
+        }
+    }
+
+    #[test]
+    fn short_or_embedded_third_party_key_lookalikes_are_left_alone() {
+        for input in [
+            "sk-proj-short",
+            "AIza-short",
+            "AIzaSy123",
+            "gsk_short",
+            "bigsk-proj-AbCdEf0123456789xyzQWERTY",
+            "xAIzaSyA-1234567890abcdefghijklmnopqrstu",
+            "xgsk_AbCdEf0123456789xyzQWERTY12",
+        ] {
+            assert_scrubs(input, input);
+        }
     }
 
     #[test]
