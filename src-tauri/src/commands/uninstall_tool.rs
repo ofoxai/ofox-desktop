@@ -407,32 +407,51 @@ fn manager_plan(
 
 /// What `hermes uninstall --yes` does even though it keeps the user's data: it
 /// deletes its code checkout (inside `~/.hermes`), edits shell rc files, removes
-/// the desktop app, the gateway service and caches. Its own dry run says exactly
-/// what; when it has none, this is what its uninstaller is known to do.
+/// the desktop app, the gateway service and caches. Its own dry run says what it
+/// does first; when it has none, this is what its uninstaller is known to do.
+/// Two things it deletes are never in that listing, so they are always added:
+/// `remove_desktop_app_leftovers` (caches, logs and saved state outside
+/// `~/.hermes`) and `remove_legacy_runtime_trees` (`node/` and `bin/uv` in its home).
 fn hermes_removes(install: &Installation, facts: &Facts) -> Vec<String> {
+    let home = &facts.home;
     let listed = facts
         .hermes_dry_run
         .as_deref()
-        .map(|output| hermes_dry_run_actions(output, &facts.home))
+        .map(|output| hermes_dry_run_actions(output, home))
         .unwrap_or_default();
-    if !listed.is_empty() {
-        return listed;
-    }
     let checkout = install
         .real
         .ancestors()
-        .find(|dir| dir.file_name().is_some_and(|name| name == "hermes-agent"))
-        .map_or_else(
-            || "the Hermes code checkout".to_string(),
-            |dir| shown(dir, &facts.home),
-        );
-    vec![
-        format!("Code checkout: {checkout}"),
-        "Hermes PATH entries in shell configs".to_string(),
-        "Hermes wrapper scripts and Hermes-managed node/npm/npx symlinks".to_string(),
-        "Desktop Chat GUI artifacts and caches".to_string(),
-        "Gateway services and standalone gateway processes".to_string(),
-    ]
+        .find(|dir| dir.file_name().is_some_and(|name| name == "hermes-agent"));
+    let mut removes = if listed.is_empty() {
+        vec![
+            format!(
+                "Code checkout: {}",
+                checkout.map_or_else(
+                    || "the Hermes code checkout".to_string(),
+                    |dir| shown(dir, home)
+                )
+            ),
+            "Hermes PATH entries in shell configs".to_string(),
+            "Hermes wrapper scripts and Hermes-managed node/npm/npx symlinks".to_string(),
+            "Desktop Chat GUI artifacts".to_string(),
+            "Gateway services and standalone gateway processes".to_string(),
+        ]
+    } else {
+        listed
+    };
+    // Its home is `~/.hermes` unless the checkout sits inside another one.
+    let hermes_home = checkout
+        .and_then(Path::parent)
+        .filter(|dir| dir.file_name().is_some_and(|name| name == ".hermes"))
+        .map_or_else(|| home.join(".hermes"), Path::to_path_buf);
+    let hermes_home = shown(&hermes_home, home);
+    removes.extend([
+        format!("App cache: {}", shown(&home.join(".cache/hermes"), home)),
+        "Entries named hermes in ~/Library/Caches, Logs, WebKit, HTTPStorages and Saved Application State (macOS)".to_string(),
+        format!("Legacy runtime: {hermes_home}/node and {hermes_home}/bin/uv"),
+    ]);
+    removes
 }
 
 fn native_plan(
@@ -2070,16 +2089,30 @@ Would inspect/remove:
         let active = install(&bin, &real);
         let mut facts = facts(home, native_owner(&active));
         facts.hermes_help = Some(HERMES_HELP.into());
+        // What its uninstaller deletes beyond anything its dry run prints:
+        // `remove_desktop_app_leftovers` and `remove_legacy_runtime_trees`.
+        let leftovers = [
+            "App cache: ~/.cache/hermes",
+            "Entries named hermes in ~/Library/Caches, Logs, WebKit, HTTPStorages and Saved Application State (macOS)",
+            "Legacy runtime: ~/.hermes/node and ~/.hermes/bin/uv",
+        ];
 
-        // Its own dry run, when it has one.
+        // Its own dry run, when it has one, plus those.
         let listing = HERMES_DRY_RUN.replace("/home/me", home.to_str().unwrap());
         facts.hermes_dry_run = Some(listing);
         let plan = uninstall_plan("hermes", &active, &facts).unwrap();
-        assert_eq!(plan.removes.len(), 5);
-        assert!(plan
-            .removes
-            .contains(&"Code checkout: ~/.hermes/hermes-agent".to_string()));
-        assert!(plan.removes.iter().all(|line| !line.starts_with("Keep")));
+        let (from_dry_run, extra) = plan.removes.split_at(5);
+        assert_eq!(
+            from_dry_run,
+            [
+                "Gateway services and standalone gateway processes",
+                "Hermes PATH entries from shell configs / Windows User PATH",
+                "Hermes wrapper scripts and Hermes-managed node/npm/npx symlinks",
+                "Desktop Chat GUI artifacts",
+                "Code checkout: ~/.hermes/hermes-agent",
+            ]
+        );
+        assert_eq!(extra, leftovers);
 
         // Otherwise what it is known to do, never just the launcher.
         facts.hermes_dry_run = None;
@@ -2087,15 +2120,29 @@ Would inspect/remove:
         assert!(plan
             .removes
             .contains(&"Code checkout: ~/.hermes/hermes-agent".to_string()));
+        for fragment in ["PATH entries", "Desktop Chat GUI", "Gateway"] {
+            assert!(plan.removes.iter().any(|line| line.contains(fragment)));
+        }
+        assert_eq!(plan.removes[plan.removes.len() - 3..], leftovers);
+    }
+
+    #[test]
+    fn the_hermes_runtime_leftovers_follow_a_hermes_home_the_checkout_sits_in() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        // A checkout outside the home leaves its node and uv under the home.
+        let real = home.join("src/hermes-agent/venv/bin/hermes");
+        let active = install(&home.join(".local/bin/hermes"), &real);
+        let mut facts = facts(home, native_owner(&active));
+        facts.hermes_help = Some(HERMES_HELP.into());
+        let plan = uninstall_plan("hermes", &active, &facts).unwrap();
         assert!(plan
             .removes
-            .iter()
-            .any(|line| line.contains("PATH entries")));
-        assert!(plan
-            .removes
-            .iter()
-            .any(|line| line.contains("Desktop Chat GUI")));
-        assert!(plan.removes.iter().any(|line| line.contains("Gateway")));
+            .contains(&"Code checkout: ~/src/hermes-agent".to_string()));
+        assert_eq!(
+            plan.removes.last().map(String::as_str),
+            Some("Legacy runtime: ~/.hermes/node and ~/.hermes/bin/uv")
+        );
     }
 
     #[test]
