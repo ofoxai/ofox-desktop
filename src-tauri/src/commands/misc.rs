@@ -1469,7 +1469,7 @@ fn node_manager_bin_dirs(
 
 /// 扫描常见路径查找 CLI
 async fn scan_cli_version(tool: &str) -> LocalDetection {
-    let home = dirs::home_dir().unwrap_or_default();
+    let home = crate::config::try_get_home_dir().unwrap_or_default();
 
     // 常见的安装路径（原生安装优先）
     let mut search_paths: Vec<std::path::PathBuf> = Vec::new();

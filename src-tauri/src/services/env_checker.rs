@@ -103,16 +103,18 @@ fn check_system_env(keywords: &[&str]) -> Result<Vec<EnvConflict>, String> {
 fn check_shell_configs(keywords: &[&str]) -> Result<Vec<EnvConflict>, String> {
     let mut conflicts = Vec::new();
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let config_files = vec![
-        format!("{}/.bashrc", home),
-        format!("{}/.bash_profile", home),
-        format!("{}/.zshrc", home),
-        format!("{}/.zprofile", home),
-        format!("{}/.profile", home),
-        "/etc/profile".to_string(),
-        "/etc/bashrc".to_string(),
-    ];
+    let home = crate::config::get_home_dir();
+    let config_files: Vec<String> = [
+        ".bashrc",
+        ".bash_profile",
+        ".zshrc",
+        ".zprofile",
+        ".profile",
+    ]
+    .iter()
+    .map(|name| home.join(name).to_string_lossy().into_owned())
+    .chain(["/etc/profile".to_string(), "/etc/bashrc".to_string()])
+    .collect();
 
     for file_path in config_files {
         if let Ok(content) = fs::read_to_string(&file_path) {

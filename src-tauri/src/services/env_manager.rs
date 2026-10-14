@@ -67,7 +67,7 @@ fn create_backup(conflicts: &[EnvConflict]) -> Result<BackupInfo, String> {
 
 /// Get backup directory path
 fn get_backup_dir() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or("无法获取用户主目录")?;
+    let home = crate::config::try_get_home_dir().ok_or("无法获取用户主目录")?;
     Ok(home.join(".ofox-desktop").join("backups"))
 }
 

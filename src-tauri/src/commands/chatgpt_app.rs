@@ -61,7 +61,7 @@ pub(crate) struct ChatGptDesktopApp {
 #[cfg(target_os = "macos")]
 fn candidate_paths() -> Vec<PathBuf> {
     let mut paths = Vec::with_capacity(4);
-    if let Some(home) = dirs::home_dir() {
+    if let Some(home) = crate::config::try_get_home_dir() {
         paths.push(home.join("Applications/ChatGPT.app"));
         paths.push(home.join("Applications/Codex.app"));
     }
@@ -453,7 +453,7 @@ where
     );
 
     emit_progress(emit, 4, "安装 ChatGPT App", "start", None, None);
-    let applications = dirs::home_dir()
+    let applications = crate::config::try_get_home_dir()
         .ok_or_else(|| "无法获取用户主目录".to_string())?
         .join("Applications");
     std::fs::create_dir_all(&applications)

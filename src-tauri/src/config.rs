@@ -5,6 +5,58 @@ use std::path::{Path, PathBuf};
 
 use crate::error::AppError;
 
+/// 各 agent CLI 用来改写自己配置目录的环境变量。
+///
+/// 测试沙箱会清空这些变量（见 `tests/support.rs` 的 `sandbox()` 与 crate 内的
+/// `test_support::sandbox()`）：开发者 shell 里残留的任何一个都会让测试读写真实 agent
+/// 的目录。只列出确实会被读到的变量：`HERMES_HOME`、`PI_CODING_AGENT_DIR`、`DSH_HOME`
+/// 由本应用直接读取；`CODEX_HOME`、`CLAUDE_CONFIG_DIR` 由应用启动 / 探测的 Codex、
+/// Claude Code CLI 解析（也是应用要遵循的目录）。`GEMINI_CLI_HOME`、`OPENCODE_CONFIG_DIR`、
+/// `OPENCODE_CONFIG`、`WORKBUDDY_CONFIG_DIR` 目前没有任何代码读取，故不在列；
+/// 新增读取某个 agent 目录变量时，在这里补上。
+pub const AGENT_DIR_VARS: &[&str] = &[
+    "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "HERMES_HOME",
+    "PI_CODING_AGENT_DIR",
+    "DSH_HOME",
+];
+
+/// 读取 `CC_SWITCH_TEST_HOME` 显式覆盖；空白视为未设置。
+fn home_override() -> Option<PathBuf> {
+    let home = std::env::var("CC_SWITCH_TEST_HOME").ok()?;
+    let trimmed = home.trim();
+    (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+}
+
+#[cfg(not(test))]
+fn real_home_dir() -> Option<PathBuf> {
+    dirs::home_dir()
+}
+
+/// 单元测试里没有显式覆盖时，永远不碰真实 home：整个进程共用一个一次性临时目录。
+#[cfg(test)]
+fn real_home_dir() -> Option<PathBuf> {
+    use std::sync::OnceLock;
+
+    static PROCESS_TEST_HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
+    let dir = PROCESS_TEST_HOME.get_or_init(|| {
+        tempfile::Builder::new()
+            .prefix("ofox-test-home-")
+            .tempdir()
+            .expect("create the per-process test home")
+    });
+    Some(dir.path().to_path_buf())
+}
+
+/// 获取用户主目录；取不到时返回 `None`（调用方需要区分“没有 home”时用它）。
+///
+/// 这是整个 crate 里唯一允许向系统询问 home 的地方（`tests/home_dir_guard.rs` 会检查）。
+/// 其余代码一律走 [`get_home_dir`] 或本函数。
+pub fn try_get_home_dir() -> Option<PathBuf> {
+    home_override().or_else(real_home_dir)
+}
+
 /// 获取用户主目录，带回退和日志
 ///
 /// ## Windows 注意事项
@@ -17,16 +69,10 @@ use crate::error::AppError;
 /// ## 测试隔离
 ///
 /// 为了让 Windows CI/本地测试能稳定隔离真实用户数据，可通过 `CC_SWITCH_TEST_HOME`
-/// 显式覆盖 home dir（仅用于测试/调试场景）。
+/// 显式覆盖 home dir（仅用于测试/调试场景）。单元测试（`cfg(test)`）里没有设置该变量时，
+/// 返回本进程的一次性临时目录而不是真实 home。
 pub fn get_home_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("CC_SWITCH_TEST_HOME") {
-        let trimmed = home.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
-    }
-
-    dirs::home_dir().unwrap_or_else(|| {
+    try_get_home_dir().unwrap_or_else(|| {
         log::warn!("无法获取用户主目录，回退到当前目录");
         PathBuf::from(".")
     })
@@ -363,6 +409,12 @@ mod tests {
             std::env::set_var("CC_SWITCH_TEST_HOME", value);
             Self(previous)
         }
+
+        fn unset() -> Self {
+            let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
+            std::env::remove_var("CC_SWITCH_TEST_HOME");
+            Self(previous)
+        }
     }
 
     impl Drop for TestHomeGuard {
@@ -392,12 +444,37 @@ mod tests {
 
     #[test]
     #[serial]
-    fn blank_test_home_override_falls_back_to_real_home() {
+    fn blank_test_home_override_is_treated_as_unset() {
         let _guard = TestHomeGuard::set("   ");
+        let blank = get_home_dir();
 
-        // 只断言"没把空白当成 home"——真实 home 的值取决于运行环境，不能硬编码。
-        assert_ne!(get_home_dir(), PathBuf::from("   "));
-        assert_ne!(get_home_dir(), PathBuf::new());
+        drop(_guard);
+        let _unset = TestHomeGuard::unset();
+        assert_eq!(blank, get_home_dir());
+        assert_ne!(blank, PathBuf::from("   "));
+    }
+
+    #[test]
+    #[serial]
+    fn unit_tests_without_an_override_never_resolve_to_the_real_home() {
+        let _guard = TestHomeGuard::unset();
+
+        let home = get_home_dir();
+
+        // `dirs::home_dir()` 是真实 home；单元测试必须落在别处的一次性目录。
+        assert_ne!(Some(home.clone()), dirs::home_dir());
+        assert!(
+            home.starts_with(std::env::temp_dir()),
+            "{} is not under the temp dir",
+            home.display()
+        );
+        assert!(home.is_dir());
+        assert_eq!(
+            home,
+            get_home_dir(),
+            "the process test home is created once"
+        );
+        assert_eq!(try_get_home_dir(), Some(home));
     }
 
     /// Windows 上 `CC_SWITCH_TEST_HOME` 会是 `C:\Users\Alice` 这种形态。这里用
