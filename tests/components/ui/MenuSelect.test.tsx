@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import i18n from "i18next";
 import { useState } from "react";
@@ -69,6 +69,7 @@ describe("MenuSelect", () => {
 
     const { listbox } = await openMenu();
     expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(listbox).toHaveAccessibleName("Agent");
     expect(within(listbox).getAllByRole("option")).toHaveLength(4);
   });
 
@@ -136,6 +137,8 @@ describe("MenuSelect", () => {
     expect(codex).toHaveAttribute("data-checked", "true");
     expect(codex.querySelector("svg.lucide-check")).not.toBeNull();
     expect(codex).toHaveAttribute("aria-selected", "true");
+    // focus sits on the option itself, so a screen reader names it at once
+    expect(codex).toHaveFocus();
     const claude = option(/^Claude Code/);
     expect(claude).not.toHaveAttribute("data-checked");
     expect(claude.querySelector("svg.lucide-check")).toBeNull();
@@ -148,6 +151,7 @@ describe("MenuSelect", () => {
 
     await user.keyboard("{ArrowDown}");
     expect(option(/^Pi/)).toHaveAttribute("aria-selected", "true");
+    expect(option(/^Pi/)).toHaveFocus();
     await user.keyboard("{ArrowDown}");
     expect(option(/^Claude Code/)).toHaveAttribute("aria-selected", "true");
     await user.keyboard("{ArrowUp}");
@@ -227,8 +231,15 @@ describe("MenuSelect", () => {
       <Harness onPick={onPick} searchable searchPlaceholder="Filter agents" />,
     );
     const { user } = await openMenu();
-    const search = screen.getByPlaceholderText("Filter agents");
+    const search = screen.getByRole("combobox", { name: "Filter agents" });
     expect(search).toHaveFocus();
+    // the filter points at the option Enter would take
+    await waitFor(() =>
+      expect(search).toHaveAttribute(
+        "aria-activedescendant",
+        option(/^Claude Code/).id,
+      ),
+    );
 
     await user.keyboard("anthro");
     expect(screen.getAllByRole("option")).toHaveLength(1);
@@ -236,6 +247,28 @@ describe("MenuSelect", () => {
 
     await user.keyboard("{Enter}");
     expect(onPick).toHaveBeenCalledWith("claude");
+  });
+
+  it("points the filter at the first match as the user types and at each option the arrows reach", async () => {
+    render(<Harness searchable searchPlaceholder="Filter agents" />);
+    const { user } = await openMenu();
+    const search = screen.getByRole("combobox", { name: "Filter agents" });
+
+    await user.keyboard("ex");
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    expect(search).toHaveAttribute(
+      "aria-activedescendant",
+      option(/^Codex/).id,
+    );
+    expect(option(/^Codex/)).toHaveAttribute("aria-selected", "true");
+
+    await user.clear(search);
+    await user.keyboard("{ArrowDown}");
+    expect(search).toHaveAttribute(
+      "aria-activedescendant",
+      option(/^Codex/).id,
+    );
+    expect(search).toHaveFocus();
   });
 
   it("says so when nothing matches the search", async () => {

@@ -72,10 +72,28 @@ const ICON_BOX =
 // their position in `options` rather than the caller's value.
 const itemKey = (index: number) => `option-${index}`;
 
-function matches(option: MenuSelectOption<string>, query: string): boolean {
-  return `${option.label} ${option.note ?? ""} ${option.value}`
-    .toLocaleLowerCase()
-    .includes(query);
+type Indexed<T extends string> = { option: MenuSelectOption<T>; index: number };
+
+function filterOptions<T extends string>(
+  options: ReadonlyArray<MenuSelectOption<T>>,
+  query: string,
+): Indexed<T>[] {
+  const q = query.trim().toLocaleLowerCase();
+  return options
+    .map((option, index) => ({ option, index }))
+    .filter(
+      ({ option }) =>
+        !q ||
+        `${option.label} ${option.note ?? ""} ${option.value}`
+          .toLocaleLowerCase()
+          .includes(q),
+    );
+}
+
+/** The key of the first option that can be picked, or "" for none. */
+function firstKey<T extends string>(items: Indexed<T>[]): string {
+  const first = items.find(({ option }) => !option.disabled);
+  return first ? itemKey(first.index) : "";
 }
 
 /**
@@ -103,31 +121,60 @@ export function MenuSelect<T extends string>({
   const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
+  // The highlighted option's key. Kept here rather than in cmdk: cmdk only
+  // records which element is highlighted (for aria-activedescendant) when a
+  // key or the pointer moves it, never when it picks the first option itself.
   const [active, setActive] = React.useState("");
+  const [activeId, setActiveId] = React.useState<string>();
+  const [listId, setListId] = React.useState<string>();
   const listRef = React.useRef<HTMLDivElement>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
+  const itemRefs = React.useRef(new Map<string, HTMLDivElement>());
 
   const chosen = options.find((option) => option.value === value);
-  const shown = React.useMemo(() => {
-    const q = query.trim().toLocaleLowerCase();
-    return options
-      .map((option, index) => ({ option, index }))
-      .filter(({ option }) => !q || matches(option, q));
-  }, [options, query]);
+  const shown = React.useMemo(
+    () => filterOptions(options, query),
+    [options, query],
+  );
 
   const handleOpenChange = (next: boolean) => {
     if (next) {
-      // Open on the chosen option, as magpie does, else the first one free.
       setQuery("");
+      // A menu opens on the chosen option, as magpie's does; a filter on the
+      // first option, which Enter takes.
       const at = options.findIndex(
         (option) => option.value === value && !option.disabled,
       );
-      const first = options.findIndex((option) => !option.disabled);
-      const start = at >= 0 ? at : first;
-      setActive(start >= 0 ? itemKey(start) : "");
+      const all = filterOptions(options, "");
+      setActive(!searchable && at >= 0 ? itemKey(at) : firstKey(all));
     }
     setOpen(next);
   };
+
+  const handleQuery = (next: string) => {
+    setQuery(next);
+    setActive(firstKey(filterOptions(options, next)));
+  };
+
+  // Without a filter, focus rides on the highlighted option itself, as in
+  // magpie's menus, so a screen reader names each option as it is reached
+  // (the list as a fallback, when no option can be picked). With one, focus
+  // stays in the field, which points at the option instead.
+  const followHighlight = React.useCallback(() => {
+    const item = itemRefs.current.get(active);
+    if (searchable) {
+      setActiveId(item?.id);
+      setListId(listRef.current?.id);
+    } else {
+      (item ?? listRef.current)?.focus({ preventScroll: true });
+    }
+  }, [active, searchable]);
+
+  // The popup's content mounts a render after `open` turns true, so its
+  // first focus comes from onOpenAutoFocus below; this follows the moves.
+  React.useLayoutEffect(() => {
+    if (open) followHighlight();
+  }, [open, followHighlight, shown]);
 
   const choose = (option: MenuSelectOption<T>) => {
     setOpen(false);
@@ -188,12 +235,10 @@ export function MenuSelect<T extends string>({
         className="flex max-h-[min(360px,70vh)] max-w-[calc(100vw-16px)] flex-col overflow-hidden border border-line"
         onOpenAutoFocus={(event) => {
           // cmdk listens for keys on its root, so focus has to start inside
-          // it: on the filter, or on the list (which tracks the highlight
-          // through aria-activedescendant).
+          // it: on the filter, else on the highlighted option.
           event.preventDefault();
-          (searchable ? inputRef.current : listRef.current)?.focus({
-            preventScroll: true,
-          });
+          if (searchable) inputRef.current?.focus({ preventScroll: true });
+          followHighlight();
         }}
       >
         <CommandPrimitive
@@ -201,7 +246,6 @@ export function MenuSelect<T extends string>({
           loop
           value={active}
           onValueChange={setActive}
-          label={ariaLabel}
           className="flex min-h-0 flex-1 flex-col outline-none"
         >
           {head && (
@@ -211,18 +255,30 @@ export function MenuSelect<T extends string>({
           )}
           {searchable && (
             <div className="pb-1.5 pt-1">
-              <CommandPrimitive.Input
+              {/* A plain field rather than cmdk's Input, so it can point at
+                  the highlighted option (see `active`). Its keys still reach
+                  cmdk's root, which moves the highlight. */}
+              <input
                 ref={inputRef}
-                value={query}
-                onValueChange={setQuery}
-                placeholder={searchPlaceholder}
+                type="text"
+                role="combobox"
+                aria-expanded
+                aria-autocomplete="list"
+                aria-controls={listId}
+                aria-activedescendant={activeId}
                 aria-label={searchPlaceholder ?? ariaLabel}
+                autoComplete="off"
+                spellCheck={false}
+                value={query}
+                onChange={(event) => handleQuery(event.target.value)}
+                placeholder={searchPlaceholder}
                 className="block h-7 w-full rounded-ctl border border-line bg-pill px-[9px] text-nav text-ink outline-none transition-colors duration-150 ease-soft placeholder:text-ink-faint focus:border-brand focus-visible:outline-none"
               />
             </div>
           )}
           <CommandPrimitive.List
             ref={listRef}
+            label={ariaLabel}
             className="min-h-0 flex-1 overflow-y-auto overscroll-contain outline-none focus-visible:outline-none [&_[cmdk-list-sizer]]:grid [&_[cmdk-list-sizer]]:gap-px"
           >
             <CommandPrimitive.Empty className="px-2 pb-1.5 pt-2 text-note text-ink-muted">
@@ -233,11 +289,16 @@ export function MenuSelect<T extends string>({
               return (
                 <CommandPrimitive.Item
                   key={option.value}
+                  ref={(node) => {
+                    if (node) itemRefs.current.set(itemKey(index), node);
+                    else itemRefs.current.delete(itemKey(index));
+                  }}
+                  tabIndex={-1}
                   value={itemKey(index)}
                   disabled={option.disabled}
                   onSelect={() => choose(option)}
                   data-checked={checked || undefined}
-                  className="flex w-full cursor-default select-none items-start gap-[7px] rounded-ctl px-2 pb-[7px] pt-1.5 text-left text-ink outline-none transition-colors duration-100 data-[disabled=true]:opacity-45 data-[selected=true]:bg-pill"
+                  className="flex w-full cursor-default select-none items-start gap-[7px] rounded-ctl px-2 pb-[7px] pt-1.5 text-left text-ink outline-none transition-colors duration-100 focus-visible:outline-none data-[disabled=true]:opacity-45 data-[selected=true]:bg-pill"
                 >
                   <span
                     aria-hidden
