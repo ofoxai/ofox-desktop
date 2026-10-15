@@ -103,6 +103,25 @@ pub(crate) fn key(provider: &str, id: &str) -> String {
 pub(crate) fn project_key(path: &str) -> String {
     key("project-v1", path)
 }
+/// Analytics observations tolerate opaque stamp extensions. This comparison
+/// must never be used for ledger acknowledgements or negative identity proof.
+fn same_known_revision(saved: &Value, current: &Value) -> bool {
+    match (saved, current) {
+        (Value::Object(saved), Value::Object(current)) => current.iter().all(|(key, value)| {
+            saved
+                .get(key)
+                .is_some_and(|old| same_known_revision(old, value))
+        }),
+        (Value::Array(saved), Value::Array(current)) => {
+            saved.len() == current.len()
+                && saved
+                    .iter()
+                    .zip(current)
+                    .all(|(a, b)| same_known_revision(a, b))
+        }
+        _ => saved == current,
+    }
+}
 fn source_id(provider: &str) -> &str {
     match provider {
         "claude" => "session_log",
@@ -292,7 +311,13 @@ fn refresh_sources_inner(
         let now = chrono::Utc::now().timestamp_millis();
         let next_stamp = source_revision(spec);
         if let (Ok(next), Some(old)) = (&next_stamp, previous) {
-            if old.stamp.as_ref() == Some(next) && old.available && old.status != "failed" {
+            if old
+                .stamp
+                .as_ref()
+                .is_some_and(|saved| same_known_revision(saved, next))
+                && old.available
+                && old.status != "failed"
+            {
                 report.unchanged += 1;
                 report.mark(
                     &spec.provider,
@@ -639,6 +664,82 @@ fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
     Ok(entry)
 }
 
+fn health_severity(status: &str) -> u8 {
+    match status {
+        "unsupported" => 4,
+        "failed" => 3,
+        "partial" => 2,
+        "unknown" => 1,
+        _ => 0,
+    }
+}
+
+/// A corrupt native parent component must not make an unrelated source query
+/// fail. Clear unverifiable links with a scoped reason rather than guessing a
+/// root. Memoizing each functional-graph chain keeps this linear in its edges.
+fn isolate_invalid_roots(
+    sessions: &mut BTreeMap<String, SessionDescriptor>,
+    reasons: &mut Vec<SourceReason>,
+) {
+    let parents: BTreeMap<_, _> = sessions
+        .iter()
+        .map(|(key, s)| {
+            (
+                key.clone(),
+                (
+                    s.identity.tool_id.clone(),
+                    s.identity.verified_root_key.clone(),
+                ),
+            )
+        })
+        .collect();
+    let mut resolved: BTreeMap<String, bool> = BTreeMap::new();
+    for start in parents.keys() {
+        if resolved.contains_key(start) {
+            continue;
+        }
+        let mut current = start.clone();
+        let mut path = vec![];
+        let mut visiting = BTreeSet::new();
+        let valid = loop {
+            if let Some(valid) = resolved.get(&current) {
+                break *valid;
+            }
+            if !visiting.insert(current.clone()) {
+                break false;
+            }
+            path.push(current.clone());
+            let Some((tool, parent)) = parents.get(&current) else {
+                break false;
+            };
+            let Some(parent) = parent else {
+                break true;
+            };
+            if parents.get(parent).is_none_or(|(other, _)| other != tool) {
+                break false;
+            }
+            current = parent.clone();
+        };
+        for key in path {
+            resolved.insert(key, valid);
+        }
+    }
+    for (key, valid) in resolved {
+        if valid {
+            continue;
+        }
+        let session = sessions.get_mut(&key).expect("known native graph key");
+        session.identity.verified_root_key = None;
+        session.messages_supported = false;
+        session.message_reasons.push("invalidSessionRoot".into());
+        reasons.push(SourceReason {
+            tool_id: session.identity.tool_id.clone(),
+            source_id: source_id(&session.identity.tool_id).into(),
+            reason: "invalidSessionRoot".into(),
+        });
+    }
+}
+
 pub(crate) fn read_input(db: &Database) -> Result<AnalyticsInput, AppError> {
     let conn = crate::database::lock_conn!(db.conn);
     read_input_on(&conn)
@@ -670,7 +771,26 @@ pub(crate) fn read_input_on(conn: &rusqlite::Connection) -> Result<AnalyticsInpu
             }),
         }
     }
-    entries.sort_by_key(|(_, entry)| (entry.available, entry.priority));
+    let current_sessions: BTreeSet<_> = entries
+        .iter()
+        .filter(|(_, e)| e.available && e.status != "failed")
+        .flat_map(|(_, e)| e.sessions.iter().map(|s| s.identity.key.clone()))
+        .collect();
+    let current_facts: BTreeSet<_> = entries
+        .iter()
+        .filter(|(_, e)| e.available && e.status != "failed")
+        .flat_map(|(_, e)| e.facts.iter().map(|f| f.event_key.clone()))
+        .collect();
+    let current_messages: BTreeSet<_> = entries
+        .iter()
+        .filter(|(_, e)| e.available && e.status != "failed")
+        .flat_map(|(_, e)| {
+            e.messages
+                .iter()
+                .map(|m| (m.session_key.clone(), m.native_id.clone()))
+        })
+        .collect();
+    entries.sort_by_key(|(_, entry)| (entry.available && entry.status != "failed", entry.priority));
     let mut sessions: BTreeMap<String, SessionDescriptor> = BTreeMap::new();
     let mut priorities: BTreeMap<String, u8> = BTreeMap::new();
     let mut metadata_conflicts = BTreeSet::new();
@@ -680,7 +800,21 @@ pub(crate) fn read_input_on(conn: &rusqlite::Connection) -> Result<AnalyticsInpu
     let mut conflicts = BTreeSet::new();
     let mut messages: BTreeMap<(String, String), MessageEvent> = BTreeMap::new();
     let mut health: BTreeMap<String, SourceHealth> = BTreeMap::new();
-    for (provider, entry) in entries {
+    for (provider, mut entry) in entries {
+        if !entry.available || entry.status == "failed" {
+            // Preserve absent history, but a currently observed native identity
+            // supersedes an obsolete cached copy of that same identity. Only
+            // simultaneous current copies can disagree as native replicas.
+            entry
+                .sessions
+                .retain(|s| !current_sessions.contains(&s.identity.key));
+            entry
+                .facts
+                .retain(|f| !current_facts.contains(&f.event_key));
+            entry.messages.retain(|m| {
+                !current_messages.contains(&(m.session_key.clone(), m.native_id.clone()))
+            });
+        }
         let source = source_id(&provider).to_owned();
         for reason in &entry.reasons {
             input.source_reasons.push(SourceReason {
@@ -700,7 +834,14 @@ pub(crate) fn read_input_on(conn: &rusqlite::Connection) -> Result<AnalyticsInpu
                 error_code: None,
             });
         if entry.status != "ok" {
-            health.status = "partial".into();
+            if entry.status == "failed" || health.status != "failed" {
+                health.status = if entry.status == "failed" {
+                    "failed"
+                } else {
+                    "partial"
+                }
+                .into();
+            }
             health.error_code = Some(
                 if entry.status == "failed" {
                     "sourceReadFailed"
@@ -800,15 +941,46 @@ pub(crate) fn read_input_on(conn: &rusqlite::Connection) -> Result<AnalyticsInpu
             .is_some_and(|key| !keys.contains(key))
         {
             session.identity.verified_root_key = None;
+            session.messages_supported = false;
             session
                 .message_reasons
                 .push("sessionParentUnavailable".into());
+            input.source_reasons.push(SourceReason {
+                tool_id: session.identity.tool_id.clone(),
+                source_id: source_id(&session.identity.tool_id).into(),
+                reason: "sessionParentUnavailable".into(),
+            });
         }
     }
+    isolate_invalid_roots(&mut sessions, &mut input.source_reasons);
     input.sessions = sessions.into_values().collect();
     input.facts = facts.into_values().collect();
     input.messages = messages.into_values().collect();
-    input.sources = health.into_values().collect();
+    // Read the common health under this query's existing SQLite snapshot.
+    // A successful old cache never upgrades an unattempted/failed channel.
+    let common = super::usage_health::source_health_on(conn)?;
+    for mut source in common
+        .into_iter()
+        .filter(|s| source_id(&s.tool_id) != "unsupported")
+    {
+        if let Some(cached) = health.remove(&source.source_id) {
+            if health_severity(&cached.status) > health_severity(&source.status) {
+                source.status = cached.status;
+                source.error_code = cached.error_code;
+            }
+            source.last_attempt_at_ms = source
+                .last_attempt_at_ms
+                .into_iter()
+                .chain(cached.last_attempt_at_ms)
+                .max();
+            source.last_success_at_ms = source
+                .last_success_at_ms
+                .zip(cached.last_success_at_ms)
+                .map(|(a, b)| a.min(b));
+        }
+        input.sources.push(source);
+    }
+    input.sources.extend(health.into_values());
     if input.sessions.is_empty() && input.source_reasons.is_empty() {
         input.reasons.push("analyticsIndexEmpty".into());
     }
@@ -1364,5 +1536,214 @@ mod tests {
             .source_reasons
             .iter()
             .any(|r| r.tool_id == "claude" && r.reason == "sourceMissing"));
+    }
+    #[test]
+    fn session_analytics_index_cache_success_cannot_hide_common_failed_or_pending_health() {
+        use crate::services::usage_health::{self, Channel, Outcome};
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::memory().unwrap();
+        let path = dir.path().join("c.jsonl");
+        write(&path, &row("c", "m", 3));
+        refresh_sources(&db, &[spec(&path)]).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            let ledger =
+                usage_health::begin_on(&conn, "claude", "session_log", Channel::Ledger, 1000)
+                    .unwrap();
+            usage_health::finish_on(&conn, &ledger, Outcome::Ok, 1100).unwrap();
+            let analytics =
+                usage_health::begin_on(&conn, "claude", "session_log", Channel::Analytics, 1200)
+                    .unwrap();
+            usage_health::finish_on(
+                &conn,
+                &analytics,
+                Outcome::Failed("usage.sources.readFailed"),
+                1300,
+            )
+            .unwrap();
+        }
+        let input = read_input(&db).unwrap();
+        assert_eq!(input.facts.len(), 1);
+        let source = input
+            .sources
+            .iter()
+            .find(|s| s.tool_id == "claude")
+            .unwrap();
+        assert_eq!(source.status, "failed");
+        assert_eq!(source.last_success_at_ms, None);
+        {
+            let conn = db.conn.lock().unwrap();
+            usage_health::begin_on(&conn, "claude", "session_log", Channel::Analytics, 1400)
+                .unwrap();
+        }
+        let pending = read_input(&db).unwrap();
+        assert_eq!(
+            pending
+                .sources
+                .iter()
+                .find(|s| s.tool_id == "claude")
+                .unwrap()
+                .status,
+            "unknown"
+        );
+    }
+    #[test]
+    fn session_analytics_index_corrupt_common_health_remains_unknown_and_keeps_native_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::memory().unwrap();
+        let path = dir.path().join("c.jsonl");
+        write(&path, &row("c", "m", 3));
+        refresh_sources(&db, &[spec(&path)]).unwrap();
+        db.set_setting(
+            crate::services::usage_health::SETTING_KEY,
+            "not valid health",
+        )
+        .unwrap();
+        let input = read_input(&db).unwrap();
+        assert_eq!(input.facts.len(), 1);
+        let source = input
+            .sources
+            .iter()
+            .find(|s| s.tool_id == "claude")
+            .unwrap();
+        assert_eq!(source.status, "unknown");
+        assert_eq!(source.last_success_at_ms, None);
+        assert_eq!(
+            source.error_code.as_deref(),
+            Some("usage.sources.invalidHealth")
+        );
+    }
+    #[test]
+    fn session_analytics_index_invalid_native_parent_cycle_is_scoped_and_does_not_block_a_healthy_tool(
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::memory().unwrap();
+        let native = dir.path().join("opencode.db");
+        let oc = oc_db(&native);
+        oc.execute_batch(
+            "UPDATE session SET parent_id=CASE id WHEN 'ses_a' THEN 'ses_b' ELSE 'ses_a' END",
+        )
+        .unwrap();
+        let codex = dir.path().join("x.jsonl");
+        std::fs::write(&codex,[json!({"type":"session_meta","payload":{"id":"x","cwd":"/p","source":"cli"}}),json!({"type":"event_msg","timestamp":"2026-10-15T00:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5,"output_tokens":2}}}})].iter().map(Value::to_string).collect::<Vec<_>>().join("\n")).unwrap();
+        let mut oc_spec = spec(&native);
+        oc_spec.provider = "opencode".into();
+        let mut cx_spec = spec(&codex);
+        cx_spec.provider = "codex".into();
+        refresh_sources(&db, &[oc_spec, cx_spec]).unwrap();
+        let query = crate::services::usage_query::UsageQueryV1 {
+            version: 1,
+            start_ms: Some(1792022400000),
+            end_ms: 1792108800000,
+            tool_ids: vec!["codex".into()],
+            model_ids: vec![],
+            project_ids: vec![],
+            source_ids: vec![],
+        };
+        let result = crate::services::session_analytics_api::query(
+            &db,
+            query.clone(),
+            "ofox.ai",
+            1792108800000,
+            &chrono::Utc,
+        )
+        .unwrap();
+        assert_eq!(result.totals.tokens.total_tokens, 7);
+        assert!(!result
+            .coverage
+            .reasons
+            .iter()
+            .any(|r| r == "invalidSessionRoot"));
+        let mut all = query;
+        all.tool_ids.clear();
+        let result = crate::services::session_analytics_api::query(
+            &db,
+            all,
+            "ofox.ai",
+            1792108800000,
+            &chrono::Utc,
+        )
+        .unwrap();
+        assert_eq!(result.coverage.state, "partial");
+        assert!(result
+            .coverage
+            .reasons
+            .iter()
+            .any(|r| r == "invalidSessionRoot"));
+    }
+    #[test]
+    fn session_analytics_index_unknown_stamp_peer_does_not_reparse_an_unchanged_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::memory().unwrap();
+        let path = dir.path().join("c.jsonl");
+        write(&path, &row("c", "m", 3));
+        refresh_sources(&db, &[spec(&path)]).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            let parts = source_cache::read_on(&conn, path.to_str().unwrap(), "claude").unwrap();
+            let mut value = parts.value(Part::Analytics).unwrap().clone();
+            value["stamp"]["futurePeer"] = json!({"preserve":"opaque"});
+            value["stamp"]["native"]["futurePhysicalPeer"] = json!("opaque");
+            source_cache::merge_on(
+                &conn,
+                path.to_str().unwrap(),
+                "claude",
+                None,
+                Part::Analytics,
+                &parts.token(Part::Analytics),
+                Some(value),
+            )
+            .unwrap();
+        }
+        let warm = refresh_sources(&db, &[spec(&path)]).unwrap();
+        assert_eq!(warm.parsed, 0);
+        assert_eq!(warm.unchanged, 1);
+        let conn = db.conn.lock().unwrap();
+        let parts = source_cache::read_on(&conn, path.to_str().unwrap(), "claude").unwrap();
+        assert_eq!(
+            parts.value(Part::Analytics).unwrap()["stamp"]["futurePeer"]["preserve"],
+            "opaque"
+        );
+        assert_eq!(
+            parts.value(Part::Analytics).unwrap()["stamp"]["native"]["futurePhysicalPeer"],
+            "opaque"
+        );
+    }
+    #[test]
+    fn session_analytics_index_moved_revised_source_supersedes_its_missing_cached_replica() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::memory().unwrap();
+        let old = dir.path().join("old.jsonl");
+        let new = dir.path().join("new.jsonl");
+        let mut before = row("s", "m", 3);
+        before["cwd"] = json!("/before");
+        write(&old, &before);
+        refresh_sources(&db, &[spec(&old)]).unwrap();
+        std::fs::rename(&old, &new).unwrap();
+        let mut revised = row("s", "m", 9);
+        revised["cwd"] = json!("/after");
+        revised["timestamp"] = json!("2026-10-15T00:01:00Z");
+        write(&new, &revised);
+        refresh_sources(&db, &[spec(&new)]).unwrap();
+        let input = read_input(&db).unwrap();
+        assert_eq!(
+            input.facts.len(),
+            1,
+            "missing old replicas are not current conflicting calls"
+        );
+        assert_eq!(input.facts[0].buckets[0], 9);
+        assert_eq!(input.messages.len(), 1);
+        assert_eq!(input.messages[0].at_ms, 1792022460000);
+        assert_eq!(input.sessions.len(), 1);
+        assert_eq!(input.sessions[0].project_path.as_deref(), Some("/after"));
+        assert!(input.sessions[0].source_available);
+        assert!(input
+            .source_reasons
+            .iter()
+            .any(|r| r.reason == "sourceMissing"));
+        assert!(!input.source_reasons.iter().any(|r| matches!(
+            r.reason.as_str(),
+            "conflictingUsageReplica" | "conflictingMessageReplica" | "conflictingSessionMetadata"
+        )));
     }
 }

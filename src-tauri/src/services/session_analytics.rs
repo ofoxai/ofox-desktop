@@ -193,6 +193,7 @@ fn incomplete_message_reason(reason: &str) -> bool {
             | "sessionIdentityUnavailable"
             | "sessionRoleNotRecorded"
             | "sessionParentUnavailable"
+            | "invalidSessionRoot"
             | "incompleteSource"
     )
 }
