@@ -1,8 +1,10 @@
 # Usage analytics IPC contract
 
 This document describes the version 1 query and request snapshot implementation.
-Database schema 11 is unchanged. It is separate from the legacy saved-cost APIs
-and from source parsing, maintenance and session analytics.
+Database schema 11 is unchanged. Query projections are separate from the legacy
+saved-cost APIs, source parsing and maintenance. The cached session analysis and
+shared project association are described in [session analytics](usage-session-analytics.md)
+and [project filters](usage-project-filter.md).
 
 ## Query and receipts
 
@@ -24,8 +26,11 @@ Times are Unix milliseconds and the interval is `[startMs, endMs)`. A null start
 means all earlier history. An empty interval is valid. ID arrays are exact,
 case-sensitive matches; empty arrays mean all. Normalization sorts and removes
 duplicates, permits at most 256 IDs per array and 512 bytes per nonempty ID.
-Overview and request queries reject nonempty `projectIds` until a proven project
-join is available. They do not guess a project from a provider or a tool.
+Overview, requests and cached session analysis accept the same `projectIds`.
+Only an owned import tuple and native session ID can join a verified cached root
+session and project. A proxy row with the same bare session ID is not evidence
+of that project. Unresolved parent metadata is distinct from a resolved session
+whose native directory is unknown.
 
 Every versioned response carries an explicit receipt:
 
@@ -46,8 +51,10 @@ Separate overview and request calls are separate projections; they do not claim
 a shared cross-command persistent snapshot.
 
 `get_usage_capabilities()` returns `{queryVersion: 1, requestSnapshots: true,
-csv: true, projectFilter: false, sources: SourceCapability[]}`. The frontend must
-check this before relying on versioned filters with an older backend.
+csv: true, projectFilter: true, localRefresh: true, sessionAnalytics: true,
+sessionProjectFilter: true, sources: SourceCapability[]}`. Per-source capabilities
+remain authoritative: a new event-time reader does not imply a cached session or
+project bridge. The frontend checks capabilities before using an older backend.
 
 ## Overview
 
@@ -55,13 +62,18 @@ check this before relying on versioned filters with an older backend.
 When query is present it is authoritative; a 90-day or custom UI range sends
 `period: "all"` and an explicit query. Query mode is a pure database read and
 does not synchronize sources, fetch prices or rewrite saved costs. Without query,
-the previous period planning and debounced synchronization remain available.
+the previous period planning remains available. Synchronization uses the shared
+local coordinator described below.
 
 The response retains existing totals, series, tool/model breakdowns and
 `costUsd`. It adds the receipt, `coverage`, `pricingCoverage`, `options`, `sources`,
-and `estimate` in each totals/series entry. `options` contains `toolIds`, `modelIds`
-and `sourceIds` from available historical detail and rollups, not only tools with
-current bindings. Overview `start`, `end`, and series timestamps remain
+and `estimate` in each totals/series entry. `options` contains `toolIds`, `modelIds`,
+`sourceIds` and `projects` from available history and verified cached associations,
+not only tools with current bindings. The response also adds `byProject` and
+`attribution: {sessionCount, projectCount, unassociatedRecords, partial}`. These
+counts describe identified associations; they do not certify a complete historic
+session or project total. A resolved unknown-directory group is not an identified
+project. Overview `start`, `end`, and series timestamps remain
 milliseconds in both query and legacy no-query mode. Legacy request-log filters
 retain their seconds contract.
 
@@ -71,6 +83,9 @@ Legacy date rollups have local-date precision only. Only fully included natural
 days can enter an exact query; partial boundary days are excluded and reported.
 Source-specific queries exclude rollups whose source identity was not retained.
 Detailed request queries exclude all rollups while reporting unavailable history.
+Project filters exclude old rollups without a retained project dimension and
+report `legacyProjectUnavailable`. `excludedRollupDays` counts excluded rollup
+rows, which may include multiple tools or models for the same day.
 
 ## Coverage and measurement
 
@@ -97,6 +112,7 @@ type SourceCapability = {
   toolId: string;
   sourceIds: string[];
   usageSupported: boolean;
+  lifetimeUsageSupported: boolean;
   sessionAnalyticsSupported: boolean;
   projectFilterSupported: boolean;
   reason: string | null;
@@ -104,11 +120,42 @@ type SourceCapability = {
 ```
 
 Unknown source health cannot certify complete coverage. Source-specific health
-is read from the database setting `usage_source_health_v1`; absent sources remain
-unknown. A combined synchronization finish timestamp does not prove that each
-source was read successfully. Supported usage readers are Claude, Codex, Gemini
-and OpenCode. Unsupported tools are explicit registry entries, including the
-ChatGPT mode whose records belong to Codex. No separate ChatGPT usage is inferred.
+is read from the machine-local database setting `usage_source_health_v1`; absent
+sources remain unknown. Ledger and Analytics attempts have separate CAS revisions
+and must match the local ledger epoch. Required channels cannot be upgraded by
+an older successful cache. Partial or failed attempts retain the previous fully
+trustworthy success time. This key is excluded from export and reconciled with
+the final local value during restore. A combined synchronization finish timestamp
+does not prove that every source was read successfully.
+
+Event-time readers currently cover Claude, Codex, Gemini, OpenCode, WorkBuddy and
+native v0 dsh within each reader's coverage limits. Cached session/project bridges
+currently cover the first four. Hermes exposes independent cumulative statistics
+through `lifetimeUsageSupported`; it has no event-time ledger reader. Pi and
+OpenClaw remain unavailable until their reader integration is complete. ChatGPT
+mode shares Codex records; no separate general ChatGPT usage is inferred.
+
+## Local refresh and cumulative sources
+
+`refresh_local_usage()` refreshes native facts and cached session analysis through
+one coordinator without account or price requests. A lightweight observation of
+source metadata and database revisions avoids reopening unchanged transcripts.
+Failure remains retryable even when the next observation is unchanged. Request
+snapshots stay frozen until the user starts a new query.
+
+Concurrent callers share the running worker. Cancellation of a waiter does not
+release the worker's gate. A forced manual request during a running scan schedules
+one follow-up generation; requests during that follow-up join it. Database change
+counters invalidate warm observations but are not ingestion identity proofs.
+`sync_session_usage()` retains explicit manual pricing refresh and forced local
+synchronization for compatible callers.
+
+`get_usage_source_summary({toolId: "hermes"})` is an explicit independent read of
+native cumulative counters. It returns a version 1 lifetime response with its own
+snapshot, count/model/pricing coverage and current resolved-apex estimates.
+Date/project filters do not apply to this lifetime summary. It does not synthesize
+request IDs or event dates, and its counts never enter the event-time overview,
+daily chart or request export. See [Hermes lifetime statistics](usage-hermes-lifetime.md).
 
 Request rows add `observedStatusCode: number | null` and
 `observedLatencyMs: number | null`. Imported placeholder success codes do not
