@@ -23,6 +23,8 @@ mod session_usage_atomic_tests;
 pub mod session_usage_codex;
 pub mod session_usage_gemini;
 pub mod session_usage_opencode;
+#[cfg(test)]
+mod session_usage_semantics_tests;
 pub mod skill;
 // Test-only fake clock. The production loops in `lib.rs::run` currently
 // use `tokio::time::sleep` directly; this trait is kept ready so future
@@ -36,6 +38,7 @@ pub mod subscription;
 pub mod usage_cache;
 pub mod usage_maintenance;
 pub mod usage_overview;
+pub mod usage_source;
 pub mod usage_stats;
 pub mod usage_sync;
 pub(crate) mod usage_sync_db;

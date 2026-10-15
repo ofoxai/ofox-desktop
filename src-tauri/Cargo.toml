@@ -103,7 +103,7 @@ webkit2gtk = { version = "2.0.1", features = ["v2_16"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 process-wrap = { version = "=10.0.1", default-features = false, features = ["tokio1", "job-object", "kill-on-drop", "creation-flags"] }
-windows = { version = "=0.62.2", default-features = false, features = ["Win32_System_Threading"] }
+windows = { version = "=0.62.2", default-features = false, features = ["Win32_System_Threading", "Win32_Storage_FileSystem"] }
 winreg = "0.52"
 
 [target.'cfg(target_os = "macos")'.dependencies]

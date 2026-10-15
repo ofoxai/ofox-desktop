@@ -6,7 +6,8 @@ use crate::{
 };
 use rusqlite::{params, Connection, OptionalExtension};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct SyncState {
     pub modified: i64,
     pub offset: i64,

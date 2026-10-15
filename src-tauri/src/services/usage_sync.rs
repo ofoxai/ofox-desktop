@@ -265,7 +265,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(flag, "done");
+        assert_eq!(flag, "partial");
     }
 
     #[test]

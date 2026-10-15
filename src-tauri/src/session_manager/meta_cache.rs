@@ -8,12 +8,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
-use std::time::UNIX_EPOCH;
 
 use super::providers;
+use super::source_cache::{self, Part, SourceStamp};
 use super::title::{titled, TitleCandidates};
 use super::SessionMeta;
 use crate::database::Database;
+use crate::error::AppError;
 
 /// Bump to read every cached file again after a change to what is read.
 pub const PARSER_VERSION: i64 = 2;
@@ -30,9 +31,7 @@ pub struct SessionDetails {
 
 /// A file's stamp: its size and modification time in nanoseconds.
 pub(crate) fn stamp(path: &Path) -> Option<String> {
-    let meta = std::fs::metadata(path).ok()?;
-    let modified = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
-    Some(format!("{}:{}", meta.len(), modified.as_nanos()))
+    serde_json::to_string(&SourceStamp::at(path).ok()?).ok()
 }
 
 /// Read a whole session file for its details.
@@ -49,13 +48,14 @@ struct File {
     session_id: String,
     path: PathBuf,
     stamp: String,
+    expected: Option<String>,
 }
 
 /// Title every Claude and Codex session of a listing from its whole files and
 /// count its messages: from the cache where a file is unchanged, else read
 /// (and cached when there is a database).
 pub(crate) fn enrich(listing: &mut [SessionMeta], db: Option<&Database>) {
-    let files = listing
+    let mut files = listing
         .iter()
         .filter(|meta| PROVIDERS.contains(&meta.provider_id.as_str()))
         .filter_map(|meta| {
@@ -65,6 +65,7 @@ pub(crate) fn enrich(listing: &mut [SessionMeta], db: Option<&Database>) {
                 session_id: meta.session_id.clone(),
                 stamp: stamp(&path)?,
                 path,
+                expected: None,
             })
         })
         .collect::<Vec<_>>();
@@ -72,13 +73,15 @@ pub(crate) fn enrich(listing: &mut [SessionMeta], db: Option<&Database>) {
     let mut cached = db.map(load).unwrap_or_default();
     let mut details: HashMap<PathBuf, SessionDetails> = HashMap::new();
     let mut missing = Vec::new();
-    for file in &files {
+    for file in &mut files {
         let key = file.path.to_string_lossy();
-        match cached.remove(key.as_ref()) {
+        let cell = cached.remove(key.as_ref());
+        file.expected = cell.as_ref().and_then(|cell| cell.token.clone());
+        match cell.and_then(|cell| cell.valid) {
             Some((stamp, found)) if stamp == file.stamp => {
                 details.insert(file.path.clone(), found);
             }
-            _ => missing.push(file),
+            _ => missing.push(&*file),
         }
     }
 
@@ -89,9 +92,7 @@ pub(crate) fn enrich(listing: &mut [SessionMeta], db: Option<&Database>) {
         .filter_map(|(file, found)| Some((*file, found?)))
         .collect::<Vec<_>>();
     if let Some(db) = db {
-        // rows left in `cached` are files no longer listed (or of an older parser)
-        let gone = cached.into_keys().collect::<Vec<_>>();
-        if let Err(e) = store(db, &fresh, &gone) {
+        if let Err(e) = store(db, &fresh) {
             log::warn!("[SESSIONS] meta cache write failed: {e}");
         }
     }
@@ -179,30 +180,62 @@ fn parse_all(files: &[&File]) -> Vec<Option<SessionDetails>> {
     results.into_inner().unwrap_or_else(|e| e.into_inner())
 }
 
-type Cached = HashMap<String, (String, SessionDetails)>;
+struct CachedPart {
+    token: Option<String>,
+    valid: Option<(String, SessionDetails)>,
+}
+type Cached = HashMap<String, CachedPart>;
 
 /// Every cached row of the current parser, by source path.
 fn load(db: &Database) -> Cached {
-    let rows = (|| -> rusqlite::Result<Cached> {
+    let rows = (|| -> Result<Cached, AppError> {
         let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
         let mut stmt = conn.prepare(
-            "SELECT source_path, stamp, meta_json FROM session_meta_cache
-             WHERE parser_version = ?1 AND provider_id IN ('claude', 'codex')",
+            "SELECT source_path, provider_id, stamp, parser_version, meta_json FROM session_meta_cache
+             WHERE provider_id IN ('claude', 'codex')",
         )?;
-        let rows = stmt.query_map([PARSER_VERSION], |row| {
+        let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
+                (
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ),
             ))
         })?;
         let mut cached = HashMap::new();
         for row in rows {
-            let (path, stamp, json) = row?;
-            let found = json.and_then(|json| serde_json::from_str(&json).ok());
-            if let (Some(stamp), Some(found)) = (stamp, found) {
-                cached.insert(path, (stamp, found));
-            }
+            let (path, row) = row?;
+            let provider = row.0.clone().unwrap_or_default();
+            let parts = match source_cache::decode_row(row, &provider) {
+                Ok(parts) => parts,
+                Err(e) => {
+                    log::warn!("[SESSIONS] cache part unavailable: {e}");
+                    continue;
+                }
+            };
+            let valid = parts.value(Part::Metadata).and_then(|v| {
+                if v["parserVersion"].as_i64() != Some(PARSER_VERSION) {
+                    return None;
+                }
+                let details = v.get("details")?;
+                if details.get("candidates").is_none() && details.get("messageCount").is_none() {
+                    return None;
+                }
+                Some((
+                    v["stamp"].as_str()?.to_owned(),
+                    serde_json::from_value(details.clone()).ok()?,
+                ))
+            });
+            cached.insert(
+                path,
+                CachedPart {
+                    token: parts.token(Part::Metadata),
+                    valid,
+                },
+            );
         }
         Ok(cached)
     })();
@@ -212,48 +245,44 @@ fn load(db: &Database) -> Cached {
     })
 }
 
-/// Write the files read again, and forget the rows of files no longer listed
-/// or read by an older parser.
-fn store(
-    db: &Database,
-    fresh: &[(&File, SessionDetails)],
-    gone: &[String],
-) -> rusqlite::Result<()> {
-    if fresh.is_empty() && gone.is_empty() {
+/// Only metadata is replaced. A filtered/incomplete listing is not evidence
+/// that a source disappeared, and never deletes another part's usage proof.
+fn store(db: &Database, fresh: &[(&File, SessionDetails)]) -> Result<(), AppError> {
+    if fresh.is_empty() {
         return Ok(());
     }
     let mut conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
-    let tx = conn.transaction()?;
-    {
-        let now = chrono::Utc::now().timestamp_millis();
-        let mut upsert = tx.prepare(
-            "INSERT OR REPLACE INTO session_meta_cache
-                (source_path, provider_id, session_id, stamp, parser_version, meta_json, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        )?;
-        for (file, found) in fresh {
-            let json = serde_json::to_string(found).unwrap_or_default();
-            upsert.execute(rusqlite::params![
-                file.path.to_string_lossy(),
-                file.provider,
-                file.session_id,
-                file.stamp,
-                PARSER_VERSION,
-                json,
-                now,
-            ])?;
+    let mut first_error = None;
+    for (file, found) in fresh {
+        let result = (|| -> Result<(), AppError> {
+            let tx = conn.transaction()?;
+            // A changed source cannot publish stale details after parsing.
+            if stamp(&file.path).as_deref() != Some(&file.stamp) {
+                return Err(AppError::Database("metadata source changed; retry".into()));
+            }
+            source_cache::merge_on(
+                &tx,
+                &file.path.to_string_lossy(),
+                &file.provider,
+                Some(&file.session_id),
+                Part::Metadata,
+                &file.expected,
+                Some(serde_json::json!({"parserVersion":PARSER_VERSION,
+                "stamp":file.stamp,"sourceStamp":serde_json::from_str::<serde_json::Value>(&file.stamp).ok(),"details":found})),
+            )?;
+            tx.commit()?;
+            Ok(())
+        })();
+        if let Err(e) = result {
+            if first_error.is_none() {
+                first_error = Some(e);
+            }
         }
-        let mut forget = tx.prepare("DELETE FROM session_meta_cache WHERE source_path = ?1")?;
-        for path in gone {
-            forget.execute([path])?;
-        }
-        tx.execute(
-            "DELETE FROM session_meta_cache
-             WHERE provider_id IN ('claude', 'codex') AND parser_version != ?1",
-            [PARSER_VERSION],
-        )?;
     }
-    tx.commit()
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -360,7 +389,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn the_row_of_a_file_no_longer_listed_is_forgotten() {
+    fn a_file_absent_from_a_listing_retains_its_cache_parts() {
         let sandbox = sandbox();
         let db = Database::memory().unwrap();
         let path = claude_session(sandbox.home());
@@ -374,7 +403,7 @@ mod tests {
             .unwrap()
             .query_row("SELECT COUNT(*) FROM session_meta_cache", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(rows, 0);
+        assert_eq!(rows, 1);
     }
 
     #[test]

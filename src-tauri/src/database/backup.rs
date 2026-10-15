@@ -171,6 +171,16 @@ impl Database {
         prepare(&temp_conn)?;
         Self::validate_basic_state(&temp_conn)?;
         Self::restore_tables(&local_snapshot, &temp_conn, preserve_tables)?;
+        if ![
+            "proxy_request_logs",
+            "session_log_sync",
+            "session_meta_cache",
+        ]
+        .iter()
+        .all(|table| preserve_tables.contains(table))
+        {
+            crate::session_manager::source_cache::revoke_usage_on(&temp_conn)?;
+        }
         crate::services::library::restore_machine_state(&local_snapshot, &temp_conn)?;
 
         // 使用 Backup 将临时库原子写回主库
@@ -662,6 +672,7 @@ impl Database {
         Self::create_tables_on_conn(&staged)?;
         Self::apply_schema_migrations_on_conn(&staged)?;
         Self::restore_tables(&local_snapshot, &staged, MACHINE_LOCAL_TABLES)?;
+        crate::session_manager::source_cache::revoke_usage_on(&staged)?;
         crate::services::library::restore_machine_state(&local_snapshot, &staged)?;
         drop(source_conn);
         let safety_backup = self.backup_database_file()?;
@@ -1178,8 +1189,13 @@ mod tests {
 
     fn column_values(db: &Database, table: &str, column: &str) -> Result<Vec<String>, AppError> {
         let conn = crate::database::lock_conn!(db.conn);
+        let condition = if table == "maintenance_flags" {
+            " WHERE key != 'usage_ledger_epoch_v1'"
+        } else {
+            ""
+        };
         let values = conn
-            .prepare(&format!("SELECT {column} FROM {table}"))?
+            .prepare(&format!("SELECT {column} FROM {table}{condition}"))?
             .query_map([], |row| row.get(0))?
             .collect::<Result<_, _>>()?;
         Ok(values)

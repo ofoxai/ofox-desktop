@@ -18,6 +18,7 @@ use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
 use crate::proxy::usage::parser::TokenUsage;
+use crate::services::usage_source::{self, Prepared, ProviderIndex, Snapshot};
 use crate::services::usage_sync_db::{
     commit_sync_batch, read_sync_state, CheckpointChange, SyncState,
 };
@@ -25,7 +26,6 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -84,10 +84,11 @@ pub fn sync_claude_session_logs(db: &Database) -> Result<SessionSyncResult, AppE
     // 收集所有 .jsonl 文件
     let jsonl_files = collect_jsonl_files(&projects_dir);
 
+    let mut index = ProviderIndex::load(db, "claude", &projects_dir)?;
     for file_path in &jsonl_files {
         result.files_scanned += 1;
 
-        match sync_single_file(db, file_path) {
+        match sync_single_file_with_index(db, file_path, &mut index) {
             Ok((imported, skipped)) => {
                 result.imported += imported;
                 result.skipped += skipped;
@@ -162,127 +163,119 @@ fn session_of_path(path: &Path) -> Option<String> {
 fn parse_claude_file(
     file_path: &Path,
     skip_lines: i64,
-) -> Result<(Vec<ParsedAssistantUsage>, i64), AppError> {
-    let file =
-        fs::File::open(file_path).map_err(|e| AppError::Config(format!("无法打开文件: {e}")))?;
-    let reader = BufReader::new(file);
-
-    let mut line_offset: i64 = 0;
+) -> Result<(Vec<ParsedAssistantUsage>, i64, bool), AppError> {
     let mut messages: Vec<ParsedAssistantUsage> = Vec::new();
     let mut index_of: HashMap<String, usize> = HashMap::new();
     let mut current_session_id: Option<String> = None;
+    let mut identified = true;
 
-    for line_result in reader.lines() {
-        line_offset += 1;
-
-        // 跳过已处理的行
-        if line_offset <= skip_lines {
-            continue;
-        }
-
-        let line = match line_result {
-            Ok(l) => l,
-            Err(_) => continue, // 容忍不完整的最后一行
-        };
-
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let value: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        // 提取 session ID (从 system 或首条消息)
-        if current_session_id.is_none() {
-            if let Some(sid) = value.get("sessionId").and_then(|v| v.as_str()) {
-                current_session_id = Some(sid.to_string());
-            }
-        }
-
-        // 只处理 assistant 类型的消息
-        if value.get("type").and_then(|t| t.as_str()) != Some("assistant") {
-            continue;
-        }
-
-        let message = match value.get("message") {
-            Some(m) => m,
-            None => continue,
-        };
-
-        let msg_id = match message.get("id").and_then(|v| v.as_str()) {
-            Some(id) => id.to_string(),
-            None => continue,
-        };
-
-        let usage = match message.get("usage") {
-            Some(u) => u,
-            None => continue,
-        };
-
-        let parsed = ParsedAssistantUsage {
-            message_id: msg_id.clone(),
-            model: message
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string(),
-            input_tokens: usage
-                .get("input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32,
-            output_tokens: usage
-                .get("output_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32,
-            cache_read_tokens: usage
-                .get("cache_read_input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32,
-            cache_creation_tokens: usage
-                .get("cache_creation_input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32,
-            stop_reason: message
-                .get("stop_reason")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            timestamp: value
-                .get("timestamp")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string()),
-            session_id: current_session_id
-                .clone()
-                .or_else(|| session_of_path(file_path)),
-        };
-
-        // 按 message.id 去重：优先保留有 stop_reason 的条目，否则保留最新的
-        match index_of.get(&msg_id) {
-            None => {
-                index_of.insert(msg_id, messages.len());
-                messages.push(parsed);
-            }
-            Some(&i) => {
-                let existing = &messages[i];
-                // 新条目有 stop_reason 而旧条目没有 → 替换
-                // 两个都有或都没有 stop_reason → 取 output_tokens 更大的
-                let should_replace =
-                    if parsed.stop_reason.is_some() && existing.stop_reason.is_none() {
-                        true
-                    } else if parsed.stop_reason.is_some() == existing.stop_reason.is_some() {
-                        parsed.output_tokens > existing.output_tokens
-                    } else {
-                        false
-                    };
-                if should_replace {
-                    messages[i] = parsed;
+    let line_offset = usage_source::json_lines(
+        file_path,
+        |_| true,
+        |line_offset, value| {
+            // 提取 session ID (从 system 或首条消息)
+            if current_session_id.is_none() {
+                if let Some(sid) = value.get("sessionId").and_then(|v| v.as_str()) {
+                    current_session_id = Some(sid.to_string());
                 }
             }
-        }
-    }
+            if line_offset <= skip_lines {
+                return Ok(());
+            }
 
-    Ok((messages, line_offset))
+            // 只处理 assistant 类型的消息
+            if value.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+                return Ok(());
+            }
+
+            let message = match value.get("message") {
+                Some(m) => m,
+                None => return Ok(()),
+            };
+
+            let msg_id = match message.get("id").and_then(|v| v.as_str()) {
+                Some(id) if !id.is_empty() => id.to_string(),
+                _ => {
+                    if message.get("usage").is_some() {
+                        identified = false;
+                    }
+                    return Ok(());
+                }
+            };
+
+            let usage = match message.get("usage") {
+                Some(u) => u,
+                None => return Ok(()),
+            };
+
+            let parsed = ParsedAssistantUsage {
+                message_id: msg_id.clone(),
+                model: message
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                input_tokens: usage_source::checked_token(usage_source::number(
+                    usage,
+                    "input_tokens",
+                )?)?,
+                output_tokens: usage_source::checked_token(usage_source::number(
+                    usage,
+                    "output_tokens",
+                )?)?,
+                cache_read_tokens: usage_source::checked_token(usage_source::number(
+                    usage,
+                    "cache_read_input_tokens",
+                )?)?,
+                cache_creation_tokens: usage_source::checked_token(usage_source::number(
+                    usage,
+                    "cache_creation_input_tokens",
+                )?)?,
+                stop_reason: message
+                    .get("stop_reason")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                timestamp: value
+                    .get("timestamp")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                session_id: current_session_id
+                    .clone()
+                    .or_else(|| session_of_path(file_path)),
+            };
+
+            // 按 message.id 去重：优先保留有 stop_reason 的条目，否则保留最新的
+            match index_of.get(&msg_id) {
+                None => {
+                    index_of.insert(msg_id, messages.len());
+                    messages.push(parsed);
+                }
+                Some(&i) => {
+                    let existing = &messages[i];
+                    // 新条目有 stop_reason 而旧条目没有 → 替换
+                    // 两个都有或都没有 stop_reason → 取 output_tokens 更大的
+                    let should_replace =
+                        if parsed.stop_reason.is_some() && existing.stop_reason.is_none() {
+                            true
+                        } else if parsed.stop_reason.is_some() == existing.stop_reason.is_some() {
+                            parsed.output_tokens >= existing.output_tokens
+                        } else {
+                            false
+                        };
+                    if should_replace {
+                        messages[i] = parsed;
+                    }
+                }
+            }
+            Ok(())
+        },
+    )?;
+
+    Ok((
+        messages,
+        line_offset.offset,
+        line_offset.complete && identified,
+    ))
 }
 
 /// When a reply happened: its line's timestamp, else now.
@@ -301,59 +294,59 @@ fn created_at_of(timestamp: Option<&str>) -> i64 {
         })
 }
 
-/// One call as a session transcript records it, read whole for the archive
-/// backfill; `usage.input_tokens` is fresh input like the stored rows.
-#[derive(Debug, Clone)]
-pub(crate) struct SessionUsageEntry {
-    pub session_id: String,
-    pub model: String,
-    pub usage: TokenUsage,
-    pub created_at: i64,
+pub(crate) fn normalized_facts(
+    path: &Path,
+) -> Result<(Vec<usage_source::NormalizedUsageFact>, bool), AppError> {
+    let (messages, _, complete) = parse_claude_file(path, 0)?;
+    let facts = messages
+        .into_iter()
+        .filter(|m| {
+            m.input_tokens != 0
+                || m.output_tokens != 0
+                || m.cache_read_tokens != 0
+                || m.cache_creation_tokens != 0
+        })
+        .map(|m| usage_source::NormalizedUsageFact {
+            request_id: format!("session:{}", m.message_id),
+            native_key: (!m.message_id.is_empty()).then(|| {
+                usage_source::native_key(
+                    "claude",
+                    m.session_id.as_deref().unwrap_or(""),
+                    &m.message_id,
+                )
+            }),
+            at_ms: usage_source::timestamp_ms(m.timestamp.as_deref()),
+            session_id: m.session_id,
+            usage: TokenUsage {
+                input_tokens: m.input_tokens,
+                output_tokens: m.output_tokens,
+                cache_read_tokens: m.cache_read_tokens,
+                cache_creation_tokens: m.cache_creation_tokens,
+                model: Some(m.model.clone()),
+                message_id: None,
+            },
+            model: m.model,
+        })
+        .collect();
+    Ok((facts, complete))
 }
-
-/// Every Claude call the sync would store, read from every transcript in full:
-/// a message id counts once, in the first file that has it (as the sync keeps the
-/// first row for an id). Calls with no output or no session are left out, as
-/// neither is stored nor archived.
+#[cfg(test)]
+pub(crate) type SessionUsageEntry = usage_source::NormalizedUsageFact;
+#[cfg(test)]
 pub(crate) fn session_entries() -> Vec<SessionUsageEntry> {
-    let projects_dir = get_claude_config_dir().join("projects");
     let mut seen = std::collections::HashSet::new();
-    let mut entries = Vec::new();
-    for file_path in collect_jsonl_files(&projects_dir) {
-        let messages = match parse_claude_file(&file_path, 0) {
-            Ok((messages, _)) => messages,
-            Err(e) => {
-                log::debug!("[SESSION-SYNC] 归档回填跳过 {}: {e}", file_path.display());
-                continue;
-            }
-        };
-        for msg in messages {
-            if msg.output_tokens == 0 || !seen.insert(msg.message_id.clone()) {
-                continue;
-            }
-            let Some(session_id) = msg.session_id.clone() else {
-                continue;
-            };
-            entries.push(SessionUsageEntry {
-                session_id,
-                created_at: created_at_of(msg.timestamp.as_deref()),
-                usage: TokenUsage {
-                    input_tokens: msg.input_tokens,
-                    output_tokens: msg.output_tokens,
-                    cache_read_tokens: msg.cache_read_tokens,
-                    cache_creation_tokens: msg.cache_creation_tokens,
-                    model: Some(msg.model.clone()),
-                    message_id: None,
-                },
-                model: msg.model,
-            });
-        }
-    }
-    entries
+    collect_jsonl_files(&get_claude_config_dir().join("projects"))
+        .into_iter()
+        .flat_map(|p| usage_source::read_normalized("claude", &p).unwrap().facts)
+        .filter(|f| seen.insert(f.request_id.clone()))
+        .collect()
 }
 
-/// 同步单个 JSONL 文件，返回 (imported, skipped)
-fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppError> {
+fn sync_single_file_with_index(
+    db: &Database,
+    file_path: &Path,
+    index: &mut ProviderIndex,
+) -> Result<(u32, u32), AppError> {
     let file_path_str = file_path.to_string_lossy().to_string();
 
     // 获取文件元数据
@@ -368,15 +361,19 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
 
     // 检查同步状态
     let expected = read_sync_state(db, &file_path_str)?;
-    let previous = expected.unwrap_or_default();
 
-    // 文件未变化则跳过
-    if file_modified <= previous.modified {
+    let mut source = Prepared::with_index(db, Snapshot::file(file_path)?, expected, 2, index)?;
+    if source.unchanged {
         return Ok((0, 0));
     }
 
-    // 从上次偏移位置开始增量解析
-    let (messages, line_offset) = parse_claude_file(file_path, previous.offset)?;
+    // A changed file may be rewritten or replaced, not only appended. Stable
+    // native IDs and transactional evidence protect already archived calls.
+    let (messages, line_offset, complete) = parse_claude_file(file_path, 0)?;
+    if !complete {
+        source.evidence.complete_event_identity_set = false;
+        source.evidence.partial("incompleteEnumeration");
+    }
 
     let checkpoint = CheckpointChange {
         key: file_path_str,
@@ -386,7 +383,9 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
             offset: line_offset,
         }),
     };
-    commit_sync_batch(db, &[checkpoint], |conn| {
+    let next = checkpoint.next.unwrap();
+    let result = commit_sync_batch(db, &[checkpoint], |conn| {
+        source.check_on(conn)?;
         // 写入数据库
         let mut imported: u32 = 0;
         let mut skipped: u32 = 0;
@@ -402,19 +401,40 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
             );
 
             // 跳过 output_tokens 为 0 的无意义条目
-            if msg.output_tokens == 0 {
+            if msg.input_tokens == 0
+                && msg.output_tokens == 0
+                && msg.cache_read_tokens == 0
+                && msg.cache_creation_tokens == 0
+            {
                 continue;
             }
-
+            let native = usage_source::native_key(
+                "claude",
+                msg.session_id.as_deref().unwrap_or(""),
+                &msg.message_id,
+            );
+            if !source.should_store_on(
+                conn,
+                &request_id,
+                &native,
+                "session_log",
+                created_at_of(msg.timestamp.as_deref()),
+            )? {
+                skipped += 1;
+                continue;
+            }
             if insert_session_log_entry(conn, &request_id, msg)? {
                 imported += 1;
             } else {
                 skipped += 1;
             }
+            source.evidence.acknowledge(&native);
         }
-
+        source.save_on(conn, next)?;
         Ok((imported, skipped))
-    })
+    })?;
+    index.advance(source);
+    Ok(result)
 }
 
 /// 插入单条会话日志到 proxy_request_logs，返回是否写入 (true=新插入或更新, false=未变)
@@ -472,6 +492,8 @@ fn insert_session_log_entry(
             provider_type, is_streaming, cost_multiplier, created_at, data_source
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
         ON CONFLICT(request_id) DO UPDATE SET
+            model = excluded.model,
+            request_model = excluded.request_model,
             input_tokens = excluded.input_tokens,
             output_tokens = excluded.output_tokens,
             cache_read_tokens = excluded.cache_read_tokens,
@@ -481,7 +503,10 @@ fn insert_session_log_entry(
             cache_read_cost_usd = excluded.cache_read_cost_usd,
             cache_creation_cost_usd = excluded.cache_creation_cost_usd,
             total_cost_usd = excluded.total_cost_usd
-        WHERE data_source = 'session_log' AND excluded.output_tokens > output_tokens",
+        WHERE data_source = 'session_log' AND (model != excluded.model OR request_model IS NOT excluded.request_model OR
+            excluded.output_tokens > output_tokens OR (excluded.output_tokens = output_tokens AND (
+            excluded.input_tokens != input_tokens OR excluded.cache_read_tokens != cache_read_tokens
+            OR excluded.cache_creation_tokens != cache_creation_tokens)))",
         rusqlite::params![
             request_id,
             "_session",         // provider_id: 标记为会话来源

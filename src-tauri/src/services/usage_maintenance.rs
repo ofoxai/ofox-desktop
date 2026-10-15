@@ -7,26 +7,22 @@
 //!   them. Their costs, and those of the Claude session rollups and archive, are
 //!   priced again with `CostCalculator`.
 //! - `backfill_session_archive`: sessions whose old rows were pruned before v11
-//!   have no archive. For every session/model the transcripts still hold, the
-//!   archive is set to (calls older than the prune cutoff, read from the files)
-//!   minus (those calls still live), clamped at 0. Setting rather than adding
-//!   makes it idempotent, and the calls a later prune folds in are exactly the
-//!   live ones subtracted here, so nothing is counted twice.
+//!   have no provable event identities. Preserve existing aggregates and record
+//!   permanent partial coverage; current parsed totals cannot reconstruct or
+//!   safely subtract their contributions. Explicit future proof upgrades may
+//!   requeue this maintenance step.
 //!
 //! A step marks its flag `done` only after it succeeded; a missing flag (a
 //! database that never went through the v11 migration) means nothing to do.
 
-use crate::database::dao::usage_rollup::{parse_cost_usd, usage_prune_cutoff};
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
 use crate::proxy::usage::parser::TokenUsage;
-use crate::services::session_usage::{self, find_model_pricing_for_session, SessionUsageEntry};
-use crate::services::session_usage_codex::{self, find_codex_pricing};
-use crate::services::session_usage_gemini::{self, find_gemini_pricing};
+use crate::services::session_usage::find_model_pricing_for_session;
 use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::str::FromStr;
 
 pub(crate) const RECOMPUTE_CLAUDE_COSTS: &str = "recompute_claude_costs";
@@ -42,9 +38,8 @@ pub fn run_pending(db: &Database) -> Result<(), AppError> {
         log::debug!("[USAGE-MAINT] recomputed Claude costs on {updated} rows");
     }
     if is_pending(db, BACKFILL_SESSION_ARCHIVE)? {
-        let written = backfill_session_archive(db)?;
-        mark_done(db, BACKFILL_SESSION_ARCHIVE)?;
-        log::debug!("[USAGE-MAINT] backfilled {written} session archive rows");
+        let outcome = backfill_session_archive(db)?;
+        log::debug!("[USAGE-MAINT] archive backfill: {outcome:?}");
     }
     Ok(())
 }
@@ -218,237 +213,55 @@ pub(crate) fn recompute_claude_costs(db: &Database) -> Result<usize, AppError> {
     Ok(updated)
 }
 
-/// Per (session, model) usage: token sums, call count, cost and time span.
-#[derive(Debug, Default, Clone, PartialEq)]
-struct Totals {
-    tokens: [i64; 4],
-    count: i64,
-    cost: Decimal,
-    first_at: i64,
-    last_at: i64,
+/// Legacy archive aggregates have no event IDs and can include proxy usage.
+/// No parser revision can prove which individual missing rows they represent.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BackfillOutcome {
+    pub written: usize,
+    pub complete: bool,
+    pub unproven: Vec<&'static str>,
 }
 
-impl Totals {
-    fn add(&mut self, tokens: [i64; 4], cost: Decimal, at: i64) {
-        if self.count == 0 {
-            self.first_at = at;
-            self.last_at = at;
-        }
-        for (sum, n) in self.tokens.iter_mut().zip(tokens) {
-            *sum += n;
-        }
-        self.count += 1;
-        self.cost += cost;
-        self.first_at = self.first_at.min(at);
-        self.last_at = self.last_at.max(at);
-    }
-
-    /// `self` minus `live`, every field clamped at 0.
-    fn less(&self, live: &Totals) -> Totals {
-        let mut tokens = [0; 4];
-        for (i, n) in tokens.iter_mut().enumerate() {
-            *n = (self.tokens[i] - live.tokens[i]).max(0);
-        }
-        Totals {
-            tokens,
-            count: (self.count - live.count).max(0),
-            cost: (self.cost - live.cost).max(Decimal::ZERO),
-            first_at: self.first_at,
-            last_at: self.last_at,
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.count == 0 && self.tokens.iter().all(|n| *n == 0)
-    }
-}
-
-/// A session source: the app type and data source its rows are stored under,
-/// how its models are priced, and its calls read from the files.
-struct Source {
-    app_type: &'static str,
-    data_source: &'static str,
-    price: fn(&Connection, &str) -> Option<ModelPricing>,
-    entries: Vec<SessionUsageEntry>,
-}
-
-/// Set the archive of every session the transcripts hold to (its calls before
-/// the prune cutoff) minus (those still live). Returns the rows written.
-pub(crate) fn backfill_session_archive(db: &Database) -> Result<usize, AppError> {
-    backfill_with(db, read_sources, usage_prune_cutoff)
-}
-
-/// Every session source's calls, read from its files.
-fn read_sources() -> Vec<Source> {
-    vec![
-        Source {
-            app_type: "claude",
-            data_source: "session_log",
-            price: find_model_pricing_for_session,
-            entries: session_usage::session_entries(),
-        },
-        Source {
-            app_type: "codex",
-            data_source: "codex_session",
-            price: find_codex_pricing,
-            entries: session_usage_codex::session_entries(),
-        },
-        Source {
-            app_type: "gemini",
-            data_source: "gemini_session",
-            price: find_gemini_pricing,
-            entries: session_usage_gemini::session_entries(),
-        },
-    ]
-}
-
-/// The backfill with its file reading and its cutoff given.
-fn backfill_with(
-    db: &Database,
-    read: impl FnOnce() -> Vec<Source>,
-    cutoff: impl FnOnce() -> Result<i64, AppError>,
-) -> Result<usize, AppError> {
-    // read the files before taking the database lock
-    let sources = read();
-
+pub(crate) fn backfill_session_archive(db: &Database) -> Result<BackfillOutcome, AppError> {
+    let outcome = BackfillOutcome {
+        written: 0,
+        complete: false,
+        unproven: vec!["legacyArchiveHasNoEventIdentity"],
+    };
     let mut conn = lock_conn!(db.conn);
-    // Taken under the lock, after the read: a prune that ran meanwhile (its
-    // cutoff a day later) already archived the calls up to its cutoff, and the
-    // archive set here must cover them.
-    let cutoff = cutoff()?;
-    let tx = conn
-        .transaction()
-        .map_err(|e| AppError::Database(format!("backfill begin tx: {e}")))?;
-    let mut written = 0;
-    for source in &sources {
-        let parsed = parsed_totals(&tx, source, cutoff);
-        let live = live_totals(&tx, source, cutoff)?;
-        for ((session_id, model), totals) in parsed {
-            let archive = match live.get(&(session_id.clone(), model.clone())) {
-                Some(live) => totals.less(live),
-                None => totals,
-            };
-            if archive.is_empty() {
-                continue;
-            }
-            tx.execute(
-                "INSERT INTO session_usage_archive
-                    (app_type, session_id, model, input_tokens, output_tokens,
-                     cache_read_tokens, cache_creation_tokens, request_count, cost_usd,
-                     first_at, last_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-                 ON CONFLICT(app_type, session_id, model) DO UPDATE SET
-                    input_tokens = excluded.input_tokens,
-                    output_tokens = excluded.output_tokens,
-                    cache_read_tokens = excluded.cache_read_tokens,
-                    cache_creation_tokens = excluded.cache_creation_tokens,
-                    request_count = excluded.request_count,
-                    cost_usd = excluded.cost_usd,
-                    first_at = excluded.first_at,
-                    last_at = excluded.last_at",
-                params![
-                    source.app_type,
-                    session_id,
-                    model,
-                    archive.tokens[0],
-                    archive.tokens[1],
-                    archive.tokens[2],
-                    archive.tokens[3],
-                    archive.count,
-                    archive.cost.normalize().to_string(),
-                    archive.first_at,
-                    archive.last_at,
-                ],
-            )
-            .map_err(|e| AppError::Database(format!("backfill archive write: {e}")))?;
-            written += 1;
-        }
-    }
-    tx.commit()
-        .map_err(|e| AppError::Database(format!("backfill commit: {e}")))?;
-    Ok(written)
-}
-
-/// The source's calls before `cutoff`, read from its files, priced as the sync
-/// prices them.
-fn parsed_totals(
-    conn: &Connection,
-    source: &Source,
-    cutoff: i64,
-) -> BTreeMap<(String, String), Totals> {
-    let mut prices: HashMap<&str, Option<ModelPricing>> = HashMap::new();
-    let mut totals: BTreeMap<(String, String), Totals> = BTreeMap::new();
-    for entry in source.entries.iter().filter(|e| e.created_at < cutoff) {
-        let pricing = prices
-            .entry(entry.model.as_str())
-            .or_insert_with(|| (source.price)(conn, &entry.model));
-        let cost = pricing
-            .as_ref()
-            .map(|p| CostCalculator::calculate(&entry.usage, p, Decimal::ONE).total_cost)
-            .unwrap_or(Decimal::ZERO);
-        let usage = &entry.usage;
-        totals
-            .entry((entry.session_id.clone(), entry.model.clone()))
-            .or_default()
-            .add(
-                [
-                    usage.input_tokens as i64,
-                    usage.output_tokens as i64,
-                    usage.cache_read_tokens as i64,
-                    usage.cache_creation_tokens as i64,
-                ],
-                cost,
-                entry.created_at,
-            );
-    }
-    totals
-}
-
-/// The source's rows still in `proxy_request_logs` from before `cutoff`.
-fn live_totals(
-    conn: &Connection,
-    source: &Source,
-    cutoff: i64,
-) -> Result<HashMap<(String, String), Totals>, AppError> {
-    let db_err = |e: rusqlite::Error| AppError::Database(format!("backfill live rows: {e}"));
-    let mut stmt = conn
-        .prepare(
-            "SELECT session_id, model, input_tokens, output_tokens, cache_read_tokens,
-                    cache_creation_tokens, total_cost_usd, created_at
-             FROM proxy_request_logs
-             WHERE app_type = ?1 AND data_source = ?2 AND created_at < ?3
-               AND session_id IS NOT NULL AND session_id != ''",
-        )
-        .map_err(db_err)?;
-    let rows = stmt
-        .query_map(params![source.app_type, source.data_source, cutoff], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                [r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?],
-                r.get::<_, String>(6)?,
-                r.get::<_, i64>(7)?,
-            ))
-        })
-        .map_err(db_err)?;
-    let mut totals: HashMap<(String, String), Totals> = HashMap::new();
-    for row in rows {
-        let (session_id, model, tokens, cost, at) = row.map_err(db_err)?;
-        let cost = parse_cost_usd(&cost);
-        totals
-            .entry((session_id, model))
-            .or_default()
-            .add(tokens, cost, at);
-    }
-    Ok(totals)
+    let tx = conn.transaction()?;
+    // State and any future proven writes belong to this same transaction.
+    // A permanent proof gap is not pending work: retrying it every refresh
+    // would repeatedly read hundreds of files without establishing identity.
+    tx.execute(
+        "INSERT OR REPLACE INTO maintenance_flags(key,value) VALUES(?1,?2)",
+        params![
+            BACKFILL_SESSION_ARCHIVE,
+            if outcome.complete { DONE } else { "partial" }
+        ],
+    )?;
+    tx.execute(
+        "INSERT OR REPLACE INTO maintenance_flags(key,value) VALUES(?1,?2)",
+        params![
+            "backfill_session_archive_coverage",
+            serde_json::to_string(&outcome)
+                .map_err(|e| AppError::Database(format!("serialize backfill coverage: {e}")))?
+        ],
+    )?;
+    tx.commit()?;
+    Ok(outcome)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::dao::usage_rollup::usage_prune_cutoff;
+    use crate::services::{session_usage, session_usage_codex, session_usage_gemini};
     use crate::test_sandbox::sandbox;
     use chrono::{Duration, Utc};
     use serial_test::serial;
+    use std::collections::BTreeMap;
     use std::path::Path;
 
     const SESSION: &str = "0f3a1c2d-1111-4222-8333-444455556666";
@@ -622,7 +435,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn the_backfill_restores_sessions_pruned_before_the_archive_existed() {
+    fn legacy_pruned_sessions_remain_partial_without_event_proof() {
         let sandbox = sandbox();
         write_transcripts(sandbox.home());
         let expected = reference_totals();
@@ -630,12 +443,18 @@ mod tests {
         let db = database_with_prices();
         sync_all_sources(&db);
         prune_without_archive(&db);
+        let surviving = session_totals(&db);
+        assert_ne!(surviving, expected);
         set_pending(&db);
 
         run_pending(&db).unwrap();
 
-        assert_eq!(session_totals(&db), expected);
-        assert_eq!(archive_rows(&db), 3);
+        assert_eq!(session_totals(&db), surviving);
+        assert_eq!(archive_rows(&db), 0);
+        assert_eq!(
+            backfill_session_archive(&db).unwrap().unproven,
+            ["legacyArchiveHasNoEventIdentity"]
+        );
     }
 
     #[test]
@@ -682,7 +501,7 @@ mod tests {
         run_pending(&db).unwrap();
         let conn = db.conn.lock().unwrap();
         let flags: Vec<(String, String)> = conn
-            .prepare("SELECT key, value FROM maintenance_flags ORDER BY key")
+            .prepare("SELECT key, value FROM maintenance_flags WHERE key IN ('backfill_session_archive','recompute_claude_costs') ORDER BY key")
             .unwrap()
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
             .unwrap()
@@ -691,7 +510,10 @@ mod tests {
         assert_eq!(
             flags,
             [
-                ("backfill_session_archive".to_string(), "done".to_string()),
+                (
+                    "backfill_session_archive".to_string(),
+                    "partial".to_string()
+                ),
                 ("recompute_claude_costs".to_string(), "done".to_string())
             ]
         );
@@ -780,64 +602,28 @@ mod tests {
     }
 
     #[test]
-    fn a_prune_while_the_files_are_read_is_not_overwritten() {
+    fn backfill_does_not_read_sources_or_overwrite_a_prune() {
         let db = database_with_prices();
-        let now = Utc::now().timestamp();
-        let (t1, t2) = (now - 5 * 86400, now - 3 * 86400);
-        let (yesterdays_cutoff, todays_cutoff) = (now - 4 * 86400, now - 2 * 86400);
-        let entry = |at: i64| SessionUsageEntry {
-            session_id: SESSION.to_string(),
-            model: "test-opus".to_string(),
-            usage: usage_of([3, 100, 5000, 1000]),
-            created_at: at,
-        };
-        {
-            let conn = db.conn.lock().unwrap();
-            for (id, at) in [("m1", t1), ("m2", t2)] {
-                conn.execute(
-                    "INSERT INTO proxy_request_logs (request_id, provider_id, app_type, model,
-                        input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                        total_cost_usd, latency_ms, status_code, session_id, created_at,
-                        data_source)
-                     VALUES (?1, '_session', 'claude', 'test-opus', 3, 100, 5000, 1000, '0.01',
-                        0, 200, ?2, ?3, 'session_log')",
-                    params![id, SESSION, at],
-                )
-                .unwrap();
-            }
-        }
-        // yesterday's prune archived m1; m2 is still live
-        db.rollup_and_prune_before(yesterdays_cutoff).unwrap();
-        let cutoff = std::cell::Cell::new(yesterdays_cutoff);
-
-        backfill_with(
-            &db,
-            || {
-                // midnight passes while the files are read: today's prune archives m2
-                cutoff.set(todays_cutoff);
-                db.rollup_and_prune_before(todays_cutoff).unwrap();
-                vec![Source {
-                    app_type: "claude",
-                    data_source: "session_log",
-                    price: find_model_pricing_for_session,
-                    entries: vec![entry(t1), entry(t2)],
-                }]
-            },
-            || Ok(cutoff.get()),
-        )
-        .unwrap();
-
-        let calls: i64 = db
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO session_usage_archive VALUES
+            ('claude','fixture','test-opus',100,10,0,0,1,'0.1234',1,2)",
+                [],
+            )
+            .unwrap();
+        let outcome = backfill_session_archive(&db).unwrap();
+        assert!(!outcome.complete);
+        assert_eq!(outcome.written, 0);
+        let cost: String = db
             .conn
             .lock()
             .unwrap()
-            .query_row(
-                "SELECT COALESCE(SUM(request_count), 0) FROM session_usage_archive
-                 WHERE session_id = ?1",
-                [SESSION],
-                |r| r.get(0),
-            )
+            .query_row("SELECT cost_usd FROM session_usage_archive", [], |r| {
+                r.get(0)
+            })
             .unwrap();
-        assert_eq!(calls, 2, "the call archived during the read is kept");
+        assert_eq!(cost, "0.1234");
     }
 }

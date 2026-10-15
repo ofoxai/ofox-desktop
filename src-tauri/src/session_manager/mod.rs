@@ -1,6 +1,9 @@
+#[cfg(test)]
+mod cache_foundation_tests;
 pub mod managed;
 pub mod meta_cache;
 pub mod providers;
+pub(crate) mod source_cache;
 pub mod terminal;
 pub mod title;
 pub mod transcript;

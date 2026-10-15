@@ -18,13 +18,18 @@ use crate::database::Database;
 use crate::error::AppError;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
 use crate::proxy::usage::parser::TokenUsage;
-use crate::services::session_usage::{SessionSyncResult, SessionUsageEntry};
+use crate::services::session_usage::SessionSyncResult;
+#[cfg(test)]
+use crate::services::session_usage::SessionUsageEntry;
+use crate::services::usage_source::{self, Prepared, ProviderIndex, Snapshot};
 use crate::services::usage_sync_db::{
     commit_sync_batch, read_sync_state, CheckpointChange, SyncState,
 };
 use rust_decimal::Decimal;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -33,7 +38,7 @@ use std::time::SystemTime;
 /// Codex's `input_tokens` is the whole prompt: the cached part
 /// (`cached_input_tokens`) and, in newer versions, what was written to the cache
 /// (`cache_write_input_tokens`) are counted in it.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct CumulativeTokens {
     input: u64,
     cached_input: u64,
@@ -44,7 +49,7 @@ struct CumulativeTokens {
 /// 单次 API 调用的 token 增量（input 仍是 Codex 口径：含缓存部分）
 #[derive(Debug)]
 struct DeltaTokens {
-    input: u32,
+    input: u64,
     cached_input: u32,
     cache_write: u32,
     output: u32,
@@ -59,17 +64,9 @@ impl DeltaTokens {
     /// from or written to the cache.
     fn fresh_input(&self) -> u32 {
         self.input
-            .saturating_sub(self.cached_input)
-            .saturating_sub(self.cache_write)
+            .saturating_sub(self.cached_input as u64)
+            .saturating_sub(self.cache_write as u64) as u32
     }
-}
-
-/// 单文件解析时的运行状态
-struct FileParseState {
-    session_id: Option<String>,
-    current_model: String,
-    prev_total: Option<CumulativeTokens>,
-    event_index: u32,
 }
 
 /// 归一化 Codex 模型名
@@ -90,14 +87,15 @@ fn normalize_codex_model(raw: &str) -> String {
 
     // Step 3: 剥离 ISO 日期后缀 -YYYY-MM-DD（正好 11 字符）
     if name.len() > 11 {
-        let suffix = &name[name.len() - 11..];
-        if suffix.as_bytes()[0] == b'-'
-            && suffix[1..5].chars().all(|c| c.is_ascii_digit())
-            && suffix.as_bytes()[5] == b'-'
-            && suffix[6..8].chars().all(|c| c.is_ascii_digit())
-            && suffix.as_bytes()[8] == b'-'
-            && suffix[9..11].chars().all(|c| c.is_ascii_digit())
-        {
+        if name.get(name.len() - 11..).is_some_and(|suffix| {
+            let b = suffix.as_bytes();
+            b[0] == b'-'
+                && b[1..5].iter().all(u8::is_ascii_digit)
+                && b[5] == b'-'
+                && b[6..8].iter().all(u8::is_ascii_digit)
+                && b[8] == b'-'
+                && b[9..11].iter().all(u8::is_ascii_digit)
+        }) {
             name.truncate(name.len() - 11);
         }
     }
@@ -121,13 +119,13 @@ fn normalize_codex_model(raw: &str) -> String {
 fn compute_delta(prev: &Option<CumulativeTokens>, current: &CumulativeTokens) -> DeltaTokens {
     match prev {
         None => DeltaTokens {
-            input: current.input as u32,
+            input: (current.input as u32) as u64,
             cached_input: current.cached_input as u32,
             cache_write: current.cache_write as u32,
             output: current.output as u32,
         },
         Some(p) => DeltaTokens {
-            input: current.input.saturating_sub(p.input) as u32,
+            input: (current.input.saturating_sub(p.input) as u32) as u64,
             cached_input: current.cached_input.saturating_sub(p.cached_input) as u32,
             cache_write: current.cache_write.saturating_sub(p.cache_write) as u32,
             output: current.output.saturating_sub(p.output) as u32,
@@ -178,8 +176,9 @@ pub fn sync_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
         return Ok(result);
     }
 
+    let mut index = ProviderIndex::load(db, "codex", &codex_dir)?;
     for file_path in &files {
-        match sync_single_codex_file(db, file_path) {
+        match sync_single_codex_file_with_index(db, file_path, &mut index) {
             Ok((imported, skipped)) => {
                 result.imported += imported;
                 result.skipped += skipped;
@@ -194,7 +193,7 @@ pub fn sync_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
 
     if result.imported > 0 {
         log::debug!(
-            "[CODEX-SYNC] 同步完成: 导入 {} 条, 跳过 {} 条, ��描 {} 个文件",
+            "[CODEX-SYNC] 同步完成: 导入 {} 条, 跳过 {} 条, 扫描 {} 个文件",
             result.imported,
             result.skipped,
             result.files_scanned
@@ -208,7 +207,7 @@ pub fn sync_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
 fn collect_codex_session_files(codex_dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
 
-    // 1. 扫描 sessions/YYYY/MM/DD/*.jsonl（日期分区目录��
+    // 1. 扫描 sessions/YYYY/MM/DD/*.jsonl（日期分区目录）
     let sessions_dir = codex_dir.join("sessions");
     if sessions_dir.is_dir() {
         collect_jsonl_recursive(&sessions_dir, &mut files, 0, 3);
@@ -247,8 +246,17 @@ fn collect_jsonl_recursive(dir: &Path, files: &mut Vec<PathBuf>, depth: u32, max
     }
 }
 
-/// 同步单�� Codex JSONL 文件，返回 (imported, skipped)
+/// 同步单个 Codex JSONL 文件，返回 (imported, skipped)
+#[cfg(test)]
 fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppError> {
+    let mut index = ProviderIndex::load(db, "codex", file_path.parent().unwrap())?;
+    sync_single_codex_file_with_index(db, file_path, &mut index)
+}
+fn sync_single_codex_file_with_index(
+    db: &Database,
+    file_path: &Path,
+    index: &mut ProviderIndex,
+) -> Result<(u32, u32), AppError> {
     let file_path_str = file_path.to_string_lossy().to_string();
 
     // 获取文件元数据
@@ -265,13 +273,18 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
     let expected = read_sync_state(db, &file_path_str)?;
     let previous = expected.unwrap_or_default();
 
-    // 文件未变化则跳过
-    if file_modified <= previous.modified {
+    let mut source = Prepared::with_index(db, Snapshot::file(file_path)?, expected, 2, index)?;
+    if source.unchanged {
         return Ok((0, 0));
     }
 
     // 整个文件都要解析以恢复累计值状态，只写入上次偏移之后的调用
-    let (calls, line_offset) = parse_codex_file(file_path)?;
+    let (calls, line_offset, complete) = parse_codex_file(file_path)?;
+    source.evidence.complete_event_identity_set = false;
+    source.evidence.partial("missingNativeEventIdentity");
+    if !complete {
+        source.evidence.partial("incompleteEnumeration");
+    }
     let checkpoint = CheckpointChange {
         key: file_path_str,
         expected,
@@ -280,7 +293,9 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
             offset: line_offset,
         }),
     };
-    commit_sync_batch(db, &[checkpoint], |conn| {
+    let next = checkpoint.next.unwrap();
+    let result = commit_sync_batch(db, &[checkpoint], |conn| {
+        source.check_on(conn)?;
         // Read the latest alias under the commit lock: a new moved path cannot
         // appear between this dedup decision and publishing the destination state.
         let last_offset = if expected.is_none() {
@@ -288,9 +303,33 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
         } else {
             previous.offset
         };
+        // A source stamp proves that bytes changed, not that the change was
+        // append-only. Compare the consumed normalized prefix before reusing
+        // its ordinal boundary; it is never a native event acknowledgement.
+        let same_prefix = last_offset == 0
+            || source.evidence.codex_prefix()
+                == Some(calls_fingerprint(calls.iter().filter(|c| c.line <= last_offset)).as_str());
+        let reconcile =
+            source.evidence.codex_requires_reconciliation() || (last_offset > 0 && !same_prefix);
+        source
+            .evidence
+            .note_codex_prefix(calls_fingerprint(calls.iter()), reconcile);
+        let cutoff = crate::database::dao::usage_rollup::usage_prune_cutoff()?;
+        let history = usage_source::has_history_on(conn, "codex")?;
         let mut imported: u32 = 0;
         let mut skipped: u32 = 0;
-        for call in calls.iter().filter(|c| c.line > last_offset) {
+        for call in calls.iter().filter(|c| !c.delta.is_zero()) {
+            if same_prefix && !reconcile && call.line <= last_offset {
+                continue;
+            }
+            let at = usage_source::timestamp_ms(call.timestamp.as_deref());
+            let old_or_unknown = at.is_none_or(|ms| ms / 1000 < cutoff);
+            if old_or_unknown && (reconcile || (expected.is_none() && last_offset == 0 && history))
+            {
+                source.evidence.partial("unverifiedHistoricalBoundary");
+                skipped += 1;
+                continue;
+            }
             if insert_codex_session_entry(
                 conn,
                 &call.ids,
@@ -305,8 +344,33 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
             }
         }
 
+        source.save_on(conn, next)?;
         Ok((imported, skipped))
-    })
+    })?;
+    index.advance(source);
+    Ok(result)
+}
+
+fn calls_fingerprint<'a>(calls: impl Iterator<Item = &'a CodexCall>) -> String {
+    let mut hash = Sha256::new();
+    for c in calls {
+        hash.update(
+            serde_json::json!([
+                c.line,
+                c.ids.request_id,
+                c.delta.input,
+                c.delta.cached_input,
+                c.delta.cache_write,
+                c.delta.output,
+                c.model,
+                c.timestamp
+            ])
+            .to_string()
+            .as_bytes(),
+        );
+        hash.update(b"\n");
+    }
+    format!("{:x}", hash.finalize())
 }
 
 /// How far the same rollout file (same file name) was read at another path.
@@ -351,185 +415,280 @@ struct CodexCall {
     timestamp: Option<String>,
 }
 
-/// Every call in a rollout file, in order, and the file's line count.
-fn parse_codex_file(file_path: &Path) -> Result<(Vec<CodexCall>, i64), AppError> {
-    let file_stem = file_path
+// The old parser is an identity algorithm as well as a usage algorithm. Keep
+// its lossy arithmetic isolated here: changing it would renumber existing N
+// slots. Corrected accounting below never uses this state as its baseline.
+#[derive(Default)]
+struct LegacySlots {
+    previous: Option<CumulativeTokens>,
+    next: u32,
+}
+impl LegacySlots {
+    fn step(&mut self, info: &Value) -> Result<Option<u32>, AppError> {
+        let (value, is_total) = if let Some(v) = info.get("total_token_usage") {
+            (v, true)
+        } else if let Some(v) = info.get("last_token_usage") {
+            (v, false)
+        } else {
+            return Ok(None);
+        };
+        let Some(current) = parse_cumulative_tokens(value) else {
+            return Ok(None);
+        };
+        let delta = if is_total {
+            let first = if self.previous.is_none() {
+                info.get("last_token_usage")
+                    .and_then(parse_cumulative_tokens)
+            } else {
+                None
+            };
+            let delta = compute_delta(&self.previous, &first.unwrap_or_else(|| current.clone()));
+            self.previous = Some(current);
+            delta
+        } else {
+            compute_delta(&None, &current)
+        };
+        let delta = DeltaTokens {
+            cached_input: delta.cached_input.min(delta.input as u32),
+            ..delta
+        };
+        if delta.is_zero() {
+            return Ok(None);
+        }
+        self.next = self
+            .next
+            .checked_add(1)
+            .ok_or_else(|| codex_error("event identity limit"))?;
+        Ok(Some(self.next))
+    }
+}
+fn codex_error(reason: &str) -> AppError {
+    AppError::Config(format!("Codex usage: {reason}"))
+}
+fn checked_cumulative(value: Option<&Value>) -> Result<Option<CumulativeTokens>, AppError> {
+    let Some(value) = value.filter(|v| v.is_object()) else {
+        return Ok(None);
+    };
+    let keys = [
+        "input_tokens",
+        "output_tokens",
+        "cached_input_tokens",
+        "cache_read_input_tokens",
+        "cache_write_input_tokens",
+    ];
+    if !keys
+        .iter()
+        .any(|k| value.get(k).is_some_and(|v| !v.is_null()))
+    {
+        return Ok(None);
+    }
+    Ok(Some(CumulativeTokens {
+        input: usage_source::number(value, "input_tokens")?,
+        output: usage_source::number(value, "output_tokens")?,
+        cached_input: usage_source::number(
+            value,
+            if value.get("cached_input_tokens").is_some() {
+                "cached_input_tokens"
+            } else {
+                "cache_read_input_tokens"
+            },
+        )?,
+        cache_write: usage_source::number(value, "cache_write_input_tokens")?,
+    }))
+}
+impl CumulativeTokens {
+    fn add(&self, rhs: &Self) -> Result<Self, AppError> {
+        let add = |a: u64, b: u64| {
+            a.checked_add(b)
+                .ok_or_else(|| codex_error("cumulative token overflow"))
+        };
+        Ok(Self {
+            input: add(self.input, rhs.input)?,
+            cached_input: add(self.cached_input, rhs.cached_input)?,
+            cache_write: add(self.cache_write, rhs.cache_write)?,
+            output: add(self.output, rhs.output)?,
+        })
+    }
+    fn subtract(&self, rhs: &Self) -> Result<Self, AppError> {
+        let sub = |a: u64, b: u64| {
+            a.checked_sub(b)
+                .ok_or_else(|| codex_error("unanchored cumulative reset"))
+        };
+        Ok(Self {
+            input: sub(self.input, rhs.input)?,
+            cached_input: sub(self.cached_input, rhs.cached_input)?,
+            cache_write: sub(self.cache_write, rhs.cache_write)?,
+            output: sub(self.output, rhs.output)?,
+        })
+    }
+    fn checked_delta(self) -> Result<DeltaTokens, AppError> {
+        let cached_input = self.cached_input.min(self.input);
+        usage_source::checked_token(
+            self.input
+                .saturating_sub(cached_input)
+                .saturating_sub(self.cache_write),
+        )?;
+        Ok(DeltaTokens {
+            input: self.input,
+            cached_input: usage_source::checked_token(cached_input)?,
+            cache_write: usage_source::checked_token(self.cache_write)?,
+            output: usage_source::checked_token(self.output)?,
+        })
+    }
+}
+#[derive(Default)]
+struct Accounting {
+    effective: Option<CumulativeTokens>,
+    raw_total: Option<CumulativeTokens>,
+    unanchored_last: bool,
+}
+impl Accounting {
+    fn step(&mut self, info: &Value) -> Result<Option<DeltaTokens>, AppError> {
+        let total = checked_cumulative(info.get("total_token_usage"))?;
+        let last = checked_cumulative(info.get("last_token_usage"))?;
+        let delta = if let Some(total) = total {
+            let delta = match &self.effective {
+                None => {
+                    if let Some(last) = last {
+                        last
+                    } else if self.unanchored_last {
+                        return Err(codex_error(
+                            "first total has no anchor after last-only events",
+                        ));
+                    } else {
+                        total.clone()
+                    }
+                }
+                Some(previous) => {
+                    // A repeated older total must not rewind the last-only
+                    // contributions already counted after that notification.
+                    if self.raw_total.as_ref() == Some(&total) && &total != previous {
+                        return Ok(Some(CumulativeTokens::default().checked_delta()?));
+                    }
+                    total.subtract(previous)?
+                }
+            };
+            self.effective = Some(total.clone());
+            self.raw_total = Some(total);
+            delta
+        } else if let Some(last) = last {
+            if let Some(previous) = &self.effective {
+                self.effective = Some(previous.add(&last)?);
+            } else {
+                self.unanchored_last = true;
+            }
+            last
+        } else {
+            return Ok(None);
+        };
+        Ok(Some(delta.checked_delta()?))
+    }
+}
+fn canonical(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), canonical(v)))
+                .collect::<BTreeMap<_, _>>()
+                .into_iter()
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(values.iter().map(canonical).collect()),
+        other => other.clone(),
+    }
+}
+/// Parse accounting and legacy identity in independent state machines.
+fn parse_codex_file(file_path: &Path) -> Result<(Vec<CodexCall>, i64, bool), AppError> {
+    let stem = file_path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("rollout");
-
-    // 打开文件逐行解析
-    let file =
-        fs::File::open(file_path).map_err(|e| AppError::Config(format!("无法打开文件: {e}")))?;
-    let reader = BufReader::new(file);
-
-    let mut state = FileParseState {
-        session_id: None,
-        current_model: "unknown".to_string(),
-        prev_total: None,
-        event_index: 0,
-    };
-
-    let mut line_offset: i64 = 0;
+    let mut session: Option<String> = None;
+    let mut model = "unknown".to_owned();
+    let mut legacy = LegacySlots::default();
+    let mut accounting = Accounting::default();
+    let mut recovered: BTreeMap<String, u32> = BTreeMap::new();
     let mut calls = Vec::new();
-
-    for line_result in reader.lines() {
-        line_offset += 1;
-
-        let line = match line_result {
-            Ok(l) => l,
-            Err(_) => continue, // 容忍不完整的最后一行
-        };
-
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        // 快速过滤：在 JSON 反序列化前跳过无关行
-        let is_event_msg = line.contains("\"event_msg\"");
-        let is_turn_context = line.contains("\"turn_context\"");
-        let is_session_meta = line.contains("\"session_meta\"");
-
-        if !is_event_msg && !is_turn_context && !is_session_meta {
-            continue;
-        }
-        if is_event_msg && !line.contains("\"token_count\"") {
-            continue;
-        }
-
-        let value: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let event_type = match value.get("type").and_then(|t| t.as_str()) {
-            Some(t) => t,
-            None => continue,
-        };
-
-        match event_type {
-            "session_meta" if state.session_id.is_none() => {
-                let payload = value.get("payload");
-                state.session_id = payload
-                    .and_then(|p| {
-                        p.get("session_id")
-                            .or_else(|| p.get("sessionId"))
-                            .or_else(|| p.get("id"))
-                    })
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-            }
-            "turn_context" => {
-                if let Some(payload) = value.get("payload") {
-                    // model 可能在 payload.model 或 payload.info.model
-                    if let Some(model) = payload
+    let progress = usage_source::json_lines(
+        file_path,
+        |line| {
+            line.contains("\"session_meta\"")
+                || line.contains("\"turn_context\"")
+                || (line.contains("\"event_msg\"") && line.contains("\"token_count\""))
+        },
+        |line, value| {
+            let payload = &value["payload"];
+            match value["type"].as_str() {
+                Some("session_meta") if session.is_none() => {
+                    session = payload
+                        .get("session_id")
+                        .or_else(|| payload.get("sessionId"))
+                        .or_else(|| payload.get("id"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                }
+                Some("turn_context") => {
+                    if let Some(raw) = payload
                         .get("model")
-                        .or_else(|| payload.get("info").and_then(|info| info.get("model")))
-                        .and_then(|v| v.as_str())
+                        .or_else(|| payload.get("info").and_then(|i| i.get("model")))
+                        .and_then(Value::as_str)
                     {
-                        state.current_model = normalize_codex_model(model);
+                        model = normalize_codex_model(raw);
                     }
                 }
-            }
-            "event_msg" => {
-                let payload = match value.get("payload") {
-                    Some(p) => p,
-                    None => continue,
-                };
-
-                // 只处理 token_count 类型
-                if payload.get("type").and_then(|t| t.as_str()) != Some("token_count") {
-                    continue;
-                }
-
-                let info = match payload.get("info") {
-                    Some(i) if !i.is_null() => i,
-                    _ => continue, // info 为 null 的首个事件跳��
-                };
-
-                // 提取模型（token_count 事件也可能携带 model）
-                if let Some(model) = info
-                    .get("model")
-                    .or_else(|| info.get("model_name"))
-                    .or_else(|| payload.get("model"))
-                    .and_then(|v| v.as_str())
-                {
-                    state.current_model = normalize_codex_model(model);
-                }
-
-                // 优先用 total_token_usage（累计值），fallback 到 last_token_usage（增量值）
-                let (cumulative, is_total) = if let Some(total) = info.get("total_token_usage") {
-                    (parse_cumulative_tokens(total), true)
-                } else if let Some(last) = info.get("last_token_usage") {
-                    (parse_cumulative_tokens(last), false)
-                } else {
-                    continue;
-                };
-
-                let cumulative = match cumulative {
-                    Some(c) => c,
-                    None => continue,
-                };
-
-                let delta = if is_total {
-                    // 累计值模式：计算与上次的 delta。A file's first count has no
-                    // earlier total here, and a thread continued in this file
-                    // carries its running total over: that call is its
-                    // last_token_usage (equal to the total in a fresh file).
-                    let first_call = match state.prev_total {
-                        None => info
-                            .get("last_token_usage")
-                            .and_then(parse_cumulative_tokens),
-                        Some(_) => None,
+                Some("event_msg") if payload["type"] == "token_count" => {
+                    let Some(info) = payload.get("info").filter(|v| !v.is_null()) else {
+                        return Ok(());
                     };
-                    let d = match first_call {
-                        Some(last) => compute_delta(&None, &last),
-                        None => compute_delta(&state.prev_total, &cumulative),
-                    };
-                    state.prev_total = Some(cumulative);
-                    d
-                } else {
-                    // 增量值模式：直接使用 last_token_usage 的值
-                    DeltaTokens {
-                        input: cumulative.input as u32,
-                        cached_input: cumulative.cached_input as u32,
-                        cache_write: cumulative.cache_write as u32,
-                        output: cumulative.output as u32,
+                    if let Some(raw) = info
+                        .get("model")
+                        .or_else(|| info.get("model_name"))
+                        .or_else(|| payload.get("model"))
+                        .and_then(Value::as_str)
+                    {
+                        model = normalize_codex_model(raw);
                     }
-                };
-
-                // 钳制：cached 不应超过 input（防护异常数据）
-                let delta = DeltaTokens {
-                    cached_input: delta.cached_input.min(delta.input),
-                    ..delta
-                };
-
-                if delta.is_zero() {
-                    continue; // 跳过 task 边界的零 delta 事件
+                    let old_slot = legacy.step(info)?;
+                    let Some(delta) = accounting.step(info)? else {
+                        return Ok(());
+                    };
+                    if old_slot.is_none() && delta.is_zero() {
+                        return Ok(());
+                    }
+                    let sid = session.as_deref().unwrap_or("unknown");
+                    let ids = if let Some(n) = old_slot {
+                        CodexRequestIds::new(sid, stem, n)
+                    } else {
+                        let digest = format!(
+                            "{:x}",
+                            Sha256::digest(canonical(&value).to_string().as_bytes())
+                        );
+                        let occurrence = recovered.entry(digest.clone()).or_default();
+                        *occurrence = occurrence
+                            .checked_add(1)
+                            .ok_or_else(|| codex_error("recovered identity limit"))?;
+                        CodexRequestIds {
+                            request_id: format!(
+                                "codex_session:{sid}:{stem}:recovered-v2:{digest}:{occurrence}"
+                            ),
+                            legacy_id: None,
+                        }
+                    };
+                    calls.push(CodexCall {
+                        line,
+                        ids,
+                        delta,
+                        model: model.clone(),
+                        session_id: session.clone(),
+                        timestamp: value["timestamp"].as_str().map(str::to_owned),
+                    });
                 }
-
-                state.event_index += 1;
-
-                // 生成唯一 request_id
-                let session_id_str = state.session_id.as_deref().unwrap_or("unknown");
-                calls.push(CodexCall {
-                    line: line_offset,
-                    ids: CodexRequestIds::new(session_id_str, file_stem, state.event_index),
-                    delta,
-                    model: state.current_model.clone(),
-                    session_id: state.session_id.clone(),
-                    // 提取时间戳
-                    timestamp: value
-                        .get("timestamp")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                });
+                _ => {}
             }
-            _ => {}
-        }
-    }
-
-    Ok((calls, line_offset))
+            Ok(())
+        },
+    )?;
+    Ok((calls, progress.offset, progress.complete))
 }
 
 /// When a call happened: its event's timestamp, else now.
@@ -548,43 +707,41 @@ fn created_at_of(timestamp: Option<&str>) -> i64 {
         })
 }
 
-/// Every Codex call the sync would store, read from every rollout file in full
-/// (a request id counts once, as the insert keeps the first row for it). Calls
-/// of a file with no thread id are left out: they have no session to archive.
-pub(crate) fn session_entries() -> Vec<SessionUsageEntry> {
-    let mut seen = std::collections::HashSet::new();
-    let mut entries = Vec::new();
-    for file_path in collect_codex_session_files(&get_codex_config_dir()) {
-        let calls = match parse_codex_file(&file_path) {
-            Ok((calls, _)) => calls,
-            Err(e) => {
-                log::debug!("[CODEX-SYNC] 归档回填跳过 {}: {e}", file_path.display());
-                continue;
-            }
-        };
-        for call in calls {
-            let Some(session_id) = call.session_id else {
-                continue;
-            };
-            if !seen.insert(call.ids.request_id) {
-                continue;
-            }
-            entries.push(SessionUsageEntry {
-                session_id,
-                created_at: created_at_of(call.timestamp.as_deref()),
+pub(crate) fn normalized_facts(
+    path: &Path,
+) -> Result<(Vec<usage_source::NormalizedUsageFact>, bool), AppError> {
+    let (calls, _, complete) = parse_codex_file(path)?;
+    Ok((
+        calls
+            .into_iter()
+            .filter(|c| !c.delta.is_zero())
+            .map(|c| usage_source::NormalizedUsageFact {
+                request_id: c.ids.request_id,
+                native_key: None,
+                session_id: c.session_id,
+                at_ms: usage_source::timestamp_ms(c.timestamp.as_deref()),
                 usage: TokenUsage {
-                    input_tokens: call.delta.fresh_input(),
-                    output_tokens: call.delta.output,
-                    cache_read_tokens: call.delta.cached_input,
-                    cache_creation_tokens: call.delta.cache_write,
-                    model: Some(call.model.clone()),
+                    input_tokens: c.delta.fresh_input(),
+                    output_tokens: c.delta.output,
+                    cache_read_tokens: c.delta.cached_input,
+                    cache_creation_tokens: c.delta.cache_write,
+                    model: Some(c.model.clone()),
                     message_id: None,
                 },
-                model: call.model,
-            });
-        }
-    }
-    entries
+                model: c.model,
+            })
+            .collect(),
+        complete,
+    ))
+}
+#[cfg(test)]
+pub(crate) fn session_entries() -> Vec<SessionUsageEntry> {
+    let mut seen = std::collections::HashSet::new();
+    collect_codex_session_files(&get_codex_config_dir())
+        .into_iter()
+        .flat_map(|p| usage_source::read_normalized("codex", &p).unwrap().facts)
+        .filter(|f| seen.insert(f.request_id.clone()))
+        .collect()
 }
 
 /// The request id of a Codex call, and the one versions before v11 gave it.
@@ -594,14 +751,14 @@ pub(crate) fn session_entries() -> Vec<SessionUsageEntry> {
 /// part of the id. The old id (`codex_session:{thread}:{n}`) did not have it.
 struct CodexRequestIds {
     request_id: String,
-    legacy_id: String,
+    legacy_id: Option<String>,
 }
 
 impl CodexRequestIds {
     fn new(session_id: &str, file_stem: &str, event_index: u32) -> Self {
         Self {
             request_id: format!("codex_session:{session_id}:{file_stem}:{event_index}"),
-            legacy_id: format!("codex_session:{session_id}:{event_index}"),
+            legacy_id: Some(format!("codex_session:{session_id}:{event_index}")),
         }
     }
 }
@@ -731,57 +888,6 @@ pub(crate) fn find_codex_pricing_checked(
         return Ok(Some(price));
     }
     crate::services::usage_sync_db::lookup_pricing(conn, &format!("{normalized}%"), true)
-}
-
-pub(crate) fn find_codex_pricing(
-    conn: &rusqlite::Connection,
-    model_id: &str,
-) -> Option<ModelPricing> {
-    let normalized = normalize_codex_model(model_id);
-
-    // 1. 精确匹配（归一化后的名称）
-    if let Some(pricing) = try_find_pricing(conn, &normalized) {
-        return Some(pricing);
-    }
-
-    // 2. LIKE 模糊匹配（兜底）
-    let pattern = format!("{normalized}%");
-    conn.query_row(
-        "SELECT input_cost_per_million, output_cost_per_million,
-                cache_read_cost_per_million, cache_creation_cost_per_million
-         FROM model_pricing WHERE model_id LIKE ?1 LIMIT 1",
-        rusqlite::params![pattern],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        },
-    )
-    .ok()
-    .and_then(|(i, o, cr, cc)| ModelPricing::from_strings(&i, &o, &cr, &cc).ok())
-}
-
-/// 精确匹配定价查询
-fn try_find_pricing(conn: &rusqlite::Connection, model_id: &str) -> Option<ModelPricing> {
-    conn.query_row(
-        "SELECT input_cost_per_million, output_cost_per_million,
-                cache_read_cost_per_million, cache_creation_cost_per_million
-         FROM model_pricing WHERE model_id = ?1",
-        rusqlite::params![model_id],
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-            ))
-        },
-    )
-    .ok()
-    .and_then(|(i, o, cr, cc)| ModelPricing::from_strings(&i, &o, &cr, &cc).ok())
 }
 
 #[cfg(test)]
@@ -980,7 +1086,7 @@ mod tests {
         assert_eq!(delta.cached_input, 80);
         assert_eq!(delta.input, 10);
         // 实际钳制在调用侧：delta.cached_input.min(delta.input)
-        let clamped = delta.cached_input.min(delta.input);
+        let clamped = delta.cached_input.min(delta.input as u32);
         assert_eq!(clamped, 10);
     }
 

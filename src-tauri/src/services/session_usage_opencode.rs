@@ -24,13 +24,13 @@
 //! storage/message/<sid>/*.json (mtime ≥ watermark) ┴→ 费用计算 → proxy_request_logs (opencode_session)
 //! ```
 
-use crate::database::dao::usage_rollup::usage_prune_cutoff;
 use crate::database::Database;
 use crate::error::AppError;
 use crate::proxy::usage::calculator::CostCalculator;
 use crate::proxy::usage::parser::TokenUsage;
 use crate::services::session_usage::SessionSyncResult;
 use crate::services::session_usage_codex::find_codex_pricing_checked;
+use crate::services::usage_source::{self, Prepared, ProviderIndex, Snapshot};
 use crate::services::usage_sync_db::{
     commit_sync_batch, read_sync_state, CheckpointChange, SyncState,
 };
@@ -59,17 +59,6 @@ struct OcMessage {
     #[serde(default)]
     time: OcTime,
     tokens: Option<OcTokens>,
-}
-
-impl OcMessage {
-    /// When the message was created (else completed), in milliseconds.
-    fn created_ms(&self) -> i64 {
-        if self.time.created > 0 {
-            self.time.created
-        } else {
-            self.time.completed
-        }
-    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -119,16 +108,18 @@ struct OcCall {
     usage: TokenUsage,
     created_at: i64,
     latency_ms: i64,
-    /// The message was created before what an earlier read already covered (the
-    /// previous watermark of its source), so that read stored it: if its row is
-    /// gone now and it is older than the prune cutoff, the prune archived it.
-    covered_before: bool,
+    source: usize,
+    native_id: bool,
+    native_session_id: String,
+    at_ms: Option<i64>,
 }
 
 #[derive(Default)]
 struct ParsedBatch {
     calls: Vec<OcCall>,
     checkpoints: Vec<CheckpointChange>,
+    sources: Vec<Prepared>,
+    dependencies: Vec<Snapshot>,
 }
 
 /// 同步 OpenCode 使用数据（数据库优先，否则读 storage/ 下的 JSON 文件）
@@ -141,23 +132,41 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
         files_scanned: 0,
         errors: vec![],
     };
-    let batch = if db_path.is_file() {
+    let mut index = ProviderIndex::load(db, "opencode", &base)?;
+    let mut batch = if db_path.is_file() {
         result.files_scanned = 1;
-        read_db_calls(db, &db_path)?
+        read_db_calls(db, &db_path, &index)?
     } else {
-        read_storage_calls(db, &base.join("storage"), &mut result)?
+        read_storage_calls(db, &base.join("storage"), &mut result, &index)?
     };
 
     let (imported, skipped) = commit_sync_batch(db, &batch.checkpoints, |conn| {
-        // Prune cannot interleave its archive write and this live-row decision.
-        let cutoff = usage_prune_cutoff()?;
+        // Validate every physical source and the shared provider lease before
+        // any fact; all directories are one batch, including late checkpoints.
+        for dependency in &batch.dependencies {
+            dependency.verify()?;
+        }
+        for source in &batch.sources {
+            source.check_on(conn)?;
+        }
         let mut imported = 0;
         let mut skipped = 0;
         for call in &batch.calls {
-            // A message rewritten after the prune folded it into the rollups and the
-            // archive moves past the watermark again; it is not stored a second time.
-            // One read for the first time is stored however old it is.
-            if call.covered_before && call.created_at < cutoff && !row_exists(conn, &call.msg_id)? {
+            let source = &mut batch.sources[call.source];
+            if call.at_ms.is_none() {
+                source.evidence.complete_event_identity_set = false;
+                source.evidence.partial("missingTimestamp");
+                skipped += 1;
+                continue;
+            }
+            let native = usage_source::native_key("opencode", "", &call.msg_id);
+            if !source.should_store_on(
+                conn,
+                &format!("opencode:{}", call.msg_id),
+                &native,
+                DATA_SOURCE,
+                call.created_at,
+            )? {
                 skipped += 1;
                 continue;
             }
@@ -166,9 +175,25 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
             } else {
                 skipped += 1;
             }
+            if call.native_id {
+                source.evidence.acknowledge(&native);
+            } else {
+                source.evidence.complete_event_identity_set = false;
+                source.evidence.partial("missingNativeEventIdentity");
+            }
+        }
+        for source in &mut batch.sources {
+            let next = batch
+                .checkpoints
+                .iter()
+                .find(|c| c.key == source.snapshot.path.to_string_lossy())
+                .and_then(|c| c.next)
+                .ok_or_else(|| AppError::Database("missing OpenCode source checkpoint".into()))?;
+            source.save_on(conn, next)?;
         }
         Ok((imported, skipped))
     })?;
+    index.advance_many(batch.sources);
     result.imported = imported;
     result.skipped = skipped;
 
@@ -185,81 +210,79 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
 // ---- the database ------------------------------------------------------------
 
 /// Parse outside the OFox DB lock, returning the watermark to commit with facts.
-fn read_db_calls(db: &Database, db_path: &Path) -> Result<ParsedBatch, AppError> {
+fn read_db_calls(
+    db: &Database,
+    db_path: &Path,
+    index: &ProviderIndex,
+) -> Result<ParsedBatch, AppError> {
     let key = db_path.to_string_lossy().to_string();
     let expected = read_sync_state(db, &key)?;
     let watermark = expected.unwrap_or_default().modified;
-    // OpenCode 1.2 builds its database from the JSON files: a message the JSON
-    // read covered (created before its session directory's watermark) was read.
-    let json_dir = db_path.with_file_name("storage").join("message");
-    let mut json_watermarks: HashMap<String, i64> = HashMap::new();
+    let source = Prepared::with_index(db, Snapshot::sqlite(db_path)?, expected, 2, index)?;
+    if source.unchanged {
+        return Ok(ParsedBatch::default());
+    }
+    let (calls, newest) = read_database(db_path, watermark)?;
+    source.snapshot.verify()?;
+    // JSON -> SQLite migration is deduplicated by provider native identities,
+    // never by a timestamp that merely says a directory was scanned.
+    Ok(ParsedBatch {
+        calls,
+        checkpoints: vec![CheckpointChange {
+            key,
+            expected,
+            next: Some(SyncState {
+                modified: newest,
+                offset: 0,
+            }),
+        }],
+        sources: vec![source],
+        dependencies: Vec::new(),
+    })
+}
 
+fn read_database(db_path: &Path, watermark: i64) -> Result<(Vec<OcCall>, i64), AppError> {
     let conn = Connection::open_with_flags(
         db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .map_err(|e| AppError::Database(format!("无法打开 OpenCode 数据库: {e}")))?;
-
-    let parents = db_session_parents(&conn)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, session_id, time_created, time_updated, data FROM message
-             WHERE time_updated >= ?1 ORDER BY time_updated",
-        )
-        .map_err(|e| AppError::Database(format!("查询 OpenCode 消息失败: {e}")))?;
-    let rows = stmt
-        .query_map([watermark], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        })
-        .map_err(|e| AppError::Database(format!("查询 OpenCode 消息失败: {e}")))?;
-
-    let mut batch = ParsedBatch::default();
+    .map_err(|_| AppError::Database("OpenCode database unavailable".into()))?;
+    let before: i64 = conn.query_row("PRAGMA data_version", [], |r| r.get(0))?;
+    let tx = conn.unchecked_transaction()?;
+    let parents = db_session_parents(&tx)?;
     let mut newest = watermark;
-    for row in rows {
-        let (id, session_id, created, updated, data) =
-            row.map_err(|e| AppError::Database(format!("读取 OpenCode 消息失败: {e}")))?;
-        newest = newest.max(updated);
-        let json_watermark = match json_watermarks.get(&session_id) {
-            Some(w) => *w,
-            None => {
-                let dir_key = json_dir.join(&session_id).to_string_lossy().to_string();
-                let expected = read_sync_state(db, &dir_key)?;
-                let w = expected.unwrap_or_default().modified;
-                batch.checkpoints.push(CheckpointChange {
-                    key: dir_key,
-                    expected,
-                    next: None,
-                });
-                json_watermarks.insert(session_id.clone(), w);
-                w
+    let mut calls = Vec::new();
+    {
+        let mut stmt=tx.prepare("SELECT id,session_id,time_created,time_updated,data FROM message WHERE time_updated>=?1 ORDER BY time_updated")?;
+        let rows = stmt.query_map([watermark], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, sid, _created, updated, data) = row?;
+            newest = newest.max(updated);
+            let mut message: OcMessage = serde_json::from_str(&data)
+                .map_err(|_| AppError::Config("invalid OpenCode message".into()))?;
+            message.id = id;
+            message.session_id = sid;
+            if let Some(call) = to_call(&message, &parents, 0, true)? {
+                calls.push(call);
             }
-        };
-        let covered_before = covered_by(created, watermark.max(json_watermark));
-        let Ok(mut message) = serde_json::from_str::<OcMessage>(&data) else {
-            continue;
-        };
-        // the database keeps the ids in their columns, not in the document
-        message.id = id;
-        message.session_id = session_id;
-        if let Some(call) = to_call(&message, &parents, covered_before) {
-            batch.calls.push(call);
         }
     }
-    batch.checkpoints.push(CheckpointChange {
-        key,
-        expected,
-        next: Some(SyncState {
-            modified: newest,
-            offset: 0,
-        }),
-    });
-    Ok(batch)
+    tx.commit()?;
+    let after: i64 = conn.query_row("PRAGMA data_version", [], |r| r.get(0))?;
+    if before != after {
+        return Err(AppError::Database(
+            "OpenCode database changed during read; retry".into(),
+        ));
+    }
+    Ok((calls, newest))
 }
 
 fn db_session_parents(conn: &Connection) -> Result<HashMap<String, String>, AppError> {
@@ -289,108 +312,128 @@ fn read_storage_calls(
     db: &Database,
     storage: &Path,
     result: &mut SessionSyncResult,
+    index: &ProviderIndex,
 ) -> Result<ParsedBatch, AppError> {
-    let parents = storage_session_parents(storage);
-    let Ok(session_dirs) = fs::read_dir(storage.join("message")) else {
-        return Ok(ParsedBatch::default());
+    let dependency = Snapshot::tree(&storage.join("session"))?;
+    let parents = storage_session_parents(storage)?;
+    dependency.verify()?;
+    let session_dirs = match fs::read_dir(storage.join("message")) {
+        Ok(dirs) => dirs,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ParsedBatch::default()),
+        Err(_) => {
+            return Err(AppError::Config(
+                "OpenCode message directories unavailable".into(),
+            ))
+        }
     };
-
-    let mut batch = ParsedBatch::default();
-    for dir in session_dirs
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-    {
+    let mut dirs = Vec::new();
+    for entry in session_dirs {
+        let path = entry
+            .map_err(|_| AppError::Config("OpenCode directory enumeration failed".into()))?
+            .path();
+        if path.is_dir() {
+            dirs.push(path);
+        }
+    }
+    dirs.sort();
+    let mut batch = ParsedBatch {
+        dependencies: vec![dependency],
+        ..ParsedBatch::default()
+    };
+    for dir in dirs {
         let key = dir.to_string_lossy().to_string();
         let expected = read_sync_state(db, &key)?;
-        let watermark = expected.unwrap_or_default().modified;
-        let mut newest = watermark;
-        for (path, modified) in json_files_with_mtime(&dir) {
-            if modified < watermark {
-                continue;
-            }
+        let mut source = Prepared::with_index(db, Snapshot::directory(&dir)?, expected, 2, index)?;
+        if source.unchanged {
+            continue;
+        }
+        let mut newest = expected.unwrap_or_default().modified;
+        let source_index = batch.sources.len();
+        for (path, modified) in checked_json_files(&dir)? {
             newest = newest.max(modified);
             result.files_scanned += 1;
-            let message = fs::read_to_string(&path)
-                .ok()
-                .and_then(|text| serde_json::from_str::<OcMessage>(&text).ok());
-            let Some(mut message) = message else {
-                continue;
-            };
-            if message.id.is_empty() {
+            let text = usage_source::read_text(&path)?;
+            let mut message: OcMessage = serde_json::from_str(&text)
+                .map_err(|_| AppError::Config("invalid OpenCode message".into()))?;
+            let native_id = !message.id.is_empty();
+            if !native_id {
                 message.id = file_stem(&path);
+                source.evidence.complete_event_identity_set = false;
+                source.evidence.partial("missingNativeEventIdentity");
             }
             if message.session_id.is_empty() {
                 message.session_id = file_name(&dir);
             }
-            // a file read again (written since) whose message was created before
-            // the directory's watermark was read before
-            let covered_before = covered_by(message.created_ms(), watermark);
-            if let Some(call) = to_call(&message, &parents, covered_before) {
+            if let Some(call) = to_call(&message, &parents, source_index, native_id)? {
                 batch.calls.push(call);
             }
         }
+        source.snapshot.verify()?;
         batch.checkpoints.push(CheckpointChange {
             key,
             expected,
-            next: (newest > watermark).then_some(SyncState {
+            next: Some(SyncState {
                 modified: newest,
                 offset: 0,
             }),
         });
+        batch.sources.push(source);
     }
     Ok(batch)
 }
+fn checked_json_files(dir: &Path) -> Result<Vec<(PathBuf, i64)>, AppError> {
+    let entries =
+        fs::read_dir(dir).map_err(|_| AppError::Config("OpenCode directory unavailable".into()))?;
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|_| AppError::Config("OpenCode enumeration failed".into()))?;
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map_err(|_| AppError::Config("OpenCode file metadata unavailable".into()))?
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_err(|_| AppError::Config("invalid OpenCode file time".into()))?
+            .as_millis();
+        files.push((
+            path,
+            i64::try_from(modified)
+                .map_err(|_| AppError::Config("OpenCode file time exceeds range".into()))?,
+        ));
+    }
+    files.sort();
+    Ok(files)
+}
 
-fn storage_session_parents(storage: &Path) -> HashMap<String, String> {
+fn storage_session_parents(storage: &Path) -> Result<HashMap<String, String>, AppError> {
     let mut parents = HashMap::new();
-    let Ok(projects) = fs::read_dir(storage.join("session")) else {
-        return parents;
+    let projects = match fs::read_dir(storage.join("session")) {
+        Ok(dirs) => dirs,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(parents),
+        Err(_) => return Err(AppError::Config("OpenCode sessions unavailable".into())),
     };
-    for project in projects.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
-        for (path, _) in json_files_with_mtime(&project) {
-            let info = fs::read_to_string(&path)
-                .ok()
-                .and_then(|text| serde_json::from_str::<OcSessionInfo>(&text).ok());
-            if let Some(OcSessionInfo {
-                id,
-                parent_id: Some(parent),
-            }) = info
-            {
-                if !id.is_empty() && !parent.is_empty() {
-                    parents.insert(id, parent);
+    for project in projects {
+        let project = project
+            .map_err(|_| AppError::Config("OpenCode session enumeration failed".into()))?
+            .path();
+        if !project.is_dir() {
+            continue;
+        }
+        for (path, _) in checked_json_files(&project)? {
+            let text = usage_source::read_text(&path)?;
+            let info: OcSessionInfo = serde_json::from_str(&text)
+                .map_err(|_| AppError::Config("invalid OpenCode session".into()))?;
+            if let Some(parent) = info.parent_id {
+                if !info.id.is_empty() && !parent.is_empty() {
+                    parents.insert(info.id, parent);
                 }
             }
         }
     }
-    parents
-}
-
-/// The `.json` files directly in `dir`, each with its mtime in milliseconds.
-fn json_files_with_mtime(dir: &Path) -> Vec<(PathBuf, i64)> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut files: Vec<(PathBuf, i64)> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                return None;
-            }
-            let modified = entry
-                .metadata()
-                .ok()?
-                .modified()
-                .ok()?
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .ok()?
-                .as_millis() as i64;
-            Some((path, modified))
-        })
-        .collect();
-    files.sort();
-    files
+    Ok(parents)
 }
 
 fn file_stem(path: &Path) -> String {
@@ -426,17 +469,25 @@ fn root_session(session: &str, parents: &HashMap<String, String>) -> String {
 fn to_call(
     message: &OcMessage,
     parents: &HashMap<String, String>,
-    covered_before: bool,
-) -> Option<OcCall> {
+    source: usize,
+    native_id: bool,
+) -> Result<Option<OcCall>, AppError> {
     if message.role != "assistant" || message.model_id.is_empty() || message.id.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let tokens = message.tokens.as_ref()?;
+    let Some(tokens) = message.tokens.as_ref() else {
+        return Ok(None);
+    };
     let usage = TokenUsage {
-        input_tokens: tokens.input as u32,
-        output_tokens: (tokens.output + tokens.reasoning) as u32,
-        cache_read_tokens: tokens.cache.read as u32,
-        cache_creation_tokens: tokens.cache.write as u32,
+        input_tokens: usage_source::checked_token(tokens.input)?,
+        output_tokens: usage_source::checked_token(
+            tokens
+                .output
+                .checked_add(tokens.reasoning)
+                .ok_or_else(|| AppError::Config("OpenCode output overflow".into()))?,
+        )?,
+        cache_read_tokens: usage_source::checked_token(tokens.cache.read)?,
+        cache_creation_tokens: usage_source::checked_token(tokens.cache.write)?,
         model: Some(message.model_id.clone()),
         message_id: None,
     };
@@ -445,45 +496,90 @@ fn to_call(
         && usage.cache_read_tokens == 0
         && usage.cache_creation_tokens == 0
     {
-        return None;
+        return Ok(None);
     }
     let (created, completed) = (message.time.created, message.time.completed);
     let at_ms = if completed > 0 { completed } else { created };
-    if at_ms <= 0 {
-        return None;
-    }
     let latency_ms = if created > 0 && completed > created {
         completed - created
     } else {
         0
     };
-    Some(OcCall {
+    Ok(Some(OcCall {
         msg_id: message.id.clone(),
         session_id: root_session(&message.session_id, parents),
         model: message.model_id.clone(),
         usage,
         created_at: at_ms / 1000,
+        at_ms: (at_ms > 0).then_some(at_ms),
         latency_ms,
-        covered_before,
-    })
+        source,
+        native_id,
+        native_session_id: message.session_id.clone(),
+    }))
 }
 
-/// Whether a message created at `created_ms` was covered by the read that left
-/// `watermark` (the newest time it read; messages at it are read again, so they
-/// were read then too). No watermark: nothing was read.
-fn covered_by(created_ms: i64, watermark: i64) -> bool {
-    watermark > 0 && created_ms <= watermark
-}
-
-/// Whether the call of OpenCode message `msg_id` has a row.
-fn row_exists(conn: &Connection, msg_id: &str) -> Result<bool, AppError> {
-    conn.query_row(
-        "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = ?1",
-        [format!("opencode:{msg_id}")],
-        |row| row.get::<_, i64>(0),
-    )
-    .map(|n| n > 0)
-    .map_err(|e| AppError::Database(format!("查询 OpenCode 会话用量失败: {e}")))
+pub(crate) fn normalized_facts(
+    path: &Path,
+) -> Result<(Vec<usage_source::NormalizedUsageFact>, bool), AppError> {
+    let calls = if path.is_file() {
+        read_database(path, 0)?.0
+    } else {
+        let parents = storage_session_parents(path)?;
+        let root = path.join("message");
+        let mut calls = Vec::new();
+        let dirs = match fs::read_dir(&root) {
+            Ok(dirs) => Some(dirs),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => {
+                return Err(AppError::Config(
+                    "OpenCode message directories unavailable".into(),
+                ))
+            }
+        };
+        if let Some(dirs) = dirs {
+            for dir in dirs {
+                let dir = dir
+                    .map_err(|_| AppError::Config("OpenCode enumeration failed".into()))?
+                    .path();
+                if !dir.is_dir() {
+                    continue;
+                }
+                for (file, _) in checked_json_files(&dir)? {
+                    let text = usage_source::read_text(&file)?;
+                    let mut message: OcMessage = serde_json::from_str(&text)
+                        .map_err(|_| AppError::Config("invalid OpenCode message".into()))?;
+                    let native_id = !message.id.is_empty();
+                    if !native_id {
+                        message.id = file_stem(&file);
+                    }
+                    if message.session_id.is_empty() {
+                        message.session_id = file_name(&dir);
+                    }
+                    if let Some(call) = to_call(&message, &parents, 0, native_id)? {
+                        calls.push(call);
+                    }
+                }
+            }
+        }
+        calls
+    };
+    Ok((
+        calls
+            .into_iter()
+            .map(|c| usage_source::NormalizedUsageFact {
+                request_id: format!("opencode:{}", c.msg_id),
+                native_key: c
+                    .native_id
+                    .then(|| usage_source::native_key("opencode", "", &c.msg_id)),
+                session_id: Some(c.native_session_id),
+                model: c.model,
+                usage: c.usage,
+                at_ms: c.at_ms,
+            })
+            .collect(),
+        true,
+    ))
 }
 
 /// Insert a call, or update its row when the reply has gone on since; returns
@@ -660,7 +756,7 @@ mod tests {
         )
         .unwrap();
         let storage = fixture_storage();
-        for (path, _) in json_files_with_mtime(&storage.join("session/0f3a")) {
+        for (path, _) in checked_json_files(&storage.join("session/0f3a")).unwrap() {
             let info: serde_json::Value =
                 serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
             conn.execute(
@@ -670,7 +766,7 @@ mod tests {
             .unwrap();
         }
         for dir in fs::read_dir(storage.join("message")).unwrap().flatten() {
-            for (path, _) in json_files_with_mtime(&dir.path()) {
+            for (path, _) in checked_json_files(&dir.path()).unwrap() {
                 let mut doc: serde_json::Value =
                     serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
                 let id = doc["id"].as_str().unwrap().to_string();
