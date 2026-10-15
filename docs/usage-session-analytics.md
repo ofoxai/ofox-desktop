@@ -20,7 +20,8 @@
 `discover_sources()` 仅枚举和读取文件属性；`source_revision(spec)` 包含正文文件身份／时间、Gemini 的 `.project_root`、Codex 的 `session_index.jsonl`，以及 OpenCode 数据库 WAL 或 JSON session/message/part 依赖。正文或依赖变化才重新解析，解析前后再次核对来源版本。
 
 - Claude／Codex 复用既有标题候选与规范化用量语义；Codex 标题索引变化也会失效缓存。
-- Gemini 保留原生消息和项目侧文件的独立状态。
+- Gemini 保留原生消息和项目侧文件的独立状态。已适配 0.64.0 JSONL：上下文回退后的当前消息与已经发生的用量分别投影，同一原生消息的重复 Token 快照只保留最终值。请求账本仍只发现 `chats/` 平层文件；会话分析保持既有有界递归，可读嵌套 child，但没有持久化父 SID 时不按目录名猜归并。原生 `kind=subagent` 不进入主会话消息／活跃时长；缺失或未知 JSONL 角色保持未知，旧 JSON 无 `kind` 保持兼容。
+- Codex 原生 fork／replay 的多 `session_meta` 物理来源没有唯一会话归属时，缓存明确保存 partial 与原因，不产生推测的分析指标；未变化来源仍可暖命中。真正损坏的 JSON／不可读来源继续失败并保留旧事实，不以空 partial 覆盖上次成功统计。旧请求账本身份没有因此得到修复。
 - OpenCode SQLite 的会话、消息、parts 和用量来自同一原生只读事务，保留一库多会话；旧 JSON 存储同样以原生 ID 去重。没有原生消息 ID 的文件副本不能成为额外请求。
 - 物理来源删除后保留已知统计，清除管理跳转引用并标为不可用。枚举失败不等于删除：失败 provider 保留上次事实与引用、暴露读取失败，其余 provider 继续刷新。
 - 文件搬移并修订后，当前观察到的同原生事件替代缺失／失败副本的旧缓存；没有新副本的历史仍保留并说明来源缺失。两个同时存在的冲突副本仍拒绝任意选择。
@@ -38,4 +39,4 @@
 - 页面使用测试数据检查过 900px 浅／深色和详情 Escape 回焦点；不是实际本机统计或最终原生界面的验收。
 - 当前会话分析桥接覆盖 Claude、Codex、Gemini 和 OpenCode；WorkBuddy、dsh、Pi、OpenClaw 的 reader 不因此取得会话分析能力。Hermes 累计统计独立于此查询，不制造时间序列或请求 ID。
 - 概览／请求页的共享项目筛选和概览项目排行见[项目归属说明](usage-project-filter.md)。旧后端只有会话项目能力时仍保留原有的局部筛选降级。
-- 全项目最终门禁、真实数据对账、安装验收、release 性能及 Windows 原生行为仍待完成。Windows 不以 macOS 的类型检查替代。
+- 全项目最终代码门禁已通过，初轮真实数据／CSV 对账完成；新 release 原生复验与最终交付见实施记录。release p95 和 Windows 原生行为仍未验证，Windows 不以 macOS 的类型检查替代。
