@@ -61,6 +61,7 @@ export interface UsageCapabilities {
   projectFilter: boolean;
   sessionAnalytics?: boolean;
   sessionProjectFilter?: boolean;
+  localRefresh?: boolean;
   sources: {
     toolId: string;
     sourceIds: string[];

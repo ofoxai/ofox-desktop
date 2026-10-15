@@ -151,6 +151,7 @@ export function UsagePage({
         (effectiveTab === "overview" ||
           (effectiveTab === "requests" && !optionsLoaded)),
       accountEnabled: visible && effectiveTab === "overview",
+      localRefreshSupported: modern && !!capabilities.data?.localRefresh,
     },
   );
   const data = state.overview.data;

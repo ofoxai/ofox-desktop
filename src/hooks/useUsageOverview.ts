@@ -41,6 +41,7 @@ export function useUsageOverview(
     query?: UsageQueryV1;
     enabled?: boolean;
     accountEnabled?: boolean;
+    localRefreshSupported?: boolean;
   } = {},
 ) {
   const identity = accountIdentity(user, apex);
@@ -126,15 +127,22 @@ export function useUsageOverview(
       stop?.();
     };
   }, [apex]);
-  const refreshLocal = async () => {
-    await usageApi.syncSessionUsage();
+  const readLocal = async () => {
     setSourceVersion((version) => version + 1);
     if (enabled) await overview.refetch({ throwOnError: true });
+  };
+  const refreshLocal = async () => {
+    if (options.localRefreshSupported) await usageApi.refreshLocalUsage();
+    await readLocal();
+  };
+  const refreshManual = async () => {
+    await usageApi.syncSessionUsage();
+    await readLocal();
   };
   const refresh = async () => {
     // Keep every failed source visible while still refreshing the other sources.
     const results = await Promise.allSettled([
-      refreshLocal(),
+      refreshManual(),
       ...(user && accountEnabled
         ? [
             balance.refetch({ throwOnError: true }),

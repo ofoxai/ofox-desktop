@@ -192,6 +192,10 @@ export const usageApi = {
     return invoke("sync_session_usage");
   },
 
+  refreshLocalUsage: async (): Promise<SessionSyncResult> => {
+    return invoke("refresh_local_usage");
+  },
+
   getDataSourceBreakdown: async (): Promise<DataSourceSummary[]> => {
     return invoke("get_usage_data_sources");
   },

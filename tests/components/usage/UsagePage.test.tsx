@@ -433,15 +433,13 @@ it("stops automatic local refresh after leaving the visible page and never polls
     mocks.invoke.mockClear();
     tick();
     await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("sync_session_usage"),
-    );
-    await waitFor(() =>
       expect(
         mocks.invoke.mock.calls.filter(
           ([name]) => name === "get_usage_overview",
         ).length,
       ).toBeGreaterThan(0),
     );
+    expect(mocks.invoke).not.toHaveBeenCalledWith("sync_session_usage");
     expect(
       mocks.invoke.mock.calls.some(([name]) => name.startsWith("ofox_")),
     ).toBe(false);
@@ -533,3 +531,61 @@ it("can still refresh after development StrictMode replays its mount effects", a
     expect(mocks.invoke).toHaveBeenCalledWith("sync_session_usage"),
   );
 });
+
+it.each([true, false])(
+  "automatic refresh uses a local-only capability (%s) and keeps manual pricing/account refresh explicit",
+  async (localRefresh) => {
+    const normal = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: any) => {
+      if (command === "get_usage_capabilities")
+        return {
+          queryVersion: 1,
+          requestSnapshots: true,
+          csv: true,
+          projectFilter: false,
+          localRefresh,
+          sources: [],
+        };
+      if (command === "get_usage_overview")
+        return {
+          ...overview,
+          appliedQuery: args.query,
+          queryFingerprint: "query",
+          snapshotVersion: "snapshot",
+        };
+      if (command === "refresh_local_usage") return {};
+      return normal(command, args);
+    });
+    const timers = vi.spyOn(window, "setInterval");
+    try {
+      render(<Page />);
+      await screen.findByText("unknown-model");
+      const index = timers.mock.calls.findIndex((call) => call[1] === 30_000);
+      expect(index).toBeGreaterThanOrEqual(0);
+      const tick = timers.mock.calls[index][0] as () => void;
+      mocks.invoke.mockClear();
+      tick();
+      await waitFor(() =>
+        expect(
+          mocks.invoke.mock.calls.some(
+            ([name]) => name === "get_usage_overview",
+          ),
+        ).toBe(true),
+      );
+      const automatic = mocks.invoke.mock.calls.map(([name]) => name);
+      expect(automatic).not.toContain("sync_session_usage");
+      expect(automatic.includes("refresh_local_usage")).toBe(localRefresh);
+      expect(automatic.some((name) => name.startsWith("ofox_"))).toBe(false);
+      mocks.invoke.mockClear();
+      fireEvent.click(screen.getByText("refresh-page"));
+      await waitFor(() =>
+        expect(mocks.invoke).toHaveBeenCalledWith("sync_session_usage"),
+      );
+      await waitFor(() =>
+        expect(mocks.invoke).toHaveBeenCalledWith("ofox_refresh_user_info"),
+      );
+    } finally {
+      timers.mockRestore();
+    }
+  },
+);

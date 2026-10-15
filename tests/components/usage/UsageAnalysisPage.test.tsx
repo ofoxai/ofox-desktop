@@ -52,6 +52,7 @@ beforeEach(() => {
           projectFilter: false,
           sessionAnalytics: mocks.supported,
           sessionProjectFilter: mocks.supported,
+          localRefresh: true,
           sources: [],
         };
       if (command === "get_session_usage_analytics")
@@ -73,7 +74,8 @@ beforeEach(() => {
           lastSyncedAt: null,
         };
       }
-      if (command === "sync_session_usage") return {};
+      if (command === "sync_session_usage" || command === "refresh_local_usage")
+        return {};
       throw new Error(command);
     });
 });
@@ -134,7 +136,7 @@ it("refreshes analysis only while visible, without polling account balance", asy
     mocks.invoke.mockClear();
     tick();
     await waitFor(() =>
-      expect(mocks.invoke).toHaveBeenCalledWith("sync_session_usage"),
+      expect(mocks.invoke).toHaveBeenCalledWith("refresh_local_usage"),
     );
     await waitFor(() =>
       expect(
