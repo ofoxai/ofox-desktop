@@ -1448,6 +1448,8 @@ pub fn run() {
             commands::import_library_skill_directory,
             commands::get_library_mcp,
             commands::save_library_mcp,
+            commands::duplicate_library_mcp,
+            commands::preview_library_mcp_adoption,
             commands::preview_library_mcp,
             commands::delete_library_mcp,
             commands::import_library_mcp,

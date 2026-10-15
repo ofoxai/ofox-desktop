@@ -40,6 +40,11 @@ export function ResourceReview({
   const [selected, setSelected] = useDraftState(store, "selected", () =>
     targets.filter((target) => target.desired).map((target) => target.toolId),
   );
+  const [adoptTools, setAdoptTools] = useDraftState<string[]>(
+    store,
+    "adoptTools",
+    [],
+  );
   const [review, setReview] = useDraftState(store, "review", operation);
   const [internalBusy, setBusy] = useDraftState(store, "busy", false);
   const busy = internalBusy || externalBusy;
@@ -189,7 +194,13 @@ export function ResourceReview({
                   </p>
                 )}
                 {target.reason && (
-                  <p className="text-danger">
+                  <p
+                    className={
+                      target.reason === "library.adoptionPreview"
+                        ? "text-warn"
+                        : "text-danger"
+                    }
+                  >
                     {libraryError(target.reason, t)}
                   </p>
                 )}
@@ -220,6 +231,43 @@ export function ResourceReview({
                     })}
                   </p>
                 )}
+                {kind === "mcp" &&
+                  resource?.revision !== undefined &&
+                  target.status === "conflict" &&
+                  target.reason?.includes("library.mcpNameConflict") &&
+                  target.tools.some((tool) => selected.includes(tool)) && (
+                    <div className="space-y-2">
+                      <p className="text-note text-ink-muted">
+                        {t("library.adoptDescription")}
+                      </p>
+                      <Button
+                        variant="secondary"
+                        disabled={busy || readOnly}
+                        onClick={() => {
+                          const next = Array.from(
+                            new Set([
+                              ...adoptTools,
+                              ...target.tools.filter((tool) =>
+                                selected.includes(tool),
+                              ),
+                            ]),
+                          );
+                          setAdoptTools(next);
+                          void run(() =>
+                            libraryApi.previewMcpAdoption(
+                              resource!.id,
+                              selected,
+                              next,
+                              resource!.revision!,
+                              expectedEpoch,
+                            ),
+                          );
+                        }}
+                      >
+                        {t("library.adoptPreview")}
+                      </Button>
+                    </div>
+                  )}
                 {kind === "skills" && (
                   <>
                     <p className="text-note">
@@ -250,7 +298,10 @@ export function ResourceReview({
                 <Button
                   variant="secondary"
                   disabled={busy || readOnly}
-                  onClick={() => setReview(undefined)}
+                  onClick={() => {
+                    setReview(undefined);
+                    setAdoptTools([]);
+                  }}
                 >
                   {t("library.changeTargets")}
                 </Button>

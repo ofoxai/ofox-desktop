@@ -547,3 +547,108 @@ it("retains an in-flight pack preview through portal suspension and rejects a se
   ).toBeEnabled();
   expect(libraryApi.previewPack).toHaveBeenCalledTimes(1);
 });
+it("copies MCP using backend references and freezes the opened source revision and epoch", async () => {
+  vi.spyOn(libraryApi, "duplicateMcp").mockResolvedValue({
+    id: "copy",
+    name: "Copy",
+    revision: 1,
+    transport: "stdio",
+    credentialState: "needsMigration",
+    fields: [],
+  });
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
+  await screen.findByText("MCP demo");
+  await userEvent.click(
+    screen.getByRole("button", { name: "复制模板 MCP demo" }),
+  );
+  fireEvent.change(screen.getByLabelText("新服务器 ID"), {
+    target: { value: "new-server-id" },
+  });
+  fireEvent.change(screen.getByLabelText("名称"), {
+    target: { value: "Copy" },
+  });
+  await userEvent.click(screen.getByRole("button", { name: "保存副本" }));
+  expect(libraryApi.duplicateMcp).toHaveBeenCalledWith(
+    "server",
+    3,
+    1,
+    "new-server-id",
+    "Copy",
+  );
+});
+it("requires a second full preview and explicit confirmation for native MCP adoption", async () => {
+  vi.mocked(libraryApi.list).mockResolvedValue({
+    epoch: 1,
+    servers: [
+      {
+        id: "server",
+        name: "MCP demo",
+        revision: 3,
+        transport: "stdio",
+        credentialState: "nativeEnvironmentRequired",
+        fields: [],
+        targets: [target("codex", true), target("claude", true)],
+      },
+    ],
+    operations: [],
+  });
+  const nativeTarget = {
+    tools: ["codex"],
+    readers: ["codex"],
+    path: "/sandbox/config.toml",
+    targetGroupId: "codex",
+    status: "conflict",
+    reason: "library.mcpNameConflict",
+    changedFields: [],
+  };
+  vi.mocked(libraryApi.preview).mockResolvedValue({
+    operationId: "before-adopt",
+    kind: "mcp",
+    resourceId: "server",
+    resourceRevision: 3,
+    status: "previewed",
+    targets: [nativeTarget],
+  });
+  vi.spyOn(libraryApi, "previewMcpAdoption").mockResolvedValue({
+    operationId: "adopt-preview",
+    kind: "mcp",
+    resourceId: "server",
+    resourceRevision: 3,
+    status: "previewed",
+    targets: [
+      { ...nativeTarget, status: "pending", reason: "library.adoptionPreview" },
+    ],
+  });
+  vi.spyOn(libraryApi, "apply").mockResolvedValue({
+    operationId: "adopt-preview",
+    kind: "mcp",
+    resourceId: "server",
+    resourceRevision: 3,
+    status: "applied",
+    targets: [],
+  });
+  mount();
+  await screen.findByText("MCP demo");
+  await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "分配目标 MCP demo" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "预览变更" }));
+  await userEvent.click(
+    await screen.findByRole("button", { name: "预览接管一致字段" }),
+  );
+  expect(libraryApi.previewMcpAdoption).toHaveBeenCalledWith(
+    "server",
+    ["codex", "claude"],
+    ["codex"],
+    3,
+    1,
+  );
+  expect(libraryApi.apply).not.toHaveBeenCalled();
+  await userEvent.click(
+    await screen.findByRole("button", { name: "确认应用" }),
+  );
+  expect(libraryApi.apply).toHaveBeenCalledWith("adopt-preview");
+});

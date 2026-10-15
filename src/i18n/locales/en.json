@@ -3519,6 +3519,16 @@
     "packReadFailed": "Cannot read the resource pack.",
     "packWriteFailed": "Cannot save the resource pack.",
     "packChanged": "The resource pack changed. Preview it again.",
-    "packItemFailed": "This resource could not be restored. Existing resources were preserved."
+    "packItemFailed": "This resource could not be restored. Existing resources were preserved.",
+    "copyMcpNamed": "Copy template {{name}}",
+    "copyTemplate": "Copy template",
+    "copyMcpDescription": "Create an independent copy with a new server ID. Private configuration is copied by the backend. Targets are not inherited.",
+    "newMcpId": "New server ID",
+    "saveCopy": "Save copy",
+    "mcpNeedsValues": "Values need completion or migration",
+    "mcpUsesEnvironment": "Uses tool environment; connection not checked",
+    "adoptPreview": "Preview matching-field adoption",
+    "adoptDescription": "Adopt only fields at this physical location that exactly match the shared definition. Other fields and comments stay intact. Confirm after preview. Withdrawal removes an empty server entry only when no user extensions remain.",
+    "adoptionPreview": "Matching fields will be adopted. This preview leaves the file unchanged; confirmation records ownership."
   }
 }

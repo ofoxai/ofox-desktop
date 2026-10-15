@@ -14,6 +14,9 @@ pub struct OwnedFields {
     pub server_id: String,
     pub fields: Vec<(Vec<String>, Value)>,
     pub created_paths: Vec<Vec<String>>,
+    /// Explicitly adopted server container, distinct from parents OFox created.
+    #[serde(default)]
+    pub adopted_server: bool,
 }
 
 fn env_name(value: &str) -> Option<&str> {
@@ -691,6 +694,48 @@ fn remove_semantic(root: &mut Value, path: &[String]) {
     }
 }
 
+/// Adoption owns only matching desired leaves. It never rewrites the native text.
+pub fn adopt_server(
+    text: &str,
+    tool: &str,
+    id: &str,
+    spec: &Value,
+) -> Result<OwnedFields, AppError> {
+    let root = parse_native(text, tool)?;
+    let native = root
+        .get(section(tool))
+        .and_then(|servers| servers.get(id))
+        .ok_or_else(|| error("mcpNameConflict"))?;
+    verify_native_headers(native, tool)?;
+    let mut fields = vec![];
+    flatten(spec, vec![section(tool).into(), id.into()], &mut fields);
+    let owned = OwnedFields {
+        tool: tool.into(),
+        server_id: id.into(),
+        fields,
+        created_paths: vec![],
+        adopted_server: true,
+    };
+    verify_owned_text(text, &owned)?;
+    Ok(owned)
+}
+
+fn withdrawal_parents(owned: &OwnedFields) -> Vec<Vec<String>> {
+    let mut paths = owned.created_paths.clone();
+    if owned.adopted_server {
+        for (field, _) in &owned.fields {
+            for count in 2..field.len() {
+                let parent = field[..count].to_vec();
+                if !paths.contains(&parent) {
+                    paths.push(parent);
+                }
+            }
+        }
+    }
+    paths.sort_by_key(|path| std::cmp::Reverse(path.len()));
+    paths
+}
+
 pub fn patch_server(
     current: Option<&str>,
     tool: &str,
@@ -730,9 +775,7 @@ pub fn patch_server(
             for (path, _) in &owned.fields {
                 remove_semantic(&mut remaining, path);
             }
-            let mut cleanup = owned.created_paths.clone();
-            cleanup.sort_by_key(|path| std::cmp::Reverse(path.len()));
-            for path in cleanup {
+            for path in withdrawal_parents(owned) {
                 if leaf(&remaining, &path)
                     .is_some_and(|value| value.as_object().is_some_and(|map| map.is_empty()))
                 {
@@ -796,6 +839,9 @@ pub fn patch_server(
     let mut cleanup = owned
         .map(|owned| owned.created_paths.clone())
         .unwrap_or_default();
+    if let Some(owned) = owned.filter(|owned| owned.adopted_server) {
+        cleanup = withdrawal_parents(owned);
+    }
     cleanup.sort_by_key(|path| std::cmp::Reverse(path.len()));
     for path in cleanup {
         if spec.is_some() && new.keys().any(|field| field.starts_with(&path)) {
@@ -823,6 +869,7 @@ pub fn patch_server(
         server_id: id.into(),
         fields,
         created_paths,
+        adopted_server: owned.is_some_and(|owned| owned.adopted_server),
     });
     Ok((result, receipt))
 }

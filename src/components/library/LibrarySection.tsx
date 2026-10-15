@@ -27,6 +27,7 @@ import {
   SkillImporter,
   SkillDetails,
 } from "./ResourceEditors";
+import { McpDuplicate } from "./McpDuplicate";
 import { ResourceReview } from "./ResourceReview";
 import { libraryError } from "./libraryText";
 import { DraftStore } from "./useDraftState";
@@ -34,7 +35,7 @@ import { DraftStore } from "./useDraftState";
 export type Resource = InstructionSet | McpDefinition | SkillDefinition;
 type OpenViewBody =
   | {
-      type: "edit" | "targets" | "details" | "delete";
+      type: "edit" | "targets" | "details" | "delete" | "copy";
       resource: Resource;
       targets: ResourceTarget[];
     }
@@ -242,6 +243,17 @@ export function LibrarySection({
                     ? row.directory
                     : t("library.revision", { revision: row.revision ?? "—" })}
                 </p>
+                {kind === "mcp" && (
+                  <p className="text-note text-ink-muted">
+                    {(row as McpDefinition).transport} ·{" "}
+                    {t(
+                      (row as McpDefinition).credentialState ===
+                        "needsMigration"
+                        ? "library.mcpNeedsValues"
+                        : "library.mcpUsesEnvironment",
+                    )}
+                  </p>
+                )}
                 <p className="text-note text-ink-muted">
                   {t("library.targetSummary", {
                     desired: targets(row).filter((target) => target.desired)
@@ -268,6 +280,18 @@ export function LibrarySection({
                     }
                   >
                     {t("library.edit")}
+                  </Button>
+                )}
+                {kind === "mcp" && (
+                  <Button
+                    variant="secondary"
+                    disabled={busy || !writable}
+                    aria-label={t("library.copyMcpNamed", { name: row.name })}
+                    onClick={(event) =>
+                      open({ type: "copy", resource: row, targets: [] }, event)
+                    }
+                  >
+                    {t("library.copyTemplate")}
                   </Button>
                 )}
                 {kind === "instructions" && (
@@ -433,6 +457,26 @@ export function LibrarySection({
                   }
                 />
               )}
+            {view?.type === "copy" && kind === "mcp" && (
+              <McpDuplicate
+                store={draftStore}
+                initial={view.resource as McpDefinition}
+                busy={busy || !writable}
+                onSave={(id, name) =>
+                  run(
+                    () =>
+                      libraryApi.duplicateMcp(
+                        view.resource.id,
+                        view.resource.revision!,
+                        view.epoch,
+                        id,
+                        name,
+                      ),
+                    true,
+                  )
+                }
+              />
+            )}
             {(view?.type === "new" || view?.type === "edit") &&
               kind === "mcp" && (
                 <McpEditor

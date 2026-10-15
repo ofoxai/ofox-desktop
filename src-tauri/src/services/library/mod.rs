@@ -2,6 +2,7 @@
 pub(crate) mod catalog;
 pub(crate) mod coordinator;
 mod instructions;
+pub(crate) mod mcp_actions;
 pub(crate) mod mcp_codec;
 pub(crate) mod mcp_resource;
 pub(crate) mod native_json;

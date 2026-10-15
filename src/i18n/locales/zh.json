@@ -3519,6 +3519,16 @@
     "packReadFailed": "无法读取资源包。",
     "packWriteFailed": "无法保存资源包。",
     "packChanged": "资源包已变化，请重新预览。",
-    "packItemFailed": "此资源恢复失败，已有资源已保留。"
+    "packItemFailed": "此资源恢复失败，已有资源已保留。",
+    "copyMcpNamed": "复制模板 {{name}}",
+    "copyTemplate": "复制模板",
+    "copyMcpDescription": "创建独立副本并设置新的服务器 ID。原有私有配置由后端复制，副本不继承目标分配。",
+    "newMcpId": "新服务器 ID",
+    "saveCopy": "保存副本",
+    "mcpNeedsValues": "需补全或迁移配置值",
+    "mcpUsesEnvironment": "使用工具环境，连接未检查",
+    "adoptPreview": "预览接管一致字段",
+    "adoptDescription": "仅接管此物理位置中与共享定义完全一致的字段，保留其他字段和注释。预览后仍需确认；撤回时，仅在无用户扩展的情况下移除空服务器项。",
+    "adoptionPreview": "将接管已匹配的字段；此预览不改写文件，确认后才记录所有权。"
   }
 }

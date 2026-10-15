@@ -120,6 +120,34 @@ export interface ResourcePackResult {
   }[];
 }
 export const libraryApi = {
+  duplicateMcp: (
+    sourceId: string,
+    expectedRevision: number,
+    expectedEpoch: number,
+    newId: string,
+    name: string,
+  ) =>
+    invoke<Omit<McpDefinition, "targets">>("duplicate_library_mcp", {
+      sourceId,
+      expectedRevision,
+      expectedEpoch,
+      newId,
+      name,
+    }),
+  previewMcpAdoption: (
+    resourceId: string,
+    tools: string[],
+    adoptTools: string[],
+    expectedRevision: number,
+    expectedEpoch: number,
+  ) =>
+    invoke<LibraryOperation>("preview_library_mcp_adoption", {
+      resourceId,
+      tools,
+      adoptTools,
+      expectedRevision,
+      expectedEpoch,
+    }),
   pickPack: () => invoke<string | null>("pick_library_pack"),
   exportPack: () => invoke<boolean>("export_library_pack"),
   previewPack: (path: string) =>

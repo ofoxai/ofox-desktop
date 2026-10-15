@@ -740,3 +740,54 @@ pub async fn restore_library_pack(
     .await
     .map_err(|_| "library.packInvalid".to_string())?
 }
+
+#[tauri::command]
+pub fn duplicate_library_mcp(
+    state: State<'_, AppState>,
+    source_id: String,
+    expected_revision: u64,
+    expected_epoch: u64,
+    new_id: String,
+    name: String,
+) -> Result<Value, String> {
+    library::mcp_actions::duplicate(
+        &state.db,
+        &source_id,
+        expected_revision,
+        expected_epoch,
+        &new_id,
+        &name,
+    )
+    .map_err(|e| e.to_string())
+}
+#[tauri::command]
+pub async fn preview_library_mcp_adoption(
+    state: State<'_, AppState>,
+    resource_id: String,
+    tools: Vec<String>,
+    adopt_tools: Vec<String>,
+    expected_revision: u64,
+    expected_epoch: u64,
+) -> Result<Value, String> {
+    crate::agent_env::ready().await;
+    let discovery = resource_discovery().await?;
+    let _io = crate::config_io::lock();
+    library::catalog::verify_epoch(&state.db, expected_epoch).map_err(|e| e.to_string())?;
+    let snapshot = state.db.library_snapshot().map_err(|e| e.to_string())?;
+    check_revision(
+        &snapshot,
+        library::ResourceKind::Mcp,
+        &resource_id,
+        Some(expected_revision),
+    )?;
+    verify_selected_tools(
+        &snapshot,
+        library::ResourceKind::Mcp,
+        &resource_id,
+        &tools,
+        &discovery,
+    )?;
+    library::mcp_actions::preview_adoption(&state.db, &resource_id, &tools, &adopt_tools)
+        .map(|op| library::operation_view(&op))
+        .map_err(|e| e.to_string())
+}

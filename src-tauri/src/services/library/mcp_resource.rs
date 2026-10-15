@@ -378,6 +378,22 @@ pub(crate) fn preview_at(
     selected: &[(String, PathBuf)],
     paths: Option<BTreeMap<String, PathBuf>>,
 ) -> Result<Operation, AppError> {
+    preview_at_adoption(db, id, selected, paths, &[])
+}
+pub(crate) fn preview_at_adoption(
+    db: &Database,
+    id: &str,
+    selected: &[(String, PathBuf)],
+    paths: Option<BTreeMap<String, PathBuf>>,
+    adopt: &[String],
+) -> Result<Operation, AppError> {
+    if adopt
+        .iter()
+        .any(|tool| !selected.iter().any(|(selected, _)| selected == tool))
+        || adopt.iter().collect::<BTreeSet<_>>().len() != adopt.len()
+    {
+        return Err(error("targetUnsupported"));
+    }
     let _guard = crate::config_io::lock();
     let before = db.library_snapshot()?;
     let meta = before
@@ -590,13 +606,22 @@ pub(crate) fn preview_at(
                 }
                 Some(native)
             };
-            let (after, receipt) = mcp_codec::patch_server(
-                text.as_deref(),
-                formatter,
-                id,
-                owned.as_ref(),
-                native.as_ref(),
-            )?;
+            let (after, receipt) =
+                if owned.is_none() && owners.iter().any(|tool| adopt.contains(tool)) {
+                    let text = text.as_deref().ok_or_else(|| error("mcpNameConflict"))?;
+                    let spec = native.as_ref().ok_or_else(|| error("invalidMcp"))?;
+                    let adopted = mcp_codec::adopt_server(text, formatter, id, spec)?;
+                    write.reason = Some("library.adoptionPreview".into());
+                    (text.to_string(), Some(adopted))
+                } else {
+                    mcp_codec::patch_server(
+                        text.as_deref(),
+                        formatter,
+                        id,
+                        owned.as_ref(),
+                        native.as_ref(),
+                    )?
+                };
             for reader in &write.readers {
                 if mcp_codec::section(reader) != mcp_codec::section(formatter)
                     || mcp_codec::parse_native(&after, reader).is_err()
