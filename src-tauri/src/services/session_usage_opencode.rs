@@ -529,6 +529,29 @@ fn to_call(
     }))
 }
 
+fn call_to_fact(c: OcCall) -> usage_source::NormalizedUsageFact {
+    usage_source::NormalizedUsageFact {
+        request_id: format!("opencode:{}", c.msg_id),
+        native_key: c
+            .native_id
+            .then(|| usage_source::native_key("opencode", "", &c.msg_id)),
+        session_id: Some(c.native_session_id),
+        model: c.model,
+        usage: c.usage,
+        at_ms: c.at_ms,
+    }
+}
+/// Reuses the ledger's token semantics for a message already read in a native
+/// transaction. The caller supplies authoritative native row identifiers.
+pub(crate) fn normalized_message(
+    value: serde_json::Value,
+    native_id: bool,
+) -> Result<Option<usage_source::NormalizedUsageFact>, AppError> {
+    let message: OcMessage = serde_json::from_value(value)
+        .map_err(|_| AppError::Config("invalid OpenCode message".into()))?;
+    Ok(to_call(&message, &HashMap::new(), 0, native_id)?.map(call_to_fact))
+}
+
 pub(crate) fn normalized_facts(
     path: &Path,
 ) -> Result<(Vec<usage_source::NormalizedUsageFact>, bool), AppError> {
@@ -574,22 +597,7 @@ pub(crate) fn normalized_facts(
         }
         calls
     };
-    Ok((
-        calls
-            .into_iter()
-            .map(|c| usage_source::NormalizedUsageFact {
-                request_id: format!("opencode:{}", c.msg_id),
-                native_key: c
-                    .native_id
-                    .then(|| usage_source::native_key("opencode", "", &c.msg_id)),
-                session_id: Some(c.native_session_id),
-                model: c.model,
-                usage: c.usage,
-                at_ms: c.at_ms,
-            })
-            .collect(),
-        true,
-    ))
+    Ok((calls.into_iter().map(call_to_fact).collect(), true))
 }
 
 /// Insert a call, or update its row when the reply has gone on since; returns

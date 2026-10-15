@@ -18,6 +18,13 @@ pub mod pricing_sync;
 pub mod prompt;
 pub mod provider;
 pub mod proxy;
+pub mod session_analytics;
+pub mod session_analytics_api;
+pub mod session_analytics_core;
+pub(crate) mod session_analytics_discovery;
+pub mod session_analytics_index;
+pub mod session_analytics_messages;
+pub mod session_analytics_opencode;
 pub mod session_usage;
 #[cfg(test)]
 mod session_usage_atomic_tests;
