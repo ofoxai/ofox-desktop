@@ -3831,5 +3831,44 @@
     "messageCoveragePartial": "Message timestamp coverage is incomplete. Message counts and activity duration are unavailable.",
     "showMore": "Show more ({{count}} remaining)",
     "moreHidden": "More hidden items ({{count}} remaining)"
+  },
+  "usageLifetime": {
+    "title": "Hermes lifetime usage",
+    "scope": "Native cumulative statistics, independent of time, tool, model and project filters. Excluded from daily trends and request details.",
+    "failed": "Could not read lifetime usage. The current result is retained.",
+    "loading": "Reading cumulative statistics…",
+    "refresh": "Read again",
+    "staleMissing": "The source is missing. The last stable cumulative statistics are retained.",
+    "staleError": "The source is unreadable. The last stable cumulative statistics are retained.",
+    "missing": "No readable native cumulative statistics yet. A missing source does not mean zero usage.",
+    "unreadable": "Native cumulative statistics are unreadable and have not been treated as zero usage.",
+    "lastRead": "Last stable read {{time}}; counter or model coverage may still be incomplete.",
+    "counterCoverage": "Counter coverage: {{value}}",
+    "modelCoverage": "Model attribution: {{value}}",
+    "priceCoverage": "Price estimate: {{value}}",
+    "coverage": {
+      "complete": "Complete",
+      "partial": "Partial",
+      "unknown": "Unknown"
+    },
+    "price": {
+      "known": "Known",
+      "free": "Known free",
+      "partial": "Partial",
+      "unknown": "Unknown"
+    },
+    "modelPartial": "Some historical model attribution cannot be verified. Recorded model names are retained, with unattributed residuals listed separately.",
+    "mainTokens": "Fresh input + output; cache separate",
+    "sessionRecords": "Native session records",
+    "apiCalls": "Cumulative API counter",
+    "callExplanation": "The native cumulative API counter is not individually attributable request details. ≥ means a known lower bound; — means unknown.",
+    "models": "Models and purposes",
+    "residual": "Unattributed model residual",
+    "category": {
+      "main": "Main loop",
+      "voice": "Voice",
+      "auxiliary": "Auxiliary",
+      "unattributed": "Unattributed purpose"
+    }
   }
 }
