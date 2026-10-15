@@ -11,6 +11,7 @@ pub mod library;
 pub mod low_balance;
 pub mod mcp;
 pub mod model_fetch;
+pub(crate) mod native_sqlite_snapshot;
 pub(crate) mod ofox_bind;
 pub mod ofox_pricing;
 pub mod omo;
@@ -32,6 +33,7 @@ pub mod session_usage_codex;
 mod session_usage_dsh;
 pub mod session_usage_gemini;
 pub mod session_usage_hermes;
+pub(crate) mod session_usage_openclaw;
 pub mod session_usage_opencode;
 mod session_usage_pi;
 #[cfg(test)]

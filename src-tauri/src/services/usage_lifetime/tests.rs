@@ -290,6 +290,23 @@ fn hermes_empty_wal_does_not_make_a_plain_database_corrupt() {
     assert!(!root.join("state.db-shm").exists());
 }
 
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn hermes_sqlite_leaf_alias_with_target_wal_never_reports_stale_success() {
+    let sandbox = crate::test_sandbox::sandbox();
+    let target = wal_only_fixture(sandbox.home());
+    let alias = sandbox.home().join("alias");
+    fs::create_dir_all(&alias).unwrap();
+    std::os::unix::fs::symlink(target.join("state.db"), alias.join("state.db")).unwrap();
+    assert!(
+        read_lifetime(&alias).is_err(),
+        "a main alias without its target WAL must fail closed"
+    );
+    assert!(crate::services::session_usage_hermes::current_stamp(&alias).is_err());
+    assert_amount(&read_lifetime(&target).unwrap(), 230, 13);
+}
+
 #[test]
 #[serial_test::serial]
 fn hermes_source_snapshot_rejects_main_identity_change_and_wal_set_change() {

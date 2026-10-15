@@ -15,6 +15,140 @@ use super::utils::{extract_text, parse_timestamp_to_ms, read_head_tail_lines, tr
 
 const PROVIDER_ID: &str = "openclaw";
 
+/// Native usage state root, independent of the configuration-file location.
+pub(crate) fn usage_root() -> Result<std::path::PathBuf, String> {
+    let _io = crate::config_io::lock();
+    if crate::settings::settings_health().state == crate::settings::SettingsHealthState::Unreadable
+    {
+        return Err("usage.openclaw.settingsUnreadable".into());
+    }
+    if let Some(root) = crate::settings::get_openclaw_override_dir() {
+        return Ok(root);
+    }
+    fn env(name: &str) -> Result<Option<String>, String> {
+        match std::env::var(name) {
+            Ok(value) => Ok((!value.trim().is_empty()).then(|| value.trim().to_owned())),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(_) => Err("usage.openclaw.invalidStateDirectory".into()),
+        }
+    }
+    fn absolute(value: &str, home: &Path) -> Result<std::path::PathBuf, String> {
+        let path = if value == "~" {
+            home.to_owned()
+        } else if value.starts_with("~/") || value.starts_with("~\\") {
+            home.join(&value[2..])
+        } else {
+            std::path::PathBuf::from(value)
+        };
+        // The desktop cannot recover a native CLI's invocation cwd. Relative
+        // overrides are unknown, rather than permission to scan a default.
+        path.is_absolute()
+            .then_some(path)
+            .ok_or_else(|| "usage.openclaw.invalidStateDirectory".into())
+    }
+    let os_home = crate::config::get_home_dir();
+    let home = match env("OPENCLAW_HOME")?.filter(|v| !matches!(v.as_str(), "null" | "undefined")) {
+        Some(value) => absolute(&value, &os_home)?,
+        None => os_home,
+    };
+    if let Some(value) = env("OPENCLAW_STATE_DIR")? {
+        return absolute(&value, &home);
+    }
+    let current = home.join(".openclaw");
+    match std::fs::symlink_metadata(&current) {
+        Ok(_) => return Ok(current),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("usage.openclaw.sourceUnavailable".into()),
+    }
+    let legacy = home.join(".clawdbot");
+    match std::fs::symlink_metadata(&legacy) {
+        Ok(_) => Ok(legacy),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(current),
+        Err(_) => Err("usage.openclaw.sourceUnavailable".into()),
+    }
+}
+
+/// Strict, stat-only roster used by local refresh and the native reader.
+pub(crate) fn usage_files(root: &Path) -> Result<Vec<std::path::PathBuf>, String> {
+    fn kind(path: &Path) -> Result<Option<std::fs::Metadata>, String> {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                Err("usage.openclaw.sourceSymlinkUnsupported".into())
+            }
+            Ok(meta) => Ok(Some(meta)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err("usage.openclaw.sourceUnavailable".into()),
+        }
+    }
+    fn directory(path: &Path) -> Result<bool, String> {
+        match kind(path)? {
+            None => Ok(false),
+            Some(m) if m.is_dir() => Ok(true),
+            Some(_) => Err("usage.openclaw.sourceRootNotDirectory".into()),
+        }
+    }
+    if !directory(root)? || !directory(&root.join("agents"))? {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    let mut visited = 0;
+    for agent in
+        std::fs::read_dir(root.join("agents")).map_err(|_| "usage.openclaw.sourceUnavailable")?
+    {
+        visited += 1;
+        if visited > 20_000 {
+            return Err("usage.openclaw.sourceBudgetExceeded".into());
+        }
+        let agent = agent
+            .map_err(|_| "usage.openclaw.sourceUnavailable")?
+            .path();
+        if !kind(&agent)?.is_some_and(|m| m.is_dir()) {
+            continue;
+        }
+        let primary_dir = agent.join("agent");
+        if directory(&primary_dir)? {
+            let primary = primary_dir.join("openclaw-agent.sqlite");
+            if let Some(meta) = kind(&primary)? {
+                if !meta.is_file() {
+                    return Err("usage.openclaw.sourceUnavailable".into());
+                }
+                // WAL is observed by normalized_stamp; reject redirected sidecars.
+                for suffix in ["-wal", "-journal"] {
+                    let _ = kind(&std::path::PathBuf::from(format!(
+                        "{}{suffix}",
+                        primary.to_string_lossy()
+                    )))?;
+                }
+                out.push(primary);
+            }
+        }
+        let sessions = agent.join("sessions");
+        if !directory(&sessions)? {
+            continue;
+        }
+        for entry in std::fs::read_dir(sessions).map_err(|_| "usage.openclaw.sourceUnavailable")? {
+            visited += 1;
+            if visited > 20_000 || out.len() >= 10_000 {
+                return Err("usage.openclaw.sourceBudgetExceeded".into());
+            }
+            let path = entry
+                .map_err(|_| "usage.openclaw.sourceUnavailable")?
+                .path();
+            if path.extension().is_some_and(|e| e == "jsonl") {
+                if !kind(&path)?.is_some_and(|m| m.is_file()) {
+                    return Err("usage.openclaw.sourceUnavailable".into());
+                }
+                out.push(path);
+            }
+        }
+    }
+    if out.len() > 10_000 {
+        return Err("usage.openclaw.sourceBudgetExceeded".into());
+    }
+    out.sort();
+    Ok(out)
+}
+
 /// Strip trailing `\n[message_id: ...]` metadata injected by OpenClaw gateway.
 fn strip_message_id_suffix(text: &str) -> &str {
     if let Some(pos) = text.rfind("\n[message_id:") {

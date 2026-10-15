@@ -54,6 +54,9 @@ impl Snapshot {
         Self::capture(path, Kind::Storage)
     }
     fn capture(path: &Path, kind: Kind) -> Result<Self, AppError> {
+        if matches!(kind, Kind::Sqlite) {
+            super::native_sqlite_snapshot::validate_paths(path, error)?;
+        }
         if matches!(kind, Kind::Tree) {
             return Ok(Self {
                 path: path.to_owned(),
@@ -197,6 +200,14 @@ pub(crate) fn timestamp_ms(timestamp: Option<&str>) -> Option<i64> {
 fn normalized_source(provider: &str, path: &Path) -> Result<Snapshot, AppError> {
     match provider {
         "claude" | "codex" | "gemini" | "workbuddy" | "dsh" | "pi" => Snapshot::file(path),
+        "openclaw"
+            if path
+                .file_name()
+                .is_some_and(|s| s == "openclaw-agent.sqlite") =>
+        {
+            Snapshot::sqlite(path)
+        }
+        "openclaw" => Snapshot::file(path),
         "opencode" if path.is_file() => Snapshot::sqlite(path),
         "opencode" => Snapshot::storage(path),
         _ => Err(error("unsupported normalized provider")),
@@ -230,6 +241,12 @@ pub fn read_normalized(provider: &str, path: &Path) -> Result<NormalizedSnapshot
         }
         "pi" => {
             let read = super::session_usage_pi::read_pi(path)?;
+            let complete = !read.reasons.contains("incompleteEnumeration");
+            reasons.extend(read.reasons);
+            (read.facts, complete)
+        }
+        "openclaw" => {
+            let read = super::session_usage_openclaw::read_openclaw(path)?;
             let complete = !read.reasons.contains("incompleteEnumeration");
             reasons.extend(read.reasons);
             (read.facts, complete)
@@ -602,6 +619,18 @@ pub(crate) fn has_complete_coverage_on(
 
 fn owned_identity(provider: &str, request: &str, session: Option<&str>) -> Option<String> {
     let session = session.unwrap_or("");
+    if provider == "openclaw" {
+        let [agent, sid, id]: [String; 3] =
+            serde_json::from_str(request.strip_prefix("openclaw_session:")?).ok()?;
+        if agent.trim().is_empty()
+            || sid.trim().is_empty()
+            || id.trim().is_empty()
+            || json!([agent, sid]).to_string() != session
+        {
+            return None;
+        }
+        return Some(native_key(provider, session, &id));
+    }
     if matches!(provider, "dsh" | "pi") {
         let [sid, kind, id]: [String; 3] =
             serde_json::from_str(request.strip_prefix(&format!("{provider}_session:"))?).ok()?;
@@ -654,6 +683,7 @@ fn owner(provider: &str) -> Result<&'static str, AppError> {
         "workbuddy" => Ok("_workbuddy_session"),
         "dsh" => Ok("_dsh_session"),
         "pi" => Ok("_pi_session"),
+        "openclaw" => Ok("_openclaw_session"),
         _ => Err(error("unknown provider")),
     }
 }
@@ -666,6 +696,7 @@ fn origin(provider: &str) -> Result<&'static str, AppError> {
         "workbuddy" => Ok("workbuddy_session"),
         "dsh" => Ok("dsh_session"),
         "pi" => Ok("pi_session"),
+        "openclaw" => Ok("openclaw_session"),
         _ => Err(error("unknown provider")),
     }
 }
@@ -695,7 +726,7 @@ fn no_prior_ledger_on(
             .keys()
             .any(|p| roots.iter().any(|root| Path::new(p).starts_with(root))))
 }
-fn decode_evidence(value: &Value) -> Result<Evidence, AppError> {
+pub(crate) fn decode_evidence(value: &Value) -> Result<Evidence, AppError> {
     if value["version"].as_u64() != Some(1) {
         return Err(error("unsupported evidence version"));
     }
@@ -1133,6 +1164,7 @@ impl Prepared {
             "workbuddy" => "_workbuddy_session",
             "dsh" => "_dsh_session",
             "pi" => "_pi_session",
+            "openclaw" => "_openclaw_session",
             _ => return Err(error("unsupported native evidence source")),
         };
         if let Some((source, app, provider)) = row {

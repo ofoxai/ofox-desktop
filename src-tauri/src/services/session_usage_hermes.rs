@@ -1,20 +1,18 @@
 //! Read-only Hermes cumulative counters. Never produces ledger event facts.
 //! Source contract: SessionDB 0.21.7+18.g590af66, schema 31. Only statistics
 //! columns are selected. Current routing and transcript bodies are never read.
+use super::native_sqlite_snapshot::SqliteSnapshot;
 use super::usage_lifetime::{
     LifetimeAmountKind, LifetimeBuckets, LifetimeCategory, LifetimeCoverage, LifetimeModelFact,
     LifetimeNativeSnapshot,
 };
 use crate::{error::AppError, session_manager::source_cache::SourceStamp};
-use rusqlite::{types::ValueRef, Connection, OpenFlags, Row};
+use rusqlite::{types::ValueRef, Connection, Row};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
-    path::{Path, PathBuf},
-    time::Duration,
+    path::Path,
 };
 
 const MAX_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
@@ -25,121 +23,8 @@ fn invalid(code: &str) -> AppError {
     AppError::Database(format!("usage.hermes.{code}"))
 }
 
-struct Component {
-    path: PathBuf,
-    file: File,
-    stamp: SourceStamp,
-}
-impl Component {
-    fn open(path: PathBuf) -> Result<Self, AppError> {
-        let mut options = OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC);
-        }
-        let file = options
-            .open(&path)
-            .map_err(|_| invalid("sourceUnreadable"))?;
-        if !file
-            .metadata()
-            .map_err(|_| invalid("sourceUnreadable"))?
-            .is_file()
-        {
-            return Err(invalid("sourceUnreadable"));
-        }
-        let stamp = SourceStamp::of(&file).map_err(|_| invalid("sourceUnreadable"))?;
-        if stamp.size > MAX_SOURCE_BYTES {
-            return Err(invalid("sourceTooLarge"));
-        }
-        Ok(Self { path, file, stamp })
-    }
-    fn verify(&self) -> Result<(), AppError> {
-        self.stamp
-            .verify(&self.path)
-            .map_err(|_| invalid("sourceChanged"))?;
-        if SourceStamp::of(&self.file).map_err(|_| invalid("sourceChanged"))? != self.stamp {
-            return Err(invalid("sourceChanged"));
-        }
-        Ok(())
-    }
-    fn copy_to(&mut self, destination: &Path) -> Result<(), AppError> {
-        let mut target = File::create(destination).map_err(|_| invalid("snapshotFailed"))?;
-        let copied = std::io::copy(&mut (&mut self.file).take(self.stamp.size + 1), &mut target)
-            .map_err(|_| invalid("snapshotFailed"))?;
-        target.flush().map_err(|_| invalid("snapshotFailed"))?;
-        if copied != self.stamp.size {
-            return Err(invalid("sourceChanged"));
-        }
-        self.verify()
-    }
-}
-
-fn exists(path: &Path) -> Result<bool, AppError> {
-    match fs::metadata(path) {
-        Ok(_) => Ok(true),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(_) => Err(invalid("sourceUnreadable")),
-    }
-}
-
-struct SourceFiles {
-    main: Component,
-    wal: Option<Component>,
-    root: PathBuf,
-}
-impl SourceFiles {
-    fn open(root: &Path) -> Result<Self, AppError> {
-        let main = root.join("state.db");
-        if !exists(&main)? {
-            return Err(invalid("sourceMissing"));
-        }
-        // A rollback writer may hold stable but uncommitted main pages while
-        // paused. Without its journal that is not a valid native snapshot.
-        if exists(&root.join("state.db-journal"))? {
-            return Err(invalid("sourceBusy"));
-        }
-        let main = Component::open(main)?;
-        let wal_path = root.join("state.db-wal");
-        let wal = exists(&wal_path)?
-            .then(|| Component::open(wal_path))
-            .transpose()?;
-        if main
-            .stamp
-            .size
-            .checked_add(wal.as_ref().map_or(0, |f| f.stamp.size))
-            .is_none_or(|size| size > MAX_SOURCE_BYTES)
-        {
-            return Err(invalid("sourceTooLarge"));
-        }
-        let files = Self {
-            main,
-            wal,
-            root: root.to_owned(),
-        };
-        files.verify()?;
-        Ok(files)
-    }
-    fn stamp(&self) -> Value {
-        json!({"database":self.main.stamp,"wal":self.wal.as_ref().map(|f| &f.stamp)})
-    }
-    fn verify(&self) -> Result<(), AppError> {
-        self.main.verify()?;
-        if exists(&self.root.join("state.db-journal"))?
-            || exists(&self.root.join("state.db-wal"))? != self.wal.is_some()
-        {
-            return Err(invalid("sourceChanged"));
-        }
-        if let Some(wal) = &self.wal {
-            wal.verify()?;
-        }
-        Ok(())
-    }
-}
-
 pub(crate) fn current_stamp(root: &Path) -> Result<Value, AppError> {
-    Ok(SourceFiles::open(root)?.stamp())
+    Ok(SqliteSnapshot::open(&root.join("state.db"), MAX_SOURCE_BYTES, invalid)?.stamp())
 }
 
 #[derive(Deserialize, PartialEq, Eq)]
@@ -185,49 +70,20 @@ fn read_snapshot(
     root: &Path,
     after_copy: impl FnOnce(),
 ) -> Result<LifetimeNativeSnapshot, AppError> {
-    let mut files = SourceFiles::open(root)?;
-    let temporary = tempfile::tempdir().map_err(|_| invalid("snapshotFailed"))?;
-    let copy = temporary.path().join("state.db");
-    files.main.copy_to(&copy)?;
-    if let Some(wal) = &mut files.wal {
-        wal.copy_to(&temporary.path().join("state.db-wal"))?;
-    }
-    files.verify()?;
-    after_copy();
-    let conn = Connection::open_with_flags(
-        &copy,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|_| invalid("invalidDatabase"))?;
-    conn.busy_timeout(Duration::from_millis(500))
-        .map_err(|_| invalid("invalidDatabase"))?;
-    conn.pragma_update(None, "query_only", true)
-        .map_err(|_| invalid("invalidDatabase"))?;
-    let data_version: i64 = conn
-        .pragma_query_value(None, "data_version", |r| r.get(0))
-        .map_err(|_| invalid("invalidDatabase"))?;
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|_| invalid("invalidDatabase"))?;
-    let version: i64 = tx
-        .query_row(
-            "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(|_| invalid("unsupportedSchema"))?;
-    if version != 31 {
-        return Err(invalid("unsupportedSchema"));
-    }
-    let mut result = read_counters(&tx)?;
-    tx.commit().map_err(|_| invalid("invalidDatabase"))?;
-    let after_version: i64 = conn
-        .pragma_query_value(None, "data_version", |r| r.get(0))
-        .map_err(|_| invalid("invalidDatabase"))?;
-    if data_version != after_version {
-        return Err(invalid("sourceChanged"));
-    }
-    files.verify()?;
+    let mut files = SqliteSnapshot::open(&root.join("state.db"), MAX_SOURCE_BYTES, invalid)?;
+    let mut result = files.read(after_copy, |conn| {
+        let version: i64 = conn
+            .query_row(
+                "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|_| invalid("unsupportedSchema"))?;
+        if version != 31 {
+            return Err(invalid("unsupportedSchema"));
+        }
+        read_counters(conn)
+    })?;
     result.source_stamp = files.stamp();
     Ok(result)
 }

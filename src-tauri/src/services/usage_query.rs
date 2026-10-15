@@ -102,7 +102,7 @@ pub fn source_capabilities() -> Vec<SourceCapability> {
         ("hermes", None),
         ("pi", Some("pi_session")),
         ("dsh", Some("dsh_session")),
-        ("openclaw", None),
+        ("openclaw", Some("openclaw_session")),
     ]
     .into_iter()
     .map(|(tool, source)| SourceCapability {

@@ -7,7 +7,7 @@ use crate::error::AppError;
 use crate::services::session_usage::SessionSyncResult;
 use crate::services::{
     pricing_sync, session_usage, session_usage_codex, session_usage_dsh, session_usage_gemini,
-    session_usage_opencode, session_usage_workbuddy, usage_maintenance,
+    session_usage_openclaw, session_usage_opencode, session_usage_workbuddy, usage_maintenance,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -509,6 +509,21 @@ struct Source {
     observe: Option<ObserveFiles>,
 }
 const SOURCES: &[Source] = &[
+    Source {
+        provider: "openclaw",
+        source_id: "openclaw_session",
+        name: "OpenClaw",
+        resolve: || {
+            crate::session_manager::providers::openclaw::usage_root()
+                .map(|root| vec![root])
+                .map_err(|_| root_unavailable())
+        },
+        sync: |db, roots| session_usage_openclaw::sync_openclaw_usage_at(db, single_root(roots)?),
+        observe: Some(|roots| {
+            crate::session_manager::providers::openclaw::usage_files(single_root(roots)?)
+                .map_err(|_| root_unavailable())
+        }),
+    },
     Source {
         provider: "claude",
         source_id: "session_log",
