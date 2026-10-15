@@ -44,6 +44,8 @@ export function SessionFolder({
   expanded,
   setExpanded,
   trash,
+  located,
+  onLocated,
 }: {
   path: string;
   sessions: ManagedSession[];
@@ -55,9 +57,16 @@ export function SessionFolder({
   expanded: string | null;
   setExpanded: (s: string | null) => void;
   trash: (items: ManagedSession[]) => void;
+  located?: { key: string; request: number | null };
+  onLocated?: (request: number) => void;
 }) {
   const { t } = useTranslation();
   const [all, setAll] = useState(false);
+  const visible = sessions.slice(0, all ? undefined : 100);
+  const target = sessions.find(
+    (session) => session.sessionKey === located?.key,
+  );
+  if (target && !visible.includes(target)) visible.push(target);
   return (
     <ListCard>
       <ListHead>
@@ -91,7 +100,7 @@ export function SessionFolder({
       </ListHead>
       {open && (
         <>
-          {sessions.slice(0, all ? undefined : 100).map((s) => (
+          {visible.map((s) => (
             <SessionRow
               key={s.sessionKey}
               session={s}
@@ -103,12 +112,16 @@ export function SessionFolder({
               select={(v) => select([s], v)}
               busy={busy}
               trash={() => trash([s])}
+              focusRequest={
+                located?.key === s.sessionKey ? located.request : null
+              }
+              onLocated={onLocated}
             />
           ))}
-          {!all && sessions.length > 100 && (
+          {!all && sessions.length > visible.length && (
             <Button variant="ghost" onClick={() => setAll(true)}>
               {t("sessionCenter.showRemaining", {
-                count: sessions.length - 100,
+                count: sessions.length - visible.length,
               })}
             </Button>
           )}

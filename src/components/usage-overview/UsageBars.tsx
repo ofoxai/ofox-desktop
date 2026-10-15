@@ -1,14 +1,49 @@
 import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { MenuSelect } from "@/components/ui/menu-select";
-import type { UsageOverview, UsageSeriesPoint } from "@/lib/api/usageOverview";
+import type {
+  UsageGranularity,
+  UsageSeriesPoint,
+} from "@/lib/api/usageOverview";
 import { fmtTokens } from "@/lib/format";
 import { formatUsageEstimate } from "@/lib/usageEstimate";
 
-type Metric = "tokens" | "output" | "cost" | "records";
-export function UsageBars({ overview }: { overview: UsageOverview }) {
+type Metric =
+  | "tokens"
+  | "output"
+  | "cost"
+  | "records"
+  | "messages"
+  | "sessions"
+  | "active";
+export type UsageMetric = Metric;
+type TrendPoint = Pick<
+  UsageSeriesPoint,
+  "start" | "inputTokens" | "outputTokens" | "estimate"
+> & {
+  costUsd?: number;
+  requests?: number;
+  messages?: number | null;
+  sessionCount?: number;
+  activeMs?: number | null;
+};
+export function UsageBars({
+  overview,
+  analysis = false,
+  unavailableMetrics = [],
+  selectedMetric,
+  onMetricChange,
+}: {
+  overview: { granularity: UsageGranularity; series: TrendPoint[] };
+  analysis?: boolean;
+  unavailableMetrics?: Metric[];
+  selectedMetric?: Metric;
+  onMetricChange?: (metric: Metric) => void;
+}) {
   const { t, i18n } = useTranslation();
-  const [metric, setMetric] = useState<Metric>("tokens");
+  const [chosenMetric, setMetric] = useState<Metric>("tokens");
+  const chosen = selectedMetric ?? chosenMetric;
+  const metric = unavailableMetrics.includes(chosen) ? "tokens" : chosen;
   const [selected, setSelected] = useState(0);
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
   const label = (start: number) =>
@@ -18,22 +53,38 @@ export function UsageBars({ overview }: { overview: UsageOverview }) {
         ? { hour: "2-digit", minute: "2-digit" }
         : { month: "short", day: "numeric" },
     );
-  const value = (point: UsageSeriesPoint): number | null =>
+  const value = (point: TrendPoint): number | null =>
     metric === "tokens"
       ? point.inputTokens + point.outputTokens
       : metric === "output"
         ? point.outputTokens
-        : metric === "records"
-          ? point.requests
-          : point.estimate
-            ? point.estimate.knownCostUsd == null
-              ? null
-              : Number(point.estimate.knownCostUsd)
-            : point.costUsd;
-  const formatted = (point: UsageSeriesPoint) =>
+        : metric === "messages"
+          ? (point.messages ?? null)
+          : metric === "sessions"
+            ? (point.sessionCount ?? null)
+            : metric === "active"
+              ? point.activeMs == null
+                ? null
+                : point.activeMs / 60000
+              : metric === "records"
+                ? (point.requests ?? null)
+                : point.estimate
+                  ? point.estimate.knownCostUsd == null
+                    ? null
+                    : Number(point.estimate.knownCostUsd)
+                  : (point.costUsd ?? null);
+  const formatted = (point: TrendPoint) =>
     metric === "cost"
       ? formatUsageEstimate(point.estimate, point.costUsd)
-      : `${value(point)?.toLocaleString(i18n.language) ?? "—"} ${t(`usageWorkbench.${metric}`)}`;
+      : metric === "active"
+        ? value(point) == null
+          ? "—"
+          : t("usageSessions.activeMinutes", {
+              value: Number(value(point)!.toFixed(2)).toLocaleString(
+                i18n.language,
+              ),
+            })
+        : `${value(point)?.toLocaleString(i18n.language) ?? "—"} ${t(`usageWorkbench.${metric}`)}`;
   const max =
     Math.max(0, ...overview.series.map((point) => value(point) ?? 0)) || 1;
   const current =
@@ -74,10 +125,25 @@ export function UsageBars({ overview }: { overview: UsageOverview }) {
         <MenuSelect<Metric>
           aria-label={t("usageWorkbench.metric")}
           value={metric}
-          onChange={setMetric}
-          options={(["tokens", "output", "cost", "records"] as const).map(
-            (value) => ({ value, label: t(`usageWorkbench.${value}`) }),
-          )}
+          onChange={(value) => {
+            setMetric(value);
+            onMetricChange?.(value);
+          }}
+          options={(analysis
+            ? ([
+                "tokens",
+                "output",
+                "messages",
+                "sessions",
+                "cost",
+                "active",
+              ] as const)
+            : (["tokens", "output", "cost", "records"] as const)
+          ).map((value) => ({
+            value,
+            label: t(`usageWorkbench.${value}`),
+            disabled: unavailableMetrics.includes(value),
+          }))}
         />
       </div>
       <div

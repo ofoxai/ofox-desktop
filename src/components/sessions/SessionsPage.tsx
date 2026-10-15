@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
@@ -9,7 +9,7 @@ import {
   type SessionTrashEntry,
 } from "@/lib/api/sessions";
 import { useSessionSearch } from "@/hooks/useSessionSearch";
-import { useShellRefresh } from "@/components/shell/ShellContext";
+import { useShell, useShellRefresh } from "@/components/shell/ShellContext";
 import { Button } from "@/components/ui/button";
 import { ListHead } from "@/components/ui/list";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -27,6 +27,7 @@ type Confirmation =
   | { kind: "purge"; items: SessionTrashEntry[] };
 export function SessionsPage({ className }: { className?: string }) {
   const { t } = useTranslation();
+  const { active, sessionLocation, consumeSessionLocation } = useShell();
   const client = useQueryClient();
   const query = useQuery({
     queryKey: ["sessions"],
@@ -47,6 +48,11 @@ export function SessionsPage({ className }: { className?: string }) {
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [expanded, setExpanded] = useState<string | null>(null);
   const [opened, setOpened] = useState<Record<string, boolean>>({});
+  const [located, setLocated] = useState<{
+    key: string;
+    request: number | null;
+  }>();
+  const [locationMissing, setLocationMissing] = useState(false);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [busy, setBusy] = useState(false);
   const running = useRef(false);
@@ -59,6 +65,33 @@ export function SessionsPage({ className }: { className?: string }) {
     [find, search],
   );
   const groups = useMemo(() => groupByFolder(filtered), [filtered]);
+  useEffect(() => {
+    if (active !== "sessions" || !sessionLocation || !query.isSuccess) return;
+    const row = sessions.find(
+      (session) => session.sessionKey === sessionLocation.key,
+    );
+    setLocationMissing(!row);
+    if (row) {
+      setAgent("all");
+      localStorage.setItem("ofox.sessionsAgent", "all");
+      setSearch("");
+      setTrash(false);
+      setOpened((old) => ({ ...old, [row.projectDir || ""]: true }));
+      setLocated(sessionLocation);
+    }
+    consumeSessionLocation(sessionLocation.request);
+  }, [
+    active,
+    sessionLocation,
+    query.isSuccess,
+    sessions,
+    consumeSessionLocation,
+  ]);
+  const locatedFocus = useCallback((request: number) => {
+    setLocated((current) =>
+      current?.request === request ? { ...current, request: null } : current,
+    );
+  }, []);
   useEffect(() => {
     const keys = new Set(filtered.filter(canSelect).map((s) => s.sessionKey));
     setSelected((old) => new Set([...old].filter((k) => keys.has(k))));
@@ -170,6 +203,11 @@ export function SessionsPage({ className }: { className?: string }) {
         setTrash={setTrash}
         trashCount={trashQuery.data?.length ?? 0}
       />
+      {locationMissing && (
+        <p role="status" className="mb-3 text-sub text-ink-muted">
+          {t("usageSessions.managerMissing")}
+        </p>
+      )}
       {(trash ? trashQuery : query).isError && (
         <div role="alert" className="mb-3 text-sub text-danger">
           {String((trash ? trashQuery : query).error)}{" "}
@@ -258,6 +296,8 @@ export function SessionsPage({ className }: { className?: string }) {
                 busy={busy}
                 expanded={expanded}
                 setExpanded={setExpanded}
+                located={located}
+                onLocated={locatedFocus}
                 trash={(items) => setConfirmation({ kind: "trash", items })}
               />
             ))}

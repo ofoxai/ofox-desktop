@@ -59,6 +59,8 @@ export interface UsageCapabilities {
   requestSnapshots: boolean;
   csv: boolean;
   projectFilter: boolean;
+  sessionAnalytics?: boolean;
+  sessionProjectFilter?: boolean;
   sources: {
     toolId: string;
     sourceIds: string[];
@@ -67,6 +69,15 @@ export interface UsageCapabilities {
     projectFilterSupported: boolean;
     reason: string | null;
   }[];
+}
+
+export interface UsageSourceHealth {
+  sourceId: string;
+  toolId: string;
+  status: "unknown" | "ok" | "partial" | "failed" | "unsupported";
+  lastAttemptAtMs: number | null;
+  lastSuccessAtMs: number | null;
+  errorCode: string | null;
 }
 
 export interface UsageFilterOptions {

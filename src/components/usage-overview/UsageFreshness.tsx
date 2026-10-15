@@ -9,7 +9,7 @@ export function UsageFreshness({
   sources,
   pricing,
 }: {
-  localUpdatedAt: number | null;
+  localUpdatedAt?: number | null;
   accountUpdatedAt?: number | null;
   sources?: UsageOverview["sources"];
   pricing?: UsagePricingCoverage;
@@ -21,7 +21,11 @@ export function UsageFreshness({
       : t("usageWorkbench.notRecorded");
   return (
     <div className="space-y-1 text-note text-ink-muted">
-      <p>{t("usageWorkbench.localUpdated", { time: time(localUpdatedAt) })}</p>
+      {localUpdatedAt !== undefined && (
+        <p>
+          {t("usageWorkbench.localUpdated", { time: time(localUpdatedAt) })}
+        </p>
+      )}
       {accountUpdatedAt !== undefined && (
         <p>
           {t("usageWorkbench.accountUpdated", { time: time(accountUpdatedAt) })}

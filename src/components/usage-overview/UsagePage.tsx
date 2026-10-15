@@ -16,7 +16,10 @@ import {
   useUsageVisibility,
 } from "@/hooks/useUsageVisibility";
 import { settingsApi } from "@/lib/api";
-import { getUsageCapabilities } from "@/lib/api/usageOverview";
+import {
+  getSessionUsageAnalytics,
+  getUsageCapabilities,
+} from "@/lib/api/usageOverview";
 import { queryClient } from "@/lib/query/queryClient";
 import { ofoxDashboardUrl, ofoxWalletUrl } from "@/lib/ofoxUrls";
 import {
@@ -28,6 +31,11 @@ import {
 } from "@/lib/usageWorkbench";
 import { createUsageRefreshCoordinator } from "@/lib/usageRefresh";
 import { TOOL_META } from "@/config/toolMeta";
+import {
+  UNKNOWN_USAGE_PROJECT_ID,
+  usageProjectLabel,
+} from "@/lib/usageProject";
+import type { SessionAnalytics } from "@/types/sessionAnalytics";
 import { UsageHeader } from "./UsageHeader";
 import { BalanceTrendCard } from "./BalanceTrendCard";
 import { UsageKpis } from "./UsageKpis";
@@ -36,9 +44,10 @@ import { UsageBreakdownList } from "./UsageBreakdownList";
 import { UsageFilterMenu } from "./UsageFilterMenu";
 import { UsageRequests } from "./UsageRequests";
 import { UsageFreshness } from "./UsageFreshness";
+import { UsageSessions } from "./UsageSessions";
 
 const EMPTY: string[] = [];
-type Tab = "overview" | "requests";
+type Tab = "overview" | "requests" | "sessions";
 export function UsagePage({
   account,
   boundTools = EMPTY,
@@ -53,11 +62,10 @@ export function UsagePage({
   const visible = useUsageVisibility(
     interactionActive && shell.active === "usage",
   );
-  const [tab, setTab] = useState<Tab>(() =>
-    localStorage.getItem("ofox.usageTab") === "requests"
-      ? "requests"
-      : "overview",
-  );
+  const [tab, setTab] = useState<Tab>(() => {
+    const saved = localStorage.getItem("ofox.usageTab");
+    return saved === "requests" || saved === "sessions" ? saved : "overview";
+  });
   const [range, setRange] = useState<WorkbenchRange>(() => {
     const value = localStorage.getItem("ofox.usagePeriod");
     return {
@@ -67,6 +75,8 @@ export function UsagePage({
     };
   });
   const [filters, setFilters] = useState<WorkbenchFilters>({});
+  const [analysisProjects, setAnalysisProjects] = useState<string[]>([]);
+  const [projectsCleared, setProjectsCleared] = useState(false);
   const [anchor, setAnchor] = useState(Date.now);
   const query = useMemo(
     () => createUsageQuery(range, filters, anchor),
@@ -85,10 +95,32 @@ export function UsagePage({
   );
   const modern = capabilities.data?.queryVersion === 1;
   const requestSupported = modern && !!capabilities.data?.requestSnapshots;
+  const analysisSupported = modern && !!capabilities.data?.sessionAnalytics;
+  const analysisProjectSupported =
+    analysisSupported && !!capabilities.data?.sessionProjectFilter;
   const effectiveTab =
-    tab === "requests" && !requestSupported && !capabilities.isPending
+    ((tab === "requests" && !requestSupported) ||
+      (tab === "sessions" && !analysisSupported)) &&
+    !capabilities.isPending
       ? "overview"
       : tab;
+  const analysisQuery = useMemo(
+    () => ({ ...query, projectIds: analysisProjects }),
+    [query, analysisProjects],
+  );
+  const analysis = useQuery(
+    {
+      queryKey: ["sessionUsageAnalytics", apex, analysisQuery],
+      queryFn: () => getSessionUsageAnalytics(analysisQuery),
+      enabled: visible && effectiveTab === "sessions" && analysisSupported,
+      retry: false,
+      staleTime: Infinity,
+      refetchOnWindowFocus: false,
+    },
+    queryClient,
+  );
+  const [lastAnalysis, setLastAnalysis] = useState<SessionAnalytics>();
+  const analysisDisplay = analysis.data ?? lastAnalysis;
   useEffect(() => {
     if (
       capabilities.isFetched &&
@@ -116,7 +148,8 @@ export function UsagePage({
       enabled:
         visible &&
         capabilities.isFetched &&
-        (effectiveTab === "overview" || !optionsLoaded),
+        (effectiveTab === "overview" ||
+          (effectiveTab === "requests" && !optionsLoaded)),
       accountEnabled: visible && effectiveTab === "overview",
     },
   );
@@ -132,6 +165,11 @@ export function UsagePage({
       );
     }
   }, [data, updateOptions]);
+  useEffect(() => {
+    if (analysis.data) setLastAnalysis(analysis.data);
+    if (analysis.data && effectiveTab === "sessions")
+      updateOptions(analysis.data.options);
+  }, [analysis.data, effectiveTab, updateOptions]);
   const [customOpen, setCustomOpen] = useState(false);
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
@@ -145,9 +183,30 @@ export function UsagePage({
   });
   const activeRef = useRef(visible);
   activeRef.current = visible;
+  const refreshOwner = useMemo(
+    () => ({
+      query: effectiveTab === "sessions" ? analysisQuery : query,
+      apex,
+      tab: effectiveTab,
+      range,
+      analysisSupported,
+    }),
+    [
+      query,
+      analysisQuery,
+      apex,
+      effectiveTab,
+      range,
+      visible,
+      analysisSupported,
+    ],
+  );
+  const refreshOwnerRef = useRef(refreshOwner);
+  refreshOwnerRef.current = refreshOwner;
   const manualRequested = useRef(false);
   const runRef = useRef<() => Promise<void>>(async () => undefined);
   runRef.current = async () => {
+    const owner = refreshOwnerRef.current;
     const includeAccount = manualRequested.current;
     manualRequested.current = false;
     if (
@@ -159,10 +218,26 @@ export function UsagePage({
     setRefreshError(null);
     try {
       await (includeAccount ? state.refresh() : state.refreshLocal());
-      if (activeRef.current && effectiveTab === "overview")
-        setAnchor(Date.now());
+      if (!activeRef.current || refreshOwnerRef.current !== owner) return;
+      if (owner.tab === "sessions" && owner.analysisSupported) {
+        const nextAnchor = Date.now();
+        const nextQuery = {
+          ...owner.query,
+          ...resolveWorkbenchRange(owner.range, nextAnchor),
+        };
+        // Stage the read before changing the visible query. Only its owner may
+        // publish it, including when a custom range would reuse the same key.
+        const next = await getSessionUsageAnalytics(nextQuery);
+        if (!activeRef.current || refreshOwnerRef.current !== owner) return;
+        queryClient.setQueryData(
+          ["sessionUsageAnalytics", owner.apex, nextQuery],
+          next,
+        );
+        setAnchor(nextAnchor);
+      } else if (effectiveTab === "overview") setAnchor(Date.now());
     } catch (error) {
-      if (activeRef.current) setRefreshError(String(error));
+      if (activeRef.current && refreshOwnerRef.current === owner)
+        setRefreshError(String(error));
       throw error;
     }
   };
@@ -208,18 +283,61 @@ export function UsagePage({
       .catch(() => toast.error(t("shell.openFailed")));
   const unsupported =
     data?.unsupportedTools.filter((id) => boundTools.includes(id)) ?? [];
-  const errors = [
-    state.overview.error,
-    state.balance.error,
-    state.trend.error,
-    state.spending.error,
-  ].filter(Boolean);
+  const errors = (
+    effectiveTab === "sessions"
+      ? [analysis.error]
+      : effectiveTab === "overview"
+        ? [
+            state.overview.error,
+            state.balance.error,
+            state.trend.error,
+            state.spending.error,
+          ]
+        : []
+  ).filter(Boolean);
   const toolIds = [
     ...new Set([...options.toolIds, ...(filters.toolIds ?? [])]),
   ];
   const modelIds = [
     ...new Set([...options.modelIds, ...(filters.modelIds ?? [])]),
   ];
+  const projects = analysis.data?.options.projects ?? [];
+  const projectLabels = new Map<string, number>();
+  for (const project of projects)
+    projectLabels.set(
+      project.label,
+      (projectLabels.get(project.label) ?? 0) + 1,
+    );
+  const projectNames = {
+    unknown: t("usageSessions.unknownProject"),
+    unparsed: t("usageSessions.projectUnparsed"),
+  };
+  const projectOptions = projects.map((project) => {
+    const label = usageProjectLabel(
+      project.id,
+      project.label,
+      project.path,
+      projectNames,
+    );
+    return {
+      value: project.id,
+      label:
+        project.id !== UNKNOWN_USAGE_PROJECT_ID &&
+        (projectLabels.get(project.label) ?? 0) > 1 &&
+        project.path
+          ? `${label} · ${project.path}`
+          : label,
+      title:
+        project.id === UNKNOWN_USAGE_PROJECT_ID
+          ? label
+          : (project.path ?? label),
+    };
+  });
+  for (const id of analysisProjects)
+    if (!projectOptions.some((option) => option.value === id)) {
+      const label = usageProjectLabel(id, null, null, projectNames);
+      projectOptions.push({ value: id, label, title: label });
+    }
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   return (
     <div className="flex min-w-0 flex-col gap-3">
@@ -228,6 +346,10 @@ export function UsagePage({
           aria-label={t("usageWorkbench.tabs")}
           value={effectiveTab}
           onChange={(value) => {
+            if (value !== "sessions" && analysisProjects.length) {
+              setAnalysisProjects([]);
+              setProjectsCleared(true);
+            }
             setTab(value);
             localStorage.setItem("ofox.usageTab", value);
           }}
@@ -243,6 +365,15 @@ export function UsagePage({
                     value: "requests" as const,
                     label: t("usageWorkbench.requests"),
                     controls: "usage-requests-panel",
+                  },
+                ]
+              : []),
+            ...(analysisSupported
+              ? [
+                  {
+                    value: "sessions" as const,
+                    label: t("usageSessions.title"),
+                    controls: "usage-sessions-panel",
                   },
                 ]
               : []),
@@ -339,25 +470,57 @@ export function UsagePage({
         />
         <UsageFilterMenu
           label={t("usageWorkbench.modelsFilter")}
+          pageSize={effectiveTab === "sessions" ? 50 : undefined}
           options={modelIds.map((value) => ({ value, label: value }))}
           selected={filters.modelIds ?? []}
           onChange={(modelIds) => setFilters((old) => ({ ...old, modelIds }))}
           disabled={!modern}
         />
-        <span
-          className="text-note text-ink-faint"
-          title={t("usageWorkbench.projectUnavailable")}
-        >
-          {t("usageWorkbench.projectUnavailable")}
-        </span>
+        {effectiveTab === "sessions" && analysisProjectSupported ? (
+          <UsageFilterMenu
+            label={t("usageSessions.projectFilter")}
+            pageSize={50}
+            options={projectOptions}
+            selected={analysisProjects}
+            onChange={(ids) => {
+              setAnalysisProjects(ids);
+              setProjectsCleared(false);
+            }}
+          />
+        ) : (
+          <span
+            className="text-note text-ink-faint"
+            title={t("usageWorkbench.projectUnavailable")}
+          >
+            {t("usageWorkbench.projectUnavailable")}
+          </span>
+        )}
         {!!(
-          (filters.toolIds?.length ?? 0) + (filters.modelIds?.length ?? 0)
+          (filters.toolIds?.length ?? 0) +
+          (filters.modelIds?.length ?? 0) +
+          analysisProjects.length
         ) && (
-          <Button variant="ghost" onClick={() => setFilters({})}>
+          <Button
+            variant="ghost"
+            onClick={() => {
+              setFilters({});
+              setAnalysisProjects([]);
+            }}
+          >
             {t("usageWorkbench.reset")}
           </Button>
         )}
       </div>
+      {effectiveTab === "sessions" && analysisProjectSupported && (
+        <p className="text-note text-ink-muted">
+          {t("usageSessions.projectScope")}
+        </p>
+      )}
+      {projectsCleared && effectiveTab !== "sessions" && (
+        <p role="status" className="text-note text-ink-muted">
+          {t("usageSessions.projectsCleared")}
+        </p>
+      )}
       <p className="text-note text-ink-muted">
         {t("usageWorkbench.rangeSummary", {
           start:
@@ -518,6 +681,53 @@ export function UsagePage({
             canExport={!!capabilities.data?.csv}
             onLatest={() => setAnchor(Date.now())}
           />
+        </div>
+      )}
+      {analysisSupported && (
+        <div
+          id="usage-sessions-panel"
+          role="tabpanel"
+          aria-label={t("usageSessions.title")}
+          hidden={effectiveTab !== "sessions"}
+        >
+          {analysis.isPending ? (
+            <p role="status" className="p-6 text-center text-ink-muted">
+              {t("common.loading")}
+            </p>
+          ) : !analysis.data ||
+            analysis.data.coverage.state === "unsupported" ? (
+            <p className="rounded-list border border-line bg-card p-8 text-center text-sub text-ink-muted">
+              {t("usagePage.unavailable")}
+            </p>
+          ) : null}
+          {analysisDisplay && (
+            <UsageSessions
+              key={apex}
+              data={analysisDisplay}
+              showData={
+                !!analysis.data &&
+                analysis.data.coverage.state !== "unsupported"
+              }
+              active={visible && effectiveTab === "sessions"}
+              onProject={
+                analysisProjectSupported
+                  ? (id) => {
+                      setAnalysisProjects((old) =>
+                        old.length === 1 && old[0] === id ? [] : [id],
+                      );
+                      setProjectsCleared(false);
+                    }
+                  : undefined
+              }
+              onModel={(id) =>
+                setFilters((old) => ({
+                  ...old,
+                  modelIds: old.modelIds?.includes(id) ? [] : [id],
+                }))
+              }
+              onManage={shell.locateSession}
+            />
+          )}
         </div>
       )}
       {!!unsupported.length && (

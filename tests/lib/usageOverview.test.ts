@@ -3,6 +3,7 @@ import {
   getBalanceTrend,
   getSpending,
   getUsageOverview,
+  getSessionUsageAnalytics,
 } from "@/lib/api/usageOverview";
 import { createUsageQuery } from "@/lib/usageWorkbench";
 
@@ -68,4 +69,27 @@ describe("usage overview api", () => {
     expect(spending?.monthlyUsedUsd).toBe(12.5);
     expect(invoke).toHaveBeenCalledWith("ofox_get_spending");
   });
+});
+
+it("rejects session analysis from a different filter receipt", async () => {
+  const query = createUsageQuery(
+    { period: "all" },
+    { projectIds: ["project-a"] },
+    1000,
+  );
+  invoke.mockResolvedValue({
+    appliedQuery: { ...query, projectIds: [] },
+    queryFingerprint: "other",
+    snapshotVersion: "s1",
+  });
+  await expect(getSessionUsageAnalytics(query)).rejects.toThrow(
+    "usage.queryMismatch",
+  );
+  expect(invoke).toHaveBeenCalledWith("get_session_usage_analytics", { query });
+});
+it("rejects analysis without a receipt instead of treating it as supported", async () => {
+  invoke.mockResolvedValue({ totals: { sessionCount: 100 } });
+  await expect(
+    getSessionUsageAnalytics(createUsageQuery({ period: "all" }, {}, 1000)),
+  ).rejects.toThrow("usage.queryUnsupported");
 });

@@ -80,7 +80,14 @@ function session(
 function RefreshControl() {
   const shell = useShell();
   useEffect(() => shell.setActive("sessions"), [shell.setActive]);
-  return <button onClick={() => void shell.refresh()}>refresh-page</button>;
+  return (
+    <>
+      <button onClick={() => void shell.refresh()}>refresh-page</button>
+      <button onClick={() => shell.locateSession?.("analytics-target")}>
+        locate-analysis-session
+      </button>
+    </>
+  );
 }
 function renderPanel(sessions: ManagedSession[]) {
   const client = new QueryClient({
@@ -411,4 +418,32 @@ it("refreshes an open transcript when its revision changes", async () => {
   client.setQueryData(["sessions"], [{ ...a, revision: "changed" }]);
   expect(await screen.findByText("new body")).toBeVisible();
   expect(sessionsApi.getMessagesByKey).toHaveBeenCalledTimes(2);
+});
+
+it("locates a stable analysis key beyond the first hundred without reading or resuming it", async () => {
+  localStorage.setItem("ofox.sessionsAgent", "pi");
+  const target = {
+    ...session("target", "claude"),
+    sessionKey: "analytics-target",
+    projectDir: "/older",
+    lastActiveAt: 1,
+  };
+  const rows = Array.from({ length: 102 }, (_, i) => ({
+    ...session(`item-${i}`, "claude"),
+    projectDir: "/older",
+    lastActiveAt: 200 - i,
+  }));
+  renderPanel([
+    { ...session("visible", "pi"), projectDir: "/active", lastActiveAt: 1000 },
+    ...rows,
+    target,
+  ]);
+  expect(screen.queryByText("title-target")).toBeNull();
+  await userEvent.click(screen.getByText("locate-analysis-session"));
+  const button = await screen.findByRole("button", { name: /title-target/ });
+  await waitFor(() => expect(button).toHaveFocus());
+  expect(button).toHaveAttribute("aria-expanded", "false");
+  expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalled();
+  expect(sessionsApi.getMessagesByKey).not.toHaveBeenCalled();
+  expect(sessionsApi.resume).not.toHaveBeenCalled();
 });

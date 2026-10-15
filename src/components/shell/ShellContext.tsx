@@ -29,6 +29,9 @@ export interface ShellContextValue {
   /** The page on screen. */
   active: ShellPage;
   setActive: (page: ShellPage) => void;
+  sessionLocation: { key: string; request: number } | null;
+  locateSession: (key: string) => void;
+  consumeSessionLocation: (request: number) => void;
   /** Pages opened at least once. They stay mounted, hidden, after. */
   visited: ReadonlySet<ShellPage>;
   openSettings: () => void;
@@ -66,6 +69,9 @@ interface ShellProviderProps {
  */
 export function ShellProvider({ openSettings, children }: ShellProviderProps) {
   const [active, setActiveState] = useState<ShellPage>("tools");
+  const [sessionLocation, setSessionLocation] =
+    useState<ShellContextValue["sessionLocation"]>(null);
+  const locationSequence = useRef(0);
   const [visited, setVisited] = useState<ReadonlySet<ShellPage>>(
     () => new Set<ShellPage>(["tools"]),
   );
@@ -81,6 +87,18 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
   const setActive = useCallback((page: ShellPage) => {
     setActiveState(page);
     setVisited((previous) => withPage(previous, page));
+  }, []);
+  const locateSession = useCallback(
+    (key: string) => {
+      setSessionLocation({ key, request: ++locationSequence.current });
+      setActive("sessions");
+    },
+    [setActive],
+  );
+  const consumeSessionLocation = useCallback((request: number) => {
+    setSessionLocation((current) =>
+      current?.request === request ? null : current,
+    );
   }, []);
 
   const registerRefresh = useCallback((page: ShellPage, fn: RefreshHandler) => {
@@ -114,6 +132,9 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
     () => ({
       active,
       setActive,
+      sessionLocation,
+      locateSession,
+      consumeSessionLocation,
       visited,
       openSettings,
       registerRefresh,
@@ -124,6 +145,9 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
     [
       active,
       setActive,
+      sessionLocation,
+      locateSession,
+      consumeSessionLocation,
       visited,
       openSettings,
       registerRefresh,

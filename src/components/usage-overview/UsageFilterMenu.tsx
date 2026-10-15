@@ -16,30 +16,37 @@ export function UsageFilterMenu({
   selected,
   onChange,
   disabled = false,
+  pageSize,
 }: {
   label: string;
-  options: { value: string; label: string }[];
+  options: { value: string; label: string; title?: string }[];
   selected: string[];
   onChange: (values: string[]) => void;
   disabled?: boolean;
+  pageSize?: number;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const [pages, setPages] = useState(1);
   const id = useId();
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
   const menu = useMenuTab(() => setOpen(false));
-  const shown = options.filter((option) =>
-    `${option.value} ${option.label}`
+  const matching = options.filter((option) =>
+    `${option.value} ${option.label} ${option.title ?? ""}`
       .toLocaleLowerCase()
       .includes(search.toLocaleLowerCase()),
   );
+  const shown = matching.slice(0, (pageSize ?? Infinity) * pages);
   return (
     <Popover
       open={open}
       onOpenChange={(next) => {
         setOpen(next);
-        if (next) setSearch("");
+        if (next) {
+          setSearch("");
+          setPages(1);
+        }
       }}
     >
       <PopoverTrigger asChild>
@@ -69,7 +76,10 @@ export function UsageFilterMenu({
         <Input
           aria-label={t("usageWorkbench.searchOptions", { name: label })}
           value={search}
-          onChange={(event) => setSearch(event.target.value)}
+          onChange={(event) => {
+            setSearch(event.target.value);
+            setPages(1);
+          }}
           onKeyDown={(event) => {
             if (event.key === "ArrowDown") {
               event.preventDefault();
@@ -130,7 +140,10 @@ export function UsageFilterMenu({
                   <Check className="h-3.5 w-3.5" />
                 ) : null}
               </span>
-              <span className="min-w-0 truncate" title={option.label}>
+              <span
+                className="min-w-0 truncate"
+                title={option.title ?? option.label}
+              >
                 {option.label}
               </span>
             </button>
@@ -141,6 +154,17 @@ export function UsageFilterMenu({
             </p>
           )}
         </div>
+        {matching.length > shown.length && (
+          <button
+            type="button"
+            className="mt-1 w-full rounded-ctl px-2 py-1.5 text-left text-note text-ink-muted hover:bg-pill focus-visible:ring-2 focus-visible:ring-brand/30"
+            onClick={() => setPages((value) => value + 1)}
+          >
+            {t("usageSessions.showMore", {
+              count: matching.length - shown.length,
+            })}
+          </button>
+        )}
       </PopoverContent>
     </Popover>
   );

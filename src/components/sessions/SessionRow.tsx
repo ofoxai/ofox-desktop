@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -17,6 +17,8 @@ export function SessionRow({
   select,
   busy,
   trash,
+  focusRequest,
+  onLocated,
 }: {
   session: ManagedSession;
   expanded: boolean;
@@ -25,8 +27,17 @@ export function SessionRow({
   select: (v: boolean) => void;
   busy: boolean;
   trash: () => void;
+  focusRequest?: number | null;
+  onLocated?: (request: number) => void;
 }) {
   const { t, i18n } = useTranslation();
+  const titleButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (focusRequest == null) return;
+    titleButton.current?.scrollIntoView({ block: "center" });
+    titleButton.current?.focus({ preventScroll: true });
+    onLocated?.(focusRequest);
+  }, [focusRequest, onLocated]);
   const [launching, setLaunching] = useState(false);
   const running = useRef(false);
   const title = s.title || t("sessionCenter.untitled");
@@ -72,6 +83,7 @@ export function SessionRow({
           aria-label={t("sessionCenter.selectSession", { title })}
         />
         <button
+          ref={titleButton}
           className="min-w-0 flex-1 text-left"
           aria-expanded={expanded}
           onClick={toggle}

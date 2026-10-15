@@ -6,7 +6,9 @@ import type {
   UsageEstimate,
   UsageQueryV1,
   UsageReceipt,
+  UsageSourceHealth,
 } from "@/types/usageQuery";
+import type { SessionAnalytics } from "@/types/sessionAnalytics";
 import { assertUsageReceipt } from "@/lib/usageWorkbench";
 
 /**
@@ -85,14 +87,7 @@ export interface UsageOverview extends Partial<UsageReceipt> {
   /** Bound tools whose usage is not read yet (e.g. openclaw, hermes, pi, dsh). */
   unsupportedTools: string[];
   options?: { toolIds: string[]; modelIds: string[]; sourceIds: string[] };
-  sources?: {
-    sourceId: string;
-    toolId: string;
-    status: "unknown" | "ok" | "partial" | "failed" | "unsupported";
-    lastAttemptAtMs: number | null;
-    lastSuccessAtMs: number | null;
-    errorCode: string | null;
-  }[];
+  sources?: UsageSourceHealth[];
 }
 
 /** One reading of the OFox balance: `amount` USD was left at `at`. */
@@ -131,6 +126,19 @@ export async function getUsageOverview(
 
 export function getUsageCapabilities(): Promise<UsageCapabilities> {
   return invoke("get_usage_capabilities");
+}
+
+export async function getSessionUsageAnalytics(
+  query: UsageQueryV1,
+): Promise<SessionAnalytics> {
+  const response = await invoke<SessionAnalytics>(
+    "get_session_usage_analytics",
+    {
+      query,
+    },
+  );
+  assertUsageReceipt(response, query);
+  return response;
 }
 
 /** The signed-in account's balance history and run-out estimate; empty when signed out. */
