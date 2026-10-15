@@ -10,7 +10,7 @@
 
 - Visual Studio Build Tools，勾选“使用 C++ 的桌面开发”和 Windows SDK；原生依赖
   需要 CMake 时也安装 CMake 工具。
-- Rust stable MSVC，安装 `rustfmt` 和 `clippy`。
+- Rust MSVC 1.87+（仓库固定 toolchain 为 1.95），安装 `rustfmt` 和 `clippy`。
 - Node.js 满足 Vite 7 要求（20.19+ 或 22.12+），pnpm 10.12.3。
 - 运行桌面界面时需要 WebView2。
 
@@ -71,6 +71,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-windows.ps1 -
 
 `.github/workflows/windows-probe.yml` 已使用相同后端入口。代码推送后，Windows
 workflow 将构建两个探针并上传验证日志；全量前端检查继续由主 CI 执行。
+
+资源库 MCP 检查的 Windows Job、取消后子进程回收、stdio/HTTP/SSE 也包含在完整 Rust 测试中。它们使用本机 Node 和临时模拟服务器，不执行已配置的真实 MCP。必须在 Windows 原生运行；macOS 交叉类型检查不能验收 Job 行为。实现边界见 [MCP 检查](mcp-connection-checks.md)。
 
 ## 在目标主机观察安装状态
 

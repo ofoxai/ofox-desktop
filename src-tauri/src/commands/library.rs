@@ -150,6 +150,36 @@ pub async fn get_library_instructions(state: State<'_, AppState>) -> Result<Valu
 }
 
 #[tauri::command]
+pub fn prepare_library_mcp_check(
+    state: State<'_, AppState>,
+    resource_id: String,
+    expected_revision: u64,
+    expected_epoch: u64,
+) -> Result<Value, String> {
+    library::mcp_check::prepare(&state.db, &resource_id, expected_revision, expected_epoch)
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+pub async fn run_library_mcp_check(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    operation_id: String,
+) -> Result<Value, String> {
+    use tauri::Emitter;
+    library::mcp_check::run(&state.db, &operation_id, |stage| {
+        let _ = app.emit(
+            "library-mcp-check-progress",
+            json!({"operationId":operation_id,"stage":stage}),
+        );
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+#[tauri::command]
+pub fn cancel_library_mcp_check(operation_id: String) -> Result<bool, String> {
+    library::mcp_check::cancel(&operation_id).map_err(|e| e.to_string())
+}
+#[tauri::command]
 pub fn save_library_instruction(
     state: State<'_, AppState>,
     set: library::InstructionSet,

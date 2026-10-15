@@ -225,6 +225,27 @@ fn build_client(proxy_url: Option<&str>) -> Result<Client, String> {
         .no_brotli()
         .no_deflate();
 
+    builder = configure_client_proxy(builder, proxy_url)?;
+
+    builder
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))
+}
+
+/// MCP probes never follow a redirect carrying user-supplied headers.
+pub(crate) fn mcp_check_client() -> Result<Client, String> {
+    let builder = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(120));
+    configure_client_proxy(builder, get_current_proxy_url().as_deref())?
+        .build()
+        .map_err(|_| "MCP client unavailable".into())
+}
+fn configure_client_proxy(
+    mut builder: reqwest::ClientBuilder,
+    proxy_url: Option<&str>,
+) -> Result<reqwest::ClientBuilder, String> {
     // 有代理地址则使用代理，否则跟随系统代理
     if let Some(url) = proxy_url {
         // 先验证 URL 格式和 scheme
@@ -263,9 +284,7 @@ fn build_client(proxy_url: Option<&str>) -> Result<Client, String> {
         }
     }
 
-    builder
-        .build()
-        .map_err(|e| format!("Failed to build HTTP client: {e}"))
+    Ok(builder)
 }
 
 fn system_proxy_points_to_loopback() -> bool {

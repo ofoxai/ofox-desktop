@@ -3591,6 +3591,57 @@
     "importedAt": "インポート日時",
     "sourceUpdatedAt": "ソース草稿の更新日時",
     "notRecorded": "記録なし",
-    "openSkillSource": "ソースページを開く"
+    "openSkillSource": "ソースページを開く",
+    "mcpCheck": "接続を確認",
+    "mcpCheckNamed": "{{name}} の接続を確認",
+    "mcpCheckStart": "確認を開始",
+    "mcpCheckCancel": "確認を中止",
+    "mcpCheckCancelling": "中止しています…",
+    "mcpCheckTitleDescription": "ツール設定を変更せず、明示的に接続を確認します。",
+    "mcpCheckDescription": "開始後にサーバーへ接続するか、インストール済みのローカルプログラムを起動し、プロトコルとツール一覧を読み取ります。ツールの呼び出し、依存関係のインストール、OAuth 認証は行いません。閉じるか別ページへ移ると中止します。",
+    "mcpCheckToolCount": "{{count}} 個のツールが見つかりました",
+    "mcpCheckBusy": "このサーバーは確認中か、同時確認数の上限に達しています。",
+    "mcpCheckExpired": "確認が期限切れまたは中止されました。やり直してください。",
+    "mcpCheckStage": {
+      "preflight": "設定とローカルプログラムを確認中…",
+      "connect": "接続中…",
+      "negotiate": "プロトコルを確認中…",
+      "list": "ツール一覧を取得中…",
+      "cleanup": "接続と確認プロセスを終了中…"
+    },
+    "mcpCheckState": {
+      "ok": "接続しました",
+      "partial": "ツール一覧が不完全です",
+      "blocked": "確認できません",
+      "authRequired": "認証情報またはツールでの認証が必要です",
+      "forbidden": "アクセスが拒否されました",
+      "timeout": "確認がタイムアウトしました",
+      "cancelled": "確認を中止しました",
+      "error": "確認に失敗しました"
+    },
+    "mcpCheckReason": {
+      "cancelled": "確認を中止しました。",
+      "timeout": "制限時間を超えました。サービスを確認してやり直してください。",
+      "limit": "応答、設定、ツール数が確認の上限を超えています。",
+      "protocol": "サーバーのプロトコルメッセージが未対応または不正です。",
+      "version": "互換性のあるプロトコル版がありません。",
+      "network": "サーバーに接続できないか、確認プロセスが終了しました。",
+      "authRequired": "ツール本来の認証手順を完了するか、明示的な認証情報の参照を更新してください。OFox はツールのログイン状態を読み取りません。",
+      "forbidden": "サーバーの権限を確認してください。",
+      "redirect": "認証情報の転送を防ぐため、リダイレクトで確認を停止しました。",
+      "http": "サーバーの HTTP 状態により確認を完了できません。",
+      "runnerBlocked": "パッケージ管理、コンテナー、shell による取得と実行は行いません。先にサービスをインストールし、ローカルの実行ファイルを指定してください。",
+      "programMissing": "ローカルの実行ファイルが見つかりません。コマンドと PATH を確認してください。",
+      "localScriptRequired": "インタープリターは既存のローカルスクリプトのみ対応します。eval、パッケージモジュール、リモートスクリプトには対応しません。",
+      "referenceInvalid": "環境変数の参照形式が不正です。",
+      "credentialMissing": "OFox プロセスに参照先の環境変数がありません。環境を設定して OFox を再起動するか、ツール内で確認してください。",
+      "cwdMissing": "作業ディレクトリが存在しないか、絶対パスではありません。",
+      "spawnFailed": "確認プロセスを起動できません。",
+      "fieldUnsupported": "この設定フィールドの確認には対応していません。",
+      "transportUnsupported": "このトランスポートの確認には対応していません。",
+      "urlCredentials": "ユーザー名、パスワード、query、fragment のない HTTP(S) URL を使い、header で認証情報を参照してください。",
+      "headerUnsupported": "この HTTP 制御 header は上書きできません。",
+      "endpointOrigin": "旧式 SSE が別オリジンまたは安全でない送信先を返したため停止しました。"
+    }
   }
 }

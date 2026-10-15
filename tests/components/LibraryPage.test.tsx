@@ -16,7 +16,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { LibraryPage } from "@/components/library/LibraryPage";
 import { ShellProvider, useShell } from "@/components/shell/ShellContext";
 import { libraryApi, type LibraryData } from "@/lib/api/library";
+import type { McpCheckProgress, McpCheckResult } from "@/lib/api/library";
 import { promptsApi } from "@/lib/api/prompts";
+import { listen } from "@tauri-apps/api/event";
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
 vi.mock("@/components/MarkdownEditor", () => ({
   default: ({
@@ -304,6 +307,156 @@ it("shows skill provenance separately from its content hash and freezes detail i
     7,
     "artifact-hash",
   );
+});
+it("starts MCP inspection only explicitly and subscribes before execution", async () => {
+  let subscribed!: (unlisten: () => void) => void;
+  vi.mocked(listen).mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        subscribed = resolve;
+      }),
+  );
+  vi.spyOn(libraryApi, "prepareMcpCheck").mockResolvedValue({
+    operationId: "check-one",
+  });
+  vi.spyOn(libraryApi, "runMcpCheck").mockResolvedValue({
+    operationId: "check-one",
+    state: "ok",
+    tools: [{ name: "fixture-tool" }],
+  });
+  vi.spyOn(libraryApi, "cancelMcpCheck").mockResolvedValue(true);
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
+  await screen.findByText("MCP demo");
+  expect(libraryApi.prepareMcpCheck).not.toHaveBeenCalled();
+  await userEvent.click(
+    screen.getByRole("button", { name: "检查连接 MCP demo" }),
+  );
+  expect(libraryApi.prepareMcpCheck).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole("button", { name: "开始检查" }));
+  await waitFor(() => expect(listen).toHaveBeenCalled());
+  expect(libraryApi.runMcpCheck).not.toHaveBeenCalled();
+  expect(libraryApi.prepareMcpCheck).toHaveBeenCalledWith("server", 3, 1);
+  const unlisten = vi.fn();
+  await act(async () => subscribed(unlisten));
+  expect(await screen.findByText("fixture-tool")).toBeVisible();
+  expect(libraryApi.runMcpCheck).toHaveBeenCalledWith("check-one");
+  expect(unlisten).toHaveBeenCalledTimes(1);
+});
+it("isolates MCP progress and cancels with immediate listener cleanup when the portal suspends", async () => {
+  let progress!: (event: { payload: McpCheckProgress }) => void;
+  const unlisten = vi.fn();
+  vi.mocked(listen).mockImplementation(async (_event, callback) => {
+    progress = callback as typeof progress;
+    return unlisten;
+  });
+  let finish!: (value: McpCheckResult) => void;
+  vi.spyOn(libraryApi, "prepareMcpCheck").mockResolvedValue({
+    operationId: "owned-check",
+  });
+  vi.spyOn(libraryApi, "runMcpCheck").mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  vi.spyOn(libraryApi, "cancelMcpCheck").mockResolvedValue(true);
+  const rendered = render(<Fixture />);
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
+  await userEvent.click(
+    await screen.findByRole("button", { name: "检查连接 MCP demo" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "开始检查" }));
+  await waitFor(() => expect(libraryApi.runMcpCheck).toHaveBeenCalled());
+  act(() =>
+    progress({ payload: { operationId: "other-check", stage: "list" } }),
+  );
+  expect(screen.queryByText("读取工具列表…")).not.toBeInTheDocument();
+  act(() =>
+    progress({ payload: { operationId: "owned-check", stage: "list" } }),
+  );
+  expect(screen.getByText("读取工具列表…")).toBeVisible();
+  rendered.rerender(<Fixture active={false} />);
+  await waitFor(() =>
+    expect(libraryApi.cancelMcpCheck).toHaveBeenCalledWith("owned-check"),
+  );
+  expect(unlisten).toHaveBeenCalledTimes(1);
+  await act(async () =>
+    finish({
+      operationId: "owned-check",
+      state: "ok",
+      tools: [{ name: "late-tool" }],
+    }),
+  );
+  rendered.rerender(<Fixture />);
+  expect(await screen.findByText("检查已取消")).toBeVisible();
+  expect(screen.queryByText("late-tool")).not.toBeInTheDocument();
+  expect(unlisten).toHaveBeenCalledTimes(1);
+});
+it("cancels a late prepared MCP job after the dialog has closed without subscribing or executing", async () => {
+  let prepared!: (value: { operationId: string }) => void;
+  vi.spyOn(libraryApi, "prepareMcpCheck").mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        prepared = resolve;
+      }),
+  );
+  vi.spyOn(libraryApi, "runMcpCheck").mockResolvedValue({
+    operationId: "late-prepared",
+    state: "ok",
+    tools: [],
+  });
+  vi.spyOn(libraryApi, "cancelMcpCheck").mockResolvedValue(true);
+  vi.mocked(listen).mockClear();
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
+  await userEvent.click(
+    await screen.findByRole("button", { name: "检查连接 MCP demo" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "开始检查" }));
+  await userEvent.click(screen.getByRole("button", { name: "取消检查" }));
+  await userEvent.click(screen.getByRole("button", { name: "关闭" }));
+  await act(async () => prepared({ operationId: "late-prepared" }));
+  await waitFor(() =>
+    expect(libraryApi.cancelMcpCheck).toHaveBeenCalledWith("late-prepared"),
+  );
+  expect(listen).not.toHaveBeenCalled();
+  expect(libraryApi.runMcpCheck).not.toHaveBeenCalled();
+});
+it("unsubscribes a late MCP listener exactly once after its portal has suspended", async () => {
+  let subscribed!: (unlisten: () => void) => void;
+  const unlisten = vi.fn();
+  vi.mocked(listen).mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        subscribed = resolve;
+      }),
+  );
+  vi.spyOn(libraryApi, "prepareMcpCheck").mockResolvedValue({
+    operationId: "late-listener",
+  });
+  vi.spyOn(libraryApi, "runMcpCheck").mockResolvedValue({
+    operationId: "late-listener",
+    state: "ok",
+    tools: [],
+  });
+  vi.spyOn(libraryApi, "cancelMcpCheck").mockResolvedValue(true);
+  const rendered = render(<Fixture />);
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
+  await userEvent.click(
+    await screen.findByRole("button", { name: "检查连接 MCP demo" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "开始检查" }));
+  await waitFor(() => expect(listen).toHaveBeenCalled());
+  rendered.rerender(<Fixture active={false} />);
+  await act(async () => subscribed(unlisten));
+  expect(libraryApi.cancelMcpCheck).toHaveBeenCalledWith("late-listener");
+  expect(unlisten).toHaveBeenCalledTimes(1);
+  expect(libraryApi.runMcpCheck).not.toHaveBeenCalled();
 });
 it("previews the complete desired set and lets an unavailable prior target be withdrawn", async () => {
   mount();

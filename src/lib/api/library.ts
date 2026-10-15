@@ -171,7 +171,38 @@ export interface SkillDraftChange {
   artifactHash: string;
   nativeApplyRequired: boolean;
 }
+export interface McpCheckProgress {
+  operationId: string;
+  stage: "preflight" | "connect" | "negotiate" | "list" | "cleanup";
+}
+export interface McpCheckResult {
+  operationId: string;
+  state:
+    | "ok"
+    | "blocked"
+    | "authRequired"
+    | "forbidden"
+    | "timeout"
+    | "cancelled"
+    | "error";
+  reason?: string;
+  tools: { name: string; description?: string | null }[];
+}
 export const libraryApi = {
+  prepareMcpCheck: (
+    resourceId: string,
+    expectedRevision: number,
+    expectedEpoch: number,
+  ) =>
+    invoke<{ operationId: string }>("prepare_library_mcp_check", {
+      resourceId,
+      expectedRevision,
+      expectedEpoch,
+    }),
+  runMcpCheck: (operationId: string) =>
+    invoke<McpCheckResult>("run_library_mcp_check", { operationId }),
+  cancelMcpCheck: (operationId: string) =>
+    invoke<boolean>("cancel_library_mcp_check", { operationId }),
   checkSkillUpdate: (
     resourceId: string,
     expectedRevision: number,

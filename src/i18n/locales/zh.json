@@ -3591,6 +3591,57 @@
     "importedAt": "导入时间",
     "sourceUpdatedAt": "源草稿更新时间",
     "notRecorded": "未记录",
-    "openSkillSource": "打开来源页面"
+    "openSkillSource": "打开来源页面",
+    "mcpCheck": "检查连接",
+    "mcpCheckNamed": "检查连接 {{name}}",
+    "mcpCheckStart": "开始检查",
+    "mcpCheckCancel": "取消检查",
+    "mcpCheckCancelling": "正在取消…",
+    "mcpCheckTitleDescription": "显式连接检查，不更改工具配置。",
+    "mcpCheckDescription": "仅在开始后连接服务器或启动已安装的本机程序，读取协议与工具列表；不会调用工具、自动安装依赖或代做 OAuth 授权。关闭或离开页面将取消检查。",
+    "mcpCheckToolCount": "发现 {{count}} 个工具",
+    "mcpCheckBusy": "此服务器已有检查，或检查数量已达上限。",
+    "mcpCheckExpired": "检查已过期或取消，请重新开始。",
+    "mcpCheckStage": {
+      "preflight": "检查配置与本机程序…",
+      "connect": "连接服务器…",
+      "negotiate": "协商协议…",
+      "list": "读取工具列表…",
+      "cleanup": "清理连接与检查进程…"
+    },
+    "mcpCheckState": {
+      "ok": "连接成功",
+      "partial": "工具列表不完整",
+      "blocked": "检查被阻止",
+      "authRequired": "需要凭据或原生授权",
+      "forbidden": "服务器拒绝访问",
+      "timeout": "检查超时",
+      "cancelled": "检查已取消",
+      "error": "检查失败"
+    },
+    "mcpCheckReason": {
+      "cancelled": "检查已取消。",
+      "timeout": "超过检查时限，请核对服务后重试。",
+      "limit": "响应、配置或工具数量超过检查上限。",
+      "protocol": "服务器返回的协议消息不受支持或格式不正确。",
+      "version": "服务器没有兼容的协议版本。",
+      "network": "无法连接服务器或检查进程已退出。",
+      "authRequired": "请在工具原生流程完成授权，或更新显式引用的凭据。OFox 不读取工具登录态。",
+      "forbidden": "请核对服务器权限。",
+      "redirect": "服务器要求重定向；为避免凭据被转发，检查已停止。",
+      "http": "服务器返回了无法完成检查的 HTTP 状态。",
+      "runnerBlocked": "检查不会通过包管理器、容器或 shell 拉取并运行程序。请先安装服务，再使用本机可执行文件。",
+      "programMissing": "找不到可执行的本机程序，请核对命令与 PATH。",
+      "localScriptRequired": "解释器检查只支持现有的本机脚本，不支持 eval、模块安装或远程脚本。",
+      "referenceInvalid": "环境变量引用格式不正确。",
+      "credentialMissing": "OFox 进程中缺少引用的环境变量。请配置环境后重启 OFox，或在工具内检查。",
+      "cwdMissing": "工作目录不存在或不是绝对路径。",
+      "spawnFailed": "无法启动检查进程。",
+      "fieldUnsupported": "检查暂不支持此配置字段。",
+      "transportUnsupported": "检查暂不支持此传输方式。",
+      "urlCredentials": "请使用无用户名、密码、query 或 fragment 的 HTTP(S) 地址，并通过 header 引用凭据。",
+      "headerUnsupported": "检查不支持覆盖此 HTTP 控制 header。",
+      "endpointOrigin": "旧式 SSE 提供了跨来源或不安全的消息地址，检查已停止。"
+    }
   }
 }

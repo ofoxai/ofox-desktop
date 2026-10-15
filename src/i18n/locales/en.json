@@ -3591,6 +3591,57 @@
     "importedAt": "Imported",
     "sourceUpdatedAt": "Source draft updated",
     "notRecorded": "Not recorded",
-    "openSkillSource": "Open source page"
+    "openSkillSource": "Open source page",
+    "mcpCheck": "Check connection",
+    "mcpCheckNamed": "Check connection {{name}}",
+    "mcpCheckStart": "Start check",
+    "mcpCheckCancel": "Cancel check",
+    "mcpCheckCancelling": "Cancelling…",
+    "mcpCheckTitleDescription": "An explicit connection check that does not change tool configuration.",
+    "mcpCheckDescription": "Starting connects to the server or launches an installed local program to read the protocol and tool list. It does not call tools, install dependencies or perform OAuth. Closing or leaving this page cancels the check.",
+    "mcpCheckToolCount": "Found {{count}} tools",
+    "mcpCheckBusy": "This server is already being checked, or the check limit has been reached.",
+    "mcpCheckExpired": "The check expired or was cancelled. Start again.",
+    "mcpCheckStage": {
+      "preflight": "Checking configuration and local program…",
+      "connect": "Connecting…",
+      "negotiate": "Negotiating protocol…",
+      "list": "Reading tool list…",
+      "cleanup": "Cleaning up the connection and check process…"
+    },
+    "mcpCheckState": {
+      "ok": "Connected",
+      "partial": "Incomplete tool list",
+      "blocked": "Check blocked",
+      "authRequired": "Credentials or native authorization required",
+      "forbidden": "Access denied",
+      "timeout": "Check timed out",
+      "cancelled": "Check cancelled",
+      "error": "Check failed"
+    },
+    "mcpCheckReason": {
+      "cancelled": "The check was cancelled.",
+      "timeout": "The check deadline was exceeded. Check the service and retry.",
+      "limit": "The response, configuration or tool count exceeds the check limit.",
+      "protocol": "The server returned an unsupported or invalid protocol message.",
+      "version": "The server has no compatible protocol version.",
+      "network": "The server is unreachable or the check process exited.",
+      "authRequired": "Authorize in the native tool or update the explicit credential references. OFox does not read tool login state.",
+      "forbidden": "Check the server permissions.",
+      "redirect": "The server requested a redirect. The check stopped to avoid forwarding credentials.",
+      "http": "The server returned an HTTP status that prevents this check.",
+      "runnerBlocked": "Checks do not fetch and run programs through package managers, containers or shells. Install the service first, then use a local executable.",
+      "programMissing": "No executable local program was found. Check the command and PATH.",
+      "localScriptRequired": "Interpreter checks require an existing local script. Eval, package modules and remote scripts are unsupported.",
+      "referenceInvalid": "The environment reference is invalid.",
+      "credentialMissing": "The OFox process is missing a referenced environment variable. Configure the environment and restart OFox, or check in the native tool.",
+      "cwdMissing": "The working directory is missing or is not absolute.",
+      "spawnFailed": "The check process could not start.",
+      "fieldUnsupported": "This configuration field is unsupported by the check.",
+      "transportUnsupported": "This transport is unsupported by the check.",
+      "urlCredentials": "Use an HTTP(S) URL without a username, password, query or fragment, and reference credentials through headers.",
+      "headerUnsupported": "The check cannot override this HTTP control header.",
+      "endpointOrigin": "Legacy SSE supplied a cross-origin or unsafe message endpoint. The check stopped."
+    }
   }
 }

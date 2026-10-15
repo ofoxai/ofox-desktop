@@ -29,6 +29,7 @@ import {
 } from "./ResourceEditors";
 import { SkillUpdate } from "./SkillUpdate";
 import { McpDuplicate } from "./McpDuplicate";
+import { McpCheck } from "./McpCheck";
 import { ResourceReview } from "./ResourceReview";
 import { InstructionOverview } from "./InstructionOverview";
 import { libraryError } from "./libraryText";
@@ -37,7 +38,14 @@ import { DraftStore } from "./useDraftState";
 export type Resource = InstructionSet | McpDefinition | SkillDefinition;
 type OpenViewBody =
   | {
-      type: "edit" | "targets" | "details" | "delete" | "copy" | "update";
+      type:
+        | "edit"
+        | "targets"
+        | "details"
+        | "delete"
+        | "copy"
+        | "update"
+        | "check";
       resource: Resource;
       targets: ResourceTarget[];
     }
@@ -255,6 +263,18 @@ export function LibrarySection({
                     : t("library.revision", { revision: row.revision ?? "—" })}
                 </p>
                 {kind === "mcp" && (
+                  <Button
+                    variant="secondary"
+                    disabled={busy || !writable}
+                    aria-label={t("library.mcpCheckNamed", { name: row.name })}
+                    onClick={(event) =>
+                      open({ type: "check", resource: row, targets: [] }, event)
+                    }
+                  >
+                    {t("library.mcpCheck")}
+                  </Button>
+                )}
+                {kind === "mcp" && (
                   <p className="text-note text-ink-muted">
                     {(row as McpDefinition).transport} ·{" "}
                     {t(
@@ -463,9 +483,11 @@ export function LibrarySection({
             </DialogTitle>
             <DialogDescription>
               {t(
-                view?.type === "targets"
-                  ? "library.assignDescription"
-                  : "library.draftDescription",
+                view?.type === "check"
+                  ? "library.mcpCheckTitleDescription"
+                  : view?.type === "targets"
+                    ? "library.assignDescription"
+                    : "library.draftDescription",
               )}
             </DialogDescription>
           </DialogHeader>
@@ -517,6 +539,18 @@ export function LibrarySection({
                     true,
                   )
                 }
+              />
+            )}
+            {view?.type === "check" && kind === "mcp" && (
+              <McpCheck
+                store={draftStore}
+                server={view.resource as McpDefinition}
+                epoch={view.epoch}
+                readOnly={!writable}
+                onBusyChange={(value) => {
+                  running.current = value;
+                  setBusy(value);
+                }}
               />
             )}
             {(view?.type === "new" || view?.type === "edit") &&
