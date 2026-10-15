@@ -61,8 +61,9 @@ The response retains existing totals, series, tool/model breakdowns and
 `costUsd`. It adds the receipt, `coverage`, `pricingCoverage`, `options`, `sources`,
 and `estimate` in each totals/series entry. `options` contains `toolIds`, `modelIds`
 and `sourceIds` from available historical detail and rollups, not only tools with
-current bindings. Series timestamps in query mode are milliseconds. Legacy
-no-query series and legacy log filters retain their previous seconds contract.
+current bindings. Overview `start`, `end`, and series timestamps remain
+milliseconds in both query and legacy no-query mode. Legacy request-log filters
+retain their seconds contract.
 
 Overview combines live `proxy_request_logs` and retained `usage_daily_rollups`.
 It does not add `session_usage_archive`, which would count retained usage twice.
