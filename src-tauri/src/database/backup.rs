@@ -171,14 +171,14 @@ impl Database {
         prepare(&temp_conn)?;
         Self::validate_basic_state(&temp_conn)?;
         Self::restore_tables(&local_snapshot, &temp_conn, preserve_tables)?;
-        if ![
+        let preserves_usage = [
             "proxy_request_logs",
             "session_log_sync",
             "session_meta_cache",
         ]
         .iter()
-        .all(|table| preserve_tables.contains(table))
-        {
+        .all(|table| preserve_tables.contains(table));
+        if !preserves_usage {
             crate::session_manager::source_cache::revoke_usage_on(&temp_conn)?;
         }
         crate::services::library::restore_machine_state(&local_snapshot, &temp_conn)?;
@@ -186,6 +186,11 @@ impl Database {
         // 使用 Backup 将临时库原子写回主库
         {
             let mut main_conn = lock_conn!(self.conn);
+            if preserves_usage {
+                // Usage writes do not take config_io; freeze their latest ledger
+                // and evidence under the same lock as the final replacement.
+                Self::restore_tables(&main_conn, &temp_conn, preserve_tables)?;
+            }
             let backup = Backup::new(&temp_conn, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?;
             backup
@@ -1318,6 +1323,198 @@ mod tests {
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<Result<_, _>>()?;
         assert_eq!(rows, [("/local/transcript.jsonl".to_string(), 42)]);
+        Ok(())
+    }
+
+    type LocalUsageState = Vec<(String, Vec<Vec<rusqlite::types::Value>>)>;
+
+    fn local_usage_state(db: &Database) -> Result<LocalUsageState, AppError> {
+        let conn = crate::database::lock_conn!(db.conn);
+        [
+            "proxy_request_logs",
+            "session_log_sync",
+            "session_meta_cache",
+            "maintenance_flags",
+            "usage_daily_rollups",
+            "session_usage_archive",
+        ]
+        .into_iter()
+        .map(|table| {
+            let mut statement = conn.prepare(&format!("SELECT * FROM {table} ORDER BY 1"))?;
+            let columns = statement.column_count();
+            let rows = statement
+                .query_map([], |row| {
+                    (0..columns)
+                        .map(|index| row.get::<_, rusqlite::types::Value>(index))
+                        .collect::<Result<Vec<_>, _>>()
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((table.to_string(), rows))
+        })
+        .collect()
+    }
+
+    fn commit_concurrent_usage(
+        db: &Database,
+        path: &std::path::Path,
+        at: i64,
+    ) -> Result<(), AppError> {
+        use crate::services::usage_source::{native_key, Prepared, Snapshot};
+        use crate::services::usage_sync_db::{commit_sync_batch, CheckpointChange, SyncState};
+        use crate::session_manager::source_cache::{merge_on, Part};
+        std::fs::write(path, "{}\n").map_err(|error| AppError::io(path, error))?;
+        let mut source = Prepared::load(db, Snapshot::file(path)?, "claude", None, 2)?;
+        let next = SyncState {
+            modified: 1,
+            offset: 1,
+        };
+        commit_sync_batch(
+            db,
+            &[CheckpointChange {
+                key: path.to_string_lossy().into(),
+                expected: None,
+                next: Some(next),
+            }],
+            |conn| {
+                source.check_on(conn)?;
+                conn.execute(
+                    "INSERT INTO proxy_request_logs
+                    (request_id,provider_id,app_type,model,input_tokens,output_tokens,
+                     total_cost_usd,latency_ms,status_code,session_id,created_at,data_source)
+                    VALUES ('session:concurrent-event','_session','claude','fixture',100,10,
+                            '0.123',0,200,'concurrent-session',?1,'session_log')",
+                    [at],
+                )?;
+                source.evidence.acknowledge(&native_key(
+                    "claude",
+                    "concurrent-session",
+                    "concurrent-event",
+                ));
+                source.save_on(conn, next)?;
+                conn.execute(
+                    "INSERT INTO maintenance_flags (key, value) VALUES
+                     ('usage_prune_frontier_utc_v1:claude',
+                      '{\"version\":1,\"cutoffMs\":1234000,\"legacyUnknown\":false}')",
+                    [],
+                )?;
+                merge_on(
+                    conn,
+                    &path.to_string_lossy(),
+                    "claude",
+                    Some("concurrent-session"),
+                    Part::Metadata,
+                    &None,
+                    Some(serde_json::json!({"parserVersion":2,
+                    "stamp":"concurrent","details":{"candidates":{},"messageCount":1}})),
+                )?;
+                merge_on(
+                    conn,
+                    &path.to_string_lossy(),
+                    "claude",
+                    None,
+                    Part::Analytics,
+                    &None,
+                    Some(serde_json::json!({"version":1,"futureAnalytics":{"preserve":true}})),
+                )?;
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    #[serial]
+    fn webdav_sync_preserves_usage_committed_after_its_initial_snapshot() -> Result<(), AppError> {
+        let sandbox = crate::test_sandbox::sandbox();
+        let remote = Database::memory()?;
+        remote.conn.lock().unwrap().execute(
+            "INSERT INTO providers(id,app_type,name,settings_config,meta)
+             VALUES('remote-provider','claude','Remote','{}','{}')",
+            [],
+        )?;
+        let sql = remote.export_sql_string_for_sync()?;
+        for prune in [false, true] {
+            let local = Database::memory()?;
+            local.conn.lock().unwrap().execute(
+                "INSERT INTO maintenance_flags(key,value) VALUES('usage_ledger_epoch_v1','local-epoch')", [],)?;
+            let path = sandbox
+                .home()
+                .join(if prune { "pruned.jsonl" } else { "live.jsonl" });
+            let mut committed = None;
+            local.import_sync_with_resources(&sql, |_| {
+                let at = if prune {
+                    (chrono::Utc::now() - chrono::Duration::days(40)).timestamp()
+                } else {
+                    chrono::Utc::now().timestamp()
+                };
+                commit_concurrent_usage(&local, &path, at)?;
+                if prune {
+                    local.rollup_and_prune(30)?;
+                }
+                committed = Some(local_usage_state(&local)?);
+                Ok(())
+            })?;
+            assert_eq!(
+                local_usage_state(&local)?,
+                committed.unwrap(),
+                "WebDAV replaced a successfully committed local usage batch (prune={prune})"
+            );
+            let remote_count: i64 = local.conn.lock().unwrap().query_row(
+                "SELECT COUNT(*) FROM providers WHERE id='remote-provider'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(remote_count, 1, "remote configuration should still import");
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn webdav_late_local_copy_failure_preserves_the_concurrent_main_commit() -> Result<(), AppError>
+    {
+        let sandbox = crate::test_sandbox::sandbox();
+        let remote = Database::memory()?;
+        remote.conn.lock().unwrap().execute_batch(
+            "CREATE TRIGGER fail_late_cache BEFORE INSERT ON session_meta_cache
+             WHEN NEW.session_id='concurrent-session'
+             BEGIN SELECT RAISE(ABORT,'fixture late cache copy'); END;
+             INSERT INTO providers(id,app_type,name,settings_config,meta)
+             VALUES('remote-provider','claude','Remote','{}','{}');",
+        )?;
+        let sql = remote.export_sql_string_for_sync()?;
+        let local = Database::memory()?;
+        local.conn.lock().unwrap().execute(
+            "INSERT INTO providers(id,app_type,name,settings_config,meta)
+             VALUES('local-provider','claude','Local','{}','{}')",
+            [],
+        )?;
+        let mut committed = None;
+        let result = local.import_sync_with_resources(&sql, |_| {
+            commit_concurrent_usage(
+                &local,
+                &sandbox.home().join("late.jsonl"),
+                chrono::Utc::now().timestamp(),
+            )?;
+            committed = Some(local_usage_state(&local)?);
+            Ok(())
+        });
+        assert!(
+            result.is_err(),
+            "the final copy never observed the new local cache row"
+        );
+        assert_eq!(local_usage_state(&local)?, committed.unwrap());
+        let providers: Vec<String> = local
+            .conn
+            .lock()
+            .unwrap()
+            .prepare("SELECT id FROM providers ORDER BY id")?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        assert_eq!(
+            providers,
+            ["local-provider"],
+            "failed staging replaced main configuration"
+        );
         Ok(())
     }
 }
