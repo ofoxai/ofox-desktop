@@ -25,12 +25,15 @@
 //! ```
 
 use crate::database::dao::usage_rollup::usage_prune_cutoff;
-use crate::database::{lock_conn, Database};
+use crate::database::Database;
 use crate::error::AppError;
 use crate::proxy::usage::calculator::CostCalculator;
 use crate::proxy::usage::parser::TokenUsage;
-use crate::services::session_usage::{get_sync_state, update_sync_state, SessionSyncResult};
-use crate::services::session_usage_codex::find_codex_pricing;
+use crate::services::session_usage::SessionSyncResult;
+use crate::services::session_usage_codex::find_codex_pricing_checked;
+use crate::services::usage_sync_db::{
+    commit_sync_batch, read_sync_state, CheckpointChange, SyncState,
+};
 use crate::session_manager::providers::opencode::get_opencode_base_dir;
 use rusqlite::{Connection, OpenFlags};
 use rust_decimal::Decimal;
@@ -122,6 +125,12 @@ struct OcCall {
     covered_before: bool,
 }
 
+#[derive(Default)]
+struct ParsedBatch {
+    calls: Vec<OcCall>,
+    checkpoints: Vec<CheckpointChange>,
+}
+
 /// 同步 OpenCode 使用数据（数据库优先，否则读 storage/ 下的 JSON 文件）
 pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
     let base = get_opencode_base_dir();
@@ -132,31 +141,36 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
         files_scanned: 0,
         errors: vec![],
     };
-    let calls = if db_path.is_file() {
+    let batch = if db_path.is_file() {
         result.files_scanned = 1;
         read_db_calls(db, &db_path)?
     } else {
         read_storage_calls(db, &base.join("storage"), &mut result)?
     };
 
-    let cutoff = usage_prune_cutoff()?;
-    for call in &calls {
-        // A message rewritten after the prune folded it into the rollups and the
-        // archive moves past the watermark again; it is not stored a second time.
-        // One read for the first time is stored however old it is.
-        if call.covered_before && call.created_at < cutoff && !row_exists(db, &call.msg_id)? {
-            result.skipped += 1;
-            continue;
-        }
-        match upsert_call(db, call) {
-            Ok(true) => result.imported += 1,
-            Ok(false) => result.skipped += 1,
-            Err(e) => {
-                log::warn!("[OPENCODE-SYNC] 写入失败 ({}): {e}", call.msg_id);
-                result.skipped += 1;
+    let (imported, skipped) = commit_sync_batch(db, &batch.checkpoints, |conn| {
+        // Prune cannot interleave its archive write and this live-row decision.
+        let cutoff = usage_prune_cutoff()?;
+        let mut imported = 0;
+        let mut skipped = 0;
+        for call in &batch.calls {
+            // A message rewritten after the prune folded it into the rollups and the
+            // archive moves past the watermark again; it is not stored a second time.
+            // One read for the first time is stored however old it is.
+            if call.covered_before && call.created_at < cutoff && !row_exists(conn, &call.msg_id)? {
+                skipped += 1;
+                continue;
+            }
+            if upsert_call(conn, call)? {
+                imported += 1;
+            } else {
+                skipped += 1;
             }
         }
-    }
+        Ok((imported, skipped))
+    })?;
+    result.imported = imported;
+    result.skipped = skipped;
 
     if result.imported > 0 {
         log::debug!(
@@ -170,11 +184,11 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
 
 // ---- the database ------------------------------------------------------------
 
-/// The calls among messages changed since the last read, and the watermark moved
-/// past them.
-fn read_db_calls(db: &Database, db_path: &Path) -> Result<Vec<OcCall>, AppError> {
+/// Parse outside the OFox DB lock, returning the watermark to commit with facts.
+fn read_db_calls(db: &Database, db_path: &Path) -> Result<ParsedBatch, AppError> {
     let key = db_path.to_string_lossy().to_string();
-    let (watermark, _) = get_sync_state(db, &key)?;
+    let expected = read_sync_state(db, &key)?;
+    let watermark = expected.unwrap_or_default().modified;
     // OpenCode 1.2 builds its database from the JSON files: a message the JSON
     // read covered (created before its session directory's watermark) was read.
     let json_dir = db_path.with_file_name("storage").join("message");
@@ -205,7 +219,7 @@ fn read_db_calls(db: &Database, db_path: &Path) -> Result<Vec<OcCall>, AppError>
         })
         .map_err(|e| AppError::Database(format!("查询 OpenCode 消息失败: {e}")))?;
 
-    let mut calls = Vec::new();
+    let mut batch = ParsedBatch::default();
     let mut newest = watermark;
     for row in rows {
         let (id, session_id, created, updated, data) =
@@ -215,7 +229,13 @@ fn read_db_calls(db: &Database, db_path: &Path) -> Result<Vec<OcCall>, AppError>
             Some(w) => *w,
             None => {
                 let dir_key = json_dir.join(&session_id).to_string_lossy().to_string();
-                let (w, _) = get_sync_state(db, &dir_key)?;
+                let expected = read_sync_state(db, &dir_key)?;
+                let w = expected.unwrap_or_default().modified;
+                batch.checkpoints.push(CheckpointChange {
+                    key: dir_key,
+                    expected,
+                    next: None,
+                });
                 json_watermarks.insert(session_id.clone(), w);
                 w
             }
@@ -228,11 +248,18 @@ fn read_db_calls(db: &Database, db_path: &Path) -> Result<Vec<OcCall>, AppError>
         message.id = id;
         message.session_id = session_id;
         if let Some(call) = to_call(&message, &parents, covered_before) {
-            calls.push(call);
+            batch.calls.push(call);
         }
     }
-    update_sync_state(db, &key, newest, 0)?;
-    Ok(calls)
+    batch.checkpoints.push(CheckpointChange {
+        key,
+        expected,
+        next: Some(SyncState {
+            modified: newest,
+            offset: 0,
+        }),
+    });
+    Ok(batch)
 }
 
 fn db_session_parents(conn: &Connection) -> Result<HashMap<String, String>, AppError> {
@@ -245,7 +272,8 @@ fn db_session_parents(conn: &Connection) -> Result<HashMap<String, String>, AppE
         })
         .map_err(|e| AppError::Database(format!("查询 OpenCode 会话失败: {e}")))?;
     let mut parents = HashMap::new();
-    for row in rows.flatten() {
+    for row in rows {
+        let row = row.map_err(|e| AppError::Database(format!("读取 OpenCode 会话失败: {e}")))?;
         if !row.1.is_empty() {
             parents.insert(row.0, row.1);
         }
@@ -256,25 +284,26 @@ fn db_session_parents(conn: &Connection) -> Result<HashMap<String, String>, AppE
 // ---- the files ---------------------------------------------------------------
 
 /// The calls among message files changed since each session directory's last
-/// read; every directory's watermark is moved past them.
+/// read, together with every directory's checkpoint. Reading never publishes it.
 fn read_storage_calls(
     db: &Database,
     storage: &Path,
     result: &mut SessionSyncResult,
-) -> Result<Vec<OcCall>, AppError> {
+) -> Result<ParsedBatch, AppError> {
     let parents = storage_session_parents(storage);
     let Ok(session_dirs) = fs::read_dir(storage.join("message")) else {
-        return Ok(Vec::new());
+        return Ok(ParsedBatch::default());
     };
 
-    let mut calls = Vec::new();
+    let mut batch = ParsedBatch::default();
     for dir in session_dirs
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.is_dir())
     {
         let key = dir.to_string_lossy().to_string();
-        let (watermark, _) = get_sync_state(db, &key)?;
+        let expected = read_sync_state(db, &key)?;
+        let watermark = expected.unwrap_or_default().modified;
         let mut newest = watermark;
         for (path, modified) in json_files_with_mtime(&dir) {
             if modified < watermark {
@@ -298,14 +327,19 @@ fn read_storage_calls(
             // the directory's watermark was read before
             let covered_before = covered_by(message.created_ms(), watermark);
             if let Some(call) = to_call(&message, &parents, covered_before) {
-                calls.push(call);
+                batch.calls.push(call);
             }
         }
-        if newest > watermark {
-            update_sync_state(db, &key, newest, 0)?;
-        }
+        batch.checkpoints.push(CheckpointChange {
+            key,
+            expected,
+            next: (newest > watermark).then_some(SyncState {
+                modified: newest,
+                offset: 0,
+            }),
+        });
     }
-    Ok(calls)
+    Ok(batch)
 }
 
 fn storage_session_parents(storage: &Path) -> HashMap<String, String> {
@@ -442,8 +476,7 @@ fn covered_by(created_ms: i64, watermark: i64) -> bool {
 }
 
 /// Whether the call of OpenCode message `msg_id` has a row.
-fn row_exists(db: &Database, msg_id: &str) -> Result<bool, AppError> {
-    let conn = lock_conn!(db.conn);
+fn row_exists(conn: &Connection, msg_id: &str) -> Result<bool, AppError> {
     conn.query_row(
         "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = ?1",
         [format!("opencode:{msg_id}")],
@@ -455,10 +488,9 @@ fn row_exists(db: &Database, msg_id: &str) -> Result<bool, AppError> {
 
 /// Insert a call, or update its row when the reply has gone on since; returns
 /// whether the row changed.
-fn upsert_call(db: &Database, call: &OcCall) -> Result<bool, AppError> {
-    let conn = lock_conn!(db.conn);
+fn upsert_call(conn: &Connection, call: &OcCall) -> Result<bool, AppError> {
     let request_id = format!("opencode:{}", call.msg_id);
-    let cost = find_codex_pricing(&conn, &call.model)
+    let cost = find_codex_pricing_checked(conn, &call.model)?
         .map(|p| CostCalculator::calculate(&call.usage, &p, Decimal::ONE));
     let costs = |pick: fn(&crate::proxy::usage::CostBreakdown) -> Decimal| {
         cost.as_ref()

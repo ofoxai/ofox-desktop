@@ -13,12 +13,15 @@
 //! - 无需状态恢复：不依赖前一条消息的累计值
 //! - 天然去重：每条消息有唯一 id 字段
 
-use crate::database::{lock_conn, Database};
+use crate::database::Database;
 use crate::error::AppError;
 use crate::gemini_config::get_gemini_dir;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
 use crate::proxy::usage::parser::TokenUsage;
 use crate::services::session_usage::{SessionSyncResult, SessionUsageEntry};
+use crate::services::usage_sync_db::{
+    commit_sync_batch, read_sync_state, CheckpointChange, SyncState,
+};
 use rust_decimal::Decimal;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -133,55 +136,58 @@ fn sync_single_gemini_file(db: &Database, file_path: &Path) -> Result<(u32, u32)
         .unwrap_or(0);
 
     // 检查同步状态
-    let (last_modified, last_offset) = get_sync_state(db, &file_path_str)?;
+    let expected = read_sync_state(db, &file_path_str)?;
+    let previous = expected.unwrap_or_default();
 
     // 文件未变化则跳过
-    if file_modified <= last_modified {
+    if file_modified <= previous.modified {
         return Ok((0, 0));
     }
 
     // 读取并解析整个 JSON 文件
     let (session_id, calls) = parse_gemini_file(file_path)?;
+    let checkpoint = CheckpointChange {
+        key: file_path_str,
+        expected,
+        next: Some(SyncState {
+            modified: file_modified,
+            offset: calls.len() as i64,
+        }),
+    };
+    commit_sync_batch(db, &[checkpoint], |conn| {
+        let mut imported: u32 = 0;
+        let mut skipped: u32 = 0;
 
-    let mut imported: u32 = 0;
-    let mut skipped: u32 = 0;
-    let gemini_msg_count = calls.len() as i64;
+        for (index, call) in calls.iter().enumerate() {
+            // 生成唯一 request_id
+            let session_id_str = session_id.as_deref().unwrap_or("unknown");
+            let request_id = format!("gemini_session:{session_id_str}:{}", call.message_id);
 
-    for (index, call) in calls.iter().enumerate() {
-        // 生成唯一 request_id
-        let session_id_str = session_id.as_deref().unwrap_or("unknown");
-        let request_id = format!("gemini_session:{session_id_str}:{}", call.message_id);
+            // The file is read whole each time it changes. A reply an earlier sync
+            // stored (its messages only grow) is updated if its row is still there,
+            // but not stored again once the 30-day prune folded it into the rollups
+            // and the session archive.
+            if (index as i64) < previous.offset && !row_exists(conn, &request_id)? {
+                skipped += 1;
+                continue;
+            }
 
-        // The file is read whole each time it changes. A reply an earlier sync
-        // stored (its messages only grow) is updated if its row is still there,
-        // but not stored again once the 30-day prune folded it into the rollups
-        // and the session archive.
-        if (index as i64) < last_offset && !row_exists(db, &request_id)? {
-            skipped += 1;
-            continue;
-        }
-
-        match insert_gemini_session_entry(
-            db,
-            &request_id,
-            &call.tokens,
-            &call.model,
-            session_id.as_deref(),
-            call.timestamp.as_deref(),
-        ) {
-            Ok(true) => imported += 1,
-            Ok(false) => skipped += 1,
-            Err(e) => {
-                log::warn!("[GEMINI-SYNC] 插入失败 ({}): {e}", request_id);
+            if insert_gemini_session_entry(
+                conn,
+                &request_id,
+                &call.tokens,
+                &call.model,
+                session_id.as_deref(),
+                call.timestamp.as_deref(),
+            )? {
+                imported += 1;
+            } else {
                 skipped += 1;
             }
         }
-    }
 
-    // 更新同步状态
-    update_sync_state(db, &file_path_str, file_modified, gemini_msg_count)?;
-
-    Ok((imported, skipped))
+        Ok((imported, skipped))
+    })
 }
 
 /// One Gemini reply with tokens.
@@ -311,8 +317,7 @@ pub(crate) fn session_entries() -> Vec<SessionUsageEntry> {
     entries
 }
 
-fn row_exists(db: &Database, request_id: &str) -> Result<bool, AppError> {
-    let conn = lock_conn!(db.conn);
+fn row_exists(conn: &rusqlite::Connection, request_id: &str) -> Result<bool, AppError> {
     conn.query_row(
         "SELECT COUNT(*) FROM proxy_request_logs WHERE request_id = ?1",
         [request_id],
@@ -334,22 +339,20 @@ fn parse_gemini_tokens(tokens: &serde_json::Value) -> GeminiTokens {
 
 /// 插入单条 Gemini 会话记录到 proxy_request_logs
 fn insert_gemini_session_entry(
-    db: &Database,
+    conn: &rusqlite::Connection,
     request_id: &str,
     tokens: &GeminiTokens,
     model: &str,
     session_id: Option<&str>,
     timestamp: Option<&str>,
 ) -> Result<bool, AppError> {
-    let conn = lock_conn!(db.conn);
-
     // 解析时间戳
     let created_at = created_at_of(timestamp);
 
     // 计算费用
     let usage = usage_of(tokens, model);
 
-    let pricing = find_gemini_pricing(&conn, model);
+    let pricing = find_gemini_pricing_checked(conn, model)?;
     let multiplier = Decimal::from(1);
     let (input_cost, output_cost, cache_read_cost, cache_creation_cost, total_cost) = match pricing
     {
@@ -428,40 +431,16 @@ fn insert_gemini_session_entry(
     Ok(conn.changes() > 0)
 }
 
-/// 获取文件的同步状态
-fn get_sync_state(db: &Database, file_path: &str) -> Result<(i64, i64), AppError> {
-    let conn = lock_conn!(db.conn);
-    let result = conn.query_row(
-        "SELECT last_modified, last_line_offset FROM session_log_sync WHERE file_path = ?1",
-        rusqlite::params![file_path],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-    );
-    Ok(result.unwrap_or((0, 0)))
+fn find_gemini_pricing_checked(
+    conn: &rusqlite::Connection,
+    model_id: &str,
+) -> Result<Option<ModelPricing>, AppError> {
+    if let Some(price) = crate::services::usage_sync_db::lookup_pricing(conn, model_id, false)? {
+        return Ok(Some(price));
+    }
+    crate::services::usage_sync_db::lookup_pricing(conn, &format!("{model_id}%"), true)
 }
 
-/// 更新文件的同步状态
-fn update_sync_state(
-    db: &Database,
-    file_path: &str,
-    last_modified: i64,
-    last_offset: i64,
-) -> Result<(), AppError> {
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    let conn = lock_conn!(db.conn);
-    conn.execute(
-        "INSERT OR REPLACE INTO session_log_sync (file_path, last_modified, last_line_offset, last_synced_at)
-         VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![file_path, last_modified, last_offset, now],
-    )
-    .map_err(|e| AppError::Database(format!("更新同步状态失败: {e}")))?;
-    Ok(())
-}
-
-/// 查找 Gemini 模型定价
 pub(crate) fn find_gemini_pricing(
     conn: &rusqlite::Connection,
     model_id: &str,

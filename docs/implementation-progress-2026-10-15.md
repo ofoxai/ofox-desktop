@@ -6,7 +6,7 @@
 - R0 资源所有权、持久状态与安全写入：代码、复审及阶段门禁完成，随后直接进入 R1。
 - R1 资源库三页与原有全局适配：代码、独立评审、阶段门禁及沙箱原生基础交互验收完成。真实第三方客户端执行与 Windows 仍未验收；不代替全项目最终门禁。
 - I2 逐工具安装及资源适配：进行中，先验证 Copilot CLI 的独立 npm 管理副本；其他候选和未验平台保持官方手动途径。
-- U-A 统计口径与覆盖：已取得四来源事务回滚回归的失败证据，首个原子性切片正在实施；其余统计口径仍待实施。
+- U-A 统计口径与覆盖：四来源事务原子性首切片已完成阶段门禁；累计差分、快照修订、价格覆盖及来源状态仍待后续切片。
 - U-B 工作台、请求恢复及刷新：待实施。
 - U-C 会话与项目分析：待实施。
 - U-D 新增统计来源：待实施。
@@ -89,3 +89,11 @@
 - 临时 HOME 下的配置／授权／会话／共享 Skills 四个 sentinel 在卸载后逐项 hash 不变；npm 包目录已移除。真实版本升级由前述 1.0.97→1.0.98 核心原生测试覆盖，此次界面更新仅验证预览取消，不重复宣称真实升级验收。
 - 界面发现上次 cleanup 状态遗留到下次 preview，先以 update／uninstall 两项 RED 复现，再将每次预览明确重置为 verify。取消再次触发状态变化并禁用按钮。独立复审通过；前端 typecheck、format、109 文件／775 项单测通过。
 - 管理副本的检查与预览逐次重读 Node／npm／prefix 内容；debug 下耗时明显，快速重开和 StrictMode 还可能重复检查。该成本保留为已知限制，未通过删减写前校验掩盖；release 性能、最终应用安装与 Windows 仍未验收。
+
+## U-A 首切片：同步批次原子性
+
+- Claude／Codex／Gemini／OpenCode 的解析仍在锁外；同一批次的 facts、去重／prune 决策及全部 checkpoint 在一个 SQLite 事务中提交。预期 checkpoint 在写前 CAS，区分缺失与零值，并校验只读迁移依赖；任何事实、价格读取、checkpoint 或 COMMIT 错误使批次回滚，不把失败累计成 imported／skipped，也不推进水位。
+- Codex 文件别名的最新 offset 在同一事务中读取；冲突忽略仅限 request_id，其他约束失败会返回错误。OpenCode SQLite 与旧 JSON 的相关水位在全部事实成功后一起发布。一个来源失败不撤回其他来源已提交数据；但推迟 pending maintenance，避免失败旧记录先被 backfill 归档、重试时又加 live。
+- 扩展 RED 为 30 项、25 失败／5 通过，单独复现了归档重试 2≠1。补充既有行恢复、正常缺价与 deferred FK COMMIT 失败后，33 项原子性回归全部通过；最终 library 2316 项通过、10 项 ignored，Rust fmt 及 all-targets Clippy（-D warnings）通过。独立复审关闭 Codex fixture 覆盖缺口，无剩余确定 P1/P2。
+- 集成最初只有旧 Windows 资源空数组断言失败；更新为实际 Tauri 资源展开验证后，当前 16 个 integration targets 共 94 项通过。该资源测试及其 Clippy 专项也通过。所有设置／环境／会话写入测试使用临时沙箱与默认 serial 锁，没有修改真实工具数据。schema v11 和现有 IPC 保持不变。
+- 本切片没有修复 cache-only、同输出修订、累计／单次混合差分、半条 JSONL、大数截断、历史身份或新估价口径；这些仍需独立回归与实现。上述是阶段结果，不能替代全项目最终门禁或 Windows 原生验收。

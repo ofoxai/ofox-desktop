@@ -14,11 +14,14 @@
 //! - `event_msg` (type=token_count) → 提取累计 token 用量，计算 delta
 
 use crate::codex_config::get_codex_config_dir;
-use crate::database::{lock_conn, Database};
+use crate::database::Database;
 use crate::error::AppError;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
 use crate::proxy::usage::parser::TokenUsage;
 use crate::services::session_usage::{SessionSyncResult, SessionUsageEntry};
+use crate::services::usage_sync_db::{
+    commit_sync_batch, read_sync_state, CheckpointChange, SyncState,
+};
 use rust_decimal::Decimal;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -259,54 +262,62 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
         .unwrap_or(0);
 
     // 检查同步状态
-    let (last_modified, mut last_offset) = get_sync_state(db, &file_path_str)?;
+    let expected = read_sync_state(db, &file_path_str)?;
+    let previous = expected.unwrap_or_default();
 
     // 文件未变化则跳过
-    if file_modified <= last_modified {
+    if file_modified <= previous.modified {
         return Ok((0, 0));
-    }
-
-    // A rollout Codex moved (sessions/ -> archived_sessions/) goes on from where
-    // it was read at its old path: its pruned calls must not be stored again.
-    if last_modified == 0 {
-        last_offset = offset_at_another_path(db, file_path)?.unwrap_or(0);
     }
 
     // 整个文件都要解析以恢复累计值状态，只写入上次偏移之后的调用
     let (calls, line_offset) = parse_codex_file(file_path)?;
-    let mut imported: u32 = 0;
-    let mut skipped: u32 = 0;
-    for call in calls.iter().filter(|c| c.line > last_offset) {
-        match insert_codex_session_entry(
-            db,
-            &call.ids,
-            &call.delta,
-            &call.model,
-            call.session_id.as_deref(),
-            call.timestamp.as_deref(),
-        ) {
-            Ok(true) => imported += 1,
-            Ok(false) => skipped += 1,
-            Err(e) => {
-                log::warn!("[CODEX-SYNC] 插入失败 ({}): {e}", call.ids.request_id);
+    let checkpoint = CheckpointChange {
+        key: file_path_str,
+        expected,
+        next: Some(SyncState {
+            modified: file_modified,
+            offset: line_offset,
+        }),
+    };
+    commit_sync_batch(db, &[checkpoint], |conn| {
+        // Read the latest alias under the commit lock: a new moved path cannot
+        // appear between this dedup decision and publishing the destination state.
+        let last_offset = if expected.is_none() {
+            offset_at_another_path(conn, file_path)?.unwrap_or(0)
+        } else {
+            previous.offset
+        };
+        let mut imported: u32 = 0;
+        let mut skipped: u32 = 0;
+        for call in calls.iter().filter(|c| c.line > last_offset) {
+            if insert_codex_session_entry(
+                conn,
+                &call.ids,
+                &call.delta,
+                &call.model,
+                call.session_id.as_deref(),
+                call.timestamp.as_deref(),
+            )? {
+                imported += 1;
+            } else {
                 skipped += 1;
             }
         }
-    }
 
-    // 更新同步状态
-    update_sync_state(db, &file_path_str, file_modified, line_offset)?;
-
-    Ok((imported, skipped))
+        Ok((imported, skipped))
+    })
 }
 
 /// How far the same rollout file (same file name) was read at another path.
-fn offset_at_another_path(db: &Database, file_path: &Path) -> Result<Option<i64>, AppError> {
+fn offset_at_another_path(
+    conn: &rusqlite::Connection,
+    file_path: &Path,
+) -> Result<Option<i64>, AppError> {
     let Some(name) = file_path.file_name() else {
         return Ok(None);
     };
     let name_str = name.to_string_lossy().to_string();
-    let conn = lock_conn!(db.conn);
     let mut stmt = conn
         .prepare(
             "SELECT file_path, last_line_offset FROM session_log_sync
@@ -320,7 +331,9 @@ fn offset_at_another_path(db: &Database, file_path: &Path) -> Result<Option<i64>
         )
         .map_err(|e| AppError::Database(format!("查询同步状态失败: {e}")))?;
     let mut offset = None;
-    for (other, other_offset) in rows.flatten() {
+    for row in rows {
+        let (other, other_offset) =
+            row.map_err(|e| AppError::Database(format!("读取同步状态失败: {e}")))?;
         if Path::new(&other).file_name() == Some(name) {
             offset = Some(offset.unwrap_or(0).max(other_offset));
         }
@@ -595,14 +608,13 @@ impl CodexRequestIds {
 
 /// 插入单条 Codex 会话记录到 proxy_request_logs
 fn insert_codex_session_entry(
-    db: &Database,
+    conn: &rusqlite::Connection,
     ids: &CodexRequestIds,
     delta: &DeltaTokens,
     model: &str,
     session_id: Option<&str>,
     timestamp: Option<&str>,
 ) -> Result<bool, AppError> {
-    let conn = lock_conn!(db.conn);
     let request_id = ids.request_id.as_str();
 
     // 检查是否已存在
@@ -612,7 +624,7 @@ fn insert_codex_session_entry(
             rusqlite::params![request_id],
             |row| row.get::<_, i64>(0).map(|c| c > 0),
         )
-        .unwrap_or(false);
+        .map_err(|e| AppError::Database(format!("查询 Codex 调用失败: {e}")))?;
 
     if exists {
         return Ok(false);
@@ -629,7 +641,7 @@ fn insert_codex_session_entry(
             rusqlite::params![ids.legacy_id, created_at],
             |row| row.get::<_, i64>(0).map(|c| c > 0),
         )
-        .unwrap_or(false);
+        .map_err(|e| AppError::Database(format!("查询旧 Codex 调用失败: {e}")))?;
     if logged_under_legacy_id {
         return Ok(false);
     }
@@ -644,7 +656,7 @@ fn insert_codex_session_entry(
         message_id: None,
     };
 
-    let pricing = find_codex_pricing(&conn, model);
+    let pricing = find_codex_pricing_checked(conn, model)?;
     let multiplier = Decimal::from(1);
     let (input_cost, output_cost, cache_read_cost, cache_creation_cost, total_cost) = match pricing
     {
@@ -667,14 +679,15 @@ fn insert_codex_session_entry(
         ),
     };
 
-    conn.execute(
-        "INSERT OR IGNORE INTO proxy_request_logs (
+    let changed = conn.execute(
+        "INSERT INTO proxy_request_logs (
             request_id, provider_id, app_type, model, request_model,
             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
             input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
             latency_ms, first_token_ms, status_code, error_message, session_id,
             provider_type, is_streaming, cost_multiplier, created_at, data_source
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+        ON CONFLICT(request_id) DO NOTHING",
         rusqlite::params![
             request_id,
             "_codex_session",    // provider_id
@@ -704,43 +717,22 @@ fn insert_codex_session_entry(
     )
     .map_err(|e| AppError::Database(format!("插入 Codex 会话日志失败: {e}")))?;
 
-    Ok(true)
+    Ok(changed > 0)
 }
 
-/// 获取文件的同步状态
-fn get_sync_state(db: &Database, file_path: &str) -> Result<(i64, i64), AppError> {
-    let conn = lock_conn!(db.conn);
-    let result = conn.query_row(
-        "SELECT last_modified, last_line_offset FROM session_log_sync WHERE file_path = ?1",
-        rusqlite::params![file_path],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-    );
-    Ok(result.unwrap_or((0, 0)))
+/// Fallible lookup for a sync transaction; the legacy Option wrapper below
+/// stays available to maintenance callers.
+pub(crate) fn find_codex_pricing_checked(
+    conn: &rusqlite::Connection,
+    model_id: &str,
+) -> Result<Option<ModelPricing>, AppError> {
+    let normalized = normalize_codex_model(model_id);
+    if let Some(price) = crate::services::usage_sync_db::lookup_pricing(conn, &normalized, false)? {
+        return Ok(Some(price));
+    }
+    crate::services::usage_sync_db::lookup_pricing(conn, &format!("{normalized}%"), true)
 }
 
-/// 更新文件的同步状态
-fn update_sync_state(
-    db: &Database,
-    file_path: &str,
-    last_modified: i64,
-    last_offset: i64,
-) -> Result<(), AppError> {
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    let conn = lock_conn!(db.conn);
-    conn.execute(
-        "INSERT OR REPLACE INTO session_log_sync (file_path, last_modified, last_line_offset, last_synced_at)
-         VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![file_path, last_modified, last_offset, now],
-    )
-    .map_err(|e| AppError::Database(format!("更新同步状态失败: {e}")))?;
-    Ok(())
-}
-
-/// ��找 Codex 模型定价（带归一化）
 pub(crate) fn find_codex_pricing(
     conn: &rusqlite::Connection,
     model_id: &str,

@@ -152,8 +152,13 @@ fn sync_sources(db: &Database) -> SessionSyncResult {
             Err(e) => total.errors.push(format!("{name} 同步失败: {e}")),
         }
     }
-    if let Err(e) = usage_maintenance::run_pending(db) {
-        total.errors.push(format!("用量维护失败: {e}"));
+    // Backfill reparses old files. Publishing it after a rolled-back source
+    // batch would archive those calls before their unchanged-file retry writes
+    // them live, counting them twice. Leave pending flags for a successful run.
+    if total.errors.is_empty() {
+        if let Err(e) = usage_maintenance::run_pending(db) {
+            total.errors.push(format!("用量维护失败: {e}"));
+        }
     }
     log::debug!(
         "[USAGE-SYNC] done: {} written, {} unchanged, {} files, {} errors",
@@ -261,6 +266,91 @@ mod tests {
             )
             .unwrap();
         assert_eq!(flag, "done");
+    }
+
+    #[test]
+    #[serial]
+    fn atomic_sync_one_failed_source_keeps_the_other_three() {
+        let home = sandbox();
+        write_one_call_per_source(home.home());
+        let db = Database::memory().unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_claude BEFORE INSERT ON proxy_request_logs
+             WHEN NEW.data_source = 'session_log'
+             BEGIN SELECT RAISE(ABORT, 'fixture Claude write failure'); END;",
+            )
+            .unwrap();
+        let result = sync_sources(&db);
+        assert!(!result.errors.is_empty(), "{result:?}");
+        assert_eq!((result.imported, result.skipped), (3, 0));
+        assert_eq!(
+            data_sources(&db),
+            ["codex_session", "gemini_session", "opencode_session"]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn atomic_sync_failed_old_call_defers_backfill_until_an_unchanged_retry() {
+        let home = sandbox();
+        let timestamp = (chrono::Utc::now() - chrono::Duration::days(40)).to_rfc3339();
+        write(
+            &home.home().join(".claude/projects/p/old.jsonl"),
+            &serde_json::json!({"type":"assistant","sessionId":"old-atomic","timestamp":timestamp,
+                "message":{"id":"old-atomic","model":"claude-opus-4-6","stop_reason":"end_turn",
+                    "usage":{"input_tokens":100,"output_tokens":10}}})
+            .to_string(),
+        );
+        let db = Database::memory().unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO maintenance_flags VALUES ('backfill_session_archive','pending');
+             CREATE TEMP TRIGGER fail_old BEFORE INSERT ON proxy_request_logs
+             BEGIN SELECT RAISE(ABORT, 'fixture old call failure'); END;
+             CREATE TEMP TRIGGER fail_old_checkpoint BEFORE INSERT ON session_log_sync
+             BEGIN SELECT RAISE(ABORT, 'fixture old checkpoint failure'); END;",
+            )
+            .unwrap();
+        let failed = sync_sources(&db);
+        assert!(!failed.errors.is_empty(), "{failed:?}");
+        let (archive_after_failure, flag_after_failure) = {
+            let conn = db.conn.lock().unwrap();
+            let archive: i64 = conn
+                .query_row("SELECT COUNT(*) FROM session_usage_archive", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            let flag: String = conn
+                .query_row(
+                    "SELECT value FROM maintenance_flags WHERE key='backfill_session_archive'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            conn.execute_batch("DROP TRIGGER fail_old; DROP TRIGGER fail_old_checkpoint;")
+                .unwrap();
+            (archive, flag)
+        };
+        let retried = sync_sources(&db);
+        assert!(retried.errors.is_empty(), "{retried:?}");
+        assert_eq!(retried.imported, 1);
+        db.rollup_and_prune(30).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let total: i64 = conn.query_row("SELECT
+            (SELECT COUNT(*) FROM proxy_request_logs WHERE session_id='old-atomic') +
+            (SELECT COALESCE(SUM(request_count),0) FROM session_usage_archive WHERE session_id='old-atomic')",
+            [],|r|r.get(0)).unwrap();
+        assert_eq!(total, 1, "retry must not count archive and live twice");
+        assert_eq!(
+            archive_after_failure, 0,
+            "backfill must not publish rolled-back source facts"
+        );
+        assert_eq!(flag_after_failure, "pending");
     }
 
     #[tokio::test]

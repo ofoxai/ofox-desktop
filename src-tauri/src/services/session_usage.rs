@@ -18,6 +18,9 @@ use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
 use crate::proxy::usage::parser::TokenUsage;
+use crate::services::usage_sync_db::{
+    commit_sync_batch, read_sync_state, CheckpointChange, SyncState,
+};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -364,82 +367,54 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
         .unwrap_or(0);
 
     // 检查同步状态
-    let (last_modified, last_offset) = get_sync_state(db, &file_path_str)?;
+    let expected = read_sync_state(db, &file_path_str)?;
+    let previous = expected.unwrap_or_default();
 
     // 文件未变化则跳过
-    if file_modified <= last_modified {
+    if file_modified <= previous.modified {
         return Ok((0, 0));
     }
 
     // 从上次偏移位置开始增量解析
-    let (messages, line_offset) = parse_claude_file(file_path, last_offset)?;
+    let (messages, line_offset) = parse_claude_file(file_path, previous.offset)?;
 
-    // 写入数据库
-    let mut imported: u32 = 0;
-    let mut skipped: u32 = 0;
+    let checkpoint = CheckpointChange {
+        key: file_path_str,
+        expected,
+        next: Some(SyncState {
+            modified: file_modified,
+            offset: line_offset,
+        }),
+    };
+    commit_sync_batch(db, &[checkpoint], |conn| {
+        // 写入数据库
+        let mut imported: u32 = 0;
+        let mut skipped: u32 = 0;
 
-    for msg in &messages {
-        // A reply without a stop_reason is still a call: a subagent's replies
-        // mostly never get one, and a reply still streaming gets its final line
-        // later, which then updates the row (see insert_session_log_entry).
-        let request_id = format!(
-            "{}{}",
-            crate::proxy::usage::parser::SESSION_REQUEST_ID_PREFIX,
-            msg.message_id
-        );
+        for msg in &messages {
+            // A reply without a stop_reason is still a call: a subagent's replies
+            // mostly never get one, and a reply still streaming gets its final line
+            // later, which then updates the row (see insert_session_log_entry).
+            let request_id = format!(
+                "{}{}",
+                crate::proxy::usage::parser::SESSION_REQUEST_ID_PREFIX,
+                msg.message_id
+            );
 
-        // 跳过 output_tokens 为 0 的无意义条目
-        if msg.output_tokens == 0 {
-            continue;
-        }
+            // 跳过 output_tokens 为 0 的无意义条目
+            if msg.output_tokens == 0 {
+                continue;
+            }
 
-        match insert_session_log_entry(db, &request_id, msg) {
-            Ok(true) => imported += 1,
-            Ok(false) => skipped += 1,
-            Err(e) => {
-                log::warn!("[SESSION-SYNC] 插入失败 ({}): {e}", msg.message_id);
+            if insert_session_log_entry(conn, &request_id, msg)? {
+                imported += 1;
+            } else {
                 skipped += 1;
             }
         }
-    }
 
-    // 更新同步状态
-    update_sync_state(db, &file_path_str, file_modified, line_offset)?;
-
-    Ok((imported, skipped))
-}
-
-/// 获取文件的同步状态
-pub(crate) fn get_sync_state(db: &Database, file_path: &str) -> Result<(i64, i64), AppError> {
-    let conn = lock_conn!(db.conn);
-    let result = conn.query_row(
-        "SELECT last_modified, last_line_offset FROM session_log_sync WHERE file_path = ?1",
-        rusqlite::params![file_path],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-    );
-    Ok(result.unwrap_or((0, 0)))
-}
-
-/// 更新文件的同步状态
-pub(crate) fn update_sync_state(
-    db: &Database,
-    file_path: &str,
-    last_modified: i64,
-    last_offset: i64,
-) -> Result<(), AppError> {
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    let conn = lock_conn!(db.conn);
-    conn.execute(
-        "INSERT OR REPLACE INTO session_log_sync (file_path, last_modified, last_line_offset, last_synced_at)
-         VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![file_path, last_modified, last_offset, now],
-    )
-    .map_err(|e| AppError::Database(format!("更新同步状态失败: {e}")))?;
-    Ok(())
+        Ok((imported, skipped))
+    })
 }
 
 /// 插入单条会话日志到 proxy_request_logs，返回是否写入 (true=新插入或更新, false=未变)
@@ -448,12 +423,10 @@ pub(crate) fn update_sync_state(
 /// when a later line reports more output; a proxy row sharing the message id
 /// is never touched.
 fn insert_session_log_entry(
-    db: &Database,
+    conn: &rusqlite::Connection,
     request_id: &str,
     msg: &ParsedAssistantUsage,
 ) -> Result<bool, AppError> {
-    let conn = lock_conn!(db.conn);
-
     // 解析时间戳（ISO 8601）
     let created_at = created_at_of(msg.timestamp.as_deref());
 
@@ -467,7 +440,7 @@ fn insert_session_log_entry(
         message_id: None,
     };
 
-    let pricing = find_model_pricing_for_session(&conn, &msg.model);
+    let pricing = find_model_pricing_for_session_checked(conn, &msg.model)?;
     let multiplier = Decimal::from(1);
     let (input_cost, output_cost, cache_read_cost, cache_creation_cost, total_cost) = match pricing
     {
@@ -542,6 +515,23 @@ fn insert_session_log_entry(
 }
 
 /// 从 model_pricing 表查找模型定价（支持模糊匹配）
+fn find_model_pricing_for_session_checked(
+    conn: &rusqlite::Connection,
+    model_id: &str,
+) -> Result<Option<ModelPricing>, AppError> {
+    if let Some(price) = try_find_pricing(conn, model_id)? {
+        return Ok(Some(price));
+    }
+    if let Some((prefix, suffix)) = model_id.rsplit_once('-') {
+        if suffix.len() == 8 && suffix.chars().all(|c| c.is_ascii_digit()) {
+            if let Some(price) = try_find_pricing(conn, prefix)? {
+                return Ok(Some(price));
+            }
+        }
+    }
+    crate::services::usage_sync_db::lookup_pricing(conn, &format!("{model_id}%"), true)
+}
+
 pub(crate) fn find_model_pricing_for_session(
     conn: &rusqlite::Connection,
     model_id: &str,

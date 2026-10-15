@@ -18,6 +18,8 @@ pub mod prompt;
 pub mod provider;
 pub mod proxy;
 pub mod session_usage;
+#[cfg(test)]
+mod session_usage_atomic_tests;
 pub mod session_usage_codex;
 pub mod session_usage_gemini;
 pub mod session_usage_opencode;
@@ -36,6 +38,7 @@ pub mod usage_maintenance;
 pub mod usage_overview;
 pub mod usage_stats;
 pub mod usage_sync;
+pub(crate) mod usage_sync_db;
 pub mod webdav;
 pub mod webdav_auto_sync;
 pub mod webdav_sync;
