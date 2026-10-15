@@ -629,3 +629,114 @@ mod import_tests {
             .is_empty());
     }
 }
+
+fn read_resource_pack(path: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let limit = library::skill_artifact::PACKAGE_MAX_BYTES;
+    let file = std::fs::File::open(path).map_err(|_| "library.packReadFailed")?;
+    if !file
+        .metadata()
+        .map_err(|_| "library.packReadFailed")?
+        .is_file()
+    {
+        return Err("library.packInvalid".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "library.packReadFailed")?;
+    if bytes.len() as u64 > limit {
+        return Err("library.packTooLarge".into());
+    }
+    Ok(bytes)
+}
+#[tauri::command]
+pub async fn pick_library_pack(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let selected = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .add_filter("ZIP", &["zip"])
+            .blocking_pick_file()
+    })
+    .await
+    .map_err(|_| "library.packReadFailed")?;
+    selected
+        .map(|file| {
+            file.into_path()
+                .map(|path| path.to_string_lossy().into_owned())
+                .map_err(|_| "library.packReadFailed".into())
+        })
+        .transpose()
+}
+#[tauri::command]
+pub async fn export_library_pack(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let selected = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_file_name("ofox-resources.zip")
+            .add_filter("ZIP", &["zip"])
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|_| "library.packWriteFailed")?;
+    let Some(file) = selected else {
+        return Ok(false);
+    };
+    let path = file.into_path().map_err(|_| "library.packWriteFailed")?;
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let raw = library::resource_pack::export(&db).map_err(|e| e.to_string())?;
+        crate::config::atomic_write_with(
+            &path,
+            &raw,
+            crate::config::AtomicOpts { mode: Some(0o600) },
+        )
+        .map_err(|_| "library.packWriteFailed".to_string())?;
+        Ok(true)
+    })
+    .await
+    .map_err(|_| "library.packWriteFailed".to_string())?
+}
+#[tauri::command]
+pub async fn preview_library_pack(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<Value, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let raw = read_resource_pack(&path)?;
+        library::resource_pack::preview(&db, &raw).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|_| "library.packInvalid".to_string())?
+}
+#[tauri::command]
+pub async fn restore_library_pack(
+    state: State<'_, AppState>,
+    path: String,
+    expected_fingerprint: String,
+    expected_revision: u64,
+    expected_epoch: u64,
+    conflicts: String,
+) -> Result<Value, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let raw = read_resource_pack(&path)?;
+        library::resource_pack::restore(
+            &db,
+            &raw,
+            &expected_fingerprint,
+            expected_revision,
+            expected_epoch,
+            &conflicts,
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|_| "library.packInvalid".to_string())?
+}

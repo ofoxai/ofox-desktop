@@ -22,7 +22,7 @@ use crate::services::webdav::{
 };
 use crate::settings::{update_webdav_sync_status, WebDavSyncSettings, WebDavSyncStatus};
 
-mod archive;
+pub(crate) mod archive;
 use archive::{prepare_zip, zip_skill_artifacts};
 
 // ─── Protocol constants ──────────────────────────────────────

@@ -3492,6 +3492,33 @@
     "verifyFailed": "写入或核验未完成。请查看逐目标结果，核对恢复状态后重试未完成项目。",
     "operationMissing": "此资源或操作已不存在，请刷新资源库。",
     "resourceMissing": "此资源或操作已不存在，请刷新资源库。",
-    "operationNeedsReview": "操作包含无法确认的恢复状态，已保留文件。请先核对恢复记录。"
+    "operationNeedsReview": "操作包含无法确认的恢复状态，已保留文件。请先核对恢复记录。",
+    "pack": {
+      "title": "资源备份／恢复",
+      "description": "导出全部资源，或预览资源包并恢复为草稿。恢复后需要重新选择目标。",
+      "contents": "资源包包含共享指令和技能原始文件，请在分享前检查内容。MCP 仅保留环境变量引用和传输类型，其他值将省略；包中不含本机配置、分配或执行记录。此入口与整库私有备份分开。",
+      "export": "导出全部资源包",
+      "exported": "资源包已保存",
+      "pick": "选择资源包并预览",
+      "confirm": "确认恢复草稿",
+      "conflict": "相同 ID 或技能目录已存在",
+      "newDraft": "新草稿",
+      "omitted": "已省略 {{count}} 个字段，需补值",
+      "conflicts": "已有资源处理",
+      "skip": "跳过已存在资源",
+      "copy": "另存为新副本",
+      "restoreHint": "不会覆盖已有定义或修改工具文件。另存副本会生成新 ID，必要时重命名技能目录。",
+      "result": "已恢复 {{count}} 个草稿",
+      "imported": "已恢复",
+      "skipped": "已跳过",
+      "failed": "恢复失败"
+    },
+    "packInvalid": "资源包无效或内容校验失败，请重新导出。",
+    "packVersionUnsupported": "不支持此资源包版本。",
+    "packTooLarge": "资源包超过体积或资源数量限制。",
+    "packReadFailed": "无法读取资源包。",
+    "packWriteFailed": "无法保存资源包。",
+    "packChanged": "资源包已变化，请重新预览。",
+    "packItemFailed": "此资源恢复失败，已有资源已保留。"
   }
 }

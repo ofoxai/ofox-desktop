@@ -12,3 +12,17 @@ it("includes the opened epoch in MCP saves rather than only the resource revisio
     expectedEpoch: 44,
   });
 });
+it("confirms the resource pack using camelCase frozen fingerprint, revision and epoch", async () => {
+  await libraryApi.restorePack(
+    "/sandbox/drafts.zip",
+    { fingerprint: "hash-before-confirm", revision: 7, epoch: 11, items: [] },
+    "copy",
+  );
+  expect(invoke).toHaveBeenCalledWith("restore_library_pack", {
+    path: "/sandbox/drafts.zip",
+    expectedFingerprint: "hash-before-confirm",
+    expectedRevision: 7,
+    expectedEpoch: 11,
+    conflicts: "copy",
+  });
+});

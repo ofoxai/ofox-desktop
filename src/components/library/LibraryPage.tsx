@@ -8,6 +8,7 @@ import {
   InteractionScope,
   useInteractionActive,
 } from "@/components/ui/interaction-scope";
+import { ResourcePackDialog } from "./ResourcePackDialog";
 import { LibrarySection } from "./LibrarySection";
 
 const KINDS: LibraryKind[] = ["instructions", "mcp", "skills"];
@@ -55,7 +56,17 @@ export function LibraryPage() {
             controls: `library-panel-${kind}`,
           }))}
         />
-        <p className="text-note text-ink-muted">{t("library.globalScope")}</p>
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-note text-ink-muted">{t("library.globalScope")}</p>
+          <ResourcePackDialog
+            onChanged={async () => {
+              await Promise.all([
+                summary.refetch(),
+                ...Array.from(actions.current.values(), (action) => action()),
+              ]);
+            }}
+          />
+        </div>
       </div>
       {KINDS.filter((kind) => visited.has(kind)).map((kind) => (
         <div

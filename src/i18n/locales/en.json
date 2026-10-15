@@ -3492,6 +3492,33 @@
     "verifyFailed": "Writing or verification did not complete. Review per-target results, verify recovery, then retry incomplete items.",
     "operationMissing": "This resource or operation no longer exists. Refresh the library.",
     "resourceMissing": "This resource or operation no longer exists. Refresh the library.",
-    "operationNeedsReview": "The operation has unverified recovery state. Files are preserved; review recovery records first."
+    "operationNeedsReview": "The operation has unverified recovery state. Files are preserved; review recovery records first.",
+    "pack": {
+      "title": "Resource backup / restore",
+      "description": "Export all resources, or preview a resource pack and restore drafts. Choose targets again after restoring.",
+      "contents": "The pack contains original instructions and skill files. Review their contents before sharing. MCP keeps environment references and transport types; other values are omitted. Native configuration, assignments and operation history are excluded. This is separate from the private database backup.",
+      "export": "Export all resources",
+      "exported": "Resource pack saved",
+      "pick": "Choose and preview pack",
+      "confirm": "Restore drafts",
+      "conflict": "ID or skill directory already exists",
+      "newDraft": "New draft",
+      "omitted": "{{count}} fields omitted; values required",
+      "conflicts": "Existing resources",
+      "skip": "Skip existing resources",
+      "copy": "Save new copies",
+      "restoreHint": "Existing definitions and tool files are preserved. Copies receive new IDs and skill directories are renamed when needed.",
+      "result": "Restored {{count}} drafts",
+      "imported": "Restored",
+      "skipped": "Skipped",
+      "failed": "Restore failed"
+    },
+    "packInvalid": "The resource pack is invalid or failed verification. Export it again.",
+    "packVersionUnsupported": "This resource pack version is not supported.",
+    "packTooLarge": "The pack exceeds size or resource limits.",
+    "packReadFailed": "Cannot read the resource pack.",
+    "packWriteFailed": "Cannot save the resource pack.",
+    "packChanged": "The resource pack changed. Preview it again.",
+    "packItemFailed": "This resource could not be restored. Existing resources were preserved."
   }
 }

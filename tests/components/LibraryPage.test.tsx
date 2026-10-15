@@ -456,3 +456,94 @@ it("keeps existing legacy rows read-only when their backend supplies no epoch", 
   ).toBeDisabled();
   expect(screen.getByRole("button", { name: "移除 Shared" })).toBeDisabled();
 });
+it("requires a resource-pack preview and confirms the frozen file fingerprint and revision", async () => {
+  vi.spyOn(libraryApi, "pickPack").mockResolvedValue("/sandbox/resources.zip");
+  vi.spyOn(libraryApi, "previewPack").mockResolvedValue({
+    fingerprint: "pack-hash",
+    revision: 12,
+    epoch: 8,
+    items: [
+      {
+        kind: "mcp",
+        id: "pack-id",
+        name: "Template",
+        conflict: true,
+        omittedFields: 3,
+      },
+    ],
+  });
+  vi.spyOn(libraryApi, "restorePack").mockResolvedValue({
+    imported: 0,
+    items: [{ kind: "mcp", name: "Template", status: "skipped" }],
+  });
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("button", { name: "资源备份／恢复" }));
+  expect(screen.queryByRole("button", { name: "确认恢复草稿" })).toBeNull();
+  await userEvent.click(
+    screen.getByRole("button", { name: "选择资源包并预览" }),
+  );
+  await screen.findByText("Template");
+  expect(libraryApi.restorePack).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole("button", { name: "确认恢复草稿" }));
+  expect(libraryApi.restorePack).toHaveBeenCalledWith(
+    "/sandbox/resources.zip",
+    expect.objectContaining({
+      fingerprint: "pack-hash",
+      revision: 12,
+      epoch: 8,
+    }),
+    "skip",
+  );
+  expect(await screen.findByText("已跳过")).toBeVisible();
+});
+it("keeps a resource-pack preview while the retained page releases its dialog", async () => {
+  vi.spyOn(libraryApi, "pickPack").mockResolvedValue("/sandbox/resources.zip");
+  vi.spyOn(libraryApi, "previewPack").mockResolvedValue({
+    fingerprint: "pack-hash",
+    revision: 12,
+    epoch: 8,
+    items: [],
+  });
+  const rendered = mount();
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("button", { name: "资源备份／恢复" }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "选择资源包并预览" }),
+  );
+  await screen.findByRole("button", { name: "确认恢复草稿" });
+  rendered.rerender(<Fixture active={false} />);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  rendered.rerender(<Fixture />);
+  expect(screen.getByRole("button", { name: "确认恢复草稿" })).toBeEnabled();
+  expect(libraryApi.previewPack).toHaveBeenCalledTimes(1);
+});
+it("retains an in-flight pack preview through portal suspension and rejects a second submission", async () => {
+  let finish!: (v: Awaited<ReturnType<typeof libraryApi.previewPack>>) => void;
+  vi.spyOn(libraryApi, "pickPack").mockResolvedValue("/sandbox/resources.zip");
+  vi.spyOn(libraryApi, "previewPack").mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const rendered = mount();
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("button", { name: "资源备份／恢复" }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "选择资源包并预览" }),
+  );
+  rendered.rerender(<Fixture active={false} />);
+  rendered.rerender(<Fixture />);
+  expect(
+    screen.getByRole("button", { name: "选择资源包并预览" }),
+  ).toBeDisabled();
+  expect(screen.getByRole("button", { name: "关闭" })).toBeDisabled();
+  await act(async () =>
+    finish({ fingerprint: "hash", revision: 3, epoch: 4, items: [] }),
+  );
+  expect(
+    await screen.findByRole("button", { name: "确认恢复草稿" }),
+  ).toBeEnabled();
+  expect(libraryApi.previewPack).toHaveBeenCalledTimes(1);
+});

@@ -38,7 +38,7 @@ fn skill_rows(
         })
         .collect()
 }
-pub(super) fn zip_skill_artifacts(
+pub(crate) fn zip_skill_artifacts(
     dest: &Path,
     conn: &rusqlite::Connection,
 ) -> Result<(), AppError> {
@@ -146,11 +146,11 @@ fn zip_skill_artifacts_with_limits(
     }
     Ok(())
 }
-pub(super) struct PreparedBundle {
+pub(crate) struct PreparedBundle {
     extracted: artifacts::ExtractedDir,
     objects: Option<BTreeMap<String, (PathBuf, artifacts::ExecutionMap)>>,
 }
-pub(super) fn prepare_zip(raw: &[u8], immutable: bool) -> Result<PreparedBundle, AppError> {
+pub(crate) fn prepare_zip(raw: &[u8], immutable: bool) -> Result<PreparedBundle, AppError> {
     let extracted = artifacts::extract_artifact_package(raw)?;
     let objects = if immutable {
         let bytes = fs::read(extracted.path().join("artifact-index.json"))
@@ -214,6 +214,14 @@ fn names(path: &Path) -> Result<BTreeSet<String>, AppError> {
         .map_err(|_| error("skillArchiveInvalid"))
 }
 impl PreparedBundle {
+    /// Verified immutable objects only; the extraction stays alive with this bundle.
+    pub(crate) fn objects(
+        &self,
+    ) -> Result<&BTreeMap<String, (PathBuf, artifacts::ExecutionMap)>, AppError> {
+        self.objects
+            .as_ref()
+            .ok_or_else(|| error("skillArchiveInvalid"))
+    }
     /// Runs on a staged DB under the IO barrier; validate every definition first.
     pub(super) fn prepare_database(&self, conn: &rusqlite::Connection) -> Result<(), AppError> {
         let mut snapshot = library::snapshot_from_connection(conn)?;

@@ -98,7 +98,44 @@ export interface SkillDetail {
   }[];
 }
 
+export interface ResourcePackPreview {
+  fingerprint: string;
+  revision: number;
+  epoch: number;
+  items: {
+    kind: LibraryKind;
+    id: string;
+    name: string;
+    conflict: boolean;
+    omittedFields: number;
+  }[];
+}
+export interface ResourcePackResult {
+  imported: number;
+  items: {
+    kind: LibraryKind;
+    name: string;
+    status: "imported" | "skipped" | "failed";
+    reason?: string | null;
+  }[];
+}
 export const libraryApi = {
+  pickPack: () => invoke<string | null>("pick_library_pack"),
+  exportPack: () => invoke<boolean>("export_library_pack"),
+  previewPack: (path: string) =>
+    invoke<ResourcePackPreview>("preview_library_pack", { path }),
+  restorePack: (
+    path: string,
+    plan: ResourcePackPreview,
+    conflicts: "skip" | "copy",
+  ) =>
+    invoke<ResourcePackResult>("restore_library_pack", {
+      path,
+      expectedFingerprint: plan.fingerprint,
+      expectedRevision: plan.revision,
+      expectedEpoch: plan.epoch,
+      conflicts,
+    }),
   summary: () => invoke<Record<LibraryKind, number>>("get_library_summary"),
   list: (kind: LibraryKind) => invoke<LibraryData>(`get_library_${kind}`),
   saveInstruction: (
