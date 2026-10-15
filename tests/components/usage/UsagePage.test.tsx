@@ -1,5 +1,11 @@
 import { useEffect } from "react";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import {
+  render,
+  screen,
+  waitFor,
+  fireEvent,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
@@ -9,6 +15,7 @@ import { ShellProvider, useShell } from "@/components/shell/ShellContext";
 import { UsagePage } from "@/components/usage-overview/UsagePage";
 import type { OfoxAccount } from "@/hooks/useOfoxAccount";
 import type { UsageOverview } from "@/lib/api/usageOverview";
+import { sessionAnalyticsFixture } from "./sessionAnalyticsFixture";
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   openExternal: vi.fn(),
@@ -134,6 +141,122 @@ it("publishes consecutive successful balance samples to the shared account", asy
   await waitFor(() => expect(balance()).toBe(18));
 });
 describe("UsagePage", () => {
+  it.each([
+    ["请求", "≈$4.41"],
+    ["会话分析", "≈$3.25"],
+  ])(
+    "keeps the overview-only header estimate out of the priced %s page",
+    async (tab, price) => {
+      const normal = mocks.invoke.getMockImplementation()!;
+      const known = (value: string) => ({
+        knownCostUsd: value,
+        availability: "known" as const,
+        unpricedModelIds: [],
+        unpricedRecordCount: 0,
+        additionalUnitsUnsupported: false,
+      });
+      mocks.invoke.mockImplementation(async (command: string, args: any) => {
+        if (command === "get_usage_capabilities")
+          return {
+            queryVersion: 1,
+            requestSnapshots: true,
+            csv: true,
+            projectFilter: true,
+            sessionAnalytics: true,
+            sessionProjectFilter: true,
+            sources: [],
+          };
+        const fixture = sessionAnalyticsFixture();
+        const receipt = {
+          appliedQuery: args?.query,
+          queryFingerprint: "known-query",
+          snapshotVersion: "known-snapshot",
+          coverage: fixture.coverage,
+        };
+        if (command === "get_usage_overview")
+          return {
+            ...overview,
+            ...receipt,
+            totals: { ...totals, estimate: known("2.00") },
+            options: fixture.options,
+          };
+        if (command === "get_session_usage_analytics")
+          return {
+            ...fixture,
+            ...receipt,
+            totals: { ...fixture.totals, estimate: known("3.25") },
+          };
+        if (command === "get_request_logs")
+          return {
+            ...receipt,
+            requestFilters: args.requestFilters ?? {},
+            snapshotId: "known-request-snapshot",
+            total: 44,
+            page: args.page,
+            pageSize: args.pageSize,
+            summary: {
+              ...totals,
+              requests: 44,
+              inputTokens: 100000,
+              outputTokens: 4331,
+              totalTokens: 104331,
+              estimate: known("4.41"),
+            },
+            trend: { granularity: "day", series: [] },
+            measurements: {
+              statusSamples: 0,
+              failedSamples: 0,
+              failureRate: null,
+              latencySamples: 0,
+              avgLatencyMs: null,
+              firstTokenSamples: 0,
+              avgFirstTokenMs: null,
+              generationSpeedSamples: 0,
+              avgGenerationTokensPerSecond: null,
+            },
+            data: Array.from({ length: 20 }, (_, index) => ({
+              requestId: `header-fixture-${index}`,
+              providerId: "fixture",
+              appType: "claude",
+              model: "fixture-model",
+              costMultiplier: "1",
+              inputTokens: 1000,
+              outputTokens: 200,
+              cacheReadTokens: 0,
+              cacheCreationTokens: 0,
+              inputCostUsd: "0",
+              outputCostUsd: "0",
+              cacheReadCostUsd: "0",
+              cacheCreationCostUsd: "0",
+              totalCostUsd: "0",
+              isStreaming: false,
+              latencyMs: 0,
+              statusCode: 0,
+              createdAt: 1791993600,
+              dataSource: "session_log",
+              currentEstimate: known("0.10"),
+            })),
+          };
+        return normal(command, args);
+      });
+      render(<Page />);
+      const header = screen.getByRole("radiogroup", {
+        name: "时间范围",
+      }).parentElement!;
+      expect(await within(header).findByText("≈$2.00")).toBeVisible();
+      await userEvent.click(screen.getByRole("tab", { name: tab }));
+      const panel = screen.getByRole("tabpanel", { name: tab });
+      expect(
+        await within(panel).findByText(price, { exact: false }),
+      ).toBeVisible();
+      expect(within(header).queryByText("按 OFox 价格估算")).toBeNull();
+      expect(within(header).queryByText("—")).toBeNull();
+      await userEvent.click(screen.getByRole("tab", { name: "概览" }));
+      expect(await within(header).findByText("≈$2.00")).toBeVisible();
+      expect(within(header).getByText("按 OFox 价格估算")).toBeVisible();
+    },
+  );
+
   it("shares exact tool filters and one frozen interval between overview and requests", async () => {
     const normal = mocks.invoke.getMockImplementation()!;
     mocks.invoke.mockImplementation(async (command: string, args: any) => {
@@ -213,7 +336,9 @@ describe("UsagePage", () => {
     expect(screen.getAllByText("1.2K").length).toBeGreaterThan(0);
     expect(screen.getAllByText("≈$0.020").length).toBeGreaterThan(0);
     expect(screen.getByText("—")).toBeVisible();
-    expect(screen.getByText(/以下工具尚无分时用量统计/)).toHaveTextContent("Pi");
+    expect(screen.getByText(/以下工具尚无分时用量统计/)).toHaveTextContent(
+      "Pi",
+    );
     expect(screen.getByText(/以下工具尚无分时用量统计/)).not.toHaveTextContent(
       "Hermes",
     );

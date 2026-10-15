@@ -9,12 +9,14 @@ export function UsageHeader({
   cost,
   estimate,
   modern = false,
+  showEstimate = true,
 }: {
   period: WorkbenchPeriod;
   onChange: (p: WorkbenchPeriod) => void;
   cost?: number;
   estimate?: UsageEstimate;
   modern?: boolean;
+  showEstimate?: boolean;
 }) {
   const { t } = useTranslation();
   return (
@@ -31,13 +33,17 @@ export function UsageHeader({
           label: t(`usagePage.periods.${value}`),
         }))}
       />
-      <span className="flex-1" />
-      <span className="text-[15px] font-semibold tabular-nums">
-        {formatUsageEstimate(estimate, cost)}
-      </span>
-      <span className="text-note text-ink-muted">
-        {t("usagePage.estimate")}
-      </span>
+      {showEstimate ? (
+        <>
+          <span className="flex-1" />
+          <span className="text-[15px] font-semibold tabular-nums">
+            {formatUsageEstimate(estimate, cost)}
+          </span>
+          <span className="text-note text-ink-muted">
+            {t("usagePage.estimate")}
+          </span>
+        </>
+      ) : null}
     </div>
   );
 }

@@ -423,6 +423,7 @@ export function UsagePage({
       <UsageHeader
         period={range.period}
         modern={modern}
+        showEstimate={effectiveTab === "overview"}
         onChange={(period) =>
           period === "custom"
             ? setCustomOpen((value) => !value)
