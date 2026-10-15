@@ -80,6 +80,10 @@ export interface UsageSourceHealth {
   lastAttemptAtMs: number | null;
   lastSuccessAtMs: number | null;
   errorCode: string | null;
+  /** Missing on older backends; pending/failed attempts remain unknown. */
+  lastScan?: { filesScanned: number; imported: number; skipped: number } | null;
+  /** Current retained detail rows only, never a complete-history guarantee. */
+  retainedDetailRange?: { startMs: number; endMs: number } | null;
 }
 
 export interface UsageFilterOptions {

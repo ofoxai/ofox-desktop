@@ -622,14 +622,15 @@ fn owned_identity(provider: &str, request: &str, session: Option<&str>) -> Optio
     if provider == "openclaw" {
         let [agent, sid, id]: [String; 3] =
             serde_json::from_str(request.strip_prefix("openclaw_session:")?).ok()?;
+        let canonical_session = json!([agent, sid]).to_string();
         if agent.trim().is_empty()
             || sid.trim().is_empty()
             || id.trim().is_empty()
-            || json!([agent, sid]).to_string() != session
+            || canonical_session != session
         {
             return None;
         }
-        return Some(native_key(provider, session, &id));
+        return Some(native_key(provider, &canonical_session, &id));
     }
     if matches!(provider, "dsh" | "pi") {
         let [sid, kind, id]: [String; 3] =

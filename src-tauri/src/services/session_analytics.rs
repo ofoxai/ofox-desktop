@@ -814,6 +814,8 @@ mod tests {
             last_attempt_at_ms: Some(1),
             last_success_at_ms: Some(1),
             error_code: None,
+            last_scan: None,
+            retained_detail_range: None,
         }
     }
     #[test]

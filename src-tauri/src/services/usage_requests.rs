@@ -204,6 +204,27 @@ pub fn request_page(
     apex: &str,
     now_ms: i64,
 ) -> Result<RequestPage, AppError> {
+    request_page_in(
+        db,
+        query,
+        filters,
+        pagination,
+        snapshot_id,
+        apex,
+        (&chrono::Local, now_ms),
+    )
+}
+
+fn request_page_in<Tz: chrono::TimeZone>(
+    db: &Database,
+    query: UsageQueryV1,
+    filters: RequestFilters,
+    pagination: Pagination,
+    snapshot_id: Option<&str>,
+    apex: &str,
+    context: (&Tz, i64),
+) -> Result<RequestPage, AppError> {
+    let (tz, now_ms) = context;
     let Pagination { page, page_size } = pagination;
     if !(1..=100).contains(&page_size) {
         return Err(invalid("invalidPageSize"));
@@ -228,21 +249,15 @@ pub fn request_page(
         if page != 0 {
             return Err(invalid("snapshotRequired"));
         }
-        let data = usage_data::read_dataset(
-            db,
-            query.clone(),
-            Some(&filters),
-            apex,
-            now_ms,
-            &chrono::Local,
-        )?;
+        let data = usage_data::read_dataset(db, query.clone(), Some(&filters), apex, now_ms, tz)?;
         let mut total = Sum::default();
         for atom in &data.atoms {
             total.add(atom, &data.catalog)?;
         }
         let summary = total.totals()?;
-        let trend =
-            usage_analytics::build_trend(&data.query, &data.atoms, &data.catalog, &chrono::Local)?;
+        let trend = usage_analytics::build_trend(&data.query, &data.atoms, &data.catalog, tz)?;
+        let projection_version =
+            usage_analytics::projection_version(&data.snapshot_version, &trend)?;
         let rows: Vec<_> = data
             .records
             .into_iter()
@@ -279,7 +294,7 @@ pub fn request_page(
                     "{:x}",
                     Sha256::digest(format!(
                         "{}:{}",
-                        data.snapshot_version,
+                        projection_version,
                         fingerprint(&data.query, &filters)?
                     ))
                 ),
@@ -845,5 +860,56 @@ mod tests {
             serde_json::json!({"choices":[{"delta":{"role":"assistant"}}]}),
         )
         .await;
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn request_timezone_changes_new_projection_version_but_keeps_open_snapshot_frozen() {
+        let db = Database::memory().unwrap();
+        db.conn.lock().unwrap().execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at) VALUES('tz','p','claude','m',10,0,200,1)",[]).unwrap();
+        let q = UsageQueryV1 {
+            start_ms: Some(0),
+            end_ms: 3 * 86_400_000,
+            ..query()
+        };
+        let page = |tz: &chrono::FixedOffset, id: Option<&str>| {
+            request_page_in(
+                &db,
+                q.clone(),
+                RequestFilters::default(),
+                Pagination {
+                    page: 0,
+                    page_size: 1,
+                },
+                id,
+                "ofox.ai",
+                (tz, q.end_ms),
+            )
+            .unwrap()
+        };
+        let utc = chrono::FixedOffset::east_opt(0).unwrap();
+        let other = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        let initial = page(&utc, None);
+        let same = page(&utc, None);
+        assert_eq!(
+            initial.receipt.snapshot_version,
+            same.receipt.snapshot_version
+        );
+        let frozen = page(&other, Some(&initial.snapshot_id));
+        assert_eq!(initial.trend, frozen.trend);
+        assert_eq!(
+            initial.receipt.snapshot_version,
+            frozen.receipt.snapshot_version
+        );
+        let changed = page(&other, None);
+        assert_ne!(initial.trend, changed.trend);
+        assert_eq!(
+            initial.receipt.query_fingerprint,
+            changed.receipt.query_fingerprint
+        );
+        assert_ne!(
+            initial.receipt.snapshot_version, changed.receipt.snapshot_version,
+            "different local calendar projections need distinct snapshot versions"
+        );
     }
 }

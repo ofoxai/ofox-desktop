@@ -161,7 +161,7 @@ Top 会话点击打开只读详情；会话管理跳转传递稳定键和定位�
 上线顺序：
 
 1. 校准现有 Claude、Codex、Gemini、OpenCode；保留 Codex archive、Claude 子代理及 OpenCode SQLite／旧 JSON 已有支持。
-2. WorkBuddy：优先评估 Magpie reader 对实际安装版的兼容，取得脱敏 fixture 后增加会话和逐条用量。当前 OFox 没有 reader，不假设改一行注册就可完成。
+2. WorkBuddy：优先评估 Magpie reader 对实际安装版的兼容，取得脱敏 fixture 后增加会话和逐条用量。基线 OFox 没有 reader，不假设改一行注册就可完成；后续接入的能力与限制见[原生 reader](../../usage-workbuddy-reader.md)。
 3. Hermes：复用现有会话发现和 SQLite 优先规则；累计模型用量与逐事件能力分开。只有累计值时，先上线累计信息与限制提示，不纳入精确按日统计。
 4. Pi、dsh：复用现有目录、活动分支、generation、压缩及父子关系规则，按可验证字段开放能力。
 5. OpenClaw：已有会话发现；验证记录格式和 usage 语义后接入。Cursor 等当前不属于 OFox 工具体系的来源另行规划，不顺带扩展产品。

@@ -1,8 +1,8 @@
 //! Machine-local, body-free analytics cache. Native files are read on refresh;
 //! changing a query or opening details reads the cache in one batch only.
-pub(crate) use super::session_analytics_discovery::{
-    discover_sources, Discovery, DiscoveryFailure,
-};
+#[cfg(test)]
+pub(crate) use super::session_analytics_discovery::discover_sources;
+pub(crate) use super::session_analytics_discovery::{Discovery, DiscoveryFailure};
 use super::{
     session_analytics::{AnalyticsInput, SessionDescriptor, SourceReason},
     session_analytics_core::{MessageEvent, Project, Role, SessionIdentity, UsageFact},
@@ -255,6 +255,7 @@ pub(crate) fn refresh_discovered(
     refresh_sources_inner(db, &discovery.specs, &discovery.failures)
 }
 
+#[cfg(test)]
 pub(crate) fn refresh_sources(
     db: &Database,
     specs: &[SourceSpec],
@@ -740,6 +741,7 @@ fn isolate_invalid_roots(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn read_input(db: &Database) -> Result<AnalyticsInput, AppError> {
     let conn = crate::database::lock_conn!(db.conn);
     read_input_on(&conn)
@@ -832,6 +834,8 @@ pub(crate) fn read_input_on(conn: &rusqlite::Connection) -> Result<AnalyticsInpu
                 last_attempt_at_ms: None,
                 last_success_at_ms: entry.succeeded_at_ms,
                 error_code: None,
+                last_scan: None,
+                retained_detail_range: None,
             });
         if entry.status != "ok" {
             if entry.status == "failed" || health.status != "failed" {

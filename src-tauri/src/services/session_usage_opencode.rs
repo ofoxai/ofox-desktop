@@ -123,6 +123,7 @@ struct ParsedBatch {
 }
 
 /// 同步 OpenCode 使用数据（数据库优先，否则读 storage/ 下的 JSON 文件）
+#[cfg(test)]
 pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
     let root = super::usage_sync::resolve_root("opencode")?;
     sync_opencode_usage_at(db, &root)

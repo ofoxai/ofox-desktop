@@ -46,6 +46,29 @@ export function UsageFreshness({
                 {t("usageWorkbench.sourceSuccess", {
                   time: time(source.lastSuccessAtMs),
                 })}
+                <p>
+                  {source.lastScan
+                    ? t("usageWorkbench.sourceScan", {
+                        files: source.lastScan.filesScanned.toLocaleString(
+                          i18n.language,
+                        ),
+                        imported: source.lastScan.imported.toLocaleString(
+                          i18n.language,
+                        ),
+                        skipped: source.lastScan.skipped.toLocaleString(
+                          i18n.language,
+                        ),
+                      })
+                    : t("usageWorkbench.sourceScanUnknown")}
+                </p>
+                <p>
+                  {source.retainedDetailRange
+                    ? t("usageWorkbench.retainedDetailRange", {
+                        start: time(source.retainedDetailRange.startMs),
+                        end: time(source.retainedDetailRange.endMs - 1),
+                      })
+                    : t("usageWorkbench.retainedDetailRangeUnknown")}
+                </p>
               </li>
             ))}
           </ul>

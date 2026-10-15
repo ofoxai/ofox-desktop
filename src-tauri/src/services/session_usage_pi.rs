@@ -458,12 +458,6 @@ fn resolve_fork(
         true
     }
 }
-pub(crate) fn sync_pi_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
-    sync_pi_usage_at(
-        db,
-        &pi::usage_roots().map_err(|_| invalid("sourceRootUnavailable"))?,
-    )
-}
 pub(crate) fn sync_pi_usage_at(
     db: &Database,
     roots: &[PathBuf],

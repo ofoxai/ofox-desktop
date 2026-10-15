@@ -43,6 +43,7 @@ struct GeminiTokens {
 }
 
 /// 同步 Gemini 使用数据（从 JSON 会话日志）
+#[cfg(test)]
 pub fn sync_gemini_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
     let root = super::usage_sync::resolve_root("gemini")?;
     sync_gemini_usage_at(db, &root)

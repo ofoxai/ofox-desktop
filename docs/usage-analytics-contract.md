@@ -45,7 +45,10 @@ type QueryReceipt = {
 `appliedQuery` is the normalized query actually applied. The overview fingerprint
 hashes that query. Request fingerprints hash the normalized query and normalized
 request filters together. `snapshotVersion` hashes the read projection and its
-pricing context. Neither value uses a wall-clock timestamp as a substitute for
+pricing context, including the complete local-calendar trend projection. A new
+query whose timezone changes its day/hour/week buckets gets a distinct version;
+an already retained request snapshot keeps its original buckets and version.
+Neither value uses a wall-clock timestamp as a substitute for
 a database snapshot. Each initial response reads from one SQLite transaction.
 Separate overview and request calls are separate projections; they do not claim
 a shared cross-command persistent snapshot.
@@ -107,6 +110,12 @@ type SourceHealth = {
   lastAttemptAtMs: number | null;
   lastSuccessAtMs: number | null;
   errorCode: string | null;
+  lastScan: {
+    filesScanned: number;
+    imported: number;
+    skipped: number;
+  } | null;
+  retainedDetailRange: { startMs: number; endMs: number } | null;
 };
 type SourceCapability = {
   toolId: string;
@@ -128,12 +137,26 @@ trustworthy success time. This key is excluded from export and reconciled with
 the final local value during restore. A combined synchronization finish timestamp
 does not prove that every source was read successfully.
 
-Event-time readers currently cover Claude, Codex, Gemini, OpenCode, WorkBuddy and
-native v0 dsh within each reader's coverage limits. Cached session/project bridges
+`lastScan` describes the ledger's latest completed, non-failed attempt. A partial
+attempt may expose the result it actually returned; a pending attempt, error or
+legacy missing observation is null. Files scanned counts physical sources;
+imported and skipped preserve each reader's result semantics. Skipped may count
+unchanged files or existing facts, so these fields do not form a common-unit
+success rate. Counts use the same attempt CAS and local epoch as health; opaque
+future scan representations remain unknown rather than being overwritten.
+
+`retainedDetailRange` is the current live ledger detail's minimum and maximum
+whole-second timestamps, exposed as a millisecond half-open interval. It is
+scoped by both tool and source, excludes daily rollups, and does not establish
+gap-free coverage or complete source history. Missing or unrepresentable bounds
+are null. Older backends may omit both new fields; the renderer treats them as
+unknown.
+
+Event-time readers currently cover Claude, Codex, Gemini, OpenCode, WorkBuddy,
+[Pi schema 3](usage-pi-reader.md), native v0 dsh and [OpenClaw schema 24](usage-openclaw-reader.md) within each reader's coverage limits. Cached session/project bridges
 currently cover the first four. Hermes exposes independent cumulative statistics
-through `lifetimeUsageSupported`; it has no event-time ledger reader. Pi and
-OpenClaw remain unavailable until their reader integration is complete. ChatGPT
-mode shares Codex records; no separate general ChatGPT usage is inferred.
+through `lifetimeUsageSupported`; it has no event-time ledger reader.
+ChatGPT mode shares Codex records; no separate general ChatGPT usage is inferred.
 
 ## Local refresh and cumulative sources
 

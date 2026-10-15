@@ -10,6 +10,7 @@ pub(crate) struct DiscoveryFailure {
     pub provider: String,
     pub code: &'static str,
 }
+#[cfg(test)]
 pub(crate) fn discover_sources() -> Discovery {
     discover_in(&[
         ("claude", crate::config::get_claude_config_dir()),

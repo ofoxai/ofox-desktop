@@ -12,6 +12,7 @@ use crate::{database::Database, error::AppError};
 use chrono::{Datelike, TimeZone};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -124,6 +125,14 @@ pub struct UsageTrend {
     pub series: Vec<UsageSeriesPoint>,
 }
 
+/// Calendar projection is part of the receipt, including DST and week boundaries.
+pub(crate) fn projection_version(base: &str, trend: &UsageTrend) -> Result<String, AppError> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&(base, trend)).map_err(|_| overflow())?)
+    ))
+}
+
 /// Both projections use the same bounded local calendar and token estimates.
 pub(crate) fn build_trend<Tz: TimeZone>(
     query: &UsageQueryV1,
@@ -220,10 +229,12 @@ pub fn build_query_overview<Tz: TimeZone>(
     last_synced_at: Option<i64>,
 ) -> Result<UsageOverview, AppError> {
     let data = usage_data::read_dataset(db, query, None, apex, now_ms, tz)?;
+    let trend = build_trend(&data.query, &data.atoms, &data.catalog, tz)?;
+    let snapshot_version = projection_version(&data.snapshot_version, &trend)?;
     let UsageTrend {
         granularity,
         series,
-    } = build_trend(&data.query, &data.atoms, &data.catalog, tz)?;
+    } = trend;
     let mut total = Sum::default();
     let mut tools: BTreeMap<String, Sum> = BTreeMap::new();
     let mut projects: BTreeMap<String, Sum> = BTreeMap::new();
@@ -339,7 +350,7 @@ pub fn build_query_overview<Tz: TimeZone>(
         receipt: QueryReceipt {
             query_fingerprint: data.query.fingerprint()?,
             applied_query: data.query.clone(),
-            snapshot_version: data.snapshot_version,
+            snapshot_version,
         },
         coverage: data.coverage,
         pricing_coverage: data
@@ -403,6 +414,51 @@ mod tests {
         .unwrap();
         assert_eq!(result.totals.requests, 0);
         assert!(result.series.is_empty());
+    }
+
+    #[test]
+    fn analytics_timezone_is_part_of_the_projected_snapshot_version() {
+        let db = Database::memory().unwrap();
+        db.conn.lock().unwrap().execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at) VALUES('tz','p','claude','m',10,0,200,1)",[]).unwrap();
+        let q = UsageQueryV1 {
+            version: 1,
+            start_ms: Some(0),
+            end_ms: 3 * 86_400_000,
+            tool_ids: vec![],
+            model_ids: vec![],
+            project_ids: vec![],
+            source_ids: vec![],
+        };
+        let read = |tz: &chrono::FixedOffset| {
+            build_query_overview(
+                &db,
+                UsagePeriod::All,
+                q.clone(),
+                "ofox.ai",
+                q.end_ms,
+                tz,
+                None,
+            )
+            .unwrap()
+        };
+        let a = read(&chrono::FixedOffset::east_opt(0).unwrap());
+        let same = read(&chrono::FixedOffset::east_opt(0).unwrap());
+        let b = read(&chrono::FixedOffset::east_opt(8 * 3600).unwrap());
+        assert_eq!(
+            a.analytics.as_ref().unwrap().receipt.snapshot_version,
+            same.analytics.as_ref().unwrap().receipt.snapshot_version
+        );
+        assert_eq!(a.totals, b.totals);
+        assert_ne!(a.series, b.series);
+        assert_eq!(
+            a.analytics.as_ref().unwrap().receipt.query_fingerprint,
+            b.analytics.as_ref().unwrap().receipt.query_fingerprint
+        );
+        assert_ne!(
+            a.analytics.unwrap().receipt.snapshot_version,
+            b.analytics.unwrap().receipt.snapshot_version,
+            "different local calendar projections need distinct snapshot versions"
+        );
     }
 
     #[test]

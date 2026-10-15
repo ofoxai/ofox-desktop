@@ -1,5 +1,5 @@
 //! Machine-local, epoch-fenced source health shared by ingestion and analytics.
-use super::usage_query::SourceHealth;
+use super::usage_query::{RetainedDetailRange, SourceHealth, SourceScan};
 use crate::{error::AppError, session_manager::source_cache};
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
@@ -143,6 +143,52 @@ struct ChannelState {
     attempted: i64,
     succeeded: Option<i64>,
     code: Option<String>,
+    scan: Option<SourceScan>,
+}
+
+fn scan_counts(value: &Value) -> Option<SourceScan> {
+    let object = value.as_object()?;
+    if object.get("version").is_some_and(|v| v.as_u64() != Some(1)) {
+        return None;
+    }
+    let count = |name: &str| -> Option<u32> { object.get(name)?.as_u64()?.try_into().ok() };
+    Some(SourceScan {
+        files_scanned: count("filesScanned")?,
+        imported: count("imported")?,
+        skipped: count("skipped")?,
+    })
+}
+
+/// Update owned count fields while retaining extensions of a recognized object.
+/// An opaque future representation remains untouched and publicly unknown.
+fn set_scan(state: &mut Value, scan: Option<SourceScan>) {
+    match state.get_mut("lastScan") {
+        Some(Value::Object(object)) => {
+            if object.get("version").is_some_and(|v| v.as_u64() != Some(1)) {
+                return;
+            }
+            if scan.is_none()
+                && object.keys().all(|key| {
+                    matches!(
+                        key.as_str(),
+                        "version" | "filesScanned" | "imported" | "skipped"
+                    )
+                })
+            {
+                state["lastScan"] = Value::Null;
+                return;
+            }
+            for (key, value) in [
+                ("filesScanned", scan.map(|s| s.files_scanned)),
+                ("imported", scan.map(|s| s.imported)),
+                ("skipped", scan.map(|s| s.skipped)),
+            ] {
+                object.insert(key.into(), json!(value));
+            }
+        }
+        Some(Value::Null) | None => state["lastScan"] = json!(scan),
+        Some(_) => {}
+    }
 }
 fn channel_state(value: &Value) -> Result<ChannelState, AppError> {
     if value["version"].as_u64() != Some(1)
@@ -184,6 +230,9 @@ fn channel_state(value: &Value) -> Result<ChannelState, AppError> {
         attempted,
         succeeded,
         code,
+        scan: (value["pending"] == false && matches!(status, "ok" | "partial"))
+            .then(|| scan_counts(&value["lastScan"]))
+            .flatten(),
     })
 }
 
@@ -217,6 +266,9 @@ pub(crate) fn begin_on(
     {
         object.insert(key.clone(), entry.clone());
     }
+    if channel == Channel::Ledger {
+        set_scan(&mut state, None);
+    }
     row[channel.key()] = state;
     write_on(conn, &value)?;
     Ok(Attempt {
@@ -236,6 +288,16 @@ pub(crate) fn finish_on(
     attempt: &Attempt,
     outcome: Outcome,
     at_ms: i64,
+) -> Result<bool, AppError> {
+    finish_with_scan_on(conn, attempt, outcome, at_ms, None)
+}
+
+pub(crate) fn finish_with_scan_on(
+    conn: &Connection,
+    attempt: &Attempt,
+    outcome: Outcome,
+    at_ms: i64,
+    scan: Option<SourceScan>,
 ) -> Result<bool, AppError> {
     if source_cache::ledger_epoch_on(conn)? != attempt.epoch {
         return Ok(false);
@@ -273,6 +335,9 @@ pub(crate) fn finish_on(
     state["status"] = json!(status);
     state["pending"] = json!(false);
     state["errorCode"] = json!(code);
+    if attempt.channel == Channel::Ledger {
+        set_scan(state, if status == "failed" { None } else { scan });
+    }
     if status == "ok" {
         state["lastSuccessAtMs"] = json!(at_ms);
     }
@@ -304,6 +369,8 @@ fn skeleton(
                     last_attempt_at_ms: None,
                     last_success_at_ms: None,
                     error_code: c.reason.clone(),
+                    last_scan: None,
+                    retained_detail_range: None,
                 };
                 (
                     (row.tool_id.clone(), row.source_id.clone()),
@@ -332,6 +399,7 @@ fn source_health_with_capabilities_on(
     capabilities: Vec<super::usage_query::SourceCapability>,
 ) -> Result<Vec<SourceHealth>, AppError> {
     let mut health = skeleton(capabilities);
+    retained_detail_ranges_on(conn, &mut health)?;
     let Some(raw) = read_raw_on(conn)? else {
         return Ok(health.into_values().map(|v| v.0).collect());
     };
@@ -374,8 +442,12 @@ fn source_health_with_capabilities_on(
                     attempted: 0,
                     succeeded: None,
                     code: Some("usage.sources.incompleteHealth".into()),
+                    scan: None,
                 },
             };
+            if channel == Channel::Ledger {
+                row.last_scan = state.scan;
+            }
             states.push(state);
         }
         let worst = states
@@ -392,6 +464,44 @@ fn source_health_with_capabilities_on(
             .and_then(|s| s.into_iter().min());
     }
     Ok(health.into_values().map(|v| v.0).collect())
+}
+
+/// One bounded tuple-filtered query, in the caller's read transaction. These
+/// extrema describe retained detail rows, not source enumeration or rollups.
+fn retained_detail_ranges_on(
+    conn: &Connection,
+    health: &mut BTreeMap<(String, String), (SourceHealth, bool)>,
+) -> Result<(), AppError> {
+    let tuples: Vec<_> = health
+        .iter()
+        .filter(|(_, (row, _))| row.status != "unsupported")
+        .map(|((tool, source), _)| (tool.clone(), source.clone()))
+        .collect();
+    if tuples.is_empty() {
+        return Ok(());
+    }
+    let predicate = vec!["(app_type=? AND data_source=?)"; tuples.len()].join(" OR ");
+    let values = tuples.iter().flat_map(|(tool, source)| [tool, source]);
+    let mut statement = conn.prepare(&format!(
+        "SELECT app_type,data_source,MIN(created_at),MAX(created_at) FROM proxy_request_logs WHERE {predicate} GROUP BY app_type,data_source"
+    ))?;
+    let mut rows = statement.query(rusqlite::params_from_iter(values))?;
+    while let Some(row) = rows.next()? {
+        let key = (row.get::<_, String>(0)?, row.get::<_, String>(1)?);
+        let first: i64 = row.get(2)?;
+        let last: i64 = row.get(3)?;
+        let range = first.checked_mul(1000).and_then(|start_ms| {
+            let end_ms = last.checked_add(1)?.checked_mul(1000)?;
+            (start_ms < end_ms
+                && chrono::DateTime::from_timestamp_millis(start_ms).is_some()
+                && chrono::DateTime::from_timestamp_millis(end_ms).is_some())
+            .then_some(RetainedDetailRange { start_ms, end_ms })
+        });
+        if let Some((health, _)) = health.get_mut(&key) {
+            health.retained_detail_range = range;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -414,6 +524,206 @@ mod tests {
 
     fn begin(conn: &Connection, channel: Channel, at: i64) -> Attempt {
         begin_on(conn, "gemini", "gemini_session", channel, at).unwrap()
+    }
+
+    #[test]
+    fn source_observability_pending_attempt_does_not_reuse_an_old_scan() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let first = begin(&conn, Channel::Ledger, 1000);
+        assert!(finish_on(&conn, &first, Outcome::Ok, 1100).unwrap());
+        let mut value: Value = serde_json::from_str(&read_raw_on(&conn).unwrap().unwrap()).unwrap();
+        value["sources"][0]["ledger"]["lastScan"] =
+            json!({"filesScanned":8,"imported":7,"skipped":1,"futureScan":"keep"});
+        write_on(&conn, &value).unwrap();
+        begin(&conn, Channel::Ledger, 1200);
+        let pending = serde_json::to_value(health(&conn, "gemini")).unwrap();
+        assert_eq!(pending.get("lastScan"), Some(&Value::Null));
+        let saved: Value = serde_json::from_str(&read_raw_on(&conn).unwrap().unwrap()).unwrap();
+        assert_eq!(
+            saved["sources"][0]["ledger"]["lastScan"]["futureScan"],
+            "keep"
+        );
+    }
+
+    #[test]
+    fn source_observability_live_detail_range_is_source_scoped_and_half_open() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        for capability in super::super::usage_query::source_capabilities()
+            .into_iter()
+            .filter(|c| c.usage_supported)
+        {
+            for source in capability.source_ids {
+                for at in [0_i64, 2] {
+                    conn.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at,data_source) VALUES(?1,'fixture',?2,'fixture',1,0,0,?3,?4)", rusqlite::params![format!("{}-{source}-{at}",capability.tool_id),capability.tool_id,at,source]).unwrap();
+                }
+                conn.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at,data_source) VALUES(?1,'fixture','foreign-tool','fixture',1,0,0,1000,?2)", rusqlite::params![format!("foreign-{source}"),source]).unwrap();
+            }
+            conn.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at,data_source) VALUES(?1,'old-proxy',?2,'fixture',1,0,200,-1000,'proxy')",rusqlite::params![format!("old-proxy-{}",capability.tool_id),capability.tool_id]).unwrap();
+        }
+        conn.execute("INSERT INTO usage_daily_rollups(date,app_type,provider_id,model,request_count,input_tokens,total_cost_usd) VALUES('1969-01-01','gemini','fixture','fixture',1,1,'0')",[]).unwrap();
+        for row in source_health_on(&conn)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.status != "unsupported")
+        {
+            let value = serde_json::to_value(row).unwrap();
+            assert_eq!(
+                value.get("retainedDetailRange"),
+                Some(&json!({"startMs":0,"endMs":3000})),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_observability_legacy_or_empty_health_uses_explicit_unknown_scan_and_detail_range() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let value = serde_json::to_value(health(&conn, "gemini")).unwrap();
+        assert_eq!(value.get("lastScan"), Some(&Value::Null));
+        assert_eq!(value.get("retainedDetailRange"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn source_observability_pruned_detail_range_never_uses_rollup_dates() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at,data_source) VALUES('retained','fixture','gemini','fixture',1,0,0,2,'gemini_session')",[]).unwrap();
+        conn.execute("INSERT INTO usage_daily_rollups(date,app_type,provider_id,model,request_count,input_tokens,total_cost_usd) VALUES('1969-01-01','gemini','fixture','fixture',1,1,'0')",[]).unwrap();
+        assert_eq!(
+            serde_json::to_value(health(&conn, "gemini"))
+                .unwrap()
+                .get("retainedDetailRange"),
+            Some(&json!({"startMs":2000,"endMs":3000}))
+        );
+        conn.execute("DELETE FROM proxy_request_logs", []).unwrap();
+        assert_eq!(
+            serde_json::to_value(health(&conn, "gemini"))
+                .unwrap()
+                .get("retainedDetailRange"),
+            Some(&Value::Null)
+        );
+    }
+
+    #[test]
+    fn source_observability_scan_counts_obey_attempt_cas_and_restore_epoch() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let counts = SourceScan {
+            files_scanned: 3,
+            imported: 2,
+            skipped: 1,
+        };
+        let old = begin(&conn, Channel::Ledger, 1000);
+        let newer = begin(&conn, Channel::Ledger, 2000);
+        assert!(finish_with_scan_on(
+            &conn,
+            &newer,
+            Outcome::Partial("usage.sources.incompleteCoverage"),
+            2100,
+            Some(counts)
+        )
+        .unwrap());
+        assert!(!finish_with_scan_on(
+            &conn,
+            &old,
+            Outcome::Ok,
+            2200,
+            Some(SourceScan {
+                files_scanned: 99,
+                ..counts
+            })
+        )
+        .unwrap());
+        assert_eq!(
+            serde_json::to_value(health(&conn, "gemini")).unwrap()["lastScan"],
+            json!(counts)
+        );
+        let pending = begin(&conn, Channel::Ledger, 3000);
+        conn.execute("INSERT INTO maintenance_flags(key,value) VALUES('usage_ledger_epoch_v1','restored-epoch')", []).unwrap();
+        assert!(!finish_with_scan_on(&conn, &pending, Outcome::Ok, 3100, Some(counts)).unwrap());
+        assert_eq!(
+            serde_json::to_value(health(&conn, "gemini")).unwrap()["lastScan"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn source_observability_scan_extensions_survive_and_future_versions_remain_opaque() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let first = begin(&conn, Channel::Ledger, 1000);
+        finish_on(&conn, &first, Outcome::Ok, 1100).unwrap();
+        let mut value: Value = serde_json::from_str(&read_raw_on(&conn).unwrap().unwrap()).unwrap();
+        value["sources"][0]["ledger"]["lastScan"] =
+            json!({"filesScanned":3,"imported":2,"skipped":1,"futureScan":{"keep":true}});
+        write_on(&conn, &value).unwrap();
+        let counts = SourceScan {
+            files_scanned: 0,
+            imported: 0,
+            skipped: 0,
+        };
+        let next = begin(&conn, Channel::Ledger, 2000);
+        finish_with_scan_on(&conn, &next, Outcome::Ok, 2100, Some(counts)).unwrap();
+        let mut saved: Value = serde_json::from_str(&read_raw_on(&conn).unwrap().unwrap()).unwrap();
+        assert_eq!(
+            saved["sources"][0]["ledger"]["lastScan"]["futureScan"]["keep"],
+            true
+        );
+        assert_eq!(
+            serde_json::to_value(health(&conn, "gemini")).unwrap()["lastScan"],
+            json!(counts)
+        );
+        saved["sources"][0]["ledger"]["lastScan"]["version"] = json!(999);
+        write_on(&conn, &saved).unwrap();
+        let future = saved["sources"][0]["ledger"]["lastScan"].clone();
+        let attempt = begin(&conn, Channel::Ledger, 3000);
+        finish_with_scan_on(&conn, &attempt, Outcome::Ok, 3100, Some(counts)).unwrap();
+        let saved: Value = serde_json::from_str(&read_raw_on(&conn).unwrap().unwrap()).unwrap();
+        assert_eq!(saved["sources"][0]["ledger"]["lastScan"], future);
+        assert_eq!(
+            serde_json::to_value(health(&conn, "gemini")).unwrap()["lastScan"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn source_observability_malformed_scan_counts_are_unknown_instead_of_zero() {
+        for scan in [
+            json!({"filesScanned":-1,"imported":2,"skipped":1}),
+            json!({"filesScanned":3,"imported":4294967296_u64,"skipped":1}),
+            json!({"filesScanned":3,"imported":"2","skipped":1}),
+            json!({"filesScanned":3,"imported":2}),
+            json!([1, 2, 3]),
+        ] {
+            let db = Database::memory().unwrap();
+            let conn = db.conn.lock().unwrap();
+            let attempt = begin(&conn, Channel::Ledger, 1000);
+            finish_on(&conn, &attempt, Outcome::Ok, 1100).unwrap();
+            let mut saved: Value =
+                serde_json::from_str(&read_raw_on(&conn).unwrap().unwrap()).unwrap();
+            saved["sources"][0]["ledger"]["lastScan"] = scan;
+            write_on(&conn, &saved).unwrap();
+            assert_eq!(
+                serde_json::to_value(health(&conn, "gemini")).unwrap()["lastScan"],
+                Value::Null
+            );
+        }
+    }
+
+    #[test]
+    fn source_observability_unrepresentable_seconds_do_not_overflow_into_a_detail_range() {
+        for at in [i64::MIN, i64::MAX] {
+            let db = Database::memory().unwrap();
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at,data_source) VALUES('range','fixture','gemini','fixture',1,0,0,?1,'gemini_session')",[at]).unwrap();
+            assert_eq!(
+                serde_json::to_value(health(&conn, "gemini")).unwrap()["retainedDetailRange"],
+                Value::Null
+            );
+        }
     }
 
     #[test]

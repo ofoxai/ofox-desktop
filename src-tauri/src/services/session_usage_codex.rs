@@ -161,6 +161,7 @@ fn parse_cumulative_tokens(total_usage: &serde_json::Value) -> Option<Cumulative
 }
 
 /// 同步 Codex 使用数据（从 JSONL 会话日志）
+#[cfg(test)]
 pub fn sync_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
     let root = super::usage_sync::resolve_root("codex")?;
     sync_codex_usage_at(db, &root)

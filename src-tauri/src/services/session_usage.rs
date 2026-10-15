@@ -64,6 +64,7 @@ struct ParsedAssistantUsage {
 }
 
 /// 同步 Claude Code 会话日志到使用统计数据库
+#[cfg(test)]
 pub fn sync_claude_session_logs(db: &Database) -> Result<SessionSyncResult, AppError> {
     let root = super::usage_sync::resolve_root("claude")?;
     sync_claude_session_logs_at(db, &root)

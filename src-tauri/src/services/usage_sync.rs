@@ -7,7 +7,8 @@ use crate::error::AppError;
 use crate::services::session_usage::SessionSyncResult;
 use crate::services::{
     pricing_sync, session_usage, session_usage_codex, session_usage_dsh, session_usage_gemini,
-    session_usage_openclaw, session_usage_opencode, session_usage_workbuddy, usage_maintenance,
+    session_usage_openclaw, session_usage_opencode, session_usage_pi, session_usage_workbuddy,
+    usage_maintenance,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -230,6 +231,7 @@ fn single_root(roots: &[PathBuf]) -> Result<&std::path::Path, AppError> {
     }
 }
 /// Compatibility wrappers also freeze root resolution before native I/O.
+#[cfg(test)]
 pub(crate) fn resolve_root(provider: &str) -> Result<PathBuf, AppError> {
     let roots = FrozenRoots::capture()?;
     Ok(single_root(roots.get(provider)?)?.to_owned())
@@ -586,6 +588,19 @@ const SOURCES: &[Source] = &[
                 .map_err(|_| root_unavailable())
         }),
     },
+    Source {
+        provider: "pi",
+        source_id: "pi_session",
+        name: "Pi",
+        resolve: || {
+            crate::session_manager::providers::pi::usage_roots().map_err(|_| root_unavailable())
+        },
+        sync: session_usage_pi::sync_pi_usage_at,
+        observe: Some(|roots| {
+            crate::session_manager::providers::pi::usage_files(roots)
+                .map_err(|_| root_unavailable())
+        }),
+    },
 ];
 
 fn begin_source(db: &Database, source: &Source) -> Result<super::usage_health::Attempt, AppError> {
@@ -688,8 +703,9 @@ fn finish_source(
     attempt: &super::usage_health::Attempt,
     failure: Option<&'static str>,
     empty: bool,
+    scan: Option<super::usage_query::SourceScan>,
 ) -> Result<(), AppError> {
-    use super::usage_health::{finish_on, Outcome};
+    use super::usage_health::{finish_with_scan_on, Outcome};
     let mut conn = crate::database::lock_conn!(db.conn);
     let tx = conn.transaction()?;
     let outcome = if let Some(code) = failure {
@@ -701,7 +717,13 @@ fn finish_source(
     } else {
         Outcome::Partial("usage.sources.incompleteCoverage")
     };
-    if !finish_on(&tx, attempt, outcome, chrono::Utc::now().timestamp_millis())? {
+    if !finish_with_scan_on(
+        &tx,
+        attempt,
+        outcome,
+        chrono::Utc::now().timestamp_millis(),
+        scan,
+    )? {
         return Err(AppError::Database("usage.sources.staleAttempt".into()));
     }
     tx.commit()?;
@@ -748,18 +770,23 @@ fn sync_selected_sources(
             }
         };
         let root_failure = roots.get(source.provider).is_err();
-        let (failure, empty) = match roots
+        let (failure, empty, scan) = match roots
             .get(source.provider)
             .and_then(|roots| (source.sync)(db, roots))
         {
             Ok(result) => {
                 let failed = !result.errors.is_empty();
                 let empty = result.files_scanned == 0;
+                let scan = (!failed).then_some(super::usage_query::SourceScan {
+                    files_scanned: result.files_scanned,
+                    imported: result.imported,
+                    skipped: result.skipped,
+                });
                 total.imported += result.imported;
                 total.skipped += result.skipped;
                 total.files_scanned += result.files_scanned;
                 total.errors.extend(result.errors);
-                (failed.then_some("usage.sources.syncFailed"), empty)
+                (failed.then_some("usage.sources.syncFailed"), empty, scan)
             }
             Err(e) => {
                 total.errors.push(format!("{} 同步失败: {e}", source.name));
@@ -770,6 +797,7 @@ fn sync_selected_sources(
                         "usage.sources.syncFailed"
                     }),
                     false,
+                    None,
                 )
             }
         };
@@ -777,7 +805,7 @@ fn sync_selected_sources(
             failed_providers.insert(source.provider.into());
         }
         if let Some(attempt) = attempt {
-            if finish_source(db, source, &attempt, failure, empty).is_err() {
+            if finish_source(db, source, &attempt, failure, empty, scan).is_err() {
                 failed_providers.insert(source.provider.into());
                 total
                     .errors
@@ -912,6 +940,74 @@ mod tests {
         ledger["toolId"] = source["toolId"].clone();
         ledger["sourceId"] = source["sourceId"].clone();
         serde_json::from_value(ledger).unwrap()
+    }
+
+    fn observation(db: &Database, tool: &str) -> serde_json::Value {
+        let conn = db.conn.lock().unwrap();
+        serde_json::to_value(
+            super::super::usage_health::source_health_on(&conn)
+                .unwrap()
+                .into_iter()
+                .find(|source| source.tool_id == tool && !source.source_id.ends_with(":proxy"))
+                .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    #[serial]
+    fn source_observability_scan_counts_are_scoped_to_each_completed_source() {
+        let home = sandbox();
+        write_one_call_per_source(home.home());
+        workbuddy_partial_fixture(home.home(), false, false);
+        dsh_fixture(home.home(), "obs-dsh", "session.jsonl", 40);
+        write(&home.home().join(".pi/agent/sessions/project/obs.jsonl"), &[
+            serde_json::json!({"type":"session","version":3,"id":"obs-pi","timestamp":"2026-10-15T00:00:00Z","cwd":"/fixture"}),
+            serde_json::json!({"type":"message","id":"a1","parentId":null,"timestamp":"2026-10-15T00:00:01Z","message":{"role":"assistant","model":"fixture","timestamp":1792022401000_i64,"usage":{"input":4,"output":2,"cacheRead":0,"cacheWrite":0}}}),
+        ].map(|row|row.to_string()).join("\n"));
+        let db = Database::memory().unwrap();
+        let result = sync_sources(&db);
+        assert!(result.errors.is_empty(), "{result:?}");
+        for source in SOURCES {
+            let row = observation(&db, source.provider);
+            let scan = row
+                .get("lastScan")
+                .expect("lastScan must be an explicit nullable field");
+            let has_fixture = matches!(
+                source.provider,
+                "claude" | "codex" | "gemini" | "opencode" | "workbuddy" | "dsh" | "pi"
+            );
+            assert_eq!(
+                scan["imported"],
+                u64::from(has_fixture),
+                "{}: {row}",
+                source.provider
+            );
+            assert_eq!(scan["skipped"], 0, "{}: {row}", source.provider);
+            assert_eq!(
+                scan["filesScanned"].as_u64().is_some_and(|n| n > 0),
+                has_fixture,
+                "{}: {row}",
+                source.provider
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn source_observability_failed_attempt_clears_scan_but_keeps_success_time() {
+        let home = sandbox();
+        write_one_call_per_source(home.home());
+        let db = Database::memory().unwrap();
+        assert!(sync_sources(&db).errors.is_empty());
+        let succeeded = status(&db, "gemini").last_success_at_ms;
+        assert!(succeeded.is_some());
+        write(&home.home().join(".gemini/tmp/h/chats/session-1.json"), "{");
+        assert!(!sync_sources(&db).errors.is_empty());
+        let failed = observation(&db, "gemini");
+        assert_eq!(status(&db, "gemini").last_success_at_ms, succeeded);
+        assert_eq!(failed.get("lastScan"), Some(&serde_json::Value::Null));
+        assert!(observation(&db, "claude")["lastScan"].is_object());
     }
 
     #[test]
@@ -1154,6 +1250,28 @@ mod tests {
             .unwrap()
     }
 
+    fn pi_fixture(home: &Path, sid: &str, name: &str, input: u64) -> std::path::PathBuf {
+        let path = home.join(".pi/agent/sessions/project").join(name);
+        let rows = [
+            serde_json::json!({"type":"session","version":3,"id":sid,"timestamp":"2026-10-15T00:00:00Z","cwd":"/fixture/project"}),
+            serde_json::json!({"type":"message","id":"a1","parentId":null,"timestamp":"2026-10-15T00:00:01Z","message":{"role":"assistant","model":"fixture","timestamp":1792022401000_i64,"usage":{"input":input,"output":2,"cacheRead":0,"cacheWrite":0}}}),
+        ];
+        write(&path, &(rows.map(|row| row.to_string()).join("\n") + "\n"));
+        path
+    }
+
+    fn pi_input(db: &Database) -> u64 {
+        db.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COALESCE(SUM(input_tokens),0) FROM proxy_request_logs WHERE app_type='pi'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
     fn root_setting(settings: &mut crate::settings::AppSettings, provider: &str, root: &Path) {
         let value = Some(root.to_str().unwrap().to_owned());
         match provider {
@@ -1170,6 +1288,10 @@ mod tests {
         write_one_call_per_source(&known);
         workbuddy_partial_fixture(&known, false, false);
         dsh_fixture(&known, "one", "session.jsonl", 40);
+        if provider == "pi" {
+            pi_fixture(&known, "pi-one", "session.jsonl", 40);
+            std::env::set_var("PI_CODING_AGENT_DIR", known.join(".pi/agent"));
+        }
         let mut settings = crate::settings::get_settings();
         for (tool, path) in [
             ("claude", ".claude"),
@@ -1204,6 +1326,10 @@ mod tests {
                     std::env::set_var("DSH_HOME", next_root);
                     Ok(())
                 }
+                "pi" => {
+                    std::env::set_var("PI_CODING_AGENT_DIR", next_root);
+                    Ok(())
+                }
                 _ => crate::settings::mutate_settings(|s| root_setting(s, provider, &next_root)),
             };
             let _ = done_tx.send(result.is_ok());
@@ -1231,7 +1357,8 @@ mod tests {
         let result = result.unwrap().unwrap();
         assert!(result.errors.is_empty(), "{result:?}");
         assert_eq!(
-            result.imported, 6,
+            result.imported,
+            if provider == "pi" { 7 } else { 6 },
             "{provider} re-resolved a changed root after the observation boundary"
         );
         let count: i64 = db
@@ -1276,6 +1403,53 @@ mod tests {
     #[serial]
     async fn source_roots_dsh_are_frozen_before_native_scan() {
         root_is_frozen("dsh").await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn source_pi_roots_are_frozen_before_native_scan() {
+        root_is_frozen("pi").await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn source_pi_modified_file_wakes_warm_refresh_without_reparsing_unchanged_body() {
+        let home = sandbox();
+        pi_fixture(home.home(), "pi-one", "one.jsonl", 40);
+        let db = Arc::new(Database::memory().unwrap());
+        let sync = UsageSync::new();
+        assert_eq!(sync.run(&db, false).await.unwrap().unwrap().imported, 1);
+        let reads = super::super::usage_source::body_reads_under(home.home());
+        assert!(sync.run(&db, false).await.unwrap().is_none());
+        assert_eq!(
+            super::super::usage_source::body_reads_under(home.home()),
+            reads
+        );
+        pi_fixture(home.home(), "pi-one", "one.jsonl", 41);
+        let changed = sync
+            .run(&db, false)
+            .await
+            .unwrap()
+            .expect("Pi changed stamp must wake a warm scan");
+        assert!(changed.errors.is_empty(), "{changed:?}");
+        assert_eq!(pi_input(&db), 41);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn source_pi_new_file_wakes_warm_refresh() {
+        let home = sandbox();
+        let db = Arc::new(Database::memory().unwrap());
+        let sync = UsageSync::new();
+        sync.run(&db, false).await.unwrap();
+        pi_fixture(home.home(), "pi-new", "new.jsonl", 7);
+        let changed = sync
+            .run(&db, false)
+            .await
+            .unwrap()
+            .expect("new Pi native file must wake a warm scan");
+        assert!(changed.errors.is_empty(), "{changed:?}");
+        assert_eq!(pi_input(&db), 7);
     }
 
     #[tokio::test]

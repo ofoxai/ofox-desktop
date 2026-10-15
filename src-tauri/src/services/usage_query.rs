@@ -76,6 +76,25 @@ pub struct SourceHealth {
     pub last_attempt_at_ms: Option<i64>,
     pub last_success_at_ms: Option<i64>,
     pub error_code: Option<String>,
+    #[serde(default)]
+    pub last_scan: Option<SourceScan>,
+    #[serde(default)]
+    pub retained_detail_range: Option<RetainedDetailRange>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceScan {
+    pub files_scanned: u32,
+    pub imported: u32,
+    pub skipped: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetainedDetailRange {
+    pub start_ms: i64,
+    pub end_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

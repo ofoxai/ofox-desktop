@@ -14,6 +14,7 @@ use std::{
 };
 
 type Buckets = [i64; 4];
+type SyncSource = fn(&Database) -> Result<claude::SessionSyncResult, AppError>;
 fn write(path: &Path, body: &str, revision: u64) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, body).unwrap();
@@ -1631,10 +1632,7 @@ fn missing_timestamp_is_not_today(provider: &str, invalid: bool) {
     } else {
         call.as_object_mut().unwrap().remove("timestamp");
     }
-    let (path, sync): (
-        PathBuf,
-        fn(&Database) -> Result<claude::SessionSyncResult, AppError>,
-    ) = match provider {
+    let (path, sync): (PathBuf, SyncSource) = match provider {
         "claude" => (claude_path(home.home()), claude::sync_claude_session_logs),
         "codex" => (codex_path(home.home()), codex::sync_codex_usage),
         "gemini" => (
