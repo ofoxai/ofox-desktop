@@ -10,7 +10,7 @@ use rusqlite::{params_from_iter, types::Value as SqlValue, Connection, OptionalE
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 const MAX_ROWS: usize = 100_000;
 const MAX_BYTES: usize = 64 * 1024 * 1024;
@@ -475,58 +475,7 @@ pub fn read_dataset<Tz: TimeZone>(
 /// Explicit unknown until a source-specific successful run records health. Never
 /// substitute a combined run's completion time for per-source success.
 pub fn source_health_on(conn: &Connection) -> Result<Vec<SourceHealth>, AppError> {
-    let raw: Option<String> = conn
-        .query_row(
-            "SELECT value FROM settings WHERE key='usage_source_health_v1'",
-            [],
-            |r| r.get(0),
-        )
-        .optional()?;
-    let mut health = super::usage_query::source_capabilities()
-        .into_iter()
-        .flat_map(|capability| {
-            let ids = if capability.source_ids.is_empty() {
-                vec![format!("{}:unsupported", capability.tool_id)]
-            } else {
-                capability.source_ids
-            };
-            ids.into_iter().map(move |source_id| SourceHealth {
-                source_id,
-                tool_id: capability.tool_id.clone(),
-                status: if capability.usage_supported {
-                    "unknown"
-                } else {
-                    "unsupported"
-                }
-                .into(),
-                last_attempt_at_ms: None,
-                last_success_at_ms: None,
-                error_code: capability.reason.clone(),
-            })
-        })
-        .map(|s| ((s.tool_id.clone(), s.source_id.clone()), s))
-        .collect::<BTreeMap<_, _>>();
-    if let Some(raw) = raw {
-        let stored: Vec<SourceHealth> = serde_json::from_str(&raw)
-            .map_err(|_| AppError::Database("usage.sources.invalidHealth".into()))?;
-        let mut seen = BTreeSet::new();
-        for row in stored {
-            let key = (row.tool_id.clone(), row.source_id.clone());
-            if !seen.insert(key.clone()) {
-                return Err(AppError::Database("usage.sources.conflictingHealth".into()));
-            }
-            if let Some(slot) = health.get_mut(&key).filter(|s| s.status != "unsupported") {
-                if !["unknown", "ok", "partial", "failed"].contains(&row.status.as_str())
-                    || (row.status == "ok" && row.last_success_at_ms.is_none())
-                {
-                    slot.error_code = Some("usage.sources.invalidHealth".into());
-                } else {
-                    *slot = row;
-                }
-            }
-        }
-    }
-    Ok(health.into_values().collect())
+    super::usage_health::source_health_on(conn)
 }
 
 #[cfg(test)]

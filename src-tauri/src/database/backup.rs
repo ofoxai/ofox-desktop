@@ -191,6 +191,7 @@ impl Database {
                 // and evidence under the same lock as the final replacement.
                 Self::restore_tables(&main_conn, &temp_conn, preserve_tables)?;
             }
+            Self::restore_local_usage_health(&main_conn, &temp_conn)?;
             let backup = Backup::new(&temp_conn, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?;
             backup
@@ -531,6 +532,9 @@ impl Database {
                     if key == crate::services::library::MACHINE_KEY {
                         continue;
                     }
+                    if key == crate::services::usage_health::SETTING_KEY {
+                        continue;
+                    }
                 }
                 let mut values = Vec::with_capacity(columns.len());
                 for idx in 0..columns.len() {
@@ -554,6 +558,30 @@ impl Database {
 
         output.push_str("COMMIT;\nPRAGMA foreign_keys=ON;\n");
         Ok(output)
+    }
+
+    /// This single settings row describes local native sources. Copy its fresh
+    /// value (including absence) under the final replacement lock; unrelated
+    /// settings still come from the selected import or backup.
+    fn restore_local_usage_health(
+        source: &Connection,
+        target: &Connection,
+    ) -> Result<(), AppError> {
+        use rusqlite::OptionalExtension;
+        let key = crate::services::usage_health::SETTING_KEY;
+        let value: Option<String> = source
+            .query_row("SELECT value FROM settings WHERE key=?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        target.execute("DELETE FROM settings WHERE key=?1", [key])?;
+        if let Some(value) = value {
+            target.execute(
+                "INSERT INTO settings(key,value) VALUES(?1,?2)",
+                [key, &value],
+            )?;
+        }
+        Ok(())
     }
 
     /// 获取表的列名列表
@@ -686,6 +714,7 @@ impl Database {
             .unwrap_or_default();
         {
             let mut main_conn = lock_conn!(self.conn);
+            Self::restore_local_usage_health(&main_conn, &staged)?;
             Backup::new(&staged, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?
                 .step(-1)
@@ -1514,6 +1543,130 @@ mod tests {
             providers,
             ["local-provider"],
             "failed staging replaced main configuration"
+        );
+        Ok(())
+    }
+
+    const HEALTH_KEY: &str = "usage_source_health_v1";
+
+    fn health_remote_sql(sync: bool) -> Result<String, AppError> {
+        let remote = Database::memory()?;
+        remote.conn.lock().unwrap().execute(
+            "INSERT INTO providers(id,app_type,name,settings_config,meta)
+             VALUES('health-remote','claude','Remote','{}','{}')",
+            [],
+        )?;
+        // Old clients may have exported this machine-local key. Import must
+        // remove the foreign value even when the local device has no row.
+        let dump = if sync {
+            remote.export_sql_string_for_sync()?
+        } else {
+            remote.export_sql_string()?
+        };
+        Ok(format!(
+            "{dump}\nINSERT INTO settings(key,value) VALUES('{HEALTH_KEY}','foreign-health');"
+        ))
+    }
+
+    #[test]
+    fn health_exports_exclude_only_the_machine_local_health_setting() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        db.set_setting(HEALTH_KEY, "local-only-health")?;
+        db.set_setting("usage_source_health_v1_extra", "unrelated-setting")?;
+        let snapshot = db.snapshot_to_memory()?;
+        for dump in [
+            db.export_sql_string()?,
+            db.export_sql_string_for_sync()?,
+            Database::export_sync_snapshot(&snapshot)?,
+        ] {
+            assert!(
+                !dump.contains("local-only-health"),
+                "local health leaked into SQL"
+            );
+            assert!(
+                dump.contains("unrelated-setting"),
+                "filter expanded beyond the exact key"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn health_full_sql_import_preserves_local_and_removes_foreign_when_absent(
+    ) -> Result<(), AppError> {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let sql = health_remote_sql(false)?;
+        for local_value in [Some("local-health"), None] {
+            let local = Database::memory()?;
+            if let Some(value) = local_value {
+                local.set_setting(HEALTH_KEY, value)?;
+            }
+            local.import_sql_string(&sql)?;
+            assert_eq!(local.get_setting(HEALTH_KEY)?.as_deref(), local_value);
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn health_webdav_import_uses_fresh_local_value_and_absence() -> Result<(), AppError> {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let sql = health_remote_sql(true)?;
+        for fresh_value in [Some("new-local-health"), None] {
+            let local = Database::memory()?;
+            local.set_setting(HEALTH_KEY, "stale-local-health")?;
+            local.import_sync_with_resources(&sql, |_| {
+                match fresh_value {
+                    Some(value) => local.set_setting(HEALTH_KEY, value)?,
+                    None => {
+                        local
+                            .conn
+                            .lock()
+                            .unwrap()
+                            .execute("DELETE FROM settings WHERE key=?1", [HEALTH_KEY])?;
+                    }
+                }
+                Ok(())
+            })?;
+            assert_eq!(local.get_setting(HEALTH_KEY)?.as_deref(), fresh_value);
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn health_full_import_takes_the_fresh_local_value() -> Result<(), AppError> {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let local = Database::memory()?;
+        local.set_setting(HEALTH_KEY, "stale-local-health")?;
+        local.import_sql_string_inner(
+            &health_remote_sql(false)?,
+            super::MACHINE_LOCAL_TABLES,
+            |_| {
+                local.set_setting(HEALTH_KEY, "fresh-local-health")?;
+                Ok(())
+            },
+        )?;
+        assert_eq!(
+            local.get_setting(HEALTH_KEY)?.as_deref(),
+            Some("fresh-local-health")
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn health_database_restore_keeps_current_local_health() -> Result<(), AppError> {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Database::init()?;
+        db.set_setting(HEALTH_KEY, "old-backup-health")?;
+        let source = db.backup_database_file()?.unwrap();
+        db.set_setting(HEALTH_KEY, "current-local-health")?;
+        db.restore_from_backup(source.file_name().unwrap().to_str().unwrap())?;
+        assert_eq!(
+            db.get_setting(HEALTH_KEY)?.as_deref(),
+            Some("current-local-health")
         );
         Ok(())
     }

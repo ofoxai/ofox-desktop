@@ -40,6 +40,7 @@ pub mod subscription;
 pub mod usage_analytics;
 pub mod usage_cache;
 pub mod usage_data;
+pub(crate) mod usage_health;
 pub mod usage_maintenance;
 pub mod usage_overview;
 pub mod usage_query;
