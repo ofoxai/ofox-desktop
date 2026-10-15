@@ -86,8 +86,8 @@ fn normalize_codex_model(raw: &str) -> String {
     }
 
     // Step 3: 剥离 ISO 日期后缀 -YYYY-MM-DD（正好 11 字符）
-    if name.len() > 11 {
-        if name.get(name.len() - 11..).is_some_and(|suffix| {
+    if name.len() > 11
+        && name.get(name.len() - 11..).is_some_and(|suffix| {
             let b = suffix.as_bytes();
             b[0] == b'-'
                 && b[1..5].iter().all(u8::is_ascii_digit)
@@ -95,9 +95,9 @@ fn normalize_codex_model(raw: &str) -> String {
                 && b[6..8].iter().all(u8::is_ascii_digit)
                 && b[8] == b'-'
                 && b[9..11].iter().all(u8::is_ascii_digit)
-        }) {
-            name.truncate(name.len() - 11);
-        }
+        })
+    {
+        name.truncate(name.len() - 11);
     }
 
     // Step 4: 剥离紧凑日期后缀 -YYYYMMDD（正好 9 字符）

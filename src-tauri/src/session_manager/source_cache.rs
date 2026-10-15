@@ -411,7 +411,7 @@ fn validate_owned(current: &CacheParts, part: Part) -> Result<(), AppError> {
             Part::Metadata
                 if value["parserVersion"]
                     .as_i64()
-                    .is_none_or(|v| v < 0 || v > super::meta_cache::PARSER_VERSION) =>
+                    .is_none_or(|v| !(0..=super::meta_cache::PARSER_VERSION).contains(&v)) =>
             {
                 return Err(invalid("unsupported metadata parser"))
             }
