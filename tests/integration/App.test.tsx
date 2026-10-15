@@ -1,7 +1,7 @@
 import { Suspense, type ComponentType } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import { providersApi } from "@/lib/api/providers";
 import {
   resetProviderState,
@@ -157,6 +157,13 @@ const renderApp = (AppComponent: ComponentType) => {
 };
 
 describe("App integration with MSW", () => {
+  let App: ComponentType;
+
+  // Cold module transforms belong to setup, not the provider-flow time budget.
+  beforeAll(async () => {
+    App = (await import("@/App")).default;
+  }, 20_000);
+
   beforeEach(() => {
     resetProviderState();
     toastSuccessMock.mockReset();
@@ -164,7 +171,6 @@ describe("App integration with MSW", () => {
   });
 
   it("covers basic provider flows via real hooks", async () => {
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     await waitFor(() =>
@@ -221,7 +227,6 @@ describe("App integration with MSW", () => {
   });
 
   it("shows toast when auto sync fails in background", async () => {
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     await waitFor(() =>
@@ -260,7 +265,6 @@ describe("App integration with MSW", () => {
     setCurrentProviderId("openclaw", "deepseek");
     setLiveProviderIds("openclaw", ["deepseek-copy"]);
 
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     fireEvent.click(screen.getByText("switch-openclaw"));
@@ -306,7 +310,6 @@ describe("App integration with MSW", () => {
       .spyOn(providersApi, "getOpenClawLiveProviderIds")
       .mockRejectedValueOnce(new Error("broken config"));
 
-    const { default: App } = await import("@/App");
     renderApp(App);
 
     fireEvent.click(screen.getByText("switch-openclaw"));
