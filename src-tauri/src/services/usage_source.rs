@@ -196,7 +196,7 @@ pub(crate) fn timestamp_ms(timestamp: Option<&str>) -> Option<i64> {
 }
 fn normalized_source(provider: &str, path: &Path) -> Result<Snapshot, AppError> {
     match provider {
-        "claude" | "codex" | "gemini" | "workbuddy" | "dsh" => Snapshot::file(path),
+        "claude" | "codex" | "gemini" | "workbuddy" | "dsh" | "pi" => Snapshot::file(path),
         "opencode" if path.is_file() => Snapshot::sqlite(path),
         "opencode" => Snapshot::storage(path),
         _ => Err(error("unsupported normalized provider")),
@@ -224,6 +224,12 @@ pub fn read_normalized(provider: &str, path: &Path) -> Result<NormalizedSnapshot
         }
         "dsh" => {
             let read = super::session_usage_dsh::read_dsh(path)?;
+            let complete = !read.reasons.contains("incompleteEnumeration");
+            reasons.extend(read.reasons);
+            (read.facts, complete)
+        }
+        "pi" => {
+            let read = super::session_usage_pi::read_pi(path)?;
             let complete = !read.reasons.contains("incompleteEnumeration");
             reasons.extend(read.reasons);
             (read.facts, complete)
@@ -269,6 +275,36 @@ pub(crate) fn with_stable_file<T>(
     parse: impl FnOnce(fs::File) -> Result<T, AppError>,
 ) -> Result<T, AppError> {
     let file = fs::File::open(path).map_err(|_| error("file unavailable"))?;
+    with_stable_open_file(path, file, parse)
+}
+/// Pi source/config reads must never wait on a FIFO swapped in after stat.
+/// Verify the opened descriptor; a pathname-only check cannot close that race.
+pub(crate) fn with_stable_regular_file<T>(
+    path: &Path,
+    parse: impl FnOnce(fs::File) -> Result<T, AppError>,
+) -> Result<T, AppError> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
+    let file = options.open(path).map_err(|_| error("file unavailable"))?;
+    if !file
+        .metadata()
+        .map_err(|_| error("file metadata unavailable"))?
+        .is_file()
+    {
+        return Err(error("non-regular file"));
+    }
+    with_stable_open_file(path, file, parse)
+}
+fn with_stable_open_file<T>(
+    path: &Path,
+    file: fs::File,
+    parse: impl FnOnce(fs::File) -> Result<T, AppError>,
+) -> Result<T, AppError> {
     let before = SourceStamp::of(&file)?;
     record_body_read(path);
     let result = parse(
@@ -468,7 +504,7 @@ fn extend_acknowledged(
 /// remaining files as complete again.
 pub(crate) struct ProviderIndex {
     provider: &'static str,
-    root: PathBuf,
+    roots: Vec<PathBuf>,
     generation: Option<String>,
     epoch: Option<String>,
     acknowledged: Arc<BTreeSet<String>>,
@@ -566,9 +602,9 @@ pub(crate) fn has_complete_coverage_on(
 
 fn owned_identity(provider: &str, request: &str, session: Option<&str>) -> Option<String> {
     let session = session.unwrap_or("");
-    if provider == "dsh" {
+    if matches!(provider, "dsh" | "pi") {
         let [sid, kind, id]: [String; 3] =
-            serde_json::from_str(request.strip_prefix("dsh_session:")?).ok()?;
+            serde_json::from_str(request.strip_prefix(&format!("{provider}_session:"))?).ok()?;
         if sid.trim().is_empty() || id.trim().is_empty() || sid != session || kind != "assistant" {
             return None;
         }
@@ -617,6 +653,7 @@ fn owner(provider: &str) -> Result<&'static str, AppError> {
         "codex" => Ok("_codex_session"),
         "workbuddy" => Ok("_workbuddy_session"),
         "dsh" => Ok("_dsh_session"),
+        "pi" => Ok("_pi_session"),
         _ => Err(error("unknown provider")),
     }
 }
@@ -628,6 +665,7 @@ fn origin(provider: &str) -> Result<&'static str, AppError> {
         "codex" => Ok("codex_session"),
         "workbuddy" => Ok("workbuddy_session"),
         "dsh" => Ok("dsh_session"),
+        "pi" => Ok("pi_session"),
         _ => Err(error("unknown provider")),
     }
 }
@@ -648,14 +686,14 @@ fn checkpoints_on(conn: &rusqlite::Connection) -> Result<BTreeMap<String, SyncSt
 fn no_prior_ledger_on(
     conn: &rusqlite::Connection,
     provider: &str,
-    root: &Path,
+    roots: &[PathBuf],
 ) -> Result<bool, AppError> {
     Ok(ledger_count_on(conn, provider)? == 0
         && !has_history_on(conn, provider)?
         && !has_owned_on(conn, provider)?
         && !checkpoints_on(conn)?
             .keys()
-            .any(|p| Path::new(p).starts_with(root)))
+            .any(|p| roots.iter().any(|root| Path::new(p).starts_with(root))))
 }
 fn decode_evidence(value: &Value) -> Result<Evidence, AppError> {
     if value["version"].as_u64() != Some(1) {
@@ -684,13 +722,43 @@ fn decode_evidence(value: &Value) -> Result<Evidence, AppError> {
     Ok(evidence)
 }
 impl ProviderIndex {
+    pub(crate) fn load_roots(
+        db: &Database,
+        provider: &'static str,
+        roots: &[PathBuf],
+    ) -> Result<Self, AppError> {
+        let mut seen = BTreeSet::new();
+        if roots.is_empty()
+            || roots.iter().any(|root| {
+                !root.is_absolute()
+                    || root
+                        .components()
+                        .any(|c| matches!(c, std::path::Component::ParentDir))
+                    || !seen.insert(root.clone())
+            })
+        {
+            return Err(error("invalid source roots"));
+        }
+        Self::load_scoped(db, provider, roots)
+    }
     pub(crate) fn origin_empty(&self) -> bool {
         self.origin_empty
+    }
+    /// Trusted positive receipts are independent of complete negative evidence.
+    pub(crate) fn has_acknowledged(&self, native: &str) -> bool {
+        self.acknowledged.contains(&native_digest(native))
     }
     pub(crate) fn load(
         db: &Database,
         provider: &'static str,
         root: &Path,
+    ) -> Result<Self, AppError> {
+        Self::load_scoped(db, provider, &[root.to_owned()])
+    }
+    fn load_scoped(
+        db: &Database,
+        provider: &'static str,
+        roots: &[PathBuf],
     ) -> Result<Self, AppError> {
         let mut conn = lock_conn!(db.conn);
         let tx = conn.transaction()?;
@@ -769,10 +837,9 @@ impl ProviderIndex {
                 complete = false;
             }
         }
-        if checkpoints
-            .keys()
-            .any(|p| Path::new(p).starts_with(root) && !valid_paths.contains(p))
-        {
+        if checkpoints.keys().any(|p| {
+            roots.iter().any(|root| Path::new(p).starts_with(root)) && !valid_paths.contains(p)
+        }) {
             complete = false;
         }
         let mut any_live = false;
@@ -801,7 +868,9 @@ impl ProviderIndex {
             && !any_live
             && ledger_count == 0
             && !has_history_on(&tx, provider)?
-            && !checkpoints.keys().any(|p| Path::new(p).starts_with(root));
+            && !checkpoints
+                .keys()
+                .any(|p| roots.iter().any(|root| Path::new(p).starts_with(root)));
         if origin_empty {
             complete = true;
         }
@@ -815,7 +884,7 @@ impl ProviderIndex {
         tx.commit()?;
         Ok(Self {
             provider,
-            root: root.to_owned(),
+            roots: roots.to_owned(),
             generation,
             epoch,
             acknowledged: Arc::new(acknowledged),
@@ -834,7 +903,7 @@ impl ProviderIndex {
         if self.negative_complete && ledger_count_on(conn, self.provider)? != self.ledger_count {
             return Err(error("ledger contribution boundary changed; retry"));
         }
-        if self.origin_empty && !no_prior_ledger_on(conn, self.provider, &self.root)? {
+        if self.origin_empty && !no_prior_ledger_on(conn, self.provider, &self.roots)? {
             return Err(error("empty ledger boundary changed; retry"));
         }
         Ok(())
@@ -974,7 +1043,7 @@ impl Prepared {
             may_import_unseen_history,
             index: ProviderIndex {
                 provider,
-                root: index.root.clone(),
+                roots: index.roots.clone(),
                 generation: index.generation.clone(),
                 epoch: index.epoch.clone(),
                 acknowledged: Arc::clone(&index.acknowledged),
@@ -1063,6 +1132,7 @@ impl Prepared {
             "opencode" => "_opencode_session",
             "workbuddy" => "_workbuddy_session",
             "dsh" => "_dsh_session",
+            "pi" => "_pi_session",
             _ => return Err(error("unsupported native evidence source")),
         };
         if let Some((source, app, provider)) = row {

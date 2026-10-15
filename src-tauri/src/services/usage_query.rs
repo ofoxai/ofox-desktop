@@ -100,7 +100,7 @@ pub fn source_capabilities() -> Vec<SourceCapability> {
         ("chatgpt", None),
         ("workbuddy", Some("workbuddy_session")),
         ("hermes", None),
-        ("pi", None),
+        ("pi", Some("pi_session")),
         ("dsh", Some("dsh_session")),
         ("openclaw", None),
     ]

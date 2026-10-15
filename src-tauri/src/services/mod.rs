@@ -33,6 +33,7 @@ mod session_usage_dsh;
 pub mod session_usage_gemini;
 pub mod session_usage_hermes;
 pub mod session_usage_opencode;
+mod session_usage_pi;
 #[cfg(test)]
 mod session_usage_semantics_tests;
 pub mod session_usage_workbuddy;

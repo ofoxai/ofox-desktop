@@ -19,6 +19,122 @@ pub fn session_roots() -> Result<Vec<PathBuf>, String> {
     )
 }
 
+pub(crate) fn usage_roots() -> Result<Vec<PathBuf>, String> {
+    usage_roots_in(
+        &agent_dir()?,
+        std::env::var("PI_CODING_AGENT_SESSION_DIR").ok().as_deref(),
+    )
+}
+pub(crate) fn usage_roots_in(
+    agent: &Path,
+    override_dir: Option<&str>,
+) -> Result<Vec<PathBuf>, String> {
+    let mut roots = vec![agent.join("sessions")];
+    let configured = if let Some(raw) = override_dir.filter(|s| !s.is_empty()) {
+        Some(raw.to_owned())
+    } else {
+        let path = agent.join("settings.json");
+        let settings = match std::fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err("Pi settings unavailable".into()),
+            Ok(_) => {
+                let bytes =
+                    crate::services::usage_source::with_stable_regular_file(&path, |file| {
+                        use std::io::Read;
+                        let max = 1024 * 1024;
+                        let invalid =
+                            || crate::error::AppError::Config("Pi settings unavailable".into());
+                        if file.metadata().map_err(|_| invalid())?.len() > max {
+                            return Err(invalid());
+                        }
+                        let mut bytes = Vec::new();
+                        file.take(max + 1)
+                            .read_to_end(&mut bytes)
+                            .map_err(|_| invalid())?;
+                        if bytes.len() as u64 > max {
+                            return Err(invalid());
+                        }
+                        Ok(bytes)
+                    })
+                    .map_err(|_| "Pi settings unavailable")?;
+                let text = std::str::from_utf8(&bytes).map_err(|_| "Pi settings unavailable")?;
+                let value =
+                    json5::from_str::<Value>(text).map_err(|_| "Pi settings unavailable")?;
+                if !value.is_object() {
+                    return Err("Pi settings unavailable".into());
+                }
+                Some(value)
+            }
+        };
+        match settings.as_ref().and_then(|s| s.get("sessionDir")) {
+            None | Some(Value::Null) => None,
+            Some(Value::String(raw)) => (!raw.is_empty()).then(|| raw.clone()),
+            _ => return Err("Pi session directory unavailable".into()),
+        }
+    };
+    if let Some(raw) = configured {
+        let path =
+            if raw == "~" || raw.starts_with("~/") || (cfg!(windows) && raw.starts_with("~\\")) {
+                crate::config::get_home_dir()
+                    .join(raw.trim_start_matches('~').trim_start_matches(['/', '\\']))
+            } else {
+                PathBuf::from(raw)
+            };
+        if !path.is_absolute() {
+            return Err("Pi session directory must be absolute".into());
+        }
+        if !roots.contains(&path) {
+            roots.push(path);
+        }
+    }
+    Ok(roots)
+}
+pub(crate) fn usage_files(roots: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    fn collect(
+        path: &Path,
+        depth: usize,
+        files: &mut std::collections::BTreeSet<PathBuf>,
+        directories: &mut usize,
+    ) -> Result<(), String> {
+        let meta = match std::fs::symlink_metadata(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err("Pi source directory unavailable".into()),
+            Ok(meta) => meta,
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err("Pi source directory unavailable".into());
+        }
+        *directories += 1;
+        if *directories > 20_000 {
+            return Err("Pi source directory budget exceeded".into());
+        }
+        for entry in std::fs::read_dir(path).map_err(|_| "Pi source enumeration failed")? {
+            let entry = entry.map_err(|_| "Pi source enumeration failed")?;
+            let kind = entry
+                .file_type()
+                .map_err(|_| "Pi source metadata unavailable")?;
+            if kind.is_symlink() {
+                return Err("Pi source symlink unsupported".into());
+            }
+            if kind.is_dir() && depth > 0 {
+                collect(&entry.path(), depth - 1, files, directories)?;
+            } else if kind.is_file() && entry.path().extension().is_some_and(|e| e == "jsonl") {
+                files.insert(entry.path());
+                if files.len() > 10_000 {
+                    return Err("Pi source file budget exceeded".into());
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut files = std::collections::BTreeSet::new();
+    let mut directories = 0;
+    for (i, root) in roots.iter().enumerate() {
+        collect(root, usize::from(i == 0), &mut files, &mut directories)?;
+    }
+    Ok(files.into_iter().collect())
+}
+
 fn roots_in(agent: &Path, override_dir: Option<&str>) -> Result<Vec<PathBuf>, String> {
     let mut roots = vec![agent.join("sessions")];
     let settings = std::fs::read_to_string(agent.join("settings.json"))

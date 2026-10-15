@@ -1,0 +1,248 @@
+{
+  "package": "@earendil-works/pi-coding-agent",
+  "version": "0.84.4",
+  "execution": "temporary npm package --ignore-scripts, pure SessionManager API; no CLI/AI/live profile",
+  "schemaVersion": 3,
+  "node": "v24.19.0",
+  "fixedClockMs": 1792053987262,
+  "ids": {
+    "user": "df083a4d",
+    "first": "ac5a1b72",
+    "abandoned": "6c6c7c79",
+    "childOwn": "3fb85da5"
+  },
+  "parent": [
+    {
+      "type": "session",
+      "version": 3,
+      "id": "base",
+      "timestamp": "2026-10-15T08:46:27.262Z",
+      "cwd": "<sandbox>/project"
+    },
+    {
+      "type": "message",
+      "id": "df083a4d",
+      "parentId": null,
+      "timestamp": "2026-10-15T08:46:27.262Z",
+      "message": {
+        "role": "user",
+        "content": "synthetic prompt",
+        "timestamp": 1792053987262
+      }
+    },
+    {
+      "type": "message",
+      "id": "ac5a1b72",
+      "parentId": "df083a4d",
+      "timestamp": "2026-10-15T08:46:27.262Z",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "synthetic response"
+          }
+        ],
+        "api": "openai-responses",
+        "provider": "fixture",
+        "model": "native-model",
+        "usage": {
+          "input": 40,
+          "output": 10,
+          "cacheRead": 100,
+          "cacheWrite": 20,
+          "totalTokens": 170,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 1792053987262
+      }
+    },
+    {
+      "type": "message",
+      "id": "6c6c7c79",
+      "parentId": "df083a4d",
+      "timestamp": "2026-10-15T08:46:27.262Z",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "synthetic response"
+          }
+        ],
+        "api": "openai-responses",
+        "provider": "fixture",
+        "model": "native-model",
+        "usage": {
+          "input": 7,
+          "output": 1,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "totalTokens": 8,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 1792053987262
+      }
+    }
+  ],
+  "child": [
+    {
+      "type": "session",
+      "version": 3,
+      "id": "01a13ebd-c7be-7196-90e0-ec4f298b9880",
+      "timestamp": "2026-10-15T08:46:27.262Z",
+      "cwd": "<sandbox>/project",
+      "parentSession": "<sandbox>/sessions/2026-10-15T08-46-27-262Z_base.jsonl"
+    },
+    {
+      "type": "message",
+      "id": "df083a4d",
+      "parentId": null,
+      "timestamp": "2026-10-15T08:46:27.262Z",
+      "message": {
+        "role": "user",
+        "content": "synthetic prompt",
+        "timestamp": 1792053987262
+      }
+    },
+    {
+      "type": "message",
+      "id": "ac5a1b72",
+      "parentId": "df083a4d",
+      "timestamp": "2026-10-15T08:46:27.262Z",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "synthetic response"
+          }
+        ],
+        "api": "openai-responses",
+        "provider": "fixture",
+        "model": "native-model",
+        "usage": {
+          "input": 40,
+          "output": 10,
+          "cacheRead": 100,
+          "cacheWrite": 20,
+          "totalTokens": 170,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 1792053987262
+      }
+    },
+    {
+      "type": "message",
+      "id": "3fb85da5",
+      "parentId": "ac5a1b72",
+      "timestamp": "2026-10-15T08:46:27.262Z",
+      "message": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "synthetic response"
+          }
+        ],
+        "api": "openai-responses",
+        "provider": "fixture",
+        "model": "native-model",
+        "usage": {
+          "input": 20,
+          "output": 2,
+          "cacheRead": 10,
+          "cacheWrite": 0,
+          "totalTokens": 32,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0,
+            "total": 0
+          }
+        },
+        "stopReason": "stop",
+        "timestamp": 1792053987262
+      }
+    },
+    {
+      "type": "compaction",
+      "id": "34f77e26",
+      "parentId": "3fb85da5",
+      "timestamp": "2026-10-15T08:46:27.262Z",
+      "summary": "synthetic summary",
+      "firstKeptEntryId": "ac5a1b72",
+      "tokensBefore": 170,
+      "usage": {
+        "input": 3,
+        "output": 1,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 4,
+        "cost": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0
+        }
+      },
+      "fromHook": false
+    },
+    {
+      "type": "branch_summary",
+      "id": "6b122d9a",
+      "parentId": "ac5a1b72",
+      "timestamp": "2026-10-15T08:46:27.262Z",
+      "fromId": "34f77e26",
+      "summary": "synthetic branch summary",
+      "usage": {
+        "input": 4,
+        "output": 1,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 5,
+        "cost": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0,
+          "total": 0
+        }
+      },
+      "fromHook": false
+    }
+  ],
+  "validJsonAtEof": {
+    "entries": 4,
+    "accepted": true,
+    "readerRepairedLf": true
+  },
+  "primarySources": [
+    "https://github.com/earendil-works/pi/blob/v0.84.4/packages/coding-agent/src/core/session-manager.ts",
+    "https://github.com/earendil-works/pi/blob/v0.84.4/packages/ai/src/types.ts"
+  ],
+  "installedCliVerified": false
+}

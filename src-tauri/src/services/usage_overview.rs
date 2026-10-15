@@ -973,7 +973,7 @@ mod tests {
         assert!(close(t.cost_usd, 1.81), "{}", t.cost_usd);
         assert!(close(t.cache_hit_rate, 8003.0 / (1431.0 + 8003.0 + 304.0)));
         assert_eq!(o.last_synced_at, Some(42));
-        assert_eq!(o.unsupported_tools, ["chatgpt", "hermes", "pi", "openclaw"]);
+        assert_eq!(o.unsupported_tools, ["chatgpt", "hermes", "openclaw"]);
     }
 
     #[test]
