@@ -131,5 +131,11 @@
 - OpenClaw 已以 `0ea5f326` 合入（来源 `7ce52a38`）：2026.10.3 原生数据库事务和 transcript append API 在沙箱写入 schema 24、v4 TEXT／zstd；56 项最终专项、119 项 Hermes 快照、43 项协调器、258 项 reader 及 10 项健康兄弟测试通过，独立复审无剩余确定 P1／P2。源主库按 agent／SID 优先于旧 JSONL，保留严格身份与失败保旧。没有运行 gateway 或真实 AI 请求，不认证原生金额，也不开放 C／project，Windows 仍待验。
 - 换时区会改变日历投影却复用 snapshotVersion 的问题取得概览／请求 2 项真实 RED 后修复，2 项集成测试通过；旧请求快照的趋势和回执仍冻结。合流用量整组 189 项通过、1 项旧能力名单断言失败，已对齐 OpenClaw 新能力，待最终整组复跑，不将其记录成全绿。
 - 逐来源观测补齐：6 项后端真实 RED（其中一项先修正 NOT NULL fixture 后重新取得失败）及 3 项前端真实 RED 后，新增 Ledger lastScan 与当前 retainedDetailRange。计数服从 attempt CAS／epoch，pending／失败未知，保留未知扩展；范围只取同事务精确 tool+source 的 live 明细，不拿汇总日期证明完整覆盖。独立复审无确定 P1／P2；集成用量整组 200 项通过，前端 124 文件／889 项及 typecheck／format／renderer 构建通过。新增普通 null 形状问题另以 198 通过／2 失败复现并修正，未知扩展保留控制继续通过。
-- 最终 all-targets Clippy 补出了测试专用兼容 wrapper、一个 canonical 字符串比较和测试函数类型别名的 lint；按实际调用收窄 test cfg 并保持身份语义，独立复审通过。最后代码变更后已重新通过最终前端 typecheck／format／124 文件 889 项单测，以及 Rust fmt／all-targets Clippy（-D warnings）／全量测试：2831 library + 96 integration 通过、10 项既有 ignored。接下来继续真实数据／原生界面、安装和最终 SHA 的 Windows 包；Windows 未原生运行。
+- 最终 all-targets Clippy 补出了测试专用兼容 wrapper、一个 canonical 字符串比较和测试函数类型别名的 lint；按实际调用收窄 test cfg 并保持身份语义，独立复审通过。最后代码变更后已重新通过最终前端 typecheck／format／124 文件 889 项单测，以及 Rust fmt／all-targets Clippy（-D warnings）／全量测试：2927 项通过（2831 library + 2 binary 单测 + 94 integration）、10 项既有 ignored。接下来继续真实数据／原生界面、安装和最终 SHA 的 Windows 包；Windows 未原生运行。
 - Rust 大构建仍串行复用一个 target；最近检查约 46 GiB 可用，不需要清理源码或未完成工作区。以上只记录阶段证据，全部任务尚未完成；Windows 明确保留待原生验收。
+
+## macOS 构建与安装阶段
+
+- `f37a4072` 完成最后代码收口；前端 889 项、Rust 2927 项通过，10 ignored；最终 fmt／all-targets Clippy／typecheck／format 均通过。原先记录的 96 是非 library 合计，其中 binary 单测 2、integration 94，此处明确更正分类。
+- macOS 26.5.1 arm64 release 构建成功。生成的 bundle 已补齐本地 ad-hoc 签名并通过 `codesign --verify --deep --strict`；版本保持 1.3.6。旧应用保留在废纸篓，新应用已替换安装，Applications 仅一个版本。
+- 新签名首次启动触发系统钥匙串授权；界面工具禁止操作 SecurityAgent，已请求用户在系统弹窗完成。原生窗口、真实数据／CSV 对账及最终截图等待该授权，不能记为本机终验完成。Windows 仍待原生验收；源码验证包由交付清单绑定完整提交 SHA，不包括本机账户或数据库。
