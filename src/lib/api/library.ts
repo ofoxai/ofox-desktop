@@ -21,6 +21,10 @@ export interface ResourceTarget {
   readable?: boolean | null;
   readableResourceId?: string | null;
   lastAppliedResourceId?: string | null;
+  lastAppliedRevision?: number | null;
+  userContentLines?: number | null;
+  managedContentLines?: number | null;
+  nativeState?: string | null;
   disabledReason?: string | null;
 }
 export interface McpField {
@@ -47,6 +51,12 @@ export interface SkillDefinition {
   artifactHash?: string;
   sourceState: string;
   sourceUrl?: string;
+  sourceKind?: "repository" | "localOrArchive" | "unknown";
+  repository?: string;
+  trackingRef?: string;
+  commitSha?: string | null;
+  installedAtMs?: number;
+  updatedAtMs?: number;
   targets: ResourceTarget[];
 }
 export interface LibraryOperation {
@@ -77,6 +87,7 @@ export interface LibraryData {
   servers?: McpDefinition[];
   skills?: SkillDefinition[];
   targets?: ResourceTarget[];
+  detachedTargets?: { path: string; resourceId: string; tools: string[] }[];
   operations: LibraryOperation[];
 }
 export interface FieldEdit {
@@ -323,10 +334,19 @@ export const libraryApi = {
     invoke<LibraryOperation>("recover_library_operation", { operationId }),
   cancel: (operationId: string) =>
     invoke<LibraryOperation>("cancel_library_operation", { operationId }),
-  skillDetail: (resourceId: string, relativePath?: string) =>
+  skillDetail: (
+    resourceId: string,
+    relativePath?: string,
+    expectedRevision?: number,
+    expectedEpoch?: number,
+    expectedHash?: string,
+  ) =>
     invoke<SkillDetail>("get_library_skill_detail", {
       resourceId,
       relativePath,
+      expectedRevision,
+      expectedEpoch,
+      expectedHash,
     }),
   importSkillDirectory: (source: string, directory: string, name: string) =>
     invoke("import_library_skill_directory", { source, directory, name }),

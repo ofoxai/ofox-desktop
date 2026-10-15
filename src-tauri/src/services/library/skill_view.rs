@@ -102,23 +102,15 @@ pub fn definition_view(db: &Database, row: &InstalledSkill) -> Result<Value, App
     } else {
         "unverified"
     };
-    let source_url = row
-        .readme_url
-        .as_ref()
-        .and_then(|raw| url::Url::parse(raw).ok())
-        .filter(|url| {
-            url.scheme() == "https"
-                && url.host_str() == Some("github.com")
-                && url.username().is_empty()
-                && url.password().is_none()
-                && url.query().is_none()
-                && url.fragment().is_none()
-        })
-        .map(|url| url.to_string());
-    Ok(
-        json!({"id":row.id,"name":row.name,"description":row.description,"directory":row.directory,"revision":meta.map(|meta|meta.revision),"artifactHash":row.content_hash,
-        "sourceState":source_state,"sourceUrl":source_url,"installedAtMs":row.installed_at.checked_mul(1000).ok_or_else(||error("stateUnreadable"))?,"updatedAtMs":row.updated_at.checked_mul(1000).ok_or_else(||error("stateUnreadable"))?,"targets":targets}),
-    )
+    let mut view = json!({"id":row.id,"name":row.name,"description":row.description,"directory":row.directory,"revision":meta.map(|meta|meta.revision),"artifactHash":row.content_hash,
+        "sourceState":source_state,"installedAtMs":row.installed_at.checked_mul(1000).ok_or_else(||error("stateUnreadable"))?,"updatedAtMs":row.updated_at.checked_mul(1000).ok_or_else(||error("stateUnreadable"))?,"targets":targets});
+    view.as_object_mut().unwrap().extend(
+        super::skill_actions::provenance_view(row)
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    Ok(view)
 }
 
 pub fn detail(db: &Database, id: &str, relative: Option<&str>) -> Result<Value, AppError> {
@@ -149,6 +141,37 @@ pub fn detail(db: &Database, id: &str, relative: Option<&str>) -> Result<Value, 
     Ok(
         json!({"resourceId":id,"artifactHash":hash,"path":requested,"content":content,"files":entries.iter().map(|entry|json!({"path":entry.path,"isDirectory":entry.bytes.is_none(),"sizeBytes":entry.bytes.as_ref().map(|bytes|bytes.len()),"executable":entry.executable})).collect::<Vec<_>>()}),
     )
+}
+
+pub fn detail_revisioned(
+    db: &Database,
+    id: &str,
+    relative: Option<&str>,
+    revision: Option<u64>,
+    epoch: Option<u64>,
+    hash: Option<&str>,
+) -> Result<Value, AppError> {
+    let _io = crate::config_io::lock();
+    let snapshot = db.library_snapshot()?;
+    if epoch.is_some_and(|epoch| epoch != snapshot.machine.epoch) {
+        return Err(error("epochChanged"));
+    }
+    if revision.is_some_and(|revision| {
+        snapshot
+            .definitions
+            .skills
+            .get(id)
+            .is_none_or(|meta| meta.revision != revision)
+    }) {
+        return Err(error("revisionChanged"));
+    }
+    let row = db
+        .get_installed_skill(id)?
+        .ok_or_else(|| error("resourceMissing"))?;
+    if hash.is_some_and(|hash| row.content_hash.as_deref() != Some(hash)) {
+        return Err(error("revisionChanged"));
+    }
+    detail(db, id, relative)
 }
 
 #[cfg(test)]
@@ -193,6 +216,84 @@ mod tests {
             .iter()
             .find(|target| target["toolId"] == tool)
             .unwrap()
+    }
+    #[test]
+    #[serial_test::serial]
+    fn details_reject_a_previous_revision_or_restored_epoch_and_show_validated_source() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let original = source("Original");
+        let mut row = row();
+        row.repo_owner = Some("fixture-owner".into());
+        row.repo_name = Some("fixture-repo".into());
+        row.repo_branch = Some("feature/skills".into());
+        let sha = "b".repeat(40);
+        row.readme_url = Some(format!(
+            "https://github.com/fixture-owner/fixture-repo/blob/{sha}/nested/SKILL.md"
+        ));
+        let saved = skill_resource::save_draft(&db, row, original.path(), None).unwrap();
+        let view = definition_view(&db, &saved).unwrap();
+        assert_eq!(view["sourceKind"], "repository");
+        assert_eq!(view["trackingRef"], "feature/skills");
+        assert_eq!(view["commitSha"], sha);
+        let epoch = db.library_snapshot().unwrap().machine.epoch;
+        assert!(detail_revisioned(&db, &saved.id, None, None, None, None).is_ok());
+        assert!(detail_revisioned(
+            &db,
+            &saved.id,
+            None,
+            Some(1),
+            Some(epoch),
+            Some("incorrect-hash")
+        )
+        .is_err());
+        assert!(detail_revisioned(
+            &db,
+            &saved.id,
+            None,
+            Some(1),
+            Some(epoch),
+            saved.content_hash.as_deref()
+        )
+        .is_ok());
+        assert!(detail_revisioned(
+            &db,
+            &saved.id,
+            None,
+            Some(1),
+            Some(epoch + 1),
+            saved.content_hash.as_deref()
+        )
+        .is_err());
+        let updated = source("New body");
+        skill_resource::save_draft(&db, saved.clone(), updated.path(), Some(1)).unwrap();
+        assert!(detail_revisioned(
+            &db,
+            &saved.id,
+            None,
+            Some(1),
+            Some(epoch),
+            saved.content_hash.as_deref()
+        )
+        .is_err());
+        let mut unsafe_row = saved;
+        unsafe_row.readme_url = Some("https://github.com:8443/fixture-owner/fixture-repo/blob/main/SKILL.md?token=private-sentinel".into());
+        let unsafe_view = definition_view(&db, &unsafe_row).unwrap();
+        assert_eq!(unsafe_view["sourceKind"], "unknown");
+        assert!(unsafe_view["sourceUrl"].is_null());
+        assert!(!unsafe_view.to_string().contains("private-sentinel"));
+        unsafe_row.readme_url = Some(
+            "https://github.com/fixture-owner/fixture-repo/blob/feature/skills/nested/SKILL.md"
+                .into(),
+        );
+        let tracked = super::super::skill_actions::provenance_view(&unsafe_row);
+        assert_eq!(tracked["sourceKind"], "repository");
+        assert_eq!(tracked["trackingRef"], "feature/skills");
+        assert!(tracked["commitSha"].is_null());
+        unsafe_row.repo_owner = None;
+        let incomplete = super::super::skill_actions::provenance_view(&unsafe_row);
+        assert_eq!(incomplete["sourceKind"], "unknown");
+        assert!(incomplete["sourceUrl"].is_null());
     }
     #[test]
     #[serial_test::serial]

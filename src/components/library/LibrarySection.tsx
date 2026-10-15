@@ -30,6 +30,7 @@ import {
 import { SkillUpdate } from "./SkillUpdate";
 import { McpDuplicate } from "./McpDuplicate";
 import { ResourceReview } from "./ResourceReview";
+import { InstructionOverview } from "./InstructionOverview";
 import { libraryError } from "./libraryText";
 import { DraftStore } from "./useDraftState";
 
@@ -396,6 +397,18 @@ export function LibrarySection({
           ))}
         </ListCard>
       )}
+      {kind === "instructions" && data && (
+        <InstructionOverview
+          data={data}
+          busy={busy || !writable}
+          onManage={(set, event) =>
+            open(
+              { type: "targets", resource: set, targets: targets(set) },
+              event,
+            )
+          }
+        />
+      )}
       <ListFold
         open={history}
         onOpenChange={setHistory}
@@ -555,6 +568,7 @@ export function LibrarySection({
               <SkillDetails
                 store={draftStore}
                 skill={view.resource as SkillDefinition}
+                epoch={view.epoch}
               />
             )}
             {view?.type === "targets" && (

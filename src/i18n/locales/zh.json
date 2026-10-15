@@ -3569,6 +3569,28 @@
     "skillTargetModified": "工具副本已修改，请另存候选或先处理冲突。",
     "skillDownloadFailed": "无法读取仓库，请检查网络、访问权限或稍后重试。",
     "skillArtifactHashOccupied": "相同内容哈希的旧存储已被修改，无法安全另存此候选。请先备份用户修改并手动修复旧源；OFox 不会替换仍可能被工具读取的目录。",
-    "skillSourceMissing": "仓库中的原技能源路径已不存在，请核对来源。"
+    "skillSourceMissing": "仓库中的原技能源路径已不存在，请核对来源。",
+    "instructionOverview": "工具指令总览",
+    "definitionMissing": "定义缺失（{{id}}）",
+    "noInstructionSet": "未分配",
+    "contentLines": "{{count}} 行",
+    "instructionCounts": "自有内容 {{own}} · 受管内容 {{managed}}",
+    "instructionSelection": "期望：{{desired}} · 实际可读：{{readable}}",
+    "lastManagedRevision": "最后受管版本 {{revision}}",
+    "manageToolInstructions": "管理 {{tool}} 的指令分配",
+    "detachedInstruction": "{{tools}} 的旧目标仍需核对：{{name}} · {{path}}。当前目标位置已改变，旧内容未被自动撤回。",
+    "skillSource": "来源",
+    "sourceKind": {
+      "repository": "GitHub 仓库",
+      "localOrArchive": "本机或归档导入",
+      "unknown": "来源未知"
+    },
+    "trackingRef": "跟踪 ref",
+    "fixedCommit": "记录的固定提交",
+    "artifactHash": "内容 SHA-256",
+    "importedAt": "导入时间",
+    "sourceUpdatedAt": "源草稿更新时间",
+    "notRecorded": "未记录",
+    "openSkillSource": "打开来源页面"
   }
 }

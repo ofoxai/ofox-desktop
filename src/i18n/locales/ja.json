@@ -3569,6 +3569,28 @@
     "skillTargetModified": "ツール側のコピーが変更されています。候補を別名で保存するか競合を解消してください。",
     "skillDownloadFailed": "リポジトリを読み込めません。ネットワークや権限を確認するか、後で再試行してください。",
     "skillArtifactHashOccupied": "同じ内容ハッシュの既存データが変更されているため、この候補を安全にコピーできません。ユーザーの変更をバックアップし、元データを手動で修復してください。ツールが参照中の可能性があるディレクトリは置換しません。",
-    "skillSourceMissing": "リポジトリに元のスキルのパスがありません。配布元を確認してください。"
+    "skillSourceMissing": "リポジトリに元のスキルのパスがありません。配布元を確認してください。",
+    "instructionOverview": "ツール指示の概要",
+    "definitionMissing": "定義がありません（{{id}}）",
+    "noInstructionSet": "未割り当て",
+    "contentLines": "{{count}} 行",
+    "instructionCounts": "固有の内容 {{own}} · 管理対象 {{managed}}",
+    "instructionSelection": "希望：{{desired}} · 読み取り可能：{{readable}}",
+    "lastManagedRevision": "最後の管理リビジョン {{revision}}",
+    "manageToolInstructions": "{{tool}} の指示の割り当てを管理",
+    "detachedInstruction": "{{tools}} の旧配置先を確認してください：{{name}} · {{path}}。現在の場所が変更されており、以前の内容は自動的に取り消されていません。",
+    "skillSource": "ソース",
+    "sourceKind": {
+      "repository": "GitHub リポジトリ",
+      "localOrArchive": "ローカルまたはアーカイブからインポート",
+      "unknown": "ソース不明"
+    },
+    "trackingRef": "追跡する ref",
+    "fixedCommit": "記録された固定コミット",
+    "artifactHash": "内容 SHA-256",
+    "importedAt": "インポート日時",
+    "sourceUpdatedAt": "ソース草稿の更新日時",
+    "notRecorded": "記録なし",
+    "openSkillSource": "ソースページを開く"
   }
 }

@@ -184,6 +184,31 @@ fn tracking(row: &InstalledSkill) -> Result<Option<(SkillRepo, PathBuf)>, AppErr
         directory,
     )))
 }
+/// Source display uses the same strict interpretation as update checks. Invalid
+/// metadata is unknown, never an unverified URL sent to the renderer.
+pub(super) fn provenance_view(row: &InstalledSkill) -> Value {
+    match tracking(row) {
+        Ok(Some((repo, _))) => {
+            let raw = row.readme_url.as_deref().unwrap_or_default();
+            let commit = url::Url::parse(raw).ok().and_then(|url| {
+                let path = decode(url.path()).ok()?;
+                let tail = path
+                    .strip_prefix(&format!("/{}/{}/blob/", repo.owner, repo.name))
+                    .or_else(|| {
+                        path.strip_prefix(&format!("/{}/{}/tree/", repo.owner, repo.name))
+                    })?;
+                let first = tail.split('/').next()?;
+                (first.len() == 40 && first.bytes().all(|b| b.is_ascii_hexdigit()))
+                    .then(|| first.to_ascii_lowercase())
+            });
+            json!({"sourceKind":"repository","sourceUrl":raw,"repository":format!("{}/{}",repo.owner,repo.name),"trackingRef":repo.branch,"commitSha":commit})
+        }
+        Ok(None) if row.readme_url.is_none() && row.repo_branch.is_none() => {
+            json!({"sourceKind":"localOrArchive","sourceUrl":null})
+        }
+        _ => json!({"sourceKind":"unknown","sourceUrl":null}),
+    }
+}
 fn can_copy(hash: &str) -> Result<bool, AppError> {
     let tree = artifacts::path(hash)?;
     let container = tree.parent().ok_or_else(|| error("skillArtifactMissing"))?;

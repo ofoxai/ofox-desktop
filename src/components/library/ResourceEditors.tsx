@@ -15,6 +15,7 @@ import {
   type SkillDefinition,
 } from "@/lib/api/library";
 import { promptsApi } from "@/lib/api/prompts";
+import { settingsApi } from "@/lib/api/settings";
 import {
   skillsApi,
   type DiscoverableSkill,
@@ -419,17 +420,68 @@ export function McpEditor({
 export function SkillDetails({
   store,
   skill,
+  epoch,
 }: {
   store: DraftStore;
   skill: SkillDefinition;
+  epoch: number;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [path, setPath] = useDraftState(store, "skillPath", "SKILL.md");
+  const [sourceError, setSourceError] = useDraftState(
+    store,
+    "skillSourceError",
+    "",
+  );
   const query = useQuery({
-    queryKey: ["library", "skillDetail", skill.id, skill.revision, path],
-    queryFn: () => libraryApi.skillDetail(skill.id, path),
+    queryKey: [
+      "library",
+      "skillDetail",
+      skill.id,
+      skill.revision,
+      epoch,
+      skill.artifactHash,
+      path,
+    ],
+    queryFn: async () => {
+      const detail = await libraryApi.skillDetail(
+        skill.id,
+        path,
+        skill.revision,
+        epoch,
+        skill.artifactHash,
+      );
+      if (skill.artifactHash && detail.artifactHash !== skill.artifactHash)
+        throw new Error("library.revisionChanged");
+      return detail;
+    },
     retry: false,
   });
+  const timestamp = (ms?: number) => {
+    if (!ms || !Number.isSafeInteger(ms) || ms < 0 || ms > 8640000000000000)
+      return t("library.notRecorded");
+    return new Date(ms).toLocaleString(i18n.resolvedLanguage ?? i18n.language);
+  };
+  let sourceUrl: string | undefined;
+  try {
+    const raw = skill.sourceUrl;
+    const url = raw ? new URL(raw) : undefined;
+    if (
+      url &&
+      raw &&
+      !/[\u0000-\u001f\u007f]/.test(raw) &&
+      url.protocol === "https:" &&
+      url.hostname === "github.com" &&
+      !url.port &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash
+    )
+      sourceUrl = url.href;
+  } catch {
+    /* An older backend may provide an invalid source; keep it unavailable. */
+  }
   const [files, setFiles] = useDraftState<
     NonNullable<typeof query.data>["files"]
   >(store, "verifiedSkillFiles", []);
@@ -438,9 +490,47 @@ export function SkillDetails({
   }, [query.data, setFiles]);
   return (
     <div className="space-y-3 text-ctl">
-      <p className="break-all text-note text-ink-muted">
-        {skill.artifactHash ?? "—"}
-      </p>
+      <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 text-note">
+        <dt className="text-ink-muted">{t("library.skillSource")}</dt>
+        <dd className="break-words">
+          {t(`library.sourceKind.${skill.sourceKind ?? "unknown"}`, {
+            defaultValue: t("library.unknown"),
+          })}
+          {skill.sourceKind === "repository" && skill.repository
+            ? ` · ${skill.repository}`
+            : ""}
+        </dd>
+        <dt className="text-ink-muted">{t("library.trackingRef")}</dt>
+        <dd className="break-all">{skill.trackingRef ?? "—"}</dd>
+        <dt className="text-ink-muted">{t("library.fixedCommit")}</dt>
+        <dd className="break-all">
+          {skill.commitSha ?? t("library.notRecorded")}
+        </dd>
+        <dt className="text-ink-muted">{t("library.artifactHash")}</dt>
+        <dd className="break-all">{skill.artifactHash ?? "—"}</dd>
+        <dt className="text-ink-muted">{t("library.importedAt")}</dt>
+        <dd>{timestamp(skill.installedAtMs)}</dd>
+        <dt className="text-ink-muted">{t("library.sourceUpdatedAt")}</dt>
+        <dd>{timestamp(skill.updatedAtMs)}</dd>
+      </dl>
+      {sourceUrl && (
+        <Button
+          variant="secondary"
+          onClick={() => {
+            setSourceError("");
+            void settingsApi
+              .openExternal(sourceUrl!)
+              .catch((error) => setSourceError(libraryError(error, t)));
+          }}
+        >
+          {t("library.openSkillSource")}
+        </Button>
+      )}
+      {sourceError && (
+        <p role="alert" className="text-danger">
+          {sourceError}
+        </p>
+      )}
       <p className="text-note text-ink-muted">
         {t(`library.sourceState.${skill.sourceState}`, {
           defaultValue: t("library.unknown"),

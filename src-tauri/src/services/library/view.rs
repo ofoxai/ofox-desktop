@@ -1,27 +1,48 @@
 use super::Operation;
 
-pub fn instruction_block_health(path: &std::path::Path, receipt: &super::Receipt) -> &'static str {
-    match super::coordinator::read(path) {
-        Ok(None) => "missing",
-        Err(_) => "unreadable",
-        Ok(Some(text)) => {
-            if super::patch_instructions(&text, Some(&receipt.owned_segment), None).is_ok() {
-                "intact"
-            } else {
-                "conflict"
-            }
+pub fn instruction_content_view(
+    path: &std::path::Path,
+    receipt: Option<&super::Receipt>,
+) -> serde_json::Value {
+    use serde_json::json;
+    let unknown =
+        |state| json!({"nativeState":state,"userContentLines":null,"managedContentLines":null});
+    let text = match super::coordinator::read(path) {
+        Ok(Some(text)) => text,
+        Ok(None) => {
+            return json!({"nativeState":"missing","userContentLines":0,"managedContentLines":0})
         }
+        Err(_) => return unknown("unreadable"),
+    };
+    let lines = |text: &str| {
+        text.strip_prefix('\u{feff}')
+            .unwrap_or(text)
+            .lines()
+            .count()
+    };
+    if let Some(receipt) = receipt {
+        match super::patch_instructions(&text, Some(&receipt.owned_segment), None) {
+            Ok(withdrawn) => {
+                let block = receipt.owned_segment.trim_start_matches(['\r', '\n']);
+                let managed = block.lines().count().saturating_sub(2);
+                json!({"nativeState":"intact","userContentLines":lines(&withdrawn.text),"managedContentLines":managed})
+            }
+            Err(_) => unknown("conflict"),
+        }
+    } else if text.contains("<!-- OFOX:") {
+        unknown("conflict")
+    } else {
+        json!({"nativeState":"unmanaged","userContentLines":lines(&text),"managedContentLines":0})
     }
 }
 
-pub fn instruction_status(
-    path: &std::path::Path,
+pub fn instruction_status<'a>(
+    native_state: &'a str,
     receipt: &super::Receipt,
     definition: &super::InstructionSet,
-) -> &'static str {
-    let health = instruction_block_health(path, receipt);
-    if health != "intact" {
-        return health;
+) -> &'a str {
+    if native_state != "intact" {
+        return native_state;
     }
     if receipt.resource_revision == definition.revision
         && receipt.definition_hash
@@ -67,6 +88,69 @@ pub fn operation_view(operation: &Operation) -> serde_json::Value {
 mod tests {
     use super::super::{coordinator::preview_at, save_instruction, InstructionSet};
     use super::*;
+    fn status_for(
+        path: &std::path::Path,
+        receipt: &super::super::Receipt,
+        definition: &InstructionSet,
+    ) -> String {
+        let content = instruction_content_view(path, Some(receipt));
+        instruction_status(
+            content["nativeState"].as_str().unwrap(),
+            receipt,
+            definition,
+        )
+        .to_owned()
+    }
+
+    #[test]
+    fn instruction_counts_preserve_private_text_and_report_unknown_instead_of_empty() {
+        let (_dir, path, receipt, _) = applied_fixture();
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str("private-sentinel outside\nlast line");
+        std::fs::write(&path, &text).unwrap();
+        let view = instruction_content_view(&path, Some(&receipt));
+        assert_eq!(view["userContentLines"], 3);
+        assert_eq!(view["managedContentLines"], 1);
+        assert_eq!(view["nativeState"], "intact");
+        assert!(!view.to_string().contains("private-sentinel"));
+        std::fs::write(&path, text.replace("shared", "user modified")).unwrap();
+        let conflict = instruction_content_view(&path, Some(&receipt));
+        assert!(conflict["userContentLines"].is_null());
+        assert!(conflict["managedContentLines"].is_null());
+        assert_eq!(conflict["nativeState"], "conflict");
+    }
+
+    #[test]
+    fn instruction_counts_handle_bom_newlines_missing_foreign_and_unreadable_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        for (body, count) in [("\u{feff}", 0), ("\u{feff}one\r\ntwo", 2), ("a\n\n", 2)] {
+            std::fs::write(&path, body).unwrap();
+            let view = instruction_content_view(&path, None);
+            assert_eq!(view["userContentLines"], count);
+            assert_eq!(view["managedContentLines"], 0);
+            assert_eq!(view["nativeState"], "unmanaged");
+        }
+        for body in ["<!-- OFOX:BEGIN instructions -->", "<!-- OFOX:unknown -->"] {
+            std::fs::write(&path, body).unwrap();
+            let view = instruction_content_view(&path, None);
+            assert_eq!(view["nativeState"], "conflict");
+            assert!(view["userContentLines"].is_null());
+        }
+        std::fs::write(&path, [0xff]).unwrap();
+        assert_eq!(
+            instruction_content_view(&path, None)["nativeState"],
+            "unreadable"
+        );
+        std::fs::write(&path, vec![b'a'; 2 * 1024 * 1024 + 1]).unwrap();
+        assert!(instruction_content_view(&path, None)["userContentLines"].is_null());
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            instruction_content_view(&path, None)["nativeState"],
+            "missing"
+        );
+        assert_eq!(instruction_content_view(&path, None)["userContentLines"], 0);
+    }
 
     fn applied_fixture() -> (
         tempfile::TempDir,
@@ -98,7 +182,7 @@ mod tests {
     fn a_deleted_native_file_is_not_reported_applied() {
         let (_dir, path, receipt, set) = applied_fixture();
         std::fs::remove_file(&path).unwrap();
-        assert_eq!(instruction_status(&path, &receipt, &set), "missing");
+        assert_eq!(status_for(&path, &receipt, &set), "missing");
     }
 
     #[test]
@@ -108,7 +192,7 @@ mod tests {
             .unwrap()
             .replace("shared", "manual");
         std::fs::write(&path, text).unwrap();
-        assert_eq!(instruction_status(&path, &receipt, &set), "conflict");
+        assert_eq!(status_for(&path, &receipt, &set), "conflict");
     }
 
     #[test]
@@ -116,14 +200,14 @@ mod tests {
         let (_dir, path, receipt, set) = applied_fixture();
         let text = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, format!("{text}new personal\n")).unwrap();
-        assert_eq!(instruction_status(&path, &receipt, &set), "applied");
+        assert_eq!(status_for(&path, &receipt, &set), "applied");
     }
 
     #[test]
     fn a_restored_definition_with_the_same_revision_is_still_pending() {
         let (_dir, path, receipt, mut set) = applied_fixture();
         set.content = "different content from a backup".into();
-        assert_eq!(instruction_status(&path, &receipt, &set), "pending");
+        assert_eq!(status_for(&path, &receipt, &set), "pending");
         assert!(std::fs::read_to_string(&path).unwrap().contains("shared"));
     }
 

@@ -3569,6 +3569,28 @@
     "skillTargetModified": "A tool copy was modified. Save a new candidate copy or resolve the conflict.",
     "skillDownloadFailed": "Cannot read the repository. Check network and access permissions, or retry later.",
     "skillArtifactHashOccupied": "The existing object for this content hash was modified. This candidate cannot be copied safely. Back up user changes and repair the old source manually; OFox will not replace a directory that tools may still read.",
-    "skillSourceMissing": "The original skill path is missing from the repository. Verify the source."
+    "skillSourceMissing": "The original skill path is missing from the repository. Verify the source.",
+    "instructionOverview": "Tool instructions overview",
+    "definitionMissing": "Missing definition ({{id}})",
+    "noInstructionSet": "Unassigned",
+    "contentLines": "{{count}} lines",
+    "instructionCounts": "Own content {{own}} · Managed content {{managed}}",
+    "instructionSelection": "Desired: {{desired}} · Readable: {{readable}}",
+    "lastManagedRevision": "Last managed revision {{revision}}",
+    "manageToolInstructions": "Manage instructions for {{tool}}",
+    "detachedInstruction": "Previous target for {{tools}} needs review: {{name}} · {{path}}. The current location has changed; previous content was not withdrawn automatically.",
+    "skillSource": "Source",
+    "sourceKind": {
+      "repository": "GitHub repository",
+      "localOrArchive": "Local or archive import",
+      "unknown": "Unknown source"
+    },
+    "trackingRef": "Tracking ref",
+    "fixedCommit": "Recorded pinned commit",
+    "artifactHash": "Content SHA-256",
+    "importedAt": "Imported",
+    "sourceUpdatedAt": "Source draft updated",
+    "notRecorded": "Not recorded",
+    "openSkillSource": "Open source page"
   }
 }

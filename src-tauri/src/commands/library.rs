@@ -93,14 +93,30 @@ pub async fn get_library_instructions(state: State<'_, AppState>) -> Result<Valu
             ))
         })
         .collect::<Result<_, String>>()?;
+    let mut content_by_group = std::collections::BTreeMap::new();
+    for (tool, path) in &paths {
+        let group = &physical[tool];
+        content_by_group.entry(group.clone()).or_insert_with(|| {
+            library::instruction_content_view(
+                path,
+                snapshot
+                    .machine
+                    .receipts
+                    .get(&format!("instructions:{group}")),
+            )
+        });
+    }
     let targets: Vec<Value> = paths.iter().map(|(tool,path)| {
         let target = &physical[tool];
         let receipt = snapshot.machine.receipts.get(&format!("instructions:{target}"));
         let own = receipt.filter(|receipt|receipt.owners.contains(tool));
         let desired = snapshot.machine.assignments.get(&format!("instructions:{tool}"));
-        let native = receipt.map(|receipt|library::instruction_block_health(path,receipt));
-        let inspected = receipt.map(|receipt| snapshot.definitions.instructions.get(&receipt.resource_id).map(|definition|library::instruction_status(path,receipt,definition)).unwrap_or("needsReview"));
-        let status = if receipt.is_some() && inspected != Some("applied") { inspected.unwrap_or("needsReview") } else {
+        let content = &content_by_group[target];
+        let native = content["nativeState"].as_str().unwrap_or("unreadable");
+        let inspected = receipt.map(|receipt| {
+            snapshot.definitions.instructions.get(&receipt.resource_id).map(|definition| library::instruction_status(native, receipt, definition)).unwrap_or("needsReview")
+        });
+        let status = if receipt.is_none() && ["conflict","unreadable"].contains(&native) { native } else if receipt.is_some() && inspected != Some("applied") { inspected.unwrap_or("needsReview") } else {
             match (desired,own) {
                 (Some(id),Some(receipt)) if id == &receipt.resource_id => "applied",
                 (Some(_),_) => "pending",
@@ -116,7 +132,8 @@ pub async fn get_library_instructions(state: State<'_, AppState>) -> Result<Valu
             "readers":physical.iter().filter(|(_,id)|*id == target).map(|(tool,_)|tool).collect::<Vec<_>>(),
             "desiredResourceId":desired,"lastAppliedResourceId":own.map(|receipt|&receipt.resource_id),
             "appliedResourceId":own.filter(|_|inspected == Some("applied")).map(|receipt|&receipt.resource_id),
-            "readableResourceId":receipt.filter(|_|native == Some("intact")).map(|receipt|&receipt.resource_id),"nativeState":native,"status":status})
+            "readableResourceId":receipt.filter(|_|native == "intact").map(|receipt|&receipt.resource_id),"nativeState":native,"status":status,
+            "userContentLines":content["userContentLines"],"managedContentLines":content["managedContentLines"],"lastAppliedRevision":own.map(|receipt|receipt.resource_revision)})
     }).collect();
     let mut operations: Vec<_> = snapshot
         .machine
@@ -127,6 +144,7 @@ pub async fn get_library_instructions(state: State<'_, AppState>) -> Result<Valu
     operations.sort_by_key(|operation| std::cmp::Reverse(operation.created_at));
     Ok(
         json!({"epoch":snapshot.machine.epoch,"instructions":snapshot.definitions.instructions.values().collect::<Vec<_>>(),"targets":targets,
+        "detachedTargets":snapshot.machine.receipts.values().filter(|receipt| receipt.kind == library::ResourceKind::Instructions && !physical.values().any(|group|group == &receipt.physical_target)).map(|receipt| json!({"path":receipt.path,"resourceId":receipt.resource_id,"tools":receipt.owners})).collect::<Vec<_>>(),
         "operations":operations.into_iter().take(20).map(library::operation_view).collect::<Vec<_>>()}),
     )
 }
@@ -519,10 +537,20 @@ pub async fn get_library_skill_detail(
     state: State<'_, AppState>,
     resource_id: String,
     relative_path: Option<String>,
+    expected_revision: Option<u64>,
+    expected_epoch: Option<u64>,
+    expected_hash: Option<String>,
 ) -> Result<Value, String> {
     crate::agent_env::ready().await;
-    library::skill_view::detail(&state.db, &resource_id, relative_path.as_deref())
-        .map_err(|e| e.to_string())
+    library::skill_view::detail_revisioned(
+        &state.db,
+        &resource_id,
+        relative_path.as_deref(),
+        expected_revision,
+        expected_epoch,
+        expected_hash.as_deref(),
+    )
+    .map_err(|e| e.to_string())
 }
 #[tauri::command]
 pub async fn import_library_skill_directory(

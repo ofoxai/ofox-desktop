@@ -171,6 +171,140 @@ it("loads only visited subpages and keeps a dirty editor through refresh", async
     1,
   );
 });
+it("shows native instruction summaries even with no shared drafts without treating unknown as empty", async () => {
+  data = {
+    ...data,
+    instructions: [],
+    targets: [
+      {
+        ...target("codex"),
+        userContentLines: 12,
+        managedContentLines: 0,
+        nativeState: "unmanaged",
+      },
+      {
+        ...target("claude", false, false),
+        userContentLines: null,
+        managedContentLines: null,
+        nativeState: "unreadable",
+        status: "unreadable",
+      },
+    ],
+  } as LibraryData;
+  mount();
+  const overview = await screen.findByRole("region", { name: "工具指令总览" });
+  expect(within(overview).getByText("/fixture/codex")).toBeVisible();
+  expect(
+    within(overview).getByText("自有内容 12 行 · 受管内容 0 行"),
+  ).toBeVisible();
+  expect(
+    within(overview).getByText("自有内容 未知 · 受管内容 未知"),
+  ).toBeVisible();
+  expect(
+    within(overview).getByText("期望：未分配 · 实际可读：未知"),
+  ).toBeVisible();
+  expect(libraryApi.preview).not.toHaveBeenCalled();
+});
+it("does not infer readable instructions from missing older-backend health fields", async () => {
+  data = { ...data, instructions: [], targets: [target("codex")] };
+  mount();
+  const overview = await screen.findByRole("region", { name: "工具指令总览" });
+  expect(
+    within(overview).getByText("期望：未分配 · 实际可读：未知"),
+  ).toBeVisible();
+});
+it("distinguishes desired and readable instruction sets and keeps missing definitions visible", async () => {
+  data = {
+    ...data,
+    instructions: [
+      ...data.instructions!,
+      { id: "b", name: "Older", content: "Old", revision: 1 },
+    ],
+    targets: [
+      {
+        ...target("codex", true),
+        desiredResourceId: "a",
+        readableResourceId: "b",
+        lastAppliedRevision: 1,
+        status: "pending",
+      },
+      {
+        ...target("gemini"),
+        desiredResourceId: "deleted",
+        readableResourceId: "b",
+        status: "shared",
+        readers: ["codex", "gemini"],
+      },
+    ],
+  } as LibraryData;
+  mount();
+  const overview = await screen.findByRole("region", { name: "工具指令总览" });
+  expect(
+    within(overview).getByText("期望：Shared · 实际可读：Older"),
+  ).toBeVisible();
+  expect(
+    within(overview).getByText("期望：定义缺失（deleted） · 实际可读：Older"),
+  ).toBeVisible();
+  await userEvent.click(
+    within(overview).getByRole("button", { name: "管理 Codex 的指令分配" }),
+  );
+  expect(screen.getByRole("dialog")).toBeVisible();
+  expect(libraryApi.preview).not.toHaveBeenCalled();
+});
+it("shows skill provenance separately from its content hash and freezes detail identity", async () => {
+  const base = vi.mocked(libraryApi.list).getMockImplementation()!;
+  vi.mocked(libraryApi.list).mockImplementation(async (kind) =>
+    kind === "skills"
+      ? ({
+          epoch: 7,
+          skills: [
+            {
+              id: "skill",
+              name: "Skill demo",
+              directory: "sample",
+              revision: 2,
+              artifactHash: "artifact-hash",
+              sourceState: "ready",
+              sourceKind: "repository",
+              sourceUrl: "https://github.com/fixture/repo/blob/abcd/SKILL.md",
+              repository: "fixture/repo",
+              trackingRef: "feature/skills",
+              commitSha: "a".repeat(40),
+              installedAtMs: 0,
+              updatedAtMs: 1720000000000,
+              targets: [],
+            },
+          ],
+          operations: [],
+        } as LibraryData)
+      : base(kind),
+  );
+  vi.spyOn(libraryApi, "skillDetail").mockResolvedValue({
+    resourceId: "skill",
+    artifactHash: "artifact-hash",
+    path: "SKILL.md",
+    content: "Verified text",
+    files: [],
+  });
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("tab", { name: /Skills/ }));
+  await userEvent.click(
+    await screen.findByRole("button", { name: "详情 Skill demo" }),
+  );
+  const dialog = screen.getByRole("dialog");
+  expect(await within(dialog).findByText("Verified text")).toBeVisible();
+  expect(within(dialog).getByText("feature/skills")).toBeVisible();
+  expect(within(dialog).getByText("a".repeat(40))).toBeVisible();
+  expect(within(dialog).getByText("未记录")).toBeVisible();
+  expect(libraryApi.skillDetail).toHaveBeenCalledWith(
+    "skill",
+    "SKILL.md",
+    2,
+    7,
+    "artifact-hash",
+  );
+});
 it("previews the complete desired set and lets an unavailable prior target be withdrawn", async () => {
   mount();
   await screen.findByText("Shared");

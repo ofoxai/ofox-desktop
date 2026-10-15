@@ -20,7 +20,7 @@ pub use mcp_resource::{
 };
 pub(crate) use store::load as snapshot_from_connection;
 pub(crate) use store::restore_machine_state;
-pub use view::{instruction_block_health, instruction_status, operation_view};
+pub use view::{instruction_content_view, instruction_status, operation_view};
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
