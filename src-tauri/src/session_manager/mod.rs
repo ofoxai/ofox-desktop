@@ -103,6 +103,7 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
     sessions.extend(r6);
     sessions.extend(providers::pi::scan_sessions());
     sessions.extend(providers::dsh::scan_sessions());
+    sessions.extend(providers::workbuddy::scan_sessions());
 
     sessions.sort_by(|a, b| {
         let a_ts = a.last_active_at.or(a.created_at).unwrap_or(0);
@@ -141,6 +142,7 @@ fn load_provider_messages(
         "gemini" => gemini::load_messages(path),
         "hermes" => hermes::load_messages(path),
         "pi" => providers::pi::load_messages(path),
+        "workbuddy" => providers::workbuddy::load_messages(path),
         _ => Err(format!("Unsupported provider: {provider_id}")),
     }
 }

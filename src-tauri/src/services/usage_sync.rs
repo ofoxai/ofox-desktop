@@ -11,7 +11,7 @@ use crate::error::AppError;
 use crate::services::session_usage::SessionSyncResult;
 use crate::services::{
     pricing_sync, session_usage, session_usage_codex, session_usage_gemini, session_usage_opencode,
-    usage_maintenance,
+    session_usage_workbuddy, usage_maintenance,
 };
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -129,11 +129,12 @@ type SourceSync = fn(&Database) -> Result<SessionSyncResult, AppError>;
 /// Every source in turn (one failing does not stop the others), then the
 /// pending maintenance; failures are collected in `errors`.
 fn sync_sources(db: &Database) -> SessionSyncResult {
-    let sources: [(&str, SourceSync); 4] = [
+    let sources: [(&str, SourceSync); 5] = [
         ("Claude", session_usage::sync_claude_session_logs),
         ("Codex", session_usage_codex::sync_codex_usage),
         ("Gemini", session_usage_gemini::sync_gemini_usage),
         ("OpenCode", session_usage_opencode::sync_opencode_usage),
+        ("WorkBuddy", session_usage_workbuddy::sync_workbuddy_usage),
     ];
     let mut total = SessionSyncResult {
         imported: 0,
@@ -228,6 +229,125 @@ mod tests {
                 "time": {"created": 1791800000000_i64, "completed": 1791800001000_i64}})
             .to_string(),
         );
+    }
+
+    fn workbuddy_partial_fixture(
+        home: &Path,
+        missing_model: bool,
+        incomplete: bool,
+    ) -> std::path::PathBuf {
+        let path = home.join(".workbuddy/projects/native/s.jsonl");
+        let mut row = serde_json::json!({"type":"message","role":"assistant","sessionId":"native-wb","timestamp":1791800000123_i64,"providerData":{"messageId":"m","model":"native","usage":{"requests":1,"inputTokens":3,"outputTokens":2}}});
+        if missing_model {
+            row["providerData"].as_object_mut().unwrap().remove("model");
+        }
+        let mut body = row.to_string() + "\n";
+        if incomplete {
+            body.push_str("{\"providerData\":{\"messageId\":\"unfinished\"");
+        }
+        write(&path, &body);
+        path
+    }
+
+    #[test]
+    #[serial]
+    fn workbuddy_partial_model_does_not_block_other_sources_pending_maintenance() {
+        let home = sandbox();
+        write_one_call_per_source(home.home());
+        let path = workbuddy_partial_fixture(home.home(), true, false);
+        let db = Database::memory().unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO maintenance_flags VALUES('recompute_claude_costs','pending')",
+                [],
+            )
+            .unwrap();
+        let result = sync_sources(&db);
+        let conn = db.conn.lock().unwrap();
+        let flag: String = conn
+            .query_row(
+                "SELECT value FROM maintenance_flags WHERE key='recompute_claude_costs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            flag, "done",
+            "WorkBuddy coverage partial must not defer unrelated maintenance: {result:?}"
+        );
+        assert!(
+            result.errors.is_empty(),
+            "partial is not a transport failure: {result:?}"
+        );
+        let parts = crate::session_manager::source_cache::read_on(
+            &conn,
+            path.to_str().unwrap(),
+            "workbuddy",
+        )
+        .unwrap();
+        let evidence = parts
+            .value(crate::session_manager::source_cache::Part::UsageSync)
+            .unwrap();
+        assert_eq!(evidence["coverage"], "partial");
+        assert!(evidence["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "missingModel"));
+    }
+
+    #[test]
+    #[serial]
+    fn workbuddy_partial_tail_does_not_block_maintenance_or_acknowledge_an_unfinished_event() {
+        let home = sandbox();
+        write_one_call_per_source(home.home());
+        let path = workbuddy_partial_fixture(home.home(), false, true);
+        let db = Database::memory().unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO maintenance_flags VALUES('recompute_claude_costs','pending')",
+                [],
+            )
+            .unwrap();
+        let result = sync_sources(&db);
+        let conn = db.conn.lock().unwrap();
+        let flag: String = conn
+            .query_row(
+                "SELECT value FROM maintenance_flags WHERE key='recompute_claude_costs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            flag, "done",
+            "A valid native prefix is partial coverage, not failed maintenance: {result:?}"
+        );
+        assert!(result.errors.is_empty());
+        let (records,offset):(i64,i64)=conn.query_row("SELECT (SELECT COUNT(*) FROM proxy_request_logs WHERE app_type='workbuddy'),(SELECT last_line_offset FROM session_log_sync WHERE file_path=?1)",[path.to_str().unwrap()],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+        assert_eq!((records, offset), (1, 1));
+        let parts = crate::session_manager::source_cache::read_on(
+            &conn,
+            path.to_str().unwrap(),
+            "workbuddy",
+        )
+        .unwrap();
+        let evidence = parts
+            .value(crate::session_manager::source_cache::Part::UsageSync)
+            .unwrap();
+        assert_eq!(evidence["completeEventIdentitySet"], false);
+        assert_eq!(
+            evidence["acknowledgedEventIds"].as_array().unwrap().len(),
+            1
+        );
+        assert!(evidence["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "incompleteEnumeration"));
     }
 
     #[tokio::test]

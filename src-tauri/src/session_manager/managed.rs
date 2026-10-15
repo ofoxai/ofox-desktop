@@ -71,6 +71,8 @@ pub fn roots(provider: &str) -> Result<Vec<PathBuf>, String> {
         "openclaw" => vec![crate::openclaw_config::get_openclaw_dir().join("agents")],
         "pi" => providers::pi::session_roots()?,
         "dsh" => vec![providers::dsh::home_dir()?],
+        "workbuddy" => vec![providers::workbuddy::session_root()
+            .map_err(|_| "session.workbuddy.invalidConfigDirectory".to_owned())?],
         _ => return Err("Unknown session provider".into()),
     })
 }

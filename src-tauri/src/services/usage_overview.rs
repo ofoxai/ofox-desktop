@@ -415,11 +415,18 @@ mod tests {
     }
 
     #[test]
-    fn analytics_capabilities_include_workbuddy_without_a_usage_reader() {
+    fn analytics_capabilities_register_workbuddy_usage_without_claiming_session_analytics() {
         let db = Database::memory().unwrap();
         let result =
             build_overview(&db, UsagePeriod::All, 1_760_000_000_000, &chrono::Utc, None).unwrap();
-        assert!(result.unsupported_tools.iter().any(|id| id == "workbuddy"));
+        assert!(!result.unsupported_tools.iter().any(|id| id == "workbuddy"));
+        let capability = crate::services::usage_query::source_capabilities()
+            .into_iter()
+            .find(|c| c.tool_id == "workbuddy")
+            .unwrap();
+        assert!(capability.usage_supported);
+        assert_eq!(capability.source_ids, ["workbuddy_session"]);
+        assert!(!capability.session_analytics_supported);
     }
     use chrono::{FixedOffset, Local, NaiveDateTime, Offset, Timelike, Weekday};
     use rusqlite::params;
@@ -968,7 +975,7 @@ mod tests {
         assert_eq!(o.last_synced_at, Some(42));
         assert_eq!(
             o.unsupported_tools,
-            ["chatgpt", "workbuddy", "hermes", "pi", "dsh", "openclaw"]
+            ["chatgpt", "hermes", "pi", "dsh", "openclaw"]
         );
     }
 

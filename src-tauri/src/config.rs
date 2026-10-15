@@ -10,7 +10,8 @@ use crate::error::AppError;
 /// 测试沙箱（`test_sandbox::sandbox()`，单元测试与集成测试共用）会清空这些变量：开发者 shell 里残留的任何一个都会让测试读写真实 agent
 /// 的目录。只列出本应用确实会读取的变量：`CODEX_HOME`、`CLAUDE_CONFIG_DIR` 由
 /// `agent_env` 读取（进程环境，以及登录 shell / 注册表里的快照），`HERMES_HOME`、
-/// `PI_CODING_AGENT_DIR`、`DSH_HOME`、`GEMINI_CLI_HOME` 由配置模块直接读取。
+/// `PI_CODING_AGENT_DIR`、`DSH_HOME`、`GEMINI_CLI_HOME` 由配置模块直接读取；
+/// `WORKBUDDY_CONFIG_DIR` 由原生会话 reader 直接读取。
 /// OpenCode 的额外全局配置和 Skills 开关也必须隔离；新增读取变量时在这里补上。
 pub const AGENT_DIR_VARS: &[&str] = &[
     "CODEX_HOME",
@@ -19,6 +20,7 @@ pub const AGENT_DIR_VARS: &[&str] = &[
     "PI_CODING_AGENT_DIR",
     "DSH_HOME",
     "GEMINI_CLI_HOME",
+    "WORKBUDDY_CONFIG_DIR",
     "OPENCODE_CONFIG_DIR",
     "OPENCODE_CONFIG",
     "OPENCODE_CONFIG_CONTENT",

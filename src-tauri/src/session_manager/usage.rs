@@ -44,6 +44,7 @@ pub fn app_type(provider: &str) -> Option<&'static str> {
         "codex" => "codex",
         "gemini" => "gemini",
         "opencode" => "opencode",
+        "workbuddy" => "workbuddy",
         _ => return None,
     })
 }
@@ -61,7 +62,7 @@ const SESSION_USAGE_SQL: &str = "
                SUM(cache_read_tokens) AS cache_read, SUM(cache_creation_tokens) AS cache_write,
                SUM(CAST(total_cost_usd AS REAL)) AS cost
         FROM proxy_request_logs
-        WHERE app_type IN ('claude', 'codex', 'gemini', 'opencode')
+        WHERE app_type IN ('claude', 'codex', 'gemini', 'opencode', 'workbuddy')
           AND session_id IS NOT NULL AND session_id != ''
         GROUP BY app_type, session_id, model
         UNION ALL
@@ -195,6 +196,38 @@ mod tests {
                 rusqlite::params![app, session, model, tokens[0], tokens[1], tokens[2], tokens[3], requests, cost],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn workbuddy_session_usage_provider_maps_to_its_own_native_app() {
+        assert_eq!(app_type("workbuddy"), Some("workbuddy"));
+    }
+
+    #[test]
+    fn workbuddy_session_usage_keeps_saved_zero_unknown_and_unions_live_with_archive() {
+        let db = Database::memory().unwrap();
+        db.conn.lock().unwrap().execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,latency_ms,status_code,session_id,created_at,data_source) VALUES('workbuddy_session:[\"s\",\"m\"]','_workbuddy_session','workbuddy','native',100,20,30,40,0,0,'s',1,'workbuddy_session')",[]).unwrap();
+        archived(&db, "workbuddy", "s", "native", [1, 2, 3, 4], 1, "0");
+        let all = load(&db).unwrap();
+        let session = all
+            .get(&("workbuddy".into(), "s".into()))
+            .expect("native WorkBuddy session usage must be visible");
+        assert_eq!(
+            (
+                session.input_tokens,
+                session.output_tokens,
+                session.cache_read_tokens,
+                session.cache_write_tokens
+            ),
+            (101, 22, 33, 44)
+        );
+        assert_eq!(session.total_tokens, 123);
+        assert_eq!(session.models[0].requests, 2);
+        assert_eq!(
+            session.models[0].cost_usd, None,
+            "saved 0 with tokens is not a verified native bill or known-free current estimate"
+        );
+        assert_eq!(session.unpriced_models, 1);
     }
 
     #[test]

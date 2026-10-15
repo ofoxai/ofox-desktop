@@ -196,7 +196,7 @@ pub(crate) fn timestamp_ms(timestamp: Option<&str>) -> Option<i64> {
 }
 fn normalized_source(provider: &str, path: &Path) -> Result<Snapshot, AppError> {
     match provider {
-        "claude" | "codex" | "gemini" => Snapshot::file(path),
+        "claude" | "codex" | "gemini" | "workbuddy" => Snapshot::file(path),
         "opencode" if path.is_file() => Snapshot::sqlite(path),
         "opencode" => Snapshot::storage(path),
         _ => Err(error("unsupported normalized provider")),
@@ -210,11 +210,18 @@ pub fn normalized_stamp(provider: &str, path: &Path) -> Result<Value, AppError> 
 }
 pub fn read_normalized(provider: &str, path: &Path) -> Result<NormalizedSnapshot, AppError> {
     let snapshot = normalized_source(provider, path)?;
+    let mut reasons = BTreeSet::new();
     let (mut facts, enumerated) = match provider {
         "claude" => super::session_usage::normalized_facts(path)?,
         "codex" => super::session_usage_codex::normalized_facts(path)?,
         "gemini" => super::session_usage_gemini::normalized_facts(path)?,
         "opencode" => super::session_usage_opencode::normalized_facts(path)?,
+        "workbuddy" => {
+            let read = super::session_usage_workbuddy::read_workbuddy(path)?;
+            let complete = !read.reasons.contains("incompleteEnumeration");
+            reasons.extend(read.reasons);
+            (read.facts, complete)
+        }
         _ => return Err(error("unsupported normalized provider")),
     };
     snapshot.verify()?;
@@ -223,7 +230,6 @@ pub fn read_normalized(provider: &str, path: &Path) -> Result<NormalizedSnapshot
             .cmp(&b.at_ms)
             .then_with(|| a.request_id.cmp(&b.request_id))
     });
-    let mut reasons = BTreeSet::new();
     if !enumerated {
         reasons.insert("incompleteEnumeration".into());
     }
@@ -466,6 +472,14 @@ pub(crate) struct ProviderIndex {
 }
 fn owned_identity(provider: &str, request: &str, session: Option<&str>) -> Option<String> {
     let session = session.unwrap_or("");
+    if provider == "workbuddy" {
+        let [sid, id]: [String; 2] =
+            serde_json::from_str(request.strip_prefix("workbuddy_session:")?).ok()?;
+        if sid.trim().is_empty() || id.trim().is_empty() || sid != session {
+            return None;
+        }
+        return Some(native_key(provider, &sid, &id));
+    }
     let id = match provider {
         "claude" => request.strip_prefix("session:")?,
         "gemini" => request.strip_prefix(&format!("gemini_session:{session}:"))?,
@@ -499,6 +513,7 @@ fn owner(provider: &str) -> Result<&'static str, AppError> {
         "gemini" => Ok("_gemini_session"),
         "opencode" => Ok("_opencode_session"),
         "codex" => Ok("_codex_session"),
+        "workbuddy" => Ok("_workbuddy_session"),
         _ => Err(error("unknown provider")),
     }
 }
@@ -508,6 +523,7 @@ fn origin(provider: &str) -> Result<&'static str, AppError> {
         "gemini" => Ok("gemini_session"),
         "opencode" => Ok("opencode_session"),
         "codex" => Ok("codex_session"),
+        "workbuddy" => Ok("workbuddy_session"),
         _ => Err(error("unknown provider")),
     }
 }
@@ -938,6 +954,7 @@ impl Prepared {
             "claude" => "_session",
             "gemini" => "_gemini_session",
             "opencode" => "_opencode_session",
+            "workbuddy" => "_workbuddy_session",
             _ => return Err(error("unsupported native evidence source")),
         };
         if let Some((source, app, provider)) = row {

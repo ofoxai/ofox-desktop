@@ -26,6 +26,7 @@ pub mod session_usage_gemini;
 pub mod session_usage_opencode;
 #[cfg(test)]
 mod session_usage_semantics_tests;
+pub mod session_usage_workbuddy;
 pub mod skill;
 // Test-only fake clock. The production loops in `lib.rs::run` currently
 // use `tokio::time::sleep` directly; this trait is kept ready so future

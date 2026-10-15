@@ -96,7 +96,7 @@ pub fn source_capabilities() -> Vec<SourceCapability> {
         ("gemini", Some("gemini_session")),
         ("opencode", Some("opencode_session")),
         ("chatgpt", None),
-        ("workbuddy", None),
+        ("workbuddy", Some("workbuddy_session")),
         ("hermes", None),
         ("pi", None),
         ("dsh", None),
