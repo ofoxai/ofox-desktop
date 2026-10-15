@@ -114,6 +114,7 @@ pub(crate) enum Part {
     Metadata,
     UsageSync,
     Analytics,
+    Lifetime,
 }
 impl Part {
     fn key(self) -> &'static str {
@@ -121,6 +122,7 @@ impl Part {
             Self::Metadata => "metadata",
             Self::UsageSync => "usageSync",
             Self::Analytics => "analytics",
+            Self::Lifetime => "lifetimeUsage",
         }
     }
 }
@@ -210,7 +212,12 @@ pub(crate) fn decode_row(row: CacheRow, provider: &str) -> Result<CacheParts, Ap
             .get("parts")
             .and_then(Value::as_object)
             .ok_or_else(|| invalid("invalid parts"))?;
-        for part in [Part::Metadata, Part::UsageSync, Part::Analytics] {
+        for part in [
+            Part::Metadata,
+            Part::UsageSync,
+            Part::Analytics,
+            Part::Lifetime,
+        ] {
             if let Some(v) = parts.get(part.key()) {
                 if v.get("revision")
                     .and_then(Value::as_str)
@@ -407,6 +414,9 @@ fn validate_owned(current: &CacheParts, part: Part) -> Result<(), AppError> {
         match part {
             Part::UsageSync if value["version"].as_u64() != Some(1) => {
                 return Err(invalid("unsupported usage version"))
+            }
+            Part::Lifetime if value["version"].as_u64() != Some(1) => {
+                return Err(invalid("unsupported lifetime version"))
             }
             Part::Metadata
                 if value["parserVersion"]

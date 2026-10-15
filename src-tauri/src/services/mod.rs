@@ -30,6 +30,7 @@ pub mod session_usage;
 mod session_usage_atomic_tests;
 pub mod session_usage_codex;
 pub mod session_usage_gemini;
+pub mod session_usage_hermes;
 pub mod session_usage_opencode;
 #[cfg(test)]
 mod session_usage_semantics_tests;
@@ -48,6 +49,7 @@ pub mod usage_analytics;
 pub mod usage_cache;
 pub mod usage_data;
 pub(crate) mod usage_health;
+pub mod usage_lifetime;
 pub mod usage_maintenance;
 pub mod usage_overview;
 pub mod usage_query;
