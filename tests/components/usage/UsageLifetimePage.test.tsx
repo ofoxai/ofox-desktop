@@ -117,6 +117,9 @@ it("mounts the enabled bound-Hermes entry and reads only after explicit open", a
   render(<Page bound />);
   const entry = await screen.findByRole("button", { name: "Hermes 累计用量" });
   expect(
+    await screen.findByText("以下工具尚无分时用量统计：Hermes"),
+  ).toBeVisible();
+  expect(
     mocks.invoke.mock.calls.some(
       ([name]) => name === "get_usage_source_summary",
     ),

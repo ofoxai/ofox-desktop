@@ -3076,7 +3076,7 @@
     "errorDetails": "エラー詳細",
     "unavailable": "ローカル使用量を取得できません",
     "empty": "この期間の使用量はありません",
-    "unsupported": "未対応のツール: {{tools}}",
+    "unsupported": "期間別の使用量に未対応のツール: {{tools}}",
     "disclaimer": "費用は OFox 料金による概算です。実際の請求額を確認してください。",
     "periods": {
       "today": "今日",

@@ -213,8 +213,8 @@ describe("UsagePage", () => {
     expect(screen.getAllByText("1.2K").length).toBeGreaterThan(0);
     expect(screen.getAllByText("≈$0.020").length).toBeGreaterThan(0);
     expect(screen.getByText("—")).toBeVisible();
-    expect(screen.getByText(/以下工具暂不统计/)).toHaveTextContent("Pi");
-    expect(screen.getByText(/以下工具暂不统计/)).not.toHaveTextContent(
+    expect(screen.getByText(/以下工具尚无分时用量统计/)).toHaveTextContent("Pi");
+    expect(screen.getByText(/以下工具尚无分时用量统计/)).not.toHaveTextContent(
       "Hermes",
     );
     expect(mocks.invoke).toHaveBeenCalledWith("ofox_refresh_user_info");

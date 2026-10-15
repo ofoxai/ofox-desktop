@@ -3076,7 +3076,7 @@
     "errorDetails": "Error details",
     "unavailable": "Local usage is unavailable",
     "empty": "No usage in this period",
-    "unsupported": "Usage is not yet available for: {{tools}}",
+    "unsupported": "Time-based usage is not yet available for: {{tools}}",
     "disclaimer": "Costs are estimates using OFox prices. Your bill is authoritative.",
     "periods": {
       "today": "Today",

@@ -530,6 +530,12 @@ export function UsagePage({
             {t("usageWorkbench.reset")}
           </Button>
         )}
+        <UsageLifetimeEntry
+          boundTools={boundTools}
+          capabilities={capabilities.data}
+          apex={apex}
+          active={visible}
+        />
       </div>
       {!sharedProjectSupported &&
         effectiveTab === "sessions" &&
@@ -543,12 +549,6 @@ export function UsagePage({
           {t("usageSessions.projectsCleared")}
         </p>
       )}
-      <UsageLifetimeEntry
-        boundTools={boundTools}
-        capabilities={capabilities.data}
-        apex={apex}
-        active={visible}
-      />
       <p className="text-note text-ink-muted">
         {t("usageWorkbench.rangeSummary", {
           start:

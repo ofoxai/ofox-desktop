@@ -3076,7 +3076,7 @@
     "errorDetails": "错误详情",
     "unavailable": "本地用量暂不可用",
     "empty": "该时间范围内暂无用量",
-    "unsupported": "以下工具暂不统计：{{tools}}",
+    "unsupported": "以下工具尚无分时用量统计：{{tools}}",
     "disclaimer": "费用为按 OFox 价格的估算，以账单为准",
     "periods": {
       "today": "今天",
