@@ -63,7 +63,7 @@
 - 原生验收发现静态“连接未检查”与 shared 伪读取者两项 P2，分别取得前端／Rust RED 后修正；独立复审通过，并用重建的 Tauri 窗口复验。前端 typecheck、format、106 文件／735 项全量单测；Rust fmt、all-targets Clippy（-D warnings）、2251 library 单测及 95 integration 全部再次通过，9 项既有 ignored。屏幕共享标识遮住了交通灯，因此阶段截图不作为交通灯位置的新验收证据；真实第三方 MCP／技能执行与 Windows 仍未验。
 - 下一步继续：I2、U-A 至 U-D，最后重跑完整本机门禁、安装和同 SHA Windows 验证包。
 
-## I2 首个切片（代码已提交，界面生命周期待验）
+## I2 首个切片（代码与 macOS 沙箱基础生命周期已验）
 
 - 首个自动生命周期目标为 Copilot CLI 的 macOS arm64 npm 副本。采用 OFox 专用 prefix，与已安装的外部副本、模型绑定、Key 和用户 npm 配置分开；不修改 shell PATH，界面说明实际管理位置并提供绝对启动命令。已有外部副本和其他平台保留手动途径，不把目录候选视作自动支持。
 - 必须使用已有 Node ≥22／npm，冻结并重核运行时、包与 bin 身份。受控 cwd/env 和独立 npmrc 明确固定官方 scoped registry；不补装 Node、不修改用户镜像／npmrc、不继承 npm token。执行先订阅，owner job 持有写锁至进程树回收及重新探测；不复用带解绑／退 Key 的卸载流程。
@@ -82,3 +82,10 @@
 - 19 个工具 ID 均使用本地产品 Logo；补齐缺失项，区分 Codex／ChatGPT、GitHub Copilot／Microsoft Copilot 和 DevEco Code／CLI。共享 ToolBadge 保留未知 ID 后备显示，深色 OpenCode 保留灰阶，未安装 ChatGPT 不强制白化。素材来源与许可见 [品牌素材](brand-assets.md)。
 - 先取得目录短标签与缺失 Logo 的失败回归（11 项失败），以及浏览器文档高度、读屏状态越界的失败证据；修复后 109 文件／773 项前端单测、typecheck、format:check 通过。两路独立审查关闭已知 P2，无剩余确定 P1/P2；这只是此轮前端阶段门禁。
 - macOS 原生调试沙箱在 900px、浅／深色检查目录顶部和底部；Goose 末行完整、页头固定，Tab 顺序及管理弹窗 Enter／Escape／关闭后焦点恢复通过。截图留在本机交付目录，未写入真实工具配置、未安装或卸载本机工具。自动生命周期的实际执行和最终全项目门禁仍待后续；Windows 待原生验收。
+
+## I2 原生界面补验
+
+- macOS 原生调试沙箱经管理弹窗准备并执行安装，核验 Node 22.12.0／Copilot 1.0.98；预览更新后取消，迟到计划未执行。随后预览并卸载同一临时受管副本，界面返回“尚无 OFox 管理副本”及成功回执，目录返回候选区。未运行 AI、代登录或改动本机外部副本。
+- 临时 HOME 下的配置／授权／会话／共享 Skills 四个 sentinel 在卸载后逐项 hash 不变；npm 包目录已移除。真实版本升级由前述 1.0.97→1.0.98 核心原生测试覆盖，此次界面更新仅验证预览取消，不重复宣称真实升级验收。
+- 界面发现上次 cleanup 状态遗留到下次 preview，先以 update／uninstall 两项 RED 复现，再将每次预览明确重置为 verify。取消再次触发状态变化并禁用按钮。独立复审通过；前端 typecheck、format、109 文件／775 项单测通过。
+- 管理副本的检查与预览逐次重读 Node／npm／prefix 内容；debug 下耗时明显，快速重开和 StrictMode 还可能重复检查。该成本保留为已知限制，未通过删减写前校验掩盖；release 性能、最终应用安装与 Windows 仍未验收。

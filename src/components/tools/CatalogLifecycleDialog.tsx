@@ -110,6 +110,7 @@ export function CatalogLifecycleDialog({
     running.current = true;
     cancelled.current = false;
     setBusy(true);
+    setStage("verify");
     setError("");
     setResult(null);
     setPlan(null);

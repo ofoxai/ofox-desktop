@@ -321,3 +321,45 @@ it("ignores an old cancellation failure after switching to another tool", async 
   await act(async () => oldFailure(new Error("old cancel failure")));
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
+
+it.each([
+  ["update", "预览更新此副本"],
+  ["uninstall", "预览卸载此副本"],
+] as const)(
+  "starts a fresh %s preview at verification after cancellation",
+  async (action, label) => {
+    vi.mocked(catalogLifecycleApi.inspect).mockResolvedValue({
+      ...missing,
+      state: "managed",
+      version: "1.0.98",
+      actions: ["update", "uninstall"],
+    });
+    let finish!: (
+      prepared: Awaited<ReturnType<typeof catalogLifecycleApi.prepare>>,
+    ) => void;
+    vi.mocked(catalogLifecycleApi.prepare).mockReturnValueOnce(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    render(
+      <CatalogLifecycleDialog
+        entry={entry}
+        onBusyChange={vi.fn()}
+        onChanged={vi.fn()}
+      />,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: label }));
+    await userEvent.click(screen.getByRole("button", { name: "取消操作" }));
+    expect(screen.getByRole("status")).toHaveTextContent("正在回收进程");
+    await act(async () => finish({ ...plan, action }));
+    vi.mocked(catalogLifecycleApi.prepare).mockReturnValueOnce(
+      new Promise(() => undefined),
+    );
+    await userEvent.click(await screen.findByRole("button", { name: label }));
+    expect(screen.getByRole("status")).toHaveTextContent("核对来源");
+    await userEvent.click(screen.getByRole("button", { name: "取消操作" }));
+    expect(screen.getByRole("button", { name: "取消操作" })).toBeDisabled();
+    expect(catalogLifecycleApi.run).not.toHaveBeenCalled();
+  },
+);
