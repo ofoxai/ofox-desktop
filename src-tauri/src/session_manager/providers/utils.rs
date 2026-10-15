@@ -83,11 +83,19 @@ pub fn for_each_line(path: &Path, mut visit: impl FnMut(&str)) -> io::Result<()>
 pub fn parse_timestamp_to_ms(value: &Value) -> Option<i64> {
     // Integer: milliseconds (>1e12) or seconds
     if let Some(n) = value.as_i64() {
-        return Some(if n > 1_000_000_000_000 { n } else { n * 1000 });
+        return if n > 1_000_000_000_000 {
+            Some(n)
+        } else {
+            n.checked_mul(1000)
+        };
     }
     if let Some(n) = value.as_f64() {
         let n = n as i64;
-        return Some(if n > 1_000_000_000_000 { n } else { n * 1000 });
+        return if n > 1_000_000_000_000 {
+            Some(n)
+        } else {
+            n.checked_mul(1000)
+        };
     }
     // RFC3339 string
     let raw = value.as_str()?;
@@ -219,6 +227,16 @@ mod tests {
         assert_eq!(
             parse_timestamp_to_ms(&json!("1970-01-01T00:00:01Z")),
             Some(1_000)
+        );
+    }
+
+    #[test]
+    fn parse_timestamp_to_ms_rejects_overflowing_negative_seconds() {
+        assert_eq!(parse_timestamp_to_ms(&json!(i64::MIN)), None);
+        assert_eq!(parse_timestamp_to_ms(&json!(-1.0e100_f64)), None);
+        assert_eq!(
+            parse_timestamp_to_ms(&json!(i64::MIN / 1000)),
+            Some((i64::MIN / 1000) * 1000)
         );
     }
 }

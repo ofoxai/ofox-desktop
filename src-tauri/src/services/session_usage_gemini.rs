@@ -179,14 +179,14 @@ fn sync_single_gemini_file_with_index(
             let session_id_str = session_id.as_deref().unwrap_or("unknown");
             let request_id = format!("gemini_session:{session_id_str}:{}", call.message_id);
 
+            let Some(created_at) = created_at_of(call.timestamp.as_deref()) else {
+                source.evidence.complete_event_identity_set = false;
+                source.evidence.partial("missingTimestamp");
+                skipped += 1;
+                continue;
+            };
             let native = usage_source::native_key("gemini", session_id_str, &call.message_id);
-            if !source.should_store_on(
-                conn,
-                &request_id,
-                &native,
-                "gemini_session",
-                created_at_of(call.timestamp.as_deref()),
-            )? {
+            if !source.should_store_on(conn, &request_id, &native, "gemini_session", created_at)? {
                 skipped += 1;
                 continue;
             }
@@ -196,7 +196,7 @@ fn sync_single_gemini_file_with_index(
                 &call.tokens,
                 &call.model,
                 session_id.as_deref(),
-                call.timestamp.as_deref(),
+                created_at,
             )? {
                 imported += 1;
             } else {
@@ -295,20 +295,9 @@ fn parse_gemini_file(file_path: &Path) -> Result<(Option<String>, Vec<GeminiCall
     Ok((session_id, calls, raw_count))
 }
 
-/// When a reply happened: its timestamp, else now.
-fn created_at_of(timestamp: Option<&str>) -> i64 {
-    timestamp
-        .and_then(|ts| {
-            chrono::DateTime::parse_from_rfc3339(ts)
-                .ok()
-                .map(|dt| dt.timestamp())
-        })
-        .unwrap_or_else(|| {
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0)
-        })
+/// Preserve unknown native time rather than manufacturing a current date.
+fn created_at_of(timestamp: Option<&str>) -> Option<i64> {
+    usage_source::timestamp_ms(timestamp).map(|ms| ms.div_euclid(1000))
 }
 
 /// Fresh input as every source stores it: Gemini's input (promptTokenCount)
@@ -392,11 +381,8 @@ fn insert_gemini_session_entry(
     tokens: &GeminiTokens,
     model: &str,
     session_id: Option<&str>,
-    timestamp: Option<&str>,
+    created_at: i64,
 ) -> Result<bool, AppError> {
-    // 解析时间戳
-    let created_at = created_at_of(timestamp);
-
     // 计算费用
     let usage = usage_of(tokens, model);
 

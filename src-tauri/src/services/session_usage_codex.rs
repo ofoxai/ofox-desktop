@@ -322,8 +322,12 @@ fn sync_single_codex_file_with_index(
             if same_prefix && !reconcile && call.line <= last_offset {
                 continue;
             }
-            let at = usage_source::timestamp_ms(call.timestamp.as_deref());
-            let old_or_unknown = at.is_none_or(|ms| ms / 1000 < cutoff);
+            let Some(created_at) = created_at_of(call.timestamp.as_deref()) else {
+                source.evidence.partial("missingTimestamp");
+                skipped += 1;
+                continue;
+            };
+            let old_or_unknown = created_at < cutoff;
             if old_or_unknown && (reconcile || (expected.is_none() && last_offset == 0 && history))
             {
                 source.evidence.partial("unverifiedHistoricalBoundary");
@@ -336,7 +340,7 @@ fn sync_single_codex_file_with_index(
                 &call.delta,
                 &call.model,
                 call.session_id.as_deref(),
-                call.timestamp.as_deref(),
+                created_at,
             )? {
                 imported += 1;
             } else {
@@ -691,20 +695,9 @@ fn parse_codex_file(file_path: &Path) -> Result<(Vec<CodexCall>, i64, bool), App
     Ok((calls, progress.offset, progress.complete))
 }
 
-/// When a call happened: its event's timestamp, else now.
-fn created_at_of(timestamp: Option<&str>) -> i64 {
-    timestamp
-        .and_then(|ts| {
-            chrono::DateTime::parse_from_rfc3339(ts)
-                .ok()
-                .map(|dt| dt.timestamp())
-        })
-        .unwrap_or_else(|| {
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0)
-        })
+/// Preserve unknown native time rather than manufacturing a current date.
+fn created_at_of(timestamp: Option<&str>) -> Option<i64> {
+    usage_source::timestamp_ms(timestamp).map(|ms| ms.div_euclid(1000))
 }
 
 pub(crate) fn normalized_facts(
@@ -770,7 +763,7 @@ fn insert_codex_session_entry(
     delta: &DeltaTokens,
     model: &str,
     session_id: Option<&str>,
-    timestamp: Option<&str>,
+    created_at: i64,
 ) -> Result<bool, AppError> {
     let request_id = ids.request_id.as_str();
 
@@ -786,9 +779,6 @@ fn insert_codex_session_entry(
     if exists {
         return Ok(false);
     }
-
-    // 解析时间戳
-    let created_at = created_at_of(timestamp);
 
     // The same call stored by an earlier version under its old id (a file read
     // again from its new path in archived_sessions/): same number, same time.

@@ -278,20 +278,9 @@ fn parse_claude_file(
     ))
 }
 
-/// When a reply happened: its line's timestamp, else now.
-fn created_at_of(timestamp: Option<&str>) -> i64 {
-    timestamp
-        .and_then(|ts| {
-            chrono::DateTime::parse_from_rfc3339(ts)
-                .ok()
-                .map(|dt| dt.timestamp())
-        })
-        .unwrap_or_else(|| {
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0)
-        })
+/// Preserve unknown native time rather than manufacturing a current date.
+fn created_at_of(timestamp: Option<&str>) -> Option<i64> {
+    usage_source::timestamp_ms(timestamp).map(|ms| ms.div_euclid(1000))
 }
 
 pub(crate) fn normalized_facts(
@@ -408,22 +397,22 @@ fn sync_single_file_with_index(
             {
                 continue;
             }
+            let Some(created_at) = created_at_of(msg.timestamp.as_deref()) else {
+                source.evidence.complete_event_identity_set = false;
+                source.evidence.partial("missingTimestamp");
+                skipped += 1;
+                continue;
+            };
             let native = usage_source::native_key(
                 "claude",
                 msg.session_id.as_deref().unwrap_or(""),
                 &msg.message_id,
             );
-            if !source.should_store_on(
-                conn,
-                &request_id,
-                &native,
-                "session_log",
-                created_at_of(msg.timestamp.as_deref()),
-            )? {
+            if !source.should_store_on(conn, &request_id, &native, "session_log", created_at)? {
                 skipped += 1;
                 continue;
             }
-            if insert_session_log_entry(conn, &request_id, msg)? {
+            if insert_session_log_entry(conn, &request_id, msg, created_at)? {
                 imported += 1;
             } else {
                 skipped += 1;
@@ -446,10 +435,8 @@ fn insert_session_log_entry(
     conn: &rusqlite::Connection,
     request_id: &str,
     msg: &ParsedAssistantUsage,
+    created_at: i64,
 ) -> Result<bool, AppError> {
-    // 解析时间戳（ISO 8601）
-    let created_at = created_at_of(msg.timestamp.as_deref());
-
     // 计算费用
     let usage = TokenUsage {
         input_tokens: msg.input_tokens,

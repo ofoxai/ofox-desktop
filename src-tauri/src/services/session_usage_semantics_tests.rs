@@ -1615,3 +1615,122 @@ fn semantics_opencode_legacy_database_receipt_establishes_parent_dependency() {
 fn semantics_opencode_legacy_json_receipt_establishes_parent_dependency() {
     opencode_legacy_dependency_receipt(false);
 }
+
+fn missing_timestamp_is_not_today(provider: &str, invalid: bool) {
+    let home = sandbox();
+    let db = Database::memory().unwrap();
+    let mut call = match provider {
+        "claude" => c("undated", [10, 1, 0, 0]),
+        "codex" => t(1, 10, 1, 0),
+        "gemini" => json!({"id":"undated","type":"gemini","model":"fixture",
+            "tokens":{"input":10,"output":1}}),
+        _ => unreachable!(),
+    };
+    if invalid {
+        call["timestamp"] = json!("not-an-original-date");
+    } else {
+        call.as_object_mut().unwrap().remove("timestamp");
+    }
+    let (path, sync): (
+        PathBuf,
+        fn(&Database) -> Result<claude::SessionSyncResult, AppError>,
+    ) = match provider {
+        "claude" => (claude_path(home.home()), claude::sync_claude_session_logs),
+        "codex" => (codex_path(home.home()), codex::sync_codex_usage),
+        "gemini" => (
+            home.home().join(".gemini/tmp/p/chats/session-s.json"),
+            gemini::sync_gemini_usage,
+        ),
+        _ => unreachable!(),
+    };
+    let body = |call: &Value| match provider {
+        "codex" => codex_body(std::slice::from_ref(call)),
+        "gemini" => json!({"sessionId":"s","messages":[call]}).to_string(),
+        _ => jsonl(std::slice::from_ref(call)),
+    };
+    write(&path, &body(&call), 0);
+    good(sync(&db));
+    assert!(
+        facts(&db).is_empty(),
+        "undated native usage was given a fabricated current date"
+    );
+    let snapshot = super::usage_source::read_normalized(provider, &path).unwrap();
+    assert_eq!(snapshot.facts.len(), 1);
+    assert_eq!(snapshot.facts[0].at_ms, None);
+    assert!(snapshot.reasons.contains("missingTimestamp"));
+    {
+        let conn = db.conn.lock().unwrap();
+        let raw: String = conn
+            .query_row(
+                "SELECT meta_json FROM session_meta_cache WHERE provider_id=?1",
+                [provider],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        let evidence = &value["parts"]["usageSync"]["value"];
+        assert_eq!(evidence["coverage"], "partial");
+        assert!(evidence["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r == "missingTimestamp"));
+        assert!(evidence["acknowledgedEventIds"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+    let valid = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let expected = chrono::DateTime::parse_from_rfc3339(&valid)
+        .unwrap()
+        .timestamp();
+    call["timestamp"] = json!(valid);
+    write(&path, &body(&call), 1);
+    assert_eq!(
+        good(sync(&db)).imported,
+        1,
+        "later original timestamp must allow a normal import"
+    );
+    assert_eq!(facts(&db).len(), 1);
+    let stored: i64 = db
+        .conn
+        .lock()
+        .unwrap()
+        .query_row("SELECT created_at FROM proxy_request_logs", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(stored, expected);
+    assert_eq!(good(sync(&db)).imported, 0);
+}
+
+#[test]
+#[serial]
+fn semantics_missing_claude_timestamp_is_not_today() {
+    missing_timestamp_is_not_today("claude", false);
+}
+#[test]
+#[serial]
+fn semantics_invalid_claude_timestamp_is_not_today() {
+    missing_timestamp_is_not_today("claude", true);
+}
+#[test]
+#[serial]
+fn semantics_missing_codex_timestamp_is_not_today() {
+    missing_timestamp_is_not_today("codex", false);
+}
+#[test]
+#[serial]
+fn semantics_invalid_codex_timestamp_is_not_today() {
+    missing_timestamp_is_not_today("codex", true);
+}
+#[test]
+#[serial]
+fn semantics_missing_gemini_timestamp_is_not_today() {
+    missing_timestamp_is_not_today("gemini", false);
+}
+#[test]
+#[serial]
+fn semantics_invalid_gemini_timestamp_is_not_today() {
+    missing_timestamp_is_not_today("gemini", true);
+}
