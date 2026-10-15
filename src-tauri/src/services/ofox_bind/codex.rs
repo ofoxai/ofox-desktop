@@ -313,6 +313,7 @@ pub(crate) fn migrate_legacy_shape(
     stored_key: impl FnOnce() -> Option<String>,
     record: impl FnOnce(&str) -> Result<(), String>,
 ) -> Result<bool, String> {
+    let _io = crate::config_io::lock();
     let config_path = get_codex_config_path();
     let Some(config) = read_text(&config_path)? else {
         return Ok(false);
@@ -476,6 +477,7 @@ fn strip_flag(doc: &mut DocumentMut) -> bool {
 pub(crate) fn strip_flag_codex_ignores(
     record: impl FnOnce(&str) -> Result<(), String>,
 ) -> Result<bool, String> {
+    let _io = crate::config_io::lock();
     if super::codex_probe::flag_support() != super::codex_probe::FlagSupport::Unknown {
         return Ok(false);
     }

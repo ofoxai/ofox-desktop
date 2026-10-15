@@ -16,7 +16,6 @@ use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 
 /// 配置文件不存在时 OpenClaw 自己用的默认配置。
 pub(crate) const OPENCLAW_DEFAULT_SOURCE: &str =
@@ -55,11 +54,7 @@ fn default_openclaw_config_value() -> Value {
     })
 }
 
-/// 所有读改写 openclaw.json 的路径都要拿这把锁。
-pub(crate) fn openclaw_write_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+// 所有读改写 openclaw.json 的路径使用 config_io 共享屏障。
 
 // ============================================================================
 // Type Definitions
@@ -262,7 +257,7 @@ impl OpenClawConfigDocument {
 
 impl OpenClawConfigDocument {
     fn save(self) -> Result<OpenClawWriteOutcome, AppError> {
-        let _guard = openclaw_write_lock().lock()?;
+        let _guard = crate::config_io::lock();
 
         let current_source = if self.path.exists() {
             Some(fs::read_to_string(&self.path).map_err(|e| AppError::io(&self.path, e))?)

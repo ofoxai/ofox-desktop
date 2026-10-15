@@ -27,6 +27,18 @@ Binding records retain the pre-bind value and last written value. Unbind restore
 
 Usage aggregators currently cover Claude, Codex, Gemini and OpenCode. Main Tokens = new input + output; cache reads/writes stay separate. Historical archives and live rows are added without double counting. Prices are estimates from recorded catalog data; unknown price is not zero. New overview/trend timestamps are milliseconds. The [session providers](../src-tauri/src/session_manager/providers/mod.rs) and [usage service](../src-tauri/src/services/session_usage.rs) are authoritative.
 
+## Resource ownership and native readers
+
+Shared instructions, MCP definitions and immutable Skills drafts use versioned `library_*` settings without changing schema v11. Desired targets, verified receipts and prepared operations are separate. Saving/importing definitions does not apply them. Native projection requires a revisioned preview; apply and recovery recheck routing and file fingerprints under the same IO barrier used by model writes. Recovery only verifies completed writes. Restores keep this machine's proof, increase its epoch and do not resume old writes.
+
+Instructions preserve bytes outside the OFox markers. MCP patches owned leaves in each native JSON/JSONC, TOML or YAML format; same-name foreign entries and edited owned values block writes. Field references support keep/set/clear without returning private values. Skills use append-only hash artifacts with a portable execution manifest; links and verified copies are staged beside targets and old material is retained until the new result and receipt are verified. Legacy enabled flags do not prove ownership.
+
+Gemini respects an explicit app override, otherwise `GEMINI_CLI_HOME` plus `.gemini`; OpenCode uses its explicit app override or `XDG_CONFIG_HOME/opencode`. MCP auditing also includes OpenCode's three global files, `OPENCODE_CONFIG`, home `.opencode`, `OPENCODE_CONFIG_DIR` and inline content. Skills disclose shared and recursive readers, including Gemini/Codex `.agents`, OpenCode extra directories and Hermes configured paths. Dynamic routing keys and unresolved path references require a supported adapter and cannot be treated as literal paths. CLI/project overlays remain outside this global scope.
+
+New WebDAV snapshots contain only referenced immutable skill objects and the same captured DB snapshot. A distinct archive name/encoding makes old clients refuse before applying. Old flat archives restore available content into drafts, leaving legacy/native roots intact; they cannot recover hidden files or execution intent omitted by the old exporter. Full application SQL/WebDAV backups still include private legacy definitions and are not shareable resource packages.
+
+Source contracts were checked against [OpenCode v1.19.0](https://github.com/anomalyco/opencode/blob/v1.19.0/packages/opencode/src/config/config.ts) and [Hermes v0.22.0](https://github.com/NousResearch/hermes-agent/blob/v0.22.0/agent/skill_utils.py). Native execution, especially Windows, remains a separate acceptance gate.
+
 ## Installation, update and removal
 
 [Installer](../src-tauri/src/commands/install_tool.rs) advertises host capabilities. macOS automatic CLI installation supports Apple Silicon via the bundled script; Windows uses [windows_install](../src-tauri/src/commands/windows_install.rs). Linux/Intel Mac support is not implied. Package mappings: Claude `@anthropic-ai/claude-code`, Codex `@openai/codex`, Gemini `@google/gemini-cli`, OpenCode `opencode-ai`, OpenClaw `openclaw`, Pi `@earendil-works/pi-coding-agent`, dsh `@deepseek-ai/dsh`; Hermes uses its installer. ChatGPT uses a native DMG path on macOS and Microsoft Store/winget fallback on Windows. WorkBuddy has no automatic installer here.

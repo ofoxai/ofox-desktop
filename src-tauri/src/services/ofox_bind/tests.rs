@@ -3758,23 +3758,37 @@ async fn a_fresh_codex_install_is_accepted_by_the_real_codex() {
     let db = db_for(Tool::Codex, template);
     bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
 
-    let mut config = crate::app_config::MultiAppConfig::default();
+    let db = crate::Database::memory().unwrap();
     for (id, server) in [
         (
             "local",
-            json!({"type": "stdio", "command": "npx", "args": ["-y", "pkg"], "env": {"A": "b"}}),
+            json!({"type": "stdio", "command": "npx", "args": ["-y", "pkg"], "env": {"A": "${A}"}}),
         ),
         (
             "remote",
-            json!({"type": "http", "url": "https://example.com/mcp", "headers": {"K": "v"}}),
+            json!({"type": "http", "url": "https://example.com/mcp", "headers": {"K": "${K}"}}),
         ),
     ] {
-        config.mcp.codex.servers.insert(
-            id.into(),
-            json!({"id": id, "enabled": true, "server": server}),
+        let resource = crate::app_config::McpServer {
+            id: id.into(),
+            name: id.into(),
+            server,
+            apps: Default::default(),
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        };
+        crate::services::library::mcp_resource::save_draft(&db, resource, None).unwrap();
+        let op =
+            crate::services::library::mcp_resource::preview(&db, id, &["codex".into()]).unwrap();
+        assert_eq!(
+            crate::services::library::apply_operation(&db, &op.id)
+                .unwrap()
+                .status,
+            "applied"
         );
     }
-    crate::mcp::sync_enabled_to_codex(&config).unwrap();
 
     match codex_strict_config_check(&home.codex("")) {
         None => eprintln!("skipped: no codex with --strict-config on PATH"),

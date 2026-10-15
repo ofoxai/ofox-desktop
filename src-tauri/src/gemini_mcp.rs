@@ -76,6 +76,7 @@ pub fn read_mcp_servers_map() -> Result<std::collections::HashMap<String, Value>
 pub fn set_mcp_servers_map(
     servers: &std::collections::HashMap<String, Value>,
 ) -> Result<(), AppError> {
+    let _io = crate::config_io::lock();
     let path = user_config_path();
     let mut root = if path.exists() {
         read_json_value(&path)?

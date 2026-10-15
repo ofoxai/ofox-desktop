@@ -627,7 +627,9 @@ mod tests {
 
     /// 已存在的 keychain 条目应当被原样返回，不调端点。
     #[tokio::test]
+    #[serial]
     async fn cached_key_returns_without_endpoint_call() {
+        let _home = TempSettingsHome::new();
         let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
         store
             .save(
@@ -655,7 +657,9 @@ mod tests {
 
     /// 每工具独立 key 的核心保证：给 Claude 缓存的 key 不会被 Codex 读到。
     #[tokio::test]
+    #[serial]
     async fn cached_key_is_per_tool() {
+        let _home = TempSettingsHome::new();
         let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
         store
             .save(
@@ -853,7 +857,9 @@ mod tests {
 
     /// 本地撤销应当清 keychain；settings 端在没条目时也吃得下（幂等）。
     #[tokio::test]
+    #[serial]
     async fn revoke_local_clears_keychain_entry() {
+        let _home = TempSettingsHome::new();
         let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
         store
             .save(

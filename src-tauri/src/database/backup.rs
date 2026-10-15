@@ -88,6 +88,9 @@ impl Database {
         let snapshot = self.snapshot_to_memory()?;
         Self::dump_sql(&snapshot, SYNC_SKIP_TABLES)
     }
+    pub(crate) fn export_sync_snapshot(conn: &Connection) -> Result<String, AppError> {
+        Self::dump_sql(conn, SYNC_SKIP_TABLES)
+    }
 
     /// 导出为 SQLite 兼容的 SQL 文本
     pub fn export_sql(&self, target_path: &Path) -> Result<(), AppError> {
@@ -116,31 +119,38 @@ impl Database {
 
     /// 从 SQL 字符串导入，返回生成的备份 ID（若无备份则为空字符串）
     pub fn import_sql_string(&self, sql_raw: &str) -> Result<String, AppError> {
-        self.import_sql_string_inner(sql_raw, MACHINE_LOCAL_TABLES)
+        self.import_sql_string_inner(sql_raw, MACHINE_LOCAL_TABLES, |_| Ok(()))
     }
 
     /// Import SQL generated for sync, then restore local-only tables from the
     /// current device snapshot before replacing the main database.
+    #[cfg(test)]
     pub(crate) fn import_sql_string_for_sync(&self, sql_raw: &str) -> Result<String, AppError> {
-        self.import_sql_string_inner(sql_raw, SYNC_PRESERVE_TABLES)
+        self.import_sql_string_inner(sql_raw, SYNC_PRESERVE_TABLES, |_| Ok(()))
+    }
+
+    pub(crate) fn import_sync_with_resources(
+        &self,
+        sql_raw: &str,
+        prepare: impl FnOnce(&Connection) -> Result<(), AppError>,
+    ) -> Result<String, AppError> {
+        self.import_sql_string_inner(sql_raw, SYNC_PRESERVE_TABLES, prepare)
     }
 
     fn import_sql_string_inner(
         &self,
         sql_raw: &str,
         preserve_tables: &[&str],
+        prepare: impl FnOnce(&Connection) -> Result<(), AppError>,
     ) -> Result<String, AppError> {
+        let _io = crate::config_io::lock();
         let sql_content = sql_raw.trim_start_matches('\u{feff}');
         Self::validate_cc_switch_sql_export(sql_content)?;
 
         // 导入前备份现有数据库
         let backup_path = self.backup_database_file()?;
 
-        let local_snapshot = if preserve_tables.is_empty() {
-            None
-        } else {
-            Some(self.snapshot_to_memory()?)
-        };
+        let local_snapshot = self.snapshot_to_memory()?;
 
         // 在临时数据库执行导入，确保失败不会污染主库
         let temp_file = NamedTempFile::new().map_err(|e| AppError::IoContext {
@@ -158,10 +168,10 @@ impl Database {
         // 补齐缺失表/索引并进行基础校验
         Self::create_tables_on_conn(&temp_conn)?;
         Self::apply_schema_migrations_on_conn(&temp_conn)?;
+        prepare(&temp_conn)?;
         Self::validate_basic_state(&temp_conn)?;
-        if let Some(local_snapshot) = local_snapshot.as_ref() {
-            Self::restore_tables(local_snapshot, &temp_conn, preserve_tables)?;
-        }
+        Self::restore_tables(&local_snapshot, &temp_conn, preserve_tables)?;
+        crate::services::library::restore_machine_state(&local_snapshot, &temp_conn)?;
 
         // 使用 Backup 将临时库原子写回主库
         {
@@ -413,7 +423,16 @@ impl Database {
             .query_row("SELECT COUNT(*) FROM mcp_servers", [], |row| row.get(0))
             .map_err(|e| AppError::Database(e.to_string()))?;
 
-        if provider_count == 0 && mcp_count == 0 {
+        let skill_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM skills", [], |row| row.get(0))
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let resources = crate::services::library::snapshot_from_connection(conn)?;
+
+        if provider_count == 0
+            && mcp_count == 0
+            && skill_count == 0
+            && resources.definitions.instructions.is_empty()
+        {
             return Err(AppError::Config(
                 "导入的 SQL 未包含有效的供应商或 MCP 数据".to_string(),
             ));
@@ -486,6 +505,18 @@ impl Database {
                 .map_err(|e| AppError::Database(e.to_string()))?;
 
             while let Some(row) = rows.next().map_err(|e| AppError::Database(e.to_string()))? {
+                if table == "settings" {
+                    let key_index = columns
+                        .iter()
+                        .position(|column| column == "key")
+                        .ok_or_else(|| AppError::Database("settings has no key".into()))?;
+                    let key: String = row
+                        .get(key_index)
+                        .map_err(|e| AppError::Database(e.to_string()))?;
+                    if key == crate::services::library::MACHINE_KEY {
+                        continue;
+                    }
+                }
                 let mut values = Vec::with_capacity(columns.len());
                 for idx in 0..columns.len() {
                     let value = row
@@ -588,6 +619,7 @@ impl Database {
 
     /// Restore database from a backup file. Returns the safety backup ID.
     pub fn restore_from_backup(&self, filename: &str) -> Result<String, AppError> {
+        let _io = crate::config_io::lock();
         // Security: validate filename to prevent path traversal
         if filename.contains("..")
             || filename.contains('/')
@@ -608,37 +640,42 @@ impl Database {
             )));
         }
 
-        // Step 1: Create safety backup of current database
+        // Open without CREATE and fully stage the selected source before a
+        // safety backup's retention cleanup can unlink that source.
+        let source_conn =
+            Connection::open_with_flags(&backup_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|_| AppError::Config("backup.sourceUnreadable".into()))?;
+        let managed_schema: bool = source_conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='providers')", [], |row| row.get(0))
+            .map_err(|_| AppError::Config("backup.sourceUnreadable".into()))?;
+        if !managed_schema {
+            return Err(AppError::Config("backup.sourceInvalid".into()));
+        }
+        let local_snapshot = self.snapshot_to_memory()?;
+
+        // Validate and preserve local proof in a staging database before replacing the main one.
+        let mut staged =
+            Connection::open_in_memory().map_err(|e| AppError::Database(e.to_string()))?;
+        Backup::new(&source_conn, &mut staged)
+            .map_err(|e| AppError::Database(e.to_string()))?
+            .step(-1)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Self::create_tables_on_conn(&staged)?;
+        Self::apply_schema_migrations_on_conn(&staged)?;
+        Self::restore_tables(&local_snapshot, &staged, MACHINE_LOCAL_TABLES)?;
+        crate::services::library::restore_machine_state(&local_snapshot, &staged)?;
+        drop(source_conn);
         let safety_backup = self.backup_database_file()?;
         let safety_id = safety_backup
             .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
             .unwrap_or_default();
-
-        // Machine-local rows describe this machine's current files; an old backup
-        // must not bring back stale ones.
-        let local_snapshot = self.snapshot_to_memory()?;
-
-        // Step 2: Open the backup file and restore it to the main database
-        let source_conn =
-            Connection::open(&backup_path).map_err(|e| AppError::Database(e.to_string()))?;
-
         {
             let mut main_conn = lock_conn!(self.conn);
-            let backup = Backup::new(&source_conn, &mut main_conn)
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            backup
+            Backup::new(&staged, &mut main_conn)
+                .map_err(|e| AppError::Database(e.to_string()))?
                 .step(-1)
                 .map_err(|e| AppError::Database(e.to_string()))?;
         }
-
-        // Step 3: Run schema migrations (backup may be from an older version)
-        self.create_tables()?;
-        self.apply_schema_migrations()?;
         self.ensure_model_pricing_seeded()?;
-        {
-            let main_conn = lock_conn!(self.conn);
-            Self::restore_tables(&local_snapshot, &main_conn, MACHINE_LOCAL_TABLES)?;
-        }
 
         log::info!("Database restored from backup: {filename}, safety backup: {safety_id}");
         Ok(safety_id)
@@ -739,6 +776,80 @@ mod tests {
     use crate::error::AppError;
     use crate::settings::{update_settings, AppSettings};
     use serial_test::serial;
+
+    #[test]
+    fn library_machine_receipts_and_journal_never_leave_sql_exports() {
+        let db = Database::memory().unwrap();
+        let state = crate::services::library::MachineState {
+            epoch: 4,
+            ..Default::default()
+        };
+        db.set_setting(
+            crate::services::library::MACHINE_KEY,
+            &serde_json::to_string(&state).unwrap(),
+        )
+        .unwrap();
+        for dump in [
+            db.export_sql_string().unwrap(),
+            db.export_sql_string_for_sync().unwrap(),
+        ] {
+            assert!(!dump.contains(crate::services::library::MACHINE_KEY));
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn library_restore_keeps_local_receipts_and_invalidates_old_confirmation() {
+        let sandbox = crate::test_sandbox::sandbox();
+        let local = Database::memory().unwrap();
+        let remote = Database::memory().unwrap();
+        let definition = |id: &str| crate::services::library::InstructionSet {
+            id: id.into(),
+            name: id.into(),
+            content: "shared".into(),
+            revision: 0,
+        };
+        crate::services::library::save_instruction(&local, definition("local"), None).unwrap();
+        crate::services::library::save_instruction(&remote, definition("remote"), None).unwrap();
+        {
+            let conn = remote.conn.lock().unwrap();
+            conn.execute("INSERT INTO providers(id,app_type,name,settings_config,meta) VALUES ('fixture','claude','Fixture','{}','{}')",[]).unwrap();
+        }
+        let path = sandbox.home().join("AGENTS.md");
+        std::fs::write(&path, "personal").unwrap();
+        let applied = crate::services::library::coordinator::preview_at(
+            &local,
+            "local",
+            &[("codex".into(), path.clone())],
+        )
+        .unwrap();
+        crate::services::library::apply_operation(&local, &applied.id).unwrap();
+        let pending =
+            crate::services::library::coordinator::preview_at(&local, "local", &[]).unwrap();
+        let before = local.library_snapshot().unwrap();
+        let file = std::fs::read_to_string(&path).unwrap();
+        let foreign_machine = crate::services::library::MachineState {
+            epoch: 99,
+            ..Default::default()
+        };
+        let machine = serde_json::to_string(&foreign_machine)
+            .unwrap()
+            .replace('\'', "''");
+        let dump = format!(
+            "{}\nINSERT OR REPLACE INTO settings(key,value) VALUES ('{}','{}');",
+            remote.export_sql_string().unwrap(),
+            crate::services::library::MACHINE_KEY,
+            machine
+        );
+        local.import_sql_string(&dump).unwrap();
+        let after = local.library_snapshot().unwrap();
+        assert_eq!(after.machine.receipts, before.machine.receipts);
+        assert_eq!(after.machine.epoch, before.machine.epoch + 1);
+        assert!(after.definitions.instructions.contains_key("remote"));
+        assert!(!after.definitions.instructions.contains_key("local"));
+        assert!(crate::services::library::apply_operation(&local, &pending.id).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), file);
+    }
 
     #[test]
     fn sync_import_preserves_local_only_tables() -> Result<(), AppError> {
@@ -929,6 +1040,35 @@ mod tests {
             }
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    #[serial]
+    fn selected_backup_is_staged_before_retention_cleanup_can_remove_it() -> Result<(), AppError> {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let mut settings = crate::settings::get_settings();
+        settings.backup_retain_count = Some(1);
+        crate::settings::update_settings(settings)?;
+        let db = Database::init()?;
+        db.set_setting("selected-backup-content", "old-definition")?;
+        let source = db.backup_database_file()?.unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10),
+            ))
+            .unwrap();
+        db.set_setting("selected-backup-content", "current-definition")?;
+        db.upsert_bind_record("codex", "local-proof")?;
+        db.restore_from_backup(source.file_name().unwrap().to_str().unwrap())?;
+        assert_eq!(
+            db.get_setting("selected-backup-content")?.as_deref(),
+            Some("old-definition")
+        );
+        assert_eq!(db.get_bind_record("codex")?.unwrap().record, "local-proof");
+        Ok(())
     }
 
     #[test]

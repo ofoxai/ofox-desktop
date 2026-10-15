@@ -429,7 +429,15 @@ pub(crate) fn plan_restore(
     );
     set_section(&mut restored, MODEL, model);
 
-    if restored == original_value {
+    let unowned_text = |source: Option<&str>| -> Result<String, String> {
+        let mut text = source.unwrap_or_default().to_string();
+        for section in SECTIONS {
+            text =
+                hermes_config::render_section(&text, section, None).map_err(|e| e.to_string())?;
+        }
+        Ok(text)
+    };
+    if restored == original_value && unowned_text(current)? == unowned_text(original)? {
         return Ok(RestorePlan {
             content: original.map(str::to_string),
             exact: true,
@@ -575,6 +583,20 @@ mod tests {
         assert!(bound.contains("skills:\n  enabled: true\n"));
         assert!(is_ofox_bound(&bound));
         assert!(!is_ofox_bound(USER_CONFIG));
+    }
+
+    #[test]
+    fn unbind_preserves_mcp_text_edits_that_do_not_change_yaml_values() {
+        let original = format!("{USER_CONFIG}mcp_servers:\n  demo:\n    command: server\n");
+        let bound = bound_config(Some(&original), &template(), "sk-of-K", true).unwrap();
+        let edited = bound
+            .replace("mcp_servers:\n", "# current MCP note\nmcp_servers:\n")
+            .replace("command: server", "command: \"server\"");
+        let plan = plan_restore(Some(&original), Some(&edited), &BTreeSet::new()).unwrap();
+        assert!(plan
+            .content
+            .unwrap()
+            .contains("# current MCP note\nmcp_servers:\n  demo:\n    command: \"server\"\n"));
     }
 
     #[test]

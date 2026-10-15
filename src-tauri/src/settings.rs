@@ -772,6 +772,7 @@ pub(crate) fn clear_settings_health() {
 /// writes work again. Does nothing in any other state. Fails, writing nothing,
 /// when the bad bytes cannot be kept.
 pub fn reset_unreadable() -> Result<SettingsHealth, AppError> {
+    let _io = crate::config_io::lock();
     let mut guard = settings_store().write().unwrap_or_else(|e| {
         log::warn!("设置锁已毒化，使用恢复值: {e}");
         e.into_inner()
@@ -843,6 +844,7 @@ pub fn get_settings_for_frontend() -> AppSettings {
 }
 
 pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
+    let _io = crate::config_io::lock();
     new_settings.normalize_paths();
     save_settings_file(&new_settings)?;
 
@@ -861,6 +863,7 @@ pub fn mutate_settings<F>(mutator: F) -> Result<(), AppError>
 where
     F: FnOnce(&mut AppSettings),
 {
+    let _io = crate::config_io::lock();
     let mut guard = settings_store().write().unwrap_or_else(|e| {
         log::warn!("设置锁已毒化，使用恢复值: {e}");
         e.into_inner()
@@ -876,6 +879,7 @@ where
 /// 从文件重新加载设置到内存缓存
 /// 用于导入配置等场景，确保内存缓存与文件同步
 pub fn reload_settings() -> Result<(), AppError> {
+    let _io = crate::config_io::lock();
     let fresh_settings = AppSettings::load_from_file();
     let mut guard = settings_store().write().unwrap_or_else(|e| {
         log::warn!("设置锁已毒化，使用恢复值: {e}");
@@ -1028,13 +1032,6 @@ pub fn get_skill_storage_location() -> SkillStorageLocation {
             e.into_inner()
         })
         .skill_storage_location
-}
-
-/// 设置 Skill 存储位置
-pub fn set_skill_storage_location(location: SkillStorageLocation) -> Result<(), AppError> {
-    mutate_settings(|s| {
-        s.skill_storage_location = location;
-    })
 }
 
 // ===== 备份策略管理函数 =====

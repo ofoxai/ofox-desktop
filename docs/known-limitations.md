@@ -47,6 +47,10 @@ The following entries retain the specific review observations. Some contain seve
 
 ## Acceptance boundaries
 
+- The resource library manages verified global targets. Project/session overlays and OpenCode dynamic routing keys or unresolved Skills path references require an explicit supported adapter; they are blocked rather than treated as literal paths. OAuth still uses the native tool's authorization flow.
+- New WebDAV skill snapshots carry immutable artifacts, hidden files, empty directories and portable execution intent. Old flat snapshots omitted some of that information; restoring their available content as drafts cannot reconstruct missing files or permissions. Native/legacy roots and existing artifacts remain intact.
+- Resource compatibility rules were checked against OpenCode v1.19.0 and Hermes v0.22.0 source, including global precedence and Skills readers. This is source-contract verification, not a claim of native agent execution on every platform.
+
 - Native Windows tests, UI/installer behavior and file-lock semantics remain pending until the exact delivery SHA is run with the Windows verification package. macOS type checking is not Windows execution.
 - UI layout screenshots use synthetic accounts and session fixtures; they do not establish live backend compatibility. Native macOS window placement and installation are checked separately.
 - No live uninstall or intentional damage to real settings is part of acceptance. Sandbox tests cover those destructive paths.

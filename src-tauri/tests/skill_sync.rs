@@ -28,6 +28,7 @@ fn symlink_dir(src: &std::path::Path, dest: &std::path::Path) {
 }
 
 #[test]
+#[serial_test::serial]
 fn import_from_apps_respects_explicit_app_selection() {
     let sandbox = sandbox();
     let home = sandbox.home();
@@ -62,9 +63,19 @@ fn import_from_apps_respects_explicit_app_selection() {
     assert_eq!(imported.len(), 1, "expected exactly one imported skill");
     let skill = imported.first().expect("imported skill");
     assert!(
-        skill.apps.opencode,
-        "explicitly selected OpenCode app should remain enabled"
+        !skill.apps.opencode,
+        "source selection does not assign a native target"
     );
+    assert!(home
+        .join(".config/opencode/skills/shared-skill/SKILL.md")
+        .is_file());
+    assert!(state
+        .db
+        .library_snapshot()
+        .unwrap()
+        .machine
+        .assignments
+        .is_empty());
     assert!(
         !skill.apps.claude && !skill.apps.codex && !skill.apps.gemini,
         "import should no longer infer apps from every matching source path"
@@ -72,7 +83,8 @@ fn import_from_apps_respects_explicit_app_selection() {
 }
 
 #[test]
-fn sync_to_app_removes_disabled_and_orphaned_ssot_symlinks() {
+#[serial_test::serial]
+fn sync_to_app_preserves_unowned_disabled_and_orphaned_links() {
     let sandbox = sandbox();
     let home = sandbox.home();
 
@@ -109,17 +121,18 @@ fn sync_to_app_removes_disabled_and_orphaned_ssot_symlinks() {
     SkillService::sync_to_app(&state.db, &AppType::OpenCode).expect("reconcile skills");
 
     assert!(
-        !opencode_skills_dir.join("disabled-skill").exists(),
-        "DB-known disabled skill should be removed from OpenCode live dir"
+        opencode_skills_dir.join("disabled-skill").exists(),
+        "old enabled flags are not ownership proof"
     );
     assert!(
-        !opencode_skills_dir.join("orphan-skill").exists(),
-        "orphaned symlink into SSOT should be cleaned up"
+        opencode_skills_dir.join("orphan-skill").exists(),
+        "unowned orphan links remain user files"
     );
 }
 
 #[test]
-fn uninstall_skill_creates_backup_before_removing_ssot() {
+#[serial_test::serial]
+fn removing_a_draft_backs_up_content_and_keeps_legacy_sources() {
     let sandbox = sandbox();
     let home = sandbox.home();
 
@@ -175,8 +188,8 @@ fn uninstall_skill_creates_backup_before_removing_ssot() {
     assert_eq!(metadata["skill"]["name"], "Backup Skill");
 
     assert!(
-        !ssot_skill_dir.exists(),
-        "SSOT skill directory should be removed after uninstall"
+        ssot_skill_dir.exists(),
+        "draft deletion preserves the legacy source"
     );
     assert!(
         state
@@ -189,7 +202,8 @@ fn uninstall_skill_creates_backup_before_removing_ssot() {
 }
 
 #[test]
-fn restore_skill_backup_restores_files_to_ssot_and_current_app() {
+#[serial_test::serial]
+fn restore_skill_backup_creates_an_unassigned_immutable_draft() {
     let sandbox = sandbox();
     let home = sandbox.home();
 
@@ -238,10 +252,13 @@ fn restore_skill_backup_restores_files_to_ssot_and_current_app() {
         .expect("restore from backup");
 
     assert_eq!(restored.directory, "restore-skill");
-    assert!(restored.apps.claude, "restored skill should enable Claude");
+    assert!(
+        !restored.apps.claude,
+        "restore does not assign a native target"
+    );
     assert!(
         !restored.apps.codex && !restored.apps.gemini && !restored.apps.opencode,
-        "restore should only enable the selected app"
+        "restore never infers native ownership"
     );
     assert!(
         home.join(".ofox-desktop")
@@ -252,12 +269,13 @@ fn restore_skill_backup_restores_files_to_ssot_and_current_app() {
         "restored skill should exist in SSOT"
     );
     assert!(
-        home.join(".claude")
+        !home
+            .join(".claude")
             .join("skills")
             .join("restore-skill")
             .join("prompt.md")
             .exists(),
-        "restored skill should sync to the selected app"
+        "restore never writes the native app root"
     );
     assert!(
         state
@@ -270,6 +288,7 @@ fn restore_skill_backup_restores_files_to_ssot_and_current_app() {
 }
 
 #[test]
+#[serial_test::serial]
 fn delete_skill_backup_removes_backup_directory() {
     let sandbox = sandbox();
     let home = sandbox.home();
@@ -334,7 +353,8 @@ fn delete_skill_backup_removes_backup_directory() {
 }
 
 #[test]
-fn migration_snapshot_overrides_multi_source_directory_inference() {
+#[serial_test::serial]
+fn startup_migration_does_not_claim_native_directory_ownership() {
     let sandbox = sandbox();
     let home = sandbox.home();
 
@@ -361,20 +381,17 @@ fn migration_snapshot_overrides_multi_source_directory_inference() {
         .expect("seed migration snapshot");
 
     let count = migrate_skills_to_ssot(&state.db).expect("migrate skills to ssot");
-    assert_eq!(count, 1, "expected one migrated skill");
-
-    let skills = state.db.get_all_installed_skills().expect("get skills");
-    let migrated = skills
-        .values()
-        .find(|skill| skill.directory == "demo-skill")
-        .expect("migrated demo-skill");
-
-    assert!(
-        migrated.apps.claude,
-        "legacy snapshot should preserve Claude enablement"
-    );
-    assert!(
-        !migrated.apps.opencode,
-        "migration should no longer infer OpenCode enablement from a duplicate directory alone"
-    );
+    assert_eq!(count, 0, "native import requires explicit selection");
+    assert!(state.db.get_all_installed_skills().unwrap().is_empty());
+    assert!(home.join(".claude/skills/demo-skill/SKILL.md").is_file());
+    assert!(home
+        .join(".config/opencode/skills/demo-skill/SKILL.md")
+        .is_file());
+    assert!(state
+        .db
+        .library_snapshot()
+        .unwrap()
+        .machine
+        .receipts
+        .is_empty());
 }

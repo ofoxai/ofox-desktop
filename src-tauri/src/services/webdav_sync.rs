@@ -1,7 +1,7 @@
 //! WebDAV v2 sync protocol layer with DB compatibility subdirectories.
 //!
 //! Implements manifest-based synchronization on top of the HTTP transport
-//! primitives in [`super::webdav`]. Artifact set: `db.sql` + `skills.zip`.
+//! primitives in [`super::webdav`]. New artifact set: `db.sql` + `skill-artifacts.zip`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -23,9 +23,7 @@ use crate::services::webdav::{
 use crate::settings::{update_webdav_sync_status, WebDavSyncSettings, WebDavSyncStatus};
 
 mod archive;
-use archive::{
-    backup_current_skills, restore_skills_from_backup, restore_skills_zip, zip_skills_ssot,
-};
+use archive::{prepare_zip, zip_skill_artifacts};
 
 // ─── Protocol constants ──────────────────────────────────────
 
@@ -35,10 +33,12 @@ const DB_COMPAT_VERSION: u32 = 6;
 const LEGACY_DB_COMPAT_VERSION: u32 = 5;
 const REMOTE_DB_SQL: &str = "db.sql";
 const REMOTE_SKILLS_ZIP: &str = "skills.zip";
+const REMOTE_SKILL_ARTIFACTS_ZIP: &str = "skill-artifacts.zip";
 const REMOTE_MANIFEST: &str = "manifest.json";
 const MAX_DEVICE_NAME_LEN: usize = 64;
 const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
-pub(super) const MAX_SYNC_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
+pub(super) const MAX_SYNC_ARTIFACT_BYTES: u64 =
+    crate::services::library::skill_artifact::PACKAGE_MAX_BYTES;
 
 pub fn sync_mutex() -> &'static tokio::sync::Mutex<()> {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -84,6 +84,8 @@ struct SyncManifest {
     created_at: String,
     artifacts: BTreeMap<String, ArtifactMeta>,
     snapshot_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    skills_encoding: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +140,7 @@ pub async fn upload(
     db: &crate::database::Database,
     settings: &mut WebDavSyncSettings,
 ) -> Result<Value, AppError> {
+    crate::agent_env::ready().await;
     settings.validate()?;
     let auth = auth_for(settings);
     let dir_segs = remote_dir_segments(settings, RemoteLayout::Current);
@@ -149,7 +152,7 @@ pub async fn upload(
     let db_url = remote_file_url(settings, RemoteLayout::Current, REMOTE_DB_SQL)?;
     put_bytes(&db_url, &auth, snapshot.db_sql, "application/sql").await?;
 
-    let skills_url = remote_file_url(settings, RemoteLayout::Current, REMOTE_SKILLS_ZIP)?;
+    let skills_url = remote_file_url(settings, RemoteLayout::Current, REMOTE_SKILL_ARTIFACTS_ZIP)?;
     put_bytes(&skills_url, &auth, snapshot.skills_zip, "application/zip").await?;
 
     let manifest_url = remote_file_url(settings, RemoteLayout::Current, REMOTE_MANIFEST)?;
@@ -184,6 +187,7 @@ pub async fn download(
     db: &crate::database::Database,
     settings: &mut WebDavSyncSettings,
 ) -> Result<Value, AppError> {
+    crate::agent_env::ready().await;
     settings.validate()?;
     let auth = auth_for(settings);
     let snapshot = find_remote_snapshot(settings, &auth)
@@ -211,13 +215,22 @@ pub async fn download(
         settings,
         &auth,
         snapshot.layout,
-        REMOTE_SKILLS_ZIP,
+        if snapshot.manifest.skills_encoding.is_some() {
+            REMOTE_SKILL_ARTIFACTS_ZIP
+        } else {
+            REMOTE_SKILLS_ZIP
+        },
         &snapshot.manifest.artifacts,
     )
     .await?;
 
     // Apply snapshot
-    apply_snapshot(db, &db_sql, &skills_zip)?;
+    apply_snapshot_encoded(
+        db,
+        &db_sql,
+        &skills_zip,
+        snapshot.manifest.skills_encoding.is_some(),
+    )?;
 
     let manifest_hash = sha256_hex(&snapshot.manifest_bytes);
     let _persisted = persist_sync_success_best_effort(
@@ -302,8 +315,12 @@ fn build_local_snapshot(
     db: &crate::database::Database,
     _settings: &WebDavSyncSettings,
 ) -> Result<LocalSnapshot, AppError> {
-    // Export database to SQL string
-    let sql_string = db.export_sql_string_for_sync()?;
+    let captured = {
+        let _io = crate::config_io::lock();
+        crate::services::library::skill_resource::ensure_metadata(db)?;
+        db.snapshot_to_memory()?
+    };
+    let sql_string = crate::Database::export_sync_snapshot(&captured)?;
     let db_sql = sql_string.into_bytes();
 
     // Pack skills into deterministic ZIP
@@ -315,8 +332,8 @@ fn build_local_snapshot(
             e,
         )
     })?;
-    let skills_zip_path = tmp.path().join(REMOTE_SKILLS_ZIP);
-    zip_skills_ssot(&skills_zip_path)?;
+    let skills_zip_path = tmp.path().join(REMOTE_SKILL_ARTIFACTS_ZIP);
+    zip_skill_artifacts(&skills_zip_path, &captured)?;
     let skills_zip = fs::read(&skills_zip_path).map_err(|e| AppError::io(&skills_zip_path, e))?;
 
     // Build artifact map and compute hashes
@@ -329,7 +346,7 @@ fn build_local_snapshot(
         },
     );
     artifacts.insert(
-        REMOTE_SKILLS_ZIP.to_string(),
+        REMOTE_SKILL_ARTIFACTS_ZIP.to_string(),
         ArtifactMeta {
             sha256: sha256_hex(&skills_zip),
             size: skills_zip.len() as u64,
@@ -345,6 +362,7 @@ fn build_local_snapshot(
         created_at: Utc::now().to_rfc3339(),
         artifacts,
         snapshot_id,
+        skills_encoding: Some("immutable-artifacts-v1".into()),
     };
     let manifest_bytes =
         serde_json::to_vec_pretty(&manifest).map_err(|e| AppError::JsonSerialize { source: e })?;
@@ -428,6 +446,15 @@ fn effective_db_compat_version(manifest: &SyncManifest, layout: RemoteLayout) ->
 }
 
 fn validate_manifest_compat(manifest: &SyncManifest, layout: RemoteLayout) -> Result<(), AppError> {
+    if manifest
+        .skills_encoding
+        .as_deref()
+        .is_some_and(|encoding| encoding != "immutable-artifacts-v1")
+    {
+        return Err(AppError::Config(
+            "library.skillArchiveVersionUnsupported".into(),
+        ));
+    }
     if manifest.format != PROTOCOL_FORMAT {
         return Err(localized(
             "webdav.sync.manifest_format_incompatible",
@@ -587,10 +614,19 @@ async fn download_and_verify(
     Ok(bytes)
 }
 
+#[cfg(test)]
 fn apply_snapshot(
     db: &crate::database::Database,
     db_sql: &[u8],
     skills_zip: &[u8],
+) -> Result<(), AppError> {
+    apply_snapshot_encoded(db, db_sql, skills_zip, false)
+}
+fn apply_snapshot_encoded(
+    db: &crate::Database,
+    db_sql: &[u8],
+    skills_zip: &[u8],
+    immutable: bool,
 ) -> Result<(), AppError> {
     let sql_str = std::str::from_utf8(db_sql).map_err(|e| {
         localized(
@@ -599,23 +635,9 @@ fn apply_snapshot(
             format!("SQL is not valid UTF-8: {e}"),
         )
     })?;
-    let skills_backup = backup_current_skills()?;
-
-    // 先替换 skills，再导入数据库；若导入失败则回滚 skills，避免“半恢复”。
-    restore_skills_zip(skills_zip)?;
-
-    if let Err(db_err) = db.import_sql_string_for_sync(sql_str) {
-        if let Err(rollback_err) = restore_skills_from_backup(&skills_backup) {
-            return Err(localized(
-                "webdav.sync.db_import_and_rollback_failed",
-                format!("导入数据库失败: {db_err}; 同时回滚 Skills 失败: {rollback_err}"),
-                format!(
-                    "Database import failed: {db_err}; skills rollback also failed: {rollback_err}"
-                ),
-            ));
-        }
-        return Err(db_err);
-    }
+    let prepared = prepare_zip(skills_zip, immutable)?;
+    let _io = crate::config_io::lock();
+    db.import_sync_with_resources(sql_str, |conn| prepared.prepare_database(conn))?;
 
     Ok(())
 }
@@ -669,6 +691,151 @@ fn validate_artifact_size_limit(artifact_name: &str, size: u64) -> Result<(), Ap
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn zip_fixture() -> Vec<u8> {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("fixture/SKILL.md", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"---\nname: fixture\ndescription: Remote\n---\nRemote draft")
+            .unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+    fn skill_row() -> crate::app_config::InstalledSkill {
+        crate::app_config::InstalledSkill {
+            id: "local:fixture".into(),
+            name: "Fixture".into(),
+            description: None,
+            directory: "fixture".into(),
+            repo_owner: None,
+            repo_name: None,
+            repo_branch: None,
+            readme_url: None,
+            apps: crate::app_config::SkillApps::default(),
+            installed_at: 0,
+            content_hash: None,
+            updated_at: 0,
+        }
+    }
+    #[test]
+    #[serial_test::serial]
+    fn legacy_sync_restores_drafts_without_replacing_the_live_ssot() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let old = crate::services::skill::SkillService::get_ssot_dir()
+            .unwrap()
+            .join("fixture");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("SKILL.md"), "Local user content").unwrap();
+        let source = crate::Database::memory().unwrap();
+        source.save_skill(&skill_row()).unwrap();
+        let db = crate::Database::memory().unwrap();
+        apply_snapshot(
+            &db,
+            source.export_sql_string_for_sync().unwrap().as_bytes(),
+            &zip_fixture(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(old.join("SKILL.md")).unwrap(),
+            "Local user content"
+        );
+        let artifact =
+            crate::services::library::skill_resource::artifact_for(&db, "local:fixture").unwrap();
+        assert!(fs::read_to_string(artifact.join("SKILL.md"))
+            .unwrap()
+            .contains("Remote draft"));
+        assert!(db
+            .library_snapshot()
+            .unwrap()
+            .machine
+            .assignments
+            .is_empty());
+    }
+    #[test]
+    #[serial_test::serial]
+    fn new_snapshots_use_an_unambiguous_artifact_encoding() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("SKILL.md"), "Fixture").unwrap();
+        fs::write(source.path().join(".hidden"), "keep").unwrap();
+        let db = crate::Database::memory().unwrap();
+        crate::services::library::skill_resource::save_draft(&db, skill_row(), source.path(), None)
+            .unwrap();
+        let snapshot = build_local_snapshot(&db, &WebDavSyncSettings::default()).unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&snapshot.manifest_bytes).unwrap();
+        assert_eq!(manifest["skillsEncoding"], "immutable-artifacts-v1");
+        assert!(manifest["artifacts"].get("skill-artifacts.zip").is_some());
+        assert!(manifest["artifacts"].get("skills.zip").is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn immutable_sync_preserves_hidden_empty_dirs_execution_and_local_receipts() {
+        use crate::services::library::{skill_artifact as artifacts, skill_resource};
+        let _sandbox = crate::test_sandbox::sandbox();
+        let local = crate::Database::memory().unwrap();
+        let old = tempfile::tempdir().unwrap();
+        fs::write(old.path().join("SKILL.md"), "Local").unwrap();
+        let mut row = skill_row();
+        row.id = "local:retained".into();
+        row.directory = "retained".into();
+        skill_resource::save_draft(&local, row, old.path(), None).unwrap();
+        let op = skill_resource::preview(&local, "local:retained", &["codex".into()]).unwrap();
+        crate::services::library::apply_operation(&local, &op.id).unwrap();
+        let before = local.library_snapshot().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("SKILL.md"), "Remote").unwrap();
+        fs::write(source.path().join(".hidden"), "Hidden").unwrap();
+        fs::write(source.path().join("run.sh"), "echo fixture").unwrap();
+        fs::create_dir(source.path().join("empty")).unwrap();
+        let flags = BTreeMap::from([
+            ("SKILL.md".into(), false),
+            (".hidden".into(), false),
+            ("run.sh".into(), true),
+        ]);
+        let remote = crate::Database::memory().unwrap();
+        let skill = skill_resource::save_draft_with_execution(
+            &remote,
+            skill_row(),
+            source.path(),
+            None,
+            Some(&flags),
+        )
+        .unwrap();
+        let snapshot = build_local_snapshot(&remote, &WebDavSyncSettings::default()).unwrap();
+        let again = build_local_snapshot(&remote, &WebDavSyncSettings::default()).unwrap();
+        assert_eq!(snapshot.skills_zip, again.skills_zip);
+        apply_snapshot_encoded(&local, &snapshot.db_sql, &snapshot.skills_zip, true).unwrap();
+        let after = local.library_snapshot().unwrap();
+        assert_eq!(after.machine.epoch, before.machine.epoch + 1);
+        assert_eq!(after.machine.receipts, before.machine.receipts);
+        assert_eq!(
+            fs::read_to_string(
+                crate::codex_config::get_codex_config_dir().join("skills/retained/SKILL.md")
+            )
+            .unwrap(),
+            "Local"
+        );
+        let restored = skill_resource::artifact_for(&local, &skill.id).unwrap();
+        assert_eq!(
+            fs::read_to_string(restored.join(".hidden")).unwrap(),
+            "Hidden"
+        );
+        assert!(restored.join("empty").is_dir());
+        assert_eq!(
+            artifacts::manifest(skill.content_hash.as_deref().unwrap()).unwrap(),
+            flags
+        );
+        let before_failure = local.library_snapshot().unwrap();
+        assert!(apply_snapshot_encoded(
+            &local,
+            b"-- Ofox Switch SQLite \xe5\xaf\xbc\xe5\x87\xba\ninvalid sql",
+            &snapshot.skills_zip,
+            true
+        )
+        .is_err());
+        assert_eq!(local.library_snapshot().unwrap(), before_failure);
+    }
 
     fn artifact(sha256: &str, size: u64) -> ArtifactMeta {
         ArtifactMeta {
@@ -766,6 +933,7 @@ mod tests {
             created_at: "2026-02-12T00:00:00Z".to_string(),
             artifacts,
             snapshot_id: "snap-1".to_string(),
+            skills_encoding: None,
         }
     }
 

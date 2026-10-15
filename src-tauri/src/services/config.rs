@@ -143,6 +143,7 @@ impl ConfigService {
         provider_id: &str,
         provider: &Provider,
     ) -> Result<(), AppError> {
+        let _io = crate::config_io::lock();
         let settings = provider.settings_config.as_object().ok_or_else(|| {
             AppError::Config(format!("供应商 {provider_id} 的 Codex 配置必须是对象"))
         })?;
@@ -181,6 +182,7 @@ impl ConfigService {
         provider_id: &str,
         provider: &Provider,
     ) -> Result<(), AppError> {
+        let _io = crate::config_io::lock();
         use crate::config::{read_json_file, write_json_file};
 
         let settings_path = crate::config::get_claude_settings_path();
@@ -206,6 +208,7 @@ impl ConfigService {
         provider_id: &str,
         provider: &Provider,
     ) -> Result<(), AppError> {
+        let _io = crate::config_io::lock();
         use crate::gemini_config::{env_to_json, read_gemini_env};
 
         ProviderService::write_gemini_live(provider)?;
@@ -214,7 +217,7 @@ impl ConfigService {
         let live_after_env = read_gemini_env()?;
         let settings_path = crate::gemini_config::get_gemini_settings_path();
         let live_after_config = if settings_path.exists() {
-            crate::config::read_json_file(&settings_path)?
+            crate::gemini_config::read_native_settings()?
         } else {
             serde_json::json!({})
         };

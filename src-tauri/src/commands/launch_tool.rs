@@ -453,7 +453,7 @@ pub async fn launch_tool_cli(app: AppHandle, tool_id: String) -> Result<(), Stri
         crate::commands::manage_tool::follow_live_model(&state, &tool_id).await;
     }
 
-    // 以前版本给 Codex 的 MCP 条目写了 `type`，Codex 不认，每次启动都警告。只删这个键。
+    // Only model compatibility metadata is managed at launch; MCP changes require a library preview.
     if tool_id == "codex" {
         // Warm the process-based probe before taking the configuration write lock.
         match tokio::task::spawn_blocking(crate::services::ofox_bind::codex_probe::flag_support)
@@ -463,9 +463,6 @@ pub async fn launch_tool_cli(app: AppHandle, tool_id: String) -> Result<(), Stri
             Err(e) => log::warn!("Codex compatibility probe failed: {e}"),
         }
         let _guard = crate::services::ofox_bind::BIND_LOCK.lock().await;
-        if let Err(e) = crate::mcp::strip_ignored_type_from_codex_config() {
-            log::warn!("清理 Codex MCP 配置里的 type 失败: {e}");
-        }
         let state = app.state::<crate::store::AppState>();
         if let Err(e) = crate::services::ofox_bind::strip_codex_flag_ignored(&state.db) {
             log::warn!("清理 Codex 配置里被忽略的设置失败: {e}");

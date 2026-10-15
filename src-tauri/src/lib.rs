@@ -7,10 +7,12 @@ mod claude_plugin;
 mod codex_config;
 mod commands;
 mod config;
+mod config_io;
 mod database;
 mod deeplink;
 mod error;
 mod gemini_config;
+#[cfg(test)]
 mod gemini_mcp;
 pub mod hermes_config;
 mod init_status;
@@ -63,13 +65,21 @@ pub use config::{get_claude_mcp_path, get_claude_settings_path, read_json_file, 
 pub use database::Database;
 pub use deeplink::{import_provider_from_deeplink, parse_deeplink_url, DeepLinkImportRequest};
 pub use error::AppError;
+pub use gemini_config::get_gemini_settings_path;
 pub use mcp::{
-    import_from_claude, import_from_codex, import_from_gemini, remove_server_from_claude,
-    remove_server_from_codex, remove_server_from_gemini, strip_ignored_type_from_codex_config,
-    sync_enabled_to_claude, sync_enabled_to_codex, sync_enabled_to_gemini,
-    sync_single_server_to_claude, sync_single_server_to_codex, sync_single_server_to_gemini,
+    import_from_claude, import_from_codex, import_from_gemini, import_from_hermes,
+    import_from_opencode, remove_server_from_claude, remove_server_from_codex,
+    remove_server_from_gemini, remove_server_from_hermes, remove_server_from_opencode,
+    strip_ignored_type_from_codex_config, sync_enabled_to_claude, sync_enabled_to_codex,
+    sync_enabled_to_gemini, sync_single_server_to_claude, sync_single_server_to_codex,
+    sync_single_server_to_gemini, sync_single_server_to_hermes, sync_single_server_to_opencode,
 };
 pub use provider::{Provider, ProviderMeta};
+pub use services::library::{
+    apply_operation as apply_resource_operation, delete_mcp_draft, preview_mcp_resource,
+    recover_operation as recover_resource_operation, save_mcp_draft,
+    skill_resource::preview as preview_skills_resource, Operation as ResourceOperation,
+};
 pub use services::{
     skill::{migrate_skills_to_ssot, ImportSkillSelection},
     ConfigService, EndpointLatency, McpService, PromptService, ProviderService, ProxyService,
@@ -92,32 +102,53 @@ use tauri::{Emitter, Manager};
 
 fn redact_url_for_log(url_str: &str) -> String {
     match url::Url::parse(url_str) {
-        Ok(url) => {
-            let mut output = format!("{}://", url.scheme());
-            if let Some(host) = url.host_str() {
-                output.push_str(host);
-            }
-            output.push_str(url.path());
-
-            let mut keys: Vec<String> = url.query_pairs().map(|(k, _)| k.to_string()).collect();
-            keys.sort();
-            keys.dedup();
-
-            if !keys.is_empty() {
-                output.push_str("?[keys:");
-                output.push_str(&keys.join(","));
-                output.push(']');
-            }
-
-            output
+        Ok(url) if ["ccswitch", "ofoxswitch"].contains(&url.scheme()) => {
+            format!("{}://[redacted]", url.scheme())
         }
-        Err(_) => {
-            let base = url_str.split('#').next().unwrap_or(url_str);
-            match base.split_once('?') {
-                Some((prefix, _)) => format!("{prefix}?[redacted]"),
-                None => base.to_string(),
-            }
+        _ => "[redacted]".into(),
+    }
+}
+
+fn deeplink_error_view(url_str: &str, _error: &crate::AppError) -> serde_json::Value {
+    serde_json::json!({"url":redact_url_for_log(url_str),"error":"deeplink.invalidLink"})
+}
+
+#[cfg(test)]
+mod resource_logging_tests {
+    #[test]
+    fn deeplink_errors_never_export_private_url_or_parser_values() {
+        let value = super::deeplink_error_view(
+            "ccswitch://v1/import?config=private-fixture",
+            &crate::AppError::InvalidInput("invalid private-fixture".into()),
+        );
+        assert!(!value.to_string().contains("private-fixture"));
+        let source = include_str!("lib.rs");
+        let handler = source
+            .rsplit_once("fn handle_deep_link")
+            .unwrap()
+            .1
+            .split("\n    true\n}")
+            .next()
+            .unwrap();
+        assert!(!handler.contains("log::debug!(\"Deep link URL (raw)"));
+        assert!(!source.contains("log::info!(\"RunEvent::Opened with URL: {url_str}\")"));
+        for url in [
+            "private-fixture",
+            "ccswitch://private-fixture/private-fixture?private-fixture=secret",
+        ] {
+            assert!(!super::redact_url_for_log(url).contains("private-fixture"));
         }
+    }
+
+    #[test]
+    fn the_ipc_parser_uses_safe_errors_and_never_logs_raw_links() {
+        let error = crate::commands::parse_deeplink(
+            "ccswitch://v1/private-fixture?apiKey=private-fixture".into(),
+        )
+        .unwrap_err();
+        assert!(!error.contains("private-fixture"));
+        assert!(!include_str!("commands/deeplink.rs")
+            .contains("log::info!(\"Parsing deep link URL: {url}\")"));
     }
 }
 
@@ -143,7 +174,6 @@ fn handle_deeplink_url(
 
     let redacted_url = redact_url_for_log(&normalized);
     log::info!("✓ Deep link URL detected from {source}: {redacted_url}");
-    log::debug!("Deep link URL (raw) from {source}: {url_str}");
 
     match crate::deeplink::parse_deeplink_url(&normalized) {
         Ok(request) => {
@@ -174,15 +204,9 @@ fn handle_deeplink_url(
             }
         }
         Err(e) => {
-            log::error!("✗ Failed to parse deep link URL: {e}");
+            log::error!("✗ Failed to parse deep link URL");
 
-            if let Err(emit_err) = app.emit(
-                "deeplink-error",
-                serde_json::json!({
-                    "url": url_str,
-                    "error": e.to_string()
-                }),
-            ) {
+            if let Err(emit_err) = app.emit("deeplink-error", deeplink_error_view(url_str, &e)) {
                 log::error!("✗ Failed to emit deeplink-error event: {emit_err}");
             }
         }
@@ -1409,6 +1433,16 @@ pub fn run() {
             commands::import_mcp_from_apps,
             // Prompt management
             commands::get_prompts,
+            commands::get_library_instructions,
+            commands::get_library_mcp,
+            commands::save_library_mcp,
+            commands::preview_library_mcp,
+            commands::delete_library_mcp,
+            commands::import_library_mcp,
+            commands::save_library_instruction,
+            commands::preview_library_instructions,
+            commands::apply_library_operation,
+            commands::recover_library_operation,
             commands::upsert_prompt,
             commands::delete_prompt,
             commands::enable_prompt,
@@ -1738,7 +1772,7 @@ pub fn run() {
                 RunEvent::Opened { urls } => {
                     if let Some(url) = urls.first() {
                         let url_str = url.to_string();
-                        log::info!("RunEvent::Opened with URL: {url_str}");
+                        log::info!("RunEvent::Opened received a URL");
 
                         if url_str.starts_with("ccswitch://")
                             || url_str.starts_with("ofoxswitch://")

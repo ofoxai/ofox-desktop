@@ -225,6 +225,14 @@ enum InstallationStatus {
 }
 
 impl ToolVersion {
+    pub(crate) fn into_resource_inventory(mut self) -> super::install_catalog::InventoryEntry {
+        if self.env_type == "wsl" || self.installation_kind != "cli" {
+            self.installation_status = InstallationStatus::Unknown;
+            self.error = Some("library.nativeCliRequired".into());
+        }
+        self.into_catalog_inventory()
+    }
+
     pub(crate) fn into_catalog_inventory(self) -> super::install_catalog::InventoryEntry {
         // The binding detector accepts ChatGPT as a legacy Codex fallback.
         // The installation catalog lists these two products separately.

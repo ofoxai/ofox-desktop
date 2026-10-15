@@ -636,18 +636,8 @@ fn load_record(db: &Database, tool: Tool) -> Result<Option<(String, StoredRecord
 
 /// 工具配置文件所在模块的锁：和应用里其它改同一份文件的路径互斥。拿到之后
 /// 不能再 `.await`。
-fn file_locks(tool: Tool) -> Vec<std::sync::MutexGuard<'static, ()>> {
-    let lock = |mutex: &'static std::sync::Mutex<()>| {
-        mutex
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    };
-    match tool {
-        Tool::OpenCode => vec![lock(crate::opencode_config::opencode_config_lock())],
-        Tool::OpenClaw => vec![lock(crate::openclaw_config::openclaw_write_lock())],
-        Tool::Hermes => vec![lock(crate::hermes_config::hermes_write_lock())],
-        Tool::Codex | Tool::Claude | Tool::Gemini => Vec::new(),
-    }
+fn file_locks(_tool: Tool) -> crate::config_io::IoGuard {
+    crate::config_io::lock()
 }
 
 /// 已经绑定的工具（切换模型时）：按 DB 模板重写接入字段，其余内容不动。

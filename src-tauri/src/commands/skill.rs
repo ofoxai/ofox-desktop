@@ -34,7 +34,10 @@ fn parse_app_type(app: &str) -> Result<AppType, String> {
 
 /// 获取所有已安装的 Skills
 #[tauri::command]
-pub fn get_installed_skills(app_state: State<'_, AppState>) -> Result<Vec<InstalledSkill>, String> {
+pub async fn get_installed_skills(
+    app_state: State<'_, AppState>,
+) -> Result<Vec<InstalledSkill>, String> {
+    crate::agent_env::ready().await;
     SkillService::get_all_installed(&app_state.db).map_err(|e| e.to_string())
 }
 

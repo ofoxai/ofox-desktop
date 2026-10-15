@@ -963,5 +963,15 @@ mod tests {
 
             assert!(awaits_ready(service.update_skill(&db, "missing")).await);
         }
+
+        #[tokio::test]
+        #[serial]
+        async fn webdav_resource_snapshots_wait_before_resolving_native_readers() {
+            let _sandbox = sandbox();
+            let db = Database::memory().unwrap();
+            let mut settings = crate::settings::WebDavSyncSettings::default();
+            assert!(awaits_ready(crate::services::webdav_sync::upload(&db, &mut settings)).await);
+            assert!(awaits_ready(crate::services::webdav_sync::download(&db, &mut settings)).await);
+        }
     }
 }

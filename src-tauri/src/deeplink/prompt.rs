@@ -57,16 +57,13 @@ pub fn import_prompt_from_deeplink(
         .to_lowercase();
     let id = format!("{sanitized_name}-{timestamp}");
 
-    // Check if we should enable this prompt
-    let should_enable = request.enabled.unwrap_or(false);
-
     // Create Prompt (initially disabled)
     let prompt = Prompt {
         id: id.clone(),
         name: name.clone(),
         content,
         description: request.description,
-        enabled: false, // Always start as disabled, will be enabled later if needed
+        enabled: false, // Import never assigns a native target.
         created_at: Some(timestamp),
         updated_at: Some(timestamp),
     };
@@ -74,13 +71,8 @@ pub fn import_prompt_from_deeplink(
     // Save using PromptService
     PromptService::upsert_prompt(state, app_type, &id, prompt)?;
 
-    // If enabled flag is set, enable this prompt (which will disable others)
-    if should_enable {
-        PromptService::enable_prompt(state, app_type, &id)?;
-        log::info!("Successfully imported and enabled prompt '{name}' for {app_str}");
-    } else {
-        log::info!("Successfully imported prompt '{name}' for {app_str} (disabled)");
-    }
+    // Imported link data cannot authorize native writes. Applying is a separate action.
+    log::info!("Imported prompt draft for {app_str}");
 
     Ok(id)
 }

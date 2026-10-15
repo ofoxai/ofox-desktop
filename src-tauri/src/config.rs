@@ -10,15 +10,21 @@ use crate::error::AppError;
 /// 测试沙箱（`test_sandbox::sandbox()`，单元测试与集成测试共用）会清空这些变量：开发者 shell 里残留的任何一个都会让测试读写真实 agent
 /// 的目录。只列出本应用确实会读取的变量：`CODEX_HOME`、`CLAUDE_CONFIG_DIR` 由
 /// `agent_env` 读取（进程环境，以及登录 shell / 注册表里的快照），`HERMES_HOME`、
-/// `PI_CODING_AGENT_DIR`、`DSH_HOME` 由各自的配置模块直接读取。`GEMINI_CLI_HOME`、
-/// `OPENCODE_CONFIG_DIR`、`OPENCODE_CONFIG`、`WORKBUDDY_CONFIG_DIR` 目前没有任何代码读取，
-/// 故不在列；新增读取某个 agent 目录变量时，在这里补上。
+/// `PI_CODING_AGENT_DIR`、`DSH_HOME`、`GEMINI_CLI_HOME` 由配置模块直接读取。
+/// OpenCode 的额外全局配置和 Skills 开关也必须隔离；新增读取变量时在这里补上。
 pub const AGENT_DIR_VARS: &[&str] = &[
     "CODEX_HOME",
     "CLAUDE_CONFIG_DIR",
     "HERMES_HOME",
     "PI_CODING_AGENT_DIR",
     "DSH_HOME",
+    "GEMINI_CLI_HOME",
+    "OPENCODE_CONFIG_DIR",
+    "OPENCODE_CONFIG",
+    "OPENCODE_CONFIG_CONTENT",
+    "OPENCODE_DISABLE_EXTERNAL_SKILLS",
+    "OPENCODE_DISABLE_CLAUDE_CODE",
+    "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS",
 ];
 
 /// 读取 `CC_SWITCH_TEST_HOME` 显式覆盖；空白视为未设置。
@@ -89,6 +95,7 @@ pub fn get_claude_config_dir() -> PathBuf {
 }
 
 /// 默认 Claude MCP 配置文件路径 (~/.claude.json)
+#[cfg(test)]
 pub fn get_default_claude_mcp_path() -> PathBuf {
     get_home_dir().join(".claude.json")
 }
@@ -287,7 +294,7 @@ pub fn atomic_write_with(path: &Path, data: &[u8], opts: AtomicOpts) -> Result<(
 
 /// 写 `path` 时真正要替换的文件：`path` 不是符号链接就是它自己，否则是链接指向的文件
 /// （目标还不存在的悬空链接也算，这样写入会建出目标而不是把链接换成普通文件）。
-fn write_target(path: &Path) -> Result<PathBuf, AppError> {
+pub(crate) fn write_target(path: &Path) -> Result<PathBuf, AppError> {
     if !is_symlink(path) {
         return Ok(path.to_path_buf());
     }
