@@ -1,7 +1,7 @@
 //! Ofox 模型 pricing 同步
 //!
-//! 从 Ofox 三个 model-list 端点（`/v1/models`、`/anthropic/v1/models`、
-//! `/gemini/v1beta/models`）拉取每个模型的 pricing 字段，写入本地
+//! 从 resolved apex 的公开 `/v1/models` 拉取完整 pricing，保存独立的
+//! current-ofox-base-v1 catalog，再兼容写入本地
 //! `model_pricing` 表，让 claude/codex/gemini 的会话日志成本估算与 Ofox
 //! 实际计费保持一致。
 //!
@@ -29,8 +29,8 @@
 //!
 //! ## Cooldown
 //!
-//! `sync_pricing_if_needed` 用 `AppSettings::last_pricing_sync_at` 做 24h
-//! 门控；`sync_pricing` 强制刷新（用户点 ConsolePage「刷新」会走这条）。
+//! `sync_pricing_if_needed` 按独立 catalog 的 apex 和抓取时间做 24h
+//! 门控；`sync_pricing` 强制刷新。旧设置时间戳只为兼容保留。
 
 use std::time::SystemTime;
 
@@ -48,14 +48,13 @@ use crate::error::AppError;
 #[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct PricingSyncResult {
-    /// 三端点合计返回的有效模型条数（已经按 `id` 去重前的原始数）。
+    /// 公开目录返回的有效模型条数。
     pub models: usize,
     /// 实际写入 `model_pricing` 表的行数（每个模型展开 N 个 alias key）。
     pub rows: usize,
     /// 是否被 cooldown 跳过（用于 startup 路径）。
     pub skipped: bool,
-    /// 各端点的 fetch 错误信息。仅当至少一个端点成功时才会到达写库阶段；
-    /// 全部失败时整个 `sync_pricing` 直接返回 Err。
+    /// 兼容字段；公开目录请求失败时整个同步返回 Err。
     pub errors: Vec<String>,
 }
 
@@ -128,10 +127,8 @@ impl From<OpenAiShapeModel> for Option<NormalizedModel> {
 
 /// 强制同步 Ofox pricing 到本地。失败时不更新 cooldown。
 ///
-/// **只打 `/v1/models`** 一个端点。这一个端点已包含全部厂商（anthropic /
-/// google / openai / 第三方）的全部模型 + 完整 pricing —— 经实测生产
-/// `https://api.ofox.ai/v1/models` 返回 ~98 个模型，覆盖所有 cc-switch
-/// 关心的工具。`/anthropic/v1/models` 与 `/gemini/v1beta/models` 在某些
+/// **只打 `/v1/models`** 一个端点。该公开目录包含全部厂商模型和价格。
+/// `/anthropic/v1/models` 与 `/gemini/v1beta/models` 在某些
 /// 部署环境下需要 Bearer token 鉴权（401），且即使能拿到也只是
 /// `/v1/models` 的子集，没必要冒鉴权失败的风险去打。
 pub async fn sync_pricing(db: &Database) -> Result<PricingSyncResult, AppError> {

@@ -56,7 +56,7 @@ impl Sum {
             &atom.model,
             atom.tokens,
             (!atom.archived).then_some(atom.requests),
-        ));
+        ))?;
         Ok(())
     }
     pub(crate) fn totals(&self) -> Result<UsageTotals, AppError> {
@@ -93,18 +93,8 @@ impl Sum {
     }
 }
 
-fn boundary<Tz: TimeZone>(tz: &Tz, date: chrono::NaiveDate) -> Result<i64, AppError> {
-    let mut at = date.and_hms_opt(0, 0, 0).ok_or_else(overflow)?;
-    for _ in 0..48 {
-        match tz.from_local_datetime(&at) {
-            chrono::LocalResult::Single(v) => return Ok(v.timestamp_millis()),
-            chrono::LocalResult::Ambiguous(a, b) => {
-                return Ok(a.timestamp_millis().min(b.timestamp_millis()))
-            }
-            chrono::LocalResult::None => at += chrono::Duration::minutes(30),
-        }
-    }
-    Err(overflow())
+pub(crate) fn boundary<Tz: TimeZone>(tz: &Tz, date: chrono::NaiveDate) -> Result<i64, AppError> {
+    super::usage_time::local_day_start_ms(tz, date)
 }
 
 pub fn build_query_overview<Tz: TimeZone>(
@@ -153,7 +143,11 @@ pub fn build_query_overview<Tz: TimeZone>(
         }
     };
     let mut series: BTreeMap<i64, Sum> = BTreeMap::new();
-    let mut at = bucket(first)?;
+    let mut at = if first < data.query.end_ms {
+        bucket(first)?
+    } else {
+        data.query.end_ms
+    };
     while at < data.query.end_ms {
         if series.len() >= 10_000 {
             return Err(AppError::InvalidInput("usage.query.tooManyBuckets".into()));
@@ -289,6 +283,26 @@ mod tests {
             source_ids: vec![],
         }
     }
+    #[test]
+    fn analytics_empty_half_open_query_has_no_series_buckets() {
+        let db = Database::memory().unwrap();
+        let mut q = query();
+        q.end_ms += 123;
+        q.start_ms = Some(q.end_ms);
+        let result = build_query_overview(
+            &db,
+            UsagePeriod::All,
+            q.clone(),
+            "ofox.ai",
+            q.end_ms,
+            &chrono::Utc,
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.totals.requests, 0);
+        assert!(result.series.is_empty());
+    }
+
     #[test]
     fn analytics_query_unions_only_live_and_rollups_and_echoes_normalized_query() {
         let db = Database::memory().unwrap();

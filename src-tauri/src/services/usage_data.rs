@@ -1,6 +1,6 @@
 //! One read transaction supplies every block of a versioned analytics response.
 use super::{
-    ofox_pricing::PriceCatalog,
+    ofox_pricing::{parse_amount, PriceCatalog},
     usage_query::{Coverage, SourceHealth, UsageQueryV1},
     usage_stats::RequestLogDetail,
 };
@@ -10,7 +10,7 @@ use rusqlite::{params_from_iter, types::Value as SqlValue, Connection, OptionalE
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, str::FromStr};
+use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_ROWS: usize = 100_000;
 const MAX_BYTES: usize = 64 * 1024 * 1024;
@@ -221,20 +221,8 @@ fn options_on(conn: &Connection) -> Result<FilterOptions, AppError> {
     }
     Ok(options)
 }
-fn midnight<Tz: TimeZone>(tz: &Tz, date: NaiveDate) -> Result<i64, AppError> {
-    let mut value = date
-        .and_hms_opt(0, 0, 0)
-        .ok_or_else(|| AppError::InvalidInput("usage.query.invalidTime".into()))?;
-    for _ in 0..48 {
-        match tz.from_local_datetime(&value) {
-            chrono::LocalResult::Single(v) => return Ok(v.timestamp_millis()),
-            chrono::LocalResult::Ambiguous(a, b) => {
-                return Ok(a.timestamp_millis().min(b.timestamp_millis()))
-            }
-            chrono::LocalResult::None => value += chrono::Duration::minutes(30),
-        }
-    }
-    Err(AppError::InvalidInput("usage.query.invalidTime".into()))
+pub(crate) fn midnight<Tz: TimeZone>(tz: &Tz, date: NaiveDate) -> Result<i64, AppError> {
+    super::usage_time::local_day_start_ms(tz, date)
 }
 
 pub fn read_dataset<Tz: TimeZone>(
@@ -284,7 +272,7 @@ pub fn read_dataset<Tz: TimeZone>(
                     row.cache_creation_tokens as u64,
                 ],
                 requests: 1,
-                saved_cost: Decimal::from_str(&row.total_cost_usd).unwrap_or(Decimal::ZERO),
+                saved_cost: parse_amount(&row.total_cost_usd)?,
                 archived: false,
             })
         })
@@ -367,7 +355,7 @@ pub fn read_dataset<Tz: TimeZone>(
             at_ms: start,
             tokens,
             requests,
-            saved_cost: Decimal::from_str(&cost).unwrap_or(Decimal::ZERO),
+            saved_cost: parse_amount(&cost)?,
             archived: true,
         });
     }
@@ -385,10 +373,22 @@ pub fn read_dataset<Tz: TimeZone>(
             .push("legacyArchiveCoverageUnproven".into());
     }
     let sources = source_health_on(&tx)?;
-    if sources.iter().any(|s| {
-        ["failed", "partial"].contains(&s.status.as_str())
-            && (query.tool_ids.is_empty() || query.tool_ids.contains(&s.tool_id))
-    }) {
+    let source_selected = |s: &SourceHealth| {
+        (query.tool_ids.is_empty() || query.tool_ids.contains(&s.tool_id))
+            && (query.source_ids.is_empty() || query.source_ids.contains(&s.source_id))
+            && request_filters
+                .is_none_or(|f| f.source_ids.is_empty() || f.source_ids.contains(&s.source_id))
+    };
+    if sources
+        .iter()
+        .any(|s| s.status == "unknown" && source_selected(s))
+    {
+        coverage.reasons.push("sourceHealthUnknown".into());
+    }
+    if sources
+        .iter()
+        .any(|s| ["failed", "partial"].contains(&s.status.as_str()) && source_selected(s))
+    {
         coverage.reasons.push("sourceReadIncomplete".into());
     }
     for tool in &query.tool_ids {
@@ -400,6 +400,20 @@ pub fn read_dataset<Tz: TimeZone>(
             coverage.reasons.push(format!("unsupportedTool:{tool}"));
         }
     }
+    let capabilities = super::usage_query::source_capabilities();
+    for source in query
+        .source_ids
+        .iter()
+        .chain(request_filters.into_iter().flat_map(|f| &f.source_ids))
+    {
+        if source != "proxy"
+            && !capabilities
+                .iter()
+                .any(|c| c.usage_supported && c.source_ids.contains(source))
+        {
+            coverage.reasons.push(format!("unsupportedSource:{source}"));
+        }
+    }
     coverage.reasons.sort();
     coverage.reasons.dedup();
     if !coverage.reasons.is_empty() {
@@ -407,7 +421,7 @@ pub fn read_dataset<Tz: TimeZone>(
             && coverage
                 .reasons
                 .iter()
-                .all(|r| r.starts_with("unsupportedTool:"))
+                .all(|r| r.starts_with("unsupportedTool:") || r.starts_with("unsupportedSource:"))
         {
             "unsupported"
         } else {
@@ -441,6 +455,10 @@ pub fn read_dataset<Tz: TimeZone>(
         serde_json::to_vec(&catalog.coverage)
             .map_err(|_| AppError::Database("usage.query.serialize".into()))?,
     );
+    hash.update(
+        serde_json::to_vec(&(&coverage, &options, &sources))
+            .map_err(|_| AppError::Database("usage.query.serialize".into()))?,
+    );
     tx.commit()?;
     Ok(Dataset {
         query,
@@ -464,11 +482,7 @@ pub fn source_health_on(conn: &Connection) -> Result<Vec<SourceHealth>, AppError
             |r| r.get(0),
         )
         .optional()?;
-    if let Some(raw) = raw {
-        return serde_json::from_str(&raw)
-            .map_err(|_| AppError::Database("usage.sources.invalidHealth".into()));
-    }
-    Ok(super::usage_query::source_capabilities()
+    let mut health = super::usage_query::source_capabilities()
         .into_iter()
         .flat_map(|capability| {
             let ids = if capability.source_ids.is_empty() {
@@ -490,5 +504,148 @@ pub fn source_health_on(conn: &Connection) -> Result<Vec<SourceHealth>, AppError
                 error_code: capability.reason.clone(),
             })
         })
-        .collect())
+        .map(|s| ((s.tool_id.clone(), s.source_id.clone()), s))
+        .collect::<BTreeMap<_, _>>();
+    if let Some(raw) = raw {
+        let stored: Vec<SourceHealth> = serde_json::from_str(&raw)
+            .map_err(|_| AppError::Database("usage.sources.invalidHealth".into()))?;
+        let mut seen = BTreeSet::new();
+        for row in stored {
+            let key = (row.tool_id.clone(), row.source_id.clone());
+            if !seen.insert(key.clone()) {
+                return Err(AppError::Database("usage.sources.conflictingHealth".into()));
+            }
+            if let Some(slot) = health.get_mut(&key).filter(|s| s.status != "unsupported") {
+                if !["unknown", "ok", "partial", "failed"].contains(&row.status.as_str())
+                    || (row.status == "ok" && row.last_success_at_ms.is_none())
+                {
+                    slot.error_code = Some("usage.sources.invalidHealth".into());
+                } else {
+                    *slot = row;
+                }
+            }
+        }
+    }
+    Ok(health.into_values().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn query() -> UsageQueryV1 {
+        UsageQueryV1 {
+            version: 1,
+            start_ms: Some(1000),
+            end_ms: 3000,
+            tool_ids: vec!["claude".into()],
+            model_ids: vec![],
+            project_ids: vec![],
+            source_ids: vec![],
+        }
+    }
+    #[test]
+    fn analytics_saved_scientific_amount_is_not_replaced_by_zero() {
+        let db = Database::memory().unwrap();
+        db.conn.lock().unwrap().execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at,total_cost_usd) VALUES('a','p','claude','m',1,0,200,1,'1e-7')",[]).unwrap();
+        let data = read_dataset(&db, query(), None, "ofox.ai", 3000, &chrono::Utc).unwrap();
+        assert_eq!(
+            data.atoms[0].saved_cost,
+            Decimal::from_scientific("1e-7").unwrap()
+        );
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE proxy_request_logs SET total_cost_usd='invalid'", [])
+            .unwrap();
+        assert!(read_dataset(&db, query(), None, "ofox.ai", 3000, &chrono::Utc).is_err());
+    }
+
+    #[test]
+    fn analytics_rollup_scientific_amount_is_not_replaced_by_zero() {
+        let db = Database::memory().unwrap();
+        db.conn.lock().unwrap().execute("INSERT INTO usage_daily_rollups(date,app_type,provider_id,model,request_count,input_tokens,total_cost_usd) VALUES('2026-10-01','claude','p','m',1,1,'1e-7')",[]).unwrap();
+        let mut q = query();
+        q.start_ms = Some(
+            chrono::Utc
+                .with_ymd_and_hms(2026, 10, 1, 0, 0, 0)
+                .unwrap()
+                .timestamp_millis(),
+        );
+        q.end_ms = q.start_ms.unwrap() + 86_400_000;
+        let data = read_dataset(&db, q.clone(), None, "ofox.ai", q.end_ms, &chrono::Utc).unwrap();
+        assert_eq!(data.atoms.len(), 1);
+        assert_eq!(
+            data.atoms[0].saved_cost,
+            Decimal::from_scientific("1e-7").unwrap()
+        );
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE usage_daily_rollups SET total_cost_usd='invalid'",
+                [],
+            )
+            .unwrap();
+        assert!(read_dataset(&db, q.clone(), None, "ofox.ai", q.end_ms, &chrono::Utc).is_err());
+    }
+    #[test]
+    fn analytics_millisecond_boundaries_are_half_open_and_do_not_round_down() {
+        let db = Database::memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            for (id, at) in [("a", 1), ("b", 2), ("c", 3)] {
+                conn.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at) VALUES(?1,'p','claude','m',1,0,200,?2)",rusqlite::params![id,at]).unwrap();
+            }
+        }
+        let mut q = query();
+        q.start_ms = Some(1001);
+        q.end_ms = 2001;
+        let data = read_dataset(&db, q, None, "ofox.ai", 3000, &chrono::Utc).unwrap();
+        assert_eq!(
+            data.records
+                .iter()
+                .map(|r| r.request_id.as_str())
+                .collect::<Vec<_>>(),
+            ["b"]
+        );
+    }
+
+    #[test]
+    fn analytics_missing_source_health_cannot_certify_complete_coverage() {
+        let db = Database::memory().unwrap();
+        db.conn.lock().unwrap().execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at) VALUES('a','p','claude','m',1,0,200,1)",[]).unwrap();
+        let data = read_dataset(&db, query(), None, "ofox.ai", 3000, &chrono::Utc).unwrap();
+        assert_eq!(data.coverage.state, "partial");
+        assert!(data
+            .coverage
+            .reasons
+            .iter()
+            .any(|r| r == "sourceHealthUnknown"));
+    }
+
+    #[test]
+    fn analytics_one_source_health_does_not_hide_other_unattempted_sources() {
+        let db = Database::memory().unwrap();
+        db.conn.lock().unwrap().execute("INSERT INTO settings(key,value) VALUES('usage_source_health_v1',?1)", [r#"[{"sourceId":"gemini_session","toolId":"gemini","status":"ok","lastAttemptAtMs":2000,"lastSuccessAtMs":2000,"errorCode":null}]"#]).unwrap();
+        let data = read_dataset(&db, query(), None, "ofox.ai", 3000, &chrono::Utc).unwrap();
+        assert_eq!(data.coverage.state, "partial");
+        assert!(data
+            .sources
+            .iter()
+            .any(|s| s.tool_id == "claude" && s.status == "unknown"));
+    }
+
+    #[test]
+    fn analytics_unknown_source_filter_is_not_certified_as_complete_empty_usage() {
+        let db = Database::memory().unwrap();
+        let mut q = query();
+        q.source_ids.push("not-a-reader".into());
+        let data = read_dataset(&db, q, None, "ofox.ai", 3000, &chrono::Utc).unwrap();
+        assert_eq!(data.coverage.state, "unsupported");
+        assert!(data
+            .coverage
+            .reasons
+            .iter()
+            .any(|r| r == "unsupportedSource:not-a-reader"));
+    }
 }

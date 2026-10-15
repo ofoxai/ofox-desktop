@@ -7,10 +7,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    str::FromStr,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const POLICY: &str = "current-ofox-base-v1";
 const MAX_CATALOG_BYTES: usize = 4 * 1024 * 1024;
@@ -44,27 +41,44 @@ impl CostEstimate {
             ..Self::default()
         }
     }
-    pub fn combine(&mut self, other: &Self) {
+    pub fn combine(&mut self, other: &Self) -> Result<(), AppError> {
         let before_has_unknown = self.availability == "partial"
             || (self.availability == "unknown" && !self.unpriced_model_ids.is_empty());
         let other_has_unknown = other.availability == "partial"
             || (other.availability == "unknown" && !other.unpriced_model_ids.is_empty());
-        let parse =
-            |value: &Option<String>| value.as_deref().and_then(|v| Decimal::from_str(v).ok());
-        self.known_cost_usd = match (parse(&self.known_cost_usd), parse(&other.known_cost_usd)) {
-            (Some(a), Some(b)) => a.checked_add(b).map(clean_decimal),
-            (Some(a), None) => Some(clean_decimal(a)),
-            (None, Some(b)) => Some(clean_decimal(b)),
-            _ => None,
-        };
+        let a = self
+            .known_cost_usd
+            .as_deref()
+            .map(parse_amount)
+            .transpose()?;
+        let b = other
+            .known_cost_usd
+            .as_deref()
+            .map(parse_amount)
+            .transpose()?;
+        let cost =
+            match (a, b) {
+                (Some(a), Some(b)) => Some(clean_decimal(a.checked_add(b).ok_or_else(|| {
+                    AppError::Database("usage.pricing.aggregateOverflow".into())
+                })?)),
+                (Some(a), None) => Some(clean_decimal(a)),
+                (None, Some(b)) => Some(clean_decimal(b)),
+                _ => None,
+            };
+        let count = self
+            .unpriced_record_count
+            .zip(other.unpriced_record_count)
+            .map(|(a, b)| {
+                a.checked_add(b)
+                    .ok_or_else(|| AppError::Database("usage.pricing.aggregateOverflow".into()))
+            })
+            .transpose()?;
+        self.known_cost_usd = cost;
         self.unpriced_model_ids
             .extend(other.unpriced_model_ids.iter().cloned());
         self.unpriced_model_ids.sort();
         self.unpriced_model_ids.dedup();
-        self.unpriced_record_count = self
-            .unpriced_record_count
-            .zip(other.unpriced_record_count)
-            .and_then(|(a, b)| a.checked_add(b));
+        self.unpriced_record_count = count;
         self.additional_units_unsupported |= other.additional_units_unsupported;
         self.availability = match self.known_cost_usd.as_deref() {
             None => "unknown",
@@ -74,6 +88,7 @@ impl CostEstimate {
             _ => "known",
         }
         .into();
+        Ok(())
     }
 }
 
@@ -84,6 +99,8 @@ pub struct PricingCoverage {
     pub apex: String,
     pub catalog_version: Option<String>,
     pub catalog_updated_at_ms: Option<i64>,
+    pub catalog_state: String,
+    pub error_code: Option<String>,
     pub stale: bool,
     pub unpriced_model_ids: Vec<String>,
     pub unpriced_record_count: Option<u64>,
@@ -94,7 +111,7 @@ pub struct PricingCoverage {
 #[serde(rename_all = "camelCase")]
 struct ModelRate {
     rates: [Option<String>; 4],
-    additional_units: Vec<String>,
+    additional_units: BTreeMap<String, Option<String>>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -119,14 +136,24 @@ pub fn clean_decimal(value: Decimal) -> String {
 }
 
 /// Exact decimal including scientific notation; unknown is never synthesized as 0.
-pub fn parse_rate(value: &str) -> Result<Decimal, AppError> {
+pub fn parse_amount(value: &str) -> Result<Decimal, AppError> {
     let value = value.trim();
     if value.is_empty() {
         return Err(AppError::InvalidInput("usage.pricing.emptyRate".into()));
     }
-    let result = Decimal::from_str(value)
-        .or_else(|_| Decimal::from_scientific(value))
-        .map_err(|_| AppError::InvalidInput("usage.pricing.invalidRate".into()))?;
+    let invalid = || AppError::InvalidInput("usage.pricing.invalidAmount".into());
+    if let Some((base, exponent)) = value.split_once(['e', 'E']) {
+        // from_scientific internally uses the rounding parser for its mantissa.
+        // Validate and normalize that mantissa with the exact parser first.
+        let base = Decimal::from_str_exact(base).map_err(|_| invalid())?;
+        Decimal::from_scientific(&format!("{}e{exponent}", base.normalize())).map_err(|_| invalid())
+    } else {
+        Decimal::from_str_exact(value).map_err(|_| invalid())
+    }
+}
+
+pub fn parse_rate(value: &str) -> Result<Decimal, AppError> {
+    let result = parse_amount(value)?;
     if result.is_sign_negative() {
         return Err(AppError::InvalidInput("usage.pricing.negativeRate".into()));
     }
@@ -135,6 +162,16 @@ pub fn parse_rate(value: &str) -> Result<Decimal, AppError> {
 
 fn key(apex: &str) -> String {
     format!("ofox_usage_pricing_catalog_v1:{apex}")
+}
+
+fn catalog_hash(
+    apex: &str,
+    models: &BTreeMap<String, ModelRate>,
+    aliases: &BTreeMap<String, Option<String>>,
+) -> Result<String, AppError> {
+    let canonical = serde_json::to_vec(&(POLICY, apex, models, aliases))
+        .map_err(|_| AppError::Database("usage.pricing.serializeCatalog".into()))?;
+    Ok(format!("{:x}", Sha256::digest(canonical)))
 }
 
 impl PriceCatalog {
@@ -149,20 +186,25 @@ impl PriceCatalog {
                 |row| row.get(0),
             )
             .optional()?;
-        let snapshot = match raw {
-            None => None,
+        let (snapshot, catalog_state, error_code) = match raw {
+            None => (None, "missing", None),
             Some(raw) => {
                 if raw.len() > MAX_CATALOG_BYTES {
-                    return Err(AppError::Database("usage.pricing.catalogTooLarge".into()));
+                    (None, "invalid", Some("usage.pricing.catalogTooLarge"))
+                } else {
+                    match serde_json::from_str::<CatalogSnapshot>(&raw) {
+                        Err(_) => (None, "invalid", Some("usage.pricing.invalidCatalog")),
+                        Ok(s) if s.version != 1 || s.apex != apex || s.policy != POLICY => (
+                            None,
+                            "unsupported",
+                            Some("usage.pricing.unsupportedCatalog"),
+                        ),
+                        Ok(s) if catalog_hash(apex, &s.models, &s.aliases)? != s.content_hash => {
+                            (None, "invalid", Some("usage.pricing.contentMismatch"))
+                        }
+                        Ok(s) => (Some(s), "ready", None),
+                    }
                 }
-                let snapshot: CatalogSnapshot = serde_json::from_str(&raw)
-                    .map_err(|_| AppError::Database("usage.pricing.invalidCatalog".into()))?;
-                if snapshot.version != 1 || snapshot.apex != apex || snapshot.policy != POLICY {
-                    return Err(AppError::Database(
-                        "usage.pricing.unsupportedCatalog".into(),
-                    ));
-                }
-                Some(snapshot)
             }
         };
         let coverage = PricingCoverage {
@@ -170,6 +212,8 @@ impl PriceCatalog {
             apex: apex.into(),
             catalog_version: snapshot.as_ref().map(|s| s.content_hash.clone()),
             catalog_updated_at_ms: snapshot.as_ref().map(|s| s.fetched_at_ms),
+            catalog_state: catalog_state.into(),
+            error_code: error_code.map(str::to_owned),
             stale: snapshot.as_ref().is_none_or(|s| {
                 now_ms.saturating_sub(s.fetched_at_ms) >= FRESH_MS || s.fetched_at_ms > now_ms
             }),
@@ -241,11 +285,11 @@ impl PriceCatalog {
                     {
                         return None;
                     }
-                    let is_nonzero = value
+                    let normalized = value
                         .as_str()
                         .and_then(|v| parse_rate(v).ok())
-                        .is_none_or(|v| !v.is_zero());
-                    is_nonzero.then(|| name.clone())
+                        .map(clean_decimal);
+                    Some((name.clone(), normalized))
                 })
                 .collect();
             models.insert(
@@ -291,13 +335,11 @@ impl PriceCatalog {
                 (alias, canonical)
             })
             .collect::<BTreeMap<_, _>>();
-        let canonical = serde_json::to_vec(&(POLICY, apex, &models, &aliases))
-            .map_err(|_| AppError::Database("usage.pricing.serializeCatalog".into()))?;
         let snapshot = CatalogSnapshot {
             version: 1,
             policy: POLICY.into(),
             apex: apex.into(),
-            content_hash: format!("{:x}", Sha256::digest(canonical)),
+            content_hash: catalog_hash(apex, &models, &aliases)?,
             fetched_at_ms,
             models,
             aliases,
@@ -342,10 +384,17 @@ impl PriceCatalog {
             }
         }
         if buckets == [0; 4] {
-            known = resolved.is_some();
+            known = resolved.is_some_and(|rate| rate.rates.iter().all(Option::is_some));
             unknown = !known;
         }
-        let additional = resolved.is_some_and(|rate| !rate.additional_units.is_empty());
+        let additional = resolved.is_some_and(|rate| {
+            rate.additional_units.values().any(|value| {
+                value
+                    .as_deref()
+                    .and_then(|v| parse_rate(v).ok())
+                    .is_none_or(|v| !v.is_zero())
+            })
+        });
         let availability = if !known {
             "unknown"
         } else if unknown || (amount.is_zero() && additional) {
@@ -432,6 +481,27 @@ mod tests {
     }
 
     #[test]
+    fn analytics_current_cost_overflow_never_discards_the_previous_sum() {
+        let mut total = CostEstimate {
+            known_cost_usd: Some(Decimal::MAX.to_string()),
+            availability: "known".into(),
+            ..CostEstimate::default()
+        };
+        let increment = CostEstimate {
+            known_cost_usd: Some("1".into()),
+            availability: "known".into(),
+            ..CostEstimate::default()
+        };
+        assert!(total.combine(&increment).is_err());
+        assert!(total.combine(&increment).is_err());
+        assert_eq!(
+            total.known_cost_usd.as_deref(),
+            Some(Decimal::MAX.to_string().as_str()),
+            "overflow dropped the earlier sum and a later combine could restart it"
+        );
+    }
+
+    #[test]
     fn analytics_catalog_distinguishes_free_missing_partial_and_additional_units() {
         let db = Database::memory().unwrap();
         let conn = db.conn.lock().unwrap();
@@ -487,6 +557,97 @@ mod tests {
                 .availability,
             "known"
         );
+    }
+
+    #[test]
+    fn analytics_rate_underflow_is_unknown_and_not_an_explicit_free_price() {
+        assert!(parse_rate("0.00000000000000000000000000001").is_err());
+        assert!(parse_rate("0.00000000000000000000000000001e0").is_err());
+        assert!(parse_rate("1e-29").is_err());
+        assert_eq!(parse_rate("1e-9").unwrap().to_string(), "0.000000001");
+    }
+
+    #[test]
+    fn analytics_zero_token_record_does_not_make_a_missing_price_free() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let catalog = PriceCatalog::ingest_on(&conn, "ofox.ai", &serde_json::json!({"data":[
+            {"id":"missing","pricing":{}},
+            {"id":"free","pricing":{"prompt":"0","completion":"0","input_cache_read":"0","input_cache_write":"0"}}
+        ]}), 10).unwrap();
+        let unknown = catalog.estimate("missing", [0; 4], Some(1));
+        assert_eq!(unknown.availability, "unknown");
+        assert_eq!(unknown.known_cost_usd, None);
+        assert_eq!(unknown.unpriced_record_count, Some(1));
+        assert_eq!(
+            catalog.estimate("free", [0; 4], Some(1)).availability,
+            "free"
+        );
+    }
+
+    #[test]
+    fn analytics_catalog_unknown_cache_does_not_certify_free_or_reuse_a_forged_version() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO settings(key,value) VALUES(?1,'invalid JSON')",
+            [key("ofox.ai")],
+        )
+        .unwrap();
+        let missing = PriceCatalog::load_on(&conn, "ofox.ai", 20).unwrap();
+        assert_eq!(
+            missing.estimate("free", [1, 0, 0, 0], Some(1)).availability,
+            "unknown"
+        );
+        assert_eq!(missing.coverage.catalog_version, None);
+        let valid = PriceCatalog::ingest_on(&conn, "ofox.ai", &payload(), 20).unwrap();
+        let mut saved: Value = serde_json::from_str(
+            &conn
+                .query_row::<String, _, _>(
+                    "SELECT value FROM settings WHERE key=?1",
+                    [key("ofox.ai")],
+                    |r| r.get(0),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        saved["models"]["a/free"]["rates"][0] = json!("99");
+        conn.execute(
+            "UPDATE settings SET value=?1 WHERE key=?2",
+            params![saved.to_string(), key("ofox.ai")],
+        )
+        .unwrap();
+        let corrupt = PriceCatalog::load_on(&conn, "ofox.ai", 30).unwrap();
+        assert_eq!(corrupt.coverage.catalog_version, None);
+        assert_eq!(
+            corrupt.estimate("free", [1, 0, 0, 0], Some(1)).availability,
+            "unknown"
+        );
+        assert!(valid.coverage.catalog_version.is_some());
+    }
+    #[test]
+    fn analytics_catalog_version_does_not_depend_on_extra_field_order() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let one:Value=serde_json::from_str(r#"{"data":[{"id":"m","pricing":{"prompt":"1e-6","output_audio":"1","web_search":"2"}}]}"#).unwrap();
+        let two:Value=serde_json::from_str(r#"{"data":[{"id":"m","pricing":{"web_search":"2","output_audio":"1","prompt":"1e-6"}}]}"#).unwrap();
+        let a = PriceCatalog::ingest_on(&conn, "ofox.ai", &one, 1).unwrap();
+        let b = PriceCatalog::ingest_on(&conn, "ofox.ai", &two, 2).unwrap();
+        assert_eq!(a.coverage.catalog_version, b.coverage.catalog_version);
+    }
+
+    #[test]
+    fn analytics_catalog_version_changes_when_an_unsupported_unit_price_changes() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let mut payload = serde_json::json!({"data":[{"id":"video","pricing":{"prompt":"0","completion":"0","output_video_per_second":"0.13"}}]});
+        let a = PriceCatalog::ingest_on(&conn, "ofox.ai", &payload, 10).unwrap();
+        payload["data"][0]["pricing"]["output_video_per_second"] = serde_json::json!("0.14");
+        let b = PriceCatalog::ingest_on(&conn, "ofox.ai", &payload, 20).unwrap();
+        assert_ne!(a.coverage.catalog_version, b.coverage.catalog_version);
+        let estimate = b.estimate("video", [1, 0, 0, 0], Some(1));
+        assert!(estimate.additional_units_unsupported);
+        assert_eq!(estimate.availability, "partial");
     }
 
     #[test]

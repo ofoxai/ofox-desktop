@@ -24,7 +24,6 @@ use serde::{Deserialize, Serialize};
 const WEEKLY_AFTER_DAYS: i64 = 180;
 
 /// Tools OFox can bind but whose sessions have no usage reader yet.
-const UNSUPPORTED_TOOLS: [&str; 5] = ["openclaw", "hermes", "pi", "dsh", "workbuddy"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UsagePeriod {
@@ -389,7 +388,11 @@ pub fn build_overview<Tz: TimeZone>(
         by_tool,
         by_model,
         last_synced_at,
-        unsupported_tools: UNSUPPORTED_TOOLS.iter().map(|t| t.to_string()).collect(),
+        unsupported_tools: super::usage_query::source_capabilities()
+            .into_iter()
+            .filter(|c| !c.usage_supported)
+            .map(|c| c.tool_id)
+            .collect(),
         analytics: None,
     })
 }
@@ -397,6 +400,19 @@ pub fn build_overview<Tz: TimeZone>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn analytics_legacy_and_query_overviews_share_one_capability_registry() {
+        let db = Database::memory().unwrap();
+        let legacy =
+            build_overview(&db, UsagePeriod::All, 1_760_000_000_000, &chrono::Utc, None).unwrap();
+        let expected = crate::services::usage_query::source_capabilities()
+            .into_iter()
+            .filter(|c| !c.usage_supported)
+            .map(|c| c.tool_id)
+            .collect::<Vec<_>>();
+        assert_eq!(legacy.unsupported_tools, expected);
+    }
 
     #[test]
     fn analytics_capabilities_include_workbuddy_without_a_usage_reader() {
@@ -487,6 +503,64 @@ mod tests {
             .with_ymd_and_hms(y, mo, d, h, mi, 0)
             .unwrap()
             .timestamp()
+    }
+
+    fn quarter_hour_midnight_gap() -> DstZone {
+        DstZone {
+            std: 0,
+            dst: 15 * 60,
+            dst_start: utc(2026, 10, 4, 0, 0),
+            dst_end: utc(2026, 10, 6, 0, 0),
+        }
+    }
+
+    fn skipped_natural_day() -> DstZone {
+        DstZone {
+            std: -12 * 3600,
+            dst: 12 * 3600,
+            dst_start: utc(2026, 10, 4, 12, 0),
+            dst_end: utc(2026, 10, 6, 12, 0),
+        }
+    }
+
+    #[test]
+    fn analytics_midnight_data_finds_the_first_valid_second_of_a_quarter_hour_gap() {
+        let at = super::super::usage_data::midnight(
+            &quarter_hour_midnight_gap(),
+            NaiveDate::from_ymd_opt(2026, 10, 4).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(at, utc(2026, 10, 4, 0, 0) * 1000);
+    }
+
+    #[test]
+    fn analytics_midnight_series_finds_the_first_valid_second_of_a_quarter_hour_gap() {
+        let at = super::super::usage_analytics::boundary(
+            &quarter_hour_midnight_gap(),
+            NaiveDate::from_ymd_opt(2026, 10, 4).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(at, utc(2026, 10, 4, 0, 0) * 1000);
+    }
+
+    #[test]
+    fn analytics_midnight_data_accepts_an_entire_skipped_day_at_the_next_boundary() {
+        let at = super::super::usage_data::midnight(
+            &skipped_natural_day(),
+            NaiveDate::from_ymd_opt(2026, 10, 4).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(at, utc(2026, 10, 4, 12, 0) * 1000);
+    }
+
+    #[test]
+    fn analytics_midnight_series_accepts_an_entire_skipped_day_at_the_next_boundary() {
+        let at = super::super::usage_analytics::boundary(
+            &skipped_natural_day(),
+            NaiveDate::from_ymd_opt(2026, 10, 4).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(at, utc(2026, 10, 4, 12, 0) * 1000);
     }
 
     /// New York in 2026: UTC-5, UTC-4 from 2026-03-08 02:00 to 2026-11-01 02:00 local.
@@ -894,7 +968,7 @@ mod tests {
         assert_eq!(o.last_synced_at, Some(42));
         assert_eq!(
             o.unsupported_tools,
-            ["openclaw", "hermes", "pi", "dsh", "workbuddy"]
+            ["chatgpt", "workbuddy", "hermes", "pi", "dsh", "openclaw"]
         );
     }
 

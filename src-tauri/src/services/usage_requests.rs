@@ -61,6 +61,10 @@ struct Snapshot {
     options: FilterOptions,
     sources: Vec<SourceHealth>,
 }
+pub struct Pagination {
+    pub page: u32,
+    pub page_size: u32,
+}
 struct Entry {
     created: Instant,
     bytes: usize,
@@ -138,12 +142,12 @@ pub fn request_page(
     db: &Database,
     query: UsageQueryV1,
     filters: RequestFilters,
-    page: u32,
-    page_size: u32,
+    pagination: Pagination,
     snapshot_id: Option<&str>,
     apex: &str,
     now_ms: i64,
 ) -> Result<RequestPage, AppError> {
+    let Pagination { page, page_size } = pagination;
     if !(1..=100).contains(&page_size) {
         return Err(invalid("invalidPageSize"));
     }
@@ -161,6 +165,9 @@ pub fn request_page(
     let query_fingerprint = fingerprint(&query, &filters)?;
     let (id, snapshot) = if let Some(id) = snapshot_id {
         let snapshot = get_snapshot(id)?;
+        if snapshot.pricing.apex != apex {
+            return Err(invalid("snapshotPricingApexMismatch"));
+        }
         if snapshot.receipt.query_fingerprint != query_fingerprint {
             return Err(invalid("snapshotQueryMismatch"));
         }
@@ -379,6 +386,38 @@ mod tests {
     }
     #[test]
     #[serial_test::serial]
+    fn analytics_request_snapshot_rejects_a_different_pricing_apex() {
+        let db = Database::memory().unwrap();
+        let first = request_page(
+            &db,
+            query(),
+            RequestFilters::default(),
+            Pagination {
+                page: 0,
+                page_size: 20,
+            },
+            None,
+            "ofox.ai",
+            3000,
+        )
+        .unwrap();
+        assert!(request_page(
+            &db,
+            query(),
+            RequestFilters::default(),
+            Pagination {
+                page: 0,
+                page_size: 20
+            },
+            Some(&first.snapshot_id),
+            "ofox.io",
+            3000
+        )
+        .is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn analytics_request_snapshot_freezes_pages_details_and_all_matching_csv() {
         let db = Database::memory().unwrap();
         {
@@ -391,8 +430,10 @@ mod tests {
             &db,
             query(),
             RequestFilters::default(),
-            0,
-            2,
+            Pagination {
+                page: 0,
+                page_size: 2,
+            },
             None,
             "ofox.ai",
             3000,
@@ -414,8 +455,10 @@ mod tests {
             &db,
             query(),
             RequestFilters::default(),
-            1,
-            2,
+            Pagination {
+                page: 1,
+                page_size: 2,
+            },
             Some(&first.snapshot_id),
             "ofox.ai",
             3000,
@@ -442,8 +485,10 @@ mod tests {
             &db,
             changed,
             RequestFilters::default(),
-            0,
-            2,
+            Pagination {
+                page: 0,
+                page_size: 2
+            },
             Some(&first.snapshot_id),
             "ofox.ai",
             3000
@@ -453,14 +498,46 @@ mod tests {
             &db,
             query(),
             RequestFilters::default(),
-            0,
-            0,
+            Pagination {
+                page: 0,
+                page_size: 0
+            },
             None,
             "ofox.ai",
             3000
         )
         .is_err());
     }
+    #[test]
+    #[serial_test::serial]
+    fn analytics_csv_native_save_uses_the_same_frozen_complete_snapshot() {
+        let db = Database::memory().unwrap();
+        db.conn.lock().unwrap().execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at) VALUES('a','p','claude','m',1,0,200,1)",[]).unwrap();
+        let page = request_page(
+            &db,
+            query(),
+            RequestFilters::default(),
+            Pagination {
+                page: 0,
+                page_size: 1,
+            },
+            None,
+            "ofox.ai",
+            3000,
+        )
+        .unwrap();
+        let preview = export_csv(&page.snapshot_id, None).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("records.csv");
+        let saved = export_csv(&page.snapshot_id, Some(destination.to_str().unwrap())).unwrap();
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), preview.csv);
+        assert_eq!(saved.query_fingerprint, preview.query_fingerprint);
+        assert_eq!(saved.snapshot_version, preview.snapshot_version);
+        assert_eq!(saved.saved_path.as_deref(), destination.to_str());
+        assert!(saved.csv.is_empty());
+        assert!(export_csv(&page.snapshot_id, Some("relative.csv")).is_err());
+    }
+
     #[test]
     #[serial_test::serial]
     fn analytics_request_filters_match_summary_count_and_literal_search() {
@@ -480,7 +557,19 @@ mod tests {
             search: Some("%_".into()),
             ..Default::default()
         };
-        let result = request_page(&db, query(), filters, 0, 20, None, "ofox.ai", 3000).unwrap();
+        let result = request_page(
+            &db,
+            query(),
+            filters,
+            Pagination {
+                page: 0,
+                page_size: 20,
+            },
+            None,
+            "ofox.ai",
+            3000,
+        )
+        .unwrap();
         assert_eq!(result.total, 1);
         assert_eq!(result.summary.requests, 1);
         assert_eq!(result.data[0].record.request_id, "a");
