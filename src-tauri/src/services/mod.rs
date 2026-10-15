@@ -33,6 +33,8 @@ pub mod session_usage_codex;
 mod session_usage_dsh;
 pub mod session_usage_gemini;
 pub mod session_usage_hermes;
+#[cfg(test)]
+mod session_usage_native_followup_tests;
 pub(crate) mod session_usage_openclaw;
 pub mod session_usage_opencode;
 mod session_usage_pi;

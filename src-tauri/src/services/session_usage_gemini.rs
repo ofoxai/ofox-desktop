@@ -123,7 +123,9 @@ fn collect_gemini_session_files(gemini_dir: &Path) -> Vec<PathBuf> {
             let is_session = path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .map(|n| n.starts_with("session-") && n.ends_with(".json"))
+                .map(|n| {
+                    (n.starts_with("session-") && n.ends_with(".json")) || n.ends_with(".jsonl")
+                })
                 .unwrap_or(false);
             if is_session {
                 files.push(path);
@@ -166,7 +168,12 @@ fn sync_single_gemini_file_with_index(
     }
 
     // 读取并解析整个 JSON 文件
-    let (session_id, calls, raw_count) = parse_gemini_file(file_path)?;
+    let GeminiRead {
+        session_id,
+        calls,
+        raw_count,
+        complete,
+    } = parse_gemini_file(file_path)?;
     let checkpoint = CheckpointChange {
         key: file_path_str,
         expected,
@@ -180,6 +187,10 @@ fn sync_single_gemini_file_with_index(
         source.check_on(conn)?;
         let mut imported: u32 = 0;
         let mut skipped: u32 = 0;
+        if !complete {
+            source.evidence.complete_event_identity_set = false;
+            source.evidence.partial("incompleteEnumeration");
+        }
 
         for call in &calls {
             // 生成唯一 request_id
@@ -231,12 +242,74 @@ struct GeminiCall {
     tokens: GeminiTokens,
     timestamp: Option<String>,
 }
+struct GeminiRead {
+    session_id: Option<String>,
+    calls: Vec<GeminiCall>,
+    raw_count: i64,
+    complete: bool,
+}
+
+/// Gemini 0.64 appends complete message snapshots, including a second snapshot
+/// when tokens arrive. Rewind/patch/remove change context, not physical spending.
+/// The common per-native-ID selection below keeps the final paid snapshot.
+fn usage_jsonl(content: &str) -> Result<(serde_json::Value, bool), AppError> {
+    use serde_json::{json, Value};
+    let mut session: Option<String> = None;
+    let mut messages = Vec::new();
+    let mut complete = true;
+    for line in content
+        .split_inclusive('\n')
+        .filter(|line| !line.trim().is_empty())
+    {
+        let record: Value = match serde_json::from_str(line) {
+            Ok(record) => record,
+            Err(_) if !line.ends_with('\n') => {
+                complete = false;
+                break;
+            }
+            Err(_) => return Err(AppError::Config("usage.gemini.invalidJsonlRecord".into())),
+        };
+        let metadata = record.get("$set").unwrap_or(&record);
+        if let Some(id) = metadata
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            if session.as_deref().is_some_and(|old| old != id) {
+                return Err(AppError::Config(
+                    "usage.gemini.conflictingSessionIdentity".into(),
+                ));
+            }
+            session = Some(id.to_owned());
+        }
+        if let Some(snapshot) = metadata.get("messages").and_then(Value::as_array) {
+            messages.extend(snapshot.iter().cloned());
+        }
+        if record.get("id").is_some_and(Value::is_string) && record.get("$patch").is_none() {
+            messages.push(record);
+        }
+    }
+    let session = session
+        .ok_or_else(|| AppError::Config("usage.gemini.sessionIdentityUnavailable".into()))?;
+    Ok((json!({"sessionId":session,"messages":messages}), complete))
+}
 
 /// A chat file's session id and its replies with tokens, in order.
-fn parse_gemini_file(file_path: &Path) -> Result<(Option<String>, Vec<GeminiCall>, i64), AppError> {
+fn parse_gemini_file(file_path: &Path) -> Result<GeminiRead, AppError> {
     let content = usage_source::read_text(file_path)?;
-    let value: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| AppError::Config(format!("JSON 解析失败: {e}")))?;
+    let (value, complete): (serde_json::Value, bool) =
+        if file_path.extension().is_some_and(|e| e == "jsonl") {
+            match serde_json::from_str::<serde_json::Value>(&content) {
+                Ok(value) if value.get("messages").is_some() => (value, true),
+                _ => usage_jsonl(&content)?,
+            }
+        } else {
+            (
+                serde_json::from_str(&content)
+                    .map_err(|e| AppError::Config(format!("JSON 解析失败: {e}")))?,
+                true,
+            )
+        };
 
     // 提取顶层 sessionId
     let session_id = value
@@ -246,7 +319,12 @@ fn parse_gemini_file(file_path: &Path) -> Result<(Option<String>, Vec<GeminiCall
 
     // 遍历 messages 数组
     let Some(messages) = value.get("messages").and_then(|v| v.as_array()) else {
-        return Ok((session_id, Vec::new(), 0));
+        return Ok(GeminiRead {
+            session_id,
+            calls: Vec::new(),
+            raw_count: 0,
+            complete,
+        });
     };
 
     let mut calls = Vec::new();
@@ -299,7 +377,12 @@ fn parse_gemini_file(file_path: &Path) -> Result<(Option<String>, Vec<GeminiCall
             calls.push(call);
         }
     }
-    Ok((session_id, calls, raw_count))
+    Ok(GeminiRead {
+        session_id,
+        calls,
+        raw_count,
+        complete,
+    })
 }
 
 /// Preserve unknown native time rather than manufacturing a current date.
@@ -326,7 +409,12 @@ fn usage_of(tokens: &GeminiTokens, model: &str) -> TokenUsage {
 pub(crate) fn normalized_facts(
     path: &Path,
 ) -> Result<(Vec<usage_source::NormalizedUsageFact>, bool), AppError> {
-    let (session, calls, _) = parse_gemini_file(path)?;
+    let GeminiRead {
+        session_id: session,
+        calls,
+        complete,
+        ..
+    } = parse_gemini_file(path)?;
     Ok((
         calls
             .into_iter()
@@ -350,7 +438,7 @@ pub(crate) fn normalized_facts(
                 model: c.model,
             })
             .collect(),
-        true,
+        complete,
     ))
 }
 #[cfg(test)]

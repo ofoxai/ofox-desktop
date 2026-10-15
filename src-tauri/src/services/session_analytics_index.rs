@@ -459,18 +459,40 @@ fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
                 spec.subagent,
             )?;
             let text = usage_source::read_text(&spec.path)?;
+            let mut ambiguous_codex_identity = false;
             for (i, line) in text.lines().enumerate() {
                 if line.trim().is_empty() {
                     continue;
                 }
                 let value: Value =
                     serde_json::from_str(line).map_err(|_| invalid("sourceReadFailed"))?;
-                scan.line(i as i64 + 1, &value)?;
+                // Native fork/replay can retain both parent and child headers.
+                // Neither header licenses attributing the whole physical file.
+                // Continue validating JSON, but publish no inferred metrics.
+                if ambiguous_codex_identity {
+                    continue;
+                }
+                match scan.line(i as i64 + 1, &value) {
+                    Err(AppError::InvalidInput(code))
+                        if spec.provider == "codex"
+                            && code == "usage.analytics.conflictingSessionIdentity" =>
+                    {
+                        ambiguous_codex_identity = true;
+                        continue;
+                    }
+                    result => result?,
+                }
                 if spec.provider == "claude" {
                     claude.line(&value);
                 } else {
                     codex.line(&value);
                 }
+            }
+            if ambiguous_codex_identity {
+                entry.status = "partial".into();
+                entry.reasons.push("sessionIdentityUnavailable".into());
+                entry.succeeded_at_ms = Some(now);
+                return Ok(entry);
             }
             let transcript = scan.finish();
             candidates = if spec.provider == "claude" {
@@ -493,6 +515,20 @@ fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
                 is_main: !spec.subagent,
                 ..Default::default()
             };
+            match conversation.get("kind").and_then(Value::as_str) {
+                Some("main") => {}
+                Some("subagent") => {
+                    // Native 0.64 JSONL records the role, but not a verifiable
+                    // parent session ID. Keep spending without main activity.
+                    transcript.is_main = false;
+                    transcript.reasons.insert("sessionParentUnavailable".into());
+                }
+                None if spec.path.extension().is_some_and(|ext| ext == "json") => {}
+                _ => {
+                    transcript.is_main = false;
+                    transcript.reasons.insert("sessionRoleNotRecorded".into());
+                }
+            }
             transcript.session_id = conversation["sessionId"]
                 .as_str()
                 .filter(|s| !s.is_empty())
