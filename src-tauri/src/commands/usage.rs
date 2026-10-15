@@ -65,20 +65,83 @@ pub fn get_model_stats(
 #[tauri::command]
 pub fn get_request_logs(
     state: State<'_, AppState>,
-    filters: LogFilters,
+    filters: Option<LogFilters>,
     page: u32,
     page_size: u32,
-) -> Result<PaginatedLogs, AppError> {
-    state.db.get_request_logs(&filters, page, page_size)
+    query: Option<crate::services::usage_query::UsageQueryV1>,
+    request_filters: Option<crate::services::usage_data::RequestFilters>,
+    snapshot_id: Option<String>,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(query) = query {
+        if filters.as_ref().is_some_and(|f| {
+            f.app_type.is_some()
+                || f.provider_name.is_some()
+                || f.model.is_some()
+                || f.status_code.is_some()
+                || f.start_date.is_some()
+                || f.end_date.is_some()
+        }) {
+            return Err(AppError::InvalidInput(
+                "usage.requests.conflictingLegacyFilters".into(),
+            ));
+        }
+        let result = crate::services::usage_requests::request_page(
+            &state.db,
+            query,
+            request_filters.unwrap_or_default(),
+            page,
+            page_size,
+            snapshot_id.as_deref(),
+            crate::ofox_apex::current_apex(),
+            chrono::Utc::now().timestamp_millis(),
+        )?;
+        serde_json::to_value(result).map_err(|e| AppError::Database(e.to_string()))
+    } else {
+        if request_filters.is_some() || snapshot_id.is_some() {
+            return Err(AppError::InvalidInput(
+                "usage.requests.queryRequired".into(),
+            ));
+        }
+        serde_json::to_value(state.db.get_request_logs(
+            &filters.unwrap_or_default(),
+            page,
+            page_size,
+        )?)
+        .map_err(|e| AppError::Database(e.to_string()))
+    }
 }
 
-/// 获取单个请求详情
+/// Existing callers keep the legacy row shape; a snapshot pins both data and prices.
 #[tauri::command]
 pub fn get_request_detail(
     state: State<'_, AppState>,
     request_id: String,
-) -> Result<Option<RequestLogDetail>, AppError> {
-    state.db.get_request_detail(&request_id)
+    snapshot_id: Option<String>,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(snapshot_id) = snapshot_id {
+        serde_json::to_value(crate::services::usage_requests::request_detail(
+            &request_id,
+            &snapshot_id,
+        )?)
+        .map_err(|e| AppError::Database(e.to_string()))
+    } else {
+        serde_json::to_value(state.db.get_request_detail(&request_id)?)
+            .map_err(|e| AppError::Database(e.to_string()))
+    }
+}
+
+#[tauri::command]
+pub fn export_request_logs_csv(
+    snapshot_id: String,
+    destination: Option<String>,
+) -> Result<crate::services::usage_requests::CsvExport, AppError> {
+    crate::services::usage_requests::export_csv(&snapshot_id, destination.as_deref())
+}
+
+#[tauri::command]
+pub fn get_usage_capabilities() -> serde_json::Value {
+    serde_json::json!({"queryVersion":1,"requestSnapshots":true,"csv":true,"projectFilter":false,
+        "sources":crate::services::usage_query::source_capabilities()})
 }
 
 /// 获取模型定价列表

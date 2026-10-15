@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 const WEEKLY_AFTER_DAYS: i64 = 180;
 
 /// Tools OFox can bind but whose sessions have no usage reader yet.
-const UNSUPPORTED_TOOLS: [&str; 4] = ["openclaw", "hermes", "pi", "dsh"];
+const UNSUPPORTED_TOOLS: [&str; 5] = ["openclaw", "hermes", "pi", "dsh", "workbuddy"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UsagePeriod {
@@ -60,6 +60,8 @@ pub struct UsageTotals {
     pub total_tokens: u64,
     pub cache_hit_rate: f64,
     pub cost_usd: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<super::ofox_pricing::CostEstimate>,
 }
 
 impl UsageTotals {
@@ -86,6 +88,7 @@ impl UsageTotals {
             total_tokens: input_tokens + output_tokens,
             cache_hit_rate,
             cost_usd: round6(cost_usd),
+            estimate: None,
         }
     }
 }
@@ -101,6 +104,8 @@ pub struct UsageSeriesPoint {
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
     pub cost_usd: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<super::ofox_pricing::CostEstimate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -139,6 +144,8 @@ pub struct UsageOverview {
     /// When the last usage sync finished; `None` before the first of this run.
     pub last_synced_at: Option<i64>,
     pub unsupported_tools: Vec<String>,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub analytics: Option<super::usage_analytics::OverviewAnalytics>,
 }
 
 fn round6(v: f64) -> f64 {
@@ -287,6 +294,7 @@ fn series_point(start: i64, sums: &UsageSums) -> UsageSeriesPoint {
         cache_read_tokens: sums.cache_read_tokens,
         cache_write_tokens: sums.cache_creation_tokens,
         cost_usd: round6(sums.cost),
+        estimate: None,
     }
 }
 
@@ -382,12 +390,21 @@ pub fn build_overview<Tz: TimeZone>(
         by_model,
         last_synced_at,
         unsupported_tools: UNSUPPORTED_TOOLS.iter().map(|t| t.to_string()).collect(),
+        analytics: None,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn analytics_capabilities_include_workbuddy_without_a_usage_reader() {
+        let db = Database::memory().unwrap();
+        let result =
+            build_overview(&db, UsagePeriod::All, 1_760_000_000_000, &chrono::Utc, None).unwrap();
+        assert!(result.unsupported_tools.iter().any(|id| id == "workbuddy"));
+    }
     use chrono::{FixedOffset, Local, NaiveDateTime, Offset, Timelike, Weekday};
     use rusqlite::params;
 
@@ -875,7 +892,10 @@ mod tests {
         assert!(close(t.cost_usd, 1.81), "{}", t.cost_usd);
         assert!(close(t.cache_hit_rate, 8003.0 / (1431.0 + 8003.0 + 304.0)));
         assert_eq!(o.last_synced_at, Some(42));
-        assert_eq!(o.unsupported_tools, ["openclaw", "hermes", "pi", "dsh"]);
+        assert_eq!(
+            o.unsupported_tools,
+            ["openclaw", "hermes", "pi", "dsh", "workbuddy"]
+        );
     }
 
     #[test]

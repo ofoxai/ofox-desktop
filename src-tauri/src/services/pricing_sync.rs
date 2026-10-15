@@ -32,17 +32,13 @@
 //! `sync_pricing_if_needed` 用 `AppSettings::last_pricing_sync_at` 做 24h
 //! 门控；`sync_pricing` 强制刷新（用户点 ConsolePage「刷新」会走这条）。
 
-use std::str::FromStr;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
-
-const FETCH_TIMEOUT_SECS: u64 = 15;
-const SYNC_COOLDOWN_SECS: i64 = 24 * 3600;
 
 /// 一次 sync 的结果摘要。
 ///
@@ -76,7 +72,7 @@ struct OpenAiShapeResp {
 struct OpenAiShapeModel {
     id: String,
     #[serde(default)]
-    aliases: Vec<String>,
+    aliases: Option<Vec<String>>,
     pricing: Option<OfoxPricing>,
     /// `/v1/models` 用 `name`，`/anthropic/v1/models` 用 `display_name`。
     /// 两者只会出现一个；缺失时回退到 `id`。
@@ -122,7 +118,7 @@ impl From<OpenAiShapeModel> for Option<NormalizedModel> {
         Some(NormalizedModel {
             id: m.id,
             display_name,
-            aliases: m.aliases,
+            aliases: m.aliases.unwrap_or_default(),
             pricing,
         })
     }
@@ -139,11 +135,22 @@ impl From<OpenAiShapeModel> for Option<NormalizedModel> {
 /// 部署环境下需要 Bearer token 鉴权（401），且即使能拿到也只是
 /// `/v1/models` 的子集，没必要冒鉴权失败的风险去打。
 pub async fn sync_pricing(db: &Database) -> Result<PricingSyncResult, AppError> {
-    let base = crate::ofox_apex::gateway_base();
-    let url = format!("{base}/v1/models");
-
-    let models = match fetch_openai_shape(&url).await {
-        Ok(items) => items,
+    static SYNC: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _flight = SYNC.lock().await;
+    let apex = crate::ofox_apex::current_apex();
+    let payload = super::ofox_pricing::fetch_payload(apex).await?;
+    super::ofox_pricing::persist_payload(
+        db,
+        apex,
+        &payload,
+        chrono::Utc::now().timestamp_millis(),
+    )?;
+    let models = match serde_json::from_value::<OpenAiShapeResp>(payload) {
+        Ok(items) => items
+            .data
+            .into_iter()
+            .filter_map(<Option<NormalizedModel>>::from)
+            .collect::<Vec<_>>(),
         Err(e) => {
             return Err(AppError::Message(format!(
                 "pricing_sync: /v1/models fetch failed: {e}"
@@ -160,6 +167,13 @@ pub async fn sync_pricing(db: &Database) -> Result<PricingSyncResult, AppError> 
     let errors: Vec<String> = Vec::new();
 
     let model_count = models.len();
+    // A late response from another region is cached only under its own apex.
+    if crate::ofox_apex::current_apex() != apex {
+        return Ok(PricingSyncResult {
+            models: model_count,
+            ..Default::default()
+        });
+    }
     let rows = write_pricing_rows(db, &models)?;
 
     // 历史数据兜底：sync 后 pricing 表可能新增了能命中老 session_log 行的
@@ -205,46 +219,21 @@ pub async fn sync_pricing(db: &Database) -> Result<PricingSyncResult, AppError> 
 /// 仅当距离上次成功同步超过 24h 时才真正发起同步。
 /// 启动 + 24h 维护 timer 都用这个入口。
 pub async fn sync_pricing_if_needed(db: &Database) -> Result<PricingSyncResult, AppError> {
-    let last = crate::settings::get_settings().last_pricing_sync_at;
-    if let Some(ts) = last {
-        let age = now_unix_secs() - ts;
-        if age < SYNC_COOLDOWN_SECS {
-            log::info!(
-                "pricing_sync: skipped, last sync {:.1}h ago",
-                age as f64 / 3600.0
-            );
-            return Ok(PricingSyncResult {
-                skipped: true,
-                ..Default::default()
-            });
-        }
+    let recent = {
+        let conn = lock_conn!(db.conn);
+        super::ofox_pricing::PriceCatalog::load_on(
+            &conn,
+            crate::ofox_apex::current_apex(),
+            chrono::Utc::now().timestamp_millis(),
+        )?
+    };
+    if !recent.coverage.stale {
+        return Ok(PricingSyncResult {
+            skipped: true,
+            ..Default::default()
+        });
     }
     sync_pricing(db).await
-}
-
-// ─── Fetch ────────────────────────────────────────────────────────────────
-
-async fn fetch_openai_shape(url: &str) -> Result<Vec<NormalizedModel>, String> {
-    let client = crate::proxy::http_client::get();
-    let resp = client
-        .get(url)
-        .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(format!("HTTP {status}"));
-    }
-    let parsed: OpenAiShapeResp = resp
-        .json()
-        .await
-        .map_err(|e| format!("parse failed: {e}"))?;
-    Ok(parsed
-        .data
-        .into_iter()
-        .filter_map(<Option<NormalizedModel>>::from)
-        .collect())
 }
 
 // ─── 写库 ─────────────────────────────────────────────────────────────────
@@ -506,12 +495,10 @@ fn expand_keys(m: &NormalizedModel) -> Vec<String> {
 /// 用 `rust_decimal` 做精确十进制乘法避免 f64 误差，输出剥末尾零以匹配
 /// seed 数据风格（`"5"` 而不是 `"5.000000"`，`"3.75"` 不变）。
 fn per_token_to_per_million(per_token: &str) -> Result<String, String> {
-    let trimmed = per_token.trim();
-    if trimmed.is_empty() {
-        return Ok("0".to_string());
-    }
-    let d = Decimal::from_str(trimmed).map_err(|e| format!("decimal parse `{trimmed}`: {e}"))?;
-    let scaled = d * Decimal::from(1_000_000_u64);
+    let d = super::ofox_pricing::parse_rate(per_token).map_err(|e| e.to_string())?;
+    let scaled = d
+        .checked_mul(Decimal::from(1_000_000_u64))
+        .ok_or_else(|| "price exceeds decimal range".to_string())?;
     Ok(format_decimal_clean(scaled))
 }
 
@@ -540,6 +527,17 @@ fn now_unix_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn analytics_scientific_price_keeps_decimal_precision() {
+        assert_eq!(per_token_to_per_million("1e-9").unwrap(), "0.001");
+    }
+
+    #[test]
+    fn analytics_empty_price_is_unknown_instead_of_free() {
+        assert!(per_token_to_per_million(" ").is_err());
+        assert!(per_token_to_per_million("-0.01").is_err());
+    }
 
     fn mk(id: &str, aliases: &[&str], p: OfoxPricing) -> NormalizedModel {
         NormalizedModel {
@@ -574,8 +572,8 @@ mod tests {
         assert_eq!(per_token_to_per_million("0.000000125").unwrap(), "0.125");
         // Zero
         assert_eq!(per_token_to_per_million("0").unwrap(), "0");
-        // Empty → 0
-        assert_eq!(per_token_to_per_million("").unwrap(), "0");
+        // Missing/empty price is not an explicit free price.
+        assert!(per_token_to_per_million("").is_err());
         // Whitespace tolerated
         assert_eq!(per_token_to_per_million("  0.000003  ").unwrap(), "3");
     }
@@ -583,7 +581,7 @@ mod tests {
     #[test]
     fn per_token_to_per_million_rejects_garbage() {
         assert!(per_token_to_per_million("not-a-number").is_err());
-        assert!(per_token_to_per_million("1e-9").is_err()); // rust_decimal 不接受科学计数法
+        assert_eq!(per_token_to_per_million("1e-9").unwrap(), "0.001");
     }
 
     #[test]
