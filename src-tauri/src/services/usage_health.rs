@@ -280,8 +280,10 @@ pub(crate) fn finish_on(
     Ok(true)
 }
 
-fn skeleton() -> BTreeMap<(String, String), (SourceHealth, bool)> {
-    super::usage_query::source_capabilities()
+fn skeleton(
+    capabilities: Vec<super::usage_query::SourceCapability>,
+) -> BTreeMap<(String, String), (SourceHealth, bool)> {
+    capabilities
         .into_iter()
         .flat_map(|c| {
             let ids = if c.source_ids.is_empty() {
@@ -323,7 +325,13 @@ fn priority(status: &str) -> u8 {
 /// A read-only query never turns legacy, corrupt, or foreign-epoch health into
 /// a local success. Real SQLite read errors remain visible to the caller.
 pub(crate) fn source_health_on(conn: &Connection) -> Result<Vec<SourceHealth>, AppError> {
-    let mut health = skeleton();
+    source_health_with_capabilities_on(conn, super::usage_query::source_capabilities())
+}
+fn source_health_with_capabilities_on(
+    conn: &Connection,
+    capabilities: Vec<super::usage_query::SourceCapability>,
+) -> Result<Vec<SourceHealth>, AppError> {
+    let mut health = skeleton(capabilities);
     let Some(raw) = read_raw_on(conn)? else {
         return Ok(health.into_values().map(|v| v.0).collect());
     };
@@ -393,7 +401,11 @@ mod tests {
     use serde_json::{json, Value};
 
     fn health(conn: &Connection, tool: &str) -> SourceHealth {
-        source_health_on(conn)
+        let mut capabilities = super::super::usage_query::source_capabilities();
+        for capability in &mut capabilities {
+            capability.session_analytics_supported = false;
+        }
+        source_health_with_capabilities_on(conn, capabilities)
             .unwrap()
             .into_iter()
             .find(|row| row.tool_id == tool && !row.source_id.ends_with(":proxy"))
@@ -402,6 +414,42 @@ mod tests {
 
     fn begin(conn: &Connection, channel: Channel, at: i64) -> Attempt {
         begin_on(conn, "gemini", "gemini_session", channel, at).unwrap()
+    }
+
+    #[test]
+    fn health_required_analytics_cannot_be_replaced_by_ledger_success() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let mut capabilities = super::super::usage_query::source_capabilities();
+        capabilities
+            .iter_mut()
+            .find(|c| c.tool_id == "gemini")
+            .unwrap()
+            .session_analytics_supported = true;
+        let read = || {
+            source_health_with_capabilities_on(&conn, capabilities.clone())
+                .unwrap()
+                .into_iter()
+                .find(|r| r.tool_id == "gemini")
+                .unwrap()
+        };
+        let ledger = begin(&conn, Channel::Ledger, 1000);
+        assert!(finish_on(&conn, &ledger, Outcome::Ok, 1100).unwrap());
+        assert_eq!(read().status, "unknown");
+        assert_eq!(read().last_success_at_ms, None);
+        let partial = begin(&conn, Channel::Analytics, 1200);
+        assert!(finish_on(
+            &conn,
+            &partial,
+            Outcome::Partial("usage.sources.incompleteCoverage"),
+            1300
+        )
+        .unwrap());
+        assert_eq!(read().status, "partial");
+        let complete = begin(&conn, Channel::Analytics, 1400);
+        assert!(finish_on(&conn, &complete, Outcome::Ok, 1500).unwrap());
+        assert_eq!(read().status, "ok");
+        assert_eq!(read().last_success_at_ms, Some(1100));
     }
 
     #[test]

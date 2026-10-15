@@ -284,6 +284,24 @@ pub async fn sync_session_usage(
     )
 }
 
+/// Local polling refreshes native facts and analytics without pricing or
+/// account requests. Unchanged revisions return the compatible empty result.
+#[tauri::command]
+pub async fn refresh_local_usage(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<crate::services::session_usage::SessionSyncResult, AppError> {
+    let result = crate::services::usage_sync::sync_all_and_emit(&app, &state.db, false).await?;
+    Ok(
+        result.unwrap_or(crate::services::session_usage::SessionSyncResult {
+            imported: 0,
+            skipped: 0,
+            files_scanned: 0,
+            errors: vec![],
+        }),
+    )
+}
+
 /// 获取数据来源分布
 #[tauri::command]
 pub fn get_usage_data_sources(

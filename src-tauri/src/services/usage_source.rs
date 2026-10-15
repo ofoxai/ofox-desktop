@@ -470,6 +470,94 @@ pub(crate) struct ProviderIndex {
     origin_empty: bool,
     ledger_count: i64,
 }
+
+/// Health-only coverage summary; never a replacement for Prepared's identity
+/// proofs, generation lease, or transaction-time checks.
+pub(crate) fn has_complete_coverage_on(
+    conn: &rusqlite::Connection,
+    provider: &str,
+) -> Result<bool, AppError> {
+    let Some(manifest) = source_cache::provider_on(conn, provider)? else {
+        return Ok(false);
+    };
+    if manifest["originEmpty"] != true
+        || manifest["complete"] != true
+        || manifest["ledgerEpoch"] != json!(source_cache::ledger_epoch_on(conn)?)
+    {
+        return Ok(false);
+    }
+    let checkpoints = checkpoints_on(conn)?;
+    let mut acknowledged = BTreeSet::new();
+    let mut observed = BTreeMap::new();
+    let mut statement = conn.prepare(
+        "SELECT source_path,provider_id,stamp,parser_version,meta_json FROM session_meta_cache WHERE provider_id=?1",
+    )?;
+    let rows = statement.query_map([provider], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?),
+        ))
+    })?;
+    for row in rows {
+        let (path, row) = row?;
+        let Ok(parts) = source_cache::decode_row(row, provider) else {
+            return Ok(false);
+        };
+        let Some(receipt) = parts.receipt() else {
+            continue;
+        };
+        let Some(value) = parts.value(Part::UsageSync) else {
+            return Ok(false);
+        };
+        let Ok(evidence) = decode_evidence(value) else {
+            return Ok(false);
+        };
+        let revision = if matches!(provider, "claude" | "codex" | "gemini" | "opencode") {
+            2
+        } else {
+            1
+        };
+        if !evidence.trusted
+            || !evidence.complete_event_identity_set
+            || evidence.parser_revision != revision
+            || evidence.coverage != "completeFromStart"
+            || !evidence.reasons.is_empty()
+            || checkpoints.get(&path) != Some(&evidence.checkpoint)
+        {
+            return Ok(false);
+        }
+        observed.insert(source_cache::receipt_key(&path), receipt);
+        if !extend_acknowledged(
+            &mut acknowledged,
+            evidence.acknowledged_event_ids,
+            MAX_PROVIDER_ACKNOWLEDGED_EVENTS,
+        ) {
+            return Ok(false);
+        }
+    }
+    let expected = manifest["receipts"]
+        .as_object()
+        .ok_or_else(|| error("invalid provider roster"))?;
+    if expected.len() != observed.len() || expected.iter().any(|(k, v)| observed.get(k) != Some(v))
+    {
+        return Ok(false);
+    }
+    let mut statement = conn.prepare("SELECT request_id,session_id FROM proxy_request_logs WHERE app_type=?1 AND provider_id=?2 AND data_source=?3")?;
+    let rows = statement.query_map(
+        rusqlite::params![provider, owner(provider)?, origin(provider)?],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+    )?;
+    for row in rows {
+        let (id, session) = row?;
+        if owned_identity(provider, &id, session.as_deref())
+            .is_none_or(|n| !acknowledged.contains(&native_digest(&n)))
+        {
+            return Ok(false);
+        }
+    }
+    Ok(usize::try_from(ledger_count_on(conn, provider)?).ok() == Some(acknowledged.len()))
+}
+
 fn owned_identity(provider: &str, request: &str, session: Option<&str>) -> Option<String> {
     let session = session.unwrap_or("");
     if provider == "workbuddy" {
