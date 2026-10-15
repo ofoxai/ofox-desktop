@@ -11,7 +11,20 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+pub(crate) fn resolve_hermes_root() -> Result<PathBuf, AppError> {
+    // Keep the health check and override resolution in the same short barrier
+    // as settings reload/update. Native reads happen after this guard drops.
+    let _io = crate::config_io::lock();
+    if crate::settings::settings_health().state == crate::settings::SettingsHealthState::Unreadable
+    {
+        return Err(AppError::Message(
+            "usage.lifetime.settingsUnreadable".into(),
+        ));
+    }
+    Ok(crate::hermes_config::get_hermes_dir())
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

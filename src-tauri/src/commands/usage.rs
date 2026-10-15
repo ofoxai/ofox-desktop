@@ -139,8 +139,64 @@ pub fn export_request_logs_csv(
 
 #[tauri::command]
 pub fn get_usage_capabilities() -> serde_json::Value {
-    serde_json::json!({"queryVersion":1,"requestSnapshots":true,"csv":true,"projectFilter":false,
+    serde_json::json!({"queryVersion":1,"requestSnapshots":true,"csv":true,"projectFilter":true,
+        "localRefresh":true,"sessionAnalytics":true,"sessionProjectFilter":true,
         "sources":crate::services::usage_query::source_capabilities()})
+}
+
+/// Native cumulative counters stay independent of event-time ledger queries.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_usage_source_summary(
+    state: State<'_, AppState>,
+    tool_id: String,
+) -> Result<crate::services::usage_lifetime::LifetimeSummaryV1, AppError> {
+    if tool_id != "hermes" {
+        return Err(AppError::InvalidInput(
+            "usage.lifetime.unsupportedTool".into(),
+        ));
+    }
+    let db = state.db.clone();
+    let root = crate::services::usage_lifetime::resolve_hermes_root()?;
+    let apex = crate::ofox_apex::current_apex();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    tokio::task::spawn_blocking(move || {
+        crate::services::usage_lifetime::hermes_summary(&db, &root, apex, now_ms)
+    })
+    .await
+    .map_err(|_| AppError::Message("usage.lifetime.taskFailed".into()))?
+}
+
+#[cfg(test)]
+mod workbench_capability_tests {
+    #[test]
+    fn workbench_capability_exposes_the_integrated_local_and_cached_query_paths() {
+        let value = super::get_usage_capabilities();
+        for key in [
+            "localRefresh",
+            "sessionAnalytics",
+            "sessionProjectFilter",
+            "projectFilter",
+        ] {
+            assert_eq!(value[key], true, "missing integrated capability {key}");
+        }
+    }
+    #[test]
+    fn workbench_capability_registry_only_claims_native_analytics_for_bridged_readers() {
+        for capability in crate::services::usage_query::source_capabilities() {
+            let supported =
+                ["claude", "codex", "gemini", "opencode"].contains(&capability.tool_id.as_str());
+            assert_eq!(
+                capability.session_analytics_supported, supported,
+                "{} analytics bridge",
+                capability.tool_id
+            );
+            assert_eq!(
+                capability.project_filter_supported, supported,
+                "{} project bridge",
+                capability.tool_id
+            );
+        }
+    }
 }
 
 /// 获取模型定价列表

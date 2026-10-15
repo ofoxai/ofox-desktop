@@ -84,6 +84,8 @@ pub struct SourceCapability {
     pub tool_id: String,
     pub source_ids: Vec<String>,
     pub usage_supported: bool,
+    #[serde(default)]
+    pub lifetime_usage_supported: bool,
     pub session_analytics_supported: bool,
     pub project_filter_supported: bool,
     pub reason: Option<String>,
@@ -107,8 +109,9 @@ pub fn source_capabilities() -> Vec<SourceCapability> {
         tool_id: tool.into(),
         source_ids: source.into_iter().map(str::to_owned).collect(),
         usage_supported: source.is_some(),
-        session_analytics_supported: false,
-        project_filter_supported: false,
+        lifetime_usage_supported: tool == "hermes",
+        session_analytics_supported: matches!(tool, "claude" | "codex" | "gemini" | "opencode"),
+        project_filter_supported: matches!(tool, "claude" | "codex" | "gemini" | "opencode"),
         reason: source.is_none().then(|| {
             if tool == "chatgpt" {
                 "codexModeSharesCodexRecords".into()
@@ -123,6 +126,33 @@ pub fn source_capabilities() -> Vec<SourceCapability> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifetime_capability_does_not_claim_event_time_support() {
+        let capabilities = source_capabilities();
+        for source in &capabilities {
+            let value = serde_json::to_value(source).unwrap();
+            assert_eq!(value["lifetimeUsageSupported"], source.tool_id == "hermes");
+            if source.tool_id == "hermes" {
+                assert!(!source.usage_supported);
+                assert!(source.source_ids.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_capability_defaults_to_no_lifetime_support() {
+        let source: SourceCapability = serde_json::from_value(serde_json::json!({
+            "toolId": "hermes", "sourceIds": [], "usageSupported": false,
+            "sessionAnalyticsSupported": false, "projectFilterSupported": false,
+            "reason": "usageReaderUnavailable"
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(source).unwrap()["lifetimeUsageSupported"],
+            false
+        );
+    }
 
     #[test]
     fn query_fingerprint_is_order_independent() {

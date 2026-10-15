@@ -22,6 +22,89 @@ fn native_fixture(home: &Path, session: &str) -> PathBuf {
     root
 }
 
+fn default_native_fixture() -> PathBuf {
+    let root = crate::hermes_config::get_hermes_dir();
+    fs::create_dir_all(&root).unwrap();
+    Connection::open(root.join("state.db"))
+        .unwrap()
+        .execute_batch(NATIVE_SQL)
+        .unwrap();
+    root
+}
+
+#[test]
+#[serial_test::serial]
+fn hermes_root_missing_settings_reads_the_native_default() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    let root = default_native_fixture();
+    assert_eq!(resolve_hermes_root().unwrap(), root);
+    assert!(read_lifetime(&root).unwrap().session_records > 0);
+}
+
+#[test]
+#[serial_test::serial]
+fn hermes_root_recovered_settings_keeps_the_recovered_override() {
+    let sandbox = crate::test_sandbox::sandbox();
+    let custom = native_fixture(sandbox.home(), "main-aux");
+    let folder = sandbox.home().join(".ofox-desktop");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(
+        folder.join("settings.json.bak"),
+        json!({"hermesConfigDir": custom.to_str().unwrap()}).to_string(),
+    )
+    .unwrap();
+    fs::write(folder.join("settings.json"), "invalid fixture").unwrap();
+    crate::settings::reload_settings().unwrap();
+    assert_eq!(
+        crate::settings::settings_health().state,
+        crate::settings::SettingsHealthState::Recovered
+    );
+    assert_eq!(resolve_hermes_root().unwrap(), custom);
+}
+
+fn assert_unknown_settings_refused(environment_override: bool) {
+    let sandbox = crate::test_sandbox::sandbox();
+    let root = default_native_fixture();
+    if environment_override {
+        std::env::set_var("HERMES_HOME", &root);
+    }
+    let folder = sandbox.home().join(".ofox-desktop");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(folder.join("settings.json"), "invalid fixture SECRET").unwrap();
+    fs::write(folder.join("settings.json.bak"), "invalid backup").unwrap();
+    crate::settings::reload_settings().unwrap();
+    assert_eq!(
+        crate::settings::settings_health().state,
+        crate::settings::SettingsHealthState::Unreadable
+    );
+    let db = Database::memory().unwrap();
+    let result = resolve_hermes_root().and_then(|root| hermes_summary(&db, &root, "ofox.ai", 10));
+    let error = result.expect_err("unknown settings fell through to readable default statistics");
+    assert_eq!(error.to_string(), "usage.lifetime.settingsUnreadable");
+    let cache_rows: i64 = db
+        .conn
+        .lock()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM session_meta_cache", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        cache_rows, 0,
+        "unknown settings must not publish default facts"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn hermes_root_unreadable_settings_cannot_read_the_default_database() {
+    assert_unknown_settings_refused(false);
+}
+
+#[test]
+#[serial_test::serial]
+fn hermes_root_unreadable_settings_cannot_fall_through_to_environment() {
+    assert_unknown_settings_refused(true);
+}
+
 fn assert_amount(snapshot: &LifetimeNativeSnapshot, input: u64, output: u64) {
     assert_eq!(snapshot.totals.input_tokens, Some(input));
     assert_eq!(snapshot.totals.output_tokens, Some(output));
