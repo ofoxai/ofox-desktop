@@ -11,7 +11,14 @@ import type {
   PaginatedLogs,
   SessionSyncResult,
   DataSourceSummary,
+  RequestQueryOptions,
 } from "@/types/usage";
+import type { UsageCsvExport, UsageSnapshotReceipt } from "@/types/usageQuery";
+import {
+  assertUsageReceipt,
+  assertSnapshotReceipt,
+  sameRequestFilters,
+} from "@/lib/usageWorkbench";
 import type { UsageResult } from "@/types";
 import type { AppId } from "./types";
 import type { TemplateType } from "@/config/constants";
@@ -95,16 +102,56 @@ export const usageApi = {
     filters: LogFilters,
     page: number = 0,
     pageSize: number = 20,
+    options?: RequestQueryOptions,
   ): Promise<PaginatedLogs> => {
-    return invoke("get_request_logs", {
+    const { expectedReceipt, ...ipcOptions } = options ?? {};
+    const response = await invoke<PaginatedLogs>("get_request_logs", {
       filters,
       page,
       pageSize,
+      ...ipcOptions,
     });
+    if (options) {
+      assertUsageReceipt(response, options.query);
+      if (!response.requestFilters) throw new Error("usage.queryUnsupported");
+      if (!sameRequestFilters(response.requestFilters, options.requestFilters))
+        throw new Error("usage.queryMismatch");
+      if (expectedReceipt) assertSnapshotReceipt(response, expectedReceipt);
+      if (!response.snapshotId) throw new Error("usage.queryUnsupported");
+      if (options.snapshotId && response.snapshotId !== options.snapshotId)
+        throw new Error("usage.queryMismatch");
+    }
+    return response;
   },
 
-  getRequestDetail: async (requestId: string): Promise<RequestLog | null> => {
-    return invoke("get_request_detail", { requestId });
+  getRequestDetail: async (
+    requestId: string,
+    snapshotId?: string,
+    expectedReceipt?: UsageSnapshotReceipt,
+  ): Promise<RequestLog | null> => {
+    const response = await invoke<RequestLog | null>("get_request_detail", {
+      requestId,
+      ...(snapshotId ? { snapshotId } : {}),
+    });
+    if (snapshotId && response) {
+      assertSnapshotReceipt(response.receipt, expectedReceipt);
+      if (response.requestId !== requestId)
+        throw new Error("usage.queryMismatch");
+    }
+    return response;
+  },
+
+  exportRequestLogsCsv: async (
+    snapshotId: string,
+    destination?: string,
+    expectedReceipt?: UsageSnapshotReceipt,
+  ): Promise<UsageCsvExport> => {
+    const response = await invoke<UsageCsvExport>("export_request_logs_csv", {
+      snapshotId,
+      ...(destination ? { destination } : {}),
+    });
+    assertSnapshotReceipt(response, expectedReceipt);
+    return response;
   },
 
   getModelPricing: async (): Promise<ModelPricing[]> => {

@@ -14,6 +14,7 @@ import { ToolBadge } from "@/components/tools/ToolBadge";
 import { TOOL_META } from "@/config/toolMeta";
 import type { UsageTotals } from "@/lib/api/usageOverview";
 import { fmtTokens, fmtCost } from "@/lib/format";
+import { formatUsageEstimate } from "@/lib/usageEstimate";
 interface Row extends UsageTotals {
   id: string;
   priced?: boolean;
@@ -32,10 +33,12 @@ export function UsageBreakdownList({
   kind,
   rows,
   total,
+  onFilter,
 }: {
   kind: "tools" | "models";
   rows: Row[];
   total: number;
+  onFilter?: (id: string) => void;
 }) {
   const { t } = useTranslation();
   const key = `ofox.usageHidden.${kind}`;
@@ -67,21 +70,43 @@ export function UsageBreakdownList({
                 }
                 title={label(r)}
               >
-                {label(r)}
+                {onFilter ? (
+                  <button
+                    type="button"
+                    className="block w-full truncate text-left hover:text-brand-ink focus-visible:outline-brand"
+                    title={label(r)}
+                    onClick={() => onFilter(r.id)}
+                  >
+                    {label(r)}
+                  </button>
+                ) : (
+                  label(r)
+                )}
               </p>
               <ShareBar value={total > 0 ? r.totalTokens / total : 0} />
             </div>
-            <div className="text-right tabular-nums">
+            <div
+              className="shrink-0 text-right tabular-nums"
+              title={t("usagePage.io", {
+                input: fmtTokens(r.inputTokens),
+                output: fmtTokens(r.outputTokens),
+              })}
+            >
               <b className="text-sub">{fmtTokens(r.totalTokens)}</b>
-              <p className="text-note text-ink-faint">
+              <p className="hidden text-note text-ink-faint xl:block">
                 {t("usagePage.io", {
                   input: fmtTokens(r.inputTokens),
                   output: fmtTokens(r.outputTokens),
                 })}
               </p>
             </div>
-            <span className="min-w-[58px] text-right text-sub text-ok">
-              {fmtCost(r.priced === false ? null : r.costUsd)}
+            <span
+              className="min-w-[58px] shrink-0 whitespace-nowrap text-right text-sub text-ink"
+              title={r.estimate?.knownCostUsd ?? undefined}
+            >
+              {r.estimate
+                ? formatUsageEstimate(r.estimate)
+                : fmtCost(r.priced === false ? null : r.costUsd)}
             </span>
             <DropdownMenu modal={false}>
               <DropdownMenuTrigger asChild>

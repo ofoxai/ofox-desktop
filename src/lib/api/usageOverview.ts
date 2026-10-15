@@ -1,6 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type { OfoxSpending } from "./ofoxAuth";
+import type {
+  UsageCapabilities,
+  UsageEstimate,
+  UsageQueryV1,
+  UsageReceipt,
+} from "@/types/usageQuery";
+import { assertUsageReceipt } from "@/lib/usageWorkbench";
 
 /**
  * Usage overview and balance trend (Rust: `commands/usage_overview.rs`,
@@ -29,6 +36,7 @@ export interface UsageTotals {
   totalTokens: number;
   cacheHitRate: number;
   costUsd: number;
+  estimate?: UsageEstimate;
 }
 
 /** One bucket of the series; `start` is when it begins (local midnight / hour). */
@@ -40,6 +48,7 @@ export interface UsageSeriesPoint {
   cacheReadTokens: number;
   cacheWriteTokens: number;
   costUsd: number;
+  estimate?: UsageEstimate;
 }
 
 /** One tool (`appType`: claude, codex, gemini, opencode, ...). */
@@ -58,7 +67,7 @@ export interface ModelUsage extends UsageTotals {
   priced: boolean;
 }
 
-export interface UsageOverview {
+export interface UsageOverview extends Partial<UsageReceipt> {
   period: UsagePeriod;
   /** `null` for `all`. */
   start: number | null;
@@ -75,6 +84,15 @@ export interface UsageOverview {
   lastSyncedAt: number | null;
   /** Bound tools whose usage is not read yet (e.g. openclaw, hermes, pi, dsh). */
   unsupportedTools: string[];
+  options?: { toolIds: string[]; modelIds: string[]; sourceIds: string[] };
+  sources?: {
+    sourceId: string;
+    toolId: string;
+    status: "unknown" | "ok" | "partial" | "failed" | "unsupported";
+    lastAttemptAtMs: number | null;
+    lastSuccessAtMs: number | null;
+    errorCode: string | null;
+  }[];
 }
 
 /** One reading of the OFox balance: `amount` USD was left at `at`. */
@@ -98,11 +116,21 @@ export interface BalanceTrend {
   daysLeft: number | null;
 }
 
-/** Everything the usage page shows for `period`; syncs the session sources first. */
+/** Query mode reads a frozen local projection; the legacy period call syncs first. */
 export async function getUsageOverview(
   period: UsagePeriod,
+  query?: UsageQueryV1,
 ): Promise<UsageOverview> {
-  return invoke<UsageOverview>("get_usage_overview", { period });
+  const response = await invoke<UsageOverview>("get_usage_overview", {
+    period,
+    ...(query ? { query } : {}),
+  });
+  if (query) assertUsageReceipt(response, query);
+  return response;
+}
+
+export function getUsageCapabilities(): Promise<UsageCapabilities> {
+  return invoke("get_usage_capabilities");
 }
 
 /** The signed-in account's balance history and run-out estimate; empty when signed out. */

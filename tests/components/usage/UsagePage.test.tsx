@@ -66,7 +66,12 @@ const overview: UsageOverview = {
 function Refresh() {
   const shell = useShell();
   useEffect(() => shell.setActive("usage"), [shell.setActive]);
-  return <button onClick={() => void shell.refresh()}>refresh-page</button>;
+  return (
+    <>
+      <button onClick={() => void shell.refresh()}>refresh-page</button>
+      <button onClick={() => shell.setActive("tools")}>hide-page</button>
+    </>
+  );
 }
 function Page({ value = account }: { value?: OfoxAccount }) {
   return (
@@ -129,6 +134,79 @@ it("publishes consecutive successful balance samples to the shared account", asy
   await waitFor(() => expect(balance()).toBe(18));
 });
 describe("UsagePage", () => {
+  it("shares exact tool filters and one frozen interval between overview and requests", async () => {
+    const normal = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: any) => {
+      if (command === "get_usage_capabilities")
+        return {
+          queryVersion: 1,
+          requestSnapshots: true,
+          csv: true,
+          projectFilter: false,
+          sources: [],
+        };
+      const receipt = {
+        appliedQuery: args?.query,
+        queryFingerprint: "query",
+        snapshotVersion: "version",
+        coverage: {
+          state: "complete",
+          reasons: [],
+          timeBasis: "eventTime",
+          detailStartMs: null,
+          detailEndMs: null,
+          aggregateOnly: false,
+          excludedRollupDays: 0,
+          sourceIds: [],
+        },
+      };
+      if (command === "get_usage_overview")
+        return {
+          ...overview,
+          ...receipt,
+          options: {
+            toolIds: ["claude", "opencode"],
+            modelIds: ["unknown-model"],
+            sourceIds: [],
+          },
+        };
+      if (command === "get_request_logs")
+        return {
+          ...receipt,
+          snapshotId: "frozen",
+          requestFilters: args.requestFilters ?? {},
+          data: [],
+          total: 0,
+          page: args.page,
+          pageSize: args.pageSize,
+        };
+      return normal(command, args);
+    });
+    render(<Page />);
+    await screen.findByText("unknown-model");
+    await userEvent.click(screen.getByRole("combobox", { name: "工具筛选" }));
+    await userEvent.click(screen.getByRole("option", { name: "OpenCode" }));
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(
+        mocks.invoke.mock.calls.some(
+          ([name, args]) =>
+            name === "get_usage_overview" &&
+            args?.query?.toolIds[0] === "opencode",
+        ),
+      ).toBe(true),
+    );
+    const overviewQuery = mocks.invoke.mock.calls
+      .filter(([name]) => name === "get_usage_overview")
+      .at(-1)![1].query;
+    await userEvent.click(screen.getByRole("tab", { name: "请求" }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith(
+        "get_request_logs",
+        expect.objectContaining({ query: overviewQuery, page: 0 }),
+      ),
+    );
+  });
   it("shows KPIs, separate cache and unknown price, refreshes a balance sample on first visit", async () => {
     render(<Page />);
     expect(await screen.findByText("75%", { exact: false })).toBeVisible();
@@ -144,6 +222,7 @@ describe("UsagePage", () => {
     expect(screen.getByText(/本月已用/)).toHaveTextContent("$5.00 / $50.00");
   });
   it("changes and persists the period and refreshes through the shell", async () => {
+    localStorage.setItem("ofox.usagePeriod", "7d");
     render(<Page />);
     await screen.findByText("unknown-model");
     fireEvent.click(screen.getByRole("radio", { name: "30 天" }));
@@ -239,7 +318,16 @@ it("keeps honest empty and refresh-failure states", async () => {
     command === "get_usage_overview"
       ? Promise.resolve({
           ...overview,
-          totals: { ...totals, requests: 0 },
+          totals: {
+            requests: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            totalTokens: 0,
+            cacheHitRate: 0,
+            costUsd: 0,
+          },
           byTool: [],
           byModel: [],
           series: [],
@@ -276,7 +364,9 @@ it("shows hours only with a forecast and reads millisecond chart timestamps", as
     month: "short",
     day: "numeric",
   });
-  expect(screen.getByText(stamp)).toBeVisible();
+  expect(
+    screen.getAllByText(stamp).some((element) => !element.closest("details")),
+  ).toBe(true);
 });
 
 it("uses a newer shared balance after the tools page refreshed it", async () => {
@@ -327,4 +417,119 @@ it("does not claim an extra hour when the balance is exhausted", async () => {
   render(<Page />);
   await screen.findByText("unknown-model");
   expect(screen.queryByText(/小时后用完/)).toBeNull();
+});
+
+it("stops automatic local refresh after leaving the visible page and never polls balance", async () => {
+  const intervalSpy = vi.spyOn(window, "setInterval");
+  const clearSpy = vi.spyOn(window, "clearInterval");
+  try {
+    render(<Page />);
+    await screen.findByText("unknown-model");
+    const timerIndex = intervalSpy.mock.calls.findIndex(
+      (call) => call[1] === 30_000,
+    );
+    expect(timerIndex).toBeGreaterThanOrEqual(0);
+    const tick = intervalSpy.mock.calls[timerIndex][0] as () => void;
+    mocks.invoke.mockClear();
+    tick();
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith("sync_session_usage"),
+    );
+    await waitFor(() =>
+      expect(
+        mocks.invoke.mock.calls.filter(
+          ([name]) => name === "get_usage_overview",
+        ).length,
+      ).toBeGreaterThan(0),
+    );
+    expect(
+      mocks.invoke.mock.calls.some(([name]) => name.startsWith("ofox_")),
+    ).toBe(false);
+    fireEvent.click(screen.getByText("hide-page"));
+    expect(clearSpy).toHaveBeenCalledWith(
+      intervalSpy.mock.results[timerIndex].value,
+    );
+    mocks.invoke.mockClear();
+    tick();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  } finally {
+    intervalSpy.mockRestore();
+    clearSpy.mockRestore();
+  }
+});
+
+it("loads filter options when returning directly to a saved request tab", async () => {
+  localStorage.setItem("ofox.usageTab", "requests");
+  const normal = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation(async (command: string, args: any) => {
+    if (command === "get_usage_capabilities")
+      return {
+        queryVersion: 1,
+        requestSnapshots: true,
+        csv: true,
+        projectFilter: false,
+        sources: [],
+      };
+    const receipt = {
+      appliedQuery: args?.query,
+      queryFingerprint: "query",
+      snapshotVersion: "version",
+    };
+    if (command === "get_usage_overview")
+      return {
+        ...overview,
+        ...receipt,
+        options: {
+          toolIds: ["opencode"],
+          modelIds: ["long-model"],
+          sourceIds: ["opencode_session"],
+        },
+      };
+    if (command === "get_request_logs")
+      return {
+        ...receipt,
+        snapshotId: "snapshot",
+        requestFilters: args.requestFilters ?? {},
+        data: [],
+        total: 0,
+        page: 0,
+        pageSize: 20,
+      };
+    return normal(command, args);
+  });
+  render(<Page />);
+  await screen.findByText("当前条件下没有可读的请求明细");
+  await userEvent.click(screen.getByRole("combobox", { name: "模型筛选" }));
+  expect(
+    await screen.findByRole("option", { name: "long-model" }),
+  ).toBeVisible();
+});
+
+it("shows nonzero usage buckets even when an aggregate has no request count", async () => {
+  const normal = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command: string, args: unknown) =>
+    command === "get_usage_overview"
+      ? Promise.resolve({ ...overview, totals: { ...totals, requests: 0 } })
+      : normal(command, args),
+  );
+  render(<Page />);
+  expect(await screen.findByText("unknown-model")).toBeVisible();
+  expect(screen.queryByText("还没有用量记录")).toBeNull();
+  expect(screen.getAllByText("1.2K").length).toBeGreaterThan(0);
+});
+
+it("can still refresh after development StrictMode replays its mount effects", async () => {
+  const { StrictMode } = await import("react");
+  render(
+    <StrictMode>
+      <Page />
+    </StrictMode>,
+  );
+  await screen.findByText("unknown-model");
+  mocks.invoke.mockClear();
+  fireEvent.click(screen.getByRole("button", { name: "刷新本机数据" }));
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("sync_session_usage"),
+  );
 });

@@ -4,6 +4,7 @@ import {
   getSpending,
   getUsageOverview,
 } from "@/lib/api/usageOverview";
+import { createUsageQuery } from "@/lib/usageWorkbench";
 
 const invoke = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -11,6 +12,37 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 beforeEach(() => invoke.mockReset());
 
 describe("usage overview api", () => {
+  it("rejects a backend that silently ignores the requested query", async () => {
+    const query = createUsageQuery(
+      { period: "90d" },
+      { toolIds: ["opencode"] },
+      1791993600000,
+    );
+    invoke.mockResolvedValue({ period: "all", totals: { requests: 99 } });
+    await expect(getUsageOverview("all", query)).rejects.toThrow(
+      "usage.queryUnsupported",
+    );
+    expect(invoke).toHaveBeenCalledWith("get_usage_overview", {
+      period: "all",
+      query,
+    });
+  });
+
+  it("rejects a receipt for different filters instead of showing its totals", async () => {
+    const query = createUsageQuery(
+      { period: "all" },
+      { modelIds: ["model"] },
+      1000,
+    );
+    invoke.mockResolvedValue({
+      appliedQuery: { ...query, modelIds: [] },
+      queryFingerprint: "other",
+      snapshotVersion: "s1",
+    });
+    await expect(getUsageOverview("all", query)).rejects.toThrow(
+      "usage.queryMismatch",
+    );
+  });
   it("asks for the period by name", async () => {
     invoke.mockResolvedValue({ period: "7d" });
     await getUsageOverview("7d");

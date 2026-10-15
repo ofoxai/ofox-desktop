@@ -1,4 +1,12 @@
 // 使用统计相关类型定义
+import type {
+  UsageEstimate,
+  UsageFilterOptions,
+  UsageQueryV1,
+  UsageReceipt,
+  UsageRequestFilters,
+  UsageSnapshotReceipt,
+} from "@/types/usageQuery";
 
 export interface TokenUsage {
   inputTokens: number;
@@ -32,6 +40,13 @@ export interface RequestLog {
   errorMessage?: string;
   createdAt: number;
   dataSource?: string;
+  observedStatusCode?: number | null;
+  observedLatencyMs?: number | null;
+  currentEstimate?: UsageEstimate;
+  receipt?: Pick<
+    UsageReceipt,
+    "appliedQuery" | "queryFingerprint" | "snapshotVersion"
+  >;
 }
 
 export interface SessionSyncResult {
@@ -47,11 +62,32 @@ export interface DataSourceSummary {
   totalCostUsd: string;
 }
 
-export interface PaginatedLogs {
+export interface PaginatedLogs extends Partial<UsageReceipt> {
   data: RequestLog[];
   total: number;
   page: number;
   pageSize: number;
+  snapshotId?: string;
+  options?: UsageFilterOptions;
+  requestFilters?: UsageRequestFilters | null;
+  summary?: {
+    requests: number;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    totalTokens: number;
+    cacheHitRate: number;
+    costUsd: number;
+    estimate: UsageEstimate;
+  };
+}
+
+export interface RequestQueryOptions {
+  query: UsageQueryV1;
+  requestFilters?: UsageRequestFilters;
+  snapshotId?: string;
+  expectedReceipt?: UsageSnapshotReceipt;
 }
 
 export interface ModelPricing {

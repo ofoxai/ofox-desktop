@@ -5,278 +5,148 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { CopyButton } from "@/components/ui/copy-button";
 import { useRequestDetail } from "@/lib/query/usage";
-
-interface RequestDetailPanelProps {
-  requestId: string;
-  onClose: () => void;
-}
+import { formatUsageEstimate } from "@/lib/usageEstimate";
+import type { UsageSnapshotReceipt } from "@/types/usageQuery";
 
 export function RequestDetailPanel({
   requestId,
+  snapshotId,
+  returnFocus,
+  expectedReceipt,
   onClose,
-}: RequestDetailPanelProps) {
+}: {
+  requestId: string;
+  snapshotId?: string;
+  returnFocus?: HTMLElement;
+  expectedReceipt?: UsageSnapshotReceipt;
+  onClose: () => void;
+}) {
   const { t, i18n } = useTranslation();
-  const { data: request, isLoading } = useRequestDetail(requestId);
-  const dateLocale =
-    i18n.language === "zh"
-      ? "zh-CN"
-      : i18n.language === "ja"
-        ? "ja-JP"
-        : "en-US";
-
-  if (isLoading) {
-    return (
-      <Dialog open onOpenChange={onClose}>
-        <DialogContent className="max-w-2xl">
-          <div className="h-[400px] animate-pulse rounded bg-gray-100" />
-        </DialogContent>
-      </Dialog>
-    );
-  }
-
-  if (!request) {
-    return (
-      <Dialog open onOpenChange={onClose}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>{t("usage.requestDetail", "请求详情")}</DialogTitle>
-          </DialogHeader>
-          <div className="text-center text-muted-foreground">
-            {t("usage.requestNotFound", "请求未找到")}
-          </div>
-        </DialogContent>
-      </Dialog>
-    );
-  }
-
+  const result = useRequestDetail(requestId, snapshotId, expectedReceipt);
+  const request = result.data;
+  const imported = request?.dataSource && request.dataSource !== "proxy";
+  const status =
+    request && "observedStatusCode" in request
+      ? request.observedStatusCode
+      : imported
+        ? null
+        : request?.statusCode;
+  const latency =
+    request && "observedLatencyMs" in request
+      ? request.observedLatencyMs
+      : imported
+        ? null
+        : request?.latencyMs;
+  const number = (value: number) => value.toLocaleString(i18n.language);
+  const fields = request
+    ? [
+        [
+          t("usage.time"),
+          new Date(request.createdAt * 1000).toLocaleString(i18n.language),
+        ],
+        [t("usage.appType"), request.appType],
+        [t("usage.provider"), request.providerName ?? request.providerId],
+        [t("usage.model"), request.model],
+        ...(request.requestModel
+          ? [[t("usageWorkbench.requestModel"), request.requestModel]]
+          : []),
+        [t("usageWorkbench.source"), request.dataSource ?? "proxy"],
+        [t("usageWorkbench.status"), status ?? t("usageWorkbench.notRecorded")],
+        [t("usage.inputTokens"), number(request.inputTokens)],
+        [t("usage.outputTokens"), number(request.outputTokens)],
+        [t("usage.cacheReadTokens"), number(request.cacheReadTokens)],
+        [t("usage.cacheCreationTokens"), number(request.cacheCreationTokens)],
+        [t("usage.costMultiplier"), request.costMultiplier],
+        [t("usageWorkbench.inputAmount"), `$${request.inputCostUsd}`],
+        [t("usageWorkbench.outputAmount"), `$${request.outputCostUsd}`],
+        [t("usageWorkbench.cacheReadAmount"), `$${request.cacheReadCostUsd}`],
+        [t("usage.cacheCreationCost"), `$${request.cacheCreationCostUsd}`],
+        [t("usageWorkbench.savedAmount"), `$${request.totalCostUsd}`],
+        [
+          t("usageWorkbench.currentEstimate"),
+          formatUsageEstimate(request.currentEstimate),
+        ],
+        [
+          t("usage.latency"),
+          latency == null ? t("usageWorkbench.notRecorded") : `${latency} ms`,
+        ],
+        [
+          t("usageWorkbench.firstToken"),
+          request.firstTokenMs == null
+            ? t("usageWorkbench.notRecorded")
+            : `${request.firstTokenMs} ms`,
+        ],
+      ]
+    : [];
   return (
-    <Dialog open onOpenChange={onClose}>
-      <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <DialogContent
+        className="max-w-2xl"
+        aria-describedby={undefined}
+        onCloseAutoFocus={(event) => {
+          if (returnFocus?.isConnected) {
+            event.preventDefault();
+            returnFocus.focus();
+          }
+        }}
+      >
         <DialogHeader>
-          <DialogTitle>{t("usage.requestDetail", "请求详情")}</DialogTitle>
+          <div className="flex items-center justify-between gap-3">
+            <DialogTitle>{t("usageWorkbench.detail")}</DialogTitle>
+            <Button variant="ghost" onClick={onClose}>
+              {t("usageWorkbench.close")}
+            </Button>
+          </div>
         </DialogHeader>
-
-        <div className="space-y-4">
-          {/* 基本信息 */}
-          <div className="rounded-lg border p-4">
-            <h3 className="mb-3 font-semibold">
-              {t("usage.basicInfo", "基本信息")}
-            </h3>
-            <dl className="grid grid-cols-2 gap-3 text-sm">
-              <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.requestId", "请求ID")}
-                </dt>
-                <dd className="font-mono">{request.requestId}</dd>
-              </div>
-              <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.time", "时间")}
-                </dt>
-                <dd>
-                  {new Date(request.createdAt * 1000).toLocaleString(
-                    dateLocale,
-                  )}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.provider", "供应商")}
-                </dt>
-                <dd className="text-sm">
-                  <span className="font-medium">
-                    {request.providerName || t("usage.unknownProvider", "未知")}
-                  </span>
-                  <span className="ml-2 font-mono text-xs text-muted-foreground">
-                    {request.providerId}
-                  </span>
-                </dd>
-              </div>
-              <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.appType", "应用类型")}
-                </dt>
-                <dd>{request.appType}</dd>
-              </div>
-              <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.model", "模型")}
-                </dt>
-                <dd className="font-mono">{request.model}</dd>
-              </div>
-              <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.status", "状态")}
-                </dt>
-                <dd>
-                  <span
-                    className={`inline-flex rounded-full px-2 py-1 text-xs ${
-                      request.statusCode >= 200 && request.statusCode < 300
-                        ? "bg-green-100 text-green-800"
-                        : "bg-red-100 text-red-800"
-                    }`}
-                  >
-                    {request.statusCode}
-                  </span>
-                </dd>
-              </div>
-            </dl>
-          </div>
-
-          {/* Token 使用量 */}
-          <div className="rounded-lg border p-4">
-            <h3 className="mb-3 font-semibold">
-              {t("usage.tokenUsage", "Token 使用量")}
-            </h3>
-            <dl className="grid grid-cols-2 gap-3 text-sm">
-              <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.inputTokens", "输入 Tokens")}
-                </dt>
-                <dd className="font-mono">
-                  {request.inputTokens.toLocaleString()}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.outputTokens", "输出 Tokens")}
-                </dt>
-                <dd className="font-mono">
-                  {request.outputTokens.toLocaleString()}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.cacheReadTokens", "缓存读取")}
-                </dt>
-                <dd className="font-mono">
-                  {request.cacheReadTokens.toLocaleString()}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.cacheCreationTokens", "缓存写入")}
-                </dt>
-                <dd className="font-mono">
-                  {request.cacheCreationTokens.toLocaleString()}
-                </dd>
-              </div>
-              <div className="col-span-2">
-                <dt className="text-muted-foreground">
-                  {t("usage.totalTokens", "总计")}
-                </dt>
-                <dd className="text-lg font-semibold">
-                  {(
-                    request.inputTokens + request.outputTokens
-                  ).toLocaleString()}
-                </dd>
-              </div>
-            </dl>
-          </div>
-
-          {/* 成本明细 */}
-          <div className="rounded-lg border p-4">
-            <h3 className="mb-3 font-semibold">
-              {t("usage.costBreakdown", "成本明细")}
-            </h3>
-            <dl className="grid grid-cols-2 gap-3 text-sm">
-              <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.inputCost", "输入成本")}
-                  <span className="ml-1 text-xs">
-                    ({t("usage.baseCost", "基础")})
-                  </span>
-                </dt>
-                <dd className="font-mono">
-                  ${parseFloat(request.inputCostUsd).toFixed(6)}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.outputCost", "输出成本")}
-                  <span className="ml-1 text-xs">
-                    ({t("usage.baseCost", "基础")})
-                  </span>
-                </dt>
-                <dd className="font-mono">
-                  ${parseFloat(request.outputCostUsd).toFixed(6)}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.cacheReadCost", "缓存读取成本")}
-                  <span className="ml-1 text-xs">
-                    ({t("usage.baseCost", "基础")})
-                  </span>
-                </dt>
-                <dd className="font-mono">
-                  ${parseFloat(request.cacheReadCostUsd).toFixed(6)}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.cacheCreationCost", "缓存写入成本")}
-                  <span className="ml-1 text-xs">
-                    ({t("usage.baseCost", "基础")})
-                  </span>
-                </dt>
-                <dd className="font-mono">
-                  ${parseFloat(request.cacheCreationCostUsd).toFixed(6)}
-                </dd>
-              </div>
-              {/* 显示成本倍率（如果不等于1） */}
-              {request.costMultiplier &&
-                parseFloat(request.costMultiplier) !== 1 && (
-                  <div className="col-span-2 border-t pt-3">
-                    <dt className="text-muted-foreground">
-                      {t("usage.costMultiplier", "成本倍率")}
-                    </dt>
-                    <dd className="font-mono">×{request.costMultiplier}</dd>
-                  </div>
-                )}
-              <div
-                className={`col-span-2 ${request.costMultiplier && parseFloat(request.costMultiplier) !== 1 ? "" : "border-t"} pt-3`}
-              >
-                <dt className="text-muted-foreground">
-                  {t("usage.totalCost", "总成本")}
-                  {request.costMultiplier &&
-                    parseFloat(request.costMultiplier) !== 1 && (
-                      <span className="ml-1 text-xs">
-                        ({t("usage.withMultiplier", "含倍率")})
-                      </span>
-                    )}
-                </dt>
-                <dd className="text-lg font-semibold text-primary">
-                  ${parseFloat(request.totalCostUsd).toFixed(6)}
-                </dd>
-              </div>
-            </dl>
-          </div>
-
-          {/* 性能信息 */}
-          <div className="rounded-lg border p-4">
-            <h3 className="mb-3 font-semibold">
-              {t("usage.performance", "性能信息")}
-            </h3>
-            <dl className="grid grid-cols-2 gap-3 text-sm">
-              <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.latency", "延迟")}
-                </dt>
-                <dd className="font-mono">{request.latencyMs}ms</dd>
-              </div>
-            </dl>
-          </div>
-
-          {/* 错误信息 */}
-          {request.errorMessage && (
-            <div className="rounded-lg border border-red-200 bg-red-50 p-4">
-              <h3 className="mb-2 font-semibold text-red-800">
-                {t("usage.errorMessage", "错误信息")}
-              </h3>
-              <p className="text-sm text-red-700">{request.errorMessage}</p>
+        <div className="max-h-[70vh] overflow-y-auto p-4">
+          {result.isPending ? (
+            <p role="status">{t("common.loading")}</p>
+          ) : result.isError ? (
+            <div role="alert" className="space-y-2 text-sub text-warn">
+              <p>{t("usageWorkbench.detailFailed")}</p>
+              <Button variant="ghost" onClick={() => void result.refetch()}>
+                {t("usageWorkbench.retry")}
+              </Button>
             </div>
+          ) : !request ? (
+            <p className="text-sub text-ink-muted">
+              {t("usageWorkbench.notFound")}
+            </p>
+          ) : (
+            <>
+              <div className="mb-4 flex min-w-0 items-center gap-2">
+                <code className="min-w-0 flex-1 break-all text-note text-ink-muted">
+                  {requestId}
+                </code>
+                <CopyButton
+                  text={requestId}
+                  aria-label={t("usage.requestId")}
+                />
+              </div>
+              <dl className="grid grid-cols-2 gap-x-5 gap-y-4 text-sub">
+                {fields.map(([label, value]) => (
+                  <div key={label} className="min-w-0">
+                    <dt className="text-note text-ink-muted">{label}</dt>
+                    <dd className="break-words tabular-nums text-ink">
+                      {value}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+              {request.currentEstimate?.additionalUnitsUnsupported && (
+                <p className="mt-4 text-note text-ink-muted">
+                  {t("usageWorkbench.unsupportedUnits")}
+                </p>
+              )}
+            </>
           )}
         </div>
       </DialogContent>
