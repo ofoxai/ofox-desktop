@@ -46,6 +46,7 @@ import { UsageFilterMenu } from "./UsageFilterMenu";
 import { UsageRequests } from "./UsageRequests";
 import { UsageFreshness } from "./UsageFreshness";
 import { UsageSessions } from "./UsageSessions";
+import { UsageLifetimeEntry } from "./UsageLifetimeEntry";
 
 const EMPTY: string[] = [];
 type Tab = "overview" | "requests" | "sessions";
@@ -542,6 +543,12 @@ export function UsagePage({
           {t("usageSessions.projectsCleared")}
         </p>
       )}
+      <UsageLifetimeEntry
+        boundTools={boundTools}
+        capabilities={capabilities.data}
+        apex={apex}
+        active={visible}
+      />
       <p className="text-note text-ink-muted">
         {t("usageWorkbench.rangeSummary", {
           start:
