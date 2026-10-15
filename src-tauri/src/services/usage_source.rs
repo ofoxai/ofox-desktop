@@ -957,15 +957,13 @@ impl Prepared {
             }
             return Ok(false);
         }
-        if !self.may_import_unseen_history
-            && created_at < crate::database::dao::usage_rollup::usage_prune_cutoff()?
-        {
+        if !self.may_import_unseen_history {
             self.evidence.partial("unverifiedHistoricalBoundary");
-            // An unexecuted maintenance flag does not itself contain an old
-            // contribution. Under this same write transaction, allow an old
-            // event only when there is no archive or rollup to duplicate.
-            let history:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM session_usage_archive WHERE app_type=?1) OR EXISTS(SELECT 1 FROM usage_daily_rollups WHERE app_type=?1)",[self.provider],|r|r.get(0))?;
-            if history {
+            if !crate::database::dao::usage_rollup::unseen_event_is_after_history_on(
+                conn,
+                self.provider,
+                created_at,
+            )? {
                 return Ok(false);
             }
         }
@@ -1096,6 +1094,166 @@ mod tests {
 
     fn read_sync_state_for_test(db: &Database, path: &str) -> Option<SyncState> {
         crate::services::usage_sync_db::read_sync_state(db, path).unwrap()
+    }
+
+    fn unknown_pruned_boundary(legacy_without_frontier: bool) {
+        let home = sandbox();
+        let db = Database::memory().unwrap();
+        let original = home.home().join("original.jsonl");
+        native_receipt(&db, &original, "archived");
+        // Model two timezone day boundaries at one fixed instant. The old
+        // boundary is sixteen UTC hours later than the current local cutoff.
+        let current_cutoff = crate::database::dao::usage_rollup::usage_prune_cutoff().unwrap();
+        let old_cutoff = current_cutoff + 16 * 3600;
+        let at = current_cutoff + 4 * 3600;
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE proxy_request_logs SET created_at=?1", [at])
+            .unwrap();
+        db.rollup_and_prune_before(old_cutoff).unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            if legacy_without_frontier {
+                conn.execute(
+                    "DELETE FROM maintenance_flags WHERE key='usage_prune_frontier_utc_v1:claude'",
+                    [],
+                )
+                .unwrap();
+            }
+            let key = original.to_string_lossy();
+            let parts = source_cache::read_on(&conn, &key, "claude").unwrap();
+            source_cache::merge_on(
+                &conn,
+                &key,
+                "claude",
+                None,
+                Part::UsageSync,
+                &parts.token(Part::UsageSync),
+                None,
+            )
+            .unwrap();
+        }
+        let alias = home.home().join("alias.jsonl");
+        fs::write(&alias, "{}").unwrap();
+        let mut source =
+            Prepared::load(&db, Snapshot::file(&alias).unwrap(), "claude", None, 2).unwrap();
+        assert!(!source.may_import_unseen_history);
+        let next = SyncState {
+            modified: 1,
+            offset: 1,
+        };
+        commit_sync_batch(&db, &[CheckpointChange { key: alias.to_string_lossy().into(), expected: None, next: Some(next) }], |conn| {
+            source.check_on(conn)?;
+            let native = native_key("claude", "s", "archived");
+            if source.should_store_on(conn, "session:archived", &native, "session_log", at)? {
+                conn.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,output_tokens,latency_ms,status_code,session_id,created_at,data_source) VALUES('session:archived','_session','claude','fixture',1,1,0,200,'s',?1,'session_log')", [at])?;
+                source.evidence.acknowledge(&native);
+            }
+            source.save_on(conn, next)
+        }).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let count: i64 = conn.query_row("SELECT (SELECT COUNT(*) FROM proxy_request_logs)+(SELECT COALESCE(SUM(request_count),0) FROM session_usage_archive)", [], |r| r.get(0)).unwrap();
+        assert_eq!(
+            count, 1,
+            "a receding local cutoff reimported an archived unknown identity"
+        );
+        assert_eq!(source.evidence.coverage, "partial");
+        let recent = native_key("claude", "s", "after-frontier");
+        assert_eq!(
+            source
+                .should_store_on(
+                    &conn,
+                    "session:after-frontier",
+                    &recent,
+                    "session_log",
+                    old_cutoff + 1
+                )
+                .unwrap(),
+            !legacy_without_frontier
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn evidence_pruned_unknown_identity_cannot_become_recent_after_timezone_change() {
+        unknown_pruned_boundary(false);
+    }
+
+    #[test]
+    #[serial]
+    fn evidence_legacy_archive_without_frontier_cannot_prove_a_recent_identity_is_new() {
+        unknown_pruned_boundary(true);
+    }
+
+    fn legacy_calendar_boundary(date: &str, last_at: i64, allowed: bool) {
+        let home = sandbox();
+        let db = Database::memory().unwrap();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO session_usage_archive VALUES('claude','s','fixture',1,1,0,0,1,'0',?1,?1)", [last_at]).unwrap();
+            conn.execute("INSERT INTO usage_daily_rollups(date,app_type,provider_id,model,request_count,success_count,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,total_cost_usd,avg_latency_ms) VALUES(?1,'claude','_session','fixture',1,1,1,1,0,0,'0',0)", [date]).unwrap();
+        }
+        let path = home.home().join("new.jsonl");
+        fs::write(&path, "{}").unwrap();
+        let mut source =
+            Prepared::load(&db, Snapshot::file(&path).unwrap(), "claude", None, 2).unwrap();
+        let next = SyncState {
+            modified: 1,
+            offset: 1,
+        };
+        commit_sync_batch(
+            &db,
+            &[CheckpointChange {
+                key: path.to_string_lossy().into(),
+                expected: None,
+                next: Some(next),
+            }],
+            |conn| {
+                source.check_on(conn)?;
+                let native = native_key("claude", "s", "new");
+                assert_eq!(
+                    source.should_store_on(
+                        conn,
+                        "session:new",
+                        &native,
+                        "session_log",
+                        chrono::Utc::now().timestamp()
+                    )?,
+                    allowed,
+                    "legacy calendar history must bound, rather than guess, a new event's date"
+                );
+                source.save_on(conn, next)
+            },
+        )
+        .unwrap();
+        if !allowed {
+            let conn = db.conn.lock().unwrap();
+            let raw: String = conn.query_row("SELECT value FROM maintenance_flags WHERE key='usage_prune_frontier_utc_v1:claude'", [], |r| r.get(0)).unwrap();
+            let flag: Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(flag["legacyUnknown"], true);
+            assert_eq!(source.evidence.coverage, "partial");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn evidence_legacy_valid_archive_and_rollup_still_allow_current_native_events() {
+        let old = chrono::Utc::now() - chrono::Duration::days(40);
+        legacy_calendar_boundary(&old.format("%Y-%m-%d").to_string(), old.timestamp(), true);
+    }
+
+    #[test]
+    #[serial]
+    fn evidence_legacy_invalid_rollup_date_cannot_prove_a_new_identity() {
+        let old = (chrono::Utc::now() - chrono::Duration::days(40)).timestamp();
+        legacy_calendar_boundary("2026-02-30", old, false);
+    }
+
+    #[test]
+    #[serial]
+    fn evidence_legacy_overflowing_archive_boundary_cannot_prove_a_new_identity() {
+        legacy_calendar_boundary("2026-01-01", i64::MAX, false);
     }
 
     #[test]

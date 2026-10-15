@@ -328,11 +328,17 @@ fn sync_single_codex_file_with_index(
                 continue;
             };
             let old_or_unknown = created_at < cutoff;
-            if old_or_unknown && (reconcile || (expected.is_none() && last_offset == 0 && history))
-            {
+            let uncertain = reconcile || (expected.is_none() && last_offset == 0 && history);
+            if uncertain {
                 source.evidence.partial("unverifiedHistoricalBoundary");
-                skipped += 1;
-                continue;
+                if old_or_unknown
+                    || !crate::database::dao::usage_rollup::unseen_event_is_after_history_on(
+                        conn, "codex", created_at,
+                    )?
+                {
+                    skipped += 1;
+                    continue;
+                }
             }
             if insert_codex_session_entry(
                 conn,

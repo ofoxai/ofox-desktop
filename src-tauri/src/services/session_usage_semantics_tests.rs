@@ -1734,3 +1734,50 @@ fn semantics_missing_gemini_timestamp_is_not_today() {
 fn semantics_invalid_gemini_timestamp_is_not_today() {
     missing_timestamp_is_not_today("gemini", true);
 }
+
+#[test]
+#[serial]
+fn semantics_legacy_changed_native_time_remains_partial_without_identity_proof() {
+    let home = sandbox();
+    let db = Database::memory().unwrap();
+    let path = home.home().join(".local/share/opencode/opencode.db");
+    let old = (chrono::Utc::now() - chrono::Duration::days(40)).timestamp_millis();
+    let now = chrono::Utc::now().timestamp_millis();
+    let conn = native_oc_database(&path);
+    conn.execute("INSERT INTO session VALUES('s',NULL)", [])
+        .unwrap();
+    let mut message = native_oc_message("m", "s", old, 100, 10);
+    message["time"]["completed"] = json!(0);
+    native_oc_insert(&conn, &message, old);
+    // A legacy ledger has this native contribution, but no event receipt. Its
+    // aggregate cannot prove which ID supplied the old tokens after pruning.
+    db.conn.lock().unwrap().execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,output_tokens,latency_ms,status_code,session_id,created_at,data_source) VALUES('opencode:m','_opencode_session','opencode','fixture',100,10,0,200,'s',?1,'opencode_session')", [old.div_euclid(1000)]).unwrap();
+    db.rollup_and_prune(30).unwrap();
+    message["time"]["completed"] = json!(now);
+    conn.execute(
+        "UPDATE message SET data=?1,time_updated=?2 WHERE id='m'",
+        params![message.to_string(), now],
+    )
+    .unwrap();
+    good(opencode::sync_opencode_usage(&db));
+    // Compatibility admits a recent unknown event. This deliberately exposes
+    // the legacy limitation instead of pretending a temporal bound deduped it.
+    assert_eq!(archived_total(&db), (200, 20, 2));
+    let conn = db.conn.lock().unwrap();
+    let raw: String = conn
+        .query_row(
+            "SELECT meta_json FROM session_meta_cache WHERE provider_id='opencode'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let cache: Value = serde_json::from_str(&raw).unwrap();
+    let evidence = &cache["parts"]["usageSync"]["value"];
+    assert_eq!(evidence["coverage"], "partial");
+    assert_eq!(evidence["completeEventIdentitySet"], false);
+    let manifest = crate::session_manager::source_cache::provider_on(&conn, "opencode")
+        .unwrap()
+        .unwrap();
+    assert_eq!(manifest["originEmpty"], false);
+    assert_eq!(manifest["complete"], false);
+}

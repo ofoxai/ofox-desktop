@@ -8,6 +8,7 @@ use crate::error::AppError;
 use chrono::{Duration, Local, TimeZone};
 use rusqlite::{params, OptionalExtension};
 use rust_decimal::Decimal;
+use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
@@ -18,6 +19,136 @@ pub(crate) const USAGE_DETAIL_RETAIN_DAYS: i64 = 30;
 /// The cutoff the prune uses now: rows older than it are rolled up and deleted.
 pub(crate) fn usage_prune_cutoff() -> Result<i64, AppError> {
     compute_local_midnight_cutoff(Local::now(), USAGE_DETAIL_RETAIN_DAYS)
+}
+
+const PRUNE_FRONTIER_PREFIX: &str = "usage_prune_frontier_utc_v1:";
+
+fn frontier_error() -> AppError {
+    AppError::Database("invalid usage prune frontier".into())
+}
+
+fn read_frontier_on(conn: &rusqlite::Connection, app: &str) -> Result<Option<Value>, AppError> {
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT value FROM maintenance_flags WHERE key=?1",
+            [format!("{PRUNE_FRONTIER_PREFIX}{app}")],
+            |r| r.get(0),
+        )
+        .optional()?;
+    raw.map(|raw| {
+        let value: Value = serde_json::from_str(&raw).map_err(|_| frontier_error())?;
+        let valid_cutoff = value["cutoff"].is_i64()
+            || (value["cutoff"].is_null() && value["legacyUnknown"] == true);
+        if value["version"].as_u64() != Some(1)
+            || !value["legacyUnknown"].is_boolean()
+            || !valid_cutoff
+        {
+            return Err(frontier_error());
+        }
+        Ok(value)
+    })
+    .transpose()
+}
+
+/// Bootstrap a conservative UTC upper bound for pre-frontier aggregates. The
+/// archive retains absolute seconds; rollups retain a local date only. Legal
+/// offsets supported by Chrono are strictly within 24 hours, so the next UTC
+/// midnight plus 24 hours bounds every instant in that old local day. This is
+/// a temporal boundary, never an event identity or completeness receipt.
+fn legacy_frontier_on(conn: &rusqlite::Connection, app: &str) -> Result<Value, AppError> {
+    let (last, mut unknown): (Option<i64>, bool) = conn.query_row(
+        "SELECT MAX(CASE WHEN typeof(last_at)='integer' THEN last_at END),
+            COALESCE(MAX(typeof(last_at)!='integer'),0)
+         FROM session_usage_archive WHERE app_type=?1",
+        [app],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let mut cutoff = last.and_then(|last| {
+        let next = last.checked_add(1);
+        unknown |= next.is_none();
+        next
+    });
+    let mut stmt =
+        conn.prepare("SELECT DISTINCT date FROM usage_daily_rollups WHERE app_type=?1")?;
+    let dates = stmt.query_map([app], |r| r.get::<_, rusqlite::types::Value>(0))?;
+    for date in dates {
+        let date = match date? {
+            rusqlite::types::Value::Text(date) => Some(date),
+            _ => None,
+        };
+        let upper = date.and_then(|date| {
+            let parsed = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()?;
+            if date.len() != 10 || parsed.format("%Y-%m-%d").to_string() != date {
+                return None;
+            }
+            parsed
+                .checked_add_signed(Duration::days(2))?
+                .and_hms_opt(0, 0, 0)
+                .map(|dt| dt.and_utc().timestamp())
+        });
+        match upper {
+            Some(upper) => cutoff = Some(cutoff.map_or(upper, |prior| prior.max(upper))),
+            None => unknown = true,
+        }
+    }
+    Ok(json!({"version":1,"cutoff":cutoff,"legacyUnknown":unknown}))
+}
+
+fn write_frontier_on(
+    conn: &rusqlite::Connection,
+    app: &str,
+    value: &Value,
+) -> Result<(), AppError> {
+    let raw = serde_json::to_string(value).map_err(|_| frontier_error())?;
+    conn.execute(
+        "INSERT INTO maintenance_flags(key,value) VALUES(?1,?2)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![format!("{PRUNE_FRONTIER_PREFIX}{app}"), raw],
+    )?;
+    Ok(())
+}
+
+/// Called only inside the same facts transaction as the unknown native event.
+/// A recent timestamp does not upgrade partial history into native-ID proof.
+pub(crate) fn unseen_event_is_after_history_on(
+    conn: &rusqlite::Connection,
+    app: &str,
+    created_at: i64,
+) -> Result<bool, AppError> {
+    let history: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM session_usage_archive WHERE app_type=?1) OR EXISTS(SELECT 1 FROM usage_daily_rollups WHERE app_type=?1)", [app], |r| r.get(0))?;
+    if !history {
+        return Ok(true);
+    }
+    let frontier = match read_frontier_on(conn, app)? {
+        Some(frontier) => frontier,
+        None => {
+            let frontier = legacy_frontier_on(conn, app)?;
+            write_frontier_on(conn, app, &frontier)?;
+            frontier
+        }
+    };
+    Ok(frontier["legacyUnknown"] == false
+        && frontier["cutoff"]
+            .as_i64()
+            .is_some_and(|cutoff| created_at >= cutoff))
+}
+
+fn advance_frontiers_on(conn: &rusqlite::Connection, cutoff: i64) -> Result<(), AppError> {
+    let apps = conn
+        .prepare("SELECT DISTINCT app_type FROM proxy_request_logs WHERE created_at<?1")?
+        .query_map([cutoff], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    for app in apps {
+        let mut frontier = match read_frontier_on(conn, &app)? {
+            Some(frontier) => frontier,
+            None => legacy_frontier_on(conn, &app)?,
+        };
+        frontier["cutoff"] = json!(frontier["cutoff"]
+            .as_i64()
+            .map_or(cutoff, |prior| prior.max(cutoff)));
+        write_frontier_on(conn, &app, &frontier)?;
+    }
+    Ok(())
 }
 
 /// Compute the rollup/prune cutoff aligned to a local-day boundary.
@@ -248,6 +379,10 @@ impl Database {
     }
 
     fn do_rollup_and_prune(conn: &rusqlite::Connection, cutoff: i64) -> Result<u64, AppError> {
+        // Publish the UTC boundary in the same savepoint as the aggregates and
+        // deletion. Bootstrap before adding new aggregates to distinguish
+        // pre-frontier legacy history from this transaction's known cutoff.
+        advance_frontiers_on(conn, cutoff)?;
         // Aggregate old logs, merging with any pre-existing rollup rows via LEFT JOIN.
         conn.execute(
             "INSERT OR REPLACE INTO usage_daily_rollups
@@ -720,5 +855,125 @@ mod tests {
 
         assert_eq!(archived_cost(&db, "sess-exp")?, "0.00001");
         Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn prune_frontier_is_monotonic_when_a_later_cutoff_moves_backwards() {
+        let _home = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let high = 1_800_000_000;
+        insert_log(&db, "a", Some("s"), "fixture", (1, 1, 0, 0), "0", high - 1).unwrap();
+        db.rollup_and_prune_before(high).unwrap();
+        let low = high - 16 * 3600;
+        insert_log(&db, "b", Some("s"), "fixture", (1, 1, 0, 0), "0", low - 1).unwrap();
+        db.rollup_and_prune_before(low).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let value = conn.query_row("SELECT value FROM maintenance_flags WHERE key='usage_prune_frontier_utc_v1:claude'", [], |r| r.get::<_, String>(0)).ok();
+        let value: Option<serde_json::Value> = value.map(|s| serde_json::from_str(&s).unwrap());
+        assert_eq!(
+            value.as_ref().and_then(|v| v["cutoff"].as_i64()),
+            Some(high)
+        );
+        assert_eq!(
+            value.as_ref().map(|v| &v["legacyUnknown"]),
+            Some(&serde_json::Value::Bool(false))
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn prune_frontier_write_failure_rolls_back_facts_rollup_and_archive() {
+        let _home = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let cutoff = 1_800_000_000;
+        insert_log(
+            &db,
+            "a",
+            Some("s"),
+            "fixture",
+            (1, 1, 0, 0),
+            "0",
+            cutoff - 1,
+        )
+        .unwrap();
+        db.conn.lock().unwrap().execute_batch("CREATE TRIGGER fail_prune_frontier BEFORE INSERT ON maintenance_flags WHEN substr(NEW.key,1,28)='usage_prune_frontier_utc_v1:' BEGIN SELECT RAISE(FAIL,'fixture frontier failure'); END;").unwrap();
+        assert!(
+            db.rollup_and_prune_before(cutoff).is_err(),
+            "prune did not atomically publish its historical boundary"
+        );
+        let conn = db.conn.lock().unwrap();
+        for (table, count) in [
+            ("proxy_request_logs", 1),
+            ("usage_daily_rollups", 0),
+            ("session_usage_archive", 0),
+            ("maintenance_flags", 0),
+        ] {
+            let actual: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(
+                actual, count,
+                "{table} changed despite the failed frontier write"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn prune_frontier_keeps_unknown_fields_and_a_higher_previous_boundary() {
+        let _home = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let cutoff = 1_800_000_000;
+        let before = serde_json::json!({"version":1,"cutoff":cutoff+16*3600,"legacyUnknown":false,"future":{"opaque":7}});
+        db.conn.lock().unwrap().execute("INSERT INTO maintenance_flags(key,value) VALUES('usage_prune_frontier_utc_v1:claude',?1)", [before.to_string()]).unwrap();
+        insert_log(
+            &db,
+            "a",
+            Some("s"),
+            "fixture",
+            (1, 1, 0, 0),
+            "0",
+            cutoff - 1,
+        )
+        .unwrap();
+        db.rollup_and_prune_before(cutoff).unwrap();
+        let raw: String = db.conn.lock().unwrap().query_row("SELECT value FROM maintenance_flags WHERE key='usage_prune_frontier_utc_v1:claude'", [], |r| r.get(0)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&raw).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn prune_frontier_refuses_unknown_or_corrupt_formats_without_deleting_facts() {
+        let _home = crate::test_sandbox::sandbox();
+        for raw in [
+            "{broken",
+            r#"{"version":999,"cutoff":1,"legacyUnknown":false,"future":7}"#,
+        ] {
+            let db = Database::memory().unwrap();
+            let cutoff = 1_800_000_000;
+            db.conn.lock().unwrap().execute("INSERT INTO maintenance_flags(key,value) VALUES('usage_prune_frontier_utc_v1:claude',?1)", [raw]).unwrap();
+            insert_log(
+                &db,
+                "a",
+                Some("s"),
+                "fixture",
+                (1, 1, 0, 0),
+                "0",
+                cutoff - 1,
+            )
+            .unwrap();
+            assert!(db.rollup_and_prune_before(cutoff).is_err());
+            let conn = db.conn.lock().unwrap();
+            let after: String = conn.query_row("SELECT value FROM maintenance_flags WHERE key='usage_prune_frontier_utc_v1:claude'", [], |r| r.get(0)).unwrap();
+            assert_eq!(after, raw);
+            let live: i64 = conn
+                .query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(live, 1);
+        }
     }
 }

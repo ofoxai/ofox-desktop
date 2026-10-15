@@ -1394,7 +1394,7 @@ mod tests {
                 conn.execute(
                     "INSERT INTO maintenance_flags (key, value) VALUES
                      ('usage_prune_frontier_utc_v1:claude',
-                      '{\"version\":1,\"cutoffMs\":1234000,\"legacyUnknown\":false}')",
+                      '{\"version\":1,\"cutoff\":1234000,\"legacyUnknown\":false}')",
                     [],
                 )?;
                 merge_on(
