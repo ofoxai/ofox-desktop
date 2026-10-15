@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::{fs, path::Path, time::UNIX_EPOCH};
+use std::{collections::BTreeMap, fs, path::Path, time::UNIX_EPOCH};
 
 const FORMAT: u64 = 1;
 const PROVIDER_PREFIX: &str = "usage_provider_evidence_v1:";
@@ -354,6 +354,268 @@ pub(crate) fn invalidate_provider_on(
         .ok_or_else(|| invalid("provider reasons"))?
         .insert(reason.into(), json!(true));
     write_provider_on(conn, provider, &manifest)
+}
+
+/// Provider-local durable ordering for dsh physical generations. This is
+/// positive ordering evidence, never permission to infer an absent native ID.
+/// Call check_on before facts, and save_on before source receipts, in the same
+/// caller-owned transaction. Restore may keep ordering while revoking ack trust.
+pub(crate) struct DshNativeGenerations {
+    expected_generation: Option<String>,
+    expected_extension: Option<Value>,
+    epoch: Option<String>,
+    root: std::path::PathBuf,
+    extension: Value,
+    event_count: usize,
+    available: bool,
+    initializing: bool,
+    origin_empty: bool,
+}
+const MAX_DSH_GENERATION_SESSIONS: usize = 20_000;
+const MAX_DSH_GENERATION_EVENTS: usize = 100_000;
+fn canonical_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+#[derive(Serialize)]
+struct DshGenerationFields {
+    generation: u64,
+    events: BTreeMap<String, u64>,
+}
+#[derive(Serialize)]
+struct DshGenerationProjection {
+    version: u8,
+    sessions: BTreeMap<String, DshGenerationFields>,
+    #[serde(skip)]
+    event_count: usize,
+}
+/// Only recognized v1 ordering fields enter integrity. Unknown extensions
+/// survive roundtrips without becoming accidental inputs to this version.
+fn dsh_generation_projection(value: &Value) -> Result<Option<DshGenerationProjection>, AppError> {
+    if value["version"].as_u64() != Some(1) {
+        return Ok(None);
+    }
+    let Some(sessions) = value["sessions"].as_object() else {
+        return Ok(None);
+    };
+    if sessions.len() > MAX_DSH_GENERATION_SESSIONS {
+        return Err(invalid("dsh generation session budget"));
+    }
+    let mut projection = DshGenerationProjection {
+        version: 1,
+        sessions: BTreeMap::new(),
+        event_count: 0,
+    };
+    for (sid, session) in sessions {
+        let (Some(generation), Some(events)) = (
+            session["generation"].as_u64(),
+            session["events"].as_object(),
+        ) else {
+            return Ok(None);
+        };
+        if !canonical_digest(sid) {
+            return Ok(None);
+        }
+        projection.event_count = projection
+            .event_count
+            .checked_add(events.len())
+            .ok_or_else(|| invalid("dsh generation event budget"))?;
+        if projection.event_count > MAX_DSH_GENERATION_EVENTS {
+            return Err(invalid("dsh generation event budget"));
+        }
+        let mut fields = DshGenerationFields {
+            generation,
+            events: BTreeMap::new(),
+        };
+        for (event, g) in events {
+            let Some(g) = g.as_u64() else {
+                return Ok(None);
+            };
+            if !canonical_digest(event) || g > generation {
+                return Ok(None);
+            }
+            fields.events.insert(event.clone(), g);
+        }
+        projection.sessions.insert(sid.clone(), fields);
+    }
+    Ok(Some(projection))
+}
+fn dsh_generation_digest(value: &Value) -> Result<Option<(String, usize)>, AppError> {
+    let Some(projection) = dsh_generation_projection(value)? else {
+        return Ok(None);
+    };
+    let bytes = serde_json::to_vec(&projection)
+        .map_err(|_| invalid("serialize dsh generation projection"))?;
+    Ok(Some((
+        format!("{:x}", Sha256::digest(bytes)),
+        projection.event_count,
+    )))
+}
+fn dsh_generation_shape(value: &Value) -> Result<Option<usize>, AppError> {
+    let Some((hash, count)) = dsh_generation_digest(value)? else {
+        return Ok(None);
+    };
+    Ok((value["contentHash"].as_str() == Some(hash.as_str())).then_some(count))
+}
+fn dsh_usage_history_on(conn: &Connection, root: &Path) -> Result<bool, AppError> {
+    if conn.query_row("SELECT EXISTS(SELECT 1 FROM proxy_request_logs WHERE app_type='dsh') OR EXISTS(SELECT 1 FROM usage_daily_rollups WHERE app_type='dsh') OR EXISTS(SELECT 1 FROM session_usage_archive WHERE app_type='dsh')",[],|r|r.get::<_,bool>(0)).map_err(sql_error)? { return Ok(true); }
+    let manifest = provider_on(conn, "dsh")?;
+    if manifest
+        .as_ref()
+        .is_some_and(|m| m["receipts"].as_object().is_some_and(|r| !r.is_empty()))
+    {
+        return Ok(true);
+    }
+    let mut statement = conn.prepare("SELECT provider_id,stamp,parser_version,meta_json FROM session_meta_cache WHERE provider_id='dsh'").map_err(sql_error)?;
+    let rows = statement
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .map_err(sql_error)?;
+    for row in rows {
+        match decode_row(row.map_err(sql_error)?, "dsh") {
+            Ok(parts) if parts.token(Part::UsageSync).is_none() => {}
+            _ => return Ok(true),
+        }
+    }
+    let mut statement = conn
+        .prepare("SELECT file_path FROM session_log_sync")
+        .map_err(sql_error)?;
+    let rows = statement
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(sql_error)?;
+    for row in rows {
+        if Path::new(&row.map_err(sql_error)?).starts_with(root) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+impl DshNativeGenerations {
+    pub(crate) fn load_on(
+        conn: &Connection,
+        root: &Path,
+        origin_empty: bool,
+    ) -> Result<Self, AppError> {
+        let manifest = provider_on(conn, "dsh")?;
+        let expected_extension = manifest
+            .as_ref()
+            .and_then(|m| m.get("nativeGenerations"))
+            .cloned();
+        let known = expected_extension
+            .as_ref()
+            .map(dsh_generation_shape)
+            .transpose()?
+            .flatten();
+        let initializing = expected_extension.is_none() && !dsh_usage_history_on(conn, root)?;
+        Ok(Self {
+            expected_generation: provider_generation(&manifest),
+            extension: expected_extension
+                .clone()
+                .unwrap_or_else(|| json!({"version":1,"sessions":{}})),
+            expected_extension,
+            epoch: ledger_epoch_on(conn)?,
+            root: root.to_owned(),
+            event_count: known.unwrap_or(0),
+            available: known.is_some() || initializing,
+            initializing,
+            origin_empty,
+        })
+    }
+    fn check_fence_on(&self, conn: &Connection) -> Result<(), AppError> {
+        let current = provider_on(conn, "dsh")?;
+        if provider_generation(&current) != self.expected_generation
+            || ledger_epoch_on(conn)? != self.epoch
+            || current.as_ref().and_then(|m| m.get("nativeGenerations"))
+                != self.expected_extension.as_ref()
+        {
+            return Err(invalid("dsh generation lease changed; retry"));
+        }
+        Ok(())
+    }
+    pub(crate) fn check_on(&self, conn: &Connection) -> Result<(), AppError> {
+        self.check_fence_on(conn)?;
+        if self.initializing && dsh_usage_history_on(conn, &self.root)? {
+            return Err(invalid("dsh ordering origin changed; retry"));
+        }
+        Ok(())
+    }
+    pub(crate) fn available(&self) -> bool {
+        self.available
+    }
+    pub(crate) fn session_allows(&self, sid: &str, generation: u64) -> bool {
+        self.available
+            && self.extension["sessions"][receipt_key(sid)]["generation"]
+                .as_u64()
+                .is_none_or(|prior| generation >= prior)
+    }
+    pub(crate) fn event_allows(&self, sid: &str, native: &str, generation: u64) -> bool {
+        self.available
+            && self.extension["sessions"][receipt_key(sid)]["events"][receipt_key(native)]
+                .as_u64()
+                .is_none_or(|prior| generation >= prior)
+    }
+    pub(crate) fn observe_session(&mut self, sid: &str, generation: u64) -> Result<(), AppError> {
+        if sid.trim().is_empty() || !self.session_allows(sid, generation) {
+            return Err(invalid("dsh generation rollback"));
+        }
+        let sessions = self.extension["sessions"]
+            .as_object_mut()
+            .ok_or_else(|| invalid("dsh generation sessions"))?;
+        let id = receipt_key(sid);
+        if !sessions.contains_key(&id) && sessions.len() >= MAX_DSH_GENERATION_SESSIONS {
+            return Err(invalid("dsh generation session budget"));
+        }
+        let entry = sessions
+            .entry(id)
+            .or_insert_with(|| json!({"generation":generation,"events":{}}));
+        entry["generation"] = json!(generation);
+        Ok(())
+    }
+    pub(crate) fn observe_event(
+        &mut self,
+        sid: &str,
+        native: &str,
+        generation: u64,
+    ) -> Result<(), AppError> {
+        if !self.event_allows(sid, native, generation) {
+            return Err(invalid("dsh event generation rollback"));
+        }
+        let session = &mut self.extension["sessions"][receipt_key(sid)];
+        if session["generation"]
+            .as_u64()
+            .is_none_or(|highest| generation > highest)
+        {
+            return Err(invalid("dsh generation session missing"));
+        }
+        let events = session["events"]
+            .as_object_mut()
+            .ok_or_else(|| invalid("dsh generation events"))?;
+        let id = receipt_key(native);
+        if !events.contains_key(&id) {
+            if self.event_count >= MAX_DSH_GENERATION_EVENTS {
+                return Err(invalid("dsh generation event budget"));
+            }
+            self.event_count += 1;
+        }
+        events.insert(id, json!(generation));
+        Ok(())
+    }
+    pub(crate) fn save_on(&self, conn: &Connection) -> Result<(), AppError> {
+        self.check_fence_on(conn)?;
+        if !self.available {
+            return Ok(());
+        }
+        let mut manifest = provider_on(conn, "dsh")?
+            .unwrap_or_else(|| new_provider(self.epoch.clone(), self.origin_empty));
+        let mut extension = self.extension.clone();
+        let (hash, _) = dsh_generation_digest(&extension)?
+            .ok_or_else(|| invalid("invalid dsh generation projection"))?;
+        extension["contentHash"] = json!(hash);
+        manifest["nativeGenerations"] = extension;
+        manifest["generation"] = json!(uuid::Uuid::new_v4().to_string());
+        write_provider_on(conn, "dsh", &manifest)
+    }
 }
 
 fn record_receipt_on(
@@ -725,5 +987,144 @@ mod tests {
             after.value(Part::UsageSync).unwrap()["acknowledgedEventIds"],
             json!(["native"])
         );
+    }
+    #[test]
+    fn dsh_generation_manifest_preserves_peers_unknown_fields_and_native_identity_hashes() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        bootstrap_provider_on(&conn, "dsh", true).unwrap();
+        let mut manifest = provider_on(&conn, "dsh").unwrap().unwrap();
+        manifest["futurePeer"] = json!({"keep":true});
+        write_provider_on(&conn, "dsh", &manifest).unwrap();
+        let mut lease =
+            DshNativeGenerations::load_on(&conn, Path::new("fixture-dsh-root"), true).unwrap();
+        assert!(lease.available());
+        lease.observe_session("native-secret-sid", 1).unwrap();
+        lease
+            .observe_event("native-secret-sid", "native-secret-event", 1)
+            .unwrap();
+        lease.save_on(&conn).unwrap();
+        let after = provider_on(&conn, "dsh").unwrap().unwrap();
+        assert_eq!(after["futurePeer"], json!({"keep":true}));
+        let raw = after["nativeGenerations"].to_string();
+        assert!(!raw.contains("native-secret"));
+        let lease =
+            DshNativeGenerations::load_on(&conn, Path::new("fixture-dsh-root"), false).unwrap();
+        assert!(!lease.session_allows("native-secret-sid", 0));
+        assert!(!lease.event_allows("native-secret-sid", "native-secret-event", 0));
+    }
+    #[test]
+    fn dsh_generation_manifest_refuses_stale_provider_generation_before_any_write() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let mut lease =
+            DshNativeGenerations::load_on(&conn, Path::new("fixture-dsh-root"), true).unwrap();
+        lease.observe_session("s", 1).unwrap();
+        bootstrap_provider_on(&conn, "dsh", false).unwrap();
+        let before = provider_on(&conn, "dsh").unwrap();
+        assert!(lease.check_on(&conn).is_err());
+        assert!(lease.save_on(&conn).is_err());
+        assert_eq!(provider_on(&conn, "dsh").unwrap(), before);
+    }
+    #[test]
+    fn dsh_generation_future_extension_is_unavailable_and_never_replaced_with_an_empty_map() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        bootstrap_provider_on(&conn, "dsh", false).unwrap();
+        let mut manifest = provider_on(&conn, "dsh").unwrap().unwrap();
+        manifest["nativeGenerations"] = json!({"version":7,"future":true,"sessions":{}});
+        write_provider_on(&conn, "dsh", &manifest).unwrap();
+        let lease =
+            DshNativeGenerations::load_on(&conn, Path::new("fixture-dsh-root"), false).unwrap();
+        assert!(!lease.available());
+        lease.save_on(&conn).unwrap();
+        assert_eq!(provider_on(&conn, "dsh").unwrap(), Some(manifest));
+    }
+    #[test]
+    fn dsh_generation_manifest_session_limit_rejects_growth_without_evicting_history() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        bootstrap_provider_on(&conn, "dsh", true).unwrap();
+        let mut manifest = provider_on(&conn, "dsh").unwrap().unwrap();
+        let sessions = (0..20_000)
+            .map(|n| (format!("{n:064x}"), json!({"generation":1,"events":{}})))
+            .collect::<serde_json::Map<_, _>>();
+        manifest["nativeGenerations"] = json!({"version":1,"sessions":sessions});
+        let (hash, _) = dsh_generation_digest(&manifest["nativeGenerations"])
+            .unwrap()
+            .unwrap();
+        manifest["nativeGenerations"]["contentHash"] = json!(hash);
+        write_provider_on(&conn, "dsh", &manifest).unwrap();
+        let mut lease =
+            DshNativeGenerations::load_on(&conn, Path::new("fixture-dsh-root"), false).unwrap();
+        assert!(
+            lease.available(),
+            "the fixture must reach the actual session budget guard"
+        );
+        assert!(lease.observe_session("new", 1).is_err());
+        assert_eq!(provider_on(&conn, "dsh").unwrap(), Some(manifest));
+    }
+    #[test]
+    fn dsh_generation_epoch_cas_rejects_old_work_while_restore_keeps_positive_order() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let root = Path::new("fixture-dsh-root");
+        let mut initial = DshNativeGenerations::load_on(&conn, root, true).unwrap();
+        initial.observe_session("s", 1).unwrap();
+        initial.observe_event("s", "event", 1).unwrap();
+        initial.save_on(&conn).unwrap();
+        let prepared = DshNativeGenerations::load_on(&conn, root, false).unwrap();
+        conn.execute(
+            "INSERT INTO maintenance_flags(key,value) VALUES(?1,'changed-epoch')",
+            [LEDGER_EPOCH_KEY],
+        )
+        .unwrap();
+        assert!(
+            prepared.check_on(&conn).is_err(),
+            "epoch alone fences an old prepare"
+        );
+        assert!(prepared.save_on(&conn).is_err());
+        let before = provider_on(&conn, "dsh").unwrap().unwrap()["nativeGenerations"].clone();
+        revoke_usage_on(&conn).unwrap();
+        let next = DshNativeGenerations::load_on(&conn, root, false).unwrap();
+        assert!(next.available());
+        assert!(!next.event_allows("s", "event", 0));
+        next.save_on(&conn).unwrap();
+        let after = provider_on(&conn, "dsh").unwrap().unwrap();
+        assert_eq!(after["nativeGenerations"], before);
+        assert_eq!(after["complete"], false);
+    }
+    #[test]
+    fn dsh_generation_integrity_preserves_unknown_root_and_session_extensions() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let root = Path::new("fixture-dsh-root");
+        let mut initial = DshNativeGenerations::load_on(&conn, root, true).unwrap();
+        initial.observe_session("s", 1).unwrap();
+        initial.observe_event("s", "event", 1).unwrap();
+        initial.save_on(&conn).unwrap();
+        let mut manifest = provider_on(&conn, "dsh").unwrap().unwrap();
+        let digest = manifest["nativeGenerations"]["contentHash"].clone();
+        manifest["futureProviderPeer"] = json!({"keep":1});
+        manifest["nativeGenerations"]["futurePeer"] = json!({"keep":2});
+        manifest["nativeGenerations"]["sessions"][receipt_key("s")]["futureSessionPeer"] =
+            json!({"keep":3});
+        write_provider_on(&conn, "dsh", &manifest).unwrap();
+        let mut next = DshNativeGenerations::load_on(&conn, root, false).unwrap();
+        assert!(
+            next.available(),
+            "unrecognized fields do not change known generation integrity"
+        );
+        next.observe_session("s", 1).unwrap();
+        next.observe_event("s", "event", 1).unwrap();
+        next.save_on(&conn).unwrap();
+        let after = provider_on(&conn, "dsh").unwrap().unwrap();
+        assert_eq!(after["futureProviderPeer"], json!({"keep":1}));
+        assert_eq!(after["nativeGenerations"]["futurePeer"], json!({"keep":2}));
+        assert_eq!(
+            after["nativeGenerations"]["sessions"][receipt_key("s")]["futureSessionPeer"],
+            json!({"keep":3})
+        );
+        assert_eq!(after["nativeGenerations"]["contentHash"], digest);
     }
 }

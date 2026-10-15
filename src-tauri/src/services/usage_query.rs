@@ -99,7 +99,7 @@ pub fn source_capabilities() -> Vec<SourceCapability> {
         ("workbuddy", Some("workbuddy_session")),
         ("hermes", None),
         ("pi", None),
-        ("dsh", None),
+        ("dsh", Some("dsh_session")),
         ("openclaw", None),
     ]
     .into_iter()

@@ -15,6 +15,10 @@ pub fn home_dir() -> Result<PathBuf, String> {
 
 pub(crate) fn open(path: &Path) -> Result<Box<dyn Read>, String> {
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    open_handle(file, path)
+}
+
+pub(crate) fn open_handle(file: std::fs::File, path: &Path) -> Result<Box<dyn Read>, String> {
     if path.extension().is_some_and(|e| e == "zstd" || e == "zst") {
         // Decoder defaults to concatenated frames, as dsh appends a frame per batch.
         Ok(Box::new(
@@ -30,7 +34,7 @@ pub(crate) struct FileMeta {
     pub parent: Option<String>,
 }
 
-fn generation(name: &str) -> Option<u32> {
+pub(crate) fn generation(name: &str) -> Option<u32> {
     let name = name.strip_suffix(".zstd").unwrap_or(name);
     if name == "session.jsonl" {
         return Some(0);
@@ -39,6 +43,72 @@ fn generation(name: &str) -> Option<u32> {
         .strip_suffix(".jsonl")?
         .parse()
         .ok()
+}
+
+/// Strict usage enumeration keeps every physical generation, including compressed
+/// twins. Metadata display continues to select its latest projection separately.
+pub(crate) fn usage_files(home: &Path) -> Result<Vec<(PathBuf, u64)>, String> {
+    fn directory(path: &Path) -> Result<bool, String> {
+        match std::fs::symlink_metadata(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Ok(m) if m.is_dir() && !m.file_type().is_symlink() => Ok(true),
+            _ => Err("dsh usage directory unavailable".into()),
+        }
+    }
+    fn children(path: &Path) -> Result<Vec<PathBuf>, String> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(path).map_err(|_| "dsh usage directory unavailable")? {
+            let entry = entry.map_err(|_| "dsh usage directory unavailable")?;
+            if out.len() >= 100_000
+                || entry
+                    .file_type()
+                    .map_err(|_| "dsh usage entry unavailable")?
+                    .is_symlink()
+            {
+                return Err("dsh usage enumeration unsupported".into());
+            }
+            out.push(entry.path());
+        }
+        out.sort();
+        Ok(out)
+    }
+    if !directory(home)? || !directory(&home.join("sessions"))? {
+        return Ok(vec![]);
+    }
+    let mut out = Vec::new();
+    let mut directories = 0usize;
+    for project in children(&home.join("sessions"))? {
+        if !project.is_dir() {
+            continue;
+        }
+        for session in children(&project)? {
+            if !session.is_dir() {
+                continue;
+            }
+            directories += 1;
+            if directories > 100_000 {
+                return Err("dsh usage directory budget".into());
+            }
+            for path in children(&session)? {
+                let Some(generation) = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .and_then(generation)
+                else {
+                    continue;
+                };
+                if !path.is_file() || path.to_str().is_none() {
+                    return Err("dsh usage source unavailable".into());
+                }
+                if out.len() >= 10_000 {
+                    return Err("dsh usage source budget".into());
+                }
+                out.push((path, u64::from(generation)));
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 pub(crate) fn scan_files(home: &Path) -> Vec<FileMeta> {

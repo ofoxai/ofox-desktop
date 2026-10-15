@@ -196,7 +196,7 @@ pub(crate) fn timestamp_ms(timestamp: Option<&str>) -> Option<i64> {
 }
 fn normalized_source(provider: &str, path: &Path) -> Result<Snapshot, AppError> {
     match provider {
-        "claude" | "codex" | "gemini" | "workbuddy" => Snapshot::file(path),
+        "claude" | "codex" | "gemini" | "workbuddy" | "dsh" => Snapshot::file(path),
         "opencode" if path.is_file() => Snapshot::sqlite(path),
         "opencode" => Snapshot::storage(path),
         _ => Err(error("unsupported normalized provider")),
@@ -218,6 +218,12 @@ pub fn read_normalized(provider: &str, path: &Path) -> Result<NormalizedSnapshot
         "opencode" => super::session_usage_opencode::normalized_facts(path)?,
         "workbuddy" => {
             let read = super::session_usage_workbuddy::read_workbuddy(path)?;
+            let complete = !read.reasons.contains("incompleteEnumeration");
+            reasons.extend(read.reasons);
+            (read.facts, complete)
+        }
+        "dsh" => {
+            let read = super::session_usage_dsh::read_dsh(path)?;
             let complete = !read.reasons.contains("incompleteEnumeration");
             reasons.extend(read.reasons);
             (read.facts, complete)
@@ -560,6 +566,14 @@ pub(crate) fn has_complete_coverage_on(
 
 fn owned_identity(provider: &str, request: &str, session: Option<&str>) -> Option<String> {
     let session = session.unwrap_or("");
+    if provider == "dsh" {
+        let [sid, kind, id]: [String; 3] =
+            serde_json::from_str(request.strip_prefix("dsh_session:")?).ok()?;
+        if sid.trim().is_empty() || id.trim().is_empty() || sid != session || kind != "assistant" {
+            return None;
+        }
+        return Some(native_key(provider, &sid, &json!([kind, id]).to_string()));
+    }
     if provider == "workbuddy" {
         let [sid, id]: [String; 2] =
             serde_json::from_str(request.strip_prefix("workbuddy_session:")?).ok()?;
@@ -602,6 +616,7 @@ fn owner(provider: &str) -> Result<&'static str, AppError> {
         "opencode" => Ok("_opencode_session"),
         "codex" => Ok("_codex_session"),
         "workbuddy" => Ok("_workbuddy_session"),
+        "dsh" => Ok("_dsh_session"),
         _ => Err(error("unknown provider")),
     }
 }
@@ -612,6 +627,7 @@ fn origin(provider: &str) -> Result<&'static str, AppError> {
         "opencode" => Ok("opencode_session"),
         "codex" => Ok("codex_session"),
         "workbuddy" => Ok("workbuddy_session"),
+        "dsh" => Ok("dsh_session"),
         _ => Err(error("unknown provider")),
     }
 }
@@ -668,6 +684,9 @@ fn decode_evidence(value: &Value) -> Result<Evidence, AppError> {
     Ok(evidence)
 }
 impl ProviderIndex {
+    pub(crate) fn origin_empty(&self) -> bool {
+        self.origin_empty
+    }
     pub(crate) fn load(
         db: &Database,
         provider: &'static str,
@@ -1043,6 +1062,7 @@ impl Prepared {
             "gemini" => "_gemini_session",
             "opencode" => "_opencode_session",
             "workbuddy" => "_workbuddy_session",
+            "dsh" => "_dsh_session",
             _ => return Err(error("unsupported native evidence source")),
         };
         if let Some((source, app, provider)) = row {

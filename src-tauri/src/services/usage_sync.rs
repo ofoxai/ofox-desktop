@@ -6,8 +6,8 @@ use crate::database::Database;
 use crate::error::AppError;
 use crate::services::session_usage::SessionSyncResult;
 use crate::services::{
-    pricing_sync, session_usage, session_usage_codex, session_usage_gemini, session_usage_opencode,
-    session_usage_workbuddy, usage_maintenance,
+    pricing_sync, session_usage, session_usage_codex, session_usage_dsh, session_usage_gemini,
+    session_usage_opencode, session_usage_workbuddy, usage_maintenance,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -386,6 +386,12 @@ const SOURCES: &[Source] = &[
         source_id: "workbuddy_session",
         name: "WorkBuddy",
         sync: session_usage_workbuddy::sync_workbuddy_usage,
+    },
+    Source {
+        provider: "dsh",
+        source_id: "dsh_session",
+        name: "dsh",
+        sync: session_usage_dsh::sync_dsh_usage,
     },
 ];
 
@@ -1454,6 +1460,63 @@ mod tests {
             .unwrap()
             .iter()
             .any(|r| r == "incompleteEnumeration"));
+    }
+
+    #[test]
+    #[serial]
+    fn dsh_registered_partial_prefix_does_not_block_other_sources_maintenance() {
+        let home = sandbox();
+        write_one_call_per_source(home.home());
+        let path = home.home().join(".dsh/sessions/_no-cwd/s/session.jsonl");
+        let header = serde_json::json!({"type":"session","version":0,"id":"s","createdAt":1_792_053_987_000_i64,"delegationDepth":0});
+        let call = serde_json::json!({"type":"assistant/message","seq":0,"time":1_792_053_987_262_i64,
+            "data":{"message":{"id":"native-message","role":"assistant","source":{"kind":"model"}},"usage":{"inputTokens":1,"outputTokens":2}}});
+        write(
+            &path,
+            &format!("{header}\n{call}\n{{\"type\":\"assistant/message\""),
+        );
+        let db = Database::memory().unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO maintenance_flags VALUES('recompute_claude_costs','pending')",
+                [],
+            )
+            .unwrap();
+        let result = sync_sources(&db);
+        let conn = db.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM proxy_request_logs WHERE app_type='dsh'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "dsh must be registered with the coordinator: {result:?}"
+        );
+        assert!(
+            result.errors.is_empty(),
+            "typed coverage partial is not transport failure: {result:?}"
+        );
+        let flag: String = conn
+            .query_row(
+                "SELECT value FROM maintenance_flags WHERE key='recompute_claude_costs'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(flag, "done");
+        let offset: i64 = conn
+            .query_row(
+                "SELECT last_line_offset FROM session_log_sync WHERE file_path=?1",
+                [path.to_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(offset, 2);
     }
 
     #[tokio::test]

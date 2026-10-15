@@ -29,6 +29,7 @@ pub mod session_usage;
 #[cfg(test)]
 mod session_usage_atomic_tests;
 pub mod session_usage_codex;
+mod session_usage_dsh;
 pub mod session_usage_gemini;
 pub mod session_usage_hermes;
 pub mod session_usage_opencode;
