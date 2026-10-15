@@ -4,6 +4,7 @@
 //! not centered).
 
 use serde_json::{Map, Value};
+use std::{collections::BTreeSet, path::PathBuf};
 
 /// Fields that intentionally differ on Windows: no overlay title bar there.
 const PLATFORM_FIELDS: [&str; 2] = ["title", "titleBarStyle"];
@@ -54,7 +55,13 @@ fn windows_bundle_drops_the_macos_installer_resources() {
         .as_object()
         .expect("Windows bundle override");
     assert_eq!(bundle.keys().collect::<Vec<_>>(), ["resources"]);
-    assert_eq!(bundle["resources"], Value::Array(Vec::new()));
+    let installer = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../scripts/installer")
+        .canonicalize()
+        .unwrap();
+    assert!(expanded_resources(&windows)
+        .iter()
+        .all(|resource| !resource.starts_with(&installer)));
 }
 
 #[test]
@@ -62,4 +69,60 @@ fn windows_main_window_is_titled_with_the_product_name() {
     let product = read("tauri.conf.json")["productName"].clone();
     let windows = main_window(&read("tauri.windows.conf.json"));
     assert_eq!(windows["title"], product);
+}
+
+fn expanded_resources(config: &Value) -> Vec<PathBuf> {
+    let patterns: Vec<String> = config["bundle"]["resources"]
+        .as_array()
+        .expect("bundle.resources")
+        .iter()
+        .map(|pattern| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(pattern.as_str().expect("resource glob"))
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    tauri::utils::resources::ResourcePaths::new(&patterns, true)
+        .map(|resource| {
+            resource
+                .expect("resource glob resolves")
+                .canonicalize()
+                .unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn every_platform_bundles_the_logo_notices_without_duplicate_images() {
+    let logo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../src/assets/agent-logos")
+        .canonicalize()
+        .unwrap();
+    let expected: BTreeSet<String> = [
+        "LICENSE-Aider.txt",
+        "LICENSE-Crush.md",
+        "LICENSE-Lobe-Icons.txt",
+        "LICENSE-Magpie.txt",
+        "NOTICE.md",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    for config in ["tauri.conf.json", "tauri.windows.conf.json"] {
+        let resources = expanded_resources(&read(config));
+        let logo_resources: Vec<_> = resources
+            .iter()
+            .filter(|resource| resource.starts_with(&logo_root))
+            .collect();
+        assert_eq!(logo_resources.len(), expected.len(), "{config}");
+        let notices = logo_resources
+            .into_iter()
+            .map(|resource| {
+                assert!(resource.is_file());
+                resource.file_name().unwrap().to_string_lossy().into_owned()
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(notices, expected, "{config}");
+    }
 }
