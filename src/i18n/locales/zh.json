@@ -3650,6 +3650,7 @@
     }
   },
   "catalogLifecycle": {
+    "manageShort": "管理",
     "description": "仅管理此 OFox 副本；不修改终端 PATH，也不绑定模型或代登录。外部副本继续由原安装方式管理。",
     "unavailable": "此后端暂不支持该安装管理。",
     "prepareFailed": "无法准备操作。请重新检测安装来源或使用官方手动途径。",

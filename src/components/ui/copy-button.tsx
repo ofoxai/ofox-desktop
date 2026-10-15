@@ -61,7 +61,7 @@ export function CopyButton({
       data-copied={copied || undefined}
       onClick={() => void copy()}
       className={cn(
-        "flex-none",
+        "relative flex-none",
         copied &&
           "animate-copy-pop bg-ok-soft text-ok hover:bg-ok-soft hover:text-ok",
         className,

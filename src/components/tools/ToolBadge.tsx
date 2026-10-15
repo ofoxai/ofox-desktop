@@ -1,58 +1,6 @@
-import type { ComponentType } from "react";
-
-import {
-  ClaudeIcon,
-  DshIcon,
-  PiIcon,
-  CodexIcon,
-  GeminiIcon,
-  HermesIcon,
-  OpenClawIcon,
-  OpenCodeIcon,
-  WorkBuddyIcon,
-} from "@/components/BrandIcons";
+import { TOOL_LOGOS } from "@/config/toolLogos";
 import { TOOL_META } from "@/config/toolMeta";
 import { cn } from "@/lib/utils";
-
-type BrandIconComponent = ComponentType<{
-  size?: number;
-  className?: string;
-}>;
-
-/**
- * 单个工具在卡片/列表/弹窗里反复出现的"圆角徽章"——品牌色背景 + 居中
- * logo。在没有官方图标的工具上，回退到 TOOL_META.color + abbr 色块。
- *
- * 用法：
- *   <ToolBadge toolId="claude" size={40} />          // popover / 主列表
- *   <ToolBadge toolId="codex" size={28} />           // 工具选择器 / 紧凑场景
- *
- * 各家品牌色背景是按"品牌识别度 > 视觉一致性"挑的：
- *   - Codex (openai)   黑   — OpenAI 黑底白 logo
- *   - Claude           米橙 — Anthropic 米色品牌色
- *   - Gemini           白   — Gemini logo 本身彩色，背景留白最干净
- *   - OpenCode         浅灰 — pixel art logo 需要明度对比；浅灰避免过黑
- *   - OpenClaw         米色 — 红色卡通龙虾，米底突出主体
- *   - Hermes           米色 — 头像类图标，米底比纯白柔和
- *   - WorkBuddy        透明 — 官方圆形图标自带完整渐变背景
- *
- * 内边距统一走 padding（容器 size 的 1/5）——SVG 的 size 自然撑满剩余空间，
- * 不需要为每家硬编码不同 px。OpenCode 占比偏大的问题靠这个 padding 一并解决。
- */
-const TOOL_ICON: Record<string, BrandIconComponent> = {
-  claude: ClaudeIcon,
-  dsh: DshIcon,
-  pi: PiIcon,
-  codex: CodexIcon,
-  // ChatGPT App 复用 OpenAI 单色 logo —— 与 Codex 同厂牌，靠背景色（绿底）
-  // 和 label（"ChatGPT" vs "Codex"）而不是图标本身区分开。
-  chatgpt: CodexIcon,
-  gemini: GeminiIcon,
-  opencode: OpenCodeIcon,
-  openclaw: OpenClawIcon,
-  hermes: HermesIcon,
-  workbuddy: WorkBuddyIcon,
-};
 
 /**
  * 每个工具的徽章背景 Tailwind class——按品牌色挑，色相饱和而非"浅淡"，
@@ -63,7 +11,7 @@ const TOOL_BADGE_BG: Record<string, string> = {
   dsh: "bg-white dark:bg-neutral-100",
   pi: "bg-orange-200 dark:bg-orange-950",
   claude: "bg-[#E8DCC8] dark:bg-[#2D2419]",
-  codex: "bg-neutral-900 dark:bg-neutral-900",
+  codex: "bg-transparent",
   // ChatGPT 品牌绿（近 OpenAI 官网 accent），让"Codex vs ChatGPT"两张
   // OpenAI 牌卡片一眼分得开。
   chatgpt: "bg-[#10A37F] dark:bg-[#0E8266]",
@@ -72,28 +20,14 @@ const TOOL_BADGE_BG: Record<string, string> = {
   // OpenCode pixel-art monitor 黑+灰，给中性浅灰让线条干净。
   opencode: "bg-neutral-200 dark:bg-neutral-800",
   openclaw: "bg-[#FFD7BC] dark:bg-[#3A2418]",
-  // Hermes 头像类图标，纯白底最干净——其它米色背景会让它"糊"在一起。
-  // ring 让白底在浅色 popover 上仍有可见边界，不至于"消失"。
-  hermes:
-    "bg-white ring-1 ring-black/10 dark:bg-neutral-100 dark:ring-white/10",
+  hermes: "bg-neutral-100 dark:bg-neutral-800",
   // WorkBuddy 官方图标已自带圆形渐变背景，不再叠加额外色块。
   workbuddy: "bg-transparent",
 };
 
-/**
- * Codex 用的是 lobehub OpenAI 黑色单色 SVG，需要在深色背景上反色。
- * 这是 ToolBadge 内部对图标做的二次着色，与 BrandIcons.CodexIcon 自带的
- * `dark:brightness-0 dark:invert`（应对页面深色模式）不冲突——这里专门
- * 处理"徽章本身是深底"这一固定语境。
- */
-const TOOL_ICON_FILTER: Record<string, string> = {
-  codex: "[&_img]:brightness-0 [&_img]:invert",
-  // ChatGPT 徽章底是绿色——单色 OpenAI logo 同样需要反色为白才能立起来。
-  chatgpt: "[&_img]:brightness-0 [&_img]:invert",
-};
-
 interface ToolBadgeProps {
   toolId: string;
+  variant?: "badge" | "plain";
   /** 徽章正方形边长（px）。默认 40，适合 popover / 主列表。 */
   size?: number;
   /** 圆角半径风格——`"md"` (8px) / `"lg"` (12px) / `"xl"` (16px)。 */
@@ -115,16 +49,17 @@ const ROUNDED_CLASS: Record<NonNullable<ToolBadgeProps["rounded"]>, string> = {
 
 export function ToolBadge({
   toolId,
+  variant = "badge",
   size = 40,
   rounded = "lg",
   dimmed = false,
   className,
 }: ToolBadgeProps) {
-  const Icon = TOOL_ICON[toolId];
+  const logo = TOOL_LOGOS[toolId];
   const meta = TOOL_META[toolId];
 
-  // 没有官方 logo（理论上 TOOL_META 已穷举，这里兜底）—— 用 abbr + 主题色块。
-  if (!Icon) {
+  // Preserve a fallback for unknown future IDs; every catalog entry has a logo.
+  if (!logo) {
     return (
       <div
         style={{ width: size, height: size }}
@@ -151,7 +86,9 @@ export function ToolBadge({
   const paddingRatio =
     toolId === "opencode" ? 0.3 : toolId === "workbuddy" ? 0 : 0.18;
   const padding =
-    toolId === "workbuddy" ? 0 : Math.max(4, Math.round(size * paddingRatio));
+    variant === "plain" || toolId === "workbuddy"
+      ? 0
+      : Math.max(4, Math.round(size * paddingRatio));
   const innerSize = size - padding * 2;
 
   return (
@@ -160,16 +97,30 @@ export function ToolBadge({
       className={cn(
         "flex shrink-0 items-center justify-center",
         ROUNDED_CLASS[rounded],
-        dimmed
-          ? "bg-neutral-200 dark:bg-neutral-800"
-          : (TOOL_BADGE_BG[toolId] ?? "bg-muted"),
-        // 仅在非 dimmed 时应用品牌特定滤镜——dimmed 下我们让整张 logo 降饱和
-        !dimmed && TOOL_ICON_FILTER[toolId],
+        variant === "badge" &&
+          (dimmed
+            ? "bg-neutral-200 dark:bg-neutral-800"
+            : (TOOL_BADGE_BG[toolId] ?? "bg-transparent")),
         dimmed && "opacity-50 grayscale",
         className,
       )}
     >
-      <Icon size={innerSize} />
+      <img
+        src={logo.src}
+        width={innerSize}
+        height={innerSize}
+        alt={logo.label}
+        loading="lazy"
+        className={cn(
+          "h-full w-full object-contain",
+          logo.darkTreatment === "white" && "dark:brightness-0 dark:invert",
+          logo.darkTreatment === "invert" && "dark:invert",
+          toolId === "chatgpt" &&
+            variant === "badge" &&
+            !dimmed &&
+            "brightness-0 invert",
+        )}
+      />
     </div>
   );
 }

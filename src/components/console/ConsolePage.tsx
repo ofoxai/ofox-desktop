@@ -126,7 +126,7 @@ function ConsoleShell({
       <main className="min-h-0 flex-1">
         <div
           {...panel("tools")}
-          className="h-full overflow-y-auto px-[max(16px,calc(50%-600px))] pb-4 pt-1"
+          className="h-full overscroll-contain overflow-y-auto px-[max(16px,calc(50%-600px))] pb-6 pt-1"
         >
           {localOnly ? (
             <LocalToolsPanel

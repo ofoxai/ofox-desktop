@@ -56,6 +56,20 @@ beforeEach(() => {
 });
 
 describe("independent tool installation catalog", () => {
+  it("keeps the management label concise while naming its tool for assistive technology", async () => {
+    render(<OptionalToolsCatalog boundTools={[]} />);
+    await userEvent.click(
+      screen.getByRole("button", { name: /其他已安装工具/ }),
+    );
+    const manage = await screen.findByRole("button", {
+      name: "管理 GitHub Copilot CLI 安装",
+    });
+    expect(manage).toHaveTextContent(/^管理$/);
+    await userEvent.click(manage);
+    expect(screen.getByRole("dialog")).toHaveAccessibleName(
+      "GitHub Copilot CLI · OFox 管理副本",
+    );
+  });
   it("lists a verified OFox copy among installed tools while preserving external-copy evidence", async () => {
     mocks.inventory.mockResolvedValueOnce([
       {

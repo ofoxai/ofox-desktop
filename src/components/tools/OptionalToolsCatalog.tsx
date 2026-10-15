@@ -25,6 +25,7 @@ import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
+import { RefreshCw } from "lucide-react";
 import { ToolBadge } from "./ToolBadge";
 import { CatalogLifecycleDialog } from "./CatalogLifecycleDialog";
 import {
@@ -194,10 +195,12 @@ export const OptionalToolsCatalog = forwardRef<
       <ListRow
         key={entry.toolId}
         data-tool-id={entry.toolId}
-        className="flex-wrap"
+        role="group"
+        aria-label={entry.label}
+        className="grid grid-cols-[32px_minmax(0,1fr)_auto] gap-x-3 gap-y-2 py-3 md:grid-cols-[32px_190px_minmax(0,1fr)_136px]"
       >
-        <ToolBadge toolId={entry.toolId} />
-        <div className="min-w-0 flex-1 basis-48">
+        <ToolBadge toolId={entry.toolId} variant="plain" size={32} />
+        <div className="min-w-0">
           <p className="text-ui font-medium text-ink">{entry.label}</p>
           {info?.managedCopy && (
             <>
@@ -248,46 +251,51 @@ export const OptionalToolsCatalog = forwardRef<
             </p>
           )}
         </div>
-        {!isInstalled && entry.command && (
-          <div className="flex min-w-0 flex-1 basis-72 items-center gap-2">
-            <code className="min-w-0 flex-1 whitespace-pre-wrap break-words rounded-ctl bg-canvas px-2 py-1 text-note">
-              {entry.command}
-            </code>
-            <CopyButton
-              text={entry.command}
-              aria-label={t("toolCatalog.copyCommand", { name: entry.label })}
-            />
-          </div>
-        )}
-        {info?.error && (
+        <div className="col-span-2 col-start-2 flex min-w-0 items-center gap-2 md:col-span-1 md:col-start-3 md:row-start-1">
+          {!isInstalled && entry.command && (
+            <>
+              <code className="min-w-0 flex-1 whitespace-pre-wrap break-words rounded-ctl bg-canvas px-2 py-1 text-note">
+                {entry.command}
+              </code>
+              <CopyButton
+                text={entry.command}
+                aria-label={t("toolCatalog.copyCommand", { name: entry.label })}
+              />
+            </>
+          )}
+        </div>
+        <div className="col-start-3 row-start-1 flex flex-wrap items-center justify-end gap-1.5 md:col-start-4">
+          {info?.error && (
+            <Button
+              variant="secondary"
+              disabled={busy}
+              onClick={() => void refresh()}
+              aria-label={t("toolCatalog.retryFor", { name: entry.label })}
+              title={t("toolCatalog.retryFor", { name: entry.label })}
+            >
+              <RefreshCw aria-hidden className="h-3.5 w-3.5" />
+            </Button>
+          )}
           <Button
-            variant="secondary"
-            disabled={busy}
-            onClick={() => void refresh()}
-            aria-label={t("toolCatalog.retryFor", { name: entry.label })}
+            variant="ghost"
+            onClick={() => open(entry.officialUrl)}
+            aria-label={t("toolCatalog.officialFor", { name: entry.label })}
           >
-            {t("toolCatalog.refresh")}
+            {t("toolCatalog.official")}
           </Button>
-        )}
-        <Button
-          variant="ghost"
-          onClick={() => open(entry.officialUrl)}
-          aria-label={t("toolCatalog.officialFor", { name: entry.label })}
-        >
-          {t("toolCatalog.official")}
-        </Button>
-        {entry.toolId === "copilot" && (
-          <Button
-            variant="secondary"
-            aria-label={t("catalogLifecycle.manage", { name: entry.label })}
-            onClick={(event) => {
-              managementTrigger.current = event.currentTarget;
-              setManagement(entry);
-            }}
-          >
-            {t("catalogLifecycle.manage", { name: entry.label })}
-          </Button>
-        )}
+          {entry.toolId === "copilot" && (
+            <Button
+              variant="secondary"
+              aria-label={t("catalogLifecycle.manage", { name: entry.label })}
+              onClick={(event) => {
+                managementTrigger.current = event.currentTarget;
+                setManagement(entry);
+              }}
+            >
+              {t("catalogLifecycle.manageShort")}
+            </Button>
+          )}
+        </div>
       </ListRow>
     );
   };

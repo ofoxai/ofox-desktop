@@ -3650,6 +3650,7 @@
     }
   },
   "catalogLifecycle": {
+    "manageShort": "Manage",
     "description": "Manage this OFox copy only. Shell PATH, model bindings and login remain separate. Manage external copies with their original installer.",
     "unavailable": "This backend does not support this installation manager.",
     "prepareFailed": "Could not prepare the operation. Inspect the source again or use the official manual method.",
