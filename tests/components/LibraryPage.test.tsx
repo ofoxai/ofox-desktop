@@ -652,3 +652,139 @@ it("requires a second full preview and explicit confirmation for native MCP adop
   );
   expect(libraryApi.apply).toHaveBeenCalledWith("adopt-preview");
 });
+it("checks one skill explicitly and confirms its frozen candidate without applying native targets", async () => {
+  vi.spyOn(libraryApi, "checkSkillUpdate").mockResolvedValue({
+    resourceId: "skill",
+    revision: 1,
+    epoch: 1,
+    state: "updateAvailable",
+    currentArtifactHash: "old",
+    targetConflicts: [],
+    candidate: {
+      ticketId: "ticket-a",
+      artifactHash: "new",
+      commitSha: "a".repeat(40),
+      name: "New Skill",
+      expiresAtMs: Date.now() + 600000,
+    },
+  });
+  vi.spyOn(libraryApi, "compareSkillUpdate").mockResolvedValue({
+    path: "SKILL.md",
+    before: "Old body",
+    after: "New body",
+    files: [
+      {
+        path: "SKILL.md",
+        status: "modified",
+        beforeExecutable: false,
+        afterExecutable: false,
+      },
+    ],
+  });
+  vi.spyOn(libraryApi, "confirmSkillUpdate").mockResolvedValue({
+    state: "updated",
+    resourceId: "skill",
+    revision: 2,
+    artifactHash: "new",
+    nativeApplyRequired: true,
+  });
+  vi.spyOn(libraryApi, "apply");
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("tab", { name: /Skills/ }));
+  await screen.findByText("Skill demo");
+  expect(libraryApi.checkSkillUpdate).not.toHaveBeenCalled();
+  await userEvent.click(
+    screen.getByRole("button", { name: "检查更新 Skill demo" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "检查来源更新" }));
+  await screen.findByText("New body");
+  expect(libraryApi.checkSkillUpdate).toHaveBeenCalledWith("skill", 1, 1);
+  await userEvent.click(screen.getByRole("button", { name: "更新源草稿" }));
+  expect(libraryApi.confirmSkillUpdate).toHaveBeenCalledWith(
+    "ticket-a",
+    1,
+    1,
+    "update",
+    undefined,
+    undefined,
+  );
+  expect(libraryApi.apply).not.toHaveBeenCalled();
+  expect(
+    await screen.findByText(
+      "源草稿已更新。工具仍保留旧内容，请预览并应用分发。",
+    ),
+  ).toBeVisible();
+});
+it("labels local skills as untracked instead of current and keeps updates disabled", async () => {
+  vi.spyOn(libraryApi, "checkSkillUpdate").mockResolvedValue({
+    resourceId: "skill",
+    revision: 1,
+    epoch: 1,
+    state: "notTracked",
+    currentArtifactHash: "old",
+  });
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("tab", { name: /Skills/ }));
+  await userEvent.click(
+    await screen.findByRole("button", { name: "检查更新 Skill demo" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "检查来源更新" }));
+  expect(
+    await screen.findByText(
+      "此技能没有可跟踪的仓库来源；本机或 ZIP 导入不会被标记为已是最新。",
+    ),
+  ).toBeVisible();
+  expect(screen.queryByRole("button", { name: "更新源草稿" })).toBeNull();
+});
+it("retries a failed comparison using the same frozen ticket before enabling a skill update", async () => {
+  vi.spyOn(libraryApi, "checkSkillUpdate").mockResolvedValue({
+    resourceId: "skill",
+    revision: 1,
+    epoch: 1,
+    state: "updateAvailable",
+    currentArtifactHash: "old",
+    sourceVerified: true,
+    candidate: {
+      ticketId: "keep-ticket",
+      artifactHash: "new",
+      commitSha: "a".repeat(40),
+      name: "New",
+      expiresAtMs: Date.now() + 600000,
+    },
+  });
+  vi.spyOn(libraryApi, "compareSkillUpdate")
+    .mockRejectedValueOnce("library.skillReadFailed")
+    .mockResolvedValue({
+      path: "SKILL.md",
+      before: "Old",
+      after: "Retried candidate",
+      files: [
+        {
+          path: "SKILL.md",
+          status: "modified",
+          beforeExecutable: false,
+          afterExecutable: false,
+        },
+      ],
+    });
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("tab", { name: /Skills/ }));
+  await userEvent.click(
+    await screen.findByRole("button", { name: "检查更新 Skill demo" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "检查来源更新" }));
+  await screen.findByRole("alert");
+  expect(screen.getByRole("button", { name: "更新源草稿" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "另存候选副本" })).toBeDisabled();
+  await userEvent.click(screen.getByRole("button", { name: "重试比较" }));
+  await screen.findByText("Retried candidate");
+  expect(libraryApi.checkSkillUpdate).toHaveBeenCalledTimes(1);
+  expect(libraryApi.compareSkillUpdate).toHaveBeenLastCalledWith(
+    "keep-ticket",
+    "SKILL.md",
+  );
+  expect(screen.getByRole("button", { name: "更新源草稿" })).toBeEnabled();
+});

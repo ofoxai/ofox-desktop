@@ -7,6 +7,7 @@ pub(crate) mod mcp_codec;
 pub(crate) mod mcp_resource;
 pub(crate) mod native_json;
 pub(crate) mod resource_pack;
+pub(crate) mod skill_actions;
 pub(crate) mod skill_artifact;
 pub(crate) mod skill_resource;
 pub(crate) mod skill_view;

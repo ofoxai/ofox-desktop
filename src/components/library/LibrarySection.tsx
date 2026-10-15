@@ -27,6 +27,7 @@ import {
   SkillImporter,
   SkillDetails,
 } from "./ResourceEditors";
+import { SkillUpdate } from "./SkillUpdate";
 import { McpDuplicate } from "./McpDuplicate";
 import { ResourceReview } from "./ResourceReview";
 import { libraryError } from "./libraryText";
@@ -35,7 +36,7 @@ import { DraftStore } from "./useDraftState";
 export type Resource = InstructionSet | McpDefinition | SkillDefinition;
 type OpenViewBody =
   | {
-      type: "edit" | "targets" | "details" | "delete" | "copy";
+      type: "edit" | "targets" | "details" | "delete" | "copy" | "update";
       resource: Resource;
       targets: ResourceTarget[];
     }
@@ -113,6 +114,15 @@ export function LibrarySection({
   };
   const close = () => {
     if (!running.current) {
+      if (view?.type === "update") {
+        const checked = draftStore.values.get("skillUpdateCheck") as
+          | import("@/lib/api/library").SkillUpdateCheck
+          | undefined;
+        if (checked?.candidate)
+          void libraryApi
+            .discardSkillUpdate(checked.candidate.ticketId)
+            .catch(() => undefined);
+      }
       setView(null);
       setError("");
     }
@@ -320,6 +330,25 @@ export function LibrarySection({
                 {kind === "skills" && (
                   <Button
                     variant="secondary"
+                    disabled={busy || !writable || row.revision === undefined}
+                    aria-label={t("library.updateNamed", { name: row.name })}
+                    onClick={(event) =>
+                      open(
+                        {
+                          type: "update",
+                          resource: row,
+                          targets: targets(row),
+                        },
+                        event,
+                      )
+                    }
+                  >
+                    {t("library.skillUpdate.check")}
+                  </Button>
+                )}
+                {kind === "skills" && (
+                  <Button
+                    variant="secondary"
                     disabled={busy}
                     aria-label={t("library.detailsNamed", { name: row.name })}
                     onClick={(event) =>
@@ -503,6 +532,23 @@ export function LibrarySection({
                 store={draftStore}
                 busy={busy || !writable}
                 onImport={(action) => run(action, true)}
+              />
+            )}
+            {view?.type === "update" && kind === "skills" && (
+              <SkillUpdate
+                store={draftStore}
+                skill={view.resource as SkillDefinition}
+                epoch={view.epoch}
+                readOnly={!writable}
+                externalBusy={busy}
+                onBusyChange={(value) => {
+                  running.current = value;
+                  setBusy(value);
+                }}
+                onChanged={async () => {
+                  await query.refetch();
+                  onChanged();
+                }}
               />
             )}
             {view?.type === "details" && kind === "skills" && (

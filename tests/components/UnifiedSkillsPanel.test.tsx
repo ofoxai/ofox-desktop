@@ -1,3 +1,4 @@
+import { toast } from "sonner";
 import { createRef } from "react";
 import { render, screen, waitFor, act } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
@@ -13,6 +14,7 @@ const importSkillsMock = vi.fn();
 const installFromZipMock = vi.fn();
 const deleteSkillBackupMock = vi.fn();
 const restoreSkillBackupMock = vi.fn();
+const checkUpdatesMock = vi.fn();
 
 vi.mock("sonner", () => ({
   toast: {
@@ -66,7 +68,7 @@ vi.mock("@/hooks/useSkills", () => ({
   }),
   useCheckSkillUpdates: () => ({
     data: [],
-    refetch: vi.fn(),
+    refetch: checkUpdatesMock,
     isFetching: false,
   }),
   useUpdateSkill: () => ({
@@ -77,6 +79,9 @@ vi.mock("@/hooks/useSkills", () => ({
 
 describe("UnifiedSkillsPanel", () => {
   beforeEach(() => {
+    checkUpdatesMock.mockReset();
+    vi.mocked(toast.success).mockClear();
+    vi.mocked(toast.error).mockClear();
     scanUnmanagedMock.mockResolvedValue({
       data: [
         {
@@ -116,5 +121,28 @@ describe("UnifiedSkillsPanel", () => {
       expect(screen.getByText("Shared Skill")).toBeInTheDocument();
       expect(screen.getByText("/tmp/shared-skill")).toBeInTheDocument();
     });
+  });
+  it("does not report all skills current when refetch returns an error result", async () => {
+    checkUpdatesMock.mockResolvedValue({
+      data: [],
+      isError: true,
+      error: new Error("library.skillDownloadFailed"),
+    });
+    const ref = createRef<UnifiedSkillsPanelHandle>();
+    render(
+      <UnifiedSkillsPanel
+        ref={ref}
+        onOpenDiscovery={() => {}}
+        currentApp="claude"
+      />,
+    );
+    await act(async () => {
+      ref.current?.checkUpdates();
+    });
+    await waitFor(() => expect(toast.error).toHaveBeenCalled());
+    expect(toast.success).not.toHaveBeenCalledWith(
+      "skills.noUpdates",
+      expect.anything(),
+    );
   });
 });

@@ -64,16 +64,30 @@ pub fn save_draft(
 }
 pub fn save_draft_with_execution(
     db: &Database,
+    skill: InstalledSkill,
+    source: &Path,
+    expected: Option<u64>,
+    flags: Option<&artifacts::ExecutionMap>,
+) -> Result<InstalledSkill, AppError> {
+    save_draft_checked_with_execution(db, skill, source, expected, flags, None)
+}
+pub(crate) fn save_draft_checked_with_execution(
+    db: &Database,
     mut skill: InstalledSkill,
     source: &Path,
     expected: Option<u64>,
     flags: Option<&artifacts::ExecutionMap>,
+    expected_hash: Option<&str>,
 ) -> Result<InstalledSkill, AppError> {
     artifacts::safe_leaf(&skill.directory)?;
     if skill.id.is_empty() || skill.id.len() > 256 || skill.name.trim().is_empty() {
         return Err(error("invalidSkill"));
     }
-    let artifact = artifacts::publish_with_execution(source, flags)?;
+    let artifact = if let Some(hash) = expected_hash {
+        artifacts::publish_checked(source, flags, hash)?
+    } else {
+        artifacts::publish_with_execution(source, flags)?
+    };
     let _guard = crate::config_io::lock();
     let before = db.library_snapshot()?;
     if before

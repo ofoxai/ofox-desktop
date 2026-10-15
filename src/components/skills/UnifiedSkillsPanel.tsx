@@ -31,6 +31,7 @@ import type { AppId } from "@/lib/api/types";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { settingsApi, skillsApi } from "@/lib/api";
 import { toast } from "sonner";
+import { libraryError } from "@/components/library/libraryText";
 import { SKILLS_APP_IDS } from "@/config/appConfig";
 import { AppCountBar } from "@/components/common/AppCountBar";
 import { AppToggleGroup } from "@/components/common/AppToggleGroup";
@@ -101,16 +102,17 @@ const UnifiedSkillsPanel = React.forwardRef<
   } = useCheckSkillUpdates();
   const updateSkillMutation = useUpdateSkill();
   const [isUpdatingAll, setIsUpdatingAll] = useState(false);
+  const [updatesCheckValid, setUpdatesCheckValid] = useState(false);
 
   const updatesMap = useMemo(() => {
     const map: Record<string, SkillUpdateInfo> = {};
-    if (skillUpdates) {
+    if (skillUpdates && updatesCheckValid) {
       for (const u of skillUpdates) {
         map[u.id] = u;
       }
     }
     return map;
-  }, [skillUpdates]);
+  }, [skillUpdates, updatesCheckValid]);
 
   const enabledCounts = useMemo(() => {
     const counts = {
@@ -227,9 +229,13 @@ const UnifiedSkillsPanel = React.forwardRef<
   };
 
   const handleCheckUpdates = async () => {
+    setUpdatesCheckValid(false);
     try {
-      const result = await checkUpdates();
-      const updates = result.data || [];
+      const result = await checkUpdates({ throwOnError: true });
+      if (result.isError || !Array.isArray(result.data))
+        throw result.error ?? new Error("library.failed");
+      const updates = result.data;
+      setUpdatesCheckValid(true);
       if (updates.length === 0) {
         toast.success(t("skills.noUpdates"), { closeButton: true });
       } else {
@@ -238,7 +244,7 @@ const UnifiedSkillsPanel = React.forwardRef<
         });
       }
     } catch (error) {
-      toast.error(t("common.error"), { description: String(error) });
+      toast.error(t("common.error"), { description: libraryError(error, t) });
     }
   };
 
@@ -254,7 +260,8 @@ const UnifiedSkillsPanel = React.forwardRef<
   };
 
   const handleUpdateAll = async () => {
-    if (!skillUpdates || skillUpdates.length === 0) return;
+    if (!updatesCheckValid || !skillUpdates || skillUpdates.length === 0)
+      return;
     setIsUpdatingAll(true);
     let successCount = 0;
     for (const update of skillUpdates) {
@@ -366,7 +373,11 @@ const UnifiedSkillsPanel = React.forwardRef<
               size="sm"
               className="h-7 text-xs gap-1 whitespace-nowrap"
               onClick={handleUpdateAll}
-              disabled={isUpdatingAll || updateSkillMutation.isPending}
+              disabled={
+                !updatesCheckValid ||
+                isUpdatingAll ||
+                updateSkillMutation.isPending
+              }
             >
               {isUpdatingAll ? (
                 <Loader2 size={12} className="animate-spin" />

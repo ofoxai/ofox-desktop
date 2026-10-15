@@ -441,15 +441,43 @@ pub fn hash_with_execution(source: &Path, execution: &ExecutionMap) -> Result<St
 pub fn publish(source: &Path) -> Result<String, AppError> {
     publish_with_execution(source, None)
 }
+pub(crate) fn source_entries_checked(
+    source: &Path,
+    flags: &ExecutionMap,
+    expected: &str,
+) -> Result<Vec<Entry>, AppError> {
+    let tree = read_tree_flags(source, Some(flags), false)?;
+    if tree.hash != expected {
+        return Err(error("skillArtifactChanged"));
+    }
+    Ok(tree.entries)
+}
+pub(crate) fn publish_checked(
+    source: &Path,
+    flags: Option<&ExecutionMap>,
+    expected: &str,
+) -> Result<String, AppError> {
+    publish_inner(source, flags, Some(expected))
+}
 pub fn publish_with_execution(
     source: &Path,
     flags: Option<&ExecutionMap>,
+) -> Result<String, AppError> {
+    publish_inner(source, flags, None)
+}
+fn publish_inner(
+    source: &Path,
+    flags: Option<&ExecutionMap>,
+    expected: Option<&str>,
 ) -> Result<String, AppError> {
     let tree = if let Some(flags) = flags {
         read_tree_flags(source, Some(flags), false)?
     } else {
         read_tree(source)?
     };
+    if expected.is_some_and(|expected| tree.hash != expected) {
+        return Err(error("skillArtifactChanged"));
+    }
     let _io = crate::config_io::lock();
     validate_root()?;
     let root = root();

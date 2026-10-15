@@ -308,24 +308,6 @@ impl SkillService {
         format!("https://github.com/{owner}/{repo}/blob/{branch}/{doc_path}")
     }
 
-    /// 从旧 readme_url 中提取仓库内文档路径，兼容 `blob`/`tree` 两种格式
-    fn extract_doc_path_from_url(url: &str) -> Option<String> {
-        let marker = if url.contains("/blob/") {
-            "/blob/"
-        } else if url.contains("/tree/") {
-            "/tree/"
-        } else {
-            return None;
-        };
-
-        let (_, tail) = url.split_once(marker)?;
-        let (_, path) = tail.split_once('/')?;
-        if path.is_empty() {
-            return None;
-        }
-        Some(path.to_string())
-    }
-
     // ========== 路径管理 ==========
 
     /// 获取 SSOT 目录（根据设置返回 ~/.ofox-desktop/skills/ 或 ~/.agents/skills/）
@@ -569,185 +551,15 @@ impl SkillService {
     /// 仅检查有 repo_owner 的 Skill（本地 Skill 跳过），
     /// 按仓库分组下载，避免重复下载同一仓库。
     pub async fn check_updates(&self, db: &Arc<Database>) -> Result<Vec<SkillUpdateInfo>> {
-        let skills = db.get_all_installed_skills()?;
-        let mut updates = Vec::new();
-
-        // 按 (owner, name, branch) 分组
-        let mut repo_groups: HashMap<(String, String, String), Vec<InstalledSkill>> =
-            HashMap::new();
-
-        for skill in skills.into_values() {
-            let (owner, name, branch) =
-                match (&skill.repo_owner, &skill.repo_name, &skill.repo_branch) {
-                    (Some(o), Some(n), Some(b)) => (o.clone(), n.clone(), b.clone()),
-                    (Some(o), Some(n), None) => (o.clone(), n.clone(), "main".to_string()),
-                    _ => continue,
-                };
-            repo_groups
-                .entry((owner, name, branch))
-                .or_default()
-                .push(skill);
-        }
-
-        let ssot_dir = Self::get_ssot_dir()?;
-
-        for ((owner, name, branch), group_skills) in &repo_groups {
-            let repo = SkillRepo {
-                owner: owner.clone(),
-                name: name.clone(),
-                branch: branch.clone(),
-                enabled: true,
-            };
-
-            // 下载仓库 ZIP
-            let (temp_dir, _used_branch) = match timeout(
-                std::time::Duration::from_secs(60),
-                self.download_repo(&repo),
-            )
-            .await
-            {
-                Ok(Ok(result)) => result,
-                Ok(Err(e)) => {
-                    log::warn!("检查更新时下载 {}/{} 失败: {e}", owner, name);
-                    continue;
-                }
-                Err(_) => {
-                    log::warn!("检查更新时下载 {}/{} 超时", owner, name);
-                    continue;
-                }
-            };
-
-            // 扫描仓库中的所有 Skill 目录
-            let mut remote_skills: Vec<DiscoverableSkill> = Vec::new();
-            let _ = self.scan_dir_recursive(
-                temp_dir.path(),
-                temp_dir.path(),
-                &repo,
-                &mut remote_skills,
-            );
-
-            for skill in group_skills {
-                // 在远程仓库中找到匹配的 Skill 目录
-                let source_hint = skill
-                    .readme_url
-                    .as_deref()
-                    .and_then(Self::extract_doc_path_from_url)
-                    .map(|path| path.trim_end_matches("/SKILL.md").to_string())
-                    .unwrap_or_else(|| skill.directory.clone());
-                let remote_skill_dir =
-                    match Self::resolve_skill_source_dir(temp_dir.path(), &source_hint) {
-                        Some(path) => path,
-                        None => continue,
-                    };
-                let remote_hash = match Self::compute_dir_hash(&remote_skill_dir) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        log::warn!("计算远程哈希失败 {}: {e}", skill.id);
-                        continue;
-                    }
-                };
-
-                // 本地哈希：优先数据库，否则实时计算
-                let local_hash = match &skill.content_hash {
-                    Some(h) => Some(h.clone()),
-                    None => {
-                        let local_dir = ssot_dir.join(&skill.directory);
-                        if local_dir.exists() {
-                            match Self::compute_dir_hash(&local_dir) {
-                                Ok(h) => {
-                                    let _ = db.update_skill_hash(&skill.id, &h, 0);
-                                    Some(h)
-                                }
-                                Err(_) => None,
-                            }
-                        } else {
-                            None
-                        }
-                    }
-                };
-
-                if local_hash.as_deref() != Some(&remote_hash) {
-                    updates.push(SkillUpdateInfo {
-                        id: skill.id.clone(),
-                        name: skill.name.clone(),
-                        current_hash: local_hash,
-                        remote_hash,
-                    });
-                }
-            }
-
-            // TempDir removes unpublished files on every exit.
-        }
-
-        Ok(updates)
+        crate::agent_env::ready().await;
+        Ok(crate::services::library::skill_actions::legacy_check(db).await?)
     }
 
-    /// 更新单个 Skill（重新下载并替换本地文件）
+    /// Legacy callers resolve their tracking ref at this call, and update only a draft.
+    /// The resource-library UI uses its frozen ticket instead.
     pub async fn update_skill(&self, db: &Arc<Database>, skill_id: &str) -> Result<InstalledSkill> {
         crate::agent_env::ready().await;
-        crate::services::library::skill_resource::ensure_metadata(db)?;
-        let snapshot = db.library_snapshot()?;
-        let meta = snapshot
-            .definitions
-            .skills
-            .get(skill_id)
-            .ok_or_else(|| anyhow!("library.skillNeedsMigration"))?;
-        let row = db
-            .get_installed_skill(skill_id)?
-            .ok_or_else(|| anyhow!("library.resourceMissing"))?;
-        crate::services::library::skill_resource::artifact_for(db, skill_id)?;
-        let repo = SkillRepo {
-            owner: row
-                .repo_owner
-                .clone()
-                .ok_or_else(|| anyhow!("library.skillLocalSource"))?,
-            name: row
-                .repo_name
-                .clone()
-                .ok_or_else(|| anyhow!("library.skillLocalSource"))?,
-            branch: row.repo_branch.clone().unwrap_or_else(|| "HEAD".into()),
-            enabled: true,
-        };
-        let (downloaded, commit) = timeout(
-            std::time::Duration::from_secs(60),
-            self.download_repo(&repo),
-        )
-        .await
-        .map_err(|_| anyhow!("library.skillDownloadTimeout"))??;
-        let relative = row
-            .readme_url
-            .as_deref()
-            .and_then(Self::extract_doc_path_from_url)
-            .map(|path| path.trim_end_matches("/SKILL.md").to_string())
-            .unwrap_or_else(|| row.directory.clone());
-        let source = Self::resolve_skill_source_dir(downloaded.path(), &relative)
-            .ok_or_else(|| anyhow!("library.skillSourceAmbiguous"))?;
-        let (name, description) =
-            Self::read_skill_name_desc(&source.join("SKILL.md"), &row.directory);
-        let doc = source
-            .strip_prefix(downloaded.path())?
-            .join("SKILL.md")
-            .to_string_lossy()
-            .replace('\\', "/");
-        let mut next = row;
-        next.name = name;
-        next.description = description;
-        next.updated_at = Utc::now().timestamp();
-        next.readme_url = Some(Self::build_skill_doc_url(
-            &repo.owner,
-            &repo.name,
-            &commit,
-            &doc,
-        ));
-        Ok(
-            crate::services::library::skill_resource::save_draft_with_execution(
-                db,
-                next,
-                &source,
-                Some(meta.revision),
-                Some(&downloaded.execution_for(&source)?),
-            )?,
-        )
+        Ok(crate::services::library::skill_actions::legacy_update(db, skill_id).await?)
     }
 
     /// 为缺少 content_hash 的已安装 Skill 补算哈希
@@ -1266,7 +1078,10 @@ impl SkillService {
     }
 
     /// 从 SKILL.md 读取名称和描述，不存在则用目录名兜底
-    fn read_skill_name_desc(skill_md: &Path, fallback_name: &str) -> (String, Option<String>) {
+    pub(crate) fn read_skill_name_desc(
+        skill_md: &Path,
+        fallback_name: &str,
+    ) -> (String, Option<String>) {
         if skill_md.exists() {
             match Self::parse_skill_metadata_static(skill_md) {
                 Ok(meta) => (
@@ -1402,7 +1217,7 @@ impl SkillService {
     }
 
     /// 下载仓库
-    async fn download_repo(
+    pub(crate) async fn download_repo(
         &self,
         repo: &SkillRepo,
     ) -> Result<(

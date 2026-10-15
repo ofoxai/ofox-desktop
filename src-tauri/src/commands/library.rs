@@ -791,3 +791,50 @@ pub async fn preview_library_mcp_adoption(
         .map(|op| library::operation_view(&op))
         .map_err(|e| e.to_string())
 }
+
+#[tauri::command]
+pub async fn check_library_skill_update(
+    state: State<'_, AppState>,
+    resource_id: String,
+    expected_revision: u64,
+    expected_epoch: u64,
+) -> Result<Value, String> {
+    crate::agent_env::ready().await;
+    library::skill_actions::check(&state.db, &resource_id, expected_revision, expected_epoch)
+        .await
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+pub fn compare_library_skill_update(
+    state: State<'_, AppState>,
+    ticket_id: String,
+    relative_path: String,
+) -> Result<Value, String> {
+    library::skill_actions::compare(&state.db, &ticket_id, &relative_path)
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+pub fn confirm_library_skill_update(
+    state: State<'_, AppState>,
+    ticket_id: String,
+    expected_revision: u64,
+    expected_epoch: u64,
+    mode: String,
+    name: Option<String>,
+    directory: Option<String>,
+) -> Result<Value, String> {
+    library::skill_actions::confirm(
+        &state.db,
+        &ticket_id,
+        expected_revision,
+        expected_epoch,
+        &mode,
+        name.as_deref(),
+        directory.as_deref(),
+    )
+    .map_err(|e| e.to_string())
+}
+#[tauri::command]
+pub fn discard_library_skill_update(ticket_id: String) -> Result<bool, String> {
+    library::skill_actions::discard(&ticket_id).map_err(|e| e.to_string())
+}

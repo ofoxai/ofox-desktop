@@ -56,3 +56,7 @@ The following entries retain the specific review observations. Some contain seve
 - No live uninstall or intentional damage to real settings is part of acceptance. Sandbox tests cover those destructive paths.
 - Real-agent configuration compatibility is version-specific. The optional Codex strict-config probe is recorded by the Rust runner; other unavailable agent probes are not claimed passed.
 - A prior manual probe left an empty app shell in system Trash. It is outside the source delivery and is not removed by these tests.
+
+- Skill updates preserve damaged immutable objects that native links may still read. When a verified remote candidate has the same hash as an already damaged object, the current hash-addressed store cannot hold a second independent instance safely. The update UI reports `skillArtifactHashOccupied` and disables copy; it never replaces that object or claims automatic repair. A different-hash candidate can be saved as a separate draft. Back up local edits before any manual source repair.
+
+- The compatibility `update_skill(id)` API resolves its tracked ref when that call starts; an earlier legacy `Vec<SkillUpdateInfo>` result does not freeze its commit. It checks its own revision/epoch and only updates the source draft. The resource-library update UI exclusively consumes a reviewed, fixed-SHA ticket.

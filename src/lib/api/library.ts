@@ -119,7 +119,81 @@ export interface ResourcePackResult {
     reason?: string | null;
   }[];
 }
+export interface SkillUpdateCheck {
+  resourceId: string;
+  revision: number;
+  epoch: number;
+  state: "updateAvailable" | "upToDate" | "notTracked" | "sourceMissing";
+  currentArtifactHash: string | null;
+  sourceVerified?: boolean;
+  targetConflicts?: string[];
+  candidate?: {
+    ticketId: string;
+    expiresAtMs: number;
+    artifactHash: string;
+    commitSha: string;
+    name: string;
+    description?: string | null;
+    sourceUrl?: string;
+    canCopy?: boolean;
+    copyBlockedReason?: string | null;
+  };
+}
+export interface SkillUpdateComparison {
+  beforeVerified?: boolean;
+  canCopy?: boolean;
+  beforeState?: "verified" | "unverified";
+  path: string;
+  before: string | null;
+  after: string | null;
+  files: {
+    path: string;
+    status: string;
+    beforeExecutable: boolean | null;
+    afterExecutable: boolean;
+  }[];
+}
+export interface SkillDraftChange {
+  state: "updated" | "copied" | "unchanged";
+  resourceId: string;
+  revision: number;
+  artifactHash: string;
+  nativeApplyRequired: boolean;
+}
 export const libraryApi = {
+  checkSkillUpdate: (
+    resourceId: string,
+    expectedRevision: number,
+    expectedEpoch: number,
+  ) =>
+    invoke<SkillUpdateCheck>("check_library_skill_update", {
+      resourceId,
+      expectedRevision,
+      expectedEpoch,
+    }),
+  compareSkillUpdate: (ticketId: string, relativePath: string) =>
+    invoke<SkillUpdateComparison>("compare_library_skill_update", {
+      ticketId,
+      relativePath,
+    }),
+  confirmSkillUpdate: (
+    ticketId: string,
+    expectedRevision: number,
+    expectedEpoch: number,
+    mode: "update" | "copy",
+    name?: string,
+    directory?: string,
+  ) =>
+    invoke<SkillDraftChange>("confirm_library_skill_update", {
+      ticketId,
+      expectedRevision,
+      expectedEpoch,
+      mode,
+      name,
+      directory,
+    }),
+  discardSkillUpdate: (ticketId: string) =>
+    invoke<boolean>("discard_library_skill_update", { ticketId }),
   duplicateMcp: (
     sourceId: string,
     expectedRevision: number,
