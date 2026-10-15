@@ -73,11 +73,13 @@ function readBoolPref(key: string, fallback: boolean): boolean {
 interface OfoxSettingsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onReturnFocus?: () => void;
 }
 
 export default function OfoxSettingsDialog({
   open,
   onOpenChange,
+  onReturnFocus,
 }: OfoxSettingsDialogProps) {
   const { status, refetch } = useOfoxAuth();
   const user = status?.user ?? null;
@@ -339,6 +341,12 @@ export default function OfoxSettingsDialog({
         className="max-w-[560px] gap-0 p-0"
         zIndex="nested"
         aria-describedby={undefined}
+        onCloseAutoFocus={(event) => {
+          if (onReturnFocus) {
+            event.preventDefault();
+            onReturnFocus();
+          }
+        }}
       >
         {/* Header — custom layout (no bottom border, larger padding) so it
             matches the floating-card feel of the spec instead of the standard

@@ -1,4 +1,5 @@
 import { RefreshCw, Settings } from "lucide-react";
+import type { Ref } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { SegmentedNav } from "@/components/ui/segmented";
@@ -18,7 +19,11 @@ import { UpdatePill } from "./UpdatePill";
  * drags the window. Windows and Linux keep their native title bar, which
  * already names the app, so the header there is only the tabs and actions.
  */
-export function AppHeader() {
+export function AppHeader({
+  settingsButtonRef,
+}: {
+  settingsButtonRef?: Ref<HTMLButtonElement>;
+}) {
   const { t } = useTranslation();
   const shell = useShell();
   const mac = isMac();
@@ -82,6 +87,7 @@ export function AppHeader() {
           />
         </Button>
         <Button
+          ref={settingsButtonRef}
           variant="icon"
           aria-label={t("shell.settings")}
           title={t("shell.settings")}

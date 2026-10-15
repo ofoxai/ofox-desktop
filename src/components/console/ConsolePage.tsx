@@ -1,5 +1,12 @@
 import { SettingsHealthBanner } from "./SettingsHealthBanner";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type Ref,
+} from "react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import { listen } from "@tauri-apps/api/event";
@@ -46,6 +53,11 @@ interface ConsolePageProps {
  */
 export default function ConsolePage(props: ConsolePageProps) {
   const active = props.active ?? true;
+  const settingsButton = useRef<HTMLButtonElement>(null);
+  const activeRef = useRef(active);
+  useLayoutEffect(() => {
+    activeRef.current = active;
+  }, [active]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const openSettings = useCallback(() => {
     if (active) setSettingsOpen(true);
@@ -53,6 +65,16 @@ export default function ConsolePage(props: ConsolePageProps) {
   useEffect(() => {
     if (!active) setSettingsOpen(false);
   }, [active]);
+  const restoreSettingsFocus = useCallback(() => {
+    const opener = settingsButton.current;
+    if (
+      activeRef.current &&
+      opener?.isConnected &&
+      !opener.closest('[hidden], [inert], [aria-hidden="true"]')
+    ) {
+      opener.focus();
+    }
+  }, []);
 
   // 监听 tray popover 发出的"打开偏好设置"事件，把当前 dialog 拉起来。
   // popover 是独立 webview，无法直接调用本组件的 setState，因此走 Tauri
@@ -62,7 +84,7 @@ export default function ConsolePage(props: ConsolePageProps) {
     let cancelled = false;
     (async () => {
       try {
-        const off = await listen("ofox-open-settings", openSettings);
+        const off = await listen("ofox-open-settings", () => openSettings());
         if (cancelled) {
           off();
         } else {
@@ -81,10 +103,11 @@ export default function ConsolePage(props: ConsolePageProps) {
   return (
     <InteractionScope active={active}>
       <ShellProvider openSettings={openSettings}>
-        <ConsoleShell {...props} />
+        <ConsoleShell {...props} settingsButtonRef={settingsButton} />
         <OfoxSettingsDialog
           open={settingsOpen}
           onOpenChange={setSettingsOpen}
+          onReturnFocus={restoreSettingsFocus}
         />
       </ShellProvider>
     </InteractionScope>
@@ -97,7 +120,8 @@ function ConsoleShell({
   localOnly = false,
   localSignedIn,
   onLoginRequested,
-}: ConsolePageProps) {
+  settingsButtonRef,
+}: ConsolePageProps & { settingsButtonRef: Ref<HTMLButtonElement> }) {
   const { t } = useTranslation();
   const shell = useShell();
   // 应用自更新的首次发现弹窗；常驻的提示在顶栏（UpdatePill）。数据源 =
@@ -118,7 +142,7 @@ function ConsoleShell({
 
   return (
     <div className="flex h-screen w-full flex-col bg-canvas">
-      <AppHeader />
+      <AppHeader settingsButtonRef={settingsButtonRef} />
       <div className="px-4">
         <SettingsHealthBanner />
       </div>
