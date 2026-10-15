@@ -39,4 +39,4 @@
 - 页面使用测试数据检查过 900px 浅／深色和详情 Escape 回焦点；不是实际本机统计或最终原生界面的验收。
 - 当前会话分析桥接覆盖 Claude、Codex、Gemini 和 OpenCode；WorkBuddy、dsh、Pi、OpenClaw 的 reader 不因此取得会话分析能力。Hermes 累计统计独立于此查询，不制造时间序列或请求 ID。
 - 概览／请求页的共享项目筛选和概览项目排行见[项目归属说明](usage-project-filter.md)。旧后端只有会话项目能力时仍保留原有的局部筛选降级。
-- 全项目最终代码门禁已通过，初轮真实数据／CSV 对账完成；新 release 原生复验与最终交付见实施记录。release p95 和 Windows 原生行为仍未验证，Windows 不以 macOS 的类型检查替代。
+- 全项目最终代码门禁、release 原生复验及真实 CSV 聚合对账已完成，最终交付见实施记录。请求与概览按同一冻结范围核对；会话分析保留可核实的归属子集，未知历史不为配平而加入。release p95 和 Windows 原生行为仍未验证，Windows 不以 macOS 的类型检查替代。
