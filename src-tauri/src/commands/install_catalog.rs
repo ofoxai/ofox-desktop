@@ -8,6 +8,7 @@ pub struct InventoryEntry {
     pub version: Option<String>,
     pub path: Option<String>,
     pub error: Option<String>,
+    pub managed_copy: Option<serde_json::Value>,
 }
 
 fn catalog_binary(tool: &str) -> Option<&'static str> {
@@ -30,6 +31,7 @@ fn inventory_from_probe(tool: &str, result: Result<Installation, ProbeError>) ->
         version: None,
         path: None,
         error: None,
+        managed_copy: None,
     };
     match result {
         Ok(result) => {
@@ -75,10 +77,14 @@ pub async fn get_install_catalog_inventory() -> Result<Vec<InventoryEntry>, Stri
                 version: None,
                 path: None,
                 error: None,
+                managed_copy: None,
             },
         }
     });
     rows.extend(futures::future::join_all(futures).await);
+    if let Some(row) = rows.iter_mut().find(|row| row.tool_id == "copilot") {
+        row.managed_copy = crate::services::catalog_lifecycle::operation::inventory();
+    }
     Ok(rows)
 }
 

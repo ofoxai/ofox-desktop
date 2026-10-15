@@ -1602,6 +1602,10 @@ pub fn run() {
             commands::launch_session_terminal,
             commands::get_tool_versions,
             commands::get_install_catalog_inventory,
+            commands::get_catalog_copy_state,
+            commands::prepare_catalog_operation,
+            commands::run_catalog_operation,
+            commands::cancel_catalog_operation,
             // Provider terminal
             commands::open_provider_terminal,
             // Universal Provider management

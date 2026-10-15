@@ -243,6 +243,7 @@ impl ToolVersion {
                 version: None,
                 path: None,
                 error: None,
+                managed_copy: None,
             };
         }
         super::install_catalog::InventoryEntry {
@@ -256,6 +257,7 @@ impl ToolVersion {
             version: self.version,
             path: self.executable_path,
             error: self.error,
+            managed_copy: None,
         }
     }
 }

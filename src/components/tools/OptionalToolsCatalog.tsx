@@ -16,15 +16,43 @@ import {
   type InstallInventoryEntry,
 } from "@/lib/api/installCatalog";
 import { settingsApi } from "@/lib/api";
+import {
+  isCatalogOperationRunning,
+  observeCatalogOperations,
+} from "@/lib/api/catalogLifecycle";
 import { ListCard, ListFold, ListRow } from "@/components/ui/list";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import { ToolBadge } from "./ToolBadge";
+import { CatalogLifecycleDialog } from "./CatalogLifecycleDialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 export interface InstallCatalogHandle {
   refresh: () => Promise<void>;
+}
+function invalidateActiveCopies(rows: InstallInventoryEntry[]) {
+  if (!isCatalogOperationRunning()) return rows;
+  return rows.map((row) =>
+    row.toolId === "copilot" && row.managedCopy
+      ? {
+          ...row,
+          managedCopy: {
+            ...row.managedCopy,
+            state: "needsReview" as const,
+            version: null,
+          },
+        }
+      : row,
+  );
 }
 export const OptionalToolsCatalog = forwardRef<
   InstallCatalogHandle,
@@ -37,8 +65,20 @@ export const OptionalToolsCatalog = forwardRef<
   const [query, setQuery] = useState("");
   const [error, setError] = useState(false);
   const [busy, setBusy] = useState(true);
+  const [management, setManagement] = useState<InstallCatalogEntry | null>(
+    null,
+  );
+  const [managementBusy, setManagementBusy] = useState(false);
+  const managementTrigger = useRef<HTMLElement | null>(null);
+  const section = useRef<HTMLElement | null>(null);
   const generation = useRef(0);
   const inFlight = useRef<Promise<void> | null>(null);
+  const refreshFailed = useRef(false);
+  const mutationVersion = useRef(0);
+  const mutationFlight = useRef<Promise<void> | null>(null);
+  const catalogMounted = useRef(true);
+  const mountEpoch = useRef(0);
+  const completionRefresh = useRef(new Map<string, Promise<void>>());
   const refresh = useCallback(() => {
     if (inFlight.current) return inFlight.current;
     const run = ++generation.current;
@@ -47,10 +87,14 @@ export const OptionalToolsCatalog = forwardRef<
       try {
         const result = await getInstallInventory();
         if (run !== generation.current) return;
-        setInventory(result);
+        setInventory(invalidateActiveCopies(result));
         setError(false);
+        refreshFailed.current = false;
       } catch {
-        if (run === generation.current) setError(true);
+        if (run === generation.current) {
+          setError(true);
+          refreshFailed.current = true;
+        }
       } finally {
         if (run === generation.current) setBusy(false);
       }
@@ -61,22 +105,81 @@ export const OptionalToolsCatalog = forwardRef<
     });
     return promise;
   }, []);
+  const refreshAfterMutation = useCallback(() => {
+    const epoch = mountEpoch.current;
+    if (!catalogMounted.current)
+      return Promise.reject(new Error("Catalog closed"));
+    mutationVersion.current += 1;
+    generation.current += 1;
+    if (mutationFlight.current) return mutationFlight.current;
+    const promise = (async () => {
+      for (;;) {
+        const pending = inFlight.current;
+        if (pending) await pending;
+        if (!catalogMounted.current || epoch !== mountEpoch.current)
+          throw new Error("Catalog closed");
+        const version = mutationVersion.current;
+        await refresh();
+        if (version !== mutationVersion.current) continue;
+        if (refreshFailed.current) throw new Error("Catalog refresh failed");
+        return;
+      }
+    })();
+    mutationFlight.current = promise;
+    const release = () => {
+      if (mutationFlight.current === promise) mutationFlight.current = null;
+    };
+    void promise.then(release, release);
+    return promise;
+  }, [refresh]);
+  const refreshForOperation = useCallback(
+    (id?: string) => {
+      if (id && completionRefresh.current.has(id))
+        return completionRefresh.current.get(id)!;
+      return refreshAfterMutation();
+    },
+    [refreshAfterMutation],
+  );
   useImperativeHandle(ref, () => ({ refresh }), [refresh]);
   useEffect(() => {
+    catalogMounted.current = true;
+    mountEpoch.current += 1;
+    const epoch = mountEpoch.current;
+    const stop = observeCatalogOperations((event) => {
+      if (!catalogMounted.current || epoch !== mountEpoch.current) return;
+      if (event.phase === "start") {
+        generation.current += 1;
+        setInventory(invalidateActiveCopies);
+      } else {
+        const refresh = refreshAfterMutation();
+        completionRefresh.current.set(event.operationId, refresh);
+        if (completionRefresh.current.size > 20)
+          completionRefresh.current.delete(
+            completionRefresh.current.keys().next().value!,
+          );
+        void refresh.catch(() => undefined);
+      }
+    });
     void refresh();
     return () => {
+      stop();
+      completionRefresh.current.clear();
+      catalogMounted.current = false;
+      mountEpoch.current += 1;
       generation.current += 1;
       inFlight.current = null;
     };
-  }, [refresh]);
+  }, [refresh, refreshAfterMutation]);
   const byId = new Map(inventory.map((r) => [r.toolId, r]));
   const extras = INSTALL_CATALOG.filter((r) => !boundTools.includes(r.toolId));
-  const installed = extras.filter(
-    (r) => byId.get(r.toolId)?.status === "installed",
-  );
-  const candidates = extras.filter(
-    (r) => byId.get(r.toolId)?.status !== "installed",
-  );
+  const hasCopy = (id: string) => {
+    const info = byId.get(id);
+    return (
+      info?.status === "installed" || info?.managedCopy?.state === "managed"
+    );
+  };
+  const installed = extras.filter((r) => hasCopy(r.toolId));
+  const candidates = extras.filter((r) => !hasCopy(r.toolId));
   const filtered = candidates.filter((r) =>
     r.label.toLowerCase().includes(query.toLowerCase()),
   );
@@ -96,10 +199,39 @@ export const OptionalToolsCatalog = forwardRef<
         <ToolBadge toolId={entry.toolId} />
         <div className="min-w-0 flex-1 basis-48">
           <p className="text-ui font-medium text-ink">{entry.label}</p>
-          <p className="text-note text-ink-muted">
-            {t(`toolCatalog.${status}`)}
-            {info?.version ? ` · ${info.version}` : ""}
-          </p>
+          {info?.managedCopy && (
+            <>
+              <p
+                className={
+                  info.managedCopy.state === "managed"
+                    ? "text-note text-ink-muted"
+                    : "text-note text-warn"
+                }
+              >
+                {info.managedCopy.state === "managed"
+                  ? t("toolCatalog.managedCopy", {
+                      version: info.managedCopy.version ?? "—",
+                    })
+                  : t("toolCatalog.managedCopyNeedsReview")}
+              </p>
+              <p
+                className="truncate text-note text-ink-faint"
+                title={info.managedCopy.path}
+              >
+                {info.managedCopy.path}
+              </p>
+            </>
+          )}
+          {(!info?.managedCopy || status !== "notInstalled") && (
+            <p className="text-note text-ink-muted">
+              {info?.managedCopy
+                ? t("toolCatalog.externalCopy", {
+                    status: t(`toolCatalog.${status}`),
+                  })
+                : t(`toolCatalog.${status}`)}
+              {info?.version ? ` · ${info.version}` : ""}
+            </p>
+          )}
           {info?.error && (
             <p className="text-note text-warn">
               {t("toolCatalog.probeIncomplete")}
@@ -144,11 +276,75 @@ export const OptionalToolsCatalog = forwardRef<
         >
           {t("toolCatalog.official")}
         </Button>
+        {entry.toolId === "copilot" && (
+          <Button
+            variant="secondary"
+            aria-label={t("catalogLifecycle.manage", { name: entry.label })}
+            onClick={(event) => {
+              managementTrigger.current = event.currentTarget;
+              setManagement(entry);
+            }}
+          >
+            {t("catalogLifecycle.manage", { name: entry.label })}
+          </Button>
+        )}
       </ListRow>
     );
   };
   return (
-    <section className="mt-4 space-y-2" aria-label={t("toolCatalog.title")}>
+    <section
+      ref={section}
+      tabIndex={-1}
+      className="mt-4 space-y-2"
+      aria-label={t("toolCatalog.title")}
+    >
+      <Dialog
+        open={!!management}
+        onOpenChange={(open) => {
+          if (!open && !managementBusy) setManagement(null);
+        }}
+      >
+        <DialogContent
+          className="max-w-2xl"
+          onEscapeKeyDown={(event) => {
+            if (managementBusy) event.preventDefault();
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            (managementTrigger.current?.isConnected
+              ? managementTrigger.current
+              : section.current
+            )?.focus();
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>
+              {t("catalogLifecycle.title", { name: management?.label ?? "" })}
+            </DialogTitle>
+            <DialogDescription>
+              {t("catalogLifecycle.preservesData")}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 overflow-auto px-[18px] py-4">
+            {management && (
+              <CatalogLifecycleDialog
+                entry={management}
+                onBusyChange={setManagementBusy}
+                onChanged={refreshForOperation}
+              />
+            )}
+          </div>
+          <DialogFooter>
+            <Button
+              variant="secondary"
+              disabled={managementBusy}
+              onClick={() => setManagement(null)}
+            >
+              {t("common.close")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       {(installedOpen || catalogOpen) && busy && (
         <p role="status" className="text-note text-ink-muted">
           {t("common.loading")}

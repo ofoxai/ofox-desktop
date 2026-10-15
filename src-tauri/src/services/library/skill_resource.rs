@@ -265,6 +265,8 @@ pub fn reader_paths() -> Result<BTreeMap<String, Vec<PathBuf>>, AppError> {
         .map(|(tool, path)| (tool, vec![path]))
         .collect();
     readers.get_mut("codex").unwrap().push(shared.clone());
+    // A known default reader, not a supported native write target or proof of loading.
+    readers.insert("copilot".into(), vec![shared.clone()]);
     readers.get_mut("gemini").unwrap().push(
         std::env::var_os("GEMINI_CLI_HOME")
             .filter(|value| !value.is_empty())
@@ -1276,6 +1278,33 @@ mod tests {
         assert!(readers["opencode"].contains(&extra.join("skill")));
         assert!(readers["opencode"].contains(&sandbox.home().join(".opencode/skill")));
         assert!(readers["opencode"].contains(&custom));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn shared_skills_disclose_copilot_without_offering_a_native_write_target() {
+        let sandbox = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let skill = draft(&db, "shared reader fixture");
+        let review = preview(&db, &skill.id, &["shared".into()]).unwrap();
+        assert!(review
+            .targets
+            .iter()
+            .any(|target| target.readers.contains(&"copilot".into())));
+        assert!(!native_paths().unwrap().contains_key("copilot"));
+        assert!(!target_paths().unwrap().contains_key("copilot"));
+        assert!(preview(&db, &skill.id, &["copilot".into()]).is_err());
+        assert_eq!(
+            reader_paths().unwrap()["copilot"],
+            vec![sandbox.home().join(".agents/skills")]
+        );
+        io::apply_operation(&db, &review.id).unwrap();
+        let state = db.library_snapshot().unwrap();
+        assert!(!state
+            .machine
+            .assignments
+            .contains_key(&assignment(&skill.id, "copilot")));
+        assert!(!sandbox.home().join(".copilot").exists());
     }
 
     #[test]

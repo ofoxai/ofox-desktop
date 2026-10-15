@@ -129,7 +129,7 @@ beforeEach(() => {
                     ...target("gemini"),
                     status: "shared",
                     readable: true,
-                    readers: ["gemini", "codex"],
+                    readers: ["gemini", "codex", "copilot"],
                   },
                 ],
               },
@@ -518,7 +518,16 @@ it("discloses shared Skills readability without claiming a separate assignment",
     screen.getByRole("button", { name: "分配目标 Skill demo" }),
   );
   expect(screen.getByRole("checkbox", { name: "gemini" })).not.toBeChecked();
+  expect(screen.queryByRole("checkbox", { name: "copilot" })).toBeNull();
+  expect(
+    screen.getByText("已知潜在读取工具：Gemini CLI, Codex, GitHub Copilot CLI"),
+  ).toBeVisible();
   expect(screen.getByText("未单独分配，仍可从共享目录读取")).toBeVisible();
+  expect(
+    screen.getByText(
+      "共享目录也可能被 Copilot 等兼容工具读取；潜在读取者不代表已启用或实际加载，请在工具中核对。",
+    ),
+  ).toBeVisible();
   expect(libraryApi.preview).not.toHaveBeenCalled();
 });
 it("keeps dirty input when the retained page releases and reopens its portal", async () => {

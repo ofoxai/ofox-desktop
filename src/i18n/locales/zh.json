@@ -254,7 +254,8 @@
     "auto": "自动",
     "enabled": "已开启",
     "notSet": "未设置",
-    "noMatches": "无匹配项"
+    "noMatches": "无匹配项",
+    "retry": "重试"
   },
   "update": {
     "promptTitle": "发现新版本",
@@ -3297,7 +3298,10 @@
       "platform": "平台和运行时要求待核实，请查看官方说明"
     },
     "probeIncomplete": "版本检测未完成",
-    "retryFor": "重新检测 {{name}}"
+    "retryFor": "重新检测 {{name}}",
+    "managedCopy": "OFox 管理副本 · {{version}}",
+    "externalCopy": "外部副本 · {{status}}",
+    "managedCopyNeedsReview": "OFox 副本需要核对"
   },
   "library": {
     "nav": "资源库分类",
@@ -3327,7 +3331,7 @@
     "remove": "移除",
     "history": "最近操作与恢复",
     "unknown": "未知",
-    "assignDescription": "选择完整的期望目标，先预览，再应用。共享目录的实际读取范围会一并显示。",
+    "assignDescription": "选择完整的期望目标，先预览，再应用。已识别的潜在读取范围会一并显示。",
     "draftDescription": "保存或导入只更新资源库草稿，不自动改动工具配置。",
     "removeDescription": "先撤回所有受管目标，再移除资源库记录。技能移除会保留备份，原始来源和非受管内容保持不变。",
     "confirmRemove": "确认移除资源",
@@ -3336,7 +3340,8 @@
     "name": "名称",
     "sharedDirectory": "共享目录（.agents/skills）",
     "sharedReadable": "未单独分配，仍可从共享目录读取",
-    "readers": "实际读取工具：{{tools}}",
+    "readers": "已知潜在读取工具：{{tools}}",
+    "sharedReaderNotice": "共享目录也可能被 Copilot 等兼容工具读取；潜在读取者不代表已启用或实际加载，请在工具中核对。",
     "scopeUnknown": "读取范围未知，暂不能确认已应用。",
     "nativeCliRequired": "新增分配需要已安装的原生 CLI；旧分配仍可撤回。",
     "nativeScopeUnsupported": "原生配置包含暂不支持的动态读取范围，请先核对工具配置。",
@@ -3643,5 +3648,47 @@
       "headerUnsupported": "检查不支持覆盖此 HTTP 控制 header。",
       "endpointOrigin": "旧式 SSE 提供了跨来源或不安全的消息地址，检查已停止。"
     }
+  },
+  "catalogLifecycle": {
+    "description": "仅管理此 OFox 副本；不修改终端 PATH，也不绑定模型或代登录。外部副本继续由原安装方式管理。",
+    "unavailable": "此后端暂不支持该安装管理。",
+    "prepareFailed": "无法准备操作。请重新检测安装来源或使用官方手动途径。",
+    "executeFailed": "操作未能完成。请重新检测实际安装状态后再处理。",
+    "manualRequired": "此副本、运行时或平台尚不能自动管理，请使用官方手动途径。",
+    "copyLaunch": "复制此副本的启动命令",
+    "frozenVersion": "固定版本 {{version}} · Node.js {{node}}",
+    "preservesData": "保留工具的配置、授权、会话与共享 Node/npm；未知或修改过的文件会阻止自动操作。",
+    "cancel": "取消操作",
+    "copyState": {
+      "missing": "尚无 OFox 管理副本",
+      "managed": "OFox 管理副本已核验",
+      "needsReview": "安装来源需要核对",
+      "unavailable": "当前平台或运行时不可用"
+    },
+    "preview": {
+      "install": "预览安装 OFox 副本",
+      "update": "预览更新此副本",
+      "uninstall": "预览卸载此副本"
+    },
+    "start": {
+      "install": "开始安装",
+      "update": "开始更新",
+      "uninstall": "卸载此副本并保留数据"
+    },
+    "stages": {
+      "verify": "核对来源…",
+      "execute": "正在执行…",
+      "cleanup": "正在回收进程…",
+      "inspect": "重新检测安装…"
+    },
+    "result": {
+      "ok": "操作完成",
+      "partial": "部分完成，请核对保留的文件和实际安装状态。",
+      "cancelled": "操作已取消，请以重新检测的安装状态为准。",
+      "failed": "操作失败，原有数据已保留；请核对安装状态。"
+    },
+    "manage": "管理 {{name}} 安装",
+    "title": "{{name}} · OFox 管理副本",
+    "refreshFailed": "刷新安装目录失败；操作结果已保留。"
   }
 }

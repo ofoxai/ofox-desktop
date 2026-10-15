@@ -7,6 +7,11 @@ export interface InstallInventoryEntry {
   version?: string | null;
   path?: string | null;
   error?: string | null;
+  managedCopy?: {
+    state: "managed" | "needsReview";
+    version?: string | null;
+    path: string;
+  } | null;
 }
 
 /** Local probes only: no OFox keys, bindings, model snapshots or latest-version HTTP. */

@@ -69,6 +69,11 @@ export function ResourceReview({
   }
   return (
     <div className="space-y-3 text-ctl">
+      {kind === "skills" && (
+        <p className="text-note text-ink-muted">
+          {t("library.sharedReaderNotice")}
+        </p>
+      )}
       {error && (
         <p role="alert" className="text-danger">
           {error}

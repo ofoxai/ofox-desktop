@@ -347,7 +347,10 @@ mod tests {
         let saved = skill_resource::save_draft(&db, row(), source.path(), None).unwrap();
         let op = skill_resource::preview(&db, &saved.id, &["shared".into()]).unwrap();
         assert_eq!(op.targets[0].tools, ["shared"]);
-        assert_eq!(op.targets[0].readers, ["codex", "gemini", "opencode"]);
+        assert_eq!(
+            op.targets[0].readers,
+            ["codex", "copilot", "gemini", "opencode"]
+        );
         coordinator::apply_operation(&db, &op.id).unwrap();
         let view = definition_view(&db, &saved).unwrap();
         assert_eq!(target(&view, "shared")["applied"], true);

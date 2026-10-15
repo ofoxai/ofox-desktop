@@ -50,3 +50,5 @@ Source contracts were checked against [OpenCode v1.19.0](https://github.com/anom
 No destructive real-agent validation is required to test removal: use sandbox fixtures. External version behavior and native Windows acceptance are recorded as verified only when actually run.
 
 Explicit [MCP connection checks](mcp-connection-checks.md) use frozen library definitions without applying them. Checks are local/HTTP fixture-tested, with native vendor versions and Windows process cleanup pending. Credentials and OAuth remain in their declared environment/native authorization flows.
+
+The optional catalog has a separate Copilot CLI lifecycle on macOS arm64, using an existing compatible Node/npm and a dedicated OFox prefix without changing PATH or model bindings. External copies remain with their original manager. A frozen preview precedes mutation, and process ownership outlives a closed IPC waiter. Unknown or changed private state requires review. Installation does not add Copilot resource write adapters; the library only discloses its known potential shared `~/.agents/skills` reader. See the [acceptance boundaries](known-limitations.md).

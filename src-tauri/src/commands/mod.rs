@@ -2,6 +2,7 @@
 
 mod auth;
 mod balance;
+mod catalog_lifecycle;
 #[cfg(target_os = "macos")]
 mod chatgpt_app;
 mod chatgpt_updates;
@@ -61,6 +62,7 @@ mod workspace;
 
 pub use auth::*;
 pub use balance::*;
+pub use catalog_lifecycle::*;
 #[cfg(target_os = "macos")]
 pub use chatgpt_app::install_chatgpt_desktop_app_with;
 pub use codex_oauth::*;

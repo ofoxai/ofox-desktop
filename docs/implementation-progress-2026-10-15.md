@@ -71,3 +71,9 @@
 - 必须使用已有 Node ≥22／npm，冻结并重核运行时、包与 bin 身份。受控 cwd/env 和独立 npmrc 明确固定官方 scoped registry；不补装 Node、不修改用户镜像／npmrc、不继承 npm token。执行先订阅，owner job 持有写锁至进程树回收及重新探测；不复用带解绑／退 Key 的卸载流程。
 - 原生来源特性检查：在临时 HOME／prefix／npm cache 中，以 Node 22.12.0、npm 10.9.0 安装官方 `@github/copilot@1.0.98`（禁用安装脚本）并仅运行 `--version`，成功返回 GitHub Copilot CLI 1.0.98。此结果只证明该临时安装及版本读取，不证明 OFox 生命周期接口、资源适配或 Windows 已完成；没有登录、运行 AI 或卸载本机副本。
 - 官方约束来源：[Copilot 安装](https://docs.github.com/en/copilot/get-started/cli-quickstart)、[npm registry 选择](https://github.com/npm/npm-registry-fetch/blob/main/lib/index.js)。旧 Terminal 安装器超时后仍可能运行的边界，不能通过新增一个请求期 RAII 锁就宣称消除；新链必须管理自己的进程和写入范围。
+- 已接通独立的检查／准备／执行／取消接口和工具目录管理弹窗。冻结官方版本、tarball SHA-512、Node/npm 全树身份及管理目录；持久 intent 先于执行，owner job 不依赖 IPC waiter。Unix 专用进程组回收完成后才释放任务；未知清理或来源变化保留待核对，不自动接管外部副本。
+- 回归覆盖 FIFO／超量输入、物理目录替换、manifest 读取竞态、mtime 恢复后的 ctime 变化、receipt 祖先及叶节点替换、执行前目录改向、运行时失效、重复／过期任务、取消与 waiter 丢弃。npm 内置配置含非注释项即拒绝，复审发现的孤立 CR 注释绕过先 RED 后修复。
+- 前端在执行前订阅并按 operationId 筛事件；目录层独立持有活动状态，关闭／重挂弹窗不恢复旧可信版本。操作结束刷新失效旧查询，同次结果共用刷新 promise，失败可真正重试。新增边界回归发现并补齐 `common.retry` 三语键；已运行的前端 typecheck、format 与 108 文件／752 项单测通过。
+- 原生临时 prefix 核心链已通过：Node 22.12.0／npm 10.9.0 安装 Copilot 1.0.97，升级到 1.0.98，在 execute stage、spawn 前取消，再卸载临时副本。配置／授权／会话 sentinel 保留。该 opt-in 测试直接构造 Plan，不等于 Tauri 界面全流程；真实 npm 运行中取消由本地进程树 fixture 覆盖，未卸载本机工具。
+- Copilot 1.0.98 `skill list --json` 从无关的空项目发现临时 HOME 下的 personal-Copilot 及 personal-Agents 技能，不运行技能脚本或 AI。资源预览新增 Copilot 的已知潜在共享读取者，明确不代表启用或实际加载；不增加 Copilot 分配目标，专用指令／MCP 和完整路径／禁用项解析仍未支持。
+- 后端及界面独立复审已关闭当前 P1/P2；31 项生命周期及 17 项共享范围专测通过。当前代码 Rust fmt、all-targets Clippy（-D warnings）及全量测试通过（2283 library 单测、95 integration，9 项既有 ignored 加 1 项显式运行过的 opt-in 原生测试）；原生 900px 深浅色界面验收仍在收尾。以上均为 I2 阶段证据，不能代替 U-A 至 U-D 和全项目最终门禁；Windows 仍待原生验证。

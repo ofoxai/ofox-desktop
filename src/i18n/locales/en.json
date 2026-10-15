@@ -254,7 +254,8 @@
     "auto": "Auto",
     "enabled": "Enabled",
     "notSet": "Not Set",
-    "noMatches": "No matches"
+    "noMatches": "No matches",
+    "retry": "Retry"
   },
   "update": {
     "promptTitle": "Update available",
@@ -3297,7 +3298,10 @@
       "platform": "Platform and runtime requirements are not yet verified; see the official guide"
     },
     "probeIncomplete": "Version detection incomplete",
-    "retryFor": "Detect {{name}} again"
+    "retryFor": "Detect {{name}} again",
+    "managedCopy": "OFox-managed copy · {{version}}",
+    "externalCopy": "External copy · {{status}}",
+    "managedCopyNeedsReview": "OFox copy needs review"
   },
   "library": {
     "nav": "Resource categories",
@@ -3327,7 +3331,7 @@
     "remove": "Remove",
     "history": "Recent operations and recovery",
     "unknown": "Unknown",
-    "assignDescription": "Choose the full desired target set, preview, then apply. Shared directory readers are shown.",
+    "assignDescription": "Choose the full desired target set, preview, then apply. Known potential reader scope is shown.",
     "draftDescription": "Saving or importing updates the library draft only. Apply targets separately.",
     "removeDescription": "Withdraw all managed targets before removing the library record. Removed skills keep a backup; sources and unmanaged content are preserved.",
     "confirmRemove": "Remove resource",
@@ -3336,7 +3340,8 @@
     "name": "Name",
     "sharedDirectory": "Shared directory (.agents/skills)",
     "sharedReadable": "Not separately assigned; still readable from a shared directory",
-    "readers": "Readers: {{tools}}",
+    "readers": "Known potential readers: {{tools}}",
+    "sharedReaderNotice": "Copilot and other compatible tools may also read shared directories. Potential readers do not prove that a skill is enabled or loaded; check in the tool.",
     "scopeUnknown": "Reader scope is unknown; applied state cannot be verified.",
     "nativeCliRequired": "New assignments require an installed native CLI; previous assignments can still be withdrawn.",
     "nativeScopeUnsupported": "Native configuration has an unsupported dynamic reader scope. Review it in the tool first.",
@@ -3643,5 +3648,47 @@
       "headerUnsupported": "The check cannot override this HTTP control header.",
       "endpointOrigin": "Legacy SSE supplied a cross-origin or unsafe message endpoint. The check stopped."
     }
+  },
+  "catalogLifecycle": {
+    "description": "Manage this OFox copy only. Shell PATH, model bindings and login remain separate. Manage external copies with their original installer.",
+    "unavailable": "This backend does not support this installation manager.",
+    "prepareFailed": "Could not prepare the operation. Inspect the source again or use the official manual method.",
+    "executeFailed": "The operation did not complete. Inspect the actual installation before retrying.",
+    "manualRequired": "This copy, runtime or platform requires the official manual method.",
+    "copyLaunch": "Copy this copy’s launch command",
+    "frozenVersion": "Pinned version {{version}} · Node.js {{node}}",
+    "preservesData": "Preserve tool settings, authorization, sessions and shared Node/npm. Unknown or edited files block automatic changes.",
+    "cancel": "Cancel operation",
+    "copyState": {
+      "missing": "No OFox-managed copy",
+      "managed": "OFox-managed copy verified",
+      "needsReview": "Installation source needs review",
+      "unavailable": "Platform or runtime unavailable"
+    },
+    "preview": {
+      "install": "Preview OFox copy installation",
+      "update": "Preview this copy’s update",
+      "uninstall": "Preview this copy’s removal"
+    },
+    "start": {
+      "install": "Start installation",
+      "update": "Start update",
+      "uninstall": "Remove this copy and keep data"
+    },
+    "stages": {
+      "verify": "Verifying source…",
+      "execute": "Running…",
+      "cleanup": "Stopping processes…",
+      "inspect": "Inspecting installation…"
+    },
+    "result": {
+      "ok": "Operation completed",
+      "partial": "Partially completed. Review retained files and the actual installation.",
+      "cancelled": "Operation cancelled. Refer to the refreshed installation state.",
+      "failed": "Operation failed; existing data is retained. Inspect the installation state."
+    },
+    "manage": "Manage {{name}} installation",
+    "title": "{{name}} · OFox-managed copy",
+    "refreshFailed": "Could not refresh the installation directory. The operation result is retained."
   }
 }

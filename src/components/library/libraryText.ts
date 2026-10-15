@@ -11,6 +11,7 @@ export function toolLabel(tool: string, t: TFunction) {
     : ({
         claude: "Claude Code",
         codex: "Codex",
+        copilot: "GitHub Copilot CLI",
         gemini: "Gemini CLI",
         opencode: "OpenCode",
         hermes: "Hermes",

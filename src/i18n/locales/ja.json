@@ -254,7 +254,8 @@
     "auto": "自動",
     "enabled": "有効",
     "notSet": "未設定",
-    "noMatches": "一致する項目はありません"
+    "noMatches": "一致する項目はありません",
+    "retry": "再試行"
   },
   "update": {
     "promptTitle": "新しいバージョンがあります",
@@ -3297,7 +3298,10 @@
       "platform": "対応環境とランタイム要件は未確認です。公式手順をご覧ください"
     },
     "probeIncomplete": "バージョン検出が未完了",
-    "retryFor": "{{name}} を再検出"
+    "retryFor": "{{name}} を再検出",
+    "managedCopy": "OFox 管理コピー · {{version}}",
+    "externalCopy": "外部コピー · {{status}}",
+    "managedCopyNeedsReview": "OFox コピーの確認が必要です"
   },
   "library": {
     "nav": "リソースの種類",
@@ -3327,7 +3331,7 @@
     "remove": "削除",
     "history": "最近の操作と復旧",
     "unknown": "不明",
-    "assignDescription": "希望する適用先をすべて選び、プレビュー後に適用します。共有ディレクトリの読み取り範囲も表示します。",
+    "assignDescription": "希望する適用先をすべて選び、プレビュー後に適用します。既知の潜在的な読み取り範囲も表示します。",
     "draftDescription": "保存・取り込みは下書きのみ更新します。ツールへの適用は別操作です。",
     "removeDescription": "管理対象への適用をすべて撤回してから削除します。スキルのバックアップ、元のソースと管理外の内容は保持されます。",
     "confirmRemove": "リソースを削除",
@@ -3336,7 +3340,8 @@
     "name": "名前",
     "sharedDirectory": "共有ディレクトリ（.agents/skills）",
     "sharedReadable": "個別割り当てはありませんが、共有ディレクトリから読み取れます",
-    "readers": "読み取りツール：{{tools}}",
+    "readers": "既知の潜在的な読み取りツール：{{tools}}",
+    "sharedReaderNotice": "共有ディレクトリは Copilot などの対応ツールからも読み取られる可能性があります。この一覧は有効化や実際の読み込みを示すものではありません。各ツールで確認してください。",
     "scopeUnknown": "読み取り範囲が不明なため適用済みと確認できません。",
     "nativeCliRequired": "新しい割り当てにはネイティブCLIが必要です。既存の割り当ては撤回できます。",
     "nativeScopeUnsupported": "ネイティブ設定に未対応の動的な読み取り範囲があります。ツールの設定を確認してください。",
@@ -3643,5 +3648,47 @@
       "headerUnsupported": "この HTTP 制御 header は上書きできません。",
       "endpointOrigin": "旧式 SSE が別オリジンまたは安全でない送信先を返したため停止しました。"
     }
+  },
+  "catalogLifecycle": {
+    "description": "この OFox コピーだけを管理します。端末 PATH・モデル接続・ログインは変更しません。外部コピーは元のインストール方法で管理してください。",
+    "unavailable": "このバックエンドはこのインストール管理に対応していません。",
+    "prepareFailed": "操作を準備できませんでした。導入元を再確認するか公式の手動手順を使用してください。",
+    "executeFailed": "操作を完了できませんでした。実際の導入状態を確認してから再試行してください。",
+    "manualRequired": "このコピー・ランタイム・プラットフォームには公式の手動手順が必要です。",
+    "copyLaunch": "このコピーの起動コマンドをコピー",
+    "frozenVersion": "固定バージョン {{version}} · Node.js {{node}}",
+    "preservesData": "設定・認証・セッション・共有 Node/npm を保持します。不明または変更されたファイルがある場合、自動操作を停止します。",
+    "cancel": "操作をキャンセル",
+    "copyState": {
+      "missing": "OFox 管理コピーはありません",
+      "managed": "OFox 管理コピーを検証済み",
+      "needsReview": "導入元の確認が必要です",
+      "unavailable": "プラットフォームまたはランタイムが利用できません"
+    },
+    "preview": {
+      "install": "OFox コピーの導入をプレビュー",
+      "update": "このコピーの更新をプレビュー",
+      "uninstall": "このコピーの削除をプレビュー"
+    },
+    "start": {
+      "install": "インストール開始",
+      "update": "更新開始",
+      "uninstall": "このコピーを削除してデータを保持"
+    },
+    "stages": {
+      "verify": "導入元を確認中…",
+      "execute": "実行中…",
+      "cleanup": "プロセスを終了中…",
+      "inspect": "導入状態を再検出中…"
+    },
+    "result": {
+      "ok": "操作が完了しました",
+      "partial": "一部完了しました。保持したファイルと実際の導入状態を確認してください。",
+      "cancelled": "操作をキャンセルしました。再検出した導入状態を確認してください。",
+      "failed": "操作に失敗しました。既存データは保持されます。導入状態を確認してください。"
+    },
+    "manage": "{{name}} のインストールを管理",
+    "title": "{{name}} · OFox 管理コピー",
+    "refreshFailed": "インストール一覧を更新できませんでした。操作結果は保持されています。"
   }
 }

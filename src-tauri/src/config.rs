@@ -258,6 +258,236 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
     atomic_write_with(path, data, AtomicOpts::default())
 }
 
+/// Private machine state must never follow a link, including in its ancestors.
+/// All writes and the final rename address an opened physical parent directory.
+#[cfg(unix)]
+fn open_private_parent(parent: &Path) -> std::io::Result<fs::File> {
+    use std::{
+        ffi::CString,
+        os::fd::{AsRawFd, FromRawFd},
+        os::unix::ffi::OsStrExt,
+        path::Component,
+    };
+    let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidInput);
+    if !parent.is_absolute() {
+        return Err(invalid());
+    }
+    let mut directory = fs::File::open("/")?;
+    for component in parent.components() {
+        let Component::Normal(part) = component else {
+            if component == Component::RootDir {
+                continue;
+            }
+            return Err(invalid());
+        };
+        let part = CString::new(part.as_bytes()).map_err(|_| invalid())?;
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                part.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        directory = unsafe { fs::File::from_raw_fd(fd) };
+    }
+    Ok(directory)
+}
+
+#[cfg(unix)]
+pub(crate) fn read_private_with(
+    path: &Path,
+    max: u64,
+    after_open: impl FnOnce(),
+) -> Result<Option<Vec<u8>>, AppError> {
+    use std::{
+        ffi::CString,
+        io::Read,
+        os::fd::{AsRawFd, FromRawFd},
+        os::unix::{ffi::OsStrExt, fs::MetadataExt},
+    };
+    let invalid = || AppError::Config("privateStateReadFailed".into());
+    let parent = path.parent().ok_or_else(invalid)?;
+    let name =
+        CString::new(path.file_name().ok_or_else(invalid)?.as_bytes()).map_err(|_| invalid())?;
+    let directory = match open_private_parent(parent) {
+        Ok(dir) => dir,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(invalid()),
+    };
+    let physical = directory.metadata().map_err(|_| invalid())?;
+    after_open();
+    let checked = open_private_parent(parent)
+        .map_err(|_| invalid())?
+        .metadata()
+        .map_err(|_| invalid())?;
+    if (checked.dev(), checked.ino()) != (physical.dev(), physical.ino()) {
+        return Err(invalid());
+    }
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )
+    };
+    if fd < 0 {
+        return if std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound {
+            Ok(None)
+        } else {
+            Err(invalid())
+        };
+    }
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    let before = file.metadata().map_err(|_| invalid())?;
+    if !before.is_file() || before.len() > max {
+        return Err(invalid());
+    }
+    let fingerprint = |meta: &fs::Metadata| {
+        (
+            meta.dev(),
+            meta.ino(),
+            meta.mode(),
+            meta.len(),
+            meta.mtime(),
+            meta.mtime_nsec(),
+            meta.ctime(),
+            meta.ctime_nsec(),
+        )
+    };
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(max.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| invalid())?;
+    if bytes.len() as u64 != before.len()
+        || fingerprint(&before) != fingerprint(&file.metadata().map_err(|_| invalid())?)
+    {
+        return Err(invalid());
+    }
+    let checked = open_private_parent(parent)
+        .map_err(|_| invalid())?
+        .metadata()
+        .map_err(|_| invalid())?;
+    if (checked.dev(), checked.ino()) != (physical.dev(), physical.ino()) {
+        return Err(invalid());
+    }
+    let mut entry = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            entry.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(invalid());
+    }
+    let entry = unsafe { entry.assume_init() };
+    if entry.st_dev as u64 != before.dev()
+        || entry.st_ino != before.ino()
+        || entry.st_mode & libc::S_IFMT != libc::S_IFREG
+    {
+        return Err(invalid());
+    }
+    Ok(Some(bytes))
+}
+
+#[cfg(unix)]
+pub(crate) fn atomic_write_private_with(
+    path: &Path,
+    data: &[u8],
+    after_open: impl FnOnce(),
+) -> Result<(), AppError> {
+    use std::{
+        ffi::CString,
+        os::fd::{AsRawFd, FromRawFd},
+        os::unix::{ffi::OsStrExt, fs::MetadataExt},
+    };
+    let invalid = || AppError::Config("privateStateWriteFailed".into());
+    if !path.is_absolute() {
+        return Err(invalid());
+    }
+    let parent = path.parent().ok_or_else(invalid)?;
+    let name =
+        CString::new(path.file_name().ok_or_else(invalid)?.as_bytes()).map_err(|_| invalid())?;
+    let directory = open_private_parent(parent).map_err(|_| invalid())?;
+    let physical = directory.metadata().map_err(|_| invalid())?;
+    after_open();
+    let now = open_private_parent(parent)
+        .map_err(|_| invalid())?
+        .metadata()
+        .map_err(|_| invalid())?;
+    if !now.is_dir()
+        || now.file_type().is_symlink()
+        || (now.dev(), now.ino()) != (physical.dev(), physical.ino())
+    {
+        return Err(invalid());
+    }
+    let mut entry = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let exists = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            entry.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if exists == 0 {
+        let entry = unsafe { entry.assume_init() };
+        if entry.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(invalid());
+        }
+    } else if std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
+        return Err(invalid());
+    }
+    let temp =
+        CString::new(format!(".ofox-{}.tmp", uuid::Uuid::new_v4())).map_err(|_| invalid())?;
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            temp.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(invalid());
+    }
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    let result = (|| {
+        file.write_all(data).map_err(|_| invalid())?;
+        file.sync_all().map_err(|_| invalid())?;
+        let now = open_private_parent(parent)
+            .map_err(|_| invalid())?
+            .metadata()
+            .map_err(|_| invalid())?;
+        if !now.is_dir()
+            || now.file_type().is_symlink()
+            || (now.dev(), now.ino()) != (physical.dev(), physical.ino())
+        {
+            return Err(invalid());
+        }
+        if unsafe {
+            libc::renameat(
+                directory.as_raw_fd(),
+                temp.as_ptr(),
+                directory.as_raw_fd(),
+                name.as_ptr(),
+            )
+        } != 0
+        {
+            return Err(invalid());
+        }
+        directory.sync_all().map_err(|_| invalid())
+    })();
+    unsafe { libc::unlinkat(directory.as_raw_fd(), temp.as_ptr(), 0) };
+    result
+}
+
 /// 原子写入，可指定文件权限。
 ///
 /// - `path` 是符号链接（常见于放在 dotfiles 仓库里的配置）时写它指向的文件，链接本身保留。
