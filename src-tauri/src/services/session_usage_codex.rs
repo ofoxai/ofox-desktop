@@ -13,6 +13,7 @@
 //! - `turn_context` → 提取当前 model
 //! - `event_msg` (type=token_count) → 提取累计 token 用量，计算 delta
 
+#[cfg(test)]
 use crate::codex_config::get_codex_config_dir;
 use crate::database::Database;
 use crate::error::AppError;
@@ -161,9 +162,14 @@ fn parse_cumulative_tokens(total_usage: &serde_json::Value) -> Option<Cumulative
 
 /// 同步 Codex 使用数据（从 JSONL 会话日志）
 pub fn sync_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
-    let codex_dir = get_codex_config_dir();
-
-    let files = collect_codex_session_files(&codex_dir);
+    let root = super::usage_sync::resolve_root("codex")?;
+    sync_codex_usage_at(db, &root)
+}
+pub(crate) fn sync_codex_usage_at(
+    db: &Database,
+    codex_dir: &Path,
+) -> Result<SessionSyncResult, AppError> {
+    let files = collect_codex_session_files(codex_dir);
 
     let mut result = SessionSyncResult {
         imported: 0,
@@ -176,7 +182,7 @@ pub fn sync_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
         return Ok(result);
     }
 
-    let mut index = ProviderIndex::load(db, "codex", &codex_dir)?;
+    let mut index = ProviderIndex::load(db, "codex", codex_dir)?;
     for file_path in &files {
         match sync_single_codex_file_with_index(db, file_path, &mut index) {
             Ok((imported, skipped)) => {

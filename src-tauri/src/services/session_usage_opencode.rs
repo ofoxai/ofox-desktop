@@ -33,6 +33,7 @@ use crate::services::usage_source::{self, Prepared, ProviderIndex, Snapshot};
 use crate::services::usage_sync_db::{
     commit_sync_batch, read_sync_state, CheckpointChange, SyncState,
 };
+#[cfg(test)]
 use crate::session_manager::providers::opencode::get_opencode_base_dir;
 use rusqlite::{Connection, OpenFlags};
 use rust_decimal::Decimal;
@@ -123,7 +124,13 @@ struct ParsedBatch {
 
 /// 同步 OpenCode 使用数据（数据库优先，否则读 storage/ 下的 JSON 文件）
 pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
-    let base = get_opencode_base_dir();
+    let root = super::usage_sync::resolve_root("opencode")?;
+    sync_opencode_usage_at(db, &root)
+}
+pub(crate) fn sync_opencode_usage_at(
+    db: &Database,
+    base: &Path,
+) -> Result<SessionSyncResult, AppError> {
     let db_path = base.join("opencode.db");
     let mut result = SessionSyncResult {
         imported: 0,
@@ -131,7 +138,7 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
         files_scanned: 0,
         errors: vec![],
     };
-    let mut index = ProviderIndex::load(db, "opencode", &base)?;
+    let mut index = ProviderIndex::load(db, "opencode", base)?;
     let mut batch = if db_path.is_file() {
         result.files_scanned = 1;
         read_db_calls(db, &db_path, &index)?

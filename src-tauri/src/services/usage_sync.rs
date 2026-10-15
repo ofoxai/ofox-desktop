@@ -30,6 +30,8 @@ struct Shared {
     requests: Mutex<Requests>,
     probe: Mutex<Option<Probe>>,
     last_synced_ms: AtomicI64,
+    #[cfg(test)]
+    before_scan: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 struct UsageSync {
     shared: Arc<Shared>,
@@ -69,6 +71,8 @@ impl UsageSync {
                 requests: Mutex::new(Requests::default()),
                 probe: Mutex::new(None),
                 last_synced_ms: AtomicI64::new(0),
+                #[cfg(test)]
+                before_scan: Mutex::new(None),
             }),
         }
     }
@@ -89,7 +93,15 @@ impl UsageSync {
             let Ok(mut probe) = shared.probe.lock() else {
                 return Some(error_result("usage.sync.probeUnavailable"));
             };
-            refresh_local(&db, force, &mut probe)
+            refresh_local(&db, force, &mut probe, || {
+                #[cfg(test)]
+                {
+                    let hook = shared.before_scan.lock().unwrap().take();
+                    if let Some(hook) = hook {
+                        hook();
+                    }
+                }
+            })
         })
         .await
     }
@@ -161,39 +173,127 @@ impl DbRevision {
         })
     }
 }
-type Observations = BTreeMap<String, BTreeMap<PathBuf, serde_json::Value>>;
+#[derive(PartialEq)]
+struct Revision {
+    roots: Vec<PathBuf>,
+    files: BTreeMap<PathBuf, serde_json::Value>,
+}
+type Observations = BTreeMap<String, Revision>;
 struct Probe {
     observations: Observations,
     db_revision: DbRevision,
     retry: BTreeSet<String>,
     maintenance_failed: bool,
 }
+struct FrozenRoots(BTreeMap<&'static str, Result<Vec<PathBuf>, ()>>);
+impl FrozenRoots {
+    fn capture() -> Result<Self, AppError> {
+        // Freeze configuration only. Enumeration and native reads happen after
+        // releasing this barrier, using these paths without resolving again.
+        let _io = crate::config_io::lock();
+        if crate::settings::settings_health().state
+            == crate::settings::SettingsHealthState::Unreadable
+        {
+            return Err(AppError::Message("usage.sources.settingsUnreadable".into()));
+        }
+        Ok(Self(
+            SOURCES
+                .iter()
+                .map(|source| {
+                    let roots = (source.resolve)().map_err(|_| ()).and_then(|roots| {
+                        if roots.is_empty() {
+                            Err(())
+                        } else {
+                            Ok(roots)
+                        }
+                    });
+                    (source.provider, roots)
+                })
+                .collect(),
+        ))
+    }
+    fn get(&self, provider: &str) -> Result<&[PathBuf], AppError> {
+        self.0
+            .get(provider)
+            .and_then(|roots| roots.as_ref().ok())
+            .map(Vec::as_slice)
+            .ok_or_else(root_unavailable)
+    }
+}
+fn root_unavailable() -> AppError {
+    AppError::Message("usage.sources.rootUnavailable".into())
+}
+fn single_root(roots: &[PathBuf]) -> Result<&std::path::Path, AppError> {
+    match roots {
+        [root] => Ok(root.as_path()),
+        _ => Err(root_unavailable()),
+    }
+}
+/// Compatibility wrappers also freeze root resolution before native I/O.
+pub(crate) fn resolve_root(provider: &str) -> Result<PathBuf, AppError> {
+    let roots = FrozenRoots::capture()?;
+    Ok(single_root(roots.get(provider)?)?.to_owned())
+}
 struct Observed {
     discovery: super::session_analytics_index::Discovery,
     observations: Observations,
     failed: BTreeSet<String>,
+    roots: FrozenRoots,
 }
 fn observes_analytics(provider: &str) -> bool {
     matches!(provider, "claude" | "codex" | "gemini" | "opencode")
 }
-fn observe_sources() -> Observed {
-    use super::session_analytics_index::{discover_sources, source_revision};
-    let discovery = discover_sources();
+fn observe_sources(roots: FrozenRoots) -> Observed {
+    use super::session_analytics_index::source_revision;
+    let native_roots: Vec<_> = SOURCES
+        .iter()
+        .filter(|s| observes_analytics(s.provider))
+        .filter_map(|s| {
+            roots
+                .get(s.provider)
+                .ok()
+                .and_then(|r| single_root(r).ok())
+                .map(|root| (s.provider, root.to_owned()))
+        })
+        .collect();
+    let mut discovery = super::session_analytics_discovery::discover_in(&native_roots);
     let mut observations: Observations = SOURCES
         .iter()
-        .map(|s| (s.provider.to_owned(), BTreeMap::new()))
+        .map(|source| {
+            (
+                source.provider.to_owned(),
+                Revision {
+                    roots: roots.get(source.provider).unwrap_or_default().to_vec(),
+                    files: BTreeMap::new(),
+                },
+            )
+        })
         .collect();
     let mut failed: BTreeSet<_> = discovery
         .failures
         .iter()
         .map(|failure| failure.provider.clone())
         .collect();
+    for source in SOURCES {
+        if roots.get(source.provider).is_err() {
+            failed.insert(source.provider.into());
+            if observes_analytics(source.provider) {
+                discovery
+                    .failures
+                    .push(super::session_analytics_index::DiscoveryFailure {
+                        provider: source.provider.into(),
+                        code: "usage.sources.rootUnavailable",
+                    });
+            }
+        }
+    }
     for spec in &discovery.specs {
         match source_revision(spec) {
             Ok(stamp) => {
                 observations
-                    .entry(spec.provider.clone())
-                    .or_default()
+                    .get_mut(&spec.provider)
+                    .expect("known provider")
+                    .files
                     .insert(spec.path.clone(), stamp);
             }
             Err(_) => {
@@ -201,27 +301,36 @@ fn observe_sources() -> Observed {
             }
         }
     }
-    let workbuddy = (|| {
-        let root = crate::session_manager::providers::workbuddy::session_root()?;
-        let mut stamps = BTreeMap::new();
-        for path in session_usage_workbuddy::collect_files(&root)? {
-            let stamp = super::usage_source::normalized_stamp("workbuddy", &path)?;
-            stamps.insert(path, stamp);
-        }
-        Ok::<_, AppError>(stamps)
-    })();
-    match workbuddy {
-        Ok(stamps) => {
-            observations.insert("workbuddy".into(), stamps);
-        }
-        Err(_) => {
-            failed.insert("workbuddy".into());
+    for source in SOURCES {
+        let Some(enumerate) = source.observe else {
+            continue;
+        };
+        let result = (|| {
+            let paths = enumerate(roots.get(source.provider)?)?;
+            let mut stamps = BTreeMap::new();
+            for path in paths {
+                let stamp = super::usage_source::normalized_stamp(source.provider, &path)?;
+                stamps.insert(path, stamp);
+            }
+            Ok::<_, AppError>(stamps)
+        })();
+        match result {
+            Ok(stamps) => {
+                observations
+                    .get_mut(source.provider)
+                    .expect("known provider")
+                    .files = stamps;
+            }
+            Err(_) => {
+                failed.insert(source.provider.into());
+            }
         }
     }
     Observed {
         discovery,
         observations,
         failed,
+        roots,
     }
 }
 fn error_result(code: &str) -> SessionSyncResult {
@@ -232,18 +341,58 @@ fn error_result(code: &str) -> SessionSyncResult {
         errors: vec![code.into()],
     }
 }
+fn settings_failed(db: &Database) -> SessionSyncResult {
+    use super::usage_health::{self, Channel, Outcome};
+    let mut result = error_result("usage.sources.settingsUnreadable");
+    let saved = (|| {
+        let mut conn = crate::database::lock_conn!(db.conn);
+        let tx = conn.transaction()?;
+        let now = chrono::Utc::now().timestamp_millis();
+        for source in SOURCES {
+            for channel in [Channel::Ledger]
+                .into_iter()
+                .chain(observes_analytics(source.provider).then_some(Channel::Analytics))
+            {
+                let attempt =
+                    usage_health::begin_on(&tx, source.provider, source.source_id, channel, now)?;
+                if !usage_health::finish_on(
+                    &tx,
+                    &attempt,
+                    Outcome::Failed("usage.sources.settingsUnreadable"),
+                    now,
+                )? {
+                    return Err(AppError::Database("usage.sources.staleAttempt".into()));
+                }
+            }
+        }
+        tx.commit()?;
+        Ok::<_, AppError>(())
+    })();
+    if saved.is_err() {
+        result.errors.push("usage.sources.healthWriteFailed".into());
+    }
+    result
+}
 fn refresh_local(
     db: &Database,
     force: bool,
     saved: &mut Option<Probe>,
+    before_scan: impl FnOnce(),
 ) -> Option<SessionSyncResult> {
+    let roots = match FrozenRoots::capture() {
+        Ok(roots) => roots,
+        Err(_) => {
+            *saved = None;
+            return Some(settings_failed(db));
+        }
+    };
     let before_db = match DbRevision::read(db) {
         Ok(revision) => revision,
         Err(_) => return Some(error_result("usage.sync.revisionUnavailable")),
     };
     // Capture observations before parsing. A concurrent append must remain a
     // change next time, even when a native reader happens to see the new bytes.
-    let observed = observe_sources();
+    let observed = observe_sources(roots);
     let all = force
         || saved
             .as_ref()
@@ -263,7 +412,8 @@ fn refresh_local(
     if selected.is_empty() && !saved.as_ref().is_some_and(|old| old.maintenance_failed) {
         return None;
     }
-    let (mut total, mut failed) = sync_selected_sources(db, &selected);
+    before_scan();
+    let (mut total, mut failed) = sync_selected_sources(db, &selected, &observed.roots);
     failed.extend(observed.failed.iter().cloned());
     if selected.iter().any(|provider| observes_analytics(provider)) {
         // Refresh expects a complete discovery: a subset would falsely mark
@@ -347,51 +497,79 @@ pub fn spawn_periodic(app: AppHandle, db: Arc<Database>) {
     });
 }
 
-type SourceSync = fn(&Database) -> Result<SessionSyncResult, AppError>;
-
+type SourceSync = fn(&Database, &[PathBuf]) -> Result<SessionSyncResult, AppError>;
+type ResolveRoots = fn() -> Result<Vec<PathBuf>, AppError>;
+type ObserveFiles = fn(&[PathBuf]) -> Result<Vec<PathBuf>, AppError>;
 struct Source {
     provider: &'static str,
     source_id: &'static str,
     name: &'static str,
+    resolve: ResolveRoots,
     sync: SourceSync,
+    observe: Option<ObserveFiles>,
 }
-
 const SOURCES: &[Source] = &[
     Source {
         provider: "claude",
         source_id: "session_log",
         name: "Claude",
-        sync: session_usage::sync_claude_session_logs,
+        resolve: || Ok(vec![crate::config::get_claude_config_dir()]),
+        sync: |db, roots| session_usage::sync_claude_session_logs_at(db, single_root(roots)?),
+        observe: None,
     },
     Source {
         provider: "codex",
         source_id: "codex_session",
         name: "Codex",
-        sync: session_usage_codex::sync_codex_usage,
+        resolve: || Ok(vec![crate::codex_config::get_codex_config_dir()]),
+        sync: |db, roots| session_usage_codex::sync_codex_usage_at(db, single_root(roots)?),
+        observe: None,
     },
     Source {
         provider: "gemini",
         source_id: "gemini_session",
         name: "Gemini",
-        sync: session_usage_gemini::sync_gemini_usage,
+        resolve: || Ok(vec![crate::gemini_config::get_gemini_dir()]),
+        sync: |db, roots| session_usage_gemini::sync_gemini_usage_at(db, single_root(roots)?),
+        observe: None,
     },
     Source {
         provider: "opencode",
         source_id: "opencode_session",
         name: "OpenCode",
-        sync: session_usage_opencode::sync_opencode_usage,
+        resolve: || {
+            Ok(vec![
+                crate::session_manager::providers::opencode::get_opencode_base_dir(),
+            ])
+        },
+        sync: |db, roots| session_usage_opencode::sync_opencode_usage_at(db, single_root(roots)?),
+        observe: None,
     },
     Source {
         provider: "workbuddy",
         source_id: "workbuddy_session",
         name: "WorkBuddy",
-        sync: session_usage_workbuddy::sync_workbuddy_usage,
+        resolve: || {
+            crate::session_manager::providers::workbuddy::session_root().map(|root| vec![root])
+        },
+        sync: |db, roots| session_usage_workbuddy::sync_workbuddy_usage_at(db, single_root(roots)?),
+        observe: Some(|roots| session_usage_workbuddy::collect_files(single_root(roots)?)),
     },
     Source {
         provider: "dsh",
         source_id: "dsh_session",
         name: "dsh",
-        sync: session_usage_dsh::sync_dsh_usage,
+        resolve: || {
+            crate::session_manager::providers::dsh::home_dir()
+                .map(|root| vec![root])
+                .map_err(|_| root_unavailable())
+        },
+        sync: |db, roots| session_usage_dsh::sync_dsh_usage_at(db, single_root(roots)?),
+        observe: Some(|roots| {
+            crate::session_manager::providers::dsh::usage_files(single_root(roots)?)
+                .map(|files| files.into_iter().map(|(path, _)| path).collect())
+                .map_err(|_| root_unavailable())
+        }),
     },
 ];
 
@@ -493,14 +671,14 @@ fn finish_source(
     db: &Database,
     source: &Source,
     attempt: &super::usage_health::Attempt,
-    failed: bool,
+    failure: Option<&'static str>,
     empty: bool,
 ) -> Result<(), AppError> {
     use super::usage_health::{finish_on, Outcome};
     let mut conn = crate::database::lock_conn!(db.conn);
     let tx = conn.transaction()?;
-    let outcome = if failed {
-        Outcome::Failed("usage.sources.syncFailed")
+    let outcome = if let Some(code) = failure {
+        Outcome::Failed(code)
     } else if empty {
         Outcome::Partial("usage.sources.noFiles")
     } else if super::usage_source::has_complete_coverage_on(&tx, source.provider)? {
@@ -519,14 +697,19 @@ fn finish_source(
 /// pending maintenance; failures are collected in `errors`.
 #[cfg(test)]
 fn sync_sources(db: &Database) -> SessionSyncResult {
+    let roots = match FrozenRoots::capture() {
+        Ok(roots) => roots,
+        Err(_) => return settings_failed(db),
+    };
     let selected = SOURCES.iter().map(|source| source.provider).collect();
-    let (mut total, _) = sync_selected_sources(db, &selected);
+    let (mut total, _) = sync_selected_sources(db, &selected, &roots);
     run_maintenance(db, &mut total);
     total
 }
 fn sync_selected_sources(
     db: &Database,
     selected: &BTreeSet<&str>,
+    roots: &FrozenRoots,
 ) -> (SessionSyncResult, BTreeSet<String>) {
     let mut total = SessionSyncResult {
         imported: 0,
@@ -549,7 +732,11 @@ fn sync_selected_sources(
                 None
             }
         };
-        let (failed, empty) = match (source.sync)(db) {
+        let root_failure = roots.get(source.provider).is_err();
+        let (failure, empty) = match roots
+            .get(source.provider)
+            .and_then(|roots| (source.sync)(db, roots))
+        {
             Ok(result) => {
                 let failed = !result.errors.is_empty();
                 let empty = result.files_scanned == 0;
@@ -557,18 +744,25 @@ fn sync_selected_sources(
                 total.skipped += result.skipped;
                 total.files_scanned += result.files_scanned;
                 total.errors.extend(result.errors);
-                (failed, empty)
+                (failed.then_some("usage.sources.syncFailed"), empty)
             }
             Err(e) => {
                 total.errors.push(format!("{} 同步失败: {e}", source.name));
-                (true, false)
+                (
+                    Some(if root_failure {
+                        "usage.sources.rootUnavailable"
+                    } else {
+                        "usage.sources.syncFailed"
+                    }),
+                    false,
+                )
             }
         };
-        if failed {
+        if failure.is_some() {
             failed_providers.insert(source.provider.into());
         }
         if let Some(attempt) = attempt {
-            if finish_source(db, source, &attempt, failed, empty).is_err() {
+            if finish_source(db, source, &attempt, failure, empty).is_err() {
                 failed_providers.insert(source.provider.into());
                 total
                     .errors
@@ -919,6 +1113,295 @@ mod tests {
             "model":"claude-opus-4-6","stop_reason":"end_turn",
             "usage":{"input_tokens":3,"output_tokens":2}}})
         .to_string()
+    }
+
+    fn dsh_fixture(home: &Path, sid: &str, name: &str, input: u64) -> std::path::PathBuf {
+        let path = home.join(".dsh/sessions/project").join(sid).join(name);
+        let rows = [
+            serde_json::json!({"type":"session","version":0,"id":sid,"createdAt":1792022400000_i64,"delegationDepth":0}),
+            serde_json::json!({"type":"assistant/message","seq":0,"time":1792022400123_i64,"surfaceOp":"append",
+                "data":{"message":{"id":"m","role":"assistant","source":{"kind":"model","provider":"fixture","model":"native"}},
+                    "usage":{"inputTokens":input,"outputTokens":2,"cacheReadTokens":0,"cacheWriteTokens":0}}}),
+        ];
+        write(&path, &(rows.map(|row| row.to_string()).join("\n") + "\n"));
+        path
+    }
+
+    fn dsh_input(db: &Database) -> u64 {
+        db.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COALESCE(SUM(input_tokens),0) FROM proxy_request_logs WHERE app_type='dsh'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn root_setting(settings: &mut crate::settings::AppSettings, provider: &str, root: &Path) {
+        let value = Some(root.to_str().unwrap().to_owned());
+        match provider {
+            "claude" => settings.claude_config_dir = value,
+            "codex" => settings.codex_config_dir = value,
+            "gemini" => settings.gemini_config_dir = value,
+            _ => panic!("fixture provider"),
+        }
+    }
+
+    async fn root_is_frozen(provider: &'static str) {
+        let home = sandbox();
+        let known = home.home().join("known");
+        write_one_call_per_source(&known);
+        workbuddy_partial_fixture(&known, false, false);
+        dsh_fixture(&known, "one", "session.jsonl", 40);
+        let mut settings = crate::settings::get_settings();
+        for (tool, path) in [
+            ("claude", ".claude"),
+            ("codex", ".codex"),
+            ("gemini", ".gemini"),
+        ] {
+            root_setting(&mut settings, tool, &known.join(path));
+        }
+        crate::settings::update_settings(settings).unwrap();
+        // Native OpenCode state follows XDG_DATA_HOME, independently of its
+        // configuration-directory override.
+        std::env::set_var("XDG_DATA_HOME", known.join(".local/share"));
+        std::env::set_var("WORKBUDDY_CONFIG_DIR", known.join(".workbuddy"));
+        std::env::set_var("DSH_HOME", known.join(".dsh"));
+        let next_root = home.home().join("changed-empty-root");
+        std::fs::create_dir_all(&next_root).unwrap();
+        let (start_tx, start_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            start_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            let _io = crate::config_io::lock();
+            let result = match provider {
+                "opencode" => {
+                    std::env::set_var("XDG_DATA_HOME", next_root);
+                    Ok(())
+                }
+                "workbuddy" => {
+                    std::env::set_var("WORKBUDDY_CONFIG_DIR", next_root);
+                    Ok(())
+                }
+                "dsh" => {
+                    std::env::set_var("DSH_HOME", next_root);
+                    Ok(())
+                }
+                _ => crate::settings::mutate_settings(|s| root_setting(s, provider, &next_root)),
+            };
+            let _ = done_tx.send(result.is_ok());
+            result
+        });
+        let config_was_available = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observation = Arc::clone(&config_was_available);
+        let sync = UsageSync::new();
+        *sync.shared.before_scan.lock().unwrap() = Some(Box::new(move || {
+            start_tx.send(()).unwrap();
+            observation.store(
+                done_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap_or(false),
+                Ordering::Relaxed,
+            );
+        }));
+        let db = Arc::new(Database::memory().unwrap());
+        let result = sync.run(&db, false).await;
+        writer.join().unwrap().unwrap();
+        assert!(
+            config_was_available.load(Ordering::Relaxed),
+            "a native scan must not hold the configuration IO barrier"
+        );
+        let result = result.unwrap().unwrap();
+        assert!(result.errors.is_empty(), "{result:?}");
+        assert_eq!(
+            result.imported, 6,
+            "{provider} re-resolved a changed root after the observation boundary"
+        );
+        let count: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM proxy_request_logs WHERE app_type=?1",
+                [provider],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn source_roots_claude_are_frozen_before_native_scan() {
+        root_is_frozen("claude").await;
+    }
+    #[tokio::test]
+    #[serial]
+    async fn source_roots_codex_are_frozen_before_native_scan() {
+        root_is_frozen("codex").await;
+    }
+    #[tokio::test]
+    #[serial]
+    async fn source_roots_gemini_are_frozen_before_native_scan() {
+        root_is_frozen("gemini").await;
+    }
+    #[tokio::test]
+    #[serial]
+    async fn source_roots_opencode_are_frozen_before_native_scan() {
+        root_is_frozen("opencode").await;
+    }
+    #[tokio::test]
+    #[serial]
+    async fn source_roots_workbuddy_are_frozen_before_native_scan() {
+        root_is_frozen("workbuddy").await;
+    }
+    #[tokio::test]
+    #[serial]
+    async fn source_roots_dsh_are_frozen_before_native_scan() {
+        root_is_frozen("dsh").await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn source_refresh_dsh_new_native_file_wakes_the_warm_probe() {
+        let home = sandbox();
+        dsh_fixture(home.home(), "one", "session.jsonl", 40);
+        let db = Arc::new(Database::memory().unwrap());
+        let sync = UsageSync::new();
+        assert_eq!(sync.run(&db, false).await.unwrap().unwrap().imported, 1);
+        dsh_fixture(home.home(), "two", "session.jsonl", 20);
+        let next = sync
+            .run(&db, false)
+            .await
+            .unwrap()
+            .expect("new dsh source was hidden by the warm probe");
+        assert_eq!(next.imported, 1);
+        assert_eq!(dsh_input(&db), 60);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn source_refresh_dsh_native_revision_wakes_the_warm_probe() {
+        let home = sandbox();
+        dsh_fixture(home.home(), "one", "session.jsonl", 40);
+        let db = Arc::new(Database::memory().unwrap());
+        let sync = UsageSync::new();
+        sync.run(&db, false).await.unwrap();
+        dsh_fixture(home.home(), "one", "session.jsonl", 80);
+        let next = sync
+            .run(&db, false)
+            .await
+            .unwrap()
+            .expect("changed dsh source was hidden by the warm probe");
+        assert_eq!(next.imported, 1);
+        assert_eq!(dsh_input(&db), 80);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn source_refresh_dsh_removed_highest_generation_is_observed_without_rollback() {
+        let home = sandbox();
+        dsh_fixture(home.home(), "one", "session.jsonl", 40);
+        let highest = dsh_fixture(home.home(), "one", "session.v1.jsonl", 80);
+        let db = Arc::new(Database::memory().unwrap());
+        let sync = UsageSync::new();
+        sync.run(&db, false).await.unwrap();
+        assert_eq!(dsh_input(&db), 80);
+        std::fs::remove_file(highest).unwrap();
+        let next = sync
+            .run(&db, false)
+            .await
+            .unwrap()
+            .expect("removed generation was hidden by the warm probe");
+        assert!(next.errors.is_empty(), "{next:?}");
+        assert_eq!(
+            dsh_input(&db),
+            80,
+            "the surviving lower generation must not replace native order"
+        );
+        assert_eq!(status(&db, "dsh").status, "partial");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn source_refresh_unreadable_settings_never_scan_default_roots_or_hide_the_failure() {
+        let home = sandbox();
+        write_one_call_per_source(home.home());
+        workbuddy_partial_fixture(home.home(), false, false);
+        dsh_fixture(home.home(), "one", "session.jsonl", 40);
+        let db = Arc::new(Database::memory().unwrap());
+        let sync = UsageSync::new();
+        assert_eq!(
+            sync.run(&db, false).await.unwrap().unwrap().imported,
+            6,
+            "all native fixtures must first be importable"
+        );
+        let before = super::super::usage_source::body_reads_under(home.home());
+        let cached = super::super::session_analytics_index::read_input(&db)
+            .unwrap()
+            .facts
+            .len();
+        write(
+            &home.home().join(".claude/projects/extra/new.jsonl"),
+            &claude_call("new-default"),
+        );
+        let settings = home.home().join(".ofox-desktop/settings.json");
+        std::fs::create_dir_all(&settings).unwrap();
+        struct UnreadableFixture(std::path::PathBuf);
+        impl Drop for UnreadableFixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _settings_fixture = UnreadableFixture(settings.clone());
+        crate::settings::reload_settings().unwrap();
+        assert_eq!(
+            crate::settings::settings_health().state,
+            crate::settings::SettingsHealthState::Unreadable
+        );
+        let result = sync
+            .run(&db, false)
+            .await
+            .unwrap()
+            .expect("unknown settings must not be hidden as unchanged");
+        assert_eq!(
+            result.imported, 0,
+            "unreadable settings are not permission to scan the default roots"
+        );
+        assert!(!result.errors.is_empty());
+        assert!(!format!("{result:?}").contains(&home.home().to_string_lossy().to_string()));
+        assert_eq!(
+            super::super::usage_source::body_reads_under(home.home()),
+            before
+        );
+        assert_eq!(
+            super::super::session_analytics_index::read_input(&db)
+                .unwrap()
+                .facts
+                .len(),
+            cached
+        );
+        for source in SOURCES {
+            let health = status(&db, source.provider);
+            assert_eq!(
+                health.status, "failed",
+                "{} must retain a typed root-resolution failure",
+                source.provider
+            );
+            assert_eq!(
+                health.error_code.as_deref(),
+                Some("usage.sources.settingsUnreadable")
+            );
+        }
+        std::fs::remove_dir(&settings).unwrap();
+        crate::settings::reload_settings().unwrap();
+        assert_eq!(
+            sync.run(&db, false).await.unwrap().unwrap().imported,
+            1,
+            "a repaired root must retry even in the same minute"
+        );
     }
 
     #[tokio::test]

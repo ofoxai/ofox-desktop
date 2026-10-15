@@ -376,13 +376,6 @@ pub(crate) fn collect_files(root: &Path) -> Result<Vec<PathBuf>, AppError> {
     Ok(files)
 }
 
-pub fn sync_workbuddy_usage(
-    db: &crate::database::Database,
-) -> Result<super::session_usage::SessionSyncResult, AppError> {
-    let root = crate::session_manager::providers::workbuddy::session_root()?;
-    sync_workbuddy_usage_at(db, &root)
-}
-
 pub(crate) fn sync_workbuddy_usage_at(
     db: &crate::database::Database,
     root: &Path,

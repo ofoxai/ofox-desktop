@@ -15,6 +15,7 @@
 
 use crate::database::Database;
 use crate::error::AppError;
+#[cfg(test)]
 use crate::gemini_config::get_gemini_dir;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
 use crate::proxy::usage::parser::TokenUsage;
@@ -43,9 +44,14 @@ struct GeminiTokens {
 
 /// 同步 Gemini 使用数据（从 JSON 会话日志）
 pub fn sync_gemini_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
-    let gemini_dir = get_gemini_dir();
-
-    let files = collect_gemini_session_files(&gemini_dir);
+    let root = super::usage_sync::resolve_root("gemini")?;
+    sync_gemini_usage_at(db, &root)
+}
+pub(crate) fn sync_gemini_usage_at(
+    db: &Database,
+    gemini_dir: &Path,
+) -> Result<SessionSyncResult, AppError> {
+    let files = collect_gemini_session_files(gemini_dir);
 
     let mut result = SessionSyncResult {
         imported: 0,
@@ -58,7 +64,7 @@ pub fn sync_gemini_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
         return Ok(result);
     }
 
-    let mut index = ProviderIndex::load(db, "gemini", &gemini_dir)?;
+    let mut index = ProviderIndex::load(db, "gemini", gemini_dir)?;
     for file_path in &files {
         match sync_single_gemini_file_with_index(db, file_path, &mut index) {
             Ok((imported, skipped)) => {

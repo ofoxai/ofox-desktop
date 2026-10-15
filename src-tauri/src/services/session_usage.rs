@@ -13,6 +13,7 @@
 //! toward the parent session. `input_tokens` is Claude's own: fresh input, without
 //! the cache reads and writes.
 
+#[cfg(test)]
 use crate::config::get_claude_config_dir;
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
@@ -64,7 +65,14 @@ struct ParsedAssistantUsage {
 
 /// 同步 Claude Code 会话日志到使用统计数据库
 pub fn sync_claude_session_logs(db: &Database) -> Result<SessionSyncResult, AppError> {
-    let projects_dir = get_claude_config_dir().join("projects");
+    let root = super::usage_sync::resolve_root("claude")?;
+    sync_claude_session_logs_at(db, &root)
+}
+pub(crate) fn sync_claude_session_logs_at(
+    db: &Database,
+    root: &Path,
+) -> Result<SessionSyncResult, AppError> {
+    let projects_dir = root.join("projects");
     if !projects_dir.exists() {
         return Ok(SessionSyncResult {
             imported: 0,

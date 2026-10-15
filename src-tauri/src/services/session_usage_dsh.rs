@@ -337,7 +337,7 @@ pub(crate) fn read_dsh(path: &Path) -> Result<DshRead, AppError> {
 pub fn sync_dsh_usage(
     db: &crate::database::Database,
 ) -> Result<super::session_usage::SessionSyncResult, AppError> {
-    let home = dsh::home_dir().map_err(|_| invalid("sourceRootUnavailable"))?;
+    let home = super::usage_sync::resolve_root("dsh")?;
     sync_dsh_usage_at(db, &home)
 }
 pub(crate) fn sync_dsh_usage_at(

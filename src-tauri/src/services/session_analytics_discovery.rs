@@ -21,7 +21,7 @@ pub(crate) fn discover_sources() -> Discovery {
         ),
     ])
 }
-fn discover_in(roots: &[(&str, PathBuf)]) -> Discovery {
+pub(crate) fn discover_in(roots: &[(&str, PathBuf)]) -> Discovery {
     let mut result = Discovery::default();
     for (provider, root) in roots {
         match provider_sources(provider, root) {
