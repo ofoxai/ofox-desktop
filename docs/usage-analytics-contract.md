@@ -240,16 +240,34 @@ Nonempty legacy filters cannot be mixed with a versioned query.
 
 The result includes `data`, `total`, `page`, `pageSize`, `snapshotId`, receipt,
 explicit normalized `requestFilters` (arrays plus nullable fields), coverage,
-pricing coverage, options, sources and summary. Summary aggregates precisely
-the matching readable detail records. It does not silently reuse overview KPIs
-that ignore request-specific filters or include archived rollups.
+pricing coverage, options, sources, summary, `trend` and `measurements`. Summary
+and trend aggregate precisely the matching readable detail records. Trend uses
+the same bounded local-hour/day/week calendar and current-price estimates as
+overview, with request-only filters already applied. It does not reuse overview
+KPIs that ignore request filters or include archived rollups.
+
+`measurements` returns `statusSamples`, `failedSamples`, `failureRate`,
+`latencySamples`, `avgLatencyMs`, `firstTokenSamples`, `avgFirstTokenMs`,
+`generationSpeedSamples` and `avgGenerationTokensPerSecond`. Rates and averages
+are null when their sample count is zero. HTTP 400–599 are failures among observed
+HTTP statuses. Imported synthetic statuses are excluded; latency follows the
+same provenance rule as row detail, including observed zero latency. The legacy
+`first_token_ms` writer times the first SSE event, including lifecycle or role-only
+events. That column cannot prove the first generated token. First-token timing
+therefore returns zero samples and null until a source supplies verified token
+timing; rows expose the same nullable `observedFirstTokenMs` used by detail. Native
+import placeholders cannot become samples. No source currently provides verified
+generation start/end times either; speed returns zero samples and null, even if a
+generic duration column is present. Neither response duration nor output token
+count proves output speed.
 
 Subsequent pages reuse snapshotId and the same normalized query/filter. Query,
 request-filter or apex mismatches are rejected. A changed filter or explicit
 refresh starts again at page 0 without snapshotId. Background inserts cannot
 shift the already frozen result. The frontend must not refresh it by default
 every 30 seconds. A native source refresh is a separate operation from replacing
-the displayed request snapshot.
+the displayed request snapshot. Trend and measurement summaries remain frozen
+with those rows across every page; they are not computed from the visible page.
 
 `get_request_detail({requestId, snapshotId})` returns the frozen row or null,
 including its receipt and current estimate. The receipt must match the list.
@@ -266,7 +284,7 @@ neutralizes spreadsheet formulas. It excludes request/response bodies,
 credentials and error text.
 
 Snapshots live only in memory, expire after 10 minutes and are lost on restart.
-The global store retains at most four snapshots and 128 MiB of serialized rows,
+The global store retains at most four snapshots and 128 MiB of serialized snapshots,
 evicting the oldest when necessary. An initial read is bounded to 100,000 rows
 and 64 MiB of source projection and fails explicitly beyond either budget;
 results are never silently truncated. CSV iterates the frozen rows in chunks of

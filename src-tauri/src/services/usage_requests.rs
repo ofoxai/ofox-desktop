@@ -2,7 +2,7 @@
 //! Snapshots never contain request/response bodies or credentials.
 use super::{
     ofox_pricing::{CostEstimate, PricingCoverage},
-    usage_analytics::Sum,
+    usage_analytics::{self, Sum, UsageTrend},
     usage_data::{self, FilterOptions, RequestFilters},
     usage_overview::UsageTotals,
     usage_query::{Coverage, QueryReceipt, SourceHealth, UsageQueryV1},
@@ -30,6 +30,7 @@ pub struct RequestView {
     pub record: RequestLogDetail,
     pub observed_status_code: Option<u16>,
     pub observed_latency_ms: Option<u64>,
+    pub observed_first_token_ms: Option<u64>,
     pub current_estimate: CostEstimate,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receipt: Option<QueryReceipt>,
@@ -48,9 +49,12 @@ pub struct RequestPage {
     pub coverage: Coverage,
     pub pricing_coverage: PricingCoverage,
     pub summary: UsageTotals,
+    pub trend: UsageTrend,
+    pub measurements: RequestMeasurements,
     pub options: FilterOptions,
     pub sources: Vec<SourceHealth>,
 }
+#[derive(Serialize)]
 struct Snapshot {
     receipt: QueryReceipt,
     filters: RequestFilters,
@@ -58,8 +62,61 @@ struct Snapshot {
     coverage: Coverage,
     pricing: PricingCoverage,
     summary: UsageTotals,
+    trend: UsageTrend,
+    measurements: RequestMeasurements,
     options: FilterOptions,
     sources: Vec<SourceHealth>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestMeasurements {
+    status_samples: u64,
+    failed_samples: u64,
+    failure_rate: Option<f64>,
+    latency_samples: u64,
+    avg_latency_ms: Option<f64>,
+    first_token_samples: u64,
+    avg_first_token_ms: Option<f64>,
+    generation_speed_samples: u64,
+    avg_generation_tokens_per_second: Option<f64>,
+}
+
+fn measure(rows: &[RequestView]) -> RequestMeasurements {
+    let mut status_samples = 0;
+    let mut failed_samples = 0;
+    let mut latency_samples = 0;
+    let mut latency_sum: u128 = 0;
+    let mut first_token_samples = 0;
+    let mut first_token_sum: u128 = 0;
+    for row in rows {
+        if let Some(status) = row.observed_status_code {
+            status_samples += 1;
+            failed_samples += u64::from(status >= 400);
+        }
+        if let Some(latency) = row.observed_latency_ms {
+            latency_samples += 1;
+            latency_sum += u128::from(latency);
+        }
+        if let Some(first) = row.observed_first_token_ms {
+            first_token_samples += 1;
+            first_token_sum += u128::from(first);
+        }
+    }
+    RequestMeasurements {
+        status_samples,
+        failed_samples,
+        failure_rate: (status_samples > 0).then(|| failed_samples as f64 / status_samples as f64),
+        latency_samples,
+        avg_latency_ms: (latency_samples > 0).then(|| latency_sum as f64 / latency_samples as f64),
+        first_token_samples,
+        avg_first_token_ms: (first_token_samples > 0)
+            .then(|| first_token_sum as f64 / first_token_samples as f64),
+        // Neither a generic duration column nor total latency proves the first
+        // and last generated token times. Do not manufacture output speed.
+        generation_speed_samples: 0,
+        avg_generation_tokens_per_second: None,
+    }
 }
 pub struct Pagination {
     pub page: u32,
@@ -76,7 +133,7 @@ fn invalid(message: &str) -> AppError {
 }
 
 fn retain_snapshot(snapshot: Snapshot) -> Result<(String, Arc<Snapshot>), AppError> {
-    let bytes = serde_json::to_vec(&snapshot.rows)
+    let bytes = serde_json::to_vec(&snapshot)
         .map_err(|_| invalid("serialize"))?
         .len();
     if bytes > MAX_SNAPSHOT_BYTES {
@@ -184,7 +241,9 @@ pub fn request_page(
             total.add(atom, &data.catalog)?;
         }
         let summary = total.totals()?;
-        let rows = data
+        let trend =
+            usage_analytics::build_trend(&data.query, &data.atoms, &data.catalog, &chrono::Local)?;
+        let rows: Vec<_> = data
             .records
             .into_iter()
             .map(|record| {
@@ -201,12 +260,17 @@ pub fn request_page(
                 RequestView {
                     observed_status_code: usage_data::observed_status(&record),
                     observed_latency_ms: usage_data::observed_latency(&record),
+                    // The legacy writer times the first SSE event, including
+                    // lifecycle/role-only events. It does not prove a first
+                    // generated token, even when the raw column is zero.
+                    observed_first_token_ms: None,
                     record,
                     current_estimate,
                     receipt: None,
                 }
             })
             .collect();
+        let measurements = measure(&rows);
         retain_snapshot(Snapshot {
             receipt: QueryReceipt {
                 applied_query: query,
@@ -230,6 +294,8 @@ pub fn request_page(
                     .ok_or_else(|| invalid("estimateUnavailable"))?,
             ),
             summary,
+            trend,
+            measurements,
             options: data.options,
             sources: data.sources,
         })?
@@ -252,6 +318,8 @@ pub fn request_page(
         coverage: snapshot.coverage.clone(),
         pricing_coverage: snapshot.pricing.clone(),
         summary: snapshot.summary.clone(),
+        trend: snapshot.trend.clone(),
+        measurements: snapshot.measurements.clone(),
         options: snapshot.options.clone(),
         sources: snapshot.sources.clone(),
     })
@@ -569,5 +637,213 @@ mod tests {
         assert_eq!(result.summary.requests, 1);
         assert_eq!(result.data[0].record.request_id, "a");
         assert_eq!(result.data[0].observed_status_code, Some(429));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn request_trend_and_measurements_use_complete_filters_and_remain_frozen() {
+        let db = Database::memory().unwrap();
+        for (id, model, source, status, at) in [
+            ("a", "match", "proxy", 200, 1),
+            ("b", "match", "proxy", 503, 86_401),
+            ("other-model", "excluded", "proxy", 500, 1),
+            ("other-source", "match", "session_log", 200, 1),
+        ] {
+            db.conn.lock().unwrap().execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,output_tokens,latency_ms,first_token_ms,is_streaming,status_code,created_at,data_source) VALUES(?1,'p','claude',?2,10,20,1000,100,1,?4,?5,?3)",params![id,model,source,status,at]).unwrap();
+        }
+        let q = UsageQueryV1 {
+            start_ms: Some(0),
+            end_ms: 3 * 86_400_000,
+            ..query()
+        };
+        let filters = RequestFilters {
+            source_ids: vec!["proxy".into()],
+            status_kind: Some("recorded".into()),
+            search: Some("match".into()),
+            ..Default::default()
+        };
+        let page = request_page(
+            &db,
+            q.clone(),
+            filters.clone(),
+            Pagination {
+                page: 0,
+                page_size: 1,
+            },
+            None,
+            "ofox.ai",
+            q.end_ms,
+        )
+        .unwrap();
+        let before = serde_json::to_value(&page).unwrap();
+        assert_eq!(before["trend"]["granularity"], "day");
+        assert_eq!(
+            before["trend"]["series"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v["requests"].as_u64().unwrap())
+                .sum::<u64>(),
+            2
+        );
+        assert_eq!(before["measurements"]["statusSamples"], 2);
+        assert_eq!(before["measurements"]["failedSamples"], 1);
+        assert_eq!(before["measurements"]["failureRate"], 0.5);
+        assert_eq!(before["measurements"]["firstTokenSamples"], 0);
+        assert!(before["measurements"]["avgFirstTokenMs"].is_null());
+        db.conn.lock().unwrap().execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at,data_source) VALUES('late','p','claude','match',900,400,500,2,'proxy')",[]).unwrap();
+        let second = request_page(
+            &db,
+            q.clone(),
+            filters.clone(),
+            Pagination {
+                page: 1,
+                page_size: 1,
+            },
+            Some(&page.snapshot_id),
+            "ofox.ai",
+            q.end_ms,
+        )
+        .unwrap();
+        let frozen = serde_json::to_value(&second).unwrap();
+        assert_eq!(frozen["trend"], before["trend"]);
+        assert_eq!(frozen["measurements"], before["measurements"]);
+        assert_eq!(export_csv(&page.snapshot_id, None).unwrap().record_count, 2);
+        let latest = request_page(
+            &db,
+            q.clone(),
+            filters,
+            Pagination {
+                page: 0,
+                page_size: 1,
+            },
+            None,
+            "ofox.ai",
+            q.end_ms,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(latest).unwrap()["measurements"]["statusSamples"],
+            3
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn request_measurements_distinguish_zero_from_imported_placeholders_and_unknown_speed() {
+        let db = Database::memory().unwrap();
+        for (id, source, latency, first, streaming) in [
+            ("zero", "proxy", 0, Some(0), true),
+            ("native", "opencode_session", 200, Some(50), true),
+            ("placeholder", "session_log", 0, Some(0), true),
+            ("invalid-first", "proxy", 100, Some(200), true),
+            ("nonstream", "proxy", 100, Some(20), false),
+        ] {
+            db.conn.lock().unwrap().execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,output_tokens,latency_ms,first_token_ms,duration_ms,is_streaming,status_code,created_at,data_source) VALUES(?1,'p','claude','m',1,20,?3,?4,1000,?5,200,1,?2)",params![id,source,latency,first,streaming]).unwrap();
+        }
+        let page = request_page(
+            &db,
+            query(),
+            RequestFilters::default(),
+            Pagination {
+                page: 0,
+                page_size: 20,
+            },
+            None,
+            "ofox.ai",
+            3000,
+        )
+        .unwrap();
+        let value = serde_json::to_value(page).unwrap();
+        assert_eq!(value["measurements"]["statusSamples"], 3);
+        assert_eq!(value["measurements"]["failureRate"], 0.0);
+        assert_eq!(value["measurements"]["latencySamples"], 4);
+        assert_eq!(value["measurements"]["avgLatencyMs"], 100.0);
+        assert_eq!(value["measurements"]["firstTokenSamples"], 0);
+        assert!(value["measurements"]["avgFirstTokenMs"].is_null());
+        assert_eq!(value["measurements"]["generationSpeedSamples"], 0);
+        assert!(value["measurements"]["avgGenerationTokensPerSecond"].is_null());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn request_measurements_without_observations_never_claim_a_zero_failure_rate() {
+        let db = Database::memory().unwrap();
+        db.conn.lock().unwrap().execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,latency_ms,status_code,created_at,data_source) VALUES('native','p','claude','m',0,200,1,'session_log')",[]).unwrap();
+        let page = request_page(
+            &db,
+            query(),
+            RequestFilters::default(),
+            Pagination {
+                page: 0,
+                page_size: 20,
+            },
+            None,
+            "ofox.ai",
+            3000,
+        )
+        .unwrap();
+        let value = serde_json::to_value(page).unwrap();
+        assert_eq!(value["measurements"]["statusSamples"], 0);
+        assert!(value["measurements"]["failureRate"].is_null());
+        assert_eq!(value["measurements"]["latencySamples"], 0);
+        assert!(value["measurements"]["avgLatencyMs"].is_null());
+        assert_eq!(value["measurements"]["firstTokenSamples"], 0);
+        assert!(value["measurements"]["avgFirstTokenMs"].is_null());
+    }
+
+    async fn assert_lifecycle_is_not_a_token(event: serde_json::Value) {
+        let timing = Arc::new(Mutex::new(None));
+        let captured = timing.clone();
+        let collector = crate::proxy::response_processor::SseUsageCollector::new(
+            Instant::now(),
+            move |_, first| *captured.lock().unwrap() = first,
+        );
+        collector.push(event).await;
+        collector.finish().await;
+        let first = timing
+            .lock()
+            .unwrap()
+            .expect("the existing writer records a first event even without generated content");
+        let db = Database::memory().unwrap();
+        db.conn.lock().unwrap().execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,latency_ms,first_token_ms,is_streaming,status_code,created_at,data_source) VALUES('lifecycle','p','claude','m',?1,?1,1,200,1,'proxy')",[first]).unwrap();
+        let page = request_page(
+            &db,
+            query(),
+            RequestFilters::default(),
+            Pagination {
+                page: 0,
+                page_size: 20,
+            },
+            None,
+            "ofox.ai",
+            3000,
+        )
+        .unwrap();
+        let value = serde_json::to_value(page).unwrap();
+        assert_eq!(
+            value["measurements"]["firstTokenSamples"], 0,
+            "first SSE lifecycle event is not a generated token"
+        );
+        assert!(value["measurements"]["avgFirstTokenMs"].is_null());
+        assert!(value["data"][0]["observedFirstTokenMs"].is_null());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn request_anthropic_message_start_is_not_a_first_token_measurement() {
+        assert_lifecycle_is_not_a_token(
+            serde_json::json!({"type":"message_start","message":{"role":"assistant","content":[]}}),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn request_openai_role_delta_is_not_a_first_token_measurement() {
+        assert_lifecycle_is_not_a_token(
+            serde_json::json!({"choices":[{"delta":{"role":"assistant"}}]}),
+        )
+        .await;
     }
 }

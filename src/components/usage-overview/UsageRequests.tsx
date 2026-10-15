@@ -15,6 +15,8 @@ import {
 } from "@/components/ui/dialog";
 import { ToolBadge } from "@/components/tools/ToolBadge";
 import { UsagePriceNotice } from "./UsageFreshness";
+import { UsageBars } from "./UsageBars";
+import { UsageRequestMeasurements } from "./UsageRequestMeasurements";
 import { RequestDetailPanel } from "@/components/usage/RequestDetailPanel";
 import { queryClient } from "@/lib/query/queryClient";
 import { usageApi } from "@/lib/api/usage";
@@ -297,6 +299,22 @@ export function UsageRequests({
             {formatUsageEstimate(summary.estimate)}
           </span>
         </div>
+      )}
+      {data?.trend && (
+        <section aria-label={t("usageWorkbench.requestTrend")}>
+          <UsageBars overview={data.trend} />
+        </section>
+      )}
+      {data?.measurements && (
+        <UsageRequestMeasurements
+          measurements={data.measurements}
+          total={data.total}
+        />
+      )}
+      {data && (!data.trend || !data.measurements) && (
+        <p className="text-note text-ink-muted">
+          {t("usageWorkbench.requestAnalyticsUnavailable")}
+        </p>
       )}
       {result.isPending ? (
         <p role="status" className="p-6 text-center text-sub text-ink-muted">

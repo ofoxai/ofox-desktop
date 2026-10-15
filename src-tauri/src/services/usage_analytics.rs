@@ -117,22 +117,25 @@ pub(crate) fn boundary<Tz: TimeZone>(tz: &Tz, date: chrono::NaiveDate) -> Result
     super::usage_time::local_day_start_ms(tz, date)
 }
 
-pub fn build_query_overview<Tz: TimeZone>(
-    db: &Database,
-    period: UsagePeriod,
-    query: UsageQueryV1,
-    apex: &str,
-    now_ms: i64,
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageTrend {
+    pub granularity: Granularity,
+    pub series: Vec<UsageSeriesPoint>,
+}
+
+/// Both projections use the same bounded local calendar and token estimates.
+pub(crate) fn build_trend<Tz: TimeZone>(
+    query: &UsageQueryV1,
+    atoms: &[Atom],
+    catalog: &super::ofox_pricing::PriceCatalog,
     tz: &Tz,
-    last_synced_at: Option<i64>,
-) -> Result<UsageOverview, AppError> {
-    let data = usage_data::read_dataset(db, query, None, apex, now_ms, tz)?;
-    let first = data
-        .query
+) -> Result<UsageTrend, AppError> {
+    let first = query
         .start_ms
-        .or_else(|| data.atoms.iter().map(|a| a.at_ms).min())
-        .unwrap_or(data.query.end_ms);
-    let span = data.query.end_ms.saturating_sub(first);
+        .or_else(|| atoms.iter().map(|a| a.at_ms).min())
+        .unwrap_or(query.end_ms);
+    let span = query.end_ms.saturating_sub(first);
     let granularity = if span <= 36 * 3_600_000 {
         Granularity::Hour
     } else if span > 180 * 86_400_000 {
@@ -163,12 +166,12 @@ pub fn build_query_overview<Tz: TimeZone>(
         }
     };
     let mut series: BTreeMap<i64, Sum> = BTreeMap::new();
-    let mut at = if first < data.query.end_ms {
+    let mut at = if first < query.end_ms {
         bucket(first)?
     } else {
-        data.query.end_ms
+        query.end_ms
     };
-    while at < data.query.end_ms {
+    while at < query.end_ms {
         if series.len() >= 10_000 {
             return Err(AppError::InvalidInput("usage.query.tooManyBuckets".into()));
         }
@@ -179,6 +182,48 @@ pub fn build_query_overview<Tz: TimeZone>(
             Granularity::Week => boundary(tz, day_of(at)? + chrono::Duration::days(7))?,
         };
     }
+    for atom in atoms {
+        series
+            .entry(bucket(atom.at_ms)?)
+            .or_default()
+            .add(atom, catalog)?;
+    }
+    let series = series
+        .into_iter()
+        .map(|(start, sum)| {
+            let totals = sum.totals()?;
+            Ok(UsageSeriesPoint {
+                start,
+                requests: totals.requests,
+                input_tokens: totals.input_tokens,
+                output_tokens: totals.output_tokens,
+                cache_read_tokens: totals.cache_read_tokens,
+                cache_write_tokens: totals.cache_write_tokens,
+                cost_usd: totals.cost_usd,
+                estimate: totals.estimate,
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    Ok(UsageTrend {
+        granularity,
+        series,
+    })
+}
+
+pub fn build_query_overview<Tz: TimeZone>(
+    db: &Database,
+    period: UsagePeriod,
+    query: UsageQueryV1,
+    apex: &str,
+    now_ms: i64,
+    tz: &Tz,
+    last_synced_at: Option<i64>,
+) -> Result<UsageOverview, AppError> {
+    let data = usage_data::read_dataset(db, query, None, apex, now_ms, tz)?;
+    let UsageTrend {
+        granularity,
+        series,
+    } = build_trend(&data.query, &data.atoms, &data.catalog, tz)?;
     let mut total = Sum::default();
     let mut tools: BTreeMap<String, Sum> = BTreeMap::new();
     let mut projects: BTreeMap<String, Sum> = BTreeMap::new();
@@ -215,10 +260,6 @@ pub fn build_query_overview<Tz: TimeZone>(
             .checked_add(atom.tokens[0])
             .and_then(|v| v.checked_add(atom.tokens[1]))
             .ok_or_else(overflow)?;
-        series
-            .entry(bucket(atom.at_ms)?)
-            .or_default()
-            .add(atom, &data.catalog)?;
     }
     let totals = total.totals()?;
     let attribution = Attribution {
@@ -294,22 +335,6 @@ pub fn build_query_overview<Tz: TimeZone>(
             .cmp(&a.totals.total_tokens)
             .then_with(|| a.model.cmp(&b.model))
     });
-    let series = series
-        .into_iter()
-        .map(|(start, sum)| {
-            let totals = sum.totals()?;
-            Ok(UsageSeriesPoint {
-                start,
-                requests: totals.requests,
-                input_tokens: totals.input_tokens,
-                output_tokens: totals.output_tokens,
-                cache_read_tokens: totals.cache_read_tokens,
-                cache_write_tokens: totals.cache_write_tokens,
-                cost_usd: totals.cost_usd,
-                estimate: totals.estimate,
-            })
-        })
-        .collect::<Result<Vec<_>, AppError>>()?;
     let analytics = OverviewAnalytics {
         receipt: QueryReceipt {
             query_fingerprint: data.query.fingerprint()?,

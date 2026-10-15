@@ -40,6 +40,7 @@ export function RequestDetailPanel({
       : imported
         ? null
         : request?.latencyMs;
+  const firstToken = request?.observedFirstTokenMs;
   const number = (value: number) => value.toLocaleString(i18n.language);
   const fields = request
     ? [
@@ -75,9 +76,9 @@ export function RequestDetailPanel({
         ],
         [
           t("usageWorkbench.firstToken"),
-          request.firstTokenMs == null
+          firstToken == null
             ? t("usageWorkbench.notRecorded")
-            : `${request.firstTokenMs} ms`,
+            : `${firstToken} ms`,
         ],
       ]
     : [];

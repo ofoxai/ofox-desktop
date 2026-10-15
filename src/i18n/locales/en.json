@@ -3800,7 +3800,16 @@
     "queryUnavailable": "Statistics for these conditions are unsupported. This does not mean there is no usage.",
     "messages": "Messages",
     "sessions": "Sessions",
-    "active": "Accumulated session activity"
+    "active": "Accumulated session activity",
+    "requestTrend": "Request trend",
+    "measurements": "Request measurements",
+    "failureRate": "Failure rate",
+    "avgLatency": "Average latency",
+    "avgFirstToken": "Average first token",
+    "generationSpeed": "Generation speed",
+    "measuredSamples": "Measured samples {{count}} / {{total}}",
+    "measurementBasis": "Only observed samples are included; HTTP 400–599 count as failures. Imported placeholders are excluded. First-token timing and generation speed require verified measurements.",
+    "requestAnalyticsUnavailable": "This backend does not provide request trends and measurement summaries."
   },
   "usageSessions": {
     "title": "Session analysis",

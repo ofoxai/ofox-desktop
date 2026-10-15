@@ -7,6 +7,10 @@ import type {
   UsageRequestFilters,
   UsageSnapshotReceipt,
 } from "@/types/usageQuery";
+import type {
+  UsageGranularity,
+  UsageSeriesPoint,
+} from "@/lib/api/usageOverview";
 
 export interface TokenUsage {
   inputTokens: number;
@@ -42,6 +46,7 @@ export interface RequestLog {
   dataSource?: string;
   observedStatusCode?: number | null;
   observedLatencyMs?: number | null;
+  observedFirstTokenMs?: number | null;
   currentEstimate?: UsageEstimate;
   receipt?: Pick<
     UsageReceipt,
@@ -70,6 +75,8 @@ export interface PaginatedLogs extends Partial<UsageReceipt> {
   snapshotId?: string;
   options?: UsageFilterOptions;
   requestFilters?: UsageRequestFilters | null;
+  trend?: { granularity: UsageGranularity; series: UsageSeriesPoint[] };
+  measurements?: UsageRequestMeasurements;
   summary?: {
     requests: number;
     inputTokens: number;
@@ -81,6 +88,18 @@ export interface PaginatedLogs extends Partial<UsageReceipt> {
     costUsd: number;
     estimate: UsageEstimate;
   };
+}
+
+export interface UsageRequestMeasurements {
+  statusSamples: number;
+  failedSamples: number;
+  failureRate: number | null;
+  latencySamples: number;
+  avgLatencyMs: number | null;
+  firstTokenSamples: number;
+  avgFirstTokenMs: number | null;
+  generationSpeedSamples: number;
+  avgGenerationTokensPerSecond: number | null;
 }
 
 export interface RequestQueryOptions {

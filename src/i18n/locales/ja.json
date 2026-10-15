@@ -3800,7 +3800,16 @@
     "queryUnavailable": "この条件の集計は未対応です。利用がないことを意味するものではありません。",
     "messages": "メッセージ数",
     "sessions": "セッション数",
-    "active": "セッション活動の累計"
+    "active": "セッション活動の累計",
+    "requestTrend": "リクエスト推移",
+    "measurements": "リクエスト測定",
+    "failureRate": "失敗率",
+    "avgLatency": "平均所要時間",
+    "avgFirstToken": "最初の Token の平均時間",
+    "generationSpeed": "生成速度",
+    "measuredSamples": "測定サンプル {{count}} / {{total}}",
+    "measurementBasis": "実測値のあるサンプルのみを集計し、HTTP 400–599 を失敗とします。インポート時の仮値は除外し、最初の Token の時間と生成速度は信頼できる測定がある場合のみ表示します。",
+    "requestAnalyticsUnavailable": "このバックエンドはリクエスト推移と測定サマリーを提供していません。"
   },
   "usageSessions": {
     "title": "セッション分析",

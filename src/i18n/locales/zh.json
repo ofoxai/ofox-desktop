@@ -3800,7 +3800,16 @@
     "queryUnavailable": "当前条件的统计暂不支持，无法据此判断没有用量。",
     "messages": "消息数",
     "sessions": "会话数",
-    "active": "会话活跃累计"
+    "active": "会话活跃累计",
+    "requestTrend": "请求趋势",
+    "measurements": "请求测量",
+    "failureRate": "失败率",
+    "avgLatency": "平均耗时",
+    "avgFirstToken": "平均首 Token",
+    "generationSpeed": "生成速度",
+    "measuredSamples": "测量样本 {{count}} / {{total}}",
+    "measurementBasis": "仅统计有实测值的样本；HTTP 400–599 计为失败。导入占位值不参与测量，首 Token 和生成速度仅在有可信测量时显示。",
+    "requestAnalyticsUnavailable": "当前后端未提供请求趋势和测量摘要。"
   },
   "usageSessions": {
     "title": "会话分析",

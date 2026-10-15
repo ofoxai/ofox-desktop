@@ -302,3 +302,119 @@ it("keeps unavailable price and unsupported coverage distinct from empty request
   expect(screen.queryByText("当前条件下没有可读的请求明细")).toBeNull();
   expect(screen.queryByText(/internal should not render/)).toBeNull();
 });
+
+it("shows the frozen complete-condition trend and measured sample denominators across pages", async () => {
+  const normal = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation(async (command, args) =>
+    command === "get_request_logs"
+      ? {
+          ...(await normal(command, args)),
+          trend: {
+            granularity: "day",
+            series: [
+              {
+                start: 0,
+                requests: 45,
+                inputTokens: 450,
+                outputTokens: 90,
+                cacheReadTokens: 3000,
+                cacheWriteTokens: 0,
+                costUsd: 0,
+                estimate,
+              },
+            ],
+          },
+          measurements: {
+            statusSamples: 4,
+            failedSamples: 1,
+            failureRate: 0.25,
+            latencySamples: 3,
+            avgLatencyMs: 120,
+            firstTokenSamples: 2,
+            avgFirstTokenMs: 0,
+            generationSpeedSamples: 0,
+            avgGenerationTokensPerSecond: null,
+          },
+        }
+      : normal(command, args),
+  );
+  const view = render(<UsageRequests {...props} />);
+  const metrics = await screen.findByRole("region", { name: "请求测量" });
+  expect(metrics).toHaveTextContent("25%");
+  expect(metrics).toHaveTextContent("4 / 45");
+  expect(metrics).toHaveTextContent("120 ms");
+  expect(metrics).toHaveTextContent("3 / 45");
+  expect(metrics).toHaveTextContent("0 ms");
+  expect(metrics).toHaveTextContent("2 / 45");
+  expect(metrics).toHaveTextContent("0 / 45");
+  expect(metrics).toHaveTextContent("未记录");
+  const trend = screen.getByRole("region", { name: "请求趋势" });
+  expect(
+    within(trend).getByRole("button", { name: /540 Tokens/ }),
+  ).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "下一页" }));
+  await screen.findByText("第 2 / 3 页");
+  view.rerender(<UsageRequests {...props} updateVersion={1} />);
+  expect(screen.getByRole("region", { name: "请求测量" })).toHaveTextContent(
+    "4 / 45",
+  );
+  expect(
+    within(screen.getByRole("region", { name: "请求趋势" })).getByRole(
+      "button",
+      { name: /540 Tokens/ },
+    ),
+  ).toBeVisible();
+});
+
+it("explains older-backend absence instead of manufacturing zero-sample statistics", async () => {
+  render(<UsageRequests {...props} />);
+  await screen.findByRole("button", { name: "查看请求 native-1" });
+  expect(screen.getByText("当前后端未提供请求趋势和测量摘要。")).toBeVisible();
+  expect(screen.queryByRole("region", { name: "请求测量" })).toBeNull();
+});
+
+it("honors the same explicit first-token measurement provenance in request detail", async () => {
+  const normal = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command, args) =>
+    command === "get_request_detail"
+      ? Promise.resolve({
+          ...row,
+          firstTokenMs: 999,
+          observedFirstTokenMs: null,
+          receipt: receipt(),
+        })
+      : normal(command, args),
+  );
+  render(<UsageRequests {...props} />);
+  await userEvent.click(
+    await screen.findByRole("button", { name: "查看请求 native-1" }),
+  );
+  const dialog = await screen.findByRole("dialog");
+  await waitFor(() =>
+    expect(within(dialog).getAllByText("未记录").length).toBeGreaterThan(2),
+  );
+  expect(within(dialog).queryByText("999 ms")).toBeNull();
+});
+
+it("does not reinterpret an older proxy first-event column as observed first-token timing", async () => {
+  const normal = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command, args) =>
+    command === "get_request_detail"
+      ? Promise.resolve({
+          ...row,
+          dataSource: "proxy",
+          firstTokenMs: 999,
+          receipt: receipt(),
+        })
+      : normal(command, args),
+  );
+  render(<UsageRequests {...props} />);
+  await userEvent.click(
+    await screen.findByRole("button", { name: "查看请求 native-1" }),
+  );
+  const dialog = await screen.findByRole("dialog");
+  await waitFor(() =>
+    expect(within(dialog).getAllByText("未记录").length).toBeGreaterThan(1),
+  );
+  expect(within(dialog).queryByText("999 ms")).toBeNull();
+});
