@@ -376,6 +376,8 @@ pub(crate) struct Evidence {
     codex_prefix_hash: Option<String>,
     #[serde(default)]
     codex_reconciliation_required: bool,
+    #[serde(default)]
+    dependency_hash: Option<String>,
 }
 impl Evidence {
     pub(crate) fn codex_prefix(&self) -> Option<&str> {
@@ -550,6 +552,14 @@ fn decode_evidence(value: &Value) -> Result<Evidence, AppError> {
         serde_json::from_value(value.clone()).map_err(|_| error("invalid evidence"))?;
     if evidence.acknowledged_event_ids.len() > MAX_ACKNOWLEDGED_EVENTS {
         return Err(error("evidence exceeds event budget"));
+    }
+    if evidence.acknowledged_event_ids.iter().any(|id| {
+        id.len() != 64
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }) {
+        return Err(error("invalid canonical event digest"));
     }
     Ok(evidence)
 }
@@ -742,6 +752,7 @@ pub(crate) struct Prepared {
     saved_generation: Option<String>,
     saved_negative_complete: bool,
     saved_ledger_count: i64,
+    dependency_changed: bool,
 }
 pub(crate) fn has_history_on(
     conn: &rusqlite::Connection,
@@ -750,7 +761,8 @@ pub(crate) fn has_history_on(
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM session_usage_archive WHERE app_type=?1)
         OR EXISTS(SELECT 1 FROM usage_daily_rollups WHERE app_type=?1)
-        OR EXISTS(SELECT 1 FROM maintenance_flags WHERE key='backfill_session_archive')",
+        OR (?1 IN ('claude','codex','gemini','opencode')
+            AND EXISTS(SELECT 1 FROM maintenance_flags WHERE key='backfill_session_archive'))",
         [provider],
         |r| r.get(0),
     )?)
@@ -818,6 +830,7 @@ impl Prepared {
                 acknowledged_event_ids: BTreeSet::new(),
                 codex_prefix_hash: None,
                 codex_reconciliation_required: false,
+                dependency_hash: None,
             });
         if evidence.parser_revision != parser_revision {
             evidence.complete_event_identity_set = false;
@@ -849,7 +862,21 @@ impl Prepared {
             saved_generation: index.generation.clone(),
             saved_negative_complete: index.negative_complete,
             saved_ledger_count: index.ledger_count,
+            dependency_changed: false,
         })
+    }
+    /// A physical message source can depend on another native structure (for
+    /// example OpenCode's session ancestry). Missing legacy proof also requires
+    /// a read; recording a new dependency never upgrades historical coverage.
+    pub(crate) fn observe_dependency(&mut self, hash: &str) {
+        if self.evidence.dependency_hash.as_deref() != Some(hash) {
+            self.unchanged = false;
+            self.dependency_changed = true;
+            self.evidence.dependency_hash = Some(hash.to_owned());
+        }
+    }
+    pub(crate) fn has_dependency(&self) -> bool {
+        self.evidence.dependency_hash.is_some()
     }
     pub(crate) fn check_on(&self, conn: &rusqlite::Connection) -> Result<(), AppError> {
         source_cache::check_on(
@@ -925,6 +952,9 @@ impl Prepared {
             return Ok(false);
         }
         if self.evidence.has(native) || self.index.acknowledged.contains(&native_digest(native)) {
+            if self.dependency_changed {
+                self.evidence.partial("historicalSessionAncestryUnverified");
+            }
             return Ok(false);
         }
         if !self.may_import_unseen_history
@@ -986,6 +1016,88 @@ mod tests {
         test_sandbox::sandbox,
     };
     use serial_test::serial;
+    #[test]
+    #[serial]
+    fn evidence_legacy_backfill_flag_is_scoped_to_historical_readers() {
+        let _home = sandbox();
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO maintenance_flags(key,value) VALUES('backfill_session_archive','partial')",
+            [],
+        )
+        .unwrap();
+        for provider in ["claude", "codex", "gemini", "opencode"] {
+            assert!(has_history_on(&conn, provider).unwrap());
+        }
+        assert!(
+            !has_history_on(&conn, "workbuddy").unwrap(),
+            "an unrelated legacy backfill flag is not evidence of new-provider history"
+        );
+        conn.execute(
+            "INSERT INTO session_usage_archive VALUES('workbuddy','s','fixture',1,1,0,0,1,'0',1,1)",
+            [],
+        )
+        .unwrap();
+        assert!(has_history_on(&conn, "workbuddy").unwrap());
+    }
+
+    #[test]
+    #[serial]
+    fn evidence_invalid_digest_cannot_bypass_the_provider_byte_budget() {
+        let home = sandbox();
+        let db = Database::memory().unwrap();
+        let path = home.home().join("receipt.jsonl");
+        native_receipt(&db, &path, "native");
+        let key = path.to_string_lossy();
+        let original = {
+            let conn = db.conn.lock().unwrap();
+            let parts = source_cache::read_on(&conn, &key, "claude").unwrap();
+            let mut value = parts.value(Part::UsageSync).unwrap().clone();
+            value["acknowledgedEventIds"] = json!(["a".repeat(4096)]);
+            source_cache::merge_on(
+                &conn,
+                &key,
+                "claude",
+                None,
+                Part::UsageSync,
+                &parts.token(Part::UsageSync),
+                Some(value),
+            )
+            .unwrap();
+            conn.query_row(
+                "SELECT meta_json FROM session_meta_cache WHERE source_path=?1",
+                [&*key],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+        };
+        let cp = read_sync_state_for_test(&db, &key);
+        assert!(
+            Prepared::load(&db, Snapshot::file(&path).unwrap(), "claude", cp, 2).is_err(),
+            "a variable-sized digest defeats the fixed 67-byte index budget"
+        );
+        let envelope: Value = serde_json::from_str(&original).unwrap();
+        for invalid in ["g".repeat(64), "é".repeat(32), "A".repeat(64)] {
+            let mut value = envelope["parts"]["usageSync"]["value"].clone();
+            value["acknowledgedEventIds"] = json!([invalid]);
+            assert!(decode_evidence(&value).is_err());
+        }
+        let conn = db.conn.lock().unwrap();
+        let after: String = conn
+            .query_row(
+                "SELECT meta_json FROM session_meta_cache WHERE source_path=?1",
+                [&*key],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, original);
+    }
+
+    fn read_sync_state_for_test(db: &Database, path: &str) -> Option<SyncState> {
+        crate::services::usage_sync_db::read_sync_state(db, path).unwrap()
+    }
+
     #[test]
     #[serial]
     fn evidence_prune_after_fresh_prepare_cannot_reinsert_an_archived_fact() {

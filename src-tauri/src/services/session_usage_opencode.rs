@@ -14,14 +14,13 @@
 //! cache (stored as is), the output counts the reasoning. A subagent's work is a
 //! session of its own whose parent is the session it ran in, and counts there.
 //! A message's tokens are written in place while its reply streams, so rows are
-//! upserted; progress is a `time_updated` watermark (database) or a file mtime
-//! watermark (per session directory) in `session_log_sync`, so a message is read
-//! again only when it changed.
+//! upserted. Exact physical source stamps avoid reading unchanged sources;
+//! changed sources are fully enumerated because native update timestamps need
+//! not advance when a message or its session ancestry changes.
 //!
 //! ## 数据流
 //! ```text
-//! opencode.db (message.time_updated ≥ watermark) ┐
-//! storage/message/<sid>/*.json (mtime ≥ watermark) ┴→ 费用计算 → proxy_request_logs (opencode_session)
+//! opencode.db / storage/message/<sid>/*.json ─→ 原生身份去重 → proxy_request_logs (opencode_session)
 //! ```
 
 use crate::database::Database;
@@ -217,12 +216,12 @@ fn read_db_calls(
 ) -> Result<ParsedBatch, AppError> {
     let key = db_path.to_string_lossy().to_string();
     let expected = read_sync_state(db, &key)?;
-    let watermark = expected.unwrap_or_default().modified;
-    let source = Prepared::with_index(db, Snapshot::sqlite(db_path)?, expected, 2, index)?;
-    if source.unchanged {
+    let mut source = Prepared::with_index(db, Snapshot::sqlite(db_path)?, expected, 2, index)?;
+    if source.unchanged && source.has_dependency() {
         return Ok(ParsedBatch::default());
     }
-    let (calls, newest) = read_database(db_path, watermark)?;
+    let (calls, newest, dependency) = read_database(db_path)?;
+    source.observe_dependency(&dependency);
     source.snapshot.verify()?;
     // JSON -> SQLite migration is deduplicated by provider native identities,
     // never by a timestamp that merely says a directory was scanned.
@@ -241,7 +240,7 @@ fn read_db_calls(
     })
 }
 
-fn read_database(db_path: &Path, watermark: i64) -> Result<(Vec<OcCall>, i64), AppError> {
+fn read_database(db_path: &Path) -> Result<(Vec<OcCall>, i64, String), AppError> {
     let conn = Connection::open_with_flags(
         db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -250,11 +249,12 @@ fn read_database(db_path: &Path, watermark: i64) -> Result<(Vec<OcCall>, i64), A
     let before: i64 = conn.query_row("PRAGMA data_version", [], |r| r.get(0))?;
     let tx = conn.unchecked_transaction()?;
     let parents = db_session_parents(&tx)?;
-    let mut newest = watermark;
+    let dependency = parent_dependency(&parents)?;
+    let mut newest = 0;
     let mut calls = Vec::new();
     {
-        let mut stmt=tx.prepare("SELECT id,session_id,time_created,time_updated,data FROM message WHERE time_updated>=?1 ORDER BY time_updated")?;
-        let rows = stmt.query_map([watermark], |r| {
+        let mut stmt=tx.prepare("SELECT id,session_id,time_created,time_updated,data FROM message ORDER BY time_updated,id")?;
+        let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -282,7 +282,15 @@ fn read_database(db_path: &Path, watermark: i64) -> Result<(Vec<OcCall>, i64), A
             "OpenCode database changed during read; retry".into(),
         ));
     }
-    Ok((calls, newest))
+    Ok((calls, newest, dependency))
+}
+
+fn parent_dependency(parents: &HashMap<String, String>) -> Result<String, AppError> {
+    let mut edges: Vec<_> = parents.iter().collect();
+    edges.sort();
+    let canonical = serde_json::to_string(&edges)
+        .map_err(|_| AppError::Config("OpenCode ancestry unavailable".into()))?;
+    Ok(usage_source::native_digest(&canonical))
 }
 
 fn db_session_parents(conn: &Connection) -> Result<HashMap<String, String>, AppError> {
@@ -306,8 +314,8 @@ fn db_session_parents(conn: &Connection) -> Result<HashMap<String, String>, AppE
 
 // ---- the files ---------------------------------------------------------------
 
-/// The calls among message files changed since each session directory's last
-/// read, together with every directory's checkpoint. Reading never publishes it.
+/// Enumerate every message of a changed directory or changed ancestry graph,
+/// together with each directory's checkpoint. Reading never publishes it.
 fn read_storage_calls(
     db: &Database,
     storage: &Path,
@@ -316,6 +324,7 @@ fn read_storage_calls(
 ) -> Result<ParsedBatch, AppError> {
     let dependency = Snapshot::tree(&storage.join("session"))?;
     let parents = storage_session_parents(storage)?;
+    let dependency_hash = parent_dependency(&parents)?;
     dependency.verify()?;
     let session_dirs = match fs::read_dir(storage.join("message")) {
         Ok(dirs) => dirs,
@@ -344,6 +353,7 @@ fn read_storage_calls(
         let key = dir.to_string_lossy().to_string();
         let expected = read_sync_state(db, &key)?;
         let mut source = Prepared::with_index(db, Snapshot::directory(&dir)?, expected, 2, index)?;
+        source.observe_dependency(&dependency_hash);
         if source.unchanged {
             continue;
         }
@@ -523,7 +533,7 @@ pub(crate) fn normalized_facts(
     path: &Path,
 ) -> Result<(Vec<usage_source::NormalizedUsageFact>, bool), AppError> {
     let calls = if path.is_file() {
-        read_database(path, 0)?.0
+        read_database(path)?.0
     } else {
         let parents = storage_session_parents(path)?;
         let root = path.join("message");
@@ -825,7 +835,8 @@ mod tests {
         sync_opencode_usage(&db).unwrap();
         assert_eq!(rows(&db), expected_rows());
 
-        // tokens written in place without a newer time_updated: not read again
+        // Native timestamps are not append proof: changed bytes must refresh
+        // an owned live fact even when time_updated did not advance.
         oc.execute(
             "UPDATE message SET data = json_set(data, '$.tokens.input', 9999)
              WHERE id = 'msg_0002'",
@@ -833,7 +844,7 @@ mod tests {
         )
         .unwrap();
         sync_opencode_usage(&db).unwrap();
-        assert_eq!(rows(&db)[0].3, 1000);
+        assert_eq!(rows(&db)[0].3, 9999);
 
         // the reply goes on: OpenCode writes its tokens and stamps it now
         oc.execute(

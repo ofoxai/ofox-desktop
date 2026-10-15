@@ -1354,3 +1354,264 @@ fn assert_partial_without_ack(db: &Database, provider: &str) {
         .unwrap()
         .is_empty());
 }
+
+fn native_oc_message(id: &str, sid: &str, at: i64, input: u64, output: u64) -> Value {
+    json!({"id":id,"sessionID":sid,"role":"assistant","modelID":"fixture",
+        "tokens":{"input":input,"output":output},"time":{"created":at,"completed":at+1}})
+}
+fn native_oc_database(path: &Path) -> Connection {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let conn = Connection::open(path).unwrap();
+    conn.execute_batch("CREATE TABLE session(id TEXT PRIMARY KEY,parent_id TEXT); CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,time_updated INTEGER,data TEXT);").unwrap();
+    conn
+}
+fn native_oc_insert(conn: &Connection, message: &Value, updated: i64) {
+    conn.execute(
+        "INSERT INTO message VALUES(?1,?2,?3,?4,?5)",
+        params![
+            message["id"].as_str().unwrap(),
+            message["sessionID"].as_str().unwrap(),
+            message["time"]["created"].as_i64().unwrap(),
+            updated,
+            message.to_string()
+        ],
+    )
+    .unwrap();
+}
+#[test]
+#[serial]
+fn semantics_opencode_replaced_database_reads_native_ids_below_the_old_watermark() {
+    let home = sandbox();
+    let db = Database::memory().unwrap();
+    let path = home.home().join(".local/share/opencode/opencode.db");
+    let high = chrono::Utc::now().timestamp_millis();
+    let conn = native_oc_database(&path);
+    conn.execute("INSERT INTO session VALUES('s',NULL)", [])
+        .unwrap();
+    native_oc_insert(
+        &conn,
+        &native_oc_message("a", "s", high - 120_000, 100, 10),
+        high,
+    );
+    drop(conn);
+    good(opencode::sync_opencode_usage(&db));
+    let replacement = path.with_extension("replacement");
+    let conn = native_oc_database(&replacement);
+    conn.execute("INSERT INTO session VALUES('s',NULL)", [])
+        .unwrap();
+    native_oc_insert(
+        &conn,
+        &native_oc_message("b", "s", high - 120_000, 30, 3),
+        high - 60_000,
+    );
+    drop(conn);
+    fs::rename(replacement, &path).unwrap();
+    good(opencode::sync_opencode_usage(&db));
+    assert!(
+        facts(&db).iter().any(|r| r.0 == "opencode:b"),
+        "changed inode kept a watermark from the replaced database"
+    );
+    assert_eq!(good(opencode::sync_opencode_usage(&db)).imported, 0);
+}
+#[test]
+#[serial]
+fn semantics_opencode_old_zero_below_the_watermark_is_not_permanently_skipped() {
+    let home = sandbox();
+    let db = Database::memory().unwrap();
+    let path = home.home().join(".local/share/opencode/opencode.db");
+    let high = chrono::Utc::now().timestamp_millis();
+    let old = (chrono::Utc::now() - chrono::Duration::days(40)).timestamp_millis();
+    let conn = native_oc_database(&path);
+    conn.execute("INSERT INTO session VALUES('s',NULL)", [])
+        .unwrap();
+    native_oc_insert(
+        &conn,
+        &native_oc_message("m0", "s", old - 86_400_000, 0, 0),
+        high - 60_000,
+    );
+    native_oc_insert(&conn, &native_oc_message("m1", "s", old, 100, 10), high);
+    good(opencode::sync_opencode_usage(&db));
+    db.rollup_and_prune(30).unwrap();
+    conn.execute(
+        "UPDATE message SET data=?1 WHERE id='m0'",
+        [native_oc_message("m0", "s", old - 86_400_000, 30, 3).to_string()],
+    )
+    .unwrap();
+    good(opencode::sync_opencode_usage(&db));
+    assert_eq!(archived_total(&db), (130, 13, 2));
+    db.rollup_and_prune(30).unwrap();
+    conn.execute("UPDATE message SET data=data WHERE id='m0'", [])
+        .unwrap();
+    good(opencode::sync_opencode_usage(&db));
+    assert_eq!(archived_total(&db), (130, 13, 2));
+    assert!(facts(&db).is_empty());
+}
+fn opencode_parent_dependency(use_db: bool) {
+    let home = sandbox();
+    let db = Database::memory().unwrap();
+    let base = home.home().join(".local/share/opencode");
+    let old = (chrono::Utc::now() - chrono::Duration::days(40)).timestamp_millis();
+    let high = chrono::Utc::now().timestamp_millis();
+    let path = base.join("opencode.db");
+    if use_db {
+        let conn = native_oc_database(&path);
+        conn.execute_batch(
+            "INSERT INTO session VALUES('child',NULL),('root',NULL),('other',NULL);",
+        )
+        .unwrap();
+        native_oc_insert(
+            &conn,
+            &native_oc_message("child-msg", "child", old, 10, 1),
+            high - 60_000,
+        );
+        native_oc_insert(
+            &conn,
+            &native_oc_message("other-msg", "other", old, 20, 2),
+            high,
+        );
+    } else {
+        write(
+            &base.join("storage/session/p/child.json"),
+            &json!({"id":"child"}).to_string(),
+            0,
+        );
+        write(
+            &base.join("storage/message/child/child-msg.json"),
+            &native_oc_message("child-msg", "child", old, 10, 1).to_string(),
+            0,
+        );
+    }
+    good(opencode::sync_opencode_usage(&db));
+    let group = || {
+        db.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT session_id FROM proxy_request_logs WHERE request_id='opencode:child-msg'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(group(), "child");
+    let reparent = |parent: &str| {
+        if use_db {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute("UPDATE session SET parent_id=?1 WHERE id='child'", [parent])
+                .unwrap();
+        } else {
+            write(
+                &base.join("storage/session/p/child.json"),
+                &json!({"id":"child","parentID":parent}).to_string(),
+                1,
+            );
+        }
+    };
+    reparent("root");
+    good(opencode::sync_opencode_usage(&db));
+    assert_eq!(
+        group(),
+        "root",
+        "parent-only change was hidden by the message watermark/stamp"
+    );
+    db.rollup_and_prune(30).unwrap();
+    reparent("another-root");
+    good(opencode::sync_opencode_usage(&db));
+    assert!(facts(&db).is_empty());
+    let conn = db.conn.lock().unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT request_count FROM session_usage_archive WHERE session_id='root'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "unproven archived attribution must remain in its original group"
+    );
+    let raw:String=conn.query_row("SELECT meta_json FROM session_meta_cache WHERE provider_id='opencode' ORDER BY source_path LIMIT 1",[],|r|r.get(0)).unwrap();
+    let value: Value = serde_json::from_str(&raw).unwrap();
+    let evidence = &value["parts"]["usageSync"]["value"];
+    assert_eq!(evidence["coverage"], "partial");
+    assert!(evidence["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r == "historicalSessionAncestryUnverified"));
+}
+#[test]
+#[serial]
+fn semantics_opencode_parent_only_database_change_refreshes_owned_live_attribution() {
+    opencode_parent_dependency(true);
+}
+#[test]
+#[serial]
+fn semantics_opencode_parent_only_json_change_refreshes_owned_live_attribution() {
+    opencode_parent_dependency(false);
+}
+
+fn opencode_legacy_dependency_receipt(use_db: bool) {
+    use crate::session_manager::source_cache::{self, Part};
+    let home = sandbox();
+    let db = Database::memory().unwrap();
+    let base = home.home().join(".local/share/opencode");
+    let at = chrono::Utc::now().timestamp_millis();
+    let source = if use_db {
+        let path = base.join("opencode.db");
+        let conn = native_oc_database(&path);
+        conn.execute("INSERT INTO session VALUES('s',NULL)", [])
+            .unwrap();
+        native_oc_insert(&conn, &native_oc_message("m", "s", at, 10, 1), at);
+        path
+    } else {
+        let dir = base.join("storage/message/s");
+        write(
+            &dir.join("m.json"),
+            &native_oc_message("m", "s", at, 10, 1).to_string(),
+            0,
+        );
+        dir
+    };
+    good(opencode::sync_opencode_usage(&db));
+    let key = source.to_string_lossy();
+    {
+        let conn = db.conn.lock().unwrap();
+        let parts = source_cache::read_on(&conn, &key, "opencode").unwrap();
+        let mut value = parts.value(Part::UsageSync).unwrap().clone();
+        // null and an absent legacy field both deserialize to None; explicitly
+        // unset it because merge preserves fields omitted by an older writer.
+        value["dependencyHash"] = Value::Null;
+        // Simulate a valid older receipt, updating the roster through the same
+        // merge API rather than making an invalid receipt digest by hand.
+        source_cache::merge_on(
+            &conn,
+            &key,
+            "opencode",
+            None,
+            Part::UsageSync,
+            &parts.token(Part::UsageSync),
+            Some(value),
+        )
+        .unwrap();
+    }
+    assert_eq!(good(opencode::sync_opencode_usage(&db)).imported, 0);
+    let conn = db.conn.lock().unwrap();
+    let parts = source_cache::read_on(&conn, &key, "opencode").unwrap();
+    assert!(parts.value(Part::UsageSync).unwrap()["dependencyHash"].is_string());
+    assert_eq!(facts_count(&conn), 1);
+}
+fn facts_count(conn: &Connection) -> i64 {
+    conn.query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |r| r.get(0))
+        .unwrap()
+}
+#[test]
+#[serial]
+fn semantics_opencode_legacy_database_receipt_establishes_parent_dependency() {
+    opencode_legacy_dependency_receipt(true);
+}
+#[test]
+#[serial]
+fn semantics_opencode_legacy_json_receipt_establishes_parent_dependency() {
+    opencode_legacy_dependency_receipt(false);
+}
