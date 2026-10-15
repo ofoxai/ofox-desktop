@@ -38,3 +38,9 @@ Crush's current FSL-1.1-MIT texts are preserved separately; no blanket MIT
 claim is made for all upstream material. The two Huawei images are official
 product material, without asserting a separate open-source image license.
 Brand marks remain the property of their respective owners.
+
+The macOS/Linux base bundle and the Windows resource override include the four
+license texts and this asset notice as text resources. The Windows override
+continues to exclude the Unix installer scripts. Final bundle acceptance must
+verify these files in the installed resources; source configuration checks alone
+do not establish that a platform bundle was built successfully.

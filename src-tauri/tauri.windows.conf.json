@@ -6,7 +6,10 @@
         "label": "main",
         "title": "Ofox Desktop",
         "titleBarStyle": "Visible",
-        "trafficLightPosition": { "x": 14, "y": 17 },
+        "trafficLightPosition": {
+          "x": 14,
+          "y": 17
+        },
         "width": 1000,
         "height": 650,
         "minWidth": 900,
@@ -19,6 +22,10 @@
     ]
   },
   "bundle": {
-    "resources": []
+    "resources": [
+      "../src/assets/agent-logos/LICENSE-*.txt",
+      "../src/assets/agent-logos/LICENSE-*.md",
+      "../src/assets/agent-logos/NOTICE.md"
+    ]
   }
 }
