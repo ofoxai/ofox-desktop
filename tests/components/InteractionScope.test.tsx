@@ -8,6 +8,21 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 
+it("does not revive an inner dialog while its parent surface is inactive", () => {
+  render(
+    <InteractionScope active={false}>
+      <InteractionScope active>
+        <Dialog open>
+          <DialogContent>
+            <DialogTitle>Nested fixture</DialogTitle>
+          </DialogContent>
+        </Dialog>
+      </InteractionScope>
+    </InteractionScope>,
+  );
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
 it("releases portaled dialog focus and overlay when its retained page is suspended", () => {
   const content = (active: boolean) => (
     <InteractionScope active={active}>

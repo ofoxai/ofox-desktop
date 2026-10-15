@@ -11,6 +11,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useUpdate } from "@/contexts/UpdateContext";
 import { SessionsPanel } from "@/components/sessions/SessionsPanel";
 import { AppHeader } from "@/components/shell/AppHeader";
+import { LibraryPage } from "@/components/library/LibraryPage";
 import {
   ShellProvider,
   shellPanelId,
@@ -155,6 +156,16 @@ function ConsoleShell({
             ) : (
               <SignedUsagePage boundTools={boundTools} />
             )}
+          </div>
+        )}
+        {shell.visited.has("library") && (
+          <div
+            {...panel("library")}
+            className="h-full overflow-y-auto px-4 pb-4 pt-1"
+          >
+            <InteractionScope active={shell.active === "library"}>
+              <LibraryPage />
+            </InteractionScope>
           </div>
         )}
       </main>

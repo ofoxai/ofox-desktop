@@ -11,6 +11,7 @@ const scopes = [
   "tray",
   "onboarding",
   "model-profiles",
+  "library",
   "ui",
 ];
 const languageNames = new Set(["简体中文", "中文", "日本語"]);

@@ -1,0 +1,458 @@
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { beforeEach, expect, it, vi } from "vitest";
+import { useEffect, useState } from "react";
+import { InteractionScope } from "@/components/ui/interaction-scope";
+import i18n from "i18next";
+import zh from "@/i18n/locales/zh.json";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { LibraryPage } from "@/components/library/LibraryPage";
+import { ShellProvider, useShell } from "@/components/shell/ShellContext";
+import { libraryApi, type LibraryData } from "@/lib/api/library";
+import { promptsApi } from "@/lib/api/prompts";
+
+vi.mock("@/components/MarkdownEditor", () => ({
+  default: ({
+    value,
+    onChange,
+  }: {
+    value: string;
+    onChange: (v: string) => void;
+  }) => (
+    <textarea
+      aria-label="Markdown"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+    />
+  ),
+}));
+let data: LibraryData;
+const target = (toolId: string, desired = false, available = true) => ({
+  toolId,
+  path: `/fixture/${toolId}`,
+  targetGroupId: toolId,
+  available,
+  discoveryStatus: "installed",
+  status: desired ? "applied" : "unassigned",
+  desired,
+});
+function Refresh() {
+  const shell = useShell();
+  useEffect(() => shell.setActive("library"), [shell.setActive]);
+  return <button onClick={() => void shell.refresh()}>Refresh fixture</button>;
+}
+function Fixture({ active = true }: { active?: boolean }) {
+  const [client] = useState(
+    () => new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+  );
+  return (
+    <QueryClientProvider client={client}>
+      <ShellProvider openSettings={() => undefined}>
+        <InteractionScope active={active}>
+          <LibraryPage />
+        </InteractionScope>
+        <Refresh />
+      </ShellProvider>
+    </QueryClientProvider>
+  );
+}
+function mount() {
+  return render(<Fixture />);
+}
+beforeEach(() => {
+  HTMLElement.prototype.scrollIntoView = vi.fn();
+  i18n.addResourceBundle("zh", "translation", zh, true, true);
+  data = {
+    epoch: 1,
+    instructions: [
+      { id: "a", name: "Shared", content: "Original", revision: 1 },
+    ],
+    targets: [
+      target("codex", true),
+      target("claude", true, false),
+      target("gemini"),
+    ].map((t) => ({ ...t, desiredResourceId: t.desired ? "a" : null })),
+    operations: [],
+  };
+  vi.spyOn(libraryApi, "summary").mockResolvedValue({
+    instructions: 1,
+    mcp: 1,
+    skills: 1,
+  });
+  vi.spyOn(libraryApi, "list").mockImplementation(async (kind) =>
+    kind === "instructions"
+      ? data
+      : kind === "mcp"
+        ? {
+            epoch: 1,
+            servers: [
+              {
+                id: "server",
+                name: "MCP demo",
+                revision: 3,
+                transport: "stdio",
+                credentialState: "nativeEnvironmentRequired",
+                fields: [
+                  {
+                    path: ["command"],
+                    fieldRef: "ref-3",
+                    valueType: "string",
+                    exists: true,
+                  },
+                ],
+                targets: [],
+              },
+            ],
+            operations: [],
+          }
+        : {
+            epoch: 1,
+            skills: [
+              {
+                id: "skill",
+                name: "Skill demo",
+                directory: "sample",
+                revision: 1,
+                sourceState: "ready",
+                targets: [
+                  {
+                    ...target("gemini"),
+                    status: "shared",
+                    readable: true,
+                    readers: ["gemini", "codex"],
+                  },
+                ],
+              },
+            ],
+            operations: [],
+          },
+  );
+  vi.spyOn(libraryApi, "preview").mockResolvedValue({
+    operationId: "op-1",
+    kind: "instructions",
+    resourceId: "a",
+    resourceRevision: 1,
+    status: "previewed",
+    targets: [],
+  });
+  vi.spyOn(libraryApi, "saveInstruction").mockResolvedValue(
+    data.instructions![0],
+  );
+  vi.spyOn(libraryApi, "saveMcp").mockResolvedValue(undefined);
+});
+it("loads only visited subpages and keeps a dirty editor through refresh", async () => {
+  mount();
+  await screen.findByText("Shared");
+  expect(libraryApi.list).toHaveBeenCalledTimes(1);
+  await userEvent.click(screen.getByRole("button", { name: "编辑 Shared" }));
+  fireEvent.change(screen.getByLabelText("Markdown"), {
+    target: { value: "Unsaved" },
+  });
+  data = {
+    ...data,
+    instructions: [
+      { ...data.instructions![0], content: "Remote", revision: 2 },
+    ],
+  };
+  fireEvent.click(screen.getByText("Refresh fixture"));
+  await waitFor(() => expect(libraryApi.list).toHaveBeenCalledTimes(2));
+  expect(screen.getByLabelText("Markdown")).toHaveValue("Unsaved");
+  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+  expect(libraryApi.saveInstruction).toHaveBeenCalledWith(
+    expect.objectContaining({ content: "Unsaved", revision: 1 }),
+    1,
+    1,
+  );
+});
+it("previews the complete desired set and lets an unavailable prior target be withdrawn", async () => {
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(
+    screen.getByRole("button", { name: "分配目标 Shared" }),
+  );
+  const dialog = screen.getByRole("dialog");
+  expect(
+    within(dialog).getByRole("checkbox", { name: "claude" }),
+  ).toBeEnabled();
+  await userEvent.click(
+    within(dialog).getByRole("checkbox", { name: "gemini" }),
+  );
+  await userEvent.click(
+    within(dialog).getByRole("button", { name: "预览变更" }),
+  );
+  expect(libraryApi.preview).toHaveBeenCalledWith(
+    "instructions",
+    "a",
+    ["codex", "claude", "gemini"],
+    1,
+    1,
+  );
+});
+it("saves a name edit using original MCP field refs without sending masked values", async () => {
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
+  await screen.findByText("MCP demo");
+  await userEvent.click(screen.getByRole("button", { name: "编辑 MCP demo" }));
+  fireEvent.change(screen.getByLabelText("名称"), {
+    target: { value: "Renamed" },
+  });
+  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+  expect(libraryApi.saveMcp).toHaveBeenCalledWith(
+    "server",
+    "Renamed",
+    3,
+    [{ path: ["command"], fieldRef: "ref-3", action: "keep" }],
+    1,
+  );
+});
+it("discloses shared Skills readability without claiming a separate assignment", async () => {
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("tab", { name: /Skills/ }));
+  await screen.findByText("Skill demo");
+  await userEvent.click(
+    screen.getByRole("button", { name: "分配目标 Skill demo" }),
+  );
+  expect(screen.getByRole("checkbox", { name: "gemini" })).not.toBeChecked();
+  expect(screen.getByText("未单独分配，仍可从共享目录读取")).toBeVisible();
+  expect(libraryApi.preview).not.toHaveBeenCalled();
+});
+it("keeps dirty input when the retained page releases and reopens its portal", async () => {
+  const rendered = mount();
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("button", { name: "编辑 Shared" }));
+  fireEvent.change(screen.getByLabelText("Markdown"), {
+    target: { value: "Retained draft" },
+  });
+  rendered.rerender(<Fixture active={false} />);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  rendered.rerender(<Fixture />);
+  expect(screen.getByLabelText("Markdown")).toHaveValue("Retained draft");
+});
+it("accepts actual backend pending targets and retains an in-flight preview across suspension", async () => {
+  let finish!: (value: Awaited<ReturnType<typeof libraryApi.preview>>) => void;
+  vi.mocked(libraryApi.preview).mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  vi.spyOn(libraryApi, "apply").mockResolvedValue({
+    operationId: "op-1",
+    kind: "instructions",
+    resourceId: "a",
+    resourceRevision: 1,
+    status: "applied",
+    targets: [],
+  });
+  const rendered = mount();
+  await screen.findByText("Shared");
+  await userEvent.click(
+    screen.getByRole("button", { name: "分配目标 Shared" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "预览变更" }));
+  rendered.rerender(<Fixture active={false} />);
+  rendered.rerender(<Fixture />);
+  expect(screen.getByRole("button", { name: "预览变更" })).toBeDisabled();
+  expect(libraryApi.preview).toHaveBeenCalledTimes(1);
+  await act(async () =>
+    finish({
+      operationId: "op-1",
+      kind: "instructions",
+      resourceId: "a",
+      resourceRevision: 1,
+      status: "previewed",
+      targets: [
+        {
+          tools: ["codex"],
+          readers: ["codex"],
+          path: "/fixture",
+          targetGroupId: "group",
+          status: "pending",
+          changedFields: [],
+        },
+      ],
+    }),
+  );
+  expect(await screen.findByRole("button", { name: "确认应用" })).toBeEnabled();
+  await userEvent.click(screen.getByRole("button", { name: "确认应用" }));
+  expect(libraryApi.apply).toHaveBeenCalledWith("op-1");
+});
+it("keeps the skill file picker available after an unreadable file", async () => {
+  vi.spyOn(libraryApi, "skillDetail").mockImplementation(async (_id, path) => {
+    if (path === "binary.dat") throw "library.skillFileNotText";
+    return {
+      resourceId: "skill",
+      artifactHash: "hash",
+      path: "SKILL.md",
+      content: "Text",
+      files: [
+        {
+          path: "SKILL.md",
+          isDirectory: false,
+          sizeBytes: 4,
+          executable: false,
+        },
+        {
+          path: "binary.dat",
+          isDirectory: false,
+          sizeBytes: 4,
+          executable: false,
+        },
+      ],
+    };
+  });
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("tab", { name: /Skills/ }));
+  await userEvent.click(
+    await screen.findByRole("button", { name: "详情 Skill demo" }),
+  );
+  await screen.findByText("Text");
+  await userEvent.click(screen.getByRole("combobox", { name: "技能文件" }));
+  await userEvent.click(
+    await screen.findByRole("option", { name: /binary.dat/ }),
+  );
+  await screen.findByRole("alert");
+  expect(screen.getByRole("combobox", { name: "技能文件" })).toBeEnabled();
+});
+it("locks the legacy import source while its explicit read is pending", async () => {
+  let finish!: (
+    value: Awaited<ReturnType<typeof promptsApi.getPrompts>>,
+  ) => void;
+  vi.spyOn(promptsApi, "getPrompts").mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(
+    screen.getByRole("button", { name: "导入 Markdown／旧提示词" }),
+  );
+  await userEvent.click(screen.getByRole("combobox", { name: "导入来源" }));
+  await userEvent.click(
+    await screen.findByRole("option", { name: "claude 旧提示词" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "读取旧提示词" }));
+  expect(screen.getByRole("combobox", { name: "导入来源" })).toBeDisabled();
+  await act(async () =>
+    finish({
+      legacy: {
+        id: "legacy",
+        name: "Legacy",
+        content: "Imported",
+        enabled: true,
+      },
+    }),
+  );
+  expect(await screen.findByText("Legacy")).toBeVisible();
+});
+it("does not replace a new edit with a late Markdown file read", async () => {
+  let finish!: (value: string) => void;
+  const file = new File(["file"], "sample.md", { type: "text/markdown" });
+  Object.assign(file, {
+    text: () =>
+      new Promise<string>((resolve) => {
+        finish = resolve;
+      }),
+  });
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(
+    screen.getByRole("button", { name: "导入 Markdown／旧提示词" }),
+  );
+  fireEvent.change(screen.getByLabelText("Markdown 文件／粘贴内容"), {
+    target: { files: [file] },
+  });
+  fireEvent.change(screen.getByLabelText("Markdown"), {
+    target: { value: "New edit" },
+  });
+  await act(async () => finish("Old file"));
+  expect(screen.getByLabelText("Markdown")).toHaveValue("New edit");
+});
+it("keeps the latest file selection when file reads finish out of order", async () => {
+  let first!: (value: string) => void;
+  let second!: (value: string) => void;
+  const a = Object.assign(new File(["a"], "a.md"), {
+    text: () =>
+      new Promise<string>((resolve) => {
+        first = resolve;
+      }),
+  });
+  const b = Object.assign(new File(["b"], "b.md"), {
+    text: () =>
+      new Promise<string>((resolve) => {
+        second = resolve;
+      }),
+  });
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(
+    screen.getByRole("button", { name: "导入 Markdown／旧提示词" }),
+  );
+  const picker = screen.getByLabelText("Markdown 文件／粘贴内容");
+  fireEvent.change(picker, { target: { files: [a] } });
+  fireEvent.change(picker, { target: { files: [b] } });
+  await act(async () => second("Latest file"));
+  await act(async () => first("Old file"));
+  expect(screen.getByLabelText("Markdown")).toHaveValue("Latest file");
+});
+it("allows a preview with only desired assignment removals to be confirmed", async () => {
+  vi.spyOn(libraryApi, "apply").mockResolvedValue({
+    operationId: "op-1",
+    kind: "instructions",
+    resourceId: "a",
+    resourceRevision: 1,
+    status: "applied",
+    targets: [],
+  });
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(
+    screen.getByRole("button", { name: "分配目标 Shared" }),
+  );
+  await userEvent.click(screen.getByRole("checkbox", { name: "codex" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: "claude" }));
+  await userEvent.click(screen.getByRole("button", { name: "预览变更" }));
+  expect(await screen.findByRole("button", { name: "确认应用" })).toBeEnabled();
+});
+it("freezes the opened epoch when deleting after a background restore", async () => {
+  vi.spyOn(libraryApi, "deleteInstruction").mockResolvedValue(true);
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("button", { name: "移除 Shared" }));
+  data = { ...data, epoch: 2 };
+  fireEvent.click(screen.getByText("Refresh fixture"));
+  await waitFor(() => expect(libraryApi.list).toHaveBeenCalledTimes(2));
+  await userEvent.click(screen.getByRole("button", { name: "确认移除资源" }));
+  expect(libraryApi.deleteInstruction).toHaveBeenCalledWith("a", 1, 1);
+});
+it("does not present an unreadable backend as an empty writable library", async () => {
+  vi.mocked(libraryApi.list).mockRejectedValue(new Error("old backend"));
+  mount();
+  await screen.findByRole("alert");
+  expect(screen.getByRole("button", { name: "新建" })).toBeDisabled();
+  expect(
+    screen.queryByText("尚未收录资源。添加或导入后，再明确选择应用目标。"),
+  ).toBeNull();
+});
+it("keeps existing legacy rows read-only when their backend supplies no epoch", async () => {
+  data = { ...data, epoch: undefined as unknown as number };
+  mount();
+  await screen.findByText("Shared");
+  expect(screen.getByRole("button", { name: "编辑 Shared" })).toBeDisabled();
+  expect(
+    screen.getByRole("button", { name: "分配目标 Shared" }),
+  ).toBeDisabled();
+  expect(screen.getByRole("button", { name: "移除 Shared" })).toBeDisabled();
+});

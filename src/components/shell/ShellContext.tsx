@@ -10,10 +10,15 @@ import {
   type ReactNode,
 } from "react";
 
-export type ShellPage = "tools" | "sessions" | "usage";
+export type ShellPage = "tools" | "sessions" | "library" | "usage";
 
 /** The header's tabs, in order. */
-export const SHELL_PAGES: readonly ShellPage[] = ["tools", "sessions", "usage"];
+export const SHELL_PAGES: readonly ShellPage[] = [
+  "tools",
+  "sessions",
+  "library",
+  "usage",
+];
 
 /** The id of a page's panel, for the tab's `aria-controls`. */
 export const shellPanelId = (page: ShellPage) => `shell-panel-${page}`;

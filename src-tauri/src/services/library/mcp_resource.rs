@@ -500,6 +500,7 @@ pub(crate) fn preview_at(
             .collect();
         let mut write = TargetWrite {
             directory: None,
+            transfer: None,
             tools: owners.clone(),
             readers,
             path: group.path.to_string_lossy().into_owned(),

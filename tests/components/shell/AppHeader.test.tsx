@@ -74,12 +74,13 @@ beforeEach(() => {
 });
 
 describe("AppHeader navigation", () => {
-  it("offers exactly the pages 工具, 会话 and 用量, with 工具 open first", () => {
+  it("offers tools, sessions, library and usage in order with tools open first", () => {
     renderHeader();
     const tabs = screen.getAllByRole("tab");
     expect(tabs.map((tab) => tab.textContent)).toEqual([
       "工具",
       "会话",
+      "资源库",
       "用量",
     ]);
     expect(screen.getByRole("tab", { name: "工具" })).toHaveAttribute(

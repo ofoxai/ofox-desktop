@@ -229,6 +229,14 @@ pub fn native_paths() -> Result<BTreeMap<String, PathBuf>, AppError> {
         })
         .collect()
 }
+pub fn target_paths() -> Result<BTreeMap<String, PathBuf>, AppError> {
+    let mut paths = native_paths()?;
+    paths.insert(
+        "shared".into(),
+        crate::config::get_home_dir().join(".agents/skills"),
+    );
+    Ok(paths)
+}
 fn flag(name: &str) -> bool {
     std::env::var(name)
         .ok()
@@ -410,7 +418,7 @@ pub fn reads_entry(
     }
 }
 pub fn resolver_paths() -> Result<BTreeMap<String, PathBuf>, AppError> {
-    let mut paths = native_paths()?;
+    let mut paths = target_paths()?;
     for (tool, roots) in reader_paths()? {
         for (index, path) in roots.into_iter().enumerate() {
             paths.insert(format!("reader:{tool}:{index}"), path);
@@ -500,6 +508,23 @@ pub fn validate_target(target: &TargetWrite, op: &Operation) -> Result<(), AppEr
     let valid_hash = |hash: &str| {
         hash == "missing" || (hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
     };
+    if let Some(summary) = &target.transfer {
+        artifacts::path(&summary.artifact_hash)?;
+        if !["copy", "symlink", "withdraw"].contains(&summary.method.as_str())
+            || summary
+                .planned_method
+                .as_deref()
+                .is_some_and(|method| !["copy", "symlink", "withdraw"].contains(&method))
+            || target.after_hash != predicted(&summary.artifact_hash, &summary.method)?
+            || target.directory.as_ref().is_some_and(|plan| {
+                plan.artifact_hash != summary.artifact_hash
+                    || plan.method != summary.method
+                    || plan.fallback_copy != summary.fallback_copy
+            })
+        {
+            return Err(error("stateUnreadable"));
+        }
+    }
     if !target.after_text.is_empty()
         || (!target.before_hash.is_empty() && !valid_hash(&target.before_hash))
         || (!target.after_hash.is_empty() && !valid_hash(&target.after_hash))
@@ -560,7 +585,7 @@ fn assignment(id: &str, tool: &str) -> String {
 }
 pub fn preview(db: &Database, id: &str, tools: &[String]) -> Result<Operation, AppError> {
     ensure_metadata(db)?;
-    let paths = native_paths()?;
+    let paths = target_paths()?;
     let selected = tools
         .iter()
         .map(|tool| {
@@ -694,6 +719,7 @@ pub(crate) fn preview_at(
             .collect();
         let mut target = TargetWrite {
             directory: None,
+            transfer: None,
             tools: owners.iter().cloned().collect(),
             readers: readers.into_iter().collect(),
             path: path.to_string_lossy().into_owned(),
@@ -750,6 +776,12 @@ pub(crate) fn preview_at(
             let after = predicted(&hash, method)?;
             let (stage, backup) = recovery_paths(&physical, &op_id)?;
             target.after_hash = after.clone();
+            target.transfer = Some(super::SkillTransfer {
+                artifact_hash: hash.clone(),
+                planned_method: Some(method.into()),
+                method: method.into(),
+                fallback_copy: sync == crate::services::skill::SyncMethod::Auto,
+            });
             target.directory = Some(DirectoryPlan {
                 artifact_hash: hash.clone(),
                 method: method.into(),
@@ -780,6 +812,7 @@ pub(crate) fn preview_at(
             target.status = "conflict".into();
             target.reason = Some(failure.to_string());
             target.directory = None;
+            target.transfer = None;
             target.after_hash.clear();
             target.receipt = None;
         }
@@ -885,6 +918,15 @@ fn stage_with(
                 return Err(error("skillLinkFailed"));
             }
             plan.method = "copy".into();
+            target
+                .transfer
+                .get_or_insert_with(|| super::SkillTransfer {
+                    artifact_hash: plan.artifact_hash.clone(),
+                    planned_method: None,
+                    method: "copy".into(),
+                    fallback_copy: plan.fallback_copy,
+                })
+                .method = "copy".into();
             target.after_hash = predicted(&plan.artifact_hash, "copy")?;
             if let Some(receipt) = &mut target.receipt {
                 receipt.owned_segment = serde_json::to_string(&DirectoryOwned {
@@ -973,8 +1015,49 @@ pub fn cleanup(target: &TargetWrite) -> Result<(), AppError> {
     }
     Ok(())
 }
+/// Explicit cancellation may discard a proven new stage, never the old backup
+/// or native entry. A backup may be the only intact pre-operation entry.
+pub fn discard_staged(target: &mut TargetWrite) -> Result<(), AppError> {
+    let Some(plan) = target.directory.as_ref() else {
+        return Ok(());
+    };
+    if entry_id(Path::new(&target.path))? != target.physical_target {
+        return Err(error("cleanupNeedsReview"));
+    }
+    match fs::symlink_metadata(&plan.backup_path) {
+        Ok(_) => return Err(error("cleanupNeedsReview")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(error("cleanupNeedsReview")),
+    }
+    let stage = Path::new(&plan.stage_path);
+    let parent = stage.parent().ok_or_else(|| error("stateUnreadable"))?;
+    match fs::symlink_metadata(parent) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err(error("cleanupNeedsReview")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            target.directory = None;
+            return Ok(());
+        }
+        Err(_) => return Err(error("cleanupNeedsReview")),
+    }
+    match fs::symlink_metadata(stage) {
+        Ok(_) => {
+            if entry_hash_with(stage, Some(&plan.artifact_hash))? != target.after_hash {
+                return Err(error("cleanupNeedsReview"));
+            }
+            unlink(stage)?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(error("cleanupNeedsReview")),
+    }
+    fs::remove_dir(parent).map_err(|_| error("cleanupNeedsReview"))?;
+    target.directory = None;
+    Ok(())
+}
 pub fn receipt_intact(receipt: &Receipt) -> bool {
     validate_receipt(receipt).is_ok()
+        && entry_id(Path::new(&receipt.path)).ok().as_deref()
+            == Some(receipt.physical_target.as_str())
         && serde_json::from_str::<DirectoryOwned>(&receipt.owned_segment)
             .ok()
             .is_some_and(|owned| {
@@ -988,6 +1071,90 @@ pub fn receipt_intact(receipt: &Receipt) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn cancelling_discards_only_a_verified_stage_and_preserves_native_and_backup_entries() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        copy_mode();
+        let db = Database::memory().unwrap();
+        let row = draft(&db, "Skill body");
+        let mut first = preview(&db, &row.id, &["codex".into()]).unwrap();
+        stage(&mut first.targets[0]).unwrap();
+        let plan = first.targets[0].directory.clone().unwrap();
+        assert!(Path::new(&plan.stage_path).exists());
+        let cancelled = io::cancel_operation(&db, &first.id).unwrap();
+        assert_eq!(cancelled.status, "cancelled");
+        assert!(!Path::new(&plan.stage_path).exists());
+        assert!(!Path::new(&first.targets[0].path).exists());
+        assert!(artifact_for(&db, &row.id)
+            .unwrap()
+            .join("SKILL.md")
+            .exists());
+        let mut changed = preview(&db, &row.id, &["codex".into()]).unwrap();
+        stage(&mut changed.targets[0]).unwrap();
+        let plan = changed.targets[0].directory.clone().unwrap();
+        fs::write(
+            Path::new(&plan.stage_path).join("SKILL.md"),
+            "User-edited stage",
+        )
+        .unwrap();
+        assert!(io::cancel_operation(&db, &changed.id).is_err());
+        assert_eq!(
+            fs::read_to_string(Path::new(&plan.stage_path).join("SKILL.md")).unwrap(),
+            "User-edited stage"
+        );
+        let mut backup = preview(&db, &row.id, &["codex".into()]).unwrap();
+        stage(&mut backup.targets[0]).unwrap();
+        let plan = backup.targets[0].directory.clone().unwrap();
+        fs::create_dir(&plan.backup_path).unwrap();
+        fs::write(
+            Path::new(&plan.backup_path).join("untouched"),
+            "Previous data",
+        )
+        .unwrap();
+        assert!(io::cancel_operation(&db, &backup.id).is_err());
+        assert!(Path::new(&plan.stage_path).exists());
+        assert_eq!(
+            fs::read_to_string(Path::new(&plan.backup_path).join("untouched")).unwrap(),
+            "Previous data"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn a_receipt_stops_proving_ownership_when_its_parent_alias_moves() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let row = draft(&db, "Old");
+        let roots = tempfile::tempdir().unwrap();
+        let real = roots.path().join("real");
+        let other = roots.path().join("other");
+        let alias = roots.path().join("alias");
+        fs::create_dir(&real).unwrap();
+        fs::create_dir(&other).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let op = preview_at(&db, &row.id, &[("codex".into(), alias.clone())], None).unwrap();
+        io::apply_operation(&db, &op.id).unwrap();
+        let receipt = db
+            .library_snapshot()
+            .unwrap()
+            .machine
+            .receipts
+            .into_values()
+            .next()
+            .unwrap();
+        assert!(receipt_intact(&receipt));
+        std::os::unix::fs::symlink(
+            artifacts::path(row.content_hash.as_deref().unwrap()).unwrap(),
+            other.join("fixture"),
+        )
+        .unwrap();
+        fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(other, &alias).unwrap();
+        assert!(!receipt_intact(&receipt));
+    }
 
     #[test]
     #[serial_test::serial]
@@ -1313,6 +1480,15 @@ mod tests {
         let roots = tempfile::tempdir().unwrap();
         let native = roots.path().join("native");
         let first = preview_at(&db, &old.id, &[("codex".into(), native.clone())], None).unwrap();
+        assert_eq!(
+            super::super::operation_view(&first)["targets"][0]["method"],
+            "copy"
+        );
+        let applied = io::apply_operation(&db, &first.id).unwrap();
+        assert_eq!(
+            super::super::operation_view(&applied)["targets"][0]["method"],
+            "copy"
+        );
         assert_eq!(
             io::apply_operation(&db, &first.id).unwrap().status,
             "applied"

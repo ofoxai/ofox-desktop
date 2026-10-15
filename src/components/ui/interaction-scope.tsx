@@ -10,8 +10,11 @@ export function InteractionScope({
   active: boolean;
   children: ReactNode;
 }) {
+  const parentActive = useContext(ActiveContext);
   return (
-    <ActiveContext.Provider value={active}>{children}</ActiveContext.Provider>
+    <ActiveContext.Provider value={parentActive && active}>
+      {children}
+    </ActiveContext.Provider>
   );
 }
 

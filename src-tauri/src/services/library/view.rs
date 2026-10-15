@@ -49,6 +49,11 @@ pub fn operation_view(operation: &Operation) -> serde_json::Value {
             "targetGroupId":target.physical_target,
             "status":target.status,
             "reason":target.reason,
+            "method":target.transfer.as_ref().map(|summary|summary.method.as_str()).or_else(||target.directory.as_ref().map(|plan|plan.method.as_str())),
+            "plannedMethod":target.transfer.as_ref().and_then(|summary|summary.planned_method.as_deref()),
+            "artifactHash":target.transfer.as_ref().map(|summary|summary.artifact_hash.as_str()).or_else(||target.directory.as_ref().map(|plan|plan.artifact_hash.as_str())),
+            "fallbackCopy":target.transfer.as_ref().map(|summary|summary.fallback_copy).or_else(||target.directory.as_ref().map(|plan|plan.fallback_copy)),
+            "fallbackUsed":target.transfer.as_ref().and_then(|summary|summary.planned_method.as_ref().map(|method|method=="symlink"&&summary.method=="copy")),
             "beforeManaged":target.previous_receipt.as_ref().filter(|receipt|receipt.kind==super::ResourceKind::Instructions).map(|receipt| &receipt.owned_segment),
             "afterManaged":target.receipt.as_ref().filter(|receipt|receipt.kind==super::ResourceKind::Instructions).map(|receipt| &receipt.owned_segment),
             "changedFields": if operation.kind==super::ResourceKind::Mcp {

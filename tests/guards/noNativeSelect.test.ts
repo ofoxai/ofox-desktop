@@ -58,6 +58,7 @@ it("main-window choices use shared checkbox and radio controls", () => {
     "tray",
     "onboarding",
     "model-profiles",
+    "library",
     "ui",
   ];
   const offenders = scopes

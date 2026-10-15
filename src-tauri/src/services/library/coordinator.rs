@@ -83,6 +83,33 @@ pub fn save_instruction(
     Ok(set)
 }
 
+/// Stop an obsolete journal without reverting or modifying native content.
+/// Recovery material must be inspected before an operation can be discarded.
+pub fn cancel_operation(db: &Database, id: &str) -> Result<Operation, AppError> {
+    let _io = crate::config_io::lock();
+    let before = db.library_snapshot()?;
+    let mut op = before
+        .machine
+        .operations
+        .get(id)
+        .cloned()
+        .ok_or_else(|| error("operationMissing"))?;
+    for target in &mut op.targets {
+        if target.directory.is_some() {
+            super::skill_resource::discard_staged(target)?;
+        }
+        if target.status != "applied" {
+            target.status = "needsReview".into();
+            target.reason = Some("library.operationCancelled".into());
+        }
+    }
+    op.status = "cancelled".into();
+    let mut next = before.clone();
+    next.machine.operations.insert(op.id.clone(), op.clone());
+    db.library_commit(&before, &next)?;
+    Ok(op)
+}
+
 pub(crate) fn native_instruction_paths() -> Result<BTreeMap<String, PathBuf>, AppError> {
     use std::str::FromStr;
     ["claude", "codex", "gemini", "opencode", "hermes"]
@@ -249,6 +276,7 @@ fn preview_internal(
         let current = read(&group.path);
         let mut write = TargetWrite {
             directory: None,
+            transfer: None,
             tools: owners.clone(),
             readers: owners
                 .iter()
@@ -451,7 +479,11 @@ fn compact_finished(op: &mut Operation) {
 }
 
 pub(crate) fn prune_history(snapshot: &mut LibrarySnapshot, keep_id: &str) {
-    for (status, limit) in [("previewed", 8usize), ("applied", 20usize)] {
+    for (status, limit) in [
+        ("previewed", 8usize),
+        ("applied", 20usize),
+        ("cancelled", 20usize),
+    ] {
         let mut candidates: Vec<_> = snapshot
             .machine
             .operations
@@ -565,6 +597,9 @@ pub fn apply_operation(db: &Database, id: &str) -> Result<Operation, AppError> {
         .cloned()
         .ok_or_else(|| error("operationMissing"))?;
     confirm_version(db, &snapshot, &op)?;
+    if op.status == "cancelled" {
+        return Err(error("operationCancelled"));
+    }
     if op.status == "applied" {
         return Ok(op);
     }
@@ -723,7 +758,7 @@ pub fn recover_operation(db: &Database, id: &str) -> Result<Operation, AppError>
         .get(id)
         .cloned()
         .ok_or_else(|| error("operationMissing"))?;
-    if op.status == "previewed" || op.status == "applied" {
+    if op.status == "previewed" || op.status == "applied" || op.status == "cancelled" {
         return Ok(op);
     }
     let current_version =

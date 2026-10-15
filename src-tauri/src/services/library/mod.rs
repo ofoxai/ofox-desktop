@@ -1,4 +1,5 @@
 //! Local resource ownership. Definitions and machine execution state are distinct.
+pub(crate) mod catalog;
 pub(crate) mod coordinator;
 mod instructions;
 pub(crate) mod mcp_codec;
@@ -6,6 +7,7 @@ pub(crate) mod mcp_resource;
 pub(crate) mod native_json;
 pub(crate) mod skill_artifact;
 pub(crate) mod skill_resource;
+pub(crate) mod skill_view;
 mod store;
 mod view;
 pub(crate) mod yaml_paths;
@@ -98,6 +100,8 @@ pub struct SourceFingerprint {
 pub struct TargetWrite {
     #[serde(default)]
     pub directory: Option<skill_resource::DirectoryPlan>,
+    #[serde(default)]
+    pub transfer: Option<SkillTransfer>,
     pub tools: Vec<String>,
     pub readers: Vec<String>,
     pub path: String,
@@ -113,6 +117,15 @@ pub struct TargetWrite {
     pub receipt: Option<Receipt>,
     pub status: String,
     pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SkillTransfer {
+    pub artifact_hash: String,
+    pub planned_method: Option<String>,
+    pub method: String,
+    pub fallback_copy: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

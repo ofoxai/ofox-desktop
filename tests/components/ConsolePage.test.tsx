@@ -309,12 +309,13 @@ describe("Console title bar", () => {
 });
 
 describe("Console navigation", () => {
-  it("offers 工具, 会话 and 用量, and no 模型方案 tab", async () => {
+  it("offers 工具, 会话, 资源库 and 用量, and no 模型方案 tab", async () => {
     render(<ConsolePage boundTools={[]} />);
     await screen.findByText("Test User");
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
       "工具",
       "会话",
+      "资源库",
       "用量",
     ]);
   });

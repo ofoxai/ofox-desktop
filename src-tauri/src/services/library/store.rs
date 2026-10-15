@@ -186,7 +186,7 @@ fn validate(snapshot: &LibrarySnapshot) -> Result<(), AppError> {
                 super::skill_resource::validate_target(target, operation)?;
                 continue;
             }
-            if target.directory.is_some() {
+            if target.directory.is_some() || target.transfer.is_some() {
                 return Err(unreadable());
             }
             if !target.after_hash.is_empty() {
