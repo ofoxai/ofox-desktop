@@ -52,6 +52,9 @@ pub(crate) mod usage_health;
 pub mod usage_lifetime;
 pub mod usage_maintenance;
 pub mod usage_overview;
+#[cfg(test)]
+mod usage_project_tests;
+pub(crate) mod usage_projects;
 pub mod usage_query;
 pub mod usage_requests;
 pub mod usage_source;

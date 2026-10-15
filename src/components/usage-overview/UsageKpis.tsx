@@ -3,11 +3,22 @@ import { KpiStrip } from "@/components/ui/kpi-strip";
 import type { UsageTotals } from "@/lib/api/usageOverview";
 import { fmtTokens, fmtCost } from "@/lib/format";
 import { formatUsageEstimate } from "@/lib/usageEstimate";
-export function UsageKpis({ totals: v }: { totals: UsageTotals }) {
+import type { UsageAttribution } from "@/types/usageQuery";
+export function UsageKpis({
+  totals: v,
+  attribution,
+}: {
+  totals: UsageTotals;
+  attribution?: UsageAttribution;
+}) {
   const { t } = useTranslation();
   return (
     <KpiStrip
-      className="!grid-cols-2 sm:!grid-cols-4"
+      className={
+        attribution
+          ? "!grid-cols-2 sm:!grid-cols-3"
+          : "!grid-cols-2 sm:!grid-cols-4"
+      }
       items={[
         {
           label: "Tokens",
@@ -38,6 +49,24 @@ export function UsageKpis({ totals: v }: { totals: UsageTotals }) {
           sub: t("usagePage.estimate"),
         },
         { label: t("usageWorkbench.records"), value: fmtTokens(v.requests) },
+        ...(attribution
+          ? [
+              {
+                label: t("usageWorkbench.identifiedSessions"),
+                value: fmtTokens(attribution.sessionCount),
+                sub: attribution.partial
+                  ? t("usageWorkbench.attributionPartial")
+                  : undefined,
+              },
+              {
+                label: t("usageWorkbench.identifiedProjects"),
+                value: fmtTokens(attribution.projectCount),
+                sub: attribution.partial
+                  ? t("usageWorkbench.attributionPartial")
+                  : undefined,
+              },
+            ]
+          : []),
       ]}
     />
   );

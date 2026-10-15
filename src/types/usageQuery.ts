@@ -86,6 +86,14 @@ export interface UsageFilterOptions {
   toolIds: string[];
   modelIds: string[];
   sourceIds: string[];
+  projects?: { id: string; label: string; path: string | null }[];
+}
+
+export interface UsageAttribution {
+  sessionCount: number;
+  projectCount: number;
+  unassociatedRecords: number;
+  partial: boolean;
 }
 
 export interface UsageRequestFilters {

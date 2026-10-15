@@ -13,6 +13,7 @@ import { sessionAnalyticsFixture } from "./sessionAnalyticsFixture";
 const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   supported: true,
+  sharedProjects: false,
   apex: "ofox.io",
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
@@ -39,6 +40,7 @@ beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();
   localStorage.clear();
   mocks.supported = true;
+  mocks.sharedProjects = false;
   mocks.apex = "ofox.io";
   i18n.addResourceBundle("zh", "translation", zh, true, true);
   mocks.invoke
@@ -49,7 +51,7 @@ beforeEach(() => {
           queryVersion: 1,
           requestSnapshots: true,
           csv: true,
-          projectFilter: false,
+          projectFilter: mocks.sharedProjects,
           sessionAnalytics: mocks.supported,
           sessionProjectFilter: mocks.supported,
           localRefresh: true,
@@ -70,14 +72,98 @@ beforeEach(() => {
           series: [],
           byTool: [],
           byModel: [],
+          byProject: mocks.sharedProjects ? fixture.byProject : undefined,
+          attribution: mocks.sharedProjects
+            ? {
+                sessionCount: 3,
+                projectCount: 1,
+                unassociatedRecords: 1,
+                partial: true,
+              }
+            : undefined,
           unsupportedTools: [],
           lastSyncedAt: null,
+        };
+      }
+      if (command === "get_request_logs") {
+        const fixture = sessionAnalyticsFixture();
+        return {
+          ...fixture,
+          appliedQuery: args.query,
+          requestFilters: args.requestFilters,
+          snapshotId: "project-snapshot",
+          data: [],
+          total: 0,
+          page: args.page,
+          pageSize: args.pageSize,
         };
       }
       if (command === "sync_session_usage" || command === "refresh_local_usage")
         return {};
       throw new Error(command);
     });
+});
+it("shares a supported project condition across analysis, overview and requests until reset", async () => {
+  mocks.sharedProjects = true;
+  localStorage.setItem("ofox.usageTab", "sessions");
+  render(<Page />);
+  const projectMenu = await screen.findByRole("combobox", { name: "项目筛选" });
+  await userEvent.click(projectMenu);
+  await userEvent.click(screen.getByRole("option", { name: "project" }));
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("get_session_usage_analytics", {
+      query: expect.objectContaining({ projectIds: ["/fixture/project"] }),
+    }),
+  );
+  await userEvent.click(screen.getByRole("tab", { name: "概览" }));
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "get_usage_overview",
+      expect.objectContaining({
+        query: expect.objectContaining({ projectIds: ["/fixture/project"] }),
+      }),
+    ),
+  );
+  expect(screen.queryByText(/切换后已清除/)).toBeNull();
+  await userEvent.click(screen.getByRole("tab", { name: "请求" }));
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "get_request_logs",
+      expect.objectContaining({
+        query: expect.objectContaining({ projectIds: ["/fixture/project"] }),
+      }),
+    ),
+  );
+  await userEvent.click(screen.getAllByRole("button", { name: "重置条件" })[0]);
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "get_request_logs",
+      expect.objectContaining({
+        query: expect.objectContaining({ projectIds: [] }),
+      }),
+    ),
+  );
+});
+it("offers shared project filters on first overview visit and keeps unknown statistics explicit", async () => {
+  mocks.sharedProjects = true;
+  render(<Page />);
+  expect(
+    await screen.findByRole("combobox", { name: "项目筛选" }),
+  ).toBeVisible();
+  expect(await screen.findByText("已识别会话数")).toBeVisible();
+  expect(screen.getByText("已识别项目数")).toBeVisible();
+  expect(screen.getByText(/1 条采集记录无法关联会话/)).toBeVisible();
+  const rank = screen.getByRole("button", { name: "project" });
+  await userEvent.click(rank);
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "get_usage_overview",
+      expect.objectContaining({
+        query: expect.objectContaining({ projectIds: ["/fixture/project"] }),
+      }),
+    ),
+  );
 });
 it("keeps the analysis entry unavailable until the backend explicitly advertises it", async () => {
   mocks.supported = false;

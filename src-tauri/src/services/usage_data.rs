@@ -1,6 +1,7 @@
 //! One read transaction supplies every block of a versioned analytics response.
 use super::{
     ofox_pricing::{parse_amount, PriceCatalog},
+    usage_projects::{ProjectIndex, ProjectOption},
     usage_query::{Coverage, SourceHealth, UsageQueryV1},
     usage_stats::RequestLogDetail,
 };
@@ -89,6 +90,8 @@ pub struct FilterOptions {
     pub tool_ids: Vec<String>,
     pub model_ids: Vec<String>,
     pub source_ids: Vec<String>,
+    #[serde(default)]
+    pub projects: Vec<ProjectOption>,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +104,8 @@ pub struct Atom {
     pub requests: u64,
     pub saved_cost: Decimal,
     pub archived: bool,
+    pub session_key: Option<String>,
+    pub project_id: Option<String>,
 }
 
 pub struct Dataset {
@@ -124,10 +129,11 @@ fn checked_u64(value: i64) -> rusqlite::Result<u64> {
 fn checked_u32(value: i64) -> rusqlite::Result<u32> {
     u32::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, value))
 }
-pub(crate) fn read_records(
-    conn: &Connection,
-    query: &UsageQueryV1,
-) -> Result<Vec<RequestLogDetail>, AppError> {
+struct Record {
+    row: RequestLogDetail,
+    native_sid: Option<String>,
+}
+fn read_records(conn: &Connection, query: &UsageQueryV1) -> Result<Vec<Record>, AppError> {
     let mut predicates = vec!["l.created_at < ?".to_owned()];
     let mut values = vec![SqlValue::Integer(ceil_seconds(query.end_ms)?)];
     if let Some(start) = query.start_ms {
@@ -147,48 +153,51 @@ pub(crate) fn read_records(
     let sql=format!("SELECT l.request_id,l.provider_id,p.name,l.app_type,l.model,l.request_model,l.cost_multiplier,
         l.input_tokens,l.output_tokens,l.cache_read_tokens,l.cache_creation_tokens,
         l.input_cost_usd,l.output_cost_usd,l.cache_read_cost_usd,l.cache_creation_cost_usd,l.total_cost_usd,
-        l.is_streaming,l.latency_ms,l.first_token_ms,l.duration_ms,l.status_code,l.error_message,l.created_at,l.data_source
+        l.is_streaming,l.latency_ms,l.first_token_ms,l.duration_ms,l.status_code,l.error_message,l.created_at,l.data_source,l.session_id
         FROM proxy_request_logs l LEFT JOIN providers p ON p.id=l.provider_id AND p.app_type=l.app_type
         WHERE {} ORDER BY l.created_at DESC,l.request_id DESC LIMIT {}",predicates.join(" AND "),MAX_ROWS+1);
     let mut statement = conn.prepare(&sql)?;
     let rows = statement.query_map(params_from_iter(values), |row| {
         let status = row.get::<_, i64>(20)?;
-        Ok(RequestLogDetail {
-            request_id: row.get(0)?,
-            provider_id: row.get(1)?,
-            provider_name: row.get(2)?,
-            app_type: row.get(3)?,
-            model: row.get(4)?,
-            request_model: row.get(5)?,
-            cost_multiplier: row
-                .get::<_, Option<String>>(6)?
-                .unwrap_or_else(|| "1".into()),
-            input_tokens: checked_u32(row.get(7)?)?,
-            output_tokens: checked_u32(row.get(8)?)?,
-            cache_read_tokens: checked_u32(row.get(9)?)?,
-            cache_creation_tokens: checked_u32(row.get(10)?)?,
-            input_cost_usd: row.get(11)?,
-            output_cost_usd: row.get(12)?,
-            cache_read_cost_usd: row.get(13)?,
-            cache_creation_cost_usd: row.get(14)?,
-            total_cost_usd: row.get(15)?,
-            is_streaming: row.get::<_, i64>(16)? != 0,
-            latency_ms: checked_u64(row.get(17)?)?,
-            first_token_ms: row
-                .get::<_, Option<i64>>(18)?
-                .map(checked_u64)
-                .transpose()?,
-            duration_ms: row
-                .get::<_, Option<i64>>(19)?
-                .map(checked_u64)
-                .transpose()?,
-            status_code: u16::try_from(status)
-                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(20, status))?,
-            error_message: row
-                .get::<_, Option<String>>(21)?
-                .map(crate::redact::scrub_error),
-            created_at: row.get(22)?,
-            data_source: row.get(23)?,
+        Ok(Record {
+            row: RequestLogDetail {
+                request_id: row.get(0)?,
+                provider_id: row.get(1)?,
+                provider_name: row.get(2)?,
+                app_type: row.get(3)?,
+                model: row.get(4)?,
+                request_model: row.get(5)?,
+                cost_multiplier: row
+                    .get::<_, Option<String>>(6)?
+                    .unwrap_or_else(|| "1".into()),
+                input_tokens: checked_u32(row.get(7)?)?,
+                output_tokens: checked_u32(row.get(8)?)?,
+                cache_read_tokens: checked_u32(row.get(9)?)?,
+                cache_creation_tokens: checked_u32(row.get(10)?)?,
+                input_cost_usd: row.get(11)?,
+                output_cost_usd: row.get(12)?,
+                cache_read_cost_usd: row.get(13)?,
+                cache_creation_cost_usd: row.get(14)?,
+                total_cost_usd: row.get(15)?,
+                is_streaming: row.get::<_, i64>(16)? != 0,
+                latency_ms: checked_u64(row.get(17)?)?,
+                first_token_ms: row
+                    .get::<_, Option<i64>>(18)?
+                    .map(checked_u64)
+                    .transpose()?,
+                duration_ms: row
+                    .get::<_, Option<i64>>(19)?
+                    .map(checked_u64)
+                    .transpose()?,
+                status_code: u16::try_from(status)
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(20, status))?,
+                error_message: row
+                    .get::<_, Option<String>>(21)?
+                    .map(crate::redact::scrub_error),
+                created_at: row.get(22)?,
+                data_source: row.get(23)?,
+            },
+            native_sid: row.get(24)?,
         })
     })?;
     let mut result = Vec::new();
@@ -196,7 +205,7 @@ pub(crate) fn read_records(
     for row in rows {
         let row = row?;
         bytes = bytes.saturating_add(
-            serde_json::to_vec(&row)
+            serde_json::to_vec(&row.row)
                 .map_err(|_| AppError::Database("usage.requests.serialize".into()))?
                 .len(),
         );
@@ -234,11 +243,6 @@ pub fn read_dataset<Tz: TimeZone>(
     tz: &Tz,
 ) -> Result<Dataset, AppError> {
     let query = query.normalized()?;
-    if !query.project_ids.is_empty() {
-        return Err(AppError::InvalidInput(
-            "usage.query.projectsUnsupported".into(),
-        ));
-    }
     if chrono::DateTime::from_timestamp_millis(query.end_ms).is_none()
         || query
             .start_ms
@@ -249,14 +253,46 @@ pub fn read_dataset<Tz: TimeZone>(
     let mut conn = crate::database::lock_conn!(db.conn);
     let tx = conn.transaction()?;
     let catalog = PriceCatalog::load_on(&tx, apex, now_ms)?;
-    let options = options_on(&tx)?;
+    let mut options = options_on(&tx)?;
+    let projects = ProjectIndex::read_on(&tx)?;
+    options.projects = projects.options.clone();
     let mut records = read_records(&tx, &query)?;
     if let Some(filters) = request_filters {
-        records.retain(|row| filters.matches(row));
+        records.retain(|row| filters.matches(&row.row));
+    }
+    let project_incomplete = records.iter().any(|record| {
+        projects
+            .associate(
+                &record.row.app_type,
+                &record.row.provider_id,
+                record.row.data_source.as_deref(),
+                record.native_sid.as_deref(),
+            )
+            .is_none_or(|a| a.project_id.is_none())
+    });
+    if !query.project_ids.is_empty() {
+        records.retain(|record| {
+            projects
+                .associate(
+                    &record.row.app_type,
+                    &record.row.provider_id,
+                    record.row.data_source.as_deref(),
+                    record.native_sid.as_deref(),
+                )
+                .and_then(|a| a.project_id.as_ref())
+                .is_some_and(|id| query.project_ids.contains(id))
+        });
     }
     let mut atoms = records
         .iter()
-        .map(|row| {
+        .map(|record| {
+            let row = &record.row;
+            let association = projects.associate(
+                &row.app_type,
+                &row.provider_id,
+                row.data_source.as_deref(),
+                record.native_sid.as_deref(),
+            );
             Ok(Atom {
                 tool: row.app_type.clone(),
                 model: row.model.clone(),
@@ -274,12 +310,18 @@ pub fn read_dataset<Tz: TimeZone>(
                 requests: 1,
                 saved_cost: parse_amount(&row.total_cost_usd)?,
                 archived: false,
+                session_key: association.map(|a| a.session_key.clone()),
+                project_id: association.and_then(|a| a.project_id.clone()),
             })
         })
         .collect::<Result<Vec<_>, AppError>>()?;
     let mut coverage = Coverage {
         state: "complete".into(),
-        reasons: vec![],
+        reasons: if project_incomplete {
+            vec!["projectAttributionIncomplete".into()]
+        } else {
+            vec![]
+        },
         time_basis: "eventTime".into(),
         detail_start_ms: atoms.iter().map(|a| a.at_ms).min(),
         detail_end_ms: atoms.iter().map(|a| a.at_ms).max(),
@@ -287,7 +329,7 @@ pub fn read_dataset<Tz: TimeZone>(
         excluded_rollup_days: 0,
         source_ids: records
             .iter()
-            .filter_map(|r| r.data_source.clone())
+            .filter_map(|r| r.row.data_source.clone())
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect(),
@@ -333,6 +375,11 @@ pub fn read_dataset<Tz: TimeZone>(
             "mixed"
         }
         .into();
+        if !query.project_ids.is_empty() {
+            coverage.excluded_rollup_days += 1;
+            coverage.reasons.push("legacyProjectUnavailable".into());
+            continue;
+        }
         if request_filters.is_some() {
             coverage.reasons.push("historicalDetailUnavailable".into());
             continue;
@@ -357,6 +404,8 @@ pub fn read_dataset<Tz: TimeZone>(
             requests,
             saved_cost: parse_amount(&cost)?,
             archived: true,
+            session_key: None,
+            project_id: None,
         });
     }
     drop(statement);
@@ -430,6 +479,8 @@ pub fn read_dataset<Tz: TimeZone>(
         .into();
     }
     let mut hash = Sha256::new();
+    hash.update(projects.snapshot_version);
+    let records: Vec<_> = records.into_iter().map(|r| r.row).collect();
     hash.update(
         serde_json::to_vec(&query)
             .map_err(|_| AppError::Database("usage.query.serialize".into()))?,
@@ -441,14 +492,16 @@ pub fn read_dataset<Tz: TimeZone>(
     for atom in &atoms {
         hash.update(atom.source.as_deref().unwrap_or("legacy-rollup").as_bytes());
         hash.update(format!(
-            "{}\0{}\0{}\0{:?}\0{}\0{}\0{}",
+            "{}\0{}\0{}\0{:?}\0{}\0{}\0{}\0{:?}\0{:?}",
             atom.tool,
             atom.model,
             atom.at_ms,
             atom.tokens,
             atom.requests,
             atom.saved_cost,
-            atom.archived
+            atom.archived,
+            atom.session_key,
+            atom.project_id
         ));
     }
     hash.update(

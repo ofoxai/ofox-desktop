@@ -156,11 +156,6 @@ pub fn request_page(
         .and_then(|n| usize::try_from(n).ok())
         .ok_or_else(|| invalid("invalidPage"))?;
     let query = query.normalized()?;
-    if !query.project_ids.is_empty() {
-        return Err(AppError::InvalidInput(
-            "usage.query.projectsUnsupported".into(),
-        ));
-    }
     let filters = filters.normalized()?;
     let query_fingerprint = fingerprint(&query, &filters)?;
     let (id, snapshot) = if let Some(id) = snapshot_id {

@@ -12,9 +12,9 @@ use crate::{database::Database, error::AppError};
 use chrono::{Datelike, TimeZone};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverviewAnalytics {
     #[serde(flatten)]
@@ -23,6 +23,26 @@ pub struct OverviewAnalytics {
     pub pricing_coverage: PricingCoverage,
     pub options: FilterOptions,
     pub sources: Vec<SourceHealth>,
+    pub by_project: Vec<ProjectUsage>,
+    pub attribution: Attribution,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Attribution {
+    pub session_count: u64,
+    pub project_count: u64,
+    pub unassociated_records: u64,
+    pub partial: bool,
+}
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectUsage {
+    pub id: String,
+    pub label: String,
+    pub path: Option<String>,
+    #[serde(flatten)]
+    pub totals: UsageTotals,
 }
 
 #[derive(Default)]
@@ -161,8 +181,28 @@ pub fn build_query_overview<Tz: TimeZone>(
     }
     let mut total = Sum::default();
     let mut tools: BTreeMap<String, Sum> = BTreeMap::new();
+    let mut projects: BTreeMap<String, Sum> = BTreeMap::new();
+    let mut session_keys = BTreeSet::new();
+    let mut unassociated_records: u64 = 0;
+    let mut attribution_partial = false;
     let mut models: BTreeMap<String, (Sum, BTreeMap<String, u64>)> = BTreeMap::new();
     for atom in &data.atoms {
+        if let Some(key) = &atom.session_key {
+            session_keys.insert(key);
+        } else {
+            unassociated_records = unassociated_records
+                .checked_add(atom.requests)
+                .ok_or_else(overflow)?;
+            attribution_partial = true;
+        }
+        if let Some(id) = &atom.project_id {
+            projects
+                .entry(id.clone())
+                .or_default()
+                .add(atom, &data.catalog)?;
+        } else {
+            attribution_partial = true;
+        }
         total.add(atom, &data.catalog)?;
         tools
             .entry(atom.tool.clone())
@@ -181,6 +221,41 @@ pub fn build_query_overview<Tz: TimeZone>(
             .add(atom, &data.catalog)?;
     }
     let totals = total.totals()?;
+    let attribution = Attribution {
+        session_count: session_keys.len() as u64,
+        project_count: projects
+            .keys()
+            .filter(|id| id.as_str() != super::session_analytics_core::UNKNOWN_PROJECT_ID)
+            .count() as u64,
+        unassociated_records,
+        partial: attribution_partial,
+    };
+    let labels: BTreeMap<_, _> = data
+        .options
+        .projects
+        .iter()
+        .map(|p| (p.id.as_str(), p))
+        .collect();
+    let mut by_project = projects
+        .into_iter()
+        .map(|(id, sum)| {
+            let option = labels.get(id.as_str());
+            Ok(ProjectUsage {
+                label: option
+                    .map(|p| p.label.clone())
+                    .unwrap_or_else(|| id.clone()),
+                path: option.and_then(|p| p.path.clone()),
+                id,
+                totals: sum.totals()?,
+            })
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
+    by_project.sort_by(|a, b| {
+        b.totals
+            .total_tokens
+            .cmp(&a.totals.total_tokens)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     let mut by_tool = tools
         .into_iter()
         .map(|(app_type, sum)| {
@@ -247,6 +322,8 @@ pub fn build_query_overview<Tz: TimeZone>(
             .coverage_for(totals.estimate.as_ref().ok_or_else(overflow)?),
         options: data.options,
         sources: data.sources,
+        by_project,
+        attribution,
     };
     Ok(UsageOverview {
         period,

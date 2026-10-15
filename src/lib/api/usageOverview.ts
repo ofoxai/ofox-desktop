@@ -7,6 +7,8 @@ import type {
   UsageQueryV1,
   UsageReceipt,
   UsageSourceHealth,
+  UsageFilterOptions,
+  UsageAttribution,
 } from "@/types/usageQuery";
 import type { SessionAnalytics } from "@/types/sessionAnalytics";
 import { assertUsageReceipt } from "@/lib/usageWorkbench";
@@ -69,6 +71,12 @@ export interface ModelUsage extends UsageTotals {
   priced: boolean;
 }
 
+export interface ProjectUsage extends UsageTotals {
+  id: string;
+  label: string;
+  path: string | null;
+}
+
 export interface UsageOverview extends Partial<UsageReceipt> {
   period: UsagePeriod;
   /** `null` for `all`. */
@@ -86,8 +94,10 @@ export interface UsageOverview extends Partial<UsageReceipt> {
   lastSyncedAt: number | null;
   /** Bound tools whose usage is not read yet (e.g. openclaw, hermes, pi, dsh). */
   unsupportedTools: string[];
-  options?: { toolIds: string[]; modelIds: string[]; sourceIds: string[] };
+  options?: UsageFilterOptions;
   sources?: UsageSourceHealth[];
+  byProject?: ProjectUsage[];
+  attribution?: UsageAttribution;
 }
 
 /** One reading of the OFox balance: `amount` USD was left at `at`. */

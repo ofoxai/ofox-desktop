@@ -1,4 +1,5 @@
 //! Read-only session/project analysis over one cached, body-free snapshot.
+pub use super::usage_projects::ProjectOption;
 use super::{
     ofox_pricing::{CostEstimate, PriceCatalog, PricingCoverage},
     session_analytics_core::{DayBoundary, MessageEvent, SessionIdentity, UsageFact},
@@ -124,21 +125,7 @@ pub struct AnalyticsSession {
     pub reasons: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectOption {
-    pub id: String,
-    pub label: String,
-    pub path: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionOptions {
-    #[serde(flatten)]
-    pub filters: FilterOptions,
-    pub projects: Vec<ProjectOption>,
-}
+pub type SessionOptions = FilterOptions;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -724,8 +711,8 @@ pub fn build_analysis(
         top_sessions,
         top_limit: TOP_LIMIT as u32,
         options: SessionOptions {
-            filters: options,
             projects: projects.into_values().collect(),
+            ..options
         },
         unassociated: UnassociatedUsage {
             records: unassociated.records,

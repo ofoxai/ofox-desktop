@@ -36,6 +36,7 @@ import {
   usageProjectLabel,
 } from "@/lib/usageProject";
 import type { SessionAnalytics } from "@/types/sessionAnalytics";
+import type { UsageFilterOptions } from "@/types/usageQuery";
 import { UsageHeader } from "./UsageHeader";
 import { BalanceTrendCard } from "./BalanceTrendCard";
 import { UsageKpis } from "./UsageKpis";
@@ -98,6 +99,15 @@ export function UsagePage({
   const analysisSupported = modern && !!capabilities.data?.sessionAnalytics;
   const analysisProjectSupported =
     analysisSupported && !!capabilities.data?.sessionProjectFilter;
+  const sharedProjectSupported = modern && !!capabilities.data?.projectFilter;
+  const selectedProjects = sharedProjectSupported
+    ? (filters.projectIds ?? EMPTY)
+    : analysisProjects;
+  const chooseProjects = (projectIds: string[]) => {
+    if (sharedProjectSupported) setFilters((old) => ({ ...old, projectIds }));
+    else setAnalysisProjects(projectIds);
+    setProjectsCleared(false);
+  };
   const effectiveTab =
     ((tab === "requests" && !requestSupported) ||
       (tab === "sessions" && !analysisSupported)) &&
@@ -105,8 +115,8 @@ export function UsagePage({
       ? "overview"
       : tab;
   const analysisQuery = useMemo(
-    () => ({ ...query, projectIds: analysisProjects }),
-    [query, analysisProjects],
+    () => ({ ...query, projectIds: selectedProjects }),
+    [query, selectedProjects],
   );
   const analysis = useQuery(
     {
@@ -129,7 +139,7 @@ export function UsagePage({
     )
       setRange({ period: "30d" });
   }, [capabilities.isFetched, modern, range.period]);
-  const [options, setOptions] = useState({
+  const [options, setOptions] = useState<UsageFilterOptions>({
     toolIds: EMPTY,
     modelIds: EMPTY,
     sourceIds: EMPTY,
@@ -302,7 +312,9 @@ export function UsagePage({
   const modelIds = [
     ...new Set([...options.modelIds, ...(filters.modelIds ?? [])]),
   ];
-  const projects = analysis.data?.options.projects ?? [];
+  const projects = sharedProjectSupported
+    ? (options.projects ?? [])
+    : (analysis.data?.options.projects ?? []);
   const projectLabels = new Map<string, number>();
   for (const project of projects)
     projectLabels.set(
@@ -334,7 +346,7 @@ export function UsagePage({
           : (project.path ?? label),
     };
   });
-  for (const id of analysisProjects)
+  for (const id of selectedProjects)
     if (!projectOptions.some((option) => option.value === id)) {
       const label = usageProjectLabel(id, null, null, projectNames);
       projectOptions.push({ value: id, label, title: label });
@@ -347,7 +359,11 @@ export function UsagePage({
           aria-label={t("usageWorkbench.tabs")}
           value={effectiveTab}
           onChange={(value) => {
-            if (value !== "sessions" && analysisProjects.length) {
+            if (
+              !sharedProjectSupported &&
+              value !== "sessions" &&
+              analysisProjects.length
+            ) {
               setAnalysisProjects([]);
               setProjectsCleared(true);
             }
@@ -477,16 +493,18 @@ export function UsagePage({
           onChange={(modelIds) => setFilters((old) => ({ ...old, modelIds }))}
           disabled={!modern}
         />
-        {effectiveTab === "sessions" && analysisProjectSupported ? (
+        {sharedProjectSupported ||
+        (effectiveTab === "sessions" && analysisProjectSupported) ? (
           <UsageFilterMenu
-            label={t("usageSessions.projectFilter")}
+            label={t(
+              sharedProjectSupported
+                ? "usageWorkbench.projectsFilter"
+                : "usageSessions.projectFilter",
+            )}
             pageSize={50}
             options={projectOptions}
-            selected={analysisProjects}
-            onChange={(ids) => {
-              setAnalysisProjects(ids);
-              setProjectsCleared(false);
-            }}
+            selected={selectedProjects}
+            onChange={chooseProjects}
           />
         ) : (
           <span
@@ -499,7 +517,7 @@ export function UsagePage({
         {!!(
           (filters.toolIds?.length ?? 0) +
           (filters.modelIds?.length ?? 0) +
-          analysisProjects.length
+          selectedProjects.length
         ) && (
           <Button
             variant="ghost"
@@ -512,11 +530,13 @@ export function UsagePage({
           </Button>
         )}
       </div>
-      {effectiveTab === "sessions" && analysisProjectSupported && (
-        <p className="text-note text-ink-muted">
-          {t("usageSessions.projectScope")}
-        </p>
-      )}
+      {!sharedProjectSupported &&
+        effectiveTab === "sessions" &&
+        analysisProjectSupported && (
+          <p className="text-note text-ink-muted">
+            {t("usageSessions.projectScope")}
+          </p>
+        )}
       {projectsCleared && effectiveTab !== "sessions" && (
         <p role="status" className="text-note text-ink-muted">
           {t("usageSessions.projectsCleared")}
@@ -601,7 +621,14 @@ export function UsagePage({
           </div>
         ) : (
           <>
-            <UsageKpis totals={data.totals} />
+            <UsageKpis totals={data.totals} attribution={data.attribution} />
+            {!!data.attribution?.unassociatedRecords && (
+              <p className="text-note text-ink-muted">
+                {t("usageWorkbench.unassociatedRecords", {
+                  count: data.attribution.unassociatedRecords,
+                })}
+              </p>
+            )}
             <UsageBars overview={data} />
             <div className="grid gap-3 md:grid-cols-2">
               <UsageBreakdownList
@@ -632,6 +659,33 @@ export function UsagePage({
                     : undefined
                 }
               />
+              {data.byProject && (
+                <UsageBreakdownList
+                  kind="projects"
+                  rows={data.byProject.map((row) => ({
+                    ...row,
+                    label: usageProjectLabel(
+                      row.id,
+                      row.label,
+                      row.path,
+                      projectNames,
+                    ),
+                  }))}
+                  total={data.totals.totalTokens}
+                  pageSize={50}
+                  onFilter={
+                    sharedProjectSupported
+                      ? (id) =>
+                          chooseProjects(
+                            selectedProjects.length === 1 &&
+                              selectedProjects[0] === id
+                              ? []
+                              : [id],
+                          )
+                      : undefined
+                  }
+                />
+              )}
             </div>
           </>
         )}
@@ -711,12 +765,14 @@ export function UsagePage({
               }
               active={visible && effectiveTab === "sessions"}
               onProject={
-                analysisProjectSupported
+                sharedProjectSupported || analysisProjectSupported
                   ? (id) => {
-                      setAnalysisProjects((old) =>
-                        old.length === 1 && old[0] === id ? [] : [id],
+                      chooseProjects(
+                        selectedProjects.length === 1 &&
+                          selectedProjects[0] === id
+                          ? []
+                          : [id],
                       );
-                      setProjectsCleared(false);
                     }
                   : undefined
               }
