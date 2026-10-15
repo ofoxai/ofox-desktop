@@ -4,8 +4,8 @@
 
 - I1 可选目录与本机入口：代码及阶段门禁完成；增加 9 个独立候选，默认折叠，本机模式不触发账户绑定。原生界面/Windows 留到最终验收。
 - R0 资源所有权、持久状态与安全写入：代码、复审及阶段门禁完成，随后直接进入 R1。
-- R1 资源库三页与原有全局适配：进行中。三页、草稿编辑／导入、完整目标预览／应用／恢复已接线；专用资源包已接线，MCP 复制与显式接管、Skills 固定版本更新及连接检查流程已完成代码、评审与阶段门禁；原生界面验收仍未完成。
-- I2 逐工具安装及资源适配：待实施，按平台能力开放。
+- R1 资源库三页与原有全局适配：代码、独立评审、阶段门禁及沙箱原生基础交互验收完成。真实第三方客户端执行与 Windows 仍未验收；不代替全项目最终门禁。
+- I2 逐工具安装及资源适配：进行中，先验证 Copilot CLI 的独立 npm 管理副本；其他候选和未验平台保持官方手动途径。
 - U-A 统计口径与覆盖：待实施。
 - U-B 工作台、请求恢复及刷新：待实施。
 - U-C 会话与项目分析：待实施。
@@ -40,7 +40,7 @@
 - 资源库页面、连接检查、专用可分享资源包及后续用量阶段尚未完成；Windows 原生文件/链接语义仍待验。本阶段只验证全局规则和沙箱写入，没有操作真实工具配置或卸载本机工具。
 
 
-## R1 当前实施记录（尚未完成）
+## R1 阶段实施记录
 
 - 四导航及指令／MCP／Skills 子页首访加载；资源状态独立于登录和模型绑定。指令可新建、编辑、复制、Markdown／旧提示词草稿导入；MCP 按字段引用保持／设置／清除；Skills 接入目录、ZIP、GitHub/ref、已有技能及备份草稿导入和经核验 artifact 的只读详情。
 - 预览发送完整期望目标集合，按物理组展示受管内容、字段名、分发方式和共享读取范围；保存、预览、删除冻结 revision 与恢复 epoch。后台刷新与隐藏页面不丢草稿／选择／预览，不允许重复提交。
@@ -60,4 +60,14 @@
 - 检查限制消息、总接收量、分页、工具数、字段展开和脱敏预算；保留半条迟到握手、支持服务端 ping，HTTP 不跟随重定向或跨域 SSE endpoint。已知凭据先统一控制字符处理，再合并全部重叠匹配，错误不含 stderr／响应正文。Unix 专用进程组及 Windows Job 请求回收进程树；实际外部程序不是 OS 沙箱，详见 [连接检查说明](mcp-connection-checks.md)。
 - MCP 回归先取得策略、协议、界面、取消竞态和复审问题的 RED；24 项后端专测通过。前端 typecheck、format、全量 106 文件／735 项通过；Rust fmt、all-targets Clippy（-D warnings）、全量测试通过（2251 library 单测、95 integration，9 项既有 ignored）。后端／协议及界面独立复审无剩余 P1/P2。
 - macOS 使用 Node 22.12.0 沙箱进程及本地 HTTP fixtures，覆盖迟到半条握手、ping、stderr 排空、取消后子进程不再写入；没有执行真实 MCP 服务、授权或原生工具配置。Windows Job／执行策略仅通过隔离的交叉类型检查，原生 Job 行为仍待 Windows 验证，不能将其写为平台验收通过。
-- 下一步继续：R1 沙箱原生界面验收；之后按 I2、U-A 至 U-D、最终本机及 Windows 验证包推进。
+- macOS 26.5.1（Apple Silicon）原生沙箱完成未登录本机入口、默认折叠、资源三页、指令新建与双目标预览／应用、Skills 本机目录导入／核验正文／共享链接、MCP 协议失败／成功／取消及重启保留资源的操作检查。Tab、空格、标签方向键、Escape 与关闭后焦点恢复通过；900px 浅／深色和长路径已抽查并保存阶段截图。所有手工应用目标及 artifact 均确认位于临时目录，MCP fixture 只收到 discover/list，未调用工具、登录或卸载本机工具。
+- 原生验收发现静态“连接未检查”与 shared 伪读取者两项 P2，分别取得前端／Rust RED 后修正；独立复审通过，并用重建的 Tauri 窗口复验。前端 typecheck、format、106 文件／735 项全量单测；Rust fmt、all-targets Clippy（-D warnings）、2251 library 单测及 95 integration 全部再次通过，9 项既有 ignored。屏幕共享标识遮住了交通灯，因此阶段截图不作为交通灯位置的新验收证据；真实第三方 MCP／技能执行与 Windows 仍未验。
+- 下一步继续：I2、U-A 至 U-D，最后重跑完整本机门禁、安装和同 SHA Windows 验证包。
+
+
+## I2 首个切片（尚未交付）
+
+- 首个自动生命周期目标为 Copilot CLI 的 macOS arm64 npm 副本。采用 OFox 专用 prefix，与已安装的外部副本、模型绑定、Key 和用户 npm 配置分开；不修改 shell PATH，界面说明实际管理位置并提供绝对启动命令。已有外部副本和其他平台保留手动途径，不把目录候选视作自动支持。
+- 必须使用已有 Node ≥22／npm，冻结并重核运行时、包与 bin 身份。受控 cwd/env 和独立 npmrc 明确固定官方 scoped registry；不补装 Node、不修改用户镜像／npmrc、不继承 npm token。执行先订阅，owner job 持有写锁至进程树回收及重新探测；不复用带解绑／退 Key 的卸载流程。
+- 原生来源特性检查：在临时 HOME／prefix／npm cache 中，以 Node 22.12.0、npm 10.9.0 安装官方 `@github/copilot@1.0.98`（禁用安装脚本）并仅运行 `--version`，成功返回 GitHub Copilot CLI 1.0.98。此结果只证明该临时安装及版本读取，不证明 OFox 生命周期接口、资源适配或 Windows 已完成；没有登录、运行 AI 或卸载本机副本。
+- 官方约束来源：[Copilot 安装](https://docs.github.com/en/copilot/get-started/cli-quickstart)、[npm registry 选择](https://github.com/npm/npm-registry-fetch/blob/main/lib/index.js)。旧 Terminal 安装器超时后仍可能运行的边界，不能通过新增一个请求期 RAII 锁就宣称消除；新链必须管理自己的进程和写入范围。

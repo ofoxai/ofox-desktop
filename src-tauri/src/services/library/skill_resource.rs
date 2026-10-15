@@ -710,7 +710,11 @@ pub(crate) fn preview_at(
                 );
             }
         }
-        let mut readers = owners.clone();
+        let mut readers = owners
+            .iter()
+            .filter(|tool| tool.as_str() != "shared")
+            .cloned()
+            .collect::<BTreeSet<_>>();
         for (tool, roots) in &reader_roots {
             for root in roots {
                 if reads_entry(tool, root, Path::new(&physical), &row.directory)? {

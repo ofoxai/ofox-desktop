@@ -3526,7 +3526,7 @@
     "newMcpId": "新服务器 ID",
     "saveCopy": "保存副本",
     "mcpNeedsValues": "需补全或迁移配置值",
-    "mcpUsesEnvironment": "使用工具环境，连接未检查",
+    "mcpUsesEnvironment": "使用工具环境",
     "adoptPreview": "预览接管一致字段",
     "adoptDescription": "仅接管此物理位置中与共享定义完全一致的字段，保留其他字段和注释。预览后仍需确认；撤回时，仅在无用户扩展的情况下移除空服务器项。",
     "adoptionPreview": "将接管已匹配的字段；此预览不改写文件，确认后才记录所有权。",

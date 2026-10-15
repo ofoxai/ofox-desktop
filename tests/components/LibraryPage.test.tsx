@@ -343,6 +343,15 @@ it("starts MCP inspection only explicitly and subscribes before execution", asyn
   expect(await screen.findByText("fixture-tool")).toBeVisible();
   expect(libraryApi.runMcpCheck).toHaveBeenCalledWith("check-one");
   expect(unlisten).toHaveBeenCalledTimes(1);
+  await userEvent.click(screen.getByRole("button", { name: "关闭" }));
+  expect(screen.queryByText(/连接未检查/)).not.toBeInTheDocument();
+  await userEvent.click(
+    screen.getByRole("button", { name: "检查连接 MCP demo" }),
+  );
+  expect(screen.queryByText("fixture-tool")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "开始检查" })).toBeEnabled();
+  expect(libraryApi.prepareMcpCheck).toHaveBeenCalledTimes(1);
+  expect(libraryApi.runMcpCheck).toHaveBeenCalledTimes(1);
 });
 it("isolates MCP progress and cancels with immediate listener cleanup when the portal suspends", async () => {
   let progress!: (event: { payload: McpCheckProgress }) => void;
