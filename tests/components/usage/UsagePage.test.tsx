@@ -307,9 +307,12 @@ describe("UsagePage", () => {
     });
     render(<Page />);
     await screen.findByText("unknown-model");
-    await userEvent.click(screen.getByRole("combobox", { name: "工具筛选" }));
-    await userEvent.click(screen.getByRole("option", { name: "OpenCode" }));
-    await userEvent.keyboard("{Escape}");
+    await userEvent.click(
+      within(screen.getByRole("group", { name: "工具筛选" })).getByRole(
+        "button",
+        { name: "OpenCode" },
+      ),
+    );
     await waitFor(() =>
       expect(
         mocks.invoke.mock.calls.some(

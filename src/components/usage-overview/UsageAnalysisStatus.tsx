@@ -2,7 +2,13 @@ import { useTranslation } from "react-i18next";
 import type { SessionAnalytics } from "@/types/sessionAnalytics";
 import { UsageFreshness } from "./UsageFreshness";
 
-export function UsageAnalysisStatus({ data }: { data: SessionAnalytics }) {
+export function UsageAnalysisStatus({
+  data,
+  compact = false,
+}: {
+  data: SessionAnalytics;
+  compact?: boolean;
+}) {
   const { t, i18n } = useTranslation();
   const coverage = data.metricCoverage;
   const unavailable = data.coverage.state === "unsupported";
@@ -24,7 +30,9 @@ export function UsageAnalysisStatus({ data }: { data: SessionAnalytics }) {
     ...new Set([...data.coverage.reasons, ...(coverage?.reasons ?? [])]),
   ];
   return (
-    <details className="rounded-lg border border-line bg-card px-3 py-2 text-note text-ink-muted">
+    <details
+      className={`rounded-lg border border-line bg-card px-3 text-note text-ink-muted ${compact ? "py-1.5" : "py-2"}`}
+    >
       <summary className="cursor-pointer">
         <span
           className={`mr-2 inline-block h-1.5 w-1.5 rounded-full ${partial || unavailable ? "bg-warn" : "bg-ok"}`}

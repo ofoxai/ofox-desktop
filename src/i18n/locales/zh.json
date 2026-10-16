@@ -3979,7 +3979,9 @@
     "rankNoSamples": "当前指标没有可核实的样本；会话记录仍保留。",
     "activityUnavailable": "消息和活跃不可用",
     "lessThanSecond": "不足 1 秒",
-    "seconds": "{{value}} 秒"
+    "seconds": "{{value}} 秒",
+    "removeFilter": "移除 {{name}} 筛选",
+    "dailyTrend": "每日趋势"
   },
   "sessionExperience": {
     "back": "返回会话列表",
@@ -4041,5 +4043,17 @@
     "readerReadLimit": "此会话超出安全读取预算，暂无法显示完整正文。可在原工具中查看。",
     "readerReadFailed": "无法安全读取此会话，请刷新会话列表后重试。",
     "limitDatabase": "本地数据库超过安全快照预算；可在原工具中查看。"
+  },
+  "usageFilters": {
+    "allTools": "全部工具",
+    "allModels": "全部模型",
+    "allProjects": "全部项目",
+    "activeFilters": "已选筛选",
+    "selectedCount": "{{selected}} / {{total}} 已选",
+    "clearMenu": "清空{{name}}",
+    "removeFilter": "移除{{name}}：{{value}}",
+    "toolsHint": "可多选；点“全部工具”取消工具限制。",
+    "updating": "正在更新筛选结果，暂时显示上次结果。",
+    "previous": "当前条件读取失败，仍显示上次结果。"
   }
 }

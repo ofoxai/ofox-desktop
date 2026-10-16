@@ -96,15 +96,15 @@ export function UsageSessionRanking({
       type="button"
       aria-label={t("usageSessions.view", { title: row.title })}
       onClick={(event) => onSelect(row, event, context)}
-      className="flex w-full min-w-0 items-center gap-3 border-b border-line-2 px-4 py-2.5 text-left last:border-0 hover:bg-pill focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/50"
+      className="flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left hover:bg-pill focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/50"
     >
-      <ToolBadge toolId={row.toolId} size={24} />
+      <ToolBadge toolId={row.toolId} size={20} />
       <span className="min-w-0 flex-1">
         <span className="block truncate text-sub font-medium" title={row.title}>
           {row.title}
         </span>
         <span
-          className="block truncate text-note text-ink-muted"
+          className="block truncate text-micro text-ink-muted"
           title={row.projectPath ?? row.projectLabel ?? undefined}
         >
           {row.projectLabel ||
@@ -118,7 +118,12 @@ export function UsageSessionRanking({
             .join(", ") || "—"}
         </span>
       </span>
-      <span className="shrink-0 text-right text-sub tabular-nums">
+      <span
+        className="max-w-[34%] shrink-0 truncate text-right text-sub tabular-nums"
+        title={
+          sort === "cost" ? (row.estimate.knownCostUsd ?? undefined) : undefined
+        }
+      >
         {sort === "active"
           ? formatActivity(row.activeMs, t)
           : sort === "cost"
@@ -131,11 +136,11 @@ export function UsageSessionRanking({
   );
   return (
     <section
-      className="min-w-0 overflow-hidden rounded-list border border-line bg-card"
+      className="flex min-w-0 flex-col overflow-hidden rounded-list border border-line bg-card px-3.5 pb-2.5 pt-3"
       aria-label={t("usageExperience.rankTitle")}
     >
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line-2 px-4 py-3">
-        <h2 className="text-sub font-medium text-ink-muted">
+      <div className="mb-2 flex min-h-5 flex-wrap items-center justify-between gap-2">
+        <h2 className="text-note font-medium text-ink-muted">
           {t("usageExperience.rankTitle")}
         </h2>
         <SegmentedControl
@@ -148,7 +153,7 @@ export function UsageSessionRanking({
       {rows.length ? (
         rows.slice(0, 6).map((row) => renderRow(row, data))
       ) : (
-        <p className="p-5 text-sub text-ink-muted">
+        <p className="py-5 text-sub text-ink-muted">
           {t(
             data.compactTop
               ? data.totals.sessionCount
@@ -159,12 +164,12 @@ export function UsageSessionRanking({
         </p>
       )}
       {sort === "cost" && (
-        <p className="px-4 pt-2 text-note text-ink-faint">
+        <p className="pt-1.5 text-micro text-ink-faint">
           {t("usageExperience.costRankHint")}
         </p>
       )}
       {data.pagingUnavailableReason && (
-        <p className="px-4 py-2 text-note text-ink-muted">
+        <p className="py-1.5 text-micro text-ink-muted">
           {t("usageExperience.pagingLimited")}
         </p>
       )}
@@ -178,7 +183,7 @@ export function UsageSessionRanking({
           <DialogTrigger asChild>
             <Button
               variant="ghost"
-              className="m-2"
+              className="mt-1 self-start px-1 text-note"
               onClick={() => {
                 setPage(0);
                 setSearch("");

@@ -1,6 +1,7 @@
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { MenuSelect } from "@/components/ui/menu-select";
+import { Button } from "@/components/ui/button";
 import type {
   UsageGranularity,
   UsageSeriesPoint,
@@ -46,6 +47,22 @@ export function UsageBars({
   const metric = unavailableMetrics.includes(chosen) ? "tokens" : chosen;
   const [selected, setSelected] = useState(0);
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
+  const metricRefs = useRef<Partial<Record<Metric, HTMLButtonElement | null>>>(
+    {},
+  );
+  const chartId = useId();
+  const analysisMetrics = [
+    "tokens",
+    "output",
+    "messages",
+    "sessions",
+    "cost",
+    "active",
+  ] as const;
+  const chooseMetric = (value: Metric) => {
+    setMetric(value);
+    onMetricChange?.(value);
+  };
   const label = (start: number) =>
     new Date(start).toLocaleString(
       i18n.language,
@@ -90,64 +107,145 @@ export function UsageBars({
   const current =
     overview.series[Math.min(selected, overview.series.length - 1)];
   return (
-    <div className="min-w-0 rounded-list border border-line bg-card p-3.5">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-3 text-note text-ink-muted">
-          {metric === "tokens" ? (
+    <div
+      className={`min-w-0 rounded-list border border-line bg-card ${analysis ? "px-3.5 pb-2.5 pt-3" : "p-3.5"}`}
+    >
+      {analysis && (
+        <div className="mb-2 flex min-w-0 flex-wrap items-center justify-between gap-2">
+          <h2 className="text-note font-medium text-ink-muted">
+            {t("usageExperience.dailyTrend")}
+          </h2>
+          <div
+            role="tablist"
+            aria-label={t("usageWorkbench.metric")}
+            className="inline-flex min-w-0 flex-wrap gap-px rounded-ctl bg-pill p-0.5"
+          >
+            {analysisMetrics.map((value) => (
+              <Button
+                key={value}
+                variant="ghost"
+                role="tab"
+                id={`${chartId}-${value}`}
+                aria-controls={chartId}
+                aria-selected={metric === value}
+                aria-disabled={unavailableMetrics.includes(value) || undefined}
+                disabled={unavailableMetrics.includes(value)}
+                tabIndex={metric === value ? 0 : -1}
+                ref={(node) => {
+                  metricRefs.current[value] = node;
+                }}
+                className="h-5 px-2 text-note aria-selected:bg-card aria-selected:text-ink aria-selected:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50"
+                onClick={() => chooseMetric(value)}
+                onKeyDown={(event) => {
+                  const available = analysisMetrics.filter(
+                    (item) => !unavailableMetrics.includes(item),
+                  );
+                  const index = available.indexOf(value);
+                  const next =
+                    event.key === "Home"
+                      ? available[0]
+                      : event.key === "End"
+                        ? available.at(-1)
+                        : event.key === "ArrowRight"
+                          ? available[(index + 1) % available.length]
+                          : event.key === "ArrowLeft"
+                            ? available[
+                                (index - 1 + available.length) %
+                                  available.length
+                              ]
+                            : undefined;
+                  if (next) {
+                    event.preventDefault();
+                    chooseMetric(next);
+                    metricRefs.current[next]?.focus();
+                  }
+                }}
+              >
+                {t(
+                  value === "cost" || value === "active"
+                    ? `usageExperience.${value}`
+                    : `usageWorkbench.${value}`,
+                )}
+              </Button>
+            ))}
+          </div>
+        </div>
+      )}
+      {!analysis && (
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-3 text-note text-ink-muted">
+            {metric === "tokens" ? (
+              <>
+                <span className="inline-flex items-center gap-1.5">
+                  <span
+                    aria-hidden
+                    className="h-2.5 w-2.5 overflow-hidden rounded-sm bg-brand/75"
+                  >
+                    <span className="block h-full w-full bg-brand/30" />
+                  </span>
+                  {t("usageWorkbench.freshInput")}
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <span
+                    aria-hidden
+                    className="h-2.5 w-2.5 overflow-hidden rounded-sm bg-brand/75"
+                  >
+                    <span className="block h-full w-full bg-brand/90" />
+                  </span>
+                  {t("usageWorkbench.outputLegend")}
+                </span>
+                <span>{t("usageWorkbench.cacheSeparate")}</span>
+              </>
+            ) : (
+              t(`usageWorkbench.${metric}`)
+            )}
+          </div>
+          <span className="text-note text-ink-faint">
+            {t(`usageWorkbench.granularity.${overview.granularity}`)}
+          </span>
+          <MenuSelect<Metric>
+            aria-label={t("usageWorkbench.metric")}
+            value={metric}
+            onChange={chooseMetric}
+            options={(analysis
+              ? ([
+                  "tokens",
+                  "output",
+                  "messages",
+                  "sessions",
+                  "cost",
+                  "active",
+                ] as const)
+              : (["tokens", "output", "cost", "records"] as const)
+            ).map((value) => ({
+              value,
+              label: t(`usageWorkbench.${value}`),
+              disabled: unavailableMetrics.includes(value),
+            }))}
+          />
+        </div>
+      )}
+      {analysis && (
+        <p className="mb-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-micro text-ink-faint">
+          {metric === "tokens" && (
             <>
-              <span className="inline-flex items-center gap-1.5">
-                <span
-                  aria-hidden
-                  className="h-2.5 w-2.5 overflow-hidden rounded-sm bg-brand/75"
-                >
-                  <span className="block h-full w-full bg-brand/30" />
-                </span>
-                {t("usageWorkbench.freshInput")}
-              </span>
-              <span className="inline-flex items-center gap-1.5">
-                <span
-                  aria-hidden
-                  className="h-2.5 w-2.5 overflow-hidden rounded-sm bg-brand/75"
-                >
-                  <span className="block h-full w-full bg-brand/90" />
-                </span>
+              <span>
+                {t("usageWorkbench.freshInput")} ·{" "}
                 {t("usageWorkbench.outputLegend")}
               </span>
               <span>{t("usageWorkbench.cacheSeparate")}</span>
             </>
-          ) : (
-            t(`usageWorkbench.${metric}`)
           )}
-        </div>
-        <span className="text-note text-ink-faint">
-          {t(`usageWorkbench.granularity.${overview.granularity}`)}
-        </span>
-        <MenuSelect<Metric>
-          aria-label={t("usageWorkbench.metric")}
-          value={metric}
-          onChange={(value) => {
-            setMetric(value);
-            onMetricChange?.(value);
-          }}
-          options={(analysis
-            ? ([
-                "tokens",
-                "output",
-                "messages",
-                "sessions",
-                "cost",
-                "active",
-              ] as const)
-            : (["tokens", "output", "cost", "records"] as const)
-          ).map((value) => ({
-            value,
-            label: t(`usageWorkbench.${value}`),
-            disabled: unavailableMetrics.includes(value),
-          }))}
-        />
-      </div>
+          <span className="ml-auto">
+            {t(`usageWorkbench.granularity.${overview.granularity}`)}
+          </span>
+        </p>
+      )}
       <div
-        className="grid h-[205px] min-w-0 grid-cols-[44px_minmax(0,1fr)] gap-2"
+        id={analysis ? chartId : undefined}
+        role={analysis ? "tabpanel" : undefined}
+        aria-labelledby={analysis ? `${chartId}-${metric}` : undefined}
+        className={`grid min-w-0 grid-cols-[44px_minmax(0,1fr)] gap-2 ${analysis ? "h-[132px]" : "h-[205px]"}`}
         aria-label={t("usagePage.chart")}
       >
         <div
@@ -242,12 +340,14 @@ export function UsageBars({
       {current && (
         <p
           aria-live="polite"
-          className="mt-2 text-note tabular-nums text-ink-muted"
+          className={`${analysis ? "mt-1 text-micro" : "mt-2 text-note"} tabular-nums text-ink-muted`}
         >
           {label(current.start)} · {formatted(current)}
         </p>
       )}
-      <details className="mt-2 text-note text-ink-muted">
+      <details
+        className={`${analysis ? "mt-1 text-micro" : "mt-2 text-note"} text-ink-muted`}
+      >
         <summary className="cursor-pointer">
           {t("usageWorkbench.chartData")}
         </summary>

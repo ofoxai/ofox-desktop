@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { RefreshCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useShell, useShellRefresh } from "@/components/shell/ShellContext";
 import { useInteractionActive } from "@/components/ui/interaction-scope";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MenuSelect } from "@/components/ui/menu-select";
-import { SegmentedNav } from "@/components/ui/segmented";
+import { SegmentedControl, SegmentedNav } from "@/components/ui/segmented";
 import type { OfoxAccount } from "@/hooks/useOfoxAccount";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
 import { useUsageOverview } from "@/hooks/useUsageOverview";
@@ -19,6 +20,7 @@ import { settingsApi } from "@/lib/api";
 import {
   getSessionUsageAnalytics,
   getUsageCapabilities,
+  type UsageOverview,
 } from "@/lib/api/usageOverview";
 import { queryClient } from "@/lib/query/queryClient";
 import { ofoxDashboardUrl, ofoxWalletUrl } from "@/lib/ofoxUrls";
@@ -28,6 +30,7 @@ import {
   resolveWorkbenchRange,
   type WorkbenchFilters,
   type WorkbenchRange,
+  type WorkbenchPeriod,
 } from "@/lib/usageWorkbench";
 import { createUsageRefreshCoordinator } from "@/lib/usageRefresh";
 import { TOOL_META } from "@/config/toolMeta";
@@ -36,8 +39,9 @@ import {
   usageProjectLabel,
 } from "@/lib/usageProject";
 import type { SessionAnalytics } from "@/types/sessionAnalytics";
-import type { UsageFilterOptions } from "@/types/usageQuery";
-import { UsageHeader } from "./UsageHeader";
+import type { UsageFilterOptions, UsageQueryV1 } from "@/types/usageQuery";
+import { formatUsageEstimate } from "@/lib/usageEstimate";
+import { UsageFilterToolbar, type UsageFilterChip } from "./UsageFilterToolbar";
 import { BalanceTrendCard } from "./BalanceTrendCard";
 import { UsageKpis } from "./UsageKpis";
 import { UsageBars } from "./UsageBars";
@@ -147,8 +151,16 @@ export function UsagePage({
     },
     queryClient,
   );
-  const [lastAnalysis, setLastAnalysis] = useState<SessionAnalytics>();
-  const analysisDisplay = analysis.data ?? lastAnalysis;
+  const [lastAnalysis, setLastAnalysis] = useState<{
+    apex: string;
+    data: SessionAnalytics;
+  }>();
+  const analysisDisplay =
+    analysis.data ??
+    (lastAnalysis?.apex === apex &&
+    lastAnalysis.data.pricingCoverage.apex === apex
+      ? lastAnalysis.data
+      : undefined);
   useEffect(() => {
     if (
       capabilities.isFetched &&
@@ -182,7 +194,21 @@ export function UsagePage({
       localRefreshSupported: modern && !!capabilities.data?.localRefresh,
     },
   );
-  const data = state.overview.data;
+  const [lastOverview, setLastOverview] = useState<{
+    apex: string;
+    data: UsageOverview;
+  }>();
+  const data =
+    state.overview.data ??
+    (lastOverview?.apex === apex &&
+    (!lastOverview.data.pricingCoverage ||
+      lastOverview.data.pricingCoverage.apex === apex)
+      ? lastOverview.data
+      : undefined);
+  useEffect(() => {
+    if (state.overview.data)
+      setLastOverview({ apex, data: state.overview.data });
+  }, [state.overview.data, apex]);
   useEffect(() => {
     if (data) {
       updateOptions(
@@ -195,10 +221,10 @@ export function UsagePage({
     }
   }, [data, updateOptions]);
   useEffect(() => {
-    if (analysis.data) setLastAnalysis(analysis.data);
+    if (analysis.data) setLastAnalysis({ apex, data: analysis.data });
     if (analysis.data && effectiveTab === "sessions")
       updateOptions(analysis.data.options);
-  }, [analysis.data, effectiveTab, updateOptions]);
+  }, [analysis.data, effectiveTab, updateOptions, apex]);
   const [customOpen, setCustomOpen] = useState(false);
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
@@ -369,11 +395,57 @@ export function UsagePage({
       const label = usageProjectLabel(id, null, null, projectNames);
       projectOptions.push({ value: id, label, title: label });
     }
+  const filterChips: UsageFilterChip[] = [
+    ...(filters.toolIds ?? []).map((id) => ({
+      key: `tool:${id}`,
+      name: t("usageWorkbench.toolsFilter"),
+      value: TOOL_META[id]?.label ?? id,
+      toolId: id,
+      remove: () =>
+        setFilters((old) => ({
+          ...old,
+          toolIds: old.toolIds?.filter((value) => value !== id),
+        })),
+    })),
+    ...(filters.modelIds ?? []).map((id) => ({
+      key: `model:${id}`,
+      name: t("usageWorkbench.modelsFilter"),
+      value: id,
+      remove: () =>
+        setFilters((old) => ({
+          ...old,
+          modelIds: old.modelIds?.filter((value) => value !== id),
+        })),
+    })),
+    ...selectedProjects.map((id) => ({
+      key: `project:${id}`,
+      name: t("usageWorkbench.projectsFilter"),
+      value: projectOptions.find((option) => option.value === id)?.label ?? id,
+      title: projectOptions.find((option) => option.value === id)?.title,
+      remove: () =>
+        chooseProjects(selectedProjects.filter((value) => value !== id)),
+    })),
+  ];
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const describePrevious = (previous: UsageQueryV1) =>
+    [
+      t("usageWorkbench.rangeSummary", {
+        start:
+          previous.startMs == null
+            ? t("usageWorkbench.beginning")
+            : new Date(previous.startMs).toLocaleDateString(i18n.language),
+        end: new Date(previous.endMs - 1).toLocaleString(i18n.language),
+        timezone,
+      }),
+      `${t("usageWorkbench.toolsFilter")}: ${previous.toolIds.length ? previous.toolIds.map((id) => TOOL_META[id]?.label ?? id).join(", ") : t("usageFilters.allTools")}`,
+      `${t("usageWorkbench.modelsFilter")}: ${previous.modelIds.length ? previous.modelIds.join(", ") : t("usageFilters.allModels")}`,
+      `${t("usageWorkbench.projectsFilter")}: ${previous.projectIds.length ? previous.projectIds.map((id) => usageProjectLabel(id, null, null, projectNames)).join(", ") : t("usageFilters.allProjects")}`,
+    ].join(" · ");
   return (
     <div className="flex min-w-0 flex-col gap-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
         <SegmentedNav
+          className="shrink-0 [&>button]:px-2 [&>button]:text-ctl"
           aria-label={t("usageWorkbench.tabs")}
           value={effectiveTab}
           onChange={(value) => {
@@ -414,21 +486,42 @@ export function UsagePage({
               : []),
           ]}
         />
-        <UsageHeader
-          period={range.period}
-          modern={modern}
-          showEstimate={effectiveTab === "overview"}
-          onChange={(period) =>
-            period === "custom"
-              ? setCustomOpen((value) => !value)
-              : chooseRange({ period })
-          }
-          cost={effectiveTab === "overview" ? data?.totals.costUsd : undefined}
-          estimate={
-            effectiveTab === "overview" ? data?.totals.estimate : undefined
-          }
-        />
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <SegmentedControl<WorkbenchPeriod>
+            aria-label={t("usagePage.period")}
+            value={range.period}
+            className="[&>button]:px-2"
+            options={(modern
+              ? (["today", "7d", "30d", "90d", "all", "custom"] as const)
+              : (["today", "7d", "30d", "all"] as const)
+            ).map((value) => ({
+              value,
+              label: t(`usagePage.periods.${value}`),
+            }))}
+            onChange={(period) =>
+              period === "custom"
+                ? setCustomOpen((value) => !value)
+                : chooseRange({ period })
+            }
+          />
+          {effectiveTab === "overview" && (
+            <span
+              className="inline-flex items-center gap-1.5"
+              title={t("usagePage.estimate")}
+            >
+              <span className="text-sub font-semibold tabular-nums">
+                {formatUsageEstimate(
+                  data?.totals.estimate,
+                  data?.totals.costUsd,
+                )}
+              </span>
+              <span className="hidden text-note text-ink-muted xl:inline">
+                {t("usagePage.estimate")}
+              </span>
+            </span>
+          )}
+        </div>
+        <div className="ml-auto flex shrink-0 items-center gap-1.5">
           <MenuSelect
             aria-label={t("usageWorkbench.refreshEvery")}
             value={String(interval)}
@@ -444,10 +537,13 @@ export function UsagePage({
             }))}
           />
           <Button
-            variant="secondary"
+            variant="ghost"
+            className="h-[26px] w-[26px] p-0 text-ink-muted"
+            aria-label={t("usageWorkbench.refresh")}
+            title={t("usageWorkbench.refresh")}
             onClick={() => void manualRefresh().catch(() => undefined)}
           >
-            {t("usageWorkbench.refresh")}
+            <RefreshCw aria-hidden className="h-3.5 w-3.5" />
           </Button>
         </div>
       </div>
@@ -493,19 +589,23 @@ export function UsagePage({
           )}
         </form>
       )}
-      <div className="flex flex-wrap items-center gap-2">
-        <UsageFilterMenu
-          label={t("usageWorkbench.toolsFilter")}
-          options={toolIds.map((value) => ({
-            value,
-            label: TOOL_META[value]?.label ?? value,
-          }))}
-          selected={filters.toolIds ?? []}
-          onChange={(toolIds) => setFilters((old) => ({ ...old, toolIds }))}
-          disabled={!modern}
-        />
+      <UsageFilterToolbar
+        tools={toolIds.map((value) => ({
+          value,
+          label: TOOL_META[value]?.label ?? value,
+        }))}
+        selectedTools={filters.toolIds ?? []}
+        onToolsChange={(toolIds) => setFilters((old) => ({ ...old, toolIds }))}
+        disabled={!modern}
+        chips={filterChips}
+        onReset={() => {
+          setFilters({});
+          setAnalysisProjects([]);
+        }}
+      >
         <UsageFilterMenu
           label={t("usageWorkbench.modelsFilter")}
+          allLabel={t("usageFilters.allModels")}
           pageSize={effectiveTab === "sessions" ? 50 : undefined}
           options={modelIds.map((value) => ({ value, label: value }))}
           selected={filters.modelIds ?? []}
@@ -520,6 +620,7 @@ export function UsagePage({
                 ? "usageWorkbench.projectsFilter"
                 : "usageSessions.projectFilter",
             )}
+            allLabel={t("usageFilters.allProjects")}
             pageSize={50}
             options={projectOptions}
             selected={selectedProjects}
@@ -533,28 +634,13 @@ export function UsagePage({
             {t("usageWorkbench.projectUnavailable")}
           </span>
         )}
-        {!!(
-          (filters.toolIds?.length ?? 0) +
-          (filters.modelIds?.length ?? 0) +
-          selectedProjects.length
-        ) && (
-          <Button
-            variant="ghost"
-            onClick={() => {
-              setFilters({});
-              setAnalysisProjects([]);
-            }}
-          >
-            {t("usageWorkbench.reset")}
-          </Button>
-        )}
         <UsageLifetimeEntry
           boundTools={boundTools}
           capabilities={capabilities.data}
           apex={apex}
           active={visible}
         />
-      </div>
+      </UsageFilterToolbar>
       {!sharedProjectSupported &&
         effectiveTab === "sessions" &&
         analysisProjectSupported && (
@@ -608,7 +694,25 @@ export function UsagePage({
         aria-label={t("usageWorkbench.overview")}
         hidden={effectiveTab !== "overview"}
         className="space-y-3"
+        aria-busy={state.overview.isFetching}
       >
+        {!state.overview.data && data && (
+          <p
+            role="status"
+            className="rounded-lg border border-line bg-card px-3 py-2 text-note text-ink-muted"
+          >
+            {t(
+              state.overview.isError
+                ? "usageFilters.previous"
+                : "usageFilters.updating",
+            )}
+            {data.appliedQuery && (
+              <span className="mt-1 block break-words text-ink-faint">
+                {describePrevious(data.appliedQuery)}
+              </span>
+            )}
+          </p>
+        )}
         <p className="text-note font-medium text-ink-muted">
           {t("usageWorkbench.currentAccount")}
         </p>
@@ -621,7 +725,7 @@ export function UsagePage({
         <p className="pt-1 text-note font-medium text-ink-muted">
           {t("usageWorkbench.localHistory")}
         </p>
-        {state.overview.isPending ? (
+        {state.overview.isPending && !data ? (
           <p role="status" className="p-6 text-center text-ink-muted">
             {t("common.loading")}
           </p>
@@ -769,13 +873,29 @@ export function UsagePage({
           role="tabpanel"
           aria-label={t("usageSessions.title")}
           hidden={effectiveTab !== "sessions"}
+          aria-busy={analysis.isFetching}
         >
-          {analysis.isPending ? (
+          {!analysis.data && analysisDisplay && (
+            <p
+              role="status"
+              className="rounded-lg border border-line bg-card px-3 py-2 text-note text-ink-muted"
+            >
+              {t(
+                analysis.isError
+                  ? "usageFilters.previous"
+                  : "usageFilters.updating",
+              )}
+              <span className="mt-1 block break-words text-ink-faint">
+                {describePrevious(analysisDisplay.appliedQuery)}
+              </span>
+            </p>
+          )}
+          {analysis.isPending && !analysisDisplay ? (
             <p role="status" className="p-6 text-center text-ink-muted">
               {t("common.loading")}
             </p>
-          ) : !analysis.data ||
-            analysis.data.coverage.state === "unsupported" ? (
+          ) : !analysisDisplay ||
+            analysisDisplay.coverage.state === "unsupported" ? (
             <p className="rounded-list border border-line bg-card p-8 text-center text-sub text-ink-muted">
               {t("usagePage.unavailable")}
             </p>
@@ -784,10 +904,7 @@ export function UsagePage({
             <UsageSessions
               key={apex}
               data={analysisDisplay}
-              showData={
-                !!analysis.data &&
-                analysis.data.coverage.state !== "unsupported"
-              }
+              showData={analysisDisplay.coverage.state !== "unsupported"}
               active={visible && effectiveTab === "sessions"}
               onProject={
                 sharedProjectSupported || analysisProjectSupported
@@ -807,6 +924,26 @@ export function UsagePage({
                   modelIds: old.modelIds?.includes(id) ? [] : [id],
                 }))
               }
+              onRemoveProject={
+                sharedProjectSupported || analysisProjectSupported
+                  ? (id) =>
+                      chooseProjects(
+                        selectedProjects.filter((value) => value !== id),
+                      )
+                  : undefined
+              }
+              onRemoveModel={(id) =>
+                setFilters((old) => ({
+                  ...old,
+                  modelIds: old.modelIds?.filter((value) => value !== id),
+                }))
+              }
+              onRemoveTool={(id) =>
+                setFilters((old) => ({
+                  ...old,
+                  toolIds: old.toolIds?.filter((value) => value !== id),
+                }))
+              }
               onManage={shell.locateSession}
               onTool={(id) =>
                 setFilters((old) => ({
@@ -814,7 +951,7 @@ export function UsagePage({
                   toolIds: old.toolIds?.includes(id) ? [] : [id],
                 }))
               }
-              location={sessionTarget}
+              location={analysis.data ? sessionTarget : null}
               onLocated={clearSessionTarget}
               onExpandScope={() => {
                 setFilters({});

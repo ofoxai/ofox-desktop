@@ -3979,7 +3979,9 @@
     "rankNoSamples": "No verifiable samples for this metric; session records are retained.",
     "activityUnavailable": "Messages and activity unavailable",
     "lessThanSecond": "Less than 1 second",
-    "seconds": "{{value}} sec"
+    "seconds": "{{value}} sec",
+    "removeFilter": "Remove {{name}} filter",
+    "dailyTrend": "Daily trend"
   },
   "sessionExperience": {
     "back": "Back to sessions",
@@ -4041,5 +4043,17 @@
     "readerReadLimit": "This session exceeds the safe reading budget. Its full transcript cannot be displayed here. Open it in the original tool.",
     "readerReadFailed": "This session could not be read safely. Refresh the session list and try again.",
     "limitDatabase": "The local database exceeds the safe snapshot budget. Open it in the original tool."
+  },
+  "usageFilters": {
+    "allTools": "All tools",
+    "allModels": "All models",
+    "allProjects": "All projects",
+    "activeFilters": "Active filters",
+    "selectedCount": "{{selected}} of {{total}} selected",
+    "clearMenu": "Clear {{name}}",
+    "removeFilter": "Remove {{name}}: {{value}}",
+    "toolsHint": "Select multiple tools; choose “All tools” to remove the tool filter.",
+    "updating": "Updating filters; showing the previous result until ready.",
+    "previous": "Could not load these filters; showing the previous result."
   }
 }

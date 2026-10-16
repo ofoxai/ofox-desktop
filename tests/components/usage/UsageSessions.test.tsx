@@ -16,8 +16,7 @@ it("keeps unknown activity distinct from zero and shows quantile exclusions and 
   expect(screen.getByText(/无法按模型拆分/)).toBeVisible();
   await userEvent.click(screen.getByText("数据范围与来源"));
   expect(screen.getByText(/1 条未关联会话的记录.*7 Tokens/)).toBeVisible();
-  await userEvent.click(screen.getByRole("combobox", { name: "趋势指标" }));
-  expect(screen.getByRole("option", { name: "消息数" })).toHaveAttribute(
+  expect(screen.getByRole("tab", { name: "消息数" })).toHaveAttribute(
     "aria-disabled",
     "true",
   );
@@ -135,12 +134,12 @@ it.each(["kpi", "row", "detail"])(
 it("retains the trend selection when a filter is loading a new analysis", async () => {
   const data = sessionAnalyticsFixture();
   const view = render(<UsageSessions data={data} active />);
-  await userEvent.click(screen.getByRole("combobox", { name: "趋势指标" }));
-  await userEvent.click(screen.getByRole("option", { name: "输出 Tokens" }));
+  await userEvent.click(screen.getByRole("tab", { name: "输出 Tokens" }));
   view.rerender(<UsageSessions data={data} active showData={false} />);
   view.rerender(<UsageSessions data={data} active />);
-  expect(screen.getByRole("combobox", { name: "趋势指标" })).toHaveTextContent(
-    "输出 Tokens",
+  expect(screen.getByRole("tab", { name: "输出 Tokens" })).toHaveAttribute(
+    "aria-selected",
+    "true",
   );
 });
 it("bounds large project and model rankings and expands each list on request", async () => {

@@ -90,7 +90,7 @@ export function UsageTimeInsights({ data }: { data: SessionAnalytics }) {
       tabIndex={index === Math.min(focused, shown.length - 1) ? 0 : -1}
       aria-label={cell.label}
       title={cell.label}
-      className={`h-5 min-w-0 rounded-[3px] outline-none focus-visible:ring-2 focus-visible:ring-brand-ink ${heatColor(cell.amount, max)}`}
+      className={`h-3.5 min-w-0 rounded-[2.5px] outline-none focus-visible:ring-2 focus-visible:ring-brand-ink ${heatColor(cell.amount, max)}`}
       onFocus={() => {
         setFocused(index);
         setDescription(cell.label);
@@ -124,11 +124,11 @@ export function UsageTimeInsights({ data }: { data: SessionAnalytics }) {
   );
   return (
     <section
-      className="min-w-0 rounded-list border border-line bg-card p-4"
+      className="flex min-w-0 flex-col rounded-list border border-line bg-card px-3.5 pb-2.5 pt-3"
       aria-label={t("usageExperience.timeInsights")}
     >
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-sub font-medium text-ink-muted">
+      <div className="mb-2 flex min-h-5 flex-wrap items-center justify-between gap-2">
+        <h2 className="text-note font-medium text-ink-muted">
           {t("usageExperience.timeInsights")}
         </h2>
         <SegmentedControl
@@ -147,21 +147,26 @@ export function UsageTimeInsights({ data }: { data: SessionAnalytics }) {
       </div>
       {mode === "hourly" ? (
         <>
-          <p className="mb-2 text-right text-note text-ink-faint">{timezone}</p>
+          <p
+            className="mb-1.5 truncate text-right text-micro text-ink-faint"
+            title={timezone}
+          >
+            {timezone}
+          </p>
           {hourlyAvailable ? (
-            <div className="grid grid-cols-[28px_minmax(0,1fr)] gap-2">
+            <div className="grid min-w-0 grid-cols-[24px_minmax(0,1fr)] gap-1.5">
               <div
                 aria-hidden
-                className="grid grid-rows-7 gap-1 text-note text-ink-muted"
+                className="grid grid-rows-7 gap-0.5 text-micro text-ink-muted"
               >
                 {weekdays.map((day) => (
-                  <span key={day} className="flex h-5 items-center">
+                  <span key={day} className="flex h-3.5 items-center">
                     {day}
                   </span>
                 ))}
               </div>
-              <div>
-                <div className="grid grid-cols-[repeat(24,minmax(0,1fr))] gap-1">
+              <div className="min-w-0">
+                <div className="grid grid-cols-[repeat(24,minmax(0,1fr))] gap-0.5">
                   {cells.map(renderCell)}
                 </div>
                 <div
@@ -175,14 +180,14 @@ export function UsageTimeInsights({ data }: { data: SessionAnalytics }) {
               </div>
             </div>
           ) : (
-            <p className="flex min-h-[190px] items-center justify-center text-sub text-ink-muted">
+            <p className="flex flex-1 items-center justify-center py-6 text-sub text-ink-muted">
               {t("usageExperience.noActivity")}
             </p>
           )}
         </>
       ) : (
         <>
-          <div className="mb-3 flex items-center justify-end gap-2">
+          <div className="mb-2 flex flex-wrap items-center justify-end gap-2">
             {years.length > 1 && (
               <MenuSelect
                 aria-label={t("usageExperience.calendar")}
@@ -206,11 +211,11 @@ export function UsageTimeInsights({ data }: { data: SessionAnalytics }) {
               }))}
             />
           </div>
-          <div className="overflow-x-auto pb-1">
+          <div className="min-w-0 pb-1">
             <div
-              className="grid min-w-[360px] grid-flow-col grid-rows-7 gap-1"
+              className="grid min-w-0 grid-flow-col grid-rows-7 gap-0.5"
               style={{
-                gridTemplateColumns: `repeat(${Math.max(1, Math.ceil((days.length + (days.length ? (new Date(days[0].startMs).getDay() + 6) % 7 : 0)) / 7))}, minmax(5px,1fr))`,
+                gridTemplateColumns: `repeat(${Math.max(1, Math.ceil((days.length + (days.length ? (new Date(days[0].startMs).getDay() + 6) % 7 : 0)) / 7))}, minmax(0,1fr))`,
               }}
             >
               {Array.from(
@@ -228,8 +233,8 @@ export function UsageTimeInsights({ data }: { data: SessionAnalytics }) {
           </div>
         </>
       )}
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-note text-ink-muted">
-        <p aria-live="polite">
+      <div className="mt-2 flex min-w-0 flex-wrap items-center justify-between gap-x-2 gap-y-1 text-micro text-ink-muted">
+        <p aria-live="polite" className="min-w-0 break-words">
           {description
             ? (shown[Math.min(focused, shown.length - 1)]?.label ?? "—")
             : busiest
@@ -244,7 +249,7 @@ export function UsageTimeInsights({ data }: { data: SessionAnalytics }) {
           {t("usageExperience.more")}
         </span>
       </div>
-      <p className="mt-2 text-note text-ink-faint">
+      <p className="mt-1.5 text-micro leading-relaxed text-ink-faint">
         {t("usageExperience.activeDefinition")}
       </p>
     </section>

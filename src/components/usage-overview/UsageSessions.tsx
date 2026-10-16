@@ -33,6 +33,9 @@ export function UsageSessions({
   onProject,
   onModel,
   onTool,
+  onRemoveProject,
+  onRemoveModel,
+  onRemoveTool,
   onManage,
   showData = true,
   location,
@@ -44,6 +47,9 @@ export function UsageSessions({
   onProject?: (id: string) => void;
   onModel?: (id: string) => void;
   onTool?: (id: string) => void;
+  onRemoveProject?: (id: string) => void;
+  onRemoveModel?: (id: string) => void;
+  onRemoveTool?: (id: string) => void;
   onManage?: (key: string) => void;
   showData?: boolean;
   location?: { key: string; request: number } | null;
@@ -136,7 +142,7 @@ export function UsageSessions({
       ref={panel}
       tabIndex={-1}
       aria-label={t("usageSessions.title")}
-      className="space-y-3 outline-none"
+      className="min-w-0 space-y-2 outline-none"
     >
       {showData && (
         <>
@@ -167,9 +173,9 @@ export function UsageSessions({
               </Button>
             </div>
           )}
-          <UsageAnalysisStatus data={data} />
+          <UsageAnalysisStatus data={data} compact />
           <KpiStrip
-            className="!grid-cols-2 md:!grid-cols-3"
+            className="!grid-cols-2 min-[420px]:!grid-cols-3 [&>div]:px-3 [&>div]:pb-2 [&>div]:pt-2.5 [&_b]:text-[24px]"
             items={[
               {
                 label: t("usageSessions.sessions"),
@@ -280,57 +286,59 @@ export function UsageSessions({
               ...(activeMs == null ? ["active" as const] : []),
             ]}
           />
-          <div className="grid items-start gap-3 min-[1100px]:grid-cols-2">
-            <div className="min-w-0 space-y-2">
-              <SegmentedControl
-                aria-label={t("usageExperience.projectTools")}
-                value={rankKind}
-                onChange={setRankKind}
-                options={[
-                  { value: "projects", label: t("usageExperience.projects") },
-                  { value: "tools", label: t("usageExperience.tools") },
-                ]}
-              />
-              <UsageBreakdownList
-                key={rankKind}
-                kind={rankKind}
-                rows={
-                  rankKind === "projects"
-                    ? data.byProject.map((row) => ({
-                        ...row,
-                        label: project(row.id, row.label, row.path),
-                      }))
-                    : data.byTool
-                }
-                total={v.totalTokens}
-                onFilter={rankKind === "projects" ? onProject : onTool}
-                selectedIds={
-                  rankKind === "projects"
-                    ? data.appliedQuery.projectIds
-                    : data.appliedQuery.toolIds
-                }
-                pageSize={50}
-                initialLimit={6}
-                storageKey={`ofox.usageAnalysisHidden.${rankKind}`}
-                compact
-              />
-            </div>
-            <div className="min-w-0 pt-0 min-[1100px]:pt-[36px]">
-              <UsageBreakdownList
-                kind="models"
-                rows={data.byModel}
-                total={v.totalTokens}
-                onFilter={onModel}
-                selectedIds={data.appliedQuery.modelIds}
-                pageSize={50}
-                initialLimit={6}
-                storageKey="ofox.usageAnalysisHidden.models"
-                title={t("usageSessions.modelRank")}
-                compact
-              />
-            </div>
+          <div className="grid min-w-0 gap-2 min-[720px]:grid-cols-2">
+            <UsageBreakdownList
+              headerControl={
+                <SegmentedControl
+                  aria-label={t("usageExperience.projectTools")}
+                  value={rankKind}
+                  onChange={setRankKind}
+                  options={[
+                    { value: "projects", label: t("usageExperience.projects") },
+                    { value: "tools", label: t("usageExperience.tools") },
+                  ]}
+                />
+              }
+              key={rankKind}
+              kind={rankKind}
+              rows={
+                rankKind === "projects"
+                  ? data.byProject.map((row) => ({
+                      ...row,
+                      label: project(row.id, row.label, row.path),
+                    }))
+                  : data.byTool
+              }
+              total={v.totalTokens}
+              onFilter={rankKind === "projects" ? onProject : onTool}
+              onRemove={
+                rankKind === "projects" ? onRemoveProject : onRemoveTool
+              }
+              selectedIds={
+                rankKind === "projects"
+                  ? data.appliedQuery.projectIds
+                  : data.appliedQuery.toolIds
+              }
+              pageSize={50}
+              initialLimit={6}
+              storageKey={`ofox.usageAnalysisHidden.${rankKind}`}
+              compact
+            />
+            <UsageBreakdownList
+              kind="models"
+              rows={data.byModel}
+              total={v.totalTokens}
+              onFilter={onModel}
+              onRemove={onRemoveModel}
+              selectedIds={data.appliedQuery.modelIds}
+              pageSize={50}
+              initialLimit={6}
+              storageKey="ofox.usageAnalysisHidden.models"
+              title={t("usageSessions.modelRank")}
+              compact
+            />
           </div>
-          <div className="grid items-start gap-3 min-[1100px]:grid-cols-2">
+          <div className="grid min-w-0 items-stretch gap-2 min-[720px]:grid-cols-2">
             <UsageTimeInsights data={data} />
             <UsageSessionRanking
               data={data}

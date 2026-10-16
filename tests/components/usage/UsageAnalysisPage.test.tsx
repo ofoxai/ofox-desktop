@@ -1,5 +1,12 @@
 import { useEffect } from "react";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import {
+  render,
+  screen,
+  waitFor,
+  fireEvent,
+  within,
+  act,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import i18n from "i18next";
@@ -58,7 +65,14 @@ beforeEach(() => {
           sources: [],
         };
       if (command === "get_session_usage_analytics")
-        return { ...sessionAnalyticsFixture(), appliedQuery: args.query };
+        return {
+          ...sessionAnalyticsFixture(),
+          appliedQuery: args.query,
+          pricingCoverage: {
+            ...sessionAnalyticsFixture().pricingCoverage,
+            apex: mocks.apex,
+          },
+        };
       if (command === "get_usage_overview") {
         const fixture = sessionAnalyticsFixture();
         return {
@@ -329,9 +343,8 @@ it("keeps the old snapshot and chart state when the refreshed analysis read fail
   const interval = vi.spyOn(window, "setInterval");
   render(<Page />);
   await screen.findByText(/有效样本 2.*排除 1/);
-  await userEvent.click(screen.getByRole("combobox", { name: "趋势指标" }));
-  await userEvent.click(screen.getByRole("option", { name: "输出 Tokens" }));
-  const trend = screen.getByRole("combobox", { name: "趋势指标" });
+  await userEvent.click(screen.getByRole("tab", { name: "输出 Tokens" }));
+  const trend = screen.getByRole("tab", { name: "输出 Tokens" });
   const normal = mocks.invoke.getMockImplementation()!;
   mocks.invoke.mockClear();
   mocks.invoke.mockImplementation((command: string, args: any) =>
@@ -423,4 +436,188 @@ it("never calls analysis from manual refresh while capability negotiation is pen
     sessionAnalytics: false,
     sources: [],
   });
+});
+
+it("keeps ranking-selected filters visible without jumping and removes only the chosen condition", async () => {
+  mocks.sharedProjects = true;
+  localStorage.setItem("ofox.usageTab", "sessions");
+  render(<Page />);
+  await userEvent.click(
+    await screen.findByRole("combobox", { name: "模型筛选" }),
+  );
+  await userEvent.click(screen.getByRole("option", { name: "model-a" }));
+  await userEvent.keyboard("{Escape}");
+  await userEvent.click(
+    within(screen.getByRole("group", { name: "工具筛选" })).getByRole(
+      "button",
+      { name: "Codex" },
+    ),
+  );
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenLastCalledWith(
+      "get_session_usage_analytics",
+      {
+        query: expect.objectContaining({
+          toolIds: ["codex"],
+          modelIds: ["model-a"],
+        }),
+      },
+    ),
+  );
+  vi.mocked(Element.prototype.scrollIntoView).mockClear();
+  const project = screen.getByRole("button", { name: "project" });
+  await userEvent.click(project);
+  const active = within(screen.getByRole("group", { name: "已选筛选" }));
+  expect(
+    active.getByRole("button", { name: "移除项目筛选：project" }),
+  ).toBeVisible();
+  expect(project).toHaveFocus();
+  expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
+  await userEvent.click(
+    active.getByRole("button", { name: "移除模型筛选：model-a" }),
+  );
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenLastCalledWith(
+      "get_session_usage_analytics",
+      {
+        query: expect.objectContaining({
+          toolIds: ["codex"],
+          modelIds: [],
+          projectIds: ["/fixture/project"],
+        }),
+      },
+    ),
+  );
+  expect(
+    active.getByRole("button", { name: "移除工具筛选：Codex" }),
+  ).toBeVisible();
+  expect(
+    active.getByRole("button", { name: "移除项目筛选：project" }),
+  ).toBeVisible();
+});
+
+it("preserves the frozen analysis DOM and focus while a filtered request is delayed, and labels its original scope", async () => {
+  localStorage.setItem("ofox.usageTab", "sessions");
+  render(<Page />);
+  const project = await screen.findByRole("button", { name: "project" });
+  const normal = mocks.invoke.getMockImplementation()!;
+  let release!: (data: unknown) => void;
+  mocks.invoke.mockImplementation((command: string, args: any) =>
+    command === "get_session_usage_analytics"
+      ? new Promise((resolve) => {
+          release = resolve;
+        })
+      : normal(command, args),
+  );
+  await userEvent.click(project);
+  expect(screen.getByRole("button", { name: "project" })).toBe(project);
+  expect(project).toHaveFocus();
+  expect(screen.getByRole("tabpanel", { name: "会话分析" })).toHaveAttribute(
+    "aria-busy",
+    "true",
+  );
+  expect(
+    screen.getByText("正在更新筛选结果，暂时显示上次结果。", { exact: false }),
+  ).toHaveTextContent("项目筛选: 全部项目");
+  const args = mocks.invoke.mock.calls
+    .filter(([command]) => command === "get_session_usage_analytics")
+    .at(-1)![1];
+  await act(async () =>
+    release(await normal("get_session_usage_analytics", args)),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("tabpanel", { name: "会话分析" })).toHaveAttribute(
+      "aria-busy",
+      "false",
+    ),
+  );
+  expect(
+    screen.queryByText("正在更新筛选结果，暂时显示上次结果。", {
+      exact: false,
+    }),
+  ).toBeNull();
+  expect(screen.getByRole("button", { name: "project" })).toBe(project);
+});
+
+it("keeps failed-filter results clearly previous and never carries their prices across apex changes", async () => {
+  localStorage.setItem("ofox.usageTab", "sessions");
+  const view = render(<Page />);
+  const project = await screen.findByRole("button", { name: "project" });
+  const normal = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command: string, args: any) =>
+    command === "get_session_usage_analytics"
+      ? Promise.reject(new Error("fixture filter failed"))
+      : normal(command, args),
+  );
+  await userEvent.click(project);
+  expect(
+    await screen.findByText("当前条件读取失败，仍显示上次结果。", {
+      exact: false,
+    }),
+  ).toHaveTextContent("项目筛选: 全部项目");
+  expect(screen.getByRole("button", { name: "project" })).toBe(project);
+  expect(screen.getByRole("tabpanel", { name: "会话分析" })).toHaveAttribute(
+    "aria-busy",
+    "false",
+  );
+  mocks.apex = "ofox.ai";
+  mocks.invoke.mockImplementation((command: string, args: any) =>
+    command === "get_session_usage_analytics"
+      ? new Promise(() => undefined)
+      : normal(command, args),
+  );
+  view.rerender(<Page />);
+  expect(screen.queryByText("Frozen session")).toBeNull();
+  expect(
+    screen.queryByText("当前条件读取失败，仍显示上次结果。", { exact: false }),
+  ).toBeNull();
+});
+
+it("removes one project from a multi-selected ranking without altering other dimensions", async () => {
+  mocks.sharedProjects = true;
+  localStorage.setItem("ofox.usageTab", "sessions");
+  const normal = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation(async (command: string, args: any) => {
+    const result = await normal(command, args);
+    if (command === "get_session_usage_analytics") {
+      result.options.projects.push({
+        id: "/fixture/second",
+        label: "second",
+        path: "/fixture/second",
+      });
+    }
+    return result;
+  });
+  render(<Page />);
+  await userEvent.click(
+    await screen.findByRole("combobox", { name: "项目筛选" }),
+  );
+  await userEvent.click(screen.getByRole("option", { name: "project" }));
+  await userEvent.click(screen.getByRole("option", { name: "second" }));
+  await userEvent.keyboard("{Escape}");
+  await userEvent.click(
+    within(screen.getByRole("group", { name: "工具筛选" })).getByRole(
+      "button",
+      { name: "Codex" },
+    ),
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "移除 project 筛选" }),
+    ).toBeVisible(),
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "移除 project 筛选" }),
+  );
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenLastCalledWith(
+      "get_session_usage_analytics",
+      {
+        query: expect.objectContaining({
+          toolIds: ["codex"],
+          projectIds: ["/fixture/second"],
+        }),
+      },
+    ),
+  );
 });

@@ -44,3 +44,32 @@ it("labels input and output without a theme-dependent light/dark claim", () => {
   expect(screen.getByText("新输入")).toBeVisible();
   expect(screen.getByText("输出")).toBeVisible();
 });
+
+it("offers inline analysis metrics and skips unavailable message/activity tabs by keyboard", async () => {
+  render(
+    <UsageBars
+      analysis
+      unavailableMetrics={["messages", "active"]}
+      overview={{
+        granularity: "day",
+        series: [
+          {
+            start: 1791993600000,
+            inputTokens: 10,
+            outputTokens: 20,
+            estimate: undefined,
+          },
+        ],
+      }}
+    />,
+  );
+  const tokens = screen.getByRole("tab", { name: "Tokens" });
+  expect(screen.getByRole("tab", { name: "消息数" })).toBeDisabled();
+  tokens.focus();
+  await userEvent.keyboard("{ArrowRight}");
+  expect(screen.getByRole("tab", { name: "输出 Tokens" })).toHaveFocus();
+  expect(screen.getByRole("button", { name: /20 输出 Tokens/ })).toBeVisible();
+  await userEvent.keyboard("{End}");
+  expect(screen.getByRole("tab", { name: "现价估算" })).toHaveFocus();
+  expect(screen.getByRole("tabpanel")).toBeVisible();
+});
