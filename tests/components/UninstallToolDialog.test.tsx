@@ -117,7 +117,10 @@ it("offers a fresh uninstall preview from a tool row only when supported", async
   render(<BoundToolRow {...props} />);
   await userEvent.click(screen.getByRole("button", { name: /更多/ }));
   await waitFor(() => expect(mocks.invoke).toHaveBeenCalled());
-  expect(screen.queryByRole("menuitem", { name: "卸载…" })).toBeNull();
+  expect(await screen.findByText("暂时无法读取卸载信息")).toBeVisible();
+  expect(screen.getByRole("menuitem", { name: "卸载…" })).toHaveAttribute(
+    "data-disabled",
+  );
 });
 
 it("prevents escape and duplicate confirmation while removal is running", async () => {

@@ -2820,7 +2820,7 @@
   "toolLifecycle": {
     "desktopApp": "桌面应用",
     "modelUnset": "未设置模型",
-    "analytics": "账户用量（网页）",
+    "analytics": "用量明细",
     "analyticsFailed": "打开数据统计失败",
     "downloadFailed": "打开安装页面失败",
     "notInstalled": "未安装",
@@ -3103,6 +3103,7 @@
   },
   "toolUninstall": {
     "entry": "卸载…",
+    "previewUnavailable": "暂时无法读取卸载信息",
     "title": "卸载 {{tool}}",
     "description": "确认移除程序前，请检查以下影响。",
     "restore": "解除绑定并恢复可安全恢复的原配置",

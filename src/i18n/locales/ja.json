@@ -2820,7 +2820,7 @@
   "toolLifecycle": {
     "desktopApp": "デスクトップアプリ",
     "modelUnset": "モデル未設定",
-    "analytics": "アカウント使用量（Web）",
+    "analytics": "使用量明細",
     "analyticsFailed": "利用状況を開けませんでした",
     "downloadFailed": "インストールページを開けませんでした",
     "notInstalled": "未インストール",
@@ -3103,6 +3103,7 @@
   },
   "toolUninstall": {
     "entry": "アンインストール…",
+    "previewUnavailable": "アンインストール情報を読み取れません",
     "title": "{{tool}} をアンインストール",
     "description": "プログラムを削除する前に、以下の影響を確認してください。",
     "restore": "連携を解除し、安全に復元できる設定を戻す",
