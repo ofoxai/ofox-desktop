@@ -118,13 +118,17 @@ it("opens detail by keyboard without presenting imported synthetic status as obs
   const trigger = await screen.findByRole("button", {
     name: "查看请求 native-1",
   });
-  expect(trigger).toHaveTextContent("未记录");
+  expect(trigger).toHaveTextContent("本机会话导入");
+  expect(trigger).not.toHaveTextContent("未记录");
   trigger.focus();
   await userEvent.keyboard("{Enter}");
   const dialog = await screen.findByRole("dialog");
-  await waitFor(() =>
-    expect(within(dialog).getAllByText("未记录").length).toBeGreaterThan(1),
-  );
+  expect(
+    await within(dialog).findByText("原始记录未提供请求状态"),
+  ).toBeVisible();
+  expect(
+    within(dialog).getByText(/原始记录未提供：.*首 Token 用时/),
+  ).toBeVisible();
   expect(mocks.invoke).toHaveBeenCalledWith("get_request_detail", {
     requestId: "native-1",
     snapshotId: "snapshot-1",
@@ -207,9 +211,12 @@ it("honors explicit unknown measurements on proxy details as well", async () => 
     await screen.findByRole("button", { name: "查看请求 native-1" }),
   );
   const dialog = await screen.findByRole("dialog");
-  await waitFor(() =>
-    expect(within(dialog).getAllByText("未记录").length).toBeGreaterThan(2),
-  );
+  expect(
+    await within(dialog).findByText("原始记录未提供请求状态"),
+  ).toBeVisible();
+  expect(
+    within(dialog).getByText(/原始记录未提供：.*首 Token 用时/),
+  ).toBeVisible();
   expect(within(dialog).queryByText("200")).toBeNull();
 });
 
@@ -347,7 +354,7 @@ it("shows the frozen complete-condition trend and measured sample denominators a
   expect(metrics).toHaveTextContent("0 ms");
   expect(metrics).toHaveTextContent("2 / 45");
   expect(metrics).toHaveTextContent("0 / 45");
-  expect(metrics).toHaveTextContent("未记录");
+  expect(metrics).toHaveTextContent("暂无可用样本");
   const trend = screen.getByRole("region", { name: "请求趋势" });
   expect(
     within(trend).getByRole("button", { name: /540 Tokens/ }),
@@ -390,9 +397,12 @@ it("honors the same explicit first-token measurement provenance in request detai
     await screen.findByRole("button", { name: "查看请求 native-1" }),
   );
   const dialog = await screen.findByRole("dialog");
-  await waitFor(() =>
-    expect(within(dialog).getAllByText("未记录").length).toBeGreaterThan(2),
-  );
+  expect(
+    await within(dialog).findByText("原始记录未提供请求状态"),
+  ).toBeVisible();
+  expect(
+    within(dialog).getByText(/原始记录未提供：.*首 Token 用时/),
+  ).toBeVisible();
   expect(within(dialog).queryByText("999 ms")).toBeNull();
 });
 
@@ -413,8 +423,11 @@ it("does not reinterpret an older proxy first-event column as observed first-tok
     await screen.findByRole("button", { name: "查看请求 native-1" }),
   );
   const dialog = await screen.findByRole("dialog");
-  await waitFor(() =>
-    expect(within(dialog).getAllByText("未记录").length).toBeGreaterThan(1),
-  );
+  expect(
+    await within(dialog).findByText("原始记录未提供请求状态"),
+  ).toBeVisible();
+  expect(
+    within(dialog).getByText(/原始记录未提供：.*首 Token 用时/),
+  ).toBeVisible();
   expect(within(dialog).queryByText("999 ms")).toBeNull();
 });

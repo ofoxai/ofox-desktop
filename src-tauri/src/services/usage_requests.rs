@@ -807,6 +807,126 @@ mod tests {
         assert!(value["measurements"]["avgFirstTokenMs"].is_null());
     }
 
+    #[test]
+    #[serial_test::serial]
+    fn local_source_placeholders_keep_tokens_without_claiming_http_observations() {
+        let db = Database::memory().unwrap();
+        // Earlier importers used 200 and later importers use 0 as compatible
+        // ledger placeholders. Even a non-success raw value cannot prove HTTP
+        // evidence for a source whose supported projection does not supply it.
+        for (source, tool, status) in [
+            ("session_log", "claude", 200),
+            ("codex_session", "codex", 200),
+            ("gemini_session", "gemini", 200),
+            ("opencode_session", "opencode", 200),
+            ("workbuddy_session", "workbuddy", 0),
+            ("pi_session", "pi", 0),
+            ("dsh_session", "dsh", 0),
+            ("openclaw_session", "openclaw", 429),
+        ] {
+            db.conn.lock().unwrap().execute(
+                "INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,latency_ms,first_token_ms,duration_ms,is_streaming,status_code,created_at,data_source) VALUES(?1,'local',?2,'unpriced',10,20,30,40,500,10,600,1,?3,1,?1)",
+                params![source, tool, status],
+            ).unwrap();
+        }
+        let page = request_page(
+            &db,
+            query(),
+            RequestFilters {
+                status_kind: Some("unrecorded".into()),
+                ..Default::default()
+            },
+            Pagination {
+                page: 0,
+                page_size: 20,
+            },
+            None,
+            "ofox.ai",
+            3000,
+        )
+        .unwrap();
+        assert_eq!(page.total, 8);
+        assert_eq!(page.summary.requests, 8);
+        assert_eq!(page.summary.total_tokens, 240);
+        assert_eq!(page.summary.cache_read_tokens, 240);
+        assert_eq!(page.summary.cache_write_tokens, 320);
+        assert_eq!(page.measurements.status_samples, 0);
+        assert_eq!(page.measurements.failed_samples, 0);
+        assert_eq!(page.measurements.failure_rate, None);
+        assert_eq!(page.measurements.latency_samples, 1);
+        assert_eq!(page.measurements.avg_latency_ms, Some(500.0));
+        assert_eq!(page.measurements.first_token_samples, 0);
+        for row in &page.data {
+            assert_eq!(row.observed_status_code, None);
+            assert_eq!(row.observed_first_token_ms, None);
+            assert_eq!(
+                row.observed_latency_ms,
+                (row.record.data_source.as_deref() == Some("opencode_session")).then_some(500)
+            );
+            let detail = request_detail(&row.record.request_id, &page.snapshot_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(detail.observed_status_code, None);
+            assert_eq!(detail.current_estimate.availability, "unknown");
+            assert_eq!(detail.current_estimate.known_cost_usd, None);
+        }
+        assert_eq!(page.trend.series.iter().map(|p| p.requests).sum::<u64>(), 8);
+        assert_eq!(export_csv(&page.snapshot_id, None).unwrap().record_count, 8);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn http_status_filters_and_failure_rate_only_use_measured_samples() {
+        let db = Database::memory().unwrap();
+        for (id, source, status) in [
+            ("measured-success", "proxy", 200),
+            ("measured-rate-limit", "proxy", 429),
+            ("unmeasured-proxy", "proxy", 0),
+            ("imported-output", "workbuddy_session", 200),
+        ] {
+            db.conn.lock().unwrap().execute(
+                "INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,output_tokens,latency_ms,status_code,created_at,data_source) VALUES(?1,'p','workbuddy','unpriced',10,20,0,?3,1,?2)",
+                params![id, source, status],
+            ).unwrap();
+        }
+        let read = |status_kind: Option<&str>, status_code| {
+            request_page(
+                &db,
+                query(),
+                RequestFilters {
+                    status_kind: status_kind.map(str::to_owned),
+                    status_code,
+                    ..Default::default()
+                },
+                Pagination {
+                    page: 0,
+                    page_size: 20,
+                },
+                None,
+                "ofox.ai",
+                3000,
+            )
+            .unwrap()
+        };
+        let all = read(None, None);
+        assert_eq!(all.summary.total_tokens, 120);
+        assert_eq!(all.measurements.status_samples, 2);
+        assert_eq!(all.measurements.failed_samples, 1);
+        assert_eq!(all.measurements.failure_rate, Some(0.5));
+        let no_status = read(Some("unrecorded"), None);
+        assert_eq!(no_status.total, 2);
+        assert_eq!(no_status.summary.total_tokens, 60);
+        assert_eq!(no_status.measurements.failure_rate, None);
+        let success = read(None, Some(200));
+        assert_eq!(success.total, 1);
+        assert_eq!(success.data[0].record.request_id, "measured-success");
+        assert_eq!(success.measurements.failure_rate, Some(0.0));
+        let rate_limit = read(None, Some(429));
+        assert_eq!(rate_limit.total, 1);
+        assert_eq!(rate_limit.data[0].observed_status_code, Some(429));
+        assert_eq!(rate_limit.measurements.failure_rate, Some(1.0));
+    }
+
     async fn assert_lifecycle_is_not_a_token(event: serde_json::Value) {
         let timing = Arc::new(Mutex::new(None));
         let captured = timing.clone();

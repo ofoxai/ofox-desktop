@@ -11,16 +11,16 @@ export function UsageRequestMeasurements({
   const { t, i18n } = useTranslation();
   const number = (value: number) =>
     value.toLocaleString(i18n.language, { maximumFractionDigits: 2 });
-  const measured = (value: number | null, unit: string) =>
-    value == null
-      ? t("usageWorkbench.notRecorded")
+  const measured = (value: number | null, samples: number, unit: string) =>
+    samples <= 0 || value == null
+      ? t("usageWorkbench.noAvailableSamples")
       : `${number(value)} ${unit}`;
   const items = [
     {
       label: t("usageWorkbench.failureRate"),
       value:
-        measurements.failureRate == null
-          ? t("usageWorkbench.notRecorded")
+        measurements.statusSamples <= 0 || measurements.failureRate == null
+          ? t("usageWorkbench.noAvailableSamples")
           : measurements.failureRate.toLocaleString(i18n.language, {
               style: "percent",
               maximumFractionDigits: 2,
@@ -29,17 +29,29 @@ export function UsageRequestMeasurements({
     },
     {
       label: t("usageWorkbench.avgLatency"),
-      value: measured(measurements.avgLatencyMs, "ms"),
+      value: measured(
+        measurements.avgLatencyMs,
+        measurements.latencySamples,
+        "ms",
+      ),
       samples: measurements.latencySamples,
     },
     {
       label: t("usageWorkbench.avgFirstToken"),
-      value: measured(measurements.avgFirstTokenMs, "ms"),
+      value: measured(
+        measurements.avgFirstTokenMs,
+        measurements.firstTokenSamples,
+        "ms",
+      ),
       samples: measurements.firstTokenSamples,
     },
     {
       label: t("usageWorkbench.generationSpeed"),
-      value: measured(measurements.avgGenerationTokensPerSecond, "Tokens/s"),
+      value: measured(
+        measurements.avgGenerationTokensPerSecond,
+        measurements.generationSpeedSamples,
+        "Tokens/s",
+      ),
       samples: measurements.generationSpeedSamples,
     },
   ];

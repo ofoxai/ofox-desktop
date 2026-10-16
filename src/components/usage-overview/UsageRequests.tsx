@@ -13,6 +13,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import {
+  requestMeasurements,
+  requestSourcePresentation,
+} from "@/lib/usageRequestEvidence";
 import { ToolBadge } from "@/components/tools/ToolBadge";
 import { UsagePriceNotice } from "./UsageFreshness";
 import { UsageBars } from "./UsageBars";
@@ -208,7 +218,14 @@ export function UsageRequests({
           }
           options={[
             { value: "all", label: t("usageWorkbench.all") },
-            ...sourceIds.map((value) => ({ value, label: value })),
+            ...sourceIds.map((value) => {
+              const source = requestSourcePresentation(value, t);
+              return {
+                value,
+                label: source.filterLabel,
+                note: source.description,
+              };
+            }),
           ]}
         />
         <MenuSelect
@@ -234,6 +251,7 @@ export function UsageRequests({
             {
               value: "unrecorded",
               label: t("usageWorkbench.unrecordedStatus"),
+              note: t("usageWorkbench.noMeasuredStatusNote"),
             },
             ...[200, 400, 401, 403, 429, 500, 502, 503].map((code) => ({
               value: String(code),
@@ -255,6 +273,11 @@ export function UsageRequests({
           {t("usageWorkbench.reset")}
         </Button>
       </form>
+      {filters.statusKind === "unrecorded" && (
+        <p className="text-note text-ink-muted">
+          {t("usageWorkbench.noMeasuredStatusHelp")}
+        </p>
+      )}
       {updateVersion > seenUpdate && (
         <div
           role="status"
@@ -335,95 +358,119 @@ export function UsageRequests({
         </div>
       ) : (
         <>
-          <div className="overflow-hidden rounded-list border border-line bg-card">
-            <div className="grid grid-cols-[100px_minmax(0,1fr)_110px_110px] gap-3 border-b border-line-2 px-3 py-2 text-note text-ink-muted">
-              <span>{t("usageWorkbench.date")}</span>
-              <span>{t("usage.model")}</span>
-              <span className="text-right">Tokens</span>
-              <span className="text-right">
-                {t("usageWorkbench.currentEstimate")}
-              </span>
+          <TooltipProvider delayDuration={250}>
+            <div className="overflow-hidden rounded-list border border-line bg-card">
+              <div className="grid grid-cols-[100px_minmax(0,1fr)_110px_110px] gap-3 border-b border-line-2 px-3 py-2 text-note text-ink-muted">
+                <span>{t("usageWorkbench.date")}</span>
+                <span>{t("usage.model")}</span>
+                <span className="text-right">Tokens</span>
+                <span className="text-right">
+                  {t("usageWorkbench.currentEstimate")}
+                </span>
+              </div>
+              {!data?.data.length ? (
+                <p className="p-7 text-center text-sub text-ink-muted">
+                  {t(
+                    data?.coverage?.state === "unsupported"
+                      ? "usageWorkbench.queryUnavailable"
+                      : "usageWorkbench.noRequests",
+                  )}
+                </p>
+              ) : (
+                data.data.map((record) => {
+                  const source = requestSourcePresentation(
+                    record.dataSource,
+                    t,
+                  );
+                  const status = requestMeasurements(record).status;
+                  return (
+                    <Tooltip key={record.requestId}>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label={t("usageWorkbench.viewRequest", {
+                            id: record.requestId,
+                          })}
+                          className="grid w-full grid-cols-[100px_minmax(0,1fr)_110px_110px] items-center gap-3 border-b border-line-2 px-3 py-3 text-left last:border-b-0 hover:bg-pill focus-visible:relative focus-visible:z-[1] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/50"
+                          onClick={(event) =>
+                            setSelected({
+                              id: record.requestId,
+                              snapshotId: data.snapshotId,
+                              trigger: event.currentTarget,
+                              apex,
+                              receipt: {
+                                queryFingerprint: data.queryFingerprint!,
+                                snapshotVersion: data.snapshotVersion!,
+                              },
+                            })
+                          }
+                        >
+                          <span className="text-note tabular-nums text-ink-muted">
+                            {new Date(record.createdAt * 1000).toLocaleString(
+                              i18n.language,
+                              {
+                                month: "2-digit",
+                                day: "2-digit",
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              },
+                            )}
+                          </span>
+                          <span className="flex min-w-0 items-center gap-2">
+                            <ToolBadge toolId={record.appType} size={22} />
+                            <span className="min-w-0">
+                              <span
+                                className="block truncate text-sub text-ink"
+                                title={record.model}
+                              >
+                                {record.model}
+                              </span>
+                              <span
+                                className="block truncate text-note text-ink-muted"
+                                title={source.description}
+                              >
+                                {source.label}
+                                {status != null && (
+                                  <span
+                                    className={
+                                      status >= 400 ? "text-warn" : undefined
+                                    }
+                                  >
+                                    {" · HTTP "}
+                                    {status}
+                                  </span>
+                                )}
+                              </span>
+                            </span>
+                          </span>
+                          <span className="text-right tabular-nums">
+                            <span className="block text-sub text-ink">
+                              {fmtTokens(
+                                record.inputTokens + record.outputTokens,
+                              )}
+                            </span>
+                            <span className="block text-note text-ink-muted">
+                              {fmtTokens(record.inputTokens)} /{" "}
+                              {fmtTokens(record.outputTokens)}
+                            </span>
+                          </span>
+                          <span
+                            className="text-right text-sub tabular-nums text-ink"
+                            title={
+                              record.currentEstimate?.knownCostUsd ?? undefined
+                            }
+                          >
+                            {formatUsageEstimate(record.currentEstimate)}
+                          </span>
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent>{source.description}</TooltipContent>
+                    </Tooltip>
+                  );
+                })
+              )}
             </div>
-            {!data?.data.length ? (
-              <p className="p-7 text-center text-sub text-ink-muted">
-                {t(
-                  data?.coverage?.state === "unsupported"
-                    ? "usageWorkbench.queryUnavailable"
-                    : "usageWorkbench.noRequests",
-                )}
-              </p>
-            ) : (
-              data.data.map((record) => (
-                <button
-                  key={record.requestId}
-                  type="button"
-                  aria-label={t("usageWorkbench.viewRequest", {
-                    id: record.requestId,
-                  })}
-                  className="grid w-full grid-cols-[100px_minmax(0,1fr)_110px_110px] items-center gap-3 border-b border-line-2 px-3 py-3 text-left last:border-b-0 hover:bg-pill focus-visible:relative focus-visible:z-[1] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/50"
-                  onClick={(event) =>
-                    setSelected({
-                      id: record.requestId,
-                      snapshotId: data.snapshotId,
-                      trigger: event.currentTarget,
-                      apex,
-                      receipt: {
-                        queryFingerprint: data.queryFingerprint!,
-                        snapshotVersion: data.snapshotVersion!,
-                      },
-                    })
-                  }
-                >
-                  <span className="text-note tabular-nums text-ink-muted">
-                    {new Date(record.createdAt * 1000).toLocaleString(
-                      i18n.language,
-                      {
-                        month: "2-digit",
-                        day: "2-digit",
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      },
-                    )}
-                  </span>
-                  <span className="flex min-w-0 items-center gap-2">
-                    <ToolBadge toolId={record.appType} size={22} />
-                    <span className="min-w-0">
-                      <span
-                        className="block truncate text-sub text-ink"
-                        title={record.model}
-                      >
-                        {record.model}
-                      </span>
-                      <span
-                        className="block truncate text-note text-ink-muted"
-                        title={record.dataSource}
-                      >
-                        {record.dataSource ?? "proxy"} ·{" "}
-                        {record.observedStatusCode == null
-                          ? t("usageWorkbench.notRecorded")
-                          : record.observedStatusCode}
-                      </span>
-                    </span>
-                  </span>
-                  <span className="text-right tabular-nums">
-                    <span className="block text-sub text-ink">
-                      {fmtTokens(record.inputTokens + record.outputTokens)}
-                    </span>
-                    <span className="block text-note text-ink-muted">
-                      {fmtTokens(record.inputTokens)} /{" "}
-                      {fmtTokens(record.outputTokens)}
-                    </span>
-                  </span>
-                  <span
-                    className="text-right text-sub tabular-nums text-ink"
-                    title={record.currentEstimate?.knownCostUsd ?? undefined}
-                  >
-                    {formatUsageEstimate(record.currentEstimate)}
-                  </span>
-                </button>
-              ))
-            )}
-          </div>
+          </TooltipProvider>
           <div className="flex flex-wrap items-center justify-between gap-2 text-note text-ink-muted">
             <span>
               {t("usageWorkbench.totalRecords", { count: data?.total ?? 0 })}
