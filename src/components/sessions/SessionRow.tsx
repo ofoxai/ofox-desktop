@@ -1,14 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { Trash2 } from "lucide-react";
-import { toast } from "sonner";
-import { sessionsApi, type ManagedSession } from "@/lib/api/sessions";
-import { copyText } from "@/lib/clipboard";
+import type { ManagedSession } from "@/lib/api/sessions";
 import { fmtCost, fmtTokens } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { ToolBadge } from "@/components/tools/ToolBadge";
 import { SessionDetails } from "./SessionDetails";
 import { canSelect, sessionSubline } from "./model";
+import { useSessionResume } from "@/hooks/useSessionActions";
+import { ResumeFeedback } from "./ResumeFeedback";
 export function SessionRow({
   session: s,
   expanded,
@@ -19,6 +20,8 @@ export function SessionRow({
   trash,
   focusRequest,
   onLocated,
+  onRead,
+  onAnalyze,
 }: {
   session: ManagedSession;
   expanded: boolean;
@@ -29,6 +32,8 @@ export function SessionRow({
   trash: () => void;
   focusRequest?: number | null;
   onLocated?: (request: number) => void;
+  onRead?: (session: ManagedSession) => void;
+  onAnalyze?: (sessionKey: string) => void;
 }) {
   const { t, i18n } = useTranslation();
   const titleButton = useRef<HTMLButtonElement>(null);
@@ -38,36 +43,13 @@ export function SessionRow({
     titleButton.current?.focus({ preventScroll: true });
     onLocated?.(focusRequest);
   }, [focusRequest, onLocated]);
-  const [launching, setLaunching] = useState(false);
-  const running = useRef(false);
+  const resume = useSessionResume(s.sessionKey);
   const title = s.title || t("sessionCenter.untitled");
   const u = s.usage;
   const cost =
     u && !(u.models.length && u.models.every((m) => m.costUsd == null))
       ? u.costUsd
       : null;
-  const launch = async () => {
-    if (running.current) return;
-    running.current = true;
-    setLaunching(true);
-    try {
-      let result;
-      try {
-        result = await sessionsApi.resume(s.sessionKey, true);
-      } catch {
-        result = await sessionsApi.resume(s.sessionKey, false);
-      }
-      if (!result.launched) {
-        await copyText(result.command);
-        toast.success(t("sessionCenter.commandCopied"));
-      }
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      running.current = false;
-      setLaunching(false);
-    }
-  };
   return (
     <div>
       <div
@@ -82,6 +64,7 @@ export function SessionRow({
           onCheckedChange={(v) => select(v === true)}
           aria-label={t("sessionCenter.selectSession", { title })}
         />
+        <ToolBadge toolId={s.providerId} size={22} />
         <button
           ref={titleButton}
           className="min-w-0 flex-1 text-left"
@@ -114,14 +97,15 @@ export function SessionRow({
           title={t("sessionCenter.estimated")}
         >
           {fmtCost(cost)}
+          {cost != null && (u?.unpricedModels ?? 0) > 0 ? "+" : ""}
         </span>
         {s.capabilities.canResume && (
           <Button
             variant="secondary"
-            disabled={launching || busy}
-            onClick={() => void launch()}
+            disabled={resume.busy || busy}
+            onClick={() => void resume.launch()}
           >
-            {t("sessionCenter.resume")}
+            {t("sessionExperience.resumeTerminal")}
           </Button>
         )}
         <Button
@@ -134,7 +118,10 @@ export function SessionRow({
           <Trash2 className="h-3.5 w-3.5" />
         </Button>
       </div>
-      {expanded && <SessionDetails session={s} />}
+      <ResumeFeedback command={resume.command} feedback={resume.feedback} />
+      {expanded && (
+        <SessionDetails session={s} onRead={onRead} onAnalyze={onAnalyze} />
+      )}
     </div>
   );
 }

@@ -203,9 +203,10 @@ fn collect_files(root: &Path, depth: usize, paths: &mut Vec<PathBuf>) {
 
 fn entries(path: &Path) -> Result<Vec<Value>, String> {
     use std::io::{BufRead, BufReader};
-    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let file = crate::session_manager::read_context::open(path)?;
     let mut entries = Vec::new();
     for line in BufReader::new(file).lines() {
+        crate::session_manager::read_context::check()?;
         let line = line.map_err(|e| e.to_string())?;
         // A CLI may leave its final line incomplete; completed entries remain readable.
         if let Ok(value) = serde_json::from_str(&line) {

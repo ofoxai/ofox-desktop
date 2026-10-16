@@ -142,7 +142,7 @@ it("publishes consecutive successful balance samples to the shared account", asy
 });
 describe("UsagePage", () => {
   it.each([
-    ["请求", "≈$4.41"],
+    ["明细", "≈$4.41"],
     ["会话分析", "≈$3.25"],
   ])(
     "keeps the overview-only header estimate out of the priced %s page",
@@ -322,7 +322,7 @@ describe("UsagePage", () => {
     const overviewQuery = mocks.invoke.mock.calls
       .filter(([name]) => name === "get_usage_overview")
       .at(-1)![1].query;
-    await userEvent.click(screen.getByRole("tab", { name: "请求" }));
+    await userEvent.click(screen.getByRole("tab", { name: "明细" }));
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith(
         "get_request_logs",

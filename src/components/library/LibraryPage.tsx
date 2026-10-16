@@ -12,13 +12,25 @@ import { ResourcePackDialog } from "./ResourcePackDialog";
 import { LibrarySection } from "./LibrarySection";
 
 const KINDS: LibraryKind[] = ["instructions", "mcp", "skills"];
-export function LibraryPage() {
+export function LibraryPage({
+  location,
+  onLocated,
+}: {
+  location?: { kind: "mcp" | "skills"; request: number } | null;
+  onLocated?: (request: number) => void;
+}) {
   const { t } = useTranslation();
   const active = useInteractionActive();
   const [tab, setTab] = useState<LibraryKind>("instructions");
   const [visited, setVisited] = useState<Set<LibraryKind>>(
     () => new Set(["instructions"]),
   );
+  useEffect(() => {
+    if (!location || !active) return;
+    setTab(location.kind);
+    setVisited((previous) => new Set(previous).add(location.kind));
+    onLocated?.(location.request);
+  }, [location, active, onLocated]);
   const actions = useRef(new Map<LibraryKind, () => Promise<unknown>>());
   const summary = useQuery({
     queryKey: ["library", "summary"],

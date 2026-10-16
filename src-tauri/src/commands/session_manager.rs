@@ -81,6 +81,60 @@ pub async fn get_session_messages(
 }
 
 #[tauri::command]
+pub async fn get_session_transcript(
+    sessionKey: String,
+    expectedReadRevision: Option<String>,
+    expectedMessageOrdinal: Option<usize>,
+    expectedContentHash: Option<String>,
+) -> Result<session_manager::search::Transcript, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        session_manager::search::transcript(
+            &sessionKey,
+            expectedReadRevision.as_deref(),
+            expectedMessageOrdinal,
+            expectedContentHash.as_deref(),
+        )
+    })
+    .await
+    .map_err(|_| "session.search.sourceUnavailable".to_owned())?
+}
+
+#[tauri::command]
+pub async fn prepare_session_search(
+    requestId: String,
+    query: String,
+    sessionKeys: Vec<String>,
+    includeProcess: bool,
+) -> Result<session_manager::search::Prepared, String> {
+    crate::agent_env::ready().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        session_manager::search::prepare(requestId, query, sessionKeys, includeProcess)
+    })
+    .await
+    .map_err(|_| "session.search.sourceUnavailable".to_owned())?
+}
+
+#[tauri::command]
+pub async fn run_session_search(
+    app: AppHandle,
+    operationId: String,
+    cursor: Option<String>,
+) -> Result<session_manager::search::SearchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        session_manager::search::run(&operationId, cursor.as_deref(), |progress| {
+            let _ = app.emit("session-search-progress", progress);
+        })
+    })
+    .await
+    .map_err(|_| "session.search.sourceUnavailable".to_owned())?
+}
+
+#[tauri::command]
+pub fn cancel_session_search(operationId: String) -> bool {
+    session_manager::search::cancel(&operationId)
+}
+
+#[tauri::command]
 pub async fn launch_session_terminal(
     command: String,
     cwd: Option<String>,

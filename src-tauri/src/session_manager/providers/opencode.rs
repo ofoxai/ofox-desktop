@@ -183,7 +183,8 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
     let mut entries: Vec<(i64, String, String, String)> = Vec::new();
 
     for msg_path in &msg_files {
-        let data = match std::fs::read_to_string(msg_path) {
+        crate::session_manager::read_context::check()?;
+        let data = match crate::session_manager::read_context::read_text(msg_path) {
             Ok(d) => d,
             Err(_) => continue,
         };
@@ -220,7 +221,7 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
     }
 
     // Sort by created timestamp
-    entries.sort_by_key(|(ts, _, _, _)| *ts);
+    entries.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
 
     let messages = entries
         .into_iter()
@@ -241,51 +242,49 @@ pub fn load_messages_sqlite(source: &str) -> Result<Vec<SessionMessage>, String>
     let (db_path, session_id) = parse_sqlite_source(source)
         .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))?;
 
-    let conn = Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|e| format!("Failed to open OpenCode database: {e}"))?;
+    let conn = crate::session_manager::read_context::open_sqlite(&db_path)?;
 
     let mut msg_stmt = conn
         .prepare(
-            "SELECT id, time_created, data FROM message WHERE session_id = ?1 ORDER BY time_created ASC",
+            "SELECT id, time_created, data FROM message WHERE session_id = ?1 ORDER BY time_created ASC, id ASC",
         )
         .map_err(|e| format!("Failed to prepare message query: {e}"))?;
 
     let msg_rows = msg_stmt
         .query_map([session_id.as_str()], |row| {
-            let id: String = row.get(0)?;
+            let id = crate::session_manager::read_context::column(row, 0)?;
             let ts: i64 = row.get(1)?;
-            let data: String = row.get(2)?;
+            let data = crate::session_manager::read_context::column(row, 2)?;
             Ok((id, ts, data))
         })
         .map_err(|e| format!("Failed to query messages: {e}"))?;
 
     let mut part_stmt = conn
         .prepare(
-            "SELECT message_id, data FROM part WHERE session_id = ?1 ORDER BY time_created ASC",
+            "SELECT message_id, data FROM part WHERE session_id = ?1 ORDER BY time_created ASC, id ASC",
         )
         .map_err(|e| format!("Failed to prepare part query: {e}"))?;
 
     let part_rows = part_stmt
         .query_map([session_id.as_str()], |row| {
-            let message_id: String = row.get(0)?;
-            let data: String = row.get(1)?;
+            let message_id = crate::session_manager::read_context::column(row, 0)?;
+            let data = crate::session_manager::read_context::column(row, 1)?;
             Ok((message_id, data))
         })
         .map_err(|e| format!("Failed to query parts: {e}"))?;
 
     let mut parts_map: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
-    for part in part_rows.flatten() {
-        let (message_id, data) = part;
+    for part in part_rows {
+        crate::session_manager::read_context::check()?;
+        let (message_id, data) = part.map_err(|_| "session.search.sourceUnavailable".to_owned())?;
         parts_map.entry(message_id).or_default().push(data);
     }
 
     let mut messages = Vec::new();
-    for row in msg_rows.flatten() {
-        let (msg_id, ts, data) = row;
+    for row in msg_rows {
+        crate::session_manager::read_context::check()?;
+        let (msg_id, ts, data) = row.map_err(|_| "session.search.sourceUnavailable".to_owned())?;
         let msg_value: Value = match serde_json::from_str(&data) {
             Ok(v) => v,
             Err(_) => continue,
@@ -507,7 +506,8 @@ fn get_first_user_summary(storage: &Path, session_id: &str) -> Option<String> {
     // Collect user messages with timestamps for ordering
     let mut user_msgs: Vec<(i64, String)> = Vec::new();
     for msg_path in &msg_files {
-        let data = match std::fs::read_to_string(msg_path) {
+        crate::session_manager::read_context::check().ok()?;
+        let data = match crate::session_manager::read_context::read_text(msg_path) {
             Ok(d) => d,
             Err(_) => continue,
         };
@@ -570,6 +570,7 @@ fn collect_parts_text(part_dir: &Path) -> String {
         return String::new();
     };
     if crate::session_manager::managed::validate_path(part_dir, &[storage.to_path_buf()]).is_err() {
+        crate::session_manager::read_context::source_unavailable();
         return String::new();
     }
     if !part_dir.is_dir() {
@@ -579,9 +580,13 @@ fn collect_parts_text(part_dir: &Path) -> String {
     let mut parts = Vec::new();
     collect_json_files(part_dir, &mut parts);
 
+    parts.sort();
     let mut texts = Vec::new();
     for part_path in &parts {
-        let data = match std::fs::read_to_string(part_path) {
+        if crate::session_manager::read_context::check().is_err() {
+            break;
+        }
+        let data = match crate::session_manager::read_context::read_text(part_path) {
             Ok(d) => d,
             Err(_) => continue,
         };
@@ -599,16 +604,30 @@ fn collect_parts_text(part_dir: &Path) -> String {
 }
 
 fn collect_json_files(root: &Path, files: &mut Vec<PathBuf>) {
+    if crate::session_manager::read_context::check().is_err() {
+        return;
+    }
+    if root.exists() && crate::session_manager::read_context::directory(root).is_err() {
+        return;
+    }
     if !root.exists() {
         return;
     }
 
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
-        Err(_) => return,
+        Err(_) => {
+            crate::session_manager::read_context::source_unavailable();
+            return;
+        }
     };
 
     for entry in entries.flatten() {
+        if crate::session_manager::read_context::check().is_err()
+            || crate::session_manager::read_context::file_count(files.len()).is_err()
+        {
+            break;
+        }
         let path = entry.path();
         if entry.file_type().is_ok_and(|t| t.is_dir()) {
             collect_json_files(&path, files);

@@ -10,8 +10,16 @@ import type {
   UsageFilterOptions,
   UsageAttribution,
 } from "@/types/usageQuery";
-import type { SessionAnalytics } from "@/types/sessionAnalytics";
-import { assertUsageReceipt } from "@/lib/usageWorkbench";
+import type {
+  AnalyticsPage,
+  AnalyticsSort,
+  SessionAnalytics,
+} from "@/types/sessionAnalytics";
+import {
+  assertSnapshotReceipt,
+  assertUsageReceipt,
+} from "@/lib/usageWorkbench";
+import type { UsageSnapshotReceipt } from "@/types/usageQuery";
 
 /**
  * Usage overview and balance trend (Rust: `commands/usage_overview.rs`,
@@ -148,6 +156,36 @@ export async function getSessionUsageAnalytics(
     },
   );
   assertUsageReceipt(response, query);
+  return response;
+}
+
+export async function getSessionAnalyticsPage(options: {
+  analyticsSnapshotId: string;
+  expectedReceipt: UsageSnapshotReceipt;
+  sortBy: AnalyticsSort;
+  page: number;
+  pageSize: number;
+  search?: string;
+  managerKey?: string;
+}): Promise<AnalyticsPage> {
+  const response = await invoke<AnalyticsPage>("get_session_analytics_page", {
+    ...options,
+    expectedReceipt: {
+      queryFingerprint: options.expectedReceipt.queryFingerprint,
+      snapshotVersion: options.expectedReceipt.snapshotVersion,
+    },
+  });
+  assertSnapshotReceipt(response, options.expectedReceipt);
+  if (
+    response.analyticsSnapshotId !== options.analyticsSnapshotId ||
+    response.page !== options.page ||
+    response.pageSize !== options.pageSize ||
+    response.appliedView.sortBy !== options.sortBy ||
+    (response.appliedView.search ?? "") !==
+      (options.search?.trim().toLowerCase() ?? "") ||
+    (response.appliedView.managerKey ?? null) !== (options.managerKey ?? null)
+  )
+    throw new Error("usage.queryMismatch");
   return response;
 }
 

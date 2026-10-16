@@ -104,6 +104,7 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
 
     let mut result = Vec::new();
     for msg in messages {
+        crate::session_manager::read_context::check()?;
         let role = match msg.get("type").and_then(Value::as_str) {
             Some("gemini") => "assistant",
             Some("user") => "user",
@@ -237,7 +238,7 @@ pub(crate) fn parse_session(path: &Path) -> Option<SessionMeta> {
 // https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/services/chatRecordingService.ts
 // This independent reader preserves current message order after rewind/patch/set.
 pub(crate) fn read_conversation(path: &Path) -> Result<Value, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let text = crate::session_manager::read_context::read_text(path)?;
     if let Ok(value) = serde_json::from_str::<Value>(&text) {
         if value.get("messages").is_some() || path.extension().is_some_and(|e| e == "json") {
             return Ok(value);
@@ -246,6 +247,7 @@ pub(crate) fn read_conversation(path: &Path) -> Result<Value, String> {
     let mut metadata = serde_json::Map::new();
     let mut messages: Vec<Value> = Vec::new();
     for line in text.lines() {
+        crate::session_manager::read_context::check()?;
         let Ok(record) = serde_json::from_str::<Value>(line) else {
             continue;
         };

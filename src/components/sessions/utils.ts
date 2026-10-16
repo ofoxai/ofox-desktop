@@ -92,8 +92,7 @@ export const highlightText = (text: string, query: string): ReactNode => {
           "mark",
           {
             key: i,
-            className:
-              "bg-yellow-200/60 dark:bg-yellow-500/30 text-inherit rounded-sm px-0.5",
+            className: "rounded-sm bg-brand-soft px-0.5 text-brand-ink",
           },
           part,
         )

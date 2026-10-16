@@ -18,6 +18,7 @@ pub struct Capabilities {
     pub can_trash: bool,
     pub resume_uses_session_model: bool,
     pub read_only_reason: Option<String>,
+    pub resume_unavailable_reason: Option<String>,
 }
 
 /// What a file of a session holds.
@@ -64,9 +65,12 @@ pub struct ManagedSession {
 pub fn roots(provider: &str) -> Result<Vec<PathBuf>, String> {
     Ok(match provider {
         "claude" => vec![crate::config::get_claude_config_dir()],
-        "codex" => vec![crate::codex_config::get_codex_config_dir().join("sessions")],
+        "codex" => vec![
+            crate::codex_config::get_codex_config_dir().join("sessions"),
+            crate::codex_config::get_codex_config_dir().join("archived_sessions"),
+        ],
         "gemini" => vec![crate::gemini_config::get_gemini_dir().join("tmp")],
-        "opencode" => vec![providers::opencode::get_opencode_data_dir()],
+        "opencode" => vec![providers::opencode::get_opencode_base_dir()],
         "hermes" => vec![crate::hermes_config::get_hermes_dir()],
         "openclaw" => vec![crate::openclaw_config::get_openclaw_dir().join("agents")],
         "pi" => providers::pi::session_roots()?,
@@ -77,7 +81,7 @@ pub fn roots(provider: &str) -> Result<Vec<PathBuf>, String> {
     })
 }
 
-fn source_file(meta: &SessionMeta) -> Result<PathBuf, String> {
+pub(crate) fn source_file(meta: &SessionMeta) -> Result<PathBuf, String> {
     let source = meta.source_path.as_deref().ok_or("Session has no source")?;
     if let Some(sqlite) = source.strip_prefix("sqlite:") {
         let path = match meta.provider_id.as_str() {
@@ -143,13 +147,35 @@ fn remember(listing: Vec<SessionMeta>) -> Arc<Vec<SessionMeta>> {
 }
 
 /// The last listing when it is less than 5 s old, else a new scan.
-fn recent_listing() -> Arc<Vec<SessionMeta>> {
+pub(crate) fn recent_listing() -> Arc<Vec<SessionMeta>> {
     if let Some((at, listing)) = LISTING.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         if at.elapsed() < LISTING_TTL {
             return Arc::clone(listing);
         }
     }
     remember(super::scan_sessions())
+}
+
+/// Body operations use references already issued by the listing and must not
+/// incidentally rescan providers whose metadata reads whole transcripts.
+pub(crate) fn cached_listing() -> Result<Arc<Vec<SessionMeta>>, String> {
+    LISTING
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+        .map(|(_, listing)| Arc::clone(listing))
+        .ok_or_else(|| "session.search.changed".into())
+}
+
+#[cfg(test)]
+pub(crate) fn age_listing_for_test() {
+    if let Some((at, _)) = LISTING
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_mut()
+    {
+        *at = Instant::now() - Duration::from_secs(10);
+    }
 }
 
 /// Drop the cached listing (after sessions were moved to or from the trash).
@@ -209,7 +235,7 @@ pub fn list_with(db: Option<&crate::database::Database>) -> Vec<ManagedSession> 
         .collect()
 }
 
-fn record(meta: SessionMeta, listing: &[SessionMeta]) -> ManagedSession {
+pub(crate) fn record(meta: SessionMeta, listing: &[SessionMeta]) -> ManagedSession {
     let readable = meta.provider_id != "dsh";
     let resume = can_resume(&meta);
     let plan = super::trash::plan_from_listing(&meta, listing);
@@ -243,6 +269,15 @@ fn record(meta: SessionMeta, listing: &[SessionMeta]) -> ManagedSession {
                     .is_none()
                     .then(|| "Session bundle cannot be safely fingerprinted".into())
             }),
+            resume_unavailable_reason: if providers::codex::is_archived(&meta) {
+                Some("session.resume.archived".into())
+            } else if resume_args(&meta).is_err() {
+                Some("session.resume.unsupported".into())
+            } else if resume_project(&meta).is_err() {
+                Some("session.resume.directoryMissing".into())
+            } else {
+                None
+            },
         },
         models: meta
             .source_path
@@ -364,36 +399,71 @@ pub(crate) fn resolve(session_key: &str) -> Result<ManagedSession, String> {
     Ok(record(meta, &listing))
 }
 
+pub(crate) fn freeze_references(keys: &[String]) -> Result<Vec<SessionMeta>, String> {
+    let mut wanted: HashSet<_> = keys.iter().cloned().collect();
+    if wanted.len() > 20_000
+        || wanted
+            .iter()
+            .any(|key| key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err("session.search.invalidRequest".into());
+    }
+    let listing = cached_listing()?;
+    let rows: Vec<_> = shown(&listing)
+        .filter(|meta| wanted.remove(&key(meta)))
+        .cloned()
+        .collect();
+    if !wanted.is_empty() {
+        return Err("session.search.changed".into());
+    }
+    Ok(rows)
+}
+
 pub fn messages(session_key: &str) -> Result<Vec<SessionMessage>, String> {
     let record = resolve(session_key)?;
+    messages_record(&record)
+}
+
+pub(crate) fn messages_record(record: &ManagedSession) -> Result<Vec<SessionMessage>, String> {
     if !record.capabilities.can_read_messages {
         return Err("This provider supports metadata only".into());
     }
-    if record.meta.provider_id == "codex" {
-        let mut messages = Vec::new();
-        let plan = super::trash::plan(&record.meta)?;
-        let mut seen = HashSet::new();
-        // Prefer an uncompressed rollout when its compressed mirror is present.
-        let mut paths = plan.paths.clone();
-        paths.sort_by_key(|p| p.extension().is_some_and(|e| e == "zst" || e == "zstd"));
+    messages_meta(&record.meta)
+}
+
+/// No model discovery, trash bundle planning or recursive metadata walks.
+pub(crate) fn messages_meta(meta: &SessionMeta) -> Result<Vec<SessionMessage>, String> {
+    if meta.provider_id == "dsh" {
+        return Err("session.search.unsupported".into());
+    }
+    validate_path(&source_file(meta)?, &roots(&meta.provider_id)?)?;
+    if meta.provider_id == "codex" {
+        let mut parts: Vec<(Vec<u8>, Vec<SessionMessage>)> = Vec::new();
+        let paths = providers::codex::conversation_paths(meta)?;
         for path in paths.iter() {
-            let base = if path.extension().is_some_and(|e| e == "zst" || e == "zstd") {
-                path.with_extension("")
-            } else {
-                path.clone()
-            };
-            if !seen.insert(base) {
+            super::read_context::check()?;
+            let bytes = super::read_context::read_bytes(path)?;
+            // Archives may retain an identical (or shorter prefix) live copy.
+            // Require identical native bytes, including headers and hidden records;
+            // similar visible prompts alone do not prove a copied rollout.
+            if parts
+                .iter()
+                .any(|(previous, _)| previous.starts_with(&bytes))
+            {
                 continue;
             }
-            messages.extend(providers::codex::load_messages(path)?);
+            let part = super::transcript::codex_reader(std::io::Cursor::new(&bytes))?;
+            parts.retain(|(previous, _)| !bytes.starts_with(previous));
+            parts.push((bytes, part));
         }
-        return Ok(messages);
+        return Ok(parts
+            .into_iter()
+            .flat_map(|(_, messages)| messages)
+            .collect());
     }
     super::load_messages_unchecked(
-        &record.meta.provider_id,
-        record
-            .meta
-            .source_path
+        &meta.provider_id,
+        meta.source_path
             .as_deref()
             .ok_or("Missing session source")?,
     )
@@ -451,15 +521,26 @@ fn resume_project(meta: &SessionMeta) -> Result<&str, String> {
 }
 
 fn can_resume(meta: &SessionMeta) -> bool {
-    resume_args(meta).is_ok() && resume_project(meta).is_ok()
+    !providers::codex::is_archived(meta)
+        && resume_args(meta).is_ok()
+        && resume_project(meta).is_ok()
 }
 
 pub fn resume(session_key: &str, launch: bool) -> Result<ResumeResult, String> {
-    let record = resolve(session_key)?;
-    resume_record(&record.meta, launch)
+    let meta = freeze_references(&[session_key.to_owned()])?
+        .into_iter()
+        .next()
+        .ok_or("Session is no longer available; refresh the listing")?;
+    validate_path(&source_file(&meta)?, &roots(&meta.provider_id)?)?;
+    // Command preparation and launch share these current source, provider,
+    // archive, cwd and argument checks without model discovery or body reads.
+    resume_record(&meta, launch)
 }
 
 fn resume_record(meta: &SessionMeta, launch: bool) -> Result<ResumeResult, String> {
+    if providers::codex::is_archived(meta) {
+        return Err("session.resume.archived".into());
+    }
     let args = resume_args(meta)?;
     let cwd = Some(resume_project(meta)?);
     let pi_dir = if meta.provider_id == "pi" {

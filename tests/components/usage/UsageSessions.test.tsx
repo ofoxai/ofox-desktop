@@ -14,6 +14,7 @@ it("keeps unknown activity distinct from zero and shows quantile exclusions and 
   render(<UsageSessions data={sessionAnalyticsFixture()} active />);
   expect(screen.getByText(/有效样本 2.*排除 1/)).toBeVisible();
   expect(screen.getByText(/无法按模型拆分/)).toBeVisible();
+  await userEvent.click(screen.getByText("数据范围与来源"));
   expect(screen.getByText(/1 条未关联会话的记录.*7 Tokens/)).toBeVisible();
   await userEvent.click(screen.getByRole("combobox", { name: "趋势指标" }));
   expect(screen.getByRole("option", { name: "消息数" })).toHaveAttribute(
@@ -164,19 +165,19 @@ it("bounds large project and model rankings and expands each list on request", a
     .parentElement!;
   expect(
     within(project).getAllByRole("button", { name: /^project-\d+$/ }),
-  ).toHaveLength(50);
+  ).toHaveLength(6);
   expect(
     within(model).getAllByRole("button", { name: /^model-\d+$/ }),
-  ).toHaveLength(50);
+  ).toHaveLength(6);
   await userEvent.click(
-    within(project).getByRole("button", { name: "显示更多（剩余 250）" }),
+    within(project).getByRole("button", { name: "显示更多（剩余 294）" }),
   );
   expect(
     within(project).getAllByRole("button", { name: /^project-\d+$/ }),
-  ).toHaveLength(100);
+  ).toHaveLength(56);
   expect(
     within(model).getAllByRole("button", { name: /^model-\d+$/ }),
-  ).toHaveLength(50);
+  ).toHaveLength(6);
 });
 it("bounds restoration controls for a large hidden project list", async () => {
   const data = sessionAnalyticsFixture();
@@ -221,7 +222,7 @@ it("bounds visible models and hidden restoration for a ten-thousand-project snap
   );
   render(<UsageSessions data={data} active onModel={vi.fn()} />);
   expect(screen.getAllByRole("button", { name: /^model-\d+$/ })).toHaveLength(
-    50,
+    6,
   );
   await userEvent.click(screen.getByRole("button", { name: "10000 个已隐藏" }));
   expect(

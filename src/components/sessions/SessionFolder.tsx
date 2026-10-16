@@ -46,6 +46,8 @@ export function SessionFolder({
   trash,
   located,
   onLocated,
+  onRead,
+  onAnalyze,
 }: {
   path: string;
   sessions: ManagedSession[];
@@ -59,6 +61,8 @@ export function SessionFolder({
   trash: (items: ManagedSession[]) => void;
   located?: { key: string; request: number | null };
   onLocated?: (request: number) => void;
+  onRead?: (session: ManagedSession) => void;
+  onAnalyze?: (sessionKey: string) => void;
 }) {
   const { t } = useTranslation();
   const [all, setAll] = useState(false);
@@ -116,6 +120,8 @@ export function SessionFolder({
                 located?.key === s.sessionKey ? located.request : null
               }
               onLocated={onLocated}
+              onRead={onRead}
+              onAnalyze={onAnalyze}
             />
           ))}
           {!all && sessions.length > visible.length && (

@@ -23,6 +23,35 @@ pub async fn get_session_usage_analytics(
     .map_err(|_| AppError::Message("usage.analytics.taskFailed".into()))?
 }
 
+/// Sorting and paging use the frozen identified cohort that produced the
+/// analysis, without another source scan or query aggregation.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_session_analytics_page(
+    analytics_snapshot_id: String,
+    expected_receipt: crate::services::session_analytics::advanced::ExpectedReceipt,
+    sort_by: crate::services::session_analytics::advanced::SortBy,
+    page: u32,
+    page_size: u32,
+    search: Option<String>,
+    manager_key: Option<String>,
+) -> Result<crate::services::session_analytics::advanced::SessionPage, AppError> {
+    let apex = crate::ofox_apex::current_apex();
+    tokio::task::spawn_blocking(move || {
+        crate::services::session_analytics::advanced::page(
+            &analytics_snapshot_id,
+            expected_receipt,
+            sort_by,
+            page,
+            page_size,
+            search,
+            manager_key,
+            apex,
+        )
+    })
+    .await
+    .map_err(|_| AppError::Message("usage.analytics.taskFailed".into()))?
+}
+
 /// Everything the usage page shows for `period`: totals, series, per-tool and
 /// per-model breakdowns. Syncs the session sources first (debounced to once a
 /// minute); a failing sync is logged and the overview is built from what the

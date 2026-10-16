@@ -1576,6 +1576,7 @@ pub fn run() {
             // Usage statistics
             commands::get_usage_overview,
             commands::get_session_usage_analytics,
+            commands::get_session_analytics_page,
             commands::get_usage_summary,
             commands::get_usage_trends,
             commands::get_provider_stats,
@@ -1602,6 +1603,10 @@ pub fn run() {
             commands::list_sessions,
             commands::refresh_session_index,
             commands::get_session_messages,
+            commands::get_session_transcript,
+            commands::prepare_session_search,
+            commands::run_session_search,
+            commands::cancel_session_search,
             commands::delete_session,
             commands::delete_sessions,
             commands::launch_session_terminal,

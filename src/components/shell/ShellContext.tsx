@@ -32,6 +32,12 @@ export interface ShellContextValue {
   sessionLocation: { key: string; request: number } | null;
   locateSession: (key: string) => void;
   consumeSessionLocation: (request: number) => void;
+  usageLocation: { key: string; request: number } | null;
+  locateUsage: (key: string) => void;
+  consumeUsageLocation: (request: number) => void;
+  libraryLocation: { kind: "mcp" | "skills"; request: number } | null;
+  locateLibrary: (kind: "mcp" | "skills") => void;
+  consumeLibraryLocation: (request: number) => void;
   /** Pages opened at least once. They stay mounted, hidden, after. */
   visited: ReadonlySet<ShellPage>;
   openSettings: () => void;
@@ -72,6 +78,10 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
   const [sessionLocation, setSessionLocation] =
     useState<ShellContextValue["sessionLocation"]>(null);
   const locationSequence = useRef(0);
+  const [usageLocation, setUsageLocation] =
+    useState<ShellContextValue["usageLocation"]>(null);
+  const [libraryLocation, setLibraryLocation] =
+    useState<ShellContextValue["libraryLocation"]>(null);
   const [visited, setVisited] = useState<ReadonlySet<ShellPage>>(
     () => new Set<ShellPage>(["tools"]),
   );
@@ -97,6 +107,30 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
   );
   const consumeSessionLocation = useCallback((request: number) => {
     setSessionLocation((current) =>
+      current?.request === request ? null : current,
+    );
+  }, []);
+  const locateUsage = useCallback(
+    (key: string) => {
+      setUsageLocation({ key, request: ++locationSequence.current });
+      setActive("usage");
+    },
+    [setActive],
+  );
+  const consumeUsageLocation = useCallback((request: number) => {
+    setUsageLocation((current) =>
+      current?.request === request ? null : current,
+    );
+  }, []);
+  const locateLibrary = useCallback(
+    (kind: "mcp" | "skills") => {
+      setLibraryLocation({ kind, request: ++locationSequence.current });
+      setActive("library");
+    },
+    [setActive],
+  );
+  const consumeLibraryLocation = useCallback((request: number) => {
+    setLibraryLocation((current) =>
       current?.request === request ? null : current,
     );
   }, []);
@@ -135,6 +169,12 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
       sessionLocation,
       locateSession,
       consumeSessionLocation,
+      usageLocation,
+      locateUsage,
+      consumeUsageLocation,
+      libraryLocation,
+      locateLibrary,
+      consumeLibraryLocation,
       visited,
       openSettings,
       registerRefresh,
@@ -148,6 +188,12 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
       sessionLocation,
       locateSession,
       consumeSessionLocation,
+      usageLocation,
+      locateUsage,
+      consumeUsageLocation,
+      libraryLocation,
+      locateLibrary,
+      consumeLibraryLocation,
       visited,
       openSettings,
       registerRefresh,

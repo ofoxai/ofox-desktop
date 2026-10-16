@@ -1,6 +1,6 @@
 # 会话分析缓存与查询
 
-会话分析只读本机缓存；查询筛选和打开详情不重新解析原生正文，也不写入请求账本。前端、缓存查询、共享刷新、公共来源健康和能力开关已经接通并通过专项评审。最终全项目门禁与原生窗口验收以[实施记录](implementation-progress-2026-10-15.md)为准。
+会话分析只读本机缓存；查询筛选和打开详情不重新解析原生正文，也不写入请求账本。前端、缓存查询、共享刷新、公共来源健康和能力开关已经接通并通过专项评审。最终全项目门禁与原生窗口验收以[实施记录](implementation-progress-2026-10-16.md)为准。
 
 ## 数据与口径
 
@@ -40,3 +40,28 @@
 - 当前会话分析桥接覆盖 Claude、Codex、Gemini 和 OpenCode；WorkBuddy、dsh、Pi、OpenClaw 的 reader 不因此取得会话分析能力。Hermes 累计统计独立于此查询，不制造时间序列或请求 ID。
 - 概览／请求页的共享项目筛选和概览项目排行见[项目归属说明](usage-project-filter.md)。旧后端只有会话项目能力时仍保留原有的局部筛选降级。
 - 全项目最终代码门禁、release 原生复验及真实 CSV 聚合对账已完成，最终交付见实施记录。请求与概览按同一冻结范围核对；会话分析保留可核实的归属子集，未知历史不为配平而加入。release p95 和 Windows 原生行为仍未验证，Windows 不以 macOS 的类型检查替代。
+
+## 会话工作台扩展
+
+分析响应在同一个缓存／价格投影中增加以下兼容字段，不增加数据库迁移：
+
+- `knownMetrics`、`metricCoverage`：只累计消息身份、角色和时间完整的已识别会话。旧 totals 与 series 的 nullable 语义不变；每日的 `knownMessages`／`knownActiveMs` 与相同子集对账。有效与排除数不是全量完成率，无法量化的来源缺口单独声明。模型或来源不可归因时，新指标同样不可用。
+- `activityByHour`：有效消息间隔先按查询窗口裁切，再切到本地小时，汇总为星期一至星期日、0–23点。前跳小时为空，回拨的同名小时合并；总和与已知活动时长相同。时区投影和规则版本进入快照版本。
+- `compactTop`：完整筛选 cohort 的 Tokens／可计算估价／活跃排行各六条。未知指标不填零，费用使用十进制比较；部分金额仍明确标为部分。
+- `distributions`：Tokens、消息数和活动时长分布，已知零有效，未知排除；边界为各桶包含的下界，末桶无上限。不是从 Top100 推算。
+
+`get_session_analytics_page({analyticsSnapshotId,expectedReceipt,sortBy,page,pageSize,search?,managerKey?})` 只读完整 cohort 的无正文内存快照。每页1–100条，搜索只影响列表，`managerKey` 精确匹配后端签发引用；`appliedView` 和 `viewFingerprint` 与统计范围回执分开。快照沿用10分钟、最多4份／128MiB、单份100k行的上限；超限明确返回分页不可用，不截断冒充完整。后台更新不替换已打开的排行，apex不匹配或过期需重新查询。
+
+UI保留六格KPI、趋势与两栏排行；900px排行改为单列。项目／工具切换与模型排行默认各六条，继续展示分批有界；隐藏只是显示偏好，不改变统计。日历按年查看当前范围；活动指标是消息间隔估计，不代表人的工作时间。
+
+## 本地正文搜索与阅读
+
+正文搜索显式调用 `prepare_session_search`，先订阅 `session-search-progress`，再 `run_session_search`；`cancel_session_search` 设置同一任务取消标记。请求、事件和结果均以 operation／request ID 隔离。候选是已发现、后端签发的会话引用，不接受任意文件路径；不扫描回收站，不建立持久化正文索引，不上传查询或正文。
+
+搜索使用原生 reader 还原后的可见消息，保留 Gemini rewind、Pi active branch、WorkBuddy快照替换等语义。命中包含 `sessionKey/readRevision/messageOrdinal/contentHash`；`get_session_transcript` 打开时验证来源与定位，变化时要求重新搜索。缓存中的旧定位不能绕过重新验证。进度和片段在返回前清理可识别凭据；显式阅读正文不改原生文件。
+
+每批最多200个命中、每会话最多3个片段；默认只含用户与助手，过程内容需明确开启。时间、解码、结果上限以及变化／失败／不支持来源分别报告，不合成假零。普通元数据筛选不读取全部正文。阅读器保留虚拟化，增加安全Markdown、逐条和代码复制、时间、提问目录及本会话查找；HTML作为文本显示，图片不自动联网，链接只允许现有外部打开器支持的HTTP(S)。
+
+Codex原生 `archived_sessions` 纳入发现、读取和导出。原生归档与OFox回收站不同；归档或跨根副本不因可读而开放继续／删除。没有前缀证明的缓存消息数保持未知，正文投影按可证明的身份处理副本。
+
+安全读取预算与快照限制见[已知边界](known-limitations.md#session-workbench-acceptance-boundaries-2026-10-16)。普通阅读和生成继续命令也遵循经过验证的会话引用；阅读不会隐式执行工具。

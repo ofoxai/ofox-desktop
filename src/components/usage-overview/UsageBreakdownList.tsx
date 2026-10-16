@@ -44,6 +44,9 @@ export function UsageBreakdownList({
   storageKey,
   title,
   pageSize,
+  compact = false,
+  selectedIds = [],
+  initialLimit,
 }: {
   kind: "tools" | "models" | "projects";
   rows: Row[];
@@ -52,13 +55,16 @@ export function UsageBreakdownList({
   storageKey?: string;
   title?: string;
   pageSize?: number;
+  compact?: boolean;
+  selectedIds?: string[];
+  initialLimit?: number;
 }) {
   const { t } = useTranslation();
   const key = storageKey ?? `ofox.usageHidden.${kind}`;
   const [hidden, setHidden] = useState(() => readHidden(key));
   const [open, setOpen] = useState(false);
   const batchSize = pageSize ?? Infinity;
-  const [visibleLimit, setVisibleLimit] = useState(batchSize);
+  const [visibleLimit, setVisibleLimit] = useState(initialLimit ?? batchSize);
   const [hiddenLimit, setHiddenLimit] = useState(batchSize);
   const set = (ids: string[]) => {
     setHidden(ids);
@@ -69,6 +75,9 @@ export function UsageBreakdownList({
   const hiddenIds = new Set(hidden);
   const hiddenRows = rows.filter((r) => hiddenIds.has(r.id));
   const visibleRows = rows.filter((r) => !hiddenIds.has(r.id));
+  const barScale = compact
+    ? Math.max(1, ...visibleRows.map((row) => row.totalTokens))
+    : total;
   return (
     <ListCard>
       <ListHead>
@@ -82,9 +91,14 @@ export function UsageBreakdownList({
         </h2>
       </ListHead>
       {visibleRows.slice(0, visibleLimit).map((r) => (
-        <ListRow key={r.id}>
+        <ListRow
+          key={r.id}
+          className={compact ? "min-h-[42px] py-1.5" : undefined}
+        >
           {kind === "tools" && <ToolBadge toolId={r.id} size={24} />}
-          <div className="min-w-0 flex-1 space-y-1">
+          <div
+            className={compact ? "min-w-0 flex-1" : "min-w-0 flex-1 space-y-1"}
+          >
             <p
               className={
                 kind === "models"
@@ -96,8 +110,9 @@ export function UsageBreakdownList({
               {onFilter ? (
                 <button
                   type="button"
-                  className="block w-full truncate text-left hover:text-brand-ink focus-visible:outline-brand"
-                  title={label(r)}
+                  className="block w-full truncate rounded px-1 text-left hover:text-brand-ink focus-visible:outline-brand aria-pressed:bg-brand-soft aria-pressed:text-brand-ink"
+                  title={r.path ? `${label(r)}\n${r.path}` : label(r)}
+                  aria-pressed={selectedIds.includes(r.id)}
                   onClick={() => onFilter(r.id)}
                 >
                   {label(r)}
@@ -106,7 +121,7 @@ export function UsageBreakdownList({
                 label(r)
               )}
             </p>
-            {r.path && (
+            {r.path && !compact && (
               <p
                 className="truncate font-mono text-note text-ink-faint"
                 title={r.path}
@@ -114,8 +129,15 @@ export function UsageBreakdownList({
                 {r.path}
               </p>
             )}
-            <ShareBar value={total > 0 ? r.totalTokens / total : 0} />
+            {!compact && (
+              <ShareBar value={total > 0 ? r.totalTokens / total : 0} />
+            )}
           </div>
+          {compact && (
+            <div className="w-[24%] shrink-0" aria-hidden>
+              <ShareBar value={barScale > 0 ? r.totalTokens / barScale : 0} />
+            </div>
+          )}
           <div
             className="shrink-0 text-right tabular-nums"
             title={t("usagePage.io", {
@@ -124,7 +146,11 @@ export function UsageBreakdownList({
             })}
           >
             <b className="text-sub">{fmtTokens(r.totalTokens)}</b>
-            <p className="hidden text-note text-ink-faint xl:block">
+            <p
+              className={
+                compact ? "hidden" : "hidden text-note text-ink-faint xl:block"
+              }
+            >
               {t("usagePage.io", {
                 input: fmtTokens(r.inputTokens),
                 output: fmtTokens(r.outputTokens),

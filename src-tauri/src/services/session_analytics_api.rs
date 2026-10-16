@@ -1,7 +1,7 @@
 //! Cached session queries; IPC never reparses native transcripts.
 use super::{
     ofox_pricing::PriceCatalog,
-    session_analytics::{build_analysis, AnalyticsInput, SessionAnalytics},
+    session_analytics::{advanced, build_analysis_in, AnalyticsInput, SessionAnalytics},
     session_analytics_core::DayBoundary,
     session_analytics_index,
     usage_query::UsageQueryV1,
@@ -111,7 +111,7 @@ pub(crate) fn query<Tz: TimeZone>(
                 .iter()
                 .all(|source| !READERS.iter().any(|(_, id)| id == source)));
     let days = days(&query, &input, tz)?;
-    let mut result = build_analysis(query, &input, &catalog, &days)?;
+    let mut result = build_analysis_in(query, &input, &catalog, &days, tz)?;
     if only_unsupported {
         result.coverage.state = "unsupported".into();
         result.totals.messages = None;
@@ -119,6 +119,11 @@ pub(crate) fn query<Tz: TimeZone>(
         result.totals.active_days = None;
         result.totals.message_reason = Some("sourceUnsupported".into());
         result.totals.activity_reason = Some("sourceUnsupported".into());
+        result.known_metrics = None;
+        result.metric_coverage.state = "unavailable".into();
+        result.metric_coverage.reasons = vec!["sourceUnsupported".into()];
+        result.activity_by_hour.cells.clear();
+        result.activity_by_hour.coverage = result.metric_coverage.clone();
         result.totals.estimate = super::ofox_pricing::CostEstimate {
             unpriced_record_count: None,
             ..Default::default()
@@ -127,11 +132,18 @@ pub(crate) fn query<Tz: TimeZone>(
         for day in &mut result.series {
             day.messages = None;
             day.active_ms = None;
+            day.known_messages = None;
+            day.known_active_ms = None;
             day.estimate = result.totals.estimate.clone();
         }
     }
+    advanced::retain_analysis(&mut result);
     Ok(result)
 }
+#[cfg(test)]
+#[path = "session_analytics_calendar_tests.rs"]
+mod calendar_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +186,11 @@ mod tests {
         assert_eq!(result.series.len(), 1);
         assert_eq!(result.pricing_coverage.apex, "ofox.ai");
         assert!(!format!("{result:?}").contains("private payload"));
+        assert!(result.analytics_snapshot_id.is_some());
+        assert!(result.cohort_rows.is_empty());
+        let json = serde_json::to_value(&result).unwrap();
+        assert!(json.get("cohortRows").is_none());
+        assert_eq!(json["compactTop"]["tokens"][0]["tokens"]["totalTokens"], 5);
     }
     #[test]
     fn session_analytics_api_handles_empty_window_and_separate_apex_without_creating_days() {
@@ -221,6 +238,9 @@ mod tests {
             assert_eq!(result.coverage.state, "unsupported");
             assert!(result.coverage.reasons.iter().any(|r| r == reason));
             assert_eq!(result.totals.session_count, 0);
+            assert!(result.known_metrics.is_none());
+            assert!(result.activity_by_hour.cells.is_empty());
+            assert!(result.analytics_snapshot_id.is_none());
         }
     }
 }

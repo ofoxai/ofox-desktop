@@ -1,17 +1,24 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { save } from "@tauri-apps/plugin-dialog";
-import { toast } from "sonner";
 import { sessionsApi, type ManagedSession } from "@/lib/api/sessions";
 import { fmtCost, fmtTokens, fmtBytes } from "@/lib/format";
 import { CopyButton } from "@/components/ui/copy-button";
 import { Button } from "@/components/ui/button";
 import { SessionTranscript } from "./SessionTranscript";
-export function SessionDetails({ session: s }: { session: ManagedSession }) {
+import { useSessionExport } from "@/hooks/useSessionActions";
+export function SessionDetails({
+  session: s,
+  onRead,
+  onAnalyze,
+}: {
+  session: ManagedSession;
+  onRead?: (session: ManagedSession) => void;
+  onAnalyze?: (sessionKey: string) => void;
+}) {
   const { t, i18n } = useTranslation();
   const [show, setShow] = useState(false);
-  const [exporting, setExporting] = useState(false);
+  const { busy: exporting, exportFile } = useSessionExport(s.sessionKey);
   const resume = useQuery({
     queryKey: ["session-command", s.sessionKey],
     queryFn: () => sessionsApi.resume(s.sessionKey, false),
@@ -20,24 +27,6 @@ export function SessionDetails({ session: s }: { session: ManagedSession }) {
   });
   const stamp = (n?: number) =>
     n == null ? "—" : new Date(n).toLocaleString(i18n.language);
-  const exportFile = async () => {
-    if (exporting) return;
-    setExporting(true);
-    try {
-      const preview = await sessionsApi.exportMarkdown(s.sessionKey);
-      const destination = await save({
-        defaultPath: preview.filename,
-        filters: [{ name: "Markdown", extensions: ["md"] }],
-      });
-      if (!destination) return;
-      await sessionsApi.exportMarkdown(s.sessionKey, destination);
-      toast.success(t("sessionCenter.exported"));
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setExporting(false);
-    }
-  };
   return (
     <div className="space-y-2 border-t border-line-2 py-3 pl-[38px] pr-3 text-[11.5px] text-ink-muted select-text">
       <div>
@@ -66,6 +55,18 @@ export function SessionDetails({ session: s }: { session: ManagedSession }) {
         </div>
       )}
       {resume.isError && <p role="alert">{String(resume.error)}</p>}
+      {!s.capabilities.canResume && (
+        <p className="text-note">
+          {t(
+            s.capabilities.resumeUnavailableReason === "session.resume.archived"
+              ? "sessionExperience.resumeArchived"
+              : s.capabilities.resumeUnavailableReason ===
+                  "session.resume.directoryMissing"
+                ? "sessionExperience.resumeDirectoryMissing"
+                : "sessionExperience.resumeUnavailable",
+          )}
+        </p>
+      )}
       {s.usage?.models.map((m) => (
         <div
           key={m.model}
@@ -105,7 +106,7 @@ export function SessionDetails({ session: s }: { session: ManagedSession }) {
           <Button
             variant="ghost"
             aria-expanded={show}
-            onClick={() => setShow(!show)}
+            onClick={() => (onRead ? onRead(s) : setShow(!show))}
           >
             {t(
               show ? "sessionCenter.hideContent" : "sessionCenter.viewContent",
@@ -119,6 +120,11 @@ export function SessionDetails({ session: s }: { session: ManagedSession }) {
             onClick={() => void exportFile()}
           >
             {t("sessionCenter.export")}
+          </Button>
+        )}
+        {onAnalyze && (
+          <Button variant="ghost" onClick={() => onAnalyze(s.sessionKey)}>
+            {t("sessionExperience.analyze")}
           </Button>
         )}
       </div>

@@ -167,7 +167,15 @@ function ConsoleShell({
 
         {shell.visited.has("sessions") && (
           <div {...panel("sessions")} className="h-full px-4 pb-4 pt-1">
-            <SessionsPanel className="h-full min-h-0" />
+            <SessionsPanel
+              className="h-full min-h-0"
+              onAnalyze={shell.locateUsage}
+              onConfigure={(section) =>
+                section === "tools"
+                  ? shell.setActive("tools")
+                  : shell.locateLibrary(section)
+              }
+            />
           </div>
         )}
         {shell.visited.has("usage") && (
@@ -188,7 +196,10 @@ function ConsoleShell({
             className="h-full overflow-y-auto px-4 pb-4 pt-1"
           >
             <InteractionScope active={shell.active === "library"}>
-              <LibraryPage />
+              <LibraryPage
+                location={shell.libraryLocation}
+                onLocated={shell.consumeLibraryLocation}
+              />
             </InteractionScope>
           </div>
         )}

@@ -3,6 +3,10 @@ mod cache_foundation_tests;
 pub mod managed;
 pub mod meta_cache;
 pub mod providers;
+pub(crate) mod read_context;
+pub mod search;
+#[cfg(test)]
+mod search_regression_tests;
 pub(crate) mod source_cache;
 pub mod terminal;
 pub mod title;

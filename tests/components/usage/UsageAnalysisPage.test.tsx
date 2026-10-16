@@ -126,7 +126,7 @@ it("shares a supported project condition across analysis, overview and requests 
     ),
   );
   expect(screen.queryByText(/切换后已清除/)).toBeNull();
-  await userEvent.click(screen.getByRole("tab", { name: "请求" }));
+  await userEvent.click(screen.getByRole("tab", { name: "明细" }));
   await waitFor(() =>
     expect(mocks.invoke).toHaveBeenCalledWith(
       "get_request_logs",

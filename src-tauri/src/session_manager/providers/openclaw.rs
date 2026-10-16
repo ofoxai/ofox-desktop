@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fs::File;
+
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
@@ -211,15 +211,13 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
 }
 
 pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
-    let file = File::open(path).map_err(|e| format!("Failed to open session file: {e}"))?;
+    let file = crate::session_manager::read_context::open(path)?;
     let reader = BufReader::new(file);
     let mut messages = Vec::new();
 
     for line in reader.lines() {
-        let line = match line {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
+        crate::session_manager::read_context::check()?;
+        let line = line.map_err(|error| error.to_string())?;
         let value: Value = match serde_json::from_str(&line) {
             Ok(parsed) => parsed,
             Err(_) => continue,

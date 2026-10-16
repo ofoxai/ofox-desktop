@@ -167,12 +167,12 @@ fn pretty(value: &Value) -> String {
 
 /// A Claude Code session file as a transcript.
 pub fn claude(path: &Path) -> Result<Vec<SessionMessage>, String> {
-    let file =
-        std::fs::File::open(path).map_err(|e| format!("Failed to open session file: {e}"))?;
+    let file = super::read_context::open(path)?;
     let mut out = Vec::new();
     let mut tools = HashMap::new();
     for line in BufReader::new(file).lines() {
-        let Ok(line) = line else { continue };
+        super::read_context::check()?;
+        let line = line.map_err(|error| error.to_string())?;
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -251,11 +251,16 @@ fn claude_blocks(
 
 /// A Codex rollout as a transcript.
 pub fn codex(path: &Path) -> Result<Vec<SessionMessage>, String> {
-    let reader = super::providers::dsh::open(path)?;
+    let reader = super::read_context::open(path)?;
+    codex_reader(reader)
+}
+
+pub(crate) fn codex_reader(reader: impl std::io::Read) -> Result<Vec<SessionMessage>, String> {
     let mut out = Vec::new();
     let mut tools: HashMap<String, String> = HashMap::new();
     for line in BufReader::new(reader).lines() {
-        let Ok(line) = line else { continue };
+        super::read_context::check()?;
+        let line = line.map_err(|error| error.to_string())?;
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
             continue;
         };

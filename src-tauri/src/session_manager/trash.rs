@@ -14,6 +14,13 @@ use std::time::{Duration, SystemTime};
 static LOCK: Mutex<()> = Mutex::new(());
 const ACTIVE_WINDOW: Duration = Duration::from_secs(60);
 
+#[cfg(test)]
+thread_local! { static FINGERPRINT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+pub(crate) fn fingerprint_calls() -> usize {
+    FINGERPRINT_CALLS.with(std::cell::Cell::get)
+}
+
 pub(crate) struct Bundle {
     pub paths: Vec<PathBuf>,
     pub roots: Vec<PathBuf>,
@@ -50,6 +57,9 @@ fn plan_with_listing(
     roots: Vec<PathBuf>,
     listing: Option<&[SessionMeta]>,
 ) -> Result<Bundle, String> {
+    if providers::codex::is_archived(meta) {
+        return Err("Native archived sessions are read-only in the session center".into());
+    }
     if !matches!(
         meta.provider_id.as_str(),
         "claude" | "codex" | "gemini" | "pi" | "dsh"
@@ -98,7 +108,7 @@ fn plan_with_listing(
             }
         }
         "codex" => {
-            let records = listing
+            let records: Vec<SessionMeta> = listing
                 .map(|records| {
                     records
                         .iter()
@@ -106,7 +116,19 @@ fn plan_with_listing(
                         .cloned()
                         .collect()
                 })
-                .unwrap_or_else(|| providers::codex::scan_in(&roots[0]));
+                .unwrap_or_else(|| {
+                    roots
+                        .iter()
+                        .flat_map(|root| providers::codex::scan_in(root))
+                        .collect()
+                });
+            if records.iter().any(|record| {
+                record.session_id == meta.session_id && providers::codex::is_archived(record)
+            }) {
+                return Err(
+                    "A native archived copy shares this session; file trash is unavailable".into(),
+                );
+            }
             for record in records {
                 if record.session_id == meta.session_id {
                     if let Some(source) = record.source_path {
@@ -377,6 +399,8 @@ pub(crate) struct Fingerprint {
 }
 
 pub(crate) fn fingerprint(paths: &[PathBuf]) -> Result<Fingerprint, String> {
+    #[cfg(test)]
+    FINGERPRINT_CALLS.with(|count| count.set(count.get() + 1));
     let mut hash = Sha256::new();
     let mut size = 0;
     let mut files = Vec::new();

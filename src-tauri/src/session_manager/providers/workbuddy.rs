@@ -80,11 +80,11 @@ pub fn scan_sessions() -> Vec<SessionMeta> {
 }
 
 pub(crate) fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
-    use crate::services::{session_usage_workbuddy as wb, usage_source};
+    use crate::services::session_usage_workbuddy as wb;
     use serde_json::Value;
     let mut messages: Vec<SessionMessage> = Vec::new();
     let mut identities = std::collections::BTreeMap::new();
-    let progress = usage_source::json_lines(
+    let progress = crate::session_manager::read_context::json_lines(
         path,
         |_| true,
         |_, value| {

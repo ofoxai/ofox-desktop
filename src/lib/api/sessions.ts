@@ -8,6 +8,7 @@ export interface SessionCapabilities {
   canTrash: boolean;
   resumeUsesSessionModel: boolean;
   readOnlyReason?: string | null;
+  resumeUnavailableReason?: string | null;
 }
 
 export type SessionFileKind = "main" | "subagent" | "segment" | "database";
@@ -103,7 +104,78 @@ export interface DeleteSessionResult extends DeleteSessionOptions {
   error?: string;
 }
 
+export interface SessionSearchHit {
+  sessionKey: string;
+  readRevision: string;
+  messageOrdinal: number;
+  contentHash: string;
+  role: SessionMessage["role"];
+  name?: string | null;
+  snippet: string;
+}
+
+export interface SessionSearchProgress {
+  operationId: string;
+  requestId: string;
+  hits: SessionSearchHit[];
+  scanned: number;
+  total: number;
+  changed: number;
+  failed: number;
+  unsupported: number;
+}
+
+export interface SessionSearchResult extends SessionSearchProgress {
+  state: "complete" | "limited" | "cancelled";
+  limitReasons: string[];
+  nextCursor?: string | null;
+}
+
+export interface SessionTranscriptResult {
+  readRevision: string;
+  messages: SessionMessage[];
+}
+
 export const sessionsApi = {
+  async prepareSearch(request: {
+    requestId: string;
+    query: string;
+    sessionKeys: string[];
+    includeProcess: boolean;
+  }) {
+    return await invoke<{
+      operationId: string;
+      requestId: string;
+      candidateCount: number;
+    }>("prepare_session_search", request);
+  },
+
+  async runSearch(operationId: string, cursor?: string) {
+    return await invoke<SessionSearchResult>("run_session_search", {
+      operationId,
+      cursor,
+    });
+  },
+
+  async cancelSearch(operationId: string) {
+    return await invoke<boolean>("cancel_session_search", { operationId });
+  },
+
+  async getTranscript(
+    sessionKey: string,
+    expected?: Pick<
+      SessionSearchHit,
+      "readRevision" | "messageOrdinal" | "contentHash"
+    >,
+  ) {
+    return await invoke<SessionTranscriptResult>("get_session_transcript", {
+      sessionKey,
+      expectedReadRevision: expected?.readRevision,
+      expectedMessageOrdinal: expected?.messageOrdinal,
+      expectedContentHash: expected?.contentHash,
+    });
+  },
+
   async list(): Promise<ManagedSession[]> {
     return await invoke("list_sessions");
   },

@@ -79,6 +79,23 @@ export function UsagePage({
   const [filters, setFilters] = useState<WorkbenchFilters>({});
   const [analysisProjects, setAnalysisProjects] = useState<string[]>([]);
   const [projectsCleared, setProjectsCleared] = useState(false);
+  const [sessionTarget, setSessionTarget] = useState<{
+    key: string;
+    request: number;
+  } | null>(null);
+  const { usageLocation, consumeUsageLocation } = shell;
+  useEffect(() => {
+    if (!usageLocation || shell.active !== "usage") return;
+    setSessionTarget(usageLocation);
+    setTab("sessions");
+    localStorage.setItem("ofox.usageTab", "sessions");
+    consumeUsageLocation(usageLocation.request);
+  }, [usageLocation, consumeUsageLocation, shell.active]);
+  const clearSessionTarget = useCallback((request: number) => {
+    setSessionTarget((current) =>
+      current?.request === request ? null : current,
+    );
+  }, []);
   const [anchor, setAnchor] = useState(Date.now);
   const query = useMemo(
     () => createUsageQuery(range, filters, anchor),
@@ -397,6 +414,20 @@ export function UsagePage({
               : []),
           ]}
         />
+        <UsageHeader
+          period={range.period}
+          modern={modern}
+          showEstimate={effectiveTab === "overview"}
+          onChange={(period) =>
+            period === "custom"
+              ? setCustomOpen((value) => !value)
+              : chooseRange({ period })
+          }
+          cost={effectiveTab === "overview" ? data?.totals.costUsd : undefined}
+          estimate={
+            effectiveTab === "overview" ? data?.totals.estimate : undefined
+          }
+        />
         <div className="flex items-center gap-2">
           <MenuSelect
             aria-label={t("usageWorkbench.refreshEvery")}
@@ -420,20 +451,6 @@ export function UsagePage({
           </Button>
         </div>
       </div>
-      <UsageHeader
-        period={range.period}
-        modern={modern}
-        showEstimate={effectiveTab === "overview"}
-        onChange={(period) =>
-          period === "custom"
-            ? setCustomOpen((value) => !value)
-            : chooseRange({ period })
-        }
-        cost={effectiveTab === "overview" ? data?.totals.costUsd : undefined}
-        estimate={
-          effectiveTab === "overview" ? data?.totals.estimate : undefined
-        }
-      />
       {customOpen && (
         <form
           className="flex flex-wrap items-end gap-2 rounded-card border border-line bg-card p-3"
@@ -791,6 +808,19 @@ export function UsagePage({
                 }))
               }
               onManage={shell.locateSession}
+              onTool={(id) =>
+                setFilters((old) => ({
+                  ...old,
+                  toolIds: old.toolIds?.includes(id) ? [] : [id],
+                }))
+              }
+              location={sessionTarget}
+              onLocated={clearSessionTarget}
+              onExpandScope={() => {
+                setFilters({});
+                setAnalysisProjects([]);
+                chooseRange({ period: "all" });
+              }}
             />
           )}
         </div>

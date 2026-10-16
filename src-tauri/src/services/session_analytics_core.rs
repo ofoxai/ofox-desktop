@@ -115,6 +115,9 @@ pub struct Activity {
     pub by_session: BTreeMap<String, u64>,
     pub by_session_messages: BTreeMap<String, u64>,
     pub daily_sessions: BTreeMap<String, BTreeSet<String>>,
+    /// Verified, clipped gaps retained for local-hour projection. Never bodies.
+    #[serde(skip)]
+    pub intervals: Vec<(i64, i64)>,
 }
 
 pub fn quantiles(samples: impl IntoIterator<Item = Option<u64>>) -> Quantiles {
@@ -382,6 +385,7 @@ pub fn message_activity(
             if covered != duration {
                 return Err("incompleteActivityDayBoundaries".into());
             }
+            result.intervals.push((start, end));
             checked_add(&mut result.active_ms, duration)?;
             checked_add(
                 result.by_session.entry(session.to_owned()).or_default(),

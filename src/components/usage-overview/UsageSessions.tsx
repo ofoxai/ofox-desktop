@@ -17,7 +17,13 @@ import type {
 } from "@/types/sessionAnalytics";
 import { UsageBars, type UsageMetric } from "./UsageBars";
 import { usageProjectLabel } from "@/lib/usageProject";
-import { UsageFreshness } from "./UsageFreshness";
+import { UsageAnalysisStatus } from "./UsageAnalysisStatus";
+import { UsageSessionRanking } from "./UsageSessionRanking";
+import { UsageTimeInsights } from "./UsageTimeInsights";
+import { UsageDistributions } from "./UsageDistributions";
+import { SegmentedControl } from "@/components/ui/segmented";
+import { formatActivity } from "@/lib/usageInsights";
+import { getSessionAnalyticsPage } from "@/lib/api/usageOverview";
 import { UsageBreakdownList } from "./UsageBreakdownList";
 import type { UsageQueryV1 } from "@/types/usageQuery";
 
@@ -26,15 +32,23 @@ export function UsageSessions({
   active,
   onProject,
   onModel,
+  onTool,
   onManage,
   showData = true,
+  location,
+  onLocated,
+  onExpandScope,
 }: {
   data: SessionAnalytics;
   active: boolean;
   onProject?: (id: string) => void;
   onModel?: (id: string) => void;
+  onTool?: (id: string) => void;
   onManage?: (key: string) => void;
   showData?: boolean;
+  location?: { key: string; request: number } | null;
+  onLocated?: (request: number) => void;
+  onExpandScope?: () => void;
 }) {
   const { t, i18n } = useTranslation();
   const panel = useRef<HTMLElement>(null);
@@ -52,6 +66,50 @@ export function UsageSessions({
   }, [active]);
   const [metric, setMetric] = useState<UsageMetric>("tokens");
   const [detailModelLimit, setDetailModelLimit] = useState(50);
+  const [locationState, setLocationState] = useState<
+    "loading" | "missing" | "unsupported" | null
+  >(null);
+  useEffect(() => {
+    if (!active || !showData || !location) return;
+    if (!data.analyticsSnapshotId) {
+      setLocationState("unsupported");
+      return;
+    }
+    let stale = false;
+    setLocationState("loading");
+    void getSessionAnalyticsPage({
+      analyticsSnapshotId: data.analyticsSnapshotId,
+      expectedReceipt: data,
+      managerKey: location.key,
+      sortBy: "tokens",
+      page: 0,
+      pageSize: 1,
+    })
+      .then((page) => {
+        if (stale) return;
+        const row = page.data[0];
+        if (!row) {
+          setLocationState("missing");
+          return;
+        }
+        handingOff.current = false;
+        returnFocus.current = undefined;
+        returnKey.current = row.sessionKey;
+        setSelected({
+          row,
+          version: data.snapshotVersion,
+          query: data.appliedQuery,
+        });
+        setLocationState(null);
+        onLocated?.(location.request);
+      })
+      .catch(() => {
+        if (!stale) setLocationState("unsupported");
+      });
+    return () => {
+      stale = true;
+    };
+  }, [active, showData, location, data, onLocated]);
   const project = (
     id: string | null,
     label?: string | null,
@@ -63,25 +121,15 @@ export function UsageSessions({
     });
   const firstProject = data.byProject[0];
   const v = data.totals;
-  const duration = (ms: number | null) =>
-    ms == null
-      ? "—"
-      : t("usageSessions.activeMinutes", {
-          value: Number((ms / 60000).toFixed(2)).toLocaleString(i18n.language),
-        });
-  const quantile = (value: string | number | null) => {
-    if (value == null) return "—";
-    const [whole, decimal] = String(value).split(".");
-    if (!/^\d+$/.test(whole)) return "—";
-    const separator =
-      new Intl.NumberFormat(i18n.language)
-        .formatToParts(1.1)
-        .find((p) => p.type === "decimal")?.value ?? ".";
-    return (
-      BigInt(whole).toLocaleString(i18n.language) +
-      (decimal ? separator + decimal : "")
-    );
-  };
+  const duration = (ms: number | null) => formatActivity(ms, t);
+  const quantile = (value: string | number | null) =>
+    value == null ? "—" : fmtTokens(Number(value));
+  const [rankKind, setRankKind] = useState<"projects" | "tools">("projects");
+  const known =
+    data.metricCoverage?.state === "unavailable" ? null : data.knownMetrics;
+  const activeMs = v.activeMs ?? known?.activeMs ?? null;
+  const messages = v.messages ?? known?.messages ?? null;
+  const partialMetrics = data.metricCoverage?.state === "partial" && !!known;
 
   return (
     <section
@@ -92,6 +140,34 @@ export function UsageSessions({
     >
       {showData && (
         <>
+          {location && locationState && (
+            <div
+              role="status"
+              className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-card px-3 py-2 text-sub text-ink-muted"
+            >
+              <span>
+                {t(
+                  locationState === "loading"
+                    ? "common.loading"
+                    : locationState === "missing"
+                      ? "usageExperience.locationMissing"
+                      : "usageExperience.rankUnavailable",
+                )}
+              </span>
+              {locationState === "missing" && onExpandScope && (
+                <Button variant="secondary" onClick={onExpandScope}>
+                  {t("usageExperience.expandScope")}
+                </Button>
+              )}
+              <Button
+                variant="ghost"
+                onClick={() => onLocated?.(location.request)}
+              >
+                {t("usageWorkbench.close")}
+              </Button>
+            </div>
+          )}
+          <UsageAnalysisStatus data={data} />
           <KpiStrip
             className="!grid-cols-2 md:!grid-cols-3"
             items={[
@@ -102,6 +178,7 @@ export function UsageSessions({
                   median: quantile(v.medianTokens),
                   p90: quantile(v.p90Tokens),
                 }),
+                title: `${v.medianTokens ?? "—"} / ${v.p90Tokens ?? "—"}`,
               },
               {
                 label: "Tokens",
@@ -128,10 +205,8 @@ export function UsageSessions({
               },
               {
                 label: t("usageSessions.activity"),
-                value: duration(v.activeMs),
-                sub: t("usageSessions.activeDays", {
-                  value: v.activeDays ?? "—",
-                }),
+                value: duration(activeMs),
+                sub: `${partialMetrics ? t("usageExperience.knownPart") + " · " : ""}${t("usageSessions.activeDays", { value: v.activeDays ?? known?.activeDays ?? "—" })}`,
               },
               {
                 label: t("usageSessions.projects"),
@@ -146,19 +221,31 @@ export function UsageSessions({
               },
             ]}
           />
-          <p className="text-note text-ink-muted">
-            {t("usageSessions.samples", {
-              count: v.quantileSamples,
-              excluded: v.quantileExcluded,
-            })}
-          </p>
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-note text-ink-muted">
+            <p>
+              {t("usageSessions.samples", {
+                count: v.quantileSamples,
+                excluded: v.quantileExcluded,
+              })}
+            </p>
+            <p>
+              {partialMetrics && (
+                <span>{t("usageExperience.knownPart")} · </span>
+              )}
+              {t("usageExperience.aux", {
+                messages: messages?.toLocaleString(i18n.language) ?? "—",
+                cache: fmtTokens(v.cacheWriteTokens),
+              })}
+            </p>
+          </div>
           {(v.messageReason === "modelAttributionUnavailable" ||
             v.activityReason === "modelAttributionUnavailable") && (
             <p className="text-note text-ink-muted">
               {t("usageSessions.modelUnavailable")}
             </p>
           )}
-          {(v.messages == null || v.activeMs == null) &&
+          {!known &&
+            (v.messages == null || v.activeMs == null) &&
             v.messageReason !== "modelAttributionUnavailable" &&
             v.activityReason !== "modelAttributionUnavailable" && (
               <p className="text-note text-ink-muted">
@@ -170,6 +257,11 @@ export function UsageSessions({
                 )}
               </p>
             )}
+          {partialMetrics && (
+            <p className="text-note text-ink-faint">
+              {t("usageExperience.knownTrend")}
+            </p>
+          )}
           <UsageBars
             selectedMetric={metric}
             onMetricChange={setMetric}
@@ -179,132 +271,84 @@ export function UsageSessions({
               series: data.series.map((day) => ({
                 ...day,
                 start: day.startMs,
+                messages: day.messages ?? day.knownMessages ?? null,
+                activeMs: day.activeMs ?? day.knownActiveMs ?? null,
               })),
             }}
             unavailableMetrics={[
-              ...(v.messages == null ? ["messages" as const] : []),
-              ...(v.activeMs == null ? ["active" as const] : []),
+              ...(messages == null ? ["messages" as const] : []),
+              ...(activeMs == null ? ["active" as const] : []),
             ]}
           />
-          <p className="text-note text-ink-faint">
-            {t("usageSessions.activityExplanation")}
-          </p>
-          <div className="grid gap-3 md:grid-cols-2">
-            <UsageBreakdownList
-              kind="projects"
-              rows={data.byProject.map((row) => ({
-                ...row,
-                label: project(row.id, row.label, row.path),
-              }))}
-              total={v.totalTokens}
-              onFilter={onProject}
-              pageSize={50}
-              storageKey="ofox.usageAnalysisHidden.projects"
-            />
-            <UsageBreakdownList
-              kind="models"
-              rows={data.byModel}
-              total={v.totalTokens}
-              onFilter={onModel}
-              pageSize={50}
-              storageKey="ofox.usageAnalysisHidden.models"
-              title={t("usageSessions.modelRank")}
+          <div className="grid items-start gap-3 min-[1100px]:grid-cols-2">
+            <div className="min-w-0 space-y-2">
+              <SegmentedControl
+                aria-label={t("usageExperience.projectTools")}
+                value={rankKind}
+                onChange={setRankKind}
+                options={[
+                  { value: "projects", label: t("usageExperience.projects") },
+                  { value: "tools", label: t("usageExperience.tools") },
+                ]}
+              />
+              <UsageBreakdownList
+                key={rankKind}
+                kind={rankKind}
+                rows={
+                  rankKind === "projects"
+                    ? data.byProject.map((row) => ({
+                        ...row,
+                        label: project(row.id, row.label, row.path),
+                      }))
+                    : data.byTool
+                }
+                total={v.totalTokens}
+                onFilter={rankKind === "projects" ? onProject : onTool}
+                selectedIds={
+                  rankKind === "projects"
+                    ? data.appliedQuery.projectIds
+                    : data.appliedQuery.toolIds
+                }
+                pageSize={50}
+                initialLimit={6}
+                storageKey={`ofox.usageAnalysisHidden.${rankKind}`}
+                compact
+              />
+            </div>
+            <div className="min-w-0 pt-0 min-[1100px]:pt-[36px]">
+              <UsageBreakdownList
+                kind="models"
+                rows={data.byModel}
+                total={v.totalTokens}
+                onFilter={onModel}
+                selectedIds={data.appliedQuery.modelIds}
+                pageSize={50}
+                initialLimit={6}
+                storageKey="ofox.usageAnalysisHidden.models"
+                title={t("usageSessions.modelRank")}
+                compact
+              />
+            </div>
+          </div>
+          <div className="grid items-start gap-3 min-[1100px]:grid-cols-2">
+            <UsageTimeInsights data={data} />
+            <UsageSessionRanking
+              data={data}
+              active={active}
+              onSelect={(row, event, context) => {
+                handingOff.current = false;
+                returnFocus.current = event.currentTarget;
+                returnKey.current = row.sessionKey;
+                setDetailModelLimit(50);
+                setSelected({
+                  row,
+                  version: context.snapshotVersion,
+                  query: context.appliedQuery,
+                });
+              }}
             />
           </div>
-          <div className="overflow-hidden rounded-list border border-line bg-card">
-            <h2 className="border-b border-line-2 px-3 py-2 text-sub font-medium">
-              {t("usageSessions.top", { count: data.topLimit })}
-            </h2>
-            {data.topSessions.length ? (
-              data.topSessions.map((row) => (
-                <button
-                  key={row.sessionKey}
-                  type="button"
-                  aria-label={t("usageSessions.view", { title: row.title })}
-                  ref={(node) => {
-                    if (node) rowButtons.current.set(row.sessionKey, node);
-                    else rowButtons.current.delete(row.sessionKey);
-                  }}
-                  onClick={(event) => {
-                    handingOff.current = false;
-                    returnFocus.current = event.currentTarget;
-                    returnKey.current = row.sessionKey;
-                    setDetailModelLimit(50);
-                    setSelected({
-                      row,
-                      version: data.snapshotVersion,
-                      query: data.appliedQuery,
-                    });
-                  }}
-                  className="flex w-full min-w-0 items-center gap-3 border-b border-line-2 px-3 py-3 text-left last:border-b-0 hover:bg-pill focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/50"
-                >
-                  <ToolBadge toolId={row.toolId} size={24} />
-                  <span className="min-w-0 flex-1">
-                    <span
-                      className="block truncate text-sub font-medium"
-                      title={row.title}
-                    >
-                      {row.title}
-                    </span>
-                    <span
-                      className="block truncate text-note text-ink-muted"
-                      title={project(
-                        row.projectId,
-                        row.projectPath ?? row.projectLabel,
-                      )}
-                    >
-                      {project(
-                        row.projectId,
-                        row.projectLabel,
-                        row.projectPath,
-                      )}{" "}
-                      ·{" "}
-                      {row.models
-                        .slice(0, 2)
-                        .map((m) => m.model)
-                        .join(", ") || "—"}
-                      {row.models.length > 2
-                        ? ` +${row.models.length - 2}`
-                        : ""}
-                    </span>
-                  </span>
-                  <span className="shrink-0 text-sub tabular-nums">
-                    {row.tokens == null
-                      ? "—"
-                      : fmtTokens(row.tokens.totalTokens)}
-                  </span>
-                  <span className="shrink-0 whitespace-nowrap text-sub tabular-nums text-ink-muted">
-                    {formatUsageEstimate(row.estimate)}
-                  </span>
-                </button>
-              ))
-            ) : (
-              <p className="p-5 text-sub text-ink-muted">
-                {t("usageSessions.empty")}
-              </p>
-            )}
-          </div>
-          {!!data.unassociated.records && (
-            <p className="text-note text-ink-muted">
-              {t("usageSessions.unassociated", {
-                count: data.unassociated.records,
-                tokens: fmtTokens(data.unassociated.totalTokens),
-              })}
-            </p>
-          )}
-          {data.coverage.state !== "complete" && (
-            <p className="text-note text-ink-muted">
-              {t(
-                data.coverage.state === "unsupported"
-                  ? "usageWorkbench.queryUnavailable"
-                  : "usageWorkbench.partial",
-              )}
-            </p>
-          )}
-          <UsageFreshness
-            sources={data.sources}
-            pricing={data.pricingCoverage}
-          />
+          <UsageDistributions distributions={data.distributions} />
         </>
       )}
       <Dialog

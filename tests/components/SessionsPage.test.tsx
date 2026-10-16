@@ -9,6 +9,7 @@ import {
   screen,
   waitFor,
   within,
+  act,
 } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
@@ -35,6 +36,7 @@ vi.mock("@tanstack/react-virtual", () => ({
         start: index * 70,
       })),
     measureElement: () => undefined,
+    scrollToIndex: () => undefined,
   }),
 }));
 vi.mock("@/components/ConfirmDialog", () => ({
@@ -111,12 +113,25 @@ beforeEach(() => {
   localStorage.clear();
   HTMLElement.prototype.scrollIntoView = vi.fn();
   i18n.addResourceBundle("zh", "translation", zh, true, true);
+  i18n.addResourceBundle(
+    "zh",
+    "translation",
+    { sessionExperience: zh.sessionExperience },
+    true,
+    true,
+  );
   vi.spyOn(sessionsApi, "resume").mockResolvedValue({
     command: "safe command",
     launched: false,
   });
   vi.spyOn(sessionsApi, "getMessagesByKey").mockResolvedValue([]);
+  vi.spyOn(sessionsApi, "getTranscript").mockResolvedValue({
+    readRevision: "verified",
+    messages: [],
+  });
   vi.spyOn(sessionsApi, "listTrash").mockResolvedValue([]);
+  vi.spyOn(sessionsApi, "cancelSearch").mockResolvedValue(true);
+  vi.spyOn(clipboard, "copyText").mockResolvedValue();
 });
 
 describe("SessionsPage capabilities and reversible actions", () => {
@@ -220,7 +235,7 @@ describe("SessionsPage capabilities and reversible actions", () => {
         launched: false,
       });
     renderPanel([a]);
-    fireEvent.click(await screen.findByRole("button", { name: "继续对话" }));
+    fireEvent.click(await screen.findByRole("button", { name: "在终端继续" }));
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith("backend literal command"),
     );
@@ -302,7 +317,10 @@ it("shows fresh tokens, separate cache, readable costs, and lazy inline bodies",
   expect(sessionsApi.getMessagesByKey).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: "查看会话" }));
   await waitFor(() =>
-    expect(sessionsApi.getMessagesByKey).toHaveBeenCalledWith(a.sessionKey),
+    expect(sessionsApi.getTranscript).toHaveBeenCalledWith(
+      a.sessionKey,
+      undefined,
+    ),
   );
 });
 
@@ -369,7 +387,7 @@ it("launches safely, exports to the chosen destination, and searches model names
     target: { value: "special-model" },
   });
   await waitFor(() => expect(screen.queryByText("title-b")).toBeNull());
-  fireEvent.click(screen.getByRole("button", { name: "继续对话" }));
+  fireEvent.click(screen.getByRole("button", { name: "在终端继续" }));
   await waitFor(() =>
     expect(sessionsApi.resume).toHaveBeenCalledWith(row.sessionKey, true),
   );
@@ -408,16 +426,22 @@ it("restores sessions and confirms clearing every trash entry", async () => {
 
 it("refreshes an open transcript when its revision changes", async () => {
   const a = session("a");
-  vi.mocked(sessionsApi.getMessagesByKey)
-    .mockResolvedValueOnce([{ role: "user", content: "old body" }])
-    .mockResolvedValue([{ role: "user", content: "new body" }]);
+  vi.mocked(sessionsApi.getTranscript)
+    .mockResolvedValueOnce({
+      readRevision: "old",
+      messages: [{ role: "user", content: "old body" }],
+    })
+    .mockResolvedValue({
+      readRevision: "new",
+      messages: [{ role: "user", content: "new body" }],
+    });
   const client = renderPanel([a]);
   fireEvent.click(screen.getByRole("button", { name: /title-a/ }));
   fireEvent.click(screen.getByRole("button", { name: "查看会话" }));
   expect(await screen.findByText("old body")).toBeVisible();
   client.setQueryData(["sessions"], [{ ...a, revision: "changed" }]);
   expect(await screen.findByText("new body")).toBeVisible();
-  expect(sessionsApi.getMessagesByKey).toHaveBeenCalledTimes(2);
+  expect(sessionsApi.getTranscript).toHaveBeenCalledTimes(2);
 });
 
 it("locates a stable analysis key beyond the first hundred without reading or resuming it", async () => {
@@ -446,4 +470,413 @@ it("locates a stable analysis key beyond the first hundred without reading or re
   expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalled();
   expect(sessionsApi.getMessagesByKey).not.toHaveBeenCalled();
   expect(sessionsApi.resume).not.toHaveBeenCalled();
+});
+
+it("opens an independent reader and returns to the unchanged list without eager content reads", async () => {
+  vi.mocked(sessionsApi.getTranscript).mockResolvedValue({
+    readRevision: "verified",
+    messages: [{ role: "user", content: "A readable question" }],
+  });
+  renderPanel([session("a"), session("b")]);
+  fireEvent.change(screen.getByRole("searchbox"), {
+    target: { value: "title-a" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: /title-a/ }));
+  expect(sessionsApi.getMessagesByKey).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "查看会话" }));
+  expect(
+    await screen.findByRole("button", { name: "返回会话列表" }),
+  ).toBeVisible();
+  expect(screen.queryByRole("button", { name: /title-b/ })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "返回会话列表" }));
+  expect(screen.getByRole("searchbox")).toHaveValue("title-a");
+  expect(screen.getByRole("button", { name: /title-a/ })).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
+});
+
+it("requires an explicit content-search action and freezes backend session keys", async () => {
+  const row = session("a");
+  const prepare = vi
+    .spyOn(sessionsApi, "prepareSearch")
+    .mockImplementation(async ({ requestId }) => ({
+      operationId: "operation",
+      requestId,
+      candidateCount: 1,
+    }));
+  const runSearch = vi
+    .spyOn(sessionsApi, "runSearch")
+    .mockImplementation(async () => ({
+      operationId: "operation",
+      requestId: prepare.mock.calls[0][0].requestId,
+      state: "complete",
+      hits: [
+        {
+          sessionKey: row.sessionKey,
+          readRevision: "read-revision",
+          messageOrdinal: 0,
+          contentHash: "checksum",
+          role: "user",
+          snippet: "matching question",
+        },
+      ],
+      scanned: 1,
+      total: 1,
+      changed: 0,
+      failed: 0,
+      unsupported: 0,
+      limitReasons: [],
+    }));
+  renderPanel([row]);
+  fireEvent.click(screen.getByRole("radio", { name: "聊天内容" }));
+  fireEvent.change(screen.getByRole("searchbox"), {
+    target: { value: "matching" },
+  });
+  expect(prepare).not.toHaveBeenCalled();
+  fireEvent.keyDown(screen.getByRole("searchbox"), { key: "Enter" });
+  await waitFor(() =>
+    expect(runSearch).toHaveBeenCalledWith("operation", undefined),
+  );
+  expect(
+    await screen.findByText(
+      (_, element) =>
+        element?.tagName === "SPAN" &&
+        element.textContent === "matching question",
+    ),
+  ).toBeVisible();
+  expect(prepare).toHaveBeenCalledWith({
+    requestId: expect.any(String),
+    query: "matching",
+    sessionKeys: [row.sessionKey],
+    includeProcess: false,
+  });
+  expect(runSearch).toHaveBeenCalledWith("operation", undefined);
+  expect(sessionsApi.getMessagesByKey).not.toHaveBeenCalled();
+});
+
+it("opens a search hit only through backend revision and message checksum validation", async () => {
+  const row = session("a");
+  const hit = {
+    sessionKey: row.sessionKey,
+    readRevision: "searched-revision",
+    messageOrdinal: 0,
+    contentHash: "checksum",
+    role: "user" as const,
+    snippet: "matching question",
+  };
+  const prepare = vi
+    .spyOn(sessionsApi, "prepareSearch")
+    .mockImplementation(async ({ requestId }) => ({
+      operationId: "operation",
+      requestId,
+      candidateCount: 1,
+    }));
+  vi.spyOn(sessionsApi, "runSearch").mockImplementation(async () => ({
+    operationId: "operation",
+    requestId: prepare.mock.calls[0][0].requestId,
+    state: "complete",
+    hits: [hit],
+    scanned: 1,
+    total: 1,
+    changed: 0,
+    failed: 0,
+    unsupported: 0,
+    limitReasons: [],
+  }));
+  const read = vi
+    .spyOn(sessionsApi, "getTranscript")
+    .mockRejectedValue("session.search.changed");
+  renderPanel([row]);
+  fireEvent.click(screen.getByRole("radio", { name: "聊天内容" }));
+  fireEvent.change(screen.getByRole("searchbox"), {
+    target: { value: "matching" },
+  });
+  fireEvent.keyDown(screen.getByRole("searchbox"), { key: "Enter" });
+  fireEvent.click(
+    await screen.findByRole("button", { name: /title-a.*matching question/ }),
+  );
+  expect(
+    await screen.findByText("会话内容已变化，请重新搜索后定位。"),
+  ).toBeVisible();
+  expect(read).toHaveBeenCalledWith(row.sessionKey, hit);
+  expect(sessionsApi.getMessagesByKey).not.toHaveBeenCalled();
+  expect(
+    within(screen.getByRole("region", { name: "会话阅读" })).queryByText(
+      "matching question",
+    ),
+  ).toBeNull();
+});
+
+it("navigates user questions and local matches inside a virtualized reader", async () => {
+  vi.mocked(sessionsApi.getTranscript).mockResolvedValue({
+    readRevision: "verified",
+    messages: [
+      { role: "user", content: "First question" },
+      { role: "assistant", content: "Useful answer" },
+      { role: "tool", content: "Tool evidence", name: "read" },
+      { role: "user", content: "Follow-up question" },
+    ],
+  });
+  renderPanel([session("a")]);
+  fireEvent.click(screen.getByRole("button", { name: /title-a/ }));
+  fireEvent.click(screen.getByRole("button", { name: "查看会话" }));
+  await screen.findByText("First question");
+  fireEvent.click(screen.getByRole("button", { name: /提问目录/ }));
+  fireEvent.click(screen.getByRole("button", { name: "第 2 条提问" }));
+  await waitFor(() =>
+    expect(document.querySelector('[data-message-ordinal="3"]')).toHaveFocus(),
+  );
+  fireEvent.change(screen.getByRole("searchbox", { name: "在本会话中查找" }), {
+    target: { value: "Tool evidence" },
+  });
+  expect(screen.getByText("1 / 1 条匹配消息")).toBeVisible();
+  expect(document.querySelector('[data-message-ordinal="2"]')).toHaveClass(
+    "ring-brand/40",
+  );
+  expect(
+    document.querySelector('[data-message-ordinal="2"] details'),
+  ).toHaveAttribute("open");
+});
+
+it("never leaves stale search-hit content visible when a recheck reports a changed source", async () => {
+  const row = session("a");
+  const hit = {
+    sessionKey: row.sessionKey,
+    readRevision: "searched-revision",
+    messageOrdinal: 0,
+    contentHash: "checksum",
+    role: "user" as const,
+    snippet: "matching question",
+  };
+  const prepare = vi
+    .spyOn(sessionsApi, "prepareSearch")
+    .mockImplementation(async ({ requestId }) => ({
+      operationId: "operation",
+      requestId,
+      candidateCount: 1,
+    }));
+  vi.spyOn(sessionsApi, "runSearch").mockImplementation(async () => ({
+    operationId: "operation",
+    requestId: prepare.mock.calls[0][0].requestId,
+    state: "complete",
+    hits: [hit],
+    scanned: 1,
+    total: 1,
+    changed: 0,
+    failed: 0,
+    unsupported: 0,
+    limitReasons: [],
+  }));
+  const read = vi
+    .spyOn(sessionsApi, "getTranscript")
+    .mockResolvedValueOnce({
+      readRevision: "searched-revision",
+      messages: [{ role: "user", content: "Old accepted content" }],
+    })
+    .mockRejectedValue("session.search.changed");
+  const client = renderPanel([row]);
+  fireEvent.click(screen.getByRole("radio", { name: "聊天内容" }));
+  fireEvent.change(screen.getByRole("searchbox"), {
+    target: { value: "matching" },
+  });
+  fireEvent.keyDown(screen.getByRole("searchbox"), { key: "Enter" });
+  fireEvent.click(
+    await screen.findByRole("button", { name: /title-a.*matching question/ }),
+  );
+  expect(await screen.findByText("Old accepted content")).toBeVisible();
+  await act(async () =>
+    client.invalidateQueries({ queryKey: ["session-messages"] }),
+  );
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  expect(
+    await screen.findByText("会话内容已变化，请重新搜索后定位。"),
+  ).toBeVisible();
+  expect(screen.queryByText("Old accepted content")).toBeNull();
+});
+
+it("keeps focus in the local find field while typing instead of moving it to a result", async () => {
+  vi.mocked(sessionsApi.getTranscript).mockResolvedValue({
+    readRevision: "verified",
+    messages: [{ role: "user", content: "A matching answer" }],
+  });
+  renderPanel([session("a")]);
+  fireEvent.click(screen.getByRole("button", { name: /title-a/ }));
+  fireEvent.click(screen.getByRole("button", { name: "查看会话" }));
+  await screen.findByText("A matching answer");
+  const find = screen.getByRole("searchbox", { name: "在本会话中查找" });
+  find.focus();
+  fireEvent.change(find, { target: { value: "answer" } });
+  await act(
+    async () =>
+      new Promise((resolve) =>
+        window.requestAnimationFrame(() => resolve(undefined)),
+      ),
+  );
+  expect(find).toHaveFocus();
+});
+
+it("offers continue and export inside the reader without returning to the list", async () => {
+  const row = session("a");
+  const exp = vi
+    .spyOn(sessionsApi, "exportMarkdown")
+    .mockResolvedValue({ filename: "a.md", content: "body" });
+  saveDialog.mockResolvedValue(null);
+  renderPanel([row]);
+  fireEvent.click(screen.getByRole("button", { name: /title-a/ }));
+  fireEvent.click(screen.getByRole("button", { name: "查看会话" }));
+  const reader = screen.getByRole("region", { name: "会话阅读" });
+  fireEvent.click(within(reader).getByRole("button", { name: "在终端继续" }));
+  await waitFor(() =>
+    expect(sessionsApi.resume).toHaveBeenCalledWith(row.sessionKey, true),
+  );
+  fireEvent.click(
+    within(reader).getByRole("button", { name: "导出 Markdown" }),
+  );
+  await waitFor(() => expect(exp).toHaveBeenCalledWith(row.sessionKey));
+  expect(exp).toHaveBeenCalledOnce();
+});
+
+it("labels partial session pricing without presenting the known amount as a complete total", () => {
+  const model = {
+    model: "known",
+    requests: 1,
+    inputTokens: 1,
+    outputTokens: 1,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    costUsd: 0.02,
+  };
+  renderPanel([
+    {
+      ...session("a"),
+      usage: {
+        models: [model, { ...model, model: "unknown", costUsd: null }],
+        inputTokens: 2,
+        outputTokens: 2,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        totalTokens: 4,
+        costUsd: 0.02,
+        unpricedModels: 1,
+      },
+    },
+  ]);
+  expect(screen.getByText("≈$0.020+")).toBeVisible();
+});
+
+it("keeps a copyable command visible when both terminal launch and clipboard fallback fail", async () => {
+  vi.mocked(sessionsApi.resume)
+    .mockRejectedValueOnce("terminal unavailable")
+    .mockResolvedValue({ command: "copy-this-command", launched: false });
+  vi.mocked(clipboard.copyText)
+    .mockRejectedValueOnce("clipboard unavailable")
+    .mockResolvedValue();
+  renderPanel([session("a")]);
+  fireEvent.click(screen.getByRole("button", { name: "在终端继续" }));
+  expect(
+    await screen.findByText("未能启动终端，复制也失败；请重试复制下方命令。"),
+  ).toBeVisible();
+  expect(screen.getByText("copy-this-command")).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "复制继续命令" }));
+  expect(clipboard.copyText).toHaveBeenCalledTimes(2);
+});
+
+it("opens ordinary sessions through the same bounded verified reader as search hits", async () => {
+  const row = session("a");
+  const read = vi.spyOn(sessionsApi, "getTranscript").mockResolvedValue({
+    readRevision: "verified",
+    messages: [{ role: "user", content: "Verified ordinary content" }],
+  });
+  vi.mocked(sessionsApi.getMessagesByKey).mockResolvedValue([
+    { role: "user", content: "Legacy unbounded content" },
+  ]);
+  renderPanel([row]);
+  fireEvent.click(screen.getByRole("button", { name: /title-a/ }));
+  fireEvent.click(screen.getByRole("button", { name: "查看会话" }));
+  expect(await screen.findByText("Verified ordinary content")).toBeVisible();
+  expect(read).toHaveBeenCalledWith(row.sessionKey, undefined);
+  expect(sessionsApi.getMessagesByKey).not.toHaveBeenCalled();
+  expect(screen.queryByText("Legacy unbounded content")).toBeNull();
+});
+
+it("reports a missing verified-reader command without falling back to an unbounded read", async () => {
+  vi.spyOn(sessionsApi, "getTranscript").mockRejectedValue(
+    "Command get_session_transcript not found",
+  );
+  renderPanel([session("a")]);
+  fireEvent.click(screen.getByRole("button", { name: /title-a/ }));
+  fireEvent.click(screen.getByRole("button", { name: "查看会话" }));
+  expect(
+    await screen.findByText("当前版本不支持安全会话阅读，请更新应用后重试。"),
+  ).toBeVisible();
+  expect(sessionsApi.getMessagesByKey).not.toHaveBeenCalled();
+});
+
+it("verifies every explicit ordinary open and hides the previous body while the new read is pending", async () => {
+  let finish!: (value: {
+    readRevision: string;
+    messages: { role: "user"; content: string }[];
+  }) => void;
+  const read = vi
+    .spyOn(sessionsApi, "getTranscript")
+    .mockResolvedValueOnce({
+      readRevision: "first",
+      messages: [{ role: "user", content: "Previously verified body" }],
+    })
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+  renderPanel([session("a")]);
+  fireEvent.click(screen.getByRole("button", { name: /title-a/ }));
+  fireEvent.click(screen.getByRole("button", { name: "查看会话" }));
+  expect(await screen.findByText("Previously verified body")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "返回会话列表" }));
+  fireEvent.click(screen.getByRole("button", { name: "查看会话" }));
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  expect(screen.queryByText("Previously verified body")).toBeNull();
+  await act(async () =>
+    finish({
+      readRevision: "second",
+      messages: [{ role: "user", content: "Freshly verified body" }],
+    }),
+  );
+  expect(await screen.findByText("Freshly verified body")).toBeVisible();
+  expect(sessionsApi.getMessagesByKey).not.toHaveBeenCalled();
+});
+
+it("explains a database read budget as partial coverage without claiming that scanning can continue", async () => {
+  const prepare = vi
+    .spyOn(sessionsApi, "prepareSearch")
+    .mockImplementation(async ({ requestId }) => ({
+      operationId: "database-budget",
+      requestId,
+      candidateCount: 1,
+    }));
+  vi.spyOn(sessionsApi, "runSearch").mockImplementation(async () => ({
+    operationId: "database-budget",
+    requestId: prepare.mock.calls[0][0].requestId,
+    state: "limited",
+    hits: [],
+    scanned: 1,
+    total: 1,
+    changed: 0,
+    failed: 1,
+    unsupported: 0,
+    limitReasons: ["databaseLimit"],
+  }));
+  renderPanel([session("a")]);
+  fireEvent.click(screen.getByRole("radio", { name: "聊天内容" }));
+  fireEvent.change(screen.getByRole("searchbox"), {
+    target: { value: "matching" },
+  });
+  fireEvent.keyDown(screen.getByRole("searchbox"), { key: "Enter" });
+  expect(
+    await screen.findByText(zh.sessionExperience.limitDatabase),
+  ).toBeVisible();
+  expect(screen.getByText("当前是部分结果，不代表全部历史。")).toBeVisible();
+  expect(screen.queryByRole("button", { name: "继续扫描" })).toBeNull();
 });

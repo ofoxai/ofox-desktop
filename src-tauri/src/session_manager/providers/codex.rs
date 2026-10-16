@@ -23,8 +23,54 @@ static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 pub fn scan_sessions() -> Vec<SessionMeta> {
-    let root = get_codex_config_dir().join("sessions");
-    scan_in(&root)
+    let home = get_codex_config_dir();
+    let mut sessions = scan_in(&home.join("sessions"));
+    sessions.extend(scan_in(&home.join("archived_sessions")));
+    sessions
+}
+
+pub(crate) fn is_archived(meta: &SessionMeta) -> bool {
+    meta.provider_id == PROVIDER_ID
+        && meta.source_path.as_deref().is_some_and(|path| {
+            Path::new(path).starts_with(get_codex_config_dir().join("archived_sessions"))
+        })
+}
+
+/// Conversation sources include native archives but do not grant any mutation
+/// capability. A compressed mirror is represented by its plain rollout.
+pub(crate) fn conversation_paths(meta: &SessionMeta) -> Result<Vec<PathBuf>, String> {
+    let mut paths: Vec<_> = crate::session_manager::managed::cached_listing()?
+        .iter()
+        .filter(|record| record.provider_id == PROVIDER_ID && record.session_id == meta.session_id)
+        .filter_map(|record| record.source_path.as_deref().map(PathBuf::from))
+        .collect();
+    if paths.is_empty() {
+        return Err("session.search.changed".into());
+    }
+    paths.sort_by(|left, right| {
+        left.file_name()
+            .cmp(&right.file_name())
+            .then_with(|| left.cmp(right))
+    });
+    paths.dedup();
+    let plain: std::collections::HashSet<_> = paths
+        .iter()
+        .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .cloned()
+        .collect();
+    paths.retain(|path| {
+        !path
+            .extension()
+            .is_some_and(|ext| ext == "zst" || ext == "zstd")
+            || !plain.contains(&path.with_extension(""))
+    });
+    for path in &paths {
+        crate::session_manager::managed::validate_path(
+            path,
+            &crate::session_manager::managed::roots(PROVIDER_ID)?,
+        )?;
+    }
+    Ok(paths)
 }
 
 pub(crate) fn scan_in(root: &Path) -> Vec<SessionMeta> {

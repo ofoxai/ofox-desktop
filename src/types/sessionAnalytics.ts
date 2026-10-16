@@ -35,6 +35,8 @@ export interface AnalyticsDay extends AnalyticsTokens {
   estimate: UsageEstimate;
   messages: number | null;
   activeMs: number | null;
+  knownMessages?: number | null;
+  knownActiveMs?: number | null;
 }
 export interface AnalyticsRank extends AnalyticsTokens {
   id: string;
@@ -77,4 +79,54 @@ export interface SessionAnalytics extends UsageReceipt {
   };
   unassociated: AnalyticsTokens & { records: number };
   sources: UsageSourceHealth[];
+  compactTop?: Record<AnalyticsSort, AnalyticsSession[]>;
+  knownMetrics?: {
+    messages: number;
+    activeMs: number;
+    activeDays: number;
+  } | null;
+  metricCoverage?: AnalyticsMetricCoverage;
+  activityByHour?: {
+    timezone: string;
+    utcOffsetSecondsAtEnd?: number;
+    cells: { weekday: number; hour: number; activeMs: number }[];
+    coverage: AnalyticsMetricCoverage;
+  };
+  distributions?: AnalyticsDistribution[];
+  analyticsSnapshotId?: string | null;
+  pagingUnavailableReason?: string | null;
+}
+
+export type AnalyticsSort = "tokens" | "cost" | "active";
+export interface AnalyticsMetricCoverage {
+  state: "complete" | "partial" | "unavailable";
+  eligibleSessions: number;
+  excludedSessions: number;
+  unquantifiedSourceGaps: boolean;
+  reasons: string[];
+}
+export interface AnalyticsDistribution {
+  metric: "tokens" | "messages" | "activeMs";
+  edges: number[];
+  counts: number[];
+  samples: number;
+  excludedSessions: number;
+  unquantifiedSourceGaps: boolean;
+}
+export interface AnalyticsPage
+  extends Pick<
+    UsageReceipt,
+    "appliedQuery" | "queryFingerprint" | "snapshotVersion"
+  > {
+  analyticsSnapshotId: string;
+  data: AnalyticsSession[];
+  total: number;
+  page: number;
+  pageSize: number;
+  appliedView: {
+    sortBy: AnalyticsSort;
+    search: string | null;
+    managerKey?: string | null;
+  };
+  viewFingerprint: string;
 }

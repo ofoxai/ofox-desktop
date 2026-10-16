@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -194,15 +195,11 @@ pub fn load_messages_sqlite(source: &str) -> Result<Vec<SessionMessage>, String>
     let (db_path, session_id) = parse_sqlite_source(source)
         .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))?;
 
-    let conn = Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|e| format!("Failed to open Hermes database: {e}"))?;
+    let conn = crate::session_manager::read_context::open_sqlite(&db_path)?;
 
     // Try querying with common column names
     let query =
-        "SELECT role, content, created_at FROM messages WHERE session_id = ?1 ORDER BY created_at ASC";
+        "SELECT role, content, created_at FROM messages WHERE session_id = ?1 ORDER BY created_at ASC, rowid ASC";
 
     let mut stmt = conn
         .prepare(query)
@@ -210,16 +207,17 @@ pub fn load_messages_sqlite(source: &str) -> Result<Vec<SessionMessage>, String>
 
     let rows = stmt
         .query_map([session_id.as_str()], |row| {
-            let role: String = row.get(0)?;
-            let content: String = row.get(1)?;
+            let role = crate::session_manager::read_context::column(row, 0)?;
+            let content = crate::session_manager::read_context::column(row, 1)?;
             let ts: Option<i64> = row.get(2).ok();
             Ok((role, content, ts))
         })
         .map_err(|e| format!("Failed to query messages: {e}"))?;
 
     let mut messages = Vec::new();
-    for row in rows.flatten() {
-        let (role, content, ts) = row;
+    for row in rows {
+        crate::session_manager::read_context::check()?;
+        let (role, content, ts) = row.map_err(|_| "session.search.sourceUnavailable".to_owned())?;
         if content.trim().is_empty() {
             continue;
         }
@@ -406,15 +404,13 @@ fn parse_jsonl_session(path: &Path) -> Option<SessionMeta> {
 
 /// Load messages from a Hermes JSONL transcript file.
 pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
-    let file = File::open(path).map_err(|e| format!("Failed to open session file: {e}"))?;
+    let file = crate::session_manager::read_context::open(path)?;
     let reader = BufReader::new(file);
     let mut messages = Vec::new();
 
     for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
+        crate::session_manager::read_context::check()?;
+        let line = line.map_err(|error| error.to_string())?;
         if line.trim().is_empty() {
             continue;
         }

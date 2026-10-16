@@ -118,6 +118,25 @@ fn apply(listing: &mut [SessionMeta], files: &[File], details: &HashMap<PathBuf,
     for ((provider, session_id), mut group) in sessions {
         group.sort_by_key(|f| f.path.file_name().map(|n| n.to_os_string()));
         let plain = group.iter().map(|f| f.path.clone()).collect::<HashSet<_>>();
+        // Metadata receipts contain counts, not native-byte prefix proofs. When
+        // an archive and another rollout coexist, summing could count a copy
+        // twice. The explicit transcript reader verifies prefixes when opened.
+        let archive_root = crate::codex_config::get_codex_config_dir().join("archived_sessions");
+        let effective: Vec<_> = group
+            .iter()
+            .filter(|file| {
+                !file
+                    .path
+                    .extension()
+                    .is_some_and(|extension| extension == "zst" || extension == "zstd")
+                    || !plain.contains(&file.path.with_extension(""))
+            })
+            .collect();
+        let count_available = !(provider == "codex"
+            && effective.len() > 1
+            && effective
+                .iter()
+                .any(|file| file.path.starts_with(&archive_root)));
         let mut total = SessionDetails::default();
         let mut found = false;
         for file in group {
@@ -141,11 +160,16 @@ fn apply(listing: &mut [SessionMeta], files: &[File], details: &HashMap<PathBuf,
             if provider == "codex" {
                 total.candidates.agent = names.get(session_id).cloned();
             }
-            merged.insert((provider.to_string(), session_id.to_string()), total);
+            merged.insert(
+                (provider.to_string(), session_id.to_string()),
+                (total, count_available),
+            );
         }
     }
     for meta in listing.iter_mut() {
-        let Some(found) = merged.get(&(meta.provider_id.clone(), meta.session_id.clone())) else {
+        let Some((found, count_available)) =
+            merged.get(&(meta.provider_id.clone(), meta.session_id.clone()))
+        else {
             continue;
         };
         let candidates = found
@@ -153,7 +177,7 @@ fn apply(listing: &mut [SessionMeta], files: &[File], details: &HashMap<PathBuf,
             .clone()
             .with_directory(meta.project_dir.as_deref());
         (meta.title, meta.title_source) = titled(&candidates);
-        meta.message_count = Some(found.message_count);
+        meta.message_count = count_available.then_some(found.message_count);
     }
 }
 

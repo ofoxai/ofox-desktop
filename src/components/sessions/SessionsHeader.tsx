@@ -6,6 +6,8 @@ import { ToolBadge } from "@/components/tools/ToolBadge";
 import { TOOL_META } from "@/config/toolMeta";
 import type { ManagedSession } from "@/lib/api/sessions";
 import { agentCounts } from "./model";
+import { SegmentedControl } from "@/components/ui/segmented";
+import type { ReactNode } from "react";
 export function SessionsHeader({
   sessions,
   agent,
@@ -15,6 +17,10 @@ export function SessionsHeader({
   trash,
   setTrash,
   trashCount,
+  searchMode = "metadata",
+  setSearchMode,
+  onStartSearch,
+  projectPicker,
 }: {
   sessions: ManagedSession[];
   agent: string;
@@ -24,6 +30,10 @@ export function SessionsHeader({
   trash: boolean;
   setTrash: (v: boolean) => void;
   trashCount: number;
+  searchMode?: "metadata" | "content";
+  setSearchMode?: (mode: "metadata" | "content") => void;
+  onStartSearch?: () => void;
+  projectPicker?: ReactNode;
 }) {
   const { t } = useTranslation();
   return (
@@ -46,12 +56,34 @@ export function SessionsHeader({
           })),
         ]}
       />
+      {projectPicker}
       <span className="flex-1" />
+      {!trash && setSearchMode && (
+        <SegmentedControl
+          aria-label={t("sessionExperience.searchMode")}
+          value={searchMode}
+          onChange={setSearchMode}
+          options={[
+            { value: "metadata", label: t("sessionExperience.metadata") },
+            { value: "content", label: t("sessionExperience.content") },
+          ]}
+        />
+      )}
       <SearchInput
         value={search}
         onChange={setSearch}
         className="w-[200px]"
-        placeholder={t("sessionCenter.filter")}
+        placeholder={t(
+          searchMode === "content"
+            ? "sessionExperience.searchPlaceholder"
+            : "sessionCenter.filter",
+        )}
+        onKeyDown={(event) => {
+          if (searchMode === "content" && event.key === "Enter") {
+            event.preventDefault();
+            onStartSearch?.();
+          }
+        }}
       />
       <Button
         variant="ghost"
