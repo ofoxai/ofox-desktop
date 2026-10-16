@@ -1,7 +1,7 @@
 import type { TFunction } from "i18next";
 import { sessionModelNames } from "@/lib/api/sessions";
 import type { ManagedSession } from "@/lib/api/sessions";
-import { fmtAgo, fmtBytes } from "@/lib/format";
+import { fmtAgo } from "@/lib/format";
 export const activity = (s: ManagedSession) =>
   s.lastActiveAt ?? s.createdAt ?? 0;
 export function groupByFolder(sessions: ManagedSession[]) {
@@ -38,8 +38,6 @@ export function sessionSubline(
     s.messageCount == null
       ? ""
       : t("sessionCenter.messageCount", { count: s.messageCount }),
-    s.sizeBytes == null ? "" : fmtBytes(s.sizeBytes),
-    s.sessionId.slice(0, 8),
   ]
     .filter(Boolean)
     .join(" · ");

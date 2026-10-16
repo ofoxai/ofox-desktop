@@ -22,6 +22,9 @@ import { sessionsApi, type ManagedSession } from "@/lib/api/sessions";
 import * as clipboard from "@/lib/clipboard";
 import * as platform from "@/lib/platform";
 
+const apexState = vi.hoisted(() => ({ apex: "ofox.ai", isLoading: false }));
+vi.mock("@/hooks/useOfoxApex", () => ({ useOfoxApex: () => apexState }));
+let rerenderPanel = () => {};
 const toastError = vi.hoisted(() => vi.fn());
 const saveDialog = vi.hoisted(() => vi.fn());
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: toastError } }));
@@ -95,22 +98,26 @@ function renderPanel(sessions: ManagedSession[]) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
   });
-  client.setQueryData(["sessions"], sessions);
+  client.setQueryData(["sessions", "ofox.ai"], sessions);
   vi.spyOn(sessionsApi, "list").mockResolvedValue(sessions);
-  render(
+  const element = () => (
     <QueryClientProvider client={client}>
       <ShellProvider openSettings={() => undefined}>
         <RefreshControl />
         <SessionsPage className="h-full" />
       </ShellProvider>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  const view = render(element());
+  rerenderPanel = () => view.rerender(element());
   return client;
 }
 
 beforeEach(() => {
   vi.restoreAllMocks();
   localStorage.clear();
+  apexState.apex = "ofox.ai";
+  apexState.isLoading = false;
   HTMLElement.prototype.scrollIntoView = vi.fn();
   i18n.addResourceBundle("zh", "translation", zh, true, true);
   i18n.addResourceBundle(
@@ -150,6 +157,27 @@ describe("SessionsPage capabilities and reversible actions", () => {
     expect(
       screen.getByRole("checkbox", { name: "选择会话 title-d" }),
     ).toBeDisabled();
+  });
+
+  it("keeps capability notes collapsed and scoped to the affected tools", () => {
+    renderPanel([session("a"), session("d", "dsh", false)]);
+    expect(screen.getByText("此工具目前仅支持会话元数据。")).not.toBeVisible();
+    const summary = screen.getByText("工具说明");
+    expect(summary).toBeVisible();
+    fireEvent.click(summary);
+    const notes = summary.closest("details")!;
+    expect(within(notes).getByText("DeepSeek Harness")).toBeVisible();
+    expect(within(notes).queryByText("Claude Code")).toBeNull();
+    expect(
+      within(notes).getByText("此工具目前仅支持会话元数据。"),
+    ).toBeVisible();
+    expect(
+      within(notes).getByText("此来源暂不支持安全文件回收。"),
+    ).toBeVisible();
+    fireEvent.click(summary);
+    expect(
+      within(notes).getByText("此工具目前仅支持会话元数据。"),
+    ).not.toBeVisible();
   });
 
   it("groups full project paths and filters tool metadata without reading bodies", async () => {
@@ -192,7 +220,7 @@ describe("SessionsPage capabilities and reversible actions", () => {
     await waitFor(() =>
       expect(
         client
-          .getQueryData<ManagedSession[]>(["sessions"])
+          .getQueryData<ManagedSession[]>(["sessions", "ofox.ai"])
           ?.map((s) => s.sessionKey),
       ).toEqual([b.sessionKey]),
     );
@@ -310,8 +338,9 @@ it("shows fresh tokens, separate cache, readable costs, and lazy inline bodies",
   renderPanel([a, session("b")]);
   expect(screen.getByText("1.2K")).toBeVisible();
   expect(screen.getByText("≈$0.020")).toBeVisible();
-  expect(screen.getAllByText("—").length).toBeGreaterThan(0);
-  expect(screen.getByText(/33 条消息.*11 MB/)).toBeVisible();
+  expect(screen.getByText("用量不可用")).toBeVisible();
+  expect(screen.getByText(/33 条消息/)).toBeVisible();
+  expect(screen.queryByText(/11 MB/)).toBeNull();
   expect(sessionsApi.getMessagesByKey).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: /title-a/ }));
   expect(sessionsApi.getMessagesByKey).not.toHaveBeenCalled();
@@ -439,7 +468,7 @@ it("refreshes an open transcript when its revision changes", async () => {
   fireEvent.click(screen.getByRole("button", { name: /title-a/ }));
   fireEvent.click(screen.getByRole("button", { name: "查看会话" }));
   expect(await screen.findByText("old body")).toBeVisible();
-  client.setQueryData(["sessions"], [{ ...a, revision: "changed" }]);
+  client.setQueryData(["sessions", "ofox.ai"], [{ ...a, revision: "changed" }]);
   expect(await screen.findByText("new body")).toBeVisible();
   expect(sessionsApi.getTranscript).toHaveBeenCalledTimes(2);
 });
@@ -879,4 +908,85 @@ it("explains a database read budget as partial coverage without claiming that sc
   ).toBeVisible();
   expect(screen.getByText("当前是部分结果，不代表全部历史。")).toBeVisible();
   expect(screen.queryByRole("button", { name: "继续扫描" })).toBeNull();
+});
+
+const regionSession = (apex: string, value: number): ManagedSession => ({
+  ...session("region"),
+  providerId: "codex",
+  usage: {
+    models: [],
+    inputTokens: 10,
+    outputTokens: 2,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 12,
+    costUsd: value,
+    unpricedModels: 0,
+  },
+  usageDisplay: {
+    state: "available",
+    basis: "currentOfoxEstimate",
+    scope: "nativeThread",
+    reasons: [],
+    parentSessionId: null,
+    billingSessionId: null,
+    estimate: {
+      knownCostUsd: String(value),
+      availability: "known",
+      unpricedModelIds: [],
+      unpricedRecordCount: 0,
+      additionalUnitsUnsupported: false,
+    },
+    pricingCoverage: {
+      policy: "current-ofox-base-v1",
+      apex: apex as "ofox.ai" | "ofox.io",
+      catalogVersion: "fixture",
+      catalogUpdatedAtMs: 1,
+      stale: false,
+      unpricedModelIds: [],
+      unpricedRecordCount: 0,
+      additionalUnitsUnsupported: false,
+    },
+  },
+});
+
+it("isolates session estimates by apex and refuses late replies from the previous region", async () => {
+  const ai = regionSession("ofox.ai", 1),
+    io = regionSession("ofox.io", 2);
+  const client = renderPanel([ai]);
+  expect(screen.getByText("≈$1.00")).toBeVisible();
+  let resolveOld!: (rows: ManagedSession[]) => void;
+  vi.mocked(sessionsApi.list)
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOld = resolve;
+        }),
+    )
+    .mockResolvedValue([io]);
+  void client.invalidateQueries({ queryKey: ["sessions"] });
+  await waitFor(() => expect(resolveOld).toBeTypeOf("function"));
+  act(() => {
+    apexState.apex = "ofox.io";
+    rerenderPanel();
+  });
+  expect(await screen.findByText("≈$2.00")).toBeVisible();
+  await act(async () => {
+    resolveOld([regionSession("ofox.ai", 8)]);
+  });
+  expect(screen.queryByText("≈$8.00")).toBeNull();
+  expect(screen.getByText("≈$2.00")).toBeVisible();
+});
+
+it("rejects a listing price receipt from the wrong apex even on the current query", async () => {
+  const old = regionSession("ofox.ai", 9);
+  apexState.apex = "ofox.io";
+  renderPanel([old]);
+  expect(await screen.findByText("title-region")).toBeVisible();
+  expect(screen.getByText("用量不可用")).toBeVisible();
+  expect(screen.queryByText("≈$9.00")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: /title-region/ }));
+  expect(
+    screen.getByText("价格区域正在更新，请稍后刷新会话用量。"),
+  ).toBeVisible();
 });

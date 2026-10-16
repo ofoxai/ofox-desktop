@@ -3030,7 +3030,20 @@
       "command": "Command",
       "command_output": "Command output",
       "system": "System"
-    }
+    },
+    "usageUnavailable": "Usage unavailable",
+    "usageUnavailableDetails": "This session has no verifiable usage records, so its cost cannot be estimated.",
+    "unpriced": "Unpriced",
+    "unpricedDetails": "Tokens are recorded, but the model prices are unknown, so cost cannot be estimated.",
+    "partialCostDetails": "Only priced models are included; some costs are not yet counted.",
+    "capabilityNotes": "Tool notes",
+    "size": "File size",
+    "nativeThreadEstimate": "Verifiable usage for this session only; child sessions are separate. Cost uses current OFox prices and is not the account charge.",
+    "usageNotIndexed": "Session usage has not been indexed yet. Refresh to try again.",
+    "usageAmbiguous": "This session contains copied history with unclear ownership, so usage and cost are unavailable.",
+    "usageSourceChanged": "The session source changed. Refresh to try again.",
+    "usageConflicting": "Different sources exist for this session, so its usage cannot yet be verified.",
+    "usagePricingChanged": "The pricing region is updating. Refresh session usage shortly."
   },
   "modelProfiles": {
     "reasonNotInstalled": "Tool is not installed; skipped.",
@@ -3819,7 +3832,8 @@
     "generationSpeed": "Generation speed",
     "measuredSamples": "Measured samples {{count}} / {{total}}",
     "measurementBasis": "Only observed samples are included; HTTP 400–599 count as failures. Imported placeholders are excluded. First-token timing and generation speed require verified measurements.",
-    "requestAnalyticsUnavailable": "This backend does not provide request trends and measurement summaries."
+    "requestAnalyticsUnavailable": "This backend does not provide request trends and measurement summaries.",
+    "dataStatus": "Data status"
   },
   "usageSessions": {
     "title": "Session analysis",

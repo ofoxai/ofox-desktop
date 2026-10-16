@@ -3030,7 +3030,20 @@
       "command": "命令",
       "command_output": "命令输出",
       "system": "系统"
-    }
+    },
+    "usageUnavailable": "用量不可用",
+    "usageUnavailableDetails": "当前会话没有可核验的用量记录，无法估算费用。",
+    "unpriced": "未计价",
+    "unpricedDetails": "已记录 Token，但模型价格未知，无法估算费用。",
+    "partialCostDetails": "仅包含有价格的模型，部分费用尚未计入。",
+    "capabilityNotes": "工具说明",
+    "size": "文件大小",
+    "nativeThreadEstimate": "仅此会话的可核验用量，子会话另列；费用按当前 OFox 价格估算，不代表账户实际扣费。",
+    "usageNotIndexed": "会话用量尚未建立索引，请刷新后重试。",
+    "usageAmbiguous": "此会话包含无法区分归属的复制历史，暂不展示用量和费用。",
+    "usageSourceChanged": "会话来源已变化，请刷新后重试。",
+    "usageConflicting": "发现同一会话的不同来源，暂无法确定用量。",
+    "usagePricingChanged": "价格区域正在更新，请稍后刷新会话用量。"
   },
   "modelProfiles": {
     "reasonNotInstalled": "工具未安装，已跳过。",
@@ -3819,7 +3832,8 @@
     "generationSpeed": "生成速度",
     "measuredSamples": "测量样本 {{count}} / {{total}}",
     "measurementBasis": "仅统计有实测值的样本；HTTP 400–599 计为失败。导入占位值不参与测量，首 Token 和生成速度仅在有可信测量时显示。",
-    "requestAnalyticsUnavailable": "当前后端未提供请求趋势和测量摘要。"
+    "requestAnalyticsUnavailable": "当前后端未提供请求趋势和测量摘要。",
+    "dataStatus": "数据状态"
   },
   "usageSessions": {
     "title": "会话分析",

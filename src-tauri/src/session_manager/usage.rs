@@ -2,10 +2,12 @@
 //! the 30-day prune kept in `session_usage_archive`, read in one query and
 //! joined to the listing in memory by (app type, session id).
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::database::Database;
 use crate::error::AppError;
+use crate::services::ofox_pricing::{CostEstimate, PriceCatalog, PricingCoverage};
+use crate::session_manager::SessionMeta;
 
 /// One model's share of a session.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -35,6 +37,139 @@ pub struct SessionUsage {
     pub cost_usd: f64,
     /// Models that spent tokens but have no known price.
     pub unpriced_models: u32,
+}
+
+/// Provenance of Codex list values. This display projection never revises the
+/// saved ledger, and its price is always the current resolved OFox catalog.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageDisplay {
+    pub state: String,
+    pub basis: &'static str,
+    pub scope: &'static str,
+    pub reasons: Vec<String>,
+    pub estimate: Option<CostEstimate>,
+    pub pricing_coverage: Option<PricingCoverage>,
+    pub model_estimates: BTreeMap<String, CostEstimate>,
+    pub parent_session_id: Option<String>,
+    pub billing_session_id: Option<String>,
+}
+impl UsageDisplay {
+    pub(crate) fn unavailable(reason: &str) -> Self {
+        Self {
+            state: "unavailable".into(),
+            basis: "currentOfoxEstimate",
+            scope: "nativeThread",
+            reasons: vec![reason.into()],
+            estimate: None,
+            pricing_coverage: None,
+            model_estimates: BTreeMap::new(),
+            parent_session_id: None,
+            billing_session_id: None,
+        }
+    }
+}
+type DisplayBySession = HashMap<String, (Option<SessionUsage>, UsageDisplay)>;
+
+/// One listing read transaction, one legacy usage aggregation, one bounded
+/// cache batch, and one current catalog. No per-row SQL or transcript parsing.
+pub(crate) fn load_for_listing(
+    db: &Database,
+    listing: &[SessionMeta],
+) -> Result<(UsageBySession, DisplayBySession), AppError> {
+    let apex = crate::ofox_apex::current_apex();
+    let mut conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
+    let tx = conn.transaction()?;
+    let ledger = load_on(&tx)?;
+    let display = display_on(&tx, listing, apex, chrono::Utc::now().timestamp_millis())
+        .unwrap_or_else(|_| {
+            listing
+                .iter()
+                .filter(|m| m.provider_id == "codex")
+                .map(|m| {
+                    (
+                        m.session_id.clone(),
+                        (
+                            None,
+                            UsageDisplay::unavailable("threadUsageCacheUnavailable"),
+                        ),
+                    )
+                })
+                .collect()
+        });
+    tx.commit()?;
+    Ok((ledger, display))
+}
+fn display_on(
+    conn: &rusqlite::Connection,
+    listing: &[SessionMeta],
+    apex: &str,
+    now_ms: i64,
+) -> Result<DisplayBySession, AppError> {
+    let cached = crate::services::session_analytics_index::thread_usage_on(conn, listing)?;
+    let catalog = PriceCatalog::load_on(conn, apex, now_ms)?;
+    let mut result = HashMap::new();
+    for meta in listing.iter().filter(|m| m.provider_id == "codex") {
+        let Some(projection) = cached.get(&meta.session_id) else {
+            result.insert(
+                meta.session_id.clone(),
+                (None, UsageDisplay::unavailable("threadUsageNotIndexed")),
+            );
+            continue;
+        };
+        let mut display = UsageDisplay {
+            state: projection.state.clone(),
+            basis: "currentOfoxEstimate",
+            scope: "nativeThread",
+            reasons: projection.reasons.clone(),
+            estimate: None,
+            pricing_coverage: Some(catalog.coverage.clone()),
+            model_estimates: BTreeMap::new(),
+            parent_session_id: projection.parent_session_id.clone(),
+            billing_session_id: projection.billing_session_id.clone(),
+        };
+        if projection.state != "available" {
+            result.insert(meta.session_id.clone(), (None, display));
+            continue;
+        }
+        let mut estimate: Option<CostEstimate> = None;
+        let mut models = vec![];
+        let mut unpriced = 0;
+        for row in &projection.models {
+            let priced = catalog.estimate(&row.model, row.buckets, Some(row.records));
+            if matches!(priced.availability.as_str(), "unknown" | "partial") {
+                unpriced += 1;
+            }
+            let cost = priced
+                .known_cost_usd
+                .as_deref()
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|v| v.is_finite());
+            if let Some(total) = &mut estimate {
+                total.combine(&priced)?;
+            } else {
+                estimate = Some(priced.clone());
+            }
+            display.model_estimates.insert(row.model.clone(), priced);
+            models.push(ModelUsage {
+                model: row.model.clone(),
+                requests: row.records,
+                input_tokens: row.buckets[0],
+                output_tokens: row.buckets[1],
+                cache_read_tokens: row.buckets[2],
+                cache_write_tokens: row.buckets[3],
+                cost_usd: cost,
+            });
+        }
+        let mut usage = total(models);
+        usage.unpriced_models = unpriced;
+        if let Some(estimate) = &estimate {
+            display.pricing_coverage = Some(catalog.coverage_for(estimate));
+        }
+        display.estimate = estimate;
+        result.insert(meta.session_id.clone(), (Some(usage), display));
+    }
+    Ok(result)
 }
 
 /// The usage `app_type` of a session provider, for those whose usage is read.
@@ -81,10 +216,14 @@ thread_local! {
 }
 
 /// Every session's usage, by (app type, session id).
+#[cfg(test)]
 pub fn load(db: &Database) -> Result<UsageBySession, AppError> {
+    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
+    load_on(&conn)
+}
+fn load_on(conn: &rusqlite::Connection) -> Result<UsageBySession, AppError> {
     #[cfg(test)]
     LOAD_COUNT.with(|count| count.set(count.get() + 1));
-    let conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
     let query = || -> rusqlite::Result<Vec<(String, String, ModelUsage)>> {
         let mut stmt = conn.prepare(SESSION_USAGE_SQL)?;
         let count = |row: &rusqlite::Row, i| -> rusqlite::Result<u64> {
@@ -107,8 +246,6 @@ pub fn load(db: &Database) -> Result<UsageBySession, AppError> {
     };
     let rows =
         query().map_err(|e| AppError::Database(format!("Reading session usage failed: {e}")))?;
-    drop(conn);
-
     let mut by_session: HashMap<(String, String), Vec<ModelUsage>> = HashMap::new();
     for (app, session, model) in rows {
         by_session.entry((app, session)).or_default().push(model);
@@ -338,3 +475,7 @@ mod tests {
         assert!((session.cost_usd - 0.1).abs() < 1e-9);
     }
 }
+
+#[cfg(test)]
+#[path = "codex_display_tests.rs"]
+mod codex_display_tests;

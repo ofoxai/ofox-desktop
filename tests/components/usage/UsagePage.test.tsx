@@ -253,7 +253,7 @@ describe("UsagePage", () => {
       expect(within(header).queryByText("—")).toBeNull();
       await userEvent.click(screen.getByRole("tab", { name: "概览" }));
       expect(await within(header).findByText("≈$2.00")).toBeVisible();
-      expect(within(header).getByText("按 OFox 价格估算")).toBeVisible();
+      expect(within(header).getByTitle("按 OFox 价格估算")).toBeVisible();
     },
   );
 
@@ -643,6 +643,85 @@ it("shows nonzero usage buckets even when an aggregate has no request count", as
   expect(await screen.findByText("unknown-model")).toBeVisible();
   expect(screen.queryByText("还没有用量记录")).toBeNull();
   expect(screen.getAllByText("1.2K").length).toBeGreaterThan(0);
+});
+
+it("bounds the overview project ranking and keeps paths, filtering, hiding and restoration available", async () => {
+  const normal = mocks.invoke.getMockImplementation()!;
+  const projects = Array.from({ length: 60 }, (_, index) => ({
+    ...totals,
+    id: `project-${index}`,
+    label: `project-${index}${index === 0 ? "很长的中文项目名称".repeat(12) : ""}`,
+    path: `/workspace/long-parent-${index}/project-${index}`,
+  }));
+  mocks.invoke.mockImplementation(async (command: string, args: any) => {
+    if (command === "get_usage_capabilities")
+      return {
+        queryVersion: 1,
+        requestSnapshots: true,
+        csv: true,
+        projectFilter: true,
+        sources: [],
+      };
+    if (command === "get_usage_overview")
+      return {
+        ...overview,
+        appliedQuery: args.query,
+        queryFingerprint: "query",
+        snapshotVersion: "overview-rank",
+        byProject: projects,
+        options: {
+          toolIds: ["claude"],
+          modelIds: ["unknown-model"],
+          sourceIds: [],
+          projects,
+        },
+      };
+    return normal(command, args);
+  });
+  render(<Page />);
+  const heading = await screen.findByRole("heading", { name: "项目排行" });
+  const card = heading.parentElement!.parentElement!;
+  expect(
+    within(card).getAllByRole("button", {
+      name: /^project-\d+(?:很长的中文项目名称)*$/,
+    }),
+  ).toHaveLength(6);
+  expect(within(card).queryByText(projects[0].path)).toBeNull();
+  const first = within(card).getByRole("button", { name: projects[0].label });
+  expect(first).toHaveAttribute(
+    "title",
+    `${projects[0].label}\n${projects[0].path}`,
+  );
+  await userEvent.click(first);
+  await waitFor(() =>
+    expect(
+      mocks.invoke.mock.calls.some(
+        ([command, args]) =>
+          command === "get_usage_overview" &&
+          args.query.projectIds?.[0] === "project-0",
+      ),
+    ).toBe(true),
+  );
+  await userEvent.click(
+    within(card).getByRole("button", { name: "显示更多（剩余 54）" }),
+  );
+  expect(
+    within(card).getAllByRole("button", {
+      name: /^project-\d+(?:很长的中文项目名称)*$/,
+    }),
+  ).toHaveLength(56);
+  await userEvent.click(
+    within(card).getByRole("button", { name: "project-1 操作" }),
+  );
+  await userEvent.click(screen.getByRole("menuitem", { name: "隐藏" }));
+  expect(within(card).queryByRole("button", { name: "project-1" })).toBeNull();
+  await userEvent.click(
+    within(card).getByRole("button", { name: "1 个已隐藏" }),
+  );
+  await userEvent.click(
+    within(card).getByRole("button", { name: "显示 project-1" }),
+  );
+  expect(within(card).getByRole("button", { name: "project-1" })).toBeVisible();
 });
 
 it("can still refresh after development StrictMode replays its mount effects", async () => {

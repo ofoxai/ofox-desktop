@@ -24,6 +24,9 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
+#[path = "codex_thread_usage.rs"]
+pub(crate) mod codex_thread_usage;
+
 const VERSION: u8 = 1;
 const MAX_CACHE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_SOURCES: usize = 20_000;
@@ -48,6 +51,7 @@ pub(crate) fn query_decode_count() -> usize {
 struct CachedProjection {
     key: [u8; 32],
     input: Arc<AnalyticsInput>,
+    thread_sources: Arc<Vec<ThreadSource>>,
     created_at: Instant,
 }
 
@@ -82,6 +86,13 @@ impl ProjectionCache {
         conn: &rusqlite::Connection,
         now: Instant,
     ) -> Result<Arc<AnalyticsInput>, AppError> {
+        Ok(self.parts_at(conn, now)?.0)
+    }
+    fn parts_at(
+        &self,
+        conn: &rusqlite::Connection,
+        now: Instant,
+    ) -> Result<(Arc<AnalyticsInput>, Arc<Vec<ThreadSource>>), AppError> {
         // Read and validate SQL/budgets before any lookup. Even a matching
         // warm slot must not conceal a read failure or an oversized table.
         let raw_rows = raw_rows_on(conn)?;
@@ -96,22 +107,26 @@ impl ProjectionCache {
                 *slot = None;
             }
             if let Some(entry) = slot.as_ref().filter(|entry| entry.key == key) {
-                return Ok(Arc::clone(&entry.input));
+                return Ok((Arc::clone(&entry.input), Arc::clone(&entry.thread_sources)));
             }
         }
         // Decode and deduplicate the already-read rows without another SELECT.
         // No raw envelope or native transcript is retained by the slot.
-        let input = Arc::new(input_from_rows(decode_rows(raw_rows), common));
-        let bytes = projection_bytes(&input);
+        let rows = decode_rows(raw_rows);
+        let thread_sources = Arc::new(thread_sources_from_rows(&rows));
+        let input = Arc::new(input_from_rows(rows, common));
+        let bytes = projection_bytes(&input)
+            .and_then(|bytes| bytes.checked_add(thread_source_bytes(&thread_sources)?));
         let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
         *slot = bytes
             .filter(|bytes| *bytes <= self.max_bytes)
             .map(|_| CachedProjection {
                 key,
                 input: Arc::clone(&input),
+                thread_sources: Arc::clone(&thread_sources),
                 created_at: now,
             });
-        Ok(input)
+        Ok((input, thread_sources))
     }
 }
 
@@ -193,7 +208,8 @@ fn projection_bytes(input: &AnalyticsInput) -> Option<usize> {
     }
     let mut bytes = Bytes(std::mem::size_of::<AnalyticsInput>());
     bytes.add(std::mem::size_of::<CachedProjection>())?;
-    bytes.add(2 * std::mem::size_of::<usize>())?;
+    bytes.add(4 * std::mem::size_of::<usize>())?;
+    bytes.add(std::mem::size_of::<Vec<ThreadSource>>())?;
     bytes.string(&input.snapshot_version)?;
     bytes.vector(&input.sessions)?;
     for session in &input.sessions {
@@ -295,6 +311,9 @@ struct Entry {
     priority: u8,
     attempted_at_ms: i64,
     succeeded_at_ms: Option<i64>,
+    // Append optional fields: legacy positional Entry arrays remain readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thread_usage: Option<codex_thread_usage::Projection>,
 }
 struct Row {
     provider: String,
@@ -630,6 +649,7 @@ pub(crate) fn source_revision(spec: &SourceSpec) -> Result<Value, AppError> {
 fn empty_entry(now: i64) -> Entry {
     Entry {
         version: VERSION,
+        thread_usage: None,
         stamp: None,
         sessions: vec![],
         facts: vec![],
@@ -723,6 +743,17 @@ fn refresh_sources_inner(
         let previous = old
             .and_then(|r| r.entry.as_ref().ok())
             .and_then(Option::as_ref);
+        if previous
+            .and_then(|e| e.thread_usage.as_ref())
+            .is_some_and(|p| !p.version_supported())
+        {
+            report.failed += 1;
+            report.mark(
+                &spec.provider,
+                RefreshState::Failed("analyticsCacheUnavailable"),
+            );
+            continue;
+        }
         let token = old.and_then(|r| r.token.clone());
         let now = chrono::Utc::now().timestamp_millis();
         let next_stamp = source_revision(spec);
@@ -733,6 +764,11 @@ fn refresh_sources_inner(
                 .is_some_and(|saved| same_known_revision(saved, next))
                 && old.available
                 && old.status != "failed"
+                && (spec.provider != "codex"
+                    || old
+                        .thread_usage
+                        .as_ref()
+                        .is_some_and(|p| p.has_current_proof()))
             {
                 report.unchanged += 1;
                 report.mark(
@@ -864,6 +900,7 @@ fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
     }
     entry.priority = if spec.subagent { 1 } else { 2 };
     let mut candidates = crate::session_manager::title::TitleCandidates::default();
+    let mut thread_proof = codex_thread_usage::Proof::default();
     let transcript = match spec.provider.as_str() {
         "claude" | "codex" => {
             let mut claude = crate::session_manager::providers::claude::ClaudeScan::default();
@@ -874,6 +911,9 @@ fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
                 spec.subagent,
             )?;
             let text = usage_source::read_text(&spec.path)?;
+            if spec.provider == "codex" {
+                thread_proof.observe_source(&text);
+            }
             let mut ambiguous_codex_identity = false;
             for (i, line) in text.lines().enumerate() {
                 if line.trim().is_empty() {
@@ -881,6 +921,9 @@ fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
                 }
                 let value: Value =
                     serde_json::from_str(line).map_err(|_| invalid("sourceReadFailed"))?;
+                if spec.provider == "codex" {
+                    thread_proof.observe(&value);
+                }
                 // Native fork/replay can retain both parent and child headers.
                 // Neither header licenses attributing the whole physical file.
                 // Continue validating JSON, but publish no inferred metrics.
@@ -906,6 +949,7 @@ fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
             if ambiguous_codex_identity {
                 entry.status = "partial".into();
                 entry.reasons.push("sessionIdentityUnavailable".into());
+                entry.thread_usage = Some(thread_proof.finish(None));
                 entry.succeeded_at_ms = Some(now);
                 return Ok(entry);
             }
@@ -1013,6 +1057,9 @@ fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
         _ => return Err(invalid("unsupportedTranscriptReader")),
     };
     let normalized = usage_source::read_normalized(&spec.provider, &spec.path)?;
+    if spec.provider == "codex" {
+        entry.thread_usage = Some(thread_proof.finish(Some(&normalized)));
+    }
     entry.reasons.extend(normalized.reasons);
     let native_id = transcript.session_id.clone();
     if let Some(native) = &native_id {
@@ -1202,6 +1249,118 @@ pub(crate) fn read_input_on(conn: &rusqlite::Connection) -> Result<AnalyticsInpu
     let rows = rows_on(conn)?;
     let common = super::usage_health::source_health_on(conn)?;
     Ok(input_from_rows(rows, common))
+}
+
+/// Listing-only thread display evidence. This never rewrites ledger ancestry or
+/// opens transcript bodies, and deliberately does not reuse root-normalized facts.
+#[derive(Clone)]
+struct ThreadSource {
+    path: String,
+    native_stamp: Option<String>,
+    healthy: bool,
+    projection: codex_thread_usage::Projection,
+}
+fn thread_sources_from_rows(rows: &BTreeMap<String, Row>) -> Vec<ThreadSource> {
+    rows.iter()
+        .filter_map(|(path, row)| {
+            if row.provider != "codex" {
+                return None;
+            }
+            let entry = row.entry.as_ref().ok()?.as_ref()?;
+            Some(ThreadSource {
+                path: path.clone(),
+                native_stamp: entry.stamp.as_ref()?.get("native").map(Value::to_string),
+                healthy: entry.available && entry.status != "failed",
+                projection: entry.thread_usage.clone()?,
+            })
+        })
+        .collect()
+}
+fn thread_source_bytes(sources: &Vec<ThreadSource>) -> Option<usize> {
+    let mut bytes = sources
+        .capacity()
+        .checked_mul(std::mem::size_of::<ThreadSource>())?;
+    for source in sources {
+        let p = &source.projection;
+        let strings = std::iter::once(&source.path)
+            .chain(source.native_stamp.iter())
+            .chain(p.native_thread_id.iter())
+            .chain(p.billing_session_id.iter())
+            .chain(p.parent_session_id.iter())
+            .chain(std::iter::once(&p.state))
+            .chain(p.reasons.iter())
+            .chain(p.facts_hash.iter())
+            .chain(p.source_digest.iter())
+            .chain(p.models.iter().map(|m| &m.model));
+        for value in strings {
+            bytes = bytes.checked_add(value.capacity())?;
+        }
+        bytes = bytes.checked_add(
+            p.reasons
+                .capacity()
+                .checked_mul(std::mem::size_of::<String>())?,
+        )?;
+        bytes = bytes.checked_add(
+            p.models
+                .capacity()
+                .checked_mul(std::mem::size_of::<codex_thread_usage::Model>())?,
+        )?;
+    }
+    Some(bytes)
+}
+pub(crate) fn thread_usage_on(
+    conn: &rusqlite::Connection,
+    listing: &[crate::session_manager::SessionMeta],
+) -> Result<BTreeMap<String, codex_thread_usage::Projection>, AppError> {
+    thread_usage_cached_on(conn, listing, projection_cache())
+}
+fn thread_usage_cached_on(
+    conn: &rusqlite::Connection,
+    listing: &[crate::session_manager::SessionMeta],
+    cache: &ProjectionCache,
+) -> Result<BTreeMap<String, codex_thread_usage::Projection>, AppError> {
+    let (_, sources) = cache.parts_at(conn, Instant::now())?;
+    thread_usage_from_sources(&sources, listing)
+}
+fn thread_usage_from_sources(
+    sources: &[ThreadSource],
+    listing: &[crate::session_manager::SessionMeta],
+) -> Result<BTreeMap<String, codex_thread_usage::Projection>, AppError> {
+    let by_path: BTreeMap<_, _> = sources.iter().map(|s| (s.path.as_str(), s)).collect();
+    let mut projections: BTreeMap<String, codex_thread_usage::Projection> = BTreeMap::new();
+    for meta in listing.iter().filter(|m| m.provider_id == "codex") {
+        let source = meta
+            .source_path
+            .as_deref()
+            .and_then(|path| by_path.get(path));
+        let mut projection = source.map_or_else(
+            || codex_thread_usage::Projection::missing(&meta.session_id),
+            |s| s.projection.clone(),
+        );
+        let native = meta.session_id.clone();
+        if !projection.valid() || projection.native_thread_id.as_deref() != Some(&meta.session_id) {
+            projection = projection.unavailable("threadUsageNotIndexed");
+        } else if source.is_some_and(|s| !s.healthy) {
+            projection = projection.unavailable("threadUsageSourceUnavailable");
+        } else if let Some(source) = source {
+            let current = usage_source::normalized_stamp("codex", Path::new(&source.path));
+            if current.as_ref().ok().map(Value::to_string) != source.native_stamp {
+                projection = projection.unavailable("threadUsageSourceChanged");
+            }
+        }
+        match projections.entry(native) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(projection);
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                if slot.get() != &projection {
+                    let rejected = slot.get().clone().unavailable("conflictingThreadSources");
+                    slot.insert(rejected);
+                }
+            }
+        }
+    }
+    Ok(projections)
 }
 
 fn input_from_rows(rows: BTreeMap<String, Row>, common: Vec<SourceHealth>) -> AnalyticsInput {
@@ -2415,3 +2574,7 @@ mod tests {
         )));
     }
 }
+
+#[cfg(test)]
+#[path = "codex_thread_usage_tests.rs"]
+mod codex_thread_usage_tests;

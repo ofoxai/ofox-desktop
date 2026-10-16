@@ -83,6 +83,14 @@ export function UsageBreakdownList({
   const barScale = compact
     ? Math.max(1, ...visibleRows.map((row) => row.totalTokens))
     : total;
+  const compactColumns =
+    kind === "projects"
+      ? "grid-cols-[minmax(0,min(32%,14rem))_minmax(2.5rem,1fr)_auto_4.2em]"
+      : "grid-cols-[minmax(0,max-content)_minmax(2.5rem,1fr)_auto_4.2em]";
+  const fallbackColumns =
+    kind === "projects"
+      ? "supports-[not(grid-template-columns:subgrid)]:grid-cols-[minmax(0,min(32%,14rem))_minmax(2.5rem,1fr)_auto_4.2em]"
+      : "supports-[not(grid-template-columns:subgrid)]:grid-cols-[minmax(0,max-content)_minmax(2.5rem,1fr)_auto_4.2em]";
   const actions = (r: Row) => (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
@@ -139,7 +147,7 @@ export function UsageBreakdownList({
         role="list"
         className={
           compact
-            ? "grid min-w-0 grid-cols-[minmax(0,max-content)_minmax(2.5rem,1fr)_auto_4.2em] gap-x-2 gap-y-px"
+            ? `grid min-w-0 ${compactColumns} gap-x-2 gap-y-px`
             : undefined
         }
       >
@@ -155,7 +163,7 @@ export function UsageBreakdownList({
               data-selected={selectedIds.includes(r.id) || undefined}
               className={
                 compact
-                  ? "group relative col-span-4 grid min-h-[28px] min-w-0 grid-cols-subgrid gap-x-2 rounded-md border-0 px-1.5 py-0.5 -mx-1.5 hover:bg-pill data-[selected=true]:bg-pill/60 data-[selected=true]:ring-1 data-[selected=true]:ring-inset data-[selected=true]:ring-brand/25 [*+&]:border-0 supports-[not(grid-template-columns:subgrid)]:grid-cols-[minmax(0,max-content)_minmax(2.5rem,1fr)_auto_4.2em]"
+                  ? `group relative col-span-4 grid min-h-[28px] min-w-0 grid-cols-subgrid gap-x-2 rounded-md border-0 px-1.5 py-0.5 -mx-1.5 hover:bg-pill data-[selected=true]:bg-pill/60 data-[selected=true]:ring-1 data-[selected=true]:ring-inset data-[selected=true]:ring-brand/25 [*+&]:border-0 ${fallbackColumns}`
                   : "group"
               }
             >
@@ -178,7 +186,7 @@ export function UsageBreakdownList({
                       ? "min-w-0 truncate font-mono text-sub"
                       : "min-w-0 truncate text-sub font-medium"
                   }
-                  title={label(r)}
+                  title={r.path ? `${label(r)}\n${r.path}` : label(r)}
                 >
                   {onFilter ? (
                     <button

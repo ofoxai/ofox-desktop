@@ -46,7 +46,7 @@ export function UsageKpis({
           value: v.estimate
             ? formatUsageEstimate(v.estimate)
             : fmtCost(v.costUsd),
-          sub: t("usagePage.estimate"),
+          title: t("usagePage.estimate"),
         },
         { label: t("usageWorkbench.records"), value: fmtTokens(v.requests) },
         ...(attribution

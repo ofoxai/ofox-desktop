@@ -9,10 +9,10 @@ import {
 } from "@/lib/api/sessions";
 import { Button } from "@/components/ui/button";
 import { ToolBadge } from "@/components/tools/ToolBadge";
-import { fmtTokens, fmtCost } from "@/lib/format";
 import { SessionTranscript } from "./SessionTranscript";
 import { useSessionExport, useSessionResume } from "@/hooks/useSessionActions";
 import { ResumeFeedback } from "./ResumeFeedback";
+import { SessionUsageSummary } from "./SessionUsageSummary";
 import { CopyButton } from "@/components/ui/copy-button";
 
 export function SessionReader({
@@ -128,23 +128,11 @@ export function SessionReader({
             {session.projectDir || t("sessionCenter.noProject")}
           </p>
         </div>
-        {usage && (
-          <div className="text-right tabular-nums">
-            <b className="text-ui text-ink">{fmtTokens(usage.totalTokens)}</b>
-            <p className="text-sub text-ok">
-              {fmtCost(
-                usage.unpricedModels &&
-                  usage.models.every((model) => model.costUsd == null)
-                  ? null
-                  : usage.costUsd,
-              )}
-              {usage.unpricedModels &&
-              usage.models.some((model) => model.costUsd != null)
-                ? "+"
-                : ""}
-            </p>
-          </div>
-        )}
+        <SessionUsageSummary
+          usage={usage}
+          display={session.usageDisplay}
+          stacked
+        />
       </div>
       <SessionTranscript
         key={session.sessionKey}

@@ -515,9 +515,6 @@ export function UsagePage({
                   data?.totals.costUsd,
                 )}
               </span>
-              <span className="hidden text-note text-ink-muted xl:inline">
-                {t("usagePage.estimate")}
-              </span>
             </span>
           )}
         </div>
@@ -762,6 +759,9 @@ export function UsagePage({
             <div className="grid gap-3 md:grid-cols-2">
               <UsageBreakdownList
                 kind="tools"
+                compact
+                initialLimit={6}
+                pageSize={50}
                 rows={data.byTool.map((row) => ({ ...row, id: row.appType }))}
                 total={data.totals.totalTokens}
                 onFilter={
@@ -776,6 +776,9 @@ export function UsagePage({
               />
               <UsageBreakdownList
                 kind="models"
+                compact
+                initialLimit={6}
+                pageSize={50}
                 rows={data.byModel.map((row) => ({ ...row, id: row.model }))}
                 total={data.totals.totalTokens}
                 onFilter={
@@ -789,31 +792,38 @@ export function UsagePage({
                 }
               />
               {data.byProject && (
-                <UsageBreakdownList
-                  kind="projects"
-                  rows={data.byProject.map((row) => ({
-                    ...row,
-                    label: usageProjectLabel(
-                      row.id,
-                      row.label,
-                      row.path,
-                      projectNames,
-                    ),
-                  }))}
-                  total={data.totals.totalTokens}
-                  pageSize={50}
-                  onFilter={
-                    sharedProjectSupported
-                      ? (id) =>
-                          chooseProjects(
-                            selectedProjects.length === 1 &&
-                              selectedProjects[0] === id
-                              ? []
-                              : [id],
-                          )
-                      : undefined
-                  }
-                />
+                <section
+                  className="min-w-0 md:col-span-2"
+                  aria-label={t("usageSessions.projectRank")}
+                >
+                  <UsageBreakdownList
+                    kind="projects"
+                    compact
+                    initialLimit={6}
+                    rows={data.byProject.map((row) => ({
+                      ...row,
+                      label: usageProjectLabel(
+                        row.id,
+                        row.label,
+                        row.path,
+                        projectNames,
+                      ),
+                    }))}
+                    total={data.totals.totalTokens}
+                    pageSize={50}
+                    onFilter={
+                      sharedProjectSupported
+                        ? (id) =>
+                            chooseProjects(
+                              selectedProjects.length === 1 &&
+                                selectedProjects[0] === id
+                                ? []
+                                : [id],
+                            )
+                        : undefined
+                    }
+                  />
+                </section>
               )}
             </div>
           </>
@@ -971,7 +981,6 @@ export function UsagePage({
           })}
         </p>
       )}
-      <p className="text-note text-ink-faint">{t("usagePage.disclaimer")}</p>
       <Button
         variant="link"
         className="h-auto self-start px-0 text-note"

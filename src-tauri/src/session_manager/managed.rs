@@ -60,6 +60,8 @@ pub struct ManagedSession {
     /// What it spent, where its agent's usage is read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<SessionUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_display: Option<usage::UsageDisplay>,
 }
 
 pub fn roots(provider: &str) -> Result<Vec<PathBuf>, String> {
@@ -215,9 +217,9 @@ pub fn list_with(db: Option<&crate::database::Database>) -> Vec<ManagedSession> 
     let mut listing = super::scan_sessions();
     super::meta_cache::enrich(&mut listing, db);
     let listing = remember(listing);
-    let mut usage = db
+    let (mut usage, mut display) = db
         .map(|db| {
-            usage::load(db).unwrap_or_else(|e| {
+            usage::load_for_listing(db, &listing).unwrap_or_else(|e| {
                 log::warn!("[SESSIONS] {e}");
                 Default::default()
             })
@@ -225,10 +227,24 @@ pub fn list_with(db: Option<&crate::database::Database>) -> Vec<ManagedSession> 
         .unwrap_or_default();
     shown(&listing)
         .map(|meta| {
-            let spent = usage::app_type(&meta.provider_id)
-                .and_then(|app| usage.remove(&(app.to_string(), meta.session_id.clone())));
+            let (spent, usage_display) = if meta.provider_id == "codex" {
+                let (value, detail) = display.remove(&meta.session_id).unwrap_or_else(|| {
+                    (
+                        None,
+                        usage::UsageDisplay::unavailable("threadUsageNotIndexed"),
+                    )
+                });
+                (value, Some(detail))
+            } else {
+                (
+                    usage::app_type(&meta.provider_id)
+                        .and_then(|app| usage.remove(&(app.to_string(), meta.session_id.clone()))),
+                    None,
+                )
+            };
             ManagedSession {
                 usage: spent,
+                usage_display,
                 ..record(meta.clone(), &listing)
             }
         })
@@ -293,6 +309,7 @@ pub(crate) fn record(meta: SessionMeta, listing: &[SessionMeta]) -> ManagedSessi
         size_bytes,
         files,
         usage: None,
+        usage_display: None,
         meta,
     }
 }

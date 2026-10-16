@@ -3030,7 +3030,20 @@
       "command": "コマンド",
       "command_output": "コマンド出力",
       "system": "システム"
-    }
+    },
+    "usageUnavailable": "使用量不明",
+    "usageUnavailableDetails": "このセッションには検証可能な使用量記録がないため、費用を見積もれません。",
+    "unpriced": "価格不明",
+    "unpricedDetails": "Token は記録されていますが、モデル価格が不明なため費用を見積もれません。",
+    "partialCostDetails": "価格が判明しているモデルのみを含み、一部の費用は未計上です。",
+    "capabilityNotes": "ツールの説明",
+    "size": "ファイルサイズ",
+    "nativeThreadEstimate": "このセッションで検証できる使用量のみです。子セッションは別に表示します。費用は現在の OFox 価格による見積もりで、実際の請求額ではありません。",
+    "usageNotIndexed": "セッション使用量の索引がまだありません。更新して再試行してください。",
+    "usageAmbiguous": "このセッションには帰属が不明なコピー履歴が含まれるため、使用量と費用を表示できません。",
+    "usageSourceChanged": "セッションのソースが変更されました。更新して再試行してください。",
+    "usageConflicting": "同じセッションに異なるソースがあるため、使用量をまだ検証できません。",
+    "usagePricingChanged": "価格の地域を更新しています。しばらくしてからセッション使用量を更新してください。"
   },
   "modelProfiles": {
     "reasonNotInstalled": "ツールが未インストールのため、スキップしました。",
@@ -3819,7 +3832,8 @@
     "generationSpeed": "生成速度",
     "measuredSamples": "測定サンプル {{count}} / {{total}}",
     "measurementBasis": "実測値のあるサンプルのみを集計し、HTTP 400–599 を失敗とします。インポート時の仮値は除外し、最初の Token の時間と生成速度は信頼できる測定がある場合のみ表示します。",
-    "requestAnalyticsUnavailable": "このバックエンドはリクエスト推移と測定サマリーを提供していません。"
+    "requestAnalyticsUnavailable": "このバックエンドはリクエスト推移と測定サマリーを提供していません。",
+    "dataStatus": "データの状態"
   },
   "usageSessions": {
     "title": "セッション分析",

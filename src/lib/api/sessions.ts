@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { SessionMessage, SessionMeta } from "@/types";
+import type { UsageEstimate, UsagePricingCoverage } from "@/types/usageQuery";
 
 export interface SessionCapabilities {
   canReadMessages: boolean;
@@ -42,6 +43,19 @@ export interface SessionUsage {
   unpricedModels: number;
 }
 
+/** Proven, thread-local display projection; never a rewritten billing ledger. */
+export interface SessionUsageDisplay {
+  state: "available" | "unavailable";
+  basis: "currentOfoxEstimate";
+  scope: "nativeThread";
+  reasons: string[];
+  estimate: UsageEstimate | null;
+  pricingCoverage?: UsagePricingCoverage | null;
+  modelEstimates?: Record<string, UsageEstimate>;
+  parentSessionId: string | null;
+  billingSessionId: string | null;
+}
+
 /** Emitted when titles, counts or usage of the listing may have changed. */
 export const SESSIONS_INDEX_UPDATED_EVENT = "sessions-index-updated";
 
@@ -55,6 +69,7 @@ export interface ManagedSession extends SessionMeta {
   sizeBytes?: number;
   files?: SessionFile[];
   usage?: SessionUsage;
+  usageDisplay?: SessionUsageDisplay;
 }
 
 /** Providers may expose observed models or the usage database's model breakdown. */

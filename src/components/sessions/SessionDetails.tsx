@@ -3,9 +3,14 @@ import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { sessionsApi, type ManagedSession } from "@/lib/api/sessions";
 import { fmtCost, fmtTokens, fmtBytes } from "@/lib/format";
+import { formatUsageEstimate } from "@/lib/usageEstimate";
 import { CopyButton } from "@/components/ui/copy-button";
 import { Button } from "@/components/ui/button";
 import { SessionTranscript } from "./SessionTranscript";
+import {
+  sessionCostState,
+  sessionUsageUnavailableReason,
+} from "./SessionUsageSummary";
 import { useSessionExport } from "@/hooks/useSessionActions";
 export function SessionDetails({
   session: s,
@@ -25,6 +30,8 @@ export function SessionDetails({
     enabled: s.capabilities.canResume,
     retry: false,
   });
+  const usage = s.usageDisplay?.state === "unavailable" ? undefined : s.usage;
+  const costState = sessionCostState(usage, s.usageDisplay);
   const stamp = (n?: number) =>
     n == null ? "—" : new Date(n).toLocaleString(i18n.language);
   return (
@@ -33,6 +40,27 @@ export function SessionDetails({
         {t("sessionCenter.time")}: {stamp(s.createdAt)} –{" "}
         {stamp(s.lastActiveAt)}
       </div>
+      {s.sizeBytes != null && (
+        <div>
+          {t("sessionCenter.size")}: {fmtBytes(s.sizeBytes)}
+        </div>
+      )}
+      {s.usageDisplay?.state === "available" && (
+        <p className="text-note text-ink-muted">
+          {t("sessionCenter.nativeThreadEstimate")}
+        </p>
+      )}
+      {costState !== "priced" && (
+        <p className="text-note text-ink-muted">
+          {t(
+            costState === "unavailable"
+              ? sessionUsageUnavailableReason(s.usageDisplay)
+              : costState === "unpriced"
+                ? "sessionCenter.unpricedDetails"
+                : "sessionCenter.partialCostDetails",
+          )}
+        </p>
+      )}
       <div className="break-all">
         {t("sessionCenter.folder")}:{" "}
         {s.projectDir || t("sessionCenter.noProject")}
@@ -67,23 +95,48 @@ export function SessionDetails({
           )}
         </p>
       )}
-      {s.usage?.models.map((m) => (
-        <div
-          key={m.model}
-          className="grid grid-cols-[minmax(90px,1fr)_2fr_auto] gap-2 border-b border-line-2 pb-1"
-        >
-          <code className="break-all">{m.model}</code>
-          <span>
-            {t("sessionCenter.tokenDetails", {
-              input: fmtTokens(m.inputTokens),
-              output: fmtTokens(m.outputTokens),
-              cache: fmtTokens(m.cacheReadTokens),
-              write: fmtTokens(m.cacheWriteTokens),
-            })}
-          </span>
-          <span className="text-ok">{fmtCost(m.costUsd)}</span>
-        </div>
-      ))}
+      {usage && !usage.models.length && (
+        <p>
+          {t("sessionCenter.tokenDetails", {
+            input: fmtTokens(usage.inputTokens),
+            output: fmtTokens(usage.outputTokens),
+            cache: fmtTokens(usage.cacheReadTokens),
+            write: fmtTokens(usage.cacheWriteTokens),
+          })}
+        </p>
+      )}
+      {usage?.models.map((m) => {
+        const estimate = s.usageDisplay?.modelEstimates?.[m.model];
+        const unavailable = s.usageDisplay
+          ? !estimate ||
+            estimate.availability === "unknown" ||
+            estimate.knownCostUsd == null
+          : m.costUsd == null;
+        const cost = unavailable
+          ? t("sessionCenter.unpriced")
+          : estimate
+            ? formatUsageEstimate(estimate)
+            : fmtCost(m.costUsd);
+        return (
+          <div
+            key={m.model}
+            className="grid grid-cols-[minmax(90px,1fr)_2fr_auto] gap-2 border-b border-line-2 pb-1"
+          >
+            <code className="break-all">{m.model}</code>
+            <span>
+              {t("sessionCenter.tokenDetails", {
+                input: fmtTokens(m.inputTokens),
+                output: fmtTokens(m.outputTokens),
+                cache: fmtTokens(m.cacheReadTokens),
+                write: fmtTokens(m.cacheWriteTokens),
+              })}
+            </span>
+            <span className={unavailable ? "text-ink-faint" : "text-ok"}>
+              {cost}
+            </span>
+          </div>
+        );
+      })}
       {!!s.files?.length && (
         <details>
           <summary className="cursor-pointer break-all">

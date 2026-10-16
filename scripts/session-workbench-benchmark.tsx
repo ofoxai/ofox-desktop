@@ -372,7 +372,7 @@ const client = new QueryClient({
     },
   },
 });
-client.setQueryData(["sessions"], fixtures[0].sessions);
+client.setQueryData(["sessions", "ofox.ai"], fixtures[0].sessions);
 client.setQueryData(["session-trash"], []);
 const frames = () =>
   new Promise<void>((resolve) =>
@@ -414,7 +414,7 @@ function Harness() {
       data = fixtures[next % 2],
       start = performance.now();
     flushSync(() => {
-      client.setQueryData(["sessions"], data.sessions);
+      client.setQueryData(["sessions", "ofox.ai"], data.sessions);
       setFrame((old) => ({ ...old, page, revision: next, data }));
     });
     if (commit.current.revision !== next)

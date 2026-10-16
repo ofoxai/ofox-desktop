@@ -2,11 +2,11 @@ import { useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { Trash2 } from "lucide-react";
 import type { ManagedSession } from "@/lib/api/sessions";
-import { fmtCost, fmtTokens } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ToolBadge } from "@/components/tools/ToolBadge";
 import { SessionDetails } from "./SessionDetails";
+import { SessionUsageSummary } from "./SessionUsageSummary";
 import { canSelect, sessionSubline } from "./model";
 import { useSessionResume } from "@/hooks/useSessionActions";
 import { ResumeFeedback } from "./ResumeFeedback";
@@ -45,11 +45,6 @@ export function SessionRow({
   }, [focusRequest, onLocated]);
   const resume = useSessionResume(s.sessionKey);
   const title = s.title || t("sessionCenter.untitled");
-  const u = s.usage;
-  const cost =
-    u && !(u.models.length && u.models.every((m) => m.costUsd == null))
-      ? u.costUsd
-      : null;
   return (
     <div>
       <div
@@ -78,27 +73,7 @@ export function SessionRow({
             {sessionSubline(s, i18n.language, t)}
           </span>
         </button>
-        <div className="min-w-[100px] text-right tabular-nums">
-          <b className="text-ui text-ink">
-            {u ? fmtTokens(u.totalTokens) : "—"}
-          </b>
-          {u && (
-            <div className="text-note text-ink-faint">
-              {t("sessionCenter.tokenShort", {
-                input: fmtTokens(u.inputTokens),
-                output: fmtTokens(u.outputTokens),
-                cache: fmtTokens(u.cacheReadTokens),
-              })}
-            </div>
-          )}
-        </div>
-        <span
-          className="min-w-[58px] text-right text-sub text-ok tabular-nums"
-          title={t("sessionCenter.estimated")}
-        >
-          {fmtCost(cost)}
-          {cost != null && (u?.unpricedModels ?? 0) > 0 ? "+" : ""}
-        </span>
+        <SessionUsageSummary usage={s.usage} display={s.usageDisplay} />
         {s.capabilities.canResume && (
           <Button
             variant="secondary"

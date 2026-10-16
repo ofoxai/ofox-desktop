@@ -9,6 +9,7 @@ import {
   type SessionTrashEntry,
   type SessionSearchHit,
 } from "@/lib/api/sessions";
+import { useOfoxApex } from "@/hooks/useOfoxApex";
 import { useSessionSearch } from "@/hooks/useSessionSearch";
 import { useSessionContentSearch } from "@/hooks/useSessionContentSearch";
 import { useShell, useShellRefresh } from "@/components/shell/ShellContext";
@@ -21,6 +22,7 @@ import { SessionsHeader } from "./SessionsHeader";
 import { SessionFolder, SelectionCheckbox } from "./SessionFolder";
 import { SessionsTrash } from "./SessionsTrash";
 import { SessionReader } from "./SessionReader";
+import { SessionCapabilityNotes } from "./SessionCapabilityNotes";
 import { SessionSearchResults } from "./SessionSearchResults";
 import { MenuSelect } from "@/components/ui/menu-select";
 import { Switch } from "@/components/ui/switch";
@@ -44,8 +46,10 @@ export function SessionsPage({
   const { t } = useTranslation();
   const { active, sessionLocation, consumeSessionLocation } = useShell();
   const client = useQueryClient();
+  const { apex, isLoading: apexLoading } = useOfoxApex();
+  const sessionQueryKey = ["sessions", apex] as const;
   const query = useQuery({
-    queryKey: ["sessions"],
+    queryKey: sessionQueryKey,
     queryFn: sessionsApi.list,
     retry: false,
   });
@@ -54,7 +58,29 @@ export function SessionsPage({
     queryFn: sessionsApi.listTrash,
     retry: false,
   });
-  const sessions = query.data ?? EMPTY;
+  const sessions = useMemo(
+    () =>
+      (query.data ?? EMPTY).map((session) => {
+        const display = session.usageDisplay;
+        if (
+          !display ||
+          display.state !== "available" ||
+          (!apexLoading && display.pricingCoverage?.apex === apex)
+        )
+          return session;
+        return {
+          ...session,
+          usage: undefined,
+          usageDisplay: {
+            ...display,
+            state: "unavailable" as const,
+            estimate: null,
+            reasons: ["pricingContextChanged"],
+          },
+        };
+      }),
+    [query.data, apex, apexLoading],
+  );
   const [agent, setAgent] = useState(
     () => localStorage.getItem("ofox.sessionsAgent") || "all",
   );
@@ -194,7 +220,7 @@ export function SessionsPage({
     try {
       const rows = await sessionsApi.refreshIndex();
       await client.invalidateQueries({ queryKey: ["session-messages"] });
-      client.setQueryData(["sessions"], rows);
+      client.setQueryData(sessionQueryKey, rows);
       await client.invalidateQueries({ queryKey: ["session-trash"] });
     } catch (e) {
       toast.error(String(e));
@@ -438,21 +464,7 @@ export function SessionsPage({
                 {t("sessionCenter.trashSelected", { count: chosen.length })}
               </Button>
             </ListHead>
-            {filtered.some((s) => !s.capabilities.canReadMessages) && (
-              <p className="mb-2 text-sub text-ink-muted">
-                {t("sessionCenter.metadataOnly")}
-              </p>
-            )}
-            {filtered.some((s) => s.capabilities.resumeUsesSessionModel) && (
-              <p className="mb-2 text-sub text-ink-muted">
-                {t("sessionCenter.piResumeModel")}
-              </p>
-            )}
-            {filtered.some((s) => !s.capabilities.canTrash) && (
-              <p className="mb-2 text-sub text-ink-muted">
-                {t("sessionCenter.fileTrashUnavailable")}
-              </p>
-            )}
+            <SessionCapabilityNotes sessions={filtered} />
             {!query.isPending && !filtered.length && (
               <div className="py-12 text-center text-ink-muted">
                 <p>{t("sessionCenter.empty")}</p>
