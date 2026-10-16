@@ -73,7 +73,7 @@ describe("AddToolsDialog binding lifecycle", () => {
       />,
     );
     expect(await screen.findByText("已绑定 · 未安装")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "在主页管理" }));
+    fireEvent.click(screen.getByRole("button", { name: "在主页配置" }));
     expect(manage).toHaveBeenCalledWith("workbuddy");
     expect(close).toHaveBeenCalledWith(false);
     expect(bindTools).not.toHaveBeenCalled();

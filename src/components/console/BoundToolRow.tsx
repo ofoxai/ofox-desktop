@@ -21,6 +21,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ListRow } from "@/components/ui/list";
@@ -90,8 +91,8 @@ interface BoundToolRowProps {
 
 /**
  * magpie's agent row: the tool, its version and state on the first line,
- * its key and model below; primary actions and the account usage link remain
- * directly reachable, with secondary operations in a quiet ⋯ menu.
+ * its key and model below; primary actions stay visible while account usage
+ * and secondary operations share the quiet ⋯ menu.
  */
 export default function BoundToolRow({
   tool,
@@ -122,11 +123,11 @@ export default function BoundToolRow({
     tool.id === "codex" && tool.installationKind === "desktopApp"
       ? "chatgpt"
       : tool.id;
-  const hasSecondaryActions =
+  const hasUninstallAction =
     !!onUninstall && tool.installationStatus === "installed";
   const uninstallPreview = useUninstallPreview(
     uninstallTarget,
-    menuOpen && hasSecondaryActions,
+    menuOpen && hasUninstallAction,
   );
   const uninstallHint = uninstallPreview.available
     ? null
@@ -309,72 +310,72 @@ export default function BoundToolRow({
           <SlidersHorizontal aria-hidden className="h-3.5 w-3.5" />
           {t("toolLifecycle.manage")}
         </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          disabled={!hasAnalytics}
-          onClick={onAnalytics}
-          title={t("toolLifecycle.analyticsHint")}
-          aria-describedby={analyticsDescriptionId}
-        >
-          {t("toolLifecycle.analytics")}
-          <ExternalLink aria-hidden className="h-3.5 w-3.5" />
-        </Button>
-        {hasSecondaryActions && (
-          <DropdownMenu
-            modal={false}
-            open={menuOpen}
-            onOpenChange={setMenuOpen}
-          >
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="icon"
-                aria-label={t("toolLifecycle.more")}
-                title={t("toolLifecycle.more")}
-                className="h-6 w-6 data-[state=open]:bg-pill data-[state=open]:text-ink"
-              >
-                <Ellipsis aria-hidden className="h-4 w-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent
-              align="end"
-              className="min-w-[160px] max-w-[280px]"
-              onCloseAutoFocus={(event) => {
-                if (openingUninstall.current) {
-                  event.preventDefault();
-                  openingUninstall.current = false;
-                  onUninstall?.();
-                }
-              }}
+        <DropdownMenu modal={false} open={menuOpen} onOpenChange={setMenuOpen}>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="icon"
+              aria-label={t("toolLifecycle.more")}
+              title={t("toolLifecycle.more")}
+              className="h-6 w-6 data-[state=open]:bg-pill data-[state=open]:text-ink"
             >
-              <DropdownMenuItem
-                disabled={busy || !uninstallPreview.available}
-                aria-label={t("toolUninstall.entry")}
-                aria-describedby={
-                  uninstallHint ? uninstallDescriptionId : undefined
-                }
-                title={uninstallHint ?? undefined}
-                className="text-danger"
-                onSelect={() => {
-                  openingUninstall.current = true;
-                }}
-              >
-                <Trash2 aria-hidden className="h-3.5 w-3.5 shrink-0" />
-                <span className="min-w-0 flex-1">
-                  <span className="block">{t("toolUninstall.entry")}</span>
-                  {uninstallHint && (
-                    <span
-                      id={uninstallDescriptionId}
-                      className="block whitespace-normal text-note text-ink-muted"
-                    >
-                      {uninstallHint}
-                    </span>
-                  )}
-                </span>
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
+              <Ellipsis aria-hidden className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            className="min-w-[160px] max-w-[280px]"
+            onCloseAutoFocus={(event) => {
+              if (openingUninstall.current) {
+                event.preventDefault();
+                openingUninstall.current = false;
+                onUninstall?.();
+              }
+            }}
+          >
+            <DropdownMenuItem
+              disabled={!hasAnalytics}
+              onSelect={onAnalytics}
+              title={t("toolLifecycle.analyticsHint")}
+              aria-describedby={analyticsDescriptionId}
+            >
+              <span className="flex-1">{t("toolLifecycle.analytics")}</span>
+              <ExternalLink
+                aria-hidden
+                className="h-3.5 w-3.5 shrink-0 text-ink-muted"
+              />
+            </DropdownMenuItem>
+            {hasUninstallAction && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  disabled={busy || !uninstallPreview.available}
+                  aria-label={t("toolUninstall.entry")}
+                  aria-describedby={
+                    uninstallHint ? uninstallDescriptionId : undefined
+                  }
+                  title={uninstallHint ?? undefined}
+                  className="text-danger"
+                  onSelect={() => {
+                    openingUninstall.current = true;
+                  }}
+                >
+                  <Trash2 aria-hidden className="h-3.5 w-3.5 shrink-0" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block">{t("toolUninstall.entry")}</span>
+                    {uninstallHint && (
+                      <span
+                        id={uninstallDescriptionId}
+                        className="block whitespace-normal text-note text-ink-muted"
+                      >
+                        {uninstallHint}
+                      </span>
+                    )}
+                  </span>
+                </DropdownMenuItem>
+              </>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </ListRow>
   );

@@ -926,7 +926,7 @@ describe("Console tool rows", () => {
     localTools = [localTool("claude", "2.1.293")];
     render(<ConsolePage boundTools={["claude"]} />);
     const row = await screen.findByRole("group", { name: "Claude Code" });
-    const manage = within(row).getByRole("button", { name: "管理" });
+    const manage = within(row).getByRole("button", { name: "配置" });
     await userEvent.click(manage);
     expect(mocks.manageFocus).toHaveBeenLastCalledWith(manage);
     await userEvent.click(screen.getByRole("button", { name: "关闭测试管理" }));
@@ -944,7 +944,7 @@ describe("Console tool rows", () => {
       localTools = [localTool("claude", "2.1.293")];
       render(<ConsolePage boundTools={["claude"]} />);
       const row = await screen.findByRole("group", { name: "Claude Code" });
-      const trigger = within(row).getByRole("button", { name: "管理" });
+      const trigger = within(row).getByRole("button", { name: "配置" });
       if (input === "keyboard") {
         trigger.focus();
         await userEvent.keyboard("{Enter}");
@@ -961,12 +961,13 @@ describe("Console tool rows", () => {
     localTools = [localTool("claude", "2.1.293")];
     render(<ConsolePage boundTools={["claude"]} />);
     const row = await screen.findByRole("group", { name: "Claude Code" });
-    const entry = within(row).getByRole("button", {
-      name: "用量明细",
-    });
+    await userEvent.click(
+      within(row).getByRole("button", { name: "更多操作" }),
+    );
+    const entry = screen.getByRole("menuitem", { name: "用量明细" });
     expect(entry).toHaveAttribute("title", zh.toolLifecycle.analyticsHint);
     expect(entry).toHaveAccessibleDescription(zh.toolLifecycle.analyticsHint);
-    expect(entry).toBeDisabled();
+    expect(entry).toHaveAttribute("data-disabled");
   });
   it.each(["ofox.ai", "ofox.io"])(
     "opens account usage on %s with the bound key encoded in its web URL",
@@ -987,9 +988,13 @@ describe("Console tool rows", () => {
       const row = await screen.findByRole("group", { name: "Claude Code" });
       expect(await within(row).findByText("Claude on mac")).toBeVisible();
 
+      expect(
+        within(row).queryByRole("button", { name: "用量明细" }),
+      ).toBeNull();
       await userEvent.click(
-        within(row).getByRole("button", { name: "用量明细" }),
+        within(row).getByRole("button", { name: "更多操作" }),
       );
+      await userEvent.click(screen.getByRole("menuitem", { name: "用量明细" }));
 
       expect(mocks.openExternal).toHaveBeenCalledWith(
         `https://app.${apex}/analytics?apiKeys=key%20%2F%2B%3F1`,
@@ -1002,9 +1007,12 @@ describe("Console tool rows", () => {
     render(<ConsolePage boundTools={["claude"]} />);
     const row = await screen.findByRole("group", { name: "Claude Code" });
 
-    expect(
-      within(row).getByRole("button", { name: "用量明细" }),
-    ).toBeDisabled();
+    await userEvent.click(
+      within(row).getByRole("button", { name: "更多操作" }),
+    );
+    expect(screen.getByRole("menuitem", { name: "用量明细" })).toHaveAttribute(
+      "data-disabled",
+    );
   });
 
   it("names how the version was installed when it is known", async () => {
@@ -1054,7 +1062,7 @@ describe("Console tool rows", () => {
       within(claude).getByRole("button", { name: "打开" }),
     ).not.toHaveClass("bg-brand");
     expect(
-      within(claude).getByRole("button", { name: "管理" }),
+      within(claude).getByRole("button", { name: "配置" }),
     ).not.toHaveClass("bg-brand");
   });
 
@@ -1091,10 +1099,10 @@ describe("Bound tool lifecycle", () => {
     expect(buttonNames(row)).toEqual([
       "0 个模型",
       "前往下载",
-      "管理",
-      "用量明细",
+      "配置",
+      "更多操作",
     ]);
-    fireEvent.click(within(row).getByRole("button", { name: "管理" }));
+    fireEvent.click(within(row).getByRole("button", { name: "配置" }));
     expect(screen.getByRole("dialog")).toHaveTextContent("管理：WorkBuddy");
     expect(mocks.invoke).not.toHaveBeenCalledWith(
       "ofox_unbind_tool",
@@ -1117,7 +1125,7 @@ describe("Bound tool lifecycle", () => {
     render(<ConsolePage boundTools={["codex"]} />);
     const row = await screen.findByRole("group", { name: "Codex" });
     expect(within(row).getByText("检测失败")).toBeVisible();
-    expect(buttonNames(row)).toEqual(["重新检测", "管理", "用量明细"]);
+    expect(buttonNames(row)).toEqual(["重新检测", "配置", "更多操作"]);
     expect(
       screen.queryByRole("button", { name: /未安装工具/ }),
     ).not.toBeInTheDocument();
@@ -1144,12 +1152,7 @@ describe("Bound tool lifecycle", () => {
       ).toBeEnabled(),
     );
     expect(within(row).getByText("安装异常")).toBeVisible();
-    expect(buttonNames(row)).toEqual([
-      "修复安装",
-      "管理",
-      "用量明细",
-      "更多操作",
-    ]);
+    expect(buttonNames(row)).toEqual(["修复安装", "配置", "更多操作"]);
     fireEvent.click(within(row).getByRole("button", { name: "修复安装" }));
     expect(mocks.install).toHaveBeenCalledWith("codex");
   });
@@ -1173,12 +1176,7 @@ describe("Bound tool lifecycle", () => {
     render(<ConsolePage boundTools={["claude"]} />);
     const row = await screen.findByRole("group", { name: "Claude Code" });
     expect(within(row).getByText("绑定配置缺失")).toBeVisible();
-    expect(buttonNames(row)).toEqual([
-      "恢复绑定",
-      "管理",
-      "用量明细",
-      "更多操作",
-    ]);
+    expect(buttonNames(row)).toEqual(["恢复绑定", "配置", "更多操作"]);
     fireEvent.click(within(row).getByRole("button", { name: "恢复绑定" }));
     expect(screen.getByRole("dialog")).toHaveTextContent("管理：Claude Code");
     expect(

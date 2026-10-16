@@ -61,16 +61,37 @@ beforeEach(async () => {
 });
 
 it.each([
+  ["zh", "配置"],
+  ["en", "Configure"],
+  ["ja", "設定"],
+])(
+  "points model-recovery guidance at the available %s configuration action",
+  async (language, label) => {
+    await i18n.changeLanguage(language);
+    render(<BoundToolRow {...props()} />);
+    const configure = screen.getByRole("button", { name: label });
+    expect(
+      i18n.t("modelCompatibility.defaultModelFailed", { tool: "Claude Code" }),
+    ).toContain(configure.textContent);
+  },
+);
+
+it.each([
   ["zh", "用量明细"],
   ["en", "Usage details"],
   ["ja", "使用量明細"],
 ])(
-  "keeps the account usage link visible and localized in %s without opening a menu",
+  "hides account usage until More opens and localizes its menu entry in %s",
   async (language, name) => {
     await i18n.changeLanguage(language);
     const input = props();
     render(<BoundToolRow {...input} />);
-    const link = screen.getByRole("button", { name });
+    expect(screen.queryByRole("button", { name })).toBeNull();
+    expect(screen.queryByRole("menuitem", { name })).toBeNull();
+    await userEvent.click(
+      screen.getByRole("button", { name: i18n.t("toolLifecycle.more") }),
+    );
+    const link = screen.getByRole("menuitem", { name });
     expect(link).toBeVisible();
     expect(link).toHaveAttribute(
       "title",
@@ -79,16 +100,13 @@ it.each([
     expect(link).toHaveAccessibleDescription(
       i18n.t("toolLifecycle.analyticsHint"),
     );
-    expect(
-      screen.queryByRole("button", { name: i18n.t("toolLifecycle.more") }),
-    ).toBeNull();
     await userEvent.click(link);
     expect(input.onAnalytics).toHaveBeenCalledOnce();
     expect(mocks.invoke).not.toHaveBeenCalled();
   },
 );
 
-it("keeps long-name row actions directly reachable by keyboard without a More detour", async () => {
+it("opens usage from More by keyboard and restores focus to the long-name row trigger", async () => {
   const input = props();
   input.tool.label = `Claude ${"很长的工具名称".repeat(30)}`;
   render(
@@ -104,20 +122,29 @@ it("keeps long-name row actions directly reachable by keyboard without a More de
   await userEvent.tab();
   expect(screen.getByRole("button", { name: "打开" })).toHaveFocus();
   await userEvent.tab();
-  expect(screen.getByRole("button", { name: "管理" })).toHaveFocus();
+  expect(screen.getByRole("button", { name: "配置" })).toHaveFocus();
   await userEvent.tab();
-  expect(screen.getByRole("button", { name: "用量明细" })).toHaveFocus();
+  const more = screen.getByRole("button", { name: "更多操作" });
+  expect(more).toHaveFocus();
   await userEvent.keyboard("{Enter}");
+  const entry = screen.getByRole("menuitem", { name: "用量明细" });
+  expect(entry).toHaveFocus();
+  await userEvent.keyboard("{Escape}");
+  expect(more).toHaveFocus();
+  await userEvent.keyboard("{Enter}{Enter}");
   expect(input.onAnalytics).toHaveBeenCalledOnce();
+  await waitFor(() => expect(more).toHaveFocus());
+  expect(mocks.invoke).not.toHaveBeenCalled();
 });
 
-it("retains the disabled account link when no verified key exists", async () => {
+it("keeps a disabled usage menu entry when no verified key exists", async () => {
   const input = props();
   render(<BoundToolRow {...input} hasAnalytics={false} />);
-  const link = screen.getByRole("button", { name: "用量明细" });
+  await userEvent.click(screen.getByRole("button", { name: "更多操作" }));
+  const link = screen.getByRole("menuitem", { name: "用量明细" });
   expect(link).toBeVisible();
-  expect(link).toBeDisabled();
-  await userEvent.click(link);
+  expect(link).toHaveAttribute("data-disabled");
+  await userEvent.keyboard("{Enter}");
   expect(input.onAnalytics).not.toHaveBeenCalled();
 });
 
@@ -140,7 +167,7 @@ it("loads uninstall preview only on opening More, retaining a disabled loading e
     tool: "claude",
     stillBound: [],
   });
-  expect(screen.queryByRole("menuitem", { name: "用量明细" })).toBeNull();
+  expect(screen.getByRole("menuitem", { name: "用量明细" })).toBeVisible();
   await act(async () => resolve(preview));
   const ready = await screen.findByRole("menuitem", { name: "卸载…" });
   expect(ready).not.toHaveAttribute("data-disabled");
@@ -177,15 +204,22 @@ it.each(["unsupported", "error"])(
   },
 );
 
-it("omits More when a missing tool has no secondary action", () => {
-  const input = props();
-  render(
-    <BoundToolRow
-      {...input}
-      tool={{ ...input.tool, installationStatus: "notInstalled" }}
-      onUninstall={vi.fn()}
-    />,
-  );
-  expect(screen.getByRole("button", { name: "用量明细" })).toBeVisible();
-  expect(screen.queryByRole("button", { name: "更多操作" })).toBeNull();
-});
+it.each(["notInstalled", "unknown"] as const)(
+  "retains usage without uninstall preview when installation is %s",
+  async (status) => {
+    const input = props();
+    render(
+      <BoundToolRow
+        {...input}
+        tool={{ ...input.tool, installationStatus: status }}
+        onUninstall={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "用量明细" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "更多操作" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "用量明细" }));
+    expect(input.onAnalytics).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("menuitem", { name: /卸载/ })).toBeNull();
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  },
+);
