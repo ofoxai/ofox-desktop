@@ -49,15 +49,40 @@ pub(crate) fn zip_skill_artifacts(
         artifacts::PACKAGE_MAX_ENTRIES,
     )
 }
+pub(crate) fn zip_selected_skill_artifacts(
+    dest: &Path,
+    conn: &rusqlite::Connection,
+    selected: &BTreeSet<String>,
+) -> Result<(), AppError> {
+    zip_skill_artifacts_filtered(
+        dest,
+        conn,
+        artifacts::PACKAGE_MAX_OBJECTS,
+        artifacts::PACKAGE_MAX_ENTRIES,
+        Some(selected),
+    )
+}
 fn zip_skill_artifacts_with_limits(
     dest: &Path,
     conn: &rusqlite::Connection,
     max_objects: usize,
     max_entries: usize,
 ) -> Result<(), AppError> {
+    zip_skill_artifacts_filtered(dest, conn, max_objects, max_entries, None)
+}
+fn zip_skill_artifacts_filtered(
+    dest: &Path,
+    conn: &rusqlite::Connection,
+    max_objects: usize,
+    max_entries: usize,
+    selected: Option<&BTreeSet<String>>,
+) -> Result<(), AppError> {
     let snapshot = library::snapshot_from_connection(conn)?;
     let mut hashes = BTreeSet::new();
-    for row in skill_rows(conn)? {
+    for row in skill_rows(conn)?
+        .into_iter()
+        .filter(|row| selected.is_none_or(|ids| ids.contains(&row.id)))
+    {
         skill_resource::validate_skill(&row)?;
         let meta = snapshot
             .definitions

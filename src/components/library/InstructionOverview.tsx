@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 import type { InstructionSet, LibraryData } from "@/lib/api/library";
 import { ListCard, ListHead, ListRow } from "@/components/ui/list";
 import { Button } from "@/components/ui/button";
+import { ToolBadge } from "@/components/tools/ToolBadge";
 import { toolLabel } from "./libraryText";
 
 export function InstructionOverview({
@@ -46,48 +47,34 @@ export function InstructionOverview({
                 ? t("library.noInstructionSet")
                 : t("library.unknown");
           return (
-            <ListRow key={target.toolId} className="flex-wrap items-start">
+            <ListRow
+              key={target.toolId}
+              className="flex-wrap items-start gap-3 py-3"
+            >
+              <ToolBadge toolId={target.toolId} size={28} rounded="md" />
               <div className="min-w-0 flex-1 space-y-1 text-ctl">
-                <p className="font-medium">
-                  {tool} ·{" "}
-                  {t(`library.status.${target.status}`, {
-                    defaultValue: t("library.unknown"),
-                  })}
-                </p>
-                <p className="break-all text-note text-ink-muted">
-                  {target.path}
-                </p>
-                <p className="text-note text-ink-muted">
-                  {t("library.instructionCounts", {
-                    own: count(target.userContentLines),
-                    managed: count(target.managedContentLines),
-                  })}
-                </p>
-                <p className="break-words text-note">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="font-medium text-ink">{tool}</span>
+                  <span className="rounded bg-pill px-1.5 py-0.5 text-note text-ink-muted">
+                    {t(`library.status.${target.status}`, {
+                      defaultValue: t("library.unknown"),
+                    })}
+                  </span>
+                  <span className="text-note text-ink-muted">
+                    {t("library.instructionExperience.ownSummary", {
+                      lines: count(target.userContentLines),
+                    })}
+                  </span>
+                </div>
+                <p className="break-words text-note text-ink-muted">
                   {t("library.instructionSelection", {
                     desired: name(target.desiredResourceId),
                     readable,
                   })}
                 </p>
-                {target.lastAppliedRevision != null && (
-                  <p className="text-note text-ink-muted">
-                    {t("library.lastManagedRevision", {
-                      revision: target.lastAppliedRevision,
-                    })}
-                  </p>
-                )}
                 {target.status === "shared" && (
                   <p className="text-note text-ink-muted">
                     {t("library.sharedReadable")}
-                  </p>
-                )}
-                {target.readers && target.readers.length > 1 && (
-                  <p className="text-note text-ink-muted">
-                    {t("library.readers", {
-                      tools: target.readers
-                        .map((reader) => toolLabel(reader, t))
-                        .join(", "),
-                    })}
                   </p>
                 )}
                 {!target.available && (
@@ -95,6 +82,36 @@ export function InstructionOverview({
                     {t("library.nativeCliRequired")}
                   </p>
                 )}
+                <details className="pt-1 text-note text-ink-muted">
+                  <summary className="w-fit cursor-pointer rounded outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-brand">
+                    {t("library.instructionExperience.technicalDetails")}
+                  </summary>
+                  <div className="mt-2 space-y-1 border-l border-line-2 pl-3">
+                    <p className="break-all font-mono">{target.path}</p>
+                    <p>
+                      {t("library.instructionCounts", {
+                        own: count(target.userContentLines),
+                        managed: count(target.managedContentLines),
+                      })}
+                    </p>
+                    {target.lastAppliedRevision != null && (
+                      <p>
+                        {t("library.lastManagedRevision", {
+                          revision: target.lastAppliedRevision,
+                        })}
+                      </p>
+                    )}
+                    {target.readers && target.readers.length > 1 && (
+                      <p>
+                        {t("library.readers", {
+                          tools: target.readers
+                            .map((reader) => toolLabel(reader, t))
+                            .join(", "),
+                        })}
+                      </p>
+                    )}
+                  </div>
+                </details>
               </div>
               {set && (
                 <Button

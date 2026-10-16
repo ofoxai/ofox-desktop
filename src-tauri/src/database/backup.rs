@@ -529,7 +529,9 @@ impl Database {
                     let key: String = row
                         .get(key_index)
                         .map_err(|e| AppError::Database(e.to_string()))?;
-                    if key == crate::services::library::MACHINE_KEY {
+                    if key == crate::services::library::MACHINE_KEY
+                        || key == crate::services::library::batch::SETTING_KEY
+                    {
                         continue;
                     }
                     if key == crate::services::usage_health::SETTING_KEY {

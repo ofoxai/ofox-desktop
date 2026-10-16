@@ -2,10 +2,12 @@ import { useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import MarkdownEditor from "@/components/MarkdownEditor";
+import { SessionMarkdown } from "@/components/sessions/SessionMarkdown";
 import { useDarkMode } from "@/hooks/useDarkMode";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MenuSelect } from "@/components/ui/menu-select";
+import { SegmentedControl } from "@/components/ui/segmented";
 import { ListCard, ListRow } from "@/components/ui/list";
 import {
   libraryApi,
@@ -32,12 +34,14 @@ export function InstructionEditor({
   importMode,
   busy,
   onSave,
+  onDiscard,
 }: {
   store: DraftStore;
   initial?: InstructionSet;
   importMode?: boolean;
   busy: boolean;
   onSave: (set: InstructionSet, imported: boolean) => Promise<unknown>;
+  onDiscard?: () => void;
 }) {
   const { t } = useTranslation();
   const [draft, setDraft] = useDraftState<InstructionSet>(
@@ -52,6 +56,18 @@ export function InstructionEditor({
       },
   );
   const [error, setError] = useDraftState(store, "instructionError", "");
+  const [baseline, setBaseline] = useDraftState<InstructionSet>(
+    store,
+    "instructionBaseline",
+    () => ({ ...draft }),
+  );
+  const [mode, setMode] = useDraftState<"edit" | "preview">(
+    store,
+    "instructionMode",
+    "edit",
+  );
+  const [saving, setSaving] = useDraftState(store, "instructionSaving", false);
+  const submitting = useRef(false);
   const [source, setSource] = useDraftState(
     store,
     "instructionSource",
@@ -74,12 +90,39 @@ export function InstructionEditor({
     () => ({ current: 0 }),
   );
   const isDarkMode = useDarkMode();
+  const disabled = busy || saving;
+  const dirty =
+    draft.name !== baseline.name || draft.content !== baseline.content;
+  async function save() {
+    if (disabled || submitting.current || !draft.name.trim()) return;
+    submitting.current = true;
+    setSaving(true);
+    setError("");
+    try {
+      const result = await onSave(draft, !!importMode);
+      if (result !== false) setBaseline({ ...draft });
+    } catch (failure) {
+      setError(libraryError(failure, t));
+    } finally {
+      submitting.current = false;
+      setSaving(false);
+    }
+  }
   return (
     <form
       className="space-y-3"
       onSubmit={(event) => {
         event.preventDefault();
-        void onSave(draft, !!importMode);
+        void save();
+      }}
+      onKeyDown={(event) => {
+        if (
+          (event.metaKey || event.ctrlKey) &&
+          event.key.toLowerCase() === "s"
+        ) {
+          event.preventDefault();
+          void save();
+        }
       }}
     >
       {importMode && (
@@ -213,27 +256,69 @@ export function InstructionEditor({
         <Input
           required
           value={draft.name}
-          disabled={busy}
+          disabled={disabled}
           onChange={(event) => {
             editGeneration.current++;
             setDraft((previous) => ({ ...previous, name: event.target.value }));
           }}
         />
       </label>
-      <MarkdownEditor
-        value={draft.content}
-        onChange={(content) => {
-          editGeneration.current++;
-          setDraft((previous) => ({ ...previous, content }));
-        }}
-        darkMode={isDarkMode}
-        readOnly={busy}
-        minHeight="240px"
-        maxHeight="45vh"
+      <SegmentedControl
+        aria-label={t("library.instructionExperience.view")}
+        value={mode}
+        onChange={setMode}
+        options={[
+          { value: "edit", label: t("library.instructionExperience.edit") },
+          {
+            value: "preview",
+            label: t("library.instructionExperience.preview"),
+          },
+        ]}
       />
-      <Button type="submit" disabled={busy || !draft.name.trim()}>
-        {t("library.saveDraft")}
-      </Button>
+      {mode === "edit" ? (
+        <MarkdownEditor
+          value={draft.content}
+          onChange={(content) => {
+            editGeneration.current++;
+            setDraft((previous) => ({ ...previous, content }));
+          }}
+          darkMode={isDarkMode}
+          readOnly={disabled}
+          minHeight="240px"
+          maxHeight="45vh"
+        />
+      ) : (
+        <div className="max-h-[45vh] min-h-[240px] overflow-auto rounded-ctl border border-line bg-card px-4 py-2">
+          {draft.content ? (
+            <SessionMarkdown content={draft.content} />
+          ) : (
+            <p className="py-3 text-ctl text-ink-muted">
+              {t("library.instructionExperience.emptyPreview")}
+            </p>
+          )}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        <Button type="submit" disabled={disabled || !draft.name.trim()}>
+          {t("library.saveDraft")}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          disabled={disabled || !dirty}
+          onClick={() => {
+            editGeneration.current++;
+            setDraft({ ...baseline });
+            setError("");
+            onDiscard?.();
+          }}
+        >
+          {t("library.instructionExperience.discard")}
+        </Button>
+        <span className="ml-auto text-note text-ink-faint">
+          {t("library.instructionExperience.shortcut")}
+        </span>
+      </div>
     </form>
   );
 }
@@ -768,7 +853,7 @@ export function SkillImporter({
               })
             }
           >
-            {t("library.discover")}
+            {t("library.discover.title")}
           </Button>
           <ListCard>
             {available.map((skill) => (

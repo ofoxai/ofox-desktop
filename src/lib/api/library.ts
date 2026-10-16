@@ -188,7 +188,114 @@ export interface McpCheckResult {
   reason?: string;
   tools: { name: string; description?: string | null }[];
 }
+export interface LibraryInventory {
+  ticketId: string;
+  kind: LibraryKind;
+  expiresAtMs: number;
+  sources: {
+    sourceId: string;
+    toolId: string;
+    label: string;
+    state: string;
+    reason?: string | null;
+    count: number;
+  }[];
+  entries: {
+    entryId: string;
+    kind: LibraryKind;
+    name: string;
+    summary?: string | null;
+    sources: { sourceId: string; toolId: string }[];
+    matchedResourceIds: string[];
+    conflict: boolean;
+    variant?: string | null;
+    directory?: string | null;
+  }[];
+}
+export interface InventoryImport {
+  imported: number;
+  items: {
+    entryId: string;
+    resourceId?: string | null;
+    name: string;
+    status: string;
+    reason?: string | null;
+  }[];
+}
+export interface BatchResource {
+  resourceId: string;
+  expectedRevision: number;
+  addTools?: string[];
+  withdrawTools?: string[];
+}
+export interface LibraryBatchChange {
+  resourceId: string;
+  name: string;
+  action: "apply" | "withdraw";
+  tools?: string[];
+  changedFields: string[];
+  method?: string | null;
+  status?: string;
+}
+export interface LibraryBatchPlan {
+  operationId: string;
+  kind: LibraryKind;
+  status: string;
+  resources: { resourceId: string; name?: string; expectedRevision?: number }[];
+  groups: {
+    groupId: string;
+    tools: string[];
+    readers: string[];
+    path: string;
+    status: string;
+    reason?: string | null;
+    beforeManaged?: string | null;
+    afterManaged?: string | null;
+    resourceIds: string[];
+    changedTools?: string[];
+    changes?: LibraryBatchChange[];
+  }[];
+  metadataChanges?: LibraryBatchChange[];
+  completed?: number;
+  remaining?: number;
+}
 export const libraryApi = {
+  discardInventory: (ticketId: string) =>
+    invoke<boolean>("discard_library_inventory", { ticketId }),
+  inventory: (kind: LibraryKind) =>
+    invoke<LibraryInventory>("scan_library_inventory", { kind }),
+  importInventory: (
+    ticketId: string,
+    entryIds: string[],
+    expectedEpoch: number,
+  ) =>
+    invoke<InventoryImport>("import_library_inventory", {
+      ticketId,
+      entryIds,
+      expectedEpoch,
+    }),
+  previewBatch: (
+    kind: LibraryKind,
+    resources: BatchResource[],
+    tools: string[],
+    action: "apply" | "withdraw",
+    expectedEpoch: number,
+  ) =>
+    invoke<LibraryBatchPlan>("preview_library_batch", {
+      kind,
+      resources,
+      tools,
+      action,
+      expectedEpoch,
+    }),
+  runBatch: (operationId: string) =>
+    invoke<LibraryBatchPlan>("run_library_batch", { operationId }),
+  cancelBatch: (operationId: string) =>
+    invoke<LibraryBatchPlan>("cancel_library_batch", { operationId }),
+  reconcileBatch: (operationId: string) =>
+    invoke<LibraryBatchPlan>("reconcile_library_batch", { operationId }),
+  batches: (kind: LibraryKind) =>
+    invoke<LibraryBatchPlan[]>("list_library_batches", { kind }),
   prepareMcpCheck: (
     resourceId: string,
     expectedRevision: number,
@@ -266,6 +373,10 @@ export const libraryApi = {
     }),
   pickPack: () => invoke<string | null>("pick_library_pack"),
   exportPack: () => invoke<boolean>("export_library_pack"),
+  exportSelected: (kind: LibraryKind, resourceIds: string[]) =>
+    invoke<boolean>("export_library_selection", {
+      selection: { kind, resourceIds },
+    }),
   previewPack: (path: string) =>
     invoke<ResourcePackPreview>("preview_library_pack", { path }),
   restorePack: (

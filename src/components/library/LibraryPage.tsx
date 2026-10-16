@@ -8,6 +8,8 @@ import {
   InteractionScope,
   useInteractionActive,
 } from "@/components/ui/interaction-scope";
+import { Button } from "@/components/ui/button";
+import { Compass } from "lucide-react";
 import { ResourcePackDialog } from "./ResourcePackDialog";
 import { LibrarySection } from "./LibrarySection";
 
@@ -31,6 +33,19 @@ export function LibraryPage({
     setVisited((previous) => new Set(previous).add(location.kind));
     onLocated?.(location.request);
   }, [location, active, onLocated]);
+  const discoverActions = useRef(
+    new Map<LibraryKind, (element: HTMLElement) => void>(),
+  );
+  const registerDiscover = useCallback(
+    (kind: LibraryKind, open: (element: HTMLElement) => void) => {
+      discoverActions.current.set(kind, open);
+      return () => {
+        if (discoverActions.current.get(kind) === open)
+          discoverActions.current.delete(kind);
+      };
+    },
+    [],
+  );
   const actions = useRef(new Map<LibraryKind, () => Promise<unknown>>());
   const summary = useQuery({
     queryKey: ["library", "summary"],
@@ -53,7 +68,7 @@ export function LibraryPage({
     if (visited.size > 1) void summary.refetch();
   }, [visited.size, summary.refetch]);
   return (
-    <div className="mx-auto max-w-[1200px] space-y-3">
+    <div className="min-w-0 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <SegmentedNav
           aria-label={t("library.nav")}
@@ -69,7 +84,15 @@ export function LibraryPage({
           }))}
         />
         <div className="flex flex-wrap items-center gap-2">
-          <p className="text-note text-ink-muted">{t("library.globalScope")}</p>
+          <Button
+            variant="ghost"
+            onClick={(event) =>
+              discoverActions.current.get(tab)?.(event.currentTarget)
+            }
+          >
+            <Compass className="mr-1 h-3.5 w-3.5" />
+            {t("library.discover.title")}
+          </Button>
           <ResourcePackDialog
             onChanged={async () => {
               await Promise.all([
@@ -92,6 +115,7 @@ export function LibraryPage({
             <LibrarySection
               kind={kind}
               registerRefresh={register}
+              registerDiscover={registerDiscover}
               onChanged={() => void summary.refetch()}
             />
           </InteractionScope>

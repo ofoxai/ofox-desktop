@@ -86,6 +86,9 @@ pub fn save_instruction(
 /// Stop an obsolete journal without reverting or modifying native content.
 /// Recovery material must be inspected before an operation can be discarded.
 pub fn cancel_operation(db: &Database, id: &str) -> Result<Operation, AppError> {
+    if id.starts_with(super::batch::CHILD_PREFIX) {
+        return Err(error("batchParentRequired"));
+    }
     let _io = crate::config_io::lock();
     let before = db.library_snapshot()?;
     let mut op = before
@@ -408,7 +411,7 @@ fn preview_internal(
     Ok(operation)
 }
 
-fn confirm_version(
+pub(crate) fn confirm_version(
     db: &Database,
     snapshot: &LibrarySnapshot,
     op: &Operation,
@@ -488,7 +491,11 @@ pub(crate) fn prune_history(snapshot: &mut LibrarySnapshot, keep_id: &str) {
             .machine
             .operations
             .iter()
-            .filter(|(id, op)| op.status == status && id.as_str() != keep_id)
+            .filter(|(id, op)| {
+                op.status == status
+                    && id.as_str() != keep_id
+                    && !id.starts_with(super::batch::CHILD_PREFIX)
+            })
             .map(|(id, op)| (op.created_at, id.clone()))
             .collect();
         candidates.sort();
@@ -520,7 +527,10 @@ fn persist(
     db.library_commit(current, &next)
 }
 
-fn verify_sources(target: &TargetWrite, targets: &[TargetWrite]) -> Result<(), AppError> {
+pub(crate) fn verify_sources(
+    target: &TargetWrite,
+    targets: &[TargetWrite],
+) -> Result<(), AppError> {
     for (path, source) in &target.source_fingerprints {
         let path = PathBuf::from(path);
         if physical_id(&path)? != source.physical_target {
@@ -544,7 +554,7 @@ fn verify_sources(target: &TargetWrite, targets: &[TargetWrite]) -> Result<(), A
     Ok(())
 }
 
-fn verify_routing(op: &Operation) -> Result<(), AppError> {
+pub(crate) fn verify_routing(op: &Operation) -> Result<(), AppError> {
     if op.kind == super::ResourceKind::Mcp
         && op.resolved_paths.contains_key("opencode")
         && op.routing.as_ref() != Some(&super::mcp_resource::routing_dependencies()?)
@@ -588,6 +598,9 @@ fn verify_routing(op: &Operation) -> Result<(), AppError> {
 }
 
 pub fn apply_operation(db: &Database, id: &str) -> Result<Operation, AppError> {
+    if id.starts_with(super::batch::CHILD_PREFIX) {
+        return Err(error("batchParentRequired"));
+    }
     let _io = crate::config_io::lock();
     let mut snapshot = db.library_snapshot()?;
     let mut op = snapshot
@@ -750,6 +763,9 @@ pub fn apply_operation(db: &Database, id: &str) -> Result<Operation, AppError> {
 
 /// Crash recovery only verifies. It never resumes writes or revives stale epochs.
 pub fn recover_operation(db: &Database, id: &str) -> Result<Operation, AppError> {
+    if id.starts_with(super::batch::CHILD_PREFIX) {
+        return Err(error("batchParentRequired"));
+    }
     let _io = crate::config_io::lock();
     let mut snapshot = db.library_snapshot()?;
     let mut op = snapshot

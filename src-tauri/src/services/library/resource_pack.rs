@@ -219,11 +219,39 @@ fn zip_pack(pack: &Pack, skills: &[u8]) -> Result<Vec<u8>, AppError> {
     }
     Ok(raw)
 }
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExportSelection {
+    pub kind: super::ResourceKind,
+    pub resource_ids: Vec<String>,
+}
+pub fn export_selected(db: &Database, selection: &ExportSelection) -> Result<Vec<u8>, AppError> {
+    if selection.resource_ids.is_empty()
+        || selection.resource_ids.len() > 2000
+        || selection.resource_ids.iter().collect::<BTreeSet<_>>().len()
+            != selection.resource_ids.len()
+    {
+        return Err(error("packInvalid"));
+    }
+    export_inner(db, Some(selection))
+}
 pub fn export(db: &Database) -> Result<Vec<u8>, AppError> {
+    export_inner(db, None)
+}
+fn export_inner(db: &Database, selection: Option<&ExportSelection>) -> Result<Vec<u8>, AppError> {
+    let selected = |kind: super::ResourceKind, id: &str| {
+        selection.is_none_or(|selection| {
+            selection.kind == kind && selection.resource_ids.iter().any(|selected| selected == id)
+        })
+    };
     let _io = crate::config_io::lock();
     let snapshot = db.library_snapshot()?;
     let mut mcp = vec![];
-    for row in db.get_all_mcp_servers()?.into_values() {
+    for row in db
+        .get_all_mcp_servers()?
+        .into_values()
+        .filter(|row| selected(super::ResourceKind::Mcp, &row.id))
+    {
         let mut omitted_fields = vec![];
         let server = skeleton(&row.server, &mut vec![], &mut omitted_fields, 0)?;
         mcp.push(Mcp {
@@ -234,7 +262,13 @@ pub fn export(db: &Database) -> Result<Vec<u8>, AppError> {
         });
     }
     let mut skills = vec![];
-    for row in db.get_all_installed_skills()?.into_values() {
+    let mut selected_skills = BTreeSet::new();
+    for row in db
+        .get_all_installed_skills()?
+        .into_values()
+        .filter(|row| selected(super::ResourceKind::Skills, &row.id))
+    {
+        selected_skills.insert(row.id.clone());
         skill_resource::artifact_for(db, &row.id)?;
         skills.push(Skill {
             id: portable_id("skills", &row.id),
@@ -251,6 +285,7 @@ pub fn export(db: &Database) -> Result<Vec<u8>, AppError> {
             .definitions
             .instructions
             .into_values()
+            .filter(|row| selected(super::ResourceKind::Instructions, &row.id))
             .map(|row| Instruction {
                 id: portable_id("instructions", &row.id),
                 name: row.name,
@@ -261,11 +296,16 @@ pub fn export(db: &Database) -> Result<Vec<u8>, AppError> {
         skills,
     };
     validate(&pack)?;
+    if selection.is_some_and(|selection| {
+        selection.resource_ids.len() != pack.instructions.len() + pack.mcp.len() + pack.skills.len()
+    }) {
+        return Err(error("resourceMissing"));
+    }
     let temp = tempfile::tempdir().map_err(|_| error("packWriteFailed"))?;
     let path = temp.path().join("artifacts.zip");
     {
         let conn = crate::database::lock_conn!(db.conn);
-        archive::zip_skill_artifacts(&path, &conn)?;
+        archive::zip_selected_skill_artifacts(&path, &conn, &selected_skills)?;
     }
     let bytes = std::fs::read(path).map_err(|_| error("packWriteFailed"))?;
     zip_pack(&pack, &bytes)
@@ -620,6 +660,153 @@ mod tests {
         writer.start_file("skill-artifacts.zip", options).unwrap();
         writer.write_all(&skill_zip).unwrap();
         writer.finish().unwrap().into_inner()
+    }
+    #[test]
+    #[serial_test::serial]
+    fn selected_export_excludes_unselected_resources_and_artifact_bytes() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = fixture();
+        let id = db
+            .library_snapshot()
+            .unwrap()
+            .definitions
+            .instructions
+            .into_keys()
+            .next()
+            .unwrap();
+        let bytes = export_selected(
+            &db,
+            &ExportSelection {
+                kind: library::ResourceKind::Instructions,
+                resource_ids: vec![id],
+            },
+        )
+        .unwrap();
+        let value = manifest(&bytes);
+        assert_eq!(value["instructions"].as_array().unwrap().len(), 1);
+        assert_eq!(value["mcp"], json!([]));
+        assert_eq!(value["skills"], json!([]));
+        let mut outer = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut raw = Vec::new();
+        outer
+            .by_name("skill-artifacts.zip")
+            .unwrap()
+            .read_to_end(&mut raw)
+            .unwrap();
+        let mut nested = zip::ZipArchive::new(Cursor::new(raw)).unwrap();
+        assert_eq!(nested.len(), 1);
+        let mut index = String::new();
+        nested
+            .by_name("artifact-index.json")
+            .unwrap()
+            .read_to_string(&mut index)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&index).unwrap()["hashes"],
+            json!([])
+        );
+    }
+    #[test]
+    #[serial_test::serial]
+    fn selected_skill_export_excludes_other_skill_manifest_and_nested_artifact_payload() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let selected_source = tempfile::tempdir().unwrap();
+        let unselected_source = tempfile::tempdir().unwrap();
+        let selected_sentinel = b"selected-skill-private-subset-sentinel-5726";
+        let unselected_sentinel = b"unselected-skill-must-never-export-sentinel-8392";
+        fs::write(
+            selected_source.path().join("SKILL.md"),
+            "Selected skill body",
+        )
+        .unwrap();
+        fs::write(
+            selected_source.path().join("selected.txt"),
+            selected_sentinel,
+        )
+        .unwrap();
+        fs::write(
+            unselected_source.path().join("SKILL.md"),
+            "Different unselected body",
+        )
+        .unwrap();
+        fs::write(
+            unselected_source.path().join("unselected.txt"),
+            unselected_sentinel,
+        )
+        .unwrap();
+        let selected = catalog::import_directory(
+            &db,
+            selected_source.path(),
+            "selected-skill",
+            "Selected skill",
+        )
+        .unwrap();
+        let unselected = catalog::import_directory(
+            &db,
+            unselected_source.path(),
+            "unselected-skill",
+            "Unselected skill",
+        )
+        .unwrap();
+        let selected_hash = selected.content_hash.unwrap();
+        let unselected_hash = unselected.content_hash.unwrap();
+        assert_ne!(selected_hash, unselected_hash);
+        let bytes = export_selected(
+            &db,
+            &ExportSelection {
+                kind: library::ResourceKind::Skills,
+                resource_ids: vec![selected.id],
+            },
+        )
+        .unwrap();
+        let value = manifest(&bytes);
+        assert_eq!(value["instructions"], json!([]));
+        assert_eq!(value["mcp"], json!([]));
+        let skills = value["skills"].as_array().unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0]["name"], "Selected skill");
+        assert_eq!(skills[0]["artifactHash"], selected_hash);
+        let mut outer = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut raw = Vec::new();
+        outer
+            .by_name("skill-artifacts.zip")
+            .unwrap()
+            .read_to_end(&mut raw)
+            .unwrap();
+        let mut nested = zip::ZipArchive::new(Cursor::new(raw)).unwrap();
+        let mut index = String::new();
+        nested
+            .by_name("artifact-index.json")
+            .unwrap()
+            .read_to_string(&mut index)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&index).unwrap()["hashes"],
+            json!([selected_hash])
+        );
+        let mut selected_bytes = Vec::new();
+        nested
+            .by_name(&format!("artifacts/{selected_hash}/tree/selected.txt"))
+            .unwrap()
+            .read_to_end(&mut selected_bytes)
+            .unwrap();
+        assert_eq!(selected_bytes, selected_sentinel);
+        for i in 0..nested.len() {
+            let mut entry = nested.by_index(i).unwrap();
+            assert!(!entry
+                .name()
+                .starts_with(&format!("artifacts/{unselected_hash}/")));
+            let mut decoded = Vec::new();
+            entry.read_to_end(&mut decoded).unwrap();
+            assert!(
+                !decoded
+                    .windows(unselected_sentinel.len())
+                    .any(|bytes| bytes == unselected_sentinel),
+                "unselected payload in {}",
+                entry.name()
+            );
+        }
     }
     #[test]
     #[serial_test::serial]

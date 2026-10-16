@@ -69,6 +69,18 @@ function Fixture({ active = true }: { active?: boolean }) {
 function mount() {
   return render(<Fixture />);
 }
+async function rowAction(name: string) {
+  const resource = name.endsWith("MCP demo")
+    ? "MCP demo"
+    : name.endsWith("Skill demo")
+      ? "Skill demo"
+      : "Shared";
+  await userEvent.click(
+    await screen.findByRole("button", { name: `${resource} 的更多操作` }),
+  );
+  return screen.findByRole("menuitem", { name });
+}
+
 beforeEach(() => {
   HTMLElement.prototype.scrollIntoView = vi.fn();
   i18n.addResourceBundle("zh", "translation", zh, true, true);
@@ -149,6 +161,7 @@ beforeEach(() => {
     data.instructions![0],
   );
   vi.spyOn(libraryApi, "saveMcp").mockResolvedValue(undefined);
+  vi.spyOn(libraryApi, "discardInventory").mockResolvedValue(true);
 });
 it("loads only visited subpages and keeps a dirty editor through refresh", async () => {
   mount();
@@ -196,6 +209,8 @@ it("shows native instruction summaries even with no shared drafts without treati
   } as LibraryData;
   mount();
   const overview = await screen.findByRole("region", { name: "工具指令总览" });
+  for (const summary of within(overview).getAllByText("技术详情"))
+    await userEvent.click(summary);
   expect(within(overview).getByText("/fixture/codex")).toBeVisible();
   expect(
     within(overview).getByText("自有内容 12 行 · 受管内容 0 行"),
@@ -330,9 +345,7 @@ it("starts MCP inspection only explicitly and subscribes before execution", asyn
   await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
   await screen.findByText("MCP demo");
   expect(libraryApi.prepareMcpCheck).not.toHaveBeenCalled();
-  await userEvent.click(
-    screen.getByRole("button", { name: "检查连接 MCP demo" }),
-  );
+  await userEvent.click(await rowAction("检查连接 MCP demo"));
   expect(libraryApi.prepareMcpCheck).not.toHaveBeenCalled();
   await userEvent.click(screen.getByRole("button", { name: "开始检查" }));
   await waitFor(() => expect(listen).toHaveBeenCalled());
@@ -345,9 +358,7 @@ it("starts MCP inspection only explicitly and subscribes before execution", asyn
   expect(unlisten).toHaveBeenCalledTimes(1);
   await userEvent.click(screen.getByRole("button", { name: "关闭" }));
   expect(screen.queryByText(/连接未检查/)).not.toBeInTheDocument();
-  await userEvent.click(
-    screen.getByRole("button", { name: "检查连接 MCP demo" }),
-  );
+  await userEvent.click(await rowAction("检查连接 MCP demo"));
   expect(screen.queryByText("fixture-tool")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "开始检查" })).toBeEnabled();
   expect(libraryApi.prepareMcpCheck).toHaveBeenCalledTimes(1);
@@ -374,9 +385,7 @@ it("isolates MCP progress and cancels with immediate listener cleanup when the p
   const rendered = render(<Fixture />);
   await screen.findByText("Shared");
   await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
-  await userEvent.click(
-    await screen.findByRole("button", { name: "检查连接 MCP demo" }),
-  );
+  await userEvent.click(await rowAction("检查连接 MCP demo"));
   await userEvent.click(screen.getByRole("button", { name: "开始检查" }));
   await waitFor(() => expect(libraryApi.runMcpCheck).toHaveBeenCalled());
   act(() =>
@@ -422,9 +431,7 @@ it("cancels a late prepared MCP job after the dialog has closed without subscrib
   mount();
   await screen.findByText("Shared");
   await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
-  await userEvent.click(
-    await screen.findByRole("button", { name: "检查连接 MCP demo" }),
-  );
+  await userEvent.click(await rowAction("检查连接 MCP demo"));
   await userEvent.click(screen.getByRole("button", { name: "开始检查" }));
   await userEvent.click(screen.getByRole("button", { name: "取消检查" }));
   await userEvent.click(screen.getByRole("button", { name: "关闭" }));
@@ -456,9 +463,7 @@ it("unsubscribes a late MCP listener exactly once after its portal has suspended
   const rendered = render(<Fixture />);
   await screen.findByText("Shared");
   await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
-  await userEvent.click(
-    await screen.findByRole("button", { name: "检查连接 MCP demo" }),
-  );
+  await userEvent.click(await rowAction("检查连接 MCP demo"));
   await userEvent.click(screen.getByRole("button", { name: "开始检查" }));
   await waitFor(() => expect(listen).toHaveBeenCalled());
   rendered.rerender(<Fixture active={false} />);
@@ -735,7 +740,7 @@ it("freezes the opened epoch when deleting after a background restore", async ()
   vi.spyOn(libraryApi, "deleteInstruction").mockResolvedValue(true);
   mount();
   await screen.findByText("Shared");
-  await userEvent.click(screen.getByRole("button", { name: "移除 Shared" }));
+  await userEvent.click(await rowAction("移除 Shared"));
   data = { ...data, epoch: 2 };
   fireEvent.click(screen.getByText("Refresh fixture"));
   await waitFor(() => expect(libraryApi.list).toHaveBeenCalledTimes(2));
@@ -759,7 +764,10 @@ it("keeps existing legacy rows read-only when their backend supplies no epoch", 
   expect(
     screen.getByRole("button", { name: "分配目标 Shared" }),
   ).toBeDisabled();
-  expect(screen.getByRole("button", { name: "移除 Shared" })).toBeDisabled();
+  expect(await rowAction("移除 Shared")).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
 });
 it("requires a resource-pack preview and confirms the frozen file fingerprint and revision", async () => {
   vi.spyOn(libraryApi, "pickPack").mockResolvedValue("/sandbox/resources.zip");
@@ -783,7 +791,9 @@ it("requires a resource-pack preview and confirms the frozen file fingerprint an
   });
   mount();
   await screen.findByText("Shared");
-  await userEvent.click(screen.getByRole("button", { name: "资源备份／恢复" }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "资源包导入／导出" }),
+  );
   expect(screen.queryByRole("button", { name: "确认恢复草稿" })).toBeNull();
   await userEvent.click(
     screen.getByRole("button", { name: "选择资源包并预览" }),
@@ -812,7 +822,9 @@ it("keeps a resource-pack preview while the retained page releases its dialog", 
   });
   const rendered = mount();
   await screen.findByText("Shared");
-  await userEvent.click(screen.getByRole("button", { name: "资源备份／恢复" }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "资源包导入／导出" }),
+  );
   await userEvent.click(
     screen.getByRole("button", { name: "选择资源包并预览" }),
   );
@@ -834,7 +846,9 @@ it("retains an in-flight pack preview through portal suspension and rejects a se
   );
   const rendered = mount();
   await screen.findByText("Shared");
-  await userEvent.click(screen.getByRole("button", { name: "资源备份／恢复" }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "资源包导入／导出" }),
+  );
   await userEvent.click(
     screen.getByRole("button", { name: "选择资源包并预览" }),
   );
@@ -865,9 +879,7 @@ it("copies MCP using backend references and freezes the opened source revision a
   await screen.findByText("Shared");
   await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
   await screen.findByText("MCP demo");
-  await userEvent.click(
-    screen.getByRole("button", { name: "复制模板 MCP demo" }),
-  );
+  await userEvent.click(await rowAction("复制模板 MCP demo"));
   fireEvent.change(screen.getByLabelText("新服务器 ID"), {
     target: { value: "new-server-id" },
   });
@@ -999,9 +1011,7 @@ it("checks one skill explicitly and confirms its frozen candidate without applyi
   await userEvent.click(screen.getByRole("tab", { name: /Skills/ }));
   await screen.findByText("Skill demo");
   expect(libraryApi.checkSkillUpdate).not.toHaveBeenCalled();
-  await userEvent.click(
-    screen.getByRole("button", { name: "检查更新 Skill demo" }),
-  );
+  await userEvent.click(await rowAction("检查更新 Skill demo"));
   await userEvent.click(screen.getByRole("button", { name: "检查来源更新" }));
   await screen.findByText("New body");
   expect(libraryApi.checkSkillUpdate).toHaveBeenCalledWith("skill", 1, 1);
@@ -1032,9 +1042,7 @@ it("labels local skills as untracked instead of current and keeps updates disabl
   mount();
   await screen.findByText("Shared");
   await userEvent.click(screen.getByRole("tab", { name: /Skills/ }));
-  await userEvent.click(
-    await screen.findByRole("button", { name: "检查更新 Skill demo" }),
-  );
+  await userEvent.click(await rowAction("检查更新 Skill demo"));
   await userEvent.click(screen.getByRole("button", { name: "检查来源更新" }));
   expect(
     await screen.findByText(
@@ -1077,9 +1085,7 @@ it("retries a failed comparison using the same frozen ticket before enabling a s
   mount();
   await screen.findByText("Shared");
   await userEvent.click(screen.getByRole("tab", { name: /Skills/ }));
-  await userEvent.click(
-    await screen.findByRole("button", { name: "检查更新 Skill demo" }),
-  );
+  await userEvent.click(await rowAction("检查更新 Skill demo"));
   await userEvent.click(screen.getByRole("button", { name: "检查来源更新" }));
   await screen.findByRole("alert");
   expect(screen.getByRole("button", { name: "更新源草稿" })).toBeDisabled();
@@ -1093,3 +1099,270 @@ it("retries a failed comparison using the same frozen ticket before enabling a s
   );
   expect(screen.getByRole("button", { name: "更新源草稿" })).toBeEnabled();
 });
+
+it("stages agent logo changes and requires a composed preview before native writes", async () => {
+  const preview = vi.spyOn(libraryApi, "previewBatch").mockResolvedValue({
+    operationId: "batch-1",
+    kind: "instructions",
+    status: "previewed",
+    resources: [{ resourceId: "a" }],
+    groups: [],
+  });
+  const apply = vi.spyOn(libraryApi, "runBatch").mockResolvedValue({
+    operationId: "batch-1",
+    kind: "instructions",
+    status: "applied",
+    resources: [{ resourceId: "a" }],
+    groups: [],
+  });
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(
+    screen.getByRole("button", { name: "Shared · Gemini CLI · 未分配" }),
+  );
+  expect(preview).not.toHaveBeenCalled();
+  expect(apply).not.toHaveBeenCalled();
+  expect(screen.getByText("待应用 1 项")).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "预览变更" }));
+  expect(preview).toHaveBeenCalledWith(
+    "instructions",
+    [
+      {
+        resourceId: "a",
+        expectedRevision: 1,
+        addTools: ["gemini"],
+        withdrawTools: [],
+      },
+    ],
+    [],
+    "apply",
+    1,
+  );
+  expect(apply).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole("button", { name: "确认应用" }));
+  await waitFor(() => expect(apply).toHaveBeenCalledWith("batch-1"));
+});
+it("scans native MCP without importing until selected entries are confirmed", async () => {
+  const scan = vi.spyOn(libraryApi, "inventory").mockResolvedValue({
+    ticketId: "scan-1",
+    kind: "mcp",
+    expiresAtMs: Date.now() + 600000,
+    sources: [
+      {
+        sourceId: "source-1",
+        toolId: "codex",
+        label: "Codex",
+        state: "ready",
+        count: 2,
+      },
+    ],
+    entries: [
+      {
+        entryId: "entry-1",
+        kind: "mcp",
+        name: "Native one",
+        sources: [{ sourceId: "source-1", toolId: "codex" }],
+        matchedResourceIds: [],
+        conflict: false,
+      },
+      {
+        entryId: "entry-2",
+        kind: "mcp",
+        name: "Native two",
+        sources: [{ sourceId: "source-1", toolId: "codex" }],
+        matchedResourceIds: [],
+        conflict: false,
+      },
+    ],
+  });
+  const imported = vi.spyOn(libraryApi, "importInventory").mockResolvedValue({
+    imported: 1,
+    items: [
+      {
+        entryId: "entry-2",
+        resourceId: "draft-2",
+        name: "Native two",
+        status: "imported",
+      },
+    ],
+  });
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("tab", { name: /^MCP/ }));
+  await screen.findByText("MCP demo");
+  await userEvent.click(screen.getByRole("button", { name: "从本机导入" }));
+  await within(screen.getByRole("dialog")).findByText("Native two");
+  expect(scan).toHaveBeenCalledWith("mcp");
+  expect(imported).not.toHaveBeenCalled();
+  await userEvent.click(
+    screen.getByRole("checkbox", { name: "选择 Native two" }),
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "导入选中项（1）" }),
+  );
+  await waitFor(() =>
+    expect(imported).toHaveBeenCalledWith("scan-1", ["entry-2"], 1),
+  );
+});
+
+it("groups skills by provenance without exposing paths in compact rows", async () => {
+  const original = vi.mocked(libraryApi.list).getMockImplementation()!;
+  vi.mocked(libraryApi.list).mockImplementation(async (kind) =>
+    kind === "skills"
+      ? {
+          epoch: 1,
+          skills: [
+            {
+              id: "s1",
+              name: "First skill",
+              description: "One",
+              directory: "one",
+              revision: 1,
+              sourceState: "ready",
+              sourceKind: "repository",
+              repository: "anthropics/skills",
+              targets: [],
+            },
+            {
+              id: "s2",
+              name: "Second skill",
+              directory: "two",
+              revision: 1,
+              sourceState: "ready",
+              sourceKind: "repository",
+              repository: "fixture/example",
+              targets: [],
+            },
+          ],
+          operations: [],
+        }
+      : original(kind),
+  );
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("tab", { name: /Skills/ }));
+  await screen.findByText("First skill");
+  await userEvent.click(screen.getByRole("combobox", { name: "排序" }));
+  await userEvent.click(screen.getByRole("option", { name: "按来源" }));
+  expect(
+    screen.getByRole("heading", { name: "anthropics/skills" }),
+  ).toBeVisible();
+  expect(
+    screen.getByRole("heading", { name: "fixture/example" }),
+  ).toBeVisible();
+});
+it("keeps unrelated staged logo changes after applying a separate selection", async () => {
+  data = {
+    ...data,
+    instructions: [
+      ...data.instructions!,
+      { id: "b", name: "Second", content: "Second content", revision: 1 },
+    ],
+  };
+  vi.spyOn(libraryApi, "previewBatch").mockResolvedValue({
+    operationId: "selected-b",
+    kind: "instructions",
+    status: "previewed",
+    resources: [{ resourceId: "b" }],
+    groups: [],
+  });
+  vi.spyOn(libraryApi, "runBatch").mockResolvedValue({
+    operationId: "selected-b",
+    kind: "instructions",
+    status: "applied",
+    resources: [{ resourceId: "b" }],
+    groups: [],
+  });
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(
+    screen.getByRole("button", { name: "Shared · Gemini CLI · 未分配" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "选择" }));
+  await userEvent.click(screen.getByRole("checkbox", { name: "选择 Second" }));
+  await userEvent.click(screen.getByRole("button", { name: "Codex" }));
+  await userEvent.click(screen.getByRole("button", { name: "应用到所选工具" }));
+  await userEvent.click(
+    await screen.findByRole("button", { name: "确认应用" }),
+  );
+  await waitFor(() =>
+    expect(libraryApi.runBatch).toHaveBeenCalledWith("selected-b"),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "关闭" }));
+  expect(screen.getByText("待应用 1 项")).toBeVisible();
+});
+it("keeps read-only discovery results in the native section and rescans before row import", async () => {
+  vi.spyOn(libraryApi, "inventory").mockResolvedValue({
+    ticketId: "fresh-native",
+    kind: "mcp",
+    expiresAtMs: Date.now() + 600000,
+    sources: [
+      {
+        sourceId: "codex-native",
+        toolId: "codex",
+        label: "nativeMcp",
+        state: "ready",
+        count: 1,
+      },
+    ],
+    entries: [
+      {
+        entryId: "entry-native",
+        kind: "mcp",
+        name: "Native source",
+        sources: [{ sourceId: "codex-native", toolId: "codex" }],
+        matchedResourceIds: [],
+        conflict: false,
+      },
+    ],
+  });
+  const importing = vi
+    .spyOn(libraryApi, "importInventory")
+    .mockResolvedValue({ imported: 1, items: [] });
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("tab", { name: /^MCP/ }));
+  await screen.findByText("MCP demo");
+  await userEvent.click(screen.getByRole("button", { name: "从本机导入" }));
+  await within(screen.getByRole("dialog")).findByText("Native source");
+  await userEvent.click(screen.getByRole("button", { name: "关闭" }));
+  const native = screen.getByRole("region", { name: "工具中已有" });
+  expect(within(native).getByText("Native source")).toBeVisible();
+  expect(importing).not.toHaveBeenCalled();
+  await userEvent.click(
+    within(native).getByRole("button", { name: "导入 Native source" }),
+  );
+  await waitFor(() => expect(libraryApi.inventory).toHaveBeenCalledTimes(2));
+  expect(
+    await screen.findByRole("button", { name: "导入选中项（1）" }),
+  ).toBeEnabled();
+  expect(importing).not.toHaveBeenCalled();
+});
+it.each(["mcp", "skills"] as const)(
+  "keeps older %s backends read-only without a native snapshot",
+  async (kind) => {
+    const original = vi.mocked(libraryApi.list).getMockImplementation()!;
+    vi.mocked(libraryApi.list).mockImplementation(async (selectedKind) => ({
+      ...(await original(selectedKind)),
+      epoch: undefined as unknown as number,
+    }));
+    mount();
+    await screen.findByText("Shared");
+    await userEvent.click(
+      screen.getByRole("tab", { name: kind === "mcp" ? /^MCP/ : /Skills/ }),
+    );
+    await screen.findByText(kind === "mcp" ? "MCP demo" : "Skill demo");
+    expect(
+      within(
+        screen.getByRole("tabpanel", {
+          name: kind === "mcp" ? "MCP" : "Skills",
+        }),
+      ).getByText(zh.library.legacyReadOnly),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", {
+        name: kind === "mcp" ? "新建" : zh.library.addSkill,
+      }),
+    ).toBeDisabled();
+  },
+);

@@ -39,7 +39,7 @@ fn receipt_key(receipt: &super::Receipt) -> Result<String, AppError> {
     })
 }
 
-fn validate(snapshot: &LibrarySnapshot) -> Result<(), AppError> {
+pub(crate) fn validate(snapshot: &LibrarySnapshot) -> Result<(), AppError> {
     if snapshot.definitions.schema_version != 1 || snapshot.machine.schema_version != 1 {
         return Err(AppError::Config("library.stateVersionUnsupported".into()));
     }
@@ -226,6 +226,60 @@ fn validate(snapshot: &LibrarySnapshot) -> Result<(), AppError> {
 }
 
 impl Database {
+    /// Batch parent, non-executable children and standard receipts have one CAS
+    /// boundary. No native write may be authorized by a detached parent record.
+    pub(crate) fn library_commit_batch(
+        &self,
+        expected: &LibrarySnapshot,
+        next: &LibrarySnapshot,
+        expected_batches: &super::batch::BatchStore,
+        next_batches: &super::batch::BatchStore,
+    ) -> Result<(LibrarySnapshot, super::batch::BatchStore), AppError> {
+        validate(next)?;
+        super::batch::validate_store(next_batches, next)?;
+        let mut conn = crate::database::lock_conn!(self.conn);
+        let tx = conn
+            .transaction()
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let current = load(&tx)?;
+        if &current != expected || &super::batch::load_on(&tx, &current)? != expected_batches {
+            return Err(AppError::Config("library.revisionChanged".into()));
+        }
+        if next.machine.epoch < expected.machine.epoch {
+            return Err(AppError::Config("library.epochChanged".into()));
+        }
+        let increment = |revision: u64| {
+            revision
+                .checked_add(1)
+                .ok_or_else(|| AppError::Config("library.revisionOverflow".into()))
+        };
+        let mut saved = next.clone();
+        saved.definitions.revision = increment(expected.definitions.revision)?;
+        saved.machine.revision = increment(expected.machine.revision)?;
+        let mut batches = next_batches.clone();
+        batches.revision = increment(expected_batches.revision)?;
+        let values = [
+            (
+                super::DEFINITIONS_KEY,
+                serde_json::to_string(&saved.definitions),
+            ),
+            (super::MACHINE_KEY, serde_json::to_string(&saved.machine)),
+            (super::batch::SETTING_KEY, serde_json::to_string(&batches)),
+        ];
+        for (key, value) in values {
+            let value = value.map_err(|_| AppError::Config("library.stateUnreadable".into()))?;
+            if key == super::batch::SETTING_KEY && value.len() > super::batch::MAX_STORE_BYTES {
+                return Err(AppError::Config("library.batchTooLarge".into()));
+            }
+            tx.execute(
+                "INSERT OR REPLACE INTO settings(key,value) VALUES(?1,?2)",
+                rusqlite::params![key, value],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+        tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
+        Ok((saved, batches))
+    }
     pub fn library_snapshot(&self) -> Result<LibrarySnapshot, AppError> {
         let conn = crate::database::lock_conn!(self.conn);
         load(&conn)
@@ -382,13 +436,17 @@ pub(crate) fn restore_machine_state(
         }
     }
     let raw = serde_json::to_string(&machine).map_err(|e| AppError::Database(e.to_string()))?;
-    target
-        .execute(
-            "INSERT OR REPLACE INTO settings(key,value) VALUES (?1,?2)",
-            rusqlite::params![super::MACHINE_KEY, raw],
-        )
+    let tx = target
+        .unchecked_transaction()
         .map_err(|e| AppError::Database(e.to_string()))?;
-    load(target)?;
+    tx.execute(
+        "INSERT OR REPLACE INTO settings(key,value) VALUES (?1,?2)",
+        rusqlite::params![super::MACHINE_KEY, raw],
+    )
+    .map_err(|e| AppError::Database(e.to_string()))?;
+    super::batch::restore_local(source, &tx, machine.epoch)?;
+    load(&tx)?;
+    tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
     Ok(())
 }
 

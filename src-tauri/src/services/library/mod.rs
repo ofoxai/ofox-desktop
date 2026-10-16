@@ -1,7 +1,9 @@
 //! Local resource ownership. Definitions and machine execution state are distinct.
+pub(crate) mod batch;
 pub(crate) mod catalog;
 pub(crate) mod coordinator;
 mod instructions;
+pub(crate) mod inventory;
 pub(crate) mod mcp_actions;
 pub(crate) mod mcp_check;
 pub(crate) mod mcp_codec;

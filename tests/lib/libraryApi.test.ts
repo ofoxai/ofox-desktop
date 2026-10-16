@@ -26,3 +26,13 @@ it("confirms the resource pack using camelCase frozen fingerprint, revision and 
     conflicts: "copy",
   });
 });
+it("uses a dedicated selected-export command so an older backend cannot silently export every resource", async () => {
+  await libraryApi.exportSelected("mcp", ["selected-server"]);
+  expect(invoke).toHaveBeenCalledWith("export_library_selection", {
+    selection: { kind: "mcp", resourceIds: ["selected-server"] },
+  });
+  expect(invoke).not.toHaveBeenCalledWith(
+    "export_library_pack",
+    expect.anything(),
+  );
+});

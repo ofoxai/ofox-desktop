@@ -139,6 +139,7 @@ pub async fn get_library_instructions(state: State<'_, AppState>) -> Result<Valu
         .machine
         .operations
         .values()
+        .filter(|op| !op.id.starts_with(library::batch::CHILD_PREFIX))
         .filter(|op| op.kind == library::ResourceKind::Instructions)
         .collect();
     operations.sort_by_key(|operation| std::cmp::Reverse(operation.created_at));
@@ -303,6 +304,7 @@ pub async fn get_library_mcp(state: State<'_, AppState>) -> Result<Value, String
         .machine
         .operations
         .values()
+        .filter(|op| !op.id.starts_with(library::batch::CHILD_PREFIX))
         .filter(|op| op.kind == library::ResourceKind::Mcp)
         .collect();
     operations.sort_by_key(|op| std::cmp::Reverse(op.created_at));
@@ -491,6 +493,7 @@ pub async fn get_library_skills(state: State<'_, AppState>) -> Result<Value, Str
         .machine
         .operations
         .values()
+        .filter(|op| !op.id.starts_with(library::batch::CHILD_PREFIX))
         .filter(|op| op.kind == library::ResourceKind::Skills)
         .collect();
     operations.sort_by_key(|op| std::cmp::Reverse(op.created_at));
@@ -731,6 +734,7 @@ pub async fn pick_library_pack(app: tauri::AppHandle) -> Result<Option<String>, 
 pub async fn export_library_pack(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
+    selection: Option<library::resource_pack::ExportSelection>,
 ) -> Result<bool, String> {
     use tauri_plugin_dialog::DialogExt;
     let selected = tauri::async_runtime::spawn_blocking(move || {
@@ -748,7 +752,11 @@ pub async fn export_library_pack(
     let path = file.into_path().map_err(|_| "library.packWriteFailed")?;
     let db = state.db.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let raw = library::resource_pack::export(&db).map_err(|e| e.to_string())?;
+        let raw = match selection {
+            Some(selection) => library::resource_pack::export_selected(&db, &selection),
+            None => library::resource_pack::export(&db),
+        }
+        .map_err(|e| e.to_string())?;
         crate::config::atomic_write_with(
             &path,
             &raw,
@@ -895,4 +903,234 @@ pub fn confirm_library_skill_update(
 #[tauri::command]
 pub fn discard_library_skill_update(ticket_id: String) -> Result<bool, String> {
     library::skill_actions::discard(&ticket_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn scan_library_inventory(
+    state: State<'_, AppState>,
+    kind: library::ResourceKind,
+) -> Result<library::inventory::LibraryInventory, String> {
+    crate::agent_env::ready().await;
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        library::inventory::scan(&db, kind).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|_| "library.inventoryUnavailable".to_string())?
+}
+#[tauri::command]
+pub async fn import_library_inventory(
+    state: State<'_, AppState>,
+    ticket_id: String,
+    entry_ids: Vec<String>,
+    expected_epoch: u64,
+) -> Result<library::inventory::InventoryImport, String> {
+    crate::agent_env::ready().await;
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        library::inventory::import(&db, &ticket_id, &entry_ids, expected_epoch)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|_| "library.inventoryUnavailable".to_string())?
+}
+#[tauri::command]
+pub async fn preview_library_batch(
+    state: State<'_, AppState>,
+    kind: library::ResourceKind,
+    resources: Vec<library::batch::BatchResource>,
+    tools: Vec<String>,
+    action: library::batch::BatchAction,
+    expected_epoch: u64,
+) -> Result<Value, String> {
+    crate::agent_env::ready().await;
+    let discovery = resource_discovery().await?;
+    let snapshot = state.db.library_snapshot().map_err(|e| e.to_string())?;
+    for resource in &resources {
+        let mut additions = resource.add_tools.clone();
+        if action == library::batch::BatchAction::Apply {
+            additions.extend(tools.iter().cloned());
+        }
+        verify_selected_tools(
+            &snapshot,
+            kind.clone(),
+            &resource.resource_id,
+            &additions,
+            &discovery,
+        )?;
+    }
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        library::batch::preview_batch(&db, kind, resources, tools, action, expected_epoch)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|_| "library.failed".to_string())?
+}
+#[tauri::command]
+pub async fn run_library_batch(
+    state: State<'_, AppState>,
+    operation_id: String,
+) -> Result<Value, String> {
+    let db = state.db.clone();
+    run_ready_batch(move || {
+        library::batch::run_batch(&db, &operation_id).map_err(|e| e.to_string())
+    })
+    .await
+}
+#[tauri::command]
+pub async fn cancel_library_batch(
+    state: State<'_, AppState>,
+    operation_id: String,
+) -> Result<Value, String> {
+    let db = state.db.clone();
+    run_ready_batch(move || {
+        library::batch::cancel_batch(&db, &operation_id).map_err(|e| e.to_string())
+    })
+    .await
+}
+#[tauri::command]
+pub async fn reconcile_library_batch(
+    state: State<'_, AppState>,
+    operation_id: String,
+) -> Result<Value, String> {
+    let db = state.db.clone();
+    run_ready_batch(move || {
+        library::batch::reconcile_batch(&db, &operation_id).map_err(|e| e.to_string())
+    })
+    .await
+}
+
+async fn run_ready_batch(
+    job: impl FnOnce() -> Result<Value, String> + Send + 'static,
+) -> Result<Value, String> {
+    run_ready_batch_with(crate::agent_env::ready(), job).await
+}
+
+async fn run_ready_batch_with(
+    readiness: impl std::future::Future<Output = ()>,
+    job: impl FnOnce() -> Result<Value, String> + Send + 'static,
+) -> Result<Value, String> {
+    readiness.await;
+    tauri::async_runtime::spawn_blocking(job)
+        .await
+        .map_err(|_| "library.failed".to_string())?
+}
+#[tauri::command]
+pub fn list_library_batches(
+    state: State<'_, AppState>,
+    kind: Option<library::ResourceKind>,
+) -> Result<Value, String> {
+    library::batch::list_batches(&state.db, kind).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn discard_library_inventory(ticket_id: String) -> bool {
+    library::inventory::discard(&ticket_id)
+}
+
+#[tauri::command]
+pub async fn export_library_selection(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    selection: library::resource_pack::ExportSelection,
+) -> Result<bool, String> {
+    export_library_pack(app, state, Some(selection)).await
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::*;
+    use crate::{app_config::McpServer, Database};
+    use std::sync::Arc;
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn batch_execution_waits_for_pending_environment_before_native_write() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Arc::new(Database::memory().unwrap());
+        library::mcp_resource::save_draft(
+            &db,
+            McpServer {
+                id: "ready-fixture".into(),
+                name: "Readiness fixture".into(),
+                server: json!({"command":"never-executed","args":["fixture"]}),
+                apps: Default::default(),
+                description: None,
+                homepage: None,
+                docs: None,
+                tags: vec![],
+            },
+            None,
+        )
+        .unwrap();
+        let native = library::mcp_resource::native_paths().unwrap()["codex"].clone();
+        let plan = library::batch::preview_batch(
+            &db,
+            library::ResourceKind::Mcp,
+            vec![library::batch::BatchResource {
+                resource_id: "ready-fixture".into(),
+                expected_revision: 1,
+                add_tools: vec![],
+                withdraw_tools: vec![],
+            }],
+            vec!["codex".into()],
+            library::batch::BatchAction::Apply,
+            0,
+        )
+        .unwrap();
+        let operation_id = plan["operationId"].as_str().unwrap().to_owned();
+        assert!(!native.exists(), "preview must not write the native file");
+        let (ready_started_tx, mut ready_started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let (worker_started_tx, mut worker_started_rx) = oneshot::channel();
+        let readiness = async move {
+            let _ = ready_started_tx.send(());
+            release_rx.await.unwrap();
+        };
+        let task = tokio::spawn(run_ready_batch_with(readiness, move || {
+            let _ = worker_started_tx.send(());
+            library::batch::run_batch(&db, &operation_id).map_err(|e| e.to_string())
+        }));
+        let waited = tokio::select! {
+            ready = &mut ready_started_rx => ready.is_ok(),
+            _ = &mut worker_started_rx => false,
+        };
+        if !waited {
+            let _ = release_tx.send(());
+            let _ = task.await;
+            panic!("native batch callable bypassed unresolved environment readiness");
+        }
+        assert!(matches!(
+            worker_started_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(
+            !native.exists(),
+            "unresolved environment must block native writes"
+        );
+        release_tx.send(()).unwrap();
+        let result = task.await.unwrap().unwrap();
+        assert_eq!(result["status"], "applied");
+        let text = std::fs::read_to_string(native).unwrap();
+        let parsed = library::mcp_codec::parse_native(&text, "codex").unwrap();
+        assert_eq!(
+            parsed["mcp_servers"]["ready-fixture"]["command"],
+            "never-executed"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn batch_gate_awaits_the_real_environment_ready_entry_point() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let before = crate::agent_env::READY_CALLS.with(|calls| calls.get());
+        let result = run_ready_batch(|| Ok(json!({"ran":true}))).await.unwrap();
+        assert_eq!(result["ran"], true);
+        assert_eq!(
+            crate::agent_env::READY_CALLS.with(|calls| calls.get()),
+            before + 1
+        );
+    }
 }

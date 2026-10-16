@@ -24,12 +24,14 @@ export function McpCheck({
   epoch,
   readOnly,
   onBusyChange,
+  onResult,
 }: {
   store: DraftStore;
   server: McpDefinition;
   epoch: number;
   readOnly: boolean;
   onBusyChange: (busy: boolean) => void;
+  onResult?: (result: McpCheckResult, checkedAtMs: number) => void;
 }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useDraftState(store, "mcpCheckBusy", false);
@@ -56,6 +58,11 @@ export function McpCheck({
   const stopListener = useRef<UnlistenFn>();
   const busyCallback = useRef(onBusyChange);
   busyCallback.current = onBusyChange;
+  const resultCallback = useRef(onResult);
+  resultCallback.current = onResult;
+  const currentProof = `${epoch}:${server.id}:${server.revision}`;
+  const proof = useRef(currentProof);
+  proof.current = currentProof;
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -91,6 +98,7 @@ export function McpCheck({
     busyCallback.current(true);
     let unlisten: UnlistenFn | undefined;
     let id: string | undefined;
+    const expectedProof = currentProof;
     try {
       const prepared = await libraryApi.prepareMcpCheck(
         server.id,
@@ -128,14 +136,36 @@ export function McpCheck({
         return;
       }
       const checked = await libraryApi.runMcpCheck(id);
-      if (!mounted.current) return;
-      if (checked.operationId !== id || !Array.isArray(checked.tools))
+      if (!mounted.current || proof.current !== expectedProof) return;
+      if (
+        checked.operationId !== id ||
+        ![
+          "ok",
+          "blocked",
+          "authRequired",
+          "forbidden",
+          "timeout",
+          "cancelled",
+          "error",
+        ].includes(checked.state) ||
+        (checked.reason != null && typeof checked.reason !== "string") ||
+        !Array.isArray(checked.tools) ||
+        checked.tools.some(
+          (tool) =>
+            !tool ||
+            typeof tool.name !== "string" ||
+            !tool.name ||
+            (tool.description != null && typeof tool.description !== "string"),
+        )
+      )
         throw new Error("library.failed");
       setResult(
         cancelled.current
           ? { operationId: id, state: "cancelled", tools: [] }
           : checked,
       );
+      if (!cancelled.current && checked.state !== "cancelled")
+        resultCallback.current?.(checked, Date.now());
     } catch (failure) {
       if (id) void libraryApi.cancelMcpCheck(id).catch(() => undefined);
       if (mounted.current && !cancelled.current)

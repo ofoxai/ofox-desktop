@@ -37,6 +37,8 @@ Request details label local-session imports by source adapter rather than exposi
 
 ## Resource ownership and native readers
 
+The [library workbench](library-workbench.md) adds selective native discovery and physical-file batch coordination. Imports remain drafts, explicit checks remain separate from application, and batch recovery verifies completed writes without replaying unfinished groups.
+
 Shared instructions, MCP definitions and immutable Skills drafts use versioned `library_*` settings without changing schema v11. Desired targets, verified receipts and prepared operations are separate. Saving/importing definitions does not apply them. Native projection requires a revisioned preview; apply and recovery recheck routing and file fingerprints under the same IO barrier used by model writes. Recovery only verifies completed writes. Restores keep this machine's proof, increase its epoch and do not resume old writes.
 
 Instructions preserve bytes outside the OFox markers. MCP patches owned leaves in each native JSON/JSONC, TOML or YAML format; same-name foreign entries and edited owned values block writes. Field references support keep/set/clear without returning private values. Skills use append-only hash artifacts with a portable execution manifest; links and verified copies are staged beside targets and old material is retained until the new result and receipt are verified. Legacy enabled flags do not prove ownership.
