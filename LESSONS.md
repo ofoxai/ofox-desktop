@@ -13,3 +13,11 @@ These are verified commit references, not claims that every external agent versi
 | Bind asynchronous work to account and component lifetime. | `1559001a`, `a5cd8c6c`, and `b840f7d1` cover abandoned account responses, continuous balance samples and delayed job subscriptions. Subscribe before starting jobs, validate operation IDs, and prevent stale completion callbacks. |
 
 See [development standards](docs/code-standards.md) and [integration wiring](docs/agent-wiring.md).
+
+## Current regression evidence
+
+- Avoiding native transcript parsing does not establish a fast warm query. Measure the complete release cache-to-analysis path, including cached JSON decoding, repeated pricing and frozen-cohort retention. The 10k-session release benchmark caught latency that the 600-source no-reparse test could not measure. See [the implementation record](docs/implementation-progress-2026-10-16.md) and [the benchmark](src-tauri/src/services/session_analytics.rs).
+- A typed JSON fast path must retain the old decoder's refusal semantics. `IgnoredAny` can skip numeric-range and nesting checks in opaque fields; differential tests include `1e400`, excessive depth, null/missing wrappers, duplicate fields and legacy payloads. Validate the complete envelope before projecting fields, and preserve the original raw-byte receipt. See [the decoder guards](src-tauri/src/services/session_analytics_index.rs).
+- Exact numeric accumulation must preserve more than the final amount. Compare each step with the original estimate combiner, including unknown counts, partial/free state, additional units, normalized Decimal scale and overflow. The optimization changes internal work, not billing or coverage policy.
+- A warm projection cache must validate fresh SQLite rows and effective source health before lookup, and reload prices in the same transaction. A connection pointer or query key cannot establish freshness; deletion, external writers, failures and apex changes need regression coverage. See [the cache guards](src-tauri/src/services/session_analytics_projection_tests.rs).
+- Passing `cfg(test)` library tests does not establish production compilation. Keep compatibility readers available to their production callers and run all-targets Clippy after refactoring test injection; it caught an accidental test-only gate on the project-options reader during this work.

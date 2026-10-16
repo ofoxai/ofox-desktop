@@ -7,7 +7,9 @@ use super::{
     usage_query::{Coverage, QueryReceipt, SourceHealth, UsageQueryV1},
 };
 use crate::error::AppError;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 #[path = "session_analytics_advanced.rs"]
 pub mod advanced;
@@ -216,16 +218,113 @@ fn project_id(project: &super::session_analytics_core::Project) -> Option<&str> 
 struct Sum {
     buckets: [u64; 4],
     records: u64,
-    estimate: CostEstimate,
+    estimate: NumericEstimate,
+}
+
+struct CostContribution<'a> {
+    value: &'a CostEstimate,
+    amount: Option<Decimal>,
+}
+impl<'a> CostContribution<'a> {
+    fn new(value: &'a CostEstimate) -> Result<Self, AppError> {
+        Ok(Self {
+            value,
+            amount: value
+                .known_cost_usd
+                .as_deref()
+                .map(super::ofox_pricing::parse_amount)
+                .transpose()?,
+        })
+    }
+}
+
+/// Running arithmetic stays numeric. Decimal text is emitted once per
+/// completed projection rather than parsed/formatted for every fact in every
+/// session/day/project/model/tool accumulator.
+struct NumericEstimate {
+    amount: Option<Decimal>,
+    partial: bool,
+    unpriced_models: BTreeSet<String>,
+    unpriced_records: Option<u64>,
+    additional_units: bool,
+}
+impl Default for NumericEstimate {
+    fn default() -> Self {
+        Self {
+            amount: None,
+            partial: false,
+            unpriced_models: BTreeSet::new(),
+            unpriced_records: Some(0),
+            additional_units: false,
+        }
+    }
+}
+impl NumericEstimate {
+    fn combine(&mut self, contribution: &CostContribution<'_>) -> Result<(), AppError> {
+        let value = contribution.value;
+        let overflow = || AppError::Database("usage.pricing.aggregateOverflow".into());
+        let amount = match (self.amount, contribution.amount) {
+            (Some(a), Some(b)) => Some(a.checked_add(b).ok_or_else(overflow)?),
+            (a, b) => a.or(b),
+        }
+        .map(|amount| amount.normalize());
+        let unpriced_records = self
+            .unpriced_records
+            .zip(value.unpriced_record_count)
+            .map(|(a, b)| a.checked_add(b).ok_or_else(overflow))
+            .transpose()?;
+        let additional_units = self.additional_units || value.additional_units_unsupported;
+        // Match CostEstimate::combine's sticky partial policy, including a
+        // previous zero-token estimate with unsupported additional charges.
+        let before_has_unknown =
+            self.partial || (self.amount.is_none() && !self.unpriced_models.is_empty());
+        let partial = amount.is_some()
+            && (before_has_unknown
+                || value.availability == "partial"
+                || (value.availability == "unknown" && !value.unpriced_model_ids.is_empty())
+                || (amount.is_some_and(|v| v.is_zero()) && additional_units));
+        self.amount = amount;
+        self.unpriced_records = unpriced_records;
+        self.additional_units = additional_units;
+        self.partial = partial;
+        for model in &value.unpriced_model_ids {
+            if !self.unpriced_models.contains(model) {
+                self.unpriced_models.insert(model.clone());
+            }
+        }
+        Ok(())
+    }
+    fn value(&self) -> CostEstimate {
+        CostEstimate {
+            known_cost_usd: self.amount.map(super::ofox_pricing::clean_decimal),
+            availability: match self.amount {
+                None => "unknown",
+                Some(_) if self.partial => "partial",
+                Some(amount) if amount.is_zero() => "free",
+                Some(_) => "known",
+            }
+            .into(),
+            unpriced_model_ids: self.unpriced_models.iter().cloned().collect(),
+            unpriced_record_count: self.unpriced_records,
+            additional_units_unsupported: self.additional_units,
+        }
+    }
 }
 impl Sum {
-    fn add(&mut self, fact: &UsageFact, catalog: &PriceCatalog) -> Result<(), AppError> {
+    #[cfg(test)]
+    fn add(&mut self, fact: &UsageFact, estimate: &CostEstimate) -> Result<(), AppError> {
+        self.add_prepared(fact, &CostContribution::new(estimate)?)
+    }
+    fn add_prepared(
+        &mut self,
+        fact: &UsageFact,
+        estimate: &CostContribution<'_>,
+    ) -> Result<(), AppError> {
         for (total, value) in self.buckets.iter_mut().zip(fact.buckets) {
             add(total, value)?;
         }
         add(&mut self.records, 1)?;
-        self.estimate
-            .combine(&catalog.estimate(&fact.model, fact.buckets, Some(1)))
+        self.estimate.combine(estimate)
     }
     fn tokens(&self) -> Result<TokenTotals, AppError> {
         let mut total_tokens = self.buckets[0];
@@ -246,7 +345,7 @@ impl Sum {
         if self.records == 0 {
             CostEstimate::empty()
         } else {
-            self.estimate.clone()
+            self.estimate.value()
         }
     }
 }
@@ -273,7 +372,10 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
 ) -> Result<SessionAnalytics, AppError> {
     use super::session_analytics_core::{self as core, Filters, Window};
     use sha2::{Digest, Sha256};
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+    #[cfg(test)]
+    let mut profile = std::time::Instant::now();
 
     let query = query.normalized()?;
     let filters = Filters {
@@ -289,8 +391,10 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
     let identities: Vec<_> = input.sessions.iter().map(|s| s.identity.clone()).collect();
     let roots = core::resolve_roots(&identities).map_err(|code| invalid(&code))?;
     // This also validates conflicting native event replicas before filtering.
-    let aggregate = core::aggregate_usage(&input.facts, &identities, &filters)
+    let aggregate = core::aggregate_usage_with_roots(&input.facts, &roots, &filters)
         .map_err(|code| invalid(&code))?;
+    #[cfg(test)]
+    advanced::profile_stage("usage+roots", &mut profile);
     let descriptors: BTreeMap<_, _> = input
         .sessions
         .iter()
@@ -339,11 +443,12 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
                         || project_id(&identity.project)
                             .is_some_and(|id| selected(&query.project_ids, id)))
             })
-            .cloned()
             .collect()
     };
-    let activity =
-        core::message_activity(&messages, &filters.window, days).map_err(|code| invalid(&code))?;
+    let activity = core::message_activity_refs(messages.iter().copied(), &filters.window, days)
+        .map_err(|code| invalid(&code))?;
+    #[cfg(test)]
+    advanced::profile_stage("activity", &mut profile);
     let mut cohort: BTreeSet<String> = aggregate.sessions.keys().cloned().collect();
     for message in &messages {
         if message.main
@@ -432,15 +537,19 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
         reasons: metric_reasons.into_iter().collect(),
     };
     let known_activity = if eligible.len() == cohort.len() {
-        activity.clone()
+        std::borrow::Cow::Borrowed(&activity)
     } else {
-        let known_messages: Vec<_> = messages
-            .iter()
-            .filter(|m| eligible.contains(&m.session_key))
-            .cloned()
-            .collect();
-        core::message_activity(&known_messages, &filters.window, days)
-            .map_err(|code| invalid(&code))?
+        std::borrow::Cow::Owned(
+            core::message_activity_refs(
+                messages
+                    .iter()
+                    .copied()
+                    .filter(|m| eligible.contains(&m.session_key)),
+                &filters.window,
+                days,
+            )
+            .map_err(|code| invalid(&code))?,
+        )
     };
     let known_metrics = (metric_coverage.state != "unavailable").then_some(KnownMetrics {
         messages: known_activity.messages,
@@ -449,18 +558,20 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
     });
     let activity_by_hour =
         advanced::hour_activity(&known_activity, &metric_coverage, query.end_ms, tz)?;
-    let mut by_session: BTreeMap<String, Sum> = BTreeMap::new();
-    let mut by_model_session: BTreeMap<String, BTreeMap<String, Sum>> = BTreeMap::new();
+    #[cfg(test)]
+    advanced::profile_stage("known+hours", &mut profile);
+    let mut by_session: BTreeMap<&str, Sum> = BTreeMap::new();
+    let mut by_model_session: BTreeMap<&str, BTreeMap<&str, Sum>> = BTreeMap::new();
     let mut total = Sum::default();
     let mut unassociated = Sum::default();
     let mut daily: Vec<Sum> = days.iter().map(|_| Sum::default()).collect();
     let mut ordered_days: Vec<_> = days.iter().enumerate().collect();
     ordered_days.sort_by_key(|(_, d)| d.start_ms);
-    let mut daily_sessions: Vec<BTreeSet<String>> = days.iter().map(|_| BTreeSet::new()).collect();
-    let mut project_sums: BTreeMap<String, (Sum, BTreeSet<String>)> = BTreeMap::new();
-    let mut model_sums: BTreeMap<String, (Sum, BTreeSet<String>)> = BTreeMap::new();
-    let mut tool_sums: BTreeMap<String, (Sum, BTreeSet<String>)> = BTreeMap::new();
-    let mut seen = BTreeSet::new();
+    let mut daily_sessions: Vec<BTreeSet<&str>> = days.iter().map(|_| BTreeSet::new()).collect();
+    let mut project_sums: BTreeMap<&str, (Sum, BTreeSet<&str>)> = BTreeMap::new();
+    let mut model_sums: BTreeMap<&str, (Sum, BTreeSet<&str>)> = BTreeMap::new();
+    let mut tool_sums: BTreeMap<&str, (Sum, BTreeSet<&str>)> = BTreeMap::new();
+    let mut seen = HashSet::new();
     for fact in &input.facts {
         if !seen.insert(fact.event_key.as_str())
             || !in_window(&filters.window, fact.at_ms)
@@ -482,62 +593,68 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
         {
             continue;
         }
+        // Every projection uses the same immutable per-record estimate from
+        // the captured catalog. Resolve aliases/rates and price buckets once.
+        let fact_estimate = catalog.estimate(&fact.model, fact.buckets, Some(1));
+        let contribution = CostContribution::new(&fact_estimate)?;
         let Some(root) = root else {
-            unassociated.add(fact, catalog)?;
+            unassociated.add_prepared(fact, &contribution)?;
             continue;
         };
-        total.add(fact, catalog)?;
+        total.add_prepared(fact, &contribution)?;
         by_session
-            .entry(root.key.clone())
+            .entry(root.key.as_str())
             .or_default()
-            .add(fact, catalog)?;
+            .add_prepared(fact, &contribution)?;
         by_model_session
-            .entry(root.key.clone())
+            .entry(root.key.as_str())
             .or_default()
-            .entry(fact.model.clone())
+            .entry(fact.model.as_str())
             .or_default()
-            .add(fact, catalog)?;
+            .add_prepared(fact, &contribution)?;
         let day_index = ordered_days.partition_point(|(_, d)| d.end_ms <= fact.at_ms);
         let day = ordered_days
             .get(day_index)
             .filter(|(_, d)| d.start_ms <= fact.at_ms)
             .map(|(i, _)| *i)
             .ok_or_else(|| invalid("missingUsageDayBoundary"))?;
-        daily[day].add(fact, catalog)?;
-        daily_sessions[day].insert(root.key.clone());
+        daily[day].add_prepared(fact, &contribution)?;
+        daily_sessions[day].insert(root.key.as_str());
         if !fact.complete {
             reasons.insert("incompleteUsageFact".into());
         }
         if let Some(project) = project_id(&root.project) {
-            let entry = project_sums.entry(project.to_owned()).or_default();
-            entry.0.add(fact, catalog)?;
-            entry.1.insert(root.key.clone());
+            let entry = project_sums.entry(project).or_default();
+            entry.0.add_prepared(fact, &contribution)?;
+            entry.1.insert(root.key.as_str());
         }
         for (map, id) in [
             (&mut model_sums, fact.model.as_str()),
             (&mut tool_sums, root.tool_id.as_str()),
         ] {
-            let entry = map.entry(id.to_owned()).or_default();
-            entry.0.add(fact, catalog)?;
-            entry.1.insert(root.key.clone());
+            let entry = map.entry(id).or_default();
+            entry.0.add_prepared(fact, &contribution)?;
+            entry.1.insert(root.key.as_str());
         }
     }
+    #[cfg(test)]
+    advanced::profile_stage("fact-sums", &mut profile);
     // Message-only sessions participate in cohort/project counts while their
     // missing usage remains null and stays out of token distributions.
     for key in &cohort {
         let descriptor = descriptors[key.as_str()];
         if let Some(project) = project_id(&descriptor.identity.project) {
             project_sums
-                .entry(project.to_owned())
+                .entry(project)
                 .or_default()
                 .1
-                .insert(key.clone());
+                .insert(key.as_str());
         }
         tool_sums
-            .entry(descriptor.identity.tool_id.clone())
+            .entry(descriptor.identity.tool_id.as_str())
             .or_default()
             .1
-            .insert(key.clone());
+            .insert(key.as_str());
     }
     let mut cohort_rows = Vec::new();
     let mut cohort_tokens = cohort
@@ -545,7 +662,7 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
         .map(|key| {
             Ok((
                 key.clone(),
-                by_session.get(key).map(Sum::tokens).transpose()?,
+                by_session.get(key.as_str()).map(Sum::tokens).transpose()?,
             ))
         })
         .collect::<Result<Vec<_>, AppError>>()?;
@@ -578,7 +695,7 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
     );
     for (key, tokens) in cohort_tokens {
         let descriptor = descriptors[key.as_str()];
-        let sum = by_session.get(&key);
+        let sum = by_session.get(key.as_str());
         let own_available = eligible.contains(&key);
         let mut row_reasons = descriptor.message_reasons.clone();
         if tokens.is_none() {
@@ -587,13 +704,13 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
             row_reasons.push("incompleteUsageFact".into());
         }
         let models = by_model_session
-            .get(&key)
+            .get(key.as_str())
             .map(|models| {
                 models
                     .iter()
                     .map(|(model, sum)| {
                         Ok(AnalyticsModel {
-                            model: model.clone(),
+                            model: (*model).to_owned(),
                             tokens: sum.tokens()?,
                             estimate: sum.estimate(),
                         })
@@ -638,10 +755,12 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
             unquantified_source_gaps,
         ),
     ];
+    #[cfg(test)]
+    advanced::profile_stage("cohort+tops", &mut profile);
     let mut series = Vec::new();
     for (index, day) in days.iter().enumerate() {
         if let Some(keys) = activity.daily_sessions.get(&day.date) {
-            daily_sessions[index].extend(keys.iter().cloned());
+            daily_sessions[index].extend(keys.iter().map(String::as_str));
         }
         series.push(AnalyticsDay {
             date: day.date.clone(),
@@ -678,8 +797,11 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
     let project_count = project_sums.len() as u64;
     let mut projects: BTreeMap<String, ProjectOption> = BTreeMap::new();
     let mut options = FilterOptions::default();
+    let mut option_tools = BTreeSet::new();
+    let mut option_models = BTreeSet::new();
+    let mut option_sources = BTreeSet::new();
     for descriptor in &input.sessions {
-        options.tool_ids.push(descriptor.identity.tool_id.clone());
+        option_tools.insert(descriptor.identity.tool_id.as_str());
         if let Some(id) = project_id(&descriptor.identity.project) {
             projects
                 .entry(id.to_owned())
@@ -694,30 +816,25 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
         }
     }
     for fact in &input.facts {
-        options.tool_ids.push(fact.tool_id.clone());
-        options.model_ids.push(fact.model.clone());
-        options.source_ids.push(fact.source_id.clone());
+        option_tools.insert(fact.tool_id.as_str());
+        option_models.insert(fact.model.as_str());
+        option_sources.insert(fact.source_id.as_str());
     }
-    for ids in [
-        &mut options.tool_ids,
-        &mut options.model_ids,
-        &mut options.source_ids,
-    ] {
-        ids.sort();
-        ids.dedup();
-    }
+    options.tool_ids = option_tools.into_iter().map(str::to_owned).collect();
+    options.model_ids = option_models.into_iter().map(str::to_owned).collect();
+    options.source_ids = option_sources.into_iter().map(str::to_owned).collect();
     let project_options = &projects;
-    let rank = |map: BTreeMap<String, (Sum, BTreeSet<String>)>,
+    let rank = |map: BTreeMap<&str, (Sum, BTreeSet<&str>)>,
                 projects: bool|
      -> Result<Vec<AnalyticsRank>, AppError> {
         let mut rows = Vec::new();
         for (id, (sum, sessions)) in map {
-            let descriptor = projects.then(|| project_options.get(&id)).flatten();
+            let descriptor = projects.then(|| project_options.get(id)).flatten();
             rows.push(AnalyticsRank {
-                id: id.clone(),
+                id: id.to_owned(),
                 label: descriptor
                     .map(|s| s.label.clone())
-                    .unwrap_or_else(|| id.clone()),
+                    .unwrap_or_else(|| id.to_owned()),
                 path: descriptor.and_then(|s| s.path.clone()),
                 session_count: sessions.len() as u64,
                 tokens: sum.tokens()?,
@@ -727,7 +844,7 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
                     } else {
                         sum.estimate()
                     };
-                    if sessions.iter().any(|key| !by_session.contains_key(key))
+                    if sessions.iter().any(|key| !by_session.contains_key(*key))
                         && estimate.known_cost_usd.is_some()
                     {
                         estimate.availability = "partial".into();
@@ -866,6 +983,81 @@ mod tests {
         database::Database,
         services::session_analytics_core::{Project, Role, UNKNOWN_PROJECT_ID},
     };
+
+    #[test]
+    fn analytics_sum_estimates_match_reference_decimal_and_unknown_semantics() {
+        let estimate =
+            |amount: Option<&str>, availability: &str, models: &[&str], count, additional| {
+                CostEstimate {
+                    known_cost_usd: amount.map(str::to_owned),
+                    availability: availability.into(),
+                    unpriced_model_ids: models.iter().map(|v| (*v).into()).collect(),
+                    unpriced_record_count: count,
+                    additional_units_unsupported: additional,
+                }
+            };
+        let cases = [
+            vec![estimate(Some("0"), "free", &[], Some(0), false)],
+            vec![
+                estimate(None, "unknown", &["missing"], Some(1), false),
+                estimate(Some("0"), "free", &[], Some(0), false),
+            ],
+            vec![
+                estimate(Some("1e-20"), "partial", &["b", "a", "a"], Some(1), false),
+                estimate(Some("0.00000000000000000002"), "known", &[], Some(0), false),
+            ],
+            vec![
+                estimate(Some("0"), "partial", &[], None, true),
+                estimate(Some("1"), "known", &[], Some(0), false),
+            ],
+            vec![
+                estimate(Some("1"), "known", &[], Some(0), true),
+                estimate(None, "unknown", &["missing"], None, false),
+            ],
+            vec![
+                estimate(None, "partial", &[], Some(0), false),
+                estimate(Some("1"), "known", &[], Some(0), false),
+            ],
+        ];
+        for estimates in cases {
+            let mut sum = Sum::default();
+            let mut reference = CostEstimate::default();
+            for value in estimates {
+                reference.combine(&value).unwrap();
+                sum.add(&fact("event", Some("s"), "m", 1, [0; 4]), &value)
+                    .unwrap();
+                assert_eq!(sum.estimate(), reference);
+            }
+        }
+        let mut sum = Sum::default();
+        let huge = estimate(
+            Some("79228162514264337593543950335"),
+            "known",
+            &[],
+            Some(0),
+            false,
+        );
+        let one = estimate(Some("1"), "known", &[], Some(0), false);
+        sum.add(&fact("event", Some("s"), "m", 1, [0; 4]), &huge)
+            .unwrap();
+        assert!(sum
+            .add(&fact("event", Some("s"), "m", 1, [0; 4]), &one)
+            .is_err());
+        assert_eq!(sum.estimate().known_cost_usd, huge.known_cost_usd);
+        assert!(sum
+            .add(&fact("event", Some("s"), "m", 1, [0; 4]), &one)
+            .is_err());
+        let count_overflow = estimate(None, "unknown", &["missing"], Some(u64::MAX), false);
+        let mut sum = Sum::default();
+        sum.add(&fact("event", Some("s"), "m", 1, [0; 4]), &count_overflow)
+            .unwrap();
+        assert!(sum
+            .add(
+                &fact("event", Some("s"), "m", 1, [0; 4]),
+                &estimate(None, "unknown", &["missing"], Some(1), false)
+            )
+            .is_err());
+    }
 
     fn query() -> UsageQueryV1 {
         UsageQueryV1 {

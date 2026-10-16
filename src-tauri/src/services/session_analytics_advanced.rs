@@ -18,6 +18,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Opt-in test profiling stays outside production and never prints data.
+#[cfg(test)]
+pub(crate) fn profile_stage(label: &str, start: &mut Instant) {
+    if std::env::var_os("OFOX_ANALYTICS_PROFILE").is_some() {
+        eprintln!("analytics profile {label}: {:?}", start.elapsed());
+    }
+    *start = Instant::now();
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KnownMetrics {

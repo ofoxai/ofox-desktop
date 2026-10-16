@@ -21,10 +21,224 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 const VERSION: u8 = 1;
 const MAX_CACHE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_SOURCES: usize = 20_000;
+const PROJECTION_CACHE_BYTES: usize = 128 * 1024 * 1024;
+const PROJECTION_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+
+#[cfg(test)]
+thread_local! {
+    static QUERY_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_query_decode_count() {
+    QUERY_DECODE_COUNT.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn query_decode_count() -> usize {
+    QUERY_DECODE_COUNT.get()
+}
+
+struct CachedProjection {
+    key: [u8; 32],
+    input: Arc<AnalyticsInput>,
+    created_at: Instant,
+}
+
+/// One verified, body-free input projection. Keys describe the full SQLite
+/// observation, never a connection address, query filter, price or native path
+/// reopened outside the transaction. An in-flight Arc may outlive eviction;
+/// the budget limits this slot's retention, not concurrent request memory.
+pub(crate) struct ProjectionCache {
+    slot: Mutex<Option<CachedProjection>>,
+    max_bytes: usize,
+    ttl: Duration,
+}
+impl Default for ProjectionCache {
+    fn default() -> Self {
+        Self {
+            slot: Mutex::new(None),
+            max_bytes: PROJECTION_CACHE_BYTES,
+            ttl: PROJECTION_CACHE_TTL,
+        }
+    }
+}
+impl ProjectionCache {
+    pub(crate) fn read_on(
+        &self,
+        conn: &rusqlite::Connection,
+    ) -> Result<Arc<AnalyticsInput>, AppError> {
+        self.read_at(conn, Instant::now())
+    }
+
+    fn read_at(
+        &self,
+        conn: &rusqlite::Connection,
+        now: Instant,
+    ) -> Result<Arc<AnalyticsInput>, AppError> {
+        // Read and validate SQL/budgets before any lookup. Even a matching
+        // warm slot must not conceal a read failure or an oversized table.
+        let raw_rows = raw_rows_on(conn)?;
+        let common = super::usage_health::source_health_on(conn)?;
+        let key = projection_key(&raw_rows, &common)?;
+        {
+            let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+            if slot
+                .as_ref()
+                .is_some_and(|entry| now.saturating_duration_since(entry.created_at) >= self.ttl)
+            {
+                *slot = None;
+            }
+            if let Some(entry) = slot.as_ref().filter(|entry| entry.key == key) {
+                return Ok(Arc::clone(&entry.input));
+            }
+        }
+        // Decode and deduplicate the already-read rows without another SELECT.
+        // No raw envelope or native transcript is retained by the slot.
+        let input = Arc::new(input_from_rows(decode_rows(raw_rows), common));
+        let bytes = projection_bytes(&input);
+        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        *slot = bytes
+            .filter(|bytes| *bytes <= self.max_bytes)
+            .map(|_| CachedProjection {
+                key,
+                input: Arc::clone(&input),
+                created_at: now,
+            });
+        Ok(input)
+    }
+}
+
+pub(crate) fn projection_cache() -> &'static ProjectionCache {
+    static CACHE: OnceLock<ProjectionCache> = OnceLock::new();
+    CACHE.get_or_init(ProjectionCache::default)
+}
+
+struct RawRow {
+    path: String,
+    provider: String,
+    stamp: Option<String>,
+    parser_version: Option<i64>,
+    raw: Option<String>,
+}
+
+fn projection_key(rows: &[RawRow], common: &[SourceHealth]) -> Result<[u8; 32], AppError> {
+    fn string(hash: &mut Sha256, value: &str) {
+        hash.update((value.len() as u64).to_be_bytes());
+        hash.update(value.as_bytes());
+    }
+    fn optional_string(hash: &mut Sha256, value: Option<&str>) {
+        hash.update([u8::from(value.is_some())]);
+        if let Some(value) = value {
+            string(hash, value);
+        }
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"analytics-input-projection-v1\0");
+    hash.update((rows.len() as u64).to_be_bytes());
+    for row in rows {
+        string(&mut hash, &row.path);
+        string(&mut hash, &row.provider);
+        optional_string(&mut hash, row.stamp.as_deref());
+        hash.update([u8::from(row.parser_version.is_some())]);
+        if let Some(version) = row.parser_version {
+            hash.update(version.to_be_bytes());
+        }
+        optional_string(&mut hash, row.raw.as_deref());
+    }
+    // All effective health fields matter, including epochs resolved to unknown,
+    // scan counters and retained-detail ranges. The raw health setting itself
+    // is not consumed by input construction and need not be read a second time.
+    let common = serde_json::to_vec(common).map_err(|_| invalid("invalidSourceHealth"))?;
+    hash.update((common.len() as u64).to_be_bytes());
+    hash.update(common);
+    Ok(hash.finalize().into())
+}
+
+/// Count the owned allocation capacities, rather than serialized length. This
+/// covers nested strings and Vec storage, plus conservative Arc/slot overhead;
+/// checked arithmetic refuses retention if a size cannot be represented.
+fn projection_bytes(input: &AnalyticsInput) -> Option<usize> {
+    struct Bytes(usize);
+    impl Bytes {
+        fn add(&mut self, bytes: usize) -> Option<()> {
+            self.0 = self.0.checked_add(bytes)?;
+            Some(())
+        }
+        fn string(&mut self, value: &String) -> Option<()> {
+            self.add(value.capacity())
+        }
+        fn optional(&mut self, value: &Option<String>) -> Option<()> {
+            if let Some(value) = value {
+                self.string(value)?;
+            }
+            Some(())
+        }
+        fn vector<T>(&mut self, value: &Vec<T>) -> Option<()> {
+            self.add(value.capacity().checked_mul(std::mem::size_of::<T>())?)
+        }
+        fn strings(&mut self, values: &Vec<String>) -> Option<()> {
+            self.vector(values)?;
+            for value in values {
+                self.string(value)?;
+            }
+            Some(())
+        }
+    }
+    let mut bytes = Bytes(std::mem::size_of::<AnalyticsInput>());
+    bytes.add(std::mem::size_of::<CachedProjection>())?;
+    bytes.add(2 * std::mem::size_of::<usize>())?;
+    bytes.string(&input.snapshot_version)?;
+    bytes.vector(&input.sessions)?;
+    for session in &input.sessions {
+        bytes.string(&session.identity.key)?;
+        bytes.string(&session.identity.tool_id)?;
+        if let Project::Known(project) = &session.identity.project {
+            bytes.string(project)?;
+        }
+        bytes.optional(&session.identity.verified_root_key)?;
+        bytes.string(&session.native_session_id)?;
+        bytes.string(&session.title)?;
+        bytes.optional(&session.project_label)?;
+        bytes.optional(&session.project_path)?;
+        bytes.optional(&session.manager_key)?;
+        bytes.strings(&session.message_reasons)?;
+    }
+    bytes.vector(&input.facts)?;
+    for fact in &input.facts {
+        bytes.string(&fact.event_key)?;
+        bytes.optional(&fact.session_key)?;
+        bytes.string(&fact.tool_id)?;
+        bytes.string(&fact.source_id)?;
+        bytes.string(&fact.model)?;
+    }
+    bytes.vector(&input.messages)?;
+    for message in &input.messages {
+        bytes.string(&message.session_key)?;
+        bytes.string(&message.native_id)?;
+    }
+    bytes.strings(&input.reasons)?;
+    bytes.vector(&input.source_reasons)?;
+    for reason in &input.source_reasons {
+        bytes.string(&reason.tool_id)?;
+        bytes.string(&reason.source_id)?;
+        bytes.string(&reason.reason)?;
+    }
+    bytes.vector(&input.sources)?;
+    for source in &input.sources {
+        bytes.string(&source.source_id)?;
+        bytes.string(&source.tool_id)?;
+        bytes.string(&source.status)?;
+        bytes.optional(&source.error_code)?;
+    }
+    Some(bytes.0)
+}
 
 #[derive(Clone)]
 pub(crate) struct SourceSpec {
@@ -88,6 +302,157 @@ struct Row {
     entry: Result<Option<Entry>, ()>,
     raw: String,
 }
+
+/// A query only needs Analytics' typed value. Other known parts still have
+/// their wrapper validated, but their potentially large opaque values can be
+/// skipped without materializing another JSON tree. Noncanonical inputs fall
+/// back to the shared decoder below, preserving its legacy/duplicate-key rules.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QueryEnvelope {
+    format_version: u64,
+    #[serde(deserialize_with = "map_only")]
+    parts: QueryParts,
+}
+
+struct MapOnly<T>(T);
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for MapOnly<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        map_only(deserializer).map(Self)
+    }
+}
+
+fn map_only<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct ObjectVisitor<T>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for ObjectVisitor<T> {
+        type Value = T;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a JSON object")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<T, A::Error> {
+            T::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+        }
+    }
+    // Only wrappers that the shared decoder checks with Value::as_object are
+    // constrained here. Entry and its contents retain their original serde
+    // behavior, including compatible positional representations.
+    deserializer.deserialize_map(ObjectVisitor(std::marker::PhantomData))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QueryParts {
+    #[serde(default, deserialize_with = "present_part")]
+    metadata: Option<OpaqueQueryPart>,
+    #[serde(default, deserialize_with = "present_part")]
+    usage_sync: Option<OpaqueQueryPart>,
+    #[serde(default, deserialize_with = "present_part")]
+    lifetime_usage: Option<OpaqueQueryPart>,
+    #[serde(default, deserialize_with = "present_part")]
+    analytics: Option<AnalyticsQueryPart>,
+}
+
+fn present_part<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    // A present null wrapper is invalid in the shared contract. Ordinary
+    // Option<T> deserialization would confuse it with an absent part.
+    map_only(deserializer).map(Some)
+}
+
+#[derive(Deserialize)]
+struct OpaqueQueryPart {
+    revision: String,
+    #[serde(rename = "value")]
+    _value: serde::de::IgnoredAny,
+}
+
+#[derive(Deserialize)]
+struct AnalyticsQueryPart {
+    revision: String,
+    // A cleared/null value uses the existing shared decoder; the hot path is
+    // an actual typed Entry, whose required fields remain required.
+    value: Entry,
+}
+
+/// Validate opaque extensions with the same numeric and recursion checks as
+/// serde_json::Value, without allocating maps, vectors or owned JSON strings.
+/// IgnoredAny/derived unknown-field skipping alone can accept out-of-range
+/// numbers or skip the normal depth budget, so it cannot establish readability.
+struct ReadableJson;
+impl<'de> Deserialize<'de> for ReadableJson {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct JsonVisitor;
+        impl<'de> serde::de::Visitor<'de> for JsonVisitor {
+            type Value = ReadableJson;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("readable bounded JSON")
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<ReadableJson, E> {
+                Ok(ReadableJson)
+            }
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<ReadableJson, E> {
+                Ok(ReadableJson)
+            }
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<ReadableJson, E> {
+                Ok(ReadableJson)
+            }
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<ReadableJson, E> {
+                Ok(ReadableJson)
+            }
+            fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<ReadableJson, E> {
+                if value.is_finite() {
+                    Ok(ReadableJson)
+                } else {
+                    Err(E::custom("number out of range"))
+                }
+            }
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<ReadableJson, E> {
+                Ok(ReadableJson)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<ReadableJson, A::Error> {
+                while sequence.next_element::<ReadableJson>()?.is_some() {}
+                Ok(ReadableJson)
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<ReadableJson, A::Error> {
+                while map.next_key::<ReadableJson>()?.is_some() {
+                    map.next_value::<ReadableJson>()?;
+                }
+                Ok(ReadableJson)
+            }
+        }
+        deserializer.deserialize_any(JsonVisitor)
+    }
+}
+
+impl QueryParts {
+    fn valid_wrappers(&self) -> bool {
+        [&self.metadata, &self.usage_sync, &self.lifetime_usage]
+            .into_iter()
+            .flatten()
+            .all(|part| !part.revision.is_empty())
+            && self
+                .analytics
+                .as_ref()
+                .is_none_or(|part| !part.revision.is_empty())
+    }
+}
 fn invalid(code: &str) -> AppError {
     AppError::Database(format!("usage.analytics.{code}"))
 }
@@ -134,8 +499,12 @@ fn source_id(provider: &str) -> &str {
 /// Exactly one cache-table SELECT for a query/refresh. Changed sources alone
 /// perform CAS writes; warm aggregation never point-reads each session.
 fn rows_on(conn: &rusqlite::Connection) -> Result<BTreeMap<String, Row>, AppError> {
+    Ok(decode_rows(raw_rows_on(conn)?))
+}
+
+fn raw_rows_on(conn: &rusqlite::Connection) -> Result<Vec<RawRow>, AppError> {
     let mut statement=conn.prepare("SELECT source_path,provider_id,stamp,parser_version,meta_json FROM session_meta_cache WHERE provider_id IN ('claude','codex','gemini','opencode') ORDER BY source_path")?;
-    let mut result = BTreeMap::new();
+    let mut result = Vec::new();
     let mut bytes = 0usize;
     let rows = statement.query_map([], |r| {
         Ok((
@@ -148,45 +517,91 @@ fn rows_on(conn: &rusqlite::Connection) -> Result<BTreeMap<String, Row>, AppErro
     })?;
     for row in rows {
         let (path, provider, stamp, version, raw) = row?;
-        let raw = raw.unwrap_or_default();
         bytes = bytes
-            .checked_add(raw.len())
+            .checked_add(raw.as_ref().map_or(0, String::len))
             .ok_or_else(|| invalid("cacheBudgetExceeded"))?;
         if bytes > MAX_CACHE_BYTES || result.len() >= MAX_SOURCES {
             return Err(invalid("cacheBudgetExceeded"));
         }
-        let decoded = source_cache::decode_row(
-            (Some(provider.clone()), stamp, version, Some(raw.clone())),
-            &provider,
-        );
-        let (token, entry) = match decoded {
-            Ok(parts) => {
-                let token = parts.token(Part::Analytics);
-                let entry = parts
-                    .value(Part::Analytics)
-                    .map(|value| {
-                        let entry: Entry = serde_json::from_value(value.clone()).map_err(|_| ())?;
-                        if entry.version != VERSION {
-                            return Err(());
-                        }
-                        Ok(entry)
-                    })
-                    .transpose();
-                (token, entry)
-            }
-            Err(_) => (None, Err(())),
-        };
-        result.insert(
+        result.push(RawRow {
             path,
-            Row {
-                provider,
-                token,
-                entry,
-                raw,
-            },
-        );
+            provider,
+            stamp,
+            parser_version: version,
+            raw,
+        });
     }
     Ok(result)
+}
+
+fn decode_rows(raw_rows: Vec<RawRow>) -> BTreeMap<String, Row> {
+    raw_rows
+        .into_iter()
+        .map(|row| {
+            let raw = row.raw.unwrap_or_default();
+            let (token, entry) =
+                decode_analytics_row(&row.provider, row.stamp, row.parser_version, &raw);
+            (
+                row.path,
+                Row {
+                    provider: row.provider,
+                    token,
+                    entry,
+                    raw,
+                },
+            )
+        })
+        .collect()
+}
+
+fn decode_analytics_row(
+    provider: &str,
+    stamp: Option<String>,
+    version: Option<i64>,
+    raw: &str,
+) -> (Option<String>, Result<Option<Entry>, ()>) {
+    #[cfg(test)]
+    QUERY_DECODE_COUNT.set(QUERY_DECODE_COUNT.get().saturating_add(1));
+    if raw.len() <= source_cache::MAX_ENVELOPE_BYTES
+        && serde_json::from_str::<ReadableJson>(raw).is_ok()
+    {
+        if let Ok(MapOnly(envelope)) = serde_json::from_str::<MapOnly<QueryEnvelope>>(raw) {
+            if envelope.format_version == 1 && envelope.parts.valid_wrappers() {
+                return match envelope.parts.analytics {
+                    Some(part) => (
+                        Some(part.revision),
+                        if part.value.version == VERSION {
+                            Ok(Some(part.value))
+                        } else {
+                            Err(())
+                        },
+                    ),
+                    None => (None, Ok(None)),
+                };
+            }
+        }
+    }
+    let decoded = source_cache::decode_row(
+        (Some(provider.into()), stamp, version, Some(raw.into())),
+        provider,
+    );
+    match decoded {
+        Ok(parts) => {
+            let token = parts.token(Part::Analytics);
+            let entry = parts
+                .value(Part::Analytics)
+                .map(|value| {
+                    let entry = Entry::deserialize(value).map_err(|_| ())?;
+                    if entry.version != VERSION {
+                        return Err(());
+                    }
+                    Ok(entry)
+                })
+                .transpose();
+            (token, entry)
+        }
+        Err(_) => (None, Err(())),
+    }
 }
 pub(crate) fn source_revision(spec: &SourceSpec) -> Result<Value, AppError> {
     fn dependency(path: Option<&Path>) -> Result<Option<Value>, AppError> {
@@ -785,6 +1200,11 @@ pub(crate) fn read_input(db: &Database) -> Result<AnalyticsInput, AppError> {
 
 pub(crate) fn read_input_on(conn: &rusqlite::Connection) -> Result<AnalyticsInput, AppError> {
     let rows = rows_on(conn)?;
+    let common = super::usage_health::source_health_on(conn)?;
+    Ok(input_from_rows(rows, common))
+}
+
+fn input_from_rows(rows: BTreeMap<String, Row>, common: Vec<SourceHealth>) -> AnalyticsInput {
     let mut input = AnalyticsInput {
         snapshot_version: String::new(),
         sessions: vec![],
@@ -809,19 +1229,22 @@ pub(crate) fn read_input_on(conn: &rusqlite::Connection) -> Result<AnalyticsInpu
             }),
         }
     }
+    let has_obsolete_entries = entries
+        .iter()
+        .any(|(_, entry)| !entry.available || entry.status == "failed");
     let current_sessions: BTreeSet<_> = entries
         .iter()
-        .filter(|(_, e)| e.available && e.status != "failed")
+        .filter(|(_, e)| has_obsolete_entries && e.available && e.status != "failed")
         .flat_map(|(_, e)| e.sessions.iter().map(|s| s.identity.key.clone()))
         .collect();
     let current_facts: BTreeSet<_> = entries
         .iter()
-        .filter(|(_, e)| e.available && e.status != "failed")
+        .filter(|(_, e)| has_obsolete_entries && e.available && e.status != "failed")
         .flat_map(|(_, e)| e.facts.iter().map(|f| f.event_key.clone()))
         .collect();
     let current_messages: BTreeSet<_> = entries
         .iter()
-        .filter(|(_, e)| e.available && e.status != "failed")
+        .filter(|(_, e)| has_obsolete_entries && e.available && e.status != "failed")
         .flat_map(|(_, e)| {
             e.messages
                 .iter()
@@ -998,7 +1421,6 @@ pub(crate) fn read_input_on(conn: &rusqlite::Connection) -> Result<AnalyticsInpu
     input.messages = messages.into_values().collect();
     // Read the common health under this query's existing SQLite snapshot.
     // A successful old cache never upgrades an unattempted/failed channel.
-    let common = super::usage_health::source_health_on(conn)?;
     for mut source in common
         .into_iter()
         .filter(|s| source_id(&s.tool_id) != "unsupported")
@@ -1031,7 +1453,7 @@ pub(crate) fn read_input_on(conn: &rusqlite::Connection) -> Result<AnalyticsInpu
         a.tool_id == b.tool_id && a.source_id == b.source_id && a.reason == b.reason
     });
     input.snapshot_version = format!("{:x}", hash.finalize());
-    Ok(input)
+    input
 }
 
 #[cfg(test)]
@@ -1039,6 +1461,121 @@ mod tests {
     use super::*;
     use crate::session_manager::source_cache::{self, Part};
     use serde_json::json;
+
+    #[test]
+    fn analytics_envelope_projection_matches_shared_decoder_compatibility_and_refusals() {
+        fn shared(raw: &str) -> (Option<String>, Result<Option<Entry>, ()>) {
+            match source_cache::decode_row(
+                (Some("codex".into()), None, None, Some(raw.into())),
+                "codex",
+            ) {
+                Ok(parts) => {
+                    let entry = parts
+                        .value(Part::Analytics)
+                        .map(|value| {
+                            let entry = Entry::deserialize(value).map_err(|_| ())?;
+                            if entry.version != VERSION {
+                                return Err(());
+                            }
+                            Ok(entry)
+                        })
+                        .transpose();
+                    (parts.token(Part::Analytics), entry)
+                }
+                Err(_) => (None, Err(())),
+            }
+        }
+        let entry = json!({"version":1,"stamp":{"futureStamp":{"keep":true}},"sessions":[],"facts":[],"messages":[],"reasons":[],"available":true,"status":"ok","priority":2,"attemptedAtMs":1,"succeededAtMs":1,"futureEntry":"opaque"});
+        let canonical = json!({"formatVersion":1,"parts":{
+            "analytics":{"revision":"analytics-r","value":entry},
+            "metadata":{"revision":"meta-r","value":{"futureVersion":999}},
+            "usageSync":{"revision":"usage-r","value":{"version":999,"opaque":[1,2]}},
+            "lifetimeUsage":{"revision":"life-r","value":null},
+            "futurePart":{"unrecognized":"opaque"}
+        },"futureRoot":true});
+        let mut cases = vec![
+            canonical.to_string(),
+            "invalid JSON".into(),
+            json!({"candidates":{},"messageCount":3}).to_string(),
+            "{}".into(),
+            json!([1, {}]).to_string(),
+        ];
+        let mut sequence_parts = canonical.clone();
+        sequence_parts["parts"] = json!([]);
+        cases.push(sequence_parts.to_string());
+        for part in ["metadata", "usageSync", "analytics", "lifetimeUsage"] {
+            let mut sequence_wrapper = canonical.clone();
+            let value = sequence_wrapper["parts"][part]["value"].clone();
+            sequence_wrapper["parts"][part] = json!(["sequence-r", value]);
+            cases.push(sequence_wrapper.to_string());
+        }
+        for field in ["formatVersion", "parts"] {
+            let mut value = canonical.clone();
+            value.as_object_mut().unwrap().remove(field);
+            cases.push(value.to_string());
+        }
+        for format in [json!(2), Value::Null, json!("1")] {
+            let mut value = canonical.clone();
+            value["formatVersion"] = format;
+            cases.push(value.to_string());
+        }
+        for part in ["metadata", "usageSync", "analytics", "lifetimeUsage"] {
+            for field in ["revision", "value"] {
+                let mut value = canonical.clone();
+                value["parts"][part].as_object_mut().unwrap().remove(field);
+                cases.push(value.to_string());
+            }
+            for wrapper in [Value::Null, json!(7), json!({"revision":"","value":null})] {
+                let mut value = canonical.clone();
+                value["parts"][part] = wrapper;
+                cases.push(value.to_string());
+            }
+        }
+        let mut cleared = canonical.clone();
+        cleared["parts"]["analytics"]["value"] = Value::Null;
+        cases.push(cleared.to_string());
+        let mut future = canonical.clone();
+        future["parts"]["analytics"]["value"]["version"] = json!(2);
+        cases.push(future.to_string());
+        let mut absent = canonical.clone();
+        absent["parts"].as_object_mut().unwrap().remove("analytics");
+        cases.push(absent.to_string());
+        // Shared Value decoding accepts duplicate object keys with the final
+        // value winning; a typed parser must preserve that fallback behavior.
+        cases.push(canonical.to_string().replace(
+            "\"formatVersion\":1",
+            "\"formatVersion\":0,\"formatVersion\":1",
+        ));
+        for replacement in [
+            "1e400".to_owned(),
+            format!("{}0{}", "[".repeat(140), "]".repeat(140)),
+        ] {
+            for needle in [
+                "\"futureRoot\":true",
+                "\"futureVersion\":999",
+                "\"futureEntry\":\"opaque\"",
+            ] {
+                let raw = canonical.to_string();
+                assert!(raw.contains(needle));
+                let key = needle.split_once(':').unwrap().0;
+                let raw = raw.replace(needle, &format!("{key}:{replacement}"));
+                assert!(
+                    shared(&raw).1.is_err(),
+                    "shared decoder must reject malformed opaque values"
+                );
+                cases.push(raw);
+            }
+        }
+        let mut large = canonical.clone();
+        large["padding"] = json!("x".repeat(source_cache::MAX_ENVELOPE_BYTES));
+        cases.push(large.to_string());
+        for (index, raw) in cases.iter().enumerate() {
+            let expected = serde_json::to_value(shared(raw)).unwrap();
+            let actual =
+                serde_json::to_value(decode_analytics_row("codex", None, None, raw)).unwrap();
+            assert_eq!(actual, expected, "envelope case {index}");
+        }
+    }
 
     fn write(path: &std::path::Path, value: &serde_json::Value) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1058,6 +1595,97 @@ mod tests {
             title_file: None,
         }
     }
+
+    #[test]
+    fn analytics_projection_ttl_is_absolute_and_reuses_arc_until_exact_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::memory().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write(&path, &row("ttl", "event", 3));
+        refresh_sources(&db, &[spec(&path)]).unwrap();
+        let cache = ProjectionCache::default();
+        let start = Instant::now();
+        let conn = db.conn.lock().unwrap();
+        let first = cache.read_at(&conn, start).unwrap();
+        reset_query_decode_count();
+        let warm = cache
+            .read_at(
+                &conn,
+                start + PROJECTION_CACHE_TTL - Duration::from_nanos(1),
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &warm));
+        assert_eq!(query_decode_count(), 0);
+        let expired = cache.read_at(&conn, start + PROJECTION_CACHE_TTL).unwrap();
+        assert!(!Arc::ptr_eq(&first, &expired));
+        assert_eq!(query_decode_count(), 1);
+        assert_eq!(
+            serde_json::to_value(&*first).unwrap(),
+            serde_json::to_value(&*expired).unwrap()
+        );
+    }
+
+    #[test]
+    fn analytics_projection_retention_budget_counts_owned_capacities_and_refuses_oversized_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::memory().unwrap();
+        let path = dir.path().join("session.jsonl");
+        write(&path, &row("budget", "event", 3));
+        refresh_sources(&db, &[spec(&path)]).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let baseline = read_input_on(&conn).unwrap();
+        let bytes = projection_bytes(&baseline).unwrap();
+        assert!(bytes > std::mem::size_of::<AnalyticsInput>());
+        let cache = ProjectionCache {
+            max_bytes: bytes - 1,
+            ..ProjectionCache::default()
+        };
+        reset_query_decode_count();
+        let first = cache.read_on(&conn).unwrap();
+        let second = cache.read_on(&conn).unwrap();
+        assert_eq!(query_decode_count(), 2);
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(cache.slot.lock().unwrap().is_none());
+        assert_eq!(
+            first.facts[0].buckets[0], 3,
+            "budget refusal must not drop the query's input"
+        );
+
+        let exact = ProjectionCache {
+            max_bytes: bytes,
+            ..ProjectionCache::default()
+        };
+        let retained = exact.read_on(&conn).unwrap();
+        assert!(Arc::ptr_eq(&retained, &exact.read_on(&conn).unwrap()));
+
+        let mut spare = baseline.clone();
+        let before = projection_bytes(&spare).unwrap();
+        let old_capacity = spare.sessions[0].title.capacity();
+        spare.sessions[0].title.reserve(4096);
+        assert_eq!(
+            projection_bytes(&spare).unwrap() - before,
+            spare.sessions[0].title.capacity() - old_capacity
+        );
+        spare.facts.reserve(500);
+        assert!(
+            projection_bytes(&spare).unwrap() >= before + 500 * std::mem::size_of::<UsageFact>()
+        );
+        assert!(!serde_json::to_string(&*retained)
+            .unwrap()
+            .contains("not retained in cache"));
+    }
+
+    #[test]
+    fn analytics_projection_warm_slot_cannot_hide_raw_source_count_budget_failure() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let cache = ProjectionCache::default();
+        let empty = cache.read_on(&conn).unwrap();
+        assert!(empty.facts.is_empty());
+        conn.execute("WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<20000) INSERT INTO session_meta_cache(source_path,provider_id,meta_json,updated_at) SELECT 'source-'||i,'codex','',0 FROM n", []).unwrap();
+        assert!(cache.read_on(&conn).is_err());
+    }
+
     fn oc_db(path: &Path) -> rusqlite::Connection {
         let conn = rusqlite::Connection::open(path).unwrap();
         conn.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE session(id TEXT PRIMARY KEY,parent_id TEXT,title TEXT,directory TEXT,time_created INTEGER,time_updated INTEGER);CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,time_updated INTEGER,data TEXT); INSERT INTO session VALUES('ses_a',NULL,'A','/one/project',1,1),('ses_b',NULL,'B','/two/project',1,1);").unwrap();

@@ -1,7 +1,7 @@
 //! Pure aggregation of normalized facts. File parsing and database writes do
 //! not belong here; a caller must supply one coherent, deduplicated snapshot.
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub const UNKNOWN_PROJECT_ID: &str = "__unknown_project__";
 
@@ -202,6 +202,7 @@ pub fn resolve_roots(
     Ok(roots)
 }
 
+#[cfg(test)]
 pub fn aggregate_usage(
     facts: &[UsageFact],
     sessions: &[SessionIdentity],
@@ -209,7 +210,19 @@ pub fn aggregate_usage(
 ) -> Result<UsageAggregate, String> {
     validate_window(&filters.window)?;
     let roots = resolve_roots(sessions)?;
-    let mut seen = BTreeMap::new();
+    aggregate_usage_with_roots(facts, &roots, filters)
+}
+
+/// Reuse roots already validated by resolve_roots in this analysis. Fact
+/// identity/conflict, tool, window, filter and arithmetic checks stay here, so
+/// the public wrapper retains its complete validation contract.
+pub(crate) fn aggregate_usage_with_roots(
+    facts: &[UsageFact],
+    roots: &BTreeMap<&str, &SessionIdentity>,
+    filters: &Filters,
+) -> Result<UsageAggregate, String> {
+    validate_window(&filters.window)?;
+    let mut seen = HashMap::new();
     let mut result = UsageAggregate::default();
     for fact in facts {
         if fact.event_key.is_empty() {
@@ -276,17 +289,26 @@ pub fn aggregate_usage(
     Ok(result)
 }
 
+#[cfg(test)]
 pub fn message_activity(
     messages: &[MessageEvent],
     window: &Window,
     days: &[DayBoundary],
 ) -> Result<Activity, String> {
+    message_activity_refs(messages, window, days)
+}
+
+pub(crate) fn message_activity_refs<'a>(
+    messages: impl IntoIterator<Item = &'a MessageEvent>,
+    window: &Window,
+    days: &[DayBoundary],
+) -> Result<Activity, String> {
     validate_window(window)?;
     let mut dates = std::collections::BTreeSet::new();
-    let mut ordered_days: Vec<_> = days.iter().collect();
-    ordered_days.sort_unstable_by_key(|day| day.start_ms);
+    let mut ordered_days: Vec<_> = days.iter().enumerate().collect();
+    ordered_days.sort_unstable_by_key(|(_, day)| day.start_ms);
     let mut previous_end = None;
-    for day in &ordered_days {
+    for (_, day) in &ordered_days {
         if day.date.is_empty()
             || day.start_ms >= day.end_ms
             || !dates.insert(day.date.as_str())
@@ -296,9 +318,15 @@ pub fn message_activity(
         }
         previous_end = Some(day.end_ms);
     }
-    let mut seen = BTreeMap::new();
+    let mut seen = HashMap::new();
     let mut timelines: BTreeMap<&str, Vec<i64>> = BTreeMap::new();
     let mut active_dates = std::collections::BTreeSet::new();
+    let mut daily_messages = vec![0; days.len()];
+    let mut daily_active_ms = vec![0; days.len()];
+    let mut daily_sessions: Vec<BTreeSet<&str>> =
+        (0..days.len()).map(|_| BTreeSet::new()).collect();
+    let mut by_session_messages: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut by_session: BTreeMap<&str, u64> = BTreeMap::new();
     let mut result = Activity::default();
     for message in messages {
         if message.native_id.is_empty() || message.session_key.is_empty() {
@@ -317,32 +345,24 @@ pub fn message_activity(
         // Keep neighbours outside the window. A valid gap may cross either
         // query boundary even when neither endpoint is inside it.
         timelines
-            .entry(&message.session_key)
+            .entry(message.session_key.as_str())
             .or_default()
             .push(message.at_ms);
         if contains_time(window, message.at_ms) {
-            let index = ordered_days.partition_point(|day| day.end_ms <= message.at_ms);
-            let day = ordered_days
+            let index = ordered_days.partition_point(|(_, day)| day.end_ms <= message.at_ms);
+            let (day_index, day) = ordered_days
                 .get(index)
-                .filter(|day| day.start_ms <= message.at_ms)
+                .filter(|(_, day)| day.start_ms <= message.at_ms)
                 .ok_or("missingActivityDayBoundary")?;
             checked_add(&mut result.messages, 1)?;
+            checked_add(&mut daily_messages[*day_index], 1)?;
             checked_add(
-                result.daily_messages.entry(day.date.clone()).or_default(),
-                1,
-            )?;
-            checked_add(
-                result
-                    .by_session_messages
-                    .entry(message.session_key.clone())
+                by_session_messages
+                    .entry(message.session_key.as_str())
                     .or_default(),
                 1,
             )?;
-            result
-                .daily_sessions
-                .entry(day.date.clone())
-                .or_default()
-                .insert(message.session_key.clone());
+            daily_sessions[*day_index].insert(message.session_key.as_str());
             active_dates.insert(day.date.as_str());
         }
     }
@@ -360,25 +380,18 @@ pub fn message_activity(
             }
             let duration = (i128::from(end) - i128::from(start)) as u64;
             let mut covered = 0;
-            let first_day = ordered_days.partition_point(|day| day.end_ms <= start);
-            for day in ordered_days[first_day..]
+            let first_day = ordered_days.partition_point(|(_, day)| day.end_ms <= start);
+            for (day_index, day) in ordered_days[first_day..]
                 .iter()
-                .take_while(|day| day.start_ms < end)
+                .take_while(|(_, day)| day.start_ms < end)
             {
                 let segment_start = start.max(day.start_ms);
                 let segment_end = end.min(day.end_ms);
                 if segment_start < segment_end {
                     let segment = (i128::from(segment_end) - i128::from(segment_start)) as u64;
                     checked_add(&mut covered, segment)?;
-                    checked_add(
-                        result.daily_active_ms.entry(day.date.clone()).or_default(),
-                        segment,
-                    )?;
-                    result
-                        .daily_sessions
-                        .entry(day.date.clone())
-                        .or_default()
-                        .insert(session.to_owned());
+                    checked_add(&mut daily_active_ms[*day_index], segment)?;
+                    daily_sessions[*day_index].insert(session);
                     active_dates.insert(day.date.as_str());
                 }
             }
@@ -387,13 +400,41 @@ pub fn message_activity(
             }
             result.intervals.push((start, end));
             checked_add(&mut result.active_ms, duration)?;
-            checked_add(
-                result.by_session.entry(session.to_owned()).or_default(),
-                duration,
-            )?;
+            checked_add(by_session.entry(session).or_default(), duration)?;
         }
     }
     result.active_days = active_dates.len() as u64;
+    result.by_session = by_session
+        .into_iter()
+        .map(|(session, amount)| (session.to_owned(), amount))
+        .collect();
+    result.by_session_messages = by_session_messages
+        .into_iter()
+        .map(|(session, count)| (session.to_owned(), count))
+        .collect();
+    // Keep the original sparse maps: an out-of-window/no-gap session must not
+    // become a cohort member merely because it has a zero counter.
+    for (index, day) in days.iter().enumerate() {
+        if daily_messages[index] > 0 {
+            result
+                .daily_messages
+                .insert(day.date.clone(), daily_messages[index]);
+        }
+        if daily_active_ms[index] > 0 {
+            result
+                .daily_active_ms
+                .insert(day.date.clone(), daily_active_ms[index]);
+        }
+        if !daily_sessions[index].is_empty() {
+            result.daily_sessions.insert(
+                day.date.clone(),
+                daily_sessions[index]
+                    .iter()
+                    .map(|session| (*session).to_owned())
+                    .collect(),
+            );
+        }
+    }
     Ok(result)
 }
 
@@ -723,6 +764,97 @@ mod tests {
         assert_eq!(result.active_days, 2);
         assert_eq!(result.daily_active_ms["first"], 10_000);
         assert_eq!(result.daily_active_ms["second"], 30_000);
+        assert!(result.by_session_messages.is_empty());
+        assert!(result.daily_messages.is_empty());
+        assert_eq!(result.intervals, [(90_000, 130_000)]);
+        for date in ["first", "second"] {
+            assert_eq!(result.daily_sessions[date], BTreeSet::from(["s".into()]));
+        }
+    }
+    #[test]
+    fn analytics_activity_no_contribution_keeps_sparse_maps_and_single_message_counts_a_day() {
+        let window = Window {
+            start_ms: Some(10),
+            end_ms: 20,
+        };
+        let days = [day("date", 0, 30)];
+        let mut ignored = message("ignored", "system", 15);
+        ignored.role = Role::System;
+        let mut child = message("child", "child", 15);
+        child.main = false;
+        let outside = message_activity(
+            &[
+                message("outside", "before", -400_000),
+                message("outside", "after", 400_000),
+                ignored,
+                child,
+            ],
+            &window,
+            &days,
+        )
+        .unwrap();
+        assert_eq!(outside, Activity::default());
+
+        let point = message_activity(&[message("point", "one", 15)], &window, &days).unwrap();
+        assert_eq!(
+            (point.messages, point.active_ms, point.active_days),
+            (1, 0, 1)
+        );
+        assert!(point.by_session.is_empty());
+        assert!(point.daily_active_ms.is_empty());
+        assert!(point.intervals.is_empty());
+        assert_eq!(point.by_session_messages["point"], 1);
+        assert_eq!(point.daily_messages["date"], 1);
+        assert_eq!(
+            point.daily_sessions["date"],
+            BTreeSet::from(["point".into()])
+        );
+    }
+    #[test]
+    fn analytics_activity_unsorted_days_keep_message_and_interval_counters_on_the_correct_date() {
+        let activity = message_activity(
+            &[message("s", "late", 150), message("s", "early", 50)],
+            &Window {
+                start_ms: Some(0),
+                end_ms: 200,
+            },
+            &[day("a-later", 100, 200), day("z-earlier", 0, 100)],
+        )
+        .unwrap();
+        assert_eq!(
+            (activity.messages, activity.active_ms, activity.active_days),
+            (2, 100, 2)
+        );
+        assert_eq!(activity.intervals, [(50, 150)]);
+        assert_eq!(activity.by_session["s"], 100);
+        assert_eq!(activity.by_session_messages["s"], 2);
+        for date in ["a-later", "z-earlier"] {
+            assert_eq!(activity.daily_messages[date], 1);
+            assert_eq!(activity.daily_active_ms[date], 50);
+            assert_eq!(activity.daily_sessions[date], BTreeSet::from(["s".into()]));
+        }
+    }
+    #[test]
+    fn analytics_activity_rejects_invalid_or_conflicting_messages_before_main_and_window_filters() {
+        let window = Window {
+            start_ms: Some(10),
+            end_ms: 20,
+        };
+        let days = [day("date", 0, 30)];
+        let mut first = message("child", "duplicate", 100);
+        first.main = false;
+        let mut conflicting = first.clone();
+        conflicting.at_ms = 101;
+        assert_eq!(
+            message_activity(&[first, conflicting], &window, &days).unwrap_err(),
+            "conflictingMessageEvent"
+        );
+        let mut invalid = message("child", "", 100);
+        invalid.main = false;
+        assert_eq!(
+            message_activity(&[invalid], &window, &days).unwrap_err(),
+            "missingMessageIdentity"
+        );
     }
     #[test]
     fn analytics_activity_respects_supplied_23_and_25_hour_natural_days() {

@@ -67,6 +67,26 @@ pub(crate) fn query<Tz: TimeZone>(
     now_ms: i64,
     tz: &Tz,
 ) -> Result<SessionAnalytics, AppError> {
+    query_with_cache(
+        db,
+        query,
+        apex,
+        now_ms,
+        tz,
+        session_analytics_index::projection_cache(),
+    )
+}
+
+fn query_with_cache<Tz: TimeZone>(
+    db: &Database,
+    query: UsageQueryV1,
+    apex: &str,
+    now_ms: i64,
+    tz: &Tz,
+    cache: &session_analytics_index::ProjectionCache,
+) -> Result<SessionAnalytics, AppError> {
+    #[cfg(test)]
+    let mut profile = std::time::Instant::now();
     let query = query.normalized()?;
     DateTime::from_timestamp_millis(query.end_ms).ok_or_else(invalid_time)?;
     if let Some(start) = query.start_ms {
@@ -77,11 +97,13 @@ pub(crate) fn query<Tz: TimeZone>(
     let (mut input, catalog) = {
         let mut conn = crate::database::lock_conn!(db.conn);
         let tx = conn.transaction()?;
-        let input = session_analytics_index::read_input_on(&tx)?;
+        let input = cache.read_on(&tx)?;
         let catalog = PriceCatalog::load_on(&tx, apex, now_ms)?;
         tx.commit()?;
         (input, catalog)
     };
+    #[cfg(test)]
+    advanced::profile_stage("cache+catalog", &mut profile);
     const READERS: [(&str, &str); 4] = [
         ("claude", "session_log"),
         ("codex", "codex_session"),
@@ -90,14 +112,18 @@ pub(crate) fn query<Tz: TimeZone>(
     ];
     for tool in &query.tool_ids {
         if !READERS.iter().any(|(id, _)| id == tool) {
-            input.reasons.push(format!("unsupportedTool:{tool}"));
+            std::sync::Arc::make_mut(&mut input)
+                .reasons
+                .push(format!("unsupportedTool:{tool}"));
         }
     }
     for source in &query.source_ids {
         if !READERS.iter().any(|(_, id)| id == source) {
             // Unknown source IDs have no trustworthy tool mapping. This query
             // explicitly selected the ID, so the reason applies to its scope.
-            input.reasons.push(format!("unsupportedSource:{source}"));
+            std::sync::Arc::make_mut(&mut input)
+                .reasons
+                .push(format!("unsupportedSource:{source}"));
         }
     }
     let only_unsupported = (!query.tool_ids.is_empty()
@@ -112,6 +138,8 @@ pub(crate) fn query<Tz: TimeZone>(
                 .all(|source| !READERS.iter().any(|(_, id)| id == source)));
     let days = days(&query, &input, tz)?;
     let mut result = build_analysis_in(query, &input, &catalog, &days, tz)?;
+    #[cfg(test)]
+    advanced::profile_stage("aggregate", &mut profile);
     if only_unsupported {
         result.coverage.state = "unsupported".into();
         result.totals.messages = None;
@@ -138,11 +166,17 @@ pub(crate) fn query<Tz: TimeZone>(
         }
     }
     advanced::retain_analysis(&mut result);
+    #[cfg(test)]
+    advanced::profile_stage("freeze", &mut profile);
     Ok(result)
 }
 #[cfg(test)]
 #[path = "session_analytics_calendar_tests.rs"]
 mod calendar_tests;
+
+#[cfg(test)]
+#[path = "session_analytics_projection_tests.rs"]
+mod projection_tests;
 
 #[cfg(test)]
 mod tests {
