@@ -10,6 +10,19 @@ const tools = [
   { value: "claude", label: "Claude Code" },
   { value: "codex", label: "Codex" },
 ];
+const manyTools = [
+  { value: "claude", label: "Claude Code" },
+  { value: "codex", label: "Codex" },
+  { value: "dsh", label: "DeepSeek Harness" },
+  { value: "gemini", label: "Gemini CLI" },
+  { value: "opencode", label: "OpenCode" },
+  { value: "workbuddy", label: "WorkBuddy" },
+  ...Array.from({ length: 6 }, (_, i) => ({
+    value: `extra-${i}`,
+    label:
+      i === 5 ? `LongTool-${"VeryLongName".repeat(16)}` : `Extra tool ${i}`,
+  })),
+];
 beforeEach(() => {
   i18n.addResourceBundle("zh", "translation", zh, true, true);
   Element.prototype.scrollIntoView = vi.fn();
@@ -141,3 +154,74 @@ it("does not move focus or scroll when a ranking updates the filters externally"
   expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled();
   expect(screen.getByRole("button", { name: "移除Tool：Codex" })).toBeVisible();
 });
+
+function DenseToolbar({ count }: { count: number }) {
+  const options = manyTools.slice(0, count);
+  const [selected, setSelected] = useState([
+    options[0].value,
+    options.at(-1)!.value,
+  ]);
+  return (
+    <UsageFilterToolbar
+      tools={options}
+      selectedTools={selected}
+      onToolsChange={setSelected}
+      disabled={false}
+      chips={selected.map((value) => ({
+        key: value,
+        name: "Tool",
+        value,
+        remove: () => setSelected((old) => old.filter((id) => id !== value)),
+      }))}
+      onReset={() => setSelected([])}
+    >
+      <button>Model filter</button>
+      <button>Project filter</button>
+      <button>Hermes statistics</button>
+    </UsageFilterToolbar>
+  );
+}
+
+it.each([6, 12])(
+  "keeps all %i tool choices and their selection independent of secondary filters with keyboard access to the last long-named tool",
+  async (count) => {
+    render(<DenseToolbar count={count} />);
+    const toolGroup = screen.getByRole("group", { name: "工具筛选" });
+    const secondaryGroup = screen.getByRole("group", {
+      name: "模型、项目及其他筛选",
+    });
+    expect(toolGroup).not.toContainElement(secondaryGroup);
+    for (const name of ["Model filter", "Project filter", "Hermes statistics"])
+      expect(
+        within(secondaryGroup).getByRole("button", { name }),
+      ).toBeEnabled();
+    const choices = within(toolGroup).getAllByRole("button");
+    expect(choices).toHaveLength(count + 1);
+    for (const option of manyTools.slice(0, count))
+      expect(
+        within(toolGroup).getByRole("button", { name: option.label }),
+      ).toHaveTextContent(option.label);
+    const first = within(toolGroup).getByRole("button", { name: "全部工具" });
+    const lastOption = manyTools[count - 1];
+    const last = within(toolGroup).getByRole("button", {
+      name: lastOption.label,
+    });
+    expect(last).toHaveAttribute("aria-pressed", "true");
+    first.focus();
+    await userEvent.keyboard("{End}");
+    expect(last).toHaveFocus();
+    expect(choices.filter((choice) => choice.tabIndex === 0)).toHaveLength(1);
+    await userEvent.keyboard("{Enter}");
+    expect(last).toHaveAttribute("aria-pressed", "false");
+    expect(
+      within(toolGroup).getByRole("button", { name: "Claude Code" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    await userEvent.tab();
+    expect(
+      within(secondaryGroup).getByRole("button", { name: "Model filter" }),
+    ).toHaveFocus();
+    expect(
+      screen.getByRole("button", { name: "移除Tool：claude" }),
+    ).toBeInTheDocument();
+  },
+);

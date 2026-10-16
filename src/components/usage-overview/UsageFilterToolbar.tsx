@@ -43,76 +43,80 @@ export function UsageFilterToolbar({
     });
   return (
     <div className="min-w-0 space-y-2">
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <div
-          role="group"
-          aria-label={t("usageWorkbench.toolsFilter")}
-          title={t("usageFilters.toolsHint")}
-          className="flex min-w-[180px] flex-1 items-center overflow-x-auto rounded-[8px] bg-pill p-[2px] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-        >
-          {rows.map((row, index) => {
-            const selected = row.value
-              ? selectedTools.includes(row.value)
-              : !selectedTools.length;
-            return (
-              <button
-                key={row.value}
-                type="button"
-                aria-label={row.label}
-                aria-pressed={selected}
-                disabled={disabled}
-                ref={(node) => {
-                  buttons.current[index] = node;
-                }}
-                tabIndex={index === Math.min(focused, rows.length - 1) ? 0 : -1}
-                onFocus={() => setFocused(index)}
-                onClick={() =>
-                  onToolsChange(
-                    row.value
-                      ? selected
-                        ? selectedTools.filter((value) => value !== row.value)
-                        : [...selectedTools, row.value].sort()
-                      : [],
-                  )
+      <div
+        role="group"
+        aria-label={t("usageWorkbench.toolsFilter")}
+        title={t("usageFilters.toolsHint")}
+        className="flex w-full min-w-0 flex-wrap items-center gap-x-0.5 gap-y-1 rounded-[8px] bg-pill p-[2px]"
+      >
+        {rows.map((row, index) => {
+          const selected = row.value
+            ? selectedTools.includes(row.value)
+            : !selectedTools.length;
+          return (
+            <button
+              key={row.value}
+              type="button"
+              aria-label={row.label}
+              aria-pressed={selected}
+              disabled={disabled}
+              ref={(node) => {
+                buttons.current[index] = node;
+              }}
+              tabIndex={index === Math.min(focused, rows.length - 1) ? 0 : -1}
+              onFocus={() => setFocused(index)}
+              onClick={() =>
+                onToolsChange(
+                  row.value
+                    ? selected
+                      ? selectedTools.filter((value) => value !== row.value)
+                      : [...selectedTools, row.value].sort()
+                    : [],
+                )
+              }
+              onKeyDown={(event) => {
+                const next =
+                  event.key === "ArrowRight"
+                    ? (index + 1) % rows.length
+                    : event.key === "ArrowLeft"
+                      ? (index - 1 + rows.length) % rows.length
+                      : event.key === "Home"
+                        ? 0
+                        : event.key === "End"
+                          ? rows.length - 1
+                          : undefined;
+                if (next != null) {
+                  event.preventDefault();
+                  buttons.current[next]?.focus({ preventScroll: true });
+                  buttons.current[next]?.scrollIntoView({
+                    block: "nearest",
+                    inline: "nearest",
+                  });
                 }
-                onKeyDown={(event) => {
-                  const next =
-                    event.key === "ArrowRight"
-                      ? (index + 1) % rows.length
-                      : event.key === "ArrowLeft"
-                        ? (index - 1 + rows.length) % rows.length
-                        : event.key === "Home"
-                          ? 0
-                          : event.key === "End"
-                            ? rows.length - 1
-                            : undefined;
-                  if (next != null) {
-                    event.preventDefault();
-                    buttons.current[next]?.focus({ preventScroll: true });
-                    buttons.current[next]?.scrollIntoView({
-                      block: "nearest",
-                      inline: "nearest",
-                    });
-                  }
-                }}
-                className={cn(
-                  "inline-flex h-[24px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-[6px] px-2.5 text-ctl transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 disabled:opacity-45",
-                  selected
-                    ? "bg-card text-ink shadow-[0_1px_2px_rgba(0,0,0,.14),0_0_0_.5px_rgba(0,0,0,.08)]"
-                    : "text-ink-muted hover:text-ink",
-                )}
-              >
-                {row.value && (
-                  <ToolBadge toolId={row.value} size={14} variant="plain" />
-                )}
+              }}
+              className={cn(
+                "inline-flex min-h-[24px] min-w-0 max-w-full flex-none items-center gap-1.5 rounded-[6px] px-2.5 py-1 text-ctl transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 disabled:opacity-45",
+                selected
+                  ? "bg-card text-ink shadow-[0_1px_2px_rgba(0,0,0,.14),0_0_0_.5px_rgba(0,0,0,.08)]"
+                  : "text-ink-muted hover:text-ink",
+              )}
+            >
+              {row.value && (
+                <ToolBadge toolId={row.value} size={14} variant="plain" />
+              )}
+              <span className="min-w-0 whitespace-normal break-words text-left [overflow-wrap:anywhere]">
                 {row.label}
-              </button>
-            );
-          })}
-        </div>
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          {children}
-        </div>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+      <div
+        role="group"
+        aria-label={t("usageFilters.otherFilters")}
+        className="flex min-w-0 flex-wrap items-center gap-2"
+      >
+        {children}
       </div>
       {!!chips.length && (
         <div

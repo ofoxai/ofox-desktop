@@ -4054,6 +4054,7 @@
     "removeFilter": "Remove {{name}}: {{value}}",
     "toolsHint": "Select multiple tools; choose “All tools” to remove the tool filter.",
     "updating": "Updating filters; showing the previous result until ready.",
-    "previous": "Could not load these filters; showing the previous result."
+    "previous": "Could not load these filters; showing the previous result.",
+    "otherFilters": "Model, project and other filters"
   }
 }

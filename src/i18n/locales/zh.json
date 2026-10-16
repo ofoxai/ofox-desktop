@@ -4054,6 +4054,7 @@
     "removeFilter": "移除{{name}}：{{value}}",
     "toolsHint": "可多选；点“全部工具”取消工具限制。",
     "updating": "正在更新筛选结果，暂时显示上次结果。",
-    "previous": "当前条件读取失败，仍显示上次结果。"
+    "previous": "当前条件读取失败，仍显示上次结果。",
+    "otherFilters": "模型、项目及其他筛选"
   }
 }
