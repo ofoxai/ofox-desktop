@@ -2820,7 +2820,7 @@
   "toolLifecycle": {
     "desktopApp": "デスクトップアプリ",
     "modelUnset": "モデル未設定",
-    "analytics": "利用状況",
+    "analytics": "アカウント使用量（Web）",
     "analyticsFailed": "利用状況を開けませんでした",
     "downloadFailed": "インストールページを開けませんでした",
     "notInstalled": "未インストール",
@@ -2879,7 +2879,8 @@
       "native": "公式インストーラー",
       "sparkle": "公式サイトのインストーラー",
       "msstore": "Microsoft Store"
-    }
+    },
+    "analyticsHint": "このツールに紐付く API キーのアカウント使用量を Web で表示"
   },
   "modelExperience": {
     "multiDescription": "選択順にモデル集合を保存します。ツール内でこれらのモデルを切り替えられます。",
@@ -3322,7 +3323,8 @@
     "externalCopy": "外部コピー · {{status}}",
     "managedCopyNeedsReview": "OFox コピーの確認が必要です",
     "downloadOnly": "公式ページからダウンロードしてインストールしてください",
-    "platformGuide": "公式ガイドで現在のシステムに合うインストール方法を選んでください"
+    "platformGuide": "公式ガイドで現在のシステムに合うインストール方法を選んでください",
+    "details": "インストール情報"
   },
   "library": {
     "nav": "リソースの種類",
@@ -3671,7 +3673,7 @@
     }
   },
   "catalogLifecycle": {
-    "manageShort": "管理",
+    "manageShort": "インストール管理",
     "description": "この OFox コピーだけを管理します。端末 PATH・モデル接続・ログインは変更しません。外部コピーは元のインストール方法で管理してください。",
     "unavailable": "このバックエンドはこのインストール管理に対応していません。",
     "prepareFailed": "操作を準備できませんでした。導入元を再確認するか公式の手動手順を使用してください。",
@@ -3711,7 +3713,8 @@
     },
     "manage": "{{name}} のインストールを管理",
     "title": "{{name}} · OFox 管理コピー",
-    "refreshFailed": "インストール一覧を更新できませんでした。操作結果は保持されています。"
+    "refreshFailed": "インストール一覧を更新できませんでした。操作結果は保持されています。",
+    "installationScope": "OFox が作成した独立コピーのみを管理します。外部インストールは変更せず、OFox への紐付けや使用量集計も行いません。"
   },
   "usageWorkbench": {
     "tabs": "使用量のページ",
@@ -4090,5 +4093,8 @@
     "updating": "絞り込みを更新中です。完了まで前回の結果を表示します。",
     "previous": "現在の絞り込みを読み込めませんでした。前回の結果を表示しています。",
     "otherFilters": "モデル・プロジェクトなどの絞り込み"
+  },
+  "toolsManage": {
+    "configurationNotes": "設定について"
   }
 }

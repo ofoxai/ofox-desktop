@@ -2820,7 +2820,7 @@
   "toolLifecycle": {
     "desktopApp": "桌面应用",
     "modelUnset": "未设置模型",
-    "analytics": "数据统计",
+    "analytics": "账户用量（网页）",
     "analyticsFailed": "打开数据统计失败",
     "downloadFailed": "打开安装页面失败",
     "notInstalled": "未安装",
@@ -2879,7 +2879,8 @@
       "native": "官方安装程序",
       "sparkle": "官网安装包",
       "msstore": "Microsoft Store"
-    }
+    },
+    "analyticsHint": "在网页查看此工具绑定 API Key 的账户用量"
   },
   "modelExperience": {
     "multiDescription": "保存一组模型，顺序按选择顺序保留。工具内可在这组模型间切换。",
@@ -3322,7 +3323,8 @@
     "externalCopy": "外部副本 · {{status}}",
     "managedCopyNeedsReview": "OFox 副本需要核对",
     "downloadOnly": "请前往官方页面下载安装",
-    "platformGuide": "请按官方说明选择当前系统的安装方式"
+    "platformGuide": "请按官方说明选择当前系统的安装方式",
+    "details": "安装信息"
   },
   "library": {
     "nav": "资源库分类",
@@ -3671,7 +3673,7 @@
     }
   },
   "catalogLifecycle": {
-    "manageShort": "管理",
+    "manageShort": "安装管理",
     "description": "仅管理此 OFox 副本；不修改终端 PATH，也不绑定模型或代登录。外部副本继续由原安装方式管理。",
     "unavailable": "此后端暂不支持该安装管理。",
     "prepareFailed": "无法准备操作。请重新检测安装来源或使用官方手动途径。",
@@ -3711,7 +3713,8 @@
     },
     "manage": "管理 {{name}} 安装",
     "title": "{{name}} · OFox 管理副本",
-    "refreshFailed": "刷新安装目录失败；操作结果已保留。"
+    "refreshFailed": "刷新安装目录失败；操作结果已保留。",
+    "installationScope": "仅管理 OFox 创建的独立副本；不改变外部安装，也不表示已绑定 OFox 或纳入用量统计。"
   },
   "usageWorkbench": {
     "tabs": "用量子页",
@@ -4090,5 +4093,8 @@
     "updating": "正在更新筛选结果，暂时显示上次结果。",
     "previous": "当前条件读取失败，仍显示上次结果。",
     "otherFilters": "模型、项目及其他筛选"
+  },
+  "toolsManage": {
+    "configurationNotes": "配置说明"
   }
 }

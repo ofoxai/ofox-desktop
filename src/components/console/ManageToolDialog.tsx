@@ -11,6 +11,7 @@ import {
   Wallet,
   Github,
   ExternalLink,
+  ChevronDown,
 } from "lucide-react";
 import {
   Dialog,
@@ -87,6 +88,8 @@ interface ManageToolDialogProps {
    *  refresh its list (status pill, monthly tokens, presence after unbind). */
   onChanged?: () => void;
   onUninstall?: () => void;
+  /** Controlled dialogs have no Radix Trigger to restore keyboard focus to. */
+  returnFocus?: HTMLElement | null;
 }
 
 function toolLabels(ids: string[]): string {
@@ -149,6 +152,7 @@ export default function ManageToolDialog({
   onOpenChange,
   onChanged,
   onUninstall,
+  returnFocus,
 }: ManageToolDialogProps) {
   const { t } = useTranslation();
   const open = !!tool;
@@ -743,17 +747,26 @@ export default function ManageToolDialog({
             event.preventDefault();
             uninstallPending.current = false;
             onUninstall?.();
+          } else if (
+            returnFocus?.isConnected &&
+            returnFocus.getClientRects().length > 0 &&
+            !returnFocus.closest("[hidden], [inert]") &&
+            !returnFocus.matches(":disabled, [aria-disabled='true']") &&
+            getComputedStyle(returnFocus).visibility === "visible"
+          ) {
+            event.preventDefault();
+            returnFocus.focus({ preventScroll: true });
           }
         }}
-        className="max-w-lg gap-0 p-0"
+        className="w-[calc(100vw-2rem)] max-w-[560px] gap-0 p-0"
         aria-describedby={undefined}
       >
         {tool && (
           <>
-            <DialogHeader className="flex-row items-center gap-3 space-y-0">
-              <ToolBadge toolId={tool.id} size={40} rounded="xl" />
+            <DialogHeader className="flex-row items-center gap-3 space-y-0 px-5 py-4">
+              <ToolBadge toolId={tool.id} size={36} rounded="xl" />
               <div className="min-w-0 flex-1 text-left">
-                <DialogTitle className="text-[15px] font-semibold text-ink">
+                <DialogTitle className="truncate text-[16px] font-semibold text-ink">
                   {tool.label}
                 </DialogTitle>
                 <div className="truncate text-[12px] text-ink-muted">
@@ -792,7 +805,7 @@ export default function ManageToolDialog({
               )}
             </DialogHeader>
 
-            <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
               {snapshotQuery.isError && (
                 <div
                   role="alert"
@@ -922,15 +935,17 @@ export default function ManageToolDialog({
                 </div>
               )}
               {/* ---- Model ---- */}
-              <div className="space-y-2">
-                <Label htmlFor="manage-model" className="text-[13px]">
+              <section
+                aria-labelledby="manage-model-heading"
+                className="space-y-3 rounded-xl border border-line-2 p-4"
+              >
+                <Label
+                  id="manage-model-heading"
+                  htmlFor="manage-model"
+                  className="block text-[13px]"
+                >
                   {t("uiCopy.model")}
                 </Label>
-                {tool.id === "chatgpt" && (
-                  <p className="text-[11px] text-ink-muted">
-                    {t("modelCompatibility.chatgptCodexShared")}
-                  </p>
-                )}
                 {protocol && !desktopCodex && multiModel ? (
                   <>
                     <MultiModelPicker
@@ -952,11 +967,6 @@ export default function ManageToolDialog({
                           : undefined
                       }
                     />
-                    {tool.id === "opencode" && (
-                      <p className="text-[11px] text-ink-muted">
-                        {t("modelCompatibility.openCodeProtocol")}
-                      </p>
-                    )}
                     {tool.id === "opencode" &&
                       protocolHints.length > 0 &&
                       !isDirty && (
@@ -1062,16 +1072,6 @@ export default function ManageToolDialog({
                         onRetry={() => void fetchModels(true)}
                       />
                     )}
-                    {tool.id === "gemini" && (
-                      <p className="text-[11px] text-ink-muted">
-                        {t("modelCompatibility.geminiRememberHint")}
-                      </p>
-                    )}
-                    {tool.id === "chatgpt" && (
-                      <p className="text-[11px] text-ink-muted">
-                        {t("modelCompatibility.chatgptDefaultHint")}
-                      </p>
-                    )}
                   </>
                 ) : (
                   <div className="rounded-md border border-dashed border-line px-3 py-2 text-[12px] text-ink-muted">
@@ -1109,14 +1109,51 @@ export default function ManageToolDialog({
                         </p>
                       ))
                   ))}
-              </div>
+                {["chatgpt", "gemini", "opencode"].includes(tool.id) && (
+                  <details className="group border-t border-line-2 pt-2.5">
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-2 rounded-sm text-[12px] text-ink-muted outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-brand [&::-webkit-details-marker]:hidden">
+                      {t("toolsManage.configurationNotes")}
+                      <ChevronDown
+                        aria-hidden="true"
+                        className="h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-180"
+                      />
+                    </summary>
+                    <div className="space-y-2 pt-2.5 text-[12px] leading-relaxed text-ink-muted">
+                      {tool.id === "chatgpt" && (
+                        <>
+                          <p>{t("modelCompatibility.chatgptCodexShared")}</p>
+                          <p>{t("modelCompatibility.chatgptDefaultHint")}</p>
+                        </>
+                      )}
+                      {tool.id === "gemini" && (
+                        <p>{t("modelCompatibility.geminiRememberHint")}</p>
+                      )}
+                      {tool.id === "opencode" && (
+                        <p>{t("modelCompatibility.openCodeProtocol")}</p>
+                      )}
+                    </div>
+                  </details>
+                )}
+              </section>
 
               {/* ---- Config file ---- */}
-              <div className="space-y-2">
-                <Label className="text-[13px]">{t("uiCopy.configFile")}</Label>
+              <section
+                aria-labelledby="manage-config-heading"
+                className="space-y-3 rounded-xl border border-line-2 p-4"
+              >
+                <h3
+                  id="manage-config-heading"
+                  className="text-[13px] font-medium"
+                >
+                  {t("uiCopy.configFile")}
+                </h3>
                 <div className="flex items-center gap-2">
                   <code
-                    className="flex-1 truncate rounded-md border border-line bg-muted/30 px-3 py-2 text-[12px] text-ink"
+                    className={cn(
+                      "min-w-0 flex-1 truncate rounded-md bg-muted/40 px-3 py-2 text-[12px]",
+                      filePathError ? "text-danger" : "text-ink",
+                    )}
+                    role={filePathError ? "alert" : undefined}
                     title={filePath ?? filePathError ?? ""}
                   >
                     {filePath ?? filePathError ?? t("uiCopy.loading")}
@@ -1131,13 +1168,20 @@ export default function ManageToolDialog({
                     {isMac() ? t("uiCopy.openFinder") : t("uiCopy.openFolder")}
                   </Button>
                 </div>
-              </div>
+              </section>
 
               {/* WorkBuddy checks one chosen stream on demand. Other tools
                   keep their separate, optional 1-token connectivity ping. */}
               {multiModel ? (
-                <div className="space-y-2">
-                  <Label htmlFor="workbuddy-test-model" className="text-[13px]">
+                <section
+                  aria-labelledby="manage-connection-heading"
+                  className="space-y-3 rounded-xl border border-line-2 p-4"
+                >
+                  <Label
+                    id="manage-connection-heading"
+                    htmlFor="workbuddy-test-model"
+                    className="block text-[13px]"
+                  >
                     {t("modelCompatibility.title")}
                   </Label>
                   <div className="flex gap-2">
@@ -1215,13 +1259,19 @@ export default function ManageToolDialog({
                         ` · ${workBuddyTestResult.reason}`}
                     </div>
                   )}
-                </div>
+                </section>
               ) : (
-                <div className="space-y-2">
+                <section
+                  aria-labelledby="manage-connection-heading"
+                  className="space-y-3 rounded-xl border border-line-2 p-4"
+                >
                   <div className="flex items-center justify-between">
-                    <Label className="text-[13px]">
+                    <h3
+                      id="manage-connection-heading"
+                      className="text-[13px] font-medium"
+                    >
                       {t("uiCopy.connectivity")}
-                    </Label>
+                    </h3>
                     <Button
                       type="button"
                       size="sm"
@@ -1249,14 +1299,14 @@ export default function ManageToolDialog({
                     result={pingResult}
                     model={probeModel}
                   />
-                </div>
+                </section>
               )}
             </div>
 
             {unbindConfirming && <UnbindPreviewPanel preview={unbindPreview} />}
 
-            <DialogFooter className="!items-center sm:!justify-between">
-              <div className="flex gap-2">
+            <DialogFooter className="!items-center gap-3 px-5 sm:!justify-between">
+              <div className="flex flex-wrap gap-2">
                 <Button
                   type="button"
                   variant="secondary"
@@ -1287,7 +1337,7 @@ export default function ManageToolDialog({
                   </Button>
                 )}
               </div>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 <Button
                   type="button"
                   variant="secondary"
@@ -1414,9 +1464,7 @@ function PingStatusBox({ loading, result, model }: PingStatusBoxProps) {
   }
   if (!result) {
     return (
-      <div className="rounded-md border border-dashed border-line px-3 py-2 text-[12px] text-ink-muted">
-        {t("uiCopy.notTested")}
-      </div>
+      <div className="text-[12px] text-ink-muted">{t("uiCopy.notTested")}</div>
     );
   }
   if (result.statusCode === 402) return <InsufficientCreditsNotice />;

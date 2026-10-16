@@ -200,11 +200,16 @@ export const OptionalToolsCatalog = forwardRef<
         data-tool-id={entry.toolId}
         role="group"
         aria-label={entry.label}
-        className="grid grid-cols-[32px_minmax(0,1fr)_auto] gap-x-3 gap-y-2 py-3 md:grid-cols-[32px_190px_minmax(0,1fr)_136px]"
+        className="grid grid-cols-[24px_minmax(0,1fr)_auto] gap-x-3 gap-y-1.5 py-2.5 md:grid-cols-[24px_180px_minmax(0,1fr)_auto]"
       >
-        <ToolBadge toolId={entry.toolId} variant="plain" size={32} />
+        <ToolBadge toolId={entry.toolId} variant="plain" size={24} />
         <div className="min-w-0">
-          <p className="text-ui font-medium text-ink">{entry.label}</p>
+          <p
+            className="truncate text-ui font-medium text-ink"
+            title={entry.label}
+          >
+            {entry.label}
+          </p>
           {info?.managedCopy && (
             <>
               <p
@@ -219,12 +224,6 @@ export const OptionalToolsCatalog = forwardRef<
                       version: info.managedCopy.version ?? "—",
                     })
                   : t("toolCatalog.managedCopyNeedsReview")}
-              </p>
-              <p
-                className="truncate text-note text-ink-faint"
-                title={info.managedCopy.path}
-              >
-                {info.managedCopy.path}
               </p>
             </>
           )}
@@ -243,10 +242,22 @@ export const OptionalToolsCatalog = forwardRef<
               {t("toolCatalog.probeIncomplete")}
             </p>
           )}
-          {info?.path && (
-            <p className="truncate text-note text-ink-faint" title={info.path}>
-              {info.path}
-            </p>
+          {(info?.path || info?.managedCopy?.path) && (
+            <details className="mt-0.5 text-note text-ink-muted">
+              <summary className="w-fit cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50">
+                {t("toolCatalog.details")}
+              </summary>
+              <div className="mt-1 space-y-1.5">
+                {info.managedCopy?.path && (
+                  <p className="break-all text-ink-faint">
+                    {info.managedCopy.path}
+                  </p>
+                )}
+                {info.path && (
+                  <p className="break-all text-ink-faint">{info.path}</p>
+                )}
+              </div>
+            </details>
           )}
           {!isInstalled && dependency && (
             <p className="text-note text-ink-faint">
@@ -299,6 +310,7 @@ export const OptionalToolsCatalog = forwardRef<
             <Button
               variant="secondary"
               aria-label={t("catalogLifecycle.manage", { name: entry.label })}
+              title={t("catalogLifecycle.installationScope")}
               onClick={(event) => {
                 managementTrigger.current = event.currentTarget;
                 setManagement(entry);
@@ -342,7 +354,7 @@ export const OptionalToolsCatalog = forwardRef<
               {t("catalogLifecycle.title", { name: management?.label ?? "" })}
             </DialogTitle>
             <DialogDescription>
-              {t("catalogLifecycle.preservesData")}
+              {t("catalogLifecycle.installationScope")}
             </DialogDescription>
           </DialogHeader>
           <div className="min-h-0 overflow-auto px-[18px] py-4">

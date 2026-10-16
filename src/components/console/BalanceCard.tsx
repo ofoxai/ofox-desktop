@@ -31,7 +31,7 @@ export function BalanceCard({ account, className }: BalanceCardProps) {
       data-testid="balance-card"
       data-empty={balanceEmpty ? "true" : undefined}
       className={cn(
-        "flex items-center gap-3 rounded-card border py-3 pl-4 pr-3.5",
+        "flex min-w-0 items-center gap-3 rounded-card border px-3.5 py-2.5",
         balanceEmpty
           ? "border-danger/40 bg-danger-soft/60"
           : "border-line bg-card",
@@ -42,7 +42,7 @@ export function BalanceCard({ account, className }: BalanceCardProps) {
         avatarUrl={ofoxAvatarUrl(user?.avatar_url)}
         name={user?.name}
         email={user?.email}
-        className="h-9 w-9"
+        className="h-8 w-8"
         fallbackTextClassName="text-ui"
       />
       <div className="min-w-0 flex-1">

@@ -96,6 +96,8 @@ export function ToolsPanel({
   const inlineUpdates = useInlineToolUpdates();
   const toolUpdates = inlineUpdates.state;
   const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const addToolTrigger = useRef<HTMLButtonElement>(null);
+  const manageTrigger = useRef<HTMLElement | null>(null);
   // null = manage dialog is closed. Holds the snapshot of the tool row that
   // was clicked, so the dialog stays consistent even if `tools` reloads
   // mid-edit (e.g. monthly token refetch).
@@ -186,11 +188,12 @@ export function ToolsPanel({
         }}
         onUpdate={() => void inlineUpdates.updateOne(tool)}
         onUninstall={() => setUninstallTool(target)}
-        onManage={() => {
+        onManage={(trigger) => {
+          manageTrigger.current = trigger;
           setUninstallFromManage(target);
           setManageTool(tool);
         }}
-        onAction={(action: ToolRowAction) => {
+        onAction={(action: ToolRowAction, trigger) => {
           if (action === "retry") {
             void reload();
           } else if (action === "install") {
@@ -207,6 +210,7 @@ export function ToolsPanel({
           } else if (action === "open") {
             void launchTool(tool.id);
           } else {
+            manageTrigger.current = trigger ?? null;
             setUninstallFromManage(installTarget(tool));
             setManageTool(tool);
           }
@@ -217,7 +221,7 @@ export function ToolsPanel({
 
   return (
     <>
-      <BalanceCard account={account} className="mb-4" />
+      <BalanceCard account={account} className="mb-3" />
 
       <div className="mb-2.5 flex min-h-[27px] items-center gap-2 px-0.5">
         <h2 className="text-ui font-semibold text-ink">
@@ -233,7 +237,11 @@ export function ToolsPanel({
         )}
         <span className="flex-1" />
         <ProfilesMenu boundTools={boundTools} />
-        <Button variant="secondary" onClick={() => setAddDialogOpen(true)}>
+        <Button
+          ref={addToolTrigger}
+          variant="secondary"
+          onClick={() => setAddDialogOpen(true)}
+        >
           <Plus aria-hidden className="h-3.5 w-3.5" />
           {t("console.tools.add")}
         </Button>
@@ -315,6 +323,7 @@ export function ToolsPanel({
         onManageBound={(id) => {
           const tool = tools.find((entry) => entry.id === id);
           if (tool) {
+            manageTrigger.current = addToolTrigger.current;
             setAddDialogOpen(false);
             setUninstallFromManage(installTarget(tool));
             setManageTool(tool);
@@ -333,6 +342,7 @@ export function ToolsPanel({
 
       <ManageToolDialog
         tool={manageTool}
+        returnFocus={manageTrigger.current}
         onUninstall={() => setUninstallTool(uninstallFromManage)}
         onOpenChange={(open) => {
           if (!open) setManageTool(null);

@@ -2820,7 +2820,7 @@
   "toolLifecycle": {
     "desktopApp": "Desktop app",
     "modelUnset": "Model not set",
-    "analytics": "Usage",
+    "analytics": "Account usage (web)",
     "analyticsFailed": "Failed to open usage statistics",
     "downloadFailed": "Failed to open installation page",
     "notInstalled": "Not installed",
@@ -2879,7 +2879,8 @@
       "native": "the official installer",
       "sparkle": "the download from its website",
       "msstore": "the Microsoft Store"
-    }
+    },
+    "analyticsHint": "View account usage for this tool’s bound API key on the web"
   },
   "modelExperience": {
     "multiDescription": "Save a model set in selection order. Switch among these models inside the tool.",
@@ -3322,7 +3323,8 @@
     "externalCopy": "External copy · {{status}}",
     "managedCopyNeedsReview": "OFox copy needs review",
     "downloadOnly": "Download and install from the official page",
-    "platformGuide": "Choose the installation method for your system in the official guide"
+    "platformGuide": "Choose the installation method for your system in the official guide",
+    "details": "Installation details"
   },
   "library": {
     "nav": "Resource categories",
@@ -3671,7 +3673,7 @@
     }
   },
   "catalogLifecycle": {
-    "manageShort": "Manage",
+    "manageShort": "Manage installation",
     "description": "Manage this OFox copy only. Shell PATH, model bindings and login remain separate. Manage external copies with their original installer.",
     "unavailable": "This backend does not support this installation manager.",
     "prepareFailed": "Could not prepare the operation. Inspect the source again or use the official manual method.",
@@ -3711,7 +3713,8 @@
     },
     "manage": "Manage {{name}} installation",
     "title": "{{name}} · OFox-managed copy",
-    "refreshFailed": "Could not refresh the installation directory. The operation result is retained."
+    "refreshFailed": "Could not refresh the installation directory. The operation result is retained.",
+    "installationScope": "Manages only the separate copy created by OFox. External installations are unchanged; this does not bind OFox or enable usage statistics."
   },
   "usageWorkbench": {
     "tabs": "Usage pages",
@@ -4090,5 +4093,8 @@
     "updating": "Updating filters; showing the previous result until ready.",
     "previous": "Could not load these filters; showing the previous result.",
     "otherFilters": "Model, project and other filters"
+  },
+  "toolsManage": {
+    "configurationNotes": "Configuration notes"
   }
 }

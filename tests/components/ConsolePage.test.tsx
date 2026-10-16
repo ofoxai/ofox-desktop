@@ -18,6 +18,7 @@ import { toolUpdatesApi, type ToolUpdateInfo } from "@/lib/api/toolUpdates";
 
 const mocks = vi.hoisted(() => ({
   mac: true,
+  apex: "ofox.ai",
   toast: Object.assign(() => undefined, {
     success: vi.fn(),
     error: vi.fn(),
@@ -30,6 +31,8 @@ const mocks = vi.hoisted(() => ({
   workBuddyModels: vi.fn(),
   chatGptModel: vi.fn(),
   install: vi.fn(),
+  manageFocus: vi.fn(),
+  addManageFlow: false,
   openExternal: vi.fn().mockResolvedValue(undefined),
   onInstallDone: undefined as
     | ((toolId: string, code: number) => void)
@@ -67,7 +70,7 @@ vi.mock("@/lib/api/manageTool", async (importOriginal) => ({
   },
 }));
 vi.mock("@/hooks/useOfoxApex", () => ({
-  useOfoxApex: () => ({ apex: "ofox.ai" }),
+  useOfoxApex: () => ({ apex: mocks.apex }),
 }));
 vi.mock("@/hooks/useToolLaunch", () => ({
   useToolLaunch: () => ({ launching: new Set(), launch: vi.fn() }),
@@ -93,10 +96,41 @@ vi.mock("@/contexts/UpdateContext", () => ({
     dismissUpdate: vi.fn(),
   }),
 }));
-vi.mock("@/components/console/AddToolsDialog", () => ({ default: () => null }));
+vi.mock("@/components/console/AddToolsDialog", () => ({
+  default: ({
+    open,
+    onManageBound,
+  }: {
+    open: boolean;
+    onManageBound: (id: string) => void;
+  }) =>
+    mocks.addManageFlow && open ? (
+      <div role="dialog" aria-label="添加工具测试">
+        <button onClick={() => onManageBound("claude")}>管理已绑定工具</button>
+      </div>
+    ) : null,
+}));
 vi.mock("@/components/console/ManageToolDialog", () => ({
-  default: ({ tool }: { tool: { label: string } | null }) =>
-    tool ? <div role="dialog">管理：{tool.label}</div> : null,
+  default: ({
+    tool,
+    returnFocus,
+    onOpenChange,
+  }: {
+    tool: { label: string } | null;
+    returnFocus?: HTMLElement | null;
+    onOpenChange: (open: boolean) => void;
+  }) => {
+    if (!tool) return null;
+    mocks.manageFocus(returnFocus);
+    return (
+      <div role="dialog">
+        管理：{tool.label}
+        {mocks.addManageFlow && (
+          <button onClick={() => onOpenChange(false)}>关闭测试管理</button>
+        )}
+      </div>
+    );
+  },
 }));
 vi.mock("@/components/console/OfoxSettingsDialog", () => ({
   default: ({ open }: { open: boolean }) =>
@@ -217,6 +251,10 @@ beforeEach(async () => {
   queryClient.clear();
   localTools = [];
   mocks.mac = true;
+  mocks.apex = "ofox.ai";
+  mocks.openExternal.mockClear();
+  mocks.manageFocus.mockClear();
+  mocks.addManageFlow = false;
   mocks.onInstallDone = undefined;
   vi.mocked(toolUpdatesApi.update).mockReset();
   mocks.toast.success.mockClear();
@@ -883,33 +921,89 @@ describe("Console tool update badges", () => {
 });
 
 describe("Console tool rows", () => {
-  it("opens the tool's usage on the web from its ⋯ menu, with its key on the sub-line", async () => {
+  it("replaces a previous row trigger with the stable Add button for an Add-to-Manage handoff", async () => {
+    mocks.addManageFlow = true;
     localTools = [localTool("claude", "2.1.293")];
-    const original = mocks.invoke.getMockImplementation()!;
-    mocks.invoke.mockImplementation(
-      async (command: string, ...args: unknown[]) => {
-        if (command === "ofox_list_api_keys")
-          return [{ tool: "claude", keyId: "key-1", name: "Claude on mac" }];
-        return original(command, ...args);
-      },
-    );
     render(<ConsolePage boundTools={["claude"]} />);
     const row = await screen.findByRole("group", { name: "Claude Code" });
-    expect(await within(row).findByText("Claude on mac")).toBeVisible();
-
+    const manage = within(row).getByRole("button", { name: "管理" });
+    await userEvent.click(manage);
+    expect(mocks.manageFocus).toHaveBeenLastCalledWith(manage);
+    await userEvent.click(screen.getByRole("button", { name: "关闭测试管理" }));
+    const add = screen.getByRole("button", { name: "添加" });
+    await userEvent.click(add);
+    await userEvent.click(
+      screen.getByRole("button", { name: "管理已绑定工具" }),
+    );
+    expect(mocks.manageFocus).toHaveBeenLastCalledWith(add);
+    expect(screen.queryByRole("dialog", { name: "添加工具测试" })).toBeNull();
+  });
+  it.each(["pointer", "keyboard"])(
+    "passes the actual %s management trigger to the controlled dialog",
+    async (input) => {
+      localTools = [localTool("claude", "2.1.293")];
+      render(<ConsolePage boundTools={["claude"]} />);
+      const row = await screen.findByRole("group", { name: "Claude Code" });
+      const trigger = within(row).getByRole("button", { name: "管理" });
+      if (input === "keyboard") {
+        trigger.focus();
+        await userEvent.keyboard("{Enter}");
+      } else {
+        // Safari pointer activation does not necessarily focus a button first.
+        screen.getByRole("button", { name: "刷新" }).focus();
+        fireEvent.click(trigger);
+      }
+      await screen.findByRole("dialog");
+      expect(mocks.manageFocus).toHaveBeenLastCalledWith(trigger);
+    },
+  );
+  it("describes account usage as a website scoped to the bound key", async () => {
+    localTools = [localTool("claude", "2.1.293")];
+    render(<ConsolePage boundTools={["claude"]} />);
+    const row = await screen.findByRole("group", { name: "Claude Code" });
     await userEvent.click(
       within(row).getByRole("button", { name: "更多操作" }),
     );
-    await userEvent.click(
-      await screen.findByRole("menuitem", { name: "数据统计" }),
-    );
-
-    expect(mocks.openExternal).toHaveBeenCalledWith(
-      "https://app.ofox.ai/analytics?apiKeys=key-1",
-    );
+    const entry = await screen.findByRole("menuitem", {
+      name: "账户用量（网页）",
+    });
+    expect(entry).toHaveAttribute("title", zh.toolLifecycle.analyticsHint);
+    expect(entry).toHaveAccessibleDescription(zh.toolLifecycle.analyticsHint);
+    expect(entry).toHaveAttribute("data-disabled");
   });
+  it.each(["ofox.ai", "ofox.io"])(
+    "opens account usage on %s with the bound key encoded in its web URL",
+    async (apex) => {
+      mocks.apex = apex;
+      localTools = [localTool("claude", "2.1.293")];
+      const original = mocks.invoke.getMockImplementation()!;
+      mocks.invoke.mockImplementation(
+        async (command: string, ...args: unknown[]) => {
+          if (command === "ofox_list_api_keys")
+            return [
+              { tool: "claude", keyId: "key /+?1", name: "Claude on mac" },
+            ];
+          return original(command, ...args);
+        },
+      );
+      render(<ConsolePage boundTools={["claude"]} />);
+      const row = await screen.findByRole("group", { name: "Claude Code" });
+      expect(await within(row).findByText("Claude on mac")).toBeVisible();
 
-  it("keeps 数据统计 in the ⋯ menu but unavailable while the tool has no key", async () => {
+      await userEvent.click(
+        within(row).getByRole("button", { name: "更多操作" }),
+      );
+      await userEvent.click(
+        await screen.findByRole("menuitem", { name: "账户用量（网页）" }),
+      );
+
+      expect(mocks.openExternal).toHaveBeenCalledWith(
+        `https://app.${apex}/analytics?apiKeys=key%20%2F%2B%3F1`,
+      );
+    },
+  );
+
+  it("keeps account web usage unavailable while the tool has no verified key", async () => {
     localTools = [localTool("claude", "2.1.293")];
     render(<ConsolePage boundTools={["claude"]} />);
     const row = await screen.findByRole("group", { name: "Claude Code" });
@@ -919,7 +1013,7 @@ describe("Console tool rows", () => {
     );
 
     expect(
-      await screen.findByRole("menuitem", { name: "数据统计" }),
+      await screen.findByRole("menuitem", { name: "账户用量（网页）" }),
     ).toHaveAttribute("data-disabled");
   });
 

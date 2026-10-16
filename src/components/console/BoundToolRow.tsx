@@ -12,7 +12,7 @@ import {
   Wrench,
   Trash2,
 } from "lucide-react";
-import { useRef, useState, type ReactNode } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { useUninstallPreview } from "@/hooks/useUninstallPreview";
 import { useTranslation } from "react-i18next";
 import { TOOL_META } from "@/config/toolMeta";
@@ -84,8 +84,8 @@ interface BoundToolRowProps {
   progress?: string;
   onAnalytics: () => void;
   onUpdate: () => void;
-  onAction: (action: ToolRowAction) => void;
-  onManage: () => void;
+  onAction: (action: ToolRowAction, trigger?: HTMLElement) => void;
+  onManage: (trigger: HTMLElement) => void;
   onUninstall?: () => void;
 }
 
@@ -114,6 +114,7 @@ export default function BoundToolRow({
   onUninstall,
 }: BoundToolRowProps) {
   const { t } = useTranslation();
+  const analyticsDescriptionId = useId();
   const [menuOpen, setMenuOpen] = useState(false);
   const openingUninstall = useRef(false);
   const uninstallTarget =
@@ -181,17 +182,20 @@ export default function BoundToolRow({
     <ListRow
       role="group"
       aria-label={tool.label}
-      className="flex-wrap items-start gap-x-3 gap-y-2 py-2.5"
+      className="grid grid-cols-[24px_minmax(0,1fr)] gap-x-3 gap-y-1 py-2 sm:grid-cols-[24px_minmax(0,1fr)_auto]"
     >
       <ToolBadge
         toolId={tool.id}
         size={24}
         rounded="md"
-        className="mt-px rounded-[6px]"
+        className="self-start mt-1 rounded-[6px]"
       />
-      <div className="min-w-0 flex-1 basis-56">
+      <div className="min-w-0">
         <div className="flex min-h-[26px] flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="truncate text-ui font-medium tracking-[-.005em] text-ink">
+          <span
+            className="min-w-0 truncate text-ui font-medium tracking-[-.005em] text-ink"
+            title={tool.label}
+          >
             {tool.label}
           </span>
           {tool.version && (
@@ -243,7 +247,9 @@ export default function BoundToolRow({
         </div>
         <div className="mt-0.5 flex min-w-0 items-start gap-1.5 text-sub text-ink-muted">
           {keyText && (
-            <span className="min-w-0 truncate leading-[25px]">{keyText}</span>
+            <span className="min-w-0 truncate leading-[25px]" title={keyText}>
+              {keyText}
+            </span>
           )}
           {keyText && (modelControl || model !== undefined) && (
             <span aria-hidden className="leading-[25px] text-ink-faint">
@@ -263,12 +269,15 @@ export default function BoundToolRow({
             ))}
         </div>
       </div>
-      <div className="ml-auto flex flex-none items-center gap-1.5">
+      <span id={analyticsDescriptionId} className="sr-only">
+        {t("toolLifecycle.analyticsHint")}
+      </span>
+      <div className="col-start-2 flex items-center justify-end gap-1.5 sm:col-start-3 sm:row-start-1">
         {action && actionKey && (
           <Button
             variant={action === "install" ? "primary" : "secondary"}
             size="sm"
-            onClick={() => onAction(action)}
+            onClick={(event) => onAction(action, event.currentTarget)}
             disabled={busy}
           >
             {busy ? (
@@ -282,7 +291,7 @@ export default function BoundToolRow({
         <Button
           variant="secondary"
           size="sm"
-          onClick={onManage}
+          onClick={(event) => onManage(event.currentTarget)}
           disabled={busy}
         >
           <SlidersHorizontal aria-hidden className="h-3.5 w-3.5" />
@@ -310,12 +319,15 @@ export default function BoundToolRow({
               }
             }}
           >
-            <DropdownMenuItem disabled={!hasAnalytics} onSelect={onAnalytics}>
+            <DropdownMenuItem
+              disabled={!hasAnalytics}
+              onSelect={onAnalytics}
+              title={t("toolLifecycle.analyticsHint")}
+              aria-describedby={analyticsDescriptionId}
+            >
               <BarChart3 aria-hidden className="h-3.5 w-3.5 text-ink-muted" />
               <span className="flex-1">{t("toolLifecycle.analytics")}</span>
-              <span aria-hidden className="text-ink-faint">
-                ↗
-              </span>
+              <ExternalLink aria-hidden className="h-3 w-3 text-ink-faint" />
             </DropdownMenuItem>
             {uninstallPreview.available && (
               <DropdownMenuItem

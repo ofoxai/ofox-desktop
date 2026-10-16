@@ -176,11 +176,54 @@ describe("independent tool installation catalog", () => {
     const manage = await screen.findByRole("button", {
       name: "管理 GitHub Copilot CLI 安装",
     });
-    expect(manage).toHaveTextContent(/^管理$/);
+    expect(manage).toHaveTextContent(/^安装管理$/);
+    expect(manage).toHaveAttribute(
+      "title",
+      zh.catalogLifecycle.installationScope,
+    );
     await userEvent.click(manage);
     expect(screen.getByRole("dialog")).toHaveAccessibleName(
       "GitHub Copilot CLI · OFox 管理副本",
     );
+  });
+  it("keeps installation metadata available in a disclosure without crowding the row", async () => {
+    mocks.inventory.mockResolvedValueOnce([
+      {
+        toolId: "copilot",
+        status: "installed",
+        version: "external-1",
+        path: "/external/very-long/copilot",
+        managedCopy: {
+          state: "managed",
+          version: "1.0.98",
+          path: "/private/very-long/prefix/bin/copilot",
+        },
+      },
+    ]);
+    render(<OptionalToolsCatalog boundTools={[]} />);
+    await userEvent.click(
+      screen.getByRole("button", { name: /其他已安装工具/ }),
+    );
+    const row = await screen.findByRole("group", {
+      name: "GitHub Copilot CLI",
+    });
+    expect(within(row).getByText(/OFox 管理副本.*1.0.98/)).toBeVisible();
+    expect(within(row).getByText(/外部副本.*external-1/)).toBeVisible();
+    const metadata = row.querySelector("details");
+    expect(metadata).not.toBeNull();
+    expect(metadata).not.toHaveAttribute("open");
+    expect(
+      within(row).getByText("/external/very-long/copilot"),
+    ).not.toBeVisible();
+    expect(
+      within(row).getByText("/private/very-long/prefix/bin/copilot"),
+    ).not.toBeVisible();
+    await userEvent.click(within(row).getByText("安装信息"));
+    expect(within(row).getByText("/external/very-long/copilot")).toBeVisible();
+    expect(
+      within(row).getByText("/private/very-long/prefix/bin/copilot"),
+    ).toBeVisible();
+    expect(localStorage.getItem("ofox-bound-tools")).toBe('["codex"]');
   });
   it("lists a verified OFox copy among installed tools while preserving external-copy evidence", async () => {
     mocks.inventory.mockResolvedValueOnce([
@@ -204,6 +247,7 @@ describe("independent tool installation catalog", () => {
       expect(screen.getByText(/OFox 管理副本.*1.0.98/)).toBeVisible(),
     );
     expect(screen.getByText(/外部副本.*external-1/)).toBeVisible();
+    await userEvent.click(screen.getByText("安装信息"));
     expect(screen.getByText("/external/copilot")).toBeVisible();
   });
   it("does not hide a private managed copy when no shell executable exists", async () => {

@@ -6,6 +6,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { useState } from "react";
 import {
   afterEach,
   beforeAll,
@@ -33,6 +34,7 @@ import {
 } from "@/lib/api/modelSelection";
 import { queryClient } from "@/lib/query/queryClient";
 import { emitTauriEvent } from "../msw/tauriMocks";
+import * as uninstallPreviewModule from "@/hooks/useUninstallPreview";
 
 let selections: Record<string, ModelSelection> = {};
 let observed: Record<string, string> = {};
@@ -389,6 +391,173 @@ async function renderTool(id: string, label: string, version = "1.0") {
     );
   });
 }
+
+describe("ManageToolDialog compact sections", () => {
+  it("keeps model, config and connection actions in named sections while folding static notes", async () => {
+    mockSingleTool(compatibleModel("gemini/test"));
+    selections.gemini = { kind: "single", model: "gemini/test" };
+    await renderTool("gemini", "Gemini CLI");
+    await screen.findByText("/Users/test/.config/tool/config.json");
+
+    const model = screen.getByRole("region", { name: "模型" });
+    expect(within(model).getByRole("combobox")).toBeEnabled();
+    const files = screen.getByRole("region", { name: "配置文件" });
+    expect(
+      within(files).getByText("/Users/test/.config/tool/config.json"),
+    ).toBeVisible();
+    expect(
+      within(files).getByRole("button", { name: /Finder|文件夹/ }),
+    ).toBeEnabled();
+    const connection = screen.getByRole("region", { name: "连通性" });
+    expect(
+      within(connection).getByRole("button", { name: "测试连通性" }),
+    ).toBeEnabled();
+
+    const summary = screen.getByText("配置说明");
+    const notes = summary.closest("details")!;
+    expect(notes).not.toHaveAttribute("open");
+    const rememberHint = screen.getByText(
+      zh.modelCompatibility.geminiRememberHint,
+    );
+    expect(rememberHint).not.toBeVisible();
+    summary.focus();
+    expect(summary).toHaveFocus();
+    fireEvent.click(summary);
+    expect(notes).toHaveAttribute("open");
+    expect(rememberHint).toBeVisible();
+    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "解除绑定" })).toBeEnabled();
+  });
+
+  it("keeps real model-load and environment warnings outside the collapsed notes", async () => {
+    mockSingleTool(compatibleModel("gemini/test"));
+    const ping = vi.spyOn(manageToolApi, "pingModel");
+    vi.mocked(modelFetch.fetchOfoxModels).mockRejectedValue(
+      new Error("catalog unavailable"),
+    );
+    vi.mocked(ofoxBindApi.status).mockResolvedValue({
+      status: "configured",
+      message: null,
+      missingFiles: [],
+      modifiedFields: [],
+      envOverrides: [
+        { name: "GEMINI_API_KEY", scope: "process", location: null },
+      ],
+    });
+    selections.gemini = { kind: "single", model: "gemini/test" };
+    await renderTool("gemini", "Gemini CLI");
+
+    const notes = screen.getByText("配置说明").closest("details")!;
+    expect(notes).not.toHaveAttribute("open");
+    const retry = await screen.findByRole("button", { name: "重试" });
+    expect(retry).toBeVisible();
+    expect(notes).not.toContainElement(retry);
+    const variable = screen.getByText("GEMINI_API_KEY");
+    expect(variable).toBeVisible();
+    expect(notes).not.toContainElement(variable);
+    expect(screen.getByRole("button", { name: "解除绑定" })).toBeEnabled();
+    expect(modelSelectionApi.save).not.toHaveBeenCalled();
+    expect(ping).not.toHaveBeenCalled();
+  });
+});
+
+describe("ManageToolDialog keyboard return focus", () => {
+  function FocusHarness({ onUninstall }: { onUninstall?: () => void }) {
+    const [open, setOpen] = useState(false);
+    const [returnFocus, setReturnFocus] = useState<HTMLElement | null>(null);
+    return (
+      <>
+        <button
+          onClick={(event) => {
+            setReturnFocus(event.currentTarget);
+            setOpen(true);
+          }}
+        >
+          Manage Gemini
+        </button>
+        <ManageToolDialog
+          tool={
+            open
+              ? {
+                  id: "gemini",
+                  abbr: "G",
+                  label: "Gemini CLI",
+                  color: "",
+                  version: "1.0",
+                }
+              : null
+          }
+          returnFocus={returnFocus}
+          onOpenChange={setOpen}
+          onUninstall={onUninstall}
+        />
+      </>
+    );
+  }
+
+  async function openManage(onUninstall?: () => void) {
+    mockSingleTool(compatibleModel("gemini/test"));
+    selections.gemini = { kind: "single", model: "gemini/test" };
+    render(<FocusHarness onUninstall={onUninstall} />);
+    const origin = screen.getByRole("button", { name: "Manage Gemini" });
+    vi.spyOn(origin, "getClientRects").mockReturnValue([
+      { width: 100, height: 30 },
+    ] as unknown as DOMRectList);
+    origin.focus();
+    fireEvent.click(origin);
+    await screen.findByText("/Users/test/.config/tool/config.json");
+    return origin;
+  }
+
+  it.each(["Escape", "cancel"])(
+    "returns %s dismissal to the invoking tool row",
+    async (kind) => {
+      const origin = await openManage();
+      if (kind === "Escape") {
+        fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+      } else {
+        fireEvent.click(screen.getByRole("button", { name: "取消" }));
+      }
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+      );
+      await waitFor(() => expect(origin).toHaveFocus());
+    },
+  );
+
+  it.each(["hidden", "disabled", "detached"])(
+    "does not restore an unavailable %s origin",
+    async (state) => {
+      const origin = await openManage();
+      const focus = vi.spyOn(origin, "focus");
+      if (state === "hidden") origin.hidden = true;
+      if (state === "disabled") origin.setAttribute("disabled", "");
+      if (state === "detached")
+        vi.spyOn(origin, "isConnected", "get").mockReturnValue(false);
+      fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+      );
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+      expect(focus).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps uninstall handoff ahead of restoring the tool-row focus", async () => {
+    vi.spyOn(uninstallPreviewModule, "useUninstallPreview").mockReturnValue({
+      available: true,
+      data: undefined,
+      error: undefined,
+      retry: vi.fn(),
+    });
+    const onUninstall = vi.fn();
+    const origin = await openManage(onUninstall);
+    const focus = vi.spyOn(origin, "focus");
+    fireEvent.click(screen.getByRole("button", { name: "卸载…" }));
+    await waitFor(() => expect(onUninstall).toHaveBeenCalledOnce());
+    expect(focus).not.toHaveBeenCalled();
+  });
+});
 
 describe("ManageToolDialog streaming compatibility", () => {
   it("does not overwrite a draft or advance its write revision after an external model change", async () => {
