@@ -3297,13 +3297,19 @@
       "node": "npm インストールには公式指定の Node.js が必要です",
       "bun": "Bun 1.3.14 以降が必要です",
       "python": "分離環境を使用します。公式インストーラーが Python 3.12 を追加する場合があります",
-      "platform": "対応環境とランタイム要件は未確認です。公式手順をご覧ください"
+      "platform": "対応環境とランタイム要件は未確認です。公式手順をご覧ください",
+      "node2219": "npm でのインストールには Node.js 22.19 以降が必要です",
+      "homebrew": "Homebrew が必要です",
+      "shell": "curl と Bash が必要です。前提条件は公式ガイドを参照してください",
+      "powershell": "PowerShell で実行してください。前提条件は公式ガイドを参照してください"
     },
     "probeIncomplete": "バージョン検出が未完了",
     "retryFor": "{{name}} を再検出",
     "managedCopy": "OFox 管理コピー · {{version}}",
     "externalCopy": "外部コピー · {{status}}",
-    "managedCopyNeedsReview": "OFox コピーの確認が必要です"
+    "managedCopyNeedsReview": "OFox コピーの確認が必要です",
+    "downloadOnly": "公式ページからダウンロードしてインストールしてください",
+    "platformGuide": "公式ガイドで現在のシステムに合うインストール方法を選んでください"
   },
   "library": {
     "nav": "リソースの種類",

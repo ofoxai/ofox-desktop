@@ -3297,13 +3297,19 @@
       "node": "npm installation requires the Node.js version specified by the publisher",
       "bun": "Requires Bun 1.3.14 or newer",
       "python": "Uses an isolated environment; the official installer may also install Python 3.12",
-      "platform": "Platform and runtime requirements are not yet verified; see the official guide"
+      "platform": "Platform and runtime requirements are not yet verified; see the official guide",
+      "node2219": "npm installation requires Node.js 22.19 or newer",
+      "homebrew": "Requires Homebrew",
+      "shell": "Requires curl and Bash; see the official guide for prerequisites",
+      "powershell": "Run in PowerShell; see the official guide for prerequisites"
     },
     "probeIncomplete": "Version detection incomplete",
     "retryFor": "Detect {{name}} again",
     "managedCopy": "OFox-managed copy · {{version}}",
     "externalCopy": "External copy · {{status}}",
-    "managedCopyNeedsReview": "OFox copy needs review"
+    "managedCopyNeedsReview": "OFox copy needs review",
+    "downloadOnly": "Download and install from the official page",
+    "platformGuide": "Choose the installation method for your system in the official guide"
   },
   "library": {
     "nav": "Resource categories",

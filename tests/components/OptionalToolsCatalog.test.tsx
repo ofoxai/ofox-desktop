@@ -7,7 +7,7 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
 import { OptionalToolsCatalog } from "@/components/tools/OptionalToolsCatalog";
@@ -38,6 +38,8 @@ vi.mock("@/components/tools/CatalogLifecycleDialog", () => ({
 }));
 
 beforeEach(() => {
+  vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Macintosh");
+  vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
   i18n.addResourceBundle("zh", "translation", zh, true, true);
   mocks.inventory.mockResolvedValue([
     {
@@ -55,7 +57,117 @@ beforeEach(() => {
   localStorage.setItem("ofox-bound-tools", '["codex"]');
 });
 
+afterEach(() => vi.restoreAllMocks());
+
 describe("independent tool installation catalog", () => {
+  it.each([
+    "Claude Code",
+    "Codex",
+    "OpenCode",
+    "OpenClaw",
+    "Hermes",
+    "Gemini",
+    "DeepSeek Harness",
+    "Pi",
+  ])("offers a manual command for the unbound core CLI %s", async (name) => {
+    mocks.inventory.mockResolvedValue([]);
+    render(<OptionalToolsCatalog boundTools={[]} />);
+    await userEvent.click(screen.getByRole("button", { name: /安装其他工具/ }));
+    expect(
+      within(screen.getByRole("group", { name })).getByRole("button", {
+        name: `复制 ${name} 安装命令`,
+      }),
+    ).toBeVisible();
+    expect(mocks.copy).not.toHaveBeenCalled();
+  });
+
+  it("copies Pi's current official npm command and shows its Node requirement", async () => {
+    mocks.inventory.mockResolvedValue([]);
+    render(<OptionalToolsCatalog boundTools={[]} />);
+    await userEvent.click(screen.getByRole("button", { name: /安装其他工具/ }));
+    const row = within(screen.getByRole("group", { name: "Pi" }));
+    expect(row.getByText(/Node\.js 22\.19/)).toBeVisible();
+    await userEvent.click(
+      row.getByRole("button", { name: "复制 Pi 安装命令" }),
+    );
+    expect(mocks.copy).toHaveBeenCalledWith(
+      "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
+    );
+    expect(localStorage.getItem("ofox-bound-tools")).toBe('["codex"]');
+  });
+
+  it.each([
+    ["Macintosh", "MacIntel", "brew install block-goose-cli"],
+    [
+      "X11; Linux x86_64",
+      "Linux x86_64",
+      "curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | bash",
+    ],
+    [
+      "Windows NT 10.0; Win64; x64",
+      "Win32",
+      'Invoke-WebRequest -Uri "https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1" -OutFile "download_cli.ps1"\n.\\download_cli.ps1',
+    ],
+  ])("copies the Goose CLI command for %s", async (ua, platform, command) => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue(ua);
+    vi.spyOn(navigator, "platform", "get").mockReturnValue(platform);
+    mocks.inventory.mockResolvedValue([]);
+    render(<OptionalToolsCatalog boundTools={[]} />);
+    await userEvent.click(screen.getByRole("button", { name: /安装其他工具/ }));
+    const row = within(screen.getByRole("group", { name: "Goose CLI" }));
+    await userEvent.click(
+      row.getByRole("button", { name: "复制 Goose CLI 安装命令" }),
+    );
+    expect(mocks.copy).toHaveBeenCalledWith(command);
+    expect(row.queryByText("brew install goose")).not.toBeInTheDocument();
+  });
+
+  it("provides guidance instead of a foreign OS command when the host is unknown", async () => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Unknown host");
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("");
+    mocks.inventory.mockResolvedValue([]);
+    render(<OptionalToolsCatalog boundTools={[]} />);
+    await userEvent.click(screen.getByRole("button", { name: /安装其他工具/ }));
+    const row = within(screen.getByRole("group", { name: "Goose CLI" }));
+    expect(row.getByText("请按官方说明选择当前系统的安装方式")).toBeVisible();
+    expect(row.queryByRole("button", { name: /复制/ })).toBeNull();
+    expect(
+      row.getByRole("button", { name: "查看 Goose CLI 官方说明" }),
+    ).toBeEnabled();
+  });
+
+  it.each([
+    ["Claude Code", "irm https://claude.ai/install.ps1 | iex"],
+    ["OpenClaw", "iwr -useb https://openclaw.ai/install.ps1 | iex"],
+    ["Hermes", "iex (irm https://hermes-agent.nousresearch.com/install.ps1)"],
+  ])("uses the native Windows installer for %s", async (name, command) => {
+    vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Windows NT 10.0");
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("Win32");
+    mocks.inventory.mockResolvedValue([]);
+    render(<OptionalToolsCatalog boundTools={[]} />);
+    await userEvent.click(screen.getByRole("button", { name: /安装其他工具/ }));
+    await userEvent.click(
+      within(screen.getByRole("group", { name })).getByRole("button", {
+        name: `复制 ${name} 安装命令`,
+      }),
+    );
+    expect(mocks.copy).toHaveBeenCalledWith(command);
+  });
+
+  it.each(["ChatGPT", "WorkBuddy"])(
+    "explains the download-only installation for %s",
+    async (name) => {
+      mocks.inventory.mockResolvedValue([]);
+      render(<OptionalToolsCatalog boundTools={[]} />);
+      await userEvent.click(
+        screen.getByRole("button", { name: /安装其他工具/ }),
+      );
+      const row = within(screen.getByRole("group", { name }));
+      expect(row.getByText("请前往官方页面下载安装")).toBeVisible();
+      expect(row.queryByRole("button", { name: /复制/ })).toBeNull();
+    },
+  );
+
   it("keeps the management label concise while naming its tool for assistive technology", async () => {
     render(<OptionalToolsCatalog boundTools={[]} />);
     await userEvent.click(

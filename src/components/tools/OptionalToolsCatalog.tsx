@@ -9,6 +9,7 @@ import {
 import { useTranslation } from "react-i18next";
 import {
   INSTALL_CATALOG,
+  getCatalogInstallCommand,
   type InstallCatalogEntry,
 } from "@/config/installCatalog";
 import {
@@ -191,6 +192,8 @@ export const OptionalToolsCatalog = forwardRef<
   const row = (entry: InstallCatalogEntry, isInstalled: boolean) => {
     const info = byId.get(entry.toolId);
     const status = info?.status ?? "unknown";
+    const install = getCatalogInstallCommand(entry);
+    const dependency = install?.dependency ?? entry.dependency;
     return (
       <ListRow
         key={entry.toolId}
@@ -245,23 +248,32 @@ export const OptionalToolsCatalog = forwardRef<
               {info.path}
             </p>
           )}
-          {!isInstalled && entry.dependency && (
+          {!isInstalled && dependency && (
             <p className="text-note text-ink-faint">
-              {t(`toolCatalog.dependencies.${entry.dependency}`)}
+              {t(`toolCatalog.dependencies.${dependency}`)}
             </p>
           )}
         </div>
         <div className="col-span-2 col-start-2 flex min-w-0 items-center gap-2 md:col-span-1 md:col-start-3 md:row-start-1">
-          {!isInstalled && entry.command && (
+          {!isInstalled && install && (
             <>
               <code className="min-w-0 flex-1 whitespace-pre-wrap break-words rounded-ctl bg-canvas px-2 py-1 text-note">
-                {entry.command}
+                {install.command}
               </code>
               <CopyButton
-                text={entry.command}
+                text={install.command}
                 aria-label={t("toolCatalog.copyCommand", { name: entry.label })}
               />
             </>
+          )}
+          {!isInstalled && !install && (
+            <p className="text-note text-ink-muted">
+              {t(
+                entry.downloadOnly
+                  ? "toolCatalog.downloadOnly"
+                  : "toolCatalog.platformGuide",
+              )}
+            </p>
           )}
         </div>
         <div className="col-start-3 row-start-1 flex flex-wrap items-center justify-end gap-1.5 md:col-start-4">
