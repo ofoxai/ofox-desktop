@@ -94,7 +94,7 @@ beforeEach(() => {
 });
 it("keeps a frozen snapshot across pages and resets the first request on filter changes", async () => {
   const view = render(<UsageRequests {...props} />);
-  await screen.findByRole("button", { name: "查看请求 native-1" });
+  await screen.findByRole("button", { name: /model/ });
   await userEvent.click(screen.getByRole("button", { name: "下一页" }));
   await waitFor(() =>
     expect(mocks.invoke).toHaveBeenCalledWith(
@@ -116,7 +116,7 @@ it("keeps a frozen snapshot across pages and resets the first request on filter 
 it("opens detail by keyboard without presenting imported synthetic status as observed", async () => {
   render(<UsageRequests {...props} />);
   const trigger = await screen.findByRole("button", {
-    name: "查看请求 native-1",
+    name: /model/,
   });
   expect(trigger).toHaveTextContent("本机会话导入");
   expect(trigger).not.toHaveTextContent("未记录");
@@ -144,9 +144,7 @@ it("distinguishes a detail fetch failure from a missing record", async () => {
       : normal(command, args),
   );
   render(<UsageRequests {...props} />);
-  await userEvent.click(
-    await screen.findByRole("button", { name: "查看请求 native-1" }),
-  );
+  await userEvent.click(await screen.findByRole("button", { name: /model/ }));
   expect(await screen.findByText("请求详情读取失败")).toBeVisible();
   expect(screen.queryByText("该快照中未找到请求")).toBeNull();
 });
@@ -161,7 +159,7 @@ it("confirms the complete readable count and refuses a late export after its fil
       : normal(command, args),
   );
   const view = render(<UsageRequests {...props} />);
-  await screen.findByRole("button", { name: "查看请求 native-1" });
+  await screen.findByRole("button", { name: /model/ });
   await userEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
   expect(screen.getByRole("dialog")).toHaveTextContent("45 条可读明细");
   await userEvent.click(screen.getByRole("button", { name: "保存 CSV" }));
@@ -174,7 +172,7 @@ it("confirms the complete readable count and refuses a late export after its fil
 });
 it("shows new-data notice without replacing an older page or detail", async () => {
   const view = render(<UsageRequests {...props} />);
-  await screen.findByRole("button", { name: "查看请求 native-1" });
+  await screen.findByRole("button", { name: /model/ });
   await userEvent.click(screen.getByRole("button", { name: "下一页" }));
   await screen.findByText("第 2 / 3 页");
   mocks.invoke.mockClear();
@@ -186,7 +184,7 @@ it("shows new-data notice without replacing an older page or detail", async () =
 
 it("drops the old page snapshot when the resolved region changes", async () => {
   const view = render(<UsageRequests {...props} />);
-  await screen.findByRole("button", { name: "查看请求 native-1" });
+  await screen.findByRole("button", { name: /model/ });
   await userEvent.click(screen.getByRole("button", { name: "下一页" }));
   await screen.findByText("第 2 / 3 页");
   mocks.invoke.mockClear();
@@ -207,9 +205,7 @@ it("honors explicit unknown measurements on proxy details as well", async () => 
       : normal(command, args),
   );
   render(<UsageRequests {...props} />);
-  await userEvent.click(
-    await screen.findByRole("button", { name: "查看请求 native-1" }),
-  );
+  await userEvent.click(await screen.findByRole("button", { name: /model/ }));
   const dialog = await screen.findByRole("dialog");
   expect(
     await within(dialog).findByText("原始记录未提供请求状态"),
@@ -231,7 +227,7 @@ it("never revives an abandoned export after the filters return to the old values
       : normal(command, args),
   );
   const view = render(<UsageRequests {...props} />);
-  await screen.findByRole("button", { name: "查看请求 native-1" });
+  await screen.findByRole("button", { name: /model/ });
   await userEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
   await userEvent.click(screen.getByRole("button", { name: "保存 CSV" }));
   view.rerender(
@@ -375,7 +371,7 @@ it("shows the frozen complete-condition trend and measured sample denominators a
 
 it("explains older-backend absence instead of manufacturing zero-sample statistics", async () => {
   render(<UsageRequests {...props} />);
-  await screen.findByRole("button", { name: "查看请求 native-1" });
+  await screen.findByRole("button", { name: /model/ });
   expect(screen.getByText("当前后端未提供请求趋势和测量摘要。")).toBeVisible();
   expect(screen.queryByRole("region", { name: "请求测量" })).toBeNull();
 });
@@ -393,9 +389,7 @@ it("honors the same explicit first-token measurement provenance in request detai
       : normal(command, args),
   );
   render(<UsageRequests {...props} />);
-  await userEvent.click(
-    await screen.findByRole("button", { name: "查看请求 native-1" }),
-  );
+  await userEvent.click(await screen.findByRole("button", { name: /model/ }));
   const dialog = await screen.findByRole("dialog");
   expect(
     await within(dialog).findByText("原始记录未提供请求状态"),
@@ -419,9 +413,7 @@ it("does not reinterpret an older proxy first-event column as observed first-tok
       : normal(command, args),
   );
   render(<UsageRequests {...props} />);
-  await userEvent.click(
-    await screen.findByRole("button", { name: "查看请求 native-1" }),
-  );
+  await userEvent.click(await screen.findByRole("button", { name: /model/ }));
   const dialog = await screen.findByRole("dialog");
   expect(
     await within(dialog).findByText("原始记录未提供请求状态"),

@@ -3856,7 +3856,8 @@
     "estimateNotBill": "Estimated at current prices; refer to your account bill.",
     "nativeElapsedHelp": "Elapsed time comes from native message start and end times, not HTTP round-trip or first-token timing.",
     "savedAmountHelp": "Historical saved amounts may include import placeholders and are not actual account charges.",
-    "noMeasuredStatusNote": "No status ≠ failure; Tokens count"
+    "noMeasuredStatusNote": "No status ≠ failure; Tokens count",
+    "viewRequestRecord": "View {{model}} details for {{time}}"
   },
   "usageSessions": {
     "title": "Session analysis",

@@ -3856,7 +3856,8 @@
     "estimateNotBill": "現在の価格による概算です。実際の請求はアカウントの明細をご確認ください。",
     "nativeElapsedHelp": "所要時間は元のメッセージの開始・終了時刻に基づき、HTTP 往復時間や最初の Token までの時間ではありません。",
     "savedAmountHelp": "過去の保存金額には取り込み時の仮値が含まれる場合があり、実際のアカウント請求額ではありません。",
-    "noMeasuredStatusNote": "失敗を意味せず、Tokens は集計対象です"
+    "noMeasuredStatusNote": "失敗を意味せず、Tokens は集計対象です",
+    "viewRequestRecord": "{{time}} の {{model}} の明細を表示"
   },
   "usageSessions": {
     "title": "セッション分析",

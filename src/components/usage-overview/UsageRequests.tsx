@@ -383,13 +383,23 @@ export function UsageRequests({
                     t,
                   );
                   const status = requestMeasurements(record).status;
+                  const time = new Date(record.createdAt * 1000).toLocaleString(
+                    i18n.language,
+                    {
+                      month: "2-digit",
+                      day: "2-digit",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    },
+                  );
                   return (
                     <Tooltip key={record.requestId}>
                       <TooltipTrigger asChild>
                         <button
                           type="button"
-                          aria-label={t("usageWorkbench.viewRequest", {
-                            id: record.requestId,
+                          aria-label={t("usageWorkbench.viewRequestRecord", {
+                            model: record.model,
+                            time,
                           })}
                           className="grid w-full grid-cols-[100px_minmax(0,1fr)_110px_110px] items-center gap-3 border-b border-line-2 px-3 py-3 text-left last:border-b-0 hover:bg-pill focus-visible:relative focus-visible:z-[1] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/50"
                           onClick={(event) =>
@@ -406,15 +416,7 @@ export function UsageRequests({
                           }
                         >
                           <span className="text-note tabular-nums text-ink-muted">
-                            {new Date(record.createdAt * 1000).toLocaleString(
-                              i18n.language,
-                              {
-                                month: "2-digit",
-                                day: "2-digit",
-                                hour: "2-digit",
-                                minute: "2-digit",
-                              },
-                            )}
+                            {time}
                           </span>
                           <span className="flex min-w-0 items-center gap-2">
                             <ToolBadge toolId={record.appType} size={22} />

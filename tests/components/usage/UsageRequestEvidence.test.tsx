@@ -123,7 +123,7 @@ it.each([
   async (source) => {
     records = [{ ...row, dataSource: source }];
     render(<UsageRequests {...props} />);
-    const item = await screen.findByRole("button", { name: "查看请求 native" });
+    const item = await screen.findByRole("button", { name: /test-model/ });
     expect(item).toHaveTextContent("本机会话导入");
     expect(item).not.toHaveTextContent(source);
     expect(item).not.toHaveTextContent("未记录");
@@ -148,10 +148,40 @@ it.each([
   expect(screen.queryByText(/workbuddy_session/)).toBeNull();
 });
 
+it.each(["zh", "en", "ja"])(
+  "names an imported row by model and localized time in %s without exposing its internal ID",
+  async (lang) => {
+    await i18n.changeLanguage(lang);
+    const requestId = 'workbuddy_session:["private-session","native-message"]';
+    records = [{ ...row, requestId }];
+    render(<UsageRequests {...props} />);
+    const item = (await screen.findByText(row.model)).closest("button")!;
+    const time = new Date(row.createdAt * 1000).toLocaleString(lang, {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+    expect(item).toHaveAccessibleName(expect.stringContaining(row.model));
+    expect(item).toHaveAccessibleName(expect.stringContaining(time));
+    expect(item).not.toHaveAccessibleName(expect.stringContaining(requestId));
+    expect(item).not.toHaveAccessibleName(/workbuddy_session|private-session/);
+    item.focus();
+    await userEvent.keyboard("{Enter}");
+    await screen.findByRole("dialog");
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "get_request_detail",
+      expect.objectContaining({ requestId, snapshotId: "s" }),
+    );
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(item).toHaveFocus());
+  },
+);
+
 it("groups missing timing, explains absent status, and hides raw IDs in technical details", async () => {
   render(<UsageRequests {...props} />);
   const trigger = await screen.findByRole("button", {
-    name: "查看请求 native",
+    name: /test-model/,
   });
   trigger.focus();
   await userEvent.keyboard("{Enter}");
@@ -187,7 +217,7 @@ it.each([200, 429])(
       },
     ];
     render(<UsageRequests {...props} />);
-    const item = await screen.findByRole("button", { name: "查看请求 native" });
+    const item = await screen.findByRole("button", { name: /test-model/ });
     expect(item).toHaveTextContent(`HTTP ${status}`);
     await userEvent.click(item);
     const d = await screen.findByRole("dialog");
@@ -199,10 +229,11 @@ it.each([200, 429])(
 
 it("keeps free, unknown and partial current estimates distinct from saved zero placeholders", async () => {
   records = [
-    { ...row, requestId: "free" },
+    { ...row, requestId: "free", model: "free-model" },
     {
       ...row,
       requestId: "unknown",
+      model: "unknown-model",
       currentEstimate: {
         ...free,
         availability: "unknown",
@@ -214,6 +245,7 @@ it("keeps free, unknown and partial current estimates distinct from saved zero p
     {
       ...row,
       requestId: "partial",
+      model: "partial-model",
       currentEstimate: {
         ...free,
         availability: "partial",
@@ -224,13 +256,13 @@ it("keeps free, unknown and partial current estimates distinct from saved zero p
   ];
   render(<UsageRequests {...props} />);
   expect(
-    await screen.findByRole("button", { name: "查看请求 free" }),
+    await screen.findByRole("button", { name: /free-model/ }),
   ).toHaveTextContent("≈$0");
-  const unknown = screen.getByRole("button", { name: "查看请求 unknown" });
+  const unknown = screen.getByRole("button", { name: /unknown-model/ });
   expect(unknown).toHaveTextContent("—");
   expect(unknown).not.toHaveTextContent("≈$0");
   expect(
-    screen.getByRole("button", { name: "查看请求 partial" }),
+    screen.getByRole("button", { name: /partial-model/ }),
   ).toHaveTextContent("≈$0.010+");
   await userEvent.click(unknown);
   const d = await screen.findByRole("dialog");
@@ -253,14 +285,14 @@ it("uses no available samples instead of zero percent without measured status an
   const m = await screen.findByRole("region", { name: "请求测量" });
   expect(m).toHaveTextContent("暂无可用样本");
   expect(m).not.toHaveTextContent("0%");
-  expect(
-    screen.getByRole("button", { name: "查看请求 native" }),
-  ).toHaveTextContent("30");
+  expect(screen.getByRole("button", { name: /test-model/ })).toHaveTextContent(
+    "30",
+  );
 });
 
 it("offers a friendly source filter and explains no measured status is not failure", async () => {
   render(<UsageRequests {...props} />);
-  await screen.findByRole("button", { name: "查看请求 native" });
+  await screen.findByRole("button", { name: /test-model/ });
   await userEvent.click(screen.getByRole("combobox", { name: "记录来源" }));
   expect(
     screen.getByRole("option", { name: /WorkBuddy · 本机会话导入/ }),
@@ -286,7 +318,7 @@ it("uses a neutral future-source name without treating a source suffix as proof"
     { ...row, dataSource: "future_session", observedStatusCode: undefined },
   ];
   render(<UsageRequests {...props} />);
-  const item = await screen.findByRole("button", { name: "查看请求 native" });
+  const item = await screen.findByRole("button", { name: /test-model/ });
   expect(item).toHaveTextContent("其他来源记录");
   expect(item).not.toHaveTextContent("future_session");
   expect(item).not.toHaveTextContent("HTTP 200");
@@ -333,7 +365,7 @@ it.each(["constructor", "__proto__", "toString"])(
     records = [{ ...row, dataSource: source }];
     render(<UsageRequests {...props} />);
     expect(
-      await screen.findByRole("button", { name: "查看请求 native" }),
+      await screen.findByRole("button", { name: /test-model/ }),
     ).toHaveTextContent("其他来源记录");
   },
 );

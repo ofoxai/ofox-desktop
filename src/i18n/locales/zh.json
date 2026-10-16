@@ -3856,7 +3856,8 @@
     "estimateNotBill": "现价估算，以账户账单为准。",
     "nativeElapsedHelp": "耗时来自原生消息的起止时间，不代表 HTTP 往返或首 Token 用时。",
     "savedAmountHelp": "历史保存金额可能包含导入占位值，不代表账户实际扣费。",
-    "noMeasuredStatusNote": "不代表失败，Tokens 仍计入统计"
+    "noMeasuredStatusNote": "不代表失败，Tokens 仍计入统计",
+    "viewRequestRecord": "查看 {{model}} · {{time}} 的明细"
   },
   "usageSessions": {
     "title": "会话分析",
