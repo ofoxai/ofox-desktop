@@ -72,18 +72,7 @@ import { MoreHorizontal } from "lucide-react";
 import { settingsApi } from "@/lib/api/settings";
 import { skillsApi } from "@/lib/api/skills";
 
-function definitionFromEdits(edits: import("@/lib/api/library").FieldEdit[]) {
-  const result: Record<string, unknown> = Object.create(null);
-  for (const edit of edits) {
-    let parent = result;
-    for (const key of edit.path.slice(0, -1)) {
-      parent[key] ??= Object.create(null);
-      parent = parent[key] as Record<string, unknown>;
-    }
-    parent[edit.path.at(-1)!] = edit.value;
-  }
-  return result;
-}
+import { definitionFromEdits } from "./libraryMcpInput";
 /** Opaque IDs are ticket-local. A description is only useful when unique in both scans. */
 function inventorySourceIdentity(source: LibraryInventory["sources"][number]) {
   if (!source.locationKind) return undefined;
@@ -145,6 +134,7 @@ type OpenViewBody =
         | "check";
       resource: Resource;
       targets: ResourceTarget[];
+      focusPath?: string[];
     }
   | { type: "new" | "import" | "discover" | "advancedNew" }
   | {
@@ -1732,6 +1722,7 @@ export function LibrarySection({
                             repoBranch: recipe.repository.branch,
                           },
                           "claude",
+                          view.epoch,
                         );
                         await nextAfterSave(installed.id, intent);
                       })
@@ -1954,6 +1945,31 @@ export function LibrarySection({
                 server={view.resource as McpDefinition}
                 epoch={view.epoch}
                 readOnly={!writable || viewStale}
+                onNextAction={(action, element) => {
+                  if (action.kind !== "edit" || viewStale || !writable) return;
+                  const latest = rows.find(
+                    (row) => row.id === view.resource.id,
+                  );
+                  if (
+                    !latest ||
+                    latest.revision !== view.resource.revision ||
+                    data?.epoch !== view.epoch
+                  )
+                    return;
+                  open(
+                    {
+                      type: "edit",
+                      resource: latest,
+                      targets: view.targets,
+                      focusPath: action.focusPath,
+                    },
+                    {
+                      currentTarget: trigger.current?.isConnected
+                        ? trigger.current
+                        : element,
+                    },
+                  );
+                }}
                 onResult={(result, checkedAtMs) =>
                   setChecks((previous) => ({
                     ...previous,
@@ -1975,6 +1991,9 @@ export function LibrarySection({
               kind === "mcp" && (
                 <LibraryMcpForm
                   value={mcpDraft}
+                  initialFocusPath={
+                    view.type === "edit" ? view.focusPath : undefined
+                  }
                   initial={
                     view.type === "edit"
                       ? (view.resource as McpDefinition)

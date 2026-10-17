@@ -12,6 +12,7 @@ import { Button } from "@/components/ui/button";
 import { Compass } from "lucide-react";
 import { ResourcePackDialog } from "./ResourcePackDialog";
 import { LibrarySection } from "./LibrarySection";
+import { LibraryScenarioWizard } from "./LibraryScenarioWizard";
 
 const KINDS: LibraryKind[] = ["instructions", "mcp", "skills"];
 export function LibraryPage({
@@ -84,6 +85,14 @@ export function LibraryPage({
           }))}
         />
         <div className="flex flex-wrap items-center gap-2">
+          <LibraryScenarioWizard
+            onChanged={async () => {
+              await Promise.all([
+                summary.refetch(),
+                ...Array.from(actions.current.values(), (action) => action()),
+              ]);
+            }}
+          />
           <Button
             variant="ghost"
             onClick={(event) =>

@@ -100,6 +100,20 @@ async function toolbarAction(name: string) {
   return screen.findByRole("menuitem", { name });
 }
 
+it("opens scenario selection without saving, downloading or applying resources", async () => {
+  const save = vi.spyOn(libraryApi, "saveInstruction");
+  const apply = vi.spyOn(libraryApi, "runBatch");
+  mount();
+  await userEvent.click(
+    await screen.findByRole("button", { name: "场景套餐" }),
+  );
+  expect(screen.getByRole("button", { name: /前端开发/ })).toBeVisible();
+  expect(screen.getByRole("button", { name: /查文档/ })).toBeVisible();
+  expect(screen.getByRole("button", { name: /代码审查/ })).toBeVisible();
+  expect(save).not.toHaveBeenCalled();
+  expect(apply).not.toHaveBeenCalled();
+});
+
 beforeEach(() => {
   HTMLElement.prototype.scrollIntoView = vi.fn();
   scanSequence = 0;
@@ -349,6 +363,39 @@ it("shows skill provenance separately from its content hash and freezes detail i
     "artifact-hash",
   );
 });
+it("offers a focused command repair after a measured missing-program check without saving", async () => {
+  vi.mocked(listen).mockResolvedValue(vi.fn());
+  vi.spyOn(libraryApi, "prepareMcpCheck").mockResolvedValue({
+    operationId: "missing-program",
+  });
+  vi.spyOn(libraryApi, "runMcpCheck").mockResolvedValue({
+    operationId: "missing-program",
+    state: "blocked",
+    reason: "programMissing",
+    tools: [],
+  });
+  const save = vi.spyOn(libraryApi, "saveMcp");
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
+  await screen.findByText("MCP demo");
+  await userEvent.click(await rowAction("检查连接 MCP demo"));
+  await userEvent.click(screen.getByRole("button", { name: "开始检查" }));
+  await userEvent.click(
+    await screen.findByRole("button", { name: "修改命令" }),
+  );
+  expect(
+    await screen.findByRole("combobox", { name: "command的操作" }),
+  ).toHaveFocus();
+  expect(save).not.toHaveBeenCalled();
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "MCP demo 的更多操作" }),
+    ).toHaveFocus(),
+  );
+});
+
 it("starts MCP inspection only explicitly and subscribes before execution", async () => {
   let subscribed!: (unlisten: () => void) => void;
   vi.mocked(listen).mockImplementation(

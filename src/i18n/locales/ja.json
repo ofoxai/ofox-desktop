@@ -3044,7 +3044,8 @@
     "usageAmbiguous": "このセッションには帰属が不明なコピー履歴が含まれるため、使用量と費用を表示できません。",
     "usageSourceChanged": "セッションのソースが変更されました。更新して再試行してください。",
     "usageConflicting": "同じセッションに異なるソースがあるため、使用量をまだ検証できません。",
-    "usagePricingChanged": "価格の地域を更新しています。しばらくしてからセッション使用量を更新してください。"
+    "usagePricingChanged": "価格の地域を更新しています。しばらくしてからセッション使用量を更新してください。",
+    "usageNativeNotAssociated": "元の使用量は読み取れましたが、この会話に安全に関連付ける証拠がありません。"
   },
   "modelProfiles": {
     "reasonNotInstalled": "ツールが未インストールのため、スキップしました。",
@@ -3685,6 +3686,22 @@
     "mcpCheckCancel": "確認を中止",
     "mcpCheckCancelling": "中止しています…",
     "mcpCheckTitleDescription": "ツール設定を変更せず、明示的に接続を確認します。",
+    "issues": {
+      "command": "コマンドを編集",
+      "commandHint": "ローカル実行ファイルのパスを確認し、保存してから再確認してください。",
+      "directory": "作業ディレクトリを編集",
+      "directoryHint": "設定内の絶対ディレクトリパスを確認してください。",
+      "credentials": "認証情報の設定を確認",
+      "credentialsHint": "保存済み環境変数とヘッダーを確認します。認証情報の値は表示しません。",
+      "nativeGuide": "ツール側の手順を表示",
+      "unsupportedHint": "対象ツールで設定を確認してください。サービス障害を示すものではありません。",
+      "authorizationHint": "対象ツールで認証するか、アクセス権限を確認してください。",
+      "nativeSteps": "対象ツールを開き直すか新しいセッションを開始し、MCP 設定でサーバーを確認してください。\n必要な場合はツール標準の認証を使用し、パスワードやトークンをエラー詳細に貼り付けないでください。\nOFox は依存関係のインストール、サービス実行、ログイン状態の読み取りを自動では行いません。",
+      "reconcile": "既存の結果を確認",
+      "repreview": "残りの設定を再プレビュー",
+      "incompleteHint": "完了済みの項目を確認してから、残りを新しくプレビューしてください。",
+      "cancelledHint": "完了済み項目は保持されます。再適用には新しいプレビューが必要です。"
+    },
     "mcpCheckDescription": "開始後にサーバーへ接続するか、インストール済みのローカルプログラムを起動し、プロトコルとツール一覧を読み取ります。ツールの呼び出し、依存関係のインストール、OAuth 認証は行いません。閉じるか別ページへ移ると中止します。",
     "mcpCheckToolCount": "{{count}} 個のツールが見つかりました",
     "mcpCheckBusy": "このサーバーは確認中か、同時確認数の上限に達しています。",
@@ -4149,7 +4166,32 @@
       }
     },
     "inventoryRevealFailed": "取得元を表示できません。再スキャンして再試行してください。",
-    "skillGitLfsUnsupported": "このスキルには未対応の Git LFS ポインターが含まれます。完全なファイルをローカルに取得してから収録してください。"
+    "skillGitLfsUnsupported": "このスキルには未対応の Git LFS ポインターが含まれます。完全なファイルをローカルに取得してから収録してください。",
+    "scenarios": {
+      "title": "用途別セット",
+      "description": "必要なリソースを選び、種類ごとに確認してツールへ適用します。",
+      "frontend": "フロントエンド開発",
+      "docs": "ドキュメント調査",
+      "review": "コードレビュー",
+      "optional": "任意・初期状態はオフ",
+      "prepare": "設定を補って収録",
+      "prepared": "準備済み {{count}} / {{total}} 件",
+      "reuse": "収録済みの「{{name}}」を使う",
+      "matchNote": "完全に同じ設定のみ直接再利用できます。新規設定も競合プレビューで確認します。",
+      "download": "選択した Skill をライブラリにダウンロード",
+      "chooseTools": "ツールを選ぶ",
+      "toolsHint": "ツールは初期状態では選択されません。選択したリソースをすべて扱えるインストール済みツールのみ表示します。",
+      "summary": "全体を確認",
+      "confirmSeparately": "指示、MCP、Skills の順に個別にプレビューして確認します。完了した段階は保持され、後続の段階は自動実行されません。",
+      "startReview": "種類ごとの確認を開始",
+      "nextType": "次の種類をプレビュー",
+      "showResult": "結果を見る",
+      "done": "選択した段階が完了しました",
+      "resultHint": "ツール別の書き込み、競合、未完了項目は各段階の結果と操作履歴で確認できます。ツールを開き直すか新しい会話を開始し、必要な認証はネイティブクライアントで行ってください。閉じた後の自動再実行はありません。残りの項目は再プレビューが必要です。",
+      "stop": "後続の手順を停止して閉じる",
+      "savedPending": "ライブラリへの保存は完了し、結果の確認が必要です。送信済みの設定はここでは変更できません。編集するにはライブラリへ戻ってください。",
+      "verifySaved": "保存済み項目を再確認"
+    }
   },
   "catalogLifecycle": {
     "manageShort": "インストール管理",
@@ -4489,7 +4531,17 @@
       "unparsedProjectExcluded": "場所を解析できない記録はプロジェクト条件から除外しました。",
       "sessionRoleNotRecorded": "ネイティブ記録の役割を確認できません。",
       "messageNativeIdentityUnavailable": "信頼できるメッセージIDがなく、安全に重複排除できません。",
-      "incompleteSource": "ソースが不完全なため、確認できる指標だけを保持します。"
+      "incompleteSource": "ソースが不完全なため、確認できる指標だけを保持します。",
+      "messagesUnavailable": "有効なメッセージの検証済み投影がないため、メッセージ数と活動時間は不明です。",
+      "nativeGenerationRollback": "古い世代の記録で、検証済みの新しいデータを置き換えることはできません。",
+      "nativePrimaryMissing": "以前確認した主データベースが見つからないため、古いログは復活させていません。",
+      "seedBoundaryUnavailable": "継承境界を確認できず、コピーされた使用量を安全に帰属できません。",
+      "seedBoundaryIncomplete": "継承境界の証拠が不完全です。",
+      "conflictingSessionProject": "元のプロジェクト情報が競合するため、帰属先は推測していません。",
+      "parentCycleOrDepthLimit": "親子関係に循環があるか、検証可能な深さを超えています。",
+      "parentSourceUnavailable": "親会話の元記録がなく、継承分を確認できません。",
+      "forkBoundaryUnavailable": "分岐の継承境界を確認できません。",
+      "nativeGenerationLeaseUnavailable": "ネイティブ世代の証拠を確認できないため、古い記録で補っていません。"
     },
     "underMinute": "1分未満（ゼロ以外）",
     "distributionBucket": "{{range}}：{{count}} セッション",

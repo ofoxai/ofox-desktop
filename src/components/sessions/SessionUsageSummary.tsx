@@ -5,6 +5,8 @@ import { formatUsageEstimate } from "@/lib/usageEstimate";
 
 export function sessionUsageUnavailableReason(display?: SessionUsageDisplay) {
   const reasons = display?.reasons ?? [];
+  if (reasons.includes("nativeSessionNotAssociated"))
+    return "sessionCenter.usageNativeNotAssociated";
   if (reasons.includes("pricingContextChanged"))
     return "sessionCenter.usagePricingChanged";
   if (reasons.includes("ambiguousThreadHistory"))

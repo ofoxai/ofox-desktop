@@ -1,5 +1,20 @@
 import { parseTree, type Node, type ParseError } from "jsonc-parser";
 import type { FieldEdit, McpDefinition } from "@/lib/api/library";
+
+/** Used only with validated create edits; never expands references to saved values. */
+export function definitionFromEdits(edits: FieldEdit[]) {
+  const result: Record<string, unknown> = Object.create(null);
+  for (const edit of edits) {
+    if (edit.action !== "set" || !edit.path.length) continue;
+    let parent = result;
+    for (const key of edit.path.slice(0, -1)) {
+      parent[key] ??= Object.create(null);
+      parent = parent[key] as Record<string, unknown>;
+    }
+    parent[edit.path.at(-1)!] = edit.value;
+  }
+  return result;
+}
 import {
   createMcpDraft,
   type LibraryMcpDraft,

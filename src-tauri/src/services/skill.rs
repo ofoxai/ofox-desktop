@@ -422,37 +422,85 @@ impl SkillService {
             .collect()
     }
 
-    /// 安装 Skill
+    /// 收录 Skill 到资源库；不启用工具，也不执行脚本。
     ///
     /// 流程：
-    /// 1. 下载到 SSOT 目录
-    /// 2. 保存到数据库
-    /// 3. 同步到启用的应用目录
+    /// 1. 获取所选目录并固定实际提交
+    /// 2. 核验本机资源库 epoch，发布不可变内容并保存未分配定义
     pub async fn install(
         &self,
         db: &Arc<Database>,
         skill: &DiscoverableSkill,
         current_app: &AppType,
     ) -> Result<InstalledSkill> {
+        self.install_with_epoch(db, skill, current_app, None).await
+    }
+
+    /// Compatible library entry point. A provided epoch binds collection to
+    /// the caller's current local library rather than a later restored state.
+    pub async fn install_with_epoch(
+        &self,
+        db: &Arc<Database>,
+        skill: &DiscoverableSkill,
+        current_app: &AppType,
+        expected_epoch: Option<u64>,
+    ) -> Result<InstalledSkill> {
+        self.install_with_download(
+            db,
+            skill,
+            current_app,
+            expected_epoch,
+            |repo, directory| async move { self.download_selected_repo(&repo, &directory).await },
+        )
+        .await
+    }
+
+    async fn install_with_download<F, Fut>(
+        &self,
+        db: &Arc<Database>,
+        skill: &DiscoverableSkill,
+        current_app: &AppType,
+        expected_epoch: Option<u64>,
+        download: F,
+    ) -> Result<InstalledSkill>
+    where
+        F: FnOnce(SkillRepo, String) -> Fut,
+        Fut: std::future::Future<
+            Output = Result<(
+                crate::services::library::skill_artifact::ExtractedDir,
+                String,
+            )>,
+        >,
+    {
         crate::agent_env::ready().await;
         let _ = current_app;
         crate::services::library::skill_artifact::safe_relative(&skill.directory)?;
-        crate::services::library::skill_resource::ensure_metadata(db)?;
-        let existing = db.get_all_installed_skills()?;
-        if let Some(row) = existing.values().find(|row| {
-            row.directory.eq_ignore_ascii_case(
-                skill
-                    .directory
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&skill.directory),
-            )
-        }) {
-            if row.id == skill.key {
-                return Ok(row.clone());
+        let frozen_epoch = {
+            let _guard = crate::config_io::lock();
+            let snapshot = db.library_snapshot()?;
+            if expected_epoch.is_some_and(|epoch| snapshot.machine.epoch != epoch) {
+                return Err(anyhow!("library.epochChanged"));
             }
-            return Err(anyhow!("library.skillNameConflict"));
-        }
+            crate::services::library::skill_resource::ensure_metadata(db)?;
+            let existing = db.get_all_installed_skills()?;
+            if let Some(row) = existing.values().find(|row| {
+                row.directory.eq_ignore_ascii_case(
+                    skill
+                        .directory
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&skill.directory),
+                )
+            }) {
+                // Strict callers must explicitly select an evidence-matched
+                // existing resource. A directory or old key is not that proof.
+                if expected_epoch.is_none() && row.id == skill.key {
+                    return Ok(row.clone());
+                }
+                return Err(anyhow!("library.skillNameConflict"));
+            }
+            snapshot.machine.epoch
+        };
         let repo = SkillRepo {
             owner: skill.repo_owner.clone(),
             name: skill.repo_name.clone(),
@@ -461,7 +509,7 @@ impl SkillService {
         };
         let (downloaded, commit) = timeout(
             std::time::Duration::from_secs(60),
-            self.download_selected_repo(&repo, &skill.directory),
+            download(repo.clone(), skill.directory.clone()),
         )
         .await
         .map_err(|_| anyhow!("library.skillDownloadTimeout"))??;
@@ -498,12 +546,13 @@ impl SkillService {
             updated_at: 0,
         };
         Ok(
-            crate::services::library::skill_resource::save_draft_with_execution(
+            crate::services::library::skill_resource::save_draft_with_execution_at_epoch(
                 db,
                 row,
                 &source,
                 None,
                 Some(&downloaded.execution_for(&source)?),
+                frozen_epoch,
             )?,
         )
     }
@@ -1686,6 +1735,171 @@ pub fn migrate_skills_to_ssot(db: &Arc<Database>) -> Result<usize> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn epoch_collection_recipe() -> DiscoverableSkill {
+        DiscoverableSkill {
+            key: "fixture/skills:skills/epoch-guard".into(),
+            name: "Epoch guard".into(),
+            description: "Local fixture".into(),
+            directory: "skills/epoch-guard".into(),
+            readme_url: None,
+            repo_owner: "fixture".into(),
+            repo_name: "skills".into(),
+            repo_branch: "main".into(),
+        }
+    }
+    fn epoch_collection_download() -> crate::services::library::skill_artifact::ExtractedDir {
+        use std::io::{Cursor, Write};
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        zip.start_file(
+            "skills/epoch-guard/SKILL.md",
+            zip::write::SimpleFileOptions::default().unix_permissions(0o644),
+        )
+        .unwrap();
+        zip.write_all(b"---\nname: epoch-guard\ndescription: Sandbox\n---\nSynthetic fixture")
+            .unwrap();
+        crate::services::library::skill_artifact::extract_zip(
+            &zip.finish().unwrap().into_inner(),
+            false,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn skill_collection_epoch_change_while_downloading_cannot_create_a_draft() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Arc::new(Database::memory().unwrap());
+        let original = db.library_snapshot().unwrap();
+        let download = epoch_collection_download();
+        let source = download.path().join("skills/epoch-guard");
+        let hash = crate::services::library::skill_artifact::tree_hash(&source).unwrap();
+        let artifact = crate::services::library::skill_artifact::path(&hash).unwrap();
+        assert!(!artifact.exists());
+        let service = SkillService::new();
+        let result = service
+            .install_with_download(
+                &db,
+                &epoch_collection_recipe(),
+                &AppType::Claude,
+                Some(original.machine.epoch),
+                |_, _| async {
+                    let current = db.library_snapshot().unwrap();
+                    let mut restored = current.clone();
+                    restored.machine.epoch += 1;
+                    db.library_commit(&current, &restored).unwrap();
+                    Ok((download, "a".repeat(40)))
+                },
+            )
+            .await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("library.epochChanged"));
+        assert!(db.get_all_installed_skills().unwrap().is_empty());
+        let after = db.library_snapshot().unwrap();
+        assert!(after.definitions.skills.is_empty());
+        assert!(after.machine.assignments.is_empty());
+        assert!(after.machine.receipts.is_empty());
+        assert_eq!(after.machine.epoch, original.machine.epoch + 1);
+        assert!(
+            !artifact.exists(),
+            "staleness was known before immutable publication"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn skill_collection_stale_expected_epoch_never_starts_download() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Arc::new(Database::memory().unwrap());
+        let before = db.library_snapshot().unwrap();
+        let mut restored = before.clone();
+        restored.machine.epoch += 1;
+        let restored = db.library_commit(&before, &restored).unwrap();
+        let writes_before: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT total_changes()", [], |row| row.get(0))
+            .unwrap();
+        let called = std::cell::Cell::new(false);
+        let result = SkillService::new()
+            .install_with_download(
+                &db,
+                &epoch_collection_recipe(),
+                &AppType::Claude,
+                Some(before.machine.epoch),
+                |_, _| async {
+                    called.set(true);
+                    Err(anyhow!("unexpected fixture download"))
+                },
+            )
+            .await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("library.epochChanged"));
+        assert!(!called.get());
+        assert_eq!(db.library_snapshot().unwrap(), restored);
+        let writes_after: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT total_changes()", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            writes_after, writes_before,
+            "a stale intent cannot write metadata"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn skill_collection_strict_duplicate_is_not_reused_by_its_old_key() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Arc::new(Database::memory().unwrap());
+        let recipe = epoch_collection_recipe();
+        let service = SkillService::new();
+        let saved = service
+            .install_with_download(&db, &recipe, &AppType::Claude, Some(0), |_, _| async {
+                Ok((epoch_collection_download(), "a".repeat(40)))
+            })
+            .await
+            .unwrap();
+        assert!(saved.apps == SkillApps::default());
+        assert!(saved.readme_url.as_ref().unwrap().contains(&"a".repeat(40)));
+        let before = db.library_snapshot().unwrap();
+        let called = std::cell::Cell::new(false);
+        let strict = service
+            .install_with_download(
+                &db,
+                &recipe,
+                &AppType::Claude,
+                Some(before.machine.epoch),
+                |_, _| async {
+                    called.set(true);
+                    Err(anyhow!("unexpected fixture download"))
+                },
+            )
+            .await;
+        assert!(strict
+            .unwrap_err()
+            .to_string()
+            .contains("library.skillNameConflict"));
+        assert!(!called.get());
+        assert_eq!(db.library_snapshot().unwrap(), before);
+        let legacy = service
+            .install_with_download(&db, &recipe, &AppType::Claude, None, |_, _| async {
+                called.set(true);
+                Err(anyhow!("unexpected fixture download"))
+            })
+            .await
+            .unwrap();
+        assert_eq!(legacy.id, saved.id);
+        assert!(!called.get());
+        assert_eq!(db.library_snapshot().unwrap(), before);
+    }
 
     #[test]
     #[serial_test::serial]

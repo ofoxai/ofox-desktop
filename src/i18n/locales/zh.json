@@ -3044,7 +3044,8 @@
     "usageAmbiguous": "此会话包含无法区分归属的复制历史，暂不展示用量和费用。",
     "usageSourceChanged": "会话来源已变化，请刷新后重试。",
     "usageConflicting": "发现同一会话的不同来源，暂无法确定用量。",
-    "usagePricingChanged": "价格区域正在更新，请稍后刷新会话用量。"
+    "usagePricingChanged": "价格区域正在更新，请稍后刷新会话用量。",
+    "usageNativeNotAssociated": "已读取来源用量，但缺少把它安全关联到此会话的证据。"
   },
   "modelProfiles": {
     "reasonNotInstalled": "工具未安装，已跳过。",
@@ -3685,6 +3686,22 @@
     "mcpCheckCancel": "取消检查",
     "mcpCheckCancelling": "正在取消…",
     "mcpCheckTitleDescription": "显式连接检查，不更改工具配置。",
+    "issues": {
+      "command": "修改命令",
+      "commandHint": "核对本机程序路径；保存后重新检查。",
+      "directory": "修改工作目录",
+      "directoryHint": "核对配置中的绝对目录路径。",
+      "credentials": "补充凭据配置",
+      "credentialsHint": "检查已保存的环境变量和请求头；原始凭据不会在这里显示。",
+      "nativeGuide": "查看原生操作步骤",
+      "unsupportedHint": "此配置需要在对应工具中检查，不表示服务故障。",
+      "authorizationHint": "请在目标工具中完成授权或核对访问权限。",
+      "nativeSteps": "重新打开目标工具或新建会话，在它的 MCP 管理入口检查服务器。\n需要登录时使用工具原生授权流程；请勿将密码或令牌粘贴到错误详情。\nOFox 不会自动安装依赖、执行服务或读取工具登录态。",
+      "reconcile": "核对已有结果",
+      "repreview": "重新预览剩余配置",
+      "incompleteHint": "先核对已完成项，再为未完成项生成新预览。",
+      "cancelledHint": "已完成项保留；再次应用需要重新预览。"
+    },
     "mcpCheckDescription": "仅在开始后连接服务器或启动已安装的本机程序，读取协议与工具列表；不会调用工具、自动安装依赖或代做 OAuth 授权。关闭或离开页面将取消检查。",
     "mcpCheckToolCount": "发现 {{count}} 个工具",
     "mcpCheckBusy": "此服务器已有检查，或检查数量已达上限。",
@@ -4149,7 +4166,32 @@
       }
     },
     "inventoryRevealFailed": "无法在文件夹中显示，请重新扫描后重试。",
-    "skillGitLfsUnsupported": "所选技能包含 Git LFS 指针，此版本暂不支持。请先在本机取得完整文件，再从本机收录。"
+    "skillGitLfsUnsupported": "所选技能包含 Git LFS 指针，此版本暂不支持。请先在本机取得完整文件，再从本机收录。",
+    "scenarios": {
+      "title": "场景套餐",
+      "description": "选择常用资源，再逐类预览并应用到工具。",
+      "frontend": "前端开发",
+      "docs": "查文档",
+      "review": "代码审查",
+      "optional": "可选，默认关闭",
+      "prepare": "补充配置并收录",
+      "prepared": "已准备 {{count}} / {{total}} 项",
+      "reuse": "使用已收录的「{{name}}」",
+      "matchNote": "仅完全相同的配置可直接复用；新建配置仍会经过冲突预览。",
+      "download": "下载所选 Skill 到资源库",
+      "chooseTools": "选择工具",
+      "toolsHint": "工具默认不选。此处仅列出所选资源均支持的已安装工具。",
+      "summary": "查看总览",
+      "confirmSeparately": "按指令、MCP、Skills 分别预览并确认。已完成阶段会保留，后续阶段不会自动执行。",
+      "startReview": "开始逐类预览",
+      "nextType": "预览下一类",
+      "showResult": "查看汇总结果",
+      "done": "已完成所选阶段",
+      "resultHint": "各工具的写入、冲突和未完成项见阶段结果与操作记录。重新打开工具或新建会话；若需要授权，请在原生客户端完成。关闭后不会自动重放；剩余项需要重新预览。",
+      "stop": "停止后续步骤并关闭",
+      "savedPending": "已保存到资源库，正在核对结果。此处不再修改已提交的配置；如需编辑，请返回资源库。",
+      "verifySaved": "重新核验已保存项"
+    }
   },
   "catalogLifecycle": {
     "manageShort": "安装管理",
@@ -4489,7 +4531,17 @@
       "unparsedProjectExcluded": "无法解析项目目录的记录未纳入当前项目筛选。",
       "sessionRoleNotRecorded": "原生记录缺少可确认的消息角色。",
       "messageNativeIdentityUnavailable": "缺少可靠的原生消息身份，无法安全去重。",
-      "incompleteSource": "来源内容不完整，相关指标只保留可信部分。"
+      "incompleteSource": "来源内容不完整，相关指标只保留可信部分。",
+      "messagesUnavailable": "原始来源尚无可验证的有效消息投影；消息数与活跃时长保持未知。",
+      "nativeGenerationRollback": "已发现旧代记录，无法用其替代已确认的新代数据。",
+      "nativePrimaryMissing": "曾确认的主数据库已消失，未回退读取旧日志。",
+      "seedBoundaryUnavailable": "缺少可验证的继承边界，不能安全归属复制的消耗。",
+      "seedBoundaryIncomplete": "继承边界证据不完整。",
+      "conflictingSessionProject": "原始会话的项目信息存在冲突，未猜测项目归属。",
+      "parentCycleOrDepthLimit": "会话父子链存在循环或超过可验证深度。",
+      "parentSourceUnavailable": "缺少父会话的原始记录，无法确认继承归属。",
+      "forkBoundaryUnavailable": "分支的继承边界无法确认。",
+      "nativeGenerationLeaseUnavailable": "缺少可验证的原生代际凭据，未使用旧代记录补齐。"
     },
     "underMinute": "不足 1 分钟（非零）",
     "distributionBucket": "{{range}}：{{count}} 个会话",

@@ -10,6 +10,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { ListCard, ListRow } from "@/components/ui/list";
 import { libraryError, toolLabel } from "./libraryText";
+import { batchIssue } from "./libraryIssues";
+import { LibraryIssueNotice } from "./LibraryIssueNotice";
 function BatchChangeSummary({
   change,
 }: {
@@ -240,6 +242,34 @@ export function LibraryBatchReview({
               defaultValue: t("library.unknown"),
             })}
           </p>
+          {batchIssue(plan.status) && (
+            <LibraryIssueNotice
+              issue={batchIssue(plan.status)!}
+              disabled={busy || cancelPending}
+              onAction={
+                batchIssue(plan.status)!.action.kind === "repreview" &&
+                !resources.length
+                  ? undefined
+                  : (next) => {
+                      if (next.kind === "reconcile")
+                        void run(
+                          () => libraryApi.reconcileBatch(plan.operationId),
+                          true,
+                        );
+                      if (next.kind === "repreview")
+                        void run(() =>
+                          libraryApi.previewBatch(
+                            kind,
+                            resources,
+                            tools,
+                            action,
+                            epoch,
+                          ),
+                        );
+                    }
+              }
+            />
+          )}
           {plan.metadataChanges && plan.metadataChanges.length > 0 && (
             <section className="space-y-2">
               <p className="text-ctl text-ink-muted">
@@ -355,21 +385,7 @@ export function LibraryBatchReview({
                 {t("library.workbench.stopRemaining")}
               </Button>
             )}
-            {["partial", "needsReview", "prepared"].includes(plan.status) && (
-              <Button
-                variant="secondary"
-                disabled={busy}
-                onClick={() =>
-                  void run(
-                    () => libraryApi.reconcileBatch(plan.operationId),
-                    true,
-                  )
-                }
-              >
-                {t("library.workbench.reconcile")}
-              </Button>
-            )}
-            {["partial", "cancelled", "needsReview"].includes(plan.status) &&
+            {["partial", "needsReview"].includes(plan.status) &&
               resources.length > 0 && (
                 <Button
                   variant="secondary"

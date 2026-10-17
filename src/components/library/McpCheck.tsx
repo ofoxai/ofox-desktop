@@ -11,6 +11,8 @@ import {
 } from "@/lib/api/library";
 import { useDraftState, type DraftStore } from "./useDraftState";
 import { libraryError } from "./libraryText";
+import { checkIssue, type LibraryNextAction } from "./libraryIssues";
+import { LibraryIssueNotice } from "./LibraryIssueNotice";
 const STAGES = [
   "preflight",
   "connect",
@@ -25,6 +27,7 @@ export function McpCheck({
   readOnly,
   onBusyChange,
   onResult,
+  onNextAction,
 }: {
   store: DraftStore;
   server: McpDefinition;
@@ -32,6 +35,7 @@ export function McpCheck({
   readOnly: boolean;
   onBusyChange: (busy: boolean) => void;
   onResult?: (result: McpCheckResult, checkedAtMs: number) => void;
+  onNextAction?: (action: LibraryNextAction, trigger: HTMLElement) => void;
 }) {
   const { t } = useTranslation();
   const [busy, setBusy] = useDraftState(store, "mcpCheckBusy", false);
@@ -46,6 +50,11 @@ export function McpCheck({
     null,
   );
   const [error, setError] = useDraftState(store, "mcpCheckError", "");
+  const [resultProof, setResultProof] = useDraftState(
+    store,
+    "mcpCheckResultProof",
+    "",
+  );
   const [cancelling, setCancelling] = useDraftState(
     store,
     "mcpCheckCancelling",
@@ -164,6 +173,7 @@ export function McpCheck({
           ? { operationId: id, state: "cancelled", tools: [] }
           : checked,
       );
+      setResultProof(expectedProof);
       if (!cancelled.current && checked.state !== "cancelled")
         resultCallback.current?.(checked, Date.now());
     } catch (failure) {
@@ -237,6 +247,13 @@ export function McpCheck({
                 defaultValue: t("library.failed"),
               })}
             </p>
+          )}
+          {resultProof === currentProof && checkIssue(result) && (
+            <LibraryIssueNotice
+              issue={checkIssue(result)!}
+              disabled={readOnly || busy}
+              onAction={onNextAction}
+            />
           )}
           {result.state === "blocked" && (
             <p className="text-ctl text-ink-muted">

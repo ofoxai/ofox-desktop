@@ -71,14 +71,51 @@ pub fn save_draft_with_execution(
 ) -> Result<InstalledSkill, AppError> {
     save_draft_checked_with_execution(db, skill, source, expected, flags, None)
 }
+pub(crate) fn save_draft_with_execution_at_epoch(
+    db: &Database,
+    skill: InstalledSkill,
+    source: &Path,
+    expected: Option<u64>,
+    flags: Option<&artifacts::ExecutionMap>,
+    expected_epoch: u64,
+) -> Result<InstalledSkill, AppError> {
+    save_draft_checked_at_epoch(
+        db,
+        skill,
+        source,
+        expected,
+        flags,
+        None,
+        Some(expected_epoch),
+    )
+}
 pub(crate) fn save_draft_checked_with_execution(
+    db: &Database,
+    skill: InstalledSkill,
+    source: &Path,
+    expected: Option<u64>,
+    flags: Option<&artifacts::ExecutionMap>,
+    expected_hash: Option<&str>,
+) -> Result<InstalledSkill, AppError> {
+    save_draft_checked_at_epoch(db, skill, source, expected, flags, expected_hash, None)
+}
+fn save_draft_checked_at_epoch(
     db: &Database,
     mut skill: InstalledSkill,
     source: &Path,
     expected: Option<u64>,
     flags: Option<&artifacts::ExecutionMap>,
     expected_hash: Option<&str>,
+    expected_epoch: Option<u64>,
 ) -> Result<InstalledSkill, AppError> {
+    // Collection is synchronous here. Keep restoration outside the publication
+    // and commit interval without retaining a configuration lock across download.
+    let _epoch_guard = expected_epoch.map(|_| crate::config_io::lock());
+    if let Some(epoch) = expected_epoch {
+        if db.library_snapshot()?.machine.epoch != epoch {
+            return Err(error("epochChanged"));
+        }
+    }
     artifacts::safe_leaf(&skill.directory)?;
     if skill.id.is_empty() || skill.id.len() > 256 || skill.name.trim().is_empty() {
         return Err(error("invalidSkill"));
@@ -90,6 +127,9 @@ pub(crate) fn save_draft_checked_with_execution(
     };
     let _guard = crate::config_io::lock();
     let before = db.library_snapshot()?;
+    if expected_epoch.is_some_and(|epoch| before.machine.epoch != epoch) {
+        return Err(error("epochChanged"));
+    }
     if before
         .definitions
         .skills
@@ -1091,6 +1131,118 @@ pub fn receipt_intact(receipt: &Receipt) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn skill_draft_epoch_guard_rejects_an_old_download_before_publication() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let source = tempfile::tempdir().unwrap();
+        fs::write(
+            source.path().join("SKILL.md"),
+            "---\nname: epoch-guard\ndescription: Sandbox\n---\nSynthetic fixture",
+        )
+        .unwrap();
+        let hash = artifacts::tree_hash(source.path()).unwrap();
+        let artifact = artifacts::path(&hash).unwrap();
+        assert!(!artifact.exists());
+        let db = Database::memory().unwrap();
+        let before = db.library_snapshot().unwrap();
+        let mut restored = before.clone();
+        restored.machine.epoch += 1;
+        let restored = db.library_commit(&before, &restored).unwrap();
+        let writes_before: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT total_changes()", [], |row| row.get(0))
+            .unwrap();
+        let row = InstalledSkill {
+            id: "epoch:fixture".into(),
+            name: "Epoch fixture".into(),
+            description: None,
+            directory: "epoch-guard".into(),
+            repo_owner: None,
+            repo_name: None,
+            repo_branch: None,
+            readme_url: None,
+            apps: SkillApps::default(),
+            installed_at: 0,
+            updated_at: 0,
+            content_hash: None,
+        };
+        let result = save_draft_with_execution_at_epoch(
+            &db,
+            row,
+            source.path(),
+            None,
+            None,
+            before.machine.epoch,
+        );
+        assert!(
+            result.is_err(),
+            "a restore epoch must invalidate the original download intent"
+        );
+        assert_eq!(db.library_snapshot().unwrap(), restored);
+        assert!(db.get_all_installed_skills().unwrap().is_empty());
+        assert!(
+            !artifact.exists(),
+            "an already-stale intent must not publish its artifact"
+        );
+        let writes_after: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT total_changes()", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            writes_after, writes_before,
+            "a stale draft intent cannot write metadata"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn skill_draft_epoch_guard_same_epoch_creates_only_an_unassigned_draft() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let source = tempfile::tempdir().unwrap();
+        fs::write(
+            source.path().join("SKILL.md"),
+            "---\nname: epoch-guard\ndescription: Sandbox\n---\nSynthetic fixture",
+        )
+        .unwrap();
+        let db = Database::memory().unwrap();
+        let before = db.library_snapshot().unwrap();
+        let row = InstalledSkill {
+            id: "epoch:fixture".into(),
+            name: "Epoch fixture".into(),
+            description: None,
+            directory: "epoch-guard".into(),
+            repo_owner: None,
+            repo_name: None,
+            repo_branch: None,
+            readme_url: None,
+            apps: SkillApps {
+                claude: true,
+                ..Default::default()
+            },
+            installed_at: 0,
+            updated_at: 0,
+            content_hash: None,
+        };
+        let saved = save_draft_with_execution_at_epoch(
+            &db,
+            row,
+            source.path(),
+            None,
+            None,
+            before.machine.epoch,
+        )
+        .unwrap();
+        assert_eq!(saved.apps, SkillApps::default());
+        let after = db.library_snapshot().unwrap();
+        assert!(after.machine.assignments.is_empty());
+        assert!(after.machine.receipts.is_empty());
+    }
 
     #[test]
     #[serial_test::serial]

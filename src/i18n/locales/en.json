@@ -3044,7 +3044,8 @@
     "usageAmbiguous": "This session contains copied history with unclear ownership, so usage and cost are unavailable.",
     "usageSourceChanged": "The session source changed. Refresh to try again.",
     "usageConflicting": "Different sources exist for this session, so its usage cannot yet be verified.",
-    "usagePricingChanged": "The pricing region is updating. Refresh session usage shortly."
+    "usagePricingChanged": "The pricing region is updating. Refresh session usage shortly.",
+    "usageNativeNotAssociated": "Source usage was read, but it cannot be safely associated with this session."
   },
   "modelProfiles": {
     "reasonNotInstalled": "Tool is not installed; skipped.",
@@ -3685,6 +3686,22 @@
     "mcpCheckCancel": "Cancel check",
     "mcpCheckCancelling": "Cancelling…",
     "mcpCheckTitleDescription": "An explicit connection check that does not change tool configuration.",
+    "issues": {
+      "command": "Edit command",
+      "commandHint": "Check the local executable path, then save and check again.",
+      "directory": "Edit working directory",
+      "directoryHint": "Check the absolute directory path in this configuration.",
+      "credentials": "Review credentials",
+      "credentialsHint": "Review saved environment variables and headers. Stored credential values stay private.",
+      "nativeGuide": "View native steps",
+      "unsupportedHint": "Check this configuration in the target tool; this does not indicate a service failure.",
+      "authorizationHint": "Authorize in the target tool or review its access permissions.",
+      "nativeSteps": "Reopen the target tool or start a new session, then check the server in its MCP settings.\nUse the tool’s native sign-in flow when required. Do not paste passwords or tokens into error details.\nOFox does not install dependencies, run the service, or read the tool’s login state automatically.",
+      "reconcile": "Verify existing results",
+      "repreview": "Preview remaining configuration",
+      "incompleteHint": "Verify completed items before preparing a new preview for the remainder.",
+      "cancelledHint": "Completed items are retained; applying again requires a new preview."
+    },
     "mcpCheckDescription": "Starting connects to the server or launches an installed local program to read the protocol and tool list. It does not call tools, install dependencies or perform OAuth. Closing or leaving this page cancels the check.",
     "mcpCheckToolCount": "Found {{count}} tools",
     "mcpCheckBusy": "This server is already being checked, or the check limit has been reached.",
@@ -4149,7 +4166,32 @@
       }
     },
     "inventoryRevealFailed": "Could not reveal the source. Rescan and try again.",
-    "skillGitLfsUnsupported": "This skill contains Git LFS pointers, which are unsupported. Obtain the complete files locally, then collect them from this machine."
+    "skillGitLfsUnsupported": "This skill contains Git LFS pointers, which are unsupported. Obtain the complete files locally, then collect them from this machine.",
+    "scenarios": {
+      "title": "Scenario kits",
+      "description": "Choose useful resources, then review and apply each resource type.",
+      "frontend": "Frontend development",
+      "docs": "Documentation",
+      "review": "Code review",
+      "optional": "Optional, off by default",
+      "prepare": "Configure and collect",
+      "prepared": "Prepared {{count}} / {{total}} resources",
+      "reuse": "Use collected “{{name}}”",
+      "matchNote": "Only identical configurations can be reused directly. New configurations still go through conflict review.",
+      "download": "Download the selected Skill to the library",
+      "chooseTools": "Choose tools",
+      "toolsHint": "No tools are selected by default. Only installed tools supporting all selected resources are listed.",
+      "summary": "Review overview",
+      "confirmSeparately": "Review and confirm instructions, MCP, then Skills separately. Completed stages are kept; later stages never run automatically.",
+      "startReview": "Start reviews",
+      "nextType": "Review next type",
+      "showResult": "View results",
+      "done": "Selected stages completed",
+      "resultHint": "Per-tool writes, conflicts and unfinished items are shown in stage results and operation history. Reopen the tool or start a new session; complete authorization in the native client if needed. Closing never replays work automatically. Preview unfinished items again.",
+      "stop": "Stop remaining steps and close",
+      "savedPending": "Saved to the library; verification is pending. Submitted configuration is frozen here. Return to the library to edit it.",
+      "verifySaved": "Verify the saved resource again"
+    }
   },
   "catalogLifecycle": {
     "manageShort": "Manage installation",
@@ -4489,7 +4531,17 @@
       "unparsedProjectExcluded": "Records without a parseable project were excluded by the project filter.",
       "sessionRoleNotRecorded": "Native records do not establish the message role.",
       "messageNativeIdentityUnavailable": "Reliable native message identity is missing, so deduplication cannot be proved.",
-      "incompleteSource": "Source content is incomplete; only verified metrics are retained."
+      "incompleteSource": "Source content is incomplete; only verified metrics are retained.",
+      "messagesUnavailable": "The source has no verified effective-message projection; message counts and activity remain unknown.",
+      "nativeGenerationRollback": "Older generations cannot replace the verified newer data.",
+      "nativePrimaryMissing": "A previously verified primary database is missing; legacy logs were not revived.",
+      "seedBoundaryUnavailable": "The inheritance boundary cannot be verified, so copied usage cannot be safely attributed.",
+      "seedBoundaryIncomplete": "Inheritance-boundary evidence is incomplete.",
+      "conflictingSessionProject": "Native project metadata conflicts; project attribution was not guessed.",
+      "parentCycleOrDepthLimit": "The session parent chain contains a cycle or exceeds the verified depth limit.",
+      "parentSourceUnavailable": "The native parent source is unavailable, so inherited usage cannot be verified.",
+      "forkBoundaryUnavailable": "The fork inheritance boundary cannot be verified.",
+      "nativeGenerationLeaseUnavailable": "Native generation evidence cannot be verified; older records were not used to fill the gap."
     },
     "underMinute": "Under 1 min (nonzero)",
     "distributionBucket": "{{range}}: {{count}} sessions",

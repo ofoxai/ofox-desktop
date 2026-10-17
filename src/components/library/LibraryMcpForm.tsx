@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Plus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -65,6 +65,7 @@ export interface LibraryMcpFormProps {
   ) => void | Promise<unknown>;
   onDiscover?: () => void;
   saveOnly?: boolean;
+  initialFocusPath?: string[];
 }
 function PairFields({
   kind,
@@ -182,7 +183,10 @@ function SavedField({
   const action = edit?.action ?? "keep";
   const [input, setInput] = useState("");
   return (
-    <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-ctl border border-line-2 p-2">
+    <div
+      data-mcp-field={JSON.stringify(field.path)}
+      className="flex min-w-0 flex-wrap items-center gap-2 rounded-ctl border border-line-2 p-2"
+    >
       <span className="min-w-0 flex-1 break-all font-mono text-note">
         {label}
       </span>
@@ -261,6 +265,7 @@ export function LibraryMcpForm({
   onImportMany,
   onDiscover,
   saveOnly = false,
+  initialFocusPath,
 }: LibraryMcpFormProps) {
   const { t } = useTranslation();
   const [error, setError] = useState("");
@@ -289,6 +294,28 @@ export function LibraryMcpForm({
   const generation = useRef(0);
   const previousInitial = useRef(initial);
   const fieldsId = useId();
+  const form = useRef<HTMLFormElement>(null);
+  const focusKey = JSON.stringify(initialFocusPath);
+  useLayoutEffect(() => {
+    if (!initialFocusPath) return;
+    const group = Array.from(
+      form.current?.querySelectorAll<HTMLElement>("[data-mcp-field]") ?? [],
+    ).find((node) => node.dataset.mcpField === focusKey);
+    for (
+      let parent = group?.parentElement;
+      parent;
+      parent = parent.parentElement
+    ) {
+      if (parent instanceof HTMLDetailsElement) parent.open = true;
+      if (parent === form.current) break;
+    }
+    const target =
+      group?.querySelector<HTMLElement>(
+        '[role="combobox"], input, textarea, button',
+      ) ?? form.current;
+    target?.scrollIntoView?.({ block: "center" });
+    target?.focus();
+  }, [focusKey, initial?.id, initial?.revision]);
   useEffect(() => {
     generation.current++;
     submitting.current = false;
@@ -502,7 +529,7 @@ export function LibraryMcpForm({
     ),
   );
   const scalarField = (path: "command" | "url", label: string) => (
-    <div className="space-y-1">
+    <div data-mcp-field={JSON.stringify([path])} className="space-y-1">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <label htmlFor={`${fieldsId}-${path}`} className="text-ctl">
           {label}
@@ -567,6 +594,8 @@ export function LibraryMcpForm({
   };
   return (
     <form
+      ref={form}
+      tabIndex={-1}
       className="min-w-0 space-y-3"
       onSubmit={(event) => {
         event.preventDefault();
