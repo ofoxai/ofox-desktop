@@ -243,19 +243,22 @@ struct Observed {
     roots: FrozenRoots,
 }
 fn observes_analytics(provider: &str) -> bool {
-    matches!(provider, "claude" | "codex" | "gemini" | "opencode")
+    matches!(
+        provider,
+        "claude" | "codex" | "gemini" | "opencode" | "workbuddy" | "pi" | "dsh" | "openclaw"
+    )
 }
 fn observe_sources(roots: FrozenRoots) -> Observed {
     use super::session_analytics_index::source_revision;
     let native_roots: Vec<_> = SOURCES
         .iter()
         .filter(|s| observes_analytics(s.provider))
-        .filter_map(|s| {
+        .flat_map(|source| {
             roots
-                .get(s.provider)
-                .ok()
-                .and_then(|r| single_root(r).ok())
-                .map(|root| (s.provider, root.to_owned()))
+                .get(source.provider)
+                .unwrap_or_default()
+                .iter()
+                .map(move |root| (source.provider, root.clone()))
         })
         .collect();
     let mut discovery = super::session_analytics_discovery::discover_in(&native_roots);
@@ -325,6 +328,28 @@ fn observe_sources(roots: FrozenRoots) -> Observed {
             }
             Err(_) => {
                 failed.insert(source.provider.into());
+            }
+        }
+    }
+    for batch in &discovery.batches {
+        let result = super::session_analytics_index::batch_stamp(batch)
+            .and_then(|stamp| Ok((super::session_analytics_index::batch_key(batch)?, stamp)));
+        match result {
+            Ok((path, stamp)) => {
+                observations
+                    .get_mut(&batch.provider)
+                    .expect("known provider")
+                    .files
+                    .insert(PathBuf::from(path), stamp);
+            }
+            Err(_) => {
+                failed.insert(batch.provider.clone());
+                discovery
+                    .failures
+                    .push(super::session_analytics_index::DiscoveryFailure {
+                        provider: batch.provider.clone(),
+                        code: "sourceDiscoveryFailed",
+                    });
             }
         }
     }
@@ -1746,6 +1771,196 @@ mod tests {
             "local refresh returned before analytics was refreshed"
         );
         assert_eq!(input.sessions.len(), 1);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn source_refresh_workbuddy_pi_bridge_preserves_project_and_all_spending() {
+        let home = sandbox();
+        let wb = workbuddy_partial_fixture(home.home(), false, false);
+        let body = std::fs::read_to_string(&wb).unwrap();
+        let mut row: serde_json::Value = serde_json::from_str(body.trim()).unwrap();
+        row["cwd"] = serde_json::json!("/fixture-project");
+        row["content"] = serde_json::json!("safe synthetic answer");
+        write(&wb, &(row.to_string() + "\n"));
+        let pi = home.home().join(".pi/agent/sessions/project/native.jsonl");
+        let title_prefix = "Pi bridge fixture title: ";
+        let title_text = format!(
+            "{title_prefix}{}",
+            "x".repeat(crate::session_manager::title::TITLE_MAX_CHARS - title_prefix.len())
+        );
+        let user_body_canary = "PI_PRIVATE_USER_BODY_CANARY_26d967f9";
+        let user_body = format!("{title_text}\n{user_body_canary}");
+        write(&pi, &[
+            serde_json::json!({"type":"session","version":3,"id":"native-pi","cwd":"/fixture-project","timestamp":"2026-10-15T00:00:00Z"}),
+            serde_json::json!({"type":"message","id":"u1","parentId":null,"timestamp":"2026-10-15T00:00:00Z","message":{"role":"user","content":user_body,"timestamp":1792022400000_i64}}),
+            serde_json::json!({"type":"message","id":"a1","parentId":"u1","timestamp":"2026-10-15T00:00:01Z","message":{"role":"assistant","content":"old branch","model":"fixture","timestamp":1792022401000_i64,"usage":{"input":4,"output":2,"cacheRead":0,"cacheWrite":0}}}),
+            serde_json::json!({"type":"message","id":"a2","parentId":"u1","timestamp":"2026-10-15T00:00:02Z","message":{"role":"assistant","content":"current branch","model":"fixture","timestamp":1792022402000_i64,"usage":{"input":7,"output":3,"cacheRead":0,"cacheWrite":0}}}),
+        ].map(|row|row.to_string()).join("\n"));
+        let db = Arc::new(Database::memory().unwrap());
+        let sync = UsageSync::new();
+        let result = sync.run(&db, false).await.unwrap().unwrap();
+        assert!(result.errors.is_empty(), "{result:?}");
+        let input = super::super::session_analytics_index::read_input(&db).unwrap();
+        assert_eq!(
+            input.sessions.len(),
+            2,
+            "both native tools must enter the same cached analysis"
+        );
+        assert_eq!(
+            input.facts.len(),
+            3,
+            "abandoned Pi spending must remain included"
+        );
+        assert!(input.sessions.iter().all(|session| matches!(
+            &session.identity.project,
+            super::super::session_analytics_core::Project::Known(_)
+        )));
+        assert_eq!(
+            input
+                .messages
+                .iter()
+                .filter(|m| m.session_key
+                    == super::super::session_analytics_index::key("pi", "native-pi"))
+                .count(),
+            2,
+            "active branch alone supplies readable conversation activity"
+        );
+        let before = super::super::usage_source::body_reads_under(home.home());
+        assert!(sync.run(&db, false).await.unwrap().is_none());
+        assert_eq!(
+            super::super::usage_source::body_reads_under(home.home()),
+            before
+        );
+        let pi_title = &input
+            .sessions
+            .iter()
+            .find(|session| session.identity.tool_id == "pi")
+            .unwrap()
+            .title;
+        assert_eq!(pi_title, &format!("{title_text}…"));
+        assert_eq!(
+            pi_title.chars().count(),
+            crate::session_manager::title::TITLE_MAX_CHARS + 1,
+            "the first prompt is allowed only as bounded title metadata"
+        );
+        let encoded = serde_json::to_string(&input).unwrap();
+        let cached = {
+            let conn = db.conn.lock().unwrap();
+            let mut statement = conn
+                .prepare("SELECT meta_json FROM session_meta_cache WHERE provider_id IN ('workbuddy','pi') AND meta_json IS NOT NULL")
+                .unwrap();
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            rows.join("\n")
+        };
+        for payload in [&encoded, &cached] {
+            assert!(payload.contains(title_prefix));
+            for private_body in [
+                user_body_canary,
+                "current branch",
+                "old branch",
+                "safe synthetic answer",
+            ] {
+                assert!(
+                    !payload.contains(private_body),
+                    "a full message body must not survive in analysis or its raw cache"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn source_refresh_native_batch_keeps_missing_session_history_and_retries_failures() {
+        let home = sandbox();
+        let path = workbuddy_partial_fixture(home.home(), false, false);
+        let db = Arc::new(Database::memory().unwrap());
+        let sync = UsageSync::new();
+        let first = sync.run(&db, false).await.unwrap().unwrap();
+        assert!(first.errors.is_empty(), "{first:?}");
+        let input = super::super::session_analytics_index::read_input(&db).unwrap();
+        assert_eq!(input.facts.len(), 1);
+        std::fs::remove_file(&path).unwrap();
+        let next = sync.run(&db, false).await.unwrap().unwrap();
+        assert!(next.errors.is_empty(), "{next:?}");
+        let input = super::super::session_analytics_index::read_input(&db).unwrap();
+        assert_eq!(
+            input.facts.len(),
+            1,
+            "a missing native file does not erase previously observed spending"
+        );
+        assert!(!input.sessions[0].source_available);
+        assert!(input.sessions[0].manager_key.is_none());
+        assert!(input
+            .source_reasons
+            .iter()
+            .any(|reason| reason.reason == "sourceMissing"));
+        workbuddy_partial_fixture(home.home(), false, false);
+        sync.run(&db, false).await.unwrap().unwrap();
+        let restored = super::super::session_analytics_index::read_input(&db).unwrap();
+        assert!(restored.sessions[0].source_available);
+        assert_eq!(restored.facts.len(), 1);
+        let native_root = home.home().join(".workbuddy/projects");
+        std::fs::remove_dir_all(&native_root).unwrap();
+        std::fs::write(native_root, "not a source directory").unwrap();
+        let failed = sync.run(&db, false).await.unwrap().unwrap();
+        assert!(!failed.errors.is_empty());
+        assert_eq!(
+            super::super::session_analytics_index::read_input(&db)
+                .unwrap()
+                .facts
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn source_refresh_six_hundred_mixed_native_bridges_stay_warm_without_body_reads() {
+        use serde_json::json;
+        let home = sandbox();
+        for i in 0..150 {
+            let sid = format!("mixed-{i}");
+            write(&home.home().join(format!(".workbuddy/projects/project/{sid}.jsonl")),&(json!({"type":"message","role":"assistant","id":"a","sessionId":sid,"cwd":"/fixture/project","timestamp":1792022400000_i64,"content":"synthetic answer","providerData":{"messageId":"a","model":"native","usage":{"requests":1,"inputTokens":3,"outputTokens":2}}}).to_string()+"\n"));
+            pi_fixture(home.home(), &sid, &format!("{sid}.jsonl"), 3);
+            dsh_fixture(home.home(), &sid, "session.jsonl", 3);
+            write(&home.home().join(format!(".openclaw/agents/main/sessions/{sid}.jsonl")),&[
+                json!({"type":"session","version":4,"id":sid,"cwd":"/fixture/project","timestamp":"2026-10-15T00:00:00Z"}),
+                json!({"type":"message","id":"a","timestamp":"2026-10-15T00:00:01Z","message":{"role":"assistant","model":"native","usage":{"input":3,"output":2,"cacheRead":0,"cacheWrite":0}}}),
+            ].map(|row|row.to_string()).join("\n"));
+        }
+        let db = Arc::new(Database::memory().unwrap());
+        let sync = UsageSync::new();
+        let result = sync.run(&db, false).await.unwrap().unwrap();
+        assert!(result.errors.is_empty(), "{result:?}");
+        let input = super::super::session_analytics_index::read_input(&db).unwrap();
+        assert_eq!(input.sessions.len(), 600);
+        assert_eq!(input.facts.len(), 600);
+        let before = super::super::usage_source::body_reads_under(home.home());
+        assert!(sync.run(&db, false).await.unwrap().is_none());
+        assert_eq!(
+            super::super::usage_source::body_reads_under(home.home()),
+            before
+        );
+        // Manual refresh still verifies the frozen roster, without rereading
+        // unchanged native bodies to rebuild either ledger or analytics.
+        let manual = sync.run(&db, true).await.unwrap().unwrap();
+        assert!(manual.errors.is_empty(), "{manual:?}");
+        assert_eq!(
+            super::super::usage_source::body_reads_under(home.home()),
+            before
+        );
+        assert_eq!(
+            super::super::session_analytics_index::read_input(&db)
+                .unwrap()
+                .facts
+                .len(),
+            600
+        );
     }
 
     #[tokio::test]

@@ -37,11 +37,11 @@ fn event_identifier(value: Option<&Value>) -> Option<String> {
         .map(str::to_owned)
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
+pub(crate) enum Kind {
     Database,
     Legacy,
 }
-fn location(path: &Path) -> Result<(String, Kind), AppError> {
+pub(crate) fn location(path: &Path) -> Result<(String, Kind), AppError> {
     let directory = path
         .parent()
         .ok_or_else(|| invalid("invalidSourceLayout"))?;
@@ -82,17 +82,19 @@ pub(crate) struct OpenClawRead {
     pub event_count: i64,
     pub reasons: BTreeSet<String>,
     pub sessions: BTreeSet<String>,
-    blocked_sessions: BTreeSet<String>,
-    decoded_bytes: usize,
-    native_events: BTreeMap<String, String>,
+    pub projects: BTreeMap<String, Option<Option<String>>>,
+    pub blocked_sessions: BTreeSet<String>,
+    pub decoded_bytes: usize,
+    pub native_events: BTreeMap<String, String>,
 }
 impl OpenClawRead {
-    fn suppressed(sid: Option<String>, decoded_bytes: usize, reason: &str) -> Self {
+    pub(crate) fn suppressed(sid: Option<String>, decoded_bytes: usize, reason: &str) -> Self {
         Self {
             facts: Vec::new(),
             event_count: 0,
             reasons: BTreeSet::from([reason.to_owned()]),
             sessions: sid.into_iter().collect(),
+            projects: BTreeMap::new(),
             blocked_sessions: BTreeSet::new(),
             decoded_bytes,
             native_events: BTreeMap::new(),
@@ -114,6 +116,8 @@ struct Reader {
     calls: Vec<Call>,
     native_events: Vec<(Option<String>, String, String)>,
     sessions: BTreeSet<String>,
+    projects: BTreeMap<String, Option<Option<String>>>,
+    conflicting_projects: BTreeSet<String>,
     blocked: BTreeSet<String>,
     reasons: BTreeSet<String>,
     count: i64,
@@ -187,6 +191,8 @@ impl Reader {
             calls: Vec::new(),
             native_events: Vec::new(),
             sessions: BTreeSet::new(),
+            projects: BTreeMap::new(),
+            conflicting_projects: BTreeSet::new(),
             blocked: BTreeSet::new(),
             reasons: BTreeSet::new(),
             count: 0,
@@ -214,6 +220,28 @@ impl Reader {
                     return Err(invalid("conflictingSessionIdentity"));
                 }
                 self.sessions.insert(id.clone());
+                let project = match value.get("cwd") {
+                    Some(Value::String(path)) if !path.trim().is_empty() => {
+                        Some(Some(path.clone()))
+                    }
+                    Some(Value::String(_) | Value::Null) => Some(None),
+                    _ => None,
+                };
+                if self
+                    .projects
+                    .get(&id)
+                    .is_some_and(|prior| prior != &project)
+                {
+                    self.conflicting_projects.insert(id.clone());
+                }
+                self.projects.insert(
+                    id.clone(),
+                    if self.conflicting_projects.contains(&id) {
+                        None
+                    } else {
+                        project
+                    },
+                );
                 if value.get("parentSession").is_some_and(|v| !v.is_null()) {
                     self.blocked.insert(id.clone());
                     self.reasons.insert("forkProvenanceUnverified".into());
@@ -321,6 +349,7 @@ impl Reader {
             event_count: self.count,
             reasons: self.reasons,
             sessions: self.sessions,
+            projects: self.projects,
             blocked_sessions: self.blocked,
             decoded_bytes: 0,
             native_events,
@@ -369,7 +398,7 @@ fn read_jsonl(path: &Path, agent: String) -> Result<OpenClawRead, AppError> {
 }
 // Only a native first-line header can identify an obsolete JSONL projection.
 // Its body/version is irrelevant once the primary database owns that SID.
-fn shadowed_legacy(
+pub(crate) fn shadowed_legacy(
     path: &Path,
     primary_sessions: &BTreeSet<String>,
 ) -> Result<Option<OpenClawRead>, AppError> {
@@ -528,7 +557,7 @@ pub(crate) fn read_openclaw(path: &Path) -> Result<OpenClawRead, AppError> {
 
 // A strictly matched positive source receipt remembers primary authority. It
 // does not acknowledge any event or make absence into ingestion evidence.
-fn remembered_primaries_on(
+pub(crate) fn remembered_primaries_on(
     conn: &Connection,
     root: &Path,
 ) -> Result<BTreeMap<PathBuf, Value>, AppError> {

@@ -1204,6 +1204,14 @@ mod tests {
     #[test]
     #[ignore = "opt-in release API benchmark; no IPC, rendering, or native-source scan"]
     fn session_analytics_release_warm_query_p95() {
+        release_query_benchmark(false);
+    }
+    #[test]
+    #[ignore = "opt-in release synthetic four-source cache/API benchmark, not native history or UI"]
+    fn session_analytics_release_four_native_bridges_query_p95() {
+        release_query_benchmark(true);
+    }
+    fn release_query_benchmark(mixed_native: bool) {
         use crate::{
             services::usage_health::{self, Channel, Outcome},
             session_manager::source_cache::{self, Part},
@@ -1216,7 +1224,28 @@ mod tests {
             "run this benchmark with cargo test --release"
         );
         let db = Database::memory().unwrap();
-        let (data, query, _) = large_fixture();
+        let (mut data, mut query, _) = large_fixture();
+        let sources = if mixed_native {
+            vec![
+                ("workbuddy", "workbuddy_session"),
+                ("pi", "pi_session"),
+                ("dsh", "dsh_session"),
+                ("openclaw", "openclaw_session"),
+            ]
+        } else {
+            vec![("codex", "codex_session")]
+        };
+        if mixed_native {
+            for (i, session) in data.sessions.iter_mut().enumerate() {
+                session.identity.tool_id = sources[i / 2500].0.into();
+            }
+            for (i, fact) in data.facts.iter_mut().enumerate() {
+                let (tool, source) = sources[i / 12500];
+                fact.tool_id = tool.into();
+                fact.source_id = source.into();
+            }
+            query.tool_ids = sources.iter().map(|(tool, _)| (*tool).into()).collect();
+        }
         {
             let mut conn = db.conn.lock().unwrap();
             let tx = conn.transaction().unwrap();
@@ -1227,7 +1256,7 @@ mod tests {
                 source_cache::merge_on(
                     &tx,
                     &format!("benchmark-{i:03}"),
-                    "codex",
+                    sources[if mixed_native { i / 25 } else { 0 }].0,
                     None,
                     Part::Analytics,
                     &None,
@@ -1242,10 +1271,11 @@ mod tests {
                 )
                 .unwrap();
             }
-            for channel in [Channel::Ledger, Channel::Analytics] {
-                let attempt =
-                    usage_health::begin_on(&tx, "codex", "codex_session", channel, 1).unwrap();
-                assert!(usage_health::finish_on(&tx, &attempt, Outcome::Ok, 1).unwrap());
+            for (tool, source) in &sources {
+                for channel in [Channel::Ledger, Channel::Analytics] {
+                    let attempt = usage_health::begin_on(&tx, tool, source, channel, 1).unwrap();
+                    assert!(usage_health::finish_on(&tx, &attempt, Outcome::Ok, 1).unwrap());
+                }
             }
             PriceCatalog::ingest_on(&tx, "ofox.ai", &json!({"data":[{"id":"m","pricing":{"prompt":"0.000001","completion":"0.000002"}}]}), query.end_ms).unwrap();
             tx.commit().unwrap();
@@ -1278,7 +1308,7 @@ mod tests {
         samples.sort_unstable();
         let p50 = samples[14];
         let p95 = samples[28];
-        eprintln!("session analytics release warm API: os={} arch={} sessions=10000 facts=50000 messages=50000 cacheEnvelopes=100 days=1460 warmups=3 rounds=30 p50={p50:?} p95={p95:?}; includes SQLite cache/catalog/health read, deduplication, aggregation, and frozen-cohort retention; excludes cold parsing, native source scan, IPC serialization/transport and UI rendering", std::env::consts::OS, std::env::consts::ARCH);
+        eprintln!("session analytics release warm API: os={} arch={} providers={sources:?} synthetic=true sessions=10000 facts=50000 messages=50000 cacheEnvelopes=100 days=1460 warmups=3 rounds=30 p50={p50:?} p95={p95:?}; includes SQLite cache/catalog/health read, deduplication, aggregation, and frozen-cohort retention; excludes cold parsing, native source scan, actual historical completeness, IPC serialization/transport and UI rendering", std::env::consts::OS, std::env::consts::ARCH);
         assert!(
             p95 < Duration::from_millis(300),
             "warm API p95 exceeds 300ms: {p95:?}"

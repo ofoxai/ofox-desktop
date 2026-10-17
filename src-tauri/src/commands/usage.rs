@@ -183,8 +183,17 @@ mod workbench_capability_tests {
     #[test]
     fn workbench_capability_registry_only_claims_native_analytics_for_bridged_readers() {
         for capability in crate::services::usage_query::source_capabilities() {
-            let supported =
-                ["claude", "codex", "gemini", "opencode"].contains(&capability.tool_id.as_str());
+            let supported = [
+                "claude",
+                "codex",
+                "gemini",
+                "opencode",
+                "workbuddy",
+                "pi",
+                "dsh",
+                "openclaw",
+            ]
+            .contains(&capability.tool_id.as_str());
             assert_eq!(
                 capability.session_analytics_supported, supported,
                 "{} analytics bridge",

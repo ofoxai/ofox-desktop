@@ -217,7 +217,7 @@ pub fn list_with(db: Option<&crate::database::Database>) -> Vec<ManagedSession> 
     let mut listing = super::scan_sessions();
     super::meta_cache::enrich(&mut listing, db);
     let listing = remember(listing);
-    let (mut usage, mut display) = db
+    let (mut usage, mut display, mut native) = db
         .map(|db| {
             usage::load_for_listing(db, &listing).unwrap_or_else(|e| {
                 log::warn!("[SESSIONS] {e}");
@@ -232,6 +232,17 @@ pub fn list_with(db: Option<&crate::database::Database>) -> Vec<ManagedSession> 
                     (
                         None,
                         usage::UsageDisplay::unavailable("threadUsageNotIndexed"),
+                    )
+                });
+                (value, Some(detail))
+            } else if matches!(
+                meta.provider_id.as_str(),
+                "workbuddy" | "pi" | "dsh" | "openclaw"
+            ) {
+                let (value, detail) = native.remove(&key(meta)).unwrap_or_else(|| {
+                    (
+                        None,
+                        usage::UsageDisplay::unavailable("nativeSessionNotAssociated"),
                     )
                 });
                 (value, Some(detail))

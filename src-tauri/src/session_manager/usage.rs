@@ -70,36 +70,65 @@ impl UsageDisplay {
     }
 }
 type DisplayBySession = HashMap<String, (Option<SessionUsage>, UsageDisplay)>;
+type ListingUsage = (UsageBySession, DisplayBySession, DisplayBySession);
 
 /// One listing read transaction, one legacy usage aggregation, one bounded
 /// cache batch, and one current catalog. No per-row SQL or transcript parsing.
 pub(crate) fn load_for_listing(
     db: &Database,
     listing: &[SessionMeta],
-) -> Result<(UsageBySession, DisplayBySession), AppError> {
+) -> Result<ListingUsage, AppError> {
     let apex = crate::ofox_apex::current_apex();
     let mut conn = db.conn.lock().unwrap_or_else(|e| e.into_inner());
     let tx = conn.transaction()?;
     let ledger = load_on(&tx)?;
-    let display = display_on(&tx, listing, apex, chrono::Utc::now().timestamp_millis())
-        .unwrap_or_else(|_| {
-            listing
-                .iter()
-                .filter(|m| m.provider_id == "codex")
-                .map(|m| {
+    let displays = (|| {
+        let (codex, native) =
+            crate::services::session_analytics_index::listing_projections_on(&tx, listing)?;
+        let catalog = PriceCatalog::load_on(&tx, apex, chrono::Utc::now().timestamp_millis())?;
+        Ok::<_, AppError>((
+            display_from_threads(listing, &codex, &catalog)?,
+            display_from_native(native, &catalog)?,
+        ))
+    })();
+    let (display, native) = displays.unwrap_or_else(|_| {
+        let codex = listing
+            .iter()
+            .filter(|m| m.provider_id == "codex")
+            .map(|m| {
+                (
+                    m.session_id.clone(),
                     (
-                        m.session_id.clone(),
-                        (
-                            None,
-                            UsageDisplay::unavailable("threadUsageCacheUnavailable"),
-                        ),
-                    )
-                })
-                .collect()
-        });
+                        None,
+                        UsageDisplay::unavailable("threadUsageCacheUnavailable"),
+                    ),
+                )
+            })
+            .collect();
+        let native = listing
+            .iter()
+            .filter(|meta| {
+                matches!(
+                    meta.provider_id.as_str(),
+                    "workbuddy" | "pi" | "dsh" | "openclaw"
+                )
+            })
+            .map(|meta| {
+                (
+                    super::managed::key(meta),
+                    (
+                        None,
+                        UsageDisplay::unavailable("threadUsageCacheUnavailable"),
+                    ),
+                )
+            })
+            .collect();
+        (codex, native)
+    });
     tx.commit()?;
-    Ok((ledger, display))
+    Ok((ledger, display, native))
 }
+#[cfg(test)]
 fn display_on(
     conn: &rusqlite::Connection,
     listing: &[SessionMeta],
@@ -108,6 +137,16 @@ fn display_on(
 ) -> Result<DisplayBySession, AppError> {
     let cached = crate::services::session_analytics_index::thread_usage_on(conn, listing)?;
     let catalog = PriceCatalog::load_on(conn, apex, now_ms)?;
+    display_from_threads(listing, &cached, &catalog)
+}
+fn display_from_threads(
+    listing: &[SessionMeta],
+    cached: &BTreeMap<
+        String,
+        crate::services::session_analytics_index::codex_thread_usage::Projection,
+    >,
+    catalog: &PriceCatalog,
+) -> Result<DisplayBySession, AppError> {
     let mut result = HashMap::new();
     for meta in listing.iter().filter(|m| m.provider_id == "codex") {
         let Some(projection) = cached.get(&meta.session_id) else {
@@ -132,42 +171,81 @@ fn display_on(
             result.insert(meta.session_id.clone(), (None, display));
             continue;
         }
-        let mut estimate: Option<CostEstimate> = None;
-        let mut models = vec![];
-        let mut unpriced = 0;
-        for row in &projection.models {
-            let priced = catalog.estimate(&row.model, row.buckets, Some(row.records));
-            if matches!(priced.availability.as_str(), "unknown" | "partial") {
-                unpriced += 1;
-            }
-            let cost = priced
-                .known_cost_usd
-                .as_deref()
-                .and_then(|v| v.parse::<f64>().ok())
-                .filter(|v| v.is_finite());
-            if let Some(total) = &mut estimate {
-                total.combine(&priced)?;
-            } else {
-                estimate = Some(priced.clone());
-            }
-            display.model_estimates.insert(row.model.clone(), priced);
-            models.push(ModelUsage {
-                model: row.model.clone(),
-                requests: row.records,
-                input_tokens: row.buckets[0],
-                output_tokens: row.buckets[1],
-                cache_read_tokens: row.buckets[2],
-                cache_write_tokens: row.buckets[3],
-                cost_usd: cost,
-            });
-        }
-        let mut usage = total(models);
-        usage.unpriced_models = unpriced;
-        if let Some(estimate) = &estimate {
-            display.pricing_coverage = Some(catalog.coverage_for(estimate));
-        }
-        display.estimate = estimate;
+        let usage = price_models(&projection.models, catalog, &mut display)?;
         result.insert(meta.session_id.clone(), (Some(usage), display));
+    }
+    Ok(result)
+}
+fn price_models(
+    rows: &[crate::services::session_analytics_index::codex_thread_usage::Model],
+    catalog: &PriceCatalog,
+    display: &mut UsageDisplay,
+) -> Result<SessionUsage, AppError> {
+    let mut estimate: Option<CostEstimate> = None;
+    let mut models = vec![];
+    let mut unpriced = 0;
+    for row in rows {
+        let priced = catalog.estimate(&row.model, row.buckets, Some(row.records));
+        if matches!(priced.availability.as_str(), "unknown" | "partial") {
+            unpriced += 1;
+        }
+        let cost = priced
+            .known_cost_usd
+            .as_deref()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite());
+        if let Some(total) = &mut estimate {
+            total.combine(&priced)?;
+        } else {
+            estimate = Some(priced.clone());
+        }
+        display.model_estimates.insert(row.model.clone(), priced);
+        models.push(ModelUsage {
+            model: row.model.clone(),
+            requests: row.records,
+            input_tokens: row.buckets[0],
+            output_tokens: row.buckets[1],
+            cache_read_tokens: row.buckets[2],
+            cache_write_tokens: row.buckets[3],
+            cost_usd: cost,
+        });
+    }
+    let mut usage = total(models);
+    usage.unpriced_models = unpriced;
+    if let Some(estimate) = &estimate {
+        display.pricing_coverage = Some(catalog.coverage_for(estimate));
+    }
+    display.estimate = estimate;
+    Ok(usage)
+}
+fn display_from_native(
+    projections: BTreeMap<
+        String,
+        crate::services::session_analytics_index::NativeListingProjection,
+    >,
+    catalog: &PriceCatalog,
+) -> Result<DisplayBySession, AppError> {
+    let mut result = HashMap::new();
+    for (manager, projection) in projections {
+        let mut display = UsageDisplay::unavailable("nativeSessionNotAssociated");
+        display.reasons = projection.reasons;
+        display.pricing_coverage = Some(catalog.coverage.clone());
+        if !projection.available {
+            result.insert(manager, (None, display));
+            continue;
+        }
+        display.state = "available".into();
+        let usage = price_models(&projection.models, catalog, &mut display)?;
+        if !projection.complete {
+            if let Some(estimate) = &mut display.estimate {
+                if estimate.known_cost_usd.is_some() {
+                    estimate.availability = "partial".into();
+                }
+                estimate.unpriced_record_count = None;
+                display.pricing_coverage = Some(catalog.coverage_for(estimate));
+            }
+        }
+        result.insert(manager, (Some(usage), display));
     }
     Ok(result)
 }
@@ -291,6 +369,154 @@ fn total(mut models: Vec<ModelUsage>) -> SessionUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_session_estimates_keep_real_zero_unknown_and_partial_separate() {
+        use crate::services::session_analytics_index::{
+            codex_thread_usage::Model, NativeListingProjection,
+        };
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        PriceCatalog::ingest_on(&conn,"ofox.ai",&serde_json::json!({"data":[{"id":"free","pricing":{"prompt":"0","completion":"0","input_cache_read":"0","input_cache_write":"0"}}]}),1).unwrap();
+        let catalog = PriceCatalog::load_on(&conn, "ofox.ai", 2).unwrap();
+        for (models, complete, availability, amount) in [
+            (vec!["free"], true, "free", Some("0")),
+            (vec!["missing"], true, "unknown", None),
+            (vec!["free", "missing"], true, "partial", Some("0")),
+            (vec!["free"], false, "partial", Some("0")),
+        ] {
+            let input = BTreeMap::from([(
+                "manager".into(),
+                NativeListingProjection {
+                    available: true,
+                    complete,
+                    reasons: vec![],
+                    models: models
+                        .into_iter()
+                        .map(|model| Model {
+                            model: model.into(),
+                            buckets: [5, 2, 0, 0],
+                            records: 1,
+                        })
+                        .collect(),
+                },
+            )]);
+            let result = display_from_native(input, &catalog).unwrap();
+            let (usage, display) = &result["manager"];
+            assert!(usage.is_some());
+            assert_eq!(display.state, "available");
+            let estimate = display.estimate.as_ref().unwrap();
+            assert_eq!(estimate.availability, availability);
+            assert_eq!(estimate.known_cost_usd.as_deref(), amount);
+            if !complete {
+                assert!(estimate.unpriced_record_count.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn native_session_display_requires_exact_manager_and_current_source_proof() {
+        use crate::services::session_analytics_index::{self as index, BatchSource, Discovery};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("projects");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("s.jsonl");
+        let row = serde_json::json!({"type":"message","role":"assistant","id":"a","sessionId":"s","cwd":"/fixture","timestamp":1000,"content":"native","providerData":{"messageId":"a","model":"m","usage":{"requests":1,"inputTokens":3,"outputTokens":2}}});
+        std::fs::write(&path, row.to_string() + "\n").unwrap();
+        let db = Database::memory().unwrap();
+        index::refresh_discovered(
+            &db,
+            &Discovery {
+                specs: vec![],
+                batches: vec![BatchSource {
+                    provider: "workbuddy".into(),
+                    roots: vec![root],
+                }],
+                failures: vec![],
+            },
+        )
+        .unwrap();
+        let meta = SessionMeta {
+            provider_id: "workbuddy".into(),
+            session_id: "s".into(),
+            source_path: Some(path.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let key = crate::session_manager::managed::key(&meta);
+        let conn = db.conn.lock().unwrap();
+        assert!(
+            index::listing_projections_on(&conn, std::slice::from_ref(&meta))
+                .unwrap()
+                .1[&key]
+                .available
+        );
+        let mut foreign = meta.clone();
+        foreign.source_path = Some(
+            temp.path()
+                .join("other.jsonl")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let foreign_key = crate::session_manager::managed::key(&foreign);
+        let unproven = index::listing_projections_on(&conn, &[foreign]).unwrap().1;
+        assert!(!unproven[&foreign_key].available);
+        assert_eq!(
+            unproven[&foreign_key].reasons,
+            ["nativeSessionNotAssociated"]
+        );
+        std::fs::write(path, row.to_string() + "\n\n").unwrap();
+        let changed = index::listing_projections_on(&conn, &[meta]).unwrap().1;
+        assert!(!changed[&key].available);
+        assert_eq!(changed[&key].reasons, ["threadUsageSourceChanged"]);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn native_session_listing_prices_verified_workbuddy_usage_instead_of_legacy_zero() {
+        use crate::services::session_analytics_index::{
+            refresh_discovered, BatchSource, Discovery,
+        };
+        use serde_json::json;
+        let home = crate::test_sandbox::sandbox();
+        let root = home.home().join(".workbuddy/projects");
+        let path = root.join("project/s.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path,json!({"type":"message","role":"assistant","id":"a","sessionId":"native-wb","cwd":"/fixture/project","timestamp":1792022400000_i64,"content":"private native answer","providerData":{"messageId":"a","model":"priced-native","usage":{"requests":1,"inputTokens":100,"outputTokens":20}}}).to_string()+"\n").unwrap();
+        let db = Database::memory().unwrap();
+        refresh_discovered(
+            &db,
+            &Discovery {
+                specs: vec![],
+                batches: vec![BatchSource {
+                    provider: "workbuddy".into(),
+                    roots: vec![root],
+                }],
+                failures: vec![],
+            },
+        )
+        .unwrap();
+        PriceCatalog::ingest_on(&db.conn.lock().unwrap(),"ofox.ai",&json!({"data":[{"id":"priced-native","pricing":{"prompt":"0.001","completion":"0.001"}}]}),1).unwrap();
+        let listed = crate::session_manager::managed::list_with(Some(&db));
+        let native = listed
+            .iter()
+            .find(|session| {
+                session.meta.provider_id == "workbuddy" && session.meta.session_id == "native-wb"
+            })
+            .expect("native source appears in session manager");
+        assert_eq!(
+            native.usage.as_ref().map(|usage| usage.total_tokens),
+            Some(120)
+        );
+        let display = native
+            .usage_display
+            .as_ref()
+            .expect("a verified native amount has explicit current-price provenance");
+        assert_eq!(display.basis, "currentOfoxEstimate");
+        assert_eq!(
+            display.estimate.as_ref().unwrap().known_cost_usd.as_deref(),
+            Some("0.12")
+        );
+    }
 
     fn live(
         db: &Database,

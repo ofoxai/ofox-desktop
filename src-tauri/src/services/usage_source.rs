@@ -754,6 +754,27 @@ pub(crate) fn decode_evidence(value: &Value) -> Result<Evidence, AppError> {
     Ok(evidence)
 }
 impl ProviderIndex {
+    /// Analytics may inspect existing ownership evidence but must not repair or
+    /// invalidate an ingestion manifest merely by reading a projection.
+    pub(crate) fn read_roots(
+        db: &Database,
+        provider: &'static str,
+        roots: &[PathBuf],
+    ) -> Result<Self, AppError> {
+        let mut seen = BTreeSet::new();
+        if roots.is_empty()
+            || roots.iter().any(|root| {
+                !root.is_absolute()
+                    || root
+                        .components()
+                        .any(|component| matches!(component, std::path::Component::ParentDir))
+                    || !seen.insert(root.clone())
+            })
+        {
+            return Err(error("invalid source roots"));
+        }
+        Self::load_scoped_mode(db, provider, roots, false)
+    }
     pub(crate) fn load_roots(
         db: &Database,
         provider: &'static str,
@@ -791,6 +812,14 @@ impl ProviderIndex {
         db: &Database,
         provider: &'static str,
         roots: &[PathBuf],
+    ) -> Result<Self, AppError> {
+        Self::load_scoped_mode(db, provider, roots, true)
+    }
+    fn load_scoped_mode(
+        db: &Database,
+        provider: &'static str,
+        roots: &[PathBuf],
+        invalidate: bool,
     ) -> Result<Self, AppError> {
         let mut conn = lock_conn!(db.conn);
         let tx = conn.transaction()?;
@@ -908,7 +937,7 @@ impl ProviderIndex {
         }
         // Persist detected proof loss once. Recreating only some cache rows can
         // never turn a former complete ledger into a new empty origin.
-        if manifest.as_ref().is_some_and(|m| m["complete"] == true) && !complete {
+        if invalidate && manifest.as_ref().is_some_and(|m| m["complete"] == true) && !complete {
             source_cache::invalidate_provider_on(&tx, provider, "incompleteReceiptCoverage")?;
             manifest = source_cache::provider_on(&tx, provider)?;
         }
@@ -925,7 +954,7 @@ impl ProviderIndex {
             ledger_count,
         })
     }
-    fn check_on(&self, conn: &rusqlite::Connection) -> Result<(), AppError> {
+    pub(crate) fn check_on(&self, conn: &rusqlite::Connection) -> Result<(), AppError> {
         if source_cache::ledger_epoch_on(conn)? != self.epoch
             || source_cache::provider_generation(&source_cache::provider_on(conn, self.provider)?)
                 != self.generation

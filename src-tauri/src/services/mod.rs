@@ -23,9 +23,14 @@ pub mod session_analytics;
 pub mod session_analytics_api;
 pub mod session_analytics_core;
 pub(crate) mod session_analytics_discovery;
+pub(crate) mod session_analytics_dsh;
 pub mod session_analytics_index;
 pub mod session_analytics_messages;
+pub(crate) mod session_analytics_native;
+pub(crate) mod session_analytics_openclaw;
 pub mod session_analytics_opencode;
+pub(crate) mod session_analytics_pi;
+pub(crate) mod session_analytics_workbuddy;
 pub mod session_usage;
 #[cfg(test)]
 mod session_usage_atomic_tests;

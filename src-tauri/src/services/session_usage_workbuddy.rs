@@ -29,6 +29,8 @@ pub(crate) struct WorkBuddyRead {
     pub line_count: i64,
     pub reasons: BTreeSet<String>,
     pub session: Option<SessionMeta>,
+    pub analytics: super::session_analytics_messages::TranscriptFacts,
+    pub analytics_message_hashes: BTreeMap<String, String>,
 }
 
 pub(crate) fn native_time(value: Option<&Value>) -> Option<i64> {
@@ -122,6 +124,11 @@ pub(crate) fn read_workbuddy(path: &Path) -> Result<WorkBuddyRead, AppError> {
     let mut candidates = TitleCandidates::default();
     let mut messages = BTreeSet::new();
     let mut message_count_known = true;
+    let mut analytics = super::session_analytics_messages::TranscriptFacts {
+        is_main: true,
+        ..Default::default()
+    };
+    let mut analytics_message_hashes = BTreeMap::new();
     let mut pending = Vec::new();
     let mut reasons = BTreeSet::new();
     let progress = usage_source::json_lines(
@@ -185,11 +192,46 @@ pub(crate) fn read_workbuddy(path: &Path) -> Result<WorkBuddyRead, AppError> {
                     } else {
                         identifier(value.get("id"))
                     };
+                    let native = id.is_some();
+                    let identity = id
+                        .as_ref()
+                        .map(|id| format!("{role}:{id}"))
+                        .unwrap_or_else(|| format!("local:{ordinal}"));
+                    if analytics.messages.len() >= MAX_NATIVE_EVENTS
+                        && !analytics.messages.contains_key(&identity)
+                    {
+                        return Err(invalid("eventBudgetExceeded"));
+                    }
                     if let Some(id) = id {
                         messages.insert((role.to_owned(), id));
                     } else {
                         message_count_known = false;
+                        analytics
+                            .reasons
+                            .insert("messageNativeIdentityUnavailable".into());
                     }
+                    if at_ms.is_none() {
+                        analytics.reasons.insert("messageTimeUnavailable".into());
+                    }
+                    analytics.messages.insert(
+                        identity.clone(),
+                        super::session_analytics_messages::MessageFact {
+                            identity: identity.clone(),
+                            at_ms,
+                            role: role.into(),
+                            native_identity: native,
+                        },
+                    );
+                    analytics_message_hashes.insert(
+                        identity,
+                        format!(
+                            "{:x}",
+                            Sha256::digest(
+                                serde_json::to_vec(&value)
+                                    .map_err(|_| invalid("invalidNativeEntry"))?
+                            )
+                        ),
+                    );
                     if role == "user" && candidates.prompt.is_none() {
                         candidates.prompt =
                             title::clean_prompt(&crate::redact::scrub(&message_text(&value)));
@@ -313,6 +355,15 @@ pub(crate) fn read_workbuddy(path: &Path) -> Result<WorkBuddyRead, AppError> {
         project = None;
         reasons.insert("conflictingSessionProject".into());
     }
+    analytics.session_id = session_id.clone();
+    analytics.project_parsed = project_seen && !project_conflict;
+    analytics.project_dir = project.clone();
+    if !analytics.project_parsed {
+        analytics.reasons.insert("projectNotRecorded".into());
+    }
+    if !progress.complete {
+        analytics.reasons.insert("incompleteSource".into());
+    }
     let session = session_id.map(|session_id| {
         let (title, title_source) = title::titled(&candidates.with_directory(project.as_deref()));
         SessionMeta {
@@ -336,6 +387,8 @@ pub(crate) fn read_workbuddy(path: &Path) -> Result<WorkBuddyRead, AppError> {
         line_count: progress.offset,
         reasons,
         session,
+        analytics,
+        analytics_message_hashes,
     })
 }
 
@@ -526,6 +579,21 @@ pub(crate) fn sync_workbuddy_usage_at(
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+
+    #[test]
+    fn workbuddy_analytics_messages_without_usage_are_bounded_before_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("many.jsonl");
+        use std::io::Write;
+        let mut file = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+        for i in 0..=MAX_NATIVE_EVENTS {
+            writeln!(file,"{}",json!({"type":"message","role":"user","id":format!("u{i}"),"sessionId":"s","timestamp":1000,"content":"q"})).unwrap();
+        }
+        file.flush().unwrap();
+        assert!(
+            matches!(read_workbuddy(&path),Err(AppError::InvalidInput(code)) if code=="usage.workbuddy.eventBudgetExceeded")
+        );
+    }
 
     fn line(sid: &str, id: &str, at: i64, input: u64, output: u64) -> Value {
         json!({"type":"message","role":"assistant","id":format!("item-{id}"),"sessionId":sid,"timestamp":at,

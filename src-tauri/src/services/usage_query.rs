@@ -129,8 +129,14 @@ pub fn source_capabilities() -> Vec<SourceCapability> {
         source_ids: source.into_iter().map(str::to_owned).collect(),
         usage_supported: source.is_some(),
         lifetime_usage_supported: tool == "hermes",
-        session_analytics_supported: matches!(tool, "claude" | "codex" | "gemini" | "opencode"),
-        project_filter_supported: matches!(tool, "claude" | "codex" | "gemini" | "opencode"),
+        session_analytics_supported: matches!(
+            tool,
+            "claude" | "codex" | "gemini" | "opencode" | "workbuddy" | "pi" | "dsh" | "openclaw"
+        ),
+        project_filter_supported: matches!(
+            tool,
+            "claude" | "codex" | "gemini" | "opencode" | "workbuddy" | "pi" | "dsh" | "openclaw"
+        ),
         reason: source.is_none().then(|| {
             if tool == "chatgpt" {
                 "codexModeSharesCodexRecords".into()
@@ -145,6 +151,32 @@ pub fn source_capabilities() -> Vec<SourceCapability> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_session_bridges_are_advertised_without_enabling_hermes_event_time() {
+        for capability in source_capabilities() {
+            if matches!(
+                capability.tool_id.as_str(),
+                "workbuddy" | "pi" | "dsh" | "openclaw"
+            ) {
+                assert!(
+                    capability.session_analytics_supported,
+                    "{}",
+                    capability.tool_id
+                );
+                assert!(
+                    capability.project_filter_supported,
+                    "{}",
+                    capability.tool_id
+                );
+            }
+            if capability.tool_id == "hermes" {
+                assert!(!capability.session_analytics_supported);
+                assert!(!capability.project_filter_supported);
+                assert!(capability.lifetime_usage_supported);
+            }
+        }
+    }
 
     #[test]
     fn lifetime_capability_does_not_claim_event_time_support() {

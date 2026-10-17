@@ -30,7 +30,7 @@ fn identifier(value: Option<&Value>) -> Option<String> {
 fn event_identity(id: &str) -> String {
     json!(["assistant", id]).to_string()
 }
-fn native_time(message: &Value, entry: &Value) -> Option<i64> {
+pub(crate) fn native_time(message: &Value, entry: &Value) -> Option<i64> {
     if let Some(value) = message.get("timestamp") {
         let ms = value.as_i64()?;
         return (ms.checked_abs()? <= 9_007_199_254_740_991
@@ -69,6 +69,7 @@ pub(crate) struct PiRead {
     pub reasons: BTreeSet<String>,
     pub line_count: i64,
     pub session_id: Option<String>,
+    pub inherited_entries: BTreeSet<String>,
     parent_session: Option<PathBuf>,
     entries: Vec<NativeEntry>,
     entry_index: BTreeMap<String, usize>,
@@ -96,6 +97,7 @@ fn read_pi_raw(path: &Path) -> Result<PiRead, AppError> {
             reasons: BTreeSet::new(),
             line_count: 0,
             session_id: None,
+            inherited_entries: BTreeSet::new(),
             parent_session: None,
             entries: vec![],
             entry_index: BTreeMap::new(),
@@ -436,6 +438,7 @@ fn resolve_fork(
                     Some("forkBoundaryUnavailable")
                 } else {
                     reads[index].ancestors = ancestors;
+                    reads[index].inherited_entries = inherited.clone();
                     reads[index].facts.retain(|f| {
                         f.usage
                             .message_id
@@ -457,6 +460,89 @@ fn resolve_fork(
         states[index] = 2;
         true
     }
+}
+
+/// Read-only sibling of ingestion's ownership resolution. All roots and files
+/// participate, so a copied fork prefix cannot become a new expense.
+pub(crate) fn read_analytics_roster(
+    db: &Database,
+    roots: &[PathBuf],
+) -> Result<Vec<(PathBuf, PiRead)>, AppError> {
+    let files = pi::usage_files(roots).map_err(|_| invalid("sourceEnumerationFailed"))?;
+    let index = usage_source::ProviderIndex::read_roots(db, "pi", roots)?;
+    let before = files
+        .iter()
+        .map(|path| usage_source::Snapshot::file(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut reads = Vec::with_capacity(files.len());
+    let mut bytes = 0u64;
+    let mut entries = 0usize;
+    for path in &files {
+        let read = read_pi_raw(path)?;
+        bytes = bytes
+            .checked_add(read.bytes)
+            .ok_or_else(|| invalid("sourceBudgetExceeded"))?;
+        entries = entries
+            .checked_add(read.entries.len())
+            .ok_or_else(|| invalid("eventBudgetExceeded"))?;
+        if bytes > MAX_SCAN_BYTES || entries > MAX_NATIVE_ENTRIES {
+            return Err(invalid("sourceBudgetExceeded"));
+        }
+        reads.push(read);
+    }
+    let paths = files
+        .iter()
+        .enumerate()
+        .filter_map(|(i, path)| absolute_path(path).map(|path| (path, i)))
+        .collect::<BTreeMap<_, _>>();
+    let mut states = vec![0; reads.len()];
+    for i in 0..reads.len() {
+        resolve_fork(i, &mut reads, &mut states, &paths, &index, 0);
+    }
+    let mut replicas = BTreeMap::<String, Value>::new();
+    let mut native_records = BTreeMap::new();
+    for read in &reads {
+        if let Some(sid) = &read.session_id {
+            for entry in &read.entries {
+                let Some(id) = &entry.id else {
+                    continue;
+                };
+                let identity = (sid.clone(), id.clone());
+                let signature = (
+                    entry.parent.clone(),
+                    entry.kind.clone(),
+                    entry.digest.clone(),
+                );
+                if native_records
+                    .get(&identity)
+                    .is_some_and(|prior| prior != &signature)
+                {
+                    return Err(invalid("conflictingNativeReplicas"));
+                }
+                native_records.insert(identity, signature);
+            }
+        }
+        for fact in &read.facts {
+            if let Some(native) = &fact.native_key {
+                let value = serde_json::to_value(fact).map_err(|_| invalid("invalidFact"))?;
+                if replicas.get(native).is_some_and(|prior| prior != &value) {
+                    return Err(invalid("conflictingNativeReplicas"));
+                }
+                replicas.insert(native.clone(), value);
+            }
+        }
+    }
+    if pi::usage_files(roots).map_err(|_| invalid("sourceEnumerationFailed"))? != files {
+        return Err(invalid("sourceRosterChanged"));
+    }
+    for source in &before {
+        source.verify()?;
+    }
+    {
+        let conn = crate::database::lock_conn!(db.conn);
+        index.check_on(&conn)?;
+    }
+    Ok(files.into_iter().zip(reads).collect())
 }
 pub(crate) fn sync_pi_usage_at(
     db: &Database,
@@ -1175,13 +1261,13 @@ mod tests {
         assert_eq!(cap.source_ids, ["pi_session"]);
     }
     #[test]
-    fn pi_session_capabilities_remain_unsupported_without_a_separate_session_bridge() {
+    fn pi_session_capabilities_expose_the_verified_native_session_bridge() {
         let cap = super::super::usage_query::source_capabilities()
             .into_iter()
             .find(|c| c.tool_id == "pi")
             .unwrap();
-        assert!(!cap.session_analytics_supported);
-        assert!(!cap.project_filter_supported);
+        assert!(cap.session_analytics_supported);
+        assert!(cap.project_filter_supported);
     }
     #[test]
     fn pi_usage_resolver_missing_settings_keeps_the_default_root() {

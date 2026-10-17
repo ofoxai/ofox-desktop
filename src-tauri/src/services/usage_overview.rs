@@ -415,7 +415,7 @@ mod tests {
     }
 
     #[test]
-    fn analytics_capabilities_register_workbuddy_usage_without_claiming_session_analytics() {
+    fn analytics_capabilities_register_workbuddy_usage_with_verified_session_bridge() {
         let db = Database::memory().unwrap();
         let result =
             build_overview(&db, UsagePeriod::All, 1_760_000_000_000, &chrono::Utc, None).unwrap();
@@ -426,7 +426,7 @@ mod tests {
             .unwrap();
         assert!(capability.usage_supported);
         assert_eq!(capability.source_ids, ["workbuddy_session"]);
-        assert!(!capability.session_analytics_supported);
+        assert!(capability.session_analytics_supported);
     }
     use chrono::{FixedOffset, Local, NaiveDateTime, Offset, Timelike, Weekday};
     use rusqlite::params;

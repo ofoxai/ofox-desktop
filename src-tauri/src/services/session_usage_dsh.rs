@@ -112,14 +112,22 @@ fn packed_length(value: &Value, kind: &str) -> Option<usize> {
     (last <= JS_SAFE_INTEGER as u64).then_some(members.len())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DshMetadata {
+    /// Outer None means the header did not establish project metadata.
+    pub project: Option<Option<String>>,
+    pub title: Option<String>,
+    pub delegated: bool,
+}
 pub(crate) struct DshRead {
     pub facts: Vec<NormalizedUsageFact>,
     pub reasons: BTreeSet<String>,
     pub line_count: i64,
     pub session_id: Option<String>,
     pub parent_session_id: Option<String>,
-    decoded_bytes: u64,
-    supported_version: bool,
+    pub metadata: Option<DshMetadata>,
+    pub decoded_bytes: u64,
+    pub supported_version: bool,
 }
 
 /// Native v0 commits newline-terminated rows only. Keep the same open handle
@@ -142,6 +150,7 @@ pub(crate) fn read_dsh(path: &Path) -> Result<DshRead, AppError> {
             line_count: 0,
             session_id: None,
             parent_session_id: None,
+            metadata: None,
             decoded_bytes: 0,
             supported_version: false,
         };
@@ -197,6 +206,18 @@ pub(crate) fn read_dsh(path: &Path) -> Result<DshRead, AppError> {
                     break;
                 }
                 read.supported_version = true;
+                read.metadata = Some(DshMetadata {
+                    project: match value.get("cwd") {
+                        Some(Value::String(path)) if !path.trim().is_empty() => {
+                            Some(Some(path.clone()))
+                        }
+                        Some(Value::String(_) | Value::Null) => Some(None),
+                        _ => None,
+                    },
+                    title: None,
+                    delegated: value["delegationDepth"].as_u64().is_some_and(|n| n > 0)
+                        && value["origin"] == "subagent",
+                });
                 if let Some(cut) = value.get("seedLength") {
                     seeded = true;
                     if let Some(cut) = cut.as_u64() {
@@ -243,6 +264,17 @@ pub(crate) fn read_dsh(path: &Path) -> Result<DshRead, AppError> {
             seq = end;
             if packed {
                 continue;
+            }
+            if kind == "session/title" {
+                if let Some(title) = value.pointer("/data/title").and_then(Value::as_str) {
+                    if title.len() <= 8192 {
+                        if let Some(meta) = &mut read.metadata {
+                            meta.title = Some(crate::session_manager::title::one_line(
+                                &crate::redact::scrub(title),
+                            ));
+                        }
+                    }
+                }
             }
             let Some(usage) = value.pointer("/data/usage").filter(|v| !v.is_null()) else {
                 continue;
@@ -1286,15 +1318,15 @@ mod tests {
     }
 
     #[test]
-    fn dsh_capabilities_expose_native_usage_without_claiming_root_session_analytics() {
+    fn dsh_capabilities_expose_verified_usage_and_partial_session_project_analytics() {
         let cap = super::super::usage_query::source_capabilities()
             .into_iter()
             .find(|c| c.tool_id == "dsh")
             .unwrap();
         assert!(cap.usage_supported);
         assert_eq!(cap.source_ids, ["dsh_session"]);
-        assert!(!cap.session_analytics_supported);
-        assert!(!cap.project_filter_supported);
+        assert!(cap.session_analytics_supported);
+        assert!(cap.project_filter_supported);
     }
     #[test]
     fn dsh_new_provider_can_record_recent_native_facts_after_an_unrelated_global_epoch() {

@@ -104,11 +104,15 @@ fn query_with_cache<Tz: TimeZone>(
     };
     #[cfg(test)]
     advanced::profile_stage("cache+catalog", &mut profile);
-    const READERS: [(&str, &str); 4] = [
+    const READERS: [(&str, &str); 8] = [
         ("claude", "session_log"),
         ("codex", "codex_session"),
         ("gemini", "gemini_session"),
         ("opencode", "opencode_session"),
+        ("workbuddy", "workbuddy_session"),
+        ("pi", "pi_session"),
+        ("dsh", "dsh_session"),
+        ("openclaw", "openclaw_session"),
     ];
     for tool in &query.tool_ids {
         if !READERS.iter().any(|(id, _)| id == tool) {
@@ -258,11 +262,7 @@ mod tests {
     {
         let db = Database::memory().unwrap();
         for (tools, sources, reason) in [
-            (
-                vec!["workbuddy".to_owned()],
-                vec![],
-                "unsupportedTool:workbuddy",
-            ),
+            (vec!["hermes".to_owned()], vec![], "unsupportedTool:hermes"),
             (vec![], vec!["proxy".to_owned()], "unsupportedSource:proxy"),
         ] {
             let mut selected = q();

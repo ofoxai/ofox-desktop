@@ -103,6 +103,9 @@ impl ProjectIndex {
             "gemini" => ("_gemini_session", "gemini_session"),
             "opencode" => ("_opencode_session", "opencode_session"),
             "workbuddy" => ("_workbuddy_session", "workbuddy_session"),
+            "pi" => ("_pi_session", "pi_session"),
+            "dsh" => ("_dsh_session", "dsh_session"),
+            "openclaw" => ("_openclaw_session", "openclaw_session"),
             _ => return None,
         };
         if provider != owned_provider || source != Some(owned_source) {

@@ -26,7 +26,7 @@ pub(crate) fn session_root() -> Result<PathBuf, AppError> {
     Ok(config.join("projects"))
 }
 
-fn sidecar_project(path: &Path) -> Result<Option<String>, AppError> {
+pub(crate) fn sidecar_project(path: &Path) -> Result<Option<String>, AppError> {
     let sidecar = path.with_extension("meta.json");
     let meta = match std::fs::symlink_metadata(&sidecar) {
         Ok(m) => m,

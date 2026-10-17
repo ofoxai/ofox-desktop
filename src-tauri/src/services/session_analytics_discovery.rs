@@ -4,7 +4,13 @@ use std::path::PathBuf;
 #[derive(Default)]
 pub(crate) struct Discovery {
     pub specs: Vec<SourceSpec>,
+    pub batches: Vec<BatchSource>,
     pub failures: Vec<DiscoveryFailure>,
+}
+#[derive(Clone)]
+pub(crate) struct BatchSource {
+    pub provider: String,
+    pub roots: Vec<PathBuf>,
 }
 pub(crate) struct DiscoveryFailure {
     pub provider: String,
@@ -25,6 +31,23 @@ pub(crate) fn discover_sources() -> Discovery {
 pub(crate) fn discover_in(roots: &[(&str, PathBuf)]) -> Discovery {
     let mut result = Discovery::default();
     for (provider, root) in roots {
+        if matches!(*provider, "workbuddy" | "pi" | "dsh" | "openclaw") {
+            if let Some(batch) = result
+                .batches
+                .iter_mut()
+                .find(|batch| batch.provider == *provider)
+            {
+                if !batch.roots.contains(root) {
+                    batch.roots.push(root.clone());
+                }
+            } else {
+                result.batches.push(BatchSource {
+                    provider: (*provider).into(),
+                    roots: vec![root.clone()],
+                });
+            }
+            continue;
+        }
         match provider_sources(provider, root) {
             Ok(mut specs) => result.specs.append(&mut specs),
             Err(()) => result.failures.push(DiscoveryFailure {

@@ -2,7 +2,7 @@
 //! changing a query or opening details reads the cache in one batch only.
 #[cfg(test)]
 pub(crate) use super::session_analytics_discovery::discover_sources;
-pub(crate) use super::session_analytics_discovery::{Discovery, DiscoveryFailure};
+pub(crate) use super::session_analytics_discovery::{BatchSource, Discovery, DiscoveryFailure};
 use super::{
     session_analytics::{AnalyticsInput, SessionDescriptor, SourceReason},
     session_analytics_core::{MessageEvent, Project, Role, SessionIdentity, UsageFact},
@@ -52,6 +52,7 @@ struct CachedProjection {
     key: [u8; 32],
     input: Arc<AnalyticsInput>,
     thread_sources: Arc<Vec<ThreadSource>>,
+    native_sources: Arc<Vec<NativeBatchSource>>,
     created_at: Instant,
 }
 
@@ -64,6 +65,11 @@ pub(crate) struct ProjectionCache {
     max_bytes: usize,
     ttl: Duration,
 }
+type ProjectionParts = (
+    Arc<AnalyticsInput>,
+    Arc<Vec<ThreadSource>>,
+    Arc<Vec<NativeBatchSource>>,
+);
 impl Default for ProjectionCache {
     fn default() -> Self {
         Self {
@@ -92,7 +98,7 @@ impl ProjectionCache {
         &self,
         conn: &rusqlite::Connection,
         now: Instant,
-    ) -> Result<(Arc<AnalyticsInput>, Arc<Vec<ThreadSource>>), AppError> {
+    ) -> Result<ProjectionParts, AppError> {
         // Read and validate SQL/budgets before any lookup. Even a matching
         // warm slot must not conceal a read failure or an oversized table.
         let raw_rows = raw_rows_on(conn)?;
@@ -107,16 +113,22 @@ impl ProjectionCache {
                 *slot = None;
             }
             if let Some(entry) = slot.as_ref().filter(|entry| entry.key == key) {
-                return Ok((Arc::clone(&entry.input), Arc::clone(&entry.thread_sources)));
+                return Ok((
+                    Arc::clone(&entry.input),
+                    Arc::clone(&entry.thread_sources),
+                    Arc::clone(&entry.native_sources),
+                ));
             }
         }
         // Decode and deduplicate the already-read rows without another SELECT.
         // No raw envelope or native transcript is retained by the slot.
         let rows = decode_rows(raw_rows);
         let thread_sources = Arc::new(thread_sources_from_rows(&rows));
+        let native_sources = Arc::new(native_sources_from_rows(&rows));
         let input = Arc::new(input_from_rows(rows, common));
         let bytes = projection_bytes(&input)
-            .and_then(|bytes| bytes.checked_add(thread_source_bytes(&thread_sources)?));
+            .and_then(|bytes| bytes.checked_add(thread_source_bytes(&thread_sources)?))
+            .and_then(|bytes| bytes.checked_add(native_source_bytes(&native_sources)?));
         let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
         *slot = bytes
             .filter(|bytes| *bytes <= self.max_bytes)
@@ -124,9 +136,10 @@ impl ProjectionCache {
                 key,
                 input: Arc::clone(&input),
                 thread_sources: Arc::clone(&thread_sources),
+                native_sources: Arc::clone(&native_sources),
                 created_at: now,
             });
-        Ok((input, thread_sources))
+        Ok((input, thread_sources, native_sources))
     }
 }
 
@@ -512,6 +525,10 @@ fn source_id(provider: &str) -> &str {
         "codex" => "codex_session",
         "gemini" => "gemini_session",
         "opencode" => "opencode_session",
+        "workbuddy" => "workbuddy_session",
+        "pi" => "pi_session",
+        "dsh" => "dsh_session",
+        "openclaw" => "openclaw_session",
         _ => "unsupported",
     }
 }
@@ -522,7 +539,7 @@ fn rows_on(conn: &rusqlite::Connection) -> Result<BTreeMap<String, Row>, AppErro
 }
 
 fn raw_rows_on(conn: &rusqlite::Connection) -> Result<Vec<RawRow>, AppError> {
-    let mut statement=conn.prepare("SELECT source_path,provider_id,stamp,parser_version,meta_json FROM session_meta_cache WHERE provider_id IN ('claude','codex','gemini','opencode') ORDER BY source_path")?;
+    let mut statement=conn.prepare("SELECT source_path,provider_id,stamp,parser_version,meta_json FROM session_meta_cache WHERE provider_id IN ('claude','codex','gemini','opencode','workbuddy','pi','dsh','openclaw') ORDER BY source_path")?;
     let mut result = Vec::new();
     let mut bytes = 0usize;
     let rows = statement.query_map([], |r| {
@@ -687,7 +704,12 @@ pub(crate) fn refresh_discovered(
     db: &Database,
     discovery: &Discovery,
 ) -> Result<RefreshReport, AppError> {
-    refresh_sources_inner(db, &discovery.specs, &discovery.failures)
+    refresh_sources_inner(
+        db,
+        &discovery.specs,
+        &discovery.failures,
+        &discovery.batches,
+    )
 }
 
 #[cfg(test)]
@@ -695,14 +717,15 @@ pub(crate) fn refresh_sources(
     db: &Database,
     specs: &[SourceSpec],
 ) -> Result<RefreshReport, AppError> {
-    refresh_sources_inner(db, specs, &[])
+    refresh_sources_inner(db, specs, &[], &[])
 }
 fn refresh_sources_inner(
     db: &Database,
     specs: &[SourceSpec],
     failures: &[DiscoveryFailure],
+    batches: &[BatchSource],
 ) -> Result<RefreshReport, AppError> {
-    if specs.len() > MAX_SOURCES {
+    if specs.len() + batches.len() > MAX_SOURCES {
         return Err(invalid("sourceBudgetExceeded"));
     }
     let rows = {
@@ -823,6 +846,14 @@ fn refresh_sources_inner(
             );
         }
     }
+    for batch in batches {
+        let path = batch_key(batch)?;
+        found.insert(path.clone());
+        if failed_providers.contains(batch.provider.as_str()) {
+            continue;
+        }
+        refresh_batch(db, batch, &path, rows.get(&path), &mut report)?;
+    }
     for (path, row) in rows {
         if found.contains(&path) {
             continue;
@@ -879,6 +910,249 @@ pub(crate) struct ParsedSource {
     pub facts: Vec<UsageFact>,
     pub messages: Vec<MessageEvent>,
     pub reasons: Vec<String>,
+}
+pub(crate) fn batch_key(batch: &BatchSource) -> Result<String, AppError> {
+    let roots = serde_json::to_vec(&batch.roots).map_err(|_| invalid("invalidSourceRoots"))?;
+    Ok(format!(
+        "analytics-roster-v1:{}:{:x}",
+        batch.provider,
+        Sha256::digest(roots)
+    ))
+}
+/// Observation only: source-specific readers retain their roster and lineage
+/// rules. The shared wrapper never turns a physical file into an ownership proof.
+pub(crate) fn batch_stamp(batch: &BatchSource) -> Result<Value, AppError> {
+    match batch.provider.as_str() {
+        "workbuddy" => super::session_analytics_workbuddy::stamp(&batch.roots),
+        "pi" => super::session_analytics_pi::stamp(&batch.roots),
+        "dsh" => super::session_analytics_dsh::stamp(&batch.roots),
+        "openclaw" => super::session_analytics_openclaw::stamp(&batch.roots),
+        _ => Err(invalid("unsupportedTranscriptReader")),
+    }
+}
+fn batch_read(db: &Database, batch: &BatchSource) -> Result<ParsedSource, AppError> {
+    match batch.provider.as_str() {
+        "workbuddy" => super::session_analytics_workbuddy::read(db, &batch.roots),
+        "pi" => super::session_analytics_pi::read(db, &batch.roots),
+        "dsh" => super::session_analytics_dsh::read(db, &batch.roots),
+        "openclaw" => super::session_analytics_openclaw::read(db, &batch.roots),
+        _ => Err(invalid("unsupportedTranscriptReader")),
+    }
+}
+fn batch_db_revision_on(conn: &rusqlite::Connection, provider: &str) -> Result<Value, AppError> {
+    let manifest = source_cache::provider_on(conn, provider)?;
+    let manifest =
+        serde_json::to_vec(&manifest).map_err(|_| invalid("analyticsCacheUnavailable"))?;
+    Ok(
+        json!({"epoch":source_cache::ledger_epoch_on(conn)?,"manifest":format!("{:x}",Sha256::digest(manifest))}),
+    )
+}
+fn native_revision(stamp: &Value) -> Result<String, AppError> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(stamp).map_err(|_| invalid("invalidSourceStamp"))?)
+    ))
+}
+fn preserve_absent_batch_sessions(entry: &mut Entry, previous: Option<&Entry>) {
+    let Some(previous) = previous else {
+        return;
+    };
+    let current = entry
+        .sessions
+        .iter()
+        .map(|session| session.identity.key.as_str())
+        .collect::<BTreeSet<_>>();
+    let absent = previous
+        .sessions
+        .iter()
+        .filter(|session| !current.contains(session.identity.key.as_str()))
+        .map(|session| session.identity.key.clone())
+        .collect::<BTreeSet<_>>();
+    if absent.is_empty() {
+        return;
+    }
+    for session in previous
+        .sessions
+        .iter()
+        .filter(|session| absent.contains(&session.identity.key))
+    {
+        let mut session = session.clone();
+        session.source_available = false;
+        session.manager_key = None;
+        if !session
+            .message_reasons
+            .iter()
+            .any(|reason| reason == "sourceMissing")
+        {
+            session.message_reasons.push("sourceMissing".into());
+        }
+        entry.sessions.push(session);
+    }
+    entry.facts.extend(
+        previous
+            .facts
+            .iter()
+            .filter(|fact| {
+                fact.session_key
+                    .as_ref()
+                    .is_some_and(|key| absent.contains(key))
+            })
+            .cloned(),
+    );
+    entry.messages.extend(
+        previous
+            .messages
+            .iter()
+            .filter(|message| absent.contains(&message.session_key))
+            .cloned(),
+    );
+    entry.reasons.push("sourceMissing".into());
+}
+fn save_batch(
+    db: &Database,
+    batch: &BatchSource,
+    path: &str,
+    token: &Option<String>,
+    entry: &Entry,
+    db_revision: &Value,
+    native: Option<&Value>,
+) -> Result<(), AppError> {
+    let mut conn = crate::database::lock_conn!(db.conn);
+    let tx = conn.transaction()?;
+    if batch_db_revision_on(&tx, &batch.provider)? != *db_revision {
+        return Err(invalid("sourceChangedRetry"));
+    }
+    if let Some(native) = native {
+        if batch_stamp(batch)? != *native {
+            return Err(invalid("sourceChangedRetry"));
+        }
+    }
+    source_cache::merge_on(
+        &tx,
+        path,
+        &batch.provider,
+        None,
+        Part::Analytics,
+        token,
+        Some(serde_json::to_value(entry).map_err(|_| invalid("invalidCacheValue"))?),
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+fn refresh_batch(
+    db: &Database,
+    batch: &BatchSource,
+    path: &str,
+    old: Option<&Row>,
+    report: &mut RefreshReport,
+) -> Result<(), AppError> {
+    if old.is_some_and(|row| row.provider != batch.provider || row.entry.is_err()) {
+        report.failed += 1;
+        report.mark(
+            &batch.provider,
+            RefreshState::Failed("analyticsCacheUnavailable"),
+        );
+        return Ok(());
+    }
+    let previous = old
+        .and_then(|row| row.entry.as_ref().ok())
+        .and_then(Option::as_ref);
+    let token = old.and_then(|row| row.token.clone());
+    let now = chrono::Utc::now().timestamp_millis();
+    let db_revision = {
+        let conn = crate::database::lock_conn!(db.conn);
+        batch_db_revision_on(&conn, &batch.provider)?
+    };
+    let before = batch_stamp(batch);
+    if let (Ok(native), Some(previous)) = (&before, previous) {
+        let revision =
+            json!({"native":native_revision(native)?,"db":db_revision,"roots":batch.roots});
+        if previous.available
+            && previous.status != "failed"
+            && previous.stamp.as_ref() == Some(&revision)
+        {
+            report.unchanged += 1;
+            report.mark(
+                &batch.provider,
+                if previous.status == "ok" {
+                    RefreshState::Ok
+                } else {
+                    RefreshState::Partial("partialSource")
+                },
+            );
+            return Ok(());
+        }
+    }
+    let parsed = before
+        .as_ref()
+        .map_err(|_| invalid("sourceReadFailed"))
+        .and_then(|native| {
+            let parsed = batch_read(db, batch)?;
+            if batch_stamp(batch)? != *native {
+                return Err(invalid("sourceChangedRetry"));
+            }
+            let mut entry = empty_entry(now);
+            entry.sessions = parsed.sessions;
+            entry.facts = parsed.facts;
+            entry.messages = parsed.messages;
+            entry.reasons = parsed.reasons;
+            preserve_absent_batch_sessions(&mut entry, previous);
+            entry.reasons.sort();
+            entry.reasons.dedup();
+            entry.priority = 3;
+            entry.status = if entry.reasons.is_empty() {
+                "ok"
+            } else {
+                "partial"
+            }
+            .into();
+            entry.stamp = Some(
+                json!({"native":native_revision(native)?,"db":db_revision,"roots":batch.roots}),
+            );
+            entry.succeeded_at_ms = Some(now);
+            Ok(entry)
+        });
+    let (entry, verified) = match parsed {
+        Ok(entry) => {
+            report.parsed += 1;
+            (entry, true)
+        }
+        Err(_) => {
+            report.failed += 1;
+            let mut entry = previous.cloned().unwrap_or_else(|| empty_entry(now));
+            entry.status = "failed".into();
+            entry.attempted_at_ms = now;
+            entry.reasons.retain(|reason| reason != "sourceReadFailed");
+            entry.reasons.push("sourceReadFailed".into());
+            (entry, false)
+        }
+    };
+    report.mark(
+        &batch.provider,
+        match entry.status.as_str() {
+            "ok" => RefreshState::Ok,
+            "failed" => RefreshState::Failed("sourceReadFailed"),
+            _ => RefreshState::Partial("partialSource"),
+        },
+    );
+    if save_batch(
+        db,
+        batch,
+        path,
+        &token,
+        &entry,
+        &db_revision,
+        if verified { before.as_ref().ok() } else { None },
+    )
+    .is_err()
+    {
+        report.failed += 1;
+        report.mark(
+            &batch.provider,
+            RefreshState::Failed("analyticsCacheWriteFailed"),
+        );
+    }
+    Ok(())
 }
 fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
     let mut entry = empty_entry(now);
@@ -1260,6 +1534,174 @@ struct ThreadSource {
     healthy: bool,
     projection: codex_thread_usage::Projection,
 }
+struct NativeBatchSource {
+    provider: String,
+    roots: Vec<PathBuf>,
+    native_hash: String,
+    db_hash: String,
+    managers: BTreeSet<String>,
+    healthy: bool,
+}
+fn native_sources_from_rows(rows: &BTreeMap<String, Row>) -> Vec<NativeBatchSource> {
+    rows.iter()
+        .filter_map(|(path, row)| {
+            if !path.starts_with("analytics-roster-v1:") {
+                return None;
+            }
+            let entry = row.entry.as_ref().ok()?.as_ref()?;
+            let stamp = entry.stamp.as_ref()?;
+            Some(NativeBatchSource {
+                provider: row.provider.clone(),
+                roots: serde_json::from_value(stamp.get("roots")?.clone()).ok()?,
+                native_hash: stamp.get("native")?.as_str()?.into(),
+                db_hash: native_revision(stamp.get("db")?).ok()?,
+                managers: entry
+                    .sessions
+                    .iter()
+                    .filter(|session| session.source_available)
+                    .filter_map(|session| session.manager_key.clone())
+                    .collect(),
+                healthy: entry.available && entry.status != "failed",
+            })
+        })
+        .collect()
+}
+fn native_source_bytes(sources: &Vec<NativeBatchSource>) -> Option<usize> {
+    let mut bytes = sources
+        .capacity()
+        .checked_mul(std::mem::size_of::<NativeBatchSource>())?;
+    for source in sources {
+        bytes = bytes
+            .checked_add(source.provider.capacity())?
+            .checked_add(source.native_hash.capacity())?
+            .checked_add(source.db_hash.capacity())?;
+        bytes = bytes.checked_add(
+            source
+                .roots
+                .capacity()
+                .checked_mul(std::mem::size_of::<PathBuf>())?,
+        )?;
+        for root in &source.roots {
+            bytes = bytes.checked_add(root.capacity())?;
+        }
+        for key in &source.managers {
+            bytes = bytes.checked_add(key.capacity())?.checked_add(128)?;
+        }
+    }
+    Some(bytes)
+}
+pub(crate) struct NativeListingProjection {
+    pub available: bool,
+    pub complete: bool,
+    pub reasons: Vec<String>,
+    pub models: Vec<codex_thread_usage::Model>,
+}
+pub(crate) type ListingProjections = (
+    BTreeMap<String, codex_thread_usage::Projection>,
+    BTreeMap<String, NativeListingProjection>,
+);
+/// Both display consumers share the same one-query, decoded snapshot.
+pub(crate) fn listing_projections_on(
+    conn: &rusqlite::Connection,
+    listing: &[crate::session_manager::SessionMeta],
+) -> Result<ListingProjections, AppError> {
+    let (input, threads, native) = projection_cache().parts_at(conn, Instant::now())?;
+    let codex = thread_usage_from_sources(&threads, listing)?;
+    let mut verified = BTreeSet::new();
+    let mut changed = BTreeSet::new();
+    for source in native.iter() {
+        let batch = BatchSource {
+            provider: source.provider.clone(),
+            roots: source.roots.clone(),
+        };
+        let valid = source.healthy
+            && batch_stamp(&batch)
+                .and_then(|stamp| native_revision(&stamp))
+                .as_ref()
+                .ok()
+                == Some(&source.native_hash)
+            && native_revision(&batch_db_revision_on(conn, &source.provider)?)
+                .as_ref()
+                .ok()
+                == Some(&source.db_hash);
+        for key in &source.managers {
+            if valid {
+                verified.insert(key.clone());
+            } else {
+                changed.insert(key.clone());
+            }
+        }
+    }
+    let descriptors = input
+        .sessions
+        .iter()
+        .filter_map(|session| session.manager_key.as_ref().map(|key| (key, session)))
+        .collect::<BTreeMap<_, _>>();
+    let mut models = BTreeMap::<String, BTreeMap<String, codex_thread_usage::Model>>::new();
+    let mut incomplete = BTreeSet::new();
+    for fact in &input.facts {
+        let Some(session) = &fact.session_key else {
+            continue;
+        };
+        let model = models
+            .entry(session.clone())
+            .or_default()
+            .entry(fact.model.clone())
+            .or_insert_with(|| codex_thread_usage::Model {
+                model: fact.model.clone(),
+                buckets: [0; 4],
+                records: 0,
+            });
+        for (sum, value) in model.buckets.iter_mut().zip(fact.buckets) {
+            *sum = sum
+                .checked_add(value)
+                .ok_or_else(|| invalid("aggregateOverflow"))?;
+        }
+        model.records = model
+            .records
+            .checked_add(1)
+            .ok_or_else(|| invalid("aggregateOverflow"))?;
+        if !fact.complete {
+            incomplete.insert(session.clone());
+        }
+    }
+    let mut result = BTreeMap::new();
+    for meta in listing.iter().filter(|meta| {
+        matches!(
+            meta.provider_id.as_str(),
+            "workbuddy" | "pi" | "dsh" | "openclaw"
+        )
+    }) {
+        let manager = crate::session_manager::managed::key(meta);
+        let mut projection = NativeListingProjection {
+            available: false,
+            complete: false,
+            reasons: vec!["nativeSessionNotAssociated".into()],
+            models: vec![],
+        };
+        if let Some(descriptor) = descriptors.get(&manager) {
+            if descriptor.identity.tool_id == meta.provider_id
+                && descriptor.source_available
+                && verified.contains(&manager)
+            {
+                if let Some(rows) = models.get(&descriptor.identity.key) {
+                    projection.available = true;
+                    projection.complete = !incomplete.contains(&descriptor.identity.key);
+                    projection.reasons = if projection.complete {
+                        vec![]
+                    } else {
+                        vec!["incompleteSource".into()]
+                    };
+                    projection.models = rows.values().cloned().collect();
+                }
+            } else if changed.contains(&manager) {
+                projection.reasons = vec!["threadUsageSourceChanged".into()];
+            }
+        }
+        result.insert(manager, projection);
+    }
+    Ok((codex, result))
+}
 fn thread_sources_from_rows(rows: &BTreeMap<String, Row>) -> Vec<ThreadSource> {
     rows.iter()
         .filter_map(|(path, row)| {
@@ -1308,18 +1750,20 @@ fn thread_source_bytes(sources: &Vec<ThreadSource>) -> Option<usize> {
     }
     Some(bytes)
 }
+#[cfg(test)]
 pub(crate) fn thread_usage_on(
     conn: &rusqlite::Connection,
     listing: &[crate::session_manager::SessionMeta],
 ) -> Result<BTreeMap<String, codex_thread_usage::Projection>, AppError> {
     thread_usage_cached_on(conn, listing, projection_cache())
 }
+#[cfg(test)]
 fn thread_usage_cached_on(
     conn: &rusqlite::Connection,
     listing: &[crate::session_manager::SessionMeta],
     cache: &ProjectionCache,
 ) -> Result<BTreeMap<String, codex_thread_usage::Projection>, AppError> {
-    let (_, sources) = cache.parts_at(conn, Instant::now())?;
+    let (_, sources, _) = cache.parts_at(conn, Instant::now())?;
     thread_usage_from_sources(&sources, listing)
 }
 fn thread_usage_from_sources(
@@ -2333,6 +2777,7 @@ mod tests {
         refresh_sources(&db, &[spec(&claude), x.clone()]).unwrap();
         let discovery = Discovery {
             specs: vec![x],
+            batches: vec![],
             failures: vec![DiscoveryFailure {
                 provider: "claude".into(),
                 code: "sourceDiscoveryFailed",
