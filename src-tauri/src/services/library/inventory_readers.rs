@@ -162,8 +162,23 @@ pub(super) fn routing_signature(kind: &ResourceKind) -> Result<String, AppError>
     )))
 }
 fn source(r: &Route) -> InventorySource {
+    let location = match &r.location {
+        Location::File(path) if r.label == "nativeSkills" => {
+            SourceLocation::Directory(path.clone())
+        }
+        Location::File(path) => SourceLocation::File(path.clone()),
+        Location::Inline(_) => SourceLocation::Inline,
+        Location::Legacy => SourceLocation::Legacy,
+    };
+    let source_id = uuid::Uuid::new_v4().to_string();
     InventorySource {
-        source_id: uuid::Uuid::new_v4().to_string(),
+        source_ref: Some(source_id.clone()),
+        observed_at_ms: Some(chrono::Utc::now().timestamp_millis()),
+        location_kind: Some(location.kind().into()),
+        display_path: location.short_path(),
+        location: Some(location),
+        proofs: vec![],
+        source_id,
         tool_id: r.tool.clone(),
         label: r.label.clone(),
         state: "ready".into(),
@@ -212,12 +227,17 @@ fn add(
         existing.proofs.extend(proofs);
         return;
     }
+    let service_host = match &definition {
+        Definition::Mcp { spec } => mcp_service_host(spec),
+        _ => None,
+    };
     data.candidates.push(Candidate {
         view: InventoryEntry {
             entry_id: uuid::Uuid::new_v4().to_string(),
             kind: data_kind(&definition),
             name,
             summary: None,
+            service_host,
             sources: vec![reference(source)],
             matched_resource_ids: vec![],
             conflict: false,
@@ -306,35 +326,38 @@ fn user_instructions(text: &str) -> Result<String, AppError> {
 fn instructions(db: &Database, route: &Route, source: &mut InventorySource, data: &mut ScanData) {
     match &route.location {
         Location::File(path) => match text_file(path) {
-            Ok(Some((text, proof))) => match user_instructions(&text) {
-                Ok(content) if !content.trim_matches('\u{feff}').trim().is_empty() => {
-                    let hash = io::fingerprint(Some(content.as_bytes()));
-                    let name = if route.label == "nativeInstructionsOverride" {
-                        "Codex (AGENTS.override.md)"
-                    } else {
-                        match route.tool.as_str() {
-                            "claude" => "Claude Code",
-                            "codex" => "Codex",
-                            "gemini" => "Gemini CLI",
-                            "opencode" => "OpenCode",
-                            "hermes" => "Hermes",
-                            _ => &route.tool,
-                        }
-                    };
-                    add(
-                        data,
-                        source,
-                        name.into(),
-                        Definition::Instructions { content },
-                        vec![proof],
-                        hash,
-                        None,
-                    );
-                    source.count += 1;
+            Ok(Some((text, proof))) => {
+                source.proofs.push(proof.clone());
+                match user_instructions(&text) {
+                    Ok(content) if !content.trim_matches('\u{feff}').trim().is_empty() => {
+                        let hash = io::fingerprint(Some(content.as_bytes()));
+                        let name = if route.label == "nativeInstructionsOverride" {
+                            "Codex (AGENTS.override.md)"
+                        } else {
+                            match route.tool.as_str() {
+                                "claude" => "Claude Code",
+                                "codex" => "Codex",
+                                "gemini" => "Gemini CLI",
+                                "opencode" => "OpenCode",
+                                "hermes" => "Hermes",
+                                _ => &route.tool,
+                            }
+                        };
+                        add(
+                            data,
+                            source,
+                            name.into(),
+                            Definition::Instructions { content },
+                            vec![proof],
+                            hash,
+                            None,
+                        );
+                        source.count += 1;
+                    }
+                    Ok(_) => source.reason = Some("library.inventoryManagedOnly".into()),
+                    Err(_) => fail(source, "instructionsConflict"),
                 }
-                Ok(_) => source.reason = Some("library.inventoryManagedOnly".into()),
-                Err(_) => fail(source, "instructionsConflict"),
-            },
+            }
             Ok(None) => source.state = "missing".into(),
             Err(_) => fail(source, "inventorySourceUnreadable"),
         },
@@ -382,7 +405,21 @@ fn mcp_single(
     source: &mut InventorySource,
 ) -> Result<Option<(Value, Option<Proof>)>, AppError> {
     let read = match &route.location {
-        Location::File(path) => text_file(path)?.map(|(text, proof)| (text, Some(proof))),
+        Location::File(path) => match text_file(path)? {
+            Some((text, proof)) => {
+                source.proofs.push(proof.clone());
+                Some((text, Some(proof)))
+            }
+            None => {
+                // Negative scan evidence is required even if this source yields no entries.
+                source.proofs.push(Proof::File {
+                    path: path.clone(),
+                    physical: io::physical_id(path)?,
+                    hash: io::fingerprint(None),
+                });
+                None
+            }
+        },
         Location::Inline(raw) if raw.len() <= 2 * 1024 * 1024 => Some((raw.clone(), None)),
         _ => return Err(error("inventorySourceUnsupported")),
     };
@@ -755,7 +792,71 @@ pub(super) fn collect(db: &Database, kind: ResourceKind) -> Result<ScanData, App
             state: "unsupported".into(),
             reason: Some("library.inventorySourceUnsupported".into()),
             count: 0,
+            observed_at_ms: Some(chrono::Utc::now().timestamp_millis()),
+            location_kind: None,
+            display_path: None,
+            source_ref: None,
+            location: None,
+            proofs: vec![],
         });
     }
     Ok(data)
+}
+
+pub(super) fn scan_signature(data: &ScanData) -> Result<String, AppError> {
+    let source_key = |source: &InventorySource| {
+        let physical = match source.location.as_ref() {
+            Some(SourceLocation::File(path) | SourceLocation::Directory(path)) => {
+                io::physical_id(path).ok()
+            }
+            _ => None,
+        };
+        format!(
+            "{:?}",
+            (
+                &source.tool_id,
+                &source.label,
+                &source.state,
+                &source.reason,
+                source.count,
+                &source.location,
+                physical,
+                source.proofs.iter().collect::<BTreeSet<_>>()
+            )
+        )
+    };
+    let mut sources: Vec<_> = data.sources.iter().map(&source_key).collect();
+    sources.sort();
+    let source_keys: BTreeMap<_, _> = data
+        .sources
+        .iter()
+        .map(|source| (source.source_id.as_str(), source_key(source)))
+        .collect();
+    let mut entries: Vec<_> = data
+        .candidates
+        .iter()
+        .map(|candidate| {
+            let origins: BTreeSet<_> = candidate
+                .view
+                .sources
+                .iter()
+                .filter_map(|source| source_keys.get(source.source_id.as_str()))
+                .collect();
+            format!(
+                "{:?}",
+                (
+                    &candidate.view.name,
+                    &candidate.hash,
+                    &candidate.view.directory,
+                    candidate.proofs.iter().collect::<BTreeSet<_>>(),
+                    origins
+                )
+            )
+        })
+        .collect();
+    entries.sort();
+    Ok(io::fingerprint(Some(
+        &serde_json::to_vec(&(sources, entries, &data.routing))
+            .map_err(|_| error("inventoryUnavailable"))?,
+    )))
 }

@@ -622,3 +622,66 @@ fn replacing_an_alias_with_identical_bytes_at_another_physical_path_is_stale() {
         .instructions
         .is_empty());
 }
+
+#[test]
+#[serial_test::serial]
+fn scan_exposes_safe_source_locations_without_private_paths_or_values() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let path = super::super::mcp_resource::native_paths().unwrap()["claude"].clone();
+    write(
+        &path,
+        r#"{"mcpServers":{"sample":{"command":"PRIVATE-COMMAND","env":{"TOKEN":"PRIVATE-TOKEN"}}}}"#,
+    );
+    let view = scan(&db, ResourceKind::Mcp).unwrap();
+    let json = serde_json::to_value(&view).unwrap();
+    assert!(
+        json["observedAtMs"].as_i64().is_some_and(|value| value > 0),
+        "read-only discovery needs an observation timestamp"
+    );
+    let source = json["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["toolId"] == "claude")
+        .unwrap();
+    assert_eq!(source["locationKind"], "file");
+    assert!(source["sourceRef"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    let serialized = serde_json::to_string(&view).unwrap();
+    for private in [path.to_str().unwrap(), "PRIVATE-COMMAND", "PRIVATE-TOKEN"] {
+        assert!(!serialized.contains(private));
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn source_search_host_excludes_url_path_query_userinfo_and_non_http_schemes() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let path = super::super::mcp_resource::native_paths().unwrap()["claude"].clone();
+    write(
+        &path,
+        r#"{"mcpServers":{"remote":{"type":"http","url":"https://EXAMPLE.invalid/PRIVATE-PATH?token=PRIVATE-QUERY"},"credentials":{"type":"http","url":"https://user:PRIVATE-PASSWORD@example.invalid/mcp"},"local":{"type":"http","url":"file:///PRIVATE-LOCAL-PATH"}}}"#,
+    );
+    let view = scan(&db, ResourceKind::Mcp).unwrap();
+    let json = serde_json::to_value(&view).unwrap();
+    let rows = json["entries"].as_array().unwrap();
+    assert_eq!(
+        rows.iter().find(|entry| entry["name"] == "remote").unwrap()["serviceHost"],
+        "example.invalid"
+    );
+    for name in ["credentials", "local"] {
+        assert!(rows.iter().find(|entry| entry["name"] == name).unwrap()["serviceHost"].is_null());
+    }
+    let output = json.to_string();
+    for private in [
+        "PRIVATE-PATH",
+        "PRIVATE-QUERY",
+        "PRIVATE-PASSWORD",
+        "PRIVATE-LOCAL-PATH",
+    ] {
+        assert!(!output.contains(private));
+    }
+}

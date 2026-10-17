@@ -13,8 +13,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "inventory_builtin.rs"]
+mod builtin;
+#[path = "inventory_details.rs"]
+mod details;
+pub use builtin::{match_builtin_recipes, BuiltinRecipe};
 #[path = "inventory_readers.rs"]
 mod readers;
+use details::SourceLocation;
+pub use details::{
+    compare_mcp, match_recipes, mcp_service_host, reveal_source, source_detail,
+    InventorySourceDetail, McpComparison, McpComparisonSubject, McpRecipe, McpRecipeMatch,
+};
 const TTL: Duration = Duration::from_secs(600);
 const MAX_TICKETS: usize = 8;
 const MAX_BYTES: usize = 64 * 1024 * 1024;
@@ -32,6 +42,18 @@ pub struct InventorySource {
     pub state: String,
     pub reason: Option<String>,
     pub count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_at_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<String>,
+    #[serde(skip)]
+    location: Option<SourceLocation>,
+    #[serde(skip)]
+    proofs: Vec<Proof>,
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,6 +68,8 @@ pub struct InventoryEntry {
     pub kind: ResourceKind,
     pub name: String,
     pub summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_host: Option<String>,
     pub sources: Vec<EntrySource>,
     pub matched_resource_ids: Vec<String>,
     pub conflict: bool,
@@ -58,6 +82,7 @@ pub struct LibraryInventory {
     pub ticket_id: String,
     pub kind: ResourceKind,
     pub expires_at_ms: i64,
+    pub observed_at_ms: i64,
     pub sources: Vec<InventorySource>,
     pub entries: Vec<InventoryEntry>,
 }
@@ -91,7 +116,7 @@ enum Definition {
         description: Option<String>,
     },
 }
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Proof {
     File {
         path: PathBuf,
@@ -125,6 +150,11 @@ struct Ticket {
     created: Instant,
     bytes: usize,
     candidates: BTreeMap<String, Candidate>,
+    sources: Vec<InventorySource>,
+    observed_at_ms: i64,
+    definitions_revision: u64,
+    source_proofs: Vec<Proof>,
+    source_signature: String,
 }
 fn pending() -> &'static Mutex<BTreeMap<String, Ticket>> {
     static TICKETS: OnceLock<Mutex<BTreeMap<String, Ticket>>> = OnceLock::new();
@@ -225,12 +255,15 @@ pub fn scan(db: &Database, kind: ResourceKind) -> Result<LibraryInventory, AppEr
     if bytes > MAX_BYTES || data.candidates.len() > MAX_ENTRIES {
         return Err(error("inventoryLimit"));
     }
+    let source_signature = readers::scan_signature(&data)?;
     let id = uuid::Uuid::new_v4().to_string();
+    let observed_at_ms = chrono::Utc::now().timestamp_millis();
     let view = LibraryInventory {
         ticket_id: id.clone(),
         kind: kind.clone(),
+        observed_at_ms,
         expires_at_ms: chrono::Utc::now().timestamp_millis() + TTL.as_millis() as i64,
-        sources: data.sources,
+        sources: data.sources.clone(),
         entries: data
             .candidates
             .iter()
@@ -263,6 +296,15 @@ pub fn scan(db: &Database, kind: ResourceKind) -> Result<LibraryInventory, AppEr
             routing: data.routing,
             created: Instant::now(),
             bytes,
+            source_signature,
+            source_proofs: data
+                .sources
+                .iter()
+                .flat_map(|source| source.proofs.iter().cloned())
+                .collect(),
+            sources: data.sources,
+            observed_at_ms,
+            definitions_revision: snapshot.definitions.revision,
             candidates: data
                 .candidates
                 .into_iter()
@@ -272,43 +314,47 @@ pub fn scan(db: &Database, kind: ResourceKind) -> Result<LibraryInventory, AppEr
     );
     Ok(view)
 }
-fn verify(db: &Database, candidate: &Candidate) -> Result<(), AppError> {
-    for proof in &candidate.proofs {
-        match proof {
-            Proof::File {
-                path,
-                physical,
-                hash,
-            } => {
-                if io::physical_id(path)? != *physical
-                    || io::fingerprint(io::read(path)?.as_deref().map(str::as_bytes)) != *hash
-                {
-                    return Err(error("inventoryChanged"));
-                }
-            }
-            Proof::Legacy { tool, id, hash } => {
-                let rows = db.get_prompts(tool)?;
-                let row = rows.get(id).ok_or_else(|| error("inventoryChanged"))?;
-                if io::fingerprint(Some(
-                    &serde_json::to_vec(row).map_err(|_| error("inventoryChanged"))?,
-                )) != *hash
-                {
-                    return Err(error("inventoryChanged"));
-                }
-            }
-            Proof::Tree {
-                path,
-                physical,
-                hash,
-            } => {
-                let canonical = path.canonicalize().map_err(|_| error("inventoryChanged"))?;
-                if canonical.to_string_lossy() != physical.as_str()
-                    || super::skill_artifact::tree_hash(&canonical)? != *hash
-                {
-                    return Err(error("inventoryChanged"));
-                }
+fn verify_proof(db: &Database, proof: &Proof) -> Result<(), AppError> {
+    match proof {
+        Proof::File {
+            path,
+            physical,
+            hash,
+        } => {
+            if io::physical_id(path)? != *physical
+                || io::fingerprint(io::read(path)?.as_deref().map(str::as_bytes)) != *hash
+            {
+                return Err(error("inventoryChanged"));
             }
         }
+        Proof::Legacy { tool, id, hash } => {
+            let rows = db.get_prompts(tool)?;
+            let row = rows.get(id).ok_or_else(|| error("inventoryChanged"))?;
+            if io::fingerprint(Some(
+                &serde_json::to_vec(row).map_err(|_| error("inventoryChanged"))?,
+            )) != *hash
+            {
+                return Err(error("inventoryChanged"));
+            }
+        }
+        Proof::Tree {
+            path,
+            physical,
+            hash,
+        } => {
+            let canonical = path.canonicalize().map_err(|_| error("inventoryChanged"))?;
+            if canonical.to_string_lossy() != physical.as_str()
+                || super::skill_artifact::tree_hash(&canonical)? != *hash
+            {
+                return Err(error("inventoryChanged"));
+            }
+        }
+    }
+    Ok(())
+}
+fn verify(db: &Database, candidate: &Candidate) -> Result<(), AppError> {
+    for proof in &candidate.proofs {
+        verify_proof(db, proof)?;
     }
     Ok(())
 }
@@ -505,3 +551,15 @@ pub fn import(
 #[cfg(test)]
 #[path = "inventory_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "inventory_details_tests.rs"]
+mod details_tests;
+
+#[cfg(test)]
+#[path = "inventory_builtin_tests.rs"]
+mod builtin_tests;
+
+#[cfg(test)]
+#[path = "inventory_builtin_extra_tests.rs"]
+mod builtin_extra_tests;

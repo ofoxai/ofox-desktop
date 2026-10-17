@@ -39,6 +39,7 @@ export interface McpDefinition {
   revision: number;
   transport: string;
   credentialState: string;
+  serviceHost?: string | null;
   fields: McpField[];
   targets: ResourceTarget[];
 }
@@ -192,6 +193,7 @@ export interface LibraryInventory {
   ticketId: string;
   kind: LibraryKind;
   expiresAtMs: number;
+  observedAtMs?: number;
   sources: {
     sourceId: string;
     toolId: string;
@@ -199,18 +201,57 @@ export interface LibraryInventory {
     state: string;
     reason?: string | null;
     count: number;
+    observedAtMs?: number;
+    locationKind?: "file" | "directory" | "inline" | "legacy";
+    displayPath?: string | null;
+    sourceRef?: string | null;
   }[];
   entries: {
     entryId: string;
     kind: LibraryKind;
     name: string;
     summary?: string | null;
+    serviceHost?: string | null;
     sources: { sourceId: string; toolId: string }[];
     matchedResourceIds: string[];
     conflict: boolean;
     variant?: string | null;
     directory?: string | null;
   }[];
+}
+export interface InventorySourceDetail {
+  ticketId: string;
+  entryId: string;
+  sourceRef: string;
+  toolId: string;
+  label: string;
+  locationKind: "file" | "directory" | "inline" | "legacy";
+  displayPath?: string | null;
+  logicalPath?: string | null;
+  canonicalPath?: string | null;
+  isSymlink: boolean;
+  observedAtMs: number;
+  canReveal: boolean;
+  matchedResourceIds: string[];
+  fields: { path: string[]; valueType: string }[];
+}
+export type McpComparisonSubject =
+  | { kind: "native"; ticketId: string; entryId: string }
+  | { kind: "resource"; resourceId: string; expectedRevision: number };
+export interface McpComparison {
+  fields: {
+    path: string[];
+    leftType?: string | null;
+    rightType?: string | null;
+    state: "equal" | "different" | "missingLeft" | "missingRight";
+  }[];
+}
+export interface McpRecipeMatch {
+  recipeId: string;
+  exactResourceIds: string[];
+  nativeEntryIds: string[];
+  similarResourceIds: string[];
+  similarNativeEntryIds: string[];
 }
 export interface InventoryImport {
   imported: number;
@@ -259,7 +300,70 @@ export interface LibraryBatchPlan {
   completed?: number;
   remaining?: number;
 }
+export interface LibraryBuiltinRecipe {
+  recipeId: string;
+  content?: string;
+  repoOwner?: string;
+  repoName?: string;
+  directory?: string;
+}
 export const libraryApi = {
+  matchBuiltinRecipes: (
+    kind: LibraryKind,
+    recipes: LibraryBuiltinRecipe[],
+    inventoryTicketId: string | undefined,
+    expectedEpoch: number,
+  ) =>
+    invoke<McpRecipeMatch[]>("match_library_builtin_recipes", {
+      kind,
+      recipes,
+      inventoryTicketId,
+      expectedEpoch,
+    }),
+  inventorySource: (
+    ticketId: string,
+    entryId: string,
+    sourceRef: string,
+    expectedEpoch: number,
+  ) =>
+    invoke<InventorySourceDetail>("get_library_inventory_source", {
+      ticketId,
+      entryId,
+      sourceRef,
+      expectedEpoch,
+    }),
+  revealInventorySource: (
+    ticketId: string,
+    entryId: string,
+    sourceRef: string,
+    expectedEpoch: number,
+  ) =>
+    invoke<void>("reveal_library_inventory_source", {
+      ticketId,
+      entryId,
+      sourceRef,
+      expectedEpoch,
+    }),
+  compareMcp: (
+    left: McpComparisonSubject,
+    right: McpComparisonSubject,
+    expectedEpoch: number,
+  ) =>
+    invoke<McpComparison>("compare_library_mcp", {
+      left,
+      right,
+      expectedEpoch,
+    }),
+  matchMcpRecipes: (
+    recipes: { recipeId: string; name?: string; definition: unknown }[],
+    inventoryTicketId: string | undefined,
+    expectedEpoch: number,
+  ) =>
+    invoke<McpRecipeMatch[]>("match_library_mcp_recipes", {
+      recipes,
+      inventoryTicketId,
+      expectedEpoch,
+    }),
   discardInventory: (ticketId: string) =>
     invoke<boolean>("discard_library_inventory", { ticketId }),
   inventory: (kind: LibraryKind) =>

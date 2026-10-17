@@ -260,9 +260,16 @@ pub fn cancel_library_operation(
 pub async fn get_library_mcp(state: State<'_, AppState>) -> Result<Value, String> {
     crate::agent_env::ready().await;
     let discovery = resource_discovery().await?;
+    library_mcp_from_discovery(&state.db, &discovery)
+}
+
+fn library_mcp_from_discovery(
+    db: &crate::Database,
+    discovery: &std::collections::BTreeMap<String, crate::commands::InventoryEntry>,
+) -> Result<Value, String> {
     let _guard = crate::config_io::lock();
-    library::mcp_resource::ensure_metadata(&state.db).map_err(|e| e.to_string())?;
-    let snapshot = state.db.library_snapshot().map_err(|e| e.to_string())?;
+    library::mcp_resource::ensure_metadata(db).map_err(|e| e.to_string())?;
+    let snapshot = db.library_snapshot().map_err(|e| e.to_string())?;
     let paths = library::mcp_resource::native_paths().map_err(|e| e.to_string())?;
     let physical: std::collections::BTreeMap<_, _> = paths
         .iter()
@@ -278,7 +285,16 @@ pub async fn get_library_mcp(state: State<'_, AppState>) -> Result<Value, String
         .iter()
         .map(|path| library::coordinator::physical_id(path).map_err(|error| error.to_string()))
         .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
-    let servers = state.db.get_all_mcp_servers().map_err(|e| e.to_string())?;
+    let global_targets: Vec<_> = paths.iter().map(|(tool, path)| {
+        let discovery_status = discovery.get(tool).map(|entry|entry.status.as_str()).unwrap_or("unknown");
+        let available = library::coordinator::target_available(discovery_status, path);
+        json!({"toolId":tool,"path":path.to_string_lossy(),"targetGroupId":physical[tool],
+            "available":available,"discoveryStatus":discovery_status,
+            "pathState":if path.exists(){"exists"}else if path.parent().is_some_and(|parent|parent.is_dir()){"missing"}else{"missingParent"},
+            "readers":physical.iter().filter(|(_,id)|*id==&physical[tool]).map(|(tool,_)|tool.clone()).chain(opencode_readers.contains(&physical[tool]).then_some("opencode".to_string())).collect::<std::collections::BTreeSet<_>>(),
+            "disabledReason":(!available).then_some("library.nativeCliRequired")})
+    }).collect();
+    let servers = db.get_all_mcp_servers().map_err(|e| e.to_string())?;
     let definitions:Vec<_>=servers.values().map(|server|{
         let targets:Vec<_>=paths.iter().map(|(tool,path)|{
             let receipt=snapshot.machine.receipts.get(&format!("mcp:{}:{}",physical[tool],server.id));
@@ -298,7 +314,7 @@ pub async fn get_library_mcp(state: State<'_, AppState>) -> Result<Value, String
             "discoveryStatus":discovery.get(tool).map(|entry|entry.status.as_str()).unwrap_or("unknown"),
             "pathState":if path.exists(){"exists"}else if path.parent().is_some_and(|parent|parent.is_dir()){"missing"}else{"missingParent"},"desired":desired,"applied":owns&&intact&&current,"status":status,"readers":physical.iter().filter(|(_,id)|*id==&physical[tool]).map(|(tool,_)|tool.clone()).chain(opencode_readers.contains(&physical[tool]).then_some("opencode".to_string())).collect::<std::collections::BTreeSet<_>>(),"disabledReason":reason})
         }).collect();
-        let mut view=library::mcp_resource::definition_view(server,&snapshot);view["targets"]=json!(targets);view
+        let mut view=library::mcp_resource::definition_view(server,&snapshot);view["targets"]=json!(targets);view["serviceHost"]=json!(library::inventory::mcp_service_host(&server.server));view
     }).collect();
     let mut operations: Vec<_> = snapshot
         .machine
@@ -309,7 +325,7 @@ pub async fn get_library_mcp(state: State<'_, AppState>) -> Result<Value, String
         .collect();
     operations.sort_by_key(|op| std::cmp::Reverse(op.created_at));
     Ok(
-        json!({"epoch":snapshot.machine.epoch,"servers":definitions,"operations":operations.into_iter().take(20).map(library::operation_view).collect::<Vec<_>>()}),
+        json!({"epoch":snapshot.machine.epoch,"servers":definitions,"targets":global_targets,"operations":operations.into_iter().take(20).map(library::operation_view).collect::<Vec<_>>()}),
     )
 }
 
@@ -1133,4 +1149,154 @@ mod readiness_tests {
             before + 1
         );
     }
+}
+
+#[tauri::command]
+pub async fn get_library_inventory_source(
+    state: State<'_, AppState>,
+    ticket_id: String,
+    entry_id: String,
+    source_ref: String,
+    expected_epoch: u64,
+) -> Result<library::inventory::InventorySourceDetail, String> {
+    crate::agent_env::ready().await;
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        library::inventory::source_detail(&db, &ticket_id, &entry_id, &source_ref, expected_epoch)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|_| "library.inventoryUnavailable".to_string())?
+}
+
+#[tauri::command]
+pub async fn reveal_library_inventory_source(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    ticket_id: String,
+    entry_id: String,
+    source_ref: String,
+    expected_epoch: u64,
+) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    crate::agent_env::ready().await;
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        library::inventory::reveal_source(
+            &db,
+            &ticket_id,
+            &entry_id,
+            &source_ref,
+            expected_epoch,
+            |path| {
+                app.opener().reveal_item_in_dir(path).map_err(|_| {
+                    crate::error::AppError::Config("library.inventoryRevealFailed".into())
+                })
+            },
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|_| "library.inventoryUnavailable".to_string())?
+}
+
+#[tauri::command]
+pub async fn compare_library_mcp(
+    state: State<'_, AppState>,
+    left: library::inventory::McpComparisonSubject,
+    right: library::inventory::McpComparisonSubject,
+    expected_epoch: u64,
+) -> Result<library::inventory::McpComparison, String> {
+    crate::agent_env::ready().await;
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        library::inventory::compare_mcp(&db, &left, &right, expected_epoch)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|_| "library.inventoryUnavailable".to_string())?
+}
+
+#[tauri::command]
+pub async fn match_library_mcp_recipes(
+    state: State<'_, AppState>,
+    recipes: Vec<library::inventory::McpRecipe>,
+    inventory_ticket_id: Option<String>,
+    expected_epoch: u64,
+) -> Result<Vec<library::inventory::McpRecipeMatch>, String> {
+    crate::agent_env::ready().await;
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        library::inventory::match_recipes(
+            &db,
+            &recipes,
+            inventory_ticket_id.as_deref(),
+            expected_epoch,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|_| "library.inventoryUnavailable".to_string())?
+}
+
+#[cfg(test)]
+mod mcp_target_tests {
+    use super::*;
+    #[test]
+    #[serial_test::serial]
+    fn empty_mcp_library_still_advertises_real_global_targets() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = crate::Database::memory().unwrap();
+        let discovery = [(
+            "claude".to_string(),
+            crate::commands::InventoryEntry {
+                tool_id: "claude".into(),
+                status: "installed".into(),
+                version: Some("fixture".into()),
+                path: None,
+                error: None,
+                managed_copy: None,
+            },
+        )]
+        .into_iter()
+        .collect();
+        let view = library_mcp_from_discovery(&db, &discovery).unwrap();
+        assert_eq!(view["servers"], json!([]));
+        let targets = view["targets"]
+            .as_array()
+            .expect("first MCP needs backend-proven targets before a resource exists");
+        assert_eq!(targets.len(), 5);
+        for target in targets {
+            assert_eq!(target["available"], target["toolId"] == "claude");
+            assert!(target["path"]
+                .as_str()
+                .is_some_and(|path| std::path::Path::new(path).is_absolute()));
+            assert!(target["targetGroupId"].as_str().is_some());
+            assert!(target.get("desired").is_none());
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn match_library_builtin_recipes(
+    state: State<'_, AppState>,
+    kind: library::ResourceKind,
+    recipes: Vec<library::inventory::BuiltinRecipe>,
+    inventory_ticket_id: Option<String>,
+    expected_epoch: u64,
+) -> Result<Vec<library::inventory::McpRecipeMatch>, String> {
+    crate::agent_env::ready().await;
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        library::inventory::match_builtin_recipes(
+            &db,
+            kind,
+            &recipes,
+            inventory_ticket_id.as_deref(),
+            expected_epoch,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|_| "library.inventoryUnavailable".to_string())?
 }
