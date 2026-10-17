@@ -8,7 +8,10 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runAcceptance } from "../../scripts/native-acceptance.mjs";
 import * as nativeEvidence from "../../scripts/native-acceptance-evidence.mjs";
-import { prepareProfile } from "../../scripts/native-acceptance-drivers.mjs";
+import {
+  prepareProfile,
+  microsoftLearnQuery,
+} from "../../scripts/native-acceptance-drivers.mjs";
 import { openSupervisedAcceptance } from "../../scripts/native-acceptance-supervised.mjs";
 import type {
   OperatorContextV1,
@@ -419,131 +422,185 @@ describe("code-only supervised acceptance", () => {
     expect(reopened.snapshot().unresolvedNanoUsd).toBe(10_000_000_000);
     await reopened.close();
   });
-  it("stops the native runner after one simulated case with unknown charges and never claims finalization", async () => {
-    const { root, operator, state } = await setup();
-    state.actual = null;
-    const profileRoot = join(root, "synthetic-profile");
-    const profile = await prepareProfile({
-      root: profileRoot,
-      agentId: "codex",
-      runId: "prepared-run",
-      sourceSha: sha,
-      nonce: "fixture-nonce",
-      instructionChallenge: "fixture-instruction",
-      skillChallenge: "fixture-skill",
-    });
-    const proof = JSON.parse(await readFile(profile.proofPath, "utf8"));
-    // Only this test replaces identity and writer verification with synthetic inputs.
-    vi.spyOn(nativeEvidence, "verifyAcceptanceIdentity").mockResolvedValue({
-      status: "verified",
-      requestedSourceSha: sha,
-      sourceSha: sha,
-      checkout: { status: "verified" },
-      artifact: { status: "verified" },
-    });
-    vi.spyOn(nativeEvidence, "verifyWriterProfile").mockResolvedValue({
-      root: profileRoot,
-      receipt: {} as never,
-      proof,
-      receiptSha256: hash("synthetic-receipt"),
-      writer: "ofoxSandboxWriterV1",
-      verifiedFileCount: 4,
-    });
-    const executable = join(root, "synthetic-client");
-    await writeFile(executable, "synthetic executable bytes");
-    const spawn = vi.mocked(childProcess.spawn).mockImplementation(((
-      _command: string,
-      args: string[],
-    ) => {
-      const process_ = Object.assign(new EventEmitter(), {
-        stdout: new EventEmitter(),
-        stderr: new EventEmitter(),
-      });
-      setImmediate(async () => {
-        if (args.includes("--version"))
-          process_.stdout.emit("data", Buffer.from("1.2.3\n"));
-        else {
-          await writeFile(
-            proof.receipt,
-            JSON.stringify({
-              schemaVersion: 1,
-              runId: proof.runId,
-              sourceSha: sha,
-              agentId: "codex",
-              toolName: "attest",
-              nonceHash: hash(proof.nonce),
-              instructionHash: hash(proof.instructionChallenge),
-              skillHash: hash(proof.skillChallenge),
-              receiptId: hash(`${proof.runId}:${proof.nonce}:codex`),
-            }),
-          );
-          process_.stdout.emit(
-            "data",
-            Buffer.from(
-              [
-                {
-                  type: "item.completed",
-                  item: {
-                    type: "mcp_tool_call",
-                    server: "ofox_acceptance",
-                    tool: "attest",
-                    status: "completed",
-                    id: "fixture-call",
-                  },
-                },
-                { type: "turn.completed" },
-              ]
-                .map((event) => JSON.stringify(event))
-                .join("\n"),
-            ),
-          );
-        }
-        process_.emit("close", 0);
-      });
-      return process_;
-    }) as never);
-    const report = await runAcceptance(
-      {
-        schemaVersion: 1,
-        mode: "native",
+  it.each([
+    { agentId: "codex", remoteOnly: false },
+    { agentId: "claude", remoteOnly: true },
+  ])(
+    "preserves observed $agentId events and stops after one simulated case with unknown charges",
+    async ({ agentId, remoteOnly }) => {
+      const { root, operator, state } = await setup();
+      state.actual = null;
+      const profileRoot = join(root, "synthetic-profile");
+      const profile = await prepareProfile({
+        root: profileRoot,
+        agentId,
+        runId: "prepared-run",
         sourceSha: sha,
-        agents: ["codex", "gemini"],
-        models: { codex: "fixture-model" },
-        versions: { codex: "1.2.3" },
-        executables: {
-          codex: {
-            path: executable,
-            sha256: hash("synthetic executable bytes"),
+        nonce: "fixture-nonce",
+        instructionChallenge: "fixture-instruction",
+        skillChallenge: "fixture-skill",
+      });
+      const proof = JSON.parse(await readFile(profile.proofPath, "utf8"));
+      // Only this test replaces identity and writer verification with synthetic inputs.
+      vi.spyOn(nativeEvidence, "verifyAcceptanceIdentity").mockResolvedValue({
+        status: "verified",
+        requestedSourceSha: sha,
+        sourceSha: sha,
+        checkout: { status: "verified" },
+        artifact: { status: "verified" },
+      });
+      vi.spyOn(nativeEvidence, "verifyWriterProfile").mockResolvedValue({
+        root: profileRoot,
+        receipt: {} as never,
+        proof,
+        receiptSha256: hash("synthetic-receipt"),
+        writer: "ofoxSandboxWriterV1",
+        verifiedFileCount: 4,
+      });
+      const executable = join(root, "synthetic-client");
+      await writeFile(executable, "synthetic executable bytes");
+      const spawn = vi.mocked(childProcess.spawn).mockImplementation(((
+        _command: string,
+        args: string[],
+      ) => {
+        const process_ = Object.assign(new EventEmitter(), {
+          stdout: new EventEmitter(),
+          stderr: new EventEmitter(),
+        });
+        setImmediate(async () => {
+          if (args.includes("--version"))
+            process_.stdout.emit("data", Buffer.from("1.2.3\n"));
+          else if (remoteOnly) {
+            process_.stdout.emit(
+              "data",
+              Buffer.from(
+                [
+                  {
+                    type: "assistant",
+                    message: {
+                      content: [
+                        {
+                          type: "tool_use",
+                          id: "remote-call",
+                          name: "mcp__microsoft_learn__microsoft_docs_search",
+                          input: { query: microsoftLearnQuery },
+                        },
+                      ],
+                    },
+                  },
+                  {
+                    type: "user",
+                    message: {
+                      content: [
+                        {
+                          type: "tool_result",
+                          tool_use_id: "remote-call",
+                          is_error: false,
+                          content: "Synthetic public documentation result",
+                        },
+                      ],
+                    },
+                  },
+                  { type: "result", subtype: "success", is_error: false },
+                ]
+                  .map((event) => JSON.stringify(event))
+                  .join("\n"),
+              ),
+            );
+          } else {
+            await writeFile(
+              proof.receipt,
+              JSON.stringify({
+                schemaVersion: 1,
+                runId: proof.runId,
+                sourceSha: sha,
+                agentId: "codex",
+                toolName: "attest",
+                nonceHash: hash(proof.nonce),
+                instructionHash: hash(proof.instructionChallenge),
+                skillHash: hash(proof.skillChallenge),
+                receiptId: hash(`${proof.runId}:${proof.nonce}:codex`),
+              }),
+            );
+            process_.stdout.emit(
+              "data",
+              Buffer.from(
+                [
+                  {
+                    type: "item.completed",
+                    item: {
+                      type: "mcp_tool_call",
+                      server: "ofox_acceptance",
+                      tool: "attest",
+                      status: "completed",
+                      id: "fixture-call",
+                    },
+                  },
+                  { type: "turn.completed" },
+                ]
+                  .map((event) => JSON.stringify(event))
+                  .join("\n"),
+              ),
+            );
+          }
+          process_.emit("close", 0);
+        });
+        return process_;
+      }) as never);
+      const report = await runAcceptance(
+        {
+          schemaVersion: 1,
+          mode: "native",
+          sourceSha: sha,
+          agents: [agentId, "gemini"],
+          models: { [agentId]: "fixture-model" },
+          versions: { [agentId]: "1.2.3" },
+          executables: {
+            [agentId]: {
+              path: executable,
+              sha256: hash("synthetic executable bytes"),
+            },
+          },
+          writerProfiles: {
+            [agentId]: { root: profileRoot },
+            gemini: { root: "not opened" },
           },
         },
-        writerProfiles: {
-          codex: { root: profileRoot },
-          gemini: { root: "not opened" },
+        { outputDirectory: join(root, "runner-report"), operator },
+      );
+      expect(spawn).toHaveBeenCalledTimes(2); // fixed version + one mocked native case
+      expect(report.results).toHaveLength(1);
+      expect(report).toMatchObject({
+        status: "pendingSettlement",
+        nativeAccepted: false,
+        billing: {
+          actualCents: null,
+          actualNanoUsd: null,
+          status: "settlementPending",
         },
-      },
-      { outputDirectory: join(root, "runner-report"), operator },
-    );
-    expect(spawn).toHaveBeenCalledTimes(2); // fixed version + one mocked native case
-    expect(report.results).toHaveLength(1);
-    expect(report).toMatchObject({
-      status: "pendingSettlement",
-      nativeAccepted: false,
-      billing: {
-        actualCents: null,
-        actualNanoUsd: null,
-        status: "settlementPending",
-      },
-      supervisedBudget: {
-        mode: "supervisedOfficialConsole",
-        unresolvedNanoUsd: 10_000_000_000,
-      },
-    });
-    expect(
-      operator.observe.mock.calls.map(([request]) => request.phase),
-    ).toEqual(["beforeCase", "afterCase"]);
-    expect(JSON.stringify(report)).not.toContain("synthetic-test-credential");
-    expect(JSON.stringify(report)).not.toContain("serverFinalized");
-  });
+        supervisedBudget: {
+          mode: "supervisedOfficialConsole",
+          unresolvedNanoUsd: 10_000_000_000,
+        },
+      });
+      expect(
+        operator.observe.mock.calls.map(([request]) => request.phase),
+      ).toEqual(remoteOnly ? ["beforeCase"] : ["beforeCase", "afterCase"]);
+      if (remoteOnly) {
+        expect(report.results[0]).toMatchObject({
+          status: "failed",
+          reason: "nativeEvidenceIncomplete",
+          events: { completed: true, mcpCalled: false },
+          remoteMcp: { status: "verified", evidence: "nativeClientToolResult" },
+        });
+        expect(report.results[0]?.remoteMcp?.responseSha256).toMatch(
+          /^[a-f0-9]{64}$/,
+        );
+      }
+      expect(JSON.stringify(report)).not.toContain("synthetic-test-credential");
+      expect(JSON.stringify(report)).not.toContain("serverFinalized");
+    },
+  );
   it("cancels after a fresh operator authorization without retrieving a credential or starting a client", async () => {
     const { root, operator, observation } = await setup();
     const controller = new AbortController();

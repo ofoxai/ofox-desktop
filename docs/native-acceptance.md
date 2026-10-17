@@ -91,6 +91,8 @@ node scripts/native-acceptance.mjs \
 
 临时 HOME 不等于 macOS Keychain 隔离。Claude 当前使用 `--bare`，避免读取生产 Keychain；这会关闭默认 `CLAUDE.md` 自动发现，因此通过固定 CLI 文件注入并记录 `explicitCliFileNoKeychain`。其默认指令自动发现仍是未验证，需要独立 OS 身份或虚拟机验证，不能冒充通过。Hermes 若专用运行环境尚未就绪，应记录准确失败原因，不修复或重装真实用户环境。
 
+Claude 的固定任务以 `/ofox-acceptance` 换行开头，使用 bare 模式仍支持的原生 Skill 命令发现。自然语言“Load skill”不能证明加载，不通过显式读取 `SKILL.md` 代替原生发现。若本地 attest 未完成，整体仍失败；已经观察到的 Microsoft Learn tool-use/result 和事件摘要继续保留，不因另一阶段失败而丢失。
+
 Codex Skills 按产品实际 writer 目标写入 `.codex/skills`；不能把共享 `.agents/skills` 的结果替代该路径的原生消费。
 
 | 证据                 | 可得结论                                                                             |

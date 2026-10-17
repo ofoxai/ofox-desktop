@@ -237,6 +237,13 @@ describe("native acceptance safety and evidence", () => {
       if (agentId === "claude") {
         expect(invocation.args).toContain("--bare");
         expect(invocation.args).toContain("--append-system-prompt-file");
+        expect(invocation.args.at(-1)).toBe(
+          "/ofox-acceptance\nfixed acceptance",
+        );
+        expect(invocation.args.join(" ")).not.toContain("SKILL.md");
+      } else {
+        expect(invocation.args).toContain("fixed acceptance");
+        expect(invocation.args.join(" ")).not.toContain("/ofox-acceptance");
       }
     }
   });

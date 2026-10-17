@@ -46,6 +46,12 @@ export interface NativeAcceptanceReportV1 {
     attempts: number;
     reason?: string;
     resources?: ResourceEvidenceV1;
+    events?: {
+      completed: boolean;
+      mcpCalled: boolean;
+      structuredEvents: number;
+      toolCallCount: number;
+    };
     remoteMcp?: RemoteMcpEvidenceV1;
     clientVersion?: {
       status: string;

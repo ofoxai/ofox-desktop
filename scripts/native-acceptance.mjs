@@ -587,8 +587,6 @@ export async function runAcceptance(
                   mcpCalled: true,
                 }
               : nativeEvents(agentId, stdout);
-          if (!evidence.completed || !evidence.mcpCalled)
-            throw new Error("nativeEvidenceIncomplete");
           row.events = {
             completed: evidence.completed,
             mcpCalled: evidence.mcpCalled,
@@ -596,6 +594,10 @@ export async function runAcceptance(
             toolCallCount: evidence.toolCallCount ?? 1,
           };
           if (manifest.mode === "native") row.remoteMcp = evidence.remoteMcp;
+          // Keep independently observed facts even if another required stage
+          // fails. Missing local attest must not erase a real remote MCP result.
+          if (!evidence.completed || !evidence.mcpCalled)
+            throw new Error("nativeEvidenceIncomplete");
           row.receipt = await validateReceipt(profile, proof);
           if (profile.external)
             await verifyWriterProfile(manifest.writerProfiles[agentId], {

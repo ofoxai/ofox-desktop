@@ -93,7 +93,7 @@ export function nativeInvocation(
       instructionPath ?? join(home ?? workspace, ".claude/CLAUDE.md"),
       "--model",
       model,
-      prompt,
+      `/ofox-acceptance\n${prompt}`,
     ],
     codex: [
       "exec",
