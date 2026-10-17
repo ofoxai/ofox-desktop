@@ -22,3 +22,11 @@ See [development standards](docs/code-standards.md) and [integration wiring](doc
 - A warm projection cache must validate fresh SQLite rows and effective source health before lookup, and reload prices in the same transaction. A connection pointer or query key cannot establish freshness; deletion, external writers, failures and apex changes need regression coverage. See [the cache guards](src-tauri/src/services/session_analytics_projection_tests.rs).
 - Passing `cfg(test)` library tests does not establish production compilation. Keep compatibility readers available to their production callers and run all-targets Clippy after refactoring test injection; it caught an accidental test-only gate on the project-options reader during this work.
 - Clearing a controlled selection can disable or remove the focused control. Transfer focus to a stable search field or card heading, and test the parent rerender for every sibling dimension. Separate exclusive row filtering from removing one member of a multi-selection; otherwise a remove button can keep the item it claims to remove. See [the usage interaction regressions](tests/components/usage/UsageSessionLayout.test.tsx).
+
+### Library evidence and lossless configuration input
+
+- A negative discovery conclusion needs evidence for missing and empty sources, not just fingerprints for entries that were found. Preserve unreadable/unsupported as unknown; never turn a failed scan into absence or a successful connection.
+- Stable identifiers need a single state owner. Separate automatic suggestions from a user's edits, freeze on first submission, and never turn a concurrent create conflict into overwrite or a new native identifier that bypasses conflict review.
+- Lossless JSON validation must compare every numeric literal form with its decoded value. Checking only integer-shaped text misses exponent and decimal forms; duplicate keys and empty arguments also need regression coverage.
+- A private-value editor cannot reuse a create-only serializer. Submit the actual leaf delta, retain unknown fields and saved values, and explicitly confirm incompatible transport cleanup.
+- UI evidence has a lifetime too. Invalidate open source/compare views when their ticket, revision, route or epoch changes; a backend rejection on the next write does not make an already displayed stale conclusion truthful.
