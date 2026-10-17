@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   libraryApi,
@@ -10,7 +10,11 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ListCard, ListRow } from "@/components/ui/list";
 import { ToolBadge } from "@/components/tools/ToolBadge";
-import { libraryError, toolLabel } from "./libraryText";
+import {
+  inventoryEntryDescription,
+  libraryError,
+  toolLabel,
+} from "./libraryText";
 
 export function LibraryInventoryView({
   kind,
@@ -28,6 +32,7 @@ export function LibraryInventoryView({
   selectionHint?: { name: string; variant?: string | null; tools: string[] };
 }) {
   const { t } = useTranslation();
+  const descriptionId = useId();
   const [inventory, setInventory] = useState<LibraryInventory>();
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [result, setResult] = useState<InventoryImport>();
@@ -190,6 +195,7 @@ export function LibraryInventoryView({
           {inventory.entries.map((entry) => (
             <ListRow key={entry.entryId} className="gap-3">
               <Checkbox
+                aria-describedby={`${descriptionId}-${entry.entryId}`}
                 aria-label={t("library.workbench.selectNamed", {
                   name: entry.name,
                 })}
@@ -208,13 +214,12 @@ export function LibraryInventoryView({
                 <p className="truncate text-ui font-medium" title={entry.name}>
                   {entry.name}
                 </p>
-                <p className="text-note text-ink-muted">
-                  {entry.matchedResourceIds.length
-                    ? t("library.workbench.alreadyLibrary")
-                    : entry.conflict
-                      ? t("library.workbench.importVariant")
-                      : t("library.workbench.draftOnly")}
-                  {entry.variant ? ` · ${entry.variant}` : ""}
+                <p
+                  id={`${descriptionId}-${entry.entryId}`}
+                  className="truncate text-note text-ink-muted"
+                  title={inventoryEntryDescription(inventory, entry, t)}
+                >
+                  {inventoryEntryDescription(inventory, entry, t)}
                 </p>
               </div>
               <div className="flex flex-wrap gap-1">

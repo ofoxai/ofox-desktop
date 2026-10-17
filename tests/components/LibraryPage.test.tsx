@@ -1328,6 +1328,7 @@ it("keeps read-only discovery results in the native section and rescans before r
   await userEvent.click(screen.getByRole("button", { name: "关闭" }));
   const native = screen.getByRole("region", { name: "工具中已有" });
   expect(within(native).getByText("Native source")).toBeVisible();
+  expect(within(native).getByText(/原生 MCP 配置/)).toBeVisible();
   expect(importing).not.toHaveBeenCalled();
   await userEvent.click(
     within(native).getByRole("button", { name: "导入 Native source" }),

@@ -35,7 +35,7 @@ import { McpDuplicate } from "./McpDuplicate";
 import { McpCheck } from "./McpCheck";
 import { ResourceReview } from "./ResourceReview";
 import { InstructionOverview } from "./InstructionOverview";
-import { libraryError } from "./libraryText";
+import { inventoryEntryDescription, libraryError } from "./libraryText";
 import { LibraryResourceRow } from "./LibraryResourceRow";
 import { LibraryInventoryView } from "./LibraryInventoryView";
 import { LibraryUpdateChecks } from "./LibraryUpdateChecks";
@@ -642,10 +642,19 @@ export function LibrarySection({
                         >
                           {entry.name}
                         </p>
-                        <p className="text-note text-ink-muted">
-                          {entry.conflict
-                            ? t("library.workbench.importVariant")
-                            : t("library.workbench.draftOnly")}
+                        <p
+                          className="truncate text-note text-ink-muted"
+                          title={inventoryEntryDescription(
+                            nativeSnapshot.inventory,
+                            entry,
+                            t,
+                          )}
+                        >
+                          {inventoryEntryDescription(
+                            nativeSnapshot.inventory,
+                            entry,
+                            t,
+                          )}
                         </p>
                       </div>
                       <div className="flex flex-wrap gap-1">
