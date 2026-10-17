@@ -19,6 +19,9 @@ use crate::config::{get_app_config_dir, get_home_dir};
 use crate::database::Database;
 use crate::error::format_skill_error;
 
+#[path = "skill_selected_download.rs"]
+mod selected_download;
+
 // ========== 数据结构 ==========
 
 /// Skill 同步方式
@@ -458,7 +461,7 @@ impl SkillService {
         };
         let (downloaded, commit) = timeout(
             std::time::Duration::from_secs(60),
-            self.download_repo(&repo),
+            self.download_selected_repo(&repo, &skill.directory),
         )
         .await
         .map_err(|_| anyhow!("library.skillDownloadTimeout"))??;
@@ -1214,6 +1217,18 @@ impl SkillService {
                 false
             }
         });
+    }
+
+    /// Download only a selected immutable skill tree; browsing/discovery keeps its separate path.
+    pub(crate) async fn download_selected_repo(
+        &self,
+        repo: &SkillRepo,
+        directory: &str,
+    ) -> Result<(
+        crate::services::library::skill_artifact::ExtractedDir,
+        String,
+    )> {
+        selected_download::download(repo, directory).await
     }
 
     /// 下载仓库

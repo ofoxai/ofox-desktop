@@ -49,7 +49,10 @@ fn builtin_skills_require_fixed_verified_repository_provenance_and_artifact() {
     let exact = fixture(&db, sandbox.home(), "different-local-directory", true);
     fixture(&db, sandbox.home(), "unfixed-ref", false);
     let result = match_builtin_recipes(&db, ResourceKind::Skills, &[recipe()], None, 0).unwrap();
-    assert_eq!(result[0].exact_resource_ids, [exact.id.clone()]);
+    assert_eq!(
+        result[0].exact_resource_ids.as_slice(),
+        std::slice::from_ref(&exact.id)
+    );
     assert_eq!(result[0].similar_resource_ids, ["unfixed-ref"]);
     let artifact =
         super::super::skill_artifact::path(exact.content_hash.as_deref().unwrap()).unwrap();

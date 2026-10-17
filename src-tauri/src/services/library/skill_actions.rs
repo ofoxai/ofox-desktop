@@ -306,7 +306,7 @@ pub(crate) async fn check_with<F, Fut>(
     download: F,
 ) -> Result<Value, AppError>
 where
-    F: FnOnce(SkillRepo) -> Fut,
+    F: FnOnce(SkillRepo, PathBuf) -> Fut,
     Fut: Future<Output = Result<(ExtractedDir, String), AppError>>,
 {
     let (frozen, repo, relative, _active) = {
@@ -318,13 +318,24 @@ where
         let active = reserve(db, &frozen)?;
         (frozen, repo, relative, active)
     };
-    let (downloaded, commit) =
-        tokio::time::timeout(Duration::from_secs(60), download(repo.clone()))
-            .await
-            .map_err(|_| error("skillDownloadTimeout"))?
-            .map_err(|_| error("skillDownloadFailed"))?;
+    let downloaded = tokio::time::timeout(
+        Duration::from_secs(60),
+        download(repo.clone(), relative.clone()),
+    )
+    .await
+    .map_err(|_| error("skillDownloadTimeout"))?;
     let _io = crate::config_io::lock();
     verify(db, &frozen)?;
+    let (downloaded, commit) = match downloaded {
+        Ok(result) => result,
+        Err(AppError::Config(reason)) if reason == "library.skillSourceMissing" => {
+            return Ok(base(&frozen, "sourceMissing"));
+        }
+        Err(AppError::Config(reason)) if reason == "library.skillGitLfsUnsupported" => {
+            return Err(error("skillGitLfsUnsupported"));
+        }
+        Err(_) => return Err(error("skillDownloadFailed")),
+    };
     let Some(PreparedSource {
         source,
         execution,
@@ -396,11 +407,16 @@ where
     Ok(result)
 }
 pub async fn check(db: &Database, id: &str, revision: u64, epoch: u64) -> Result<Value, AppError> {
-    check_with(db, id, revision, epoch, |repo| async move {
+    check_with(db, id, revision, epoch, |repo, relative| async move {
+        let directory = relative.to_str().ok_or_else(|| error("invalidSkillPath"))?;
         SkillService::new()
-            .download_repo(&repo)
+            .download_selected_repo(&repo, directory)
             .await
-            .map_err(|_| error("skillDownloadFailed"))
+            .map_err(|reason| match reason.to_string().as_str() {
+                "library.skillSourceMissing" => error("skillSourceMissing"),
+                "library.skillGitLfsUnsupported" => error("skillGitLfsUnsupported"),
+                _ => error("skillDownloadFailed"),
+            })
     })
     .await
 }
@@ -796,7 +812,8 @@ mod tests {
         let native = skill_resource::native_paths().unwrap()["codex"].join("sample/SKILL.md");
         let old = fs::read(&native).unwrap();
         let before = db.library_snapshot().unwrap();
-        let checked = check_with(&db, "sample", 1, 0, |repo| async move {
+        let checked = check_with(&db, "sample", 1, 0, |repo, relative| async move {
+            assert_eq!(relative, PathBuf::from("nested/sample"));
             assert_eq!(repo.branch, "feature/shared");
             Ok(download("New body", true, "nested/sample"))
         })
@@ -836,13 +853,13 @@ mod tests {
         let _sandbox = crate::test_sandbox::sandbox();
         let db = fixture(true);
         let before = db.library_snapshot().unwrap();
-        let failed = check_with(&db, "sample", 1, 0, |_| async {
+        let failed = check_with(&db, "sample", 1, 0, |_, _| async {
             Err(AppError::Config("library.skillDownloadFailed".into()))
         })
         .await;
         assert!(failed.is_err());
         assert_eq!(db.library_snapshot().unwrap(), before);
-        let missing = check_with(&db, "sample", 1, 0, |_| async {
+        let missing = check_with(&db, "sample", 1, 0, |_, _| async {
             Ok(download("Other", false, "somewhere/sample"))
         })
         .await
@@ -850,8 +867,33 @@ mod tests {
         assert_eq!(missing["state"], "sourceMissing");
         assert!(missing["candidate"].is_null());
         assert_eq!(db.library_snapshot().unwrap(), before);
+        // A complete remote tree can prove this selected directory is gone without downloading siblings.
+        let selected_missing = check_with(&db, "sample", 1, 0, |_, _| async {
+            Err(error("skillSourceMissing"))
+        })
+        .await
+        .unwrap();
+        assert_eq!(selected_missing["state"], "sourceMissing");
+        assert!(selected_missing["candidate"].is_null());
+        assert_eq!(db.library_snapshot().unwrap(), before);
+        let lfs = check_with(&db, "sample", 1, 0, |_, _| async {
+            Err(error("skillGitLfsUnsupported"))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(lfs.to_string(), error("skillGitLfsUnsupported").to_string());
+        assert_eq!(db.library_snapshot().unwrap(), before);
+        let stale_missing = check_with(&db, "sample", 1, 0, |_, _| async {
+            let before = db.library_snapshot().unwrap();
+            let mut restored = before.clone();
+            restored.machine.epoch += 1;
+            db.library_commit(&before, &restored).unwrap();
+            Err(error("skillSourceMissing"))
+        })
+        .await;
+        assert!(stale_missing.is_err());
         let db = fixture(false);
-        let local = check_with(&db, "sample", 1, 0, |_| async {
+        let local = check_with(&db, "sample", 1, 0, |_, _| async {
             panic!("local check downloaded")
         })
         .await
@@ -863,7 +905,7 @@ mod tests {
     async fn restoration_during_download_and_after_preview_invalidates_the_candidate() {
         let _sandbox = crate::test_sandbox::sandbox();
         let db = fixture(true);
-        let result = check_with(&db, "sample", 1, 0, |_| async {
+        let result = check_with(&db, "sample", 1, 0, |_, _| async {
             let before = db.library_snapshot().unwrap();
             let mut after = before.clone();
             after.machine.epoch += 1;
@@ -872,7 +914,7 @@ mod tests {
         })
         .await;
         assert!(result.is_err());
-        let checked = check_with(&db, "sample", 1, 1, |_| async {
+        let checked = check_with(&db, "sample", 1, 1, |_, _| async {
             Ok(download("New", false, "nested/sample"))
         })
         .await
@@ -901,7 +943,7 @@ mod tests {
         let _sandbox = crate::test_sandbox::sandbox();
         let db = fixture(true);
         let before = db.get_installed_skill("sample").unwrap().unwrap();
-        let checked = check_with(&db, "sample", 1, 0, |_| async {
+        let checked = check_with(&db, "sample", 1, 0, |_, _| async {
             Ok(download("New", true, "nested/sample"))
         })
         .await
@@ -936,7 +978,7 @@ mod tests {
             .machine
             .assignments
             .is_empty());
-        let checked = check_with(&db, "sample", 1, 0, |_| async {
+        let checked = check_with(&db, "sample", 1, 0, |_, _| async {
             Ok(download("Newer", false, "nested/sample"))
         })
         .await
@@ -966,7 +1008,7 @@ mod tests {
         let flags = artifacts::manifest(row.content_hash.as_ref().unwrap()).unwrap();
         skill_resource::save_draft_with_execution(&db, row, &source, Some(1), Some(&flags))
             .unwrap();
-        let value = check_with(&db, "sample", 2, 0, |repo| async move {
+        let value = check_with(&db, "sample", 2, 0, |repo, _relative| async move {
             assert_eq!(repo.branch, "feature/shared");
             Ok(download("New", false, "nested/sample"))
         })
@@ -980,7 +1022,7 @@ mod tests {
         ));
         skill_resource::save_draft_with_execution(&db, row, &source, Some(2), Some(&flags))
             .unwrap();
-        assert!(check_with(&db, "sample", 3, 0, |_| async {
+        assert!(check_with(&db, "sample", 3, 0, |_, _| async {
             panic!("mismatched repository downloaded")
         })
         .await
@@ -991,7 +1033,7 @@ mod tests {
     async fn comparison_reads_only_the_frozen_candidate_and_expired_tickets_release_staging() {
         let _sandbox = crate::test_sandbox::sandbox();
         let db = fixture(true);
-        let checked = check_with(&db, "sample", 1, 0, |_| async {
+        let checked = check_with(&db, "sample", 1, 0, |_, _| async {
             Ok(download("New body", true, "nested/sample"))
         })
         .await
@@ -1024,7 +1066,7 @@ mod tests {
             .unwrap()
             .join("SKILL.md");
         fs::write(&path, "User local changes").unwrap();
-        let checked = check_with(&db, "sample", 1, 0, |_| async {
+        let checked = check_with(&db, "sample", 1, 0, |_, _| async {
             Ok(download("Remote", false, "nested/sample"))
         })
         .await
@@ -1065,7 +1107,7 @@ mod tests {
     async fn a_recoverable_copy_name_error_preserves_the_same_reviewed_candidate() {
         let _sandbox = crate::test_sandbox::sandbox();
         let db = fixture(true);
-        let checked = check_with(&db, "sample", 1, 0, |_| async {
+        let checked = check_with(&db, "sample", 1, 0, |_, _| async {
             Ok(download("Reviewed", false, "nested/sample"))
         })
         .await
@@ -1099,7 +1141,7 @@ mod tests {
         let db = fixture(true);
         let op = skill_resource::preview(&db, "sample", &["codex".into()]).unwrap();
         library::apply_operation(&db, &op.id).unwrap();
-        let checked = check_with(&db, "sample", 1, 0, |_| async {
+        let checked = check_with(&db, "sample", 1, 0, |_, _| async {
             Ok(download("Reviewed", true, "nested/sample"))
         })
         .await
@@ -1129,7 +1171,7 @@ mod tests {
         let path = skill_resource::artifact_for(&db, "sample")
             .unwrap()
             .join("SKILL.md");
-        let checked = check_with(&db, "sample", 1, 0, |_| async {
+        let checked = check_with(&db, "sample", 1, 0, |_, _| async {
             Ok(download("Remote", true, "nested/sample"))
         })
         .await
@@ -1182,7 +1224,7 @@ mod tests {
             "User modified native link source",
         )
         .unwrap();
-        let checked = check_with(&db, "sample", 1, 0, |_| async {
+        let checked = check_with(&db, "sample", 1, 0, |_, _| async {
             Ok((artifacts::extract_zip(&raw, false).unwrap(), "b".repeat(40)))
         })
         .await
@@ -1215,7 +1257,7 @@ mod tests {
     {
         let _sandbox = crate::test_sandbox::sandbox();
         let db = fixture(true);
-        let checked = check_with(&db, "sample", 1, 0, |_| async {
+        let checked = check_with(&db, "sample", 1, 0, |_, _| async {
             Ok(download("Frozen", true, "nested/sample"))
         })
         .await
