@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import {
@@ -228,6 +228,18 @@ export function LibrarySection({
   const locateRequest = useRef(0);
   const toolbarAction = useRef<"inventory" | "import">();
   const [error, setError] = useState("");
+  const [sourceLocateError, setSourceLocateError] = useState<{
+    reason: "unsupported" | "sourceUnconfirmed";
+    ticketId?: string;
+    sourceId?: string;
+    toolId?: string;
+  }>();
+  const [locateIntent, setLocateIntent] = useState<{
+    id: string;
+    request: number;
+    context: string;
+  }>();
+  const focusedLocateRequest = useRef(0);
   const [notice, setNotice] = useState("");
   const [history, setHistory] = useState(false);
   const [agentFilter, setAgentFilter] = useState("all");
@@ -476,6 +488,46 @@ export function LibrarySection({
   const locationContext = `${definitionsKey}:${native.inventory?.ticketId}:${data?.epoch}:${active}`;
   const latestLocationContext = useRef(locationContext);
   latestLocationContext.current = locationContext;
+  useEffect(() => {
+    if (
+      !active ||
+      !sourceLocateError ||
+      sourceLocateError.reason !== "sourceUnconfirmed" ||
+      !native.inventory ||
+      native.inventory.ticketId === sourceLocateError.ticketId
+    )
+      return;
+    const refreshedSource = native.inventory.sources.find(
+      (source) =>
+        source.sourceId === sourceLocateError.sourceId &&
+        source.toolId === sourceLocateError.toolId,
+    );
+    if (refreshedSource && ["ready", "missing"].includes(refreshedSource.state))
+      setSourceLocateError(undefined);
+  }, [active, native.inventory, sourceLocateError]);
+  useLayoutEffect(() => {
+    if (!locateIntent) return;
+    if (
+      !active ||
+      !mounted.current ||
+      locateIntent.request !== locateRequest.current ||
+      locateIntent.context !== latestLocationContext.current
+    ) {
+      // A paused or superseded intent must never resume on a later matching render.
+      if (locateIntent.request === locateRequest.current)
+        locateRequest.current++;
+      return;
+    }
+    if (locateIntent.request === focusedLocateRequest.current) return;
+    // All filter resets and variant expansion have committed before consuming focus.
+    const element = document.getElementById(
+      `library-resource-${locateIntent.id}`,
+    );
+    if (!element) return;
+    focusedLocateRequest.current = locateIntent.request;
+    element.scrollIntoView?.({ block: "center", behavior: "smooth" });
+    element.focus({ preventScroll: true });
+  }, [locateIntent, locationContext, active]);
   async function locateNativeResource(
     entry: import("@/lib/api/library").LibraryInventory["entries"][number],
     id: string,
@@ -490,7 +542,10 @@ export function LibrarySection({
         ),
     );
     if (!source?.sourceRef || !native.inventory || data?.epoch === undefined) {
-      setError(t("library.workbench2.unsupported"));
+      setSourceLocateError({
+        reason: "unsupported",
+        ticketId: native.inventory?.ticketId,
+      });
       return;
     }
     const context = locationContext;
@@ -510,21 +565,29 @@ export function LibrarySection({
         return;
       if (!detail.matchedResourceIds.includes(id))
         throw new Error("library.inventoryChanged");
-      locateResource(id);
+      if (!locateResource(id)) throw new Error("library.inventoryChanged");
+      setSourceLocateError(undefined);
     } catch {
       if (
         context === latestLocationContext.current &&
-        request === locateRequest.current
+        request === locateRequest.current &&
+        mounted.current
       ) {
-        setError(t("library.workbench2.sourceUnconfirmed"));
+        setSourceLocateError({
+          reason: "sourceUnconfirmed",
+          ticketId: native.inventory!.ticketId,
+          sourceId: source.sourceId,
+          toolId: source.toolId,
+        });
         native.rescan();
       }
     }
   }
   function locateResource(id: string) {
-    if (!active || !mounted.current) return;
+    if (!active || !mounted.current) return false;
     const row = rows.find((row) => row.id === id);
-    if (!row) return;
+    if (!row) return false;
+    const request = ++locateRequest.current;
     setView(null);
     setSearch("");
     setAgentFilter("all");
@@ -534,14 +597,8 @@ export function LibrarySection({
     setExpandedGroups((previous) =>
       new Set(previous).add(row.name.toLocaleLowerCase()),
     );
-    const intentContext = locationContext;
-    requestAnimationFrame(() => {
-      if (!mounted.current || intentContext !== latestLocationContext.current)
-        return;
-      const element = document.getElementById(`library-resource-${id}`);
-      element?.scrollIntoView?.({ block: "center", behavior: "smooth" });
-      element?.focus({ preventScroll: true });
-    });
+    setLocateIntent({ id, request, context: locationContext });
+    return true;
   }
   const targets = (row: Resource) =>
     "targets" in row
@@ -900,6 +957,11 @@ export function LibrarySection({
       {!view && error && (
         <p role="alert" className="text-ctl text-danger">
           {error}
+        </p>
+      )}
+      {!view && sourceLocateError && (
+        <p role="alert" className="text-ctl text-warn">
+          {t(`library.workbench2.${sourceLocateError.reason}`)}
         </p>
       )}
       {notice && (
@@ -1424,6 +1486,12 @@ export function LibrarySection({
           }}
           onCloseAutoFocus={(event) => {
             event.preventDefault();
+            if (
+              locateIntent?.request === locateRequest.current &&
+              locateIntent.context === latestLocationContext.current &&
+              active
+            )
+              return;
             const element = trigger.current?.isConnected
               ? trigger.current
               : addButton.current;
