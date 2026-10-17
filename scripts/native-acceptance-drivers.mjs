@@ -471,6 +471,7 @@ export async function prepareProfile({
     await file(
       join(home, ".config/opencode/opencode.json"),
       JSON.stringify({
+        $schema: "https://opencode.ai/config.json",
         model: `ofox-acceptance/${model}`,
         provider: {
           "ofox-acceptance": {

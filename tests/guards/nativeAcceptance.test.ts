@@ -14,6 +14,7 @@ import {
 import {
   nativeInvocation,
   nativeEvents,
+  prepareProfile,
 } from "../../scripts/native-acceptance-drivers.mjs";
 
 const roots: string[] = [];
@@ -106,6 +107,33 @@ describe("native acceptance safety and evidence", () => {
       process.env.HOME,
     );
   });
+  it.each(["fixture", "writer"] as const)(
+    "preseeds the OpenCode schema so native loading preserves %s profile configuration bytes",
+    async (resourcesMode) => {
+      const profile = await prepareProfile({
+        root: await output(),
+        agentId: "opencode",
+        runId: "offline-schema-regression",
+        sourceSha,
+        nonce: "offline-nonce",
+        instructionChallenge: "offline-instruction",
+        skillChallenge: "offline-skill",
+        resourcesMode,
+      });
+      const original = await readFile(profile.mcpNativePath, "utf8");
+      const config = JSON.parse(original);
+      // OpenCode 1.19.3 inserts this prefix while loading schema-less native
+      // configuration. A later byte hash must still match the writer receipt.
+      const nativeLoaded = config.$schema
+        ? original
+        : original.replace(
+            /^\s*\{/,
+            '{\n  "$schema": "https://opencode.ai/config.json",',
+          );
+      expect(nativeLoaded).toBe(original);
+      expect(config.$schema).toBe("https://opencode.ai/config.json");
+    },
+  );
   it("retries only once, refuses stale receipts, and cancels without starting later clients", async () => {
     const retry = await runAcceptance(
       {
