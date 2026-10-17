@@ -811,13 +811,9 @@ it("requires a resource-pack preview and confirms the frozen file fingerprint an
   });
   mount();
   await screen.findByText("Shared");
-  await userEvent.click(
-    screen.getByRole("button", { name: "资源包导入／导出" }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "资源库更多操作" }));
   expect(screen.queryByRole("button", { name: "确认恢复草稿" })).toBeNull();
-  await userEvent.click(
-    screen.getByRole("button", { name: "选择资源包并预览" }),
-  );
+  await userEvent.click(screen.getByRole("menuitem", { name: "导入资源包" }));
   await screen.findByText("Template");
   expect(libraryApi.restorePack).not.toHaveBeenCalled();
   await userEvent.click(screen.getByRole("button", { name: "确认恢复草稿" }));
@@ -842,12 +838,8 @@ it("keeps a resource-pack preview while the retained page releases its dialog", 
   });
   const rendered = mount();
   await screen.findByText("Shared");
-  await userEvent.click(
-    screen.getByRole("button", { name: "资源包导入／导出" }),
-  );
-  await userEvent.click(
-    screen.getByRole("button", { name: "选择资源包并预览" }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "资源库更多操作" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "导入资源包" }));
   await screen.findByRole("button", { name: "确认恢复草稿" });
   rendered.rerender(<Fixture active={false} />);
   expect(screen.queryByRole("dialog")).toBeNull();
@@ -866,12 +858,8 @@ it("retains an in-flight pack preview through portal suspension and rejects a se
   );
   const rendered = mount();
   await screen.findByText("Shared");
-  await userEvent.click(
-    screen.getByRole("button", { name: "资源包导入／导出" }),
-  );
-  await userEvent.click(
-    screen.getByRole("button", { name: "选择资源包并预览" }),
-  );
+  await userEvent.click(screen.getByRole("button", { name: "资源库更多操作" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "导入资源包" }));
   rendered.rerender(<Fixture active={false} />);
   rendered.rerender(<Fixture />);
   expect(

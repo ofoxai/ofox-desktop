@@ -3589,7 +3589,16 @@
       "result": "Restored {{count}} drafts",
       "imported": "Restored",
       "skipped": "Skipped",
-      "failed": "Restore failed"
+      "failed": "Restore failed",
+      "menu": "More library actions",
+      "importAction": "Import resource pack",
+      "exportAction": "Export resource pack",
+      "importTitle": "Import resource pack",
+      "exportTitle": "Export resource pack",
+      "importDescription": "Preview and add resources to the library. Tools are not changed automatically.",
+      "exportDescription": "Export all library resources and choose where to save the pack.",
+      "cancelledImport": "No resource pack selected",
+      "cancelledExport": "Export cancelled"
     },
     "packInvalid": "The resource pack is invalid or failed verification. Export it again.",
     "packVersionUnsupported": "This resource pack version is not supported.",
@@ -3963,7 +3972,8 @@
       "saved": "Saved to library",
       "unfinished": "Unfinished",
       "reviewRemaining": "Review unfinished items",
-      "fixedSkill": "A fixed version from this source is collected; it may not be the latest. Check for updates in resource details."
+      "fixedSkill": "A fixed version from this source is collected; it may not be the latest. Check for updates in resource details.",
+      "sourceTool": "Source tool"
     },
     "mcpComposer": {
       "entry": "Add method",

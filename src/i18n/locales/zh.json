@@ -3589,7 +3589,16 @@
       "result": "已恢复 {{count}} 个草稿",
       "imported": "已恢复",
       "skipped": "已跳过",
-      "failed": "恢复失败"
+      "failed": "恢复失败",
+      "menu": "资源库更多操作",
+      "importAction": "导入资源包",
+      "exportAction": "导出资源包",
+      "importTitle": "导入资源包",
+      "exportTitle": "导出资源包",
+      "importDescription": "预览后收录到资源库，不会自动应用到工具。",
+      "exportDescription": "导出资源库中的全部资源，可在保存前选择位置。",
+      "cancelledImport": "未选择资源包",
+      "cancelledExport": "已取消导出"
     },
     "packInvalid": "资源包无效或内容校验失败，请重新导出。",
     "packVersionUnsupported": "不支持此资源包版本。",
@@ -3963,7 +3972,8 @@
       "saved": "已保存到资源库",
       "unfinished": "未完成",
       "reviewRemaining": "重新检查未完成项",
-      "fixedSkill": "已收录此来源的固定版本，不代表远端最新版；可在资源详情中检查更新。"
+      "fixedSkill": "已收录此来源的固定版本，不代表远端最新版；可在资源详情中检查更新。",
+      "sourceTool": "来源工具"
     },
     "mcpComposer": {
       "entry": "添加方式",

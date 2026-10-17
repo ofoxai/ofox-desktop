@@ -1436,7 +1436,14 @@ export function LibrarySection({
                 ? t("library.discover.title")
                 : view?.type === "inventory"
                   ? t("library.workbench.importNative")
-                  : (resource?.name ?? t(`library.tabs.${kind}`))}
+                  : view?.type === "source"
+                    ? t("library.workbench2.sourceDetails")
+                    : view?.type === "compare"
+                      ? t("library.workbench2.compare")
+                      : kind === "mcp" &&
+                          (view?.type === "new" || view?.type === "advancedNew")
+                        ? t("library.workbench2.addMcp")
+                        : (resource?.name ?? t(`library.tabs.${kind}`))}
             </DialogTitle>
             <DialogDescription>
               {t(

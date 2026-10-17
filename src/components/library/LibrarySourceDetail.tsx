@@ -172,7 +172,7 @@ export function LibrarySourceDetail({
         <>
           <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-ctl">
             <dt className="text-ink-muted">
-              {t("library.workbench.agentFilter")}
+              {t("library.workbench2.sourceTool")}
             </dt>
             <dd>{toolLabel(detail.toolId, t)}</dd>
             <dt className="text-ink-muted">

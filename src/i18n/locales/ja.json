@@ -3589,7 +3589,16 @@
       "result": "{{count}} 個の下書きを復元しました",
       "imported": "復元済み",
       "skipped": "スキップ済み",
-      "failed": "復元に失敗"
+      "failed": "復元に失敗",
+      "menu": "ライブラリのその他の操作",
+      "importAction": "リソースパックを読み込む",
+      "exportAction": "リソースパックを書き出す",
+      "importTitle": "リソースパックを読み込む",
+      "exportTitle": "リソースパックを書き出す",
+      "importDescription": "プレビュー後にライブラリへ追加します。ツールには自動適用しません。",
+      "exportDescription": "ライブラリ内のすべてのリソースを書き出し、保存場所を選びます。",
+      "cancelledImport": "リソースパックが選択されていません",
+      "cancelledExport": "書き出しをキャンセルしました"
     },
     "packInvalid": "パックが無効か検証に失敗しました。書き出し直してください。",
     "packVersionUnsupported": "このパックのバージョンには対応していません。",
@@ -3963,7 +3972,8 @@
       "saved": "ライブラリに保存済み",
       "unfinished": "未完了",
       "reviewRemaining": "未完了項目を再確認",
-      "fixedSkill": "この取得元の固定バージョンを収録済みです。最新版とは限りません。リソース詳細から更新を確認できます。"
+      "fixedSkill": "この取得元の固定バージョンを収録済みです。最新版とは限りません。リソース詳細から更新を確認できます。",
+      "sourceTool": "提供元のツール"
     },
     "mcpComposer": {
       "entry": "追加方法",
