@@ -8,6 +8,8 @@ pub(crate) mod mcp_actions;
 pub(crate) mod mcp_check;
 pub(crate) mod mcp_codec;
 pub(crate) mod mcp_resource;
+#[cfg(test)]
+mod native_acceptance_profile;
 pub(crate) mod native_json;
 pub(crate) mod resource_pack;
 pub(crate) mod skill_actions;

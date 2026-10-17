@@ -32,3 +32,10 @@ See [development standards](docs/code-standards.md) and [integration wiring](doc
 - UI evidence has a lifetime too. Invalidate open source/compare views when their ticket, revision, route or epoch changes; a backend rejection on the next write does not make an already displayed stale conclusion truthful.
 - Locating a folded row must wait for React to commit the newly visible DOM. A single animation frame after setting state can run too early in a native WebView; regressions must verify scrolling and focus, not just a highlight flag. Keep source-recovery errors separate so a fresh scan or successful retry clears only the error it resolved.
 - Discovery IDs are scoped to one scan, not stable source identities. Regression fixtures must rotate ticket, source and entry references together. A source description may dismiss a resolved UI warning only when unambiguous in both scans; it never authorizes a source action or replaces ticket and fingerprint checks.
+
+
+### Keep proof separate from presentation and acknowledgements
+
+- A source capability must be explicitly registered; the existence of an adapter alone does not make every metric available. Use the same verified roster and branch/identity rules for ledger and analytics, and bound every decoding pass, including metadata fallbacks.
+- A successful save acknowledgement must close or freeze the old editable form before a refresh retry. Reusing its receipt while leaving new edits enabled silently loses the user's intent.
+- Bind native acceptance writer receipts to the actual compiled clean checkout. A caller-supplied SHA or successful configuration parsing cannot prove either source identity or native resource consumption. Synthetic UI and 10k cached-query benchmarks must be labelled with their measured scope.
