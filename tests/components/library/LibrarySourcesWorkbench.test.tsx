@@ -52,6 +52,8 @@ const inventory: LibraryInventory = {
       state: "ready",
       count: 2,
       sourceRef: "source-ref",
+      locationKind: "file",
+      displayPath: "config.toml",
     },
   ],
   entries: [
@@ -74,6 +76,35 @@ const inventory: LibraryInventory = {
     },
   ],
 };
+/** Native scans allocate new opaque references, including references held by entries. */
+function rotatedInventory(
+  ticketId: string,
+  base: LibraryInventory = inventory,
+): LibraryInventory {
+  const ids = new Map(
+    base.sources.map((source, index) => [
+      source.sourceId,
+      `${ticketId}-source-${index}`,
+    ]),
+  );
+  return {
+    ...base,
+    ticketId,
+    sources: base.sources.map((source) => ({
+      ...source,
+      sourceId: ids.get(source.sourceId)!,
+      sourceRef: ids.get(source.sourceId)!,
+    })),
+    entries: base.entries.map((entry) => ({
+      ...entry,
+      entryId: `${ticketId}-${entry.entryId}`,
+      sources: entry.sources.map((source) => ({
+        ...source,
+        sourceId: ids.get(source.sourceId)!,
+      })),
+    })),
+  };
+}
 function renderSection() {
   return render(
     <StrictMode>
@@ -101,20 +132,25 @@ beforeEach(async () => {
     operations: [],
   });
   vi.spyOn(libraryApi, "matchMcpRecipes").mockResolvedValue([]);
-  vi.spyOn(libraryApi, "inventorySource").mockResolvedValue({
-    ticketId: "native-ticket",
-    entryId: "matched",
-    sourceRef: "source-ref",
-    toolId: "codex",
-    label: "nativeMcp",
-    locationKind: "file",
-    isSymlink: false,
-    observedAtMs: Date.now(),
-    canReveal: true,
-    matchedResourceIds: ["a"],
-    fields: [],
-  });
-  vi.spyOn(libraryApi, "inventory").mockResolvedValue(inventory);
+  vi.spyOn(libraryApi, "inventorySource").mockImplementation(
+    async (ticketId, entryId, sourceRef) => ({
+      ticketId,
+      entryId,
+      sourceRef,
+      toolId: "codex",
+      label: "nativeMcp",
+      locationKind: "file",
+      isSymlink: false,
+      observedAtMs: Date.now(),
+      canReveal: true,
+      matchedResourceIds: ["a"],
+      fields: [],
+    }),
+  );
+  let scan = 0;
+  vi.spyOn(libraryApi, "inventory").mockImplementation(async () =>
+    ++scan === 1 ? inventory : rotatedInventory(`rescan-${scan}`),
+  );
   vi.spyOn(libraryApi, "discardInventory").mockResolvedValue(true);
 });
 it("scans in the background once without blocking the library or importing native configuration", async () => {
@@ -378,8 +414,8 @@ it("clears a failed-source locate warning after a successful scan and revalidate
     .mockRejectedValueOnce(new Error("library.inventoryChanged"))
     .mockResolvedValueOnce({
       ticketId: "fresh-ticket",
-      entryId: "matched",
-      sourceRef: "source-ref",
+      entryId: "fresh-ticket-matched",
+      sourceRef: "fresh-ticket-source-0",
       toolId: "codex",
       label: "nativeMcp",
       locationKind: "file",
@@ -397,7 +433,7 @@ it("clears a failed-source locate warning after a successful scan and revalidate
   );
   expect(await screen.findByText("来源待确认，请重新扫描。")).toBeVisible();
   await waitFor(() => expect(libraryApi.inventory).toHaveBeenCalledTimes(2));
-  await act(async () => finishScan({ ...inventory, ticketId: "fresh-ticket" }));
+  await act(async () => finishScan(rotatedInventory("fresh-ticket")));
   expect(
     screen.queryByText("来源待确认，请重新扫描。"),
   ).not.toBeInTheDocument();
@@ -410,8 +446,8 @@ it("clears a failed-source locate warning after a successful scan and revalidate
   );
   expect(libraryApi.inventorySource).toHaveBeenLastCalledWith(
     "fresh-ticket",
-    "matched",
-    "source-ref",
+    "fresh-ticket-matched",
+    "fresh-ticket-source-0",
     1,
   );
   expect(
@@ -444,17 +480,16 @@ it("keeps an unrelated export failure visible after a successful source locate",
 
 it("keeps an unconfirmed source warning until that source is successfully rescanned", async () => {
   const failed = {
-    ...inventory,
-    ticketId: "failed-ticket",
-    sources: inventory.sources.map((source) => ({
+    ...rotatedInventory("failed-ticket"),
+    sources: rotatedInventory("failed-ticket").sources.map((source) => ({
       ...source,
-      state: "readFailed",
+      state: "unreadable",
     })),
   };
   vi.mocked(libraryApi.inventory)
     .mockResolvedValueOnce(inventory)
     .mockResolvedValueOnce(failed)
-    .mockResolvedValue({ ...inventory, ticketId: "manual-fresh" });
+    .mockResolvedValue(rotatedInventory("manual-fresh"));
   vi.mocked(libraryApi.inventorySource).mockRejectedValueOnce(
     new Error("library.inventoryChanged"),
   );
@@ -590,4 +625,192 @@ it("does not replay an unconsumed locate focus when the retained page is reactiv
   view.rerender(section(true));
   expect(scroll).not.toHaveBeenCalled();
   expect(screen.getByTestId("library-resource-a")).not.toHaveFocus();
+});
+
+it.each([
+  "old ambiguity",
+  "new ambiguity",
+  "old missing location",
+  "new missing location",
+  "old file missing path",
+  "new file missing path",
+  "different source",
+  "fresh unreadable",
+  "fresh unsupported",
+])("preserves the source warning after a scan with %s", async (scenario) => {
+  let old = inventory;
+  let freshBase = inventory;
+  if (scenario === "old ambiguity")
+    old = {
+      ...inventory,
+      sources: [
+        ...inventory.sources,
+        {
+          ...inventory.sources[0],
+          sourceId: "other-old",
+          sourceRef: "other-old",
+        },
+      ],
+    };
+  if (scenario === "new ambiguity")
+    freshBase = {
+      ...inventory,
+      sources: [
+        ...inventory.sources,
+        {
+          ...inventory.sources[0],
+          sourceId: "other-new",
+          sourceRef: "other-new",
+        },
+      ],
+    };
+  if (scenario === "old missing location")
+    old = {
+      ...inventory,
+      sources: inventory.sources.map((source) => ({
+        ...source,
+        locationKind: undefined,
+        displayPath: undefined,
+      })),
+    };
+  if (scenario === "new missing location")
+    freshBase = {
+      ...inventory,
+      sources: inventory.sources.map((source) => ({
+        ...source,
+        locationKind: undefined,
+        displayPath: undefined,
+      })),
+    };
+  if (scenario === "old file missing path")
+    old = {
+      ...inventory,
+      sources: inventory.sources.map((source) => ({
+        ...source,
+        displayPath: undefined,
+      })),
+    };
+  if (scenario === "new file missing path")
+    freshBase = {
+      ...inventory,
+      sources: inventory.sources.map((source) => ({
+        ...source,
+        displayPath: undefined,
+      })),
+    };
+  if (scenario === "different source")
+    freshBase = {
+      ...inventory,
+      sources: inventory.sources.map((source) => ({
+        ...source,
+        displayPath: "different.toml",
+      })),
+    };
+  if (scenario === "fresh unreadable" || scenario === "fresh unsupported")
+    freshBase = {
+      ...inventory,
+      sources: inventory.sources.map((source) => ({
+        ...source,
+        state: scenario === "fresh unreadable" ? "unreadable" : "unsupported",
+      })),
+    };
+  vi.mocked(libraryApi.inventory)
+    .mockResolvedValueOnce(old)
+    .mockResolvedValue(rotatedInventory("rotated-fresh", freshBase));
+  vi.mocked(libraryApi.inventorySource).mockRejectedValueOnce(
+    new Error("library.inventoryChanged"),
+  );
+  renderSection();
+  const native = await screen.findByRole("region", { name: "本机配置中" });
+  await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
+  await userEvent.click(
+    within(native).getByRole("button", { name: /定位到资源库/ }),
+  );
+  await waitFor(() => expect(libraryApi.inventory).toHaveBeenCalledTimes(2));
+  expect(screen.getByText("来源待确认，请重新扫描。")).toBeVisible();
+});
+
+it.each(["inline", "legacy"] as const)(
+  "uses an explicit unique %s location kind without inventing a file path",
+  async (locationKind) => {
+    const inline = {
+      ...inventory,
+      sources: inventory.sources.map((source) => ({
+        ...source,
+        label: locationKind === "inline" ? "nativeMcpInline" : "legacyPrompts",
+        locationKind,
+        displayPath: undefined,
+      })),
+    };
+    let finish!: (value: LibraryInventory) => void;
+    vi.mocked(libraryApi.inventory)
+      .mockResolvedValueOnce(inline)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+    vi.mocked(libraryApi.inventorySource).mockRejectedValueOnce(
+      new Error("library.inventoryChanged"),
+    );
+    renderSection();
+    const native = await screen.findByRole("region", { name: "本机配置中" });
+    await userEvent.click(
+      within(native).getByRole("button", { name: /已收录/ }),
+    );
+    await userEvent.click(
+      within(native).getByRole("button", { name: /定位到资源库/ }),
+    );
+    expect(await screen.findByText("来源待确认，请重新扫描。")).toBeVisible();
+    await act(async () => finish(rotatedInventory("fresh-inline", inline)));
+    expect(
+      screen.queryByText("来源待确认，请重新扫描。"),
+    ).not.toBeInTheDocument();
+  },
+);
+
+it("keeps an old-backend warning without location evidence until a fresh locate is verified", async () => {
+  const old = {
+    ...inventory,
+    sources: inventory.sources.map((source) => ({
+      ...source,
+      locationKind: undefined,
+      displayPath: undefined,
+    })),
+  };
+  let finish!: (value: LibraryInventory) => void;
+  vi.mocked(libraryApi.inventory)
+    .mockResolvedValueOnce(old)
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+  vi.mocked(libraryApi.inventorySource).mockRejectedValueOnce(
+    new Error("library.inventoryChanged"),
+  );
+  renderSection();
+  const native = await screen.findByRole("region", { name: "本机配置中" });
+  await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
+  await userEvent.click(
+    within(native).getByRole("button", { name: /定位到资源库/ }),
+  );
+  expect(await screen.findByText("来源待确认，请重新扫描。")).toBeVisible();
+  await act(async () => finish(rotatedInventory("verified-fresh")));
+  expect(screen.getByText("来源待确认，请重新扫描。")).toBeVisible();
+  await userEvent.click(
+    within(native).getByRole("button", { name: /定位到资源库/ }),
+  );
+  await screen.findByTestId("library-resource-a");
+  expect(libraryApi.inventorySource).toHaveBeenLastCalledWith(
+    "verified-fresh",
+    "verified-fresh-matched",
+    "verified-fresh-source-0",
+    1,
+  );
+  expect(
+    screen.queryByText("来源待确认，请重新扫描。"),
+  ).not.toBeInTheDocument();
 });

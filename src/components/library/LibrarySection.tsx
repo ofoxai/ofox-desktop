@@ -13,6 +13,7 @@ import {
   type LibraryBatchPlan,
   type McpComparisonSubject,
   type McpRecipeMatch,
+  type LibraryInventory,
 } from "@/lib/api/library";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -82,6 +83,21 @@ function definitionFromEdits(edits: import("@/lib/api/library").FieldEdit[]) {
     parent[edit.path.at(-1)!] = edit.value;
   }
   return result;
+}
+/** Opaque IDs are ticket-local. A description is only useful when unique in both scans. */
+function inventorySourceIdentity(source: LibraryInventory["sources"][number]) {
+  if (!source.locationKind) return undefined;
+  if (
+    ["file", "directory"].includes(source.locationKind) &&
+    !source.displayPath
+  )
+    return undefined;
+  return JSON.stringify([
+    source.toolId,
+    source.label,
+    source.locationKind,
+    source.displayPath ?? null,
+  ]);
 }
 function recipeDefinition(
   draft: import("./libraryRecommendations").LibraryMcpDraft,
@@ -231,8 +247,7 @@ export function LibrarySection({
   const [sourceLocateError, setSourceLocateError] = useState<{
     reason: "unsupported" | "sourceUnconfirmed";
     ticketId?: string;
-    sourceId?: string;
-    toolId?: string;
+    sourceIdentity?: string;
   }>();
   const [locateIntent, setLocateIntent] = useState<{
     id: string;
@@ -493,16 +508,19 @@ export function LibrarySection({
       !active ||
       !sourceLocateError ||
       sourceLocateError.reason !== "sourceUnconfirmed" ||
+      !sourceLocateError.sourceIdentity ||
       !native.inventory ||
       native.inventory.ticketId === sourceLocateError.ticketId
     )
       return;
-    const refreshedSource = native.inventory.sources.find(
+    const refreshedSources = native.inventory.sources.filter(
       (source) =>
-        source.sourceId === sourceLocateError.sourceId &&
-        source.toolId === sourceLocateError.toolId,
+        inventorySourceIdentity(source) === sourceLocateError.sourceIdentity,
     );
-    if (refreshedSource && ["ready", "missing"].includes(refreshedSource.state))
+    if (
+      refreshedSources.length === 1 &&
+      ["ready", "missing"].includes(refreshedSources[0].state)
+    )
       setSourceLocateError(undefined);
   }, [active, native.inventory, sourceLocateError]);
   useLayoutEffect(() => {
@@ -573,11 +591,16 @@ export function LibrarySection({
         request === locateRequest.current &&
         mounted.current
       ) {
+        const identity = inventorySourceIdentity(source);
+        const uniquelyIdentified =
+          identity &&
+          native.inventory!.sources.filter(
+            (item) => inventorySourceIdentity(item) === identity,
+          ).length === 1;
         setSourceLocateError({
           reason: "sourceUnconfirmed",
           ticketId: native.inventory!.ticketId,
-          sourceId: source.sourceId,
-          toolId: source.toolId,
+          sourceIdentity: uniquelyIdentified ? identity : undefined,
         });
         native.rescan();
       }
