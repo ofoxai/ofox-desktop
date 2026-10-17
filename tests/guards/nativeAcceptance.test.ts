@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dirname } from "node:path";
 import { rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   BudgetLedger,
@@ -17,6 +18,20 @@ import {
 
 const roots: string[] = [];
 const sourceSha = "a".repeat(40);
+interface OfflineArguments {
+  _: unknown[];
+  prompt?: string;
+  "allowed-mcp-server-names"?: string[];
+}
+interface OfflineParser {
+  exitProcess(value: boolean): OfflineParser;
+  help(value: boolean): OfflineParser;
+  version(value: boolean): OfflineParser;
+  option(name: string, value: Record<string, unknown>): OfflineParser;
+  fail(callback: (message: string) => never): OfflineParser;
+  check(callback: (value: OfflineArguments) => boolean | string): OfflineParser;
+  parseSync(): OfflineArguments;
+}
 async function output() {
   const path = await mkdtemp(join(tmpdir(), "ofox-native-proof-"));
   roots.push(path);
@@ -246,6 +261,54 @@ describe("native acceptance safety and evidence", () => {
         expect(invocation.args.join(" ")).not.toContain("/ofox-acceptance");
       }
     }
+  });
+  it("passes both Gemini MCP names through its nargs-one parser without creating a positional prompt", () => {
+    // Gemini 0.64.0 bundles yargs with this exact option and comma coercion.
+    // Reuse the lockfile's existing MSW yargs dependency for an offline replay;
+    // no Gemini entry point, config, credential or network is accessed here.
+    const installedDependency = createRequire(
+      createRequire(import.meta.url).resolve("msw/package.json"),
+    );
+    const yargs = installedDependency("yargs/yargs") as (
+      args: string[],
+    ) => OfflineParser;
+    const invocation = nativeInvocation("gemini", {
+      workspace: "/sandbox/work",
+      prompt: "fixed acceptance",
+      model: "test-model",
+    });
+    const parsed = yargs(invocation.args)
+      .exitProcess(false)
+      .help(false)
+      .version(false)
+      .option("prompt", { type: "string" })
+      .option("allowed-mcp-server-names", {
+        type: "array",
+        string: true,
+        nargs: 1,
+        coerce: (values: string[]) =>
+          values.flatMap((value) =>
+            value
+              .split(",")
+              .map((item) => item.trim())
+              .filter(Boolean),
+          ),
+      })
+      .check((value) =>
+        value.prompt && value._.length > 0
+          ? "Cannot use both a positional prompt and the --prompt (-p) flag together"
+          : true,
+      )
+      .fail((message) => {
+        throw new Error(message);
+      })
+      .parseSync();
+    expect(parsed["allowed-mcp-server-names"]).toEqual([
+      "ofox_acceptance",
+      "microsoft_learn",
+    ]);
+    expect(parsed._).toEqual([]);
+    expect(parsed.prompt).toBe("fixed acceptance");
   });
   it("accepts structured real tool events but never assistant self-reports or incomplete runs", () => {
     const samples = {

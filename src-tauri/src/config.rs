@@ -1045,7 +1045,9 @@ mod tests {
             let path = path.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(40));
-                fs::write(&path, b"back").unwrap();
+                // Publish a complete replacement; a non-atomic create/write can
+                // legitimately be observed between creation and its first byte.
+                atomic_write(&path, b"back").unwrap();
             })
         };
 

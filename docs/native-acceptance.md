@@ -95,6 +95,8 @@ Claude 的固定任务以 `/ofox-acceptance` 换行开头，使用 bare 模式�
 
 Codex Skills 按产品实际 writer 目标写入 `.codex/skills`；不能把共享 `.agents/skills` 的结果替代该路径的原生消费。
 
+Gemini 0.64.0 的 MCP allowlist 选项使用 `nargs: 1` 并支持逗号拆分，driver 传单个 `ofox_acceptance,microsoft_learn` 值。一次 flag 后写两个裸值会把第二个值解析成位置参数，与 `--prompt` 冲突。此处回归只重放已安装 yargs 与对应的公开参数规则，不启动 Gemini；参数验证不证明配置、权限或原生资源消费已经通过。
+
 | 证据                 | 可得结论                                                                             |
 | -------------------- | ------------------------------------------------------------------------------------ |
 | fixture 完成         | 固定离线 driver、取消、解析及本地 MCP 收据链工作；未验证真实 Agent。                 |
