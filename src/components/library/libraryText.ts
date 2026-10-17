@@ -32,7 +32,7 @@ export function inventoryEntryDescription(
     : entry.conflict
       ? t("library.workbench.importVariant")
       : t("library.workbench.draftOnly");
-  return [inventorySourceLabel(inventory, entry, t), state, entry.variant]
+  return [inventorySourceLabel(inventory, entry, t), state]
     .filter(Boolean)
     .join(" · ");
 }
@@ -54,4 +54,11 @@ export function toolLabel(tool: string, t: TFunction) {
         opencode: "OpenCode",
         hermes: "Hermes",
       }[tool] ?? tool);
+}
+
+export function libraryCommandUnavailable(reason: unknown) {
+  const message = reason instanceof Error ? reason.message : String(reason);
+  return /(?:unknown|missing|not found).*command|command.*(?:not found|unknown|does not exist)/i.test(
+    message,
+  );
 }

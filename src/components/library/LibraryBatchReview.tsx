@@ -253,6 +253,11 @@ export function LibraryBatchReview({
               ))}
             </section>
           )}
+          {plan.groups.some((group) => group.status === "applied") && (
+            <p className="text-note text-ink-muted">
+              {t("library.workbench2.targetNext")}
+            </p>
+          )}
           <ListCard>
             {plan.groups.map((group) => (
               <ListRow

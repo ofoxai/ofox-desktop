@@ -238,6 +238,11 @@ export function McpCheck({
               })}
             </p>
           )}
+          {result.state === "blocked" && (
+            <p className="text-ctl text-ink-muted">
+              {t("library.workbench2.nativeCheck")}
+            </p>
+          )}
           {result.state === "ok" && (
             <p className="text-note text-ink-muted">
               {t("library.mcpCheckToolCount", { count: result.tools.length })}

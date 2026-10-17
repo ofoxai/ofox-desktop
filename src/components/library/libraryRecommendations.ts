@@ -6,10 +6,13 @@ export interface LibraryMcpPair {
   value: string;
 }
 export interface LibraryMcpDraft {
+  identifier?: string;
   name: string;
   transport: "stdio" | "http" | "sse";
   command: string;
   argsText: string;
+  /** Exact argv from a parsed command; absent for legacy newline-only drafts. */
+  args?: string[];
   url: string;
   environment: LibraryMcpPair[];
   headers: LibraryMcpPair[];
@@ -17,6 +20,14 @@ export interface LibraryMcpDraft {
   requiresDirectory?: boolean;
   directory?: string;
 }
+export type LibraryRecommendationCategory =
+  | "docs"
+  | "browser"
+  | "files"
+  | "development"
+  | "design"
+  | "communication";
+
 interface RecommendationBase {
   id: string;
   kind: LibraryKind;
@@ -28,6 +39,14 @@ interface RecommendationBase {
   permissionKeys: string[];
   toolIds: string[];
   referenceExample?: boolean;
+  category?: LibraryRecommendationCategory;
+  publisher?: string;
+  reviewedAt?: string;
+  licenseKey?: string;
+  runtimeKey?: string;
+  preparationKey?: string;
+  authRequired?: boolean;
+  checkMode?: "ofox" | "native";
 }
 export type LibraryRecommendation = RecommendationBase &
   (
@@ -62,6 +81,88 @@ export function createMcpDraft(
 }
 
 const TARGETS = ["claude", "codex", "gemini", "opencode", "hermes"];
+const RECIPE_METADATA: Record<
+  string,
+  Pick<RecommendationBase, "category" | "publisher" | "licenseKey">
+> = {
+  context7: { category: "docs", publisher: "Upstash", licenseKey: "mit" },
+  "chrome-devtools": {
+    category: "browser",
+    publisher: "Chrome DevTools",
+    licenseKey: "apache",
+  },
+  filesystem: {
+    category: "files",
+    publisher: "Model Context Protocol",
+    licenseKey: "reference",
+  },
+  fetch: {
+    category: "files",
+    publisher: "Model Context Protocol",
+    licenseKey: "reference",
+  },
+  "microsoft-learn": {
+    category: "docs",
+    publisher: "Microsoft",
+    licenseKey: "service",
+  },
+  deepwiki: { category: "docs", publisher: "Cognition", licenseKey: "service" },
+  playwright: {
+    category: "browser",
+    publisher: "Microsoft",
+    licenseKey: "apache",
+  },
+  github: {
+    category: "development",
+    publisher: "GitHub",
+    licenseKey: "mitService",
+  },
+  "frontend-design": {
+    category: "design",
+    publisher: "Anthropic",
+    licenseKey: "skill",
+  },
+  "webapp-testing": {
+    category: "browser",
+    publisher: "Anthropic",
+    licenseKey: "skill",
+  },
+  "mcp-builder": {
+    category: "development",
+    publisher: "Anthropic",
+    licenseKey: "skill",
+  },
+  "skill-creator": {
+    category: "development",
+    publisher: "Anthropic",
+    licenseKey: "skill",
+  },
+  "theme-factory": {
+    category: "design",
+    publisher: "Anthropic",
+    licenseKey: "skill",
+  },
+  "canvas-design": {
+    category: "design",
+    publisher: "Anthropic",
+    licenseKey: "skillFonts",
+  },
+  coding: {
+    category: "development",
+    publisher: "OFox",
+    licenseKey: "template",
+  },
+  chinese: {
+    category: "communication",
+    publisher: "OFox",
+    licenseKey: "template",
+  },
+  review: {
+    category: "communication",
+    publisher: "OFox",
+    licenseKey: "template",
+  },
+};
 const base = (id: string, name: string, sourceUrl?: string) => ({
   id,
   name,
@@ -70,6 +171,13 @@ const base = (id: string, name: string, sourceUrl?: string) => ({
   descriptionKey: `library.discover.recipes.${id}`,
   dependencyKeys: [] as string[],
   permissionKeys: [] as string[],
+  ...RECIPE_METADATA[id],
+  reviewedAt: "2026-10-17",
+  runtimeKey: `library.discover2.runtime.${["context7", "microsoft-learn", "deepwiki", "github"].includes(id) ? "http" : ["chrome-devtools", "filesystem", "playwright"].includes(id) ? "node" : id === "fetch" ? "uv" : ["coding", "chinese", "review"].includes(id) ? "instructions" : "skill"}`,
+  preparationKey: `library.discover2.preparation.${id}`,
+  checkMode: (["context7", "microsoft-learn", "deepwiki"].includes(id)
+    ? "ofox"
+    : "native") as "ofox" | "native",
 });
 
 /** Maintained recipes only. Browsing or selecting one never runs or downloads it. */
@@ -135,24 +243,99 @@ export const LIBRARY_RECOMMENDATIONS: readonly LibraryRecommendation[] = [
     dependencyKeys: ["library.discover.requirements.fetch"],
     permissionKeys: ["library.discover.permissions.web"],
   },
-  ...["frontend-design", "webapp-testing", "mcp-builder", "skill-creator"].map(
-    (name) => ({
-      ...base(
-        name,
-        name,
-        `https://github.com/anthropics/skills/tree/main/skills/${name}`,
-      ),
-      kind: "skills" as const,
-      repository: {
-        owner: "anthropics",
-        name: "skills",
-        branch: "main",
-        directory: `skills/${name}`,
-      },
-      dependencyKeys: [`library.discover.requirements.${name}`],
-      permissionKeys: ["library.discover.permissions.skillFiles"],
+  {
+    ...base(
+      "microsoft-learn",
+      "Microsoft Learn",
+      "https://learn.microsoft.com/en-us/training/support/mcp",
+    ),
+    kind: "mcp",
+    descriptionKey: "library.discover2.recipes.microsoft-learn",
+    initialDraft: createMcpDraft({
+      name: "microsoft-learn",
+      transport: "http",
+      url: "https://learn.microsoft.com/api/mcp",
     }),
-  ),
+    dependencyKeys: ["library.discover2.requirements.publicHttp"],
+    permissionKeys: ["library.discover2.permissions.microsoft-learn"],
+  },
+  {
+    ...base(
+      "deepwiki",
+      "DeepWiki",
+      "https://docs.devin.ai/work-with-devin/deepwiki-mcp",
+    ),
+    kind: "mcp",
+    descriptionKey: "library.discover2.recipes.deepwiki",
+    initialDraft: createMcpDraft({
+      name: "deepwiki",
+      transport: "http",
+      url: "https://mcp.deepwiki.com/mcp",
+    }),
+    dependencyKeys: ["library.discover2.requirements.publicHttp"],
+    permissionKeys: ["library.discover2.permissions.deepwiki"],
+  },
+  {
+    ...base(
+      "playwright",
+      "Playwright",
+      "https://github.com/microsoft/playwright-mcp",
+    ),
+    kind: "mcp",
+    descriptionKey: "library.discover2.recipes.playwright",
+    initialDraft: createMcpDraft({
+      name: "playwright",
+      command: "npx",
+      argsText: "-y\n@playwright/mcp@latest",
+    }),
+    dependencyKeys: ["library.discover2.requirements.playwright"],
+    permissionKeys: ["library.discover2.permissions.playwright"],
+  },
+  {
+    ...base(
+      "github",
+      "GitHub",
+      "https://github.com/github/github-mcp-server/blob/main/docs/remote-server.md",
+    ),
+    kind: "mcp",
+    descriptionKey: "library.discover2.recipes.github",
+    authRequired: true,
+    initialDraft: createMcpDraft({
+      name: "github",
+      transport: "http",
+      url: "https://api.githubcopilot.com/mcp/readonly",
+    }),
+    dependencyKeys: ["library.discover2.requirements.github"],
+    permissionKeys: ["library.discover2.permissions.github"],
+  },
+  ...[
+    "frontend-design",
+    "webapp-testing",
+    "mcp-builder",
+    "skill-creator",
+    "theme-factory",
+    "canvas-design",
+  ].map((name) => ({
+    ...base(
+      name,
+      name,
+      `https://github.com/anthropics/skills/tree/main/skills/${name}`,
+    ),
+    kind: "skills" as const,
+    repository: {
+      owner: "anthropics",
+      name: "skills",
+      branch: "main",
+      directory: `skills/${name}`,
+    },
+    descriptionKey: ["theme-factory", "canvas-design"].includes(name)
+      ? `library.discover2.recipes.${name}`
+      : `library.discover.recipes.${name}`,
+    dependencyKeys: [
+      `library.${["theme-factory", "canvas-design"].includes(name) ? "discover2" : "discover"}.requirements.${name}`,
+    ],
+    permissionKeys: ["library.discover.permissions.skillFiles"],
+  })),
   {
     ...base("coding", "General coding"),
     kind: "instructions",
@@ -191,6 +374,7 @@ export function cloneRecommendationDraft(
   if (recipe.kind !== "mcp") throw new Error("notMcp");
   return {
     ...recipe.initialDraft,
+    args: recipe.initialDraft.args ? [...recipe.initialDraft.args] : undefined,
     environment: recipe.initialDraft.environment.map((pair) => ({ ...pair })),
     headers: recipe.initialDraft.headers.map((pair) => ({ ...pair })),
     advancedFields: recipe.initialDraft.advancedFields?.map((field) => ({

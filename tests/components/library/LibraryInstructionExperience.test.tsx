@@ -150,7 +150,7 @@ describe("compact instruction experience", () => {
     fireEvent.change(screen.getByLabelText("Markdown"), {
       target: { value: "Unsaved local changes" },
     });
-    await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+    await userEvent.click(screen.getByRole("button", { name: "保存到资源库" }));
     expect(screen.getByRole("button", { name: "放弃修改" })).toBeEnabled();
     await userEvent.click(screen.getByRole("button", { name: "放弃修改" }));
     expect(screen.getByLabelText("Markdown")).toHaveValue(initial.content);

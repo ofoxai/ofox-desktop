@@ -268,7 +268,7 @@ it("does not confuse applied configuration with an MCP connection result", () =>
       check={{ state: "blocked", checkedAtMs: 1000, toolsCount: 0 }}
     />,
   );
-  expect(screen.getByText(/上次检查：检查被阻止/)).toBeVisible();
+  expect(screen.getByText(/上次检查：请在对应工具中检查/)).toBeVisible();
   expect(screen.queryByText(/连接成功/)).not.toBeInTheDocument();
 });
 

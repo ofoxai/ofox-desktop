@@ -11,7 +11,8 @@ import {
   type SkillDefinition,
   type BatchResource,
   type LibraryBatchPlan,
-  type LibraryInventory,
+  type McpComparisonSubject,
+  type McpRecipeMatch,
 } from "@/lib/api/library";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -35,7 +36,7 @@ import { McpDuplicate } from "./McpDuplicate";
 import { McpCheck } from "./McpCheck";
 import { ResourceReview } from "./ResourceReview";
 import { InstructionOverview } from "./InstructionOverview";
-import { inventoryEntryDescription, libraryError } from "./libraryText";
+import { libraryError } from "./libraryText";
 import { LibraryResourceRow } from "./LibraryResourceRow";
 import { LibraryInventoryView } from "./LibraryInventoryView";
 import { LibraryUpdateChecks } from "./LibraryUpdateChecks";
@@ -48,14 +49,73 @@ import { DraftStore, useDraftState } from "./useDraftState";
 import { LibraryDiscover } from "./LibraryDiscover";
 import { LibraryMcpForm, mcpDraftToEdits } from "./LibraryMcpForm";
 import {
+  LIBRARY_RECOMMENDATIONS,
   createMcpDraft,
   cloneRecommendationDraft,
   type LibraryRecommendation,
 } from "./libraryRecommendations";
-import { ToolBadge } from "@/components/tools/ToolBadge";
+import { useInteractionActive } from "@/components/ui/interaction-scope";
+import { useLibraryInventory } from "./useLibraryInventory";
+import { LibraryNativeSources } from "./LibraryNativeSources";
+import { LibrarySourceDetail } from "./LibrarySourceDetail";
+import { LibraryMultiSaveResult } from "./LibraryMultiSaveResult";
+import { LibraryMcpCompare } from "./LibraryMcpCompare";
+import { createMcpIdentifier } from "./libraryMcpInput";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { MoreHorizontal } from "lucide-react";
 import { settingsApi } from "@/lib/api/settings";
 import { skillsApi } from "@/lib/api/skills";
 
+function definitionFromEdits(edits: import("@/lib/api/library").FieldEdit[]) {
+  const result: Record<string, unknown> = Object.create(null);
+  for (const edit of edits) {
+    let parent = result;
+    for (const key of edit.path.slice(0, -1)) {
+      parent[key] ??= Object.create(null);
+      parent = parent[key] as Record<string, unknown>;
+    }
+    parent[edit.path.at(-1)!] = edit.value;
+  }
+  return result;
+}
+function recipeDefinition(
+  draft: import("./libraryRecommendations").LibraryMcpDraft,
+) {
+  return definitionFromEdits([
+    { path: ["type"], action: "set", value: draft.transport },
+    ...(draft.transport === "stdio"
+      ? [
+          { path: ["command"], action: "set" as const, value: draft.command },
+          {
+            path: ["args"],
+            action: "set" as const,
+            value:
+              draft.args ??
+              (draft.argsText ? draft.argsText.split(/\r?\n/) : []),
+          },
+        ]
+      : [{ path: ["url"], action: "set" as const, value: draft.url }]),
+    ...draft.environment.map((pair) => ({
+      path: ["env", pair.name],
+      action: "set" as const,
+      value: pair.value,
+    })),
+    ...draft.headers.map((pair) => ({
+      path: ["headers", pair.name],
+      action: "set" as const,
+      value: pair.value,
+    })),
+    ...(draft.advancedFields ?? []).map((field) => ({
+      ...field,
+      action: "set" as const,
+    })),
+  ]);
+}
 export type Resource = InstructionSet | McpDefinition | SkillDefinition;
 type OpenViewBody =
   | {
@@ -79,6 +139,18 @@ type OpenViewBody =
         tools: string[];
       };
     }
+  | { type: "source"; ticketId: string; entryId: string; sourceRef: string }
+  | {
+      type: "compare";
+      subjects: { name: string; subject: McpComparisonSubject }[];
+    }
+  | {
+      type: "multiResult";
+      saved: { id: string; name: string }[];
+      remaining: import("./libraryRecommendations").LibraryMcpDraft[];
+      intent: "draft" | "apply";
+      tools: string[];
+    }
   | { type: "updates"; skills: SkillDefinition[] }
   | {
       type: "recommendedSkill";
@@ -92,7 +164,7 @@ type OpenViewBody =
       initial?: LibraryBatchPlan;
     }
   | { type: "operation"; operation: LibraryOperation };
-type OpenView = OpenViewBody & { epoch: number };
+type OpenView = OpenViewBody & { epoch: number; contextKey?: string };
 export function LibrarySection({
   kind,
   registerRefresh,
@@ -111,8 +183,21 @@ export function LibrarySection({
   ) => () => void;
 }) {
   const { t, i18n } = useTranslation();
+  // Observe the existing settings cache; this does not read or write settings.
+  const routingSettings = useQuery({
+    queryKey: ["settings"],
+    queryFn: settingsApi.get,
+    enabled: false,
+  }).data;
+  const routingKey = JSON.stringify([
+    routingSettings?.claudeConfigDir,
+    routingSettings?.codexConfigDir,
+    routingSettings?.geminiConfigDir,
+    routingSettings?.opencodeConfigDir,
+    routingSettings?.hermesConfigDir,
+  ]);
   const query = useQuery({
-    queryKey: ["library", kind],
+    queryKey: ["library", kind, routingKey],
     queryFn: () => libraryApi.list(kind),
     retry: false,
   });
@@ -124,19 +209,36 @@ export function LibrarySection({
     "friendlyMcp",
     createMcpDraft,
   );
-  const [newMcpId] = useDraftState(draftStore, "newMcpId", () =>
-    crypto.randomUUID(),
+  const [newMcpId, setNewMcpId] = useDraftState(
+    draftStore,
+    "newMcpId",
+    () => "",
+  );
+  const [formTools, setFormTools] = useDraftState<string[]>(
+    draftStore,
+    "formTools",
+    () => [],
   );
   const [busy, setBusy] = useState(false);
   const running = useRef(false);
   const mounted = useRef(true);
   const trigger = useRef<HTMLElement | null>(null);
   const addButton = useRef<HTMLButtonElement>(null);
+  const toolbarMenu = useRef<HTMLButtonElement>(null);
+  const locateRequest = useRef(0);
+  const toolbarAction = useRef<"inventory" | "import">();
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [history, setHistory] = useState(false);
   const [agentFilter, setAgentFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [sourceFilter, setSourceFilter] = useState("all");
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [located, setLocated] = useState<string>();
+  const [nativeMatchVerified, setNativeMatchVerified] = useState(false);
+  const [recipeMatches, setRecipeMatches] = useState<McpRecipeMatch[]>([]);
   const [sort, setSort] = useState("name");
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
@@ -145,10 +247,6 @@ export function LibrarySection({
   >({});
   const [batchTools, setBatchTools] = useState<string[]>([]);
   const [batches, setBatches] = useState<LibraryBatchPlan[]>([]);
-  const [nativeSnapshot, setNativeSnapshot] = useState<{
-    epoch: number;
-    inventory: LibraryInventory;
-  }>();
   const [checks, setChecks] = useState<
     Record<string, { state: string; checkedAtMs: number; toolsCount: number }>
   >({});
@@ -156,6 +254,7 @@ export function LibrarySection({
     mounted.current = true;
     return () => {
       mounted.current = false;
+      locateRequest.current++;
     };
   }, []);
   useEffect(
@@ -163,6 +262,7 @@ export function LibrarySection({
       registerRefresh(kind, async () => {
         const result = await query.refetch();
         if (result.error) throw result.error;
+        native.rescan();
       }),
     [kind, query.refetch, registerRefresh],
   );
@@ -177,6 +277,7 @@ export function LibrarySection({
       if (!mounted.current) return false;
       if (close) setView(null);
       await query.refetch();
+      native.rescan();
       onChanged();
       return true;
     } catch (e) {
@@ -188,11 +289,28 @@ export function LibrarySection({
     }
   }
   const open = (next: OpenViewBody, event: { currentTarget: HTMLElement }) => {
+    locateRequest.current++;
     trigger.current = event.currentTarget;
     setError("");
     setNotice("");
-    setDraftStore(new DraftStore());
-    setView({ ...next, epoch: query.data?.epoch ?? -1 });
+    const store = new DraftStore();
+    if (next.type === "edit" && "resource" in next && kind === "mcp")
+      store.values.set(
+        "friendlyMcp",
+        createMcpDraft({
+          name: next.resource.name,
+          transport: (next.resource as McpDefinition).transport as
+            | "stdio"
+            | "http"
+            | "sse",
+        }),
+      );
+    setDraftStore(store);
+    setView({
+      ...next,
+      epoch: query.data?.epoch ?? -1,
+      contextKey: definitionsKey,
+    });
   };
   useEffect(
     () =>
@@ -221,6 +339,210 @@ export function LibrarySection({
     Number.isSafeInteger(data?.epoch) && (data?.epoch ?? -1) >= 0;
   const rows: Resource[] =
     data?.instructions ?? data?.servers ?? data?.skills ?? [];
+  const active = useInteractionActive();
+  const definitionsKey =
+    rows
+      .map(
+        (row) =>
+          `${row.id}:${row.revision}:${"targets" in row ? row.targets.map((target) => `${target.toolId}:${target.path}:${target.available}`).join(",") : ""}`,
+      )
+      .sort()
+      .join("|") +
+    routingKey +
+    JSON.stringify(
+      data?.targets?.map((target) => [
+        target.toolId,
+        target.path,
+        target.available,
+      ]),
+    );
+  const native = useLibraryInventory(kind, data?.epoch, definitionsKey, active);
+  const observed = (id: string) => [
+    ...new Set(
+      (native.inventory?.entries ?? [])
+        .filter((entry) => entry.matchedResourceIds.includes(id))
+        .flatMap((entry) => entry.sources.map((source) => source.toolId)),
+    ),
+  ];
+  const recipeGeneration = useRef(0);
+  useEffect(() => {
+    const generation = ++recipeGeneration.current;
+    setRecipeMatches([]);
+    setNativeMatchVerified(false);
+    if (!writable) return;
+    const language =
+      i18n.resolvedLanguage?.split("-")[0] ?? i18n.language.split("-")[0];
+    const mcpRecipes = LIBRARY_RECOMMENDATIONS.filter(
+      (recipe) => recipe.kind === "mcp",
+    ).map((recipe) => ({
+      recipeId: recipe.id,
+      name: recipe.name,
+      definition: recipeDefinition(recipe.initialDraft),
+    }));
+    const builtins = LIBRARY_RECOMMENDATIONS.filter(
+      (recipe): recipe is Exclude<LibraryRecommendation, { kind: "mcp" }> =>
+        recipe.kind === kind && recipe.kind !== "mcp",
+    ).map((recipe) =>
+      recipe.kind === "instructions"
+        ? {
+            recipeId: recipe.id,
+            content:
+              recipe.contentByLanguage[
+                language === "ja" ? "ja" : language === "en" ? "en" : "zh"
+              ],
+          }
+        : {
+            recipeId: recipe.id,
+            repoOwner: recipe.repository.owner,
+            repoName: recipe.repository.name,
+            directory: recipe.repository.directory,
+          },
+    );
+    const match = (ticket: string | undefined) =>
+      kind === "mcp"
+        ? libraryApi.matchMcpRecipes(mcpRecipes, ticket, data!.epoch)
+        : libraryApi.matchBuiltinRecipes(kind, builtins, ticket, data!.epoch);
+    const ticket = native.inventory?.ticketId;
+    void match(ticket)
+      .then((value) => {
+        if (generation === recipeGeneration.current && Array.isArray(value)) {
+          setRecipeMatches(value);
+          setNativeMatchVerified(!!ticket);
+        }
+      })
+      .catch(async () => {
+        if (!ticket) return;
+        try {
+          const value = await match(undefined);
+          if (generation === recipeGeneration.current && Array.isArray(value))
+            setRecipeMatches(value);
+        } catch {
+          /* Optional matching is unavailable on older backends. */
+        }
+      });
+    return () => {
+      recipeGeneration.current++;
+    };
+  }, [
+    kind,
+    data?.epoch,
+    definitionsKey,
+    native.inventory?.ticketId,
+    i18n.language,
+  ]);
+  useEffect(() => {
+    setPending((previous) =>
+      Object.fromEntries(
+        Object.entries(previous).filter(([id, delta]) =>
+          rows.some((row) => row.id === id && row.revision === delta.revision),
+        ),
+      ),
+    );
+  }, [definitionsKey, data?.epoch]);
+  const lastEpoch = useRef(data?.epoch);
+  useEffect(() => {
+    if (lastEpoch.current !== undefined && lastEpoch.current !== data?.epoch) {
+      setPending({});
+      setSelected(new Set());
+      setChecks({});
+    }
+    lastEpoch.current = data?.epoch;
+  }, [data?.epoch]);
+  const viewStale =
+    !!view &&
+    (view.epoch !== data?.epoch ||
+      ("resource" in view &&
+        view.resource.revision !== undefined &&
+        view.resource.revision > 0 &&
+        !rows.some(
+          (row) =>
+            row.id === view.resource.id &&
+            row.revision === view.resource.revision,
+        )));
+  const sourceValid =
+    view?.type !== "source" ||
+    (view.epoch === data?.epoch &&
+      view.contextKey === definitionsKey &&
+      view.ticketId === native.inventory?.ticketId);
+  const compareValid =
+    view?.type !== "compare" ||
+    (view.epoch === data?.epoch &&
+      view.contextKey === definitionsKey &&
+      view.subjects.every(
+        (item) =>
+          item.subject.kind !== "native" ||
+          item.subject.ticketId === native.inventory?.ticketId,
+      ));
+  const locationContext = `${definitionsKey}:${native.inventory?.ticketId}:${data?.epoch}:${active}`;
+  const latestLocationContext = useRef(locationContext);
+  latestLocationContext.current = locationContext;
+  async function locateNativeResource(
+    entry: import("@/lib/api/library").LibraryInventory["entries"][number],
+    id: string,
+  ) {
+    const source = native.inventory?.sources.find(
+      (source) =>
+        source.sourceRef &&
+        entry.sources.some(
+          (reference) =>
+            reference.sourceId === source.sourceId &&
+            reference.toolId === source.toolId,
+        ),
+    );
+    if (!source?.sourceRef || !native.inventory || data?.epoch === undefined) {
+      setError(t("library.workbench2.unsupported"));
+      return;
+    }
+    const context = locationContext;
+    const request = ++locateRequest.current;
+    try {
+      const detail = await libraryApi.inventorySource(
+        native.inventory.ticketId,
+        entry.entryId,
+        source.sourceRef,
+        data.epoch,
+      );
+      if (
+        context !== latestLocationContext.current ||
+        request !== locateRequest.current ||
+        !mounted.current
+      )
+        return;
+      if (!detail.matchedResourceIds.includes(id))
+        throw new Error("library.inventoryChanged");
+      locateResource(id);
+    } catch {
+      if (
+        context === latestLocationContext.current &&
+        request === locateRequest.current
+      ) {
+        setError(t("library.workbench2.sourceUnconfirmed"));
+        native.rescan();
+      }
+    }
+  }
+  function locateResource(id: string) {
+    if (!active || !mounted.current) return;
+    const row = rows.find((row) => row.id === id);
+    if (!row) return;
+    setView(null);
+    setSearch("");
+    setAgentFilter("all");
+    setStatusFilter("all");
+    setSourceFilter("all");
+    setLocated(id);
+    setExpandedGroups((previous) =>
+      new Set(previous).add(row.name.toLocaleLowerCase()),
+    );
+    const intentContext = locationContext;
+    requestAnimationFrame(() => {
+      if (!mounted.current || intentContext !== latestLocationContext.current)
+        return;
+      const element = document.getElementById(`library-resource-${id}`);
+      element?.scrollIntoView?.({ block: "center", behavior: "smooth" });
+      element?.focus({ preventScroll: true });
+    });
+  }
   const targets = (row: Resource) =>
     "targets" in row
       ? row.targets
@@ -247,14 +569,36 @@ export function LibrarySection({
       const rowTargets = targets(row);
       const text = [
         row.name,
+        "serviceHost" in row ? row.serviceHost : "",
         "description" in row ? row.description : "",
         "repository" in row ? row.repository : "",
+        ...targets(row)
+          .filter((target) => target.desired || target.readable)
+          .map((target) => toolLabel(target.toolId, t)),
+        ...(native.inventory?.entries ?? [])
+          .filter((entry) => entry.matchedResourceIds.includes(row.id))
+          .map((entry) =>
+            [
+              entry.summary,
+              ...entry.sources.map((source) => toolLabel(source.toolId, t)),
+            ].join(" "),
+          ),
+        ...recipeMatches
+          .filter((match) => match.exactResourceIds.includes(row.id))
+          .map((match) => {
+            const recipe = LIBRARY_RECOMMENDATIONS.find(
+              (recipe) => recipe.id === match.recipeId,
+            );
+            return recipe ? t(recipe.descriptionKey) : "";
+          }),
       ]
         .join(" ")
         .toLocaleLowerCase();
       return (
+        sourceFilter !== "native" &&
         text.includes(search.trim().toLocaleLowerCase()) &&
         (agentFilter === "all" ||
+          observed(row.id).includes(agentFilter) ||
           rowTargets.some(
             (target) =>
               target.toolId === agentFilter &&
@@ -283,6 +627,11 @@ export function LibrarySection({
             ) || a.name.localeCompare(b.name)
           : a.name.localeCompare(b.name),
     );
+  const rowGroups = new Map<string, Resource[]>();
+  for (const row of filtered) {
+    const key = row.name.toLocaleLowerCase();
+    rowGroups.set(key, [...(rowGroups.get(key) ?? []), row]);
+  }
   const toggleTarget = (row: Resource, target: ResourceTarget) =>
     setPending((previous) => {
       const change = previous[row.id] ?? {
@@ -318,6 +667,15 @@ export function LibrarySection({
     }),
   );
   const selectedRows = rows.filter((row) => selected.has(row.id));
+  const formTargets =
+    data?.targets ??
+    (rows.length && "targets" in rows[0] ? rows[0].targets : []);
+  const identifier =
+    newMcpId ||
+    createMcpIdentifier(
+      mcpDraft.name,
+      rows.map((row) => row.id),
+    );
   const resource = view && "resource" in view ? view.resource : undefined;
   async function nextAfterSave(resourceId: string, intent: "draft" | "apply") {
     if (intent === "draft") {
@@ -337,12 +695,21 @@ export function LibrarySection({
             desired: target.desiredResourceId === row.id,
           }));
     setDraftStore(new DraftStore());
-    setView({
-      type: "targets",
-      resource: row,
-      targets: nextTargets,
-      epoch: next.epoch,
-    });
+    if (kind === "mcp" && formTools.length)
+      setView({
+        type: "batch",
+        resources: [{ resourceId: row.id, expectedRevision: row.revision! }],
+        tools: formTools,
+        action: "apply",
+        epoch: next.epoch,
+      });
+    else
+      setView({
+        type: "targets",
+        resource: row,
+        targets: nextTargets,
+        epoch: next.epoch,
+      });
   }
   function chooseRecommendation(recipe: LibraryRecommendation) {
     const next = new DraftStore();
@@ -376,7 +743,11 @@ export function LibrarySection({
       <div className="flex flex-wrap items-center gap-2">
         <Input
           value={search}
-          onChange={(event) => setSearch(event.target.value)}
+          onChange={(event) => {
+            locateRequest.current++;
+            setLocated(undefined);
+            setSearch(event.target.value);
+          }}
           aria-label={t("library.search")}
           placeholder={t("library.search")}
           className="h-7 min-w-[160px] max-w-xs flex-1"
@@ -384,7 +755,10 @@ export function LibrarySection({
         <MenuSelect
           aria-label={t("library.workbench.agentFilter")}
           value={agentFilter}
-          onChange={setAgentFilter}
+          onChange={(value) => {
+            locateRequest.current++;
+            setAgentFilter(value);
+          }}
           options={[
             { value: "all", label: t("library.workbench.allAgents") },
             ...["claude", "codex", "gemini", "opencode", "hermes"].map(
@@ -393,9 +767,25 @@ export function LibrarySection({
           ]}
         />
         <MenuSelect
+          aria-label={t("library.workbench2.sourceFilter")}
+          value={sourceFilter}
+          onChange={(value) => {
+            locateRequest.current++;
+            setSourceFilter(value);
+          }}
+          options={[
+            { value: "all", label: t("library.workbench2.allSources") },
+            { value: "library", label: t("library.workbench2.libraryOnly") },
+            { value: "native", label: t("library.workbench2.nativeOnly") },
+          ]}
+        />
+        <MenuSelect
           aria-label={t("library.workbench.statusFilter")}
           value={statusFilter}
-          onChange={setStatusFilter}
+          onChange={(value) => {
+            locateRequest.current++;
+            setStatusFilter(value);
+          }}
           options={["all", "applied", "draft", "attention"].map((value) => ({
             value,
             label: t(`library.workbench.filter.${value}`),
@@ -404,7 +794,10 @@ export function LibrarySection({
         <MenuSelect
           aria-label={t("library.workbench.sort")}
           value={sort}
-          onChange={setSort}
+          onChange={(value) => {
+            locateRequest.current++;
+            setSort(value);
+          }}
           options={[
             { value: "name", label: "A → Z" },
             { value: "reverse", label: "Z → A" },
@@ -432,24 +825,59 @@ export function LibrarySection({
           disabled={busy || !writable}
           onClick={(event) => open({ type: "new" }, event)}
         >
-          {t(kind === "skills" ? "library.addSkill" : "library.add")}
+          {t(
+            kind === "mcp"
+              ? "library.workbench2.addMcp"
+              : kind === "skills"
+                ? "library.addSkill"
+                : "library.add",
+          )}
         </Button>
-        <Button
-          variant="secondary"
-          disabled={busy || !writable}
-          onClick={(event) => open({ type: "inventory" }, event)}
-        >
-          {t("library.workbench.importNative")}
-        </Button>
-        {kind === "instructions" && (
-          <Button
-            variant="ghost"
-            disabled={busy || !writable}
-            onClick={(event) => open({ type: "import" }, event)}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              ref={toolbarMenu}
+              variant="ghost"
+              size="icon"
+              aria-label={t("library.workbench2.more")}
+            >
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            onCloseAutoFocus={(event) => {
+              event.preventDefault();
+              const action = toolbarAction.current;
+              toolbarAction.current = undefined;
+              if (action && toolbarMenu.current) {
+                const element = toolbarMenu.current;
+                queueMicrotask(() =>
+                  open({ type: action }, { currentTarget: element }),
+                );
+              } else toolbarMenu.current?.focus();
+            }}
           >
-            {t("library.importMarkdown")}
-          </Button>
-        )}
+            <DropdownMenuItem
+              disabled={busy || !writable}
+              onSelect={() => {
+                toolbarAction.current = "inventory";
+              }}
+            >
+              {t("library.workbench.importNative")}
+            </DropdownMenuItem>
+            {kind === "instructions" && (
+              <DropdownMenuItem
+                disabled={busy || !writable}
+                onSelect={() => {
+                  toolbarAction.current = "import";
+                }}
+              >
+                {t("library.importMarkdown")}
+              </DropdownMenuItem>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
       {data && !writable && (
         <p role="status" className="text-ctl text-warn">
@@ -479,7 +907,7 @@ export function LibrarySection({
           {notice}
         </p>
       )}
-      {data && (
+      {data && sourceFilter !== "native" && (
         <ListCard>
           <ListHead>
             {t("library.workbench.inLibrary")} · {rows.length}
@@ -547,187 +975,191 @@ export function LibrarySection({
           )}
           {filtered.map((row, index) => (
             <Fragment key={row.id}>
-              {kind === "skills" &&
-                sort === "source" &&
-                (index === 0 ||
-                  sourceName(row) !== sourceName(filtered[index - 1])) && (
-                  <div className="border-b border-line bg-pill/40 px-4 py-2">
-                    <h3 className="text-ctl font-medium text-ink-muted">
-                      {sourceName(row)}
-                    </h3>
-                  </div>
+              {kind === "mcp" &&
+                rowGroups.get(row.name.toLocaleLowerCase())!.length > 1 &&
+                rowGroups.get(row.name.toLocaleLowerCase())![0].id ===
+                  row.id && (
+                  <ListRow className="justify-between">
+                    <Button
+                      variant="ghost"
+                      aria-expanded={
+                        expandedGroups.has(row.name.toLocaleLowerCase()) ||
+                        !!search
+                      }
+                      onClick={() =>
+                        setExpandedGroups((previous) => {
+                          const next = new Set(previous);
+                          const key = row.name.toLocaleLowerCase();
+                          if (next.has(key)) next.delete(key);
+                          else next.add(key);
+                          return next;
+                        })
+                      }
+                    >
+                      {t("library.workbench2.variants", {
+                        name: row.name,
+                        count: rowGroups.get(row.name.toLocaleLowerCase())!
+                          .length,
+                      })}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      onClick={(event) =>
+                        open(
+                          {
+                            type: "compare",
+                            subjects: rowGroups
+                              .get(row.name.toLocaleLowerCase())!
+                              .map((item) => ({
+                                name: `${item.name} · ${item.id}`,
+                                subject: {
+                                  kind: "resource",
+                                  resourceId: item.id,
+                                  expectedRevision: item.revision!,
+                                },
+                              })),
+                          },
+                          event,
+                        )
+                      }
+                    >
+                      {t("library.workbench2.compare")}
+                    </Button>
+                  </ListRow>
                 )}
-              <LibraryResourceRow
-                key={row.id}
-                kind={kind}
-                row={row}
-                targets={targets(row)}
-                busy={busy}
-                writable={writable}
-                selecting={selecting}
-                selected={selected.has(row.id)}
-                onSelected={(checked) =>
-                  setSelected((previous) => {
-                    const next = new Set(previous);
-                    if (checked) next.add(row.id);
-                    else next.delete(row.id);
-                    return next;
-                  })
-                }
-                delta={pending[row.id]}
-                check={checks[`${data?.epoch}:${row.id}:${row.revision}`]}
-                onToggle={(target) => toggleTarget(row, target)}
-                onAction={(type, element) => {
-                  if (type === "export") {
-                    void run(() => libraryApi.exportSelected(kind, [row.id]));
-                    return;
-                  }
-                  if (type === "copy" && kind === "instructions")
-                    open(
-                      {
-                        type: "edit",
-                        resource: {
-                          ...(row as InstructionSet),
-                          id: crypto.randomUUID(),
-                          name: t("library.copyName", { name: row.name }),
-                          revision: 0,
-                        },
-                        targets: [],
-                      },
-                      { currentTarget: element },
-                    );
-                  else
-                    open(
-                      { type, resource: row, targets: targets(row) },
-                      { currentTarget: element },
-                    );
-                }}
-              />
+              {(kind !== "mcp" ||
+                !!search ||
+                expandedGroups.has(row.name.toLocaleLowerCase()) ||
+                rowGroups.get(row.name.toLocaleLowerCase())!.length === 1) && (
+                <Fragment>
+                  {kind === "skills" &&
+                    sort === "source" &&
+                    (index === 0 ||
+                      sourceName(row) !== sourceName(filtered[index - 1])) && (
+                      <div className="border-b border-line bg-pill/40 px-4 py-2">
+                        <h3 className="text-ctl font-medium text-ink-muted">
+                          {sourceName(row)}
+                        </h3>
+                      </div>
+                    )}
+                  <LibraryResourceRow
+                    key={row.id}
+                    kind={kind}
+                    row={row}
+                    located={located === row.id}
+                    observedTools={observed(row.id)}
+                    recipeId={
+                      recipeMatches.find((match) =>
+                        match.exactResourceIds.includes(row.id),
+                      )?.recipeId
+                    }
+                    targets={targets(row)}
+                    busy={busy}
+                    writable={writable}
+                    selecting={selecting}
+                    selected={selected.has(row.id)}
+                    onSelected={(checked) =>
+                      setSelected((previous) => {
+                        const next = new Set(previous);
+                        if (checked) next.add(row.id);
+                        else next.delete(row.id);
+                        return next;
+                      })
+                    }
+                    delta={pending[row.id]}
+                    check={checks[`${data?.epoch}:${row.id}:${row.revision}`]}
+                    onToggle={(target) => toggleTarget(row, target)}
+                    onAction={(type, element) => {
+                      if (type === "export") {
+                        void run(() =>
+                          libraryApi.exportSelected(kind, [row.id]),
+                        );
+                        return;
+                      }
+                      if (type === "copy" && kind === "instructions")
+                        open(
+                          {
+                            type: "edit",
+                            resource: {
+                              ...(row as InstructionSet),
+                              id: crypto.randomUUID(),
+                              name: t("library.copyName", { name: row.name }),
+                              revision: 0,
+                            },
+                            targets: [],
+                          },
+                          { currentTarget: element },
+                        );
+                      else
+                        open(
+                          { type, resource: row, targets: targets(row) },
+                          { currentTarget: element },
+                        );
+                    }}
+                  />
+                </Fragment>
+              )}
             </Fragment>
           ))}
         </ListCard>
       )}
-      {kind !== "instructions" && data && (
-        <section
-          aria-label={t("library.workbench.inTools")}
-          className="space-y-2"
-        >
-          <div className="flex flex-wrap items-center justify-between gap-2 px-1 pt-2">
-            <h3 className="text-ctl font-medium">
-              {t("library.workbench.inTools")}
-            </h3>
-            <Button
-              variant="ghost"
-              disabled={busy}
-              onClick={(event) => open({ type: "inventory" }, event)}
-            >
-              {t(
-                nativeSnapshot && nativeSnapshot.epoch === data.epoch
-                  ? "library.workbench.rescan"
-                  : "library.workbench.scanNative",
-              )}
-            </Button>
-          </div>
-          {nativeSnapshot && nativeSnapshot.epoch === data.epoch ? (
-            <>
-              <ListCard>
-                {nativeSnapshot.inventory.entries
-                  .filter((entry) => !entry.matchedResourceIds.length)
-                  .map((entry) => (
-                    <ListRow key={entry.entryId} className="flex-wrap gap-3">
-                      <div className="min-w-0 flex-1">
-                        <p
-                          className="truncate text-ui font-medium"
-                          title={entry.name}
-                        >
-                          {entry.name}
-                        </p>
-                        <p
-                          className="truncate text-note text-ink-muted"
-                          title={inventoryEntryDescription(
-                            nativeSnapshot.inventory,
-                            entry,
-                            t,
-                          )}
-                        >
-                          {inventoryEntryDescription(
-                            nativeSnapshot.inventory,
-                            entry,
-                            t,
-                          )}
-                        </p>
-                      </div>
-                      <div className="flex flex-wrap gap-1">
-                        {[
-                          ...new Set(
-                            entry.sources.map((source) => source.toolId),
-                          ),
-                        ].map((tool) => (
-                          <span key={tool} title={toolLabel(tool, t)}>
-                            <ToolBadge
-                              toolId={tool}
-                              size={22}
-                              variant="plain"
-                            />
-                          </span>
-                        ))}
-                      </div>
-                      <Button
-                        variant="secondary"
-                        disabled={busy}
-                        aria-label={t("library.workbench.importNamed", {
-                          name: entry.name,
-                        })}
-                        onClick={(event) =>
-                          open(
-                            {
-                              type: "inventory",
-                              selectionHint: {
-                                name: entry.name,
-                                variant: entry.variant,
-                                tools: entry.sources.map(
-                                  (source) => source.toolId,
-                                ),
-                              },
-                            },
-                            event,
-                          )
-                        }
-                      >
-                        {t("library.importDraft")}
-                      </Button>
-                    </ListRow>
-                  ))}
-                {!nativeSnapshot.inventory.entries.some(
-                  (entry) => !entry.matchedResourceIds.length,
-                ) && (
-                  <ListRow className="text-ctl text-ink-muted">
-                    {t("library.workbench.noNativeResources")}
-                  </ListRow>
-                )}
-              </ListCard>
-              <p className="px-1 text-note text-ink-muted">
-                {t("library.workbench.scanSnapshot")}
-              </p>
-              {nativeSnapshot.inventory.sources.some(
-                (source) => !["ready", "missing"].includes(source.state),
-              ) && (
-                <p role="status" className="px-1 text-note text-warn">
-                  {t("library.workbench.scanIncomplete")}
-                </p>
-              )}
-            </>
-          ) : (
-            <p className="px-1 text-note text-ink-muted">
-              {t("library.workbench.nativeDraftHint")}
-            </p>
-          )}
-        </section>
+      {data && sourceFilter !== "library" && (
+        <LibraryNativeSources
+          inventory={native.inventory}
+          loading={native.loading}
+          failed={!!native.error || native.expired}
+          search={search}
+          tool={agentFilter}
+          status={statusFilter}
+          busy={busy}
+          onRescan={native.rescan}
+          onImport={(entry, element) =>
+            open(
+              {
+                type: "inventory",
+                selectionHint: {
+                  name: entry.name,
+                  variant: entry.variant,
+                  tools: entry.sources.map((source) => source.toolId),
+                },
+              },
+              { currentTarget: element },
+            )
+          }
+          onSource={(entry, sourceRef, element) =>
+            open(
+              {
+                type: "source",
+                ticketId: native.inventory!.ticketId,
+                entryId: entry.entryId,
+                sourceRef,
+              },
+              { currentTarget: element },
+            )
+          }
+          onLocate={(entry, id) => void locateNativeResource(entry, id)}
+          onCompare={(entries, element) =>
+            open(
+              {
+                type: "compare",
+                subjects: entries.map((entry) => ({
+                  name: `${entry.name} · ${entry.variant ?? entry.sources.map((source) => toolLabel(source.toolId, t)).join(", ")}`,
+                  subject: {
+                    kind: "native",
+                    ticketId: native.inventory!.ticketId,
+                    entryId: entry.entryId,
+                  },
+                })),
+              },
+              { currentTarget: element },
+            )
+          }
+        />
       )}
       {kind === "instructions" && data && (
         <InstructionOverview
           data={data}
-          busy={busy || !writable}
+          busy={busy || !writable || viewStale}
           onManage={(set, event) =>
             open(
               { type: "targets", resource: set, targets: targets(set) },
@@ -1017,15 +1449,152 @@ export function LibrarySection({
             </DialogDescription>
           </DialogHeader>
           <div className="min-h-0 space-y-3 overflow-y-auto px-[18px] py-3">
+            {viewStale && (
+              <p role="alert" className="text-ctl text-warn">
+                {t("library.workbench2.staleEdit")}
+              </p>
+            )}
             {error && (
               <p role="alert" className="text-ctl text-danger">
                 {error}
               </p>
             )}
+            {view?.type === "multiResult" && (
+              <LibraryMultiSaveResult
+                result={view}
+                busy={busy || !writable || view.epoch !== data?.epoch}
+                targets={formTargets}
+                existingIds={rows.map((row) => row.id)}
+                onRetry={(draft, index) =>
+                  run(async () => {
+                    await libraryApi.saveMcp(
+                      draft.identifier!,
+                      draft.name,
+                      undefined,
+                      mcpDraftToEdits(draft),
+                      view.epoch,
+                    );
+                    setView({
+                      ...view,
+                      saved: [
+                        ...view.saved,
+                        { id: draft.identifier!, name: draft.name },
+                      ],
+                      remaining: view.remaining.filter(
+                        (_, item) => item !== index,
+                      ),
+                    });
+                  })
+                }
+                onPreview={() =>
+                  void run(async () => {
+                    const current = await libraryApi.list("mcp");
+                    setView({
+                      type: "batch",
+                      resources: (current.servers ?? [])
+                        .filter((row) =>
+                          view.saved.some((item) => item.id === row.id),
+                        )
+                        .map((row) => ({
+                          resourceId: row.id,
+                          expectedRevision: row.revision,
+                        })),
+                      tools: view.tools,
+                      action: "apply",
+                      epoch: current.epoch,
+                    });
+                  })
+                }
+              />
+            )}
+            {(!sourceValid || !compareValid) && (
+              <p role="alert" className="text-ctl text-warn">
+                {t("library.workbench2.sourceUnconfirmed")}
+              </p>
+            )}
+            {sourceValid && view?.type === "source" && (
+              <LibrarySourceDetail
+                key={`${view.ticketId}:${view.entryId}:${view.sourceRef}`}
+                ticketId={view.ticketId}
+                entryId={view.entryId}
+                sourceRef={view.sourceRef}
+                epoch={view.epoch}
+                onBack={close}
+                onLocate={locateResource}
+              />
+            )}
+            {compareValid && view?.type === "compare" && (
+              <LibraryMcpCompare
+                key={JSON.stringify(view.subjects)}
+                subjects={view.subjects}
+                epoch={view.epoch}
+              />
+            )}
             {view?.type === "discover" && (
               <LibraryDiscover
                 kind={kind}
                 busy={busy}
+                matches={Object.fromEntries(
+                  recipeMatches
+                    .filter(
+                      (match) =>
+                        match.exactResourceIds.length ||
+                        match.nativeEntryIds.length ||
+                        match.similarNativeEntryIds.length ||
+                        nativeMatchVerified,
+                    )
+                    .map((match) => [
+                      match.recipeId,
+                      match.exactResourceIds.length
+                        ? {
+                            state: "exactLibrary",
+                            resourceId: match.exactResourceIds[0],
+                          }
+                        : match.nativeEntryIds.length ||
+                            match.similarNativeEntryIds.length
+                          ? {
+                              state: "nativeOther",
+                              entryId: [
+                                ...match.nativeEntryIds,
+                                ...match.similarNativeEntryIds,
+                              ][0],
+                            }
+                          : { state: "none" },
+                    ]),
+                )}
+                onLocateExisting={(match) => {
+                  if (match.state === "exactLibrary")
+                    locateResource(match.resourceId);
+                  else {
+                    const entry = native.inventory?.entries.find(
+                      (entry) => entry.entryId === match.entryId,
+                    );
+                    const source =
+                      entry &&
+                      native.inventory?.sources.find(
+                        (source) =>
+                          source.sourceRef &&
+                          entry.sources.some(
+                            (reference) =>
+                              reference.sourceId === source.sourceId,
+                          ),
+                      );
+                    if (entry && source?.sourceRef)
+                      setView({
+                        type: "source",
+                        ticketId: native.inventory!.ticketId,
+                        entryId: entry.entryId,
+                        sourceRef: source.sourceRef,
+                        epoch: data!.epoch,
+                        contextKey: definitionsKey,
+                      });
+                    else {
+                      setView(null);
+                      setSourceFilter("native");
+                      setSearch(entry?.name ?? "");
+                    }
+                  }
+                }}
                 onChoose={chooseRecommendation}
                 onOpenSource={(url) =>
                   void settingsApi
@@ -1038,7 +1607,7 @@ export function LibrarySection({
               <div className="space-y-3">
                 <p className="text-ui font-medium">{view.recipe.name}</p>
                 <p className="text-ctl text-ink-muted">
-                  {t("library.discover.pinNote")}
+                  {t("library.discover2.selectedSkillNote")}
                 </p>
                 <p className="text-ctl">
                   {view.recipe.dependencyKeys.map((key) => t(key)).join(" ")}
@@ -1103,12 +1672,9 @@ export function LibrarySection({
                 kind={kind}
                 epoch={view.epoch}
                 selectionHint={view.selectionHint}
-                onScanned={(inventory) =>
-                  setNativeSnapshot({ epoch: view.epoch, inventory })
-                }
                 onChanged={async () => {
-                  setNativeSnapshot(undefined);
                   await query.refetch();
+                  native.rescan();
                   onChanged();
                 }}
                 onBusyChange={(value) => {
@@ -1131,6 +1697,7 @@ export function LibrarySection({
                 }}
                 onChanged={async (plan) => {
                   await query.refetch();
+                  native.rescan();
                   onChanged();
                   if (
                     ["applied", "partial", "cancelled", "needsReview"].includes(
@@ -1215,7 +1782,7 @@ export function LibrarySection({
                   initial={resource as InstructionSet | undefined}
                   importMode={view.type === "import"}
                   onDiscard={close}
-                  busy={busy || !writable}
+                  busy={busy || !writable || viewStale}
                   onSave={(set, imported) =>
                     run(
                       () =>
@@ -1267,7 +1834,7 @@ export function LibrarySection({
               <McpDuplicate
                 store={draftStore}
                 initial={view.resource as McpDefinition}
-                busy={busy || !writable}
+                busy={busy || !writable || viewStale}
                 onSave={(id, name) =>
                   run(
                     () =>
@@ -1288,7 +1855,7 @@ export function LibrarySection({
                 store={draftStore}
                 server={view.resource as McpDefinition}
                 epoch={view.epoch}
-                readOnly={!writable}
+                readOnly={!writable || viewStale}
                 onResult={(result, checkedAtMs) =>
                   setChecks((previous) => ({
                     ...previous,
@@ -1306,111 +1873,186 @@ export function LibrarySection({
                 }}
               />
             )}
-            {view?.type === "new" && kind === "mcp" && (
-              <LibraryMcpForm
-                value={mcpDraft}
-                onChange={setMcpDraft}
-                busy={busy || !writable}
-                onSave={(draft, intent) =>
-                  run(async () => {
-                    await libraryApi.saveMcp(
-                      newMcpId,
-                      draft.name,
-                      undefined,
-                      mcpDraftToEdits(draft),
-                      view.epoch,
-                    );
-                    await nextAfterSave(newMcpId, intent);
-                  })
-                }
-                onAdvanced={(draft) => {
-                  let edits: import("@/lib/api/library").FieldEdit[];
-                  try {
-                    edits = mcpDraftToEdits(draft);
-                  } catch {
-                    edits = [
-                      { path: ["type"], action: "set", value: draft.transport },
-                      ...(draft.transport === "stdio"
-                        ? [
-                            {
-                              path: ["command"],
-                              action: "set" as const,
-                              value: draft.command,
-                            },
-                            {
-                              path: ["args"],
-                              action: "set" as const,
-                              value: draft.argsText
-                                .split(/\r?\n/)
-                                .filter(Boolean),
-                            },
-                          ]
-                        : [
-                            {
-                              path: ["url"],
-                              action: "set" as const,
-                              value: draft.url,
-                            },
-                          ]),
-                      ...draft.environment
-                        .filter((pair) => pair.name)
-                        .map((pair) => ({
-                          path: ["env", pair.name],
-                          action: "set" as const,
-                          value: pair.value,
-                        })),
-                      ...draft.headers
-                        .filter((pair) => pair.name)
-                        .map((pair) => ({
-                          path: ["headers", pair.name],
-                          action: "set" as const,
-                          value: pair.value,
-                        })),
-                      ...(draft.advancedFields ?? []).map((field) => ({
-                        ...field,
-                        action: "set" as const,
-                      })),
-                    ];
-                  }
-                  draftStore.values.set("mcpId", newMcpId);
-                  draftStore.values.set("mcpName", draft.name);
-                  draftStore.values.set(
-                    "mcpFields",
-                    edits.map((edit, index) => ({
-                      ...edit,
-                      input: JSON.stringify(edit.value),
-                      key: String(index),
-                    })),
-                  );
-                  setView({ ...view, type: "advancedNew" });
-                }}
-              />
-            )}
-            {(view?.type === "advancedNew" || view?.type === "edit") &&
+            {(view?.type === "new" || view?.type === "edit") &&
               kind === "mcp" && (
-                <McpEditor
-                  store={draftStore}
-                  initial={resource as McpDefinition | undefined}
-                  busy={busy || !writable}
-                  onSave={(id, name, revision, edits) =>
-                    run(
-                      () =>
-                        libraryApi.saveMcp(
-                          id,
-                          name,
-                          revision,
-                          edits,
-                          view.epoch,
-                        ),
-                      true,
-                    )
+                <LibraryMcpForm
+                  value={mcpDraft}
+                  initial={
+                    view.type === "edit"
+                      ? (view.resource as McpDefinition)
+                      : undefined
+                  }
+                  identifier={
+                    view.type === "edit" ? view.resource.id : identifier
+                  }
+                  onIdentifierChange={setNewMcpId}
+                  existingIdentifiers={rows.map((row) => row.id)}
+                  targets={view.type === "edit" ? view.targets : formTargets}
+                  selectedTools={formTools}
+                  onToolsChange={setFormTools}
+                  onChange={setMcpDraft}
+                  onDiscover={() =>
+                    setView({ type: "discover", epoch: view.epoch })
+                  }
+                  onSaveEdits={(edits, intent) =>
+                    run(async () => {
+                      if (view.type !== "edit") return;
+                      await libraryApi.saveMcp(
+                        view.resource.id,
+                        mcpDraft.name,
+                        view.resource.revision,
+                        edits,
+                        view.epoch,
+                      );
+                      await nextAfterSave(view.resource.id, intent);
+                    })
+                  }
+                  onImportMany={(drafts, intent) =>
+                    run(async () => {
+                      const saved: { id: string; name: string }[] = [];
+                      const remaining: typeof drafts = [];
+                      for (const draft of drafts) {
+                        const id = draft.identifier!;
+                        try {
+                          await libraryApi.saveMcp(
+                            id,
+                            draft.name,
+                            undefined,
+                            mcpDraftToEdits(draft),
+                            view.epoch,
+                          );
+                          saved.push({ id, name: draft.name });
+                        } catch {
+                          remaining.push(draft);
+                        }
+                      }
+                      setView({
+                        type: "multiResult",
+                        saved,
+                        remaining,
+                        intent,
+                        tools: formTools,
+                        epoch: view.epoch,
+                      });
+                    })
+                  }
+                  busy={
+                    busy ||
+                    !writable ||
+                    view.epoch !== data?.epoch ||
+                    (view.type === "edit" &&
+                      !rows.some(
+                        (row) =>
+                          row.id === view.resource.id &&
+                          row.revision === view.resource.revision,
+                      ))
+                  }
+                  onSave={(draft, intent) =>
+                    run(async () => {
+                      setNewMcpId(identifier);
+                      await libraryApi.saveMcp(
+                        identifier,
+                        draft.name,
+                        undefined,
+                        mcpDraftToEdits(draft),
+                        view.epoch,
+                      );
+                      await nextAfterSave(
+                        draft.identifier ?? identifier,
+                        intent,
+                      );
+                    })
+                  }
+                  onAdvanced={
+                    view.type === "edit"
+                      ? undefined
+                      : (draft) => {
+                          let edits: import("@/lib/api/library").FieldEdit[];
+                          try {
+                            edits = mcpDraftToEdits(draft);
+                          } catch {
+                            edits = [
+                              {
+                                path: ["type"],
+                                action: "set",
+                                value: draft.transport,
+                              },
+                              ...(draft.transport === "stdio"
+                                ? [
+                                    {
+                                      path: ["command"],
+                                      action: "set" as const,
+                                      value: draft.command,
+                                    },
+                                    {
+                                      path: ["args"],
+                                      action: "set" as const,
+                                      value: draft.argsText
+                                        .split(/\r?\n/)
+                                        .filter(Boolean),
+                                    },
+                                  ]
+                                : [
+                                    {
+                                      path: ["url"],
+                                      action: "set" as const,
+                                      value: draft.url,
+                                    },
+                                  ]),
+                              ...draft.environment
+                                .filter((pair) => pair.name)
+                                .map((pair) => ({
+                                  path: ["env", pair.name],
+                                  action: "set" as const,
+                                  value: pair.value,
+                                })),
+                              ...draft.headers
+                                .filter((pair) => pair.name)
+                                .map((pair) => ({
+                                  path: ["headers", pair.name],
+                                  action: "set" as const,
+                                  value: pair.value,
+                                })),
+                              ...(draft.advancedFields ?? []).map((field) => ({
+                                ...field,
+                                action: "set" as const,
+                              })),
+                            ];
+                          }
+                          draftStore.values.set("mcpId", identifier);
+                          setNewMcpId(identifier);
+                          draftStore.values.set("mcpName", draft.name);
+                          draftStore.values.set(
+                            "mcpFields",
+                            edits.map((edit, index) => ({
+                              ...edit,
+                              input: JSON.stringify(edit.value),
+                              key: String(index),
+                            })),
+                          );
+                          setView({ ...view, type: "advancedNew" });
+                        }
                   }
                 />
               )}
+            {view?.type === "advancedNew" && kind === "mcp" && (
+              <McpEditor
+                store={draftStore}
+                initial={resource as McpDefinition | undefined}
+                busy={busy || !writable || viewStale}
+                onSave={(id, name, revision, edits) =>
+                  run(
+                    () =>
+                      libraryApi.saveMcp(id, name, revision, edits, view.epoch),
+                    true,
+                  )
+                }
+              />
+            )}
             {view?.type === "new" && kind === "skills" && (
               <SkillImporter
                 store={draftStore}
-                busy={busy || !writable}
+                busy={busy || !writable || viewStale}
                 onImport={(action) => run(action, true)}
               />
             )}
@@ -1419,7 +2061,7 @@ export function LibrarySection({
                 store={draftStore}
                 skill={view.resource as SkillDefinition}
                 epoch={view.epoch}
-                readOnly={!writable}
+                readOnly={!writable || viewStale}
                 externalBusy={busy}
                 onBusyChange={(value) => {
                   running.current = value;
@@ -1427,6 +2069,7 @@ export function LibrarySection({
                 }}
                 onChanged={async () => {
                   await query.refetch();
+                  native.rescan();
                   onChanged();
                 }}
               />
@@ -1442,7 +2085,7 @@ export function LibrarySection({
               <ResourceReview
                 store={draftStore}
                 externalBusy={busy}
-                readOnly={!writable}
+                readOnly={!writable || viewStale}
                 expectedEpoch={view.epoch}
                 kind={kind}
                 resource={view.resource}
@@ -1453,6 +2096,7 @@ export function LibrarySection({
                 }}
                 onChanged={async () => {
                   await query.refetch();
+                  native.rescan();
                   onChanged();
                 }}
               />
@@ -1461,7 +2105,7 @@ export function LibrarySection({
               <ResourceReview
                 store={draftStore}
                 externalBusy={busy}
-                readOnly={!writable}
+                readOnly={!writable || viewStale}
                 expectedEpoch={view.epoch}
                 kind={kind}
                 operation={view.operation}
@@ -1471,6 +2115,7 @@ export function LibrarySection({
                 }}
                 onChanged={async () => {
                   await query.refetch();
+                  native.rescan();
                   onChanged();
                 }}
               />

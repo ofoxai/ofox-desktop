@@ -16,12 +16,14 @@ export function LibraryTargets({
   name,
   targets,
   delta,
+  observedTools = [],
   busy,
   onToggle,
 }: {
   name: string;
   targets: ResourceTarget[];
   delta?: TargetDelta;
+  observedTools?: string[];
   busy: boolean;
   onToggle: (target: ResourceTarget) => void;
 }) {
@@ -55,8 +57,10 @@ export function LibraryTargets({
                   ? "applied"
                   : target.desired
                     ? "pending"
-                    : "unassigned";
-          const label = `${name} · ${toolLabel(target.toolId, t)} · ${t(`library.workbench.${state}`)}`;
+                    : observedTools.includes(target.toolId)
+                      ? "observed"
+                      : "unassigned";
+          const label = `${name} · ${toolLabel(target.toolId, t)} · ${t(state === "observed" ? "library.workbench2.observed" : `library.workbench.${state}`)}`;
           return (
             <Tooltip key={target.toolId}>
               <TooltipTrigger asChild>
@@ -107,6 +111,9 @@ export function LibraryTargets({
               </TooltipTrigger>
               <TooltipContent>
                 <p>{label}</p>
+                {state === "observed" && (
+                  <p>{t("library.workbench2.observedHint")}</p>
+                )}
                 {target.readers && target.readers.length > 1 && (
                   <p>
                     {t("library.readers", {

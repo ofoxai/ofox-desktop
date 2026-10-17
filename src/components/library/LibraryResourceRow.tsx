@@ -12,6 +12,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { LibraryTargets, type TargetDelta } from "./LibraryTargets";
+import { LibraryResourceIcon } from "./LibraryResourceIcon";
 import type { Resource } from "./LibrarySection";
 export function LibraryResourceRow({
   kind,
@@ -24,6 +25,9 @@ export function LibraryResourceRow({
   onSelected,
   delta,
   check,
+  observedTools = [],
+  located = false,
+  recipeId,
   onToggle,
   onAction,
 }: {
@@ -37,6 +41,9 @@ export function LibraryResourceRow({
   onSelected: (selected: boolean) => void;
   delta?: TargetDelta;
   check?: { state: string; checkedAtMs: number; toolsCount: number };
+  observedTools?: string[];
+  located?: boolean;
+  recipeId?: string;
   onToggle: (target: ResourceTarget) => void;
   onAction: (
     action:
@@ -85,19 +92,28 @@ export function LibraryResourceRow({
     summary || t("library.workbench.noSummary"),
     check && checkTime
       ? t("library.rowCheck.last", {
-          state: t(`library.mcpCheckState.${check.state}`, {
-            defaultValue: t("library.unknown"),
-          }),
+          state: t(
+            check.state === "blocked"
+              ? "library.workbench2.nativeCheck"
+              : `library.mcpCheckState.${check.state}`,
+            {
+              defaultValue: t("library.unknown"),
+            },
+          ),
           time: checkTime,
         })
-      : kind === "mcp"
-        ? t("library.rowCheck.notChecked")
-        : "",
+      : "",
   ]
     .filter(Boolean)
     .join(" · ");
   return (
-    <ListRow className="flex-wrap gap-x-3 gap-y-2 py-3">
+    <ListRow
+      id={`library-resource-${row.id}`}
+      data-testid={`library-resource-${row.id}`}
+      data-located={located}
+      tabIndex={-1}
+      className={`scroll-mt-24 flex-wrap gap-x-3 gap-y-2 py-3 outline-none ${located ? "bg-brand/5 ring-1 ring-inset ring-brand/40" : ""}`}
+    >
       {selecting && (
         <Checkbox
           checked={selected}
@@ -110,7 +126,15 @@ export function LibraryResourceRow({
         aria-hidden
         className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-pill text-ink-muted"
       >
-        <Icon className="h-5 w-5" />
+        {kind !== "instructions" ? (
+          <LibraryResourceIcon
+            recipeId={recipeId}
+            kind={kind}
+            className="h-9 w-9"
+          />
+        ) : (
+          <Icon className="h-5 w-5" />
+        )}
       </span>
       <div className="min-w-0 flex-1 basis-[180px]">
         <button
@@ -139,6 +163,7 @@ export function LibraryResourceRow({
         <LibraryTargets
           name={row.name}
           targets={targets}
+          observedTools={observedTools}
           delta={delta}
           busy={busy || !writable}
           onToggle={onToggle}

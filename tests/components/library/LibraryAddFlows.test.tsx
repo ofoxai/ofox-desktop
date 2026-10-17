@@ -14,6 +14,7 @@ import {
   LIBRARY_RECOMMENDATIONS,
 } from "@/components/library/libraryRecommendations";
 import { LIBRARY_ADD_COPY } from "@/components/library/libraryAddCopy";
+import { LIBRARY_MCP_COPY } from "@/components/library/libraryMcpCopy";
 import { invoke } from "@tauri-apps/api/core";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -23,6 +24,13 @@ beforeEach(() => {
     "zh",
     "translation",
     { library: LIBRARY_ADD_COPY.zh },
+    true,
+    true,
+  );
+  i18n.addResourceBundle(
+    "zh",
+    "translation",
+    { library: LIBRARY_MCP_COPY.zh },
     true,
     true,
   );
@@ -190,9 +198,11 @@ describe("friendly MCP form", () => {
       action: "set",
       value: "Bearer private-sentinel",
     });
-    expect(() => mcpDraftFromJson('{"mcpServers":{"a":{},"b":{}}}')).toThrow(
-      /^oneServer$/,
-    );
+    expect(() =>
+      mcpDraftFromJson(
+        '{"mcpServers":{"a":{"command":"a"},"b":{"command":"b"}}}',
+      ),
+    ).toThrow(/^oneServer$/);
   });
 
   it("saves a draft separately from preview and does not submit on transport selection", async () => {
@@ -209,7 +219,7 @@ describe("friendly MCP form", () => {
     fireEvent.change(screen.getByLabelText("服务器 URL"), {
       target: { value: "https://example.org/mcp" },
     });
-    await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+    await userEvent.click(screen.getByRole("button", { name: "保存到资源库" }));
     expect(save).toHaveBeenLastCalledWith(
       expect.objectContaining({
         transport: "http",
@@ -217,9 +227,7 @@ describe("friendly MCP form", () => {
       }),
       "draft",
     );
-    await userEvent.click(
-      screen.getByRole("button", { name: "选择工具并预览" }),
-    );
+    await userEvent.click(screen.getByRole("button", { name: "预览并应用" }));
     expect(save).toHaveBeenLastCalledWith(expect.anything(), "apply");
   });
 

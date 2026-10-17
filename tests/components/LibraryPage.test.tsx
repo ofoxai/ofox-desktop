@@ -15,7 +15,11 @@ import zh from "@/i18n/locales/zh.json";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { LibraryPage } from "@/components/library/LibraryPage";
 import { ShellProvider, useShell } from "@/components/shell/ShellContext";
-import { libraryApi, type LibraryData } from "@/lib/api/library";
+import {
+  libraryApi,
+  type LibraryData,
+  type LibraryKind,
+} from "@/lib/api/library";
 import type { McpCheckProgress, McpCheckResult } from "@/lib/api/library";
 import { promptsApi } from "@/lib/api/prompts";
 import { listen } from "@tauri-apps/api/event";
@@ -37,6 +41,16 @@ vi.mock("@/components/MarkdownEditor", () => ({
   ),
 }));
 let data: LibraryData;
+let scanSequence = 0;
+function emptyInventory(kind: LibraryKind) {
+  return {
+    ticketId: `empty-${kind}-${++scanSequence}`,
+    kind,
+    expiresAtMs: Date.now() + 600000,
+    sources: [],
+    entries: [],
+  };
+}
 const target = (toolId: string, desired = false, available = true) => ({
   toolId,
   path: `/fixture/${toolId}`,
@@ -81,8 +95,18 @@ async function rowAction(name: string) {
   return screen.findByRole("menuitem", { name });
 }
 
+async function toolbarAction(name: string) {
+  await userEvent.click(screen.getByRole("button", { name: "更多操作" }));
+  return screen.findByRole("menuitem", { name });
+}
+
 beforeEach(() => {
   HTMLElement.prototype.scrollIntoView = vi.fn();
+  scanSequence = 0;
+  vi.spyOn(libraryApi, "inventory").mockImplementation(async (kind) =>
+    emptyInventory(kind),
+  );
+  vi.spyOn(libraryApi, "matchMcpRecipes").mockResolvedValue([]);
   i18n.addResourceBundle("zh", "translation", zh, true, true);
   data = {
     epoch: 1,
@@ -167,6 +191,11 @@ it("loads only visited subpages and keeps a dirty editor through refresh", async
   mount();
   await screen.findByText("Shared");
   expect(libraryApi.list).toHaveBeenCalledTimes(1);
+  await waitFor(() =>
+    expect(libraryApi.inventory).toHaveBeenCalledWith("instructions"),
+  );
+  expect(libraryApi.inventory).not.toHaveBeenCalledWith("mcp");
+  expect(libraryApi.inventory).not.toHaveBeenCalledWith("skills");
   await userEvent.click(screen.getByRole("button", { name: "编辑 Shared" }));
   fireEvent.change(screen.getByLabelText("Markdown"), {
     target: { value: "Unsaved" },
@@ -180,12 +209,9 @@ it("loads only visited subpages and keeps a dirty editor through refresh", async
   fireEvent.click(screen.getByText("Refresh fixture"));
   await waitFor(() => expect(libraryApi.list).toHaveBeenCalledTimes(2));
   expect(screen.getByLabelText("Markdown")).toHaveValue("Unsaved");
-  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
-  expect(libraryApi.saveInstruction).toHaveBeenCalledWith(
-    expect.objectContaining({ content: "Unsaved", revision: 1 }),
-    1,
-    1,
-  );
+  expect(screen.getByRole("button", { name: "保存到资源库" })).toBeDisabled();
+  expect(screen.getByText("资源已变化，请关闭并重新打开。")).toBeVisible();
+  expect(libraryApi.saveInstruction).not.toHaveBeenCalled();
 });
 it("shows native instruction summaries even with no shared drafts without treating unknown as empty", async () => {
   data = {
@@ -476,7 +502,7 @@ it("previews the complete desired set and lets an unavailable prior target be wi
   mount();
   await screen.findByText("Shared");
   await userEvent.click(
-    screen.getByRole("button", { name: "分配目标 Shared" }),
+    screen.getByRole("button", { name: "将 Shared 应用到工具" }),
   );
   const dialog = screen.getByRole("dialog");
   expect(
@@ -496,7 +522,7 @@ it("previews the complete desired set and lets an unavailable prior target be wi
     1,
   );
 });
-it("saves a name edit using original MCP field refs without sending masked values", async () => {
+it("saves a name-only MCP edit without replacing saved private fields", async () => {
   mount();
   await screen.findByText("Shared");
   await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
@@ -505,12 +531,12 @@ it("saves a name edit using original MCP field refs without sending masked value
   fireEvent.change(screen.getByLabelText("名称"), {
     target: { value: "Renamed" },
   });
-  await userEvent.click(screen.getByRole("button", { name: "保存草稿" }));
+  await userEvent.click(screen.getByRole("button", { name: "保存到资源库" }));
   expect(libraryApi.saveMcp).toHaveBeenCalledWith(
     "server",
     "Renamed",
     3,
-    [{ path: ["command"], fieldRef: "ref-3", action: "keep" }],
+    [],
     1,
   );
 });
@@ -520,7 +546,7 @@ it("discloses shared Skills readability without claiming a separate assignment",
   await userEvent.click(screen.getByRole("tab", { name: /Skills/ }));
   await screen.findByText("Skill demo");
   await userEvent.click(
-    screen.getByRole("button", { name: "分配目标 Skill demo" }),
+    screen.getByRole("button", { name: "将 Skill demo 应用到工具" }),
   );
   expect(screen.getByRole("checkbox", { name: "gemini" })).not.toBeChecked();
   expect(screen.queryByRole("checkbox", { name: "copilot" })).toBeNull();
@@ -566,7 +592,7 @@ it("accepts actual backend pending targets and retains an in-flight preview acro
   const rendered = mount();
   await screen.findByText("Shared");
   await userEvent.click(
-    screen.getByRole("button", { name: "分配目标 Shared" }),
+    screen.getByRole("button", { name: "将 Shared 应用到工具" }),
   );
   await userEvent.click(screen.getByRole("button", { name: "预览变更" }));
   rendered.rerender(<Fixture active={false} />);
@@ -646,9 +672,7 @@ it("locks the legacy import source while its explicit read is pending", async ()
   );
   mount();
   await screen.findByText("Shared");
-  await userEvent.click(
-    screen.getByRole("button", { name: "导入 Markdown／旧提示词" }),
-  );
+  await userEvent.click(await toolbarAction("导入 Markdown／旧提示词"));
   await userEvent.click(screen.getByRole("combobox", { name: "导入来源" }));
   await userEvent.click(
     await screen.findByRole("option", { name: "claude 旧提示词" }),
@@ -678,9 +702,7 @@ it("does not replace a new edit with a late Markdown file read", async () => {
   });
   mount();
   await screen.findByText("Shared");
-  await userEvent.click(
-    screen.getByRole("button", { name: "导入 Markdown／旧提示词" }),
-  );
+  await userEvent.click(await toolbarAction("导入 Markdown／旧提示词"));
   fireEvent.change(screen.getByLabelText("Markdown 文件／粘贴内容"), {
     target: { files: [file] },
   });
@@ -707,9 +729,7 @@ it("keeps the latest file selection when file reads finish out of order", async 
   });
   mount();
   await screen.findByText("Shared");
-  await userEvent.click(
-    screen.getByRole("button", { name: "导入 Markdown／旧提示词" }),
-  );
+  await userEvent.click(await toolbarAction("导入 Markdown／旧提示词"));
   const picker = screen.getByLabelText("Markdown 文件／粘贴内容");
   fireEvent.change(picker, { target: { files: [a] } });
   fireEvent.change(picker, { target: { files: [b] } });
@@ -729,7 +749,7 @@ it("allows a preview with only desired assignment removals to be confirmed", asy
   mount();
   await screen.findByText("Shared");
   await userEvent.click(
-    screen.getByRole("button", { name: "分配目标 Shared" }),
+    screen.getByRole("button", { name: "将 Shared 应用到工具" }),
   );
   await userEvent.click(screen.getByRole("checkbox", { name: "codex" }));
   await userEvent.click(screen.getByRole("checkbox", { name: "claude" }));
@@ -762,7 +782,7 @@ it("keeps existing legacy rows read-only when their backend supplies no epoch", 
   await screen.findByText("Shared");
   expect(screen.getByRole("button", { name: "编辑 Shared" })).toBeDisabled();
   expect(
-    screen.getByRole("button", { name: "分配目标 Shared" }),
+    screen.getByRole("button", { name: "将 Shared 应用到工具" }),
   ).toBeDisabled();
   expect(await rowAction("移除 Shared")).toHaveAttribute(
     "aria-disabled",
@@ -950,7 +970,7 @@ it("requires a second full preview and explicit confirmation for native MCP adop
   await screen.findByText("MCP demo");
   await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
   await userEvent.click(
-    screen.getByRole("button", { name: "分配目标 MCP demo" }),
+    screen.getByRole("button", { name: "将 MCP demo 应用到工具" }),
   );
   await userEvent.click(screen.getByRole("button", { name: "预览变更" }));
   await userEvent.click(
@@ -1190,7 +1210,7 @@ it("scans native MCP without importing until selected entries are confirmed", as
   await screen.findByText("Shared");
   await userEvent.click(screen.getByRole("tab", { name: /^MCP/ }));
   await screen.findByText("MCP demo");
-  await userEvent.click(screen.getByRole("button", { name: "从本机导入" }));
+  await userEvent.click(await toolbarAction("从本机导入"));
   await within(screen.getByRole("dialog")).findByText("Native two");
   expect(scan).toHaveBeenCalledWith("mcp");
   expect(imported).not.toHaveBeenCalled();
@@ -1323,17 +1343,26 @@ it("keeps read-only discovery results in the native section and rescans before r
   await screen.findByText("Shared");
   await userEvent.click(screen.getByRole("tab", { name: /^MCP/ }));
   await screen.findByText("MCP demo");
-  await userEvent.click(screen.getByRole("button", { name: "从本机导入" }));
+  await userEvent.click(await toolbarAction("从本机导入"));
   await within(screen.getByRole("dialog")).findByText("Native source");
   await userEvent.click(screen.getByRole("button", { name: "关闭" }));
-  const native = screen.getByRole("region", { name: "工具中已有" });
+  const native = screen.getByRole("region", { name: "本机配置中" });
+  const scansBeforeRowImport = vi
+    .mocked(libraryApi.inventory)
+    .mock.calls.filter(([kind]) => kind === "mcp").length;
   expect(within(native).getByText("Native source")).toBeVisible();
   expect(within(native).getByText(/原生 MCP 配置/)).toBeVisible();
   expect(importing).not.toHaveBeenCalled();
   await userEvent.click(
     within(native).getByRole("button", { name: "导入 Native source" }),
   );
-  await waitFor(() => expect(libraryApi.inventory).toHaveBeenCalledTimes(2));
+  await waitFor(() =>
+    expect(
+      vi
+        .mocked(libraryApi.inventory)
+        .mock.calls.filter(([kind]) => kind === "mcp"),
+    ).toHaveLength(scansBeforeRowImport + 1),
+  );
   expect(
     await screen.findByRole("button", { name: "导入选中项（1）" }),
   ).toBeEnabled();
@@ -1362,7 +1391,7 @@ it.each(["mcp", "skills"] as const)(
     ).toBeVisible();
     expect(
       screen.getByRole("button", {
-        name: kind === "mcp" ? "新建" : zh.library.addSkill,
+        name: kind === "mcp" ? "添加 MCP" : zh.library.addSkill,
       }),
     ).toBeDisabled();
   },
