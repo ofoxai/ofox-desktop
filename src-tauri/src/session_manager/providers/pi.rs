@@ -284,6 +284,7 @@ pub(crate) fn parse_session(path: &Path) -> Option<SessionMeta> {
         resume_command: None,
         title_source,
         message_count: None,
+        parent_session_id: None,
     })
 }
 

@@ -15,6 +15,7 @@ fn meta(path: &Path, sid: &str) -> SessionMeta {
         resume_command: None,
         title_source: None,
         message_count: None,
+        parent_session_id: None,
     }
 }
 fn write(path: &Path, sid: &str, billing: &str, input: u64) {

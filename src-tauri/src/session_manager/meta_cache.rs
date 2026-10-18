@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use super::providers;
+use super::providers::codex::CodexSpawns;
 use super::source_cache::{self, Part, SourceStamp};
 use super::title::{titled, TitleCandidates};
 use super::SessionMeta;
@@ -17,7 +18,7 @@ use crate::database::Database;
 use crate::error::AppError;
 
 /// Bump to read every cached file again after a change to what is read.
-pub const PARSER_VERSION: i64 = 2;
+pub const PARSER_VERSION: i64 = 3;
 
 /// Providers whose files are read whole for their details.
 const PROVIDERS: [&str; 2] = ["claude", "codex"];
@@ -27,6 +28,9 @@ const PROVIDERS: [&str; 2] = ["claude", "codex"];
 pub struct SessionDetails {
     pub candidates: TitleCandidates,
     pub message_count: u32,
+    /// The subagents a Codex rollout's own calls spawned.
+    #[serde(skip_serializing_if = "CodexSpawns::is_empty")]
+    pub spawns: CodexSpawns,
 }
 
 /// A file's stamp: its size and modification time in nanoseconds.
@@ -155,6 +159,7 @@ fn apply(listing: &mut [SessionMeta], files: &[File], details: &HashMap<PathBuf,
             found = true;
             total.candidates.fill_from(&part.candidates);
             total.message_count = total.message_count.saturating_add(part.message_count);
+            total.spawns.merge(&part.spawns);
         }
         if found {
             if provider == "codex" {
@@ -166,19 +171,53 @@ fn apply(listing: &mut [SessionMeta], files: &[File], details: &HashMap<PathBuf,
             );
         }
     }
+    let tasks = task_titles(&merged);
     for meta in listing.iter_mut() {
         let Some((found, count_available)) =
             merged.get(&(meta.provider_id.clone(), meta.session_id.clone()))
         else {
             continue;
         };
-        let candidates = found
+        let mut candidates = found
             .candidates
             .clone()
             .with_directory(meta.project_dir.as_deref());
+        if meta.provider_id == "codex" {
+            if let Some(parent) = &meta.parent_session_id {
+                candidates.task = tasks
+                    .get(&(parent.as_str(), meta.session_id.as_str()))
+                    .cloned()
+                    .flatten();
+            }
+        }
         (meta.title, meta.title_source) = titled(&candidates);
         meta.message_count = count_available.then_some(found.message_count);
     }
+}
+
+/// Each Codex subagent's task name, by (parent, child): only its own parent's
+/// call names a child, so a fork's copy of its parent's calls names none of
+/// its siblings. A link two calls name differently is left unnamed.
+fn task_titles(
+    merged: &HashMap<(String, String), (SessionDetails, bool)>,
+) -> HashMap<(&str, &str), Option<String>> {
+    let mut tasks: HashMap<(&str, &str), Option<String>> = HashMap::new();
+    for ((provider, parent), (details, _)) in merged {
+        if provider != "codex" {
+            continue;
+        }
+        for (child, task) in details.spawns.titles() {
+            tasks
+                .entry((parent.as_str(), child))
+                .and_modify(|old| {
+                    if old.as_deref() != Some(task) {
+                        *old = None;
+                    }
+                })
+                .or_insert_with(|| Some(task.to_owned()));
+        }
+    }
+    tasks
 }
 
 /// Read the missing files' details, a few files at a time.
@@ -313,6 +352,7 @@ fn store(db: &Database, fresh: &[(&File, SessionDetails)]) -> Result<(), AppErro
 mod tests {
     use super::*;
     use crate::session_manager::managed::{list_with, ManagedSession};
+    use crate::session_manager::title::TitleSource;
     use crate::test_sandbox::sandbox;
 
     const ID: &str = "11111111-2222-3333-4444-555555555555";
@@ -481,5 +521,121 @@ mod tests {
             listed(&listing, thread).meta.title.as_deref(),
             Some("Codex named it")
         );
+    }
+
+    /// A Codex rollout of `id`, spawned by `parent` when there is one.
+    fn codex_thread(home: &Path, id: &str, parent: Option<&str>, lines: &[serde_json::Value]) {
+        let day = home.join(".codex/sessions/2026/10/14");
+        std::fs::create_dir_all(&day).unwrap();
+        let source = match parent {
+            Some(parent) => {
+                serde_json::json!({"subagent": {"thread_spawn": {"parent_thread_id": parent}}})
+            }
+            None => serde_json::json!("vscode"),
+        };
+        let mut body = format!(
+            "{}\n",
+            serde_json::json!({"timestamp": "2026-10-14T10:00:00Z", "type": "session_meta",
+                "payload": {"id": id, "cwd": "/work/app", "source": source}})
+        );
+        for line in lines {
+            body.push_str(&format!("{line}\n"));
+        }
+        std::fs::write(
+            day.join(format!("rollout-2026-10-14T10-00-00-{id}.jsonl")),
+            body,
+        )
+        .unwrap();
+    }
+
+    fn spawned(call: &str, task: &str, child: &str) -> [serde_json::Value; 2] {
+        [
+            serde_json::json!({"timestamp": "2026-10-14T10:00:01Z", "type": "response_item",
+                "payload": {"type": "function_call", "name": "spawn_agent", "call_id": call,
+                    "arguments": serde_json::json!({"task_name": task}).to_string()}}),
+            serde_json::json!({"timestamp": "2026-10-14T10:00:02Z", "type": "event_msg",
+                "payload": {"type": "item_completed", "item": {"type": "SubAgentActivity",
+                    "id": call, "kind": "started", "agent_thread_id": child}}}),
+        ]
+    }
+
+    fn typed(prompt: &str) -> serde_json::Value {
+        serde_json::json!({"timestamp": "2026-10-14T10:00:03Z", "type": "response_item",
+            "payload": {"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": prompt}]}})
+    }
+
+    /// Magpie `TestCodexSubagentTaskTitleAndNickname`,
+    /// `…ComesFromItsOwnParent` and `…ConflictingSpawnLinksDoNotNameChildren` (MIT).
+    #[test]
+    #[serial_test::serial]
+    fn an_untitled_codex_subagent_takes_its_parents_task_name() {
+        let sandbox = sandbox();
+        let home = sandbox.home();
+        let [spawn_a, start_a] = spawned("c1", "usage_audit", "child-a");
+        let [spawn_b, start_b] = spawned("c2", "r0_final_review", "child-b");
+        let [spawn_c, start_c] = spawned("c3", "named_but_prompted", "child-c");
+        codex_thread(
+            home,
+            "parent-p",
+            None,
+            &[
+                typed("合并集成分支改动"),
+                spawn_a,
+                start_a,
+                spawn_b,
+                start_b,
+                spawn_c,
+                start_c,
+            ],
+        );
+        // child-a repeats its parent's history: its copy of the call that
+        // started child-b says another name, and must not rename its sibling
+        let [copied_spawn, copied_start] = spawned("c2", "copied_wrong_name", "child-b");
+        codex_thread(
+            home,
+            "child-a",
+            Some("parent-p"),
+            &[copied_spawn, copied_start],
+        );
+        codex_thread(home, "child-b", Some("parent-p"), &[]);
+        codex_thread(
+            home,
+            "child-c",
+            Some("parent-p"),
+            &[typed("读 HANDOFF-codex.md")],
+        );
+        // a thread no parent spawned keeps its folder name
+        codex_thread(home, "child-d", Some("parent-p"), &[]);
+
+        let listing = list_with(None);
+        let title = |id: &str| {
+            let meta = &listed(&listing, id).meta;
+            (meta.title.clone().unwrap_or_default(), meta.title_source)
+        };
+        assert_eq!(
+            title("child-a"),
+            ("usage_audit".into(), Some(TitleSource::Task))
+        );
+        assert_eq!(
+            title("child-b"),
+            ("r0_final_review".into(), Some(TitleSource::Task))
+        );
+        assert_eq!(
+            title("child-c"),
+            ("读 HANDOFF-codex.md".into(), Some(TitleSource::Prompt))
+        );
+        assert_eq!(
+            title("child-d"),
+            ("app".into(), Some(TitleSource::Directory))
+        );
+        assert_eq!(
+            listed(&listing, "child-a")
+                .meta
+                .parent_session_id
+                .as_deref(),
+            Some("parent-p")
+        );
+        assert_eq!(listed(&listing, "parent-p").meta.parent_session_id, None);
     }
 }

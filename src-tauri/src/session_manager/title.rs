@@ -4,7 +4,7 @@
 //!
 //! A session goes by the name it was given, else the agent's own name for it,
 //! else the first prompt someone typed, else its first message with the tags
-//! taken out, else its folder.
+//! taken out, else the task its parent spawned it for, else its folder.
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
@@ -65,6 +65,8 @@ pub enum TitleSource {
     Prompt,
     /// The first message, with its tags taken out.
     Message,
+    /// The task its parent gave a spawned subagent (Codex `spawn_agent`).
+    Task,
     /// The folder it ran in.
     Directory,
 }
@@ -79,6 +81,8 @@ pub struct TitleCandidates {
     pub summary: Option<String>,
     pub prompt: Option<String>,
     pub message: Option<String>,
+    /// A subagent's task name, from the parent that spawned it.
+    pub task: Option<String>,
     pub directory: Option<String>,
 }
 
@@ -100,6 +104,7 @@ impl TitleCandidates {
             (&mut self.summary, &other.summary),
             (&mut self.prompt, &other.prompt),
             (&mut self.message, &other.message),
+            (&mut self.task, &other.task),
             (&mut self.directory, &other.directory),
         ] {
             if mine.is_none() {
@@ -116,7 +121,7 @@ impl TitleCandidates {
 }
 
 /// The title, and where it came from: custom, then agent (its summary line only
-/// when there is no agent title), then prompt, message and directory.
+/// when there is no agent title), then prompt, message, task and directory.
 pub fn pick_title(candidates: &TitleCandidates) -> Option<(String, TitleSource)> {
     [
         (&candidates.custom, TitleSource::Custom),
@@ -124,6 +129,7 @@ pub fn pick_title(candidates: &TitleCandidates) -> Option<(String, TitleSource)>
         (&candidates.summary, TitleSource::Agent),
         (&candidates.prompt, TitleSource::Prompt),
         (&candidates.message, TitleSource::Message),
+        (&candidates.task, TitleSource::Task),
         (&candidates.directory, TitleSource::Directory),
     ]
     .into_iter()
@@ -276,6 +282,7 @@ mod tests {
             summary: some("Old summary"),
             prompt: some("fix the login"),
             message: some("hello"),
+            task: some("usage_audit"),
             directory: some("app"),
         };
         let mut candidates = all.clone();
@@ -288,6 +295,7 @@ mod tests {
                 TitleSource::Agent => candidates.summary = None,
                 TitleSource::Prompt => candidates.prompt = None,
                 TitleSource::Message => candidates.message = None,
+                TitleSource::Task => candidates.task = None,
                 TitleSource::Directory => candidates.directory = None,
             }
         }
@@ -299,6 +307,7 @@ mod tests {
                 ("Old summary".to_string(), TitleSource::Agent),
                 ("fix the login".to_string(), TitleSource::Prompt),
                 ("hello".to_string(), TitleSource::Message),
+                ("usage_audit".to_string(), TitleSource::Task),
                 ("app".to_string(), TitleSource::Directory),
             ]
         );

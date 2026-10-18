@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::codex_config::get_codex_config_dir;
@@ -172,13 +173,124 @@ pub fn delete_session(_root: &Path, path: &Path, session_id: &str) -> Result<boo
     Ok(true)
 }
 
-/// What a Codex rollout's lines say about its title and length. Title rules
-/// adapted from Magpie internal/sessions/codex.go (MIT).
+/// A thread's parent, adapted from Magpie internal/sessions/codex.go
+/// (`codexIdentityFromMeta`, `codexSource`; MIT). The spawn in `source` names
+/// it, else the top-level `parent_thread_id`. When the two disagree, or a main
+/// thread's source still names a parent, the thread's place is unknown and it
+/// has none. `forked_from_id` never makes a parent.
+pub(crate) fn codex_parent(payload: &Value) -> Option<String> {
+    let top = payload
+        .get("parent_thread_id")
+        .and_then(Value::as_str)
+        .filter(|parent| !parent.is_empty());
+    let (main, spawn) = codex_source(payload.get("source"));
+    if spawn.is_some() && top.is_some() && spawn != top || main && top.is_some() {
+        return None;
+    }
+    spawn.or(top).map(str::to_owned)
+}
+
+/// Whether a session_meta `source` is a main thread's, and the parent its
+/// `subagent.thread_spawn` names.
+fn codex_source(source: Option<&Value>) -> (bool, Option<&str>) {
+    match source {
+        Some(Value::String(name)) => (
+            matches!(name.as_str(), "cli" | "vscode" | "exec" | "mcp"),
+            None,
+        ),
+        Some(Value::Object(variants)) if variants.len() == 1 => {
+            if let Some(custom) = variants.get("custom") {
+                return (custom.as_str().is_some_and(|c| !c.is_empty()), None);
+            }
+            let parent = variants
+                .get("subagent")
+                .and_then(Value::as_object)
+                .filter(|kind| kind.len() == 1)
+                .and_then(|kind| kind.get("thread_spawn"))
+                .and_then(|spawn| spawn.get("parent_thread_id"))
+                .and_then(Value::as_str)
+                .filter(|parent| !parent.is_empty());
+            (false, parent)
+        }
+        _ => (false, None),
+    }
+}
+
+/// The threads a rollout's own `spawn_agent` calls started and the task name
+/// each call gave, by call id (Magpie `codexSubagentTaskTitles`, MIT). A call
+/// id claimed twice with different values names nothing.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CodexSpawns {
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub names: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub children: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub conflicts: BTreeSet<String>,
+}
+
+impl CodexSpawns {
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty() && self.children.is_empty() && self.conflicts.is_empty()
+    }
+
+    fn note(
+        map: &mut BTreeMap<String, String>,
+        conflicts: &mut BTreeSet<String>,
+        call: &str,
+        value: &str,
+    ) {
+        if call.is_empty() || value.is_empty() {
+            return;
+        }
+        match map.get(call) {
+            Some(old) if old != value => {
+                conflicts.insert(call.to_owned());
+            }
+            _ => {
+                map.insert(call.to_owned(), value.to_owned());
+            }
+        }
+    }
+
+    fn named(&mut self, call: &str, task: &str) {
+        Self::note(&mut self.names, &mut self.conflicts, call, task);
+    }
+
+    fn started(&mut self, call: &str, child: &str) {
+        Self::note(&mut self.children, &mut self.conflicts, call, child);
+    }
+
+    /// Fold in another rollout of the same thread.
+    pub fn merge(&mut self, other: &CodexSpawns) {
+        self.conflicts.extend(other.conflicts.iter().cloned());
+        for (call, task) in &other.names {
+            self.named(call, task);
+        }
+        for (call, child) in &other.children {
+            self.started(call, child);
+        }
+    }
+
+    /// Each started child thread and the task name its call gave.
+    pub fn titles(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.names
+            .iter()
+            .filter(|(call, _)| !self.conflicts.contains(*call))
+            .filter_map(|(call, task)| Some((self.children.get(call)?.as_str(), task.as_str())))
+    }
+}
+
+/// What a Codex rollout's lines say about its title, length and the
+/// subagents it spawned. Title rules adapted from Magpie
+/// internal/sessions/codex.go (MIT).
 #[derive(Debug, Default)]
 pub(crate) struct CodexScan {
     pub candidates: TitleCandidates,
     prompts: u32,
     replies: u32,
+    pub spawns: CodexSpawns,
 }
 
 impl CodexScan {
@@ -217,6 +329,41 @@ impl CodexScan {
                     candidates.message = Some(untagged(text)).filter(|t| !t.is_empty());
                 }
             }
+            Some("response_item")
+                if payload_type == Some("function_call")
+                    && payload.get("name").and_then(Value::as_str) == Some("spawn_agent") =>
+            {
+                let arguments = match payload.get("arguments") {
+                    Some(Value::String(text)) => serde_json::from_str(text).ok(),
+                    other => other.cloned(),
+                };
+                let task = arguments
+                    .as_ref()
+                    .and_then(|a| a.get("task_name"))
+                    .and_then(Value::as_str)
+                    .map(one_line)
+                    .unwrap_or_default();
+                self.spawns.named(str_at(payload, "call_id"), &task);
+            }
+            Some("event_msg") if payload_type == Some("item_completed") => {
+                let Some(item) = payload.get("item") else {
+                    return;
+                };
+                if str_at(item, "type") == "SubAgentActivity" && str_at(item, "kind") == "started" {
+                    self.spawns
+                        .started(str_at(item, "id"), str_at(item, "agent_thread_id"));
+                }
+            }
+            // a legacy rollout's started activity, its id the spawn call's
+            Some("event_msg")
+                if payload_type == Some("sub_agent_activity")
+                    && str_at(payload, "kind") == "started" =>
+            {
+                self.spawns.started(
+                    str_at(payload, "event_id"),
+                    str_at(payload, "agent_thread_id"),
+                );
+            }
             _ => {}
         }
     }
@@ -249,10 +396,14 @@ pub(crate) fn details(path: &Path) -> Option<SessionDetails> {
             return;
         };
         let payload = header.payload.as_ref().and_then(|p| p.kind.as_deref());
-        if matches!(
-            (header.kind.as_deref(), payload),
-            (Some("response_item"), Some("message")) | (Some("event_msg"), Some("user_message"))
-        ) {
+        let wanted = match (header.kind.as_deref(), payload) {
+            (Some("response_item"), Some("message"))
+            | (Some("event_msg"), Some("user_message" | "sub_agent_activity")) => true,
+            (Some("response_item"), Some("function_call")) => line.contains("\"spawn_agent\""),
+            (Some("event_msg"), Some("item_completed")) => line.contains("SubAgentActivity"),
+            _ => false,
+        };
+        if wanted {
             if let Ok(value) = serde_json::from_str::<Value>(line) {
                 scan.line(&value);
             }
@@ -262,7 +413,12 @@ pub(crate) fn details(path: &Path) -> Option<SessionDetails> {
     Some(SessionDetails {
         message_count: scan.message_count(),
         candidates: scan.candidates,
+        spawns: scan.spawns,
     })
+}
+
+fn str_at<'a>(value: &'a Value, key: &str) -> &'a str {
+    value.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
 /// The texts of a user message: each text item, or the message when it is
@@ -292,6 +448,7 @@ fn parse_with_names(path: &Path, names: &HashMap<String, String>) -> Option<Sess
     let (head, tail) = read_head_tail_lines(path, 10, 30).ok()?;
 
     let mut session_id: Option<String> = None;
+    let mut parent_session_id: Option<String> = None;
     let mut project_dir: Option<String> = None;
     let mut created_at: Option<i64> = None;
     let mut scan = CodexScan::default();
@@ -306,11 +463,13 @@ fn parse_with_names(path: &Path, names: &HashMap<String, String>) -> Option<Sess
         }
         if value.get("type").and_then(Value::as_str) == Some("session_meta") {
             if let Some(payload) = value.get("payload") {
+                // a subagent's rollout repeats its parent's meta after its own
                 if session_id.is_none() {
                     session_id = payload
                         .get("id")
                         .and_then(Value::as_str)
                         .map(|s| s.to_string());
+                    parent_session_id = codex_parent(payload);
                 }
                 if project_dir.is_none() {
                     project_dir = payload
@@ -381,6 +540,7 @@ fn parse_with_names(path: &Path, names: &HashMap<String, String>) -> Option<Sess
         resume_command: Some(format!("codex resume {session_id}")),
         title_source,
         message_count: None,
+        parent_session_id,
     })
 }
 
@@ -512,6 +672,148 @@ mod tests {
 
     fn item(payload: serde_json::Value) -> serde_json::Value {
         serde_json::json!({"timestamp": "2026-10-14T10:00:03Z", "type": "response_item", "payload": payload})
+    }
+
+    /// Cases from Magpie `TestCodexIdentityParentChainsAndSummaryCache` (MIT).
+    #[test]
+    fn a_thread_parent_comes_from_its_spawn_else_the_top_level_field() {
+        let spawn = |parent: &str| serde_json::json!({"subagent": {"thread_spawn": {"parent_thread_id": parent, "depth": 1}}});
+        let cases = [
+            (
+                "main",
+                serde_json::json!({"id": "main-a", "source": "vscode"}),
+                None,
+            ),
+            (
+                "child",
+                serde_json::json!({"id": "child-b", "source": spawn("main-a")}),
+                Some("main-a"),
+            ),
+            (
+                "nested",
+                serde_json::json!({"id": "nested-c", "source": spawn("child-b"),
+                "parent_thread_id": "child-b"}),
+                Some("child-b"),
+            ),
+            (
+                "fork",
+                serde_json::json!({"id": "fork-f", "source": "vscode",
+                "forked_from_id": "main-a"}),
+                None,
+            ),
+            (
+                "missing parent",
+                serde_json::json!({"id": "orphan", "source": spawn("absent-parent")}),
+                Some("absent-parent"),
+            ),
+            (
+                "empty spawn parent",
+                serde_json::json!({"id": "e", "source": spawn("")}),
+                None,
+            ),
+            (
+                "review subagent",
+                serde_json::json!({"id": "r", "source": {"subagent": "review"},
+                "parent_thread_id": "main-a"}),
+                Some("main-a"),
+            ),
+            (
+                "conflicting parents",
+                serde_json::json!({"id": "x", "source": spawn("main-a"),
+                "parent_thread_id": "other"}),
+                None,
+            ),
+            (
+                "main naming a parent",
+                serde_json::json!({"id": "y", "source": "cli",
+                "parent_thread_id": "main-a"}),
+                None,
+            ),
+            (
+                "custom naming a parent",
+                serde_json::json!({"id": "z", "source": {"custom": "ide"},
+                "parent_thread_id": "main-a"}),
+                None,
+            ),
+            (
+                "unknown source",
+                serde_json::json!({"id": "u", "source": {"weird": {}},
+                "parent_thread_id": "main-a"}),
+                Some("main-a"),
+            ),
+            ("no source", serde_json::json!({"id": "n"}), None),
+        ];
+        for (name, payload, parent) in cases {
+            assert_eq!(codex_parent(&payload).as_deref(), parent, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_subagent_rollout_is_its_first_meta_not_the_parent_copy_after_it() {
+        let temp = tempdir().expect("tempdir");
+        let dir = temp.path().join("sessions/2026/10/14");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("rollout-2026-10-14T10-00-00-{THREAD}.jsonl"));
+        let lines = [
+            serde_json::json!({"timestamp": "2026-10-14T10:00:00Z", "type": "session_meta",
+                "payload": {"id": THREAD, "session_id": "parent-p", "parent_thread_id": "parent-p",
+                    "cwd": "/work/app",
+                    "source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent-p"}}}}}),
+            serde_json::json!({"timestamp": "2026-10-13T09:00:00Z", "type": "session_meta",
+                "payload": {"id": "parent-p", "session_id": "parent-p", "cwd": "/work/app",
+                    "source": "vscode"}}),
+        ];
+        std::fs::write(
+            &path,
+            lines.iter().map(|l| format!("{l}\n")).collect::<String>(),
+        )
+        .unwrap();
+
+        let meta = parse_session(&path).expect("parse");
+        assert_eq!(meta.session_id, THREAD);
+        assert_eq!(meta.parent_session_id.as_deref(), Some("parent-p"));
+    }
+
+    #[test]
+    fn a_rollout_notes_the_threads_its_spawn_calls_started() {
+        let temp = tempdir().expect("tempdir");
+        let spawn = |call: &str, task: &str| {
+            item(
+                serde_json::json!({"type": "function_call", "name": "spawn_agent", "call_id": call,
+                "arguments": serde_json::json!({"task_name": task, "message": "go"}).to_string()}),
+            )
+        };
+        let started = |call: &str, child: &str| {
+            serde_json::json!({"timestamp": "2026-10-14T10:00:04Z", "type": "event_msg",
+                "payload": {"type": "item_completed", "item": {"type": "SubAgentActivity",
+                    "id": call, "kind": "started", "agent_thread_id": child}}})
+        };
+        let path = rollout(
+            temp.path(),
+            &[
+                spawn("c1", "  usage\n audit "),
+                started("c1", "child-1"),
+                serde_json::json!({"timestamp": "2026-10-14T10:00:05Z", "type": "event_msg",
+                    "payload": {"type": "item_completed", "item": {"type": "SubAgentActivity",
+                        "id": "c1", "kind": "completed", "agent_thread_id": "child-1"}}}),
+                // a legacy rollout's started event
+                spawn("c2", "bugbot"),
+                serde_json::json!({"timestamp": "2026-10-14T10:00:06Z", "type": "event_msg",
+                    "payload": {"type": "sub_agent_activity", "event_id": "c2", "kind": "started",
+                        "agent_thread_id": "child-2"}}),
+                // one call id named twice names nothing
+                spawn("c3", "first"),
+                spawn("c3", "second"),
+                started("c3", "child-3"),
+            ],
+        );
+
+        let spawns = details(&path).expect("details").spawns;
+        let titles = spawns.titles().collect::<Vec<_>>();
+        assert_eq!(
+            titles,
+            vec![("child-1", "usage audit"), ("child-2", "bugbot")]
+        );
     }
 
     #[test]

@@ -225,6 +225,7 @@ fn codex_thread_display_warm_601_sources_reuses_decoded_projection() {
             resume_command: None,
             title_source: None,
             message_count: None,
+            parent_session_id: None,
         });
     }
     refresh_sources(&db, &specs).unwrap();

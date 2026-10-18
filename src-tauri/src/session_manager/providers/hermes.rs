@@ -150,6 +150,7 @@ fn sqlite_row_to_session_meta(row: &Value, db_source: &str) -> Option<SessionMet
         resume_command: None,
         title_source,
         message_count: None,
+        parent_session_id: None,
     })
 }
 
@@ -393,6 +394,7 @@ fn parse_jsonl_session(path: &Path) -> Option<SessionMeta> {
         title,
         title_source,
         message_count: None,
+        parent_session_id: None,
         summary: first_user_msg.map(|text| truncate_summary(&text, 160)),
         project_dir: cwd,
         created_at: first_ts,

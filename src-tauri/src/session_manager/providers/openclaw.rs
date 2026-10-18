@@ -438,6 +438,7 @@ fn parse_session(
         resume_command: None, // OpenClaw sessions are gateway-managed, no CLI resume
         title_source,
         message_count: None,
+        parent_session_id: None,
     })
 }
 

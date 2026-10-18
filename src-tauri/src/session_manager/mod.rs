@@ -45,6 +45,10 @@ pub struct SessionMeta {
     /// Prompts typed plus replies, where the whole file was read for them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_count: Option<u32>,
+    /// The thread that spawned this one, where an agent keeps each subagent
+    /// as a session of its own (Codex).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

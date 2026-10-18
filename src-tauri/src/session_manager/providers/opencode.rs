@@ -150,6 +150,7 @@ fn scan_sessions_sqlite() -> Vec<SessionMeta> {
             title: display_title.clone(),
             title_source,
             message_count: None,
+            parent_session_id: None,
             summary: display_title,
             project_dir: if directory.is_empty() {
                 None
@@ -486,6 +487,7 @@ fn parse_session(storage: &Path, path: &Path) -> Option<SessionMeta> {
         resume_command: Some(format!("opencode session resume {session_id}")),
         title_source,
         message_count: None,
+        parent_session_id: None,
     })
 }
 

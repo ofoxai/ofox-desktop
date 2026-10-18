@@ -197,6 +197,7 @@ pub(crate) fn details(path: &Path) -> Option<SessionDetails> {
     Some(SessionDetails {
         message_count: scan.message_count(),
         candidates: scan.candidates,
+        ..SessionDetails::default()
     })
 }
 
@@ -320,6 +321,7 @@ fn parse_session(path: &Path) -> Option<SessionMeta> {
         resume_command: Some(format!("claude --resume {session_id}")),
         title_source,
         message_count: None,
+        parent_session_id: None,
     })
 }
 

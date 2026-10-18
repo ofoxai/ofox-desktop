@@ -424,6 +424,7 @@ pub(crate) fn read_workbuddy(path: &Path) -> Result<WorkBuddyRead, AppError> {
             message_count: message_count_known
                 .then(|| u32::try_from(messages.len()).ok())
                 .flatten(),
+            parent_session_id: None,
         }
     });
     Ok(WorkBuddyRead {

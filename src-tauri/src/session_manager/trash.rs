@@ -1277,6 +1277,7 @@ mod tests {
             resume_command: None,
             title_source: None,
             message_count: None,
+            parent_session_id: None,
         }
     }
     // Advance comparison time instead of touching process-global env or personal configs.

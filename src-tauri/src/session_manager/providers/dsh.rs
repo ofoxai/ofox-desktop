@@ -203,6 +203,7 @@ fn parse_file(path: &Path) -> Option<FileMeta> {
             title,
             title_source,
             message_count: None,
+            parent_session_id: None,
             summary: None,
             project_dir: head["cwd"].as_str().map(str::to_string),
             created_at: head["createdAt"].as_i64(),
