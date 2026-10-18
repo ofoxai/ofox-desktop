@@ -10,9 +10,10 @@ pub(super) struct NativeReceipt {
     pub billing_session_id: Option<String>,
     pub parent_thread_id: Option<String>,
     pub source_digest: String,
+    #[serde(with = "crate::services::analytics_compact::digests")]
     pub event_sequence: Vec<String>,
     pub strong_events: bool,
-    #[serde(default)]
+    #[serde(default, with = "crate::services::analytics_compact::digests")]
     pub record_hashes: Vec<String>,
     #[serde(default)]
     pub prefix_proven: bool,

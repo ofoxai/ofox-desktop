@@ -1,4 +1,5 @@
 pub(crate) mod account_keys;
+pub(crate) mod analytics_compact;
 pub mod balance;
 pub mod balance_history;
 pub(crate) mod catalog_lifecycle;

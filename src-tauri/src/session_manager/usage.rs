@@ -91,7 +91,8 @@ pub(crate) fn load_for_listing(
             display_from_native(native, &catalog)?,
         ))
     })();
-    let (display, native) = displays.unwrap_or_else(|_| {
+    let (display, native) = displays.unwrap_or_else(|e| {
+        log::warn!("[SESSIONS] native usage projections unavailable: {e}");
         let codex = listing
             .iter()
             .filter(|m| m.provider_id == "codex")

@@ -418,7 +418,11 @@ struct Entry {
     // Append optional fields: legacy positional Entry arrays remain readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     thread_usage: Option<codex_thread_usage::Projection>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        with = "super::analytics_compact::activity"
+    )]
     native_activity: Vec<super::session_native_activity::NativeActivityEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     codex_native: Option<codex_index::NativeReceipt>,
@@ -850,6 +854,11 @@ fn refresh_sources_inner(
     }
     let rows = {
         let conn = crate::database::lock_conn!(db.conn);
+        // rows an older version wrote in the plain form can outgrow the byte
+        // budget of the read below, which would then refuse every refresh
+        if let Err(e) = super::analytics_compact::compact_legacy_on(&conn) {
+            log::warn!("[USAGE-ANALYTICS] cache compaction failed: {e}");
+        }
         rows_on(&conn)?
     };
     let mut generation =
