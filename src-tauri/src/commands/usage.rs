@@ -140,7 +140,7 @@ pub fn export_request_logs_csv(
 #[tauri::command]
 pub fn get_usage_capabilities() -> serde_json::Value {
     serde_json::json!({"queryVersion":1,"requestSnapshots":true,"csv":true,"projectFilter":true,
-        "localRefresh":true,"sessionAnalytics":true,"sessionProjectFilter":true,
+        "localRefresh":true,"sessionAnalytics":true,"sessionProjectFilter":true,"nativeRebuild":true,
         "sources":crate::services::usage_query::source_capabilities()})
 }
 
@@ -365,6 +365,18 @@ pub async fn refresh_local_usage(
             errors: vec![],
         }),
     )
+}
+
+#[tauri::command]
+pub fn get_usage_rebuild_progress() -> Option<crate::services::usage_rebuild::RebuildProgress> {
+    crate::services::usage_rebuild::progress()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn cancel_usage_rebuild(
+    operation_id: String,
+) -> Result<crate::services::usage_rebuild::RebuildProgress, AppError> {
+    crate::services::usage_rebuild::cancel(&operation_id)
 }
 
 /// 获取数据来源分布

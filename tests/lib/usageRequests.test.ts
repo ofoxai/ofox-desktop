@@ -82,3 +82,39 @@ it("reports malformed shared receipts as a query mismatch", async () => {
     "usage.queryMismatch",
   );
 });
+
+it("does not accept effective statistics as a saved-history audit receipt", async () => {
+  invoke.mockResolvedValue({
+    ...receipt,
+    snapshotId: "snapshot",
+    requestFilters: {},
+  });
+  await expect(
+    usageApi.getRequestLogs({}, 0, 20, {
+      query,
+      requestFilters: { recordBasis: "savedHistory" },
+    }),
+  ).rejects.toThrow("usage.queryUnsupported");
+});
+
+it("accepts the same saved-history basis but rejects a changed basis on pagination", async () => {
+  invoke.mockResolvedValue({
+    ...receipt,
+    snapshotId: "audit-snapshot",
+    requestFilters: { recordBasis: "savedHistory" },
+  });
+  await expect(
+    usageApi.getRequestLogs({}, 0, 20, {
+      query,
+      requestFilters: { recordBasis: "savedHistory" },
+    }),
+  ).resolves.toMatchObject({ snapshotId: "audit-snapshot" });
+  await expect(
+    usageApi.getRequestLogs({}, 1, 20, {
+      query,
+      requestFilters: { recordBasis: "effective" },
+      snapshotId: "audit-snapshot",
+      expectedReceipt: receipt,
+    }),
+  ).rejects.toThrow("usage.queryMismatch");
+});

@@ -1,8 +1,12 @@
 //! Independent display evidence for one native thread. Never changes ledger IDs.
+#[cfg(test)]
 use super::super::usage_source::{NormalizedSnapshot, NormalizedUsageFact};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::Value;
+#[cfg(test)]
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use std::collections::BTreeMap;
 
 const VERSION: u8 = 1;
@@ -24,6 +28,8 @@ pub(crate) struct Projection {
     pub state: String,
     pub reasons: Vec<String>,
     pub models: Vec<Model>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incomplete_models: Vec<String>,
     pub facts_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_digest: Option<String>,
@@ -48,6 +54,7 @@ impl Projection {
             state: "unavailable".into(),
             reasons: vec!["threadUsageNotIndexed".into()],
             models: vec![],
+            incomplete_models: vec![],
             facts_hash: None,
             source_digest: None,
         }
@@ -55,6 +62,7 @@ impl Projection {
     pub(crate) fn unavailable(mut self, reason: &str) -> Self {
         self.state = "unavailable".into();
         self.models.clear();
+        self.incomplete_models.clear();
         self.facts_hash = None;
         self.reasons.push(reason.into());
         self.reasons.sort();
@@ -105,6 +113,7 @@ impl Projection {
                 }) && !self.models.is_empty()))
     }
 }
+#[cfg(test)]
 #[derive(Default)]
 pub(crate) struct Proof {
     headers: usize,
@@ -117,12 +126,14 @@ pub(crate) struct Proof {
     first_counter: bool,
     source_digest: Option<String>,
 }
+#[cfg(test)]
 fn id(value: Option<&Value>) -> Option<String> {
     value
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty() && s.len() <= 512)
         .map(str::to_owned)
 }
+#[cfg(test)]
 impl Proof {
     /// The refresh already read these bytes with a stable source receipt.
     /// Keep only their digest; equal token facts cannot prove equal histories.
@@ -207,6 +218,7 @@ impl Proof {
             state: "available".into(),
             reasons: vec![],
             models: vec![],
+            incomplete_models: vec![],
             facts_hash: None,
             source_digest: self.source_digest.clone(),
         };
@@ -284,6 +296,7 @@ impl Proof {
         result
     }
 }
+#[cfg(test)]
 fn buckets(fact: &NormalizedUsageFact) -> [u64; 4] {
     [
         fact.usage.input_tokens,

@@ -172,6 +172,18 @@ fn display_from_threads(
             continue;
         }
         let usage = price_models(&projection.models, catalog, &mut display)?;
+        mark_incomplete_model_estimates(&projection.incomplete_models, catalog, &mut display);
+        if projection.reasons.iter().any(|reason| {
+            matches!(
+                reason.as_str(),
+                "conflictingUsageReplica" | "unprovenLegacyReplica"
+            )
+        }) {
+            // A removed response can belong to a model absent from the
+            // surviving rows. The known total is then only a lower bound;
+            // unrelated surviving models retain their own price coverage.
+            mark_incomplete_thread_estimate(catalog, &mut display);
+        }
         result.insert(meta.session_id.clone(), (Some(usage), display));
     }
     Ok(result)
@@ -217,6 +229,34 @@ fn price_models(
     }
     display.estimate = estimate;
     Ok(usage)
+}
+fn mark_incomplete_model_estimates(
+    incomplete_models: &[String],
+    catalog: &PriceCatalog,
+    display: &mut UsageDisplay,
+) {
+    let mut affected = false;
+    for model in incomplete_models {
+        if let Some(estimate) = display.model_estimates.get_mut(model) {
+            affected = true;
+            mark_incomplete_estimate(estimate);
+        }
+    }
+    if affected {
+        mark_incomplete_thread_estimate(catalog, display);
+    }
+}
+fn mark_incomplete_estimate(estimate: &mut CostEstimate) {
+    if estimate.known_cost_usd.is_some() {
+        estimate.availability = "partial".into();
+        estimate.unpriced_record_count = None;
+    }
+}
+fn mark_incomplete_thread_estimate(catalog: &PriceCatalog, display: &mut UsageDisplay) {
+    if let Some(estimate) = &mut display.estimate {
+        mark_incomplete_estimate(estimate);
+        display.pricing_coverage = Some(catalog.coverage_for(estimate));
+    }
 }
 fn display_from_native(
     projections: BTreeMap<
@@ -427,6 +467,8 @@ mod tests {
         index::refresh_discovered(
             &db,
             &Discovery {
+                roots: vec![],
+                require_route_match: false,
                 specs: vec![],
                 batches: vec![BatchSource {
                     provider: "workbuddy".into(),
@@ -486,6 +528,8 @@ mod tests {
         refresh_discovered(
             &db,
             &Discovery {
+                roots: vec![],
+                require_route_match: false,
                 specs: vec![],
                 batches: vec![BatchSource {
                     provider: "workbuddy".into(),

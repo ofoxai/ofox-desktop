@@ -86,6 +86,11 @@ export interface SessionAnalytics extends UsageReceipt {
     activeDays: number;
   } | null;
   metricCoverage?: AnalyticsMetricCoverage;
+  messageCoverage?: AnalyticsMetricCoverage;
+  activityCoverage?: AnalyticsMetricCoverage;
+  knownMessages?: number | null;
+  knownActiveMs?: number | null;
+  knownActiveDays?: number | null;
   activityByHour?: {
     timezone: string;
     utcOffsetSecondsAtEnd?: number;

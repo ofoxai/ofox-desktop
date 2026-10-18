@@ -11,6 +11,7 @@ import {
 import { ToolBadge } from "@/components/tools/ToolBadge";
 import { fmtTokens } from "@/lib/format";
 import { formatUsageEstimate } from "@/lib/usageEstimate";
+import { usageIsUnavailable } from "@/lib/usageWorkbench";
 import type {
   AnalyticsSession,
   SessionAnalytics,
@@ -22,7 +23,11 @@ import { UsageSessionRanking } from "./UsageSessionRanking";
 import { UsageTimeInsights } from "./UsageTimeInsights";
 import { UsageDistributions } from "./UsageDistributions";
 import { SegmentedControl } from "@/components/ui/segmented";
-import { formatActivity } from "@/lib/usageInsights";
+import {
+  formatActivity,
+  isPartialActivity,
+  usageCohortIsUnavailable,
+} from "@/lib/usageInsights";
 import { getSessionAnalyticsPage } from "@/lib/api/usageOverview";
 import { UsageBreakdownList } from "./UsageBreakdownList";
 import type { UsageQueryV1 } from "@/types/usageQuery";
@@ -41,6 +46,7 @@ export function UsageSessions({
   location,
   onLocated,
   onExpandScope,
+  onSavedHistory,
 }: {
   data: SessionAnalytics;
   active: boolean;
@@ -55,6 +61,7 @@ export function UsageSessions({
   location?: { key: string; request: number } | null;
   onLocated?: (request: number) => void;
   onExpandScope?: () => void;
+  onSavedHistory?: () => void;
 }) {
   const { t, i18n } = useTranslation();
   const panel = useRef<HTMLElement>(null);
@@ -133,9 +140,31 @@ export function UsageSessions({
   const [rankKind, setRankKind] = useState<"projects" | "tools">("projects");
   const known =
     data.metricCoverage?.state === "unavailable" ? null : data.knownMetrics;
-  const activeMs = v.activeMs ?? known?.activeMs ?? null;
-  const messages = v.messages ?? known?.messages ?? null;
-  const partialMetrics = data.metricCoverage?.state === "partial" && !!known;
+  const messageCoverage = data.messageCoverage ?? data.metricCoverage;
+  const activityCoverage = data.activityCoverage ?? data.metricCoverage;
+  const activeMs =
+    activityCoverage?.state === "unavailable"
+      ? null
+      : (v.activeMs ?? data.knownActiveMs ?? known?.activeMs ?? null);
+  const messages =
+    messageCoverage?.state === "unavailable"
+      ? null
+      : (v.messages ?? data.knownMessages ?? known?.messages ?? null);
+  const activeDays =
+    activityCoverage?.state === "unavailable"
+      ? null
+      : (v.activeDays ?? data.knownActiveDays ?? known?.activeDays ?? null);
+  const partialActivity =
+    activityCoverage?.state === "partial" && activeMs != null;
+  const partialMessages =
+    messageCoverage?.state === "partial" && messages != null;
+  const partialMetrics = partialActivity || partialMessages;
+  const noUsage = usageIsUnavailable(data);
+  const noCohort = usageCohortIsUnavailable(data);
+  const nativeMethod = data.methodVersion === "magpie-native-v1";
+  const activityLabel = t(
+    nativeMethod ? "usageExperience.nativeActivity" : "usageSessions.activity",
+  );
 
   return (
     <section
@@ -173,50 +202,65 @@ export function UsageSessions({
               </Button>
             </div>
           )}
-          <UsageAnalysisStatus data={data} compact />
+          <UsageAnalysisStatus
+            data={data}
+            compact
+            onSavedHistory={onSavedHistory}
+          />
           <KpiStrip
             className="!grid-cols-2 min-[420px]:!grid-cols-3 [&>div]:px-3 [&>div]:pb-2 [&>div]:pt-2.5 [&_b]:text-[24px]"
             items={[
               {
                 label: t("usageSessions.sessions"),
-                value: v.sessionCount.toLocaleString(i18n.language),
+                value: noCohort
+                  ? "—"
+                  : v.sessionCount.toLocaleString(i18n.language),
                 sub: t("usageSessions.quantiles", {
-                  median: quantile(v.medianTokens),
-                  p90: quantile(v.p90Tokens),
+                  median: noUsage ? "—" : quantile(v.medianTokens),
+                  p90: noUsage ? "—" : quantile(v.p90Tokens),
                 }),
-                title: `${v.medianTokens ?? "—"} / ${v.p90Tokens ?? "—"}`,
+                title: noUsage
+                  ? "—"
+                  : `${v.medianTokens ?? "—"} / ${v.p90Tokens ?? "—"}`,
               },
               {
                 label: "Tokens",
-                value: fmtTokens(v.totalTokens),
+                value: noUsage ? "—" : fmtTokens(v.totalTokens),
                 sub: t("usagePage.io", {
-                  input: fmtTokens(v.inputTokens),
-                  output: fmtTokens(v.outputTokens),
+                  input: noUsage ? "—" : fmtTokens(v.inputTokens),
+                  output: noUsage ? "—" : fmtTokens(v.outputTokens),
                 }),
               },
               {
                 label: t("usageWorkbench.currentEstimate"),
-                value: formatUsageEstimate(v.estimate),
+                value: noUsage ? "—" : formatUsageEstimate(v.estimate),
                 sub: t("usagePage.estimate"),
               },
               {
                 label: t("usagePage.cacheRead"),
-                value: fmtTokens(v.cacheReadTokens),
+                value: noUsage ? "—" : fmtTokens(v.cacheReadTokens),
                 sub: t("usagePage.hitRate", {
                   rate:
-                    v.cacheHitRate == null
+                    noUsage || v.cacheHitRate == null
                       ? "—"
                       : `${Math.round(v.cacheHitRate * 100)}%`,
                 }),
               },
               {
-                label: t("usageSessions.activity"),
+                label: activityLabel,
                 value: duration(activeMs),
-                sub: `${partialMetrics ? t("usageExperience.knownPart") + " · " : ""}${t("usageSessions.activeDays", { value: v.activeDays ?? known?.activeDays ?? "—" })}`,
+                title: t(
+                  nativeMethod
+                    ? "usageExperience.nativeActivityHelp"
+                    : "usageSessions.activityExplanation",
+                ),
+                sub: `${partialActivity ? t("usageExperience.knownPart") + " · " : ""}${t("usageSessions.activeDays", { value: activeDays ?? "—" })}`,
               },
               {
                 label: t("usageSessions.projects"),
-                value: v.projectCount.toLocaleString(i18n.language),
+                value: noCohort
+                  ? "—"
+                  : v.projectCount.toLocaleString(i18n.language),
                 sub: firstProject
                   ? project(
                       firstProject.id,
@@ -235,12 +279,12 @@ export function UsageSessions({
               })}
             </p>
             <p>
-              {partialMetrics && (
+              {partialMessages && (
                 <span>{t("usageExperience.knownPart")} · </span>
               )}
               {t("usageExperience.aux", {
                 messages: messages?.toLocaleString(i18n.language) ?? "—",
-                cache: fmtTokens(v.cacheWriteTokens),
+                cache: noUsage ? "—" : fmtTokens(v.cacheWriteTokens),
               })}
             </p>
           </div>
@@ -251,7 +295,8 @@ export function UsageSessions({
             </p>
           )}
           {!known &&
-            (v.messages == null || v.activeMs == null) &&
+            messages == null &&
+            activeMs == null &&
             v.messageReason !== "modelAttributionUnavailable" &&
             v.activityReason !== "modelAttributionUnavailable" && (
               <p className="text-note text-ink-muted">
@@ -265,10 +310,19 @@ export function UsageSessions({
             )}
           {partialMetrics && (
             <p className="text-note text-ink-faint">
-              {t("usageExperience.knownTrend")}
+              {t(
+                data.messageCoverage || data.activityCoverage
+                  ? partialActivity && partialMessages
+                    ? "usageExperience.knownTrend"
+                    : partialActivity
+                      ? "usageExperience.knownActivityTrend"
+                      : "usageExperience.knownMessageTrend"
+                  : "usageExperience.knownTrend",
+              )}
             </p>
           )}
           <UsageBars
+            activityLabel={activityLabel}
             selectedMetric={metric}
             onMetricChange={setMetric}
             analysis
@@ -282,6 +336,10 @@ export function UsageSessions({
               })),
             }}
             unavailableMetrics={[
+              ...(noUsage
+                ? ["tokens" as const, "output" as const, "cost" as const]
+                : []),
+              ...(noCohort ? ["sessions" as const] : []),
               ...(messages == null ? ["messages" as const] : []),
               ...(activeMs == null ? ["active" as const] : []),
             ]}
@@ -310,6 +368,7 @@ export function UsageSessions({
                   : data.byTool
               }
               total={v.totalTokens}
+              unavailable={noUsage}
               onFilter={rankKind === "projects" ? onProject : onTool}
               onRemove={
                 rankKind === "projects" ? onRemoveProject : onRemoveTool
@@ -328,6 +387,7 @@ export function UsageSessions({
               kind="models"
               rows={data.byModel}
               total={v.totalTokens}
+              unavailable={noUsage}
               onFilter={onModel}
               onRemove={onRemoveModel}
               selectedIds={data.appliedQuery.modelIds}
@@ -356,7 +416,10 @@ export function UsageSessions({
               }}
             />
           </div>
-          <UsageDistributions distributions={data.distributions} />
+          <UsageDistributions
+            distributions={data.distributions}
+            activityLabel={activityLabel}
+          />
         </>
       )}
       <Dialog
@@ -434,8 +497,8 @@ export function UsageSessions({
                     selected.row.messages?.toLocaleString(i18n.language) ?? "—",
                   ],
                   [
-                    t("usageSessions.activity"),
-                    duration(selected.row.activeMs),
+                    activityLabel,
+                    `${duration(selected.row.activeMs)}${isPartialActivity(selected.row) ? "＋" : ""}`,
                   ],
                   [
                     t("usagePage.cacheRead"),

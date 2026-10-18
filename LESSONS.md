@@ -39,3 +39,10 @@ See [development standards](docs/code-standards.md) and [integration wiring](doc
 - A source capability must be explicitly registered; the existence of an adapter alone does not make every metric available. Use the same verified roster and branch/identity rules for ledger and analytics, and bound every decoding pass, including metadata fallbacks.
 - A successful save acknowledgement must close or freeze the old editable form before a refresh retry. Reusing its receipt while leaving new edits enabled silently loses the user's intent.
 - Bind native acceptance writer receipts to the actual compiled clean checkout. A caller-supplied SHA or successful configuration parsing cannot prove either source identity or native resource consumption. Synthetic UI and 10k cached-query benchmarks must be labelled with their measured scope.
+
+### Native statistics and generation publication
+
+- Lock the first canonical thread identity independently of optional record ordinals. A damaged ordinal must not promote a later copied parent header. Billing/session IDs and native thread IDs have different scopes.
+- A cumulative-count correction must update the correct counter domain and its later checkpoints, while preserving the original event time. Replay identity cannot depend on the current turn context. An unresolved old interval must not poison a separately proven runtime reset.
+- An epoch fence invalidates acceptance, not unchanged native bytes. Reverify and CAS-publish warm receipts with the generation marker; otherwise a successful restore can leave rebuilding permanently blocked. A route returning to an unchanged source must restore availability and location evidence.
+- Build coverage after conflict reconciliation, and carry missing-event evidence to the affected thread and model. Known surviving Tokens and price can be shown as partial; clean sibling threads must not inherit a source-wide warning. No samples, a real zero and a partially priced total require different UI states.

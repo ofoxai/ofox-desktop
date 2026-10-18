@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "referenceCommit": "bfaedf18301d02a423bd5422d22e41432d231ab8",
+  "timezone": "UTC",
+  "threadCount": 3,
+  "tokens": {
+    "input": 573,
+    "output": 114,
+    "cacheRead": 150,
+    "cacheWrite": 27,
+    "main": 687
+  },
+  "quantiles": {
+    "median": 193,
+    "p90": 395
+  },
+  "costUsd": "0.0021765",
+  "activeMs": 189900,
+  "referenceActiveSeconds": 189,
+  "days": [
+    {
+      "date": "2026-10-01",
+      "tokens": {
+        "input": 95,
+        "output": 10,
+        "cacheRead": 20,
+        "cacheWrite": 5,
+        "main": 105
+      },
+      "activeMs": 90100,
+      "referenceActiveSeconds": 90,
+      "hourActiveMs": {
+        "23": 90100
+      },
+      "costUsd": "0.00029"
+    },
+    {
+      "date": "2026-10-02",
+      "tokens": {
+        "input": 478,
+        "output": 104,
+        "cacheRead": 130,
+        "cacheWrite": 22,
+        "main": 582
+      },
+      "activeMs": 99800,
+      "referenceActiveSeconds": 99,
+      "hourActiveMs": {
+        "0": 91800,
+        "2": 4000,
+        "3": 4000
+      },
+      "costUsd": "0.0018865"
+    }
+  ],
+  "threads": [
+    {
+      "id": "parity-a",
+      "tokens": {
+        "input": 163,
+        "output": 30,
+        "cacheRead": 30,
+        "cacheWrite": 7,
+        "main": 193
+      },
+      "activeMs": 181900,
+      "referenceActiveSeconds": 181,
+      "costUsd": "0.0005945"
+    },
+    {
+      "id": "parity-b",
+      "tokens": {
+        "input": 320,
+        "output": 75,
+        "cacheRead": 110,
+        "cacheWrite": 20,
+        "main": 395
+      },
+      "activeMs": 4000,
+      "referenceActiveSeconds": 4,
+      "costUsd": "0.0013275"
+    },
+    {
+      "id": "parity-c",
+      "tokens": {
+        "input": 90,
+        "output": 9,
+        "cacheRead": 10,
+        "cacheWrite": 0,
+        "main": 99
+      },
+      "activeMs": 4000,
+      "referenceActiveSeconds": 4,
+      "costUsd": "0.0002545"
+    }
+  ]
+}

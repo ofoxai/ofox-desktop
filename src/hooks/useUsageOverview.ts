@@ -51,7 +51,7 @@ export function useUsageOverview(
   const overview = useQuery(
     {
       queryKey: ["usageOverview", apex, period, options.query ?? null],
-      queryFn: () => getUsageOverview(period, options.query),
+      queryFn: () => getUsageOverview(period, options.query, apex),
       staleTime: STALE_MS,
       gcTime: 0,
       retry: false,

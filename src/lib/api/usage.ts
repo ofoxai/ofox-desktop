@@ -16,6 +16,7 @@ import type {
 import type { UsageCsvExport, UsageSnapshotReceipt } from "@/types/usageQuery";
 import {
   assertUsageReceipt,
+  assertUsageApex,
   assertSnapshotReceipt,
   sameRequestFilters,
 } from "@/lib/usageWorkbench";
@@ -104,7 +105,7 @@ export const usageApi = {
     pageSize: number = 20,
     options?: RequestQueryOptions,
   ): Promise<PaginatedLogs> => {
-    const { expectedReceipt, ...ipcOptions } = options ?? {};
+    const { expectedReceipt, expectedApex, ...ipcOptions } = options ?? {};
     const response = await invoke<PaginatedLogs>("get_request_logs", {
       filters,
       page,
@@ -113,7 +114,13 @@ export const usageApi = {
     });
     if (options) {
       assertUsageReceipt(response, options.query);
+      assertUsageApex(response, expectedApex);
       if (!response.requestFilters) throw new Error("usage.queryUnsupported");
+      if (
+        options.requestFilters?.recordBasis === "savedHistory" &&
+        response.requestFilters.recordBasis == null
+      )
+        throw new Error("usage.queryUnsupported");
       if (!sameRequestFilters(response.requestFilters, options.requestFilters))
         throw new Error("usage.queryMismatch");
       if (expectedReceipt) assertSnapshotReceipt(response, expectedReceipt);

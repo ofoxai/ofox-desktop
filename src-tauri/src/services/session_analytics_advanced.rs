@@ -144,6 +144,18 @@ pub(super) fn hour_activity<Tz: TimeZone>(
         return Ok(result);
     }
     let mut amounts = [[0u64; 24]; 7];
+    for &(at, duration) in &activity.native_allocations {
+        let local = utc(at)?.with_timezone(tz);
+        let weekday = local.weekday().num_days_from_monday() as usize;
+        use chrono::Timelike;
+        let hour = local.hour() as usize;
+        amounts[weekday][hour] = amounts[weekday][hour]
+            .checked_add(duration)
+            .ok_or_else(|| invalid("counterOverflow"))?;
+    }
+    // Old cached/message-only activity retains interval splitting. A native
+    // gap exists only in native_allocations, so the two methods cannot count
+    // the same gap twice unless a caller supplies an invalid mixed projection.
     for &(from, end) in &activity.intervals {
         let mut start = from;
         while start < end {
@@ -227,9 +239,12 @@ pub(super) fn compact_top(rows: &[AnalyticsSession]) -> CompactTop {
         let mut indexes: Vec<_> = rows
             .iter()
             .filter(|row| match sort {
-                SortBy::Tokens => row.tokens.is_some(),
-                SortBy::Cost => cost(row).is_some(),
-                SortBy::Active => row.active_ms.is_some(),
+                SortBy::Tokens => row
+                    .tokens
+                    .as_ref()
+                    .is_some_and(|tokens| tokens.total_tokens > 0),
+                SortBy::Cost => cost(row).is_some_and(|amount| amount > Decimal::ZERO),
+                SortBy::Active => row.active_ms.is_some_and(|amount| amount > 0),
             })
             .collect();
         indexes.sort_by(|a, b| compare(a, b, sort));
@@ -615,6 +630,90 @@ mod tests {
             .is_empty());
     }
 
+    #[test]
+    fn analytics_native_hours_assign_whole_gap_to_later_event_across_midnight_and_dst() {
+        let base = DateTime::parse_from_rfc3339("2026-10-15T00:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let midnight = Activity {
+            active_ms: 120_000,
+            native_allocations: vec![(base + 60_000, 120_000)],
+            ..Default::default()
+        };
+        let result = hour_activity(&midnight, &coverage(), base + 86_400_000, &Utc).unwrap();
+        assert_eq!(
+            result.cells.iter().map(|cell| cell.active_ms).sum::<u64>(),
+            120_000
+        );
+        assert_eq!(
+            result
+                .cells
+                .iter()
+                .find(|cell| cell.weekday == 3 && cell.hour == 0)
+                .unwrap()
+                .active_ms,
+            120_000
+        );
+        assert_eq!(
+            result
+                .cells
+                .iter()
+                .find(|cell| cell.weekday == 2 && cell.hour == 23)
+                .unwrap()
+                .active_ms,
+            0
+        );
+
+        for (before, after, hour) in [(0, 3_600, 2), (3_600, 0, 1), (0, 1_800, 1)] {
+            let tz = Transition {
+                at: base + 3_600_000,
+                before,
+                after,
+            };
+            let activity = Activity {
+                active_ms: 120_000,
+                native_allocations: vec![(base + 3_660_000, 120_000)],
+                ..Default::default()
+            };
+            let result = hour_activity(&activity, &coverage(), base + 86_400_000, &tz).unwrap();
+            assert_eq!(
+                result.cells.iter().map(|cell| cell.active_ms).sum::<u64>(),
+                activity.active_ms
+            );
+            assert_eq!(
+                result
+                    .cells
+                    .iter()
+                    .find(|cell| cell.weekday == 3 && cell.hour == hour)
+                    .unwrap()
+                    .active_ms,
+                120_000
+            );
+        }
+    }
+
+    #[test]
+    fn analytics_hours_can_project_native_and_legacy_allocations_without_losing_known_zero() {
+        let base = DateTime::parse_from_rfc3339("2026-10-15T00:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        let activity = Activity {
+            active_ms: 180_000,
+            intervals: vec![(base - 60_000, base)],
+            native_allocations: vec![(base + 60_000, 120_000)],
+            ..Default::default()
+        };
+        let result = hour_activity(&activity, &coverage(), base + 86_400_000, &Utc).unwrap();
+        assert_eq!(
+            result.cells.iter().map(|cell| cell.active_ms).sum::<u64>(),
+            activity.active_ms
+        );
+        let zero =
+            hour_activity(&Activity::default(), &coverage(), base + 86_400_000, &Utc).unwrap();
+        assert_eq!(zero.cells.len(), 168);
+        assert!(zero.cells.iter().all(|cell| cell.active_ms == 0));
+    }
+
     fn row(key: &str, tokens: u64, cost: Option<&str>, active: Option<u64>) -> AnalyticsSession {
         AnalyticsSession {
             session_key: key.into(),
@@ -943,9 +1042,9 @@ mod tests {
                 .iter()
                 .map(|r| r.session_key.as_str())
                 .collect::<Vec<_>>(),
-            ["tiny", "zero"]
+            ["tiny"]
         );
-        assert_eq!(top.active.len(), 2);
+        assert!(top.active.is_empty());
         let distribution = distribution(
             "tokens",
             &[0, 1, 5],
@@ -957,5 +1056,51 @@ mod tests {
             (distribution.samples, distribution.excluded_sessions),
             (3, 1)
         );
+    }
+
+    #[test]
+    fn analytics_compact_rank_omits_zero_but_full_paging_preserves_zero_and_unknown() {
+        let zero = row("zero", 0, Some("0"), Some(0));
+        let mut unknown = row("unknown", 0, None, None);
+        unknown.tokens = None;
+        let mut partial = row("partial", 7, Some("0.01"), Some(1));
+        partial.estimate.availability = "partial".into();
+        let rows = vec![zero, unknown, partial];
+        let top = compact_top(&rows);
+        for ranked in [top.tokens, top.cost, top.active] {
+            assert_eq!(
+                ranked
+                    .iter()
+                    .map(|row| row.session_key.as_str())
+                    .collect::<Vec<_>>(),
+                ["partial"]
+            );
+        }
+        let full = Snapshot { rows, ..snapshot() };
+        for sort_by in [SortBy::Tokens, SortBy::Cost, SortBy::Active] {
+            let result = page_on(
+                &full,
+                "id",
+                expected(),
+                sort_by,
+                0,
+                10,
+                None,
+                None,
+                "ofox.ai",
+            )
+            .unwrap();
+            assert_eq!(result.total, 3);
+            assert_eq!(
+                result
+                    .data
+                    .iter()
+                    .map(|row| row.session_key.as_str())
+                    .collect::<Vec<_>>(),
+                ["partial", "zero", "unknown"]
+            );
+            assert_eq!(result.data[1].estimate.known_cost_usd.as_deref(), Some("0"));
+            assert!(result.data[2].estimate.known_cost_usd.is_none());
+        }
     }
 }

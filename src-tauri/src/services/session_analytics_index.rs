@@ -24,14 +24,25 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
+#[path = "session_analytics_codex.rs"]
+mod codex_index;
 #[path = "codex_thread_usage.rs"]
 pub(crate) mod codex_thread_usage;
+#[path = "session_analytics_rebuild.rs"]
+mod rebuild;
 
 const VERSION: u8 = 1;
 const MAX_CACHE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_SOURCES: usize = 20_000;
 const PROJECTION_CACHE_BYTES: usize = 128 * 1024 * 1024;
 const PROJECTION_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+
+#[cfg(test)]
+#[path = "session_analytics_codex_rebuild_tests.rs"]
+mod codex_rebuild_tests;
+#[cfg(test)]
+#[path = "session_analytics_parity_tests.rs"]
+mod parity_tests;
 
 #[cfg(test)]
 thread_local! {
@@ -103,7 +114,55 @@ impl ProjectionCache {
         // warm slot must not conceal a read failure or an oversized table.
         let raw_rows = raw_rows_on(conn)?;
         let common = super::usage_health::source_health_on(conn)?;
-        let key = projection_key(&raw_rows, &common)?;
+        let epoch = source_cache::ledger_epoch_on(conn)?;
+        let ready = raw_rows
+            .iter()
+            .find(|row| row.path == rebuild::GENERATION_KEY)
+            .is_some_and(|row| {
+                // The generation marker is a tiny receipt, not a source envelope.
+                // Do not charge it as re-decoding all native projections on a warm query.
+                let Some(raw) = row
+                    .raw
+                    .as_deref()
+                    .filter(|raw| raw.len() <= source_cache::MAX_ENVELOPE_BYTES)
+                else {
+                    return false;
+                };
+                if serde_json::from_str::<ReadableJson>(raw).is_err() {
+                    return false;
+                }
+                serde_json::from_str::<MapOnly<QueryEnvelope>>(raw)
+                    .ok()
+                    .filter(|MapOnly(envelope)| {
+                        envelope.format_version == 1 && envelope.parts.valid_wrappers()
+                    })
+                    .and_then(|MapOnly(envelope)| envelope.parts.analytics)
+                    .is_some_and(|part| {
+                        part.value.version == VERSION && generation_is_current(&part.value, &epoch)
+                    })
+            });
+        let legacy = if ready {
+            None
+        } else {
+            Some(
+                super::session_analytics_legacy::load_on(conn).unwrap_or_else(|_| {
+                    super::session_analytics_legacy::LegacySnapshot::unavailable()
+                }),
+            )
+        };
+        let legacy_failed = legacy.as_ref().is_some_and(|snapshot| snapshot.failed);
+        let legacy_history_available = legacy_history_on(conn)?;
+        let mut key_hash = Sha256::new();
+        key_hash.update(projection_key(&raw_rows, &common)?);
+        key_hash.update([u8::from(legacy_history_available)]);
+        if let Some(legacy) = &legacy {
+            key_hash.update(legacy.digest.as_bytes());
+        }
+        key_hash.update(
+            serde_json::to_vec(&source_cache::ledger_epoch_on(conn)?)
+                .map_err(|_| invalid("invalidEpoch"))?,
+        );
+        let key: [u8; 32] = key_hash.finalize().into();
         {
             let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
             if slot
@@ -125,12 +184,18 @@ impl ProjectionCache {
         let rows = decode_rows(raw_rows);
         let thread_sources = Arc::new(thread_sources_from_rows(&rows));
         let native_sources = Arc::new(native_sources_from_rows(&rows));
-        let input = Arc::new(input_from_rows(rows, common));
+        let mut input = input_from_rows(rows, common, source_cache::ledger_epoch_on(conn)?);
+        input.legacy_history_available = legacy_history_available;
+        if let Some(legacy) = legacy {
+            legacy.apply(&mut input)?;
+        }
+        let input = Arc::new(input);
         let bytes = projection_bytes(&input)
             .and_then(|bytes| bytes.checked_add(thread_source_bytes(&thread_sources)?))
             .and_then(|bytes| bytes.checked_add(native_source_bytes(&native_sources)?));
         let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
         *slot = bytes
+            .filter(|_| !legacy_failed)
             .filter(|bytes| *bytes <= self.max_bytes)
             .map(|_| CachedProjection {
                 key,
@@ -252,6 +317,32 @@ fn projection_bytes(input: &AnalyticsInput) -> Option<usize> {
         bytes.string(&message.session_key)?;
         bytes.string(&message.native_id)?;
     }
+    bytes.vector(&input.native_activity)?;
+    for event in &input.native_activity {
+        bytes.string(&event.session_key)?;
+        bytes.string(&event.event_key)?;
+        bytes.string(&event.stream_key)?;
+    }
+    bytes.vector(&input.source_observations)?;
+    for source in &input.source_observations {
+        bytes.string(&source.tool_id)?;
+        bytes.string(&source.source_id)?;
+        bytes.string(&source.status)?;
+    }
+    for (thread, coverage) in &input.thread_usage_coverage {
+        // Conservative tree-node allowance plus the actual owned strings.
+        bytes.add(
+            std::mem::size_of::<(
+                String,
+                super::session_analytics_listing::ThreadUsageCoverage,
+            )>() + 4 * std::mem::size_of::<usize>(),
+        )?;
+        bytes.string(thread)?;
+        for value in coverage.reasons.iter().chain(&coverage.incomplete_models) {
+            bytes.add(std::mem::size_of::<String>() + 4 * std::mem::size_of::<usize>())?;
+            bytes.string(value)?;
+        }
+    }
     bytes.strings(&input.reasons)?;
     bytes.vector(&input.source_reasons)?;
     for reason in &input.source_reasons {
@@ -327,6 +418,14 @@ struct Entry {
     // Append optional fields: legacy positional Entry arrays remain readable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     thread_usage: Option<codex_thread_usage::Projection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    native_activity: Vec<super::session_native_activity::NativeActivityEvent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    codex_native: Option<codex_index::NativeReceipt>,
+    #[serde(default)]
+    native_method: bool,
+    #[serde(default)]
+    physical_source_count: Option<usize>,
 }
 struct Row {
     provider: String,
@@ -660,13 +759,17 @@ pub(crate) fn source_revision(spec: &SourceSpec) -> Result<Value, AppError> {
         None
     };
     Ok(
-        json!({"native":usage_source::normalized_stamp(&spec.provider,&spec.path)?,"project":project,"title":title,"parts":parts,"subagent":spec.subagent}),
+        json!({"native":usage_source::normalized_stamp(&spec.provider,&spec.path)?,"project":project,"title":title,"parts":parts,"subagent":spec.subagent,"activityParserVersion":1,"codexParserVersion":if spec.provider=="codex" {Some(super::codex_native::VERSION)} else {None}}),
     )
 }
 fn empty_entry(now: i64) -> Entry {
     Entry {
         version: VERSION,
         thread_usage: None,
+        native_activity: vec![],
+        codex_native: None,
+        native_method: false,
+        physical_source_count: None,
         stamp: None,
         sessions: vec![],
         facts: vec![],
@@ -704,11 +807,25 @@ pub(crate) fn refresh_discovered(
     db: &Database,
     discovery: &Discovery,
 ) -> Result<RefreshReport, AppError> {
+    let has_codex = discovery.specs.iter().any(|s| s.provider == "codex")
+        || discovery.roots.iter().any(|(p, _)| p == "codex")
+        || discovery.failures.iter().any(|f| f.provider == "codex");
     refresh_sources_inner(
         db,
         &discovery.specs,
         &discovery.failures,
         &discovery.batches,
+        &discovery.roots,
+        discovery.require_route_match,
+        has_codex.then(|| {
+            super::usage_rebuild::begin(
+                discovery
+                    .specs
+                    .iter()
+                    .filter(|s| s.provider == "codex")
+                    .count(),
+            )
+        }),
     )
 }
 
@@ -717,13 +834,16 @@ pub(crate) fn refresh_sources(
     db: &Database,
     specs: &[SourceSpec],
 ) -> Result<RefreshReport, AppError> {
-    refresh_sources_inner(db, specs, &[], &[])
+    refresh_sources_inner(db, specs, &[], &[], &[], false, None)
 }
 fn refresh_sources_inner(
     db: &Database,
     specs: &[SourceSpec],
     failures: &[DiscoveryFailure],
     batches: &[BatchSource],
+    roots: &[(String, PathBuf)],
+    require_route_match: bool,
+    control: Option<Arc<super::usage_rebuild::Control>>,
 ) -> Result<RefreshReport, AppError> {
     if specs.len() + batches.len() > MAX_SOURCES {
         return Err(invalid("sourceBudgetExceeded"));
@@ -732,14 +852,30 @@ fn refresh_sources_inner(
         let conn = crate::database::lock_conn!(db.conn);
         rows_on(&conn)?
     };
+    let mut generation =
+        rebuild::Generation::new(db, &rows, specs, roots, require_route_match, control)?;
     let mut report = RefreshReport::default();
     let failed_providers: BTreeSet<_> = failures.iter().map(|f| f.provider.as_str()).collect();
     for failure in failures {
         report.failed += 1;
         report.mark(&failure.provider, RefreshState::Failed(failure.code));
     }
+    let mut title_maps = BTreeMap::new();
+    for path in specs
+        .iter()
+        .filter(|s| s.provider == "codex")
+        .filter_map(|s| s.title_file.as_ref())
+    {
+        title_maps
+            .entry(path.clone())
+            .or_insert_with(|| crate::session_manager::providers::codex::thread_names(path));
+    }
     let mut found = BTreeSet::new();
     for spec in specs {
+        if spec.provider == "codex" && generation.check().is_err() {
+            report.mark("codex", RefreshState::Partial("usage.rebuild.cancelled"));
+            continue;
+        }
         if failed_providers.contains(spec.provider.as_str()) {
             continue;
         }
@@ -788,11 +924,23 @@ fn refresh_sources_inner(
                 && old.available
                 && old.status != "failed"
                 && (spec.provider != "codex"
-                    || old
-                        .thread_usage
-                        .as_ref()
-                        .is_some_and(|p| p.has_current_proof()))
+                    || (old.native_method
+                        && old
+                            .thread_usage
+                            .as_ref()
+                            .is_some_and(|p| p.has_current_proof())))
             {
+                if spec.provider == "codex" {
+                    generation.observed(spec, Some(next.clone()))?;
+                    // An epoch restore invalidates the generation marker, not
+                    // the verified bytes of every native source. Republish the
+                    // warm receipts under the same source/roster/epoch CAS.
+                    if generation.needs_publication() {
+                        generation
+                            .pending
+                            .push((path.to_owned(), token.clone(), old.clone()));
+                    }
+                }
                 report.unchanged += 1;
                 report.mark(
                     &spec.provider,
@@ -806,7 +954,45 @@ fn refresh_sources_inner(
             }
         }
         let parsed = next_stamp.and_then(|before| {
-            let mut entry = parse(spec, now)?;
+            let title_only = spec.provider == "codex"
+                && previous.is_some_and(|old| {
+                    old.available
+                        && old.native_method
+                        && old.status != "failed"
+                        && old
+                            .thread_usage
+                            .as_ref()
+                            .is_some_and(|projection| projection.has_current_proof())
+                        && old.stamp.as_ref().is_some_and(|stamp| {
+                            [
+                                "native",
+                                "project",
+                                "parts",
+                                "subagent",
+                                "activityParserVersion",
+                                "codexParserVersion",
+                            ]
+                            .iter()
+                            .all(|field| stamp[*field] == before[*field])
+                        })
+                });
+            let mut entry = if title_only {
+                previous.unwrap().clone()
+            } else {
+                parse(spec, now)?
+            };
+            if spec.provider == "codex" {
+                for session in &mut entry.sessions {
+                    if let Some(title) = spec
+                        .title_file
+                        .as_ref()
+                        .and_then(|p| title_maps.get(p))
+                        .and_then(|m| m.get(&session.native_session_id))
+                    {
+                        session.title = crate::redact::scrub(title).into_owned();
+                    }
+                }
+            }
             if source_revision(spec)? != before {
                 return Err(invalid("sourceChangedRetry"));
             }
@@ -838,7 +1024,19 @@ fn refresh_sources_inner(
                 _ => RefreshState::Partial("partialSource"),
             },
         );
-        if save(db, path, &spec.provider, &token, &entry).is_err() {
+        if spec.provider == "codex" {
+            if generation
+                .observed(
+                    spec,
+                    entry.stamp.clone().filter(|_| entry.status != "failed"),
+                )
+                .is_err()
+            {
+                report.mark("codex", RefreshState::Partial("usage.rebuild.cancelled"));
+                continue;
+            }
+            generation.pending.push((path.to_owned(), token, entry));
+        } else if save(db, path, &spec.provider, &token, &entry).is_err() {
             report.failed += 1;
             report.mark(
                 &spec.provider,
@@ -855,6 +1053,9 @@ fn refresh_sources_inner(
         refresh_batch(db, batch, &path, rows.get(&path), &mut report)?;
     }
     for (path, row) in rows {
+        if path == rebuild::GENERATION_KEY {
+            continue;
+        }
         if found.contains(&path) {
             continue;
         }
@@ -874,7 +1075,9 @@ fn refresh_sources_inner(
             entry.attempted_at_ms = chrono::Utc::now().timestamp_millis();
             entry.reasons.retain(|r| r != "sourceDiscoveryFailed");
             entry.reasons.push("sourceDiscoveryFailed".into());
-            if save(db, &path, &row.provider, &row.token, &entry).is_err() {
+            if row.provider == "codex" {
+                generation.pending.push((path, row.token, entry));
+            } else if save(db, &path, &row.provider, &row.token, &entry).is_err() {
                 report.failed += 1;
                 report.mark(
                     &row.provider,
@@ -895,11 +1098,24 @@ fn refresh_sources_inner(
             session.source_available = false;
             session.manager_key = None;
         }
-        if save(db, &path, &row.provider, &row.token, &entry).is_err() {
+        if row.provider == "codex" {
+            generation.pending.push((path, row.token, entry));
+        } else if save(db, &path, &row.provider, &row.token, &entry).is_err() {
             report.failed += 1;
             report.mark(
                 &row.provider,
                 RefreshState::Failed("analyticsCacheWriteFailed"),
+            );
+        }
+    }
+    if let Err(error) = generation.commit(db) {
+        if error.to_string().contains("usage.rebuild.cancelled") {
+            report.mark("codex", RefreshState::Partial("usage.rebuild.cancelled"));
+        } else {
+            report.failed += 1;
+            report.mark(
+                "codex",
+                RefreshState::Failed("analyticsGenerationUnavailable"),
             );
         }
     }
@@ -909,6 +1125,7 @@ pub(crate) struct ParsedSource {
     pub sessions: Vec<SessionDescriptor>,
     pub facts: Vec<UsageFact>,
     pub messages: Vec<MessageEvent>,
+    pub native_activity: Vec<super::session_native_activity::NativeActivityEvent>,
     pub reasons: Vec<String>,
 }
 pub(crate) fn batch_key(batch: &BatchSource) -> Result<String, AppError> {
@@ -1095,7 +1312,13 @@ fn refresh_batch(
             entry.sessions = parsed.sessions;
             entry.facts = parsed.facts;
             entry.messages = parsed.messages;
+            entry.native_activity = parsed.native_activity;
             entry.reasons = parsed.reasons;
+            entry.physical_source_count = native
+                .get("files")
+                .or_else(|| native.pointer("/native/files"))
+                .and_then(Value::as_array)
+                .map(Vec::len);
             preserve_absent_batch_sessions(&mut entry, previous);
             entry.reasons.sort();
             entry.reasons.dedup();
@@ -1155,12 +1378,16 @@ fn refresh_batch(
     Ok(())
 }
 fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
+    if spec.provider == "codex" {
+        return codex_index::parse(spec, now);
+    }
     let mut entry = empty_entry(now);
     if spec.provider == "opencode" {
         let parsed = super::session_analytics_opencode::read(&spec.path)?;
         entry.sessions = parsed.sessions;
         entry.facts = parsed.facts;
         entry.messages = parsed.messages;
+        entry.native_activity = parsed.native_activity;
         entry.reasons = parsed.reasons;
         entry.status = if entry.reasons.is_empty() {
             "ok"
@@ -1174,71 +1401,45 @@ fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
     }
     entry.priority = if spec.subagent { 1 } else { 2 };
     let mut candidates = crate::session_manager::title::TitleCandidates::default();
-    let mut thread_proof = codex_thread_usage::Proof::default();
+    let mut native_activity_candidates = Vec::new();
+    let mut native_stream_segment = 0u32;
     let transcript = match spec.provider.as_str() {
-        "claude" | "codex" => {
+        "claude" => {
             let mut claude = crate::session_manager::providers::claude::ClaudeScan::default();
-            let mut codex = crate::session_manager::providers::codex::CodexScan::default();
             let mut scan = TranscriptScan::new(
                 &spec.provider,
                 &key(&spec.provider, &spec.path.to_string_lossy()),
                 spec.subagent,
             )?;
             let text = usage_source::read_text(&spec.path)?;
-            if spec.provider == "codex" {
-                thread_proof.observe_source(&text);
-            }
-            let mut ambiguous_codex_identity = false;
             for (i, line) in text.lines().enumerate() {
                 if line.trim().is_empty() {
                     continue;
                 }
                 let value: Value =
                     serde_json::from_str(line).map_err(|_| invalid("sourceReadFailed"))?;
-                if spec.provider == "codex" {
-                    thread_proof.observe(&value);
-                }
-                // Native fork/replay can retain both parent and child headers.
-                // Neither header licenses attributing the whole physical file.
-                // Continue validating JSON, but publish no inferred metrics.
-                if ambiguous_codex_identity {
-                    continue;
-                }
-                match scan.line(i as i64 + 1, &value) {
-                    Err(AppError::InvalidInput(code))
-                        if spec.provider == "codex"
-                            && code == "usage.analytics.conflictingSessionIdentity" =>
-                    {
-                        ambiguous_codex_identity = true;
-                        continue;
-                    }
-                    result => result?,
-                }
-                if spec.provider == "claude" {
-                    claude.line(&value);
+                if let Some(at_ms) = value
+                    .get("timestamp")
+                    .and_then(crate::session_manager::providers::parse_timestamp_to_ms)
+                {
+                    let digest = format!(
+                        "{:x}",
+                        Sha256::digest(
+                            serde_json::to_vec(&value).map_err(|_| invalid("sourceReadFailed"))?
+                        )
+                    );
+                    native_activity_candidates.push((digest, at_ms, native_stream_segment));
                 } else {
-                    codex.line(&value);
+                    native_stream_segment = native_stream_segment.saturating_add(1);
+                    if !entry.reasons.iter().any(|r| r == "activityTimeUnavailable") {
+                        entry.reasons.push("activityTimeUnavailable".into());
+                    }
                 }
+                scan.line(i as i64 + 1, &value)?;
+                claude.line(&value);
             }
-            if ambiguous_codex_identity {
-                entry.status = "partial".into();
-                entry.reasons.push("sessionIdentityUnavailable".into());
-                entry.thread_usage = Some(thread_proof.finish(None));
-                entry.succeeded_at_ms = Some(now);
-                return Ok(entry);
-            }
-            let transcript = scan.finish();
-            candidates = if spec.provider == "claude" {
-                claude.candidates
-            } else {
-                codex.candidates
-            };
-            if let (Some(path), Some(id)) = (&spec.title_file, &transcript.session_id) {
-                candidates.agent = crate::session_manager::providers::codex::thread_names(path)
-                    .get(id)
-                    .cloned();
-            }
-            transcript
+            candidates = claude.candidates;
+            scan.finish()
         }
         "gemini" => {
             let conversation =
@@ -1331,9 +1532,6 @@ fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
         _ => return Err(invalid("unsupportedTranscriptReader")),
     };
     let normalized = usage_source::read_normalized(&spec.provider, &spec.path)?;
-    if spec.provider == "codex" {
-        entry.thread_usage = Some(thread_proof.finish(Some(&normalized)));
-    }
     entry.reasons.extend(normalized.reasons);
     let native_id = transcript.session_id.clone();
     if let Some(native) = &native_id {
@@ -1360,6 +1558,21 @@ fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| p.clone())
         });
+        if spec.provider == "claude" {
+            let stream = key("claude-stream", &spec.path.to_string_lossy());
+            entry.native_activity = native_activity_candidates
+                .into_iter()
+                .map(|(digest, at_ms, segment)| {
+                    super::session_native_activity::NativeActivityEvent {
+                        session_key: session_key.clone(),
+                        event_key: key("claude-runtime", &format!("{native}:{digest}")),
+                        at_ms,
+                        main: transcript.is_main && !spec.subagent,
+                        stream_key: format!("{stream}:{segment}"),
+                    }
+                })
+                .collect();
+        }
         entry.sessions.push(SessionDescriptor {
             identity: SessionIdentity {
                 key: session_key.clone(),
@@ -1382,7 +1595,12 @@ fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
             manager_key: Some(crate::session_manager::managed::key(&meta)),
             source_available: true,
             messages_supported: true,
-            message_reasons: transcript.reasons.iter().cloned().collect(),
+            message_reasons: transcript
+                .reasons
+                .iter()
+                .chain(entry.reasons.iter().filter(|r| r.starts_with("activity")))
+                .cloned()
+                .collect(),
         });
         for message in transcript.messages.into_values() {
             if let Some(at_ms) = message.at_ms {
@@ -1519,10 +1737,18 @@ pub(crate) fn read_input(db: &Database) -> Result<AnalyticsInput, AppError> {
     read_input_on(&conn)
 }
 
+fn legacy_history_on(conn: &rusqlite::Connection) -> Result<bool, AppError> {
+    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM proxy_request_logs WHERE app_type='codex' AND data_source='codex_session') OR EXISTS(SELECT 1 FROM usage_daily_rollups WHERE app_type='codex' AND provider_id='_codex_session')",[],|r|r.get(0))?)
+}
+
+#[cfg(test)]
 pub(crate) fn read_input_on(conn: &rusqlite::Connection) -> Result<AnalyticsInput, AppError> {
     let rows = rows_on(conn)?;
     let common = super::usage_health::source_health_on(conn)?;
-    Ok(input_from_rows(rows, common))
+    let mut input = input_from_rows(rows, common, source_cache::ledger_epoch_on(conn)?);
+    input.legacy_history_available = legacy_history_on(conn)?;
+    super::session_analytics_legacy::apply_on(conn, &mut input)?;
+    Ok(input)
 }
 
 /// Listing-only thread display evidence. This never rewrites ledger ancestry or
@@ -1606,7 +1832,7 @@ pub(crate) fn listing_projections_on(
     listing: &[crate::session_manager::SessionMeta],
 ) -> Result<ListingProjections, AppError> {
     let (input, threads, native) = projection_cache().parts_at(conn, Instant::now())?;
-    let codex = thread_usage_from_sources(&threads, listing)?;
+    let codex = thread_usage_from_sources(&threads, listing, &input)?;
     let mut verified = BTreeSet::new();
     let mut changed = BTreeSet::new();
     for source in native.iter() {
@@ -1731,6 +1957,7 @@ fn thread_source_bytes(sources: &Vec<ThreadSource>) -> Option<usize> {
             .chain(p.parent_session_id.iter())
             .chain(std::iter::once(&p.state))
             .chain(p.reasons.iter())
+            .chain(p.incomplete_models.iter())
             .chain(p.facts_hash.iter())
             .chain(p.source_digest.iter())
             .chain(p.models.iter().map(|m| &m.model));
@@ -1739,6 +1966,11 @@ fn thread_source_bytes(sources: &Vec<ThreadSource>) -> Option<usize> {
         }
         bytes = bytes.checked_add(
             p.reasons
+                .capacity()
+                .checked_mul(std::mem::size_of::<String>())?,
+        )?;
+        bytes = bytes.checked_add(
+            p.incomplete_models
                 .capacity()
                 .checked_mul(std::mem::size_of::<String>())?,
         )?;
@@ -1763,16 +1995,30 @@ fn thread_usage_cached_on(
     listing: &[crate::session_manager::SessionMeta],
     cache: &ProjectionCache,
 ) -> Result<BTreeMap<String, codex_thread_usage::Projection>, AppError> {
-    let (_, sources, _) = cache.parts_at(conn, Instant::now())?;
-    thread_usage_from_sources(&sources, listing)
+    let (input, sources, _) = cache.parts_at(conn, Instant::now())?;
+    thread_usage_from_sources(&sources, listing, &input)
 }
 fn thread_usage_from_sources(
     sources: &[ThreadSource],
     listing: &[crate::session_manager::SessionMeta],
+    input: &AnalyticsInput,
 ) -> Result<BTreeMap<String, codex_thread_usage::Projection>, AppError> {
     let by_path: BTreeMap<_, _> = sources.iter().map(|s| (s.path.as_str(), s)).collect();
+    let current_models = if input.codex_native_ready {
+        super::session_analytics_listing::current_thread_models(input)?
+    } else {
+        BTreeMap::new()
+    };
     let mut projections: BTreeMap<String, codex_thread_usage::Projection> = BTreeMap::new();
     for meta in listing.iter().filter(|m| m.provider_id == "codex") {
+        if !input.codex_native_ready {
+            projections.insert(
+                meta.session_id.clone(),
+                codex_thread_usage::Projection::missing(&meta.session_id)
+                    .unavailable("statisticsRebuildRequired"),
+            );
+            continue;
+        }
         let source = meta
             .source_path
             .as_deref()
@@ -1782,6 +2028,28 @@ fn thread_usage_from_sources(
             |s| s.projection.clone(),
         );
         let native = meta.session_id.clone();
+        if input.codex_native_ready && projection.has_current_proof() {
+            // Same deduplicated events as overview and analysis, never a second
+            // token_count decoder nor per-physical-file sums for this thread.
+            let session_key = key("codex", &native);
+            let (models, incomplete, coverage_reasons) = current_models
+                .get(&session_key)
+                .cloned()
+                .unwrap_or_default();
+            projection.reasons.extend(coverage_reasons);
+            projection.models = models;
+            projection.incomplete_models = incomplete.into_iter().collect();
+            projection.state = if projection.models.is_empty() {
+                "unavailable"
+            } else {
+                "available"
+            }
+            .into();
+            projection.facts_hash = Some(input.snapshot_version.clone());
+            if !projection.incomplete_models.is_empty() {
+                projection.reasons.push("incompleteUsageFact".into());
+            }
+        }
         if !projection.valid() || projection.native_thread_id.as_deref() != Some(&meta.session_id) {
             projection = projection.unavailable("threadUsageNotIndexed");
         } else if source.is_some_and(|s| !s.healthy) {
@@ -1797,7 +2065,10 @@ fn thread_usage_from_sources(
                 slot.insert(projection);
             }
             std::collections::btree_map::Entry::Occupied(mut slot) => {
-                if slot.get() != &projection {
+                let consistent = input.codex_native_ready
+                    && slot.get().state == projection.state
+                    && slot.get().models == projection.models;
+                if !consistent && slot.get() != &projection {
                     let rejected = slot.get().clone().unavailable("conflictingThreadSources");
                     slot.insert(rejected);
                 }
@@ -1807,7 +2078,134 @@ fn thread_usage_from_sources(
     Ok(projections)
 }
 
-fn input_from_rows(rows: BTreeMap<String, Row>, common: Vec<SourceHealth>) -> AnalyticsInput {
+/// Describe the *accepted* semantic records, not merely a readable file. This
+/// preflight shares the later conflict rules and marks only affected origins.
+fn note_thread_usage_gap(
+    coverage: &mut BTreeMap<String, super::session_analytics_listing::ThreadUsageCoverage>,
+    fact: &UsageFact,
+    reason: &str,
+) {
+    if fact.tool_id != "codex" {
+        return;
+    }
+    if let Some(thread) = &fact.session_key {
+        let value = coverage.entry(thread.clone()).or_default();
+        value.reasons.insert(reason.to_owned());
+        value.incomplete_models.insert(fact.model.clone());
+    }
+}
+fn reconcile_coverage(
+    entries: &mut [(String, Entry)],
+    coverage: &mut BTreeMap<String, super::session_analytics_listing::ThreadUsageCoverage>,
+) {
+    let mut facts = BTreeMap::new();
+    let mut messages = BTreeMap::new();
+    let mut activity = BTreeMap::new();
+    let mut metadata = BTreeMap::new();
+    let mut bad_facts = BTreeSet::new();
+    let mut bad_messages = BTreeSet::new();
+    let mut bad_activity = BTreeSet::new();
+    let mut bad_metadata = BTreeSet::new();
+    for (_, entry) in entries
+        .iter()
+        .filter(|(_, entry)| entry.available && entry.status != "failed")
+    {
+        for fact in &entry.facts {
+            if facts
+                .insert(fact.event_key.as_str(), fact)
+                .is_some_and(|prior| prior != fact)
+            {
+                bad_facts.insert(fact.event_key.clone());
+            }
+        }
+        for message in &entry.messages {
+            let key = (message.session_key.as_str(), message.native_id.as_str());
+            if messages
+                .insert(key, message)
+                .is_some_and(|prior| prior != message)
+            {
+                bad_messages.insert((message.session_key.clone(), message.native_id.clone()));
+            }
+        }
+        for event in &entry.native_activity {
+            let key = (event.session_key.as_str(), event.event_key.as_str());
+            if activity
+                .insert(key, (event.at_ms, event.main))
+                .is_some_and(|prior| prior != (event.at_ms, event.main))
+            {
+                bad_activity.insert((event.session_key.clone(), event.event_key.clone()));
+            }
+        }
+        for session in &entry.sessions {
+            if metadata
+                .insert(
+                    session.identity.key.as_str(),
+                    (entry.priority, &session.identity),
+                )
+                .is_some_and(|(priority, prior)| {
+                    priority == entry.priority && prior != &session.identity
+                })
+            {
+                bad_metadata.insert(session.identity.key.clone());
+            }
+        }
+    }
+    // Drop borrowed maps before updating their owners.
+    drop((facts, messages, activity, metadata));
+    for (_, entry) in entries
+        .iter_mut()
+        .filter(|(_, entry)| entry.available && entry.status != "failed")
+    {
+        for fact in entry
+            .facts
+            .iter()
+            .filter(|fact| bad_facts.contains(&fact.event_key))
+        {
+            note_thread_usage_gap(coverage, fact, "conflictingUsageReplica");
+        }
+        let usage = entry.facts.iter().any(|f| bad_facts.contains(&f.event_key));
+        let message = entry
+            .messages
+            .iter()
+            .any(|m| bad_messages.contains(&(m.session_key.clone(), m.native_id.clone())));
+        let runtime = entry
+            .native_activity
+            .iter()
+            .any(|e| bad_activity.contains(&(e.session_key.clone(), e.event_key.clone())));
+        let meta = entry
+            .sessions
+            .iter()
+            .any(|s| bad_metadata.contains(&s.identity.key));
+        for (affected, reason) in [
+            (usage, "conflictingUsageReplica"),
+            (message, "conflictingMessageReplica"),
+            (runtime, "activityIdentityUnavailable"),
+            (meta, "conflictingSessionMetadata"),
+        ] {
+            if affected {
+                entry.status = "partial".into();
+                if !entry.reasons.iter().any(|r| r == reason) {
+                    entry.reasons.push(reason.into());
+                }
+            }
+        }
+    }
+}
+
+fn generation_is_current(entry: &Entry, epoch: &Option<String>) -> bool {
+    entry.native_method
+        && entry.status == "ok"
+        && entry.stamp.as_ref().is_some_and(|stamp| {
+            stamp["epoch"] == json!(epoch)
+                && stamp["methodVersion"] == json!(super::codex_native::VERSION)
+        })
+}
+
+fn input_from_rows(
+    rows: BTreeMap<String, Row>,
+    common: Vec<SourceHealth>,
+    epoch: Option<String>,
+) -> AnalyticsInput {
     let mut input = AnalyticsInput {
         snapshot_version: String::new(),
         sessions: vec![],
@@ -1816,21 +2214,88 @@ fn input_from_rows(rows: BTreeMap<String, Row>, common: Vec<SourceHealth>) -> An
         reasons: vec![],
         source_reasons: vec![],
         sources: vec![],
+        native_activity: vec![],
+        source_observations: vec![],
+        codex_native_ready: false,
+        legacy_history_available: false,
+        thread_usage_coverage: Default::default(),
     };
     let mut hash = Sha256::new();
+    hash.update(serde_json::to_vec(&epoch).unwrap_or_default());
     let mut entries = Vec::new();
+    input.codex_native_ready = rows
+        .get(rebuild::GENERATION_KEY)
+        .and_then(|r| r.entry.as_ref().ok())
+        .and_then(Option::as_ref)
+        .is_some_and(|entry| generation_is_current(entry, &epoch));
     for (path, row) in rows {
         hash.update(path.as_bytes());
         hash.update(row.raw.as_bytes());
-        match row.entry {
-            Ok(Some(entry)) => entries.push((row.provider, entry)),
-            Ok(None) => {}
-            Err(()) => input.source_reasons.push(SourceReason {
-                tool_id: row.provider.clone(),
-                source_id: source_id(&row.provider).into(),
-                reason: "analyticsCacheUnavailable".into(),
-            }),
+        if path == rebuild::GENERATION_KEY {
+            continue;
         }
+        match row.entry {
+            Ok(Some(entry)) => {
+                if row.provider == "codex" && input.codex_native_ready && !entry.native_method {
+                    input
+                        .source_observations
+                        .push(super::session_analytics::SourceObservation {
+                            tool_id: row.provider.clone(),
+                            source_id: source_id(&row.provider).into(),
+                            status: "partial".into(),
+                            dated: false,
+                        });
+                    input.source_reasons.push(SourceReason {
+                        tool_id: "codex".into(),
+                        source_id: "codex_session".into(),
+                        reason: "legacyCodexHistoryUnverified".into(),
+                    });
+                    continue;
+                }
+                entries.push((row.provider, entry));
+            }
+            Ok(None) => {}
+            Err(()) => {
+                input
+                    .source_observations
+                    .push(super::session_analytics::SourceObservation {
+                        tool_id: row.provider.clone(),
+                        source_id: source_id(&row.provider).into(),
+                        status: "failed".into(),
+                        dated: false,
+                    });
+                input.source_reasons.push(SourceReason {
+                    tool_id: row.provider.clone(),
+                    source_id: source_id(&row.provider).into(),
+                    reason: "analyticsCacheUnavailable".into(),
+                });
+            }
+        }
+    }
+    codex_index::reconcile(&mut entries, &mut input.thread_usage_coverage);
+    reconcile_coverage(&mut entries, &mut input.thread_usage_coverage);
+    for (provider, entry) in &entries {
+        let count = entry
+            .physical_source_count
+            .unwrap_or(1)
+            .max(usize::from(entry.status == "failed"));
+        let dated = (!entry.facts.is_empty()
+            || !entry.messages.is_empty()
+            || !entry.native_activity.is_empty())
+            && !entry.reasons.iter().any(|r| {
+                matches!(
+                    r.as_str(),
+                    "missingTimestamp" | "usageTimeUnavailable" | "messageTimeUnavailable"
+                )
+            });
+        input.source_observations.extend((0..count).map(|_| {
+            super::session_analytics::SourceObservation {
+                tool_id: provider.clone(),
+                source_id: source_id(provider).into(),
+                status: entry.status.clone(),
+                dated,
+            }
+        }));
     }
     let has_obsolete_entries = entries
         .iter()
@@ -1962,6 +2427,7 @@ fn input_from_rows(rows: BTreeMap<String, Row>, common: Vec<SourceHealth>) -> An
             }
             facts.insert(fact.event_key.clone(), fact);
         }
+        input.native_activity.extend(entry.native_activity);
         for message in entry.messages {
             let k = (message.session_key.clone(), message.native_id.clone());
             if message_conflicts.contains(&k) {
@@ -1990,6 +2456,32 @@ fn input_from_rows(rows: BTreeMap<String, Row>, common: Vec<SourceHealth>) -> An
                 source_id: fact.source_id,
                 reason: "conflictingUsageReplica".into(),
             });
+        }
+    }
+    let mut seen_activity = BTreeMap::new();
+    let mut bad_activity = BTreeSet::new();
+    for e in &input.native_activity {
+        let id = (e.session_key.clone(), e.event_key.clone());
+        if seen_activity
+            .insert(id.clone(), (e.at_ms, e.main))
+            .is_some_and(|prior| prior != (e.at_ms, e.main))
+        {
+            bad_activity.insert(id);
+        }
+    }
+    if !bad_activity.is_empty() {
+        input
+            .native_activity
+            .retain(|e| !bad_activity.contains(&(e.session_key.clone(), e.event_key.clone())));
+        for (key, _) in bad_activity {
+            if let Some(s) = sessions.get_mut(&key) {
+                s.message_reasons.push("activityIdentityUnavailable".into());
+                input.source_reasons.push(SourceReason {
+                    tool_id: s.identity.tool_id.clone(),
+                    source_id: source_id(&s.identity.tool_id).into(),
+                    reason: "activityIdentityUnavailable".into(),
+                });
+            }
         }
     }
     let keys: BTreeSet<_> = sessions.keys().cloned().collect();
@@ -2771,11 +3263,13 @@ mod tests {
         let claude = dir.path().join("c.jsonl");
         let codex = dir.path().join("x.jsonl");
         write(&claude, &row("c", "m", 3));
-        std::fs::write(&codex,[json!({"type":"session_meta","payload":{"id":"x","cwd":"/p","source":"cli"}}),json!({"type":"event_msg","timestamp":"2026-10-15T00:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5,"output_tokens":2}}}})].iter().map(Value::to_string).collect::<Vec<_>>().join("\n")).unwrap();
+        std::fs::write(&codex,[json!({"type":"session_meta","payload":{"id":"x","cwd":"/p","source":"cli"}}),json!({"type":"turn_context","payload":{"model":"fixture"}}),json!({"type":"event_msg","timestamp":"2026-10-15T00:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":2}}}})].iter().map(Value::to_string).collect::<Vec<_>>().join("\n")).unwrap();
         let mut x = spec(&codex);
         x.provider = "codex".into();
         refresh_sources(&db, &[spec(&claude), x.clone()]).unwrap();
         let discovery = Discovery {
+            roots: vec![],
+            require_route_match: false,
             specs: vec![x],
             batches: vec![],
             failures: vec![DiscoveryFailure {
@@ -2897,7 +3391,7 @@ mod tests {
         )
         .unwrap();
         let codex = dir.path().join("x.jsonl");
-        std::fs::write(&codex,[json!({"type":"session_meta","payload":{"id":"x","cwd":"/p","source":"cli"}}),json!({"type":"event_msg","timestamp":"2026-10-15T00:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5,"output_tokens":2}}}})].iter().map(Value::to_string).collect::<Vec<_>>().join("\n")).unwrap();
+        std::fs::write(&codex,[json!({"type":"session_meta","payload":{"id":"x","cwd":"/p","source":"cli"}}),json!({"type":"turn_context","payload":{"model":"fixture"}}),json!({"type":"event_msg","timestamp":"2026-10-15T00:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":2}}}})].iter().map(Value::to_string).collect::<Vec<_>>().join("\n")).unwrap();
         let mut oc_spec = spec(&native);
         oc_spec.provider = "opencode".into();
         let mut cx_spec = spec(&codex);

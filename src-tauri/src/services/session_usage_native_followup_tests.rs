@@ -310,19 +310,21 @@ fn native_followup_gemini_jsonl_missing_or_future_kind_cannot_claim_main_role() 
 
 fn codex_rows(fork: bool) -> Vec<Value> {
     let mut rows = vec![
-        json!({"type":"session_meta","payload":{"id":"parent","cwd":"/fixture","source":"cli"}}),
-        json!({"type":"event_msg","timestamp":"2026-10-15T00:00:01Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":1}}}}),
+        json!({"type":"session_meta","timestamp":"2026-10-15T00:00:00Z","payload":{"id":"parent","cwd":"/fixture","source":"cli"}}),
+        json!({"type":"turn_context","timestamp":"2026-10-15T00:00:00Z","payload":{"model":"fixture"}}),
+        json!({"type":"event_msg","timestamp":"2026-10-15T00:00:01Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":1}}}}),
     ];
     if fork {
         rows.push(json!({"type":"session_meta","payload":{"id":"child","forked_from_id":"parent","parent_thread_id":"parent","cwd":"/fixture","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent"}}}}}));
+        rows.push(json!({"type":"turn_context","timestamp":"2026-10-15T00:00:01.500Z","payload":{"thread_id":"parent","turn_id":"owned-followup","model":"fixture"}}));
     }
-    rows.push(json!({"type":"event_msg","timestamp":"2026-10-15T00:00:02Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"output_tokens":2}}}}));
+    rows.push(json!({"type":"event_msg","timestamp":"2026-10-15T00:00:02Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":2}}}}));
     rows
 }
 
 #[test]
 #[serial]
-fn native_followup_codex_replayed_headers_are_unknown_partial_and_warm_cached() {
+fn native_followup_codex_replayed_headers_keep_canonical_thread_and_warm_cache() {
     let home = sandbox();
     let path = home.home().join("codex-fork.jsonl");
     lines(&path, &codex_rows(true));
@@ -332,13 +334,18 @@ fn native_followup_codex_replayed_headers_are_unknown_partial_and_warm_cached() 
     let report = index::refresh_sources(&db, &sources).unwrap();
     assert_eq!(report.failed, 0);
     let input = index::read_input(&db).unwrap();
-    assert!(input.sessions.is_empty());
-    assert!(input.facts.is_empty());
+    assert_eq!(input.sessions.len(), 1);
+    assert_eq!(input.sessions[0].native_session_id, "parent");
+    assert_eq!(input.facts.len(), 2);
+    assert_eq!(
+        input
+            .facts
+            .iter()
+            .map(|f| f.buckets[0] + f.buckets[1])
+            .sum::<u64>(),
+        22
+    );
     assert!(input.messages.is_empty());
-    assert!(input
-        .source_reasons
-        .iter()
-        .any(|r| r.reason == "sessionIdentityUnavailable"));
     assert_eq!(
         buckets(&db),
         [7, 2, 0, 0],
@@ -393,9 +400,15 @@ fn native_followup_codex_actual_malformed_or_missing_source_still_fails() {
         .unwrap();
     let db = Database::memory().unwrap();
     let sources = [spec(&path, "codex")];
-    assert_eq!(index::refresh_sources(&db, &sources).unwrap().failed, 1);
+    assert_eq!(index::refresh_sources(&db, &sources).unwrap().failed, 0);
+    let partial = index::read_input(&db).unwrap();
+    assert_eq!(partial.facts.len(), 2);
+    assert!(partial
+        .source_reasons
+        .iter()
+        .any(|r| r.reason == "malformedNativeRecord"));
     std::fs::remove_file(&path).unwrap();
-    assert_eq!(index::refresh_sources(&db, &sources).unwrap().failed, 1);
+    assert!(index::refresh_sources(&db, &sources).unwrap().failed >= 1);
 }
 
 #[test]
@@ -416,17 +429,23 @@ fn native_followup_codex_failed_replay_preserves_cache_until_identity_is_known_p
         .unwrap()
         .write_all(b"{broken fixture\n")
         .unwrap();
-    assert_eq!(index::refresh_sources(&db, &sources).unwrap().failed, 1);
+    assert_eq!(index::refresh_sources(&db, &sources).unwrap().failed, 0);
+    let partial = index::read_input(&db).unwrap();
     assert_eq!(
-        index::read_input(&db).unwrap().facts.len(),
+        partial.facts.len(),
         2,
-        "real malformed input must retain last known cache"
+        "malformed lines must not discard independently verified events"
     );
+    assert!(partial
+        .source_reasons
+        .iter()
+        .any(|r| r.reason == "malformedNativeRecord"));
     lines(&path, &codex_rows(true));
     assert_eq!(index::refresh_sources(&db, &sources).unwrap().failed, 0);
     let partial = index::read_input(&db).unwrap();
-    assert!(partial.facts.is_empty());
-    assert!(partial.sessions.is_empty());
+    assert_eq!(partial.facts.len(), 2);
+    assert_eq!(partial.sessions.len(), 1);
+    assert_eq!(partial.sessions[0].native_session_id, "parent");
 }
 
 #[test]

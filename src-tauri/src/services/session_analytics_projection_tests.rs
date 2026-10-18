@@ -17,7 +17,7 @@ fn selected() -> UsageQueryV1 {
         version: 1,
         start_ms: Some(NOW - 86_400_000),
         end_ms: NOW,
-        tool_ids: vec!["codex".into()],
+        tool_ids: vec!["claude".into()],
         model_ids: vec![],
         project_ids: vec![],
         source_ids: vec![],
@@ -28,20 +28,20 @@ fn seed(conn: &Connection, path: &str, tokens: u64) {
     source_cache::merge_on(
         conn,
         path,
-        "codex",
+        "claude",
         None,
         Part::Analytics,
         &None,
         Some(json!({
             "version":1,"stamp":null,
             "sessions":[{
-                "identity":{"key":path,"tool_id":"codex","project":"Unknown","verified_root_key":null},
+                "identity":{"key":path,"tool_id":"claude","project":"Unknown","verified_root_key":null},
                 "native_session_id":path,"title":"Safe title","project_label":null,
                 "project_path":null,"manager_key":"manager","source_available":true,
                 "messages_supported":true,"message_reasons":[]
             }],
-            "facts":[{"event_key":path,"session_key":path,"tool_id":"codex",
-                "source_id":"codex_session","model":"m","at_ms":NOW-1000,
+            "facts":[{"event_key":path,"session_key":path,"tool_id":"claude",
+                "source_id":"session_log","model":"m","at_ms":NOW-1000,
                 "buckets":[tokens,2,0,0],"complete":true}],
             "messages":[{"session_key":path,"native_id":"m","at_ms":NOW-1000,"role":"User","main":true}],
             "reasons":[],"available":true,"status":"ok","priority":0,
@@ -53,7 +53,7 @@ fn seed(conn: &Connection, path: &str, tokens: u64) {
 
 fn ready(conn: &Connection) {
     for channel in [Channel::Ledger, Channel::Analytics] {
-        let attempt = usage_health::begin_on(conn, "codex", "codex_session", channel, 1).unwrap();
+        let attempt = usage_health::begin_on(conn, "claude", "session_log", channel, 1).unwrap();
         assert!(usage_health::finish_on(conn, &attempt, Outcome::Ok, 1).unwrap());
     }
 }
@@ -76,7 +76,7 @@ fn source(result: &SessionAnalytics) -> &super::super::usage_query::SourceHealth
     result
         .sources
         .iter()
-        .find(|source| source.source_id == "codex_session")
+        .find(|source| source.source_id == "session_log")
         .unwrap()
 }
 
@@ -145,7 +145,7 @@ fn analytics_projection_every_raw_column_invalidates_and_preserves_original_rece
     for (sql, value) in [
         ("UPDATE session_meta_cache SET stamp=?1", "different-stamp"),
         ("UPDATE session_meta_cache SET parser_version=?1", "4321"),
-        ("UPDATE session_meta_cache SET provider_id=?1", "claude"),
+        ("UPDATE session_meta_cache SET provider_id=?1", "gemini"),
         (
             "UPDATE session_meta_cache SET source_path=?1",
             "moved-source",
@@ -294,7 +294,7 @@ fn analytics_projection_common_health_epoch_and_retained_range_changes_are_fresh
     {
         let conn = db.conn.lock().unwrap();
         let attempt =
-            usage_health::begin_on(&conn, "codex", "codex_session", Channel::Analytics, 2).unwrap();
+            usage_health::begin_on(&conn, "claude", "session_log", Channel::Analytics, 2).unwrap();
         assert_eq!(source(&run_without_lock(&conn, &cache)).status, "unknown");
         usage_health::finish_on(
             &conn,
@@ -322,7 +322,7 @@ fn analytics_projection_common_health_epoch_and_retained_range_changes_are_fresh
     );
     {
         let conn = db.conn.lock().unwrap();
-        conn.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at,data_source) VALUES('detail','fixture','codex','m',1,0,0,1,'codex_session')", []).unwrap();
+        conn.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at,data_source) VALUES('detail','fixture','claude','m',1,0,0,1,'session_log')", []).unwrap();
     }
     let updated = run(&db, &cache);
     assert_eq!(

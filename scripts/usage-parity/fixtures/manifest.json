@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "referenceCommit": "bfaedf18301d02a423bd5422d22e41432d231ab8",
+  "synthetic": true,
+  "timezone": "UTC",
+  "now": "2026-10-02T23:59:59Z",
+  "files": [
+    {
+      "path": "rollout-2026-10-02T00-00-00-parity-a.jsonl",
+      "threadId": "parity-a",
+      "purpose": "paired legacy/new event; later-event day/hour; exact five-minute exclusion"
+    },
+    {
+      "path": "rollout-2026-10-02T00-00-00-parity-b.jsonl",
+      "threadId": "parity-b",
+      "purpose": "new response records; compaction embedded/top-level duplicate"
+    },
+    {
+      "path": "rollout-2026-10-02T00-00-00-parity-c.jsonl",
+      "threadId": "parity-c",
+      "purpose": "counter reset; equal-sized independent legacy calls"
+    },
+    {
+      "path": "rollout-2026-10-02T00-00-00-parity-empty.jsonl",
+      "threadId": "parity-empty",
+      "purpose": "metadata-only source does not create an active session"
+    }
+  ],
+  "pricesUsdPerMillion": {
+    "parity-priced": {
+      "input": 2,
+      "output": 8,
+      "cacheRead": 0.25,
+      "cacheWrite": 3
+    }
+  },
+  "activityCases": [
+    {
+      "id": "strict-gap-and-clock-rollback",
+      "timezone": "UTC",
+      "main": true,
+      "timestamps": [
+        "2026-10-02T00:00:00Z",
+        "2026-10-02T00:05:00Z",
+        "2026-10-02T00:09:59.999Z",
+        "2026-10-02T00:09:00Z",
+        "2026-10-02T00:10:00Z"
+      ],
+      "expectedActiveMs": 300000
+    },
+    {
+      "id": "midnight-later-event",
+      "timezone": "UTC",
+      "main": true,
+      "timestamps": [
+        "2026-10-01T23:59:59.400Z",
+        "2026-10-02T00:00:01.100Z"
+      ],
+      "expectedActiveMs": 1700
+    },
+    {
+      "id": "dst-fall-back-later-local-hour",
+      "timezone": "America/New_York",
+      "main": true,
+      "timestamps": [
+        "2026-11-01T01:59:58-04:00",
+        "2026-11-01T01:00:02-05:00"
+      ],
+      "expectedActiveMs": 4000
+    },
+    {
+      "id": "subagent-does-not-add-runtime",
+      "timezone": "UTC",
+      "main": false,
+      "timestamps": [
+        "2026-10-02T00:00:00Z",
+        "2026-10-02T00:00:01Z"
+      ],
+      "expectedActiveMs": 0
+    }
+  ]
+}

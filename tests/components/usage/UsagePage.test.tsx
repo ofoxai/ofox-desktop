@@ -184,6 +184,7 @@ describe("UsagePage", () => {
           return {
             ...fixture,
             ...receipt,
+            pricingCoverage: { ...fixture.pricingCoverage, apex: mocks.apex },
             totals: { ...fixture.totals, estimate: known("3.25") },
           };
         if (command === "get_request_logs")

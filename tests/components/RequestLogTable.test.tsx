@@ -71,6 +71,45 @@ describe("RequestLogTable", () => {
     );
   });
 
+  it("keeps a rebuilt record's absent saved amount unknown in the legacy table", () => {
+    useRequestLogsMock.mockReturnValue({
+      data: {
+        data: [
+          {
+            requestId: "rebuilt",
+            appType: "codex",
+            model: "test-model",
+            providerId: "local",
+            createdAt: 1,
+            inputTokens: 1,
+            outputTokens: 2,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+            totalCostUsd: "0",
+            recordedCostUsd: null,
+            costMultiplier: "1",
+            latencyMs: 0,
+            statusCode: 200,
+            dataSource: "codex_session",
+          },
+        ],
+        total: 1,
+        page: 0,
+        pageSize: 20,
+      },
+      isLoading: false,
+    });
+    render(
+      <RequestLogTable
+        range={{ preset: "today" }}
+        rangeLabel="Today"
+        appType="all"
+        refreshIntervalMs={0}
+      />,
+    );
+    expect(screen.queryByText("$0.0000")).toBeNull();
+  });
+
   it("resets pagination when the dashboard range changes", async () => {
     const initialRange: UsageRangeSelection = { preset: "today" };
     const nextRange: UsageRangeSelection = {

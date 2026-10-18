@@ -14,7 +14,10 @@ use crate::{
 };
 use serde_json::Value;
 use std::io::Read;
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 pub(crate) fn stamp(roots: &[PathBuf]) -> Result<Value, AppError> {
     let files = pi::usage_files(roots).map_err(|_| invalid())?;
@@ -33,6 +36,8 @@ pub(crate) fn read(db: &Database, roots: &[PathBuf]) -> Result<ParsedSource, App
     let mut sessions = BTreeMap::new();
     let mut facts = BTreeMap::new();
     let mut messages = BTreeMap::new();
+    let mut native_streams = BTreeMap::new();
+    let mut activity_entries = 0usize;
     let mut projected_entries = 0usize;
     for (path, read) in roster {
         let Some(sid) = read.session_id.as_deref() else {
@@ -93,6 +98,12 @@ pub(crate) fn read(db: &Database, roots: &[PathBuf]) -> Result<ParsedSource, App
             .unwrap_or_else(|| sid.into());
         // A fork is a separate conversation, not a subagent root rollup.
         let mut descriptor = native::descriptor("pi", sid, &name, project, None, path.to_str());
+        descriptor
+            .message_reasons
+            .extend(read.native_activity_reasons.iter().cloned());
+        result
+            .reasons
+            .extend(read.native_activity_reasons.iter().cloned());
         let ownership_unknown = read.reasons.iter().any(|reason| {
             matches!(
                 reason.as_str(),
@@ -116,6 +127,26 @@ pub(crate) fn read(db: &Database, roots: &[PathBuf]) -> Result<ParsedSource, App
             descriptor.message_reasons.push("incompleteSource".into());
         }
         if !ownership_unknown {
+            let inherited = read
+                .inherited_entries
+                .iter()
+                .map(|id| native::activity_key("pi", &serde_json::json!(["entry", id]).to_string()))
+                .collect::<BTreeSet<_>>();
+            let events = read
+                .native_activity
+                .into_iter()
+                .filter(|event| !inherited.contains(&event.event_key))
+                .collect();
+            activity_entries = activity_entries
+                .checked_add(native::merge_activity_stream(
+                    &mut native_streams,
+                    key("pi", sid),
+                    events,
+                )?)
+                .ok_or_else(invalid)?;
+            if activity_entries > 100_000 {
+                return Err(invalid());
+            }
             for entry in branch {
                 if entry["type"] != "message" {
                     continue;
@@ -208,6 +239,7 @@ pub(crate) fn read(db: &Database, roots: &[PathBuf]) -> Result<ParsedSource, App
     result.sessions = sessions.into_values().collect();
     result.facts = facts.into_values().collect();
     result.messages = messages.into_values().collect();
+    result.native_activity = native_streams.into_values().flatten().collect();
     result.reasons.sort();
     result.reasons.dedup();
     Ok(result)
@@ -273,10 +305,57 @@ mod tests {
             .sessions
             .iter()
             .all(|session| session.identity.verified_root_key.is_none()));
+        assert_eq!(
+            parsed
+                .native_activity
+                .iter()
+                .filter(|event| event.session_key == key("pi", "child"))
+                .count(),
+            2
+        );
         std::fs::remove_file(parent).unwrap();
         let missing = read(&db, &[root]).unwrap();
         assert!(missing.facts.is_empty());
+        assert!(missing.native_activity.is_empty());
         assert!(!missing.sessions[0].messages_supported);
+    }
+
+    #[test]
+    fn native_runtime_pi_uses_all_owned_runtime_but_visible_messages_keep_active_branch() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("sessions");
+        let mut entries = rows("s");
+        let mut abandoned = entries[2].clone();
+        abandoned["id"] = json!("abandoned");
+        abandoned["message"]["timestamp"] = json!(1792022402000_i64);
+        abandoned["timestamp"] = json!("2026-10-15T00:00:02Z");
+        entries.push(abandoned);
+        let mut active = entries[2].clone();
+        active["id"] = json!("active");
+        active["message"]["timestamp"] = json!(1792022403000_i64);
+        active["timestamp"] = json!("2026-10-15T00:00:03Z");
+        entries.push(active);
+        write(&root, "s.jsonl", &entries);
+        let parsed = read(&Database::memory().unwrap(), &[root]).unwrap();
+        assert_eq!(parsed.messages.len(), 2);
+        assert_eq!(parsed.native_activity.len(), 5);
+        assert_eq!(
+            parsed
+                .native_activity
+                .iter()
+                .map(|event| event.at_ms)
+                .collect::<Vec<_>>(),
+            [
+                1792022400000,
+                1792022400000,
+                1792022401000,
+                1792022402000,
+                1792022403000
+            ]
+        );
+        assert!(!serde_json::to_string(&parsed.native_activity)
+            .unwrap()
+            .contains("private reply"));
     }
     #[test]
     fn analytics_pi_conflicting_replica_body_never_becomes_a_successful_projection() {

@@ -155,7 +155,7 @@ fn assert_reconciles(result: &SessionAnalytics, active_ms: u64, messages: u64) {
 }
 
 #[test]
-fn session_analytics_api_dst_natural_days_hours_and_clipped_midnight_activity_reconcile() {
+fn session_analytics_api_dst_natural_days_hours_and_later_event_activity_reconcile() {
     let zone = DstZone {
         standard: -5 * 3_600,
         daylight: -4 * 3_600,
@@ -248,13 +248,13 @@ fn session_analytics_api_dst_natural_days_hours_and_clipped_midnight_activity_re
             day.series[0].end_ms - day.series[0].start_ms,
             day_hours * HOUR
         );
-        assert_eq!(active_cell(&day, 6, 0), MINUTE as u64);
-        assert_eq!(active_cell(&day, 6, 23), MINUTE as u64);
+        assert_eq!(active_cell(&day, 6, 0), 2 * MINUTE as u64);
+        assert_eq!(active_cell(&day, 6, 23), 0);
         if before_hour == after_hour {
             assert_eq!(active_cell(&day, 6, 1), 2 * MINUTE as u64);
         } else {
-            assert_eq!(active_cell(&day, 6, before_hour), MINUTE as u64);
-            assert_eq!(active_cell(&day, 6, after_hour), MINUTE as u64);
+            assert_eq!(active_cell(&day, 6, before_hour), 0);
+            assert_eq!(active_cell(&day, 6, after_hour), 2 * MINUTE as u64);
             assert_eq!(
                 active_cell(&day, 6, 2),
                 0,
@@ -262,7 +262,7 @@ fn session_analytics_api_dst_natural_days_hours_and_clipped_midnight_activity_re
             );
         }
 
-        // Both gaps cross a midnight and both query boundaries cut a gap.
+        // Native runtime uses the later event, never a clipped fraction of a gap.
         let expanded = query(
             &db,
             query_range(start - MINUTE / 2, end + MINUTE / 2),
@@ -271,7 +271,7 @@ fn session_analytics_api_dst_natural_days_hours_and_clipped_midnight_activity_re
             &zone,
         )
         .unwrap();
-        assert_reconciles(&expanded, 5 * MINUTE as u64, 4);
+        assert_reconciles(&expanded, 4 * MINUTE as u64, 4);
         assert_eq!(expanded.series.len(), 3);
         assert_eq!(
             expanded
@@ -279,13 +279,13 @@ fn session_analytics_api_dst_natural_days_hours_and_clipped_midnight_activity_re
                 .iter()
                 .map(|day| day.known_active_ms.unwrap())
                 .collect::<Vec<_>>(),
-            [30_000, 240_000, 30_000],
+            [0, 240_000, 0],
         );
-        assert_eq!(active_cell(&expanded, 5, 23), 30_000);
-        assert_eq!(active_cell(&expanded, 0, 0), 30_000);
+        assert_eq!(active_cell(&expanded, 5, 23), 0);
+        assert_eq!(active_cell(&expanded, 0, 0), 0);
 
-        // Neither endpoint message is in this window; the verified interval
-        // still establishes a cohort and is clipped around the DST transition.
+        // Neither later endpoint is in this narrow window. Native event
+        // attribution does not create activity or a session from gap overlap.
         let clipped = query(
             &db,
             query_range(transition - MINUTE / 2, transition + MINUTE / 2),
@@ -294,17 +294,20 @@ fn session_analytics_api_dst_natural_days_hours_and_clipped_midnight_activity_re
             &zone,
         )
         .unwrap();
-        assert_reconciles(&clipped, MINUTE as u64, 0);
-        assert_eq!(clipped.totals.session_count, 1);
+        // There is no metric sample in this cohort. Do not turn its absence
+        // into a measured zero duration or revive a clipped message gap.
+        assert!(clipped.known_metrics.is_none());
+        assert_eq!(clipped.totals.active_ms, None);
+        assert_eq!(clipped.metric_coverage.state, "unavailable");
+        assert_eq!(clipped.metric_coverage.eligible_sessions, 0);
+        assert_eq!(clipped.totals.session_count, 0);
         assert_eq!(
             clipped.series[0].end_ms - clipped.series[0].start_ms,
             day_hours * HOUR
         );
-        if before_hour == after_hour {
-            assert_eq!(active_cell(&clipped, 6, 1), MINUTE as u64);
-        } else {
-            assert_eq!(active_cell(&clipped, 6, before_hour), 30_000);
-            assert_eq!(active_cell(&clipped, 6, after_hour), 30_000);
-        }
+        assert!(
+            clipped.activity_by_hour.cells.is_empty(),
+            "a cohort without activity samples must not draw measured zero cells"
+        );
     }
 }

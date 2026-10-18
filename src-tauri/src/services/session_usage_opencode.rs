@@ -28,8 +28,8 @@ use crate::error::AppError;
 use crate::proxy::usage::calculator::CostCalculator;
 use crate::proxy::usage::parser::TokenUsage;
 use crate::services::session_usage::SessionSyncResult;
-use crate::services::session_usage_codex::find_codex_pricing_checked;
 use crate::services::usage_source::{self, Prepared, ProviderIndex, Snapshot};
+use crate::services::usage_sync_db::find_session_pricing_checked;
 use crate::services::usage_sync_db::{
     commit_sync_batch, read_sync_state, CheckpointChange, SyncState,
 };
@@ -612,7 +612,7 @@ pub(crate) fn normalized_facts(
 /// whether the row changed.
 fn upsert_call(conn: &Connection, call: &OcCall) -> Result<bool, AppError> {
     let request_id = format!("opencode:{}", call.msg_id);
-    let cost = find_codex_pricing_checked(conn, &call.model)?
+    let cost = find_session_pricing_checked(conn, &call.model)?
         .map(|p| CostCalculator::calculate(&call.usage, &p, Decimal::ONE));
     let costs = |pick: fn(&crate::proxy::usage::CostBreakdown) -> Decimal| {
         cost.as_ref()

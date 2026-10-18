@@ -7,9 +7,11 @@ import type { UsageAttribution } from "@/types/usageQuery";
 export function UsageKpis({
   totals: v,
   attribution,
+  unavailable = false,
 }: {
   totals: UsageTotals;
   attribution?: UsageAttribution;
+  unavailable?: boolean;
 }) {
   const { t } = useTranslation();
   return (
@@ -22,45 +24,51 @@ export function UsageKpis({
       items={[
         {
           label: "Tokens",
-          value: fmtTokens(v.totalTokens),
+          value: unavailable ? "—" : fmtTokens(v.totalTokens),
           sub: t("usagePage.io", {
-            input: fmtTokens(v.inputTokens),
-            output: fmtTokens(v.outputTokens),
+            input: unavailable ? "—" : fmtTokens(v.inputTokens),
+            output: unavailable ? "—" : fmtTokens(v.outputTokens),
           }),
         },
         {
           label: t("usagePage.cacheRead"),
-          value: fmtTokens(v.cacheReadTokens),
+          value: unavailable ? "—" : fmtTokens(v.cacheReadTokens),
           sub: t("usagePage.hitRate", {
             rate:
+              unavailable ||
               v.inputTokens + v.cacheReadTokens + v.cacheWriteTokens === 0
                 ? "—"
                 : `${Math.round(v.cacheHitRate * 100)}%`,
           }),
           title: t("usagePage.cacheWrite", {
-            value: fmtTokens(v.cacheWriteTokens),
+            value: unavailable ? "—" : fmtTokens(v.cacheWriteTokens),
           }),
         },
         {
           label: t("usagePage.cost"),
-          value: v.estimate
-            ? formatUsageEstimate(v.estimate)
-            : fmtCost(v.costUsd),
+          value: unavailable
+            ? "—"
+            : v.estimate
+              ? formatUsageEstimate(v.estimate)
+              : fmtCost(v.costUsd),
           title: t("usagePage.estimate"),
         },
-        { label: t("usageWorkbench.records"), value: fmtTokens(v.requests) },
+        {
+          label: t("usageWorkbench.records"),
+          value: unavailable ? "—" : fmtTokens(v.requests),
+        },
         ...(attribution
           ? [
               {
                 label: t("usageWorkbench.identifiedSessions"),
-                value: fmtTokens(attribution.sessionCount),
+                value: unavailable ? "—" : fmtTokens(attribution.sessionCount),
                 sub: attribution.partial
                   ? t("usageWorkbench.attributionPartial")
                   : undefined,
               },
               {
                 label: t("usageWorkbench.identifiedProjects"),
-                value: fmtTokens(attribution.projectCount),
+                value: unavailable ? "—" : fmtTokens(attribution.projectCount),
                 sub: attribution.partial
                   ? t("usageWorkbench.attributionPartial")
                   : undefined,

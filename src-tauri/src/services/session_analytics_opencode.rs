@@ -1,9 +1,13 @@
 //! OpenCode metadata/messages and usage read in one read-only native snapshot.
 //! Token semantics belong to session_usage_opencode, never a second parser.
+//! Runtime ordering follows Magpie bfaedf18 `parseOpenCode` (Copyright 2026
+//! yetone, MIT; see `../session_manager/MAGPIE_LICENSE`).
 use super::{
     session_analytics::SessionDescriptor,
     session_analytics_core::{MessageEvent, Project, Role, SessionIdentity, UsageFact},
     session_analytics_index::{key, project_key, ParsedSource},
+    session_analytics_native as native,
+    session_native_activity::NativeActivityEvent,
     session_usage_opencode, usage_source,
 };
 use crate::error::AppError;
@@ -17,10 +21,18 @@ fn error(code: &str) -> AppError {
 }
 const MAX_ROWS: usize = 100_000;
 const MAX_BYTES: usize = 64 * 1024 * 1024;
+struct RuntimeMessage {
+    id: String,
+    created_ms: Option<i64>,
+    completed_ms: Option<i64>,
+}
 struct Scan {
     sessions: BTreeMap<String, SessionDescriptor>,
     facts: Vec<UsageFact>,
     messages: Vec<MessageEvent>,
+    runtime_headers: BTreeMap<String, i64>,
+    runtime_messages: BTreeMap<String, Vec<RuntimeMessage>>,
+    runtime_message_count: usize,
     reasons: BTreeSet<String>,
     bytes: usize,
 }
@@ -30,6 +42,9 @@ impl Scan {
             sessions: BTreeMap::new(),
             facts: vec![],
             messages: vec![],
+            runtime_headers: BTreeMap::new(),
+            runtime_messages: BTreeMap::new(),
+            runtime_message_count: 0,
             reasons: BTreeSet::new(),
             bytes: 0,
         }
@@ -45,6 +60,7 @@ impl Scan {
                 .len()
                 .max(self.facts.len())
                 .max(self.messages.len())
+                .max(self.runtime_message_count)
                 > MAX_ROWS
         {
             return Err(error("sourceBudgetExceeded"));
@@ -107,6 +123,9 @@ impl Scan {
             messages_supported: true,
             message_reasons: vec![],
         };
+        if let Some(at) = native_time(value.pointer("/time/created")) {
+            self.runtime_headers.insert(id.into(), at);
+        }
         if self.sessions.insert(id.into(), descriptor).is_some() {
             return Err(error("conflictingSessionMetadata"));
         }
@@ -121,6 +140,35 @@ impl Scan {
     ) -> Result<(), AppError> {
         value["id"] = json!(id);
         value["sessionID"] = json!(sid);
+        if !id.is_empty() && self.sessions.contains_key(sid) {
+            let created_ms = native_time(value.pointer("/time/created"));
+            let completed_ms = (value["role"] == "assistant")
+                .then(|| native_time(value.pointer("/time/completed")))
+                .flatten();
+            if created_ms.is_none() && completed_ms.is_none() {
+                if let Some(session) = self.sessions.get_mut(sid) {
+                    session
+                        .message_reasons
+                        .push("activityTimeUnavailable".into());
+                }
+                self.reasons.insert("activityTimeUnavailable".into());
+            }
+            self.runtime_messages
+                .entry(sid.into())
+                .or_default()
+                .push(RuntimeMessage {
+                    id: id.into(),
+                    created_ms,
+                    completed_ms,
+                });
+            self.runtime_message_count = self
+                .runtime_message_count
+                .checked_add(1)
+                .ok_or_else(|| error("sourceBudgetExceeded"))?;
+            if self.runtime_message_count > MAX_ROWS {
+                return Err(error("sourceBudgetExceeded"));
+            }
+        }
         if let Some(fact) =
             session_usage_opencode::normalized_message(value.clone(), !id.is_empty())?
         {
@@ -194,14 +242,58 @@ impl Scan {
         });
         Ok(())
     }
-    fn finish(self) -> ParsedSource {
+    fn finish(mut self) -> ParsedSource {
+        let mut native_activity: Vec<NativeActivityEvent> = Vec::new();
+        for (sid, descriptor) in &self.sessions {
+            let main = descriptor.identity.verified_root_key.is_none();
+            if let Some(at) = self.runtime_headers.remove(sid) {
+                let mut event = native::runtime_event("opencode", sid, "[\"header\"]", at);
+                event.main = main;
+                native_activity.push(event);
+            }
+            let Some(mut messages) = self.runtime_messages.remove(sid) else {
+                continue;
+            };
+            // The native store has no ordered event log. Magpie orders its
+            // messages by creation and native ID, then observes completion in
+            // the same message before continuing to the next message.
+            messages.sort_by(|a, b| {
+                a.created_ms
+                    .unwrap_or(0)
+                    .cmp(&b.created_ms.unwrap_or(0))
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+            for message in messages {
+                for (phase, at) in [
+                    ("created", message.created_ms),
+                    ("completed", message.completed_ms),
+                ] {
+                    if let Some(at) = at {
+                        let mut event = native::runtime_event(
+                            "opencode",
+                            sid,
+                            &json!(["message", message.id, phase]).to_string(),
+                            at,
+                        );
+                        event.main = main;
+                        native_activity.push(event);
+                    }
+                }
+            }
+        }
         ParsedSource {
             sessions: self.sessions.into_values().collect(),
             facts: self.facts,
             messages: self.messages,
+            native_activity,
             reasons: self.reasons.into_iter().collect(),
         }
     }
+}
+fn native_time(value: Option<&Value>) -> Option<i64> {
+    value
+        .and_then(Value::as_i64)
+        .filter(|at| *at > 0 && chrono::DateTime::from_timestamp_millis(*at).is_some())
 }
 fn safe_id(id: &str) -> bool {
     !id.is_empty()
@@ -258,18 +350,24 @@ pub(crate) fn read(path: &Path) -> Result<ParsedSource, AppError> {
         let before: i64 = conn.query_row("PRAGMA data_version", [], |r| r.get(0))?;
         let tx = conn.unchecked_transaction()?;
         {
-            let mut statement =
-                tx.prepare("SELECT id,parent_id,title,directory FROM session ORDER BY id")?;
+            let has_created: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('session') WHERE name='time_created')", [], |row| row.get(0))?;
+            let sql = if has_created {
+                "SELECT id,parent_id,title,directory,time_created FROM session ORDER BY id"
+            } else {
+                "SELECT id,parent_id,title,directory,NULL FROM session ORDER BY id"
+            };
+            let mut statement = tx.prepare(sql)?;
             let rows = statement.query_map([], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, Option<String>>(1)?,
                     r.get::<_, Option<String>>(2)?,
                     r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
                 ))
             })?;
             for row in rows {
-                let (id, parent, title, directory) = row?;
+                let (id, parent, title, directory, created) = row?;
                 scan.budget(
                     id.len()
                         + parent.as_ref().map_or(0, String::len)
@@ -277,7 +375,7 @@ pub(crate) fn read(path: &Path) -> Result<ParsedSource, AppError> {
                         + directory.as_ref().map_or(0, String::len),
                 )?;
                 scan.session(
-                    &json!({"id":id,"parentID":parent,"title":title,"directory":directory}),
+                    &json!({"id":id,"parentID":parent,"title":title,"directory":directory,"time":{"created":created}}),
                     format!("sqlite:{}:{id}", path.display()),
                 )?;
             }
@@ -396,4 +494,61 @@ pub(crate) fn read(path: &Path) -> Result<ParsedSource, AppError> {
         }
     }
     Ok(scan.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_runtime_opencode_keeps_all_roles_and_completed_times_in_native_message_order() {
+        let mut scan = Scan::new();
+        scan.session(
+            &json!({"id":"root","directory":"/fixture/project","time":{"created":1000}}),
+            "root".into(),
+        )
+        .unwrap();
+        scan.session(&json!({"id":"child","parentID":"root","directory":"/fixture/project","time":{"created":1000}}), "child".into()).unwrap();
+        scan.message(
+            json!({"role":"assistant","time":{"created":4000,"completed":4500}}),
+            "assistant",
+            "root",
+            None,
+        )
+        .unwrap();
+        scan.message(json!({"role":"system","time":{"created":3000},"content":"private runtime not indexed"}), "system", "root", None).unwrap();
+        scan.message(
+            json!({"role":"user","time":{"created":2000}}),
+            "user",
+            "root",
+            None,
+        )
+        .unwrap();
+        scan.message(
+            json!({"role":"tool","time":{"created":2500}}),
+            "tool",
+            "child",
+            None,
+        )
+        .unwrap();
+        let parsed = scan.finish();
+        let root = parsed
+            .native_activity
+            .iter()
+            .filter(|event| event.session_key == key("opencode", "root"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            root.iter().map(|event| event.at_ms).collect::<Vec<_>>(),
+            [1000, 2000, 3000, 4000, 4500]
+        );
+        assert!(root.iter().all(|event| event.main));
+        assert!(parsed
+            .native_activity
+            .iter()
+            .filter(|event| event.session_key == key("opencode", "child"))
+            .all(|event| !event.main));
+        assert!(!serde_json::to_string(&parsed.native_activity)
+            .unwrap()
+            .contains("private runtime"));
+    }
 }

@@ -56,6 +56,8 @@ pub(crate) fn read(_db: &Database, roots: &[PathBuf]) -> Result<ParsedSource, Ap
     let mut facts = BTreeMap::new();
     let mut messages = BTreeMap::new();
     let mut message_hashes = BTreeMap::new();
+    let mut native_streams = BTreeMap::new();
+    let mut activity_entries = 0usize;
     let mut bytes = 0u64;
     for path in files {
         bytes = bytes
@@ -119,6 +121,16 @@ pub(crate) fn read(_db: &Database, roots: &[PathBuf]) -> Result<ParsedSource, Ap
             .filter(|reason| sidecar.is_none() || reason.as_str() != "projectNotRecorded")
             .cloned()
             .collect();
+        activity_entries = activity_entries
+            .checked_add(native::merge_activity_stream(
+                &mut native_streams,
+                key("workbuddy", &meta.session_id),
+                parsed.native_activity,
+            )?)
+            .ok_or_else(invalid)?;
+        if activity_entries > 100_000 {
+            return Err(invalid());
+        }
         if let Some(prior) = sessions.get(&meta.session_id) {
             let prior: &super::session_analytics::SessionDescriptor = prior;
             if prior.identity.project != descriptor.identity.project
@@ -168,6 +180,7 @@ pub(crate) fn read(_db: &Database, roots: &[PathBuf]) -> Result<ParsedSource, Ap
     result.sessions = sessions.into_values().collect();
     result.facts = facts.into_values().collect();
     result.messages = messages.into_values().collect();
+    result.native_activity = native_streams.into_values().flatten().collect();
     result.reasons.sort();
     result.reasons.dedup();
     Ok(result)
@@ -243,5 +256,38 @@ mod tests {
             .contains(&"messageTimeUnavailable".into()));
         std::fs::write(path, "invalid private body").unwrap();
         assert!(stamp(&[root]).is_ok());
+    }
+
+    #[test]
+    fn native_runtime_workbuddy_projects_the_validated_roster_once_and_rejects_runtime_conflicts() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("projects");
+        let path = source(&root, "one.jsonl", "s", 10);
+        let runtime = json!({"type":"function_call_result","id":"tool","sessionId":"s","timestamp":3000,"output":"private runtime"});
+        let text = std::fs::read_to_string(&path).unwrap() + &runtime.to_string() + "\n";
+        std::fs::write(&path, &text).unwrap();
+        std::fs::write(root.join("copy.jsonl"), &text).unwrap();
+        let parsed = read(&Database::memory().unwrap(), std::slice::from_ref(&root)).unwrap();
+        assert_eq!(parsed.native_activity.len(), 3);
+        assert_eq!(
+            parsed
+                .native_activity
+                .iter()
+                .map(|event| event.at_ms)
+                .collect::<Vec<_>>(),
+            [1000, 2000, 3000]
+        );
+        let encoded = serde_json::to_string(&parsed.native_activity).unwrap();
+        assert!(!encoded.contains("private runtime"));
+        assert!(!encoded.contains("private answer"));
+
+        let mut changed = runtime;
+        changed["output"] = json!("conflicting runtime");
+        let changed = text.lines().take(2).collect::<Vec<_>>().join("\n")
+            + "\n"
+            + &changed.to_string()
+            + "\n";
+        std::fs::write(root.join("copy.jsonl"), changed).unwrap();
+        assert!(read(&Database::memory().unwrap(), &[root]).is_err());
     }
 }

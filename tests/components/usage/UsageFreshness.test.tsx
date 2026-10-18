@@ -210,3 +210,30 @@ it("summarizes repeated tool failures once while keeping each source in the deta
   expect(screen.getByText(/claude_primary/)).toBeVisible();
   expect(screen.getByText(/claude_archive/)).toBeVisible();
 });
+
+it("shows source-file coverage in folded status without presenting it as message samples", () => {
+  render(
+    <UsageFreshness
+      receipt={{
+        methodVersion: "magpie-native-v1",
+        sourceCoverage: {
+          observed: 100,
+          read: 34,
+          partial: 64,
+          failed: 2,
+          undated: 3,
+          legacyHistoryAvailable: true,
+        },
+      }}
+      onSavedHistory={() => undefined}
+    />,
+  );
+  expect(screen.getByText("部分本机记录未计入")).toBeVisible();
+  expect(screen.getByText(/完整读取 34 个来源/)).not.toBeVisible();
+  fireEvent.click(screen.getByText("数据状态"));
+  expect(screen.getByText(/完整读取 34 个来源/)).toBeVisible();
+  expect(
+    screen.getByRole("button", { name: "查看原始历史记录" }),
+  ).toBeVisible();
+  expect(screen.queryByText(/有效.*会话/)).toBeNull();
+});

@@ -1,9 +1,6 @@
 //! Positive native session/project associations from the same cached snapshot
 //! as a usage query. A proxy's coincident SID is not a native import identity.
-use super::{
-    session_analytics_core::{self, Project},
-    session_analytics_index,
-};
+use super::session_analytics_core::{self, Project};
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -27,8 +24,7 @@ pub(crate) struct ProjectIndex {
     sessions: BTreeMap<(String, String), Association>,
 }
 impl ProjectIndex {
-    pub fn read_on(conn: &rusqlite::Connection) -> Result<Self, AppError> {
-        let input = session_analytics_index::read_input_on(conn)?;
+    pub fn from_input(input: &super::session_analytics::AnalyticsInput) -> Result<Self, AppError> {
         let identities: Vec<_> = input.sessions.iter().map(|s| s.identity.clone()).collect();
         let roots = session_analytics_core::resolve_roots(&identities)
             .map_err(|_| AppError::Database("usage.query.invalidSessionRoots".into()))?;
@@ -85,7 +81,7 @@ impl ProjectIndex {
             );
         }
         Ok(Self {
-            snapshot_version: input.snapshot_version,
+            snapshot_version: input.snapshot_version.clone(),
             options: options.into_values().collect(),
             sessions,
         })

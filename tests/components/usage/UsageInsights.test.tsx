@@ -180,7 +180,7 @@ it("does not mark token analysis unavailable when only message attribution is un
   };
   render(<UsageAnalysisStatus data={data} />);
   expect(screen.queryByText("当前条件无法统计")).toBeNull();
-  expect(screen.getByText("部分数据可用")).toBeVisible();
+  expect(screen.getByText("当前后端使用旧统计口径")).toBeVisible();
   expect(screen.getByText("消息和活跃不可用")).toBeVisible();
 });
 it("does not round a verifiable positive activity interval down to a displayed zero", () => {

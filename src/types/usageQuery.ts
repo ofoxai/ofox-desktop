@@ -47,6 +47,20 @@ export interface UsageReceipt {
   snapshotVersion: string;
   coverage: UsageCoverage;
   pricingCoverage: UsagePricingCoverage;
+  methodVersion?: string;
+  inputSnapshotVersion?: string;
+  sourceCoverage?: UsageSourceCoverage;
+}
+
+export interface UsageSourceCoverage {
+  observed: number;
+  read: number;
+  partial: number;
+  failed: number;
+  undated: number;
+  legacyHistoryAvailable: boolean;
+  usageAvailability?: "available" | "partial" | "unavailable";
+  knownUsageRecords?: number;
 }
 
 export type UsageSnapshotReceipt = Pick<
@@ -62,6 +76,7 @@ export interface UsageCapabilities {
   sessionAnalytics?: boolean;
   sessionProjectFilter?: boolean;
   localRefresh?: boolean;
+  nativeRebuild?: boolean;
   sources: {
     toolId: string;
     sourceIds: string[];
@@ -71,6 +86,14 @@ export interface UsageCapabilities {
     projectFilterSupported: boolean;
     reason: string | null;
   }[];
+}
+
+export interface UsageRebuildProgress {
+  operationId: string;
+  state: "running" | "cancelling" | "cancelled" | "completed" | "failed";
+  completedSources: number;
+  totalSources: number;
+  errorCode: string | null;
 }
 
 export interface UsageSourceHealth {
@@ -101,6 +124,7 @@ export interface UsageAttribution {
 }
 
 export interface UsageRequestFilters {
+  recordBasis?: "effective" | "savedHistory";
   sourceIds?: string[];
   statusCode?: number | null;
   statusKind?: "recorded" | "unrecorded" | null;

@@ -1,21 +1,38 @@
 import { useTranslation } from "react-i18next";
 import type { SessionAnalytics } from "@/types/sessionAnalytics";
+import { usageIsUnavailable } from "@/lib/usageWorkbench";
 import { UsageFreshness } from "./UsageFreshness";
+import {
+  hasSourceCoverageGaps,
+  UsageSourceCoverageDetails,
+} from "./UsageSourceCoverageDetails";
 
 export function UsageAnalysisStatus({
   data,
   compact = false,
+  onSavedHistory,
 }: {
   data: SessionAnalytics;
   compact?: boolean;
+  onSavedHistory?: () => void;
 }) {
   const { t, i18n } = useTranslation();
   const coverage = data.metricCoverage;
-  const unavailable = data.coverage.state === "unsupported";
-  const activityUnavailable = coverage?.state === "unavailable";
+  const messages = data.messageCoverage ?? coverage;
+  const activity = data.activityCoverage ?? coverage;
+  const sources = data.sourceCoverage;
+  const modern = data.methodVersion === "magpie-native-v1";
+  const unavailable =
+    data.coverage.state === "unsupported" || usageIsUnavailable(data);
+  const messagesUnavailable = messages?.state === "unavailable";
+  const activityUnavailable = activity?.state === "unavailable";
+  const sourcePartial =
+    data.coverage.state !== "complete" || hasSourceCoverageGaps(sources);
   const partial =
-    data.coverage.state !== "complete" ||
-    coverage?.state === "partial" ||
+    sourcePartial ||
+    messages?.state === "partial" ||
+    activity?.state === "partial" ||
+    messagesUnavailable ||
     activityUnavailable ||
     data.pricingCoverage.stale ||
     !!data.pricingCoverage.unpricedModelIds.length ||
@@ -27,7 +44,11 @@ export function UsageAnalysisStatus({
     ...data.sources.map((source) => source.lastAttemptAtMs ?? 0),
   );
   const reasons = [
-    ...new Set([...data.coverage.reasons, ...(coverage?.reasons ?? [])]),
+    ...new Set([
+      ...data.coverage.reasons,
+      ...(messages?.reasons ?? []),
+      ...(activity?.reasons ?? []),
+    ]),
   ];
   return (
     <details
@@ -38,20 +59,26 @@ export function UsageAnalysisStatus({
           className={`mr-2 inline-block h-1.5 w-1.5 rounded-full ${partial || unavailable ? "bg-warn" : "bg-ok"}`}
           aria-hidden
         />
-        {t(
-          `usageExperience.${unavailable ? "unavailable" : partial ? "partial" : "complete"}`,
-        )}
-        {activityUnavailable && (
+        <span>
+          {t(
+            !modern
+              ? "usageExperience.legacyMethod"
+              : unavailable
+                ? "usageExperience.unavailable"
+                : sourcePartial
+                  ? "usageExperience.nativePartial"
+                  : "usageExperience.nativeUpdated",
+          )}
+        </span>
+        {(activityUnavailable || messagesUnavailable) && (
           <span className="ml-3">
-            {t("usageExperience.activityUnavailable")}
-          </span>
-        )}
-        {coverage && !unavailable && (
-          <span className="ml-3">
-            {t("usageExperience.coverage", {
-              eligible: coverage.eligibleSessions,
-              excluded: coverage.excludedSessions,
-            })}
+            {t(
+              activityUnavailable && messagesUnavailable
+                ? "usageExperience.activityUnavailable"
+                : activityUnavailable
+                  ? "usageExperience.toolActivityUnavailable"
+                  : "usageExperience.messagesUnavailable",
+            )}
           </span>
         )}
         <span className="ml-3 text-ink-faint">
@@ -66,7 +93,44 @@ export function UsageAnalysisStatus({
         )}
       </summary>
       <div className="mt-3 space-y-2 border-t border-line-2 pt-3">
-        {coverage?.unquantifiedSourceGaps && (
+        {sources && (
+          <UsageSourceCoverageDetails
+            coverage={sources}
+            onSavedHistory={modern ? onSavedHistory : undefined}
+          />
+        )}
+        {(data.messageCoverage || data.activityCoverage) && !unavailable ? (
+          <>
+            {messages && (
+              <p>
+                {t("usageExperience.messageSamples", {
+                  eligible: messages.eligibleSessions,
+                  excluded: messages.excludedSessions,
+                })}
+              </p>
+            )}
+            {activity && (
+              <p>
+                {t("usageExperience.activitySamples", {
+                  eligible: activity.eligibleSessions,
+                  excluded: activity.excludedSessions,
+                })}
+              </p>
+            )}
+          </>
+        ) : (
+          coverage &&
+          !unavailable && (
+            <p>
+              {t("usageExperience.metricSamples", {
+                eligible: coverage.eligibleSessions,
+                excluded: coverage.excludedSessions,
+              })}
+            </p>
+          )
+        )}
+        {(messages?.unquantifiedSourceGaps ||
+          activity?.unquantifiedSourceGaps) && (
           <p>{t("usageExperience.unknownGaps")}</p>
         )}
         {!!data.unassociated.records && (

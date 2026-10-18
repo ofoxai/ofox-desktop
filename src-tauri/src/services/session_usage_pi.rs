@@ -70,6 +70,8 @@ pub(crate) struct PiRead {
     pub line_count: i64,
     pub session_id: Option<String>,
     pub inherited_entries: BTreeSet<String>,
+    pub native_activity: Vec<super::session_native_activity::NativeActivityEvent>,
+    pub native_activity_reasons: BTreeSet<String>,
     parent_session: Option<PathBuf>,
     entries: Vec<NativeEntry>,
     entry_index: BTreeMap<String, usize>,
@@ -98,6 +100,8 @@ fn read_pi_raw(path: &Path) -> Result<PiRead, AppError> {
             line_count: 0,
             session_id: None,
             inherited_entries: BTreeSet::new(),
+            native_activity: vec![],
+            native_activity_reasons: BTreeSet::new(),
             parent_session: None,
             entries: vec![],
             entry_index: BTreeMap::new(),
@@ -113,6 +117,7 @@ fn read_pi_raw(path: &Path) -> Result<PiRead, AppError> {
         let mut facts = BTreeMap::new();
         let mut identities = BTreeMap::<String, String>::new();
         let mut header = false;
+        let mut runtime_generation = 0u64;
         for raw in bytes.split_inclusive(|b| *b == b'\n') {
             let terminated = raw.last() == Some(&b'\n');
             let value: Value = match std::str::from_utf8(raw)
@@ -165,6 +170,13 @@ fn read_pi_raw(path: &Path) -> Result<PiRead, AppError> {
                     }
                 }
                 read.supported = true;
+                read.native_activity
+                    .push(super::session_analytics_native::runtime_event(
+                        "pi",
+                        read.session_id.as_deref().expect("validated header"),
+                        "[\"header\"]",
+                        native_time(&Value::Null, &value).expect("validated header time"),
+                    ));
                 continue;
             }
             if value["type"] == "session" {
@@ -205,6 +217,38 @@ fn read_pi_raw(path: &Path) -> Result<PiRead, AppError> {
                 kind: value["type"].as_str().unwrap_or("").to_owned(),
                 digest,
             });
+            match (id.as_deref(), native_time(&value["message"], &value)) {
+                (Some(id), Some(at)) => {
+                    let sid = read.session_id.as_deref().expect("validated header");
+                    let mut event = super::session_analytics_native::runtime_event(
+                        "pi",
+                        sid,
+                        &json!(["entry", id]).to_string(),
+                        at,
+                    );
+                    if runtime_generation > 0 {
+                        event.stream_key = super::session_analytics_index::key(
+                            "pi-activity-stream",
+                            &json!([sid, runtime_generation]).to_string(),
+                        );
+                    }
+                    read.native_activity.push(event);
+                }
+                (_, None) => {
+                    read.native_activity_reasons
+                        .insert("activityTimeUnavailable".into());
+                    runtime_generation = runtime_generation
+                        .checked_add(1)
+                        .ok_or_else(|| invalid("eventBudgetExceeded"))?;
+                }
+                (None, _) => {
+                    read.native_activity_reasons
+                        .insert("activityIdentityUnavailable".into());
+                    runtime_generation = runtime_generation
+                        .checked_add(1)
+                        .ok_or_else(|| invalid("eventBudgetExceeded"))?;
+                }
+            }
             let message = &value["message"];
             let assistant = value["type"] == "message" && message["role"] == "assistant";
             let usage = if assistant {
@@ -773,6 +817,62 @@ mod tests {
             f.usage.cache_read_tokens,
             f.usage.cache_creation_tokens,
         ]
+    }
+
+    #[test]
+    fn native_runtime_pi_reader_retains_owned_runtime_and_branch_events_without_body() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut rows = parent();
+        rows.push(json!({"type":"model_change","id":"model","parentId":"a2","timestamp":"2026-10-15T08:46:28.262Z","modelId":"fixture"}));
+        rows.push(json!({"type":"message","id":"tool","parentId":"model","timestamp":ISO,"message":{"role":"toolResult","content":"private-runtime-not-indexed","timestamp":AT+2000}}));
+        let read = read_pi(&write(temp.path(), "base.jsonl", &rows)).unwrap();
+        assert_eq!(read.facts.len(), 2);
+        assert_eq!(read.native_activity.len(), 6);
+        assert_eq!(
+            read.native_activity
+                .iter()
+                .map(|event| event.at_ms)
+                .collect::<Vec<_>>(),
+            [AT, AT, AT, AT, AT + 1000, AT + 2000]
+        );
+        let encoded = serde_json::to_string(&read.native_activity).unwrap();
+        assert!(!encoded.contains("private-pi-body"));
+        assert!(!encoded.contains("private-runtime"));
+    }
+
+    #[test]
+    fn native_runtime_pi_missing_time_cuts_activity_stream() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut assistant = call("a1", Some("gap"), [40, 10, 100, 20]);
+        assistant["message"]["timestamp"] = json!(AT + 60_000);
+        let entries = [
+            header("base"),
+            user("u1"),
+            json!({"type":"custom","id":"gap","parentId":"u1","data":"private runtime"}),
+            assistant,
+        ];
+        let read = read_pi(&write(temp.path(), "base.jsonl", &entries)).unwrap();
+        let result = super::super::session_native_activity::activity(
+            &read.native_activity,
+            &super::super::session_analytics_core::Window {
+                start_ms: Some(AT),
+                end_ms: AT + 100_000,
+            },
+            &[super::super::session_analytics_core::DayBoundary {
+                date: "date".into(),
+                start_ms: AT,
+                end_ms: AT + 100_000,
+            }],
+        )
+        .unwrap();
+        assert_eq!(read.facts.len(), 1);
+        assert_eq!(
+            result.active_ms, 0,
+            "missing native time is a boundary, not permission to bridge it"
+        );
+        assert!(read
+            .native_activity_reasons
+            .contains("activityTimeUnavailable"));
     }
     fn totals(db: &Database) -> (u64, u64, u64, u64, u64) {
         db.conn.lock().unwrap().query_row("SELECT COUNT(*),COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),COALESCE(SUM(cache_read_tokens),0),COALESCE(SUM(cache_creation_tokens),0) FROM proxy_request_logs WHERE app_type='pi'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).unwrap()

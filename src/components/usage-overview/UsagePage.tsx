@@ -26,6 +26,8 @@ import { queryClient } from "@/lib/query/queryClient";
 import { ofoxDashboardUrl, ofoxWalletUrl } from "@/lib/ofoxUrls";
 import {
   createUsageQuery,
+  sameUsageQuery,
+  usageIsUnavailable,
   legacyPeriod,
   resolveWorkbenchRange,
   type WorkbenchFilters,
@@ -51,6 +53,7 @@ import { UsageRequests } from "./UsageRequests";
 import { UsageFreshness } from "./UsageFreshness";
 import { UsageSessions } from "./UsageSessions";
 import { UsageLifetimeEntry } from "./UsageLifetimeEntry";
+import { UsageRebuildStatus } from "./UsageRebuildStatus";
 
 const EMPTY: string[] = [];
 type Tab = "overview" | "requests" | "sessions";
@@ -62,6 +65,7 @@ export function UsagePage({
   boundTools?: string[];
 }) {
   const { t, i18n } = useTranslation();
+  const refreshButton = useRef<HTMLButtonElement>(null);
   const { apex } = useOfoxApex();
   const shell = useShell();
   const interactionActive = useInteractionActive();
@@ -82,6 +86,12 @@ export function UsagePage({
   });
   const [filters, setFilters] = useState<WorkbenchFilters>({});
   const [analysisProjects, setAnalysisProjects] = useState<string[]>([]);
+  const [savedHistory, setSavedHistory] = useState<{
+    apex: string;
+    query: UsageQueryV1;
+    filterScope: string;
+  }>();
+  useEffect(() => setSavedHistory(undefined), [apex]);
   const [projectsCleared, setProjectsCleared] = useState(false);
   const [sessionTarget, setSessionTarget] = useState<{
     key: string;
@@ -136,6 +146,19 @@ export function UsagePage({
     !capabilities.isPending
       ? "overview"
       : tab;
+  const filterScope = JSON.stringify([range, filters, analysisProjects]);
+  const historyScope =
+    effectiveTab === "requests" &&
+    savedHistory?.apex === apex &&
+    savedHistory.filterScope === filterScope
+      ? savedHistory
+      : undefined;
+  const displayedQuery = historyScope?.query ?? query;
+  const openSavedHistory = (from: UsageQueryV1) => {
+    setSavedHistory({ apex, query: from, filterScope });
+    setTab("requests");
+    localStorage.setItem("ofox.usageTab", "requests");
+  };
   const analysisQuery = useMemo(
     () => ({ ...query, projectIds: selectedProjects }),
     [query, selectedProjects],
@@ -143,7 +166,7 @@ export function UsagePage({
   const analysis = useQuery(
     {
       queryKey: ["sessionUsageAnalytics", apex, analysisQuery],
-      queryFn: () => getSessionUsageAnalytics(analysisQuery),
+      queryFn: () => getSessionUsageAnalytics(analysisQuery, apex),
       enabled: visible && effectiveTab === "sessions" && analysisSupported,
       retry: false,
       staleTime: Infinity,
@@ -282,7 +305,7 @@ export function UsagePage({
         };
         // Stage the read before changing the visible query. Only its owner may
         // publish it, including when a custom range would reuse the same key.
-        const next = await getSessionUsageAnalytics(nextQuery);
+        const next = await getSessionUsageAnalytics(nextQuery, owner.apex);
         if (!activeRef.current || refreshOwnerRef.current !== owner) return;
         queryClient.setQueryData(
           ["sessionUsageAnalytics", owner.apex, nextQuery],
@@ -458,6 +481,7 @@ export function UsagePage({
               setProjectsCleared(true);
             }
             setTab(value);
+            setSavedHistory(undefined);
             localStorage.setItem("ofox.usageTab", value);
           }}
           items={[
@@ -510,10 +534,12 @@ export function UsagePage({
               title={t("usagePage.estimate")}
             >
               <span className="text-sub font-semibold tabular-nums">
-                {formatUsageEstimate(
-                  data?.totals.estimate,
-                  data?.totals.costUsd,
-                )}
+                {usageIsUnavailable(data)
+                  ? "—"
+                  : formatUsageEstimate(
+                      data?.totals.estimate,
+                      data?.totals.costUsd,
+                    )}
               </span>
             </span>
           )}
@@ -534,6 +560,7 @@ export function UsagePage({
             }))}
           />
           <Button
+            ref={refreshButton}
             variant="ghost"
             className="h-[26px] w-[26px] p-0 text-ink-muted"
             aria-label={t("usageWorkbench.refresh")}
@@ -653,10 +680,12 @@ export function UsagePage({
       <p className="text-note text-ink-muted">
         {t("usageWorkbench.rangeSummary", {
           start:
-            query.startMs == null
+            displayedQuery.startMs == null
               ? t("usageWorkbench.beginning")
-              : new Date(query.startMs).toLocaleDateString(i18n.language),
-          end: new Date(query.endMs - 1).toLocaleString(i18n.language),
+              : new Date(displayedQuery.startMs).toLocaleDateString(
+                  i18n.language,
+                ),
+          end: new Date(displayedQuery.endMs - 1).toLocaleString(i18n.language),
           timezone,
         })}
       </p>
@@ -665,6 +694,11 @@ export function UsagePage({
           {t("usageWorkbench.oldBackend")}
         </p>
       )}
+      <UsageRebuildStatus
+        active={visible}
+        supported={!!capabilities.data?.nativeRebuild}
+        onDismiss={() => refreshButton.current?.focus()}
+      />
       {(errors.length > 0 || refreshError) && (
         <div
           role="alert"
@@ -727,15 +761,16 @@ export function UsagePage({
             {t("common.loading")}
           </p>
         ) : !data ||
-          (![
-            data.totals.requests,
-            data.totals.inputTokens,
-            data.totals.outputTokens,
-            data.totals.cacheReadTokens,
-            data.totals.cacheWriteTokens,
-            data.totals.costUsd,
-            Number(data.totals.estimate?.knownCostUsd),
-          ].some((value) => value > 0) &&
+          (!usageIsUnavailable(data) &&
+            ![
+              data.totals.requests,
+              data.totals.inputTokens,
+              data.totals.outputTokens,
+              data.totals.cacheReadTokens,
+              data.totals.cacheWriteTokens,
+              data.totals.costUsd,
+              Number(data.totals.estimate?.knownCostUsd),
+            ].some((value) => value > 0) &&
             data.coverage?.state !== "partial" &&
             !data.coverage?.aggregateOnly) ? (
           <div className="rounded-list border border-line bg-card p-8 text-center text-sub text-ink-muted">
@@ -747,85 +782,103 @@ export function UsagePage({
           </div>
         ) : (
           <>
-            <UsageKpis totals={data.totals} attribution={data.attribution} />
-            {!!data.attribution?.unassociatedRecords && (
-              <p className="text-note text-ink-muted">
-                {t("usageWorkbench.unassociatedRecords", {
-                  count: data.attribution.unassociatedRecords,
-                })}
+            <UsageKpis
+              totals={data.totals}
+              attribution={data.attribution}
+              unavailable={usageIsUnavailable(data)}
+            />
+            {usageIsUnavailable(data) ? (
+              <p role="status" className="text-note text-ink-muted">
+                {t("usagePage.unavailable")}
               </p>
-            )}
-            <UsageBars overview={data} />
-            <div className="grid gap-3 md:grid-cols-2">
-              <UsageBreakdownList
-                kind="tools"
-                compact
-                initialLimit={6}
-                pageSize={50}
-                rows={data.byTool.map((row) => ({ ...row, id: row.appType }))}
-                total={data.totals.totalTokens}
-                onFilter={
-                  modern
-                    ? (id) =>
-                        setFilters((old) => ({
-                          ...old,
-                          toolIds: old.toolIds?.includes(id) ? [] : [id],
-                        }))
-                    : undefined
-                }
-              />
-              <UsageBreakdownList
-                kind="models"
-                compact
-                initialLimit={6}
-                pageSize={50}
-                rows={data.byModel.map((row) => ({ ...row, id: row.model }))}
-                total={data.totals.totalTokens}
-                onFilter={
-                  modern
-                    ? (id) =>
-                        setFilters((old) => ({
-                          ...old,
-                          modelIds: old.modelIds?.includes(id) ? [] : [id],
-                        }))
-                    : undefined
-                }
-              />
-              {data.byProject && (
-                <section
-                  className="min-w-0 md:col-span-2"
-                  aria-label={t("usageSessions.projectRank")}
-                >
+            ) : (
+              <>
+                {!!data.attribution?.unassociatedRecords && (
+                  <p className="text-note text-ink-muted">
+                    {t("usageWorkbench.unassociatedRecords", {
+                      count: data.attribution.unassociatedRecords,
+                    })}
+                  </p>
+                )}
+                <UsageBars overview={data} />
+                <div className="grid gap-3 md:grid-cols-2">
                   <UsageBreakdownList
-                    kind="projects"
+                    kind="tools"
                     compact
                     initialLimit={6}
-                    rows={data.byProject.map((row) => ({
+                    pageSize={50}
+                    rows={data.byTool.map((row) => ({
                       ...row,
-                      label: usageProjectLabel(
-                        row.id,
-                        row.label,
-                        row.path,
-                        projectNames,
-                      ),
+                      id: row.appType,
                     }))}
                     total={data.totals.totalTokens}
-                    pageSize={50}
                     onFilter={
-                      sharedProjectSupported
+                      modern
                         ? (id) =>
-                            chooseProjects(
-                              selectedProjects.length === 1 &&
-                                selectedProjects[0] === id
-                                ? []
-                                : [id],
-                            )
+                            setFilters((old) => ({
+                              ...old,
+                              toolIds: old.toolIds?.includes(id) ? [] : [id],
+                            }))
                         : undefined
                     }
                   />
-                </section>
-              )}
-            </div>
+                  <UsageBreakdownList
+                    kind="models"
+                    compact
+                    initialLimit={6}
+                    pageSize={50}
+                    rows={data.byModel.map((row) => ({
+                      ...row,
+                      id: row.model,
+                    }))}
+                    total={data.totals.totalTokens}
+                    onFilter={
+                      modern
+                        ? (id) =>
+                            setFilters((old) => ({
+                              ...old,
+                              modelIds: old.modelIds?.includes(id) ? [] : [id],
+                            }))
+                        : undefined
+                    }
+                  />
+                  {data.byProject && (
+                    <section
+                      className="min-w-0 md:col-span-2"
+                      aria-label={t("usageSessions.projectRank")}
+                    >
+                      <UsageBreakdownList
+                        kind="projects"
+                        compact
+                        initialLimit={6}
+                        rows={data.byProject.map((row) => ({
+                          ...row,
+                          label: usageProjectLabel(
+                            row.id,
+                            row.label,
+                            row.path,
+                            projectNames,
+                          ),
+                        }))}
+                        total={data.totals.totalTokens}
+                        pageSize={50}
+                        onFilter={
+                          sharedProjectSupported
+                            ? (id) =>
+                                chooseProjects(
+                                  selectedProjects.length === 1 &&
+                                    selectedProjects[0] === id
+                                    ? []
+                                    : [id],
+                                )
+                            : undefined
+                        }
+                      />
+                    </section>
+                  )}
+                </div>
+              </>
+            )}
           </>
         )}
         <UsageFreshness
@@ -835,6 +888,14 @@ export function UsagePage({
           }
           sources={data?.sources}
           pricing={data?.pricingCoverage}
+          receipt={data}
+          onSavedHistory={
+            requestSupported &&
+            data?.appliedQuery &&
+            sameUsageQuery(data.appliedQuery, query)
+              ? () => openSavedHistory(data.appliedQuery!)
+              : undefined
+          }
         />
         {data?.coverage?.state === "unsupported" && (
           <p className="text-note text-ink-muted">
@@ -866,7 +927,10 @@ export function UsagePage({
           hidden={effectiveTab !== "requests"}
         >
           <UsageRequests
-            query={query}
+            query={displayedQuery}
+            recordBasis={historyScope ? "savedHistory" : "effective"}
+            onEffectiveRecords={() => setSavedHistory(undefined)}
+            onSavedHistory={openSavedHistory}
             onOptions={updateOptions}
             apex={apex}
             active={visible && effectiveTab === "requests"}
@@ -916,6 +980,12 @@ export function UsagePage({
               data={analysisDisplay}
               showData={analysisDisplay.coverage.state !== "unsupported"}
               active={visible && effectiveTab === "sessions"}
+              onSavedHistory={
+                requestSupported &&
+                sameUsageQuery(analysisDisplay.appliedQuery, analysisQuery)
+                  ? () => openSavedHistory(analysisDisplay.appliedQuery)
+                  : undefined
+              }
               onProject={
                 sharedProjectSupported || analysisProjectSupported
                   ? (id) => {

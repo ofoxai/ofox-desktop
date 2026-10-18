@@ -6,9 +6,8 @@ use crate::database::Database;
 use crate::error::AppError;
 use crate::services::session_usage::SessionSyncResult;
 use crate::services::{
-    pricing_sync, session_usage, session_usage_codex, session_usage_dsh, session_usage_gemini,
-    session_usage_openclaw, session_usage_opencode, session_usage_pi, session_usage_workbuddy,
-    usage_maintenance,
+    pricing_sync, session_usage, session_usage_dsh, session_usage_gemini, session_usage_openclaw,
+    session_usage_opencode, session_usage_pi, session_usage_workbuddy, usage_maintenance,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -186,6 +185,7 @@ struct Probe {
     retry: BTreeSet<String>,
     maintenance_failed: bool,
 }
+#[derive(Clone)]
 struct FrozenRoots(BTreeMap<&'static str, Result<Vec<PathBuf>, ()>>);
 impl FrozenRoots {
     fn capture() -> Result<Self, AppError> {
@@ -262,6 +262,7 @@ fn observe_sources(roots: FrozenRoots) -> Observed {
         })
         .collect();
     let mut discovery = super::session_analytics_discovery::discover_in(&native_roots);
+    discovery.require_route_match = true;
     let mut observations: Observations = SOURCES
         .iter()
         .map(|source| {
@@ -564,7 +565,16 @@ const SOURCES: &[Source] = &[
         source_id: "codex_session",
         name: "Codex",
         resolve: || Ok(vec![crate::codex_config::get_codex_config_dir()]),
-        sync: |db, roots| session_usage_codex::sync_codex_usage_at(db, single_root(roots)?),
+        // Codex is rebuilt in one native projection, never appended through the
+        // previous independent token_count importer. Saved ledger rows stay put.
+        sync: |_, _| {
+            Ok(SessionSyncResult {
+                imported: 0,
+                skipped: 0,
+                files_scanned: 0,
+                errors: vec![],
+            })
+        },
         observe: None,
     },
     Source {
@@ -678,7 +688,26 @@ fn refresh_analytics(
             },
         )
         .collect();
+    let codex_ledger = sources
+        .iter()
+        .find(|s| s.provider == "codex")
+        .and_then(|source| begin_source_channel(db, source, usage_health::Channel::Ledger).ok());
     let report = refresh_discovered(db, discovery);
+    let codex_scan = report
+        .as_ref()
+        .ok()
+        .map(|_| super::usage_query::SourceScan {
+            files_scanned: discovery
+                .specs
+                .iter()
+                .filter(|spec| spec.provider == "codex")
+                .count() as u32,
+            imported: 0,
+            skipped: 0,
+        });
+    if let Some(scan) = &codex_scan {
+        total.files_scanned = total.files_scanned.saturating_add(scan.files_scanned);
+    }
     for (source, attempt) in sources.into_iter().zip(attempts) {
         let state = match &report {
             Ok(report) => report
@@ -708,6 +737,20 @@ fn refresh_analytics(
                     chrono::Utc::now().timestamp_millis(),
                 )? {
                     return Err(AppError::Database("usage.sources.staleAttempt".into()));
+                }
+                if source.provider == "codex" {
+                    let attempt = codex_ledger.as_ref().ok_or_else(|| {
+                        AppError::Database("usage.sources.healthWriteFailed".into())
+                    })?;
+                    if !usage_health::finish_with_scan_on(
+                        &tx,
+                        attempt,
+                        outcome,
+                        chrono::Utc::now().timestamp_millis(),
+                        codex_scan,
+                    )? {
+                        return Err(AppError::Database("usage.sources.staleAttempt".into()));
+                    }
                 }
                 tx.commit()?;
                 Ok::<_, AppError>(())
@@ -764,7 +807,9 @@ fn sync_sources(db: &Database) -> SessionSyncResult {
         Err(_) => return settings_failed(db),
     };
     let selected = SOURCES.iter().map(|source| source.provider).collect();
-    let (mut total, _) = sync_selected_sources(db, &selected, &roots);
+    let discovery = observe_sources(roots.clone()).discovery;
+    let (mut total, mut failed) = sync_selected_sources(db, &selected, &roots);
+    refresh_analytics(db, &discovery, &mut total, &mut failed);
     run_maintenance(db, &mut total);
     total
 }
@@ -782,7 +827,7 @@ fn sync_selected_sources(
     let mut failed_providers = BTreeSet::new();
     for source in SOURCES
         .iter()
-        .filter(|source| selected.contains(source.provider))
+        .filter(|source| selected.contains(source.provider) && source.provider != "codex")
     {
         let attempt = match begin_source(db, source) {
             Ok(attempt) => Some(attempt),
@@ -1004,7 +1049,7 @@ mod tests {
             );
             assert_eq!(
                 scan["imported"],
-                u64::from(has_fixture),
+                u64::from(has_fixture && source.provider != "codex"),
                 "{}: {row}",
                 source.provider
             );
@@ -1132,10 +1177,16 @@ mod tests {
             .unwrap();
         let result = sync_sources(&db);
         assert_eq!(
-            result.imported, 4,
+            result.imported, 3,
             "health persistence failure must not cancel native readers"
         );
-        assert_eq!(data_sources(&db).len(), 4);
+        assert_eq!(data_sources(&db).len(), 3);
+        let input = crate::services::session_analytics_index::read_input(&db).unwrap();
+        assert_eq!(
+            input.facts.iter().filter(|f| f.tool_id == "codex").count(),
+            1,
+            "Codex now uses the native projection without adding ledger rows"
+        );
         assert!(
             !result.errors.is_empty(),
             "the health DB failure was swallowed"
@@ -1212,7 +1263,14 @@ mod tests {
             after.status, "partial",
             "cached proof must not claim that a vanished native source was read"
         );
-        assert_eq!(after.error_code.as_deref(), Some("usage.sources.noFiles"));
+        assert_eq!(
+            after.error_code.as_deref(),
+            Some(if tool == "codex" {
+                "sourceMissing"
+            } else {
+                "usage.sources.noFiles"
+            })
+        );
         assert_eq!(after.last_success_at_ms, before.last_success_at_ms);
         assert!(after.last_attempt_at_ms >= before.last_attempt_at_ms);
     }
@@ -1380,11 +1438,31 @@ mod tests {
             "a native scan must not hold the configuration IO barrier"
         );
         let result = result.unwrap().unwrap();
-        assert!(result.errors.is_empty(), "{result:?}");
+        if provider == "codex" {
+            assert!(
+                result
+                    .errors
+                    .iter()
+                    .any(|error| error.contains("analyticsGenerationUnavailable")),
+                "a changed Codex route must invalidate staged publication: {result:?}"
+            );
+            assert!(
+                !crate::services::session_analytics_index::read_input(&db)
+                    .unwrap()
+                    .codex_native_ready
+            );
+        } else {
+            assert!(result.errors.is_empty(), "{result:?}");
+            assert!(
+                crate::services::session_analytics_index::read_input(&db)
+                    .unwrap()
+                    .codex_native_ready
+            );
+        }
         assert_eq!(
             result.imported,
-            if provider == "pi" { 7 } else { 6 },
-            "{provider} re-resolved a changed root after the observation boundary"
+            if provider == "pi" { 6 } else { 5 },
+            "{provider} must use frozen roots without adding new Codex ledger imports"
         );
         let count: i64 = db
             .conn
@@ -1396,7 +1474,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(count, i64::from(provider != "codex"));
     }
 
     #[tokio::test]
@@ -1549,8 +1627,8 @@ mod tests {
         let sync = UsageSync::new();
         assert_eq!(
             sync.run(&db, false).await.unwrap().unwrap().imported,
-            6,
-            "all native fixtures must first be importable"
+            5,
+            "all ledger fixtures are imported while Codex uses a verified native projection"
         );
         let before = super::super::usage_source::body_reads_under(home.home());
         let cached = super::super::session_analytics_index::read_input(&db)
@@ -2423,15 +2501,10 @@ mod tests {
 
         let result = UsageSync::new().run(&db, false).await.unwrap().unwrap();
 
-        assert_eq!(result.imported, 4, "{result:?}");
+        assert_eq!(result.imported, 3, "{result:?}");
         assert_eq!(
             data_sources(&db),
-            [
-                "codex_session",
-                "gemini_session",
-                "opencode_session",
-                "session_log"
-            ]
+            ["gemini_session", "opencode_session", "session_log"]
         );
         let conn = db.conn.lock().unwrap();
         let flag: String = conn
@@ -2461,11 +2534,8 @@ mod tests {
             .unwrap();
         let result = sync_sources(&db);
         assert!(!result.errors.is_empty(), "{result:?}");
-        assert_eq!((result.imported, result.skipped), (3, 0));
-        assert_eq!(
-            data_sources(&db),
-            ["codex_session", "gemini_session", "opencode_session"]
-        );
+        assert_eq!((result.imported, result.skipped), (2, 0));
+        assert_eq!(data_sources(&db), ["gemini_session", "opencode_session"]);
     }
 
     #[test]

@@ -44,7 +44,8 @@ fn spec(root: &Path, tool: &str, sid: &str, project: Option<&str>) -> SourceSpec
             &json!({"type":"assistant","sessionId":sid,"cwd":project,"uuid":"m","timestamp":"2026-10-15T00:00:00Z","message":{"id":"m","role":"assistant","model":"m","content":"answer","usage":{"input_tokens":10,"output_tokens":2}}}),
         ),
         "codex" => {
-            std::fs::write(&path, format!("{}\n{}\n", json!({"type":"session_meta","payload":{"id":sid,"cwd":project,"source":"cli"}}), json!({"type":"event_msg","timestamp":"2026-10-15T00:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"output_tokens":2}}}}))).unwrap();
+            let input = if sid == "other" { 20 } else { 10 };
+            std::fs::write(&path, [json!({"type":"session_meta","payload":{"id":sid,"cwd":project,"source":"cli"}}),json!({"type":"turn_context","payload":{"model":"m"}}),json!({"type":"event_msg","timestamp":"2026-10-15T00:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":input,"output_tokens":2,"cached_input_tokens":0,"cache_write_input_tokens":0}}}})].iter().map(Value::to_string).collect::<Vec<_>>().join("\n")).unwrap();
         }
         "gemini" => {
             write(
@@ -141,7 +142,15 @@ fn shared_project(tool: &str) {
     )
     .unwrap();
     assert_eq!(page.total, 1);
-    assert_eq!(page.data[0].record.request_id, "a");
+    if tool == "codex" {
+        assert!(page.data[0]
+            .record
+            .request_id
+            .starts_with("codex_native_v1:"));
+        assert!(page.data[0].recorded_cost_usd.is_none());
+    } else {
+        assert_eq!(page.data[0].record.request_id, "a");
+    }
     assert_eq!(page.summary.total_tokens, 12);
     let csv = usage_requests::export_csv(&page.snapshot_id, None).unwrap();
     assert_eq!(csv.record_count, 1);

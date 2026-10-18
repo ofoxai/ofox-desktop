@@ -224,6 +224,9 @@ pub fn read_normalized(provider: &str, path: &Path) -> Result<NormalizedSnapshot
     let mut reasons = BTreeSet::new();
     let (mut facts, enumerated) = match provider {
         "claude" => super::session_usage::normalized_facts(path)?,
+        // Retired ledger decoder is retained for historical regression tests.
+        // Production Codex reads go through the shared native projection.
+        #[cfg(test)]
         "codex" => super::session_usage_codex::normalized_facts(path)?,
         "gemini" => super::session_usage_gemini::normalized_facts(path)?,
         "opencode" => super::session_usage_opencode::normalized_facts(path)?,
@@ -445,12 +448,15 @@ pub(crate) struct Evidence {
     dependency_hash: Option<String>,
 }
 impl Evidence {
+    #[cfg(test)]
     pub(crate) fn codex_prefix(&self) -> Option<&str> {
         self.codex_prefix_hash.as_deref()
     }
+    #[cfg(test)]
     pub(crate) fn codex_requires_reconciliation(&self) -> bool {
         self.codex_reconciliation_required
     }
+    #[cfg(test)]
     pub(crate) fn note_codex_prefix(&mut self, hash: String, reconcile: bool) {
         self.codex_prefix_hash = Some(hash);
         self.codex_reconciliation_required |= reconcile;

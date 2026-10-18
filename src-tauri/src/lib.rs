@@ -1607,6 +1607,8 @@ pub fn run() {
             // Session usage sync
             commands::sync_session_usage,
             commands::refresh_local_usage,
+            commands::get_usage_rebuild_progress,
+            commands::cancel_usage_rebuild,
             commands::get_usage_data_sources,
             // Stream health check
             commands::stream_check_provider,

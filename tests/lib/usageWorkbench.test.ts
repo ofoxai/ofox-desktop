@@ -3,6 +3,7 @@ import {
   createUsageQuery,
   resolveWorkbenchRange,
   sameUsageQuery,
+  sameRequestFilters,
 } from "@/lib/usageWorkbench";
 
 afterEach(() => vi.unstubAllEnvs());
@@ -60,4 +61,10 @@ describe("workbench ranges", () => {
     });
     expect(sameUsageQuery(query, { ...query, endMs: 123_457 })).toBe(false);
   });
+});
+
+it("keeps an omitted record basis compatible with older effective-statistics receipts", () => {
+  expect(sameRequestFilters({}, { recordBasis: "effective" })).toBe(true);
+  expect(sameRequestFilters({ recordBasis: "savedHistory" }, {})).toBe(false);
+  expect(sameRequestFilters({ recordBasis: "unknown" }, {})).toBe(false);
 });

@@ -79,6 +79,65 @@ pub(crate) fn commit_sync_batch<T>(
     Ok(result)
 }
 
+/// 归一化 Codex 模型名
+///
+/// 处理规则（按顺序）：
+/// 1. 转小写：`GLM-4.6` → `glm-4.6`
+/// 2. 剥离 provider 前缀：`openai/gpt-5.4` → `gpt-5.4`
+/// 3. 剥离 ISO 日期后缀：`gpt-5.4-2026-03-05` → `gpt-5.4`
+/// 4. 剥离紧凑日期后缀：`gpt-5.4-20260305` → `gpt-5.4`
+pub(crate) fn normalize_session_model(raw: &str) -> String {
+    // Step 1: 小写
+    let mut name = raw.to_lowercase();
+
+    // Step 2: 剥离 "provider/" 前缀（如 openai/, azure/）
+    if let Some(pos) = name.rfind('/') {
+        name = name[pos + 1..].to_string();
+    }
+
+    // Step 3: 剥离 ISO 日期后缀 -YYYY-MM-DD（正好 11 字符）
+    if name.len() > 11
+        && name.get(name.len() - 11..).is_some_and(|suffix| {
+            let b = suffix.as_bytes();
+            b[0] == b'-'
+                && b[1..5].iter().all(u8::is_ascii_digit)
+                && b[5] == b'-'
+                && b[6..8].iter().all(u8::is_ascii_digit)
+                && b[8] == b'-'
+                && b[9..11].iter().all(u8::is_ascii_digit)
+        })
+    {
+        name.truncate(name.len() - 11);
+    }
+
+    // Step 4: 剥离紧凑日期后缀 -YYYYMMDD（正好 9 字符）
+    if name.len() > 9 {
+        let parts: Vec<&str> = name.rsplitn(2, '-').collect();
+        if parts.len() == 2 {
+            if let Some(suffix) = parts.first() {
+                if suffix.len() == 8 && suffix.chars().all(|c| c.is_ascii_digit()) {
+                    name = parts[1].to_string();
+                }
+            }
+        }
+    }
+
+    name
+}
+
+/// Existing session-ledger price normalization, shared with OpenCode without
+/// retaining the retired Codex ledger decoder in production.
+pub(crate) fn find_session_pricing_checked(
+    conn: &rusqlite::Connection,
+    model_id: &str,
+) -> Result<Option<ModelPricing>, AppError> {
+    let normalized = normalize_session_model(model_id);
+    if let Some(price) = crate::services::usage_sync_db::lookup_pricing(conn, &normalized, false)? {
+        return Ok(Some(price));
+    }
+    crate::services::usage_sync_db::lookup_pricing(conn, &format!("{normalized}%"), true)
+}
+
 /// Missing catalog rows are normal. Query/row/price corruption is not a
 /// missing price and must abort the same batch as a failed facts write.
 pub(crate) fn lookup_pricing(

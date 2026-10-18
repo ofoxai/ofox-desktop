@@ -2,6 +2,7 @@
 //!
 //! Aggregates proxy_request_logs into daily rollups and prunes old detail rows;
 //! rows of a session are also folded into `session_usage_archive` first.
+//! Original Codex imports remain as an audit ledger for rebuilt native usage.
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
@@ -17,11 +18,17 @@ use std::str::FromStr;
 pub(crate) const USAGE_DETAIL_RETAIN_DAYS: i64 = 30;
 
 /// The cutoff the prune uses now: rows older than it are rolled up and deleted.
+#[cfg(test)]
 pub(crate) fn usage_prune_cutoff() -> Result<i64, AppError> {
     compute_local_midnight_cutoff(Local::now(), USAGE_DETAIL_RETAIN_DAYS)
 }
 
 const PRUNE_FRONTIER_PREFIX: &str = "usage_prune_frontier_utc_v1:";
+// A rebuild replaces these imports in effective statistics, but their original
+// request IDs and saved decimal strings must remain available for audit. The
+// source is evidence; provider names alone do not identify native imports.
+const PRUNABLE_DETAIL_SQL: &str =
+    "NOT (app_type='codex' AND COALESCE(data_source,'proxy')='codex_session')";
 
 fn frontier_error() -> AppError {
     AppError::Database("invalid usage prune frontier".into())
@@ -135,7 +142,7 @@ pub(crate) fn unseen_event_is_after_history_on(
 
 fn advance_frontiers_on(conn: &rusqlite::Connection, cutoff: i64) -> Result<(), AppError> {
     let apps = conn
-        .prepare("SELECT DISTINCT app_type FROM proxy_request_logs WHERE created_at<?1")?
+        .prepare(&format!("SELECT DISTINCT app_type FROM proxy_request_logs WHERE created_at<?1 AND {PRUNABLE_DETAIL_SQL}"))?
         .query_map([cutoff], |r| r.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     for app in apps {
@@ -236,8 +243,9 @@ impl ArchiveTotals {
 }
 
 impl Database {
-    /// Aggregate proxy_request_logs older than `retain_days` into usage_daily_rollups,
-    /// then delete the aggregated detail rows.
+    /// Aggregate eligible proxy_request_logs older than `retain_days` into
+    /// usage_daily_rollups, then delete the aggregated detail rows. Original
+    /// Codex imports are retained for audit without reaggregating them.
     /// Returns the number of deleted detail rows.
     pub fn rollup_and_prune(&self, retain_days: i64) -> Result<u64, AppError> {
         let cutoff = compute_local_midnight_cutoff(Local::now(), retain_days)?;
@@ -251,7 +259,7 @@ impl Database {
         // Check if there are any rows to process
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM proxy_request_logs WHERE created_at < ?1",
+                &format!("SELECT COUNT(*) FROM proxy_request_logs WHERE created_at < ?1 AND {PRUNABLE_DETAIL_SQL}"),
                 [cutoff],
                 |row| row.get(0),
             )
@@ -297,10 +305,10 @@ impl Database {
         {
             let mut stmt = conn
                 .prepare(
-                    "SELECT app_type, session_id, model, input_tokens, output_tokens,
+                    &format!("SELECT app_type, session_id, model, input_tokens, output_tokens,
                             cache_read_tokens, cache_creation_tokens, total_cost_usd, created_at
                      FROM proxy_request_logs
-                     WHERE created_at < ?1 AND session_id IS NOT NULL AND session_id != ''",
+                     WHERE created_at < ?1 AND session_id IS NOT NULL AND session_id != '' AND {PRUNABLE_DETAIL_SQL}"),
                 )
                 .map_err(db_err)?;
             let rows = stmt
@@ -385,7 +393,7 @@ impl Database {
         advance_frontiers_on(conn, cutoff)?;
         // Aggregate old logs, merging with any pre-existing rollup rows via LEFT JOIN.
         conn.execute(
-            "INSERT OR REPLACE INTO usage_daily_rollups
+            &format!("INSERT OR REPLACE INTO usage_daily_rollups
                 (date, app_type, provider_id, model,
                  request_count, success_count,
                  input_tokens, output_tokens,
@@ -417,12 +425,12 @@ impl Database {
                     COALESCE(SUM(cache_creation_tokens), 0) as new_cc,
                     COALESCE(SUM(CAST(total_cost_usd AS REAL)), 0) as new_cost,
                     COALESCE(AVG(latency_ms), 0) as new_lat
-                FROM proxy_request_logs WHERE created_at < ?1
+                FROM proxy_request_logs WHERE created_at < ?1 AND {PRUNABLE_DETAIL_SQL}
                 GROUP BY d, a, p, m
             ) agg
             LEFT JOIN usage_daily_rollups old
                 ON old.date = agg.d AND old.app_type = agg.a
-                AND old.provider_id = agg.p AND old.model = agg.m",
+                AND old.provider_id = agg.p AND old.model = agg.m"),
             [cutoff],
         )
         .map_err(|e| AppError::Database(format!("Rollup aggregation failed: {e}")))?;
@@ -432,7 +440,7 @@ impl Database {
         // Delete the aggregated detail rows
         let deleted = conn
             .execute(
-                "DELETE FROM proxy_request_logs WHERE created_at < ?1",
+                &format!("DELETE FROM proxy_request_logs WHERE created_at < ?1 AND {PRUNABLE_DETAIL_SQL}"),
                 [cutoff],
             )
             .map_err(|e| AppError::Database(format!("Pruning old logs failed: {e}")))?;
@@ -447,6 +455,90 @@ mod tests {
     use crate::database::Database;
     use crate::error::AppError;
     use chrono::{Local, TimeZone};
+
+    type SavedCodexAudit = (String, String, [i64; 4], [String; 5]);
+
+    fn saved_codex_audit(db: &Database) -> Vec<SavedCodexAudit> {
+        let conn = db.conn.lock().unwrap();
+        let mut statement = conn.prepare("SELECT request_id,provider_id,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,input_cost_usd,output_cost_usd,cache_read_cost_usd,cache_creation_cost_usd,total_cost_usd FROM proxy_request_logs WHERE app_type='codex' AND data_source='codex_session' ORDER BY request_id").unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    [row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?],
+                    [
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                    ],
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn insert_codex_audit_history(db: &Database) -> Vec<SavedCodexAudit> {
+        let conn = db.conn.lock().unwrap();
+        for (index, provider) in ["_codex_session", "_session", "retired-provider"]
+            .into_iter()
+            .enumerate()
+        {
+            conn.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,input_cost_usd,output_cost_usd,cache_read_cost_usd,cache_creation_cost_usd,total_cost_usd,latency_ms,status_code,session_id,created_at,data_source) VALUES(?1,?2,'codex','native-saved',11,22,33,44,'0.000000100000000000','1.2300e-7','0.00000000000','0','0.000000223000000000',0,200,'thread-old',1,'codex_session')", rusqlite::params![format!("old-codex-id-{index}"),provider]).unwrap();
+        }
+        conn.execute("INSERT INTO usage_daily_rollups(date,app_type,provider_id,model,request_count,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,total_cost_usd) VALUES('1970-01-01','codex','_codex_session','native-saved',7,1,2,3,4,'9.870000e-7')", []).unwrap();
+        drop(conn);
+        saved_codex_audit(db)
+    }
+
+    fn saved_codex_rollup(db: &Database) -> (i64, [i64; 4], String) {
+        db.conn.lock().unwrap().query_row("SELECT request_count,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,total_cost_usd FROM usage_daily_rollups WHERE app_type='codex' AND provider_id='_codex_session' AND model='native-saved'", [], |row| Ok((row.get(0)?,[row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?],row.get(5)?))).unwrap()
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn native_codex_audit_survives_first_and_repeated_pruning_without_reaggregating() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let expected = insert_codex_audit_history(&db);
+        let rollup = saved_codex_rollup(&db);
+        db.conn.lock().unwrap().execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at,data_source) VALUES('codex-real-http','_codex_session','codex','http-measured',5,40,429,1,'proxy'),('claude-import','_session','claude','claude-native',6,0,0,1,'session_log')",[]).unwrap();
+        for (pass, cutoff) in [86_400_i64, 86_400, 172_800].into_iter().enumerate() {
+            let deleted = db.rollup_and_prune_before(cutoff).unwrap();
+            assert_eq!(saved_codex_audit(&db), expected, "maintenance pass {pass} must retain original Codex IDs, four Token buckets, and exact saved decimal strings");
+            assert_eq!(
+                saved_codex_rollup(&db),
+                rollup,
+                "retained audit rows must not be folded into an existing legacy rollup again"
+            );
+            assert_eq!(deleted, if pass == 0 { 2 } else { 0 });
+            let conn = db.conn.lock().unwrap();
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM proxy_request_logs WHERE request_id IN ('codex-real-http','claude-import')", [], |row| row.get::<_, i64>(0)).unwrap(), 0, "unrelated proxy and native sources retain normal pruning");
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM session_usage_archive WHERE app_type='codex' AND session_id='thread-old'", [], |row| row.get::<_, i64>(0)).unwrap(), 0, "preserved audit rows are not duplicated in the session archive");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn native_codex_audit_survives_database_startup_maintenance_and_restart() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Database::init().unwrap();
+        let expected = insert_codex_audit_history(&db);
+        let rollup = saved_codex_rollup(&db);
+        drop(db);
+        for restart in 0..2 {
+            let db = Database::init().unwrap();
+            assert_eq!(
+                saved_codex_audit(&db),
+                expected,
+                "startup {restart} must preserve historical Codex details"
+            );
+            assert_eq!(saved_codex_rollup(&db), rollup);
+        }
+    }
 
     fn local_dt(
         year: i32,

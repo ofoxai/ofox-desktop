@@ -72,7 +72,7 @@ pub struct UsageAggregate {
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Quantiles {
-    /// Exact base-10 text also preserves .5 and values beyond JS safe integers.
+    /// Exact base-10 text preserves values beyond JS safe integers.
     pub median_tokens: Option<String>,
     pub p90_tokens: Option<u64>,
     pub samples: u64,
@@ -118,6 +118,9 @@ pub struct Activity {
     /// Verified, clipped gaps retained for local-hour projection. Never bodies.
     #[serde(skip)]
     pub intervals: Vec<(i64, i64)>,
+    /// Native-runtime gaps attributed wholly to their later event. Never bodies.
+    #[serde(skip)]
+    pub native_allocations: Vec<(i64, u64)>,
 }
 
 pub fn quantiles(samples: impl IntoIterator<Item = Option<u64>>) -> Quantiles {
@@ -131,18 +134,9 @@ pub fn quantiles(samples: impl IntoIterator<Item = Option<u64>>) -> Quantiles {
     }
     known.sort_unstable();
     let count = known.len();
-    let median_tokens = match count {
-        0 => None,
-        n if n % 2 == 1 => Some(known[n / 2].to_string()),
-        n => {
-            let sum = u128::from(known[n / 2 - 1]) + u128::from(known[n / 2]);
-            Some(if sum % 2 == 0 {
-                (sum / 2).to_string()
-            } else {
-                format!("{}.5", sum / 2)
-            })
-        }
-    };
+    // Magpie uses nearest rank for both p50 and p90. For an even sample count,
+    // the median is the lower middle observed value, not an invented mean.
+    let median_tokens = (count > 0).then(|| known[(count - 1) / 2].to_string());
     let p90_tokens = (count > 0).then(|| {
         let rank = (9 * count as u128).div_ceil(10) as usize;
         known[rank - 1]
@@ -549,7 +543,7 @@ mod tests {
         assert_eq!(
             quantiles([Some(0), Some(10), None, Some(20), Some(31)]),
             Quantiles {
-                median_tokens: Some("15".into()),
+                median_tokens: Some("10".into()),
                 p90_tokens: Some(31),
                 samples: 4,
                 excluded: 1,
@@ -557,7 +551,7 @@ mod tests {
         );
         assert_eq!(
             quantiles([Some(10), Some(11)]).median_tokens.as_deref(),
-            Some("10.5")
+            Some("10")
         );
         assert_eq!(quantiles((1..=10).map(Some)).p90_tokens, Some(9));
     }
@@ -567,7 +561,7 @@ mod tests {
             quantiles([Some(u64::MAX - 1), Some(u64::MAX)])
                 .median_tokens
                 .as_deref(),
-            Some("18446744073709551614.5")
+            Some("18446744073709551614")
         );
         assert_eq!(
             quantiles([None, None]),

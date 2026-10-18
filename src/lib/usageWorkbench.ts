@@ -7,6 +7,26 @@ import type {
 } from "@/types/usageQuery";
 
 export type WorkbenchPeriod = UsagePeriod | "90d" | "custom";
+
+/** Only an explicit backend receipt can make zero-valued usage unavailable. */
+export function usageIsUnavailable(
+  receipt?: Partial<UsageReceipt> | null,
+): boolean {
+  return receipt?.sourceCoverage?.usageAvailability === "unavailable";
+}
+
+/** Validate the region captured before a read; legacy receipts may omit it. */
+export function assertUsageApex(
+  response: Partial<UsageReceipt>,
+  expectedApex?: string,
+) {
+  if (
+    expectedApex != null &&
+    response.pricingCoverage?.apex != null &&
+    response.pricingCoverage.apex !== expectedApex
+  )
+    throw new Error("usage.queryMismatch");
+}
 export interface WorkbenchRange {
   period: WorkbenchPeriod;
   startDate?: string;
@@ -101,6 +121,7 @@ export function sameUsageQuery(a: unknown, b: unknown): boolean {
 
 export function normalizedRequestFilters(value: UsageRequestFilters = {}) {
   return {
+    recordBasis: value.recordBasis ?? "effective",
     sourceIds: [...new Set(value.sourceIds ?? [])].sort(),
     statusCode: value.statusCode ?? null,
     statusKind: value.statusKind ?? null,
@@ -121,6 +142,12 @@ export function sameRequestFilters(
   )
     return false;
   if (value.search != null && typeof value.search !== "string") return false;
+  if (
+    value.recordBasis != null &&
+    value.recordBasis !== "effective" &&
+    value.recordBasis !== "savedHistory"
+  )
+    return false;
   return (
     JSON.stringify(normalizedRequestFilters(value)) ===
     JSON.stringify(normalizedRequestFilters(expected))

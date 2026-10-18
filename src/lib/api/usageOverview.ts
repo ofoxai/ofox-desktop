@@ -9,6 +9,7 @@ import type {
   UsageSourceHealth,
   UsageFilterOptions,
   UsageAttribution,
+  UsageRebuildProgress,
 } from "@/types/usageQuery";
 import type {
   AnalyticsPage,
@@ -18,6 +19,7 @@ import type {
 import {
   assertSnapshotReceipt,
   assertUsageReceipt,
+  assertUsageApex,
 } from "@/lib/usageWorkbench";
 import type { UsageSnapshotReceipt } from "@/types/usageQuery";
 
@@ -133,12 +135,14 @@ export interface BalanceTrend {
 export async function getUsageOverview(
   period: UsagePeriod,
   query?: UsageQueryV1,
+  expectedApex?: string,
 ): Promise<UsageOverview> {
   const response = await invoke<UsageOverview>("get_usage_overview", {
     period,
     ...(query ? { query } : {}),
   });
   if (query) assertUsageReceipt(response, query);
+  assertUsageApex(response, expectedApex);
   return response;
 }
 
@@ -146,8 +150,43 @@ export function getUsageCapabilities(): Promise<UsageCapabilities> {
   return invoke("get_usage_capabilities");
 }
 
+function rebuildProgress(value: unknown): UsageRebuildProgress {
+  const progress = value as UsageRebuildProgress | null;
+  if (
+    !progress ||
+    typeof progress.operationId !== "string" ||
+    !progress.operationId ||
+    !["running", "cancelling", "cancelled", "completed", "failed"].includes(
+      progress.state,
+    ) ||
+    !Number.isSafeInteger(progress.completedSources) ||
+    progress.completedSources < 0 ||
+    !Number.isSafeInteger(progress.totalSources) ||
+    progress.totalSources < progress.completedSources
+  )
+    throw new Error("usage.rebuild.invalidReceipt");
+  return progress;
+}
+
+export async function getUsageRebuildProgress(): Promise<UsageRebuildProgress | null> {
+  const value = await invoke<unknown>("get_usage_rebuild_progress");
+  return value == null ? null : rebuildProgress(value);
+}
+
+export async function cancelUsageRebuild(
+  operationId: string,
+): Promise<UsageRebuildProgress> {
+  const value = rebuildProgress(
+    await invoke<unknown>("cancel_usage_rebuild", { operationId }),
+  );
+  if (value.operationId !== operationId)
+    throw new Error("usage.rebuild.invalidReceipt");
+  return value;
+}
+
 export async function getSessionUsageAnalytics(
   query: UsageQueryV1,
+  expectedApex?: string,
 ): Promise<SessionAnalytics> {
   const response = await invoke<SessionAnalytics>(
     "get_session_usage_analytics",
@@ -156,6 +195,7 @@ export async function getSessionUsageAnalytics(
     },
   );
   assertUsageReceipt(response, query);
+  assertUsageApex(response, expectedApex);
   return response;
 }
 

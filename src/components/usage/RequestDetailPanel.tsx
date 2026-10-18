@@ -35,8 +35,13 @@ export function RequestDetailPanel({
   const evidence = request ? requestMeasurements(request) : null;
   const source = requestSourcePresentation(request?.dataSource, t);
   const number = (value: number) => value.toLocaleString(i18n.language);
-  const money = (value: string | undefined) =>
+  const money = (value: string | null | undefined) =>
     value == null ? t("usageWorkbench.notProvided") : `$${value}`;
+  const savedAmount = request
+    ? request.recordedCostUsd === undefined
+      ? request.totalCostUsd
+      : request.recordedCostUsd
+    : null;
   const missingTiming = evidence
     ? [
         ...(evidence.latency == null ? [t("usageWorkbench.elapsed")] : []),
@@ -50,7 +55,9 @@ export function RequestDetailPanel({
       ? [
           [
             t("usage.time"),
-            new Date(request.createdAt * 1000).toLocaleString(i18n.language),
+            new Date(
+              request.createdAtMs ?? request.createdAt * 1000,
+            ).toLocaleString(i18n.language),
           ],
           [
             t("usage.appType"),
@@ -94,11 +101,21 @@ export function RequestDetailPanel({
         [t("usage.appType"), request.appType],
         [t("usage.provider"), request.providerName ?? request.providerId],
         [t("usage.costMultiplier"), request.costMultiplier],
-        [t("usageWorkbench.inputAmount"), money(request.inputCostUsd)],
-        [t("usageWorkbench.outputAmount"), money(request.outputCostUsd)],
-        [t("usageWorkbench.cacheReadAmount"), money(request.cacheReadCostUsd)],
-        [t("usage.cacheCreationCost"), money(request.cacheCreationCostUsd)],
-        [t("usageWorkbench.savedAmount"), money(request.totalCostUsd)],
+        ...(request.recordedCostUsd === null
+          ? []
+          : [
+              [t("usageWorkbench.inputAmount"), money(request.inputCostUsd)],
+              [t("usageWorkbench.outputAmount"), money(request.outputCostUsd)],
+              [
+                t("usageWorkbench.cacheReadAmount"),
+                money(request.cacheReadCostUsd),
+              ],
+              [
+                t("usage.cacheCreationCost"),
+                money(request.cacheCreationCostUsd),
+              ],
+            ]),
+        [t("usageWorkbench.savedAmount"), money(savedAmount)],
       ]
     : [];
   return (

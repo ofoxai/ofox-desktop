@@ -17,7 +17,7 @@
 use crate::codex_config::get_codex_config_dir;
 use crate::database::Database;
 use crate::error::AppError;
-use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
+use crate::proxy::usage::calculator::CostCalculator;
 use crate::proxy::usage::parser::TokenUsage;
 use crate::services::session_usage::SessionSyncResult;
 #[cfg(test)]
@@ -70,51 +70,10 @@ impl DeltaTokens {
     }
 }
 
-/// 归一化 Codex 模型名
-///
-/// 处理规则（按顺序）：
-/// 1. 转小写：`GLM-4.6` → `glm-4.6`
-/// 2. 剥离 provider 前缀：`openai/gpt-5.4` → `gpt-5.4`
-/// 3. 剥离 ISO 日期后缀：`gpt-5.4-2026-03-05` → `gpt-5.4`
-/// 4. 剥离紧凑日期后缀：`gpt-5.4-20260305` → `gpt-5.4`
-fn normalize_codex_model(raw: &str) -> String {
-    // Step 1: 小写
-    let mut name = raw.to_lowercase();
-
-    // Step 2: 剥离 "provider/" 前缀（如 openai/, azure/）
-    if let Some(pos) = name.rfind('/') {
-        name = name[pos + 1..].to_string();
-    }
-
-    // Step 3: 剥离 ISO 日期后缀 -YYYY-MM-DD（正好 11 字符）
-    if name.len() > 11
-        && name.get(name.len() - 11..).is_some_and(|suffix| {
-            let b = suffix.as_bytes();
-            b[0] == b'-'
-                && b[1..5].iter().all(u8::is_ascii_digit)
-                && b[5] == b'-'
-                && b[6..8].iter().all(u8::is_ascii_digit)
-                && b[8] == b'-'
-                && b[9..11].iter().all(u8::is_ascii_digit)
-        })
-    {
-        name.truncate(name.len() - 11);
-    }
-
-    // Step 4: 剥离紧凑日期后缀 -YYYYMMDD（正好 9 字符）
-    if name.len() > 9 {
-        let parts: Vec<&str> = name.rsplitn(2, '-').collect();
-        if parts.len() == 2 {
-            if let Some(suffix) = parts.first() {
-                if suffix.len() == 8 && suffix.chars().all(|c| c.is_ascii_digit()) {
-                    name = parts[1].to_string();
-                }
-            }
-        }
-    }
-
-    name
-}
+use super::usage_sync_db::{
+    find_session_pricing_checked as find_codex_pricing_checked,
+    normalize_session_model as normalize_codex_model,
+};
 
 /// 计算两次累计值之间的 delta
 fn compute_delta(prev: &Option<CumulativeTokens>, current: &CumulativeTokens) -> DeltaTokens {
@@ -878,19 +837,6 @@ fn insert_codex_session_entry(
     .map_err(|e| AppError::Database(format!("插入 Codex 会话日志失败: {e}")))?;
 
     Ok(changed > 0)
-}
-
-/// Fallible lookup for a sync transaction; the legacy Option wrapper below
-/// stays available to maintenance callers.
-pub(crate) fn find_codex_pricing_checked(
-    conn: &rusqlite::Connection,
-    model_id: &str,
-) -> Result<Option<ModelPricing>, AppError> {
-    let normalized = normalize_codex_model(model_id);
-    if let Some(price) = crate::services::usage_sync_db::lookup_pricing(conn, &normalized, false)? {
-        return Ok(Some(price));
-    }
-    crate::services::usage_sync_db::lookup_pricing(conn, &format!("{normalized}%"), true)
 }
 
 #[cfg(test)]

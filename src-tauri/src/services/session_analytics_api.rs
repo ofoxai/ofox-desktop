@@ -25,6 +25,7 @@ fn days<Tz: TimeZone>(
             .iter()
             .map(|f| f.at_ms)
             .chain(input.messages.iter().map(|m| m.at_ms))
+            .chain(input.native_activity.iter().map(|event| event.at_ms))
             .filter(|at| *at < query.end_ms)
             .min()
     }) else {
@@ -152,8 +153,13 @@ fn query_with_cache<Tz: TimeZone>(
         result.totals.message_reason = Some("sourceUnsupported".into());
         result.totals.activity_reason = Some("sourceUnsupported".into());
         result.known_metrics = None;
+        result.known_messages = None;
+        result.known_active_ms = None;
+        result.known_active_days = None;
         result.metric_coverage.state = "unavailable".into();
         result.metric_coverage.reasons = vec!["sourceUnsupported".into()];
+        result.message_coverage = Some(result.metric_coverage.clone());
+        result.activity_coverage = Some(result.metric_coverage.clone());
         result.activity_by_hour.cells.clear();
         result.activity_by_hour.coverage = result.metric_coverage.clone();
         result.totals.estimate = super::ofox_pricing::CostEstimate {
@@ -197,6 +203,37 @@ mod tests {
             project_ids: vec![],
             source_ids: vec![],
         }
+    }
+    #[test]
+    fn native_analysis_days_include_cached_runtime_when_other_projections_have_no_timestamp() {
+        let mut input = AnalyticsInput {
+            snapshot_version: "native-only".into(),
+            sessions: vec![],
+            facts: vec![],
+            messages: vec![],
+            reasons: vec![],
+            source_reasons: vec![],
+            sources: vec![],
+            native_activity: vec![],
+            source_observations: vec![],
+            codex_native_ready: true,
+            legacy_history_available: false,
+            thread_usage_coverage: Default::default(),
+        };
+        input.native_activity.push(
+            crate::services::session_native_activity::NativeActivityEvent {
+                session_key: "s".into(),
+                event_key: "runtime".into(),
+                at_ms: 1792022400000,
+                main: true,
+                stream_key: "stream".into(),
+            },
+        );
+        let mut query = q();
+        query.start_ms = None;
+        let days = days(&query, &input, &chrono::Utc).unwrap();
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].date, "2026-10-15");
     }
     #[test]
     fn session_analytics_api_reads_cache_without_reopening_corrupt_native_source_and_echoes_receipt(

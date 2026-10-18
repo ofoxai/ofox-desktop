@@ -13,7 +13,7 @@ import {
 import { ToolBadge } from "@/components/tools/ToolBadge";
 import { getSessionAnalyticsPage } from "@/lib/api/usageOverview";
 import { fmtTokens } from "@/lib/format";
-import { formatActivity } from "@/lib/usageInsights";
+import { formatActivity, isPartialActivity } from "@/lib/usageInsights";
 import { formatUsageEstimate } from "@/lib/usageEstimate";
 import type {
   AnalyticsPage,
@@ -86,7 +86,11 @@ export function UsageSessionRanking({
   }, [frozen, sort, page, search, active]);
   const choices = (["tokens", "cost", "active"] as const).map((value) => ({
     value,
-    label: t(`usageExperience.${value}`),
+    label: t(
+      value === "active" && current.methodVersion === "magpie-native-v1"
+        ? "usageExperience.nativeActivity"
+        : `usageExperience.${value}`,
+    ),
   }));
   const rows =
     data.compactTop?.[sort] ?? (sort === "tokens" ? data.topSessions : []);
@@ -121,11 +125,15 @@ export function UsageSessionRanking({
       <span
         className="max-w-[34%] shrink-0 truncate text-right text-sub tabular-nums"
         title={
-          sort === "cost" ? (row.estimate.knownCostUsd ?? undefined) : undefined
+          sort === "cost"
+            ? (row.estimate.knownCostUsd ?? undefined)
+            : sort === "active" && isPartialActivity(row)
+              ? t("usageExperience.knownPart")
+              : undefined
         }
       >
         {sort === "active"
-          ? formatActivity(row.activeMs, t)
+          ? `${formatActivity(row.activeMs, t)}${isPartialActivity(row) ? "＋" : ""}`
           : sort === "cost"
             ? formatUsageEstimate(row.estimate)
             : row.tokens

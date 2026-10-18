@@ -204,6 +204,30 @@ it("groups missing timing, explains absent status, and hides raw IDs in technica
   await waitFor(() => expect(trigger).toHaveFocus());
 });
 
+it("uses the native millisecond timestamp for the request row and detail without changing the legacy fallback", async () => {
+  const createdAtMs = 90001;
+  records = [{ ...row, createdAtMs }];
+  render(<UsageRequests {...props} />);
+  const trigger = await screen.findByRole("button", { name: /test-model/ });
+  expect(trigger).toHaveAccessibleName(
+    expect.stringContaining(
+      new Date(createdAtMs).toLocaleString("zh", {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+    ),
+  );
+  await userEvent.click(trigger);
+  const dialog = await screen.findByRole("dialog");
+  expect(
+    within(dialog).getByText(new Date(createdAtMs).toLocaleString("zh")),
+  ).toBeVisible();
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() => expect(trigger).toHaveFocus());
+});
+
 it.each([200, 429])(
   "shows only measured HTTP %i and genuine zero timing",
   async (status) => {
@@ -369,3 +393,25 @@ it.each(["constructor", "__proto__", "toString"])(
     ).toHaveTextContent("其他来源记录");
   },
 );
+
+it("does not revive a rebuilt record's compatibility zero as a saved amount", async () => {
+  records = [{ ...row, dataSource: "codex_session", recordedCostUsd: null }];
+  render(<UsageRequests {...props} />);
+  await userEvent.click(
+    await screen.findByRole("button", { name: /test-model/ }),
+  );
+  await userEvent.click(screen.getByText("技术详情"));
+  const saved = screen.getByText("已保存金额").parentElement!;
+  expect(saved).toHaveTextContent("未提供");
+  expect(saved).not.toHaveTextContent("$0");
+});
+
+it("preserves a reliable saved zero instead of calling it missing", async () => {
+  records = [{ ...row, recordedCostUsd: "0" }];
+  render(<UsageRequests {...props} />);
+  await userEvent.click(
+    await screen.findByRole("button", { name: /test-model/ }),
+  );
+  await userEvent.click(screen.getByText("技术详情"));
+  expect(screen.getByText("已保存金额").parentElement).toHaveTextContent("$0");
+});

@@ -5,8 +5,10 @@ import { formatActivity } from "@/lib/usageInsights";
 
 export function UsageDistributions({
   distributions,
+  activityLabel,
 }: {
   distributions?: AnalyticsDistribution[];
+  activityLabel?: string;
 }) {
   const { t } = useTranslation();
   if (!distributions) return null;
@@ -18,18 +20,17 @@ export function UsageDistributions({
       <div className="mt-4 grid gap-6 min-[1100px]:grid-cols-3">
         {distributions.map((distribution) => {
           const max = Math.max(1, ...distribution.counts);
+          const label =
+            distribution.metric === "activeMs" && activityLabel
+              ? activityLabel
+              : t(`usageExperience.${distribution.metric}`);
           const format = (value: number) =>
             distribution.metric === "activeMs"
               ? formatActivity(value, t)
               : fmtTokens(value);
           return (
-            <section
-              key={distribution.metric}
-              aria-label={t(`usageExperience.${distribution.metric}`)}
-            >
-              <h3 className="text-sub font-medium">
-                {t(`usageExperience.${distribution.metric}`)}
-              </h3>
+            <section key={distribution.metric} aria-label={label}>
+              <h3 className="text-sub font-medium">{label}</h3>
               <p className="mb-3 text-note text-ink-faint">
                 {t("usageExperience.distributionSamples", {
                   count: distribution.samples,

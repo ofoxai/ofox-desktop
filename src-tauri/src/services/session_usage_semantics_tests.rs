@@ -1300,6 +1300,7 @@ fn semantics_codex_pruned_rewrite_does_not_reset_its_unknown_history_boundary_on
     );
     good(codex::sync_codex_usage(&db));
     db.rollup_and_prune(30).unwrap();
+    let original_audit = facts(&db);
     let header = json!({"type":"session_meta","payload":{"id":"replacement"}});
     write(&path, &jsonl(&[header.clone(), event(1, 30, 3)]), 1);
     good(codex::sync_codex_usage(&db));
@@ -1310,7 +1311,7 @@ fn semantics_codex_pruned_rewrite_does_not_reset_its_unknown_history_boundary_on
     );
     good(codex::sync_codex_usage(&db));
     assert_eq!(archived_total(&db), (200, 20, 2));
-    assert!(facts(&db).is_empty());
+    assert_eq!(facts(&db),original_audit,"the retired importer must not overwrite preserved original IDs/counters during rewrite or append");
     assert_codex_partial(&db, "legacyLiveReconciliationRequired");
 }
 

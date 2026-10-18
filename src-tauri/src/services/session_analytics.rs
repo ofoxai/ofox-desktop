@@ -44,6 +44,82 @@ pub struct AnalyticsInput {
     pub reasons: Vec<String>,
     pub source_reasons: Vec<SourceReason>,
     pub sources: Vec<SourceHealth>,
+    #[serde(default)]
+    pub native_activity: Vec<super::session_native_activity::NativeActivityEvent>,
+    #[serde(default)]
+    pub source_observations: Vec<SourceObservation>,
+    #[serde(default)]
+    pub codex_native_ready: bool,
+    #[serde(default)]
+    pub legacy_history_available: bool,
+    #[serde(default)]
+    pub thread_usage_coverage:
+        std::collections::BTreeMap<String, super::session_analytics_listing::ThreadUsageCoverage>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SourceObservation {
+    pub tool_id: String,
+    pub source_id: String,
+    pub status: String,
+    pub dated: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceCoverage {
+    pub observed: u64,
+    pub read: u64,
+    pub partial: u64,
+    pub failed: u64,
+    pub undated: u64,
+    pub legacy_history_available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_availability: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_usage_records: Option<u64>,
+}
+impl SourceCoverage {
+    pub(crate) fn with_usage_samples(mut self, records: u64) -> Self {
+        let gaps = self.partial > 0 || self.failed > 0 || self.undated > 0;
+        self.usage_availability = Some(
+            if records == 0 && gaps {
+                "unavailable"
+            } else if gaps {
+                "partial"
+            } else {
+                "available"
+            }
+            .into(),
+        );
+        self.known_usage_records = Some(records);
+        self
+    }
+}
+impl AnalyticsInput {
+    pub(crate) fn source_coverage(&self, query: &UsageQueryV1) -> SourceCoverage {
+        let mut result = SourceCoverage {
+            legacy_history_available: self.legacy_history_available
+                && selected(&query.tool_ids, "codex")
+                && selected(&query.source_ids, "codex_session"),
+            ..Default::default()
+        };
+        for source in &self.source_observations {
+            if (!query.tool_ids.is_empty() && !query.tool_ids.contains(&source.tool_id))
+                || (!query.source_ids.is_empty() && !query.source_ids.contains(&source.source_id))
+            {
+                continue;
+            }
+            result.observed += 1;
+            match source.status.as_str() {
+                "ok" => result.read += 1,
+                "failed" => result.failed += 1,
+                _ => result.partial += 1,
+            }
+            result.undated += u64::from(!source.dated);
+        }
+        result
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -146,6 +222,9 @@ pub struct UnassociatedUsage {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionAnalytics {
+    pub method_version: &'static str,
+    pub input_snapshot_version: String,
+    pub source_coverage: SourceCoverage,
     #[serde(flatten)]
     pub receipt: QueryReceipt,
     pub coverage: Coverage,
@@ -165,6 +244,16 @@ pub struct SessionAnalytics {
     pub compact_top: CompactTop,
     pub known_metrics: Option<KnownMetrics>,
     pub metric_coverage: MetricCoverage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_coverage: Option<MetricCoverage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity_coverage: Option<MetricCoverage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub known_messages: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub known_active_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub known_active_days: Option<u64>,
     pub distributions: Vec<Distribution>,
     pub activity_by_hour: HourActivity,
     pub analytics_snapshot_id: Option<String>,
@@ -200,6 +289,46 @@ fn incomplete_message_reason(reason: &str) -> bool {
             | "sessionParentUnavailable"
             | "invalidSessionRoot"
             | "incompleteSource"
+    )
+}
+fn unavailable_activity_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "conflictingSessionMetadata"
+            | "sessionIdentityUnavailable"
+            | "sessionRoleNotRecorded"
+            | "sessionParentUnavailable"
+            | "invalidSessionRoot"
+            | "incompleteSource"
+    )
+}
+fn usage_only_metric_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "nativeUsageUnavailable"
+            | "missingNativeCounters"
+            | "freshInputUnavailable"
+            | "missingModel"
+            | "incompleteUsageFact"
+            | "conflictingUsageReplica"
+            | "unprovenLegacyReplica"
+    )
+}
+fn unknown_metric_range_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "analyticsCacheUnavailable"
+            | "sourceReadFailed"
+            | "sourceMissing"
+            | "sourceLineBudgetExceeded"
+            | "projectionBudgetExceeded"
+            | "malformedNativeRecord"
+            | "missingTimestamp"
+            | "usageTimeUnavailable"
+            | "messageTimeUnavailable"
+            | "activityTimeUnavailable"
+            | "missingNativeSessionIdentity"
+            | "sessionIdentityUnavailable"
     )
 }
 fn in_window(window: &super::session_analytics_core::Window, time: i64) -> bool {
@@ -388,6 +517,8 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
         project_ids: query.project_ids.clone(),
         source_ids: query.source_ids.clone(),
     };
+    let mut ordered_days: Vec<_> = days.iter().enumerate().collect();
+    ordered_days.sort_by_key(|(_, day)| day.start_ms);
     let identities: Vec<_> = input.sessions.iter().map(|s| s.identity.clone()).collect();
     let roots = core::resolve_roots(&identities).map_err(|code| invalid(&code))?;
     // This also validates conflicting native event replicas before filtering.
@@ -445,8 +576,39 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
             })
             .collect()
     };
-    let activity = core::message_activity_refs(messages.iter().copied(), &filters.window, days)
-        .map_err(|code| invalid(&code))?;
+    let native_mode = input.codex_native_ready
+        || !input.source_observations.is_empty()
+        || !input.native_activity.is_empty();
+    let runtime_events: Vec<_> = input
+        .native_activity
+        .iter()
+        .filter(|event| {
+            let Some(identity) = roots.get(event.session_key.as_str()) else {
+                return false;
+            };
+            metric_reason.is_none()
+                && identity.key == event.session_key
+                && selected(&query.tool_ids, &identity.tool_id)
+                && (query.project_ids.is_empty()
+                    || project_id(&identity.project)
+                        .is_some_and(|id| selected(&query.project_ids, id)))
+        })
+        .cloned()
+        .collect();
+    let runtime_supported: BTreeSet<_> = runtime_events
+        .iter()
+        .filter(|event| event.main)
+        .map(|event| event.session_key.as_str())
+        .collect();
+    let message_activity =
+        core::message_activity_refs(messages.iter().copied(), &filters.window, days)
+            .map_err(|code| invalid(&code))?;
+    let runtime_activity = if native_mode {
+        super::session_native_activity::activity(&runtime_events, &filters.window, days)
+            .map_err(|code| invalid(&code))?
+    } else {
+        message_activity.clone()
+    };
     #[cfg(test)]
     advanced::profile_stage("activity", &mut profile);
     let mut cohort: BTreeSet<String> = aggregate.sessions.keys().cloned().collect();
@@ -458,27 +620,99 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
             cohort.insert(message.session_key.clone());
         }
     }
-    cohort.extend(activity.by_session.keys().cloned());
-    let mut message_reason = metric_reason.map(str::to_owned);
-    // An undated/missing-identity message cannot enter the timed cohort. Its
-    // absence from that cohort must not certify a zero message/activity count.
-    if input.source_reasons.iter().any(|r| {
-        selected(&query.tool_ids, &r.tool_id)
-            && selected(&query.source_ids, &r.source_id)
-            && incomplete_message_reason(&r.reason)
-    }) {
-        message_reason.get_or_insert_with(|| "messageCoveragePartial".into());
+    cohort.extend(
+        runtime_activity
+            .by_session
+            .iter()
+            .filter(|(_, amount)| !native_mode || **amount > 0)
+            .map(|(key, _)| key.clone()),
+    );
+    let mut activity = if native_mode && runtime_supported.iter().any(|key| !cohort.contains(*key))
+    {
+        super::session_native_activity::activity(
+            &runtime_events
+                .iter()
+                .filter(|event| cohort.contains(&event.session_key))
+                .cloned()
+                .collect::<Vec<_>>(),
+            &filters.window,
+            days,
+        )
+        .map_err(|code| invalid(&code))?
+    } else {
+        runtime_activity
+    };
+    // Message counts use their effective native message projection. Runtime
+    // events cannot manufacture extra conversational messages.
+    if native_mode {
+        activity.messages = message_activity.messages;
+        activity.daily_messages = message_activity.daily_messages.clone();
+        activity.by_session_messages = message_activity.by_session_messages.clone();
+        for (date, sessions) in &message_activity.daily_sessions {
+            activity
+                .daily_sessions
+                .entry(date.clone())
+                .or_default()
+                .extend(sessions.iter().cloned());
+        }
+    }
+    let mut evidence_dates: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    if native_mode {
+        let message_dates = messages
+            .iter()
+            .filter(|message| {
+                message.main
+                    && matches!(message.role, core::Role::User | core::Role::Assistant)
+                    && in_window(&filters.window, message.at_ms)
+            })
+            .map(|message| (message.session_key.as_str(), message.at_ms));
+        let usage_dates = input
+            .facts
+            .iter()
+            .filter(|fact| {
+                in_window(&filters.window, fact.at_ms)
+                    && selected(&query.tool_ids, &fact.tool_id)
+                    && selected(&query.model_ids, &fact.model)
+                    && selected(&query.source_ids, &fact.source_id)
+            })
+            .filter_map(|fact| {
+                fact.session_key
+                    .as_deref()
+                    .and_then(|key| roots.get(key))
+                    .map(|root| (root.key.as_str(), fact.at_ms))
+            })
+            .filter(|(key, _)| cohort.contains(*key));
+        for (key, at) in message_dates.chain(usage_dates) {
+            let index = ordered_days.partition_point(|(_, day)| day.end_ms <= at);
+            let (_, day) = ordered_days
+                .get(index)
+                .filter(|(_, day)| day.start_ms <= at)
+                .ok_or_else(|| invalid("missingActivityDayBoundary"))?;
+            evidence_dates
+                .entry(key)
+                .or_default()
+                .insert(day.date.as_str());
+        }
+    }
+    let active_days_for = |projection: &core::Activity, selected: &BTreeSet<String>| {
+        let mut dates: BTreeSet<&str> = projection
+            .daily_active_ms
+            .iter()
+            .filter(|(_, amount)| **amount > 0)
+            .map(|(date, _)| date.as_str())
+            .collect();
+        for key in selected {
+            if let Some(observed) = evidence_dates.get(key.as_str()) {
+                dates.extend(observed.iter().copied());
+            }
+        }
+        dates.len() as u64
+    };
+    if native_mode {
+        activity.active_days = active_days_for(&activity, &cohort);
     }
     for key in &cohort {
         let descriptor = descriptors[key.as_str()];
-        if !descriptor.messages_supported
-            || descriptor
-                .message_reasons
-                .iter()
-                .any(|reason| incomplete_message_reason(reason))
-        {
-            message_reason.get_or_insert_with(|| "messageCoveragePartial".into());
-        }
         if !descriptor.source_available {
             reasons.insert("sourceMissing".into());
         }
@@ -487,11 +721,7 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
             reasons.insert("unparsedProject".into());
         }
     }
-    if message_reason.as_deref() == Some("messageCoveragePartial") {
-        reasons.insert("messageCoveragePartial".into());
-    }
-    let metrics_available = message_reason.is_none();
-    let eligible: BTreeSet<_> = cohort
+    let message_eligible: BTreeSet<_> = cohort
         .iter()
         .filter(|key| {
             let descriptor = descriptors[key.as_str()];
@@ -501,6 +731,84 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
                     .message_reasons
                     .iter()
                     .any(|r| incomplete_message_reason(r))
+        })
+        .cloned()
+        .collect();
+    // SourceHealth is aggregated by tool/source kind, not physical source.
+    // A warning carried by an identified, out-of-window descriptor must not
+    // turn another session's complete message/runtime projection into unknown.
+    // Lost times and unreadable sources still have no provable query range.
+    let owned_metric_reasons: BTreeSet<_> = input
+        .sessions
+        .iter()
+        .flat_map(|session| {
+            session
+                .message_reasons
+                .iter()
+                .map(move |reason| (session.identity.tool_id.as_str(), reason.as_str()))
+        })
+        .collect();
+    let cohort_metric_reasons: BTreeSet<_> = cohort
+        .iter()
+        .flat_map(|key| {
+            let descriptor = descriptors[key.as_str()];
+            descriptor
+                .message_reasons
+                .iter()
+                .map(move |reason| (descriptor.identity.tool_id.as_str(), reason.as_str()))
+        })
+        .collect();
+    let cohort_source_reason = |reason: &SourceReason| {
+        let identity = (reason.tool_id.as_str(), reason.reason.as_str());
+        selected(&query.tool_ids, &reason.tool_id)
+            && selected(&query.source_ids, &reason.source_id)
+            && (unknown_metric_range_reason(&reason.reason)
+                || !owned_metric_reasons.contains(&identity)
+                || cohort_metric_reasons.contains(&identity))
+    };
+    let partial_activity: BTreeSet<_> = cohort
+        .iter()
+        .filter(|key| {
+            let descriptor = descriptors[key.as_str()];
+            descriptor
+                .message_reasons
+                .iter()
+                .any(|reason| reason.starts_with("activity"))
+                || input
+                    .reasons
+                    .iter()
+                    .any(|reason| reason.starts_with("activity"))
+                || input.source_reasons.iter().any(|reason| {
+                    reason.tool_id == descriptor.identity.tool_id
+                        && cohort_source_reason(reason)
+                        && reason.reason.starts_with("activity")
+                        && (unknown_metric_range_reason(&reason.reason)
+                            || !owned_metric_reasons
+                                .contains(&(reason.tool_id.as_str(), reason.reason.as_str()))
+                            || descriptor.message_reasons.contains(&reason.reason))
+                })
+        })
+        .cloned()
+        .collect();
+    let activity_eligible: BTreeSet<_> = cohort
+        .iter()
+        .filter(|key| {
+            let descriptor = descriptors[key.as_str()];
+            metric_reason.is_none()
+                && if native_mode {
+                    runtime_supported.contains(key.as_str())
+                        && !descriptor
+                            .message_reasons
+                            .iter()
+                            .any(|reason| unavailable_activity_reason(reason))
+                        && (!partial_activity.contains(*key)
+                            || activity
+                                .by_session
+                                .get(*key)
+                                .is_some_and(|amount| *amount > 0))
+                } else {
+                    message_eligible.contains(*key)
+                }
         })
         .cloned()
         .collect();
@@ -516,48 +824,230 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
                 && selected(&query.source_ids, &s.source_id)
                 && s.status != "ok"
         });
-    let mut metric_reasons: BTreeSet<String> = message_reason.iter().cloned().collect();
-    if unquantified_source_gaps {
-        metric_reasons.insert("sourceCoveragePartial".into());
-    }
-    let metric_coverage = MetricCoverage {
-        state: if metric_reason.is_some()
-            || (eligible.is_empty() && (!cohort.is_empty() || unquantified_source_gaps))
-        {
-            "unavailable"
-        } else if eligible.len() < cohort.len() || unquantified_source_gaps {
-            "partial"
-        } else {
-            "complete"
-        }
-        .into(),
-        eligible_sessions: eligible.len() as u64,
-        excluded_sessions: (cohort.len() - eligible.len()) as u64,
-        unquantified_source_gaps,
-        reasons: metric_reasons.into_iter().collect(),
+    let scoped_reason = |reason: &&SourceReason| {
+        selected(&query.tool_ids, &reason.tool_id) && selected(&query.source_ids, &reason.source_id)
     };
-    let known_activity = if eligible.len() == cohort.len() {
-        std::borrow::Cow::Borrowed(&activity)
+    let legacy_message_gaps = input
+        .reasons
+        .iter()
+        .any(|reason| !reason.starts_with("activity"))
+        || input
+            .source_reasons
+            .iter()
+            .filter(scoped_reason)
+            .any(|reason| !reason.reason.starts_with("activity"))
+        || !input.sources.iter().any(|source| {
+            selected(&query.tool_ids, &source.tool_id)
+                && selected(&query.source_ids, &source.source_id)
+        })
+        || input.sources.iter().any(|source| {
+            selected(&query.tool_ids, &source.tool_id)
+                && selected(&query.source_ids, &source.source_id)
+                && source.status != "ok"
+        });
+    let reason_affects_metric = |reason: &str, runtime: bool| {
+        !usage_only_metric_reason(reason)
+            && if runtime {
+                !reason.starts_with("message")
+            } else {
+                !reason.starts_with("activity")
+            }
+    };
+    let native_metric_gaps = |runtime: bool| {
+        let selected_sources = || {
+            input.sources.iter().filter(|source| {
+                selected(&query.tool_ids, &source.tool_id)
+                    && selected(&query.source_ids, &source.source_id)
+            })
+        };
+        let health_gap = selected_sources().next().is_none()
+            || selected_sources().any(|source| match source.status.as_str() {
+                "ok" => false,
+                "partial" => {
+                    let source_reasons = || {
+                        input.source_reasons.iter().filter(move |reason| {
+                            reason.tool_id == source.tool_id && reason.source_id == source.source_id
+                        })
+                    };
+                    // A coarse partial result without a scoped explanation is
+                    // still unknown; do not silently upgrade old backends.
+                    source_reasons().next().is_none()
+                        || source_reasons().any(|reason| {
+                            cohort_source_reason(reason)
+                                && reason_affects_metric(&reason.reason, runtime)
+                        })
+                }
+                _ => true,
+            });
+        health_gap
+            || cohort
+                .iter()
+                .any(|key| !descriptors[key.as_str()].source_available)
+            || input
+                .reasons
+                .iter()
+                .any(|reason| reason_affects_metric(reason, runtime))
+            || input.source_reasons.iter().any(|reason| {
+                cohort_source_reason(reason) && reason_affects_metric(&reason.reason, runtime)
+            })
+    };
+    let message_gaps = if native_mode {
+        native_metric_gaps(false)
     } else {
-        std::borrow::Cow::Owned(
-            core::message_activity_refs(
-                messages
+        legacy_message_gaps
+    };
+    let activity_gaps = if native_mode {
+        native_metric_gaps(true)
+    } else {
+        legacy_message_gaps
+    };
+    let coverage_for =
+        |eligible: &BTreeSet<String>, gaps: bool, partial_reason: &str, partial_samples: bool| {
+            let mut coverage_reasons: BTreeSet<String> =
+                metric_reason.into_iter().map(str::to_owned).collect();
+            if eligible.len() < cohort.len() || partial_samples {
+                coverage_reasons.insert(partial_reason.into());
+            }
+            if gaps {
+                coverage_reasons.insert("sourceCoveragePartial".into());
+            }
+            MetricCoverage {
+                state: if metric_reason.is_some()
+                    || (eligible.is_empty() && (native_mode || !cohort.is_empty() || gaps))
+                {
+                    "unavailable"
+                } else if eligible.len() < cohort.len() || gaps || partial_samples {
+                    "partial"
+                } else {
+                    "complete"
+                }
+                .into(),
+                eligible_sessions: eligible.len() as u64,
+                excluded_sessions: (cohort.len() - eligible.len()) as u64,
+                unquantified_source_gaps: gaps,
+                reasons: coverage_reasons.into_iter().collect(),
+            }
+        };
+    let message_coverage = coverage_for(
+        &message_eligible,
+        message_gaps,
+        "messageCoveragePartial",
+        false,
+    );
+    let activity_coverage = coverage_for(
+        &activity_eligible,
+        activity_gaps,
+        "activityCoveragePartial",
+        native_mode && !partial_activity.is_empty(),
+    );
+    let eligible: BTreeSet<_> = message_eligible
+        .intersection(&activity_eligible)
+        .cloned()
+        .collect();
+    let metric_coverage = coverage_for(
+        &eligible,
+        unquantified_source_gaps,
+        "messageCoveragePartial",
+        native_mode && !partial_activity.is_empty(),
+    );
+    let mut message_reason = metric_reason.map(str::to_owned);
+    if input
+        .source_reasons
+        .iter()
+        .filter(|reason| {
+            if native_mode {
+                cohort_source_reason(reason)
+            } else {
+                scoped_reason(reason)
+            }
+        })
+        .any(|reason| incomplete_message_reason(&reason.reason))
+        || message_eligible.len() < cohort.len()
+        || (native_mode && message_coverage.state != "complete")
+    {
+        message_reason.get_or_insert_with(|| "messageCoveragePartial".into());
+    }
+    let mut activity_reason = metric_reason.map(str::to_owned);
+    if activity_eligible.len() < cohort.len()
+        || (native_mode && activity_coverage.state != "complete")
+        || (!native_mode && message_reason.is_some())
+    {
+        activity_reason.get_or_insert_with(|| "activityCoveragePartial".into());
+    }
+    if let Some(reason) = &message_reason {
+        reasons.insert(reason.clone());
+    }
+    if let Some(reason) = &activity_reason {
+        reasons.insert(reason.clone());
+    }
+    let messages_available = message_reason.is_none();
+    let activity_available = activity_reason.is_none();
+    let message_projection = |selected: &BTreeSet<String>| {
+        core::message_activity_refs(
+            messages
+                .iter()
+                .copied()
+                .filter(|message| selected.contains(&message.session_key)),
+            &filters.window,
+            days,
+        )
+        .map_err(|code| invalid(&code))
+    };
+    let runtime_projection = |selected: &BTreeSet<String>| {
+        if native_mode {
+            let mut result = super::session_native_activity::activity(
+                &runtime_events
                     .iter()
-                    .copied()
-                    .filter(|m| eligible.contains(&m.session_key)),
+                    .filter(|event| selected.contains(&event.session_key))
+                    .cloned()
+                    .collect::<Vec<_>>(),
                 &filters.window,
                 days,
             )
-            .map_err(|code| invalid(&code))?,
-        )
+            .map_err(|code| invalid(&code))?;
+            result.active_days = active_days_for(&result, selected);
+            Ok(result)
+        } else {
+            message_projection(selected)
+        }
     };
-    let known_metrics = (metric_coverage.state != "unavailable").then_some(KnownMetrics {
-        messages: known_activity.messages,
-        active_ms: known_activity.active_ms,
-        active_days: known_activity.active_days,
-    });
+    let known_message_activity = if message_eligible.len() == cohort.len() {
+        std::borrow::Cow::Borrowed(&message_activity)
+    } else {
+        std::borrow::Cow::Owned(message_projection(&message_eligible)?)
+    };
+    let known_activity = if activity_eligible.len() == cohort.len() {
+        std::borrow::Cow::Borrowed(&activity)
+    } else {
+        std::borrow::Cow::Owned(runtime_projection(&activity_eligible)?)
+    };
+    let known_messages =
+        (message_coverage.state != "unavailable").then_some(known_message_activity.messages);
+    let known_active_ms =
+        (activity_coverage.state != "unavailable").then_some(known_activity.active_ms);
+    let known_active_days =
+        (activity_coverage.state != "unavailable").then_some(known_activity.active_days);
+    let known_metrics = if metric_coverage.state == "unavailable" {
+        None
+    } else {
+        let legacy_messages = if eligible == message_eligible {
+            std::borrow::Cow::Borrowed(known_message_activity.as_ref())
+        } else {
+            std::borrow::Cow::Owned(message_projection(&eligible)?)
+        };
+        let legacy_activity = if eligible == activity_eligible {
+            std::borrow::Cow::Borrowed(known_activity.as_ref())
+        } else {
+            std::borrow::Cow::Owned(runtime_projection(&eligible)?)
+        };
+        Some(KnownMetrics {
+            messages: legacy_messages.messages,
+            active_ms: legacy_activity.active_ms,
+            active_days: legacy_activity.active_days,
+        })
+    };
     let activity_by_hour =
-        advanced::hour_activity(&known_activity, &metric_coverage, query.end_ms, tz)?;
+        advanced::hour_activity(&known_activity, &activity_coverage, query.end_ms, tz)?;
     #[cfg(test)]
     advanced::profile_stage("known+hours", &mut profile);
     let mut by_session: BTreeMap<&str, Sum> = BTreeMap::new();
@@ -565,8 +1055,6 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
     let mut total = Sum::default();
     let mut unassociated = Sum::default();
     let mut daily: Vec<Sum> = days.iter().map(|_| Sum::default()).collect();
-    let mut ordered_days: Vec<_> = days.iter().enumerate().collect();
-    ordered_days.sort_by_key(|(_, d)| d.start_ms);
     let mut daily_sessions: Vec<BTreeSet<&str>> = days.iter().map(|_| BTreeSet::new()).collect();
     let mut project_sums: BTreeMap<&str, (Sum, BTreeSet<&str>)> = BTreeMap::new();
     let mut model_sums: BTreeMap<&str, (Sum, BTreeSet<&str>)> = BTreeMap::new();
@@ -595,7 +1083,11 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
         }
         // Every projection uses the same immutable per-record estimate from
         // the captured catalog. Resolve aliases/rates and price buckets once.
-        let fact_estimate = catalog.estimate(&fact.model, fact.buckets, Some(1));
+        let mut fact_estimate = catalog.estimate(&fact.model, fact.buckets, Some(1));
+        if !fact.complete && fact_estimate.known_cost_usd.is_some() {
+            fact_estimate.availability = "partial".into();
+            fact_estimate.unpriced_record_count = None;
+        }
         let contribution = CostContribution::new(&fact_estimate)?;
         let Some(root) = root else {
             unassociated.add_prepared(fact, &contribution)?;
@@ -696,8 +1188,12 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
     for (key, tokens) in cohort_tokens {
         let descriptor = descriptors[key.as_str()];
         let sum = by_session.get(key.as_str());
-        let own_available = eligible.contains(&key);
+        let own_messages_available = message_eligible.contains(&key);
+        let own_activity_available = activity_eligible.contains(&key);
         let mut row_reasons = descriptor.message_reasons.clone();
+        if native_mode && metric_reason.is_none() && !runtime_supported.contains(key.as_str()) {
+            row_reasons.push("activityProjectionUnavailable".into());
+        }
         if tokens.is_none() {
             row_reasons.push("sessionUsageUnavailable".into());
         } else if aggregate.sessions.get(&key).is_some_and(|s| !s.complete) {
@@ -732,9 +1228,10 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
             tokens,
             estimate: sum.map(Sum::estimate).unwrap_or_default(),
             models,
-            messages: own_available
+            messages: own_messages_available
                 .then_some(activity.by_session_messages.get(&key).copied().unwrap_or(0)),
-            active_ms: own_available.then_some(activity.by_session.get(&key).copied().unwrap_or(0)),
+            active_ms: own_activity_available
+                .then_some(activity.by_session.get(&key).copied().unwrap_or(0)),
             reasons: row_reasons,
         });
     }
@@ -769,23 +1266,23 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
             session_count: daily_sessions[index].len() as u64,
             tokens: daily[index].tokens()?,
             estimate: daily[index].estimate(),
-            messages: metrics_available
+            messages: messages_available
                 .then_some(activity.daily_messages.get(&day.date).copied().unwrap_or(0)),
-            active_ms: metrics_available.then_some(
+            active_ms: activity_available.then_some(
                 activity
                     .daily_active_ms
                     .get(&day.date)
                     .copied()
                     .unwrap_or(0),
             ),
-            known_messages: known_metrics.as_ref().map(|_| {
-                known_activity
+            known_messages: known_messages.map(|_| {
+                known_message_activity
                     .daily_messages
                     .get(&day.date)
                     .copied()
                     .unwrap_or(0)
             }),
-            known_active_ms: known_metrics.as_ref().map(|_| {
+            known_active_ms: known_active_ms.map(|_| {
                 known_activity
                     .daily_active_ms
                     .get(&day.date)
@@ -875,7 +1372,13 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
     let pricing_coverage = catalog.coverage_for(&estimate);
     let fingerprint = query.fingerprint()?;
     let mut hash = Sha256::new();
-    hash.update(b"session-analytics-v2\0");
+    let method_version = if input.codex_native_ready {
+        "magpie-native-v1"
+    } else {
+        "legacy-v1"
+    };
+    hash.update(b"session-analytics-v3\0");
+    hash.update(method_version.as_bytes());
     hash.update(input.snapshot_version.as_bytes());
     hash.update(fingerprint.as_bytes());
     hash.update(
@@ -913,7 +1416,13 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
         })
         .map(|f| f.source_id.clone())
         .collect();
+    let source_coverage = input
+        .source_coverage(&query)
+        .with_usage_samples(total.records);
     Ok(SessionAnalytics {
+        method_version,
+        input_snapshot_version: input.snapshot_version.clone(),
+        source_coverage,
         receipt: QueryReceipt {
             applied_query: query,
             query_fingerprint: fingerprint,
@@ -944,11 +1453,11 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
             quantile_samples: quantiles.samples,
             quantile_excluded: quantiles.excluded,
             estimate,
-            messages: metrics_available.then_some(activity.messages),
-            active_ms: metrics_available.then_some(activity.active_ms),
-            active_days: metrics_available.then_some(activity.active_days),
-            message_reason: message_reason.clone(),
-            activity_reason: message_reason,
+            messages: messages_available.then_some(activity.messages),
+            active_ms: activity_available.then_some(activity.active_ms),
+            active_days: activity_available.then_some(activity.active_days),
+            message_reason,
+            activity_reason,
         },
         series,
         by_project: rank(project_sums, true)?,
@@ -968,6 +1477,11 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
         compact_top,
         known_metrics,
         metric_coverage,
+        message_coverage: Some(message_coverage),
+        activity_coverage: Some(activity_coverage),
+        known_messages,
+        known_active_ms,
+        known_active_days,
         distributions,
         activity_by_hour,
         analytics_snapshot_id: None,
@@ -1123,6 +1637,11 @@ mod tests {
     fn input() -> AnalyticsInput {
         AnalyticsInput {
             snapshot_version: "source-snapshot".into(),
+            native_activity: vec![],
+            source_observations: vec![],
+            codex_native_ready: false,
+            legacy_history_available: false,
+            thread_usage_coverage: Default::default(),
             sessions: vec![],
             facts: vec![],
             messages: vec![],
@@ -1145,6 +1664,373 @@ mod tests {
             error_code: None,
             last_scan: None,
             retained_detail_range: None,
+        }
+    }
+
+    fn native_event(
+        session: &str,
+        id: &str,
+        at_ms: i64,
+    ) -> super::super::session_native_activity::NativeActivityEvent {
+        super::super::session_native_activity::NativeActivityEvent {
+            session_key: session.into(),
+            event_key: id.into(),
+            at_ms,
+            main: true,
+            stream_key: "stream".into(),
+        }
+    }
+
+    fn native_input(tool: &str, source: &str) -> AnalyticsInput {
+        let mut data = input();
+        data.codex_native_ready = true;
+        let mut session = descriptor("s", Project::Unknown);
+        session.identity.tool_id = tool.into();
+        data.sessions.push(session);
+        let mut usage = fact("usage", Some("s"), "m", 60_000, [1, 1, 0, 0]);
+        usage.tool_id = tool.into();
+        usage.source_id = source.into();
+        data.facts.push(usage);
+        data.sources.push(health(tool, source, "ok"));
+        data.source_observations.push(SourceObservation {
+            tool_id: tool.into(),
+            source_id: source.into(),
+            status: "ok".into(),
+            dated: true,
+        });
+        for at_ms in [1_000, 61_000] {
+            data.messages.push(MessageEvent {
+                session_key: "s".into(),
+                native_id: format!("message-{at_ms}"),
+                at_ms,
+                role: Role::User,
+                main: true,
+            });
+        }
+        data
+    }
+
+    #[test]
+    fn native_analysis_runtime_beats_visible_message_gaps_and_excludes_metadata_only_cohort() {
+        let db = Database::memory().unwrap();
+        let mut data = native_input("codex", "codex_session");
+        data.messages[1].at_ms = 601_000;
+        data.sessions.push(descriptor("metadata", Project::Unknown));
+        data.native_activity = vec![native_event("metadata", "header", 1_000)];
+        data.native_activity.extend(
+            [1_000, 201_000, 401_000, 601_000]
+                .into_iter()
+                .enumerate()
+                .map(|(id, at)| native_event("s", &format!("runtime-{id}"), at)),
+        );
+        let mut q = query();
+        q.end_ms = 1_000_000;
+        let boundaries = [
+            DayBoundary {
+                date: "first".into(),
+                start_ms: 0,
+                end_ms: 500_000,
+            },
+            DayBoundary {
+                date: "second".into(),
+                start_ms: 500_000,
+                end_ms: 1_000_000,
+            },
+        ];
+        let result = build_analysis(q, &data, &catalog(&db), &boundaries).unwrap();
+        assert_eq!(result.method_version, "magpie-native-v1");
+        assert_eq!(result.totals.session_count, 1);
+        assert_eq!(result.totals.messages, Some(2));
+        assert_eq!(result.totals.active_ms, Some(600_000));
+        assert_eq!(result.known_messages, Some(2));
+        assert_eq!(result.known_active_ms, Some(600_000));
+        assert_eq!(
+            result
+                .series
+                .iter()
+                .map(|day| day.active_ms.unwrap())
+                .collect::<Vec<_>>(),
+            [400_000, 200_000]
+        );
+        assert_eq!(
+            result
+                .activity_by_hour
+                .cells
+                .iter()
+                .map(|cell| cell.active_ms)
+                .sum::<u64>(),
+            600_000
+        );
+    }
+
+    #[test]
+    fn native_analysis_missing_runtime_never_falls_back_to_visible_messages_or_fake_zero() {
+        let db = Database::memory().unwrap();
+        let data = native_input("gemini", "gemini_session");
+        let result = build_analysis(query(), &data, &catalog(&db), &days()).unwrap();
+        assert_eq!(result.totals.messages, Some(2));
+        assert_eq!(result.totals.active_ms, None);
+        assert_eq!(result.known_messages, Some(2));
+        assert_eq!(result.known_active_ms, None);
+        assert_eq!(result.message_coverage.as_ref().unwrap().state, "complete");
+        assert_eq!(
+            result.activity_coverage.as_ref().unwrap().state,
+            "unavailable"
+        );
+        assert!(result.activity_by_hour.cells.is_empty());
+        assert_eq!(result.top_sessions[0].messages, Some(2));
+        assert_eq!(result.top_sessions[0].active_ms, None);
+    }
+
+    #[test]
+    fn native_analysis_metric_coverage_ignores_known_metadata_and_outside_cohort_issues() {
+        let db = Database::memory().unwrap();
+        let mut data = native_input("codex", "codex_session");
+        data.native_activity = vec![
+            native_event("s", "begin", 1_000),
+            native_event("s", "end", 61_000),
+            native_event("metadata", "header", 1_000),
+            native_event("outside", "begin", 110_000),
+            native_event("outside", "end", 120_000),
+        ];
+        let mut metadata = descriptor("metadata", Project::Unknown);
+        metadata.messages_supported = false;
+        metadata.message_reasons = vec!["messagePartsUnavailable".into()];
+        let mut outside = descriptor("outside", Project::Unknown);
+        outside.message_reasons = vec!["activityIdentityUnavailable".into()];
+        data.sessions.extend([metadata, outside]);
+        data.facts.push(fact(
+            "outside-usage",
+            Some("outside"),
+            "m",
+            120_000,
+            [5, 2, 0, 0],
+        ));
+        data.sources[0].status = "partial".into();
+        for reason in ["messagePartsUnavailable", "activityIdentityUnavailable"] {
+            data.source_reasons.push(SourceReason {
+                tool_id: "codex".into(),
+                source_id: "codex_session".into(),
+                reason: reason.into(),
+            });
+        }
+        let result = build_analysis(query(), &data, &catalog(&db), &days()).unwrap();
+        assert_eq!(result.totals.session_count, 1);
+        assert_eq!(result.totals.messages, Some(2));
+        assert_eq!(result.totals.active_ms, Some(60_000));
+        for coverage in [
+            result.message_coverage.as_ref().unwrap(),
+            result.activity_coverage.as_ref().unwrap(),
+        ] {
+            assert_eq!(coverage.state, "complete");
+            assert_eq!(coverage.eligible_sessions, 1);
+            assert_eq!(coverage.excluded_sessions, 0);
+            assert!(!coverage.unquantified_source_gaps);
+        }
+    }
+
+    #[test]
+    fn native_analysis_usage_only_warnings_do_not_hide_verified_message_or_runtime() {
+        let db = Database::memory().unwrap();
+        let mut data = native_input("codex", "codex_session");
+        data.native_activity = vec![
+            native_event("s", "begin", 1_000),
+            native_event("s", "end", 61_000),
+        ];
+        data.facts[0].complete = false;
+        data.sources[0].status = "partial".into();
+        for reason in [
+            "nativeUsageUnavailable",
+            "missingNativeCounters",
+            "conflictingUsageReplica",
+            "unprovenLegacyReplica",
+        ] {
+            data.source_reasons.push(SourceReason {
+                tool_id: "codex".into(),
+                source_id: "codex_session".into(),
+                reason: reason.into(),
+            });
+        }
+        let result = build_analysis(query(), &data, &catalog(&db), &days()).unwrap();
+        assert_eq!(result.totals.messages, Some(2));
+        assert_eq!(result.totals.active_ms, Some(60_000));
+        assert_eq!(result.message_coverage.as_ref().unwrap().state, "complete");
+        assert_eq!(result.activity_coverage.as_ref().unwrap().state, "complete");
+        assert!(result
+            .coverage
+            .reasons
+            .contains(&"incompleteUsageFact".into()));
+    }
+
+    #[test]
+    fn native_analysis_unattributed_source_failure_keeps_known_parts_and_unknown_runtime() {
+        let db = Database::memory().unwrap();
+        let mut data = native_input("codex", "codex_session");
+        data.native_activity = vec![
+            native_event("s", "begin", 1_000),
+            native_event("s", "end", 61_000),
+        ];
+        data.sources[0].status = "failed".into();
+        data.source_reasons.push(SourceReason {
+            tool_id: "codex".into(),
+            source_id: "codex_session".into(),
+            reason: "analyticsCacheUnavailable".into(),
+        });
+        let partial = build_analysis(query(), &data, &catalog(&db), &days()).unwrap();
+        assert_eq!(partial.totals.messages, None);
+        assert_eq!(partial.totals.active_ms, None);
+        assert_eq!(partial.known_messages, Some(2));
+        assert_eq!(partial.known_active_ms, Some(60_000));
+        assert_eq!(partial.activity_coverage.as_ref().unwrap().state, "partial");
+        assert!(
+            partial
+                .activity_coverage
+                .as_ref()
+                .unwrap()
+                .unquantified_source_gaps
+        );
+        data.native_activity.clear();
+        let missing = build_analysis(query(), &data, &catalog(&db), &days()).unwrap();
+        assert_eq!(missing.totals.session_count, 1);
+        assert_eq!(missing.totals.active_ms, None);
+        assert_eq!(missing.known_active_ms, None);
+        assert_eq!(
+            missing.activity_coverage.as_ref().unwrap().state,
+            "unavailable"
+        );
+    }
+
+    #[test]
+    fn native_analysis_active_days_exclude_header_only_dates_but_keep_proven_zero_usage_day() {
+        let db = Database::memory().unwrap();
+        let mut data = native_input("codex", "codex_session");
+        data.messages[0].at_ms = 901_000;
+        data.messages[1].at_ms = 1_001_000;
+        data.facts[0].at_ms = 1_001_000;
+        data.native_activity = vec![
+            native_event("s", "header", 1_000),
+            native_event("s", "begin", 901_000),
+            native_event("s", "end", 1_001_000),
+        ];
+        let mut q = query();
+        q.end_ms = 2_000_000;
+        let boundaries = [
+            DayBoundary {
+                date: "metadata-only".into(),
+                start_ms: 0,
+                end_ms: 500_000,
+            },
+            DayBoundary {
+                date: "active".into(),
+                start_ms: 500_000,
+                end_ms: 2_000_000,
+            },
+        ];
+        let result = build_analysis(q.clone(), &data, &catalog(&db), &boundaries).unwrap();
+        assert_eq!(result.totals.active_days, Some(1));
+        assert_eq!(result.known_active_days, Some(1));
+        assert_eq!(result.series[0].session_count, 0);
+        data.messages.clear();
+        data.facts[0].buckets = [0; 4];
+        data.native_activity = vec![native_event("s", "usage", 1_001_000)];
+        let zero = build_analysis(q, &data, &catalog(&db), &boundaries).unwrap();
+        assert_eq!(zero.totals.session_count, 1);
+        assert_eq!(zero.totals.active_ms, Some(0));
+        assert_eq!(zero.known_active_ms, Some(0));
+        assert_eq!(zero.totals.active_days, Some(1));
+    }
+
+    #[test]
+    fn native_analysis_message_and_runtime_coverage_are_independent() {
+        let db = Database::memory().unwrap();
+        let mut data = native_input("opencode", "opencode_session");
+        data.native_activity = vec![
+            native_event("s", "begin", 1_000),
+            native_event("s", "end", 61_000),
+        ];
+        data.sessions[0]
+            .message_reasons
+            .push("activityTimeUnavailable".into());
+        let result = build_analysis(query(), &data, &catalog(&db), &days()).unwrap();
+        assert_eq!(result.totals.messages, Some(2));
+        assert_eq!(result.totals.active_ms, None);
+        assert_eq!(result.known_active_ms, Some(60_000));
+        assert_eq!(
+            result.message_coverage.as_ref().unwrap().eligible_sessions,
+            1
+        );
+        assert_eq!(
+            result.activity_coverage.as_ref().unwrap().eligible_sessions,
+            1
+        );
+        assert_eq!(result.activity_coverage.as_ref().unwrap().state, "partial");
+        data.sessions[0].message_reasons = vec!["messagePartsUnavailable".into()];
+        data.sessions[0].messages_supported = false;
+        let result = build_analysis(query(), &data, &catalog(&db), &days()).unwrap();
+        assert_eq!(result.totals.messages, None);
+        assert_eq!(result.known_messages, None);
+        assert_eq!(result.totals.active_ms, Some(60_000));
+        assert_eq!(result.known_active_ms, Some(60_000));
+        assert_eq!(result.top_sessions[0].messages, None);
+        assert_eq!(result.top_sessions[0].active_ms, Some(60_000));
+    }
+
+    #[test]
+    fn native_analysis_unknown_attribution_and_legacy_method_are_explicit() {
+        let db = Database::memory().unwrap();
+        let mut data = native_input("codex", "codex_session");
+        data.native_activity = vec![
+            native_event("s", "begin", 1_000),
+            native_event("s", "end", 61_000),
+        ];
+        for (models, sources) in [
+            (vec!["m".into()], vec![]),
+            (vec![], vec!["codex_session".into()]),
+        ] {
+            let mut selected = query();
+            selected.model_ids = models;
+            selected.source_ids = sources;
+            let result = build_analysis(selected, &data, &catalog(&db), &days()).unwrap();
+            assert_eq!(result.totals.messages, None);
+            assert_eq!(result.totals.active_ms, None);
+            assert_eq!(result.known_messages, None);
+            assert_eq!(result.known_active_ms, None);
+        }
+        data.codex_native_ready = false;
+        data.source_observations.clear();
+        data.native_activity.clear();
+        let legacy = build_analysis(query(), &data, &catalog(&db), &days()).unwrap();
+        assert_eq!(legacy.method_version, "legacy-v1");
+        assert_eq!(legacy.totals.active_ms, Some(60_000));
+    }
+
+    #[test]
+    fn native_analysis_incomplete_facts_keep_known_cost_and_mark_all_projections_partial() {
+        let db = Database::memory().unwrap();
+        let catalog = PriceCatalog::ingest_on(&db.conn.lock().unwrap(), "ofox.ai", &serde_json::json!({"data":[{"id":"m","pricing":{"prompt":"1","completion":"2","input_cache_read":"0","input_cache_write":"0"}}]}), 100_000).unwrap();
+        for buckets in [[10, 2, 0, 0], [0; 4]] {
+            let mut data = native_input("codex", "codex_session");
+            data.facts[0].buckets = buckets;
+            data.facts[0].complete = false;
+            let expected = catalog.estimate("m", buckets, Some(1));
+            let result = build_analysis(query(), &data, &catalog, &days()).unwrap();
+            for estimate in [
+                &result.totals.estimate,
+                &result.series[1].estimate,
+                &result.by_tool[0].estimate,
+                &result.by_model[0].estimate,
+                &result.top_sessions[0].estimate,
+                &result.top_sessions[0].models[0].estimate,
+            ] {
+                assert_eq!(estimate.known_cost_usd, expected.known_cost_usd);
+                assert_eq!(estimate.availability, "partial");
+                assert_eq!(estimate.unpriced_record_count, None);
+            }
+            data.facts[0].model = "unpriced".into();
+            data.facts[0].buckets = [10, 2, 0, 0];
+            let unknown = build_analysis(query(), &data, &catalog, &days()).unwrap();
+            assert_eq!(unknown.totals.estimate.availability, "unknown");
+            assert!(unknown.totals.estimate.known_cost_usd.is_none());
         }
     }
     fn large_fixture() -> (AnalyticsInput, UsageQueryV1, Vec<DayBoundary>) {
@@ -1207,8 +2093,8 @@ mod tests {
         release_query_benchmark(false);
     }
     #[test]
-    #[ignore = "opt-in release synthetic four-source cache/API benchmark, not native history or UI"]
-    fn session_analytics_release_four_native_bridges_query_p95() {
+    #[ignore = "opt-in release synthetic eight-source native-projection/API benchmark, not native history or UI"]
+    fn session_analytics_release_eight_native_bridges_query_p95() {
         release_query_benchmark(true);
     }
     fn release_query_benchmark(mixed_native: bool) {
@@ -1227,6 +2113,10 @@ mod tests {
         let (mut data, mut query, _) = large_fixture();
         let sources = if mixed_native {
             vec![
+                ("claude", "session_log"),
+                ("codex", "codex_session"),
+                ("gemini", "gemini_session"),
+                ("opencode", "opencode_session"),
                 ("workbuddy", "workbuddy_session"),
                 ("pi", "pi_session"),
                 ("dsh", "dsh_session"),
@@ -1237,40 +2127,59 @@ mod tests {
         };
         if mixed_native {
             for (i, session) in data.sessions.iter_mut().enumerate() {
-                session.identity.tool_id = sources[i / 2500].0.into();
+                session.identity.tool_id = sources[i / 1250].0.into();
             }
             for (i, fact) in data.facts.iter_mut().enumerate() {
-                let (tool, source) = sources[i / 12500];
+                let (tool, source) = sources[i / 6250];
                 fact.tool_id = tool.into();
                 fact.source_id = source.into();
             }
             query.tool_ids = sources.iter().map(|(tool, _)| (*tool).into()).collect();
         }
+        let envelopes = if mixed_native { 80 } else { 100 };
+        let sessions_per_envelope = 10_000 / envelopes;
+        let facts_per_envelope = 50_000 / envelopes;
+        let runtime: Vec<_> = data
+            .messages
+            .iter()
+            .map(
+                |event| crate::services::session_native_activity::NativeActivityEvent {
+                    session_key: event.session_key.clone(),
+                    event_key: format!("runtime:{}", event.native_id),
+                    at_ms: event.at_ms,
+                    main: true,
+                    stream_key: event.session_key.clone(),
+                },
+            )
+            .collect();
         {
             let mut conn = db.conn.lock().unwrap();
             let tx = conn.transaction().unwrap();
             // Seed the same normalized body-free fixture used by the existing
             // aggregation regression into 100 cache envelopes. Native parsing
             // is deliberately outside the measured API's responsibility.
-            for i in 0..100 {
+            for i in 0..envelopes {
                 source_cache::merge_on(
                     &tx,
                     &format!("benchmark-{i:03}"),
-                    sources[if mixed_native { i / 25 } else { 0 }].0,
+                    sources[if mixed_native { i / 10 } else { 0 }].0,
                     None,
                     Part::Analytics,
                     &None,
                     Some(json!({
                         "version":1,"stamp":null,
-                        "sessions":&data.sessions[i * 100..(i + 1) * 100],
-                        "facts":&data.facts[i * 500..(i + 1) * 500],
-                        "messages":&data.messages[i * 500..(i + 1) * 500],
+                        "sessions":&data.sessions[i * sessions_per_envelope..(i + 1) * sessions_per_envelope],
+                        "facts":&data.facts[i * facts_per_envelope..(i + 1) * facts_per_envelope],
+                        "messages":&data.messages[i * facts_per_envelope..(i + 1) * facts_per_envelope],
+                        "nativeActivity":&runtime[i * facts_per_envelope..(i + 1) * facts_per_envelope],
+                        "nativeMethod":true,
                         "reasons":[],"available":true,"status":"ok","priority":0,
                         "attemptedAtMs":1,"succeededAtMs":1,
                     })),
                 )
                 .unwrap();
             }
+            source_cache::merge_on(&tx,"analytics-codex-generation-v1","codex",None,Part::Analytics,&None,Some(json!({"version":1,"stamp":{"epoch":source_cache::ledger_epoch_on(&tx).unwrap(),"methodVersion":crate::services::codex_native::VERSION},"sessions":[],"facts":[],"messages":[],"reasons":[],"available":true,"status":"ok","priority":0,"attemptedAtMs":1,"succeededAtMs":1,"nativeMethod":true}))).unwrap();
             for (tool, source) in &sources {
                 for channel in [Channel::Ledger, Channel::Analytics] {
                     let attempt = usage_health::begin_on(&tx, tool, source, channel, 1).unwrap();
@@ -1308,7 +2217,7 @@ mod tests {
         samples.sort_unstable();
         let p50 = samples[14];
         let p95 = samples[28];
-        eprintln!("session analytics release warm API: os={} arch={} providers={sources:?} synthetic=true sessions=10000 facts=50000 messages=50000 cacheEnvelopes=100 days=1460 warmups=3 rounds=30 p50={p50:?} p95={p95:?}; includes SQLite cache/catalog/health read, deduplication, aggregation, and frozen-cohort retention; excludes cold parsing, native source scan, actual historical completeness, IPC serialization/transport and UI rendering", std::env::consts::OS, std::env::consts::ARCH);
+        eprintln!("session analytics release warm API: os={} arch={} providers={sources:?} synthetic=true sessions=10000 facts=50000 messages=50000 cacheEnvelopes={envelopes} nativeActivity=50000 days=1460 warmups=3 rounds=30 p50={p50:?} p95={p95:?}; includes SQLite cache/catalog/health read, deduplication, aggregation, and frozen-cohort retention; excludes cold parsing, native source scan, actual historical completeness, IPC serialization/transport and UI rendering", std::env::consts::OS, std::env::consts::ARCH);
         assert!(
             p95 < Duration::from_millis(300),
             "warm API p95 exceeds 300ms: {p95:?}"
@@ -1393,7 +2302,7 @@ mod tests {
         let result = build_analysis(q.clone(), &input, &catalog(&db), &days()).unwrap();
         assert_eq!(result.totals.session_count, 2);
         assert_eq!(result.totals.tokens.total_tokens, 30);
-        assert_eq!(result.totals.median_tokens.as_deref(), Some("15"));
+        assert_eq!(result.totals.median_tokens.as_deref(), Some("10"));
         assert_eq!(result.totals.p90_tokens, Some(20));
         assert_eq!(result.totals.messages, None);
         assert_eq!(result.totals.active_ms, None);

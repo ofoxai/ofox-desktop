@@ -1,18 +1,27 @@
 import { useTranslation } from "react-i18next";
 import { TOOL_META } from "@/config/toolMeta";
 import type { UsageOverview } from "@/lib/api/usageOverview";
-import type { UsagePricingCoverage } from "@/types/usageQuery";
+import type { UsagePricingCoverage, UsageReceipt } from "@/types/usageQuery";
+import { usageIsUnavailable } from "@/lib/usageWorkbench";
+import {
+  hasSourceCoverageGaps,
+  UsageSourceCoverageDetails,
+} from "./UsageSourceCoverageDetails";
 
 export function UsageFreshness({
   localUpdatedAt,
   accountUpdatedAt,
   sources,
   pricing,
+  receipt,
+  onSavedHistory,
 }: {
   localUpdatedAt?: number | null;
   accountUpdatedAt?: number | null;
   sources?: UsageOverview["sources"];
   pricing?: UsagePricingCoverage;
+  receipt?: Partial<UsageReceipt>;
+  onSavedHistory?: () => void;
 }) {
   const { t, i18n } = useTranslation();
   const time = (at: number | null | undefined) =>
@@ -37,6 +46,10 @@ export function UsageFreshness({
   const pricePartial = !!pricing?.unpricedModelIds.length;
   const hasWarning =
     !!sourceIssues.length || priceUnavailable || pricing?.stale || pricePartial;
+  const modern = receipt?.methodVersion === "magpie-native-v1";
+  const sourcePartial =
+    receipt?.coverage?.state !== "complete" ||
+    hasSourceCoverageGaps(receipt?.sourceCoverage);
   return (
     <div className="space-y-1.5 text-note text-ink-muted">
       {hasWarning && (
@@ -68,8 +81,27 @@ export function UsageFreshness({
       <details>
         <summary className="w-fit cursor-pointer rounded-sm text-ink-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50">
           {t("usageWorkbench.dataStatus")}
+          {receipt && (
+            <span className="ml-2">
+              {t(
+                !modern
+                  ? "usageExperience.legacyMethod"
+                  : usageIsUnavailable(receipt)
+                    ? "usageExperience.unavailable"
+                    : sourcePartial
+                      ? "usageExperience.nativePartial"
+                      : "usageExperience.nativeUpdated",
+              )}
+            </span>
+          )}
         </summary>
         <div className="mt-2 space-y-1.5 rounded-lg border border-line bg-card px-3 py-2">
+          {receipt?.sourceCoverage && (
+            <UsageSourceCoverageDetails
+              coverage={receipt.sourceCoverage}
+              onSavedHistory={modern ? onSavedHistory : undefined}
+            />
+          )}
           {localUpdatedAt !== undefined && (
             <p>
               {t("usageWorkbench.localUpdated", { time: time(localUpdatedAt) })}
@@ -149,8 +181,18 @@ export function UsageFreshness({
 /** Requests and overview share the same visible warnings and folded metadata. */
 export function UsagePriceNotice({
   pricing,
+  receipt,
+  onSavedHistory,
 }: {
   pricing?: UsagePricingCoverage;
+  receipt?: Partial<UsageReceipt>;
+  onSavedHistory?: () => void;
 }) {
-  return <UsageFreshness pricing={pricing} />;
+  return (
+    <UsageFreshness
+      pricing={pricing}
+      receipt={receipt}
+      onSavedHistory={onSavedHistory}
+    />
+  );
 }

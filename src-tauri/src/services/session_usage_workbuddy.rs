@@ -31,6 +31,7 @@ pub(crate) struct WorkBuddyRead {
     pub session: Option<SessionMeta>,
     pub analytics: super::session_analytics_messages::TranscriptFacts,
     pub analytics_message_hashes: BTreeMap<String, String>,
+    pub native_activity: Vec<super::session_native_activity::NativeActivityEvent>,
 }
 
 pub(crate) fn native_time(value: Option<&Value>) -> Option<i64> {
@@ -129,6 +130,8 @@ pub(crate) fn read_workbuddy(path: &Path) -> Result<WorkBuddyRead, AppError> {
         ..Default::default()
     };
     let mut analytics_message_hashes = BTreeMap::new();
+    let mut runtime_events = Vec::new();
+    let mut runtime_generation = 0u64;
     let mut pending = Vec::new();
     let mut reasons = BTreeSet::new();
     let progress = usage_source::json_lines(
@@ -159,6 +162,28 @@ pub(crate) fn read_workbuddy(path: &Path) -> Result<WorkBuddyRead, AppError> {
             if let Some(at) = at_ms {
                 created = Some(created.map_or(at, |prior| prior.min(at)));
                 last = Some(last.map_or(at, |prior| prior.max(at)));
+                if runtime_events.len() >= MAX_NATIVE_EVENTS {
+                    return Err(invalid("eventBudgetExceeded"));
+                }
+                let digest = format!(
+                    "{:x}",
+                    Sha256::digest(
+                        serde_json::to_vec(&value).map_err(|_| invalid("invalidNativeEntry"))?
+                    )
+                );
+                runtime_events.push((
+                    json!(["record", digest]).to_string(),
+                    at,
+                    runtime_generation,
+                ));
+            } else if matches!(
+                value["type"].as_str(),
+                Some("message" | "reasoning" | "function_call" | "function_call_result")
+            ) {
+                analytics.reasons.insert("activityTimeUnavailable".into());
+                runtime_generation = runtime_generation
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("eventBudgetExceeded"))?;
             }
             match value.get("type").and_then(Value::as_str) {
                 Some("custom-title") => {
@@ -364,6 +389,25 @@ pub(crate) fn read_workbuddy(path: &Path) -> Result<WorkBuddyRead, AppError> {
     if !progress.complete {
         analytics.reasons.insert("incompleteSource".into());
     }
+    let native_activity = session_id
+        .as_deref()
+        .map(|sid| {
+            runtime_events
+                .into_iter()
+                .map(|(id, at, generation)| {
+                    let mut event =
+                        super::session_analytics_native::runtime_event("workbuddy", sid, &id, at);
+                    if generation > 0 {
+                        event.stream_key = super::session_analytics_index::key(
+                            "workbuddy-activity-stream",
+                            &json!([sid, generation]).to_string(),
+                        );
+                    }
+                    event
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let session = session_id.map(|session_id| {
         let (title, title_source) = title::titled(&candidates.with_directory(project.as_deref()));
         SessionMeta {
@@ -389,6 +433,7 @@ pub(crate) fn read_workbuddy(path: &Path) -> Result<WorkBuddyRead, AppError> {
         session,
         analytics,
         analytics_message_hashes,
+        native_activity,
     })
 }
 
@@ -620,6 +665,61 @@ mod tests {
             fact.usage.cache_read_tokens,
             fact.usage.cache_creation_tokens,
         ]
+    }
+
+    #[test]
+    fn native_runtime_workbuddy_reader_retains_all_timed_records_without_body_or_guessing_sid() {
+        let (_temp, path) = source(&[
+            json!({"type":"function_call","id":"call","timestamp":1000,"arguments":"private runtime not indexed"}),
+            json!({"type":"function_call_result","id":"result","sessionId":"native-s","timestamp":1500,"output":"private runtime not indexed"}),
+            line("native-s", "assistant", 2000, 130, 50),
+            json!({"type":"reasoning","id":"invalid-clock","sessionId":"native-s","timestamp":"bad time","content":"private runtime not indexed"}),
+        ]);
+        let parsed = read_workbuddy(&path).unwrap();
+        assert_eq!(parsed.facts.len(), 1);
+        assert_eq!(
+            parsed
+                .native_activity
+                .iter()
+                .map(|event| event.at_ms)
+                .collect::<Vec<_>>(),
+            [1000, 1500, 2000]
+        );
+        assert!(parsed.native_activity.iter().all(|event| event.session_key
+            == super::super::session_analytics_index::key("workbuddy", "native-s")
+            && event.main));
+        let encoded = serde_json::to_string(&parsed.native_activity).unwrap();
+        assert!(!encoded.contains("private runtime"));
+        assert!(!encoded.contains("private-body-not-indexed"));
+    }
+
+    #[test]
+    fn native_runtime_workbuddy_missing_time_cuts_activity_stream() {
+        let (_temp, path) = source(&[
+            json!({"type":"message","role":"user","id":"u","sessionId":"s","timestamp":1000,"content":"question"}),
+            json!({"type":"reasoning","id":"unknown-clock","sessionId":"s","content":"private reasoning"}),
+            line("s", "assistant", 61_000, 130, 50),
+        ]);
+        let parsed = read_workbuddy(&path).unwrap();
+        assert_eq!(parsed.facts.len(), 1);
+        let result = super::super::session_native_activity::activity(
+            &parsed.native_activity,
+            &super::super::session_analytics_core::Window {
+                start_ms: Some(0),
+                end_ms: 100_000,
+            },
+            &[super::super::session_analytics_core::DayBoundary {
+                date: "date".into(),
+                start_ms: 0,
+                end_ms: 100_000,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            result.active_ms, 0,
+            "an unknown intervening timestamp cannot establish one verified interval"
+        );
+        assert!(parsed.analytics.reasons.contains("activityTimeUnavailable"));
     }
 
     #[test]

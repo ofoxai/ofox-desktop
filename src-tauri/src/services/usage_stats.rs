@@ -156,10 +156,10 @@ pub struct RequestLogDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_model: Option<String>,
     pub cost_multiplier: String,
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    pub cache_read_tokens: u32,
-    pub cache_creation_tokens: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_creation_tokens: u64,
     pub input_cost_usd: String,
     pub output_cost_usd: String,
     pub cache_read_cost_usd: String,
@@ -1236,10 +1236,10 @@ impl Database {
                 cost_multiplier: row
                     .get::<_, Option<String>>(6)?
                     .unwrap_or_else(|| "1".to_string()),
-                input_tokens: row.get::<_, i64>(7)? as u32,
-                output_tokens: row.get::<_, i64>(8)? as u32,
-                cache_read_tokens: row.get::<_, i64>(9)? as u32,
-                cache_creation_tokens: row.get::<_, i64>(10)? as u32,
+                input_tokens: row.get::<_, u64>(7)?,
+                output_tokens: row.get::<_, u64>(8)?,
+                cache_read_tokens: row.get::<_, u64>(9)?,
+                cache_creation_tokens: row.get::<_, u64>(10)?,
                 input_cost_usd: row.get(11)?,
                 output_cost_usd: row.get(12)?,
                 cache_read_cost_usd: row.get(13)?,
@@ -1309,10 +1309,10 @@ impl Database {
                 cost_multiplier: row
                     .get::<_, Option<String>>(6)?
                     .unwrap_or_else(|| "1".to_string()),
-                input_tokens: row.get::<_, i64>(7)? as u32,
-                output_tokens: row.get::<_, i64>(8)? as u32,
-                cache_read_tokens: row.get::<_, i64>(9)? as u32,
-                cache_creation_tokens: row.get::<_, i64>(10)? as u32,
+                input_tokens: row.get::<_, u64>(7)?,
+                output_tokens: row.get::<_, u64>(8)?,
+                cache_read_tokens: row.get::<_, u64>(9)?,
+                cache_creation_tokens: row.get::<_, u64>(10)?,
                 input_cost_usd: row.get(11)?,
                 output_cost_usd: row.get(12)?,
                 cache_read_cost_usd: row.get(13)?,
@@ -1456,6 +1456,11 @@ impl Database {
         provider_cache: &mut HashMap<(String, String), rust_decimal::Decimal>,
         pricing_cache: &mut HashMap<String, ModelPricing>,
     ) -> Result<(), AppError> {
+        // Saved native history is audit evidence. A present zero is not
+        // permission to replace the original amount with today's prices.
+        if log.app_type == "codex" && log.data_source.as_deref() == Some("codex_session") {
+            return Ok(());
+        }
         let total_cost = rust_decimal::Decimal::from_str(&log.total_cost_usd)
             .unwrap_or(rust_decimal::Decimal::ZERO);
         let has_cost = total_cost > rust_decimal::Decimal::ZERO;
@@ -1479,11 +1484,25 @@ impl Database {
             &log.app_type,
         )?;
 
+        let buckets = [
+            log.input_tokens,
+            log.output_tokens,
+            log.cache_read_tokens,
+            log.cache_creation_tokens,
+        ]
+        .map(u32::try_from);
+        let [Ok(input_tokens), Ok(output_tokens), Ok(cache_read_tokens), Ok(cache_creation_tokens)] =
+            buckets
+        else {
+            // This compatibility backfill cannot price native u64 counters.
+            // Preserve the saved amount rather than narrowing or rewriting it.
+            return Ok(());
+        };
         let usage = TokenUsage {
-            input_tokens: log.input_tokens,
-            output_tokens: log.output_tokens,
-            cache_read_tokens: log.cache_read_tokens,
-            cache_creation_tokens: log.cache_creation_tokens,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
             model: Some(log.model.clone()),
             message_id: None,
         };
@@ -1623,6 +1642,34 @@ pub(crate) fn find_model_pricing_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_audit_saved_zero_is_not_backfilled_by_legacy_detail_reader() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,output_tokens,latency_ms,status_code,created_at,data_source,total_cost_usd) VALUES('preserve-zero','_codex_session','codex','fixture',100,10,0,200,1,'codex_session','0.000000000')",[]).unwrap();
+        let mut log:RequestLogDetail=serde_json::from_value(serde_json::json!({"requestId":"preserve-zero","providerId":"_codex_session","appType":"codex","model":"fixture","costMultiplier":"1","inputTokens":100,"outputTokens":10,"cacheReadTokens":0,"cacheCreationTokens":0,"inputCostUsd":"0","outputCostUsd":"0","cacheReadCostUsd":"0","cacheCreationCostUsd":"0","totalCostUsd":"0.000000000","isStreaming":false,"latencyMs":0,"statusCode":200,"createdAt":1,"dataSource":"codex_session"})).unwrap();
+        let mut prices = HashMap::from([(
+            "fixture".into(),
+            ModelPricing {
+                input_cost_per_million: rust_decimal::Decimal::ONE,
+                output_cost_per_million: rust_decimal::Decimal::ONE,
+                cache_read_cost_per_million: rust_decimal::Decimal::ZERO,
+                cache_creation_cost_per_million: rust_decimal::Decimal::ZERO,
+            },
+        )]);
+        Database::maybe_backfill_log_costs(&conn, &mut log, &mut HashMap::new(), &mut prices)
+            .unwrap();
+        assert_eq!(log.total_cost_usd, "0.000000000");
+        let saved: String = conn
+            .query_row(
+                "SELECT total_cost_usd FROM proxy_request_logs WHERE request_id='preserve-zero'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(saved, "0.000000000");
+    }
 
     fn local_ts(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> i64 {
         match Local.with_ymd_and_hms(year, month, day, hour, minute, second) {

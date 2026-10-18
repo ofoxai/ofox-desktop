@@ -36,6 +36,8 @@ export interface RequestLog {
   cacheReadCostUsd: string;
   cacheCreationCostUsd: string;
   totalCostUsd: string;
+  /** Explicit null means no original saved amount exists for this rebuilt event. */
+  recordedCostUsd?: string | null;
   isStreaming: boolean;
   latencyMs: number;
   firstTokenMs?: number;
@@ -43,6 +45,8 @@ export interface RequestLog {
   statusCode: number;
   errorMessage?: string;
   createdAt: number;
+  /** Canonical native event time; absent on older backends. */
+  createdAtMs?: number;
   dataSource?: string;
   observedStatusCode?: number | null;
   observedLatencyMs?: number | null;
@@ -104,6 +108,8 @@ export interface UsageRequestMeasurements {
 
 export interface RequestQueryOptions {
   query: UsageQueryV1;
+  /** Frontend-only ownership guard, never sent as a product IPC argument. */
+  expectedApex?: string;
   requestFilters?: UsageRequestFilters;
   snapshotId?: string;
   expectedReceipt?: UsageSnapshotReceipt;

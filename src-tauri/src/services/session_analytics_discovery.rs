@@ -6,6 +6,8 @@ pub(crate) struct Discovery {
     pub specs: Vec<SourceSpec>,
     pub batches: Vec<BatchSource>,
     pub failures: Vec<DiscoveryFailure>,
+    pub roots: Vec<(String, PathBuf)>,
+    pub require_route_match: bool,
 }
 #[derive(Clone)]
 pub(crate) struct BatchSource {
@@ -29,7 +31,13 @@ pub(crate) fn discover_sources() -> Discovery {
     ])
 }
 pub(crate) fn discover_in(roots: &[(&str, PathBuf)]) -> Discovery {
-    let mut result = Discovery::default();
+    let mut result = Discovery {
+        roots: roots
+            .iter()
+            .map(|(p, r)| ((*p).into(), r.clone()))
+            .collect(),
+        ..Default::default()
+    };
     for (provider, root) in roots {
         if matches!(*provider, "workbuddy" | "pi" | "dsh" | "openclaw") {
             if let Some(batch) = result
@@ -126,12 +134,18 @@ fn provider_sources(provider: &str, root: &std::path::Path) -> Result<Vec<Source
     match provider {
         "claude" => walk(&root.join("projects"), 0, &mut dirs, &["jsonl"], &mut files)?,
         "codex" => {
-            walk(&root.join("sessions"), 0, &mut dirs, &["jsonl"], &mut files)?;
+            walk(
+                &root.join("sessions"),
+                0,
+                &mut dirs,
+                &["jsonl", "zst", "zstd"],
+                &mut files,
+            )?;
             walk(
                 &root.join("archived_sessions"),
                 0,
                 &mut dirs,
-                &["jsonl"],
+                &["jsonl", "zst", "zstd"],
                 &mut files,
             )?;
         }

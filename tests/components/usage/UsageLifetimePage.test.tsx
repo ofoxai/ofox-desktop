@@ -66,6 +66,7 @@ beforeEach(() => {
         const fixture = sessionAnalyticsFixture();
         return {
           ...fixture,
+          pricingCoverage: { ...fixture.pricingCoverage, apex: "ofox.io" },
           appliedQuery: args.query,
           period: "30d",
           start: args.query.startMs,

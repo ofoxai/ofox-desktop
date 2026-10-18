@@ -76,7 +76,7 @@ fn codex_thread_display_multiple_headers_never_attributes_copied_prefix() {
     assert!(value["reasons"]
         .as_array()
         .unwrap()
-        .contains(&json!("ambiguousThreadHistory")));
+        .contains(&json!("unprovenInheritedBoundary")));
     assert!(
         read_input(&db).unwrap().facts.is_empty(),
         "existing analytics rejection must remain intact"
@@ -103,7 +103,7 @@ fn codex_thread_display_single_header_fork_stays_unknown() {
     assert!(value["reasons"]
         .as_array()
         .unwrap()
-        .contains(&json!("ambiguousThreadHistory")));
+        .contains(&json!("unprovenInheritedBoundary")));
 }
 #[test]
 fn codex_thread_display_missing_native_usage_is_not_known_zero() {

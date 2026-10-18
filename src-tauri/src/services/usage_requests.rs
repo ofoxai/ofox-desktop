@@ -28,6 +28,8 @@ const MAX_SNAPSHOT_BYTES: usize = 128 * 1024 * 1024;
 pub struct RequestView {
     #[serde(flatten)]
     pub record: RequestLogDetail,
+    pub created_at_ms: i64,
+    pub recorded_cost_usd: Option<String>,
     pub observed_status_code: Option<u16>,
     pub observed_latency_ms: Option<u64>,
     pub observed_first_token_ms: Option<u64>,
@@ -38,6 +40,9 @@ pub struct RequestView {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestPage {
+    pub method_version: &'static str,
+    pub input_snapshot_version: String,
+    pub source_coverage: super::session_analytics::SourceCoverage,
     #[serde(flatten)]
     pub receipt: QueryReceipt,
     pub request_filters: RequestFilters,
@@ -56,6 +61,9 @@ pub struct RequestPage {
 }
 #[derive(Serialize)]
 struct Snapshot {
+    method_version: &'static str,
+    input_snapshot_version: String,
+    source_coverage: super::session_analytics::SourceCoverage,
     receipt: QueryReceipt,
     filters: RequestFilters,
     rows: Vec<RequestView>,
@@ -215,7 +223,7 @@ pub fn request_page(
     )
 }
 
-fn request_page_in<Tz: chrono::TimeZone>(
+pub(crate) fn request_page_in<Tz: chrono::TimeZone>(
     db: &Database,
     query: UsageQueryV1,
     filters: RequestFilters,
@@ -262,17 +270,27 @@ fn request_page_in<Tz: chrono::TimeZone>(
             .records
             .into_iter()
             .map(|record| {
-                let current_estimate = data.catalog.estimate(
+                let evidence = data
+                    .record_evidence
+                    .get(&record.request_id)
+                    .ok_or_else(|| invalid("recordEvidenceUnavailable"))?;
+                let mut current_estimate = data.catalog.estimate(
                     &record.model,
                     [
-                        record.input_tokens as u64,
-                        record.output_tokens as u64,
-                        record.cache_read_tokens as u64,
-                        record.cache_creation_tokens as u64,
+                        record.input_tokens,
+                        record.output_tokens,
+                        record.cache_read_tokens,
+                        record.cache_creation_tokens,
                     ],
                     Some(1),
                 );
-                RequestView {
+                if !evidence.complete && current_estimate.known_cost_usd.is_some() {
+                    current_estimate.availability = "partial".into();
+                    current_estimate.unpriced_record_count = None;
+                }
+                Ok(RequestView {
+                    created_at_ms: evidence.at_ms,
+                    recorded_cost_usd: evidence.recorded_cost_usd.clone(),
                     observed_status_code: usage_data::observed_status(&record),
                     observed_latency_ms: usage_data::observed_latency(&record),
                     // The legacy writer times the first SSE event, including
@@ -282,11 +300,14 @@ fn request_page_in<Tz: chrono::TimeZone>(
                     record,
                     current_estimate,
                     receipt: None,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, AppError>>()?;
         let measurements = measure(&rows);
         retain_snapshot(Snapshot {
+            method_version: data.method_version,
+            input_snapshot_version: data.input_snapshot_version,
+            source_coverage: data.source_coverage,
             receipt: QueryReceipt {
                 applied_query: query,
                 query_fingerprint,
@@ -323,6 +344,9 @@ fn request_page_in<Tz: chrono::TimeZone>(
         .cloned()
         .collect();
     Ok(RequestPage {
+        method_version: snapshot.method_version,
+        input_snapshot_version: snapshot.input_snapshot_version.clone(),
+        source_coverage: snapshot.source_coverage.clone(),
         receipt: snapshot.receipt.clone(),
         request_filters: snapshot.filters.clone(),
         snapshot_id: id,
@@ -387,10 +411,7 @@ pub fn export_csv(snapshot_id: &str, destination: Option<&str>) -> Result<CsvExp
             let row = &view.record;
             let values = [
                 row.request_id.clone(),
-                row.created_at
-                    .checked_mul(1000)
-                    .ok_or_else(|| invalid("invalidTime"))?
-                    .to_string(),
+                view.created_at_ms.to_string(),
                 row.app_type.clone(),
                 row.model.clone(),
                 row.request_model.clone().unwrap_or_default(),
@@ -398,7 +419,7 @@ pub fn export_csv(snapshot_id: &str, destination: Option<&str>) -> Result<CsvExp
                 row.output_tokens.to_string(),
                 row.cache_read_tokens.to_string(),
                 row.cache_creation_tokens.to_string(),
-                row.total_cost_usd.clone(),
+                view.recorded_cost_usd.clone().unwrap_or_default(),
                 view.current_estimate
                     .known_cost_usd
                     .clone()

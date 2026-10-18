@@ -3,18 +3,74 @@ use super::{
     session_analytics::SessionDescriptor,
     session_analytics_core::{Project, SessionIdentity, UsageFact},
     session_analytics_index::{key, project_key, ParsedSource},
+    session_native_activity::NativeActivityEvent,
     usage_source::NormalizedUsageFact,
 };
 use crate::{error::AppError, session_manager::source_cache::SourceStamp};
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 pub(crate) fn empty() -> ParsedSource {
     ParsedSource {
         sessions: vec![],
         facts: vec![],
         messages: vec![],
+        native_activity: vec![],
         reasons: vec![],
+    }
+}
+
+pub(crate) fn activity_key(tool: &str, native_identity: &str) -> String {
+    key(&format!("{tool}-activity"), native_identity)
+}
+
+pub(crate) fn runtime_event(
+    tool: &str,
+    sid: &str,
+    native_identity: &str,
+    at_ms: i64,
+) -> NativeActivityEvent {
+    NativeActivityEvent {
+        session_key: key(tool, sid),
+        event_key: activity_key(tool, native_identity),
+        at_ms,
+        main: true,
+        stream_key: key(&format!("{tool}-activity-stream"), sid),
+    }
+}
+
+/// A native SID names one append-only runtime stream. Full replicas and
+/// verified prefixes keep one stream, while divergent copies cannot pick a
+/// winner by path order. The returned delta maintains the provider budget.
+pub(crate) fn merge_activity_stream(
+    streams: &mut BTreeMap<String, Vec<NativeActivityEvent>>,
+    session_key: String,
+    events: Vec<NativeActivityEvent>,
+) -> Result<usize, AppError> {
+    let invalid = || AppError::InvalidInput("usage.analytics.sourceReadFailed".into());
+    if events.iter().any(|event| event.session_key != session_key) {
+        return Err(invalid());
+    }
+    match streams.entry(session_key) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            let added = events.len();
+            entry.insert(events);
+            Ok(added)
+        }
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            if entry.get().starts_with(&events) {
+                Ok(0)
+            } else if events.starts_with(entry.get()) {
+                let added = events.len() - entry.get().len();
+                entry.insert(events);
+                Ok(added)
+            } else {
+                Err(invalid())
+            }
+        }
     }
 }
 

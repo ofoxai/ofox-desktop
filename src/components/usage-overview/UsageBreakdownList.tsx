@@ -49,6 +49,7 @@ export function UsageBreakdownList({
   selectedIds = [],
   initialLimit,
   headerControl,
+  unavailable = false,
 }: {
   kind: "tools" | "models" | "projects";
   rows: Row[];
@@ -62,6 +63,7 @@ export function UsageBreakdownList({
   selectedIds?: string[];
   initialLimit?: number;
   headerControl?: ReactNode;
+  unavailable?: boolean;
 }) {
   const { t } = useTranslation();
   const heading = useRef<HTMLHeadingElement>(null);
@@ -152,9 +154,11 @@ export function UsageBreakdownList({
         }
       >
         {visibleRows.slice(0, visibleLimit).map((r) => {
-          const costText = r.estimate
-            ? formatUsageEstimate(r.estimate)
-            : fmtCost(r.priced === false ? null : r.costUsd);
+          const costText = unavailable
+            ? "—"
+            : r.estimate
+              ? formatUsageEstimate(r.estimate)
+              : fmtCost(r.priced === false ? null : r.costUsd);
           const partialPrice = costText.endsWith("+");
           return (
             <ListRow
@@ -231,15 +235,17 @@ export function UsageBreakdownList({
                     {r.path}
                   </p>
                 )}
-                {!compact && (
+                {!compact && !unavailable && (
                   <ShareBar value={total > 0 ? r.totalTokens / total : 0} />
                 )}
               </div>
               {compact && (
                 <div className="relative min-w-0">
-                  <ShareBar
-                    value={barScale > 0 ? r.totalTokens / barScale : 0}
-                  />
+                  {!unavailable && (
+                    <ShareBar
+                      value={barScale > 0 ? r.totalTokens / barScale : 0}
+                    />
+                  )}
                   <div className="absolute right-0 top-1/2 -translate-y-1/2">
                     {actions(r)}
                   </div>
@@ -248,11 +254,13 @@ export function UsageBreakdownList({
               <div
                 className="min-w-0 shrink-0 text-right tabular-nums"
                 title={t("usagePage.io", {
-                  input: fmtTokens(r.inputTokens),
-                  output: fmtTokens(r.outputTokens),
+                  input: unavailable ? "—" : fmtTokens(r.inputTokens),
+                  output: unavailable ? "—" : fmtTokens(r.outputTokens),
                 })}
               >
-                <b className="text-sub">{fmtTokens(r.totalTokens)}</b>
+                <b className="text-sub">
+                  {unavailable ? "—" : fmtTokens(r.totalTokens)}
+                </b>
                 <p
                   className={
                     compact
@@ -261,19 +269,19 @@ export function UsageBreakdownList({
                   }
                 >
                   {t("usagePage.io", {
-                    input: fmtTokens(r.inputTokens),
-                    output: fmtTokens(r.outputTokens),
+                    input: unavailable ? "—" : fmtTokens(r.inputTokens),
+                    output: unavailable ? "—" : fmtTokens(r.outputTokens),
                   })}
                 </p>
               </div>
               <span
                 className={
                   compact
-                    ? "flex min-w-0 items-center justify-end whitespace-nowrap text-right text-note tabular-nums text-ok"
+                    ? `flex min-w-0 items-center justify-end whitespace-nowrap text-right text-note tabular-nums ${unavailable ? "text-ink-faint" : "text-ok"}`
                     : "min-w-[58px] shrink-0 whitespace-nowrap text-right text-sub text-ink"
                 }
                 title={
-                  r.estimate?.knownCostUsd == null
+                  unavailable || r.estimate?.knownCostUsd == null
                     ? costText
                     : `${costText}\n${r.estimate.knownCostUsd}`
                 }

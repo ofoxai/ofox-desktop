@@ -1,4 +1,38 @@
 import type { TFunction } from "i18next";
+import type {
+  AnalyticsSession,
+  SessionAnalytics,
+} from "@/types/sessionAnalytics";
+import { usageIsUnavailable } from "@/lib/usageWorkbench";
+
+/** Usage gaps do not erase a separately verified message or activity cohort. */
+export function usageCohortIsUnavailable(data: SessionAnalytics): boolean {
+  if (!usageIsUnavailable(data)) return false;
+  const legacy =
+    data.metricCoverage?.state === "unavailable" ? null : data.knownMetrics;
+  const messages =
+    (data.messageCoverage ?? data.metricCoverage)?.state === "unavailable"
+      ? null
+      : (data.totals.messages ?? data.knownMessages ?? legacy?.messages);
+  const activity =
+    (data.activityCoverage ?? data.metricCoverage)?.state === "unavailable"
+      ? null
+      : (data.totals.activeMs ?? data.knownActiveMs ?? legacy?.activeMs);
+  return messages == null && activity == null;
+}
+
+export function isPartialActivity(
+  row: Pick<AnalyticsSession, "activeMs" | "reasons">,
+): boolean {
+  return (
+    row.activeMs != null &&
+    row.reasons.some(
+      (reason) =>
+        reason === "activityTimeUnavailable" ||
+        reason === "activityIdentityUnavailable",
+    )
+  );
+}
 
 export function formatActivity(
   ms: number | null | undefined,

@@ -42,6 +42,146 @@ function Page() {
     </ShellProvider>
   );
 }
+
+it("opens original history from folded data status with its exact query and returns to effective records by keyboard", async () => {
+  mocks.sharedProjects = true;
+  localStorage.setItem("ofox.usageTab", "sessions");
+  const normal = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation(async (command: string, args: any) => {
+    const result = await normal(command, args);
+    if (command === "get_session_usage_analytics") {
+      result.methodVersion = "magpie-native-v1";
+      result.sourceCoverage = {
+        observed: 2,
+        read: 2,
+        partial: 0,
+        failed: 0,
+        undated: 0,
+        legacyHistoryAvailable: true,
+      };
+    }
+    return result;
+  });
+  render(<Page />);
+  await userEvent.click(
+    await screen.findByRole("combobox", { name: "项目筛选" }),
+  );
+  await userEvent.click(screen.getByRole("option", { name: "project" }));
+  await userEvent.keyboard("{Escape}");
+  await userEvent.click(screen.getByText("部分本机记录未计入"));
+  const history = screen.getByRole("button", { name: "查看原始历史记录" });
+  history.focus();
+  await userEvent.keyboard("{Enter}");
+  const back = await screen.findByRole("button", { name: "返回有效统计" });
+  expect(back).toHaveFocus();
+  expect(screen.getByText(/原始历史记录仅供核对/)).toBeVisible();
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "get_request_logs",
+      expect.objectContaining({
+        query: expect.objectContaining({ projectIds: ["/fixture/project"] }),
+        requestFilters: expect.objectContaining({
+          recordBasis: "savedHistory",
+        }),
+      }),
+    ),
+  );
+  const audit = mocks.invoke.mock.calls.find(
+    ([name, args]) =>
+      name === "get_request_logs" &&
+      args.requestFilters?.recordBasis === "savedHistory",
+  )![1];
+  const analytics = mocks.invoke.mock.calls
+    .filter(([name]) => name === "get_session_usage_analytics")
+    .at(-1)![1];
+  expect(audit.query).toEqual(analytics.query);
+  await userEvent.keyboard("{Enter}");
+  await waitFor(() =>
+    expect(
+      screen.getByRole("textbox", { name: "搜索请求、模型或供应商" }),
+    ).toHaveFocus(),
+  );
+  expect(screen.queryByText(/原始历史记录仅供核对/)).toBeNull();
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenLastCalledWith(
+      "get_request_logs",
+      expect.objectContaining({ requestFilters: {} }),
+    ),
+  );
+});
+
+it("does not offer a stale analysis history jump under newly selected filters", async () => {
+  localStorage.setItem("ofox.usageTab", "sessions");
+  const normal = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation(async (command: string, args: any) => {
+    if (command === "get_session_usage_analytics" && args.query.toolIds.length)
+      return new Promise(() => undefined);
+    const result = await normal(command, args);
+    if (command === "get_session_usage_analytics") {
+      result.methodVersion = "magpie-native-v1";
+      result.sourceCoverage = {
+        observed: 1,
+        read: 1,
+        partial: 0,
+        failed: 0,
+        undated: 0,
+        legacyHistoryAvailable: true,
+      };
+    }
+    return result;
+  });
+  render(<Page />);
+  await userEvent.click(await screen.findByText("部分本机记录未计入"));
+  expect(
+    screen.getByRole("button", { name: "查看原始历史记录" }),
+  ).toBeVisible();
+  await userEvent.click(
+    within(screen.getByRole("group", { name: "工具筛选" })).getByRole(
+      "button",
+      { name: "Codex" },
+    ),
+  );
+  expect(screen.queryByRole("button", { name: "查看原始历史记录" })).toBeNull();
+});
+
+it("shows native cache rebuild progress and cancels only its exact operation", async () => {
+  localStorage.setItem("ofox.usageTab", "sessions");
+  const normal = mocks.invoke.getMockImplementation()!;
+  let progress = {
+    operationId: "rebuild-a",
+    state: "running",
+    completedSources: 2,
+    totalSources: 5,
+    errorCode: null,
+  };
+  mocks.invoke.mockImplementation(async (command: string, args: any) => {
+    if (command === "get_usage_rebuild_progress") return progress;
+    if (command === "cancel_usage_rebuild") {
+      expect(args).toEqual({ operationId: "rebuild-a" });
+      progress = { ...progress, state: "cancelling" };
+      return progress;
+    }
+    const result = await normal(command, args);
+    if (command === "get_usage_capabilities") result.nativeRebuild = true;
+    return result;
+  });
+  render(<Page />);
+  expect(
+    await screen.findByText("正在重建 Codex 本机统计：2 / 5 个来源"),
+  ).toBeVisible();
+  const cancel = screen.getByRole("button", { name: "取消重建" });
+  cancel.focus();
+  await userEvent.keyboard("{Enter}");
+  expect(
+    await screen.findByText("正在停止后续重建，保留原有统计…"),
+  ).toBeVisible();
+  expect(mocks.invoke).toHaveBeenCalledWith("cancel_usage_rebuild", {
+    operationId: "rebuild-a",
+  });
+  expect(
+    mocks.invoke.mock.calls.filter(([name]) => name === "sync_session_usage"),
+  ).toHaveLength(0);
+});
 beforeEach(() => {
   queryClient.clear();
   Element.prototype.scrollIntoView = vi.fn();
@@ -77,6 +217,7 @@ beforeEach(() => {
         const fixture = sessionAnalyticsFixture();
         return {
           ...fixture,
+          pricingCoverage: { ...fixture.pricingCoverage, apex: mocks.apex },
           appliedQuery: args.query,
           period: "30d",
           start: args.query.startMs,
@@ -103,6 +244,7 @@ beforeEach(() => {
         const fixture = sessionAnalyticsFixture();
         return {
           ...fixture,
+          pricingCoverage: { ...fixture.pricingCoverage, apex: mocks.apex },
           appliedQuery: args.query,
           requestFilters: args.requestFilters,
           snapshotId: "project-snapshot",

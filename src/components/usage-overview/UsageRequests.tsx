@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -26,6 +26,7 @@ import {
 import { ToolBadge } from "@/components/tools/ToolBadge";
 import { UsagePriceNotice } from "./UsageFreshness";
 import { UsageBars } from "./UsageBars";
+import { usageIsUnavailable } from "@/lib/usageWorkbench";
 import { UsageRequestMeasurements } from "./UsageRequestMeasurements";
 import { RequestDetailPanel } from "@/components/usage/RequestDetailPanel";
 import { queryClient } from "@/lib/query/queryClient";
@@ -48,6 +49,9 @@ export function UsageRequests({
   canExport,
   onLatest,
   onOptions,
+  recordBasis = "effective",
+  onEffectiveRecords,
+  onSavedHistory,
 }: {
   query: UsageQueryV1;
   apex: string;
@@ -57,12 +61,33 @@ export function UsageRequests({
   canExport: boolean;
   onLatest: () => void;
   onOptions?: (options: UsageFilterOptions) => void;
+  recordBasis?: UsageRequestFilters["recordBasis"];
+  onEffectiveRecords?: () => void;
+  onSavedHistory?: (query: UsageQueryV1) => void;
 }) {
   const { t, i18n } = useTranslation();
   const [draft, setDraft] = useState("");
   const [filters, setFilters] = useState<UsageRequestFilters>({});
   const [generation, setGeneration] = useState(0);
-  const scope = JSON.stringify([apex, query, filters, generation]);
+  const requestFilters = useMemo(
+    () => ({
+      ...filters,
+      ...(recordBasis === "savedHistory" ? { recordBasis } : {}),
+    }),
+    [filters, recordBasis],
+  );
+  const scope = JSON.stringify([apex, query, requestFilters, generation]);
+  const searchInput = useRef<HTMLInputElement>(null);
+  const auditReturn = useRef<HTMLButtonElement>(null);
+  const restoreSearch = useRef(false);
+  useLayoutEffect(() => {
+    if (!active) return;
+    if (recordBasis === "savedHistory") auditReturn.current?.focus();
+    else if (restoreSearch.current) {
+      searchInput.current?.focus();
+      restoreSearch.current = false;
+    }
+  }, [active, recordBasis]);
   const [paging, setPaging] = useState<{
     scope: string;
     page: number;
@@ -79,7 +104,8 @@ export function UsageRequests({
       queryFn: () =>
         usageApi.getRequestLogs({}, page, 20, {
           query,
-          requestFilters: filters,
+          expectedApex: apex,
+          requestFilters,
           ...(snapshotId ? { snapshotId } : {}),
           ...(expectedReceipt ? { expectedReceipt } : {}),
         }),
@@ -137,9 +163,11 @@ export function UsageRequests({
     [],
   );
   useEffect(() => setSelected(undefined), [apex]);
+  useEffect(() => setSelected(undefined), [recordBasis]);
   const data = result.data;
   const pages = Math.max(1, Math.ceil((data?.total ?? 0) / 20));
   const summary = data?.summary;
+  const noUsage = usageIsUnavailable(data);
   const latest = () => {
     setSeenUpdate(updateVersion);
     setGeneration((value) => value + 1);
@@ -190,6 +218,28 @@ export function UsageRequests({
       aria-label={t("usageWorkbench.requestConditions")}
       className="space-y-3"
     >
+      {recordBasis === "savedHistory" && (
+        <div
+          role="status"
+          className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-card px-3 py-2 text-note text-ink-muted"
+        >
+          <p className="min-w-0 flex-1">
+            {t("usageExperience.savedHistoryNotice")}
+          </p>
+          {onEffectiveRecords && (
+            <Button
+              ref={auditReturn}
+              variant="secondary"
+              onClick={() => {
+                restoreSearch.current = true;
+                onEffectiveRecords();
+              }}
+            >
+              {t("usageExperience.effectiveRecords")}
+            </Button>
+          )}
+        </div>
+      )}
       <form
         className="flex flex-wrap items-center gap-2"
         onSubmit={(event) => {
@@ -201,6 +251,7 @@ export function UsageRequests({
         }}
       >
         <Input
+          ref={searchInput}
           aria-label={t("usageWorkbench.searchRequests")}
           placeholder={t("usageWorkbench.searchRequests")}
           value={draft}
@@ -304,7 +355,15 @@ export function UsageRequests({
           {t("usageWorkbench.legacyDates")}
         </p>
       )}
-      <UsagePriceNotice pricing={data?.pricingCoverage} />
+      <UsagePriceNotice
+        pricing={data?.pricingCoverage}
+        receipt={data}
+        onSavedHistory={
+          recordBasis === "effective" && data?.appliedQuery && onSavedHistory
+            ? () => onSavedHistory(data.appliedQuery!)
+            : undefined
+        }
+      />
       {data?.pricingCoverage?.additionalUnitsUnsupported && (
         <p className="text-note text-ink-muted">
           {t("usageWorkbench.unsupportedUnits")}
@@ -314,16 +373,16 @@ export function UsageRequests({
         <div className="flex flex-wrap gap-x-5 gap-y-1 rounded-card border border-line bg-card p-3 text-sub tabular-nums">
           <span>
             {t("usageWorkbench.records")}:{" "}
-            {summary.requests.toLocaleString(i18n.language)}
+            {noUsage ? "—" : summary.requests.toLocaleString(i18n.language)}
           </span>
-          <span>Tokens: {fmtTokens(summary.totalTokens)}</span>
+          <span>Tokens: {noUsage ? "—" : fmtTokens(summary.totalTokens)}</span>
           <span>
             {t("usageWorkbench.currentEstimate")}:{" "}
-            {formatUsageEstimate(summary.estimate)}
+            {noUsage ? "—" : formatUsageEstimate(summary.estimate)}
           </span>
         </div>
       )}
-      {data?.trend && (
+      {data?.trend && !noUsage && (
         <section aria-label={t("usageWorkbench.requestTrend")}>
           <UsageBars overview={data.trend} />
         </section>
@@ -348,7 +407,14 @@ export function UsageRequests({
           role="alert"
           className="space-y-2 rounded-card border border-warn/30 bg-warn-soft p-3 text-sub text-warn"
         >
-          <p>{t("usageWorkbench.requestFailed")}</p>
+          <p>
+            {t(
+              recordBasis === "savedHistory" &&
+                String(result.error).includes("usage.queryUnsupported")
+                ? "usageExperience.savedHistoryUnavailable"
+                : "usageWorkbench.requestFailed",
+            )}
+          </p>
           <Button variant="ghost" onClick={() => void result.refetch()}>
             {t("usageWorkbench.retry")}
           </Button>
@@ -371,9 +437,11 @@ export function UsageRequests({
               {!data?.data.length ? (
                 <p className="p-7 text-center text-sub text-ink-muted">
                   {t(
-                    data?.coverage?.state === "unsupported"
-                      ? "usageWorkbench.queryUnavailable"
-                      : "usageWorkbench.noRequests",
+                    noUsage
+                      ? "usagePage.unavailable"
+                      : data?.coverage?.state === "unsupported"
+                        ? "usageWorkbench.queryUnavailable"
+                        : "usageWorkbench.noRequests",
                   )}
                 </p>
               ) : (
@@ -383,15 +451,14 @@ export function UsageRequests({
                     t,
                   );
                   const status = requestMeasurements(record).status;
-                  const time = new Date(record.createdAt * 1000).toLocaleString(
-                    i18n.language,
-                    {
-                      month: "2-digit",
-                      day: "2-digit",
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    },
-                  );
+                  const time = new Date(
+                    record.createdAtMs ?? record.createdAt * 1000,
+                  ).toLocaleString(i18n.language, {
+                    month: "2-digit",
+                    day: "2-digit",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  });
                   return (
                     <Tooltip key={record.requestId}>
                       <TooltipTrigger asChild>

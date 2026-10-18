@@ -34,17 +34,18 @@ export function UsageBars({
   unavailableMetrics = [],
   selectedMetric,
   onMetricChange,
+  activityLabel,
 }: {
   overview: { granularity: UsageGranularity; series: TrendPoint[] };
   analysis?: boolean;
   unavailableMetrics?: Metric[];
   selectedMetric?: Metric;
   onMetricChange?: (metric: Metric) => void;
+  activityLabel?: string;
 }) {
   const { t, i18n } = useTranslation();
   const [chosenMetric, setMetric] = useState<Metric>("tokens");
   const chosen = selectedMetric ?? chosenMetric;
-  const metric = unavailableMetrics.includes(chosen) ? "tokens" : chosen;
   const [selected, setSelected] = useState(0);
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
   const metricRefs = useRef<Partial<Record<Metric, HTMLButtonElement | null>>>(
@@ -59,6 +60,17 @@ export function UsageBars({
     "cost",
     "active",
   ] as const;
+  const available = (
+    analysis
+      ? analysisMetrics
+      : (["tokens", "output", "cost", "records"] as const)
+  ).filter((item) => !unavailableMetrics.includes(item));
+  const noMetric = available.length === 0;
+  const metric = unavailableMetrics.includes(chosen)
+    ? (available.find((item) => item === "messages" || item === "active") ??
+      available[0] ??
+      chosen)
+    : chosen;
   const chooseMetric = (value: Metric) => {
     setMetric(value);
     onMetricChange?.(value);
@@ -161,11 +173,13 @@ export function UsageBars({
                   }
                 }}
               >
-                {t(
-                  value === "cost" || value === "active"
-                    ? `usageExperience.${value}`
-                    : `usageWorkbench.${value}`,
-                )}
+                {value === "active" && activityLabel
+                  ? activityLabel
+                  : t(
+                      value === "cost" || value === "active"
+                        ? `usageExperience.${value}`
+                        : `usageWorkbench.${value}`,
+                    )}
               </Button>
             ))}
           </div>
@@ -241,135 +255,151 @@ export function UsageBars({
           </span>
         </p>
       )}
-      <div
-        id={analysis ? chartId : undefined}
-        role={analysis ? "tabpanel" : undefined}
-        aria-labelledby={analysis ? `${chartId}-${metric}` : undefined}
-        className={`grid min-w-0 grid-cols-[44px_minmax(0,1fr)] gap-2 ${analysis ? "h-[132px]" : "h-[205px]"}`}
-        aria-label={t("usagePage.chart")}
-      >
-        <div
-          aria-hidden
-          className="flex flex-col justify-between pb-5 text-right text-micro tabular-nums text-ink-faint"
-        >
-          <span>
-            {metric === "cost" ? `$${max.toPrecision(2)}` : fmtTokens(max)}
-          </span>
-          <span>
-            {metric === "cost"
-              ? `$${(max / 2).toPrecision(2)}`
-              : fmtTokens(max / 2)}
-          </span>
-          <span>0</span>
-        </div>
-        <div className="flex min-w-0 items-end gap-px border-b border-line-2 pb-5">
-          {overview.series.map((point, index) => {
-            const amount = value(point);
-            return (
-              <button
-                key={point.start}
-                type="button"
-                ref={(node) => {
-                  refs.current[index] = node;
-                }}
-                tabIndex={
-                  index === Math.min(selected, overview.series.length - 1)
-                    ? 0
-                    : -1
-                }
-                aria-label={`${label(point.start)} · ${formatted(point)}`}
-                title={`${label(point.start)} · ${formatted(point)}`}
-                className="relative flex h-full min-w-0 flex-1 items-end justify-center rounded-sm px-px outline-none hover:bg-pill focus-visible:ring-2 focus-visible:ring-brand/60"
-                onFocus={() => setSelected(index)}
-                onClick={() => setSelected(index)}
-                onKeyDown={(event) => {
-                  const next =
-                    event.key === "ArrowRight"
-                      ? (index + 1) % overview.series.length
-                      : event.key === "ArrowLeft"
-                        ? (index - 1 + overview.series.length) %
-                          overview.series.length
-                        : event.key === "Home"
-                          ? 0
-                          : event.key === "End"
-                            ? overview.series.length - 1
-                            : undefined;
-                  if (next !== undefined) {
-                    event.preventDefault();
-                    refs.current[next]?.focus();
-                  }
-                }}
-              >
-                {amount == null ? (
-                  <span className="text-micro text-ink-faint">—</span>
-                ) : (
-                  <span
-                    aria-hidden
-                    className="flex w-full max-w-[28px] flex-col-reverse overflow-hidden rounded-t-sm bg-brand/75"
-                    style={{ height: `${Math.max(0, amount / max) * 100}%` }}
-                  >
-                    {metric === "tokens" && amount > 0 ? (
-                      <>
-                        <span
-                          className="bg-brand/30"
-                          style={{
-                            height: `${(point.inputTokens / amount) * 100}%`,
-                          }}
-                        />
-                        <span
-                          className="bg-brand/90"
-                          style={{
-                            height: `${(point.outputTokens / amount) * 100}%`,
-                          }}
-                        />
-                      </>
-                    ) : null}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-      <div className="mt-1 flex justify-between text-micro text-ink-faint">
-        <span>{overview.series[0] ? label(overview.series[0].start) : ""}</span>
-        <span>
-          {overview.series.at(-1) ? label(overview.series.at(-1)!.start) : ""}
-        </span>
-      </div>
-      {current && (
-        <p
-          aria-live="polite"
-          className={`${analysis ? "mt-1 text-micro" : "mt-2 text-note"} tabular-nums text-ink-muted`}
-        >
-          {label(current.start)} · {formatted(current)}
+      {noMetric ? (
+        <p role="status" className="py-6 text-center text-sub text-ink-muted">
+          {t("usagePage.unavailable")}
         </p>
+      ) : (
+        <>
+          <div
+            id={analysis ? chartId : undefined}
+            role={analysis ? "tabpanel" : undefined}
+            aria-labelledby={analysis ? `${chartId}-${metric}` : undefined}
+            className={`grid min-w-0 grid-cols-[44px_minmax(0,1fr)] gap-2 ${analysis ? "h-[132px]" : "h-[205px]"}`}
+            aria-label={t("usagePage.chart")}
+          >
+            <div
+              aria-hidden
+              className="flex flex-col justify-between pb-5 text-right text-micro tabular-nums text-ink-faint"
+            >
+              <span>
+                {metric === "cost" ? `$${max.toPrecision(2)}` : fmtTokens(max)}
+              </span>
+              <span>
+                {metric === "cost"
+                  ? `$${(max / 2).toPrecision(2)}`
+                  : fmtTokens(max / 2)}
+              </span>
+              <span>0</span>
+            </div>
+            <div className="flex min-w-0 items-end gap-px border-b border-line-2 pb-5">
+              {overview.series.map((point, index) => {
+                const amount = value(point);
+                return (
+                  <button
+                    key={point.start}
+                    type="button"
+                    ref={(node) => {
+                      refs.current[index] = node;
+                    }}
+                    tabIndex={
+                      index === Math.min(selected, overview.series.length - 1)
+                        ? 0
+                        : -1
+                    }
+                    aria-label={`${label(point.start)} · ${formatted(point)}`}
+                    title={`${label(point.start)} · ${formatted(point)}`}
+                    className="relative flex h-full min-w-0 flex-1 items-end justify-center rounded-sm px-px outline-none hover:bg-pill focus-visible:ring-2 focus-visible:ring-brand/60"
+                    onFocus={() => setSelected(index)}
+                    onClick={() => setSelected(index)}
+                    onKeyDown={(event) => {
+                      const next =
+                        event.key === "ArrowRight"
+                          ? (index + 1) % overview.series.length
+                          : event.key === "ArrowLeft"
+                            ? (index - 1 + overview.series.length) %
+                              overview.series.length
+                            : event.key === "Home"
+                              ? 0
+                              : event.key === "End"
+                                ? overview.series.length - 1
+                                : undefined;
+                      if (next !== undefined) {
+                        event.preventDefault();
+                        refs.current[next]?.focus();
+                      }
+                    }}
+                  >
+                    {amount == null ? (
+                      <span className="text-micro text-ink-faint">—</span>
+                    ) : (
+                      <span
+                        aria-hidden
+                        className="flex w-full max-w-[28px] flex-col-reverse overflow-hidden rounded-t-sm bg-brand/75"
+                        style={{
+                          height: `${Math.max(0, amount / max) * 100}%`,
+                        }}
+                      >
+                        {metric === "tokens" && amount > 0 ? (
+                          <>
+                            <span
+                              className="bg-brand/30"
+                              style={{
+                                height: `${(point.inputTokens / amount) * 100}%`,
+                              }}
+                            />
+                            <span
+                              className="bg-brand/90"
+                              style={{
+                                height: `${(point.outputTokens / amount) * 100}%`,
+                              }}
+                            />
+                          </>
+                        ) : null}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <div className="mt-1 flex justify-between text-micro text-ink-faint">
+            <span>
+              {overview.series[0] ? label(overview.series[0].start) : ""}
+            </span>
+            <span>
+              {overview.series.at(-1)
+                ? label(overview.series.at(-1)!.start)
+                : ""}
+            </span>
+          </div>
+          {current && (
+            <p
+              aria-live="polite"
+              className={`${analysis ? "mt-1 text-micro" : "mt-2 text-note"} tabular-nums text-ink-muted`}
+            >
+              {label(current.start)} · {formatted(current)}
+            </p>
+          )}
+          <details
+            className={`${analysis ? "mt-1 text-micro" : "mt-2 text-note"} text-ink-muted`}
+          >
+            <summary className="cursor-pointer">
+              {t("usageWorkbench.chartData")}
+            </summary>
+            <div className="max-h-[220px] overflow-y-auto">
+              <table className="mt-2 w-full text-left">
+                <thead>
+                  <tr>
+                    <th>{t("usageWorkbench.date")}</th>
+                    <th>{t("usageWorkbench.value")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {overview.series.map((point) => (
+                    <tr key={point.start}>
+                      <td>
+                        {new Date(point.start).toLocaleString(i18n.language)}
+                      </td>
+                      <td className="tabular-nums">{formatted(point)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </details>
+        </>
       )}
-      <details
-        className={`${analysis ? "mt-1 text-micro" : "mt-2 text-note"} text-ink-muted`}
-      >
-        <summary className="cursor-pointer">
-          {t("usageWorkbench.chartData")}
-        </summary>
-        <div className="max-h-[220px] overflow-y-auto">
-          <table className="mt-2 w-full text-left">
-            <thead>
-              <tr>
-                <th>{t("usageWorkbench.date")}</th>
-                <th>{t("usageWorkbench.value")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {overview.series.map((point) => (
-                <tr key={point.start}>
-                  <td>{new Date(point.start).toLocaleString(i18n.language)}</td>
-                  <td className="tabular-nums">{formatted(point)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </details>
     </div>
   );
 }

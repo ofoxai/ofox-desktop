@@ -18,6 +18,9 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverviewAnalytics {
+    pub method_version: &'static str,
+    pub input_snapshot_version: String,
+    pub source_coverage: super::session_analytics::SourceCoverage,
     #[serde(flatten)]
     pub receipt: QueryReceipt,
     pub coverage: Coverage,
@@ -73,11 +76,16 @@ impl Sum {
             .saved_cost
             .checked_add(atom.saved_cost)
             .ok_or_else(overflow)?;
-        self.estimate.combine(&catalog.estimate(
+        let mut estimate = catalog.estimate(
             &atom.model,
             atom.tokens,
             (!atom.archived).then_some(atom.requests),
-        ))?;
+        );
+        if !atom.tokens_complete && estimate.known_cost_usd.is_some() {
+            estimate.availability = "partial".into();
+            estimate.unpriced_record_count = None;
+        }
+        self.estimate.combine(&estimate)?;
         Ok(())
     }
     pub(crate) fn totals(&self) -> Result<UsageTotals, AppError> {
@@ -347,6 +355,9 @@ pub fn build_query_overview<Tz: TimeZone>(
             .then_with(|| a.model.cmp(&b.model))
     });
     let analytics = OverviewAnalytics {
+        method_version: data.method_version,
+        input_snapshot_version: data.input_snapshot_version,
+        source_coverage: data.source_coverage,
         receipt: QueryReceipt {
             query_fingerprint: data.query.fingerprint()?,
             applied_query: data.query.clone(),

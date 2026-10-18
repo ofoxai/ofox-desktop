@@ -4,7 +4,13 @@ import { SegmentedControl } from "@/components/ui/segmented";
 import { MenuSelect } from "@/components/ui/menu-select";
 import { fmtTokens } from "@/lib/format";
 import { formatUsageEstimate } from "@/lib/usageEstimate";
-import { formatActivity, heatColor, heatColors } from "@/lib/usageInsights";
+import {
+  formatActivity,
+  heatColor,
+  heatColors,
+  usageCohortIsUnavailable,
+} from "@/lib/usageInsights";
+import { usageIsUnavailable } from "@/lib/usageWorkbench";
 import type { SessionAnalytics } from "@/types/sessionAnalytics";
 
 type CalendarMetric = "tokens" | "sessions" | "messages" | "active" | "cost";
@@ -23,6 +29,11 @@ export function UsageTimeInsights({ data }: { data: SessionAnalytics }) {
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const hourly = data.activityByHour;
   const hourlyAvailable = !!hourly && hourly.coverage.state !== "unavailable";
+  const hourlyPartial = hourlyAvailable && hourly.coverage.state === "partial";
+  const noUsage = usageIsUnavailable(data);
+  const noCohort = usageCohortIsUnavailable(data);
+  const messageCoverage = data.messageCoverage ?? data.metricCoverage;
+  const activityCoverage = data.activityCoverage ?? data.metricCoverage;
   const cells = Array.from({ length: 168 }, (_, index) => {
     const weekday = Math.floor(index / 24);
     const hour = index % 24;
@@ -37,35 +48,55 @@ export function UsageTimeInsights({ data }: { data: SessionAnalytics }) {
       label: t("usageExperience.hourCell", {
         day: weekdays[weekday],
         hour: `${String(hour).padStart(2, "0")}:00`,
-        value: formatActivity(amount, t),
+        value: `${formatActivity(amount, t)}${hourlyPartial && amount != null ? "＋" : ""}`,
       }),
     };
   });
   const calendar = days.map((day) => {
     const amount =
       metric === "tokens"
-        ? day.totalTokens
+        ? noUsage
+          ? null
+          : day.totalTokens
         : metric === "sessions"
-          ? day.sessionCount
+          ? noCohort
+            ? null
+            : day.sessionCount
           : metric === "messages"
-            ? (day.messages ?? day.knownMessages ?? null)
+            ? messageCoverage?.state === "unavailable"
+              ? null
+              : (day.messages ?? day.knownMessages ?? null)
             : metric === "active"
-              ? (day.activeMs ?? day.knownActiveMs ?? null)
-              : day.estimate.knownCostUsd == null
+              ? activityCoverage?.state === "unavailable"
+                ? null
+                : (day.activeMs ?? day.knownActiveMs ?? null)
+              : noUsage || day.estimate.knownCostUsd == null
                 ? null
                 : Number(day.estimate.knownCostUsd);
     const value =
       metric === "active"
         ? formatActivity(amount, t)
         : metric === "cost"
-          ? formatUsageEstimate(day.estimate)
+          ? noUsage
+            ? "—"
+            : formatUsageEstimate(day.estimate)
           : amount == null
             ? "—"
             : fmtTokens(amount);
+    const partial =
+      (metric === "active" &&
+        day.activeMs == null &&
+        day.knownActiveMs != null) ||
+      (metric === "messages" &&
+        day.messages == null &&
+        day.knownMessages != null);
     return {
       id: day.date,
       amount,
-      label: t("usageExperience.calendarCell", { date: day.date, value }),
+      label: t("usageExperience.calendarCell", {
+        date: day.date,
+        value: `${value}${partial ? "＋" : ""}`,
+      }),
     };
   });
   const shown = mode === "hourly" ? cells : calendar;
@@ -207,7 +238,12 @@ export function UsageTimeInsights({ data }: { data: SessionAnalytics }) {
                 ["tokens", "sessions", "messages", "active", "cost"] as const
               ).map((value) => ({
                 value,
-                label: t(`usageWorkbench.${value}`),
+                label: t(
+                  value === "active" &&
+                    data.methodVersion === "magpie-native-v1"
+                    ? "usageExperience.nativeActivity"
+                    : `usageWorkbench.${value}`,
+                ),
               }))}
             />
           </div>
@@ -250,7 +286,11 @@ export function UsageTimeInsights({ data }: { data: SessionAnalytics }) {
         </span>
       </div>
       <p className="mt-1.5 text-micro leading-relaxed text-ink-faint">
-        {t("usageExperience.activeDefinition")}
+        {t(
+          data.methodVersion === "magpie-native-v1"
+            ? "usageExperience.nativeActivityHelp"
+            : "usageExperience.activeDefinition",
+        )}
       </p>
     </section>
   );
