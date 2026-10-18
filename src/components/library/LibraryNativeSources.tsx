@@ -70,6 +70,10 @@ export function LibraryNativeSources({
       status !== "applied" &&
       (status !== "attention" || entry.conflict),
   );
+  const incomplete = inventory?.sources.some(
+    (source) => !["ready", "missing"].includes(source.state),
+  );
+  const filtering = !!search.trim() || tool !== "all" || status !== "all";
   const unmatched = entries.filter((entry) => !entry.matchedResourceIds.length),
     matched = entries.filter((entry) => entry.matchedResourceIds.length);
   const groups = new Map<string, Entry[]>();
@@ -203,44 +207,47 @@ export function LibraryNativeSources({
       )}
       {inventory && (
         <>
-          <ListCard>
-            {[...groups].map(([name, variants]) =>
-              variants.length === 1 ? (
-                row(variants[0])
-              ) : (
-                <div key={name}>
-                  <details open={!!search}>
-                    <summary className="cursor-pointer px-4 py-2 text-ctl font-medium">
-                      {t("library.workbench2.variants", {
-                        name: variants[0].name,
-                        count: variants.length,
-                      })}
-                    </summary>
-                    {variants.map(row)}
-                    <div className="px-4 pb-2">
-                      <Button
-                        variant="ghost"
-                        onClick={(event) =>
-                          onCompare(variants, event.currentTarget)
-                        }
-                      >
-                        {t("library.workbench2.compare")}
-                      </Button>
-                    </div>
-                  </details>
-                </div>
-              ),
-            )}
-            {!unmatched.length && (
-              <ListRow className="text-note text-ink-muted">
-                {t(
-                  search
-                    ? "library.noMatch"
-                    : "library.workbench.noNativeResources",
-                )}
-              </ListRow>
-            )}
-          </ListCard>
+          {(unmatched.length > 0 ||
+            (!matched.length && (!incomplete || filtering))) && (
+            <ListCard>
+              {[...groups].map(([name, variants]) =>
+                variants.length === 1 ? (
+                  row(variants[0])
+                ) : (
+                  <div key={name}>
+                    <details open={!!search}>
+                      <summary className="cursor-pointer px-4 py-2 text-ctl font-medium">
+                        {t("library.workbench2.variants", {
+                          name: variants[0].name,
+                          count: variants.length,
+                        })}
+                      </summary>
+                      {variants.map(row)}
+                      <div className="px-4 pb-2">
+                        <Button
+                          variant="ghost"
+                          onClick={(event) =>
+                            onCompare(variants, event.currentTarget)
+                          }
+                        >
+                          {t("library.workbench2.compare")}
+                        </Button>
+                      </div>
+                    </details>
+                  </div>
+                ),
+              )}
+              {!unmatched.length && (
+                <ListRow className="text-note text-ink-muted">
+                  {t(
+                    filtering
+                      ? "library.noMatch"
+                      : "library.workbench.noNativeResources",
+                  )}
+                </ListRow>
+              )}
+            </ListCard>
+          )}
           {matched.length > 0 && (
             <>
               <ListFold

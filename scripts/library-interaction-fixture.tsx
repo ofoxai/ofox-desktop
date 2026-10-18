@@ -280,7 +280,15 @@ libraryApi.batches = async () => [];
 libraryApi.previewBatch = async (kind, resources, tools) => ({
   operationId: `preview-${kind}`,
   kind,
-  resources,
+  resources: resources.map((resource) => ({
+    ...resource,
+    name: (
+      db[kind].instructions ??
+      db[kind].servers ??
+      db[kind].skills ??
+      []
+    ).find((row) => row.id === resource.resourceId)?.name,
+  })),
   status: "previewed",
   groups: [
     {

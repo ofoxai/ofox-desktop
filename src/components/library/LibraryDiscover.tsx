@@ -134,7 +134,7 @@ export function LibraryDiscover({
         </span>
       </div>
       <TooltipProvider delayDuration={250}>
-        <div className="grid min-w-0 gap-3 min-[700px]:grid-cols-2 min-[1200px]:grid-cols-3">
+        <div className="grid min-w-0 gap-3 min-[900px]:grid-cols-2 min-[1200px]:grid-cols-3">
           {visible.map((recipe) => {
             const name = recipe.titleKey ? t(recipe.titleKey) : recipe.name;
             const match = matches?.[recipe.id];

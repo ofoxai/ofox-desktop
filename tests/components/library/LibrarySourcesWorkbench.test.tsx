@@ -1,3 +1,4 @@
+import { LibraryNativeSources } from "@/components/library/LibraryNativeSources";
 import { StrictMode } from "react";
 import {
   act,
@@ -814,3 +815,63 @@ it("keeps an old-backend warning without location evidence until a fresh locate 
     screen.queryByText("来源待确认，请重新扫描。"),
   ).not.toBeInTheDocument();
 });
+
+it("does not report no local resources when every discovered item is already collected", async () => {
+  vi.mocked(libraryApi.inventory).mockResolvedValue({
+    ...inventory,
+    entries: inventory.entries.filter(
+      (entry) => entry.matchedResourceIds.length > 0,
+    ),
+  });
+  renderSection();
+  const native = await screen.findByRole("region", { name: "本机已有" });
+  expect(within(native).getByRole("button", { name: /已收录/ })).toBeVisible();
+  expect(
+    within(native).queryByText(zh.library.workbench.noNativeResources),
+  ).not.toBeInTheDocument();
+});
+it("does not describe an unreadable native source as an empty inventory", async () => {
+  vi.mocked(libraryApi.inventory).mockResolvedValue({
+    ...inventory,
+    entries: [],
+    sources: inventory.sources.map((source) => ({
+      ...source,
+      state: "unreadable",
+    })),
+  });
+  renderSection();
+  const native = await screen.findByRole("region", { name: "本机已有" });
+  expect(
+    within(native).queryByText(zh.library.workbench.noNativeResources),
+  ).not.toBeInTheDocument();
+  expect(within(native).getAllByRole("status").length).toBeGreaterThan(0);
+});
+
+it.each([
+  { tool: "gemini", status: "all" },
+  { tool: "all", status: "applied" },
+])(
+  "reports no matches for a filtered native inventory instead of claiming discovery is empty: %s",
+  ({ tool, status }) => {
+    render(
+      <LibraryNativeSources
+        inventory={inventory}
+        loading={false}
+        failed={false}
+        search=""
+        tool={tool}
+        status={status}
+        busy={false}
+        onRescan={vi.fn()}
+        onImport={vi.fn()}
+        onSource={vi.fn()}
+        onLocate={vi.fn()}
+        onCompare={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(zh.library.noMatch)).toBeVisible();
+    expect(
+      screen.queryByText(zh.library.workbench.noNativeResources),
+    ).not.toBeInTheDocument();
+  },
+);
