@@ -37,6 +37,7 @@ export function SessionReader({
   useEffect(() => {
     back.current?.focus();
   }, [session.sessionKey, subagent?.id]);
+  // a subagent is read in its session's place: none of the session's actions
   const actions = !subagent;
   const usage = session.usage;
   const resume = useSessionResume(session.sessionKey);
@@ -44,7 +45,7 @@ export function SessionReader({
   const command = useQuery({
     queryKey: ["session-command", session.sessionKey],
     queryFn: () => sessionsApi.resume(session.sessionKey, false),
-    enabled: session.capabilities.canResume,
+    enabled: actions && session.capabilities.canResume,
     retry: false,
   });
   return (
@@ -99,7 +100,7 @@ export function SessionReader({
         )}
       </div>
       <ResumeFeedback command={resume.command} feedback={resume.feedback} />
-      {command.isError && (
+      {actions && command.isError && (
         <p role="alert" className="text-sub text-danger">
           {String(command.error)}{" "}
           <Button variant="ghost" onClick={() => void command.refetch()}>

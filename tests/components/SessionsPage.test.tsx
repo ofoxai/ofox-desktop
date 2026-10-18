@@ -1074,6 +1074,10 @@ describe("subagent threads", () => {
     expect(await screen.findByText("Look for the bug")).toBeVisible();
     expect(read).toHaveBeenCalledWith(parent.sessionKey, "a1");
     expect(screen.getByRole("heading", { name: "Find the bug" })).toBeVisible();
+    expect(sessionsApi.resume).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("button", { name: "在终端继续" }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows a thread whose parent is not listed on top", () => {
