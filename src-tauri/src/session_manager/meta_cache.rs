@@ -18,7 +18,7 @@ use crate::database::Database;
 use crate::error::AppError;
 
 /// Bump to read every cached file again after a change to what is read.
-pub const PARSER_VERSION: i64 = 4;
+pub const PARSER_VERSION: i64 = 5;
 
 /// Providers whose files are read whole for their details.
 const PROVIDERS: [&str; 2] = ["claude", "codex"];

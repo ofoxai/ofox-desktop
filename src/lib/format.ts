@@ -19,13 +19,16 @@ export function fmtTokenCount(value: number): string {
   if (value >= 1e3) return `${(value / 1e3).toFixed(1)}K`;
   return String(value);
 }
+/** Bytes as magpie writes them: base 1000, one decimal only below 10. */
 export function fmtBytes(value: number): string {
   for (const [scale, unit] of [
     [1e9, "GB"],
     [1e6, "MB"],
     [1e3, "KB"],
   ] as const) {
-    if (value >= scale) return `${Number((value / scale).toFixed(1))} ${unit}`;
+    if (value < scale) continue;
+    const n = value / scale;
+    return `${n < 10 ? n.toFixed(1) : Math.round(n)} ${unit}`;
   }
   return `${value} B`;
 }

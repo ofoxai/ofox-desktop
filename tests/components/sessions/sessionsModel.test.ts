@@ -24,6 +24,10 @@ describe("session presentation", () => {
       "1.1B",
     ]);
     expect(fmtBytes(11000000)).toBe("11 MB");
+    // magpie: one decimal only below 10
+    expect(
+      [999, 4000000, 24144040, 460097965, 1500000000].map(fmtBytes),
+    ).toEqual(["999 B", "4.0 MB", "24 MB", "460 MB", "1.5 GB"]);
     expect(fmtAgo(1000, "en", 181000)).toBe("3 minutes ago");
   });
   it("marks estimates and distinguishes missing price and tiny costs", () => {

@@ -305,8 +305,9 @@ impl CodexScan {
                     Some("user") => {
                         let mut typed = false;
                         for text in user_texts(payload.get("content")) {
-                            typed |= typed_by_hand(text);
-                            if self.candidates.prompt.is_none() {
+                            let by_hand = typed_by_hand(text);
+                            typed |= by_hand;
+                            if by_hand && self.candidates.prompt.is_none() {
                                 self.candidates.prompt = clean_prompt(text);
                             }
                         }
@@ -321,7 +322,7 @@ impl CodexScan {
             Some("event_msg") if payload_type == Some("user_message") => {
                 let text = payload.get("message").and_then(Value::as_str).unwrap_or("");
                 let candidates = &mut self.candidates;
-                if candidates.prompt.is_none() {
+                if candidates.prompt.is_none() && typed_by_hand(text) {
                     candidates.prompt = clean_prompt(text);
                 }
                 if candidates.prompt.is_none() && candidates.message.is_none() {
@@ -416,8 +417,9 @@ pub(crate) fn details(path: &Path) -> Option<SessionDetails> {
     })
 }
 
-/// Whether a user message's text counts as a prompt in its message count: one
-/// Codex put in itself starts with a tag or AGENTS.md (Magpie `cxPrompt`, MIT).
+/// Whether a user message's text is a prompt someone typed, for its title and
+/// message count: one Codex put in itself starts with a tag or AGENTS.md
+/// (Magpie `cxPrompt`, MIT).
 fn typed_by_hand(text: &str) -> bool {
     let text = text.trim();
     !text.is_empty() && !text.starts_with('<') && !text.starts_with("# AGENTS.md")
@@ -678,6 +680,30 @@ mod tests {
 
     fn item(payload: serde_json::Value) -> serde_json::Value {
         serde_json::json!({"timestamp": "2026-10-14T10:00:03Z", "type": "response_item", "payload": payload})
+    }
+
+    /// Magpie titles a thread by the first text that does not start with `<`
+    /// (`cxPrompt`, MIT): a wrapped question reply is no prompt.
+    #[test]
+    fn a_wrapped_reply_does_not_title_a_thread() {
+        let temp = tempdir().expect("tempdir");
+        let path = rollout(
+            temp.path(),
+            &[
+                serde_json::json!({"timestamp": "2026-10-14T10:00:01Z", "type": "event_msg",
+                    "payload": {"type": "user_message", "message":
+                        "<send_user_message_question_reply>[{\"questionItemId\":\"q1\"}]</send_user_message_question_reply>"}}),
+                user_items(&[input_text(
+                    "<send_user_message_question_reply>[{\"questionItemId\":\"q1\"}]</send_user_message_question_reply>",
+                )]),
+                user_items(&[input_text("# Files mentioned by the user: notes.md")]),
+            ],
+        );
+        let details = details(&path).expect("details");
+        assert_eq!(
+            details.candidates.prompt.as_deref(),
+            Some("# Files mentioned by the user: notes.md")
+        );
     }
 
     /// Magpie counts a user message as typed only when one of its texts does
