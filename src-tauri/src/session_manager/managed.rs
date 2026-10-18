@@ -213,11 +213,19 @@ pub(crate) fn forget_listing() {
     *LISTING.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
-/// The listing's sessions that are shown: inside their provider's roots, and
-/// one per (provider, session id).
+/// The listing's sessions that are shown: inside their provider's roots, one
+/// per (provider, session id), and none that is another's subagent.
 fn shown(listing: &[SessionMeta]) -> impl Iterator<Item = &SessionMeta> {
     let mut seen = HashSet::new();
+    // an OpenCode child session is listed under its root, not as a row
+    let children: HashSet<String> = providers::opencode::roots(listing)
+        .into_keys()
+        .map(str::to_owned)
+        .collect();
     listing.iter().filter(move |meta| {
+        if meta.provider_id == "opencode" && children.contains(&meta.session_id) {
+            return false;
+        }
         let Ok(roots) = roots(&meta.provider_id) else {
             return false;
         };
@@ -305,6 +313,7 @@ pub(crate) fn record(meta: SessionMeta, listing: &[SessionMeta]) -> ManagedSessi
     };
     let subagents = match (meta.provider_id.as_str(), &walked) {
         ("claude", Some(walked)) => providers::claude::subagents(&walked.files),
+        ("opencode", _) => providers::opencode::subagents(&meta, listing),
         _ => Vec::new(),
     };
     let subagent_count = if matches!(meta.provider_id.as_str(), "dsh" | "gemini") {
@@ -915,6 +924,65 @@ mod tests {
         assert!(messages.iter().any(|m| m.content == "fix the tests"));
         assert!(subagent_messages(&record.session_key, "acompact-9").is_err());
         assert!(subagent_messages(&record.session_key, "../a2").is_err());
+    }
+
+    /// Magpie `TestOpenCodeSubagents` (MIT): a child session is listed in its
+    /// root's fold, titled from "<task> (@<agent> subagent)", never as a row of
+    /// its own; one whose parent is gone stays a row.
+    #[test]
+    #[serial_test::serial]
+    fn an_opencode_child_session_is_a_subagent_of_its_root() {
+        let sandbox = sandbox();
+        let base = sandbox.home().join(".local/share/opencode");
+        std::fs::create_dir_all(&base).unwrap();
+        let conn = rusqlite::Connection::open(base.join("opencode.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, title TEXT NOT NULL,
+                directory TEXT NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL);
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL, data TEXT NOT NULL);
+             CREATE TABLE part (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                message_id TEXT NOT NULL, time_created INTEGER NOT NULL, data TEXT NOT NULL);
+             INSERT INTO session VALUES
+                ('ses_root', NULL, 'Fix the login', '/work/app', 1000, 5000),
+                ('ses_child', 'ses_root', 'Find the bug (@explore subagent)', '/work/app', 2000, 3000),
+                ('ses_grand', 'ses_child', 'Child session - 2026-10-14T10:00:00Z', '/work/app', 2500, 2600),
+                ('ses_orphan', 'ses_gone', 'Lonely (@general subagent)', '/work/app', 4000, 4100);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let listed = list();
+        let opencode = listed
+            .iter()
+            .filter(|r| r.meta.provider_id == "opencode")
+            .map(|r| r.meta.session_id.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(opencode, HashSet::from(["ses_root", "ses_orphan"]));
+        let root = listed
+            .iter()
+            .find(|r| r.meta.session_id == "ses_root")
+            .unwrap();
+        let subagents = root
+            .subagents
+            .iter()
+            .map(|s| {
+                (
+                    s.id.as_str(),
+                    s.title.as_deref(),
+                    s.kind.as_deref(),
+                    s.parent.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            subagents,
+            vec![
+                ("ses_child", Some("Find the bug"), Some("explore"), None),
+                ("ses_grand", None, None, Some("ses_child")),
+            ]
+        );
+        assert!(subagent_messages(&root.session_key, "ses_child").is_ok());
     }
 
     /// A long Claude Code session: its title made by Claude Code sits past the

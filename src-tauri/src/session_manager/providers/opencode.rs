@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 use serde_json::Value;
 
-use crate::session_manager::title::{titled, TitleCandidates};
+use crate::session_manager::managed::Subagent;
+use crate::session_manager::title::{titled, TitleCandidates, TitleSource};
 use crate::session_manager::{SessionMessage, SessionMeta};
 
 use super::utils::{parse_timestamp_to_ms, truncate_summary};
@@ -117,9 +119,16 @@ fn scan_sessions_sqlite() -> Vec<SessionMeta> {
         Err(_) => return Vec::new(),
     };
 
-    let mut stmt = match conn.prepare(
-        "SELECT id, title, directory, time_created, time_updated FROM session ORDER BY time_updated DESC",
-    ) {
+    // a database from before OpenCode kept child sessions has no parent_id
+    let mut stmt = match conn
+        .prepare(
+            "SELECT id, title, directory, time_created, time_updated, parent_id FROM session ORDER BY time_updated DESC",
+        )
+        .or_else(|_| {
+            conn.prepare(
+                "SELECT id, title, directory, time_created, time_updated, NULL FROM session ORDER BY time_updated DESC",
+            )
+        }) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
@@ -132,7 +141,8 @@ fn scan_sessions_sqlite() -> Vec<SessionMeta> {
         let directory: String = row.get(2)?;
         let created: i64 = row.get(3)?;
         let updated: i64 = row.get(4)?;
-        Ok((session_id, title, directory, created, updated))
+        let parent: Option<String> = row.get(5)?;
+        Ok((session_id, title, directory, created, updated, parent))
     }) {
         Ok(rows) => rows,
         Err(_) => return Vec::new(),
@@ -140,7 +150,7 @@ fn scan_sessions_sqlite() -> Vec<SessionMeta> {
 
     let mut sessions = Vec::new();
     for row in iter.flatten() {
-        let (session_id, title, directory, created, updated) = row;
+        let (session_id, title, directory, created, updated, parent) = row;
         let mut candidates = TitleCandidates::default().with_directory(Some(&directory));
         candidates.agent = Some(title);
         let (display_title, title_source) = titled(&candidates);
@@ -150,7 +160,7 @@ fn scan_sessions_sqlite() -> Vec<SessionMeta> {
             title: display_title.clone(),
             title_source,
             message_count: None,
-            parent_session_id: None,
+            parent_session_id: parent.filter(|p| !p.is_empty()),
             summary: display_title,
             project_dir: if directory.is_empty() {
                 None
@@ -487,8 +497,98 @@ fn parse_session(storage: &Path, path: &Path) -> Option<SessionMeta> {
         resume_command: Some(format!("opencode session resume {session_id}")),
         title_source,
         message_count: None,
-        parent_session_id: None,
+        parent_session_id: value
+            .get("parentID")
+            .and_then(Value::as_str)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string),
     })
+}
+
+/// Each OpenCode child session's root: the listed session at the top of its
+/// parent chain (Magpie `ocRoots`, MIT). A chain that leaves the listing,
+/// loops or runs past 64 steps names none, and its session stays a row.
+pub(crate) fn roots(listing: &[SessionMeta]) -> HashMap<&str, &str> {
+    let sessions: HashMap<&str, &SessionMeta> = listing
+        .iter()
+        .filter(|meta| meta.provider_id == PROVIDER_ID)
+        .map(|meta| (meta.session_id.as_str(), meta))
+        .collect();
+    let mut roots = HashMap::new();
+    for (&id, meta) in &sessions {
+        let mut parent = meta.parent_session_id.as_deref();
+        for _ in 0..64 {
+            let Some(above) = parent.and_then(|p| sessions.get(p)) else {
+                break;
+            };
+            match above.parent_session_id.as_deref() {
+                Some(next) => parent = Some(next),
+                None => {
+                    roots.insert(id, above.session_id.as_str());
+                    break;
+                }
+            }
+        }
+    }
+    roots
+}
+
+/// The child sessions under an OpenCode session, oldest first: what the task
+/// tool asked and the agent it ran as, split from the title OpenCode gives
+/// them, "<task> (@<agent> subagent)" (Magpie `ocSubagentTitle`, MIT).
+pub(crate) fn subagents(meta: &SessionMeta, listing: &[SessionMeta]) -> Vec<Subagent> {
+    let roots = roots(listing);
+    let mut found: Vec<_> = listing
+        .iter()
+        .filter(|child| {
+            child.provider_id == PROVIDER_ID
+                && roots.get(child.session_id.as_str()) == Some(&meta.session_id.as_str())
+        })
+        .map(|child| {
+            let named = child
+                .title
+                .as_deref()
+                .filter(|_| child.title_source == Some(TitleSource::Agent));
+            let (title, kind) = task_title(named.unwrap_or_default());
+            Subagent {
+                id: child.session_id.clone(),
+                title,
+                kind,
+                parent: child
+                    .parent_session_id
+                    .clone()
+                    .filter(|parent| *parent != meta.session_id),
+                started_at: child.created_at,
+                last_active_at: child.last_active_at,
+                source: child.source_path.clone().unwrap_or_default(),
+            }
+        })
+        .collect();
+    found.sort_by(|a, b| {
+        a.started_at
+            .cmp(&b.started_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    found
+}
+
+/// A child session's title split into its task and agent. A title OpenCode
+/// made up itself ("New session - …", "Child session - …") is none.
+fn task_title(named: &str) -> (Option<String>, Option<String>) {
+    if named.is_empty()
+        || named.starts_with("New session - ")
+        || named.starts_with("Child session - ")
+    {
+        return (None, None);
+    }
+    if let Some((task, agent)) = named
+        .strip_suffix(" subagent)")
+        .and_then(|rest| rest.rsplit_once(" (@"))
+        .filter(|(task, _)| !task.is_empty())
+    {
+        return (Some(task.trim().to_string()), Some(agent.to_string()));
+    }
+    (Some(named.to_string()), None)
 }
 
 /// Read the first user message's first text part to use as summary.
@@ -678,6 +778,24 @@ mod tests {
     use rusqlite::Connection;
     use serial_test::serial;
     use tempfile::tempdir;
+
+    /// Magpie `ocSubagentTitle` cases (MIT).
+    #[test]
+    fn a_child_title_splits_into_task_and_agent() {
+        let owned =
+            |task: &str, agent: Option<&str>| (Some(task.to_string()), agent.map(str::to_string));
+        assert_eq!(
+            task_title("Find the bug (@explore subagent)"),
+            owned("Find the bug", Some("explore"))
+        );
+        assert_eq!(
+            task_title("Port (@x) helper (@general subagent)"),
+            owned("Port (@x) helper", Some("general"))
+        );
+        assert_eq!(task_title("Plain title"), owned("Plain title", None));
+        assert_eq!(task_title("Child session - 2026-10-14"), (None, None));
+        assert_eq!(task_title("New session - 2026-10-14"), (None, None));
+    }
 
     /// The OpenCode data directory as the code under test resolves it. Tests build
     /// their database inside it rather than re-deriving the path by hand, so the two
