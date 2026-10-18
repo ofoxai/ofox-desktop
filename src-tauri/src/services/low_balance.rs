@@ -111,7 +111,7 @@ fn alert_if_low(app: &AppHandle, user: &OfoxUserInfo, now_ms: i64) -> bool {
     }
 
     // ── Fire ──────────────────────────────────────────────────────────
-    let title = "OFox 余额提醒";
+    let title = "Ofox 余额提醒";
     let body = format!("当前余额 ${:.2}，低于阈值 ${:.2}。", balance, threshold);
     if let Err(e) = app.notification().builder().title(title).body(&body).show() {
         log::warn!("[low-balance] notify failed (continuing): {}", e);

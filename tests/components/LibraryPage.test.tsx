@@ -226,7 +226,7 @@ it("loads only visited subpages and keeps a dirty editor through refresh", async
   fireEvent.click(screen.getByText("Refresh fixture"));
   await waitFor(() => expect(libraryApi.list).toHaveBeenCalledTimes(2));
   expect(screen.getByLabelText("Markdown")).toHaveValue("Unsaved");
-  expect(screen.getByRole("button", { name: "保存到资源库" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "保存到我的资源" })).toBeDisabled();
   expect(screen.getByText(zh.library.revisionChanged)).toBeVisible();
   expect(libraryApi.saveInstruction).not.toHaveBeenCalled();
 });
@@ -580,7 +580,7 @@ it("saves a name-only MCP edit without replacing saved private fields", async ()
   fireEvent.change(screen.getByLabelText("名称"), {
     target: { value: "Renamed" },
   });
-  await userEvent.click(screen.getByRole("button", { name: "保存到资源库" }));
+  await userEvent.click(screen.getByRole("button", { name: "保存到我的资源" }));
   expect(libraryApi.saveMcp).toHaveBeenCalledWith(
     "server",
     "Renamed",
@@ -1377,7 +1377,7 @@ it("keeps read-only discovery results in the native section and collects one row
   await userEvent.click(await toolbarAction("从本机导入"));
   await within(screen.getByRole("dialog")).findByText("Native source");
   await userEvent.click(screen.getByRole("button", { name: "关闭" }));
-  const native = screen.getByRole("region", { name: "本机已有" });
+  const native = screen.getByRole("region", { name: "工具中发现" });
   const scansBeforeRowImport = vi
     .mocked(libraryApi.inventory)
     .mock.calls.filter(([kind]) => kind === "mcp").length;
@@ -1385,7 +1385,9 @@ it("keeps read-only discovery results in the native section and collects one row
   expect(within(native).getByText(/原生 MCP 配置/)).toBeVisible();
   expect(importing).not.toHaveBeenCalled();
   await userEvent.click(
-    within(native).getByRole("button", { name: "收录 Native source" }),
+    within(native).getByRole("button", {
+      name: "将 Native source 加入我的资源",
+    }),
   );
   await waitFor(() =>
     expect(importing).toHaveBeenCalledWith("fresh-native", ["entry-native"], 1),

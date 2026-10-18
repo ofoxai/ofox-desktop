@@ -240,10 +240,12 @@ it("verifies a saved instruction after a failed refresh without creating a secon
     await userEvent.click(screen.getByRole("checkbox", { name }));
   await userEvent.click(screen.getByRole("button", { name: "补充配置并收录" }));
   await userEvent.click(
-    await screen.findByRole("button", { name: "收录到资源库" }),
+    await screen.findByRole("button", { name: "加入我的资源" }),
   );
   await screen.findByRole("alert");
-  await userEvent.click(screen.getByRole("button", { name: "重新核验已保存项" }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "重新核验已保存项" }),
+  );
   expect(await screen.findByRole("button", { name: "选择工具" })).toBeVisible();
   expect(libraryApi.saveInstruction).toHaveBeenCalledTimes(1);
 });
@@ -283,7 +285,7 @@ it("freezes a successfully saved MCP and offers verification instead of discardi
   await userEvent.click(screen.getByRole("checkbox", { name: "DeepWiki" }));
   await userEvent.click(screen.getByRole("button", { name: "补充配置并收录" }));
   await userEvent.click(
-    await screen.findByRole("button", { name: "保存到资源库" }),
+    await screen.findByRole("button", { name: "保存到我的资源" }),
   );
   await screen.findByRole("alert");
   expect(screen.queryAllByRole("textbox")).toHaveLength(0);

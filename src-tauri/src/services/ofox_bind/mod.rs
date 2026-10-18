@@ -538,11 +538,11 @@ fn require_existing_ofox_config(tool: Tool) -> Result<(), String> {
         let path = file.current_path();
         let text = read_text(&path)
             .map_err(|_| "无法读取工具配置，已停止写入。".to_string())?
-            .ok_or_else(|| "工具配置已删除，请先恢复 OFox 接入配置。".to_string())?;
+            .ok_or_else(|| "工具配置已删除，请先恢复 Ofox 接入配置。".to_string())?;
         file.validate(&text)
             .map_err(|_| "工具配置格式无效，已停止写入。".to_string())?;
     }
-    if !bound_on_disk(tool).map_err(|_| "无法确认 OFox 接入配置，已停止写入。".to_string())?
+    if !bound_on_disk(tool).map_err(|_| "无法确认 Ofox 接入配置，已停止写入。".to_string())?
     {
         return Err("工具接入配置已被修改，已停止自动覆盖。".into());
     }
@@ -650,7 +650,7 @@ pub(crate) async fn rewrite_bound_config(
     let _guard = BIND_LOCK.lock().await;
     let _file_locks = file_locks(tool);
     if !current_binding_is_ofox(db, tool)? {
-        return Err("当前服务商已变化，已停止写入 OFox 配置。".into());
+        return Err("当前服务商已变化，已停止写入 Ofox 配置。".into());
     }
     require_existing_ofox_config(tool)?;
     if tool == Tool::Codex {
@@ -684,11 +684,11 @@ pub(crate) async fn replace_key(
     let _guard = BIND_LOCK.lock().await;
     let _file_locks = file_locks(tool);
     let health = status::inspect(db, tool, Some(old_key))
-        .map_err(|_| "无法确认现有 OFox 接入配置，已停止更换 key。".to_string())?;
+        .map_err(|_| "无法确认现有 Ofox 接入配置，已停止更换 key。".to_string())?;
     if health.status != status::BindingStatus::Configured {
         return Err(health
             .message
-            .unwrap_or_else(|| "OFox 接入配置已变化，已停止更换 key。".into()));
+            .unwrap_or_else(|| "Ofox 接入配置已变化，已停止更换 key。".into()));
     }
     // 重写前先采纳用户在 CLI 里选的模型，否则会被模板里的旧模型盖回去。
     live_model::adopt_live_model(db, tool)?;
@@ -734,8 +734,8 @@ pub(crate) async fn persist_bound_settings(
     crate::model_selection::check_write_revision(db, tool.record_key())?;
     let current = db
         .get_provider_by_id(tool.provider_id(), tool.app().as_str())
-        .map_err(|_| "读取当前 OFox 模型失败。".to_string())?
-        .ok_or_else(|| "未找到保存的 OFox 模型。".to_string())?;
+        .map_err(|_| "读取当前 Ofox 模型失败。".to_string())?
+        .ok_or_else(|| "未找到保存的 Ofox 模型。".to_string())?;
     if current.settings_config != *previous {
         return Err("保存期间模型配置已变化，请刷新后重试。".into());
     }
@@ -744,11 +744,11 @@ pub(crate) async fn persist_bound_settings(
     if health.status != status::BindingStatus::Configured {
         return Err(health
             .message
-            .unwrap_or_else(|| "请先恢复 OFox 接入配置。".into()));
+            .unwrap_or_else(|| "请先恢复 Ofox 接入配置。".into()));
     }
     let before = read_leaves(tool).map_err(|_| "无法确认现有配置，已停止保存模型。".to_string())?;
     db.update_provider_settings_config(tool.app().as_str(), tool.provider_id(), updated)
-        .map_err(|_| "保存 OFox 模型失败。".to_string())?;
+        .map_err(|_| "保存 Ofox 模型失败。".to_string())?;
     let mut txn = FileTxn::new();
     let result = template(db, tool)
         .and_then(|template| write_bound(tool, &template, api_key, true, &mut txn))
@@ -826,11 +826,11 @@ async fn bind_inner(
     if require_existing {
         require_existing_ofox_config(tool)?;
         let health = status::inspect_managed_fields(db, tool, Some(api_key))
-            .map_err(|_| "无法确认现有 OFox 接入配置，已停止启动修复。".to_string())?;
+            .map_err(|_| "无法确认现有 Ofox 接入配置，已停止启动修复。".to_string())?;
         if health.status != status::BindingStatus::Configured {
             return Err(health
                 .message
-                .unwrap_or_else(|| "OFox 接入配置已变化，已停止启动修复。".into()));
+                .unwrap_or_else(|| "Ofox 接入配置已变化，已停止启动修复。".into()));
         }
         // 修复会按模板重写，先采纳用户在 CLI 里选的模型。
         live_model::adopt_live_model(db, tool)?;
@@ -941,7 +941,7 @@ pub(crate) async fn restore_missing_binding(
         })
         .and_then(|()| store_written(db, tool, &mut envelope, &before));
     if result.is_err() {
-        let error = rollback_with(txn, "恢复 OFox 接入配置失败，请检查文件权限和内容。".into());
+        let error = rollback_with(txn, "恢复 Ofox 接入配置失败，请检查文件权限和内容。".into());
         let rollback = match previous_text {
             Some(text) => db.upsert_bind_record(key, &text),
             None => db.delete_bind_record(key),

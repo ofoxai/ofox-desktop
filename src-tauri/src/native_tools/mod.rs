@@ -109,7 +109,7 @@ fn model_json(model: &FetchedModel) -> Value {
 }
 
 fn require_record(db: &Database, tool: BindableTool) -> Result<Record, String> {
-    common::load(db, tool.as_str())?.ok_or_else(|| "工具尚未绑定 OFox".into())
+    common::load(db, tool.as_str())?.ok_or_else(|| "工具尚未绑定 Ofox".into())
 }
 
 fn require_current_key(record: &Record, key: &str) -> Result<(), String> {

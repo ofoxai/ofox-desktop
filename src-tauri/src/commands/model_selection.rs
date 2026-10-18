@@ -209,7 +209,7 @@ pub(crate) async fn save_one(
         return Err(before
             .binding
             .message
-            .unwrap_or_else(|| "请先确认 OFox 接入配置。".into()));
+            .unwrap_or_else(|| "请先确认 Ofox 接入配置。".into()));
     }
     if !before.can_write {
         return Err("当前工具通过桌面 App 管理模型，请在 App 内选择。".into());

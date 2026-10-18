@@ -124,6 +124,20 @@ function renderSection() {
     </StrictMode>,
   );
 }
+async function resourceSources() {
+  const group = await screen.findByRole("button", {
+    name: "codegraph · 2 种配置",
+  });
+  if (group.getAttribute("aria-expanded") !== "true")
+    await userEvent.click(group);
+  const row = await screen.findByTestId("library-resource-a");
+  const expand = within(row).getByRole("button", {
+    name: /展开 codegraph|收起 codegraph/,
+  });
+  if (expand.getAttribute("aria-expanded") !== "true")
+    await userEvent.click(expand);
+  return screen.findByRole("region", { name: "codegraph 的工具配置" });
+}
 beforeEach(async () => {
   i18n.addResourceBundle("zh", "translation", zh, true, true);
   await i18n.changeLanguage("zh");
@@ -164,33 +178,35 @@ it("scans in the background once without blocking the library or importing nativ
   );
   const imported = vi.spyOn(libraryApi, "importInventory");
   renderSection();
-  expect(await screen.findByText(/资源库中/)).toBeVisible();
+  expect(await screen.findByText(/我的资源/)).toBeVisible();
   expect(libraryApi.inventory).toHaveBeenCalledTimes(1);
   expect(screen.getByRole("button", { name: "添加 MCP" })).toBeEnabled();
   await act(async () => finish(inventory));
-  const native = await screen.findByRole("region", { name: "本机已有" });
+  const native = await screen.findByRole("region", { name: "工具中发现" });
   expect(within(native).getByText("Only native")).toBeVisible();
   expect(imported).not.toHaveBeenCalled();
 });
 it("searches native results and keeps matched sources available for navigation", async () => {
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机已有" });
+  const native = await screen.findByRole("region", { name: "工具中发现" });
   await userEvent.type(
     screen.getByRole("textbox", { name: "搜索已有资源" }),
     "Only native",
   );
   expect(within(native).getByText("Only native")).toBeVisible();
   await userEvent.clear(screen.getByRole("textbox", { name: "搜索已有资源" }));
-  await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
+  const sources = await resourceSources();
   await userEvent.click(
-    within(native).getByRole("button", { name: /定位到资源库/ }),
+    within(sources).getByRole("button", { name: /返回我的资源/ }),
   );
-  expect(await screen.findByTestId("library-resource-a")).toHaveAttribute(
-    "data-located",
-    "true",
+  await waitFor(() =>
+    expect(screen.getByTestId("library-resource-a")).toHaveAttribute(
+      "data-located",
+      "true",
+    ),
   );
 });
-it("groups variants without treating native presence as an OFox application or repeating unchecked text", async () => {
+it("groups variants without treating native presence as an Ofox application or repeating unchecked text", async () => {
   renderSection();
   const group = await screen.findByRole("button", {
     name: /codegraph.*2.*种配置/,
@@ -202,7 +218,7 @@ it("groups variants without treating native presence as an OFox application or r
   expect(
     screen.getByRole("button", { name: /codegraph · Codex · 配置中已有/ }),
   ).toHaveAttribute("aria-pressed", "false");
-  expect(screen.queryByText("OFox 已应用")).not.toBeInTheDocument();
+  expect(screen.queryByText("Ofox 已应用")).not.toBeInTheDocument();
 });
 
 it("drops displayed source evidence when definitions change during refresh", async () => {
@@ -265,10 +281,9 @@ it("keeps the last native locate intent when same-ticket responses finish out of
     () => new Promise((resolve) => finishes.push(resolve)),
   );
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机已有" });
-  await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
+  const native = await resourceSources();
   const locations = within(native).getAllByRole("button", {
-    name: /定位到资源库/,
+    name: /返回我的资源/,
   });
   fireEvent.click(locations[0]);
   fireEvent.click(locations[1]);
@@ -327,9 +342,8 @@ it("cancels a pending native locate intent when the retained page becomes inacti
     </QueryClientProvider>
   );
   const view = render(section(true));
-  const native = await screen.findByRole("region", { name: "本机已有" });
-  await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
-  fireEvent.click(within(native).getByRole("button", { name: /定位到资源库/ }));
+  const native = await resourceSources();
+  fireEvent.click(within(native).getByRole("button", { name: /返回我的资源/ }));
   view.rerender(section(false));
   await act(async () => {
     finish({
@@ -371,10 +385,12 @@ it("focuses and centers a freshly expanded matched variant even when a frame pre
       }),
   );
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机已有" });
-  await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
-  expect(screen.queryByTestId("library-resource-a")).toBeNull();
-  fireEvent.click(within(native).getByRole("button", { name: /定位到资源库/ }));
+  const native = await resourceSources();
+  expect(screen.getByTestId("library-resource-a")).toHaveAttribute(
+    "data-located",
+    "false",
+  );
+  fireEvent.click(within(native).getByRole("button", { name: /返回我的资源/ }));
   await act(async () => {
     finish({
       ticketId: "native-ticket",
@@ -427,10 +443,9 @@ it("clears a failed-source locate warning after a successful scan and revalidate
       fields: [],
     });
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机已有" });
-  await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
+  const native = await resourceSources();
   await userEvent.click(
-    within(native).getByRole("button", { name: /定位到资源库/ }),
+    within(native).getByRole("button", { name: /返回我的资源/ }),
   );
   expect(await screen.findByText("来源待确认，请重新扫描。")).toBeVisible();
   await waitFor(() => expect(libraryApi.inventory).toHaveBeenCalledTimes(2));
@@ -439,11 +454,15 @@ it("clears a failed-source locate warning after a successful scan and revalidate
     screen.queryByText("来源待确认，请重新扫描。"),
   ).not.toBeInTheDocument();
   await userEvent.click(
-    await within(native).findByRole("button", { name: /定位到资源库/ }),
+    await within(await resourceSources()).findByRole("button", {
+      name: /返回我的资源/,
+    }),
   );
-  expect(await screen.findByTestId("library-resource-a")).toHaveAttribute(
-    "data-located",
-    "true",
+  await waitFor(() =>
+    expect(screen.getByTestId("library-resource-a")).toHaveAttribute(
+      "data-located",
+      "true",
+    ),
   );
   expect(libraryApi.inventorySource).toHaveBeenLastCalledWith(
     "fresh-ticket",
@@ -461,7 +480,7 @@ it("keeps an unrelated export failure visible after a successful source locate",
     new Error("library.packWriteFailed"),
   );
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机已有" });
+  const native = await screen.findByRole("region", { name: "工具中发现" });
   await userEvent.click(screen.getByRole("button", { name: "选择" }));
   await userEvent.click(screen.getByRole("checkbox", { name: "选择当前结果" }));
   await userEvent.click(screen.getByRole("button", { name: "导出选中项" }));
@@ -471,9 +490,9 @@ it("keeps an unrelated export failure visible after a successful source locate",
   );
   await waitFor(() => expect(libraryApi.inventory).toHaveBeenCalledTimes(2));
   expect(screen.getByRole("alert")).toHaveTextContent("无法保存资源包");
-  await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
+  const sources = await resourceSources();
   await userEvent.click(
-    within(native).getByRole("button", { name: /定位到资源库/ }),
+    within(sources).getByRole("button", { name: /返回我的资源/ }),
   );
   await screen.findByTestId("library-resource-a");
   expect(screen.getByRole("alert")).toHaveTextContent("无法保存资源包");
@@ -495,15 +514,17 @@ it("keeps an unconfirmed source warning until that source is successfully rescan
     new Error("library.inventoryChanged"),
   );
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机已有" });
-  await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
+  const native = await resourceSources();
   await userEvent.click(
-    within(native).getByRole("button", { name: /定位到资源库/ }),
+    within(native).getByRole("button", { name: /返回我的资源/ }),
   );
   await waitFor(() => expect(libraryApi.inventory).toHaveBeenCalledTimes(2));
   expect(await screen.findByText("来源待确认，请重新扫描。")).toBeVisible();
   await userEvent.click(
-    within(native).getByRole("button", { name: "重新扫描" }),
+    within(await screen.findByRole("region", { name: "工具中发现" })).getByRole(
+      "button",
+      { name: "重新扫描" },
+    ),
   );
   await waitFor(() => expect(libraryApi.inventory).toHaveBeenCalledTimes(3));
   await waitFor(() =>
@@ -517,8 +538,7 @@ it("hands focus from a source details dialog to the located row after its close 
   const scroll = vi.fn();
   Element.prototype.scrollIntoView = scroll;
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机已有" });
-  await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
+  const native = await resourceSources();
   await userEvent.click(
     within(native).getByRole("button", {
       name: "查看 codegraph 的 Codex 来源",
@@ -526,7 +546,7 @@ it("hands focus from a source details dialog to the located row after its close 
   );
   const dialog = await screen.findByRole("dialog", { name: "来源详情" });
   await userEvent.click(
-    await within(dialog).findByRole("button", { name: /定位到资源库/ }),
+    await within(dialog).findByRole("button", { name: /返回我的资源/ }),
   );
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   await act(async () => {
@@ -551,9 +571,8 @@ it("does not let a late locate steal focus from a newer add dialog", async () =>
       }),
   );
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机已有" });
-  await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
-  fireEvent.click(within(native).getByRole("button", { name: /定位到资源库/ }));
+  const native = await resourceSources();
+  fireEvent.click(within(native).getByRole("button", { name: /返回我的资源/ }));
   await userEvent.click(screen.getByRole("button", { name: "添加 MCP" }));
   const dialog = screen.getByRole("dialog", { name: "添加 MCP" });
   await act(async () =>
@@ -572,7 +591,10 @@ it("does not let a late locate steal focus from a newer add dialog", async () =>
     }),
   );
   expect(dialog).toContainElement(document.activeElement as HTMLElement);
-  expect(screen.queryByTestId("library-resource-a")).toBeNull();
+  expect(screen.getByTestId("library-resource-a")).toHaveAttribute(
+    "data-located",
+    "false",
+  );
   expect(scroll).not.toHaveBeenCalled();
 });
 
@@ -602,9 +624,8 @@ it("does not replay an unconsumed locate focus when the retained page is reactiv
     </QueryClientProvider>
   );
   const view = render(section(true));
-  const native = await screen.findByRole("region", { name: "本机已有" });
-  await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
-  fireEvent.click(within(native).getByRole("button", { name: /定位到资源库/ }));
+  const native = await resourceSources();
+  fireEvent.click(within(native).getByRole("button", { name: /返回我的资源/ }));
   await act(async () => {
     finish({
       ticketId: "native-ticket",
@@ -722,10 +743,9 @@ it.each([
     new Error("library.inventoryChanged"),
   );
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机已有" });
-  await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
+  const native = await resourceSources();
   await userEvent.click(
-    within(native).getByRole("button", { name: /定位到资源库/ }),
+    within(native).getByRole("button", { name: /返回我的资源/ }),
   );
   await waitFor(() => expect(libraryApi.inventory).toHaveBeenCalledTimes(2));
   expect(screen.getByText("来源待确认，请重新扫描。")).toBeVisible();
@@ -756,12 +776,9 @@ it.each(["inline", "legacy"] as const)(
       new Error("library.inventoryChanged"),
     );
     renderSection();
-    const native = await screen.findByRole("region", { name: "本机已有" });
+    const native = await resourceSources();
     await userEvent.click(
-      within(native).getByRole("button", { name: /已收录/ }),
-    );
-    await userEvent.click(
-      within(native).getByRole("button", { name: /定位到资源库/ }),
+      within(native).getByRole("button", { name: /返回我的资源/ }),
     );
     expect(await screen.findByText("来源待确认，请重新扫描。")).toBeVisible();
     await act(async () => finish(rotatedInventory("fresh-inline", inline)));
@@ -793,23 +810,27 @@ it("keeps an old-backend warning without location evidence until a fresh locate 
     new Error("library.inventoryChanged"),
   );
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机已有" });
-  await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
+  await resourceSources();
   await userEvent.click(
-    within(native).getByRole("button", { name: /定位到资源库/ }),
+    within(await resourceSources()).getByRole("button", {
+      name: /返回我的资源/,
+    }),
   );
   expect(await screen.findByText("来源待确认，请重新扫描。")).toBeVisible();
   await act(async () => finish(rotatedInventory("verified-fresh")));
   expect(screen.getByText("来源待确认，请重新扫描。")).toBeVisible();
   await userEvent.click(
-    within(native).getByRole("button", { name: /定位到资源库/ }),
+    within(await resourceSources()).getByRole("button", {
+      name: /返回我的资源/,
+    }),
   );
-  await screen.findByTestId("library-resource-a");
-  expect(libraryApi.inventorySource).toHaveBeenLastCalledWith(
-    "verified-fresh",
-    "verified-fresh-matched",
-    "verified-fresh-source-0",
-    1,
+  await waitFor(() =>
+    expect(libraryApi.inventorySource).toHaveBeenLastCalledWith(
+      "verified-fresh",
+      "verified-fresh-matched",
+      "verified-fresh-source-0",
+      1,
+    ),
   );
   expect(
     screen.queryByText("来源待确认，请重新扫描。"),
@@ -824,8 +845,11 @@ it("does not report no local resources when every discovered item is already col
     ),
   });
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机已有" });
-  expect(within(native).getByRole("button", { name: /已收录/ })).toBeVisible();
+  const native = await screen.findByRole("region", { name: "工具中发现" });
+  expect(within(native).queryByRole("button", { name: /已收录/ })).toBeNull();
+  expect(
+    within(native).getByText("已发现的配置都已加入我的资源。"),
+  ).toBeVisible();
   expect(
     within(native).queryByText(zh.library.workbench.noNativeResources),
   ).not.toBeInTheDocument();
@@ -840,11 +864,70 @@ it("does not describe an unreadable native source as an empty inventory", async 
     })),
   });
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机已有" });
+  const native = await screen.findByRole("region", { name: "工具中发现" });
   expect(
     within(native).queryByText(zh.library.workbench.noNativeResources),
   ).not.toBeInTheDocument();
   expect(within(native).getAllByRole("status").length).toBeGreaterThan(0);
+});
+
+it("returns from a fully added tool-only view to My resources without changing tool configurations", async () => {
+  Element.prototype.scrollIntoView = vi.fn();
+  vi.mocked(libraryApi.inventory).mockResolvedValue({
+    ...inventory,
+    entries: inventory.entries.filter(
+      (entry) => entry.matchedResourceIds.length > 0,
+    ),
+  });
+  const apply = vi.spyOn(libraryApi, "previewBatch");
+  renderSection();
+  await screen.findByText("我的资源 · 2");
+  await userEvent.click(screen.getByRole("button", { name: "筛选" }));
+  await userEvent.click(screen.getByRole("combobox", { name: "显示范围" }));
+  await userEvent.click(screen.getByRole("option", { name: "工具中发现" }));
+  await userEvent.keyboard("{Escape}");
+  expect(screen.queryByText("我的资源 · 2")).toBeNull();
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    callback(0);
+    return 1;
+  });
+  await userEvent.click(screen.getByRole("button", { name: "查看我的资源" }));
+  await waitFor(() =>
+    expect(document.getElementById("library-owned-mcp")).toHaveFocus(),
+  );
+  expect(screen.getByText("我的资源 · 2")).toBeVisible();
+  expect(apply).not.toHaveBeenCalled();
+});
+
+it("keeps the inline source region and keyboard focus during a rescan without showing stale matches", async () => {
+  renderSection();
+  const sources = await resourceSources();
+  const rescan = within(sources).getByRole("button", { name: "重新扫描" });
+  let finish!: (value: LibraryInventory) => void;
+  vi.mocked(libraryApi.inventory).mockImplementationOnce(
+    () => new Promise((resolve) => (finish = resolve)),
+  );
+  rescan.focus();
+  await userEvent.click(rescan);
+  await waitFor(() => expect(libraryApi.inventory).toHaveBeenCalledTimes(2));
+  expect(screen.getByRole("region", { name: "codegraph 的工具配置" })).toBe(
+    sources,
+  );
+  expect(rescan).toHaveFocus();
+  expect(
+    within(sources).getByText(zh.library.workbench2.scanning),
+  ).toBeVisible();
+  expect(
+    within(sources).queryByRole("button", { name: /codegraph.*Codex.*来源/ }),
+  ).toBeNull();
+  await act(async () => finish(rotatedInventory("refreshed")));
+  expect(screen.getByRole("region", { name: "codegraph 的工具配置" })).toBe(
+    sources,
+  );
+  expect(rescan).toHaveFocus();
+  expect(
+    within(sources).getByRole("button", { name: /codegraph.*Codex.*来源/ }),
+  ).toBeEnabled();
 });
 
 it.each([

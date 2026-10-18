@@ -235,10 +235,10 @@ async fn fetch_bind_token(
         .await
         .map_err(|e| match e {
             crate::ofox_api_keys::ApiKeyError::Unauthorized(msg) => {
-                format!("OFox 授权失效：{msg}。请退出登录后重新走 device flow。")
+                format!("Ofox 授权失效：{msg}。请退出登录后重新走 device flow。")
             }
             crate::ofox_api_keys::ApiKeyError::RemoteRejected(msg) => {
-                format!("OFox API key 服务端拒绝：{msg}")
+                format!("Ofox API key 服务端拒绝：{msg}")
             }
             crate::ofox_api_keys::ApiKeyError::Storage(msg) => {
                 format!("本地 keychain / settings 读写失败：{msg}")
@@ -465,7 +465,7 @@ pub async fn ofox_restore_tool_binding(
         .load(crate::ofox_secret::Slot::ApiKey {
             tool: tool.app().into(),
         })
-        .map_err(|_| "读取已保存的 OFox API Key 失败，已停止恢复。".to_string())?;
+        .map_err(|_| "读取已保存的 Ofox API Key 失败，已停止恢复。".to_string())?;
     let health =
         crate::services::ofox_bind::status::binding_status(&state.db, tool, cached_key.as_deref())
             .await;

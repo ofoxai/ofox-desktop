@@ -1,8 +1,7 @@
-import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { LibraryInventory } from "@/lib/api/library";
 import { Button } from "@/components/ui/button";
-import { ListCard, ListFold, ListRow } from "@/components/ui/list";
+import { ListCard, ListRow } from "@/components/ui/list";
 import { ToolBadge } from "@/components/tools/ToolBadge";
 import { inventoryEntryDescription, toolLabel } from "./libraryText";
 import { LibraryResourceIcon } from "./LibraryResourceIcon";
@@ -48,6 +47,8 @@ export function LibraryNativeSources({
   onSource,
   onLocate,
   onCompare,
+  resource,
+  onShowLibrary,
 }: {
   inventory?: LibraryInventory;
   loading: boolean;
@@ -56,6 +57,8 @@ export function LibraryNativeSources({
   tool: string;
   status: string;
   busy: boolean;
+  resource?: { id: string; name: string };
+  onShowLibrary?: () => void;
   onRescan: () => void;
   onImport: (entry: Entry, trigger: HTMLElement) => void;
   onSource: (entry: Entry, sourceRef: string, trigger: HTMLElement) => void;
@@ -63,7 +66,6 @@ export function LibraryNativeSources({
   onCompare: (entries: Entry[], trigger: HTMLElement) => void;
 }) {
   const { t } = useTranslation();
-  const [showMatched, setShowMatched] = useState(false);
   const entries = (inventory?.entries ?? []).filter(
     (entry) =>
       nativeEntryMatches(entry, inventory!, search, tool) &&
@@ -74,10 +76,14 @@ export function LibraryNativeSources({
     (source) => !["ready", "missing"].includes(source.state),
   );
   const filtering = !!search.trim() || tool !== "all" || status !== "all";
-  const unmatched = entries.filter((entry) => !entry.matchedResourceIds.length),
-    matched = entries.filter((entry) => entry.matchedResourceIds.length);
+  const matched = entries.filter((entry) => entry.matchedResourceIds.length);
+  const visible = entries.filter((entry) =>
+    resource
+      ? entry.matchedResourceIds.includes(resource.id)
+      : !entry.matchedResourceIds.length,
+  );
   const groups = new Map<string, Entry[]>();
-  for (const entry of unmatched) {
+  for (const entry of visible) {
     const key = entry.name.toLocaleLowerCase();
     groups.set(key, [...(groups.get(key) ?? []), entry]);
   }
@@ -184,14 +190,28 @@ export function LibraryNativeSources({
   return (
     <section
       role="region"
-      aria-label={t("library.workbench2.native")}
+      id={resource ? `library-sources-${resource.id}` : undefined}
+      aria-label={
+        resource
+          ? t("library.beginner.toolConfigurations", { name: resource.name })
+          : t("library.workbench2.native")
+      }
       className="space-y-2"
     >
       <div className="flex flex-wrap items-center justify-between gap-2 px-1 pt-2">
         <h3 className="text-ctl font-medium">
-          {t("library.workbench2.native")}
+          {resource
+            ? t("library.beginner.toolConfigurations", { name: resource.name })
+            : t("library.workbench2.native")}
         </h3>
-        <Button variant="ghost" disabled={loading || busy} onClick={onRescan}>
+        <Button
+          variant="ghost"
+          aria-disabled={loading || busy}
+          className="aria-disabled:opacity-50"
+          onClick={() => {
+            if (!loading && !busy) onRescan();
+          }}
+        >
           {t("library.workbench2.scan")}
         </Button>
       </div>
@@ -207,8 +227,7 @@ export function LibraryNativeSources({
       )}
       {inventory && (
         <>
-          {(unmatched.length > 0 ||
-            (!matched.length && (!incomplete || filtering))) && (
+          {(visible.length > 0 || !incomplete || filtering) && (
             <ListCard>
               {[...groups].map(([name, variants]) =>
                 variants.length === 1 ? (
@@ -237,29 +256,27 @@ export function LibraryNativeSources({
                   </div>
                 ),
               )}
-              {!unmatched.length && (
-                <ListRow className="text-note text-ink-muted">
-                  {t(
-                    filtering
-                      ? "library.noMatch"
-                      : "library.workbench.noNativeResources",
+              {!visible.length && (
+                <ListRow className="flex-wrap text-note text-ink-muted">
+                  <span>
+                    {t(
+                      matched.length && !resource
+                        ? "library.beginner.allAdded"
+                        : resource
+                          ? "library.beginner.notInTools"
+                          : filtering
+                            ? "library.noMatch"
+                            : "library.workbench.noNativeResources",
+                    )}
+                  </span>
+                  {matched.length > 0 && !resource && onShowLibrary && (
+                    <Button variant="ghost" onClick={onShowLibrary}>
+                      {t("library.beginner.showMine")}
+                    </Button>
                   )}
                 </ListRow>
               )}
             </ListCard>
-          )}
-          {matched.length > 0 && (
-            <>
-              <ListFold
-                open={showMatched || !!search}
-                onOpenChange={setShowMatched}
-              >
-                {t("library.workbench2.matched", { count: matched.length })}
-              </ListFold>
-              {(showMatched || search) && (
-                <ListCard>{matched.map(row)}</ListCard>
-              )}
-            </>
           )}
           {inventory.sources
             .filter((source) => !["ready", "missing"].includes(source.state))

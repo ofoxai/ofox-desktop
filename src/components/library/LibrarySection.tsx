@@ -268,6 +268,7 @@ export function LibrarySection({
   }>();
   const [locateIntent, setLocateIntent] = useState<{
     id: string;
+    target?: "library";
     request: number;
     context: string;
   }>();
@@ -627,13 +628,18 @@ export function LibrarySection({
     if (locateIntent.request === focusedLocateRequest.current) return;
     // All filter resets and variant expansion have committed before consuming focus.
     const element = document.getElementById(
-      `library-resource-${locateIntent.id}`,
+      locateIntent.target === "library"
+        ? `library-owned-${kind}`
+        : `library-resource-${locateIntent.id}`,
     );
     if (!element) return;
     focusedLocateRequest.current = locateIntent.request;
-    element.scrollIntoView?.({ block: "center", behavior: "smooth" });
+    element.scrollIntoView?.({
+      block: locateIntent.target === "library" ? "start" : "center",
+      behavior: "smooth",
+    });
     element.focus({ preventScroll: true });
-  }, [locateIntent, locationContext, active]);
+  }, [locateIntent, locationContext, active, kind, sourceFilter]);
   async function locateNativeResource(
     entry: import("@/lib/api/library").LibraryInventory["entries"][number],
     id: string,
@@ -973,6 +979,65 @@ export function LibrarySection({
         setCollected({ id: item.resourceId, epoch, routing: routingKey });
     });
   }
+  function nativeSources(resource?: { id: string; name: string }) {
+    return (
+      <LibraryNativeSources
+        inventory={native.inventory}
+        loading={native.loading}
+        failed={!!native.error || native.expired}
+        busy={busy}
+        onRescan={native.rescan}
+        onImport={(entry, element) =>
+          inline.guard(() => void collectNative(entry, element))
+        }
+        onSource={(entry, sourceRef, element) =>
+          open(
+            {
+              type: "source",
+              ticketId: native.inventory!.ticketId,
+              entryId: entry.entryId,
+              sourceRef,
+            },
+            { currentTarget: element },
+          )
+        }
+        onLocate={(entry, id) => void locateNativeResource(entry, id)}
+        onCompare={(entries, element) =>
+          open(
+            {
+              type: "compare",
+              subjects: entries.map((entry) => ({
+                name: `${entry.name} · ${entry.variant ?? entry.sources.map((source) => toolLabel(source.toolId, t)).join(", ")}`,
+                subject: {
+                  kind: "native",
+                  ticketId: native.inventory!.ticketId,
+                  entryId: entry.entryId,
+                },
+              })),
+            },
+            { currentTarget: element },
+          )
+        }
+        resource={resource}
+        search={resource ? "" : search}
+        tool={resource ? "all" : agentFilter}
+        status={resource ? "all" : statusFilter}
+        onShowLibrary={() =>
+          inline.guard(() => {
+            const context = latestLocationContext.current;
+            const request = ++locateRequest.current;
+            setSourceFilter("library");
+            setLocateIntent({
+              id: "",
+              target: "library",
+              request,
+              context,
+            });
+          })
+        }
+      />
+    );
+  }
   const discoverContent = (
     <LibraryDiscover
       kind={kind}
@@ -1279,7 +1344,11 @@ export function LibrarySection({
         </p>
       )}
       {data && sourceFilter !== "native" && (
-        <ListCard>
+        <ListCard
+          id={`library-owned-${kind}`}
+          tabIndex={-1}
+          className="outline-none"
+        >
           <ListHead>
             <span>
               {t("library.workbench.inLibrary")} · {filtered.length}
@@ -1523,6 +1592,7 @@ export function LibrarySection({
                           );
                         if (button) inline.toggle(row, button);
                       }}
+                      sources={nativeSources(row)}
                       row={inline.opened.row}
                       epoch={inline.opened.epoch}
                       store={inline.opened.store}
@@ -1582,49 +1652,7 @@ export function LibrarySection({
           ))}
         </ListCard>
       )}
-      {data && sourceFilter !== "library" && (
-        <LibraryNativeSources
-          inventory={native.inventory}
-          loading={native.loading}
-          failed={!!native.error || native.expired}
-          search={search}
-          tool={agentFilter}
-          status={statusFilter}
-          busy={busy}
-          onRescan={native.rescan}
-          onImport={(entry, element) =>
-            inline.guard(() => void collectNative(entry, element))
-          }
-          onSource={(entry, sourceRef, element) =>
-            open(
-              {
-                type: "source",
-                ticketId: native.inventory!.ticketId,
-                entryId: entry.entryId,
-                sourceRef,
-              },
-              { currentTarget: element },
-            )
-          }
-          onLocate={(entry, id) => void locateNativeResource(entry, id)}
-          onCompare={(entries, element) =>
-            open(
-              {
-                type: "compare",
-                subjects: entries.map((entry) => ({
-                  name: `${entry.name} · ${entry.variant ?? entry.sources.map((source) => toolLabel(source.toolId, t)).join(", ")}`,
-                  subject: {
-                    kind: "native",
-                    ticketId: native.inventory!.ticketId,
-                    entryId: entry.entryId,
-                  },
-                })),
-              },
-              { currentTarget: element },
-            )
-          }
-        />
-      )}
+      {data && sourceFilter !== "library" && nativeSources()}
       {kind === "instructions" && data && (
         <InstructionOverview
           data={data}

@@ -243,7 +243,9 @@ describe("friendly MCP form", () => {
     fireEvent.change(screen.getByLabelText("服务器 URL"), {
       target: { value: "https://example.org/mcp" },
     });
-    await userEvent.click(screen.getByRole("button", { name: "保存到资源库" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "保存到我的资源" }),
+    );
     expect(save).toHaveBeenLastCalledWith(
       expect.objectContaining({
         transport: "http",

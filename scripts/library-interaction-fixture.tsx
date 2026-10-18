@@ -329,7 +329,7 @@ function Fixture() {
       <ShellProvider openSettings={() => undefined}>
         <main className="flex h-screen flex-col bg-canvas text-ink">
           <header className="flex flex-none items-center justify-between gap-2 border-b border-line px-4 py-2">
-            <strong>OFox · Library</strong>
+            <strong>Ofox · Library</strong>
             <div className="flex gap-2">
               {["zh", "en", "ja"].map((l) => (
                 <Button

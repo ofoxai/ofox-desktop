@@ -664,7 +664,7 @@ fn require_configured(
     } else {
         Err(health
             .message
-            .unwrap_or_else(|| "请先确认 OFox 接入配置。".into()))
+            .unwrap_or_else(|| "请先确认 Ofox 接入配置。".into()))
     }
 }
 
@@ -1112,7 +1112,7 @@ mod tests {
         let body = r#"{"error":{"message":"Insufficient credits. Current balance: $0. Please top up to continue.","type":"insufficient_credits","code":402,"request_id":"6340bd36"}}"#;
         assert_eq!(
             ping_failure_message(402, body),
-            "OFOX 账户余额不足，充值后即可使用。"
+            "Ofox 账户余额不足，充值后即可使用。"
         );
     }
 
@@ -1709,7 +1709,7 @@ const PING_DETAIL_MAX_CHARS: usize = 200;
 /// balance ran out; the dialog adds the top-up action for that status.
 fn ping_failure_message(status: u16, body: &str) -> String {
     if status == 402 {
-        return "OFOX 账户余额不足，充值后即可使用。".into();
+        return "Ofox 账户余额不足，充值后即可使用。".into();
     }
     let hint = match status {
         401 => "API Key 无效或已过期，请尝试解除绑定后重新绑定该工具。",

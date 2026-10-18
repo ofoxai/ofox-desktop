@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import type {
@@ -32,7 +33,9 @@ export function LibraryInlineDetails({
   onNextAction,
   routingKey,
   onCollapse,
+  sources,
 }: {
+  sources?: ReactNode;
   routingKey: string;
   onCollapse: () => void;
   kind: LibraryKind;
@@ -127,6 +130,7 @@ export function LibraryInlineDetails({
           />
         </>
       )}
+      {sources}
     </section>
   );
 }

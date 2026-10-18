@@ -128,7 +128,7 @@ it("keeps discovery in the page while the native scan is slow and never starts a
   );
   const check = vi.spyOn(libraryApi, "prepareMcpCheck");
   mount();
-  const discovery = await screen.findByRole("region", { name: "发现 MCP" });
+  const discovery = await screen.findByRole("region", { name: "发现资源" });
   expect(
     within(discovery).getByRole("article", { name: "Context7" }),
   ).toBeVisible();
@@ -145,6 +145,13 @@ it("collects one native item using its existing ticket and locates the saved res
         ...data,
         servers: [server, { ...server, id: "collected", name: "Only native" }],
       };
+      inventory = {
+        ...inventory,
+        entries: inventory.entries.map((entry) => ({
+          ...entry,
+          matchedResourceIds: ["collected"],
+        })),
+      };
       return {
         imported: 1,
         items: [
@@ -158,9 +165,9 @@ it("collects one native item using its existing ticket and locates the saved res
       };
     });
   mount();
-  const native = await screen.findByRole("region", { name: "本机已有" });
+  const native = await screen.findByRole("region", { name: "工具中发现" });
   await userEvent.click(
-    within(native).getByRole("button", { name: "收录 Only native" }),
+    within(native).getByRole("button", { name: "将 Only native 加入我的资源" }),
   );
   await waitFor(() =>
     expect(imported).toHaveBeenCalledWith("scan", ["native"], 1),
@@ -170,6 +177,19 @@ it("collects one native item using its existing ticket and locates the saved res
   ).toHaveAttribute("data-located", "true");
   expect(apply).not.toHaveBeenCalled();
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  await waitFor(() =>
+    expect(within(native).queryByText("Only native")).toBeNull(),
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "展开 Only native" }),
+  );
+  expect(
+    within(
+      screen.getByRole("region", { name: "Only native 的工具配置" }),
+    ).getByRole("button", {
+      name: "查看 Only native 的 Codex 来源",
+    }),
+  ).toBeVisible();
 });
 
 it("opens MCP details inline and keeps full explicit check results only for the current revision", async () => {

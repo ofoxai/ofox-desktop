@@ -102,7 +102,9 @@ describe("MCP composer editing", () => {
     fireEvent.change(screen.getByLabelText("服务器 URL"), {
       target: { value: "https://example.org/new" },
     });
-    await userEvent.click(screen.getByRole("button", { name: "保存到资源库" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "保存到我的资源" }),
+    );
     expect(save).toHaveBeenCalledWith(
       [
         {
@@ -137,7 +139,9 @@ describe("MCP composer editing", () => {
     fireEvent.change(screen.getByLabelText("名称"), {
       target: { value: "Renamed" },
     });
-    await userEvent.click(screen.getByRole("button", { name: "保存到资源库" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "保存到我的资源" }),
+    );
     expect(save).toHaveBeenCalledWith([], "draft");
   });
   it("requires a deliberate confirmation before clearing saved fields for a new transport", async () => {
@@ -164,13 +168,17 @@ describe("MCP composer editing", () => {
     expect(screen.getByText(/以下已保存字段将清除/)).toHaveTextContent(
       "headers.Authorization",
     );
-    await userEvent.click(screen.getByRole("button", { name: "保存到资源库" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "保存到我的资源" }),
+    );
     expect(save).not.toHaveBeenCalled();
     expect(screen.getByRole("alert")).toHaveTextContent("请确认连接方式变化");
     await userEvent.click(
       screen.getByRole("checkbox", { name: "我确认清除不兼容字段" }),
     );
-    await userEvent.click(screen.getByRole("button", { name: "保存到资源库" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "保存到我的资源" }),
+    );
     expect(save).toHaveBeenCalledWith(
       expect.arrayContaining([
         {
@@ -198,7 +206,9 @@ describe("MCP composer editing", () => {
     fireEvent.change(screen.getByLabelText("参数"), {
       target: { value: '["broken"' },
     });
-    await userEvent.click(screen.getByRole("button", { name: "保存到资源库" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "保存到我的资源" }),
+    );
     expect(save).not.toHaveBeenCalled();
   });
   it("does not auto-select targets and preserves a manually edited identifier", async () => {
@@ -325,7 +335,9 @@ describe("MCP composer editing", () => {
     fireEvent.change(screen.getByLabelText("值 1"), {
       target: { value: "private-value" },
     });
-    await userEvent.click(screen.getByRole("button", { name: "保存到资源库" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "保存到我的资源" }),
+    );
     expect(save).not.toHaveBeenCalled();
     expect(screen.getByRole("alert")).toHaveTextContent(
       "有效的变量或请求头名称",
@@ -399,7 +411,9 @@ describe("MCP composer editing", () => {
     await userEvent.click(screen.getByRole("combobox", { name: "args的操作" }));
     await userEvent.click(screen.getByRole("option", { name: "替换" }));
     expect(screen.getByLabelText("参数")).toHaveValue("new-arg");
-    await userEvent.click(screen.getByRole("button", { name: "保存到资源库" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "保存到我的资源" }),
+    );
     expect(save).toHaveBeenCalledWith(
       [{ path: ["args"], fieldRef: "args", action: "set", value: ["new-arg"] }],
       "draft",
@@ -416,7 +430,9 @@ describe("MCP composer editing", () => {
       target: { value: "First name" },
     });
     expect(screen.getByLabelText("配置标识")).toHaveValue("first-name");
-    await userEvent.click(screen.getByRole("button", { name: "保存到资源库" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "保存到我的资源" }),
+    );
     expect(save).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText("名称"), {
       target: { value: "Second name" },

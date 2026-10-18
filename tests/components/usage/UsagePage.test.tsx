@@ -249,11 +249,11 @@ describe("UsagePage", () => {
       expect(
         await within(panel).findByText(price, { exact: false }),
       ).toBeVisible();
-      expect(within(header).queryByText("按 OFox 价格估算")).toBeNull();
+      expect(within(header).queryByText("按 Ofox 价格估算")).toBeNull();
       expect(within(header).queryByText("—")).toBeNull();
       await userEvent.click(screen.getByRole("tab", { name: "概览" }));
       expect(await within(header).findByText("≈$2.00")).toBeVisible();
-      expect(within(header).getByTitle("按 OFox 价格估算")).toBeVisible();
+      expect(within(header).getByTitle("按 Ofox 价格估算")).toBeVisible();
     },
   );
 

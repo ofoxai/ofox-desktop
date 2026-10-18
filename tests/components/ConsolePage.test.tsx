@@ -539,7 +539,7 @@ describe("Console usage page", () => {
     fireEvent.click(screen.getByRole("tab", { name: "用量" }));
     const usage = screen.getByRole("tabpanel", { name: "用量" });
     expect(
-      within(usage).getByRole("region", { name: "OFox 余额" }),
+      within(usage).getByRole("region", { name: "Ofox 余额" }),
     ).toHaveTextContent("$12.50");
     fireEvent.click(
       within(usage).getByRole("button", { name: "在网页查看详细用量 ↗" }),

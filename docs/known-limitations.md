@@ -146,3 +146,9 @@ See the [workbench boundaries](library-workbench.md#已知边界): Codex overrid
 - Release artifact validation now belongs to both dry-run and publish paths. The workflow has not been executed remotely without push authorization. Local ad-hoc bundles do not establish Developer ID signing, Apple notarization, Gatekeeper acceptance, NSIS installation, or cross-version automatic updating. Those results must be recorded separately for the final SHA.
 
 - Library inline editors keep private drafts in memory only. Hiding the retained macOS window preserves them; quitting the process does not provide persistent draft recovery. The inline discovery/check fixtures use synthetic data and do not certify Agent resource consumption. This UI iteration does not change the existing Windows, notarization or paid native acceptance status.
+
+## Library beginner presentation boundary
+
+The My resources / Discovered in tools presentation changes neither the native reader roster nor saved definitions. Only supported native adapters contribute discovered configurations; a tool outside that roster is not established absent. Saved items can outlive their current native configuration. Exact matched sources move into each resource's expanded details, while conflicting same-name variants remain independently addable. Adding still does not apply, take ownership or prove connection success.
+
+This increment corrects Ofox display spelling without renaming compatibility identifiers or historical user data. Read-only installed-window verification and synthetic responsive/keyboard fixtures do not certify real client consumption, Windows installation or Apple notarization; those external acceptance limits remain unchanged.

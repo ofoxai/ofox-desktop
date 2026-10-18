@@ -21,7 +21,7 @@ beforeEach(() => {
           exportAction: "导出资源包",
           importTitle: "导入资源包",
           exportTitle: "导出资源包",
-          importDescription: "预览后收录到资源库，不会自动应用到工具。",
+          importDescription: "预览后加入我的资源，不会自动应用到工具。",
           exportDescription: "导出全部资源库内容。",
           cancelledImport: "未选择资源包",
           cancelledExport: "已取消导出",

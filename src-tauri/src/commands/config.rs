@@ -176,7 +176,7 @@ pub async fn open_config_folder(handle: AppHandle, app: String) -> Result<bool, 
     };
 
     if !config_dir.exists() {
-        return Err("配置目录不存在，请先恢复 OFox 接入配置或安装工具。".to_string());
+        return Err("配置目录不存在，请先恢复 Ofox 接入配置或安装工具。".to_string());
     }
 
     handle

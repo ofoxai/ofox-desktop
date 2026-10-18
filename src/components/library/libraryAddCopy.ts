@@ -49,7 +49,7 @@ export const LIBRARY_ADD_COPY = {
       compatible: "可配置的工具",
       noExecution: "浏览和选择不会启动服务、运行脚本或安装依赖。",
       pinNote: "仅将所选技能导入资源库；下载仓库归档后固定实际提交版本。",
-      templateSource: "OFox 可编辑模板",
+      templateSource: "Ofox 可编辑模板",
       templates: {
         coding: "通用编程",
         chinese: "中文沟通",
@@ -111,7 +111,7 @@ export const LIBRARY_ADD_COPY = {
       removeHeader: "移除请求头 {{index}}",
       directory: "允许访问的文件夹",
       directoryHint: "填写完整路径，仅向此服务开放你选择的目录。",
-      save: "保存草稿",
+      save: "保存到我的资源",
       preview: "选择工具并预览",
       advanced: "高级字段",
       paste: "粘贴 JSON",
@@ -192,7 +192,7 @@ export const LIBRARY_ADD_COPY = {
         "Browsing and choosing do not start services, run scripts, or install dependencies.",
       pinNote:
         "Only the selected skill is imported; a repository archive is downloaded and the actual commit is pinned.",
-      templateSource: "Editable OFox template",
+      templateSource: "Editable Ofox template",
       templates: {
         coding: "General coding",
         chinese: "Chinese communication",
@@ -265,7 +265,7 @@ export const LIBRARY_ADD_COPY = {
       directory: "Permitted folder",
       directoryHint:
         "Enter an absolute path. Grant this server access only to the folder you choose.",
-      save: "Save draft",
+      save: "Save to My resources",
       preview: "Choose tools and preview",
       advanced: "Advanced fields",
       paste: "Paste JSON",
@@ -352,7 +352,7 @@ export const LIBRARY_ADD_COPY = {
         "閲覧と選択では、サービスの起動、スクリプトの実行、依存関係のインストールは行いません。",
       pinNote:
         "選択したスキルのみを取り込みます。リポジトリのアーカイブをダウンロードし、実際のコミットを固定します。",
-      templateSource: "編集可能な OFox テンプレート",
+      templateSource: "編集可能な Ofox テンプレート",
       templates: {
         coding: "基本のコーディング",
         chinese: "中国語での会話",
@@ -428,7 +428,7 @@ export const LIBRARY_ADD_COPY = {
       directory: "許可するフォルダー",
       directoryHint:
         "絶対パスを入力し、選択したフォルダーだけへのアクセスを許可します。",
-      save: "下書きを保存",
+      save: "マイリソースに保存",
       preview: "ツールを選んでプレビュー",
       advanced: "詳細フィールド",
       paste: "JSON を貼り付け",

@@ -24,9 +24,9 @@ use crate::settings::{self, ApiKeyMeta};
 fn explain(e: ApiKeyError) -> String {
     let message = match e {
         ApiKeyError::Unauthorized(msg) => {
-            format!("OFox 授权失效：{msg}。请退出登录后重新走 device flow。")
+            format!("Ofox 授权失效：{msg}。请退出登录后重新走 device flow。")
         }
-        ApiKeyError::RemoteRejected(msg) => format!("OFox API key 服务端拒绝：{msg}"),
+        ApiKeyError::RemoteRejected(msg) => format!("Ofox API key 服务端拒绝：{msg}"),
         ApiKeyError::Storage(msg) => format!("本地 keychain / settings 读写失败：{msg}"),
     };
     // 服务端的拒绝文案可能回显请求里的 key。

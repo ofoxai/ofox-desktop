@@ -52,7 +52,7 @@ impl ToolBindingStatus {
     pub(crate) fn missing(files: Vec<String>) -> Self {
         Self {
             status: BindingStatus::Missing,
-            message: Some("部分 OFox 接入配置已删除，可恢复已保存的模型和绑定。".into()),
+            message: Some("部分 Ofox 接入配置已删除，可恢复已保存的模型和绑定。".into()),
             missing_files: files,
             modified_fields: Vec::new(),
             env_overrides: Vec::new(),
@@ -62,7 +62,7 @@ impl ToolBindingStatus {
     pub(crate) fn modified(fields: Vec<String>) -> Self {
         Self {
             status: BindingStatus::Modified,
-            message: Some("OFox 接入配置已被修改，已停止自动覆盖，请检查现有配置。".into()),
+            message: Some("Ofox 接入配置已被修改，已停止自动覆盖，请检查现有配置。".into()),
             missing_files: Vec::new(),
             modified_fields: fields,
             env_overrides: Vec::new(),
@@ -73,7 +73,7 @@ impl ToolBindingStatus {
         Self {
             status: BindingStatus::Unknown,
             message: Some(
-                "无法确认 OFox 接入配置，请检查文件权限、配置格式和本地绑定记录。".into(),
+                "无法确认 Ofox 接入配置，请检查文件权限、配置格式和本地绑定记录。".into(),
             ),
             missing_files: Vec::new(),
             modified_fields: Vec::new(),

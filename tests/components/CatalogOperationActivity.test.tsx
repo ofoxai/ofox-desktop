@@ -78,7 +78,7 @@ it("invalidates verified evidence during a job and refreshes after cancellation 
   render(<OptionalToolsCatalog boundTools={[]} />);
   await userEvent.click(screen.getByRole("button", { name: /其他已安装工具/ }));
   await waitFor(() =>
-    expect(screen.getByText(/OFox 管理副本.*1.0.98/)).toBeVisible(),
+    expect(screen.getByText(/Ofox 管理副本.*1.0.98/)).toBeVisible(),
   );
   await userEvent.click(
     screen.getByRole("button", { name: "管理 GitHub Copilot CLI 安装" }),
@@ -97,7 +97,7 @@ it("invalidates verified evidence during a job and refreshes after cancellation 
   await userEvent.click(screen.getByRole("button", { name: "取消操作" }));
   await userEvent.click(screen.getByRole("button", { name: "关闭" }));
   try {
-    expect(screen.queryByText(/OFox 管理副本.*1.0.98/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Ofox 管理副本.*1.0.98/)).not.toBeInTheDocument();
   } finally {
     await act(async () =>
       finish({
@@ -115,7 +115,7 @@ it("invalidates verified evidence during a job and refreshes after cancellation 
   }
   await waitFor(() => expect(mocks.inventory).toHaveBeenCalledTimes(2));
   fireEvent.click(screen.getByRole("button", { name: /安装其他工具/ }));
-  expect(await screen.findByText("OFox 副本需要核对")).toBeVisible();
+  expect(await screen.findByText("Ofox 副本需要核对")).toBeVisible();
 });
 
 it("keeps a remounted directory unverified until the outstanding operation settles", async () => {
@@ -150,7 +150,7 @@ it("keeps a remounted directory unverified until the outstanding operation settl
   );
   const first = render(<OptionalToolsCatalog boundTools={[]} />);
   await userEvent.click(screen.getByRole("button", { name: /其他已安装工具/ }));
-  await screen.findByText(/OFox 管理副本.*1.0.98/);
+  await screen.findByText(/Ofox 管理副本.*1.0.98/);
   let pending!: ReturnType<typeof catalogLifecycleApi.run>;
   act(() => {
     pending = catalogLifecycleApi.run("remounted-operation");
@@ -159,8 +159,8 @@ it("keeps a remounted directory unverified until the outstanding operation settl
   render(<OptionalToolsCatalog boundTools={[]} />);
   await userEvent.click(screen.getByRole("button", { name: /安装其他工具/ }));
   try {
-    expect(await screen.findByText("OFox 副本需要核对")).toBeVisible();
-    expect(screen.queryByText(/OFox 管理副本.*1.0.98/)).not.toBeInTheDocument();
+    expect(await screen.findByText("Ofox 副本需要核对")).toBeVisible();
+    expect(screen.queryByText(/Ofox 管理副本.*1.0.98/)).not.toBeInTheDocument();
   } finally {
     await act(async () => {
       finish({ operationId: "remounted-operation", state: "partial" });
@@ -168,7 +168,7 @@ it("keeps a remounted directory unverified until the outstanding operation settl
     });
   }
   await waitFor(() => expect(mocks.inventory).toHaveBeenCalledTimes(3));
-  expect(screen.getByText("OFox 副本需要核对")).toBeVisible();
+  expect(screen.getByText("Ofox 副本需要核对")).toBeVisible();
 });
 
 it("shares a failed settle refresh with the open dialog and performs a new query on retry", async () => {
@@ -195,7 +195,7 @@ it("shares a failed settle refresh with the open dialog and performs a new query
   );
   render(<OptionalToolsCatalog boundTools={[]} />);
   await userEvent.click(screen.getByRole("button", { name: /其他已安装工具/ }));
-  await screen.findByText(/OFox 管理副本.*1.0.98/);
+  await screen.findByText(/Ofox 管理副本.*1.0.98/);
   await userEvent.click(
     screen.getByRole("button", { name: "管理 GitHub Copilot CLI 安装" }),
   );
@@ -273,7 +273,7 @@ it("refreshes past an older inventory request when the run IPC rejects", async (
   };
   render(<OptionalToolsCatalog ref={ref} boundTools={[]} />);
   await userEvent.click(screen.getByRole("button", { name: /其他已安装工具/ }));
-  await screen.findByText(/OFox 管理副本.*1.0.98/);
+  await screen.findByText(/Ofox 管理副本.*1.0.98/);
   let oldQuery!: Promise<void>;
   act(() => {
     oldQuery = ref.current!.refresh();
@@ -293,6 +293,6 @@ it("refreshes past an older inventory request when the run IPC rejects", async (
   });
   await waitFor(() => expect(mocks.inventory).toHaveBeenCalledTimes(3));
   await userEvent.click(screen.getByRole("button", { name: /安装其他工具/ }));
-  expect(await screen.findByText("OFox 副本需要核对")).toBeVisible();
-  expect(screen.queryByText(/OFox 管理副本.*1.0.98/)).not.toBeInTheDocument();
+  expect(await screen.findByText("Ofox 副本需要核对")).toBeVisible();
+  expect(screen.queryByText(/Ofox 管理副本.*1.0.98/)).not.toBeInTheDocument();
 });

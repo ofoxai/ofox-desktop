@@ -149,17 +149,17 @@ const RECIPE_METADATA: Record<
   },
   coding: {
     category: "development",
-    publisher: "OFox",
+    publisher: "Ofox",
     licenseKey: "template",
   },
   chinese: {
     category: "communication",
-    publisher: "OFox",
+    publisher: "Ofox",
     licenseKey: "template",
   },
   review: {
     category: "communication",
-    publisher: "OFox",
+    publisher: "Ofox",
     licenseKey: "template",
   },
 };

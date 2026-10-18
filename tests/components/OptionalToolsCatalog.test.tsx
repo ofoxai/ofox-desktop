@@ -183,7 +183,7 @@ describe("independent tool installation catalog", () => {
     );
     await userEvent.click(manage);
     expect(screen.getByRole("dialog")).toHaveAccessibleName(
-      "GitHub Copilot CLI · OFox 管理副本",
+      "GitHub Copilot CLI · Ofox 管理副本",
     );
   });
   it("keeps installation metadata available in a disclosure without crowding the row", async () => {
@@ -207,7 +207,7 @@ describe("independent tool installation catalog", () => {
     const row = await screen.findByRole("group", {
       name: "GitHub Copilot CLI",
     });
-    expect(within(row).getByText(/OFox 管理副本.*1.0.98/)).toBeVisible();
+    expect(within(row).getByText(/Ofox 管理副本.*1.0.98/)).toBeVisible();
     expect(within(row).getByText(/外部副本.*external-1/)).toBeVisible();
     const metadata = row.querySelector("details");
     expect(metadata).not.toBeNull();
@@ -225,7 +225,7 @@ describe("independent tool installation catalog", () => {
     ).toBeVisible();
     expect(localStorage.getItem("ofox-bound-tools")).toBe('["codex"]');
   });
-  it("lists a verified OFox copy among installed tools while preserving external-copy evidence", async () => {
+  it("lists a verified Ofox copy among installed tools while preserving external-copy evidence", async () => {
     mocks.inventory.mockResolvedValueOnce([
       {
         toolId: "copilot",
@@ -244,7 +244,7 @@ describe("independent tool installation catalog", () => {
       screen.getByRole("button", { name: /其他已安装工具/ }),
     );
     await waitFor(() =>
-      expect(screen.getByText(/OFox 管理副本.*1.0.98/)).toBeVisible(),
+      expect(screen.getByText(/Ofox 管理副本.*1.0.98/)).toBeVisible(),
     );
     expect(screen.getByText(/外部副本.*external-1/)).toBeVisible();
     await userEvent.click(screen.getByText("安装信息"));
@@ -269,7 +269,7 @@ describe("independent tool installation catalog", () => {
     await waitFor(() =>
       expect(screen.getByText("GitHub Copilot CLI")).toBeVisible(),
     );
-    expect(screen.getByText(/OFox 管理副本.*1.0.98/)).toBeVisible();
+    expect(screen.getByText(/Ofox 管理副本.*1.0.98/)).toBeVisible();
     expect(screen.queryByText("未安装")).not.toBeInTheDocument();
   });
   it("does not start a queued mutation refresh after the catalog has unmounted", async () => {

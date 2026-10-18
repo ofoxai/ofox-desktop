@@ -30,11 +30,11 @@ export const LIBRARY_DISCOVER_COPY = {
       configurable: "可配置",
       nativeAuth: "需凭据或原生授权",
       checkLabel: "检查方式",
-      checkOfox: "可由 OFox 发起连接检查",
+      checkOfox: "可由 Ofox 发起连接检查",
       checkNative: "请在对应工具中检查",
       notTested: "尚未实测",
-      notCollected: "未收录",
-      collected: "已收录",
+      notCollected: "尚未加入",
+      collected: "已加入我的资源",
       nativeOther: "本机有其他配置",
       viewExisting: "查看已有配置",
       locateNative: "查看本机配置",
@@ -60,7 +60,7 @@ export const LIBRARY_DISCOVER_COPY = {
         mitService: "服务端源码：MIT；托管服务另受 GitHub 条款约束。",
         skill: "下载时保留技能目录内许可文件；实际提交与许可在详情中记录。",
         skillFonts: "保留技能许可与字体的独立许可；使用字体前查看对应条款。",
-        template: "OFox 可编辑模板，可按项目需求修改。",
+        template: "Ofox 可编辑模板，可按项目需求修改。",
       },
       recipes: {
         "microsoft-learn": "检索微软官方文档与代码示例。",
@@ -93,7 +93,7 @@ export const LIBRARY_DISCOVER_COPY = {
         publicHttp:
           "保持网络连接；使用目标工具支持的 Streamable HTTP，无需本地运行时或认证。",
         playwright:
-          "Node.js 18 或更新版本；首次使用前按官方说明准备所需浏览器。OFox 不会自动安装。",
+          "Node.js 18 或更新版本；首次使用前按官方说明准备所需浏览器。Ofox 不会自动安装。",
         github:
           "在目标工具中完成受支持的原生授权，或在表单填写有效凭据；不要将凭据写入 URL。",
         "theme-factory":
@@ -142,11 +142,11 @@ export const LIBRARY_DISCOVER_COPY = {
       configurable: "Configurable",
       nativeAuth: "Credentials or native authorization required",
       checkLabel: "Check method",
-      checkOfox: "OFox can start a connection check",
+      checkOfox: "Ofox can start a connection check",
       checkNative: "Check in the target tool",
       notTested: "Not live-tested",
-      notCollected: "Not collected",
-      collected: "Collected",
+      notCollected: "Not added yet",
+      collected: "In My resources",
       nativeOther: "Other local configuration exists",
       viewExisting: "View existing configuration",
       locateNative: "View local configuration",
@@ -180,7 +180,7 @@ export const LIBRARY_DISCOVER_COPY = {
         skillFonts:
           "Retain the skill license and separate font licenses. Read their terms before using the fonts.",
         template:
-          "An editable OFox template that you can adapt to your project.",
+          "An editable Ofox template that you can adapt to your project.",
       },
       recipes: {
         "microsoft-learn":
@@ -219,7 +219,7 @@ export const LIBRARY_DISCOVER_COPY = {
         publicHttp:
           "Network access and Streamable HTTP support in the target tool. No local runtime or authentication is required.",
         playwright:
-          "Node.js 18 or newer. Prepare the required browser using the official instructions before first use. OFox does not install it automatically.",
+          "Node.js 18 or newer. Prepare the required browser using the official instructions before first use. Ofox does not install it automatically.",
         github:
           "Complete supported native authorization in the target tool, or enter valid credentials in the form. Never put credentials in the URL.",
         "theme-factory":
@@ -270,11 +270,11 @@ export const LIBRARY_DISCOVER_COPY = {
       configurable: "設定可能",
       nativeAuth: "認証情報またはツール側の認可が必要",
       checkLabel: "確認方法",
-      checkOfox: "OFox から接続確認を開始できます",
+      checkOfox: "Ofox から接続確認を開始できます",
       checkNative: "対象ツールで確認してください",
       notTested: "実機での接続は未検証",
-      notCollected: "未登録",
-      collected: "登録済み",
+      notCollected: "未追加",
+      collected: "マイリソースに追加済み",
       nativeOther: "別のローカル設定があります",
       viewExisting: "既存の設定を表示",
       locateNative: "ローカル設定を表示",
@@ -307,7 +307,7 @@ export const LIBRARY_DISCOVER_COPY = {
           "選択したスキル内のライセンスファイルを保持します。実際のコミットとライセンスは詳細に記録されます。",
         skillFonts:
           "スキルと各フォントの個別ライセンスを保持します。フォント使用前に条件を確認してください。",
-        template: "プロジェクトに合わせて変更できる OFox のテンプレートです。",
+        template: "プロジェクトに合わせて変更できる Ofox のテンプレートです。",
       },
       recipes: {
         "microsoft-learn":
@@ -342,7 +342,7 @@ export const LIBRARY_DISCOVER_COPY = {
         publicHttp:
           "ネット接続と対象ツールの Streamable HTTP 対応が必要です。ローカル実行環境や認証は不要です。",
         playwright:
-          "Node.js 18 以上。初回利用前に公式手順で必要なブラウザーを準備してください。OFox は自動インストールしません。",
+          "Node.js 18 以上。初回利用前に公式手順で必要なブラウザーを準備してください。Ofox は自動インストールしません。",
         github:
           "対象ツールで対応する認可を完了するか、フォームに有効な認証情報を入力してください。URL に秘密情報を含めないでください。",
         "theme-factory":

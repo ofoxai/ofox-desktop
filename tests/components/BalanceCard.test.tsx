@@ -107,7 +107,7 @@ describe("BalanceCard", () => {
       />,
     );
     const card = screen.getByTestId("balance-card");
-    expect(card).toHaveTextContent("OFOX balance");
+    expect(card).toHaveTextContent("Ofox balance");
     expect(card).toHaveTextContent("Loading your account (2/3)");
     expect(card).not.toHaveTextContent(/[一-鿿]/);
   });

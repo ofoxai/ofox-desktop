@@ -97,7 +97,7 @@ fn validate_layers(value: &Value, initial: bool) -> Result<(), String> {
             .and_then(|v| v.pointer("/config/providers"))
             .is_some_and(|v| ROUTES.iter().any(|(route, _)| v.get(*route).is_some()))
     {
-        return Err("dsh 已有同名 OFox provider，未覆盖".into());
+        return Err("dsh 已有同名 Ofox provider，未覆盖".into());
     }
     for (id, row) in value.as_object().unwrap() {
         if id.contains("credential") {

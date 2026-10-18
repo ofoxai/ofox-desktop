@@ -22,7 +22,7 @@ import { OfoxApexSwitch } from "@/components/OfoxApexSwitch";
 import type { Settings } from "@/types";
 
 /**
- * OFox-flavored settings dialog, opened by the settings icon in the console
+ * Ofox-flavored settings dialog, opened by the settings icon in the console
  * header (`AppHeader`) or by the tray popover's `ofox-open-settings` event.
  *
  *   · Account     — show identity, allow logout
@@ -31,7 +31,7 @@ import type { Settings } from "@/types";
  *   · About       — app version + check-for-updates entry point, and the
  *                   link to the Ofox website (it left the console footer)
  *
- * The "检查更新" button calls the OFox-native self-hosted update check
+ * The "检查更新" button calls the Ofox-native self-hosted update check
  * (`check_for_updates` → desktop.ofox.ai/latest.json on Cloudflare R2), NOT
  * cc-switch's old tauri-plugin-updater flow (whose endpoint points upstream).
  * New version → toast with a "前往下载" action; up-to-date → success toast.
@@ -406,7 +406,7 @@ export default function OfoxSettingsDialog({
               在 OfoxApexSwitch 内部触发 ConfirmDialog → 重新登录流程。 */}
           <SectionCard title={t("uiCopy.region")}>
             <Row
-              label="OFox apex"
+              label="Ofox apex"
               hint={t("uiCopy.regionHint")}
               control={<OfoxApexSwitch />}
               isLast

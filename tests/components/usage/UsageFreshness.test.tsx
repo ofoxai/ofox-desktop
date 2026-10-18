@@ -133,7 +133,7 @@ it("keeps routine sync times and the full catalog version collapsed until data s
   expect(screen.getByText(/账户余额更新/)).toBeVisible();
   expect(screen.getByText(new RegExp(version))).toBeVisible();
   expect(
-    screen.getAllByText("费用为按 OFox 价格的估算，以账单为准"),
+    screen.getAllByText("费用为按 Ofox 价格的估算，以账单为准"),
   ).toHaveLength(1);
 });
 

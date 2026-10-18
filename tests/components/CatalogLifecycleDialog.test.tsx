@@ -67,7 +67,7 @@ it("previews the designated copy and subscribes before installing without changi
   expect(catalogLifecycleApi.prepare).not.toHaveBeenCalled();
   expect(catalogLifecycleApi.run).not.toHaveBeenCalled();
   await userEvent.click(
-    screen.getByRole("button", { name: "预览安装 OFox 副本" }),
+    screen.getByRole("button", { name: "预览安装 Ofox 副本" }),
   );
   await screen.findByText("fixture-command");
   expect(catalogLifecycleApi.prepare).toHaveBeenCalledWith(
@@ -100,7 +100,7 @@ it("keeps a completed operation successful when refreshing the directory fails",
   );
   await screen.findByText(missing.prefix!);
   await userEvent.click(
-    screen.getByRole("button", { name: "预览安装 OFox 副本" }),
+    screen.getByRole("button", { name: "预览安装 Ofox 副本" }),
   );
   await userEvent.click(
     await screen.findByRole("button", { name: "开始安装" }),
@@ -129,7 +129,7 @@ it("releases a prepared operation whose returned scope does not match", async ()
   );
   await screen.findByText(missing.prefix!);
   await userEvent.click(
-    screen.getByRole("button", { name: "预览安装 OFox 副本" }),
+    screen.getByRole("button", { name: "预览安装 Ofox 副本" }),
   );
   await screen.findByRole("alert");
   expect(catalogLifecycleApi.cancel).toHaveBeenCalledWith("job-1");
@@ -188,7 +188,7 @@ it("does not accept a previous tool's completed job after its lifecycle has ende
   );
   await screen.findByText(missing.prefix!);
   await userEvent.click(
-    screen.getByRole("button", { name: "预览安装 OFox 副本" }),
+    screen.getByRole("button", { name: "预览安装 Ofox 副本" }),
   );
   await userEvent.click(
     await screen.findByRole("button", { name: "开始安装" }),
@@ -238,7 +238,7 @@ it("cancels a late prepared operation after unmount without subscribing or execu
   );
   await screen.findByText(missing.prefix!);
   await userEvent.click(
-    screen.getByRole("button", { name: "预览安装 OFox 副本" }),
+    screen.getByRole("button", { name: "预览安装 Ofox 副本" }),
   );
   rendered.unmount();
   await act(async () => finish(plan));
@@ -263,7 +263,7 @@ it("closes a late subscription exactly once after unmount and never starts the j
   );
   await screen.findByText(missing.prefix!);
   await userEvent.click(
-    screen.getByRole("button", { name: "预览安装 OFox 副本" }),
+    screen.getByRole("button", { name: "预览安装 Ofox 副本" }),
   );
   await userEvent.click(
     await screen.findByRole("button", { name: "开始安装" }),
@@ -296,7 +296,7 @@ it("ignores an old cancellation failure after switching to another tool", async 
   );
   await screen.findByText(missing.prefix!);
   await userEvent.click(
-    screen.getByRole("button", { name: "预览安装 OFox 副本" }),
+    screen.getByRole("button", { name: "预览安装 Ofox 副本" }),
   );
   await userEvent.click(
     await screen.findByRole("button", { name: "开始安装" }),

@@ -87,7 +87,7 @@ it("reports and refreshes a partially saved JSON selection without replaying the
     await screen.findByRole("button", { name: "添加 MCP" }),
   );
   await userEvent.click(screen.getByRole("button", { name: "Submit two" }));
-  expect(await screen.findByText("First · 已保存到资源库")).toBeVisible();
+  expect(await screen.findByText("First · 已保存到我的资源")).toBeVisible();
   expect(screen.getByText("Second · 未完成")).toBeVisible();
   expect(libraryApi.list).toHaveBeenCalledTimes(2);
   expect(save).toHaveBeenCalledTimes(2);
