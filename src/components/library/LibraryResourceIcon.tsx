@@ -3,6 +3,10 @@ import microsoftLogo from "@lobehub/icons-static-svg/icons/microsoft-color.svg";
 import githubLogo from "@lobehub/icons-static-svg/icons/github.svg";
 import anthropicLogo from "@lobehub/icons-static-svg/icons/anthropic.svg";
 import mcpLogo from "@lobehub/icons-static-svg/icons/mcp.svg";
+import context7Logo from "@/assets/library-logos/context7.png";
+import chromeLogo from "@/assets/library-logos/chrome-devtools.png";
+import playwrightLogo from "@/assets/library-logos/playwright.svg";
+import deepwikiLogo from "@/assets/library-logos/deepwiki.png";
 import type { LibraryKind } from "@/lib/api/library";
 import { cn } from "@/lib/utils";
 
@@ -10,8 +14,11 @@ import { cn } from "@/lib/utils";
 const RECIPE_LOGOS: Readonly<
   Record<string, { src: string; invert?: boolean }>
 > = {
+  context7: { src: context7Logo },
+  "chrome-devtools": { src: chromeLogo },
+  deepwiki: { src: deepwikiLogo },
   "microsoft-learn": { src: microsoftLogo },
-  playwright: { src: microsoftLogo },
+  playwright: { src: playwrightLogo },
   github: { src: githubLogo, invert: true },
   filesystem: { src: mcpLogo, invert: true },
   fetch: { src: mcpLogo, invert: true },

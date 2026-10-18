@@ -29,6 +29,10 @@ export interface ShellContextValue {
   /** The page on screen. */
   active: ShellPage;
   setActive: (page: ShellPage) => void;
+  registerLeaveGuard: (
+    page: ShellPage,
+    guard: (proceed: () => void) => void,
+  ) => () => void;
   sessionLocation: { key: string; request: number } | null;
   locateSession: (key: string) => void;
   consumeSessionLocation: (request: number) => void;
@@ -86,6 +90,10 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
     () => new Set<ShellPage>(["tools"]),
   );
   const handlers = useRef(new Map<ShellPage, RefreshHandler>());
+  const leaveGuards = useRef(
+    new Map<ShellPage, (proceed: () => void) => void>(),
+  );
+  const activeRef = useRef(active);
   const [registered, setRegistered] = useState<ReadonlySet<ShellPage>>(
     () => new Set(),
   );
@@ -94,16 +102,41 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
     () => new Set(),
   );
 
-  const setActive = useCallback((page: ShellPage) => {
-    setActiveState(page);
-    setVisited((previous) => withPage(previous, page));
+  const navigate = useCallback((page: ShellPage, after?: () => void) => {
+    const commit = () => {
+      activeRef.current = page;
+      setActiveState(page);
+      setVisited((previous) => withPage(previous, page));
+      after?.();
+    };
+    const guard =
+      page !== activeRef.current
+        ? leaveGuards.current.get(activeRef.current)
+        : undefined;
+    if (guard) guard(commit);
+    else commit();
   }, []);
+  const setActive = useCallback(
+    (page: ShellPage) => navigate(page),
+    [navigate],
+  );
+  const registerLeaveGuard = useCallback(
+    (page: ShellPage, guard: (proceed: () => void) => void) => {
+      leaveGuards.current.set(page, guard);
+      return () => {
+        if (leaveGuards.current.get(page) === guard)
+          leaveGuards.current.delete(page);
+      };
+    },
+    [],
+  );
   const locateSession = useCallback(
     (key: string) => {
-      setSessionLocation({ key, request: ++locationSequence.current });
-      setActive("sessions");
+      navigate("sessions", () =>
+        setSessionLocation({ key, request: ++locationSequence.current }),
+      );
     },
-    [setActive],
+    [navigate],
   );
   const consumeSessionLocation = useCallback((request: number) => {
     setSessionLocation((current) =>
@@ -112,10 +145,11 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
   }, []);
   const locateUsage = useCallback(
     (key: string) => {
-      setUsageLocation({ key, request: ++locationSequence.current });
-      setActive("usage");
+      navigate("usage", () =>
+        setUsageLocation({ key, request: ++locationSequence.current }),
+      );
     },
-    [setActive],
+    [navigate],
   );
   const consumeUsageLocation = useCallback((request: number) => {
     setUsageLocation((current) =>
@@ -124,10 +158,11 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
   }, []);
   const locateLibrary = useCallback(
     (kind: "mcp" | "skills") => {
-      setLibraryLocation({ kind, request: ++locationSequence.current });
-      setActive("library");
+      navigate("library", () =>
+        setLibraryLocation({ kind, request: ++locationSequence.current }),
+      );
     },
-    [setActive],
+    [navigate],
   );
   const consumeLibraryLocation = useCallback((request: number) => {
     setLibraryLocation((current) =>
@@ -166,6 +201,7 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
     () => ({
       active,
       setActive,
+      registerLeaveGuard,
       sessionLocation,
       locateSession,
       consumeSessionLocation,
@@ -185,6 +221,7 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
     [
       active,
       setActive,
+      registerLeaveGuard,
       sessionLocation,
       locateSession,
       consumeSessionLocation,

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useRef, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronDown, ExternalLink, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -43,9 +43,10 @@ export interface LibraryDiscoverProps {
   busy?: boolean;
   /** Backend-confirmed matches only. Absence does not mean a recipe is absent. */
   matches?: Readonly<Record<string, LibraryRecommendationMatch>>;
-  onChoose: (recipe: LibraryRecommendation) => void;
+  onChoose: (recipe: LibraryRecommendation, trigger: HTMLElement) => void;
   onOpenSource?: (url: string) => void;
   onLocateExisting?: (match: LibraryRecommendationLocation) => void;
+  searchInputRef?: RefObject<HTMLInputElement>;
 }
 export function LibraryDiscover({
   kind,
@@ -54,6 +55,7 @@ export function LibraryDiscover({
   onChoose,
   onOpenSource,
   onLocateExisting,
+  searchInputRef,
 }: LibraryDiscoverProps) {
   const { t } = useTranslation();
   const [query, setQuery] = useState("");
@@ -102,10 +104,10 @@ export function LibraryDiscover({
             className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-faint"
           />
           <Input
-            ref={searchRef}
+            ref={searchInputRef ?? searchRef}
             type="search"
-            aria-label={t("library.discover2.search")}
-            placeholder={t("library.discover2.searchPlaceholder")}
+            aria-label={t("library.interaction.searchDiscover")}
+            placeholder={t("library.interaction.searchDiscover")}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             className="pl-9"
@@ -132,7 +134,7 @@ export function LibraryDiscover({
         </span>
       </div>
       <TooltipProvider delayDuration={250}>
-        <div className="grid min-w-0 gap-3 md:grid-cols-2">
+        <div className="grid min-w-0 gap-3 min-[700px]:grid-cols-2 min-[1200px]:grid-cols-3">
           {visible.map((recipe) => {
             const name = recipe.titleKey ? t(recipe.titleKey) : recipe.name;
             const match = matches?.[recipe.id];
@@ -161,37 +163,9 @@ export function LibraryDiscover({
                     </p>
                   </div>
                 </div>
-                <p className="text-ctl leading-relaxed text-ink-2">
+                <p className="line-clamp-2 text-ctl leading-relaxed text-ink-2">
                   {t(recipe.descriptionKey)}
                 </p>
-                {recipe.preparationKey && (
-                  <p className="text-note leading-relaxed text-ink-muted">
-                    {t(recipe.preparationKey)}
-                  </p>
-                )}
-                <div className="flex flex-wrap gap-1.5 text-note">
-                  <span className="rounded-full bg-pill px-2 py-0.5 text-ink-muted">
-                    {t(
-                      exactMatch
-                        ? "library.discover2.collected"
-                        : nativeMatch
-                          ? "library.discover2.nativeOther"
-                          : match?.state === "none"
-                            ? "library.discover2.notCollected"
-                            : "library.discover2.configurable",
-                    )}
-                  </span>
-                  {recipe.authRequired && (
-                    <span className="rounded-full bg-pill px-2 py-0.5 text-ink-muted">
-                      {t("library.discover2.nativeAuth")}
-                    </span>
-                  )}
-                  {recipe.referenceExample && (
-                    <span className="rounded-full bg-pill px-2 py-0.5 text-ink-muted">
-                      {t("library.discover.reference")}
-                    </span>
-                  )}
-                </div>
                 <Collapsible
                   open={expanded === recipe.id}
                   onOpenChange={(open) => setExpanded(open ? recipe.id : null)}
@@ -230,13 +204,43 @@ export function LibraryDiscover({
                         type="button"
                         variant="secondary"
                         disabled={busy}
-                        onClick={() => onChoose(recipe)}
+                        onClick={(event) =>
+                          onChoose(recipe, event.currentTarget)
+                        }
                       >
                         {t("library.discover.choose", { name })}
                       </Button>
                     )}
                   </div>
                   <CollapsibleContent className="space-y-3 border-t border-line-2 pt-3 text-note leading-relaxed">
+                    <div className="flex flex-wrap gap-2 text-note">
+                      <span className="rounded-full bg-pill px-2 py-0.5 text-ink-muted">
+                        {t(
+                          exactMatch
+                            ? "library.discover2.collected"
+                            : nativeMatch
+                              ? "library.discover2.nativeOther"
+                              : match?.state === "none"
+                                ? "library.discover2.notCollected"
+                                : "library.discover2.configurable",
+                        )}
+                      </span>
+                      {recipe.authRequired && (
+                        <span className="rounded-full bg-pill px-2 py-0.5 text-ink-muted">
+                          {t("library.discover2.nativeAuth")}
+                        </span>
+                      )}
+                      {recipe.referenceExample && (
+                        <span className="rounded-full bg-pill px-2 py-0.5 text-ink-muted">
+                          {t("library.discover.reference")}
+                        </span>
+                      )}
+                    </div>
+                    {recipe.preparationKey && (
+                      <p className="text-ink-muted">
+                        {t(recipe.preparationKey)}
+                      </p>
+                    )}
                     <dl className="space-y-2">
                       {recipe.dependencyKeys.length > 0 && (
                         <div>

@@ -27,6 +27,7 @@ import {
 import type { AppId } from "@/lib/api/types";
 import { useDraftState, type DraftStore } from "./useDraftState";
 import { libraryError } from "./libraryText";
+import type { LibraryEditorController } from "./useLibraryInline";
 
 export function InstructionEditor({
   store,
@@ -35,6 +36,7 @@ export function InstructionEditor({
   busy,
   onSave,
   onDiscard,
+  onController,
 }: {
   store: DraftStore;
   initial?: InstructionSet;
@@ -42,6 +44,7 @@ export function InstructionEditor({
   busy: boolean;
   onSave: (set: InstructionSet, imported: boolean) => Promise<unknown>;
   onDiscard?: () => void;
+  onController?: (controller: LibraryEditorController) => void;
 }) {
   const { t } = useTranslation();
   const [draft, setDraft] = useDraftState<InstructionSet>(
@@ -94,20 +97,31 @@ export function InstructionEditor({
   const dirty =
     draft.name !== baseline.name || draft.content !== baseline.content;
   async function save() {
-    if (disabled || submitting.current || !draft.name.trim()) return;
+    if (disabled || submitting.current || !draft.name.trim()) return false;
     submitting.current = true;
     setSaving(true);
     setError("");
     try {
       const result = await onSave(draft, !!importMode);
       if (result !== false) setBaseline({ ...draft });
+      return result !== false;
     } catch (failure) {
       setError(libraryError(failure, t));
+      return false;
     } finally {
       submitting.current = false;
       setSaving(false);
     }
   }
+  const discard = () => {
+    editGeneration.current++;
+    setDraft({ ...baseline });
+    setError("");
+    onDiscard?.();
+  };
+  useEffect(() => {
+    onController?.({ dirty, saving, save, discard });
+  });
   return (
     <form
       className="space-y-3"
@@ -306,12 +320,7 @@ export function InstructionEditor({
           type="button"
           variant="ghost"
           disabled={disabled || !dirty}
-          onClick={() => {
-            editGeneration.current++;
-            setDraft({ ...baseline });
-            setError("");
-            onDiscard?.();
-          }}
+          onClick={discard}
         >
           {t("library.instructionExperience.discard")}
         </Button>
@@ -329,7 +338,9 @@ export function McpEditor({
   initial,
   busy,
   onSave,
+  onController,
 }: {
+  onController?: (controller: LibraryEditorController) => void;
   store: DraftStore;
   initial?: McpDefinition;
   busy: boolean;
@@ -370,6 +381,48 @@ export function McpEditor({
     '["env", "VARIABLE_NAME"]',
   );
   const [error, setError] = useDraftState(store, "mcpError", "");
+  const baseline = useRef({ name, fields });
+  const [inheritedDirty, setInheritedDirty] = useDraftState(
+    store,
+    "mcpInheritedDirty",
+    false,
+  );
+  const submitting = useRef(false);
+  async function save() {
+    if (busy || submitting.current || !name.trim()) return false;
+    submitting.current = true;
+    setError("");
+    try {
+      const edits: FieldEdit[] = fields.map((field) => ({
+        path: field.path,
+        ...(field.fieldRef ? { fieldRef: field.fieldRef } : {}),
+        action: field.action,
+        ...(field.action === "set" ? { value: JSON.parse(field.input) } : {}),
+      }));
+      return (await onSave(id, name, initial?.revision, edits)) !== false;
+    } catch {
+      setError(t("library.invalidFieldValue"));
+      return false;
+    } finally {
+      submitting.current = false;
+    }
+  }
+  useEffect(() =>
+    onController?.({
+      dirty:
+        inheritedDirty ||
+        name !== baseline.current.name ||
+        JSON.stringify(fields) !== JSON.stringify(baseline.current.fields),
+      saving: busy,
+      save,
+      discard: () => {
+        setInheritedDirty(false);
+        setName(baseline.current.name);
+        setFields(baseline.current.fields);
+        setError("");
+      },
+    }),
+  );
   const update = (key: string, edit: Partial<EditableField>) =>
     setFields((previous) =>
       previous.map((field) =>
@@ -381,20 +434,7 @@ export function McpEditor({
       className="space-y-3"
       onSubmit={(event) => {
         event.preventDefault();
-        setError("");
-        try {
-          const edits: FieldEdit[] = fields.map((field) => ({
-            path: field.path,
-            ...(field.fieldRef ? { fieldRef: field.fieldRef } : {}),
-            action: field.action,
-            ...(field.action === "set"
-              ? { value: JSON.parse(field.input) }
-              : {}),
-          }));
-          void onSave(id, name, initial?.revision, edits);
-        } catch {
-          setError(t("library.invalidFieldValue"));
-        }
+        void save();
       }}
     >
       <p className="text-note text-ink-muted">
@@ -506,10 +546,12 @@ export function SkillDetails({
   store,
   skill,
   epoch,
+  inline = false,
 }: {
   store: DraftStore;
   skill: SkillDefinition;
   epoch: number;
+  inline?: boolean;
 }) {
   const { t, i18n } = useTranslation();
   const [path, setPath] = useDraftState(store, "skillPath", "SKILL.md");
@@ -575,29 +617,40 @@ export function SkillDetails({
   }, [query.data, setFiles]);
   return (
     <div className="space-y-3 text-ctl">
-      <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 text-note">
-        <dt className="text-ink-muted">{t("library.skillSource")}</dt>
-        <dd className="break-words">
-          {t(`library.sourceKind.${skill.sourceKind ?? "unknown"}`, {
-            defaultValue: t("library.unknown"),
-          })}
-          {skill.sourceKind === "repository" && skill.repository
-            ? ` · ${skill.repository}`
-            : ""}
-        </dd>
-        <dt className="text-ink-muted">{t("library.trackingRef")}</dt>
-        <dd className="break-all">{skill.trackingRef ?? "—"}</dd>
-        <dt className="text-ink-muted">{t("library.fixedCommit")}</dt>
-        <dd className="break-all">
-          {skill.commitSha ?? t("library.notRecorded")}
-        </dd>
-        <dt className="text-ink-muted">{t("library.artifactHash")}</dt>
-        <dd className="break-all">{skill.artifactHash ?? "—"}</dd>
-        <dt className="text-ink-muted">{t("library.importedAt")}</dt>
-        <dd>{timestamp(skill.installedAtMs)}</dd>
-        <dt className="text-ink-muted">{t("library.sourceUpdatedAt")}</dt>
-        <dd>{timestamp(skill.updatedAtMs)}</dd>
-      </dl>
+      {inline && skill.description && (
+        <p className="text-ctl text-ink-2">{skill.description}</p>
+      )}
+      <details
+        open={inline ? undefined : true}
+        className="text-note text-ink-muted"
+      >
+        <summary className="cursor-pointer rounded outline-none focus-visible:ring-2 focus-visible:ring-brand">
+          {t("library.instructionExperience.technicalDetails")}
+        </summary>
+        <dl className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 text-note">
+          <dt className="text-ink-muted">{t("library.skillSource")}</dt>
+          <dd className="break-words">
+            {t(`library.sourceKind.${skill.sourceKind ?? "unknown"}`, {
+              defaultValue: t("library.unknown"),
+            })}
+            {skill.sourceKind === "repository" && skill.repository
+              ? ` · ${skill.repository}`
+              : ""}
+          </dd>
+          <dt className="text-ink-muted">{t("library.trackingRef")}</dt>
+          <dd className="break-all">{skill.trackingRef ?? "—"}</dd>
+          <dt className="text-ink-muted">{t("library.fixedCommit")}</dt>
+          <dd className="break-all">
+            {skill.commitSha ?? t("library.notRecorded")}
+          </dd>
+          <dt className="text-ink-muted">{t("library.artifactHash")}</dt>
+          <dd className="break-all">{skill.artifactHash ?? "—"}</dd>
+          <dt className="text-ink-muted">{t("library.importedAt")}</dt>
+          <dd>{timestamp(skill.installedAtMs)}</dd>
+          <dt className="text-ink-muted">{t("library.sourceUpdatedAt")}</dt>
+          <dd>{timestamp(skill.updatedAtMs)}</dd>
+        </dl>
+      </details>
       {sourceUrl && (
         <Button
           variant="secondary"
@@ -643,11 +696,16 @@ export function SkillDetails({
             }))}
         />
       )}
-      {query.data && (
-        <pre className="max-h-[45vh] overflow-auto whitespace-pre-wrap break-words rounded-card bg-pill p-3 text-note">
-          {query.data.content}
-        </pre>
-      )}
+      {query.data &&
+        (inline && /\.md$/i.test(path) ? (
+          <div className="max-h-[55vh] overflow-auto rounded-ctl bg-card px-4 py-2">
+            <SessionMarkdown content={query.data.content} />
+          </div>
+        ) : (
+          <pre className="max-h-[45vh] overflow-auto whitespace-pre-wrap break-words rounded-card bg-pill p-3 text-note">
+            {query.data.content}
+          </pre>
+        ))}
     </div>
   );
 }
@@ -657,7 +715,9 @@ export function SkillImporter({
   store,
   busy,
   onImport,
+  onController,
 }: {
+  onController?: (controller: LibraryEditorController) => void;
   store: DraftStore;
   busy: boolean;
   onImport: (action: () => Promise<unknown>) => Promise<unknown>;
@@ -699,6 +759,37 @@ export function SkillImporter({
   );
   const [error, setError] = useDraftState(store, "skillImportError", "");
   const running = useRef(false);
+  useEffect(() =>
+    onController?.({
+      dirty: !!(source || name || directory || repo || branch !== "main"),
+      saving: busy || loading,
+      save: async () => {
+        if (busy || loading) return false;
+        if (mode === "directory" && source && name.trim() && directory.trim())
+          return (
+            (await onImport(() =>
+              libraryApi.importSkillDirectory(source, directory, name),
+            )) !== false
+          );
+        if (mode === "zip" && source)
+          return (
+            (await onImport(() =>
+              skillsApi.installFromZip(source, "claude"),
+            )) !== false
+          );
+        setError(t("library.interaction.completeImport"));
+        return false;
+      },
+      discard: () => {
+        setSource("");
+        setName("");
+        setDirectory("");
+        setRepo("");
+        setBranch("main");
+        setError("");
+      },
+    }),
+  );
   async function load(action: () => Promise<unknown>) {
     if (running.current || busy || loading) return;
     running.current = true;

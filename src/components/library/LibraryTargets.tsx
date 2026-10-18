@@ -67,6 +67,7 @@ export function LibraryTargets({
                 <button
                   type="button"
                   aria-label={label}
+                  data-state={state}
                   aria-pressed={shared ? undefined : !!chosen}
                   aria-disabled={busy || blocked}
                   onClick={() => {
@@ -77,6 +78,7 @@ export function LibraryTargets({
                     chosen && "border-brand/50 bg-brand/10",
                     shared && "border-dashed",
                     changed && "ring-1 ring-brand",
+                    state === "observed" && "border-line bg-pill",
                   )}
                 >
                   <span aria-hidden>
@@ -87,10 +89,18 @@ export function LibraryTargets({
                         toolId={target.toolId}
                         size={20}
                         variant="plain"
-                        dimmed={!chosen && !shared}
+                        dimmed={!chosen && !shared && state !== "observed"}
                       />
                     )}
                   </span>
+                  {["applied", "pending"].includes(state) && (
+                    <span
+                      aria-hidden
+                      className="absolute -bottom-1 -right-1 rounded-full bg-card px-0.5 text-micro text-brand"
+                    >
+                      {state === "applied" ? "✓" : "±"}
+                    </span>
+                  )}
                   {state === "attention" && (
                     <span
                       aria-hidden
@@ -105,6 +115,14 @@ export function LibraryTargets({
                       className="absolute -bottom-1 -right-1 rounded-full bg-card px-0.5 text-micro text-ink-muted"
                     >
                       ↗
+                    </span>
+                  )}
+                  {state === "observed" && (
+                    <span
+                      aria-hidden
+                      className="absolute -bottom-1 -right-1 rounded-full bg-card px-0.5 text-micro text-ink-muted"
+                    >
+                      ◇
                     </span>
                   )}
                 </button>

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { Download, MoreHorizontal, Upload } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
@@ -27,8 +27,14 @@ import { libraryError } from "./libraryText";
 
 export function ResourcePackDialog({
   onChanged,
+  menuRef,
+  beforeAction,
+  additionalActions = [],
 }: {
   onChanged: () => Promise<void>;
+  menuRef?: RefObject<HTMLButtonElement>;
+  beforeAction?: (proceed: () => void) => void;
+  additionalActions?: { label: string; onSelect: () => void }[];
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -43,8 +49,9 @@ export function ResourcePackDialog({
   const [result, setResult] = useState<ResourcePackResult | null>(null);
   const [conflicts, setConflicts] = useState<"skip" | "copy">("skip");
   const running = useRef(false);
-  const trigger = useRef<HTMLButtonElement>(null);
+  const trigger = useRef<HTMLButtonElement | null>(null);
   const pendingAction = useRef<"import" | "export" | null>(null);
+  const extraAction = useRef<() => void>();
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -114,7 +121,12 @@ export function ResourcePackDialog({
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
-            ref={trigger}
+            ref={(element) => {
+              trigger.current = element;
+              if (menuRef)
+                (menuRef as { current: HTMLButtonElement | null }).current =
+                  element;
+            }}
             variant="ghost"
             size="icon"
             disabled={busy || open}
@@ -128,8 +140,15 @@ export function ResourcePackDialog({
           onCloseAutoFocus={(event) => {
             event.preventDefault();
             const action = pendingAction.current;
+            const extra = extraAction.current;
+            extraAction.current = undefined;
             pendingAction.current = null;
-            if (action) queueMicrotask(() => start(action));
+            if (extra) queueMicrotask(extra);
+            else if (action)
+              queueMicrotask(() => {
+                if (beforeAction) beforeAction(() => start(action));
+                else start(action);
+              });
             else trigger.current?.focus();
           }}
         >
@@ -149,6 +168,16 @@ export function ResourcePackDialog({
             <Download aria-hidden className="h-4 w-4" />
             {t("library.pack.exportAction")}
           </DropdownMenuItem>
+          {additionalActions.map((action) => (
+            <DropdownMenuItem
+              key={action.label}
+              onSelect={() => {
+                extraAction.current = action.onSelect;
+              }}
+            >
+              {action.label}
+            </DropdownMenuItem>
+          ))}
         </DropdownMenuContent>
       </DropdownMenu>
       <Dialog

@@ -1,6 +1,12 @@
 import { useRef } from "react";
 import { useTranslation } from "react-i18next";
-import { FileText, MoreHorizontal, Plug, Sparkles } from "lucide-react";
+import {
+  ChevronDown,
+  FileText,
+  MoreHorizontal,
+  Plug,
+  Sparkles,
+} from "lucide-react";
 import type { LibraryKind, ResourceTarget } from "@/lib/api/library";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -30,6 +36,8 @@ export function LibraryResourceRow({
   recipeId,
   onToggle,
   onAction,
+  expanded = false,
+  onExpand,
 }: {
   kind: LibraryKind;
   row: Resource;
@@ -44,6 +52,8 @@ export function LibraryResourceRow({
   observedTools?: string[];
   located?: boolean;
   recipeId?: string;
+  expanded?: boolean;
+  onExpand?: (trigger: HTMLElement) => void;
   onToggle: (target: ResourceTarget) => void;
   onAction: (
     action:
@@ -77,7 +87,7 @@ export function LibraryResourceRow({
       : "description" in row
         ? row.description
         : "transport" in row
-          ? `${row.transport === "stdio" ? t("library.workbench.localConnection") : t("library.workbench.remoteConnection")}${row.credentialState === "needsMigration" ? ` · ${t("library.mcpNeedsValues")}` : ""}`
+          ? `${row.displaySummary || row.serviceHost || (row.transport === "stdio" ? t("library.workbench.localConnection") : t("library.workbench.remoteConnection"))}${row.credentialState === "needsMigration" ? ` · ${t("library.mcpNeedsValues")}` : ""}`
           : "";
   const checkTime =
     check && Number.isFinite(check.checkedAtMs)
@@ -111,6 +121,7 @@ export function LibraryResourceRow({
       id={`library-resource-${row.id}`}
       data-testid={`library-resource-${row.id}`}
       data-located={located}
+      style={{ scrollMarginTop: "var(--library-scroll-offset, 96px)" }}
       tabIndex={-1}
       className={`scroll-mt-24 flex-wrap gap-x-3 gap-y-2 py-3 outline-none ${located ? "bg-brand/5 ring-1 ring-inset ring-brand/40" : ""}`}
     >
@@ -128,7 +139,7 @@ export function LibraryResourceRow({
       >
         {kind !== "instructions" ? (
           <LibraryResourceIcon
-            recipeId={recipeId}
+            recipeId={"iconId" in row ? row.iconId || recipeId : recipeId}
             kind={kind}
             className="h-9 w-9"
           />
@@ -141,19 +152,40 @@ export function LibraryResourceRow({
           type="button"
           className="block max-w-full truncate text-left text-ui font-medium outline-none hover:text-brand focus-visible:ring-2 focus-visible:ring-brand"
           title={row.name}
-          aria-label={t(
-            kind === "skills" ? "library.detailsNamed" : "library.editNamed",
-            { name: row.name },
-          )}
+          aria-expanded={onExpand ? expanded : undefined}
+          aria-controls={onExpand ? `library-inline-${row.id}` : undefined}
+          aria-label={
+            onExpand
+              ? t(
+                  expanded
+                    ? "library.interaction.collapseNamed"
+                    : "library.interaction.expandNamed",
+                  { name: row.name },
+                )
+              : t(
+                  kind === "skills"
+                    ? "library.detailsNamed"
+                    : "library.editNamed",
+                  { name: row.name },
+                )
+          }
           onClick={(event) =>
-            onAction(
-              kind === "skills" ? "details" : "edit",
-              event.currentTarget,
-            )
+            onExpand
+              ? onExpand(event.currentTarget)
+              : onAction(
+                  kind === "skills" ? "details" : "edit",
+                  event.currentTarget,
+                )
           }
           disabled={busy || (kind !== "skills" && !writable)}
         >
           {row.name}
+          {onExpand && (
+            <ChevronDown
+              aria-hidden
+              className={`ml-1 inline h-3 w-3 transition-transform ${expanded ? "rotate-180" : ""}`}
+            />
+          )}
         </button>
         <p className="truncate text-note text-ink-muted" title={summaryText}>
           {summaryText}
@@ -170,14 +202,6 @@ export function LibraryResourceRow({
         />
       </div>
       <div className="flex shrink-0 items-center gap-1">
-        <Button
-          variant="ghost"
-          disabled={busy || !writable}
-          aria-label={t("library.assignNamed", { name: row.name })}
-          onClick={(event) => onAction("targets", event.currentTarget)}
-        >
-          {t("library.assign")}
-        </Button>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
@@ -204,10 +228,10 @@ export function LibraryResourceRow({
             }}
           >
             {(kind === "skills"
-              ? ["details", "update", "export", "delete"]
+              ? ["details", "targets", "update", "export", "delete"]
               : kind === "mcp"
-                ? ["edit", "copy", "check", "export", "delete"]
-                : ["edit", "copy", "export", "delete"]
+                ? ["edit", "targets", "copy", "check", "export", "delete"]
+                : ["edit", "targets", "copy", "export", "delete"]
             ).map((action) => (
               <DropdownMenuItem
                 key={action}
@@ -218,15 +242,17 @@ export function LibraryResourceRow({
                       ? "library.updateNamed"
                       : action === "delete"
                         ? "library.deleteNamed"
-                        : action === "copy" && kind === "mcp"
-                          ? "library.copyMcpNamed"
-                          : action === "edit"
-                            ? "library.editNamed"
-                            : action === "details"
-                              ? "library.detailsNamed"
-                              : action === "export"
-                                ? "library.workbench.exportResource"
-                                : `library.${action}`,
+                        : action === "targets"
+                          ? "library.assignNamed"
+                          : action === "copy" && kind === "mcp"
+                            ? "library.copyMcpNamed"
+                            : action === "edit"
+                              ? "library.editNamed"
+                              : action === "details"
+                                ? "library.detailsNamed"
+                                : action === "export"
+                                  ? "library.workbench.exportResource"
+                                  : `library.${action}`,
                   { name: row.name },
                 )}
                 disabled={
@@ -253,9 +279,11 @@ export function LibraryResourceRow({
                         ? "library.copyTemplate"
                         : action === "delete"
                           ? "library.remove"
-                          : action === "export"
-                            ? "library.workbench.exportResource"
-                            : `library.${action}`,
+                          : action === "targets"
+                            ? "library.assign"
+                            : action === "export"
+                              ? "library.workbench.exportResource"
+                              : `library.${action}`,
                 )}
               </DropdownMenuItem>
             ))}

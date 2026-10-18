@@ -26,6 +26,7 @@ import {
   type LibraryMcpPair,
 } from "./libraryRecommendations";
 import { toolLabel } from "./libraryText";
+import type { LibraryEditorController } from "./useLibraryInline";
 import {
   createMcpIdentifier,
   mcpDraftsFromJson,
@@ -47,7 +48,7 @@ export interface LibraryMcpFormProps {
     draft: LibraryMcpDraft,
     intent: "draft" | "apply",
   ) => void | Promise<unknown>;
-  onAdvanced?: (draft: LibraryMcpDraft) => void;
+  onAdvanced?: (draft: LibraryMcpDraft, dirty: boolean) => void;
   initial?: McpDefinition;
   identifier?: string;
   existingIdentifiers?: string[];
@@ -66,6 +67,7 @@ export interface LibraryMcpFormProps {
   onDiscover?: () => void;
   saveOnly?: boolean;
   initialFocusPath?: string[];
+  onController?: (controller: LibraryEditorController) => void;
 }
 function PairFields({
   kind,
@@ -266,6 +268,7 @@ export function LibraryMcpForm({
   onDiscover,
   saveOnly = false,
   initialFocusPath,
+  onController,
 }: LibraryMcpFormProps) {
   const { t } = useTranslation();
   const [error, setError] = useState("");
@@ -295,6 +298,7 @@ export function LibraryMcpForm({
   const previousInitial = useRef(initial);
   const fieldsId = useId();
   const form = useRef<HTMLFormElement>(null);
+  const baseline = useRef({ value, identifier });
   const focusKey = JSON.stringify(initialFocusPath);
   useLayoutEffect(() => {
     if (!initialFocusPath) return;
@@ -371,15 +375,17 @@ export function LibraryMcpForm({
       }),
     });
   const run = async (callback: () => void | Promise<unknown>) => {
-    if (disabled || submitting.current) return;
+    if (disabled || submitting.current) return false;
     submitting.current = true;
     setWorking(true);
     setError("");
     const current = generation.current;
     try {
-      await callback();
+      const saved = await callback();
+      return saved !== false;
     } catch {
       if (current === generation.current) setError("saveFailed");
+      return false;
     } finally {
       if (current === generation.current) {
         submitting.current = false;
@@ -388,7 +394,7 @@ export function LibraryMcpForm({
     }
   };
   const submit = async (intent: "draft" | "apply") => {
-    if (disabled || submitting.current) return;
+    if (disabled || submitting.current) return false;
     submittedIdentifier.current = true;
     if (!initial) onIdentifierChange?.(configIdentifier);
     let edits: FieldEdit[] = [];
@@ -464,14 +470,37 @@ export function LibraryMcpForm({
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "invalidJson");
-      return;
+      return false;
     }
-    await run(() =>
+    return run(() =>
       initial && onSaveEdits
         ? onSaveEdits(edits, intent)
         : onSave({ ...value, identifier: configIdentifier }, intent),
     );
   };
+  const dirty =
+    JSON.stringify(value) !== JSON.stringify(baseline.current.value) ||
+    identifier !== baseline.current.identifier ||
+    changes.some((edit) => edit.action !== "keep") ||
+    !!json.trim() ||
+    !!commandInput.trim();
+  useEffect(() => {
+    onController?.({
+      dirty,
+      saving: working,
+      save: async () => (await submit("draft")) === true,
+      discard: () => {
+        onChange(baseline.current.value);
+        onIdentifierChange?.(baseline.current.identifier ?? "");
+        setChanges([]);
+        setJson("");
+        setCommandInput("");
+        setCandidates([]);
+        setSelectedJson([]);
+        setError("");
+      },
+    });
+  });
   const setScalar = (path: string, text: string) => {
     update({ [path]: text });
     if (initial) setField({ path: [path], action: "set", value: text });
@@ -1321,8 +1350,13 @@ export function LibraryMcpForm({
             <Button
               type="button"
               variant="ghost"
-              disabled={disabled}
-              onClick={() => onAdvanced(value)}
+              disabled={disabled || !!json.trim() || !!commandInput.trim()}
+              title={
+                json.trim() || commandInput.trim()
+                  ? t("library.interaction.completeMcpInput")
+                  : undefined
+              }
+              onClick={() => onAdvanced(value, dirty)}
             >
               {t("library.addFlow.advanced")}
             </Button>

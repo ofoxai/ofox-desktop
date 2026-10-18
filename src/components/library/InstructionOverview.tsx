@@ -67,10 +67,16 @@ export function InstructionOverview({
                   </span>
                 </div>
                 <p className="break-words text-note text-ink-muted">
-                  {t("library.instructionSelection", {
-                    desired: name(target.desiredResourceId),
-                    readable,
-                  })}
+                  {target.desiredResourceId &&
+                  target.desiredResourceId === target.readableResourceId &&
+                  !unreadable
+                    ? t("library.interaction.currentInstruction", {
+                        name: readable,
+                      })
+                    : t("library.instructionSelection", {
+                        desired: name(target.desiredResourceId),
+                        readable,
+                      })}
                 </p>
                 {target.status === "shared" && (
                   <p className="text-note text-ink-muted">

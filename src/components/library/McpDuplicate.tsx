@@ -1,3 +1,5 @@
+import { useEffect, useRef } from "react";
+import type { LibraryEditorController } from "./useLibraryInline";
 import { useTranslation } from "react-i18next";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -8,7 +10,9 @@ export function McpDuplicate({
   initial,
   busy,
   onSave,
+  onController,
 }: {
+  onController?: (controller: LibraryEditorController) => void;
   store: DraftStore;
   initial: McpDefinition;
   busy: boolean;
@@ -20,6 +24,23 @@ export function McpDuplicate({
   );
   const [name, setName] = useDraftState(store, "copyName", () =>
     t("library.copyName", { name: initial.name }),
+  );
+  const baseline = useRef({ id, name });
+  async function save() {
+    if (busy || !name.trim() || !/^[A-Za-z0-9_.-]{1,256}$/.test(id))
+      return false;
+    return (await onSave(id, name)) !== false;
+  }
+  useEffect(() =>
+    onController?.({
+      dirty: id !== baseline.current.id || name !== baseline.current.name,
+      saving: busy,
+      save,
+      discard: () => {
+        setId(baseline.current.id);
+        setName(baseline.current.name);
+      },
+    }),
   );
   return (
     <div className="space-y-3">
@@ -45,7 +66,7 @@ export function McpDuplicate({
       </label>
       <Button
         disabled={busy || !/^[A-Za-z0-9_.-]{1,256}$/.test(id) || !name.trim()}
-        onClick={() => void onSave(id, name)}
+        onClick={() => void save()}
       >
         {t("library.saveCopy")}
       </Button>

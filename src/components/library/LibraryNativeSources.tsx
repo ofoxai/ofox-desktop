@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { ListCard, ListFold, ListRow } from "@/components/ui/list";
 import { ToolBadge } from "@/components/tools/ToolBadge";
 import { inventoryEntryDescription, toolLabel } from "./libraryText";
+import { LibraryResourceIcon } from "./LibraryResourceIcon";
 
 type Entry = LibraryInventory["entries"][number];
 export function nativeEntryMatches(
@@ -16,6 +17,7 @@ export function nativeEntryMatches(
   const text = [
     entry.name,
     entry.summary,
+    entry.displaySummary,
     entry.serviceHost,
     ...entry.sources.map((source) =>
       toolLabel(source.toolId, (() => "") as never),
@@ -77,16 +79,29 @@ export function LibraryNativeSources({
   }
   function row(entry: Entry) {
     return (
-      <ListRow key={entry.entryId} className="flex-wrap gap-2 py-3">
+      <ListRow key={entry.entryId} className="flex-wrap gap-3 py-3">
+        <LibraryResourceIcon
+          kind={entry.kind}
+          recipeId={entry.iconId ?? undefined}
+          className="h-9 w-9"
+        />
         <div className="min-w-0 flex-1 basis-48">
           <p className="truncate text-ui font-medium" title={entry.name}>
             {entry.name}
           </p>
           <p
             className="truncate text-note text-ink-muted"
-            title={inventoryEntryDescription(inventory!, entry, t)}
+            title={
+              entry.displaySummary ||
+              entry.summary ||
+              entry.serviceHost ||
+              inventoryEntryDescription(inventory!, entry, t)
+            }
           >
-            {inventoryEntryDescription(inventory!, entry, t)}
+            {entry.displaySummary ||
+              entry.summary ||
+              entry.serviceHost ||
+              inventoryEntryDescription(inventory!, entry, t)}
           </p>
         </div>
         <div
@@ -144,19 +159,19 @@ export function LibraryNativeSources({
               })}
               onClick={() => onLocate(entry, id)}
             >
-              {t("library.workbench2.locate")}
+              {t("library.interaction.viewResource")}
             </Button>
           ))
         ) : (
           <Button
             variant="secondary"
             disabled={busy}
-            aria-label={t("library.workbench.importNamed", {
+            aria-label={t("library.interaction.collectNamed", {
               name: entry.name,
             })}
             onClick={(event) => onImport(entry, event.currentTarget)}
           >
-            {t("library.importDraft")}
+            {t("library.interaction.collect")}
           </Button>
         )}
       </ListRow>

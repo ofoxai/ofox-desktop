@@ -167,19 +167,19 @@ it("scans in the background once without blocking the library or importing nativ
   expect(libraryApi.inventory).toHaveBeenCalledTimes(1);
   expect(screen.getByRole("button", { name: "添加 MCP" })).toBeEnabled();
   await act(async () => finish(inventory));
-  const native = await screen.findByRole("region", { name: "本机配置中" });
+  const native = await screen.findByRole("region", { name: "本机已有" });
   expect(within(native).getByText("Only native")).toBeVisible();
   expect(imported).not.toHaveBeenCalled();
 });
 it("searches native results and keeps matched sources available for navigation", async () => {
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机配置中" });
+  const native = await screen.findByRole("region", { name: "本机已有" });
   await userEvent.type(
-    screen.getByRole("textbox", { name: "搜索资源" }),
+    screen.getByRole("textbox", { name: "搜索已有资源" }),
     "Only native",
   );
   expect(within(native).getByText("Only native")).toBeVisible();
-  await userEvent.clear(screen.getByRole("textbox", { name: "搜索资源" }));
+  await userEvent.clear(screen.getByRole("textbox", { name: "搜索已有资源" }));
   await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
   await userEvent.click(
     within(native).getByRole("button", { name: /定位到资源库/ }),
@@ -264,7 +264,7 @@ it("keeps the last native locate intent when same-ticket responses finish out of
     () => new Promise((resolve) => finishes.push(resolve)),
   );
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机配置中" });
+  const native = await screen.findByRole("region", { name: "本机已有" });
   await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
   const locations = within(native).getAllByRole("button", {
     name: /定位到资源库/,
@@ -326,7 +326,7 @@ it("cancels a pending native locate intent when the retained page becomes inacti
     </QueryClientProvider>
   );
   const view = render(section(true));
-  const native = await screen.findByRole("region", { name: "本机配置中" });
+  const native = await screen.findByRole("region", { name: "本机已有" });
   await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
   fireEvent.click(within(native).getByRole("button", { name: /定位到资源库/ }));
   view.rerender(section(false));
@@ -370,7 +370,7 @@ it("focuses and centers a freshly expanded matched variant even when a frame pre
       }),
   );
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机配置中" });
+  const native = await screen.findByRole("region", { name: "本机已有" });
   await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
   expect(screen.queryByTestId("library-resource-a")).toBeNull();
   fireEvent.click(within(native).getByRole("button", { name: /定位到资源库/ }));
@@ -426,7 +426,7 @@ it("clears a failed-source locate warning after a successful scan and revalidate
       fields: [],
     });
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机配置中" });
+  const native = await screen.findByRole("region", { name: "本机已有" });
   await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
   await userEvent.click(
     within(native).getByRole("button", { name: /定位到资源库/ }),
@@ -460,7 +460,7 @@ it("keeps an unrelated export failure visible after a successful source locate",
     new Error("library.packWriteFailed"),
   );
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机配置中" });
+  const native = await screen.findByRole("region", { name: "本机已有" });
   await userEvent.click(screen.getByRole("button", { name: "选择" }));
   await userEvent.click(screen.getByRole("checkbox", { name: "选择当前结果" }));
   await userEvent.click(screen.getByRole("button", { name: "导出选中项" }));
@@ -494,7 +494,7 @@ it("keeps an unconfirmed source warning until that source is successfully rescan
     new Error("library.inventoryChanged"),
   );
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机配置中" });
+  const native = await screen.findByRole("region", { name: "本机已有" });
   await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
   await userEvent.click(
     within(native).getByRole("button", { name: /定位到资源库/ }),
@@ -516,7 +516,7 @@ it("hands focus from a source details dialog to the located row after its close 
   const scroll = vi.fn();
   Element.prototype.scrollIntoView = scroll;
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机配置中" });
+  const native = await screen.findByRole("region", { name: "本机已有" });
   await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
   await userEvent.click(
     within(native).getByRole("button", {
@@ -550,7 +550,7 @@ it("does not let a late locate steal focus from a newer add dialog", async () =>
       }),
   );
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机配置中" });
+  const native = await screen.findByRole("region", { name: "本机已有" });
   await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
   fireEvent.click(within(native).getByRole("button", { name: /定位到资源库/ }));
   await userEvent.click(screen.getByRole("button", { name: "添加 MCP" }));
@@ -601,7 +601,7 @@ it("does not replay an unconsumed locate focus when the retained page is reactiv
     </QueryClientProvider>
   );
   const view = render(section(true));
-  const native = await screen.findByRole("region", { name: "本机配置中" });
+  const native = await screen.findByRole("region", { name: "本机已有" });
   await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
   fireEvent.click(within(native).getByRole("button", { name: /定位到资源库/ }));
   await act(async () => {
@@ -721,7 +721,7 @@ it.each([
     new Error("library.inventoryChanged"),
   );
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机配置中" });
+  const native = await screen.findByRole("region", { name: "本机已有" });
   await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
   await userEvent.click(
     within(native).getByRole("button", { name: /定位到资源库/ }),
@@ -755,7 +755,7 @@ it.each(["inline", "legacy"] as const)(
       new Error("library.inventoryChanged"),
     );
     renderSection();
-    const native = await screen.findByRole("region", { name: "本机配置中" });
+    const native = await screen.findByRole("region", { name: "本机已有" });
     await userEvent.click(
       within(native).getByRole("button", { name: /已收录/ }),
     );
@@ -792,7 +792,7 @@ it("keeps an old-backend warning without location evidence until a fresh locate 
     new Error("library.inventoryChanged"),
   );
   renderSection();
-  const native = await screen.findByRole("region", { name: "本机配置中" });
+  const native = await screen.findByRole("region", { name: "本机已有" });
   await userEvent.click(within(native).getByRole("button", { name: /已收录/ }));
   await userEvent.click(
     within(native).getByRole("button", { name: /定位到资源库/ }),

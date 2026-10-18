@@ -1,3 +1,6 @@
+import zhLocale from "@/i18n/locales/zh.json";
+import enLocale from "@/i18n/locales/en.json";
+import jaLocale from "@/i18n/locales/ja.json";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { act } from "react";
@@ -10,6 +13,12 @@ import { LIBRARY_DISCOVER_COPY } from "@/components/library/libraryDiscoverCopy"
 import { LIBRARY_ADD_COPY } from "@/components/library/libraryAddCopy";
 
 beforeEach(() => {
+  for (const [lang, copy] of Object.entries({
+    zh: zhLocale,
+    en: enLocale,
+    ja: jaLocale,
+  }))
+    i18n.addResourceBundle(lang, "translation", copy, true, true);
   Element.prototype.scrollIntoView = vi.fn();
   i18n.addResourceBundle(
     "zh",
@@ -68,9 +77,12 @@ describe("curated resource workbench", () => {
   it("searches within the active resource kind and resets an empty search without choosing anything", async () => {
     const choose = vi.fn();
     render(<LibraryDiscover kind="mcp" onChoose={choose} />);
-    fireEvent.change(screen.getByRole("searchbox", { name: "搜索精选资源" }), {
-      target: { value: "microsoft" },
-    });
+    fireEvent.change(
+      screen.getByRole("searchbox", { name: "搜索可添加资源" }),
+      {
+        target: { value: "microsoft" },
+      },
+    );
     expect(
       screen.getByRole("article", { name: "Microsoft Learn" }),
     ).toBeVisible();
@@ -80,9 +92,12 @@ describe("curated resource workbench", () => {
     expect(
       screen.queryByRole("article", { name: "frontend-design" }),
     ).not.toBeInTheDocument();
-    fireEvent.change(screen.getByRole("searchbox", { name: "搜索精选资源" }), {
-      target: { value: "" },
-    });
+    fireEvent.change(
+      screen.getByRole("searchbox", { name: "搜索可添加资源" }),
+      {
+        target: { value: "" },
+      },
+    );
     expect(screen.getAllByRole("article")).toHaveLength(8);
     expect(choose).not.toHaveBeenCalled();
   });
@@ -143,6 +158,9 @@ describe("curated resource workbench", () => {
       />,
     );
     const card = screen.getByRole("article", { name: "Context7" });
+    await userEvent.click(
+      within(card).getByRole("button", { name: "配置详情" }),
+    );
     expect(within(card).getByText("本机有其他配置")).toBeVisible();
     await userEvent.click(
       within(card).getByRole("button", { name: "查看本机配置" }),
@@ -153,6 +171,7 @@ describe("curated resource workbench", () => {
     );
     expect(choose).toHaveBeenCalledWith(
       expect.objectContaining({ id: "context7" }),
+      expect.any(HTMLButtonElement),
     );
     expect(
       within(screen.getByRole("article", { name: "Filesystem" })).queryByText(
@@ -198,6 +217,7 @@ describe("curated evidence and keyboard boundaries", () => {
     );
     expect(choose).toHaveBeenCalledWith(
       expect.objectContaining({ id: "context7" }),
+      expect.any(HTMLButtonElement),
     );
   });
 
@@ -231,7 +251,7 @@ describe("curated evidence and keyboard boundaries", () => {
 
   it("moves focus to the surviving search input when clearing empty results", async () => {
     render(<LibraryDiscover kind="mcp" onChoose={vi.fn()} />);
-    const search = screen.getByRole("searchbox", { name: "搜索精选资源" });
+    const search = screen.getByRole("searchbox", { name: "搜索可添加资源" });
     fireEvent.change(search, { target: { value: "no-such-curated-recipe" } });
     await userEvent.click(screen.getByRole("button", { name: "清除筛选" }));
     expect(search).toHaveFocus();

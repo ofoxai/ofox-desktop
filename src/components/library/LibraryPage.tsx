@@ -1,8 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { libraryApi, type LibraryKind } from "@/lib/api/library";
-import { useShellRefresh } from "@/components/shell/ShellContext";
+import { useShell, useShellRefresh } from "@/components/shell/ShellContext";
 import { SegmentedNav } from "@/components/ui/segmented";
 import {
   InteractionScope,
@@ -13,6 +19,7 @@ import { Compass } from "lucide-react";
 import { ResourcePackDialog } from "./ResourcePackDialog";
 import { LibrarySection } from "./LibrarySection";
 import { LibraryScenarioWizard } from "./LibraryScenarioWizard";
+import { libraryScroller, type LibraryLeaveGuard } from "./useLibraryInline";
 
 const KINDS: LibraryKind[] = ["instructions", "mcp", "skills"];
 export function LibraryPage({
@@ -24,15 +31,87 @@ export function LibraryPage({
 }) {
   const { t } = useTranslation();
   const active = useInteractionActive();
+  const shell = useShell();
   const [tab, setTab] = useState<LibraryKind>("instructions");
   const [visited, setVisited] = useState<Set<LibraryKind>>(
     () => new Set(["instructions"]),
   );
+  const root = useRef<HTMLDivElement>(null);
+  const header = useRef<HTMLDivElement>(null);
+  const positions = useRef(new Map<LibraryKind, number>());
+  useLayoutEffect(() => {
+    if (!active) return;
+    const scroll = libraryScroller(root.current);
+    if (!scroll) return;
+    scroll.scrollTop = positions.current.get(tab) ?? 0;
+    const remember = () => {
+      positions.current.set(tab, scroll.scrollTop);
+    };
+    scroll.addEventListener("scroll", remember, { passive: true });
+    return () => scroll.removeEventListener("scroll", remember);
+  }, [tab, active]);
+  useLayoutEffect(() => {
+    const measure = () =>
+      root.current?.style.setProperty(
+        "--library-scroll-offset",
+        `${(header.current?.getBoundingClientRect().height ?? 64) + 12}px`,
+      );
+    measure();
+    if (typeof ResizeObserver === "undefined" || !header.current) return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(header.current);
+    return () => observer.disconnect();
+  }, []);
+  function changeTab(kind: LibraryKind) {
+    const scroll = libraryScroller(root.current);
+    if (scroll) positions.current.set(tab, scroll.scrollTop);
+    setTab(kind);
+    setVisited((previous) => new Set(previous).add(kind));
+  }
+  const leaveActions = useRef(new Map<LibraryKind, LibraryLeaveGuard>());
+  const historyActions = useRef(new Map<LibraryKind, () => void>());
+  const scenarioTrigger = useRef<HTMLButtonElement>(null);
+  const [scenarioRequest, setScenarioRequest] = useState(0);
+  const registerLeave = useCallback(
+    (kind: LibraryKind, guard: LibraryLeaveGuard) => {
+      leaveActions.current.set(kind, guard);
+      return () => {
+        if (leaveActions.current.get(kind) === guard)
+          leaveActions.current.delete(kind);
+      };
+    },
+    [],
+  );
+  const registerHistory = useCallback(
+    (kind: LibraryKind, action: () => void) => {
+      historyActions.current.set(kind, action);
+      return () => {
+        if (historyActions.current.get(kind) === action)
+          historyActions.current.delete(kind);
+      };
+    },
+    [],
+  );
+  const guarded = (proceed: () => void) => {
+    const guard = leaveActions.current.get(tab);
+    if (guard) guard(proceed);
+    else proceed();
+  };
+  useEffect(
+    () =>
+      shell.registerLeaveGuard("library", (proceed) => {
+        const guard = leaveActions.current.get(tab);
+        if (guard) guard(proceed);
+        else proceed();
+      }),
+    [shell.registerLeaveGuard, tab],
+  );
   useEffect(() => {
     if (!location || !active) return;
-    setTab(location.kind);
-    setVisited((previous) => new Set(previous).add(location.kind));
-    onLocated?.(location.request);
+    guarded(() => {
+      changeTab(location.kind);
+      onLocated?.(location.request);
+    });
   }, [location, active, onLocated]);
   const discoverActions = useRef(
     new Map<LibraryKind, (element: HTMLElement) => void>(),
@@ -69,14 +148,19 @@ export function LibraryPage({
     if (visited.size > 1) void summary.refetch();
   }, [visited.size, summary.refetch]);
   return (
-    <div className="min-w-0 space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+    <div ref={root} className="min-w-0 space-y-3">
+      <div
+        ref={header}
+        data-library-header
+        className="sticky top-0 z-20 -mx-1 flex flex-wrap items-center justify-between gap-3 border-b border-line-2 bg-background/95 px-1 py-2 backdrop-blur"
+      >
         <SegmentedNav
           aria-label={t("library.nav")}
           value={tab}
           onChange={(kind) => {
-            setTab(kind);
-            setVisited((previous) => new Set(previous).add(kind));
+            guarded(() => {
+              changeTab(kind);
+            });
           }}
           items={KINDS.map((kind) => ({
             value: kind,
@@ -86,6 +170,8 @@ export function LibraryPage({
         />
         <div className="flex flex-wrap items-center gap-2">
           <LibraryScenarioWizard
+            request={scenarioRequest}
+            returnFocusRef={scenarioTrigger}
             onChanged={async () => {
               await Promise.all([
                 summary.refetch(),
@@ -100,9 +186,26 @@ export function LibraryPage({
             }
           >
             <Compass className="mr-1 h-3.5 w-3.5" />
-            {t("library.discover.title")}
+            {t(
+              tab === "instructions"
+                ? "library.interaction.templates"
+                : "library.interaction.discover",
+            )}
           </Button>
           <ResourcePackDialog
+            menuRef={scenarioTrigger}
+            beforeAction={guarded}
+            additionalActions={[
+              {
+                label: t("library.interaction.scenarioAction"),
+                onSelect: () =>
+                  guarded(() => setScenarioRequest((value) => value + 1)),
+              },
+              {
+                label: t("library.interaction.historyAction"),
+                onSelect: () => historyActions.current.get(tab)?.(),
+              },
+            ]}
             onChanged={async () => {
               await Promise.all([
                 summary.refetch(),
@@ -125,6 +228,8 @@ export function LibraryPage({
               kind={kind}
               registerRefresh={register}
               registerDiscover={registerDiscover}
+              registerLeave={registerLeave}
+              registerHistory={registerHistory}
               onChanged={() => void summary.refetch()}
             />
           </InteractionScope>

@@ -356,11 +356,21 @@ function RecipePreparation({
 
 export function LibraryScenarioWizard({
   onChanged,
+  request,
+  returnFocusRef,
 }: {
   onChanged: () => Promise<unknown>;
+  request?: number;
+  returnFocusRef?: import("react").RefObject<HTMLButtonElement>;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (request) {
+      reset();
+      setOpen(true);
+    }
+  }, [request]);
   const [scenario, setScenario] = useState<LibraryScenario>();
   const [selected, setSelected] = useState<string[]>([]);
   const [stage, setStage] = useState<Stage>("select");
@@ -488,14 +498,24 @@ export function LibraryScenarioWizard({
         }
       }}
     >
-      <DialogTrigger asChild>
-        <Button variant="ghost">
-          <Layers className="mr-1 h-3.5 w-3.5" />
-          {t("library.scenarios.title")}
-        </Button>
-      </DialogTrigger>
+      {request === undefined && (
+        <DialogTrigger asChild>
+          <Button variant="ghost">
+            <Layers className="mr-1 h-3.5 w-3.5" />
+            {t("library.scenarios.title")}
+          </Button>
+        </DialogTrigger>
+      )}
       <DialogContent
         className="w-[calc(100vw-32px)] max-w-3xl"
+        onCloseAutoFocus={
+          returnFocusRef
+            ? (event) => {
+                event.preventDefault();
+                returnFocusRef.current?.focus();
+              }
+            : undefined
+        }
         onEscapeKeyDown={(event) => {
           if (busy) event.preventDefault();
         }}

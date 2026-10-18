@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
+import { useInteractionActive } from "@/components/ui/interaction-scope";
 import { Button } from "@/components/ui/button";
 import { ListCard, ListRow } from "@/components/ui/list";
 import {
@@ -28,7 +29,9 @@ export function McpCheck({
   onBusyChange,
   onResult,
   onNextAction,
+  scopeKey = "",
 }: {
+  scopeKey?: string;
   store: DraftStore;
   server: McpDefinition;
   epoch: number;
@@ -38,6 +41,7 @@ export function McpCheck({
   onNextAction?: (action: LibraryNextAction, trigger: HTMLElement) => void;
 }) {
   const { t } = useTranslation();
+  const active = useInteractionActive();
   const [busy, setBusy] = useDraftState(store, "mcpCheckBusy", false);
   const [stage, setStage] = useDraftState<string>(
     store,
@@ -69,9 +73,13 @@ export function McpCheck({
   busyCallback.current = onBusyChange;
   const resultCallback = useRef(onResult);
   resultCallback.current = onResult;
-  const currentProof = `${epoch}:${server.id}:${server.revision}`;
+  const currentProof = `${scopeKey}:${epoch}:${server.id}:${server.revision}`;
   const proof = useRef(currentProof);
-  proof.current = currentProof;
+  const generation = useRef(0);
+  if (proof.current !== currentProof) {
+    proof.current = currentProof;
+    generation.current++;
+  }
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -95,8 +103,32 @@ export function McpCheck({
       }
     };
   }, [setBusy, setCancelling, setResult]);
+  useEffect(() => {
+    if (resultProof && resultProof !== currentProof) {
+      setResult(null);
+      setError("");
+    }
+    if (running.current) {
+      cancelled.current = true;
+      if (operation.current)
+        void libraryApi
+          .cancelMcpCheck(operation.current)
+          .catch(() => undefined);
+    }
+  }, [currentProof]);
+  useEffect(() => {
+    if (active || !running.current) return;
+    generation.current++;
+    cancelled.current = true;
+    setCancelling(true);
+    stopListener.current?.();
+    stopListener.current = undefined;
+    busyCallback.current(false);
+    if (operation.current)
+      void libraryApi.cancelMcpCheck(operation.current).catch(() => undefined);
+  }, [active, setCancelling]);
   async function start() {
-    if (running.current || busy || readOnly) return;
+    if (!active || running.current || busy || readOnly) return;
     running.current = true;
     cancelled.current = false;
     setBusy(true);
@@ -108,6 +140,12 @@ export function McpCheck({
     let unlisten: UnlistenFn | undefined;
     let id: string | undefined;
     const expectedProof = currentProof;
+    const expectedGeneration = generation.current;
+    const current = () =>
+      mounted.current &&
+      !cancelled.current &&
+      proof.current === expectedProof &&
+      generation.current === expectedGeneration;
     try {
       const prepared = await libraryApi.prepareMcpCheck(
         server.id,
@@ -115,7 +153,7 @@ export function McpCheck({
         epoch,
       );
       id = prepared.operationId;
-      if (!mounted.current || cancelled.current) {
+      if (!current()) {
         await libraryApi.cancelMcpCheck(id);
         return;
       }
@@ -124,8 +162,7 @@ export function McpCheck({
         "library-mcp-check-progress",
         (event) => {
           if (
-            mounted.current &&
-            !cancelled.current &&
+            current() &&
             event.payload.operationId === id &&
             STAGES.includes(event.payload.stage)
           )
@@ -140,12 +177,12 @@ export function McpCheck({
         }
       };
       stopListener.current = unlisten;
-      if (!mounted.current || cancelled.current) {
+      if (!current()) {
         await libraryApi.cancelMcpCheck(id);
         return;
       }
       const checked = await libraryApi.runMcpCheck(id);
-      if (!mounted.current || proof.current !== expectedProof) return;
+      if (!current()) return;
       if (
         checked.operationId !== id ||
         ![
@@ -178,8 +215,7 @@ export function McpCheck({
         resultCallback.current?.(checked, Date.now());
     } catch (failure) {
       if (id) void libraryApi.cancelMcpCheck(id).catch(() => undefined);
-      if (mounted.current && !cancelled.current)
-        setError(libraryError(failure, t));
+      if (current()) setError(libraryError(failure, t));
     } finally {
       unlisten?.();
       stopListener.current = undefined;
@@ -234,56 +270,64 @@ export function McpCheck({
           {error}
         </p>
       )}
-      {result && (
-        <div className="space-y-2">
-          <p role="status">
-            {t(`library.mcpCheckState.${result.state}`, {
-              defaultValue: t("library.failed"),
-            })}
-          </p>
-          {result.reason && (
-            <p className="text-note text-ink-muted">
-              {t(`library.mcpCheckReason.${result.reason}`, {
+      {result &&
+        (result.state === "cancelled" || resultProof === currentProof) && (
+          <div className="space-y-2">
+            <p role="status">
+              {t(`library.mcpCheckState.${result.state}`, {
                 defaultValue: t("library.failed"),
               })}
             </p>
-          )}
-          {resultProof === currentProof && checkIssue(result) && (
-            <LibraryIssueNotice
-              issue={checkIssue(result)!}
-              disabled={readOnly || busy}
-              onAction={onNextAction}
-            />
-          )}
-          {result.state === "blocked" && (
-            <p className="text-ctl text-ink-muted">
-              {t("library.workbench2.nativeCheck")}
-            </p>
-          )}
-          {result.state === "ok" && (
-            <p className="text-note text-ink-muted">
-              {t("library.mcpCheckToolCount", { count: result.tools.length })}
-            </p>
-          )}
-          {!!result.tools.length && (
-            <ListCard>
-              {result.tools.map((tool, index) => (
-                <ListRow
-                  key={`${index}-${tool.name}`}
-                  className="block space-y-1"
-                >
-                  <p className="break-all font-medium">{tool.name}</p>
-                  {tool.description && (
-                    <p className="whitespace-pre-wrap break-words text-note text-ink-muted">
-                      {tool.description}
-                    </p>
-                  )}
-                </ListRow>
-              ))}
-            </ListCard>
-          )}
-        </div>
-      )}
+            {result.reason && (
+              <p className="text-note text-ink-muted">
+                {t(`library.mcpCheckReason.${result.reason}`, {
+                  defaultValue: t("library.failed"),
+                })}
+              </p>
+            )}
+            {resultProof === currentProof && checkIssue(result) && (
+              <LibraryIssueNotice
+                issue={checkIssue(result)!}
+                disabled={readOnly || busy}
+                onAction={onNextAction}
+              />
+            )}
+            {result.state === "blocked" && (
+              <p className="text-ctl text-ink-muted">
+                {t("library.workbench2.nativeCheck")}
+              </p>
+            )}
+            {result.state === "ok" && !result.tools.length && (
+              <p className="text-note text-ink-muted">
+                {t("library.mcpCheckToolCount", { count: result.tools.length })}
+              </p>
+            )}
+            {!!result.tools.length && (
+              <details open className="space-y-2">
+                <summary className="w-fit cursor-pointer rounded text-note text-ink-2 outline-none focus-visible:ring-2 focus-visible:ring-brand">
+                  {t("library.mcpCheckToolCount", {
+                    count: result.tools.length,
+                  })}
+                </summary>
+                <ListCard>
+                  {result.tools.map((tool, index) => (
+                    <ListRow
+                      key={`${index}-${tool.name}`}
+                      className="block space-y-1"
+                    >
+                      <p className="break-all font-medium">{tool.name}</p>
+                      {tool.description && (
+                        <p className="whitespace-pre-wrap break-words text-note text-ink-muted">
+                          {tool.description}
+                        </p>
+                      )}
+                    </ListRow>
+                  ))}
+                </ListCard>
+              </details>
+            )}
+          </div>
+        )}
     </div>
   );
 }

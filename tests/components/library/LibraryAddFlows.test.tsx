@@ -1,3 +1,6 @@
+import zhLocale from "@/i18n/locales/zh.json";
+import enLocale from "@/i18n/locales/en.json";
+import jaLocale from "@/i18n/locales/ja.json";
 import { useState } from "react";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -15,11 +18,25 @@ import {
 } from "@/components/library/libraryRecommendations";
 import { LIBRARY_ADD_COPY } from "@/components/library/libraryAddCopy";
 import { LIBRARY_MCP_COPY } from "@/components/library/libraryMcpCopy";
+import { LIBRARY_DISCOVER_COPY } from "@/components/library/libraryDiscoverCopy";
 import { invoke } from "@tauri-apps/api/core";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 
 beforeEach(() => {
+  for (const [lang, copy] of Object.entries({
+    zh: zhLocale,
+    en: enLocale,
+    ja: jaLocale,
+  }))
+    i18n.addResourceBundle(lang, "translation", copy, true, true);
+  i18n.addResourceBundle(
+    "zh",
+    "translation",
+    { library: LIBRARY_DISCOVER_COPY.zh },
+    true,
+    true,
+  );
   i18n.addResourceBundle(
     "zh",
     "translation",
@@ -55,13 +72,20 @@ describe("library recommendations", () => {
           directory: "skills/frontend-design",
         },
       }),
+      expect.any(HTMLButtonElement),
     );
     expect(invoke).not.toHaveBeenCalled();
   });
 
-  it("keeps reference examples explicit and Context7 credentials out of the recipe", () => {
+  it("keeps reference examples explicit and Context7 credentials out of the recipe", async () => {
     render(<LibraryDiscover kind="mcp" onChoose={vi.fn()} />);
-    expect(screen.getAllByText("官方参考示例")).toHaveLength(2);
+    for (const name of ["Filesystem", "Fetch"]) {
+      const card = screen.getByRole("article", { name });
+      await userEvent.click(
+        within(card).getByRole("button", { name: "配置详情" }),
+      );
+      expect(within(card).getByText("官方参考示例")).toBeVisible();
+    }
     const context = LIBRARY_RECOMMENDATIONS.find(
       (recipe) => recipe.id === "context7",
     );
