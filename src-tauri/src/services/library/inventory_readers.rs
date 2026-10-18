@@ -231,12 +231,18 @@ fn add(
         Definition::Mcp { spec } => mcp_service_host(spec),
         _ => None,
     };
+    let (display_summary, icon_id) = match &definition {
+        Definition::Mcp { spec } => super::super::display::mcp_display(spec),
+        _ => (None, None),
+    };
     data.candidates.push(Candidate {
         view: InventoryEntry {
             entry_id: uuid::Uuid::new_v4().to_string(),
             kind: data_kind(&definition),
             name,
             summary: None,
+            display_summary,
+            icon_id,
             service_host,
             sources: vec![reference(source)],
             matched_resource_ids: vec![],

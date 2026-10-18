@@ -745,12 +745,44 @@ pub fn definition_view(server: &McpServer, snapshot: &LibrarySnapshot) -> Value 
     } else {
         "needsMigration"
     };
-    json!({"id":server.id,"name":server.name,"revision":revision,"transport":transport,"privateFields":server.server.as_object().map(|m|m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),"fields":fields,"credentialState":credential_state})
+    let (display_summary, icon_id) = super::display::mcp_display(&server.server);
+    json!({"id":server.id,"name":server.name,"revision":revision,"transport":transport,"privateFields":server.server.as_object().map(|m|m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),"fields":fields,"credentialState":credential_state,"displaySummary":display_summary,"iconId":icon_id})
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn list_safe_summary_exposes_only_verified_runner_package_and_icon() {
+        let db = Database::memory().unwrap();
+        let snapshot = db.library_snapshot().unwrap();
+        let mut server = McpServer {
+            id: "custom".into(),
+            name: "Not an identity proof".into(),
+            server: json!({"command":"npx","args":["-y","chrome-devtools-mcp@latest","--token","private-value"],"env":{"TOKEN":"private-value"}}),
+            apps: McpApps::default(),
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: vec![],
+        };
+        let view = definition_view(&server, &snapshot);
+        assert_eq!(view["displaySummary"], "npx · chrome-devtools-mcp");
+        assert_eq!(view["iconId"], "chrome-devtools");
+        assert!(!view.to_string().contains("private-value"));
+        server.server = json!({"command":"/private/person/tool","args":["private-value"]});
+        let view = definition_view(&server, &snapshot);
+        assert!(view["displaySummary"].is_null());
+        assert!(view["iconId"].is_null());
+        assert!(!view.to_string().contains("/private/person"));
+        server.server = json!({"type":"http","url":"https://mcp.context7.com/private-value?key=private-value","headers":{"Authorization":"private-value"}});
+        let view = definition_view(&server, &snapshot);
+        assert_eq!(view["displaySummary"], "mcp.context7.com");
+        assert_eq!(view["iconId"], "context7");
+        assert!(!view.to_string().contains("private-value"));
+        server.server = json!({"command":"sh","args":["-c","npx chrome-devtools-mcp"]});
+        assert!(definition_view(&server, &snapshot)["displaySummary"].is_null());
+    }
     #[test]
     #[serial_test::serial]
     fn recovery_does_not_claim_writes_when_inline_routing_changed() {

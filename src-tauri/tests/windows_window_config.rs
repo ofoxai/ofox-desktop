@@ -111,6 +111,18 @@ fn every_platform_bundles_the_logo_notices_without_duplicate_images() {
     .collect();
     for config in ["tauri.conf.json", "tauri.windows.conf.json"] {
         let resources = expanded_resources(&read(config));
+        let library_logos = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../src/assets/library-logos")
+            .canonicalize()
+            .unwrap();
+        assert_eq!(
+            resources
+                .iter()
+                .filter(|resource| resource.starts_with(&library_logos))
+                .collect::<Vec<_>>(),
+            vec![&library_logos.join("NOTICE.md")],
+            "{config} must ship the library logo notice without duplicate images"
+        );
         let logo_resources: Vec<_> = resources
             .iter()
             .filter(|resource| resource.starts_with(&logo_root))

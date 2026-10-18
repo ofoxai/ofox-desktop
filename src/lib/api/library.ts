@@ -40,6 +40,8 @@ export interface McpDefinition {
   transport: string;
   credentialState: string;
   serviceHost?: string | null;
+  displaySummary?: string | null;
+  iconId?: string | null;
   fields: McpField[];
   targets: ResourceTarget[];
 }
@@ -211,6 +213,8 @@ export interface LibraryInventory {
     kind: LibraryKind;
     name: string;
     summary?: string | null;
+    displaySummary?: string | null;
+    iconId?: string | null;
     serviceHost?: string | null;
     sources: { sourceId: string; toolId: string }[];
     matchedResourceIds: string[];

@@ -69,6 +69,10 @@ pub struct InventoryEntry {
     pub name: String,
     pub summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub service_host: Option<String>,
     pub sources: Vec<EntrySource>,
     pub matched_resource_ids: Vec<String>,

@@ -2,6 +2,7 @@
 pub(crate) mod batch;
 pub(crate) mod catalog;
 pub(crate) mod coordinator;
+mod display;
 mod instructions;
 pub(crate) mod inventory;
 pub(crate) mod mcp_actions;

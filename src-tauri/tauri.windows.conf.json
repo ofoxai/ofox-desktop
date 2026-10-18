@@ -25,7 +25,8 @@
     "resources": [
       "../src/assets/agent-logos/LICENSE-*.txt",
       "../src/assets/agent-logos/LICENSE-*.md",
-      "../src/assets/agent-logos/NOTICE.md"
+      "../src/assets/agent-logos/NOTICE.md",
+      "../src/assets/library-logos/NOTICE.md"
     ]
   }
 }
