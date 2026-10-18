@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
-pub(crate) const VERSION: u8 = 2;
+pub(crate) const VERSION: u8 = 3;
 const MAX_SOURCE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_LINE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_STREAM_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -426,6 +426,8 @@ struct Parser {
     ordinal_native_seen: bool,
     ordinal_has_base: bool,
     ordinal_current_trusted: bool,
+    /// A parent's header copied after the thread's own: its history follows.
+    copied_header: bool,
     stream_segment: u32,
 }
 impl Parser {
@@ -524,6 +526,7 @@ impl Parser {
             // Codex 0.162 keeps copied source headers after the new thread's
             // canonical first header. They are history, never a new identity.
             if identity(p.get("id")) != snapshot.native_thread_id {
+                self.copied_header = true;
                 self.inherited = true;
                 self.explicit_own = false;
                 self.state.pending = None;
@@ -588,7 +591,16 @@ impl Parser {
         // Native paginated ordinals start at history_base's exclusive end.
         // Old sanitized snapshots without ordinals/base retain the previous
         // explicit-thread/turn fallback; they never assert ordinal ownership.
-        let ordinal_boundary = self.history_start.is_some()
+        // An older paginated child (Codex 0.145-0.160) keeps only its own
+        // records, numbered from 0 under a start past all of them. Only a copied
+        // parent header shows that history precedes the start; until one, every
+        // record of such a file is the child's own.
+        let only_own = self.paginated
+            && !self.ordinal_has_base
+            && self.history_start.is_some()
+            && !self.copied_header;
+        let ordinal_boundary = !only_own
+            && self.history_start.is_some()
             && (!self.paginated || self.ordinal_native_seen || self.ordinal_has_base);
         let ordinal_owned = ordinal_boundary
             && self.ordinal_current_trusted
@@ -609,6 +621,7 @@ impl Parser {
             self.explicit_own = true;
         }
         let own = top == "session_meta"
+            || only_own
             || if ordinal_boundary {
                 ordinal_owned
             } else {
@@ -688,8 +701,15 @@ impl Parser {
                 }
             }
             "event_msg" if p["type"] == "task_started" => {
-                self.state
-                    .context("", &identity(p.get("turn_id")).unwrap_or_default(), "");
+                // A turn starts on the model in effect; its own turn context,
+                // when one follows, names it instead. Older rollouts start
+                // made-up turns ("rollout-4") that never get one.
+                let turn = identity(p.get("turn_id")).unwrap_or_default();
+                if !self.state.models.contains_key(&turn) {
+                    self.state.context("", &turn, &self.current_model);
+                } else {
+                    self.state.context("", &turn, "");
+                }
                 self.state.pending = None;
             }
             "event_msg" if p["type"] == "thread_settings_applied" => {
@@ -2058,6 +2078,67 @@ mod tests {
             assert_eq!(s.events.len(), 2);
             assert_eq!(sum(&s), [160, 20, 40, 0]);
         }
+    }
+
+    fn paginated_child(start: u64) -> Value {
+        let mut header = meta("child", "billing");
+        header["payload"]["source"] =
+            json!({"subagent":{"thread_spawn":{"parent_thread_id":"parent"}}});
+        header["payload"]["parent_thread_id"] = json!("parent");
+        header["payload"]["forked_from_id"] = json!("parent");
+        header["payload"]["history_mode"] = json!("paginated");
+        header["payload"]["subagent_history_start_ordinal"] = json!(start);
+        header
+    }
+    fn numbered(ordinal: u64, mut value: Value) -> Value {
+        value["ordinal"] = json!(ordinal);
+        value
+    }
+
+    /// An older paginated child (Codex 0.145-0.160) keeps only its own records,
+    /// numbered from 0, under a start ordinal past all of them and with no
+    /// copied parent header: those records are its own, not inherited history.
+    #[test]
+    fn codex_native_paginated_child_without_copied_history_owns_its_records() {
+        // its turn is one Codex made up ("rollout-4"), with no turn context
+        let started = line(
+            1,
+            "event_msg",
+            json!({"type":"task_started","turn_id":"rollout-4"}),
+        );
+        let s = parsed(vec![
+            numbered(0, paginated_child(6)),
+            numbered(1, turn(0, "t")),
+            // before any new turn: still its own
+            numbered(2, count(0, 1, 1)),
+            numbered(3, started),
+            numbered(4, count(2, 2, 1)),
+            numbered(5, count(3, 4, 2)),
+        ]);
+        assert_eq!(s.events.len(), 3);
+        assert_eq!(sum(&s), [320, 40, 80, 0]);
+        assert!(!s.reasons.contains("unprovenInheritedBoundary"));
+        assert!(s.events.iter().all(|e| e.model == "gpt-6-astra"));
+        assert!(!s.reasons.contains("missingModel"));
+    }
+
+    /// A paginated child that copied its parent's header and history before
+    /// its start ordinal still counts only what follows it.
+    #[test]
+    fn codex_native_paginated_child_with_copied_history_owns_only_past_its_start() {
+        let mut copied = meta("parent", "billing");
+        copied["timestamp"] = json!("2025-12-31T23:59:00.000Z");
+        let started = line(2, "event_msg", json!({"type":"task_started","turn_id":"t"}));
+        let s = parsed(vec![
+            numbered(0, paginated_child(3)),
+            numbered(1, copied),
+            numbered(2, count(1, 50, 50)),
+            numbered(3, started),
+            numbered(4, turn(2, "t")),
+            numbered(5, count(3, 1, 1)),
+        ]);
+        assert_eq!(s.events.len(), 1);
+        assert_eq!(sum(&s), [80, 10, 20, 0]);
     }
 
     #[test]
