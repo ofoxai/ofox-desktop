@@ -1,6 +1,6 @@
 //! Explicit local transcript search. Jobs and snippets remain in memory only.
 use super::{
-    managed,
+    managed, providers,
     read_context::{self, ReadContext},
     source_cache::SourceStamp,
     SessionMessage, SessionMeta,
@@ -541,6 +541,34 @@ pub fn transcript(
         }
     }
     Ok(transcript)
+}
+
+/// One of a listed session's subagents' conversation, read as a session's
+/// is: from references the listing issued, within the reader's limits, and
+/// only a subagent the session lists, never a path the renderer names.
+pub fn subagent_transcript(session_key: &str, subagent_id: &str) -> Result<Transcript, String> {
+    let meta = managed::freeze_references(&[session_key.to_owned()])?
+        .into_iter()
+        .next()
+        .ok_or("session.search.changed")?;
+    let listing = managed::cached_listing()?;
+    let subagent = managed::subagents_of(&meta, &providers::opencode::children(&listing))
+        .into_iter()
+        .find(|subagent| subagent.id == subagent_id)
+        .ok_or("session.search.changed")?;
+    let file = SessionMeta {
+        provider_id: meta.provider_id.clone(),
+        session_id: subagent.id,
+        source_path: Some(subagent.source),
+        ..SessionMeta::default()
+    };
+    let context = ReadContext::new(
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicU64::new(0)),
+        Instant::now() + read_context::BATCH_DURATION,
+        managed::roots(&meta.provider_id)?,
+    );
+    read_record(&file, context)
 }
 
 fn snippet(text: &str, query: &str) -> String {

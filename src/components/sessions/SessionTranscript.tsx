@@ -40,11 +40,10 @@ export function SessionTranscript({
       expected?.contentHash,
     ],
     queryFn: () =>
-      subagentId
-        ? sessionsApi.getSubagentMessages(sessionKey, subagentId)
-        : sessionsApi
-            .getTranscript(sessionKey, expected)
-            .then((result) => result.messages),
+      (subagentId
+        ? sessionsApi.getSubagentTranscript(sessionKey, subagentId)
+        : sessionsApi.getTranscript(sessionKey, expected)
+      ).then((result) => result.messages),
     retry: false,
     staleTime: 0,
     refetchOnMount: "always",

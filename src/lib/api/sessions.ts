@@ -268,11 +268,11 @@ export const sessionsApi = {
   },
 
   /** One of the session's listed subagents' conversation. */
-  async getSubagentMessages(
-    sessionKey: string,
-    subagentId: string,
-  ): Promise<SessionMessage[]> {
-    return await invoke("get_subagent_messages", { sessionKey, subagentId });
+  async getSubagentTranscript(sessionKey: string, subagentId: string) {
+    return await invoke<SessionTranscriptResult>("get_subagent_transcript", {
+      sessionKey,
+      subagentId,
+    });
   },
 
   async delete(options: DeleteSessionOptions): Promise<boolean> {

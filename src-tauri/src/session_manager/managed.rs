@@ -218,12 +218,13 @@ pub(crate) fn forget_listing() {
 fn shown(listing: &[SessionMeta]) -> impl Iterator<Item = &SessionMeta> {
     let mut seen = HashSet::new();
     // an OpenCode child session is listed under its root, not as a row
-    let children: HashSet<String> = providers::opencode::roots(listing)
-        .into_keys()
-        .map(str::to_owned)
+    let children: HashSet<&str> = providers::opencode::children(listing)
+        .into_values()
+        .flatten()
+        .map(|child| child.session_id.as_str())
         .collect();
     listing.iter().filter(move |meta| {
-        if meta.provider_id == "opencode" && children.contains(&meta.session_id) {
+        if meta.provider_id == "opencode" && children.contains(meta.session_id.as_str()) {
             return false;
         }
         let Ok(roots) = roots(&meta.provider_id) else {
@@ -261,6 +262,7 @@ pub fn list_with(db: Option<&crate::database::Database>) -> Vec<ManagedSession> 
             })
         })
         .unwrap_or_default();
+    let children = providers::opencode::children(&listing);
     shown(&listing)
         .map(|meta| {
             let (spent, usage_display) = if meta.provider_id == "codex" {
@@ -292,13 +294,17 @@ pub fn list_with(db: Option<&crate::database::Database>) -> Vec<ManagedSession> 
             ManagedSession {
                 usage: spent,
                 usage_display,
-                ..record(meta.clone(), &listing)
+                ..record(meta.clone(), &listing, &children)
             }
         })
         .collect()
 }
 
-pub(crate) fn record(meta: SessionMeta, listing: &[SessionMeta]) -> ManagedSession {
+pub(crate) fn record(
+    meta: SessionMeta,
+    listing: &[SessionMeta],
+    children: &providers::opencode::Children,
+) -> ManagedSession {
     let readable = meta.provider_id != "dsh";
     let resume = can_resume(&meta);
     let plan = super::trash::plan_from_listing(&meta, listing);
@@ -311,11 +317,7 @@ pub(crate) fn record(meta: SessionMeta, listing: &[SessionMeta]) -> ManagedSessi
         Some(walked) => (walked.size, session_files(&meta, &walked.files)),
         None => loose_files(&meta),
     };
-    let subagents = match (meta.provider_id.as_str(), &walked) {
-        ("claude", Some(walked)) => providers::claude::subagents(&walked.files),
-        ("opencode", _) => providers::opencode::subagents(&meta, listing),
-        _ => Vec::new(),
-    };
+    let subagents = subagents_of(&meta, children);
     let subagent_count = if matches!(meta.provider_id.as_str(), "dsh" | "gemini") {
         plan.as_ref()
             .map(|p| p.member_ids.len().saturating_sub(1))
@@ -466,7 +468,11 @@ pub(crate) fn resolve(session_key: &str) -> Result<ManagedSession, String> {
         .find(|meta| key(meta) == session_key)
         .cloned()
         .ok_or("Session is no longer available; refresh the listing")?;
-    Ok(record(meta, &listing))
+    Ok(record(
+        meta,
+        &listing,
+        &providers::opencode::children(&listing),
+    ))
 }
 
 pub(crate) fn freeze_references(keys: &[String]) -> Result<Vec<SessionMeta>, String> {
@@ -494,28 +500,19 @@ pub fn messages(session_key: &str) -> Result<Vec<SessionMessage>, String> {
     messages_record(&record)
 }
 
-/// The conversation of one of a listed session's subagents: only one the
-/// session lists is read, never a path the renderer names.
-pub fn subagent_messages(
-    session_key: &str,
-    subagent_id: &str,
-) -> Result<Vec<SessionMessage>, String> {
-    let record = resolve(session_key)?;
-    if !record.capabilities.can_read_messages {
-        return Err("This provider supports metadata only".into());
+/// The conversations a session's agent started inside it: a Claude Code
+/// session's subagent files, an OpenCode session's child sessions.
+pub(crate) fn subagents_of(
+    meta: &SessionMeta,
+    children: &providers::opencode::Children,
+) -> Vec<Subagent> {
+    match meta.provider_id.as_str() {
+        "claude" => source_file(meta)
+            .map(|source| providers::claude::subagents(&source))
+            .unwrap_or_default(),
+        "opencode" => providers::opencode::subagents(meta, children),
+        _ => Vec::new(),
     }
-    let subagent = record
-        .subagents
-        .iter()
-        .find(|s| s.id == subagent_id)
-        .ok_or("session.subagent.missing")?;
-    let file = SessionMeta {
-        provider_id: record.meta.provider_id.clone(),
-        source_path: Some(subagent.source.clone()),
-        ..SessionMeta::default()
-    };
-    validate_path(&source_file(&file)?, &roots(&file.provider_id)?)?;
-    super::load_messages_unchecked(&file.provider_id, &subagent.source)
 }
 
 pub(crate) fn messages_record(record: &ManagedSession) -> Result<Vec<SessionMessage>, String> {
@@ -920,10 +917,11 @@ mod tests {
         );
         assert!(record.subagents[0].started_at.is_some());
 
-        let messages = subagent_messages(&record.session_key, "a2").expect("read");
+        let read = |id: &str| super::super::search::subagent_transcript(&record.session_key, id);
+        let messages = read("a2").expect("read").messages;
         assert!(messages.iter().any(|m| m.content == "fix the tests"));
-        assert!(subagent_messages(&record.session_key, "acompact-9").is_err());
-        assert!(subagent_messages(&record.session_key, "../a2").is_err());
+        assert!(read("acompact-9").is_err());
+        assert!(read("../a2").is_err());
     }
 
     /// Magpie `TestOpenCodeSubagents` (MIT): a child session is listed in its
@@ -982,7 +980,7 @@ mod tests {
                 ("ses_grand", None, None, Some("ses_child")),
             ]
         );
-        assert!(subagent_messages(&root.session_key, "ses_child").is_ok());
+        assert!(super::super::search::subagent_transcript(&root.session_key, "ses_child").is_ok());
     }
 
     /// A long Claude Code session: its title made by Claude Code sits past the

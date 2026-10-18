@@ -1050,8 +1050,11 @@ describe("subagent threads", () => {
 
   it("lists a Claude session's subagents in its fold and opens one's conversation", async () => {
     const read = vi
-      .spyOn(sessionsApi, "getSubagentMessages")
-      .mockResolvedValue([{ role: "user", content: "Look for the bug" }]);
+      .spyOn(sessionsApi, "getSubagentTranscript")
+      .mockResolvedValue({
+        readRevision: "verified",
+        messages: [{ role: "user", content: "Look for the bug" }],
+      });
     const parent = {
       ...session("p"),
       subagents: [

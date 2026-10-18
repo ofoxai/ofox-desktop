@@ -508,7 +508,7 @@ fn parse_session(storage: &Path, path: &Path) -> Option<SessionMeta> {
 /// Each OpenCode child session's root: the listed session at the top of its
 /// parent chain (Magpie `ocRoots`, MIT). A chain that leaves the listing,
 /// loops or runs past 64 steps names none, and its session stays a row.
-pub(crate) fn roots(listing: &[SessionMeta]) -> HashMap<&str, &str> {
+fn roots(listing: &[SessionMeta]) -> HashMap<&str, &str> {
     let sessions: HashMap<&str, &SessionMeta> = listing
         .iter()
         .filter(|meta| meta.provider_id == PROVIDER_ID)
@@ -533,17 +533,29 @@ pub(crate) fn roots(listing: &[SessionMeta]) -> HashMap<&str, &str> {
     roots
 }
 
+/// Each listed root's OpenCode child sessions, by root id: worked out once a
+/// listing, not once a row.
+pub(crate) type Children<'a> = HashMap<&'a str, Vec<&'a SessionMeta>>;
+
+pub(crate) fn children(listing: &[SessionMeta]) -> Children<'_> {
+    let roots = roots(listing);
+    let mut children: Children = HashMap::new();
+    for meta in listing.iter().filter(|m| m.provider_id == PROVIDER_ID) {
+        if let Some(root) = roots.get(meta.session_id.as_str()) {
+            children.entry(root).or_default().push(meta);
+        }
+    }
+    children
+}
+
 /// The child sessions under an OpenCode session, oldest first: what the task
 /// tool asked and the agent it ran as, split from the title OpenCode gives
 /// them, "<task> (@<agent> subagent)" (Magpie `ocSubagentTitle`, MIT).
-pub(crate) fn subagents(meta: &SessionMeta, listing: &[SessionMeta]) -> Vec<Subagent> {
-    let roots = roots(listing);
-    let mut found: Vec<_> = listing
-        .iter()
-        .filter(|child| {
-            child.provider_id == PROVIDER_ID
-                && roots.get(child.session_id.as_str()) == Some(&meta.session_id.as_str())
-        })
+pub(crate) fn subagents(meta: &SessionMeta, children: &Children) -> Vec<Subagent> {
+    let mut found: Vec<_> = children
+        .get(meta.session_id.as_str())
+        .into_iter()
+        .flatten()
         .map(|child| {
             let named = child
                 .title

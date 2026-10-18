@@ -204,13 +204,24 @@ pub(crate) fn details(path: &Path) -> Option<SessionDetails> {
     })
 }
 
-/// The subagents among a Claude Code session's files, oldest first (Magpie
-/// internal/sessions/subagents.go `subagentsOf`, MIT).
-pub(crate) fn subagents(files: &[(PathBuf, u64)]) -> Vec<Subagent> {
-    let mut found: Vec<_> = files
-        .iter()
-        .filter_map(|(path, _)| subagent(path))
-        .collect();
+/// The subagents a Claude Code session keeps beside its file, under
+/// `<session>/subagents/`, oldest first (Magpie internal/sessions/subagents.go
+/// `subagentsOf`, MIT).
+pub(crate) fn subagents(source: &Path) -> Vec<Subagent> {
+    let (Some(dir), Some(stem)) = (source.parent(), source.file_stem()) else {
+        return Vec::new();
+    };
+    let filed = dir.join(stem).join("subagents");
+    let entries = |dir: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+            .unwrap_or_default()
+    };
+    let mut files = entries(&filed);
+    for run in entries(&filed.join("workflows")) {
+        files.extend(entries(&run));
+    }
+    let mut found: Vec<_> = files.iter().filter_map(|path| subagent(path)).collect();
     found.sort_by(|a, b| {
         a.started_at
             .cmp(&b.started_at)
@@ -238,7 +249,16 @@ fn subagent_id(path: &Path) -> Option<&str> {
         .filter(|id| !id.is_empty())
 }
 
-type SubagentCache = HashMap<PathBuf, (u64, Option<SystemTime>, Subagent)>;
+/// A file's length and modification time, or none when it is not there.
+type Stamp = Option<(u64, Option<SystemTime>)>;
+
+fn stamp_of(path: &Path) -> Stamp {
+    let file = std::fs::metadata(path).ok()?;
+    Some((file.len(), file.modified().ok()))
+}
+
+/// By transcript: its stamp and its meta file's, and what they said.
+type SubagentCache = HashMap<PathBuf, (Stamp, Stamp, Subagent)>;
 
 /// Subagents read before, by file: read again only once the file changes.
 static SUBAGENTS: LazyLock<Mutex<SubagentCache>> = LazyLock::new(Default::default);
@@ -251,15 +271,18 @@ fn subagent(path: &Path) -> Option<Subagent> {
     if id.starts_with("acompact-") {
         return None;
     }
-    let file = std::fs::metadata(path).ok()?;
-    let stamp = (file.len(), file.modified().ok());
-    let mut cache = SUBAGENTS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((len, modified, found)) = cache.get(path) {
-        if (*len, *modified) == stamp {
+    let meta_path = path.with_extension("meta.json");
+    let stamps = (stamp_of(path)?, stamp_of(&meta_path));
+    if let Some((transcript, meta, found)) = SUBAGENTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(path)
+    {
+        if (*transcript, *meta) == (Some(stamps.0), stamps.1) {
             return Some(found.clone());
         }
     }
-    let meta = std::fs::read(path.with_extension("meta.json"))
+    let meta = std::fs::read(&meta_path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .unwrap_or_default();
@@ -296,7 +319,10 @@ fn subagent(path: &Path) -> Option<Subagent> {
         last_active_at: tail.iter().rev().find_map(at),
         source: path.to_string_lossy().into_owned(),
     };
-    cache.insert(path.to_path_buf(), (stamp.0, stamp.1, found.clone()));
+    SUBAGENTS.lock().unwrap_or_else(|e| e.into_inner()).insert(
+        path.to_path_buf(),
+        (Some(stamps.0), stamps.1, found.clone()),
+    );
     Some(found)
 }
 
