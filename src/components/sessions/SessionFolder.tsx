@@ -1,12 +1,13 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ListCard, ListHead, ListFold } from "@/components/ui/list";
 import { Button } from "@/components/ui/button";
 import type { ManagedSession } from "@/lib/api/sessions";
 import { getBaseName } from "./utils";
-import { canSelect } from "./model";
+import { canSelect, descendants, MAX_DEPTH, type SessionKids } from "./model";
 import { SessionRow } from "./SessionRow";
+import { SessionSubagents } from "./SessionSubagents";
 export function SelectionCheckbox({
   sessions,
   selected,
@@ -36,6 +37,10 @@ export function SelectionCheckbox({
 export function SessionFolder({
   path,
   sessions,
+  kids,
+  subsOpen,
+  toggleSubs,
+  searching,
   open,
   toggle,
   selected,
@@ -50,7 +55,14 @@ export function SessionFolder({
   onAnalyze,
 }: {
   path: string;
+  /** The folder's sessions on top; those under them are in `kids`. */
   sessions: ManagedSession[];
+  kids: SessionKids;
+  /** Sessions whose subagents are unfolded, by session key. */
+  subsOpen: Set<string>;
+  toggleSubs: (sessionKey: string) => void;
+  /** A search unfolds every session's subagents. */
+  searching: boolean;
   open: boolean;
   toggle: () => void;
   selected: Set<string>;
@@ -67,21 +79,55 @@ export function SessionFolder({
   const { t } = useTranslation();
   const [all, setAll] = useState(false);
   const visible = sessions.slice(0, all ? undefined : 100);
-  const target = sessions.find(
-    (session) => session.sessionKey === located?.key,
+  // the sessions under those on top are the folder's too
+  const members = sessions.flatMap((s) => descendants(s, kids));
+  const target = sessions.find((session) =>
+    descendants(session, kids).some((s) => s.sessionKey === located?.key),
   );
   if (target && !visible.includes(target)) visible.push(target);
+  const row = (s: ManagedSession, depth: number): ReactNode => {
+    const under = depth < MAX_DEPTH ? (kids.get(s.sessionKey) ?? []) : [];
+    return (
+      <SessionRow
+        key={s.sessionKey}
+        session={s}
+        expanded={expanded === s.sessionKey}
+        toggle={() =>
+          setExpanded(expanded === s.sessionKey ? null : s.sessionKey)
+        }
+        selected={selected.has(s.sessionKey)}
+        select={(v) => select([s], v)}
+        busy={busy}
+        trash={() => trash([s])}
+        focusRequest={located?.key === s.sessionKey ? located.request : null}
+        onLocated={onLocated}
+        onRead={onRead}
+        onAnalyze={onAnalyze}
+      >
+        {under.length > 0 && (
+          <SessionSubagents
+            count={under.length}
+            nested={depth > 0}
+            open={subsOpen.has(s.sessionKey) || searching}
+            onOpenChange={() => toggleSubs(s.sessionKey)}
+          >
+            {under.map((k) => row(k, depth + 1))}
+          </SessionSubagents>
+        )}
+      </SessionRow>
+    );
+  };
   return (
     <ListCard>
       <ListHead>
         <SelectionCheckbox
-          sessions={sessions}
+          sessions={members}
           selected={selected}
           busy={busy}
           label={t("sessionCenter.selectFolder", {
             project: path || t("sessionCenter.noProject"),
           })}
-          onChange={(v) => select(sessions, v)}
+          onChange={(v) => select(members, v)}
         />
         <ListFold
           open={open}
@@ -99,31 +145,12 @@ export function SessionFolder({
           {path}
         </span>
         <span className="ml-auto text-note text-ink-faint">
-          {sessions.length}
+          {members.length}
         </span>
       </ListHead>
       {open && (
         <>
-          {visible.map((s) => (
-            <SessionRow
-              key={s.sessionKey}
-              session={s}
-              expanded={expanded === s.sessionKey}
-              toggle={() =>
-                setExpanded(expanded === s.sessionKey ? null : s.sessionKey)
-              }
-              selected={selected.has(s.sessionKey)}
-              select={(v) => select([s], v)}
-              busy={busy}
-              trash={() => trash([s])}
-              focusRequest={
-                located?.key === s.sessionKey ? located.request : null
-              }
-              onLocated={onLocated}
-              onRead={onRead}
-              onAnalyze={onAnalyze}
-            />
-          ))}
+          {visible.map((s) => row(s, 0))}
           {!all && sessions.length > visible.length && (
             <Button variant="ghost" onClick={() => setAll(true)}>
               {t("sessionCenter.showRemaining", {

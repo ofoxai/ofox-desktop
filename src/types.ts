@@ -362,6 +362,7 @@ export type SessionTitleSource =
   | "agent"
   | "prompt"
   | "message"
+  | "task"
   | "directory";
 
 export interface SessionMeta {
@@ -377,6 +378,8 @@ export interface SessionMeta {
   resumeCommand?: string;
   /** Prompts typed plus replies; only where the whole file was read. */
   messageCount?: number;
+  /** The thread that spawned this one (Codex subagents). */
+  parentSessionId?: string | null;
 }
 
 /** Transcript roles (session_manager/transcript.rs). */

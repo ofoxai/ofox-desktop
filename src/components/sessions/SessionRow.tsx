@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Trash2 } from "lucide-react";
 import type { ManagedSession } from "@/lib/api/sessions";
@@ -22,6 +22,7 @@ export function SessionRow({
   onLocated,
   onRead,
   onAnalyze,
+  children,
 }: {
   session: ManagedSession;
   expanded: boolean;
@@ -34,6 +35,8 @@ export function SessionRow({
   onLocated?: (request: number) => void;
   onRead?: (session: ManagedSession) => void;
   onAnalyze?: (sessionKey: string) => void;
+  /** What is drawn under the row: its subagents. */
+  children?: ReactNode;
 }) {
   const { t, i18n } = useTranslation();
   const titleButton = useRef<HTMLButtonElement>(null);
@@ -97,6 +100,7 @@ export function SessionRow({
       {expanded && (
         <SessionDetails session={s} onRead={onRead} onAnalyze={onAnalyze} />
       )}
+      {children}
     </div>
   );
 }

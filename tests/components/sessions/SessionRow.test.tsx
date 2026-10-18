@@ -71,16 +71,16 @@ beforeEach(() => {
   i18n.addResourceBundle("zh", "translation", zh, true, true);
 });
 describe("compact session metadata and honest usage states", () => {
-  it("keeps the list readable and reveals file, id and token breakdown on demand", () => {
+  it("says size, short id and the token split in the row, details on demand", () => {
     show();
     const title = screen.getByRole("button", { name: /Clear session title/ });
-    expect(within(title).getByText(/33 条消息/)).toBeVisible();
-    expect(title).not.toHaveTextContent("11 MB");
-    expect(title).not.toHaveTextContent("session-");
-    expect(screen.queryByText(/输入 1K · 输出 200 · 缓存 5K/)).toBeNull();
+    expect(
+      within(title).getByText(/33 条消息 · 11 MB · session-$/),
+    ).toBeVisible();
+    expect(screen.getByText("输入 1.0K · 输出 200 · 缓存 5.0K")).toBeVisible();
+    expect(screen.queryByText(/session-id-for-details/)).toBeNull();
     fireEvent.click(title);
     expect(screen.getByText(/session-id-for-details/)).toBeVisible();
-    expect(screen.getByText(/11 MB/)).toBeVisible();
     expect(
       screen.getByText(/输入 1K · 输出 200 · 缓存 5K · 写入 50/),
     ).toBeVisible();

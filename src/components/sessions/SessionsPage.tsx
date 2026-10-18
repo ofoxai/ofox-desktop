@@ -17,7 +17,7 @@ import { Button } from "@/components/ui/button";
 import { ListHead } from "@/components/ui/list";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { cn } from "@/lib/utils";
-import { groupByFolder, canSelect } from "./model";
+import { groupByFolder, canSelect, nestSessions } from "./model";
 import { SessionsHeader } from "./SessionsHeader";
 import { SessionFolder, SelectionCheckbox } from "./SessionFolder";
 import { SessionsTrash } from "./SessionsTrash";
@@ -101,6 +101,7 @@ export function SessionsPage({
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [expanded, setExpanded] = useState<string | null>(null);
   const [opened, setOpened] = useState<Record<string, boolean>>({});
+  const [subsOpen, setSubsOpen] = useState<Set<string>>(() => new Set());
   const [located, setLocated] = useState<{
     key: string;
     request: number | null;
@@ -162,7 +163,14 @@ export function SessionsPage({
   const readingSession = sessions.find(
     (session) => session.sessionKey === reader?.key,
   );
-  const groups = useMemo(() => groupByFolder(filtered), [filtered]);
+  const nesting = useMemo(() => nestSessions(filtered), [filtered]);
+  const groups = useMemo(() => groupByFolder(nesting.tops), [nesting]);
+  const toggleSubs = (sessionKey: string) =>
+    setSubsOpen((old) => {
+      const next = new Set(old);
+      if (!next.delete(sessionKey)) next.add(sessionKey);
+      return next;
+    });
   useEffect(() => {
     if (active !== "sessions" || !sessionLocation || !query.isSuccess) return;
     const row = sessions.find(
@@ -177,7 +185,21 @@ export function SessionsPage({
       setProject("all");
       setReader(undefined);
       setTrash(false);
-      setOpened((old) => ({ ...old, [row.projectDir || ""]: true }));
+      // a session drawn under another stays in sight: its folder and every
+      // session it is under are unfolded
+      const { parents } = nestSessions(sessions);
+      const above: ManagedSession[] = [];
+      for (
+        let p = parents.get(row.sessionKey);
+        p;
+        p = parents.get(p.sessionKey)
+      )
+        above.push(p);
+      const top = above.at(-1) ?? row;
+      setOpened((old) => ({ ...old, [top.projectDir || ""]: true }));
+      setSubsOpen(
+        (old) => new Set([...old, ...above.map((p) => p.sessionKey)]),
+      );
       setLocated(sessionLocation);
     }
     consumeSessionLocation(sessionLocation.request);
@@ -495,6 +517,10 @@ export function SessionsPage({
                 <SessionFolder
                   key={group.path}
                   {...group}
+                  kids={nesting.kids}
+                  subsOpen={subsOpen}
+                  toggleSubs={toggleSubs}
+                  searching={!!search.trim()}
                   open={!!search || (opened[group.path] ?? i === 0)}
                   toggle={() =>
                     setOpened((old) => ({

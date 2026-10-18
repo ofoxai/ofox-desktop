@@ -10,6 +10,15 @@ export function fmtTokens(value: number): string {
   }
   return String(value);
 }
+/** A session's token count as magpie writes it (`fmtN`): three figures. */
+export function fmtTokenCount(value: number): string {
+  if (value >= 1e9) return `${(value / 1e9).toFixed(2)}B`;
+  if (value >= 1e7) return `${Math.round(value / 1e6)}M`;
+  if (value >= 1e6) return `${(value / 1e6).toFixed(1)}M`;
+  if (value >= 1e5) return `${Math.round(value / 1e3)}K`;
+  if (value >= 1e3) return `${(value / 1e3).toFixed(1)}K`;
+  return String(value);
+}
 export function fmtBytes(value: number): string {
   for (const [scale, unit] of [
     [1e9, "GB"],

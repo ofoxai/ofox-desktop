@@ -339,8 +339,8 @@ it("shows fresh tokens, separate cache, readable costs, and lazy inline bodies",
   expect(screen.getByText("1.2K")).toBeVisible();
   expect(screen.getByText("≈$0.020")).toBeVisible();
   expect(screen.getByText("用量不可用")).toBeVisible();
-  expect(screen.getByText(/33 条消息/)).toBeVisible();
-  expect(screen.queryByText(/11 MB/)).toBeNull();
+  expect(screen.getByText(/33 条消息 · 11 MB/)).toBeVisible();
+  expect(screen.getByText("输入 1.0K · 输出 200 · 缓存 5.0K")).toBeVisible();
   expect(sessionsApi.getMessagesByKey).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button", { name: /title-a/ }));
   expect(sessionsApi.getMessagesByKey).not.toHaveBeenCalled();
@@ -989,4 +989,68 @@ it("rejects a listing price receipt from the wrong apex even on the current quer
   expect(
     screen.getByText("价格区域正在更新，请稍后刷新会话用量。"),
   ).toBeVisible();
+});
+
+describe("subagent threads", () => {
+  const thread = (id: string, parentSessionId?: string, createdAt = 0) => ({
+    ...session(id, "codex"),
+    parentSessionId,
+    createdAt,
+  });
+  const family = () => [
+    thread("p"),
+    thread("c", "p", 2),
+    thread("b", "p", 1),
+    thread("g", "c", 3),
+  ];
+
+  it("folds a parent's threads under it, nested and counted in the folder", () => {
+    renderPanel(family());
+    const folder = screen.getByText("/project").parentElement!;
+    expect(within(folder).getByText("4")).toBeVisible();
+    expect(screen.queryByText("title-b")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "2 个子代理" }));
+    const titles = screen
+      .getAllByText(/^title-[bc]$/)
+      .map((node) => node.textContent);
+    expect(titles).toEqual(["title-b", "title-c"]);
+    expect(
+      screen.getByRole("checkbox", { name: "选择会话 title-c" }),
+    ).toBeEnabled();
+    expect(screen.queryByText("title-g")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "1 个子代理" }));
+    expect(screen.getByText("title-g")).toBeVisible();
+  });
+
+  it("opens the folds while searching, and the folder box selects nested threads", async () => {
+    renderPanel(family());
+    fireEvent.change(screen.getByRole("searchbox"), {
+      target: { value: "title" },
+    });
+    expect(await screen.findByText("title-g")).toBeVisible();
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "选择 /project 中的全部会话" }),
+    );
+    expect(screen.getByText("已选 4 个")).toBeVisible();
+  });
+
+  it("unfolds every session a located thread is under", async () => {
+    const target = {
+      ...thread("target", "c", 4),
+      sessionKey: "analytics-target",
+    };
+    renderPanel([...family(), target]);
+    expect(screen.queryByText("title-target")).toBeNull();
+    await userEvent.click(screen.getByText("locate-analysis-session"));
+    const button = await screen.findByRole("button", { name: /title-target/ });
+    await waitFor(() => expect(button).toHaveFocus());
+    expect(screen.getByText("title-c")).toBeVisible();
+    expect(screen.queryByText("title-g")).toBeVisible();
+  });
+
+  it("shows a thread whose parent is not listed on top", () => {
+    renderPanel([thread("orphan", "gone")]);
+    expect(screen.getByText("title-orphan")).toBeVisible();
+    expect(screen.queryByRole("button", { name: /个子代理/ })).toBeNull();
+  });
 });

@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import type { SessionUsage, SessionUsageDisplay } from "@/lib/api/sessions";
-import { fmtCost, fmtTokens } from "@/lib/format";
+import { fmtCost, fmtTokenCount, fmtTokens } from "@/lib/format";
 import { formatUsageEstimate } from "@/lib/usageEstimate";
 
 export function sessionUsageUnavailableReason(display?: SessionUsageDisplay) {
@@ -69,6 +69,20 @@ export function SessionUsageSummary({
           ? "sessionCenter.nativeThreadEstimate"
           : "sessionCenter.estimated",
   );
+  // fresh input and output; what was read from the cache is said apart
+  const split = [
+    t("sessionCenter.tokenLine", {
+      input: fmtTokenCount(usage.inputTokens),
+      output: fmtTokenCount(usage.outputTokens),
+    }),
+    usage.cacheReadTokens > 0
+      ? t("sessionCenter.cachedTokens", {
+          tokens: fmtTokenCount(usage.cacheReadTokens),
+        })
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
   return (
     <div
       className={
@@ -77,8 +91,7 @@ export function SessionUsageSummary({
           : "flex shrink-0 items-center gap-3 text-right tabular-nums"
       }
     >
-      <b
-        className="block text-ui text-ink"
+      <div
         title={t("sessionCenter.tokenDetails", {
           input: fmtTokens(usage.inputTokens),
           output: fmtTokens(usage.outputTokens),
@@ -86,8 +99,13 @@ export function SessionUsageSummary({
           write: fmtTokens(usage.cacheWriteTokens),
         })}
       >
-        {fmtTokens(usage.totalTokens)}
-      </b>
+        <b className="block text-ui text-ink">
+          {fmtTokenCount(usage.totalTokens)}
+        </b>
+        <span className="hidden whitespace-nowrap text-note text-ink-faint min-[560px]:block">
+          {split}
+        </span>
+      </div>
       <span
         className={`block min-w-[58px] text-sub ${state === "unpriced" ? "text-ink-faint" : "text-ok"}`}
         title={costHint}
