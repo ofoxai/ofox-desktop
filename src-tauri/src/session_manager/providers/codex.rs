@@ -305,10 +305,9 @@ impl CodexScan {
                     Some("user") => {
                         let mut typed = false;
                         for text in user_texts(payload.get("content")) {
-                            let prompt = clean_prompt(text);
-                            typed |= prompt.is_some();
+                            typed |= typed_by_hand(text);
                             if self.candidates.prompt.is_none() {
-                                self.candidates.prompt = prompt;
+                                self.candidates.prompt = clean_prompt(text);
                             }
                         }
                         if typed {
@@ -415,6 +414,13 @@ pub(crate) fn details(path: &Path) -> Option<SessionDetails> {
         candidates: scan.candidates,
         spawns: scan.spawns,
     })
+}
+
+/// Whether a user message's text counts as a prompt in its message count: one
+/// Codex put in itself starts with a tag or AGENTS.md (Magpie `cxPrompt`, MIT).
+fn typed_by_hand(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty() && !text.starts_with('<') && !text.starts_with("# AGENTS.md")
 }
 
 fn str_at<'a>(value: &'a Value, key: &str) -> &'a str {
@@ -672,6 +678,33 @@ mod tests {
 
     fn item(payload: serde_json::Value) -> serde_json::Value {
         serde_json::json!({"timestamp": "2026-10-14T10:00:03Z", "type": "response_item", "payload": payload})
+    }
+
+    /// Magpie counts a user message as typed only when one of its texts does
+    /// not start with `<` or `# AGENTS.md` (`cxPrompt`, MIT).
+    #[test]
+    fn only_a_typed_prompt_counts_as_a_message() {
+        let temp = tempdir().expect("tempdir");
+        let path = rollout(
+            temp.path(),
+            &[
+                user_items(&[input_text(
+                    "<send_user_message_question_reply>[{\"questionItemId\":\"q1\"}]</send_user_message_question_reply>",
+                )]),
+                user_items(&[input_text(
+                    "<codex_internal_context source=\"goal\">keep going</codex_internal_context>",
+                )]),
+                user_items(&[input_text("# AGENTS.md instructions for /work/app")]),
+                user_items(&[
+                    input_text("<image name=[Image #1] path=\"/tmp/a.png\">"),
+                    input_text("</image>"),
+                    input_text("make it green"),
+                ]),
+                item(serde_json::json!({"type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Done."}]})),
+            ],
+        );
+        assert_eq!(details(&path).expect("details").message_count, 2);
     }
 
     /// Cases from Magpie `TestCodexIdentityParentChainsAndSummaryCache` (MIT).
