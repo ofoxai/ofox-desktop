@@ -1,9 +1,12 @@
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { ListFold } from "@/components/ui/list";
+import type { SessionSubagent } from "@/lib/api/sessions";
+import { fmtAgo } from "@/lib/format";
 /**
- * The fold under a session with the subagents it started, drawn as sessions
- * of their own (Magpie sessions client.js `subagentsBox`, MIT).
+ * The fold under a session with the subagents it started: Codex threads drawn
+ * as sessions of their own, then those its agent keeps inside it (Magpie
+ * sessions client.js `subagentsBox`, MIT).
  */
 export function SessionSubagents({
   count,
@@ -31,5 +34,39 @@ export function SessionSubagents({
         </div>
       )}
     </div>
+  );
+}
+/** One subagent its agent keeps inside the session: what it was asked, the
+ * agent it ran as; a click opens what was said in it (Magpie `subRow`). */
+export function SubagentRow({
+  subagent: s,
+  depth,
+  onOpen,
+}: {
+  subagent: SessionSubagent;
+  depth: number;
+  onOpen: () => void;
+}) {
+  const { i18n } = useTranslation();
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="flex min-h-[38px] w-full flex-col items-start justify-center py-1.5 pr-3 text-left hover:bg-pill"
+      style={{ paddingLeft: `calc(11px + ${depth} * 16px)` }}
+    >
+      <span className="block w-full truncate text-ui text-ink">
+        {s.title || s.kind || s.id}
+      </span>
+      <span className="block w-full truncate text-note text-ink-faint">
+        {[
+          s.title ? s.kind : "",
+          fmtAgo(s.lastActiveAt ?? s.startedAt, i18n.language),
+          s.id.slice(0, 8),
+        ]
+          .filter(Boolean)
+          .join(" · ")}
+      </span>
+    </button>
   );
 }

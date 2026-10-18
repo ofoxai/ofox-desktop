@@ -8,6 +8,7 @@ import {
   type ManagedSession,
   type SessionTrashEntry,
   type SessionSearchHit,
+  type SessionSubagent,
 } from "@/lib/api/sessions";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
 import { useSessionSearch } from "@/hooks/useSessionSearch";
@@ -93,6 +94,7 @@ export function SessionsPage({
   const [reader, setReader] = useState<{
     key: string;
     expected?: SessionSearchHit;
+    subagent?: SessionSubagent;
   }>();
   const listRef = useRef<HTMLDivElement>(null);
   const returnFocus = useRef<HTMLElement | null>(null);
@@ -145,13 +147,17 @@ export function SessionsPage({
       includeProcess,
     );
   };
-  const openReader = (session: ManagedSession, expected?: SessionSearchHit) => {
+  const openReader = (
+    session: ManagedSession,
+    expected?: SessionSearchHit,
+    subagent?: SessionSubagent,
+  ) => {
     returnFocus.current =
       document.activeElement instanceof HTMLElement
         ? document.activeElement
         : null;
     returnScroll.current = listRef.current?.scrollTop ?? 0;
-    setReader({ key: session.sessionKey, expected });
+    setReader({ key: session.sessionKey, expected, subagent });
   };
   const closeReader = () => {
     setReader(undefined);
@@ -317,6 +323,7 @@ export function SessionsPage({
         (readingSession ? (
           <SessionReader
             session={readingSession}
+            subagent={reader.subagent}
             expected={reader.expected}
             onBack={closeReader}
             onAnalyze={onAnalyze}
@@ -536,6 +543,9 @@ export function SessionsPage({
                   located={located}
                   onLocated={locatedFocus}
                   onRead={openReader}
+                  onReadSubagent={(session, subagent) =>
+                    openReader(session, undefined, subagent)
+                  }
                   onAnalyze={onAnalyze}
                   trash={(items) => setConfirmation({ kind: "trash", items })}
                 />

@@ -1048,6 +1048,34 @@ describe("subagent threads", () => {
     expect(screen.queryByText("title-g")).toBeVisible();
   });
 
+  it("lists a Claude session's subagents in its fold and opens one's conversation", async () => {
+    const read = vi
+      .spyOn(sessionsApi, "getSubagentMessages")
+      .mockResolvedValue([{ role: "user", content: "Look for the bug" }]);
+    const parent = {
+      ...session("p"),
+      subagents: [
+        { id: "a1", title: "Find the bug", kind: "Explore", startedAt: 1 },
+        { id: "a3", title: "Go deeper", kind: "general", parent: "a1" },
+        { id: "a2", kind: "Plan", startedAt: 2 },
+      ],
+    };
+    renderPanel([parent]);
+    expect(screen.queryByText("Find the bug")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "3 个子代理" }));
+    const rows = screen
+      .getAllByRole("button", { name: /Find the bug|Go deeper|Plan/ })
+      .map((row) => row.textContent);
+    expect(rows[0]).toMatch(/^Find the bug.*Explore/);
+    expect(rows[1]).toMatch(/^Go deeper/);
+    expect(rows[2]).toMatch(/^Plan/);
+    expect(screen.queryByRole("checkbox", { name: /Find the bug/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Find the bug/ }));
+    expect(await screen.findByText("Look for the bug")).toBeVisible();
+    expect(read).toHaveBeenCalledWith(parent.sessionKey, "a1");
+    expect(screen.getByRole("heading", { name: "Find the bug" })).toBeVisible();
+  });
+
   it("shows a thread whose parent is not listed on top", () => {
     renderPanel([thread("orphan", "gone")]);
     expect(screen.getByText("title-orphan")).toBeVisible();

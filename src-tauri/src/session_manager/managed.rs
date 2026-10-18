@@ -21,6 +21,31 @@ pub struct Capabilities {
     pub resume_unavailable_reason: Option<String>,
 }
 
+/// A conversation a session's agent started inside it and keeps beside the
+/// session's own (a Claude Code subagent, an OpenCode child session); what it
+/// spent counts in the session's. Adapted from Magpie
+/// internal/sessions/subagents.go (MIT).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Subagent {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The agent it ran as (Claude Code's agentType, OpenCode's agent).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The subagent that started it; none when the session itself did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_active_at: Option<i64>,
+    /// Where its conversation is kept, as a session's `source_path` is.
+    #[serde(skip)]
+    pub source: String,
+}
+
 /// What a file of a session holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -53,6 +78,9 @@ pub struct ManagedSession {
     pub capabilities: Capabilities,
     pub models: Vec<String>,
     pub subagent_count: usize,
+    /// The conversations its agent started inside it, oldest first.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub subagents: Vec<Subagent>,
     /// Bytes of every file of the session (0 for one kept in a shared database).
     pub size_bytes: u64,
     /// Its conversation files.
@@ -275,6 +303,10 @@ pub(crate) fn record(meta: SessionMeta, listing: &[SessionMeta]) -> ManagedSessi
         Some(walked) => (walked.size, session_files(&meta, &walked.files)),
         None => loose_files(&meta),
     };
+    let subagents = match (meta.provider_id.as_str(), &walked) {
+        ("claude", Some(walked)) => providers::claude::subagents(&walked.files),
+        _ => Vec::new(),
+    };
     let subagent_count = if matches!(meta.provider_id.as_str(), "dsh" | "gemini") {
         plan.as_ref()
             .map(|p| p.member_ids.len().saturating_sub(1))
@@ -317,6 +349,7 @@ pub(crate) fn record(meta: SessionMeta, listing: &[SessionMeta]) -> ManagedSessi
             })
             .unwrap_or_default(),
         subagent_count,
+        subagents,
         size_bytes,
         files,
         usage: None,
@@ -450,6 +483,30 @@ pub(crate) fn freeze_references(keys: &[String]) -> Result<Vec<SessionMeta>, Str
 pub fn messages(session_key: &str) -> Result<Vec<SessionMessage>, String> {
     let record = resolve(session_key)?;
     messages_record(&record)
+}
+
+/// The conversation of one of a listed session's subagents: only one the
+/// session lists is read, never a path the renderer names.
+pub fn subagent_messages(
+    session_key: &str,
+    subagent_id: &str,
+) -> Result<Vec<SessionMessage>, String> {
+    let record = resolve(session_key)?;
+    if !record.capabilities.can_read_messages {
+        return Err("This provider supports metadata only".into());
+    }
+    let subagent = record
+        .subagents
+        .iter()
+        .find(|s| s.id == subagent_id)
+        .ok_or("session.subagent.missing")?;
+    let file = SessionMeta {
+        provider_id: record.meta.provider_id.clone(),
+        source_path: Some(subagent.source.clone()),
+        ..SessionMeta::default()
+    };
+    validate_path(&source_file(&file)?, &roots(&file.provider_id)?)?;
+    super::load_messages_unchecked(&file.provider_id, &subagent.source)
 }
 
 pub(crate) fn messages_record(record: &ManagedSession) -> Result<Vec<SessionMessage>, String> {
@@ -776,6 +833,88 @@ mod tests {
                 {"path": subagent.to_string_lossy(), "sizeBytes": size(&subagent), "kind": "subagent"},
             ])
         );
+    }
+
+    fn sidechain_prompt(at: &str, content: &str) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({"type": "user", "isSidechain": true, "timestamp": at,
+                "message": {"role": "user", "content": content}})
+        )
+    }
+
+    /// Magpie `TestClaudeSubagents` (MIT): each subagent file is named by its
+    /// meta file, else by what it was first asked; a compaction's run is none.
+    #[test]
+    #[serial_test::serial]
+    fn a_claude_session_lists_its_subagents_oldest_first() {
+        let sandbox = sandbox();
+        let (_, first, _) = claude_session(sandbox.home());
+        let dir = first.parent().unwrap().to_path_buf();
+        let write = |name: &str, body: &str| std::fs::write(dir.join(name), body).unwrap();
+        write(
+            "agent-a1.jsonl",
+            &sidechain_prompt("2026-10-14T10:00:03Z", "look around"),
+        );
+        write(
+            "agent-a1.meta.json",
+            r#"{"agentType":"Explore","description":"  Find the\n bug "}"#,
+        );
+        write(
+            "agent-a2.jsonl",
+            &sidechain_prompt("2026-10-14T10:00:01Z", "fix the tests"),
+        );
+        write(
+            "agent-a3.jsonl",
+            &sidechain_prompt("2026-10-14T10:00:05Z", "deeper"),
+        );
+        write(
+            "agent-a3.meta.json",
+            r#"{"agentType":"general-purpose","parentAgentId":"a1"}"#,
+        );
+        write(
+            "agent-acompact-9.jsonl",
+            &sidechain_prompt("2026-10-14T10:00:02Z", "compact"),
+        );
+        let run = dir.join("workflows/run-1");
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(
+            run.join("agent-w1.jsonl"),
+            sidechain_prompt("2026-10-14T10:00:04Z", "step one"),
+        )
+        .unwrap();
+
+        let record = list()
+            .into_iter()
+            .find(|r| r.meta.session_id == CLAUDE_ID)
+            .expect("listed");
+        let listed = record
+            .subagents
+            .iter()
+            .map(|s| {
+                (
+                    s.id.as_str(),
+                    s.title.as_deref(),
+                    s.kind.as_deref(),
+                    s.parent.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            listed,
+            vec![
+                ("a2", Some("fix the tests"), None, None),
+                ("a1", Some("Find the bug"), Some("Explore"), None),
+                ("w1", Some("step one"), None, None),
+                ("a3", Some("deeper"), Some("general-purpose"), Some("a1")),
+            ]
+        );
+        assert!(record.subagents[0].started_at.is_some());
+
+        let messages = subagent_messages(&record.session_key, "a2").expect("read");
+        assert!(messages.iter().any(|m| m.content == "fix the tests"));
+        assert!(subagent_messages(&record.session_key, "acompact-9").is_err());
+        assert!(subagent_messages(&record.session_key, "../a2").is_err());
     }
 
     /// A long Claude Code session: its title made by Claude Code sits past the

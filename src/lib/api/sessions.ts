@@ -56,6 +56,19 @@ export interface SessionUsageDisplay {
   billingSessionId: string | null;
 }
 
+/** A conversation a session's agent started inside it (a Claude Code
+ * subagent): what it spent counts in the session's. */
+export interface SessionSubagent {
+  id: string;
+  title?: string;
+  /** The agent it ran as (Claude Code's agentType). */
+  kind?: string;
+  /** The subagent that started it; absent when the session did. */
+  parent?: string;
+  startedAt?: number;
+  lastActiveAt?: number;
+}
+
 /** Emitted when titles, counts or usage of the listing may have changed. */
 export const SESSIONS_INDEX_UPDATED_EVENT = "sessions-index-updated";
 
@@ -65,6 +78,8 @@ export interface ManagedSession extends SessionMeta {
   capabilities: SessionCapabilities;
   models?: string[];
   subagentCount?: number;
+  /** Its subagents, oldest first; Codex's are sessions of their own. */
+  subagents?: SessionSubagent[];
   /** Bytes of every file of the session (0 for a shared database). */
   sizeBytes?: number;
   files?: SessionFile[];
@@ -250,6 +265,14 @@ export const sessionsApi = {
 
   async getMessagesByKey(sessionKey: string): Promise<SessionMessage[]> {
     return await invoke("get_session_messages", { sessionKey });
+  },
+
+  /** One of the session's listed subagents' conversation. */
+  async getSubagentMessages(
+    sessionKey: string,
+    subagentId: string,
+  ): Promise<SessionMessage[]> {
+    return await invoke("get_subagent_messages", { sessionKey, subagentId });
   },
 
   async delete(options: DeleteSessionOptions): Promise<boolean> {

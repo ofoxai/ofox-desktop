@@ -10,11 +10,14 @@ import { TranscriptPart } from "./TranscriptPart";
 
 export function SessionTranscript({
   sessionKey,
+  subagentId,
   revision,
   expected,
   onResearch,
 }: {
   sessionKey: string;
+  /** Read this subagent of the session instead of the session itself. */
+  subagentId?: string;
   revision?: string | number | null;
   expected?: SessionSearchHit;
   onResearch?: () => void;
@@ -30,15 +33,18 @@ export function SessionTranscript({
     queryKey: [
       "session-messages",
       sessionKey,
+      subagentId,
       revision,
       expected?.readRevision,
       expected?.messageOrdinal,
       expected?.contentHash,
     ],
     queryFn: () =>
-      sessionsApi
-        .getTranscript(sessionKey, expected)
-        .then((result) => result.messages),
+      subagentId
+        ? sessionsApi.getSubagentMessages(sessionKey, subagentId)
+        : sessionsApi
+            .getTranscript(sessionKey, expected)
+            .then((result) => result.messages),
     retry: false,
     staleTime: 0,
     refetchOnMount: "always",

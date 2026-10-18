@@ -80,6 +80,19 @@ pub async fn get_session_messages(
         .map_err(|e| format!("Failed to load session messages: {e}"))?
 }
 
+/// One of a listed session's subagents' conversation, by the id it lists.
+#[tauri::command]
+pub async fn get_subagent_messages(
+    sessionKey: String,
+    subagentId: String,
+) -> Result<Vec<session_manager::SessionMessage>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        session_manager::managed::subagent_messages(&sessionKey, &subagentId)
+    })
+    .await
+    .map_err(|e| format!("Failed to load subagent messages: {e}"))?
+}
+
 #[tauri::command]
 pub async fn get_session_transcript(
     sessionKey: String,

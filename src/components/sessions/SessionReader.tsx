@@ -6,6 +6,7 @@ import {
   sessionsApi,
   type ManagedSession,
   type SessionSearchHit,
+  type SessionSubagent,
 } from "@/lib/api/sessions";
 import { Button } from "@/components/ui/button";
 import { ToolBadge } from "@/components/tools/ToolBadge";
@@ -17,12 +18,15 @@ import { CopyButton } from "@/components/ui/copy-button";
 
 export function SessionReader({
   session,
+  subagent,
   expected,
   onBack,
   onAnalyze,
   onResearch,
 }: {
   session: ManagedSession;
+  /** One of the session's subagents, read in its place: no actions of its own. */
+  subagent?: SessionSubagent;
   expected?: SessionSearchHit;
   onBack: () => void;
   onAnalyze?: (sessionKey: string) => void;
@@ -32,7 +36,8 @@ export function SessionReader({
   const back = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     back.current?.focus();
-  }, [session.sessionKey]);
+  }, [session.sessionKey, subagent?.id]);
+  const actions = !subagent;
   const usage = session.usage;
   const resume = useSessionResume(session.sessionKey);
   const exporting = useSessionExport(session.sessionKey);
@@ -59,14 +64,14 @@ export function SessionReader({
           {t("sessionExperience.back")}
         </Button>
         <span className="flex-1" />
-        {session.capabilities.canResume && (
+        {actions && session.capabilities.canResume && (
           <CopyButton
             text={command.data?.command ?? ""}
             disabled={!command.data}
             aria-label={t("sessionExperience.copyResume")}
           />
         )}
-        {session.capabilities.canExport && (
+        {actions && session.capabilities.canExport && (
           <Button
             variant="ghost"
             disabled={exporting.busy}
@@ -75,7 +80,7 @@ export function SessionReader({
             {t("sessionCenter.export")}
           </Button>
         )}
-        {session.capabilities.canResume && (
+        {actions && session.capabilities.canResume && (
           <Button
             variant="secondary"
             disabled={resume.busy}
@@ -84,7 +89,7 @@ export function SessionReader({
             {t("sessionExperience.resumeTerminal")}
           </Button>
         )}
-        {onAnalyze && (
+        {actions && onAnalyze && (
           <Button
             variant="secondary"
             onClick={() => onAnalyze(session.sessionKey)}
@@ -102,7 +107,7 @@ export function SessionReader({
           </Button>
         </p>
       )}
-      {!session.capabilities.canResume && (
+      {actions && !session.capabilities.canResume && (
         <p className="text-note text-ink-muted">
           {t(
             session.capabilities.resumeUnavailableReason ===
@@ -119,24 +124,36 @@ export function SessionReader({
         <ToolBadge toolId={session.providerId} size={28} />
         <div className="min-w-0 flex-1">
           <h2 className="break-words text-lg font-semibold text-ink">
-            {session.title || t("sessionCenter.untitled")}
+            {subagent
+              ? subagent.title || subagent.kind || subagent.id
+              : session.title || t("sessionCenter.untitled")}
           </h2>
           <p
             className="truncate text-sub text-ink-muted"
             title={session.projectDir || undefined}
           >
-            {session.projectDir || t("sessionCenter.noProject")}
+            {subagent
+              ? [
+                  subagent.title ? subagent.kind : "",
+                  session.title || t("sessionCenter.untitled"),
+                ]
+                  .filter(Boolean)
+                  .join(" · ")
+              : session.projectDir || t("sessionCenter.noProject")}
           </p>
         </div>
-        <SessionUsageSummary
-          usage={usage}
-          display={session.usageDisplay}
-          stacked
-        />
+        {actions && (
+          <SessionUsageSummary
+            usage={usage}
+            display={session.usageDisplay}
+            stacked
+          />
+        )}
       </div>
       <SessionTranscript
-        key={session.sessionKey}
+        key={`${session.sessionKey}/${subagent?.id ?? ""}`}
         sessionKey={session.sessionKey}
+        subagentId={subagent?.id}
         revision={session.revision ?? session.lastActiveAt}
         expected={expected}
         onResearch={onResearch}

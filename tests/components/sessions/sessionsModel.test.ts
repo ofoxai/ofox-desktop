@@ -13,6 +13,7 @@ import {
   descendants,
   nestSessions,
   sessionSubline,
+  subagentTree,
 } from "@/components/sessions/model";
 import type { ManagedSession } from "@/lib/api/sessions";
 describe("session presentation", () => {
@@ -116,5 +117,27 @@ describe("subagent nesting", () => {
       "late",
     ]);
     expect(tops.map((s) => s.sessionId)).toEqual(["p", "other"]);
+  });
+});
+
+/** Magpie sessions client.js `subTree` (MIT). */
+describe("subagent order", () => {
+  it("puts each subagent under the one that started it; a loop stays shown", () => {
+    const tree = subagentTree([
+      { id: "a" },
+      { id: "c", parent: "b" },
+      { id: "b", parent: "a" },
+      { id: "x", parent: "y" },
+      { id: "y", parent: "x" },
+      { id: "z", parent: "gone" },
+    ]);
+    expect(tree.map(([s, depth]) => `${s.id}:${depth}`)).toEqual([
+      "a:0",
+      "b:1",
+      "c:2",
+      "z:0",
+      "x:0",
+      "y:1",
+    ]);
   });
 });

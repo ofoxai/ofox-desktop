@@ -1,6 +1,6 @@
 import type { TFunction } from "i18next";
 import { sessionModelNames } from "@/lib/api/sessions";
-import type { ManagedSession } from "@/lib/api/sessions";
+import type { ManagedSession, SessionSubagent } from "@/lib/api/sessions";
 import { fmtAgo, fmtBytes } from "@/lib/format";
 export const activity = (s: ManagedSession) =>
   s.lastActiveAt ?? s.createdAt ?? 0;
@@ -83,6 +83,40 @@ export function descendants(
         )
       : [];
   return [s, ...under];
+}
+/**
+ * A session's subagents as they started one another, each with how deep it
+ * is under the session (Magpie sessions client.js `subTree`, MIT). One in a
+ * loop of parents is still shown, at the top.
+ */
+export function subagentTree(
+  subagents: SessionSubagent[],
+): [SessionSubagent, number][] {
+  const ids = new Set(subagents.map((s) => s.id));
+  const under = new Map<string, SessionSubagent[]>();
+  for (const s of subagents) {
+    const parent =
+      s.parent && ids.has(s.parent) && s.parent !== s.id ? s.parent : "";
+    under.set(parent, [...(under.get(parent) ?? []), s]);
+  }
+  const out: [SessionSubagent, number][] = [];
+  const seen = new Set<string>();
+  const walk = (parent: string, depth: number) => {
+    for (const s of under.get(parent) ?? []) {
+      if (seen.has(s.id)) continue;
+      seen.add(s.id);
+      out.push([s, Math.min(depth, MAX_DEPTH)]);
+      walk(s.id, depth + 1);
+    }
+  };
+  walk("", 0);
+  for (const s of subagents) {
+    if (seen.has(s.id)) continue;
+    seen.add(s.id);
+    out.push([s, 0]);
+    walk(s.id, 1);
+  }
+  return out;
 }
 export function agentCounts(sessions: ManagedSession[]): [string, number][] {
   const counts = new Map<string, number>();

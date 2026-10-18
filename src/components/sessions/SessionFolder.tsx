@@ -3,11 +3,17 @@ import { useTranslation } from "react-i18next";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ListCard, ListHead, ListFold } from "@/components/ui/list";
 import { Button } from "@/components/ui/button";
-import type { ManagedSession } from "@/lib/api/sessions";
+import type { ManagedSession, SessionSubagent } from "@/lib/api/sessions";
 import { getBaseName } from "./utils";
-import { canSelect, descendants, MAX_DEPTH, type SessionKids } from "./model";
+import {
+  canSelect,
+  descendants,
+  MAX_DEPTH,
+  subagentTree,
+  type SessionKids,
+} from "./model";
 import { SessionRow } from "./SessionRow";
-import { SessionSubagents } from "./SessionSubagents";
+import { SessionSubagents, SubagentRow } from "./SessionSubagents";
 export function SelectionCheckbox({
   sessions,
   selected,
@@ -52,6 +58,7 @@ export function SessionFolder({
   located,
   onLocated,
   onRead,
+  onReadSubagent,
   onAnalyze,
 }: {
   path: string;
@@ -74,6 +81,7 @@ export function SessionFolder({
   located?: { key: string; request: number | null };
   onLocated?: (request: number) => void;
   onRead?: (session: ManagedSession) => void;
+  onReadSubagent?: (session: ManagedSession, subagent: SessionSubagent) => void;
   onAnalyze?: (sessionKey: string) => void;
 }) {
   const { t } = useTranslation();
@@ -87,6 +95,8 @@ export function SessionFolder({
   if (target && !visible.includes(target)) visible.push(target);
   const row = (s: ManagedSession, depth: number): ReactNode => {
     const under = depth < MAX_DEPTH ? (kids.get(s.sessionKey) ?? []) : [];
+    const subagents = subagentTree(s.subagents ?? []);
+    const count = under.length + subagents.length;
     return (
       <SessionRow
         key={s.sessionKey}
@@ -104,14 +114,22 @@ export function SessionFolder({
         onRead={onRead}
         onAnalyze={onAnalyze}
       >
-        {under.length > 0 && (
+        {count > 0 && (
           <SessionSubagents
-            count={under.length}
+            count={count}
             nested={depth > 0}
-            open={subsOpen.has(s.sessionKey) || searching}
+            open={subsOpen.has(s.sessionKey) || (searching && under.length > 0)}
             onOpenChange={() => toggleSubs(s.sessionKey)}
           >
             {under.map((k) => row(k, depth + 1))}
+            {subagents.map(([subagent, level]) => (
+              <SubagentRow
+                key={subagent.id}
+                subagent={subagent}
+                depth={level}
+                onOpen={() => onReadSubagent?.(s, subagent)}
+              />
+            ))}
           </SessionSubagents>
         )}
       </SessionRow>

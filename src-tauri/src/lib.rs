@@ -1619,6 +1619,7 @@ pub fn run() {
             commands::list_sessions,
             commands::refresh_session_index,
             commands::get_session_messages,
+            commands::get_subagent_messages,
             commands::get_session_transcript,
             commands::prepare_session_search,
             commands::run_session_search,

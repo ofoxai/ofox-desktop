@@ -1,12 +1,15 @@
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::SystemTime;
 
 use serde::de::IgnoredAny;
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::config::get_claude_config_dir;
+use crate::session_manager::managed::Subagent;
 use crate::session_manager::meta_cache::SessionDetails;
 use crate::session_manager::title::{clean_prompt, one_line, titled, untagged, TitleCandidates};
 use crate::session_manager::{SessionMessage, SessionMeta};
@@ -199,6 +202,102 @@ pub(crate) fn details(path: &Path) -> Option<SessionDetails> {
         candidates: scan.candidates,
         ..SessionDetails::default()
     })
+}
+
+/// The subagents among a Claude Code session's files, oldest first (Magpie
+/// internal/sessions/subagents.go `subagentsOf`, MIT).
+pub(crate) fn subagents(files: &[(PathBuf, u64)]) -> Vec<Subagent> {
+    let mut found: Vec<_> = files
+        .iter()
+        .filter_map(|(path, _)| subagent(path))
+        .collect();
+    found.sort_by(|a, b| {
+        a.started_at
+            .cmp(&b.started_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    found
+}
+
+/// The id of the subagent whose transcript `path` is:
+/// `<session>/subagents/agent-<id>.jsonl`, or a workflow run's
+/// `<session>/subagents/workflows/<run>/agent-<id>.jsonl` (Magpie `SubagentOf`).
+fn subagent_id(path: &Path) -> Option<&str> {
+    let dir = path.parent()?;
+    let named = |p: Option<&Path>, name: &str| p.and_then(Path::file_name) == Some(name.as_ref());
+    let workflow = dir.parent();
+    let filed = named(Some(dir), "subagents")
+        || named(workflow, "workflows") && named(workflow.and_then(Path::parent), "subagents");
+    if !filed {
+        return None;
+    }
+    path.file_name()?
+        .to_str()?
+        .strip_suffix(".jsonl")?
+        .strip_prefix("agent-")
+        .filter(|id| !id.is_empty())
+}
+
+type SubagentCache = HashMap<PathBuf, (u64, Option<SystemTime>, Subagent)>;
+
+/// Subagents read before, by file: read again only once the file changes.
+static SUBAGENTS: LazyLock<Mutex<SubagentCache>> = LazyLock::new(Default::default);
+
+/// One subagent: kind, parent and title from the `agent-<id>.meta.json`
+/// Claude Code writes beside it, else the title from the first thing it was
+/// asked. A compaction's own run (`agent-acompact-<id>`) is no subagent.
+fn subagent(path: &Path) -> Option<Subagent> {
+    let id = subagent_id(path)?;
+    if id.starts_with("acompact-") {
+        return None;
+    }
+    let file = std::fs::metadata(path).ok()?;
+    let stamp = (file.len(), file.modified().ok());
+    let mut cache = SUBAGENTS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((len, modified, found)) = cache.get(path) {
+        if (*len, *modified) == stamp {
+            return Some(found.clone());
+        }
+    }
+    let meta = std::fs::read(path.with_extension("meta.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .unwrap_or_default();
+    let field = |key: &str, max: usize| {
+        meta.get(key)
+            .and_then(Value::as_str)
+            .map(|text| text.chars().take(max).collect::<String>())
+            .filter(|text| !text.is_empty())
+    };
+    let (head, tail) = read_head_tail_lines(path, 16, 16).unwrap_or_default();
+    let lines = |lines: &[String]| -> Vec<Value> {
+        lines
+            .iter()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    };
+    let (head, tail) = (lines(&head), lines(&tail));
+    let at = |value: &Value| value.get("timestamp").and_then(parse_timestamp_to_ms);
+    let task = head.iter().find_map(|value| {
+        let user = value.get("type").and_then(Value::as_str) == Some("user")
+            && value.get("isMeta").and_then(Value::as_bool) != Some(true);
+        let text = value.get("message")?.get("content").and_then(user_text);
+        Some(untagged(&text.filter(|_| user)?)).filter(|t| !t.is_empty())
+    });
+    let found = Subagent {
+        id: id.to_owned(),
+        title: field("description", usize::MAX)
+            .map(|d| one_line(&d))
+            .filter(|d| !d.is_empty())
+            .or(task),
+        kind: field("agentType", 128),
+        parent: field("parentAgentId", 128),
+        started_at: head.iter().find_map(at),
+        last_active_at: tail.iter().rev().find_map(at),
+        source: path.to_string_lossy().into_owned(),
+    };
+    cache.insert(path.to_path_buf(), (stamp.0, stamp.1, found.clone()));
+    Some(found)
 }
 
 fn last_text(slot: &mut Option<String>, value: Option<&Value>) {
