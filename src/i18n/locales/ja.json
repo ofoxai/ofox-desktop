@@ -3937,6 +3937,8 @@
       "nativeOnly": "ツールで検出",
       "observed": "設定内に存在",
       "observedHint": "ツールの設定から読み取りました。Ofox による適用や接続成功を意味しません。",
+      "observedDisabled": "設定内で無効",
+      "observedDisabledHint": "ツールの設定にありますが、無効になっています（enabled = false）。",
       "scan": "再スキャン",
       "scanning": "ローカル設定を読み取り中…",
       "scanFailed": "読み取りが完了していません。再スキャンしてください。",

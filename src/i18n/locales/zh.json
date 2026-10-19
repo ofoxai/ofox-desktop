@@ -3937,6 +3937,8 @@
       "nativeOnly": "工具中发现",
       "observed": "配置中已有",
       "observedHint": "来自工具配置；不代表已由 Ofox 应用或连接成功。",
+      "observedDisabled": "配置中已停用",
+      "observedDisabledHint": "工具配置里有这一项，但已关闭（enabled = false）。",
       "scan": "重新扫描",
       "scanning": "正在读取本机配置…",
       "scanFailed": "读取未完成，请重新扫描。",

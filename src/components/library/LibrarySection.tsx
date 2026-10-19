@@ -463,13 +463,19 @@ export function LibrarySection({
     setNotice(t("library.interaction.savedLocated", { name: row.name }));
     setCollected(undefined);
   }, [collected, rows, active, data?.epoch, routingKey]);
+  const observedSources = (id: string) =>
+    (native.inventory?.entries ?? [])
+      .filter((entry) => entry.matchedResourceIds.includes(id))
+      .flatMap((entry) => entry.sources);
   const observed = (id: string) => [
-    ...new Set(
-      (native.inventory?.entries ?? [])
-        .filter((entry) => entry.matchedResourceIds.includes(id))
-        .flatMap((entry) => entry.sources.map((source) => source.toolId)),
-    ),
+    ...new Set(observedSources(id).map((source) => source.toolId)),
   ];
+  const switchedOff = (id: string) => {
+    const sources = observedSources(id);
+    return observed(id).filter((tool) =>
+      sources.every((source) => source.toolId !== tool || source.disabled),
+    );
+  };
   const recipeGeneration = useRef(0);
   useEffect(() => {
     const generation = ++recipeGeneration.current;
@@ -1526,6 +1532,7 @@ export function LibrarySection({
                     onExpand={(element) => inline.toggle(row, element)}
                     located={located === row.id}
                     observedTools={observed(row.id)}
+                    disabledTools={switchedOff(row.id)}
                     recipeId={
                       recipeMatches.find((match) =>
                         match.exactResourceIds.includes(row.id),

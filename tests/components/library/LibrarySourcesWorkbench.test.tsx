@@ -221,6 +221,29 @@ it("groups variants without treating native presence as an Ofox application or r
   expect(screen.queryByText("Ofox 已应用")).not.toBeInTheDocument();
 });
 
+it("marks a tool whose matching entry is switched off as disabled", async () => {
+  vi.mocked(libraryApi.inventory).mockResolvedValue({
+    ...inventory,
+    entries: inventory.entries.map((entry) =>
+      entry.entryId === "matched"
+        ? {
+            ...entry,
+            sources: [{ sourceId: "source", toolId: "codex", disabled: true }],
+          }
+        : entry,
+    ),
+  });
+  renderSection();
+  await userEvent.click(
+    await screen.findByRole("button", { name: /codegraph.*2.*种配置/ }),
+  );
+  expect(
+    await screen.findByRole("button", {
+      name: /codegraph · Codex · 配置中已停用/,
+    }),
+  ).toBeVisible();
+});
+
 it("drops displayed source evidence when definitions change during refresh", async () => {
   let refresh!: () => Promise<unknown>;
   vi.spyOn(libraryApi, "inventorySource").mockResolvedValue({

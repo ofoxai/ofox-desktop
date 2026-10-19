@@ -17,6 +17,7 @@ export function LibraryTargets({
   targets,
   delta,
   observedTools = [],
+  disabledTools = [],
   busy,
   onToggle,
 }: {
@@ -24,6 +25,8 @@ export function LibraryTargets({
   targets: ResourceTarget[];
   delta?: TargetDelta;
   observedTools?: string[];
+  /** Observed tools whose matching entry is switched off there. */
+  disabledTools?: string[];
   busy: boolean;
   onToggle: (target: ResourceTarget) => void;
 }) {
@@ -60,7 +63,9 @@ export function LibraryTargets({
                     : observedTools.includes(target.toolId)
                       ? "observed"
                       : "unassigned";
-          const label = `${name} · ${toolLabel(target.toolId, t)} · ${t(state === "observed" ? "library.workbench2.observed" : `library.workbench.${state}`)}`;
+          const off =
+            state === "observed" && disabledTools.includes(target.toolId);
+          const label = `${name} · ${toolLabel(target.toolId, t)} · ${t(state === "observed" ? (off ? "library.workbench2.observedDisabled" : "library.workbench2.observed") : `library.workbench.${state}`)}`;
           return (
             <Tooltip key={target.toolId}>
               <TooltipTrigger asChild>
@@ -89,7 +94,9 @@ export function LibraryTargets({
                         toolId={target.toolId}
                         size={20}
                         variant="plain"
-                        dimmed={!chosen && !shared && state !== "observed"}
+                        dimmed={
+                          !chosen && !shared && (state !== "observed" || off)
+                        }
                       />
                     )}
                   </span>
@@ -130,7 +137,13 @@ export function LibraryTargets({
               <TooltipContent>
                 <p>{label}</p>
                 {state === "observed" && (
-                  <p>{t("library.workbench2.observedHint")}</p>
+                  <p>
+                    {t(
+                      off
+                        ? "library.workbench2.observedDisabledHint"
+                        : "library.workbench2.observedHint",
+                    )}
+                  </p>
                 )}
                 {target.readers && target.readers.length > 1 && (
                   <p>

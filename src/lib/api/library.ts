@@ -216,7 +216,7 @@ export interface LibraryInventory {
     displaySummary?: string | null;
     iconId?: string | null;
     serviceHost?: string | null;
-    sources: { sourceId: string; toolId: string }[];
+    sources: { sourceId: string; toolId: string; disabled?: boolean }[];
     matchedResourceIds: string[];
     conflict: boolean;
     variant?: string | null;

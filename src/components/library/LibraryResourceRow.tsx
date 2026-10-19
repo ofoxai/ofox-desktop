@@ -32,6 +32,7 @@ export function LibraryResourceRow({
   delta,
   check,
   observedTools = [],
+  disabledTools = [],
   located = false,
   recipeId,
   onToggle,
@@ -50,6 +51,7 @@ export function LibraryResourceRow({
   delta?: TargetDelta;
   check?: { state: string; checkedAtMs: number; toolsCount: number };
   observedTools?: string[];
+  disabledTools?: string[];
   located?: boolean;
   recipeId?: string;
   expanded?: boolean;
@@ -196,6 +198,7 @@ export function LibraryResourceRow({
           name={row.name}
           targets={targets}
           observedTools={observedTools}
+          disabledTools={disabledTools}
           delta={delta}
           busy={busy || !writable}
           onToggle={onToggle}

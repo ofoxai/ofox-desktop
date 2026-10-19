@@ -247,7 +247,7 @@ pub fn native_spec(tool: &str, spec: &Value) -> Result<Value, AppError> {
     let mut native = Map::new();
     let common = ["type", "command", "args", "cwd", "env", "url", "headers"];
     for (key, value) in obj {
-        if common.contains(&key.as_str()) {
+        if common.contains(&key.as_str()) || key == "enabled" {
             continue;
         }
         let allowed = match tool {
@@ -459,7 +459,6 @@ pub fn canonical_spec(tool: &str, native: &Value) -> Result<Value, AppError> {
             }
             _ => return Err(error("nativeInvalid")),
         }
-        map.remove("enabled");
         fn canonical_references(value: &mut Value) {
             match value {
                 Value::String(text) => *text = text.replace("{env:", "${"),
@@ -554,7 +553,6 @@ pub fn canonical_spec(tool: &str, native: &Value) -> Result<Value, AppError> {
         }
     }
     if tool == "hermes" {
-        map.remove("enabled");
         if let Some(timeout) = map.get_mut("timeout") {
             let seconds = timeout
                 .as_f64()
@@ -584,8 +582,10 @@ pub fn canonical_spec(tool: &str, native: &Value) -> Result<Value, AppError> {
 }
 
 /// The implied transport is spelled out and empty env/args/headers are dropped,
-/// so two spellings of one definition compare equal.
+/// so two spellings of one definition compare equal. `enabled` is a tool's own
+/// switch, not part of the definition.
 fn normalize_map(map: &mut Map<String, Value>) {
+    map.remove("enabled");
     if !map.contains_key("type") {
         let transport = if map.contains_key("url") {
             "http"

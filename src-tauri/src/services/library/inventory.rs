@@ -60,6 +60,9 @@ pub struct InventorySource {
 pub struct EntrySource {
     pub source_id: String,
     pub tool_id: String,
+    /// The tool keeps this MCP entry switched off (`enabled = false`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub disabled: bool,
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

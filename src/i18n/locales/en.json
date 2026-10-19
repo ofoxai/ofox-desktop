@@ -3937,6 +3937,8 @@
       "nativeOnly": "Discovered in tools",
       "observed": "Present in configuration",
       "observedHint": "Read from tool configuration; this alone does not establish Ofox application or connectivity.",
+      "observedDisabled": "Disabled in configuration",
+      "observedDisabledHint": "The tool configuration has this entry, but it is switched off (enabled = false).",
       "scan": "Rescan",
       "scanning": "Reading local configurations…",
       "scanFailed": "Reading is incomplete. Rescan to continue.",

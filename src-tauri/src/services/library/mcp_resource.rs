@@ -1341,6 +1341,28 @@ mod tests {
         );
     }
     #[test]
+    fn a_stored_enabled_switch_does_not_block_distribution() {
+        let db = Database::memory().unwrap();
+        let snapshot = db.library_snapshot().unwrap();
+        let server = row(
+            "local",
+            "local",
+            json!({"type":"stdio","command":"server","enabled":false}),
+        );
+        assert_eq!(
+            definition_view(&server, &snapshot)["credentialState"],
+            "nativeEnvironmentRequired"
+        );
+        assert!(mcp_codec::native_spec("claude", &server.server)
+            .unwrap()
+            .get("enabled")
+            .is_none());
+        assert_eq!(
+            match_hash(&server.server).unwrap(),
+            match_hash(&json!({"type":"stdio","command":"server"})).unwrap()
+        );
+    }
+    #[test]
     fn ensure_metadata_drops_an_identical_generated_duplicate() {
         let db = Database::memory().unwrap();
         let config = json!({"type":"stdio","command":"codegraph","args":["serve","--mcp"]});

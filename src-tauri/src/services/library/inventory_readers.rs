@@ -190,6 +190,7 @@ fn reference(source: &InventorySource) -> EntrySource {
     EntrySource {
         source_id: source.source_id.clone(),
         tool_id: source.tool_id.clone(),
+        disabled: false,
     }
 }
 fn fail(source: &mut InventorySource, key: &str) {
@@ -488,6 +489,40 @@ fn valid_spec(tool: &str, native: &Value) -> Result<Value, AppError> {
     }
     Ok(spec)
 }
+/// The tool's own on/off switch rides on the source, outside the compared definition.
+fn add_mcp(
+    data: &mut ScanData,
+    source: &InventorySource,
+    name: &str,
+    native: &Value,
+    spec: Value,
+    proofs: Vec<Proof>,
+) {
+    let hash = mcp_resource::match_hash(&spec).unwrap_or_default();
+    add(
+        data,
+        source,
+        name.to_string(),
+        Definition::Mcp { spec },
+        proofs,
+        hash.clone(),
+        None,
+    );
+    if native.get("enabled").and_then(Value::as_bool) != Some(false) {
+        return;
+    }
+    let entry = data
+        .candidates
+        .iter_mut()
+        .find(|entry| entry.hash == hash && entry.view.name == name);
+    for reference in entry
+        .into_iter()
+        .flat_map(|entry| entry.view.sources.iter_mut())
+        .filter(|reference| reference.source_id == source.source_id)
+    {
+        reference.disabled = true;
+    }
+}
 fn mcp(routes: &[Route], data: &mut ScanData, uncertain: &[String]) {
     let mut open = json!({});
     let mut open_sources = BTreeMap::<String, Vec<(InventorySource, Option<Proof>)>>::new();
@@ -515,15 +550,13 @@ fn mcp(routes: &[Route], data: &mut ScanData, uncertain: &[String]) {
                         }
                         match valid_spec(&route.tool, native) {
                             Ok(spec) => {
-                                let hash = mcp_resource::match_hash(&spec).unwrap_or_default();
-                                add(
+                                add_mcp(
                                     data,
                                     &source,
-                                    name.clone(),
-                                    Definition::Mcp { spec },
+                                    name,
+                                    native,
+                                    spec,
                                     proof.clone().into_iter().collect(),
-                                    hash,
-                                    None,
                                 );
                                 source.count += 1;
                             }
@@ -575,16 +608,14 @@ fn mcp(routes: &[Route], data: &mut ScanData, uncertain: &[String]) {
             };
             match valid_spec("opencode", native) {
                 Ok(spec) => {
-                    let hash = mcp_resource::match_hash(&spec).unwrap_or_default();
                     for (source, _) in sources {
-                        add(
+                        add_mcp(
                             data,
                             source,
-                            name.clone(),
-                            Definition::Mcp { spec: spec.clone() },
+                            name,
+                            native,
+                            spec.clone(),
                             open_proofs.clone(),
-                            hash.clone(),
-                            None,
                         );
                     }
                 }

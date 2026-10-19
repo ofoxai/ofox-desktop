@@ -330,6 +330,24 @@ it("shows native presence as a visible distinct state without claiming an applic
   expect(within(observed).getByText("◇")).toBeVisible();
 });
 
+it("shows an entry the tool keeps switched off as present but disabled", () => {
+  render(
+    <LibraryTargets
+      name="Docs"
+      targets={[target]}
+      observedTools={["codex"]}
+      disabledTools={["codex"]}
+      busy={false}
+      onToggle={vi.fn()}
+    />,
+  );
+  const observed = screen.getByRole("button", {
+    name: /Docs · Codex · 配置中已停用/,
+  });
+  expect(observed).toHaveAttribute("data-state", "observed");
+  expect(within(observed).getByText("◇")).toBeVisible();
+});
+
 it("reads Skills as safe inline Markdown without loading embedded resources", async () => {
   data = {
     epoch: 1,

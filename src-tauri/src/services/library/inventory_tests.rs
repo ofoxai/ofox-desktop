@@ -718,3 +718,62 @@ fn a_library_row_with_empty_collections_matches_its_native_entry() {
     import(&db, &view.ticket_id, &[view.entries[0].entry_id.clone()], 0).unwrap();
     assert_eq!(db.get_all_mcp_servers().unwrap().len(), 1);
 }
+
+#[test]
+#[serial_test::serial]
+fn a_disabled_native_entry_matches_its_definition_and_is_marked_disabled() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    super::super::mcp_resource::save_draft(
+        &db,
+        crate::app_config::McpServer {
+            id: "context7".into(),
+            name: "context7".into(),
+            server: serde_json::json!({"type":"http","url":"https://mcp.context7.com/mcp"}),
+            apps: Default::default(),
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: vec![],
+        },
+        None,
+    )
+    .unwrap();
+    let paths = super::super::mcp_resource::native_paths().unwrap();
+    write(
+        &paths["codex"],
+        "[mcp_servers.context7]\nurl = \"https://mcp.context7.com/mcp\"\nenabled = false\n",
+    );
+    write(
+        &paths["opencode"],
+        r#"{"mcp":{"context7":{"type":"remote","url":"https://mcp.context7.com/mcp","enabled":false}}}"#,
+    );
+    write(
+        &paths["claude"],
+        r#"{"mcpServers":{"context7":{"type":"http","url":"https://mcp.context7.com/mcp"}}}"#,
+    );
+    let view = scan(&db, ResourceKind::Mcp).unwrap();
+    assert_eq!(view.entries.len(), 1);
+    let entry = &view.entries[0];
+    assert_eq!(entry.matched_resource_ids, vec!["context7"]);
+    let disabled = |tool: &str| {
+        entry
+            .sources
+            .iter()
+            .find(|source| source.tool_id == tool)
+            .unwrap()
+            .disabled
+    };
+    assert!(disabled("codex"));
+    assert!(disabled("opencode"));
+    assert!(!disabled("claude"));
+    let dto = serde_json::to_value(&view).unwrap();
+    let claude = dto["entries"][0]["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["toolId"] == "claude")
+        .unwrap()
+        .clone();
+    assert!(claude.get("disabled").is_none());
+}
