@@ -448,7 +448,7 @@ fn refresh_local(
         // unselected providers' cached paths as missing. Warm peers do no body reads.
         refresh_analytics(db, &observed.discovery, &mut total, &mut failed);
     }
-    let maintenance_failed = !run_maintenance(db, &mut total);
+    let maintenance_failed = !run_maintenance(db, &mut total, &failed);
     let after_db = match DbRevision::read(db) {
         Ok(revision) => revision,
         Err(_) => return Some(error_result("usage.sync.revisionUnavailable")),
@@ -810,7 +810,7 @@ fn sync_sources(db: &Database) -> SessionSyncResult {
     let discovery = observe_sources(roots.clone()).discovery;
     let (mut total, mut failed) = sync_selected_sources(db, &selected, &roots);
     refresh_analytics(db, &discovery, &mut total, &mut failed);
-    run_maintenance(db, &mut total);
+    run_maintenance(db, &mut total, &failed);
     total
 }
 fn sync_selected_sources(
@@ -887,7 +887,20 @@ fn sync_selected_sources(
 }
 /// False only for an attempted maintenance failure. A source-caused deferral
 /// already has its own provider retry; stable successful providers stay warm.
-fn run_maintenance(db: &Database, total: &mut SessionSyncResult) -> bool {
+fn run_maintenance(
+    db: &Database,
+    total: &mut SessionSyncResult,
+    failed: &BTreeSet<String>,
+) -> bool {
+    // Claude's own committed rows and evidence are all this step reads: a
+    // failed batch of another provider (OpenCode's live database changing
+    // mid-read, say) must not hold it back on every sync.
+    if !failed.contains("claude") {
+        if let Err(e) = usage_maintenance::price_claude_hour_writes_if_due(db) {
+            total.errors.push(format!("用量维护失败: {e}"));
+            return false;
+        }
+    }
     // Backfill reparses old files. Publishing it after a rolled-back source
     // batch would archive those calls before their unchanged-file retry writes
     // them live, counting them twice. Leave pending flags for a successful run.
@@ -1247,6 +1260,54 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         conn.execute_batch("DROP TABLE maintenance_flags").unwrap();
         assert!(super::super::usage_source::has_complete_coverage_on(&conn, "claude").is_err());
+    }
+
+    /// Pricing Claude's hour-long writes again reads only Claude's own rows:
+    /// another provider failing its batch does not hold it back.
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn claude_hour_writes_are_priced_again_while_another_provider_fails() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = sandbox();
+        let claude = home.home().join(".claude/projects/-work/s.jsonl");
+        std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+        std::fs::write(
+            &claude,
+            format!(
+                "{}\n",
+                serde_json::json!({"type":"assistant","sessionId":"s",
+                    "timestamp":"2026-10-15T00:00:01Z","message":{"id":"m","model":"fixture",
+                    "stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1,
+                    "cache_read_input_tokens":0,"cache_creation_input_tokens":10,
+                    "cache_creation":{"ephemeral_1h_input_tokens":10}}}})
+            ),
+        )
+        .unwrap();
+        let codex = home
+            .home()
+            .join(".codex/sessions/2026/10/15/rollout-2026-10-15T00-00-00-x.jsonl");
+        std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        std::fs::write(&codex, "{}\n").unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let db = Database::memory().unwrap();
+        let result = sync_sources(&db);
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            !result.errors.is_empty(),
+            "the unreadable rollout must fail Codex"
+        );
+        let flag: Option<String> = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT value FROM maintenance_flags WHERE key = ?1",
+                [usage_maintenance::PRICE_CLAUDE_HOUR_WRITES],
+                |r| r.get(0),
+            )
+            .ok();
+        assert_eq!(flag.as_deref(), Some("done"));
     }
 
     fn source_disappears(tool: &str, relative: &str) {

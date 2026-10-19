@@ -50,6 +50,13 @@ pub fn run_pending(db: &Database) -> Result<(), AppError> {
         let outcome = backfill_session_archive(db)?;
         log::debug!("[USAGE-MAINT] archive backfill: {outcome:?}");
     }
+    price_claude_hour_writes_if_due(db)
+}
+
+/// Price Claude's hour-long cache writes again once, if that has not run.
+/// It reads only Claude's committed rows and evidence, so the sync runs it
+/// whenever Claude's own sources succeeded, whatever another provider did.
+pub fn price_claude_hour_writes_if_due(db: &Database) -> Result<(), AppError> {
     if !is_done(db, PRICE_CLAUDE_HOUR_WRITES)? {
         let projects = crate::config::get_claude_config_dir().join("projects");
         let updated = price_claude_hour_writes(db, &projects)?;
