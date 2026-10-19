@@ -11,6 +11,7 @@ pub(crate) mod chatgpt_state;
 pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod codex_probe;
+pub(crate) mod effort;
 pub(crate) mod endpoint;
 mod env_file;
 pub(crate) mod gemini;
@@ -765,6 +766,57 @@ pub(crate) async fn persist_bound_settings(
                 Err(_) => format!("{error}；还原已保存模型也失败，请刷新后重试。"),
             },
         );
+    }
+    crate::model_selection::record_write_receipt(db, tool.record_key());
+    Ok(())
+}
+
+/// Save a tool's reasoning effort under the binding lock: into the config the
+/// tool reads, and for Codex into the DB template too, which a later model
+/// switch writes from. `None` leaves the effort to the tool.
+pub(crate) async fn persist_bound_effort(
+    db: &Database,
+    tool: Tool,
+    effort: Option<&str>,
+) -> Result<(), String> {
+    let effort = effort::validate(tool, effort)?;
+    crate::agent_env::ready().await;
+    let _guard = BIND_LOCK.lock().await;
+    let _file_locks = file_locks(tool);
+    crate::model_selection::check_write_revision(db, tool.record_key())?;
+    let previous = if tool == Tool::Codex {
+        let provider = db
+            .get_provider_by_id(tool.provider_id(), tool.app().as_str())
+            .map_err(|_| "读取当前 Ofox 模型失败。".to_string())?
+            .ok_or_else(|| "未找到保存的 Ofox 模型。".to_string())?;
+        let mut updated = provider.settings_config.clone();
+        codex::set_template_effort(&mut updated, effort.as_deref())?;
+        db.update_provider_settings_config(tool.app().as_str(), tool.provider_id(), &updated)
+            .map_err(|_| "保存推理强度失败。".to_string())?;
+        Some(provider.settings_config)
+    } else {
+        None
+    };
+    let mut txn = FileTxn::new();
+    let written = match tool {
+        Tool::Codex => codex::write_effort(effort.as_deref(), &mut txn),
+        Tool::Claude => claude::write_effort(effort.as_deref(), &mut txn),
+        Tool::Hermes => hermes::write_effort(effort.as_deref(), &mut txn),
+        Tool::Gemini | Tool::OpenCode | Tool::OpenClaw => {
+            Err("这个工具不能在 Ofox 里设置推理强度。".into())
+        }
+    };
+    if let Err(error) = written {
+        let error = rollback_with(txn, error);
+        if let Some(previous) = previous {
+            if db
+                .update_provider_settings_config(tool.app().as_str(), tool.provider_id(), &previous)
+                .is_err()
+            {
+                return Err(format!("{error}；还原推理强度也失败，请刷新后重试。"));
+            }
+        }
+        return Err(error);
     }
     crate::model_selection::record_write_receipt(db, tool.record_key());
     Ok(())

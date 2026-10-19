@@ -84,6 +84,9 @@ pub struct ToolModelSnapshot {
     pub can_write: bool,
     pub scope: Vec<String>,
     pub scope_models: Vec<ScopeModel>,
+    /// The reasoning effort, for a tool Ofox can set it on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<crate::services::ofox_bind::effort::EffortState>,
 }
 
 #[derive(Debug, Clone, Serialize)]

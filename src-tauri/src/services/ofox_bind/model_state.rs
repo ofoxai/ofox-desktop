@@ -97,6 +97,7 @@ pub(crate) async fn snapshot(
             .map(|path| path.to_string_lossy().into_owned())
             .collect(),
         scope_models: Vec::new(),
+        effort: super::effort::state(tool),
     })
 }
 

@@ -5817,3 +5817,154 @@ async fn a_gemini_model_picked_for_the_users_own_endpoint_is_kept() {
         report.kept_keys
     );
 }
+
+#[tokio::test]
+#[serial]
+async fn codex_effort_set_to_default_stays_default_through_a_model_switch() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    assert_eq!(
+        effort::state(Tool::Codex).unwrap().value.as_deref(),
+        Some("high")
+    );
+
+    persist_bound_effort(&db, Tool::Codex, None).await.unwrap();
+    assert!(toml_at(&path).get("model_reasoning_effort").is_none());
+    assert_eq!(effort::state(Tool::Codex).unwrap().value, None);
+
+    // A later model switch writes from the template, which must not bring "high" back.
+    let saved = db
+        .get_provider_by_id(Tool::Codex.provider_id(), "codex")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let config = saved["config"].as_str().unwrap();
+    assert!(!config.contains("model_reasoning_effort"));
+    let updated = json!({ "config": config.replace("openai/gpt-6-luna", "openai/gpt-other") });
+    persist_bound_settings(&db, Tool::Codex, KEY, &saved, &updated)
+        .await
+        .unwrap();
+    let after = toml_at(&path);
+    assert_eq!(after["model"].as_str(), Some("openai/gpt-other"));
+    assert!(after.get("model_reasoning_effort").is_none());
+}
+
+#[tokio::test]
+#[serial]
+async fn codex_effort_level_is_written_and_kept_through_a_model_switch() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+
+    persist_bound_effort(&db, Tool::Codex, Some("xhigh"))
+        .await
+        .unwrap();
+    assert_eq!(
+        toml_at(&path)["model_reasoning_effort"].as_str(),
+        Some("xhigh")
+    );
+    let saved = db
+        .get_provider_by_id(Tool::Codex.provider_id(), "codex")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let updated = json!({ "config": saved["config"].as_str().unwrap().replace("openai/gpt-6-luna", "openai/gpt-other") });
+    persist_bound_settings(&db, Tool::Codex, KEY, &saved, &updated)
+        .await
+        .unwrap();
+    assert_eq!(
+        toml_at(&path)["model_reasoning_effort"].as_str(),
+        Some("xhigh")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_effort_keeps_max_in_the_environment_and_the_rest_in_effort_level() {
+    let (_home, db, settings) = bound_claude("anthropic/claude-sonnet-5-5").await;
+
+    persist_bound_effort(&db, Tool::Claude, Some("max"))
+        .await
+        .unwrap();
+    let value = json_at(&settings);
+    assert_eq!(value["env"]["CLAUDE_CODE_EFFORT_LEVEL"], "max");
+    assert!(value.get("effortLevel").is_none());
+    assert_eq!(value["env"]["ANTHROPIC_AUTH_TOKEN"], KEY);
+    assert_eq!(
+        effort::state(Tool::Claude).unwrap().value.as_deref(),
+        Some("max")
+    );
+
+    persist_bound_effort(&db, Tool::Claude, Some("low"))
+        .await
+        .unwrap();
+    let value = json_at(&settings);
+    assert_eq!(value["effortLevel"], "low");
+    assert!(value["env"].get("CLAUDE_CODE_EFFORT_LEVEL").is_none());
+
+    persist_bound_effort(&db, Tool::Claude, None).await.unwrap();
+    let value = json_at(&settings);
+    assert!(value.get("effortLevel").is_none());
+    assert_eq!(effort::state(Tool::Claude).unwrap().value, None);
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_effort_lives_in_the_agent_section_and_leaves_the_rest_alone() {
+    let _home = Home::new();
+    let path = crate::hermes_config::get_hermes_config_path();
+    write(&path, HERMES_CONFIG);
+    let db = db_for(Tool::Hermes, hermes_template());
+    bind(&db, Tool::Hermes, "hermes", KEY).await.unwrap();
+    let bound = fs::read_to_string(&path).unwrap();
+
+    persist_bound_effort(&db, Tool::Hermes, Some("high"))
+        .await
+        .unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.starts_with("# Hermes"), "comments survive: {text}");
+    assert_eq!(
+        effort::state(Tool::Hermes).unwrap().value.as_deref(),
+        Some("high")
+    );
+    assert_eq!(
+        crate::hermes_config::get_model_config()
+            .unwrap()
+            .unwrap()
+            .provider
+            .as_deref(),
+        Some("ofox-hermes")
+    );
+
+    persist_bound_effort(&db, Tool::Hermes, None).await.unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), bound);
+}
+
+#[test]
+fn effort_takes_each_tools_own_levels_or_its_default() {
+    assert_eq!(effort::validate(Tool::Codex, None).unwrap(), None);
+    assert_eq!(
+        effort::validate(Tool::Codex, Some(" high "))
+            .unwrap()
+            .as_deref(),
+        Some("high")
+    );
+    assert!(effort::validate(Tool::Codex, Some("max")).is_err());
+    assert_eq!(
+        effort::validate(Tool::Claude, Some("max"))
+            .unwrap()
+            .as_deref(),
+        Some("max")
+    );
+    assert_eq!(
+        effort::validate(Tool::Hermes, Some("none"))
+            .unwrap()
+            .as_deref(),
+        Some("none")
+    );
+    assert!(effort::validate(Tool::Gemini, None).is_err());
+    assert!(effort::state(Tool::OpenCode).is_none());
+}

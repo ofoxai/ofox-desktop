@@ -1334,6 +1334,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::model_selection_snapshot,
             commands::model_selection_save,
+            commands::model_effort_save,
             commands::model_profiles_list,
             commands::model_profiles_save,
             commands::model_profiles_delete,

@@ -503,6 +503,57 @@ pub(crate) fn strip_flag_codex_ignores(
     Ok(true)
 }
 
+/// 推理强度在 config.toml 里的字段（Codex 和 ChatGPT 共用）。
+const EFFORT_KEY: &str = "model_reasoning_effort";
+
+/// `text` 里的推理强度改成 `effort`，`None` 删掉、交给 Codex 自己的默认；其余不动。
+pub(crate) fn with_effort(text: &str, effort: Option<&str>) -> Result<String, String> {
+    let mut doc = parse_doc(text)?;
+    match effort {
+        Some(level) => doc[EFFORT_KEY] = toml_edit::value(level),
+        None => {
+            doc.as_table_mut().remove(EFFORT_KEY);
+        }
+    }
+    Ok(doc.to_string())
+}
+
+/// config.toml 现在的推理强度；没有或读不了都当作默认。
+pub(crate) fn effort() -> Option<String> {
+    let text = read_text(&get_codex_config_path()).ok()??;
+    parse_doc(&text)
+        .ok()?
+        .get(EFFORT_KEY)?
+        .as_str()
+        .map(Into::into)
+}
+
+/// 模板里的那份也要改：之后切换模型按模板写，而 [`apply_patch`] 只在文件里没有
+/// 推理强度时才写模板的值，选了默认就会被模板的 "high" 补回来。
+pub(crate) fn set_template_effort(
+    settings: &mut Value,
+    effort: Option<&str>,
+) -> Result<(), String> {
+    let config = settings
+        .get("config")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let updated = with_effort(&config, effort)?;
+    settings
+        .as_object_mut()
+        .ok_or_else(|| "Ofox Codex 模板不是对象".to_string())?
+        .insert("config".into(), Value::String(updated));
+    Ok(())
+}
+
+pub(crate) fn write_effort(effort: Option<&str>, txn: &mut FileTxn) -> Result<(), String> {
+    let path = get_codex_config_path();
+    let updated = with_effort(&read_text(&path)?.unwrap_or_default(), effort)?;
+    txn.write_with_mode(&path, updated.as_bytes(), BOUND_CONFIG_MODE)
+        .map_err(|e| format!("写入 Codex 配置失败：{e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

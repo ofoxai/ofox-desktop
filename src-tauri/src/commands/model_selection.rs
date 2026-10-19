@@ -77,6 +77,7 @@ pub(crate) async fn read_one(state: &AppState, id: &str) -> Result<ToolModelSnap
                 .map(|entry| entry.scope.clone())
                 .collect(),
             scope_models,
+            effort: None,
         }
     } else {
         let (legacy, _) = crate::services::ofox_bind::tool_for(&target)
@@ -156,6 +157,7 @@ pub(crate) async fn read_many(
                     can_write: false,
                     scope: vec![],
                     scope_models: vec![],
+                    effort: None,
                 }
             }
         };
@@ -333,6 +335,7 @@ pub(crate) async fn save_one(
                 can_write: false,
                 scope: before.scope,
                 scope_models: Vec::new(),
+                effort: None,
             }
         }
     };
@@ -368,6 +371,55 @@ pub async fn model_selection_save(
     let result = save_one(state, auth, &tool, selection, &expected_revision).await?;
     notify(&app, vec![result.snapshot.write_target.clone()]);
     Ok(result)
+}
+
+/// Save a tool's reasoning effort (`None`: the tool's default) against the
+/// revision its snapshot was read at, as a model save does.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn model_effort_save(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    tool: String,
+    effort: Option<String>,
+    expected_revision: String,
+) -> Result<ToolModelSnapshot, String> {
+    let _guard = SELECTION_LOCK.lock().await;
+    let target = canonical_tool(&tool)?;
+    let bind_tool = crate::services::ofox_bind::tool_for(&target)
+        .map(|(tool, _)| tool)
+        .ok_or_else(|| "这个工具不能在 Ofox 里设置推理强度。".to_string())?;
+    let before = read_one(&state, &tool).await?;
+    if before.revision != expected_revision {
+        return Err("模型配置已变化，请刷新后重试。".into());
+    }
+    if before.binding.status != BindingStatus::Configured {
+        return Err(before
+            .binding
+            .message
+            .unwrap_or_else(|| "请先确认 Ofox 接入配置。".into()));
+    }
+    if before.effort.is_none() {
+        return Err("这个工具不能在 Ofox 里设置推理强度。".into());
+    }
+    WRITE_RECEIPT
+        .scope(
+            Arc::new(Mutex::new(None)),
+            EXPECTED_WRITE.scope(
+                ExpectedWrite {
+                    target: target.clone(),
+                    revision: expected_revision,
+                },
+                crate::services::ofox_bind::persist_bound_effort(
+                    &state.db,
+                    bind_tool,
+                    effort.as_deref(),
+                ),
+            ),
+        )
+        .await
+        .map_err(crate::redact::scrub_error)?;
+    notify(&app, vec![target]);
+    read_one(&state, &tool).await
 }
 
 #[cfg(test)]

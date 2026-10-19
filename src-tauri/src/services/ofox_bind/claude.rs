@@ -173,6 +173,40 @@ pub(crate) fn legacy_edits() -> Result<Vec<FileEdit>, String> {
     }])
 }
 
+/// 推理强度；Claude Code 不让 settings.json 的 `effortLevel` 存 max，max 要放环境变量。
+const EFFORT: JsonPath = &["effortLevel"];
+const EFFORT_ENV: JsonPath = &["env", "CLAUDE_CODE_EFFORT_LEVEL"];
+
+/// settings.json 的推理强度改成 `effort`，`None` 两处都删掉、交给 Claude Code。
+pub(crate) fn with_effort(current: Option<&str>, effort: Option<&str>) -> Result<String, String> {
+    let before = json_file::parse_object(current, LABEL)?;
+    let mut after = before.clone();
+    json_file::remove(&mut after, EFFORT);
+    json_file::remove(&mut after, EFFORT_ENV);
+    match effort {
+        Some("max") => json_file::set(&mut after, EFFORT_ENV, "max".into()),
+        Some(level) => json_file::set(&mut after, EFFORT, level.into()),
+        None => {}
+    }
+    json_file::render_changed(current.unwrap_or_default(), KeyStyle::Json, &before, &after)
+}
+
+/// settings.json 现在的推理强度（环境变量里的 max 优先）；没有或读不了都当作默认。
+pub(crate) fn effort() -> Option<String> {
+    let text = read_text(&settings_path()).ok()??;
+    let value = json_file::parse_object(Some(&text), LABEL).ok()?;
+    [EFFORT_ENV, EFFORT]
+        .iter()
+        .find_map(|path| json_file::get(&value, path)?.as_str().map(Into::into))
+}
+
+pub(crate) fn write_effort(effort: Option<&str>, txn: &mut FileTxn) -> Result<(), String> {
+    let path = settings_path();
+    let updated = with_effort(read_text(&path)?.as_deref(), effort)?;
+    txn.write(&path, updated.as_bytes())
+        .map_err(|e| format!("写入 Claude 配置失败：{e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

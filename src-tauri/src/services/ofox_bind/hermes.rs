@@ -537,6 +537,53 @@ pub(crate) fn legacy_edits(legacy: Option<&Value>) -> Result<Vec<FileEdit>, Stri
     }])
 }
 
+/// 推理强度在 `agent.reasoning_effort`；绑定只管 [`SECTIONS`]，这一段单独写。
+const AGENT: &str = "agent";
+const EFFORT_FIELD: &str = "reasoning_effort";
+
+/// config.yaml 的推理强度改成 `effort`，`None` 删掉、交给 Hermes（它默认 medium）；
+/// `agent` 段里别的设置和其余段落原样保留。
+pub(crate) fn with_effort(current: Option<&str>, effort: Option<&str>) -> Result<String, String> {
+    let before = parse(current)?;
+    let mut agent = match before.get(AGENT) {
+        None | Some(Yaml::Null) => Mapping::new(),
+        Some(Yaml::Mapping(agent)) => agent.clone(),
+        Some(_) => return Err(format!("{LABEL} 的 {AGENT} 段落格式无效，请先修复后再操作")),
+    };
+    match effort {
+        Some(level) => {
+            agent.insert(EFFORT_FIELD.into(), level.into());
+        }
+        None => {
+            agent.remove(EFFORT_FIELD);
+        }
+    }
+    let after = (!agent.is_empty()).then_some(Yaml::Mapping(agent));
+    if after.as_ref() == before.get(AGENT) {
+        return Ok(current.unwrap_or_default().to_string());
+    }
+    hermes_config::render_section(current.unwrap_or_default(), AGENT, after.as_ref())
+        .map_err(|e| e.to_string())
+}
+
+/// config.yaml 现在的推理强度；没有或读不了都当作默认。
+pub(crate) fn effort() -> Option<String> {
+    let text = read_text(&config_path()).ok()??;
+    parse(Some(&text))
+        .ok()?
+        .get(AGENT)?
+        .get(EFFORT_FIELD)?
+        .as_str()
+        .map(Into::into)
+}
+
+pub(crate) fn write_effort(effort: Option<&str>, txn: &mut FileTxn) -> Result<(), String> {
+    let path = config_path();
+    let updated = with_effort(read_text(&path)?.as_deref(), effort)?;
+    txn.write(&path, updated.as_bytes())
+        .map_err(|e| format!("写入 Hermes 配置失败：{e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

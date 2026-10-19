@@ -339,6 +339,7 @@ mod tests {
             can_write: true,
             scope: vec![],
             scope_models: vec![],
+            effort: None,
         }
     }
 
