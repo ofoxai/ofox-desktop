@@ -15,6 +15,56 @@ const POPOVER_HEIGHT: f64 = 620.0;
 const POPOVER_WIDTH: f64 = 328.0;
 #[cfg(not(target_os = "macos"))]
 const POPOVER_HEIGHT: f64 = 588.0;
+/// 卡片上下的透明边距之和（macOS 的 `p-4`），其它平台没有。
+const FRAME_MARGIN: f64 = if cfg!(target_os = "macos") { 32.0 } else { 0.0 };
+/// 再矮就放不下头部、账户行、标签和底栏。
+const MIN_HEIGHT: f64 = 300.0;
+
+/// 窗口跟着卡片内容的高度走（magpie 的 panel 也是），`POPOVER_HEIGHT` 是上限。
+static HEIGHT: std::sync::Mutex<f64> = std::sync::Mutex::new(POPOVER_HEIGHT);
+/// 上次打开时托盘图标的位置，改高度时据此重新贴住图标那一侧。
+static LAST_TRAY: std::sync::Mutex<Option<tauri::Rect>> = std::sync::Mutex::new(None);
+
+fn current_height() -> f64 {
+    HEIGHT
+        .lock()
+        .map(|height| *height)
+        .unwrap_or(POPOVER_HEIGHT)
+}
+
+/// 卡片想要的高度换成窗口高度：加上透明边距，限制在 [MIN_HEIGHT, POPOVER_HEIGHT]。
+fn window_height(card: f64) -> f64 {
+    if !card.is_finite() {
+        return POPOVER_HEIGHT;
+    }
+    (card + FRAME_MARGIN).clamp(MIN_HEIGHT, POPOVER_HEIGHT)
+}
+
+/// 前端量出卡片内容的高度后调用：窗口改成这个高度，开着的话重新贴住托盘图标，
+/// 底部任务栏时底边不动，顶部菜单栏时顶边不动。
+#[tauri::command]
+pub fn fit_tray_popover(app: tauri::AppHandle, height: f64) -> Result<(), String> {
+    let height = window_height(height);
+    if let Ok(mut current) = HEIGHT.lock() {
+        if (*current - height).abs() < 0.5 {
+            return Ok(());
+        }
+        *current = height;
+    }
+    let Some(window) = app.get_webview_window(POPOVER_LABEL) else {
+        return Ok(());
+    };
+    window
+        .set_size(tauri::LogicalSize::new(POPOVER_WIDTH, height))
+        .map_err(|e| format!("调整 popover 高度失败: {e}"))?;
+    let tray = LAST_TRAY.lock().ok().and_then(|tray| *tray);
+    if let Some(tray) = tray {
+        if window.is_visible().unwrap_or(false) {
+            position_window(&window, &tray)?;
+        }
+    }
+    Ok(())
+}
 
 /// 切换 popover 窗口的显示/隐藏。
 ///
@@ -22,6 +72,9 @@ const POPOVER_HEIGHT: f64 = 588.0;
 /// - 窗口已存在但隐藏 → 重新定位并显示
 /// - 窗口不存在 → 创建并显示
 pub fn toggle_popover(app: &tauri::AppHandle, tray_rect: tauri::Rect) -> Result<(), String> {
+    if let Ok(mut last) = LAST_TRAY.lock() {
+        *last = Some(tray_rect);
+    }
     if let Some(window) = app.get_webview_window(POPOVER_LABEL) {
         // 窗口已存在，切换可见性
         let visible = window.is_visible().unwrap_or(false);
@@ -84,7 +137,7 @@ fn build_popover(app: &tauri::AppHandle, focused: bool) -> Result<tauri::Webview
 
     let window = WebviewWindowBuilder::new(app, POPOVER_LABEL, url)
         .title("")
-        .inner_size(POPOVER_WIDTH, POPOVER_HEIGHT)
+        .inner_size(POPOVER_WIDTH, current_height())
         .resizable(false)
         .decorations(false)
         // Windows 给无边框窗口加边框和阴影，透明边距会被描成一圈框，所以只有 macOS 透明。
@@ -211,7 +264,7 @@ fn position_window(window: &tauri::WebviewWindow, tray_rect: &tauri::Rect) -> Re
             popover_origin(
                 tray,
                 work,
-                (POPOVER_WIDTH * scale, POPOVER_HEIGHT * scale),
+                (POPOVER_WIDTH * scale, current_height() * scale),
                 EDGE_GAP * scale,
             )
         }
@@ -311,6 +364,23 @@ mod tests {
         let origin = popover_origin(rect(-100.0, 1045.0, 24.0, 30.0), work, SIZE, GAP);
         assert_eq!(origin.0, -360.0 - GAP);
         assert_inside(origin, work);
+    }
+
+    #[test]
+    fn the_window_fits_its_card_within_bounds() {
+        // The card's own height plus the transparent margin the frame keeps.
+        assert_eq!(window_height(400.0), 400.0 + FRAME_MARGIN);
+        assert_eq!(window_height(10.0), MIN_HEIGHT);
+        assert_eq!(window_height(2000.0), POPOVER_HEIGHT);
+        assert_eq!(window_height(f64::NAN), POPOVER_HEIGHT);
+    }
+
+    #[test]
+    fn a_shorter_popover_still_rests_on_the_taskbar() {
+        let work = rect(0.0, 0.0, 1920.0, 1032.0);
+        let tray = rect(1800.0, 1040.0, 24.0, 32.0);
+        let (_, y) = popover_origin(tray, work, (360.0, 400.0), GAP);
+        assert_eq!(y, 1032.0 - 400.0 - GAP);
     }
 
     #[test]

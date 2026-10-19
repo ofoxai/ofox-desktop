@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
@@ -12,6 +12,7 @@ import BottomMenu from "./BottomMenu";
 import PopoverFrame from "./PopoverFrame";
 import BalanceWarningBanner from "./BalanceWarningBanner";
 import UpdateBanner from "./UpdateBanner";
+import { useFitPopover } from "./useFitPopover";
 import { SegmentedControl } from "@/components/ui/segmented";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
 import { useUpdate } from "@/contexts/UpdateContext";
@@ -79,6 +80,10 @@ export default function TrayPopoverApp() {
   const { hasUpdate, isDismissed } = useUpdate();
   const [refreshing, setRefreshing] = useState(false);
   const [tab, setTab] = useState<TrayTab>(readTab);
+  const card = useRef<HTMLDivElement>(null);
+  const view = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLDivElement>(null);
+  useFitPopover(card, view, content);
 
   // 已绑定工具列表来自 localStorage（与主窗口共享同一份）。低余额阈值/开关
   // 走 settingsApi.get()。两路独立读，后者失败不影响前者。
@@ -201,7 +206,7 @@ export default function TrayPopoverApp() {
   const knownTools = boundTools.filter((id) => TOOL_META[id]);
 
   return (
-    <PopoverFrame>
+    <PopoverFrame ref={card}>
       <TrayHeader refreshing={refreshing} onRefresh={() => void refresh()} />
       <TrayAccount
         status={status}
@@ -246,12 +251,17 @@ export default function TrayPopoverApp() {
         ]}
         className="mx-3 mb-2 flex shrink-0 self-stretch [&>button]:flex-1"
       />
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-2 pt-[2px]">
-        {tab === "tools" ? (
-          <ToolStatusList boundTools={boundTools} disabled={!isActive} />
-        ) : (
-          <TrayUsage />
-        )}
+      <div
+        ref={view}
+        className="min-h-0 flex-1 overflow-y-auto px-3 pb-2 pt-[2px]"
+      >
+        <div ref={content}>
+          {tab === "tools" ? (
+            <ToolStatusList boundTools={boundTools} disabled={!isActive} />
+          ) : (
+            <TrayUsage />
+          )}
+        </div>
       </div>
       <BottomMenu
         lead={

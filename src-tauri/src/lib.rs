@@ -1765,6 +1765,7 @@ pub fn run() {
             commands::manage_tool::ofox_ping_model,
             commands::manage_tool::check_ofox_model_compatibility,
             commands::show_main_window,
+            tray_popover::fit_tray_popover,
         ]);
 
     let app = builder
