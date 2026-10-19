@@ -169,6 +169,20 @@ it("opens one row at a time, its model field inside", async () => {
   expect(openclaw).toHaveAttribute("aria-expanded", "false");
 });
 
+it("keeps launching tools out of the popover and its focus ring inside the row", async () => {
+  bind("opencode");
+  renderTray();
+  const row = await screen.findByRole("button", { name: /OpenCode/ });
+  expect(row).toHaveClass("focus-visible:ring-inset");
+  fireEvent.click(row);
+  const panel = document.getElementById(row.getAttribute("aria-controls")!)!;
+  expect(within(panel).queryByRole("button", { name: "打开" })).toBeNull();
+  expect(mocks.invoke).not.toHaveBeenCalledWith(
+    "launch_tool",
+    expect.anything(),
+  );
+});
+
 it("says a paused tool's key is paused, not that it can't be read", async () => {
   bind("hermes");
   mocks.paused = ["hermes"];

@@ -2,9 +2,8 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { toast } from "sonner";
-import { AppWindow, ChevronRight, Terminal } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import { useModelSelection } from "@/hooks/useModelSelection";
-import { useToolLaunch } from "@/hooks/useToolLaunch";
 import {
   QuickModelPicker,
   modelNotes,
@@ -14,7 +13,6 @@ import { ToolBadge } from "@/components/tools/ToolBadge";
 import { Button } from "@/components/ui/button";
 import { ListCard } from "@/components/ui/list";
 import type { ToolModelSnapshot } from "@/lib/api/modelSelection";
-import { launchErrorMessage } from "@/lib/launchErrors";
 import { cn } from "@/lib/utils";
 import { OFOX_START_BINDING_EVENT, openMainWindow } from "./trayActions";
 
@@ -71,9 +69,6 @@ export default function ToolStatusList({
     modelState.data?.tools.map((snapshot) => [snapshot.toolId, snapshot]),
   );
   const [openId, setOpenId] = useState<string | null>(null);
-  const { launching, launch } = useToolLaunch((_toolId, error) =>
-    toast.error(launchErrorMessage(error, t)),
-  );
   const openMain = (request?: string) =>
     void openMainWindow(request).catch((e) => {
       console.error("[ToolStatusList] open main window failed", e);
@@ -109,7 +104,6 @@ export default function ToolStatusList({
         const open = openId === id;
         const panelId = `tray-tool-${id}`;
         const meta = TOOL_META[id];
-        const canOpen = !!meta.cliBin || meta.launchKind === "desktopApp";
         const notes = modelNotes(snapshot, id, t);
         return (
           <div key={id} className={cn(open && "bg-card-2")}>
@@ -118,7 +112,7 @@ export default function ToolStatusList({
               aria-expanded={open}
               aria-controls={panelId}
               onClick={() => setOpenId(open ? null : id)}
-              className="flex h-9 w-full items-center gap-2.5 px-3 text-left transition-colors hover:bg-pill/60"
+              className="flex h-9 w-full items-center gap-2.5 px-3 text-left transition-colors hover:bg-pill/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/50"
             >
               <ToolBadge toolId={id} size={18} />
               <span className="min-w-0 max-w-[45%] flex-none truncate text-ui font-medium text-ink">
@@ -174,21 +168,6 @@ export default function ToolStatusList({
                       <p className="truncate text-note text-ink-muted">
                         {notes.join(" · ")}
                       </p>
-                    )}
-                    {canOpen && (
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        disabled={launching.has(id)}
-                        onClick={() => void launch(id)}
-                      >
-                        {meta.launchKind === "desktopApp" ? (
-                          <AppWindow aria-hidden className="h-3.5 w-3.5" />
-                        ) : (
-                          <Terminal aria-hidden className="h-3.5 w-3.5" />
-                        )}
-                        {t("toolLifecycle.open")}
-                      </Button>
                     )}
                   </>
                 )}
