@@ -56,8 +56,9 @@ export function SessionUsageSummary({
       <span
         className="shrink-0 text-note text-ink-faint"
         title={t(sessionUsageUnavailableReason(display))}
+        aria-label={t("sessionCenter.usageUnavailable")}
       >
-        {t("sessionCenter.usageUnavailable")}
+        -
       </span>
     );
   const costHint = t(

@@ -338,7 +338,7 @@ it("shows fresh tokens, separate cache, readable costs, and lazy inline bodies",
   renderPanel([a, session("b")]);
   expect(screen.getByText("1.2K")).toBeVisible();
   expect(screen.getByText("≈$0.020")).toBeVisible();
-  expect(screen.getByText("用量不可用")).toBeVisible();
+  expect(screen.getByLabelText("用量不可用")).toHaveTextContent(/^-$/);
   expect(screen.getByText(/33 条消息 · 11 MB/)).toBeVisible();
   expect(screen.getByText("输入 1.0K · 输出 200 · 缓存 5.0K")).toBeVisible();
   expect(sessionsApi.getMessagesByKey).not.toHaveBeenCalled();
@@ -983,7 +983,7 @@ it("rejects a listing price receipt from the wrong apex even on the current quer
   apexState.apex = "ofox.io";
   renderPanel([old]);
   expect(await screen.findByText("title-region")).toBeVisible();
-  expect(screen.getByText("用量不可用")).toBeVisible();
+  expect(screen.getByLabelText("用量不可用")).toHaveTextContent(/^-$/);
   expect(screen.queryByText("≈$9.00")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: /title-region/ }));
   expect(

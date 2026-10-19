@@ -96,10 +96,14 @@ describe("compact session metadata and honest usage states", () => {
     ).toBeVisible();
   });
 
-  it("explains absent usage instead of showing two unexplained dashes", () => {
+  it("holds absent usage with one dash and explains it on hover and in details", () => {
     show({ ...session, usage: undefined });
-    expect(screen.getByText("用量不可用")).toBeVisible();
-    expect(screen.queryAllByText("—")).toHaveLength(0);
+    expect(screen.getByText("-")).toBeVisible();
+    expect(screen.getByText("-")).toHaveAttribute(
+      "title",
+      "当前会话没有可核验的用量记录，无法估算费用。",
+    );
+    expect(screen.queryByText("用量不可用")).toBeNull();
     fireEvent.click(
       screen.getByRole("button", { name: /Clear session title/ }),
     );
@@ -147,7 +151,7 @@ describe("compact session metadata and honest usage states", () => {
         billingSessionId: "parent",
       },
     });
-    expect(screen.getByText("用量不可用")).toBeVisible();
+    expect(screen.getByText("-")).toBeVisible();
     expect(screen.queryByText("1.2K")).toBeNull();
     expect(screen.queryByText("≈$0.020")).toBeNull();
     fireEvent.click(
