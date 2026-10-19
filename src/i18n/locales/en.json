@@ -2881,7 +2881,6 @@
     "analyticsHint": "View account usage for this tool’s bound API key on the web"
   },
   "modelExperience": {
-    "multiDescription": "Save a model set in selection order. Switch among these models inside the tool.",
     "loading": "Loading model state…",
     "stateFailed": "Unable to read model state",
     "retry": "Retry",
@@ -2906,7 +2905,6 @@
     "mixedScopes": "Configurations use different models. Choose an explicit model.",
     "mixedSelection": "Multiple configurations",
     "modelCount": "{{count}} models",
-    "editModelSet": "{{tool}} model set",
     "chooseModels": "Choose at least one model",
     "chooseModel": "Choose a model",
     "missingCatalogModels": "Some selected models are absent from the catalog. Remove them before saving.",

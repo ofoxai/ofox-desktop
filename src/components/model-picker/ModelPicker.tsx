@@ -105,6 +105,13 @@ export interface MultiModelPickerProps {
   /** Optional catalog summary; defaults to the count and shared-key notice. */
   summary?: string;
   disabled?: boolean;
+  /**
+   * The list opens straight from a tool row's field: the trigger looks and
+   * reads as `trigger` says, and the summary and select-all line is left out.
+   */
+  field?: { className?: string; content: ReactNode; label: string };
+  /** Told when the list opens and closes, e.g. to save the set on close. */
+  onOpenChange?: (open: boolean) => void;
 }
 
 export function MultiModelPicker({
@@ -117,6 +124,8 @@ export function MultiModelPicker({
   portalContainer,
   summary,
   disabled = false,
+  field,
+  onOpenChange,
 }: MultiModelPickerProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -134,8 +143,9 @@ export function MultiModelPicker({
         updateSearch("");
         if (models.length === 0 && !loading) onFetch();
       }
+      onOpenChange?.(next);
     },
-    [loading, models.length, onFetch, updateSearch],
+    [loading, models.length, onFetch, onOpenChange, updateSearch],
   );
 
   const toggle = useCallback(
@@ -150,7 +160,7 @@ export function MultiModelPicker({
   );
 
   return (
-    <div className="space-y-2">
+    <div className={field ? "min-w-0" : "space-y-2"}>
       <div className="flex gap-1">
         <Popover open={open} onOpenChange={handleOpenChange}>
           <PopoverTrigger asChild>
@@ -161,27 +171,35 @@ export function MultiModelPicker({
               role="combobox"
               aria-expanded={open}
               aria-haspopup="dialog"
+              aria-label={field?.label}
               disabled={disabled}
               className={cn(
                 menuTriggerClassName,
                 "max-w-none flex-1",
                 selectedIds.length > 0 && "text-ink",
+                field?.className,
               )}
             >
-              <span className="min-w-0 flex-1 truncate text-left">
-                {selectedIds.length > 0
-                  ? t("modelPicker.selectedCount", {
-                      count: selectedIds.length,
-                    })
-                  : t("modelPicker.selectAtLeastOne")}
-              </span>
-              <MenuChevron />
+              {field ? (
+                field.content
+              ) : (
+                <>
+                  <span className="min-w-0 flex-1 truncate text-left">
+                    {selectedIds.length > 0
+                      ? t("modelPicker.selectedCount", {
+                          count: selectedIds.length,
+                        })
+                      : t("modelPicker.selectAtLeastOne")}
+                  </span>
+                  <MenuChevron />
+                </>
+              )}
             </button>
           </PopoverTrigger>
           <PopoverContent
             onKeyDown={menuTab.onKeyDown}
             onCloseAutoFocus={menuTab.onCloseAutoFocus}
-            className="p-0"
+            className={cn("p-0", field && "min-w-[20rem]")}
             align="start"
             style={{ width: "var(--radix-popover-trigger-width)" }}
             container={portalContainer ?? undefined}
@@ -266,36 +284,40 @@ export function MultiModelPicker({
           </PopoverContent>
         </Popover>
       </div>
-      <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-        <span>
-          {summary ??
-            t("modelPicker.compatibleCountWithSharedKey", {
-              count: models.length,
-            })}
-        </span>
-        <span className="flex shrink-0 gap-1">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7 px-2 text-[11px]"
-            disabled={disabled || loading || models.length === 0 || allSelected}
-            onClick={() => onChange(models.map((model) => model.id))}
-          >
-            {t("modelPicker.selectAllCompatible")}
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7 px-2 text-[11px]"
-            disabled={disabled || loading || selectedIds.length === 0}
-            onClick={() => onChange([])}
-          >
-            {t("modelPicker.clearSelection")}
-          </Button>
-        </span>
-      </div>
+      {!field && (
+        <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+          <span>
+            {summary ??
+              t("modelPicker.compatibleCountWithSharedKey", {
+                count: models.length,
+              })}
+          </span>
+          <span className="flex shrink-0 gap-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-[11px]"
+              disabled={
+                disabled || loading || models.length === 0 || allSelected
+              }
+              onClick={() => onChange(models.map((model) => model.id))}
+            >
+              {t("modelPicker.selectAllCompatible")}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-[11px]"
+              disabled={disabled || loading || selectedIds.length === 0}
+              onClick={() => onChange([])}
+            >
+              {t("modelPicker.clearSelection")}
+            </Button>
+          </span>
+        </div>
+      )}
     </div>
   );
 }

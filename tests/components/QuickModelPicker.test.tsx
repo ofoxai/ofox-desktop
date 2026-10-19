@@ -1,10 +1,4 @@
-import {
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-  within,
-} from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
@@ -75,6 +69,13 @@ beforeEach(() => {
   vi.spyOn(toast, "error").mockImplementation(() => "");
 });
 afterEach(() => vi.restoreAllMocks());
+
+/** Closes an open model list the way a person does: Escape, or clicking away. */
+function closeList() {
+  fireEvent.keyDown(document.activeElement ?? document.body, {
+    key: "Escape",
+  });
+}
 
 async function selectSingle(model = "openai/new") {
   await waitFor(() => expect(modelFetch.fetchOfoxModels).toHaveBeenCalled());
@@ -154,16 +155,17 @@ describe("QuickModelPicker", () => {
           onRetry={vi.fn()}
         />,
       );
-      fireEvent.click(screen.getByRole("button", { name: "2 个模型" }));
-      const dialog = screen.getByRole("dialog");
       await waitFor(() =>
         expect(modelFetch.fetchOfoxModels).toHaveBeenCalled(),
       );
-      fireEvent.click(within(dialog).getByRole("combobox"));
+      fireEvent.click(screen.getByRole("combobox", { name: "2 个模型" }));
+      // The list opens from the field itself, no dialog in between.
+      expect(screen.queryByText(/模型集合/)).toBeNull();
       fireEvent.click(
         await screen.findByRole("option", { name: /anthropic\/claude/ }),
       );
-      fireEvent.click(within(dialog).getByRole("button", { name: "保存" }));
+      expect(modelSelectionApi.save).not.toHaveBeenCalled();
+      closeList();
       await waitFor(() =>
         expect(modelSelectionApi.save).toHaveBeenCalledWith(
           tool,
@@ -178,6 +180,50 @@ describe("QuickModelPicker", () => {
     },
   );
 
+  it("doesn't save an emptied model set, and says a model is needed", async () => {
+    vi.spyOn(toast, "warning").mockImplementation(() => "");
+    render(
+      <QuickModelPicker
+        toolId="opencode"
+        snapshot={snapshot("opencode", {
+          kind: "models",
+          models: ["openai/old"],
+        })}
+        onRetry={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(modelFetch.fetchOfoxModels).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("combobox", { name: "1 个模型" }));
+    fireEvent.click(await screen.findByRole("option", { name: /openai\/old/ }));
+    closeList();
+    await waitFor(() =>
+      expect(toast.warning).toHaveBeenCalledWith("请至少选择一个模型"),
+    );
+    expect(modelSelectionApi.save).not.toHaveBeenCalled();
+    expect(screen.getByRole("combobox", { name: "1 个模型" })).toBeVisible();
+  });
+
+  it("saves nothing when the list closes unchanged", async () => {
+    render(
+      <QuickModelPicker
+        toolId="opencode"
+        snapshot={snapshot("opencode", {
+          kind: "models",
+          models: ["openai/old"],
+        })}
+        onRetry={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(modelFetch.fetchOfoxModels).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("combobox", { name: "1 个模型" }));
+    await screen.findByRole("option", { name: /openai\/new/ });
+    closeList();
+    await waitFor(() =>
+      expect(screen.queryByRole("option", { name: /openai\/new/ })).toBeNull(),
+    );
+    expect(modelSelectionApi.save).not.toHaveBeenCalled();
+  });
+
   it("shows OpenCode's observed route without reducing its managed model set", () => {
     const state = snapshot("opencode", {
       kind: "models",
@@ -190,7 +236,7 @@ describe("QuickModelPicker", () => {
     render(
       <QuickModelPicker toolId="opencode" snapshot={state} onRetry={vi.fn()} />,
     );
-    expect(screen.getByRole("button", { name: "2 个模型" })).toBeVisible();
+    expect(screen.getByRole("combobox", { name: "2 个模型" })).toBeVisible();
     expect(
       screen.getByText("当前观察到的模型：external/provider-model"),
     ).toBeVisible();
@@ -205,7 +251,8 @@ describe("QuickModelPicker", () => {
     const { rerender } = render(
       <QuickModelPicker toolId="opencode" snapshot={state} onRetry={vi.fn()} />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "1 个模型" }));
+    await waitFor(() => expect(modelFetch.fetchOfoxModels).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("combobox", { name: "1 个模型" }));
     rerender(
       <QuickModelPicker
         toolId="opencode"
@@ -213,13 +260,12 @@ describe("QuickModelPicker", () => {
         onRetry={vi.fn()}
       />,
     );
-    fireEvent.click(
-      within(screen.getByRole("dialog")).getByRole("button", { name: "保存" }),
-    );
+    fireEvent.click(await screen.findByRole("option", { name: /openai\/new/ }));
+    closeList();
     await waitFor(() =>
       expect(modelSelectionApi.save).toHaveBeenCalledWith(
         "opencode",
-        { kind: "models", models: ["openai/old"] },
+        { kind: "models", models: ["openai/old", "openai/new"] },
         "disk-revision-1",
       ),
     );
@@ -310,7 +356,7 @@ describe("QuickModelPicker", () => {
         onRetry={vi.fn()}
       />,
     );
-    expect(screen.getByRole("button", { name: "2 个模型" })).toHaveClass(
+    expect(screen.getByRole("combobox", { name: "2 个模型" })).toHaveClass(
       "h-[26px]",
       "rounded-ctl",
       "border-line",
@@ -353,7 +399,7 @@ describe("QuickModelPicker as a tool row's field", () => {
         variant="field"
       />,
     );
-    const field = screen.getByRole("button", { name: "2 个模型" });
+    const field = screen.getByRole("combobox", { name: "2 个模型" });
     expect(field).toHaveClass("h-[25px]", "w-full", "bg-pill");
     expect(field.querySelector("svg.lucide-chevron-down")).not.toBeNull();
     expect(container).not.toHaveTextContent("external/x");

@@ -4,22 +4,12 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { Loader2, Layers, RefreshCw } from "lucide-react";
 import { ModelPicker, MultiModelPicker } from "./ModelPicker";
-import { Button } from "@/components/ui/button";
 import { MenuChevron, menuTriggerClassName } from "@/components/ui/menu-select";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from "@/components/ui/dialog";
 import {
   useModelCatalog,
   useSaveModelSelection,
 } from "@/hooks/useModelSelection";
 import type { ToolModelSnapshot } from "@/lib/api/modelSelection";
-import { TOOL_META } from "@/config/toolMeta";
 import { cn } from "@/lib/utils";
 
 interface QuickModelPickerProps {
@@ -99,9 +89,10 @@ export function QuickModelPicker({
   );
   const save = useSaveModelSelection();
   const saveLock = useRef(false);
-  const [editing, setEditing] = useState<ToolModelSnapshot | null>(null);
-  const [draft, setDraft] = useState<string[]>([]);
-  const [portal, setPortal] = useState<HTMLDivElement | null>(null);
+  // A model set is ticked in its list and saved when the list closes, against
+  // the snapshot it opened on.
+  const [draft, setDraft] = useState<string[] | null>(null);
+  const openedOn = useRef<ToolModelSnapshot | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const multi = snapshot?.managedSelection.kind === "models";
   const writable =
@@ -144,7 +135,6 @@ export function QuickModelPicker({
             : "modelExperience.saved",
         ),
       );
-      setEditing(null);
     } catch (error) {
       const message = t("modelExperience.saveFailed", { error: String(error) });
       setSaveError(message);
@@ -260,26 +250,66 @@ export function QuickModelPicker({
       className="h-3 w-3 flex-none animate-spin opacity-70"
     />
   ) : undefined;
+  const shownModels = draft ?? selectedModels;
+  const finishSet = () => {
+    const next = draft;
+    const base = openedOn.current;
+    setDraft(null);
+    openedOn.current = null;
+    if (!next || !base || base.managedSelection.kind !== "models") return;
+    const before = base.managedSelection.models;
+    if (
+      next.length === before.length &&
+      next.every((id, i) => id === before[i])
+    )
+      return;
+    if (!next.length) {
+      toast.warning(t("modelExperience.chooseModels"));
+      return;
+    }
+    if (
+      toolId === "workbuddy" &&
+      (!!catalog.error ||
+        next.some((id) => !catalog.models.some((model) => model.id === id)))
+    ) {
+      toast.error(t("modelExperience.missingCatalogModels"));
+      return;
+    }
+    void persist(base, { kind: "models", models: next });
+  };
   const picker = multi ? (
-    <button
-      type="button"
-      title={field ? fieldTitle : undefined}
-      aria-busy={(field && save.isPending) || undefined}
+    <MultiModelPicker
+      id={`model-set-${toolId}`}
+      selectedIds={shownModels}
+      onChange={setDraft}
+      models={catalog.models}
+      loading={catalog.loading}
+      onFetch={catalog.fetch}
       disabled={!writable || save.isPending}
-      onClick={() => {
-        setEditing(snapshot);
-        setDraft([...selectedModels]);
-        setSaveError(null);
+      onOpenChange={(open) => {
+        if (open) {
+          openedOn.current = snapshot;
+          setDraft([...selectedModels]);
+          setSaveError(null);
+        } else finishSet();
       }}
-      className={cn(menuTriggerClassName, "max-w-full text-ink", fieldClass)}
-    >
-      {fieldLabel}
-      <Layers aria-hidden className="h-[13px] w-[13px] flex-none" />
-      <span className={cn("min-w-0 truncate", field && "flex-1 text-left")}>
-        {t("modelExperience.modelCount", { count: selectedModels.length })}
-      </span>
-      {field && (fieldTrailing ?? <MenuChevron />)}
-    </button>
+      field={{
+        label: t("modelExperience.modelCount", { count: shownModels.length }),
+        className: cn("max-w-full", !field && "w-auto flex-none", fieldClass),
+        content: (
+          <>
+            {fieldLabel}
+            <Layers aria-hidden className="h-[13px] w-[13px] flex-none" />
+            <span
+              className={cn("min-w-0 truncate", field && "flex-1 text-left")}
+            >
+              {t("modelExperience.modelCount", { count: shownModels.length })}
+            </span>
+            {field ? (fieldTrailing ?? <MenuChevron />) : <MenuChevron />}
+          </>
+        ),
+      }}
+    />
   ) : (
     <ModelPicker
       id={`quick-model-${toolId}`}
@@ -300,91 +330,16 @@ export function QuickModelPicker({
       busy={field && save.isPending}
     />
   );
-  const dialog = (
-    <Dialog
-      open={!!editing}
-      onOpenChange={(open) => {
-        if (!open && !save.isPending) setEditing(null);
-      }}
-    >
-      <DialogContent ref={setPortal} className="max-h-[85vh] sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>
-            {t("modelExperience.editModelSet", {
-              tool: TOOL_META[toolId]?.label ?? toolId,
-            })}
-          </DialogTitle>
-          <DialogDescription>
-            {t("modelExperience.multiDescription")}
-          </DialogDescription>
-        </DialogHeader>
-        <div className="min-h-0 space-y-4 overflow-y-auto px-6 py-4">
-          <MultiModelPicker
-            id={`model-set-${toolId}`}
-            selectedIds={draft}
-            onChange={setDraft}
-            models={catalog.models}
-            loading={catalog.loading}
-            onFetch={catalog.fetch}
-            portalContainer={portal}
-            disabled={save.isPending}
-          />
-          {catalog.error && (
-            <p role="alert" className="text-sm text-destructive">
-              {t("modelExperience.catalogFailed")}
-            </p>
-          )}
-          {saveError && (
-            <p role="alert" className="text-sm text-destructive">
-              {saveError}
-            </p>
-          )}
-        </div>
-        <DialogFooter>
-          <Button
-            type="button"
-            variant="outline"
-            disabled={save.isPending}
-            onClick={() => setEditing(null)}
-          >
-            {t("modelExperience.cancel")}
-          </Button>
-          <Button
-            type="button"
-            disabled={
-              !writable ||
-              save.isPending ||
-              !draft.length ||
-              (toolId === "workbuddy" &&
-                (!!catalog.error ||
-                  draft.some(
-                    (id) => !catalog.models.some((model) => model.id === id),
-                  )))
-            }
-            onClick={() => {
-              if (editing)
-                void persist(editing, { kind: "models", models: draft });
-            }}
-          >
-            {save.isPending
-              ? t("modelExperience.saving")
-              : t("modelExperience.save")}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
 
   if (field)
     return (
       <div className="min-w-0">
         {picker}
-        {(saveError || catalog.error) && !editing && (
+        {(saveError || catalog.error) && (
           <span role="alert" className="sr-only">
             {saveError ?? t("modelExperience.catalogFailed")}
           </span>
         )}
-        {dialog}
       </div>
     );
 
@@ -429,12 +384,11 @@ export function QuickModelPicker({
           </button>
         </div>
       )}
-      {saveError && !editing && (
+      {saveError && (
         <div role="alert" className="mt-1 text-danger">
           {saveError}
         </div>
       )}
-      {dialog}
     </div>
   );
 }

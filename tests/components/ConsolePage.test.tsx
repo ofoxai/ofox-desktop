@@ -1119,12 +1119,10 @@ describe("Bound tool lifecycle", () => {
     expect(screen.getByText("2")).toBeVisible();
     fireEvent.click(fold);
     const row = screen.getByRole("group", { name: "WorkBuddy" });
-    expect(buttonNames(row)).toEqual([
-      "0 个模型",
-      "前往下载",
-      "配置",
-      "更多操作",
-    ]);
+    expect(buttonNames(row)).toEqual(["前往下载", "配置", "更多操作"]);
+    expect(
+      within(row).getByRole("combobox", { name: "0 个模型" }),
+    ).toBeVisible();
     fireEvent.click(within(row).getByRole("button", { name: "配置" }));
     expect(screen.getByRole("dialog")).toHaveTextContent("管理：WorkBuddy");
     expect(mocks.invoke).not.toHaveBeenCalledWith(

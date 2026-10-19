@@ -2881,7 +2881,6 @@
     "analyticsHint": "在网页查看此工具绑定 API Key 的账户用量"
   },
   "modelExperience": {
-    "multiDescription": "保存一组模型，顺序按选择顺序保留。工具内可在这组模型间切换。",
     "loading": "正在读取模型状态…",
     "stateFailed": "无法读取模型状态",
     "retry": "重试",
@@ -2906,7 +2905,6 @@
     "mixedScopes": "多个配置使用不同模型，请选择一个明确的模型",
     "mixedSelection": "多个配置",
     "modelCount": "{{count}} 个模型",
-    "editModelSet": "{{tool}} 模型集合",
     "chooseModels": "请至少选择一个模型",
     "chooseModel": "请选择模型",
     "missingCatalogModels": "部分所选模型已不在可用目录中，请移除后再保存",

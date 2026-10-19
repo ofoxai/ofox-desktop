@@ -2881,7 +2881,6 @@
     "analyticsHint": "このツールに紐付く API キーのアカウント使用量を Web で表示"
   },
   "modelExperience": {
-    "multiDescription": "選択順にモデル集合を保存します。ツール内でこれらのモデルを切り替えられます。",
     "loading": "モデル状態を読み込み中…",
     "stateFailed": "モデル状態を読み込めません",
     "retry": "再試行",
@@ -2906,7 +2905,6 @@
     "mixedScopes": "設定ごとにモデルが異なります。明示的なモデルを選択してください。",
     "mixedSelection": "複数の設定",
     "modelCount": "{{count}} 個のモデル",
-    "editModelSet": "{{tool}} のモデル集合",
     "chooseModels": "モデルを1つ以上選択してください",
     "chooseModel": "モデルを選択",
     "missingCatalogModels": "選択したモデルの一部が一覧にありません。削除してから保存してください。",
