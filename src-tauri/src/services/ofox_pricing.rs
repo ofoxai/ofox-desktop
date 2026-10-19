@@ -370,10 +370,13 @@ impl PriceCatalog {
         records: Option<u64>,
     ) -> CostEstimate {
         let resolved = self.snapshot.as_ref().and_then(|s| {
-            s.aliases
-                .get(model)
-                .and_then(Option::as_ref)
-                .and_then(|id| s.models.get(id))
+            let rate = |name: &str| {
+                s.aliases
+                    .get(name)
+                    .and_then(Option::as_ref)
+                    .and_then(|id| s.models.get(id))
+            };
+            rate(model).or_else(|| priced_as(model).and_then(rate))
         });
         let rate = |index: usize| {
             resolved
@@ -452,6 +455,17 @@ impl PriceCatalog {
     }
 }
 
+/// The catalog model a model with no price of its own is priced as. Codex's
+/// auto-review (the guardian deciding an approval in the user's place) runs on
+/// GPT-5.6 Luna by OpenAI's rate card (2026-09-30), as magpie prices it; a
+/// list-price estimate, not evidence of the model that served a response.
+pub(crate) fn priced_as(model: &str) -> Option<&'static str> {
+    match model {
+        "codex-auto-review" => Some("gpt-5.6-luna"),
+        _ => None,
+    }
+}
+
 /// One anonymous public catalog request; callers freeze apex before awaiting it.
 pub async fn fetch_payload(apex: &str) -> Result<Value, AppError> {
     if !crate::ofox_apex::is_known_apex(apex) {
@@ -508,6 +522,26 @@ mod tests {
             {"id":"a/shared","aliases":["ambiguous"],"pricing":{"prompt":"1e-6"}},
             {"id":"b/shared","aliases":["ambiguous"],"pricing":{"prompt":"2e-6"}}
         ]})
+    }
+
+    /// Codex's auto-review is not in the catalog; it is priced as GPT-5.6
+    /// Luna, the model OpenAI's rate card says it runs on.
+    #[test]
+    fn analytics_codex_auto_review_is_priced_as_gpt_5_6_luna() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let payload = json!({"data":[{"id":"openai/gpt-5.6-luna","aliases":["gpt-5.6-luna"],
+            "pricing":{"prompt":"0.0000002","completion":"0.0000012","input_cache_read":"0.00000002"}}]});
+        let catalog = PriceCatalog::ingest_on(&conn, "ofox.ai", &payload, 10).unwrap();
+        let review = catalog.estimate("codex-auto-review", [1_000_000, 1_000_000, 0, 0], Some(1));
+        assert_eq!(review.known_cost_usd.as_deref(), Some("1.4"));
+        assert_eq!(review.availability, "known");
+        assert_eq!(
+            catalog
+                .estimate("other-unknown", [1, 0, 0, 0], Some(1))
+                .availability,
+            "unknown"
+        );
     }
 
     /// An hour-long cache write is priced at the catalog's

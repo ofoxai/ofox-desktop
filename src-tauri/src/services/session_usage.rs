@@ -646,7 +646,8 @@ pub(crate) fn find_model_pricing_for_session(
         Ok((input, output, cache_read, cache_creation)) => {
             ModelPricing::from_strings(&input, &output, &cache_read, &cache_creation).ok()
         }
-        Err(_) => None,
+        Err(_) => crate::services::ofox_pricing::priced_as(model_id)
+            .and_then(|other| try_find_pricing(conn, other).ok().flatten()),
     }
 }
 
