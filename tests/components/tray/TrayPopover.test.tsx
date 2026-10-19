@@ -6,6 +6,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
@@ -20,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   hide: vi.fn(),
   auth: "active" as "active" | "expired" | "loggedout",
   paused: [] as string[],
+  profiles: [] as unknown[],
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({
@@ -53,6 +55,7 @@ beforeEach(() => {
   localStorage.clear();
   mocks.auth = "active";
   mocks.paused = [];
+  mocks.profiles = [];
   mocks.emit.mockReset().mockResolvedValue(undefined);
   mocks.hide.mockReset().mockResolvedValue(undefined);
   mocks.invoke.mockReset();
@@ -73,6 +76,26 @@ beforeEach(() => {
                 },
         };
       if (command === "get_settings") return {};
+      if (command === "model_profiles_list") return mocks.profiles;
+      if (command === "model_profiles_preview")
+        return {
+          planToken: "plan-1",
+          canApply: true,
+          items: [
+            {
+              target: "openclaw",
+              before: selections.openclaw,
+              after: { kind: "single", model: "openai/gpt-6" },
+              status: "ready",
+            },
+          ],
+        };
+      if (command === "model_profiles_apply")
+        return {
+          status: "applied",
+          items: [{ target: "openclaw", outcome: "applied" }],
+          undoToken: null,
+        };
       if (command === "ofox_get_apex_state")
         return { apex: "ofox.ai", pinned: true, detected: true };
       if (command === "fetch_ofox_models") return [];
@@ -190,4 +213,36 @@ it("remembers the tab it was left on", async () => {
     "true",
   );
   await act(async () => undefined);
+});
+
+it("names the profile in use in the footer and applies another after review", async () => {
+  bind("openclaw");
+  mocks.profiles = [
+    { id: "p1", name: "日常", revision: "1", targets: [], match: "inUse" },
+    { id: "p2", name: "省钱", revision: "1", targets: [], match: "different" },
+  ];
+  renderTray();
+  const trigger = await screen.findByRole("button", { name: /方案/ });
+  await waitFor(() => expect(trigger).toHaveTextContent("方案：日常"));
+  await userEvent.click(trigger);
+  await userEvent.click(await screen.findByRole("menuitem", { name: /省钱/ }));
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("model_profiles_preview", {
+      id: "p2",
+    }),
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "应用方案" }));
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("model_profiles_apply", {
+      planToken: "plan-1",
+    }),
+  );
+});
+
+it("leaves the footer's profile slot empty while there are no profiles", async () => {
+  bind("openclaw");
+  renderTray();
+  await screen.findByRole("button", { name: /OpenClaw/ });
+  await act(async () => undefined);
+  expect(screen.queryByRole("button", { name: /方案/ })).toBeNull();
 });

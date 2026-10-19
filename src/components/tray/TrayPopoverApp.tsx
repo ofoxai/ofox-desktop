@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import TrayHeader from "./TrayHeader";
 import TrayAccount from "./TrayAccount";
 import TrayUsage from "./TrayUsage";
+import TrayProfiles from "./TrayProfiles";
 import ToolStatusList from "./ToolStatusList";
 import BottomMenu from "./BottomMenu";
 import PopoverFrame from "./PopoverFrame";
@@ -197,7 +198,7 @@ export default function TrayPopoverApp() {
     typeof balanceUsd === "number" &&
     lowBalanceEnabled &&
     balanceUsd < lowBalanceThreshold;
-  const toolCount = boundTools.filter((id) => TOOL_META[id]).length;
+  const knownTools = boundTools.filter((id) => TOOL_META[id]);
 
   return (
     <PopoverFrame>
@@ -233,9 +234,9 @@ export default function TrayPopoverApp() {
             label: (
               <>
                 {t("tray.tabs.tools")}
-                {toolCount > 0 && (
+                {knownTools.length > 0 && (
                   <em className="ml-1 not-italic tabular-nums text-ink-faint">
-                    {toolCount}
+                    {knownTools.length}
                   </em>
                 )}
               </>
@@ -252,7 +253,13 @@ export default function TrayPopoverApp() {
           <TrayUsage />
         )}
       </div>
-      <BottomMenu />
+      <BottomMenu
+        lead={
+          isActive && knownTools.length > 0 ? (
+            <TrayProfiles boundTools={knownTools} />
+          ) : null
+        }
+      />
     </PopoverFrame>
   );
 }

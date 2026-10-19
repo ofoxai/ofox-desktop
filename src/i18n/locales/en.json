@@ -4678,6 +4678,7 @@
       "cost": "Cost",
       "failed": "Couldn't load usage",
       "empty": "No usage in this period yet"
-    }
+    },
+    "profileInUse": "Profile: {{name}}"
   }
 }
