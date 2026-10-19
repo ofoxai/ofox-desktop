@@ -49,13 +49,3 @@ export function effortName(
       : t("effort.default");
   return t(`effort.levels.${value}`, { defaultValue: value });
 }
-
-/** magpie's three bars: none lit for the default or no thinking, else by rank. */
-export function effortLit(effort: EffortState): number {
-  const { value, levels } = effort;
-  if (value === null || value === "off" || value === "none") return 0;
-  const index = levels.filter((level) => level !== "none").indexOf(value);
-  if (index < 0) return 1;
-  const count = levels.filter((level) => level !== "none").length;
-  return Math.max(1, Math.round(((index + 1) / count) * 3));
-}

@@ -13,7 +13,6 @@ import { ToolBadge } from "@/components/tools/ToolBadge";
 import { Button } from "@/components/ui/button";
 import { ListCard } from "@/components/ui/list";
 import { EffortSlider } from "@/components/model-picker/EffortSlider";
-import { effortLit } from "@/components/model-picker/effortLevels";
 import type { ToolModelSnapshot } from "@/lib/api/modelSelection";
 import { cn } from "@/lib/utils";
 import { OFOX_START_BINDING_EVENT, openMainWindow } from "./trayActions";
@@ -26,29 +25,6 @@ interface ToolStatusListProps {
 /** magpie's panel card: no border, a hairline ring and a breath of shadow. */
 const PANEL_CARD =
   "rounded-[10px] border-0 shadow-[0_0_0_1px_rgba(0,0,0,.05),0_1px_2px_rgba(0,0,0,.04)] dark:shadow-[inset_0_0_0_1px_rgba(255,255,255,.06)]";
-
-/** magpie's effort bars: three, 4/7/10px tall, the lit ones darker. */
-function EffortBars({ lit }: { lit: number }) {
-  return (
-    <span
-      aria-hidden
-      data-effort-bars
-      data-lit={lit}
-      className="flex h-2.5 flex-none items-end gap-[1.5px]"
-    >
-      {[4, 7, 10].map((height, index) => (
-        <span
-          key={height}
-          className={cn(
-            "w-[2.5px] rounded-[1px]",
-            index < lit ? "bg-ink-2" : "bg-ink-faint/45",
-          )}
-          style={{ height }}
-        />
-      ))}
-    </span>
-  );
-}
 
 /** What a shut row says about its model, and in what tone. */
 function summary(
@@ -155,9 +131,6 @@ export default function ToolStatusList({
               >
                 {said.text}
               </span>
-              {snapshot?.effort && snapshot.binding.status === "configured" && (
-                <EffortBars lit={effortLit(snapshot.effort)} />
-              )}
               <ChevronRight
                 aria-hidden
                 className={cn(

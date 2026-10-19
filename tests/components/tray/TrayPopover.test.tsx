@@ -266,7 +266,7 @@ it("leaves the footer's profile slot empty while there are no profiles", async (
   expect(screen.queryByRole("button", { name: /方案/ })).toBeNull();
 });
 
-it("puts the model and its reasoning effort in an opened row, and bars on a shut one", async () => {
+it("puts the model and its reasoning effort in an opened row, and only the model on a shut one", async () => {
   bind("hermes");
   mocks.effort = {
     hermes: {
@@ -290,11 +290,9 @@ it("puts the model and its reasoning effort in an opened row, and bars on a shut
   renderTray();
   const row = await screen.findByRole("button", { name: /Hermes/ });
   await waitFor(() =>
-    expect(row.querySelector("[data-effort-bars]")).toHaveAttribute(
-      "data-lit",
-      "2",
-    ),
+    expect(row).toHaveTextContent("deepseek/deepseek-v4.1-pro"),
   );
+  expect(row.querySelector("[data-effort-bars]")).toBeNull();
   fireEvent.click(row);
   const panel = document.getElementById(row.getAttribute("aria-controls")!)!;
   expect(within(panel).getByText("模型")).toBeVisible();
