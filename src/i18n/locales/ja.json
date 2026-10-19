@@ -132,7 +132,6 @@
     "requestFailed": "確認に失敗しました。再試行してください",
     "desktopCodex": "Codex デスクトップのモデルはアプリ内で管理され、CLI の確認は対象外です",
     "chatgptCodexMode": "Codex モード",
-    "chatgptCodexUnset": "Codex モデル未設定",
     "chatgptCodexShared": "ここでは Codex CLI と設定を共有するデスクトップアプリの Codex モードを管理します。Chat と Work は OpenAI アカウントでサインインして利用し、Ofox のモデル設定では変更できません。",
     "applyProtocol": "検査結果を適用",
     "workBuddyConfiguredEndpoint": "現在の接続先",
@@ -2819,7 +2818,6 @@
   },
   "toolLifecycle": {
     "desktopApp": "デスクトップアプリ",
-    "modelUnset": "モデル未設定",
     "analytics": "使用量明細",
     "analyticsFailed": "利用状況を開けませんでした",
     "downloadFailed": "インストールページを開けませんでした",

@@ -25,6 +25,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { ListRow } from "@/components/ui/list";
+import { cn } from "@/lib/utils";
 import type { ToolBindingStatus } from "@/lib/api/ofoxBind";
 import type { InstallationStatus } from "@/lib/api/toolUpdates";
 
@@ -90,9 +91,24 @@ interface BoundToolRowProps {
 }
 
 /**
- * magpie's agent row: the tool, its version and state on the first line,
- * its key and model below; primary actions stay visible while account usage
- * and secondary operations share the quiet ⋯ menu.
+ * The bound list's columns, which every row shares through CSS subgrid so the
+ * model fields and the actions line up down the list, as magpie's `.fields`
+ * do. The first and last columns carry the rows' side padding, so the hairline
+ * between rows still runs edge to edge. Narrower than the window's minimum
+ * (zoomed in), the model drops under the name.
+ */
+export const TOOL_LIST_GRID =
+  "grid grid-cols-[auto_minmax(0,1fr)_minmax(180px,240px)_auto] gap-x-3 max-[720px]:grid-cols-[auto_minmax(0,1fr)_auto]";
+
+/** Without subgrid each row keeps the columns on its own. */
+const ROW_FALLBACK_COLUMNS =
+  "supports-[not(grid-template-columns:subgrid)]:grid-cols-[38px_minmax(0,1fr)_240px_auto] max-[720px]:supports-[not(grid-template-columns:subgrid)]:grid-cols-[38px_minmax(0,1fr)_auto]";
+
+/**
+ * magpie's agent row, always two lines tall: the tool, its version and any
+ * update or state pill on the first; the key and what its model is doing,
+ * faint, on the second. The model and the actions sit in the list's shared
+ * columns; account usage and secondary operations share the quiet ⋯ menu.
  */
 export default function BoundToolRow({
   tool,
@@ -187,24 +203,29 @@ export default function BoundToolRow({
           method: t(`toolLifecycle.installMethod.${installVia}`),
         })
       : undefined;
-  const keyText = subline.filter(Boolean).join(" · ");
+  const subText = subline.filter(Boolean).join(" · ");
 
   return (
     <ListRow
       role="group"
       aria-label={tool.label}
-      className="grid grid-cols-[24px_minmax(0,1fr)] gap-x-3 gap-y-1 py-2 sm:grid-cols-[24px_minmax(0,1fr)_auto]"
+      className={cn(
+        "col-span-full grid grid-cols-subgrid items-center gap-y-1.5 px-0",
+        ROW_FALLBACK_COLUMNS,
+      )}
     >
-      <ToolBadge
-        toolId={tool.id}
-        size={24}
-        rounded="md"
-        className="self-start mt-1 rounded-[6px]"
-      />
-      <div className="min-w-0">
-        <div className="flex min-h-[26px] flex-wrap items-center gap-x-2 gap-y-1">
+      <span data-column="badge" className="flex pl-[14px]">
+        <ToolBadge
+          toolId={tool.id}
+          size={24}
+          rounded="md"
+          className="rounded-[6px]"
+        />
+      </span>
+      <div data-column="name" className="min-w-0">
+        <div data-line="name" className="flex h-5 min-w-0 items-center gap-2">
           <span
-            className="min-w-0 truncate text-ui font-medium tracking-[-.005em] text-ink"
+            className="min-w-[3em] truncate text-ui font-medium tracking-[-.005em] text-ink"
             title={tool.label}
           >
             {tool.label}
@@ -212,7 +233,7 @@ export default function BoundToolRow({
           {tool.version && (
             <span
               title={versionTitle}
-              className="whitespace-nowrap text-sub tabular-nums text-ink-muted"
+              className="min-w-0 shrink-[4] truncate whitespace-nowrap text-sub tabular-nums text-ink-muted"
             >
               {tool.installationKind === "desktopApp"
                 ? `${t("toolLifecycle.desktopApp")} · `
@@ -230,7 +251,7 @@ export default function BoundToolRow({
               disabled={busy || updating || updateLocked}
               aria-busy={updating}
               title={updateTo ? `v${tool.version} → v${updateTo}` : undefined}
-              className="h-5 gap-1 pl-1.5 pr-2"
+              className="h-5 flex-none gap-1 pl-1.5 pr-2"
             >
               {updating ? (
                 <Loader2
@@ -251,33 +272,37 @@ export default function BoundToolRow({
             </Button>
           )}
           {stateKey && (
-            <span className="whitespace-nowrap rounded-full bg-warn-soft px-2 py-px text-note font-medium text-warn">
+            <span className="inline-flex h-5 flex-none items-center whitespace-nowrap rounded-full bg-warn-soft px-2 text-note font-medium text-warn">
               {t(`toolLifecycle.${stateKey}`)}
             </span>
           )}
         </div>
-        <div className="mt-0.5 flex min-w-0 items-start gap-1.5 text-sub text-ink-muted">
-          {keyText && (
-            <span className="min-w-0 truncate leading-[25px]" title={keyText}>
-              {keyText}
-            </span>
-          )}
-          {keyText && modelControl && (
-            <span aria-hidden className="leading-[25px] text-ink-faint">
-              ·
-            </span>
-          )}
-          {modelControl}
-        </div>
+        <p
+          data-line="sub"
+          className="mt-0.5 truncate text-sub text-ink-muted"
+          title={subText || undefined}
+        >
+          {subText || "\u00a0"}
+        </p>
+      </div>
+      <div
+        data-column="model"
+        className="min-w-0 max-[720px]:col-span-2 max-[720px]:col-start-2 max-[720px]:row-start-2 max-[720px]:max-w-[280px]"
+      >
+        {modelControl}
       </div>
       <span id={analyticsDescriptionId} className="sr-only">
         {t("toolLifecycle.analyticsHint")}
       </span>
-      <div className="col-start-2 flex flex-wrap items-center justify-end gap-1.5 sm:col-start-3 sm:row-start-1">
+      <div
+        data-column="actions"
+        className="flex items-center justify-end gap-1 pr-3 max-[720px]:col-start-3 max-[720px]:row-start-1"
+      >
         {action && actionKey && (
           <Button
             variant={action === "install" ? "primary" : "secondary"}
             size="sm"
+            className="mr-1"
             onClick={(event) => onAction(action, event.currentTarget)}
             disabled={busy}
           >
@@ -290,13 +315,14 @@ export default function BoundToolRow({
           </Button>
         )}
         <Button
-          variant="secondary"
-          size="sm"
+          variant="icon"
           onClick={(event) => onManage(event.currentTarget)}
           disabled={busy}
+          aria-label={t("toolLifecycle.manage")}
+          title={t("toolLifecycle.manage")}
+          className="h-6 w-6"
         >
           <SlidersHorizontal aria-hidden className="h-3.5 w-3.5" />
-          {t("toolLifecycle.manage")}
         </Button>
         <DropdownMenu modal={false} open={menuOpen} onOpenChange={setMenuOpen}>
           <DropdownMenuTrigger asChild>

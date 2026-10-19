@@ -132,7 +132,6 @@
     "requestFailed": "Check failed; try again",
     "desktopCodex": "Codex desktop manages models in the app; CLI protocol checks do not apply",
     "chatgptCodexMode": "Codex mode",
-    "chatgptCodexUnset": "Codex model not set",
     "chatgptCodexShared": "This manages the desktop app's Codex mode, which shares its configuration with Codex CLI. Chat and Work use your signed-in OpenAI account and models; Ofox model settings do not configure them.",
     "applyProtocol": "Apply check result",
     "workBuddyConfiguredEndpoint": "Current endpoint",
@@ -2819,7 +2818,6 @@
   },
   "toolLifecycle": {
     "desktopApp": "Desktop app",
-    "modelUnset": "Model not set",
     "analytics": "Usage details",
     "analyticsFailed": "Failed to open usage statistics",
     "downloadFailed": "Failed to open installation page",

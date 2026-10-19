@@ -1066,11 +1066,13 @@ describe("Console tool rows", () => {
     ).not.toHaveClass("bg-brand");
   });
 
-  it("puts the model picker on the sub-line as a pill", async () => {
+  it("puts the model picker in the row's model column as a filled field", async () => {
     localTools = [localTool("claude", "2.1.293")];
     render(<ConsolePage boundTools={["claude"]} />);
     const row = await screen.findByRole("group", { name: "Claude Code" });
-    expect(await within(row).findByRole("combobox")).toHaveClass("bg-pill");
+    const picker = await within(row).findByRole("combobox");
+    expect(picker).toHaveClass("bg-pill", "w-full");
+    expect(picker.closest("[data-column=model]")).not.toBeNull();
   });
 });
 

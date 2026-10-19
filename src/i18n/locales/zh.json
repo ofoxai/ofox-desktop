@@ -132,7 +132,6 @@
     "requestFailed": "检测请求失败，请重试",
     "desktopCodex": "Codex 桌面版使用应用内模型设置，不进行 CLI 协议检测",
     "chatgptCodexMode": "Codex 模式",
-    "chatgptCodexUnset": "Codex 模型未设置",
     "chatgptCodexShared": "此处管理桌面应用的 Codex 模式，与 Codex CLI 共用配置。Chat 和 Work 使用 OpenAI 账号登录与模型，不能通过 Ofox 模型配置接管。",
     "applyProtocol": "应用检测结果",
     "workBuddyConfiguredEndpoint": "当前地址",
@@ -2819,7 +2818,6 @@
   },
   "toolLifecycle": {
     "desktopApp": "桌面应用",
-    "modelUnset": "未设置模型",
     "analytics": "用量明细",
     "analyticsFailed": "打开数据统计失败",
     "downloadFailed": "打开安装页面失败",

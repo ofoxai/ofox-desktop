@@ -36,7 +36,10 @@ import { ofoxAnalyticsUrl } from "@/lib/ofoxUrls";
 // toggle row for those tools.
 import AddToolsDialog from "./AddToolsDialog";
 import { BalanceCard } from "./BalanceCard";
-import BoundToolRow, { type ToolRowAction } from "./BoundToolRow";
+import BoundToolRow, {
+  TOOL_LIST_GRID,
+  type ToolRowAction,
+} from "./BoundToolRow";
 import ManageToolDialog, { type ManageToolTarget } from "./ManageToolDialog";
 import { UninstallToolDialog } from "./UninstallToolDialog";
 import { MissingToolsFold } from "./MissingToolsFold";
@@ -294,11 +297,11 @@ export function ToolsPanel({
             </div>
           )}
           <UpdateAllLine tools={installedTools} updates={inlineUpdates} />
-          <ListCard>
+          <ListCard className={TOOL_LIST_GRID}>
             {installedTools.length > 0 ? (
               installedTools.map(renderTool)
             ) : (
-              <p className="px-4 py-6 text-center text-ui text-ink-muted">
+              <p className="col-span-full px-4 py-6 text-center text-ui text-ink-muted">
                 {t("toolLifecycle.noInstalledBoundTools")}
               </p>
             )}

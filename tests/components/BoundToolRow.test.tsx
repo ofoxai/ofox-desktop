@@ -1,11 +1,14 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
 import en from "@/i18n/locales/en.json";
 import ja from "@/i18n/locales/ja.json";
-import BoundToolRow from "@/components/console/BoundToolRow";
+import BoundToolRow, {
+  TOOL_LIST_GRID,
+} from "@/components/console/BoundToolRow";
+import { ListCard } from "@/components/ui/list";
 import type { UninstallPreview } from "@/lib/api/toolUninstall";
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -72,7 +75,7 @@ it.each([
     const configure = screen.getByRole("button", { name: label });
     expect(
       i18n.t("modelCompatibility.defaultModelFailed", { tool: "Claude Code" }),
-    ).toContain(configure.textContent);
+    ).toContain(configure.getAttribute("aria-label"));
   },
 );
 
@@ -222,3 +225,73 @@ it.each(["notInstalled", "unknown"] as const)(
     expect(mocks.invoke).not.toHaveBeenCalled();
   },
 );
+
+function inList(row: React.ReactElement) {
+  return render(<ListCard className={TOOL_LIST_GRID}>{row}</ListCard>);
+}
+
+it("lays a row out on the list's shared columns: badge, name, model, actions", () => {
+  inList(
+    <BoundToolRow
+      {...props()}
+      subline={["claude on mac"]}
+      modelControl={<button type="button">gpt</button>}
+    />,
+  );
+  const row = screen.getByRole("group", { name: "Claude Code" });
+  expect(row).toHaveClass("col-span-full", "grid-cols-subgrid");
+  const cells = [...row.children].filter(
+    (cell) => !cell.classList.contains("sr-only"),
+  );
+  expect(cells.map((cell) => cell.getAttribute("data-column"))).toEqual([
+    "badge",
+    "name",
+    "model",
+    "actions",
+  ]);
+  expect(within(cells[2] as HTMLElement).getByText("gpt")).toBeVisible();
+});
+
+it("draws the sub-line even with nothing on it, so every row is as tall", () => {
+  inList(<BoundToolRow {...props()} />);
+  const sub = screen
+    .getByRole("group", { name: "Claude Code" })
+    .querySelector("[data-line=sub]");
+  expect(sub).not.toBeNull();
+  expect(sub).toHaveClass("truncate");
+});
+
+it("joins the key and model notes on the sub-line, the whole of it in its title", () => {
+  inList(
+    <BoundToolRow
+      {...props()}
+      subline={["opencode on mac", "", "实际在用 gpt-6-luna"]}
+    />,
+  );
+  const sub = screen.getByText("opencode on mac · 实际在用 gpt-6-luna");
+  expect(sub).toHaveAttribute("title", "opencode on mac · 实际在用 gpt-6-luna");
+});
+
+it("keeps 配置 a quiet icon beside 更多操作, after the row's one bordered action", () => {
+  inList(<BoundToolRow {...props()} />);
+  const row = screen.getByRole("group", { name: "Claude Code" });
+  const configure = within(row).getByRole("button", { name: "配置" });
+  expect(configure).toHaveAttribute("title", "配置");
+  expect(configure.textContent).toBe("");
+  expect(
+    within(row)
+      .getAllByRole("button")
+      .map((button) => button.getAttribute("aria-label") ?? button.textContent),
+  ).toEqual(["打开", "配置", "更多操作"]);
+});
+
+it("keeps the upgrade pill on the name's line, so the row keeps its height", () => {
+  inList(<BoundToolRow {...props()} updateTo="2.1.400" />);
+  const name = screen
+    .getByRole("group", { name: "Claude Code" })
+    .querySelector("[data-line=name]") as HTMLElement;
+  expect(name).not.toHaveClass("flex-wrap");
+  expect(
+    within(name).getByRole("button", { name: /升级到 v2\.1\.400/ }),
+  ).toBeVisible();
+});

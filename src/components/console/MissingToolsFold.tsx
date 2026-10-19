@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { ListCard, ListFold } from "@/components/ui/list";
+import { TOOL_LIST_GRID } from "./BoundToolRow";
+import { cn } from "@/lib/utils";
 import type { BoundTool } from "@/hooks/useBoundTools";
 
 interface MissingToolsFoldProps {
@@ -39,7 +41,10 @@ export function MissingToolsFold({
         {t("toolLifecycle.missingTools", { count: tools.length })}
       </ListFold>
       {open && (
-        <ListCard id={MISSING_TOOLS_ID} className="mt-1.5">
+        <ListCard
+          id={MISSING_TOOLS_ID}
+          className={cn("mt-1.5", TOOL_LIST_GRID)}
+        >
           {tools.map(renderTool)}
         </ListCard>
       )}
