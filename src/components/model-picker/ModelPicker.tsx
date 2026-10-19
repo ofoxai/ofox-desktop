@@ -1,4 +1,10 @@
-import { useCallback, useMemo, useState, type UIEvent } from "react";
+import {
+  useCallback,
+  useMemo,
+  useState,
+  type ReactNode,
+  type UIEvent,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { Check, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -311,8 +317,14 @@ export interface ModelPickerProps {
    * shard and the search/option list stays scrollable.
    */
   portalContainer?: HTMLElement | null;
-  /** Merged over the trigger's menu look, e.g. a tool row's pill. */
+  /** Merged over the trigger's menu look, e.g. a tool row's field. */
   triggerClassName?: string;
+  /** Merged over the wrapper, e.g. to fill a tool row's model column. */
+  className?: string;
+  /** Drawn in the chevron's place, e.g. a spinner while a change saves. */
+  trailing?: ReactNode;
+  title?: string;
+  busy?: boolean;
 }
 
 export function ModelPicker({
@@ -327,6 +339,10 @@ export function ModelPicker({
   allowDefault = false,
   emptyLabel,
   triggerClassName,
+  className,
+  trailing,
+  title,
+  busy,
 }: ModelPickerProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
@@ -347,7 +363,7 @@ export function ModelPicker({
   );
 
   return (
-    <div className="flex gap-1">
+    <div className={cn("flex gap-1", className)}>
       <Popover open={open} onOpenChange={handleOpenChange}>
         <PopoverTrigger asChild>
           <button
@@ -357,6 +373,8 @@ export function ModelPicker({
             role="combobox"
             aria-expanded={open}
             aria-haspopup="dialog"
+            aria-busy={busy || undefined}
+            title={title}
             disabled={disabled}
             className={cn(
               menuTriggerClassName,
@@ -368,7 +386,7 @@ export function ModelPicker({
             <span className="min-w-0 flex-1 truncate text-left">
               {value || emptyLabel || t("modelPicker.defaultRoute")}
             </span>
-            <MenuChevron />
+            {trailing ?? <MenuChevron />}
           </button>
         </PopoverTrigger>
         <PopoverContent

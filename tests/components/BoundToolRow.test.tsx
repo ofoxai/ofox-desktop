@@ -113,8 +113,7 @@ it("opens usage from More by keyboard and restores focus to the long-name row tr
     <div style={{ width: 900 }}>
       <BoundToolRow
         {...input}
-        keyLabel={"key-name-".repeat(20)}
-        model={"model-name-".repeat(20)}
+        subline={["key-name-".repeat(20), "model-name-".repeat(20)]}
       />
     </div>,
   );

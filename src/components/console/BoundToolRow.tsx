@@ -66,8 +66,8 @@ const INSTALL_METHODS = [
 
 interface BoundToolRowProps {
   tool: BoundToolRowData;
-  keyLabel?: string;
-  model?: string;
+  /** The faint line under the name: the key, then what the model is doing. */
+  subline?: string[];
   modelControl?: ReactNode;
   hasAnalytics: boolean;
   /** How this installation was installed, when the update check knows. */
@@ -96,8 +96,7 @@ interface BoundToolRowProps {
  */
 export default function BoundToolRow({
   tool,
-  keyLabel,
-  model,
+  subline = [],
   modelControl,
   hasAnalytics,
   installVia,
@@ -188,8 +187,7 @@ export default function BoundToolRow({
           method: t(`toolLifecycle.installMethod.${installVia}`),
         })
       : undefined;
-  const keyText =
-    tool.id === "chatgpt" ? t("modelCompatibility.chatgptCodexMode") : keyLabel;
+  const keyText = subline.filter(Boolean).join(" · ");
 
   return (
     <ListRow
@@ -264,22 +262,12 @@ export default function BoundToolRow({
               {keyText}
             </span>
           )}
-          {keyText && (modelControl || model !== undefined) && (
+          {keyText && modelControl && (
             <span aria-hidden className="leading-[25px] text-ink-faint">
               ·
             </span>
           )}
-          {modelControl ??
-            (model !== undefined && (
-              <span className="truncate leading-[25px]">
-                {model ||
-                  t(
-                    tool.id === "chatgpt"
-                      ? "modelCompatibility.chatgptCodexUnset"
-                      : "toolLifecycle.modelUnset",
-                  )}
-              </span>
-            ))}
+          {modelControl}
         </div>
       </div>
       <span id={analyticsDescriptionId} className="sr-only">

@@ -2898,6 +2898,8 @@
     "catalogFailed": "モデル一覧を読み込めません",
     "skippedModels": "次のモデルは保存されませんでした：{{names}}",
     "observed": "現在確認されたモデル：{{model}}",
+    "observedShort": "使用中 {{model}}",
+    "inAppModel": "モデルはアプリ内で設定",
     "unknown": "不明",
     "writableDefault": "Codex / ChatGPT の共有設定に書き込む既定モデル",
     "mixedScopes": "設定ごとにモデルが異なります。明示的なモデルを選択してください。",

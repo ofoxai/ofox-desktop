@@ -5,7 +5,10 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { ListCard } from "@/components/ui/list";
 import { ProfilesMenu } from "@/components/model-profiles/ProfilesMenu";
-import { QuickModelPicker } from "@/components/model-picker/QuickModelPicker";
+import {
+  QuickModelPicker,
+  modelNotes,
+} from "@/components/model-picker/QuickModelPicker";
 import NodeUpgradeDialog from "@/components/tools/NodeUpgradeDialog";
 import { useShellRefresh } from "@/components/shell/ShellContext";
 import { TOOL_META } from "@/config/toolMeta";
@@ -152,7 +155,12 @@ export function ToolsPanel({
       <BoundToolRow
         key={tool.id}
         tool={tool}
-        keyLabel={apiKeyLabelByTool[tool.id]}
+        subline={[
+          tool.id === "chatgpt"
+            ? t("modelCompatibility.chatgptCodexMode")
+            : apiKeyLabelByTool[tool.id],
+          ...modelNotes(snapshotByTool.get(tool.id), tool.id, t),
+        ]}
         modelControl={
           <QuickModelPicker
             toolId={tool.id}
@@ -166,7 +174,7 @@ export function ToolsPanel({
               (tool.id === "codex" && tool.installationKind === "desktopApp")
             }
             onRetry={() => void modelState.refetch()}
-            variant="pill"
+            variant="field"
           />
         }
         hasAnalytics={!!apiKeyIdByTool[tool.id]}

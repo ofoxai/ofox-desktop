@@ -2898,6 +2898,8 @@
     "catalogFailed": "模型目录读取失败",
     "skippedModels": "以下模型未保存：{{names}}",
     "observed": "当前观察到的模型：{{model}}",
+    "observedShort": "实际在用 {{model}}",
+    "inAppModel": "模型在应用内切换",
     "unknown": "未知",
     "writableDefault": "写入 Codex / ChatGPT 共用配置的默认模型",
     "mixedScopes": "多个配置使用不同模型，请选择一个明确的模型",

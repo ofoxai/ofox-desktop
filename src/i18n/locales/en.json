@@ -2898,6 +2898,8 @@
     "catalogFailed": "Unable to load the model catalog",
     "skippedModels": "These models were not saved: {{names}}",
     "observed": "Observed model: {{model}}",
+    "observedShort": "Running {{model}}",
+    "inAppModel": "Model is set in the app",
     "unknown": "Unknown",
     "writableDefault": "Default written to the shared Codex / ChatGPT config",
     "mixedScopes": "Configurations use different models. Choose an explicit model.",

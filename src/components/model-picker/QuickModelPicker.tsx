@@ -1,10 +1,11 @@
 import { useRef, useState } from "react";
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { Loader2, Layers } from "lucide-react";
+import { Loader2, Layers, RefreshCw } from "lucide-react";
 import { ModelPicker, MultiModelPicker } from "./ModelPicker";
 import { Button } from "@/components/ui/button";
-import { menuTriggerClassName } from "@/components/ui/menu-select";
+import { MenuChevron, menuTriggerClassName } from "@/components/ui/menu-select";
 import {
   Dialog,
   DialogContent,
@@ -29,13 +30,49 @@ interface QuickModelPickerProps {
   error?: boolean;
   onRetry: () => void;
   compact?: boolean;
-  /** "pill": a tool row's filled chip, its notes below it. */
-  variant?: "menu" | "pill";
+  /**
+   * "field": a tool row's model column, filled edge to edge. Every state is
+   * drawn inside the chip so the row never grows; the row's sub-line carries
+   * {@link modelNotes}.
+   */
+  variant?: "menu" | "field";
 }
 
-/** magpie's `.field`: a filled 25px chip, ringed in brand while open. */
-const pillTriggerClassName =
-  "h-[25px] max-w-[260px] flex-none gap-[5px] rounded-[6px] border-0 bg-pill pl-2 pr-[5px] text-nav font-medium hover:bg-pill-hover data-[state=open]:bg-pill-hover data-[state=open]:shadow-[inset_0_0_0_1px_rgb(var(--brand))]";
+/**
+ * magpie's `.field`: a filled 25px chip, ringed in brand while open. It fills
+ * its column so every chevron lines up down the list.
+ */
+const fieldClassName =
+  "h-[25px] w-full max-w-none flex-none gap-[5px] rounded-[6px] border-0 bg-pill pl-2 pr-[5px] text-nav font-medium hover:bg-pill-hover data-[state=open]:bg-pill-hover data-[state=open]:shadow-[inset_0_0_0_1px_rgb(var(--brand))]";
+/** A field whose catalog or last save failed: the reason is in its title. */
+const fieldWarnClassName = "shadow-[inset_0_0_0_1px_rgb(var(--warn)/0.5)]";
+
+/**
+ * What a tool row's sub-line says about its model beside the key: what the
+ * tool actually runs, and why Ofox cannot set it.
+ */
+export function modelNotes(
+  snapshot: ToolModelSnapshot | undefined,
+  toolId: string,
+  t: TFunction,
+): string[] {
+  if (!snapshot || snapshot.binding.status === "unknown") return [];
+  const selection = snapshot.managedSelection;
+  const observed = snapshot.observedSelection.model;
+  // ChatGPT only shares Codex's default, so what it runs is always news.
+  // A model set says nothing about which one ran, except OpenCode's TUI route.
+  const differs =
+    toolId === "chatgpt" ||
+    (selection.kind === "single"
+      ? observed !== selection.model
+      : toolId === "opencode");
+  return [
+    observed && differs
+      ? t("modelExperience.observedShort", { model: observed })
+      : "",
+    snapshot.canWrite === false ? t("modelExperience.inAppModel") : "",
+  ].filter(Boolean);
+}
 
 /** A model change writes only the selected tool, guarded by its snapshot revision. */
 export function QuickModelPicker({
@@ -48,7 +85,7 @@ export function QuickModelPicker({
   compact = false,
   variant = "menu",
 }: QuickModelPickerProps) {
-  const pill = variant === "pill";
+  const field = variant === "field";
   const { t } = useTranslation();
   const catalog = useModelCatalog(
     toolId,
@@ -117,10 +154,35 @@ export function QuickModelPicker({
     }
   };
 
-  if (!snapshot || snapshot.binding.status === "unknown")
+  if (!snapshot || snapshot.binding.status === "unknown") {
+    if (field)
+      return loading ? (
+        <div
+          role="status"
+          aria-label={t("modelExperience.loading")}
+          className={cn(menuTriggerClassName, fieldClassName, "animate-pulse")}
+        />
+      ) : (
+        <button
+          type="button"
+          onClick={onRetry}
+          title={t("modelExperience.retry")}
+          className={cn(
+            menuTriggerClassName,
+            fieldClassName,
+            "font-normal text-ink-muted",
+            error && fieldWarnClassName,
+          )}
+        >
+          <span className="min-w-0 flex-1 truncate text-left">
+            {t("modelExperience.stateFailed")}
+          </span>
+          <RefreshCw aria-hidden className="h-3 w-3 flex-none opacity-70" />
+        </button>
+      );
     return (
       <div
-        className="text-[11px] text-muted-foreground"
+        className="text-note text-ink-muted"
         role={error ? "alert" : "status"}
       >
         {loading
@@ -133,11 +195,10 @@ export function QuickModelPicker({
         )}
       </div>
     );
+  }
 
-  // Above the picker in a list of its own; below it as a row's pill.
-  const noteGap = pill ? "mt-1" : "mb-1";
   const chatgptObserved = toolId === "chatgpt" && (
-    <div className={cn("truncate text-muted-foreground", noteGap)}>
+    <div className="mb-1 truncate text-ink-muted">
       {t("modelExperience.observed", {
         model: observed || t("modelExperience.unknown"),
       })}
@@ -146,36 +207,54 @@ export function QuickModelPicker({
   const singleNotes = (
     <>
       {toolId === "chatgpt" && (
-        <div className={cn("text-muted-foreground", noteGap)}>
+        <div className="mb-1 text-ink-muted">
           {t("modelExperience.writableDefault")}
         </div>
       )}
       {mixed && (
-        <div className={cn("text-muted-foreground", noteGap)}>
+        <div className="mb-1 text-ink-muted">
           {t("modelExperience.mixedScopes")}
         </div>
       )}
     </>
   );
+  // The field says in its title what the menu look says in lines around it.
+  const fieldTitle =
+    [
+      toolId === "chatgpt" && t("modelExperience.writableDefault"),
+      mixed && t("modelExperience.mixedScopes"),
+      catalog.error && t("modelExperience.catalogFailed"),
+      saveError,
+    ]
+      .filter(Boolean)
+      .join("\n") || undefined;
+  const fieldClass =
+    field &&
+    cn(fieldClassName, (catalog.error || saveError) && fieldWarnClassName);
+  const fieldTrailing = save.isPending ? (
+    <Loader2
+      aria-hidden
+      className="h-3 w-3 flex-none animate-spin opacity-70"
+    />
+  ) : undefined;
   const picker = multi ? (
     <button
       type="button"
+      title={field ? fieldTitle : undefined}
+      aria-busy={(field && save.isPending) || undefined}
       disabled={!writable || save.isPending}
       onClick={() => {
         setEditing(snapshot);
         setDraft([...selectedModels]);
         setSaveError(null);
       }}
-      className={cn(
-        menuTriggerClassName,
-        "max-w-full text-ink",
-        pill && pillTriggerClassName,
-      )}
+      className={cn(menuTriggerClassName, "max-w-full text-ink", fieldClass)}
     >
       <Layers aria-hidden className="h-[13px] w-[13px] flex-none" />
-      <span className="min-w-0 truncate">
+      <span className={cn("min-w-0 truncate", field && "flex-1 text-left")}>
         {t("modelExperience.modelCount", { count: selectedModels.length })}
       </span>
+      {field && (fieldTrailing ?? <MenuChevron />)}
     </button>
   ) : (
     <ModelPicker
@@ -193,48 +272,121 @@ export function QuickModelPicker({
         !snapshot.supportsDefault ? t("modelExperience.chooseModel") : undefined
       }
       disabled={!writable || save.isPending}
-      triggerClassName={pill ? pillTriggerClassName : undefined}
+      triggerClassName={fieldClass || undefined}
+      className={field ? "w-full" : undefined}
+      trailing={field ? fieldTrailing : undefined}
+      title={field ? fieldTitle : undefined}
+      busy={field && save.isPending}
     />
   );
+  const dialog = (
+    <Dialog
+      open={!!editing}
+      onOpenChange={(open) => {
+        if (!open && !save.isPending) setEditing(null);
+      }}
+    >
+      <DialogContent ref={setPortal} className="max-h-[85vh] sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>
+            {t("modelExperience.editModelSet", {
+              tool: TOOL_META[toolId]?.label ?? toolId,
+            })}
+          </DialogTitle>
+          <DialogDescription>
+            {t("modelExperience.multiDescription")}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="min-h-0 space-y-4 overflow-y-auto px-6 py-4">
+          <MultiModelPicker
+            id={`model-set-${toolId}`}
+            selectedIds={draft}
+            onChange={setDraft}
+            models={catalog.models}
+            loading={catalog.loading}
+            onFetch={catalog.fetch}
+            portalContainer={portal}
+            disabled={save.isPending}
+          />
+          {catalog.error && (
+            <p role="alert" className="text-sm text-destructive">
+              {t("modelExperience.catalogFailed")}
+            </p>
+          )}
+          {saveError && (
+            <p role="alert" className="text-sm text-destructive">
+              {saveError}
+            </p>
+          )}
+        </div>
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={save.isPending}
+            onClick={() => setEditing(null)}
+          >
+            {t("modelExperience.cancel")}
+          </Button>
+          <Button
+            type="button"
+            disabled={
+              !writable ||
+              save.isPending ||
+              !draft.length ||
+              (toolId === "workbuddy" &&
+                (!!catalog.error ||
+                  draft.some(
+                    (id) => !catalog.models.some((model) => model.id === id),
+                  )))
+            }
+            onClick={() => {
+              if (editing)
+                void persist(editing, { kind: "models", models: draft });
+            }}
+          >
+            {save.isPending
+              ? t("modelExperience.saving")
+              : t("modelExperience.save")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+
+  if (field)
+    return (
+      <div className="min-w-0">
+        {picker}
+        {(saveError || catalog.error) && !editing && (
+          <span role="alert" className="sr-only">
+            {saveError ?? t("modelExperience.catalogFailed")}
+          </span>
+        )}
+        {dialog}
+      </div>
+    );
 
   return (
-    <div
-      className={
-        pill
-          ? "flex min-w-0 flex-col items-start text-[11px]"
-          : compact
-            ? "mt-1 text-[11px]"
-            : "mt-1.5 max-w-sm text-[11px]"
-      }
-    >
-      {pill ? (
-        <>
-          {picker}
-          {chatgptObserved}
-          {!multi && singleNotes}
-        </>
+    <div className={compact ? "mt-1 text-note" : "mt-1.5 max-w-sm text-note"}>
+      {chatgptObserved}
+      {multi ? (
+        picker
       ) : (
-        <>
-          {chatgptObserved}
-          {multi ? (
-            picker
-          ) : (
-            <div>
-              {singleNotes}
-              {picker}
-            </div>
-          )}
-        </>
+        <div>
+          {singleNotes}
+          {picker}
+        </div>
       )}
       {snapshot.canWrite === false && (
-        <p className="mt-1 text-muted-foreground">
+        <p className="mt-1 text-ink-muted">
           {t("modelCompatibility.desktopCodex")}
         </p>
       )}
       {save.isPending && (
         <div
           role="status"
-          className="mt-1 flex items-center gap-1 text-muted-foreground"
+          className="mt-1 flex items-center gap-1 text-ink-muted"
         >
           <Loader2 className="h-3 w-3 animate-spin" />
           {t("modelExperience.saving")}
@@ -244,12 +396,12 @@ export function QuickModelPicker({
         observed &&
         observed !== selectedModel &&
         (toolId === "opencode" || !multi) && (
-          <div className="mt-1 truncate text-muted-foreground">
+          <div className="mt-1 truncate text-ink-muted">
             {t("modelExperience.observed", { model: observed })}
           </div>
         )}
       {catalog.error && (
-        <div role="alert" className="mt-1 text-muted-foreground">
+        <div role="alert" className="mt-1 text-ink-muted">
           {t("modelExperience.catalogFailed")}{" "}
           <button type="button" onClick={catalog.fetch} className="underline">
             {t("modelExperience.retry")}
@@ -257,82 +409,11 @@ export function QuickModelPicker({
         </div>
       )}
       {saveError && !editing && (
-        <div role="alert" className="mt-1 text-destructive">
+        <div role="alert" className="mt-1 text-danger">
           {saveError}
         </div>
       )}
-      <Dialog
-        open={!!editing}
-        onOpenChange={(open) => {
-          if (!open && !save.isPending) setEditing(null);
-        }}
-      >
-        <DialogContent ref={setPortal} className="max-h-[85vh] sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>
-              {t("modelExperience.editModelSet", {
-                tool: TOOL_META[toolId]?.label ?? toolId,
-              })}
-            </DialogTitle>
-            <DialogDescription>
-              {t("modelExperience.multiDescription")}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="min-h-0 space-y-4 overflow-y-auto px-6 py-4">
-            <MultiModelPicker
-              id={`model-set-${toolId}`}
-              selectedIds={draft}
-              onChange={setDraft}
-              models={catalog.models}
-              loading={catalog.loading}
-              onFetch={catalog.fetch}
-              portalContainer={portal}
-              disabled={save.isPending}
-            />
-            {catalog.error && (
-              <p role="alert" className="text-sm text-destructive">
-                {t("modelExperience.catalogFailed")}
-              </p>
-            )}
-            {saveError && (
-              <p role="alert" className="text-sm text-destructive">
-                {saveError}
-              </p>
-            )}
-          </div>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={save.isPending}
-              onClick={() => setEditing(null)}
-            >
-              {t("modelExperience.cancel")}
-            </Button>
-            <Button
-              type="button"
-              disabled={
-                !writable ||
-                save.isPending ||
-                !draft.length ||
-                (toolId === "workbuddy" &&
-                  (!!catalog.error ||
-                    draft.some(
-                      (id) => !catalog.models.some((model) => model.id === id),
-                    )))
-              }
-              onClick={() => {
-                if (editing)
-                  void persist(editing, { kind: "models", models: draft });
-              }}
-            >
-              {save.isPending
-                ? t("modelExperience.saving")
-                : t("modelExperience.save")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {dialog}
     </div>
   );
 }

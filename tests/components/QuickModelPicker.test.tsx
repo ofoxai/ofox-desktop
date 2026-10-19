@@ -9,7 +9,10 @@ import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
 import { toast } from "sonner";
-import { QuickModelPicker } from "@/components/model-picker/QuickModelPicker";
+import {
+  QuickModelPicker,
+  modelNotes,
+} from "@/components/model-picker/QuickModelPicker";
 import { queryClient } from "@/lib/query/queryClient";
 import {
   modelSelectionApi,
@@ -313,5 +316,140 @@ describe("QuickModelPicker", () => {
       <QuickModelPicker toolId="codex" snapshot={state} onRetry={vi.fn()} />,
     );
     expect(screen.getByRole("combobox")).toBeDisabled();
+  });
+});
+
+describe("QuickModelPicker as a tool row's field", () => {
+  it("fills its column with one chip and puts no note under it", () => {
+    const state = snapshot("opencode", {
+      kind: "models",
+      models: ["openai/old", "openai/new"],
+    });
+    state.observedSelection = { model: "external/x", source: "tui" };
+    const { container } = render(
+      <QuickModelPicker
+        toolId="opencode"
+        snapshot={state}
+        onRetry={vi.fn()}
+        variant="field"
+      />,
+    );
+    const field = screen.getByRole("button", { name: "2 个模型" });
+    expect(field).toHaveClass("h-[25px]", "w-full", "bg-pill");
+    expect(field.querySelector("svg.lucide-chevron-down")).not.toBeNull();
+    expect(container).not.toHaveTextContent("external/x");
+  });
+
+  it("stretches the single-model picker across the column", () => {
+    render(
+      <QuickModelPicker
+        toolId="codex"
+        snapshot={snapshot()}
+        onRetry={vi.fn()}
+        variant="field"
+      />,
+    );
+    expect(screen.getByRole("combobox")).toHaveClass("w-full", "bg-pill");
+  });
+
+  it("holds the column with a placeholder of the same shape while loading", () => {
+    render(
+      <QuickModelPicker
+        toolId="codex"
+        loading
+        onRetry={vi.fn()}
+        variant="field"
+      />,
+    );
+    expect(
+      screen.getByRole("status", { name: "正在读取模型状态…" }),
+    ).toHaveClass("h-[25px]", "w-full");
+  });
+
+  it("retries an unreadable state from inside the field", () => {
+    const onRetry = vi.fn();
+    render(
+      <QuickModelPicker
+        toolId="codex"
+        error
+        onRetry={onRetry}
+        variant="field"
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "无法读取模型状态" }));
+    expect(onRetry).toHaveBeenCalled();
+  });
+
+  it("turns the chevron into a spinner while a change saves", async () => {
+    vi.mocked(modelSelectionApi.save).mockReturnValue(new Promise(() => {}));
+    render(
+      <QuickModelPicker
+        toolId="codex"
+        snapshot={snapshot()}
+        onRetry={vi.fn()}
+        variant="field"
+      />,
+    );
+    await selectSingle();
+    await waitFor(() =>
+      expect(screen.getByRole("combobox")).toHaveAttribute("aria-busy", "true"),
+    );
+    expect(screen.queryByText("正在保存…")).toBeNull();
+  });
+
+  it("names a failed save on the field instead of a line under it", async () => {
+    vi.mocked(modelSelectionApi.save).mockRejectedValue(new Error("stale"));
+    render(
+      <QuickModelPicker
+        toolId="codex"
+        snapshot={snapshot()}
+        onRetry={vi.fn()}
+        variant="field"
+      />,
+    );
+    await selectSingle();
+    expect(await screen.findByRole("alert")).toHaveClass("sr-only");
+    expect(screen.getByRole("combobox").title).toContain("stale");
+  });
+});
+
+describe("modelNotes", () => {
+  const t = i18n.t.bind(i18n);
+
+  it("says what OpenCode runs beside its model set", () => {
+    const state = snapshot("opencode", { kind: "models", models: ["a"] });
+    state.observedSelection = { model: "external/x", source: "tui" };
+    expect(modelNotes(state, "opencode", t)).toEqual(["实际在用 external/x"]);
+  });
+
+  it("stays quiet when a single-model tool runs what is set", () => {
+    expect(modelNotes(snapshot(), "codex", t)).toEqual([]);
+  });
+
+  it("says what a single-model tool runs when it differs", () => {
+    const state = snapshot();
+    state.observedSelection = { model: "openai/live", source: "config" };
+    expect(modelNotes(state, "codex", t)).toEqual(["实际在用 openai/live"]);
+  });
+
+  it("always says what ChatGPT runs, as it only shares the default", () => {
+    expect(modelNotes(snapshot("chatgpt"), "chatgpt", t)).toEqual([
+      "实际在用 openai/old",
+    ]);
+  });
+
+  it("does not describe WorkBuddy's model set by what it ran last", () => {
+    const state = snapshot("workbuddy", { kind: "models", models: ["a"] });
+    expect(modelNotes(state, "workbuddy", t)).toEqual([]);
+  });
+
+  it("says the model is set in the app when Ofox cannot write it", () => {
+    const state = snapshot();
+    state.canWrite = false;
+    expect(modelNotes(state, "codex", t)).toEqual(["模型在应用内切换"]);
+  });
+
+  it("has nothing to say before the state is read", () => {
+    expect(modelNotes(undefined, "codex", t)).toEqual([]);
   });
 });
