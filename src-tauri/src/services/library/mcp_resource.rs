@@ -571,6 +571,18 @@ pub(crate) fn preview_at_adoption(
             status: "pending".into(),
             reason: None,
         };
+        // Ownership proofs the other MCP servers hold on this same file.
+        let siblings: Vec<mcp_codec::OwnedFields> = before
+            .machine
+            .receipts
+            .values()
+            .filter(|receipt| {
+                receipt.kind == ResourceKind::Mcp
+                    && receipt.physical_target == physical
+                    && receipt.resource_id != id
+            })
+            .filter_map(|receipt| serde_json::from_str(&receipt.owned_segment).ok())
+            .collect();
         let result = (|| {
             if io::physical_id(&group.path)? != physical {
                 return Err(error("targetChanged"));
@@ -686,7 +698,8 @@ pub(crate) fn preview_at_adoption(
             write.private_values =
                 native.is_some() && mcp_codec::has_literal_values(&server.server);
             write.receipt = receipt
-                .map(|owned| {
+                .map(|mut owned| {
+                    mcp_codec::inherit_created_section(&mut owned, &siblings);
                     Ok::<Receipt, AppError>(Receipt {
                         kind: ResourceKind::Mcp,
                         resource_id: id.into(),
@@ -1451,6 +1464,36 @@ mod tests {
             root["mcpServers"]["context7"]["headers"]["CONTEXT7_API_KEY"],
             "ctx-literal"
         );
+    }
+    #[test]
+    fn the_last_server_withdrawn_takes_the_section_ofox_created_with_it() {
+        let db = Database::memory().unwrap();
+        for id in ["first", "second"] {
+            save_draft(
+                &db,
+                row(id, id, json!({"type":"stdio","command":"server"})),
+                None,
+            )
+            .unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let original = "{\n  \"model\": {\n    \"name\": \"personal\"\n  }\n}\n";
+        std::fs::write(&path, original).unwrap();
+        for (id, tools) in [
+            ("first", vec![("gemini".to_string(), path.clone())]),
+            ("second", vec![("gemini".to_string(), path.clone())]),
+            ("first", vec![]),
+            ("second", vec![]),
+        ] {
+            let op = preview_at(&db, id, &tools, None).unwrap();
+            assert_eq!(
+                super::super::apply_operation(&db, &op.id).unwrap().status,
+                "applied",
+                "{id}"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     }
     #[test]
     fn ensure_metadata_drops_an_identical_generated_duplicate() {

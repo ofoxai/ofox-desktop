@@ -259,6 +259,27 @@ fn compose(
         return Err(error("targetChanged"));
     }
     let servers = db.get_all_mcp_servers()?;
+    let resources: Vec<String> = group
+        .members
+        .iter()
+        .map(|member| plans[member.child].resource_id.clone())
+        .collect();
+    let physical = plans[group.members[0].child].targets[group.members[0].target]
+        .physical_target
+        .clone();
+    // Proofs on this file from servers outside the batch, then each one composed below.
+    let mut siblings: Vec<mcp_codec::OwnedFields> = db
+        .library_snapshot()?
+        .machine
+        .receipts
+        .values()
+        .filter(|receipt| {
+            receipt.kind == ResourceKind::Mcp
+                && receipt.physical_target == physical
+                && !resources.contains(&receipt.resource_id)
+        })
+        .filter_map(|receipt| serde_json::from_str(&receipt.owned_segment).ok())
+        .collect();
     // Stable order is important for ownership of containers introduced by a peer.
     group
         .members
@@ -304,9 +325,11 @@ fn compose(
             old.as_ref(),
             native.as_ref(),
         )?;
-        if let (Some(receipt), Some(owned)) = (&mut target.receipt, owned) {
+        if let (Some(receipt), Some(mut owned)) = (&mut target.receipt, owned) {
+            mcp_codec::inherit_created_section(&mut owned, &siblings);
             receipt.owned_segment =
                 serde_json::to_string(&owned).map_err(|_| error("stateUnreadable"))?;
+            siblings.push(owned);
         }
         text = Some(after);
     }

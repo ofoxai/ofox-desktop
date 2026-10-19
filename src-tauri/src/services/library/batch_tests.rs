@@ -89,6 +89,55 @@ fn two_mcp_resources_share_one_final_file_and_both_receipts() {
 
 #[test]
 #[serial_test::serial]
+fn a_batch_applied_and_withdrawn_leaves_each_config_as_it_was() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let paths = mcp_resource::native_paths().unwrap();
+    let originals = [
+        ("codex", "model = \"user-model\"\n"),
+        (
+            "gemini",
+            "{\n  \"model\": {\n    \"name\": \"personal\"\n  }\n}\n",
+        ),
+        ("hermes", "model:\n  default: personal\n"),
+    ];
+    for (tool, text) in originals {
+        crate::config::atomic_write(&paths[tool], text.as_bytes()).unwrap();
+    }
+    let tools: Vec<String> = originals.iter().map(|(tool, _)| tool.to_string()).collect();
+    let (a, b) = (mcp(&db, "alpha"), mcp(&db, "beta"));
+    let plan = preview_batch(
+        &db,
+        ResourceKind::Mcp,
+        vec![a.clone(), b.clone()],
+        tools.clone(),
+        BatchAction::Apply,
+        0,
+    )
+    .unwrap();
+    assert_eq!(run_batch(&db, id(&plan)).unwrap()["status"], "applied");
+    let epoch = db.library_snapshot().unwrap().machine.epoch;
+    let plan = preview_batch(
+        &db,
+        ResourceKind::Mcp,
+        vec![a, b],
+        tools,
+        BatchAction::Withdraw,
+        epoch,
+    )
+    .unwrap();
+    assert_eq!(run_batch(&db, id(&plan)).unwrap()["status"], "applied");
+    for (tool, text) in originals {
+        assert_eq!(
+            std::fs::read_to_string(&paths[tool]).unwrap(),
+            text,
+            "{tool}"
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
 fn batch_children_cannot_be_executed_by_single_resource_api() {
     let _sandbox = crate::test_sandbox::sandbox();
     let db = Database::memory().unwrap();

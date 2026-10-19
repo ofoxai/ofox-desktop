@@ -784,6 +784,22 @@ pub fn adopt_server(
     Ok(owned)
 }
 
+/// When another of Ofox's servers in this file created the servers section,
+/// this one shares that, so whichever server leaves last takes the section with it.
+pub fn inherit_created_section<'a>(
+    owned: &mut OwnedFields,
+    others: impl IntoIterator<Item = &'a OwnedFields>,
+) {
+    let section = vec![section(&owned.tool).to_string()];
+    if !owned.created_paths.contains(&section)
+        && others
+            .into_iter()
+            .any(|other| other.created_paths.contains(&section))
+    {
+        owned.created_paths.push(section);
+    }
+}
+
 fn withdrawal_parents(owned: &OwnedFields) -> Vec<Vec<String>> {
     let mut paths = owned.created_paths.clone();
     if owned.adopted_server {
