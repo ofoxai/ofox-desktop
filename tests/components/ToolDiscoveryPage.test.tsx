@@ -71,3 +71,11 @@ describe("ToolDiscoveryPage scan lifecycle", () => {
     expect(bind).toHaveBeenCalledWith(["claude"]);
   });
 });
+
+it("keeps the skip-binding link readable, at the page's 13px and clear of the button", () => {
+  vi.spyOn(tauri, "invoke").mockResolvedValue([]);
+  render(<ToolDiscoveryPage onBind={vi.fn()} onEnterLocal={vi.fn()} />);
+  const skip = screen.getByRole("button", { name: "暂不绑定，进入本机管理" });
+  expect(skip).toHaveClass("text-ui", "mt-3");
+  expect(skip).not.toHaveClass("text-sub");
+});

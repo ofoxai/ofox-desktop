@@ -456,7 +456,7 @@ export default function LoginPage({
           {onEnterLocal && (
             <button
               type="button"
-              className="mb-4 text-sub text-ink-muted hover:underline"
+              className="mb-4 py-1 text-ui text-ink-muted hover:text-ink hover:underline"
               onClick={() => {
                 lifetime.current += 1;
                 stopPolling();

@@ -89,3 +89,12 @@ it("does not open the browser or start polling after the user enters local manag
   expect(mocks.poll).not.toHaveBeenCalled();
   expect(success).not.toHaveBeenCalled();
 });
+
+it("keeps the local-management link as readable as the sign-up line", () => {
+  render(<LoginPage onLoginSuccess={vi.fn()} onEnterLocal={vi.fn()} />);
+  const local = screen.getByRole("button", {
+    name: i18n.t("toolCatalog.enterLocal"),
+  });
+  expect(local).toHaveClass("text-ui");
+  expect(local).not.toHaveClass("text-sub");
+});

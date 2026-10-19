@@ -284,7 +284,7 @@ export default function ToolDiscoveryPage({
         {onEnterLocal && (
           <button
             type="button"
-            className="mb-4 self-center text-sub text-ink-muted hover:underline"
+            className="mb-4 mt-3 self-center py-1 text-ui text-ink-muted hover:text-ink hover:underline"
             onClick={onEnterLocal}
           >
             {t("toolCatalog.skipBinding")}
