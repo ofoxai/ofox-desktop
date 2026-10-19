@@ -19,23 +19,12 @@ const mocks = vi.hoisted(() => ({
   inventory: vi.fn(),
   open: vi.fn(),
   copy: vi.fn(),
-  changed: vi.fn(),
 }));
 vi.mock("@/lib/api/installCatalog", () => ({
   getInstallInventory: mocks.inventory,
 }));
 vi.mock("@/lib/api", () => ({ settingsApi: { openExternal: mocks.open } }));
 vi.mock("@/lib/clipboard", () => ({ copyText: mocks.copy }));
-vi.mock("@/components/tools/CatalogLifecycleDialog", () => ({
-  CatalogLifecycleDialog: ({
-    onChanged,
-  }: {
-    onChanged: () => Promise<void>;
-  }) => {
-    mocks.changed(onChanged);
-    return null;
-  },
-}));
 
 beforeEach(() => {
   vi.spyOn(navigator, "userAgent", "get").mockReturnValue("Macintosh");
@@ -168,21 +157,6 @@ describe("independent tool installation catalog", () => {
     },
   );
 
-  it("keeps the management label concise while naming its tool for assistive technology", async () => {
-    render(<OptionalToolsCatalog boundTools={[]} />);
-    const manage = await screen.findByRole("button", {
-      name: "管理 GitHub Copilot CLI 安装",
-    });
-    expect(manage).toHaveTextContent(/^安装管理$/);
-    expect(manage).toHaveAttribute(
-      "title",
-      zh.catalogLifecycle.installationScope,
-    );
-    await userEvent.click(manage);
-    expect(screen.getByRole("dialog")).toHaveAccessibleName(
-      "GitHub Copilot CLI · Ofox 管理副本",
-    );
-  });
   it("keeps installation details on one faint line, the paths in its title", async () => {
     mocks.inventory.mockResolvedValueOnce([
       {
@@ -251,67 +225,17 @@ describe("independent tool installation catalog", () => {
     expect(screen.getByText(/Ofox 管理副本.*1.0.98/)).toBeVisible();
     expect(screen.queryByText("未安装")).not.toBeInTheDocument();
   });
-  it("does not start a queued mutation refresh after the catalog has unmounted", async () => {
-    let finish!: (rows: unknown[]) => void;
-    mocks.inventory.mockReturnValueOnce(
-      new Promise((resolve) => {
-        finish = resolve;
-      }),
-    );
-    const rendered = render(<OptionalToolsCatalog boundTools={[]} />);
-    fireEvent.click(screen.getByRole("button", { name: /安装其他工具/ }));
-    await userEvent.click(
-      screen.getByRole("button", { name: "管理 GitHub Copilot CLI 安装" }),
-    );
-    const afterChange = mocks.changed.mock.calls.at(
-      -1,
-    )![0] as () => Promise<void>;
-    let completion!: Promise<void>;
-    act(() => {
-      completion = afterChange().catch(() => undefined);
-    });
-    rendered.unmount();
-    await act(async () => finish([]));
-    await act(async () => completion);
-    expect(mocks.inventory).toHaveBeenCalledTimes(1);
-  });
-
-  it("reprobes after a mutation instead of accepting an inventory request started before it", async () => {
-    let finish!: (rows: unknown[]) => void;
-    mocks.inventory
-      .mockReturnValueOnce(
-        new Promise((resolve) => {
-          finish = resolve;
-        }),
-      )
-      .mockResolvedValueOnce([
-        { toolId: "copilot", status: "installed", version: "new" },
-      ]);
-    render(<OptionalToolsCatalog boundTools={[]} />);
-    fireEvent.click(screen.getByRole("button", { name: /安装其他工具/ }));
-    await userEvent.click(
-      screen.getByRole("button", { name: "管理 GitHub Copilot CLI 安装" }),
-    );
-    const afterChange = mocks.changed.mock.calls.at(
-      -1,
-    )![0] as () => Promise<void>;
-    let completion!: Promise<void>;
-    act(() => {
-      completion = afterChange();
-    });
-    await act(async () =>
-      finish([{ toolId: "copilot", status: "installed", version: "old" }]),
-    );
-    await waitFor(() => expect(mocks.inventory).toHaveBeenCalledTimes(2));
-    await act(async () => completion);
-  });
-
-  it("offers installation-only management for Copilot without changing bindings", async () => {
+  it("gives every installed row the same official guide, with no Copilot-only management", async () => {
     render(<OptionalToolsCatalog boundTools={["codex"]} />);
-    await screen.findByText("GitHub Copilot CLI");
+    const row = await screen.findByRole("group", {
+      name: "GitHub Copilot CLI",
+    });
     expect(
-      screen.getByRole("button", { name: "管理 GitHub Copilot CLI 安装" }),
-    ).toBeEnabled();
+      within(row)
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).toEqual(["官方说明"]);
+    expect(screen.queryByText("安装管理")).toBeNull();
     expect(localStorage.getItem("ofox-bound-tools")).toBe('["codex"]');
   });
 

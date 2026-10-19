@@ -4241,50 +4241,6 @@
       "showMine": "マイリソースを見る"
     }
   },
-  "catalogLifecycle": {
-    "manageShort": "インストール管理",
-    "description": "この Ofox コピーだけを管理します。端末 PATH・モデル接続・ログインは変更しません。外部コピーは元のインストール方法で管理してください。",
-    "unavailable": "このバックエンドはこのインストール管理に対応していません。",
-    "prepareFailed": "操作を準備できませんでした。導入元を再確認するか公式の手動手順を使用してください。",
-    "executeFailed": "操作を完了できませんでした。実際の導入状態を確認してから再試行してください。",
-    "manualRequired": "このコピー・ランタイム・プラットフォームには公式の手動手順が必要です。",
-    "copyLaunch": "このコピーの起動コマンドをコピー",
-    "frozenVersion": "固定バージョン {{version}} · Node.js {{node}}",
-    "preservesData": "設定・認証・セッション・共有 Node/npm を保持します。不明または変更されたファイルがある場合、自動操作を停止します。",
-    "cancel": "操作をキャンセル",
-    "copyState": {
-      "missing": "Ofox 管理コピーはありません",
-      "managed": "Ofox 管理コピーを検証済み",
-      "needsReview": "導入元の確認が必要です",
-      "unavailable": "プラットフォームまたはランタイムが利用できません"
-    },
-    "preview": {
-      "install": "Ofox コピーの導入をプレビュー",
-      "update": "このコピーの更新をプレビュー",
-      "uninstall": "このコピーの削除をプレビュー"
-    },
-    "start": {
-      "install": "インストール開始",
-      "update": "更新開始",
-      "uninstall": "このコピーを削除してデータを保持"
-    },
-    "stages": {
-      "verify": "導入元を確認中…",
-      "execute": "実行中…",
-      "cleanup": "プロセスを終了中…",
-      "inspect": "導入状態を再検出中…"
-    },
-    "result": {
-      "ok": "操作が完了しました",
-      "partial": "一部完了しました。保持したファイルと実際の導入状態を確認してください。",
-      "cancelled": "操作をキャンセルしました。再検出した導入状態を確認してください。",
-      "failed": "操作に失敗しました。既存データは保持されます。導入状態を確認してください。"
-    },
-    "manage": "{{name}} のインストールを管理",
-    "title": "{{name}} · Ofox 管理コピー",
-    "refreshFailed": "インストール一覧を更新できませんでした。操作結果は保持されています。",
-    "installationScope": "Ofox が作成した独立コピーのみを管理します。外部インストールは変更せず、Ofox への紐付けや使用量集計も行いません。"
-  },
   "usageWorkbench": {
     "tabs": "使用量のページ",
     "overview": "概要",

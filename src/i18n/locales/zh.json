@@ -4241,50 +4241,6 @@
       "showMine": "查看我的资源"
     }
   },
-  "catalogLifecycle": {
-    "manageShort": "安装管理",
-    "description": "仅管理此 Ofox 副本；不修改终端 PATH，也不绑定模型或代登录。外部副本继续由原安装方式管理。",
-    "unavailable": "此后端暂不支持该安装管理。",
-    "prepareFailed": "无法准备操作。请重新检测安装来源或使用官方手动途径。",
-    "executeFailed": "操作未能完成。请重新检测实际安装状态后再处理。",
-    "manualRequired": "此副本、运行时或平台尚不能自动管理，请使用官方手动途径。",
-    "copyLaunch": "复制此副本的启动命令",
-    "frozenVersion": "固定版本 {{version}} · Node.js {{node}}",
-    "preservesData": "保留工具的配置、授权、会话与共享 Node/npm；未知或修改过的文件会阻止自动操作。",
-    "cancel": "取消操作",
-    "copyState": {
-      "missing": "尚无 Ofox 管理副本",
-      "managed": "Ofox 管理副本已核验",
-      "needsReview": "安装来源需要核对",
-      "unavailable": "当前平台或运行时不可用"
-    },
-    "preview": {
-      "install": "预览安装 Ofox 副本",
-      "update": "预览更新此副本",
-      "uninstall": "预览卸载此副本"
-    },
-    "start": {
-      "install": "开始安装",
-      "update": "开始更新",
-      "uninstall": "卸载此副本并保留数据"
-    },
-    "stages": {
-      "verify": "核对来源…",
-      "execute": "正在执行…",
-      "cleanup": "正在回收进程…",
-      "inspect": "重新检测安装…"
-    },
-    "result": {
-      "ok": "操作完成",
-      "partial": "部分完成，请核对保留的文件和实际安装状态。",
-      "cancelled": "操作已取消，请以重新检测的安装状态为准。",
-      "failed": "操作失败，原有数据已保留；请核对安装状态。"
-    },
-    "manage": "管理 {{name}} 安装",
-    "title": "{{name}} · Ofox 管理副本",
-    "refreshFailed": "刷新安装目录失败；操作结果已保留。",
-    "installationScope": "仅管理 Ofox 创建的独立副本；不改变外部安装，也不表示已绑定 Ofox 或纳入用量统计。"
-  },
   "usageWorkbench": {
     "tabs": "用量子页",
     "overview": "概览",

@@ -55,7 +55,7 @@
 
 ### 3.2 首批候选与核实边界
 
-以下官方身份及安装来源已于 2026-10-15 核查。初始核查只建立目录候选；后续 Copilot CLI 的 macOS arm64 独立安装生命周期已完成沙箱原生验证，其余候选和未验平台保留官方手动途径。各项当前边界见[实施记录](../../implementation-progress-2026-10-15.md)，扩大支持前须再核对发布版本、平台、架构、依赖和升级行为。
+以下官方身份及安装来源已于 2026-10-15 核查。初始核查只建立目录候选；后续 Copilot CLI 的 macOS arm64 独立安装生命周期已完成沙箱原生验证，其余候选和未验平台保留官方手动途径。2026-10-19 用户决定移除界面上的“安装管理”入口（只对一个工具生效的特例与“绑定优先”定位不符），每个额外工具只提供官方说明；后端 `catalog_lifecycle` 命令保留但不再暴露。各项当前边界见[实施记录](../../implementation-progress-2026-10-15.md)，扩大支持前须再核对发布版本、平台、架构、依赖和升级行为。
 
 - [GitHub Copilot CLI](https://docs.github.com/en/copilot/get-started/cli-quickstart)：独立 CLI；npm／官方系统包渠道。OFox 不代登录 GitHub。
 - [Cline CLI](https://github.com/cline/cline/blob/main/apps/cli/README.md)：与 Cline IDE 扩展分开；使用官方 CLI 安装来源。

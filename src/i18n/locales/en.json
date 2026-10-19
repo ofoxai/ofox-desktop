@@ -4241,50 +4241,6 @@
       "showMine": "View My resources"
     }
   },
-  "catalogLifecycle": {
-    "manageShort": "Manage installation",
-    "description": "Manage this Ofox copy only. Shell PATH, model bindings and login remain separate. Manage external copies with their original installer.",
-    "unavailable": "This backend does not support this installation manager.",
-    "prepareFailed": "Could not prepare the operation. Inspect the source again or use the official manual method.",
-    "executeFailed": "The operation did not complete. Inspect the actual installation before retrying.",
-    "manualRequired": "This copy, runtime or platform requires the official manual method.",
-    "copyLaunch": "Copy this copy’s launch command",
-    "frozenVersion": "Pinned version {{version}} · Node.js {{node}}",
-    "preservesData": "Preserve tool settings, authorization, sessions and shared Node/npm. Unknown or edited files block automatic changes.",
-    "cancel": "Cancel operation",
-    "copyState": {
-      "missing": "No Ofox-managed copy",
-      "managed": "Ofox-managed copy verified",
-      "needsReview": "Installation source needs review",
-      "unavailable": "Platform or runtime unavailable"
-    },
-    "preview": {
-      "install": "Preview Ofox copy installation",
-      "update": "Preview this copy’s update",
-      "uninstall": "Preview this copy’s removal"
-    },
-    "start": {
-      "install": "Start installation",
-      "update": "Start update",
-      "uninstall": "Remove this copy and keep data"
-    },
-    "stages": {
-      "verify": "Verifying source…",
-      "execute": "Running…",
-      "cleanup": "Stopping processes…",
-      "inspect": "Inspecting installation…"
-    },
-    "result": {
-      "ok": "Operation completed",
-      "partial": "Partially completed. Review retained files and the actual installation.",
-      "cancelled": "Operation cancelled. Refer to the refreshed installation state.",
-      "failed": "Operation failed; existing data is retained. Inspect the installation state."
-    },
-    "manage": "Manage {{name}} installation",
-    "title": "{{name}} · Ofox-managed copy",
-    "refreshFailed": "Could not refresh the installation directory. The operation result is retained.",
-    "installationScope": "Manages only the separate copy created by Ofox. External installations are unchanged; this does not bind Ofox or enable usage statistics."
-  },
   "usageWorkbench": {
     "tabs": "Usage pages",
     "overview": "Overview",
