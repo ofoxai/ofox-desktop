@@ -787,7 +787,7 @@ pub fn definition_view(server: &McpServer, snapshot: &LibrarySnapshot) -> Value 
         "needsMigration"
     };
     let (display_summary, icon_id) = super::display::mcp_display(&server.server);
-    json!({"id":server.id,"name":server.name,"revision":revision,"transport":transport,"privateFields":server.server.as_object().map(|m|m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),"fields":fields,"credentialState":credential_state,"appOwned":mcp_codec::app_owned(&server.server),"displaySummary":display_summary,"iconId":icon_id})
+    json!({"id":server.id,"name":server.name,"revision":revision,"transport":transport,"privateFields":server.server.as_object().map(|m|m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),"fields":fields,"credentialState":credential_state,"appOwned":mcp_codec::app_owned(&server.server),"displaySummary":display_summary,"commandLine":super::display::mcp_command_line(&server.server),"iconId":icon_id})
 }
 
 #[cfg(test)]
@@ -810,16 +810,21 @@ mod tests {
         let view = definition_view(&server, &snapshot);
         assert_eq!(view["displaySummary"], "npx · chrome-devtools-mcp");
         assert_eq!(view["iconId"], "chrome-devtools");
+        assert_eq!(
+            view["commandLine"],
+            "npx -y chrome-devtools-mcp@latest --token ••••"
+        );
         assert!(!view.to_string().contains("private-value"));
-        server.server = json!({"command":"/private/person/tool","args":["private-value"]});
+        server.server = json!({"command":"/private/person/tool","args":["visible-arg"]});
         let view = definition_view(&server, &snapshot);
         assert!(view["displaySummary"].is_null());
         assert!(view["iconId"].is_null());
-        assert!(!view.to_string().contains("/private/person"));
-        server.server = json!({"type":"http","url":"https://mcp.context7.com/private-value?key=private-value","headers":{"Authorization":"private-value"}});
+        assert_eq!(view["commandLine"], "/private/person/tool visible-arg");
+        server.server = json!({"type":"http","url":"https://mcp.context7.com/mcp?key=private-value","headers":{"Authorization":"private-value"}});
         let view = definition_view(&server, &snapshot);
         assert_eq!(view["displaySummary"], "mcp.context7.com");
         assert_eq!(view["iconId"], "context7");
+        assert_eq!(view["commandLine"], "mcp.context7.com/mcp?…");
         assert!(!view.to_string().contains("private-value"));
         server.server = json!({"command":"sh","args":["-c","npx chrome-devtools-mcp"]});
         assert!(definition_view(&server, &snapshot)["displaySummary"].is_null());
@@ -1286,10 +1291,9 @@ mod tests {
             .unwrap()
             .shift_remove("demo")
             .unwrap();
-        server.server = json!({"command":"private-command","args":["private-arg"],"env":{"SECRET":"private-env"},"url":"https://private.example?key=private-url","custom":"private-custom"});
+        server.server = json!({"command":"private-command","args":["--password","private-arg"],"env":{"SECRET":"private-env"},"url":"https://private.example?key=private-url","custom":"private-custom"});
         let dto = definition_view(&server, &db.library_snapshot().unwrap()).to_string();
         for value in [
-            "private-command",
             "private-arg",
             "private-env",
             "private-url",

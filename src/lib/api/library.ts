@@ -43,6 +43,8 @@ export interface McpDefinition {
   appOwned?: boolean;
   serviceHost?: string | null;
   displaySummary?: string | null;
+  /** `command args…` or `host/path`; credential-looking values are masked. */
+  commandLine?: string | null;
   iconId?: string | null;
   fields: McpField[];
   targets: ResourceTarget[];
