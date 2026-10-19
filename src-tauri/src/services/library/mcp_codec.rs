@@ -603,6 +603,27 @@ fn normalize_map(map: &mut Map<String, Value>) {
         }
     }
 }
+/// A local server an app ships inside its own bundle (Codex's node_repl and
+/// computer-use). The app rewrites it on update, so the library leaves it alone.
+pub fn app_owned(spec: &Value) -> bool {
+    if spec.get("url").is_some() {
+        return false;
+    }
+    let command = spec
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .replace('\\', "/")
+        .to_lowercase();
+    [
+        ".app/contents/",
+        "/windowsapps/",
+        "/cua_node/",
+        "/openai/codex/runtimes/",
+    ]
+    .iter()
+    .any(|marker| command.contains(marker))
+}
 pub(crate) fn normalize_spec(spec: &Value) -> Value {
     let Some(map) = spec.as_object() else {
         return spec.clone();

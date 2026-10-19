@@ -89,7 +89,7 @@ export function LibraryResourceRow({
       : "description" in row
         ? row.description
         : "transport" in row
-          ? `${row.displaySummary || row.serviceHost || (row.transport === "stdio" ? t("library.workbench.localConnection") : t("library.workbench.remoteConnection"))}${row.credentialState === "needsMigration" ? ` · ${t("library.mcpNeedsValues")}` : ""}`
+          ? `${row.displaySummary || row.serviceHost || (row.transport === "stdio" ? t("library.workbench.localConnection") : t("library.workbench.remoteConnection"))}${row.appOwned ? ` · ${t("library.mcpAppOwned")}` : row.credentialState === "needsMigration" ? ` · ${t("library.mcpNeedsValues")}` : ""}`
           : "";
   const checkTime =
     check && Number.isFinite(check.checkedAtMs)

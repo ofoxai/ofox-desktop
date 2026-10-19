@@ -3602,6 +3602,7 @@
     "newMcpId": "New server ID",
     "saveCopy": "Save copy",
     "mcpNeedsValues": "Values need completion or migration",
+    "mcpAppOwned": "Written by an app such as Codex; no need to manage it here, you can delete it",
     "mcpUsesEnvironment": "Uses tool environment",
     "adoptPreview": "Preview matching-field adoption",
     "adoptDescription": "Adopt only fields at this physical location that exactly match the shared definition. Other fields and comments stay intact. Confirm after preview. Withdrawal removes an empty server entry only when no user extensions remain.",

@@ -784,7 +784,7 @@ pub fn definition_view(server: &McpServer, snapshot: &LibrarySnapshot) -> Value 
         "needsMigration"
     };
     let (display_summary, icon_id) = super::display::mcp_display(&server.server);
-    json!({"id":server.id,"name":server.name,"revision":revision,"transport":transport,"privateFields":server.server.as_object().map(|m|m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),"fields":fields,"credentialState":credential_state,"displaySummary":display_summary,"iconId":icon_id})
+    json!({"id":server.id,"name":server.name,"revision":revision,"transport":transport,"privateFields":server.server.as_object().map(|m|m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default(),"fields":fields,"credentialState":credential_state,"appOwned":mcp_codec::app_owned(&server.server),"displaySummary":display_summary,"iconId":icon_id})
 }
 
 #[cfg(test)]
@@ -1361,6 +1361,36 @@ mod tests {
             match_hash(&server.server).unwrap(),
             match_hash(&json!({"type":"stdio","command":"server"})).unwrap()
         );
+    }
+    #[test]
+    fn rows_an_app_writes_for_itself_are_marked_app_owned() {
+        let db = Database::memory().unwrap();
+        let snapshot = db.library_snapshot().unwrap();
+        for (command, owned) in [
+            (
+                "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl",
+                true,
+            ),
+            (
+                "./Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient",
+                true,
+            ),
+            (
+                r"C:\Program Files\WindowsApps\OpenAI.Codex\app\resources\node_repl.exe",
+                true,
+            ),
+            ("npx", false),
+            ("/usr/local/bin/codegraph", false),
+        ] {
+            let server = row("x", "x", json!({"type":"stdio","command":command}));
+            assert_eq!(definition_view(&server, &snapshot)["appOwned"], owned, "{command}");
+        }
+        let remote = row(
+            "r",
+            "r",
+            json!({"type":"http","url":"https://x.app/contents/mcp"}),
+        );
+        assert_eq!(definition_view(&remote, &snapshot)["appOwned"], false);
     }
     #[test]
     fn ensure_metadata_drops_an_identical_generated_duplicate() {

@@ -221,6 +221,29 @@ it("groups variants without treating native presence as an Ofox application or r
   expect(screen.queryByText("Ofox 已应用")).not.toBeInTheDocument();
 });
 
+it("says a server an app wrote for itself needs no library management", async () => {
+  vi.mocked(libraryApi.list).mockResolvedValue({
+    epoch: 1,
+    servers: [
+      {
+        ...resource("node_repl"),
+        name: "node_repl",
+        credentialState: "needsMigration",
+        appOwned: true,
+      },
+    ],
+    operations: [],
+  });
+  renderSection();
+  const row = await screen.findByTestId("library-resource-node_repl");
+  expect(
+    within(row).getByText(
+      /由 Codex 等应用自动写入，不需要在资源库管理，可以删除/,
+    ),
+  ).toBeVisible();
+  expect(within(row).queryByText(/需补全或迁移配置值/)).not.toBeInTheDocument();
+});
+
 it("marks a tool whose matching entry is switched off as disabled", async () => {
   vi.mocked(libraryApi.inventory).mockResolvedValue({
     ...inventory,

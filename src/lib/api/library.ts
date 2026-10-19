@@ -39,6 +39,8 @@ export interface McpDefinition {
   revision: number;
   transport: string;
   credentialState: string;
+  /** Shipped inside an app bundle (Codex's node_repl); the app rewrites it. */
+  appOwned?: boolean;
   serviceHost?: string | null;
   displaySummary?: string | null;
   iconId?: string | null;

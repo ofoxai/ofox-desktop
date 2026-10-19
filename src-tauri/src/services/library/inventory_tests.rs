@@ -777,3 +777,33 @@ fn a_disabled_native_entry_matches_its_definition_and_is_marked_disabled() {
         .clone();
     assert!(claude.get("disabled").is_none());
 }
+
+#[test]
+#[serial_test::serial]
+fn servers_an_app_writes_into_its_own_bundle_are_not_offered() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let paths = super::super::mcp_resource::native_paths().unwrap();
+    write(
+        &paths["codex"],
+        concat!(
+            "[mcp_servers.filesystem]\ncommand = \"npx\"\nargs = [\"-y\", \"@modelcontextprotocol/server-filesystem\"]\n",
+            "[mcp_servers.node_repl]\ncommand = \"/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl\"\n",
+            "[mcp_servers.computer-use]\ncommand = \"./Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient\"\nargs = [\"mcp\"]\ncwd = \".\"\nenabled = false\n",
+        ),
+    );
+    let view = scan(&db, ResourceKind::Mcp).unwrap();
+    let names = view
+        .entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["filesystem"]);
+    let codex = view
+        .sources
+        .iter()
+        .find(|source| source.tool_id == "codex")
+        .unwrap();
+    assert_eq!(codex.state, "ready");
+    assert_eq!(codex.count, 1);
+}

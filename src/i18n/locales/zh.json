@@ -3602,6 +3602,7 @@
     "newMcpId": "新服务器 ID",
     "saveCopy": "保存副本",
     "mcpNeedsValues": "需补全或迁移配置值",
+    "mcpAppOwned": "由 Codex 等应用自动写入，不需要在资源库管理，可以删除",
     "mcpUsesEnvironment": "使用工具环境",
     "adoptPreview": "预览接管一致字段",
     "adoptDescription": "仅接管此物理位置中与共享定义完全一致的字段，保留其他字段和注释。预览后仍需确认；撤回时，仅在无用户扩展的情况下移除空服务器项。",

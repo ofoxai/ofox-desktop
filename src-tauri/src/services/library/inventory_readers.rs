@@ -549,6 +549,7 @@ fn mcp(routes: &[Route], data: &mut ScanData, uncertain: &[String]) {
                             continue;
                         }
                         match valid_spec(&route.tool, native) {
+                            Ok(spec) if mcp_codec::app_owned(&spec) => {}
                             Ok(spec) => {
                                 add_mcp(
                                     data,
@@ -607,6 +608,7 @@ fn mcp(routes: &[Route], data: &mut ScanData, uncertain: &[String]) {
                 continue;
             };
             match valid_spec("opencode", native) {
+                Ok(spec) if mcp_codec::app_owned(&spec) => {}
                 Ok(spec) => {
                     for (source, _) in sources {
                         add_mcp(
