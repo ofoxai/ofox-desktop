@@ -91,19 +91,35 @@ pub(crate) async fn read_one(state: &AppState, id: &str) -> Result<ToolModelSnap
     if id == "codex" {
         snapshot.can_write = codex_can_write().await;
     }
-    if crate::settings::get_api_key_meta(tool).is_some_and(|meta| meta.revoked) {
-        snapshot.binding = ToolBindingStatus::unknown();
-    }
+    pause_if_revoked(
+        &mut snapshot.binding,
+        crate::settings::get_api_key_meta(tool).is_some_and(|meta| meta.revoked),
+    );
     Ok(snapshot)
+}
+
+/// A key stopped at logout pauses the tool until sign-in issues a new one;
+/// saying its state can't be read sent people hunting file permissions.
+fn pause_if_revoked(binding: &mut ToolBindingStatus, revoked: bool) {
+    if revoked {
+        *binding = ToolBindingStatus::paused();
+    }
+}
+
+/// Ids this build doesn't know (an older or extra tool in the bound list)
+/// are left out rather than failing every other tool's read.
+fn known_tools(tools: Vec<String>) -> Vec<String> {
+    tools
+        .into_iter()
+        .filter(|id| canonical_tool(id).is_ok())
+        .collect()
 }
 
 pub(crate) async fn read_many(
     state: &AppState,
     tools: Vec<String>,
 ) -> Result<ModelSnapshot, String> {
-    for id in &tools {
-        canonical_tool(id)?;
-    }
+    let tools = known_tools(tools);
     if tools
         .iter()
         .any(|id| matches!(id.as_str(), "codex" | "chatgpt"))
@@ -352,4 +368,32 @@ pub async fn model_selection_save(
     let result = save_one(state, auth, &tool, selection, &expected_revision).await?;
     notify(&app, vec![result.snapshot.write_target.clone()]);
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::ofox_bind::status::BindingStatus;
+
+    #[test]
+    fn a_revoked_key_reads_as_paused_not_unreadable() {
+        let mut binding = ToolBindingStatus::configured();
+        pause_if_revoked(&mut binding, true);
+        assert_eq!(binding.status, BindingStatus::Paused);
+        assert_eq!(
+            serde_json::to_value(&binding).unwrap()["status"],
+            serde_json::json!("paused")
+        );
+        let mut binding = ToolBindingStatus::configured();
+        pause_if_revoked(&mut binding, false);
+        assert_eq!(binding.status, BindingStatus::Configured);
+    }
+
+    #[test]
+    fn an_unknown_tool_id_does_not_sink_the_others() {
+        assert_eq!(
+            known_tools(vec!["claude".into(), "copilot".into(), "hermes".into()]),
+            vec!["claude".to_string(), "hermes".to_string()]
+        );
+    }
 }

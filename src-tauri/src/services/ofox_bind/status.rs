@@ -24,6 +24,8 @@ pub enum BindingStatus {
     Missing,
     Modified,
     Unknown,
+    /// Its Ofox key was stopped at logout; signing in issues a new one.
+    Paused,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,6 +67,16 @@ impl ToolBindingStatus {
             message: Some("Ofox 接入配置已被修改，已停止自动覆盖，请检查现有配置。".into()),
             missing_files: Vec::new(),
             modified_fields: fields,
+            env_overrides: Vec::new(),
+        }
+    }
+
+    pub(crate) fn paused() -> Self {
+        Self {
+            status: BindingStatus::Paused,
+            message: Some("这个工具的 Ofox Key 已暂停，登录后打开 Ofox 会自动恢复。".into()),
+            missing_files: Vec::new(),
+            modified_fields: Vec::new(),
             env_overrides: Vec::new(),
         }
     }

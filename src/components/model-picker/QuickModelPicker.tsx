@@ -194,6 +194,26 @@ export function QuickModelPicker({
     );
   }
 
+  if (snapshot.binding.status === "paused")
+    return field ? (
+      <div
+        title={t("modelExperience.paused")}
+        className={cn(
+          menuTriggerClassName,
+          fieldClassName,
+          "font-normal text-ink-muted",
+        )}
+      >
+        <span className="min-w-0 flex-1 truncate text-left">
+          {t("modelExperience.pausedShort")}
+        </span>
+      </div>
+    ) : (
+      <div role="status" className="text-note text-ink-muted">
+        {t("modelExperience.paused")}
+      </div>
+    );
+
   const chatgptObserved = toolId === "chatgpt" && (
     <div className="mb-1 truncate text-ink-muted">
       {t("modelExperience.observed", {

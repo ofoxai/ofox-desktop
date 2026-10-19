@@ -2826,7 +2826,8 @@
       "missing": "绑定配置缺失",
       "modified": "配置冲突",
       "envOverride": "环境变量冲突",
-      "unknown": "配置读取失败"
+      "unknown": "配置读取失败",
+      "paused": "Key 已暂停"
     },
     "reinstall": "重新安装",
     "repairInstall": "修复安装",
@@ -2896,6 +2897,8 @@
     "skippedModels": "以下模型未保存：{{names}}",
     "observed": "当前观察到的模型：{{model}}",
     "unset": "未设置",
+    "paused": "Key 已暂停，打开 Ofox 后会自动恢复",
+    "pausedShort": "Key 已暂停",
     "observedShort": "实际在用 {{model}}",
     "inAppModel": "模型在应用内切换",
     "unknown": "未知",

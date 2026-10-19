@@ -2826,7 +2826,8 @@
       "missing": "連携設定がありません",
       "modified": "設定の競合",
       "envOverride": "環境変数の競合",
-      "unknown": "設定の確認に失敗"
+      "unknown": "設定の確認に失敗",
+      "paused": "Key 一時停止中"
     },
     "reinstall": "再インストール",
     "repairInstall": "インストールを修復",
@@ -2896,6 +2897,8 @@
     "skippedModels": "次のモデルは保存されませんでした：{{names}}",
     "observed": "現在確認されたモデル：{{model}}",
     "unset": "未設定",
+    "paused": "Key は一時停止中です。Ofox を開くと自動で再開します",
+    "pausedShort": "Key 一時停止中",
     "observedShort": "使用中 {{model}}",
     "inAppModel": "モデルはアプリ内で設定",
     "unknown": "不明",

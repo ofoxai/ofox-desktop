@@ -22,13 +22,13 @@ export default function ToolStatusList({
   const [thumbRatio, setThumbRatio] = useState(1);
   const [showTrack, setShowTrack] = useState(false);
   const { t } = useTranslation();
-  const modelState = useModelSelection(boundTools);
-  const snapshotByTool = new Map(
-    modelState.data?.tools.map((snapshot) => [snapshot.toolId, snapshot]),
-  );
   const rows = boundTools
     .filter((id) => TOOL_META[id])
     .sort((a, b) => TOOL_ORDER.indexOf(a) - TOOL_ORDER.indexOf(b));
+  const modelState = useModelSelection(rows);
+  const snapshotByTool = new Map(
+    modelState.data?.tools.map((snapshot) => [snapshot.toolId, snapshot]),
+  );
 
   const update = useCallback(() => {
     const el = scrollRef.current;

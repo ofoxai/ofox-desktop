@@ -2826,7 +2826,8 @@
       "missing": "Binding configuration missing",
       "modified": "Configuration conflict",
       "envOverride": "Env variable conflict",
-      "unknown": "Configuration check failed"
+      "unknown": "Configuration check failed",
+      "paused": "Key paused"
     },
     "reinstall": "Reinstall",
     "repairInstall": "Repair installation",
@@ -2896,6 +2897,8 @@
     "skippedModels": "These models were not saved: {{names}}",
     "observed": "Observed model: {{model}}",
     "unset": "Not set",
+    "paused": "Key paused; it resumes when you open Ofox",
+    "pausedShort": "Key paused",
     "observedShort": "Running {{model}}",
     "inAppModel": "Model is set in the app",
     "unknown": "Unknown",

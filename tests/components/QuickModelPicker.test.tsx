@@ -446,6 +446,46 @@ describe("QuickModelPicker as a tool row's field", () => {
   });
 });
 
+describe("QuickModelPicker with a paused key", () => {
+  function paused() {
+    const state = snapshot();
+    state.binding = {
+      ...state.binding,
+      status: "paused",
+      message: "这个工具的 Ofox Key 已暂停，登录后打开 Ofox 会自动恢复。",
+    };
+    return state;
+  }
+
+  it("says the key is paused instead of the state being unreadable", () => {
+    render(
+      <QuickModelPicker toolId="codex" snapshot={paused()} onRetry={vi.fn()} />,
+    );
+    expect(
+      screen.getByText("Key 已暂停，打开 Ofox 后会自动恢复"),
+    ).toBeVisible();
+    expect(screen.queryByText("无法读取模型状态")).toBeNull();
+    expect(screen.queryByRole("combobox")).toBeNull();
+  });
+
+  it("holds a row's column with a quiet paused field", () => {
+    render(
+      <QuickModelPicker
+        toolId="codex"
+        snapshot={paused()}
+        onRetry={vi.fn()}
+        variant="field"
+      />,
+    );
+    const field = screen.getByText("Key 已暂停").closest("div")!;
+    expect(field).toHaveClass("h-[25px]", "w-full");
+    expect(field).toHaveAttribute(
+      "title",
+      "Key 已暂停，打开 Ofox 后会自动恢复",
+    );
+  });
+});
+
 describe("modelNotes", () => {
   const t = i18n.t.bind(i18n);
 
