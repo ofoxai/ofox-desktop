@@ -37,7 +37,10 @@ const VERSION: u8 = 1;
 const CLAUDE_PARSER_VERSION: u8 = 2;
 const MAX_CACHE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_SOURCES: usize = 20_000;
-const PROJECTION_CACHE_BYTES: usize = 128 * 1024 * 1024;
+/// A history of 1,700 sessions decodes to about 290 MB; a projection over the
+/// limit is decoded again on every listing and Usage query (2-3 s each), and
+/// decoding it holds that memory either way.
+const PROJECTION_CACHE_BYTES: usize = 512 * 1024 * 1024;
 const PROJECTION_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 
 #[cfg(test)]

@@ -85,12 +85,60 @@ pub(crate) fn scan_in(root: &Path) -> Vec<SessionMeta> {
 
     let mut sessions = Vec::new();
     for path in files {
-        if let Some(meta) = parse_with_names(&path, &names) {
+        if let Some(meta) = parse_cached(&path, &names) {
             sessions.push(meta);
         }
     }
 
     sessions
+}
+
+/// A file's length and modification time.
+type FileStamp = (u64, Option<SystemTime>);
+
+type ScanCache = HashMap<PathBuf, (FileStamp, Option<SessionMeta>)>;
+
+/// Rollouts read before, by path: read again only once their stamp changes.
+/// A large or compressed rollout otherwise costs a full read on every listing.
+static SCANNED: LazyLock<Mutex<ScanCache>> = LazyLock::new(Default::default);
+
+/// `parse_with_names` from the stamp-keyed cache. The cache holds a rollout
+/// as it reads with no thread name, which, highest of Codex's title sources,
+/// then names it when the index has one.
+fn parse_cached(path: &Path, names: &HashMap<String, String>) -> Option<SessionMeta> {
+    let stamp = std::fs::metadata(path)
+        .ok()
+        .map(|file| (file.len(), file.modified().ok()));
+    let cached = stamp.and_then(|stamp| {
+        SCANNED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(path)
+            .filter(|(saved, _)| *saved == stamp)
+            .map(|(_, meta)| meta.clone())
+    });
+    let mut meta = match cached {
+        Some(meta) => meta,
+        None => {
+            let meta = parse_with_names(path, &HashMap::new());
+            if let Some(stamp) = stamp {
+                SCANNED
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(path.to_path_buf(), (stamp, meta.clone()));
+            }
+            meta
+        }
+    }?;
+    if let Some(name) = names
+        .get(&meta.session_id)
+        .map(|name| one_line(name))
+        .filter(|name| !name.is_empty())
+    {
+        meta.title = Some(name);
+        meta.title_source = Some(crate::session_manager::title::TitleSource::Agent);
+    }
+    Some(meta)
 }
 
 type ThreadNames = Arc<HashMap<String, String>>;
@@ -448,8 +496,9 @@ fn user_texts(content: Option<&Value>) -> Vec<&str> {
     }
 }
 
+/// A rollout's metadata, read again only once the file changes.
 pub(crate) fn parse_session(path: &Path) -> Option<SessionMeta> {
-    parse_with_names(path, &HashMap::new())
+    parse_cached(path, &HashMap::new())
 }
 
 fn parse_with_names(path: &Path, names: &HashMap<String, String>) -> Option<SessionMeta> {
@@ -628,6 +677,41 @@ mod tests {
             details.candidates.prompt.as_deref(),
             Some("A real question")
         );
+    }
+
+    /// A listing reads again only a rollout that changed; a thread name is
+    /// always the current one, the rollout unchanged or not.
+    #[test]
+    fn a_rescan_rereads_only_a_changed_rollout_and_takes_current_names() {
+        let temp = tempdir().expect("tempdir");
+        let path = rollout(temp.path(), &[user_items(&[input_text("first prompt")])]);
+        let scan = || scan_in(&temp.path().join("sessions")).remove(0);
+        assert_eq!(scan().title.as_deref(), Some("first prompt"));
+        std::fs::write(
+            temp.path().join("session_index.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::json!({"id": THREAD, "thread_name": "Named"})
+            ),
+        )
+        .unwrap();
+        assert_eq!(scan().title.as_deref(), Some("Named"));
+        let before = scan().last_active_at;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(
+            &mut file,
+            format!(
+                "{}\n",
+                serde_json::json!({"timestamp": "2026-10-14T11:00:00Z", "type": "event_msg",
+                    "payload": {"type": "task_started", "turn_id": "t"}})
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        assert!(scan().last_active_at > before);
     }
 
     #[test]

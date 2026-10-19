@@ -34,7 +34,7 @@ Native duplicate identity and content evidence are checked before publishing. Wo
 
 Queries read the accepted cache rows, effective health and current prices inside one SQLite read transaction. KPI, trend, distribution, heatmap and ranking calculations consume that same accepted input. This is a consistent database observation of accepted provider projections, not a claim that all external files were captured at one instant.
 
-The body-free decoded projection is held in one `Arc` cache slot for at most ten minutes, with an estimated 128 MiB retention budget including native display proofs. Each warm lookup still validates the current raw rows and health. Pricing and filters are recalculated; they are not hidden behind a cached estimate. Existing in-flight `Arc`s may outlive eviction, so the slot budget is not a global concurrent-request memory limit. Frozen ranking snapshots keep their existing separate lifetime/budget.
+The body-free decoded projection is held in one `Arc` cache slot for at most ten minutes, with an estimated 512 MiB retention budget including native display proofs. Each warm lookup still validates the current raw rows and health. Pricing and filters are recalculated; they are not hidden behind a cached estimate. Existing in-flight `Arc`s may outlive eviction, so the slot budget is not a global concurrent-request memory limit. Frozen ranking snapshots keep their existing separate lifetime/budget.
 
 ## Session-list amount mapping
 

@@ -108,11 +108,13 @@ fn plan_with_listing(
             }
         }
         "codex" => {
+            // Only the thread's own rollouts matter: compare ids before any
+            // costlier check, or a listing plans in time squared to its size.
             let records: Vec<SessionMeta> = listing
                 .map(|records| {
                     records
                         .iter()
-                        .filter(|s| s.provider_id == "codex")
+                        .filter(|s| s.provider_id == "codex" && s.session_id == meta.session_id)
                         .cloned()
                         .collect()
                 })
@@ -120,6 +122,7 @@ fn plan_with_listing(
                     roots
                         .iter()
                         .flat_map(|root| providers::codex::scan_in(root))
+                        .filter(|s| s.session_id == meta.session_id)
                         .collect()
                 });
             if records.iter().any(|record| {
