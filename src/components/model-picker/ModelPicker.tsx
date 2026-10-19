@@ -392,10 +392,12 @@ export function ModelPicker({
         <PopoverContent
           onKeyDown={menuTab.onKeyDown}
           onCloseAutoFocus={menuTab.onCloseAutoFocus}
-          className="p-0"
+          className="min-w-[20rem] p-0"
           align="start"
           // Match the trigger width so the list never visually mismatches
-          // its anchor (Radix exposes this via CSS var).
+          // its anchor (Radix exposes this via CSS var), but no narrower than
+          // a model id and the default route on one line: a tool row's field
+          // is a column, narrower than its list needs.
           style={{ width: "var(--radix-popover-trigger-width)" }}
           // Portal into the dialog's content node so this popover lives
           // inside Radix Dialog's scroll-lock shard — otherwise wheel

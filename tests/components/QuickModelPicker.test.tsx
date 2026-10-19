@@ -352,6 +352,20 @@ describe("QuickModelPicker as a tool row's field", () => {
     expect(screen.getByRole("combobox")).toHaveClass("w-full", "bg-pill");
   });
 
+  it("opens its list wider than the column, so model names and the default fit", async () => {
+    render(
+      <QuickModelPicker
+        toolId="codex"
+        snapshot={snapshot()}
+        onRetry={vi.fn()}
+        variant="field"
+      />,
+    );
+    fireEvent.click(screen.getByRole("combobox"));
+    const list = await screen.findByRole("dialog");
+    expect(list).toHaveClass("min-w-[20rem]");
+  });
+
   it("holds the column with a placeholder of the same shape while loading", () => {
     render(
       <QuickModelPicker
