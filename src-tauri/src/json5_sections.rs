@@ -417,6 +417,15 @@ fn insert_path_section(
     Ok(())
 }
 
+/// Layout text worth keeping when its entry goes: anything holding a comment.
+fn comment_text(text: &str) -> String {
+    if text.contains("//") || text.contains("/*") {
+        text.to_string()
+    } else {
+        String::new()
+    }
+}
+
 fn collect_layout_comments(value: &RtJSONValue) -> String {
     let mut result = String::new();
     let mut append = |text: &str| {
@@ -537,14 +546,24 @@ fn edit_path(
                 wsc: (String::new(), String::new(), String::new(), None),
             });
             let nested_comments = collect_layout_comments(&removed.value);
+            // The removed entry's own spacing goes with it; only comments stay.
             let comments = format!(
                 "{nested_comments}{}{}{}{}",
-                ctx.wsc.0,
-                ctx.wsc.1,
-                ctx.wsc.2,
-                ctx.wsc.3.as_deref().unwrap_or("")
+                comment_text(&ctx.wsc.0),
+                comment_text(&ctx.wsc.1),
+                comment_text(&ctx.wsc.2),
+                comment_text(ctx.wsc.3.as_deref().unwrap_or(""))
             );
-            if index < pairs.len() {
+            if pairs.is_empty() {
+                // An object emptied of its only entry closes up again: `{}`.
+                let context = context.get_or_insert_with(|| RtJSONObjectContext {
+                    wsc: (String::new(),),
+                });
+                context.wsc.0 = format!("{}{comments}", comment_text(&context.wsc.0));
+                if !context.wsc.0.is_empty() {
+                    context.wsc.0.push_str(&ctx.wsc.2);
+                }
+            } else if index < pairs.len() {
                 if index == 0 {
                     context
                         .get_or_insert_with(|| RtJSONObjectContext {
@@ -560,19 +579,16 @@ fn edit_path(
                         .get_or_insert_with(String::new)
                         .push_str(&comments);
                 }
-            } else if index > 0 {
+            } else {
+                // The last entry went: the one before it now runs up to the
+                // closing brace with the spacing the removed entry had there.
                 let previous = ensure_kvp_context(&mut pairs[index - 1]);
                 let lead = previous.wsc.3.take().unwrap_or_default();
-                previous.wsc.2.push_str(&lead);
+                previous.wsc.2.push_str(&comment_text(&lead));
                 previous.wsc.2.push_str(&comments);
-            } else {
-                context
-                    .get_or_insert_with(|| RtJSONObjectContext {
-                        wsc: (String::new(),),
-                    })
-                    .wsc
-                    .0
-                    .push_str(&comments);
+                if comment_text(&ctx.wsc.2).is_empty() {
+                    previous.wsc.2.push_str(&ctx.wsc.2);
+                }
             }
         }
     }

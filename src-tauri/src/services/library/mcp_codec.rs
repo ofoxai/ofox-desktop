@@ -672,6 +672,9 @@ pub fn parse_native(text: &str, tool: &str) -> Result<Value, AppError> {
     let value = if tool == "codex" {
         let value: toml::Value = toml::from_str(body).map_err(|_| error("nativeInvalid"))?;
         serde_json::to_value(value).map_err(|_| error("nativeInvalid"))?
+    } else if tool == "hermes" && body.trim().is_empty() {
+        // An empty YAML document is a config with nothing set.
+        json!({})
     } else if tool == "hermes" {
         super::yaml_paths::validate_native_mcp(body)?;
         serde_yaml::from_str::<Value>(body).map_err(|_| error("nativeInvalid"))?
@@ -724,7 +727,11 @@ pub fn validate_owned(owned: &OwnedFields) -> Result<(), AppError> {
         }
     }
     for path in &owned.created_paths {
-        if path.len() < 2 || path[0] != section(&owned.tool) || path[1] != owned.server_id {
+        // The servers section itself, when this write created it, or a path inside the server.
+        let section_only = path.len() == 1 && path[0] == section(&owned.tool);
+        if !section_only
+            && (path.len() < 2 || path[0] != section(&owned.tool) || path[1] != owned.server_id)
+        {
             return Err(error("stateUnreadable"));
         }
     }
@@ -872,7 +879,7 @@ pub fn patch_server(
         .map(|owned| owned.created_paths.clone())
         .unwrap_or_default();
     for (path, _) in &fields {
-        for count in 2..path.len() {
+        for count in 1..path.len() {
             let parent = path[..count].to_vec();
             if leaf(&root, &parent).is_none() && !created_paths.contains(&parent) {
                 created_paths.push(parent);
@@ -1619,5 +1626,39 @@ mod tests {
             .and_then(|m| m.get("demo"))
             .is_none());
         assert!(!removed.contains("value"));
+    }
+
+    #[test]
+    fn withdrawing_restores_each_config_byte_for_byte() {
+        let gemini = "{\n  \"security\": {\n    \"auth\": {\n      \"selectedType\": \"gemini-api-key\"\n    }\n  },\n  \"model\": {\n    \"name\": \"gemini-2.5-pro\"\n  }\n}\n";
+        let hermes =
+            "model:\n  default: personal\n# trailing comment\nagent:\n  reasoning_effort: high\n";
+        let opencode = "{\n  // keep me\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"mcp\": {\n    \"context7\": {\n      \"type\": \"remote\",\n      \"url\": \"https://mcp.context7.com/mcp\"\n    }\n  }\n}\n";
+        let codex = "model = \"personal\"\n\n[mcp_servers]\n\n[mcp_servers.node_repl]\nargs = []\ncommand = \"/Applications/ChatGPT.app/node_repl\"\nstartup_timeout_sec = 120\n\n[mcp_servers.node_repl.env]\nB_KEY = \"2\"\nA_KEY = \"1\"\n";
+        let claude = "{\n  \"mcpServers\": {},\n  \"theme\": \"dark\"\n}\n";
+        let spec = json!({"type":"stdio","command":"npx","args":["-y","@modelcontextprotocol/server-memory"],"env":{"MEMORY_FILE_PATH":"/tmp/memory.json"}});
+        let mut failures = vec![];
+        for (tool, original) in [
+            ("gemini", gemini),
+            ("hermes", hermes),
+            ("opencode", opencode),
+            ("codex", codex),
+            ("claude", claude),
+        ] {
+            let native = native_spec(tool, &spec).unwrap();
+            let (applied, receipt) =
+                patch_server(Some(original), tool, "ofox-test", None, Some(&native)).unwrap();
+            assert!(applied.contains("ofox-test"), "{tool}");
+            let (removed, _) =
+                patch_server(Some(&applied), tool, "ofox-test", receipt.as_ref(), None).unwrap();
+            if removed != original {
+                failures.push(format!("{tool}:\n{removed:?}"));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "not restored:\n{}",
+            failures.join("\n")
+        );
     }
 }
