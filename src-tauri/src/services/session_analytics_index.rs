@@ -35,7 +35,10 @@ const VERSION: u8 = 1;
 /// Bump to read every Claude source again after a change to what is read
 /// (2: hour-long cache writes).
 const CLAUDE_PARSER_VERSION: u8 = 2;
-const MAX_CACHE_BYTES: usize = 128 * 1024 * 1024;
+/// The one-query read of every cached source. A 1,700-session history is
+/// about 125 MB even stored compactly, and a read over the budget refuses
+/// listings and every refresh alike; decoding it holds more than this anyway.
+const MAX_CACHE_BYTES: usize = 512 * 1024 * 1024;
 const MAX_SOURCES: usize = 20_000;
 /// A history of 1,700 sessions decodes to about 290 MB; a projection over the
 /// limit is decoded again on every listing and Usage query (2-3 s each), and
