@@ -323,6 +323,8 @@ export interface ModelPickerProps {
   className?: string;
   /** Drawn in the chevron's place, e.g. a spinner while a change saves. */
   trailing?: ReactNode;
+  /** Drawn before the value, e.g. the field's 模型 label. */
+  prefix?: ReactNode;
   title?: string;
   busy?: boolean;
 }
@@ -340,6 +342,7 @@ export function ModelPicker({
   triggerClassName,
   className,
   trailing,
+  prefix,
   title,
   busy,
 }: ModelPickerProps) {
@@ -383,6 +386,7 @@ export function ModelPicker({
             )}
           >
             <span className="min-w-0 flex-1 truncate text-left">
+              {prefix}
               {value || emptyLabel || t("modelExperience.chooseModel")}
             </span>
             {trailing ?? <MenuChevron />}

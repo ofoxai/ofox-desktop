@@ -4679,6 +4679,23 @@
       "failed": "Couldn't load usage",
       "empty": "No usage in this period yet"
     },
-    "profileInUse": "Profile: {{name}}"
+    "profileInUse": "Profile: {{name}}",
+    "model": "Model"
+  },
+  "effort": {
+    "label": "Reasoning effort",
+    "default": "Default",
+    "defaultTakes": "Default ({{level}})",
+    "saveFailed": "Couldn't save the reasoning effort: {{error}}",
+    "levels": {
+      "off": "Off",
+      "none": "None",
+      "minimal": "Minimal",
+      "low": "Low",
+      "medium": "Medium",
+      "high": "High",
+      "xhigh": "Extra high",
+      "max": "Max"
+    }
   }
 }

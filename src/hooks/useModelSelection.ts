@@ -141,6 +141,41 @@ export function useModelSelection(tools: string[], enabled = true) {
   );
 }
 
+/** Puts a fresh snapshot in place of the tool's old one in every selection query. */
+function replaceSnapshot(fresh: ToolModelSnapshot) {
+  queryClient.setQueriesData<{ tools: ToolModelSnapshot[] }>(
+    { queryKey: MODEL_SELECTION_KEY },
+    (previous) =>
+      previous
+        ? {
+            tools: previous.tools.map((snapshot) =>
+              snapshot.toolId === fresh.toolId ? fresh : snapshot,
+            ),
+          }
+        : previous,
+  );
+}
+
+export function useSaveEffort() {
+  return useMutation(
+    {
+      mutationFn: (input: {
+        tool: string;
+        effort: string | null;
+        expectedRevision: string;
+      }) =>
+        modelSelectionApi.saveEffort(
+          input.tool,
+          input.effort,
+          input.expectedRevision,
+        ),
+      onSuccess: replaceSnapshot,
+      onSettled: () => invalidateModelState(),
+    },
+    queryClient,
+  );
+}
+
 export function useSaveModelSelection() {
   return useMutation(
     {
@@ -154,21 +189,7 @@ export function useSaveModelSelection() {
           input.selection,
           input.expectedRevision,
         ),
-      onSuccess: (report) => {
-        queryClient.setQueriesData<{ tools: ToolModelSnapshot[] }>(
-          { queryKey: MODEL_SELECTION_KEY },
-          (previous) =>
-            previous
-              ? {
-                  tools: previous.tools.map((snapshot) =>
-                    snapshot.toolId === report.snapshot.toolId
-                      ? report.snapshot
-                      : snapshot,
-                  ),
-                }
-              : previous,
-        );
-      },
+      onSuccess: (report) => replaceSnapshot(report.snapshot),
       onSettled: () => invalidateModelState(),
     },
     queryClient,

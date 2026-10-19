@@ -4679,6 +4679,23 @@
       "failed": "用量读取失败",
       "empty": "这段时间还没有用量"
     },
-    "profileInUse": "方案：{{name}}"
+    "profileInUse": "方案：{{name}}",
+    "model": "模型"
+  },
+  "effort": {
+    "label": "推理强度",
+    "default": "默认",
+    "defaultTakes": "默认（{{level}}）",
+    "saveFailed": "推理强度没有保存：{{error}}",
+    "levels": {
+      "off": "关闭",
+      "none": "不思考",
+      "minimal": "最低",
+      "low": "低",
+      "medium": "中",
+      "high": "高",
+      "xhigh": "很高",
+      "max": "最高"
+    }
   }
 }

@@ -4679,6 +4679,23 @@
       "failed": "使用量を読み込めません",
       "empty": "この期間の使用量はまだありません"
     },
-    "profileInUse": "プラン：{{name}}"
+    "profileInUse": "プラン：{{name}}",
+    "model": "モデル"
+  },
+  "effort": {
+    "label": "推論の強さ",
+    "default": "既定",
+    "defaultTakes": "既定（{{level}}）",
+    "saveFailed": "推論の強さを保存できません：{{error}}",
+    "levels": {
+      "off": "オフ",
+      "none": "思考なし",
+      "minimal": "最小",
+      "low": "低",
+      "medium": "中",
+      "high": "高",
+      "xhigh": "とても高い",
+      "max": "最大"
+    }
   }
 }

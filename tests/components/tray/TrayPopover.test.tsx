@@ -22,6 +22,8 @@ const mocks = vi.hoisted(() => ({
   auth: "active" as "active" | "expired" | "loggedout",
   paused: [] as string[],
   profiles: [] as unknown[],
+  effort: {} as Record<string, unknown>,
+  models: [] as unknown[],
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/api/event", () => ({
@@ -46,7 +48,7 @@ const binding = {
 const selections: Record<string, unknown> = {
   opencode: { kind: "models", models: ["a/1", "a/2", "a/3"] },
   openclaw: { kind: "single", model: "deepseek/deepseek-v4.1-flash" },
-  hermes: { kind: "single", model: "anthropic/claude-sonnet-5-5" },
+  hermes: { kind: "single", model: "deepseek/deepseek-v4.1-pro" },
 };
 
 beforeEach(() => {
@@ -56,6 +58,8 @@ beforeEach(() => {
   mocks.auth = "active";
   mocks.paused = [];
   mocks.profiles = [];
+  mocks.effort = {};
+  mocks.models = [];
   mocks.emit.mockReset().mockResolvedValue(undefined);
   mocks.hide.mockReset().mockResolvedValue(undefined);
   mocks.invoke.mockReset();
@@ -98,7 +102,7 @@ beforeEach(() => {
         };
       if (command === "ofox_get_apex_state")
         return { apex: "ofox.ai", pinned: true, detected: true };
-      if (command === "fetch_ofox_models") return [];
+      if (command === "fetch_ofox_models") return mocks.models;
       if (command === "model_selection_snapshot")
         return {
           tools: (args.tools ?? []).map((toolId) => ({
@@ -111,6 +115,7 @@ beforeEach(() => {
             managedSelection: selections[toolId],
             observedSelection: { model: null, source: "config" },
             scope: [],
+            effort: mocks.effort[toolId],
           })),
         };
       return null;
@@ -259,4 +264,41 @@ it("leaves the footer's profile slot empty while there are no profiles", async (
   await screen.findByRole("button", { name: /OpenClaw/ });
   await act(async () => undefined);
   expect(screen.queryByRole("button", { name: /方案/ })).toBeNull();
+});
+
+it("puts the model and its reasoning effort in an opened row, and bars on a shut one", async () => {
+  bind("hermes");
+  mocks.effort = {
+    hermes: {
+      value: "high",
+      levels: ["none", "minimal", "low", "medium", "high", "xhigh"],
+      defaultLevel: "medium",
+    },
+  };
+  mocks.models = [
+    {
+      id: "deepseek/deepseek-v4.1-pro",
+      name: "DeepSeek V4.1 Pro",
+      ownedBy: "deepseek",
+      pricingPrompt: null,
+      supportedEndpoints: ["/v1/chat/completions"],
+      supportedParameters: ["tools", "reasoning"],
+      inputModalities: ["text"],
+      outputModalities: ["text"],
+    },
+  ];
+  renderTray();
+  const row = await screen.findByRole("button", { name: /Hermes/ });
+  await waitFor(() =>
+    expect(row.querySelector("[data-effort-bars]")).toHaveAttribute(
+      "data-lit",
+      "2",
+    ),
+  );
+  fireEvent.click(row);
+  const panel = document.getElementById(row.getAttribute("aria-controls")!)!;
+  expect(within(panel).getByText("模型")).toBeVisible();
+  expect(
+    await within(panel).findByRole("slider", { name: "推理强度" }),
+  ).toHaveAttribute("aria-valuetext", "高");
 });

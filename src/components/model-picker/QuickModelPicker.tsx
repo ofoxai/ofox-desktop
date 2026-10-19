@@ -36,6 +36,8 @@ interface QuickModelPickerProps {
    * {@link modelNotes}.
    */
   variant?: "menu" | "field";
+  /** A faint name inside the field before its value, as magpie's `.k`. */
+  label?: string;
 }
 
 /**
@@ -84,6 +86,7 @@ export function QuickModelPicker({
   onRetry,
   compact = false,
   variant = "menu",
+  label,
 }: QuickModelPickerProps) {
   const field = variant === "field";
   const { t } = useTranslation();
@@ -248,6 +251,9 @@ export function QuickModelPicker({
   const fieldClass =
     field &&
     cn(fieldClassName, (catalog.error || saveError) && fieldWarnClassName);
+  const fieldLabel = field && label && (
+    <span className="mr-1.5 flex-none font-normal text-ink-faint">{label}</span>
+  );
   const fieldTrailing = save.isPending ? (
     <Loader2
       aria-hidden
@@ -267,6 +273,7 @@ export function QuickModelPicker({
       }}
       className={cn(menuTriggerClassName, "max-w-full text-ink", fieldClass)}
     >
+      {fieldLabel}
       <Layers aria-hidden className="h-[13px] w-[13px] flex-none" />
       <span className={cn("min-w-0 truncate", field && "flex-1 text-left")}>
         {t("modelExperience.modelCount", { count: selectedModels.length })}
@@ -288,6 +295,7 @@ export function QuickModelPicker({
       triggerClassName={fieldClass || undefined}
       className={field ? "w-full" : undefined}
       trailing={field ? fieldTrailing : undefined}
+      prefix={fieldLabel}
       title={field ? fieldTitle : undefined}
       busy={field && save.isPending}
     />
