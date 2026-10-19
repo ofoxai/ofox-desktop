@@ -3327,8 +3327,7 @@
     "externalCopy": "外部コピー · {{status}}",
     "managedCopyNeedsReview": "Ofox コピーの確認が必要です",
     "downloadOnly": "公式ページからダウンロードしてインストールしてください",
-    "platformGuide": "公式ガイドで現在のシステムに合うインストール方法を選んでください",
-    "details": "インストール情報"
+    "platformGuide": "公式ガイドで現在のシステムに合うインストール方法を選んでください"
   },
   "library": {
     "nav": "リソースの種類",

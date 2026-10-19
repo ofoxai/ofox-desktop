@@ -27,6 +27,7 @@ import { CopyButton } from "@/components/ui/copy-button";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 import { RefreshCw } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { ToolBadge } from "./ToolBadge";
 import { CatalogLifecycleDialog } from "./CatalogLifecycleDialog";
 import {
@@ -41,6 +42,16 @@ import {
 export interface InstallCatalogHandle {
   refresh: () => Promise<void>;
 }
+
+/**
+ * The catalog's columns, shared by its rows through subgrid as the bound
+ * list's are: badge, name, the install command, actions. An installed row's
+ * name takes the command's column too.
+ */
+const CATALOG_LIST_GRID =
+  "grid grid-cols-[auto_minmax(0,14rem)_minmax(0,1fr)_auto] gap-x-3 max-[720px]:grid-cols-[auto_minmax(0,1fr)_auto]";
+const CATALOG_ROW_FALLBACK_COLUMNS =
+  "supports-[not(grid-template-columns:subgrid)]:grid-cols-[38px_minmax(0,14rem)_minmax(0,1fr)_auto] max-[720px]:supports-[not(grid-template-columns:subgrid)]:grid-cols-[38px_minmax(0,1fr)_auto]";
 function invalidateActiveCopies(rows: InstallInventoryEntry[]) {
   if (!isCatalogOperationRunning()) return rows;
   return rows.map((row) =>
@@ -194,100 +205,119 @@ export const OptionalToolsCatalog = forwardRef<
     const status = info?.status ?? "unknown";
     const install = getCatalogInstallCommand(entry);
     const dependency = install?.dependency ?? entry.dependency;
+    // One faint line under the name, as a bound tool's: how this copy came
+    // to be here, or what installing it needs. The paths ride in its title.
+    const copyParts = info?.managedCopy
+      ? [
+          info.managedCopy.state === "managed"
+            ? t("toolCatalog.managedCopy", {
+                version: info.managedCopy.version ?? "—",
+              })
+            : "",
+          status !== "notInstalled"
+            ? t("toolCatalog.externalCopy", {
+                status: t(`toolCatalog.${status}`),
+              })
+            : "",
+        ]
+      : [
+          isInstalled || status !== "notInstalled"
+            ? t(`toolCatalog.${status}`)
+            : "",
+        ];
+    const subParts = [
+      ...copyParts,
+      info?.version && (!info.managedCopy || status !== "notInstalled")
+        ? info.version
+        : "",
+      !isInstalled && dependency
+        ? t(`toolCatalog.dependencies.${dependency}`)
+        : "",
+    ].filter(Boolean);
+    const paths = [info?.managedCopy?.path, info?.path].filter(Boolean);
+    const subText = subParts.join(" · ");
+    const pill = info?.error
+      ? t("toolCatalog.probeIncomplete")
+      : info?.managedCopy?.state === "needsReview"
+        ? t("toolCatalog.managedCopyNeedsReview")
+        : null;
     return (
       <ListRow
         key={entry.toolId}
         data-tool-id={entry.toolId}
         role="group"
         aria-label={entry.label}
-        className="grid grid-cols-[24px_minmax(0,1fr)_auto] gap-x-3 gap-y-1.5 py-2.5 md:grid-cols-[24px_180px_minmax(0,1fr)_auto]"
+        className={cn(
+          "col-span-full grid grid-cols-subgrid items-center gap-y-1.5 px-0",
+          CATALOG_ROW_FALLBACK_COLUMNS,
+        )}
       >
-        <ToolBadge toolId={entry.toolId} variant="plain" size={24} />
-        <div className="min-w-0">
+        <span data-column="badge" className="flex pl-[14px]">
+          <ToolBadge toolId={entry.toolId} variant="plain" size={24} />
+        </span>
+        <div
+          data-column="name"
+          className={cn(
+            "min-w-0",
+            isInstalled && "col-span-2 max-[720px]:col-span-1",
+          )}
+        >
+          <div data-line="name" className="flex h-5 min-w-0 items-center gap-2">
+            <span
+              className="min-w-[3em] truncate text-ui font-medium text-ink"
+              title={entry.label}
+            >
+              {entry.label}
+            </span>
+            {pill && (
+              <span className="inline-flex h-5 flex-none items-center whitespace-nowrap rounded-full bg-warn-soft px-2 text-note font-medium text-warn">
+                {pill}
+              </span>
+            )}
+          </div>
           <p
-            className="truncate text-ui font-medium text-ink"
-            title={entry.label}
+            data-line="sub"
+            className="mt-0.5 truncate text-sub text-ink-muted"
+            title={[...subParts, ...paths].join("\n") || undefined}
           >
-            {entry.label}
+            {subText || "\u00a0"}
           </p>
-          {info?.managedCopy && (
-            <>
-              <p
-                className={
-                  info.managedCopy.state === "managed"
-                    ? "text-note text-ink-muted"
-                    : "text-note text-warn"
-                }
-              >
-                {info.managedCopy.state === "managed"
-                  ? t("toolCatalog.managedCopy", {
-                      version: info.managedCopy.version ?? "—",
-                    })
-                  : t("toolCatalog.managedCopyNeedsReview")}
+        </div>
+        {!isInstalled && (
+          <div
+            data-column="command"
+            className="flex min-w-0 items-center gap-1.5 max-[720px]:col-span-2 max-[720px]:col-start-2 max-[720px]:row-start-2"
+          >
+            {install ? (
+              <>
+                <code
+                  className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap rounded-ctl bg-canvas px-2 py-1 text-note"
+                  title={install.command}
+                >
+                  {install.command}
+                </code>
+                <CopyButton
+                  text={install.command}
+                  aria-label={t("toolCatalog.copyCommand", {
+                    name: entry.label,
+                  })}
+                />
+              </>
+            ) : (
+              <p className="min-w-0 truncate text-note text-ink-muted">
+                {t(
+                  entry.downloadOnly
+                    ? "toolCatalog.downloadOnly"
+                    : "toolCatalog.platformGuide",
+                )}
               </p>
-            </>
-          )}
-          {(!info?.managedCopy || status !== "notInstalled") && (
-            <p className="text-note text-ink-muted">
-              {info?.managedCopy
-                ? t("toolCatalog.externalCopy", {
-                    status: t(`toolCatalog.${status}`),
-                  })
-                : t(`toolCatalog.${status}`)}
-              {info?.version ? ` · ${info.version}` : ""}
-            </p>
-          )}
-          {info?.error && (
-            <p className="text-note text-warn">
-              {t("toolCatalog.probeIncomplete")}
-            </p>
-          )}
-          {(info?.path || info?.managedCopy?.path) && (
-            <details className="mt-0.5 text-note text-ink-muted">
-              <summary className="w-fit cursor-pointer rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/50">
-                {t("toolCatalog.details")}
-              </summary>
-              <div className="mt-1 space-y-1.5">
-                {info.managedCopy?.path && (
-                  <p className="break-all text-ink-faint">
-                    {info.managedCopy.path}
-                  </p>
-                )}
-                {info.path && (
-                  <p className="break-all text-ink-faint">{info.path}</p>
-                )}
-              </div>
-            </details>
-          )}
-          {!isInstalled && dependency && (
-            <p className="text-note text-ink-faint">
-              {t(`toolCatalog.dependencies.${dependency}`)}
-            </p>
-          )}
-        </div>
-        <div className="col-span-2 col-start-2 flex min-w-0 items-center gap-2 md:col-span-1 md:col-start-3 md:row-start-1">
-          {!isInstalled && install && (
-            <>
-              <code className="min-w-0 flex-1 whitespace-pre-wrap break-words rounded-ctl bg-canvas px-2 py-1 text-note">
-                {install.command}
-              </code>
-              <CopyButton
-                text={install.command}
-                aria-label={t("toolCatalog.copyCommand", { name: entry.label })}
-              />
-            </>
-          )}
-          {!isInstalled && !install && (
-            <p className="text-note text-ink-muted">
-              {t(
-                entry.downloadOnly
-                  ? "toolCatalog.downloadOnly"
-                  : "toolCatalog.platformGuide",
-              )}
-            </p>
-          )}
-        </div>
-        <div className="col-start-3 row-start-1 flex flex-wrap items-center justify-end gap-1.5 md:col-start-4">
+            )}
+          </div>
+        )}
+        <div
+          data-column="actions"
+          className="flex items-center justify-end gap-1.5 pr-3 max-[720px]:col-start-3 max-[720px]:row-start-1"
+        >
           {info?.error && (
             <Button
               variant="secondary"
@@ -396,11 +426,11 @@ export const OptionalToolsCatalog = forwardRef<
         {t("toolCatalog.installedFold")}
       </ListFold>
       {installedOpen && (
-        <ListCard id="extra-installed-tools">
+        <ListCard id="extra-installed-tools" className={CATALOG_LIST_GRID}>
           {installed.length ? (
             installed.map((r) => row(r, true))
           ) : busy || error ? null : (
-            <p className="p-3 text-sub text-ink-muted">
+            <p className="col-span-full p-3 text-sub text-ink-muted">
               {t("toolCatalog.noInstalled")}
             </p>
           )}
@@ -434,11 +464,11 @@ export const OptionalToolsCatalog = forwardRef<
               {t(busy ? "common.loading" : "toolCatalog.refresh")}
             </Button>
           </div>
-          <ListCard>
+          <ListCard className={CATALOG_LIST_GRID}>
             {filtered.length ? (
               filtered.map((r) => row(r, false))
             ) : (
-              <p className="p-3 text-sub text-ink-muted">
+              <p className="col-span-full p-3 text-sub text-ink-muted">
                 {t("toolCatalog.noMatches")}
               </p>
             )}

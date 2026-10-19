@@ -3327,8 +3327,7 @@
     "externalCopy": "External copy · {{status}}",
     "managedCopyNeedsReview": "Ofox copy needs review",
     "downloadOnly": "Download and install from the official page",
-    "platformGuide": "Choose the installation method for your system in the official guide",
-    "details": "Installation details"
+    "platformGuide": "Choose the installation method for your system in the official guide"
   },
   "library": {
     "nav": "Resource categories",

@@ -186,7 +186,7 @@ describe("independent tool installation catalog", () => {
       "GitHub Copilot CLI · Ofox 管理副本",
     );
   });
-  it("keeps installation metadata available in a disclosure without crowding the row", async () => {
+  it("keeps installation details on one faint line, the paths in its title", async () => {
     mocks.inventory.mockResolvedValueOnce([
       {
         toolId: "copilot",
@@ -207,22 +207,13 @@ describe("independent tool installation catalog", () => {
     const row = await screen.findByRole("group", {
       name: "GitHub Copilot CLI",
     });
-    expect(within(row).getByText(/Ofox 管理副本.*1.0.98/)).toBeVisible();
-    expect(within(row).getByText(/外部副本.*external-1/)).toBeVisible();
-    const metadata = row.querySelector("details");
-    expect(metadata).not.toBeNull();
-    expect(metadata).not.toHaveAttribute("open");
-    expect(
-      within(row).getByText("/external/very-long/copilot"),
-    ).not.toBeVisible();
-    expect(
-      within(row).getByText("/private/very-long/prefix/bin/copilot"),
-    ).not.toBeVisible();
-    await userEvent.click(within(row).getByText("安装信息"));
-    expect(within(row).getByText("/external/very-long/copilot")).toBeVisible();
-    expect(
-      within(row).getByText("/private/very-long/prefix/bin/copilot"),
-    ).toBeVisible();
+    const sub = row.querySelector("[data-line=sub]") as HTMLElement;
+    expect(sub).toHaveClass("truncate");
+    expect(sub).toHaveTextContent(/Ofox 管理副本.*1.0.98/);
+    expect(sub).toHaveTextContent(/外部副本.*external-1/);
+    expect(sub.title).toContain("/external/very-long/copilot");
+    expect(sub.title).toContain("/private/very-long/prefix/bin/copilot");
+    expect(row.querySelector("details")).toBeNull();
     expect(localStorage.getItem("ofox-bound-tools")).toBe('["codex"]');
   });
   it("lists a verified Ofox copy among installed tools while preserving external-copy evidence", async () => {
@@ -246,9 +237,9 @@ describe("independent tool installation catalog", () => {
     await waitFor(() =>
       expect(screen.getByText(/Ofox 管理副本.*1.0.98/)).toBeVisible(),
     );
-    expect(screen.getByText(/外部副本.*external-1/)).toBeVisible();
-    await userEvent.click(screen.getByText("安装信息"));
-    expect(screen.getByText("/external/copilot")).toBeVisible();
+    expect(screen.getByText(/外部副本.*external-1/).title).toContain(
+      "/external/copilot",
+    );
   });
   it("does not hide a private managed copy when no shell executable exists", async () => {
     mocks.inventory.mockResolvedValueOnce([
@@ -378,7 +369,9 @@ describe("independent tool installation catalog", () => {
     render(<OptionalToolsCatalog boundTools={[]} />);
     fireEvent.click(screen.getByRole("button", { name: /其他已安装工具/ }));
     expect(await screen.findByText("Crush")).toBeVisible();
-    expect(screen.getByText(/版本检测未完成/)).toBeVisible();
+    expect(
+      screen.getByText("版本检测未完成").closest("[data-line=name]"),
+    ).not.toBeNull();
     expect(screen.queryByText(/secret-fixture-value/)).toBeNull();
     expect(
       screen.getByRole("button", { name: /重新检测 Crush/ }),
@@ -440,6 +433,43 @@ describe("independent tool installation catalog", () => {
     fireEvent.click(screen.getByRole("button", { name: /安装其他工具/ }));
     expect(await screen.findByRole("alert")).toHaveTextContent("检测");
     expect(screen.getByText("Crush")).toBeVisible();
+  });
+
+  it("lays candidate rows on the list's shared columns, each command on one line", async () => {
+    mocks.inventory.mockResolvedValue([]);
+    render(<OptionalToolsCatalog boundTools={[]} />);
+    await userEvent.click(screen.getByRole("button", { name: /安装其他工具/ }));
+    const row = screen.getByRole("group", { name: "Pi" });
+    expect(row).toHaveClass("col-span-full", "grid-cols-subgrid");
+    expect(
+      [...row.children].map((cell) => cell.getAttribute("data-column")),
+    ).toEqual(["badge", "name", "command", "actions"]);
+    expect(
+      within(row).getByText(/npm install -g --ignore-scripts/),
+    ).toHaveClass("whitespace-nowrap");
+    expect(row.querySelector("[data-line=sub]")).toHaveTextContent(
+      /Node\.js 22\.19/,
+    );
+  });
+
+  it("lets an installed row's name take the command column it does not need", async () => {
+    render(<OptionalToolsCatalog boundTools={[]} />);
+    await userEvent.click(
+      screen.getByRole("button", { name: /其他已安装工具/ }),
+    );
+    const row = await screen.findByRole("group", {
+      name: "GitHub Copilot CLI",
+    });
+    const cells = [...row.children];
+    expect(cells.map((cell) => cell.getAttribute("data-column"))).toEqual([
+      "badge",
+      "name",
+      "actions",
+    ]);
+    expect(cells[1]).toHaveClass("col-span-2");
+    expect(row.querySelector("[data-line=sub]")).toHaveTextContent(
+      "已安装 · 1.0",
+    );
   });
 
   it("catalog identities do not imply model binding or automatic installation", () => {

@@ -3327,8 +3327,7 @@
     "externalCopy": "外部副本 · {{status}}",
     "managedCopyNeedsReview": "Ofox 副本需要核对",
     "downloadOnly": "请前往官方页面下载安装",
-    "platformGuide": "请按官方说明选择当前系统的安装方式",
-    "details": "安装信息"
+    "platformGuide": "请按官方说明选择当前系统的安装方式"
   },
   "library": {
     "nav": "资源库分类",
