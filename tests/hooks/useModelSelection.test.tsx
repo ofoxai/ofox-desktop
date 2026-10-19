@@ -26,7 +26,6 @@ const snapshot: ToolModelSnapshot = {
   },
   managedSelection: { kind: "single", model: "model" },
   observedSelection: { model: "model", source: "config" },
-  supportsDefault: true,
   scope: [],
 };
 

@@ -11,7 +11,7 @@ import {
 import { ProfileDeleteDialog } from "./ProfileDeleteDialog";
 import { ProfileEditorDialog } from "./ProfileEditorDialog";
 import { ProfileReviewDialog } from "./ProfileReviewDialog";
-import { explicitTarget, selectionText, targetLabel } from "./profileText";
+import { selectionText, targetLabel } from "./profileText";
 
 export { captureProfileTargets } from "@/hooks/useModelProfiles";
 
@@ -185,12 +185,7 @@ function ProfilesList({ controller }: { controller: ModelProfilesController }) {
                     {targetLabel(item.target, sharedLabel)}
                   </dt>
                   <dd className="min-w-0 break-words text-ink-2">
-                    {selectionText(
-                      item.selection,
-                      t("modelPicker.defaultRoute"),
-                      t("modelExperience.unknown"),
-                      explicitTarget(item.target),
-                    )}
+                    {selectionText(item.selection, t("modelExperience.unset"))}
                   </dd>
                 </div>
               ))}

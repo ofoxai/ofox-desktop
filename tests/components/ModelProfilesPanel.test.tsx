@@ -36,7 +36,6 @@ function snapshot(toolId: string, model = "old/model"): ToolModelSnapshot {
     },
     managedSelection: { kind: "single", model },
     observedSelection: { model, source: "config" },
-    supportsDefault: toolId !== "dsh" && toolId !== "pi",
     scope: [],
   };
 }
@@ -74,7 +73,6 @@ describe("ModelProfilesPanel", () => {
   it("captures canonical write targets, preserves ordered sets and omits mixed dsh scopes", () => {
     const multi = snapshot("workbuddy");
     multi.managedSelection = { kind: "models", models: ["b", "a"] };
-    multi.supportsDefault = false;
     const modified = snapshot("gemini");
     modified.binding.status = "modified";
     expect(

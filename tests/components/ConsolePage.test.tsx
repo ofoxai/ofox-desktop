@@ -323,7 +323,6 @@ beforeEach(async () => {
                 model: toolId === "chatgpt" ? await mocks.chatGptModel() : null,
                 source: "config",
               },
-              supportsDefault: toolId !== "workbuddy" && toolId !== "opencode",
               scope: [],
             })),
           ),

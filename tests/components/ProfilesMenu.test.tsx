@@ -27,7 +27,6 @@ function snapshot(toolId: string, model = "old/model"): ToolModelSnapshot {
     },
     managedSelection: { kind: "single", model },
     observedSelection: { model, source: "config" },
-    supportsDefault: true,
     scope: [],
   };
 }

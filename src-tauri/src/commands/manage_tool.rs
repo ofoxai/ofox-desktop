@@ -142,8 +142,8 @@ pub(crate) async fn follow_live_model(state: &AppState, app: &str) {
 /// Read the model currently configured on the app's active provider.
 ///
 /// Returns `""` when:
-///   - the provider has no model set (legitimate "use OfoxAI's default route"
-///     state — the OfoxAI seeds ship with no model preselected);
+///   - the provider has no model set yet (the OfoxAI seeds ship with none;
+///     binding picks one, and the UI asks for one while it is empty);
 ///   - the underlying field doesn't exist yet (newly created provider).
 ///
 /// Hard errors only when we cannot resolve the active provider at all
@@ -854,8 +854,9 @@ pub(crate) fn read_model_from_settings(app: &AppType, settings: &serde_json::Val
 }
 
 /// Write `model` into the right slot for `app`. Empty `model` removes the
-/// field (keeps the stored JSON tidy and lets OfoxAI fall back to its
-/// default-route behavior). Mutates `settings` in place.
+/// field, which binding relies on for a seed with no model; a model choice
+/// is never empty (`model_selection::validate_selection`). Mutates `settings`
+/// in place.
 pub(crate) fn write_model_into_settings(
     app: &AppType,
     settings: &mut serde_json::Value,

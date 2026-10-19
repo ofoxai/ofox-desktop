@@ -104,7 +104,6 @@
     "retry": "重试"
   },
   "modelPicker": {
-    "defaultRoute": "未设置（使用 OfoxAI 默认路由）",
     "searchModel": "搜索模型…",
     "searchModelOrProvider": "搜索模型或供应商…",
     "loading": "加载中…",
@@ -2896,6 +2895,7 @@
     "catalogFailed": "模型目录读取失败",
     "skippedModels": "以下模型未保存：{{names}}",
     "observed": "当前观察到的模型：{{model}}",
+    "unset": "未设置",
     "observedShort": "实际在用 {{model}}",
     "inAppModel": "模型在应用内切换",
     "unknown": "未知",
@@ -2905,7 +2905,7 @@
     "modelCount": "{{count}} 个模型",
     "editModelSet": "{{tool}} 模型集合",
     "chooseModels": "请至少选择一个模型",
-    "chooseModel": "请选择一个明确的模型",
+    "chooseModel": "请选择模型",
     "missingCatalogModels": "部分所选模型已不在可用目录中，请移除后再保存",
     "modelsSaved": "已保存 {{count}} 个模型",
     "toolStatus": "工具模型",

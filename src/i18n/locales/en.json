@@ -104,7 +104,6 @@
     "retry": "Retry"
   },
   "modelPicker": {
-    "defaultRoute": "Not set (use the OfoxAI default route)",
     "searchModel": "Search models…",
     "searchModelOrProvider": "Search models or providers…",
     "loading": "Loading…",
@@ -2896,6 +2895,7 @@
     "catalogFailed": "Unable to load the model catalog",
     "skippedModels": "These models were not saved: {{names}}",
     "observed": "Observed model: {{model}}",
+    "unset": "Not set",
     "observedShort": "Running {{model}}",
     "inAppModel": "Model is set in the app",
     "unknown": "Unknown",
@@ -2905,7 +2905,7 @@
     "modelCount": "{{count}} models",
     "editModelSet": "{{tool}} model set",
     "chooseModels": "Choose at least one model",
-    "chooseModel": "Choose an explicit model",
+    "chooseModel": "Choose a model",
     "missingCatalogModels": "Some selected models are absent from the catalog. Remove them before saving.",
     "modelsSaved": "Saved {{count}} models",
     "toolStatus": "Tool models",

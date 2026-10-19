@@ -336,7 +336,6 @@ mod tests {
                 model: Some("observed-app-model".into()),
                 source: "appRecent".into(),
             },
-            supports_default: true,
             can_write: true,
             scope: vec![],
             scope_models: vec![],

@@ -104,7 +104,6 @@
     "retry": "再試行"
   },
   "modelPicker": {
-    "defaultRoute": "未設定（OfoxAI の既定ルートを使用）",
     "searchModel": "モデルを検索…",
     "searchModelOrProvider": "モデルまたはプロバイダーを検索…",
     "loading": "読み込み中…",
@@ -2896,6 +2895,7 @@
     "catalogFailed": "モデル一覧を読み込めません",
     "skippedModels": "次のモデルは保存されませんでした：{{names}}",
     "observed": "現在確認されたモデル：{{model}}",
+    "unset": "未設定",
     "observedShort": "使用中 {{model}}",
     "inAppModel": "モデルはアプリ内で設定",
     "unknown": "不明",
@@ -2905,7 +2905,7 @@
     "modelCount": "{{count}} 個のモデル",
     "editModelSet": "{{tool}} のモデル集合",
     "chooseModels": "モデルを1つ以上選択してください",
-    "chooseModel": "明示的なモデルを選択してください",
+    "chooseModel": "モデルを選択",
     "missingCatalogModels": "選択したモデルの一部が一覧にありません。削除してから保存してください。",
     "modelsSaved": "{{count}} 個のモデルを保存しました",
     "toolStatus": "ツールのモデル",

@@ -154,7 +154,8 @@ pub(crate) fn ofox_seeds() -> Vec<OfoxProviderSeed> {
         // codex CLI v0.140+ 要求 `model` 非空，否则启动报 "Thread model is
         // unavailable…"——所以 ensureDefaultModel 在 fetch 失败时**对 Codex
         // 单独**回落 hardcode `bailian/qwen3-coder-plus`（这里的历史默认值）。
-        // 其他 ofox 工具的 CLI 容忍空 model（走 OfoxAI 默认路由），不需要兜底。
+        // 其他 ofox 工具的 CLI 能在空 model 下启动，不需要兜底；Ofox 没有默认路由，
+        // 界面会提示用户选择模型。
         OfoxProviderSeed {
             id: "ofox-codex",
             app_type: AppType::Codex,

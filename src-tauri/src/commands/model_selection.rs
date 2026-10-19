@@ -71,7 +71,6 @@ pub(crate) async fn read_one(state: &AppState, id: &str) -> Result<ToolModelSnap
                 model: native.observed_model,
                 source: "config".into(),
             },
-            supports_default: false,
             can_write: true,
             scope: scope_models
                 .iter()
@@ -138,7 +137,6 @@ pub(crate) async fn read_many(
                         model: None,
                         source: "unknown".into(),
                     },
-                    supports_default: crate::model_selection::supports_default(&target),
                     can_write: false,
                     scope: vec![],
                     scope_models: vec![],
@@ -316,7 +314,6 @@ pub(crate) async fn save_one(
                     model: None,
                     source: "unknown".into(),
                 },
-                supports_default: before.supports_default,
                 can_write: false,
                 scope: before.scope,
                 scope_models: Vec::new(),

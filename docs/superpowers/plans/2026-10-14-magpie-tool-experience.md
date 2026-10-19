@@ -88,7 +88,7 @@ Rust 使用 `ofox_apex.rs`，renderer 使用 `ofoxUrls.ts` 和 `useOfoxApex`。�
 
 新增聚合快照，包含绑定状态、受管选择、观察值、来源、写入目标和 revision。在锁内完成应采纳的 live model 读取，避免先读模型再异步更新绑定的竞态。保存完成后发布原生事件，刷新 Console、托盘和管理弹窗。
 
-普通单模型快捷选择沿用当前兼容规则和现有 writer。OpenCode/WorkBuddy 首版快捷入口打开共用多选流程；不得调用会缩减集合的单模型 setter。Pi 和 dsh 不套用旧工具“空模型即 OFox 默认路由”的语义。
+普通单模型快捷选择沿用当前兼容规则和现有 writer。OpenCode/WorkBuddy 首版快捷入口打开共用多选流程；不得调用会缩减集合的单模型 setter。Pi 和 dsh 不套用旧工具“空模型即 OFox 默认路由”的语义。（2026-10-19 更新：核实 Ofox 并无默认路由，空模型对 Codex/OpenClaw/Hermes 不生效、还会清空 Hermes 的模型列表；用户决定所有工具都必须选择明确的模型，“未设置”选项已移除。）
 
 ## 第 2 项 模型 Profiles
 

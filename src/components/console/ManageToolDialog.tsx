@@ -521,7 +521,7 @@ export default function ManageToolDialog({
       ) {
         throw new Error(t("modelExperience.missingCatalogModels"));
       }
-      if (!multiModel && !editSnapshot.supportsDefault && !draftModel.trim()) {
+      if (!multiModel && !draftModel.trim()) {
         throw new Error(t("modelExperience.chooseModel"));
       }
       const report = await saveSelection.mutateAsync({
@@ -831,13 +831,11 @@ export default function ManageToolDialog({
                   · {t("modelExperience.writableDefault")}
                 </p>
               )}
-              {!!editSnapshot?.scopeModels?.length &&
-                !editSnapshot.supportsDefault &&
-                !currentModel && (
-                  <p className="text-[12px] text-ink-muted">
-                    {t("modelExperience.mixedScopes")}
-                  </p>
-                )}
+              {!!editSnapshot?.scopeModels?.length && !currentModel && (
+                <p className="text-[12px] text-ink-muted">
+                  {t("modelExperience.mixedScopes")}
+                </p>
+              )}
               {((tool.installationStatus &&
                 tool.installationStatus !== "installed") ||
                 tool.installationError) && (
@@ -1051,12 +1049,6 @@ export default function ManageToolDialog({
                     <ModelPicker
                       id="manage-model"
                       value={draftModel}
-                      allowDefault={editSnapshot?.supportsDefault ?? false}
-                      emptyLabel={
-                        editSnapshot?.supportsDefault === false
-                          ? t("modelExperience.chooseModel")
-                          : undefined
-                      }
                       disabled={
                         !modelWritable || !currentModelLoaded || operationBusy
                       }

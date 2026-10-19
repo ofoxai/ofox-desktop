@@ -19,7 +19,7 @@ import {
 /**
  * Codex CLI 启动时强制要求 `model` 非空——空字符串会触发 "Thread model is
  * unavailable under the current configuration"。其他工具的 CLI 都允许空
- * （走 OfoxAI 默认路由），所以这个 hardcode 兜底只在 Codex + fetch 失败的
+ * （Ofox 没有默认路由，界面会提示选择模型），所以这个 hardcode 兜底只在 Codex + fetch 失败的
  * 极端组合下生效，不构成全局的价格表 / 模型列表硬编码。
  *
  * 值取 bailian/qwen3-coder-plus —— 这是改造前 Codex seed 的硬编码默认，
@@ -36,7 +36,7 @@ const CODEX_SAFE_FALLBACK = "bailian/qwen3-coder-plus";
  *
  * 选法："最便宜但不免费"——见 {@link pickCheapestPaidModel}。
  * 兜底：fetch 失败 / 列表为空时，**只对 Codex** 回落 hardcode，其他工具留空
- * （它们的 CLI 容忍空 model，会走 OfoxAI 默认路由）。
+ * （它们的 CLI 能在空 model 下启动；Ofox 没有默认路由，界面会提示选择模型）。
  *
  * 不阻塞 bind 主流程：任何错误都吞掉打 warn，让用户至少能用上工具，进
  * "管理"里手动选 model 也能恢复。

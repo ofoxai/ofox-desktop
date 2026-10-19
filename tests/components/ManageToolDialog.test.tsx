@@ -60,7 +60,6 @@ function snapshot(
         (selection.kind === "single" ? selection.model : null),
       source: "config",
     },
-    supportsDefault: selection.kind === "single",
     scope: [],
   };
 }
@@ -841,7 +840,7 @@ describe("ManageToolDialog model picker", () => {
 
     const list = await screen.findByRole("listbox");
     expect(list.closest('[role="dialog"]')).not.toBeNull();
-    expect(screen.getAllByRole("option")).toHaveLength(81);
+    expect(screen.getAllByRole("option")).toHaveLength(80);
     expect(
       screen.queryByRole("option", { name: "openai/model-199" }),
     ).toBeNull();
@@ -852,7 +851,7 @@ describe("ManageToolDialog model picker", () => {
       scrollTop: { configurable: true, value: 300, writable: true },
     });
     fireEvent.scroll(list);
-    expect(screen.getAllByRole("option")).toHaveLength(161);
+    expect(screen.getAllByRole("option")).toHaveLength(160);
 
     fireEvent.change(screen.getByPlaceholderText("搜索模型…"), {
       target: { value: "model-199" },

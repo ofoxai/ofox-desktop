@@ -91,7 +91,6 @@ pub(crate) async fn snapshot(
             model: (!observed.is_empty()).then_some(observed),
             source: source.into(),
         },
-        supports_default: tool != Tool::OpenCode,
         can_write: true,
         scope: revision_paths(tool)
             .iter()

@@ -83,9 +83,7 @@ function ProfileEditor({
     targets.every((item) =>
       item.selection.kind === "models"
         ? item.selection.models.length > 0
-        : !!item.selection.model.trim() ||
-          (snapshotByTarget.get(item.target)?.supportsDefault ??
-            !explicitTarget(item.target)),
+        : !!item.selection.model.trim(),
     );
   const save = async () => {
     if (!valid || saveLock.current) return;
@@ -212,8 +210,6 @@ function ProfileTargetEditor({
   const { t } = useTranslation();
   const catalog = useModelCatalog(target, !!selection);
   const multi = target === "opencode" || target === "workbuddy";
-  const supportsDefault =
-    snapshot?.supportsDefault ?? (!explicitTarget(target) && !multi);
   const select = () => {
     if (selection) onChange(null);
     else
@@ -272,16 +268,10 @@ function ProfileTargetEditor({
                 models={catalog.models}
                 loading={catalog.loading}
                 onFetch={catalog.fetch}
-                allowDefault={supportsDefault}
-                emptyLabel={
-                  !supportsDefault
-                    ? t("modelExperience.chooseModel")
-                    : undefined
-                }
                 portalContainer={portal}
                 disabled={disabled}
               />
-              {!supportsDefault && (
+              {explicitTarget(target) && (
                 <label className="block space-y-1 text-note text-ink-muted">
                   <span>{t("modelExperience.profiles.explicitModel")}</span>
                   <Input

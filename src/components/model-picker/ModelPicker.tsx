@@ -308,7 +308,7 @@ export interface ModelPickerProps {
   loading: boolean;
   onFetch: (forceRefresh?: boolean) => void;
   disabled?: boolean;
-  allowDefault?: boolean;
+  /** What the trigger says while no model is chosen. */
   emptyLabel?: string;
   /**
    * Portal target for the popover. Defaults to `document.body` when omitted.
@@ -336,7 +336,6 @@ export function ModelPicker({
   onFetch,
   portalContainer,
   disabled = false,
-  allowDefault = false,
   emptyLabel,
   triggerClassName,
   className,
@@ -384,7 +383,7 @@ export function ModelPicker({
             )}
           >
             <span className="min-w-0 flex-1 truncate text-left">
-              {value || emptyLabel || t("modelPicker.defaultRoute")}
+              {value || emptyLabel || t("modelExperience.chooseModel")}
             </span>
             {trailing ?? <MenuChevron />}
           </button>
@@ -396,7 +395,7 @@ export function ModelPicker({
           align="start"
           // Match the trigger width so the list never visually mismatches
           // its anchor (Radix exposes this via CSS var), but no narrower than
-          // a model id and the default route on one line: a tool row's field
+          // a long model id on one line: a tool row's field
           // is a column, narrower than its list needs.
           style={{ width: "var(--radix-popover-trigger-width)" }}
           // Portal into the dialog's content node so this popover lives
@@ -420,25 +419,6 @@ export function ModelPicker({
                 </div>
               ) : (
                 <>
-                  {allowDefault && !search && (
-                    <CommandGroup>
-                      <CommandItem
-                        value="__ofox_default_route__"
-                        onSelect={() => {
-                          onChange("");
-                          setOpen(false);
-                        }}
-                      >
-                        <Check
-                          className={cn(
-                            "mr-2 h-3.5 w-3.5",
-                            !value ? "opacity-100" : "opacity-0",
-                          )}
-                        />
-                        {t("modelPicker.defaultRoute")}
-                      </CommandItem>
-                    </CommandGroup>
-                  )}
                   {filtered.length === 0 && (
                     <CommandEmpty>{t("modelPicker.noModels")}</CommandEmpty>
                   )}

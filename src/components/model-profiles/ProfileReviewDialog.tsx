@@ -10,7 +10,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import type { ModelProfilesController } from "@/hooks/useModelProfiles";
-import { explicitTarget, selectionText, targetLabel } from "./profileText";
+import { selectionText, targetLabel } from "./profileText";
 
 /**
  * A profile's preflight for every target, then applying it, then what each
@@ -24,8 +24,7 @@ export function ProfileReviewDialog({
   const { t } = useTranslation();
   const { review, busy, error, lastUndo } = controller;
   const sharedLabel = t("modelExperience.profiles.sharedCodex");
-  const defaultRoute = t("modelPicker.defaultRoute");
-  const unknown = t("modelExperience.unknown");
+  const unset = t("modelExperience.unset");
 
   return (
     <Dialog
@@ -84,21 +83,11 @@ export function ProfileReviewDialog({
                   <div className="mt-1 break-words text-ink-muted">
                     {selectionText(
                       item.before,
-                      defaultRoute,
-                      t(
-                        item.target === "dsh" && (item.scope?.length ?? 0) > 1
-                          ? "modelExperience.mixedSelection"
-                          : "modelExperience.unknown",
-                      ),
-                      explicitTarget(item.target),
+                      item.target === "dsh" && (item.scope?.length ?? 0) > 1
+                        ? t("modelExperience.mixedSelection")
+                        : unset,
                     )}{" "}
-                    →{" "}
-                    {selectionText(
-                      item.after,
-                      defaultRoute,
-                      unknown,
-                      explicitTarget(item.target),
-                    )}
+                    → {selectionText(item.after, unset)}
                   </div>
                   {!!item.scope?.length && (
                     <p className="mt-1 break-words text-ink-muted">

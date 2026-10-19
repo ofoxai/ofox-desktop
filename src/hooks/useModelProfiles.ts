@@ -25,12 +25,7 @@ export function captureProfileTargets(
   for (const snapshot of snapshots) {
     if (snapshot.binding.status !== "configured") continue;
     const selection = snapshot.managedSelection;
-    if (
-      selection.kind === "single" &&
-      !selection.model &&
-      !snapshot.supportsDefault
-    )
-      continue;
+    if (selection.kind === "single" && !selection.model) continue;
     if (selection.kind === "models" && !selection.models.length) continue;
     if (!targets.has(snapshot.writeTarget))
       targets.set(snapshot.writeTarget, {
@@ -187,8 +182,7 @@ export function useModelProfiles(
       snapshot.toolId === "dsh" &&
       snapshot.binding.status === "configured" &&
       snapshot.managedSelection.kind === "single" &&
-      !snapshot.managedSelection.model &&
-      !snapshot.supportsDefault,
+      !snapshot.managedSelection.model,
   );
 
   return {

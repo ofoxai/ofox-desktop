@@ -675,7 +675,6 @@ pub(crate) async fn model_snapshot(
             model: None,
             source: "unknown".into(),
         },
-        supports_default: false,
         can_write: true,
         scope: vec![models_path().to_string_lossy().into_owned()],
         scope_models: Vec::new(),

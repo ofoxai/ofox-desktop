@@ -12,7 +12,6 @@ export interface ToolModelSnapshot {
   binding: ToolBindingStatus;
   managedSelection: ModelSelection;
   observedSelection: { model: string | null; source: string };
-  supportsDefault: boolean;
   canWrite?: boolean;
   scope: string[];
   scopeModels?: { scope: string; modelId: string }[];

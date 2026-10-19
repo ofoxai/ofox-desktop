@@ -110,10 +110,7 @@ export function QuickModelPicker({
   const selectedModels = selection?.kind === "models" ? selection.models : [];
   const selectedModel = selection?.kind === "single" ? selection.model : "";
   const observed = snapshot?.observedSelection.model;
-  const mixed =
-    !!snapshot?.scopeModels?.length &&
-    !selectedModel &&
-    !snapshot.supportsDefault;
+  const mixed = !!snapshot?.scopeModels?.length && !selectedModel;
 
   const persist = async (
     base: ToolModelSnapshot,
@@ -267,10 +264,6 @@ export function QuickModelPicker({
       models={catalog.models}
       loading={catalog.loading}
       onFetch={catalog.fetch}
-      allowDefault={snapshot.supportsDefault}
-      emptyLabel={
-        !snapshot.supportsDefault ? t("modelExperience.chooseModel") : undefined
-      }
       disabled={!writable || save.isPending}
       triggerClassName={fieldClass || undefined}
       className={field ? "w-full" : undefined}

@@ -40,7 +40,6 @@ function snapshot(
     },
     managedSelection,
     observedSelection: { model: "openai/old", source: "config" },
-    supportsDefault: managedSelection.kind === "single",
     scope: [],
   };
 }
@@ -228,7 +227,6 @@ describe("QuickModelPicker", () => {
 
   it("does not describe mixed dsh scopes as a default route", () => {
     const state = snapshot("dsh", { kind: "single", model: "" });
-    state.supportsDefault = false;
     state.scopeModels = [
       { scope: "one", modelId: "a" },
       { scope: "two", modelId: "b" },
@@ -266,7 +264,7 @@ describe("QuickModelPicker", () => {
     );
   });
 
-  it("shows the default route in the control colour while no model is set", () => {
+  it("asks for a model, in the control colour, while none is set", () => {
     render(
       <QuickModelPicker
         toolId="codex"
@@ -275,9 +273,30 @@ describe("QuickModelPicker", () => {
       />,
     );
     const trigger = screen.getByRole("combobox");
-    expect(trigger).toHaveTextContent("OfoxAI 默认路由");
+    expect(trigger).toHaveTextContent("请选择模型");
     expect(trigger).toHaveClass("text-ink-ctl");
     expect(trigger).not.toHaveClass("text-ink");
+  });
+
+  it("offers no default route to fall back on, only models", async () => {
+    render(
+      <QuickModelPicker
+        toolId="claude"
+        snapshot={snapshot("claude")}
+        onRetry={vi.fn()}
+        variant="field"
+      />,
+    );
+    await waitFor(() => expect(modelFetch.fetchOfoxModels).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("combobox"));
+    await screen.findByRole("option", { name: "openai/new" });
+    expect(screen.queryByText(/默认路由|未设置/)).toBeNull();
+    expect(
+      screen
+        .getAllByRole("option")
+        .map((option) => option.textContent)
+        .sort(),
+    ).toEqual(["anthropic/claude", "openai/new", "openai/old"]);
   });
 
   it("draws the model-set button in the same 26px picker look", () => {

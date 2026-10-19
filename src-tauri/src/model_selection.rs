@@ -81,7 +81,6 @@ pub struct ToolModelSnapshot {
     pub binding: ToolBindingStatus,
     pub managed_selection: ModelSelection,
     pub observed_selection: ObservedSelection,
-    pub supports_default: bool,
     pub can_write: bool,
     pub scope: Vec<String>,
     pub scope_models: Vec<ScopeModel>,
@@ -115,10 +114,6 @@ pub(crate) fn canonical_tool(input: &str) -> Result<String, String> {
     Ok(if id == "chatgpt" { "codex".into() } else { id })
 }
 
-pub(crate) fn supports_default(tool: &str) -> bool {
-    !matches!(tool, "workbuddy" | "opencode" | "pi" | "dsh")
-}
-
 fn clean_id(id: &str, allow_empty: bool) -> Result<String, String> {
     let id = id.trim();
     if (id.is_empty() && !allow_empty)
@@ -140,8 +135,13 @@ pub(crate) fn validate_selection(
 ) -> Result<ModelSelection, String> {
     let tool = canonical_tool(tool)?;
     match selection {
+        // Ofox has no default route for a tool without a model: every tool
+        // is given one explicitly.
         ModelSelection::Single { model } if !matches!(tool.as_str(), "opencode" | "workbuddy") => {
-            let model = clean_id(&model, supports_default(&tool))?;
+            if model.trim().is_empty() {
+                return Err("请选择一个模型。".into());
+            }
+            let model = clean_id(&model, false)?;
             let model = if tool == "gemini" {
                 crate::gemini_config::normalize_gemini_env_model(&model)
             } else {
@@ -174,6 +174,12 @@ pub(crate) fn validate_targets(targets: Vec<ProfileTarget>) -> Result<Vec<Profil
     let mut out: Vec<ProfileTarget> = Vec::new();
     for target in targets {
         let id = canonical_tool(&target.target)?;
+        // Profiles saved while "no model" meant a default route leave that
+        // tool as it is.
+        if matches!(&target.selection, ModelSelection::Single { model } if model.trim().is_empty())
+        {
+            continue;
+        }
         let selection = validate_selection(&id, target.selection)?;
         if let Some(previous) = out.iter().find(|item| item.target == id) {
             if previous.selection != selection {
@@ -185,6 +191,9 @@ pub(crate) fn validate_targets(targets: Vec<ProfileTarget>) -> Result<Vec<Profil
             target: id,
             selection,
         });
+    }
+    if out.is_empty() {
+        return Err("Profile 至少需要一个工具目标。".into());
     }
     Ok(out)
 }
@@ -351,6 +360,28 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_profile_leaves_a_tool_without_a_model_alone() {
+        let targets = validate_targets(vec![
+            ProfileTarget {
+                target: "claude".into(),
+                selection: single(""),
+            },
+            ProfileTarget {
+                target: "gemini".into(),
+                selection: single("gemini-2.5-flash"),
+            },
+        ])
+        .unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].target, "gemini");
+        assert!(validate_targets(vec![ProfileTarget {
+            target: "claude".into(),
+            selection: single(""),
+        }])
+        .is_err());
+    }
+
+    #[test]
     fn collections_preserve_order_and_missing_targets_are_not_filled() {
         let targets = validate_targets(vec![ProfileTarget {
             target: "opencode".into(),
@@ -390,9 +421,20 @@ mod tests {
     }
 
     #[test]
-    fn default_is_explicit_and_only_available_for_supported_tools() {
-        assert_eq!(validate_selection("codex", single("")).unwrap(), single(""));
-        for id in ["pi", "dsh", "workbuddy", "opencode"] {
+    fn every_tool_needs_an_explicit_model() {
+        // Ofox has no default route: an empty model left Codex, OpenClaw and
+        // Hermes on their old model and emptied Hermes' model list.
+        for id in [
+            "claude", "codex", "chatgpt", "gemini", "openclaw", "hermes", "pi", "dsh",
+        ] {
+            assert_eq!(
+                validate_selection(id, single("")).unwrap_err(),
+                "请选择一个模型。",
+                "{id}"
+            );
+            assert!(validate_selection(id, single("  ")).is_err(), "{id}");
+        }
+        for id in ["workbuddy", "opencode"] {
             assert!(validate_selection(id, single("")).is_err());
         }
         assert!(validate_selection("workbuddy", single("model-a")).is_err());
