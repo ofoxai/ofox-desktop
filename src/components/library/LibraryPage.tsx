@@ -18,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Compass } from "lucide-react";
 import { ResourcePackDialog } from "./ResourcePackDialog";
 import { LibrarySection } from "./LibrarySection";
+import { LibraryMcpTable } from "./LibraryMcpTable";
 import { LibraryScenarioWizard } from "./LibraryScenarioWizard";
 import { libraryScroller, type LibraryLeaveGuard } from "./useLibraryInline";
 
@@ -224,14 +225,22 @@ export function LibraryPage({
           hidden={kind !== tab}
         >
           <InteractionScope active={active && kind === tab}>
-            <LibrarySection
-              kind={kind}
-              registerRefresh={register}
-              registerDiscover={registerDiscover}
-              registerLeave={registerLeave}
-              registerHistory={registerHistory}
-              onChanged={() => void summary.refetch()}
-            />
+            {kind === "mcp" ? (
+              <LibraryMcpTable
+                registerRefresh={register}
+                registerDiscover={registerDiscover}
+                onChanged={() => void summary.refetch()}
+              />
+            ) : (
+              <LibrarySection
+                kind={kind}
+                registerRefresh={register}
+                registerDiscover={registerDiscover}
+                registerLeave={registerLeave}
+                registerHistory={registerHistory}
+                onChanged={() => void summary.refetch()}
+              />
+            )}
           </InteractionScope>
         </div>
       ))}

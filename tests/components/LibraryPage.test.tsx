@@ -14,6 +14,7 @@ import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { LibraryPage } from "@/components/library/LibraryPage";
+import { LibrarySection } from "@/components/library/LibrarySection";
 import { ShellProvider, useShell } from "@/components/shell/ShellContext";
 import {
   libraryApi,
@@ -65,7 +66,14 @@ function Refresh() {
   useEffect(() => shell.setActive("library"), [shell.setActive]);
   return <button onClick={() => void shell.refresh()}>Refresh fixture</button>;
 }
-function Fixture({ active = true }: { active?: boolean }) {
+/** `mcp` renders the list-style MCP section on its own; the page now shows MCP as a table. */
+function Fixture({
+  active = true,
+  mcp = false,
+}: {
+  active?: boolean;
+  mcp?: boolean;
+}) {
   const [client] = useState(
     () => new QueryClient({ defaultOptions: { queries: { retry: false } } }),
   );
@@ -73,7 +81,16 @@ function Fixture({ active = true }: { active?: boolean }) {
     <QueryClientProvider client={client}>
       <ShellProvider openSettings={() => undefined}>
         <InteractionScope active={active}>
-          <LibraryPage />
+          {mcp ? (
+            <LibrarySection
+              kind="mcp"
+              registerRefresh={() => () => undefined}
+              registerDiscover={() => () => undefined}
+              onChanged={() => undefined}
+            />
+          ) : (
+            <LibraryPage />
+          )}
         </InteractionScope>
         <Refresh />
       </ShellProvider>
@@ -379,9 +396,7 @@ it("offers a focused command repair after a measured missing-program check witho
     tools: [],
   });
   const save = vi.spyOn(libraryApi, "saveMcp");
-  mount();
-  await screen.findByText("Shared");
-  await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
+  render(<Fixture mcp />);
   await screen.findByText("MCP demo");
   await userEvent.click(await rowAction("检查连接 MCP demo"));
   await userEvent.click(screen.getByRole("button", { name: "开始检查" }));
@@ -417,9 +432,7 @@ it("starts MCP inspection only explicitly and subscribes before execution", asyn
     tools: [{ name: "fixture-tool" }],
   });
   vi.spyOn(libraryApi, "cancelMcpCheck").mockResolvedValue(true);
-  mount();
-  await screen.findByText("Shared");
-  await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
+  render(<Fixture mcp />);
   await screen.findByText("MCP demo");
   expect(libraryApi.prepareMcpCheck).not.toHaveBeenCalled();
   await userEvent.click(await rowAction("检查连接 MCP demo"));
@@ -459,9 +472,7 @@ it("isolates MCP progress and cancels with immediate listener cleanup when the p
       }),
   );
   vi.spyOn(libraryApi, "cancelMcpCheck").mockResolvedValue(true);
-  const rendered = render(<Fixture />);
-  await screen.findByText("Shared");
-  await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
+  const rendered = render(<Fixture mcp />);
   await userEvent.click(await rowAction("检查连接 MCP demo"));
   await userEvent.click(screen.getByRole("button", { name: "开始检查" }));
   await waitFor(() => expect(libraryApi.runMcpCheck).toHaveBeenCalled());
@@ -473,7 +484,7 @@ it("isolates MCP progress and cancels with immediate listener cleanup when the p
     progress({ payload: { operationId: "owned-check", stage: "list" } }),
   );
   expect(screen.getByText("读取工具列表…")).toBeVisible();
-  rendered.rerender(<Fixture active={false} />);
+  rendered.rerender(<Fixture mcp active={false} />);
   await waitFor(() =>
     expect(libraryApi.cancelMcpCheck).toHaveBeenCalledWith("owned-check"),
   );
@@ -485,7 +496,7 @@ it("isolates MCP progress and cancels with immediate listener cleanup when the p
       tools: [{ name: "late-tool" }],
     }),
   );
-  rendered.rerender(<Fixture />);
+  rendered.rerender(<Fixture mcp />);
   expect(await screen.findByText("检查已取消")).toBeVisible();
   expect(screen.queryByText("late-tool")).not.toBeInTheDocument();
   expect(unlisten).toHaveBeenCalledTimes(1);
@@ -505,9 +516,7 @@ it("cancels a late prepared MCP job after the dialog has closed without subscrib
   });
   vi.spyOn(libraryApi, "cancelMcpCheck").mockResolvedValue(true);
   vi.mocked(listen).mockClear();
-  mount();
-  await screen.findByText("Shared");
-  await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
+  render(<Fixture mcp />);
   await userEvent.click(await rowAction("检查连接 MCP demo"));
   await userEvent.click(screen.getByRole("button", { name: "开始检查" }));
   await userEvent.click(screen.getByRole("button", { name: "取消检查" }));
@@ -537,13 +546,11 @@ it("unsubscribes a late MCP listener exactly once after its portal has suspended
     tools: [],
   });
   vi.spyOn(libraryApi, "cancelMcpCheck").mockResolvedValue(true);
-  const rendered = render(<Fixture />);
-  await screen.findByText("Shared");
-  await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
+  const rendered = render(<Fixture mcp />);
   await userEvent.click(await rowAction("检查连接 MCP demo"));
   await userEvent.click(screen.getByRole("button", { name: "开始检查" }));
   await waitFor(() => expect(listen).toHaveBeenCalled());
-  rendered.rerender(<Fixture active={false} />);
+  rendered.rerender(<Fixture mcp active={false} />);
   await act(async () => subscribed(unlisten));
   expect(libraryApi.cancelMcpCheck).toHaveBeenCalledWith("late-listener");
   expect(unlisten).toHaveBeenCalledTimes(1);
@@ -572,9 +579,7 @@ it("previews the complete desired set and lets an unavailable prior target be wi
   );
 });
 it("saves a name-only MCP edit without replacing saved private fields", async () => {
-  mount();
-  await screen.findByText("Shared");
-  await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
+  render(<Fixture mcp />);
   await screen.findByText("MCP demo");
   await userEvent.click(await rowAction("编辑 MCP demo"));
   fireEvent.change(screen.getByLabelText("名称"), {
@@ -928,9 +933,7 @@ it("copies MCP using backend references and freezes the opened source revision a
     credentialState: "needsMigration",
     fields: [],
   });
-  mount();
-  await screen.findByText("Shared");
-  await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
+  render(<Fixture mcp />);
   await screen.findByText("MCP demo");
   await userEvent.click(await rowAction("复制模板 MCP demo"));
   fireEvent.change(screen.getByLabelText("新服务器 ID"), {
@@ -999,9 +1002,7 @@ it("requires a second full preview and explicit confirmation for native MCP adop
     status: "applied",
     targets: [],
   });
-  mount();
-  await screen.findByText("MCP demo");
-  await userEvent.click(screen.getByRole("tab", { name: /MCP/ }));
+  render(<Fixture mcp />);
   await userEvent.click(await rowAction("将 MCP demo 应用到工具"));
   await userEvent.click(screen.getByRole("button", { name: "预览变更" }));
   await userEvent.click(
@@ -1237,9 +1238,7 @@ it("scans native MCP without importing until selected entries are confirmed", as
       },
     ],
   });
-  mount();
-  await screen.findByText("Shared");
-  await userEvent.click(screen.getByRole("tab", { name: /^MCP/ }));
+  render(<Fixture mcp />);
   await screen.findByText("MCP demo");
   await userEvent.click(await toolbarAction("从本机导入"));
   await within(screen.getByRole("dialog")).findByText("Native two");
@@ -1370,9 +1369,7 @@ it("keeps read-only discovery results in the native section and collects one row
   const importing = vi
     .spyOn(libraryApi, "importInventory")
     .mockResolvedValue({ imported: 1, items: [] });
-  mount();
-  await screen.findByText("Shared");
-  await userEvent.click(screen.getByRole("tab", { name: /^MCP/ }));
+  render(<Fixture mcp />);
   await screen.findByText("MCP demo");
   await userEvent.click(await toolbarAction("从本机导入"));
   await within(screen.getByRole("dialog")).findByText("Native source");
@@ -1423,3 +1420,24 @@ it.each(["mcp", "skills"] as const)(
     ).toBeDisabled();
   },
 );
+
+it("shows MCP as a table with one checkbox per agent", async () => {
+  mount();
+  await screen.findByText("Shared");
+  await userEvent.click(screen.getByRole("tab", { name: /^MCP/ }));
+  const row = await screen.findByTestId("mcp-row-server");
+  expect(within(row).getByText("MCP demo")).toBeVisible();
+  for (const tool of [
+    "Claude Code",
+    "Codex",
+    "OpenCode",
+    "Hermes",
+    "Gemini CLI",
+  ])
+    expect(
+      within(row).getByRole("checkbox", {
+        name: new RegExp(`^MCP demo · ${tool} · `),
+      }),
+    ).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "添加 MCP" })).toBeEnabled();
+});

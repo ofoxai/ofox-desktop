@@ -66,6 +66,8 @@ export interface LibraryMcpFormProps {
   ) => void | Promise<unknown>;
   onDiscover?: () => void;
   saveOnly?: boolean;
+  /** The apply button writes the chosen tools at once, without a preview step. */
+  immediate?: boolean;
   initialFocusPath?: string[];
   onController?: (controller: LibraryEditorController) => void;
 }
@@ -267,6 +269,7 @@ export function LibraryMcpForm({
   onImportMany,
   onDiscover,
   saveOnly = false,
+  immediate = false,
   initialFocusPath,
   onController,
 }: LibraryMcpFormProps) {
@@ -1437,7 +1440,11 @@ export function LibraryMcpForm({
             </div>
           </TooltipProvider>
           <p className="text-note text-ink-muted">
-            {t("library.mcpComposer.targetsHint")}
+            {t(
+              immediate
+                ? "library.mcpTable.targetsHint"
+                : "library.mcpComposer.targetsHint",
+            )}
           </p>
         </fieldset>
       )}
@@ -1451,15 +1458,21 @@ export function LibraryMcpForm({
             }
             onClick={() => void submit("apply")}
           >
-            {t("library.mcpComposer.preview")}
+            {t(
+              immediate
+                ? "library.mcpTable.saveAndEnable"
+                : "library.mcpComposer.preview",
+            )}
           </Button>
         )}
         <Button type="submit" variant="secondary" disabled={disabled}>
-          {t("library.mcpComposer.save")}
+          {t(immediate ? "library.mcpTable.save" : "library.mcpComposer.save")}
         </Button>
       </div>
       <p className="text-note text-ink-muted">
-        {t("library.mcpComposer.note")}
+        {t(
+          immediate ? "library.mcpTable.saveNote" : "library.mcpComposer.note",
+        )}
       </p>
     </form>
   );
