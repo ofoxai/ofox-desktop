@@ -2911,9 +2911,6 @@
     "chooseModel": "モデルを選択",
     "missingCatalogModels": "選択したモデルの一部が一覧にありません。削除してから保存してください。",
     "modelsSaved": "{{count}} 個のモデルを保存しました",
-    "toolStatus": "ツールのモデル",
-    "noTools": "連携済みツールがありません",
-    "openConsole": "メイン画面でツールを連携",
     "profiles": {
       "affectedScopes": "対象の設定：{{scopes}}",
       "title": "モデルプラン",
@@ -3203,28 +3200,17 @@
     "currentVersion": "インストール済みバージョン",
     "checkUpdates": "更新を確認",
     "done": "完了",
-    "balanceReauth": "更新には再ログインが必要です",
-    "balanceLogin": "ログインして残高を確認",
-    "liveBalance": "現在の残高",
-    "syncing": "同期中…",
     "accountBalance": "Ofox アカウント残高",
-    "refreshBalance": "残高を更新",
     "topUp": "チャージ",
-    "usageDetails": "使用量の詳細",
     "expired": "ログインの有効期限が切れました",
-    "expiredHint": "残高と使用量の更新には再ログインが必要です",
-    "loggedOutHint": "ログインして残高と使用量を確認",
     "reauth": "再ログイン",
     "login": "ログイン",
     "openMainFailed": "メインウィンドウを開けませんでした",
     "openSettingsFailed": "環境設定を開けませんでした",
     "openMain": "Ofox を開く",
     "openPreferences": "環境設定…",
-    "quit": "Ofox を終了",
     "expiredEmail": "{{value1}} · 有効期限切れ",
     "loginHint": "Ofox アカウントにログインしてください",
-    "balanceUpdated": "残高を更新しました：${{value1}}",
-    "balanceUnavailable": "残高を更新しましたが、データがありません",
     "balanceFailed": "残高を更新できませんでした。再試行してください",
     "updateAvailable": "新しいバージョンがあります",
     "downloadHint": "ダウンロードページで最新バージョンを取得",
@@ -4669,5 +4655,29 @@
   },
   "toolsManage": {
     "configurationNotes": "設定について"
+  },
+  "tray": {
+    "tabs": {
+      "label": "ポップオーバーの内容",
+      "tools": "ツール",
+      "usage": "使用量"
+    },
+    "refresh": "更新",
+    "openOfox": "Ofox を開く",
+    "quit": "終了",
+    "noToolsTitle": "まだツールが連携されていません",
+    "noToolsHint": "このコンピューターの AI ツールを選んで、ワンクリックで Ofox に接続",
+    "bindTools": "ワンクリックでツールを連携",
+    "readFailed": "読み込めません",
+    "usage": {
+      "period": "期間",
+      "today": "今日",
+      "week": "7 日間",
+      "web": "Web で詳細",
+      "tokens": "Tokens",
+      "cost": "費用",
+      "failed": "使用量を読み込めません",
+      "empty": "この期間の使用量はまだありません"
+    }
   }
 }

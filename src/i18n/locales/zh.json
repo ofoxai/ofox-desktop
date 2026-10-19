@@ -2911,9 +2911,6 @@
     "chooseModel": "请选择模型",
     "missingCatalogModels": "部分所选模型已不在可用目录中，请移除后再保存",
     "modelsSaved": "已保存 {{count}} 个模型",
-    "toolStatus": "工具模型",
-    "noTools": "暂未绑定工具",
-    "openConsole": "点此前往主窗口完成绑定",
     "profiles": {
       "affectedScopes": "受影响的配置：{{scopes}}",
       "title": "模型方案",
@@ -3203,28 +3200,17 @@
     "currentVersion": "已安装版本",
     "checkUpdates": "检查更新",
     "done": "完成",
-    "balanceReauth": "需重新登录后更新",
-    "balanceLogin": "请登录后查看余额",
-    "liveBalance": "实时余额",
-    "syncing": "正在同步…",
     "accountBalance": "Ofox 账户余额",
-    "refreshBalance": "刷新余额",
     "topUp": "充值",
-    "usageDetails": "用量详情",
     "expired": "登录已过期",
-    "expiredHint": "余额与用量需重新登录后才会更新",
-    "loggedOutHint": "登录后查看账户余额与用量",
     "reauth": "重新登录",
     "login": "登录",
     "openMainFailed": "打开主窗口失败",
     "openSettingsFailed": "打开偏好设置失败",
     "openMain": "打开 Ofox 主窗口",
     "openPreferences": "偏好设置...",
-    "quit": "退出 Ofox",
     "expiredEmail": "{{value1}} · 登录已过期",
     "loginHint": "请登录 Ofox 账号",
-    "balanceUpdated": "余额已更新：${{value1}}",
-    "balanceUnavailable": "余额已刷新，但暂无可用数据",
     "balanceFailed": "余额刷新失败，请稍后重试",
     "updateAvailable": "发现新版本",
     "downloadHint": "前往下载页获取最新版本",
@@ -4669,5 +4655,29 @@
   },
   "toolsManage": {
     "configurationNotes": "配置说明"
+  },
+  "tray": {
+    "tabs": {
+      "label": "小窗口内容",
+      "tools": "工具",
+      "usage": "用量"
+    },
+    "refresh": "刷新",
+    "openOfox": "打开 Ofox",
+    "quit": "退出",
+    "noToolsTitle": "还没有绑定工具",
+    "noToolsHint": "选好本机的 AI 工具，一键接入 Ofox",
+    "bindTools": "一键绑定工具",
+    "readFailed": "读取失败",
+    "usage": {
+      "period": "时间范围",
+      "today": "今天",
+      "week": "7 天",
+      "web": "网页版详情",
+      "tokens": "Tokens",
+      "cost": "费用",
+      "failed": "用量读取失败",
+      "empty": "这段时间还没有用量"
+    }
   }
 }

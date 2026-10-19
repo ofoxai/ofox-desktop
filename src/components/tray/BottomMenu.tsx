@@ -1,40 +1,31 @@
 import { useTranslation } from "react-i18next";
-import { useCallback, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { emit } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useCallback, useEffect, type ReactNode } from "react";
 import { exit } from "@tauri-apps/plugin-process";
 import { toast } from "sonner";
 import { isMac } from "@/lib/platform";
+import { openMainWindow } from "./trayActions";
+
+const FOOT_BUTTON =
+  "inline-flex h-6 items-center gap-1.5 rounded-[6px] px-[7px] text-ctl text-ink-ctl transition-colors hover:bg-pill hover:text-ink";
 
 /**
- * Tray popover 跟主窗口通信用的事件名。主窗口在 ConsolePage 内监听，
- * 收到后打开 OfoxSettingsDialog。命名沿用项目其它 ofox-* 风格。
+ * magpie's panel `.foot`: one line under the list, what the panel is about
+ * on the left (`lead`), the main window and quitting on the right.
  */
-const OFOX_OPEN_SETTINGS_EVENT = "ofox-open-settings";
-
-export default function BottomMenu() {
+export default function BottomMenu({ lead }: { lead?: ReactNode }) {
   const { t } = useTranslation();
-  const hideSelf = useCallback(async () => {
-    try {
-      await getCurrentWindow().hide();
-    } catch (e) {
-      // 失焦自动隐藏兜底，问题不大
-      console.error("[BottomMenu] hide popover failed", e);
-    }
-  }, []);
+  const shortcut = isMac() ? "⌘O" : "Ctrl+O";
 
   const handleOpenMain = useCallback(async () => {
     try {
-      await invoke("show_main_window");
-      await hideSelf();
+      await openMainWindow();
     } catch (e) {
       console.error("[BottomMenu] show_main_window failed", e);
       toast.error(t("uiCopy.openMainFailed"));
     }
-  }, [hideSelf]);
+  }, [t]);
 
-  // ⌘O on macOS, Ctrl+O elsewhere, as the menu item shows.
+  // ⌘O on macOS, Ctrl+O elsewhere, as the button shows.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const modifier = isMac() ? event.metaKey : event.ctrlKey;
@@ -52,17 +43,6 @@ export default function BottomMenu() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [handleOpenMain]);
 
-  const handleOpenSettings = useCallback(async () => {
-    try {
-      await invoke("show_main_window");
-      await emit(OFOX_OPEN_SETTINGS_EVENT);
-      await hideSelf();
-    } catch (e) {
-      console.error("[BottomMenu] open settings failed", e);
-      toast.error(t("uiCopy.openSettingsFailed"));
-    }
-  }, [hideSelf]);
-
   const handleQuit = useCallback(async () => {
     try {
       await exit(0);
@@ -71,42 +51,24 @@ export default function BottomMenu() {
     }
   }, []);
 
-  const items: Array<{
-    label: string;
-    shortcut?: string;
-    onClick: () => void | Promise<void>;
-  }> = [
-    {
-      label: t("uiCopy.openMain"),
-      shortcut: isMac() ? "⌘O" : "Ctrl+O",
-      onClick: handleOpenMain,
-    },
-    {
-      label: t("uiCopy.openPreferences"),
-      onClick: handleOpenSettings,
-    },
-  ];
-
   return (
-    <div className="border-t border-line">
-      {items.map((item) => (
-        <button
-          key={item.label}
-          onClick={() => void item.onClick()}
-          className="flex w-full items-center justify-between px-3.5 py-2 text-[12px] text-ink hover:bg-accent/50"
-        >
-          <span>{item.label}</span>
-          {item.shortcut && (
-            <span className="text-[11px] text-ink-muted">{item.shortcut}</span>
-          )}
-        </button>
-      ))}
+    <footer className="flex h-9 shrink-0 items-center gap-0.5 border-t border-line-2 pl-2 pr-2">
+      <div className="min-w-0 flex-1">{lead}</div>
       <button
-        onClick={() => void handleQuit()}
-        className="flex w-full items-center px-3.5 py-2 text-[12px] text-ink-muted hover:bg-accent/50"
+        type="button"
+        onClick={() => void handleOpenMain()}
+        className={FOOT_BUTTON}
       >
-        {t("uiCopy.quit")}
+        {t("tray.openOfox")}
+        <kbd className="font-sans text-note text-ink-faint">{shortcut}</kbd>
       </button>
-    </div>
+      <button
+        type="button"
+        onClick={() => void handleQuit()}
+        className={FOOT_BUTTON}
+      >
+        {t("tray.quit")}
+      </button>
+    </footer>
   );
 }

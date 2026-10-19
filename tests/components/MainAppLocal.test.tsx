@@ -148,6 +148,28 @@ describe("MainApp local management", () => {
     expect(localStorage.getItem("ofox-bound-tools")).toBeNull();
   });
 
+  it("opens one-click binding when the tray asks for it", async () => {
+    mocks.status.mockResolvedValue({ state: "active" });
+    localStorage.setItem("ofox-bound-tools", '["codex"]');
+    render(<MainApp />);
+    await screen.findByText("账户界面");
+    await waitFor(() =>
+      expect(mocks.listeners.has("ofox-start-binding")).toBe(true),
+    );
+    act(() => mocks.listeners.get("ofox-start-binding")?.());
+    expect(screen.getByText("toolDiscovery")).toBeVisible();
+  });
+
+  it("asks a signed-out user to log in when the tray asks for binding", async () => {
+    render(<MainApp />);
+    fireEvent.click(await screen.findByRole("button", { name: "本机管理" }));
+    await waitFor(() =>
+      expect(mocks.listeners.has("ofox-start-binding")).toBe(true),
+    );
+    act(() => mocks.listeners.get("ofox-start-binding")?.());
+    expect(screen.getByText("login")).toBeVisible();
+  });
+
   it("keeps the local page when the session expires", async () => {
     render(<MainApp />);
     fireEvent.click(await screen.findByRole("button", { name: "本机管理" }));

@@ -2911,9 +2911,6 @@
     "chooseModel": "Choose a model",
     "missingCatalogModels": "Some selected models are absent from the catalog. Remove them before saving.",
     "modelsSaved": "Saved {{count}} models",
-    "toolStatus": "Tool models",
-    "noTools": "No tools bound",
-    "openConsole": "Open the main window to bind tools",
     "profiles": {
       "affectedScopes": "Affected configurations: {{scopes}}",
       "title": "Model profiles",
@@ -3203,28 +3200,17 @@
     "currentVersion": "Installed version",
     "checkUpdates": "Check for updates",
     "done": "Done",
-    "balanceReauth": "Sign in again to refresh",
-    "balanceLogin": "Sign in to view balance",
-    "liveBalance": "Current balance",
-    "syncing": "Syncing…",
     "accountBalance": "Ofox account balance",
-    "refreshBalance": "Refresh balance",
     "topUp": "Top up",
-    "usageDetails": "Usage details",
     "expired": "Session expired",
-    "expiredHint": "Sign in again to update balance and usage",
-    "loggedOutHint": "Sign in to view balance and usage",
     "reauth": "Sign in again",
     "login": "Sign in",
     "openMainFailed": "Could not open the main window",
     "openSettingsFailed": "Could not open preferences",
     "openMain": "Open Ofox",
     "openPreferences": "Preferences…",
-    "quit": "Quit Ofox",
     "expiredEmail": "{{value1}} · Session expired",
     "loginHint": "Sign in to your Ofox account",
-    "balanceUpdated": "Balance updated: ${{value1}}",
-    "balanceUnavailable": "Balance refreshed; no data available",
     "balanceFailed": "Could not refresh balance. Please retry.",
     "updateAvailable": "Update available",
     "downloadHint": "Get the latest version from the download page",
@@ -4669,5 +4655,29 @@
   },
   "toolsManage": {
     "configurationNotes": "Configuration notes"
+  },
+  "tray": {
+    "tabs": {
+      "label": "Popover content",
+      "tools": "Tools",
+      "usage": "Usage"
+    },
+    "refresh": "Refresh",
+    "openOfox": "Open Ofox",
+    "quit": "Quit",
+    "noToolsTitle": "No tools bound yet",
+    "noToolsHint": "Pick the AI tools on this computer and connect them to Ofox in one click",
+    "bindTools": "Bind tools in one click",
+    "readFailed": "Can't read",
+    "usage": {
+      "period": "Period",
+      "today": "Today",
+      "week": "7 days",
+      "web": "Details on the web",
+      "tokens": "Tokens",
+      "cost": "Cost",
+      "failed": "Couldn't load usage",
+      "empty": "No usage in this period yet"
+    }
   }
 }

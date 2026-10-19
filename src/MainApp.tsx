@@ -42,6 +42,8 @@ export default function MainApp() {
   const preferLocal = useRef(false);
   const currentScreen = useRef(appState);
   currentScreen.current = appState;
+  const signedInRef = useRef(signedIn);
+  signedInRef.current = signedIn;
   const loadBoundTools = () => setBoundTools(readBoundToolsFromStorage());
   const showConsole = () => {
     currentScreen.current = "console";
@@ -118,6 +120,19 @@ export default function MainApp() {
         }
       }),
       subscribe(OFOX_AUTH_RESTORED_EVENT, afterSignIn),
+      // The tray's 一键绑定工具: binding when signed in, signing in first otherwise.
+      subscribe("ofox-start-binding", () => {
+        routeVersion.current += 1;
+        if (signedInRef.current) {
+          preferLocal.current = false;
+          setLocalOnly(false);
+          openBinding();
+          return;
+        }
+        setOnboardingEntry("login");
+        setOnboardingRevision((r) => r + 1);
+        setAppState("onboarding");
+      }),
       subscribe("ofox-reauth-requested", () => {
         routeVersion.current += 1;
         setSignedIn(false);

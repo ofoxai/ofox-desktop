@@ -3,22 +3,25 @@ import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
-import ProfileHeader from "./ProfileHeader";
-import AuthExpiredBanner from "./AuthExpiredBanner";
-import AccountBalance from "./AccountBalance";
-import ActionButtons from "./ActionButtons";
+import TrayHeader from "./TrayHeader";
+import TrayAccount from "./TrayAccount";
+import TrayUsage from "./TrayUsage";
 import ToolStatusList from "./ToolStatusList";
 import BottomMenu from "./BottomMenu";
 import PopoverFrame from "./PopoverFrame";
 import BalanceWarningBanner from "./BalanceWarningBanner";
 import UpdateBanner from "./UpdateBanner";
+import { SegmentedControl } from "@/components/ui/segmented";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
 import { useUpdate } from "@/contexts/UpdateContext";
 import { settingsApi } from "@/lib/api";
-import { BOUND_TOOLS_STORAGE_KEY } from "@/config/toolMeta";
+import { queryClient } from "@/lib/query/queryClient";
+import { BOUND_TOOLS_STORAGE_KEY, TOOL_META } from "@/config/toolMeta";
 import { isMac } from "@/lib/platform";
 
 const DEFAULT_LOW_BALANCE_THRESHOLD = 10;
+const TAB_STORAGE_KEY = "ofox-tray-tab";
+type TrayTab = "tools" | "usage";
 
 /**
  * 已绑定工具的真理源 = `localStorage[BOUND_TOOLS_STORAGE_KEY]`，与 MainApp
@@ -43,18 +46,38 @@ function readBoundToolsFromStorage(): string[] {
   }
 }
 
+function readTab(): TrayTab {
+  try {
+    return localStorage.getItem(TAB_STORAGE_KEY) === "usage"
+      ? "usage"
+      : "tools";
+  } catch {
+    return "tools";
+  }
+}
+
+function saveTab(tab: TrayTab) {
+  try {
+    localStorage.setItem(TAB_STORAGE_KEY, tab);
+  } catch {
+    // A tab that isn't remembered opens on 工具 next time; nothing else depends on it.
+  }
+}
+
 /**
- * Tray popover root.
+ * Tray popover root, laid out as magpie's panel: the brand and its actions,
+ * the account with its balance on one line, then 工具 / 用量 tabs over one
+ * scrolling card, and a one-line footer.
  *
- * Layout invariant: the section below the header keeps the same vertical
- * order across all auth states; we only swap which component renders.
- * That avoids the popover height jumping when the state changes.
+ * Layout invariant: the header, account line and tabs keep their places in
+ * every auth state; only what is on the account line changes.
  */
 export default function TrayPopoverApp() {
   const { t } = useTranslation();
-  const { status, refetch, isActive, isExpired, isLoggedOut } = useOfoxAuth();
+  const { status, refetch, isActive } = useOfoxAuth();
   const { hasUpdate, isDismissed } = useUpdate();
-  const [balanceRefreshing, setBalanceRefreshing] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [tab, setTab] = useState<TrayTab>(readTab);
 
   // 已绑定工具列表来自 localStorage（与主窗口共享同一份）。低余额阈值/开关
   // 走 settingsApi.get()。两路独立读，后者失败不影响前者。
@@ -74,12 +97,12 @@ export default function TrayPopoverApp() {
     try {
       const s = await settingsApi.get();
       setLowBalanceThreshold(
-        typeof s.lowBalanceThresholdUsd === "number"
+        typeof s?.lowBalanceThresholdUsd === "number"
           ? s.lowBalanceThresholdUsd
           : DEFAULT_LOW_BALANCE_THRESHOLD,
       );
       // 缺省视为开启 —— 用户没在设置页明确关掉的话就允许提示。
-      setLowBalanceEnabled(s.lowBalanceEnabled !== false);
+      setLowBalanceEnabled(s?.lowBalanceEnabled !== false);
     } catch (e) {
       console.error("[TrayPopover] settings fetch failed", e);
     }
@@ -113,34 +136,28 @@ export default function TrayPopoverApp() {
   }, [reloadBoundTools, reloadSettings]);
 
   /**
-   * Standalone refresh trigger for the balance pill. `useOfoxAuth.refetch()`
-   * re-reads the in-memory snapshot the backend keeps. To force a network
-   * round-trip to `/openapi/orgs/me/balance` we need to call
-   * `ofoxGetUserInfo()` directly — it invokes `refresh_user_info` on the
-   * Rust side, which pulls a fresh wallet snapshot, persists it, and then
-   * the cached auth status reflects the new balance.
+   * The header's refresh: a fresh wallet read (`ofoxGetUserInfo` reaches
+   * `/openapi/orgs/me/balance`), the bound list, and the models and usage
+   * the tabs show.
    */
-  const refreshBalance = useCallback(async () => {
-    setBalanceRefreshing(true);
+  const refresh = useCallback(async () => {
+    setRefreshing(true);
     try {
-      // Lazy-imported to keep the bundle tree intact; this module is a
-      // sibling of the auth API.
+      reloadBoundTools();
       const { ofoxGetUserInfo } = await import("@/lib/api/ofoxAuth");
-      const fresh = await ofoxGetUserInfo();
+      await Promise.all([
+        isActive ? ofoxGetUserInfo() : null,
+        queryClient.invalidateQueries({ queryKey: ["modelSelection"] }),
+        queryClient.invalidateQueries({ queryKey: ["usageOverview"] }),
+      ]);
       await refetch();
-      const value = fresh?.balance?.balance;
-      if (typeof value === "number") {
-        toast.success(t("uiCopy.balanceUpdated", { value1: value.toFixed(2) }));
-      } else {
-        toast.warning(t("uiCopy.balanceUnavailable"));
-      }
     } catch (e) {
-      console.error("[TrayPopover] balance refresh failed", e);
+      console.error("[TrayPopover] refresh failed", e);
       toast.error(t("uiCopy.balanceFailed"));
     } finally {
-      setBalanceRefreshing(false);
+      setRefreshing(false);
     }
-  }, [refetch]);
+  }, [isActive, refetch, reloadBoundTools, t]);
 
   useEffect(() => {
     // 设置透明背景：只有 macOS 的弹窗窗口是透明的（见 PopoverFrame）
@@ -165,59 +182,77 @@ export default function TrayPopoverApp() {
     };
   }, [refetch, reloadBoundTools, reloadSettings]);
 
-  const handleReauth = useCallback(async () => {
+  const handleLogin = useCallback(async () => {
     try {
-      // Ask the backend to surface the main window in re-auth mode. The
-      // device flow itself runs there (it needs a wider surface to display
-      // the user_code + browser nudge).
+      // The device flow runs in the main window; it needs room for the code.
       await invoke("ofox_request_reauth");
     } catch (e) {
       console.error("[TrayPopover] ofox_request_reauth failed", e);
     }
   }, []);
 
-  // Pull straight from the cached user snapshot — the backend fetches the
-  // wallet from `/openapi/orgs/me/balance` alongside `/openapi/me`.
   const balanceUsd = status?.user?.balance?.balance ?? null;
-
-  const showLowBalanceBanner =
+  const lowBalance =
     isActive &&
     typeof balanceUsd === "number" &&
     lowBalanceEnabled &&
     balanceUsd < lowBalanceThreshold;
+  const toolCount = boundTools.filter((id) => TOOL_META[id]).length;
 
   return (
     <PopoverFrame>
-      {/* 固定区域：不滚动 */}
-      <div className="shrink-0">
-        <ProfileHeader status={status} />
-        {hasUpdate && !isDismissed && <UpdateBanner />}
-        {(isExpired || isLoggedOut) && (
-          <AuthExpiredBanner
-            variant={isExpired ? "expired" : "loggedOut"}
-            onReauth={handleReauth}
-          />
-        )}
-        <AccountBalance
-          state={status?.state ?? "loggedout"}
-          balanceUsd={isActive ? balanceUsd : null}
-          onRefresh={refreshBalance}
-          refreshing={balanceRefreshing}
-        />
-        {showLowBalanceBanner && (
+      <TrayHeader refreshing={refreshing} onRefresh={() => void refresh()} />
+      <TrayAccount
+        status={status}
+        low={lowBalance}
+        onLogin={() => void handleLogin()}
+      />
+      {hasUpdate && !isDismissed && (
+        <div className="shrink-0 pb-2">
+          <UpdateBanner />
+        </div>
+      )}
+      {lowBalance && (
+        <div className="shrink-0 pb-2">
           <BalanceWarningBanner
             threshold={lowBalanceThreshold}
             balanceUsd={balanceUsd as number}
           />
+        </div>
+      )}
+      <SegmentedControl<TrayTab>
+        aria-label={t("tray.tabs.label")}
+        value={tab}
+        onChange={(next) => {
+          setTab(next);
+          saveTab(next);
+        }}
+        options={[
+          {
+            value: "tools",
+            label: (
+              <>
+                {t("tray.tabs.tools")}
+                {toolCount > 0 && (
+                  <em className="ml-1 not-italic tabular-nums text-ink-faint">
+                    {toolCount}
+                  </em>
+                )}
+              </>
+            ),
+          },
+          { value: "usage", label: t("tray.tabs.usage") },
+        ]}
+        className="mx-3 mb-2 flex shrink-0 self-stretch [&>button]:flex-1"
+      />
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-2 pt-[2px]">
+        {tab === "tools" ? (
+          <ToolStatusList boundTools={boundTools} disabled={!isActive} />
+        ) : (
+          <TrayUsage />
         )}
-        <ActionButtons />
       </div>
-      {/* 工具状态：标题固定，列表可滚动 */}
-      <ToolStatusList boundTools={boundTools} disabled={!isActive} />
-      {/* 固定区域：底部菜单 */}
-      <div className="shrink-0">
-        <BottomMenu />
-      </div>
+      <BottomMenu />
     </PopoverFrame>
   );
 }
