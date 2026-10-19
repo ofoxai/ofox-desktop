@@ -696,7 +696,9 @@ fn sqlite_snapshots_reuse_large_shared_sources_reject_changes_and_clean_up() {
     let native = rusqlite::Connection::open(&path).unwrap();
     native.execute_batch("CREATE TABLE message (id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,data TEXT); CREATE TABLE part (id TEXT PRIMARY KEY,session_id TEXT,message_id TEXT,time_created INTEGER,data TEXT); CREATE TABLE unrelated (payload BLOB); INSERT INTO unrelated VALUES(zeroblob(34603008)); INSERT INTO message VALUES('msg_a','ses_a',1,'{\"role\":\"assistant\"}'); INSERT INTO part VALUES('part_a','ses_a','msg_a',1,'{\"type\":\"text\",\"text\":\"small selected session\"}');").unwrap();
     drop(native);
-    assert!(std::fs::metadata(&path).unwrap().len() > read_context::SESSION_BYTES);
+    // a database past one session's read limit, shared by many sessions
+    const LIMIT: u64 = 32 * 1024 * 1024;
+    assert!(std::fs::metadata(&path).unwrap().len() > LIMIT);
     let batch = Arc::new(read_context::SqliteBatch::default());
     let context = || {
         read_context::ReadContext::with_sqlite_batch(
@@ -706,6 +708,7 @@ fn sqlite_snapshots_reuse_large_shared_sources_reject_changes_and_clean_up() {
             vec![directory.path().to_owned()],
             batch.clone(),
         )
+        .with_session_limit(LIMIT)
     };
     let source = format!("sqlite:{}:ses_a", path.display());
     let first = context();
@@ -716,7 +719,7 @@ fn sqlite_snapshots_reuse_large_shared_sources_reject_changes_and_clean_up() {
     assert_eq!(rows[0].content, "small selected session");
     first.verify().unwrap();
     let copied = batch.copied_bytes();
-    assert!(copied > read_context::SESSION_BYTES);
+    assert!(copied > LIMIT);
     let second = context();
     read_context::scope(second.clone(), || {
         providers::opencode::load_messages_sqlite(&source)
@@ -978,4 +981,72 @@ fn preparing_a_pi_resume_command_does_not_open_bodies_or_refresh_an_aged_listing
     assert!(!result.launched);
     assert!(result.command.contains("'pi'"));
     assert!(result.command.contains("--session"));
+}
+
+/// A session whose file does not hold the query's bytes is passed over
+/// without decoding a line of it (Magpie `mayHold`, MIT); one that does is
+/// still searched as decoded text.
+#[test]
+#[serial_test::serial]
+fn a_file_without_the_query_is_not_decoded() {
+    let home = sandbox();
+    claude(home.home(), 1, "");
+    let directory = home.home().join(".claude/projects/-work-search");
+    let other = "11111111-2222-3333-4444-000000000002";
+    std::fs::write(
+        directory.join(format!("{other}.jsonl")),
+        format!(
+            "{}\n",
+            serde_json::json!({"type":"user","sessionId":other,"cwd":"/work/search","message":{"role":"user","content":"nothing to see"}})
+        ),
+    )
+    .unwrap();
+    managed::forget_listing();
+    let keys: Vec<_> = managed::list().into_iter().map(|r| r.session_key).collect();
+    assert_eq!(keys.len(), 2);
+    for (query, decoded, hits) in [("needle", 1, 1), ("中文", 1, 1), ("absent", 0, 0)] {
+        let count = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = count.clone();
+        let prepared = search::prepare("r".into(), query.into(), keys.clone(), false).unwrap();
+        let result = search::with_match_observer(
+            move || seen.set(seen.get() + 1),
+            || search::run(&prepared.operation_id, None, |_| {}).unwrap(),
+        );
+        assert_eq!(result.progress.scanned, 2, "{query}");
+        assert_eq!(result.progress.hits.len(), hits, "{query}");
+        assert_eq!(count.get(), decoded, "{query}");
+    }
+}
+
+/// A long session past the old 32 MiB read limit is searched and opened.
+#[test]
+#[serial_test::serial]
+fn a_long_session_is_searched_and_read() {
+    let home = sandbox();
+    let filler = serde_json::json!({"type":"assistant","message":{"role":"assistant",
+        "content":"filler ".repeat(4096)}})
+    .to_string();
+    let lines = (40 * 1024 * 1024) / filler.len() + 1;
+    let extra = format!(
+        "{}{}\n",
+        format!("{filler}\n").repeat(lines),
+        serde_json::json!({"type":"user","message":{"role":"user","content":"先给我介绍一下全文主线"}})
+    );
+    let path = claude(home.home(), 1, &extra);
+    assert!(std::fs::metadata(&path).unwrap().len() > 40 * 1024 * 1024);
+    managed::forget_listing();
+    let key = managed::list()[0].session_key.clone();
+    let prepared =
+        search::prepare("r".into(), "全文主线".into(), vec![key.clone()], false).unwrap();
+    let result = search::run(&prepared.operation_id, None, |_| {}).unwrap();
+    assert_eq!(result.progress.failed, 0, "{:?}", result.limit_reasons);
+    assert_eq!(result.progress.hits.len(), 1);
+    let hit = &result.progress.hits[0];
+    search::transcript(
+        &key,
+        Some(&hit.read_revision),
+        Some(hit.message_ordinal),
+        Some(&hit.content_hash),
+    )
+    .unwrap();
 }

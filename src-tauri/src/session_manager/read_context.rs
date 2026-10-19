@@ -15,9 +15,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(crate) const SESSION_BYTES: u64 = 32 * 1024 * 1024;
-pub(crate) const LINE_BYTES: usize = 8 * 1024 * 1024;
-pub(crate) const BATCH_BYTES: u64 = 256 * 1024 * 1024;
+/// One session's read: a long Claude Code session passes 40 MB and a Codex
+/// rollout hundreds; past this it can be neither opened nor searched.
+pub(crate) const SESSION_BYTES: u64 = 512 * 1024 * 1024;
+/// One line: a Codex rollout's tool output or image runs to 18 MB; as the
+/// Codex usage reader and magpie, a line past 32 MiB is refused.
+pub(crate) const LINE_BYTES: usize = 32 * 1024 * 1024;
+/// At least one whole session, or a session past it never finishes a batch.
+pub(crate) const BATCH_BYTES: u64 = 1024 * 1024 * 1024;
 pub(crate) const BATCH_DURATION: Duration = Duration::from_secs(15);
 const MAX_SQLITE_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_SQLITE_BATCH_IO: u64 = 1024 * 1024 * 1024;
@@ -232,6 +237,12 @@ impl ReadContext {
             return Err(self.fail("changed"));
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn with_session_limit(mut self: Arc<Self>, bytes: u64) -> Arc<Self> {
+        Arc::get_mut(&mut self).unwrap().session_limit = bytes;
+        self
     }
 
     #[cfg(test)]

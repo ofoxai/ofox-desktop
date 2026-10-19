@@ -129,6 +129,8 @@ struct Position {
 struct Job {
     request_id: String,
     query: String,
+    /// The query as a file's raw bytes would hold it, when they would.
+    raw_needle: Option<String>,
     include_process: bool,
     candidates: Vec<Candidate>,
     cancel: Arc<AtomicBool>,
@@ -184,6 +186,7 @@ pub fn prepare(
         operation_id.clone(),
         Arc::new(Job {
             request_id: request_id.clone(),
+            raw_needle: raw_needle(&query.to_lowercase()),
             query: query.to_lowercase(),
             include_process,
             candidates,
@@ -334,7 +337,20 @@ pub fn run(
             Err("session.search.unsupported".into())
         } else {
             let path = managed::source_file(&candidate.meta)?;
-            if SourceStamp::at(&path).is_ok_and(|stamp| stamp == candidate.stamp) {
+            // a file changed since the search was prepared is reported as such,
+            // never as one that holds no match
+            let unchanged = SourceStamp::at(&path).is_ok_and(|stamp| stamp == candidate.stamp);
+            let held = match &job.raw_needle {
+                Some(needle) if unchanged => {
+                    may_hold(&candidate.meta, needle, &job.cancel, deadline)
+                }
+                _ => Ok(true),
+            };
+            if held.as_ref().is_ok_and(|held| !held) {
+                Ok(None)
+            } else if let Err(error) = held {
+                Err(error)
+            } else if unchanged {
                 let context = ReadContext::with_sqlite_batch(
                     job.cancel.clone(),
                     bytes.clone(),
@@ -343,13 +359,15 @@ pub fn run(
                     sqlite_batch.clone(),
                 );
                 context.expect_source(path, candidate.stamp.clone());
-                read_record(&candidate.meta, context)
+                read_record(&candidate.meta, context).map(Some)
             } else {
                 Err("session.search.changed".into())
             }
         };
         match result {
-            Ok(transcript) => {
+            // its files do not hold the query: nothing to decode
+            Ok(None) => {}
+            Ok(Some(transcript)) => {
                 #[cfg(test)]
                 MATCH_OBSERVER.with(|observer| {
                     if let Some(observer) = observer.borrow().as_ref() {
@@ -569,6 +587,119 @@ pub fn subagent_transcript(session_key: &str, subagent_id: &str) -> Result<Trans
         managed::roots(&meta.provider_id)?,
     );
     read_record(&file, context)
+}
+
+/// The longest word of a lowered query, when a session file's raw bytes
+/// hold it exactly as typed: ASCII but for quotes, escapes, markup and
+/// brackets, and CJK, which Claude Code and Codex write unescaped. Else
+/// none, and every file is decoded to be searched. Adapted from Magpie
+/// internal/sessions/search.go (`rawNeedle`, MIT).
+fn raw_needle(query: &str) -> Option<String> {
+    let raw = |c: char| {
+        c.is_whitespace()
+            || c.is_ascii()
+                && !c.is_ascii_control()
+                && !matches!(c, '"' | '\\' | '<' | '>' | '&' | '[' | ']')
+            || matches!(c as u32,
+                0x3000..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF
+                    | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0xFF00..=0xFFEF)
+    };
+    if !query.chars().all(raw) {
+        return None;
+    }
+    query
+        .split_whitespace()
+        .max_by_key(|word| word.len())
+        .map(str::to_owned)
+}
+
+/// Whether a session's files may hold `needle`: a pass over their raw
+/// (decompressed) bytes, ASCII case folded, decoding no line. Only Claude
+/// and Codex transcripts are known to keep text unescaped; any other, or a
+/// file that cannot be read here, is left to the decoding reader.
+fn may_hold(
+    meta: &SessionMeta,
+    needle: &str,
+    cancel: &AtomicBool,
+    deadline: Instant,
+) -> Result<bool, String> {
+    let paths = match meta.provider_id.as_str() {
+        "claude" => vec![managed::source_file(meta)?],
+        "codex" => match providers::codex::conversation_paths(meta) {
+            Ok(paths) => paths,
+            Err(_) => return Ok(true),
+        },
+        _ => return Ok(true),
+    };
+    let needle = needle.as_bytes();
+    for path in paths {
+        let Ok(file) = std::fs::File::open(&path) else {
+            return Ok(true);
+        };
+        let compressed = path
+            .extension()
+            .is_some_and(|ext| ext == "zst" || ext == "zstd");
+        let mut reader: Box<dyn std::io::Read> = if compressed {
+            match zstd::stream::read::Decoder::new(file) {
+                Ok(decoder) => Box::new(decoder),
+                Err(_) => return Ok(true),
+            }
+        } else {
+            Box::new(file)
+        };
+        let keep = needle.len().saturating_sub(1);
+        let mut buffer = vec![0u8; (1 << 20) + keep];
+        let mut have = 0;
+        loop {
+            if cancel.load(Ordering::Acquire) {
+                return Err("session.search.cancelled".into());
+            }
+            if Instant::now() >= deadline {
+                return Err("session.search.deadline".into());
+            }
+            let read = match reader.read(&mut buffer[have..]) {
+                Ok(read) => read,
+                Err(_) => return Ok(true),
+            };
+            // only what was just read, and the bytes before it a match may span
+            let from = have.saturating_sub(keep);
+            have += read;
+            if contains_folded(&buffer[from..have], needle) {
+                return Ok(true);
+            }
+            if read == 0 {
+                break;
+            }
+            if have >= buffer.len() {
+                buffer.copy_within(have - keep..have, 0);
+                have = keep;
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// `needle` (lowered) in `bytes`, ASCII letters compared without case: a
+/// scan for its first byte in either case, then a comparison there.
+fn contains_folded(bytes: &[u8], needle: &[u8]) -> bool {
+    let Some(&first) = needle.first() else {
+        return false;
+    };
+    let upper = first.to_ascii_uppercase();
+    let mut rest = bytes;
+    while rest.len() >= needle.len() {
+        let Some(at) = rest[..=rest.len() - needle.len()]
+            .iter()
+            .position(|&b| b == first || b == upper)
+        else {
+            return false;
+        };
+        if rest[at..at + needle.len()].eq_ignore_ascii_case(needle) {
+            return true;
+        }
+        rest = &rest[at + 1..];
+    }
+    false
 }
 
 fn snippet(text: &str, query: &str) -> String {
