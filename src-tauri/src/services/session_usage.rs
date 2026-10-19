@@ -58,6 +58,7 @@ struct ParsedAssistantUsage {
     output_tokens: u32,
     cache_read_tokens: u32,
     cache_creation_tokens: u32,
+    cache_creation_1h_tokens: u32,
     stop_reason: Option<String>,
     timestamp: Option<String>,
     session_id: Option<String>,
@@ -240,6 +241,9 @@ fn parse_claude_file(
                     usage,
                     "cache_creation_input_tokens",
                 )?)?,
+                cache_creation_1h_tokens: crate::proxy::usage::parser::claude_hour_cache_writes(
+                    usage,
+                ),
                 stop_reason: message
                     .get("stop_reason")
                     .and_then(|v| v.as_str())
@@ -287,6 +291,50 @@ fn parse_claude_file(
     ))
 }
 
+/// A Claude message that kept some of its cache writes for an hour.
+pub(crate) struct HourWrite {
+    pub request_id: String,
+    pub native: String,
+    pub session_id: Option<String>,
+    pub model: String,
+    pub created_at: i64,
+    pub hour: u32,
+}
+
+/// Every Claude transcript's messages that wrote cache entries for an hour,
+/// by file. The ledger keeps no such count, so pricing them again reads it here.
+pub(crate) fn hour_cache_writes(projects_dir: &Path) -> Vec<(PathBuf, Vec<HourWrite>)> {
+    collect_jsonl_files(projects_dir)
+        .into_iter()
+        .filter_map(|path| {
+            let (messages, _, _) = parse_claude_file(&path, 0).ok()?;
+            let writes: Vec<_> = messages
+                .into_iter()
+                .filter(|m| m.cache_creation_1h_tokens > 0)
+                .filter_map(|m| {
+                    Some(HourWrite {
+                        request_id: format!(
+                            "{}{}",
+                            crate::proxy::usage::parser::SESSION_REQUEST_ID_PREFIX,
+                            m.message_id
+                        ),
+                        native: usage_source::native_key(
+                            "claude",
+                            m.session_id.as_deref().unwrap_or(""),
+                            &m.message_id,
+                        ),
+                        created_at: created_at_of(m.timestamp.as_deref())?,
+                        hour: m.cache_creation_1h_tokens.min(m.cache_creation_tokens),
+                        session_id: m.session_id,
+                        model: m.model,
+                    })
+                })
+                .collect();
+            (!writes.is_empty()).then_some((path, writes))
+        })
+        .collect()
+}
+
 /// Preserve unknown native time rather than manufacturing a current date.
 fn created_at_of(timestamp: Option<&str>) -> Option<i64> {
     usage_source::timestamp_ms(timestamp).map(|ms| ms.div_euclid(1000))
@@ -320,6 +368,7 @@ pub(crate) fn normalized_facts(
                 output_tokens: m.output_tokens,
                 cache_read_tokens: m.cache_read_tokens,
                 cache_creation_tokens: m.cache_creation_tokens,
+                cache_creation_1h_tokens: m.cache_creation_1h_tokens,
                 model: Some(m.model.clone()),
                 message_id: None,
             },
@@ -452,6 +501,7 @@ fn insert_session_log_entry(
         output_tokens: msg.output_tokens,
         cache_read_tokens: msg.cache_read_tokens,
         cache_creation_tokens: msg.cache_creation_tokens,
+        cache_creation_1h_tokens: msg.cache_creation_1h_tokens,
         model: Some(msg.model.clone()),
         message_id: None,
     };
@@ -712,6 +762,7 @@ mod tests {
             output_tokens: 26,
             cache_read_tokens: 5000,
             cache_creation_tokens: 10000,
+            cache_creation_1h_tokens: 0,
             stop_reason: None,
             timestamp: Some("2026-04-05T12:00:00Z".to_string()),
             session_id: None,
@@ -726,6 +777,7 @@ mod tests {
             output_tokens: 1349,
             cache_read_tokens: 5000,
             cache_creation_tokens: 10000,
+            cache_creation_1h_tokens: 0,
             stop_reason: Some("end_turn".to_string()),
             timestamp: Some("2026-04-05T12:00:00Z".to_string()),
             session_id: None,

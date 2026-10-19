@@ -141,6 +141,7 @@ pub(crate) fn normalized_fact(
         ]
         .map(u64::from),
         complete,
+        cache_write_1h: 0,
     })
 }
 

@@ -312,6 +312,7 @@ pub(crate) fn read_dsh(path: &Path) -> Result<DshRead, AppError> {
                 output_tokens: integer(usage, "outputTokens")?,
                 cache_read_tokens: integer(usage, "cacheReadTokens")?,
                 cache_creation_tokens: integer(usage, "cacheWriteTokens")?,
+                cache_creation_1h_tokens: 0,
                 model: Some(model.clone()),
                 message_id: identifier(value.pointer("/data/message/id")),
             };

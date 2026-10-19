@@ -19,6 +19,10 @@ pub struct TokenUsage {
     pub output_tokens: u32,
     pub cache_read_tokens: u32,
     pub cache_creation_tokens: u32,
+    /// Of `cache_creation_tokens`, those Claude keeps for an hour, billed at
+    /// their own rate (`usage.cache_creation.ephemeral_1h_input_tokens`).
+    #[serde(default)]
+    pub cache_creation_1h_tokens: u32,
     /// 从响应中提取的实际模型名称（如果可用）
     pub model: Option<String>,
     /// 从响应中提取的消息 ID（用于跨源去重）
@@ -37,6 +41,14 @@ impl TokenUsage {
             .map(|mid| format!("{SESSION_REQUEST_ID_PREFIX}{mid}"))
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
     }
+}
+
+/// Of the cache writes a Claude usage block counts, those kept for an hour.
+pub(crate) fn claude_hour_cache_writes(usage: &Value) -> u32 {
+    usage
+        .pointer("/cache_creation/ephemeral_1h_input_tokens")
+        .and_then(Value::as_u64)
+        .map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX))
 }
 
 /// API 类型
@@ -74,6 +86,7 @@ impl TokenUsage {
                 .get("cache_creation_input_tokens")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u32,
+            cache_creation_1h_tokens: claude_hour_cache_writes(usage),
             model,
             message_id,
         })
@@ -119,6 +132,7 @@ impl TokenUsage {
                                 .and_then(|v| v.as_u64())
                                 .unwrap_or(0)
                                 as u32;
+                            usage.cache_creation_1h_tokens = claude_hour_cache_writes(msg_usage);
                         }
                     }
                     "message_delta" => {
@@ -155,6 +169,8 @@ impl TokenUsage {
                                     .and_then(|v| v.as_u64())
                                 {
                                     usage.cache_creation_tokens = cache_creation as u32;
+                                    usage.cache_creation_1h_tokens =
+                                        claude_hour_cache_writes(delta_usage);
                                 }
                             }
                         }
@@ -182,6 +198,7 @@ impl TokenUsage {
             output_tokens: usage.get("completion_tokens")?.as_u64()? as u32,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            cache_creation_1h_tokens: 0,
             model: None,
             message_id: None,
         })
@@ -233,6 +250,7 @@ impl TokenUsage {
                 .get("cache_creation_input_tokens")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u32,
+            cache_creation_1h_tokens: 0,
             model,
             message_id: None,
         })
@@ -334,6 +352,7 @@ impl TokenUsage {
             output_tokens: completion_tokens as u32,
             cache_read_tokens: cached_tokens,
             cache_creation_tokens: 0,
+            cache_creation_1h_tokens: 0,
             model,
             message_id: None,
         })
@@ -381,6 +400,7 @@ impl TokenUsage {
             output_tokens,
             cache_read_tokens: cached_tokens,
             cache_creation_tokens: 0,
+            cache_creation_1h_tokens: 0,
             model,
             message_id: None,
         })
@@ -433,6 +453,7 @@ impl TokenUsage {
                 output_tokens: total_output,
                 cache_read_tokens: total_cache_read,
                 cache_creation_tokens: 0,
+                cache_creation_1h_tokens: 0,
                 model,
                 message_id: None,
             })
@@ -445,6 +466,24 @@ impl TokenUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_claude_response_names_its_hour_long_cache_writes() {
+        let usage = serde_json::json!({"input_tokens": 3, "output_tokens": 5,
+            "cache_read_input_tokens": 7, "cache_creation_input_tokens": 1000,
+            "cache_creation": {"ephemeral_5m_input_tokens": 400, "ephemeral_1h_input_tokens": 600}});
+        let body = serde_json::json!({"id": "msg_1", "model": "claude-opus-5", "usage": usage});
+        let parsed = TokenUsage::from_claude_response(&body).unwrap();
+        assert_eq!(parsed.cache_creation_tokens, 1000);
+        assert_eq!(parsed.cache_creation_1h_tokens, 600);
+        let events = [
+            serde_json::json!({"type": "message_start",
+            "message": {"id": "msg_1", "model": "claude-opus-5", "usage": usage}}),
+            serde_json::json!({"type": "message_delta", "usage": {"output_tokens": 5}}),
+        ];
+        let streamed = TokenUsage::from_claude_stream_events(&events).unwrap();
+        assert_eq!(streamed.cache_creation_1h_tokens, 600);
+    }
     use serde_json::json;
 
     #[test]

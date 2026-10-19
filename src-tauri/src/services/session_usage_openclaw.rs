@@ -178,6 +178,7 @@ fn usage(value: &Value, reasons: &mut BTreeSet<String>) -> Result<Option<TokenUs
         output_tokens: usage_source::checked_token(output)?,
         cache_read_tokens: usage_source::checked_token(read)?,
         cache_creation_tokens: usage_source::checked_token(write)?,
+        cache_creation_1h_tokens: 0,
         model: None,
         message_id: None,
     }))

@@ -421,6 +421,7 @@ fn backfill_zero_cost_session_logs(db: &Database) -> Result<usize, AppError> {
                 output_tokens: output_t.max(0) as u32,
                 cache_read_tokens: cache_r_t.max(0) as u32,
                 cache_creation_tokens: cache_w_t.max(0) as u32,
+                cache_creation_1h_tokens: 0,
                 model: Some(model.clone()),
                 message_id: None,
             };

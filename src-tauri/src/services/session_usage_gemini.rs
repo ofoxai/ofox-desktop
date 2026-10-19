@@ -399,6 +399,7 @@ fn usage_of(tokens: &GeminiTokens, model: &str) -> TokenUsage {
         output_tokens: tokens.combined_output,
         cache_read_tokens: tokens.cached,
         cache_creation_tokens: 0,
+        cache_creation_1h_tokens: 0,
         model: Some(model.to_string()),
         message_id: None,
     }

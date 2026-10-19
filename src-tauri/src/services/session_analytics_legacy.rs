@@ -130,6 +130,7 @@ fn load_bounded(
             // Schema v11 stores all four counters as non-null integers. Zero
             // is an actual stored value; this does not certify native coverage.
             complete: true,
+            cache_write_1h: 0,
         });
     }
     let rollups: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM usage_daily_rollups WHERE app_type='codex' AND provider_id='_codex_session')",[],|row|row.get(0)).map_err(sql_error)?;
@@ -372,6 +373,7 @@ mod tests {
                     at_ms: 2000,
                     buckets: [80, 10, 20, 0],
                     complete: true,
+                    cache_write_1h: 0,
                 })
                 .into(),
             messages: ["codex", "claude"]

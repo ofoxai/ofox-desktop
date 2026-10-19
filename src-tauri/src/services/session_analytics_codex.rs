@@ -109,6 +109,7 @@ pub(super) fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
             at_ms,
             buckets: event.buckets,
             complete: event.complete,
+            cache_write_1h: 0,
         });
         let m = models
             .entry(event.model.clone())

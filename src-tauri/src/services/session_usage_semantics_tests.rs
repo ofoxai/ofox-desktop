@@ -107,6 +107,51 @@ fn codex_path(home: &Path) -> PathBuf {
     home.join(".codex/sessions/2026/10/15/rollout-s.jsonl")
 }
 
+/// Claude writes most cache entries for an hour; Ofox bills those at twice
+/// the input rate (`input_cache_write_1h`), the rest at the five-minute rate.
+#[test]
+#[serial]
+fn semantics_claude_hour_long_cache_writes_are_priced_at_their_rate() {
+    let home = sandbox();
+    let db = Database::memory().unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT OR REPLACE INTO model_pricing(model_id,display_name,input_cost_per_million,
+             output_cost_per_million,cache_read_cost_per_million,cache_creation_cost_per_million)
+             VALUES('fixture','fixture','5','25','0.5','6.25')",
+            [],
+        )
+        .unwrap();
+    let mut line = c("a", [0, 0, 0, 1_000_000]);
+    line["message"]["usage"]["cache_creation"] =
+        json!({"ephemeral_5m_input_tokens": 400_000, "ephemeral_1h_input_tokens": 600_000});
+    write(&claude_path(home.home()), &jsonl(&[line]), 0);
+    assert_eq!(good(claude::sync_claude_session_logs(&db)).imported, 1);
+    let (write_cost, total): (String, String) = db
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT cache_creation_cost_usd,total_cost_usd FROM proxy_request_logs",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    // 400k at $6.25 + 600k at $10
+    let dollars = |v: &str| {
+        v.parse::<rust_decimal::Decimal>()
+            .unwrap()
+            .normalize()
+            .to_string()
+    };
+    assert_eq!(
+        (dollars(&write_cost), dollars(&total)),
+        ("8.5".into(), "8.5".into())
+    );
+}
+
 #[test]
 #[serial]
 fn semantics_claude_zero_output_consumption_is_not_empty() {

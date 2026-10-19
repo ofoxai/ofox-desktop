@@ -1503,6 +1503,7 @@ impl Database {
             output_tokens,
             cache_read_tokens,
             cache_creation_tokens,
+            cache_creation_1h_tokens: 0,
             model: Some(log.model.clone()),
             message_id: None,
         };

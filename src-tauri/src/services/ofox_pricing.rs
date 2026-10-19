@@ -356,22 +356,52 @@ impl PriceCatalog {
     }
 
     pub fn estimate(&self, model: &str, buckets: [u64; 4], records: Option<u64>) -> CostEstimate {
+        self.estimate_with_hour_writes(model, buckets, 0, records)
+    }
+
+    /// `estimate`, where `hour_writes` of the cache writes (`buckets[3]`) were
+    /// kept for an hour: Claude's, priced at the catalog's
+    /// `input_cache_write_1h`, else at twice the input rate as Anthropic bills.
+    pub fn estimate_with_hour_writes(
+        &self,
+        model: &str,
+        buckets: [u64; 4],
+        hour_writes: u64,
+        records: Option<u64>,
+    ) -> CostEstimate {
         let resolved = self.snapshot.as_ref().and_then(|s| {
             s.aliases
                 .get(model)
                 .and_then(Option::as_ref)
                 .and_then(|id| s.models.get(id))
         });
+        let rate = |index: usize| {
+            resolved
+                .and_then(|rate| rate.rates[index].as_deref())
+                .and_then(|v| parse_rate(v).ok())
+        };
+        let hour_rate = resolved
+            .and_then(|rate| rate.additional_units.get("input_cache_write_1h"))
+            .and_then(|v| v.as_deref())
+            .and_then(|v| parse_rate(v).ok())
+            .and_then(|v| v.checked_mul(Decimal::from(1_000_000)))
+            .or_else(|| rate(0).and_then(|input| input.checked_mul(Decimal::TWO)));
+        let hour = hour_writes.min(buckets[3]);
+        let priced = [
+            (buckets[0], rate(0)),
+            (buckets[1], rate(1)),
+            (buckets[2], rate(2)),
+            (buckets[3] - hour, rate(3)),
+            (hour, hour_rate),
+        ];
         let mut known = false;
         let mut unknown = false;
         let mut amount = Decimal::ZERO;
-        for (index, count) in buckets.into_iter().enumerate() {
+        for (count, rate) in priced {
             if count == 0 {
                 continue;
             }
-            match resolved
-                .and_then(|rate| rate.rates[index].as_deref())
-                .and_then(|v| parse_rate(v).ok())
+            match rate
                 .and_then(|rate| rate.checked_mul(Decimal::from(count)))
                 .and_then(|cost| cost.checked_div(Decimal::from(1_000_000)))
                 .and_then(|cost| amount.checked_add(cost))
@@ -478,6 +508,38 @@ mod tests {
             {"id":"a/shared","aliases":["ambiguous"],"pricing":{"prompt":"1e-6"}},
             {"id":"b/shared","aliases":["ambiguous"],"pricing":{"prompt":"2e-6"}}
         ]})
+    }
+
+    /// An hour-long cache write is priced at the catalog's
+    /// `input_cache_write_1h`, else at twice the input rate.
+    #[test]
+    fn analytics_hour_long_cache_writes_use_their_own_rate() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let payload = json!({"data":[
+            {"id":"anthropic/claude-opus-5","aliases":["claude-opus-5"],"pricing":{
+                "prompt":"0.000005","completion":"0.000025","input_cache_read":"0.0000005",
+                "input_cache_write_5m":"0.00000625","input_cache_write_1h":"0.00001"}},
+            {"id":"anthropic/claude-old","aliases":["claude-old"],"pricing":{
+                "prompt":"0.000003","completion":"0.000015","input_cache_read":"0.0000003",
+                "input_cache_write_5m":"0.00000375"}}
+        ]});
+        let catalog = PriceCatalog::ingest_on(&conn, "ofox.ai", &payload, 10).unwrap();
+        let cost = |model: &str, hour: u64| {
+            catalog
+                .estimate_with_hour_writes(model, [0, 0, 0, 1_000_000], hour, Some(1))
+                .known_cost_usd
+                .unwrap()
+        };
+        assert_eq!(cost("claude-opus-5", 0), "6.25");
+        // 400k at $6.25 + 600k at $10
+        assert_eq!(cost("claude-opus-5", 600_000), "8.5");
+        // no listed hour rate: twice the $3 input
+        assert_eq!(cost("claude-old", 1_000_000), "6");
+        assert_eq!(
+            catalog.estimate("claude-opus-5", [0, 0, 0, 1_000_000], Some(1)),
+            catalog.estimate_with_hour_writes("claude-opus-5", [0, 0, 0, 1_000_000], 0, Some(1))
+        );
     }
 
     #[test]

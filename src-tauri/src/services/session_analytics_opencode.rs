@@ -191,6 +191,7 @@ impl Scan {
                     ]
                     .map(u64::from),
                     complete: true,
+                    cache_write_1h: 0,
                 });
             } else {
                 self.reasons.insert("missingTimestamp".into());

@@ -49,6 +49,13 @@ pub struct UsageFact {
     /// New input, output, cache read, cache write.
     pub buckets: [u64; 4],
     pub complete: bool,
+    /// Of the cache writes, those kept for an hour (Claude), at their own rate.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_write_1h: u64,
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -483,6 +490,7 @@ mod tests {
             at_ms: 1000,
             buckets,
             complete: true,
+            cache_write_1h: 0,
         }
     }
     fn filters() -> Filters {

@@ -324,6 +324,7 @@ pub(crate) fn read_workbuddy(path: &Path) -> Result<WorkBuddyRead, AppError> {
                     output_tokens: usage_source::checked_token(output)?,
                     cache_read_tokens: usage_source::checked_token(read)?,
                     cache_creation_tokens: usage_source::checked_token(write)?,
+                    cache_creation_1h_tokens: 0,
                     model: Some(model),
                     message_id: id,
                 },

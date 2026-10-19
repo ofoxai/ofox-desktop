@@ -1083,7 +1083,12 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
         }
         // Every projection uses the same immutable per-record estimate from
         // the captured catalog. Resolve aliases/rates and price buckets once.
-        let mut fact_estimate = catalog.estimate(&fact.model, fact.buckets, Some(1));
+        let mut fact_estimate = catalog.estimate_with_hour_writes(
+            &fact.model,
+            fact.buckets,
+            fact.cache_write_1h,
+            Some(1),
+        );
         if !fact.complete && fact_estimate.known_cost_usd.is_some() {
             fact_estimate.availability = "partial".into();
             fact_estimate.unpriced_record_count = None;
@@ -1618,6 +1623,7 @@ mod tests {
             at_ms,
             buckets: tokens,
             complete: true,
+            cache_write_1h: 0,
         }
     }
     fn days() -> Vec<DayBoundary> {

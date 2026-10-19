@@ -32,6 +32,9 @@ pub(crate) mod codex_thread_usage;
 mod rebuild;
 
 const VERSION: u8 = 1;
+/// Bump to read every Claude source again after a change to what is read
+/// (2: hour-long cache writes).
+const CLAUDE_PARSER_VERSION: u8 = 2;
 const MAX_CACHE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_SOURCES: usize = 20_000;
 const PROJECTION_CACHE_BYTES: usize = 128 * 1024 * 1024;
@@ -763,7 +766,7 @@ pub(crate) fn source_revision(spec: &SourceSpec) -> Result<Value, AppError> {
         None
     };
     Ok(
-        json!({"native":usage_source::normalized_stamp(&spec.provider,&spec.path)?,"project":project,"title":title,"parts":parts,"subagent":spec.subagent,"activityParserVersion":1,"codexParserVersion":if spec.provider=="codex" {Some(super::codex_native::VERSION)} else {None}}),
+        json!({"native":usage_source::normalized_stamp(&spec.provider,&spec.path)?,"project":project,"title":title,"parts":parts,"subagent":spec.subagent,"activityParserVersion":1,"codexParserVersion":if spec.provider=="codex" {Some(super::codex_native::VERSION)} else {None},"claudeParserVersion":if spec.provider=="claude" {Some(CLAUDE_PARSER_VERSION)} else {None}}),
     )
 }
 fn empty_entry(now: i64) -> Entry {
@@ -1649,6 +1652,7 @@ fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
             ]
             .map(u64::from),
             complete: true,
+            cache_write_1h: u64::from(fact.usage.cache_creation_1h_tokens),
         });
     }
     entry.reasons.extend(transcript.reasons);

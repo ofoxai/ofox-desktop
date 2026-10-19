@@ -506,6 +506,7 @@ fn to_call(
         )?,
         cache_read_tokens: usage_source::checked_token(tokens.cache.read)?,
         cache_creation_tokens: usage_source::checked_token(tokens.cache.write)?,
+        cache_creation_1h_tokens: 0,
         model: Some(message.model_id.clone()),
         message_id: None,
     };

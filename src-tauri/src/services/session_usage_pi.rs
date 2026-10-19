@@ -313,6 +313,7 @@ fn read_pi_raw(path: &Path) -> Result<PiRead, AppError> {
                         usage,
                         "cacheWrite",
                     )?)?,
+                    cache_creation_1h_tokens: 0,
                     model: Some(model),
                     message_id: id,
                 },

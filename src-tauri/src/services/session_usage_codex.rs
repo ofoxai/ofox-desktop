@@ -690,6 +690,7 @@ pub(crate) fn normalized_facts(
                     output_tokens: c.delta.output,
                     cache_read_tokens: c.delta.cached_input,
                     cache_creation_tokens: c.delta.cache_write,
+                    cache_creation_1h_tokens: 0,
                     model: Some(c.model.clone()),
                     message_id: None,
                 },
@@ -771,6 +772,7 @@ fn insert_codex_session_entry(
         output_tokens: delta.output,
         cache_read_tokens: delta.cached_input,
         cache_creation_tokens: delta.cache_write,
+        cache_creation_1h_tokens: 0,
         model: Some(model.to_string()),
         message_id: None,
     };

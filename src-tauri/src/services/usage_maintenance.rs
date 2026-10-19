@@ -12,21 +12,30 @@
 //!   safely subtract their contributions. Explicit future proof upgrades may
 //!   requeue this maintenance step.
 //!
-//! A step marks its flag `done` only after it succeeded; a missing flag (a
-//! database that never went through the v11 migration) means nothing to do.
+//! - `price_claude_hour_cache_writes`: Claude rows priced before hour-long
+//!   cache writes were read, priced again with them (see
+//!   `price_claude_hour_writes`). A missing flag means it is due.
+//!
+//! A step marks its flag `done` only after it succeeded; for the v11 steps a
+//! missing flag (a database that never went through that migration) means
+//! nothing to do.
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
 use crate::proxy::usage::parser::TokenUsage;
-use crate::services::session_usage::find_model_pricing_for_session;
+use crate::services::session_usage::{self, find_model_pricing_for_session};
+use crate::services::usage_source;
+use crate::session_manager::source_cache::{self, Part};
 use rusqlite::{params, Connection, OptionalExtension};
 use rust_decimal::Decimal;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
 use std::str::FromStr;
 
 pub(crate) const RECOMPUTE_CLAUDE_COSTS: &str = "recompute_claude_costs";
 pub(crate) const BACKFILL_SESSION_ARCHIVE: &str = "backfill_session_archive";
+pub(crate) const PRICE_CLAUDE_HOUR_WRITES: &str = "price_claude_hour_cache_writes";
 const PENDING: &str = "pending";
 const DONE: &str = "done";
 
@@ -41,7 +50,25 @@ pub fn run_pending(db: &Database) -> Result<(), AppError> {
         let outcome = backfill_session_archive(db)?;
         log::debug!("[USAGE-MAINT] archive backfill: {outcome:?}");
     }
+    if !is_done(db, PRICE_CLAUDE_HOUR_WRITES)? {
+        let projects = crate::config::get_claude_config_dir().join("projects");
+        let updated = price_claude_hour_writes(db, &projects)?;
+        log::debug!("[USAGE-MAINT] priced hour-long Claude cache writes on {updated} rows");
+    }
     Ok(())
+}
+
+fn is_done(db: &Database, key: &str) -> Result<bool, AppError> {
+    let conn = lock_conn!(db.conn);
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM maintenance_flags WHERE key = ?1",
+            [key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| AppError::Database(format!("读取 maintenance_flags 失败: {e}")))?;
+    Ok(value.as_deref() == Some(DONE))
 }
 
 fn is_pending(db: &Database, key: &str) -> Result<bool, AppError> {
@@ -74,6 +101,7 @@ fn usage_of(tokens: [i64; 4]) -> TokenUsage {
         output_tokens: clamp(tokens[1]),
         cache_read_tokens: clamp(tokens[2]),
         cache_creation_tokens: clamp(tokens[3]),
+        cache_creation_1h_tokens: 0,
         model: None,
         message_id: None,
     }
@@ -210,6 +238,124 @@ pub(crate) fn recompute_claude_costs(db: &Database) -> Result<usize, AppError> {
 
     tx.commit()
         .map_err(|e| AppError::Database(format!("recompute commit: {e}")))?;
+    Ok(updated)
+}
+
+/// Price again the Claude rows written before hour-long cache writes were
+/// read, which charged them at the five-minute rate. The ledger keeps no
+/// hour-long count, so each transcript is read for it: a live row is priced
+/// again whole; a call already pruned into the daily rollups and the session
+/// archive (its source acknowledged it, its detail row is gone) adds the
+/// difference to both. A call whose transcript is gone keeps its price. One
+/// transaction also marks the step done, so no difference is added twice.
+pub(crate) fn price_claude_hour_writes(db: &Database, projects: &Path) -> Result<usize, AppError> {
+    let files = session_usage::hour_cache_writes(projects);
+    let mut conn = lock_conn!(db.conn);
+    let tx = conn
+        .transaction()
+        .map_err(|e| AppError::Database(format!("hour writes begin tx: {e}")))?;
+    let db_err = |e: rusqlite::Error| AppError::Database(format!("hour-long cache writes: {e}"));
+    let mut prices: HashMap<String, Option<ModelPricing>> = HashMap::new();
+    let mut updated = 0;
+    for (path, writes) in files {
+        let acknowledged: BTreeSet<String> =
+            source_cache::read_on(&tx, &path.to_string_lossy(), "claude")
+                .ok()
+                .and_then(|parts| {
+                    parts.value(Part::UsageSync).and_then(|v| {
+                        serde_json::from_value(v["acknowledgedEventIds"].clone()).ok()
+                    })
+                })
+                .unwrap_or_default();
+        for write in writes {
+            let Some(pricing) = prices
+                .entry(write.model.clone())
+                .or_insert_with(|| find_model_pricing_for_session(&tx, &write.model))
+                .clone()
+            else {
+                continue;
+            };
+            let live: Option<([i64; 4], String)> = tx
+                .query_row(
+                    "SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
+                            cost_multiplier
+                     FROM proxy_request_logs WHERE request_id = ?1 AND data_source = 'session_log'",
+                    [&write.request_id],
+                    |r| Ok(([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?], r.get(4)?)),
+                )
+                .optional()
+                .map_err(db_err)?;
+            if let Some((tokens, multiplier)) = live {
+                let mut usage = usage_of(tokens);
+                usage.cache_creation_1h_tokens = write.hour;
+                let multiplier = Decimal::from_str(multiplier.trim()).unwrap_or(Decimal::ONE);
+                let cost = CostCalculator::calculate(&usage, &pricing, multiplier);
+                updated += tx
+                    .execute(
+                        "UPDATE proxy_request_logs
+                         SET cache_creation_cost_usd = ?2, total_cost_usd = ?3
+                         WHERE request_id = ?1",
+                        params![
+                            write.request_id,
+                            cost.cache_creation_cost.normalize().to_string(),
+                            cost.total_cost.normalize().to_string(),
+                        ],
+                    )
+                    .map_err(db_err)?;
+                continue;
+            }
+            if !acknowledged.contains(&usage_source::native_digest(&write.native)) {
+                continue;
+            }
+            let extra = Decimal::from(write.hour)
+                * (pricing.cache_creation_1h_cost_per_million()
+                    - pricing.cache_creation_cost_per_million)
+                / Decimal::from(1_000_000);
+            // the rollup sums costs as REAL, as the prune that wrote it does
+            updated += tx
+                .execute(
+                    "UPDATE usage_daily_rollups
+                     SET total_cost_usd = CAST(CAST(total_cost_usd AS REAL) + ?3 AS TEXT)
+                     WHERE date = date(?1, 'unixepoch', 'localtime') AND app_type = 'claude'
+                       AND provider_id = '_session' AND model = ?2",
+                    params![
+                        write.created_at,
+                        write.model,
+                        extra.to_string().parse::<f64>().unwrap_or(0.0)
+                    ],
+                )
+                .map_err(db_err)?;
+            let Some(session) = &write.session_id else {
+                continue;
+            };
+            let archived: Option<String> = tx
+                .query_row(
+                    "SELECT COALESCE(cost_usd, '0') FROM session_usage_archive
+                     WHERE app_type = 'claude' AND session_id = ?1 AND model = ?2",
+                    params![session, write.model],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(db_err)?;
+            if let Some(archived) = archived {
+                let cost = Decimal::from_str(archived.trim()).unwrap_or(Decimal::ZERO) + extra;
+                updated += tx
+                    .execute(
+                        "UPDATE session_usage_archive SET cost_usd = ?3
+                         WHERE app_type = 'claude' AND session_id = ?1 AND model = ?2",
+                        params![session, write.model, cost.normalize().to_string()],
+                    )
+                    .map_err(db_err)?;
+            }
+        }
+    }
+    tx.execute(
+        "INSERT OR REPLACE INTO maintenance_flags (key, value) VALUES (?1, ?2)",
+        params![PRICE_CLAUDE_HOUR_WRITES, DONE],
+    )
+    .map_err(db_err)?;
+    tx.commit()
+        .map_err(|e| AppError::Database(format!("hour writes commit: {e}")))?;
     Ok(updated)
 }
 
@@ -625,5 +771,60 @@ mod tests {
             })
             .unwrap();
         assert_eq!(cost, "0.1234");
+    }
+
+    /// Rows an older version priced at the five-minute rate are priced again
+    /// once: a live row whole, a pruned call by its difference in the daily
+    /// rollup and the session archive.
+    #[test]
+    #[serial]
+    fn hour_long_cache_writes_are_priced_again_once() {
+        let home = sandbox();
+        let db = database_with_prices();
+        let line = |id: &str, days: i64| {
+            serde_json::json!({
+                "type": "assistant", "sessionId": SESSION, "timestamp": ago(days),
+                "message": {"id": id, "model": "test-opus", "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 1_000_000,
+                        "cache_creation": {"ephemeral_1h_input_tokens": 1_000_000}}}
+            })
+            .to_string()
+        };
+        write(
+            &home
+                .home()
+                .join(format!(".claude/projects/-work/{SESSION}.jsonl")),
+            &[line("msg_old", 60), line("msg_new", 1)].join("\n"),
+        );
+        session_usage::sync_claude_session_logs(&db).unwrap();
+        db.rollup_and_prune_before(usage_prune_cutoff().unwrap())
+            .unwrap();
+        let costs = |db: &Database| -> [f64; 3] {
+            let conn = db.conn.lock().unwrap();
+            let one = |sql: &str| conn.query_row(sql, [], |r| r.get::<_, f64>(0)).unwrap();
+            [
+                one("SELECT CAST(total_cost_usd AS REAL) FROM proxy_request_logs"),
+                one("SELECT CAST(total_cost_usd AS REAL) FROM usage_daily_rollups WHERE app_type='claude'"),
+                one("SELECT CAST(cost_usd AS REAL) FROM session_usage_archive WHERE app_type='claude'"),
+            ]
+        };
+        // 1M written for an hour at twice the $3 input
+        assert_eq!(costs(&db), [6.0, 6.0, 6.0]);
+        {
+            // as an older version priced them: at the $3.75 five-minute rate
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch(
+                "UPDATE proxy_request_logs SET cache_creation_cost_usd='3.75', total_cost_usd='3.75';
+                 UPDATE usage_daily_rollups SET total_cost_usd='3.75' WHERE app_type='claude';
+                 UPDATE session_usage_archive SET cost_usd='3.75' WHERE app_type='claude';",
+            )
+            .unwrap();
+        }
+        run_pending(&db).unwrap();
+        assert_eq!(costs(&db), [6.0, 6.0, 6.0]);
+        // once only: a second run adds no difference again
+        run_pending(&db).unwrap();
+        assert_eq!(costs(&db), [6.0, 6.0, 6.0]);
     }
 }

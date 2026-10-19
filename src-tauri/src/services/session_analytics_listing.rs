@@ -128,6 +128,7 @@ mod tests {
             at_ms: 1,
             buckets: [n, 2, 3, 4],
             complete,
+            cache_write_1h: 0,
         }
     }
 
