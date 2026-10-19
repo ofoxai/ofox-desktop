@@ -170,9 +170,6 @@ describe("independent tool installation catalog", () => {
 
   it("keeps the management label concise while naming its tool for assistive technology", async () => {
     render(<OptionalToolsCatalog boundTools={[]} />);
-    await userEvent.click(
-      screen.getByRole("button", { name: /其他已安装工具/ }),
-    );
     const manage = await screen.findByRole("button", {
       name: "管理 GitHub Copilot CLI 安装",
     });
@@ -201,9 +198,6 @@ describe("independent tool installation catalog", () => {
       },
     ]);
     render(<OptionalToolsCatalog boundTools={[]} />);
-    await userEvent.click(
-      screen.getByRole("button", { name: /其他已安装工具/ }),
-    );
     const row = await screen.findByRole("group", {
       name: "GitHub Copilot CLI",
     });
@@ -231,9 +225,6 @@ describe("independent tool installation catalog", () => {
       },
     ]);
     render(<OptionalToolsCatalog boundTools={[]} />);
-    await userEvent.click(
-      screen.getByRole("button", { name: /其他已安装工具/ }),
-    );
     await waitFor(() =>
       expect(screen.getByText(/Ofox 管理副本.*1.0.98/)).toBeVisible(),
     );
@@ -254,9 +245,6 @@ describe("independent tool installation catalog", () => {
       },
     ]);
     render(<OptionalToolsCatalog boundTools={[]} />);
-    await userEvent.click(
-      screen.getByRole("button", { name: /其他已安装工具/ }),
-    );
     await waitFor(() =>
       expect(screen.getByText("GitHub Copilot CLI")).toBeVisible(),
     );
@@ -320,7 +308,6 @@ describe("independent tool installation catalog", () => {
 
   it("offers installation-only management for Copilot without changing bindings", async () => {
     render(<OptionalToolsCatalog boundTools={["codex"]} />);
-    fireEvent.click(screen.getByRole("button", { name: /其他已安装工具/ }));
     await screen.findByText("GitHub Copilot CLI");
     expect(
       screen.getByRole("button", { name: "管理 GitHub Copilot CLI 安装" }),
@@ -367,7 +354,6 @@ describe("independent tool installation catalog", () => {
       },
     ]);
     render(<OptionalToolsCatalog boundTools={[]} />);
-    fireEvent.click(screen.getByRole("button", { name: /其他已安装工具/ }));
     expect(await screen.findByText("Crush")).toBeVisible();
     expect(
       screen.getByText("版本检测未完成").closest("[data-line=name]"),
@@ -388,22 +374,23 @@ describe("independent tool installation catalog", () => {
   it("does not claim an empty installation list while detection is pending", async () => {
     mocks.inventory.mockReturnValue(new Promise(() => undefined));
     render(<OptionalToolsCatalog boundTools={[]} />);
-    fireEvent.click(screen.getByRole("button", { name: /其他已安装工具/ }));
     expect(screen.queryByText("暂无其他已安装工具")).toBeNull();
     expect(screen.getByRole("status")).toHaveTextContent("加载");
   });
-  it("starts both areas collapsed, even on an empty machine", async () => {
-    mocks.inventory.mockResolvedValue([]);
+  it("opens the installed tools and keeps the install catalog folded", async () => {
     render(<OptionalToolsCatalog boundTools={[]} />);
-    const folds = screen.getAllByRole("button", { expanded: false });
-    expect(folds).toHaveLength(2);
-    expect(screen.queryByText("GitHub Copilot CLI")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /其他已安装工具/ }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(
+      screen.getByRole("button", { name: /安装其他工具/ }),
+    ).toHaveAttribute("aria-expanded", "false");
+    expect(await screen.findByText("GitHub Copilot CLI")).toBeVisible();
   });
 
   it("keeps installed tools out of the candidates and bound tools out of the extra inventory", async () => {
     render(<OptionalToolsCatalog boundTools={["codex"]} />);
     await waitFor(() => expect(mocks.inventory).toHaveBeenCalled());
-    fireEvent.click(screen.getByRole("button", { name: /其他已安装工具/ }));
     expect(await screen.findByText("GitHub Copilot CLI")).toBeVisible();
     expect(screen.queryByText("Codex")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /安装其他工具/ }));
@@ -454,9 +441,6 @@ describe("independent tool installation catalog", () => {
 
   it("lets an installed row's name take the command column it does not need", async () => {
     render(<OptionalToolsCatalog boundTools={[]} />);
-    await userEvent.click(
-      screen.getByRole("button", { name: /其他已安装工具/ }),
-    );
     const row = await screen.findByRole("group", {
       name: "GitHub Copilot CLI",
     });

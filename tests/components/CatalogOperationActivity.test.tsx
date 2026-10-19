@@ -76,7 +76,6 @@ it("invalidates verified evidence during a job and refreshes after cancellation 
     }),
   );
   render(<OptionalToolsCatalog boundTools={[]} />);
-  await userEvent.click(screen.getByRole("button", { name: /其他已安装工具/ }));
   await waitFor(() =>
     expect(screen.getByText(/Ofox 管理副本.*1.0.98/)).toBeVisible(),
   );
@@ -149,7 +148,6 @@ it("keeps a remounted directory unverified until the outstanding operation settl
     }),
   );
   const first = render(<OptionalToolsCatalog boundTools={[]} />);
-  await userEvent.click(screen.getByRole("button", { name: /其他已安装工具/ }));
   await screen.findByText(/Ofox 管理副本.*1.0.98/);
   let pending!: ReturnType<typeof catalogLifecycleApi.run>;
   act(() => {
@@ -194,7 +192,6 @@ it("shares a failed settle refresh with the open dialog and performs a new query
     }),
   );
   render(<OptionalToolsCatalog boundTools={[]} />);
-  await userEvent.click(screen.getByRole("button", { name: /其他已安装工具/ }));
   await screen.findByText(/Ofox 管理副本.*1.0.98/);
   await userEvent.click(
     screen.getByRole("button", { name: "管理 GitHub Copilot CLI 安装" }),
@@ -272,7 +269,6 @@ it("refreshes past an older inventory request when the run IPC rejects", async (
       | null,
   };
   render(<OptionalToolsCatalog ref={ref} boundTools={[]} />);
-  await userEvent.click(screen.getByRole("button", { name: /其他已安装工具/ }));
   await screen.findByText(/Ofox 管理副本.*1.0.98/);
   let oldQuery!: Promise<void>;
   act(() => {

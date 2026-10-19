@@ -73,7 +73,8 @@ export const OptionalToolsCatalog = forwardRef<
 >(function OptionalToolsCatalog({ boundTools }, ref) {
   const { t } = useTranslation();
   const [inventory, setInventory] = useState<InstallInventoryEntry[]>([]);
-  const [installedOpen, setInstalledOpen] = useState(false);
+  // What is already on this machine is what most people come here to see.
+  const [installedOpen, setInstalledOpen] = useState(true);
   const [catalogOpen, setCatalogOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [error, setError] = useState(false);
