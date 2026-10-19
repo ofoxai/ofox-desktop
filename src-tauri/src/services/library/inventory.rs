@@ -193,8 +193,8 @@ pub fn scan(db: &Database, kind: ResourceKind) -> Result<LibraryInventory, AppEr
             Definition::Mcp { spec } => mcp.values().any(|row| {
                 (row.name.eq_ignore_ascii_case(&candidate.view.name)
                     || row.id == candidate.view.name)
-                    && super::mcp_resource::spec_hash(&row.server).ok()
-                        != super::mcp_resource::spec_hash(spec).ok()
+                    && super::mcp_resource::match_hash(&row.server).ok()
+                        != super::mcp_resource::match_hash(spec).ok()
             }),
             Definition::Skill {
                 hash, directory, ..
@@ -220,8 +220,8 @@ pub fn scan(db: &Database, kind: ResourceKind) -> Result<LibraryInventory, AppEr
                 .values()
                 .filter(|row| {
                     mcp_alias_matches(&row.id, &candidate.view.name, &candidate.hash)
-                        && super::mcp_resource::spec_hash(&row.server).ok()
-                            == super::mcp_resource::spec_hash(spec).ok()
+                        && super::mcp_resource::match_hash(&row.server).ok()
+                            == super::mcp_resource::match_hash(spec).ok()
                 })
                 .map(|row| row.id.clone())
                 .collect(),
@@ -381,8 +381,8 @@ fn import_one(db: &Database, candidate: &Candidate) -> Result<(String, bool), Ap
             let existing = db.get_all_mcp_servers()?;
             if let Some(row) = existing.values().find(|row| {
                 mcp_alias_matches(&row.id, &candidate.view.name, &candidate.hash)
-                    && super::mcp_resource::spec_hash(&row.server).ok()
-                        == super::mcp_resource::spec_hash(spec).ok()
+                    && super::mcp_resource::match_hash(&row.server).ok()
+                        == super::mcp_resource::match_hash(spec).ok()
             }) {
                 return Ok((row.id.clone(), false));
             }

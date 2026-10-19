@@ -222,12 +222,12 @@ fn matched_ids(db: &Database, candidate: &Candidate) -> Result<Vec<String>, AppE
             .map(|row| row.id.clone())
             .collect(),
         Definition::Mcp { spec } => {
-            let hash = super::super::mcp_resource::spec_hash(spec)?;
+            let hash = super::super::mcp_resource::match_hash(spec)?;
             db.get_all_mcp_servers()?
                 .values()
                 .filter(|row| {
                     mcp_alias_matches(&row.id, &candidate.view.name, &candidate.hash)
-                        && super::super::mcp_resource::spec_hash(&row.server)
+                        && super::super::mcp_resource::match_hash(&row.server)
                             .ok()
                             .as_ref()
                             == Some(&hash)
@@ -500,7 +500,7 @@ pub fn match_recipes(
     recipes
         .iter()
         .map(|recipe| {
-            let hash = super::super::mcp_resource::spec_hash(&recipe.definition)?;
+            let hash = super::super::mcp_resource::match_hash(&recipe.definition)?;
             let mut result = McpRecipeMatch {
                 recipe_id: recipe.recipe_id.clone(),
                 exact_resource_ids: vec![],
@@ -509,7 +509,7 @@ pub fn match_recipes(
                 similar_native_entry_ids: vec![],
             };
             for row in library.values() {
-                if super::super::mcp_resource::spec_hash(&row.server)? == hash {
+                if super::super::mcp_resource::match_hash(&row.server)? == hash {
                     result.exact_resource_ids.push(row.id.clone());
                 } else if similar(recipe, &row.name, &row.id, &row.server) {
                     result.similar_resource_ids.push(row.id.clone());

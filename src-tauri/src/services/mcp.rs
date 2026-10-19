@@ -86,9 +86,9 @@ impl McpService {
         let mut count = 0;
         for (id, native) in servers {
             let spec = mcp_codec::canonical_spec(tool, native)?;
-            let hash = mcp_resource::spec_hash(&spec)?;
+            let hash = mcp_resource::match_hash(&spec)?;
             let id = if let Some(old) = existing.get(id) {
-                if mcp_resource::spec_hash(&old.server)? == hash {
+                if mcp_resource::match_hash(&old.server)? == hash {
                     continue;
                 }
                 format!("{id}-import-{}", &hash[..8])
@@ -96,7 +96,7 @@ impl McpService {
                 id.clone()
             };
             if let Some(old) = existing.get(&id) {
-                if mcp_resource::spec_hash(&old.server)? == hash {
+                if mcp_resource::match_hash(&old.server)? == hash {
                     continue;
                 }
                 return Err(AppError::Config("library.importNameConflict".into()));

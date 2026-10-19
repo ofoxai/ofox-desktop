@@ -685,3 +685,36 @@ fn source_search_host_excludes_url_path_query_userinfo_and_non_http_schemes() {
         assert!(!output.contains(private));
     }
 }
+
+#[test]
+#[serial_test::serial]
+fn a_library_row_with_empty_collections_matches_its_native_entry() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    super::super::mcp_resource::save_draft(
+        &db,
+        crate::app_config::McpServer {
+            id: "codegraph".into(),
+            name: "codegraph".into(),
+            server: serde_json::json!({"command":"codegraph","args":["serve","--mcp"],"env":{}}),
+            apps: Default::default(),
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: vec![],
+        },
+        None,
+    )
+    .unwrap();
+    let path = super::super::mcp_resource::native_paths().unwrap()["codex"].clone();
+    write(
+        &path,
+        "[mcp_servers.codegraph]\ncommand = \"codegraph\"\nargs = [\"serve\", \"--mcp\"]\n",
+    );
+    let view = scan(&db, ResourceKind::Mcp).unwrap();
+    assert_eq!(view.entries.len(), 1);
+    assert_eq!(view.entries[0].matched_resource_ids, vec!["codegraph"]);
+    assert!(!view.entries[0].conflict);
+    import(&db, &view.ticket_id, &[view.entries[0].entry_id.clone()], 0).unwrap();
+    assert_eq!(db.get_all_mcp_servers().unwrap().len(), 1);
+}

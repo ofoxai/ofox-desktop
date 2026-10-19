@@ -515,7 +515,7 @@ fn mcp(routes: &[Route], data: &mut ScanData, uncertain: &[String]) {
                         }
                         match valid_spec(&route.tool, native) {
                             Ok(spec) => {
-                                let hash = mcp_resource::spec_hash(&spec).unwrap_or_default();
+                                let hash = mcp_resource::match_hash(&spec).unwrap_or_default();
                                 add(
                                     data,
                                     &source,
@@ -575,7 +575,7 @@ fn mcp(routes: &[Route], data: &mut ScanData, uncertain: &[String]) {
             };
             match valid_spec("opencode", native) {
                 Ok(spec) => {
-                    let hash = mcp_resource::spec_hash(&spec).unwrap_or_default();
+                    let hash = mcp_resource::match_hash(&spec).unwrap_or_default();
                     for (source, _) in sources {
                         add(
                             data,

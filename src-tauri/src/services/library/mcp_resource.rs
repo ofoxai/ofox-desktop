@@ -36,6 +36,10 @@ pub(crate) fn spec_hash(spec: &Value) -> Result<String, AppError> {
             .as_bytes(),
     )))
 }
+/// Compares definitions by meaning; `spec_hash` stays the exact stored-row hash.
+pub(crate) fn match_hash(spec: &Value) -> Result<String, AppError> {
+    spec_hash(&mcp_codec::normalize_spec(spec))
+}
 
 pub fn save_draft(
     db: &Database,
@@ -77,20 +81,22 @@ pub fn save_draft(
     db.library_commit_mcp(&before, &next, Some(&server))?;
     Ok(meta)
 }
-pub fn delete_draft(db: &Database, id: &str) -> Result<bool, AppError> {
-    let _guard = crate::config_io::lock();
-    let before = db.library_snapshot()?;
-    if before
+fn bound(snapshot: &LibrarySnapshot, id: &str) -> bool {
+    snapshot
         .machine
         .receipts
         .values()
         .any(|r| r.kind == ResourceKind::Mcp && r.resource_id == id)
-        || before
+        || snapshot
             .machine
             .assignments
             .keys()
             .any(|key| key.starts_with(&format!("mcp:{id}:")))
-    {
+}
+pub fn delete_draft(db: &Database, id: &str) -> Result<bool, AppError> {
+    let _guard = crate::config_io::lock();
+    let before = db.library_snapshot()?;
+    if bound(&before, id) {
         return Err(error("withdrawRequired"));
     }
     if !db.get_all_mcp_servers()?.contains_key(id) {
@@ -112,6 +118,38 @@ pub fn ensure_metadata(db: &Database) -> Result<(), AppError> {
             .contains_key(&server.id)
         {
             save_draft(db, server, None)?;
+        }
+    }
+    drop_generated_duplicates(db)
+}
+/// Ids an import generated beside an existing name: `name--<16 hex>` or `name-import-<8 hex>`.
+fn generated_alias_of(id: &str, base: &str) -> bool {
+    let hex = |text: &str, len: usize| {
+        text.len() == len && text.bytes().all(|byte| byte.is_ascii_hexdigit())
+    };
+    id.strip_prefix(base).is_some_and(|rest| {
+        rest.strip_prefix("--").is_some_and(|tail| hex(tail, 16))
+            || rest
+                .strip_prefix("-import-")
+                .is_some_and(|tail| hex(tail, 8))
+    })
+}
+/// Imports used to keep a second copy when only the spelling differed (`"env": {}`).
+/// Such a copy goes, unless a tool assignment or receipt still refers to it.
+fn drop_generated_duplicates(db: &Database) -> Result<(), AppError> {
+    let rows = db.get_all_mcp_servers()?;
+    let snapshot = db.library_snapshot()?;
+    for row in rows.values() {
+        let Ok(hash) = match_hash(&row.server) else {
+            continue;
+        };
+        let copy = rows.values().any(|other| {
+            generated_alias_of(&row.id, &other.id)
+                && other.name.eq_ignore_ascii_case(&row.name)
+                && match_hash(&other.server).ok().as_ref() == Some(&hash)
+        });
+        if copy && !bound(&snapshot, &row.id) {
+            delete_draft(db, &row.id)?;
         }
     }
     Ok(())
@@ -1275,5 +1313,91 @@ mod tests {
         server.server["command"] = json!("new");
         save_draft(&db, server, Some(1)).unwrap();
         assert!(super::super::apply_operation(&db, &op.id).is_err());
+    }
+    fn row(id: &str, name: &str, server: Value) -> McpServer {
+        McpServer {
+            id: id.into(),
+            name: name.into(),
+            server,
+            apps: McpApps::default(),
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: vec![],
+        }
+    }
+    #[test]
+    fn match_hash_ignores_empty_collections_and_an_implied_type() {
+        let stored = json!({"command":"codegraph","args":["serve","--mcp"],"env":{},"headers":{}});
+        let native = json!({"type":"stdio","command":"codegraph","args":["serve","--mcp"]});
+        assert_eq!(match_hash(&stored).unwrap(), match_hash(&native).unwrap());
+        assert_ne!(
+            match_hash(&stored).unwrap(),
+            match_hash(&json!({"type":"stdio","command":"codegraph"})).unwrap()
+        );
+        assert_eq!(
+            match_hash(&json!({"url":"https://x.test/mcp","headers":{}})).unwrap(),
+            match_hash(&json!({"type":"http","url":"https://x.test/mcp"})).unwrap()
+        );
+    }
+    #[test]
+    fn ensure_metadata_drops_an_identical_generated_duplicate() {
+        let db = Database::memory().unwrap();
+        let config = json!({"type":"stdio","command":"codegraph","args":["serve","--mcp"]});
+        let mut with_empty_env = config.clone();
+        with_empty_env["env"] = json!({});
+        save_draft(&db, row("codegraph", "codegraph", with_empty_env), None).unwrap();
+        save_draft(
+            &db,
+            row("codegraph--e92a6b623361891f", "codegraph", config.clone()),
+            None,
+        )
+        .unwrap();
+        save_draft(&db, row("codegraph-copy", "codegraph", config), None).unwrap();
+        ensure_metadata(&db).unwrap();
+        let ids = db
+            .get_all_mcp_servers()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["codegraph", "codegraph-copy"]);
+        assert!(!db
+            .library_snapshot()
+            .unwrap()
+            .definitions
+            .mcp
+            .contains_key("codegraph--e92a6b623361891f"));
+    }
+    #[test]
+    fn ensure_metadata_keeps_duplicates_that_differ_or_are_assigned() {
+        let db = Database::memory().unwrap();
+        let config = json!({"type":"stdio","command":"codegraph","args":["serve","--mcp"]});
+        save_draft(&db, row("codegraph", "codegraph", config.clone()), None).unwrap();
+        save_draft(
+            &db,
+            row("codegraph--0123456789abcdef", "codegraph", config.clone()),
+            None,
+        )
+        .unwrap();
+        save_draft(
+            &db,
+            row(
+                "codegraph--fedcba9876543210",
+                "codegraph",
+                json!({"type":"stdio","command":"codegraph","args":["serve"]}),
+            ),
+            None,
+        )
+        .unwrap();
+        let before = db.library_snapshot().unwrap();
+        let mut next = before.clone();
+        next.machine.assignments.insert(
+            assignment("codegraph--0123456789abcdef", "codex"),
+            "desired".into(),
+        );
+        db.library_commit(&before, &next).unwrap();
+        ensure_metadata(&db).unwrap();
+        assert_eq!(db.get_all_mcp_servers().unwrap().len(), 3);
     }
 }

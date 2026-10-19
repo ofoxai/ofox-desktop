@@ -579,6 +579,13 @@ pub fn canonical_spec(tool: &str, native: &Value) -> Result<Value, AppError> {
             map.insert("type".into(), json!("sse"));
         }
     }
+    normalize_map(&mut map);
+    Ok(json!(map))
+}
+
+/// The implied transport is spelled out and empty env/args/headers are dropped,
+/// so two spellings of one definition compare equal.
+fn normalize_map(map: &mut Map<String, Value>) {
     if !map.contains_key("type") {
         let transport = if map.contains_key("url") {
             "http"
@@ -595,7 +602,14 @@ pub fn canonical_spec(tool: &str, native: &Value) -> Result<Value, AppError> {
             map.remove(key);
         }
     }
-    Ok(json!(map))
+}
+pub(crate) fn normalize_spec(spec: &Value) -> Value {
+    let Some(map) = spec.as_object() else {
+        return spec.clone();
+    };
+    let mut map = map.clone();
+    normalize_map(&mut map);
+    Value::Object(map)
 }
 
 pub fn section(tool: &str) -> &'static str {
