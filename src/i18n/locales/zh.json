@@ -3309,7 +3309,7 @@
     "enterLocal": "暂不登录，管理本机工具",
     "skipBinding": "暂不绑定，进入本机管理",
     "login": "登录 Ofox",
-    "bindOptional": "选择绑定工具",
+    "bindOptional": "一键绑定工具",
     "dependencies": {
       "node22": "npm 安装需要 Node.js 22 或更新版本",
       "node": "npm 安装需要符合官方要求的 Node.js",

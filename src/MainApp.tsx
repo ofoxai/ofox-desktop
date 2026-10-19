@@ -23,7 +23,11 @@ function readBoundToolsFromStorage(): string[] {
   }
 }
 
-/** Local management is a route choice, never logout or an empty bind operation. */
+/**
+ * Local management is a route choice, never logout or an empty bind operation.
+ * It is only the way through while signed out or after skipping binding: a
+ * sign-in always leads to binding, as helping a newcomer get set up comes first.
+ */
 export default function MainApp() {
   const [appState, setAppState] = useState<AppState>("loading");
   const [boundTools, setBoundTools] = useState<string[]>([]);
@@ -50,6 +54,22 @@ export default function MainApp() {
     loadBoundTools();
     setLocalOnly(true);
     showConsole();
+  };
+  const openBinding = () => {
+    setOnboardingEntry("toolDiscovery");
+    setOnboardingRevision((r) => r + 1);
+    setAppState("onboarding");
+  };
+  // Back to the bound tools, or into the one-click picker when none are bound.
+  const afterSignIn = () => {
+    routeVersion.current += 1;
+    preferLocal.current = false;
+    setSignedIn(true);
+    const tools = readBoundToolsFromStorage();
+    setBoundTools(tools);
+    setLocalOnly(false);
+    if (tools.length) showConsole();
+    else openBinding();
   };
   useEffect(() => {
     const version = ++routeVersion.current;
@@ -97,22 +117,7 @@ export default function MainApp() {
           setAppState("onboarding");
         }
       }),
-      subscribe(OFOX_AUTH_RESTORED_EVENT, () => {
-        routeVersion.current += 1;
-        setSignedIn(true);
-        loadBoundTools();
-        if (preferLocal.current || currentScreen.current === "console") {
-          showConsole();
-          return;
-        }
-        const tools = readBoundToolsFromStorage();
-        if (tools.length) showConsole();
-        else {
-          setOnboardingEntry("toolDiscovery");
-          setOnboardingRevision((r) => r + 1);
-          setAppState("onboarding");
-        }
-      }),
+      subscribe(OFOX_AUTH_RESTORED_EVENT, afterSignIn),
       subscribe("ofox-reauth-requested", () => {
         routeVersion.current += 1;
         setSignedIn(false);
@@ -134,15 +139,12 @@ export default function MainApp() {
         key={onboardingRevision}
         initialStep={onboardingEntry}
         onEnterLocal={enterLocal}
-        returnToLocal={preferLocal.current && onboardingEntry === "login"}
         onComplete={() => {
+          preferLocal.current = false;
           setSignedIn(true);
-          if (preferLocal.current) enterLocal();
-          else {
-            loadBoundTools();
-            setLocalOnly(false);
-            showConsole();
-          }
+          loadBoundTools();
+          setLocalOnly(false);
+          showConsole();
         }}
       />
     ) : null;
@@ -166,8 +168,10 @@ export default function MainApp() {
                   showConsole();
                   return;
                 }
+                openBinding();
+                return;
               }
-              setOnboardingEntry(signedIn ? "toolDiscovery" : "login");
+              setOnboardingEntry("login");
               setOnboardingRevision((r) => r + 1);
               setAppState("onboarding");
             }}

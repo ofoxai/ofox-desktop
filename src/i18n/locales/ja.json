@@ -3309,7 +3309,7 @@
     "enterLocal": "ログインせずにローカルツールを管理",
     "skipBinding": "連携せずにローカル管理へ",
     "login": "Ofox にログイン",
-    "bindOptional": "連携するツールを選択",
+    "bindOptional": "ワンクリックでツールを連携",
     "dependencies": {
       "node22": "npm インストールには Node.js 22 以降が必要です",
       "node": "npm インストールには公式指定の Node.js が必要です",

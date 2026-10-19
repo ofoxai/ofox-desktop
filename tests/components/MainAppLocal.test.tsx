@@ -76,20 +76,56 @@ describe("MainApp local management", () => {
     localStorage.setItem("ofox-bound-tools", '["codex"]');
     render(<MainApp />);
     await screen.findByText("账户界面");
-    await waitFor(() => expect(mocks.listeners.has("ofox-reauth-requested")).toBe(true));
+    await waitFor(() =>
+      expect(mocks.listeners.has("ofox-reauth-requested")).toBe(true),
+    );
     act(() => mocks.listeners.get("ofox-reauth-requested")?.());
     fireEvent.click(screen.getByRole("button", { name: "本机管理" }));
     fireEvent.click(screen.getByRole("button", { name: "登录账户" }));
     expect(screen.getByText("login")).toBeVisible();
     expect(localStorage.getItem("ofox-bound-tools")).toBe('["codex"]');
   });
-  it("keeps the current local page through an explicit login", async () => {
+  it("keeps the open page but leaves local management once a login completes", async () => {
     render(<MainApp />);
     fireEvent.click(await screen.findByRole("button", { name: "本机管理" }));
     fireEvent.click(screen.getByRole("button", { name: "打开会话" }));
     fireEvent.click(screen.getByRole("button", { name: "登录账户" }));
     fireEvent.click(screen.getByRole("button", { name: "完成登录" }));
     expect(await screen.findByText("会话已打开")).toBeVisible();
+    expect(screen.getByText("账户界面")).toBeVisible();
+  });
+
+  it("takes a sign-in from local management on to binding when nothing is bound", async () => {
+    render(<MainApp />);
+    fireEvent.click(await screen.findByRole("button", { name: "本机管理" }));
+    fireEvent.click(screen.getByRole("button", { name: "登录账户" }));
+    expect(screen.getByText("login")).toBeVisible();
+    await waitFor(() => expect(mocks.listeners.has("restored")).toBe(true));
+    act(() => mocks.listeners.get("restored")?.());
+    expect(screen.getByText("toolDiscovery")).toBeVisible();
+  });
+
+  it("takes a sign-in from local management back to the bound tools", async () => {
+    localStorage.setItem("ofox-bound-tools", '["codex"]');
+    render(<MainApp />);
+    fireEvent.click(await screen.findByRole("button", { name: "本机管理" }));
+    fireEvent.click(screen.getByRole("button", { name: "登录账户" }));
+    await waitFor(() => expect(mocks.listeners.has("restored")).toBe(true));
+    act(() => mocks.listeners.get("restored")?.());
+    expect(screen.getByText("账户界面")).toBeVisible();
+    expect(screen.queryByText("login")).toBeNull();
+  });
+
+  it("brings the bound tools back when an expired session signs in again", async () => {
+    mocks.status.mockResolvedValue({ state: "active" });
+    localStorage.setItem("ofox-bound-tools", '["codex"]');
+    render(<MainApp />);
+    expect(await screen.findByText("账户界面")).toBeVisible();
+    await waitFor(() => expect(mocks.listeners.has("expired")).toBe(true));
+    act(() => mocks.listeners.get("expired")?.());
+    expect(screen.getByText("本机界面")).toBeVisible();
+    act(() => mocks.listeners.get("restored")?.());
+    expect(screen.getByText("账户界面")).toBeVisible();
   });
   it.each(["loggedout", "expired"])(
     "allows %s users to enter without binding or clearing their stored bindings",
@@ -112,12 +148,10 @@ describe("MainApp local management", () => {
     expect(localStorage.getItem("ofox-bound-tools")).toBeNull();
   });
 
-  it("keeps the local page when authentication is restored or expires", async () => {
+  it("keeps the local page when the session expires", async () => {
     render(<MainApp />);
     fireEvent.click(await screen.findByRole("button", { name: "本机管理" }));
-    await waitFor(() => expect(mocks.listeners.has("restored")).toBe(true));
-    act(() => mocks.listeners.get("restored")?.());
-    expect(screen.getByText("本机界面")).toBeVisible();
+    await waitFor(() => expect(mocks.listeners.has("expired")).toBe(true));
     act(() => mocks.listeners.get("expired")?.());
     expect(screen.getByText("本机界面")).toBeVisible();
   });

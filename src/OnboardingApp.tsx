@@ -19,23 +19,18 @@ interface OnboardingAppProps {
   initialStep?: Step;
   onComplete: () => void;
   onEnterLocal?: () => void;
-  returnToLocal?: boolean;
 }
 
 export default function OnboardingApp({
   initialStep = "login",
   onComplete,
   onEnterLocal,
-  returnToLocal = false,
 }: OnboardingAppProps) {
   const [step, setStep] = useState<Step>(initialStep);
   const [boundTools, setBoundTools] = useState<string[]>([]);
 
+  // Even from local management, a sign-in goes on to binding.
   const handleLoginSuccess = (_user: OfoxUserInfo) => {
-    if (returnToLocal) {
-      onComplete();
-      return;
-    }
     setStep("toolDiscovery");
   };
 

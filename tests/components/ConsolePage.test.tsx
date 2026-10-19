@@ -169,6 +169,28 @@ it("local mode does not load accounts, reconcile keys or query binding/model sta
   expect(commands).not.toContain("model_selection_snapshot");
 });
 
+it.each([
+  [false, "登录 Ofox"],
+  [true, "一键绑定工具"],
+])(
+  "makes local management's one way on the brand button (signed in: %s)",
+  async (signedIn, name) => {
+    const onLoginRequested = vi.fn();
+    render(
+      <ConsolePage
+        boundTools={[]}
+        localOnly
+        localSignedIn={signedIn}
+        onLoginRequested={onLoginRequested}
+      />,
+    );
+    const next = await screen.findByRole("button", { name });
+    expect(next).toHaveClass("bg-brand");
+    fireEvent.click(next);
+    expect(onLoginRequested).toHaveBeenCalledOnce();
+  },
+);
+
 it("keeps the header refreshing until the local inventory scan completes", async () => {
   let resolve!: (value: unknown[]) => void;
   mocks.invoke.mockImplementation((name: string) =>

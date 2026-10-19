@@ -3309,7 +3309,7 @@
     "enterLocal": "Continue without signing in",
     "skipBinding": "Manage local tools without binding",
     "login": "Sign in to Ofox",
-    "bindOptional": "Choose tools to bind",
+    "bindOptional": "Bind tools in one click",
     "dependencies": {
       "node22": "npm installation requires Node.js 22 or newer",
       "node": "npm installation requires the Node.js version specified by the publisher",

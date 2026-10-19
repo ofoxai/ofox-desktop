@@ -280,7 +280,8 @@ function LocalToolsPanel({
             {t("toolCatalog.localDescription")}
           </p>
         </div>
-        <Button variant="secondary" onClick={onLoginRequested}>
+        {/* The page's one way on, so the brand button: sign in, then bind. */}
+        <Button variant="primary" onClick={onLoginRequested}>
           {t(signedIn ? "toolCatalog.bindOptional" : "toolCatalog.login")}
         </Button>
       </div>
