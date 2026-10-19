@@ -123,6 +123,9 @@ pub struct TargetWrite {
     pub before_hash: String,
     pub after_hash: String,
     pub after_text: String,
+    /// The written entry holds plain-text env/header values; the file becomes owner-only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub private_values: bool,
     pub receipt: Option<Receipt>,
     pub status: String,
     pub reason: Option<String>,

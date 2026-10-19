@@ -566,6 +566,7 @@ pub(crate) fn preview_at_adoption(
             before_hash: String::new(),
             after_hash: String::new(),
             after_text: String::new(),
+            private_values: false,
             receipt: None,
             status: "pending".into(),
             reason: None,
@@ -682,6 +683,8 @@ pub(crate) fn preview_at_adoption(
             }
             write.after_hash = io::fingerprint(Some(after.as_bytes()));
             write.after_text = after;
+            write.private_values =
+                native.is_some() && mcp_codec::has_literal_values(&server.server);
             write.receipt = receipt
                 .map(|owned| {
                     Ok::<Receipt, AppError>(Receipt {
@@ -1391,6 +1394,59 @@ mod tests {
             json!({"type":"http","url":"https://x.app/contents/mcp"}),
         );
         assert_eq!(definition_view(&remote, &snapshot)["appOwned"], false);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn writing_literal_values_makes_the_config_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let db = Database::memory().unwrap();
+        save_draft(
+            &db,
+            row(
+                "context7",
+                "context7",
+                json!({"type":"http","url":"https://mcp.context7.com/mcp","headers":{"CONTEXT7_API_KEY":"ctx-literal"}}),
+            ),
+            None,
+        )
+        .unwrap();
+        save_draft(
+            &db,
+            row(
+                "docs",
+                "docs",
+                json!({"type":"stdio","command":"server","env":{"TOKEN":"${TOKEN}"}}),
+            ),
+            None,
+        )
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mode =
+            |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let referenced = dir.path().join("referenced.json");
+        let literal = dir.path().join("literal.json");
+        for path in [&referenced, &literal] {
+            std::fs::write(path, "{}").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let op = preview_at(&db, "docs", &[("claude".into(), referenced.clone())], None).unwrap();
+        assert_eq!(
+            super::super::apply_operation(&db, &op.id).unwrap().status,
+            "applied"
+        );
+        assert_eq!(mode(&referenced), 0o644);
+        let op = preview_at(&db, "context7", &[("claude".into(), literal.clone())], None).unwrap();
+        assert_eq!(
+            super::super::apply_operation(&db, &op.id).unwrap().status,
+            "applied"
+        );
+        assert_eq!(mode(&literal), 0o600);
+        let root =
+            mcp_codec::parse_native(&std::fs::read_to_string(&literal).unwrap(), "claude").unwrap();
+        assert_eq!(
+            root["mcpServers"]["context7"]["headers"]["CONTEXT7_API_KEY"],
+            "ctx-literal"
+        );
     }
     #[test]
     fn ensure_metadata_drops_an_identical_generated_duplicate() {

@@ -302,6 +302,7 @@ fn preview_internal(
             before_hash: String::new(),
             after_hash: String::new(),
             after_text: String::new(),
+            private_values: false,
             receipt: None,
             status: "pending".into(),
             reason: None,
@@ -709,8 +710,15 @@ pub fn apply_operation(db: &Database, id: &str) -> Result<Operation, AppError> {
             if hash != target.before_hash {
                 return Err(error("targetChanged"));
             }
-            crate::config::atomic_write(&path, target.after_text.as_bytes())
-                .map_err(|_| error("writeFailed"))?;
+            let mode = target
+                .private_values
+                .then(|| crate::config::file_mode(&path).map_or(0o600, |mode| mode & 0o700));
+            crate::config::atomic_write_with(
+                &path,
+                target.after_text.as_bytes(),
+                crate::config::AtomicOpts { mode },
+            )
+            .map_err(|_| error("writeFailed"))?;
             let written = read(&path)?;
             if fingerprint(written.as_deref().map(str::as_bytes)) != target.after_hash {
                 return Err(error("verifyFailed"));

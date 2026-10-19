@@ -85,7 +85,6 @@ fn native_url(value: &str, tool: &str) -> Result<String, AppError> {
     if !["http", "https"].contains(&parsed.scheme())
         || !parsed.username().is_empty()
         || parsed.password().is_some()
-        || parsed.query().is_some()
     {
         return Err(error("credentialsNeedMigration"));
     }
@@ -341,19 +340,22 @@ pub fn native_spec(tool: &str, spec: &Value) -> Result<Value, AppError> {
             for (key, value) in env.as_object().ok_or_else(|| error("invalidMcp"))? {
                 let value = value.as_str().ok_or_else(|| error("invalidMcp"))?;
                 if tool == "codex" {
-                    if env_name(value) != Some(key.as_str()) {
+                    // Codex passes a variable through by name or takes a literal; it cannot expand.
+                    if env_name(value) == Some(key.as_str()) {
+                        vars.push(json!(key));
+                    } else if value.contains("${") {
                         return Err(error("referenceUnsupported"));
+                    } else {
+                        mapped.insert(key.clone(), json!(value));
                     }
-                    vars.push(json!(key));
                 } else {
-                    mapped.insert(key.clone(), json!(reference(value, tool)?));
+                    mapped.insert(key.clone(), json!(optional_reference(value, tool)?));
                 }
             }
-            if tool == "codex" {
-                if !vars.is_empty() {
-                    native.insert("env_vars".into(), json!(vars));
-                }
-            } else if !mapped.is_empty() {
+            if !vars.is_empty() {
+                native.insert("env_vars".into(), json!(vars));
+            }
+            if !mapped.is_empty() {
                 native.insert(
                     if tool == "opencode" {
                         "environment"
@@ -394,35 +396,40 @@ pub fn native_spec(tool: &str, spec: &Value) -> Result<Value, AppError> {
         if let Some(headers) = obj.get("headers") {
             header_names([headers])?;
             let mut mapped = Map::new();
+            let mut by_name = Map::new();
             for (key, value) in headers.as_object().ok_or_else(|| error("invalidMcp"))? {
                 let value = value.as_str().ok_or_else(|| error("invalidMcp"))?;
-                if tool == "codex" && key.eq_ignore_ascii_case("authorization") {
+                if tool != "codex" {
+                    mapped.insert(key.clone(), json!(optional_reference(value, tool)?));
+                    continue;
+                }
+                if key.eq_ignore_ascii_case("authorization") {
                     if let Some(name) = value.strip_prefix("Bearer ").and_then(env_name) {
                         native.insert("bearer_token_env_var".into(), json!(name));
                         continue;
                     }
                 }
-                mapped.insert(
-                    key.clone(),
-                    json!(if tool == "codex" {
-                        env_name(value)
-                            .ok_or_else(|| error("referenceUnsupported"))?
-                            .to_string()
-                    } else {
-                        reference(value, tool)?
-                    }),
-                );
+                if let Some(name) = env_name(value) {
+                    by_name.insert(key.clone(), json!(name));
+                } else if value.contains("${") {
+                    return Err(error("referenceUnsupported"));
+                } else {
+                    mapped.insert(key.clone(), json!(value));
+                }
             }
             if !mapped.is_empty() {
                 native.insert(
                     if tool == "codex" {
-                        "env_http_headers"
+                        "http_headers"
                     } else {
                         "headers"
                     }
                     .into(),
                     json!(mapped),
                 );
+            }
+            if !by_name.is_empty() {
+                native.insert("env_http_headers".into(), json!(by_name));
             }
         }
     }
@@ -602,6 +609,21 @@ fn normalize_map(map: &mut Map<String, Value>) {
             map.remove(key);
         }
     }
+}
+/// Env or header values in plain text, or a URL query (keys often ride there).
+pub fn has_literal_values(spec: &Value) -> bool {
+    let literal = |key: &str| {
+        spec.get(key).and_then(Value::as_object).is_some_and(|map| {
+            map.values()
+                .any(|value| value.as_str().is_some_and(|text| !text.contains("${")))
+        })
+    };
+    literal("env")
+        || literal("headers")
+        || spec
+            .get("url")
+            .and_then(Value::as_str)
+            .is_some_and(|url| url.contains('?'))
 }
 /// A local server an app ships inside its own bundle (Codex's node_repl and
 /// computer-use). The app rewrites it on update, so the library leaves it alone.
@@ -1508,5 +1530,94 @@ mod tests {
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn literal_values_are_written_as_is_for_every_tool() {
+        let local = json!({"type":"stdio","command":"npx","args":["-y","shadcn"],"env":{"GITHUB_TOKEN":"ghp-literal"}});
+        let remote = json!({"type":"http","url":"https://mcp.context7.com/mcp","headers":{"CONTEXT7_API_KEY":"ctx-literal"}});
+        for tool in ["claude", "codex", "gemini", "opencode", "hermes"] {
+            for spec in [&local, &remote] {
+                let native = native_spec(tool, spec).unwrap_or_else(|e| panic!("{tool}: {e}"));
+                assert_eq!(canonical_spec(tool, &native).unwrap(), *spec, "{tool}");
+            }
+        }
+        let codex = native_spec("codex", &local).unwrap();
+        assert_eq!(codex["env"]["GITHUB_TOKEN"], "ghp-literal");
+        assert!(codex.get("env_vars").is_none());
+        let codex = native_spec("codex", &remote).unwrap();
+        assert_eq!(codex["http_headers"]["CONTEXT7_API_KEY"], "ctx-literal");
+        assert!(codex.get("env_http_headers").is_none());
+        assert_eq!(
+            native_spec("opencode", &local).unwrap()["environment"]["GITHUB_TOKEN"],
+            "ghp-literal"
+        );
+    }
+    #[test]
+    fn codex_splits_literal_and_referenced_values_and_rejects_mixtures() {
+        let local =
+            json!({"type":"stdio","command":"server","env":{"PLAIN":"value","TOKEN":"${TOKEN}"}});
+        let native = native_spec("codex", &local).unwrap();
+        assert_eq!(native["env"], json!({"PLAIN":"value"}));
+        assert_eq!(native["env_vars"], json!(["TOKEN"]));
+        assert_eq!(canonical_spec("codex", &native).unwrap(), local);
+        let remote = json!({"type":"http","url":"https://example.org/mcp","headers":{"X-Plain":"value","X-Token":"${TOKEN}","Authorization":"Bearer literal"}});
+        let native = native_spec("codex", &remote).unwrap();
+        assert_eq!(
+            native["http_headers"],
+            json!({"X-Plain":"value","Authorization":"Bearer literal"})
+        );
+        assert_eq!(native["env_http_headers"], json!({"X-Token":"TOKEN"}));
+        assert_eq!(canonical_spec("codex", &native).unwrap(), remote);
+        for spec in [
+            json!({"command":"server","env":{"PATH_LIST":"/bin:${HOME}"}}),
+            json!({"type":"http","url":"https://example.org/mcp","headers":{"X-Token":"pre-${TOKEN}"}}),
+        ] {
+            assert!(native_spec("codex", &spec).is_err(), "accepted {spec}");
+        }
+        assert_eq!(
+            native_spec(
+                "opencode",
+                &json!({"command":"server","env":{"PATH_LIST":"/bin:${HOME}"}})
+            )
+            .unwrap()["environment"]["PATH_LIST"],
+            "/bin:{env:HOME}"
+        );
+    }
+    #[test]
+    fn urls_may_carry_a_query_but_not_user_info() {
+        for tool in ["claude", "codex", "gemini", "opencode", "hermes"] {
+            let native = native_spec(
+                tool,
+                &json!({"type":"http","url":"https://x.test/mcp?key=abc"}),
+            )
+            .unwrap_or_else(|e| panic!("{tool}: {e}"));
+            assert_eq!(native["url"], "https://x.test/mcp?key=abc");
+            assert!(
+                native_spec(tool, &json!({"type":"http","url":"https://u:p@x.test/mcp"})).is_err()
+            );
+        }
+    }
+    #[test]
+    fn codex_literal_tables_are_withdrawn_completely() {
+        let original = "model = \"personal\"\n";
+        let native = native_spec(
+            "codex",
+            &json!({"type":"stdio","command":"server","env":{"PLAIN":"value","TOKEN":"${TOKEN}"}}),
+        )
+        .unwrap();
+        let (applied, receipt) =
+            patch_server(Some(original), "codex", "demo", None, Some(&native)).unwrap();
+        let root = parse_native(&applied, "codex").unwrap();
+        assert_eq!(root["mcp_servers"]["demo"]["env"]["PLAIN"], "value");
+        verify_owned_text(&applied, receipt.as_ref().unwrap()).unwrap();
+        let (removed, _) =
+            patch_server(Some(&applied), "codex", "demo", receipt.as_ref(), None).unwrap();
+        let root = parse_native(&removed, "codex").unwrap();
+        assert!(root
+            .get("mcp_servers")
+            .and_then(|m| m.get("demo"))
+            .is_none());
+        assert!(!removed.contains("value"));
     }
 }

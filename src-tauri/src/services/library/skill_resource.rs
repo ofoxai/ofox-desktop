@@ -791,6 +791,7 @@ pub(crate) fn preview_at(
             before_hash: String::new(),
             after_hash: String::new(),
             after_text: String::new(),
+            private_values: false,
             receipt: None,
             status: "pending".into(),
             reason: None,
