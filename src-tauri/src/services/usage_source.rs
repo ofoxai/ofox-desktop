@@ -583,10 +583,10 @@ pub(crate) fn has_complete_coverage_on(
         let Ok(evidence) = decode_evidence(value) else {
             return Ok(false);
         };
-        let revision = if matches!(provider, "claude" | "codex" | "gemini" | "opencode") {
-            2
-        } else {
-            1
+        let revision = match provider {
+            "claude" | "codex" | "gemini" | "opencode" => 2,
+            "dsh" => super::session_usage_dsh::PARSER_REVISION,
+            _ => 1,
         };
         if !evidence.trusted
             || !evidence.complete_event_identity_set

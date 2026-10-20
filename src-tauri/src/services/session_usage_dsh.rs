@@ -17,6 +17,9 @@ use std::{
 };
 
 const MAX_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+/// 2: session format 4 (dsh 0.2) is read. Files a revision-1 parser skipped as
+/// unsupported are read again.
+pub(crate) const PARSER_REVISION: u32 = 2;
 const MAX_SCAN_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_NATIVE_EVENTS: usize = 100_000;
 fn invalid(code: &str) -> AppError {
@@ -420,7 +423,7 @@ pub(crate) fn sync_dsh_usage_at(
             return Err(invalid("sourceBudgetExceeded"));
         }
         let checkpoint = read_sync_state(db, &path.to_string_lossy())?;
-        let mut source = Prepared::with_index(db, snapshot, checkpoint, 1, &index)?;
+        let mut source = Prepared::with_index(db, snapshot, checkpoint, PARSER_REVISION, &index)?;
         source.observe_dependency(&roster);
         sources.push(source);
         expected.push(checkpoint);
@@ -669,6 +672,44 @@ mod tests {
             read.metadata.unwrap().project,
             Some(Some("/fixture/project".into()))
         );
+    }
+
+    #[test]
+    fn dsh_02_session_skipped_by_a_revision_1_parser_is_read_again() {
+        let home = tempfile::tempdir().unwrap();
+        let mut head = header("v4");
+        head["version"] = json!(4);
+        let rows = [head, user(0), call("a1", 1, AT, [7907, 3, 4096, 0])];
+        write(home.path(), "v4", "session.v4.jsonl.zstd", &rows);
+        let db = Database::memory().unwrap();
+        sync_dsh_usage_at(&db, home.path()).unwrap();
+        {
+            // What a build without format 4 stored: no rows, an unchanged stamp.
+            let conn = db.conn.lock().unwrap();
+            conn.execute("DELETE FROM proxy_request_logs WHERE app_type='dsh'", [])
+                .unwrap();
+            let raw: String = conn
+                .query_row(
+                    "SELECT meta_json FROM session_meta_cache WHERE provider_id='dsh'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let mut meta: Value = serde_json::from_str(&raw).unwrap();
+            let evidence = meta.pointer_mut("/parts/usageSync/value").unwrap();
+            evidence["parserRevision"] = json!(1);
+            evidence["coverage"] = json!("partial");
+            evidence["completeEventIdentitySet"] = json!(false);
+            evidence["reasons"] = json!(["legacyUnknownBoundary", "unsupportedSourceVersion"]);
+            evidence["acknowledgedEventIds"] = json!([]);
+            conn.execute(
+                "UPDATE session_meta_cache SET meta_json=?1 WHERE provider_id='dsh'",
+                [meta.to_string()],
+            )
+            .unwrap();
+        }
+        sync_dsh_usage_at(&db, home.path()).unwrap();
+        assert_eq!(totals(&db), (1, 7907, 3, 4096, 0));
     }
 
     fn write(home: &Path, sid: &str, name: &str, rows: &[Value]) -> PathBuf {

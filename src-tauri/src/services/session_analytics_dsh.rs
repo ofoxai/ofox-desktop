@@ -70,7 +70,7 @@ pub(crate) fn read(db: &Database, roots: &[PathBuf]) -> Result<ParsedSource, App
             db,
             Snapshot::file(path)?,
             read_sync_state(db, &path.to_string_lossy())?,
-            1,
+            super::session_usage_dsh::PARSER_REVISION,
             &index,
         )?;
         source.observe_dependency(&dependency);
