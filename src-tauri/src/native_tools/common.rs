@@ -296,14 +296,25 @@ fn yaml_map_render(
             continue;
         }
         let Some(next) = next else { continue };
+        let (head, body) = block.split_once('\n').unwrap_or((&block, ""));
+        // A flow mapping spread over lines (`refs:` then `{ … }`) has no
+        // per-key lines to keep, so that node is rewritten in block style.
+        // Unbind still restores the original bytes when nothing else changed.
+        let flow = body
+            .lines()
+            .map(str::trim_start)
+            .find(|l| !l.is_empty() && !l.starts_with('#'))
+            .is_some_and(|l| l.starts_with('{'));
         if old.is_some_and(Value::is_object)
             && next.is_object()
-            && block
-                .lines()
+            && !flow
+            && head
+                .split('#')
                 .next()
-                .is_some_and(|l| l.split('#').next().unwrap_or(l).trim_end().ends_with(':'))
+                .unwrap_or(head)
+                .trim_end()
+                .ends_with(':')
         {
-            let (head, body) = block.split_once('\n').unwrap_or((&block, ""));
             output.push_str(head);
             output.push('\n');
             output.push_str(&yaml_map_render(body, old.unwrap(), next, indent + 2)?);

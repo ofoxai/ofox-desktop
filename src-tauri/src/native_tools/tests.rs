@@ -350,6 +350,35 @@ async fn dsh_rejects_unknown_or_shadowing_credentials_without_partial_write() {
     }
 }
 
+#[tokio::test]
+#[serial]
+async fn dsh_multiline_flow_credential_refs_bind_and_restore_exactly() {
+    let h = Home::new();
+    let db = Database::memory().unwrap();
+    let all = catalog();
+    write(&h.dsh("profiles/web/cordis.patch.yml"), "# web\n[]\n");
+    // dsh 0.1.2 writes `refs` as a flow mapping spread over several lines.
+    let creds = "version: 1\nrecords:\n  client-connection/browser-session:\n    kind: secret\n    payload:\n      version: 1\n      secret: browser\nrefs:\n  {\n    OFOX_API_KEY: older\n  }\n";
+    write(&h.dsh(".credentials.yaml"), creds);
+    bind_with_catalog(&db, BindableTool::Dsh, KEY, &all[0], &all)
+        .await
+        .unwrap();
+    let text = fs::read_to_string(h.dsh(".credentials.yaml")).unwrap();
+    let bound = common::parse(Some(&text), Format::YamlMap).unwrap();
+    assert_eq!(bound["refs"]["OFOX_API_KEY"], "older");
+    assert_eq!(bound["refs"]["OFOX_DSH_API_KEY"], KEY);
+    assert_eq!(
+        bound["records"]["client-connection/browser-session"]["payload"]["secret"],
+        "browser"
+    );
+    assert!(text.starts_with("version: 1\nrecords:\n  client-connection/browser-session:\n"));
+    unbind(&db, BindableTool::Dsh, false).await.unwrap();
+    assert_eq!(
+        fs::read_to_string(h.dsh(".credentials.yaml")).unwrap(),
+        creds
+    );
+}
+
 #[test]
 #[serial]
 fn absent_native_revision_and_new_tool_metadata_are_safe() {
