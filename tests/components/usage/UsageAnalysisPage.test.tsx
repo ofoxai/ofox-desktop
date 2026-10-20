@@ -43,14 +43,13 @@ function Page() {
   );
 }
 
-it("opens original history from folded data status with its exact query and returns to effective records by keyboard", async () => {
+it("opens original history from the request list with its exact query and returns to effective records by keyboard", async () => {
   mocks.sharedProjects = true;
-  localStorage.setItem("ofox.usageTab", "sessions");
+  localStorage.setItem("ofox.usageTab", "requests");
   const normal = mocks.invoke.getMockImplementation()!;
   mocks.invoke.mockImplementation(async (command: string, args: any) => {
     const result = await normal(command, args);
-    if (command === "get_session_usage_analytics") {
-      result.methodVersion = "magpie-native-v1";
+    if (command === "get_request_logs" && result) {
       result.sourceCoverage = {
         observed: 2,
         read: 2,
@@ -68,33 +67,28 @@ it("opens original history from folded data status with its exact query and retu
   );
   await userEvent.click(screen.getByRole("option", { name: "project" }));
   await userEvent.keyboard("{Escape}");
-  await userEvent.click(screen.getByText("部分本机记录未计入"));
-  const history = screen.getByRole("button", { name: "查看原始历史记录" });
+  const history = await screen.findByRole("button", {
+    name: "查看原始历史记录",
+  });
   history.focus();
   await userEvent.keyboard("{Enter}");
   const back = await screen.findByRole("button", { name: "返回有效统计" });
   expect(back).toHaveFocus();
   expect(screen.getByText(/原始历史记录仅供核对/)).toBeVisible();
+  const requests = () =>
+    mocks.invoke.mock.calls.filter(([name]) => name === "get_request_logs");
   await waitFor(() =>
-    expect(mocks.invoke).toHaveBeenCalledWith(
-      "get_request_logs",
-      expect.objectContaining({
-        query: expect.objectContaining({ projectIds: ["/fixture/project"] }),
-        requestFilters: expect.objectContaining({
-          recordBasis: "savedHistory",
-        }),
-      }),
-    ),
+    expect(
+      requests().some(
+        ([, args]) => args.requestFilters?.recordBasis === "savedHistory",
+      ),
+    ).toBe(true),
   );
-  const audit = mocks.invoke.mock.calls.find(
-    ([name, args]) =>
-      name === "get_request_logs" &&
-      args.requestFilters?.recordBasis === "savedHistory",
+  const audit = requests().find(
+    ([, args]) => args.requestFilters?.recordBasis === "savedHistory",
   )![1];
-  const analytics = mocks.invoke.mock.calls
-    .filter(([name]) => name === "get_session_usage_analytics")
-    .at(-1)![1];
-  expect(audit.query).toEqual(analytics.query);
+  expect(audit.query.projectIds).toEqual(["/fixture/project"]);
+  expect(screen.queryByRole("button", { name: "查看原始历史记录" })).toBeNull();
   await userEvent.keyboard("{Enter}");
   await waitFor(() =>
     expect(
@@ -102,46 +96,6 @@ it("opens original history from folded data status with its exact query and retu
     ).toHaveFocus(),
   );
   expect(screen.queryByText(/原始历史记录仅供核对/)).toBeNull();
-  await waitFor(() =>
-    expect(mocks.invoke).toHaveBeenLastCalledWith(
-      "get_request_logs",
-      expect.objectContaining({ requestFilters: {} }),
-    ),
-  );
-});
-
-it("does not offer a stale analysis history jump under newly selected filters", async () => {
-  localStorage.setItem("ofox.usageTab", "sessions");
-  const normal = mocks.invoke.getMockImplementation()!;
-  mocks.invoke.mockImplementation(async (command: string, args: any) => {
-    if (command === "get_session_usage_analytics" && args.query.toolIds.length)
-      return new Promise(() => undefined);
-    const result = await normal(command, args);
-    if (command === "get_session_usage_analytics") {
-      result.methodVersion = "magpie-native-v1";
-      result.sourceCoverage = {
-        observed: 1,
-        read: 1,
-        partial: 0,
-        failed: 0,
-        undated: 0,
-        legacyHistoryAvailable: true,
-      };
-    }
-    return result;
-  });
-  render(<Page />);
-  await userEvent.click(await screen.findByText("部分本机记录未计入"));
-  expect(
-    screen.getByRole("button", { name: "查看原始历史记录" }),
-  ).toBeVisible();
-  await userEvent.click(
-    within(screen.getByRole("group", { name: "工具筛选" })).getByRole(
-      "button",
-      { name: "Codex" },
-    ),
-  );
-  expect(screen.queryByRole("button", { name: "查看原始历史记录" })).toBeNull();
 });
 
 it("shows native cache rebuild progress and cancels only its exact operation", async () => {
@@ -309,7 +263,6 @@ it("offers shared project filters on first overview visit and keeps unknown stat
   ).toBeVisible();
   expect(await screen.findByText("已识别会话数")).toBeVisible();
   expect(screen.getByText("已识别项目数")).toBeVisible();
-  expect(screen.getByText(/1 条采集记录无法关联会话/)).toBeVisible();
   const rank = screen.getByRole("button", { name: "project" });
   await userEvent.click(rank);
   await waitFor(() =>
@@ -342,7 +295,7 @@ it("restores analysis, scopes projects to analysis, and clears them before retur
   expect(
     await screen.findByRole("tab", { name: "会话分析", selected: true }),
   ).toBeVisible();
-  await screen.findByText(/有效样本 2.*排除 1/);
+  await screen.findByText(/中位数 15 · p90 20/);
   await userEvent.click(
     screen.getByRole("combobox", { name: "项目筛选（仅会话分析）" }),
   );
@@ -371,7 +324,7 @@ it("refreshes analysis only while visible, without polling account balance", asy
   const interval = vi.spyOn(window, "setInterval");
   try {
     render(<Page />);
-    await screen.findByText(/有效样本 2.*排除 1/);
+    await screen.findByText(/中位数 15 · p90 20/);
     const tick = interval.mock.calls.find(
       (call) => call[1] === 30_000,
     )![0] as () => void;
@@ -443,7 +396,7 @@ it("keeps a frozen analysis detail open while a refreshed snapshot is loading", 
   tick();
   await waitFor(() => expect(release).toBeTypeOf("function"));
   expect(screen.getByRole("dialog")).toBeVisible();
-  expect(screen.getByText(/有效样本 2.*排除 1/)).toBeVisible();
+  expect(screen.getByText(/中位数 15 · p90 20/)).toBeVisible();
   const latest = mocks.invoke.mock.calls
     .filter(([name]) => name === "get_session_usage_analytics")
     .at(-1)![1].query;
@@ -452,7 +405,7 @@ it("keeps a frozen analysis detail open while a refreshed snapshot is loading", 
   newer.topSessions[0].models[0].model = "new-model";
   release({ ...newer, appliedQuery: latest });
   await waitFor(() =>
-    expect(screen.getByText(/有效样本 2.*排除 1/)).toBeVisible(),
+    expect(screen.getByText(/中位数 15 · p90 20/)).toBeVisible(),
   );
   expect(screen.getByRole("dialog")).toHaveTextContent("model-a");
   expect(screen.getByRole("dialog")).not.toHaveTextContent("new-model");
@@ -484,7 +437,7 @@ it("keeps the old snapshot and chart state when the refreshed analysis read fail
   localStorage.setItem("ofox.usageTab", "sessions");
   const interval = vi.spyOn(window, "setInterval");
   render(<Page />);
-  await screen.findByText(/有效样本 2.*排除 1/);
+  await screen.findByText(/中位数 15 · p90 20/);
   await userEvent.click(screen.getByRole("tab", { name: "输出 Tokens" }));
   const trend = screen.getByRole("tab", { name: "输出 Tokens" });
   const normal = mocks.invoke.getMockImplementation()!;
@@ -500,7 +453,7 @@ it("keeps the old snapshot and chart state when the refreshed analysis read fail
   interval.mockRestore();
   tick();
   await screen.findByRole("alert");
-  expect(screen.getByText(/有效样本 2.*排除 1/)).toBeVisible();
+  expect(screen.getByText(/中位数 15 · p90 20/)).toBeVisible();
   expect(trend.isConnected).toBe(true);
   expect(trend).toHaveTextContent("输出");
   expect(
@@ -515,7 +468,7 @@ it.each(["hidden", "tabRoundtrip"])(
     localStorage.setItem("ofox.usageTab", "sessions");
     const interval = vi.spyOn(window, "setInterval");
     render(<Page />);
-    await screen.findByText(/有效样本 2.*排除 1/);
+    await screen.findByText(/中位数 15 · p90 20/);
     let release!: (data: unknown) => void;
     const normal = mocks.invoke.getMockImplementation()!;
     mocks.invoke.mockImplementation((command: string, args: any) =>

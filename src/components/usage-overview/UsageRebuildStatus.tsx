@@ -131,7 +131,7 @@ export function UsageRebuildStatus({
   if (
     !current ||
     current.operationId === dismissed ||
-    (current.state === "completed" && observed.current !== current.operationId)
+    current.state === "completed"
   )
     return null;
   const isTerminal = terminal(current.state);
@@ -143,16 +143,13 @@ export function UsageRebuildStatus({
       <div className="min-w-0">
         <p>
           {t(
-            `usageExperience.rebuild${current.state === "running" ? "Running" : current.state === "cancelling" ? "Cancelling" : current.state === "cancelled" ? "Cancelled" : current.state === "completed" ? "Completed" : "Failed"}`,
+            `usageExperience.rebuild${current.state === "running" ? "Running" : current.state === "cancelling" ? "Cancelling" : current.state === "cancelled" ? "Cancelled" : "Failed"}`,
             {
               completed: current.completedSources,
               total: current.totalSources,
             },
           )}
         </p>
-        {!isTerminal && (
-          <p className="text-ink-faint">{t("usageExperience.rebuildHelp")}</p>
-        )}
         {cancelError === current.operationId && (
           <p role="alert" className="text-warn">
             {t("usageExperience.rebuildCancelFailed")}

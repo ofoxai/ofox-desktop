@@ -171,11 +171,6 @@ export function UsageSessionRanking({
           )}
         </p>
       )}
-      {sort === "cost" && (
-        <p className="pt-1.5 text-micro text-ink-faint">
-          {t("usageExperience.costRankHint")}
-        </p>
-      )}
       {data.pagingUnavailableReason && (
         <p className="py-1.5 text-micro text-ink-muted">
           {t("usageExperience.pagingLimited")}

@@ -18,7 +18,7 @@ import type {
 } from "@/types/sessionAnalytics";
 import { UsageBars, type UsageMetric } from "./UsageBars";
 import { usageProjectLabel } from "@/lib/usageProject";
-import { UsageAnalysisStatus } from "./UsageAnalysisStatus";
+import { UsageSourceAlert } from "./UsageSourceAlert";
 import { UsageSessionRanking } from "./UsageSessionRanking";
 import { UsageTimeInsights } from "./UsageTimeInsights";
 import { UsageDistributions } from "./UsageDistributions";
@@ -46,7 +46,7 @@ export function UsageSessions({
   location,
   onLocated,
   onExpandScope,
-  onSavedHistory,
+  onRetry,
 }: {
   data: SessionAnalytics;
   active: boolean;
@@ -61,7 +61,7 @@ export function UsageSessions({
   location?: { key: string; request: number } | null;
   onLocated?: (request: number) => void;
   onExpandScope?: () => void;
-  onSavedHistory?: () => void;
+  onRetry?: () => void;
 }) {
   const { t, i18n } = useTranslation();
   const panel = useRef<HTMLElement>(null);
@@ -154,11 +154,6 @@ export function UsageSessions({
     activityCoverage?.state === "unavailable"
       ? null
       : (v.activeDays ?? data.knownActiveDays ?? known?.activeDays ?? null);
-  const partialActivity =
-    activityCoverage?.state === "partial" && activeMs != null;
-  const partialMessages =
-    messageCoverage?.state === "partial" && messages != null;
-  const partialMetrics = partialActivity || partialMessages;
   const noUsage = usageIsUnavailable(data);
   const noCohort = usageCohortIsUnavailable(data);
   const nativeMethod = data.methodVersion === "magpie-native-v1";
@@ -202,10 +197,10 @@ export function UsageSessions({
               </Button>
             </div>
           )}
-          <UsageAnalysisStatus
-            data={data}
-            compact
-            onSavedHistory={onSavedHistory}
+          <UsageSourceAlert
+            sources={data.sources}
+            pricing={data.pricingCoverage}
+            onRetry={onRetry}
           />
           <KpiStrip
             className="!grid-cols-2 min-[420px]:!grid-cols-3 [&>div]:px-3 [&>div]:pb-2 [&>div]:pt-2.5 [&_b]:text-[24px]"
@@ -254,7 +249,9 @@ export function UsageSessions({
                     ? "usageExperience.nativeActivityHelp"
                     : "usageSessions.activityExplanation",
                 ),
-                sub: `${partialActivity ? t("usageExperience.knownPart") + " · " : ""}${t("usageSessions.activeDays", { value: activeDays ?? "—" })}`,
+                sub: t("usageSessions.activeDays", {
+                  value: activeDays ?? "—",
+                }),
               },
               {
                 label: t("usageSessions.projects"),
@@ -271,56 +268,12 @@ export function UsageSessions({
               },
             ]}
           />
-          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-note text-ink-muted">
-            <p>
-              {t("usageSessions.samples", {
-                count: v.quantileSamples,
-                excluded: v.quantileExcluded,
-              })}
-            </p>
-            <p>
-              {partialMessages && (
-                <span>{t("usageExperience.knownPart")} · </span>
-              )}
-              {t("usageExperience.aux", {
-                messages: messages?.toLocaleString(i18n.language) ?? "—",
-                cache: noUsage ? "—" : fmtTokens(v.cacheWriteTokens),
-              })}
-            </p>
-          </div>
-          {(v.messageReason === "modelAttributionUnavailable" ||
-            v.activityReason === "modelAttributionUnavailable") && (
-            <p className="text-note text-ink-muted">
-              {t("usageSessions.modelUnavailable")}
-            </p>
-          )}
-          {!known &&
-            messages == null &&
-            activeMs == null &&
-            v.messageReason !== "modelAttributionUnavailable" &&
-            v.activityReason !== "modelAttributionUnavailable" && (
-              <p className="text-note text-ink-muted">
-                {t(
-                  v.messageReason === "sourceAttributionUnavailable" ||
-                    v.activityReason === "sourceAttributionUnavailable"
-                    ? "usageSessions.sourceUnavailableMetrics"
-                    : "usageSessions.messageCoveragePartial",
-                )}
-              </p>
-            )}
-          {partialMetrics && (
-            <p className="text-note text-ink-faint">
-              {t(
-                data.messageCoverage || data.activityCoverage
-                  ? partialActivity && partialMessages
-                    ? "usageExperience.knownTrend"
-                    : partialActivity
-                      ? "usageExperience.knownActivityTrend"
-                      : "usageExperience.knownMessageTrend"
-                  : "usageExperience.knownTrend",
-              )}
-            </p>
-          )}
+          <p className="text-note text-ink-muted">
+            {t("usageExperience.aux", {
+              messages: messages?.toLocaleString(i18n.language) ?? "—",
+              cache: noUsage ? "—" : fmtTokens(v.cacheWriteTokens),
+            })}
+          </p>
           <UsageBars
             activityLabel={activityLabel}
             selectedMetric={metric}

@@ -88,7 +88,7 @@ it("retains keyboard focus through cancellation and dismisses without touching a
   expect(screen.queryByText("重建已取消，原有统计已保留。")).toBeNull();
 });
 
-it("does not regress a completed result when an earlier cancel reply arrives", async () => {
+it("hides a completed rebuild and keeps it hidden when an earlier cancel reply arrives", async () => {
   let finish!: (value: UsageRebuildProgress) => void;
   mocks.cancel.mockImplementation(
     () =>
@@ -106,11 +106,11 @@ it("does not regress a completed result when an earlier cancel reply arrives", a
       state: "completed",
     });
   });
-  expect(await screen.findByText("本机统计重建完成。")).toBeVisible();
+  await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
   await act(async () => {
     finish({ ...running, state: "cancelling" });
   });
-  expect(screen.getByText("本机统计重建完成。")).toBeVisible();
+  expect(screen.queryByRole("status")).toBeNull();
 });
 
 it("returns focus to retry when a progress read failure removes the focused cancel action", async () => {

@@ -10,12 +10,16 @@ beforeEach(() => {
   i18n.addResourceBundle("zh", "translation", zh, true, true);
   Element.prototype.scrollIntoView = vi.fn();
 });
-it("keeps unknown activity distinct from zero and shows quantile exclusions and unassociated usage", async () => {
+it("keeps unknown activity distinct from zero without coverage footnotes", async () => {
   render(<UsageSessions data={sessionAnalyticsFixture()} active />);
-  expect(screen.getByText(/有效样本 2.*排除 1/)).toBeVisible();
-  expect(screen.getByText(/无法按模型拆分/)).toBeVisible();
-  await userEvent.click(screen.getByText("数据范围与来源"));
-  expect(screen.getByText(/1 条未关联会话的记录.*7 Tokens/)).toBeVisible();
+  for (const note of [
+    /有效样本/,
+    /无法按模型拆分/,
+    /数据范围与来源/,
+    /已知部分/,
+  ]) {
+    expect(screen.queryByText(note)).toBeNull();
+  }
   expect(screen.getByRole("tab", { name: "消息数" })).toHaveAttribute(
     "aria-disabled",
     "true",
@@ -86,17 +90,18 @@ it("hides a ranking row without changing analysis totals or filters and can rest
   await userEvent.click(screen.getByRole("menuitem", { name: "隐藏" }));
   expect(screen.queryByRole("button", { name: "model-a" })).toBeNull();
   expect(onModel).not.toHaveBeenCalled();
-  expect(screen.getByText(/有效样本 2.*排除 1/)).toBeVisible();
+  expect(screen.getByText(/中位数 15 · p90 20/)).toBeVisible();
   await userEvent.click(screen.getByRole("button", { name: "1 个已隐藏" }));
   await userEvent.click(screen.getByRole("button", { name: "显示 model-a" }));
   expect(screen.getByRole("button", { name: "model-a" })).toBeVisible();
 });
-it("explains unavailable message coverage rather than presenting zero activity", () => {
+it("shows unavailable message coverage as unknown rather than zero", () => {
   const data = sessionAnalyticsFixture();
   data.totals.messageReason = "messageCoveragePartial";
   data.totals.activityReason = "messageCoveragePartial";
   render(<UsageSessions data={data} active />);
-  expect(screen.getByText(/消息时间覆盖不完整/)).toBeVisible();
+  expect(screen.getByText(/消息 — · 缓存写入/)).toBeVisible();
+  expect(screen.queryByText(/消息时间覆盖不完整/)).toBeNull();
 });
 
 it.each(["kpi", "row", "detail"])(

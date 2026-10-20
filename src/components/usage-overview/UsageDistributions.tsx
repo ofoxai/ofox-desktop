@@ -30,13 +30,7 @@ export function UsageDistributions({
               : fmtTokens(value);
           return (
             <section key={distribution.metric} aria-label={label}>
-              <h3 className="text-sub font-medium">{label}</h3>
-              <p className="mb-3 text-note text-ink-faint">
-                {t("usageExperience.distributionSamples", {
-                  count: distribution.samples,
-                  excluded: distribution.excludedSessions,
-                })}
-              </p>
+              <h3 className="mb-3 text-sub font-medium">{label}</h3>
               {distribution.samples ? (
                 distribution.counts.map((count, index) => {
                   const start = distribution.edges[index];
@@ -81,11 +75,6 @@ export function UsageDistributions({
               ) : (
                 <p className="text-note text-ink-muted">
                   {t("usageExperience.noSamples")}
-                </p>
-              )}
-              {distribution.unquantifiedSourceGaps && (
-                <p className="mt-2 text-note text-ink-faint">
-                  {t("usageExperience.unknownGaps")}
                 </p>
               )}
             </section>

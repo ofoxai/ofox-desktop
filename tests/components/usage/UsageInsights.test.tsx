@@ -7,7 +7,6 @@ import { UsageSessions } from "@/components/usage-overview/UsageSessions";
 import { sessionAnalyticsFixture } from "./sessionAnalyticsFixture";
 import { UsageTimeInsights } from "@/components/usage-overview/UsageTimeInsights";
 import { UsageDistributions } from "@/components/usage-overview/UsageDistributions";
-import { UsageAnalysisStatus } from "@/components/usage-overview/UsageAnalysisStatus";
 import type { AnalyticsPage } from "@/types/sessionAnalytics";
 const mocks = vi.hoisted(() => ({ page: vi.fn() }));
 vi.mock("@/lib/api/usageOverview", () => ({
@@ -169,20 +168,6 @@ it("labels zero activity separately from a positive duration below one minute", 
   expect(screen.getByText("0 分钟")).toBeVisible();
   expect(screen.getByText("不足 1 分钟（非零）")).toBeVisible();
 });
-it("does not mark token analysis unavailable when only message attribution is unsupported", () => {
-  const data = sessionAnalyticsFixture();
-  data.metricCoverage = {
-    state: "unavailable",
-    eligibleSessions: 0,
-    excludedSessions: 3,
-    unquantifiedSourceGaps: false,
-    reasons: ["modelAttributionUnavailable"],
-  };
-  render(<UsageAnalysisStatus data={data} />);
-  expect(screen.queryByText("当前条件无法统计")).toBeNull();
-  expect(screen.getByText("当前后端使用旧统计口径")).toBeVisible();
-  expect(screen.getByText("消息和活跃不可用")).toBeVisible();
-});
 it("does not round a verifiable positive activity interval down to a displayed zero", () => {
   const data = sessionAnalyticsFixture();
   data.activityByHour = {
@@ -216,7 +201,6 @@ it("shows verified activity from a partial cohort without changing legacy unknow
   data.totals.messageReason = "messageCoveragePartial";
   data.totals.activityReason = "messageCoveragePartial";
   render(<UsageSessions data={data} active />);
-  expect(screen.getAllByText(/已知部分/).length).toBeGreaterThan(0);
   expect(screen.getByText("2 分钟")).toBeVisible();
   expect(data.totals.activeMs).toBeNull();
 });

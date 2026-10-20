@@ -24,7 +24,7 @@ import {
   requestSourcePresentation,
 } from "@/lib/usageRequestEvidence";
 import { ToolBadge } from "@/components/tools/ToolBadge";
-import { UsagePriceNotice } from "./UsageFreshness";
+import { UsageSourceAlert } from "./UsageSourceAlert";
 import { UsageBars } from "./UsageBars";
 import { usageIsUnavailable } from "@/lib/usageWorkbench";
 import { UsageRequestMeasurements } from "./UsageRequestMeasurements";
@@ -324,11 +324,6 @@ export function UsageRequests({
           {t("usageWorkbench.reset")}
         </Button>
       </form>
-      {filters.statusKind === "unrecorded" && (
-        <p className="text-note text-ink-muted">
-          {t("usageWorkbench.noMeasuredStatusHelp")}
-        </p>
-      )}
       {updateVersion > seenUpdate && (
         <div
           role="status"
@@ -340,35 +335,19 @@ export function UsageRequests({
           </Button>
         </div>
       )}
-      {data?.coverage?.aggregateOnly && (
-        <p className="text-note text-ink-muted">
-          {t("usageWorkbench.aggregateOnly")}
-        </p>
-      )}
-      {data?.coverage?.state === "partial" && (
-        <p className="text-note text-ink-muted">
-          {t("usageWorkbench.partial")}
-        </p>
-      )}
-      {data?.coverage?.timeBasis && data.coverage.timeBasis !== "eventTime" && (
-        <p className="text-note text-ink-muted">
-          {t("usageWorkbench.legacyDates")}
-        </p>
-      )}
-      <UsagePriceNotice
-        pricing={data?.pricingCoverage}
-        receipt={data}
-        onSavedHistory={
-          recordBasis === "effective" && data?.appliedQuery && onSavedHistory
-            ? () => onSavedHistory(data.appliedQuery!)
-            : undefined
-        }
-      />
-      {data?.pricingCoverage?.additionalUnitsUnsupported && (
-        <p className="text-note text-ink-muted">
-          {t("usageWorkbench.unsupportedUnits")}
-        </p>
-      )}
+      <UsageSourceAlert pricing={data?.pricingCoverage} />
+      {recordBasis === "effective" &&
+        data?.sourceCoverage?.legacyHistoryAvailable &&
+        data.appliedQuery &&
+        onSavedHistory && (
+          <Button
+            variant="ghost"
+            className="h-6 w-fit px-2 text-note"
+            onClick={() => onSavedHistory(data.appliedQuery!)}
+          >
+            {t("usageExperience.savedHistory")}
+          </Button>
+        )}
       {summary && (
         <div className="flex flex-wrap gap-x-5 gap-y-1 rounded-card border border-line bg-card p-3 text-sub tabular-nums">
           <span>

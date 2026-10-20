@@ -26,7 +26,6 @@ import { queryClient } from "@/lib/query/queryClient";
 import { ofoxDashboardUrl, ofoxWalletUrl } from "@/lib/ofoxUrls";
 import {
   createUsageQuery,
-  sameUsageQuery,
   usageIsUnavailable,
   legacyPeriod,
   resolveWorkbenchRange,
@@ -50,7 +49,7 @@ import { UsageBars } from "./UsageBars";
 import { UsageBreakdownList } from "./UsageBreakdownList";
 import { UsageFilterMenu } from "./UsageFilterMenu";
 import { UsageRequests } from "./UsageRequests";
-import { UsageFreshness } from "./UsageFreshness";
+import { UsageSourceAlert } from "./UsageSourceAlert";
 import { UsageSessions } from "./UsageSessions";
 import { UsageRebuildStatus } from "./UsageRebuildStatus";
 
@@ -347,6 +346,7 @@ export function UsagePage({
     return coordinator.current?.request("manual") ?? Promise.resolve();
   };
   useShellRefresh("usage", manualRefresh);
+  const retry = () => void manualRefresh().catch(() => undefined);
   const chooseRange = (next: WorkbenchRange) => {
     setRange(next);
     setAnchor(Date.now());
@@ -795,13 +795,6 @@ export function UsagePage({
               </p>
             ) : (
               <>
-                {!!data.attribution?.unassociatedRecords && (
-                  <p className="text-note text-ink-muted">
-                    {t("usageWorkbench.unassociatedRecords", {
-                      count: data.attribution.unassociatedRecords,
-                    })}
-                  </p>
-                )}
                 <UsageBars overview={data} />
                 <div className="grid gap-3 md:grid-cols-2">
                   <UsageBreakdownList
@@ -883,41 +876,14 @@ export function UsagePage({
             )}
           </>
         )}
-        <UsageFreshness
-          localUpdatedAt={data?.lastSyncedAt ?? null}
-          accountUpdatedAt={
-            account.user ? state.balance.dataUpdatedAt || null : undefined
-          }
+        <UsageSourceAlert
           sources={data?.sources}
           pricing={data?.pricingCoverage}
-          receipt={data}
-          onSavedHistory={
-            requestSupported &&
-            data?.appliedQuery &&
-            sameUsageQuery(data.appliedQuery, query)
-              ? () => openSavedHistory(data.appliedQuery!)
-              : undefined
-          }
+          onRetry={retry}
         />
         {data?.coverage?.state === "unsupported" && (
           <p className="text-note text-ink-muted">
             {t("usageWorkbench.queryUnavailable")}
-          </p>
-        )}
-        {data?.coverage?.state === "partial" && (
-          <p className="text-note text-ink-muted">
-            {t("usageWorkbench.partial")}
-          </p>
-        )}
-        {data?.coverage?.timeBasis !== undefined &&
-          data.coverage.timeBasis !== "eventTime" && (
-            <p className="text-note text-ink-muted">
-              {t("usageWorkbench.legacyDates")}
-            </p>
-          )}
-        {data?.pricingCoverage?.additionalUnitsUnsupported && (
-          <p className="text-note text-ink-muted">
-            {t("usageWorkbench.unsupportedUnits")}
           </p>
         )}
       </section>
@@ -982,12 +948,7 @@ export function UsagePage({
               data={analysisDisplay}
               showData={analysisDisplay.coverage.state !== "unsupported"}
               active={visible && effectiveTab === "sessions"}
-              onSavedHistory={
-                requestSupported &&
-                sameUsageQuery(analysisDisplay.appliedQuery, analysisQuery)
-                  ? () => openSavedHistory(analysisDisplay.appliedQuery)
-                  : undefined
-              }
+              onRetry={retry}
               onProject={
                 sharedProjectSupported || analysisProjectSupported
                   ? (id) => {

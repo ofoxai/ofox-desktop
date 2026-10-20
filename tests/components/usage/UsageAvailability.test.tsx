@@ -238,7 +238,6 @@ it("does not present unavailable Token calendar cells as observed zero", async (
     screen.getByRole("button", { name: `${data.series[0].date} · —` }),
   ).toBeVisible();
   expect(screen.queryByText("统计已更新")).toBeNull();
-  expect(screen.getByText("当前条件无法统计")).toBeVisible();
 });
 
 it("keeps a wholly unverified calendar session count unknown", async () => {
