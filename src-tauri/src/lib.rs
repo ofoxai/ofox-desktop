@@ -1444,6 +1444,8 @@ pub fn run() {
             commands::match_library_builtin_recipes,
             commands::discard_library_inventory,
             commands::import_library_inventory,
+            commands::remove_library_found_skill,
+            commands::preview_library_skill_adoption,
             commands::preview_library_batch,
             commands::run_library_batch,
             commands::cancel_library_batch,

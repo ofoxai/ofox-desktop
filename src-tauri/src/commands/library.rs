@@ -1004,6 +1004,59 @@ pub async fn import_library_inventory(
     .await
     .map_err(|_| "library.inventoryUnavailable".to_string())?
 }
+/// Remove a found skill (not in the library) from its agents: links go,
+/// folders are set aside in the skill backups.
+#[tauri::command]
+pub async fn remove_library_found_skill(
+    state: State<'_, AppState>,
+    ticket_id: String,
+    entry_id: String,
+    tool_ids: Vec<String>,
+    expected_epoch: u64,
+) -> Result<Value, String> {
+    crate::agent_env::ready().await;
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        library::inventory::remove_found(&db, &ticket_id, &entry_id, &tool_ids, expected_epoch)
+            .map(|removed| json!({ "removed": removed }))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|_| "library.inventoryUnavailable".to_string())?
+}
+/// Like `preview_library_skills`, but an identical entry already in one of
+/// `adopt_tools`' agents is taken over as it is.
+#[tauri::command]
+pub async fn preview_library_skill_adoption(
+    state: State<'_, AppState>,
+    resource_id: String,
+    tools: Vec<String>,
+    adopt_tools: Vec<String>,
+    expected_revision: u64,
+    expected_epoch: u64,
+) -> Result<Value, String> {
+    crate::agent_env::ready().await;
+    let discovery = skill_discovery().await?;
+    let _io = crate::config_io::lock();
+    library::catalog::verify_epoch(&state.db, expected_epoch).map_err(|e| e.to_string())?;
+    let snapshot = state.db.library_snapshot().map_err(|e| e.to_string())?;
+    check_revision(
+        &snapshot,
+        library::ResourceKind::Skills,
+        &resource_id,
+        Some(expected_revision),
+    )?;
+    verify_selected_tools(
+        &snapshot,
+        library::ResourceKind::Skills,
+        &resource_id,
+        &tools,
+        &discovery,
+    )?;
+    library::skill_resource::preview_adoption(&state.db, &resource_id, &tools, &adopt_tools)
+        .map(|op| library::operation_view(&op))
+        .map_err(|e| e.to_string())
+}
 #[tauri::command]
 pub async fn preview_library_batch(
     state: State<'_, AppState>,

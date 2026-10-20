@@ -806,15 +806,9 @@ pub fn recover_operation(db: &Database, id: &str) -> Result<Operation, AppError>
                 && snapshot.machine.receipts.get(&target.receipt_key) == ownership
                 && super::skill_resource::entry_id(&path).ok().as_ref()
                     == Some(&target.physical_target)
-                && super::skill_resource::entry_hash_with(
-                    &path,
-                    target
-                        .directory
-                        .as_ref()
-                        .map(|plan| plan.artifact_hash.as_str()),
-                )
-                .ok()
-                .as_ref()
+                && super::skill_resource::after_entry_hash(target)
+                    .ok()
+                    .as_ref()
                     == Some(&target.after_hash);
             if intact {
                 target.status = "applied".into();

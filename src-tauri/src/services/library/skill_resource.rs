@@ -33,6 +33,17 @@ pub struct DirectoryOwned {
     pub artifact_hash: String,
     pub method: String,
     pub entry_hash: String,
+    /// Present when Ofox took over an entry that was already there instead of
+    /// writing it; older receipts have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopted: Option<AdoptedEntry>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AdoptedEntry {
+    /// The link's own text when the entry taken over is a symlink.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
 }
 
 pub fn validate_skill(skill: &InstalledSkill) -> Result<(), AppError> {
@@ -552,13 +563,77 @@ fn predicted(hash: &str, method: &str) -> Result<String, AppError> {
     };
     Ok(io::fingerprint(Some(text.as_bytes())))
 }
+/// A taken-over entry is proven by what it is, not by Ofox's own writing
+/// rules: a link by its own text (it may be relative, so it is not followed),
+/// a folder by its files whatever their modes.
+fn adopted_hash(path: &Path) -> Result<String, AppError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok("missing".into()),
+        Err(_) => return Err(error("skillUnreadable")),
+    };
+    if metadata.file_type().is_symlink() {
+        let link = fs::read_link(path).map_err(|_| error("skillUnreadable"))?;
+        return Ok(adopted_link_hash(&link.to_string_lossy()));
+    }
+    if !metadata.is_dir() {
+        return Err(error("skillEntryUnsupported"));
+    }
+    Ok(io::fingerprint(Some(
+        format!("copy:{}", artifacts::tree_hash(path)?).as_bytes(),
+    )))
+}
+fn adopted_link_hash(link: &str) -> String {
+    io::fingerprint(Some(format!("adopted-link:{link}").as_bytes()))
+}
+/// The skill's files behind an entry, through a link if it is one.
+fn content_hash(path: &Path) -> Result<String, AppError> {
+    let real = fs::canonicalize(path).map_err(|_| error("skillUnreadable"))?;
+    artifacts::tree_hash(&real)
+}
+fn link_text(path: &Path) -> Result<Option<String>, AppError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| error("skillUnreadable"))?;
+    if !metadata.file_type().is_symlink() {
+        return Ok(None);
+    }
+    let link = fs::read_link(path).map_err(|_| error("skillUnreadable"))?;
+    Ok(Some(link.to_string_lossy().into_owned()))
+}
+/// How the entry a receipt covers is checked: taken over, written by Ofox, or unowned.
+pub fn owned_hash(path: &Path, owned: Option<&DirectoryOwned>) -> Result<String, AppError> {
+    match owned {
+        Some(owned) if owned.adopted.is_some() => adopted_hash(path),
+        Some(owned) => entry_hash_with(path, Some(&owned.artifact_hash)),
+        None => entry_hash_with(path, None),
+    }
+}
+fn adopted_owned(receipt: Option<&Receipt>) -> Option<DirectoryOwned> {
+    receipt
+        .and_then(|receipt| serde_json::from_str::<DirectoryOwned>(&receipt.owned_segment).ok())
+        .filter(|owned| owned.adopted.is_some())
+}
+/// The hash a target's entry has once it is done.
+pub fn after_entry_hash(target: &TargetWrite) -> Result<String, AppError> {
+    let path = Path::new(&target.path);
+    if let Some(plan) = &target.directory {
+        return entry_hash_with(path, Some(&plan.artifact_hash));
+    }
+    if adopted_owned(target.receipt.as_ref()).is_some() {
+        return adopted_hash(path);
+    }
+    entry_hash_with(path, None)
+}
 pub fn validate_receipt(receipt: &Receipt) -> Result<(), AppError> {
     let owned: DirectoryOwned =
         serde_json::from_str(&receipt.owned_segment).map_err(|_| error("stateUnreadable"))?;
     artifacts::path(&owned.artifact_hash)?;
-    if !["copy", "symlink"].contains(&owned.method.as_str())
-        || owned.entry_hash != predicted(&owned.artifact_hash, &owned.method)?
-    {
+    let expected = match (&owned.adopted, owned.method.as_str()) {
+        (Some(AdoptedEntry { link: Some(link) }), "symlink") => adopted_link_hash(link),
+        (Some(AdoptedEntry { link: None }), "copy") => predicted(&owned.artifact_hash, "copy")?,
+        (None, "copy" | "symlink") => predicted(&owned.artifact_hash, &owned.method)?,
+        _ => return Err(error("stateUnreadable")),
+    };
+    if owned.entry_hash != expected {
         return Err(error("stateUnreadable"));
     }
     Ok(())
@@ -621,6 +696,16 @@ pub fn validate_target(target: &TargetWrite, op: &Operation) -> Result<(), AppEr
                 return Err(error("stateUnreadable"));
             }
         }
+    } else if adopted_owned(target.receipt.as_ref()).is_some() {
+        // A take-over writes nothing: it only proves the entry and records it.
+        if target.previous_receipt.is_some()
+            || target.transfer.is_some()
+            || !valid_hash(&target.before_hash)
+            || !valid_hash(&target.after_hash)
+            || target.before_hash == "missing"
+        {
+            return Err(error("stateUnreadable"));
+        }
     } else if target.status == "pending"
         || (target.status == "applied"
             && (target.after_hash.is_empty() || target.before_hash.is_empty()))
@@ -651,10 +736,9 @@ pub fn validate_target(target: &TargetWrite, op: &Operation) -> Result<(), AppEr
 fn assignment(id: &str, tool: &str) -> String {
     format!("skills:{id}:{tool}")
 }
-pub fn preview(db: &Database, id: &str, tools: &[String]) -> Result<Operation, AppError> {
-    ensure_metadata(db)?;
+fn selected_roots(tools: &[String]) -> Result<Vec<(String, PathBuf)>, AppError> {
     let paths = target_paths()?;
-    let selected = tools
+    tools
         .iter()
         .map(|tool| {
             Ok((
@@ -665,14 +749,48 @@ pub fn preview(db: &Database, id: &str, tools: &[String]) -> Result<Operation, A
                     .clone(),
             ))
         })
-        .collect::<Result<Vec<_>, AppError>>()?;
+        .collect()
+}
+pub fn preview(db: &Database, id: &str, tools: &[String]) -> Result<Operation, AppError> {
+    ensure_metadata(db)?;
+    let selected = selected_roots(tools)?;
     preview_at(db, id, &selected, Some(resolver_paths()?))
+}
+/// Like `preview`, but where an entry of the same skill is already in one of
+/// `adopt`'s agents, take it over as it is instead of refusing it.
+pub fn preview_adoption(
+    db: &Database,
+    id: &str,
+    tools: &[String],
+    adopt: &[String],
+) -> Result<Operation, AppError> {
+    if adopt.is_empty() || adopt.iter().any(|tool| !tools.contains(tool)) {
+        return Err(error("targetUnsupported"));
+    }
+    ensure_metadata(db)?;
+    let selected = selected_roots(tools)?;
+    preview_at_adopting(
+        db,
+        id,
+        &selected,
+        Some(resolver_paths()?),
+        &adopt.iter().cloned().collect(),
+    )
 }
 pub(crate) fn preview_at(
     db: &Database,
     id: &str,
     roots: &[(String, PathBuf)],
     resolvers: Option<BTreeMap<String, PathBuf>>,
+) -> Result<Operation, AppError> {
+    preview_at_adopting(db, id, roots, resolvers, &BTreeSet::new())
+}
+pub(crate) fn preview_at_adopting(
+    db: &Database,
+    id: &str,
+    roots: &[(String, PathBuf)],
+    resolvers: Option<BTreeMap<String, PathBuf>>,
+    adopt: &BTreeSet<String>,
 ) -> Result<Operation, AppError> {
     let _guard = crate::config_io::lock();
     let before = db.library_snapshot()?;
@@ -816,12 +934,7 @@ pub(crate) fn preview_at(
                         .map_err(|_| error("stateUnreadable"))
                 })
                 .transpose()?;
-            let current = entry_hash_with(
-                &path,
-                previous_owned
-                    .as_ref()
-                    .map(|owned| owned.artifact_hash.as_str()),
-            )?;
+            let current = owned_hash(&path, previous_owned.as_ref())?;
             target.before_hash = current.clone();
             if let Some(receipt) = &old {
                 validate_receipt(receipt)?;
@@ -834,7 +947,31 @@ pub(crate) fn preview_at(
                     return Err(error("skillEntryChanged"));
                 }
             } else if current != "missing" {
-                return Err(error("skillNameConflict"));
+                // Only the same skill, in an agent asked to take it over, is kept as it is.
+                if !owners.iter().any(|tool| adopt.contains(tool)) || content_hash(&path)? != hash {
+                    return Err(error("skillNameConflict"));
+                }
+                let link = link_text(&path)?;
+                target.before_hash = entry_hash_with(&path, None)?;
+                target.after_hash = adopted_hash(&path)?;
+                target.reason = Some("library.adoptionPreview".into());
+                target.receipt = Some(Receipt {
+                    kind: ResourceKind::Skills,
+                    resource_id: id.into(),
+                    resource_revision: meta.revision,
+                    definition_hash: meta.hash.clone(),
+                    physical_target: physical,
+                    path: target.path.clone(),
+                    owners: owners.into_iter().collect(),
+                    owned_segment: serde_json::to_string(&DirectoryOwned {
+                        artifact_hash: hash.clone(),
+                        method: if link.is_some() { "symlink" } else { "copy" }.into(),
+                        entry_hash: target.after_hash.clone(),
+                        adopted: Some(AdoptedEntry { link }),
+                    })
+                    .map_err(|_| error("invalidSkill"))?,
+                });
+                return Ok(());
             }
             let sync = crate::settings::get_skill_sync_method();
             let method = if owners.is_empty() {
@@ -875,6 +1012,7 @@ pub(crate) fn preview_at(
                         artifact_hash: hash.clone(),
                         method: method.into(),
                         entry_hash: after,
+                        adopted: None,
                     })
                     .map_err(|_| error("invalidSkill"))?,
                 });
@@ -952,10 +1090,7 @@ fn stage_with(
         })
         .transpose()?;
     if entry_id(Path::new(&target.path))? != target.physical_target
-        || entry_hash_with(
-            Path::new(&target.path),
-            old.as_ref().map(|owned| owned.artifact_hash.as_str()),
-        )? != target.before_hash
+        || owned_hash(Path::new(&target.path), old.as_ref())? != target.before_hash
     {
         return Err(error("targetChanged"));
     }
@@ -1006,6 +1141,7 @@ fn stage_with(
                     artifact_hash: plan.artifact_hash.clone(),
                     method: "copy".into(),
                     entry_hash: target.after_hash.clone(),
+                    adopted: None,
                 })
                 .map_err(|_| error("stateUnreadable"))?;
             }
@@ -1019,11 +1155,24 @@ fn stage_with(
     }
     Ok(())
 }
+/// Taking over writes nothing: the entry must still be exactly what was previewed.
+fn verify_adoption(target: &TargetWrite) -> Result<(), AppError> {
+    let owned = adopted_owned(target.receipt.as_ref()).ok_or_else(|| error("stateUnreadable"))?;
+    let path = Path::new(&target.path);
+    if target.previous_receipt.is_some()
+        || entry_id(path)? != target.physical_target
+        || entry_hash_with(path, None)? != target.before_hash
+        || adopted_hash(path)? != target.after_hash
+        || content_hash(path)? != owned.artifact_hash
+    {
+        return Err(error("targetChanged"));
+    }
+    Ok(())
+}
 pub fn write(target: &TargetWrite) -> Result<(), AppError> {
-    let plan = target
-        .directory
-        .as_ref()
-        .ok_or_else(|| error("stateUnreadable"))?;
+    let Some(plan) = target.directory.as_ref() else {
+        return verify_adoption(target);
+    };
     let path = Path::new(&target.path);
     let previous = target
         .previous_receipt
@@ -1034,10 +1183,7 @@ pub fn write(target: &TargetWrite) -> Result<(), AppError> {
         })
         .transpose()?;
     if entry_id(path)? != target.physical_target
-        || entry_hash_with(
-            path,
-            previous.as_ref().map(|owned| owned.artifact_hash.as_str()),
-        )? != target.before_hash
+        || owned_hash(path, previous.as_ref())? != target.before_hash
     {
         return Err(error("targetChanged"));
     }
@@ -1072,10 +1218,30 @@ pub fn cleanup(target: &TargetWrite) -> Result<(), AppError> {
             .ok_or_else(|| error("operationNeedsReview"))?;
         let owned: DirectoryOwned =
             serde_json::from_str(&previous.owned_segment).map_err(|_| error("stateUnreadable"))?;
-        if entry_hash_with(backup, Some(&owned.artifact_hash))? != target.before_hash {
+        if owned_hash(backup, Some(&owned))? != target.before_hash {
             return Err(error("operationNeedsReview"));
         }
-        unlink(backup)?;
+        let user_folder = owned.adopted.is_some()
+            && !fs::symlink_metadata(backup)
+                .map_err(|_| error("operationNeedsReview"))?
+                .file_type()
+                .is_symlink();
+        if user_folder {
+            // The user's own folder: set it aside where it can be restored, never deleted.
+            let leaf = Path::new(&target.path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| error("stateUnreadable"))?;
+            let origin = if plan.method == "withdraw" {
+                "libraryWithdraw"
+            } else {
+                "libraryUpdate"
+            };
+            crate::services::skill::SkillService::archive_native_entry(backup, leaf, origin)
+                .map_err(|_| error("operationNeedsReview"))?;
+        } else {
+            unlink(backup)?;
+        }
     }
     let stage = Path::new(&plan.stage_path);
     if fs::symlink_metadata(stage).is_ok() {
@@ -1128,16 +1294,16 @@ pub fn discard_staged(target: &mut TargetWrite) -> Result<(), AppError> {
     Ok(())
 }
 pub fn receipt_intact(receipt: &Receipt) -> bool {
+    let path = Path::new(&receipt.path);
     validate_receipt(receipt).is_ok()
-        && entry_id(Path::new(&receipt.path)).ok().as_deref()
-            == Some(receipt.physical_target.as_str())
+        && entry_id(path).ok().as_deref() == Some(receipt.physical_target.as_str())
         && serde_json::from_str::<DirectoryOwned>(&receipt.owned_segment)
             .ok()
             .is_some_and(|owned| {
-                entry_hash_with(Path::new(&receipt.path), Some(&owned.artifact_hash))
-                    .ok()
-                    .as_ref()
-                    == Some(&owned.entry_hash)
+                owned_hash(path, Some(&owned)).ok().as_ref() == Some(&owned.entry_hash)
+                    // A taken-over link is checked by its text; its files must match too.
+                    && (owned.adopted.is_none()
+                        || content_hash(path).ok().as_ref() == Some(&owned.artifact_hash))
             })
 }
 
@@ -1619,6 +1785,133 @@ mod tests {
             vec![super::super::skill_targets::root("cursor").unwrap()]
         );
     }
+    /// The fixture skill's files, written by hand with the user's own modes.
+    #[cfg(unix)]
+    fn user_folder(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::create_dir_all(path).unwrap();
+        fs::write(
+            path.join("SKILL.md"),
+            format!("---\nname: fixture\ndescription: Fixture\n---\n{body}"),
+        )
+        .unwrap();
+        fs::write(path.join(".hidden"), body).unwrap();
+        for file in ["SKILL.md", ".hidden"] {
+            fs::set_permissions(path.join(file), fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fn skill_target(db: &Database, skill: &InstalledSkill, tool: &str) -> serde_json::Value {
+        let view = super::super::skill_view::definition_view(db, skill).unwrap();
+        view["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|target| target["toolId"] == tool)
+            .unwrap()
+            .clone()
+    }
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn an_identical_folder_already_in_an_agent_is_taken_over_as_it_is() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let skill = draft(&db, "body");
+        let native = super::super::skill_targets::root("claude")
+            .unwrap()
+            .join("fixture");
+        user_folder(&native, "body");
+        let inode = fs::metadata(native.join("SKILL.md")).unwrap().ino();
+        let plain = preview(&db, &skill.id, &["claude".into()]).unwrap();
+        assert_eq!(plain.targets[0].status, "conflict");
+        let op = preview_adoption(&db, &skill.id, &["claude".into()], &["claude".into()]).unwrap();
+        assert_eq!(op.targets[0].status, "pending");
+        assert_eq!(
+            op.targets[0].reason.as_deref(),
+            Some("library.adoptionPreview")
+        );
+        assert_eq!(io::apply_operation(&db, &op.id).unwrap().status, "applied");
+        assert_eq!(fs::metadata(native.join("SKILL.md")).unwrap().ino(), inode);
+        assert_eq!(
+            fs::metadata(native.join("SKILL.md"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(skill_target(&db, &skill, "claude")["status"], "applied");
+    }
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn a_different_folder_with_the_same_name_is_never_taken_over() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let skill = draft(&db, "library");
+        let native = super::super::skill_targets::root("codex")
+            .unwrap()
+            .join("fixture");
+        user_folder(&native, "the user's own");
+        let op = preview_adoption(&db, &skill.id, &["codex".into()], &["codex".into()]).unwrap();
+        assert_eq!(op.targets[0].status, "conflict");
+        assert!(op.targets[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("skillNameConflict"));
+        assert_eq!(
+            fs::read_to_string(native.join(".hidden")).unwrap(),
+            "the user's own"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn a_link_is_let_go_alone_and_a_taken_over_folder_is_archived_not_deleted() {
+        let sandbox = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let skill = draft(&db, "body");
+        let shared = target_paths().unwrap()["shared"].join("fixture");
+        user_folder(&shared, "body");
+        let claude = super::super::skill_targets::root("claude").unwrap();
+        fs::create_dir_all(&claude).unwrap();
+        // ~/.claude/skills/fixture -> ../../.agents/skills/fixture, as these links are made
+        std::os::unix::fs::symlink("../../.agents/skills/fixture", claude.join("fixture")).unwrap();
+        let both = vec!["claude".to_string(), "shared".to_string()];
+        let op = preview_adoption(&db, &skill.id, &both, &both).unwrap();
+        assert!(op.targets.iter().all(|target| target.status == "pending"));
+        assert_eq!(io::apply_operation(&db, &op.id).unwrap().status, "applied");
+        assert_eq!(skill_target(&db, &skill, "claude")["status"], "applied");
+        assert_eq!(skill_target(&db, &skill, "shared")["status"], "applied");
+        assert_eq!(skill_target(&db, &skill, "codex")["status"], "shared");
+        let op = preview(&db, &skill.id, &["shared".into()]).unwrap();
+        assert_eq!(io::apply_operation(&db, &op.id).unwrap().status, "applied");
+        assert!(fs::symlink_metadata(claude.join("fixture")).is_err());
+        assert!(shared.join("SKILL.md").exists());
+        let op = preview(&db, &skill.id, &[]).unwrap();
+        assert_eq!(io::apply_operation(&db, &op.id).unwrap().status, "applied");
+        assert!(fs::symlink_metadata(&shared).is_err());
+        let backups = crate::services::skill::SkillService::list_backups().unwrap();
+        let archived = backups
+            .iter()
+            .find(|entry| entry.skill.directory == "fixture")
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(Path::new(&archived.backup_path).join("skill/.hidden")).unwrap(),
+            "body"
+        );
+        assert!(Path::new(&archived.backup_path).starts_with(sandbox.home()));
+    }
+    #[test]
+    fn receipts_written_before_take_over_existed_still_read() {
+        let old = r#"{"artifactHash":"a","method":"copy","entryHash":"b"}"#;
+        let owned: DirectoryOwned = serde_json::from_str(old).unwrap();
+        assert!(owned.adopted.is_none());
+        assert_eq!(serde_json::to_string(&owned).unwrap(), old);
+    }
     #[test]
     #[serial_test::serial]
     fn imported_row_paths_cannot_escape_the_native_root() {
@@ -1704,6 +1997,7 @@ mod tests {
             artifact_hash: target.directory.as_ref().unwrap().artifact_hash.clone(),
             method: "symlink".into(),
             entry_hash: target.after_hash.clone(),
+            adopted: None,
         };
         target.receipt.as_mut().unwrap().owned_segment = serde_json::to_string(&owned).unwrap();
         let failure = stage_with(target, |_, dest| {

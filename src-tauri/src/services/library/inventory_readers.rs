@@ -247,6 +247,7 @@ fn add(
             service_host,
             sources: vec![reference(source)],
             matched_resource_ids: vec![],
+            locations: vec![],
             conflict: false,
             variant: None,
             directory,

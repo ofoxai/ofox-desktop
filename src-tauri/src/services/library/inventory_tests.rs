@@ -249,12 +249,23 @@ fn skill_variants_import_to_unique_directories_and_equal_copies_deduplicate() {
         2
     );
     assert!(rows.values().all(|row| row.apps.is_empty()));
-    assert!(db
+    // Only the copy that kept the folder name takes over the agents it came from.
+    let plain = rows.values().find(|row| row.directory == "sample").unwrap();
+    let assigned: Vec<String> = db
         .library_snapshot()
         .unwrap()
         .machine
         .assignments
-        .is_empty());
+        .into_iter()
+        .map(|(key, resource)| {
+            assert_eq!(resource, plain.id);
+            key
+        })
+        .collect();
+    assert!(!assigned.is_empty());
+    assert!(assigned
+        .iter()
+        .all(|key| key.starts_with(&format!("skills:{}:", plain.id))));
     assert_eq!(
         fs::read_to_string(paths["claude"].join("sample/SKILL.md")).unwrap(),
         first
@@ -806,4 +817,150 @@ fn servers_an_app_writes_into_its_own_bundle_are_not_offered() {
         .unwrap();
     assert_eq!(codex.state, "ready");
     assert_eq!(codex.count, 1);
+}
+
+#[cfg(unix)]
+fn shared_with_a_claude_link(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let shared = super::super::skill_resource::target_paths().unwrap()["shared"].join(name);
+    write(
+        &shared.join("SKILL.md"),
+        &format!("---\nname: {name}\ndescription: Shared\n---\nbody"),
+    );
+    let claude = super::super::skill_resource::native_paths().unwrap()["claude"].clone();
+    fs::create_dir_all(&claude).unwrap();
+    std::os::unix::fs::symlink(format!("../../.agents/skills/{name}"), claude.join(name)).unwrap();
+    (shared, claude.join(name))
+}
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn importing_a_found_skill_takes_over_its_folder_and_links_in_place() {
+    use std::os::unix::fs::MetadataExt;
+    let sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let (shared, link) = shared_with_a_claude_link("automate");
+    let inode = fs::metadata(shared.join("SKILL.md")).unwrap().ino();
+    let view = scan(&db, ResourceKind::Skills).unwrap();
+    let entry = view
+        .entries
+        .iter()
+        .find(|entry| entry.name == "automate")
+        .unwrap();
+    let mut places: Vec<(String, String, bool)> = entry
+        .locations
+        .iter()
+        .map(|place| {
+            (
+                place.target_id.clone(),
+                place.display_path.clone(),
+                place.adoptable,
+            )
+        })
+        .collect();
+    places.sort();
+    assert_eq!(
+        places,
+        vec![
+            ("claude".into(), "~/.claude/skills/automate".into(), true),
+            ("shared".into(), "~/.agents/skills/automate".into(), true),
+        ]
+    );
+    let serialized = serde_json::to_string(&view).unwrap();
+    assert!(!serialized.contains(&*sandbox.home().to_string_lossy()));
+    let result = import(
+        &db,
+        &view.ticket_id,
+        std::slice::from_ref(&entry.entry_id),
+        0,
+    )
+    .unwrap();
+    let item = &result.items[0];
+    let mut adopted = item.adopted.clone();
+    adopted.sort();
+    assert_eq!(adopted, vec!["claude", "shared"]);
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(fs::metadata(shared.join("SKILL.md")).unwrap().ino(), inode);
+    let row = db
+        .get_installed_skill(item.resource_id.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    let view = super::super::skill_view::definition_view(&db, &row).unwrap();
+    let status = |tool: &str| {
+        view["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|target| target["toolId"] == tool)
+            .unwrap()["status"]
+            .clone()
+    };
+    assert_eq!(status("claude"), "applied");
+    assert_eq!(status("shared"), "applied");
+    assert_eq!(status("codex"), "shared");
+}
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn a_found_skill_is_taken_out_of_its_agents_into_the_backups() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let (shared, link) = shared_with_a_claude_link("babysit");
+    let view = scan(&db, ResourceKind::Skills).unwrap();
+    let entry = view
+        .entries
+        .iter()
+        .find(|entry| entry.name == "babysit")
+        .unwrap();
+    let removed = remove_found(&db, &view.ticket_id, &entry.entry_id, &[], 0).unwrap();
+    assert_eq!(removed.len(), 2);
+    assert!(fs::symlink_metadata(&link).is_err());
+    assert!(fs::symlink_metadata(&shared).is_err());
+    let backups = crate::services::skill::SkillService::list_backups().unwrap();
+    let kept = backups
+        .iter()
+        .find(|backup| backup.skill.directory == "babysit")
+        .unwrap();
+    assert!(Path::new(&kept.backup_path).join("skill/SKILL.md").exists());
+    let after = scan(&db, ResourceKind::Skills).unwrap();
+    assert!(after.entries.iter().all(|entry| entry.name != "babysit"));
+}
+
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn a_skill_the_library_owns_is_not_removed_as_a_found_one() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let (shared, _) = shared_with_a_claude_link("canvas");
+    let view = scan(&db, ResourceKind::Skills).unwrap();
+    let entry = view
+        .entries
+        .iter()
+        .find(|entry| entry.name == "canvas")
+        .unwrap();
+    import(
+        &db,
+        &view.ticket_id,
+        std::slice::from_ref(&entry.entry_id),
+        0,
+    )
+    .unwrap();
+    let epoch = db.library_snapshot().unwrap().machine.epoch;
+    let again = scan(&db, ResourceKind::Skills).unwrap();
+    let entry = again
+        .entries
+        .iter()
+        .find(|entry| entry.name == "canvas")
+        .unwrap();
+    assert!(entry
+        .locations
+        .iter()
+        .all(|place| place.reason.as_deref() == Some("library.skillOwned")));
+    assert!(remove_found(&db, &again.ticket_id, &entry.entry_id, &[], epoch).is_err());
+    assert!(shared.join("SKILL.md").exists());
 }

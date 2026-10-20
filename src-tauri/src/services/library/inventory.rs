@@ -20,11 +20,14 @@ mod details;
 pub use builtin::{match_builtin_recipes, BuiltinRecipe};
 #[path = "inventory_readers.rs"]
 mod readers;
+#[path = "inventory_skills.rs"]
+mod skills;
 use details::SourceLocation;
 pub use details::{
     compare_mcp, match_recipes, mcp_service_host, reveal_source, source_detail,
     InventorySourceDetail, McpComparison, McpComparisonSubject, McpRecipe, McpRecipeMatch,
 };
+pub use skills::{remove_found, NotAdopted, SkillLocation};
 const TTL: Duration = Duration::from_secs(600);
 const MAX_TICKETS: usize = 8;
 const MAX_BYTES: usize = 64 * 1024 * 1024;
@@ -82,6 +85,9 @@ pub struct InventoryEntry {
     pub conflict: bool,
     pub variant: Option<String>,
     pub directory: Option<String>,
+    /// Where a found skill sits in each agent.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub locations: Vec<SkillLocation>,
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,6 +107,11 @@ pub struct ImportedItem {
     pub name: String,
     pub status: String,
     pub reason: Option<String>,
+    /// Agents whose own entry of an imported skill was taken over as it is.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub adopted: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub not_adopted: Vec<NotAdopted>,
 }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -234,6 +245,15 @@ pub fn scan(db: &Database, kind: ResourceKind) -> Result<LibraryInventory, AppEr
                 .map(|row| row.id.clone())
                 .collect(),
         };
+    }
+    for candidate in &mut data.candidates {
+        if let Definition::Skill { directory, .. } = &candidate.definition {
+            let directory = directory.clone();
+            candidate.view.locations = skills::locations(candidate, &directory, &snapshot)
+                .into_iter()
+                .map(|(location, _)| location)
+                .collect();
+        }
     }
     for index in 0..data.candidates.len() {
         let conflict = data.candidates.iter().enumerate().any(|(other, row)| {
@@ -544,12 +564,20 @@ pub fn import(
                 Err(_) => (None, "failed", Some("library.inventoryImportFailed".into())),
             },
         };
+        let (adopted, not_adopted) = match (&resource_id, &candidate.definition) {
+            (Some(resource), Definition::Skill { .. }) => {
+                skills::adopt_found(db, resource, candidate)
+            }
+            _ => (vec![], vec![]),
+        };
         result.items.push(ImportedItem {
             entry_id: id.clone(),
             resource_id,
             name: candidate.view.name.clone(),
             status: status.into(),
             reason,
+            adopted,
+            not_adopted,
         });
     }
     Ok(result)

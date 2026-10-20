@@ -266,6 +266,10 @@ struct SkillBackupMetadata {
     source_path: String,
     #[serde(default)]
     execution: Option<crate::services::library::skill_artifact::ExecutionMap>,
+    /// Why a user's own folder was set aside (taken back from an agent);
+    /// such backups are the only copy and are never pruned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin: Option<String>,
 }
 
 const SKILL_BACKUP_RETAIN_COUNT: usize = 20;
@@ -1406,6 +1410,11 @@ impl SkillService {
                 if !metadata.is_dir() {
                     return None;
                 }
+                // A folder taken back from an agent is the only copy left.
+                if Self::read_backup_metadata(&entry.path()).is_ok_and(|meta| meta.origin.is_some())
+                {
+                    return None;
+                }
                 Some((entry.path(), metadata.modified().ok()))
             })
             .collect::<Vec<_>>();
@@ -1444,6 +1453,64 @@ impl SkillService {
             .with_context(|| format!("failed to parse {}", metadata_path.display()))
     }
 
+    /// Move a skill folder out of an agent into the backups, where it is listed
+    /// for restore and never pruned. Its metadata is written first, so a
+    /// half-done move still shows up.
+    pub(crate) fn archive_native_entry(
+        source: &Path,
+        directory: &str,
+        origin: &str,
+    ) -> Result<PathBuf> {
+        let backup_root = Self::get_backup_dir()?;
+        let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
+        let slug = Self::sanitize_backup_segment(directory);
+        let mut backup_path = backup_root.join(format!("{timestamp}_{slug}_native"));
+        let mut counter = 1;
+        while backup_path.exists() {
+            backup_path = backup_root.join(format!("{timestamp}_{slug}_native_{counter}"));
+            counter += 1;
+        }
+        fs::create_dir_all(&backup_path)
+            .with_context(|| format!("failed to create {}", backup_path.display()))?;
+        let (name, description) = Self::read_skill_name_desc(&source.join("SKILL.md"), directory);
+        let now = Utc::now().timestamp();
+        let metadata = SkillBackupMetadata {
+            skill: InstalledSkill {
+                id: format!("native:{}", uuid::Uuid::new_v4()),
+                name,
+                description,
+                directory: directory.to_string(),
+                repo_owner: None,
+                repo_name: None,
+                repo_branch: None,
+                readme_url: None,
+                apps: SkillApps::default(),
+                installed_at: now,
+                content_hash: None,
+                updated_at: now,
+            },
+            backup_created_at: now,
+            source_path: source.to_string_lossy().to_string(),
+            execution: None,
+            origin: Some(origin.to_string()),
+        };
+        let metadata_json = serde_json::to_string_pretty(&metadata)
+            .context("failed to serialize skill backup metadata")?;
+        crate::config::atomic_write(&backup_path.join("meta.json"), metadata_json.as_bytes())
+            .with_context(|| format!("failed to write {}", backup_path.display()))?;
+        let dest = backup_path.join("skill");
+        if fs::rename(source, &dest).is_err() {
+            crate::services::library::skill_artifact::copy_verified(source, &dest)?;
+            fs::remove_dir_all(source)
+                .with_context(|| format!("failed to remove {}", source.display()))?;
+        }
+        log::info!(
+            "Skill 文件夹已移出 Agent 并备份到 {}",
+            backup_path.display()
+        );
+        Ok(backup_path)
+    }
+
     fn create_uninstall_backup(skill: &InstalledSkill) -> Result<Option<PathBuf>> {
         let Some(source_path) = Self::resolve_uninstall_backup_source(skill)? else {
             log::warn!(
@@ -1479,6 +1546,7 @@ impl SkillService {
                     .as_deref()
                     .map(crate::services::library::skill_artifact::manifest)
                     .transpose()?,
+                origin: None,
             };
             let metadata_path = backup_path.join("meta.json");
             let metadata_json = serde_json::to_string_pretty(&metadata)
@@ -1737,6 +1805,27 @@ pub fn migrate_skills_to_ssot(db: &Arc<Database>) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn folders_taken_back_from_agents_outlive_backup_pruning() {
+        let sandbox = crate::test_sandbox::sandbox();
+        let folder = sandbox.home().join("agent-skill");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("SKILL.md"), "---\nname: kept\n---\nbody").unwrap();
+        let archived =
+            SkillService::archive_native_entry(&folder, "agent-skill", "nativeRemove").unwrap();
+        assert!(!folder.exists());
+        assert!(archived.join("skill/SKILL.md").exists());
+        let root = SkillService::get_backup_dir().unwrap();
+        for index in 0..(SKILL_BACKUP_RETAIN_COUNT + 5) {
+            fs::create_dir_all(root.join(format!("old_{index:02}"))).unwrap();
+        }
+        SkillService::cleanup_old_skill_backups(&root).unwrap();
+        assert!(archived.exists());
+        let listed = SkillService::list_backups().unwrap();
+        assert!(listed.iter().any(|entry| entry.skill.name == "kept"));
+    }
     use tempfile::tempdir;
 
     fn epoch_collection_recipe() -> DiscoverableSkill {

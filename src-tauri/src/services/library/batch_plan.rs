@@ -546,12 +546,14 @@ pub(super) fn verify(
                     .map_err(|_| error("stateUnreadable"))
             })
             .transpose()?;
-        let artifact = if after {
-            target.transfer.as_ref().map(|s| s.artifact_hash.as_str())
+        if after {
+            skill_resource::entry_hash_with(
+                Path::new(&group.path),
+                target.transfer.as_ref().map(|s| s.artifact_hash.as_str()),
+            )?
         } else {
-            previous.as_ref().map(|o| o.artifact_hash.as_str())
-        };
-        skill_resource::entry_hash_with(Path::new(&group.path), artifact)?
+            skill_resource::owned_hash(Path::new(&group.path), previous.as_ref())?
+        }
     } else {
         io::fingerprint(
             io::read(Path::new(&group.path))?
