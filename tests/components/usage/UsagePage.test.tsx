@@ -80,11 +80,17 @@ function Refresh() {
     </>
   );
 }
-function Page({ value = account }: { value?: OfoxAccount }) {
+function Page({
+  value = account,
+  bound = ["claude", "pi"],
+}: {
+  value?: OfoxAccount;
+  bound?: string[];
+}) {
   return (
     <ShellProvider openSettings={() => undefined}>
       <Refresh />
-      <UsagePage account={value} boundTools={["claude", "pi"]} />
+      <UsagePage account={value} boundTools={bound} />
     </ShellProvider>
   );
 }
@@ -470,6 +476,25 @@ it("keeps honest empty and refresh-failure states", async () => {
   fireEvent.click(screen.getByText("refresh-page"));
   expect(await screen.findByText("Error: offline sync")).toBeInTheDocument();
   expect(screen.getByText("$20.00")).toBeVisible();
+});
+
+it("gives every bound tool a tab and counts ChatGPT under Codex", async () => {
+  const normal = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command: string, ...args: unknown[]) =>
+    command === "get_usage_overview"
+      ? Promise.resolve({ ...overview, unsupportedTools: ["chatgpt"] })
+      : normal(command, ...args),
+  );
+  render(<Page bound={["hermes", "chatgpt", "claude"]} />);
+  const tools = await screen.findByRole("group", { name: "工具筛选" });
+  await waitFor(() =>
+    expect(
+      within(tools)
+        .getAllByRole("button")
+        .map((button) => button.getAttribute("aria-label")),
+    ).toEqual(["全部工具", "Claude Code", "Codex", "Hermes"]),
+  );
+  expect(screen.queryByText(/以下工具尚无分时用量统计/)).toBeNull();
 });
 
 it("shows hours only with a forecast and reads millisecond chart timestamps", async () => {

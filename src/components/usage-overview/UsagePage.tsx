@@ -35,7 +35,7 @@ import {
   type WorkbenchPeriod,
 } from "@/lib/usageWorkbench";
 import { createUsageRefreshCoordinator } from "@/lib/usageRefresh";
-import { TOOL_META } from "@/config/toolMeta";
+import { inToolOrder, TOOL_META } from "@/config/toolMeta";
 import {
   UNKNOWN_USAGE_PROJECT_ID,
   usageProjectLabel,
@@ -358,8 +358,12 @@ export function UsagePage({
     void settingsApi
       .openExternal(url)
       .catch(() => toast.error(t("shell.openFailed")));
+  // ChatGPT's Codex mode writes Codex sessions, so its usage is Codex's.
+  const boundUsageTools = boundTools.map((id) =>
+    id === "chatgpt" ? "codex" : id,
+  );
   const unsupported =
-    data?.unsupportedTools.filter((id) => boundTools.includes(id)) ?? [];
+    data?.unsupportedTools.filter((id) => boundUsageTools.includes(id)) ?? [];
   const errors = (
     effectiveTab === "sessions"
       ? [analysis.error]
@@ -372,9 +376,14 @@ export function UsagePage({
           ]
         : []
   ).filter(Boolean);
-  const toolIds = [
-    ...new Set([...options.toolIds, ...(filters.toolIds ?? [])]),
-  ];
+  // Every bound tool gets a tab, even with no usage in the period.
+  const toolIds = inToolOrder([
+    ...options.toolIds,
+    ...boundUsageTools.filter(
+      (id) => TOOL_META[id] && !data?.unsupportedTools.includes(id),
+    ),
+    ...(filters.toolIds ?? []),
+  ]);
   const modelIds = [
     ...new Set([...options.modelIds, ...(filters.modelIds ?? [])]),
   ];

@@ -120,6 +120,15 @@ export const TOOL_ORDER = [
   "pi",
 ];
 
+/** Tool ids in `TOOL_ORDER`, deduplicated; unknown ids keep their order last. */
+export function inToolOrder(ids: Iterable<string>): string[] {
+  const rank = (id: string) => {
+    const index = TOOL_ORDER.indexOf(id);
+    return index < 0 ? TOOL_ORDER.length : index;
+  };
+  return [...new Set(ids)].sort((a, b) => rank(a) - rank(b));
+}
+
 export const BOUND_TOOLS_STORAGE_KEY = "ofox-bound-tools";
 
 export const PROXY_SUPPORTED_TOOLS = ["claude", "codex", "gemini"];
