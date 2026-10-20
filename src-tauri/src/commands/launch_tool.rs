@@ -376,6 +376,12 @@ fn opencode_launch_selection(
 fn cli_args(tool_id: &str, bin: &str, model: Option<&str>) -> Vec<String> {
     let mut args = vec![bin.to_string()];
 
+    // dsh 0.2 起必须指定 profile，单写 `dsh` 只报「--profile <name> is required」。
+    // 打开 Web 界面，和旧版不带参数时一样。
+    if tool_id == "dsh" {
+        args.push("web".to_string());
+    }
+
     if tool_id == "opencode" {
         if let Some(model) = model {
             args.push("--model".to_string());
@@ -795,6 +801,7 @@ mod tests {
             ["opencode", "--model", "ofox-opencode/openai/gpt-5.6-terra"]
         );
         assert_eq!(cli_args("opencode", "opencode", None), ["opencode"]);
+        assert_eq!(cli_args("dsh", "dsh", None), ["dsh", "web"]);
     }
 
     fn pair(provider: &str, model: &str) -> Option<(String, String)> {
