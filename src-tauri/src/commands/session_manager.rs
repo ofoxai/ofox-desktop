@@ -29,6 +29,15 @@ fn sync_changed_usage(result: &Option<SessionSyncResult>) -> bool {
     result.as_ref().is_some_and(|r| r.imported > 0)
 }
 
+/// How often the listing may start a usage sync. Each sync that runs emits
+/// `usage-synced`, which makes an open Sessions page list again; without a
+/// floor a source that keeps failing or a file being written loops forever.
+const LISTING_SYNC_INTERVAL_MS: i64 = 60_000;
+
+fn listing_starts_sync(last_synced_at_ms: Option<i64>, now_ms: i64) -> bool {
+    last_synced_at_ms.is_none_or(|at| now_ms.saturating_sub(at) >= LISTING_SYNC_INTERVAL_MS)
+}
+
 /// The session listing: titles and message counts from the meta cache (only
 /// changed files are read), usage from the database. It also starts a usage
 /// sync, skipped when one ran in the last minute.
@@ -38,6 +47,10 @@ pub async fn list_sessions(
     state: State<'_, AppState>,
 ) -> Result<Vec<ManagedSession>, String> {
     let db = Arc::clone(&state.db);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if !listing_starts_sync(usage_sync::last_synced_at_ms(), now_ms) {
+        return listing(db).await;
+    }
     let sync_db = Arc::clone(&db);
     tauri::async_runtime::spawn(async move {
         match usage_sync::sync_all_and_emit(&app, &sync_db, false).await {
@@ -255,6 +268,15 @@ mod tests {
             files_scanned: 1,
             errors: vec![],
         })
+    }
+
+    #[test]
+    fn the_listing_starts_a_sync_at_most_once_a_minute() {
+        let now = 1_000_000;
+        assert!(listing_starts_sync(None, now));
+        assert!(!listing_starts_sync(Some(now - 1_000), now));
+        assert!(!listing_starts_sync(Some(now - 59_999), now));
+        assert!(listing_starts_sync(Some(now - 60_000), now));
     }
 
     #[test]
