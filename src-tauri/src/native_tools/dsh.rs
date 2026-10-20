@@ -40,8 +40,9 @@ pub(super) fn patch_for_test(path: &Path) -> Value {
 }
 /// dsh 0.1 把用户选的默认模型存在 `settings.yaml`，它盖过 profile 里 Ofox 写的模型，
 /// 桌面端选的模型对新会话不起作用。0.2 第一次运行时把它迁进 profile 并改名
-/// （`settings.yaml.imported`），之后模型选择和 Ofox 写的是同一处。
-pub(super) const UPGRADE_HINT: &str = "dsh 版本过旧：0.1 版的 settings.yaml 会盖过 Ofox 设置的模型。请先把 dsh 升级到 0.2 以上并运行一次，再绑定";
+/// （`settings.yaml.imported`），之后模型选择和 Ofox 写的是同一处。只迁进最先
+/// 运行的那个 profile，「打开」用的是 web，所以提示先运行 `dsh web`。
+pub(super) const UPGRADE_HINT: &str = "dsh 版本过旧：0.1 版的 settings.yaml 会盖过 Ofox 设置的模型。请先把 dsh 升级到 0.2 以上并运行一次 dsh web，再绑定";
 fn require_current_layout(directory: &Path) -> Result<(), String> {
     if directory.join("settings.yaml").exists() {
         return Err(UPGRADE_HINT.into());
