@@ -315,8 +315,10 @@ pub fn reader_paths() -> Result<BTreeMap<String, Vec<PathBuf>>, AppError> {
     let targets = native_paths()?;
     let home = crate::config::get_home_dir();
     let shared = home.join(".agents").join("skills");
+    // Claude Desktop's own skills are its own: its folder is written, never read for found ones.
     let mut readers: BTreeMap<String, Vec<PathBuf>> = targets
         .into_iter()
+        .filter(|(tool, _)| tool != "claude-desktop")
         .map(|(tool, path)| (tool, vec![path]))
         .collect();
     // Gemini and OpenCode find the shared folder their own way, below.
@@ -961,7 +963,10 @@ pub(crate) fn preview_at_adopting(
                 }
             } else if current != "missing" {
                 // Only the same skill, in an agent asked to take it over, is kept as it is.
-                if !owners.iter().any(|tool| adopt.contains(tool)) || content_hash(&path)? != hash {
+                if !owners.iter().any(|tool| adopt.contains(tool))
+                    || owners.contains("claude-desktop")
+                    || content_hash(&path)? != hash
+                {
                     return Err(error("skillNameConflict"));
                 }
                 let link = link_text(&path)?;
@@ -989,7 +994,9 @@ pub(crate) fn preview_at_adopting(
             let sync = crate::settings::get_skill_sync_method();
             let method = if owners.is_empty() {
                 "withdraw"
-            } else if sync == crate::services::skill::SyncMethod::Copy
+            } else if owners.contains("claude-desktop")
+                // Cowork won't read a linked skill's files from outside its plugin.
+                || sync == crate::services::skill::SyncMethod::Copy
                 || (cfg!(windows) && sync == crate::services::skill::SyncMethod::Auto)
             {
                 "copy"
@@ -1217,7 +1224,28 @@ pub fn write(target: &TargetWrite) -> Result<(), AppError> {
     if entry_hash_with(path, Some(&plan.artifact_hash))? != target.after_hash {
         return Err(error("verifyFailed"));
     }
+    if let Some(manifest) = super::skill_targets::desktop_manifest_for(path) {
+        list_in_desktop(&manifest, path, plan.method != "withdraw");
+    }
     Ok(())
+}
+/// Claude Desktop lists a skill only once its manifest has it. The files are
+/// already in place, so a failure here is reported, not undone; the next apply renews it.
+fn list_in_desktop(manifest: &Path, path: &Path, listed: bool) {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let description = listed
+        .then(|| {
+            crate::services::skill::SkillService::read_skill_name_desc(&path.join("SKILL.md"), name)
+                .1
+        })
+        .flatten();
+    if let Err(failure) =
+        super::skill_targets::desktop_manifest_set(manifest, name, description.as_deref(), listed)
+    {
+        log::warn!("[library] Claude Desktop manifest not updated for {name}: {failure}");
+    }
 }
 pub fn cleanup(target: &TargetWrite) -> Result<(), AppError> {
     let Some(plan) = &target.directory else {
@@ -1972,6 +2000,91 @@ mod tests {
         assert_eq!(skill_target(&db, &skill, "claude")["adopted"], true);
         assert_eq!(skill_target(&db, &skill, "claude")["status"], "applied");
         assert_eq!(skill_target(&db, &skill, "pi")["status"], "applied");
+    }
+    fn desktop_account() -> PathBuf {
+        let account = super::super::skill_targets::app_data_dir()
+            .join("Claude/local-agent-mode-sessions/skills-plugin/org/account");
+        fs::create_dir_all(account.join("skills/pdf")).unwrap();
+        fs::write(
+            account.join("skills/pdf/SKILL.md"),
+            "---\nname: pdf\n---\nbuilt in",
+        )
+        .unwrap();
+        fs::write(
+            account.join("manifest.json"),
+            "{\n  \"lastUpdated\": 1779335620123,\n  \"skills\": [\n    {\n      \"skillId\": \"pdf\",\n      \"name\": \"pdf\",\n      \"description\": \"Built in\",\n      \"creatorType\": \"anthropic\",\n      \"updatedAt\": null,\n      \"enabled\": true\n    }\n  ]\n}\n",
+        )
+        .unwrap();
+        account
+    }
+    #[test]
+    #[serial_test::serial]
+    fn claude_desktop_gets_a_listed_copy_and_loses_both_when_withdrawn() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let account = desktop_account();
+        assert!(super::super::skill_targets::detected_locally(
+            "claude-desktop"
+        ));
+        assert_eq!(
+            super::super::skill_targets::root("claude-desktop").unwrap(),
+            account.join("skills")
+        );
+        let db = Database::memory().unwrap();
+        let skill = draft(&db, "body");
+        let op = preview(&db, &skill.id, &["claude-desktop".into()]).unwrap();
+        assert_eq!(io::apply_operation(&db, &op.id).unwrap().status, "applied");
+        let entry = account.join("skills/fixture");
+        assert!(fs::symlink_metadata(&entry).unwrap().is_dir());
+        let manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(account.join("manifest.json")).unwrap())
+                .unwrap();
+        assert!(manifest["lastUpdated"].as_i64().unwrap() > 1779335620123);
+        let listed = manifest["skills"].as_array().unwrap();
+        assert_eq!(listed[0]["skillId"], "pdf");
+        assert_eq!(listed[0]["creatorType"], "anthropic");
+        assert_eq!(listed[1]["skillId"], "fixture");
+        assert_eq!(listed[1]["creatorType"], "user");
+        assert_eq!(listed[1]["description"], "Fixture");
+        assert_eq!(listed[1]["enabled"], true);
+        assert!(listed[1]["updatedAt"].is_string());
+        assert_eq!(
+            skill_target(&db, &skill, "claude-desktop")["status"],
+            "applied"
+        );
+        let op = preview(&db, &skill.id, &[]).unwrap();
+        assert_eq!(io::apply_operation(&db, &op.id).unwrap().status, "applied");
+        assert!(fs::symlink_metadata(&entry).is_err());
+        let manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(account.join("manifest.json")).unwrap())
+                .unwrap();
+        let listed = manifest["skills"].as_array().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["skillId"], "pdf");
+    }
+    #[test]
+    #[serial_test::serial]
+    fn claude_desktops_own_skills_are_never_taken_over() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let account = desktop_account();
+        let db = Database::memory().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        fs::write(
+            source.path().join("SKILL.md"),
+            "---\nname: pdf\n---\nbuilt in",
+        )
+        .unwrap();
+        let mut pdf = row();
+        pdf.id = "local:pdf".into();
+        pdf.directory = "pdf".into();
+        let pdf = save_draft(&db, pdf, source.path(), None).unwrap();
+        assert_eq!(
+            skill_target(&db, &pdf, "claude-desktop")["adoptable"],
+            false
+        );
+        let tools = vec!["claude-desktop".to_string()];
+        let op = preview_adoption(&db, &pdf.id, &tools, &tools).unwrap();
+        assert_eq!(op.targets[0].status, "conflict");
+        assert!(account.join("skills/pdf/SKILL.md").exists());
     }
     #[test]
     fn receipts_written_before_take_over_existed_still_read() {

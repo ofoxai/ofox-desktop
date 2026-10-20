@@ -105,7 +105,8 @@ pub fn definition_view(db: &Database, row: &InstalledSkill) -> Result<Value, App
                 .is_ok_and(|owned| owned.adopted.is_some())
         });
         // The same skill is already there and nobody owns it: switching it on takes it over.
-        let adoptable = entry.is_some()
+        let adoptable = tool != "claude-desktop"
+            && entry.is_some()
             && !snapshot
                 .machine
                 .receipts
