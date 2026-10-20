@@ -53,7 +53,7 @@ impl UnbindReport {
 pub(crate) fn display_path(path: &std::path::Path) -> String {
     let home = crate::config::get_home_dir();
     match path.strip_prefix(&home) {
-        Ok(rest) => format!("~/{}", rest.display()),
+        Ok(rest) => format!("~/{}", crate::config::tilde_rest(rest)),
         Err(_) => path.display().to_string(),
     }
 }

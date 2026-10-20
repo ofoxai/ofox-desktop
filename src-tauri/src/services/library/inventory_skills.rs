@@ -39,7 +39,7 @@ fn tilde(path: &Path) -> String {
     [home, real]
         .iter()
         .find_map(|home| path.strip_prefix(home).ok())
-        .map(|rest| format!("~/{}", rest.to_string_lossy()))
+        .map(|rest| format!("~/{}", crate::config::tilde_rest(rest)))
         .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 fn tree_paths(candidate: &Candidate) -> Vec<PathBuf> {

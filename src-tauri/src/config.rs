@@ -94,6 +94,15 @@ pub fn get_home_dir() -> PathBuf {
     })
 }
 
+/// A path below the home as the UI shows it, `/`-separated on every platform,
+/// so Windows reads `~/.codex/config.toml` rather than `~/.codex\config.toml`.
+pub(crate) fn tilde_rest(rest: &Path) -> String {
+    rest.components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// 获取 Claude Code 配置目录路径：设置里的覆盖目录 → `CLAUDE_CONFIG_DIR` → `~/.claude`
 /// （见 [`crate::agent_env`]）。
 pub fn get_claude_config_dir() -> PathBuf {
@@ -901,6 +910,12 @@ impl FileTxn {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn a_path_below_home_is_shown_with_forward_slashes() {
+        let rest = Path::new(".codex").join("config.toml");
+        assert_eq!(tilde_rest(&rest), ".codex/config.toml");
+    }
 
     #[test]
     fn file_txn_rollback_restores_changed_created_and_removed_files() {

@@ -134,7 +134,7 @@ pub(crate) struct Facts {
 fn shown(path: &Path, home: &Path) -> String {
     match path.strip_prefix(home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".into(),
-        Ok(rest) => format!("~/{}", rest.display()),
+        Ok(rest) => format!("~/{}", crate::config::tilde_rest(rest)),
         Err(_) => path.display().to_string(),
     }
 }
@@ -2151,7 +2151,8 @@ Would inspect/remove:
     #[serial]
     fn hermes_data_is_listed_by_what_it_keeps_not_as_its_whole_home() {
         let home = sandbox();
-        let hermes = home.home().join(".hermes");
+        // ~/.hermes on macOS and Linux, %LOCALAPPDATA%\hermes on Windows.
+        let hermes = crate::hermes_config::get_hermes_dir();
         touch(&hermes.join("config.yaml"), "model: x");
         touch(&hermes.join(".env"), "KEY=1");
         touch(&hermes.join("sessions/one.json"), "{}");
@@ -2160,14 +2161,14 @@ Would inspect/remove:
             .iter()
             .map(|path| shown(path, home.home()))
             .collect();
-        assert_eq!(
-            kept,
-            [
-                "~/.hermes/config.yaml",
-                "~/.hermes/.env",
-                "~/.hermes/sessions"
-            ]
-        );
+        let expected: Vec<String> = ["config.yaml", ".env", "sessions"]
+            .iter()
+            .map(|name| shown(&hermes.join(name), home.home()))
+            .collect();
+        assert_eq!(kept, expected);
+        if cfg!(unix) {
+            assert_eq!(kept[0], "~/.hermes/config.yaml");
+        }
     }
 
     #[test]
