@@ -8,6 +8,8 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::SystemTime;
 
 pub fn home_dir() -> Result<PathBuf, String> {
     crate::native_tools::config_dir(crate::app_config::BindableTool::Dsh)
@@ -29,6 +31,7 @@ pub(crate) fn open_handle(file: std::fs::File, path: &Path) -> Result<Box<dyn Re
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct FileMeta {
     pub meta: SessionMeta,
     pub parent: Option<String>,
@@ -142,7 +145,7 @@ pub(crate) fn scan_files(home: &Path) -> Vec<FileMeta> {
                 })
                 .max_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
             if let Some((_, _, path)) = latest {
-                if let Some(meta) = parse_file(&path) {
+                if let Some(meta) = parse_cached(&path) {
                     out.push(meta);
                 }
             }
@@ -151,7 +154,53 @@ pub(crate) fn scan_files(home: &Path) -> Vec<FileMeta> {
     out
 }
 
+/// A file's length and modification time.
+type FileStamp = (u64, Option<SystemTime>);
+
+type ParseCache = HashMap<PathBuf, (FileStamp, Option<FileMeta>)>;
+
+/// Session files read before, by path: read again only once their stamp changes.
+/// The Sessions page groups each dsh row by scanning every file, so a listing
+/// otherwise reads and decompresses every file once per row.
+static PARSED: LazyLock<Mutex<ParseCache>> = LazyLock::new(Default::default);
+
+fn parse_cached(path: &Path) -> Option<FileMeta> {
+    let stamp = std::fs::metadata(path)
+        .ok()
+        .map(|file| (file.len(), file.modified().ok()));
+    let cached = stamp.and_then(|stamp| {
+        PARSED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(path)
+            .filter(|(saved, _)| *saved == stamp)
+            .map(|(_, meta)| meta.clone())
+    });
+    if let Some(meta) = cached {
+        return meta;
+    }
+    let meta = parse_file(path);
+    if let Some(stamp) = stamp {
+        PARSED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(path.to_path_buf(), (stamp, meta.clone()));
+    }
+    meta
+}
+
+#[cfg(test)]
+static PARSES: LazyLock<Mutex<HashMap<PathBuf, usize>>> = LazyLock::new(Default::default);
+
 fn parse_file(path: &Path) -> Option<FileMeta> {
+    #[cfg(test)]
+    {
+        *PARSES
+            .lock()
+            .unwrap()
+            .entry(path.to_path_buf())
+            .or_default() += 1;
+    }
     let reader = BufReader::new(open(path).ok()?);
     let mut values = reader
         .lines()
@@ -328,6 +377,9 @@ pub(crate) fn models(path: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn parses_of(path: &Path) -> usize {
+        PARSES.lock().unwrap().get(path).copied().unwrap_or(0)
+    }
     fn write_frames(path: &Path, lines: &[&str]) {
         let mut bytes = Vec::new();
         for line in lines {
@@ -358,6 +410,38 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].title.as_deref(), Some("new title"));
         assert_eq!(grouped_files(home.path(), "root").len(), 2);
+    }
+    #[test]
+    fn each_session_file_is_parsed_once_until_it_changes() {
+        let home = tempfile::tempdir().unwrap();
+        let mut paths = Vec::new();
+        for id in ["root", "child", "other"] {
+            let dir = home.path().join("sessions/project").join(id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let parent = if id == "child" { "root" } else { "" };
+            let head = format!(
+                r#"{{"type":"session","version":4,"id":"{id}","createdAt":1000,"parentSession":"{parent}","delegationDepth":{}}}"#,
+                if parent.is_empty() { 0 } else { 1 }
+            );
+            let path = dir.join("session.v4.jsonl.zstd");
+            write_frames(&path, &[&head]);
+            paths.push(path);
+        }
+        // One listing groups every root row; each row used to rescan every file.
+        for root in ["root", "other", "root"] {
+            grouped_files(home.path(), root);
+        }
+        assert!(paths.iter().all(|p| parses_of(p) == 1));
+
+        let head =
+            r#"{"type":"session","version":4,"id":"other","createdAt":2000,"delegationDepth":0}"#;
+        let event = r#"{"type":"session/title","time":3000,"data":{"title":"renamed"}}"#;
+        write_frames(&paths[2], &[head, event]);
+        assert_eq!(
+            grouped_files(home.path(), "other")[0].title.as_deref(),
+            Some("renamed")
+        );
+        assert_eq!(parses_of(&paths[2]), 2);
     }
     #[test]
     fn utf16_segment_and_wrong_directory_rejection() {
