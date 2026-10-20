@@ -517,11 +517,13 @@ fn openclaw_usage_native_live_revision_updates_in_place() {
     let db = Database::memory().unwrap();
     sync_openclaw_usage_at(&db, &root).unwrap();
     let mut revised = message("m");
-    revised["message"]["usage"]["input"] = json!(45);
+    // A different size: Windows stamps a same-size rewrite in the same clock
+    // tick identically, which real append-only sessions never do.
+    revised["message"]["usage"]["input"] = json!(4500);
     write_events(&path, &[header("s"), revised]);
     sync_openclaw_usage_at(&db, &root).unwrap();
     assert_eq!(ledger(&db).len(), 1);
-    assert_eq!(ledger(&db)[0].2, [45, 10, 100, 20]);
+    assert_eq!(ledger(&db)[0].2, [4500, 10, 100, 20]);
 }
 #[test]
 #[serial]

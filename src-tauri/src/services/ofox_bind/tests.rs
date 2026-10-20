@@ -956,13 +956,7 @@ async fn claude_relay_setup_comes_back_byte_for_byte_after_a_model_change() {
         .await
         .expect("unbind");
     assert_eq!(fs::read_to_string(&settings).unwrap(), CLAUDE_RELAY);
-    assert_eq!(
-        report.exact_files,
-        [format!(
-            "~/{}",
-            Path::new(".claude").join("settings.json").display()
-        )]
-    );
+    assert_eq!(report.exact_files, ["~/.claude/settings.json"]);
     assert!(!report.legacy);
     assert_eq!(report.provider_restored_to.as_deref(), Some("relay"));
     assert_eq!(
@@ -1057,13 +1051,7 @@ async fn claude_settings_created_by_bind_are_removed_again() {
         .await
         .expect("unbind");
     assert!(!home.dir.path().join(".claude").exists());
-    assert_eq!(
-        report.files_removed,
-        [format!(
-            "~/{}",
-            Path::new(".claude").join("settings.json").display()
-        )]
-    );
+    assert_eq!(report.files_removed, ["~/.claude/settings.json"]);
 }
 
 #[tokio::test]
@@ -1173,10 +1161,7 @@ async fn gemini_google_login_user_returns_to_google_login() {
         fs::read_to_string(&settings).unwrap(),
         GEMINI_GOOGLE_LOGIN_SETTINGS
     );
-    assert_eq!(
-        report.files_removed,
-        [format!("~/{}", Path::new(".gemini").join(".env").display())]
-    );
+    assert_eq!(report.files_removed, ["~/.gemini/.env"]);
 }
 
 #[tokio::test]
