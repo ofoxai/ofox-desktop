@@ -587,7 +587,7 @@ fn adopted_link_hash(link: &str) -> String {
     io::fingerprint(Some(format!("adopted-link:{link}").as_bytes()))
 }
 /// The skill's files behind an entry, through a link if it is one.
-fn content_hash(path: &Path) -> Result<String, AppError> {
+pub fn content_hash(path: &Path) -> Result<String, AppError> {
     let real = fs::canonicalize(path).map_err(|_| error("skillUnreadable"))?;
     artifacts::tree_hash(&real)
 }
@@ -1904,6 +1904,35 @@ mod tests {
             "body"
         );
         assert!(Path::new(&archived.backup_path).starts_with(sandbox.home()));
+    }
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn an_identical_unowned_entry_is_offered_for_take_over() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let skill = draft(&db, "body");
+        let codex = super::super::skill_targets::root("codex")
+            .unwrap()
+            .join("fixture");
+        user_folder(&codex, "body");
+        let gemini = super::super::skill_targets::root("gemini")
+            .unwrap()
+            .join("fixture");
+        user_folder(&gemini, "different");
+        let target = skill_target(&db, &skill, "codex");
+        assert_eq!(target["adoptable"], true);
+        assert_eq!(target["entryKind"], "directory");
+        assert_eq!(skill_target(&db, &skill, "gemini")["adoptable"], false);
+        assert_eq!(
+            skill_target(&db, &skill, "claude")["entryKind"],
+            serde_json::Value::Null
+        );
+        let op = preview_adoption(&db, &skill.id, &["codex".into()], &["codex".into()]).unwrap();
+        io::apply_operation(&db, &op.id).unwrap();
+        let target = skill_target(&db, &skill, "codex");
+        assert_eq!(target["adopted"], true);
+        assert_eq!(target["adoptable"], false);
     }
     #[test]
     fn receipts_written_before_take_over_existed_still_read() {

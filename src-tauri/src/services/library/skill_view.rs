@@ -92,6 +92,26 @@ pub fn definition_view(db: &Database, row: &InstalledSkill) -> Result<Value, App
             }
         }
         let readable = !readable_groups.is_empty();
+        let entry = std::fs::symlink_metadata(&path).ok();
+        let entry_kind = entry.as_ref().map(|meta| {
+            if meta.file_type().is_symlink() {
+                "link"
+            } else {
+                "directory"
+            }
+        });
+        let adopted = own.is_some_and(|receipt| {
+            serde_json::from_str::<skills::DirectoryOwned>(&receipt.owned_segment)
+                .is_ok_and(|owned| owned.adopted.is_some())
+        });
+        // The same skill is already there and nobody owns it: switching it on takes it over.
+        let adoptable = entry.is_some()
+            && !snapshot
+                .machine
+                .receipts
+                .contains_key(&format!("skills:{physical}"))
+            && row.content_hash.is_some()
+            && skills::content_hash(&path).ok() == row.content_hash;
         let status = if !scope_known && (desired || own.is_some()) {
             "needsReview"
         } else if own.is_some() && !intact {
@@ -110,7 +130,8 @@ pub fn definition_view(db: &Database, row: &InstalledSkill) -> Result<Value, App
         targets.push(json!({"toolId":tool,"path":path.to_string_lossy(),"targetGroupId":physical,"desired":desired,"applied":scope_known&&desired&&own.is_some()&&intact&&current,
             "readable":if scope_known{Some(readable)}else{None},"readers":if scope_known{Some(potential)}else{None},"readableGroups":readable_groups,"status":status,
             "lastAppliedRevision":own.map(|receipt|receipt.resource_revision),"pathState":if path.exists(){"exists"}else if root.is_dir(){"missing"}else{"missingParent"},
-            "scopeKnown":scope_known,"disabledReason":if scope_known{None}else{Some("library.nativeScopeUnsupported")}}));
+            "scopeKnown":scope_known,"disabledReason":if scope_known{None}else{Some("library.nativeScopeUnsupported")},
+            "adopted":adopted,"adoptable":adoptable,"entryKind":entry_kind}));
     }
     let source_state = if meta.is_none() {
         "needsMigration"
