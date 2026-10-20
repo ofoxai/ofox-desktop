@@ -393,7 +393,10 @@ pub(crate) fn read_private_with(
         return Err(invalid());
     }
     let entry = unsafe { entry.assume_init() };
-    if entry.st_dev as u64 != before.dev()
+    // `dev_t` is i32 on macOS and u64 on Linux, where the cast is a no-op.
+    #[allow(clippy::unnecessary_cast)]
+    let device = entry.st_dev as u64;
+    if device != before.dev()
         || entry.st_ino != before.ino()
         || entry.st_mode & libc::S_IFMT != libc::S_IFREG
     {
