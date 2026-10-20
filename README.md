@@ -8,7 +8,32 @@
 git clone --branch test-builds --single-branch --depth 1 https://github.com/ofoxai/ofox-desktop.git ofox-test-builds
 ```
 
-## 1.3.4-adfc4d6（退出登录停用 API Key，换账号后工具改用当前账号的额度，待验证）
+## 1.3.6-b54279e（所有可绑定工具都有用量统计 + 按 magpie 改版，仅 macOS，待验证）
+
+源码：`feat/usage-all-tools` @ `b54279e9`。它等于正式版 1.3.6（main `963a728f`）加上还没合并的四个分支，依次是 `feat/magpie-ux` → `feat/session-subagents` → `fix/library-mcp-detection` → `feat/usage-all-tools`，共 314 个提交。不含 `fix/codex-mcp-type`。应用里显示的版本是 1.3.6，和正式版同号。
+
+| 分支 | 内容 |
+|---|---|
+| `feat/usage-all-tools` | 用量统计覆盖所有可绑定的工具。Hermes 不再只有「Hermes 累计用量」弹窗，而是和其它工具一样进入概览、明细和会话分析：每个会话按模型的累计记在它最后活跃的那天（和 magpie 一致），项目取会话所在目录，活跃时长按消息时间计算。已绑定的工具都有用量标签，还没用过的显示 0；ChatGPT 的 Codex 模式记在 Codex 下。 |
+| `fix/library-mcp-detection` | 资源库：MCP 改成表格，每个工具一列勾选框，识别各工具里已有的 MCP 时和 magpie 一致，应用自带的 MCP 不再列出；Skills 页按 magpie 改版（查找技能、按来源分组、每个工具一个开关，包括 Claude Desktop 的 Cowork）。 |
+| `feat/session-subagents` | 会话：显示子代理（Codex、Claude、OpenCode），会话用量与 magpie 对齐，列表加载更快；工具页的列对齐；托盘弹窗改版（工具 / 用量两栏，Codex、Claude、Hermes 可调推理强度）。 |
+| `feat/magpie-ux` | 按 magpie 改版：工具 / 会话 / 资源库 / 用量四个页面，会话管理带 Tokens 和费用，用量页带余额趋势，支持卸载工具。 |
+
+| 文件 | 平台 | 说明 |
+|---|---|---|
+| `ofox_desktop_1.3.6_macos_aarch64.dmg` | macOS 12+，Apple Silicon | 公司证书（NICE TALK PTE. LTD.）签名，已通过 Apple 公证并附上公证票据，双击就能打开（离线也可以） |
+
+这次没有 Windows 安装包。安装前先从菜单栏 / 托盘弹窗里点「退出 Ofox」。校验文件 `1.3.6-b54279e/SHA256SUMS.txt`。
+
+用量统计请这样验：
+
+1. **标签**：用量 → 会话分析，时段选「全部」。所有已绑定的工具都有标签，没用过的数值为 0；没有单独的 ChatGPT 标签。筛选行里原来的「Hermes 累计用量」按钮没有了。
+2. **Hermes**：在某个项目目录里运行 `hermes -z "回复 OK"`，回到 Ofox 点刷新。Hermes 标签下出现这次会话，项目是刚才的目录，有活跃时长；Tokens 和 magpie「用量 → 会话」里 Hermes 的数字一致。明细里这条记录的来源是「本机会话导入」，鼠标悬停说明它是「一个会话在一个模型上的累计，不是单次请求」。
+3. **会话继续**：在 Hermes 里继续同一个会话再发一句（交互模式 `hermes --resume <会话 ID>`），刷新后明细里还是那一条，Tokens 变大，不会多出一条。打包时在本机试过 `hermes --resume <会话 ID> -z …`，Ofox 返回 HTTP 405（上游服务商报错，和这次改动无关）；遇到就跳过这一步。
+4. **OpenClaw、Pi**：绑定后各运行一句（`openclaw agent --local -m "回复 OK"`、`pi -p "回复 OK"`），刷新后对应标签有数字。
+5. **重启**：退出再打开 Ofox，各项数字不变。
+
+## 1.3.4-adfc4d6（退出登录停用 API Key，换账号后工具改用当前账号的额度；已随正式版 1.3.5 发布，macOS 已被 1.3.6-b54279e 取代）
 
 源码：临时集成分支 `ci/test-installers` @ `adfc4d6a` = 1.3.4-22022d0 + PR #45。应用里显示的版本仍然是 1.3.4。
 
