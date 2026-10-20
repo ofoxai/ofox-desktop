@@ -414,6 +414,139 @@ async fn dsh_01_settings_yaml_after_bind_reports_the_upgrade() {
     assert_eq!(status.message.as_deref(), Some(dsh::UPGRADE_HINT));
 }
 
+/// What dsh 0.2 does when a model is picked: save it as the running profile's default.
+fn pick_in_dsh(profile: &Path, provider: &str, model: &str, extra: Option<Value>) {
+    let current = fs::read_to_string(profile).unwrap();
+    let before = common::parse(Some(&current), Format::Patch).unwrap();
+    let mut value = before.clone();
+    value["agent-default-model"]["config"]["provider"] = json!(provider);
+    value["agent-default-model"]["config"]["model"] = json!(model);
+    if let Some(entry) = extra {
+        value["llm-pi-ai"]["config"]["providers"][provider]["models"]
+            .as_array_mut()
+            .unwrap()
+            .push(entry);
+    }
+    write(
+        profile,
+        &common::render(&current, Format::Patch, &before, &value).unwrap(),
+    );
+}
+fn default_model(profile: &Path) -> (Value, Value) {
+    let value = dsh::patch_for_test(profile);
+    let config = &value["agent-default-model"]["config"];
+    (config["provider"].clone(), config["model"].clone())
+}
+
+#[tokio::test]
+#[serial]
+async fn dsh_model_picked_in_one_profile_is_followed_and_synced() {
+    let h = Home::new();
+    let db = Database::memory().unwrap();
+    let all = catalog();
+    let web = h.dsh("profiles/web/cordis.patch.yml");
+    let headless = h.dsh("profiles/headless/cordis.patch.yml");
+    write(&web, PROFILE);
+    write(&headless, "# headless\n[]\n");
+    bind_with_catalog(&db, BindableTool::Dsh, KEY, &all[0], &all)
+        .await
+        .unwrap();
+
+    pick_in_dsh(&web, "ofox-dsh-responses", "openai/response", None);
+    let (_, native, _) = model_snapshot(&db, BindableTool::Dsh).await.unwrap();
+
+    assert_eq!(native.observed_model.as_deref(), Some("openai/response"));
+    assert_eq!(
+        default_model(&headless),
+        (json!("ofox-dsh-responses"), json!("openai/response"))
+    );
+    assert_eq!(
+        binding_status(&db, BindableTool::Dsh).await.status,
+        BindingStatus::Configured
+    );
+    unbind(&db, BindableTool::Dsh, false).await.unwrap();
+    assert_eq!(fs::read_to_string(&web).unwrap(), PROFILE);
+    assert_eq!(fs::read_to_string(&headless).unwrap(), "# headless\n[]\n");
+}
+
+#[tokio::test]
+#[serial]
+async fn dsh_unchanged_profiles_are_not_rewritten_on_refresh() {
+    let h = Home::new();
+    let db = Database::memory().unwrap();
+    let all = catalog();
+    let web = h.dsh("profiles/web/cordis.patch.yml");
+    write(&web, PROFILE);
+    write(&h.dsh("profiles/headless/cordis.patch.yml"), "[]\n");
+    bind_with_catalog(&db, BindableTool::Dsh, KEY, &all[0], &all)
+        .await
+        .unwrap();
+    let revision = revision_material(&db, BindableTool::Dsh).unwrap();
+
+    model_snapshot(&db, BindableTool::Dsh).await.unwrap();
+
+    assert_eq!(revision_material(&db, BindableTool::Dsh).unwrap(), revision);
+}
+
+#[tokio::test]
+#[serial]
+async fn dsh_profiles_changed_to_different_models_follow_web() {
+    let h = Home::new();
+    let db = Database::memory().unwrap();
+    let all = catalog();
+    let web = h.dsh("profiles/web/cordis.patch.yml");
+    let headless = h.dsh("profiles/headless/cordis.patch.yml");
+    write(&web, PROFILE);
+    write(&headless, "[]\n");
+    bind_with_catalog(&db, BindableTool::Dsh, KEY, &all[0], &all)
+        .await
+        .unwrap();
+
+    pick_in_dsh(&headless, "ofox-dsh-anthropic", "anthropic/claude", None);
+    pick_in_dsh(&web, "ofox-dsh-responses", "openai/response", None);
+    let (_, native, _) = model_snapshot(&db, BindableTool::Dsh).await.unwrap();
+
+    assert_eq!(native.observed_model.as_deref(), Some("openai/response"));
+    assert_eq!(
+        default_model(&headless),
+        (json!("ofox-dsh-responses"), json!("openai/response"))
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn dsh_model_added_in_one_profile_is_copied_to_the_others() {
+    let h = Home::new();
+    let db = Database::memory().unwrap();
+    let all = catalog();
+    let web = h.dsh("profiles/web/cordis.patch.yml");
+    let headless = h.dsh("profiles/headless/cordis.patch.yml");
+    write(&web, PROFILE);
+    write(&headless, "[]\n");
+    bind_with_catalog(&db, BindableTool::Dsh, KEY, &all[0], &all)
+        .await
+        .unwrap();
+
+    let extra = json!({"id": "openai/extra", "name": "Extra"});
+    pick_in_dsh(
+        &web,
+        "ofox-dsh-responses",
+        "openai/extra",
+        Some(extra.clone()),
+    );
+    model_snapshot(&db, BindableTool::Dsh).await.unwrap();
+
+    let value = dsh::patch_for_test(&headless);
+    let models = value["llm-pi-ai"]["config"]["providers"]["ofox-dsh-responses"]["models"]
+        .as_array()
+        .unwrap();
+    assert!(models.contains(&extra));
+    assert_eq!(
+        default_model(&headless),
+        (json!("ofox-dsh-responses"), json!("openai/extra"))
+    );
+}
+
 #[tokio::test]
 #[serial]
 async fn dsh_multiline_flow_credential_refs_bind_and_restore_exactly() {

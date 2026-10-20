@@ -141,6 +141,22 @@ describe("QuickModelPicker", () => {
     expect(screen.getByText("当前观察到的模型：app/current")).toBeVisible();
   });
 
+  it("says a dsh pick becomes the default for new sessions only", async () => {
+    render(
+      <QuickModelPicker
+        toolId="dsh"
+        snapshot={snapshot("dsh")}
+        onRetry={vi.fn()}
+      />,
+    );
+    await selectSingle();
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(
+        "已设为 dsh 新会话的默认模型；已有会话保留各自的模型",
+      ),
+    );
+  });
+
   it.each(["opencode", "workbuddy"])(
     "keeps %s as an ordered multi-model set and never calls the single setter",
     async (tool) => {

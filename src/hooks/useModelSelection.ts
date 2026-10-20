@@ -176,6 +176,13 @@ export function useSaveEffort() {
   );
 }
 
+/** Tools whose open conversations keep their own model say so after a save. */
+export function savedMessageKey(toolId: string) {
+  if (toolId === "chatgpt") return "modelExperience.defaultSaved";
+  if (toolId === "dsh") return "modelExperience.dshDefaultSaved";
+  return "modelExperience.saved";
+}
+
 export function useSaveModelSelection() {
   return useMutation(
     {

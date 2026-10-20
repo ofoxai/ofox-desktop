@@ -7,6 +7,7 @@ import { ModelPicker, MultiModelPicker } from "./ModelPicker";
 import { MenuChevron, menuTriggerClassName } from "@/components/ui/menu-select";
 import {
   useModelCatalog,
+  savedMessageKey,
   useSaveModelSelection,
 } from "@/hooks/useModelSelection";
 import type { ToolModelSnapshot } from "@/lib/api/modelSelection";
@@ -128,13 +129,7 @@ export function QuickModelPicker({
           }),
         );
       }
-      toast.success(
-        t(
-          toolId === "chatgpt"
-            ? "modelExperience.defaultSaved"
-            : "modelExperience.saved",
-        ),
-      );
+      toast.success(t(savedMessageKey(toolId)));
     } catch (error) {
       const message = t("modelExperience.saveFailed", { error: String(error) });
       setSaveError(message);

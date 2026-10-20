@@ -363,6 +363,90 @@ pub(super) fn scopes(record: &Record) -> Result<Vec<NativeScopeModel>, String> {
     Ok(scopes)
 }
 
+/// dsh 0.2 只把在 dsh 里选的模型存进正在运行的 profile。和 Ofox 上次写入的值对比，
+/// 变了的 profile 就是用户的新选择：采纳它，并写进其它受管 profile，让 dsh 只有
+/// 一个默认模型。几个 profile 改成了不同的模型时以 web 为准（「打开」用的是它）。
+pub(super) fn adopt_changed(record: &Record) -> Result<Option<Record>, String> {
+    let provider_path = common::path(&[DEFAULT, "config", "provider"]);
+    let model_path = common::path(&[DEFAULT, "config", "model"]);
+    let written = |file: &common::FileRecord, path: &[String]| {
+        file.owned
+            .iter()
+            .find(|o| o.path == path)
+            .and_then(|o| o.written.clone())
+    };
+    let mut managed = Vec::new();
+    let mut changed = Vec::new();
+    for file in record
+        .files
+        .iter()
+        .filter(|f| f.format == Format::Patch && f.owned.iter().any(|o| o.path == model_path))
+    {
+        let value = patch(&file.path)?;
+        let now = (
+            common::get(&value, &provider_path).cloned(),
+            common::get(&value, &model_path).cloned(),
+        );
+        if now != (written(file, &provider_path), written(file, &model_path)) {
+            changed.push((scope_name(&record.directory, &file.path), now, value));
+        }
+        managed.push(file.path.clone());
+    }
+    let Some(first) = changed.first() else {
+        return Ok(None);
+    };
+    let chosen = if changed.iter().all(|c| c.1 == first.1) {
+        first
+    } else {
+        match changed
+            .iter()
+            .find(|c| c.0 == "profiles/web/cordis.patch.yml")
+        {
+            Some(web) => web,
+            None => return Ok(None),
+        }
+    };
+    let (Some(Value::String(provider)), Some(Value::String(model))) = &chosen.1 else {
+        return Ok(None);
+    };
+    if !own_route(provider) || model.is_empty() {
+        return Ok(None);
+    }
+    let models_pointer = format!("/{PLUGIN}/config/providers/{provider}/models");
+    let entry = chosen
+        .2
+        .pointer(&models_pointer)
+        .and_then(Value::as_array)
+        .and_then(|entries| entries.iter().find(|e| e["id"] == model.as_str()))
+        .cloned();
+    let mut next = record.clone();
+    for path in managed {
+        let mut changes: Changes = vec![
+            (provider_path.clone(), Some(provider.as_str().into()), false),
+            (model_path.clone(), Some(model.as_str().into()), false),
+        ];
+        let mut entries = patch(&path)?
+            .pointer(&models_pointer)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if !entries.iter().any(|e| e["id"] == model.as_str()) {
+            entries.push(
+                entry
+                    .clone()
+                    .ok_or_else(|| "dsh 选择的模型不在模型列表中".to_string())?,
+            );
+            changes.push((
+                common::path(&[PLUGIN, "config", "providers", provider, "models"]),
+                Some(entries.into()),
+                false,
+            ));
+        }
+        update(&mut next, path, Format::Patch, false, changes)?;
+    }
+    Ok(Some(next))
+}
+
 pub(super) fn set_models(
     record: &Record,
     _key: &str,

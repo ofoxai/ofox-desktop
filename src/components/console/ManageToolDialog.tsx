@@ -61,6 +61,7 @@ import { isOfoxBillingManager } from "@/lib/api/ofoxAuth";
 import { ofoxWalletUrl } from "@/lib/ofoxUrls";
 import {
   useModelSelection,
+  savedMessageKey,
   useSaveModelSelection,
   filterModelsForNativeTool,
 } from "@/hooks/useModelSelection";
@@ -566,11 +567,7 @@ export default function ManageToolDialog({
       }
       toast.success(
         t(
-          multiModel
-            ? "modelExperience.modelsSaved"
-            : tool.id === "chatgpt"
-              ? "modelExperience.defaultSaved"
-              : "modelExperience.saved",
+          multiModel ? "modelExperience.modelsSaved" : savedMessageKey(tool.id),
           { count: savedCount },
         ),
       );

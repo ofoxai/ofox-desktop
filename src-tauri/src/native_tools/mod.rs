@@ -201,6 +201,24 @@ pub(crate) async fn snapshot(db: &Database, tool: BindableTool) -> Result<Native
     snapshot_unlocked(db, tool)
 }
 
+/// dsh 只把在 dsh 里切换的模型存进当前 profile；读取前先采纳它并同步到其它 profile。
+/// Pi 只有一处默认，读回的就是它，不需要这一步。
+fn adopt_agent_model(db: &Database, tool: BindableTool) -> Result<(), String> {
+    if tool != BindableTool::Dsh {
+        return Ok(());
+    }
+    let Some(record) = common::load(db, tool.as_str())? else {
+        return Ok(());
+    };
+    if health(&record, tool)?.status != BindingStatus::Configured {
+        return Ok(());
+    }
+    match dsh::adopt_changed(&record)? {
+        Some(next) => common::commit(db, tool.as_str(), &next),
+        None => Ok(()),
+    }
+}
+
 /// A coherent read for both webviews: binding, current models, and revision
 /// share the same lock as rekey, region migration, and model writes.
 pub(crate) async fn model_snapshot(
@@ -208,6 +226,12 @@ pub(crate) async fn model_snapshot(
     tool: BindableTool,
 ) -> Result<(ToolBindingStatus, NativeSnapshot, String), String> {
     let _guard = BIND_LOCK.lock().await;
+    if let Err(error) = adopt_agent_model(db, tool) {
+        log::warn!(
+            "[native_tools] 采纳 {} 里切换的模型失败：{error}",
+            tool.as_str()
+        );
+    }
     let binding = common::load(db, tool.as_str())
         .and_then(|r| r.ok_or_else(|| "尚未绑定".to_string()))
         .and_then(|r| health(&r, tool))
