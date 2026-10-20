@@ -495,8 +495,6 @@ struct QueryParts {
     #[serde(default, deserialize_with = "present_part")]
     usage_sync: Option<OpaqueQueryPart>,
     #[serde(default, deserialize_with = "present_part")]
-    lifetime_usage: Option<OpaqueQueryPart>,
-    #[serde(default, deserialize_with = "present_part")]
     analytics: Option<AnalyticsQueryPart>,
 }
 
@@ -587,7 +585,7 @@ impl<'de> Deserialize<'de> for ReadableJson {
 
 impl QueryParts {
     fn valid_wrappers(&self) -> bool {
-        [&self.metadata, &self.usage_sync, &self.lifetime_usage]
+        [&self.metadata, &self.usage_sync]
             .into_iter()
             .flatten()
             .all(|part| !part.revision.is_empty())
@@ -641,6 +639,7 @@ fn source_id(provider: &str) -> &str {
         "pi" => "pi_session",
         "dsh" => "dsh_session",
         "openclaw" => "openclaw_session",
+        "hermes" => "hermes_session",
         _ => "unsupported",
     }
 }
@@ -651,7 +650,7 @@ fn rows_on(conn: &rusqlite::Connection) -> Result<BTreeMap<String, Row>, AppErro
 }
 
 fn raw_rows_on(conn: &rusqlite::Connection) -> Result<Vec<RawRow>, AppError> {
-    let mut statement=conn.prepare("SELECT source_path,provider_id,stamp,parser_version,meta_json FROM session_meta_cache WHERE provider_id IN ('claude','codex','gemini','opencode','workbuddy','pi','dsh','openclaw') ORDER BY source_path")?;
+    let mut statement=conn.prepare("SELECT source_path,provider_id,stamp,parser_version,meta_json FROM session_meta_cache WHERE provider_id IN ('claude','codex','gemini','opencode','workbuddy','pi','dsh','openclaw','hermes') ORDER BY source_path")?;
     let mut result = Vec::new();
     let mut bytes = 0usize;
     let rows = statement.query_map([], |r| {
@@ -1162,6 +1161,7 @@ pub(crate) fn batch_stamp(batch: &BatchSource) -> Result<Value, AppError> {
         "pi" => super::session_analytics_pi::stamp(&batch.roots),
         "dsh" => super::session_analytics_dsh::stamp(&batch.roots),
         "openclaw" => super::session_analytics_openclaw::stamp(&batch.roots),
+        "hermes" => super::session_analytics_hermes::stamp(&batch.roots),
         _ => Err(invalid("unsupportedTranscriptReader")),
     }
 }
@@ -1171,6 +1171,7 @@ fn batch_read(db: &Database, batch: &BatchSource) -> Result<ParsedSource, AppErr
         "pi" => super::session_analytics_pi::read(db, &batch.roots),
         "dsh" => super::session_analytics_dsh::read(db, &batch.roots),
         "openclaw" => super::session_analytics_openclaw::read(db, &batch.roots),
+        "hermes" => super::session_analytics_hermes::read(db, &batch.roots),
         _ => Err(invalid("unsupportedTranscriptReader")),
     }
 }
@@ -1914,7 +1915,7 @@ pub(crate) fn listing_projections_on(
     for meta in listing.iter().filter(|meta| {
         matches!(
             meta.provider_id.as_str(),
-            "workbuddy" | "pi" | "dsh" | "openclaw"
+            "workbuddy" | "pi" | "dsh" | "openclaw" | "hermes"
         )
     }) {
         let manager = crate::session_manager::managed::key(meta);
@@ -2617,7 +2618,7 @@ mod tests {
         let mut sequence_parts = canonical.clone();
         sequence_parts["parts"] = json!([]);
         cases.push(sequence_parts.to_string());
-        for part in ["metadata", "usageSync", "analytics", "lifetimeUsage"] {
+        for part in ["metadata", "usageSync", "analytics"] {
             let mut sequence_wrapper = canonical.clone();
             let value = sequence_wrapper["parts"][part]["value"].clone();
             sequence_wrapper["parts"][part] = json!(["sequence-r", value]);
@@ -2633,7 +2634,7 @@ mod tests {
             value["formatVersion"] = format;
             cases.push(value.to_string());
         }
-        for part in ["metadata", "usageSync", "analytics", "lifetimeUsage"] {
+        for part in ["metadata", "usageSync", "analytics"] {
             for field in ["revision", "value"] {
                 let mut value = canonical.clone();
                 value["parts"][part].as_object_mut().unwrap().remove(field);

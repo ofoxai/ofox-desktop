@@ -102,6 +102,7 @@ impl ProjectIndex {
             "pi" => ("_pi_session", "pi_session"),
             "dsh" => ("_dsh_session", "dsh_session"),
             "openclaw" => ("_openclaw_session", "openclaw_session"),
+            "hermes" => ("_hermes_session", "hermes_session"),
             _ => return None,
         };
         if provider != owned_provider || source != Some(owned_source) {

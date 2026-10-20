@@ -137,6 +137,16 @@ it.each([
   },
 );
 
+it("explains that a Hermes row is a per-session model total", async () => {
+  records = [{ ...row, dataSource: "hermes_session" }];
+  render(<UsageRequests {...props} />);
+  const item = await screen.findByRole("button", { name: /test-model/ });
+  expect(within(item).getByText("本机会话导入")).toHaveAttribute(
+    "title",
+    expect.stringMatching(/Hermes 本地会话按模型累计读取.*不是单次请求/),
+  );
+});
+
 it.each([
   ["zh", "本机会话导入"],
   ["en", "Local session import"],

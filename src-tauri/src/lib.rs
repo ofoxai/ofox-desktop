@@ -1601,7 +1601,6 @@ pub fn run() {
             commands::get_request_logs,
             commands::get_request_detail,
             commands::get_usage_capabilities,
-            commands::get_usage_source_summary,
             commands::export_request_logs_csv,
             commands::get_model_pricing,
             commands::update_model_pricing,

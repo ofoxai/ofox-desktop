@@ -26,6 +26,7 @@ pub mod session_analytics_api;
 pub mod session_analytics_core;
 pub(crate) mod session_analytics_discovery;
 pub(crate) mod session_analytics_dsh;
+pub(crate) mod session_analytics_hermes;
 pub mod session_analytics_index;
 pub(crate) mod session_analytics_legacy;
 pub(crate) mod session_analytics_listing;
@@ -66,7 +67,6 @@ pub mod usage_analytics;
 pub mod usage_cache;
 pub mod usage_data;
 pub(crate) mod usage_health;
-pub mod usage_lifetime;
 pub mod usage_maintenance;
 pub mod usage_overview;
 #[cfg(test)]

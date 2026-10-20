@@ -144,28 +144,6 @@ pub fn get_usage_capabilities() -> serde_json::Value {
         "sources":crate::services::usage_query::source_capabilities()})
 }
 
-/// Native cumulative counters stay independent of event-time ledger queries.
-#[tauri::command(rename_all = "camelCase")]
-pub async fn get_usage_source_summary(
-    state: State<'_, AppState>,
-    tool_id: String,
-) -> Result<crate::services::usage_lifetime::LifetimeSummaryV1, AppError> {
-    if tool_id != "hermes" {
-        return Err(AppError::InvalidInput(
-            "usage.lifetime.unsupportedTool".into(),
-        ));
-    }
-    let db = state.db.clone();
-    let root = crate::services::usage_lifetime::resolve_hermes_root()?;
-    let apex = crate::ofox_apex::current_apex();
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    tokio::task::spawn_blocking(move || {
-        crate::services::usage_lifetime::hermes_summary(&db, &root, apex, now_ms)
-    })
-    .await
-    .map_err(|_| AppError::Message("usage.lifetime.taskFailed".into()))?
-}
-
 #[cfg(test)]
 mod workbench_capability_tests {
     #[test]
@@ -192,6 +170,7 @@ mod workbench_capability_tests {
                 "pi",
                 "dsh",
                 "openclaw",
+                "hermes",
             ]
             .contains(&capability.tool_id.as_str());
             assert_eq!(

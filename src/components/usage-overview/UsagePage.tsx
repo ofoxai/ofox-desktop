@@ -52,7 +52,6 @@ import { UsageFilterMenu } from "./UsageFilterMenu";
 import { UsageRequests } from "./UsageRequests";
 import { UsageFreshness } from "./UsageFreshness";
 import { UsageSessions } from "./UsageSessions";
-import { UsageLifetimeEntry } from "./UsageLifetimeEntry";
 import { UsageRebuildStatus } from "./UsageRebuildStatus";
 
 const EMPTY: string[] = [];
@@ -658,12 +657,6 @@ export function UsagePage({
             {t("usageWorkbench.projectUnavailable")}
           </span>
         )}
-        <UsageLifetimeEntry
-          boundTools={boundTools}
-          capabilities={capabilities.data}
-          apex={apex}
-          active={visible}
-        />
       </UsageFilterToolbar>
       {!sharedProjectSupported &&
         effectiveTab === "sessions" &&

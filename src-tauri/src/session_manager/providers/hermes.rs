@@ -18,6 +18,12 @@ fn get_hermes_db_path() -> PathBuf {
     get_hermes_dir().join("state.db")
 }
 
+/// The listing's source path for a SQLite session. Usage analytics derives the
+/// same managed key from it, so both sides must build it here.
+pub(crate) fn sqlite_source(db_path: &Path, session_id: &str) -> String {
+    format!("sqlite:{}#{}", db_path.display(), session_id)
+}
+
 fn get_hermes_sessions_dir() -> PathBuf {
     get_hermes_dir().join("sessions")
 }
@@ -93,10 +99,8 @@ fn scan_sessions_sqlite() -> Vec<SessionMeta> {
         Err(_) => return Vec::new(),
     };
 
-    let db_source = format!("sqlite:{}", db_path.display());
-
     for row_result in rows.flatten() {
-        if let Some(meta) = sqlite_row_to_session_meta(&row_result, &db_source) {
+        if let Some(meta) = sqlite_row_to_session_meta(&row_result, &db_path) {
             sessions.push(meta);
         }
     }
@@ -104,7 +108,7 @@ fn scan_sessions_sqlite() -> Vec<SessionMeta> {
     sessions
 }
 
-fn sqlite_row_to_session_meta(row: &Value, db_source: &str) -> Option<SessionMeta> {
+fn sqlite_row_to_session_meta(row: &Value, db_path: &Path) -> Option<SessionMeta> {
     let obj = row.as_object()?;
 
     let session_id = obj.get("id").and_then(Value::as_str)?.to_string();
@@ -132,7 +136,7 @@ fn sqlite_row_to_session_meta(row: &Value, db_source: &str) -> Option<SessionMet
         .or_else(|| obj.get("updated_at"))
         .and_then(parse_timestamp_to_ms);
 
-    let source_path = format!("{}#{}", db_source, session_id);
+    let source_path = sqlite_source(db_path, &session_id);
 
     let mut candidates = TitleCandidates::default().with_directory(cwd.as_deref());
     candidates.agent = title;

@@ -39,7 +39,10 @@ pub(crate) fn discover_in(roots: &[(&str, PathBuf)]) -> Discovery {
         ..Default::default()
     };
     for (provider, root) in roots {
-        if matches!(*provider, "workbuddy" | "pi" | "dsh" | "openclaw") {
+        if matches!(
+            *provider,
+            "workbuddy" | "pi" | "dsh" | "openclaw" | "hermes"
+        ) {
             if let Some(batch) = result
                 .batches
                 .iter_mut()

@@ -111,7 +111,7 @@ pub(crate) fn load_for_listing(
             .filter(|meta| {
                 matches!(
                     meta.provider_id.as_str(),
-                    "workbuddy" | "pi" | "dsh" | "openclaw"
+                    "workbuddy" | "pi" | "dsh" | "openclaw" | "hermes"
                 )
             })
             .map(|meta| {

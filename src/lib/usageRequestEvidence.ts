@@ -11,7 +11,11 @@ const LOCAL_SESSION_TOOLS: Record<string, string> = {
   pi_session: "pi",
   dsh_session: "dsh",
   openclaw_session: "openclaw",
+  hermes_session: "hermes",
 };
+
+// Hermes keeps per-session, per-model totals rather than per-request rows.
+const AGGREGATE_SOURCES = new Set(["hermes_session"]);
 
 export function requestSourcePresentation(
   source: string | undefined,
@@ -27,9 +31,12 @@ export function requestSourcePresentation(
     return {
       label,
       filterLabel: `${toolName} · ${label}`,
-      description: t("usageWorkbench.localSessionSourceHelp", {
-        tool: toolName,
-      }),
+      description: t(
+        AGGREGATE_SOURCES.has(source ?? "")
+          ? "usageWorkbench.localSessionAggregateHelp"
+          : "usageWorkbench.localSessionSourceHelp",
+        { tool: toolName },
+      ),
     };
   }
   const measuredSource = source == null || source === "proxy";

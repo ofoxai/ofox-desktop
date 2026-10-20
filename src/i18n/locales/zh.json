@@ -4477,6 +4477,7 @@
     "noMeasuredStatusHelp": "原始记录没有实测 HTTP 状态，不代表请求失败；有效 Tokens 仍计入统计。",
     "localSessionImport": "本机会话导入",
     "localSessionSourceHelp": "从 {{tool}} 本地历史记录读取",
+    "localSessionAggregateHelp": "从 {{tool}} 本地会话按模型累计读取；每行是一个会话在一个模型上的累计，不是单次请求",
     "localRequestRecord": "本机请求记录",
     "localRequestSourceHelp": "从已保存的本机请求记录读取；仅展示实际提供的测量。",
     "otherSourceRecord": "其他来源记录",
@@ -4530,45 +4531,6 @@
     "messageCoveragePartial": "消息时间覆盖不完整，消息数与活跃时长暂不提供。",
     "showMore": "显示更多（剩余 {{count}}）",
     "moreHidden": "更多隐藏项（剩余 {{count}}）"
-  },
-  "usageLifetime": {
-    "title": "Hermes 累计用量",
-    "scope": "原生累计统计，不受时间、工具、模型或项目筛选影响；不参与每日趋势与请求列表。",
-    "failed": "累计用量读取失败，已保留当前结果。",
-    "loading": "正在读取累计统计…",
-    "refresh": "重新读取",
-    "staleMissing": "源文件缺失，保留上次稳定读取的累计统计。",
-    "staleError": "源暂不可读，保留上次稳定读取的累计统计。",
-    "missing": "尚无可读取的原生累计统计。源文件缺失不代表零用量。",
-    "unreadable": "原生累计统计暂不可读，未将它视为零用量。",
-    "lastRead": "上次稳定读取 {{time}}；计数或模型覆盖仍可能不完整。",
-    "counterCoverage": "计数覆盖：{{value}}",
-    "modelCoverage": "模型归属：{{value}}",
-    "priceCoverage": "价格估算：{{value}}",
-    "coverage": {
-      "complete": "完整",
-      "partial": "部分",
-      "unknown": "未知"
-    },
-    "price": {
-      "known": "已知",
-      "free": "已知免费",
-      "partial": "部分",
-      "unknown": "未知"
-    },
-    "modelPartial": "部分历史模型归属无法验证。保留原生记录的模型名称，无法归属的余量单列。",
-    "mainTokens": "新输入 + 输出；缓存单列",
-    "sessionRecords": "原生会话记录",
-    "apiCalls": "累计 API 计数",
-    "callExplanation": "原生累计 API 调用计数，不是可逐条核对的请求记录。≥ 表示已知下界；— 表示未知。",
-    "models": "模型与用途",
-    "residual": "无法归属模型的余量",
-    "category": {
-      "main": "主循环",
-      "voice": "语音",
-      "auxiliary": "辅助用途",
-      "unattributed": "用途未归属"
-    }
   },
   "usageExperience": {
     "knownPart": "已知部分",

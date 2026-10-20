@@ -16,7 +16,7 @@ Codex 原生解析器 `codex_native.rs` 输出无正文的事件、原生线程�
 
 完整间隔归入后一个事件所在日期及小时，包括跨午夜、跨小时和夏令时转换；不均分每日时长，也不裁成窗口边界附近的虚构活动。内部保留毫秒。并发会话可以相加，它不是人的工作时长。中位数和 p90 采用 nearest-rank。纯元数据文件不创建活动会话。
 
-八种分析桥接都保留各自的原生身份、分支及读取优先级。Claude、Codex、OpenCode、WorkBuddy、Pi 有可验证的运行事件投影；没有可靠原生时间投影的来源保持未知。Gemini、dsh、OpenClaw 不因有 Tokens 就获得活跃时长；Hermes 的 lifetime 统计独立保留。模型筛选不能可靠分配工具活动时，活动指标仍不可用。
+九种分析桥接都保留各自的原生身份、分支及读取优先级。Claude、Codex、OpenCode、WorkBuddy、Pi 有可验证的运行事件投影；没有可靠原生时间投影的来源保持未知。Gemini、dsh、OpenClaw 不因有 Tokens 就获得活跃时长；Hermes 按 magpie 规则从 `started_at` 起按消息顺序计算活跃时长。模型筛选不能可靠分配工具活动时，活动指标仍不可用。
 
 ## 历史与金额保护
 

@@ -275,7 +275,7 @@ pub fn list_with(db: Option<&crate::database::Database>) -> Vec<ManagedSession> 
                 (value, Some(detail))
             } else if matches!(
                 meta.provider_id.as_str(),
-                "workbuddy" | "pi" | "dsh" | "openclaw"
+                "workbuddy" | "pi" | "dsh" | "openclaw" | "hermes"
             ) {
                 let (value, detail) = native.remove(&key(meta)).unwrap_or_else(|| {
                     (

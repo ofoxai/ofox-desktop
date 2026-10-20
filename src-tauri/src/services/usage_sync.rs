@@ -6,8 +6,9 @@ use crate::database::Database;
 use crate::error::AppError;
 use crate::services::session_usage::SessionSyncResult;
 use crate::services::{
-    pricing_sync, session_usage, session_usage_dsh, session_usage_gemini, session_usage_openclaw,
-    session_usage_opencode, session_usage_pi, session_usage_workbuddy, usage_maintenance,
+    pricing_sync, session_usage, session_usage_dsh, session_usage_gemini, session_usage_hermes,
+    session_usage_openclaw, session_usage_opencode, session_usage_pi, session_usage_workbuddy,
+    usage_maintenance,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -245,7 +246,15 @@ struct Observed {
 fn observes_analytics(provider: &str) -> bool {
     matches!(
         provider,
-        "claude" | "codex" | "gemini" | "opencode" | "workbuddy" | "pi" | "dsh" | "openclaw"
+        "claude"
+            | "codex"
+            | "gemini"
+            | "opencode"
+            | "workbuddy"
+            | "pi"
+            | "dsh"
+            | "openclaw"
+            | "hermes"
     )
 }
 fn observe_sources(roots: FrozenRoots) -> Observed {
@@ -634,6 +643,28 @@ const SOURCES: &[Source] = &[
         observe: Some(|roots| {
             crate::session_manager::providers::pi::usage_files(roots)
                 .map_err(|_| root_unavailable())
+        }),
+    },
+    Source {
+        provider: "hermes",
+        source_id: "hermes_session",
+        name: "Hermes",
+        resolve: || {
+            let root = crate::hermes_config::get_hermes_dir();
+            if root.is_absolute() {
+                Ok(vec![root])
+            } else {
+                Err(root_unavailable())
+            }
+        },
+        sync: |db, roots| session_usage_hermes::sync_hermes_usage_at(db, single_root(roots)?),
+        observe: Some(|roots| {
+            let path = single_root(roots)?.join("state.db");
+            match std::fs::symlink_metadata(&path) {
+                Ok(meta) if meta.is_file() => Ok(vec![path]),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+                _ => Err(root_unavailable()),
+            }
         }),
     },
 ];
@@ -2010,6 +2041,70 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn source_refresh_hermes_bridge_enters_ledger_and_analysis_without_bodies() {
+        let _home = sandbox();
+        let root = crate::hermes_config::get_hermes_dir();
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = rusqlite::Connection::open(root.join("state.db")).unwrap();
+        conn.execute_batch(include_str!("fixtures/hermes-native-0.21.7-sessions.sql"))
+            .unwrap();
+        for (table, column) in [
+            ("sessions", "id"),
+            ("session_model_usage", "session_id"),
+            ("messages", "session_id"),
+        ] {
+            conn.execute(
+                &format!("DELETE FROM {table} WHERE {column} NOT IN ('main-aux','main-voice-aux')"),
+                [],
+            )
+            .unwrap();
+        }
+        drop(conn);
+        let db = Arc::new(Database::memory().unwrap());
+        let sync = UsageSync::new();
+        let result = sync.run(&db, false).await.unwrap().unwrap();
+        assert!(result.errors.is_empty(), "{result:?}");
+        let ledger: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM proxy_request_logs WHERE app_type='hermes' AND data_source='hermes_session'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ledger, 5, "two rows for main-aux, three for main-voice-aux");
+        let input = super::super::session_analytics_index::read_input(&db).unwrap();
+        let sessions: Vec<_> = input
+            .sessions
+            .iter()
+            .filter(|s| s.identity.tool_id == "hermes")
+            .collect();
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().all(|s| matches!(
+            &s.identity.project,
+            super::super::session_analytics_core::Project::Known(_)
+        )));
+        assert_eq!(
+            input.facts.iter().filter(|f| f.tool_id == "hermes").count(),
+            5
+        );
+        assert_eq!(
+            input
+                .messages
+                .iter()
+                .filter(|m| m.session_key
+                    == super::super::session_analytics_index::key("hermes", "main-aux"))
+                .count(),
+            3
+        );
+        assert!(!serde_json::to_string(&input).unwrap().contains("private"));
+        assert!(sync.run(&db, false).await.unwrap().is_none());
     }
 
     #[tokio::test]

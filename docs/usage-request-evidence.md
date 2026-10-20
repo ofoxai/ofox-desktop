@@ -32,7 +32,7 @@ billing semantics remain unverified within the cited source contracts.
 
 The `proxy` compatibility row describes existing retained history. This work does
 not add a proxy, gateway, new request collector or background HTTP measurement.
-Hermes lifetime counters do not create request rows and do not enter this table.
+Hermes rows (`hermes_session`) are per-session, per-model totals rather than single requests; their source help says so.
 ChatGPT's Codex mode shares the Codex source rather than manufacturing another
 source or duplicate calls.
 

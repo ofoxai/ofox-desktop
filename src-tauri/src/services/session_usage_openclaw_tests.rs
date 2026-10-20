@@ -797,7 +797,6 @@ fn openclaw_usage_capability_supports_event_time_and_partial_session_project_ana
     assert_eq!(capability.source_ids, vec!["openclaw_session"]);
     assert!(capability.session_analytics_supported);
     assert!(capability.project_filter_supported);
-    assert!(!capability.lifetime_usage_supported);
 }
 
 #[test]

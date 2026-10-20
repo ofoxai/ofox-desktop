@@ -81,7 +81,6 @@ export interface UsageCapabilities {
     toolId: string;
     sourceIds: string[];
     usageSupported: boolean;
-    lifetimeUsageSupported?: boolean;
     sessionAnalyticsSupported: boolean;
     projectFilterSupported: boolean;
     reason: string | null;

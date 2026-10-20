@@ -210,6 +210,7 @@ fn normalized_source(provider: &str, path: &Path) -> Result<Snapshot, AppError> 
         "openclaw" => Snapshot::file(path),
         "opencode" if path.is_file() => Snapshot::sqlite(path),
         "opencode" => Snapshot::storage(path),
+        "hermes" if path.file_name().is_some_and(|s| s == "state.db") => Snapshot::sqlite(path),
         _ => Err(error("unsupported normalized provider")),
     }
 }
@@ -253,6 +254,11 @@ pub fn read_normalized(provider: &str, path: &Path) -> Result<NormalizedSnapshot
             let complete = !read.reasons.contains("incompleteEnumeration");
             reasons.extend(read.reasons);
             (read.facts, complete)
+        }
+        "hermes" => {
+            let read = super::session_usage_hermes::read_hermes(path)?;
+            reasons.extend(read.reasons);
+            (read.facts, true)
         }
         _ => return Err(error("unsupported normalized provider")),
     };
@@ -646,9 +652,9 @@ fn owned_identity(provider: &str, request: &str, session: Option<&str>) -> Optio
         }
         return Some(native_key(provider, &sid, &json!([kind, id]).to_string()));
     }
-    if provider == "workbuddy" {
+    if matches!(provider, "workbuddy" | "hermes") {
         let [sid, id]: [String; 2] =
-            serde_json::from_str(request.strip_prefix("workbuddy_session:")?).ok()?;
+            serde_json::from_str(request.strip_prefix(&format!("{provider}_session:"))?).ok()?;
         if sid.trim().is_empty() || id.trim().is_empty() || sid != session {
             return None;
         }
@@ -691,6 +697,7 @@ fn owner(provider: &str) -> Result<&'static str, AppError> {
         "dsh" => Ok("_dsh_session"),
         "pi" => Ok("_pi_session"),
         "openclaw" => Ok("_openclaw_session"),
+        "hermes" => Ok("_hermes_session"),
         _ => Err(error("unknown provider")),
     }
 }
@@ -704,6 +711,7 @@ fn origin(provider: &str) -> Result<&'static str, AppError> {
         "dsh" => Ok("dsh_session"),
         "pi" => Ok("pi_session"),
         "openclaw" => Ok("openclaw_session"),
+        "hermes" => Ok("hermes_session"),
         _ => Err(error("unknown provider")),
     }
 }
@@ -1201,6 +1209,7 @@ impl Prepared {
             "dsh" => "_dsh_session",
             "pi" => "_pi_session",
             "openclaw" => "_openclaw_session",
+            "hermes" => "_hermes_session",
             _ => return Err(error("unsupported native evidence source")),
         };
         if let Some((source, app, provider)) = row {

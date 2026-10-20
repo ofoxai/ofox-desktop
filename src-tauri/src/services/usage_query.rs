@@ -103,8 +103,6 @@ pub struct SourceCapability {
     pub tool_id: String,
     pub source_ids: Vec<String>,
     pub usage_supported: bool,
-    #[serde(default)]
-    pub lifetime_usage_supported: bool,
     pub session_analytics_supported: bool,
     pub project_filter_supported: bool,
     pub reason: Option<String>,
@@ -118,7 +116,7 @@ pub fn source_capabilities() -> Vec<SourceCapability> {
         ("opencode", Some("opencode_session")),
         ("chatgpt", None),
         ("workbuddy", Some("workbuddy_session")),
-        ("hermes", None),
+        ("hermes", Some("hermes_session")),
         ("pi", Some("pi_session")),
         ("dsh", Some("dsh_session")),
         ("openclaw", Some("openclaw_session")),
@@ -128,15 +126,8 @@ pub fn source_capabilities() -> Vec<SourceCapability> {
         tool_id: tool.into(),
         source_ids: source.into_iter().map(str::to_owned).collect(),
         usage_supported: source.is_some(),
-        lifetime_usage_supported: tool == "hermes",
-        session_analytics_supported: matches!(
-            tool,
-            "claude" | "codex" | "gemini" | "opencode" | "workbuddy" | "pi" | "dsh" | "openclaw"
-        ),
-        project_filter_supported: matches!(
-            tool,
-            "claude" | "codex" | "gemini" | "opencode" | "workbuddy" | "pi" | "dsh" | "openclaw"
-        ),
+        session_analytics_supported: source.is_some(),
+        project_filter_supported: source.is_some(),
         reason: source.is_none().then(|| {
             if tool == "chatgpt" {
                 "codexModeSharesCodexRecords".into()
@@ -153,56 +144,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_session_bridges_are_advertised_without_enabling_hermes_event_time() {
+    fn every_bindable_tool_but_chatgpt_has_usage_and_session_analytics() {
         for capability in source_capabilities() {
-            if matches!(
-                capability.tool_id.as_str(),
-                "workbuddy" | "pi" | "dsh" | "openclaw"
-            ) {
-                assert!(
-                    capability.session_analytics_supported,
-                    "{}",
-                    capability.tool_id
-                );
-                assert!(
-                    capability.project_filter_supported,
-                    "{}",
-                    capability.tool_id
-                );
-            }
-            if capability.tool_id == "hermes" {
-                assert!(!capability.session_analytics_supported);
-                assert!(!capability.project_filter_supported);
-                assert!(capability.lifetime_usage_supported);
-            }
+            let supported = capability.tool_id != "chatgpt";
+            assert_eq!(
+                capability.usage_supported, supported,
+                "{}",
+                capability.tool_id
+            );
+            assert_eq!(
+                capability.session_analytics_supported, supported,
+                "{}",
+                capability.tool_id
+            );
+            assert_eq!(
+                capability.project_filter_supported, supported,
+                "{}",
+                capability.tool_id
+            );
         }
-    }
-
-    #[test]
-    fn lifetime_capability_does_not_claim_event_time_support() {
-        let capabilities = source_capabilities();
-        for source in &capabilities {
-            let value = serde_json::to_value(source).unwrap();
-            assert_eq!(value["lifetimeUsageSupported"], source.tool_id == "hermes");
-            if source.tool_id == "hermes" {
-                assert!(!source.usage_supported);
-                assert!(source.source_ids.is_empty());
-            }
-        }
-    }
-
-    #[test]
-    fn legacy_capability_defaults_to_no_lifetime_support() {
-        let source: SourceCapability = serde_json::from_value(serde_json::json!({
-            "toolId": "hermes", "sourceIds": [], "usageSupported": false,
-            "sessionAnalyticsSupported": false, "projectFilterSupported": false,
-            "reason": "usageReaderUnavailable"
-        }))
-        .unwrap();
-        assert_eq!(
-            serde_json::to_value(source).unwrap()["lifetimeUsageSupported"],
-            false
-        );
+        let hermes = source_capabilities()
+            .into_iter()
+            .find(|c| c.tool_id == "hermes")
+            .unwrap();
+        assert_eq!(hermes.source_ids, ["hermes_session"]);
+        assert_eq!(hermes.reason, None);
     }
 
     #[test]

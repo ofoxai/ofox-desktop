@@ -2,7 +2,6 @@
 //! opened or created. Callers own schema/row decoding and map static errors.
 use crate::{error::AppError, session_manager::source_cache::SourceStamp};
 use rusqlite::{Connection, OpenFlags};
-use serde_json::{json, Value};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
@@ -135,9 +134,6 @@ impl SqliteSnapshot {
         };
         result.verify()?;
         Ok(result)
-    }
-    pub(crate) fn stamp(&self) -> Value {
-        json!({"database":self.main.stamp,"wal":self.wal.as_ref().map(|f| &f.stamp)})
     }
     pub(crate) fn verify(&self) -> Result<(), AppError> {
         validate_paths(&self.path, self.error)?;

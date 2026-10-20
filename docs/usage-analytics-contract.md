@@ -121,7 +121,6 @@ type SourceCapability = {
   toolId: string;
   sourceIds: string[];
   usageSupported: boolean;
-  lifetimeUsageSupported: boolean;
   sessionAnalyticsSupported: boolean;
   projectFilterSupported: boolean;
   reason: string | null;
@@ -153,12 +152,14 @@ are null. Older backends may omit both new fields; the renderer treats them as
 unknown.
 
 Event-time readers currently cover Claude, Codex, Gemini, OpenCode, WorkBuddy,
-[Pi schema 3](usage-pi-reader.md), native v0 dsh and [OpenClaw schema 24](usage-openclaw-reader.md) within each reader's coverage limits. Cached session/project bridges
-currently cover the first four. Hermes exposes independent cumulative statistics
-through `lifetimeUsageSupported`; it has no event-time ledger reader.
+[Pi schema 3](usage-pi-reader.md), native v0 dsh, [OpenClaw schema 24](usage-openclaw-reader.md)
+and Hermes SessionDB schema 31 within each reader's coverage limits. Cached
+session/project bridges cover all nine (see [native analysis bridges](native-analysis-bridges.md)).
+Hermes rows are per-session, per-model totals dated at their last activity, not
+individual requests.
 ChatGPT mode shares Codex records; no separate general ChatGPT usage is inferred.
 
-## Local refresh and cumulative sources
+## Local refresh
 
 `refresh_local_usage()` refreshes native facts and cached session analysis through
 one coordinator without account or price requests. A lightweight observation of
@@ -172,13 +173,6 @@ one follow-up generation; requests during that follow-up join it. Database chang
 counters invalidate warm observations but are not ingestion identity proofs.
 `sync_session_usage()` retains explicit manual pricing refresh and forced local
 synchronization for compatible callers.
-
-`get_usage_source_summary({toolId: "hermes"})` is an explicit independent read of
-native cumulative counters. It returns a version 1 lifetime response with its own
-snapshot, count/model/pricing coverage and current resolved-apex estimates.
-Date/project filters do not apply to this lifetime summary. It does not synthesize
-request IDs or event dates, and its counts never enter the event-time overview,
-daily chart or request export. See [Hermes lifetime statistics](usage-hermes-lifetime.md).
 
 Request rows add `observedStatusCode: number | null` and
 `observedLatencyMs: number | null`. Imported placeholder success codes do not
