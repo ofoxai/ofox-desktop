@@ -138,3 +138,23 @@ fn every_platform_bundles_the_logo_notices_without_duplicate_images() {
         assert_eq!(notices, expected, "{config}");
     }
 }
+
+#[test]
+fn every_platform_bundles_the_license_of_each_ported_magpie_module() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for config in ["tauri.conf.json", "tauri.windows.conf.json"] {
+        let resources = expanded_resources(&read(config));
+        for module in ["services", "session_manager", "native_tools"] {
+            let license = root
+                .join("src")
+                .join(module)
+                .join("MAGPIE_LICENSE")
+                .canonicalize()
+                .unwrap();
+            assert!(
+                resources.contains(&license),
+                "{config} must ship src/{module}/MAGPIE_LICENSE"
+            );
+        }
+    }
+}

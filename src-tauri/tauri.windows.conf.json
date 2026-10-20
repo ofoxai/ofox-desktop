@@ -26,7 +26,10 @@
       "../src/assets/agent-logos/LICENSE-*.txt",
       "../src/assets/agent-logos/LICENSE-*.md",
       "../src/assets/agent-logos/NOTICE.md",
-      "../src/assets/library-logos/NOTICE.md"
+      "../src/assets/library-logos/NOTICE.md",
+      "src/services/MAGPIE_LICENSE",
+      "src/session_manager/MAGPIE_LICENSE",
+      "src/native_tools/MAGPIE_LICENSE"
     ]
   }
 }
