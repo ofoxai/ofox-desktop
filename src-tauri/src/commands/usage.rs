@@ -62,8 +62,10 @@ pub fn get_model_stats(
 }
 
 /// 获取请求日志列表
+///
+/// Async so a large history is read off the main thread, as the overview is.
 #[tauri::command]
-pub fn get_request_logs(
+pub async fn get_request_logs(
     state: State<'_, AppState>,
     filters: Option<LogFilters>,
     page: u32,
@@ -85,15 +87,22 @@ pub fn get_request_logs(
                 "usage.requests.conflictingLegacyFilters".into(),
             ));
         }
-        let result = crate::services::usage_requests::request_page(
-            &state.db,
-            query,
-            request_filters.unwrap_or_default(),
-            crate::services::usage_requests::Pagination { page, page_size },
-            snapshot_id.as_deref(),
-            crate::ofox_apex::current_apex(),
-            chrono::Utc::now().timestamp_millis(),
-        )?;
+        let db = state.db.clone();
+        let apex = crate::ofox_apex::current_apex();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::services::usage_requests::request_page(
+                &db,
+                query,
+                request_filters.unwrap_or_default(),
+                crate::services::usage_requests::Pagination { page, page_size },
+                snapshot_id.as_deref(),
+                apex,
+                now_ms,
+            )
+        })
+        .await
+        .map_err(|e| AppError::Message(format!("usage requests task failed: {e}")))??;
         serde_json::to_value(result).map_err(|e| AppError::Database(e.to_string()))
     } else {
         if request_filters.is_some() || snapshot_id.is_some() {
