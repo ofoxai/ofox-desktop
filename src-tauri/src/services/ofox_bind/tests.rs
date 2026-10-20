@@ -40,6 +40,10 @@ impl Home {
             ("CODEX_HOME", None),
             ("CLAUDE_CONFIG_DIR", None),
             ("HERMES_HOME", None),
+            // Linux runners export the XDG dirs; OpenCode follows XDG_CONFIG_HOME.
+            ("XDG_CONFIG_HOME", None),
+            ("XDG_DATA_HOME", None),
+            ("XDG_CACHE_HOME", None),
             ("XDG_STATE_HOME", None),
             ("OFOX_USE_LOCAL", None),
         ];

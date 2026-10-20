@@ -1011,8 +1011,9 @@ readline.createInterface({input:process.stdin}).on('line',line=>{const v=JSON.pa
         let (sender, cancel) = watch::channel(false);
         let gate = std::sync::Mutex::new(());
         let work = inspect(plan, cancel, &gate, &ignore_stage);
+        // A loaded CI runner can take seconds to start both node processes.
         let cancel_when_ready = async {
-            for _ in 0..100 {
+            for _ in 0..500 {
                 if dir.path().join("descendant-ready").exists() {
                     sender.send_replace(true);
                     return;
@@ -1021,7 +1022,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{const v=JSON.pa
             }
             panic!("fixture descendant did not start");
         };
-        let (result, ()) = tokio::time::timeout(Duration::from_secs(6), async {
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(20), async {
             tokio::join!(work, cancel_when_ready)
         })
         .await
