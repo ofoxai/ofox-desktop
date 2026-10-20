@@ -428,6 +428,21 @@ describe("ManageToolDialog compact sections", () => {
     expect(screen.getByRole("button", { name: "解除绑定" })).toBeEnabled();
   });
 
+  it.each([
+    ["claude", "Claude Code", "claudeRememberHint"],
+    ["pi", "Pi", "piRememberHint"],
+  ] as const)(
+    "tells %s users how to save a default model inside the agent",
+    async (id, label, key) => {
+      mockSingleTool(compatibleModel("anthropic/test"));
+      selections[id] = { kind: "single", model: "anthropic/test" };
+      await renderTool(id, label);
+      const summary = await screen.findByText("配置说明");
+      fireEvent.click(summary);
+      expect(screen.getByText(zh.modelCompatibility[key])).toBeVisible();
+    },
+  );
+
   it("keeps real model-load and environment warnings outside the collapsed notes", async () => {
     mockSingleTool(compatibleModel("gemini/test"));
     const ping = vi.spyOn(manageToolApi, "pingModel");

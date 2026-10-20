@@ -147,6 +147,25 @@ function arraysEqual(left: string[], right: string[]): boolean {
  * are managed by `bindTools()` / `ofox_bind_tool` and aren't user-editable
  * here. The model is the one knob users actually need.
  */
+/**
+ * Folded notes per tool, mostly how to save a model as the default inside the
+ * agent itself: Ofox writes the same slot and follows that choice.
+ */
+const CONFIGURATION_NOTES: Record<string, string[]> = {
+  chatgpt: [
+    "modelCompatibility.chatgptCodexShared",
+    "modelCompatibility.chatgptDefaultHint",
+  ],
+  claude: ["modelCompatibility.claudeRememberHint"],
+  codex: ["modelCompatibility.codexRememberHint"],
+  gemini: ["modelCompatibility.geminiRememberHint"],
+  opencode: ["modelCompatibility.openCodeProtocol"],
+  pi: ["modelCompatibility.piRememberHint"],
+  hermes: ["modelCompatibility.hermesRememberHint"],
+  openclaw: ["modelCompatibility.openClawRememberHint"],
+  dsh: ["modelCompatibility.dshRememberHint"],
+};
+
 export default function ManageToolDialog({
   tool,
   onOpenChange,
@@ -1101,7 +1120,7 @@ export default function ManageToolDialog({
                         </p>
                       ))
                   ))}
-                {["chatgpt", "gemini", "opencode"].includes(tool.id) && (
+                {!!CONFIGURATION_NOTES[tool.id] && (
                   <details className="group border-t border-line-2 pt-2.5">
                     <summary className="flex cursor-pointer list-none items-center justify-between gap-2 rounded-sm text-[12px] text-ink-muted outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-brand [&::-webkit-details-marker]:hidden">
                       {t("toolsManage.configurationNotes")}
@@ -1111,18 +1130,9 @@ export default function ManageToolDialog({
                       />
                     </summary>
                     <div className="space-y-2 pt-2.5 text-[12px] leading-relaxed text-ink-muted">
-                      {tool.id === "chatgpt" && (
-                        <>
-                          <p>{t("modelCompatibility.chatgptCodexShared")}</p>
-                          <p>{t("modelCompatibility.chatgptDefaultHint")}</p>
-                        </>
-                      )}
-                      {tool.id === "gemini" && (
-                        <p>{t("modelCompatibility.geminiRememberHint")}</p>
-                      )}
-                      {tool.id === "opencode" && (
-                        <p>{t("modelCompatibility.openCodeProtocol")}</p>
-                      )}
+                      {CONFIGURATION_NOTES[tool.id].map((key) => (
+                        <p key={key}>{t(key)}</p>
+                      ))}
                     </div>
                   </details>
                 )}

@@ -53,7 +53,8 @@ On unbind each managed field is judged on its own:
   id, an OFox gateway URL, an `sk-of-` key). A route the user pointed at their own
   provider is kept. OpenClaw's default model names its provider
   (`ofox-openclaw/<model>`), so it is a route of its own.
-- **Model** (Codex `model`, `ANTHROPIC_MODEL`, `GEMINI_MODEL`, the model the
+- **Model** (Codex `model`, Claude's `ANTHROPIC_DEFAULT_MODEL` and family
+  aliases, the legacy `ANTHROPIC_MODEL` / `GEMINI_MODEL`, the model the
   agent remembers — Claude's top-level `model`, Gemini's `model.name` in
   `settings.json`, whose route is the `.env` base URL — and Hermes
   `model.default`): restored when it is still what OFox wrote, or when its route
