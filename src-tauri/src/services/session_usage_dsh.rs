@@ -1,4 +1,7 @@
-//! dsh v0 native spend facts; independent of the active conversation surface.
+//! dsh native spend facts; independent of the active conversation surface.
+//! dsh 0.1 writes session format 0, dsh 0.2 writes format 4 (`session.v4.jsonl.zstd`)
+//! with the same row grammar (checked against dsh 0.2.1-rc.2 sessions), so both
+//! are read by the same rules. Other versions stay unsupported.
 use crate::{
     error::AppError,
     proxy::usage::parser::TokenUsage,
@@ -197,7 +200,7 @@ pub(crate) fn read_dsh(path: &Path) -> Result<DshRead, AppError> {
                     read.reasons.insert("missingNativeSessionIdentity".into());
                 }
                 read.line_count = 1;
-                if value["version"].as_u64() != Some(0) {
+                if !matches!(value["version"].as_u64(), Some(0 | 4)) {
                     read.reasons.insert("unsupportedSourceVersion".into());
                     break;
                 }
@@ -643,6 +646,31 @@ mod tests {
             call("a2", 3, AT + 1, [20, 2, 10, 0]),
         ]
     }
+    #[test]
+    fn dsh_02_format_4_session_is_read_by_the_same_rules() {
+        let home = tempfile::tempdir().unwrap();
+        let mut head = header("v4");
+        head["version"] = json!(4);
+        head["cwd"] = json!("/fixture/project");
+        head["isSeeded"] = json!(false);
+        let rows = [
+            head,
+            json!({"type":"permission/preset","seq":0,"time":AT,"data":{}}),
+            user(1),
+            call("a1", 2, AT + 1, [7907, 3, 4096, 0]),
+            json!({"type":"turn/end","seq":3,"time":AT+2,"data":{"turn":1}}),
+        ];
+        let read = read_dsh(&write(home.path(), "v4", "session.v4.jsonl.zstd", &rows)).unwrap();
+        assert!(read.supported_version);
+        assert!(read.reasons.is_empty(), "{:?}", read.reasons);
+        assert_eq!(read.facts.len(), 1);
+        assert_eq!(buckets(&read.facts[0]), [7907, 3, 4096, 0]);
+        assert_eq!(
+            read.metadata.unwrap().project,
+            Some(Some("/fixture/project".into()))
+        );
+    }
+
     fn write(home: &Path, sid: &str, name: &str, rows: &[Value]) -> PathBuf {
         let path = home.join("sessions/_no-cwd").join(sid).join(name);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();

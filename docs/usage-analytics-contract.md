@@ -152,7 +152,7 @@ are null. Older backends may omit both new fields; the renderer treats them as
 unknown.
 
 Event-time readers currently cover Claude, Codex, Gemini, OpenCode, WorkBuddy,
-[Pi schema 3](usage-pi-reader.md), native v0 dsh, [OpenClaw schema 24](usage-openclaw-reader.md)
+[Pi schema 3](usage-pi-reader.md), native v0/v4 dsh, [OpenClaw schema 24](usage-openclaw-reader.md)
 and Hermes SessionDB schema 31 within each reader's coverage limits. Cached
 session/project bridges cover all nine (see [native analysis bridges](native-analysis-bridges.md)).
 Hermes rows are per-session, per-model totals dated at their last activity, not
