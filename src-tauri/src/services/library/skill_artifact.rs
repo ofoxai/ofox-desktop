@@ -118,7 +118,10 @@ fn normalized_mode(path: &Path, executable: bool, directory: bool) -> Result<(),
         )
         .map_err(|_| error("skillWriteFailed"))?;
     }
+    // Windows has no mode bits: clearing the read-only attribute is the write
+    // permission this sets (the lint's world-writable concern is unix-only).
     #[cfg(windows)]
+    #[allow(clippy::permissions_set_readonly_false)]
     {
         let mut permissions = fs::metadata(path)
             .map_err(|_| error("skillWriteFailed"))?

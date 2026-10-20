@@ -797,7 +797,7 @@ pub(crate) fn open_sqlite(path: &Path) -> Result<SqliteRead, String> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn sqlite(_path: &Path, conn: &rusqlite::Connection) -> Result<(), String> {
     // An externally opened connection has no provable relationship to a later
     // pathname observation. Only open_sqlite can establish the source receipt.

@@ -15,8 +15,11 @@ enum Failure {
     Limit,
     Unreadable,
     Cancelled,
+    // Only the unix process runner times out or cleans up; other platforms stub it.
+    #[cfg_attr(not(unix), allow(dead_code))]
     Timeout,
     Process,
+    #[cfg_attr(not(unix), allow(dead_code))]
     Cleanup,
 }
 impl Failure {

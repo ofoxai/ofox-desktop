@@ -231,6 +231,7 @@ pub fn write_text_file(path: &Path, data: &str) -> Result<(), AppError> {
 pub struct AtomicOpts {
     /// 写出文件的 Unix 权限位（Windows 上忽略）。`None` 时沿用被替换文件的权限，
     /// 文件还不存在则用 [`NEW_FILE_MODE`]。
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub mode: Option<u32>,
 }
 

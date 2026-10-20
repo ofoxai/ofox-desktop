@@ -1322,6 +1322,7 @@ pub fn remove_openclaw_provider_from_live(provider_id: &str) -> Result<(), AppEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::codex_config::get_codex_config_path;
     use serde_json::json;
 

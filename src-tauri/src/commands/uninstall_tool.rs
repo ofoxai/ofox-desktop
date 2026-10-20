@@ -1559,6 +1559,7 @@ mod tests {
         })
     }
 
+    #[cfg(not(target_os = "windows"))]
     fn env_of(plan: &UninstallPlan) -> &[(String, String)] {
         match &plan.action {
             Action::Run { env, .. } => env,
@@ -1816,6 +1817,7 @@ mod tests {
     // ---- native installers ------------------------------------------------
 
     /// `~/.local/bin/claude` -> `~/.local/share/claude/versions/<v>`.
+    #[cfg(unix)]
     fn native_claude(home: &Path) -> Installation {
         let version = home.join(".local/share/claude/versions/2.0.5");
         touch(&version, "binary");
@@ -2866,6 +2868,7 @@ Would inspect/remove:
     // ---- preview ----------------------------------------------------------
 
     /// Every file below `dir` with its content, to prove nothing changed.
+    #[cfg(unix)]
     fn snapshot(dir: &Path) -> Vec<(PathBuf, String)> {
         let mut found = Vec::new();
         let mut pending = vec![dir.to_path_buf()];
