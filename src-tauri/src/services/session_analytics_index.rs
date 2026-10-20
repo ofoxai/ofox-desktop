@@ -3073,7 +3073,9 @@ mod tests {
         let specs = [spec(&a), spec(&b)];
         refresh_sources(&db, &specs).unwrap();
         std::fs::write(&a, "{broken private payload").unwrap();
-        write(&b, &row("b", "mb", 9));
+        // A different size: Windows stamps a same-size rewrite in the same clock
+        // tick identically, which real append-only sessions never do.
+        std::fs::write(&b, row("b", "mb", 9).to_string() + "\n").unwrap();
         let result = refresh_sources(&db, &specs).unwrap();
         assert_eq!(result.failed, 1);
         assert_eq!(result.parsed, 1);

@@ -956,7 +956,9 @@ mod tests {
             .unwrap();
         let mut revised = line("s", "m", 1_792_108_800_000, 230, 60);
         revised["providerData"]["model"] = json!("revised-native");
-        std::fs::write(&path, revised.to_string()).unwrap();
+        // A different size: Windows stamps a same-size rewrite in the same clock
+        // tick identically, which real append-only sessions never do.
+        std::fs::write(&path, revised.to_string() + "\n").unwrap();
         sync_workbuddy_usage_at(&db, path.parent().unwrap()).unwrap();
         let conn = db.conn.lock().unwrap();
         let actual:(String,String,i64,i64,i64,String,String,String)=conn.query_row("SELECT request_id,model,input_tokens,output_tokens,created_at,provider_id,data_source,total_cost_usd FROM proxy_request_logs",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?))).unwrap();

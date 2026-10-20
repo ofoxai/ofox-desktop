@@ -1602,7 +1602,7 @@ fn opencode_legacy_dependency_receipt(use_db: bool) {
     use crate::session_manager::source_cache::{self, Part};
     let home = sandbox();
     let db = Database::memory().unwrap();
-    let base = home.home().join(".local/share/opencode");
+    let base = crate::test_sandbox::native(home.home().join(".local/share/opencode"));
     let at = chrono::Utc::now().timestamp_millis();
     let source = if use_db {
         let path = base.join("opencode.db");
@@ -1612,7 +1612,7 @@ fn opencode_legacy_dependency_receipt(use_db: bool) {
         native_oc_insert(&conn, &native_oc_message("m", "s", at, 10, 1), at);
         path
     } else {
-        let dir = base.join("storage/message/s");
+        let dir = crate::test_sandbox::native(base.join("storage/message/s"));
         write(
             &dir.join("m.json"),
             &native_oc_message("m", "s", at, 10, 1).to_string(),

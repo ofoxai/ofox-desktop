@@ -18,6 +18,13 @@ use tempfile::TempDir;
 
 use crate::settings::{clear_settings_health, reload_settings, update_settings, AppSettings};
 
+/// `path` with the platform's separators. A test path joined from a `/` literal
+/// is `C:\...\a/b` on Windows, while the app records the native path it
+/// walked (`C:\...\a\b`), so lookups by path string must go through this.
+pub fn native(path: impl AsRef<Path>) -> PathBuf {
+    path.as_ref().components().collect()
+}
+
 /// Variables set into the sandbox home, with their location below it.
 const SANDBOX_VARS: &[(&str, &str)] = &[
     ("HOME", ""),

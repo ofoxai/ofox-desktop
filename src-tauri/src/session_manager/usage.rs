@@ -521,8 +521,8 @@ mod tests {
         };
         use serde_json::json;
         let home = crate::test_sandbox::sandbox();
-        let root = home.home().join(".workbuddy/projects");
-        let path = root.join("project/s.jsonl");
+        let root = crate::test_sandbox::native(home.home().join(".workbuddy/projects"));
+        let path = root.join("project").join("s.jsonl");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path,json!({"type":"message","role":"assistant","id":"a","sessionId":"native-wb","cwd":"/fixture/project","timestamp":1792022400000_i64,"content":"private native answer","providerData":{"messageId":"a","model":"priced-native","usage":{"requests":1,"inputTokens":100,"outputTokens":20}}}).to_string()+"\n").unwrap();
         let db = Database::memory().unwrap();

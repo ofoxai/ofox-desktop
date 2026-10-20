@@ -272,11 +272,12 @@ mod tests {
     use std::path::Path;
     const AT: i64 = 1_792_053_987_262;
     fn write(root: &Path, generation: u32, input: u64, seed: bool) -> PathBuf {
-        let path = root.join("sessions/project/s").join(if generation == 0 {
-            "session.jsonl".into()
-        } else {
-            format!("session.v{generation}.jsonl")
-        });
+        let path =
+            crate::test_sandbox::native(root.join("sessions/project/s")).join(if generation == 0 {
+                "session.jsonl".into()
+            } else {
+                format!("session.v{generation}.jsonl")
+            });
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut header = json!({"type":"session","version":0,"id":"s","createdAt":AT,"delegationDepth":0,"cwd":"/fixture/project"});
         if seed {

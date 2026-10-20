@@ -1046,8 +1046,7 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         let parts = crate::session_manager::source_cache::read_on(
             &conn,
-            home.path()
-                .join("sessions/_no-cwd/child/session.jsonl")
+            crate::test_sandbox::native(home.path().join("sessions/_no-cwd/child/session.jsonl"))
                 .to_str()
                 .unwrap(),
             "dsh",
@@ -1137,8 +1136,7 @@ mod tests {
         let conn = db.conn.lock().unwrap();
         let parts = crate::session_manager::source_cache::read_on(
             &conn,
-            home.path()
-                .join("sessions/_no-cwd/base/session.jsonl")
+            crate::test_sandbox::native(home.path().join("sessions/_no-cwd/base/session.jsonl"))
                 .to_str()
                 .unwrap(),
             "dsh",
@@ -1167,7 +1165,9 @@ mod tests {
         write(home.path(), "base", "session.jsonl", &rows);
         {
             let conn = db.conn.lock().unwrap();
-            let child = home.path().join("sessions/_no-cwd/child/session.jsonl");
+            let child = crate::test_sandbox::native(
+                home.path().join("sessions/_no-cwd/child/session.jsonl"),
+            );
             let literal: String = conn
                 .query_row("SELECT quote(?1)", [child.to_str().unwrap()], |r| r.get(0))
                 .unwrap();

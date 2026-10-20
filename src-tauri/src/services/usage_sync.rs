@@ -1016,7 +1016,7 @@ mod tests {
         missing_model: bool,
         incomplete: bool,
     ) -> std::path::PathBuf {
-        let path = home.join(".workbuddy/projects/native/s.jsonl");
+        let path = crate::test_sandbox::native(home.join(".workbuddy/projects/native/s.jsonl"));
         let mut row = serde_json::json!({"type":"message","role":"assistant","sessionId":"native-wb","timestamp":1791800000123_i64,"providerData":{"messageId":"m","model":"native","usage":{"requests":1,"inputTokens":3,"outputTokens":2}}});
         if missing_model {
             row["providerData"].as_object_mut().unwrap().remove("model");
@@ -1263,7 +1263,7 @@ mod tests {
         let db = Database::memory().unwrap();
         session_usage::sync_claude_session_logs(&db).unwrap();
         let conn = db.conn.lock().unwrap();
-        let path = home.home().join(".claude/projects/-work/s1.jsonl");
+        let path = crate::test_sandbox::native(home.home().join(".claude/projects/-work/s1.jsonl"));
         let parts = source_cache::read_on(&conn, path.to_str().unwrap(), "claude").unwrap();
         let mut value = parts.value(Part::UsageSync).unwrap().clone();
         value["coverage"] = serde_json::json!("partial");
@@ -2588,7 +2588,8 @@ mod tests {
     fn dsh_registered_partial_prefix_does_not_block_other_sources_maintenance() {
         let home = sandbox();
         write_one_call_per_source(home.home());
-        let path = home.home().join(".dsh/sessions/_no-cwd/s/session.jsonl");
+        let path =
+            crate::test_sandbox::native(home.home().join(".dsh/sessions/_no-cwd/s/session.jsonl"));
         let header = serde_json::json!({"type":"session","version":0,"id":"s","createdAt":1_792_053_987_000_i64,"delegationDepth":0});
         let call = serde_json::json!({"type":"assistant/message","seq":0,"time":1_792_053_987_262_i64,
             "data":{"message":{"id":"native-message","role":"assistant","source":{"kind":"model"}},"usage":{"inputTokens":1,"outputTokens":2}}});

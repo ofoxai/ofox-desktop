@@ -788,7 +788,7 @@ mod tests {
     /// A Claude Code session in the sandbox home: its file, a subagent's
     /// transcript and a tool result kept beside it.
     fn claude_session(home: &Path) -> (PathBuf, PathBuf, PathBuf) {
-        let project = home.join(".claude/projects/-work-app");
+        let project = crate::test_sandbox::native(home.join(".claude/projects/-work-app"));
         let subagents = project.join(CLAUDE_ID).join("subagents");
         let results = project.join(CLAUDE_ID).join("tool-results");
         std::fs::create_dir_all(&subagents).unwrap();
@@ -986,7 +986,7 @@ mod tests {
     /// A long Claude Code session: its title made by Claude Code sits past the
     /// head the quick scan reads, and its lines count 3 messages.
     fn long_claude_session(home: &Path) -> PathBuf {
-        let project = home.join(".claude/projects/-work-app");
+        let project = crate::test_sandbox::native(home.join(".claude/projects/-work-app"));
         std::fs::create_dir_all(&project).unwrap();
         let path = project.join(format!("{CLAUDE_ID}.jsonl"));
         let user = |content: serde_json::Value| {

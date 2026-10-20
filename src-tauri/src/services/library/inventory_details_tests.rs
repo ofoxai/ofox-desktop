@@ -370,7 +370,7 @@ fn layered_sources_reveal_only_the_selected_layer_and_recheck_all_layers() {
         .into_iter()
         .find(|path| path.extension().is_some_and(|ext| ext == "json"))
         .unwrap();
-    let overlay = sandbox.home().join(".opencode/opencode.json");
+    let overlay = crate::test_sandbox::native(sandbox.home().join(".opencode/opencode.json"));
     write(
         &base,
         r#"{"mcp":{"layered":{"type":"local","command":["node","start"],"environment":{"FIRST":"PRIVATE-FIRST"}}}}"#,

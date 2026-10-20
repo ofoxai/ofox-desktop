@@ -277,7 +277,11 @@ mod tests {
         json!({"type":"message","id":"a","timestamp":"2026-10-15T00:00:01Z","message":{"role":"assistant","model":"m","content":[{"type":"text","text":"private body"}],"usage":{"input":input,"output":2,"cacheRead":3,"cacheWrite":4}}})
     }
     fn legacy(root: &Path, agent: &str, input: u64) -> PathBuf {
-        let path = root.join("agents").join(agent).join("sessions/same.jsonl");
+        let path = root
+            .join("agents")
+            .join(agent)
+            .join("sessions")
+            .join("same.jsonl");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, format!("{}\n{}\n", header(), message(input))).unwrap();
         path
