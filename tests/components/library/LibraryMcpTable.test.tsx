@@ -299,3 +299,16 @@ it("withdraws a server from its tools before deleting it", async () => {
   await waitFor(() => expect(remove).toHaveBeenCalledWith("filesystem", 2, 4));
   expect(preview).toHaveBeenCalledWith("mcp", "filesystem", [], 2, 4);
 });
+
+it("counts a write that landed as done even when tidying up after it needs a look", async () => {
+  vi.spyOn(libraryApi, "preview").mockResolvedValue(operation("pending"));
+  vi.mocked(libraryApi.apply).mockResolvedValue({
+    ...operation("applied", "library.cleanupNeedsReview"),
+    status: "needsReview",
+  });
+  renderTable();
+  await screen.findByTestId("mcp-row-filesystem");
+  await userEvent.click(cell("filesystem", "Claude Code"));
+  await waitFor(() => expect(libraryApi.apply).toHaveBeenCalledTimes(1));
+  expect(screen.queryByRole("alert")).toBeNull();
+});

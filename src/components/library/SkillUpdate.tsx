@@ -20,6 +20,7 @@ export function SkillUpdate({
   externalBusy,
   onBusyChange,
   onChanged,
+  updatedNote,
 }: {
   store: DraftStore;
   skill: SkillDefinition;
@@ -27,7 +28,9 @@ export function SkillUpdate({
   readOnly: boolean;
   externalBusy: boolean;
   onBusyChange: (busy: boolean) => void;
-  onChanged: () => Promise<unknown>;
+  onChanged: (change: SkillDraftChange) => Promise<unknown>;
+  /** Replaces the "apply it to the tools yourself" note when the caller does that itself. */
+  updatedNote?: string;
 }) {
   const { t } = useTranslation();
   const [checked, setChecked] = useDraftState<SkillUpdateCheck | undefined>(
@@ -100,7 +103,7 @@ export function SkillUpdate({
     setResult(changed);
     setChecked(undefined);
     setComparison(undefined);
-    await onChanged();
+    await onChanged(changed);
   }
   async function loadComparison(ticketId: string, path: string) {
     setComparePath(path);
@@ -280,7 +283,9 @@ export function SkillUpdate({
       )}
       {result && (
         <p role="status" className="text-ink-muted">
-          {t(`library.skillUpdate.${result.state}`)}
+          {result.state === "updated" && updatedNote
+            ? updatedNote
+            : t(`library.skillUpdate.${result.state}`)}
         </p>
       )}
     </div>

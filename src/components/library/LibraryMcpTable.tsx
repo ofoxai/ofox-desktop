@@ -64,9 +64,9 @@ async function commit(previewing: Promise<LibraryOperation>) {
     throw new Error(blocked.reason ?? "library.mcpNameConflict");
   }
   const result = await libraryApi.apply(operation.operationId);
+  // Every target written is done, even when tidying up after it needs a look.
   const failed = result.targets.find((target) => target.status !== "applied");
-  if (result.status !== "applied")
-    throw new Error(failed?.reason ?? "library.failed");
+  if (failed) throw new Error(failed.reason ?? "library.failed");
 }
 async function fresh(id: string) {
   const data = await libraryApi.list("mcp");
@@ -145,12 +145,13 @@ export function LibraryMcpTable({
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [checking, setChecking] = useState(false);
   const mounted = useRef(true);
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // StrictMode runs this twice in development; mark the second mount too.
+    mounted.current = true;
+    return () => {
       mounted.current = false;
-    },
-    [],
-  );
+    };
+  }, []);
   useEffect(
     () =>
       registerRefresh("mcp", async () => {

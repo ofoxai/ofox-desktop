@@ -17,6 +17,8 @@ import workbuddy from "@/icons/extracted/workbuddy.svg?url";
 import dsh from "@/icons/extracted/deepseek.svg?url";
 import pi from "@/icons/extracted/pi.svg?url";
 import copilot from "@/icons/extracted/githubcopilot.svg?url";
+import cursor from "@lobehub/icons-static-svg/icons/cursor.svg?url";
+import claudeDesktop from "@lobehub/icons-static-svg/icons/claude-color.svg?url";
 
 interface ToolLogo {
   src: string;
@@ -49,4 +51,7 @@ export const TOOL_LOGOS: Record<string, ToolLogo> = {
   "deveco-cli": { src: devecoCli, label: "DevEco CLI" },
   aider: { src: aider, label: "Aider" },
   "goose-cli": { src: goose, label: "Goose CLI", darkTreatment: "white" },
+  // Library skill targets that are not in the installation catalog.
+  cursor: { src: cursor, label: "Cursor", darkTreatment: "white" },
+  "claude-desktop": { src: claudeDesktop, label: "Claude Desktop" },
 };

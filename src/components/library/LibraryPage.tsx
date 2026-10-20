@@ -19,6 +19,7 @@ import { Compass } from "lucide-react";
 import { ResourcePackDialog } from "./ResourcePackDialog";
 import { LibrarySection } from "./LibrarySection";
 import { LibraryMcpTable } from "./LibraryMcpTable";
+import { LibrarySkillsPage } from "./LibrarySkillsPage";
 import { LibraryScenarioWizard } from "./LibraryScenarioWizard";
 import { libraryScroller, type LibraryLeaveGuard } from "./useLibraryInline";
 
@@ -202,10 +203,15 @@ export function LibraryPage({
                 onSelect: () =>
                   guarded(() => setScenarioRequest((value) => value + 1)),
               },
-              {
-                label: t("library.interaction.historyAction"),
-                onSelect: () => historyActions.current.get(tab)?.(),
-              },
+              // Only the list-style tab keeps an operation history to show.
+              ...(tab === "instructions"
+                ? [
+                    {
+                      label: t("library.interaction.historyAction"),
+                      onSelect: () => historyActions.current.get(tab)?.(),
+                    },
+                  ]
+                : []),
             ]}
             onChanged={async () => {
               await Promise.all([
@@ -227,6 +233,12 @@ export function LibraryPage({
           <InteractionScope active={active && kind === tab}>
             {kind === "mcp" ? (
               <LibraryMcpTable
+                registerRefresh={register}
+                registerDiscover={registerDiscover}
+                onChanged={() => void summary.refetch()}
+              />
+            ) : kind === "skills" ? (
+              <LibrarySkillsPage
                 registerRefresh={register}
                 registerDiscover={registerDiscover}
                 onChanged={() => void summary.refetch()}

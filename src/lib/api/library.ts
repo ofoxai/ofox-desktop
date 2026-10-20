@@ -26,6 +26,22 @@ export interface ResourceTarget {
   managedContentLines?: number | null;
   nativeState?: string | null;
   disabledReason?: string | null;
+  /** This entry was taken over in place (import), not written by Ofox. */
+  adopted?: boolean;
+  /** An identical native entry is already here and nobody owns it. */
+  adoptable?: boolean;
+  entryKind?: "link" | "directory" | null;
+}
+/** An agent the library can give skills to (never the shared folder). */
+export interface SkillTarget {
+  id: string;
+  label: string;
+  /** Installed, or its home folder exists: show the column. */
+  detected: boolean;
+  /** Reads ~/.agents/skills itself. */
+  readsShared: boolean;
+  /** Its skills folder resolved. */
+  scopeKnown: boolean;
 }
 export interface McpField {
   path: string[];
@@ -93,6 +109,7 @@ export interface LibraryData {
   instructions?: InstructionSet[];
   servers?: McpDefinition[];
   skills?: SkillDefinition[];
+  skillTargets?: SkillTarget[];
   targets?: ResourceTarget[];
   detachedTargets?: { path: string; resourceId: string; tools: string[] }[];
   operations: LibraryOperation[];
@@ -225,6 +242,17 @@ export interface LibraryInventory {
     conflict: boolean;
     variant?: string | null;
     directory?: string | null;
+    locations?: {
+      /** A target id or "shared". */
+      targetId: string;
+      /** Home shown as ~. */
+      displayPath: string;
+      link: boolean;
+      /** Can be taken over in place on import. */
+      adoptable: boolean;
+      /** A library.* key when not adoptable. */
+      reason?: string | null;
+    }[];
   }[];
 }
 export interface InventorySourceDetail {
@@ -269,7 +297,13 @@ export interface InventoryImport {
     name: string;
     status: string;
     reason?: string | null;
+    /** Target ids taken over in place. */
+    adopted?: string[];
+    notAdopted?: { targetId: string; reason: string }[];
   }[];
+}
+export interface RemovedFoundSkill {
+  removed: { targetId: string; displayPath: string; backup?: string | null }[];
 }
 export interface BatchResource {
   resourceId: string;
@@ -483,6 +517,33 @@ export const libraryApi = {
       expectedRevision,
       expectedEpoch,
     }),
+  previewSkillAdoption: (
+    resourceId: string,
+    tools: string[],
+    adoptTools: string[],
+    expectedRevision: number,
+    expectedEpoch: number,
+  ) =>
+    invoke<LibraryOperation>("preview_library_skill_adoption", {
+      resourceId,
+      tools,
+      adoptTools,
+      expectedRevision,
+      expectedEpoch,
+    }),
+  /** `toolIds` [] removes every location; folders are archived, links unlinked. */
+  removeFoundSkill: (
+    ticketId: string,
+    entryId: string,
+    toolIds: string[],
+    expectedEpoch: number,
+  ) =>
+    invoke<RemovedFoundSkill>("remove_library_found_skill", {
+      ticketId,
+      entryId,
+      toolIds,
+      expectedEpoch,
+    }),
   pickPack: () => invoke<string | null>("pick_library_pack"),
   exportPack: () => invoke<boolean>("export_library_pack"),
   exportSelected: (kind: LibraryKind, resourceIds: string[]) =>
@@ -603,7 +664,11 @@ export const libraryApi = {
       expectedHash,
     }),
   importSkillDirectory: (source: string, directory: string, name: string) =>
-    invoke("import_library_skill_directory", { source, directory, name }),
+    invoke<{ id: string }>("import_library_skill_directory", {
+      source,
+      directory,
+      name,
+    }),
   pickDirectory: () =>
     invoke<string | null>("pick_directory", { defaultPath: null }),
 };
