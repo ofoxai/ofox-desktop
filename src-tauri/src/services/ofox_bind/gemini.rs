@@ -1,5 +1,7 @@
-//! Gemini CLI 的绑定配置：`.env` 里的三个接入变量（按行改，注释和其它变量原样
-//! 保留）和 `settings.json` 的 `security.auth.selectedType`。`oauth_creds.json`
+//! Gemini CLI 的绑定配置：`.env` 里的 key 和地址（按行改，注释和其它变量原样
+//! 保留），`settings.json` 的 `security.auth.selectedType` 和默认模型 `model.name`。
+//! 模型只写 `model.name`：那是用户在 Gemini 里按 Tab「记住」时写的地方，`.env` 的
+//! `GEMINI_MODEL` 优先级比它高，写在那里会盖掉用户自己记住的模型。`oauth_creds.json`
 //! 和其它设置一律不动。
 
 use std::collections::BTreeSet;
@@ -21,6 +23,7 @@ use super::record::ManagedFile;
 
 const API_KEY: &str = "GEMINI_API_KEY";
 const BASE_URL: &str = "GOOGLE_GEMINI_BASE_URL";
+/// 旧版本把模型写在这里。现在绑定时删掉这一行；解绑时还原成绑定前的那一行。
 const MODEL: &str = "GEMINI_MODEL";
 /// 解绑时还原成绑定前的那一行（原来没有就删掉）；用户之后改过的按规则留着。
 pub(crate) const ENV_LEAVES: &[Leaf] = &[
@@ -35,8 +38,8 @@ pub(crate) const SETTINGS_LEAVES: &[Leaf] = &[
     Leaf::preference(SELECTED_TYPE),
     Leaf::model_in(REMEMBERED_MODEL, ManagedFile::GeminiEnv.id(), &[BASE_URL]),
 ];
-/// 用户在 agent 里「记住」的模型。绑定、在应用里保存模型时，原来有就改成 Ofox 的
-/// 模型（见 [`write_bound`]）。
+/// Gemini 的默认模型，也是用户在 agent 里「记住」的模型。绑定、在应用里保存模型时
+/// 写成 Ofox 的模型（见 [`write_bound`]）。
 const REMEMBERED_MODEL: JsonPath = &["model", "name"];
 const SETTINGS_CONTAINERS: &[JsonPath] = &[&["security", "auth"], &["security"], &["model"]];
 const API_KEY_AUTH: &str = "gemini-api-key";
@@ -69,14 +72,14 @@ fn template_env<'a>(template: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|value| !value.trim().is_empty())
 }
 
-/// 按 DB 里 `ofox-gemini` 模板的 settings_config 生成绑定后的 `.env`。
+/// 按 DB 里 `ofox-gemini` 模板的 settings_config 生成绑定后的 `.env`。模型不写这里，
+/// 已有的 `GEMINI_MODEL` 行删掉。
 pub(crate) fn bound_env(current: &str, template: &Value, api_key: &str) -> Result<String, String> {
     let base_url = template_env(template, BASE_URL)
         .ok_or_else(|| "Ofox Gemini 模板缺少 GOOGLE_GEMINI_BASE_URL".to_string())?;
-    let model = template_env(template, MODEL).map(normalize_gemini_env_model);
     let env = env_file::set_value(current, API_KEY, Some(api_key));
     let env = env_file::set_value(&env, BASE_URL, Some(base_url));
-    Ok(env_file::set_value(&env, MODEL, model.as_deref()))
+    Ok(env_file::set_value(&env, MODEL, None))
 }
 
 /// 让 Gemini CLI 用 `.env` 里的 key 登录。已经是 API key 登录时返回 `None`，不写文件。
@@ -93,8 +96,9 @@ pub(crate) fn bound_settings(current: Option<&str>) -> Result<Option<String>, St
 
 /// 绑定和切换模型共用。两个文件都算好再写，任何一个解析失败都不动磁盘。
 ///
-/// `select_route`：在应用里选了模型时，用户在 agent 里「记住」的 `model.name` 也要跟着改，
-/// 不然之后刷新会把它当成用户的新选择改回来。没有这个字段就不加。
+/// `select_route`：绑定、在应用里选了模型时把 `model.name` 写成模板里的模型（没有就
+/// 新建）。换 key、修复时不动它：那时它可能是用户刚在 agent 里记住的模型。settings 整个
+/// 不在（被删了）时也写，补回已保存的模型。
 pub(crate) fn write_bound(
     template: &Value,
     api_key: &str,
@@ -109,16 +113,19 @@ pub(crate) fn write_bound(
     )?;
     let current_settings = read_text(&settings_path)?;
     let mut settings = bound_settings(current_settings.as_deref())?;
-    if let (true, Some(model)) = (select_route, template_env(template, MODEL)) {
+    if let (true, Some(model)) = (
+        select_route || current_settings.is_none(),
+        template_env(template, MODEL),
+    ) {
         let text = settings.as_deref().or(current_settings.as_deref());
         let before = json_file::parse_object(text, SETTINGS_LABEL)?;
-        if json_file::get(&before, REMEMBERED_MODEL).is_some() {
-            let mut after = before.clone();
-            json_file::set(
-                &mut after,
-                REMEMBERED_MODEL,
-                normalize_gemini_env_model(model).into(),
-            );
+        let mut after = before.clone();
+        json_file::set(
+            &mut after,
+            REMEMBERED_MODEL,
+            normalize_gemini_env_model(model).into(),
+        );
+        if after != before {
             settings = Some(json_file::render_changed(
                 text.unwrap_or_default(),
                 KeyStyle::Json,
@@ -133,6 +140,65 @@ pub(crate) fn write_bound(
             None => Ok(()),
         })
         .map_err(|e| format!("写入 Gemini 配置失败：{e}"))
+}
+
+/// `auto`、`pro` 这类别名由 Gemini 自己解析，不当成用户选的具体模型。
+pub(crate) fn is_concrete_model(model: &str) -> bool {
+    !model.is_empty()
+        && !model.starts_with("auto")
+        && !matches!(model, "pro" | "flash" | "flash-lite")
+}
+
+/// settings 里的默认模型（`model.name`），只认具体的模型名。
+pub(crate) fn live_model(settings: &str) -> Result<Option<String>, String> {
+    let value = json_file::parse_object(Some(settings), SETTINGS_LABEL)?;
+    Ok(json_file::get(&value, REMEMBERED_MODEL)
+        .and_then(Value::as_str)
+        .map(|model| normalize_gemini_env_model(model).trim().to_string())
+        .filter(|model| is_concrete_model(model)))
+}
+
+/// 旧版本把模型写在 `.env` 的 `GEMINI_MODEL`，它会盖掉用户在 Gemini 里记住的模型。
+/// 去掉这一行；`model.name` 还没有具体模型时把它搬过去，保持正在用的模型不变。
+/// 不用改时是 `None`；否则是新的 `.env`，以及要改时新的 settings。
+pub(crate) fn migrated(
+    env: &str,
+    settings: Option<&str>,
+) -> Result<Option<(String, Option<String>)>, String> {
+    let Some(env_model) = env_file::get_value(env, MODEL) else {
+        return Ok(None);
+    };
+    let cleaned = env_file::set_value(env, MODEL, None);
+    let env_model = normalize_gemini_env_model(&env_model).trim().to_string();
+    let remembered = settings.map(live_model).transpose()?.flatten();
+    if remembered.is_some() || !is_concrete_model(&env_model) {
+        return Ok(Some((cleaned, None)));
+    }
+    let before = json_file::parse_object(settings, SETTINGS_LABEL)?;
+    let mut after = before.clone();
+    json_file::set(&mut after, REMEMBERED_MODEL, env_model.into());
+    let settings = json_file::render_changed(
+        settings.unwrap_or_default(),
+        KeyStyle::Json,
+        &before,
+        &after,
+    )?;
+    Ok(Some((cleaned, Some(settings))))
+}
+
+/// [`migrated`] 要写的文件、内容和权限。
+pub(crate) fn migration_edits() -> Result<Vec<(PathBuf, String, Option<u32>)>, String> {
+    let (env_path, settings_path) = (env_path(), settings_path());
+    let Some(env) = read_text(&env_path)? else {
+        return Ok(Vec::new());
+    };
+    let Some((env, settings)) = migrated(&env, read_text(&settings_path)?.as_deref())? else {
+        return Ok(Vec::new());
+    };
+    // `.env` 里有 key，和绑定时一样只给自己读写。
+    let mut edits = vec![(env_path, env, Some(ENV_MODE))];
+    edits.extend(settings.map(|text| (settings_path, text, None)));
+    Ok(edits)
 }
 
 /// `.env` 里各受管变量现在的值（按行读，没有「解析失败」）。
@@ -258,7 +324,7 @@ mod tests {
         let bound = bound_env(USER_ENV, &template(Some("google/gemini-x")), "sk-of-K").unwrap();
         assert_eq!(
             bound,
-            "# personal key\nGEMINI_API_KEY=sk-of-K\nHTTPS_PROXY=http://proxy:8080\nGOOGLE_GEMINI_BASE_URL=https://api.ofox.ai/gemini\nGEMINI_MODEL=gemini-x\n"
+            "# personal key\nGEMINI_API_KEY=sk-of-K\nHTTPS_PROXY=http://proxy:8080\nGOOGLE_GEMINI_BASE_URL=https://api.ofox.ai/gemini\n"
         );
         assert!(is_ofox_bound(&bound));
         assert!(!is_ofox_bound(USER_ENV));
@@ -266,10 +332,31 @@ mod tests {
 
     #[test]
     fn restore_puts_the_env_back_byte_for_byte() {
-        let bound = bound_env(USER_ENV, &template(Some("gemini-x")), "sk-of-K").unwrap();
-        let plan = plan_restore_env(Some(USER_ENV), Some(&bound), &BTreeSet::new());
+        let original = "# personal key\nGEMINI_API_KEY=AIza-mine\nGEMINI_MODEL=mine\nHTTPS_PROXY=http://proxy:8080\n";
+        let bound = bound_env(original, &template(Some("gemini-x")), "sk-of-K").unwrap();
+        assert!(!bound.contains("GEMINI_MODEL"));
+        let plan = plan_restore_env(Some(original), Some(&bound), &BTreeSet::new());
         assert!(plan.exact);
-        assert_eq!(plan.content.as_deref(), Some(USER_ENV));
+        assert_eq!(plan.content.as_deref(), Some(original));
+    }
+
+    #[test]
+    fn migration_moves_the_env_model_into_settings_unless_one_is_remembered() {
+        let env = "GEMINI_API_KEY=sk-of-K\nGEMINI_MODEL=google/gemini-x\n";
+        let (cleaned, settings) = migrated(env, Some("{}")).unwrap().unwrap();
+        assert_eq!(cleaned, "GEMINI_API_KEY=sk-of-K\n");
+        assert_eq!(
+            live_model(&settings.unwrap()).unwrap().as_deref(),
+            Some("gemini-x")
+        );
+        let remembered = "{ \"model\": { \"name\": \"gemini-mine\" } }";
+        assert_eq!(
+            migrated(env, Some(remembered)).unwrap(),
+            Some(("GEMINI_API_KEY=sk-of-K\n".into(), None))
+        );
+        let alias = "{ \"model\": { \"name\": \"auto\" } }";
+        assert!(migrated(env, Some(alias)).unwrap().unwrap().1.is_some());
+        assert_eq!(migrated("GEMINI_API_KEY=sk-of-K\n", None).unwrap(), None);
     }
 
     #[test]

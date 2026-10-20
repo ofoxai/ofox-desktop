@@ -1117,13 +1117,18 @@ async fn gemini_api_key_user_gets_env_and_settings_back_byte_for_byte() {
         "already in API key mode: settings.json is left alone"
     );
 
-    save_tool_template(&db, Tool::Gemini, gemini_template(Some("google/gemini-x")));
-    rewrite_bound_config(&db, Tool::Gemini, KEY)
+    let saved = db
+        .get_provider_by_id(Tool::Gemini.provider_id(), "gemini")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let mut updated = saved.clone();
+    updated["env"]["GEMINI_MODEL"] = json!("google/gemini-x");
+    persist_bound_settings(&db, Tool::Gemini, KEY, &saved, &updated)
         .await
         .expect("model change");
-    assert!(fs::read_to_string(&env)
-        .unwrap()
-        .contains("GEMINI_MODEL=gemini-x\n"));
+    assert!(!fs::read_to_string(&env).unwrap().contains("GEMINI_MODEL"));
+    assert_eq!(json_at(&settings)["model"]["name"], "gemini-x");
 
     let report = unbind(&db, Tool::Gemini, "gemini", &[], false)
         .await
@@ -1977,13 +1982,17 @@ async fn missing_bindings_restore_saved_models_and_selected_apex_without_replaci
                         json_at(&file.current_path())["env"]["ANTHROPIC_MODEL"],
                         "anthropic/claude-saved"
                     ),
-                    ManagedFile::GeminiEnv => {
-                        assert!(restored.contains("GEMINI_MODEL=gemini-saved"))
-                    }
+                    ManagedFile::GeminiEnv => assert!(!restored.contains("GEMINI_MODEL")),
                     ManagedFile::OpenCodeConfig => assert!(restored.contains("openai/gpt-saved")),
                     ManagedFile::OpenClawConfig => assert!(restored.contains("openai/gpt-x")),
                     ManagedFile::HermesConfig => assert!(restored.contains("openai/gpt-x")),
-                    ManagedFile::GeminiSettings => continue,
+                    ManagedFile::GeminiSettings => {
+                        assert_eq!(
+                            json_at(&file.current_path())["model"]["name"],
+                            "gemini-saved"
+                        );
+                        continue;
+                    }
                 }
                 assert!(restored.contains(&format!("https://api.{apex}")));
             }
@@ -3120,7 +3129,7 @@ async fn startup_existing_repair_accepts_only_unchanged_saved_managed_fields() {
 async fn region_reconciliation_preserves_external_models_and_keys_with_canonical_endpoints() {
     for (from, to) in [("ofox.ai", "ofox.io"), ("ofox.io", "ofox.ai")] {
         for (tool, saved) in binding_cases() {
-            let _home = Home::new();
+            let home = Home::new();
             crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(from.into()))
                 .unwrap();
             let db = db_for(tool, saved);
@@ -3138,7 +3147,16 @@ async fn region_reconciliation_preserves_external_models_and_keys_with_canonical
                 .replace(KEY, "sk-user-changed")
                 .replace(saved_model, "user/changed-model");
             assert!(changed.contains("sk-user-changed"));
-            assert!(changed.contains("user/changed-model"));
+            if tool == Tool::Gemini {
+                // Gemini 的模型在 settings.json，不在 `.env`。
+                set_json_field(
+                    &home.gemini("settings.json"),
+                    &["model", "name"],
+                    "user/changed-model",
+                );
+            } else {
+                assert!(changed.contains("user/changed-model"));
+            }
             fs::write(&path, changed).unwrap();
             let live = region_live_snapshot(tool);
             let provider = region_provider_snapshot(&db, tool);
@@ -3986,18 +4004,11 @@ async fn gemini_model_changed_by_the_user_is_still_configured() {
     write(&env, GEMINI_ENV);
     let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
     bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
-    let switched: Vec<String> = fs::read_to_string(&env)
-        .unwrap()
-        .lines()
-        .map(|line| {
-            if line.starts_with("GEMINI_MODEL=") {
-                "GEMINI_MODEL=gemini-other".to_string()
-            } else {
-                line.to_string()
-            }
-        })
-        .collect();
-    write(&env, &format!("{}\n", switched.join("\n")));
+    set_json_field(
+        &home.gemini("settings.json"),
+        &["model", "name"],
+        "gemini-other",
+    );
 
     let health = status::binding_status(&db, Tool::Gemini, Some(KEY)).await;
 
@@ -4183,19 +4194,11 @@ async fn gemini_model_chosen_in_the_cli_is_adopted() {
     write(&env, GEMINI_ENV);
     let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
     bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
-    let switched = fs::read_to_string(&env)
-        .unwrap()
-        .lines()
-        .map(|line| {
-            if line.starts_with("GEMINI_MODEL=") {
-                "GEMINI_MODEL=gemini-other".to_string()
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    write(&env, &format!("{switched}\n"));
+    set_json_field(
+        &home.gemini("settings.json"),
+        &["model", "name"],
+        "gemini-other",
+    );
 
     assert!(super::live_model::adopt_live_model(&db, Tool::Gemini).unwrap());
     assert_eq!(saved_model(&db, Tool::Gemini), "gemini-other");
@@ -5287,22 +5290,27 @@ async fn saving_a_model_in_the_app_updates_the_claude_remembered_model_too() {
 
 #[tokio::test]
 #[serial]
-async fn gemini_model_remembered_by_the_agent_takes_over_the_env_model() {
+async fn gemini_model_remembered_by_the_agent_is_followed() {
     let home = Home::new();
     write(&home.gemini(".env"), GEMINI_ENV);
     let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
     bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
-    set_json_field(
-        &home.gemini("settings.json"),
-        &["model", "name"],
-        "gemini-3.8-flash",
-    );
+    let settings = home.gemini("settings.json");
+    assert_eq!(json_at(&settings)["model"]["name"], "gemini-saved");
+    set_json_field(&settings, &["model", "name"], "gemini-3.8-flash");
 
     sync_live_model(&db, Tool::Gemini, Some(KEY)).await;
 
     let env = fs::read_to_string(home.gemini(".env")).unwrap();
-    assert!(env.contains("GEMINI_MODEL=gemini-3.8-flash\n"), "{env}");
+    assert!(!env.contains("GEMINI_MODEL"), "{env}");
+    assert_eq!(json_at(&settings)["model"]["name"], "gemini-3.8-flash");
     assert_eq!(saved_model(&db, Tool::Gemini), "gemini-3.8-flash");
+    assert_eq!(
+        status::binding_status(&db, Tool::Gemini, Some(KEY))
+            .await
+            .status,
+        status::BindingStatus::Configured
+    );
 }
 
 #[tokio::test]
@@ -5320,32 +5328,166 @@ async fn gemini_auto_model_alias_is_not_taken_over() {
 
     sync_live_model(&db, Tool::Gemini, Some(KEY)).await;
 
-    assert_eq!(saved_model(&db, Tool::Gemini), "gemini-saved");
+    // 别名由 Gemini 自己解析：模板里保存的模型不变。
+    assert_eq!(saved_model(&db, Tool::Gemini), "google/gemini-saved");
+}
+
+#[tokio::test]
+#[serial]
+async fn gemini_bind_creates_model_name_and_unbind_removes_it() {
+    let home = Home::new();
+    let (env, settings) = (home.gemini(".env"), home.gemini("settings.json"));
+    write(&env, GEMINI_ENV);
+    write(&settings, GEMINI_API_KEY_SETTINGS);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    assert!(!fs::read_to_string(&env).unwrap().contains("GEMINI_MODEL"));
+    let bound = fs::read_to_string(&settings).unwrap();
+    assert!(bound.contains("// picked in the CLI"));
+    assert_eq!(json_at(&settings)["model"]["name"], "gemini-saved");
+
+    unbind(&db, Tool::Gemini, "gemini", &[], false)
+        .await
+        .expect("unbind");
+    assert_eq!(fs::read_to_string(&env).unwrap(), GEMINI_ENV);
+    assert_eq!(
+        fs::read_to_string(&settings).unwrap(),
+        GEMINI_API_KEY_SETTINGS
+    );
+}
+
+/// 旧版本绑定后的样子：模型在 `.env`，settings 里没有 `model.name`。
+async fn legacy_gemini_binding(home: &Home, remembered: Option<&str>) -> Database {
+    write(&home.gemini(".env"), GEMINI_ENV);
+    write(&home.gemini("settings.json"), GEMINI_API_KEY_SETTINGS);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    let env = home.gemini(".env");
+    let legacy = format!(
+        "{}GEMINI_MODEL=gemini-legacy\n",
+        fs::read_to_string(&env).unwrap()
+    );
+    write(&env, &legacy);
+    let settings = home.gemini("settings.json");
+    let mut value = json_at(&settings);
+    match remembered {
+        Some(model) => value["model"]["name"] = json!(model),
+        None => {
+            value.as_object_mut().unwrap().remove("model");
+        }
+    }
+    write(&settings, &serde_json::to_string_pretty(&value).unwrap());
+    db
+}
+
+#[tokio::test]
+#[serial]
+async fn gemini_old_env_model_moves_into_settings_on_refresh() {
+    let home = Home::new();
+    let db = legacy_gemini_binding(&home, None).await;
+
+    sync_live_model(&db, Tool::Gemini, Some(KEY)).await;
+
+    assert!(!fs::read_to_string(home.gemini(".env"))
+        .unwrap()
+        .contains("GEMINI_MODEL"));
+    assert_eq!(
+        json_at(&home.gemini("settings.json"))["model"]["name"],
+        "gemini-legacy"
+    );
+    assert_eq!(saved_model(&db, Tool::Gemini), "gemini-legacy");
+    unbind(&db, Tool::Gemini, "gemini", &[], false)
+        .await
+        .expect("unbind");
+    assert_eq!(fs::read_to_string(home.gemini(".env")).unwrap(), GEMINI_ENV);
+    assert!(json_at(&home.gemini("settings.json"))
+        .get("model")
+        .is_none());
+}
+
+#[tokio::test]
+#[serial]
+async fn gemini_old_env_model_yields_to_a_concrete_remembered_model() {
+    let home = Home::new();
+    let db = legacy_gemini_binding(&home, Some("gemini-mine")).await;
+
+    sync_live_model(&db, Tool::Gemini, Some(KEY)).await;
+
+    assert!(!fs::read_to_string(home.gemini(".env"))
+        .unwrap()
+        .contains("GEMINI_MODEL"));
+    assert_eq!(
+        json_at(&home.gemini("settings.json"))["model"]["name"],
+        "gemini-mine"
+    );
+    assert_eq!(saved_model(&db, Tool::Gemini), "gemini-mine");
+}
+
+#[tokio::test]
+#[serial]
+async fn gemini_users_own_env_model_line_comes_back_after_unbind() {
+    let home = Home::new();
+    let env = home.gemini(".env");
+    let original = format!("{GEMINI_ENV}GEMINI_MODEL=gemini-mine\n");
+    write(&env, &original);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    assert!(!fs::read_to_string(&env).unwrap().contains("GEMINI_MODEL"));
+    unbind(&db, Tool::Gemini, "gemini", &[], false)
+        .await
+        .expect("unbind");
+    assert_eq!(fs::read_to_string(&env).unwrap(), original);
+}
+
+#[tokio::test]
+#[serial]
+async fn replacing_the_key_keeps_the_gemini_model_remembered_by_the_agent() {
+    let home = Home::new();
+    write(&home.gemini(".env"), GEMINI_ENV);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    let settings = home.gemini("settings.json");
+    set_json_field(&settings, &["model", "name"], "gemini-mine");
+
+    replace_key(&db, Tool::Gemini, KEY, "sk-of-ACCOUNT-B")
+        .await
+        .unwrap();
+
+    assert_eq!(json_at(&settings)["model"]["name"], "gemini-mine");
+    assert!(fs::read_to_string(home.gemini(".env"))
+        .unwrap()
+        .contains("GEMINI_API_KEY=sk-of-ACCOUNT-B"));
 }
 
 #[cfg(unix)]
 #[tokio::test]
 #[serial]
-async fn aligning_the_gemini_env_keeps_it_private_to_the_user() {
+async fn migrating_the_gemini_env_keeps_it_private_to_the_user() {
     use std::os::unix::fs::PermissionsExt;
     let home = Home::new();
     write(&home.gemini(".env"), GEMINI_ENV);
     let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
     bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
-    set_json_field(
-        &home.gemini("settings.json"),
-        &["model", "name"],
-        "gemini-3.8-flash",
+    // 旧版本写下的 `GEMINI_MODEL`。
+    let env = home.gemini(".env");
+    let legacy = format!(
+        "{}GEMINI_MODEL=gemini-saved\n",
+        fs::read_to_string(&env).unwrap()
     );
+    write(&env, &legacy);
+    crate::config::set_file_mode(&env, 0o600).unwrap();
 
     sync_live_model(&db, Tool::Gemini, Some(KEY)).await;
 
-    let mode = fs::metadata(home.gemini(".env"))
-        .unwrap()
-        .permissions()
-        .mode()
-        & 0o777;
+    assert!(!fs::read_to_string(&env).unwrap().contains("GEMINI_MODEL"));
+    let mode = fs::metadata(&env).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
+    assert_eq!(
+        json_at(&home.gemini("settings.json"))["model"]["name"],
+        "gemini-saved"
+    );
 }
 
 #[tokio::test]
