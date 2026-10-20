@@ -87,6 +87,53 @@ fn two_mcp_resources_share_one_final_file_and_both_receipts() {
     assert_eq!(state.machine.assignments["mcp:beta:codex"], "beta");
 }
 
+#[cfg(unix)]
+#[test]
+#[serial_test::serial]
+fn batch_mcp_with_a_literal_secret_leaves_the_config_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    mcp_resource::save_draft(
+        &db,
+        crate::app_config::McpServer {
+            id: "secret".into(),
+            name: "secret".into(),
+            server: json!({"command":"fixture-server","env":{"TOKEN":"literal-token"}}),
+            apps: Default::default(),
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: vec![],
+        },
+        None,
+    )
+    .unwrap();
+    let resource = BatchResource {
+        resource_id: "secret".into(),
+        expected_revision: 1,
+        add_tools: vec![],
+        withdraw_tools: vec![],
+    };
+    let path = mcp_resource::native_paths().unwrap()["codex"].clone();
+    crate::config::atomic_write(&path, b"model = \"user-model\"\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let plan = preview_batch(
+        &db,
+        ResourceKind::Mcp,
+        vec![resource],
+        vec!["codex".into()],
+        BatchAction::Apply,
+        0,
+    )
+    .unwrap();
+
+    assert_eq!(run_batch(&db, id(&plan)).unwrap()["status"], "applied");
+
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+}
+
 #[test]
 #[serial_test::serial]
 fn a_batch_applied_and_withdrawn_leaves_each_config_as_it_was() {

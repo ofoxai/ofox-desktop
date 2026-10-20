@@ -588,8 +588,20 @@ pub(super) fn write_group(journal: &Journal, index: usize) -> Result<(), AppErro
         return Err(error("targetChanged"));
     }
     if group.before_hash != group.after_hash {
-        crate::config::atomic_write(Path::new(&group.path), group.after_text.as_bytes())
-            .map_err(|_| error("writeFailed"))?;
+        // Literal MCP secrets keep the file owner-only, as a single apply does.
+        let private = group
+            .members
+            .iter()
+            .any(|m| journal.plans[m.child].targets[m.target].private_values);
+        let path = Path::new(&group.path);
+        let mode =
+            private.then(|| crate::config::file_mode(path).map_or(0o600, |mode| mode & 0o700));
+        crate::config::atomic_write_with(
+            path,
+            group.after_text.as_bytes(),
+            crate::config::AtomicOpts { mode },
+        )
+        .map_err(|_| error("writeFailed"))?;
     }
     if io::fingerprint(
         io::read(Path::new(&group.path))?
