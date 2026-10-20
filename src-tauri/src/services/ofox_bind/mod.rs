@@ -450,7 +450,13 @@ fn write_bound(
                 .ok_or_else(|| "Ofox Codex 模板缺少 config".to_string())?;
             codex::write_bound_config(config, api_key, txn)
         }
-        Tool::Claude => claude::write_bound(template, api_key, select_route, txn),
+        Tool::Claude => claude::write_bound(
+            template,
+            api_key,
+            select_route,
+            &claude::catalog_families(),
+            txn,
+        ),
         Tool::Gemini => gemini::write_bound(template, api_key, select_route, txn),
         Tool::OpenCode => opencode::write_bound(template, api_key, select_route, txn),
         Tool::OpenClaw => openclaw::write_bound(template, api_key, select_route, txn),
@@ -706,6 +712,40 @@ pub(crate) async fn replace_key(
 
 /// 用户在 CLI 里换了模型：配置仍是 Ofox 的接入方式时，把它采纳进模板，主页显示的
 /// 模型才和实际一致。出错只记日志——这只是展示用的同步，不该让状态查询失败。
+/// Claude 的家族别名按 Ofox 模型目录映射（见 `claude::catalog_families`）：写配置前
+/// 先把目录拉进缓存（十分钟内有就不重复请求）。拉不到（离线、超时）就算了，写配置时
+/// 保留已有的映射；限时 3 秒，失败后十分钟内不再试，离线时不拖慢状态刷新。
+pub(crate) async fn prefetch_model_catalog(tool: Tool) {
+    static FAILED_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    const RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+    if tool != Tool::Claude {
+        return;
+    }
+    if FAILED_AT
+        .lock()
+        .ok()
+        .and_then(|at| *at)
+        .is_some_and(|at| at.elapsed() < RETRY_AFTER)
+    {
+        return;
+    }
+    let fetch = crate::services::model_fetch::fetch_ofox_models("anthropic", None);
+    let failed = match tokio::time::timeout(std::time::Duration::from_secs(3), fetch).await {
+        Ok(Ok(_)) => false,
+        Ok(Err(error)) => {
+            log::warn!("[ofox_bind] 拉取 Claude 模型目录失败：{error}");
+            true
+        }
+        Err(_) => {
+            log::warn!("[ofox_bind] 拉取 Claude 模型目录超时");
+            true
+        }
+    };
+    if let Ok(mut at) = FAILED_AT.lock() {
+        *at = failed.then(std::time::Instant::now);
+    }
+}
+
 pub(crate) async fn sync_live_model(db: &Database, tool: Tool, api_key: Option<&str>) {
     crate::agent_env::ready().await;
     let _guard = BIND_LOCK.lock().await;

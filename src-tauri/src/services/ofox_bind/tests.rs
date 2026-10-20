@@ -944,10 +944,9 @@ async fn claude_relay_setup_comes_back_byte_for_byte_after_a_model_change() {
     rewrite_bound_config(&db, Tool::Claude, KEY)
         .await
         .expect("model change");
-    assert_eq!(
-        json_at(&settings)["env"]["ANTHROPIC_MODEL"],
-        "anthropic/claude-x"
-    );
+    let env = &json_at(&settings)["env"];
+    assert_eq!(env["ANTHROPIC_DEFAULT_MODEL"], "anthropic/claude-x");
+    assert!(env.get("ANTHROPIC_MODEL").is_none());
 
     let report = unbind(&db, Tool::Claude, "claude", &[], false)
         .await
@@ -1979,7 +1978,7 @@ async fn missing_bindings_restore_saved_models_and_selected_apex_without_replaci
                         );
                     }
                     ManagedFile::ClaudeSettings => assert_eq!(
-                        json_at(&file.current_path())["env"]["ANTHROPIC_MODEL"],
+                        json_at(&file.current_path())["env"]["ANTHROPIC_DEFAULT_MODEL"],
                         "anthropic/claude-saved"
                     ),
                     ManagedFile::GeminiEnv => assert!(!restored.contains("GEMINI_MODEL")),
@@ -2263,7 +2262,7 @@ async fn atomic_model_save_preserves_user_fields_and_rejects_stale_or_unbound_re
             .await
             .unwrap();
         let disk = json_at(&path);
-        assert_eq!(disk["env"]["ANTHROPIC_MODEL"], "anthropic/next");
+        assert_eq!(disk["env"]["ANTHROPIC_DEFAULT_MODEL"], "anthropic/next");
         assert_eq!(
             disk["env"]["ANTHROPIC_BASE_URL"],
             format!("https://api.{apex}/anthropic")
@@ -4147,10 +4146,9 @@ async fn opencode_snapshot_observes_real_route_without_inventing_a_tui_choice() 
     assert_eq!(saved_models(&db, Tool::OpenCode), vec!["openai/gpt-x"]);
 }
 
+/// Claude Code 的 `/model` 把选的模型记在 settings 的 `model`。
 fn switch_claude_model_in_cli(path: &Path, model: &str) {
-    let mut edited = json_at(path);
-    edited["env"]["ANTHROPIC_MODEL"] = model.into();
-    write(path, &serde_json::to_string_pretty(&edited).unwrap());
+    set_json_field(path, &["model"], model);
 }
 
 #[tokio::test]
@@ -4263,7 +4261,11 @@ async fn replacing_the_key_keeps_the_claude_model_chosen_by_the_user() {
         .expect("replace key");
 
     let after = json_at(&path);
-    assert_eq!(after["env"]["ANTHROPIC_MODEL"], "anthropic/claude-other");
+    assert_eq!(after["model"], "anthropic/claude-other");
+    assert_eq!(
+        after["env"]["ANTHROPIC_DEFAULT_MODEL"],
+        "anthropic/claude-other"
+    );
     assert_eq!(after["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-of-ACCOUNT-B");
 }
 
@@ -5215,16 +5217,19 @@ fn set_json_field(path: &Path, field: &[&str], value: &str) {
 
 #[tokio::test]
 #[serial]
-async fn claude_model_remembered_by_the_agent_takes_over_the_env_model() {
+async fn claude_model_picked_in_the_agent_is_followed() {
     let (_home, db, settings) = bound_claude("anthropic/claude-x").await;
     set_json_field(&settings, &["model"], "anthropic/claude-other");
 
     sync_live_model(&db, Tool::Claude, Some(KEY)).await;
 
+    let config = json_at(&settings);
+    assert_eq!(config["model"], "anthropic/claude-other");
     assert_eq!(
-        json_at(&settings)["env"]["ANTHROPIC_MODEL"],
+        config["env"]["ANTHROPIC_DEFAULT_MODEL"],
         "anthropic/claude-other"
     );
+    assert!(config["env"].get("ANTHROPIC_MODEL").is_none());
     assert_eq!(saved_model(&db, Tool::Claude), "anthropic/claude-other");
     assert_eq!(
         status_of(&db, Tool::Claude).await,
@@ -5234,17 +5239,132 @@ async fn claude_model_remembered_by_the_agent_takes_over_the_env_model() {
 
 #[tokio::test]
 #[serial]
-async fn claude_model_alias_is_not_taken_over() {
+async fn claude_model_ofox_cannot_name_is_not_taken_over() {
     let (_home, db, settings) = bound_claude("anthropic/claude-x").await;
+    // 没有模型目录、也没有家族映射时，别名换不成 Ofox 的 id。
     set_json_field(&settings, &["model"], "sonnet");
 
     sync_live_model(&db, Tool::Claude, Some(KEY)).await;
 
     assert_eq!(
-        json_at(&settings)["env"]["ANTHROPIC_MODEL"],
+        json_at(&settings)["env"]["ANTHROPIC_DEFAULT_MODEL"],
         "anthropic/claude-x"
     );
     assert_eq!(saved_model(&db, Tool::Claude), "anthropic/claude-x");
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_family_alias_picked_in_the_agent_is_followed() {
+    crate::services::model_fetch::seed_ofox_anthropic_model_ids(&[
+        "anthropic/claude-haiku-4.5",
+        "anthropic/claude-haiku-5.5",
+    ]);
+    let (_home, db, settings) = bound_claude("anthropic/claude-x").await;
+    assert_eq!(
+        json_at(&settings)["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
+        "anthropic/claude-haiku-5.5"
+    );
+    set_json_field(&settings, &["model"], "haiku");
+
+    sync_live_model(&db, Tool::Claude, Some(KEY)).await;
+
+    crate::services::model_fetch::seed_ofox_anthropic_model_ids(&[]);
+    let config = json_at(&settings);
+    assert_eq!(config["model"], "haiku");
+    assert_eq!(
+        config["env"]["ANTHROPIC_DEFAULT_MODEL"],
+        "anthropic/claude-haiku-5.5"
+    );
+    assert_eq!(saved_model(&db, Tool::Claude), "anthropic/claude-haiku-5.5");
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_old_env_model_is_migrated_and_still_unbinds_exactly() {
+    let (_home, db, settings) = bound_claude("anthropic/claude-x").await;
+    // 旧版本绑定后的样子：模型写在优先级最高的 `ANTHROPIC_MODEL`。
+    let mut legacy = json_at(&settings);
+    let env = legacy["env"].as_object_mut().unwrap();
+    env.remove("ANTHROPIC_DEFAULT_MODEL");
+    env.remove("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY");
+    env.insert("ANTHROPIC_MODEL".into(), json!("anthropic/claude-legacy"));
+    write(&settings, &serde_json::to_string_pretty(&legacy).unwrap());
+
+    sync_live_model(&db, Tool::Claude, Some(KEY)).await;
+
+    let env = &json_at(&settings)["env"];
+    assert!(env.get("ANTHROPIC_MODEL").is_none());
+    assert_eq!(env["ANTHROPIC_DEFAULT_MODEL"], "anthropic/claude-legacy");
+    assert_eq!(env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"], "1");
+    assert_eq!(saved_model(&db, Tool::Claude), "anthropic/claude-legacy");
+    unbind(&db, Tool::Claude, "claude", &[], false)
+        .await
+        .expect("unbind");
+    assert_eq!(fs::read_to_string(&settings).unwrap(), CLAUDE_RELAY);
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_desktop_save_and_agent_pick_last_writer_wins() {
+    let (_home, db, settings) = bound_claude("anthropic/claude-a").await;
+    let save = |model: &'static str| {
+        let db = &db;
+        async move {
+            let saved = db
+                .get_provider_by_id(Tool::Claude.provider_id(), "claude")
+                .unwrap()
+                .unwrap()
+                .settings_config;
+            let mut updated = saved.clone();
+            updated["env"]["ANTHROPIC_MODEL"] = model.into();
+            persist_bound_settings(db, Tool::Claude, KEY, &saved, &updated)
+                .await
+                .unwrap();
+        }
+    };
+    assert!(json_at(&settings).get("model").is_none());
+
+    switch_claude_model_in_cli(&settings, "anthropic/claude-b");
+    sync_live_model(&db, Tool::Claude, Some(KEY)).await;
+    assert_eq!(saved_model(&db, Tool::Claude), "anthropic/claude-b");
+
+    save("anthropic/claude-c").await;
+    let config = json_at(&settings);
+    assert_eq!(config["model"], "anthropic/claude-c");
+    assert_eq!(
+        config["env"]["ANTHROPIC_DEFAULT_MODEL"],
+        "anthropic/claude-c"
+    );
+
+    // `/model` 选 Default：回到 Ofox 的默认模型。
+    switch_claude_model_in_cli(&settings, "default");
+    sync_live_model(&db, Tool::Claude, Some(KEY)).await;
+    assert_eq!(saved_model(&db, Tool::Claude), "anthropic/claude-c");
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_discovery_turned_off_by_the_user_stays_off() {
+    let (_home, db, settings) = bound_claude("anthropic/claude-x").await;
+    set_json_field(
+        &settings,
+        &["env", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"],
+        "0",
+    );
+
+    sync_live_model(&db, Tool::Claude, Some(KEY)).await;
+    assert_eq!(
+        json_at(&settings)["env"]["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"],
+        "0"
+    );
+    unbind(&db, Tool::Claude, "claude", &[], false)
+        .await
+        .expect("unbind");
+    assert_eq!(
+        json_at(&settings)["env"]["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"],
+        "0"
+    );
 }
 
 #[tokio::test]
@@ -5257,8 +5377,10 @@ async fn replacing_the_key_keeps_the_claude_model_remembered_by_the_agent() {
         .await
         .expect("replace key");
 
+    let config = json_at(&settings);
+    assert_eq!(config["model"], "anthropic/claude-other");
     assert_eq!(
-        json_at(&settings)["env"]["ANTHROPIC_MODEL"],
+        config["env"]["ANTHROPIC_DEFAULT_MODEL"],
         "anthropic/claude-other"
     );
 }
@@ -5284,7 +5406,10 @@ async fn saving_a_model_in_the_app_updates_the_claude_remembered_model_too() {
 
     let config = json_at(&settings);
     assert_eq!(config["model"], "anthropic/claude-app");
-    assert_eq!(config["env"]["ANTHROPIC_MODEL"], "anthropic/claude-app");
+    assert_eq!(
+        config["env"]["ANTHROPIC_DEFAULT_MODEL"],
+        "anthropic/claude-app"
+    );
     assert_eq!(saved_model(&db, Tool::Claude), "anthropic/claude-app");
 }
 
@@ -5744,7 +5869,7 @@ async fn hermes_ofox_model_does_not_stay_under_the_users_own_provider() {
 
 #[tokio::test]
 #[serial]
-async fn the_claude_model_aligned_from_the_agent_does_not_stay_under_the_users_endpoint() {
+async fn the_claude_default_model_ofox_wrote_does_not_stay_under_the_users_endpoint() {
     let home = Home::new();
     let settings = home.claude("settings.json");
     write(&settings, CLAUDE_RELAY);
@@ -5753,7 +5878,7 @@ async fn the_claude_model_aligned_from_the_agent_does_not_stay_under_the_users_e
     set_json_field(&settings, &["model"], "anthropic/claude-y");
     sync_live_model(&db, Tool::Claude, Some(KEY)).await;
     assert_eq!(
-        json_at(&settings)["env"]["ANTHROPIC_MODEL"],
+        json_at(&settings)["env"]["ANTHROPIC_DEFAULT_MODEL"],
         "anthropic/claude-y"
     );
     set_json_field(
@@ -5764,10 +5889,12 @@ async fn the_claude_model_aligned_from_the_agent_does_not_stay_under_the_users_e
 
     unbind_now(&db, Tool::Claude, "claude").await;
 
-    assert_eq!(
-        json_at(&settings)["env"]["ANTHROPIC_MODEL"],
-        "claude-opus-x"
-    );
+    let env = &json_at(&settings)["env"];
+    assert_eq!(env["ANTHROPIC_MODEL"], "claude-opus-x");
+    assert!(env.get("ANTHROPIC_DEFAULT_MODEL").is_none());
+    assert!(env
+        .get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY")
+        .is_none());
 }
 
 #[tokio::test]

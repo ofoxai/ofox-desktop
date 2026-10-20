@@ -308,6 +308,7 @@ pub async fn bind_tool_to_ofox_internal(
     // 精确还原（见 services::ofox_bind）。Codex 和 ChatGPT 共用 ~/.codex。
     if let Some((tool, holder)) = crate::services::ofox_bind::tool_for(app) {
         let token = acquire_bind_token(tool.app().into(), ofox_manager).await?;
+        crate::services::ofox_bind::prefetch_model_catalog(tool).await;
         crate::services::ofox_bind::bind(db, tool, holder, &token).await?;
         // 只有走 fetch_or_create_api_key 才有元数据；没有时内部直接 noop。
         crate::ofox_api_keys::mark_key_used(tool.app());

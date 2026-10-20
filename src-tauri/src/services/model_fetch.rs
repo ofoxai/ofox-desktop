@@ -113,6 +113,40 @@ fn cached_catalog(url: &str, max_age: Duration) -> Option<OfoxCatalog> {
     cached_catalog_at(url, max_age, Instant::now())
 }
 
+/// 最近拉到的 Anthropic 模型目录里的 id（一天以内的）；没拉过返回空。给写工具配置
+/// 这种只能同步读、又不该为此发请求的地方用——先 `fetch_ofox_models("anthropic")`
+/// 把它拉进来。
+pub fn cached_ofox_anthropic_model_ids() -> Vec<String> {
+    cached_catalog(&ofox_anthropic_models_url(), CATALOG_STALE_FOR)
+        .map(|catalog| catalog.models.into_iter().map(|model| model.id).collect())
+        .unwrap_or_default()
+}
+
+/// 测试用：把 Anthropic 模型目录换成这些 id；空的就清掉缓存。
+#[cfg(test)]
+pub fn seed_ofox_anthropic_model_ids(ids: &[&str]) {
+    if ids.is_empty() {
+        if let Ok(mut cache) = CATALOG_CACHE.lock() {
+            cache.remove(&ofox_anthropic_models_url());
+        }
+        return;
+    }
+    let models: Vec<FetchedModel> = ids
+        .iter()
+        .map(|id| FetchedModel {
+            id: id.to_string(),
+            name: None,
+            owned_by: None,
+            pricing_prompt: None,
+            supported_endpoints: None,
+            supported_parameters: None,
+            input_modalities: None,
+            output_modalities: None,
+        })
+        .collect();
+    save_catalog(ofox_anthropic_models_url(), &models);
+}
+
 fn cached_catalog_at(url: &str, max_age: Duration, now: Instant) -> Option<OfoxCatalog> {
     let cache = CATALOG_CACHE.lock().ok()?;
     let entry = cache.get(url)?;

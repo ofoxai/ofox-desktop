@@ -25,7 +25,8 @@ pub struct EnvOverride {
 pub fn overriding_vars(tool: &str) -> &'static [&'static str] {
     match tool {
         "gemini" => &["GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL", "GEMINI_MODEL"],
-        "claude" => &["ANTHROPIC_API_KEY"],
+        // 模型不再写进 settings 的 env：shell 里导出的 ANTHROPIC_MODEL 会盖过 `/model`。
+        "claude" => &["ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"],
         _ => &[],
     }
 }
@@ -142,7 +143,10 @@ mod tests {
     #[test]
     fn only_variables_that_beat_the_tools_own_config_are_checked() {
         assert!(overriding_vars("gemini").contains(&"GEMINI_API_KEY"));
-        assert_eq!(overriding_vars("claude"), ["ANTHROPIC_API_KEY"]);
+        assert_eq!(
+            overriding_vars("claude"),
+            ["ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"]
+        );
         assert!(overriding_vars("codex").is_empty());
         assert!(overriding_vars("opencode").is_empty());
     }

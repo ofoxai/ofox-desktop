@@ -12,7 +12,6 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use super::json_file::KeyStyle;
 use super::{json_file, read_text, ManagedFile, Tool};
 use crate::commands::manage_tool::{read_model_from_settings, write_model_into_settings};
 use crate::config::FileTxn;
@@ -37,11 +36,7 @@ fn read_live_model(tool: Tool) -> Result<Option<String>, String> {
             let Some(text) = read_text(&ManagedFile::ClaudeSettings.current_path())? else {
                 return Ok(None);
             };
-            json_file::parse_object(Some(&text), "Claude")?
-                .get("env")
-                .and_then(|env| env.get("ANTHROPIC_MODEL"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
+            super::claude::live_model(&text, &super::claude::catalog_families())?
         }
         Tool::Gemini => {
             let Some(text) = read_text(&ManagedFile::GeminiSettings.current_path())? else {
@@ -88,41 +83,31 @@ fn normalize_before_adopt(db: &Database, tool: Tool) -> Result<bool, String> {
     write_recorded(db, tool, normalize_edits(tool)?)
 }
 
-/// 采纳前要写的文件、内容和权限：
-/// - Claude 启动时 env 里的模型优先级比 settings 里的高，而用户在 agent 里「记住」的
-///   模型写在 settings 的 `model`。把 env 对齐到它，不然用户的选择下次启动不生效。
-///   只认具体的模型名，别名（`sonnet` 之类）由 agent 自己解析，不动。
-/// - Gemini：旧版本写在 `.env` 的 `GEMINI_MODEL` 会盖掉用户记住的 `model.name`，
-///   去掉它（见 [`super::gemini::migrated`]）。
+/// 采纳前要写的文件、内容和权限：Gemini 旧版本写在 `.env` 的 `GEMINI_MODEL` 会盖掉
+/// 用户记住的 `model.name`，先去掉它（见 [`super::gemini::migrated`]），采纳时读到的才是
+/// 用户的选择。
 fn normalize_edits(tool: Tool) -> Result<Vec<(PathBuf, String, Option<u32>)>, String> {
     match tool {
-        Tool::Claude => {
-            let path = ManagedFile::ClaudeSettings.current_path();
-            let Some(text) = read_text(&path)? else {
-                return Ok(Vec::new());
-            };
-            let before = json_file::parse_object(Some(&text), "Claude")?;
-            let Some(model) = before
-                .get("model")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|model| model.contains('/'))
-            else {
-                return Ok(Vec::new());
-            };
-            let env_model =
-                json_file::get(&before, &["env", "ANTHROPIC_MODEL"]).and_then(Value::as_str);
-            if env_model == Some(model) {
-                return Ok(Vec::new());
-            }
-            let mut after = before.clone();
-            json_file::set(&mut after, &["env", "ANTHROPIC_MODEL"], model.into());
-            let rendered = json_file::render_changed(&text, KeyStyle::Json, &before, &after)?;
-            Ok(vec![(path, rendered, None)])
-        }
         Tool::Gemini => super::gemini::migration_edits(),
         _ => Ok(Vec::new()),
     }
+}
+
+/// 采纳之后按模板规整：Claude 旧版本写的 `ANTHROPIC_MODEL` 比 `/model` 记住的模型
+/// 优先，迁成默认模型，家族别名跟上最新的模型目录（见 [`super::claude::normalized`]）。
+/// 先采纳再规整：旧绑定里用户的模型可能只在 `ANTHROPIC_MODEL` 里。
+fn normalize_after_adopt(db: &Database, tool: Tool) -> Result<bool, String> {
+    if tool != Tool::Claude {
+        return Ok(false);
+    }
+    let path = ManagedFile::ClaudeSettings.current_path();
+    let Some(text) = read_text(&path)? else {
+        return Ok(false);
+    };
+    let template = super::template(db, tool)?;
+    let edits = super::claude::normalized(&text, &template, &super::claude::catalog_families())?
+        .map(|updated| (path, updated, None));
+    write_recorded(db, tool, edits.into_iter().collect())
 }
 
 /// 写入这些文件并记进绑定记录；记不进去就整批回滚。没有要写的返回 `false`。
@@ -154,6 +139,12 @@ fn write_recorded(
 /// 不动。返回是否改了模板。调用方要先确认配置还是 Ofox 的接入方式。
 pub(super) fn adopt_live_model(db: &Database, tool: Tool) -> Result<bool, String> {
     normalize_before_adopt(db, tool)?;
+    let adopted = adopt(db, tool)?;
+    normalize_after_adopt(db, tool)?;
+    Ok(adopted)
+}
+
+fn adopt(db: &Database, tool: Tool) -> Result<bool, String> {
     let Some(live) = read_live_model(tool)? else {
         return Ok(false);
     };

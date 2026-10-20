@@ -356,6 +356,7 @@ pub(super) fn inspect_managed_fields(
                         current.as_deref(),
                         &template,
                         key,
+                        &[],
                     )?),
                     "Claude",
                 )?;
