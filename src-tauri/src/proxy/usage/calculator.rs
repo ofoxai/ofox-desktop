@@ -25,6 +25,15 @@ pub struct ModelPricing {
     pub cache_creation_cost_per_million: Decimal,
 }
 
+impl ModelPricing {
+    /// The rate of a cache write kept for an hour: twice the input rate, as
+    /// Anthropic bills it and as Ofox's catalog lists it (`input_cache_write_1h`)
+    /// for every Claude model. Only Claude reports such writes.
+    pub fn cache_creation_1h_cost_per_million(&self) -> Decimal {
+        self.input_cost_per_million * Decimal::TWO
+    }
+}
+
 /// 成本计算器
 pub struct CostCalculator;
 
@@ -37,9 +46,13 @@ impl CostCalculator {
     /// - `cost_multiplier`: 成本倍数 (provider 自定义)
     ///
     /// # 计算逻辑
-    /// - input_cost: (input_tokens - cache_read_tokens) × 输入价格
+    /// Every source stores `input_tokens` as fresh input: it excludes cache reads
+    /// and cache writes (Claude reports it that way; the Codex, Gemini and OpenAI
+    /// parsers subtract the cached part before storing). So each bucket is priced
+    /// once, nothing is subtracted here, and this is the only cost formula:
+    /// - input_cost: input_tokens × 输入价格
     /// - cache_read_cost: cache_read_tokens × 缓存读取价格
-    /// - 这样避免缓存部分被重复计费
+    /// - cache_creation_cost: cache_creation_tokens × 缓存写入价格
     /// - total_cost: 各项成本之和 × 倍率（倍率只作用于最终总价）
     pub fn calculate(
         usage: &TokenUsage,
@@ -48,19 +61,20 @@ impl CostCalculator {
     ) -> CostBreakdown {
         let million = Decimal::from(1_000_000);
 
-        // 计算实际需要按输入价格计费的 token 数（减去缓存命中部分）
-        let billable_input_tokens = usage.input_tokens.saturating_sub(usage.cache_read_tokens);
-
         // 各项基础成本（不含倍率）
         let input_cost =
-            Decimal::from(billable_input_tokens) * pricing.input_cost_per_million / million;
+            Decimal::from(usage.input_tokens) * pricing.input_cost_per_million / million;
         let output_cost =
             Decimal::from(usage.output_tokens) * pricing.output_cost_per_million / million;
         let cache_read_cost =
             Decimal::from(usage.cache_read_tokens) * pricing.cache_read_cost_per_million / million;
-        let cache_creation_cost = Decimal::from(usage.cache_creation_tokens)
+        let hour = usage
+            .cache_creation_1h_tokens
+            .min(usage.cache_creation_tokens);
+        let cache_creation_cost = Decimal::from(usage.cache_creation_tokens - hour)
             * pricing.cache_creation_cost_per_million
-            / million;
+            / million
+            + Decimal::from(hour) * pricing.cache_creation_1h_cost_per_million() / million;
 
         // 总成本 = 各项基础成本之和 × 倍率
         let base_total = input_cost + output_cost + cache_read_cost + cache_creation_cost;
@@ -106,35 +120,127 @@ impl ModelPricing {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_cost_calculation() {
-        let usage = TokenUsage {
-            input_tokens: 1000,
-            output_tokens: 500,
-            cache_read_tokens: 200,
-            cache_creation_tokens: 100,
+    fn usage(input: u32, output: u32, cache_read: u32, cache_creation: u32) -> TokenUsage {
+        TokenUsage {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: cache_read,
+            cache_creation_tokens: cache_creation,
+            cache_creation_1h_tokens: 0,
             model: None,
             message_id: None,
-        };
+        }
+    }
 
+    fn dec(s: &str) -> Decimal {
+        Decimal::from_str(s).unwrap()
+    }
+
+    /// Claude bills an hour-long cache write at twice the input rate, as
+    /// Ofox's catalog lists it (`input_cache_write_1h`); the rest of the
+    /// writes keep the five-minute rate.
+    #[test]
+    fn an_hour_long_cache_write_costs_twice_the_input_rate() {
+        // $5 in, $25 out, $0.50 cache read, $6.25 five-minute cache write
+        let pricing = ModelPricing::from_strings("5", "25", "0.5", "6.25").unwrap();
+        let mut written = usage(0, 0, 0, 1_000_000);
+        written.cache_creation_1h_tokens = 600_000;
+        let cost = CostCalculator::calculate(&written, &pricing, Decimal::ONE);
+        // 400k at $6.25 + 600k at $10
+        assert_eq!(cost.cache_creation_cost, dec("8.5"));
+        assert_eq!(cost.total_cost, dec("8.5"));
+        // more hour-long writes than writes cannot charge more than all of them
+        written.cache_creation_1h_tokens = 2_000_000;
+        let cost = CostCalculator::calculate(&written, &pricing, Decimal::ONE);
+        assert_eq!(cost.cache_creation_cost, dec("10"));
+    }
+
+    /// Every source stores `input_tokens` as fresh input (no cache reads, no cache
+    /// writes), so the calculator prices each bucket once and never subtracts.
+    #[test]
+    fn every_source_prices_fresh_input_and_each_cache_bucket_separately() {
+        // $3 in, $15 out, $0.30 cache read, $3.75 cache write (per million)
         let pricing = ModelPricing::from_strings("3.0", "15.0", "0.3", "3.75").unwrap();
-        let multiplier = Decimal::from_str("1.0").unwrap();
+        // (source, stored usage, input, output, cache read, cache write costs)
+        let cases = [
+            // Claude JSONL: input 3 excludes the 5000 read and 10000 written
+            (
+                "claude session_log",
+                usage(3, 150, 5000, 10000),
+                "0.000009",
+                "0.00225",
+                "0.0015",
+                "0.0375",
+            ),
+            // Codex rollout: 1000 raw input with 800 cached is stored as 200 fresh
+            (
+                "codex_session",
+                usage(200, 50, 800, 0),
+                "0.0006",
+                "0.00075",
+                "0.00024",
+                "0",
+            ),
+            // Gemini chat: promptTokenCount 900 with 600 cached is stored as 300
+            (
+                "gemini_session",
+                usage(300, 40, 600, 0),
+                "0.0009",
+                "0.0006",
+                "0.00018",
+                "0",
+            ),
+            // OpenCode: its input already excludes the cache
+            (
+                "opencode_session",
+                usage(40, 60, 700, 300),
+                "0.00012",
+                "0.0009",
+                "0.00021",
+                "0.001125",
+            ),
+            // a proxy row whose cache read exceeds the fresh input is not clamped
+            (
+                "proxy",
+                usage(10, 0, 20, 0),
+                "0.00003",
+                "0",
+                "0.000006",
+                "0",
+            ),
+        ];
+        for (source, usage, input, output, cache_read, cache_creation) in cases {
+            let cost = CostCalculator::calculate(&usage, &pricing, Decimal::ONE);
+            assert_eq!(cost.input_cost, dec(input), "{source}: input cost");
+            assert_eq!(cost.output_cost, dec(output), "{source}: output cost");
+            assert_eq!(
+                cost.cache_read_cost,
+                dec(cache_read),
+                "{source}: cache read"
+            );
+            assert_eq!(
+                cost.cache_creation_cost,
+                dec(cache_creation),
+                "{source}: cache write"
+            );
+            assert_eq!(
+                cost.total_cost,
+                cost.input_cost
+                    + cost.output_cost
+                    + cost.cache_read_cost
+                    + cost.cache_creation_cost,
+                "{source}: total"
+            );
+        }
+    }
 
-        let cost = CostCalculator::calculate(&usage, &pricing, multiplier);
-
-        // input: (1000 - 200) * 3.0 / 1M = 0.0024 (只计算非缓存部分)
-        assert_eq!(cost.input_cost, Decimal::from_str("0.0024").unwrap());
-        // output: 500 * 15.0 / 1M = 0.0075
-        assert_eq!(cost.output_cost, Decimal::from_str("0.0075").unwrap());
-        // cache_read: 200 * 0.3 / 1M = 0.00006
-        assert_eq!(cost.cache_read_cost, Decimal::from_str("0.00006").unwrap());
-        // cache_creation: 100 * 3.75 / 1M = 0.000375
-        assert_eq!(
-            cost.cache_creation_cost,
-            Decimal::from_str("0.000375").unwrap()
-        );
-        // total: 0.0024 + 0.0075 + 0.00006 + 0.000375 = 0.010335
-        assert_eq!(cost.total_cost, Decimal::from_str("0.010335").unwrap());
+    #[test]
+    fn claude_fresh_input_is_priced_even_when_cache_reads_dwarf_it() {
+        let pricing = ModelPricing::from_strings("3.0", "15.0", "0.3", "3.75").unwrap();
+        let cost = CostCalculator::calculate(&usage(3, 150, 5000, 10000), &pricing, Decimal::ONE);
+        assert!(cost.input_cost > Decimal::ZERO);
+        assert!(cost.cache_read_cost > Decimal::ZERO);
+        assert!(cost.cache_creation_cost > Decimal::ZERO);
     }
 
     #[test]
@@ -144,6 +250,7 @@ mod tests {
             output_tokens: 0,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            cache_creation_1h_tokens: 0,
             model: None,
             message_id: None,
         };
@@ -166,6 +273,7 @@ mod tests {
             output_tokens: 500,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            cache_creation_1h_tokens: 0,
             model: None,
             message_id: None,
         };
@@ -183,6 +291,7 @@ mod tests {
             output_tokens: 1,
             cache_read_tokens: 1,
             cache_creation_tokens: 1,
+            cache_creation_1h_tokens: 0,
             model: None,
             message_id: None,
         };

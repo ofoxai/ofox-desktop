@@ -28,6 +28,7 @@ use tokio::sync::RwLock;
 use crate::app_config::{AppType, BindableTool};
 use crate::commands::ofox_auth::OfoxAuthState;
 use crate::ofox_apex::gateway_base;
+use crate::ofox_api_keys::ApiKeyError;
 use crate::ofox_auth::OfoxAuthManager;
 use crate::store::AppState;
 
@@ -52,6 +53,11 @@ use crate::store::AppState;
 /// "settings/config" file — that's the one users would actually inspect.
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_tool_config_file_path(app: String) -> Result<String, String> {
+    if let Some(tool) = BindableTool::native(&app) {
+        return Ok(crate::native_tools::primary_path(tool)?
+            .to_string_lossy()
+            .into_owned());
+    }
     if app.trim().eq_ignore_ascii_case("workbuddy") {
         return Ok(crate::workbuddy_config::models_path()
             .to_string_lossy()
@@ -75,6 +81,9 @@ pub async fn get_tool_binding_status(
     state: State<'_, AppState>,
     app: String,
 ) -> Result<crate::services::ofox_bind::status::ToolBindingStatus, String> {
+    if let Some(tool) = BindableTool::native(&app) {
+        return Ok(crate::native_tools::binding_status(&state.db, tool).await);
+    }
     if app.trim().eq_ignore_ascii_case("workbuddy") {
         return Ok(crate::workbuddy_config::binding_status(&state.db).await);
     }
@@ -93,6 +102,7 @@ pub async fn get_tool_binding_status(
                 .await;
                 // 用户在 CLI 里换了模型：让主页显示的模型跟着变。
                 if status.status == crate::services::ofox_bind::status::BindingStatus::Configured {
+                    crate::services::ofox_bind::prefetch_model_catalog(tool).await;
                     crate::services::ofox_bind::sync_live_model(&state.db, tool, key.as_deref())
                         .await;
                 }
@@ -104,9 +114,9 @@ pub async fn get_tool_binding_status(
     Ok(status)
 }
 
-/// 从 Desktop 启动 Claude、Gemini 前，先采纳用户在 agent 里「记住」的模型：它们启动时
-/// env 里的模型比 settings 里的优先，不先对齐，刚换的模型下次启动会被盖回去。
-/// 只是同步展示和 env，出错不拦启动。
+/// 从 Desktop 启动 Claude、Gemini 前，先采纳用户在 agent 里「记住」的模型，并把旧版本
+/// 写的、优先级更高的模型（Claude 的 `ANTHROPIC_MODEL`、Gemini 的 `GEMINI_MODEL`）迁走，
+/// 不然刚换的模型这次启动会被盖回去。只是同步展示和配置，出错不拦启动。
 pub(crate) async fn follow_live_model(state: &AppState, app: &str) {
     let Some((tool, _)) = crate::services::ofox_bind::tool_for(app) else {
         return;
@@ -122,6 +132,7 @@ pub(crate) async fn follow_live_model(state: &AppState, app: &str) {
             .status
             == crate::services::ofox_bind::status::BindingStatus::Configured;
     if configured {
+        crate::services::ofox_bind::prefetch_model_catalog(tool).await;
         crate::services::ofox_bind::sync_live_model(&state.db, tool, key.as_deref()).await;
     }
 }
@@ -133,8 +144,8 @@ pub(crate) async fn follow_live_model(state: &AppState, app: &str) {
 /// Read the model currently configured on the app's active provider.
 ///
 /// Returns `""` when:
-///   - the provider has no model set (legitimate "use OfoxAI's default route"
-///     state — the OfoxAI seeds ship with no model preselected);
+///   - the provider has no model set yet (the OfoxAI seeds ship with none;
+///     binding picks one, and the UI asks for one while it is empty);
 ///   - the underlying field doesn't exist yet (newly created provider).
 ///
 /// Hard errors only when we cannot resolve the active provider at all
@@ -145,6 +156,12 @@ pub async fn get_active_ofox_model(
     state: State<'_, AppState>,
     app: String,
 ) -> Result<String, String> {
+    if let Some(tool) = BindableTool::native(&app) {
+        return Ok(crate::native_tools::snapshot(&state.db, tool)
+            .await?
+            .observed_model
+            .unwrap_or_default());
+    }
     if app.trim().eq_ignore_ascii_case("workbuddy") {
         return crate::workbuddy_config::active_model(&state.db).await;
     }
@@ -238,6 +255,34 @@ pub async fn set_active_ofox_model(
     model_selection: Option<crate::workbuddy_config::WorkBuddyModelSelection>,
     compatibility_protocol: Option<String>,
 ) -> Result<(), String> {
+    if let Some(tool) = BindableTool::native(&app) {
+        require_configured(crate::native_tools::binding_status(&state.db, tool).await)?;
+        let token = catalog_access_token(&ofox_state.0).await;
+        validate_compatibility(
+            tool,
+            &model,
+            compatibility_protocol.as_deref(),
+            token.as_deref(),
+        )
+        .await?;
+        let catalog =
+            crate::services::model_fetch::fetch_ofox_catalog("openai", token.as_deref(), false)
+                .await?;
+        let selected = catalog
+            .models
+            .iter()
+            .find(|m| m.id == model.trim())
+            .ok_or_else(|| "模型不在当前目录中".to_string())?;
+        let key = crate::ofox_secret::default_store()
+            .load(crate::ofox_secret::Slot::ApiKey { tool })
+            .map_err(|_| "读取已绑定的 API Key 失败".to_string())?
+            .ok_or_else(|| "未找到已绑定的 API Key".to_string())?;
+        crate::native_tools::set_model(&state.db, tool, &key, selected)
+            .await
+            .map_err(crate::redact::scrub_error)?;
+        crate::ofox_api_keys::mark_key_used(tool);
+        return Ok(());
+    }
     if app.trim().eq_ignore_ascii_case("workbuddy") {
         require_configured(crate::workbuddy_config::binding_status(&state.db).await)?;
         let selection = model_selection
@@ -252,8 +297,10 @@ pub async fn set_active_ofox_model(
             &ofox_state.0,
         )
         .await
-        .map_err(|e| format!("获取 WorkBuddy OfoxAI API key 失败: {e}"))?;
-        crate::workbuddy_config::update_selected_models(&state.db, &api_key, &[selection]).await?;
+        .map_err(|e| api_key_failure("获取 WorkBuddy OfoxAI API key 失败: ", &e))?;
+        crate::workbuddy_config::update_selected_models(&state.db, &api_key, &[selection])
+            .await
+            .map_err(crate::redact::scrub_error)?;
         crate::ofox_api_keys::mark_key_used(BindableTool::WorkBuddy);
         return Ok(());
     }
@@ -320,7 +367,8 @@ pub async fn set_active_ofox_model(
             &previous_settings,
             &provider.settings_config,
         )
-        .await?;
+        .await
+        .map_err(crate::redact::scrub_error)?;
     } else {
         persist_with_rollback(
             &state.db,
@@ -390,6 +438,11 @@ pub async fn get_active_ofox_models(
     state: State<'_, AppState>,
     app: String,
 ) -> Result<Vec<String>, String> {
+    if let Some(tool) = BindableTool::native(&app) {
+        return Ok(crate::native_tools::snapshot(&state.db, tool)
+            .await?
+            .model_ids);
+    }
     let app_type = AppType::from_str(&app).map_err(|e| format!("无效的应用类型: {e}"))?;
     if app_type != AppType::OpenCode {
         let model = read_active_model_for(&state, &app_type)?;
@@ -432,14 +485,14 @@ pub struct SaveModelsReport {
     pub skipped: Vec<SkippedModel>,
 }
 
-struct ResolvedModels {
-    resolved: Vec<(String, Option<String>)>,
-    skipped: Vec<SkippedModel>,
+pub(crate) struct ResolvedModels {
+    pub(crate) resolved: Vec<(String, Option<String>)>,
+    pub(crate) skipped: Vec<SkippedModel>,
 }
 
 /// 保存时给每个模型选协议，不发探测请求：先用 7 天内的检测缓存，没有就按目录声明和
 /// 默认规则选。目录里没有可用端点的模型跳过并告知，不拖累其余模型；一个都存不了才报错。
-fn resolve_opencode_models(
+pub(crate) fn resolve_opencode_models(
     ids: &[String],
     catalog: &[crate::services::model_fetch::FetchedModel],
 ) -> Result<ResolvedModels, String> {
@@ -587,7 +640,8 @@ pub async fn set_active_ofox_models(
         &previous_settings,
         &provider.settings_config,
     )
-    .await?;
+    .await
+    .map_err(crate::redact::scrub_error)?;
     // 保存已完成；默认走 Responses 的模型在后台验证，不阻塞也不改配置。
     tauri::async_runtime::spawn(crate::model_compat::verify_in_background(
         catalog.models,
@@ -599,6 +653,11 @@ pub async fn set_active_ofox_models(
     })
 }
 
+/// 取 key 失败的提示。服务端的拒绝文案里可能回显请求里的 key，抹掉再给前端。
+fn api_key_failure(context: &str, error: &ApiKeyError) -> String {
+    crate::redact::scrub_error(format!("{context}{error}"))
+}
+
 fn require_configured(
     health: crate::services::ofox_bind::status::ToolBindingStatus,
 ) -> Result<(), String> {
@@ -607,7 +666,7 @@ fn require_configured(
     } else {
         Err(health
             .message
-            .unwrap_or_else(|| "请先确认 OFox 接入配置。".into()))
+            .unwrap_or_else(|| "请先确认 Ofox 接入配置。".into()))
     }
 }
 
@@ -638,19 +697,20 @@ where
 #[tauri::command(rename_all = "camelCase")]
 pub async fn set_workbuddy_managed_models(
     state: State<'_, AppState>,
-    ofox_state: State<'_, OfoxAuthState>,
+    _ofox_state: State<'_, OfoxAuthState>,
     model_selections: Vec<crate::workbuddy_config::WorkBuddyModelSelection>,
 ) -> Result<(), String> {
     require_configured(crate::workbuddy_config::binding_status(&state.db).await)?;
     crate::workbuddy_config::validate_selections(&model_selections)?;
-    let api_key = crate::ofox_api_keys::fetch_or_create_api_key(
-        BindableTool::WorkBuddy,
-        crate::ofox_api_keys::FetchMode::CachedOk,
-        &ofox_state.0,
-    )
-    .await
-    .map_err(|e| format!("获取 WorkBuddy OfoxAI API key 失败: {e}"))?;
-    crate::workbuddy_config::update_selected_models(&state.db, &api_key, &model_selections).await?;
+    let api_key = crate::ofox_secret::default_store()
+        .load(crate::ofox_secret::Slot::ApiKey {
+            tool: BindableTool::WorkBuddy,
+        })
+        .map_err(|_| "读取已绑定的 API Key 失败".to_string())?
+        .ok_or_else(|| "未找到已绑定的 API Key，请重新绑定".to_string())?;
+    crate::workbuddy_config::update_selected_models(&state.db, &api_key, &model_selections)
+        .await
+        .map_err(crate::redact::scrub_error)?;
     crate::ofox_api_keys::mark_key_used(BindableTool::WorkBuddy);
     Ok(())
 }
@@ -671,12 +731,7 @@ pub async fn check_ofox_model_compatibility(
     force_retest: Option<bool>,
     ofox_state: State<'_, OfoxAuthState>,
 ) -> Result<crate::model_compat::CompatibilityResult, String> {
-    let tool = match app.as_str() {
-        "workbuddy" => BindableTool::WorkBuddy,
-        _ => AppType::from_str(&app)
-            .map(BindableTool::from)
-            .map_err(|e| e.to_string())?,
-    };
+    let tool = BindableTool::from_str(&app)?;
     let catalog_token = catalog_access_token(&ofox_state.0).await;
     Ok(crate::model_compat::check(
         tool,
@@ -801,8 +856,9 @@ pub(crate) fn read_model_from_settings(app: &AppType, settings: &serde_json::Val
 }
 
 /// Write `model` into the right slot for `app`. Empty `model` removes the
-/// field (keeps the stored JSON tidy and lets OfoxAI fall back to its
-/// default-route behavior). Mutates `settings` in place.
+/// field, which binding relies on for a seed with no model; a model choice
+/// is never empty (`model_selection::validate_selection`). Mutates `settings`
+/// in place.
 pub(crate) fn write_model_into_settings(
     app: &AppType,
     settings: &mut serde_json::Value,
@@ -911,9 +967,12 @@ fn set_codex_model(settings: &mut serde_json::Value, model: &str) -> Result<(), 
     let mut doc = if cfg_text.is_empty() {
         DocumentMut::new()
     } else {
-        cfg_text
-            .parse::<DocumentMut>()
-            .map_err(|e| format!("解析 Codex config TOML 失败: {e}"))?
+        cfg_text.parse::<DocumentMut>().map_err(|e| {
+            format!(
+                "解析 Codex config TOML 失败: {}",
+                crate::redact::describe_toml_error(&cfg_text, &e)
+            )
+        })?
     };
 
     if model.is_empty() {
@@ -1056,7 +1115,7 @@ mod tests {
         let body = r#"{"error":{"message":"Insufficient credits. Current balance: $0. Please top up to continue.","type":"insufficient_credits","code":402,"request_id":"6340bd36"}}"#;
         assert_eq!(
             ping_failure_message(402, body),
-            "OFOX 账户余额不足，充值后即可使用。"
+            "Ofox 账户余额不足，充值后即可使用。"
         );
     }
 
@@ -1071,6 +1130,42 @@ mod tests {
             ping_failure_message(400, r#"{"message":"bad request"}"#),
             "请求失败（HTTP 400）bad request"
         );
+    }
+
+    #[test]
+    fn a_broken_codex_config_error_never_echoes_the_key_in_it() {
+        let broken = "model = \"gpt-5\"\nexperimental_bearer_token = \"sk-of-abc123456789\" oops\n";
+        let mut settings = serde_json::json!({ "config": broken });
+
+        let error = write_model_into_settings(&AppType::Codex, &mut settings, "gpt-6").unwrap_err();
+
+        assert!(error.contains("line 2, column"), "{error}");
+        assert!(!error.contains("abc123456789"), "{error}");
+        assert_eq!(settings["config"], broken, "settings left untouched");
+    }
+
+    #[test]
+    fn key_fetch_failures_never_repeat_a_key_the_server_echoes_back() {
+        let rejected = ApiKeyError::RemoteRejected("400: bad key sk-of-abc123456789".into());
+        let unauthorized = ApiKeyError::Unauthorized("Bearer abcdefgh12345678 expired".into());
+
+        for error in [rejected, unauthorized] {
+            let message = api_key_failure("获取 OfoxAI API key 失败：", &error);
+            assert!(
+                message.starts_with("获取 OfoxAI API key 失败："),
+                "{message}"
+            );
+            assert!(!message.contains("abc123456789"), "{message}");
+            assert!(!message.contains("abcdefgh12345678"), "{message}");
+        }
+    }
+
+    #[test]
+    fn ping_never_repeats_a_key_the_gateway_echoes_back() {
+        let body = r#"{"error":{"message":"Incorrect API key provided: sk-of-abc123456789xyz"}}"#;
+        let message = ping_failure_message(401, body);
+        assert!(!message.contains("abc123456789"), "{message}");
+        assert!(message.contains("Incorrect API key provided"), "{message}");
     }
 
     #[test]
@@ -1324,6 +1419,17 @@ async fn ofox_ping_model_internal(
         };
     }
 
+    if let Some(tool) = BindableTool::native(app) {
+        let token = catalog_access_token(manager_arc).await;
+        let result = crate::model_compat::check(tool, &model, true, token.as_deref()).await;
+        return PingResult {
+            success: result.status == "compatible",
+            latency_ms: 0,
+            status_code: None,
+            error: result.reason,
+        };
+    }
+
     if app.trim().eq_ignore_ascii_case("workbuddy") {
         let api_key = match crate::ofox_api_keys::fetch_or_create_api_key(
             BindableTool::WorkBuddy,
@@ -1338,7 +1444,10 @@ async fn ofox_ping_model_internal(
                     success: false,
                     latency_ms: 0,
                     status_code: Some(401),
-                    error: Some(format!("获取 WorkBuddy OfoxAI API key 失败：{error}")),
+                    error: Some(api_key_failure(
+                        "获取 WorkBuddy OfoxAI API key 失败：",
+                        &error,
+                    )),
                 };
             }
         };
@@ -1447,7 +1556,7 @@ async fn ofox_ping_model_internal(
                     success: false,
                     latency_ms: 0,
                     status_code: Some(401),
-                    error: Some(format!("获取 OfoxAI API key 失败：{e}")),
+                    error: Some(api_key_failure("获取 OfoxAI API key 失败：", &e)),
                 };
             }
         }
@@ -1603,7 +1712,7 @@ const PING_DETAIL_MAX_CHARS: usize = 200;
 /// balance ran out; the dialog adds the top-up action for that status.
 fn ping_failure_message(status: u16, body: &str) -> String {
     if status == 402 {
-        return "OFOX 账户余额不足，充值后即可使用。".into();
+        return "Ofox 账户余额不足，充值后即可使用。".into();
     }
     let hint = match status {
         401 => "API Key 无效或已过期，请尝试解除绑定后重新绑定该工具。",
@@ -1623,9 +1732,11 @@ fn ping_failure_message(status: u16, body: &str) -> String {
         })
         .unwrap_or(body)
         .trim();
+    // 网关可能把请求里的 key 原样回显在报错里；先抹掉再截断，免得截断把它切成抹不掉的残段。
+    let detail = crate::redact::scrub(detail);
     let detail = match detail.char_indices().nth(PING_DETAIL_MAX_CHARS) {
         Some((cut, _)) => format!("{}…", &detail[..cut]),
-        None => detail.to_string(),
+        None => detail.into_owned(),
     };
     format!("{hint}（HTTP {status}）{detail}")
 }

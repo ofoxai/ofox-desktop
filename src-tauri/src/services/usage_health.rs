@@ -1,0 +1,925 @@
+//! Machine-local, epoch-fenced source health shared by ingestion and analytics.
+use super::usage_query::{RetainedDetailRange, SourceHealth, SourceScan};
+use crate::{error::AppError, session_manager::source_cache};
+use rusqlite::{Connection, OptionalExtension};
+use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet};
+
+pub(crate) const SETTING_KEY: &str = "usage_source_health_v1";
+const MAX_BYTES: usize = 256 * 1024;
+const MAX_SOURCES: usize = 128;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Channel {
+    Ledger,
+    Analytics,
+}
+impl Channel {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Ledger => "ledger",
+            Self::Analytics => "analytics",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Outcome {
+    Ok,
+    Partial(&'static str),
+    Failed(&'static str),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Attempt {
+    tool_id: String,
+    source_id: String,
+    channel: Channel,
+    revision: String,
+    epoch: Option<String>,
+}
+
+fn invalid() -> AppError {
+    AppError::Database("usage.sources.invalidHealth".into())
+}
+fn identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
+}
+fn read_raw_on(conn: &Connection) -> Result<Option<String>, AppError> {
+    Ok(conn
+        .query_row(
+            "SELECT value FROM settings WHERE key=?1",
+            [SETTING_KEY],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+fn decode(raw: &str) -> Result<Value, AppError> {
+    if raw.len() > MAX_BYTES {
+        return Err(invalid());
+    }
+    let value: Value = serde_json::from_str(raw).map_err(|_| invalid())?;
+    if value["version"].as_u64() != Some(1) {
+        return Err(invalid());
+    }
+    let sources = value["sources"].as_array().ok_or_else(invalid)?;
+    if sources.len() > MAX_SOURCES {
+        return Err(invalid());
+    }
+    let mut seen = BTreeSet::new();
+    for row in sources {
+        let tool = row["toolId"]
+            .as_str()
+            .filter(|v| identifier(v))
+            .ok_or_else(invalid)?;
+        let source = row["sourceId"]
+            .as_str()
+            .filter(|v| identifier(v))
+            .ok_or_else(invalid)?;
+        if !seen.insert((tool, source)) {
+            return Err(invalid());
+        }
+    }
+    Ok(value)
+}
+fn load_for_write_on(conn: &Connection) -> Result<Value, AppError> {
+    match read_raw_on(conn)? {
+        None => Ok(json!({"version":1,"sources":[]})),
+        Some(raw) => {
+            // The legacy Vec is recognized but carries no local epoch proof.
+            // Retain it opaquely while the first real attempt builds new health.
+            if raw.len() <= MAX_BYTES {
+                if let Ok(legacy) = serde_json::from_str::<Value>(&raw) {
+                    if legacy.is_array()
+                        && serde_json::from_value::<Vec<SourceHealth>>(legacy.clone()).is_ok()
+                    {
+                        return Ok(json!({"version":1,"sources":[],"legacy":legacy}));
+                    }
+                }
+            }
+            decode(&raw)
+        }
+    }
+}
+fn write_on(conn: &Connection, value: &Value) -> Result<(), AppError> {
+    let raw = serde_json::to_string(value).map_err(|_| invalid())?;
+    if raw.len() > MAX_BYTES {
+        return Err(invalid());
+    }
+    conn.execute(
+        "INSERT INTO settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        rusqlite::params![SETTING_KEY, raw],
+    )?;
+    Ok(())
+}
+fn source_mut<'a>(
+    value: &'a mut Value,
+    tool: &str,
+    source: &str,
+) -> Result<&'a mut Value, AppError> {
+    let sources = value["sources"].as_array_mut().ok_or_else(invalid)?;
+    let index = match sources
+        .iter()
+        .position(|r| r["toolId"] == tool && r["sourceId"] == source)
+    {
+        Some(index) => index,
+        None => {
+            if sources.len() >= MAX_SOURCES {
+                return Err(invalid());
+            }
+            sources.push(json!({"toolId":tool,"sourceId":source}));
+            sources.len() - 1
+        }
+    };
+    Ok(&mut sources[index])
+}
+struct ChannelState {
+    status: String,
+    epoch: Option<String>,
+    attempted: i64,
+    succeeded: Option<i64>,
+    code: Option<String>,
+    scan: Option<SourceScan>,
+}
+
+fn scan_counts(value: &Value) -> Option<SourceScan> {
+    let object = value.as_object()?;
+    if object.get("version").is_some_and(|v| v.as_u64() != Some(1)) {
+        return None;
+    }
+    let count = |name: &str| -> Option<u32> { object.get(name)?.as_u64()?.try_into().ok() };
+    Some(SourceScan {
+        files_scanned: count("filesScanned")?,
+        imported: count("imported")?,
+        skipped: count("skipped")?,
+    })
+}
+
+/// Update owned count fields while retaining extensions of a recognized object.
+/// An opaque future representation remains untouched and publicly unknown.
+fn set_scan(state: &mut Value, scan: Option<SourceScan>) {
+    match state.get_mut("lastScan") {
+        Some(Value::Object(object)) => {
+            if object.get("version").is_some_and(|v| v.as_u64() != Some(1)) {
+                return;
+            }
+            if scan.is_none()
+                && object.keys().all(|key| {
+                    matches!(
+                        key.as_str(),
+                        "version" | "filesScanned" | "imported" | "skipped"
+                    )
+                })
+            {
+                state["lastScan"] = Value::Null;
+                return;
+            }
+            for (key, value) in [
+                ("filesScanned", scan.map(|s| s.files_scanned)),
+                ("imported", scan.map(|s| s.imported)),
+                ("skipped", scan.map(|s| s.skipped)),
+            ] {
+                object.insert(key.into(), json!(value));
+            }
+        }
+        Some(Value::Null) | None => state["lastScan"] = json!(scan),
+        Some(_) => {}
+    }
+}
+fn channel_state(value: &Value) -> Result<ChannelState, AppError> {
+    if value["version"].as_u64() != Some(1)
+        || value["revision"].as_str().is_none_or(|v| !identifier(v))
+        || !value["pending"].is_boolean()
+    {
+        return Err(invalid());
+    }
+    let status = value["status"]
+        .as_str()
+        .filter(|s| ["unknown", "ok", "partial", "failed"].contains(s))
+        .ok_or_else(invalid)?;
+    let epoch = match value.get("ledgerEpoch") {
+        Some(Value::Null) => None,
+        Some(Value::String(s)) if identifier(s) => Some(s.clone()),
+        _ => return Err(invalid()),
+    };
+    let attempted = value["lastAttemptAtMs"]
+        .as_i64()
+        .filter(|v| *v >= 0)
+        .ok_or_else(invalid)?;
+    let succeeded = match value.get("lastSuccessAtMs") {
+        Some(Value::Null) => None,
+        Some(n) => Some(n.as_i64().filter(|v| *v >= 0).ok_or_else(invalid)?),
+        None => return Err(invalid()),
+    };
+    let code = match value.get("errorCode") {
+        Some(Value::Null) => None,
+        Some(Value::String(s)) if identifier(s) => Some(s.clone()),
+        _ => return Err(invalid()),
+    };
+    if (status == "ok" && succeeded.is_none()) || (value["pending"] == true && status != "unknown")
+    {
+        return Err(invalid());
+    }
+    Ok(ChannelState {
+        status: status.into(),
+        epoch,
+        attempted,
+        succeeded,
+        code,
+        scan: (value["pending"] == false && matches!(status, "ok" | "partial"))
+            .then(|| scan_counts(&value["lastScan"]))
+            .flatten(),
+    })
+}
+
+/// Conn-level API: callers own the surrounding transaction and lock. The
+/// returned token is specific to this source, channel, and ledger incarnation.
+pub(crate) fn begin_on(
+    conn: &Connection,
+    tool_id: &str,
+    source_id: &str,
+    channel: Channel,
+    at_ms: i64,
+) -> Result<Attempt, AppError> {
+    if !identifier(tool_id) || !identifier(source_id) || at_ms < 0 {
+        return Err(invalid());
+    }
+    let mut value = load_for_write_on(conn)?;
+    let row = source_mut(&mut value, tool_id, source_id)?;
+    let epoch = source_cache::ledger_epoch_on(conn)?;
+    let prior = row.get(channel.key()).map(channel_state).transpose()?;
+    let succeeded = prior
+        .filter(|state| state.epoch == epoch)
+        .and_then(|s| s.succeeded);
+    let revision = uuid::Uuid::new_v4().to_string();
+    let mut state = row.get(channel.key()).cloned().unwrap_or_else(|| json!({}));
+    let object = state.as_object_mut().ok_or_else(invalid)?;
+    for (key, entry) in json!({"version":1,"revision":revision,"ledgerEpoch":epoch,
+        "status":"unknown","lastAttemptAtMs":at_ms,"lastSuccessAtMs":succeeded,
+        "errorCode":null,"pending":true})
+    .as_object()
+    .expect("object")
+    {
+        object.insert(key.clone(), entry.clone());
+    }
+    if channel == Channel::Ledger {
+        set_scan(&mut state, None);
+    }
+    row[channel.key()] = state;
+    write_on(conn, &value)?;
+    Ok(Attempt {
+        tool_id: tool_id.into(),
+        source_id: source_id.into(),
+        channel,
+        revision,
+        epoch,
+    })
+}
+
+/// Only a full trustworthy success advances lastSuccess. Partial and failed
+/// attempts preserve that older success; native read times remain in the cache.
+/// Returns false when consumed, superseded, or invalidated by ledger restore.
+pub(crate) fn finish_on(
+    conn: &Connection,
+    attempt: &Attempt,
+    outcome: Outcome,
+    at_ms: i64,
+) -> Result<bool, AppError> {
+    finish_with_scan_on(conn, attempt, outcome, at_ms, None)
+}
+
+pub(crate) fn finish_with_scan_on(
+    conn: &Connection,
+    attempt: &Attempt,
+    outcome: Outcome,
+    at_ms: i64,
+    scan: Option<SourceScan>,
+) -> Result<bool, AppError> {
+    if source_cache::ledger_epoch_on(conn)? != attempt.epoch {
+        return Ok(false);
+    }
+    if at_ms < 0 {
+        return Err(invalid());
+    }
+    let mut value = load_for_write_on(conn)?;
+    let Some(row) = value["sources"]
+        .as_array_mut()
+        .ok_or_else(invalid)?
+        .iter_mut()
+        .find(|r| r["toolId"] == attempt.tool_id && r["sourceId"] == attempt.source_id)
+    else {
+        return Ok(false);
+    };
+    let Some(state) = row.get_mut(attempt.channel.key()) else {
+        return Ok(false);
+    };
+    let old = channel_state(state)?;
+    if old.epoch != attempt.epoch
+        || state["revision"] != attempt.revision
+        || state["pending"] != true
+    {
+        return Ok(false);
+    }
+    let (status, code) = match outcome {
+        Outcome::Ok => ("ok", None),
+        Outcome::Partial(code) => ("partial", Some(code)),
+        Outcome::Failed(code) => ("failed", Some(code)),
+    };
+    if code.is_some_and(|c| !identifier(c)) {
+        return Err(invalid());
+    }
+    state["status"] = json!(status);
+    state["pending"] = json!(false);
+    state["errorCode"] = json!(code);
+    if attempt.channel == Channel::Ledger {
+        set_scan(state, if status == "failed" { None } else { scan });
+    }
+    if status == "ok" {
+        state["lastSuccessAtMs"] = json!(at_ms);
+    }
+    write_on(conn, &value)?;
+    Ok(true)
+}
+
+fn skeleton(
+    capabilities: Vec<super::usage_query::SourceCapability>,
+) -> BTreeMap<(String, String), (SourceHealth, bool)> {
+    capabilities
+        .into_iter()
+        .flat_map(|c| {
+            let ids = if c.source_ids.is_empty() {
+                vec![format!("{}:unsupported", c.tool_id)]
+            } else {
+                c.source_ids
+            };
+            ids.into_iter().map(move |source_id| {
+                let row = SourceHealth {
+                    source_id,
+                    tool_id: c.tool_id.clone(),
+                    status: if c.usage_supported {
+                        "unknown"
+                    } else {
+                        "unsupported"
+                    }
+                    .into(),
+                    last_attempt_at_ms: None,
+                    last_success_at_ms: None,
+                    error_code: c.reason.clone(),
+                    last_scan: None,
+                    retained_detail_range: None,
+                };
+                (
+                    (row.tool_id.clone(), row.source_id.clone()),
+                    (row, c.session_analytics_supported),
+                )
+            })
+        })
+        .collect()
+}
+fn priority(status: &str) -> u8 {
+    match status {
+        "failed" => 3,
+        "partial" => 2,
+        "unknown" => 1,
+        _ => 0,
+    }
+}
+
+/// A read-only query never turns legacy, corrupt, or foreign-epoch health into
+/// a local success. Real SQLite read errors remain visible to the caller.
+pub(crate) fn source_health_on(conn: &Connection) -> Result<Vec<SourceHealth>, AppError> {
+    source_health_with_capabilities_on(conn, super::usage_query::source_capabilities())
+}
+fn source_health_with_capabilities_on(
+    conn: &Connection,
+    capabilities: Vec<super::usage_query::SourceCapability>,
+) -> Result<Vec<SourceHealth>, AppError> {
+    let mut health = skeleton(capabilities);
+    retained_detail_ranges_on(conn, &mut health)?;
+    let Some(raw) = read_raw_on(conn)? else {
+        return Ok(health.into_values().map(|v| v.0).collect());
+    };
+    let value = match decode(&raw) {
+        Ok(value) => value,
+        Err(_) => {
+            for (row, _) in health
+                .values_mut()
+                .filter(|(r, _)| r.status != "unsupported")
+            {
+                row.error_code = Some("usage.sources.invalidHealth".into());
+            }
+            return Ok(health.into_values().map(|v| v.0).collect());
+        }
+    };
+    let epoch = source_cache::ledger_epoch_on(conn)?;
+    for source in value["sources"].as_array().expect("decoded") {
+        let key = (
+            source["toolId"].as_str().expect("decoded").to_owned(),
+            source["sourceId"].as_str().expect("decoded").to_owned(),
+        );
+        let Some((row, analytics_required)) = health
+            .get_mut(&key)
+            .filter(|(r, _)| r.status != "unsupported")
+        else {
+            continue;
+        };
+        let channels = [Channel::Ledger].into_iter().chain(
+            (*analytics_required || source.get("analytics").is_some())
+                .then_some(Channel::Analytics),
+        );
+        let mut states = Vec::new();
+        for channel in channels {
+            let state = source.get(channel.key()).map(channel_state).transpose();
+            let state = match state {
+                Ok(Some(state)) if state.epoch == epoch => state,
+                _ => ChannelState {
+                    status: "unknown".into(),
+                    epoch: epoch.clone(),
+                    attempted: 0,
+                    succeeded: None,
+                    code: Some("usage.sources.incompleteHealth".into()),
+                    scan: None,
+                },
+            };
+            if channel == Channel::Ledger {
+                row.last_scan = state.scan;
+            }
+            states.push(state);
+        }
+        let worst = states
+            .iter()
+            .max_by_key(|s| priority(&s.status))
+            .expect("ledger required");
+        row.status = worst.status.clone();
+        row.error_code = worst.code.clone();
+        row.last_attempt_at_ms = states.iter().map(|s| s.attempted).filter(|v| *v > 0).max();
+        row.last_success_at_ms = states
+            .iter()
+            .map(|s| s.succeeded)
+            .collect::<Option<Vec<_>>>()
+            .and_then(|s| s.into_iter().min());
+    }
+    Ok(health.into_values().map(|v| v.0).collect())
+}
+
+/// One bounded tuple-filtered query, in the caller's read transaction. These
+/// extrema describe retained detail rows, not source enumeration or rollups.
+fn retained_detail_ranges_on(
+    conn: &Connection,
+    health: &mut BTreeMap<(String, String), (SourceHealth, bool)>,
+) -> Result<(), AppError> {
+    let tuples: Vec<_> = health
+        .iter()
+        .filter(|(_, (row, _))| row.status != "unsupported")
+        .map(|((tool, source), _)| (tool.clone(), source.clone()))
+        .collect();
+    if tuples.is_empty() {
+        return Ok(());
+    }
+    let predicate = vec!["(app_type=? AND data_source=?)"; tuples.len()].join(" OR ");
+    let values = tuples.iter().flat_map(|(tool, source)| [tool, source]);
+    let mut statement = conn.prepare(&format!(
+        "SELECT app_type,data_source,MIN(created_at),MAX(created_at) FROM proxy_request_logs WHERE {predicate} GROUP BY app_type,data_source"
+    ))?;
+    let mut rows = statement.query(rusqlite::params_from_iter(values))?;
+    while let Some(row) = rows.next()? {
+        let key = (row.get::<_, String>(0)?, row.get::<_, String>(1)?);
+        let first: i64 = row.get(2)?;
+        let last: i64 = row.get(3)?;
+        let range = first.checked_mul(1000).and_then(|start_ms| {
+            let end_ms = last.checked_add(1)?.checked_mul(1000)?;
+            (start_ms < end_ms
+                && chrono::DateTime::from_timestamp_millis(start_ms).is_some()
+                && chrono::DateTime::from_timestamp_millis(end_ms).is_some())
+            .then_some(RetainedDetailRange { start_ms, end_ms })
+        });
+        if let Some((health, _)) = health.get_mut(&key) {
+            health.retained_detail_range = range;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::Database;
+    use serde_json::{json, Value};
+
+    fn health(conn: &Connection, tool: &str) -> SourceHealth {
+        let mut capabilities = super::super::usage_query::source_capabilities();
+        for capability in &mut capabilities {
+            capability.session_analytics_supported = false;
+        }
+        source_health_with_capabilities_on(conn, capabilities)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.tool_id == tool && !row.source_id.ends_with(":proxy"))
+            .unwrap()
+    }
+
+    fn begin(conn: &Connection, channel: Channel, at: i64) -> Attempt {
+        begin_on(conn, "gemini", "gemini_session", channel, at).unwrap()
+    }
+
+    #[test]
+    fn source_observability_pending_attempt_does_not_reuse_an_old_scan() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let first = begin(&conn, Channel::Ledger, 1000);
+        assert!(finish_on(&conn, &first, Outcome::Ok, 1100).unwrap());
+        let mut value: Value = serde_json::from_str(&read_raw_on(&conn).unwrap().unwrap()).unwrap();
+        value["sources"][0]["ledger"]["lastScan"] =
+            json!({"filesScanned":8,"imported":7,"skipped":1,"futureScan":"keep"});
+        write_on(&conn, &value).unwrap();
+        begin(&conn, Channel::Ledger, 1200);
+        let pending = serde_json::to_value(health(&conn, "gemini")).unwrap();
+        assert_eq!(pending.get("lastScan"), Some(&Value::Null));
+        let saved: Value = serde_json::from_str(&read_raw_on(&conn).unwrap().unwrap()).unwrap();
+        assert_eq!(
+            saved["sources"][0]["ledger"]["lastScan"]["futureScan"],
+            "keep"
+        );
+    }
+
+    #[test]
+    fn source_observability_live_detail_range_is_source_scoped_and_half_open() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        for capability in super::super::usage_query::source_capabilities()
+            .into_iter()
+            .filter(|c| c.usage_supported)
+        {
+            for source in capability.source_ids {
+                for at in [0_i64, 2] {
+                    conn.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at,data_source) VALUES(?1,'fixture',?2,'fixture',1,0,0,?3,?4)", rusqlite::params![format!("{}-{source}-{at}",capability.tool_id),capability.tool_id,at,source]).unwrap();
+                }
+                conn.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at,data_source) VALUES(?1,'fixture','foreign-tool','fixture',1,0,0,1000,?2)", rusqlite::params![format!("foreign-{source}"),source]).unwrap();
+            }
+            conn.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at,data_source) VALUES(?1,'old-proxy',?2,'fixture',1,0,200,-1000,'proxy')",rusqlite::params![format!("old-proxy-{}",capability.tool_id),capability.tool_id]).unwrap();
+        }
+        conn.execute("INSERT INTO usage_daily_rollups(date,app_type,provider_id,model,request_count,input_tokens,total_cost_usd) VALUES('1969-01-01','gemini','fixture','fixture',1,1,'0')",[]).unwrap();
+        for row in source_health_on(&conn)
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.status != "unsupported")
+        {
+            let value = serde_json::to_value(row).unwrap();
+            assert_eq!(
+                value.get("retainedDetailRange"),
+                Some(&json!({"startMs":0,"endMs":3000})),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn source_observability_legacy_or_empty_health_uses_explicit_unknown_scan_and_detail_range() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let value = serde_json::to_value(health(&conn, "gemini")).unwrap();
+        assert_eq!(value.get("lastScan"), Some(&Value::Null));
+        assert_eq!(value.get("retainedDetailRange"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn source_observability_pruned_detail_range_never_uses_rollup_dates() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at,data_source) VALUES('retained','fixture','gemini','fixture',1,0,0,2,'gemini_session')",[]).unwrap();
+        conn.execute("INSERT INTO usage_daily_rollups(date,app_type,provider_id,model,request_count,input_tokens,total_cost_usd) VALUES('1969-01-01','gemini','fixture','fixture',1,1,'0')",[]).unwrap();
+        assert_eq!(
+            serde_json::to_value(health(&conn, "gemini"))
+                .unwrap()
+                .get("retainedDetailRange"),
+            Some(&json!({"startMs":2000,"endMs":3000}))
+        );
+        conn.execute("DELETE FROM proxy_request_logs", []).unwrap();
+        assert_eq!(
+            serde_json::to_value(health(&conn, "gemini"))
+                .unwrap()
+                .get("retainedDetailRange"),
+            Some(&Value::Null)
+        );
+    }
+
+    #[test]
+    fn source_observability_scan_counts_obey_attempt_cas_and_restore_epoch() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let counts = SourceScan {
+            files_scanned: 3,
+            imported: 2,
+            skipped: 1,
+        };
+        let old = begin(&conn, Channel::Ledger, 1000);
+        let newer = begin(&conn, Channel::Ledger, 2000);
+        assert!(finish_with_scan_on(
+            &conn,
+            &newer,
+            Outcome::Partial("usage.sources.incompleteCoverage"),
+            2100,
+            Some(counts)
+        )
+        .unwrap());
+        assert!(!finish_with_scan_on(
+            &conn,
+            &old,
+            Outcome::Ok,
+            2200,
+            Some(SourceScan {
+                files_scanned: 99,
+                ..counts
+            })
+        )
+        .unwrap());
+        assert_eq!(
+            serde_json::to_value(health(&conn, "gemini")).unwrap()["lastScan"],
+            json!(counts)
+        );
+        let pending = begin(&conn, Channel::Ledger, 3000);
+        conn.execute("INSERT INTO maintenance_flags(key,value) VALUES('usage_ledger_epoch_v1','restored-epoch')", []).unwrap();
+        assert!(!finish_with_scan_on(&conn, &pending, Outcome::Ok, 3100, Some(counts)).unwrap());
+        assert_eq!(
+            serde_json::to_value(health(&conn, "gemini")).unwrap()["lastScan"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn source_observability_scan_extensions_survive_and_future_versions_remain_opaque() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let first = begin(&conn, Channel::Ledger, 1000);
+        finish_on(&conn, &first, Outcome::Ok, 1100).unwrap();
+        let mut value: Value = serde_json::from_str(&read_raw_on(&conn).unwrap().unwrap()).unwrap();
+        value["sources"][0]["ledger"]["lastScan"] =
+            json!({"filesScanned":3,"imported":2,"skipped":1,"futureScan":{"keep":true}});
+        write_on(&conn, &value).unwrap();
+        let counts = SourceScan {
+            files_scanned: 0,
+            imported: 0,
+            skipped: 0,
+        };
+        let next = begin(&conn, Channel::Ledger, 2000);
+        finish_with_scan_on(&conn, &next, Outcome::Ok, 2100, Some(counts)).unwrap();
+        let mut saved: Value = serde_json::from_str(&read_raw_on(&conn).unwrap().unwrap()).unwrap();
+        assert_eq!(
+            saved["sources"][0]["ledger"]["lastScan"]["futureScan"]["keep"],
+            true
+        );
+        assert_eq!(
+            serde_json::to_value(health(&conn, "gemini")).unwrap()["lastScan"],
+            json!(counts)
+        );
+        saved["sources"][0]["ledger"]["lastScan"]["version"] = json!(999);
+        write_on(&conn, &saved).unwrap();
+        let future = saved["sources"][0]["ledger"]["lastScan"].clone();
+        let attempt = begin(&conn, Channel::Ledger, 3000);
+        finish_with_scan_on(&conn, &attempt, Outcome::Ok, 3100, Some(counts)).unwrap();
+        let saved: Value = serde_json::from_str(&read_raw_on(&conn).unwrap().unwrap()).unwrap();
+        assert_eq!(saved["sources"][0]["ledger"]["lastScan"], future);
+        assert_eq!(
+            serde_json::to_value(health(&conn, "gemini")).unwrap()["lastScan"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn source_observability_malformed_scan_counts_are_unknown_instead_of_zero() {
+        for scan in [
+            json!({"filesScanned":-1,"imported":2,"skipped":1}),
+            json!({"filesScanned":3,"imported":4294967296_u64,"skipped":1}),
+            json!({"filesScanned":3,"imported":"2","skipped":1}),
+            json!({"filesScanned":3,"imported":2}),
+            json!([1, 2, 3]),
+        ] {
+            let db = Database::memory().unwrap();
+            let conn = db.conn.lock().unwrap();
+            let attempt = begin(&conn, Channel::Ledger, 1000);
+            finish_on(&conn, &attempt, Outcome::Ok, 1100).unwrap();
+            let mut saved: Value =
+                serde_json::from_str(&read_raw_on(&conn).unwrap().unwrap()).unwrap();
+            saved["sources"][0]["ledger"]["lastScan"] = scan;
+            write_on(&conn, &saved).unwrap();
+            assert_eq!(
+                serde_json::to_value(health(&conn, "gemini")).unwrap()["lastScan"],
+                Value::Null
+            );
+        }
+    }
+
+    #[test]
+    fn source_observability_unrepresentable_seconds_do_not_overflow_into_a_detail_range() {
+        for at in [i64::MIN, i64::MAX] {
+            let db = Database::memory().unwrap();
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at,data_source) VALUES('range','fixture','gemini','fixture',1,0,0,?1,'gemini_session')",[at]).unwrap();
+            assert_eq!(
+                serde_json::to_value(health(&conn, "gemini")).unwrap()["retainedDetailRange"],
+                Value::Null
+            );
+        }
+    }
+
+    #[test]
+    fn health_required_analytics_cannot_be_replaced_by_ledger_success() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let mut capabilities = super::super::usage_query::source_capabilities();
+        capabilities
+            .iter_mut()
+            .find(|c| c.tool_id == "gemini")
+            .unwrap()
+            .session_analytics_supported = true;
+        let read = || {
+            source_health_with_capabilities_on(&conn, capabilities.clone())
+                .unwrap()
+                .into_iter()
+                .find(|r| r.tool_id == "gemini")
+                .unwrap()
+        };
+        let ledger = begin(&conn, Channel::Ledger, 1000);
+        assert!(finish_on(&conn, &ledger, Outcome::Ok, 1100).unwrap());
+        assert_eq!(read().status, "unknown");
+        assert_eq!(read().last_success_at_ms, None);
+        let partial = begin(&conn, Channel::Analytics, 1200);
+        assert!(finish_on(
+            &conn,
+            &partial,
+            Outcome::Partial("usage.sources.incompleteCoverage"),
+            1300
+        )
+        .unwrap());
+        assert_eq!(read().status, "partial");
+        let complete = begin(&conn, Channel::Analytics, 1400);
+        assert!(finish_on(&conn, &complete, Outcome::Ok, 1500).unwrap());
+        assert_eq!(read().status, "ok");
+        assert_eq!(read().last_success_at_ms, Some(1100));
+    }
+
+    #[test]
+    fn health_success_and_failure_keep_distinct_attempt_and_success_times() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let first = begin(&conn, Channel::Ledger, 1000);
+        assert_eq!(health(&conn, "gemini").last_attempt_at_ms, Some(1000));
+        assert!(finish_on(&conn, &first, Outcome::Ok, 1100).unwrap());
+        let failed = begin(&conn, Channel::Ledger, 2000);
+        assert!(finish_on(
+            &conn,
+            &failed,
+            Outcome::Failed("usage.sources.readFailed"),
+            2100
+        )
+        .unwrap());
+        let row = health(&conn, "gemini");
+        assert_eq!(row.status, "failed");
+        assert_eq!(row.last_attempt_at_ms, Some(2000));
+        assert_eq!(row.last_success_at_ms, Some(1100));
+        assert_eq!(row.error_code.as_deref(), Some("usage.sources.readFailed"));
+        assert_eq!(health(&conn, "claude").status, "unknown");
+    }
+
+    #[test]
+    fn health_partial_does_not_become_failed_or_a_fabricated_success() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let attempt = begin(&conn, Channel::Ledger, 1000);
+        assert!(finish_on(
+            &conn,
+            &attempt,
+            Outcome::Partial("usage.sources.incompleteCoverage"),
+            1100
+        )
+        .unwrap());
+        let row = health(&conn, "gemini");
+        assert_eq!(row.status, "partial");
+        assert_eq!(row.last_success_at_ms, None);
+    }
+
+    #[test]
+    fn health_analytics_failure_is_not_overwritten_by_ledger_success() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let analytics = begin(&conn, Channel::Analytics, 1000);
+        assert!(finish_on(
+            &conn,
+            &analytics,
+            Outcome::Failed("usage.sources.analyticsReadFailed"),
+            1100
+        )
+        .unwrap());
+        let ledger = begin(&conn, Channel::Ledger, 1200);
+        assert!(finish_on(&conn, &ledger, Outcome::Ok, 1300).unwrap());
+        let row = health(&conn, "gemini");
+        assert_eq!(row.status, "failed");
+        assert_eq!(
+            row.error_code.as_deref(),
+            Some("usage.sources.analyticsReadFailed")
+        );
+    }
+
+    #[test]
+    fn health_late_attempt_cannot_override_newer_result() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let old = begin(&conn, Channel::Ledger, 1000);
+        let newer = begin(&conn, Channel::Ledger, 2000);
+        assert!(finish_on(&conn, &newer, Outcome::Ok, 2100).unwrap());
+        assert!(!finish_on(
+            &conn,
+            &old,
+            Outcome::Failed("usage.sources.readFailed"),
+            2200
+        )
+        .unwrap());
+        let row = health(&conn, "gemini");
+        assert_eq!(
+            (row.status.as_str(), row.last_success_at_ms),
+            ("ok", Some(2100))
+        );
+    }
+
+    #[test]
+    fn health_restore_epoch_rejects_pending_result_and_invalidates_previous_success() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let first = begin(&conn, Channel::Ledger, 1000);
+        assert!(finish_on(&conn, &first, Outcome::Ok, 1100).unwrap());
+        let pending = begin(&conn, Channel::Ledger, 1200);
+        conn.execute("INSERT INTO maintenance_flags(key,value) VALUES('usage_ledger_epoch_v1','restored-epoch')", []).unwrap();
+        assert!(!finish_on(&conn, &pending, Outcome::Ok, 1300).unwrap());
+        let row = health(&conn, "gemini");
+        assert_eq!(row.status, "unknown");
+        assert_eq!(row.last_success_at_ms, None);
+    }
+
+    #[test]
+    fn health_legacy_vec_and_future_format_are_never_trusted() {
+        for raw in [
+            r#"[{"sourceId":"gemini_session","toolId":"gemini","status":"ok","lastAttemptAtMs":1000,"lastSuccessAtMs":1100,"errorCode":null}]"#,
+            r#"{"version":999,"sources":[]}"#,
+            "{broken",
+        ] {
+            let db = Database::memory().unwrap();
+            db.set_setting(SETTING_KEY, raw).unwrap();
+            let conn = db.conn.lock().unwrap();
+            let row = health(&conn, "gemini");
+            assert_eq!(row.status, "unknown");
+            assert_eq!(row.last_success_at_ms, None);
+        }
+    }
+
+    #[test]
+    fn health_unreadable_or_future_health_is_not_overwritten() {
+        for raw in ["{broken", r#"{"version":999,"future":"keep"}"#] {
+            let db = Database::memory().unwrap();
+            db.set_setting(SETTING_KEY, raw).unwrap();
+            let conn = db.conn.lock().unwrap();
+            assert!(begin_on(&conn, "gemini", "gemini_session", Channel::Ledger, 1000).is_err());
+            drop(conn);
+            assert_eq!(db.get_setting(SETTING_KEY).unwrap().as_deref(), Some(raw));
+        }
+    }
+
+    #[test]
+    fn health_peer_and_future_fields_survive_channel_update() {
+        let db = Database::memory().unwrap();
+        db.set_setting(SETTING_KEY, &json!({"version":1,"future":{"keep":true},"sources":[{"toolId":"gemini","sourceId":"gemini_session","futureSource":"keep","futureChannel":{"opaque":true}}]}).to_string()).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let ledger = begin(&conn, Channel::Ledger, 1000);
+        assert!(finish_on(&conn, &ledger, Outcome::Ok, 1100).unwrap());
+        drop(conn);
+        let value: Value =
+            serde_json::from_str(&db.get_setting(SETTING_KEY).unwrap().unwrap()).unwrap();
+        assert_eq!(value["future"]["keep"], true);
+        assert_eq!(value["sources"][0]["futureSource"], "keep");
+        assert_eq!(value["sources"][0]["futureChannel"]["opaque"], true);
+    }
+
+    #[test]
+    fn health_analytics_can_commit_atomically_with_its_cache_transaction() {
+        let db = Database::memory().unwrap();
+        let mut conn = db.conn.lock().unwrap();
+        {
+            let tx = conn.transaction().unwrap();
+            let attempt = begin(&tx, Channel::Analytics, 1000);
+            assert!(finish_on(&tx, &attempt, Outcome::Ok, 1100).unwrap());
+            let raw: String = tx
+                .query_row(
+                    "SELECT value FROM settings WHERE key=?1",
+                    [SETTING_KEY],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let stored: Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(stored["sources"][0]["analytics"]["status"], "ok");
+        }
+        assert_eq!(health(&conn, "gemini").status, "unknown");
+    }
+}

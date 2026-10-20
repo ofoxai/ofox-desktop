@@ -289,7 +289,9 @@ export function RequestLogTable({
                   logs.map((log) => (
                     <TableRow key={log.requestId}>
                       <TableCell className="text-center whitespace-nowrap text-xs px-1.5">
-                        {new Date(log.createdAt * 1000).toLocaleString(locale, {
+                        {new Date(
+                          log.createdAtMs ?? log.createdAt * 1000,
+                        ).toLocaleString(locale, {
                           month: "2-digit",
                           day: "2-digit",
                           hour: "2-digit",
@@ -345,7 +347,12 @@ export function RequestLogTable({
                       </TableCell>
                       <TableCell className="text-center px-1.5">
                         <div className="font-medium tabular-nums">
-                          {fmtUsd(log.totalCostUsd, 4)}
+                          {log.recordedCostUsd === null
+                            ? "—"
+                            : fmtUsd(
+                                log.recordedCostUsd ?? log.totalCostUsd,
+                                4,
+                              )}
                         </div>
                         {parseFiniteNumber(log.costMultiplier) != null &&
                           parseFiniteNumber(log.costMultiplier) !== 1 && (

@@ -7,9 +7,7 @@ use cc_switch_lib::{
 
 #[path = "support.rs"]
 mod support;
-use support::{
-    create_test_state, create_test_state_with_config, ensure_test_home, reset_test_fs, test_mutex,
-};
+use support::{create_test_state, create_test_state_with_config, sandbox};
 
 fn sanitize_provider_name(name: &str) -> String {
     name.chars()
@@ -22,10 +20,9 @@ fn sanitize_provider_name(name: &str) -> String {
 }
 
 #[test]
+#[serial_test::serial]
 fn migrate_legacy_common_config_usage_marks_historical_provider_enabled() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let mut config = MultiAppConfig::default();
     {
@@ -96,10 +93,9 @@ fn migrate_legacy_common_config_usage_marks_historical_provider_enabled() {
 }
 
 #[test]
+#[serial_test::serial]
 fn provider_service_switch_codex_updates_live_and_config() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let legacy_auth = json!({ "OPENAI_API_KEY": "legacy-key" });
     let legacy_config = r#"[mcp_servers.legacy]
@@ -108,6 +104,8 @@ command = "echo"
 "#;
     write_codex_live_atomic(&legacy_auth, Some(legacy_config))
         .expect("seed existing codex live config");
+    std::fs::write(cc_switch_lib::get_codex_config_path(), legacy_config)
+        .expect("seed native user MCP");
 
     let mut initial_config = MultiAppConfig::default();
     {
@@ -134,7 +132,9 @@ command = "echo"
                 "Latest".to_string(),
                 json!({
                     "auth": {"OPENAI_API_KEY": "fresh-key"},
-                    "config": r#"[mcp_servers.latest]
+                    "config": r#"model = "provider-model"
+
+[mcp_servers.latest]
 type = "stdio"
 command = "say"
 "#
@@ -188,8 +188,8 @@ command = "say"
     let config_text =
         std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
     assert!(
-        config_text.contains("mcp_servers.echo-server"),
-        "config.toml should contain synced MCP servers"
+        config_text.contains("mcp_servers.legacy"),
+        "switching models preserves native user MCP"
     );
 
     let current_id = state
@@ -218,10 +218,11 @@ command = "say"
         new_config_text.contains("mcp_servers.latest"),
         "provider config should contain original MCP servers"
     );
-    // live 文件额外包含同步的 MCP 服务器
+    // Resource projection requires its own explicit preview.
     assert!(
-        config_text.contains("mcp_servers.echo-server"),
-        "live config should include synced MCP servers"
+        !config_text.contains("mcp_servers.echo-server")
+            && !config_text.contains("mcp_servers.latest"),
+        "legacy enabled flags and provider templates do not apply MCP"
     );
 
     let legacy = providers
@@ -240,10 +241,9 @@ command = "say"
 }
 
 #[test]
+#[serial_test::serial]
 fn sync_current_provider_for_app_keeps_live_takeover_and_updates_restore_backup() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let mut config = MultiAppConfig::default();
     {
@@ -339,10 +339,9 @@ fn sync_current_provider_for_app_keeps_live_takeover_and_updates_restore_backup(
 }
 
 #[test]
+#[serial_test::serial]
 fn explicitly_cleared_common_snippet_is_not_auto_extracted() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let state = create_test_state().expect("create test state");
     state
@@ -377,10 +376,9 @@ fn explicitly_cleared_common_snippet_is_not_auto_extracted() {
 }
 
 #[test]
+#[serial_test::serial]
 fn legacy_common_config_migration_flag_roundtrip() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let state = create_test_state().expect("create test state");
 
@@ -418,10 +416,10 @@ fn legacy_common_config_migration_flag_roundtrip() {
 }
 
 #[test]
+#[serial_test::serial]
 fn switch_packycode_gemini_updates_security_selected_type() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let home = ensure_test_home();
+    let sandbox = sandbox();
+    let home = sandbox.home();
 
     let mut config = MultiAppConfig::default();
     {
@@ -471,10 +469,10 @@ fn switch_packycode_gemini_updates_security_selected_type() {
 }
 
 #[test]
+#[serial_test::serial]
 fn packycode_partner_meta_triggers_security_flag_even_without_keywords() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let home = ensure_test_home();
+    let sandbox = sandbox();
+    let home = sandbox.home();
 
     let mut config = MultiAppConfig::default();
     {
@@ -526,10 +524,10 @@ fn packycode_partner_meta_triggers_security_flag_even_without_keywords() {
 }
 
 #[test]
+#[serial_test::serial]
 fn switch_google_official_gemini_preserves_env_vars() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let home = ensure_test_home();
+    let sandbox = sandbox();
+    let home = sandbox.home();
 
     let mut config = MultiAppConfig::default();
     {
@@ -589,10 +587,9 @@ fn switch_google_official_gemini_preserves_env_vars() {
 }
 
 #[test]
+#[serial_test::serial]
 fn provider_service_switch_claude_updates_live_and_state() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let settings_path = get_claude_settings_path();
     if let Some(parent) = settings_path.parent() {
@@ -683,10 +680,9 @@ fn provider_service_switch_claude_updates_live_and_state() {
 }
 
 #[test]
+#[serial_test::serial]
 fn provider_service_switch_missing_provider_returns_error() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let state = create_test_state().expect("create test state");
 
@@ -704,10 +700,9 @@ fn provider_service_switch_missing_provider_returns_error() {
 }
 
 #[test]
+#[serial_test::serial]
 fn provider_service_switch_codex_missing_auth_returns_error() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let mut config = MultiAppConfig::default();
     {
@@ -741,10 +736,10 @@ fn provider_service_switch_codex_missing_auth_returns_error() {
 }
 
 #[test]
+#[serial_test::serial]
 fn provider_service_delete_codex_removes_provider_and_files() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let home = ensure_test_home();
+    let sandbox = sandbox();
+    let home = sandbox.home();
 
     let mut config = MultiAppConfig::default();
     {
@@ -804,10 +799,10 @@ fn provider_service_delete_codex_removes_provider_and_files() {
 }
 
 #[test]
+#[serial_test::serial]
 fn provider_service_delete_claude_removes_provider_files() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let home = ensure_test_home();
+    let sandbox = sandbox();
+    let home = sandbox.home();
 
     let mut config = MultiAppConfig::default();
     {
@@ -864,10 +859,9 @@ fn provider_service_delete_claude_removes_provider_files() {
 }
 
 #[test]
+#[serial_test::serial]
 fn provider_service_delete_current_provider_returns_error() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let mut config = MultiAppConfig::default();
     {

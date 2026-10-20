@@ -40,11 +40,33 @@ env:
   PNPM_VERSION: "10.12.3"
 
 jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  windows-probe:
+    name: Verify Windows Probe at release SHA
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Require successful Windows Probe for this exact commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+        run: node scripts/check-windows-probe.mjs
+
   # ─────────────────────────────────────────────────────────────
   # 构建：按平台 fan out，产物以 artifact 形式交给 publish
   # ─────────────────────────────────────────────────────────────
   build:
     name: Build (${{ matrix.platform }})
+    needs: [verify, windows-probe]
     environment: release # ← secrets 边界
     strategy:
       fail-fast: false
@@ -65,7 +87,7 @@ jobs:
           #   r2_prefix: release/linux/x64
           #   ext: AppImage
     runs-on: ${{ matrix.os }}
-    # 构建只签名并提交公证，不在这里等结果（见 Publish）。
+    # 构建只签名并提交公证；独立 verify-artifacts 作业完成等待和验签。
     timeout-minutes: 120
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -85,7 +107,7 @@ jobs:
           VER_TAURI=$(node -p "require('./src-tauri/tauri.conf.json').version")
           VER_CARGO=$(grep -m1 '^version = ' src-tauri/Cargo.toml | sed -E 's/version = "(.*)"/\1/')
 
-          if [[ "$VER_PKG" != "$VER_TAURI" || "$VER_PKG" != "$VER_CARGO" ]]; then
+          if ! [[ "$VER_PKG" == "$VER_TAURI" && "$VER_PKG" == "$VER_CARGO" ]]; then
             echo "❌ 版本号不一致：" >&2
             echo "   package.json    = $VER_PKG" >&2
             echo "   tauri.conf.json = $VER_TAURI" >&2
@@ -191,7 +213,13 @@ jobs:
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           # 加进搜索列表而非替换默认 keychain，降低对 runner 环境的侵入
-          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          KEYCHAINS=()
+          while IFS= read -r KEYCHAIN; do
+            KEYCHAIN="${KEYCHAIN#*\"}"
+            KEYCHAIN="${KEYCHAIN%\"*}"
+            if [[ -n "$KEYCHAIN" ]]; then KEYCHAINS+=("$KEYCHAIN"); fi
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "${KEYCHAINS[@]}"
           security default-keychain -s "$KEYCHAIN_PATH"
 
           security import "$CERT_PATH" -k "$KEYCHAIN_PATH" \
@@ -215,7 +243,7 @@ jobs:
 
       # ── macOS：构建（Tauri 内部完成 codesign + 公证 + staple .app）──
       # 只签名，不在这里公证：Apple 处理新团队的提交可能要几个小时，超过单个
-      # 任务的时限（1.3.4 两次都因此超时）。公证在下面提交、在 Publish 里等。
+      # 任务的时限（1.3.4 两次都因此超时）。公证在下面提交、在 verify-artifacts 里等。
       - name: Build (macOS)
         if: runner.os == 'macOS'
         shell: bash
@@ -238,7 +266,7 @@ jobs:
 
       # ── macOS：提交 DMG 公证，不等结果 ────────────────────────
       # 公证最外层的 DMG 会把里面的 App 一并登记：DMG 钉上凭证；用户第一次打开
-      # 拖出来的 App 时，macOS 联网就能查到它的凭证。结果在 Publish 里等，那里
+      # 拖出来的 App 时，macOS 联网就能查到它的凭证。结果在 verify-artifacts 里等，那里
       # 超时了可以单独重跑，不用重新构建、重新排队。
       - name: Submit DMG for notarization (macOS)
         if: runner.os == 'macOS'
@@ -255,7 +283,7 @@ jobs:
           [ -z "$DMG" ] && { echo "❌ 找不到 v${VERSION} 的 dmg 产物" >&2; exit 1; }
           echo "dmg: $DMG"
           # 归一化文件名：Ofox Desktop_1.3.2_aarch64.dmg → ofox_desktop_1.3.2.dmg。
-          # 提交的就是要上传的这一份，Publish 给它钉凭证时内容不变。
+          # 提交的就是候选安装包；钉凭证后的摘要由 verify-artifacts 重新计算。
           mkdir -p dist-release notary
           OUT="dist-release/ofox_desktop_${VERSION}.dmg"
           cp "$DMG" "$OUT"
@@ -271,7 +299,7 @@ jobs:
             sleep $((attempt * 30))
           done
           echo "$ID" > notary/submission-id
-          echo "✅ 已提交公证: ${ID}（在 Publish 里等结果）"
+          echo "✅ 已提交公证: ${ID}（在 verify-artifacts 里等结果）"
 
       - name: Upload notarization submission (macOS)
         if: runner.os == 'macOS'
@@ -317,6 +345,22 @@ jobs:
       #     APPIMAGE=$(find src-tauri/target -name "*.AppImage" | head -1)
       #     cp "$APPIMAGE" "dist-release/ofox_desktop_${VERSION}.AppImage"
 
+      - name: Record source-bound build provenance
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+        run: node scripts/release-artifacts.mjs record-build
+
+      - name: Upload build provenance
+        uses: actions/upload-artifact@v6
+        with:
+          name: provenance-${{ matrix.platform }}
+          path: build-provenance.json
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
@@ -334,14 +378,55 @@ jobs:
   # ─────────────────────────────────────────────────────────────
   # 发布：汇总各平台产物 → 上传 R2 → 合并更新 latest.json
   # ─────────────────────────────────────────────────────────────
-  publish:
-    name: Publish to R2
+  verify-artifacts:
+    name: Verify signed and notarized artifacts (including dry runs)
     needs: build
     environment: release
-    # 要等公证结果并给 DMG 钉凭证（xcrun），所以在 macOS 上跑。Apple 慢时在这里
-    # 等；真超时了就在 Actions 页面重跑这个任务，构建产物和公证提交都还在。
     runs-on: macos-14
     timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Download candidate installers
+        uses: actions/download-artifact@v8
+        with:
+          pattern: build-*
+          path: artifacts
+      - name: Download source-bound build provenance
+        uses: actions/download-artifact@v8
+        with:
+          pattern: provenance-*
+          path: provenance
+      - name: Download notarization submissions
+        uses: actions/download-artifact@v8
+        with:
+          name: notary-darwin-aarch64
+          path: notary/notary-darwin-aarch64
+      - name: Complete notarization, staple and verify App and DMG
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          VERSION: ${{ needs.build.outputs.version }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: node scripts/release-artifacts.mjs verify
+      - name: Upload verified immutable release inputs
+        uses: actions/upload-artifact@v6
+        with:
+          name: verified-release-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish to R2
+    needs: [build, verify-artifacts]
+    environment: release
+    # Only publish the exact bytes approved by verify-artifacts; never re-sign/repack here.
+    runs-on: macos-14
+    timeout-minutes: 30
     permissions:
       contents: write # 创建 GitHub Release、上传附件
     # dry_run 时跳过（workflow_dispatch 默认 dry_run=true）
@@ -354,67 +439,19 @@ jobs:
       VERSION: ${{ needs.build.outputs.version }}
 
     steps:
-      - name: Download all artifacts
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Download verified release inputs
         uses: actions/download-artifact@v8
         with:
-          pattern: build-*
+          name: verified-release-${{ github.sha }}
           path: artifacts
-
-      - name: Download notarization submissions
-        uses: actions/download-artifact@v8
-        with:
-          pattern: notary-*
-          path: notary
-
-      - name: Wait for notarization and staple (macOS)
-        shell: bash
+      - name: Recheck exact source SHA and post-staple hashes before publishing
         env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-          DMG="artifacts/build-darwin-aarch64/ofox_desktop_${VERSION}.dmg"
-          if [ ! -f "$DMG" ]; then
-            echo "▶ 本次没有 macOS 产物，跳过"
-            exit 0
-          fi
-          AUTH=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
-          json_field() { python3 -c "import json,sys; print(json.load(sys.stdin).get('$1') or '')"; }
-          if xcrun stapler validate "$DMG" >/dev/null 2>&1; then
-            echo "▶ 已 staple"
-          else
-            # 只匹配到一个 notary-* 时，download-artifact 直接解压到 notary/，
-            # 多个时才按产物名分子目录，所以按文件名找。
-            ID_FILE=$(find notary -type f -name submission-id | head -1)
-            [ -n "$ID_FILE" ] || { echo "❌ 找不到公证提交编号（notary-darwin-aarch64 产物）" >&2; exit 1; }
-            ID=$(cat "$ID_FILE")
-            echo "submission: $ID"
-            # 留出上传和清理的时间：约 5 小时后还没结果就停下，提示重跑本任务。
-            DEADLINE=$((SECONDS + 300 * 60))
-            while true; do
-              STATUS=$(xcrun notarytool info "$ID" "${AUTH[@]}" --output-format json 2>/dev/null | json_field status || true)
-              echo "[$(date -u +%H:%M:%S)] 公证状态: ${STATUS:-（查询失败，稍后重试）}"
-              case "$STATUS" in
-                Accepted) break ;;
-                Invalid|Rejected)
-                  xcrun notarytool log "$ID" "${AUTH[@]}" || true
-                  echo "❌ 公证未通过: $STATUS" >&2
-                  exit 1 ;;
-              esac
-              if [ "$SECONDS" -ge "$DEADLINE" ]; then
-                echo "::error title=公证仍在处理中::Apple 还没处理完提交 ${ID}。稍后在本页面对「Publish to R2」点 Re-run，会继续等同一个提交，不用重新构建。"
-                exit 1
-              fi
-              xcrun notarytool wait "$ID" "${AUTH[@]}" --timeout 30m >/dev/null 2>&1 || true
-            done
-            xcrun stapler staple "$DMG"
-            echo "✅ 公证通过并已 staple"
-          fi
-          echo "▶ Gatekeeper 验证"
-          spctl -a -vvv -t open --context context:primary-signature "$DMG"
-          xcrun stapler validate "$DMG"
-          echo "✅ 验证通过"
+          EXPECTED_SHA: ${{ github.sha }}
+        run: node scripts/release-artifacts.mjs check
 
       - name: Configure R2 credentials
         shell: bash

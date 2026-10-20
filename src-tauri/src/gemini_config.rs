@@ -11,7 +11,11 @@ pub fn get_gemini_dir() -> PathBuf {
         return custom;
     }
 
-    get_home_dir().join(".gemini")
+    std::env::var_os("GEMINI_CLI_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(get_home_dir)
+        .join(".gemini")
 }
 
 /// 获取 Gemini .env 文件路径
@@ -320,47 +324,27 @@ pub fn get_gemini_settings_path() -> PathBuf {
 ///
 /// # 参数
 /// - `selected_type`: 要设置的 selectedType 值（如 "gemini-api-key" 或 "oauth-personal"）
+pub(crate) fn read_native_settings() -> Result<Value, AppError> {
+    let text = crate::services::library::coordinator::read(&get_gemini_settings_path())?
+        .unwrap_or_else(|| "{}".into());
+    crate::services::library::mcp_codec::parse_native(&text, "gemini")
+}
+
 fn update_selected_type(selected_type: &str) -> Result<(), AppError> {
-    let settings_path = get_gemini_settings_path();
-
-    // 确保目录存在
-    if let Some(parent) = settings_path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-    }
-
-    // 读取现有的 settings.json（如果存在）
-    let mut settings_content = if settings_path.exists() {
-        let content =
-            fs::read_to_string(&settings_path).map_err(|e| AppError::io(&settings_path, e))?;
-        serde_json::from_str::<Value>(&content).unwrap_or_else(|_| serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
-
-    // 只更新 security.auth.selectedType 字段
-    if let Some(obj) = settings_content.as_object_mut() {
-        let security = obj
-            .entry("security")
-            .or_insert_with(|| serde_json::json!({}));
-
-        if let Some(security_obj) = security.as_object_mut() {
-            let auth = security_obj
-                .entry("auth")
-                .or_insert_with(|| serde_json::json!({}));
-
-            if let Some(auth_obj) = auth.as_object_mut() {
-                auth_obj.insert(
-                    "selectedType".to_string(),
-                    Value::String(selected_type.to_string()),
-                );
-            }
-        }
-    }
-
-    // 写入文件
-    crate::config::write_json_file(&settings_path, &settings_content)?;
-
-    Ok(())
+    let _io = crate::config_io::lock();
+    let path = get_gemini_settings_path();
+    let original =
+        crate::services::library::coordinator::read(&path)?.unwrap_or_else(|| "{}".into());
+    crate::services::library::mcp_codec::parse_native(&original, "gemini")?;
+    let output = crate::json5_sections::edit_object_paths(
+        &original,
+        crate::json5_sections::KeyStyle::Json,
+        &[(
+            vec!["security".into(), "auth".into(), "selectedType".into()],
+            Some(serde_json::json!(selected_type)),
+        )],
+    )?;
+    crate::config::atomic_write(&path, output.as_bytes())
 }
 
 /// 为 Packycode Gemini 供应商写入 settings.json
@@ -399,27 +383,28 @@ pub fn ensure_api_key_auth_selected() -> Result<bool, AppError> {
     Ok(has_api_key)
 }
 
-/// 为 Google 官方 Gemini 供应商写入 settings.json（OAuth 模式）
-///
-/// 设置 `~/.gemini/settings.json` 中的：
-/// ```json
-/// {
-///   "security": {
-///     "auth": {
-///       "selectedType": "oauth-personal"
-///     }
-///   }
-/// }
-/// ```
-///
-/// 保留文件中的其他所有字段。
-pub fn write_google_oauth_settings() -> Result<(), AppError> {
-    update_selected_type("oauth-personal")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn auth_selection_refuses_corruption_and_preserves_mcp_comments() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let path = get_gemini_settings_path();
+        crate::config::atomic_write(&path, b"broken").unwrap();
+        assert!(update_selected_type("gemini-api-key").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "broken");
+        let original =
+            "{\n // private MCP\n \"mcpServers\": {\"demo\":{\"command\":\"personal\"}}, \"theme\":\"mine\"\n}";
+        crate::config::atomic_write(&path, original.as_bytes()).unwrap();
+        update_selected_type("gemini-api-key").unwrap();
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(result.contains("// private MCP"));
+        let value: Value = json5::from_str(&result).unwrap();
+        assert_eq!(value["mcpServers"]["demo"]["command"], "personal");
+        assert_eq!(value["theme"], "mine");
+    }
 
     #[test]
     fn test_normalize_gemini_env_model() {

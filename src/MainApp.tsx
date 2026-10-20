@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import OnboardingApp from "./OnboardingApp";
 import ConsolePage from "@/components/console/ConsolePage";
@@ -10,159 +10,189 @@ import {
 import { BOUND_TOOLS_STORAGE_KEY } from "@/config/toolMeta";
 
 type AppState = "loading" | "onboarding" | "console";
-
-/**
- * Read the persisted bound-tool list synchronously. Used both at top-level
- * routing time (deciding onboarding vs console for an already-logged-in user)
- * and by the locked-takeover reconciliation effect.
- */
 function readBoundToolsFromStorage(): string[] {
   try {
-    const stored = localStorage.getItem(BOUND_TOOLS_STORAGE_KEY);
-    if (!stored) return [];
-    const parsed = JSON.parse(stored);
-    return Array.isArray(parsed) ? parsed : [];
+    const parsed: unknown = JSON.parse(
+      localStorage.getItem(BOUND_TOOLS_STORAGE_KEY) ?? "[]",
+    );
+    return Array.isArray(parsed)
+      ? parsed.filter((r): r is string => typeof r === "string")
+      : [];
   } catch {
     return [];
   }
 }
 
 /**
- * Top-level router for the main window.
- *
- * Drives three states off the backend's auth snapshot:
- *   - `active`    → Console
- *   - `expired`   → Onboarding (LoginPage), so the user can re-authenticate
- *                   without having to dig through a settings menu
- *   - `loggedout` → Onboarding (LoginPage)
- *
- * It listens to three events so the swap happens without manual refresh:
- *   - `ofox-auth-expired`     → drop to onboarding immediately
- *   - `ofox-auth-restored`    → lift back to console (after re-login)
- *   - `ofox-reauth-requested` → tray popover asked us to surface the
- *                                LoginPage even if the current state hasn't
- *                                flipped yet (e.g. user explicitly clicked
- *                                "重新登录" from the popover)
+ * Local management is a route choice, never logout or an empty bind operation.
+ * It is only the way through while signed out or after skipping binding: a
+ * sign-in always leads to binding, as helping a newcomer get set up comes first.
  */
 export default function MainApp() {
   const [appState, setAppState] = useState<AppState>("loading");
   const [boundTools, setBoundTools] = useState<string[]>([]);
-  // When entering Onboarding from an already-logged-in state with empty
-  // bind list, skip the LoginPage and drop straight into the tool picker.
-  // `null` while we're loading or while the resolved entry is the default
-  // ("login").
+  const [localOnly, setLocalOnly] = useState(false);
+  const [consoleVisited, setConsoleVisited] = useState(false);
+  const [signedIn, setSignedIn] = useState(false);
   const [onboardingEntry, setOnboardingEntry] = useState<
     "login" | "toolDiscovery"
   >("login");
-
-  const loadBoundTools = () => {
-    setBoundTools(readBoundToolsFromStorage());
+  const [onboardingRevision, setOnboardingRevision] = useState(0);
+  const routeVersion = useRef(0);
+  const preferLocal = useRef(false);
+  const currentScreen = useRef(appState);
+  currentScreen.current = appState;
+  const signedInRef = useRef(signedIn);
+  signedInRef.current = signedIn;
+  const loadBoundTools = () => setBoundTools(readBoundToolsFromStorage());
+  const showConsole = () => {
+    currentScreen.current = "console";
+    setConsoleVisited(true);
+    setAppState("console");
   };
-
-  // Initial probe.
+  const enterLocal = () => {
+    routeVersion.current += 1;
+    preferLocal.current = true;
+    loadBoundTools();
+    setLocalOnly(true);
+    showConsole();
+  };
+  const openBinding = () => {
+    setOnboardingEntry("toolDiscovery");
+    setOnboardingRevision((r) => r + 1);
+    setAppState("onboarding");
+  };
+  // Back to the bound tools, or into the one-click picker when none are bound.
+  const afterSignIn = () => {
+    routeVersion.current += 1;
+    preferLocal.current = false;
+    setSignedIn(true);
+    const tools = readBoundToolsFromStorage();
+    setBoundTools(tools);
+    setLocalOnly(false);
+    if (tools.length) showConsole();
+    else openBinding();
+  };
   useEffect(() => {
-    ofoxGetAuthStatus()
+    const version = ++routeVersion.current;
+    let mounted = true;
+    void ofoxGetAuthStatus()
       .then((status) => {
-        if (status.state === "active") {
-          const tools = readBoundToolsFromStorage();
-          setBoundTools(tools);
-          if (tools.length === 0) {
-            // Logged in but no tools bound — happens after a fresh install,
-            // wiped local state, or migration from a previous version. The
-            // LoginPage would be a no-op (already logged in), so jump
-            // straight to the tool picker.
-            setOnboardingEntry("toolDiscovery");
-            setAppState("onboarding");
-          } else {
-            setAppState("console");
-          }
-        } else {
-          setOnboardingEntry("login");
+        if (!mounted || version !== routeVersion.current) return;
+        const active = status.state === "active";
+        setSignedIn(active);
+        const tools = readBoundToolsFromStorage();
+        setBoundTools(tools);
+        if (active && tools.length) showConsole();
+        else {
+          setOnboardingEntry(active ? "toolDiscovery" : "login");
           setAppState("onboarding");
         }
       })
       .catch(() => {
-        setOnboardingEntry("login");
-        setAppState("onboarding");
+        if (mounted && version === routeVersion.current)
+          setAppState("onboarding");
       });
+    return () => {
+      mounted = false;
+      routeVersion.current += 1;
+    };
   }, []);
-
-  // Event-driven transitions.
   useEffect(() => {
     let active = true;
-    const offs: Array<() => void> = [];
-
-    const setup = async () => {
-      const offExpired = await listen(OFOX_AUTH_EXPIRED_EVENT, () => {
-        if (!active) return;
-        // Token expired — user must log in again.
-        setOnboardingEntry("login");
-        setAppState("onboarding");
+    const offs: (() => void)[] = [];
+    const subscribe = async (name: string, callback: () => void) => {
+      const off = await listen(name, () => {
+        if (active) callback();
       });
-      const offRestored = await listen(OFOX_AUTH_RESTORED_EVENT, () => {
-        if (!active) return;
-        // Login succeeded. If the user already has bound tools (returning
-        // user), go straight to console; otherwise drop them into the tool
-        // picker so onboarding completes end-to-end.
-        const tools = readBoundToolsFromStorage();
-        setBoundTools(tools);
-        if (tools.length === 0) {
-          setOnboardingEntry("toolDiscovery");
-          setAppState("onboarding");
-        } else {
-          setAppState("console");
-        }
-      });
-      // The tray popover's "重新登录" button asks us to surface onboarding
-      // even when the state was already non-active (e.g. user dismissed and
-      // came back).
-      const offReauth = await listen("ofox-reauth-requested", () => {
-        if (!active) return;
-        setOnboardingEntry("login");
-        setAppState("onboarding");
-      });
-
-      if (!active) {
-        offExpired();
-        offRestored();
-        offReauth();
-        return;
-      }
-      offs.push(offExpired, offRestored, offReauth);
+      if (active) offs.push(off);
+      else off();
     };
-
-    void setup();
+    void Promise.all([
+      subscribe(OFOX_AUTH_EXPIRED_EVENT, () => {
+        routeVersion.current += 1;
+        setSignedIn(false);
+        if (currentScreen.current === "console") enterLocal();
+        else {
+          setOnboardingEntry("login");
+          setOnboardingRevision((r) => r + 1);
+          setAppState("onboarding");
+        }
+      }),
+      subscribe(OFOX_AUTH_RESTORED_EVENT, afterSignIn),
+      // The tray's 一键绑定工具: binding when signed in, signing in first otherwise.
+      subscribe("ofox-start-binding", () => {
+        routeVersion.current += 1;
+        if (signedInRef.current) {
+          preferLocal.current = false;
+          setLocalOnly(false);
+          openBinding();
+          return;
+        }
+        setOnboardingEntry("login");
+        setOnboardingRevision((r) => r + 1);
+        setAppState("onboarding");
+      }),
+      subscribe("ofox-reauth-requested", () => {
+        routeVersion.current += 1;
+        setSignedIn(false);
+        setLocalOnly(true);
+        setOnboardingEntry("login");
+        setOnboardingRevision((r) => r + 1);
+        setAppState("onboarding");
+      }),
+    ]).catch(() => undefined);
     return () => {
       active = false;
       offs.forEach((off) => off());
     };
   }, []);
-
-  // 历史："force-enable takeover" 自愈 effect 已在 bind 直写改造完成后整段
-  // 移除——6 个支持工具全部走 `ofox_bind_tool`（直写 sk-of- 到工具配置文件、
-  // baseURL 指 ofox gateway），没有任何工具再依赖 proxy takeover。再保留这层
-  // 自愈反而会把磁盘上真 token 覆盖成 `PROXY_MANAGED` 占位符。
-  //
-  // proxy server 本身（`crate::proxy::server`）保留但不再被 ofox bind 启动，
-  // 留给将来其它非 ofox provider 的延伸使用，超出本工程范围。
-
-  if (appState === "loading") {
-    return null;
-  }
-
-  if (appState === "onboarding") {
-    return (
+  if (appState === "loading") return null;
+  const onboarding =
+    appState === "onboarding" ? (
       <OnboardingApp
+        key={onboardingRevision}
         initialStep={onboardingEntry}
+        onEnterLocal={enterLocal}
         onComplete={() => {
+          preferLocal.current = false;
+          setSignedIn(true);
           loadBoundTools();
-          setAppState("console");
+          setLocalOnly(false);
+          showConsole();
         }}
       />
-    );
-  }
-
+    ) : null;
   return (
-    <ConsolePage boundTools={boundTools} onBoundToolsChanged={loadBoundTools} />
+    <>
+      {onboarding}
+      {consoleVisited && (
+        <div hidden={appState !== "console"}>
+          <ConsolePage
+            active={appState === "console"}
+            boundTools={boundTools}
+            onBoundToolsChanged={loadBoundTools}
+            localOnly={localOnly}
+            localSignedIn={signedIn}
+            onLoginRequested={() => {
+              routeVersion.current += 1;
+              if (signedIn) {
+                preferLocal.current = false;
+                if (readBoundToolsFromStorage().length) {
+                  setLocalOnly(false);
+                  showConsole();
+                  return;
+                }
+                openBinding();
+                return;
+              }
+              setOnboardingEntry("login");
+              setOnboardingRevision((r) => r + 1);
+              setAppState("onboarding");
+            }}
+          />
+        </div>
+      )}
+    </>
   );
 }

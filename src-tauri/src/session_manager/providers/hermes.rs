@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -6,16 +7,21 @@ use rusqlite::Connection;
 use serde_json::Value;
 
 use crate::hermes_config::get_hermes_dir;
+use crate::session_manager::title::{titled, TitleCandidates};
 use crate::session_manager::{SessionMessage, SessionMeta};
 
-use super::utils::{
-    extract_text, parse_timestamp_to_ms, read_head_tail_lines, truncate_summary, TITLE_MAX_CHARS,
-};
+use super::utils::{extract_text, parse_timestamp_to_ms, read_head_tail_lines, truncate_summary};
 
 const PROVIDER_ID: &str = "hermes";
 
 fn get_hermes_db_path() -> PathBuf {
     get_hermes_dir().join("state.db")
+}
+
+/// The listing's source path for a SQLite session. Usage analytics derives the
+/// same managed key from it, so both sides must build it here.
+pub(crate) fn sqlite_source(db_path: &Path, session_id: &str) -> String {
+    format!("sqlite:{}#{}", db_path.display(), session_id)
 }
 
 fn get_hermes_sessions_dir() -> PathBuf {
@@ -93,10 +99,8 @@ fn scan_sessions_sqlite() -> Vec<SessionMeta> {
         Err(_) => return Vec::new(),
     };
 
-    let db_source = format!("sqlite:{}", db_path.display());
-
     for row_result in rows.flatten() {
-        if let Some(meta) = sqlite_row_to_session_meta(&row_result, &db_source) {
+        if let Some(meta) = sqlite_row_to_session_meta(&row_result, &db_path) {
             sessions.push(meta);
         }
     }
@@ -104,7 +108,7 @@ fn scan_sessions_sqlite() -> Vec<SessionMeta> {
     sessions
 }
 
-fn sqlite_row_to_session_meta(row: &Value, db_source: &str) -> Option<SessionMeta> {
+fn sqlite_row_to_session_meta(row: &Value, db_path: &Path) -> Option<SessionMeta> {
     let obj = row.as_object()?;
 
     let session_id = obj.get("id").and_then(Value::as_str)?.to_string();
@@ -113,7 +117,7 @@ fn sqlite_row_to_session_meta(row: &Value, db_source: &str) -> Option<SessionMet
         .get("title")
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-        .map(|s| truncate_summary(s, TITLE_MAX_CHARS).to_string());
+        .map(str::to_string);
 
     let cwd = obj
         .get("cwd")
@@ -132,7 +136,11 @@ fn sqlite_row_to_session_meta(row: &Value, db_source: &str) -> Option<SessionMet
         .or_else(|| obj.get("updated_at"))
         .and_then(parse_timestamp_to_ms);
 
-    let source_path = format!("{}#{}", db_source, session_id);
+    let source_path = sqlite_source(db_path, &session_id);
+
+    let mut candidates = TitleCandidates::default().with_directory(cwd.as_deref());
+    candidates.agent = title;
+    let (title, title_source) = titled(&candidates);
 
     Some(SessionMeta {
         provider_id: PROVIDER_ID.to_string(),
@@ -144,6 +152,9 @@ fn sqlite_row_to_session_meta(row: &Value, db_source: &str) -> Option<SessionMet
         last_active_at: ended_at.or(started_at),
         source_path: Some(source_path),
         resume_command: None,
+        title_source,
+        message_count: None,
+        parent_session_id: None,
     })
 }
 
@@ -189,15 +200,11 @@ pub fn load_messages_sqlite(source: &str) -> Result<Vec<SessionMessage>, String>
     let (db_path, session_id) = parse_sqlite_source(source)
         .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))?;
 
-    let conn = Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|e| format!("Failed to open Hermes database: {e}"))?;
+    let conn = crate::session_manager::read_context::open_sqlite(&db_path)?;
 
     // Try querying with common column names
     let query =
-        "SELECT role, content, created_at FROM messages WHERE session_id = ?1 ORDER BY created_at ASC";
+        "SELECT role, content, created_at FROM messages WHERE session_id = ?1 ORDER BY created_at ASC, rowid ASC";
 
     let mut stmt = conn
         .prepare(query)
@@ -205,16 +212,17 @@ pub fn load_messages_sqlite(source: &str) -> Result<Vec<SessionMessage>, String>
 
     let rows = stmt
         .query_map([session_id.as_str()], |row| {
-            let role: String = row.get(0)?;
-            let content: String = row.get(1)?;
+            let role = crate::session_manager::read_context::column(row, 0)?;
+            let content = crate::session_manager::read_context::column(row, 1)?;
             let ts: Option<i64> = row.get(2).ok();
             Ok((role, content, ts))
         })
         .map_err(|e| format!("Failed to query messages: {e}"))?;
 
     let mut messages = Vec::new();
-    for row in rows.flatten() {
-        let (role, content, ts) = row;
+    for row in rows {
+        crate::session_manager::read_context::check()?;
+        let (role, content, ts) = row.map_err(|_| "session.search.sourceUnavailable".to_owned())?;
         if content.trim().is_empty() {
             continue;
         }
@@ -223,50 +231,11 @@ pub fn load_messages_sqlite(source: &str) -> Result<Vec<SessionMessage>, String>
             role,
             content,
             ts: ts_ms,
+            name: None,
         });
     }
 
     Ok(messages)
-}
-
-/// Delete a session from the Hermes SQLite database.
-pub fn delete_session_sqlite(session_id: &str, source: &str) -> Result<bool, String> {
-    let (db_path, ref_session_id) = parse_sqlite_source(source)
-        .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))?;
-    let db_path = db_path
-        .canonicalize()
-        .map_err(|e| format!("Failed to canonicalize Hermes database path: {e}"))?;
-    let expected_db_path = get_hermes_db_path()
-        .canonicalize()
-        .map_err(|e| format!("Failed to canonicalize expected Hermes database path: {e}"))?;
-
-    if ref_session_id != session_id {
-        return Err(format!(
-            "Hermes SQLite session ID mismatch: expected {session_id}, found {ref_session_id}"
-        ));
-    }
-    if db_path != expected_db_path {
-        return Err("SQLite path does not match expected Hermes database".to_string());
-    }
-
-    let conn =
-        Connection::open(&db_path).map_err(|e| format!("Failed to open Hermes database: {e}"))?;
-
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
-
-    // Delete messages first (child records)
-    let _ = tx.execute("DELETE FROM messages WHERE session_id = ?1", [session_id]);
-
-    let deleted = tx
-        .execute("DELETE FROM sessions WHERE id = ?1", [session_id])
-        .map_err(|e| format!("Failed to delete Hermes session: {e}"))?;
-
-    tx.commit()
-        .map_err(|e| format!("Failed to commit session deletion: {e}"))?;
-
-    Ok(deleted > 0)
 }
 
 fn parse_sqlite_source(source: &str) -> Option<(PathBuf, String)> {
@@ -295,6 +264,9 @@ fn scan_sessions_jsonl() -> Vec<SessionMeta> {
 
     let mut sessions = Vec::new();
     for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
         let path = entry.path();
         let ext = path.extension().and_then(|e| e.to_str());
         if ext != Some("jsonl") && ext != Some("json") {
@@ -379,7 +351,7 @@ fn parse_jsonl_session(path: &Path) -> Option<SessionMeta> {
                 if let Some(c) = content {
                     let text = extract_text(c);
                     if !text.trim().is_empty() {
-                        first_user_msg = Some(truncate_summary(&text, TITLE_MAX_CHARS).to_string());
+                        first_user_msg = Some(text);
                     }
                 }
             }
@@ -414,12 +386,20 @@ fn parse_jsonl_session(path: &Path) -> Option<SessionMeta> {
     });
 
     let source_path = path.to_string_lossy().to_string();
+    let mut candidates = TitleCandidates::default()
+        .with_first_user_text(first_user_msg.as_deref())
+        .with_directory(cwd.as_deref());
+    candidates.agent = title;
+    let (title, title_source) = titled(&candidates);
 
     Some(SessionMeta {
         provider_id: PROVIDER_ID.to_string(),
         session_id,
-        title: title.or_else(|| first_user_msg.clone()),
-        summary: first_user_msg,
+        title,
+        title_source,
+        message_count: None,
+        parent_session_id: None,
+        summary: first_user_msg.map(|text| truncate_summary(&text, 160)),
         project_dir: cwd,
         created_at: first_ts,
         last_active_at: last_ts.or(first_ts),
@@ -430,15 +410,13 @@ fn parse_jsonl_session(path: &Path) -> Option<SessionMeta> {
 
 /// Load messages from a Hermes JSONL transcript file.
 pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
-    let file = File::open(path).map_err(|e| format!("Failed to open session file: {e}"))?;
+    let file = crate::session_manager::read_context::open(path)?;
     let reader = BufReader::new(file);
     let mut messages = Vec::new();
 
     for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
+        crate::session_manager::read_context::check()?;
+        let line = line.map_err(|error| error.to_string())?;
         if line.trim().is_empty() {
             continue;
         }
@@ -478,13 +456,19 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
         }
 
         let ts = ts_val.and_then(parse_timestamp_to_ms);
-        messages.push(SessionMessage { role, content, ts });
+        messages.push(SessionMessage {
+            role,
+            content,
+            ts,
+            name: None,
+        });
     }
 
     Ok(messages)
 }
 
 /// Delete a Hermes JSONL session file.
+#[cfg(test)]
 pub fn delete_session(_root: &Path, path: &Path, _session_id: &str) -> Result<bool, String> {
     std::fs::remove_file(path).map_err(|e| {
         format!(

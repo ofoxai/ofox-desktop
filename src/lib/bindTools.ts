@@ -19,7 +19,7 @@ import {
 /**
  * Codex CLI 启动时强制要求 `model` 非空——空字符串会触发 "Thread model is
  * unavailable under the current configuration"。其他工具的 CLI 都允许空
- * （走 OfoxAI 默认路由），所以这个 hardcode 兜底只在 Codex + fetch 失败的
+ * （Ofox 没有默认路由，界面会提示选择模型），所以这个 hardcode 兜底只在 Codex + fetch 失败的
  * 极端组合下生效，不构成全局的价格表 / 模型列表硬编码。
  *
  * 值取 bailian/qwen3-coder-plus —— 这是改造前 Codex seed 的硬编码默认，
@@ -36,7 +36,7 @@ const CODEX_SAFE_FALLBACK = "bailian/qwen3-coder-plus";
  *
  * 选法："最便宜但不免费"——见 {@link pickCheapestPaidModel}。
  * 兜底：fetch 失败 / 列表为空时，**只对 Codex** 回落 hardcode，其他工具留空
- * （它们的 CLI 容忍空 model，会走 OfoxAI 默认路由）。
+ * （它们的 CLI 能在空 model 下启动；Ofox 没有默认路由，界面会提示选择模型）。
  *
  * 不阻塞 bind 主流程：任何错误都吞掉打 warn，让用户至少能用上工具，进
  * "管理"里手动选 model 也能恢复。
@@ -128,6 +128,8 @@ const OFOX_AUTO_BIND_TOOLS: ReadonlySet<string> = new Set([
   "openclaw",
   "hermes",
   "workbuddy",
+  "dsh",
+  "pi",
 ]);
 
 async function selectWorkBuddyDefaults(): Promise<WorkBuddyModelSelection[]> {
@@ -175,7 +177,7 @@ async function selectWorkBuddyDefaults(): Promise<WorkBuddyModelSelection[]> {
 export async function bindTools(tools: string[]): Promise<string[]> {
   const existing = new Set(readBoundTools());
   const succeeded: string[] = [];
-  const failed: string[] = [];
+  const failed: { tool: string; reason?: string }[] = [];
   for (const tool of new Set(tools)) {
     if (existing.has(tool)) continue;
     if (!OFOX_AUTO_BIND_TOOLS.has(tool)) {
@@ -190,21 +192,30 @@ export async function bindTools(tools: string[]): Promise<string[]> {
       // bind 之后立即挑默认 model：必须在 ofox_bind_tool 完成后才跑，
       // 因为 setActiveModel 依赖 active provider 已切到 ofox-<tool>。
       // 单条失败不影响 bind 结果——ensureDefaultModel 内部自吞异常。
-      if (tool !== "workbuddy") await ensureDefaultModel(tool);
+      if (!["workbuddy", "pi", "dsh"].includes(tool))
+        await ensureDefaultModel(tool);
       succeeded.push(tool);
     } catch (e) {
       console.error(`[bindTools] bind ${tool} failed`, e);
-      failed.push(tool);
+      // 后端的错误（例如 Pi/dsh 的「请先升级」）本来就是写给用户看的。
+      const reason =
+        typeof e === "string" ? e : e instanceof Error ? e.message : undefined;
+      failed.push({ tool, reason: reason?.trim() || undefined });
     }
   }
 
   if (failed.length > 0) {
-    // 让用户知道哪些工具没绑上——之前是 silent failure，用户只能从"工具
-    // 没出现在列表里"反推。常见原因是 token 过期：toast 文案不点破具体
-    // 错因（后端错误对最终用户不友好），主流程仍然继续，已成功的工具会
+    // 让用户知道哪些工具没绑上、为什么——之前只说「可重试或检查登录态」，
+    // 版本过旧这类要用户动手的原因看不到。主流程仍然继续，已成功的工具会
     // 被正常持久化。
+    const reasons = failed
+      .filter((item) => item.reason)
+      .map((item) => `${item.tool}: ${item.reason}`);
     toast.error(
-      i18n.t("toolLifecycle.bindFailed", { tools: failed.join("、") }),
+      i18n.t("toolLifecycle.bindFailed", {
+        tools: failed.map((item) => item.tool).join("、"),
+      }),
+      reasons.length ? { description: reasons.join("\n") } : undefined,
     );
   }
 
@@ -255,4 +266,15 @@ export async function unbindTool(app: string): Promise<UnbindReport | null> {
   localStorage.setItem(BOUND_TOOLS_STORAGE_KEY, JSON.stringify(stillBound));
   void mirrorBoundToolsToSettings(stillBound);
   return report;
+}
+
+/** The backend already unbound the tool; never run unbind a second time. */
+export async function forgetUninstalledTool(
+  tool: string,
+  result: import("./api/toolUninstall").UninstallResult,
+): Promise<void> {
+  if (!result.unbind && result.status !== "removed") return;
+  const retained = readBoundTools().filter((id) => id !== tool);
+  localStorage.setItem(BOUND_TOOLS_STORAGE_KEY, JSON.stringify(retained));
+  await mirrorBoundToolsToSettings(retained);
 }

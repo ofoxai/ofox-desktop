@@ -153,8 +153,13 @@ export const skillsApi = {
   async installUnified(
     skill: DiscoverableSkill,
     currentApp: AppId,
+    expectedEpoch?: number,
   ): Promise<InstalledSkill> {
-    return await invoke("install_skill_unified", { skill, currentApp });
+    return await invoke("install_skill_unified", {
+      skill,
+      currentApp,
+      expectedEpoch,
+    });
   },
 
   /** 卸载 Skill（统一卸载） */

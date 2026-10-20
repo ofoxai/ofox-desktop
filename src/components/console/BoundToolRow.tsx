@@ -1,18 +1,31 @@
 import {
   AppWindow,
   ArrowDownToLine,
-  BarChart3,
   Download,
+  Ellipsis,
   ExternalLink,
   Loader2,
   RefreshCw,
   SlidersHorizontal,
   Terminal,
   Wrench,
+  Trash2,
 } from "lucide-react";
+import { useId, useRef, useState, type ReactNode } from "react";
+import { useUninstallPreview } from "@/hooks/useUninstallPreview";
 import { useTranslation } from "react-i18next";
 import { TOOL_META } from "@/config/toolMeta";
 import { ToolBadge } from "@/components/tools/ToolBadge";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { ListRow } from "@/components/ui/list";
+import { cn } from "@/lib/utils";
 import type { ToolBindingStatus } from "@/lib/api/ofoxBind";
 import type { InstallationStatus } from "@/lib/api/toolUpdates";
 
@@ -42,11 +55,24 @@ export function toolRowAction(tool: BoundToolRowData): ToolRowAction | null {
   return meta?.cliBin || meta?.launchKind === "desktopApp" ? "open" : null;
 }
 
+/** How a tool was installed, as the update check names it. */
+const INSTALL_METHODS = [
+  "homebrew",
+  "npm",
+  "pnpm",
+  "native",
+  "sparkle",
+  "msstore",
+];
+
 interface BoundToolRowProps {
   tool: BoundToolRowData;
-  keyLabel?: string;
-  model?: string;
+  /** The faint line under the name: the key, then what the model is doing. */
+  subline?: string[];
+  modelControl?: ReactNode;
   hasAnalytics: boolean;
+  /** How this installation was installed, when the update check knows. */
+  installVia?: string | null;
   /** The newer version that is out, if this installation is behind. */
   updateTo: string | null;
   /** The update leaves Ofox: the app's own updater or the vendor's page. */
@@ -59,15 +85,37 @@ interface BoundToolRowProps {
   progress?: string;
   onAnalytics: () => void;
   onUpdate: () => void;
-  onAction: (action: ToolRowAction) => void;
-  onManage: () => void;
+  onAction: (action: ToolRowAction, trigger?: HTMLElement) => void;
+  onManage: (trigger: HTMLElement) => void;
+  onUninstall?: () => void;
 }
 
+/**
+ * The bound list's columns, which every row shares through CSS subgrid so the
+ * model fields and the actions line up down the list, as magpie's `.fields`
+ * do. The first and last columns carry the rows' side padding, so the hairline
+ * between rows still runs edge to edge. Narrower than the window's minimum
+ * (zoomed in), the model drops under the name.
+ */
+export const TOOL_LIST_GRID =
+  "grid grid-cols-[auto_minmax(0,1fr)_minmax(180px,240px)_auto] gap-x-3 max-[720px]:grid-cols-[auto_minmax(0,1fr)_auto]";
+
+/** Without subgrid each row keeps the columns on its own. */
+const ROW_FALLBACK_COLUMNS =
+  "supports-[not(grid-template-columns:subgrid)]:grid-cols-[38px_minmax(0,1fr)_240px_auto] max-[720px]:supports-[not(grid-template-columns:subgrid)]:grid-cols-[38px_minmax(0,1fr)_auto]";
+
+/**
+ * magpie's agent row, always two lines tall: the tool, its version and any
+ * update or state pill on the first; the key and what its model is doing,
+ * faint, on the second. The model and the actions sit in the list's shared
+ * columns; account usage and secondary operations share the quiet ⋯ menu.
+ */
 export default function BoundToolRow({
   tool,
-  keyLabel,
-  model,
+  subline = [],
+  modelControl,
   hasAnalytics,
+  installVia,
   updateTo,
   updateExternal = false,
   updating = false,
@@ -79,8 +127,32 @@ export default function BoundToolRow({
   onUpdate,
   onAction,
   onManage,
+  onUninstall,
 }: BoundToolRowProps) {
   const { t } = useTranslation();
+  const analyticsDescriptionId = useId();
+  const uninstallDescriptionId = useId();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const openingUninstall = useRef(false);
+  const uninstallTarget =
+    tool.id === "codex" && tool.installationKind === "desktopApp"
+      ? "chatgpt"
+      : tool.id;
+  const hasUninstallAction =
+    !!onUninstall && tool.installationStatus === "installed";
+  const uninstallPreview = useUninstallPreview(
+    uninstallTarget,
+    menuOpen && hasUninstallAction,
+  );
+  const uninstallHint = uninstallPreview.available
+    ? null
+    : uninstallPreview.error
+      ? t("toolUninstall.previewUnavailable")
+      : !uninstallPreview.data
+        ? t("common.loading")
+        : !uninstallPreview.data.installed
+          ? t("toolUninstall.notInstalled")
+          : t("toolUninstall.blocked.unsupportedPlatform");
   const action = toolRowAction(tool);
   const download = action === "install" && !canInstall;
   const stateKey =
@@ -110,36 +182,59 @@ export default function BoundToolRow({
         : action === "restore"
           ? "restoreBinding"
           : action;
-  const neutralButton =
-    "inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1 text-[12px] font-medium text-muted-foreground hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60";
   const actionIcon =
     action === "retry" ? (
-      <RefreshCw className="h-3.5 w-3.5" />
+      <RefreshCw aria-hidden className="h-3.5 w-3.5" />
     ) : action === "install" && download ? (
-      <Download className="h-3.5 w-3.5" />
+      <Download aria-hidden className="h-3.5 w-3.5" />
     ) : action === "open" ? (
       TOOL_META[tool.id]?.launchKind === "desktopApp" ||
       tool.installationKind === "desktopApp" ? (
-        <AppWindow className="h-3.5 w-3.5" />
+        <AppWindow aria-hidden className="h-3.5 w-3.5" />
       ) : (
-        <Terminal className="h-3.5 w-3.5" />
+        <Terminal aria-hidden className="h-3.5 w-3.5" />
       )
     ) : (
-      <Wrench className="h-3.5 w-3.5" />
+      <Wrench aria-hidden className="h-3.5 w-3.5" />
     );
+  const versionTitle =
+    installVia && INSTALL_METHODS.includes(installVia)
+      ? t("toolLifecycle.installedVia", {
+          method: t(`toolLifecycle.installMethod.${installVia}`),
+        })
+      : undefined;
+  const subText = subline.filter(Boolean).join(" · ");
 
   return (
-    <div
+    <ListRow
       role="group"
       aria-label={tool.label}
-      className="flex flex-wrap items-center gap-3 border-b border-border px-4 py-3 last:border-b-0"
+      className={cn(
+        "col-span-full grid grid-cols-subgrid items-center gap-y-1.5 px-0",
+        ROW_FALLBACK_COLUMNS,
+      )}
     >
-      <ToolBadge toolId={tool.id} size={36} rounded="xl" />
-      <div className="min-w-0 flex-1 basis-48">
-        <div className="flex flex-wrap items-center gap-2 text-[13px] font-medium text-foreground">
-          <span>{tool.label}</span>
+      <span data-column="badge" className="flex pl-[14px]">
+        <ToolBadge
+          toolId={tool.id}
+          size={24}
+          rounded="md"
+          className="rounded-[6px]"
+        />
+      </span>
+      <div data-column="name" className="min-w-0">
+        <div data-line="name" className="flex h-5 min-w-0 items-center gap-2">
+          <span
+            className="min-w-[3em] truncate text-ui font-medium tracking-[-.005em] text-ink"
+            title={tool.label}
+          >
+            {tool.label}
+          </span>
           {tool.version && (
-            <span className="text-[11px] font-normal text-muted-foreground">
+            <span
+              title={versionTitle}
+              className="min-w-0 shrink-[4] truncate whitespace-nowrap text-sub tabular-nums text-ink-muted"
+            >
               {tool.installationKind === "desktopApp"
                 ? `${t("toolLifecycle.desktopApp")} · `
                 : ""}
@@ -150,81 +245,152 @@ export default function BoundToolRow({
             (updateTo &&
               tool.installationStatus === "installed" &&
               !tool.installationError)) && (
-            <button
-              type="button"
+            <Button
+              variant="pill"
               onClick={onUpdate}
               disabled={busy || updating || updateLocked}
               aria-busy={updating}
               title={updateTo ? `v${tool.version} → v${updateTo}` : undefined}
-              className="inline-flex h-5 items-center gap-1 rounded-full border border-border bg-background pl-1.5 pr-2 text-[11px] font-medium text-foreground/80 transition hover:bg-accent hover:text-foreground active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
+              className="h-5 flex-none gap-1 pl-1.5 pr-2"
             >
               {updating ? (
-                <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                <Loader2
+                  aria-hidden
+                  className="h-3 w-3 animate-spin text-ink-muted"
+                />
               ) : updateExternal ? (
-                <ExternalLink className="h-3 w-3 text-muted-foreground" />
+                <ExternalLink aria-hidden className="h-3 w-3 text-ink-muted" />
               ) : (
-                <ArrowDownToLine className="h-3 w-3 text-muted-foreground" />
+                <ArrowDownToLine
+                  aria-hidden
+                  className="h-3 w-3 text-ink-muted"
+                />
               )}
               {updating
                 ? t("toolUpdates.updating")
                 : t("toolUpdates.updateTo", { version: updateTo })}
-            </button>
+            </Button>
           )}
           {stateKey && (
-            <span className="rounded-md bg-orange-50 px-1.5 py-0.5 text-[11px] font-normal text-orange-700 dark:bg-orange-950/40 dark:text-orange-300">
+            <span className="inline-flex h-5 flex-none items-center whitespace-nowrap rounded-full bg-warn-soft px-2 text-note font-medium text-warn">
               {t(`toolLifecycle.${stateKey}`)}
             </span>
           )}
         </div>
-        {(tool.id === "chatgpt" || keyLabel || model !== undefined) && (
-          <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
-            <span>
-              {tool.id === "chatgpt"
-                ? t("modelCompatibility.chatgptCodexMode")
-                : (keyLabel ?? "—")}
-            </span>
-            <span className="mx-1.5 opacity-50">·</span>
-            <span>
-              {model ||
-                t(
-                  tool.id === "chatgpt"
-                    ? "modelCompatibility.chatgptCodexUnset"
-                    : "toolLifecycle.modelUnset",
-                )}
-            </span>
-          </div>
-        )}
+        <p
+          data-line="sub"
+          className="mt-0.5 truncate text-sub text-ink-muted"
+          title={subText || undefined}
+        >
+          {subText || "\u00a0"}
+        </p>
       </div>
-      <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1.5">
-        {hasAnalytics && (
-          <button onClick={onAnalytics} className={neutralButton}>
-            <BarChart3 className="h-3.5 w-3.5" />
-            {t("toolLifecycle.analytics")}
-          </button>
-        )}
+      <div
+        data-column="model"
+        className="min-w-0 max-[720px]:col-span-2 max-[720px]:col-start-2 max-[720px]:row-start-2 max-[720px]:max-w-[280px]"
+      >
+        {modelControl}
+      </div>
+      <span id={analyticsDescriptionId} className="sr-only">
+        {t("toolLifecycle.analyticsHint")}
+      </span>
+      <div
+        data-column="actions"
+        className="flex items-center justify-end gap-1 pr-3 max-[720px]:col-start-3 max-[720px]:row-start-1"
+      >
         {action && actionKey && (
-          <button
-            onClick={() => onAction(action)}
+          <Button
+            variant={action === "install" ? "primary" : "secondary"}
+            size="sm"
+            className="mr-1"
+            onClick={(event) => onAction(action, event.currentTarget)}
             disabled={busy}
-            className={
-              action === "open" || action === "retry"
-                ? neutralButton
-                : "inline-flex items-center gap-1.5 rounded-lg bg-orange-500 px-2.5 py-1 text-[12px] font-medium text-white hover:bg-orange-600 disabled:cursor-not-allowed disabled:opacity-60"
-            }
           >
             {busy ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <Loader2 aria-hidden className="h-3.5 w-3.5 animate-spin" />
             ) : (
               actionIcon
             )}
             {progress || t(`toolLifecycle.${actionKey}`)}
-          </button>
+          </Button>
         )}
-        <button onClick={onManage} disabled={busy} className={neutralButton}>
-          <SlidersHorizontal className="h-3.5 w-3.5" />
-          {t("toolLifecycle.manage")}
-        </button>
+        <Button
+          variant="icon"
+          onClick={(event) => onManage(event.currentTarget)}
+          disabled={busy}
+          aria-label={t("toolLifecycle.manage")}
+          title={t("toolLifecycle.manage")}
+          className="h-6 w-6"
+        >
+          <SlidersHorizontal aria-hidden className="h-3.5 w-3.5" />
+        </Button>
+        <DropdownMenu modal={false} open={menuOpen} onOpenChange={setMenuOpen}>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="icon"
+              aria-label={t("toolLifecycle.more")}
+              title={t("toolLifecycle.more")}
+              className="h-6 w-6 data-[state=open]:bg-pill data-[state=open]:text-ink"
+            >
+              <Ellipsis aria-hidden className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            className="min-w-[160px] max-w-[280px]"
+            onCloseAutoFocus={(event) => {
+              if (openingUninstall.current) {
+                event.preventDefault();
+                openingUninstall.current = false;
+                onUninstall?.();
+              }
+            }}
+          >
+            <DropdownMenuItem
+              disabled={!hasAnalytics}
+              onSelect={onAnalytics}
+              title={t("toolLifecycle.analyticsHint")}
+              aria-describedby={analyticsDescriptionId}
+            >
+              <span className="flex-1">{t("toolLifecycle.analytics")}</span>
+              <ExternalLink
+                aria-hidden
+                className="h-3.5 w-3.5 shrink-0 text-ink-muted"
+              />
+            </DropdownMenuItem>
+            {hasUninstallAction && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  disabled={busy || !uninstallPreview.available}
+                  aria-label={t("toolUninstall.entry")}
+                  aria-describedby={
+                    uninstallHint ? uninstallDescriptionId : undefined
+                  }
+                  title={uninstallHint ?? undefined}
+                  className="text-danger"
+                  onSelect={() => {
+                    openingUninstall.current = true;
+                  }}
+                >
+                  <Trash2 aria-hidden className="h-3.5 w-3.5 shrink-0" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block">{t("toolUninstall.entry")}</span>
+                    {uninstallHint && (
+                      <span
+                        id={uninstallDescriptionId}
+                        className="block whitespace-normal text-note text-ink-muted"
+                      >
+                        {uninstallHint}
+                      </span>
+                    )}
+                  </span>
+                </DropdownMenuItem>
+              </>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
-    </div>
+    </ListRow>
   );
 }

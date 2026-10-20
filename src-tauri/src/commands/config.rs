@@ -11,6 +11,7 @@ use crate::settings;
 
 #[tauri::command]
 pub async fn get_claude_config_status() -> Result<ConfigStatus, String> {
+    crate::agent_env::ready().await;
     Ok(config::get_claude_config_status())
 }
 
@@ -84,8 +85,7 @@ pub async fn get_config_status(app: String) -> Result<ConfigStatus, String> {
             Ok(ConfigStatus { exists, path })
         }
         AppType::OpenCode => {
-            let config_path = crate::opencode_config::get_opencode_config_path();
-            let exists = config_path.exists();
+            let exists = crate::opencode_config::has_global_config();
             let path = crate::opencode_config::get_opencode_dir()
                 .to_string_lossy()
                 .to_string();
@@ -120,6 +120,12 @@ pub async fn get_claude_code_config_path() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn get_config_dir(app: String) -> Result<String, String> {
+    crate::agent_env::ready().await;
+    if let Some(tool) = crate::app_config::BindableTool::native(&app) {
+        return Ok(crate::native_tools::config_dir(tool)?
+            .to_string_lossy()
+            .into_owned());
+    }
     if app.trim().eq_ignore_ascii_case("workbuddy") {
         return Ok(crate::workbuddy_config::models_path()
             .parent()
@@ -139,9 +145,21 @@ pub async fn get_config_dir(app: String) -> Result<String, String> {
     Ok(dir.to_string_lossy().to_string())
 }
 
+/// Where Codex and Claude Code keep their files, and which source decided it:
+/// Ofox's settings, the `CODEX_HOME` / `CLAUDE_CONFIG_DIR` variable (from Ofox's own
+/// environment or the login shell), or the default directory in the home.
+#[tauri::command]
+pub async fn get_agent_dirs() -> Result<Vec<crate::agent_env::AgentDir>, String> {
+    crate::agent_env::ready().await;
+    Ok(crate::agent_env::dirs())
+}
+
 #[tauri::command]
 pub async fn open_config_folder(handle: AppHandle, app: String) -> Result<bool, String> {
-    let config_dir = if app.trim().eq_ignore_ascii_case("workbuddy") {
+    crate::agent_env::ready().await;
+    let config_dir = if let Some(tool) = crate::app_config::BindableTool::native(&app) {
+        crate::native_tools::config_dir(tool)?
+    } else if app.trim().eq_ignore_ascii_case("workbuddy") {
         crate::workbuddy_config::models_path()
             .parent()
             .expect("models path has a parent")
@@ -158,7 +176,7 @@ pub async fn open_config_folder(handle: AppHandle, app: String) -> Result<bool, 
     };
 
     if !config_dir.exists() {
-        return Err("配置目录不存在，请先恢复 OFox 接入配置或安装工具。".to_string());
+        return Err("配置目录不存在，请先恢复 Ofox 接入配置或安装工具。".to_string());
     }
 
     handle
@@ -347,7 +365,28 @@ pub async fn set_common_config_snippet(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_common_config_snippet;
+    use super::{get_agent_dirs, validate_common_config_snippet};
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn get_agent_dirs_reports_each_agent_directory_and_where_it_came_from() {
+        let sandbox = crate::test_sandbox::sandbox();
+        let moved = sandbox.home().join("elsewhere");
+        std::env::set_var("CLAUDE_CONFIG_DIR", &moved);
+
+        let dirs = serde_json::to_value(get_agent_dirs().await.expect("dirs")).unwrap();
+
+        assert_eq!(dirs[0]["tool"], "codex");
+        assert_eq!(dirs[0]["source"], "default");
+        assert_eq!(
+            dirs[0]["dir"],
+            sandbox.home().join(".codex").to_string_lossy().as_ref()
+        );
+        assert_eq!(dirs[1]["tool"], "claude");
+        assert_eq!(dirs[1]["source"], "env");
+        assert_eq!(dirs[1]["envVar"], "CLAUDE_CONFIG_DIR");
+        assert_eq!(dirs[1]["dir"], moved.to_string_lossy().as_ref());
+    }
 
     #[test]
     fn validate_common_config_snippet_accepts_comment_only_codex_snippet() {

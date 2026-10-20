@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { TOOL_META, TOOL_ORDER } from "@/config/toolMeta";
@@ -26,6 +27,7 @@ interface ToolDiscoveryPageProps {
    */
   onBack?: () => void;
   onBind: (selectedTools: string[]) => void;
+  onEnterLocal?: () => void;
 }
 
 /** Stagger 翻 selected 的相邻间隔（ms）。跳过 missing 不占 tick。 */
@@ -34,7 +36,9 @@ const STAGGER_INTERVAL_MS = 200;
 export default function ToolDiscoveryPage({
   onBack,
   onBind,
+  onEnterLocal,
 }: ToolDiscoveryPageProps) {
+  const { t } = useTranslation();
   const installableTools = useToolInstallCapabilities();
   // 初始就给 6 张 scanning 卡片占位——之前是 tools=[]，扫描期间整面什么也
   // 看不到，用户不知道有哪些可选工具。改成首屏即就位，扫描完成后从
@@ -205,15 +209,15 @@ export default function ToolDiscoveryPage({
   const isScanning = entries.some((e) => e.status === "scanning");
 
   return (
-    <div className="flex h-screen w-full overflow-y-auto bg-gradient-to-br from-orange-50/80 via-white to-orange-50/40 dark:from-neutral-950 dark:via-neutral-900 dark:to-neutral-950">
+    <div className="flex h-screen w-full overflow-y-auto bg-canvas">
       <div className="m-auto flex w-full max-w-2xl flex-col items-center px-8 py-2">
-        <h1 className="mb-2 text-3xl font-bold text-foreground">
+        <h1 className="mb-2 text-3xl font-bold text-ink">
           {isScanning
-            ? "正在扫描 AI 工具…"
-            : `已发现 ${detectedCount} 个 AI 工具`}
+            ? t("uiCopy.scanningTools")
+            : t("uiCopy.discovered", { value1: detectedCount })}
         </h1>
-        <p className="mb-8 text-center text-sm text-muted-foreground">
-          选择要接入 Ofox 的工具，我们将生成独立 API Key 并备份原配置
+        <p className="mb-8 text-center text-sm text-ink-muted">
+          {t("uiCopy.selectTools")}
         </p>
 
         <div className="mb-8 grid w-full grid-cols-3 gap-4">
@@ -249,10 +253,12 @@ export default function ToolDiscoveryPage({
           // 反馈——没有这条，点"安装"会表现为完全没反应。
           <div
             role="alert"
-            className="mb-4 w-full rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300"
+            className="mb-4 w-full rounded-lg border border-danger/30 bg-danger-soft px-4 py-2.5 text-xs text-danger "
           >
-            安装 {TOOL_META[installError.toolId]?.label ?? installError.toolId}{" "}
-            失败：{installError.message}
+            {t("uiCopy.install")}
+            {TOOL_META[installError.toolId]?.label ?? installError.toolId}{" "}
+            {t("uiCopy.failed")}
+            {installError.message}
           </div>
         )}
 
@@ -260,19 +266,30 @@ export default function ToolDiscoveryPage({
           {onBack && (
             <button
               onClick={onBack}
-              className="px-6 py-2.5 text-sm text-muted-foreground hover:text-foreground"
+              className="px-6 py-2.5 text-sm text-ink-muted hover:text-ink"
             >
-              返回
+              {t("uiCopy.back")}
             </button>
           )}
           <button
             onClick={() => onBind(selected.map((e) => e.id))}
             disabled={!scanDone || selected.length === 0}
-            className="flex-1 rounded-xl bg-gradient-to-r from-orange-400 to-orange-500 px-6 py-3 text-base font-semibold text-white shadow-md shadow-orange-200 transition-all hover:from-orange-500 hover:to-orange-600 disabled:opacity-50 dark:shadow-orange-900/20"
+            className="flex-1 rounded-xl bg-brand px-6 py-3 text-base font-semibold text-brand-on shadow-md transition-all disabled:opacity-50 "
           >
-            {!scanDone ? "扫描中…" : `开始绑定（${selected.length}）→`}
+            {!scanDone
+              ? t("uiCopy.scanning")
+              : t("uiCopy.startBinding", { value1: selected.length })}
           </button>
         </div>
+        {onEnterLocal && (
+          <button
+            type="button"
+            className="mb-4 mt-3 self-center py-1 text-ui text-ink-muted hover:text-ink hover:underline"
+            onClick={onEnterLocal}
+          >
+            {t("toolCatalog.skipBinding")}
+          </button>
+        )}
       </div>
       <NodeUpgradeDialog
         prompt={nodePrompt}

@@ -19,6 +19,9 @@ use crate::config::{get_app_config_dir, get_home_dir};
 use crate::database::Database;
 use crate::error::format_skill_error;
 
+#[path = "skill_selected_download.rs"]
+mod selected_download;
+
 // ========== 数据结构 ==========
 
 /// Skill 同步方式
@@ -261,6 +264,12 @@ struct SkillBackupMetadata {
     skill: InstalledSkill,
     backup_created_at: i64,
     source_path: String,
+    #[serde(default)]
+    execution: Option<crate::services::library::skill_artifact::ExecutionMap>,
+    /// Why a user's own folder was set aside (taken back from an agent);
+    /// such backups are the only copy and are never pruned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    origin: Option<String>,
 }
 
 const SKILL_BACKUP_RETAIN_COUNT: usize = 20;
@@ -281,151 +290,9 @@ pub struct ImportSkillSelection {
     pub apps: SkillApps,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct LegacySkillMigrationRow {
-    directory: String,
-    app_type: String,
-}
-
-// ========== ~/.agents/ lock 文件解析 ==========
-
-/// `~/.agents/.skill-lock.json` 文件结构
-#[derive(Deserialize)]
-struct AgentsLockFile {
-    skills: HashMap<String, AgentsLockSkill>,
-}
-
-/// lock 文件中单个 skill 的信息
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AgentsLockSkill {
-    source: Option<String>,
-    source_type: Option<String>,
-    source_url: Option<String>,
-    skill_path: Option<String>,
-    branch: Option<String>,
-    source_branch: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct LockRepoInfo {
-    owner: String,
-    repo: String,
-    skill_path: Option<String>,
-    branch: Option<String>,
-}
-
-fn normalize_optional_branch(branch: Option<String>) -> Option<String> {
-    branch.and_then(|b| {
-        let trimmed = b.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    })
-}
-
-fn parse_branch_from_source_url(source_url: Option<&str>) -> Option<String> {
-    let source_url = source_url?;
-    let source_url = source_url.trim();
-    if source_url.is_empty() {
-        return None;
-    }
-
-    // 支持 https://github.com/owner/repo/tree/<branch>/...
-    if let Some((_, after_tree)) = source_url.split_once("/tree/") {
-        let branch = after_tree
-            .split('/')
-            .next()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())?;
-        return Some(branch.to_string());
-    }
-
-    // 支持 URL fragment: ...git#branch
-    if let Some((_, fragment)) = source_url.split_once('#') {
-        let branch = fragment
-            .split('&')
-            .next()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())?;
-        return Some(branch.to_string());
-    }
-
-    // 支持 query: ...?branch=xxx / ?ref=xxx
-    if let Some((_, query)) = source_url.split_once('?') {
-        for pair in query.split('&') {
-            let Some((key, value)) = pair.split_once('=') else {
-                continue;
-            };
-            if matches!(key, "branch" | "ref") {
-                let branch = value.trim();
-                if !branch.is_empty() {
-                    return Some(branch.to_string());
-                }
-            }
-        }
-    }
-
-    None
-}
-
-/// 获取 `~/.agents/skills/` 目录（存在时返回）
 fn get_agents_skills_dir() -> Option<PathBuf> {
-    let path = get_home_dir().join(".agents").join("skills");
-    path.exists().then_some(path)
-}
-
-/// 解析 `~/.agents/.skill-lock.json`，返回 skill_name -> 仓库信息
-fn parse_agents_lock() -> HashMap<String, LockRepoInfo> {
-    let path = get_home_dir().join(".agents").join(".skill-lock.json");
-    let content = match fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                log::debug!("未找到 agents lock 文件: {}", path.display());
-            } else {
-                log::warn!("读取 agents lock 文件失败 ({}): {}", path.display(), e);
-            }
-            return HashMap::new();
-        }
-    };
-    let lock: AgentsLockFile = match serde_json::from_str(&content) {
-        Ok(l) => l,
-        Err(e) => {
-            log::warn!("解析 agents lock 文件失败 ({}): {}", path.display(), e);
-            return HashMap::new();
-        }
-    };
-    let parsed: HashMap<String, LockRepoInfo> = lock
-        .skills
-        .into_iter()
-        .filter_map(|(name, skill)| {
-            let source = skill.source?;
-            if skill.source_type.as_deref() != Some("github") {
-                return None;
-            }
-            let (owner, repo) = source.split_once('/')?;
-            let branch = normalize_optional_branch(skill.branch)
-                .or_else(|| normalize_optional_branch(skill.source_branch))
-                .or_else(|| parse_branch_from_source_url(skill.source_url.as_deref()));
-            Some((
-                name,
-                LockRepoInfo {
-                    owner: owner.to_string(),
-                    repo: repo.to_string(),
-                    skill_path: skill.skill_path,
-                    branch,
-                },
-            ))
-        })
-        .collect();
-    log::info!(
-        "agents lock 文件解析完成，共识别 {} 个 github skill",
-        parsed.len()
-    );
-    parsed
+    let path = get_home_dir().join(".agents/skills");
+    path.is_dir().then_some(path)
 }
 
 // ========== SkillService ==========
@@ -448,41 +315,21 @@ impl SkillService {
         format!("https://github.com/{owner}/{repo}/blob/{branch}/{doc_path}")
     }
 
-    /// 从旧 readme_url 中提取仓库内文档路径，兼容 `blob`/`tree` 两种格式
-    fn extract_doc_path_from_url(url: &str) -> Option<String> {
-        let marker = if url.contains("/blob/") {
-            "/blob/"
-        } else if url.contains("/tree/") {
-            "/tree/"
-        } else {
-            return None;
-        };
-
-        let (_, tail) = url.split_once(marker)?;
-        let (_, path) = tail.split_once('/')?;
-        if path.is_empty() {
-            return None;
-        }
-        Some(path.to_string())
-    }
-
     // ========== 路径管理 ==========
 
     /// 获取 SSOT 目录（根据设置返回 ~/.ofox-desktop/skills/ 或 ~/.agents/skills/）
     pub fn get_ssot_dir() -> Result<PathBuf> {
-        let location = crate::settings::get_skill_storage_location();
-        let dir = match location {
+        Ok(match crate::settings::get_skill_storage_location() {
             SkillStorageLocation::CcSwitch => get_app_config_dir().join("skills"),
             SkillStorageLocation::Unified => get_home_dir().join(".agents").join("skills"),
-        };
-        fs::create_dir_all(&dir)?;
-        Ok(dir)
+        })
     }
 
     /// 获取 Skill 卸载备份目录（~/.ofox-desktop/skill-backups/）
     fn get_backup_dir() -> Result<PathBuf> {
         let dir = get_app_config_dir().join("skill-backups");
-        fs::create_dir_all(&dir)?;
+        crate::services::library::skill_artifact::validate_private_location(&dir)?;
+        crate::config::create_private_dir_all(&dir)?;
         Ok(dir)
     }
 
@@ -490,16 +337,9 @@ impl SkillService {
     pub fn get_app_skills_dir(app: &AppType) -> Result<PathBuf> {
         // 目录覆盖：优先使用用户在 settings.json 中配置的 override 目录
         match app {
-            AppType::Claude => {
-                if let Some(custom) = crate::settings::get_claude_override_dir() {
-                    return Ok(custom.join("skills"));
-                }
-            }
-            AppType::Codex => {
-                if let Some(custom) = crate::settings::get_codex_override_dir() {
-                    return Ok(custom.join("skills"));
-                }
-            }
+            // Claude Code and Codex are resolved below through `agent_env` (the settings
+            // override, else CLAUDE_CONFIG_DIR / CODEX_HOME, else the default directory).
+            AppType::Claude | AppType::Codex => {}
             AppType::Gemini => {
                 if let Some(custom) = crate::settings::get_gemini_override_dir() {
                     return Ok(custom.join("skills"));
@@ -527,10 +367,10 @@ impl SkillService {
         let home = get_home_dir();
 
         Ok(match app {
-            AppType::Claude => home.join(".claude").join("skills"),
-            AppType::Codex => home.join(".codex").join("skills"),
-            AppType::Gemini => home.join(".gemini").join("skills"),
-            AppType::OpenCode => home.join(".config").join("opencode").join("skills"),
+            AppType::Claude => crate::config::get_claude_config_dir().join("skills"),
+            AppType::Codex => crate::codex_config::get_codex_config_dir().join("skills"),
+            AppType::Gemini => crate::gemini_config::get_gemini_dir().join("skills"),
+            AppType::OpenCode => crate::opencode_config::get_opencode_dir().join("skills"),
             AppType::OpenClaw => home.join(".openclaw").join("skills"),
             AppType::Hermes => crate::hermes_config::get_hermes_dir().join("skills"),
         })
@@ -540,223 +380,188 @@ impl SkillService {
 
     /// 获取所有已安装的 Skills
     pub fn get_all_installed(db: &Arc<Database>) -> Result<Vec<InstalledSkill>> {
-        let skills = db.get_all_installed_skills()?;
-        Ok(skills.into_values().collect())
+        let _io = crate::config_io::lock();
+        let snapshot = db.library_snapshot()?;
+        let roots = crate::services::library::skill_resource::native_paths()?;
+        db.get_all_installed_skills()?
+            .into_values()
+            .map(|mut row| {
+                crate::services::library::skill_resource::validate_skill(&row)?;
+                let definition_hash = crate::services::library::skill_resource::spec_hash(&row)?;
+                row.apps = SkillApps::default();
+                for (tool, root) in &roots {
+                    let physical = crate::services::library::skill_resource::entry_id(
+                        &root.join(&row.directory),
+                    )?;
+                    if snapshot
+                        .machine
+                        .receipts
+                        .get(&format!("skills:{physical}"))
+                        .is_some_and(|receipt| {
+                            receipt.kind == crate::services::library::ResourceKind::Skills
+                                && receipt.resource_id == row.id
+                                && receipt.owners.contains(tool)
+                                && snapshot
+                                    .machine
+                                    .assignments
+                                    .get(&format!("skills:{}:{tool}", row.id))
+                                    == Some(&row.id)
+                                && snapshot
+                                    .definitions
+                                    .skills
+                                    .get(&row.id)
+                                    .is_some_and(|meta| {
+                                        meta.revision == receipt.resource_revision
+                                            && meta.hash == receipt.definition_hash
+                                            && meta.hash == definition_hash
+                                    })
+                                && crate::services::library::skill_resource::receipt_intact(receipt)
+                        })
+                    {
+                        // Agents outside the legacy app list have no flag here.
+                        if let Ok(app) = tool.parse::<AppType>() {
+                            row.apps.set_enabled_for(&app, true);
+                        }
+                    }
+                }
+                Ok(row)
+            })
+            .collect()
     }
 
-    /// 安装 Skill
+    /// 收录 Skill 到资源库；不启用工具，也不执行脚本。
     ///
     /// 流程：
-    /// 1. 下载到 SSOT 目录
-    /// 2. 保存到数据库
-    /// 3. 同步到启用的应用目录
+    /// 1. 获取所选目录并固定实际提交
+    /// 2. 核验本机资源库 epoch，发布不可变内容并保存未分配定义
     pub async fn install(
         &self,
         db: &Arc<Database>,
         skill: &DiscoverableSkill,
         current_app: &AppType,
     ) -> Result<InstalledSkill> {
-        let ssot_dir = Self::get_ssot_dir()?;
+        self.install_with_epoch(db, skill, current_app, None).await
+    }
 
-        // 允许多级目录（如 a/b/c），但必须是安全的相对路径。
-        let source_rel = Self::sanitize_skill_source_path(&skill.directory).ok_or_else(|| {
-            anyhow!(format_skill_error(
-                "INVALID_SKILL_DIRECTORY",
-                &[("directory", &skill.directory)],
-                Some("checkZipContent"),
-            ))
-        })?;
-        // 安装目录名始终使用最后一段，避免在 SSOT 中创建多级目录。
-        let install_name = source_rel
-            .file_name()
-            .and_then(|name| Self::sanitize_install_name(&name.to_string_lossy()))
-            .ok_or_else(|| {
-                anyhow!(format_skill_error(
-                    "INVALID_SKILL_DIRECTORY",
-                    &[("directory", &skill.directory)],
-                    Some("checkZipContent"),
-                ))
-            })?;
+    /// Compatible library entry point. A provided epoch binds collection to
+    /// the caller's current local library rather than a later restored state.
+    pub async fn install_with_epoch(
+        &self,
+        db: &Arc<Database>,
+        skill: &DiscoverableSkill,
+        current_app: &AppType,
+        expected_epoch: Option<u64>,
+    ) -> Result<InstalledSkill> {
+        self.install_with_download(
+            db,
+            skill,
+            current_app,
+            expected_epoch,
+            |repo, directory| async move { self.download_selected_repo(&repo, &directory).await },
+        )
+        .await
+    }
 
-        // 检查数据库中是否已有同名 directory 的 skill（来自其他仓库）
-        let existing_skills = db.get_all_installed_skills()?;
-        for existing in existing_skills.values() {
-            if existing.directory.eq_ignore_ascii_case(&install_name) {
-                // 检查是否来自同一仓库
-                let same_repo = existing.repo_owner.as_deref() == Some(&skill.repo_owner)
-                    && existing.repo_name.as_deref() == Some(&skill.repo_name);
-                if same_repo {
-                    // 同一仓库的同名 skill，返回现有记录（可能需要更新启用状态）
-                    let mut updated = existing.clone();
-                    updated.apps.set_enabled_for(current_app, true);
-                    db.save_skill(&updated)?;
-                    Self::sync_to_app_dir(&updated.directory, current_app)?;
-                    log::info!(
-                        "Skill {} 已存在，更新 {:?} 启用状态",
-                        updated.name,
-                        current_app
-                    );
-                    return Ok(updated);
-                } else {
-                    // 不同仓库的同名 skill，报错
-                    return Err(anyhow!(format_skill_error(
-                        "SKILL_DIRECTORY_CONFLICT",
-                        &[
-                            ("directory", &install_name),
-                            (
-                                "existing_repo",
-                                &format!(
-                                    "{}/{}",
-                                    existing.repo_owner.as_deref().unwrap_or("unknown"),
-                                    existing.repo_name.as_deref().unwrap_or("unknown")
-                                )
-                            ),
-                            (
-                                "new_repo",
-                                &format!("{}/{}", skill.repo_owner, skill.repo_name)
-                            ),
-                        ],
-                        Some("uninstallFirst"),
-                    )));
+    async fn install_with_download<F, Fut>(
+        &self,
+        db: &Arc<Database>,
+        skill: &DiscoverableSkill,
+        current_app: &AppType,
+        expected_epoch: Option<u64>,
+        download: F,
+    ) -> Result<InstalledSkill>
+    where
+        F: FnOnce(SkillRepo, String) -> Fut,
+        Fut: std::future::Future<
+            Output = Result<(
+                crate::services::library::skill_artifact::ExtractedDir,
+                String,
+            )>,
+        >,
+    {
+        crate::agent_env::ready().await;
+        let _ = current_app;
+        crate::services::library::skill_artifact::safe_relative(&skill.directory)?;
+        let frozen_epoch = {
+            let _guard = crate::config_io::lock();
+            let snapshot = db.library_snapshot()?;
+            if expected_epoch.is_some_and(|epoch| snapshot.machine.epoch != epoch) {
+                return Err(anyhow!("library.epochChanged"));
+            }
+            crate::services::library::skill_resource::ensure_metadata(db)?;
+            let existing = db.get_all_installed_skills()?;
+            if let Some(row) = existing.values().find(|row| {
+                row.directory.eq_ignore_ascii_case(
+                    skill
+                        .directory
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&skill.directory),
+                )
+            }) {
+                // Strict callers must explicitly select an evidence-matched
+                // existing resource. A directory or old key is not that proof.
+                if expected_epoch.is_none() && row.id == skill.key {
+                    return Ok(row.clone());
                 }
+                return Err(anyhow!("library.skillNameConflict"));
             }
-        }
-
-        let dest = ssot_dir.join(&install_name);
-
-        let mut repo_branch = skill.repo_branch.clone();
-
-        // 如果已存在则跳过下载
-        if !dest.exists() {
-            let repo = SkillRepo {
-                owner: skill.repo_owner.clone(),
-                name: skill.repo_name.clone(),
-                branch: skill.repo_branch.clone(),
-                enabled: true,
-            };
-
-            // 下载仓库
-            let (temp_dir, used_branch) = timeout(
-                std::time::Duration::from_secs(60),
-                self.download_repo(&repo),
-            )
-            .await
-            .map_err(|_| {
-                anyhow!(format_skill_error(
-                    "DOWNLOAD_TIMEOUT",
-                    &[
-                        ("owner", &repo.owner),
-                        ("name", &repo.name),
-                        ("timeout", "60")
-                    ],
-                    Some("checkNetwork"),
-                ))
-            })??;
-            repo_branch = used_branch;
-
-            // 复制到 SSOT
-            let source =
-                Self::resolve_skill_source_dir(&temp_dir, &skill.directory).ok_or_else(|| {
-                    let missing = temp_dir.join(&source_rel).display().to_string();
-                    let _ = fs::remove_dir_all(&temp_dir);
-                    anyhow!(format_skill_error(
-                        "SKILL_DIR_NOT_FOUND",
-                        &[("path", &missing)],
-                        Some("checkRepoUrl"),
-                    ))
-                })?;
-
-            let canonical_temp = temp_dir.canonicalize().unwrap_or_else(|_| temp_dir.clone());
-            let canonical_source = source.canonicalize().map_err(|_| {
-                anyhow!(format_skill_error(
-                    "SKILL_DIR_NOT_FOUND",
-                    &[("path", &source.display().to_string())],
-                    Some("checkRepoUrl"),
-                ))
-            })?;
-            if !canonical_source.starts_with(&canonical_temp) || !canonical_source.is_dir() {
-                let _ = fs::remove_dir_all(&temp_dir);
-                return Err(anyhow!(format_skill_error(
-                    "INVALID_SKILL_DIRECTORY",
-                    &[("directory", &skill.directory)],
-                    Some("checkZipContent"),
-                )));
-            }
-
-            Self::copy_dir_recursive(&canonical_source, &dest)?;
-            let _ = fs::remove_dir_all(&temp_dir);
-
-            // 使用实际下载成功的分支，避免 readme_url / repo_branch 与真实分支不一致。
-            if repo_branch != skill.repo_branch {
-                log::info!(
-                    "Skill {}/{} 分支自动回退: {} -> {}",
-                    skill.repo_owner,
-                    skill.repo_name,
-                    skill.repo_branch,
-                    repo_branch
-                );
-            }
-        }
-
-        let doc_path = skill
-            .readme_url
-            .as_deref()
-            .and_then(Self::extract_doc_path_from_url)
-            .map(|path| {
-                if path.ends_with("/SKILL.md") || path == "SKILL.md" {
-                    path
-                } else {
-                    format!("{}/SKILL.md", path.trim_end_matches('/'))
-                }
-            })
-            .unwrap_or_else(|| format!("{}/SKILL.md", skill.directory.trim_end_matches('/')));
-
-        let readme_url = Some(Self::build_skill_doc_url(
-            &skill.repo_owner,
-            &skill.repo_name,
-            &repo_branch,
-            &doc_path,
-        ));
-
-        // 创建 InstalledSkill 记录
-        // 计算内容哈希
-        let content_hash = Self::compute_dir_hash(&dest).map(Some).unwrap_or_else(|e| {
-            log::warn!("Failed to compute content hash for {}: {e}", install_name);
-            None
-        });
-
-        let installed_skill = InstalledSkill {
+            snapshot.machine.epoch
+        };
+        let repo = SkillRepo {
+            owner: skill.repo_owner.clone(),
+            name: skill.repo_name.clone(),
+            branch: skill.repo_branch.clone(),
+            enabled: true,
+        };
+        let (downloaded, commit) = timeout(
+            std::time::Duration::from_secs(60),
+            download(repo.clone(), skill.directory.clone()),
+        )
+        .await
+        .map_err(|_| anyhow!("library.skillDownloadTimeout"))??;
+        let source = Self::resolve_skill_source_dir(downloaded.path(), &skill.directory)
+            .ok_or_else(|| anyhow!("library.skillSourceAmbiguous"))?;
+        let directory = skill
+            .directory
+            .rsplit('/')
+            .next()
+            .ok_or_else(|| anyhow!("library.invalidSkillPath"))?
+            .to_string();
+        let doc = source
+            .strip_prefix(downloaded.path())?
+            .join("SKILL.md")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let row = InstalledSkill {
             id: skill.key.clone(),
             name: skill.name.clone(),
-            description: if skill.description.is_empty() {
-                None
-            } else {
-                Some(skill.description.clone())
-            },
-            directory: install_name.clone(),
-            repo_owner: Some(skill.repo_owner.clone()),
-            repo_name: Some(skill.repo_name.clone()),
-            repo_branch: Some(repo_branch),
-            readme_url,
-            apps: SkillApps::only(current_app),
-            installed_at: chrono::Utc::now().timestamp(),
-            content_hash,
+            description: Some(skill.description.clone()),
+            directory,
+            repo_owner: Some(repo.owner.clone()),
+            repo_name: Some(repo.name.clone()),
+            repo_branch: Some(repo.branch),
+            readme_url: Some(Self::build_skill_doc_url(
+                &repo.owner,
+                &repo.name,
+                &commit,
+                &doc,
+            )),
+            apps: SkillApps::default(),
+            installed_at: Utc::now().timestamp(),
+            content_hash: None,
             updated_at: 0,
         };
-
-        // 保存到数据库
-        db.save_skill(&installed_skill)?;
-
-        // 同步到当前应用目录
-        Self::sync_to_app_dir(&install_name, current_app)?;
-
-        log::info!(
-            "Skill {} 安装成功，已启用 {:?}",
-            installed_skill.name,
-            current_app
-        );
-
-        Ok(installed_skill)
+        Ok(
+            crate::services::library::skill_resource::save_draft_with_execution_at_epoch(
+                db,
+                row,
+                &source,
+                None,
+                Some(&downloaded.execution_for(&source)?),
+                frozen_epoch,
+            )?,
+        )
     }
 
     /// 卸载 Skill
@@ -766,38 +571,27 @@ impl SkillService {
     /// 2. 从 SSOT 删除
     /// 3. 从数据库删除
     pub fn uninstall(db: &Arc<Database>, id: &str) -> Result<SkillUninstallResult> {
-        // 获取 skill 信息
+        let _io = crate::config_io::lock();
+        crate::services::library::skill_resource::ensure_metadata(db)?;
         let skill = db
             .get_installed_skill(id)?
-            .ok_or_else(|| anyhow!("Skill not found: {id}"))?;
-
+            .ok_or_else(|| anyhow!("library.resourceMissing"))?;
+        // Ownership is checked before backup or deletion; no native entry is touched.
+        let snapshot = db.library_snapshot()?;
+        if snapshot.machine.receipts.values().any(|receipt| {
+            receipt.kind == crate::services::library::ResourceKind::Skills
+                && receipt.resource_id == id
+        }) || snapshot
+            .machine
+            .assignments
+            .iter()
+            .any(|(key, value)| key.starts_with("skills:") && value == id)
+        {
+            return Err(anyhow!("library.withdrawRequired"));
+        }
         let backup_path =
-            Self::create_uninstall_backup(&skill)?.map(|path| path.to_string_lossy().to_string());
-
-        // 从所有应用目录删除
-        for app in AppType::all() {
-            let _ = Self::remove_from_app(&skill.directory, &app);
-        }
-
-        // 从 SSOT 删除
-        let ssot_dir = Self::get_ssot_dir()?;
-        let skill_path = ssot_dir.join(&skill.directory);
-        if skill_path.exists() {
-            fs::remove_dir_all(&skill_path)?;
-        }
-
-        // 从数据库删除
-        db.delete_skill(id)?;
-
-        log::info!(
-            "Skill {} 卸载成功{}",
-            skill.name,
-            backup_path
-                .as_deref()
-                .map(|path| format!(", backup: {path}"))
-                .unwrap_or_default()
-        );
-
+            Self::create_uninstall_backup(&skill)?.map(|path| path.to_string_lossy().into_owned());
+        crate::services::library::skill_resource::delete_draft(db, id)?;
         Ok(SkillUninstallResult { backup_path })
     }
 
@@ -808,46 +602,7 @@ impl SkillService {
     /// 递归遍历目录下所有非隐藏文件，按相对路径字典序排列，
     /// 将 "相对路径\0内容\0" 逐文件 feed 给同一个 hasher。
     pub fn compute_dir_hash(dir: &Path) -> Result<String> {
-        use sha2::{Digest, Sha256};
-
-        let mut files: Vec<PathBuf> = Vec::new();
-        Self::collect_files_for_hash(dir, dir, &mut files)?;
-        files.sort();
-
-        let mut hasher = Sha256::new();
-        for file_path in &files {
-            let relative = file_path.strip_prefix(dir).unwrap_or(file_path);
-            let rel_str = relative.to_string_lossy().replace('\\', "/");
-            hasher.update(rel_str.as_bytes());
-            hasher.update(b"\0");
-            let content = fs::read(file_path)
-                .with_context(|| format!("读取文件失败: {}", file_path.display()))?;
-            hasher.update(&content);
-            hasher.update(b"\0");
-        }
-
-        Ok(format!("{:x}", hasher.finalize()))
-    }
-
-    /// 递归收集目录下所有非隐藏文件
-    #[allow(clippy::only_used_in_recursion)]
-    fn collect_files_for_hash(base: &Path, current: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-        let entries = fs::read_dir(current)
-            .with_context(|| format!("读取目录失败: {}", current.display()))?;
-        for entry in entries {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
-                continue;
-            }
-            let path = entry.path();
-            if path.is_dir() {
-                Self::collect_files_for_hash(base, &path, files)?;
-            } else {
-                files.push(path);
-            }
-        }
-        Ok(())
+        Ok(crate::services::library::skill_artifact::tree_hash(dir)?)
     }
 
     /// 检查所有已安装 Skill 的更新
@@ -855,275 +610,27 @@ impl SkillService {
     /// 仅检查有 repo_owner 的 Skill（本地 Skill 跳过），
     /// 按仓库分组下载，避免重复下载同一仓库。
     pub async fn check_updates(&self, db: &Arc<Database>) -> Result<Vec<SkillUpdateInfo>> {
-        let skills = db.get_all_installed_skills()?;
-        let mut updates = Vec::new();
-
-        // 按 (owner, name, branch) 分组
-        let mut repo_groups: HashMap<(String, String, String), Vec<InstalledSkill>> =
-            HashMap::new();
-
-        for skill in skills.into_values() {
-            let (owner, name, branch) =
-                match (&skill.repo_owner, &skill.repo_name, &skill.repo_branch) {
-                    (Some(o), Some(n), Some(b)) => (o.clone(), n.clone(), b.clone()),
-                    (Some(o), Some(n), None) => (o.clone(), n.clone(), "main".to_string()),
-                    _ => continue,
-                };
-            repo_groups
-                .entry((owner, name, branch))
-                .or_default()
-                .push(skill);
-        }
-
-        let ssot_dir = Self::get_ssot_dir()?;
-
-        for ((owner, name, branch), group_skills) in &repo_groups {
-            let repo = SkillRepo {
-                owner: owner.clone(),
-                name: name.clone(),
-                branch: branch.clone(),
-                enabled: true,
-            };
-
-            // 下载仓库 ZIP
-            let (temp_dir, _used_branch) = match timeout(
-                std::time::Duration::from_secs(60),
-                self.download_repo(&repo),
-            )
-            .await
-            {
-                Ok(Ok(result)) => result,
-                Ok(Err(e)) => {
-                    log::warn!("检查更新时下载 {}/{} 失败: {e}", owner, name);
-                    continue;
-                }
-                Err(_) => {
-                    log::warn!("检查更新时下载 {}/{} 超时", owner, name);
-                    continue;
-                }
-            };
-
-            // 扫描仓库中的所有 Skill 目录
-            let mut remote_skills: Vec<DiscoverableSkill> = Vec::new();
-            let _ = self.scan_dir_recursive(&temp_dir, &temp_dir, &repo, &mut remote_skills);
-
-            for skill in group_skills {
-                // 在远程仓库中找到匹配的 Skill 目录
-                let remote_match = remote_skills.iter().find(|rs| {
-                    // 匹配方式：安装名称的最后一段
-                    let remote_install_name =
-                        rs.directory.rsplit('/').next().unwrap_or(&rs.directory);
-                    remote_install_name.eq_ignore_ascii_case(&skill.directory)
-                });
-
-                let remote_skill_dir = match remote_match {
-                    Some(rs) => match Self::resolve_skill_source_dir(&temp_dir, &rs.directory) {
-                        Some(path) => path,
-                        None => continue,
-                    },
-                    None => continue,
-                };
-
-                let remote_hash = match Self::compute_dir_hash(&remote_skill_dir) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        log::warn!("计算远程哈希失败 {}: {e}", skill.id);
-                        continue;
-                    }
-                };
-
-                // 本地哈希：优先数据库，否则实时计算
-                let local_hash = match &skill.content_hash {
-                    Some(h) => Some(h.clone()),
-                    None => {
-                        let local_dir = ssot_dir.join(&skill.directory);
-                        if local_dir.exists() {
-                            match Self::compute_dir_hash(&local_dir) {
-                                Ok(h) => {
-                                    let _ = db.update_skill_hash(&skill.id, &h, 0);
-                                    Some(h)
-                                }
-                                Err(_) => None,
-                            }
-                        } else {
-                            None
-                        }
-                    }
-                };
-
-                if local_hash.as_deref() != Some(&remote_hash) {
-                    updates.push(SkillUpdateInfo {
-                        id: skill.id.clone(),
-                        name: skill.name.clone(),
-                        current_hash: local_hash,
-                        remote_hash,
-                    });
-                }
-            }
-
-            let _ = fs::remove_dir_all(&temp_dir);
-        }
-
-        Ok(updates)
+        crate::agent_env::ready().await;
+        Ok(crate::services::library::skill_actions::legacy_check(db).await?)
     }
 
-    /// 更新单个 Skill（重新下载并替换本地文件）
+    /// Legacy callers resolve their tracking ref at this call, and update only a draft.
+    /// The resource-library UI uses its frozen ticket instead.
     pub async fn update_skill(&self, db: &Arc<Database>, skill_id: &str) -> Result<InstalledSkill> {
-        let skill = db
-            .get_installed_skill(skill_id)?
-            .ok_or_else(|| anyhow!("Skill not found: {skill_id}"))?;
-
-        let (owner, name, branch) = match (&skill.repo_owner, &skill.repo_name) {
-            (Some(o), Some(n)) => (
-                o.clone(),
-                n.clone(),
-                skill
-                    .repo_branch
-                    .clone()
-                    .unwrap_or_else(|| "main".to_string()),
-            ),
-            _ => return Err(anyhow!("Cannot update local skill: {skill_id}")),
-        };
-
-        let repo = SkillRepo {
-            owner: owner.clone(),
-            name: name.clone(),
-            branch: branch.clone(),
-            enabled: true,
-        };
-
-        let ssot_dir = Self::get_ssot_dir()?;
-
-        // 下载仓库
-        let (temp_dir, used_branch) = timeout(
-            std::time::Duration::from_secs(60),
-            self.download_repo(&repo),
-        )
-        .await
-        .map_err(|_| {
-            anyhow!(format_skill_error(
-                "DOWNLOAD_TIMEOUT",
-                &[("owner", &owner), ("name", &name), ("timeout", "60")],
-                Some("checkNetwork"),
-            ))
-        })??;
-
-        // 在解压的仓库中查找 Skill 源目录
-        let mut remote_skills: Vec<DiscoverableSkill> = Vec::new();
-        let _ = self.scan_dir_recursive(&temp_dir, &temp_dir, &repo, &mut remote_skills);
-
-        let remote_match = remote_skills
-            .iter()
-            .find(|rs| {
-                let remote_install_name = rs.directory.rsplit('/').next().unwrap_or(&rs.directory);
-                remote_install_name.eq_ignore_ascii_case(&skill.directory)
-            })
-            .ok_or_else(|| {
-                let _ = fs::remove_dir_all(&temp_dir);
-                anyhow!(format_skill_error(
-                    "SKILL_DIR_NOT_FOUND",
-                    &[("path", &skill.directory)],
-                    Some("checkRepoUrl"),
-                ))
-            })?;
-
-        let source = Self::resolve_skill_source_dir(&temp_dir, &remote_match.directory)
-            .ok_or_else(|| {
-                let missing = temp_dir.join(&remote_match.directory).display().to_string();
-                let _ = fs::remove_dir_all(&temp_dir);
-                anyhow!(format_skill_error(
-                    "SKILL_DIR_NOT_FOUND",
-                    &[("path", &missing)],
-                    Some("checkRepoUrl"),
-                ))
-            })?;
-
-        // 备份旧文件
-        let _ = Self::create_uninstall_backup(&skill);
-
-        // 删除旧 SSOT 目录并复制新文件
-        let dest = ssot_dir.join(&skill.directory);
-        if dest.exists() {
-            fs::remove_dir_all(&dest)?;
-        }
-        Self::copy_dir_recursive(&source, &dest)?;
-        let _ = fs::remove_dir_all(&temp_dir);
-
-        // 计算新哈希 + 解析新元数据
-        let new_hash = Self::compute_dir_hash(&dest).ok();
-        let skill_md = dest.join("SKILL.md");
-        let (new_name, new_description) = Self::read_skill_name_desc(&skill_md, &skill.directory);
-
-        // 更新 readme_url
-        let doc_path = skill
-            .readme_url
-            .as_deref()
-            .and_then(Self::extract_doc_path_from_url)
-            .unwrap_or_else(|| format!("{}/SKILL.md", skill.directory.trim_end_matches('/')));
-        let readme_url = Some(Self::build_skill_doc_url(
-            &owner,
-            &name,
-            &used_branch,
-            &doc_path,
-        ));
-
-        let updated_skill = InstalledSkill {
-            id: skill.id.clone(),
-            name: new_name,
-            description: new_description,
-            directory: skill.directory.clone(),
-            repo_owner: skill.repo_owner.clone(),
-            repo_name: skill.repo_name.clone(),
-            repo_branch: Some(used_branch),
-            readme_url,
-            apps: skill.apps.clone(),
-            installed_at: skill.installed_at,
-            content_hash: new_hash,
-            updated_at: chrono::Utc::now().timestamp(),
-        };
-
-        db.save_skill(&updated_skill)?;
-
-        // 同步到所有已启用的应用目录
-        for app in updated_skill.apps.enabled_apps() {
-            if let Err(e) = Self::sync_to_app_dir(&updated_skill.directory, &app) {
-                log::warn!("同步更新后的 skill 到 {:?} 失败: {e}", app);
-            }
-        }
-
-        log::info!("Skill {} 更新成功", updated_skill.name);
-        Ok(updated_skill)
+        crate::agent_env::ready().await;
+        Ok(crate::services::library::skill_actions::legacy_update(db, skill_id).await?)
     }
 
     /// 为缺少 content_hash 的已安装 Skill 补算哈希
     pub fn backfill_content_hashes(db: &Arc<Database>) -> Result<usize> {
-        let skills = db.get_all_installed_skills()?;
-        let ssot_dir = Self::get_ssot_dir()?;
-        let mut count = 0;
-
-        for skill in skills.values() {
-            if skill.content_hash.is_some() {
-                continue;
-            }
-            let skill_dir = ssot_dir.join(&skill.directory);
-            if !skill_dir.exists() {
-                continue;
-            }
-            match Self::compute_dir_hash(&skill_dir) {
-                Ok(hash) => {
-                    let _ = db.update_skill_hash(&skill.id, &hash, 0);
-                    count += 1;
-                }
-                Err(e) => {
-                    log::warn!("补算哈希失败 {}: {e}", skill.id);
-                }
-            }
-        }
-
-        if count > 0 {
-            log::info!("已为 {count} 个 Skill 补算内容哈希");
-        }
-        Ok(count)
+        let before = db.library_snapshot()?.definitions.skills.len();
+        crate::services::library::skill_resource::ensure_metadata(db)?;
+        Ok(db
+            .library_snapshot()?
+            .definitions
+            .skills
+            .len()
+            .saturating_sub(before))
     }
 
     /// 迁移 Skill 存储位置（在两个 SSOT 目录间移动文件）
@@ -1133,75 +640,8 @@ impl SkillService {
         db: &Arc<Database>,
         target: SkillStorageLocation,
     ) -> Result<MigrationResult> {
-        let current = crate::settings::get_skill_storage_location();
-        if current == target {
-            return Ok(MigrationResult {
-                migrated_count: 0,
-                skipped_count: 0,
-                errors: vec![],
-            });
-        }
-
-        // 1. 解析旧目录和新目录（不改设置）
-        let old_dir = Self::get_ssot_dir()?;
-        let new_dir = match target {
-            SkillStorageLocation::CcSwitch => get_app_config_dir().join("skills"),
-            SkillStorageLocation::Unified => get_home_dir().join(".agents").join("skills"),
-        };
-        fs::create_dir_all(&new_dir)?;
-
-        // 2. 逐个移动 skill 目录
-        let skills = db.get_all_installed_skills()?;
-        let mut result = MigrationResult {
-            migrated_count: 0,
-            skipped_count: 0,
-            errors: vec![],
-        };
-
-        for skill in skills.values() {
-            let src = old_dir.join(&skill.directory);
-            let dst = new_dir.join(&skill.directory);
-
-            if !src.exists() {
-                result.skipped_count += 1;
-                continue;
-            }
-            if dst.exists() {
-                result.skipped_count += 1;
-                continue;
-            }
-
-            // 优先 rename（同文件系统原子操作），失败则 copy+delete
-            match fs::rename(&src, &dst) {
-                Ok(()) => result.migrated_count += 1,
-                Err(_) => match Self::copy_dir_recursive(&src, &dst) {
-                    Ok(()) => {
-                        let _ = fs::remove_dir_all(&src);
-                        result.migrated_count += 1;
-                    }
-                    Err(e) => {
-                        result.errors.push(format!("{}: {e}", skill.directory));
-                    }
-                },
-            }
-        }
-
-        // 3. 文件移动完成后才持久化设置
-        crate::settings::set_skill_storage_location(target)?;
-
-        // 4. 刷新所有应用目录的 symlink（指向新 SSOT）
-        for app in AppType::all() {
-            let _ = Self::sync_to_app(db, &app);
-        }
-
-        log::info!(
-            "Skill 存储迁移完成: {} 迁移, {} 跳过, {} 错误",
-            result.migrated_count,
-            result.skipped_count,
-            result.errors.len()
-        );
-
-        Ok(result)
+        let _ = (db, target);
+        Err(anyhow!("library.previewRequired"))
     }
 
     pub fn list_backups() -> Result<Vec<SkillBackupEntry>> {
@@ -1262,69 +702,23 @@ impl SkillService {
         backup_id: &str,
         current_app: &AppType,
     ) -> Result<InstalledSkill> {
-        let backup_path = Self::backup_path_for_id(backup_id)?;
-        let metadata = Self::read_backup_metadata(&backup_path)?;
-        let backup_skill_dir = backup_path.join("skill");
-        if !backup_skill_dir.join("SKILL.md").exists() {
-            return Err(anyhow!(
-                "Skill backup is invalid or missing SKILL.md: {}",
-                backup_path.display()
-            ));
-        }
-
-        let existing_skills = db.get_all_installed_skills()?;
-        if existing_skills.contains_key(&metadata.skill.id)
-            || existing_skills.values().any(|skill| {
-                skill
-                    .directory
-                    .eq_ignore_ascii_case(&metadata.skill.directory)
-            })
-        {
-            return Err(anyhow!(
-                "Skill already exists, please uninstall the current one first: {}",
-                metadata.skill.directory
-            ));
-        }
-
-        let ssot_dir = Self::get_ssot_dir()?;
-        let restore_path = ssot_dir.join(&metadata.skill.directory);
-        if restore_path.exists() || Self::is_symlink(&restore_path) {
-            return Err(anyhow!(
-                "Restore target already exists: {}",
-                restore_path.display()
-            ));
-        }
-
-        let mut restored_skill = metadata.skill;
-        restored_skill.installed_at = Utc::now().timestamp();
-        restored_skill.apps = SkillApps::only(current_app);
-        restored_skill.updated_at = 0;
-
-        Self::copy_dir_recursive(&backup_skill_dir, &restore_path)?;
-
-        // 重新计算内容哈希
-        restored_skill.content_hash = Self::compute_dir_hash(&restore_path).ok();
-
-        if let Err(err) = db.save_skill(&restored_skill) {
-            let _ = fs::remove_dir_all(&restore_path);
-            return Err(err.into());
-        }
-
-        if !restored_skill.apps.is_empty() {
-            if let Err(err) = Self::sync_to_app_dir(&restored_skill.directory, current_app) {
-                let _ = db.delete_skill(&restored_skill.id);
-                let _ = fs::remove_dir_all(&restore_path);
-                return Err(err);
-            }
-        }
-
-        log::info!(
-            "Skill {} 已从备份恢复到 {}",
-            restored_skill.name,
-            restore_path.display()
-        );
-
-        Ok(restored_skill)
+        let _ = current_app;
+        let backup = Self::backup_path_for_id(backup_id)?;
+        let metadata = Self::read_backup_metadata(&backup)?;
+        crate::services::library::skill_artifact::safe_leaf(&metadata.skill.directory)?;
+        let mut skill = metadata.skill;
+        skill.apps = SkillApps::default();
+        skill.installed_at = Utc::now().timestamp();
+        skill.updated_at = 0;
+        Ok(
+            crate::services::library::skill_resource::save_draft_with_execution(
+                db,
+                skill,
+                &backup.join("skill"),
+                None,
+                metadata.execution.as_ref(),
+            )?,
+        )
     }
 
     /// 切换应用启用状态
@@ -1332,27 +726,8 @@ impl SkillService {
     /// 启用：复制到应用目录
     /// 禁用：从应用目录删除
     pub fn toggle_app(db: &Arc<Database>, id: &str, app: &AppType, enabled: bool) -> Result<()> {
-        // 获取当前 skill
-        let mut skill = db
-            .get_installed_skill(id)?
-            .ok_or_else(|| anyhow!("Skill not found: {id}"))?;
-
-        // 更新状态
-        skill.apps.set_enabled_for(app, enabled);
-
-        // 同步文件
-        if enabled {
-            Self::sync_to_app_dir(&skill.directory, app)?;
-        } else {
-            Self::remove_from_app(&skill.directory, app)?;
-        }
-
-        // 更新数据库
-        db.update_skill_apps(id, &skill.apps)?;
-
-        log::info!("Skill {} 的 {:?} 状态已更新为 {}", skill.name, app, enabled);
-
-        Ok(())
+        let _ = (db, id, app, enabled);
+        Err(anyhow!("library.previewRequired"))
     }
 
     /// 扫描未管理的 Skills
@@ -1425,147 +800,78 @@ impl SkillService {
         db: &Arc<Database>,
         imports: Vec<ImportSkillSelection>,
     ) -> Result<Vec<InstalledSkill>> {
-        let ssot_dir = Self::get_ssot_dir()?;
-        let agents_lock = parse_agents_lock();
-        let mut imported = Vec::new();
-
-        // 将 lock 文件中发现的仓库保存到 skill_repos
-        save_repos_from_lock(
-            db,
-            &agents_lock,
-            imports.iter().map(|selection| selection.directory.as_str()),
-        );
-
-        // 收集所有候选搜索目录
-        let mut search_sources: Vec<(PathBuf, String)> = Vec::new();
-        for app in AppType::all() {
-            if let Ok(d) = Self::get_app_skills_dir(&app) {
-                search_sources.push((d, app.as_str().to_string()));
-            }
-        }
-        if let Some(agents_dir) = get_agents_skills_dir() {
-            search_sources.push((agents_dir, "agents".to_string()));
-        }
-        search_sources.push((ssot_dir.clone(), "ofox-switch".to_string()));
-
+        let _guard = crate::config_io::lock();
+        let mut prepared = Vec::new();
         for selection in imports {
-            let dir_name = selection.directory;
-            // 在所有候选目录中查找
-            let mut source_path: Option<PathBuf> = None;
-
-            for (base, label) in &search_sources {
-                let skill_path = base.join(&dir_name);
-                if skill_path.exists() {
-                    if source_path.is_none() {
-                        source_path = Some(skill_path);
-                    }
-                    log::debug!("Skill '{dir_name}' found in source '{label}'");
+            crate::services::library::skill_artifact::safe_leaf(&selection.directory)?;
+            let mut candidates = Vec::new();
+            let apps = if selection.apps.is_empty() {
+                AppType::all().collect()
+            } else {
+                selection.apps.enabled_apps()
+            };
+            for app in apps {
+                let source = Self::get_app_skills_dir(&app)?.join(&selection.directory);
+                if source.is_dir() {
+                    candidates.push(source.canonicalize()?);
                 }
             }
-
-            let source = match source_path {
-                Some(p) => p,
-                None => continue,
-            };
-            if !source.join("SKILL.md").exists() {
-                log::warn!(
-                    "Skip importing '{}' because source '{}' has no SKILL.md",
-                    dir_name,
-                    source.display()
-                );
+            if selection.apps.is_empty() {
+                let source = get_home_dir()
+                    .join(".agents")
+                    .join("skills")
+                    .join(&selection.directory);
+                if source.is_dir() {
+                    candidates.push(source.canonicalize()?);
+                }
+            }
+            candidates.sort();
+            candidates.dedup();
+            let mut hashes = HashSet::new();
+            for source in &candidates {
+                hashes.insert(Self::compute_dir_hash(source)?);
+            }
+            if hashes.len() > 1 {
+                return Err(anyhow!("library.skillSourceAmbiguous"));
+            }
+            let source = candidates
+                .first()
+                .ok_or_else(|| anyhow!("library.skillSourceMissing"))?
+                .clone();
+            let (name, description) =
+                Self::read_skill_name_desc(&source.join("SKILL.md"), &selection.directory);
+            prepared.push((
+                InstalledSkill {
+                    id: format!("local:{}", selection.directory),
+                    name,
+                    description,
+                    directory: selection.directory,
+                    repo_owner: None,
+                    repo_name: None,
+                    repo_branch: None,
+                    readme_url: None,
+                    apps: SkillApps::default(),
+                    installed_at: Utc::now().timestamp(),
+                    content_hash: None,
+                    updated_at: 0,
+                },
+                source,
+            ));
+        }
+        let mut imported = Vec::new();
+        for (skill, source) in prepared {
+            if let Some(existing) = db.get_installed_skill(&skill.id)? {
+                imported.push(existing);
                 continue;
             }
-
-            // 复制到 SSOT
-            let dest = ssot_dir.join(&dir_name);
-            if !dest.exists() {
-                Self::copy_dir_recursive(&source, &dest)?;
-            }
-
-            // 解析元数据
-            let skill_md = dest.join("SKILL.md");
-            let (name, description) = Self::read_skill_name_desc(&skill_md, &dir_name);
-
-            // 启用状态仅信任用户本次显式选择，不再根据“在哪些位置找到”自动推断。
-            let apps = selection.apps;
-
-            // 从 lock 文件提取仓库信息
-            let (id, repo_owner, repo_name, repo_branch, readme_url) =
-                build_repo_info_from_lock(&agents_lock, &dir_name);
-
-            // 计算内容哈希
-            let ssot_skill_dir = ssot_dir.join(&dir_name);
-            let content_hash = Self::compute_dir_hash(&ssot_skill_dir).ok();
-
-            // 创建记录
-            let skill = InstalledSkill {
-                id,
-                name,
-                description,
-                directory: dir_name,
-                repo_owner,
-                repo_name,
-                repo_branch,
-                readme_url,
-                apps,
-                installed_at: chrono::Utc::now().timestamp(),
-                content_hash,
-                updated_at: 0,
-            };
-
-            // 保存到数据库
-            db.save_skill(&skill)?;
-
-            // 同步到已启用的应用目录（创建 symlink 或复制文件）
-            for app in AppType::all() {
-                if skill.apps.is_enabled_for(&app) {
-                    if let Err(e) = Self::sync_to_app_dir(&skill.directory, &app) {
-                        log::warn!(
-                            "导入后同步 Skill '{}' 到 {:?} 失败: {e:#}",
-                            skill.directory,
-                            app
-                        );
-                    }
-                }
-            }
-
-            imported.push(skill);
+            imported.push(crate::services::library::skill_resource::save_draft(
+                db, skill, &source, None,
+            )?);
         }
-
-        log::info!("成功导入 {} 个 Skills", imported.len());
-
         Ok(imported)
     }
 
     // ========== 文件同步方法 ==========
-
-    /// 创建符号链接（跨平台）
-    ///
-    /// - Unix: 使用 std::os::unix::fs::symlink
-    /// - Windows: 使用 std::os::windows::fs::symlink_dir
-    #[cfg(unix)]
-    fn create_symlink(src: &Path, dest: &Path) -> Result<()> {
-        std::os::unix::fs::symlink(src, dest)
-            .with_context(|| format!("创建符号链接失败: {} -> {}", src.display(), dest.display()))
-    }
-
-    #[cfg(windows)]
-    fn create_symlink(src: &Path, dest: &Path) -> Result<()> {
-        std::os::windows::fs::symlink_dir(src, dest)
-            .with_context(|| format!("创建符号链接失败: {} -> {}", src.display(), dest.display()))
-    }
-
-    /// 检查路径是否为符号链接
-    fn is_symlink(path: &Path) -> bool {
-        path.symlink_metadata()
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
-    }
-
-    /// 获取当前同步方式配置
-    fn get_sync_method() -> SyncMethod {
-        crate::settings::get_skill_sync_method()
-    }
 
     /// 同步 Skill 到应用目录（使用 symlink 或 copy）
     ///
@@ -1574,56 +880,8 @@ impl SkillService {
     /// - Symlink: 仅使用 symlink
     /// - Copy: 仅使用文件复制
     pub fn sync_to_app_dir(directory: &str, app: &AppType) -> Result<()> {
-        let ssot_dir = Self::get_ssot_dir()?;
-        let source = ssot_dir.join(directory);
-
-        if !source.exists() {
-            return Err(anyhow!("Skill 不存在于 SSOT: {directory}"));
-        }
-
-        let app_dir = Self::get_app_skills_dir(app)?;
-        fs::create_dir_all(&app_dir)?;
-
-        let dest = app_dir.join(directory);
-
-        // 如果已存在则先删除（无论是 symlink 还是真实目录）
-        if dest.exists() || Self::is_symlink(&dest) {
-            Self::remove_path(&dest)?;
-        }
-
-        let sync_method = Self::get_sync_method();
-
-        match sync_method {
-            SyncMethod::Auto => {
-                // 优先尝试 symlink
-                match Self::create_symlink(&source, &dest) {
-                    Ok(()) => {
-                        log::debug!("Skill {directory} 已通过 symlink 同步到 {app:?}");
-                        return Ok(());
-                    }
-                    Err(err) => {
-                        log::warn!(
-                            "Symlink 创建失败，将回退到文件复制: {} -> {}. 错误: {err:#}",
-                            source.display(),
-                            dest.display()
-                        );
-                    }
-                }
-                // Fallback 到 copy
-                Self::copy_dir_recursive(&source, &dest)?;
-                log::debug!("Skill {directory} 已通过复制同步到 {app:?}");
-            }
-            SyncMethod::Symlink => {
-                Self::create_symlink(&source, &dest)?;
-                log::debug!("Skill {directory} 已通过 symlink 同步到 {app:?}");
-            }
-            SyncMethod::Copy => {
-                Self::copy_dir_recursive(&source, &dest)?;
-                log::debug!("Skill {directory} 已通过复制同步到 {app:?}");
-            }
-        }
-
-        Ok(())
+        let _ = (directory, app);
+        Err(anyhow!("library.previewRequired"))
     }
 
     /// 复制 Skill 到应用目录（保留用于向后兼容）
@@ -1632,104 +890,16 @@ impl SkillService {
         Self::sync_to_app_dir(directory, app)
     }
 
-    /// 删除路径（支持 symlink 和真实目录）
-    fn remove_path(path: &Path) -> Result<()> {
-        if Self::is_symlink(path) {
-            // 符号链接：仅删除链接本身，不影响源文件
-            #[cfg(unix)]
-            fs::remove_file(path)?;
-            #[cfg(windows)]
-            fs::remove_dir(path)?; // Windows 的目录 symlink 需要用 remove_dir
-        } else if path.is_dir() {
-            // 真实目录：递归删除
-            fs::remove_dir_all(path)?;
-        } else if path.exists() {
-            // 普通文件
-            fs::remove_file(path)?;
-        }
-        Ok(())
-    }
-
-    /// 判断路径是否为指向 SSOT 目录内的符号链接。
-    fn is_symlink_to_ssot(path: &Path, ssot_dir: &Path) -> bool {
-        if !Self::is_symlink(path) {
-            return false;
-        }
-
-        let Ok(target) = fs::read_link(path) else {
-            return false;
-        };
-
-        if target.is_absolute() && target.starts_with(ssot_dir) {
-            return true;
-        }
-
-        let resolved = path
-            .parent()
-            .map(|parent| parent.join(&target))
-            .unwrap_or(target.clone());
-
-        let canonical_ssot = ssot_dir
-            .canonicalize()
-            .unwrap_or_else(|_| ssot_dir.to_path_buf());
-        let canonical_target = resolved.canonicalize().unwrap_or(resolved);
-
-        canonical_target.starts_with(&canonical_ssot)
-    }
-
     /// 从应用目录删除 Skill（支持 symlink 和真实目录）
     pub fn remove_from_app(directory: &str, app: &AppType) -> Result<()> {
-        let app_dir = Self::get_app_skills_dir(app)?;
-        let skill_path = app_dir.join(directory);
-
-        if skill_path.exists() || Self::is_symlink(&skill_path) {
-            Self::remove_path(&skill_path)?;
-            log::debug!("Skill {directory} 已从 {app:?} 删除");
-        }
-
-        Ok(())
+        let _ = (directory, app);
+        Err(anyhow!("library.previewRequired"))
     }
 
     /// 同步所有已启用的 Skills 到指定应用
     pub fn sync_to_app(db: &Arc<Database>, app: &AppType) -> Result<()> {
-        let skills = db.get_all_installed_skills()?;
-        let ssot_dir = Self::get_ssot_dir()?;
-        let app_dir = Self::get_app_skills_dir(app)?;
-
-        let indexed_skills: HashMap<String, &InstalledSkill> = skills
-            .values()
-            .map(|skill| (skill.directory.to_lowercase(), skill))
-            .collect();
-
-        if app_dir.exists() {
-            for entry in fs::read_dir(&app_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                let dir_name = entry.file_name().to_string_lossy().to_string();
-
-                if dir_name.starts_with('.') {
-                    continue;
-                }
-
-                if let Some(skill) = indexed_skills.get(&dir_name.to_lowercase()) {
-                    if !skill.apps.is_enabled_for(app) {
-                        Self::remove_path(&path)?;
-                    }
-                    continue;
-                }
-
-                if Self::is_symlink_to_ssot(&path, &ssot_dir) {
-                    Self::remove_path(&path)?;
-                }
-            }
-        }
-
-        for skill in skills.values() {
-            if skill.apps.is_enabled_for(app) {
-                Self::sync_to_app_dir(&skill.directory, app)?;
-            }
-        }
-
+        let _ = app;
+        db.library_snapshot()?;
         Ok(())
     }
 
@@ -1851,12 +1021,15 @@ impl SkillService {
                 })??;
 
         let mut skills = Vec::new();
-        let scan_dir = temp_dir.clone();
+        let scan_dir = temp_dir.path();
         let mut resolved_repo = repo.clone();
         resolved_repo.branch = resolved_branch;
-        self.scan_dir_recursive(&scan_dir, &scan_dir, &resolved_repo, &mut skills)?;
+        self.scan_dir_recursive(scan_dir, scan_dir, &resolved_repo, &mut skills)?;
+        for skill in &mut skills {
+            skill.repo_branch = repo.branch.clone();
+        }
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        // TempDir removes unpublished files on every exit.
 
         Ok(skills)
     }
@@ -1964,7 +1137,10 @@ impl SkillService {
     }
 
     /// 从 SKILL.md 读取名称和描述，不存在则用目录名兜底
-    fn read_skill_name_desc(skill_md: &Path, fallback_name: &str) -> (String, Option<String>) {
+    pub(crate) fn read_skill_name_desc(
+        skill_md: &Path,
+        fallback_name: &str,
+    ) -> (String, Option<String>) {
         if skill_md.exists() {
             match Self::parse_skill_metadata_static(skill_md) {
                 Ok(meta) => (
@@ -2010,62 +1186,37 @@ impl SkillService {
         has_component.then_some(normalized)
     }
 
-    /// 校验并规范化安装目录名（最终落盘目录名，仅单段）
-    fn sanitize_install_name(raw: &str) -> Option<String> {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-
-        let path = Path::new(trimmed);
-        let mut components = path.components();
-        match (components.next(), components.next()) {
-            (Some(Component::Normal(name)), None) => {
-                let normalized = name.to_string_lossy().trim().to_string();
-                if normalized.is_empty()
-                    || normalized == "."
-                    || normalized == ".."
-                    || normalized.starts_with('.')
-                {
-                    None
-                } else {
-                    Some(normalized)
-                }
-            }
-            _ => None,
-        }
-    }
-
     /// 在目录树中查找名称匹配且包含 SKILL.md 的子目录
     ///
     /// 用于 skills.sh 安装回退：API 只返回 skillId（如 "find-skills"），
     /// 但实际文件可能在仓库子目录中（如 "skills/find-skills"）。
-    fn find_skill_dir_by_name(root: &Path, target_name: &str) -> Option<PathBuf> {
-        fn walk(dir: &Path, target: &str, depth: usize) -> Option<PathBuf> {
-            if depth > 3 {
+    fn find_skill_dir_by_name(root: &Path, target_name: &str) -> Option<Vec<PathBuf>> {
+        fn walk(dir: &Path, target: &str, depth: usize, matches: &mut Vec<PathBuf>) -> Option<()> {
+            if depth > 32 {
                 return None;
             }
-            let entries = fs::read_dir(dir).ok()?;
-            for entry in entries.flatten() {
+            for entry in fs::read_dir(dir).ok()? {
+                let entry = entry.ok()?;
                 let path = entry.path();
-                if !path.is_dir() {
+                let metadata = fs::symlink_metadata(&path).ok()?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
                     continue;
                 }
                 let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                if name_str.starts_with('.') {
+                let name = name.to_str()?;
+                if name.starts_with('.') {
                     continue;
                 }
-                if name_str.eq_ignore_ascii_case(target) && path.join("SKILL.md").exists() {
-                    return Some(path);
+                if name.eq_ignore_ascii_case(target) && path.join("SKILL.md").is_file() {
+                    matches.push(path.clone());
                 }
-                if let Some(found) = walk(&path, target, depth + 1) {
-                    return Some(found);
-                }
+                walk(&path, target, depth + 1, matches)?;
             }
-            None
+            Some(())
         }
-        walk(root, target_name, 0)
+        let mut matches = Vec::new();
+        walk(root, target_name, 0, &mut matches)?;
+        Some(matches)
     }
 
     /// 将 discoverable skill 的目录信息重新解析为解压目录中的真实源目录。
@@ -2077,12 +1228,18 @@ impl SkillService {
     fn resolve_skill_source_dir(root: &Path, raw_directory: &str) -> Option<PathBuf> {
         let source_rel = Self::sanitize_skill_source_path(raw_directory)?;
         let direct = root.join(&source_rel);
-        if direct.is_dir() {
+        if direct.is_dir() && direct.join("SKILL.md").is_file() {
             return Some(direct);
         }
-
+        if source_rel.components().count() > 1 {
+            return None;
+        }
         let target_name = source_rel.file_name()?.to_string_lossy().to_string();
-        if let Some(found) = Self::find_skill_dir_by_name(root, &target_name) {
+        let mut candidates = Self::find_skill_dir_by_name(root, &target_name)?;
+        if candidates.len() > 1 {
+            return None;
+        }
+        if let Some(found) = candidates.pop() {
             log::info!(
                 "Skill directory '{}' not found at direct path, using fallback: {}",
                 target_name,
@@ -2118,140 +1275,96 @@ impl SkillService {
         });
     }
 
+    /// Download only a selected immutable skill tree; browsing/discovery keeps its separate path.
+    pub(crate) async fn download_selected_repo(
+        &self,
+        repo: &SkillRepo,
+        directory: &str,
+    ) -> Result<(
+        crate::services::library::skill_artifact::ExtractedDir,
+        String,
+    )> {
+        selected_download::download(repo, directory).await
+    }
+
     /// 下载仓库
-    async fn download_repo(&self, repo: &SkillRepo) -> Result<(PathBuf, String)> {
-        let temp_dir = tempfile::tempdir()?;
-        let temp_path = temp_dir.path().to_path_buf();
-        let _ = temp_dir.keep();
-
-        let mut branches = Vec::new();
-        if !repo.branch.is_empty() && !repo.branch.eq_ignore_ascii_case("HEAD") {
-            branches.push(repo.branch.as_str());
+    pub(crate) async fn download_repo(
+        &self,
+        repo: &SkillRepo,
+    ) -> Result<(
+        crate::services::library::skill_artifact::ExtractedDir,
+        String,
+    )> {
+        if [&repo.owner, &repo.name].iter().any(|part| {
+            part.is_empty()
+                || part.len() > 100
+                || !part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+                || [".", ".."].contains(&part.as_str())
+        }) {
+            return Err(anyhow!("library.skillRepositoryInvalid"));
         }
-        if !branches.contains(&"main") {
-            branches.push("main");
-        }
-        if !branches.contains(&"master") {
-            branches.push("master");
-        }
-
-        let mut last_error = None;
-        for branch in branches {
-            let url = format!(
-                "https://github.com/{}/{}/archive/refs/heads/{}.zip",
-                repo.owner, repo.name, branch
-            );
-
-            match self.download_and_extract(&url, &temp_path).await {
-                Ok(_) => {
-                    return Ok((temp_path, branch.to_string()));
-                }
-                Err(e) => {
-                    last_error = Some(e);
-                    continue;
-                }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("所有分支下载失败")))
-    }
-
-    /// 下载并解压 ZIP
-    async fn download_and_extract(&self, url: &str, dest: &Path) -> Result<()> {
-        let client = crate::proxy::http_client::get();
-        let response = client.get(url).send().await?;
-        if !response.status().is_success() {
-            let status = response.status().as_u16().to_string();
-            return Err(anyhow::anyhow!(format_skill_error(
-                "DOWNLOAD_FAILED",
-                &[("status", &status)],
-                match status.as_str() {
-                    "403" => Some("http403"),
-                    "404" => Some("http404"),
-                    "429" => Some("http429"),
-                    _ => Some("checkNetwork"),
-                },
-            )));
-        }
-
-        let bytes = response.bytes().await?;
-        let cursor = std::io::Cursor::new(bytes);
-        let mut archive = zip::ZipArchive::new(cursor)?;
-
-        let root_name = if !archive.is_empty() {
-            let first_file = archive.by_index(0)?;
-            let name = first_file.name();
-            name.split('/').next().unwrap_or("").to_string()
+        let reference = if repo.branch.trim().is_empty() {
+            "HEAD"
         } else {
-            return Err(anyhow::anyhow!(format_skill_error(
-                "EMPTY_ARCHIVE",
-                &[],
-                Some("checkRepoUrl"),
-            )));
+            repo.branch.as_str()
         };
-
-        // 第一遍：解压普通文件和目录，收集 symlink 条目
-        let mut symlinks: Vec<(PathBuf, String)> = Vec::new();
-
-        for i in 0..archive.len() {
-            let mut file = archive.by_index(i)?;
-            let file_path = file.name().to_string();
-
-            let relative_path =
-                if let Some(stripped) = file_path.strip_prefix(&format!("{root_name}/")) {
-                    stripped
-                } else {
-                    continue;
-                };
-
-            if relative_path.is_empty() {
-                continue;
-            }
-
-            let outpath = dest.join(relative_path);
-
-            if file.is_symlink() {
-                // 读取 symlink 目标路径
-                let mut target = String::new();
-                std::io::Read::read_to_string(&mut file, &mut target)?;
-                symlinks.push((outpath, target.trim().to_string()));
-            } else if file.is_dir() {
-                fs::create_dir_all(&outpath)?;
-            } else {
-                if let Some(parent) = outpath.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                let mut outfile = fs::File::create(&outpath)?;
-                std::io::copy(&mut file, &mut outfile)?;
-            }
+        if reference.len() > 256 || reference.chars().any(char::is_control) {
+            return Err(anyhow!("library.skillRepositoryInvalid"));
         }
-
-        // 第二遍：解析 symlink，将目标内容复制到 symlink 位置
-        Self::resolve_symlinks_in_dir(dest, &symlinks)?;
-
-        Ok(())
-    }
-
-    /// 递归复制目录
-    fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
-        fs::create_dir_all(dest)?;
-
-        for entry in fs::read_dir(src)? {
-            let entry = entry?;
-            let path = entry.path();
-            let dest_path = dest.join(entry.file_name());
-
-            if path.is_dir() {
-                Self::copy_dir_recursive(&path, &dest_path)?;
-            } else {
-                fs::copy(&path, &dest_path)?;
+        let mut api = url::Url::parse("https://api.github.com/")?;
+        api.path_segments_mut()
+            .map_err(|_| anyhow!("library.skillRepositoryInvalid"))?
+            .extend(["repos", &repo.owner, &repo.name, "commits", reference]);
+        let client = crate::proxy::http_client::get();
+        let response = client
+            .get(api)
+            .header("User-Agent", "ofox-desktop")
+            .send()
+            .await?
+            .error_for_status()?;
+        let commit: serde_json::Value = response.json().await?;
+        let sha = commit
+            .get("sha")
+            .and_then(serde_json::Value::as_str)
+            .filter(|sha| sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .ok_or_else(|| anyhow!("library.skillRepositoryInvalid"))?
+            .to_string();
+        let mut archive = url::Url::parse("https://github.com/")?;
+        archive
+            .path_segments_mut()
+            .map_err(|_| anyhow!("library.skillRepositoryInvalid"))?
+            .extend([
+                repo.owner.as_str(),
+                repo.name.as_str(),
+                "archive",
+                &format!("{sha}.zip"),
+            ]);
+        let mut response = client.get(archive).send().await?.error_for_status()?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if bytes.len().saturating_add(chunk.len()) as u64
+                > crate::services::library::skill_artifact::MAX_BYTES
+            {
+                return Err(anyhow!("library.skillTooLarge"));
             }
+            bytes.extend_from_slice(&chunk);
         }
-
-        Ok(())
+        Ok((
+            crate::services::library::skill_artifact::extract_zip(&bytes, true)?,
+            sha,
+        ))
     }
 
     fn resolve_uninstall_backup_source(skill: &InstalledSkill) -> Result<Option<PathBuf>> {
+        crate::services::library::skill_artifact::safe_leaf(&skill.directory)?;
+        if let Some(hash) = &skill.content_hash {
+            let path = crate::services::library::skill_artifact::path(hash)?;
+            if path.is_dir() {
+                return Ok(Some(path));
+            }
+        }
         let ssot_path = Self::get_ssot_dir()?.join(&skill.directory);
         if ssot_path.is_dir() {
             return Ok(Some(ssot_path));
@@ -2297,6 +1410,11 @@ impl SkillService {
                 if !metadata.is_dir() {
                     return None;
                 }
+                // A folder taken back from an agent is the only copy left.
+                if Self::read_backup_metadata(&entry.path()).is_ok_and(|meta| meta.origin.is_some())
+                {
+                    return None;
+                }
                 Some((entry.path(), metadata.modified().ok()))
             })
             .collect::<Vec<_>>();
@@ -2335,6 +1453,64 @@ impl SkillService {
             .with_context(|| format!("failed to parse {}", metadata_path.display()))
     }
 
+    /// Move a skill folder out of an agent into the backups, where it is listed
+    /// for restore and never pruned. Its metadata is written first, so a
+    /// half-done move still shows up.
+    pub(crate) fn archive_native_entry(
+        source: &Path,
+        directory: &str,
+        origin: &str,
+    ) -> Result<PathBuf> {
+        let backup_root = Self::get_backup_dir()?;
+        let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
+        let slug = Self::sanitize_backup_segment(directory);
+        let mut backup_path = backup_root.join(format!("{timestamp}_{slug}_native"));
+        let mut counter = 1;
+        while backup_path.exists() {
+            backup_path = backup_root.join(format!("{timestamp}_{slug}_native_{counter}"));
+            counter += 1;
+        }
+        fs::create_dir_all(&backup_path)
+            .with_context(|| format!("failed to create {}", backup_path.display()))?;
+        let (name, description) = Self::read_skill_name_desc(&source.join("SKILL.md"), directory);
+        let now = Utc::now().timestamp();
+        let metadata = SkillBackupMetadata {
+            skill: InstalledSkill {
+                id: format!("native:{}", uuid::Uuid::new_v4()),
+                name,
+                description,
+                directory: directory.to_string(),
+                repo_owner: None,
+                repo_name: None,
+                repo_branch: None,
+                readme_url: None,
+                apps: SkillApps::default(),
+                installed_at: now,
+                content_hash: None,
+                updated_at: now,
+            },
+            backup_created_at: now,
+            source_path: source.to_string_lossy().to_string(),
+            execution: None,
+            origin: Some(origin.to_string()),
+        };
+        let metadata_json = serde_json::to_string_pretty(&metadata)
+            .context("failed to serialize skill backup metadata")?;
+        crate::config::atomic_write(&backup_path.join("meta.json"), metadata_json.as_bytes())
+            .with_context(|| format!("failed to write {}", backup_path.display()))?;
+        let dest = backup_path.join("skill");
+        if fs::rename(source, &dest).is_err() {
+            crate::services::library::skill_artifact::copy_verified(source, &dest)?;
+            fs::remove_dir_all(source)
+                .with_context(|| format!("failed to remove {}", source.display()))?;
+        }
+        log::info!(
+            "Skill 文件夹已移出 Agent 并备份到 {}",
+            backup_path.display()
+        );
+        Ok(backup_path)
+    }
+
     fn create_uninstall_backup(skill: &InstalledSkill) -> Result<Option<PathBuf>> {
         let Some(source_path) = Self::resolve_uninstall_backup_source(skill)? else {
             log::warn!(
@@ -2356,17 +1532,26 @@ impl SkillService {
 
         let write_backup = || -> Result<()> {
             let skill_backup_dir = backup_path.join("skill");
-            Self::copy_dir_recursive(&source_path, &skill_backup_dir)?;
+            crate::services::library::skill_artifact::copy_verified(
+                &source_path,
+                &skill_backup_dir,
+            )?;
 
             let metadata = SkillBackupMetadata {
                 skill: skill.clone(),
                 backup_created_at: Utc::now().timestamp(),
                 source_path: source_path.to_string_lossy().to_string(),
+                execution: skill
+                    .content_hash
+                    .as_deref()
+                    .map(crate::services::library::skill_artifact::manifest)
+                    .transpose()?,
+                origin: None,
             };
             let metadata_path = backup_path.join("meta.json");
             let metadata_json = serde_json::to_string_pretty(&metadata)
                 .context("failed to serialize skill backup metadata")?;
-            fs::write(&metadata_path, metadata_json)
+            crate::config::atomic_write(&metadata_path, metadata_json.as_bytes())
                 .with_context(|| format!("failed to write {}", metadata_path.display()))?;
             Ok(())
         };
@@ -2389,58 +1574,6 @@ impl SkillService {
         Ok(Some(backup_path))
     }
 
-    /// 解析 ZIP 中的符号链接：将目标内容复制到 symlink 位置
-    ///
-    /// GitHub ZIP 归档保留了 symlink 元数据，解压时可通过 `is_symlink()` 检测。
-    /// 此方法将 symlink 解析为实际文件/目录内容（而非创建真实 symlink），
-    /// 以确保跨平台兼容且 skill 内容自包含。
-    fn resolve_symlinks_in_dir(base_dir: &Path, symlinks: &[(PathBuf, String)]) -> Result<()> {
-        // 规范化 base_dir（macOS 上 /tmp → /private/tmp，需保持一致）
-        let canonical_base = base_dir
-            .canonicalize()
-            .unwrap_or_else(|_| base_dir.to_path_buf());
-
-        for (link_path, target) in symlinks {
-            // 计算 symlink 的父目录，然后拼接目标的相对路径
-            let parent = link_path.parent().unwrap_or(base_dir);
-            let resolved = parent.join(target);
-
-            // 规范化路径（解析 .. 等）
-            let resolved = match resolved.canonicalize() {
-                Ok(p) => p,
-                Err(_) => {
-                    log::warn!(
-                        "Symlink 目标不存在，跳过: {} -> {}",
-                        link_path.display(),
-                        target
-                    );
-                    continue;
-                }
-            };
-
-            // 安全检查：确保目标在 base_dir 内（防止路径穿越）
-            if !resolved.starts_with(&canonical_base) {
-                log::warn!(
-                    "Symlink 目标超出仓库范围，跳过: {} -> {}",
-                    link_path.display(),
-                    resolved.display()
-                );
-                continue;
-            }
-
-            // 复制目标内容到 symlink 位置
-            if resolved.is_dir() {
-                Self::copy_dir_recursive(&resolved, link_path)?;
-            } else if resolved.is_file() {
-                if let Some(parent) = link_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::copy(&resolved, link_path)?;
-            }
-        }
-        Ok(())
-    }
-
     // ========== 从 ZIP 文件安装 ==========
 
     /// 从本地 ZIP 文件安装 Skills
@@ -2455,193 +1588,79 @@ impl SkillService {
         zip_path: &Path,
         current_app: &AppType,
     ) -> Result<Vec<InstalledSkill>> {
-        // 解压到临时目录
-        let temp_dir = Self::extract_local_zip(zip_path)?;
-
-        // 扫描所有包含 SKILL.md 的目录
-        let skill_dirs = Self::scan_skills_in_dir(&temp_dir)?;
-
-        if skill_dirs.is_empty() {
-            let _ = fs::remove_dir_all(&temp_dir);
-            return Err(anyhow!(format_skill_error(
-                "NO_SKILLS_IN_ZIP",
-                &[],
-                Some("checkZipContent"),
-            )));
+        let _ = current_app;
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        fs::File::open(zip_path)?
+            .take(crate::services::library::skill_artifact::MAX_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        let extracted = crate::services::library::skill_artifact::extract_zip(&bytes, false)?;
+        let dirs = Self::scan_skills_in_dir(extracted.path())?;
+        if dirs.is_empty() {
+            return Err(anyhow!("library.skillDocumentMissing"));
         }
-
-        let ssot_dir = Self::get_ssot_dir()?;
-        let mut installed = Vec::new();
-        let existing_skills = db.get_all_installed_skills()?;
-        let zip_stem = zip_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_string());
-
-        for skill_dir in skill_dirs {
-            // 解析元数据（提前解析，用于确定安装名）
-            let skill_md = skill_dir.join("SKILL.md");
-            let meta = if skill_md.exists() {
-                Self::parse_skill_metadata_static(&skill_md).ok()
+        let mut names = HashSet::new();
+        let mut prepared = Vec::new();
+        for source in dirs {
+            let directory = if source == extracted.path() {
+                zip_path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| anyhow!("library.invalidSkillPath"))?
+                    .to_string()
             } else {
-                None
-            };
-
-            // 获取目录名称作为安装名
-            // 当 SKILL.md 在 ZIP 根目录时，skill_dir == temp_dir，
-            // file_name() 会返回临时目录名（如 .tmpDZKGpF），需要回退到其他来源
-            let install_name = {
-                let dir_name = skill_dir
+                source
                     .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default();
-
-                if skill_dir == temp_dir || dir_name.is_empty() || dir_name.starts_with('.') {
-                    // SKILL.md 在根目录：优先用元数据 name，否则用 ZIP 文件名
-                    meta.as_ref()
-                        .and_then(|m| m.name.as_deref())
-                        .and_then(Self::sanitize_install_name)
-                        .or_else(|| zip_stem.as_deref().and_then(Self::sanitize_install_name))
-                } else {
-                    Self::sanitize_install_name(&dir_name)
-                        .or_else(|| {
-                            meta.as_ref()
-                                .and_then(|m| m.name.as_deref())
-                                .and_then(Self::sanitize_install_name)
-                        })
-                        .or_else(|| zip_stem.as_deref().and_then(Self::sanitize_install_name))
-                }
+                    .and_then(|name| name.to_str())
+                    .ok_or_else(|| anyhow!("library.invalidSkillPath"))?
+                    .to_string()
             };
-            let install_name = match install_name {
-                Some(name) => name,
-                None => {
-                    let _ = fs::remove_dir_all(&temp_dir);
-                    return Err(anyhow!(format_skill_error(
-                        "INVALID_SKILL_DIRECTORY",
-                        &[("zip", &zip_path.display().to_string())],
-                        Some("checkZipContent"),
-                    )));
-                }
-            };
-
-            // 检查是否已有同名 directory 的 skill
-            let conflict = existing_skills
+            crate::services::library::skill_artifact::safe_leaf(&directory)?;
+            if !names.insert(directory.to_lowercase()) {
+                return Err(anyhow!("library.skillPathCollision"));
+            }
+            Self::compute_dir_hash(&source)?;
+            let (name, description) =
+                Self::read_skill_name_desc(&source.join("SKILL.md"), &directory);
+            prepared.push((
+                InstalledSkill {
+                    id: format!("local:{directory}"),
+                    name,
+                    description,
+                    directory,
+                    repo_owner: None,
+                    repo_name: None,
+                    repo_branch: None,
+                    readme_url: None,
+                    apps: SkillApps::default(),
+                    installed_at: Utc::now().timestamp(),
+                    content_hash: None,
+                    updated_at: 0,
+                },
+                source,
+            ));
+        }
+        let existing = db.get_all_installed_skills()?;
+        if prepared.iter().any(|(skill, _)| {
+            existing
                 .values()
-                .find(|s| s.directory.eq_ignore_ascii_case(&install_name));
-
-            if let Some(existing) = conflict {
-                log::warn!(
-                    "Skill directory '{}' already exists (from {}), skipping",
-                    install_name,
-                    existing.id
-                );
-                continue;
-            }
-
-            let (name, description) = match meta {
-                Some(m) => (
-                    m.name.unwrap_or_else(|| install_name.clone()),
-                    m.description,
-                ),
-                None => (install_name.clone(), None),
-            };
-
-            // 复制到 SSOT
-            let dest = ssot_dir.join(&install_name);
-            if dest.exists() {
-                let _ = fs::remove_dir_all(&dest);
-            }
-            Self::copy_dir_recursive(&skill_dir, &dest)?;
-
-            // 计算内容哈希
-            let content_hash = Self::compute_dir_hash(&dest).ok();
-
-            // 创建 InstalledSkill 记录
-            let skill = InstalledSkill {
-                id: format!("local:{install_name}"),
-                name,
-                description,
-                directory: install_name.clone(),
-                repo_owner: None,
-                repo_name: None,
-                repo_branch: None,
-                readme_url: None,
-                apps: SkillApps::only(current_app),
-                installed_at: chrono::Utc::now().timestamp(),
-                content_hash,
-                updated_at: 0,
-            };
-
-            // 保存到数据库
-            db.save_skill(&skill)?;
-
-            // 同步到当前应用目录
-            Self::sync_to_app_dir(&install_name, current_app)?;
-
-            log::info!(
-                "Skill {} installed from ZIP, enabled for {:?}",
-                skill.name,
-                current_app
+                .any(|row| row.directory.eq_ignore_ascii_case(&skill.directory))
+        }) {
+            return Err(anyhow!("library.skillNameConflict"));
+        }
+        let mut imported = Vec::new();
+        for (skill, source) in prepared {
+            imported.push(
+                crate::services::library::skill_resource::save_draft_with_execution(
+                    db,
+                    skill,
+                    &source,
+                    None,
+                    Some(&extracted.execution_for(&source)?),
+                )?,
             );
-            installed.push(skill);
         }
-
-        // 清理临时目录
-        let _ = fs::remove_dir_all(&temp_dir);
-
-        Ok(installed)
-    }
-
-    /// 解压本地 ZIP 文件到临时目录
-    fn extract_local_zip(zip_path: &Path) -> Result<PathBuf> {
-        let file = fs::File::open(zip_path)
-            .with_context(|| format!("Failed to open ZIP file: {}", zip_path.display()))?;
-
-        let mut archive = zip::ZipArchive::new(file)
-            .with_context(|| format!("Failed to read ZIP file: {}", zip_path.display()))?;
-
-        if archive.is_empty() {
-            return Err(anyhow!(format_skill_error(
-                "EMPTY_ARCHIVE",
-                &[],
-                Some("checkZipContent"),
-            )));
-        }
-
-        let temp_dir = tempfile::tempdir()?;
-        let temp_path = temp_dir.path().to_path_buf();
-        let _ = temp_dir.keep(); // Keep the directory, we'll clean up later
-
-        let mut symlinks: Vec<(PathBuf, String)> = Vec::new();
-
-        for i in 0..archive.len() {
-            let mut file = archive.by_index(i)?;
-            let file_path = match file.enclosed_name() {
-                Some(path) => path.to_owned(),
-                None => continue,
-            };
-
-            let outpath = temp_path.join(&file_path);
-
-            if file.is_symlink() {
-                let mut target = String::new();
-                std::io::Read::read_to_string(&mut file, &mut target)?;
-                symlinks.push((outpath, target.trim().to_string()));
-            } else if file.is_dir() {
-                fs::create_dir_all(&outpath)?;
-            } else {
-                if let Some(parent) = outpath.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                let mut outfile = fs::File::create(&outpath)?;
-                std::io::copy(&mut file, &mut outfile)?;
-            }
-        }
-
-        // 解析 symlink
-        Self::resolve_symlinks_in_dir(&temp_path, &symlinks)?;
-
-        Ok(temp_path)
+        Ok(imported)
     }
 
     /// 递归扫描目录查找包含 SKILL.md 的技能目录
@@ -2777,203 +1796,468 @@ impl SkillService {
 /// 从 lock 文件信息构建 skill 的 ID、仓库字段和 readme URL
 ///
 /// 返回 (id, repo_owner, repo_name, repo_branch, readme_url)
-fn build_repo_info_from_lock(
-    lock: &HashMap<String, LockRepoInfo>,
-    dir_name: &str,
-) -> (
-    String,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-) {
-    match lock.get(dir_name) {
-        Some(info) => {
-            let branch = info.branch.clone();
-            let url_branch = branch.clone().unwrap_or_else(|| "HEAD".to_string());
-            // 优先使用 lock 文件中的 skillPath，否则回退到 dir_name/SKILL.md
-            let fallback = format!("{dir_name}/SKILL.md");
-            let doc_path = info.skill_path.as_deref().unwrap_or(&fallback);
-            let url = Some(SkillService::build_skill_doc_url(
-                &info.owner,
-                &info.repo,
-                &url_branch,
-                doc_path,
-            ));
-            (
-                format!("{}/{}:{dir_name}", info.owner, info.repo),
-                Some(info.owner.clone()),
-                Some(info.repo.clone()),
-                branch,
-                url,
-            )
-        }
-        None => (format!("local:{dir_name}"), None, None, None, None),
-    }
-}
-
-/// 将 lock 文件中发现的仓库保存到 skill_repos（去重）
-fn save_repos_from_lock(
-    db: &Arc<Database>,
-    lock: &HashMap<String, LockRepoInfo>,
-    directories: impl Iterator<Item = impl AsRef<str>>,
-) {
-    let existing_repos: HashSet<(String, String)> = db
-        .get_skill_repos()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|r| (r.owner, r.name))
-        .collect();
-    let mut added = HashSet::new();
-
-    for dir_name in directories {
-        if let Some(info) = lock.get(dir_name.as_ref()) {
-            let key = (info.owner.clone(), info.repo.clone());
-            if !existing_repos.contains(&key) && added.insert(key) {
-                let skill_repo = SkillRepo {
-                    owner: info.owner.clone(),
-                    name: info.repo.clone(),
-                    // 未知分支时使用 HEAD 语义，后续下载会回退到 main/master。
-                    branch: info.branch.clone().unwrap_or_else(|| "HEAD".to_string()),
-                    enabled: true,
-                };
-                if let Err(e) = db.save_skill_repo(&skill_repo) {
-                    log::warn!("保存 skill 仓库 {}/{} 失败: {}", info.owner, info.repo, e);
-                } else {
-                    log::info!(
-                        "从 agents lock 文件发现并添加仓库: {}/{} ({})",
-                        info.owner,
-                        info.repo,
-                        skill_repo.branch
-                    );
-                }
-            }
-        }
-    }
-}
-
-/// 首次启动迁移：扫描应用目录，重建数据库
 pub fn migrate_skills_to_ssot(db: &Arc<Database>) -> Result<usize> {
-    let ssot_dir = SkillService::get_ssot_dir()?;
-    let agents_lock = parse_agents_lock();
-    let snapshot: Vec<LegacySkillMigrationRow> =
-        match db.get_setting("skills_ssot_migration_snapshot")? {
-            Some(value) if !value.trim().is_empty() => match serde_json::from_str(&value) {
-                Ok(rows) => rows,
-                Err(err) => {
-                    log::warn!("解析 skills 迁移快照失败，将回退到文件系统扫描: {err}");
-                    Vec::new()
-                }
-            },
-            _ => Vec::new(),
-        };
-
-    let has_snapshot = !snapshot.is_empty();
-    let mut discovered: HashMap<String, SkillApps> = HashMap::new();
-
-    if has_snapshot {
-        for row in &snapshot {
-            if let Ok(app) = row.app_type.parse::<AppType>() {
-                discovered
-                    .entry(row.directory.clone())
-                    .or_default()
-                    .set_enabled_for(&app, true);
-            }
-        }
-    }
-
-    // 扫描各应用目录
-    for app in AppType::all() {
-        let app_dir = match SkillService::get_app_skills_dir(&app) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-
-        let entries = match fs::read_dir(&app_dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-
-            let dir_name = entry.file_name().to_string_lossy().to_string();
-            if dir_name.starts_with('.') {
-                continue;
-            }
-            if !path.join("SKILL.md").exists() {
-                continue;
-            }
-            if has_snapshot && !discovered.contains_key(&dir_name) {
-                continue;
-            }
-
-            // 复制到 SSOT（如果不存在）
-            let ssot_path = ssot_dir.join(&dir_name);
-            if !ssot_path.exists() {
-                SkillService::copy_dir_recursive(&path, &ssot_path)?;
-            }
-
-            if !has_snapshot {
-                discovered
-                    .entry(dir_name)
-                    .or_default()
-                    .set_enabled_for(&app, true);
-            }
-        }
-    }
-
-    // 重建数据库
-    db.clear_skills()?;
-
-    // 将 lock 文件中发现的仓库保存到 skill_repos
-    save_repos_from_lock(db, &agents_lock, discovered.keys());
-
-    let mut count = 0;
-    for (directory, apps) in discovered {
-        let ssot_path = ssot_dir.join(&directory);
-        let skill_md = ssot_path.join("SKILL.md");
-
-        let (name, description) = SkillService::read_skill_name_desc(&skill_md, &directory);
-
-        let (id, repo_owner, repo_name, repo_branch, readme_url) =
-            build_repo_info_from_lock(&agents_lock, &directory);
-
-        let content_hash = SkillService::compute_dir_hash(&ssot_path).ok();
-
-        let skill = InstalledSkill {
-            id,
-            name,
-            description,
-            directory,
-            repo_owner,
-            repo_name,
-            repo_branch,
-            readme_url,
-            apps,
-            installed_at: chrono::Utc::now().timestamp(),
-            content_hash,
-            updated_at: 0,
-        };
-
-        db.save_skill(&skill)?;
-        count += 1;
-    }
-
-    let _ = db.set_setting("skills_ssot_migration_snapshot", "");
-
-    log::info!("Skills 迁移完成，共 {count} 个");
-
-    Ok(count)
+    db.library_snapshot()?;
+    // Old enablement snapshots cannot establish ownership. Import is explicit.
+    Ok(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn folders_taken_back_from_agents_outlive_backup_pruning() {
+        let sandbox = crate::test_sandbox::sandbox();
+        let folder = sandbox.home().join("agent-skill");
+        fs::create_dir_all(&folder).unwrap();
+        fs::write(folder.join("SKILL.md"), "---\nname: kept\n---\nbody").unwrap();
+        let archived =
+            SkillService::archive_native_entry(&folder, "agent-skill", "nativeRemove").unwrap();
+        assert!(!folder.exists());
+        assert!(archived.join("skill/SKILL.md").exists());
+        let root = SkillService::get_backup_dir().unwrap();
+        for index in 0..(SKILL_BACKUP_RETAIN_COUNT + 5) {
+            fs::create_dir_all(root.join(format!("old_{index:02}"))).unwrap();
+        }
+        SkillService::cleanup_old_skill_backups(&root).unwrap();
+        assert!(archived.exists());
+        let listed = SkillService::list_backups().unwrap();
+        assert!(listed.iter().any(|entry| entry.skill.name == "kept"));
+    }
     use tempfile::tempdir;
+
+    fn epoch_collection_recipe() -> DiscoverableSkill {
+        DiscoverableSkill {
+            key: "fixture/skills:skills/epoch-guard".into(),
+            name: "Epoch guard".into(),
+            description: "Local fixture".into(),
+            directory: "skills/epoch-guard".into(),
+            readme_url: None,
+            repo_owner: "fixture".into(),
+            repo_name: "skills".into(),
+            repo_branch: "main".into(),
+        }
+    }
+    fn epoch_collection_download() -> crate::services::library::skill_artifact::ExtractedDir {
+        use std::io::{Cursor, Write};
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        zip.start_file(
+            "skills/epoch-guard/SKILL.md",
+            zip::write::SimpleFileOptions::default().unix_permissions(0o644),
+        )
+        .unwrap();
+        zip.write_all(b"---\nname: epoch-guard\ndescription: Sandbox\n---\nSynthetic fixture")
+            .unwrap();
+        crate::services::library::skill_artifact::extract_zip(
+            &zip.finish().unwrap().into_inner(),
+            false,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn skill_collection_epoch_change_while_downloading_cannot_create_a_draft() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Arc::new(Database::memory().unwrap());
+        let original = db.library_snapshot().unwrap();
+        let download = epoch_collection_download();
+        let source = download.path().join("skills/epoch-guard");
+        let hash = crate::services::library::skill_artifact::tree_hash(&source).unwrap();
+        let artifact = crate::services::library::skill_artifact::path(&hash).unwrap();
+        assert!(!artifact.exists());
+        let service = SkillService::new();
+        let result = service
+            .install_with_download(
+                &db,
+                &epoch_collection_recipe(),
+                &AppType::Claude,
+                Some(original.machine.epoch),
+                |_, _| async {
+                    let current = db.library_snapshot().unwrap();
+                    let mut restored = current.clone();
+                    restored.machine.epoch += 1;
+                    db.library_commit(&current, &restored).unwrap();
+                    Ok((download, "a".repeat(40)))
+                },
+            )
+            .await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("library.epochChanged"));
+        assert!(db.get_all_installed_skills().unwrap().is_empty());
+        let after = db.library_snapshot().unwrap();
+        assert!(after.definitions.skills.is_empty());
+        assert!(after.machine.assignments.is_empty());
+        assert!(after.machine.receipts.is_empty());
+        assert_eq!(after.machine.epoch, original.machine.epoch + 1);
+        assert!(
+            !artifact.exists(),
+            "staleness was known before immutable publication"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn skill_collection_stale_expected_epoch_never_starts_download() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Arc::new(Database::memory().unwrap());
+        let before = db.library_snapshot().unwrap();
+        let mut restored = before.clone();
+        restored.machine.epoch += 1;
+        let restored = db.library_commit(&before, &restored).unwrap();
+        let writes_before: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT total_changes()", [], |row| row.get(0))
+            .unwrap();
+        let called = std::cell::Cell::new(false);
+        let result = SkillService::new()
+            .install_with_download(
+                &db,
+                &epoch_collection_recipe(),
+                &AppType::Claude,
+                Some(before.machine.epoch),
+                |_, _| async {
+                    called.set(true);
+                    Err(anyhow!("unexpected fixture download"))
+                },
+            )
+            .await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("library.epochChanged"));
+        assert!(!called.get());
+        assert_eq!(db.library_snapshot().unwrap(), restored);
+        let writes_after: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT total_changes()", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            writes_after, writes_before,
+            "a stale intent cannot write metadata"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn skill_collection_strict_duplicate_is_not_reused_by_its_old_key() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Arc::new(Database::memory().unwrap());
+        let recipe = epoch_collection_recipe();
+        let service = SkillService::new();
+        let saved = service
+            .install_with_download(&db, &recipe, &AppType::Claude, Some(0), |_, _| async {
+                Ok((epoch_collection_download(), "a".repeat(40)))
+            })
+            .await
+            .unwrap();
+        assert!(saved.apps == SkillApps::default());
+        assert!(saved.readme_url.as_ref().unwrap().contains(&"a".repeat(40)));
+        let before = db.library_snapshot().unwrap();
+        let called = std::cell::Cell::new(false);
+        let strict = service
+            .install_with_download(
+                &db,
+                &recipe,
+                &AppType::Claude,
+                Some(before.machine.epoch),
+                |_, _| async {
+                    called.set(true);
+                    Err(anyhow!("unexpected fixture download"))
+                },
+            )
+            .await;
+        assert!(strict
+            .unwrap_err()
+            .to_string()
+            .contains("library.skillNameConflict"));
+        assert!(!called.get());
+        assert_eq!(db.library_snapshot().unwrap(), before);
+        let legacy = service
+            .install_with_download(&db, &recipe, &AppType::Claude, None, |_, _| async {
+                called.set(true);
+                Err(anyhow!("unexpected fixture download"))
+            })
+            .await
+            .unwrap();
+        assert_eq!(legacy.id, saved.id);
+        assert!(!called.get());
+        assert_eq!(db.library_snapshot().unwrap(), before);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn old_enabled_flags_are_not_reported_as_applied_skills() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Arc::new(crate::Database::memory().unwrap());
+        let row = InstalledSkill {
+            id: "local:fixture".into(),
+            name: "Fixture".into(),
+            description: None,
+            directory: "fixture".into(),
+            repo_owner: None,
+            repo_name: None,
+            repo_branch: None,
+            readme_url: None,
+            apps: SkillApps {
+                claude: true,
+                ..Default::default()
+            },
+            installed_at: 0,
+            content_hash: None,
+            updated_at: 0,
+        };
+        db.save_skill(&row).unwrap();
+        let listed = SkillService::get_all_installed(&db).unwrap();
+        assert!(!listed[0].apps.claude);
+        assert!(db.library_snapshot().unwrap().machine.receipts.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_modified_definition_is_not_projected_as_an_applied_native_skill() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let source = tempdir().unwrap();
+        write_skill(source.path(), "Fixture");
+        let db = Arc::new(crate::Database::memory().unwrap());
+        let row = InstalledSkill {
+            id: "local:fixture".into(),
+            name: "Fixture".into(),
+            description: None,
+            directory: "fixture".into(),
+            repo_owner: None,
+            repo_name: None,
+            repo_branch: None,
+            readme_url: None,
+            apps: Default::default(),
+            installed_at: 0,
+            content_hash: None,
+            updated_at: 0,
+        };
+        let mut row =
+            crate::services::library::skill_resource::save_draft(&db, row, source.path(), None)
+                .unwrap();
+        let op = crate::services::library::skill_resource::preview(&db, &row.id, &["codex".into()])
+            .unwrap();
+        crate::services::library::apply_operation(&db, &op.id).unwrap();
+        assert!(SkillService::get_all_installed(&db).unwrap()[0].apps.codex);
+        let before = db.library_snapshot().unwrap();
+        row.content_hash = Some("0".repeat(64));
+        db.save_skill(&row).unwrap();
+        assert!(!SkillService::get_all_installed(&db).unwrap()[0].apps.codex);
+        assert_eq!(db.library_snapshot().unwrap(), before);
+    }
+
+    #[test]
+    fn immutable_content_identity_includes_hidden_files() {
+        let dir = tempdir().unwrap();
+        write_skill(dir.path(), "Fixture");
+        fs::write(dir.path().join(".configuration"), "first").unwrap();
+        let before = SkillService::compute_dir_hash(dir.path()).unwrap();
+        fs::write(dir.path().join(".configuration"), "changed").unwrap();
+        assert_ne!(SkillService::compute_dir_hash(dir.path()).unwrap(), before);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn immutable_content_identity_includes_script_execution_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        write_skill(dir.path(), "Fixture");
+        let script = dir.path().join("run.sh");
+        fs::write(&script, "echo example").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o644)).unwrap();
+        let before = SkillService::compute_dir_hash(dir.path()).unwrap();
+        fs::set_permissions(script, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_ne!(before, SkillService::compute_dir_hash(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn a_source_name_fallback_requires_one_candidate() {
+        let dir = tempdir().unwrap();
+        write_skill(dir.path(), "Root");
+        write_skill(&dir.path().join("a/fixture"), "A");
+        write_skill(&dir.path().join("b/fixture"), "B");
+        assert!(SkillService::resolve_skill_source_dir(dir.path(), "fixture").is_none());
+        assert_eq!(
+            SkillService::resolve_skill_source_dir(dir.path(), "a/fixture").unwrap(),
+            dir.path().join("a/fixture")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn literal_backslash_names_are_not_rewritten_into_directories() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let dir = tempdir().unwrap();
+        write_skill(dir.path(), "Fixture");
+        fs::create_dir(dir.path().join("a")).unwrap();
+        fs::write(dir.path().join("a\\b"), "user content").unwrap();
+        assert!(crate::services::library::skill_artifact::publish(dir.path()).is_err());
+        assert!(!crate::services::library::skill_artifact::root().exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn a_legacy_sync_cannot_replace_an_unowned_skill_directory() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let source = SkillService::get_ssot_dir().unwrap().join("fixture");
+        write_skill(&source, "Library");
+        let target = SkillService::get_app_skills_dir(&AppType::Claude)
+            .unwrap()
+            .join("fixture");
+        write_skill(&target, "User");
+        fs::write(target.join("personal"), "keep").unwrap();
+        assert!(SkillService::sync_to_app_dir("fixture", &AppType::Claude).is_err());
+        assert_eq!(fs::read_to_string(target.join("personal")).unwrap(), "keep");
+    }
+
+    fn skill_zip(path: &Path, extra: Option<(&str, &str)>) {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(fs::File::create(path).unwrap());
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("fixture/SKILL.md", options).unwrap();
+        zip.write_all(b"---\nname: fixture\ndescription: Test\n---\nnew draft")
+            .unwrap();
+        if let Some((name, body)) = extra {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn native_import_only_creates_a_draft_and_preserves_the_source() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let source = SkillService::get_app_skills_dir(&AppType::Claude)
+            .unwrap()
+            .join("fixture");
+        write_skill(&source, "User");
+        let before = fs::read(source.join("SKILL.md")).unwrap();
+        let db = Arc::new(Database::memory().unwrap());
+        let rows = SkillService::import_from_apps(
+            &db,
+            vec![ImportSkillSelection {
+                directory: "fixture".into(),
+                apps: SkillApps::only(&AppType::Claude),
+            }],
+        )
+        .unwrap();
+        assert!(rows[0].apps.is_empty());
+        assert_eq!(fs::read(source.join("SKILL.md")).unwrap(), before);
+        assert!(db
+            .library_snapshot()
+            .unwrap()
+            .machine
+            .assignments
+            .is_empty());
+        assert!(!SkillService::get_ssot_dir()
+            .unwrap()
+            .join("fixture")
+            .exists());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn zip_import_does_not_rewrite_a_source_already_visible_to_an_agent() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let source = SkillService::get_ssot_dir().unwrap().join("fixture");
+        write_skill(&source, "Old user content");
+        let before = fs::read(source.join("SKILL.md")).unwrap();
+        let db = Arc::new(Database::memory().unwrap());
+        let tmp = tempdir().unwrap();
+        let zip = tmp.path().join("skills.zip");
+        skill_zip(&zip, None);
+        let result = SkillService::install_from_zip(&db, &zip, &AppType::Claude);
+        assert_eq!(fs::read(source.join("SKILL.md")).unwrap(), before);
+        assert!(result.unwrap()[0].apps.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn an_unsafe_archive_is_rejected_before_any_draft_is_saved() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Arc::new(Database::memory().unwrap());
+        let tmp = tempdir().unwrap();
+        let zip = tmp.path().join("skills.zip");
+        skill_zip(&zip, Some(("../outside", "bad")));
+        assert!(SkillService::install_from_zip(&db, &zip, &AppType::Claude).is_err());
+        assert!(db.get_all_installed_skills().unwrap().is_empty());
+        assert!(!SkillService::get_ssot_dir()
+            .unwrap()
+            .join("fixture")
+            .exists());
+    }
+
+    /// The agents' skills live inside the directory they were told to use.
+    mod app_skills_dir {
+        use super::*;
+        use crate::test_sandbox::sandbox;
+        use serial_test::serial;
+
+        #[test]
+        #[serial]
+        fn the_defaults_are_below_the_home() {
+            let sandbox = sandbox();
+
+            assert_eq!(
+                SkillService::get_app_skills_dir(&AppType::Claude).unwrap(),
+                sandbox.home().join(".claude").join("skills")
+            );
+            assert_eq!(
+                SkillService::get_app_skills_dir(&AppType::Codex).unwrap(),
+                sandbox.home().join(".codex").join("skills")
+            );
+        }
+
+        #[test]
+        #[serial]
+        fn claude_config_dir_and_codex_home_move_the_skills() {
+            let sandbox = sandbox();
+            let claude = sandbox.home().join("data").join("claude-state");
+            let codex = sandbox.home().join("data").join("codex-state");
+            std::env::set_var("CLAUDE_CONFIG_DIR", &claude);
+            std::env::set_var("CODEX_HOME", &codex);
+
+            assert_eq!(
+                SkillService::get_app_skills_dir(&AppType::Claude).unwrap(),
+                claude.join("skills")
+            );
+            assert_eq!(
+                SkillService::get_app_skills_dir(&AppType::Codex).unwrap(),
+                codex.join("skills")
+            );
+        }
+
+        #[test]
+        #[serial]
+        fn a_settings_override_beats_the_environment_variable() {
+            let sandbox = sandbox();
+            let typed = sandbox.home().join("typed-codex");
+            let mut settings = crate::settings::get_settings();
+            settings.codex_config_dir = Some(typed.to_string_lossy().into_owned());
+            crate::settings::update_settings(settings).expect("save the override");
+            std::env::set_var(
+                "CODEX_HOME",
+                sandbox.home().join("data").join("codex-state"),
+            );
+
+            assert_eq!(
+                SkillService::get_app_skills_dir(&AppType::Codex).unwrap(),
+                typed.join("skills")
+            );
+        }
+    }
 
     fn write_skill(dir: &Path, name: &str) {
         fs::create_dir_all(dir).expect("create skill dir");

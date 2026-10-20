@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
@@ -256,13 +257,13 @@ export default function AddToolsDialog({
         newlySelectedIds.includes(id),
       );
       if (newlySucceeded.length > 0) {
-        toast.success(`已绑定 ${newlySucceeded.length} 个工具`);
+        toast.success(t("uiCopy.addBound", { value1: newlySucceeded.length }));
       }
       onAdded(succeeded);
       onOpenChange(false);
     } catch (e) {
       console.error("[AddToolsDialog] bind failed", e);
-      toast.error("绑定失败，请稍后重试");
+      toast.error(t("uiCopy.bindFailed"));
     } finally {
       setSubmitting(false);
     }
@@ -272,16 +273,16 @@ export default function AddToolsDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[calc(100vh-3rem)] w-[calc(100vw-2rem)] overflow-hidden sm:max-w-[560px]">
         <DialogHeader>
-          <DialogTitle>添加工具</DialogTitle>
+          <DialogTitle>{t("uiCopy.addTools")}</DialogTitle>
           <DialogDescription>
             {isScanning
-              ? "正在扫描已安装的 AI 工具…"
+              ? t("uiCopy.scanningInstalled")
               : candidateCount === 0
-                ? "没有可添加的工具——所有已识别的工具都已绑定。"
-                : `检测到 ${candidateCount} 个可绑定的工具，勾选后确认即可接入。`}
+                ? t("uiCopy.allBound")
+                : t("uiCopy.candidates", { value1: candidateCount })}
           </DialogDescription>
           {entries.some((entry) => entry.status === "boundMissing") && (
-            <p className="text-xs text-muted-foreground">
+            <p className="text-xs text-ink-muted">
               {t("toolLifecycle.boundMissingHint")}
             </p>
           )}
@@ -327,34 +328,36 @@ export default function AddToolsDialog({
             // 安装脚本没起来时唯一的用户可见反馈——同 ToolDiscoveryPage。
             <div
               role="alert"
-              className="mt-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300"
+              className="mt-4 rounded-lg border border-danger/30 bg-danger-soft px-3 py-2 text-xs text-danger "
             >
-              安装{" "}
+              {t("uiCopy.install")}{" "}
               {TOOL_META[installError.toolId]?.label ?? installError.toolId}{" "}
-              失败：{installError.message}
+              {t("uiCopy.failed")}
+              {installError.message}
             </div>
           )}
         </div>
 
         <DialogFooter className="bg-background/95 py-4 shadow-[0_-8px_24px_rgba(15,23,42,0.06)] dark:shadow-[0_-8px_24px_rgba(0,0,0,0.24)]">
-          <button
+          <Button
+            variant="secondary"
             onClick={() => onOpenChange(false)}
             disabled={submitting}
-            className="rounded-md px-4 py-2 text-sm text-muted-foreground hover:bg-accent disabled:opacity-50"
+            className="rounded-md px-4 py-2 text-sm text-ink-muted hover:bg-accent disabled:opacity-50"
           >
-            取消
-          </button>
-          <button
+            {t("uiCopy.cancel")}
+          </Button>
+          <Button
             onClick={handleConfirm}
             disabled={selected.length === 0 || submitting || !scanDone}
-            className="rounded-md bg-gradient-to-r from-orange-400 to-orange-500 px-4 py-2 text-sm font-medium text-white shadow-sm hover:from-orange-500 hover:to-orange-600 disabled:opacity-50"
+            variant="primary"
           >
             {submitting
-              ? "正在绑定…"
+              ? t("uiCopy.binding")
               : !scanDone
-                ? "扫描中…"
-                : `确认（${selected.length}）`}
-          </button>
+                ? t("uiCopy.scanning")
+                : t("uiCopy.confirmCount", { value1: selected.length })}
+          </Button>
         </DialogFooter>
         <NodeUpgradeDialog
           prompt={nodePrompt}

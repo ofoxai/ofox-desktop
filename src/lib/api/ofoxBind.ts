@@ -1,6 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export type BindingStatus = "configured" | "missing" | "modified" | "unknown";
+/** `paused`: its Ofox key was stopped at logout; signing in issues a new one. */
+export type BindingStatus =
+  | "configured"
+  | "missing"
+  | "modified"
+  | "unknown"
+  | "paused";
 
 /** Read-only status of the managed files, with paths and safe diagnostics only. */
 export interface ToolBindingStatus {
@@ -41,6 +47,8 @@ export interface UnbindReport {
   exactFiles: string[];
   restoredKeys: string[];
   removedKeys: string[];
+  /** Fields the user changed after binding, left as they are rather than restored (`<file>: <field>`). */
+  keptKeys: string[];
   filesRemoved: string[];
   providerRestoredTo: string | null;
   /** Other tools sharing this config (Codex ⇄ ChatGPT) still use Ofox, so it was kept. */

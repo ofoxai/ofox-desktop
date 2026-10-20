@@ -266,6 +266,18 @@ impl Database {
         .map_err(|e| AppError::Database(e.to_string()))?;
 
         // 17. Usage Daily Rollups 表 (日聚合统计)
+        // Portable model-only recipes; additive like ofox_bind_snapshot.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS model_profiles (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, name_key TEXT NOT NULL UNIQUE,
+                revision TEXT NOT NULL, targets TEXT NOT NULL,
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        // 17. Usage Daily Rollups 表 (日聚合统计)
         conn.execute(
             "CREATE TABLE IF NOT EXISTS usage_daily_rollups (
                 date TEXT NOT NULL,
@@ -297,6 +309,10 @@ impl Database {
             [],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
+
+        // 19. v11 用量归档 / 会话元数据缓存 / 余额采样 / 维护标记
+        Self::create_usage_archive_tables(conn)?;
+        Self::create_request_logs_app_session_index(conn)?;
 
         // 尝试添加 live_takeover_active 列到 proxy_config 表
         let _ = conn.execute(
@@ -441,6 +457,11 @@ impl Database {
                         log::info!("迁移数据库从 v9 到 v10（添加 Hermes Agent 支持）");
                         Self::migrate_v9_to_v10(conn)?;
                         Self::set_user_version(conn, 10)?;
+                    }
+                    10 => {
+                        log::info!("迁移数据库从 v10 到 v11（fresh input tokens + 会话用量归档）");
+                        Self::migrate_v10_to_v11(conn)?;
+                        Self::set_user_version(conn, 11)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1210,6 +1231,109 @@ impl Database {
         Ok(())
     }
 
+    /// v10 -> v11: every source stores fresh input tokens; usage archive tables.
+    ///
+    /// Runs inside the `schema_migration` savepoint (one transaction) after
+    /// `Database::init` took its pre-migration backup.
+    fn migrate_v10_to_v11(conn: &Connection) -> Result<(), AppError> {
+        // Codex and Gemini counted the cached prompt inside input_tokens.
+        if Self::has_columns(
+            conn,
+            "proxy_request_logs",
+            &[
+                "input_tokens",
+                "cache_read_tokens",
+                "data_source",
+                "app_type",
+            ],
+        )? {
+            conn.execute(
+                "UPDATE proxy_request_logs
+                 SET input_tokens = MAX(input_tokens - cache_read_tokens, 0)
+                 WHERE data_source IN ('codex_session', 'gemini_session')
+                    OR (data_source = 'proxy' AND app_type IN ('codex', 'gemini'))",
+                [],
+            )
+            .map_err(|e| AppError::Database(format!("归一化 input_tokens 失败: {e}")))?;
+        }
+        if Self::has_columns(
+            conn,
+            "usage_daily_rollups",
+            &["input_tokens", "cache_read_tokens", "app_type"],
+        )? {
+            conn.execute(
+                "UPDATE usage_daily_rollups
+                 SET input_tokens = MAX(input_tokens - cache_read_tokens, 0)
+                 WHERE app_type IN ('codex', 'gemini')",
+                [],
+            )
+            .map_err(|e| AppError::Database(format!("归一化 rollup input_tokens 失败: {e}")))?;
+        }
+
+        Self::create_usage_archive_tables(conn)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO maintenance_flags (key, value) VALUES
+                ('recompute_claude_costs', 'pending'),
+                ('backfill_session_archive', 'pending')",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("写入 maintenance_flags 失败: {e}")))?;
+        Self::create_request_logs_app_session_index(conn)?;
+
+        log::info!("v10 -> v11 迁移完成：input_tokens 归一化为 fresh input，已添加用量归档表");
+        Ok(())
+    }
+
+    /// Tables added in v11 (also created by `create_tables_on_conn`): per-session
+    /// totals that outlive the 30-day prune, the session metadata cache, balance
+    /// samples and one-shot maintenance flags. The metadata cache and balance
+    /// samples are machine-local; the archive and the flags travel with the
+    /// request logs in exports, imports and restores, and WebDAV sync skips and
+    /// keeps all four (see backup.rs).
+    pub(crate) fn create_usage_archive_tables(conn: &Connection) -> Result<(), AppError> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS session_usage_archive (
+                app_type TEXT, session_id TEXT, model TEXT,
+                input_tokens INTEGER, output_tokens INTEGER,
+                cache_read_tokens INTEGER, cache_creation_tokens INTEGER,
+                request_count INTEGER, cost_usd TEXT,
+                first_at INTEGER, last_at INTEGER,
+                PRIMARY KEY (app_type, session_id, model)
+            );
+            CREATE TABLE IF NOT EXISTS session_meta_cache (
+                source_path TEXT PRIMARY KEY, provider_id TEXT, session_id TEXT,
+                stamp TEXT, parser_version INTEGER, meta_json TEXT, updated_at INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS balance_samples (
+                org_id TEXT, at_ms INTEGER, amount REAL,
+                PRIMARY KEY (org_id, at_ms)
+            );
+            CREATE TABLE IF NOT EXISTS maintenance_flags (
+                key TEXT PRIMARY KEY, value TEXT
+            );",
+        )
+        .map_err(|e| AppError::Database(format!("创建用量归档表失败: {e}")))
+    }
+
+    /// The index behind per-session usage queries; skipped on a legacy
+    /// `proxy_request_logs` that lacks one of its columns.
+    fn create_request_logs_app_session_index(conn: &Connection) -> Result<(), AppError> {
+        if !Self::has_columns(
+            conn,
+            "proxy_request_logs",
+            &["app_type", "session_id", "model"],
+        )? {
+            return Ok(());
+        }
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_request_logs_app_session
+             ON proxy_request_logs(app_type, session_id, model)",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("创建 idx_request_logs_app_session 失败: {e}")))?;
+        Ok(())
+    }
+
     /// 插入默认模型定价数据
     /// 格式: (model_id, display_name, input, output, cache_read, cache_creation)
     /// 注意: model_id 使用短横线格式（如 claude-haiku-4-5），与 API 返回的模型名称标准化后一致
@@ -1933,6 +2057,19 @@ impl Database {
             }
         }
         Ok(false)
+    }
+
+    /// `table` exists and has every one of `columns`.
+    fn has_columns(conn: &Connection, table: &str, columns: &[&str]) -> Result<bool, AppError> {
+        if !Self::table_exists(conn, table)? {
+            return Ok(false);
+        }
+        for column in columns {
+            if !Self::has_column(conn, table, column)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     pub(crate) fn has_column(

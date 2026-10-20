@@ -1,3 +1,4 @@
+mod agent_env;
 mod app_config;
 mod app_store;
 mod auto_launch;
@@ -6,14 +7,17 @@ mod claude_plugin;
 mod codex_config;
 mod commands;
 mod config;
+mod config_io;
 mod database;
 mod deeplink;
 mod error;
 mod gemini_config;
+#[cfg(test)]
 mod gemini_mcp;
 pub mod hermes_config;
 mod init_status;
 mod json5_sections;
+mod lastgood;
 mod lightweight;
 #[cfg(target_os = "linux")]
 mod linux_fix;
@@ -23,6 +27,9 @@ mod ofox_auth;
 // access_token 不再被当 LLM key 写进 ofox-* provider 的 settings_config。
 // 历史实现见 git log。
 mod model_compat;
+mod model_profiles;
+mod model_selection;
+mod native_tools;
 mod ofox_apex;
 mod ofox_api_keys;
 mod ofox_endpoints;
@@ -35,10 +42,15 @@ mod prompt_files;
 mod provider;
 mod provider_defaults;
 mod proxy;
+mod redact;
 mod services;
 mod session_manager;
 mod settings;
 mod store;
+// Shared by the unit tests and (re-exported by tests/support.rs) the integration
+// tests; the app never calls it.
+#[doc(hidden)]
+pub mod test_sandbox;
 
 mod tray;
 mod tray_popover;
@@ -49,23 +61,34 @@ pub use app_config::{AppType, InstalledSkill, McpApps, McpServer, MultiAppConfig
 pub use codex_config::{get_codex_auth_path, get_codex_config_path, write_codex_live_atomic};
 pub use commands::open_provider_terminal;
 pub use commands::*;
-pub use config::{get_claude_mcp_path, get_claude_settings_path, read_json_file};
+pub use config::{get_claude_mcp_path, get_claude_settings_path, read_json_file, AGENT_DIR_VARS};
 pub use database::Database;
 pub use deeplink::{import_provider_from_deeplink, parse_deeplink_url, DeepLinkImportRequest};
 pub use error::AppError;
+pub use gemini_config::get_gemini_settings_path;
 pub use mcp::{
-    import_from_claude, import_from_codex, import_from_gemini, remove_server_from_claude,
-    remove_server_from_codex, remove_server_from_gemini, strip_ignored_type_from_codex_config,
-    sync_enabled_to_claude, sync_enabled_to_codex, sync_enabled_to_gemini,
-    sync_single_server_to_claude, sync_single_server_to_codex, sync_single_server_to_gemini,
+    import_from_claude, import_from_codex, import_from_gemini, import_from_hermes,
+    import_from_opencode, remove_server_from_claude, remove_server_from_codex,
+    remove_server_from_gemini, remove_server_from_hermes, remove_server_from_opencode,
+    strip_ignored_type_from_codex_config, sync_enabled_to_claude, sync_enabled_to_codex,
+    sync_enabled_to_gemini, sync_single_server_to_claude, sync_single_server_to_codex,
+    sync_single_server_to_gemini, sync_single_server_to_hermes, sync_single_server_to_opencode,
 };
 pub use provider::{Provider, ProviderMeta};
+pub use services::library::{
+    apply_operation as apply_resource_operation, delete_mcp_draft, preview_mcp_resource,
+    recover_operation as recover_resource_operation, save_mcp_draft,
+    skill_resource::preview as preview_skills_resource, Operation as ResourceOperation,
+};
 pub use services::{
     skill::{migrate_skills_to_ssot, ImportSkillSelection},
     ConfigService, EndpointLatency, McpService, PromptService, ProviderService, ProxyService,
     SkillService, SpeedtestService,
 };
-pub use settings::{update_settings, AppSettings};
+pub use settings::{
+    reload_settings, reset_unreadable, settings_health, update_settings, AppSettings,
+    SettingsHealth, SettingsHealthState,
+};
 pub use store::AppState;
 use tauri_plugin_deep_link::DeepLinkExt;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -79,32 +102,53 @@ use tauri::{Emitter, Manager};
 
 fn redact_url_for_log(url_str: &str) -> String {
     match url::Url::parse(url_str) {
-        Ok(url) => {
-            let mut output = format!("{}://", url.scheme());
-            if let Some(host) = url.host_str() {
-                output.push_str(host);
-            }
-            output.push_str(url.path());
-
-            let mut keys: Vec<String> = url.query_pairs().map(|(k, _)| k.to_string()).collect();
-            keys.sort();
-            keys.dedup();
-
-            if !keys.is_empty() {
-                output.push_str("?[keys:");
-                output.push_str(&keys.join(","));
-                output.push(']');
-            }
-
-            output
+        Ok(url) if ["ccswitch", "ofoxswitch"].contains(&url.scheme()) => {
+            format!("{}://[redacted]", url.scheme())
         }
-        Err(_) => {
-            let base = url_str.split('#').next().unwrap_or(url_str);
-            match base.split_once('?') {
-                Some((prefix, _)) => format!("{prefix}?[redacted]"),
-                None => base.to_string(),
-            }
+        _ => "[redacted]".into(),
+    }
+}
+
+fn deeplink_error_view(url_str: &str, _error: &crate::AppError) -> serde_json::Value {
+    serde_json::json!({"url":redact_url_for_log(url_str),"error":"deeplink.invalidLink"})
+}
+
+#[cfg(test)]
+mod resource_logging_tests {
+    #[test]
+    fn deeplink_errors_never_export_private_url_or_parser_values() {
+        let value = super::deeplink_error_view(
+            "ccswitch://v1/import?config=private-fixture",
+            &crate::AppError::InvalidInput("invalid private-fixture".into()),
+        );
+        assert!(!value.to_string().contains("private-fixture"));
+        let source = include_str!("lib.rs");
+        let handler = source
+            .rsplit_once("fn handle_deep_link")
+            .unwrap()
+            .1
+            .split("\n    true\n}")
+            .next()
+            .unwrap();
+        assert!(!handler.contains("log::debug!(\"Deep link URL (raw)"));
+        assert!(!source.contains("log::info!(\"RunEvent::Opened with URL: {url_str}\")"));
+        for url in [
+            "private-fixture",
+            "ccswitch://private-fixture/private-fixture?private-fixture=secret",
+        ] {
+            assert!(!super::redact_url_for_log(url).contains("private-fixture"));
         }
+    }
+
+    #[test]
+    fn the_ipc_parser_uses_safe_errors_and_never_logs_raw_links() {
+        let error = crate::commands::parse_deeplink(
+            "ccswitch://v1/private-fixture?apiKey=private-fixture".into(),
+        )
+        .unwrap_err();
+        assert!(!error.contains("private-fixture"));
+        assert!(!include_str!("commands/deeplink.rs")
+            .contains("log::info!(\"Parsing deep link URL: {url}\")"));
     }
 }
 
@@ -130,7 +174,6 @@ fn handle_deeplink_url(
 
     let redacted_url = redact_url_for_log(&normalized);
     log::info!("✓ Deep link URL detected from {source}: {redacted_url}");
-    log::debug!("Deep link URL (raw) from {source}: {url_str}");
 
     match crate::deeplink::parse_deeplink_url(&normalized) {
         Ok(request) => {
@@ -161,15 +204,9 @@ fn handle_deeplink_url(
             }
         }
         Err(e) => {
-            log::error!("✗ Failed to parse deep link URL: {e}");
+            log::error!("✗ Failed to parse deep link URL");
 
-            if let Err(emit_err) = app.emit(
-                "deeplink-error",
-                serde_json::json!({
-                    "url": url_str,
-                    "error": e.to_string()
-                }),
-            ) {
+            if let Err(emit_err) = app.emit("deeplink-error", deeplink_error_view(url_str, &e)) {
                 log::error!("✗ Failed to emit deeplink-error event: {emit_err}");
             }
         }
@@ -327,9 +364,16 @@ pub fn run() {
                         // 单文件大小限制 1GB
                         .max_file_size(1024 * 1024 * 1024)
                         .timezone_strategy(TimezoneStrategy::UseLocal)
+                        // 放在 timezone_strategy 之后（它会重设行格式）：每条日志先脱敏再落盘
+                        .format(redact::log_format)
                         .build(),
                 )?;
             }
+
+            // CODEX_HOME / CLAUDE_CONFIG_DIR as the user's login shell has them: use the
+            // snapshot saved by the last run now and refresh it in the background, or,
+            // on a first launch, ask the shell now (in parallel with the steps below).
+            crate::agent_env::start();
 
             // 初始化数据库
             let app_config_dir = crate::config::get_app_config_dir();
@@ -419,6 +463,15 @@ pub fn run() {
 
             // 设置 AppHandle 用于代理故障转移时的 UI 更新
             app_state.proxy_service.set_app_handle(app.handle().clone());
+
+            // The steps below read Codex / Claude files (skills migration, importing
+            // the live config, relocating legacy bind rows, and the takeover check they
+            // run), and everything after setup relies on the snapshot existing too.
+            // With a snapshot saved by an earlier run this returns at once. Only a first
+            // launch (or one after the saved file is gone) waits for the login shell:
+            // about a second with a typical zsh rc (measured 0.9-1.2 s), at most 5 s,
+            // minus the time DB init above already used while the shell ran in parallel.
+            tauri::async_runtime::block_on(crate::agent_env::ready());
 
             // ============================================================
             // 按表独立判断的导入逻辑（各类数据独立检查，互不影响）
@@ -1037,6 +1090,9 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
 
+                // Everything below reads or writes Codex / Claude files.
+                crate::agent_env::ready().await;
+
                 // 启动自愈：检测 Live 配置里是否有 takeover 占位符残留
                 // （`PROXY_MANAGED` token / `127.0.0.1:port` baseURL）。
                 //
@@ -1064,7 +1120,7 @@ pub fn run() {
 
                 // 旧版本把 Codex 的 Ofox key 写进 auth.json 并要求 OpenAI 认证；用
                 // ChatGPT 登录的用户会把 ChatGPT 令牌发给 Ofox。迁成服务商自带 key。
-                crate::services::ofox_bind::migrate_codex_on_startup().await;
+                crate::services::ofox_bind::migrate_codex_on_startup(&state.db).await;
 
                 // 注：曾经在这里调 `restore_proxy_state_on_startup`——读
                 // `proxy_config.enabled` 然后无脑给所有标 true 的工具重跑
@@ -1169,51 +1225,10 @@ pub fn run() {
                     }
                 });
 
-                // Session log usage sync: 启动时同步一次。**60s 定期 loop 已移除**
-                // —— 主窗口不再展示统计，定时扫描会持续打日志、浪费 IO。
-                // 解析函数 (`session_usage::sync_claude_session_logs` /
-                // `session_usage_codex::sync_codex_usage` /
-                // `session_usage_gemini::sync_gemini_usage`) 保留：UsageDashboard /
-                // tray popover / `sync_session_usage` Tauri 命令仍可主动调，让用户
-                // 在自己想看时按需触发一次新鲜的扫描。
-                let db_for_session_sync = state.db.clone();
-                tauri::async_runtime::spawn(async move {
-                    // Pricing sync 必须先于 session 解析跑：session_usage_*
-                    // 在写入每条 proxy_request_logs 时按 model 查 model_pricing
-                    // 算 total_cost_usd。先 refresh 一次 pricing，新模型才不会
-                    // 落到本月 0 美元的洞里。cooldown 24h 门控避免重启刷屏。
-                    if let Err(e) = crate::services::pricing_sync::sync_pricing_if_needed(
-                        &db_for_session_sync,
-                    )
-                    .await
-                    {
-                        log::warn!("Pricing sync initial tick failed: {e}");
-                    }
-
-                    // 首次同步——给 UsageDashboard / tray 启动时有数据可看，
-                    // 之后再要新数据需要用户主动触发。
-                    if let Err(e) =
-                        crate::services::session_usage::sync_claude_session_logs(
-                            &db_for_session_sync,
-                        )
-                    {
-                        log::warn!("Session usage initial sync failed: {e}");
-                    }
-                    if let Err(e) =
-                        crate::services::session_usage_codex::sync_codex_usage(
-                            &db_for_session_sync,
-                        )
-                    {
-                        log::warn!("Codex usage initial sync failed: {e}");
-                    }
-                    if let Err(e) =
-                        crate::services::session_usage_gemini::sync_gemini_usage(
-                            &db_for_session_sync,
-                        )
-                    {
-                        log::warn!("Gemini usage initial sync failed: {e}");
-                    }
-                });
+                // Usage sync (Claude/Codex/Gemini/OpenCode session logs): once at
+                // startup after the pricing sync, then every 10 minutes; each run
+                // that happens emits `usage-synced`. See services/usage_sync.rs.
+                crate::services::usage_sync::spawn_periodic(app_handle.clone(), state.db.clone());
             });
 
             // Linux: 禁用 WebKitGTK 硬件加速，防止 EGL 初始化失败导致白屏
@@ -1231,7 +1246,7 @@ pub fn run() {
                 }
             }
 
-            // ─── OFox 后台循环：低余额提醒 ─────────────────────────────────
+            // ─── OFox 后台循环：余额采样 + 低余额提醒 ──────────────────────
             //
             // 在 OFox auth 初始化后运行，与 token 静默刷新循环同节奏（30 min 桶）。
             // 设计要点见 services/low_balance.rs 的模块文档。
@@ -1260,15 +1275,27 @@ pub fn run() {
                     loop {
                         ticker.tick().await;
                         let ofox_state = lb_app.state::<OfoxAuthState>();
+                        let db = lb_app.state::<AppState>().db.clone();
                         let now_ms = chrono::Utc::now().timestamp_millis();
-                        let _ = crate::services::low_balance::evaluate_and_notify(
+                        let _ = crate::services::low_balance::run_tick(
                             &lb_app,
                             &ofox_state.0,
+                            &db,
                             now_ms,
                         )
                         .await;
                     }
                 });
+            }
+
+            // settings.json 读不出来（用 .bak 恢复了，或没有可用备份）时告诉前端；
+            // 前端起得比这里晚时再用 get_settings_health 主动取一次。
+            let health = crate::settings::settings_health();
+            if health.state != crate::settings::SettingsHealthState::Ok {
+                log::warn!("settings.json health at startup: {health:?}");
+                if let Err(e) = app.emit(crate::settings::SETTINGS_HEALTH_EVENT, &health) {
+                    log::warn!("emit {} failed: {e}", crate::settings::SETTINGS_HEALTH_EVENT);
+                }
             }
 
             // 静默启动：根据设置决定是否显示主窗口
@@ -1305,6 +1332,21 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::model_selection_snapshot,
+            commands::model_selection_save,
+            commands::model_effort_save,
+            commands::model_profiles_list,
+            commands::model_profiles_save,
+            commands::model_profiles_delete,
+            commands::model_profiles_preview,
+            commands::model_profiles_apply,
+            commands::model_profiles_undo,
+            commands::export_session_markdown,
+            commands::resume_session,
+            commands::trash_sessions,
+            commands::list_session_trash,
+            commands::restore_session_trash,
+            commands::purge_session_trash,
             commands::get_providers,
             commands::get_current_provider,
             commands::add_provider,
@@ -1317,6 +1359,7 @@ pub fn run() {
             commands::get_config_status,
             commands::get_claude_code_config_path,
             commands::get_config_dir,
+            commands::get_agent_dirs,
             commands::open_config_folder,
             commands::pick_directory,
             commands::open_external,
@@ -1324,6 +1367,9 @@ pub fn run() {
             commands::install_tool,
             commands::update_tool,
             commands::is_tool_app_running,
+            // Uninstall a tool: unbind, revoke its key, remove the program
+            commands::uninstall_tool_preview,
+            commands::uninstall_tool,
             // 主页"打开"按钮：在系统终端里拉起工具 CLI，独立生命周期
             commands::launch_tool_cli,
             commands::launch_tool,
@@ -1339,6 +1385,8 @@ pub fn run() {
             commands::extract_common_config_snippet,
             commands::read_live_provider_settings,
             commands::get_settings,
+            commands::get_settings_health,
+            commands::reset_unreadable_settings,
             commands::save_settings,
             commands::save_bound_tools,
             commands::get_rectifier_config,
@@ -1386,6 +1434,54 @@ pub fn run() {
             commands::import_mcp_from_apps,
             // Prompt management
             commands::get_prompts,
+            commands::get_library_instructions,
+            commands::get_library_summary,
+            commands::scan_library_inventory,
+            commands::get_library_inventory_source,
+            commands::reveal_library_inventory_source,
+            commands::compare_library_mcp,
+            commands::match_library_mcp_recipes,
+            commands::match_library_builtin_recipes,
+            commands::discard_library_inventory,
+            commands::import_library_inventory,
+            commands::remove_library_found_skill,
+            commands::preview_library_skill_adoption,
+            commands::preview_library_batch,
+            commands::run_library_batch,
+            commands::cancel_library_batch,
+            commands::reconcile_library_batch,
+            commands::list_library_batches,
+            commands::pick_library_pack,
+            commands::export_library_pack,
+            commands::export_library_selection,
+            commands::preview_library_pack,
+            commands::restore_library_pack,
+            commands::import_library_instruction,
+            commands::delete_library_instruction,
+            commands::get_library_skills,
+            commands::delete_library_skill,
+            commands::preview_library_skills,
+            commands::get_library_skill_detail,
+            commands::prepare_library_mcp_check,
+            commands::run_library_mcp_check,
+            commands::cancel_library_mcp_check,
+            commands::check_library_skill_update,
+            commands::compare_library_skill_update,
+            commands::confirm_library_skill_update,
+            commands::discard_library_skill_update,
+            commands::import_library_skill_directory,
+            commands::get_library_mcp,
+            commands::save_library_mcp,
+            commands::duplicate_library_mcp,
+            commands::preview_library_mcp_adoption,
+            commands::preview_library_mcp,
+            commands::delete_library_mcp,
+            commands::import_library_mcp,
+            commands::save_library_instruction,
+            commands::preview_library_instructions,
+            commands::apply_library_operation,
+            commands::recover_library_operation,
+            commands::cancel_library_operation,
             commands::upsert_prompt,
             commands::delete_prompt,
             commands::enable_prompt,
@@ -1495,18 +1591,26 @@ pub fn run() {
             commands::get_auto_failover_enabled,
             commands::set_auto_failover_enabled,
             // Usage statistics
+            commands::get_usage_overview,
+            commands::get_session_usage_analytics,
+            commands::get_session_analytics_page,
             commands::get_usage_summary,
             commands::get_usage_trends,
             commands::get_provider_stats,
             commands::get_model_stats,
             commands::get_request_logs,
             commands::get_request_detail,
+            commands::get_usage_capabilities,
+            commands::export_request_logs_csv,
             commands::get_model_pricing,
             commands::update_model_pricing,
             commands::delete_model_pricing,
             commands::check_provider_limits,
             // Session usage sync
             commands::sync_session_usage,
+            commands::refresh_local_usage,
+            commands::get_usage_rebuild_progress,
+            commands::cancel_usage_rebuild,
             commands::get_usage_data_sources,
             // Stream health check
             commands::stream_check_provider,
@@ -1515,11 +1619,22 @@ pub fn run() {
             commands::save_stream_check_config,
             // Session manager
             commands::list_sessions,
+            commands::refresh_session_index,
             commands::get_session_messages,
+            commands::get_subagent_transcript,
+            commands::get_session_transcript,
+            commands::prepare_session_search,
+            commands::run_session_search,
+            commands::cancel_session_search,
             commands::delete_session,
             commands::delete_sessions,
             commands::launch_session_terminal,
             commands::get_tool_versions,
+            commands::get_install_catalog_inventory,
+            commands::get_catalog_copy_state,
+            commands::prepare_catalog_operation,
+            commands::run_catalog_operation,
+            commands::cancel_catalog_operation,
             // Provider terminal
             commands::open_provider_terminal,
             // Universal Provider management
@@ -1615,6 +1730,8 @@ pub fn run() {
             commands::ofox_auth::ofox_poll_for_token,
             commands::ofox_auth::ofox_get_user_info,
             commands::ofox_auth::ofox_refresh_user_info,
+            commands::ofox_auth::ofox_get_balance_trend,
+            commands::ofox_auth::ofox_get_spending,
             commands::ofox_auth::ofox_get_auth_status,
             commands::ofox_auth::ofox_retry_keychain,
             commands::ofox_auth::ofox_is_authenticated,
@@ -1650,6 +1767,7 @@ pub fn run() {
             commands::manage_tool::ofox_ping_model,
             commands::manage_tool::check_ofox_model_compatibility,
             commands::show_main_window,
+            tray_popover::fit_tray_popover,
         ]);
 
     let app = builder
@@ -1710,7 +1828,7 @@ pub fn run() {
                 RunEvent::Opened { urls } => {
                     if let Some(url) = urls.first() {
                         let url_str = url.to_string();
-                        log::info!("RunEvent::Opened with URL: {url_str}");
+                        log::info!("RunEvent::Opened received a URL");
 
                         if url_str.starts_with("ccswitch://")
                             || url_str.starts_with("ofoxswitch://")

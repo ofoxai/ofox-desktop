@@ -224,12 +224,87 @@ enum InstallationStatus {
     Unknown,
 }
 
+impl ToolVersion {
+    pub(crate) fn into_resource_inventory(mut self) -> super::install_catalog::InventoryEntry {
+        if self.env_type == "wsl" || self.installation_kind != "cli" {
+            self.installation_status = InstallationStatus::Unknown;
+            self.error = Some("library.nativeCliRequired".into());
+        }
+        self.into_catalog_inventory()
+    }
+
+    /// Skills only need the agent's folder: a desktop app counts, WSL does not.
+    pub(crate) fn into_skill_inventory(mut self) -> super::install_catalog::InventoryEntry {
+        if self.env_type == "wsl" {
+            self.installation_status = InstallationStatus::Unknown;
+        }
+        self.into_catalog_inventory()
+    }
+
+    pub(crate) fn into_catalog_inventory(self) -> super::install_catalog::InventoryEntry {
+        // The binding detector accepts ChatGPT as a legacy Codex fallback.
+        // The installation catalog lists these two products separately.
+        if self.name == "codex" && self.installation_kind == "desktopApp" {
+            return super::install_catalog::InventoryEntry {
+                tool_id: self.name,
+                status: "notInstalled".into(),
+                version: None,
+                path: None,
+                error: None,
+                managed_copy: None,
+            };
+        }
+        super::install_catalog::InventoryEntry {
+            tool_id: self.name,
+            status: match self.installation_status {
+                InstallationStatus::Installed => "installed",
+                InstallationStatus::NotInstalled => "notInstalled",
+                InstallationStatus::Unknown => "unknown",
+            }
+            .into(),
+            version: self.version,
+            path: self.executable_path,
+            error: self.error,
+            managed_copy: None,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct LocalDetection {
     status: InstallationStatus,
     version: Option<String>,
     error: Option<String>,
     path: Option<PathBuf>,
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    #[test]
+    fn codex_desktop_fallback_is_not_evidence_of_a_codex_cli() {
+        let row = ToolVersion {
+            name: "codex".into(),
+            version: Some("1.0".into()),
+            latest_version: None,
+            error: None,
+            env_type: "macos".into(),
+            wsl_distro: None,
+            installation_kind: "desktopApp".into(),
+            installation_status: InstallationStatus::Installed,
+            update_status: "appManaged".into(),
+            update_source: None,
+            update_supported: false,
+            update_reason: None,
+            executable_path: Some("fixture/ChatGPT.app".into()),
+        }
+        .into_catalog_inventory();
+        assert_eq!(row.tool_id, "codex");
+        assert_eq!(row.status, "notInstalled");
+        assert!(row.path.is_none());
+        assert!(row.version.is_none());
+    }
 }
 
 impl LocalDetection {
@@ -261,7 +336,7 @@ impl LocalDetection {
     }
 }
 
-const VALID_TOOLS: [&str; 8] = [
+const VALID_TOOLS: [&str; 10] = [
     "claude",
     "codex",
     "chatgpt",
@@ -270,6 +345,8 @@ const VALID_TOOLS: [&str; 8] = [
     "openclaw",
     "hermes",
     "workbuddy",
+    "dsh",
+    "pi",
 ];
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -785,7 +862,18 @@ async fn get_single_tool_version_impl(
     }
 
     let latest_version = if include_latest {
-        latest_tool_version(tool, local.version.as_deref()).await
+        let package = active_installation
+            .as_ref()
+            .ok()
+            .and_then(|installation| {
+                super::tool_update::installed_npm_package(
+                    tool,
+                    &installation.path,
+                    &installation.real,
+                )
+            })
+            .or_else(|| super::tool_update::npm_package(tool));
+        latest_tool_version_for_package(tool, local.version.as_deref(), package).await
     } else {
         None
     };
@@ -916,10 +1004,19 @@ pub(crate) async fn cli_is_missing(tool: &str) -> Result<bool, String> {
     }
 }
 
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) async fn latest_tool_version(tool: &str, local: Option<&str>) -> Option<String> {
+    latest_tool_version_for_package(tool, local, super::tool_update::npm_package(tool)).await
+}
+
+pub(crate) async fn latest_tool_version_for_package(
+    tool: &str,
+    local: Option<&str>,
+    package: Option<&str>,
+) -> Option<String> {
     let client = crate::proxy::http_client::get();
     let query = async {
-        if let Some(package) = super::tool_update::npm_package(tool) {
+        if let Some(package) = package {
             let version = fetch_npm_latest_version(&client, package).await;
             if version.is_some() || tool != "opencode" {
                 return version;
@@ -1447,7 +1544,7 @@ fn node_manager_bin_dirs(
 
 /// 扫描常见路径查找 CLI
 async fn scan_cli_version(tool: &str) -> LocalDetection {
-    let home = dirs::home_dir().unwrap_or_default();
+    let home = crate::config::try_get_home_dir().unwrap_or_default();
 
     // 常见的安装路径（原生安装优先）
     let mut search_paths: Vec<std::path::PathBuf> = Vec::new();
@@ -2330,6 +2427,8 @@ fn launcher_env_name(name: &str) -> bool {
             | "all_proxy"
             | "NO_PROXY"
             | "no_proxy"
+            | "PI_CODING_AGENT_DIR"
+            | "DSH_HOME"
     )
 }
 

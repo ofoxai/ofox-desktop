@@ -1,5 +1,6 @@
 import { useCallback, useMemo } from "react";
 import FlexSearch from "flexsearch";
+import { sessionModelNames } from "@/lib/api/sessions";
 import type { SessionMeta } from "@/types";
 
 interface UseSessionSearchOptions {
@@ -12,7 +13,7 @@ interface UseSessionSearchResult {
 }
 
 /**
- * 使用 FlexSearch 实现会话全文搜索
+ * 使用 FlexSearch 实现会话元数据搜索（不索引正文）
  * 索引会话元数据（标题、摘要、项目目录等）
  */
 export function useSessionSearch({
@@ -32,11 +33,13 @@ export function useSessionSearch({
 
     filteredByProvider.forEach((session, idx) => {
       const metaContent = [
+        session.providerId,
         session.sessionId,
         session.title,
         session.summary,
         session.projectDir,
         session.sourcePath,
+        ...sessionModelNames(session),
       ]
         .filter(Boolean)
         .join(" ");

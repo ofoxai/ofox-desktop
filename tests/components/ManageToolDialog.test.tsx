@@ -6,6 +6,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { useState } from "react";
 import {
   afterEach,
   beforeAll,
@@ -26,6 +27,53 @@ import { ofoxBindApi, type UnbindReport } from "@/lib/api/ofoxBind";
 import { toast } from "sonner";
 import { BOUND_TOOLS_STORAGE_KEY } from "@/config/toolMeta";
 import { settingsApi } from "@/lib/api";
+import {
+  modelSelectionApi,
+  type ModelSelection,
+  type ToolModelSnapshot,
+} from "@/lib/api/modelSelection";
+import { queryClient } from "@/lib/query/queryClient";
+import { emitTauriEvent } from "../msw/tauriMocks";
+import * as uninstallPreviewModule from "@/hooks/useUninstallPreview";
+
+let selections: Record<string, ModelSelection> = {};
+let observed: Record<string, string> = {};
+function snapshot(
+  toolId: string,
+  selection: ModelSelection,
+): ToolModelSnapshot {
+  return {
+    toolId,
+    writeTarget: toolId === "chatgpt" ? "codex" : toolId,
+    revision: `revision-${toolId}`,
+    binding: {
+      status: "configured",
+      message: null,
+      missingFiles: [],
+      modifiedFields: [],
+      envOverrides: [],
+    },
+    managedSelection: selection,
+    observedSelection: {
+      model:
+        observed[toolId] ??
+        (selection.kind === "single" ? selection.model : null),
+      source: "config",
+    },
+    scope: [],
+  };
+}
+function saveReport(
+  toolId: string,
+  selection: ModelSelection,
+  skipped: { id: string; reason: string }[] = [],
+) {
+  return {
+    snapshot: snapshot(toolId, selection),
+    saved: selection.kind === "models" ? selection.models : [selection.model],
+    skipped,
+  };
+}
 
 const account = vi.hoisted(() => ({
   apex: "ofox.io" as "ofox.ai" | "ofox.io",
@@ -64,6 +112,28 @@ function compatibleModel(id: string): FetchedModel {
 afterEach(() => vi.restoreAllMocks());
 beforeEach(() => {
   localStorage.clear();
+  queryClient.clear();
+  selections = {};
+  observed = {};
+  vi.spyOn(modelSelectionApi, "snapshot").mockImplementation(
+    async (tools = []) => ({
+      tools: await Promise.all(
+        tools.map(async (toolId) => {
+          const item = snapshot(
+            toolId,
+            selections[toolId] ?? { kind: "single", model: "" },
+          );
+          item.binding = await ofoxBindApi
+            .status(toolId)
+            .catch(() => ({ ...item.binding, status: "unknown" as const }));
+          return item;
+        }),
+      ),
+    }),
+  );
+  vi.spyOn(modelSelectionApi, "save").mockImplementation(
+    async (tool, selection) => saveReport(tool, selection),
+  );
   vi.spyOn(ofoxBindApi, "status").mockResolvedValue({
     status: "configured",
     message: null,
@@ -82,6 +152,7 @@ describe("ManageToolDialog binding lifecycle", () => {
     exactFiles: [],
     restoredKeys: [],
     removedKeys: [],
+    keptKeys: [],
     filesRemoved: [],
     providerRestoredTo: null,
     sharedKeptBy: [],
@@ -93,7 +164,12 @@ describe("ManageToolDialog binding lifecycle", () => {
     onOpenChange = vi.fn(),
   ) {
     mockSingleTool(compatibleModel("test/model"));
-    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue("test/model");
+    selections["codex"] =
+      selections["chatgpt"] =
+      selections["gemini"] =
+      selections["openclaw"] =
+      selections["hermes"] =
+        { kind: "single", model: "test/model" };
     await act(async () => {
       render(
         <ManageToolDialog
@@ -121,7 +197,7 @@ describe("ManageToolDialog binding lifecycle", () => {
       modifiedFields: [],
       envOverrides: [],
     });
-    const save = vi.spyOn(manageToolApi, "setActiveModel").mockResolvedValue();
+    const save = vi.spyOn(modelSelectionApi, "save");
     const ping = vi.spyOn(manageToolApi, "pingModel");
     const compatibility = vi.spyOn(manageToolApi, "checkCompatibility");
     await renderLifecycleTool();
@@ -285,7 +361,12 @@ function mockSingleTool(model: FetchedModel) {
   vi.spyOn(manageToolApi, "getConfigFilePath").mockResolvedValue(
     "/Users/test/.config/tool/config.json",
   );
-  vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue("");
+  selections["codex"] =
+    selections["chatgpt"] =
+    selections["gemini"] =
+    selections["openclaw"] =
+    selections["hermes"] =
+      { kind: "single", model: "" };
   vi.spyOn(modelFetch, "fetchOfoxModels").mockResolvedValue([model]);
 }
 
@@ -310,13 +391,228 @@ async function renderTool(id: string, label: string, version = "1.0") {
   });
 }
 
+describe("ManageToolDialog compact sections", () => {
+  it("keeps model, config and connection actions in named sections while folding static notes", async () => {
+    mockSingleTool(compatibleModel("gemini/test"));
+    selections.gemini = { kind: "single", model: "gemini/test" };
+    await renderTool("gemini", "Gemini CLI");
+    await screen.findByText("/Users/test/.config/tool/config.json");
+
+    const model = screen.getByRole("region", { name: "模型" });
+    expect(within(model).getByRole("combobox")).toBeEnabled();
+    const files = screen.getByRole("region", { name: "配置文件" });
+    expect(
+      within(files).getByText("/Users/test/.config/tool/config.json"),
+    ).toBeVisible();
+    expect(
+      within(files).getByRole("button", { name: /Finder|文件夹/ }),
+    ).toBeEnabled();
+    const connection = screen.getByRole("region", { name: "连通性" });
+    expect(
+      within(connection).getByRole("button", { name: "测试连通性" }),
+    ).toBeEnabled();
+
+    const summary = screen.getByText("配置说明");
+    const notes = summary.closest("details")!;
+    expect(notes).not.toHaveAttribute("open");
+    const rememberHint = screen.getByText(
+      zh.modelCompatibility.geminiRememberHint,
+    );
+    expect(rememberHint).not.toBeVisible();
+    summary.focus();
+    expect(summary).toHaveFocus();
+    fireEvent.click(summary);
+    expect(notes).toHaveAttribute("open");
+    expect(rememberHint).toBeVisible();
+    expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "解除绑定" })).toBeEnabled();
+  });
+
+  it.each([
+    ["claude", "Claude Code", "claudeRememberHint"],
+    ["pi", "Pi", "piRememberHint"],
+  ] as const)(
+    "tells %s users how to save a default model inside the agent",
+    async (id, label, key) => {
+      mockSingleTool(compatibleModel("anthropic/test"));
+      selections[id] = { kind: "single", model: "anthropic/test" };
+      await renderTool(id, label);
+      const summary = await screen.findByText("配置说明");
+      fireEvent.click(summary);
+      expect(screen.getByText(zh.modelCompatibility[key])).toBeVisible();
+    },
+  );
+
+  it("keeps real model-load and environment warnings outside the collapsed notes", async () => {
+    mockSingleTool(compatibleModel("gemini/test"));
+    const ping = vi.spyOn(manageToolApi, "pingModel");
+    vi.mocked(modelFetch.fetchOfoxModels).mockRejectedValue(
+      new Error("catalog unavailable"),
+    );
+    vi.mocked(ofoxBindApi.status).mockResolvedValue({
+      status: "configured",
+      message: null,
+      missingFiles: [],
+      modifiedFields: [],
+      envOverrides: [
+        { name: "GEMINI_API_KEY", scope: "process", location: null },
+      ],
+    });
+    selections.gemini = { kind: "single", model: "gemini/test" };
+    await renderTool("gemini", "Gemini CLI");
+
+    const notes = screen.getByText("配置说明").closest("details")!;
+    expect(notes).not.toHaveAttribute("open");
+    const retry = await screen.findByRole("button", { name: "重试" });
+    expect(retry).toBeVisible();
+    expect(notes).not.toContainElement(retry);
+    const variable = screen.getByText("GEMINI_API_KEY");
+    expect(variable).toBeVisible();
+    expect(notes).not.toContainElement(variable);
+    expect(screen.getByRole("button", { name: "解除绑定" })).toBeEnabled();
+    expect(modelSelectionApi.save).not.toHaveBeenCalled();
+    expect(ping).not.toHaveBeenCalled();
+  });
+});
+
+describe("ManageToolDialog keyboard return focus", () => {
+  function FocusHarness({ onUninstall }: { onUninstall?: () => void }) {
+    const [open, setOpen] = useState(false);
+    const [returnFocus, setReturnFocus] = useState<HTMLElement | null>(null);
+    return (
+      <>
+        <button
+          onClick={(event) => {
+            setReturnFocus(event.currentTarget);
+            setOpen(true);
+          }}
+        >
+          Manage Gemini
+        </button>
+        <ManageToolDialog
+          tool={
+            open
+              ? {
+                  id: "gemini",
+                  abbr: "G",
+                  label: "Gemini CLI",
+                  color: "",
+                  version: "1.0",
+                }
+              : null
+          }
+          returnFocus={returnFocus}
+          onOpenChange={setOpen}
+          onUninstall={onUninstall}
+        />
+      </>
+    );
+  }
+
+  async function openManage(onUninstall?: () => void) {
+    mockSingleTool(compatibleModel("gemini/test"));
+    selections.gemini = { kind: "single", model: "gemini/test" };
+    render(<FocusHarness onUninstall={onUninstall} />);
+    const origin = screen.getByRole("button", { name: "Manage Gemini" });
+    vi.spyOn(origin, "getClientRects").mockReturnValue([
+      { width: 100, height: 30 },
+    ] as unknown as DOMRectList);
+    origin.focus();
+    fireEvent.click(origin);
+    await screen.findByText("/Users/test/.config/tool/config.json");
+    return origin;
+  }
+
+  it.each(["Escape", "cancel"])(
+    "returns %s dismissal to the invoking tool row",
+    async (kind) => {
+      const origin = await openManage();
+      if (kind === "Escape") {
+        fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+      } else {
+        fireEvent.click(screen.getByRole("button", { name: "取消" }));
+      }
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+      );
+      await waitFor(() => expect(origin).toHaveFocus());
+    },
+  );
+
+  it.each(["hidden", "disabled", "detached"])(
+    "does not restore an unavailable %s origin",
+    async (state) => {
+      const origin = await openManage();
+      const focus = vi.spyOn(origin, "focus");
+      if (state === "hidden") origin.hidden = true;
+      if (state === "disabled") origin.setAttribute("disabled", "");
+      if (state === "detached")
+        vi.spyOn(origin, "isConnected", "get").mockReturnValue(false);
+      fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+      );
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+      expect(focus).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps uninstall handoff ahead of restoring the tool-row focus", async () => {
+    vi.spyOn(uninstallPreviewModule, "useUninstallPreview").mockReturnValue({
+      available: true,
+      data: undefined,
+      error: undefined,
+      retry: vi.fn(),
+    });
+    const onUninstall = vi.fn();
+    const origin = await openManage(onUninstall);
+    const focus = vi.spyOn(origin, "focus");
+    fireEvent.click(screen.getByRole("button", { name: "卸载…" }));
+    await waitFor(() => expect(onUninstall).toHaveBeenCalledOnce());
+    expect(focus).not.toHaveBeenCalled();
+  });
+});
+
 describe("ManageToolDialog streaming compatibility", () => {
+  it("does not overwrite a draft or advance its write revision after an external model change", async () => {
+    const model = compatibleModel("openai/new");
+    model.supportedEndpoints = ["/v1/responses"];
+    mockSingleTool(model);
+    selections.codex = { kind: "single", model: "openai/old" };
+    await renderTool("codex", "Codex");
+    await chooseModel(model.id);
+    vi.mocked(modelSelectionApi.snapshot).mockResolvedValue({
+      tools: [
+        {
+          ...snapshot("codex", { kind: "single", model: "external/model" }),
+          revision: "changed-revision",
+        },
+      ],
+    });
+    act(() => emitTauriEvent("model-selection-changed", { tools: ["codex"] }));
+    await waitFor(() =>
+      expect(modelSelectionApi.snapshot).toHaveBeenCalledTimes(2),
+    );
+    expect(screen.getByRole("combobox")).toHaveTextContent("openai/new");
+    vi.mocked(modelSelectionApi.save).mockRejectedValue(
+      new Error("stale revision"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() =>
+      expect(modelSelectionApi.save).toHaveBeenCalledWith(
+        "codex",
+        { kind: "single", model: "openai/new" },
+        "revision-codex",
+      ),
+    );
+    expect(screen.getByRole("dialog")).toBeVisible();
+  });
   it("does not check Codex or ChatGPT models before saving", async () => {
     const model = compatibleModel("deepseek/deepseek-v4.1-flash");
     model.supportedEndpoints = ["/v1/responses"];
     mockSingleTool(model);
     const check = vi.spyOn(manageToolApi, "checkCompatibility");
-    const save = vi.spyOn(manageToolApi, "setActiveModel").mockResolvedValue();
+    const save = vi.spyOn(modelSelectionApi, "save");
 
     await renderTool("chatgpt", "ChatGPT");
     await chooseModel(model.id);
@@ -330,36 +626,45 @@ describe("ManageToolDialog streaming compatibility", () => {
     await waitFor(() =>
       expect(save).toHaveBeenCalledWith(
         "chatgpt",
-        model.id,
-        undefined,
-        undefined,
+        { kind: "single", model: model.id },
+        "revision-chatgpt",
       ),
     );
   });
 
-  it("opens ChatGPT on the model the app is using, not the Codex config default", async () => {
+  it("edits the shared default while displaying ChatGPT's observed model separately", async () => {
     mockSingleTool(compatibleModel("openai/gpt-6-luna"));
     // The Codex config still says the old default; the ChatGPT app moved on.
-    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue("gpt-5.6-luna");
-    vi.spyOn(manageToolApi, "getChatGptModel").mockResolvedValue("gpt-6-luna");
+    selections["codex"] =
+      selections["chatgpt"] =
+      selections["gemini"] =
+      selections["openclaw"] =
+      selections["hermes"] =
+        { kind: "single", model: "gpt-5.6-luna" };
+    observed.chatgpt = "gpt-6-luna";
 
     await renderTool("chatgpt", "ChatGPT");
 
-    expect(await screen.findByText("gpt-6-luna")).toBeVisible();
-    expect(screen.queryByText("gpt-5.6-luna")).not.toBeInTheDocument();
+    expect(
+      await screen.findByText(/当前观察到的模型：gpt-6-luna/),
+    ).toBeVisible();
+    expect(screen.getByRole("combobox")).toHaveTextContent("gpt-5.6-luna");
   });
 
   it("still reads the Codex config model for Codex itself", async () => {
     mockSingleTool(compatibleModel("openai/gpt-6-luna"));
-    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue("gpt-5.6-luna");
-    const chatgpt = vi
-      .spyOn(manageToolApi, "getChatGptModel")
-      .mockResolvedValue("gpt-6-luna");
+    selections["codex"] =
+      selections["chatgpt"] =
+      selections["gemini"] =
+      selections["openclaw"] =
+      selections["hermes"] =
+        { kind: "single", model: "gpt-5.6-luna" };
+    observed.chatgpt = "gpt-6-luna";
 
     await renderTool("codex", "Codex");
 
     expect(await screen.findByText("gpt-5.6-luna")).toBeVisible();
-    expect(chatgpt).not.toHaveBeenCalled();
+    expect(modelSelectionApi.snapshot).toHaveBeenCalledWith(["codex"]);
   });
 
   it("blocks a fixed-protocol client when its stream is incompatible", async () => {
@@ -441,9 +746,14 @@ describe("ManageToolDialog re-saving an unchanged model", () => {
   it("re-saves the loaded model of a fixed-protocol client", async () => {
     const model = compatibleModel("google/gemini-3.8-flash");
     mockSingleTool(model);
-    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue(model.id);
+    selections["codex"] =
+      selections["chatgpt"] =
+      selections["gemini"] =
+      selections["openclaw"] =
+      selections["hermes"] =
+        { kind: "single", model: model.id };
     const check = vi.spyOn(manageToolApi, "checkCompatibility");
-    const save = vi.spyOn(manageToolApi, "setActiveModel").mockResolvedValue();
+    const save = vi.spyOn(modelSelectionApi, "save");
 
     await renderTool("gemini", "Gemini");
     await waitFor(() =>
@@ -455,9 +765,8 @@ describe("ManageToolDialog re-saving an unchanged model", () => {
     await waitFor(() =>
       expect(save).toHaveBeenCalledWith(
         "gemini",
-        model.id,
-        undefined,
-        undefined,
+        { kind: "single", model: model.id },
+        "revision-gemini",
       ),
     );
     expect(check).not.toHaveBeenCalled();
@@ -466,11 +775,11 @@ describe("ManageToolDialog re-saving an unchanged model", () => {
   it("keeps save disabled when the current model failed to load", async () => {
     const model = compatibleModel("google/gemini-3.8-flash");
     mockSingleTool(model);
-    vi.spyOn(manageToolApi, "getActiveModel").mockRejectedValue(
+    vi.mocked(modelSelectionApi.snapshot).mockRejectedValue(
       new Error("read failed"),
     );
     vi.spyOn(console, "warn").mockImplementation(() => {});
-    const save = vi.spyOn(manageToolApi, "setActiveModel");
+    const save = vi.spyOn(modelSelectionApi, "save");
 
     await renderTool("gemini", "Gemini");
     await screen.findByText("/Users/test/.config/tool/config.json");
@@ -521,15 +830,15 @@ describe("ManageToolDialog model picker", () => {
     const model = compatibleModel("openai/gpt-6-luna");
     model.supportedEndpoints = ["/v1/responses"];
     mockSingleTool(model);
-    vi.spyOn(manageToolApi, "getChatGptModel").mockResolvedValue(model.id);
+    observed.chatgpt = model.id;
 
     await renderTool("chatgpt", "ChatGPT");
-    await screen.findByText(model.id);
+    await screen.findByText(new RegExp(`当前观察到的模型：${model.id}`));
     expect(screen.getByText(/Codex CLI 共用配置/)).toBeInTheDocument();
     expect(
       screen.getByText(/Chat 和 Work 使用 OpenAI 账号/),
     ).toBeInTheDocument();
-    expect(manageToolApi.getChatGptModel).toHaveBeenCalled();
+    expect(modelSelectionApi.snapshot).toHaveBeenCalledWith(["chatgpt"]);
     expect(screen.getByText(/保存的是 Codex 的默认模型/)).toBeInTheDocument();
     expect(screen.getByRole("combobox")).toBeInTheDocument();
   });
@@ -574,9 +883,7 @@ describe("ManageToolDialog WorkBuddy multi-model management", () => {
     vi.spyOn(manageToolApi, "getConfigFilePath").mockResolvedValue(
       "/Users/test/.workbuddy/models.json",
     );
-    vi.spyOn(manageToolApi, "getWorkBuddyManagedModels").mockResolvedValue(
-      current,
-    );
+    selections.workbuddy = { kind: "models", models: current };
     vi.spyOn(manageToolApi, "getWorkBuddyEndpointStatus").mockResolvedValue({
       expectedUrl: "https://api.ofox.io/v1/chat/completions",
       configuredUrls: ["https://api.ofox.io/v1/chat/completions"],
@@ -610,9 +917,7 @@ describe("ManageToolDialog WorkBuddy multi-model management", () => {
     ];
     mockWorkBuddy(models);
     const check = vi.spyOn(manageToolApi, "checkCompatibility");
-    const save = vi
-      .spyOn(manageToolApi, "setWorkBuddyManagedModels")
-      .mockResolvedValue();
+    const save = vi.spyOn(modelSelectionApi, "save");
 
     await renderTool("workbuddy", "WorkBuddy", "5.5.6");
 
@@ -629,7 +934,9 @@ describe("ManageToolDialog WorkBuddy multi-model management", () => {
 
     await waitFor(() => {
       expect(save).toHaveBeenCalledWith(
-        models.map(modelFetch.toWorkBuddyModelSelection),
+        "workbuddy",
+        { kind: "models", models: models.map((model) => model.id) },
+        "revision-workbuddy",
       );
     });
     expect(check).not.toHaveBeenCalled();
@@ -657,9 +964,7 @@ describe("ManageToolDialog WorkBuddy multi-model management", () => {
   it("re-saves an unchanged WorkBuddy selection", async () => {
     const model = compatibleModel("openai/model-a");
     mockWorkBuddy([model]);
-    const save = vi
-      .spyOn(manageToolApi, "setWorkBuddyManagedModels")
-      .mockResolvedValue();
+    const save = vi.spyOn(modelSelectionApi, "save");
 
     await renderTool("workbuddy", "WorkBuddy");
     await screen.findByText("共 1 个兼容模型，共用一个 Ofox Key");
@@ -667,9 +972,11 @@ describe("ManageToolDialog WorkBuddy multi-model management", () => {
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() =>
-      expect(save).toHaveBeenCalledWith([
-        modelFetch.toWorkBuddyModelSelection(model),
-      ]),
+      expect(save).toHaveBeenCalledWith(
+        "workbuddy",
+        { kind: "models", models: [model.id] },
+        "revision-workbuddy",
+      ),
     );
   });
 
@@ -718,9 +1025,7 @@ describe("ManageToolDialog WorkBuddy multi-model management", () => {
           finishCheck = resolve;
         }),
     );
-    const save = vi
-      .spyOn(manageToolApi, "setWorkBuddyManagedModels")
-      .mockResolvedValue();
+    const save = vi.spyOn(modelSelectionApi, "save");
 
     await renderTool("workbuddy", "WorkBuddy");
     await screen.findByText("共 2 个兼容模型，共用一个 Ofox Key");
@@ -782,10 +1087,39 @@ describe("ManageToolDialog WorkBuddy multi-model management", () => {
     expect(check).toHaveBeenCalledWith("workbuddy", models[1].id, true);
   });
 
+  it("picks the model to check from the app's own menu inside the dialog, the chosen one ticked", async () => {
+    const models = [
+      compatibleModel("openai/model-a"),
+      compatibleModel("openai/model-b"),
+    ];
+    mockWorkBuddy(
+      models,
+      models.map((model) => model.id),
+    );
+
+    await renderTool("workbuddy", "WorkBuddy");
+    await screen.findByText("共 2 个兼容模型，共用一个 Ofox Key");
+    const picker = screen.getByRole("combobox", {
+      name: "选择待检测的 WorkBuddy 模型",
+    });
+    expect(picker).toHaveAttribute("aria-haspopup", "listbox");
+    expect(picker).toHaveTextContent("openai/model-a");
+
+    fireEvent.click(picker);
+    const listbox = await screen.findByRole("listbox");
+    expect(listbox.closest('[role="dialog"]')).toContainElement(picker);
+    expect(
+      within(listbox).getByRole("option", { name: "openai/model-a" }),
+    ).toHaveAttribute("data-checked", "true");
+    expect(
+      within(listbox).getByRole("option", { name: "openai/model-b" }),
+    ).not.toHaveAttribute("data-checked");
+  });
+
   it("keeps save disabled when the catalog lacks a selected model", async () => {
     const models = [compatibleModel("openai/model-a")];
     mockWorkBuddy(models, ["missing/model"]);
-    const save = vi.spyOn(manageToolApi, "setWorkBuddyManagedModels");
+    const save = vi.spyOn(modelSelectionApi, "save");
 
     await renderTool("workbuddy", "WorkBuddy");
     await screen.findByText("共 1 个兼容模型，共用一个 Ofox Key");
@@ -802,7 +1136,7 @@ describe("ManageToolDialog WorkBuddy multi-model management", () => {
   it("does not save an empty WorkBuddy selection", async () => {
     const model = compatibleModel("openai/model-a");
     mockWorkBuddy([model]);
-    const save = vi.spyOn(manageToolApi, "setWorkBuddyManagedModels");
+    const save = vi.spyOn(modelSelectionApi, "save");
 
     await renderTool("workbuddy", "WorkBuddy");
     await screen.findByText("共 1 个兼容模型，共用一个 Ofox Key");
@@ -870,7 +1204,12 @@ describe("ManageToolDialog connectivity", () => {
   async function pingWithEmptyBalance() {
     const model = compatibleModel("deepseek/deepseek-v4.1-flash");
     mockSingleTool(model);
-    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue(model.id);
+    selections["codex"] =
+      selections["chatgpt"] =
+      selections["gemini"] =
+      selections["openclaw"] =
+      selections["hermes"] =
+        { kind: "single", model: model.id };
     vi.spyOn(manageToolApi, "pingModel").mockResolvedValue({
       success: false,
       latencyMs: 120,
@@ -920,6 +1259,7 @@ describe("ManageToolDialog unbind", () => {
       exactFiles: ["~/.codex/config.toml"],
       restoredKeys: ["~/.codex/config.toml: model"],
       removedKeys: ["~/.codex/config.toml: model_provider"],
+      keptKeys: [],
       filesRemoved: [],
       providerRestoredTo: "default",
       sharedKeptBy: [],
@@ -932,7 +1272,12 @@ describe("ManageToolDialog unbind", () => {
     vi.spyOn(manageToolApi, "getConfigFilePath").mockResolvedValue(
       "/Users/test/.codex/config.toml",
     );
-    vi.spyOn(manageToolApi, "getActiveModel").mockResolvedValue("");
+    selections["codex"] =
+      selections["chatgpt"] =
+      selections["gemini"] =
+      selections["openclaw"] =
+      selections["hermes"] =
+        { kind: "single", model: "" };
     vi.spyOn(modelFetch, "fetchOfoxModels").mockResolvedValue([]);
     await act(async () => {
       render(
@@ -969,6 +1314,40 @@ describe("ManageToolDialog unbind", () => {
     expect(
       screen.getByRole("button", { name: "确认解除绑定？" }),
     ).toBeVisible();
+  });
+
+  it("says settings changed after binding are kept and lists them", async () => {
+    const kept = report({
+      exactFiles: [],
+      keptKeys: ["~/.codex/config.toml: model_reasoning_effort"],
+      warnings: [{ code: "userValueKept" }],
+    });
+    vi.spyOn(ofoxBindApi, "unbindPreview").mockResolvedValue(kept);
+    const unbind = vi
+      .spyOn(bindToolsModule, "unbindTool")
+      .mockResolvedValue({ ...kept, dryRun: false });
+    const success = vi.spyOn(toast, "success").mockImplementation(() => "");
+    await renderCodex();
+
+    fireEvent.click(screen.getByRole("button", { name: "解除绑定" }));
+
+    expect(
+      await screen.findByText(/Ofox 能判断是你修改过的设置会保留/),
+    ).toBeVisible();
+    expect(screen.queryByText(/也会恢复为绑定前的值/)).not.toBeInTheDocument();
+    const listed =
+      "绑定后你改过的设置保持不变：~/.codex/config.toml: model_reasoning_effort";
+    expect(screen.getByText(listed)).toBeVisible();
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "确认解除绑定？" }),
+    );
+    await waitFor(() => expect(unbind).toHaveBeenCalledWith("codex"));
+    await waitFor(() =>
+      expect(success).toHaveBeenCalledWith("Codex 已解除绑定", {
+        description: expect.stringContaining(listed),
+      }),
+    );
   });
 
   it("warns that an older binding cannot be fully restored", async () => {
@@ -1038,7 +1417,7 @@ describe("ManageToolDialog OpenCode multi-model management", () => {
     vi.spyOn(manageToolApi, "getConfigFilePath").mockResolvedValue(
       "/Users/test/.config/opencode/opencode.json",
     );
-    vi.spyOn(manageToolApi, "getActiveModels").mockResolvedValue(saved);
+    selections.opencode = { kind: "models", models: saved };
     vi.spyOn(modelFetch, "fetchOfoxModels").mockResolvedValue(models);
   }
 
@@ -1059,10 +1438,11 @@ describe("ManageToolDialog OpenCode multi-model management", () => {
       compatibleModel("google/model-c"),
     ];
     mockOpenCode(models, ["openai/model-a"]);
-    const save = vi.spyOn(manageToolApi, "setActiveModels").mockResolvedValue({
-      saved: [],
-      skipped: [],
-    });
+    const save = vi
+      .spyOn(modelSelectionApi, "save")
+      .mockResolvedValue(
+        saveReport("opencode", { kind: "models", models: [] }, []),
+      );
     const single = vi.spyOn(manageToolApi, "setActiveModel");
 
     await renderTool("opencode", "OpenCode");
@@ -1075,10 +1455,11 @@ describe("ManageToolDialog OpenCode multi-model management", () => {
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() =>
-      expect(save).toHaveBeenCalledWith("opencode", [
-        "openai/model-a",
-        "anthropic/model-b",
-      ]),
+      expect(save).toHaveBeenCalledWith(
+        "opencode",
+        { kind: "models", models: ["openai/model-a", "anthropic/model-b"] },
+        "revision-opencode",
+      ),
     );
     expect(single).not.toHaveBeenCalled();
   });
@@ -1095,17 +1476,26 @@ describe("ManageToolDialog OpenCode multi-model management", () => {
         },
       ])
       .mockResolvedValue([]);
-    const save = vi.spyOn(manageToolApi, "setActiveModels").mockResolvedValue({
-      saved: ["openai/model-a"],
-      skipped: [],
-    });
+    const save = vi
+      .spyOn(modelSelectionApi, "save")
+      .mockResolvedValue(
+        saveReport(
+          "opencode",
+          { kind: "models", models: ["openai/model-a"] },
+          [],
+        ),
+      );
 
     await renderTool("opencode", "OpenCode");
     expect(await screen.findByText(/openai\/model-a → Chat/)).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "应用建议" }));
 
     await waitFor(() =>
-      expect(save).toHaveBeenCalledWith("opencode", ["openai/model-a"]),
+      expect(save).toHaveBeenCalledWith(
+        "opencode",
+        { kind: "models", models: ["openai/model-a"] },
+        "revision-opencode",
+      ),
     );
     await waitFor(() =>
       expect(screen.queryByText(/openai\/model-a → Chat/)).toBeNull(),
@@ -1130,10 +1520,15 @@ describe("ManageToolDialog OpenCode multi-model management", () => {
       compatibleModel("google/model-c"),
     ];
     mockOpenCode(models, ["openai/model-a"]);
-    const save = vi.spyOn(manageToolApi, "setActiveModels").mockResolvedValue({
-      saved: models.map((model) => model.id),
-      skipped: [],
-    });
+    const save = vi
+      .spyOn(modelSelectionApi, "save")
+      .mockResolvedValue(
+        saveReport(
+          "opencode",
+          { kind: "models", models: models.map((model) => model.id) },
+          [],
+        ),
+      );
 
     await renderTool("opencode", "OpenCode");
     await screen.findByText("已选择 1 个兼容模型");
@@ -1144,11 +1539,14 @@ describe("ManageToolDialog OpenCode multi-model management", () => {
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() =>
-      expect(save).toHaveBeenCalledWith("opencode", [
-        "openai/model-a",
-        "anthropic/model-b",
-        "google/model-c",
-      ]),
+      expect(save).toHaveBeenCalledWith(
+        "opencode",
+        {
+          kind: "models",
+          models: ["openai/model-a", "anthropic/model-b", "google/model-c"],
+        },
+        "revision-opencode",
+      ),
     );
   });
 
@@ -1157,12 +1555,11 @@ describe("ManageToolDialog OpenCode multi-model management", () => {
       [compatibleModel("openai/model-a"), compatibleModel("anthropic/model-b")],
       ["openai/model-a"],
     );
-    vi.spyOn(manageToolApi, "setActiveModels").mockResolvedValue({
-      saved: ["openai/model-a"],
-      skipped: [
+    vi.spyOn(modelSelectionApi, "save").mockResolvedValue(
+      saveReport("opencode", { kind: "models", models: ["openai/model-a"] }, [
         { id: "anthropic/model-b", reason: "模型不在当前 Ofox 目录中" },
-      ],
-    });
+      ]),
+    );
     const toastWarning = vi.spyOn(toast, "warning");
 
     await renderTool("opencode", "OpenCode");
@@ -1182,10 +1579,11 @@ describe("ManageToolDialog OpenCode multi-model management", () => {
 
   it("does not save an empty selection", async () => {
     mockOpenCode([compatibleModel("openai/model-a")], ["openai/model-a"]);
-    const save = vi.spyOn(manageToolApi, "setActiveModels").mockResolvedValue({
-      saved: [],
-      skipped: [],
-    });
+    const save = vi
+      .spyOn(modelSelectionApi, "save")
+      .mockResolvedValue(
+        saveReport("opencode", { kind: "models", models: [] }, []),
+      );
 
     await renderTool("opencode", "OpenCode");
     await screen.findByText("已选择 1 个兼容模型");
@@ -1213,7 +1611,7 @@ describe("ManageToolDialog OpenCode multi-model management", () => {
       [compatibleModel("openai/model-a"), compatibleModel("anthropic/model-b")],
       ["openai/model-a"],
     );
-    vi.spyOn(manageToolApi, "setActiveModels").mockRejectedValue(
+    vi.spyOn(modelSelectionApi, "save").mockRejectedValue(
       "anthropic/model-b：模型与客户端协议不兼容",
     );
     const toastError = vi.spyOn(toast, "error");

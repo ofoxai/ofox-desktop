@@ -34,7 +34,10 @@ fn parse_app_type(app: &str) -> Result<AppType, String> {
 
 /// 获取所有已安装的 Skills
 #[tauri::command]
-pub fn get_installed_skills(app_state: State<'_, AppState>) -> Result<Vec<InstalledSkill>, String> {
+pub async fn get_installed_skills(
+    app_state: State<'_, AppState>,
+) -> Result<Vec<InstalledSkill>, String> {
+    crate::agent_env::ready().await;
     SkillService::get_all_installed(&app_state.db).map_err(|e| e.to_string())
 }
 
@@ -53,11 +56,13 @@ pub fn delete_skill_backup(backup_id: String) -> Result<bool, String> {
 ///
 /// 参数：
 /// - skill: 从发现列表获取的技能信息
-/// - current_app: 当前选中的应用，安装后默认启用该应用
+/// - current_app: 兼容参数；收录不自动启用任何工具
+/// - expected_epoch: 可选的本机资源库 epoch，恢复后拒绝旧收录请求
 #[tauri::command]
 pub async fn install_skill_unified(
     skill: DiscoverableSkill,
     current_app: String,
+    expected_epoch: Option<u64>,
     service: State<'_, SkillServiceState>,
     app_state: State<'_, AppState>,
 ) -> Result<InstalledSkill, String> {
@@ -65,7 +70,7 @@ pub async fn install_skill_unified(
 
     service
         .0
-        .install(&app_state.db, &skill, &app_type)
+        .install_with_epoch(&app_state.db, &skill, &app_type, expected_epoch)
         .await
         .map_err(|e| e.to_string())
 }
@@ -169,6 +174,8 @@ pub async fn migrate_skill_storage(
     target: SkillStorageLocation,
     app_state: State<'_, AppState>,
 ) -> Result<MigrationResult, String> {
+    // Skills are re-synced into the agents' own directories (CODEX_HOME, ...).
+    crate::agent_env::ready().await;
     SkillService::migrate_storage(&app_state.db, target).map_err(|e| e.to_string())
 }
 

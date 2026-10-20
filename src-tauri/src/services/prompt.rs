@@ -1,6 +1,7 @@
 use indexmap::IndexMap;
 
 use crate::app_config::AppType;
+#[cfg(test)]
 use crate::config::write_text_file;
 use crate::error::AppError;
 use crate::prompt::Prompt;
@@ -31,29 +32,75 @@ impl PromptService {
         _id: &str,
         prompt: Prompt,
     ) -> Result<(), AppError> {
-        // 检查是否为已启用的提示词
-        let is_enabled = prompt.enabled;
-
-        state.db.save_prompt(app.as_str(), &prompt)?;
-
-        if is_enabled {
-            // 启用提示词：写入内容到文件
-            let target_path = prompt_file_path(&app)?;
-            write_text_file(&target_path, &prompt.content)?;
+        let _io = crate::config_io::lock();
+        if _id != prompt.id {
+            return Err(AppError::InvalidInput("library.resourceMissing".into()));
+        }
+        if prompt.enabled {
+            Self::apply_owned_prompt(state, &app, &prompt)?;
         } else {
-            // 禁用提示词：检查是否还有其他已启用的提示词
-            let prompts = state.db.get_prompts(app.as_str())?;
-            let any_enabled = prompts.values().any(|p| p.enabled);
-
-            if !any_enabled {
-                // 所有提示词都已禁用，清空文件
-                let target_path = prompt_file_path(&app)?;
-                if target_path.exists() {
-                    write_text_file(&target_path, "")?;
+            let resource_id = Self::resource_id(&app, &prompt.id);
+            let snapshot = state.db.library_snapshot()?;
+            if snapshot
+                .machine
+                .assignments
+                .get(&format!("instructions:{}", app.as_str()))
+                == Some(&resource_id)
+                || snapshot.machine.receipts.values().any(|receipt| {
+                    receipt.resource_id == resource_id
+                        && receipt.owners.contains(&app.as_str().to_string())
+                })
+            {
+                let plan = crate::services::library::coordinator::preview_at(
+                    &state.db,
+                    &resource_id,
+                    &[],
+                )?;
+                let result = crate::services::library::apply_operation(&state.db, &plan.id)?;
+                if result.status != "applied" {
+                    return Err(AppError::Config("library.partial".into()));
                 }
             }
         }
+        state.db.save_prompt(app.as_str(), &prompt)?;
+        Ok(())
+    }
 
+    fn resource_id(app: &AppType, id: &str) -> String {
+        format!("legacy-prompt:{}:{id}", app.as_str())
+    }
+
+    fn apply_owned_prompt(
+        state: &AppState,
+        app: &AppType,
+        prompt: &Prompt,
+    ) -> Result<(), AppError> {
+        let resource_id = Self::resource_id(app, &prompt.id);
+        let snapshot = state.db.library_snapshot()?;
+        let expected = snapshot
+            .definitions
+            .instructions
+            .get(&resource_id)
+            .map(|set| set.revision);
+        crate::services::library::save_instruction(
+            &state.db,
+            crate::services::library::InstructionSet {
+                id: resource_id.clone(),
+                name: prompt.name.clone(),
+                content: prompt.content.clone(),
+                revision: 0,
+            },
+            expected,
+        )?;
+        let plan = crate::services::library::coordinator::preview_at(
+            &state.db,
+            &resource_id,
+            &[(app.as_str().into(), prompt_file_path(app)?)],
+        )?;
+        let result = crate::services::library::apply_operation(&state.db, &plan.id)?;
+        if result.status != "applied" {
+            return Err(AppError::Config("library.partial".into()));
+        }
         Ok(())
     }
 
@@ -71,79 +118,22 @@ impl PromptService {
     }
 
     pub fn enable_prompt(state: &AppState, app: AppType, id: &str) -> Result<(), AppError> {
-        // 回填当前 live 文件内容到已启用的提示词，或创建备份
-        let target_path = prompt_file_path(&app)?;
-        if target_path.exists() {
-            if let Ok(live_content) = std::fs::read_to_string(&target_path) {
-                if !live_content.trim().is_empty() {
-                    let mut prompts = state.db.get_prompts(app.as_str())?;
-
-                    // 尝试回填到当前已启用的提示词
-                    if let Some((enabled_id, enabled_prompt)) = prompts
-                        .iter_mut()
-                        .find(|(_, p)| p.enabled)
-                        .map(|(id, p)| (id.clone(), p))
-                    {
-                        let timestamp = get_unix_timestamp()?;
-                        enabled_prompt.content = live_content.clone();
-                        enabled_prompt.updated_at = Some(timestamp);
-                        log::info!("回填 live 提示词内容到已启用项: {enabled_id}");
-                        state.db.save_prompt(app.as_str(), enabled_prompt)?;
-                    } else {
-                        // 没有已启用的提示词，则创建一次备份（避免重复备份）
-                        let content_exists = prompts
-                            .values()
-                            .any(|p| p.content.trim() == live_content.trim());
-                        if !content_exists {
-                            let timestamp = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs() as i64;
-                            let backup_id = format!("backup-{timestamp}");
-                            let backup_prompt = Prompt {
-                                id: backup_id.clone(),
-                                name: format!(
-                                    "原始提示词 {}",
-                                    chrono::Local::now().format("%Y-%m-%d %H:%M")
-                                ),
-                                content: live_content,
-                                description: Some("自动备份的原始提示词".to_string()),
-                                enabled: false,
-                                created_at: Some(timestamp),
-                                updated_at: Some(timestamp),
-                            };
-                            log::info!("回填 live 提示词内容，创建备份: {backup_id}");
-                            state.db.save_prompt(app.as_str(), &backup_prompt)?;
-                        }
-                    }
-                }
-            }
-        }
-
-        // 启用目标提示词并写入文件
+        let _io = crate::config_io::lock();
         let mut prompts = state.db.get_prompts(app.as_str())?;
-
+        let selected = prompts
+            .get(id)
+            .cloned()
+            .ok_or_else(|| AppError::InvalidInput("library.resourceMissing".into()))?;
+        Self::apply_owned_prompt(state, &app, &selected)?;
         for prompt in prompts.values_mut() {
-            prompt.enabled = false;
-        }
-
-        if let Some(prompt) = prompts.get_mut(id) {
-            prompt.enabled = true;
-            write_text_file(&target_path, &prompt.content)?; // 原子写入
-            state.db.save_prompt(app.as_str(), prompt)?;
-        } else {
-            return Err(AppError::InvalidInput(format!("提示词 {id} 不存在")));
-        }
-
-        // Save all prompts to disable others
-        for (_, prompt) in prompts.iter() {
+            prompt.enabled = prompt.id == id;
             state.db.save_prompt(app.as_str(), prompt)?;
         }
-
         Ok(())
     }
 
     pub fn import_from_file(state: &AppState, app: AppType) -> Result<String, AppError> {
+        let _io = crate::config_io::lock();
         let file_path = prompt_file_path(&app)?;
 
         if !file_path.exists() {
@@ -152,6 +142,17 @@ impl PromptService {
 
         let content =
             std::fs::read_to_string(&file_path).map_err(|e| AppError::io(&file_path, e))?;
+        if content.contains("<!-- OFOX:") {
+            return Err(AppError::Config("library.nativeContainsManaged".into()));
+        }
+        if let Some(existing) = state
+            .db
+            .get_prompts(app.as_str())?
+            .values()
+            .find(|prompt| prompt.content == content)
+        {
+            return Ok(existing.id.clone());
+        }
         let timestamp = get_unix_timestamp()?;
 
         let id = format!("imported-{timestamp}");
@@ -210,6 +211,12 @@ impl PromptService {
             }
         };
 
+        // Startup import never creates an unusable draft or takes ownership.
+        if content.contains("<!-- OFOX:") {
+            log::info!("Skipped native instructions containing managed markers");
+            return Ok(0);
+        }
+
         // 检查内容是否为空
         if content.trim().is_empty() {
             return Ok(0);
@@ -228,7 +235,7 @@ impl PromptService {
             ),
             content,
             description: Some("Automatically imported on first launch".to_string()),
-            enabled: true, // 首次导入时自动启用
+            enabled: false, // Existing content is a draft, never ownership evidence.
             created_at: Some(timestamp),
             updated_at: Some(timestamp),
         };
@@ -238,5 +245,160 @@ impl PromptService {
 
         log::info!("自动导入完成: {}", app.as_str());
         Ok(1)
+    }
+}
+
+#[cfg(test)]
+mod library_regression_tests {
+    use super::*;
+    use serial_test::serial;
+    use std::sync::Arc;
+
+    #[test]
+    #[serial]
+    fn deep_link_enable_flags_import_a_draft_without_applying_native_config() {
+        use base64::Engine;
+        let _sandbox = crate::test_sandbox::sandbox();
+        let state = AppState::new(Arc::new(crate::Database::memory().unwrap()));
+        let path = prompt_file_path(&AppType::Codex).unwrap();
+        write_text_file(&path, "personal\n").unwrap();
+        let request = crate::deeplink::DeepLinkImportRequest {
+            resource: "prompt".into(),
+            app: Some("codex".into()),
+            name: Some("Imported".into()),
+            enabled: Some(true),
+            content: Some(base64::engine::general_purpose::STANDARD.encode("imported shared")),
+            ..Default::default()
+        };
+        let id = crate::deeplink::import_prompt_from_deeplink(&state, request).unwrap();
+        assert!(!state.db.get_prompts("codex").unwrap()[&id].enabled);
+        assert!(state
+            .db
+            .library_snapshot()
+            .unwrap()
+            .machine
+            .assignments
+            .is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "personal\n");
+    }
+
+    #[test]
+    #[serial]
+    fn importing_the_same_native_instructions_is_idempotent() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let state = AppState::new(Arc::new(crate::Database::memory().unwrap()));
+        let path = prompt_file_path(&AppType::Codex).unwrap();
+        write_text_file(&path, "personal\n").unwrap();
+        let first = PromptService::import_from_file(&state, AppType::Codex).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1050));
+        let second = PromptService::import_from_file(&state, AppType::Codex).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(state.db.get_prompts("codex").unwrap().len(), 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "personal\n");
+    }
+
+    #[test]
+    #[serial]
+    fn withdrawing_applied_a_after_b_fails_preserves_desired_b() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let state = AppState::new(Arc::new(crate::Database::memory().unwrap()));
+        let path = prompt_file_path(&AppType::Codex).unwrap();
+        write_text_file(&path, &"personal\n".repeat(150_000)).unwrap();
+        let a = draft();
+        state.db.save_prompt("codex", &a).unwrap();
+        PromptService::enable_prompt(&state, AppType::Codex, &a.id).unwrap();
+        let b = Prompt {
+            id: "b".into(),
+            content: "b".repeat(1024 * 1024),
+            ..draft()
+        };
+        state.db.save_prompt("codex", &b).unwrap();
+        assert!(PromptService::enable_prompt(&state, AppType::Codex, &b.id).is_err());
+        let desired_b = PromptService::resource_id(&AppType::Codex, "b");
+        assert_eq!(
+            state.db.library_snapshot().unwrap().machine.assignments["instructions:codex"],
+            desired_b
+        );
+        PromptService::upsert_prompt(&state, AppType::Codex, &a.id, a.clone()).unwrap();
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("OFOX:BEGIN"));
+        assert_eq!(
+            state.db.library_snapshot().unwrap().machine.assignments["instructions:codex"],
+            desired_b
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn native_import_with_managed_markers_refuses_an_unusable_draft() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let state = AppState::new(Arc::new(crate::Database::memory().unwrap()));
+        let path = prompt_file_path(&AppType::Codex).unwrap();
+        write_text_file(&path, "personal\n").unwrap();
+        state.db.save_prompt("codex", &draft()).unwrap();
+        PromptService::enable_prompt(&state, AppType::Codex, "fixture").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(PromptService::import_from_file(&state, AppType::Codex).is_err());
+        assert_eq!(state.db.get_prompts("codex").unwrap().len(), 1);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
+    #[test]
+    #[serial]
+    fn startup_import_skips_managed_native_text() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let state = AppState::new(Arc::new(crate::Database::memory().unwrap()));
+        let path = prompt_file_path(&AppType::Codex).unwrap();
+        let text =
+            "personal\n<!-- OFOX:BEGIN instructions -->\nshared\n<!-- OFOX:END instructions -->\n";
+        write_text_file(&path, text).unwrap();
+        assert_eq!(
+            PromptService::import_from_file_on_first_launch(&state, AppType::Codex).unwrap(),
+            0
+        );
+        assert!(state.db.get_prompts("codex").unwrap().is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
+    fn draft() -> Prompt {
+        Prompt {
+            id: "fixture".into(),
+            name: "Fixture".into(),
+            content: "shared instructions".into(),
+            description: None,
+            enabled: false,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn saving_an_unassigned_draft_never_clears_native_instructions() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let state = AppState::new(Arc::new(crate::Database::memory().unwrap()));
+        let path = prompt_file_path(&AppType::Codex).unwrap();
+        write_text_file(&path, "user-owned instructions\n").unwrap();
+        PromptService::upsert_prompt(&state, AppType::Codex, "fixture", draft()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "user-owned instructions\n"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn enabling_a_prompt_preserves_bom_crlf_and_user_content() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let state = AppState::new(Arc::new(crate::Database::memory().unwrap()));
+        let path = prompt_file_path(&AppType::Codex).unwrap();
+        write_text_file(&path, "\u{feff}user-owned\r\n").unwrap();
+        state.db.save_prompt("codex", &draft()).unwrap();
+        PromptService::enable_prompt(&state, AppType::Codex, "fixture").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("\u{feff}user-owned\r\n"));
+        assert!(text.contains("<!-- OFOX:BEGIN instructions -->"));
+        assert!(text.contains("shared instructions"));
     }
 }

@@ -64,6 +64,12 @@ impl Database {
     /// 获取单个已安装的 Skill
     pub fn get_installed_skill(&self, id: &str) -> Result<Option<InstalledSkill>, AppError> {
         let conn = lock_conn!(self.conn);
+        Self::skill_from_connection(&conn, id)
+    }
+    pub(crate) fn skill_from_connection(
+        conn: &rusqlite::Connection,
+        id: &str,
+    ) -> Result<Option<InstalledSkill>, AppError> {
         let mut stmt = conn
             .prepare(
                 "SELECT id, name, description, directory, repo_owner, repo_name, repo_branch,

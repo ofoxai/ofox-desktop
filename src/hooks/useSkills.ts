@@ -321,6 +321,7 @@ export function useUpdateSkill() {
           return oldData.filter((u) => u.id !== updatedSkill.id);
         },
       );
+      return queryClient.invalidateQueries({ queryKey: ["library"] });
     },
   });
 }

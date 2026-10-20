@@ -20,7 +20,9 @@ impl ToolOperationGuard {
     pub(crate) fn acquire(tool: &str) -> Result<Self, String> {
         let mut busy = BUSY.lock().map_err(|e| e.to_string())?;
         if !busy.insert(tool.to_string()) {
-            return Err("An installation or update is already running for this tool".into());
+            return Err(
+                "An installation, update or uninstall is already running for this tool".into(),
+            );
         }
         Ok(Self(tool.to_string()))
     }
@@ -40,8 +42,36 @@ pub(crate) fn npm_package(tool: &str) -> Option<&'static str> {
         "gemini" => Some("@google/gemini-cli"),
         "opencode" => Some("opencode-ai"),
         "openclaw" => Some("openclaw"),
+        "dsh" => Some("@deepseek-ai/dsh"),
+        "pi" => Some("@earendil-works/pi-coding-agent"),
         _ => None,
     }
+}
+
+/// An existing legacy Pi installation stays on its original npm channel.
+pub(crate) fn installed_npm_package(tool: &str, path: &Path, real: &Path) -> Option<&'static str> {
+    if tool == "pi" {
+        const LEGACY: &str = "@mariozechner/pi-coding-agent";
+        let located = real
+            .to_string_lossy()
+            .replace('\\', "/")
+            .contains(&format!("/node_modules/{LEGACY}/"));
+        let shim = std::fs::File::open(path)
+            .ok()
+            .and_then(|file| {
+                use std::io::Read;
+                let mut text = String::new();
+                file.take(65536).read_to_string(&mut text).ok().map(|_| {
+                    text.replace('\\', "/")
+                        .contains(&format!("node_modules/{LEGACY}/"))
+                })
+            })
+            .unwrap_or(false);
+        if located || shim {
+            return Some(LEGACY);
+        }
+    }
+    npm_package(tool)
 }
 
 pub(crate) fn version_status(current: Option<&str>, latest: Option<&str>) -> &'static str {
@@ -167,9 +197,9 @@ pub(crate) fn shell_resolution(
 #[derive(Debug, Clone)]
 pub(crate) struct UpdatePlan {
     pub source: &'static str,
-    program: PathBuf,
-    args: Vec<String>,
-    path: String,
+    pub(crate) program: PathBuf,
+    pub(crate) args: Vec<String>,
+    pub(crate) path: String,
 }
 
 /// Windows has no login shell: resolve the CLI the way a terminal opened now
@@ -180,6 +210,12 @@ pub(crate) async fn probe(tool: &str) -> Result<Installation, ProbeError> {
     if npm_package(tool).is_none() && tool != "hermes" {
         return Err("Unsupported CLI".into());
     }
+    probe_executable(tool).await
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) async fn probe_executable(tool: &str) -> Result<Installation, ProbeError> {
+    validate_executable_name(tool)?;
     let path = super::windows_tools::find_tool(tool).ok_or(ProbeError::NotFound)?;
     let search_path = super::windows_tools::effective_path()
         .to_string_lossy()
@@ -214,6 +250,12 @@ pub(crate) async fn probe(tool: &str) -> Result<Installation, ProbeError> {
     if npm_package(tool).is_none() && tool != "hermes" {
         return Err("Unsupported CLI".into());
     }
+    probe_executable(tool).await
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) async fn probe_executable(tool: &str) -> Result<Installation, ProbeError> {
+    validate_executable_name(tool)?;
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let mut command = Command::new(shell);
     command.args(["-l", "-i", "-c", &format!(
@@ -248,6 +290,17 @@ pub(crate) async fn probe(tool: &str) -> Result<Installation, ProbeError> {
         error,
         search_path,
     })
+}
+
+fn validate_executable_name(tool: &str) -> Result<(), ProbeError> {
+    if tool.is_empty()
+        || !tool
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        return Err("Invalid executable name".into());
+    }
+    Ok(())
 }
 
 pub(crate) fn executable_version(
@@ -396,7 +449,7 @@ pub(crate) fn plan(tool: &str, install: &Installation) -> Result<UpdatePlan, Str
             ));
         }
     }
-    if let Some(package) = npm_package(tool) {
+    if let Some(package) = installed_npm_package(tool, &install.path, &install.real) {
         for ancestor in install.real.ancestors() {
             if ancestor.ends_with(Path::new("lib/node_modules").join(package)) {
                 let mut prefix = ancestor;
@@ -467,7 +520,7 @@ async fn resolve_plan_inner(tool: &str, install: &Installation) -> Result<Update
     if original.is_ok() || cfg!(target_os = "windows") {
         return original;
     }
-    let Some(package) = npm_package(tool) else {
+    let Some(package) = installed_npm_package(tool, &install.path, &install.real) else {
         return original;
     };
     let Some(bin_dir) = install.path.parent() else {
@@ -706,9 +759,13 @@ async fn chatgpt_running() -> Result<bool, String> {
 async fn perform_update<F: Fn(&str, &str)>(tool: &str, emit: F) -> Result<UpdateResult, String> {
     emit("checking", "");
     let install = probe(tool).await?;
-    let latest = super::misc::latest_tool_version(tool, Some(&install.version))
-        .await
-        .ok_or("Could not check latest stable version; retry later")?;
+    let latest = super::misc::latest_tool_version_for_package(
+        tool,
+        Some(&install.version),
+        installed_npm_package(tool, &install.path, &install.real),
+    )
+    .await
+    .ok_or("Could not check latest stable version; retry later")?;
     if install.error.is_none()
         && version_status(Some(&install.version), Some(&latest)) != "available"
     {
@@ -958,6 +1015,24 @@ pub(crate) fn desktop_from_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn native_npm_updates_keep_both_pi_channels_and_the_same_prefix() {
+        for (tool, package) in [
+            ("dsh", "@deepseek-ai/dsh"),
+            ("pi", "@earendil-works/pi-coding-agent"),
+            ("pi", "@mariozechner/pi-coding-agent"),
+        ] {
+            let root = "/Users/native 中文/node";
+            let real = format!("{root}/lib/node_modules/{package}/dist/cli.js");
+            let plan = plan(tool, &install(&format!("{root}/bin/{tool}"), &real)).unwrap();
+            assert_eq!(plan.source, "npm");
+            assert_eq!(plan.program, PathBuf::from(root).join("bin/npm"));
+            assert!(plan.args.contains(&format!("{package}@latest")));
+            assert!(plan.args.contains(&root.to_string()));
+        }
+    }
 
     fn shell_output(stdout: &str, code: i32) -> std::process::Output {
         probe_fixture_output(stdout, "", code)
@@ -1408,6 +1483,16 @@ mod tests {
         assert!(ToolOperationGuard::acquire("test-guard").is_err());
         drop(first);
         assert!(ToolOperationGuard::acquire("test-guard").is_ok());
+    }
+    #[test]
+    fn the_busy_message_names_every_operation_that_takes_the_lock() {
+        let _first = ToolOperationGuard::acquire("test-busy-message").unwrap();
+        let message = ToolOperationGuard::acquire("test-busy-message")
+            .err()
+            .unwrap();
+        for operation in ["installation", "update", "uninstall"] {
+            assert!(message.contains(operation), "{message}");
+        }
     }
     #[test]
     fn successful_exit_does_not_prove_update() {

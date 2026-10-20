@@ -4,10 +4,10 @@ use std::path::PathBuf;
 use cc_switch_lib::{AppError, MultiAppConfig};
 
 mod support;
-use support::{ensure_test_home, reset_test_fs, test_mutex};
+use support::sandbox;
 
 fn cfg_path() -> PathBuf {
-    let home = std::env::var("HOME").expect("HOME should be set by ensure_test_home");
+    let home = std::env::var("HOME").expect("HOME should be set by the sandbox");
     PathBuf::from(home)
         .join(".ofox-desktop")
         .join("config.json")
@@ -15,9 +15,8 @@ fn cfg_path() -> PathBuf {
 
 #[test]
 fn load_v1_config_returns_error_and_does_not_write() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let home = ensure_test_home();
+    let sandbox = sandbox();
+    let home = sandbox.home();
     let path = cfg_path();
     fs::create_dir_all(path.parent().unwrap()).expect("create cfg dir");
 
@@ -41,9 +40,8 @@ fn load_v1_config_returns_error_and_does_not_write() {
 
 #[test]
 fn load_v1_with_extra_version_still_treated_as_v1() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let home = ensure_test_home();
+    let sandbox = sandbox();
+    let home = sandbox.home();
     let path = cfg_path();
     std::fs::create_dir_all(path.parent().unwrap()).expect("create cfg dir");
 
@@ -66,9 +64,8 @@ fn load_v1_with_extra_version_still_treated_as_v1() {
 
 #[test]
 fn load_invalid_json_returns_parse_error_and_does_not_write() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let home = ensure_test_home();
+    let sandbox = sandbox();
+    let home = sandbox.home();
     let path = cfg_path();
     fs::create_dir_all(path.parent().unwrap()).expect("create cfg dir");
 
@@ -89,9 +86,7 @@ fn load_invalid_json_returns_parse_error_and_does_not_write() {
 
 #[test]
 fn load_valid_v2_config_succeeds() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
     let path = cfg_path();
     fs::create_dir_all(path.parent().unwrap()).expect("create cfg dir");
 

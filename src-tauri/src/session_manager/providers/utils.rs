@@ -5,9 +5,6 @@ use std::path::Path;
 use chrono::{DateTime, FixedOffset};
 use serde_json::Value;
 
-/// Maximum number of characters for session titles (shared across providers).
-pub const TITLE_MAX_CHARS: usize = 80;
-
 /// Read the first `head_n` lines and last `tail_n` lines from a file.
 /// For small files (< 16 KB), reads all lines once to avoid unnecessary seeking.
 pub fn read_head_tail_lines(
@@ -15,6 +12,24 @@ pub fn read_head_tail_lines(
     head_n: usize,
     tail_n: usize,
 ) -> io::Result<(Vec<String>, Vec<String>)> {
+    if path.extension().is_some_and(|e| e == "zst" || e == "zstd") {
+        let reader = super::dsh::open(path).map_err(io::Error::other)?;
+        let mut head = Vec::new();
+        let mut tail = std::collections::VecDeque::with_capacity(tail_n);
+        for line in BufReader::new(reader).lines() {
+            let line = line?;
+            if head.len() < head_n {
+                head.push(line.clone());
+            }
+            if tail_n > 0 {
+                if tail.len() == tail_n {
+                    tail.pop_front();
+                }
+                tail.push_back(line);
+            }
+        }
+        return Ok((head, tail.into()));
+    }
     let file = File::open(path)?;
     let file_len = file.metadata()?.len();
 
@@ -48,14 +63,39 @@ pub fn read_head_tail_lines(
     Ok((head, tail))
 }
 
+/// Each line of a session file (a zstd one decompressed), in order. A line
+/// that is not UTF-8 is skipped.
+pub fn for_each_line(path: &Path, mut visit: impl FnMut(&str)) -> io::Result<()> {
+    let reader = super::dsh::open(path).map_err(io::Error::other)?;
+    let mut reader = BufReader::with_capacity(256 * 1024, reader);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        if reader.read_until(b'\n', &mut buf)? == 0 {
+            return Ok(());
+        }
+        if let Ok(line) = std::str::from_utf8(&buf) {
+            visit(line.trim_end());
+        }
+    }
+}
+
 pub fn parse_timestamp_to_ms(value: &Value) -> Option<i64> {
     // Integer: milliseconds (>1e12) or seconds
     if let Some(n) = value.as_i64() {
-        return Some(if n > 1_000_000_000_000 { n } else { n * 1000 });
+        return if n > 1_000_000_000_000 {
+            Some(n)
+        } else {
+            n.checked_mul(1000)
+        };
     }
     if let Some(n) = value.as_f64() {
         let n = n as i64;
-        return Some(if n > 1_000_000_000_000 { n } else { n * 1000 });
+        return if n > 1_000_000_000_000 {
+            Some(n)
+        } else {
+            n.checked_mul(1000)
+        };
     }
     // RFC3339 string
     let raw = value.as_str()?;
@@ -91,7 +131,22 @@ fn extract_text_from_item(item: &Value) -> Option<String> {
             .get("name")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
-        return Some(format!("[Tool: {name}]"));
+        return Some(format!(
+            "[Tool: {name}]\n{}",
+            item.get("input")
+                .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+                .unwrap_or_default()
+        ));
+    }
+
+    if item_type == "thinking" {
+        return item
+            .get("thinking")
+            .and_then(Value::as_str)
+            .map(|s| format!("[Thinking]\n{s}"));
+    }
+    if item_type == "image" || item_type == "input_image" {
+        return Some("[Image]".into());
     }
 
     // tool_result: extract nested content
@@ -172,6 +227,16 @@ mod tests {
         assert_eq!(
             parse_timestamp_to_ms(&json!("1970-01-01T00:00:01Z")),
             Some(1_000)
+        );
+    }
+
+    #[test]
+    fn parse_timestamp_to_ms_rejects_overflowing_negative_seconds() {
+        assert_eq!(parse_timestamp_to_ms(&json!(i64::MIN)), None);
+        assert_eq!(parse_timestamp_to_ms(&json!(-1.0e100_f64)), None);
+        assert_eq!(
+            parse_timestamp_to_ms(&json!(i64::MIN / 1000)),
+            Some((i64::MIN / 1000) * 1000)
         );
     }
 }

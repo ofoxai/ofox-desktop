@@ -32,6 +32,48 @@ Shared configuration stays bound until its final holder is removed. Errors keep
 the home-page binding available for retry. Unbinding does not uninstall software,
 delete conversations/caches, or revoke remote API keys.
 
+### Unbind restores only what OFox still owns
+
+Each write OFox makes to a bound tool's managed fields records what it wrote in
+the binding record (`written`, per managed file): bind (including repair and
+rebind), key replacement, model save, missing-binding restore, rewriting a
+bound configuration from its template, region reconciliation, the legacy Codex
+migration, aligning the Claude/Gemini env model with the model the agent
+remembers, and removing the `disable_response_storage` flag a Codex launch finds
+ignored. The one other managed write, Gemini's launch self-heal of the API-key
+sign-in, sets the value bind already recorded. Keys and tokens are stored as
+SHA-256 digests only. A field OFox left untouched keeps its earlier entry, so a
+value the user changed is never recorded as OFox's when OFox later rewrites the
+file around it. If the record cannot be saved, the write is rolled back.
+
+On unbind each managed field is judged on its own:
+
+- **Route** (provider id, the OFox provider entry, base URL, token/key): restored
+  when it is still what OFox wrote or still looks like OFox (the `ofox` provider
+  id, an OFox gateway URL, an `sk-of-` key). A route the user pointed at their own
+  provider is kept. OpenClaw's default model names its provider
+  (`ofox-openclaw/<model>`), so it is a route of its own.
+- **Model** (Codex `model`, Claude's `ANTHROPIC_DEFAULT_MODEL` and family
+  aliases, the legacy `ANTHROPIC_MODEL` / `GEMINI_MODEL`, the model the
+  agent remembers — Claude's top-level `model`, Gemini's `model.name` in
+  `settings.json`, whose route is the `.env` base URL — and Hermes
+  `model.default`): restored when it is still what OFox wrote, or when its route
+  is restored. A model picked in the agent goes back with the OFox route, and an
+  OFox model id never stays behind under the user's own provider.
+- **Preference** (Codex `model_reasoning_effort`, `disable_response_storage`,
+  Gemini's sign-in type, OpenClaw `models.mode`, OpenCode `$schema`): restored only
+  when it is still what OFox wrote.
+
+A managed field that is absent at unbind (deleted while bound, or moved away by
+the agent) gets its pre-bind value back, as magpie's Disconnect refills an empty
+field; one that had no pre-bind value stays absent.
+
+Kept fields that differ from the pre-bind value are listed in the report's
+`keptKeys` (names only, no values) with the `userValueKept` warning; preview and
+unbind report the same. Records written before this rule (no `written`), and
+files whose configuration directory moved since binding, restore every managed
+field as before.
+
 Adding tools binds only newly selected tools and merges their successful results
 with existing bindings. Startup repair, model saves, and opening a configuration
 folder do not recreate deliberately deleted configuration. Recovery is a separate
@@ -91,8 +133,10 @@ credits. Signing out does not restore pre-bind settings; Unbind does that.
   credentials cross this interface.
 - `ofox_restore_tool_binding { app, stillBound }`: explicitly restores missing
   OFox configuration, revalidating it under the same locks used for binding writes.
-- Existing unbind reports add the `configAlreadyMissing` warning. The binding
-  list and snapshot storage formats are unchanged.
+- Existing unbind reports add the `configAlreadyMissing` and `userValueKept`
+  warnings and `keptKeys`. The binding record gains an optional `written` map
+  (record version unchanged; older builds ignore it); the binding list format is
+  unchanged.
 - `ofox_logout`: revokes this account's keys, then clears the sign-in. Returns
   `stopped` tools and `notRevoked` tools (server revoke failed, queued for deletion).
 - `ofox_reconcile_tool_keys`: called after sign-in; replaces keys that are revoked

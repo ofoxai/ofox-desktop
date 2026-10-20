@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["vite/client"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable"]
+  },
+  "include": [
+    "session-workbench-benchmark.tsx",
+    "session-workbench-benchmark-native.ts"
+  ],
+  "references": []
+}

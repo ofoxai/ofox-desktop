@@ -88,6 +88,7 @@ pub fn import_mcp_from_deeplink(
         ));
     }
 
+    let _io = crate::config_io::lock();
     // Get existing servers to check for duplicates
     let existing_servers = state.db.get_all_mcp_servers()?;
 
@@ -96,6 +97,10 @@ pub fn import_mcp_from_deeplink(
     let mut failed = Vec::new();
 
     for (id, server_spec) in mcp_servers.iter() {
+        // An import is a draft, never a stale edit or a target assignment.
+        if existing_servers.contains_key(id) {
+            continue;
+        }
         // Check if server already exists
         let server = if let Some(existing) = existing_servers.get(id) {
             // Server exists - merge apps only, keep other fields unchanged

@@ -1,0 +1,63 @@
+{
+  "sourceVersion": "2026.10.3",
+  "nodeVersion": "24.21.0",
+  "schemaVersion": 24,
+  "agentId": "main",
+  "sessionId": "native-usage-fixture",
+  "events": [
+    {
+      "seq": 0,
+      "utf8Bytes": 122,
+      "event": {
+        "type": "session",
+        "version": 4,
+        "id": "native-usage-fixture",
+        "cwd": "/fixture/project",
+        "timestamp": "2026-10-15T00:00:00.000Z"
+      }
+    },
+    {
+      "seq": 1,
+      "utf8Bytes": 456,
+      "event": {
+        "type": "message",
+        "id": "a1",
+        "parentId": null,
+        "timestamp": "2026-10-15T00:00:01.123Z",
+        "message": {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "short fixture"
+            }
+          ],
+          "api": "openai-responses",
+          "provider": "fixture-provider",
+          "model": "fixture-model",
+          "usage": {
+            "input": 40,
+            "output": 10,
+            "cacheRead": 100,
+            "cacheWrite": 20,
+            "totalTokens": 170,
+            "cost": {
+              "input": 0.04,
+              "output": 0.01,
+              "cacheRead": 0.1,
+              "cacheWrite": 0.02,
+              "total": 0.17
+            }
+          },
+          "timestamp": 1792022401123,
+          "stopReason": "stop"
+        }
+      }
+    },
+    {
+      "seq": 2,
+      "utf8Bytes": 180443,
+      "zstdHex": "28b52ffda4dbc00200fc030002c91b1d70c5cd18a049bf34b5de908f2190735f7800320d412284bce4fdff7d0187368d7596e25080b5c9c6d7d11dbd8e2e025fa6cb96c4e865b96db596e3ca589a1f441f042a05d2e11dde190609b98410d4a97146c96daaac1d9d723c292cd32699d12ac793355a17d99a2ae3ca04ec4f03006dfdcb64871ff54f4e81cdad0500c2cb221d6049db06f6c2f6730b37da5aeb8d304601c0aec64dbbb0d600020038176b5d6df3f369f9e8416df30dc0201e61cc998002d72ab05cde5c392c87578eb872cd6bdcaec03c273d580184d3dbb733796d840c1ce68fa30735308e713bcc77a23ad9db11f94e54425fc86bc1e1e486a0c726dc0ccf237a208545d4edac9c56b122067492aa7d1ea9732358d70d0083c0e2700d6704e4608101129958b149a860de01a999c3fa3466b3dc74ff46565e7f3a1002b6d76295"
+    }
+  ]
+}

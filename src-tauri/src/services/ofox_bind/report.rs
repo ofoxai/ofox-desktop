@@ -23,6 +23,8 @@ pub struct UnbindReport {
     pub exact_files: Vec<String>,
     pub restored_keys: Vec<String>,
     pub removed_keys: Vec<String>,
+    /// 绑定后用户自己改过、所以留着没还原的字段（`<文件>: <字段>`，没有值）。
+    pub kept_keys: Vec<String>,
     pub files_removed: Vec<String>,
     pub provider_restored_to: Option<String>,
     /// 共用配置的其它绑定方还在用 Ofox，所以配置没动。
@@ -51,7 +53,7 @@ impl UnbindReport {
 pub(crate) fn display_path(path: &std::path::Path) -> String {
     let home = crate::config::get_home_dir();
     match path.strip_prefix(&home) {
-        Ok(rest) => format!("~/{}", rest.display()),
+        Ok(rest) => format!("~/{}", crate::config::tilde_rest(rest)),
         Err(_) => path.display().to_string(),
     }
 }

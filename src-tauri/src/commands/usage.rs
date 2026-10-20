@@ -62,23 +62,138 @@ pub fn get_model_stats(
 }
 
 /// 获取请求日志列表
+///
+/// Async so a large history is read off the main thread, as the overview is.
 #[tauri::command]
-pub fn get_request_logs(
+pub async fn get_request_logs(
     state: State<'_, AppState>,
-    filters: LogFilters,
+    filters: Option<LogFilters>,
     page: u32,
     page_size: u32,
-) -> Result<PaginatedLogs, AppError> {
-    state.db.get_request_logs(&filters, page, page_size)
+    query: Option<crate::services::usage_query::UsageQueryV1>,
+    request_filters: Option<crate::services::usage_data::RequestFilters>,
+    snapshot_id: Option<String>,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(query) = query {
+        if filters.as_ref().is_some_and(|f| {
+            f.app_type.is_some()
+                || f.provider_name.is_some()
+                || f.model.is_some()
+                || f.status_code.is_some()
+                || f.start_date.is_some()
+                || f.end_date.is_some()
+        }) {
+            return Err(AppError::InvalidInput(
+                "usage.requests.conflictingLegacyFilters".into(),
+            ));
+        }
+        let db = state.db.clone();
+        let apex = crate::ofox_apex::current_apex();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::services::usage_requests::request_page(
+                &db,
+                query,
+                request_filters.unwrap_or_default(),
+                crate::services::usage_requests::Pagination { page, page_size },
+                snapshot_id.as_deref(),
+                apex,
+                now_ms,
+            )
+        })
+        .await
+        .map_err(|e| AppError::Message(format!("usage requests task failed: {e}")))??;
+        serde_json::to_value(result).map_err(|e| AppError::Database(e.to_string()))
+    } else {
+        if request_filters.is_some() || snapshot_id.is_some() {
+            return Err(AppError::InvalidInput(
+                "usage.requests.queryRequired".into(),
+            ));
+        }
+        serde_json::to_value(state.db.get_request_logs(
+            &filters.unwrap_or_default(),
+            page,
+            page_size,
+        )?)
+        .map_err(|e| AppError::Database(e.to_string()))
+    }
 }
 
-/// 获取单个请求详情
+/// Existing callers keep the legacy row shape; a snapshot pins both data and prices.
 #[tauri::command]
 pub fn get_request_detail(
     state: State<'_, AppState>,
     request_id: String,
-) -> Result<Option<RequestLogDetail>, AppError> {
-    state.db.get_request_detail(&request_id)
+    snapshot_id: Option<String>,
+) -> Result<serde_json::Value, AppError> {
+    if let Some(snapshot_id) = snapshot_id {
+        serde_json::to_value(crate::services::usage_requests::request_detail(
+            &request_id,
+            &snapshot_id,
+        )?)
+        .map_err(|e| AppError::Database(e.to_string()))
+    } else {
+        serde_json::to_value(state.db.get_request_detail(&request_id)?)
+            .map_err(|e| AppError::Database(e.to_string()))
+    }
+}
+
+#[tauri::command]
+pub fn export_request_logs_csv(
+    snapshot_id: String,
+    destination: Option<String>,
+) -> Result<crate::services::usage_requests::CsvExport, AppError> {
+    crate::services::usage_requests::export_csv(&snapshot_id, destination.as_deref())
+}
+
+#[tauri::command]
+pub fn get_usage_capabilities() -> serde_json::Value {
+    serde_json::json!({"queryVersion":1,"requestSnapshots":true,"csv":true,"projectFilter":true,
+        "localRefresh":true,"sessionAnalytics":true,"sessionProjectFilter":true,"nativeRebuild":true,
+        "sources":crate::services::usage_query::source_capabilities()})
+}
+
+#[cfg(test)]
+mod workbench_capability_tests {
+    #[test]
+    fn workbench_capability_exposes_the_integrated_local_and_cached_query_paths() {
+        let value = super::get_usage_capabilities();
+        for key in [
+            "localRefresh",
+            "sessionAnalytics",
+            "sessionProjectFilter",
+            "projectFilter",
+        ] {
+            assert_eq!(value[key], true, "missing integrated capability {key}");
+        }
+    }
+    #[test]
+    fn workbench_capability_registry_only_claims_native_analytics_for_bridged_readers() {
+        for capability in crate::services::usage_query::source_capabilities() {
+            let supported = [
+                "claude",
+                "codex",
+                "gemini",
+                "opencode",
+                "workbuddy",
+                "pi",
+                "dsh",
+                "openclaw",
+                "hermes",
+            ]
+            .contains(&capability.tool_id.as_str());
+            assert_eq!(
+                capability.session_analytics_supported, supported,
+                "{} analytics bridge",
+                capability.tool_id
+            );
+            assert_eq!(
+                capability.project_filter_supported, supported,
+                "{} project bridge",
+                capability.tool_id
+            );
+        }
+    }
 }
 
 /// 获取模型定价列表
@@ -194,10 +309,16 @@ pub fn delete_model_pricing(state: State<'_, AppState>, model_id: String) -> Res
 ///
 /// 兼带 Ofox pricing 强制刷新（无 cooldown）—— 用户点「刷新」就是想看到
 /// 最新的成本估算，包括新上线模型的 pricing。pricing 失败不阻塞日志同步。
+/// The sync itself is `usage_sync::sync_all` forced (never skipped), which reads
+/// every session source, runs pending maintenance and emits `usage-synced`.
 #[tauri::command]
 pub async fn sync_session_usage(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<crate::services::session_usage::SessionSyncResult, AppError> {
+    // Codex / Claude sessions may live in CODEX_HOME / CLAUDE_CONFIG_DIR.
+    crate::agent_env::ready().await;
+
     // Pricing 刷新放在 session 解析之前：session_usage_* 在写入每条
     // proxy_request_logs 时按 model 查 model_pricing 算费用，先把表更新
     // 到最新版本，刚刚还没收录的模型这次同步即可正确计费。
@@ -205,36 +326,45 @@ pub async fn sync_session_usage(
         log::warn!("Pricing sync during manual refresh failed: {e}");
     }
 
-    // 同步 Claude 会话日志
-    let mut result = crate::services::session_usage::sync_claude_session_logs(&state.db)?;
+    let result = crate::services::usage_sync::sync_all_and_emit(&app, &state.db, true).await?;
+    Ok(
+        result.unwrap_or(crate::services::session_usage::SessionSyncResult {
+            imported: 0,
+            skipped: 0,
+            files_scanned: 0,
+            errors: vec![],
+        }),
+    )
+}
 
-    // 同步 Codex 使用数据
-    match crate::services::session_usage_codex::sync_codex_usage(&state.db) {
-        Ok(codex_result) => {
-            result.imported += codex_result.imported;
-            result.skipped += codex_result.skipped;
-            result.files_scanned += codex_result.files_scanned;
-            result.errors.extend(codex_result.errors);
-        }
-        Err(e) => {
-            result.errors.push(format!("Codex 同步失败: {e}"));
-        }
-    }
+/// Local polling refreshes native facts and analytics without pricing or
+/// account requests. Unchanged revisions return the compatible empty result.
+#[tauri::command]
+pub async fn refresh_local_usage(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<crate::services::session_usage::SessionSyncResult, AppError> {
+    let result = crate::services::usage_sync::sync_all_and_emit(&app, &state.db, false).await?;
+    Ok(
+        result.unwrap_or(crate::services::session_usage::SessionSyncResult {
+            imported: 0,
+            skipped: 0,
+            files_scanned: 0,
+            errors: vec![],
+        }),
+    )
+}
 
-    // 同步 Gemini 使用数据
-    match crate::services::session_usage_gemini::sync_gemini_usage(&state.db) {
-        Ok(gemini_result) => {
-            result.imported += gemini_result.imported;
-            result.skipped += gemini_result.skipped;
-            result.files_scanned += gemini_result.files_scanned;
-            result.errors.extend(gemini_result.errors);
-        }
-        Err(e) => {
-            result.errors.push(format!("Gemini 同步失败: {e}"));
-        }
-    }
+#[tauri::command]
+pub fn get_usage_rebuild_progress() -> Option<crate::services::usage_rebuild::RebuildProgress> {
+    crate::services::usage_rebuild::progress()
+}
 
-    Ok(result)
+#[tauri::command(rename_all = "camelCase")]
+pub fn cancel_usage_rebuild(
+    operation_id: String,
+) -> Result<crate::services::usage_rebuild::RebuildProgress, AppError> {
+    crate::services::usage_rebuild::cancel(&operation_id)
 }
 
 /// 获取数据来源分布

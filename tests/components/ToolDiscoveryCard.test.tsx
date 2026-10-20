@@ -128,7 +128,7 @@ describe("ToolDiscoveryCard 的安装进度展示", () => {
     expect(
       screen.queryByRole("button", { name: "安装" }),
     ).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "在主页管理" }));
+    fireEvent.click(screen.getByRole("button", { name: "在主页配置" }));
     expect(manage).toHaveBeenCalledOnce();
     expect(install).not.toHaveBeenCalled();
   });

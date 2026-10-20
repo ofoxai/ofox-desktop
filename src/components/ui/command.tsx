@@ -10,7 +10,7 @@ const Command = React.forwardRef<
   <CommandPrimitive
     ref={ref}
     className={cn(
-      "flex h-full w-full flex-col overflow-hidden rounded-md bg-popover text-popover-foreground",
+      "flex h-full w-full flex-col overflow-hidden rounded-pop bg-transparent text-popover-foreground",
       className,
     )}
     {...props}
@@ -23,14 +23,14 @@ const CommandInput = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof CommandPrimitive.Input>
 >(({ className, ...props }, ref) => (
   <div
-    className="flex items-center border-b px-3 focus-within:outline-none focus-within:ring-0"
+    className="flex items-center gap-2 border-b border-line-2 px-3 text-ink-faint focus-within:outline-none focus-within:ring-0"
     cmdk-input-wrapper=""
   >
-    <Search className="mr-2 h-4 w-4 shrink-0 opacity-50" />
+    <Search className="h-3.5 w-3.5 shrink-0" />
     <CommandPrimitive.Input
       ref={ref}
       className={cn(
-        "flex h-9 w-full rounded-md bg-transparent py-3 text-sm outline-none ring-0 focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0 focus-visible:ring-offset-0 placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50",
+        "flex h-9 w-full bg-transparent text-ui text-foreground outline-none ring-0 focus:outline-none focus:ring-0 focus-visible:outline-none focus-visible:ring-0 focus-visible:ring-offset-0 placeholder:text-ink-faint disabled:cursor-not-allowed disabled:opacity-50",
         className,
       )}
       {...props}
@@ -46,16 +46,19 @@ const CommandList = React.forwardRef<
   <CommandPrimitive.List
     ref={ref}
     className={cn(
-      // Tailwind arbitrary props override the global `* { scrollbar-width:
-      // none }` / `::-webkit-scrollbar { display: none }` rules in
-      // index.css. Without these, the cmdk list scrolls but the user has
-      // no visual indicator that more items exist below the fold.
+      // Tailwind arbitrary props override index.css's platform scrollbar
+      // rules (`:where(html.mac) * { scrollbar-width: none }`, the Mac's
+      // hidden `::-webkit-scrollbar`, and the other platforms' 10px bar with
+      // a 3px transparent thumb border, which would leave nothing of a 6px
+      // thumb); those rules are kept at zero specificity so these win.
+      // Without them the cmdk list scrolls but the user has no visual
+      // indicator that more items exist below the fold.
       "max-h-[300px] overflow-y-auto overflow-x-hidden " +
         "[scrollbar-width:thin] " +
         "[&::-webkit-scrollbar]:block [&::-webkit-scrollbar]:w-1.5 " +
         "[&::-webkit-scrollbar-thumb]:rounded-full " +
-        "[&::-webkit-scrollbar-thumb]:bg-gray-300 " +
-        "dark:[&::-webkit-scrollbar-thumb]:bg-gray-600",
+        "[&::-webkit-scrollbar-thumb]:border-0 " +
+        "[&::-webkit-scrollbar-thumb]:bg-ink-faint",
       className,
     )}
     {...props}
@@ -69,7 +72,7 @@ const CommandEmpty = React.forwardRef<
 >((props, ref) => (
   <CommandPrimitive.Empty
     ref={ref}
-    className="py-6 text-center text-sm"
+    className="px-3 py-6 text-center text-ctl text-ink-muted"
     {...props}
   />
 ));
@@ -82,7 +85,7 @@ const CommandGroup = React.forwardRef<
   <CommandPrimitive.Group
     ref={ref}
     className={cn(
-      "overflow-hidden p-1 text-foreground [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-muted-foreground",
+      "overflow-hidden p-1 text-foreground [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:pt-1.5 [&_[cmdk-group-heading]]:text-micro [&_[cmdk-group-heading]]:font-semibold [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-[.05em] [&_[cmdk-group-heading]]:text-ink-faint",
       className,
     )}
     {...props}
@@ -97,7 +100,7 @@ const CommandItem = React.forwardRef<
   <CommandPrimitive.Item
     ref={ref}
     className={cn(
-      "relative flex cursor-default gap-2 select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none data-[selected=true]:bg-accent data-[selected=true]:text-accent-foreground data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+      "relative flex min-h-[30px] cursor-default select-none items-center gap-2 rounded-ctl px-2 py-1 text-nav outline-none data-[selected=true]:bg-pill data-[selected=true]:text-ink data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
       className,
     )}
     {...props}

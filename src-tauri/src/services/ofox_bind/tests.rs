@@ -37,7 +37,13 @@ impl Home {
                 Some(dir.path().join("AppData").join("Local")),
             ),
             ("APPDATA", Some(dir.path().join("AppData").join("Roaming"))),
+            ("CODEX_HOME", None),
+            ("CLAUDE_CONFIG_DIR", None),
             ("HERMES_HOME", None),
+            // Linux runners export the XDG dirs; OpenCode follows XDG_CONFIG_HOME.
+            ("XDG_CONFIG_HOME", None),
+            ("XDG_DATA_HOME", None),
+            ("XDG_CACHE_HOME", None),
             ("XDG_STATE_HOME", None),
             ("OFOX_USE_LOCAL", None),
         ];
@@ -141,6 +147,49 @@ fn toml_at(path: &Path) -> toml::Table {
     toml::from_str(&fs::read_to_string(path).unwrap()).unwrap()
 }
 
+/// 解析不了的配置文件里有用户自己的 key：报错只说行列和原因，不能把那一行带出来。
+const LEAKY_KEY: &str = "sk-of-abc123456789";
+
+#[tokio::test]
+#[serial]
+async fn bind_error_for_an_unparseable_codex_config_does_not_echo_the_key_in_it() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    let broken = format!("model = \"gpt-5\"\nexperimental_bearer_token = \"{LEAKY_KEY}\" oops\n");
+    write(&config, &broken);
+    let db = db_with_default_provider();
+
+    let error = bind(&db, Tool::Codex, "codex", KEY).await.unwrap_err();
+
+    assert!(error.contains("line 2, column"), "{error}");
+    assert!(!error.contains("abc123456789"), "{error}");
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        broken,
+        "file untouched"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn unbind_error_for_a_codex_config_broken_after_binding_does_not_echo_the_key_in_it() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    let broken = format!("experimental_bearer_token = \"{LEAKY_KEY}\" oops\n");
+    write(&config, &broken);
+
+    let outcome = unbind(&db, Tool::Codex, "codex", &[], false).await;
+
+    let shown = match outcome {
+        Ok(report) => format!("{report:?}"),
+        Err(error) => error,
+    };
+    assert!(!shown.contains("abc123456789"), "{shown}");
+}
+
 #[tokio::test]
 #[serial]
 async fn chatgpt_oauth_login_is_untouched_and_config_restored_byte_for_byte() {
@@ -216,29 +265,111 @@ async fn bind_never_creates_auth_json_and_unbind_removes_what_bind_created() {
     assert_eq!(report.files_removed.len(), 1);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 #[serial]
-async fn managed_keys_revert_even_if_edited_while_bound_and_new_mcp_is_kept() {
+async fn a_codex_config_created_by_bind_is_private_and_leaves_no_temp_file() {
+    let home = Home::new();
+    let db = db_with_default_provider();
+
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+
+    assert_eq!(
+        crate::config::file_mode(&home.codex("config.toml")),
+        Some(0o600)
+    );
+    let names: Vec<_> = fs::read_dir(home.codex(""))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["config.toml"]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn bind_writes_through_a_symlinked_codex_config_and_keeps_the_link() {
+    let home = Home::new();
+    let dotfiles = home.dir.path().join("dotfiles/codex.toml");
+    write(&dotfiles, USER_CONFIG);
+    fs::create_dir_all(home.codex("")).unwrap();
+    std::os::unix::fs::symlink(&dotfiles, home.codex("config.toml")).unwrap();
+    let db = db_with_default_provider();
+
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+
+    let link = fs::symlink_metadata(home.codex("config.toml")).unwrap();
+    assert!(link.file_type().is_symlink(), "the link was replaced");
+    let bound = toml_at(&dotfiles);
+    assert_eq!(
+        bound["model_providers"]["ofox"]["experimental_bearer_token"].as_str(),
+        Some(KEY)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn unbind_leaves_no_key_file_behind_a_dangling_codex_config_symlink() {
+    let home = Home::new();
+    let target = home.dir.path().join("dotfiles/codex.toml");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::create_dir_all(home.codex("")).unwrap();
+    std::os::unix::fs::symlink(&target, home.codex("config.toml")).unwrap();
+    let db = db_with_default_provider();
+
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    assert!(fs::read_to_string(&target).unwrap().contains(KEY));
+    unbind(&db, Tool::Codex, "codex", &[], false)
+        .await
+        .expect("unbind");
+
+    assert!(!target.exists(), "the file holding the key is gone");
+    let link = fs::symlink_metadata(home.codex("config.toml")).unwrap();
+    assert!(link.file_type().is_symlink(), "the link is as it was");
+}
+
+const SHOWN_CONFIG: &str = "~/.codex/config.toml";
+
+fn shown(key: &str) -> String {
+    format!("{SHOWN_CONFIG}: {key}")
+}
+
+fn kept_warning(report: &UnbindReport) -> bool {
+    report
+        .warnings
+        .iter()
+        .any(|warning| warning.code == "userValueKept")
+}
+
+#[tokio::test]
+#[serial]
+async fn effort_the_user_changed_while_bound_is_kept_and_reported_and_new_mcp_stays() {
     let home = Home::new();
     let config = home.codex("config.toml");
     write(&config, USER_CONFIG);
     let db = db_with_default_provider();
     bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
-
-    let edited = fs::read_to_string(&config).unwrap().replace(
+    edit_text(
+        &config,
         "model_reasoning_effort = \"high\"",
         "model_reasoning_effort = \"low\"",
-    ) + "\n[mcp_servers.added]\ncommand = \"x\"\n";
+    );
+    let edited = fs::read_to_string(&config).unwrap() + "\n[mcp_servers.added]\ncommand = \"x\"\n";
     write(&config, &edited);
-    // 再绑一次（添加工具会重绑所有工具）：快照不能被覆盖。
+    // 再绑一次（添加工具会重绑所有工具）：Ofox 留下的用户的值不能变成「Ofox 写的」。
     bind(&db, Tool::Codex, "codex", KEY).await.expect("rebind");
 
-    unbind(&db, Tool::Codex, "codex", &[], false)
+    let preview = unbind(&db, Tool::Codex, "codex", &[], true)
+        .await
+        .expect("preview");
+    let report = unbind(&db, Tool::Codex, "codex", &[], false)
         .await
         .expect("unbind");
+
     let restored = toml_at(&config);
+    assert_eq!(restored["model_reasoning_effort"].as_str(), Some("low"));
     assert_eq!(restored["model"].as_str(), Some("gpt-5-codex"));
-    assert_eq!(restored["model_reasoning_effort"].as_str(), Some("medium"));
     assert!(restored.get("model_provider").is_none());
     assert!(restored.get("model_providers").is_none());
     assert_eq!(
@@ -249,6 +380,207 @@ async fn managed_keys_revert_even_if_edited_while_bound_and_new_mcp_is_kept() {
         restored["mcp_servers"]["docs"]["command"].as_str(),
         Some("docs-mcp")
     );
+    for report in [&preview, &report] {
+        assert_eq!(report.kept_keys, [shown("model_reasoning_effort")]);
+        assert!(kept_warning(report), "{report:?}");
+        assert!(!format!("{report:?}").contains("\"low\""), "names only");
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn an_effort_left_as_ofox_wrote_it_is_restored_while_a_changed_flag_is_kept() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    super::codex_probe::set_override(Some(super::codex_probe::FlagSupport::Known));
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    super::codex_probe::set_override(None);
+    edit_text(
+        &config,
+        "disable_response_storage = true",
+        "disable_response_storage = false",
+    );
+
+    let report = unbind(&db, Tool::Codex, "codex", &[], false)
+        .await
+        .expect("unbind");
+
+    let restored = toml_at(&config);
+    assert_eq!(restored["model_reasoning_effort"].as_str(), Some("medium"));
+    assert_eq!(restored["disable_response_storage"].as_bool(), Some(false));
+    assert_eq!(report.kept_keys, [shown("disable_response_storage")]);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_model_picked_in_the_cli_goes_back_with_the_ofox_provider() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    switch_codex_model_in_cli(&config, "anthropic/claude-x");
+    edit_text(
+        &config,
+        "model_reasoning_effort = \"high\"",
+        "model_reasoning_effort = \"low\"",
+    );
+
+    let report = unbind(&db, Tool::Codex, "codex", &[], false)
+        .await
+        .expect("unbind");
+
+    let restored = toml_at(&config);
+    assert_eq!(restored["model"].as_str(), Some("gpt-5-codex"));
+    assert_eq!(restored["model_reasoning_effort"].as_str(), Some("low"));
+    assert_eq!(report.kept_keys, [shown("model_reasoning_effort")]);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_provider_the_user_repointed_to_their_own_relay_is_kept_with_its_model() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    edit_text(
+        &config,
+        "model_provider = \"ofox\"",
+        "model_provider = \"myrelay\"",
+    );
+    switch_codex_model_in_cli(&config, "relay-model");
+    let relay = fs::read_to_string(&config).unwrap()
+        + "\n[model_providers.myrelay]\nbase_url = \"https://relay.example/v1\"\n";
+    write(&config, &relay);
+
+    let report = unbind(&db, Tool::Codex, "codex", &[], false)
+        .await
+        .expect("unbind");
+
+    let restored = toml_at(&config);
+    assert_eq!(restored["model_provider"].as_str(), Some("myrelay"));
+    assert_eq!(restored["model"].as_str(), Some("relay-model"));
+    assert_eq!(
+        restored["model_providers"]["myrelay"]["base_url"].as_str(),
+        Some("https://relay.example/v1")
+    );
+    assert!(restored["model_providers"].get("ofox").is_none());
+    assert_eq!(restored["model_reasoning_effort"].as_str(), Some("medium"));
+    assert_eq!(report.kept_keys, [shown("model"), shown("model_provider")]);
+}
+
+#[tokio::test]
+#[serial]
+async fn the_ofox_model_does_not_stay_under_the_users_own_provider() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    edit_text(
+        &config,
+        "model_provider = \"ofox\"",
+        "model_provider = \"myrelay\"",
+    );
+
+    unbind(&db, Tool::Codex, "codex", &[], false)
+        .await
+        .expect("unbind");
+
+    let restored = toml_at(&config);
+    assert_eq!(restored["model_provider"].as_str(), Some("myrelay"));
+    assert_eq!(restored["model"].as_str(), Some("gpt-5-codex"));
+}
+
+/// 绑定记录里绑定前的快照：不含 Ofox 最近写了什么（`written` 随每次写入更新）。
+fn snapshot_of(record: &str) -> Value {
+    let mut record: Value = serde_json::from_str(record).unwrap();
+    record.as_object_mut().unwrap().remove("written");
+    record
+}
+
+/// 记录里去掉 Ofox 写了什么：和新版本之前的记录一样。
+fn forget_what_ofox_wrote(db: &Database, key: &str) {
+    let row = db.get_bind_record(key).unwrap().expect("record");
+    let mut record: Value = serde_json::from_str(&row.record).unwrap();
+    assert!(
+        record.get("written").is_some(),
+        "binding recorded what Ofox wrote: {}",
+        row.record
+    );
+    record.as_object_mut().unwrap().remove("written");
+    db.upsert_bind_record(key, &record.to_string()).unwrap();
+}
+
+#[tokio::test]
+#[serial]
+async fn an_older_record_without_what_ofox_wrote_restores_everything_as_before() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    forget_what_ofox_wrote(&db, CODEX_RECORD);
+    edit_text(
+        &config,
+        "model_reasoning_effort = \"high\"",
+        "model_reasoning_effort = \"low\"",
+    );
+
+    let report = unbind(&db, Tool::Codex, "codex", &[], false)
+        .await
+        .expect("unbind");
+
+    assert_eq!(fs::read_to_string(&config).unwrap(), USER_CONFIG);
+    assert!(report.kept_keys.is_empty());
+    assert!(!kept_warning(&report));
+}
+
+#[tokio::test]
+#[serial]
+async fn the_record_of_what_ofox_wrote_holds_no_key() {
+    let home = Home::new();
+    write(&home.codex("config.toml"), USER_CONFIG);
+    write(&home.claude("settings.json"), CLAUDE_RELAY);
+    let db = db_with_default_provider();
+    save_tool_template(&db, Tool::Claude, claude_template(Some("anthropic/x")));
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    bind(&db, Tool::Claude, "claude", KEY).await.expect("bind");
+
+    for key in [CODEX_RECORD, "claude"] {
+        let record = db.get_bind_record(key).unwrap().unwrap().record;
+        assert!(record.contains("\"written\""), "{record}");
+        assert!(!record.contains(KEY), "{record}");
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn a_key_replacement_whose_record_cannot_be_saved_leaves_the_config_as_it_was() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    let bound = fs::read_to_string(&config).unwrap();
+    db.conn
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER record_failure BEFORE UPDATE ON ofox_bind_snapshot \
+             BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;",
+        )
+        .unwrap();
+
+    let error = replace_key(&db, Tool::Codex, KEY, "sk-of-NEW")
+        .await
+        .unwrap_err();
+
+    assert!(error.contains("已回滚"), "{error}");
+    assert_eq!(fs::read_to_string(&config).unwrap(), bound);
 }
 
 #[tokio::test]
@@ -419,7 +751,7 @@ async fn legacy_migration_moves_the_key_once_and_ignores_user_keys() {
     write(&config, TEMPLATE);
     write(&auth, "{\"OPENAI_API_KEY\": \"sk-proj-mine\"}");
     assert!(
-        codex::migrate_legacy_shape(|| None).unwrap(),
+        codex::migrate_legacy_shape(|| None, |_| Ok(())).unwrap(),
         "no Ofox key anywhere: still stops relying on the user's login"
     );
     assert_eq!(
@@ -431,7 +763,7 @@ async fn legacy_migration_moves_the_key_once_and_ignores_user_keys() {
         "{\"OPENAI_API_KEY\": \"sk-proj-mine\"}",
         "the user's own key is untouched"
     );
-    assert!(!codex::migrate_legacy_shape(|| None).unwrap());
+    assert!(!codex::migrate_legacy_shape(|| None, |_| Ok(())).unwrap());
 
     write(
         &auth,
@@ -440,13 +772,13 @@ async fn legacy_migration_moves_the_key_once_and_ignores_user_keys() {
             "\"OPENAI_API_KEY\": \"sk-of-OLD\"",
         ),
     );
-    assert!(codex::migrate_legacy_shape(|| None).unwrap());
+    assert!(codex::migrate_legacy_shape(|| None, |_| Ok(())).unwrap());
     assert_eq!(
         toml_at(&config)["model_providers"]["ofox"]["experimental_bearer_token"].as_str(),
         Some("sk-of-OLD")
     );
     assert!(
-        !codex::migrate_legacy_shape(|| None).unwrap(),
+        !codex::migrate_legacy_shape(|| None, |_| Ok(())).unwrap(),
         "second run is a no-op"
     );
 }
@@ -460,19 +792,22 @@ async fn legacy_migration_reads_the_keychain_only_when_it_has_to() {
     let keychain = || -> Option<String> { panic!("keychain must not be read") };
 
     write(&config, USER_CONFIG);
-    assert!(!codex::migrate_legacy_shape(keychain).unwrap());
+    assert!(!codex::migrate_legacy_shape(keychain, |_| Ok(())).unwrap());
 
     write(&config, TEMPLATE);
     write(&auth, "{\"OPENAI_API_KEY\": \"sk-of-OLD\"}");
-    assert!(codex::migrate_legacy_shape(keychain).unwrap());
+    assert!(codex::migrate_legacy_shape(keychain, |_| Ok(())).unwrap());
     assert!(!auth.exists(), "auth.json held only the Ofox key");
 
     let mut asked = false;
     write(&config, TEMPLATE);
-    assert!(codex::migrate_legacy_shape(|| {
-        asked = true;
-        Some("sk-of-STORED".to_string())
-    })
+    assert!(codex::migrate_legacy_shape(
+        || {
+            asked = true;
+            Some("sk-of-STORED".to_string())
+        },
+        |_| Ok(())
+    )
     .unwrap());
     assert!(
         asked,
@@ -613,22 +948,15 @@ async fn claude_relay_setup_comes_back_byte_for_byte_after_a_model_change() {
     rewrite_bound_config(&db, Tool::Claude, KEY)
         .await
         .expect("model change");
-    assert_eq!(
-        json_at(&settings)["env"]["ANTHROPIC_MODEL"],
-        "anthropic/claude-x"
-    );
+    let env = &json_at(&settings)["env"];
+    assert_eq!(env["ANTHROPIC_DEFAULT_MODEL"], "anthropic/claude-x");
+    assert!(env.get("ANTHROPIC_MODEL").is_none());
 
     let report = unbind(&db, Tool::Claude, "claude", &[], false)
         .await
         .expect("unbind");
     assert_eq!(fs::read_to_string(&settings).unwrap(), CLAUDE_RELAY);
-    assert_eq!(
-        report.exact_files,
-        [format!(
-            "~/{}",
-            Path::new(".claude").join("settings.json").display()
-        )]
-    );
+    assert_eq!(report.exact_files, ["~/.claude/settings.json"]);
     assert!(!report.legacy);
     assert_eq!(report.provider_restored_to.as_deref(), Some("relay"));
     assert_eq!(
@@ -640,7 +968,7 @@ async fn claude_relay_setup_comes_back_byte_for_byte_after_a_model_change() {
 
 #[tokio::test]
 #[serial]
-async fn claude_edits_while_bound_are_reverted_and_new_settings_are_kept() {
+async fn claude_endpoint_the_user_repointed_is_kept_but_the_ofox_model_and_key_go() {
     let home = Home::new();
     let settings = home.claude("settings.json");
     write(&settings, CLAUDE_RELAY);
@@ -652,13 +980,46 @@ async fn claude_edits_while_bound_are_reverted_and_new_settings_are_kept() {
     edited["statusLine"] = json!({ "type": "command", "command": "echo hi" });
     write(&settings, &serde_json::to_string_pretty(&edited).unwrap());
 
-    unbind(&db, Tool::Claude, "claude", &[], false)
+    let report = unbind(&db, Tool::Claude, "claude", &[], false)
         .await
         .expect("unbind");
     let restored = json_at(&settings);
-    let original: Value = serde_json::from_str(CLAUDE_RELAY).unwrap();
-    assert_eq!(restored["env"], original["env"]);
+    assert_eq!(
+        restored["env"],
+        json!({
+            "ANTHROPIC_BASE_URL": "https://hand-edited.example",
+            "ANTHROPIC_API_KEY": "sk-relay",
+            "ANTHROPIC_MODEL": "claude-opus-x",
+        })
+    );
     assert_eq!(restored["statusLine"]["command"], "echo hi");
+    assert_eq!(
+        report.kept_keys,
+        ["~/.claude/settings.json: env.ANTHROPIC_BASE_URL"]
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_settings_the_user_deleted_while_bound_come_back_as_before_binding() {
+    let home = Home::new();
+    let settings = home.claude("settings.json");
+    write(&settings, CLAUDE_RELAY);
+    let db = db_for(Tool::Claude, claude_template(Some("anthropic/claude-x")));
+    bind(&db, Tool::Claude, "claude", KEY).await.expect("bind");
+    let mut edited = json_at(&settings);
+    let env = edited["env"].as_object_mut().unwrap();
+    env.remove("ANTHROPIC_BASE_URL");
+    env.remove("ANTHROPIC_MODEL");
+    write(&settings, &serde_json::to_string_pretty(&edited).unwrap());
+
+    let report = unbind(&db, Tool::Claude, "claude", &[], false)
+        .await
+        .expect("unbind");
+
+    let original: Value = serde_json::from_str(CLAUDE_RELAY).unwrap();
+    assert_eq!(json_at(&settings)["env"], original["env"]);
+    assert!(report.kept_keys.is_empty(), "{:?}", report.kept_keys);
 }
 
 #[tokio::test]
@@ -690,13 +1051,7 @@ async fn claude_settings_created_by_bind_are_removed_again() {
         .await
         .expect("unbind");
     assert!(!home.dir.path().join(".claude").exists());
-    assert_eq!(
-        report.files_removed,
-        [format!(
-            "~/{}",
-            Path::new(".claude").join("settings.json").display()
-        )]
-    );
+    assert_eq!(report.files_removed, ["~/.claude/settings.json"]);
 }
 
 #[tokio::test]
@@ -753,13 +1108,18 @@ async fn gemini_api_key_user_gets_env_and_settings_back_byte_for_byte() {
         "already in API key mode: settings.json is left alone"
     );
 
-    save_tool_template(&db, Tool::Gemini, gemini_template(Some("google/gemini-x")));
-    rewrite_bound_config(&db, Tool::Gemini, KEY)
+    let saved = db
+        .get_provider_by_id(Tool::Gemini.provider_id(), "gemini")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let mut updated = saved.clone();
+    updated["env"]["GEMINI_MODEL"] = json!("google/gemini-x");
+    persist_bound_settings(&db, Tool::Gemini, KEY, &saved, &updated)
         .await
         .expect("model change");
-    assert!(fs::read_to_string(&env)
-        .unwrap()
-        .contains("GEMINI_MODEL=gemini-x\n"));
+    assert!(!fs::read_to_string(&env).unwrap().contains("GEMINI_MODEL"));
+    assert_eq!(json_at(&settings)["model"]["name"], "gemini-x");
 
     let report = unbind(&db, Tool::Gemini, "gemini", &[], false)
         .await
@@ -801,10 +1161,7 @@ async fn gemini_google_login_user_returns_to_google_login() {
         fs::read_to_string(&settings).unwrap(),
         GEMINI_GOOGLE_LOGIN_SETTINGS
     );
-    assert_eq!(
-        report.files_removed,
-        [format!("~/{}", Path::new(".gemini").join(".env").display())]
-    );
+    assert_eq!(report.files_removed, ["~/.gemini/.env"]);
 }
 
 #[tokio::test]
@@ -1374,14 +1731,17 @@ async fn legacy_codex_without_a_key_stops_using_the_chatgpt_login() {
     write(&config, TEMPLATE);
     write(&auth, OAUTH_AUTH);
 
-    assert!(codex::migrate_legacy_shape(|| None).unwrap());
+    assert!(codex::migrate_legacy_shape(|| None, |_| Ok(())).unwrap());
     let provider = &toml_at(&config)["model_providers"]["ofox"];
     assert_eq!(provider["requires_openai_auth"].as_bool(), Some(false));
     assert!(provider.get("experimental_bearer_token").is_none());
     assert_eq!(fs::read_to_string(&auth).unwrap(), OAUTH_AUTH);
-    assert!(!codex::migrate_legacy_shape(|| None).unwrap(), "idempotent");
+    assert!(
+        !codex::migrate_legacy_shape(|| None, |_| Ok(())).unwrap(),
+        "idempotent"
+    );
 
-    assert!(codex::migrate_legacy_shape(|| Some("sk-of-LATER".into())).unwrap());
+    assert!(codex::migrate_legacy_shape(|| Some("sk-of-LATER".into()), |_| Ok(())).unwrap());
     assert_eq!(
         toml_at(&config)["model_providers"]["ofox"]["experimental_bearer_token"].as_str(),
         Some("sk-of-LATER")
@@ -1587,11 +1947,13 @@ async fn missing_bindings_restore_saved_models_and_selected_apex_without_replaci
                 status::BindingStatus::Configured
             );
             assert_eq!(
-                db.get_bind_record(tool.record_key())
-                    .unwrap()
-                    .unwrap()
-                    .record,
-                record
+                snapshot_of(
+                    &db.get_bind_record(tool.record_key())
+                        .unwrap()
+                        .unwrap()
+                        .record
+                ),
+                snapshot_of(&record)
             );
             for (file, original_bound) in tool.files().iter().zip(&before) {
                 let restored = fs::read_to_string(file.current_path()).unwrap();
@@ -1605,16 +1967,20 @@ async fn missing_bindings_restore_saved_models_and_selected_apex_without_replaci
                         );
                     }
                     ManagedFile::ClaudeSettings => assert_eq!(
-                        json_at(&file.current_path())["env"]["ANTHROPIC_MODEL"],
+                        json_at(&file.current_path())["env"]["ANTHROPIC_DEFAULT_MODEL"],
                         "anthropic/claude-saved"
                     ),
-                    ManagedFile::GeminiEnv => {
-                        assert!(restored.contains("GEMINI_MODEL=gemini-saved"))
-                    }
+                    ManagedFile::GeminiEnv => assert!(!restored.contains("GEMINI_MODEL")),
                     ManagedFile::OpenCodeConfig => assert!(restored.contains("openai/gpt-saved")),
                     ManagedFile::OpenClawConfig => assert!(restored.contains("openai/gpt-x")),
                     ManagedFile::HermesConfig => assert!(restored.contains("openai/gpt-x")),
-                    ManagedFile::GeminiSettings => continue,
+                    ManagedFile::GeminiSettings => {
+                        assert_eq!(
+                            json_at(&file.current_path())["model"]["name"],
+                            "gemini-saved"
+                        );
+                        continue;
+                    }
                 }
                 assert!(restored.contains(&format!("https://api.{apex}")));
             }
@@ -1885,7 +2251,7 @@ async fn atomic_model_save_preserves_user_fields_and_rejects_stale_or_unbound_re
             .await
             .unwrap();
         let disk = json_at(&path);
-        assert_eq!(disk["env"]["ANTHROPIC_MODEL"], "anthropic/next");
+        assert_eq!(disk["env"]["ANTHROPIC_DEFAULT_MODEL"], "anthropic/next");
         assert_eq!(
             disk["env"]["ANTHROPIC_BASE_URL"],
             format!("https://api.{apex}/anthropic")
@@ -2280,11 +2646,13 @@ async fn region_reconciliation_changes_only_urls_and_restart_is_idempotent() {
                 tool.label()
             );
             assert_eq!(
-                db.get_bind_record(tool.record_key())
-                    .unwrap()
-                    .unwrap()
-                    .record,
-                record
+                snapshot_of(
+                    &db.get_bind_record(tool.record_key())
+                        .unwrap()
+                        .unwrap()
+                        .record
+                ),
+                snapshot_of(&record)
             );
             let bytes: Vec<_> = tool
                 .files()
@@ -2472,11 +2840,13 @@ async fn region_reconciliation_preserves_missing_connection_fields_until_explici
                 status::BindingStatus::Configured
             );
             assert_eq!(
-                db.get_bind_record(tool.record_key())
-                    .unwrap()
-                    .unwrap()
-                    .record,
-                record
+                snapshot_of(
+                    &db.get_bind_record(tool.record_key())
+                        .unwrap()
+                        .unwrap()
+                        .record
+                ),
+                snapshot_of(&record)
             );
         }
     }
@@ -2747,7 +3117,7 @@ async fn startup_existing_repair_accepts_only_unchanged_saved_managed_fields() {
 async fn region_reconciliation_preserves_external_models_and_keys_with_canonical_endpoints() {
     for (from, to) in [("ofox.ai", "ofox.io"), ("ofox.io", "ofox.ai")] {
         for (tool, saved) in binding_cases() {
-            let _home = Home::new();
+            let home = Home::new();
             crate::settings::mutate_settings(|settings| settings.ofox_apex = Some(from.into()))
                 .unwrap();
             let db = db_for(tool, saved);
@@ -2765,7 +3135,16 @@ async fn region_reconciliation_preserves_external_models_and_keys_with_canonical
                 .replace(KEY, "sk-user-changed")
                 .replace(saved_model, "user/changed-model");
             assert!(changed.contains("sk-user-changed"));
-            assert!(changed.contains("user/changed-model"));
+            if tool == Tool::Gemini {
+                // Gemini 的模型在 settings.json，不在 `.env`。
+                set_json_field(
+                    &home.gemini("settings.json"),
+                    &["model", "name"],
+                    "user/changed-model",
+                );
+            } else {
+                assert!(changed.contains("user/changed-model"));
+            }
             fs::write(&path, changed).unwrap();
             let live = region_live_snapshot(tool);
             let provider = region_provider_snapshot(&db, tool);
@@ -2789,11 +3168,13 @@ async fn region_reconciliation_preserves_external_models_and_keys_with_canonical
             );
             assert_eq!(region_provider_snapshot(&db, tool), provider);
             assert_eq!(
-                db.get_bind_record(tool.record_key())
-                    .unwrap()
-                    .unwrap()
-                    .record,
-                record
+                snapshot_of(
+                    &db.get_bind_record(tool.record_key())
+                        .unwrap()
+                        .unwrap()
+                        .record
+                ),
+                snapshot_of(&record)
             );
             assert_eq!(
                 status::binding_status(&db, tool, Some(KEY)).await.status,
@@ -3383,23 +3764,37 @@ async fn a_fresh_codex_install_is_accepted_by_the_real_codex() {
     let db = db_for(Tool::Codex, template);
     bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
 
-    let mut config = crate::app_config::MultiAppConfig::default();
+    let db = crate::Database::memory().unwrap();
     for (id, server) in [
         (
             "local",
-            json!({"type": "stdio", "command": "npx", "args": ["-y", "pkg"], "env": {"A": "b"}}),
+            json!({"type": "stdio", "command": "npx", "args": ["-y", "pkg"], "env": {"A": "${A}"}}),
         ),
         (
             "remote",
-            json!({"type": "http", "url": "https://example.com/mcp", "headers": {"K": "v"}}),
+            json!({"type": "http", "url": "https://example.com/mcp", "headers": {"K": "${K}"}}),
         ),
     ] {
-        config.mcp.codex.servers.insert(
-            id.into(),
-            json!({"id": id, "enabled": true, "server": server}),
+        let resource = crate::app_config::McpServer {
+            id: id.into(),
+            name: id.into(),
+            server,
+            apps: Default::default(),
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        };
+        crate::services::library::mcp_resource::save_draft(&db, resource, None).unwrap();
+        let op =
+            crate::services::library::mcp_resource::preview(&db, id, &["codex".into()]).unwrap();
+        assert_eq!(
+            crate::services::library::apply_operation(&db, &op.id)
+                .unwrap()
+                .status,
+            "applied"
         );
     }
-    crate::mcp::sync_enabled_to_codex(&config).unwrap();
 
     match codex_strict_config_check(&home.codex("")) {
         None => eprintln!("skipped: no codex with --strict-config on PATH"),
@@ -3502,7 +3897,7 @@ fn launching_strips_the_flag_only_when_codex_ignores_it() {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         write(&path, text);
         super::codex_probe::set_override(Some(support));
-        let changed = super::codex::strip_flag_codex_ignores().unwrap();
+        let changed = super::codex::strip_flag_codex_ignores(|_| Ok(())).unwrap();
         assert_eq!(changed, !expect_flag, "{support:?}");
         assert_eq!(
             fs::read_to_string(&path)
@@ -3597,18 +3992,11 @@ async fn gemini_model_changed_by_the_user_is_still_configured() {
     write(&env, GEMINI_ENV);
     let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
     bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
-    let switched: Vec<String> = fs::read_to_string(&env)
-        .unwrap()
-        .lines()
-        .map(|line| {
-            if line.starts_with("GEMINI_MODEL=") {
-                "GEMINI_MODEL=gemini-other".to_string()
-            } else {
-                line.to_string()
-            }
-        })
-        .collect();
-    write(&env, &format!("{}\n", switched.join("\n")));
+    set_json_field(
+        &home.gemini("settings.json"),
+        &["model", "name"],
+        "gemini-other",
+    );
 
     let health = status::binding_status(&db, Tool::Gemini, Some(KEY)).await;
 
@@ -3644,10 +4032,112 @@ fn switch_codex_model_in_cli(path: &Path, model: &str) {
     write(path, &switched);
 }
 
+/// Undo must identify the committed write even if a diagnostic read adopts a
+/// later CLI preference. Exercise the actual file/DB adapter, not a fake writer.
+#[tokio::test]
+#[serial]
+async fn committed_model_receipt_cannot_undo_a_later_cli_preference() {
+    use crate::model_selection::{
+        revision, ExpectedWrite, ModelSelection, EXPECTED_WRITE, WRITE_RECEIPT,
+    };
+    let home = Home::new();
+    let db = db_with_default_provider();
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    let previous = db
+        .get_provider_by_id(CODEX_PROVIDER, "codex")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let mut updated = previous.clone();
+    crate::commands::manage_tool::write_model_into_settings(
+        &AppType::Codex,
+        &mut updated,
+        "model-from-profile",
+    )
+    .unwrap();
+    let before = revision(&db, "codex").unwrap();
+    let receipt = Arc::new(std::sync::Mutex::new(None));
+    EXPECTED_WRITE
+        .scope(
+            ExpectedWrite {
+                target: "codex".into(),
+                revision: before,
+            },
+            WRITE_RECEIPT.scope(
+                receipt.clone(),
+                persist_bound_settings(&db, Tool::Codex, KEY, &previous, &updated),
+            ),
+        )
+        .await
+        .unwrap();
+    let committed = receipt.lock().unwrap().clone().expect("write receipt");
+    assert_eq!(committed, revision(&db, "codex").unwrap());
+
+    let path = home.codex("config.toml");
+    let cli_edit = fs::read_to_string(&path)
+        .unwrap()
+        .replace("model-from-profile", "model-from-cli");
+    write(&path, &cli_edit);
+    let observed = super::model_state::snapshot(&db, Tool::Codex, "codex", Some(KEY))
+        .await
+        .unwrap();
+    assert_eq!(
+        observed.managed_selection,
+        ModelSelection::Single {
+            model: "model-from-cli".into(),
+        }
+    );
+    assert_ne!(committed, observed.revision);
+    let current = db
+        .get_provider_by_id(CODEX_PROVIDER, "codex")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let error = EXPECTED_WRITE
+        .scope(
+            ExpectedWrite {
+                target: "codex".into(),
+                revision: committed,
+            },
+            persist_bound_settings(&db, Tool::Codex, KEY, &current, &previous),
+        )
+        .await;
+    assert!(error.is_err());
+    assert_eq!(fs::read_to_string(&path).unwrap(), cli_edit);
+    assert_eq!(saved_model(&db, Tool::Codex), "model-from-cli");
+}
+
+#[tokio::test]
+#[serial]
+async fn opencode_snapshot_observes_real_route_without_inventing_a_tui_choice() {
+    let _home = Home::new();
+    let db = db_for(Tool::OpenCode, opencode_template(Some("openai/gpt-x")));
+    bind(&db, Tool::OpenCode, "opencode", KEY).await.unwrap();
+    let state = super::opencode_state::state_path();
+    fs::remove_file(&state).unwrap();
+    let snapshot = super::model_state::snapshot(&db, Tool::OpenCode, "opencode", Some(KEY))
+        .await
+        .unwrap();
+    assert_eq!(snapshot.observed_selection.model, None);
+    assert_eq!(snapshot.observed_selection.source, "unknown");
+    write(
+        &state,
+        r#"{"recent":[{"providerID":"custom-route","modelID":"actual-current"}]}"#,
+    );
+    let snapshot = super::model_state::snapshot(&db, Tool::OpenCode, "opencode", Some(KEY))
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.observed_selection.model.as_deref(),
+        Some("actual-current")
+    );
+    assert_eq!(snapshot.observed_selection.source, "tui");
+    assert_eq!(saved_models(&db, Tool::OpenCode), vec!["openai/gpt-x"]);
+}
+
+/// Claude Code 的 `/model` 把选的模型记在 settings 的 `model`。
 fn switch_claude_model_in_cli(path: &Path, model: &str) {
-    let mut edited = json_at(path);
-    edited["env"]["ANTHROPIC_MODEL"] = model.into();
-    write(path, &serde_json::to_string_pretty(&edited).unwrap());
+    set_json_field(path, &["model"], model);
 }
 
 #[tokio::test]
@@ -3691,19 +4181,11 @@ async fn gemini_model_chosen_in_the_cli_is_adopted() {
     write(&env, GEMINI_ENV);
     let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
     bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
-    let switched = fs::read_to_string(&env)
-        .unwrap()
-        .lines()
-        .map(|line| {
-            if line.starts_with("GEMINI_MODEL=") {
-                "GEMINI_MODEL=gemini-other".to_string()
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    write(&env, &format!("{switched}\n"));
+    set_json_field(
+        &home.gemini("settings.json"),
+        &["model", "name"],
+        "gemini-other",
+    );
 
     assert!(super::live_model::adopt_live_model(&db, Tool::Gemini).unwrap());
     assert_eq!(saved_model(&db, Tool::Gemini), "gemini-other");
@@ -3768,7 +4250,11 @@ async fn replacing_the_key_keeps_the_claude_model_chosen_by_the_user() {
         .expect("replace key");
 
     let after = json_at(&path);
-    assert_eq!(after["env"]["ANTHROPIC_MODEL"], "anthropic/claude-other");
+    assert_eq!(after["model"], "anthropic/claude-other");
+    assert_eq!(
+        after["env"]["ANTHROPIC_DEFAULT_MODEL"],
+        "anthropic/claude-other"
+    );
     assert_eq!(after["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-of-ACCOUNT-B");
 }
 
@@ -4720,16 +5206,19 @@ fn set_json_field(path: &Path, field: &[&str], value: &str) {
 
 #[tokio::test]
 #[serial]
-async fn claude_model_remembered_by_the_agent_takes_over_the_env_model() {
+async fn claude_model_picked_in_the_agent_is_followed() {
     let (_home, db, settings) = bound_claude("anthropic/claude-x").await;
     set_json_field(&settings, &["model"], "anthropic/claude-other");
 
     sync_live_model(&db, Tool::Claude, Some(KEY)).await;
 
+    let config = json_at(&settings);
+    assert_eq!(config["model"], "anthropic/claude-other");
     assert_eq!(
-        json_at(&settings)["env"]["ANTHROPIC_MODEL"],
+        config["env"]["ANTHROPIC_DEFAULT_MODEL"],
         "anthropic/claude-other"
     );
+    assert!(config["env"].get("ANTHROPIC_MODEL").is_none());
     assert_eq!(saved_model(&db, Tool::Claude), "anthropic/claude-other");
     assert_eq!(
         status_of(&db, Tool::Claude).await,
@@ -4739,17 +5228,132 @@ async fn claude_model_remembered_by_the_agent_takes_over_the_env_model() {
 
 #[tokio::test]
 #[serial]
-async fn claude_model_alias_is_not_taken_over() {
+async fn claude_model_ofox_cannot_name_is_not_taken_over() {
     let (_home, db, settings) = bound_claude("anthropic/claude-x").await;
+    // 没有模型目录、也没有家族映射时，别名换不成 Ofox 的 id。
     set_json_field(&settings, &["model"], "sonnet");
 
     sync_live_model(&db, Tool::Claude, Some(KEY)).await;
 
     assert_eq!(
-        json_at(&settings)["env"]["ANTHROPIC_MODEL"],
+        json_at(&settings)["env"]["ANTHROPIC_DEFAULT_MODEL"],
         "anthropic/claude-x"
     );
     assert_eq!(saved_model(&db, Tool::Claude), "anthropic/claude-x");
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_family_alias_picked_in_the_agent_is_followed() {
+    crate::services::model_fetch::seed_ofox_anthropic_model_ids(&[
+        "anthropic/claude-haiku-4.5",
+        "anthropic/claude-haiku-5.5",
+    ]);
+    let (_home, db, settings) = bound_claude("anthropic/claude-x").await;
+    assert_eq!(
+        json_at(&settings)["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
+        "anthropic/claude-haiku-5.5"
+    );
+    set_json_field(&settings, &["model"], "haiku");
+
+    sync_live_model(&db, Tool::Claude, Some(KEY)).await;
+
+    crate::services::model_fetch::seed_ofox_anthropic_model_ids(&[]);
+    let config = json_at(&settings);
+    assert_eq!(config["model"], "haiku");
+    assert_eq!(
+        config["env"]["ANTHROPIC_DEFAULT_MODEL"],
+        "anthropic/claude-haiku-5.5"
+    );
+    assert_eq!(saved_model(&db, Tool::Claude), "anthropic/claude-haiku-5.5");
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_old_env_model_is_migrated_and_still_unbinds_exactly() {
+    let (_home, db, settings) = bound_claude("anthropic/claude-x").await;
+    // 旧版本绑定后的样子：模型写在优先级最高的 `ANTHROPIC_MODEL`。
+    let mut legacy = json_at(&settings);
+    let env = legacy["env"].as_object_mut().unwrap();
+    env.remove("ANTHROPIC_DEFAULT_MODEL");
+    env.remove("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY");
+    env.insert("ANTHROPIC_MODEL".into(), json!("anthropic/claude-legacy"));
+    write(&settings, &serde_json::to_string_pretty(&legacy).unwrap());
+
+    sync_live_model(&db, Tool::Claude, Some(KEY)).await;
+
+    let env = &json_at(&settings)["env"];
+    assert!(env.get("ANTHROPIC_MODEL").is_none());
+    assert_eq!(env["ANTHROPIC_DEFAULT_MODEL"], "anthropic/claude-legacy");
+    assert_eq!(env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"], "1");
+    assert_eq!(saved_model(&db, Tool::Claude), "anthropic/claude-legacy");
+    unbind(&db, Tool::Claude, "claude", &[], false)
+        .await
+        .expect("unbind");
+    assert_eq!(fs::read_to_string(&settings).unwrap(), CLAUDE_RELAY);
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_desktop_save_and_agent_pick_last_writer_wins() {
+    let (_home, db, settings) = bound_claude("anthropic/claude-a").await;
+    let save = |model: &'static str| {
+        let db = &db;
+        async move {
+            let saved = db
+                .get_provider_by_id(Tool::Claude.provider_id(), "claude")
+                .unwrap()
+                .unwrap()
+                .settings_config;
+            let mut updated = saved.clone();
+            updated["env"]["ANTHROPIC_MODEL"] = model.into();
+            persist_bound_settings(db, Tool::Claude, KEY, &saved, &updated)
+                .await
+                .unwrap();
+        }
+    };
+    assert!(json_at(&settings).get("model").is_none());
+
+    switch_claude_model_in_cli(&settings, "anthropic/claude-b");
+    sync_live_model(&db, Tool::Claude, Some(KEY)).await;
+    assert_eq!(saved_model(&db, Tool::Claude), "anthropic/claude-b");
+
+    save("anthropic/claude-c").await;
+    let config = json_at(&settings);
+    assert_eq!(config["model"], "anthropic/claude-c");
+    assert_eq!(
+        config["env"]["ANTHROPIC_DEFAULT_MODEL"],
+        "anthropic/claude-c"
+    );
+
+    // `/model` 选 Default：回到 Ofox 的默认模型。
+    switch_claude_model_in_cli(&settings, "default");
+    sync_live_model(&db, Tool::Claude, Some(KEY)).await;
+    assert_eq!(saved_model(&db, Tool::Claude), "anthropic/claude-c");
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_discovery_turned_off_by_the_user_stays_off() {
+    let (_home, db, settings) = bound_claude("anthropic/claude-x").await;
+    set_json_field(
+        &settings,
+        &["env", "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"],
+        "0",
+    );
+
+    sync_live_model(&db, Tool::Claude, Some(KEY)).await;
+    assert_eq!(
+        json_at(&settings)["env"]["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"],
+        "0"
+    );
+    unbind(&db, Tool::Claude, "claude", &[], false)
+        .await
+        .expect("unbind");
+    assert_eq!(
+        json_at(&settings)["env"]["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"],
+        "0"
+    );
 }
 
 #[tokio::test]
@@ -4762,8 +5366,10 @@ async fn replacing_the_key_keeps_the_claude_model_remembered_by_the_agent() {
         .await
         .expect("replace key");
 
+    let config = json_at(&settings);
+    assert_eq!(config["model"], "anthropic/claude-other");
     assert_eq!(
-        json_at(&settings)["env"]["ANTHROPIC_MODEL"],
+        config["env"]["ANTHROPIC_DEFAULT_MODEL"],
         "anthropic/claude-other"
     );
 }
@@ -4789,28 +5395,36 @@ async fn saving_a_model_in_the_app_updates_the_claude_remembered_model_too() {
 
     let config = json_at(&settings);
     assert_eq!(config["model"], "anthropic/claude-app");
-    assert_eq!(config["env"]["ANTHROPIC_MODEL"], "anthropic/claude-app");
+    assert_eq!(
+        config["env"]["ANTHROPIC_DEFAULT_MODEL"],
+        "anthropic/claude-app"
+    );
     assert_eq!(saved_model(&db, Tool::Claude), "anthropic/claude-app");
 }
 
 #[tokio::test]
 #[serial]
-async fn gemini_model_remembered_by_the_agent_takes_over_the_env_model() {
+async fn gemini_model_remembered_by_the_agent_is_followed() {
     let home = Home::new();
     write(&home.gemini(".env"), GEMINI_ENV);
     let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
     bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
-    set_json_field(
-        &home.gemini("settings.json"),
-        &["model", "name"],
-        "gemini-3.8-flash",
-    );
+    let settings = home.gemini("settings.json");
+    assert_eq!(json_at(&settings)["model"]["name"], "gemini-saved");
+    set_json_field(&settings, &["model", "name"], "gemini-3.8-flash");
 
     sync_live_model(&db, Tool::Gemini, Some(KEY)).await;
 
     let env = fs::read_to_string(home.gemini(".env")).unwrap();
-    assert!(env.contains("GEMINI_MODEL=gemini-3.8-flash\n"), "{env}");
+    assert!(!env.contains("GEMINI_MODEL"), "{env}");
+    assert_eq!(json_at(&settings)["model"]["name"], "gemini-3.8-flash");
     assert_eq!(saved_model(&db, Tool::Gemini), "gemini-3.8-flash");
+    assert_eq!(
+        status::binding_status(&db, Tool::Gemini, Some(KEY))
+            .await
+            .status,
+        status::BindingStatus::Configured
+    );
 }
 
 #[tokio::test]
@@ -4828,32 +5442,166 @@ async fn gemini_auto_model_alias_is_not_taken_over() {
 
     sync_live_model(&db, Tool::Gemini, Some(KEY)).await;
 
-    assert_eq!(saved_model(&db, Tool::Gemini), "gemini-saved");
+    // 别名由 Gemini 自己解析：模板里保存的模型不变。
+    assert_eq!(saved_model(&db, Tool::Gemini), "google/gemini-saved");
+}
+
+#[tokio::test]
+#[serial]
+async fn gemini_bind_creates_model_name_and_unbind_removes_it() {
+    let home = Home::new();
+    let (env, settings) = (home.gemini(".env"), home.gemini("settings.json"));
+    write(&env, GEMINI_ENV);
+    write(&settings, GEMINI_API_KEY_SETTINGS);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    assert!(!fs::read_to_string(&env).unwrap().contains("GEMINI_MODEL"));
+    let bound = fs::read_to_string(&settings).unwrap();
+    assert!(bound.contains("// picked in the CLI"));
+    assert_eq!(json_at(&settings)["model"]["name"], "gemini-saved");
+
+    unbind(&db, Tool::Gemini, "gemini", &[], false)
+        .await
+        .expect("unbind");
+    assert_eq!(fs::read_to_string(&env).unwrap(), GEMINI_ENV);
+    assert_eq!(
+        fs::read_to_string(&settings).unwrap(),
+        GEMINI_API_KEY_SETTINGS
+    );
+}
+
+/// 旧版本绑定后的样子：模型在 `.env`，settings 里没有 `model.name`。
+async fn legacy_gemini_binding(home: &Home, remembered: Option<&str>) -> Database {
+    write(&home.gemini(".env"), GEMINI_ENV);
+    write(&home.gemini("settings.json"), GEMINI_API_KEY_SETTINGS);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    let env = home.gemini(".env");
+    let legacy = format!(
+        "{}GEMINI_MODEL=gemini-legacy\n",
+        fs::read_to_string(&env).unwrap()
+    );
+    write(&env, &legacy);
+    let settings = home.gemini("settings.json");
+    let mut value = json_at(&settings);
+    match remembered {
+        Some(model) => value["model"]["name"] = json!(model),
+        None => {
+            value.as_object_mut().unwrap().remove("model");
+        }
+    }
+    write(&settings, &serde_json::to_string_pretty(&value).unwrap());
+    db
+}
+
+#[tokio::test]
+#[serial]
+async fn gemini_old_env_model_moves_into_settings_on_refresh() {
+    let home = Home::new();
+    let db = legacy_gemini_binding(&home, None).await;
+
+    sync_live_model(&db, Tool::Gemini, Some(KEY)).await;
+
+    assert!(!fs::read_to_string(home.gemini(".env"))
+        .unwrap()
+        .contains("GEMINI_MODEL"));
+    assert_eq!(
+        json_at(&home.gemini("settings.json"))["model"]["name"],
+        "gemini-legacy"
+    );
+    assert_eq!(saved_model(&db, Tool::Gemini), "gemini-legacy");
+    unbind(&db, Tool::Gemini, "gemini", &[], false)
+        .await
+        .expect("unbind");
+    assert_eq!(fs::read_to_string(home.gemini(".env")).unwrap(), GEMINI_ENV);
+    assert!(json_at(&home.gemini("settings.json"))
+        .get("model")
+        .is_none());
+}
+
+#[tokio::test]
+#[serial]
+async fn gemini_old_env_model_yields_to_a_concrete_remembered_model() {
+    let home = Home::new();
+    let db = legacy_gemini_binding(&home, Some("gemini-mine")).await;
+
+    sync_live_model(&db, Tool::Gemini, Some(KEY)).await;
+
+    assert!(!fs::read_to_string(home.gemini(".env"))
+        .unwrap()
+        .contains("GEMINI_MODEL"));
+    assert_eq!(
+        json_at(&home.gemini("settings.json"))["model"]["name"],
+        "gemini-mine"
+    );
+    assert_eq!(saved_model(&db, Tool::Gemini), "gemini-mine");
+}
+
+#[tokio::test]
+#[serial]
+async fn gemini_users_own_env_model_line_comes_back_after_unbind() {
+    let home = Home::new();
+    let env = home.gemini(".env");
+    let original = format!("{GEMINI_ENV}GEMINI_MODEL=gemini-mine\n");
+    write(&env, &original);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    assert!(!fs::read_to_string(&env).unwrap().contains("GEMINI_MODEL"));
+    unbind(&db, Tool::Gemini, "gemini", &[], false)
+        .await
+        .expect("unbind");
+    assert_eq!(fs::read_to_string(&env).unwrap(), original);
+}
+
+#[tokio::test]
+#[serial]
+async fn replacing_the_key_keeps_the_gemini_model_remembered_by_the_agent() {
+    let home = Home::new();
+    write(&home.gemini(".env"), GEMINI_ENV);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
+    let settings = home.gemini("settings.json");
+    set_json_field(&settings, &["model", "name"], "gemini-mine");
+
+    replace_key(&db, Tool::Gemini, KEY, "sk-of-ACCOUNT-B")
+        .await
+        .unwrap();
+
+    assert_eq!(json_at(&settings)["model"]["name"], "gemini-mine");
+    assert!(fs::read_to_string(home.gemini(".env"))
+        .unwrap()
+        .contains("GEMINI_API_KEY=sk-of-ACCOUNT-B"));
 }
 
 #[cfg(unix)]
 #[tokio::test]
 #[serial]
-async fn aligning_the_gemini_env_keeps_it_private_to_the_user() {
+async fn migrating_the_gemini_env_keeps_it_private_to_the_user() {
     use std::os::unix::fs::PermissionsExt;
     let home = Home::new();
     write(&home.gemini(".env"), GEMINI_ENV);
     let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
     bind(&db, Tool::Gemini, "gemini", KEY).await.unwrap();
-    set_json_field(
-        &home.gemini("settings.json"),
-        &["model", "name"],
-        "gemini-3.8-flash",
+    // 旧版本写下的 `GEMINI_MODEL`。
+    let env = home.gemini(".env");
+    let legacy = format!(
+        "{}GEMINI_MODEL=gemini-saved\n",
+        fs::read_to_string(&env).unwrap()
     );
+    write(&env, &legacy);
+    crate::config::set_file_mode(&env, 0o600).unwrap();
 
     sync_live_model(&db, Tool::Gemini, Some(KEY)).await;
 
-    let mode = fs::metadata(home.gemini(".env"))
-        .unwrap()
-        .permissions()
-        .mode()
-        & 0o777;
+    assert!(!fs::read_to_string(&env).unwrap().contains("GEMINI_MODEL"));
+    let mode = fs::metadata(&env).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
+    assert_eq!(
+        json_at(&home.gemini("settings.json"))["model"]["name"],
+        "gemini-saved"
+    );
 }
 
 #[tokio::test]
@@ -5016,4 +5764,465 @@ async fn adopting_a_tui_model_adds_it_without_dropping_the_other_saved_models() 
         .cloned()
         .collect();
     assert_eq!(ids, ["a/one", "a/two", "a/three"]);
+}
+
+// ─── Unbind keeps what the user changed after binding ───────────────────────
+
+async fn unbind_now(db: &Database, tool: Tool, holder: &str) -> UnbindReport {
+    unbind(db, tool, holder, &[], false).await.expect("unbind")
+}
+
+fn shown_at(path: &Path, key: &str) -> String {
+    format!("{}: {key}", report::display_path(path))
+}
+
+#[tokio::test]
+#[serial]
+async fn openclaw_default_model_moved_to_the_users_own_provider_is_kept() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(&path, "ofox-openclaw/openai/gpt-x", "anthropic/claude");
+
+    let report = unbind_now(&db, Tool::OpenClaw, "openclaw").await;
+
+    let config = crate::openclaw_config::read_openclaw_config().unwrap();
+    assert_eq!(
+        config["agents"]["defaults"]["model"]["primary"],
+        "anthropic/claude"
+    );
+    assert!(config["models"]["providers"].get("ofox-openclaw").is_none());
+    assert_eq!(report.kept_keys, [shown_at(&path, "agents.defaults.model")]);
+}
+
+#[tokio::test]
+#[serial]
+async fn openclaw_another_ofox_model_picked_in_the_agent_goes_back_but_a_changed_mode_stays() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenClaw, "openclaw", OPENCLAW_CONFIG).await;
+    edit_text(
+        &path,
+        "ofox-openclaw/openai/gpt-x",
+        "ofox-openclaw/anthropic/other",
+    );
+    edit_text(&path, "\"mode\": \"merge\"", "\"mode\": \"replace\"");
+
+    let report = unbind_now(&db, Tool::OpenClaw, "openclaw").await;
+
+    let config = crate::openclaw_config::read_openclaw_config().unwrap();
+    assert_eq!(
+        config["agents"]["defaults"]["model"],
+        json!({ "primary": "existing/old-model", "fallbacks": ["existing/fallback"] })
+    );
+    assert_eq!(config["models"]["mode"], "replace");
+    assert_eq!(report.kept_keys, [shown_at(&path, "models.mode")]);
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_routing_the_user_moved_to_their_own_provider_is_kept() {
+    let (_home, db, path) = bind_with_user_config(Tool::Hermes, "hermes", HERMES_CONFIG).await;
+    edit_text(&path, "provider: ofox-hermes", "provider: deepseek");
+    edit_text(&path, "default: openai/gpt-x", "default: deepseek-chat");
+
+    let report = unbind_now(&db, Tool::Hermes, "hermes").await;
+
+    let model = crate::hermes_config::get_model_config().unwrap().unwrap();
+    assert_eq!(model.provider.as_deref(), Some("deepseek"));
+    assert_eq!(model.default.as_deref(), Some("deepseek-chat"));
+    assert_eq!(model.context_length, Some(32000));
+    assert!(crate::hermes_config::get_provider("ofox-hermes")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        report.kept_keys,
+        [
+            shown_at(&path, "model.default"),
+            shown_at(&path, "model.provider")
+        ]
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_ofox_model_does_not_stay_under_the_users_own_provider() {
+    let (_home, db, path) = bind_with_user_config(Tool::Hermes, "hermes", HERMES_CONFIG).await;
+    edit_text(&path, "provider: ofox-hermes", "provider: deepseek");
+
+    let report = unbind_now(&db, Tool::Hermes, "hermes").await;
+
+    let model = crate::hermes_config::get_model_config().unwrap().unwrap();
+    assert_eq!(model.provider.as_deref(), Some("deepseek"));
+    assert_eq!(model.default.as_deref(), Some("existing/old-model"));
+    assert_eq!(report.kept_keys, [shown_at(&path, "model.provider")]);
+}
+
+#[tokio::test]
+#[serial]
+async fn the_claude_default_model_ofox_wrote_does_not_stay_under_the_users_endpoint() {
+    let home = Home::new();
+    let settings = home.claude("settings.json");
+    write(&settings, CLAUDE_RELAY);
+    let db = db_for(Tool::Claude, claude_template(Some("anthropic/claude-x")));
+    bind(&db, Tool::Claude, "claude", KEY).await.expect("bind");
+    set_json_field(&settings, &["model"], "anthropic/claude-y");
+    sync_live_model(&db, Tool::Claude, Some(KEY)).await;
+    assert_eq!(
+        json_at(&settings)["env"]["ANTHROPIC_DEFAULT_MODEL"],
+        "anthropic/claude-y"
+    );
+    set_json_field(
+        &settings,
+        &["env", "ANTHROPIC_BASE_URL"],
+        "https://my-relay.example",
+    );
+
+    unbind_now(&db, Tool::Claude, "claude").await;
+
+    let env = &json_at(&settings)["env"];
+    assert_eq!(env["ANTHROPIC_MODEL"], "claude-opus-x");
+    assert!(env.get("ANTHROPIC_DEFAULT_MODEL").is_none());
+    assert!(env
+        .get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY")
+        .is_none());
+}
+
+#[tokio::test]
+#[serial]
+async fn the_gemini_model_aligned_from_the_agent_does_not_stay_under_the_users_endpoint() {
+    let home = Home::new();
+    let env = home.gemini(".env");
+    write(&env, GEMINI_ENV);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-saved")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.expect("bind");
+    set_json_field(
+        &home.gemini("settings.json"),
+        &["model", "name"],
+        "gemini-3.8-flash",
+    );
+    sync_live_model(&db, Tool::Gemini, Some(KEY)).await;
+    edit_text(
+        &env,
+        "GOOGLE_GEMINI_BASE_URL=https://api.ofox.ai/gemini",
+        "GOOGLE_GEMINI_BASE_URL=https://my-relay.example",
+    );
+
+    unbind_now(&db, Tool::Gemini, "gemini").await;
+
+    let restored = fs::read_to_string(&env).unwrap();
+    assert!(!restored.contains("GEMINI_MODEL"), "{restored}");
+    assert!(
+        restored.contains("GOOGLE_GEMINI_BASE_URL=https://my-relay.example"),
+        "{restored}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_flag_launch_removed_and_the_user_set_again_is_the_users() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    super::codex_probe::set_override(Some(super::codex_probe::FlagSupport::Known));
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    super::codex_probe::set_override(Some(super::codex_probe::FlagSupport::Unknown));
+    assert!(strip_codex_flag_ignored(&db).unwrap());
+    super::codex_probe::set_override(None);
+    let set_again =
+        "disable_response_storage = true\n".to_string() + &fs::read_to_string(&config).unwrap();
+    write(&config, &set_again);
+
+    let report = unbind_now(&db, Tool::Codex, "codex").await;
+
+    assert_eq!(
+        toml_at(&config)["disable_response_storage"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(report.kept_keys, [shown("disable_response_storage")]);
+}
+
+fn repoint_codex_to_users_relay(config: &Path) {
+    edit_text(
+        config,
+        "model_provider = \"ofox\"",
+        "model_provider = \"myrelay\"",
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_model_saved_in_the_app_does_not_stay_under_the_users_relay() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    let saved = db
+        .get_provider_by_id(CODEX_PROVIDER, "codex")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let mut updated = saved.clone();
+    updated["config"] = json!(TEMPLATE.replace("openai/gpt-6-luna", "openai/gpt-x-saved"));
+    persist_bound_settings(&db, Tool::Codex, KEY, &saved, &updated)
+        .await
+        .expect("save model");
+    assert_eq!(
+        toml_at(&config)["model"].as_str(),
+        Some("openai/gpt-x-saved")
+    );
+    repoint_codex_to_users_relay(&config);
+
+    unbind_now(&db, Tool::Codex, "codex").await;
+
+    let restored = toml_at(&config);
+    assert_eq!(restored["model_provider"].as_str(), Some("myrelay"));
+    assert_eq!(restored["model"].as_str(), Some("gpt-5-codex"));
+}
+
+#[tokio::test]
+#[serial]
+async fn a_model_written_by_restoring_a_missing_binding_does_not_stay_under_the_users_relay() {
+    let home = Home::new();
+    let config = home.codex("config.toml");
+    write(&config, USER_CONFIG);
+    let db = db_with_default_provider();
+    bind(&db, Tool::Codex, "codex", KEY).await.expect("bind");
+    save_template(
+        &db,
+        &TEMPLATE.replace("openai/gpt-6-luna", "openai/gpt-x-saved"),
+    );
+    fs::remove_file(&config).unwrap();
+    restore_missing_binding(&db, Tool::Codex, "codex", &[], KEY)
+        .await
+        .expect("restore");
+    assert_eq!(
+        toml_at(&config)["model"].as_str(),
+        Some("openai/gpt-x-saved")
+    );
+    repoint_codex_to_users_relay(&config);
+
+    unbind_now(&db, Tool::Codex, "codex").await;
+
+    let restored = toml_at(&config);
+    assert_eq!(restored["model_provider"].as_str(), Some("myrelay"));
+    assert_eq!(restored["model"].as_str(), Some("gpt-5-codex"));
+}
+
+#[tokio::test]
+#[serial]
+async fn the_claude_model_the_agent_remembered_before_binding_comes_back() {
+    let home = Home::new();
+    let settings = home.claude("settings.json");
+    let mut original: Value = serde_json::from_str(CLAUDE_RELAY).unwrap();
+    original["model"] = json!("opus");
+    write(&settings, &serde_json::to_string_pretty(&original).unwrap());
+    let db = db_for(Tool::Claude, claude_template(Some("anthropic/claude-x")));
+    bind(&db, Tool::Claude, "claude", KEY).await.expect("bind");
+    assert_eq!(json_at(&settings)["model"], "anthropic/claude-x");
+
+    unbind_now(&db, Tool::Claude, "claude").await;
+
+    assert_eq!(json_at(&settings), original);
+}
+
+const GEMINI_REMEMBERED_SETTINGS: &str = "{\n  \"security\": { \"auth\": { \"selectedType\": \"oauth-personal\" } },\n  \"model\": { \"name\": \"gemini-2.5-pro\" }\n}\n";
+
+#[tokio::test]
+#[serial]
+async fn the_gemini_model_the_agent_remembered_before_binding_comes_back() {
+    let home = Home::new();
+    let settings = home.gemini("settings.json");
+    write(&home.gemini(".env"), GEMINI_ENV);
+    write(&settings, GEMINI_REMEMBERED_SETTINGS);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-x")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.expect("bind");
+    assert_eq!(json_at(&settings)["model"]["name"], "gemini-x");
+
+    unbind_now(&db, Tool::Gemini, "gemini").await;
+
+    assert_eq!(
+        fs::read_to_string(&settings).unwrap(),
+        GEMINI_REMEMBERED_SETTINGS
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn a_gemini_model_picked_for_the_users_own_endpoint_is_kept() {
+    let home = Home::new();
+    let settings = home.gemini("settings.json");
+    let env = home.gemini(".env");
+    write(&env, GEMINI_ENV);
+    write(&settings, GEMINI_REMEMBERED_SETTINGS);
+    let db = db_for(Tool::Gemini, gemini_template(Some("google/gemini-x")));
+    bind(&db, Tool::Gemini, "gemini", KEY).await.expect("bind");
+    edit_text(
+        &env,
+        "GOOGLE_GEMINI_BASE_URL=https://api.ofox.ai/gemini",
+        "GOOGLE_GEMINI_BASE_URL=https://my-relay.example",
+    );
+    set_json_field(&settings, &["model", "name"], "my-relay-model");
+
+    let report = unbind_now(&db, Tool::Gemini, "gemini").await;
+
+    assert_eq!(json_at(&settings)["model"]["name"], "my-relay-model");
+    assert!(
+        report
+            .kept_keys
+            .contains(&shown_at(&settings, "model.name")),
+        "{:?}",
+        report.kept_keys
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn codex_effort_set_to_default_stays_default_through_a_model_switch() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+    assert_eq!(
+        effort::state(Tool::Codex).unwrap().value.as_deref(),
+        Some("high")
+    );
+
+    persist_bound_effort(&db, Tool::Codex, None).await.unwrap();
+    assert!(toml_at(&path).get("model_reasoning_effort").is_none());
+    assert_eq!(effort::state(Tool::Codex).unwrap().value, None);
+
+    // A later model switch writes from the template, which must not bring "high" back.
+    let saved = db
+        .get_provider_by_id(Tool::Codex.provider_id(), "codex")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let config = saved["config"].as_str().unwrap();
+    assert!(!config.contains("model_reasoning_effort"));
+    let updated = json!({ "config": config.replace("openai/gpt-6-luna", "openai/gpt-other") });
+    persist_bound_settings(&db, Tool::Codex, KEY, &saved, &updated)
+        .await
+        .unwrap();
+    let after = toml_at(&path);
+    assert_eq!(after["model"].as_str(), Some("openai/gpt-other"));
+    assert!(after.get("model_reasoning_effort").is_none());
+}
+
+#[tokio::test]
+#[serial]
+async fn codex_effort_level_is_written_and_kept_through_a_model_switch() {
+    let home = Home::new();
+    let path = home.codex("config.toml");
+    let db = db_for(Tool::Codex, json!({ "config": TEMPLATE }));
+    bind(&db, Tool::Codex, "codex", KEY).await.unwrap();
+
+    persist_bound_effort(&db, Tool::Codex, Some("xhigh"))
+        .await
+        .unwrap();
+    assert_eq!(
+        toml_at(&path)["model_reasoning_effort"].as_str(),
+        Some("xhigh")
+    );
+    let saved = db
+        .get_provider_by_id(Tool::Codex.provider_id(), "codex")
+        .unwrap()
+        .unwrap()
+        .settings_config;
+    let updated = json!({ "config": saved["config"].as_str().unwrap().replace("openai/gpt-6-luna", "openai/gpt-other") });
+    persist_bound_settings(&db, Tool::Codex, KEY, &saved, &updated)
+        .await
+        .unwrap();
+    assert_eq!(
+        toml_at(&path)["model_reasoning_effort"].as_str(),
+        Some("xhigh")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn claude_effort_keeps_max_in_the_environment_and_the_rest_in_effort_level() {
+    let (_home, db, settings) = bound_claude("anthropic/claude-sonnet-5-5").await;
+
+    persist_bound_effort(&db, Tool::Claude, Some("max"))
+        .await
+        .unwrap();
+    let value = json_at(&settings);
+    assert_eq!(value["env"]["CLAUDE_CODE_EFFORT_LEVEL"], "max");
+    assert!(value.get("effortLevel").is_none());
+    assert_eq!(value["env"]["ANTHROPIC_AUTH_TOKEN"], KEY);
+    assert_eq!(
+        effort::state(Tool::Claude).unwrap().value.as_deref(),
+        Some("max")
+    );
+
+    persist_bound_effort(&db, Tool::Claude, Some("low"))
+        .await
+        .unwrap();
+    let value = json_at(&settings);
+    assert_eq!(value["effortLevel"], "low");
+    assert!(value["env"].get("CLAUDE_CODE_EFFORT_LEVEL").is_none());
+
+    persist_bound_effort(&db, Tool::Claude, None).await.unwrap();
+    let value = json_at(&settings);
+    assert!(value.get("effortLevel").is_none());
+    assert_eq!(effort::state(Tool::Claude).unwrap().value, None);
+}
+
+#[tokio::test]
+#[serial]
+async fn hermes_effort_lives_in_the_agent_section_and_leaves_the_rest_alone() {
+    let _home = Home::new();
+    let path = crate::hermes_config::get_hermes_config_path();
+    write(&path, HERMES_CONFIG);
+    let db = db_for(Tool::Hermes, hermes_template());
+    bind(&db, Tool::Hermes, "hermes", KEY).await.unwrap();
+    let bound = fs::read_to_string(&path).unwrap();
+
+    persist_bound_effort(&db, Tool::Hermes, Some("high"))
+        .await
+        .unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.starts_with("# Hermes"), "comments survive: {text}");
+    assert_eq!(
+        effort::state(Tool::Hermes).unwrap().value.as_deref(),
+        Some("high")
+    );
+    assert_eq!(
+        crate::hermes_config::get_model_config()
+            .unwrap()
+            .unwrap()
+            .provider
+            .as_deref(),
+        Some("ofox-hermes")
+    );
+
+    persist_bound_effort(&db, Tool::Hermes, None).await.unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), bound);
+}
+
+#[test]
+fn effort_takes_each_tools_own_levels_or_its_default() {
+    assert_eq!(effort::validate(Tool::Codex, None).unwrap(), None);
+    assert_eq!(
+        effort::validate(Tool::Codex, Some(" high "))
+            .unwrap()
+            .as_deref(),
+        Some("high")
+    );
+    assert!(effort::validate(Tool::Codex, Some("max")).is_err());
+    assert_eq!(
+        effort::validate(Tool::Claude, Some("max"))
+            .unwrap()
+            .as_deref(),
+        Some("max")
+    );
+    assert_eq!(
+        effort::validate(Tool::Hermes, Some("none"))
+            .unwrap()
+            .as_deref(),
+        Some("none")
+    );
+    assert!(effort::validate(Tool::Gemini, None).is_err());
+    assert!(effort::state(Tool::OpenCode).is_none());
 }

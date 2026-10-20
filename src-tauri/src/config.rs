@@ -5,6 +5,74 @@ use std::path::{Path, PathBuf};
 
 use crate::error::AppError;
 
+/// 各 agent CLI 用来改写自己配置目录的环境变量。
+///
+/// 测试沙箱（`test_sandbox::sandbox()`，单元测试与集成测试共用）会清空这些变量：开发者 shell 里残留的任何一个都会让测试读写真实 agent
+/// 的目录。只列出本应用确实会读取的变量：`CODEX_HOME`、`CLAUDE_CONFIG_DIR` 由
+/// `agent_env` 读取（进程环境，以及登录 shell / 注册表里的快照），`HERMES_HOME`、
+/// `PI_CODING_AGENT_DIR`、`DSH_HOME`、`GEMINI_CLI_HOME` 由配置模块直接读取；
+/// `WORKBUDDY_CONFIG_DIR` 由原生会话 reader 直接读取。
+/// OpenCode 的额外全局配置和 Skills 开关也必须隔离；新增读取变量时在这里补上。
+pub const AGENT_DIR_VARS: &[&str] = &[
+    "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "HERMES_HOME",
+    "PI_CODING_AGENT_DIR",
+    "PI_CODING_AGENT_SESSION_DIR",
+    "DSH_HOME",
+    "GEMINI_CLI_HOME",
+    "WORKBUDDY_CONFIG_DIR",
+    "OPENCLAW_HOME",
+    "OPENCLAW_STATE_DIR",
+    "OPENCLAW_CONFIG_PATH",
+    "OPENCODE_CONFIG_DIR",
+    "OPENCODE_CONFIG",
+    "OPENCODE_CONFIG_CONTENT",
+    "OPENCODE_DISABLE_EXTERNAL_SKILLS",
+    "OPENCODE_DISABLE_CLAUDE_CODE",
+    "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS",
+];
+
+/// 读取 `CC_SWITCH_TEST_HOME` 显式覆盖；空白视为未设置。
+fn home_override() -> Option<PathBuf> {
+    let home = std::env::var("CC_SWITCH_TEST_HOME").ok()?;
+    let trimmed = home.trim();
+    (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+}
+
+/// 是否用 `CC_SWITCH_TEST_HOME` 显式指定了 home（测试 / 调试用的隔离环境）。
+pub(crate) fn is_home_overridden() -> bool {
+    home_override().is_some()
+}
+
+#[cfg(not(test))]
+fn real_home_dir() -> Option<PathBuf> {
+    dirs::home_dir()
+}
+
+/// 单元测试里没有显式覆盖时，永远不碰真实 home：整个进程共用一个一次性临时目录。
+#[cfg(test)]
+fn real_home_dir() -> Option<PathBuf> {
+    use std::sync::OnceLock;
+
+    static PROCESS_TEST_HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
+    let dir = PROCESS_TEST_HOME.get_or_init(|| {
+        tempfile::Builder::new()
+            .prefix("ofox-test-home-")
+            .tempdir()
+            .expect("create the per-process test home")
+    });
+    Some(dir.path().to_path_buf())
+}
+
+/// 获取用户主目录；取不到时返回 `None`（调用方需要区分“没有 home”时用它）。
+///
+/// 这是整个 crate 里唯一允许向系统询问 home 的地方（`tests/home_dir_guard.rs` 会检查）。
+/// 其余代码一律走 [`get_home_dir`] 或本函数。
+pub fn try_get_home_dir() -> Option<PathBuf> {
+    home_override().or_else(real_home_dir)
+}
+
 /// 获取用户主目录，带回退和日志
 ///
 /// ## Windows 注意事项
@@ -17,31 +85,32 @@ use crate::error::AppError;
 /// ## 测试隔离
 ///
 /// 为了让 Windows CI/本地测试能稳定隔离真实用户数据，可通过 `CC_SWITCH_TEST_HOME`
-/// 显式覆盖 home dir（仅用于测试/调试场景）。
+/// 显式覆盖 home dir（仅用于测试/调试场景）。单元测试（`cfg(test)`）里没有设置该变量时，
+/// 返回本进程的一次性临时目录而不是真实 home。
 pub fn get_home_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("CC_SWITCH_TEST_HOME") {
-        let trimmed = home.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
-    }
-
-    dirs::home_dir().unwrap_or_else(|| {
+    try_get_home_dir().unwrap_or_else(|| {
         log::warn!("无法获取用户主目录，回退到当前目录");
         PathBuf::from(".")
     })
 }
 
-/// 获取 Claude Code 配置目录路径
-pub fn get_claude_config_dir() -> PathBuf {
-    if let Some(custom) = crate::settings::get_claude_override_dir() {
-        return custom;
-    }
+/// A path below the home as the UI shows it, `/`-separated on every platform,
+/// so Windows reads `~/.codex/config.toml` rather than `~/.codex\config.toml`.
+pub(crate) fn tilde_rest(rest: &Path) -> String {
+    rest.components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
 
-    get_home_dir().join(".claude")
+/// 获取 Claude Code 配置目录路径：设置里的覆盖目录 → `CLAUDE_CONFIG_DIR` → `~/.claude`
+/// （见 [`crate::agent_env`]）。
+pub fn get_claude_config_dir() -> PathBuf {
+    crate::agent_env::dir(crate::agent_env::AgentTool::Claude).dir
 }
 
 /// 默认 Claude MCP 配置文件路径 (~/.claude.json)
+#[cfg(test)]
 pub fn get_default_claude_mcp_path() -> PathBuf {
     get_home_dir().join(".claude.json")
 }
@@ -59,14 +128,27 @@ fn derive_mcp_path_from_override(dir: &Path) -> Option<PathBuf> {
     Some(parent.join(format!("{file_name}.json")))
 }
 
-/// 获取 Claude MCP 配置文件路径，若设置了目录覆盖则与覆盖目录同级
+/// 获取 Claude MCP / 全局配置文件路径（`.claude.json`）：
+///
+/// - 设置里的覆盖目录：与覆盖目录同级（`<父目录>/<目录名>.json`）；
+/// - `CLAUDE_CONFIG_DIR`（进程环境或登录 shell）：Claude Code 把它放在该目录里面，
+///   即 `<目录>/.claude.json`；
+/// - 都没有：`~/.claude.json`。
 pub fn get_claude_mcp_path() -> PathBuf {
-    if let Some(custom_dir) = crate::settings::get_claude_override_dir() {
-        if let Some(path) = derive_mcp_path_from_override(&custom_dir) {
-            return path;
+    let claude = crate::agent_env::dir(crate::agent_env::AgentTool::Claude);
+    claude_mcp_path_for(&claude, &get_home_dir())
+}
+
+fn claude_mcp_path_for(claude: &crate::agent_env::AgentDir, home: &Path) -> PathBuf {
+    use crate::agent_env::DirSource;
+
+    match claude.source {
+        DirSource::Settings => {
+            derive_mcp_path_from_override(&claude.dir).unwrap_or_else(|| home.join(".claude.json"))
         }
+        DirSource::Env | DirSource::LoginShell => claude.dir.join(".claude.json"),
+        DirSource::Default => home.join(".claude.json"),
     }
-    get_default_claude_mcp_path()
 }
 
 /// 获取 Claude Code 主配置文件路径
@@ -153,69 +235,567 @@ pub fn write_text_file(path: &Path, data: &str) -> Result<(), AppError> {
     atomic_write(path, data.as_bytes())
 }
 
+/// [`atomic_write_with`] 的可选项。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AtomicOpts {
+    /// 写出文件的 Unix 权限位（Windows 上忽略）。`None` 时沿用被替换文件的权限，
+    /// 文件还不存在则用 [`NEW_FILE_MODE`]。
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub mode: Option<u32>,
+}
+
+/// 新建文件的默认权限：agent 的配置里常有 API key，只给自己读写。
+#[cfg(unix)]
+const NEW_FILE_MODE: u32 = 0o600;
+
+/// 跟随符号链接时最多走几步，防止环。
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// 临时文件重名（同一纳秒内的并发写）时最多换几次名字。
+const MAX_TEMP_NAME_ATTEMPTS: usize = 16;
+
+/// Windows 上 rename 被别的进程短暂占用（杀毒、索引、agent 正在读）时，每次重试前的等待，
+/// 一共十次尝试、约 1 秒。
+#[cfg(windows)]
+const RENAME_BACKOFF: [std::time::Duration; 9] = [
+    std::time::Duration::from_millis(10),
+    std::time::Duration::from_millis(20),
+    std::time::Duration::from_millis(40),
+    std::time::Duration::from_millis(80),
+    std::time::Duration::from_millis(160),
+    std::time::Duration::from_millis(200),
+    std::time::Duration::from_millis(200),
+    std::time::Duration::from_millis(200),
+    std::time::Duration::from_millis(200),
+];
+
 /// 原子写入：写入临时文件后 rename 替换，避免半写状态
 pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-    }
+    atomic_write_with(path, data, AtomicOpts::default())
+}
 
-    let parent = path
-        .parent()
-        .ok_or_else(|| AppError::Config("无效的路径".to_string()))?;
-    let mut tmp = parent.to_path_buf();
-    let file_name = path
+/// Private machine state must never follow a link, including in its ancestors.
+/// All writes and the final rename address an opened physical parent directory.
+#[cfg(unix)]
+fn open_private_parent(parent: &Path) -> std::io::Result<fs::File> {
+    use std::{
+        ffi::CString,
+        os::fd::{AsRawFd, FromRawFd},
+        os::unix::ffi::OsStrExt,
+        path::Component,
+    };
+    let invalid = || std::io::Error::from(std::io::ErrorKind::InvalidInput);
+    if !parent.is_absolute() {
+        return Err(invalid());
+    }
+    let mut directory = fs::File::open("/")?;
+    for component in parent.components() {
+        let Component::Normal(part) = component else {
+            if component == Component::RootDir {
+                continue;
+            }
+            return Err(invalid());
+        };
+        let part = CString::new(part.as_bytes()).map_err(|_| invalid())?;
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                part.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        directory = unsafe { fs::File::from_raw_fd(fd) };
+    }
+    Ok(directory)
+}
+
+#[cfg(unix)]
+pub(crate) fn read_private_with(
+    path: &Path,
+    max: u64,
+    after_open: impl FnOnce(),
+) -> Result<Option<Vec<u8>>, AppError> {
+    use std::{
+        ffi::CString,
+        io::Read,
+        os::fd::{AsRawFd, FromRawFd},
+        os::unix::{ffi::OsStrExt, fs::MetadataExt},
+    };
+    let invalid = || AppError::Config("privateStateReadFailed".into());
+    let parent = path.parent().ok_or_else(invalid)?;
+    let name =
+        CString::new(path.file_name().ok_or_else(invalid)?.as_bytes()).map_err(|_| invalid())?;
+    let directory = match open_private_parent(parent) {
+        Ok(dir) => dir,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(invalid()),
+    };
+    let physical = directory.metadata().map_err(|_| invalid())?;
+    after_open();
+    let checked = open_private_parent(parent)
+        .map_err(|_| invalid())?
+        .metadata()
+        .map_err(|_| invalid())?;
+    if (checked.dev(), checked.ino()) != (physical.dev(), physical.ino()) {
+        return Err(invalid());
+    }
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )
+    };
+    if fd < 0 {
+        return if std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound {
+            Ok(None)
+        } else {
+            Err(invalid())
+        };
+    }
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    let before = file.metadata().map_err(|_| invalid())?;
+    if !before.is_file() || before.len() > max {
+        return Err(invalid());
+    }
+    let fingerprint = |meta: &fs::Metadata| {
+        (
+            meta.dev(),
+            meta.ino(),
+            meta.mode(),
+            meta.len(),
+            meta.mtime(),
+            meta.mtime_nsec(),
+            meta.ctime(),
+            meta.ctime_nsec(),
+        )
+    };
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(max.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| invalid())?;
+    if bytes.len() as u64 != before.len()
+        || fingerprint(&before) != fingerprint(&file.metadata().map_err(|_| invalid())?)
+    {
+        return Err(invalid());
+    }
+    let checked = open_private_parent(parent)
+        .map_err(|_| invalid())?
+        .metadata()
+        .map_err(|_| invalid())?;
+    if (checked.dev(), checked.ino()) != (physical.dev(), physical.ino()) {
+        return Err(invalid());
+    }
+    let mut entry = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            entry.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        return Err(invalid());
+    }
+    let entry = unsafe { entry.assume_init() };
+    // `dev_t` is i32 on macOS and u64 on Linux, where the cast is a no-op.
+    #[allow(clippy::unnecessary_cast)]
+    let device = entry.st_dev as u64;
+    if device != before.dev()
+        || entry.st_ino != before.ino()
+        || entry.st_mode & libc::S_IFMT != libc::S_IFREG
+    {
+        return Err(invalid());
+    }
+    Ok(Some(bytes))
+}
+
+#[cfg(unix)]
+pub(crate) fn atomic_write_private_with(
+    path: &Path,
+    data: &[u8],
+    after_open: impl FnOnce(),
+) -> Result<(), AppError> {
+    use std::{
+        ffi::CString,
+        os::fd::{AsRawFd, FromRawFd},
+        os::unix::{ffi::OsStrExt, fs::MetadataExt},
+    };
+    let invalid = || AppError::Config("privateStateWriteFailed".into());
+    if !path.is_absolute() {
+        return Err(invalid());
+    }
+    let parent = path.parent().ok_or_else(invalid)?;
+    let name =
+        CString::new(path.file_name().ok_or_else(invalid)?.as_bytes()).map_err(|_| invalid())?;
+    let directory = open_private_parent(parent).map_err(|_| invalid())?;
+    let physical = directory.metadata().map_err(|_| invalid())?;
+    after_open();
+    let now = open_private_parent(parent)
+        .map_err(|_| invalid())?
+        .metadata()
+        .map_err(|_| invalid())?;
+    if !now.is_dir()
+        || now.file_type().is_symlink()
+        || (now.dev(), now.ino()) != (physical.dev(), physical.ino())
+    {
+        return Err(invalid());
+    }
+    let mut entry = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let exists = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            entry.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if exists == 0 {
+        let entry = unsafe { entry.assume_init() };
+        if entry.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(invalid());
+        }
+    } else if std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
+        return Err(invalid());
+    }
+    let temp =
+        CString::new(format!(".ofox-{}.tmp", uuid::Uuid::new_v4())).map_err(|_| invalid())?;
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            temp.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(invalid());
+    }
+    let mut file = unsafe { fs::File::from_raw_fd(fd) };
+    let result = (|| {
+        file.write_all(data).map_err(|_| invalid())?;
+        file.sync_all().map_err(|_| invalid())?;
+        let now = open_private_parent(parent)
+            .map_err(|_| invalid())?
+            .metadata()
+            .map_err(|_| invalid())?;
+        if !now.is_dir()
+            || now.file_type().is_symlink()
+            || (now.dev(), now.ino()) != (physical.dev(), physical.ino())
+        {
+            return Err(invalid());
+        }
+        if unsafe {
+            libc::renameat(
+                directory.as_raw_fd(),
+                temp.as_ptr(),
+                directory.as_raw_fd(),
+                name.as_ptr(),
+            )
+        } != 0
+        {
+            return Err(invalid());
+        }
+        directory.sync_all().map_err(|_| invalid())
+    })();
+    unsafe { libc::unlinkat(directory.as_raw_fd(), temp.as_ptr(), 0) };
+    result
+}
+
+/// 原子写入，可指定文件权限。
+///
+/// - `path` 是符号链接（常见于放在 dotfiles 仓库里的配置）时写它指向的文件，链接本身保留。
+/// - 临时文件建在目标同目录，创建时就带上最终权限（没有“先 0644 再改 0600”的空窗），
+///   写完 `sync_all` 之后才 rename：断电不会留下长度对、内容全零的文件。
+/// - 任何一步失败，临时文件都会被清掉，目标文件保持原样。
+pub fn atomic_write_with(path: &Path, data: &[u8], opts: AtomicOpts) -> Result<(), AppError> {
+    let target = write_target(path)?;
+    let file_name = target
         .file_name()
-        .ok_or_else(|| AppError::Config("无效的文件名".to_string()))?
-        .to_string_lossy()
-        .to_string();
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    tmp.push(format!("{file_name}.tmp.{ts}"));
+        .ok_or_else(|| AppError::Config("无效的文件名".to_string()))?;
+    let parent = match target.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        Some(_) => Path::new("."),
+        None => return Err(AppError::Config("无效的路径".to_string())),
+    };
+    fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
 
-    {
-        let mut f = fs::File::create(&tmp).map_err(|e| AppError::io(&tmp, e))?;
-        f.write_all(data).map_err(|e| AppError::io(&tmp, e))?;
-        f.flush().map_err(|e| AppError::io(&tmp, e))?;
-    }
+    let (tmp, mut file) = create_temp_file(parent, file_name, &target, opts)?;
+    let mut guard = TempFileGuard::new(tmp.clone());
+    file.write_all(data).map_err(|e| AppError::io(&tmp, e))?;
+    file.sync_all().map_err(|e| AppError::io(&tmp, e))?;
+    // Windows 不能重命名还开着的文件。
+    drop(file);
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(meta) = fs::metadata(path) {
-            let perm = meta.permissions().mode();
-            let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(perm));
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        // Windows 上 rename 目标存在会失败，先移除再重命名（尽量接近原子性）
-        if path.exists() {
-            let _ = fs::remove_file(path);
-        }
-        fs::rename(&tmp, path).map_err(|e| AppError::IoContext {
-            context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
-            source: e,
-        })?;
-    }
-
-    #[cfg(not(windows))]
-    {
-        fs::rename(&tmp, path).map_err(|e| AppError::IoContext {
-            context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
-            source: e,
-        })?;
-    }
+    rename_over(&tmp, &target).map_err(|e| AppError::IoContext {
+        context: format!("原子替换失败: {} -> {}", tmp.display(), target.display()),
+        source: e,
+    })?;
+    guard.disarm();
+    sync_dir(parent);
     Ok(())
 }
 
-/// 读文件原始字节；文件不存在返回 `None`。
+/// 写 `path` 时真正要替换的文件：`path` 不是符号链接就是它自己，否则是链接指向的文件
+/// （目标还不存在的悬空链接也算，这样写入会建出目标而不是把链接换成普通文件）。
+pub(crate) fn write_target(path: &Path) -> Result<PathBuf, AppError> {
+    if !is_symlink(path) {
+        return Ok(path.to_path_buf());
+    }
+    if let Ok(resolved) = fs::canonicalize(path) {
+        return Ok(resolved);
+    }
+    // 悬空链接 canonicalize 会失败：一步步读链接，直到走到不是链接的路径。
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_SYMLINK_HOPS {
+        if !is_symlink(&current) {
+            return Ok(current);
+        }
+        let destination = fs::read_link(&current).map_err(|e| AppError::io(&current, e))?;
+        current = if destination.is_absolute() {
+            destination
+        } else {
+            current
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .join(destination)
+        };
+    }
+    Err(AppError::Config(format!(
+        "Too many levels of symbolic links: {}",
+        path.display()
+    )))
+}
+
+fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+/// 在目标同目录建临时文件 `.{name}.ofox-tmp-{pid}-{nanos}`（`create_new`，不会写到别人的文件上）。
+#[cfg_attr(not(unix), allow(unused_variables))]
+fn create_temp_file(
+    dir: &Path,
+    file_name: &std::ffi::OsStr,
+    target: &Path,
+    opts: AtomicOpts,
+) -> Result<(PathBuf, fs::File), AppError> {
+    #[cfg(unix)]
+    let mode = opts
+        .mode
+        .or_else(|| existing_mode(target))
+        .unwrap_or(NEW_FILE_MODE);
+
+    for _ in 0..MAX_TEMP_NAME_ATTEMPTS {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let mut name = std::ffi::OsString::from(".");
+        name.push(file_name);
+        name.push(format!(".ofox-tmp-{}-{nanos}", std::process::id()));
+        let tmp = dir.join(name);
+
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(mode);
+        }
+        match options.open(&tmp) {
+            Ok(file) => {
+                #[cfg(unix)]
+                if let Err(e) = apply_exact_mode(&file, mode) {
+                    drop(file);
+                    let _ = fs::remove_file(&tmp);
+                    return Err(AppError::io(&tmp, e));
+                }
+                return Ok((tmp, file));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(AppError::io(&tmp, e)),
+        }
+    }
+    Err(AppError::Config(format!(
+        "Could not pick an unused temp file name next to {}",
+        target.display()
+    )))
+}
+
+/// 被替换文件现在的权限位（不含 setuid 等特殊位）；文件不存在返回 `None`。
+#[cfg(unix)]
+fn existing_mode(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path)
+        .ok()
+        .map(|meta| meta.permissions().mode() & 0o777)
+}
+
+/// 创建时给的权限会被 umask 削掉（0o664 在 umask 022 下变 0o644）；再 `fchmod` 一次，
+/// 让结果和要求的完全一致。收窄不受 umask 影响，所以不会在写入内容之前变宽。
+#[cfg(unix)]
+fn apply_exact_mode(file: &fs::File, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(fs::Permissions::from_mode(mode))
+}
+
+/// 退出作用域时删掉临时文件，除非已经 [`disarm`](Self::disarm)：任何错误路径（含 `?`、panic）都不留垃圾。
+struct TempFileGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// 把 `from` 改名成 `to`，替换已有的 `to`。
+///
+/// Unix 上 `rename` 本身是原子替换。Windows 上标准库的 `rename` 也会替换已有文件，所以不要先删目标
+/// （先删再改名中间一断电，配置就没了）；目标恰好被别的进程打开时会得到 5/32/33，短暂重试。
+#[cfg(windows)]
+fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
+    retry_transient(
+        || fs::rename(from, to),
+        is_sharing_violation,
+        &RENAME_BACKOFF,
+    )
+}
+
+#[cfg(not(windows))]
+fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::rename(from, to)
+}
+
+/// ERROR_ACCESS_DENIED / ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION。
+#[cfg(windows)]
+fn is_sharing_violation(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(5 | 32 | 33))
+}
+
+/// 先试一次；失败且 `is_transient` 认为值得再试，就按 `backoff` 逐项等待后重试，
+/// 最多共 `backoff.len() + 1` 次，最后一次的结果原样返回。
+fn retry_transient<T>(
+    mut op: impl FnMut() -> std::io::Result<T>,
+    is_transient: impl Fn(&std::io::Error) -> bool,
+    backoff: &[std::time::Duration],
+) -> std::io::Result<T> {
+    let mut result = op();
+    for pause in backoff {
+        match &result {
+            Err(error) if is_transient(error) => {
+                std::thread::sleep(*pause);
+                result = op();
+            }
+            _ => break,
+        }
+    }
+    result
+}
+
+/// rename 之后把目录项也刷到盘上，断电后新文件才一定在。尽力而为：Windows 没有对应操作，
+/// 个别文件系统也不支持，失败不影响已经完成的写入。
+fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    if let Err(e) = fs::File::open(dir).and_then(|handle| handle.sync_all()) {
+        log::debug!("fsync of {} failed: {e}", dir.display());
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+}
+
+/// 创建目录（含缺的上级），新建出来的每一级在 Unix 上都是 0o700；已有的目录不动。
+pub(crate) fn create_private_dir_all(path: &Path) -> Result<(), AppError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+            .map_err(|e| AppError::io(path, e))
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(path).map_err(|e| AppError::io(path, e))
+    }
+}
+
+/// 让 `path` 在 Unix 上是 0o600：已存在就收紧权限，不存在就按 0o600 建一个空文件
+/// （SQLite 会把空文件当成新库，它的 journal/wal 也跟主文件同权限）。内容不动。
+pub(crate) fn ensure_private_file(path: &Path) -> Result<(), AppError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+        {
+            Ok(file) => apply_exact_mode(&file, 0o600).map_err(|e| AppError::io(path, e)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => set_file_mode(path, 0o600),
+            Err(e) => Err(AppError::io(path, e)),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+/// 读文件原始字节；文件不存在返回 `None`。普通读取和探测都用它，不会等待。
 pub(crate) fn read_file_bytes(path: &Path) -> Result<Option<Vec<u8>>, AppError> {
-    match fs::read(path) {
+    read_file_bytes_retrying(path, &[])
+}
+
+/// Windows 上别的进程正在用 rename 替换一个文件时，它会有一瞬间“不存在”（实测约 2 毫秒）。
+/// 其它平台的 rename 是原子的，没有这个窗口，所以不等。
+const REPLACE_WINDOW_BACKOFF: &[std::time::Duration] = if cfg!(windows) {
+    &[std::time::Duration::from_millis(20); 5]
+} else {
+    &[]
+};
+
+/// 同 [`read_file_bytes`]，但文件“不存在”时先等一等再下结论（Windows 上最多 100 毫秒）。
+///
+/// 只给读了之后会据此动手的调用方用——[`FileTxn`] 把 `None` 记成“原来没有这个文件”，
+/// 回滚时就会删掉它，读到瞬间的假 `None` 会删掉用户的文件。状态探测这类热路径上
+/// 大量文件本来就不存在，用 [`read_file_bytes`]，不要为它们每个多等 100 毫秒。
+fn read_file_bytes_waiting_out_replace(path: &Path) -> Result<Option<Vec<u8>>, AppError> {
+    read_file_bytes_retrying(path, REPLACE_WINDOW_BACKOFF)
+}
+
+fn read_file_bytes_retrying(
+    path: &Path,
+    backoff: &[std::time::Duration],
+) -> Result<Option<Vec<u8>>, AppError> {
+    let not_found = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+    match retry_transient(|| fs::read(path), not_found, backoff) {
         Ok(bytes) => Ok(Some(bytes)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) if not_found(&e) => Ok(None),
         Err(e) => Err(AppError::io(path, e)),
     }
 }
@@ -255,6 +835,10 @@ pub(crate) fn set_file_mode(_path: &Path, _mode: u32) -> Result<(), AppError> {
 
 /// 多文件写入事务：每个文件第一次被改动前记下原来的字节和权限（不存在记为
 /// `None`），任一步失败时 [`FileTxn::rollback`] 按相反顺序全部还原。
+///
+/// 一切按真正会被写到的文件记账（符号链接解析到它指向的文件，见 [`write_target`]）：链接本身
+/// 不动，指向不存在文件的悬空链接也一样——写入建出来的目标（里面可能有 API key），
+/// 回滚或删除时删的是这个目标，而不是把链接删掉、把带 key 的目标留下。
 #[derive(Default)]
 pub(crate) struct FileTxn {
     originals: Vec<(PathBuf, Option<Vec<u8>>, Option<u32>)>,
@@ -265,29 +849,45 @@ impl FileTxn {
         Self::default()
     }
 
-    fn remember(&mut self, path: &Path) -> Result<(), AppError> {
-        if self.originals.iter().any(|(seen, _, _)| seen == path) {
-            return Ok(());
+    /// 记下 `path` 指向的文件现在的样子（只记第一次），返回要操作的真实路径。
+    fn remember(&mut self, path: &Path) -> Result<PathBuf, AppError> {
+        let target = write_target(path)?;
+        if self.originals.iter().any(|(seen, _, _)| *seen == target) {
+            return Ok(target);
         }
-        let original = read_file_bytes(path)?;
-        self.originals
-            .push((path.to_path_buf(), original, file_mode(path)));
-        Ok(())
+        // 这里的 `None` 会让回滚删文件，所以要先等一等别人正在进行的 rename（Windows），别把假的“不存在”记下来。
+        let original = read_file_bytes_waiting_out_replace(&target)?;
+        let mode = file_mode(&target);
+        self.originals.push((target.clone(), original, mode));
+        Ok(target)
     }
 
     pub(crate) fn write(&mut self, path: &Path, data: &[u8]) -> Result<(), AppError> {
-        self.remember(path)?;
-        atomic_write(path, data)
+        let target = self.remember(path)?;
+        atomic_write(&target, data)
+    }
+
+    /// 写文件并在创建时就给定权限（见 [`AtomicOpts::mode`]）：含 API key 的文件不会有
+    /// 先按 umask 落盘、再收紧的空窗；已有文件会被改成这个权限，回滚时还原。
+    pub(crate) fn write_with_mode(
+        &mut self,
+        path: &Path,
+        data: &[u8],
+        mode: u32,
+    ) -> Result<(), AppError> {
+        let target = self.remember(path)?;
+        atomic_write_with(&target, data, AtomicOpts { mode: Some(mode) })
     }
 
     pub(crate) fn set_mode(&mut self, path: &Path, mode: u32) -> Result<(), AppError> {
-        self.remember(path)?;
-        set_file_mode(path, mode)
+        let target = self.remember(path)?;
+        set_file_mode(&target, mode)
     }
 
+    /// 删文件。`path` 是符号链接时删的是它指向的文件，链接留着（回滚时内容会经由链接写回去）。
     pub(crate) fn remove(&mut self, path: &Path) -> Result<(), AppError> {
-        self.remember(path)?;
-        remove_file_if_exists(path)
+        let target = self.remember(path)?;
+        remove_file_if_exists(&target)
     }
 
     /// 把改过的文件全部还原成事务开始前的样子；尽量全部还原，返回第一个错误。
@@ -295,10 +895,7 @@ impl FileTxn {
         let mut first_error = None;
         for (path, original, mode) in self.originals.into_iter().rev() {
             let result = match original {
-                Some(bytes) => atomic_write(&path, &bytes).and_then(|()| match mode {
-                    Some(mode) => set_file_mode(&path, mode),
-                    None => Ok(()),
-                }),
+                Some(bytes) => atomic_write_with(&path, &bytes, AtomicOpts { mode }),
                 None => remove_file_if_exists(&path),
             };
             if let Err(error) = result {
@@ -313,6 +910,12 @@ impl FileTxn {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn a_path_below_home_is_shown_with_forward_slashes() {
+        let rest = Path::new(".codex").join("config.toml");
+        assert_eq!(tilde_rest(&rest), ".codex/config.toml");
+    }
 
     #[test]
     fn file_txn_rollback_restores_changed_created_and_removed_files() {
@@ -351,6 +954,455 @@ mod tests {
         assert_eq!(file_mode(&path), Some(0o644));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn file_txn_write_with_mode_creates_the_file_private_and_rollback_removes_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+
+        let mut txn = FileTxn::new();
+        txn.write_with_mode(&path, b"key = 1\n", 0o600).unwrap();
+
+        assert_eq!(file_mode(&path), Some(0o600));
+        txn.rollback().unwrap();
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_txn_write_with_mode_tightens_an_existing_file_and_rollback_restores_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, b"key = 0\n").unwrap();
+        set_file_mode(&path, 0o644).unwrap();
+
+        let mut txn = FileTxn::new();
+        txn.write_with_mode(&path, b"key = 1\n", 0o600).unwrap();
+        assert_eq!(file_mode(&path), Some(0o600));
+        txn.rollback().unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"key = 0\n");
+        assert_eq!(file_mode(&path), Some(0o644));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_txn_rollback_removes_the_file_a_dangling_symlink_pointed_at_and_keeps_the_link() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(dir.path().join("store")).unwrap();
+        let target = dir.path().join("store/config.toml");
+        let link = dir.path().join("config.toml");
+        std::os::unix::fs::symlink("store/config.toml", &link).unwrap();
+
+        let mut txn = FileTxn::new();
+        txn.write_with_mode(&link, b"experimental_bearer_token = \"sk\"\n", 0o600)
+            .unwrap();
+        assert!(target.exists(), "the write went through the link");
+        txn.rollback().unwrap();
+
+        assert!(!target.exists(), "the key file the write created is gone");
+        let meta = fs::symlink_metadata(&link).unwrap();
+        assert!(meta.file_type().is_symlink(), "the link stays as it was");
+        assert_eq!(
+            fs::read_link(&link).unwrap(),
+            Path::new("store/config.toml")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_txn_remove_deletes_the_file_behind_a_symlink_and_rollback_puts_it_back_through_the_link(
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("dotfiles-auth.json");
+        let link = dir.path().join("auth.json");
+        fs::write(&target, b"{\"k\":1}").unwrap();
+        set_file_mode(&target, 0o640).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let mut txn = FileTxn::new();
+        txn.remove(&link).unwrap();
+        assert!(!target.exists(), "the content behind the link is removed");
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        txn.rollback().unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"{\"k\":1}");
+        assert_eq!(file_mode(&target), Some(0o640));
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_txn_treats_two_links_to_one_file_as_one_original() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("real.toml");
+        fs::write(&target, b"a = 0\n").unwrap();
+        let first = dir.path().join("first.toml");
+        let second = dir.path().join("second.toml");
+        std::os::unix::fs::symlink(&target, &first).unwrap();
+        std::os::unix::fs::symlink(&target, &second).unwrap();
+
+        let mut txn = FileTxn::new();
+        txn.write(&first, b"a = 1\n").unwrap();
+        txn.write(&second, b"a = 2\n").unwrap();
+        txn.rollback().unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"a = 0\n");
+    }
+
+    #[test]
+    fn a_file_that_appears_while_the_replace_window_is_waited_out_is_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let writer = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                // Publish a complete replacement; a non-atomic create/write can
+                // legitimately be observed between creation and its first byte.
+                atomic_write(&path, b"back").unwrap();
+            })
+        };
+
+        let read = read_file_bytes_retrying(&path, &[std::time::Duration::from_millis(10); 100]);
+
+        writer.join().unwrap();
+        assert_eq!(read.unwrap(), Some(b"back".to_vec()));
+    }
+
+    #[test]
+    fn a_file_that_never_appears_is_none_once_the_wait_is_used_up() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("missing.toml");
+
+        let read = read_file_bytes_retrying(&path, &[std::time::Duration::ZERO; 3]);
+
+        assert_eq!(read.unwrap(), None);
+    }
+
+    #[test]
+    fn other_read_errors_are_reported_not_retried_into_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // A directory is not a readable file: not NotFound, so an error, not `None`.
+        let read = read_file_bytes_retrying(dir.path(), &[std::time::Duration::ZERO; 3]);
+
+        assert!(read.is_err());
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn atomic_write_creates_parent_directories_and_replaces_the_content() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested/deeper/config.json");
+
+        atomic_write(&path, b"one").unwrap();
+        atomic_write(&path, b"two").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"two");
+        assert_eq!(names_in(path.parent().unwrap()), ["config.json"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_through_a_symlink_writes_the_target_and_keeps_the_link() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("dotfiles/config.toml");
+        fs::create_dir_all(real.parent().unwrap()).unwrap();
+        fs::write(&real, b"old").unwrap();
+        let link = dir.path().join("config.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        atomic_write(&link, b"new").unwrap();
+
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&real).unwrap(), b"new");
+        assert_eq!(names_in(dir.path()), ["config.toml", "dotfiles"]);
+        assert_eq!(names_in(real.parent().unwrap()), ["config.toml"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_follows_a_chain_of_relative_symlinks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("store")).unwrap();
+        let real = dir.path().join("store/real.json");
+        fs::write(&real, b"old").unwrap();
+        std::os::unix::fs::symlink("store/real.json", dir.path().join("middle.json")).unwrap();
+        std::os::unix::fs::symlink("middle.json", dir.path().join("config.json")).unwrap();
+
+        atomic_write(&dir.path().join("config.json"), b"new").unwrap();
+
+        assert_eq!(fs::read(&real).unwrap(), b"new");
+        for link in ["middle.json", "config.json"] {
+            let meta = fs::symlink_metadata(dir.path().join(link)).unwrap();
+            assert!(meta.file_type().is_symlink(), "{link} stopped being a link");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_through_a_dangling_symlink_creates_the_file_it_points_at() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("store/config.toml");
+        fs::create_dir_all(real.parent().unwrap()).unwrap();
+        let link = dir.path().join("config.toml");
+        std::os::unix::fs::symlink("store/config.toml", &link).unwrap();
+
+        atomic_write(&link, b"fresh").unwrap();
+
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&real).unwrap(), b"fresh");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_gives_a_new_file_mode_0600() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("auth.json");
+
+        atomic_write(&path, b"{}").unwrap();
+
+        assert_eq!(file_mode(&path), Some(0o600));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_keeps_the_exact_mode_of_an_existing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for mode in [0o644, 0o664, 0o640] {
+            let path = dir.path().join(format!("config-{mode:o}.toml"));
+            fs::write(&path, b"old").unwrap();
+            set_file_mode(&path, mode).unwrap();
+
+            atomic_write(&path, b"new").unwrap();
+
+            assert_eq!(file_mode(&path), Some(mode), "mode {mode:o} was not kept");
+            assert_eq!(fs::read(&path).unwrap(), b"new");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_with_an_explicit_mode_wins_over_the_existing_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let existing = dir.path().join("settings.json");
+        fs::write(&existing, b"old").unwrap();
+        set_file_mode(&existing, 0o644).unwrap();
+        let created = dir.path().join("created.json");
+
+        atomic_write_with(&existing, b"new", AtomicOpts { mode: Some(0o600) }).unwrap();
+        atomic_write_with(&created, b"new", AtomicOpts { mode: Some(0o640) }).unwrap();
+
+        assert_eq!(file_mode(&existing), Some(0o600));
+        assert_eq!(file_mode(&created), Some(0o640));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_to_a_symlink_keeps_the_mode_of_the_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real.toml");
+        fs::write(&real, b"old").unwrap();
+        set_file_mode(&real, 0o640).unwrap();
+        let link = dir.path().join("link.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        atomic_write(&link, b"new").unwrap();
+
+        assert_eq!(file_mode(&real), Some(0o640));
+    }
+
+    #[test]
+    fn a_failed_atomic_write_leaves_neither_a_temp_file_nor_a_changed_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A directory cannot be replaced by a file, so the rename at the very end fails
+        // after the temp file has been fully written.
+        let target = dir.path().join("config.toml");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("keep.txt"), b"keep").unwrap();
+
+        let result = atomic_write(&target, b"new");
+
+        assert!(result.is_err(), "replacing a directory must fail");
+        assert_eq!(names_in(dir.path()), ["config.toml"]);
+        assert_eq!(fs::read(target.join("keep.txt")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn a_failed_atomic_write_with_a_mode_leaves_no_temp_file_either() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("settings.json");
+        fs::create_dir(&target).unwrap();
+
+        let result = atomic_write_with(&target, b"new", AtomicOpts { mode: Some(0o600) });
+
+        assert!(result.is_err());
+        assert_eq!(names_in(dir.path()), ["settings.json"]);
+    }
+
+    /// Windows 专属，只在 Windows CI 上跑：rename 目标被别的进程以“不共享删除”的方式开着时，
+    /// 对方放手之前 rename 会失败（5/32/33），写入要等它而不是报错。
+    #[cfg(windows)]
+    #[test]
+    fn atomic_write_waits_for_a_reader_that_blocks_the_rename_and_then_replaces_the_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.json");
+        fs::write(&path, b"old").unwrap();
+        // FILE_SHARE_READ | FILE_SHARE_WRITE, but not FILE_SHARE_DELETE: a rename over it is refused.
+        let holder = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x3)
+            .open(&path)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(holder);
+        });
+
+        atomic_write(&path, b"new").unwrap();
+
+        release.join().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(names_in(dir.path()), ["config.json"]);
+    }
+
+    /// Windows 专属，只在 Windows CI 上跑：对方以 FILE_SHARE_DELETE 开着文件（Rust、Node 的默认）时，
+    /// 写入立刻就能替换它。
+    #[cfg(windows)]
+    #[test]
+    fn atomic_write_replaces_a_file_held_open_with_share_delete() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.json");
+        fs::write(&path, b"old").unwrap();
+        let _holder = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x7)
+            .open(&path)
+            .unwrap();
+
+        atomic_write(&path, b"new").unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+    }
+
+    #[test]
+    fn atomic_write_rejects_a_path_without_a_file_name() {
+        let result = atomic_write(Path::new("/"), b"x");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn retry_transient_succeeds_once_the_failure_clears() {
+        let mut calls = 0;
+        let result = retry_transient(
+            || {
+                calls += 1;
+                if calls < 4 {
+                    Err(std::io::Error::from_raw_os_error(32))
+                } else {
+                    Ok("done")
+                }
+            },
+            |e| e.raw_os_error() == Some(32),
+            &[std::time::Duration::ZERO; 9],
+        );
+
+        assert_eq!(result.unwrap(), "done");
+        assert_eq!(calls, 4);
+    }
+
+    #[test]
+    fn retry_transient_gives_up_after_the_backoff_is_used_up() {
+        let mut calls = 0;
+        let result: std::io::Result<()> = retry_transient(
+            || {
+                calls += 1;
+                Err(std::io::Error::from_raw_os_error(32))
+            },
+            |e| e.raw_os_error() == Some(32),
+            &[std::time::Duration::ZERO; 9],
+        );
+
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(32));
+        assert_eq!(calls, 10, "one try plus one per backoff step");
+    }
+
+    #[test]
+    fn retry_transient_returns_other_errors_at_once() {
+        let mut calls = 0;
+        let result: std::io::Result<()> = retry_transient(
+            || {
+                calls += 1;
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            },
+            |e| e.kind() == std::io::ErrorKind::NotFound,
+            &[std::time::Duration::ZERO; 9],
+        );
+
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_private_dir_all_makes_every_new_level_0700_and_leaves_old_ones() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let existing = dir.path().join("existing");
+        fs::create_dir(&existing).unwrap();
+        set_file_mode(&existing, 0o755).unwrap();
+        let leaf = existing.join("a/b");
+
+        create_private_dir_all(&leaf).unwrap();
+
+        assert_eq!(file_mode(&existing), Some(0o755));
+        assert_eq!(file_mode(&existing.join("a")), Some(0o700));
+        assert_eq!(file_mode(&leaf), Some(0o700));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_private_file_creates_or_tightens_without_touching_content() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fresh = dir.path().join("fresh.db");
+        let old = dir.path().join("old.db");
+        fs::write(&old, b"data").unwrap();
+        set_file_mode(&old, 0o644).unwrap();
+
+        ensure_private_file(&fresh).unwrap();
+        ensure_private_file(&old).unwrap();
+
+        assert_eq!(file_mode(&fresh), Some(0o600));
+        assert_eq!(fs::read(&fresh).unwrap(), b"");
+        assert_eq!(file_mode(&old), Some(0o600));
+        assert_eq!(fs::read(&old).unwrap(), b"data");
+    }
+
     /// 临时设置 `CC_SWITCH_TEST_HOME`，Drop 时还原。
     ///
     /// 环境变量是进程全局的，不还原会污染同一进程里的其他测试；配合 `#[serial]`
@@ -361,6 +1413,12 @@ mod tests {
         fn set(value: &str) -> Self {
             let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
             std::env::set_var("CC_SWITCH_TEST_HOME", value);
+            Self(previous)
+        }
+
+        fn unset() -> Self {
+            let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
+            std::env::remove_var("CC_SWITCH_TEST_HOME");
             Self(previous)
         }
     }
@@ -392,12 +1450,37 @@ mod tests {
 
     #[test]
     #[serial]
-    fn blank_test_home_override_falls_back_to_real_home() {
+    fn blank_test_home_override_is_treated_as_unset() {
         let _guard = TestHomeGuard::set("   ");
+        let blank = get_home_dir();
 
-        // 只断言"没把空白当成 home"——真实 home 的值取决于运行环境，不能硬编码。
-        assert_ne!(get_home_dir(), PathBuf::from("   "));
-        assert_ne!(get_home_dir(), PathBuf::new());
+        drop(_guard);
+        let _unset = TestHomeGuard::unset();
+        assert_eq!(blank, get_home_dir());
+        assert_ne!(blank, PathBuf::from("   "));
+    }
+
+    #[test]
+    #[serial]
+    fn unit_tests_without_an_override_never_resolve_to_the_real_home() {
+        let _guard = TestHomeGuard::unset();
+
+        let home = get_home_dir();
+
+        // `dirs::home_dir()` 是真实 home；单元测试必须落在别处的一次性目录。
+        assert_ne!(Some(home.clone()), dirs::home_dir());
+        assert!(
+            home.starts_with(std::env::temp_dir()),
+            "{} is not under the temp dir",
+            home.display()
+        );
+        assert!(home.is_dir());
+        assert_eq!(
+            home,
+            get_home_dir(),
+            "the process test home is created once"
+        );
+        assert_eq!(try_get_home_dir(), Some(home));
     }
 
     /// Windows 上 `CC_SWITCH_TEST_HOME` 会是 `C:\Users\Alice` 这种形态。这里用
@@ -443,6 +1526,86 @@ mod tests {
     fn derive_mcp_path_from_root_like_dir_returns_none() {
         let override_dir = PathBuf::from("/");
         assert!(derive_mcp_path_from_override(&override_dir).is_none());
+    }
+
+    /// Claude Code keeps `.claude.json` inside `CLAUDE_CONFIG_DIR` when it is set.
+    mod claude_mcp_path {
+        use super::*;
+        use crate::agent_env::{self, AgentTool, EnvMap};
+        use crate::test_sandbox::sandbox;
+
+        fn moved_dir(home: &Path) -> PathBuf {
+            home.join("data").join("claude-state")
+        }
+
+        fn set_claude_override(dir: &Path) {
+            let mut settings = crate::settings::get_settings();
+            settings.claude_config_dir = Some(dir.to_string_lossy().into_owned());
+            crate::settings::update_settings(settings).expect("save the override");
+        }
+
+        #[test]
+        #[serial]
+        fn without_any_override_it_is_the_dot_claude_json_in_the_home() {
+            let sandbox = sandbox();
+
+            assert_eq!(get_claude_mcp_path(), sandbox.home().join(".claude.json"));
+        }
+
+        #[test]
+        #[serial]
+        fn with_claude_config_dir_in_the_environment_it_is_inside_that_directory() {
+            let sandbox = sandbox();
+            let moved = moved_dir(sandbox.home());
+            std::env::set_var("CLAUDE_CONFIG_DIR", &moved);
+
+            assert_eq!(get_claude_mcp_path(), moved.join(".claude.json"));
+        }
+
+        #[test]
+        #[serial]
+        fn a_settings_override_still_puts_it_beside_the_override_directory() {
+            let sandbox = sandbox();
+            let typed = sandbox.home().join("profiles").join("work-claude");
+            set_claude_override(&typed);
+
+            assert_eq!(
+                get_claude_mcp_path(),
+                sandbox.home().join("profiles").join("work-claude.json")
+            );
+        }
+
+        #[test]
+        #[serial]
+        fn the_settings_override_beats_the_environment_variable() {
+            let sandbox = sandbox();
+            let typed = sandbox.home().join("profiles").join("work-claude");
+            set_claude_override(&typed);
+            std::env::set_var("CLAUDE_CONFIG_DIR", moved_dir(sandbox.home()));
+
+            assert_eq!(
+                get_claude_mcp_path(),
+                sandbox.home().join("profiles").join("work-claude.json")
+            );
+        }
+
+        #[test]
+        fn a_directory_from_the_login_shell_holds_it_too() {
+            let home = Path::new("/h");
+            let shell_dir = std::env::temp_dir().join("shell-claude");
+            let mut shell = EnvMap::new();
+            shell.insert(
+                "CLAUDE_CONFIG_DIR".into(),
+                shell_dir.to_string_lossy().into_owned(),
+            );
+            let resolved =
+                agent_env::resolve(AgentTool::Claude, None, &EnvMap::new(), &shell, home);
+
+            assert_eq!(
+                claude_mcp_path_for(&resolved, home),
+                shell_dir.join(".claude.json")
+            );
+        }
     }
 }
 

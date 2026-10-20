@@ -2,8 +2,7 @@
 use std::path::PathBuf;
 
 use crate::config::{
-    atomic_write, delete_file, get_home_dir, sanitize_provider_name, write_json_file,
-    write_text_file,
+    atomic_write, delete_file, sanitize_provider_name, write_json_file, write_text_file,
 };
 use crate::error::AppError;
 use serde_json::Value;
@@ -11,13 +10,10 @@ use std::fs;
 use std::path::Path;
 use toml_edit::DocumentMut;
 
-/// 获取 Codex 配置目录路径
+/// 获取 Codex 配置目录路径：设置里的覆盖目录 → `CODEX_HOME` → `~/.codex`
+/// （见 [`crate::agent_env`]）。
 pub fn get_codex_config_dir() -> PathBuf {
-    if let Some(custom) = crate::settings::get_codex_override_dir() {
-        return custom;
-    }
-
-    get_home_dir().join(".codex")
+    crate::agent_env::dir(crate::agent_env::AgentTool::Codex).dir
 }
 
 /// 获取 Codex auth.json 路径
@@ -65,6 +61,7 @@ pub fn write_codex_live_atomic(
     auth: &Value,
     config_text_opt: Option<&str>,
 ) -> Result<(), AppError> {
+    let _io = crate::config_io::lock();
     let auth_path = get_codex_auth_path();
     let config_path = get_codex_config_path();
 
@@ -85,12 +82,10 @@ pub fn write_codex_live_atomic(
     };
 
     // 准备写入内容
-    let cfg_text = match config_text_opt {
-        Some(s) => s.to_string(),
-        None => String::new(),
-    };
+    let cfg_text = preserve_current_mcp(config_text_opt.unwrap_or(""))?;
     if !cfg_text.trim().is_empty() {
-        toml::from_str::<toml::Table>(&cfg_text).map_err(|e| AppError::toml(&config_path, e))?;
+        toml::from_str::<toml::Table>(&cfg_text)
+            .map_err(|e| AppError::toml(&config_path, &cfg_text, e))?;
     }
 
     // 第一步：写 auth.json
@@ -110,31 +105,32 @@ pub fn write_codex_live_atomic(
     Ok(())
 }
 
-/// 用一个 codex provider 的 `settings_config`（要求是含 `auth` / `config` 字段的 JSON
-/// 对象）原子写入 `~/.codex/auth.json` 与 `~/.codex/config.toml`。
-///
-/// 这是 takeover 流程"用 active provider 的完整模板播种 live"的入口：当 provider 是
-/// 像 `ofox-codex` 这样自带 `model_provider = "ofox"` + `[model_providers.ofox]` 的
-/// 种子时，写完后磁盘上的 config.toml 就具备 codex CLI v0.140 需要的全部结构，
-/// 后续的 `update_codex_toml_field("base_url", ...)` 才能正确落到
-/// `[model_providers.ofox].base_url` 而不是触发 fallback。
-///
-/// 复用 [`write_codex_live_atomic`] 的两步写 + 回滚语义，因此调用方拿到 Err 时磁盘
-/// 上要么是改前要么是改后，不会留下半写状态。
-pub fn write_codex_live_from_provider_settings(settings_config: &Value) -> Result<(), AppError> {
-    let obj = settings_config
-        .as_object()
-        .ok_or_else(|| AppError::Config("Codex provider settings_config 必须是对象".into()))?;
-    let auth = obj
-        .get("auth")
-        .ok_or_else(|| AppError::Config("Codex provider settings_config 缺少 auth 字段".into()))?;
-    if !auth.is_object() {
-        return Err(AppError::Config(
-            "Codex provider settings_config 的 auth 必须是对象".into(),
-        ));
+/// Model/proxy snapshots never own the current native MCP subtree.
+/// Missing current MCP stays missing, even if an old snapshot contains it.
+pub(crate) fn preserve_current_mcp(proposed: &str) -> Result<String, AppError> {
+    let _io = crate::config_io::lock();
+    let current =
+        crate::services::library::coordinator::read(&get_codex_config_path())?.unwrap_or_default();
+    let mut next: toml_edit::DocumentMut = proposed
+        .parse()
+        .map_err(|_| AppError::Config("library.nativeInvalid".into()))?;
+    let current: toml_edit::DocumentMut = current
+        .parse()
+        .map_err(|_| AppError::Config("library.nativeInvalid".into()))?;
+    match current.get("mcp_servers") {
+        Some(item) => {
+            next["mcp_servers"] = item.clone();
+        }
+        None => {
+            next.as_table_mut().remove("mcp_servers");
+        }
     }
-    let cfg_text = obj.get("config").and_then(Value::as_str);
-    write_codex_live_atomic(auth, cfg_text)
+    let current_trailing = current.trailing().as_str().unwrap_or("");
+    let proposed_trailing = next.trailing().as_str().unwrap_or("");
+    if !current_trailing.is_empty() && !proposed_trailing.contains(current_trailing) {
+        next.set_trailing(format!("{proposed_trailing}\n{current_trailing}"));
+    }
+    Ok(next.to_string())
 }
 
 /// 读取 `~/.codex/config.toml`，若不存在返回空字符串
@@ -154,7 +150,7 @@ pub fn validate_config_toml(text: &str) -> Result<(), AppError> {
     }
     toml::from_str::<toml::Table>(text)
         .map(|_| ())
-        .map_err(|e| AppError::toml(Path::new("config.toml"), e))
+        .map_err(|e| AppError::toml(Path::new("config.toml"), text, e))
 }
 
 /// 读取并校验 `~/.codex/config.toml`，返回文本（可能为空）
@@ -175,9 +171,12 @@ pub fn read_and_validate_codex_config_text() -> Result<String, AppError> {
 ///
 /// Empty value removes the field.
 pub fn update_codex_toml_field(toml_str: &str, field: &str, value: &str) -> Result<String, String> {
-    let mut doc = toml_str
-        .parse::<DocumentMut>()
-        .map_err(|e| format!("TOML parse error: {e}"))?;
+    let mut doc = toml_str.parse::<DocumentMut>().map_err(|e| {
+        format!(
+            "TOML parse error: {}",
+            crate::redact::describe_toml_error(toml_str, &e)
+        )
+    })?;
 
     let trimmed = value.trim();
 
@@ -279,6 +278,72 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Fixture validation for the low-level atomic writer. Production takeover uses a memory candidate.
+    fn write_codex_live_from_provider_settings(settings_config: &Value) -> Result<(), AppError> {
+        let obj = settings_config
+            .as_object()
+            .ok_or_else(|| AppError::Config("Codex provider settings_config 必须是对象".into()))?;
+        let auth = obj.get("auth").ok_or_else(|| {
+            AppError::Config("Codex provider settings_config 缺少 auth 字段".into())
+        })?;
+        if !auth.is_object() {
+            return Err(AppError::Config(
+                "Codex provider settings_config 的 auth 必须是对象".into(),
+            ));
+        }
+        let cfg_text = obj.get("config").and_then(Value::as_str);
+        write_codex_live_atomic(auth, cfg_text)
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn provider_writes_preserve_mcp_document_trailing_comments() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let original = "model = \"personal\"\n[mcp_servers.current]\ncommand = \"server\"\n\n# retained MCP array note\n";
+        crate::config::atomic_write(&get_codex_config_path(), original.as_bytes()).unwrap();
+        let result = preserve_current_mcp("model = \"next\"\n# template note\n").unwrap();
+        assert!(result.contains("# retained MCP array note"));
+        assert!(result.contains("# template note"));
+        assert_eq!(
+            toml::from_str::<toml::Value>(&result).unwrap()["mcp_servers"]["current"]["command"]
+                .as_str(),
+            Some("server")
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn provider_writes_keep_current_mcp_and_do_not_revive_deleted_servers() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let path = get_codex_config_path();
+        let proposed = "model = \"next\"\n[mcp_servers.stale]\ncommand = \"old\"\n";
+        for original in [
+            "model = \"personal\"\n# current MCP\n[mcp_servers.current]\ncommand = \"new\"\n",
+            "model = \"personal\"\n",
+        ] {
+            crate::config::atomic_write(&path, original.as_bytes()).unwrap();
+            write_codex_live_atomic(
+                &serde_json::json!({"OPENAI_API_KEY":"sandbox"}),
+                Some(proposed),
+            )
+            .unwrap();
+            let result = std::fs::read_to_string(&path).unwrap();
+            let value: toml::Value = toml::from_str(&result).unwrap();
+            assert_eq!(value["model"].as_str(), Some("next"));
+            assert!(value
+                .get("mcp_servers")
+                .and_then(|v| v.get("stale"))
+                .is_none());
+            if original.contains("current MCP") {
+                assert_eq!(
+                    value["mcp_servers"]["current"]["command"].as_str(),
+                    Some("new")
+                );
+                assert!(result.contains("# current MCP"));
+            }
+        }
+    }
 
     #[test]
     fn base_url_writes_into_correct_model_provider_section() {
@@ -494,29 +559,11 @@ base_url = "https://production.api/v1"
 
     // ---- write_codex_live_from_provider_settings ----
 
-    use std::sync::{Mutex, OnceLock};
-
-    fn home_test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-    }
-
-    /// Run a test with an isolated temp home (matches the helper used in
-    /// hermes_config tests). Callers also need `#[serial]`: other modules'
-    /// tests swap `CC_SWITCH_TEST_HOME` under that lock, not this one.
+    /// Run a test in the shared sandbox: a private home, and `CODEX_HOME` and the
+    /// other agent directory variables cleared. Callers also need `#[serial]`.
     fn with_test_home<T>(test_fn: impl FnOnce() -> T) -> T {
-        let _guard = home_test_guard();
-        let tmp = tempfile::tempdir().unwrap();
-        let old = std::env::var_os("CC_SWITCH_TEST_HOME");
-        std::env::set_var("CC_SWITCH_TEST_HOME", tmp.path());
-        let result = test_fn();
-        match old {
-            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
-            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
-        }
-        result
+        let _sandbox = crate::test_sandbox::sandbox();
+        test_fn()
     }
 
     #[test]
@@ -551,6 +598,19 @@ base_url = "https://production.api/v1"
                 .and_then(|v| v.as_str());
             assert_eq!(base_url, Some("https://api.ofox.ai/v1"));
         });
+    }
+
+    #[test]
+    fn config_toml_errors_never_echo_the_key_in_the_broken_file() {
+        let broken = "model = \"gpt-5\"\nexperimental_bearer_token = \"sk-of-abc123456789\" oops\n";
+
+        let validate = validate_config_toml(broken).unwrap_err().to_string();
+        let update = update_codex_toml_field(broken, "model", "gpt-6").unwrap_err();
+
+        for error in [validate, update] {
+            assert!(error.contains("line 2, column"), "{error}");
+            assert!(!error.contains("abc123456789"), "{error}");
+        }
     }
 
     #[test]

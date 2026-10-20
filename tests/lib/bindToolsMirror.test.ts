@@ -17,6 +17,11 @@ vi.mock("@tauri-apps/api/event", async () => {
   };
 });
 
+const toastError = vi.fn();
+vi.mock("sonner", () => ({
+  toast: { error: (...args: unknown[]) => toastError(...args) },
+}));
+
 // Mock toolMeta so bindTools doesn't pull in unrelated paths.
 vi.mock("@/config/toolMeta", () => ({
   BOUND_TOOLS_STORAGE_KEY: "bound_tools",
@@ -41,6 +46,29 @@ describe("bindTools.mirrorBoundToolsToSettings", () => {
   beforeEach(() => {
     emitMock.mockClear();
     localStorage.clear();
+  });
+
+  it("binds Pi and dsh through their native backend without a legacy default-model rewrite", async () => {
+    const bound: string[] = [];
+    let legacyReads = 0;
+    server.use(
+      http.post(`${TAURI_ENDPOINT}/ofox_bind_tool`, async ({ request }) => {
+        const payload = (await request.json()) as { app: string };
+        bound.push(payload.app);
+        return HttpResponse.json(undefined);
+      }),
+      http.post(`${TAURI_ENDPOINT}/get_active_ofox_model`, () => {
+        legacyReads += 1;
+        return HttpResponse.json("native-model");
+      }),
+      http.post(`${TAURI_ENDPOINT}/save_bound_tools`, () =>
+        HttpResponse.json(true),
+      ),
+    );
+    const { bindTools } = await import("@/lib/bindTools");
+    expect(await bindTools(["pi", "dsh"])).toEqual(["pi", "dsh"]);
+    expect(bound).toEqual(["pi", "dsh"]);
+    expect(legacyReads).toBe(0);
   });
 
   it("bindTools writes localStorage AND mirrors boundTools to settings", async () => {
@@ -234,6 +262,29 @@ describe("bindTools.mirrorBoundToolsToSettings", () => {
     expect(JSON.parse(localStorage.getItem("bound_tools")!)).toEqual(retained);
   });
 
+  it("says why a tool could not be bound", async () => {
+    toastError.mockClear();
+    server.use(
+      http.post(`${TAURI_ENDPOINT}/get_settings`, () =>
+        HttpResponse.json(baseSettings),
+      ),
+      http.post(`${TAURI_ENDPOINT}/save_bound_tools`, () =>
+        HttpResponse.json(true),
+      ),
+      http.post(`${TAURI_ENDPOINT}/ofox_bind_tool`, () =>
+        HttpResponse.text("please upgrade dsh to 0.2", { status: 500 }),
+      ),
+    );
+    const { bindTools } = await import("@/lib/bindTools");
+    await bindTools(["dsh"]);
+    expect(toastError).toHaveBeenCalledOnce();
+    const [, options] = toastError.mock.calls[0] as [
+      string,
+      { description: string },
+    ];
+    expect(options.description).toBe("dsh: please upgrade dsh to 0.2");
+  });
+
   it("retains every existing binding when adding a new tool fails", async () => {
     localStorage.setItem(
       "bound_tools",
@@ -275,4 +326,44 @@ describe("bindTools.mirrorBoundToolsToSettings", () => {
       "chatgpt",
     ]);
   });
+});
+
+it("mirrors successful unbind after partial uninstall without losing newly bound siblings", async () => {
+  localStorage.setItem(
+    "bound_tools",
+    JSON.stringify(["codex", "chatgpt", "pi"]),
+  );
+  let saved: unknown;
+  server.use(
+    http.post(`${TAURI_ENDPOINT}/save_bound_tools`, async ({ request }) => {
+      saved = await request.json();
+      return HttpResponse.json(true);
+    }),
+  );
+  const { forgetUninstalledTool } = await import("@/lib/bindTools");
+  await forgetUninstalledTool("codex", {
+    status: "stillPresent",
+    key: "keptShared",
+    remainingPath: "/sandbox/codex",
+    kept: ["~/.codex"],
+    unbind: {
+      tool: "codex",
+      dryRun: false,
+      filesRemoved: [],
+      providerRestoredTo: null,
+      legacy: false,
+      alreadyUnbound: false,
+      restoredKeys: [],
+      removedKeys: [],
+      keptKeys: [],
+      exactFiles: [],
+      sharedKeptBy: ["chatgpt"],
+      warnings: [],
+    },
+  });
+  expect(JSON.parse(localStorage.getItem("bound_tools")!)).toEqual([
+    "chatgpt",
+    "pi",
+  ]);
+  expect(saved).toEqual({ boundTools: ["chatgpt", "pi"] });
 });

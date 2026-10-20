@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-#[cfg(unix)]
-use std::io::Write;
-use std::path::PathBuf;
-use std::sync::{OnceLock, RwLock};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock, RwLock};
 
 use crate::app_config::{AppType, BindableTool};
+use crate::config::{atomic_write_with, AtomicOpts};
 use crate::error::AppError;
+use crate::lastgood::{self, LgError};
 use crate::services::skill::{SkillStorageLocation, SyncMethod};
 
 /// 自定义端点配置（历史兼容，实际存储在 provider.meta.custom_endpoints）
@@ -602,65 +602,202 @@ impl AppSettings {
     }
 
     fn load_from_file() -> Self {
-        let Some(path) = Self::settings_path() else {
-            return Self::default();
+        let (settings, health) = match Self::settings_path() {
+            Some(path) => load_settings_at(&path),
+            None => (Self::default(), SettingsHealth::default()),
         };
-        if let Ok(content) = fs::read_to_string(&path) {
-            match serde_json::from_str::<AppSettings>(&content) {
-                Ok(mut settings) => {
-                    settings.normalize_paths();
-                    settings
-                }
-                Err(err) => {
-                    log::warn!(
-                        "解析设置文件失败，将使用默认设置。路径: {}, 错误: {}",
-                        path.display(),
-                        err
-                    );
-                    Self::default()
-                }
-            }
-        } else {
-            Self::default()
+        store_health(health);
+        settings
+    }
+}
+
+fn settings_json_valid(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<AppSettings>(bytes).is_ok()
+}
+
+/// Read settings.json. A file that does not parse is never read as "no
+/// settings": its last good generation is loaded (`Recovered`), or the settings
+/// stay at defaults in memory with writes refused (`Unreadable`).
+fn load_settings_at(path: &Path) -> (AppSettings, SettingsHealth) {
+    let unreadable = |why: String, bad_copy: Option<&Path>| {
+        log::error!(
+            "settings file {} can't be read ({why}); settings are not saved until it is reset",
+            path.display()
+        );
+        (
+            AppSettings::default(),
+            SettingsHealth {
+                state: SettingsHealthState::Unreadable,
+                path: path.display().to_string(),
+                bad_copy: bad_copy.map(|p| p.display().to_string()),
+                detail: Some(why),
+            },
+        )
+    };
+
+    let read = match lastgood::read(path, settings_json_valid) {
+        Ok(read) => read,
+        Err(LgError::NotFound) => return (AppSettings::default(), SettingsHealth::ok(path)),
+        Err(LgError::Unreadable { why, bad_copy, .. }) => {
+            return unreadable(why, bad_copy.as_deref())
+        }
+        Err(err @ LgError::Io { .. }) => return unreadable(err.to_string(), None),
+    };
+    let mut settings = match serde_json::from_slice::<AppSettings>(&read.bytes) {
+        Ok(settings) => settings,
+        Err(err) => return unreadable(err.to_string(), read.bad_copy.as_deref()),
+    };
+    settings.normalize_paths();
+    if !read.recovered {
+        return (settings, SettingsHealth::ok(path));
+    }
+
+    // Write the recovered content back so the next start reads a good file. Only
+    // once the bad bytes are kept aside: they are replaced here.
+    if read.bad_copy.is_some() {
+        if let Err(err) = atomic_write_with(path, &read.bytes, SETTINGS_WRITE) {
+            log::warn!(
+                "could not write the recovered settings back to {}: {err}",
+                path.display()
+            );
+        }
+    }
+    let health = SettingsHealth {
+        state: SettingsHealthState::Recovered,
+        path: path.display().to_string(),
+        bad_copy: read.bad_copy.map(|p| p.display().to_string()),
+        detail: read.why,
+    };
+    (settings, health)
+}
+
+/// settings.json can hold the WebDAV password: private to the user, like the other state files.
+const SETTINGS_WRITE: AtomicOpts = AtomicOpts { mode: Some(0o600) };
+
+fn settings_json(settings: &AppSettings) -> Result<String, AppError> {
+    let mut normalized = settings.clone();
+    normalized.normalize_paths();
+    serde_json::to_string_pretty(&normalized).map_err(|e| AppError::JsonSerialize { source: e })
+}
+
+/// Save settings.json. Refused while the file on disk is unreadable. The file
+/// there now is kept as `settings.json.bak` first (or, when it does not parse,
+/// copied aside), then replaced atomically.
+fn save_settings_file(settings: &AppSettings) -> Result<(), AppError> {
+    let health = settings_health();
+    if health.state == SettingsHealthState::Unreadable {
+        return Err(AppError::SettingsUnreadable {
+            path: health.path,
+            detail: health.detail.unwrap_or_default(),
+        });
+    }
+    let json = settings_json(settings)?;
+    let Some(path) = AppSettings::settings_path() else {
+        return Err(AppError::Config("无法获取用户主目录".to_string()));
+    };
+    lastgood::keep(&path, settings_json_valid)?;
+    atomic_write_with(&path, json.as_bytes(), SETTINGS_WRITE)
+}
+
+/// Event the renderer listens to for a change in [`SettingsHealth`].
+pub const SETTINGS_HEALTH_EVENT: &str = "settings-health-changed";
+
+/// How the last read of settings.json went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SettingsHealthState {
+    /// The file was read as it is, or there was none yet.
+    #[default]
+    Ok,
+    /// The file did not parse; its last good generation (`.bak`) was loaded and
+    /// written back. The bad bytes were kept aside.
+    Recovered,
+    /// The file is there but neither it nor its `.bak` parses. Nothing is saved
+    /// until [`reset_unreadable`] is called: unknown is never empty.
+    Unreadable,
+}
+
+/// Process-wide health of settings.json, for the banner and for refusing writes.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsHealth {
+    pub state: SettingsHealthState,
+    pub path: String,
+    /// Where the unreadable bytes were copied aside (`.bad-<time>`).
+    pub bad_copy: Option<String>,
+    /// What was wrong with the file, in English, for the log and the banner.
+    pub detail: Option<String>,
+}
+
+impl SettingsHealth {
+    fn ok(path: &Path) -> Self {
+        Self {
+            state: SettingsHealthState::Ok,
+            path: path.display().to_string(),
+            bad_copy: None,
+            detail: None,
         }
     }
 }
 
-fn save_settings_file(settings: &AppSettings) -> Result<(), AppError> {
-    let mut normalized = settings.clone();
-    normalized.normalize_paths();
-    let Some(path) = AppSettings::settings_path() else {
-        return Err(AppError::Config("无法获取用户主目录".to_string()));
-    };
+static SETTINGS_HEALTH: Mutex<SettingsHealth> = Mutex::new(SettingsHealth {
+    state: SettingsHealthState::Ok,
+    path: String::new(),
+    bad_copy: None,
+    detail: None,
+});
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
+fn store_health(health: SettingsHealth) {
+    *SETTINGS_HEALTH.lock().unwrap_or_else(|e| e.into_inner()) = health;
+}
+
+/// Health of settings.json as the last load left it. Loads the file first when
+/// nothing has yet, so the answer is never a guess.
+pub fn settings_health() -> SettingsHealth {
+    let _ = settings_store();
+    SETTINGS_HEALTH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Test sandboxes only: forget a corrupt-settings state so the sandbox can reset
+/// the settings it leaves behind and the next test starts clean.
+pub(crate) fn clear_settings_health() {
+    store_health(SettingsHealth::default());
+}
+
+/// The way out of [`SettingsHealthState::Unreadable`], on the user's say-so: the
+/// bytes there now are kept aside (`.bad-<time>`), defaults are written, and
+/// writes work again. Does nothing in any other state. Fails, writing nothing,
+/// when the bad bytes cannot be kept.
+pub fn reset_unreadable() -> Result<SettingsHealth, AppError> {
+    let _io = crate::config_io::lock();
+    let mut guard = settings_store().write().unwrap_or_else(|e| {
+        log::warn!("设置锁已毒化，使用恢复值: {e}");
+        e.into_inner()
+    });
+    let health = settings_health();
+    if health.state != SettingsHealthState::Unreadable {
+        return Ok(health);
+    }
+    let path = AppSettings::settings_path()
+        .ok_or_else(|| AppError::Config("无法获取用户主目录".to_string()))?;
+    match fs::read(&path) {
+        Ok(bytes) => {
+            lastgood::keep_bad(&path, &bytes)?;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(AppError::io(&path, err)),
     }
 
-    let json = serde_json::to_string_pretty(&normalized)
-        .map_err(|e| AppError::JsonSerialize { source: e })?;
-    #[cfg(unix)]
-    {
-        use std::fs::OpenOptions;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|e| AppError::io(&path, e))?;
-        file.write_all(json.as_bytes())
-            .map_err(|e| AppError::io(&path, e))?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        fs::write(&path, json).map_err(|e| AppError::io(&path, e))?;
-    }
-
-    Ok(())
+    let defaults = AppSettings::default();
+    let json = settings_json(&defaults)?;
+    atomic_write_with(&path, json.as_bytes(), SETTINGS_WRITE)?;
+    *guard = defaults;
+    let health = SettingsHealth::ok(&path);
+    store_health(health.clone());
+    Ok(health)
 }
 
 static SETTINGS_STORE: OnceLock<RwLock<AppSettings>> = OnceLock::new();
@@ -671,15 +808,15 @@ fn settings_store() -> &'static RwLock<AppSettings> {
 
 fn resolve_override_path(raw: &str) -> PathBuf {
     if raw == "~" {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::config::try_get_home_dir() {
             return home;
         }
     } else if let Some(stripped) = raw.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::config::try_get_home_dir() {
             return home.join(stripped);
         }
     } else if let Some(stripped) = raw.strip_prefix("~\\") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = crate::config::try_get_home_dir() {
             return home.join(stripped);
         }
     }
@@ -707,6 +844,7 @@ pub fn get_settings_for_frontend() -> AppSettings {
 }
 
 pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
+    let _io = crate::config_io::lock();
     new_settings.normalize_paths();
     save_settings_file(&new_settings)?;
 
@@ -725,6 +863,7 @@ pub fn mutate_settings<F>(mutator: F) -> Result<(), AppError>
 where
     F: FnOnce(&mut AppSettings),
 {
+    let _io = crate::config_io::lock();
     let mut guard = settings_store().write().unwrap_or_else(|e| {
         log::warn!("设置锁已毒化，使用恢复值: {e}");
         e.into_inner()
@@ -740,6 +879,7 @@ where
 /// 从文件重新加载设置到内存缓存
 /// 用于导入配置等场景，确保内存缓存与文件同步
 pub fn reload_settings() -> Result<(), AppError> {
+    let _io = crate::config_io::lock();
     let fresh_settings = AppSettings::load_from_file();
     let mut guard = settings_store().write().unwrap_or_else(|e| {
         log::warn!("设置锁已毒化，使用恢复值: {e}");
@@ -859,7 +999,9 @@ pub fn get_effective_current_provider(
             local_id,
             app_type.as_str()
         );
-        let _ = set_current_provider(app_type, None);
+        if let Err(e) = set_current_provider(app_type, None) {
+            log::warn!("无法清理本地 settings 中的供应商: {e}");
+        }
     }
 
     // Fallback 到数据库的 is_current
@@ -890,13 +1032,6 @@ pub fn get_skill_storage_location() -> SkillStorageLocation {
             e.into_inner()
         })
         .skill_storage_location
-}
-
-/// 设置 Skill 存储位置
-pub fn set_skill_storage_location(location: SkillStorageLocation) -> Result<(), AppError> {
-    mutate_settings(|s| {
-        s.skill_storage_location = location;
-    })
 }
 
 // ===== 备份策略管理函数 =====

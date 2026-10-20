@@ -5,7 +5,6 @@ use crate::settings::get_opencode_override_dir;
 use indexmap::IndexMap;
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 
 const STANDARD_OMO_PLUGIN_PREFIXES: [&str; 2] = ["oh-my-openagent", "oh-my-opencode"];
 const SLIM_OMO_PLUGIN_PREFIXES: [&str; 1] = ["oh-my-opencode-slim"];
@@ -20,11 +19,7 @@ const GLM_53_CHAT_MODELS: [&str; 4] = [
     "z-ai/glm-5.3-flash",
 ];
 
-/// 所有读改写 opencode.json 的路径都要拿这把锁。
-pub(crate) fn opencode_config_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+// 所有读改写 opencode.json 的路径使用 config_io 共享屏障。
 
 fn matches_plugin_prefix(plugin_name: &str, prefix: &str) -> bool {
     plugin_name == prefix
@@ -54,13 +49,49 @@ pub fn get_opencode_dir() -> PathBuf {
         return override_dir;
     }
 
-    crate::config::get_home_dir()
-        .join(".config")
+    std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::config::get_home_dir().join(".config"))
         .join("opencode")
 }
 
 pub fn get_opencode_config_path() -> PathBuf {
     get_opencode_dir().join("opencode.json")
+}
+
+pub(crate) fn global_config_paths() -> Vec<PathBuf> {
+    let dir = get_opencode_dir();
+    ["config.json", "opencode.json", "opencode.jsonc"]
+        .into_iter()
+        .map(|name| dir.join(name))
+        .collect()
+}
+pub(crate) fn has_global_config() -> bool {
+    global_config_paths().iter().any(|path| path.exists())
+}
+
+pub(crate) fn merge_global_value(base: &mut Value, overlay: Value) {
+    if let (Some(base_map), Some(overlay_map)) = (base.as_object_mut(), overlay.as_object()) {
+        for (key, value) in overlay_map {
+            if let Some(current) = base_map.get_mut(key) {
+                merge_global_value(current, value.clone());
+            } else {
+                base_map.insert(key.clone(), value.clone());
+            }
+        }
+    } else {
+        *base = overlay;
+    }
+}
+
+pub(crate) fn get_opencode_active_config_path() -> PathBuf {
+    let dir = get_opencode_dir();
+    ["opencode.jsonc", "opencode.json", "config.json"]
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|path| path.exists())
+        .unwrap_or_else(|| dir.join("opencode.json"))
 }
 
 #[allow(dead_code)]
@@ -75,24 +106,20 @@ fn read_opencode_config_from_path(path: &Path) -> Result<Value, AppError> {
         }));
     }
 
-    let content = std::fs::read_to_string(path).map_err(|e| AppError::io(path, e))?;
-    let value: Value = json5::from_str(&content).map_err(|e| {
-        AppError::Config(format!(
-            "Failed to parse OpenCode config: {}: {e}",
-            path.display()
-        ))
-    })?;
-    if !value.is_object() {
-        return Err(AppError::Config(format!(
-            "OpenCode 配置文件根节点必须是 JSON 对象: {}",
-            path.display()
-        )));
-    }
-    Ok(value)
+    let content = crate::services::library::coordinator::read(path)?
+        .ok_or_else(|| AppError::Config("library.targetUnreadable".into()))?;
+    crate::services::library::mcp_codec::parse_native(&content, "opencode")
 }
 
 pub fn read_opencode_config() -> Result<Value, AppError> {
-    read_opencode_config_from_path(&get_opencode_config_path())
+    let _io = crate::config_io::lock();
+    let mut value = json!({"$schema":"https://opencode.ai/config.json"});
+    for path in global_config_paths() {
+        if path.exists() {
+            merge_global_value(&mut value, read_opencode_config_from_path(&path)?);
+        }
+    }
+    Ok(value)
 }
 
 fn write_opencode_config_to_path(path: &Path, config: &Value) -> Result<(), AppError> {
@@ -104,7 +131,7 @@ fn write_opencode_config_to_path(path: &Path, config: &Value) -> Result<(), AppE
 
 #[allow(dead_code)]
 pub fn write_opencode_config(config: &Value) -> Result<(), AppError> {
-    let _guard = opencode_config_lock().lock()?;
+    let _guard = crate::config_io::lock();
     write_opencode_config_to_path(&get_opencode_config_path(), config)
 }
 
@@ -177,9 +204,8 @@ pub(crate) fn normalize_ofox_provider_transport(config: &mut Value) -> bool {
 /// Upgrade an already-bound OpenCode live config in place. This runs at app
 /// startup and is deliberately scoped to the Ofox-managed provider id.
 pub fn migrate_ofox_provider_transport() -> Result<bool, AppError> {
-    let _guard = opencode_config_lock().lock()?;
-    let path = get_opencode_config_path();
-    let mut full_config = read_opencode_config_from_path(&path)?;
+    let _guard = crate::config_io::lock();
+    let mut full_config = read_opencode_config()?;
     let Some(provider) = full_config
         .get_mut("provider")
         .and_then(Value::as_object_mut)
@@ -191,48 +217,54 @@ pub fn migrate_ofox_provider_transport() -> Result<bool, AppError> {
     if !normalize_ofox_provider_transport(provider) {
         return Ok(false);
     }
-    write_opencode_config_to_path(&path, &full_config)?;
+    set_provider(OFOX_PROVIDER_ID, provider.clone())?;
     Ok(true)
 }
 
 pub fn set_provider(id: &str, mut config: Value) -> Result<(), AppError> {
-    let _guard = opencode_config_lock().lock()?;
-    let path = get_opencode_config_path();
-    let mut full_config = read_opencode_config_from_path(&path)?;
-
+    let _io = crate::config_io::lock();
+    let path = get_opencode_active_config_path();
     if id == OFOX_PROVIDER_ID {
         normalize_ofox_provider_transport(&mut config);
     }
-
-    if !full_config.get("provider").is_some_and(Value::is_object) {
-        if full_config.get("provider").is_some() {
-            log::warn!("opencode.json 的 provider 不是对象，已重置为空对象");
-        }
-        full_config["provider"] = json!({});
-    }
-
-    if let Some(providers) = full_config
-        .get_mut("provider")
-        .and_then(|v| v.as_object_mut())
-    {
-        providers.insert(id.to_string(), config);
-    }
-
-    write_opencode_config_to_path(&path, &full_config)
+    let original =
+        crate::services::library::coordinator::read(&path)?.unwrap_or_else(|| "{}".into());
+    crate::services::library::mcp_codec::parse_native(&original, "opencode")?;
+    let output = crate::json5_sections::edit_object_paths(
+        &original,
+        crate::json5_sections::KeyStyle::Json,
+        &[(vec!["provider".into(), id.into()], Some(config))],
+    )?;
+    crate::config::atomic_write(&path, output.as_bytes())
 }
-
 pub fn remove_provider(id: &str) -> Result<(), AppError> {
-    let _guard = opencode_config_lock().lock()?;
-    let path = get_opencode_config_path();
-    let mut config = read_opencode_config_from_path(&path)?;
-
-    if let Some(providers) = config.get_mut("provider").and_then(|v| v.as_object_mut()) {
-        providers.remove(id);
-    } else if config.get("provider").is_some() {
-        log::warn!("opencode.json 的 provider 不是对象，无法删除供应商 '{id}'");
+    let _io = crate::config_io::lock();
+    // A lower-layer entry would reappear after deleting only the highest one.
+    // Validate and prepare all files first, then commit with rollback.
+    let mut writes = Vec::new();
+    for path in global_config_paths() {
+        let Some(original) = crate::services::library::coordinator::read(&path)? else {
+            continue;
+        };
+        let root = crate::services::library::mcp_codec::parse_native(&original, "opencode")?;
+        if root.get("provider").and_then(|v| v.get(id)).is_none() {
+            continue;
+        }
+        let output = crate::json5_sections::edit_object_paths(
+            &original,
+            crate::json5_sections::KeyStyle::Json,
+            &[(vec!["provider".into(), id.into()], None)],
+        )?;
+        writes.push((path, output));
     }
-
-    write_opencode_config_to_path(&path, &config)
+    let mut txn = crate::config::FileTxn::new();
+    for (path, output) in writes {
+        if let Err(error) = txn.write(&path, output.as_bytes()) {
+            txn.rollback()?;
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 fn fill_missing_model_names(value: &mut Value) {
@@ -278,6 +310,7 @@ pub fn set_typed_provider(id: &str, config: &OpenCodeProviderConfig) -> Result<(
     set_provider(id, value)
 }
 
+#[cfg(test)]
 pub fn get_mcp_servers() -> Result<Map<String, Value>, AppError> {
     let config = read_opencode_config()?;
     Ok(config
@@ -287,8 +320,9 @@ pub fn get_mcp_servers() -> Result<Map<String, Value>, AppError> {
         .unwrap_or_default())
 }
 
+#[cfg(test)]
 pub fn set_mcp_server(id: &str, config: Value) -> Result<(), AppError> {
-    let _guard = opencode_config_lock().lock()?;
+    let _guard = crate::config_io::lock();
     let path = get_opencode_config_path();
     let mut full_config = read_opencode_config_from_path(&path)?;
 
@@ -306,8 +340,9 @@ pub fn set_mcp_server(id: &str, config: Value) -> Result<(), AppError> {
     write_opencode_config_to_path(&path, &full_config)
 }
 
+#[cfg(test)]
 pub fn remove_mcp_server(id: &str) -> Result<(), AppError> {
-    let _guard = opencode_config_lock().lock()?;
+    let _guard = crate::config_io::lock();
     let path = get_opencode_config_path();
     let mut config = read_opencode_config_from_path(&path)?;
 
@@ -321,9 +356,12 @@ pub fn remove_mcp_server(id: &str) -> Result<(), AppError> {
 }
 
 pub fn add_plugin(plugin_name: &str) -> Result<(), AppError> {
-    let _guard = opencode_config_lock().lock()?;
-    let path = get_opencode_config_path();
-    let mut config = read_opencode_config_from_path(&path)?;
+    let _guard = crate::config_io::lock();
+    let path = get_opencode_active_config_path();
+    let original =
+        crate::services::library::coordinator::read(&path)?.unwrap_or_else(|| "{}".into());
+    crate::services::library::mcp_codec::parse_native(&original, "opencode")?;
+    let mut config = read_opencode_config()?;
     let normalized_plugin_name = canonicalize_plugin_name(plugin_name);
 
     let plugins = config.get_mut("plugin").and_then(|v| v.as_array_mut());
@@ -364,13 +402,21 @@ pub fn add_plugin(plugin_name: &str) -> Result<(), AppError> {
         }
     }
 
-    write_opencode_config_to_path(&path, &config)
+    let output = crate::json5_sections::edit_object_paths(
+        &original,
+        crate::json5_sections::KeyStyle::Json,
+        &[(vec!["plugin".into()], config.get("plugin").cloned())],
+    )?;
+    crate::config::atomic_write(&path, output.as_bytes())
 }
 
 pub fn remove_plugins_by_prefixes(prefixes: &[&str]) -> Result<(), AppError> {
-    let _guard = opencode_config_lock().lock()?;
-    let path = get_opencode_config_path();
-    let mut config = read_opencode_config_from_path(&path)?;
+    let _guard = crate::config_io::lock();
+    let path = get_opencode_active_config_path();
+    let original =
+        crate::services::library::coordinator::read(&path)?.unwrap_or_else(|| "{}".into());
+    crate::services::library::mcp_codec::parse_native(&original, "opencode")?;
+    let mut config = read_opencode_config()?;
 
     if let Some(arr) = config.get_mut("plugin").and_then(|v| v.as_array_mut()) {
         arr.retain(|v| {
@@ -379,17 +425,134 @@ pub fn remove_plugins_by_prefixes(prefixes: &[&str]) -> Result<(), AppError> {
                 .unwrap_or(true)
         });
 
-        if arr.is_empty() {
-            config.as_object_mut().map(|obj| obj.remove("plugin"));
-        }
+        // An explicit empty overlay prevents lower-layer plugins reappearing.
     }
 
-    write_opencode_config_to_path(&path, &config)
+    let output = crate::json5_sections::edit_object_paths(
+        &original,
+        crate::json5_sections::KeyStyle::Json,
+        &[(vec!["plugin".into()], config.get("plugin").cloned())],
+    )?;
+    crate::config::atomic_write(&path, output.as_bytes())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn removing_the_last_overlay_plugin_does_not_revive_a_lower_layer() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let dir = get_opencode_dir();
+        crate::config::atomic_write(
+            &dir.join("config.json"),
+            b"{/* MCP */\"mcp\":{},\"plugin\":[\"oh-my-openagent\"]}",
+        )
+        .unwrap();
+        crate::config::atomic_write(&dir.join("opencode.jsonc"), b"{}").unwrap();
+        remove_plugins_by_prefixes(&["oh-my-openagent"]).unwrap();
+        assert!(!read_opencode_config().unwrap()["plugin"]
+            .as_array()
+            .is_some_and(|plugins| plugins.iter().any(|plugin| plugin == "oh-my-openagent")));
+        assert!(std::fs::read_to_string(dir.join("config.json"))
+            .unwrap()
+            .contains("/* MCP */"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn native_provider_read_write_use_the_same_global_layers() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let dir = get_opencode_dir();
+        crate::config::atomic_write(
+            &dir.join("config.json"),
+            br#"{"provider":{"lower":{"options":{"baseURL":"https://example.org"}}}}"#,
+        )
+        .unwrap();
+        for shadow in [false, true] {
+            if shadow {
+                crate::config::atomic_write(&dir.join("opencode.json"), br#"{"model":"shadow"}"#)
+                    .unwrap();
+            }
+            crate::config::atomic_write(&dir.join("opencode.jsonc"), b"{/* MCP */\"mcp\":{}}")
+                .unwrap();
+            set_provider(
+                "demo",
+                json!({"options":{"baseURL":"https://example.org/a"}}),
+            )
+            .unwrap();
+            assert!(get_providers().unwrap().contains_key("demo"));
+            assert!(get_providers().unwrap().contains_key("lower"));
+            set_provider(
+                "demo",
+                json!({"options":{"baseURL":"https://example.org/b"}}),
+            )
+            .unwrap();
+            assert_eq!(
+                get_providers().unwrap()["demo"]["options"]["baseURL"],
+                "https://example.org/b"
+            );
+            remove_provider("demo").unwrap();
+            assert!(!get_providers().unwrap().contains_key("demo"));
+            assert!(std::fs::read_to_string(dir.join("opencode.jsonc"))
+                .unwrap()
+                .contains("/* MCP */"));
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn startup_and_plugins_preserve_mcp_comments_in_the_active_file() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let path = get_opencode_dir().join("opencode.jsonc");
+        let source = "{\n/* private MCP */\n\"mcp\":{\"demo\":{\"type\":\"local\",\"command\":[\"server\", /* args note */ \"a\"]}},\"provider\":{\"ofox-opencode\":{\"npm\":\"old\"}},\"plugin\":[\"oh-my-openagent\"]\n}";
+        for action in ["migration", "add", "remove"] {
+            crate::config::atomic_write(&path, source.as_bytes()).unwrap();
+            match action {
+                "migration" => assert!(migrate_ofox_provider_transport().unwrap()),
+                "add" => add_plugin("other-plugin").unwrap(),
+                _ => remove_plugins_by_prefixes(&["oh-my-openagent"]).unwrap(),
+            }
+            let result = std::fs::read_to_string(&path).unwrap();
+            assert!(result.contains("/* private MCP */"), "{action}");
+            assert!(result.contains("/* args note */"), "{action}");
+            let before =
+                crate::services::library::mcp_codec::parse_native(source, "opencode").unwrap();
+            let after =
+                crate::services::library::mcp_codec::parse_native(&result, "opencode").unwrap();
+            assert_eq!(before["mcp"], after["mcp"]);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn provider_changes_preserve_mcp_comments_and_jsonc_precedence() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let dir = get_opencode_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("opencode.json"), "{\"shadow\":true}").unwrap();
+        let original =
+            "{\n // private MCP\n \"mcp\": {\"demo\":{\"command\":[\"personal\"],\"type\":\"local\"}}, \"model\":\"mine\"\n}";
+        std::fs::write(dir.join("opencode.jsonc"), original).unwrap();
+        set_provider("test", json!({"npm":"test"})).unwrap();
+        let added = std::fs::read_to_string(dir.join("opencode.jsonc")).unwrap();
+        assert!(added.contains("// private MCP"));
+        assert!(json5::from_str::<Value>(&added).unwrap()["provider"]
+            .get("test")
+            .is_some());
+        remove_provider("test").unwrap();
+        let result = std::fs::read_to_string(dir.join("opencode.jsonc")).unwrap();
+        assert!(result.contains("// private MCP"));
+        assert_eq!(
+            json5::from_str::<Value>(&result).unwrap()["mcp"]["demo"]["command"],
+            json!(["personal"])
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("opencode.json")).unwrap(),
+            "{\"shadow\":true}"
+        );
+    }
 
     #[test]
     fn legacy_empty_model_entries_receive_display_names() {

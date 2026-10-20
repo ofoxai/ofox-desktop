@@ -1,0 +1,48 @@
+# Lessons from repository history
+
+These are verified commit references, not claims that every external agent version was tested.
+
+| Rule                                                                    | Why and evidence                                                                                                                                                                                                                                                                                 |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Probe the installed agent before writing version-sensitive keys.        | Removing `disable_response_storage` globally broke versions that accept it; unconditional restoration broke others. `e25d5adc`, revert `ad2d5062`, and capability-aware fixes `79da68b0` / `38a681f5` document the change. A TOML parser accepting a key does not establish agent compatibility. |
+| Follow model precedence through every sibling integration.              | CLI/GUI remembered selections can outrank, or be overridden by, settings and environment. Model fixes `c09bae5b`, `65179dbb`, `eedc53e8`, `55550f32`, `671ed1f3` show why a one-agent fix is incomplete. Preserve user effort and distinguish observed from managed selection.                   |
+| Run all-targets Clippy and tests on each supported OS.                  | Windows-only branches were invisible to macOS checks; `e9556dc1` and `fadc150b` required Windows fixes. Cross-platform type checking is insufficient.                                                                                                                                            |
+| Exercise release workflows before release day, against the same commit. | `97935497` records a release workflow repair. Full reusable CI and a successful exact-SHA Windows Probe must precede builds, even for dry-run. Never substitute a green result from another branch head.                                                                                         |
+| Unreadable settings are not empty settings.                             | `28c46c15` added backup recovery and blocked writes when parsing fails; `73569a64` exposed health and explicit reset. Recovery must preserve evidence, surface health on initial mount, and require confirmation before defaults replace unreadable settings.                                    |
+| Use one serial lock for shared settings/environment tests.              | `eebf3d0d` fixed cross-test interference between uninstall sandboxes and settings/WebDAV tests. A private lock name only serializes its own group.                                                                                                                                               |
+| Bind asynchronous work to account and component lifetime.               | `1559001a`, `a5cd8c6c`, and `b840f7d1` cover abandoned account responses, continuous balance samples and delayed job subscriptions. Subscribe before starting jobs, validate operation IDs, and prevent stale completion callbacks.                                                              |
+
+See [development standards](docs/code-standards.md) and [integration wiring](docs/agent-wiring.md).
+
+## Current regression evidence
+
+- Avoiding native transcript parsing does not establish a fast warm query. Measure the complete release cache-to-analysis path, including cached JSON decoding, repeated pricing and frozen-cohort retention. The 10k-session release benchmark caught latency that the 600-source no-reparse test could not measure. See [the implementation record](docs/implementation-progress-2026-10-16.md) and [the benchmark](src-tauri/src/services/session_analytics.rs).
+- A typed JSON fast path must retain the old decoder's refusal semantics. `IgnoredAny` can skip numeric-range and nesting checks in opaque fields; differential tests include `1e400`, excessive depth, null/missing wrappers, duplicate fields and legacy payloads. Validate the complete envelope before projecting fields, and preserve the original raw-byte receipt. See [the decoder guards](src-tauri/src/services/session_analytics_index.rs).
+- Exact numeric accumulation must preserve more than the final amount. Compare each step with the original estimate combiner, including unknown counts, partial/free state, additional units, normalized Decimal scale and overflow. The optimization changes internal work, not billing or coverage policy.
+- A warm projection cache must validate fresh SQLite rows and effective source health before lookup, and reload prices in the same transaction. A connection pointer or query key cannot establish freshness; deletion, external writers, failures and apex changes need regression coverage. See [the cache guards](src-tauri/src/services/session_analytics_projection_tests.rs).
+- Passing `cfg(test)` library tests does not establish production compilation. Keep compatibility readers available to their production callers and run all-targets Clippy after refactoring test injection; it caught an accidental test-only gate on the project-options reader during this work.
+- Clearing a controlled selection can disable or remove the focused control. Transfer focus to a stable search field or card heading, and test the parent rerender for every sibling dimension. Separate exclusive row filtering from removing one member of a multi-selection; otherwise a remove button can keep the item it claims to remove. See [the usage interaction regressions](tests/components/usage/UsageSessionLayout.test.tsx).
+
+### Library evidence and lossless configuration input
+
+- A negative discovery conclusion needs evidence for missing and empty sources, not just fingerprints for entries that were found. Preserve unreadable/unsupported as unknown; never turn a failed scan into absence or a successful connection.
+- Stable identifiers need a single state owner. Separate automatic suggestions from a user's edits, freeze on first submission, and never turn a concurrent create conflict into overwrite or a new native identifier that bypasses conflict review.
+- Lossless JSON validation must compare every numeric literal form with its decoded value. Checking only integer-shaped text misses exponent and decimal forms; duplicate keys and empty arguments also need regression coverage.
+- A private-value editor cannot reuse a create-only serializer. Submit the actual leaf delta, retain unknown fields and saved values, and explicitly confirm incompatible transport cleanup.
+- UI evidence has a lifetime too. Invalidate open source/compare views when their ticket, revision, route or epoch changes; a backend rejection on the next write does not make an already displayed stale conclusion truthful.
+- Locating a folded row must wait for React to commit the newly visible DOM. A single animation frame after setting state can run too early in a native WebView; regressions must verify scrolling and focus, not just a highlight flag. Keep source-recovery errors separate so a fresh scan or successful retry clears only the error it resolved.
+- Discovery IDs are scoped to one scan, not stable source identities. Regression fixtures must rotate ticket, source and entry references together. A source description may dismiss a resolved UI warning only when unambiguous in both scans; it never authorizes a source action or replaces ticket and fingerprint checks.
+
+
+### Keep proof separate from presentation and acknowledgements
+
+- A source capability must be explicitly registered; the existence of an adapter alone does not make every metric available. Use the same verified roster and branch/identity rules for ledger and analytics, and bound every decoding pass, including metadata fallbacks.
+- A successful save acknowledgement must close or freeze the old editable form before a refresh retry. Reusing its receipt while leaving new edits enabled silently loses the user's intent.
+- Bind native acceptance writer receipts to the actual compiled clean checkout. A caller-supplied SHA or successful configuration parsing cannot prove either source identity or native resource consumption. Synthetic UI and 10k cached-query benchmarks must be labelled with their measured scope.
+
+### Native statistics and generation publication
+
+- Lock the first canonical thread identity independently of optional record ordinals. A damaged ordinal must not promote a later copied parent header. Billing/session IDs and native thread IDs have different scopes.
+- A cumulative-count correction must update the correct counter domain and its later checkpoints, while preserving the original event time. Replay identity cannot depend on the current turn context. An unresolved old interval must not poison a separately proven runtime reset.
+- An epoch fence invalidates acceptance, not unchanged native bytes. Reverify and CAS-publish warm receipts with the generation marker; otherwise a successful restore can leave rebuilding permanently blocked. A route returning to an unchanged source must restore availability and location evidence.
+- Build coverage after conflict reconciliation, and carry missing-event evidence to the affected thread and model. Known surviving Tokens and price can be shown as partial; clean sibling threads must not inherit a source-wide warning. No samples, a real zero and a partially priced total require different UI states.

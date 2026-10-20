@@ -1,4 +1,16 @@
 // 使用统计相关类型定义
+import type {
+  UsageEstimate,
+  UsageFilterOptions,
+  UsageQueryV1,
+  UsageReceipt,
+  UsageRequestFilters,
+  UsageSnapshotReceipt,
+} from "@/types/usageQuery";
+import type {
+  UsageGranularity,
+  UsageSeriesPoint,
+} from "@/lib/api/usageOverview";
 
 export interface TokenUsage {
   inputTokens: number;
@@ -24,6 +36,8 @@ export interface RequestLog {
   cacheReadCostUsd: string;
   cacheCreationCostUsd: string;
   totalCostUsd: string;
+  /** Explicit null means no original saved amount exists for this rebuilt event. */
+  recordedCostUsd?: string | null;
   isStreaming: boolean;
   latencyMs: number;
   firstTokenMs?: number;
@@ -31,7 +45,17 @@ export interface RequestLog {
   statusCode: number;
   errorMessage?: string;
   createdAt: number;
+  /** Canonical native event time; absent on older backends. */
+  createdAtMs?: number;
   dataSource?: string;
+  observedStatusCode?: number | null;
+  observedLatencyMs?: number | null;
+  observedFirstTokenMs?: number | null;
+  currentEstimate?: UsageEstimate;
+  receipt?: Pick<
+    UsageReceipt,
+    "appliedQuery" | "queryFingerprint" | "snapshotVersion"
+  >;
 }
 
 export interface SessionSyncResult {
@@ -47,11 +71,48 @@ export interface DataSourceSummary {
   totalCostUsd: string;
 }
 
-export interface PaginatedLogs {
+export interface PaginatedLogs extends Partial<UsageReceipt> {
   data: RequestLog[];
   total: number;
   page: number;
   pageSize: number;
+  snapshotId?: string;
+  options?: UsageFilterOptions;
+  requestFilters?: UsageRequestFilters | null;
+  trend?: { granularity: UsageGranularity; series: UsageSeriesPoint[] };
+  measurements?: UsageRequestMeasurements;
+  summary?: {
+    requests: number;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    totalTokens: number;
+    cacheHitRate: number;
+    costUsd: number;
+    estimate: UsageEstimate;
+  };
+}
+
+export interface UsageRequestMeasurements {
+  statusSamples: number;
+  failedSamples: number;
+  failureRate: number | null;
+  latencySamples: number;
+  avgLatencyMs: number | null;
+  firstTokenSamples: number;
+  avgFirstTokenMs: number | null;
+  generationSpeedSamples: number;
+  avgGenerationTokensPerSecond: number | null;
+}
+
+export interface RequestQueryOptions {
+  query: UsageQueryV1;
+  /** Frontend-only ownership guard, never sent as a product IPC argument. */
+  expectedApex?: string;
+  requestFilters?: UsageRequestFilters;
+  snapshotId?: string;
+  expectedReceipt?: UsageSnapshotReceipt;
 }
 
 export interface ModelPricing {

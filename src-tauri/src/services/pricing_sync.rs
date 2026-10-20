@@ -1,7 +1,7 @@
 //! Ofox 模型 pricing 同步
 //!
-//! 从 Ofox 三个 model-list 端点（`/v1/models`、`/anthropic/v1/models`、
-//! `/gemini/v1beta/models`）拉取每个模型的 pricing 字段，写入本地
+//! 从 resolved apex 的公开 `/v1/models` 拉取完整 pricing，保存独立的
+//! current-ofox-base-v1 catalog，再兼容写入本地
 //! `model_pricing` 表，让 claude/codex/gemini 的会话日志成本估算与 Ofox
 //! 实际计费保持一致。
 //!
@@ -29,20 +29,16 @@
 //!
 //! ## Cooldown
 //!
-//! `sync_pricing_if_needed` 用 `AppSettings::last_pricing_sync_at` 做 24h
-//! 门控；`sync_pricing` 强制刷新（用户点 ConsolePage「刷新」会走这条）。
+//! `sync_pricing_if_needed` 按独立 catalog 的 apex 和抓取时间做 24h
+//! 门控；`sync_pricing` 强制刷新。旧设置时间戳只为兼容保留。
 
-use std::str::FromStr;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
-
-const FETCH_TIMEOUT_SECS: u64 = 15;
-const SYNC_COOLDOWN_SECS: i64 = 24 * 3600;
 
 /// 一次 sync 的结果摘要。
 ///
@@ -52,14 +48,13 @@ const SYNC_COOLDOWN_SECS: i64 = 24 * 3600;
 #[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct PricingSyncResult {
-    /// 三端点合计返回的有效模型条数（已经按 `id` 去重前的原始数）。
+    /// 公开目录返回的有效模型条数。
     pub models: usize,
     /// 实际写入 `model_pricing` 表的行数（每个模型展开 N 个 alias key）。
     pub rows: usize,
     /// 是否被 cooldown 跳过（用于 startup 路径）。
     pub skipped: bool,
-    /// 各端点的 fetch 错误信息。仅当至少一个端点成功时才会到达写库阶段；
-    /// 全部失败时整个 `sync_pricing` 直接返回 Err。
+    /// 兼容字段；公开目录请求失败时整个同步返回 Err。
     pub errors: Vec<String>,
 }
 
@@ -76,7 +71,7 @@ struct OpenAiShapeResp {
 struct OpenAiShapeModel {
     id: String,
     #[serde(default)]
-    aliases: Vec<String>,
+    aliases: Option<Vec<String>>,
     pricing: Option<OfoxPricing>,
     /// `/v1/models` 用 `name`，`/anthropic/v1/models` 用 `display_name`。
     /// 两者只会出现一个；缺失时回退到 `id`。
@@ -122,7 +117,7 @@ impl From<OpenAiShapeModel> for Option<NormalizedModel> {
         Some(NormalizedModel {
             id: m.id,
             display_name,
-            aliases: m.aliases,
+            aliases: m.aliases.unwrap_or_default(),
             pricing,
         })
     }
@@ -132,18 +127,27 @@ impl From<OpenAiShapeModel> for Option<NormalizedModel> {
 
 /// 强制同步 Ofox pricing 到本地。失败时不更新 cooldown。
 ///
-/// **只打 `/v1/models`** 一个端点。这一个端点已包含全部厂商（anthropic /
-/// google / openai / 第三方）的全部模型 + 完整 pricing —— 经实测生产
-/// `https://api.ofox.ai/v1/models` 返回 ~98 个模型，覆盖所有 cc-switch
-/// 关心的工具。`/anthropic/v1/models` 与 `/gemini/v1beta/models` 在某些
+/// **只打 `/v1/models`** 一个端点。该公开目录包含全部厂商模型和价格。
+/// `/anthropic/v1/models` 与 `/gemini/v1beta/models` 在某些
 /// 部署环境下需要 Bearer token 鉴权（401），且即使能拿到也只是
 /// `/v1/models` 的子集，没必要冒鉴权失败的风险去打。
 pub async fn sync_pricing(db: &Database) -> Result<PricingSyncResult, AppError> {
-    let base = crate::ofox_apex::gateway_base();
-    let url = format!("{base}/v1/models");
-
-    let models = match fetch_openai_shape(&url).await {
-        Ok(items) => items,
+    static SYNC: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _flight = SYNC.lock().await;
+    let apex = crate::ofox_apex::current_apex();
+    let payload = super::ofox_pricing::fetch_payload(apex).await?;
+    super::ofox_pricing::persist_payload(
+        db,
+        apex,
+        &payload,
+        chrono::Utc::now().timestamp_millis(),
+    )?;
+    let models = match serde_json::from_value::<OpenAiShapeResp>(payload) {
+        Ok(items) => items
+            .data
+            .into_iter()
+            .filter_map(<Option<NormalizedModel>>::from)
+            .collect::<Vec<_>>(),
         Err(e) => {
             return Err(AppError::Message(format!(
                 "pricing_sync: /v1/models fetch failed: {e}"
@@ -160,6 +164,13 @@ pub async fn sync_pricing(db: &Database) -> Result<PricingSyncResult, AppError> 
     let errors: Vec<String> = Vec::new();
 
     let model_count = models.len();
+    // A late response from another region is cached only under its own apex.
+    if crate::ofox_apex::current_apex() != apex {
+        return Ok(PricingSyncResult {
+            models: model_count,
+            ..Default::default()
+        });
+    }
     let rows = write_pricing_rows(db, &models)?;
 
     // 历史数据兜底：sync 后 pricing 表可能新增了能命中老 session_log 行的
@@ -205,46 +216,21 @@ pub async fn sync_pricing(db: &Database) -> Result<PricingSyncResult, AppError> 
 /// 仅当距离上次成功同步超过 24h 时才真正发起同步。
 /// 启动 + 24h 维护 timer 都用这个入口。
 pub async fn sync_pricing_if_needed(db: &Database) -> Result<PricingSyncResult, AppError> {
-    let last = crate::settings::get_settings().last_pricing_sync_at;
-    if let Some(ts) = last {
-        let age = now_unix_secs() - ts;
-        if age < SYNC_COOLDOWN_SECS {
-            log::info!(
-                "pricing_sync: skipped, last sync {:.1}h ago",
-                age as f64 / 3600.0
-            );
-            return Ok(PricingSyncResult {
-                skipped: true,
-                ..Default::default()
-            });
-        }
+    let recent = {
+        let conn = lock_conn!(db.conn);
+        super::ofox_pricing::PriceCatalog::load_on(
+            &conn,
+            crate::ofox_apex::current_apex(),
+            chrono::Utc::now().timestamp_millis(),
+        )?
+    };
+    if !recent.coverage.stale {
+        return Ok(PricingSyncResult {
+            skipped: true,
+            ..Default::default()
+        });
     }
     sync_pricing(db).await
-}
-
-// ─── Fetch ────────────────────────────────────────────────────────────────
-
-async fn fetch_openai_shape(url: &str) -> Result<Vec<NormalizedModel>, String> {
-    let client = crate::proxy::http_client::get();
-    let resp = client
-        .get(url)
-        .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .send()
-        .await
-        .map_err(|e| format!("request failed: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(format!("HTTP {status}"));
-    }
-    let parsed: OpenAiShapeResp = resp
-        .json()
-        .await
-        .map_err(|e| format!("parse failed: {e}"))?;
-    Ok(parsed
-        .data
-        .into_iter()
-        .filter_map(<Option<NormalizedModel>>::from)
-        .collect())
 }
 
 // ─── 写库 ─────────────────────────────────────────────────────────────────
@@ -339,15 +325,17 @@ fn write_pricing_rows(db: &Database, models: &[NormalizedModel]) -> Result<usize
 /// 修正这些行。本函数兜底处理：扫描 cost=0 但 token>0 且 data_source 来自
 /// 离线日志的行，按当前 `model_pricing` 表重新计算。
 ///
-/// 只动这三种 data_source（pure-proxy 行不动 —— 那些是真的没 token 数据）：
+/// 只动这几种 data_source（pure-proxy 行不动 —— 那些是真的没 token 数据）：
 /// - `session_log` (claude)
 /// - `codex_session`
 /// - `gemini_session`
+/// - `opencode_session`
 ///
-/// 计费公式与 `proxy::usage::CostCalculator::calculate` 完全对齐：
-/// `billable_input = input - cache_read`（缓存命中部分按 cache_read 价计费，
-/// 不再算 input 价）。
+/// 费用由 `proxy::usage::CostCalculator::calculate` 计算（唯一的计费公式；
+/// `input_tokens` 已是不含缓存的 fresh input）。
 fn backfill_zero_cost_session_logs(db: &Database) -> Result<usize, AppError> {
+    use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
+    use crate::proxy::usage::parser::TokenUsage;
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
@@ -366,7 +354,7 @@ fn backfill_zero_cost_session_logs(db: &Database) -> Result<usize, AppError> {
                         cache_read_tokens, cache_creation_tokens,
                         cost_multiplier
                  FROM proxy_request_logs
-                 WHERE data_source IN ('session_log','codex_session','gemini_session')
+                 WHERE data_source IN ('session_log','codex_session','gemini_session','opencode_session')
                    AND CAST(total_cost_usd AS REAL) = 0
                    AND (input_tokens > 0 OR output_tokens > 0
                         OR cache_read_tokens > 0 OR cache_creation_tokens > 0)",
@@ -415,33 +403,30 @@ fn backfill_zero_cost_session_logs(db: &Database) -> Result<usize, AppError> {
             let (input_per_m, output_per_m, cache_r_per_m, cache_w_per_m) = pricing;
 
             // 失败一行就 skip，不阻塞批量
-            let parse = |s: &str| -> Option<Decimal> { Decimal::from_str(s.trim()).ok() };
-            let (
-                Some(input_per_m),
-                Some(output_per_m),
-                Some(cache_r_per_m),
-                Some(cache_w_per_m),
-                Some(mult),
-            ) = (
-                parse(&input_per_m),
-                parse(&output_per_m),
-                parse(&cache_r_per_m),
-                parse(&cache_w_per_m),
-                parse(&multiplier_s),
-            )
-            else {
+            let (Ok(pricing), Ok(mult)) = (
+                ModelPricing::from_strings(
+                    input_per_m.trim(),
+                    output_per_m.trim(),
+                    cache_r_per_m.trim(),
+                    cache_w_per_m.trim(),
+                ),
+                Decimal::from_str(multiplier_s.trim()),
+            ) else {
                 log::warn!("backfill: decimal parse failed for `{model}`, skipping");
                 continue;
             };
 
-            let million = Decimal::from(1_000_000_u64);
-            // 与 CostCalculator::calculate 完全一致：billable_input 减掉 cache_read
-            let billable_in = input_t.saturating_sub(cache_r_t).max(0);
-            let in_cost = Decimal::from(billable_in) * input_per_m / million;
-            let out_cost = Decimal::from(output_t) * output_per_m / million;
-            let cr_cost = Decimal::from(cache_r_t) * cache_r_per_m / million;
-            let cw_cost = Decimal::from(cache_w_t) * cache_w_per_m / million;
-            let total = (in_cost + out_cost + cr_cost + cw_cost) * mult;
+            let usage = TokenUsage {
+                input_tokens: input_t.max(0) as u32,
+                output_tokens: output_t.max(0) as u32,
+                cache_read_tokens: cache_r_t.max(0) as u32,
+                cache_creation_tokens: cache_w_t.max(0) as u32,
+                cache_creation_1h_tokens: 0,
+                model: Some(model.clone()),
+                message_id: None,
+            };
+            let cost = CostCalculator::calculate(&usage, &pricing, mult);
+            let total = cost.total_cost;
 
             if total.is_zero() {
                 // 价格本身全 0（极少见）—— 不更新，避免噪声
@@ -451,10 +436,10 @@ fn backfill_zero_cost_session_logs(db: &Database) -> Result<usize, AppError> {
             stmt_update
                 .execute(rusqlite::params![
                     request_id,
-                    in_cost.to_string(),
-                    out_cost.to_string(),
-                    cr_cost.to_string(),
-                    cw_cost.to_string(),
+                    cost.input_cost.to_string(),
+                    cost.output_cost.to_string(),
+                    cost.cache_read_cost.to_string(),
+                    cost.cache_creation_cost.to_string(),
                     total.to_string(),
                 ])
                 .map_err(|e| AppError::Database(format!("backfill update: {e}")))?;
@@ -508,12 +493,10 @@ fn expand_keys(m: &NormalizedModel) -> Vec<String> {
 /// 用 `rust_decimal` 做精确十进制乘法避免 f64 误差，输出剥末尾零以匹配
 /// seed 数据风格（`"5"` 而不是 `"5.000000"`，`"3.75"` 不变）。
 fn per_token_to_per_million(per_token: &str) -> Result<String, String> {
-    let trimmed = per_token.trim();
-    if trimmed.is_empty() {
-        return Ok("0".to_string());
-    }
-    let d = Decimal::from_str(trimmed).map_err(|e| format!("decimal parse `{trimmed}`: {e}"))?;
-    let scaled = d * Decimal::from(1_000_000_u64);
+    let d = super::ofox_pricing::parse_rate(per_token).map_err(|e| e.to_string())?;
+    let scaled = d
+        .checked_mul(Decimal::from(1_000_000_u64))
+        .ok_or_else(|| "price exceeds decimal range".to_string())?;
     Ok(format_decimal_clean(scaled))
 }
 
@@ -542,6 +525,17 @@ fn now_unix_secs() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn analytics_scientific_price_keeps_decimal_precision() {
+        assert_eq!(per_token_to_per_million("1e-9").unwrap(), "0.001");
+    }
+
+    #[test]
+    fn analytics_empty_price_is_unknown_instead_of_free() {
+        assert!(per_token_to_per_million(" ").is_err());
+        assert!(per_token_to_per_million("-0.01").is_err());
+    }
 
     fn mk(id: &str, aliases: &[&str], p: OfoxPricing) -> NormalizedModel {
         NormalizedModel {
@@ -576,8 +570,8 @@ mod tests {
         assert_eq!(per_token_to_per_million("0.000000125").unwrap(), "0.125");
         // Zero
         assert_eq!(per_token_to_per_million("0").unwrap(), "0");
-        // Empty → 0
-        assert_eq!(per_token_to_per_million("").unwrap(), "0");
+        // Missing/empty price is not an explicit free price.
+        assert!(per_token_to_per_million("").is_err());
         // Whitespace tolerated
         assert_eq!(per_token_to_per_million("  0.000003  ").unwrap(), "3");
     }
@@ -585,7 +579,7 @@ mod tests {
     #[test]
     fn per_token_to_per_million_rejects_garbage() {
         assert!(per_token_to_per_million("not-a-number").is_err());
-        assert!(per_token_to_per_million("1e-9").is_err()); // rust_decimal 不接受科学计数法
+        assert_eq!(per_token_to_per_million("1e-9").unwrap(), "0.001");
     }
 
     #[test]

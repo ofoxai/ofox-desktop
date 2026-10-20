@@ -267,39 +267,17 @@ impl FileStore {
     }
 
     fn write_all(&self, map: &std::collections::BTreeMap<String, String>) -> Result<(), String> {
-        use std::io::Write;
-
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("dev secret dir failed: {e}"))?;
-        }
-
         let json = serde_json::to_string_pretty(map)
             .map_err(|e| format!("dev secret encode failed: {e}"))?;
 
-        // 创建时就带 0600，不给"默认权限落盘 → 再 chmod"之间的窗口期。
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-
-        let mut f = opts
-            .open(&self.path)
-            .map_err(|e| format!("dev secret open failed: {e}"))?;
-        f.write_all(json.as_bytes())
-            .map_err(|e| format!("dev secret write failed: {e}"))?;
-
-        // 文件可能是早先用默认权限建的 —— OpenOptions 的 mode 只作用于新建，
-        // 所以这里再显式收一次权限。
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
-        }
-
-        Ok(())
+        // 临时文件创建时就带 0600（不给"默认权限落盘 → 再 chmod"的窗口期），写完
+        // fsync 再 rename 替换：断电不会留下长度对、内容全零的文件。
+        crate::config::atomic_write_with(
+            &self.path,
+            json.as_bytes(),
+            crate::config::AtomicOpts { mode: Some(0o600) },
+        )
+        .map_err(|e| format!("dev secret write failed: {e}"))
     }
 }
 
@@ -507,6 +485,35 @@ mod file_store_tests {
             mode, 0o600,
             "实际权限 {mode:o}，token 明文文件不能让其他用户读到"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_file_left_world_readable_by_an_older_run_is_narrowed_on_save() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (store, dir) = store();
+        let path = dir.path().join("dev-secrets.json");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        store.save(Slot::AccessToken, "at").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn saving_replaces_the_file_whole_and_leaves_no_temp_file() {
+        let (store, dir) = store();
+        store.save(Slot::AccessToken, "at").unwrap();
+        store.save(Slot::RefreshToken, "rt").unwrap();
+
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["dev-secrets.json"]);
     }
 
     #[test]

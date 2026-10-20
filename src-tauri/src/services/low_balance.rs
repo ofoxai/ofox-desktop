@@ -1,7 +1,9 @@
-//! Low-balance OS-level alert.
+//! Background balance tick: refresh, keep a balance point, alert when low.
 //!
 //! Pulls the latest wallet balance from OFox via [`OfoxAuthManager::refresh_user_info`]
-//! and fires a system notification when:
+//! and keeps it as a point of the balance history (the trend on the usage page).
+//! That happens whether or not the alert is on. Then, if the alert is enabled,
+//! it fires a system notification when:
 //!
 //!   1. user has the alert enabled
 //!   2. session is `Active`
@@ -27,7 +29,9 @@ use tauri::{AppHandle, Emitter};
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::RwLock;
 
-use crate::ofox_auth::OfoxAuthManager;
+use crate::database::Database;
+use crate::ofox_auth::{OfoxAuthManager, OfoxUserInfo};
+use crate::services::balance_history;
 
 /// Tauri event emitted when the alert actually fires (in addition to the
 /// OS notification). Lets the in-app UI also react if it cares.
@@ -36,41 +40,26 @@ pub const LOW_BALANCE_ALERT_EVENT: &str = "ofox-low-balance-alert";
 /// 24-hour cooldown between repeated alerts at the same threshold.
 const COOLDOWN_MS: i64 = 24 * 60 * 60 * 1000;
 
-/// One full evaluation pass — refresh user info, decide whether to alert,
-/// fire the OS notification + emit the in-app event, write the latch back
-/// to settings.
+/// One tick: refresh user info, keep the balance as a history point, then (if the
+/// alert is enabled) decide whether to alert, fire the OS notification + emit
+/// the in-app event, and write the latch back to settings.
 ///
 /// Returns `true` if a notification was attempted (regardless of OS
 /// success). Errors from the OFox API are logged and the round is skipped
 /// (we'll re-evaluate on the next tick).
-pub async fn evaluate_and_notify(
+pub async fn run_tick(
     app: &AppHandle,
     manager_arc: &Arc<RwLock<OfoxAuthManager>>,
+    db: &Database,
     now_ms: i64,
 ) -> bool {
-    // ── Guard 1: user disabled the feature ────────────────────────────
-    if !crate::settings::low_balance_alert_enabled() {
-        return false;
-    }
-
-    // ── Guard 2: must be authenticated ────────────────────────────────
-    {
+    // ── Refresh balance (needs a session) ─────────────────────────────
+    let user = {
         let manager = manager_arc.read().await;
         if !manager.is_authenticated() {
             log::debug!("[low-balance] skipping: not authenticated");
             return false;
         }
-    }
-
-    let threshold = crate::settings::low_balance_threshold_usd();
-    if threshold <= 0.0 {
-        log::warn!("[low-balance] threshold is <= 0 ({}), skipping", threshold);
-        return false;
-    }
-
-    // ── Refresh balance ───────────────────────────────────────────────
-    let user = {
-        let manager = manager_arc.read().await;
         match manager.refresh_user_info().await {
             Ok(u) => u,
             Err(e) => {
@@ -79,6 +68,25 @@ pub async fn evaluate_and_notify(
             }
         }
     };
+
+    // ── Keep the point, alert or not ──────────────────────────────────
+    balance_history::record(db, &user, now_ms);
+
+    // ── Guard: user disabled the alert ────────────────────────────────
+    if !crate::settings::low_balance_alert_enabled() {
+        return false;
+    }
+    alert_if_low(app, &user, now_ms)
+}
+
+/// Fire the alert when `user`'s balance is below the threshold and the latch is
+/// open. Returns `true` if a notification was attempted.
+fn alert_if_low(app: &AppHandle, user: &OfoxUserInfo, now_ms: i64) -> bool {
+    let threshold = crate::settings::low_balance_threshold_usd();
+    if threshold <= 0.0 {
+        log::warn!("[low-balance] threshold is <= 0 ({}), skipping", threshold);
+        return false;
+    }
 
     let balance = match user.balance.as_ref().and_then(|b| b.balance) {
         Some(v) => v,
@@ -103,7 +111,7 @@ pub async fn evaluate_and_notify(
     }
 
     // ── Fire ──────────────────────────────────────────────────────────
-    let title = "OFox 余额提醒";
+    let title = "Ofox 余额提醒";
     let body = format!("当前余额 ${:.2}，低于阈值 ${:.2}。", balance, threshold);
     if let Err(e) = app.notification().builder().title(title).body(&body).show() {
         log::warn!("[low-balance] notify failed (continuing): {}", e);

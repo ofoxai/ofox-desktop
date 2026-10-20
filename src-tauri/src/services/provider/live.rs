@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use toml_edit::{DocumentMut, Item, TableLike};
 
 use crate::app_config::AppType;
-use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
+use crate::codex_config::get_codex_auth_path;
 use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
 use crate::database::Database;
 use crate::error::AppError;
@@ -14,9 +14,7 @@ use crate::provider::Provider;
 use crate::services::mcp::McpService;
 use crate::store::AppState;
 
-use super::gemini_auth::{
-    detect_gemini_auth_type, ensure_google_oauth_security_flag, GeminiAuthType,
-};
+use super::gemini_auth::{detect_gemini_auth_type, GeminiAuthType};
 use super::normalize_claude_models_in_value;
 
 pub(crate) fn sanitize_claude_settings_for_live(settings: &Value) -> Value {
@@ -599,6 +597,7 @@ pub(crate) fn normalize_provider_common_config_for_storage(
 
 /// Write live configuration snapshot for a provider
 pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Result<(), AppError> {
+    let _io = crate::config_io::lock();
     match app_type {
         AppType::Claude => {
             let path = get_claude_settings_path();
@@ -617,10 +616,7 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
                 AppError::Config("Codex 供应商配置缺少 'config' 字段或不是字符串".to_string())
             })?;
 
-            let auth_path = get_codex_auth_path();
-            write_json_file(&auth_path, auth)?;
-            let config_path = get_codex_config_path();
-            std::fs::write(&config_path, config_str).map_err(|e| AppError::io(&config_path, e))?;
+            crate::codex_config::write_codex_live_atomic(auth, Some(config_str))?;
         }
         AppType::Gemini => {
             // Delegate to write_gemini_live which handles env file writing correctly
@@ -884,7 +880,7 @@ pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
             // Read settings.json file (MCP config etc.)
             let settings_path = get_gemini_settings_path();
             let config_obj = if settings_path.exists() {
-                read_json_file(&settings_path)?
+                crate::gemini_config::read_native_settings()?
             } else {
                 json!({})
             };
@@ -896,10 +892,9 @@ pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
             }))
         }
         AppType::OpenCode => {
-            use crate::opencode_config::{get_opencode_config_path, read_opencode_config};
+            use crate::opencode_config::{has_global_config, read_opencode_config};
 
-            let config_path = get_opencode_config_path();
-            if !config_path.exists() {
+            if !has_global_config() {
                 return Err(AppError::localized(
                     "opencode.config.missing",
                     "OpenCode 配置文件不存在",
@@ -1009,7 +1004,7 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
             // Read settings.json file (MCP config etc.)
             let settings_path = get_gemini_settings_path();
             let config_obj = if settings_path.exists() {
-                read_json_file(&settings_path)?
+                crate::gemini_config::read_native_settings()?
             } else {
                 json!({})
             };
@@ -1044,84 +1039,52 @@ pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<bool
 
 /// Write Gemini live configuration with authentication handling
 pub(crate) fn write_gemini_live(provider: &Provider) -> Result<(), AppError> {
+    let _io = crate::config_io::lock();
     use crate::gemini_config::{
         get_gemini_settings_path, json_to_env, validate_gemini_settings_strict,
         write_gemini_env_atomic,
     };
-
-    // One-time auth type detection to avoid repeated detection
     let auth_type = detect_gemini_auth_type(provider);
-
     let env_map = json_to_env(&provider.settings_config)?;
-
-    // Prepare config to write to ~/.gemini/settings.json
-    // Behavior:
-    // - config is object: use it (merge with existing to preserve mcpServers etc.)
-    // - config is null or absent: preserve existing file content
-    let settings_path = get_gemini_settings_path();
-    let mut config_to_write: Option<Value> = None;
-
-    if let Some(config_value) = provider.settings_config.get("config") {
-        if config_value.is_object() {
-            // Merge with existing settings to preserve mcpServers and other fields
-            let mut merged = if settings_path.exists() {
-                read_json_file::<Value>(&settings_path).unwrap_or_else(|_| json!({}))
-            } else {
-                json!({})
-            };
-
-            // Merge provider config into existing settings
-            if let (Some(merged_obj), Some(config_obj)) =
-                (merged.as_object_mut(), config_value.as_object())
-            {
-                for (k, v) in config_obj {
-                    merged_obj.insert(k.clone(), v.clone());
+    let path = get_gemini_settings_path();
+    let original =
+        crate::services::library::coordinator::read(&path)?.unwrap_or_else(|| "{}".into());
+    crate::services::library::mcp_codec::parse_native(&original, "gemini")?;
+    let mut edits = Vec::new();
+    if let Some(value) = provider.settings_config.get("config") {
+        if let Some(map) = value.as_object() {
+            for (key, value) in map {
+                if key != "mcpServers" {
+                    edits.push((vec![key.clone()], Some(value.clone())));
                 }
             }
-            config_to_write = Some(merged);
-        } else if !config_value.is_null() {
-            return Err(AppError::localized(
-                "gemini.validation.invalid_config",
-                "Gemini 配置格式错误: config 必须是对象或 null",
-                "Gemini config invalid: config must be an object or null",
-            ));
-        }
-        // config is null: don't modify existing settings.json (preserve mcpServers etc.)
-    }
-
-    // If no config specified or config is null, preserve existing file
-    if config_to_write.is_none() && settings_path.exists() {
-        config_to_write = Some(read_json_file(&settings_path)?);
-    }
-
-    match auth_type {
-        GeminiAuthType::GoogleOfficial => {
-            // Google Official uses OAuth, no API key validation needed.
-            // Write user's env vars as-is (e.g. GEMINI_MODEL, custom vars).
-            write_gemini_env_atomic(&env_map)?;
-        }
-        GeminiAuthType::Packycode | GeminiAuthType::Generic => {
-            // API Key mode -- require GEMINI_API_KEY
-            validate_gemini_settings_strict(&provider.settings_config)?;
-            write_gemini_env_atomic(&env_map)?;
+        } else if !value.is_null() {
+            return Err(AppError::Config("gemini.validation.invalid_config".into()));
         }
     }
-
-    if let Some(config_value) = config_to_write {
-        write_json_file(&settings_path, &config_value)?;
+    let output = crate::json5_sections::edit_object_paths(
+        &original,
+        crate::json5_sections::KeyStyle::Json,
+        &edits,
+    )?;
+    let selected_type = match auth_type {
+        GeminiAuthType::GoogleOfficial => "oauth-personal",
+        _ => "gemini-api-key",
+    };
+    let output = crate::json5_sections::edit_object_paths(
+        &output,
+        crate::json5_sections::KeyStyle::Json,
+        &[(
+            vec!["security".into(), "auth".into(), "selectedType".into()],
+            Some(json!(selected_type)),
+        )],
+    )?;
+    if !matches!(auth_type, GeminiAuthType::GoogleOfficial) {
+        validate_gemini_settings_strict(&provider.settings_config)?;
     }
-
-    // Set security.auth.selectedType based on auth type
-    // - Google Official: OAuth mode
-    // - All others: API Key mode
-    match auth_type {
-        GeminiAuthType::GoogleOfficial => ensure_google_oauth_security_flag(provider)?,
-        GeminiAuthType::Packycode | GeminiAuthType::Generic => {
-            crate::gemini_config::write_packycode_settings()?;
-        }
-    }
-
-    Ok(())
+    // Finish validating both files before mutating either one.
+    write_gemini_env_atomic(&env_map)?;
+    crate::config::atomic_write(&path, output.as_bytes())
 }
 
 /// Remove an OpenCode provider from the live configuration
@@ -1359,7 +1322,122 @@ pub fn remove_openclaw_provider_from_live(provider_id: &str) -> Result<(), AppEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::codex_config::get_codex_config_path;
     use serde_json::json;
+
+    #[test]
+    #[serial_test::serial]
+    fn gemini_native_jsonc_survives_write_read_and_default_import() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let state = AppState::new(std::sync::Arc::new(crate::Database::memory().unwrap()));
+        let path = crate::gemini_config::get_gemini_settings_path();
+        crate::config::atomic_write(
+            &path,
+            b"{/* MCP */\"mcpServers\":{\"personal\":{\"command\":\"server\"}}}",
+        )
+        .unwrap();
+        let provider = Provider::with_id(
+            "test".into(),
+            "Test".into(),
+            json!({"env":{"GEMINI_API_KEY":"sandbox"}}),
+            None,
+        );
+        write_gemini_live(&provider).unwrap();
+        assert!(
+            read_live_settings(AppType::Gemini).unwrap()["config"]["mcpServers"]
+                .get("personal")
+                .is_some()
+        );
+        import_default_config(&state, AppType::Gemini).unwrap();
+        assert!(
+            state.db.get_all_providers("gemini").unwrap()["default"].settings_config["config"]
+                ["mcpServers"]
+                .get("personal")
+                .is_some()
+        );
+        assert!(std::fs::read_to_string(path).unwrap().contains("/* MCP */"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn native_read_and_status_accept_every_opencode_global_file() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        for name in ["config.json", "opencode.jsonc"] {
+            let path = crate::opencode_config::get_opencode_dir().join(name);
+            crate::config::atomic_write(
+                &path,
+                br#"{"provider":{"demo":{"npm":"@ai-sdk/openai"}}}"#,
+            )
+            .unwrap();
+            assert!(read_live_settings(AppType::OpenCode).unwrap()["provider"]
+                .get("demo")
+                .is_some());
+            assert!(
+                crate::commands::get_config_status("opencode".into())
+                    .await
+                    .unwrap()
+                    .exists
+            );
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn gemini_provider_keeps_current_mcp_and_refuses_corruption_before_env_writes() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let path = crate::gemini_config::get_gemini_settings_path();
+        let env = crate::gemini_config::get_gemini_env_path();
+        let provider = Provider::with_id(
+            "test".into(),
+            "Test".into(),
+            json!({"env":{"GEMINI_API_KEY":"new-sandbox"},"config":{"mcpServers":{"stale":{"command":"old"}},"theme":"new"}}),
+            None,
+        );
+        crate::config::atomic_write(&path, b"broken").unwrap();
+        crate::config::atomic_write(&env, b"GEMINI_API_KEY=old-sandbox\n").unwrap();
+        assert!(write_gemini_live(&provider).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "broken");
+        assert_eq!(
+            std::fs::read_to_string(&env).unwrap(),
+            "GEMINI_API_KEY=old-sandbox\n"
+        );
+        let original =
+            "{\n // current MCP\n \"mcpServers\": {\"current\":{\"command\":\"user\"}}, \"theme\":\"old\"\n}";
+        crate::config::atomic_write(&path, original.as_bytes()).unwrap();
+        write_gemini_live(&provider).unwrap();
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(result.contains("// current MCP"));
+        let root: Value = json5::from_str(&result).unwrap();
+        assert_eq!(root["mcpServers"]["current"]["command"], "user");
+        assert!(root["mcpServers"].get("stale").is_none());
+        assert_eq!(root["theme"], "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn the_codex_live_snapshot_creates_config_toml_private_and_without_leftovers() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let provider = Provider::with_id(
+            "codex-test".to_string(),
+            "Codex Test".to_string(),
+            json!({ "auth": { "OPENAI_API_KEY": "sk-test" }, "config": "model = \"new\"\n" }),
+            None,
+        );
+
+        write_live_snapshot(&AppType::Codex, &provider).unwrap();
+
+        let config = get_codex_config_path();
+        assert_eq!(crate::config::file_mode(&config), Some(0o600));
+        let mut names: Vec<_> = std::fs::read_dir(config.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["auth.json", "config.toml"]);
+    }
 
     #[test]
     fn claude_common_config_apply_and_remove_roundtrip_for_non_overlapping_fields() {

@@ -1,22 +1,58 @@
 pub(crate) mod account_keys;
+pub(crate) mod analytics_compact;
 pub mod balance;
+pub mod balance_history;
+pub(crate) mod catalog_lifecycle;
+pub(crate) mod codex_native;
 pub mod coding_plan;
 pub mod config;
 pub mod env_checker;
 pub mod env_manager;
 pub mod env_override;
+pub mod library;
 pub mod low_balance;
 pub mod mcp;
 pub mod model_fetch;
+pub(crate) mod native_sqlite_snapshot;
 pub(crate) mod ofox_bind;
+pub mod ofox_pricing;
 pub mod omo;
 pub mod pricing_sync;
 pub mod prompt;
 pub mod provider;
 pub mod proxy;
+pub mod session_analytics;
+pub mod session_analytics_api;
+pub mod session_analytics_core;
+pub(crate) mod session_analytics_discovery;
+pub(crate) mod session_analytics_dsh;
+pub(crate) mod session_analytics_hermes;
+pub mod session_analytics_index;
+pub(crate) mod session_analytics_legacy;
+pub(crate) mod session_analytics_listing;
+pub mod session_analytics_messages;
+pub(crate) mod session_analytics_native;
+pub(crate) mod session_analytics_openclaw;
+pub mod session_analytics_opencode;
+pub(crate) mod session_analytics_pi;
+pub(crate) mod session_analytics_workbuddy;
+pub(crate) mod session_native_activity;
 pub mod session_usage;
+#[cfg(test)]
+mod session_usage_atomic_tests;
+#[cfg(test)]
 pub mod session_usage_codex;
+mod session_usage_dsh;
 pub mod session_usage_gemini;
+pub mod session_usage_hermes;
+#[cfg(test)]
+mod session_usage_native_followup_tests;
+pub(crate) mod session_usage_openclaw;
+pub mod session_usage_opencode;
+mod session_usage_pi;
+#[cfg(test)]
+mod session_usage_semantics_tests;
+pub mod session_usage_workbuddy;
 pub mod skill;
 // Test-only fake clock. The production loops in `lib.rs::run` currently
 // use `tokio::time::sleep` directly; this trait is kept ready so future
@@ -27,8 +63,23 @@ pub mod sleeper;
 pub mod speedtest;
 pub mod stream_check;
 pub mod subscription;
+pub mod usage_analytics;
 pub mod usage_cache;
+pub mod usage_data;
+pub(crate) mod usage_health;
+pub mod usage_maintenance;
+pub mod usage_overview;
+#[cfg(test)]
+mod usage_project_tests;
+pub(crate) mod usage_projects;
+pub mod usage_query;
+pub mod usage_rebuild;
+pub mod usage_requests;
+pub mod usage_source;
 pub mod usage_stats;
+pub mod usage_sync;
+pub(crate) mod usage_sync_db;
+pub mod usage_time;
 pub mod webdav;
 pub mod webdav_auto_sync;
 pub mod webdav_sync;

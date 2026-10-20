@@ -6,6 +6,7 @@
 use crate::config::{atomic_write, get_app_config_dir};
 use crate::error::AppError;
 use crate::json5_sections::{self, KeyStyle};
+use crate::redact::describe_json_error;
 use crate::settings::{effective_backup_retain_count, get_openclaw_override_dir};
 use chrono::Local;
 use indexmap::IndexMap;
@@ -15,7 +16,6 @@ use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 
 /// 配置文件不存在时 OpenClaw 自己用的默认配置。
 pub(crate) const OPENCLAW_DEFAULT_SOURCE: &str =
@@ -54,11 +54,7 @@ fn default_openclaw_config_value() -> Value {
     })
 }
 
-/// 所有读改写 openclaw.json 的路径都要拿这把锁。
-pub(crate) fn openclaw_write_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+// 所有读改写 openclaw.json 的路径使用 config_io 共享屏障。
 
 // ============================================================================
 // Type Definitions
@@ -261,7 +257,7 @@ impl OpenClawConfigDocument {
 
 impl OpenClawConfigDocument {
     fn save(self) -> Result<OpenClawWriteOutcome, AppError> {
-        let _guard = openclaw_write_lock().lock()?;
+        let _guard = crate::config_io::lock();
 
         let current_source = if self.path.exists() {
             Some(fs::read_to_string(&self.path).map_err(|e| AppError::io(&self.path, e))?)
@@ -571,8 +567,12 @@ pub fn get_default_model() -> Result<Option<OpenClawDefaultModel>, AppError> {
         return Ok(None);
     };
 
-    let model = serde_json::from_value(model_value.clone())
-        .map_err(|e| AppError::Config(format!("Failed to parse agents.defaults.model: {e}")))?;
+    let model = serde_json::from_value(model_value.clone()).map_err(|e| {
+        AppError::Config(format!(
+            "Failed to parse agents.defaults.model: {}",
+            describe_json_error(&e)
+        ))
+    })?;
     Ok(Some(model))
 }
 
@@ -610,8 +610,12 @@ pub fn get_model_catalog() -> Result<Option<HashMap<String, OpenClawModelCatalog
         return Ok(None);
     };
 
-    let catalog = serde_json::from_value(models_value.clone())
-        .map_err(|e| AppError::Config(format!("Failed to parse agents.defaults.models: {e}")))?;
+    let catalog = serde_json::from_value(models_value.clone()).map_err(|e| {
+        AppError::Config(format!(
+            "Failed to parse agents.defaults.models: {}",
+            describe_json_error(&e)
+        ))
+    })?;
     Ok(Some(catalog))
 }
 
@@ -651,8 +655,12 @@ pub fn get_agents_defaults() -> Result<Option<OpenClawAgentsDefaults>, AppError>
         return Ok(None);
     };
 
-    let defaults = serde_json::from_value(defaults_value.clone())
-        .map_err(|e| AppError::Config(format!("Failed to parse agents.defaults: {e}")))?;
+    let defaults = serde_json::from_value(defaults_value.clone()).map_err(|e| {
+        AppError::Config(format!(
+            "Failed to parse agents.defaults: {}",
+            describe_json_error(&e)
+        ))
+    })?;
     Ok(Some(defaults))
 }
 
@@ -692,8 +700,12 @@ pub fn get_env_config() -> Result<OpenClawEnvConfig, AppError> {
         });
     };
 
-    serde_json::from_value(env_value.clone())
-        .map_err(|e| AppError::Config(format!("Failed to parse env config: {e}")))
+    serde_json::from_value(env_value.clone()).map_err(|e| {
+        AppError::Config(format!(
+            "Failed to parse env config: {}",
+            describe_json_error(&e)
+        ))
+    })
 }
 
 /// Write the env config section
@@ -719,8 +731,12 @@ pub fn get_tools_config() -> Result<OpenClawToolsConfig, AppError> {
         });
     };
 
-    serde_json::from_value(tools_value.clone())
-        .map_err(|e| AppError::Config(format!("Failed to parse tools config: {e}")))
+    serde_json::from_value(tools_value.clone()).map_err(|e| {
+        AppError::Config(format!(
+            "Failed to parse tools config: {}",
+            describe_json_error(&e)
+        ))
+    })
 }
 
 /// Write the tools config section
@@ -732,37 +748,16 @@ pub fn set_tools_config(tools: &OpenClawToolsConfig) -> Result<OpenClawWriteOutc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_sandbox::sandbox;
     use serial_test::serial;
-    use std::sync::{Mutex, OnceLock};
-
-    fn test_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
-    }
 
     fn with_test_paths<T>(source: &str, test: impl FnOnce(&Path) -> T) -> T {
-        let _guard = test_guard();
-        let temp = tempfile::tempdir().unwrap();
-        let openclaw_dir = temp.path().join(".openclaw");
+        let sandbox = sandbox();
+        let openclaw_dir = sandbox.home().join(".openclaw");
         fs::create_dir_all(&openclaw_dir).unwrap();
         let config_path = openclaw_dir.join("openclaw.json");
         fs::write(&config_path, source).unwrap();
-        let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
-        let old_home = std::env::var_os("HOME");
-        std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
-        std::env::set_var("HOME", temp.path());
-        let result = test(&config_path);
-        match old_test_home {
-            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
-            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
-        }
-        match old_home {
-            Some(value) => std::env::set_var("HOME", value),
-            None => std::env::remove_var("HOME"),
-        }
-        result
+        test(&config_path)
     }
 
     #[test]

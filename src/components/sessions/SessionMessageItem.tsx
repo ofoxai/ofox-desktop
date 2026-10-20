@@ -54,7 +54,7 @@ export const SessionMessageItem = memo(function SessionMessageItem({
         message.role.toLowerCase() === "user"
           ? "bg-primary/5 border-primary/20 ml-8"
           : message.role.toLowerCase() === "assistant"
-            ? "bg-blue-500/5 border-blue-500/20 mr-8"
+            ? "bg-card border-line mr-8"
             : "bg-muted/40 border-border/60",
         isActive && "ring-2 ring-primary ring-offset-2",
       )}
@@ -70,11 +70,7 @@ export const SessionMessageItem = memo(function SessionMessageItem({
             <Copy className="size-3" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent>
-          {t("sessionManager.copyMessage", {
-            defaultValue: "复制内容",
-          })}
-        </TooltipContent>
+        <TooltipContent>{t("sessionManager.copyMessage", {})}</TooltipContent>
       </Tooltip>
       <div className="flex items-center justify-between text-xs mb-1.5 pr-6">
         <span className={cn("font-semibold", getRoleTone(message.role))}>
@@ -101,16 +97,12 @@ export const SessionMessageItem = memo(function SessionMessageItem({
           {expanded ? (
             <>
               <ChevronUp className="size-3" />
-              {t("sessionManager.collapseContent", {
-                defaultValue: "收起",
-              })}
+              {t("sessionManager.collapseContent", {})}
             </>
           ) : (
             <>
               <ChevronDown className="size-3" />
-              {t("sessionManager.expandContent", {
-                defaultValue: "展开完整内容",
-              })}
+              {t("sessionManager.expandContent", {})}
               <span className="text-muted-foreground/60">
                 ({Math.round(message.content.length / 1000)}k)
               </span>

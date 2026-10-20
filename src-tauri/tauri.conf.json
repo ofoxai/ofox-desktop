@@ -16,6 +16,10 @@
         "label": "main",
         "title": "",
         "titleBarStyle": "Overlay",
+        "trafficLightPosition": {
+          "x": 14,
+          "y": 17
+        },
         "width": 1000,
         "height": 650,
         "minWidth": 900,
@@ -39,7 +43,14 @@
     "targets": "all",
     "createUpdaterArtifacts": false,
     "resources": [
-      "../scripts/installer/**/*"
+      "../scripts/installer/**/*",
+      "../src/assets/agent-logos/LICENSE-*.txt",
+      "../src/assets/agent-logos/LICENSE-*.md",
+      "../src/assets/agent-logos/NOTICE.md",
+      "../src/assets/library-logos/NOTICE.md",
+      "src/services/MAGPIE_LICENSE",
+      "src/session_manager/MAGPIE_LICENSE",
+      "src/native_tools/MAGPIE_LICENSE"
     ],
     "icon": [
       "icons/32x32.png",

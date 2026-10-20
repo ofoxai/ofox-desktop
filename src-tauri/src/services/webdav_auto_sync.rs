@@ -51,6 +51,7 @@ pub fn should_trigger_for_table(table: &str) -> bool {
             | "skills"
             | "skill_repos"
             | "settings"
+            | "model_profiles"
             | "proxy_config"
     )
 }
@@ -82,7 +83,9 @@ fn should_run_auto_sync(settings: Option<&WebDavSyncSettings>) -> bool {
 fn persist_auto_sync_error(settings: &mut WebDavSyncSettings, error: &AppError) {
     settings.status.last_error = Some(error.to_string());
     settings.status.last_error_source = Some("auto".to_string());
-    let _ = settings::update_webdav_sync_status(settings.status.clone());
+    if let Err(e) = settings::update_webdav_sync_status(settings.status.clone()) {
+        log::warn!("WebDAV auto sync status not saved: {e}");
+    }
 }
 
 fn emit_auto_sync_status_updated(app: &AppHandle, status: &str, error: Option<&str>) {

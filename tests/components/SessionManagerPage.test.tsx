@@ -1,3 +1,5 @@
+import i18n from "i18next";
+import zh from "@/i18n/locales/zh.json";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   act,
@@ -100,6 +102,7 @@ const closeSearch = () => {
 
 describe("SessionManagerPage", () => {
   beforeEach(() => {
+    i18n.addResourceBundle("zh", "translation", zh, true, true);
     toastSuccessMock.mockReset();
     toastErrorMock.mockReset();
     Element.prototype.scrollIntoView = vi.fn();
@@ -199,7 +202,7 @@ describe("SessionManagerPage", () => {
     );
 
     expect(
-      screen.getByText("sessionManager.selectSession"),
+      screen.getByText(zh.sessionManager.selectSession),
     ).toBeInTheDocument();
     expect(
       screen.queryByText("sessionManager.emptySession"),

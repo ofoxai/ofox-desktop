@@ -19,6 +19,10 @@ pub struct TokenUsage {
     pub output_tokens: u32,
     pub cache_read_tokens: u32,
     pub cache_creation_tokens: u32,
+    /// Of `cache_creation_tokens`, those Claude keeps for an hour, billed at
+    /// their own rate (`usage.cache_creation.ephemeral_1h_input_tokens`).
+    #[serde(default)]
+    pub cache_creation_1h_tokens: u32,
     /// 从响应中提取的实际模型名称（如果可用）
     pub model: Option<String>,
     /// 从响应中提取的消息 ID（用于跨源去重）
@@ -37,6 +41,14 @@ impl TokenUsage {
             .map(|mid| format!("{SESSION_REQUEST_ID_PREFIX}{mid}"))
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
     }
+}
+
+/// Of the cache writes a Claude usage block counts, those kept for an hour.
+pub(crate) fn claude_hour_cache_writes(usage: &Value) -> u32 {
+    usage
+        .pointer("/cache_creation/ephemeral_1h_input_tokens")
+        .and_then(Value::as_u64)
+        .map_or(0, |n| u32::try_from(n).unwrap_or(u32::MAX))
 }
 
 /// API 类型
@@ -74,6 +86,7 @@ impl TokenUsage {
                 .get("cache_creation_input_tokens")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u32,
+            cache_creation_1h_tokens: claude_hour_cache_writes(usage),
             model,
             message_id,
         })
@@ -119,6 +132,7 @@ impl TokenUsage {
                                 .and_then(|v| v.as_u64())
                                 .unwrap_or(0)
                                 as u32;
+                            usage.cache_creation_1h_tokens = claude_hour_cache_writes(msg_usage);
                         }
                     }
                     "message_delta" => {
@@ -155,6 +169,8 @@ impl TokenUsage {
                                     .and_then(|v| v.as_u64())
                                 {
                                     usage.cache_creation_tokens = cache_creation as u32;
+                                    usage.cache_creation_1h_tokens =
+                                        claude_hour_cache_writes(delta_usage);
                                 }
                             }
                         }
@@ -182,6 +198,7 @@ impl TokenUsage {
             output_tokens: usage.get("completion_tokens")?.as_u64()? as u32,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            cache_creation_1h_tokens: 0,
             model: None,
             message_id: None,
         })
@@ -224,61 +241,25 @@ impl TokenUsage {
             })
             .unwrap_or(0) as u32;
 
+        // input_tokens counts the cached prompt too; store fresh input only
         Some(Self {
-            input_tokens: input_tokens? as u32,
+            input_tokens: (input_tokens? as u32).saturating_sub(cached_tokens),
             output_tokens: output_tokens? as u32,
             cache_read_tokens: cached_tokens,
             cache_creation_tokens: usage
                 .get("cache_creation_input_tokens")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as u32,
+            cache_creation_1h_tokens: 0,
             model,
             message_id: None,
         })
     }
 
-    /// 从 Codex API 响应解析并调整 input_tokens
-    ///
-    /// Codex 的 input_tokens 需要减去 cached_tokens 以获得实际计费的 token 数
-    /// 公式: adjusted_input = max(input_tokens - cached_tokens, 0)
+    /// 从 Codex API 响应解析（fresh input，与 `from_codex_response` 相同）
     #[allow(dead_code)]
     pub fn from_codex_response_adjusted(body: &Value) -> Option<Self> {
-        let usage = body.get("usage")?;
-        let input_tokens = usage.get("input_tokens")?.as_u64()? as u32;
-        let output_tokens = usage.get("output_tokens")?.as_u64()? as u32;
-
-        // 获取 cached_tokens (可能在 cache_read_input_tokens 或 input_tokens_details 中)
-        let cached_tokens = usage
-            .get("cache_read_input_tokens")
-            .and_then(|v| v.as_u64())
-            .or_else(|| {
-                usage
-                    .get("input_tokens_details")
-                    .and_then(|d| d.get("cached_tokens"))
-                    .and_then(|v| v.as_u64())
-            })
-            .unwrap_or(0) as u32;
-
-        // 调整 input_tokens: 减去 cached_tokens
-        let adjusted_input = input_tokens.saturating_sub(cached_tokens);
-
-        // 提取响应中的模型名称
-        let model = body
-            .get("model")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        Some(Self {
-            input_tokens: adjusted_input,
-            output_tokens,
-            cache_read_tokens: cached_tokens,
-            cache_creation_tokens: usage
-                .get("cache_creation_input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32,
-            model,
-            message_id: None,
-        })
+        Self::from_codex_response(body)
     }
 
     /// 从 Codex API 流式响应解析
@@ -306,7 +287,7 @@ impl TokenUsage {
     /// - `/v1/responses`: 使用 input_tokens/output_tokens
     /// - `/v1/chat/completions`: 使用 prompt_tokens/completion_tokens (OpenAI 格式)
     ///
-    /// 注意：记录原始 input_tokens，费用计算时再减去 cached_tokens
+    /// 两种格式都存 fresh input（不含缓存命中部分）
     pub fn from_codex_response_auto(body: &Value) -> Option<Self> {
         let usage = body.get("usage")?;
 
@@ -316,7 +297,6 @@ impl TokenUsage {
             Self::from_openai_response(body)
         } else if usage.get("input_tokens").is_some() {
             log::debug!("[Codex] 检测到 Codex 格式 (input_tokens)");
-            // 使用非调整版本，记录原始 input_tokens
             Self::from_codex_response(body)
         } else {
             log::debug!("[Codex] 无法识别响应格式，usage: {usage:?}");
@@ -366,11 +346,13 @@ impl TokenUsage {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
+        // prompt_tokens includes the cached tokens; store fresh input only
         Some(Self {
-            input_tokens: prompt_tokens as u32,
+            input_tokens: (prompt_tokens as u32).saturating_sub(cached_tokens),
             output_tokens: completion_tokens as u32,
             cache_read_tokens: cached_tokens,
             cache_creation_tokens: 0,
+            cache_creation_1h_tokens: 0,
             model,
             message_id: None,
         })
@@ -407,15 +389,18 @@ impl TokenUsage {
         // 输出 tokens = 总 tokens - 输入 tokens
         // 这包含了 candidatesTokenCount + thoughtsTokenCount
         let output_tokens = total_tokens.saturating_sub(prompt_tokens);
+        let cached_tokens = usage
+            .get("cachedContentTokenCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
 
+        // promptTokenCount includes the cached content; store fresh input only
         Some(Self {
-            input_tokens: prompt_tokens,
+            input_tokens: prompt_tokens.saturating_sub(cached_tokens),
             output_tokens,
-            cache_read_tokens: usage
-                .get("cachedContentTokenCount")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32,
+            cache_read_tokens: cached_tokens,
             cache_creation_tokens: 0,
+            cache_creation_1h_tokens: 0,
             model,
             message_id: None,
         })
@@ -462,11 +447,13 @@ impl TokenUsage {
         let total_output = total_tokens.saturating_sub(total_input);
 
         if total_input > 0 || total_output > 0 {
+            // promptTokenCount includes the cached content; store fresh input only
             Some(Self {
-                input_tokens: total_input,
+                input_tokens: total_input.saturating_sub(total_cache_read),
                 output_tokens: total_output,
                 cache_read_tokens: total_cache_read,
                 cache_creation_tokens: 0,
+                cache_creation_1h_tokens: 0,
                 model,
                 message_id: None,
             })
@@ -479,6 +466,24 @@ impl TokenUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_claude_response_names_its_hour_long_cache_writes() {
+        let usage = serde_json::json!({"input_tokens": 3, "output_tokens": 5,
+            "cache_read_input_tokens": 7, "cache_creation_input_tokens": 1000,
+            "cache_creation": {"ephemeral_5m_input_tokens": 400, "ephemeral_1h_input_tokens": 600}});
+        let body = serde_json::json!({"id": "msg_1", "model": "claude-opus-5", "usage": usage});
+        let parsed = TokenUsage::from_claude_response(&body).unwrap();
+        assert_eq!(parsed.cache_creation_tokens, 1000);
+        assert_eq!(parsed.cache_creation_1h_tokens, 600);
+        let events = [
+            serde_json::json!({"type": "message_start",
+            "message": {"id": "msg_1", "model": "claude-opus-5", "usage": usage}}),
+            serde_json::json!({"type": "message_delta", "usage": {"output_tokens": 5}}),
+        ];
+        let streamed = TokenUsage::from_claude_stream_events(&events).unwrap();
+        assert_eq!(streamed.cache_creation_1h_tokens, 600);
+    }
     use serde_json::json;
 
     #[test]
@@ -609,7 +614,8 @@ mod tests {
         });
 
         let usage = TokenUsage::from_gemini_response(&response).unwrap();
-        assert_eq!(usage.input_tokens, 8383);
+        // fresh input: promptTokenCount 8383 includes the 20 cached
+        assert_eq!(usage.input_tokens, 8363);
         // output_tokens = totalTokenCount - promptTokenCount = 8547 - 8383 = 164
         assert_eq!(usage.output_tokens, 164);
         assert_eq!(usage.cache_read_tokens, 20);
@@ -629,7 +635,7 @@ mod tests {
         });
 
         let usage = TokenUsage::from_gemini_response(&response).unwrap();
-        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.input_tokens, 80);
         // output_tokens = totalTokenCount - promptTokenCount = 150 - 100 = 50
         assert_eq!(usage.output_tokens, 50);
         assert_eq!(usage.cache_read_tokens, 20);
@@ -689,8 +695,8 @@ mod tests {
         });
 
         let usage = TokenUsage::from_codex_response(&response).unwrap();
-        // 非调整模式：input_tokens 保持原值，但应记录缓存命中
-        assert_eq!(usage.input_tokens, 1000);
+        // fresh input: the 300 cached are counted only as cache reads
+        assert_eq!(usage.input_tokens, 700);
         assert_eq!(usage.output_tokens, 500);
         assert_eq!(usage.cache_read_tokens, 300);
     }
@@ -847,7 +853,7 @@ mod tests {
         });
 
         let usage = TokenUsage::from_codex_response_auto(&response).unwrap();
-        assert_eq!(usage.input_tokens, 1000);
+        assert_eq!(usage.input_tokens, 800);
         assert_eq!(usage.output_tokens, 500);
         assert_eq!(usage.cache_read_tokens, 200);
         assert_eq!(usage.model, Some("gpt-4o".to_string()));
@@ -868,8 +874,8 @@ mod tests {
         });
 
         let usage = TokenUsage::from_codex_response_auto(&response).unwrap();
-        // 记录原始 input_tokens，不调整
-        assert_eq!(usage.input_tokens, 1000);
+        // fresh input, as every source stores it
+        assert_eq!(usage.input_tokens, 700);
         assert_eq!(usage.output_tokens, 500);
         assert_eq!(usage.cache_read_tokens, 300);
         assert_eq!(usage.model, Some("o3".to_string()));
@@ -901,8 +907,8 @@ mod tests {
         ];
 
         let usage = TokenUsage::from_codex_stream_events_auto(&events).unwrap();
-        // 记录原始 input_tokens，不调整
-        assert_eq!(usage.input_tokens, 1000);
+        // fresh input, as every source stores it
+        assert_eq!(usage.input_tokens, 800);
         assert_eq!(usage.output_tokens, 500);
         assert_eq!(usage.cache_read_tokens, 200);
         assert_eq!(usage.model, Some("o3".to_string()));
@@ -932,5 +938,22 @@ mod tests {
         assert_eq!(usage.input_tokens, 100);
         assert_eq!(usage.output_tokens, 50);
         assert_eq!(usage.model, Some("gpt-4o".to_string()));
+    }
+
+    #[test]
+    fn gemini_stream_chunks_store_fresh_input() {
+        let chunks = vec![json!({
+            "modelVersion": "gemini-2.5-pro",
+            "usageMetadata": {
+                "promptTokenCount": 900,
+                "cachedContentTokenCount": 600,
+                "totalTokenCount": 940
+            }
+        })];
+
+        let usage = TokenUsage::from_gemini_stream_chunks(&chunks).unwrap();
+        assert_eq!(usage.input_tokens, 300);
+        assert_eq!(usage.output_tokens, 40);
+        assert_eq!(usage.cache_read_tokens, 600);
     }
 }

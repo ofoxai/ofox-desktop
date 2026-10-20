@@ -3,7 +3,9 @@
 //! 提供 SQL 导出/导入和二进制快照备份功能。
 
 use super::{lock_conn, Database};
-use crate::config::get_app_config_dir;
+use crate::config::{
+    create_private_dir_all, ensure_private_file, get_app_config_dir, set_file_mode,
+};
 use crate::error::AppError;
 use chrono::{Local, Utc};
 use rusqlite::backup::Backup;
@@ -18,9 +20,24 @@ const CC_SWITCH_SQL_EXPORT_HEADER: &str = "-- Ofox Switch SQLite 导出";
 /// Tables that describe this machine's files and never leave it: skipped by every
 /// export, and kept from the local database by every import or restore. A bind
 /// snapshot from another machine or an older backup would restore the wrong files.
-const MACHINE_LOCAL_TABLES: &[&str] = &["ofox_bind_snapshot"];
+/// The session-file metadata cache and balance samples are this machine's too.
+///
+/// `session_usage_archive` and `maintenance_flags` are not: they describe the
+/// request logs, so a full export, import or restore carries them with
+/// `proxy_request_logs` (an old backup's logs with this machine's archive would
+/// count the archived calls twice, and its unrepriced Claude rows would never be
+/// repriced under this machine's `done` flags). WebDAV sync skips and keeps them
+/// along with the logs.
+const MACHINE_LOCAL_TABLES: &[&str] = &[
+    "ofox_bind_snapshot",
+    "session_meta_cache",
+    "balance_samples",
+];
 
 /// Tables whose data rows are skipped when exporting for WebDAV sync.
+/// `session_log_sync` is how far this machine read its own transcripts: another
+/// machine's progress would make every local transcript be read from the start
+/// again and its old, already archived calls stored a second time.
 const SYNC_SKIP_TABLES: &[&str] = &[
     "proxy_request_logs",
     "stream_check_logs",
@@ -28,6 +45,11 @@ const SYNC_SKIP_TABLES: &[&str] = &[
     "proxy_live_backup",
     "usage_daily_rollups",
     "ofox_bind_snapshot",
+    "session_usage_archive",
+    "session_meta_cache",
+    "balance_samples",
+    "maintenance_flags",
+    "session_log_sync",
 ];
 
 /// Tables whose local data is preserved (restored from local snapshot) during WebDAV import.
@@ -38,6 +60,11 @@ const SYNC_PRESERVE_TABLES: &[&str] = &[
     "proxy_live_backup",
     "usage_daily_rollups",
     "ofox_bind_snapshot",
+    "session_usage_archive",
+    "session_meta_cache",
+    "balance_samples",
+    "maintenance_flags",
+    "session_log_sync",
 ];
 
 /// A database backup entry for the UI
@@ -60,6 +87,9 @@ impl Database {
     pub fn export_sql_string_for_sync(&self) -> Result<String, AppError> {
         let snapshot = self.snapshot_to_memory()?;
         Self::dump_sql(&snapshot, SYNC_SKIP_TABLES)
+    }
+    pub(crate) fn export_sync_snapshot(conn: &Connection) -> Result<String, AppError> {
+        Self::dump_sql(conn, SYNC_SKIP_TABLES)
     }
 
     /// 导出为 SQLite 兼容的 SQL 文本
@@ -89,31 +119,38 @@ impl Database {
 
     /// 从 SQL 字符串导入，返回生成的备份 ID（若无备份则为空字符串）
     pub fn import_sql_string(&self, sql_raw: &str) -> Result<String, AppError> {
-        self.import_sql_string_inner(sql_raw, MACHINE_LOCAL_TABLES)
+        self.import_sql_string_inner(sql_raw, MACHINE_LOCAL_TABLES, |_| Ok(()))
     }
 
     /// Import SQL generated for sync, then restore local-only tables from the
     /// current device snapshot before replacing the main database.
+    #[cfg(test)]
     pub(crate) fn import_sql_string_for_sync(&self, sql_raw: &str) -> Result<String, AppError> {
-        self.import_sql_string_inner(sql_raw, SYNC_PRESERVE_TABLES)
+        self.import_sql_string_inner(sql_raw, SYNC_PRESERVE_TABLES, |_| Ok(()))
+    }
+
+    pub(crate) fn import_sync_with_resources(
+        &self,
+        sql_raw: &str,
+        prepare: impl FnOnce(&Connection) -> Result<(), AppError>,
+    ) -> Result<String, AppError> {
+        self.import_sql_string_inner(sql_raw, SYNC_PRESERVE_TABLES, prepare)
     }
 
     fn import_sql_string_inner(
         &self,
         sql_raw: &str,
         preserve_tables: &[&str],
+        prepare: impl FnOnce(&Connection) -> Result<(), AppError>,
     ) -> Result<String, AppError> {
+        let _io = crate::config_io::lock();
         let sql_content = sql_raw.trim_start_matches('\u{feff}');
         Self::validate_cc_switch_sql_export(sql_content)?;
 
         // 导入前备份现有数据库
         let backup_path = self.backup_database_file()?;
 
-        let local_snapshot = if preserve_tables.is_empty() {
-            None
-        } else {
-            Some(self.snapshot_to_memory()?)
-        };
+        let local_snapshot = self.snapshot_to_memory()?;
 
         // 在临时数据库执行导入，确保失败不会污染主库
         let temp_file = NamedTempFile::new().map_err(|e| AppError::IoContext {
@@ -131,14 +168,30 @@ impl Database {
         // 补齐缺失表/索引并进行基础校验
         Self::create_tables_on_conn(&temp_conn)?;
         Self::apply_schema_migrations_on_conn(&temp_conn)?;
+        prepare(&temp_conn)?;
         Self::validate_basic_state(&temp_conn)?;
-        if let Some(local_snapshot) = local_snapshot.as_ref() {
-            Self::restore_tables(local_snapshot, &temp_conn, preserve_tables)?;
+        Self::restore_tables(&local_snapshot, &temp_conn, preserve_tables)?;
+        let preserves_usage = [
+            "proxy_request_logs",
+            "session_log_sync",
+            "session_meta_cache",
+        ]
+        .iter()
+        .all(|table| preserve_tables.contains(table));
+        if !preserves_usage {
+            crate::session_manager::source_cache::revoke_usage_on(&temp_conn)?;
         }
+        crate::services::library::restore_machine_state(&local_snapshot, &temp_conn)?;
 
         // 使用 Backup 将临时库原子写回主库
         {
             let mut main_conn = lock_conn!(self.conn);
+            if preserves_usage {
+                // Usage writes do not take config_io; freeze their latest ledger
+                // and evidence under the same lock as the final replacement.
+                Self::restore_tables(&main_conn, &temp_conn, preserve_tables)?;
+            }
+            Self::restore_local_usage_health(&main_conn, &temp_conn)?;
             let backup = Backup::new(&temp_conn, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?;
             backup
@@ -283,7 +336,7 @@ impl Database {
                 log::warn!("Periodic stream_check_logs cleanup failed: {e}");
             }
         }
-        match self.rollup_and_prune(30) {
+        match self.rollup_and_prune(super::dao::usage_rollup::USAGE_DETAIL_RETAIN_DAYS) {
             Ok(deleted) => {
                 reclaimed_rows += deleted;
             }
@@ -313,7 +366,9 @@ impl Database {
             .ok_or_else(|| AppError::Config("无效的数据库路径".to_string()))?
             .join("backups");
 
-        fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
+        // 备份里有完整的库（含 API key）：目录只给自己；老版本建的 0o755 目录也收紧。
+        create_private_dir_all(&backup_dir)?;
+        set_file_mode(&backup_dir, 0o700)?;
 
         let base_id = format!("db_backup_{}", Local::now().format("%Y%m%d_%H%M%S"));
         let mut backup_id = base_id.clone();
@@ -325,6 +380,8 @@ impl Database {
             counter += 1;
         }
 
+        // 先建成 0o600 的空文件，备份内容写进去时就已经是私有的。
+        ensure_private_file(&backup_path)?;
         {
             let conn = lock_conn!(self.conn);
             let mut dest_conn =
@@ -382,7 +439,16 @@ impl Database {
             .query_row("SELECT COUNT(*) FROM mcp_servers", [], |row| row.get(0))
             .map_err(|e| AppError::Database(e.to_string()))?;
 
-        if provider_count == 0 && mcp_count == 0 {
+        let skill_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM skills", [], |row| row.get(0))
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let resources = crate::services::library::snapshot_from_connection(conn)?;
+
+        if provider_count == 0
+            && mcp_count == 0
+            && skill_count == 0
+            && resources.definitions.instructions.is_empty()
+        {
             return Err(AppError::Config(
                 "导入的 SQL 未包含有效的供应商或 MCP 数据".to_string(),
             ));
@@ -455,6 +521,23 @@ impl Database {
                 .map_err(|e| AppError::Database(e.to_string()))?;
 
             while let Some(row) = rows.next().map_err(|e| AppError::Database(e.to_string()))? {
+                if table == "settings" {
+                    let key_index = columns
+                        .iter()
+                        .position(|column| column == "key")
+                        .ok_or_else(|| AppError::Database("settings has no key".into()))?;
+                    let key: String = row
+                        .get(key_index)
+                        .map_err(|e| AppError::Database(e.to_string()))?;
+                    if key == crate::services::library::MACHINE_KEY
+                        || key == crate::services::library::batch::SETTING_KEY
+                    {
+                        continue;
+                    }
+                    if key == crate::services::usage_health::SETTING_KEY {
+                        continue;
+                    }
+                }
                 let mut values = Vec::with_capacity(columns.len());
                 for idx in 0..columns.len() {
                     let value = row
@@ -477,6 +560,30 @@ impl Database {
 
         output.push_str("COMMIT;\nPRAGMA foreign_keys=ON;\n");
         Ok(output)
+    }
+
+    /// This single settings row describes local native sources. Copy its fresh
+    /// value (including absence) under the final replacement lock; unrelated
+    /// settings still come from the selected import or backup.
+    fn restore_local_usage_health(
+        source: &Connection,
+        target: &Connection,
+    ) -> Result<(), AppError> {
+        use rusqlite::OptionalExtension;
+        let key = crate::services::usage_health::SETTING_KEY;
+        let value: Option<String> = source
+            .query_row("SELECT value FROM settings WHERE key=?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        target.execute("DELETE FROM settings WHERE key=?1", [key])?;
+        if let Some(value) = value {
+            target.execute(
+                "INSERT INTO settings(key,value) VALUES(?1,?2)",
+                [key, &value],
+            )?;
+        }
+        Ok(())
     }
 
     /// 获取表的列名列表
@@ -557,6 +664,7 @@ impl Database {
 
     /// Restore database from a backup file. Returns the safety backup ID.
     pub fn restore_from_backup(&self, filename: &str) -> Result<String, AppError> {
+        let _io = crate::config_io::lock();
         // Security: validate filename to prevent path traversal
         if filename.contains("..")
             || filename.contains('/')
@@ -577,37 +685,44 @@ impl Database {
             )));
         }
 
-        // Step 1: Create safety backup of current database
+        // Open without CREATE and fully stage the selected source before a
+        // safety backup's retention cleanup can unlink that source.
+        let source_conn =
+            Connection::open_with_flags(&backup_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|_| AppError::Config("backup.sourceUnreadable".into()))?;
+        let managed_schema: bool = source_conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='providers')", [], |row| row.get(0))
+            .map_err(|_| AppError::Config("backup.sourceUnreadable".into()))?;
+        if !managed_schema {
+            return Err(AppError::Config("backup.sourceInvalid".into()));
+        }
+        let local_snapshot = self.snapshot_to_memory()?;
+
+        // Validate and preserve local proof in a staging database before replacing the main one.
+        let mut staged =
+            Connection::open_in_memory().map_err(|e| AppError::Database(e.to_string()))?;
+        Backup::new(&source_conn, &mut staged)
+            .map_err(|e| AppError::Database(e.to_string()))?
+            .step(-1)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Self::create_tables_on_conn(&staged)?;
+        Self::apply_schema_migrations_on_conn(&staged)?;
+        Self::restore_tables(&local_snapshot, &staged, MACHINE_LOCAL_TABLES)?;
+        crate::session_manager::source_cache::revoke_usage_on(&staged)?;
+        crate::services::library::restore_machine_state(&local_snapshot, &staged)?;
+        drop(source_conn);
         let safety_backup = self.backup_database_file()?;
         let safety_id = safety_backup
             .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
             .unwrap_or_default();
-
-        // Machine-local rows describe this machine's current files; an old backup
-        // must not bring back stale ones.
-        let local_snapshot = self.snapshot_to_memory()?;
-
-        // Step 2: Open the backup file and restore it to the main database
-        let source_conn =
-            Connection::open(&backup_path).map_err(|e| AppError::Database(e.to_string()))?;
-
         {
             let mut main_conn = lock_conn!(self.conn);
-            let backup = Backup::new(&source_conn, &mut main_conn)
-                .map_err(|e| AppError::Database(e.to_string()))?;
-            backup
+            Self::restore_local_usage_health(&main_conn, &staged)?;
+            Backup::new(&staged, &mut main_conn)
+                .map_err(|e| AppError::Database(e.to_string()))?
                 .step(-1)
                 .map_err(|e| AppError::Database(e.to_string()))?;
         }
-
-        // Step 3: Run schema migrations (backup may be from an older version)
-        self.create_tables()?;
-        self.apply_schema_migrations()?;
         self.ensure_model_pricing_seeded()?;
-        {
-            let main_conn = lock_conn!(self.conn);
-            Self::restore_tables(&local_snapshot, &main_conn, MACHINE_LOCAL_TABLES)?;
-        }
 
         log::info!("Database restored from backup: {filename}, safety backup: {safety_id}");
         Ok(safety_id)
@@ -708,6 +823,80 @@ mod tests {
     use crate::error::AppError;
     use crate::settings::{update_settings, AppSettings};
     use serial_test::serial;
+
+    #[test]
+    fn library_machine_receipts_and_journal_never_leave_sql_exports() {
+        let db = Database::memory().unwrap();
+        let state = crate::services::library::MachineState {
+            epoch: 4,
+            ..Default::default()
+        };
+        db.set_setting(
+            crate::services::library::MACHINE_KEY,
+            &serde_json::to_string(&state).unwrap(),
+        )
+        .unwrap();
+        for dump in [
+            db.export_sql_string().unwrap(),
+            db.export_sql_string_for_sync().unwrap(),
+        ] {
+            assert!(!dump.contains(crate::services::library::MACHINE_KEY));
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn library_restore_keeps_local_receipts_and_invalidates_old_confirmation() {
+        let sandbox = crate::test_sandbox::sandbox();
+        let local = Database::memory().unwrap();
+        let remote = Database::memory().unwrap();
+        let definition = |id: &str| crate::services::library::InstructionSet {
+            id: id.into(),
+            name: id.into(),
+            content: "shared".into(),
+            revision: 0,
+        };
+        crate::services::library::save_instruction(&local, definition("local"), None).unwrap();
+        crate::services::library::save_instruction(&remote, definition("remote"), None).unwrap();
+        {
+            let conn = remote.conn.lock().unwrap();
+            conn.execute("INSERT INTO providers(id,app_type,name,settings_config,meta) VALUES ('fixture','claude','Fixture','{}','{}')",[]).unwrap();
+        }
+        let path = sandbox.home().join("AGENTS.md");
+        std::fs::write(&path, "personal").unwrap();
+        let applied = crate::services::library::coordinator::preview_at(
+            &local,
+            "local",
+            &[("codex".into(), path.clone())],
+        )
+        .unwrap();
+        crate::services::library::apply_operation(&local, &applied.id).unwrap();
+        let pending =
+            crate::services::library::coordinator::preview_at(&local, "local", &[]).unwrap();
+        let before = local.library_snapshot().unwrap();
+        let file = std::fs::read_to_string(&path).unwrap();
+        let foreign_machine = crate::services::library::MachineState {
+            epoch: 99,
+            ..Default::default()
+        };
+        let machine = serde_json::to_string(&foreign_machine)
+            .unwrap()
+            .replace('\'', "''");
+        let dump = format!(
+            "{}\nINSERT OR REPLACE INTO settings(key,value) VALUES ('{}','{}');",
+            remote.export_sql_string().unwrap(),
+            crate::services::library::MACHINE_KEY,
+            machine
+        );
+        local.import_sql_string(&dump).unwrap();
+        let after = local.library_snapshot().unwrap();
+        assert_eq!(after.machine.receipts, before.machine.receipts);
+        assert_eq!(after.machine.epoch, before.machine.epoch + 1);
+        assert!(after.definitions.instructions.contains_key("remote"));
+        assert!(!after.definitions.instructions.contains_key("local"));
+        assert!(crate::services::library::apply_operation(&local, &pending.id).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), file);
+    }
 
     #[test]
     fn sync_import_preserves_local_only_tables() -> Result<(), AppError> {
@@ -901,6 +1090,35 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn selected_backup_is_staged_before_retention_cleanup_can_remove_it() -> Result<(), AppError> {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let mut settings = crate::settings::get_settings();
+        settings.backup_retain_count = Some(1);
+        crate::settings::update_settings(settings)?;
+        let db = Database::init()?;
+        db.set_setting("selected-backup-content", "old-definition")?;
+        let source = db.backup_database_file()?.unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10),
+            ))
+            .unwrap();
+        db.set_setting("selected-backup-content", "current-definition")?;
+        db.upsert_bind_record("codex", "local-proof")?;
+        db.restore_from_backup(source.file_name().unwrap().to_str().unwrap())?;
+        assert_eq!(
+            db.get_setting("selected-backup-content")?.as_deref(),
+            Some("old-definition")
+        );
+        assert_eq!(db.get_bind_record("codex")?.unwrap().record, "local-proof");
+        Ok(())
+    }
+
+    #[test]
     fn exports_never_include_bind_snapshots() -> Result<(), AppError> {
         let db = Database::memory()?;
         db.upsert_bind_record("codex", "{\"secret\":\"local-only\"}")?;
@@ -963,6 +1181,495 @@ mod tests {
         assert!(db.get_bind_record("claude")?.is_none());
         assert_eq!(db.get_bind_record("codex")?.unwrap().record, "current");
         drop(home);
+        Ok(())
+    }
+
+    /// One row in each v11 usage table, tagged with `tag`.
+    fn insert_usage_local_rows(db: &Database, tag: &str) -> Result<(), AppError> {
+        let conn = crate::database::lock_conn!(db.conn);
+        conn.execute(
+            "INSERT INTO session_usage_archive (app_type, session_id, model, input_tokens,
+                output_tokens, cache_read_tokens, cache_creation_tokens, request_count,
+                cost_usd, first_at, last_at)
+             VALUES ('claude', ?1, 'm', 1, 1, 0, 0, 1, '0.1', 1, 2)",
+            [tag],
+        )?;
+        conn.execute(
+            "INSERT INTO session_meta_cache (source_path, provider_id, session_id, stamp,
+                parser_version, meta_json, updated_at)
+             VALUES (?1, 'claude', 's', 'st', 1, '{}', 1)",
+            [tag],
+        )?;
+        conn.execute(
+            "INSERT INTO balance_samples (org_id, at_ms, amount) VALUES (?1, 1, 2.5)",
+            [tag],
+        )?;
+        conn.execute(
+            "INSERT INTO maintenance_flags (key, value) VALUES ('backfill_session_archive', ?1)",
+            [tag],
+        )?;
+        Ok(())
+    }
+
+    /// Machine-local: never exported, always kept.
+    const USAGE_MACHINE_LOCAL: [(&str, &str); 2] = [
+        ("session_meta_cache", "source_path"),
+        ("balance_samples", "org_id"),
+    ];
+    /// Bound to the request logs: carried by full exports and imports, skipped and
+    /// kept by WebDAV sync.
+    const USAGE_LOG_BOUND: [(&str, &str); 2] = [
+        ("session_usage_archive", "session_id"),
+        ("maintenance_flags", "value"),
+    ];
+
+    fn column_values(db: &Database, table: &str, column: &str) -> Result<Vec<String>, AppError> {
+        let conn = crate::database::lock_conn!(db.conn);
+        let condition = if table == "maintenance_flags" {
+            " WHERE key != 'usage_ledger_epoch_v1'"
+        } else {
+            ""
+        };
+        let values = conn
+            .prepare(&format!("SELECT {column} FROM {table}{condition}"))?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(values)
+    }
+
+    fn remote_with_usage_rows() -> Result<Database, AppError> {
+        let remote = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(remote.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('remote-provider', 'claude', 'Remote Provider', '{}', '{}')",
+                [],
+            )?;
+            // an export from a current install, so importing it migrates nothing
+            Database::set_user_version(&conn, crate::database::SCHEMA_VERSION)?;
+        }
+        insert_usage_local_rows(&remote, "remote")?;
+        Ok(remote)
+    }
+
+    #[test]
+    fn exports_never_include_machine_local_usage_tables() -> Result<(), AppError> {
+        let db = remote_with_usage_rows()?;
+        let full = db.export_sql_string()?;
+        let sync = db.export_sql_string_for_sync()?;
+        for (table, _) in USAGE_MACHINE_LOCAL {
+            for dump in [&full, &sync] {
+                assert!(
+                    !dump.contains(&format!("INSERT INTO \"{table}\"")),
+                    "{table} leaked into an export"
+                );
+            }
+        }
+        for (table, _) in USAGE_LOG_BOUND {
+            assert!(
+                full.contains(&format!("INSERT INTO \"{table}\"")),
+                "{table} full"
+            );
+            assert!(
+                !sync.contains(&format!("INSERT INTO \"{table}\"")),
+                "{table} sync"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn a_full_import_brings_the_archive_with_the_logs_and_keeps_local_caches(
+    ) -> Result<(), AppError> {
+        let _home = TestHome::new("import-usage-archive");
+        let full = remote_with_usage_rows()?.export_sql_string()?;
+        let local = Database::memory()?;
+        insert_usage_local_rows(&local, "local")?;
+
+        local.import_sql_string(&full)?;
+
+        for (table, column) in USAGE_MACHINE_LOCAL {
+            assert_eq!(column_values(&local, table, column)?, ["local"], "{table}");
+        }
+        for (table, column) in USAGE_LOG_BOUND {
+            assert_eq!(column_values(&local, table, column)?, ["remote"], "{table}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn a_webdav_import_keeps_every_local_usage_table() -> Result<(), AppError> {
+        let _home = TestHome::new("sync-import-usage-archive");
+        let sync = remote_with_usage_rows()?.export_sql_string_for_sync()?;
+        let local = Database::memory()?;
+        insert_usage_local_rows(&local, "local")?;
+
+        local.import_sql_string_for_sync(&sync)?;
+
+        for (table, column) in USAGE_MACHINE_LOCAL.iter().chain(USAGE_LOG_BOUND.iter()) {
+            assert_eq!(column_values(&local, table, column)?, ["local"], "{table}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn webdav_sync_keeps_this_machines_session_sync_progress() -> Result<(), AppError> {
+        let _home = TestHome::new("sync-keeps-session-log-sync");
+        let remote = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(remote.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('remote-provider', 'claude', 'Remote Provider', '{}', '{}')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO session_log_sync VALUES ('/remote/transcript.jsonl', 1, 99, 1)",
+                [],
+            )?;
+        }
+        let sync = remote.export_sql_string_for_sync()?;
+        assert!(
+            !sync.contains("/remote/transcript.jsonl"),
+            "sync progress leaked into a WebDAV export"
+        );
+
+        let local = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(local.conn);
+            conn.execute(
+                "INSERT INTO session_log_sync VALUES ('/local/transcript.jsonl', 1, 42, 1)",
+                [],
+            )?;
+        }
+        local.import_sql_string_for_sync(&sync)?;
+
+        let conn = crate::database::lock_conn!(local.conn);
+        let rows: Vec<(String, i64)> = conn
+            .prepare("SELECT file_path, last_line_offset FROM session_log_sync")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        assert_eq!(rows, [("/local/transcript.jsonl".to_string(), 42)]);
+        Ok(())
+    }
+
+    type LocalUsageState = Vec<(String, Vec<Vec<rusqlite::types::Value>>)>;
+
+    fn local_usage_state(db: &Database) -> Result<LocalUsageState, AppError> {
+        let conn = crate::database::lock_conn!(db.conn);
+        [
+            "proxy_request_logs",
+            "session_log_sync",
+            "session_meta_cache",
+            "maintenance_flags",
+            "usage_daily_rollups",
+            "session_usage_archive",
+        ]
+        .into_iter()
+        .map(|table| {
+            let mut statement = conn.prepare(&format!("SELECT * FROM {table} ORDER BY 1"))?;
+            let columns = statement.column_count();
+            let rows = statement
+                .query_map([], |row| {
+                    (0..columns)
+                        .map(|index| row.get::<_, rusqlite::types::Value>(index))
+                        .collect::<Result<Vec<_>, _>>()
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((table.to_string(), rows))
+        })
+        .collect()
+    }
+
+    fn commit_concurrent_usage(
+        db: &Database,
+        path: &std::path::Path,
+        at: i64,
+    ) -> Result<(), AppError> {
+        use crate::services::usage_source::{native_key, Prepared, Snapshot};
+        use crate::services::usage_sync_db::{commit_sync_batch, CheckpointChange, SyncState};
+        use crate::session_manager::source_cache::{merge_on, Part};
+        std::fs::write(path, "{}\n").map_err(|error| AppError::io(path, error))?;
+        let mut source = Prepared::load(db, Snapshot::file(path)?, "claude", None, 2)?;
+        let next = SyncState {
+            modified: 1,
+            offset: 1,
+        };
+        commit_sync_batch(
+            db,
+            &[CheckpointChange {
+                key: path.to_string_lossy().into(),
+                expected: None,
+                next: Some(next),
+            }],
+            |conn| {
+                source.check_on(conn)?;
+                conn.execute(
+                    "INSERT INTO proxy_request_logs
+                    (request_id,provider_id,app_type,model,input_tokens,output_tokens,
+                     total_cost_usd,latency_ms,status_code,session_id,created_at,data_source)
+                    VALUES ('session:concurrent-event','_session','claude','fixture',100,10,
+                            '0.123',0,200,'concurrent-session',?1,'session_log')",
+                    [at],
+                )?;
+                source.evidence.acknowledge(&native_key(
+                    "claude",
+                    "concurrent-session",
+                    "concurrent-event",
+                ));
+                source.save_on(conn, next)?;
+                conn.execute(
+                    "INSERT INTO maintenance_flags (key, value) VALUES
+                     ('usage_prune_frontier_utc_v1:claude',
+                      '{\"version\":1,\"cutoff\":1234000,\"legacyUnknown\":false}')",
+                    [],
+                )?;
+                merge_on(
+                    conn,
+                    &path.to_string_lossy(),
+                    "claude",
+                    Some("concurrent-session"),
+                    Part::Metadata,
+                    &None,
+                    Some(serde_json::json!({"parserVersion":2,
+                    "stamp":"concurrent","details":{"candidates":{},"messageCount":1}})),
+                )?;
+                merge_on(
+                    conn,
+                    &path.to_string_lossy(),
+                    "claude",
+                    None,
+                    Part::Analytics,
+                    &None,
+                    Some(serde_json::json!({"version":1,"futureAnalytics":{"preserve":true}})),
+                )?;
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    #[serial]
+    fn webdav_sync_preserves_usage_committed_after_its_initial_snapshot() -> Result<(), AppError> {
+        let sandbox = crate::test_sandbox::sandbox();
+        let remote = Database::memory()?;
+        remote.conn.lock().unwrap().execute(
+            "INSERT INTO providers(id,app_type,name,settings_config,meta)
+             VALUES('remote-provider','claude','Remote','{}','{}')",
+            [],
+        )?;
+        let sql = remote.export_sql_string_for_sync()?;
+        for prune in [false, true] {
+            let local = Database::memory()?;
+            local.conn.lock().unwrap().execute(
+                "INSERT INTO maintenance_flags(key,value) VALUES('usage_ledger_epoch_v1','local-epoch')", [],)?;
+            let path = sandbox
+                .home()
+                .join(if prune { "pruned.jsonl" } else { "live.jsonl" });
+            let mut committed = None;
+            local.import_sync_with_resources(&sql, |_| {
+                let at = if prune {
+                    (chrono::Utc::now() - chrono::Duration::days(40)).timestamp()
+                } else {
+                    chrono::Utc::now().timestamp()
+                };
+                commit_concurrent_usage(&local, &path, at)?;
+                if prune {
+                    local.rollup_and_prune(30)?;
+                }
+                committed = Some(local_usage_state(&local)?);
+                Ok(())
+            })?;
+            assert_eq!(
+                local_usage_state(&local)?,
+                committed.unwrap(),
+                "WebDAV replaced a successfully committed local usage batch (prune={prune})"
+            );
+            let remote_count: i64 = local.conn.lock().unwrap().query_row(
+                "SELECT COUNT(*) FROM providers WHERE id='remote-provider'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(remote_count, 1, "remote configuration should still import");
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn webdav_late_local_copy_failure_preserves_the_concurrent_main_commit() -> Result<(), AppError>
+    {
+        let sandbox = crate::test_sandbox::sandbox();
+        let remote = Database::memory()?;
+        remote.conn.lock().unwrap().execute_batch(
+            "CREATE TRIGGER fail_late_cache BEFORE INSERT ON session_meta_cache
+             WHEN NEW.session_id='concurrent-session'
+             BEGIN SELECT RAISE(ABORT,'fixture late cache copy'); END;
+             INSERT INTO providers(id,app_type,name,settings_config,meta)
+             VALUES('remote-provider','claude','Remote','{}','{}');",
+        )?;
+        let sql = remote.export_sql_string_for_sync()?;
+        let local = Database::memory()?;
+        local.conn.lock().unwrap().execute(
+            "INSERT INTO providers(id,app_type,name,settings_config,meta)
+             VALUES('local-provider','claude','Local','{}','{}')",
+            [],
+        )?;
+        let mut committed = None;
+        let result = local.import_sync_with_resources(&sql, |_| {
+            commit_concurrent_usage(
+                &local,
+                &sandbox.home().join("late.jsonl"),
+                chrono::Utc::now().timestamp(),
+            )?;
+            committed = Some(local_usage_state(&local)?);
+            Ok(())
+        });
+        assert!(
+            result.is_err(),
+            "the final copy never observed the new local cache row"
+        );
+        assert_eq!(local_usage_state(&local)?, committed.unwrap());
+        let providers: Vec<String> = local
+            .conn
+            .lock()
+            .unwrap()
+            .prepare("SELECT id FROM providers ORDER BY id")?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        assert_eq!(
+            providers,
+            ["local-provider"],
+            "failed staging replaced main configuration"
+        );
+        Ok(())
+    }
+
+    const HEALTH_KEY: &str = "usage_source_health_v1";
+
+    fn health_remote_sql(sync: bool) -> Result<String, AppError> {
+        let remote = Database::memory()?;
+        remote.conn.lock().unwrap().execute(
+            "INSERT INTO providers(id,app_type,name,settings_config,meta)
+             VALUES('health-remote','claude','Remote','{}','{}')",
+            [],
+        )?;
+        // Old clients may have exported this machine-local key. Import must
+        // remove the foreign value even when the local device has no row.
+        let dump = if sync {
+            remote.export_sql_string_for_sync()?
+        } else {
+            remote.export_sql_string()?
+        };
+        Ok(format!(
+            "{dump}\nINSERT INTO settings(key,value) VALUES('{HEALTH_KEY}','foreign-health');"
+        ))
+    }
+
+    #[test]
+    fn health_exports_exclude_only_the_machine_local_health_setting() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        db.set_setting(HEALTH_KEY, "local-only-health")?;
+        db.set_setting("usage_source_health_v1_extra", "unrelated-setting")?;
+        let snapshot = db.snapshot_to_memory()?;
+        for dump in [
+            db.export_sql_string()?,
+            db.export_sql_string_for_sync()?,
+            Database::export_sync_snapshot(&snapshot)?,
+        ] {
+            assert!(
+                !dump.contains("local-only-health"),
+                "local health leaked into SQL"
+            );
+            assert!(
+                dump.contains("unrelated-setting"),
+                "filter expanded beyond the exact key"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn health_full_sql_import_preserves_local_and_removes_foreign_when_absent(
+    ) -> Result<(), AppError> {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let sql = health_remote_sql(false)?;
+        for local_value in [Some("local-health"), None] {
+            let local = Database::memory()?;
+            if let Some(value) = local_value {
+                local.set_setting(HEALTH_KEY, value)?;
+            }
+            local.import_sql_string(&sql)?;
+            assert_eq!(local.get_setting(HEALTH_KEY)?.as_deref(), local_value);
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn health_webdav_import_uses_fresh_local_value_and_absence() -> Result<(), AppError> {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let sql = health_remote_sql(true)?;
+        for fresh_value in [Some("new-local-health"), None] {
+            let local = Database::memory()?;
+            local.set_setting(HEALTH_KEY, "stale-local-health")?;
+            local.import_sync_with_resources(&sql, |_| {
+                match fresh_value {
+                    Some(value) => local.set_setting(HEALTH_KEY, value)?,
+                    None => {
+                        local
+                            .conn
+                            .lock()
+                            .unwrap()
+                            .execute("DELETE FROM settings WHERE key=?1", [HEALTH_KEY])?;
+                    }
+                }
+                Ok(())
+            })?;
+            assert_eq!(local.get_setting(HEALTH_KEY)?.as_deref(), fresh_value);
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn health_full_import_takes_the_fresh_local_value() -> Result<(), AppError> {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let local = Database::memory()?;
+        local.set_setting(HEALTH_KEY, "stale-local-health")?;
+        local.import_sql_string_inner(
+            &health_remote_sql(false)?,
+            super::MACHINE_LOCAL_TABLES,
+            |_| {
+                local.set_setting(HEALTH_KEY, "fresh-local-health")?;
+                Ok(())
+            },
+        )?;
+        assert_eq!(
+            local.get_setting(HEALTH_KEY)?.as_deref(),
+            Some("fresh-local-health")
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[serial]
+    fn health_database_restore_keeps_current_local_health() -> Result<(), AppError> {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Database::init()?;
+        db.set_setting(HEALTH_KEY, "old-backup-health")?;
+        let source = db.backup_database_file()?.unwrap();
+        db.set_setting(HEALTH_KEY, "current-local-health")?;
+        db.restore_from_backup(source.file_name().unwrap().to_str().unwrap())?;
+        assert_eq!(
+            db.get_setting(HEALTH_KEY)?.as_deref(),
+            Some("current-local-health")
+        );
         Ok(())
     }
 }

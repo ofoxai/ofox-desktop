@@ -72,24 +72,20 @@ const BASE =
 
 const STATE_CLASSES: Record<ToolStatus, string> = {
   scanning:
-    "border-dashed border-border/40 bg-muted/20 animate-pulse cursor-default",
-  missing: "border-border/40 bg-muted/30 opacity-50 cursor-not-allowed",
+    "border-dashed border-line/40 bg-muted/20 animate-pulse cursor-default",
+  missing: "border-line/40 bg-muted/30 opacity-50 cursor-not-allowed",
   // installing：橙色虚线 + pulse，区别于 scanning 的"未知"灰色 pulse——这里
   // 是"正在被处理"，应该用品牌色而不是灰色。卡片不灰显，让用户看清楚是哪个
   // 工具在装。
   installing:
-    "border-dashed border-orange-300 bg-orange-50/40 animate-pulse cursor-default dark:bg-orange-900/10 dark:border-orange-500/40",
-  unselected:
-    "border-border bg-white hover:border-orange-200 dark:bg-neutral-800 cursor-pointer",
-  selected:
-    "border-orange-400 bg-white shadow-sm shadow-orange-100 dark:bg-neutral-800 dark:shadow-orange-900/20 cursor-pointer",
+    "border-dashed border-brand/30 bg-warn-soft animate-pulse cursor-default ",
+  unselected: "border-line bg-card hover:border-brand/30 cursor-pointer",
+  selected: "border-brand/30 bg-card shadow-sm cursor-pointer",
   // bound 视觉上和 selected 几乎一样——同一张橙边卡——靠顶部绿勾区分。
   // cursor-default + button[disabled] 拦截点击。
-  bound:
-    "border-orange-400 bg-white shadow-sm shadow-orange-100 dark:bg-neutral-800 dark:shadow-orange-900/20 cursor-default",
-  boundMissing:
-    "border-orange-300/70 bg-muted/30 cursor-default dark:border-orange-500/40",
-  detectionFailed: "border-dashed border-border/60 bg-muted/20 cursor-default",
+  bound: "border-brand/30 bg-card shadow-sm cursor-default",
+  boundMissing: "border-brand/30 bg-muted/30 cursor-default ",
+  detectionFailed: "border-dashed border-line/60 bg-muted/20 cursor-default",
 };
 
 export function ToolDiscoveryCard({
@@ -160,7 +156,7 @@ export function ToolDiscoveryCard({
       (progress.phase === "waiting" && progress.elapsed !== undefined
         ? ` · ${progress.elapsed}s`
         : "")
-    : "安装中…";
+    : t("uiCopy.installing");
 
   // 桌面应用的“类型 · 版本”在三列的添加窗口里放不下一行，会在“·”后面随意
   // 折行，所以固定分成两行。
@@ -175,7 +171,7 @@ export function ToolDiscoveryCard({
     );
   const versionText =
     status === "scanning"
-      ? "检测中…"
+      ? t("uiCopy.detecting")
       : status === "installing"
         ? installingText
         : status === "boundMissing"
@@ -185,7 +181,7 @@ export function ToolDiscoveryCard({
             : (detectedVersion ??
               (status === "bound"
                 ? t("toolLifecycle.bindingRetained")
-                : "未安装"));
+                : t("uiCopy.notInstalled")));
 
   // 外层 div 是 "卡片本体（motion.button）+ 角标按钮" 的共同定位锚——把
   // 角标渲染到 button **外部**有两个关键作用：
@@ -211,7 +207,7 @@ export function ToolDiscoveryCard({
           // icon 包。aria-hidden + 父按钮已 disabled，无需额外 a11y 文案。
           <span
             aria-hidden="true"
-            className="absolute -top-2 left-1/2 flex h-5 w-5 -translate-x-1/2 items-center justify-center rounded-full bg-green-500 text-white shadow-sm ring-2 ring-white dark:ring-neutral-800"
+            className="absolute -top-2 left-1/2 flex h-5 w-5 -translate-x-1/2 items-center justify-center rounded-full bg-green-500 text-brand-on shadow-sm ring-2 ring-white dark:ring-neutral-800"
           >
             <svg
               viewBox="0 0 16 16"
@@ -229,12 +225,12 @@ export function ToolDiscoveryCard({
         <ToolBadge toolId={toolId} size={40} rounded="xl" dimmed={dimmed} />
         <span
           className={`text-sm font-medium ${
-            dimmed ? "text-muted-foreground" : "text-foreground"
+            dimmed ? "text-ink-muted" : "text-ink"
           }`}
         >
           {label}
         </span>
-        <span className="text-[11px] text-muted-foreground">{versionText}</span>
+        <span className="text-[11px] text-ink-muted">{versionText}</span>
       </motion.button>
       {projectUrl && (
         // Keep this outside the card's motion.button: nested interactive
@@ -242,9 +238,15 @@ export function ToolDiscoveryCard({
         <button
           type="button"
           onClick={() => void handleOpenProject()}
-          aria-label={`查看 ${label} ${meta?.projectLinkLabel}`}
-          title={`查看 ${label} ${meta?.projectLinkLabel}`}
-          className="absolute right-2 top-2 z-10 rounded-md p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          aria-label={t("uiCopy.viewProject", {
+            value1: label,
+            value2: meta?.projectLinkLabel,
+          })}
+          title={t("uiCopy.viewProject", {
+            value1: label,
+            value2: meta?.projectLinkLabel,
+          })}
+          className="absolute right-2 top-2 z-10 rounded-md p-1 text-ink-muted transition-colors hover:bg-muted hover:text-ink"
         >
           {meta?.projectLinkLabel === "GitHub" ? (
             <Github className="h-3.5 w-3.5" />
@@ -259,25 +261,27 @@ export function ToolDiscoveryCard({
         <button
           type="button"
           onClick={onInstall}
-          className="absolute bottom-2 right-2 z-10 cursor-pointer rounded-md bg-orange-500 px-2 py-0.5 text-[10px] font-medium text-white shadow-sm hover:bg-orange-600"
+          className="absolute bottom-2 right-2 z-10 cursor-pointer rounded-md bg-brand px-2 py-0.5 text-[10px] font-medium text-brand-on shadow-sm hover:bg-brand"
         >
-          安装
+          {t("uiCopy.install")}
         </button>
       )}
       {status === "missing" && !onInstall && downloadUrl && (
         <button
           type="button"
           onClick={() => void handleDownload()}
-          className="absolute bottom-2 right-2 z-10 cursor-pointer rounded-md bg-orange-500 px-2 py-0.5 text-[10px] font-medium text-white shadow-sm hover:bg-orange-600"
+          className="absolute bottom-2 right-2 z-10 cursor-pointer rounded-md bg-brand px-2 py-0.5 text-[10px] font-medium text-brand-on shadow-sm hover:bg-brand"
         >
-          {meta?.downloadUrl ? "下载" : t("toolLifecycle.upstreamInstructions")}
+          {meta?.downloadUrl
+            ? t("uiCopy.downloadTool")
+            : t("toolLifecycle.upstreamInstructions")}
         </button>
       )}
       {status === "boundMissing" && onManageBound && (
         <button
           type="button"
           onClick={onManageBound}
-          className="absolute bottom-2 right-2 z-10 rounded-md bg-muted px-2 py-0.5 text-[10px] text-foreground hover:bg-accent"
+          className="absolute bottom-2 right-2 z-10 rounded-md bg-muted px-2 py-0.5 text-[10px] text-ink hover:bg-accent"
         >
           {t("toolLifecycle.manageFromHome")}
         </button>
@@ -286,7 +290,7 @@ export function ToolDiscoveryCard({
         <button
           type="button"
           onClick={onRetry}
-          className="absolute bottom-2 right-2 z-10 rounded-md bg-muted px-2 py-0.5 text-[10px] text-foreground hover:bg-accent"
+          className="absolute bottom-2 right-2 z-10 rounded-md bg-muted px-2 py-0.5 text-[10px] text-ink hover:bg-accent"
         >
           {t("toolLifecycle.retryDetection")}
         </button>

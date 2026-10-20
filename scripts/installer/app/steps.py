@@ -512,6 +512,20 @@ class OpenCodeStep(NpmGlobalStep):
     bin_name = "opencode"
 
 
+class DshStep(NpmGlobalStep):
+    name = "DeepSeek Harness"
+    description = "DeepSeek Harness CLI"
+    npm_pkg = "@deepseek-ai/dsh"
+    bin_name = "dsh"
+
+
+class PiStep(NpmGlobalStep):
+    name = "Pi"
+    description = "Pi coding agent CLI"
+    npm_pkg = "@earendil-works/pi-coding-agent"
+    bin_name = "pi"
+
+
 HERMES_MIRROR_URL = "https://res1.hermesagent.org.cn/install.sh"
 HERMES_OFFICIAL_URL = "https://hermes-agent.nousresearch.com/install.sh"
 
@@ -709,6 +723,8 @@ TOOL_STEPS: dict[str, type[Step]] = {
     "opencode": OpenCodeStep,
     "openclaw": OpenClawStep,
     "hermes":   HermesStep,
+    "dsh":      DshStep,
+    "pi":       PiStep,
 }
 
 

@@ -18,15 +18,18 @@ interface OnboardingAppProps {
    */
   initialStep?: Step;
   onComplete: () => void;
+  onEnterLocal?: () => void;
 }
 
 export default function OnboardingApp({
   initialStep = "login",
   onComplete,
+  onEnterLocal,
 }: OnboardingAppProps) {
   const [step, setStep] = useState<Step>(initialStep);
-  const [boundCount, setBoundCount] = useState(0);
+  const [boundTools, setBoundTools] = useState<string[]>([]);
 
+  // Even from local management, a sign-in goes on to binding.
   const handleLoginSuccess = (_user: OfoxUserInfo) => {
     setStep("toolDiscovery");
   };
@@ -35,13 +38,18 @@ export default function OnboardingApp({
     // bindTools 返回真实成功列表（失败的工具已 toast 警告并被剔除）。
     // 用 succeeded.length 做完成页计数才不会在部分失败时谎报"绑了 N 个"。
     const succeeded = await bindTools(selectedTools);
-    setBoundCount(succeeded.length);
+    setBoundTools(succeeded);
     setStep("setupComplete");
   };
 
   switch (step) {
     case "login":
-      return <LoginPage onLoginSuccess={handleLoginSuccess} />;
+      return (
+        <LoginPage
+          onLoginSuccess={handleLoginSuccess}
+          onEnterLocal={onEnterLocal}
+        />
+      );
     case "toolDiscovery":
       // If we entered the wizard at toolDiscovery (already-logged-in user with
       // empty bind list), the LoginPage isn't a meaningful "back" target — the
@@ -51,11 +59,12 @@ export default function OnboardingApp({
         <ToolDiscoveryPage
           onBack={initialStep === "login" ? () => setStep("login") : undefined}
           onBind={handleBind}
+          onEnterLocal={onEnterLocal}
         />
       );
     case "setupComplete":
       return (
-        <SetupCompletePage boundCount={boundCount} onOpenConsole={onComplete} />
+        <SetupCompletePage boundTools={boundTools} onOpenConsole={onComplete} />
       );
   }
 }

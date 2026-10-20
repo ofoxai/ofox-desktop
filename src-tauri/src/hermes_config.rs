@@ -38,7 +38,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 
 // ============================================================================
 // Path Functions
@@ -93,11 +92,7 @@ pub fn get_hermes_config_path() -> PathBuf {
     get_hermes_dir().join("config.yaml")
 }
 
-/// 所有读改写 config.yaml 的路径都要拿这把锁。
-pub(crate) fn hermes_write_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+// 所有读改写 config.yaml 的路径使用 config_io 共享屏障。
 
 // ============================================================================
 // Type Definitions
@@ -244,30 +239,50 @@ fn is_top_level_key_line(line: &str) -> bool {
 ///
 /// Returns `(start_byte_inclusive, end_byte_exclusive)` or `None` if not found.
 fn find_yaml_section_range(raw: &str, section_key: &str) -> Option<(usize, usize)> {
-    let target = format!("{}:", section_key);
+    let target = format!("{section_key}:");
     let mut section_start = None;
+    let mut pending_comments = None;
+    let mut block_scalar = None;
     let mut offset = 0;
-
-    for line in raw.split('\n') {
+    for raw_line in raw.split_inclusive('\n') {
+        let line = raw_line.trim_end_matches('\n');
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        if block_scalar
+            .is_some_and(|header_indent| !line.trim().is_empty() && indent <= header_indent)
+        {
+            block_scalar = None;
+        }
+        let in_scalar = block_scalar.is_some();
+        if !in_scalar {
+            if let Some((_, tail)) = line.rsplit_once(':') {
+                let indicator = tail.split('#').next().unwrap_or("").trim();
+                if indicator.starts_with(['|', '>'])
+                    && indicator[1..]
+                        .bytes()
+                        .all(|c| c.is_ascii_digit() || c == b'+' || c == b'-')
+                {
+                    block_scalar = Some(indent);
+                }
+            }
+        }
         if section_start.is_none() && is_top_level_key_line(line) && line.starts_with(&target) {
-            // Verify exact match: after "key:" must be whitespace or EOL
-            let after_target = &line[target.len()..];
-            if after_target.is_empty()
-                || after_target.starts_with(' ')
-                || after_target.starts_with('\t')
-                || after_target.starts_with('\r')
-            {
+            let after = &line[target.len()..];
+            if after.is_empty() || after.starts_with([' ', '\t', '\r']) {
                 section_start = Some(offset);
             }
-        } else if section_start.is_some() && is_top_level_key_line(line) {
-            // Found the next top-level key — this is the end of our section
-            return Some((section_start.unwrap(), offset));
+        } else if section_start.is_some() {
+            if is_top_level_key_line(line) {
+                return Some((section_start.unwrap(), pending_comments.unwrap_or(offset)));
+            }
+            if !in_scalar && (line.trim().is_empty() || line.trim_start().starts_with('#')) {
+                pending_comments.get_or_insert(offset);
+            } else {
+                pending_comments = None;
+            }
         }
-        offset += line.len() + 1; // +1 for the \n
+        offset += raw_line.len();
     }
-
-    // Section extends to end of file
-    section_start.map(|start| (start, raw.len()))
+    section_start.map(|start| (start, pending_comments.unwrap_or(raw.len())))
 }
 
 /// Serialize a section key + value into a YAML fragment like:
@@ -423,7 +438,7 @@ fn write_yaml_section_to_config(
     section_key: &str,
     value: &serde_yaml::Value,
 ) -> Result<HermesWriteOutcome, AppError> {
-    let _guard = hermes_write_lock().lock()?;
+    let _guard = crate::config_io::lock();
     write_yaml_section_to_config_locked(section_key, value)
 }
 
@@ -792,7 +807,7 @@ pub fn set_provider(
     name: &str,
     provider_config: serde_json::Value,
 ) -> Result<HermesWriteOutcome, AppError> {
-    let _guard = hermes_write_lock().lock()?;
+    let _guard = crate::config_io::lock();
 
     let config = read_hermes_config()?;
     let providers_value = upsert_custom_provider(&config, name, provider_config)?;
@@ -922,7 +937,7 @@ pub(crate) fn provider_dict_entry(
 /// No-op if the section is missing or no entry matches. The entire
 /// read-modify-write is done under the write lock to prevent TOCTOU races.
 pub fn remove_provider(name: &str) -> Result<HermesWriteOutcome, AppError> {
-    let _guard = hermes_write_lock().lock()?;
+    let _guard = crate::config_io::lock();
     let config = read_hermes_config()?;
 
     ensure_provider_writable(&config, name, "remove")?;
@@ -960,8 +975,12 @@ pub(crate) fn model_config_of(
         return Ok(None);
     };
     let json_val = yaml_to_json(model_value)?;
-    let model = serde_json::from_value(json_val)
-        .map_err(|e| AppError::Config(format!("Failed to parse Hermes model config: {e}")))?;
+    let model = serde_json::from_value(json_val).map_err(|e| {
+        AppError::Config(format!(
+            "Failed to parse Hermes model config: {}",
+            crate::redact::describe_json_error(&e)
+        ))
+    })?;
     Ok(Some(model))
 }
 
@@ -1047,7 +1066,7 @@ pub fn update_mcp_servers_yaml<F>(updater: F) -> Result<(), AppError>
 where
     F: FnOnce(&mut serde_yaml::Mapping) -> Result<(), AppError>,
 {
-    let _guard = hermes_write_lock().lock()?;
+    let _guard = crate::config_io::lock();
     let config = read_hermes_config()?;
     let mut servers = config
         .get("mcp_servers")
@@ -1167,7 +1186,7 @@ impl Default for HermesMemoryLimits {
 /// `user_profile_enabled` (not `user_enabled`), so the mapping to on-disk keys
 /// lives here rather than leaking to callers.
 pub fn set_memory_enabled(kind: MemoryKind, enabled: bool) -> Result<HermesWriteOutcome, AppError> {
-    let _guard = hermes_write_lock().lock()?;
+    let _guard = crate::config_io::lock();
     let config = read_hermes_config()?;
 
     let mut memory = match config.get("memory") {
@@ -1220,6 +1239,49 @@ pub fn read_memory_limits() -> Result<HermesMemoryLimits, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_scalar_tail_is_data_and_is_never_duplicated_as_a_comment() {
+        for indicator in ["|", ">", "|-", "|+", ">+"] {
+            let source=format!("model:\n  default: old\n  extra: {indicator}\n    keep\n    # literal\n\nmcp_servers: {{}}\n");
+            let before: serde_yaml::Value = serde_yaml::from_str(&source).unwrap();
+            let mut model = before["model"].clone();
+            model["default"] = serde_yaml::Value::String("new".into());
+            let result = render_section(&source, "model", Some(&model)).unwrap();
+            let after: serde_yaml::Value = serde_yaml::from_str(&result).unwrap();
+            assert_eq!(
+                after["model"]["extra"], before["model"]["extra"],
+                "{indicator}: {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn neighboring_mcp_header_comments_are_outside_a_model_replacement() {
+        let source="model:\n  default: old\n# MCP connection note\nmcp_servers:\n  demo:\n    command: server\n# file note\n";
+        for value in [
+            Some(serde_yaml::from_str::<serde_yaml::Value>("default: new").unwrap()),
+            None,
+        ] {
+            let result = render_section(source, "model", value.as_ref()).unwrap();
+            assert!(result.contains(
+                "# MCP connection note\nmcp_servers:\n  demo:\n    command: server\n# file note\n"
+            ));
+        }
+    }
+
+    #[test]
+    fn a_malformed_model_section_error_never_echoes_the_values_in_it() {
+        let config: serde_yaml::Value = serde_yaml::from_str(
+            "model:\n  default: sk-of-abc123456789\n  context_length: sk-of-abc123456789\n",
+        )
+        .unwrap();
+
+        let error = model_config_of(&config).unwrap_err().to_string();
+
+        assert!(error.contains("invalid type"), "{error}");
+        assert!(!error.contains("abc123456789"), "{error}");
+    }
 
     #[test]
     fn copy_section_uses_the_active_duplicate() {
@@ -1394,12 +1456,12 @@ model:
 agent:
   max_turns: 10
 ";
-        // model section should span from start to "agent:"
+        // Inter-section comments belong to the unowned side of the boundary.
         let (start, end) = find_yaml_section_range(yaml, "model").unwrap();
         let section = &yaml[start..end];
         assert!(section.starts_with("model:"));
-        // Comments and blank lines between sections are included in the prior section
-        assert!(section.contains("# This is a comment"));
+        assert!(!section.contains("# This is a comment"));
+        assert!(yaml[end..].contains("# This is a comment"));
     }
 
     #[test]

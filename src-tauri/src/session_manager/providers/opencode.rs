@@ -1,13 +1,25 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use rusqlite::Connection;
 use serde_json::Value;
 
+use crate::session_manager::managed::Subagent;
+use crate::session_manager::title::{titled, TitleCandidates, TitleSource};
 use crate::session_manager::{SessionMessage, SessionMeta};
 
-use super::utils::{parse_timestamp_to_ms, path_basename, truncate_summary};
+use super::utils::{parse_timestamp_to_ms, truncate_summary};
 
 const PROVIDER_ID: &str = "opencode";
+
+fn safe_storage_id(id: &str) -> bool {
+    !id.is_empty()
+        && id != "."
+        && id != ".."
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
 
 /// Return the OpenCode base directory (`$XDG_DATA_HOME/opencode`).
 ///
@@ -19,7 +31,7 @@ pub(crate) fn get_opencode_base_dir() -> PathBuf {
             return PathBuf::from(xdg).join("opencode");
         }
     }
-    dirs::home_dir()
+    crate::config::try_get_home_dir()
         .map(|h| h.join(".local/share/opencode"))
         .unwrap_or_else(|| PathBuf::from(".local/share/opencode"))
 }
@@ -107,9 +119,16 @@ fn scan_sessions_sqlite() -> Vec<SessionMeta> {
         Err(_) => return Vec::new(),
     };
 
-    let mut stmt = match conn.prepare(
-        "SELECT id, title, directory, time_created, time_updated FROM session ORDER BY time_updated DESC",
-    ) {
+    // a database from before OpenCode kept child sessions has no parent_id
+    let mut stmt = match conn
+        .prepare(
+            "SELECT id, title, directory, time_created, time_updated, parent_id FROM session ORDER BY time_updated DESC",
+        )
+        .or_else(|_| {
+            conn.prepare(
+                "SELECT id, title, directory, time_created, time_updated, NULL FROM session ORDER BY time_updated DESC",
+            )
+        }) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
@@ -122,7 +141,8 @@ fn scan_sessions_sqlite() -> Vec<SessionMeta> {
         let directory: String = row.get(2)?;
         let created: i64 = row.get(3)?;
         let updated: i64 = row.get(4)?;
-        Ok((session_id, title, directory, created, updated))
+        let parent: Option<String> = row.get(5)?;
+        Ok((session_id, title, directory, created, updated, parent))
     }) {
         Ok(rows) => rows,
         Err(_) => return Vec::new(),
@@ -130,16 +150,17 @@ fn scan_sessions_sqlite() -> Vec<SessionMeta> {
 
     let mut sessions = Vec::new();
     for row in iter.flatten() {
-        let (session_id, title, directory, created, updated) = row;
-        let display_title = if title.is_empty() {
-            path_basename(&directory)
-        } else {
-            Some(title)
-        };
+        let (session_id, title, directory, created, updated, parent) = row;
+        let mut candidates = TitleCandidates::default().with_directory(Some(&directory));
+        candidates.agent = Some(title);
+        let (display_title, title_source) = titled(&candidates);
         sessions.push(SessionMeta {
             provider_id: PROVIDER_ID.to_string(),
             session_id: session_id.clone(),
             title: display_title.clone(),
+            title_source,
+            message_count: None,
+            parent_session_id: parent.filter(|p| !p.is_empty()),
             summary: display_title,
             project_dir: if directory.is_empty() {
                 None
@@ -173,7 +194,8 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
     let mut entries: Vec<(i64, String, String, String)> = Vec::new();
 
     for msg_path in &msg_files {
-        let data = match std::fs::read_to_string(msg_path) {
+        crate::session_manager::read_context::check()?;
+        let data = match crate::session_manager::read_context::read_text(msg_path) {
             Ok(d) => d,
             Err(_) => continue,
         };
@@ -183,8 +205,8 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
         };
 
         let msg_id = match value.get("id").and_then(Value::as_str) {
-            Some(id) => id.to_string(),
-            None => continue,
+            Some(id) if safe_storage_id(id) => id.to_string(),
+            _ => continue,
         };
 
         let role = value
@@ -210,7 +232,7 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
     }
 
     // Sort by created timestamp
-    entries.sort_by_key(|(ts, _, _, _)| *ts);
+    entries.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
 
     let messages = entries
         .into_iter()
@@ -218,6 +240,7 @@ pub fn load_messages(path: &Path) -> Result<Vec<SessionMessage>, String> {
             role,
             content,
             ts: if ts > 0 { Some(ts) } else { None },
+            name: None,
         })
         .collect();
 
@@ -230,51 +253,49 @@ pub fn load_messages_sqlite(source: &str) -> Result<Vec<SessionMessage>, String>
     let (db_path, session_id) = parse_sqlite_source(source)
         .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))?;
 
-    let conn = Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|e| format!("Failed to open OpenCode database: {e}"))?;
+    let conn = crate::session_manager::read_context::open_sqlite(&db_path)?;
 
     let mut msg_stmt = conn
         .prepare(
-            "SELECT id, time_created, data FROM message WHERE session_id = ?1 ORDER BY time_created ASC",
+            "SELECT id, time_created, data FROM message WHERE session_id = ?1 ORDER BY time_created ASC, id ASC",
         )
         .map_err(|e| format!("Failed to prepare message query: {e}"))?;
 
     let msg_rows = msg_stmt
         .query_map([session_id.as_str()], |row| {
-            let id: String = row.get(0)?;
+            let id = crate::session_manager::read_context::column(row, 0)?;
             let ts: i64 = row.get(1)?;
-            let data: String = row.get(2)?;
+            let data = crate::session_manager::read_context::column(row, 2)?;
             Ok((id, ts, data))
         })
         .map_err(|e| format!("Failed to query messages: {e}"))?;
 
     let mut part_stmt = conn
         .prepare(
-            "SELECT message_id, data FROM part WHERE session_id = ?1 ORDER BY time_created ASC",
+            "SELECT message_id, data FROM part WHERE session_id = ?1 ORDER BY time_created ASC, id ASC",
         )
         .map_err(|e| format!("Failed to prepare part query: {e}"))?;
 
     let part_rows = part_stmt
         .query_map([session_id.as_str()], |row| {
-            let message_id: String = row.get(0)?;
-            let data: String = row.get(1)?;
+            let message_id = crate::session_manager::read_context::column(row, 0)?;
+            let data = crate::session_manager::read_context::column(row, 1)?;
             Ok((message_id, data))
         })
         .map_err(|e| format!("Failed to query parts: {e}"))?;
 
     let mut parts_map: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
-    for part in part_rows.flatten() {
-        let (message_id, data) = part;
+    for part in part_rows {
+        crate::session_manager::read_context::check()?;
+        let (message_id, data) = part.map_err(|_| "session.search.sourceUnavailable".to_owned())?;
         parts_map.entry(message_id).or_default().push(data);
     }
 
     let mut messages = Vec::new();
-    for row in msg_rows.flatten() {
-        let (msg_id, ts, data) = row;
+    for row in msg_rows {
+        crate::session_manager::read_context::check()?;
+        let (msg_id, ts, data) = row.map_err(|_| "session.search.sourceUnavailable".to_owned())?;
         let msg_value: Value = match serde_json::from_str(&data) {
             Ok(v) => v,
             Err(_) => continue,
@@ -307,12 +328,14 @@ pub fn load_messages_sqlite(source: &str) -> Result<Vec<SessionMessage>, String>
             role,
             content,
             ts: Some(ts),
+            name: None,
         });
     }
 
     Ok(messages)
 }
 
+#[cfg(test)]
 pub fn delete_session(storage: &Path, path: &Path, session_id: &str) -> Result<bool, String> {
     if path.file_name().and_then(|name| name.to_str()) != Some(session_id) {
         return Err(format!(
@@ -379,6 +402,7 @@ pub fn delete_session(storage: &Path, path: &Path, session_id: &str) -> Result<b
 }
 
 /// Delete a session from the OpenCode SQLite database.
+#[cfg(test)]
 pub fn delete_session_sqlite(session_id: &str, source: &str) -> Result<bool, String> {
     let (db_path, ref_session_id) = parse_sqlite_source(source)
         .ok_or_else(|| format!("Invalid SQLite source reference: {source}"))?;
@@ -446,12 +470,9 @@ fn parse_session(storage: &Path, path: &Path) -> Option<SessionMeta> {
 
     // Derive title from directory basename if no explicit title
     let has_title = title.is_some();
-    let display_title = title.or_else(|| {
-        directory
-            .as_deref()
-            .and_then(path_basename)
-            .map(|s| s.to_string())
-    });
+    let mut candidates = TitleCandidates::default().with_directory(directory.as_deref());
+    candidates.agent = title;
+    let (display_title, title_source) = titled(&candidates);
 
     // Build source_path = message directory for this session
     let msg_dir = storage.join("message").join(&session_id);
@@ -474,12 +495,121 @@ fn parse_session(storage: &Path, path: &Path) -> Option<SessionMeta> {
         last_active_at: updated_at.or(created_at),
         source_path: Some(source_path),
         resume_command: Some(format!("opencode session resume {session_id}")),
+        title_source,
+        message_count: None,
+        parent_session_id: value
+            .get("parentID")
+            .and_then(Value::as_str)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string),
     })
+}
+
+/// Each OpenCode child session's root: the listed session at the top of its
+/// parent chain (Magpie `ocRoots`, MIT). A chain that leaves the listing,
+/// loops or runs past 64 steps names none, and its session stays a row.
+fn roots(listing: &[SessionMeta]) -> HashMap<&str, &str> {
+    let sessions: HashMap<&str, &SessionMeta> = listing
+        .iter()
+        .filter(|meta| meta.provider_id == PROVIDER_ID)
+        .map(|meta| (meta.session_id.as_str(), meta))
+        .collect();
+    let mut roots = HashMap::new();
+    for (&id, meta) in &sessions {
+        let mut parent = meta.parent_session_id.as_deref();
+        for _ in 0..64 {
+            let Some(above) = parent.and_then(|p| sessions.get(p)) else {
+                break;
+            };
+            match above.parent_session_id.as_deref() {
+                Some(next) => parent = Some(next),
+                None => {
+                    roots.insert(id, above.session_id.as_str());
+                    break;
+                }
+            }
+        }
+    }
+    roots
+}
+
+/// Each listed root's OpenCode child sessions, by root id: worked out once a
+/// listing, not once a row.
+pub(crate) type Children<'a> = HashMap<&'a str, Vec<&'a SessionMeta>>;
+
+pub(crate) fn children(listing: &[SessionMeta]) -> Children<'_> {
+    let roots = roots(listing);
+    let mut children: Children = HashMap::new();
+    for meta in listing.iter().filter(|m| m.provider_id == PROVIDER_ID) {
+        if let Some(root) = roots.get(meta.session_id.as_str()) {
+            children.entry(root).or_default().push(meta);
+        }
+    }
+    children
+}
+
+/// The child sessions under an OpenCode session, oldest first: what the task
+/// tool asked and the agent it ran as, split from the title OpenCode gives
+/// them, "<task> (@<agent> subagent)" (Magpie `ocSubagentTitle`, MIT).
+pub(crate) fn subagents(meta: &SessionMeta, children: &Children) -> Vec<Subagent> {
+    let mut found: Vec<_> = children
+        .get(meta.session_id.as_str())
+        .into_iter()
+        .flatten()
+        .map(|child| {
+            let named = child
+                .title
+                .as_deref()
+                .filter(|_| child.title_source == Some(TitleSource::Agent));
+            let (title, kind) = task_title(named.unwrap_or_default());
+            Subagent {
+                id: child.session_id.clone(),
+                title,
+                kind,
+                parent: child
+                    .parent_session_id
+                    .clone()
+                    .filter(|parent| *parent != meta.session_id),
+                started_at: child.created_at,
+                last_active_at: child.last_active_at,
+                source: child.source_path.clone().unwrap_or_default(),
+            }
+        })
+        .collect();
+    found.sort_by(|a, b| {
+        a.started_at
+            .cmp(&b.started_at)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    found
+}
+
+/// A child session's title split into its task and agent. A title OpenCode
+/// made up itself ("New session - …", "Child session - …") is none.
+fn task_title(named: &str) -> (Option<String>, Option<String>) {
+    if named.is_empty()
+        || named.starts_with("New session - ")
+        || named.starts_with("Child session - ")
+    {
+        return (None, None);
+    }
+    if let Some((task, agent)) = named
+        .strip_suffix(" subagent)")
+        .and_then(|rest| rest.rsplit_once(" (@"))
+        .filter(|(task, _)| !task.is_empty())
+    {
+        return (Some(task.trim().to_string()), Some(agent.to_string()));
+    }
+    (Some(named.to_string()), None)
 }
 
 /// Read the first user message's first text part to use as summary.
 fn get_first_user_summary(storage: &Path, session_id: &str) -> Option<String> {
+    if !safe_storage_id(session_id) {
+        return None;
+    }
     let msg_dir = storage.join("message").join(session_id);
+    crate::session_manager::managed::validate_path(&msg_dir, &[storage.to_path_buf()]).ok()?;
     if !msg_dir.is_dir() {
         return None;
     }
@@ -490,7 +620,8 @@ fn get_first_user_summary(storage: &Path, session_id: &str) -> Option<String> {
     // Collect user messages with timestamps for ordering
     let mut user_msgs: Vec<(i64, String)> = Vec::new();
     for msg_path in &msg_files {
-        let data = match std::fs::read_to_string(msg_path) {
+        crate::session_manager::read_context::check().ok()?;
+        let data = match crate::session_manager::read_context::read_text(msg_path) {
             Ok(d) => d,
             Err(_) => continue,
         };
@@ -504,8 +635,8 @@ fn get_first_user_summary(storage: &Path, session_id: &str) -> Option<String> {
         }
 
         let msg_id = match value.get("id").and_then(Value::as_str) {
-            Some(id) => id.to_string(),
-            None => continue,
+            Some(id) if safe_storage_id(id) => id.to_string(),
+            _ => continue,
         };
 
         let ts = value
@@ -549,6 +680,13 @@ fn extract_part_text(part_value: &Value) -> Option<String> {
 }
 
 fn collect_parts_text(part_dir: &Path) -> String {
+    let Some(storage) = part_dir.parent().and_then(Path::parent) else {
+        return String::new();
+    };
+    if crate::session_manager::managed::validate_path(part_dir, &[storage.to_path_buf()]).is_err() {
+        crate::session_manager::read_context::source_unavailable();
+        return String::new();
+    }
     if !part_dir.is_dir() {
         return String::new();
     }
@@ -556,9 +694,13 @@ fn collect_parts_text(part_dir: &Path) -> String {
     let mut parts = Vec::new();
     collect_json_files(part_dir, &mut parts);
 
+    parts.sort();
     let mut texts = Vec::new();
     for part_path in &parts {
-        let data = match std::fs::read_to_string(part_path) {
+        if crate::session_manager::read_context::check().is_err() {
+            break;
+        }
+        let data = match crate::session_manager::read_context::read_text(part_path) {
             Ok(d) => d,
             Err(_) => continue,
         };
@@ -576,25 +718,42 @@ fn collect_parts_text(part_dir: &Path) -> String {
 }
 
 fn collect_json_files(root: &Path, files: &mut Vec<PathBuf>) {
+    if crate::session_manager::read_context::check().is_err() {
+        return;
+    }
+    if root.exists() && crate::session_manager::read_context::directory(root).is_err() {
+        return;
+    }
     if !root.exists() {
         return;
     }
 
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
-        Err(_) => return,
+        Err(_) => {
+            crate::session_manager::read_context::source_unavailable();
+            return;
+        }
     };
 
     for entry in entries.flatten() {
+        if crate::session_manager::read_context::check().is_err()
+            || crate::session_manager::read_context::file_count(files.len()).is_err()
+        {
+            break;
+        }
         let path = entry.path();
-        if path.is_dir() {
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
             collect_json_files(&path, files);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+        } else if entry.file_type().is_ok_and(|t| t.is_file())
+            && path.extension().and_then(|ext| ext.to_str()) == Some("json")
+        {
             files.push(path);
         }
     }
 }
 
+#[cfg(test)]
 fn find_session_file(storage: &Path, session_id: &str) -> Option<PathBuf> {
     let session_root = storage.join("session");
     let mut files = Vec::new();
@@ -606,6 +765,7 @@ fn find_session_file(storage: &Path, session_id: &str) -> Option<PathBuf> {
         .find(|path| path.file_name().and_then(|name| name.to_str()) == Some(expected.as_str()))
 }
 
+#[cfg(test)]
 fn remove_file_if_exists(path: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -614,6 +774,7 @@ fn remove_file_if_exists(path: &Path) -> std::io::Result<()> {
     }
 }
 
+#[cfg(test)]
 fn remove_dir_all_if_exists(path: &Path) -> std::io::Result<()> {
     match std::fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
@@ -625,13 +786,40 @@ fn remove_dir_all_if_exists(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_sandbox::sandbox;
     use rusqlite::Connection;
-    use std::sync::{Mutex, OnceLock};
+    use serial_test::serial;
     use tempfile::tempdir;
 
-    fn opencode_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    /// Magpie `ocSubagentTitle` cases (MIT).
+    #[test]
+    fn a_child_title_splits_into_task_and_agent() {
+        let owned =
+            |task: &str, agent: Option<&str>| (Some(task.to_string()), agent.map(str::to_string));
+        assert_eq!(
+            task_title("Find the bug (@explore subagent)"),
+            owned("Find the bug", Some("explore"))
+        );
+        assert_eq!(
+            task_title("Port (@x) helper (@general subagent)"),
+            owned("Port (@x) helper", Some("general"))
+        );
+        assert_eq!(task_title("Plain title"), owned("Plain title", None));
+        assert_eq!(task_title("Child session - 2026-10-14"), (None, None));
+        assert_eq!(task_title("New session - 2026-10-14"), (None, None));
+    }
+
+    /// The OpenCode data directory as the code under test resolves it. Tests build
+    /// their database inside it rather than re-deriving the path by hand, so the two
+    /// agree on separators on every platform (`source_path` is compared as a string).
+    fn opencode_dir_in(home: &Path) -> PathBuf {
+        let base_dir = get_opencode_base_dir();
+        assert!(
+            base_dir.starts_with(home),
+            "OpenCode data must resolve inside the sandbox home, got {}",
+            base_dir.display()
+        );
+        base_dir
     }
 
     fn create_sqlite_schema(conn: &Connection) {
@@ -780,14 +968,11 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)] // set_var/remove_var deprecated since Rust 1.81; safe here under mutex
+    #[serial]
     fn scan_sessions_sqlite_reads_temp_database() {
-        let _guard = opencode_env_lock().lock().expect("lock");
-        let temp = tempdir().expect("tempdir");
-        let original_xdg = std::env::var_os("XDG_DATA_HOME");
-        std::env::set_var("XDG_DATA_HOME", temp.path());
+        let sandbox = sandbox();
 
-        let base_dir = temp.path().join("opencode");
+        let base_dir = opencode_dir_in(sandbox.home());
         std::fs::create_dir_all(&base_dir).expect("create base dir");
         let db_path = base_dir.join("opencode.db");
         let conn = Connection::open(&db_path).expect("open sqlite db");
@@ -806,13 +991,6 @@ mod tests {
         drop(conn);
 
         let sessions = scan_sessions_sqlite();
-
-        #[allow(deprecated)]
-        if let Some(value) = original_xdg {
-            std::env::set_var("XDG_DATA_HOME", value);
-        } else {
-            std::env::remove_var("XDG_DATA_HOME");
-        }
 
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].session_id, "ses_2");
@@ -891,14 +1069,11 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn delete_session_sqlite_removes_session() {
-        let _guard = opencode_env_lock().lock().expect("lock");
-        let temp = tempdir().expect("tempdir");
-        let original_xdg = std::env::var_os("XDG_DATA_HOME");
-        #[allow(deprecated)]
-        std::env::set_var("XDG_DATA_HOME", temp.path());
+        let sandbox = sandbox();
 
-        let base_dir = temp.path().join("opencode");
+        let base_dir = opencode_dir_in(sandbox.home());
         std::fs::create_dir_all(&base_dir).expect("create base dir");
         let db_path = base_dir.join("opencode.db");
         let conn = Connection::open(&db_path).expect("open sqlite db");
@@ -951,29 +1126,19 @@ mod tests {
         assert_eq!(remaining_sessions, 0);
         assert_eq!(remaining_messages, 0);
         assert_eq!(remaining_parts, 0);
-
-        #[allow(deprecated)]
-        if let Some(value) = original_xdg {
-            std::env::set_var("XDG_DATA_HOME", value);
-        } else {
-            std::env::remove_var("XDG_DATA_HOME");
-        }
     }
 
     #[test]
+    #[serial]
     fn delete_session_sqlite_rejects_foreign_db_path() {
-        let _guard = opencode_env_lock().lock().expect("lock");
-        let temp = tempdir().expect("tempdir");
-        let original_xdg = std::env::var_os("XDG_DATA_HOME");
-        #[allow(deprecated)]
-        std::env::set_var("XDG_DATA_HOME", temp.path());
+        let sandbox = sandbox();
 
-        let expected_base_dir = temp.path().join("opencode");
+        let expected_base_dir = opencode_dir_in(sandbox.home());
         std::fs::create_dir_all(&expected_base_dir).expect("create expected base dir");
         let expected_db_path = expected_base_dir.join("opencode.db");
         Connection::open(&expected_db_path).expect("create expected sqlite db");
 
-        let db_path = temp.path().join("foreign.db");
+        let db_path = sandbox.home().join("foreign.db");
         let conn = Connection::open(&db_path).expect("open sqlite db");
         create_sqlite_schema(&conn);
         conn.execute(
@@ -986,12 +1151,5 @@ mod tests {
         let source = format!("sqlite:{}:ses_1", db_path.display());
         let err = delete_session_sqlite("ses_1", &source).expect_err("should reject foreign db");
         assert!(err.contains("expected OpenCode database"));
-
-        #[allow(deprecated)]
-        if let Some(value) = original_xdg {
-            std::env::set_var("XDG_DATA_HOME", value);
-        } else {
-            std::env::remove_var("XDG_DATA_HOME");
-        }
     }
 }

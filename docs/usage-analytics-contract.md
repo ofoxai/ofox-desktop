@@ -1,0 +1,320 @@
+# Usage analytics IPC contract
+
+This document describes the version 1 query and request snapshot implementation.
+Database schema 11 is unchanged. Query projections are separate from the legacy
+saved-cost APIs, source parsing and maintenance. The cached session analysis and
+shared project association are described in [session analytics](usage-session-analytics.md)
+and [project filters](usage-project-filter.md).
+
+## Query and receipts
+
+The new commands accept camelCase arguments. `UsageQueryV1` is:
+
+```ts
+type UsageQueryV1 = {
+  version: 1;
+  startMs: number | null;
+  endMs: number;
+  toolIds: string[];
+  modelIds: string[];
+  projectIds: string[];
+  sourceIds: string[];
+};
+```
+
+Times are Unix milliseconds and the interval is `[startMs, endMs)`. A null start
+means all earlier history. An empty interval is valid. ID arrays are exact,
+case-sensitive matches; empty arrays mean all. Normalization sorts and removes
+duplicates, permits at most 256 IDs per array and 512 bytes per nonempty ID.
+Overview, requests and cached session analysis accept the same `projectIds`.
+Only an owned import tuple and native session ID can join a verified cached root
+session and project. A proxy row with the same bare session ID is not evidence
+of that project. Unresolved parent metadata is distinct from a resolved session
+whose native directory is unknown.
+
+Every versioned response carries an explicit receipt:
+
+```ts
+type QueryReceipt = {
+  appliedQuery: UsageQueryV1;
+  queryFingerprint: string;
+  snapshotVersion: string;
+};
+```
+
+`appliedQuery` is the normalized query actually applied. The overview fingerprint
+hashes that query. Request fingerprints hash the normalized query and normalized
+request filters together. `snapshotVersion` hashes the read projection and its
+pricing context, including the complete local-calendar trend projection. A new
+query whose timezone changes its day/hour/week buckets gets a distinct version;
+an already retained request snapshot keeps its original buckets and version.
+Neither value uses a wall-clock timestamp as a substitute for
+a database snapshot. Each initial response reads from one SQLite transaction.
+Separate overview and request calls are separate projections; they do not claim
+a shared cross-command persistent snapshot.
+
+`get_usage_capabilities()` returns `{queryVersion: 1, requestSnapshots: true,
+csv: true, projectFilter: true, localRefresh: true, sessionAnalytics: true,
+sessionProjectFilter: true, sources: SourceCapability[]}`. Per-source capabilities
+remain authoritative: a new event-time reader does not imply a cached session or
+project bridge. The frontend checks capabilities before using an older backend.
+
+## Overview
+
+`get_usage_overview({period, query?})` preserves `today`, `7d`, `30d`, and `all`.
+When query is present it is authoritative; a 90-day or custom UI range sends
+`period: "all"` and an explicit query. Query mode is a pure database read and
+does not synchronize sources, fetch prices or rewrite saved costs. Without query,
+the previous period planning remains available. Synchronization uses the shared
+local coordinator described below.
+
+The response retains existing totals, series, tool/model breakdowns and
+`costUsd`. It adds the receipt, `coverage`, `pricingCoverage`, `options`, `sources`,
+and `estimate` in each totals/series entry. `options` contains `toolIds`, `modelIds`,
+`sourceIds` and `projects` from available history and verified cached associations,
+not only tools with current bindings. The response also adds `byProject` and
+`attribution: {sessionCount, projectCount, unassociatedRecords, partial}`. These
+counts describe identified associations; they do not certify a complete historic
+session or project total. A resolved unknown-directory group is not an identified
+project. Overview `start`, `end`, and series timestamps remain
+milliseconds in both query and legacy no-query mode. Legacy request-log filters
+retain their seconds contract.
+
+Overview combines live `proxy_request_logs` and retained `usage_daily_rollups`.
+It does not add `session_usage_archive`, which would count retained usage twice.
+Legacy date rollups have local-date precision only. Only fully included natural
+days can enter an exact query; partial boundary days are excluded and reported.
+Source-specific queries exclude rollups whose source identity was not retained.
+Detailed request queries exclude all rollups while reporting unavailable history.
+Project filters exclude old rollups without a retained project dimension and
+report `legacyProjectUnavailable`. `excludedRollupDays` counts excluded rollup
+rows, which may include multiple tools or models for the same day.
+
+## Coverage and measurement
+
+```ts
+type Coverage = {
+  state: "complete" | "partial" | "unsupported";
+  reasons: string[];
+  timeBasis: "eventTime" | "legacyLocalDate" | "mixed";
+  detailStartMs: number | null;
+  detailEndMs: number | null;
+  aggregateOnly: boolean;
+  excludedRollupDays: number;
+  sourceIds: string[];
+};
+type SourceHealth = {
+  sourceId: string;
+  toolId: string;
+  status: "unknown" | "ok" | "partial" | "failed" | "unsupported";
+  lastAttemptAtMs: number | null;
+  lastSuccessAtMs: number | null;
+  errorCode: string | null;
+  lastScan: {
+    filesScanned: number;
+    imported: number;
+    skipped: number;
+  } | null;
+  retainedDetailRange: { startMs: number; endMs: number } | null;
+};
+type SourceCapability = {
+  toolId: string;
+  sourceIds: string[];
+  usageSupported: boolean;
+  sessionAnalyticsSupported: boolean;
+  projectFilterSupported: boolean;
+  reason: string | null;
+};
+```
+
+Unknown source health cannot certify complete coverage. Source-specific health
+is read from the machine-local database setting `usage_source_health_v1`; absent
+sources remain unknown. Ledger and Analytics attempts have separate CAS revisions
+and must match the local ledger epoch. Required channels cannot be upgraded by
+an older successful cache. Partial or failed attempts retain the previous fully
+trustworthy success time. This key is excluded from export and reconciled with
+the final local value during restore. A combined synchronization finish timestamp
+does not prove that every source was read successfully.
+
+`lastScan` describes the ledger's latest completed, non-failed attempt. A partial
+attempt may expose the result it actually returned; a pending attempt, error or
+legacy missing observation is null. Files scanned counts physical sources;
+imported and skipped preserve each reader's result semantics. Skipped may count
+unchanged files or existing facts, so these fields do not form a common-unit
+success rate. Counts use the same attempt CAS and local epoch as health; opaque
+future scan representations remain unknown rather than being overwritten.
+
+`retainedDetailRange` is the current live ledger detail's minimum and maximum
+whole-second timestamps, exposed as a millisecond half-open interval. It is
+scoped by both tool and source, excludes daily rollups, and does not establish
+gap-free coverage or complete source history. Missing or unrepresentable bounds
+are null. Older backends may omit both new fields; the renderer treats them as
+unknown.
+
+Event-time readers currently cover Claude, Codex, Gemini, OpenCode, WorkBuddy,
+[Pi schema 3](usage-pi-reader.md), native v0/v4 dsh, [OpenClaw schema 24](usage-openclaw-reader.md)
+and Hermes SessionDB schema 31 within each reader's coverage limits. Cached
+session/project bridges cover all nine (see [native analysis bridges](native-analysis-bridges.md)).
+Hermes rows are per-session, per-model totals dated at their last activity, not
+individual requests.
+ChatGPT mode shares Codex records; no separate general ChatGPT usage is inferred.
+
+## Local refresh
+
+`refresh_local_usage()` refreshes native facts and cached session analysis through
+one coordinator without account or price requests. A lightweight observation of
+source metadata and database revisions avoids reopening unchanged transcripts.
+Failure remains retryable even when the next observation is unchanged. Request
+snapshots stay frozen until the user starts a new query.
+
+Concurrent callers share the running worker. Cancellation of a waiter does not
+release the worker's gate. A forced manual request during a running scan schedules
+one follow-up generation; requests during that follow-up join it. Database change
+counters invalidate warm observations but are not ingestion identity proofs.
+`sync_session_usage()` retains explicit manual pricing refresh and forced local
+synchronization for compatible callers.
+
+Request rows add `observedStatusCode: number | null` and
+`observedLatencyMs: number | null`. Imported placeholder success codes do not
+become observed HTTP status. Proxy latency, including an observed zero, is valid;
+positive native OpenCode latency is valid. Other unobserved latency is null.
+These fields distinguish absent measurements from zero milliseconds.
+
+## Current OFox base-token estimates
+
+The policy is `current-ofox-base-v1`. The catalog is fetched anonymously from
+`https://api.{resolved ofoxApex}/v1/models` with a 15-second timeout and 4 MiB
+response bound. Only `ofox.ai` and `ofox.io` are accepted. A response is cached
+under the apex captured before the request; it is never reinterpreted as a
+response from a later selected region. Cache freshness is 24 hours per apex.
+
+Normalized catalog snapshots are stored independently in database settings keys
+`ofox_usage_pricing_catalog_v1:{apex}`. They retain four optional Decimal rates
+for new input, output, cache read and cache write. Cache write selects the
+5-minute field when present, otherwise the flat field. Missing, empty, negative,
+unrepresentable and invalid rates remain unknown; explicit zero is distinct.
+Scientific notation is accepted without rounding an unrepresentable amount to
+zero. Catalog versions are stable hashes of normalized pricing content, including
+apex and additional-unit rates, not fetch time. A video-unit price change updates
+the version even though that unit is not estimated. Alias collisions remain ambiguous; an exact canonical ID has
+priority. Damaged or unsupported cached catalogs yield unavailable estimates
+with an error code while usage counts remain queryable.
+
+```ts
+type CostEstimate = {
+  knownCostUsd: string | null;
+  availability: "known" | "free" | "partial" | "unknown";
+  unpricedModelIds: string[];
+  unpricedRecordCount: number | null;
+  additionalUnitsUnsupported: boolean;
+};
+type PricingCoverage = {
+  policy: "current-ofox-base-v1";
+  apex: string;
+  catalogVersion: string | null;
+  catalogUpdatedAtMs: number | null;
+  catalogState: "missing" | "ready" | "invalid" | "unsupported";
+  errorCode: string | null;
+  stale: boolean;
+  unpricedModelIds: string[];
+  unpricedRecordCount: number | null;
+  additionalUnitsUnsupported: boolean;
+};
+```
+
+Known costs are exact decimal strings. Missing bucket prices yield a known
+subtotal plus explicit partial/unknown coverage. Nonzero or invalid additional
+units, such as video seconds, images, audio or searches, set
+`additionalUnitsUnsupported`. A zero base-token estimate with such charges is
+partial and must not be presented as a free model. These estimates do not cover
+tiered billing or additional units. `unpricedRecordCount` is null when the
+available aggregate cannot prove a count. Aggregation overflow is an explicit
+error and cannot silently restart a discarded sum.
+
+The current estimate path never rewrites historical `total_cost_usd` or the
+legacy pricing table. The existing price synchronization path still updates the
+legacy table and invokes its historical zero-cost backfill for legacy callers;
+that saved-cost behavior is separate from versioned read-only estimates.
+
+## Requests, detail and export
+
+```ts
+type UsageRequestFilters = {
+  sourceIds?: string[];
+  statusCode?: number | null;
+  statusKind?: "recorded" | "unrecorded" | null;
+  search?: string | null;
+};
+```
+
+`get_request_logs({filters: {}, page, pageSize, query, requestFilters?,
+snapshotId?})` creates a frozen snapshot when page is 0 and snapshotId is omitted.
+Page size must be 1 through 100. Rows sort by `created_at DESC, request_id DESC`,
+including a deterministic tie-break for records in the same second. Search is
+trimmed, case-insensitive literal substring matching; `%` and `_` are not SQL
+wildcards. It searches request/provider/tool IDs, models and provider names, not request bodies.
+Nonempty legacy filters cannot be mixed with a versioned query.
+
+The result includes `data`, `total`, `page`, `pageSize`, `snapshotId`, receipt,
+explicit normalized `requestFilters` (arrays plus nullable fields), coverage,
+pricing coverage, options, sources, summary, `trend` and `measurements`. Summary
+and trend aggregate precisely the matching readable detail records. Trend uses
+the same bounded local-hour/day/week calendar and current-price estimates as
+overview, with request-only filters already applied. It does not reuse overview
+KPIs that ignore request filters or include archived rollups.
+
+`measurements` returns `statusSamples`, `failedSamples`, `failureRate`,
+`latencySamples`, `avgLatencyMs`, `firstTokenSamples`, `avgFirstTokenMs`,
+`generationSpeedSamples` and `avgGenerationTokensPerSecond`. Rates and averages
+are null when their sample count is zero. HTTP 400–599 are failures among observed
+HTTP statuses. Imported synthetic statuses are excluded; latency follows the
+same provenance rule as row detail, including observed zero latency. The legacy
+`first_token_ms` writer times the first SSE event, including lifecycle or role-only
+events. That column cannot prove the first generated token. First-token timing
+therefore returns zero samples and null until a source supplies verified token
+timing; rows expose the same nullable `observedFirstTokenMs` used by detail. Native
+import placeholders cannot become samples. No source currently provides verified
+generation start/end times either; speed returns zero samples and null, even if a
+generic duration column is present. Neither response duration nor output token
+count proves output speed.
+
+Subsequent pages reuse snapshotId and the same normalized query/filter. Query,
+request-filter or apex mismatches are rejected. A changed filter or explicit
+refresh starts again at page 0 without snapshotId. Background inserts cannot
+shift the already frozen result. The frontend must not refresh it by default
+every 30 seconds. A native source refresh is a separate operation from replacing
+the displayed request snapshot. Trend and measurement summaries remain frozen
+with those rows across every page; they are not computed from the visible page.
+
+`get_request_detail({requestId, snapshotId})` returns the frozen row or null,
+including its receipt and current estimate. The receipt must match the list.
+Without snapshotId, legacy detail behavior remains available.
+
+`export_request_logs_csv({snapshotId, destination?})` exports every matching row
+in that snapshot, not only the visible page. With no destination it returns a
+preview `{fileName, csv, recordCount, coverage, queryFingerprint,
+snapshotVersion, savedPath: null}`. After a native save dialog chooses an
+absolute destination, the same command writes via `atomic_write`, returns that
+savedPath and an empty csv string. Failed/expired snapshots are errors, never
+silently replaced with a newer query. CSV quotes every cell, escapes quotes and
+neutralizes spreadsheet formulas. It excludes request/response bodies,
+credentials and error text.
+
+Snapshots live only in memory, expire after 10 minutes and are lost on restart.
+The global store retains at most four snapshots and 128 MiB of serialized snapshots,
+evicting the oldest when necessary. An initial read is bounded to 100,000 rows
+and 64 MiB of source projection and fails explicitly beyond either budget;
+results are never silently truncated. CSV iterates the frozen rows in chunks of
+1,000, but constructs the complete CSV in bounded memory before atomic file
+write. This is not a streaming export of an unbounded database result. Export
+preview and save each regenerate CSV from the same retained snapshot.
+
+## Compatibility and verification scope
+
+Legacy `startDate`/`endDate` filters are seconds with inclusive endpoints. New
+queries are milliseconds with an exclusive end. Existing no-query commands
+remain available. Current pricing estimates, coverage and snapshot receipts are
+only guaranteed in versioned mode. These backend tests use temporary or memory
+databases; installed agent integration and native UI behavior require separate
+platform verification. No live credentials, settings or session contents are
+used by the regression fixtures.

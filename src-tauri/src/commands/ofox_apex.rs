@@ -61,6 +61,9 @@ pub async fn ofox_get_apex_state() -> Result<ApexState, String> {
 /// cannot prevent safe migrations in another tool. The returned flag drives
 /// the renderer's region synchronization warning.
 pub(crate) async fn reconcile_tool_endpoints(db: &crate::database::Database) -> bool {
+    // Codex and Claude may live in CODEX_HOME / CLAUDE_CONFIG_DIR, known once the
+    // login shell has been asked.
+    crate::agent_env::ready().await;
     let direct = crate::services::ofox_bind::endpoint::reconcile_managed_endpoints(db).await;
     let workbuddy = crate::workbuddy_config::reconcile_managed_endpoint(db).await;
     if let Err(error) = &direct {
@@ -69,7 +72,11 @@ pub(crate) async fn reconcile_tool_endpoints(db: &crate::database::Database) -> 
     if workbuddy.is_err() {
         log::warn!("[OfoxApex] WorkBuddy endpoint conflict; existing configuration retained");
     }
-    direct.is_ok() && workbuddy.is_ok()
+    let native = crate::native_tools::reconcile_endpoints(db).await;
+    if native.is_err() {
+        log::warn!("[OfoxApex] Pi/dsh endpoint conflict; existing configuration retained");
+    }
+    direct.is_ok() && workbuddy.is_ok() && native.is_ok()
 }
 
 /// 切换 apex 并完成关联副作用（持久化 → 清旧域 token → 同步现存工具地址 →
@@ -148,7 +155,9 @@ pub async fn ofox_set_apex(next_apex: String, app: tauri::AppHandle) -> Result<b
         return Ok(synced);
     }
 
-    apply_apex_switch(&app, &next_apex, true).await
+    apply_apex_switch(&app, &next_apex, true)
+        .await
+        .map_err(crate::redact::scrub_error)
 }
 
 /// 改回跟随网络：解除锁定并立刻探测一次，结果和当前不同就切换。
@@ -160,7 +169,9 @@ pub async fn ofox_set_apex_auto(app: tauri::AppHandle) -> Result<ApexState, Stri
     let client = crate::proxy::http_client::get();
     let (detected, confident) = crate::ofox_apex::detect_apex_from_geo(&client).await;
     if confident && detected != crate::ofox_apex::current_apex() {
-        apply_apex_switch(&app, detected, false).await?;
+        apply_apex_switch(&app, detected, false)
+            .await
+            .map_err(crate::redact::scrub_error)?;
     }
     Ok(apex_state(confident))
 }

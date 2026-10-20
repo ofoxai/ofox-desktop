@@ -78,11 +78,8 @@ export function DeepLinkImportDialog() {
     );
 
     // Listen for deep link error events
-    const unlistenError = listen<DeeplinkError>("deeplink-error", (event) => {
-      console.error("Deep link error:", event.payload);
-      toast.error(t("deeplink.parseError"), {
-        description: event.payload.error,
-      });
+    const unlistenError = listen<DeeplinkError>("deeplink-error", () => {
+      toast.error(t("deeplink.parseError"));
     });
 
     return () => {

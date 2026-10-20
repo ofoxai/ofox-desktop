@@ -1,27 +1,163 @@
 #![allow(non_snake_case)]
 
-use crate::session_manager;
+use std::sync::Arc;
 
-#[tauri::command]
-pub async fn list_sessions() -> Result<Vec<session_manager::SessionMeta>, String> {
-    let sessions = tauri::async_runtime::spawn_blocking(session_manager::scan_sessions)
+use tauri::{AppHandle, Emitter, State};
+
+use crate::database::Database;
+use crate::services::session_usage::SessionSyncResult;
+use crate::services::usage_sync;
+use crate::session_manager;
+use crate::session_manager::managed::ManagedSession;
+use crate::store::AppState;
+
+/// Emitted when the session listing may have changed (titles, counts, usage):
+/// after `refresh_session_index`, and after a usage sync the listing started
+/// wrote new rows.
+pub const SESSIONS_INDEX_UPDATED_EVENT: &str = "sessions-index-updated";
+
+pub(crate) async fn listing(db: Arc<Database>) -> Result<Vec<ManagedSession>, String> {
+    // Resolve custom agent directories before scanning or caching metadata.
+    crate::agent_env::ready().await;
+    tauri::async_runtime::spawn_blocking(move || session_manager::managed::list_with(Some(&db)))
         .await
-        .map_err(|e| format!("Failed to scan sessions: {e}"))?;
+        .map_err(|e| format!("Failed to scan sessions: {e}"))
+}
+
+/// A sync that wrote rows changed what the listing shows.
+fn sync_changed_usage(result: &Option<SessionSyncResult>) -> bool {
+    result.as_ref().is_some_and(|r| r.imported > 0)
+}
+
+/// How often the listing may start a usage sync. Each sync that runs emits
+/// `usage-synced`, which makes an open Sessions page list again; without a
+/// floor a source that keeps failing or a file being written loops forever.
+const LISTING_SYNC_INTERVAL_MS: i64 = 60_000;
+
+fn listing_starts_sync(last_synced_at_ms: Option<i64>, now_ms: i64) -> bool {
+    last_synced_at_ms.is_none_or(|at| now_ms.saturating_sub(at) >= LISTING_SYNC_INTERVAL_MS)
+}
+
+/// The session listing: titles and message counts from the meta cache (only
+/// changed files are read), usage from the database. It also starts a usage
+/// sync, skipped when one ran in the last minute.
+#[tauri::command]
+pub async fn list_sessions(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<ManagedSession>, String> {
+    let db = Arc::clone(&state.db);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if !listing_starts_sync(usage_sync::last_synced_at_ms(), now_ms) {
+        return listing(db).await;
+    }
+    let sync_db = Arc::clone(&db);
+    tauri::async_runtime::spawn(async move {
+        match usage_sync::sync_all_and_emit(&app, &sync_db, false).await {
+            Ok(result) if sync_changed_usage(&result) => {
+                if let Err(e) = app.emit(SESSIONS_INDEX_UPDATED_EVENT, ()) {
+                    log::debug!("[SESSIONS] emit {SESSIONS_INDEX_UPDATED_EVENT} failed: {e}");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => log::debug!("[SESSIONS] usage sync from the listing failed: {e}"),
+        }
+    });
+    listing(db).await
+}
+
+/// Sync usage now (never skipped), read the changed session files again and
+/// return the new listing; emits `sessions-index-updated`.
+#[tauri::command]
+pub async fn refresh_session_index(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<ManagedSession>, String> {
+    let db = Arc::clone(&state.db);
+    if let Err(e) = usage_sync::sync_all_and_emit(&app, &db, true).await {
+        log::warn!("[SESSIONS] usage sync for the session index failed: {e}");
+    }
+    let sessions = listing(db).await?;
+    if let Err(e) = app.emit(SESSIONS_INDEX_UPDATED_EVENT, ()) {
+        log::debug!("[SESSIONS] emit {SESSIONS_INDEX_UPDATED_EVENT} failed: {e}");
+    }
     Ok(sessions)
 }
 
 #[tauri::command]
 pub async fn get_session_messages(
-    providerId: String,
-    sourcePath: String,
+    sessionKey: String,
 ) -> Result<Vec<session_manager::SessionMessage>, String> {
-    let provider_id = providerId.clone();
-    let source_path = sourcePath.clone();
+    tauri::async_runtime::spawn_blocking(move || session_manager::managed::messages(&sessionKey))
+        .await
+        .map_err(|e| format!("Failed to load session messages: {e}"))?
+}
+
+/// One of a listed session's subagents' conversation, by the id it lists.
+#[tauri::command]
+pub async fn get_subagent_transcript(
+    sessionKey: String,
+    subagentId: String,
+) -> Result<session_manager::search::Transcript, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        session_manager::load_messages(&provider_id, &source_path)
+        session_manager::search::subagent_transcript(&sessionKey, &subagentId)
     })
     .await
-    .map_err(|e| format!("Failed to load session messages: {e}"))?
+    .map_err(|_| "session.search.sourceUnavailable".to_owned())?
+}
+
+#[tauri::command]
+pub async fn get_session_transcript(
+    sessionKey: String,
+    expectedReadRevision: Option<String>,
+    expectedMessageOrdinal: Option<usize>,
+    expectedContentHash: Option<String>,
+) -> Result<session_manager::search::Transcript, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        session_manager::search::transcript(
+            &sessionKey,
+            expectedReadRevision.as_deref(),
+            expectedMessageOrdinal,
+            expectedContentHash.as_deref(),
+        )
+    })
+    .await
+    .map_err(|_| "session.search.sourceUnavailable".to_owned())?
+}
+
+#[tauri::command]
+pub async fn prepare_session_search(
+    requestId: String,
+    query: String,
+    sessionKeys: Vec<String>,
+    includeProcess: bool,
+) -> Result<session_manager::search::Prepared, String> {
+    crate::agent_env::ready().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        session_manager::search::prepare(requestId, query, sessionKeys, includeProcess)
+    })
+    .await
+    .map_err(|_| "session.search.sourceUnavailable".to_owned())?
+}
+
+#[tauri::command]
+pub async fn run_session_search(
+    app: AppHandle,
+    operationId: String,
+    cursor: Option<String>,
+) -> Result<session_manager::search::SearchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        session_manager::search::run(&operationId, cursor.as_deref(), |progress| {
+            let _ = app.emit("session-search-progress", progress);
+        })
+    })
+    .await
+    .map_err(|_| "session.search.sourceUnavailable".to_owned())?
+}
+
+#[tauri::command]
+pub fn cancel_session_search(operationId: String) -> bool {
+    session_manager::search::cancel(&operationId)
 }
 
 #[tauri::command]
@@ -30,32 +166,8 @@ pub async fn launch_session_terminal(
     cwd: Option<String>,
     custom_config: Option<String>,
 ) -> Result<bool, String> {
-    let command = command.clone();
-    let cwd = cwd.clone();
-    let custom_config = custom_config.clone();
-
-    // Read preferred terminal from global settings
-    let preferred = crate::settings::get_preferred_terminal();
-    // Map global setting terminal names to session terminal names
-    // Global uses "iterm2", session terminal uses "iterm"
-    let target = match preferred.as_deref() {
-        Some("iterm2") => "iterm".to_string(),
-        Some(t) => t.to_string(),
-        None => "terminal".to_string(), // Default to Terminal.app on macOS
-    };
-
-    tauri::async_runtime::spawn_blocking(move || {
-        session_manager::terminal::launch_terminal(
-            &target,
-            &command,
-            cwd.as_deref(),
-            custom_config.as_deref(),
-        )
-    })
-    .await
-    .map_err(|e| format!("Failed to launch terminal: {e}"))??;
-
-    Ok(true)
+    let _ = (command, cwd, custom_config);
+    Err("Raw terminal commands are disabled; use the server-owned resume_session action".into())
 }
 
 #[tauri::command]
@@ -64,22 +176,114 @@ pub async fn delete_session(
     sessionId: String,
     sourcePath: String,
 ) -> Result<bool, String> {
-    let provider_id = providerId.clone();
-    let session_id = sessionId.clone();
-    let source_path = sourcePath.clone();
+    let _ = (providerId, sessionId, sourcePath);
+    Err("Permanent session deletion is disabled; use the reversible session trash".into())
+}
 
+#[tauri::command]
+pub async fn export_session_markdown(
+    sessionKey: String,
+    destination: Option<String>,
+) -> Result<session_manager::managed::MarkdownExport, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        session_manager::delete_session(&provider_id, &session_id, &source_path)
+        session_manager::managed::export_markdown(
+            &sessionKey,
+            destination.as_deref().map(std::path::Path::new),
+        )
     })
     .await
-    .map_err(|e| format!("Failed to delete session: {e}"))?
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn resume_session(
+    sessionKey: String,
+    launch: bool,
+) -> Result<session_manager::managed::ResumeResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        session_manager::managed::resume(&sessionKey, launch)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn trash_sessions(
+    items: Vec<session_manager::trash::TrashRequest>,
+) -> Result<Vec<session_manager::trash::TrashOutcome>, String> {
+    tauri::async_runtime::spawn_blocking(move || session_manager::trash::trash_many(&items))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_session_trash() -> Result<Vec<session_manager::trash::TrashEntry>, String> {
+    tauri::async_runtime::spawn_blocking(session_manager::trash::list)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn restore_session_trash(
+    key: String,
+) -> Result<session_manager::trash::TrashEntry, String> {
+    tauri::async_runtime::spawn_blocking(move || session_manager::trash::restore(&key))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn purge_session_trash(key: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || session_manager::trash::purge(&key))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 pub async fn delete_sessions(
     items: Vec<session_manager::DeleteSessionRequest>,
 ) -> Result<Vec<session_manager::DeleteSessionOutcome>, String> {
-    tauri::async_runtime::spawn_blocking(move || session_manager::delete_sessions(&items))
-        .await
-        .map_err(|e| format!("Failed to delete sessions: {e}"))
+    Ok(items
+        .into_iter()
+        .map(|item| session_manager::DeleteSessionOutcome {
+            provider_id: item.provider_id,
+            session_id: item.session_id,
+            source_path: item.source_path,
+            success: false,
+            error: Some(
+                "Permanent session deletion is disabled; use the reversible session trash".into(),
+            ),
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn synced(imported: u32) -> Option<SessionSyncResult> {
+        Some(SessionSyncResult {
+            imported,
+            skipped: 0,
+            files_scanned: 1,
+            errors: vec![],
+        })
+    }
+
+    #[test]
+    fn the_listing_starts_a_sync_at_most_once_a_minute() {
+        let now = 1_000_000;
+        assert!(listing_starts_sync(None, now));
+        assert!(!listing_starts_sync(Some(now - 1_000), now));
+        assert!(!listing_starts_sync(Some(now - 59_999), now));
+        assert!(listing_starts_sync(Some(now - 60_000), now));
+    }
+
+    #[test]
+    fn only_a_sync_that_wrote_rows_changes_the_listing() {
+        assert!(sync_changed_usage(&synced(2)));
+        assert!(!sync_changed_usage(&synced(0)));
+        // skipped: a sync ran in the last minute
+        assert!(!sync_changed_usage(&None));
+    }
 }

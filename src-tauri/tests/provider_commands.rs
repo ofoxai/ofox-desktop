@@ -8,13 +8,12 @@ use cc_switch_lib::{
 #[path = "support.rs"]
 mod support;
 use std::collections::HashMap;
-use support::{create_test_state_with_config, ensure_test_home, reset_test_fs, test_mutex};
+use support::{create_test_state_with_config, sandbox};
 
 #[test]
+#[serial_test::serial]
 fn switch_provider_updates_codex_live_and_state() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let legacy_auth = json!({"OPENAI_API_KEY": "legacy-key"});
     let legacy_config = r#"[mcp_servers.legacy]
@@ -23,6 +22,8 @@ command = "echo"
 "#;
     write_codex_live_atomic(&legacy_auth, Some(legacy_config))
         .expect("seed existing codex live config");
+    // Model writes intentionally cannot introduce MCP. Seed a native user file.
+    std::fs::write(get_codex_config_path(), legacy_config).expect("seed native user MCP");
 
     let mut config = MultiAppConfig::default();
     {
@@ -49,7 +50,9 @@ command = "echo"
                 "Latest".to_string(),
                 json!({
                     "auth": {"OPENAI_API_KEY": "fresh-key"},
-                    "config": r#"[mcp_servers.latest]
+                    "config": r#"model = "provider-model"
+
+[mcp_servers.latest]
 type = "stdio"
 command = "say"
 "#
@@ -102,8 +105,17 @@ command = "say"
 
     let config_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
     assert!(
-        config_text.contains("mcp_servers.echo-server"),
-        "config.toml should contain synced MCP servers"
+        config_text.contains("mcp_servers.legacy"),
+        "provider switching preserves live user MCP"
+    );
+
+    assert!(
+        !config_text.contains("mcp_servers.echo-server"),
+        "legacy enabled flags do not apply resources"
+    );
+    assert!(
+        !config_text.contains("mcp_servers.latest"),
+        "provider templates do not replace resource ownership"
     );
 
     let current_id = app_state
@@ -127,11 +139,10 @@ command = "say"
         .get("config")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    // 供应商配置应该包含在 live 文件中
-    // 注意：live 文件还会包含 MCP 同步后的内容
+    // Model defaults update independently of resource definitions.
     assert!(
-        config_text.contains("mcp_servers.latest"),
-        "live file should contain provider's original config"
+        config_text.contains("provider-model"),
+        "live model defaults should reflect the selected provider"
     );
     assert!(
         new_config_text.contains("mcp_servers.latest"),
@@ -156,9 +167,9 @@ command = "say"
 }
 
 #[test]
+#[serial_test::serial]
 fn switch_provider_missing_provider_returns_error() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
+    let _sandbox = sandbox();
 
     let mut config = MultiAppConfig::default();
     config
@@ -181,10 +192,9 @@ fn switch_provider_missing_provider_returns_error() {
 }
 
 #[test]
+#[serial_test::serial]
 fn switch_provider_updates_claude_live_and_state() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let settings_path = cc_switch_lib::get_claude_settings_path();
     if let Some(parent) = settings_path.parent() {
@@ -289,7 +299,7 @@ fn switch_provider_updates_claude_live_and_state() {
 
     // v3.7.0+ 使用 SQLite 数据库而非 config.json
     // 验证数据已持久化到数据库
-    let home_dir = std::env::var("HOME").expect("HOME should be set by ensure_test_home");
+    let home_dir = std::env::var("HOME").expect("HOME should be set by the sandbox");
     let db_path = std::path::Path::new(&home_dir)
         .join(".ofox-desktop")
         .join("ofox-desktop.db");
@@ -311,10 +321,9 @@ fn switch_provider_updates_claude_live_and_state() {
 }
 
 #[test]
+#[serial_test::serial]
 fn switch_provider_codex_missing_auth_returns_error_and_keeps_state() {
-    let _guard = test_mutex().lock().expect("acquire test mutex");
-    reset_test_fs();
-    let _home = ensure_test_home();
+    let _sandbox = sandbox();
 
     let mut config = MultiAppConfig::default();
     {

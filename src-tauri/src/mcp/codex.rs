@@ -81,6 +81,7 @@ fn strip_ignored_type(doc: &mut toml_edit::DocumentMut) -> bool {
 /// 启动 Codex 前调用：清掉 `~/.codex/config.toml` 里已有 MCP 条目的 `type`，免得每次启动
 /// 都警告「type 被忽略」。文件不存在、不是有效 TOML 时什么都不做，不会覆盖用户的文件。
 pub fn strip_ignored_type_from_codex_config() -> Result<bool, AppError> {
+    let _io = crate::config_io::lock();
     if !should_sync_codex_mcp() {
         return Ok(false);
     }
@@ -256,7 +257,7 @@ pub fn import_from_codex(config: &mut MultiAppConfig) -> Result<usize, AppError>
 
                 if let Some(val) = json_val {
                     spec.insert(key.clone(), val);
-                    log::debug!("导入扩展字段 '{key}' = {toml_val:?}");
+                    log::debug!("Imported an extended MCP field");
                 }
             }
 
@@ -722,9 +723,9 @@ fn json_server_to_toml_table(spec: &Value) -> Result<toml_edit::Table, AppError>
 
                 // 记录扩展字段的处理
                 if extended_fields.contains(&key.as_str()) {
-                    log::debug!("已转换扩展字段 '{key}' = {value:?}");
+                    log::debug!("Converted an extended MCP field");
                 } else {
-                    log::info!("已转换自定义字段 '{key}' = {value:?}");
+                    log::debug!("Converted a custom MCP field");
                 }
             }
         }

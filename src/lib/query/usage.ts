@@ -2,6 +2,8 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { usageApi } from "@/lib/api/usage";
 import { resolveUsageRange } from "@/lib/usageRange";
 import type { LogFilters, UsageRangeSelection } from "@/types/usage";
+import { queryClient } from "@/lib/query/queryClient";
+import type { UsageSnapshotReceipt } from "@/types/usageQuery";
 
 const DEFAULT_REFETCH_INTERVAL_MS = 30000;
 
@@ -101,8 +103,8 @@ export const usageKeys = {
       page,
       pageSize,
     ] as const,
-  detail: (requestId: string) =>
-    [...usageKeys.all, "detail", requestId] as const,
+  detail: (requestId: string, snapshotId?: string) =>
+    [...usageKeys.all, "detail", requestId, snapshotId ?? "live"] as const,
   pricing: () => [...usageKeys.all, "pricing"] as const,
   limits: (providerId: string, appType: string) =>
     [...usageKeys.all, "limits", providerId, appType] as const,
@@ -227,12 +229,26 @@ export function useRequestLogs({
   });
 }
 
-export function useRequestDetail(requestId: string) {
-  return useQuery({
-    queryKey: usageKeys.detail(requestId),
-    queryFn: () => usageApi.getRequestDetail(requestId),
-    enabled: !!requestId,
-  });
+export function useRequestDetail(
+  requestId: string,
+  snapshotId?: string,
+  expectedReceipt?: UsageSnapshotReceipt,
+) {
+  return useQuery(
+    {
+      queryKey: [
+        ...usageKeys.detail(requestId, snapshotId),
+        expectedReceipt?.queryFingerprint ?? null,
+        expectedReceipt?.snapshotVersion ?? null,
+      ],
+      queryFn: () =>
+        usageApi.getRequestDetail(requestId, snapshotId, expectedReceipt),
+      enabled: !!requestId,
+      retry: false,
+      refetchOnWindowFocus: false,
+    },
+    queryClient,
+  );
 }
 
 export function useModelPricing() {

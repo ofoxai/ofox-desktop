@@ -64,6 +64,7 @@ impl ProxyService {
     /// 这可以避免"接管开启后切换供应商仍使用旧模型"的问题。
     /// 注意：此方法不会修改 Token/Base URL 的接管占位符，仅移除模型字段。
     pub fn cleanup_claude_model_overrides_in_live(&self) -> Result<(), String> {
+        let _io = crate::config_io::lock();
         let mut config = self.read_claude_live()?;
 
         let Some(env) = config.get_mut("env").and_then(|v| v.as_object_mut()) else {
@@ -133,13 +134,14 @@ impl ProxyService {
         &self,
         provider: &Provider,
     ) -> Result<(), String> {
+        let (proxy_url, _) = self.build_proxy_urls().await?;
+        let _io = crate::config_io::lock();
         let mut effective_settings = build_effective_settings_with_common_config(
             self.db.as_ref(),
             &AppType::Claude,
             provider,
         )
         .map_err(|e| format!("构建 claude 有效配置失败: {e}"))?;
-        let (proxy_url, _) = self.build_proxy_urls().await?;
 
         Self::apply_claude_takeover_fields(&mut effective_settings, &proxy_url);
         self.write_claude_live(&effective_settings)?;
@@ -339,15 +341,6 @@ impl ProxyService {
             // 3) 备份 Live 配置（严格：目标 app 不存在则报错）
             self.backup_live_config_strict(&app).await?;
 
-            // 3b) 用当前 provider 模板播种 live。仅 Codex 实际写盘——保证
-            // takeover 阶段 update_codex_toml_field 能落进
-            // [model_providers.<key>] 节，而不是被磁盘上残缺的 config.toml
-            // 卡死。失败则回滚刚做的备份。
-            if let Err(e) = self.seed_live_from_active_provider(&app).await {
-                let _ = self.db.delete_live_backup(app_type_str).await;
-                return Err(e);
-            }
-
             // 4) 同步 Live Token 到数据库（仅当前 app）
             if let Err(e) = self.sync_live_to_provider(&app).await {
                 let _ = self.db.delete_live_backup(app_type_str).await;
@@ -356,18 +349,10 @@ impl ProxyService {
 
             // 5) 写入接管配置（仅当前 app）
             if let Err(e) = self.takeover_live_config_strict(&app).await {
-                log::error!("{app_type_str} 接管 Live 配置失败，尝试恢复: {e}");
-                match self.restore_live_config_for_app(&app).await {
-                    Ok(()) => {
-                        // 恢复成功才清理备份，避免失败场景下丢失唯一可回滚来源
-                        let _ = self.db.delete_live_backup(app_type_str).await;
-                    }
-                    Err(restore_err) => {
-                        log::error!(
-                            "{app_type_str} 恢复 Live 配置失败，将保留备份以便下次启动恢复: {restore_err}"
-                        );
-                    }
-                }
+                // Native writers already atomically roll back their own files.
+                // A later async whole-backup restore cannot prove that binding
+                // has not changed in the meantime. Retain the recovery evidence.
+                log::error!("{app_type_str} 接管失败，已保留备份供核对恢复: {e}");
                 return Err(e);
             }
 
@@ -495,7 +480,6 @@ impl ProxyService {
             self.start().await?;
         }
 
-        self.seed_live_from_active_provider(&app).await?;
         self.takeover_live_config_strict(&app).await?;
 
         Ok(())
@@ -506,9 +490,13 @@ impl ProxyService {
     /// 在清空 Live Token 之前调用，确保数据库中的 Provider 配置有最新的 Token。
     /// 这样代理才能从数据库读取到正确的认证信息。
     async fn sync_live_to_provider(&self, app_type: &AppType) -> Result<(), String> {
+        let _io = crate::config_io::lock();
         let live_config = match app_type {
             AppType::Claude => self.read_claude_live()?,
-            AppType::Codex => self.read_codex_live()?,
+            AppType::Codex => match self.prepare_live_from_active_provider(app_type)? {
+                Some(candidate) => candidate,
+                None => self.read_codex_live()?,
+            },
             AppType::Gemini => self.read_gemini_live()?,
             AppType::OpenCode | AppType::OpenClaw | AppType::Hermes => {
                 // These apps don't support proxy features
@@ -517,10 +505,9 @@ impl ProxyService {
         };
 
         self.sync_live_config_to_provider(app_type, &live_config)
-            .await
     }
 
-    async fn sync_live_config_to_provider(
+    fn sync_live_config_to_provider(
         &self,
         app_type: &AppType,
         live_config: &Value,
@@ -736,19 +723,17 @@ impl ProxyService {
     }
 
     async fn sync_live_to_providers(&self) -> Result<(), String> {
+        let _io = crate::config_io::lock();
         if let Ok(live_config) = self.read_claude_live() {
-            self.sync_live_config_to_provider(&AppType::Claude, &live_config)
-                .await?;
+            self.sync_live_config_to_provider(&AppType::Claude, &live_config)?;
         }
 
         if let Ok(live_config) = self.read_codex_live() {
-            self.sync_live_config_to_provider(&AppType::Codex, &live_config)
-                .await?;
+            self.sync_live_config_to_provider(&AppType::Codex, &live_config)?;
         }
 
         if let Ok(live_config) = self.read_gemini_live() {
-            self.sync_live_config_to_provider(&AppType::Gemini, &live_config)
-                .await?;
+            self.sync_live_config_to_provider(&AppType::Gemini, &live_config)?;
         }
 
         log::info!("Live 配置 Token 同步完成");
@@ -924,21 +909,17 @@ impl ProxyService {
         Ok(())
     }
 
-    /// 用当前 active provider 的完整 settings_config 模板播种 live 配置。
-    ///
-    /// 必须在 `backup_live_config_strict` 之后、`takeover_live_config_strict`
-    /// 之前调用。原因：codex CLI v0.140 只读 `[model_providers.<model_provider>].base_url`，
-    /// 而 takeover 流程的 base_url 改写靠 `update_codex_toml_field`，后者要求
-    /// 文档里已存在 `model_provider`。如果用户磁盘上的 `~/.codex/config.toml` 是
-    /// Codex.app 自己写的（不含 `model_provider`），takeover 改写就会失败/无效。
-    /// 这里先用 provider 行里 `settings_config.config` 的完整 TOML 模板把磁盘
-    /// 重置成"已知良好"状态，takeover 再去改 base_url 才能落到正确节里。
-    ///
-    /// 仅 Codex 需要——Claude/Gemini 是 env 变量改写，没观察到等价问题；缩小回归面。
-    async fn seed_live_from_active_provider(&self, app_type: &AppType) -> Result<(), String> {
+    /// Prepare Codex's active template in memory. Only final takeover writes
+    /// auth/config, under the same shared transaction as its current MCP read.
+    fn prepare_live_from_active_provider(
+        &self,
+        app_type: &AppType,
+    ) -> Result<Option<Value>, String> {
         if !matches!(app_type, AppType::Codex) {
-            return Ok(());
+            return Ok(None);
         }
+
+        let _io = crate::config_io::lock();
 
         let provider_id = crate::settings::get_effective_current_provider(&self.db, app_type)
             .map_err(|e| format!("获取 {} 当前供应商失败: {e}", app_type.as_str()))?;
@@ -946,7 +927,7 @@ impl ProxyService {
             // 没设置 current provider —— 不主动播种，让后续 takeover 走原有路径
             // （多半会失败，但调用方会得到清晰的错误，比静默写入"无 provider"的
             // 残缺模板更安全）。
-            return Ok(());
+            return Ok(None);
         };
 
         let provider = match self
@@ -955,11 +936,21 @@ impl ProxyService {
             .map_err(|e| format!("读取供应商 {provider_id} 失败: {e}"))?
         {
             Some(p) => p,
-            None => return Ok(()),
+            None => return Ok(None),
         };
 
-        crate::codex_config::write_codex_live_from_provider_settings(&provider.settings_config)
-            .map_err(|e| format!("从供应商 {provider_id} 模板写入 Codex Live 失败: {e}"))
+        if !provider
+            .settings_config
+            .get("auth")
+            .is_some_and(Value::is_object)
+            || !provider
+                .settings_config
+                .get("config")
+                .is_some_and(Value::is_string)
+        {
+            return Err("library.nativeInvalid".into());
+        }
+        Ok(Some(provider.settings_config))
     }
 
     /// 构造写入 Live 的代理地址（处理 0.0.0.0 / IPv6 等特殊情况）
@@ -1000,6 +991,7 @@ impl ProxyService {
     /// 因此不需要在 URL 中添加应用前缀。
     async fn takeover_live_configs(&self) -> Result<(), String> {
         let (proxy_url, proxy_codex_base_url) = self.build_proxy_urls().await?;
+        let _io = crate::config_io::lock();
 
         // Claude: 修改 ANTHROPIC_BASE_URL，使用占位符替代真实 Token（代理会注入真实 Token）
         if let Ok(mut live_config) = self.read_claude_live() {
@@ -1049,6 +1041,7 @@ impl ProxyService {
     /// 接管指定应用的 Live 配置（严格模式：目标配置不存在则返回错误）
     async fn takeover_live_config_strict(&self, app_type: &AppType) -> Result<(), String> {
         let (proxy_url, proxy_codex_base_url) = self.build_proxy_urls().await?;
+        let _io = crate::config_io::lock();
 
         match app_type {
             AppType::Claude => {
@@ -1058,7 +1051,10 @@ impl ProxyService {
                 log::info!("Claude Live 配置已接管，代理地址: {proxy_url}");
             }
             AppType::Codex => {
-                let mut live_config = self.read_codex_live()?;
+                let mut live_config = match self.prepare_live_from_active_provider(app_type)? {
+                    Some(candidate) => candidate,
+                    None => self.read_codex_live()?,
+                };
 
                 if let Some(auth) = live_config.get_mut("auth").and_then(|v| v.as_object_mut()) {
                     auth.insert("OPENAI_API_KEY".to_string(), json!(PROXY_TOKEN_PLACEHOLDER));
@@ -1102,6 +1098,7 @@ impl ProxyService {
     /// 接管指定应用的 Live 配置（尽力而为：配置不存在/读取失败则跳过）
     async fn takeover_live_config_best_effort(&self, app_type: &AppType) -> Result<(), String> {
         let (proxy_url, proxy_codex_base_url) = self.build_proxy_urls().await?;
+        let _io = crate::config_io::lock();
 
         match app_type {
             AppType::Claude => {
@@ -1161,6 +1158,10 @@ impl ProxyService {
         match app_type {
             AppType::Claude => {
                 if let Ok(Some(backup)) = self.db.get_live_backup("claude").await {
+                    let _io = crate::config_io::lock();
+                    if !self.detect_takeover_in_live_config_for_app(app_type) {
+                        return Ok(());
+                    }
                     let config: Value = serde_json::from_str(&backup.original_config)
                         .map_err(|e| format!("解析 Claude 备份失败: {e}"))?;
                     self.write_claude_live(&config)?;
@@ -1169,6 +1170,10 @@ impl ProxyService {
             }
             AppType::Codex => {
                 if let Ok(Some(backup)) = self.db.get_live_backup("codex").await {
+                    let _io = crate::config_io::lock();
+                    if !self.detect_takeover_in_live_config_for_app(app_type) {
+                        return Ok(());
+                    }
                     let config: Value = serde_json::from_str(&backup.original_config)
                         .map_err(|e| format!("解析 Codex 备份失败: {e}"))?;
                     self.write_codex_live(&config)?;
@@ -1177,6 +1182,10 @@ impl ProxyService {
             }
             AppType::Gemini => {
                 if let Ok(Some(backup)) = self.db.get_live_backup("gemini").await {
+                    let _io = crate::config_io::lock();
+                    if !self.detect_takeover_in_live_config_for_app(app_type) {
+                        return Ok(());
+                    }
                     let config: Value = serde_json::from_str(&backup.original_config)
                         .map_err(|e| format!("解析 Gemini 备份失败: {e}"))?;
                     self.write_gemini_live(&config)?;
@@ -1245,6 +1254,10 @@ impl ProxyService {
             .get_live_backup(app_type_str)
             .await
             .map_err(|e| format!("获取 {app_type_str} Live 备份失败: {e}"))?;
+        let _io = crate::config_io::lock();
+        if !self.detect_takeover_in_live_config_for_app(app_type) {
+            return Ok(());
+        }
         if let Some(backup) = backup {
             let config: Value = serde_json::from_str(&backup.original_config)
                 .map_err(|e| format!("解析 {app_type_str} 备份失败: {e}"))?;
@@ -1318,6 +1331,7 @@ impl ProxyService {
     /// - Ok(true)：已成功写回
     /// - Ok(false)：缺少当前供应商/供应商不存在，无法写回
     fn restore_live_from_ssot_for_app(&self, app_type: &AppType) -> Result<bool, String> {
+        let _io = crate::config_io::lock();
         let current_id = crate::settings::get_effective_current_provider(&self.db, app_type)
             .map_err(|e| format!("获取 {app_type:?} 当前供应商失败: {e}"))?;
 
@@ -1333,6 +1347,10 @@ impl ProxyService {
         let Some(provider) = providers.get(&current_id) else {
             return Ok(false);
         };
+
+        if crate::database::dao::providers_seed::is_ofox_seed_id(&provider.id) {
+            return Ok(false);
+        }
 
         write_live_with_common_config(self.db.as_ref(), app_type, provider)
             .map_err(|e| format!("写入 {app_type:?} Live 配置失败: {e}"))?;
@@ -1371,6 +1389,7 @@ impl ProxyService {
     }
 
     fn cleanup_claude_takeover_placeholders_in_live(&self) -> Result<(), String> {
+        let _io = crate::config_io::lock();
         let mut config = self.read_claude_live()?;
 
         let Some(env) = config.get_mut("env").and_then(|v| v.as_object_mut()) else {
@@ -1402,6 +1421,7 @@ impl ProxyService {
     }
 
     fn cleanup_codex_takeover_placeholders_in_live(&self) -> Result<(), String> {
+        let _io = crate::config_io::lock();
         let mut config = self.read_codex_live()?;
 
         if let Some(auth) = config.get_mut("auth").and_then(|v| v.as_object_mut()) {
@@ -1426,6 +1446,7 @@ impl ProxyService {
     }
 
     fn cleanup_gemini_takeover_placeholders_in_live(&self) -> Result<(), String> {
+        let _io = crate::config_io::lock();
         let mut config = self.read_gemini_live()?;
 
         let Some(env) = config.get_mut("env").and_then(|v| v.as_object_mut()) else {
@@ -1703,7 +1724,12 @@ impl ProxyService {
         } else {
             target_config
                 .parse::<toml_edit::DocumentMut>()
-                .map_err(|e| format!("解析新的 Codex config.toml 失败: {e}"))?
+                .map_err(|e| {
+                    format!(
+                        "解析新的 Codex config.toml 失败: {}",
+                        crate::redact::describe_toml_error(target_config, &e)
+                    )
+                })?
         };
 
         let existing_config = existing_backup
@@ -1717,7 +1743,12 @@ impl ProxyService {
 
         let existing_doc = existing_config
             .parse::<toml_edit::DocumentMut>()
-            .map_err(|e| format!("解析现有 Codex 备份失败: {e}"))?;
+            .map_err(|e| {
+                format!(
+                    "解析现有 Codex 备份失败: {}",
+                    crate::redact::describe_toml_error(existing_config, &e)
+                )
+            })?;
 
         if let Some(existing_mcp_servers) = existing_doc.get("mcp_servers") {
             match target_doc.get_mut("mcp_servers") {
@@ -1772,6 +1803,7 @@ impl ProxyService {
     }
 
     fn read_claude_live(&self) -> Result<Value, String> {
+        let _io = crate::config_io::lock();
         let path = get_claude_settings_path();
         if !path.exists() {
             return Err("Claude 配置文件不存在".to_string());
@@ -1805,12 +1837,14 @@ impl ProxyService {
     /// 整文件写 `~/.claude/settings.json`。**`config` 必须是调用方已经算好的
     /// 最终磁盘态**——这里不做 merge。（Ofox 绑定不走这里，见 `services::ofox_bind`。）
     fn write_claude_live(&self, config: &Value) -> Result<(), String> {
+        let _io = crate::config_io::lock();
         let path = get_claude_settings_path();
         let settings = crate::services::provider::sanitize_claude_settings_for_live(config);
         write_json_file(&path, &settings).map_err(|e| format!("写入 Claude 配置失败: {e}"))
     }
 
     fn read_codex_live(&self) -> Result<Value, String> {
+        let _io = crate::config_io::lock();
         use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
 
         // `auth.json` / `config.toml` 任一缺失都视为"用户该字段没有配置"。
@@ -1836,6 +1870,7 @@ impl ProxyService {
     }
 
     fn write_codex_live(&self, config: &Value) -> Result<(), String> {
+        let _io = crate::config_io::lock();
         use crate::codex_config::{
             get_codex_auth_path, get_codex_config_path, write_codex_live_atomic,
         };
@@ -1853,7 +1888,9 @@ impl ProxyService {
             }
             (None, Some(cfg)) => {
                 let config_path = get_codex_config_path();
-                crate::config::write_text_file(&config_path, cfg)
+                let cfg = crate::codex_config::preserve_current_mcp(cfg)
+                    .map_err(|_| "library.nativeInvalid".to_string())?;
+                crate::config::write_text_file(&config_path, &cfg)
                     .map_err(|e| format!("写入 Codex config 失败: {e}"))?;
             }
             (None, None) => {}
@@ -1863,6 +1900,7 @@ impl ProxyService {
     }
 
     fn read_gemini_live(&self) -> Result<Value, String> {
+        let _io = crate::config_io::lock();
         use crate::gemini_config::{env_to_json, get_gemini_env_path, read_gemini_env};
 
         // `.env` 缺失视为空 env map——同 `read_codex_live` 的契约。bind 流程
@@ -1878,12 +1916,52 @@ impl ProxyService {
     }
 
     fn write_gemini_live(&self, config: &Value) -> Result<(), String> {
-        use crate::gemini_config::{json_to_env, write_gemini_env_atomic};
-
-        let env_map = json_to_env(config).map_err(|e| format!("转换 Gemini 配置失败: {e}"))?;
-        write_gemini_env_atomic(&env_map).map_err(|e| format!("写入 Gemini env 失败: {e}"))?;
-        crate::gemini_config::ensure_api_key_auth_selected()
-            .map_err(|e| format!("写入 Gemini 认证方式失败: {e}"))?;
+        let _io = crate::config_io::lock();
+        use crate::gemini_config::{
+            get_gemini_env_path, get_gemini_settings_path, json_to_env, serialize_env_file,
+        };
+        let env_map = json_to_env(config).map_err(|_| "library.invalidEnvironment".to_string())?;
+        let settings_path = get_gemini_settings_path();
+        let original = crate::services::library::coordinator::read(&settings_path)
+            .map_err(|_| "library.nativeInvalid".to_string())?
+            .unwrap_or_else(|| "{}".into());
+        crate::services::library::mcp_codec::parse_native(&original, "gemini")
+            .map_err(|_| "library.nativeInvalid".to_string())?;
+        let selected = env_map
+            .get("GEMINI_API_KEY")
+            .is_some_and(|value| !value.trim().is_empty());
+        let output = if selected {
+            Some(
+                crate::json5_sections::edit_object_paths(
+                    &original,
+                    crate::json5_sections::KeyStyle::Json,
+                    &[(
+                        vec!["security".into(), "auth".into(), "selectedType".into()],
+                        Some(json!("gemini-api-key")),
+                    )],
+                )
+                .map_err(|_| "library.nativeInvalid".to_string())?,
+            )
+        } else {
+            None
+        };
+        let mut txn = crate::config::FileTxn::new();
+        let result = (|| {
+            txn.write_with_mode(
+                &get_gemini_env_path(),
+                serialize_env_file(&env_map).as_bytes(),
+                0o600,
+            )?;
+            if let Some(output) = output {
+                txn.write(&settings_path, output.as_bytes())?;
+            }
+            Ok::<_, crate::error::AppError>(())
+        })();
+        if let Err(error) = result {
+            txn.rollback()
+                .map_err(|_| "library.rollbackFailed".to_string())?;
+            return Err(error.to_string());
+        }
         Ok(())
     }
 
@@ -2034,55 +2112,196 @@ impl ProxyService {
 mod tests {
     use super::*;
     use crate::provider::ProviderMeta;
+    use crate::test_sandbox::sandbox;
     use serial_test::serial;
-    use std::env;
-    use tempfile::TempDir;
 
-    struct TempHome {
-        #[allow(dead_code)]
-        dir: TempDir,
-        original_home: Option<String>,
-        original_userprofile: Option<String>,
-        original_test_home: Option<String>,
+    #[tokio::test]
+    #[serial]
+    async fn preparing_takeover_never_publishes_an_intermediate_seed() {
+        let _sandbox = sandbox();
+        let db = Arc::new(Database::memory().unwrap());
+        db.save_provider(
+            "codex",
+            &Provider::with_id(
+                "selected".into(),
+                "Selected".into(),
+                json!({"auth":{"OPENAI_API_KEY":"selected"},"config":"model = 'selected'\n"}),
+                None,
+            ),
+        )
+        .unwrap();
+        db.set_current_provider("codex", "selected").unwrap();
+        crate::settings::set_current_provider(&AppType::Codex, Some("selected")).unwrap();
+        let auth = crate::codex_config::get_codex_auth_path();
+        let config = crate::codex_config::get_codex_config_path();
+        crate::config::atomic_write(&auth, br#"{"personal":"auth"}"#).unwrap();
+        crate::config::atomic_write(
+            &config,
+            b"model = 'personal'\n[mcp_servers.user]\ncommand = 'server'\n",
+        )
+        .unwrap();
+        let before_auth = std::fs::read(&auth).unwrap();
+        let before_config = std::fs::read(&config).unwrap();
+        ProxyService::new(db)
+            .prepare_live_from_active_provider(&AppType::Codex)
+            .unwrap();
+        assert_eq!(std::fs::read(auth).unwrap(), before_auth);
+        assert_eq!(std::fs::read(config).unwrap(), before_config);
     }
 
-    impl TempHome {
-        fn new() -> Self {
-            let dir = TempDir::new().expect("failed to create temp home");
-            let original_home = env::var("HOME").ok();
-            let original_userprofile = env::var("USERPROFILE").ok();
-            let original_test_home = env::var("CC_SWITCH_TEST_HOME").ok();
-
-            env::set_var("HOME", dir.path());
-            env::set_var("USERPROFILE", dir.path());
-            env::set_var("CC_SWITCH_TEST_HOME", dir.path());
-
-            Self {
-                dir,
-                original_home,
-                original_userprofile,
-                original_test_home,
-            }
-        }
+    #[tokio::test]
+    #[serial]
+    async fn restoring_a_backup_does_not_overwrite_a_completed_rebind() {
+        let _sandbox = sandbox();
+        let db = Arc::new(Database::memory().unwrap());
+        let service = ProxyService::new(db.clone());
+        db.save_live_backup(
+            "claude",
+            &json!({"env":{"ANTHROPIC_AUTH_TOKEN":"old"}}).to_string(),
+        )
+        .await
+        .unwrap();
+        let path = get_claude_settings_path();
+        crate::config::atomic_write(
+            &path,
+            br#"{"env":{"ANTHROPIC_AUTH_TOKEN":"new"},"mcpServers":{"user":{"command":"s"}}}"#,
+        )
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        service
+            .restore_live_config_for_app_inner(&AppType::Claude)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), before);
     }
 
-    impl Drop for TempHome {
-        fn drop(&mut self) {
-            match &self.original_home {
-                Some(value) => env::set_var("HOME", value),
-                None => env::remove_var("HOME"),
-            }
+    #[test]
+    #[serial]
+    fn ofox_seed_is_not_reported_as_a_successful_ssot_restore() {
+        let _sandbox = sandbox();
+        let db = Arc::new(Database::memory().unwrap());
+        let provider = Provider::with_id(
+            "ofox-codex".into(),
+            "OFox".into(),
+            json!({"auth":{},"config":""}),
+            None,
+        );
+        db.save_provider("codex", &provider).unwrap();
+        db.set_current_provider("codex", "ofox-codex").unwrap();
+        crate::settings::set_current_provider(&AppType::Codex, Some("ofox-codex")).unwrap();
+        assert!(!ProxyService::new(db)
+            .restore_live_from_ssot_for_app(&AppType::Codex)
+            .unwrap());
+    }
 
-            match &self.original_userprofile {
-                Some(value) => env::set_var("USERPROFILE", value),
-                None => env::remove_var("USERPROFILE"),
-            }
-
-            match &self.original_test_home {
-                Some(value) => env::set_var("CC_SWITCH_TEST_HOME", value),
-                None => env::remove_var("CC_SWITCH_TEST_HOME"),
-            }
+    #[test]
+    #[serial]
+    fn seeding_reads_the_provider_after_the_shared_transaction() {
+        let _sandbox = sandbox();
+        let db = Arc::new(Database::memory().unwrap());
+        for (id, model) in [("old", "old-model"), ("new", "new-model")] {
+            db.save_provider(
+                "codex",
+                &Provider::with_id(
+                    id.into(),
+                    id.into(),
+                    json!({"auth":{"OPENAI_API_KEY":id},"config":format!("model = '{model}'\n")}),
+                    None,
+                ),
+            )
+            .unwrap();
         }
+        db.set_current_provider("codex", "old").unwrap();
+        crate::settings::set_current_provider(&AppType::Codex, Some("old")).unwrap();
+        let service = Arc::new(ProxyService::new(db.clone()));
+        let io = crate::config_io::lock();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            done_tx
+                .send(service.prepare_live_from_active_provider(&AppType::Codex))
+                .unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(done_rx
+            .recv_timeout(std::time::Duration::from_millis(150))
+            .is_err());
+        db.set_current_provider("codex", "new").unwrap();
+        crate::settings::set_current_provider(&AppType::Codex, Some("new")).unwrap();
+        drop(io);
+        let prepared = done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        worker.join().unwrap();
+        assert!(prepared["config"].as_str().unwrap().contains("new-model"));
+        assert!(!crate::codex_config::get_codex_auth_path().exists());
+    }
+
+    #[test]
+    #[serial]
+    fn takeover_observes_user_edits_after_a_shared_config_transaction() {
+        let _sandbox = sandbox();
+        let service = std::sync::Arc::new(ProxyService::new(std::sync::Arc::new(
+            Database::memory().unwrap(),
+        )));
+        let path = get_claude_settings_path();
+        crate::config::atomic_write(
+            &path,
+            br#"{"env":{"ANTHROPIC_AUTH_TOKEN":"old-key"},"personal":"old"}"#,
+        )
+        .unwrap();
+        let io = crate::config_io::lock();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            started_tx.send(()).unwrap();
+            let result = runtime.block_on(service.takeover_live_config_strict(&AppType::Claude));
+            finished_tx.send(result).unwrap();
+        });
+        started_rx.recv().unwrap();
+        let early = finished_rx.recv_timeout(std::time::Duration::from_millis(100));
+        crate::config::atomic_write(
+            &path,
+            br#"{"env":{"ANTHROPIC_AUTH_TOKEN":"new-key"},"personal":"latest"}"#,
+        )
+        .unwrap();
+        drop(io);
+        let result = match early {
+            Ok(result) => result,
+            Err(_) => finished_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap(),
+        };
+        result.unwrap();
+        worker.join().unwrap();
+        let live: Value = read_json_file(&path).unwrap();
+        assert_eq!(live["personal"], "latest");
+        assert_eq!(live["env"]["ANTHROPIC_AUTH_TOKEN"], PROXY_TOKEN_PLACEHOLDER);
+    }
+
+    #[test]
+    #[serial]
+    fn a_corrupt_gemini_auth_file_blocks_proxy_env_writes() {
+        let _sandbox = sandbox();
+        let service = ProxyService::new(std::sync::Arc::new(Database::memory().unwrap()));
+        let env = crate::gemini_config::get_gemini_env_path();
+        let settings = crate::gemini_config::get_gemini_settings_path();
+        crate::config::atomic_write(&env, b"GEMINI_API_KEY=old-sandbox\n").unwrap();
+        crate::config::atomic_write(&settings, b"broken").unwrap();
+        assert!(service
+            .write_gemini_live(&json!({"env":{"GEMINI_API_KEY":"new-sandbox"}}))
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(env).unwrap(),
+            "GEMINI_API_KEY=old-sandbox\n"
+        );
     }
 
     #[test]
@@ -2153,15 +2372,39 @@ model = "gpt-5.1-codex"
         assert_eq!(output.trim(), input.trim());
     }
 
+    #[test]
+    fn broken_codex_config_errors_never_echo_the_key_in_them() {
+        let broken = "model = \"gpt-5\"\nexperimental_bearer_token = \"sk-of-abc123456789\" oops\n";
+
+        let mut target = json!({ "config": broken });
+        let new_error = ProxyService::preserve_codex_mcp_servers_in_backup(
+            &mut target,
+            &json!({ "config": "" }),
+        )
+        .unwrap_err();
+
+        let mut target = json!({ "config": "model = \"gpt-6\"\n" });
+        let existing_error = ProxyService::preserve_codex_mcp_servers_in_backup(
+            &mut target,
+            &json!({ "config": broken }),
+        )
+        .unwrap_err();
+
+        for error in [new_error, existing_error] {
+            assert!(error.contains("line 2, column"), "{error}");
+            assert!(!error.contains("abc123456789"), "{error}");
+        }
+    }
+
     #[tokio::test]
     #[serial]
-    async fn seed_live_from_active_provider_writes_full_codex_template() {
+    async fn preparation_keeps_a_full_codex_template_without_writing_live() {
         // 关键路径测试：bind 流程的核心修复点。
         // 当 active codex provider 是 ofox-codex（带完整 model_provider+section
-        // 模板）时，seed_live_from_active_provider 必须把模板原封写到磁盘的
+        // 模板）时，prepare_live_from_active_provider 必须把模板原封写到磁盘的
         // ~/.codex/auth.json + config.toml，否则后续 update_toml_base_url 没
         // model_provider 可写，整条 takeover 链对 codex CLI v0.140 失效。
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2183,24 +2426,19 @@ model = "gpt-5.1-codex"
         crate::settings::set_current_provider(&AppType::Codex, Some("ofox-codex"))
             .expect("set effective current provider");
 
-        service
-            .seed_live_from_active_provider(&AppType::Codex)
-            .await
-            .expect("seed should succeed");
-
-        // 验证磁盘 auth.json
-        let auth_path = crate::codex_config::get_codex_auth_path();
-        let auth_text = std::fs::read_to_string(&auth_path).expect("read auth.json");
-        let auth: serde_json::Value = serde_json::from_str(&auth_text).expect("parse auth.json");
+        let prepared = service
+            .prepare_live_from_active_provider(&AppType::Codex)
+            .unwrap()
+            .unwrap();
+        assert!(!crate::codex_config::get_codex_auth_path().exists());
+        let auth = &prepared["auth"];
         assert_eq!(
             auth.get("OPENAI_API_KEY").and_then(|v| v.as_str()),
             Some("real-oauth-token")
         );
 
         // 验证磁盘 config.toml 含 model_provider + 对应 section
-        let cfg_path = crate::codex_config::get_codex_config_path();
-        let cfg_text = std::fs::read_to_string(&cfg_path).expect("read config.toml");
-        let cfg: toml::Value = toml::from_str(&cfg_text).expect("parse config.toml");
+        let cfg: toml::Value = toml::from_str(prepared["config"].as_str().unwrap()).unwrap();
         assert_eq!(
             cfg.get("model_provider").and_then(|v| v.as_str()),
             Some("ofox"),
@@ -2217,10 +2455,10 @@ model = "gpt-5.1-codex"
     #[tokio::test]
     #[serial]
     async fn seed_then_update_base_url_lands_in_provider_section() {
-        // 接 seed_live_from_active_provider 之后的 takeover 改写一步：
+        // 接 prepare_live_from_active_provider 之后的 takeover 改写一步：
         // update_toml_base_url 应该把代理 URL 落到 [model_providers.ofox].base_url，
         // 不再触发"无 model_provider → 顶层 fallback"那条已废弃路径。
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2241,16 +2479,13 @@ model = "gpt-5.1-codex"
         crate::settings::set_current_provider(&AppType::Codex, Some("ofox-codex"))
             .expect("set effective current");
 
-        service
-            .seed_live_from_active_provider(&AppType::Codex)
-            .await
-            .expect("seed");
-
-        // 模拟 takeover 阶段：读 live → 改 base_url 到代理 → 写回
-        let cfg_path = crate::codex_config::get_codex_config_path();
-        let cfg_text = std::fs::read_to_string(&cfg_path).expect("read config.toml");
+        let prepared = service
+            .prepare_live_from_active_provider(&AppType::Codex)
+            .unwrap()
+            .unwrap();
+        let cfg_text = prepared["config"].as_str().unwrap();
         let proxy_url = "http://127.0.0.1:15721/v1";
-        let updated = ProxyService::update_toml_base_url(&cfg_text, proxy_url);
+        let updated = ProxyService::update_toml_base_url(cfg_text, proxy_url);
 
         let parsed: toml::Value = toml::from_str(&updated).expect("parse updated toml");
         let provider_base_url = parsed
@@ -2264,9 +2499,9 @@ model = "gpt-5.1-codex"
 
     #[tokio::test]
     #[serial]
-    async fn seed_live_from_active_provider_no_op_for_non_codex() {
+    async fn prepare_live_from_active_provider_no_op_for_non_codex() {
         // Claude/Gemini 不在本次修复范围；helper 直接 Ok 返回，不写盘。
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2274,25 +2509,22 @@ model = "gpt-5.1-codex"
 
         // 不预置任何 provider — 即便有也不该触发写盘
         service
-            .seed_live_from_active_provider(&AppType::Claude)
-            .await
+            .prepare_live_from_active_provider(&AppType::Claude)
             .expect("claude no-op");
         service
-            .seed_live_from_active_provider(&AppType::Gemini)
-            .await
+            .prepare_live_from_active_provider(&AppType::Gemini)
             .expect("gemini no-op");
 
         // codex 路径在没有 current provider 时也是 no-op，不报错
         service
-            .seed_live_from_active_provider(&AppType::Codex)
-            .await
+            .prepare_live_from_active_provider(&AppType::Codex)
             .expect("codex with no current provider no-ops");
     }
 
     #[tokio::test]
     #[serial]
     async fn sync_claude_token_does_not_add_anthropic_api_key() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2322,7 +2554,6 @@ model = "gpt-5.1-codex"
 
         service
             .sync_live_config_to_provider(&AppType::Claude, &live_config)
-            .await
             .expect("sync");
 
         let updated = db
@@ -2348,7 +2579,7 @@ model = "gpt-5.1-codex"
     #[tokio::test]
     #[serial]
     async fn sync_claude_token_respects_existing_api_key_field() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2378,7 +2609,6 @@ model = "gpt-5.1-codex"
 
         service
             .sync_live_config_to_provider(&AppType::Claude, &live_config)
-            .await
             .expect("sync");
 
         let updated = db
@@ -2404,7 +2634,7 @@ model = "gpt-5.1-codex"
     #[tokio::test]
     #[serial]
     async fn switch_proxy_target_updates_live_backup_when_taken_over() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2466,7 +2696,7 @@ model = "gpt-5.1-codex"
     #[tokio::test]
     #[serial]
     async fn hot_switch_provider_updates_claude_live_while_preserving_takeover_fields() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2570,7 +2800,7 @@ model = "gpt-5.1-codex"
     async fn hot_switch_provider_serializes_same_app_switches() {
         use tokio::time::{sleep, Duration};
 
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2663,7 +2893,7 @@ model = "gpt-5.1-codex"
     async fn restore_waits_for_hot_switch_and_restores_latest_backup() {
         use tokio::time::{sleep, Duration};
 
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2747,7 +2977,7 @@ model = "gpt-5.1-codex"
     #[tokio::test]
     #[serial]
     async fn update_live_backup_from_provider_applies_claude_common_config() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2803,7 +3033,7 @@ model = "gpt-5.1-codex"
     #[tokio::test]
     #[serial]
     async fn update_live_backup_from_provider_applies_codex_common_config() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2862,7 +3092,7 @@ base_url = "https://codex.example/v1"
     #[tokio::test]
     #[serial]
     async fn update_live_backup_from_provider_preserves_codex_mcp_servers() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -2937,7 +3167,7 @@ base_url = "https://new.example/v1"
     #[tokio::test]
     #[serial]
     async fn update_live_backup_from_provider_keeps_new_codex_mcp_entries_on_conflict() {
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
 
         let db = Arc::new(Database::memory().expect("init db"));
@@ -3072,7 +3302,7 @@ command = "latest-command"
     async fn quit_and_crash_cleanup_keep_ofox_bind_records() {
         // 退出、停止、崩溃恢复都会整表清 proxy_live_backup。绑定记录在独立的表里，
         // 必须保留下来；「有绑定」也不能被当成「需要做接管清理」。
-        let _home = TempHome::new();
+        let _home = sandbox();
         crate::settings::reload_settings().expect("reload settings");
         let db = Arc::new(Database::memory().expect("init db"));
         let service = ProxyService::new(db.clone());

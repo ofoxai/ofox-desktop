@@ -1,6 +1,5 @@
 #![allow(non_snake_case)]
 
-use indexmap::IndexMap;
 use std::collections::HashMap;
 
 use serde::Serialize;
@@ -20,19 +19,21 @@ pub async fn get_claude_mcp_status() -> Result<claude_mcp::McpStatus, String> {
 /// 读取 mcp.json 文本内容
 #[tauri::command]
 pub async fn read_claude_mcp_config() -> Result<Option<String>, String> {
-    claude_mcp::read_mcp_json().map_err(|e| e.to_string())
+    Err("library.privateConfigRequiresLibrary".into())
 }
 
 /// 新增或更新一个 MCP 服务器条目
 #[tauri::command]
 pub async fn upsert_claude_mcp_server(id: String, spec: serde_json::Value) -> Result<bool, String> {
-    claude_mcp::upsert_mcp_server(&id, spec).map_err(|e| e.to_string())
+    let _ = (id, spec);
+    Err("library.previewRequired".into())
 }
 
 /// 删除一个 MCP 服务器条目
 #[tauri::command]
 pub async fn delete_claude_mcp_server(id: String) -> Result<bool, String> {
-    claude_mcp::delete_mcp_server(&id).map_err(|e| e.to_string())
+    let _ = id;
+    Err("library.previewRequired".into())
 }
 
 /// 校验命令是否在 PATH 中可用（不执行）
@@ -125,9 +126,8 @@ pub async fn upsert_mcp_server_in_config(
         new_server.apps.opencode = true;
     }
 
-    McpService::upsert_server(&state, new_server)
-        .map(|_| true)
-        .map_err(|e| e.to_string())
+    let _ = (state, new_server);
+    Err("library.previewRequired".into())
 }
 
 /// 在 config.json 中删除一个 MCP 服务器定义
@@ -161,10 +161,17 @@ use crate::app_config::McpServer;
 
 /// 获取所有 MCP 服务器（统一结构）
 #[tauri::command]
-pub async fn get_mcp_servers(
-    state: State<'_, AppState>,
-) -> Result<IndexMap<String, McpServer>, String> {
-    McpService::get_all_servers(&state).map_err(|e| e.to_string())
+pub async fn get_mcp_servers(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let _guard = crate::config_io::lock();
+    let snapshot = state.db.library_snapshot().map_err(|e| e.to_string())?;
+    let servers = McpService::get_all_servers(&state).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!(servers
+        .into_iter()
+        .map(|(id, server)| (
+            id,
+            crate::services::library::mcp_resource::definition_view(&server, &snapshot)
+        ))
+        .collect::<std::collections::BTreeMap<_, _>>()))
 }
 
 /// 添加或更新 MCP 服务器
@@ -173,7 +180,8 @@ pub async fn upsert_mcp_server(
     state: State<'_, AppState>,
     server: McpServer,
 ) -> Result<(), String> {
-    McpService::upsert_server(&state, server).map_err(|e| e.to_string())
+    let _ = (state, server);
+    Err("library.previewRequired".into())
 }
 
 /// 删除 MCP 服务器

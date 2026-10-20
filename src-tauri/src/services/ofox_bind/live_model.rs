@@ -8,10 +8,11 @@
 //! 路由里 Ofox 条目下的模型 id（模板里是只有这一个模型的列表）。OpenCode 的当前模型
 //! 在 TUI 状态文件里（见 `opencode_state`），也是 Ofox 条目下的模型 id。
 
+use std::path::PathBuf;
+
 use serde_json::Value;
 
-use super::json_file::KeyStyle;
-use super::{env_file, json_file, read_text, ManagedFile, Tool};
+use super::{json_file, read_text, ManagedFile, Tool};
 use crate::commands::manage_tool::{read_model_from_settings, write_model_into_settings};
 use crate::config::FileTxn;
 use crate::database::Database;
@@ -35,17 +36,13 @@ fn read_live_model(tool: Tool) -> Result<Option<String>, String> {
             let Some(text) = read_text(&ManagedFile::ClaudeSettings.current_path())? else {
                 return Ok(None);
             };
-            json_file::parse_object(Some(&text), "Claude")?
-                .get("env")
-                .and_then(|env| env.get("ANTHROPIC_MODEL"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
+            super::claude::live_model(&text, &super::claude::catalog_families())?
         }
         Tool::Gemini => {
-            let Some(text) = read_text(&ManagedFile::GeminiEnv.current_path())? else {
+            let Some(text) = read_text(&ManagedFile::GeminiSettings.current_path())? else {
                 return Ok(None);
             };
-            env_file::get_value(&text, "GEMINI_MODEL")
+            super::gemini::live_model(&text)?
         }
         Tool::OpenClaw => {
             let Some(text) = read_text(&ManagedFile::OpenClawConfig.current_path())? else {
@@ -80,82 +77,74 @@ fn read_live_model(tool: Tool) -> Result<Option<String>, String> {
     Ok(model.filter(|model| !model.trim().is_empty()))
 }
 
-/// Claude、Gemini 启动时 env 里的模型优先级比 settings 里的高，而用户在 agent 里
-/// 「记住」的模型（Claude 的 `model`、Gemini 的 `model.name`）写在 settings 里。这里把
-/// env 对齐到它，不然用户的选择下次启动不生效。只认具体的模型名，别名（`sonnet`、
-/// `auto-gemini-3` 之类）由 agent 自己解析，不动。返回是否改了文件。
-fn align_env_with_remembered_model(tool: Tool) -> Result<bool, String> {
-    let mut txn = FileTxn::new();
-    let changed = match tool {
-        Tool::Claude => {
-            let path = ManagedFile::ClaudeSettings.current_path();
-            let Some(text) = read_text(&path)? else {
-                return Ok(false);
-            };
-            let before = json_file::parse_object(Some(&text), "Claude")?;
-            let Some(model) = before
-                .get("model")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|model| model.contains('/'))
-            else {
-                return Ok(false);
-            };
-            let env_model =
-                json_file::get(&before, &["env", "ANTHROPIC_MODEL"]).and_then(Value::as_str);
-            if env_model == Some(model) {
-                return Ok(false);
-            }
-            let mut after = before.clone();
-            json_file::set(&mut after, &["env", "ANTHROPIC_MODEL"], model.into());
-            let rendered = json_file::render_changed(&text, KeyStyle::Json, &before, &after)?;
-            txn.write(&path, rendered.as_bytes())
-                .map_err(|e| format!("写入 Claude 配置失败：{e}"))?;
-            true
-        }
-        Tool::Gemini => {
-            let settings_path = ManagedFile::GeminiSettings.current_path();
-            let Some(settings) = read_text(&settings_path)? else {
-                return Ok(false);
-            };
-            let settings = json_file::parse_object(Some(&settings), "Gemini")?;
-            let Some(model) = json_file::get(&settings, &["model", "name"])
-                .and_then(Value::as_str)
-                .map(crate::gemini_config::normalize_gemini_env_model)
-                .map(|model| model.trim().to_string())
-                .filter(|model| is_concrete_gemini_model(model))
-            else {
-                return Ok(false);
-            };
-            let env_path = ManagedFile::GeminiEnv.current_path();
-            let Some(env) = read_text(&env_path)? else {
-                return Ok(false);
-            };
-            if env_file::get_value(&env, "GEMINI_MODEL").as_deref() == Some(model.as_str()) {
-                return Ok(false);
-            }
-            let updated = env_file::set_value(&env, "GEMINI_MODEL", Some(&model));
-            // `.env` 里有 key，和绑定时一样只给自己读写。
-            txn.write(&env_path, updated.as_bytes())
-                .and_then(|()| txn.set_mode(&env_path, super::gemini::ENV_MODE))
-                .map_err(|e| format!("写入 Gemini 配置失败：{e}"))?;
-            true
-        }
-        _ => false,
-    };
-    Ok(changed)
+/// 采纳之前先把配置规整好（见 [`normalize_edits`]）。写了就和其它 Ofox 写入一样记进
+/// 绑定记录（记不进去就回滚）。返回是否改了文件。
+fn normalize_before_adopt(db: &Database, tool: Tool) -> Result<bool, String> {
+    write_recorded(db, tool, normalize_edits(tool)?)
 }
 
-fn is_concrete_gemini_model(model: &str) -> bool {
-    !model.is_empty()
-        && !model.starts_with("auto")
-        && !matches!(model, "pro" | "flash" | "flash-lite")
+/// 采纳前要写的文件、内容和权限：Gemini 旧版本写在 `.env` 的 `GEMINI_MODEL` 会盖掉
+/// 用户记住的 `model.name`，先去掉它（见 [`super::gemini::migrated`]），采纳时读到的才是
+/// 用户的选择。
+fn normalize_edits(tool: Tool) -> Result<Vec<(PathBuf, String, Option<u32>)>, String> {
+    match tool {
+        Tool::Gemini => super::gemini::migration_edits(),
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// 采纳之后按模板规整：Claude 旧版本写的 `ANTHROPIC_MODEL` 比 `/model` 记住的模型
+/// 优先，迁成默认模型，家族别名跟上最新的模型目录（见 [`super::claude::normalized`]）。
+/// 先采纳再规整：旧绑定里用户的模型可能只在 `ANTHROPIC_MODEL` 里。
+fn normalize_after_adopt(db: &Database, tool: Tool) -> Result<bool, String> {
+    if tool != Tool::Claude {
+        return Ok(false);
+    }
+    let path = ManagedFile::ClaudeSettings.current_path();
+    let Some(text) = read_text(&path)? else {
+        return Ok(false);
+    };
+    let template = super::template(db, tool)?;
+    let edits = super::claude::normalized(&text, &template, &super::claude::catalog_families())?
+        .map(|updated| (path, updated, None));
+    write_recorded(db, tool, edits.into_iter().collect())
+}
+
+/// 写入这些文件并记进绑定记录；记不进去就整批回滚。没有要写的返回 `false`。
+fn write_recorded(
+    db: &Database,
+    tool: Tool,
+    edits: Vec<(PathBuf, String, Option<u32>)>,
+) -> Result<bool, String> {
+    if edits.is_empty() {
+        return Ok(false);
+    }
+    let before = super::read_leaves(tool)?;
+    let mut txn = FileTxn::new();
+    let result = edits
+        .iter()
+        .try_for_each(|(path, text, mode)| match mode {
+            Some(mode) => txn.write_with_mode(path, text.as_bytes(), *mode),
+            None => txn.write(path, text.as_bytes()),
+        })
+        .map_err(|e| format!("写入 {} 配置失败：{e}", tool.label()))
+        .and_then(|()| super::record_written(db, tool, &before));
+    if let Err(error) = result {
+        return Err(super::rollback_with(txn, error));
+    }
+    Ok(true)
 }
 
 /// 把配置文件里的模型写进模板（数据库里的 `ofox-<app>` 服务商）；模板已经是它就
 /// 不动。返回是否改了模板。调用方要先确认配置还是 Ofox 的接入方式。
 pub(super) fn adopt_live_model(db: &Database, tool: Tool) -> Result<bool, String> {
-    align_env_with_remembered_model(tool)?;
+    normalize_before_adopt(db, tool)?;
+    let adopted = adopt(db, tool)?;
+    normalize_after_adopt(db, tool)?;
+    Ok(adopted)
+}
+
+fn adopt(db: &Database, tool: Tool) -> Result<bool, String> {
     let Some(live) = read_live_model(tool)? else {
         return Ok(false);
     };

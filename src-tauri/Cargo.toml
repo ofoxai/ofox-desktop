@@ -7,7 +7,7 @@ authors = ["Jason Young"]
 license = "MIT"
 repository = "https://github.com/farion1231/cc-switch"
 edition = "2021"
-rust-version = "1.85.0"
+rust-version = "1.87.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -25,6 +25,7 @@ tauri-build = { version = "2.4.0", features = [] }
 
 [dependencies]
 serde_json = { version = "1.0", features = ["preserve_order"] }
+aho-corasick = "1.1.4"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
@@ -77,6 +78,7 @@ thiserror = "2.0"
 anyhow = "1.0"
 zip = "2.2"
 serde_yaml = "0.9"
+zstd = "0.13"
 tempfile = "3"
 url = "2.5"
 auto-launch = "0.5"
@@ -90,6 +92,7 @@ indexmap = { version = "2", features = ["serde"] }
 rust_decimal = "1.33"
 uuid = { version = "1.11", features = ["v4"] }
 sha2 = "0.10"
+sha1 = "0.10"
 json5 = "0.4"
 json-five = "0.3.1"
 
@@ -100,6 +103,8 @@ tauri-plugin-single-instance = "2"
 webkit2gtk = { version = "2.0.1", features = ["v2_16"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+process-wrap = { version = "=10.0.1", default-features = false, features = ["tokio1", "job-object", "kill-on-drop", "creation-flags"] }
+windows = { version = "=0.62.2", default-features = false, features = ["Win32_System_Threading", "Win32_Storage_FileSystem"] }
 winreg = "0.52"
 
 [target.'cfg(target_os = "macos")'.dependencies]

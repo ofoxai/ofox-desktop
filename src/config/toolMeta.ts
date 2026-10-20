@@ -73,6 +73,22 @@ export const TOOL_META: Record<
     projectUrl: "https://github.com/NousResearch/hermes-agent",
     projectLinkLabel: "GitHub",
   },
+  dsh: {
+    abbr: "DS",
+    label: "DeepSeek Harness",
+    color: "bg-blue-600",
+    projectUrl: "https://github.com/deepseek-ai/deepseek-harness",
+    projectLinkLabel: "GitHub",
+    cliBin: "dsh",
+  },
+  pi: {
+    abbr: "π",
+    label: "Pi",
+    color: "bg-orange-600",
+    projectUrl: "https://github.com/earendil-works/pi",
+    projectLinkLabel: "GitHub",
+    cliBin: "pi",
+  },
   workbuddy: {
     abbr: "WB",
     label: "WorkBuddy",
@@ -100,7 +116,18 @@ export const TOOL_ORDER = [
   "hermes",
   "gemini",
   "workbuddy",
+  "dsh",
+  "pi",
 ];
+
+/** Tool ids in `TOOL_ORDER`, deduplicated; unknown ids keep their order last. */
+export function inToolOrder(ids: Iterable<string>): string[] {
+  const rank = (id: string) => {
+    const index = TOOL_ORDER.indexOf(id);
+    return index < 0 ? TOOL_ORDER.length : index;
+  };
+  return [...new Set(ids)].sort((a, b) => rank(a) - rank(b));
+}
 
 export const BOUND_TOOLS_STORAGE_KEY = "ofox-bound-tools";
 
@@ -129,4 +156,6 @@ export const INSTALLABLE_TOOLS: readonly string[] = [
   "opencode",
   "openclaw",
   "hermes",
+  "dsh",
+  "pi",
 ];

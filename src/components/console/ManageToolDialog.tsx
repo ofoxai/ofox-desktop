@@ -1,11 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { toast } from "sonner";
 import {
   Loader2,
-  Check,
-  ChevronsUpDown,
   Folder,
   Zap,
   CheckCircle2,
@@ -13,6 +11,7 @@ import {
   Wallet,
   Github,
   ExternalLink,
+  ChevronDown,
 } from "lucide-react";
 import {
   Dialog,
@@ -23,26 +22,11 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { MenuSelect } from "@/components/ui/menu-select";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
-import {
-  Command,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-} from "@/components/ui/command";
+  ModelPicker,
+  MultiModelPicker,
+} from "@/components/model-picker/ModelPicker";
 import { cn } from "@/lib/utils";
 import { isMac } from "@/lib/platform";
 import { settingsApi } from "@/lib/api";
@@ -60,7 +44,6 @@ import {
   filterOfoxModelsByProtocol,
   filterOfoxModelsForOpenCode,
   filterOfoxModelsForWorkBuddy,
-  toWorkBuddyModelSelection,
   type FetchedModel,
 } from "@/lib/api/model-fetch";
 import { readBoundTools, unbindTool } from "@/lib/bindTools";
@@ -76,7 +59,14 @@ import { useOfoxApex } from "@/hooks/useOfoxApex";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
 import { isOfoxBillingManager } from "@/lib/api/ofoxAuth";
 import { ofoxWalletUrl } from "@/lib/ofoxUrls";
-import type { AppId } from "@/lib/api/types";
+import {
+  useModelSelection,
+  savedMessageKey,
+  useSaveModelSelection,
+  filterModelsForNativeTool,
+} from "@/hooks/useModelSelection";
+import { useUninstallPreview } from "@/hooks/useUninstallPreview";
+import type { ToolModelSnapshot } from "@/lib/api/modelSelection";
 
 /** Subset of `ConsolePage`'s `BoundTool` that the dialog actually needs.
  *  Kept structural so we can call it with the full BoundTool object. */
@@ -98,6 +88,9 @@ interface ManageToolDialogProps {
   /** Fired after a successful save or successful unbind so ConsolePage can
    *  refresh its list (status pill, monthly tokens, presence after unbind). */
   onChanged?: () => void;
+  onUninstall?: () => void;
+  /** Controlled dialogs have no Radix Trigger to restore keyboard focus to. */
+  returnFocus?: HTMLElement | null;
 }
 
 function toolLabels(ids: string[]): string {
@@ -126,8 +119,15 @@ function describeUnbindResult(
     parts.push(t("unbind.resultRestored", { count: changed }));
   }
   for (const warning of report.warnings) {
-    parts.push(t(`unbind.warning.${warning.code}`, { defaultValue: "" }));
+    parts.push(
+      t(`unbind.warning.${warning.code}`, {
+        defaultValue: "",
+        keys: report.keptKeys.join(", "),
+      }),
+    );
   }
+  if (report.keptKeys.length > 0)
+    parts.push(t("uiCopy.keptChanges", { keys: report.keptKeys.join(", ") }));
   const text = parts.filter(Boolean).join(" ");
   return text || undefined;
 }
@@ -148,13 +148,46 @@ function arraysEqual(left: string[], right: string[]): boolean {
  * are managed by `bindTools()` / `ofox_bind_tool` and aren't user-editable
  * here. The model is the one knob users actually need.
  */
+/**
+ * Folded notes per tool, mostly how to save a model as the default inside the
+ * agent itself: Ofox writes the same slot and follows that choice.
+ */
+const CONFIGURATION_NOTES: Record<string, string[]> = {
+  chatgpt: [
+    "modelCompatibility.chatgptCodexShared",
+    "modelCompatibility.chatgptDefaultHint",
+  ],
+  claude: ["modelCompatibility.claudeRememberHint"],
+  codex: ["modelCompatibility.codexRememberHint"],
+  gemini: ["modelCompatibility.geminiRememberHint"],
+  opencode: ["modelCompatibility.openCodeProtocol"],
+  pi: ["modelCompatibility.piRememberHint"],
+  hermes: ["modelCompatibility.hermesRememberHint"],
+  openclaw: ["modelCompatibility.openClawRememberHint"],
+  dsh: ["modelCompatibility.dshRememberHint"],
+};
+
 export default function ManageToolDialog({
   tool,
   onOpenChange,
   onChanged,
+  onUninstall,
+  returnFocus,
 }: ManageToolDialogProps) {
   const { t } = useTranslation();
   const open = !!tool;
+  const uninstallPending = useRef(false);
+  const uninstallPreview = useUninstallPreview(
+    tool?.id === "codex" && tool.installationKind === "desktopApp"
+      ? "chatgpt"
+      : (tool?.id ?? null),
+    open && !!onUninstall && tool?.installationStatus !== "notInstalled",
+  );
+  const snapshotQuery = useModelSelection(tool ? [tool.id] : [], open);
+  const saveSelection = useSaveModelSelection();
+  const [editSnapshot, setEditSnapshot] = useState<ToolModelSnapshot | null>(
+    null,
+  );
   const protocol = tool ? TOOL_PROTOCOL[tool.id] : undefined;
   const desktopCodex =
     tool?.id === "codex" && tool.installationKind === "desktopApp";
@@ -219,6 +252,7 @@ export default function ManageToolDialog({
   const [workBuddyTestLoading, setWorkBuddyTestLoading] = useState(false);
   const workBuddyTestRequest = useRef(0);
   const configurationReady = bindingStatus?.status === "configured";
+  const modelWritable = configurationReady && editSnapshot?.canWrite !== false;
   const operationBusy =
     saving || restoring || unbindLoading || pingLoading || workBuddyTestLoading;
 
@@ -239,6 +273,7 @@ export default function ManageToolDialog({
     setCurrentModels([]);
     setDraftModels([]);
     setCurrentModelLoaded(false);
+    setEditSnapshot(null);
     setModels([]);
     setModelsLoading(tool.id === "workbuddy");
     setModelsError(false);
@@ -268,89 +303,52 @@ export default function ManageToolDialog({
         if (!cancelled) setFilePathError(String(e));
       }
     };
-    const loadBindingStatus = async () => {
-      try {
-        const status = await ofoxBindApi.status(tool.id);
-        if (!cancelled) setBindingStatus(status);
-      } catch (e) {
-        console.warn(`[ManageToolDialog] binding status(${tool.id}) failed`, e);
-        if (!cancelled)
-          setBindingStatus({
-            status: "unknown",
-            message: null,
-            missingFiles: [],
-            modifiedFields: [],
-            envOverrides: [],
-          });
+    const loadDetails = async () => {
+      if (tool.id === "workbuddy") {
+        const [catalog, endpoint] = await Promise.allSettled([
+          fetchOfoxModels("openai"),
+          manageToolApi.getWorkBuddyEndpointStatus(),
+        ]);
+        if (cancelled) return;
+        if (catalog.status === "fulfilled") {
+          setModels(filterOfoxModelsForWorkBuddy(catalog.value));
+        } else setModelsError(true);
+        if (endpoint.status === "fulfilled")
+          setWorkBuddyEndpointStatus(endpoint.value);
+        setModelsLoading(false);
+      } else if (tool.id === "opencode") {
+        const hints = await manageToolApi
+          .getOpenCodeProtocolHints()
+          .catch(() => []);
+        if (!cancelled) setProtocolHints(hints);
       }
     };
-    const loadModels = async () => {
-      try {
-        if (tool.id === "workbuddy") {
-          const [managedResult, catalogResult, endpointResult] =
-            await Promise.allSettled([
-              manageToolApi.getWorkBuddyManagedModels(),
-              fetchOfoxModels("openai"),
-              manageToolApi.getWorkBuddyEndpointStatus(),
-            ]);
-          if (!cancelled) {
-            if (managedResult.status === "fulfilled") {
-              setCurrentModels(managedResult.value);
-              setDraftModels(managedResult.value);
-              setCurrentModelLoaded(true);
-            }
-            if (catalogResult.status === "fulfilled") {
-              setModels(filterOfoxModelsForWorkBuddy(catalogResult.value));
-              setModelsError(false);
-            } else {
-              setModelsError(true);
-            }
-            if (endpointResult.status === "fulfilled") {
-              setWorkBuddyEndpointStatus(endpointResult.value);
-            }
-            setModelsLoading(false);
-          }
-          if (managedResult.status === "rejected") throw managedResult.reason;
-          if (catalogResult.status === "rejected") throw catalogResult.reason;
-          return;
-        }
-        if (tool.id === "opencode") {
-          const saved = await manageToolApi.getActiveModels(tool.id);
-          if (!cancelled) {
-            setCurrentModels(saved);
-            setDraftModels(saved);
-            setCurrentModelLoaded(true);
-          }
-          // 后台检测的结果只是提示，读不出来不影响管理。
-          const hints = await manageToolApi
-            .getOpenCodeProtocolHints()
-            .catch(() => []);
-          if (!cancelled) setProtocolHints(hints);
-          return;
-        }
-        // ChatGPT 桌面 App 的模型记在它自己的状态文件里，和首页同一个来源，免得两边不一致。
-        const m =
-          tool.id === "chatgpt"
-            ? await manageToolApi.getChatGptModel()
-            : await manageToolApi.getActiveModel(tool.id);
-        if (!cancelled) {
-          setCurrentModel(m);
-          setDraftModel(m);
-          setCurrentModelLoaded(true);
-        }
-      } catch (e) {
-        // Soft-fail: an empty model just means "OfoxAI default routing",
-        // which is a valid state. Don't block the dialog over it.
-        console.warn(`[ManageToolDialog] getActiveModel(${tool.id}) failed`, e);
-        if (!cancelled && tool.id === "workbuddy") setModelsLoading(false);
-      }
-    };
-    void Promise.all([loadPath(), loadModels(), loadBindingStatus()]);
+    void loadPath();
+    void loadDetails();
 
     return () => {
       cancelled = true;
     };
   }, [tool]);
+
+  // Freeze the initial revision while editing. Event refreshes never overwrite a draft.
+  useEffect(() => {
+    if (!tool || editSnapshot) return;
+    const snapshot = snapshotQuery.data?.tools.find(
+      (item) => item.toolId === tool.id,
+    );
+    if (!snapshot) return;
+    setEditSnapshot(snapshot);
+    setBindingStatus(snapshot.binding);
+    if (snapshot.managedSelection.kind === "models") {
+      setCurrentModels(snapshot.managedSelection.models);
+      setDraftModels(snapshot.managedSelection.models);
+    } else {
+      setCurrentModel(snapshot.managedSelection.model);
+      setDraftModel(snapshot.managedSelection.model);
+    }
+    setCurrentModelLoaded(true);
+  }, [tool, editSnapshot, snapshotQuery.data]);
 
   // 模型列表在打开窗口时就加载（见下面的 effect），不让用户去点刷新。WorkBuddy
   // 在上面的初始加载里一起取，因为它的当前值要和兼容目录对上。加载失败时在
@@ -383,9 +381,11 @@ export default function ManageToolDialog({
           // 模型不列出来。WorkBuddy 只走 chat；OpenCode chat、responses 都行。
           tool?.id === "workbuddy"
             ? filterOfoxModelsForWorkBuddy(all)
-            : multiModel
-              ? filterOfoxModelsForOpenCode(all)
-              : filterOfoxModelsByProtocol(all, protocol, requiredEndpoint),
+            : tool?.id === "pi" || tool?.id === "dsh"
+              ? filterModelsForNativeTool(all)
+              : multiModel
+                ? filterOfoxModelsForOpenCode(all)
+                : filterOfoxModelsByProtocol(all, protocol, requiredEndpoint),
         );
       } catch (e) {
         console.error("[ManageToolDialog] fetchOfoxModels failed", e);
@@ -506,9 +506,9 @@ export default function ManageToolDialog({
   const handleOpenFolder = useCallback(async () => {
     if (!tool) return;
     try {
-      await settingsApi.openConfigFolder(managedToolId(tool.id) as AppId);
+      await settingsApi.openConfigFolder(managedToolId(tool.id));
     } catch (e) {
-      toast.error(`打开配置目录失败：${String(e)}`);
+      toast.error(t("uiCopy.folderFailed", { value1: String(e) }));
     }
   }, [tool]);
 
@@ -517,7 +517,7 @@ export default function ManageToolDialog({
     try {
       await settingsApi.openExternal(projectUrl);
     } catch (e) {
-      toast.error(`打开项目链接失败：${String(e)}`);
+      toast.error(t("uiCopy.projectFailed", { value1: String(e) }));
     }
   }, [projectUrl]);
 
@@ -526,65 +526,50 @@ export default function ManageToolDialog({
     : draftModel !== currentModel;
 
   const handleSave = useCallback(async () => {
-    if (!tool || !configurationReady || operationBusy) return;
+    if (!tool || !modelWritable || operationBusy) return;
     const workBuddy = tool.id === "workbuddy";
     if (!isDirty && !currentModelLoaded) return;
     let savedCount = draftModels.length;
     setSaving(true);
     try {
-      if (workBuddy) {
-        if (draftModels.length === 0) {
-          throw new Error("请至少选择一个 WorkBuddy 模型");
-        }
-        const selections = draftModels.map((id) =>
-          models.find((model) => model.id === id),
+      if (!editSnapshot) return;
+      if (multiModel && draftModels.length === 0)
+        throw new Error(t("modelExperience.chooseModels"));
+      if (
+        workBuddy &&
+        draftModels.some((id) => !models.some((model) => model.id === id))
+      ) {
+        throw new Error(t("modelExperience.missingCatalogModels"));
+      }
+      if (!multiModel && !draftModel.trim()) {
+        throw new Error(t("modelExperience.chooseModel"));
+      }
+      const report = await saveSelection.mutateAsync({
+        tool: tool.id,
+        selection: multiModel
+          ? { kind: "models", models: draftModels }
+          : { kind: "single", model: draftModel },
+        expectedRevision: editSnapshot.revision,
+      });
+      setEditSnapshot(report.snapshot);
+      if (report.snapshot.managedSelection.kind === "models") {
+        setCurrentModels(report.snapshot.managedSelection.models);
+        savedCount = report.snapshot.managedSelection.models.length;
+      } else setCurrentModel(report.snapshot.managedSelection.model);
+      if (report.skipped.length) {
+        toast.warning(
+          t("modelExperience.skippedModels", {
+            names: report.skipped
+              .map((item) => `${item.id}: ${item.reason}`)
+              .join("; "),
+          }),
         );
-        if (selections.some((model) => !model)) {
-          throw new Error("部分所选模型已不在可用列表中，请移除后再保存");
-        }
-        await manageToolApi.setWorkBuddyManagedModels(
-          selections.map((model) => toWorkBuddyModelSelection(model!)),
-        );
-        setCurrentModels(draftModels);
-      } else if (tool.id === "opencode") {
-        if (draftModels.length === 0) {
-          throw new Error("请至少选择一个 OpenCode 模型");
-        }
-        // 协议由后端按缓存和目录选，不发检测请求；没有可用端点的模型会被跳过。
-        const report = await manageToolApi.setActiveModels(
-          tool.id,
-          draftModels,
-        );
-        setCurrentModels(report.saved);
-        if (report.skipped.length > 0) {
-          toast.warning(
-            t("modelCompatibility.openCodeSkipped", {
-              count: report.skipped.length,
-              names: report.skipped.map((model) => model.id).join("、"),
-            }),
-          );
-        }
-        savedCount = report.saved.length;
-      } else {
-        // 没查出结果时不传协议，由后端按模型目录选（Responses 优先）。
-        const selectedProtocol =
-          compatibilityResults[0]?.status === "compatible"
-            ? (compatibilityResults[0].protocol ?? undefined)
-            : undefined;
-        await manageToolApi.setActiveModel(
-          tool.id,
-          draftModel,
-          undefined,
-          selectedProtocol,
-        );
-        setCurrentModel(draftModel);
       }
       toast.success(
-        workBuddy
-          ? `已同步 ${draftModels.length} 个模型`
-          : tool.id === "opencode"
-            ? `已保存 ${savedCount} 个模型`
-            : "模型已更新",
+        t(
+          multiModel ? "modelExperience.modelsSaved" : savedMessageKey(tool.id),
+          { count: savedCount },
+        ),
       );
       onChanged?.();
       // Close on success — mirrors handleUnbind's收尾 sequence and
@@ -592,7 +577,7 @@ export default function ManageToolDialog({
       // keep the dialog open so the user can fix and retry.
       onOpenChange(false);
     } catch (e) {
-      toast.error(`保存失败：${String(e)}`);
+      toast.error(t("modelExperience.saveFailed", { error: String(e) }));
     } finally {
       setSaving(false);
     }
@@ -602,36 +587,55 @@ export default function ManageToolDialog({
     currentModel,
     isDirty,
     currentModelLoaded,
-    configurationReady,
+    modelWritable,
     operationBusy,
     draftModels,
     models,
-    compatibilityResults,
+    editSnapshot,
+    multiModel,
+    saveSelection,
+    t,
     onChanged,
     onOpenChange,
   ]);
 
   const handleApplyProtocolHints = useCallback(async () => {
-    if (tool?.id !== "opencode" || operationBusy) return;
+    if (tool?.id !== "opencode" || !modelWritable || operationBusy) return;
     setSaving(true);
     try {
-      const report = await manageToolApi.setActiveModels(
-        tool.id,
-        currentModels,
-      );
-      setCurrentModels(report.saved);
-      setDraftModels(report.saved);
+      if (!editSnapshot) return;
+      const report = await saveSelection.mutateAsync({
+        tool: tool.id,
+        selection: { kind: "models", models: currentModels },
+        expectedRevision: editSnapshot.revision,
+      });
+      setEditSnapshot(report.snapshot);
+      const saved =
+        report.snapshot.managedSelection.kind === "models"
+          ? report.snapshot.managedSelection.models
+          : report.saved;
+      setCurrentModels(saved);
+      setDraftModels(saved);
       setProtocolHints(
         await manageToolApi.getOpenCodeProtocolHints().catch(() => []),
       );
       toast.success(t("modelCompatibility.openCodeHintApplied"));
       onChanged?.();
     } catch (e) {
-      toast.error(`保存失败：${String(e)}`);
+      toast.error(t("modelExperience.saveFailed", { error: String(e) }));
     } finally {
       setSaving(false);
     }
-  }, [tool?.id, operationBusy, currentModels, onChanged, t]);
+  }, [
+    tool?.id,
+    modelWritable,
+    operationBusy,
+    currentModels,
+    onChanged,
+    t,
+    editSnapshot,
+    saveSelection,
+  ]);
 
   const probeModel =
     tool?.id === "opencode" ? (draftModels[0] ?? "") : draftModel;
@@ -650,7 +654,7 @@ export default function ManageToolDialog({
   const handlePing = useCallback(async () => {
     if (!tool || !configurationReady || operationBusy) return;
     if (!probeModel) {
-      toast.error("请先选择一个模型再测试连通性");
+      toast.error(t("uiCopy.selectModel"));
       return;
     }
     setPingLoading(true);
@@ -754,18 +758,34 @@ export default function ManageToolDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         ref={setDialogContentNode}
-        className="max-w-lg gap-0 p-0"
+        onCloseAutoFocus={(event) => {
+          if (uninstallPending.current) {
+            event.preventDefault();
+            uninstallPending.current = false;
+            onUninstall?.();
+          } else if (
+            returnFocus?.isConnected &&
+            returnFocus.getClientRects().length > 0 &&
+            !returnFocus.closest("[hidden], [inert]") &&
+            !returnFocus.matches(":disabled, [aria-disabled='true']") &&
+            getComputedStyle(returnFocus).visibility === "visible"
+          ) {
+            event.preventDefault();
+            returnFocus.focus({ preventScroll: true });
+          }
+        }}
+        className="w-[calc(100vw-2rem)] max-w-[560px] gap-0 p-0"
         aria-describedby={undefined}
       >
         {tool && (
           <>
-            <DialogHeader className="flex-row items-center gap-3 space-y-0">
-              <ToolBadge toolId={tool.id} size={40} rounded="xl" />
+            <DialogHeader className="flex-row items-center gap-3 space-y-0 px-5 py-4">
+              <ToolBadge toolId={tool.id} size={36} rounded="xl" />
               <div className="min-w-0 flex-1 text-left">
-                <DialogTitle className="text-[15px] font-semibold text-foreground">
+                <DialogTitle className="truncate text-[16px] font-semibold text-ink">
                   {tool.label}
                 </DialogTitle>
-                <div className="truncate text-[12px] text-muted-foreground">
+                <div className="truncate text-[12px] text-ink-muted">
                   {tool.version
                     ? `${TOOL_META[tool.id]?.launchKind === "desktopApp" || tool.installationKind === "desktopApp" ? `${t("toolLifecycle.desktopApp")} · ` : ""}v${tool.version}`
                     : t(
@@ -781,9 +801,15 @@ export default function ManageToolDialog({
                   variant="ghost"
                   size="sm"
                   onClick={() => void handleOpenProject()}
-                  aria-label={`查看 ${tool.label} ${projectLinkLabel}`}
-                  title={`查看 ${tool.label} ${projectLinkLabel}`}
-                  className="shrink-0 text-muted-foreground"
+                  aria-label={t("uiCopy.viewProject", {
+                    value1: tool.label,
+                    value2: projectLinkLabel,
+                  })}
+                  title={t("uiCopy.viewProject", {
+                    value1: tool.label,
+                    value2: projectLinkLabel,
+                  })}
+                  className="shrink-0 text-ink-muted"
                 >
                   {projectLinkLabel === "GitHub" ? (
                     <Github className="mr-1.5 h-4 w-4" />
@@ -795,13 +821,43 @@ export default function ManageToolDialog({
               )}
             </DialogHeader>
 
-            <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
+              {snapshotQuery.isError && (
+                <div
+                  role="alert"
+                  className="rounded-md border border-destructive/30 p-3 text-[12px] text-destructive"
+                >
+                  {t("modelExperience.stateFailed")}{" "}
+                  <button
+                    type="button"
+                    className="underline"
+                    onClick={() => void snapshotQuery.refetch()}
+                  >
+                    {t("modelExperience.retry")}
+                  </button>
+                </div>
+              )}
+              {tool.id === "chatgpt" && editSnapshot && (
+                <p className="text-[12px] text-ink-muted">
+                  {t("modelExperience.observed", {
+                    model:
+                      editSnapshot.observedSelection.model ||
+                      t("modelExperience.unknown"),
+                  })}{" "}
+                  · {t("modelExperience.writableDefault")}
+                </p>
+              )}
+              {!!editSnapshot?.scopeModels?.length && !currentModel && (
+                <p className="text-[12px] text-ink-muted">
+                  {t("modelExperience.mixedScopes")}
+                </p>
+              )}
               {((tool.installationStatus &&
                 tool.installationStatus !== "installed") ||
                 tool.installationError) && (
                 <div
                   role="status"
-                  className="rounded-md border border-border-default bg-muted/20 p-3 text-[12px]"
+                  className="rounded-md border border-line bg-muted/20 p-3 text-[12px]"
                 >
                   <p>
                     {t(
@@ -813,7 +869,7 @@ export default function ManageToolDialog({
                     )}
                   </p>
                   {tool.installationError && (
-                    <p className="mt-1 break-words text-muted-foreground">
+                    <p className="mt-1 break-words text-ink-muted">
                       {tool.installationError}
                     </p>
                   )}
@@ -822,7 +878,7 @@ export default function ManageToolDialog({
               {!configurationReady && (
                 <div
                   role="status"
-                  className="space-y-2 rounded-md border border-orange-300/60 bg-orange-50/40 p-3 text-[12px] dark:border-orange-500/40 dark:bg-orange-950/20"
+                  className="space-y-2 rounded-md border border-brand/30 bg-warn-soft p-3 text-[12px] "
                 >
                   <p>
                     {t(
@@ -849,7 +905,7 @@ export default function ManageToolDialog({
                       size="sm"
                       onClick={() => void handleRestore()}
                       disabled={operationBusy}
-                      className="bg-orange-500 text-white hover:bg-orange-600"
+                      variant="primary"
                     >
                       {restoring && (
                         <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
@@ -866,7 +922,7 @@ export default function ManageToolDialog({
               {!!bindingStatus?.envOverrides.length && (
                 <div
                   role="status"
-                  className="space-y-2 rounded-md border border-orange-300/60 bg-orange-50/40 p-3 text-[12px] dark:border-orange-500/40 dark:bg-orange-950/20"
+                  className="space-y-2 rounded-md border border-brand/30 bg-warn-soft p-3 text-[12px] "
                 >
                   <p>
                     {t("toolLifecycle.envOverride.title", { tool: tool.label })}
@@ -877,7 +933,7 @@ export default function ManageToolDialog({
                       className="flex flex-wrap items-center gap-x-2 text-[11px]"
                     >
                       <code>{found.name}</code>
-                      <span className="text-muted-foreground">
+                      <span className="text-ink-muted">
                         {found.scope === "file"
                           ? found.location
                           : t(`toolLifecycle.envOverride.scope.${found.scope}`)}
@@ -893,18 +949,20 @@ export default function ManageToolDialog({
                 </div>
               )}
               {/* ---- Model ---- */}
-              <div className="space-y-2">
-                <Label htmlFor="manage-model" className="text-[13px]">
-                  模型
+              <section
+                aria-labelledby="manage-model-heading"
+                className="space-y-3 rounded-xl border border-line-2 p-4"
+              >
+                <Label
+                  id="manage-model-heading"
+                  htmlFor="manage-model"
+                  className="block text-[13px]"
+                >
+                  {t("uiCopy.model")}
                 </Label>
-                {tool.id === "chatgpt" && (
-                  <p className="text-[11px] text-muted-foreground">
-                    {t("modelCompatibility.chatgptCodexShared")}
-                  </p>
-                )}
                 {protocol && !desktopCodex && multiModel ? (
                   <>
-                    <WorkBuddyModelPicker
+                    <MultiModelPicker
                       id="manage-model"
                       selectedIds={draftModels}
                       onChange={setDraftModels}
@@ -912,21 +970,21 @@ export default function ManageToolDialog({
                       loading={modelsLoading}
                       onFetch={fetchModels}
                       portalContainer={dialogContentNode}
+                      disabled={
+                        !modelWritable || !currentModelLoaded || operationBusy
+                      }
                       summary={
                         tool.id === "opencode"
-                          ? `共 ${models.length} 个可选模型`
+                          ? t("modelPicker.availableCount", {
+                              count: models.length,
+                            })
                           : undefined
                       }
                     />
-                    {tool.id === "opencode" && (
-                      <p className="text-[11px] text-muted-foreground">
-                        {t("modelCompatibility.openCodeProtocol")}
-                      </p>
-                    )}
                     {tool.id === "opencode" &&
                       protocolHints.length > 0 &&
                       !isDirty && (
-                        <div className="flex items-center justify-between gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-[11px]">
+                        <div className="flex items-center justify-between gap-3 rounded-md border border-warn/30 bg-warn-soft p-3 text-[11px]">
                           <span>
                             {t("modelCompatibility.openCodeHint", {
                               count: protocolHints.length,
@@ -945,7 +1003,7 @@ export default function ManageToolDialog({
                           <Button
                             type="button"
                             size="sm"
-                            variant="outline"
+                            variant="secondary"
                             className="h-7 shrink-0 px-2 text-[11px]"
                             disabled={operationBusy}
                             onClick={() => void handleApplyProtocolHints()}
@@ -959,7 +1017,7 @@ export default function ManageToolDialog({
                         workBuddyEndpointStatus.configuredUrls.some(
                           (url) => url !== workBuddyEndpointStatus.expectedUrl,
                         )) && (
-                        <div className="space-y-1 rounded-md border border-red-500/30 bg-muted/20 p-3 text-[11px]">
+                        <div className="space-y-1 rounded-md border border-danger/30 bg-muted/20 p-3 text-[11px]">
                           <p className="font-medium">
                             {t(
                               "modelCompatibility.workBuddyConfiguredEndpoint",
@@ -974,11 +1032,11 @@ export default function ManageToolDialog({
                               {url}
                             </code>
                           ))}
-                          <p className="break-all text-muted-foreground">
+                          <p className="break-all text-ink-muted">
                             {t("modelCompatibility.workBuddyExpectedEndpoint")}:{" "}
                             {workBuddyEndpointStatus.expectedUrl}
                           </p>
-                          <p className="text-red-600">
+                          <p className="text-danger">
                             {t("modelCompatibility.workBuddyEndpointMismatch")}
                           </p>
                         </div>
@@ -997,7 +1055,7 @@ export default function ManageToolDialog({
                       !modelsLoading &&
                       !modelsError &&
                       workBuddyMissingIds.length > 0 && (
-                        <p className="text-[11px] text-red-600">
+                        <p className="text-[11px] text-danger">
                           {t("modelCompatibility.workBuddyMissingCatalog")}
                         </p>
                       )}
@@ -1007,6 +1065,9 @@ export default function ManageToolDialog({
                     <ModelPicker
                       id="manage-model"
                       value={draftModel}
+                      disabled={
+                        !modelWritable || !currentModelLoaded || operationBusy
+                      }
                       onChange={setDraftModel}
                       models={models}
                       loading={modelsLoading}
@@ -1019,22 +1080,12 @@ export default function ManageToolDialog({
                         onRetry={() => void fetchModels(true)}
                       />
                     )}
-                    {tool.id === "gemini" && (
-                      <p className="text-[11px] text-muted-foreground">
-                        {t("modelCompatibility.geminiRememberHint")}
-                      </p>
-                    )}
-                    {tool.id === "chatgpt" && (
-                      <p className="text-[11px] text-muted-foreground">
-                        {t("modelCompatibility.chatgptDefaultHint")}
-                      </p>
-                    )}
                   </>
                 ) : (
-                  <div className="rounded-md border border-dashed border-border-default px-3 py-2 text-[12px] text-muted-foreground">
+                  <div className="rounded-md border border-dashed border-line px-3 py-2 text-[12px] text-ink-muted">
                     {desktopCodex
                       ? t("modelCompatibility.desktopCodex")
-                      : "该工具暂不支持模型管理"}
+                      : t("uiCopy.noModelManagement")}
                   </div>
                 )}
                 {/* 只在检查中和确定不兼容时出现；查不出结果的情况（余额、
@@ -1044,7 +1095,7 @@ export default function ManageToolDialog({
                   !codexModels &&
                   !multiModel &&
                   (compatibilityLoading ? (
-                    <p className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
+                    <p className="flex items-center gap-1.5 text-[12px] text-ink-muted">
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       {t("modelCompatibility.checkingModel")}
                     </p>
@@ -1054,7 +1105,7 @@ export default function ManageToolDialog({
                       .map((result) => (
                         <p
                           key={result.model}
-                          className="text-[12px] text-red-600"
+                          className="text-[12px] text-danger"
                         >
                           {t("modelCompatibility.incompatibleModel", {
                             model: result.model,
@@ -1066,71 +1117,98 @@ export default function ManageToolDialog({
                         </p>
                       ))
                   ))}
-              </div>
+                {!!CONFIGURATION_NOTES[tool.id] && (
+                  <details className="group border-t border-line-2 pt-2.5">
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-2 rounded-sm text-[12px] text-ink-muted outline-none hover:text-ink focus-visible:ring-2 focus-visible:ring-brand [&::-webkit-details-marker]:hidden">
+                      {t("toolsManage.configurationNotes")}
+                      <ChevronDown
+                        aria-hidden="true"
+                        className="h-3.5 w-3.5 shrink-0 transition-transform group-open:rotate-180"
+                      />
+                    </summary>
+                    <div className="space-y-2 pt-2.5 text-[12px] leading-relaxed text-ink-muted">
+                      {CONFIGURATION_NOTES[tool.id].map((key) => (
+                        <p key={key}>{t(key)}</p>
+                      ))}
+                    </div>
+                  </details>
+                )}
+              </section>
 
               {/* ---- Config file ---- */}
-              <div className="space-y-2">
-                <Label className="text-[13px]">配置文件</Label>
+              <section
+                aria-labelledby="manage-config-heading"
+                className="space-y-3 rounded-xl border border-line-2 p-4"
+              >
+                <h3
+                  id="manage-config-heading"
+                  className="text-[13px] font-medium"
+                >
+                  {t("uiCopy.configFile")}
+                </h3>
                 <div className="flex items-center gap-2">
                   <code
-                    className="flex-1 truncate rounded-md border border-border-default bg-muted/30 px-3 py-2 text-[12px] text-foreground"
+                    className={cn(
+                      "min-w-0 flex-1 truncate rounded-md bg-muted/40 px-3 py-2 text-[12px]",
+                      filePathError ? "text-danger" : "text-ink",
+                    )}
+                    role={filePathError ? "alert" : undefined}
                     title={filePath ?? filePathError ?? ""}
                   >
-                    {filePath ?? filePathError ?? "加载中…"}
+                    {filePath ?? filePathError ?? t("uiCopy.loading")}
                   </code>
                   <Button
                     type="button"
-                    variant="outline"
+                    variant="secondary"
                     size="sm"
                     onClick={handleOpenFolder}
                   >
                     <Folder className="mr-1 h-3.5 w-3.5" />
-                    {isMac() ? "在 Finder 打开" : "打开所在文件夹"}
+                    {isMac() ? t("uiCopy.openFinder") : t("uiCopy.openFolder")}
                   </Button>
                 </div>
-              </div>
+              </section>
 
               {/* WorkBuddy checks one chosen stream on demand. Other tools
                   keep their separate, optional 1-token connectivity ping. */}
               {multiModel ? (
-                <div className="space-y-2">
-                  <Label htmlFor="workbuddy-test-model" className="text-[13px]">
+                <section
+                  aria-labelledby="manage-connection-heading"
+                  className="space-y-3 rounded-xl border border-line-2 p-4"
+                >
+                  <Label
+                    id="manage-connection-heading"
+                    htmlFor="workbuddy-test-model"
+                    className="block text-[13px]"
+                  >
                     {t("modelCompatibility.title")}
                   </Label>
                   <div className="flex gap-2">
-                    <Select
+                    <MenuSelect
+                      id="workbuddy-test-model"
+                      aria-label={t(
+                        tool.id === "opencode"
+                          ? "modelCompatibility.openCodeTestModel"
+                          : "modelCompatibility.workBuddyTestModel",
+                      )}
                       value={workBuddyTestModel}
-                      onValueChange={(value) => {
+                      onChange={(value) => {
                         workBuddyTestRequest.current += 1;
                         setWorkBuddyTestModel(value);
                         setWorkBuddyTestResult(null);
                         setWorkBuddyTestLoading(false);
                       }}
+                      options={draftModels.map((id) => ({
+                        value: id,
+                        label: id,
+                      }))}
+                      placeholder="—"
+                      searchable={draftModels.length > 8}
+                      searchPlaceholder={t("modelPicker.searchModel")}
                       disabled={draftModels.length === 0}
-                    >
-                      <SelectTrigger
-                        id="workbuddy-test-model"
-                        aria-label={t(
-                          tool.id === "opencode"
-                            ? "modelCompatibility.openCodeTestModel"
-                            : "modelCompatibility.workBuddyTestModel",
-                        )}
-                        className="min-w-0 flex-1 text-[12px]"
-                      >
-                        <SelectValue placeholder="—" />
-                      </SelectTrigger>
-                      <SelectContent className="max-h-60">
-                        {draftModels.map((id) => (
-                          <SelectItem
-                            key={id}
-                            value={id}
-                            className="text-[12px]"
-                          >
-                            {id}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                      width={262}
+                      triggerClassName="min-w-0 max-w-none flex-1"
+                    />
                     <Button
                       type="button"
                       size="sm"
@@ -1154,10 +1232,10 @@ export default function ManageToolDialog({
                       className={cn(
                         "rounded-md border px-3 py-2 text-[12px]",
                         workBuddyTestResult.status === "compatible"
-                          ? "border-emerald-500/30 text-emerald-700"
+                          ? "border-ok/30 text-ok"
                           : workBuddyTestResult.status === "incompatible"
-                            ? "border-red-500/30 text-red-700"
-                            : "border-border-default text-muted-foreground",
+                            ? "border-danger/30 text-danger"
+                            : "border-line text-ink-muted",
                       )}
                     >
                       {workBuddyTestResult.model}:{" "}
@@ -1180,11 +1258,19 @@ export default function ManageToolDialog({
                         ` · ${workBuddyTestResult.reason}`}
                     </div>
                   )}
-                </div>
+                </section>
               ) : (
-                <div className="space-y-2">
+                <section
+                  aria-labelledby="manage-connection-heading"
+                  className="space-y-3 rounded-xl border border-line-2 p-4"
+                >
                   <div className="flex items-center justify-between">
-                    <Label className="text-[13px]">连通性</Label>
+                    <h3
+                      id="manage-connection-heading"
+                      className="text-[13px] font-medium"
+                    >
+                      {t("uiCopy.connectivity")}
+                    </h3>
                     <Button
                       type="button"
                       size="sm"
@@ -1195,14 +1281,16 @@ export default function ManageToolDialog({
                         !protocol ||
                         !probeModel
                       }
-                      className="bg-orange-500 text-white shadow-sm shadow-orange-200/60 hover:bg-orange-600 disabled:bg-orange-500/60 disabled:text-white dark:shadow-orange-900/20"
+                      className="bg-brand text-brand-on shadow-sm hover:bg-brand disabled:bg-brand disabled:text-brand-on "
                     >
                       {pingLoading ? (
                         <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                       ) : (
                         <Zap className="mr-1.5 h-3.5 w-3.5" />
                       )}
-                      {pingLoading ? "测试中…" : "测试连通性"}
+                      {pingLoading
+                        ? t("uiCopy.checking")
+                        : t("uiCopy.checkConnection")}
                     </Button>
                   </div>
                   <PingStatusBox
@@ -1210,45 +1298,60 @@ export default function ManageToolDialog({
                     result={pingResult}
                     model={probeModel}
                   />
-                </div>
+                </section>
               )}
             </div>
 
             {unbindConfirming && <UnbindPreviewPanel preview={unbindPreview} />}
 
-            <DialogFooter className="!items-center sm:!justify-between">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={handleUnbind}
-                disabled={operationBusy}
-                className={cn(
-                  unbindConfirming &&
-                    "border-red-500 text-red-600 hover:bg-red-50 hover:text-red-700",
-                )}
-              >
-                {unbindLoading && (
-                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                )}
-                {unbindConfirming ? t("unbind.confirm") : t("unbind.button")}
-              </Button>
-              <div className="flex gap-2">
+            <DialogFooter className="!items-center gap-3 px-5 sm:!justify-between">
+              <div className="flex flex-wrap gap-2">
                 <Button
                   type="button"
-                  variant="outline"
+                  variant="secondary"
+                  size="sm"
+                  onClick={handleUnbind}
+                  disabled={operationBusy}
+                  className={cn(
+                    unbindConfirming &&
+                      "border-danger/30 text-danger hover:bg-danger-soft hover:text-danger",
+                  )}
+                >
+                  {unbindLoading && (
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  )}
+                  {unbindConfirming ? t("unbind.confirm") : t("unbind.button")}
+                </Button>
+                {uninstallPreview.available && (
+                  <Button
+                    variant="dangerGhost"
+                    size="sm"
+                    disabled={operationBusy}
+                    onClick={() => {
+                      uninstallPending.current = true;
+                      onOpenChange(false);
+                    }}
+                  >
+                    {t("toolUninstall.entry")}
+                  </Button>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant="secondary"
                   size="sm"
                   onClick={() => onOpenChange(false)}
                   disabled={operationBusy}
                 >
-                  取消
+                  {t("uiCopy.cancel")}
                 </Button>
                 <Button
                   type="button"
                   size="sm"
                   onClick={handleSave}
                   disabled={
-                    !configurationReady ||
+                    !modelWritable ||
                     operationBusy ||
                     (!isDirty && !currentModelLoaded) ||
                     saving ||
@@ -1263,7 +1366,7 @@ export default function ManageToolDialog({
                   {saving && (
                     <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                   )}
-                  保存
+                  {t("uiCopy.save")}
                 </Button>
               </div>
             </DialogFooter>
@@ -1271,259 +1374,6 @@ export default function ManageToolDialog({
         )}
       </DialogContent>
     </Dialog>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// WorkBuddyModelPicker — searchable multi-select with select-all / clear shortcuts
-// ---------------------------------------------------------------------------
-
-// cmdk becomes noticeably slow when every catalog entry is mounted at once.
-// Search the full catalog, but render it in small batches as the user scrolls.
-const MODEL_PICKER_BATCH_SIZE = 80;
-
-function filterPickerModels(
-  models: FetchedModel[],
-  query: string,
-): FetchedModel[] {
-  const search = query.trim().toLocaleLowerCase();
-  if (!search) return models;
-  return models.filter((model) =>
-    `${model.id} ${model.name ?? ""} ${model.ownedBy ?? ""}`
-      .toLocaleLowerCase()
-      .includes(search),
-  );
-}
-
-function groupPickerModels(
-  models: FetchedModel[],
-): Record<string, FetchedModel[]> {
-  const grouped: Record<string, FetchedModel[]> = {};
-  for (const model of models) {
-    const slash = model.id.indexOf("/");
-    const vendor =
-      slash > 0 ? model.id.slice(0, slash) : model.ownedBy || "Other";
-    (grouped[vendor] ||= []).push(model);
-  }
-  return grouped;
-}
-
-function usePickerResults(models: FetchedModel[]) {
-  const [search, setSearch] = useState("");
-  const [visibleCount, setVisibleCount] = useState(MODEL_PICKER_BATCH_SIZE);
-  const filtered = useMemo(
-    () => filterPickerModels(models, search),
-    [models, search],
-  );
-  const visible = useMemo(
-    () => filtered.slice(0, visibleCount),
-    [filtered, visibleCount],
-  );
-  const grouped = useMemo(() => groupPickerModels(visible), [visible]);
-  const vendors = useMemo(() => Object.keys(grouped).sort(), [grouped]);
-
-  const updateSearch = useCallback((value: string) => {
-    setSearch(value);
-    setVisibleCount(MODEL_PICKER_BATCH_SIZE);
-  }, []);
-  const loadMore = useCallback(
-    (event: React.UIEvent<HTMLDivElement>) => {
-      const list = event.currentTarget;
-      if (
-        visibleCount < filtered.length &&
-        list.scrollTop + list.clientHeight >= list.scrollHeight - 48
-      ) {
-        setVisibleCount((count) => count + MODEL_PICKER_BATCH_SIZE);
-      }
-    },
-    [filtered.length, visibleCount],
-  );
-
-  return { search, updateSearch, filtered, grouped, vendors, loadMore };
-}
-
-interface WorkBuddyModelPickerProps {
-  id: string;
-  selectedIds: string[];
-  onChange: (ids: string[]) => void;
-  models: FetchedModel[];
-  loading: boolean;
-  onFetch: (forceRefresh?: boolean) => void;
-  portalContainer?: HTMLElement | null;
-  /** 列表下方的统计文字；不传就是 WorkBuddy 的「共用一个 Ofox Key」。 */
-  summary?: string;
-}
-
-function WorkBuddyModelPicker({
-  id,
-  selectedIds,
-  onChange,
-  models,
-  loading,
-  onFetch,
-  portalContainer,
-  summary,
-}: WorkBuddyModelPickerProps) {
-  const [open, setOpen] = useState(false);
-  const selected = useMemo(() => new Set(selectedIds), [selectedIds]);
-  const allSelected =
-    models.length > 0 && models.every((model) => selected.has(model.id));
-  const { search, updateSearch, filtered, grouped, vendors, loadMore } =
-    usePickerResults(models);
-
-  const handleOpenChange = useCallback(
-    (next: boolean) => {
-      setOpen(next);
-      if (next) {
-        updateSearch("");
-        if (models.length === 0 && !loading) onFetch();
-      }
-    },
-    [loading, models.length, onFetch, updateSearch],
-  );
-
-  const toggle = useCallback(
-    (id: string) => {
-      if (selected.has(id)) {
-        onChange(selectedIds.filter((selectedId) => selectedId !== id));
-      } else {
-        onChange([...selectedIds, id]);
-      }
-    },
-    [onChange, selected, selectedIds],
-  );
-
-  return (
-    <div className="space-y-2">
-      <div className="flex gap-1">
-        <Popover open={open} onOpenChange={handleOpenChange}>
-          <PopoverTrigger asChild>
-            <Button
-              id={id}
-              type="button"
-              variant="outline"
-              role="combobox"
-              aria-expanded={open}
-              className="flex-1 justify-between font-normal"
-            >
-              <span
-                className={cn(
-                  "truncate",
-                  selectedIds.length === 0 && "text-muted-foreground",
-                )}
-              >
-                {selectedIds.length > 0
-                  ? `已选择 ${selectedIds.length} 个兼容模型`
-                  : "请选择至少一个兼容模型"}
-              </span>
-              <ChevronsUpDown className="ml-2 h-3.5 w-3.5 shrink-0 opacity-50" />
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent
-            className="p-0"
-            align="start"
-            style={{ width: "var(--radix-popover-trigger-width)" }}
-            container={portalContainer ?? undefined}
-          >
-            <Command shouldFilter={false}>
-              <CommandInput
-                placeholder="搜索模型或供应商…"
-                className="h-9"
-                value={search}
-                onValueChange={updateSearch}
-              />
-              <CommandList className="max-h-72" onScroll={loadMore}>
-                {loading ? (
-                  <div className="flex items-center justify-center py-6 text-[12px] text-muted-foreground">
-                    <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                    加载中…
-                  </div>
-                ) : (
-                  <>
-                    {filtered.length === 0 && (
-                      <CommandEmpty>未找到兼容模型</CommandEmpty>
-                    )}
-                    {vendors.map((vendor) => (
-                      <CommandGroup key={vendor} heading={vendor}>
-                        {grouped[vendor].map((model) => (
-                          <CommandItem
-                            key={model.id}
-                            value={`${model.id} ${model.name ?? ""} ${vendor}`}
-                            onSelect={() => toggle(model.id)}
-                          >
-                            <span
-                              className={cn(
-                                "mr-2 flex h-4 w-4 shrink-0 items-center justify-center rounded border",
-                                selected.has(model.id)
-                                  ? "border-orange-500 bg-orange-500 text-white"
-                                  : "border-border-default",
-                              )}
-                            >
-                              {selected.has(model.id) && (
-                                <Check className="h-3 w-3" />
-                              )}
-                            </span>
-                            <span className="min-w-0 flex-1">
-                              <span className="block truncate text-[12px] font-medium">
-                                {model.name?.trim() || model.id}
-                              </span>
-                              <span className="block truncate text-[10px] text-muted-foreground">
-                                {model.id}
-                              </span>
-                            </span>
-                            {(model.supportedParameters ?? []).includes(
-                              "reasoning",
-                            ) && (
-                              <span className="ml-2 rounded bg-violet-500/10 px-1.5 py-0.5 text-[9px] text-violet-600">
-                                推理
-                              </span>
-                            )}
-                            {(model.inputModalities ?? []).includes(
-                              "image",
-                            ) && (
-                              <span className="ml-1 rounded bg-sky-500/10 px-1.5 py-0.5 text-[9px] text-sky-600">
-                                视觉
-                              </span>
-                            )}
-                          </CommandItem>
-                        ))}
-                      </CommandGroup>
-                    ))}
-                  </>
-                )}
-              </CommandList>
-            </Command>
-          </PopoverContent>
-        </Popover>
-      </div>
-      <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
-        <span>
-          {summary ?? `共 ${models.length} 个兼容模型，共用一个 Ofox Key`}
-        </span>
-        <span className="flex shrink-0 gap-1">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7 px-2 text-[11px]"
-            disabled={loading || models.length === 0 || allSelected}
-            onClick={() => onChange(models.map((model) => model.id))}
-          >
-            全选兼容
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-7 px-2 text-[11px]"
-            disabled={loading || selectedIds.length === 0}
-            onClick={() => onChange([])}
-          >
-            取消全选
-          </Button>
-        </span>
-      </div>
-    </div>
   );
 }
 
@@ -1554,7 +1404,7 @@ function UnbindPreviewPanel({ preview }: { preview: UnbindReport | null }) {
   return (
     <div
       role="note"
-      className="mx-6 mb-3 space-y-1.5 rounded-md border border-red-200 bg-red-50/60 px-3 py-2 text-[12px] text-foreground dark:border-red-500/30 dark:bg-red-500/10"
+      className="mx-6 mb-3 space-y-1.5 rounded-md border border-danger/30 bg-danger-soft px-3 py-2 text-[12px] text-ink "
     >
       {preview && preview.sharedKeptBy.length > 0 ? (
         <p>
@@ -1568,12 +1418,10 @@ function UnbindPreviewPanel({ preview }: { preview: UnbindReport | null }) {
         <>
           <p className="font-medium">{t("unbind.willRestoreTitle")}</p>
           {preview?.legacy && (
-            <p className="text-amber-700 dark:text-amber-300">
-              {t("unbind.legacyNotice")}
-            </p>
+            <p className="text-warn ">{t("unbind.legacyNotice")}</p>
           )}
           {changedKeys.length > 0 ? (
-            <ul className="space-y-0.5 font-mono text-[11px] text-muted-foreground">
+            <ul className="space-y-0.5 font-mono text-[11px] text-ink-muted">
               {changedKeys.map((key) => (
                 <li key={key}>{key}</li>
               ))}
@@ -1582,15 +1430,18 @@ function UnbindPreviewPanel({ preview }: { preview: UnbindReport | null }) {
             <p>{t("unbind.generic")}</p>
           )}
           {!preview?.legacy && <p>{t("unbind.forceRestoreNotice")}</p>}
-          <p className="text-muted-foreground">{t("unbind.keepNotice")}</p>
+          <p className="text-ink-muted">{t("unbind.keepNotice")}</p>
         </>
       )}
       {preview?.warnings.map((warning, index) => (
         <p
           key={`${warning.code}-${warning.file ?? index}`}
-          className="break-words text-muted-foreground"
+          className="break-words text-ink-muted"
         >
-          {t(`unbind.warning.${warning.code}`, { defaultValue: "" })}
+          {t(`unbind.warning.${warning.code}`, {
+            defaultValue: "",
+            keys: preview.keptKeys.join(", "),
+          })}
           {warning.file && (
             <code className="ml-1 text-[11px]">{warning.file}</code>
           )}
@@ -1601,43 +1452,39 @@ function UnbindPreviewPanel({ preview }: { preview: UnbindReport | null }) {
 }
 
 function PingStatusBox({ loading, result, model }: PingStatusBoxProps) {
+  const { t } = useTranslation();
   if (loading) {
     return (
-      <div className="flex items-center gap-2 rounded-md border border-border-default bg-muted/30 px-3 py-2 text-[12px] text-muted-foreground">
+      <div className="flex items-center gap-2 rounded-md border border-line bg-muted/30 px-3 py-2 text-[12px] text-ink-muted">
         <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        <span>正在请求 OfoxAI 网关…</span>
+        <span>{t("uiCopy.requestingGateway")}</span>
       </div>
     );
   }
   if (!result) {
     return (
-      <div className="rounded-md border border-dashed border-border-default px-3 py-2 text-[12px] text-muted-foreground">
-        尚未测试。点击右上方「测试连通性」可向所选模型发送一次 1-token
-        验证请求。
-      </div>
+      <div className="text-[12px] text-ink-muted">{t("uiCopy.notTested")}</div>
     );
   }
   if (result.statusCode === 402) return <InsufficientCreditsNotice />;
   if (result.success) {
     return (
-      <div className="flex items-center gap-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-[12px] text-emerald-700 dark:text-emerald-400">
+      <div className="flex items-center gap-2 rounded-md border border-ok/30 bg-ok-soft px-3 py-2 text-[12px] text-ok ">
         <CheckCircle2 className="h-4 w-4 shrink-0" />
         <span className="flex-1 truncate">
-          连通成功（{result.latencyMs} ms）
-          {model && (
-            <span className="ml-1 text-muted-foreground">· {model}</span>
-          )}
+          {t("uiCopy.connectionSuccess", { ms: result.latencyMs })}
+          {model && <span className="ml-1 text-ink-muted">· {model}</span>}
         </span>
       </div>
     );
   }
   return (
-    <div className="flex items-start gap-2 rounded-md border border-red-500/30 bg-red-500/5 px-3 py-2 text-[12px] text-red-700 dark:text-red-400">
+    <div className="flex items-start gap-2 rounded-md border border-danger/30 bg-danger-soft px-3 py-2 text-[12px] text-danger ">
       <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
       <div className="min-w-0 flex-1">
-        <div className="font-medium">连通失败</div>
-        <div className="mt-0.5 break-words text-[11.5px] text-red-700/80 dark:text-red-400/80">
-          {result.error || "未知错误"}
+        <div className="font-medium">{t("uiCopy.connectionFailed")}</div>
+        <div className="mt-0.5 break-words text-[11.5px] text-danger ">
+          {result.error || t("uiCopy.unknownError")}
         </div>
       </div>
     </div>
@@ -1659,13 +1506,13 @@ function InsufficientCreditsNotice() {
       .catch(() => toast.error(t("notifications.openLinkFailed")));
 
   return (
-    <div className="flex items-start gap-2 rounded-md border border-orange-500/30 bg-orange-500/5 px-3 py-2 text-[12px] text-orange-800 dark:text-orange-300">
+    <div className="flex items-start gap-2 rounded-md border border-brand/30 bg-warn-soft px-3 py-2 text-[12px] text-brand ">
       <Wallet className="mt-0.5 h-4 w-4 shrink-0" />
       <div className="min-w-0 flex-1">
         <div className="font-medium">
           {t("connectivity.insufficientCreditsTitle")}
         </div>
-        <div className="mt-0.5 text-[11.5px] text-orange-800/80 dark:text-orange-300/80">
+        <div className="mt-0.5 text-[11.5px] text-brand ">
           {t("connectivity.insufficientCreditsHint")}
           {!isLoading && !canTopUp && ` ${t("connectivity.askAdminToTopUp")}`}
         </div>
@@ -1675,142 +1522,11 @@ function InsufficientCreditsNotice() {
           type="button"
           size="sm"
           onClick={openWallet}
-          className="shrink-0 bg-orange-500 text-white hover:bg-orange-600"
+          className="shrink-0 bg-brand text-brand-on hover:bg-brand"
         >
           {t("connectivity.topUp")}
         </Button>
       )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// ModelPicker — local searchable dropdown
-// ---------------------------------------------------------------------------
-//
-// We don't reuse `ModelSelectFromApi` here because that component is wired to
-// the i18n stack and the larger provider-form lifecycle. The manage dialog
-// only needs a simple controlled picker, so a local component keeps the
-// dependency graph clean and the empty/loading states tuned to *this* UX.
-
-interface ModelPickerProps {
-  id: string;
-  value: string;
-  onChange: (v: string) => void;
-  models: FetchedModel[];
-  loading: boolean;
-  onFetch: (forceRefresh?: boolean) => void;
-  /**
-   * Portal target for the popover. Defaults to `document.body` when omitted.
-   * Pass the dialog's content node when this picker is rendered inside a
-   * Radix Dialog, so the popover lands inside the dialog's scroll-lock
-   * shard and the search/option list stays scrollable.
-   */
-  portalContainer?: HTMLElement | null;
-}
-
-function ModelPicker({
-  id,
-  value,
-  onChange,
-  models,
-  loading,
-  onFetch,
-  portalContainer,
-}: ModelPickerProps) {
-  const [open, setOpen] = useState(false);
-  const { search, updateSearch, filtered, grouped, vendors, loadMore } =
-    usePickerResults(models);
-
-  // The dialog loads the list when it opens; opening the dropdown with an
-  // empty list (the first load failed) tries once more.
-  const handleOpenChange = useCallback(
-    (next: boolean) => {
-      setOpen(next);
-      if (next) {
-        updateSearch("");
-        if (models.length === 0 && !loading) onFetch();
-      }
-    },
-    [models.length, loading, onFetch, updateSearch],
-  );
-
-  return (
-    <div className="flex gap-1">
-      <Popover open={open} onOpenChange={handleOpenChange}>
-        <PopoverTrigger asChild>
-          <Button
-            id={id}
-            type="button"
-            variant="outline"
-            role="combobox"
-            aria-expanded={open}
-            className="flex-1 justify-between font-normal"
-          >
-            <span className={cn("truncate", !value && "text-muted-foreground")}>
-              {value || "未设置（使用 OfoxAI 默认路由）"}
-            </span>
-            <ChevronsUpDown className="ml-2 h-3.5 w-3.5 shrink-0 opacity-50" />
-          </Button>
-        </PopoverTrigger>
-        <PopoverContent
-          className="p-0"
-          align="start"
-          // Match the trigger width so the list never visually mismatches
-          // its anchor (Radix exposes this via CSS var).
-          style={{ width: "var(--radix-popover-trigger-width)" }}
-          // Portal into the dialog's content node so this popover lives
-          // inside Radix Dialog's scroll-lock shard — otherwise wheel
-          // events on the model list get swallowed and the dropdown looks
-          // "stuck" (see `ModelPickerProps.portalContainer` above).
-          container={portalContainer ?? undefined}
-        >
-          <Command shouldFilter={false}>
-            <CommandInput
-              placeholder="搜索模型…"
-              className="h-9"
-              value={search}
-              onValueChange={updateSearch}
-            />
-            <CommandList onScroll={loadMore}>
-              {loading ? (
-                <div className="flex items-center justify-center py-6 text-[12px] text-muted-foreground">
-                  <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                  加载中…
-                </div>
-              ) : (
-                <>
-                  {filtered.length === 0 && (
-                    <CommandEmpty>未找到模型</CommandEmpty>
-                  )}
-                  {vendors.map((vendor) => (
-                    <CommandGroup key={vendor} heading={vendor}>
-                      {grouped[vendor].map((m) => (
-                        <CommandItem
-                          key={m.id}
-                          value={m.id}
-                          onSelect={() => {
-                            onChange(m.id);
-                            setOpen(false);
-                          }}
-                        >
-                          <Check
-                            className={cn(
-                              "mr-2 h-3.5 w-3.5",
-                              value === m.id ? "opacity-100" : "opacity-0",
-                            )}
-                          />
-                          <span className="truncate">{m.id}</span>
-                        </CommandItem>
-                      ))}
-                    </CommandGroup>
-                  ))}
-                </>
-              )}
-            </CommandList>
-          </Command>
-        </PopoverContent>
-      </Popover>
     </div>
   );
 }
@@ -1825,12 +1541,12 @@ function ModelsLoadError({
 }) {
   const { t } = useTranslation();
   return (
-    <p className="flex items-center gap-2 text-[11px] text-red-600">
+    <p className="flex items-center gap-2 text-[11px] text-danger">
       <span>{message}</span>
       <button
         type="button"
         onClick={onRetry}
-        className="font-medium underline underline-offset-2 hover:text-red-700"
+        className="font-medium underline underline-offset-2 hover:text-danger"
       >
         {t("modelCatalog.retry")}
       </button>

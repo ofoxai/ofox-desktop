@@ -1,0 +1,488 @@
+import {
+  useCallback,
+  useMemo,
+  useState,
+  type ReactNode,
+  type UIEvent,
+} from "react";
+import { useTranslation } from "react-i18next";
+import { Check, Loader2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { MenuChevron, menuTriggerClassName } from "@/components/ui/menu-select";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import { useMenuTab } from "@/hooks/useMenuTab";
+import { cn } from "@/lib/utils";
+import type { FetchedModel } from "@/lib/api/model-fetch";
+
+// ---------------------------------------------------------------------------
+// MultiModelPicker — searchable multi-select with select-all / clear shortcuts
+// ---------------------------------------------------------------------------
+
+// cmdk becomes noticeably slow when every catalog entry is mounted at once.
+// Search the full catalog, but render it in small batches as the user scrolls.
+const MODEL_PICKER_BATCH_SIZE = 80;
+
+function filterPickerModels(
+  models: FetchedModel[],
+  query: string,
+): FetchedModel[] {
+  const search = query.trim().toLocaleLowerCase();
+  if (!search) return models;
+  return models.filter((model) =>
+    `${model.id} ${model.name ?? ""} ${model.ownedBy ?? ""}`
+      .toLocaleLowerCase()
+      .includes(search),
+  );
+}
+
+function groupPickerModels(
+  models: FetchedModel[],
+): Record<string, FetchedModel[]> {
+  const grouped: Record<string, FetchedModel[]> = {};
+  for (const model of models) {
+    const slash = model.id.indexOf("/");
+    const vendor =
+      slash > 0 ? model.id.slice(0, slash) : model.ownedBy || "Other";
+    (grouped[vendor] ||= []).push(model);
+  }
+  return grouped;
+}
+
+function usePickerResults(models: FetchedModel[]) {
+  const [search, setSearch] = useState("");
+  const [visibleCount, setVisibleCount] = useState(MODEL_PICKER_BATCH_SIZE);
+  const filtered = useMemo(
+    () => filterPickerModels(models, search),
+    [models, search],
+  );
+  const visible = useMemo(
+    () => filtered.slice(0, visibleCount),
+    [filtered, visibleCount],
+  );
+  const grouped = useMemo(() => groupPickerModels(visible), [visible]);
+  const vendors = useMemo(() => Object.keys(grouped).sort(), [grouped]);
+
+  const updateSearch = useCallback((value: string) => {
+    setSearch(value);
+    setVisibleCount(MODEL_PICKER_BATCH_SIZE);
+  }, []);
+  const loadMore = useCallback(
+    (event: UIEvent<HTMLDivElement>) => {
+      const list = event.currentTarget;
+      if (
+        visibleCount < filtered.length &&
+        list.scrollTop + list.clientHeight >= list.scrollHeight - 48
+      ) {
+        setVisibleCount((count) => count + MODEL_PICKER_BATCH_SIZE);
+      }
+    },
+    [filtered.length, visibleCount],
+  );
+
+  return { search, updateSearch, filtered, grouped, vendors, loadMore };
+}
+
+export interface MultiModelPickerProps {
+  id: string;
+  selectedIds: string[];
+  onChange: (ids: string[]) => void;
+  models: FetchedModel[];
+  loading: boolean;
+  onFetch: (forceRefresh?: boolean) => void;
+  portalContainer?: HTMLElement | null;
+  /** Optional catalog summary; defaults to the count and shared-key notice. */
+  summary?: string;
+  disabled?: boolean;
+  /**
+   * The list opens straight from a tool row's field: the trigger looks and
+   * reads as `trigger` says, and the summary and select-all line is left out.
+   */
+  field?: { className?: string; content: ReactNode; label: string };
+  /** Told when the list opens and closes, e.g. to save the set on close. */
+  onOpenChange?: (open: boolean) => void;
+}
+
+export function MultiModelPicker({
+  id,
+  selectedIds,
+  onChange,
+  models,
+  loading,
+  onFetch,
+  portalContainer,
+  summary,
+  disabled = false,
+  field,
+  onOpenChange,
+}: MultiModelPickerProps) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const menuTab = useMenuTab(() => setOpen(false));
+  const selected = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const allSelected =
+    models.length > 0 && models.every((model) => selected.has(model.id));
+  const { search, updateSearch, filtered, grouped, vendors, loadMore } =
+    usePickerResults(models);
+
+  const handleOpenChange = useCallback(
+    (next: boolean) => {
+      setOpen(next);
+      if (next) {
+        updateSearch("");
+        if (models.length === 0 && !loading) onFetch();
+      }
+      onOpenChange?.(next);
+    },
+    [loading, models.length, onFetch, onOpenChange, updateSearch],
+  );
+
+  const toggle = useCallback(
+    (id: string) => {
+      if (selected.has(id)) {
+        onChange(selectedIds.filter((selectedId) => selectedId !== id));
+      } else {
+        onChange([...selectedIds, id]);
+      }
+    },
+    [onChange, selected, selectedIds],
+  );
+
+  return (
+    <div className={field ? "min-w-0" : "space-y-2"}>
+      <div className="flex gap-1">
+        <Popover open={open} onOpenChange={handleOpenChange}>
+          <PopoverTrigger asChild>
+            <button
+              ref={menuTab.triggerRef}
+              id={id}
+              type="button"
+              role="combobox"
+              aria-expanded={open}
+              aria-haspopup="dialog"
+              aria-label={field?.label}
+              disabled={disabled}
+              className={cn(
+                menuTriggerClassName,
+                "max-w-none flex-1",
+                selectedIds.length > 0 && "text-ink",
+                field?.className,
+              )}
+            >
+              {field ? (
+                field.content
+              ) : (
+                <>
+                  <span className="min-w-0 flex-1 truncate text-left">
+                    {selectedIds.length > 0
+                      ? t("modelPicker.selectedCount", {
+                          count: selectedIds.length,
+                        })
+                      : t("modelPicker.selectAtLeastOne")}
+                  </span>
+                  <MenuChevron />
+                </>
+              )}
+            </button>
+          </PopoverTrigger>
+          <PopoverContent
+            onKeyDown={menuTab.onKeyDown}
+            onCloseAutoFocus={menuTab.onCloseAutoFocus}
+            className={cn("p-0", field && "min-w-[20rem]")}
+            align="start"
+            style={{ width: "var(--radix-popover-trigger-width)" }}
+            container={portalContainer ?? undefined}
+          >
+            <Command shouldFilter={false}>
+              <CommandInput
+                placeholder={t("modelPicker.searchModelOrProvider")}
+                className="h-9"
+                value={search}
+                onValueChange={updateSearch}
+              />
+              <CommandList className="max-h-72" onScroll={loadMore}>
+                {loading ? (
+                  <div className="flex items-center justify-center py-6 text-[12px] text-muted-foreground">
+                    <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                    {t("modelPicker.loading")}
+                  </div>
+                ) : (
+                  <>
+                    {filtered.length === 0 && (
+                      <CommandEmpty>
+                        {t("modelPicker.noCompatibleModels")}
+                      </CommandEmpty>
+                    )}
+                    {vendors.map((vendor) => (
+                      <CommandGroup
+                        key={vendor}
+                        heading={
+                          vendor === "Other"
+                            ? t("modelPicker.otherVendor")
+                            : vendor
+                        }
+                      >
+                        {grouped[vendor].map((model) => (
+                          <CommandItem
+                            key={model.id}
+                            value={`${model.id} ${model.name ?? ""} ${vendor}`}
+                            onSelect={() => toggle(model.id)}
+                          >
+                            <span
+                              className={cn(
+                                "mr-2 flex h-4 w-4 shrink-0 items-center justify-center rounded border",
+                                selected.has(model.id)
+                                  ? "border-orange-500 bg-orange-500 text-white"
+                                  : "border-border-default",
+                              )}
+                            >
+                              {selected.has(model.id) && (
+                                <Check className="h-3 w-3" />
+                              )}
+                            </span>
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-[12px] font-medium">
+                                {model.name?.trim() || model.id}
+                              </span>
+                              <span className="block truncate text-[10px] text-muted-foreground">
+                                {model.id}
+                              </span>
+                            </span>
+                            {(model.supportedParameters ?? []).includes(
+                              "reasoning",
+                            ) && (
+                              <span className="ml-2 rounded bg-violet-500/10 px-1.5 py-0.5 text-[9px] text-violet-600">
+                                {t("modelPicker.reasoning")}
+                              </span>
+                            )}
+                            {(model.inputModalities ?? []).includes(
+                              "image",
+                            ) && (
+                              <span className="ml-1 rounded bg-pill px-1.5 py-0.5 text-[9px] text-ink-2">
+                                {t("modelPicker.vision")}
+                              </span>
+                            )}
+                          </CommandItem>
+                        ))}
+                      </CommandGroup>
+                    ))}
+                  </>
+                )}
+              </CommandList>
+            </Command>
+          </PopoverContent>
+        </Popover>
+      </div>
+      {!field && (
+        <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+          <span>
+            {summary ??
+              t("modelPicker.compatibleCountWithSharedKey", {
+                count: models.length,
+              })}
+          </span>
+          <span className="flex shrink-0 gap-1">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-[11px]"
+              disabled={
+                disabled || loading || models.length === 0 || allSelected
+              }
+              onClick={() => onChange(models.map((model) => model.id))}
+            >
+              {t("modelPicker.selectAllCompatible")}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-[11px]"
+              disabled={disabled || loading || selectedIds.length === 0}
+              onClick={() => onChange([])}
+            >
+              {t("modelPicker.clearSelection")}
+            </Button>
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export interface ModelPickerProps {
+  id: string;
+  value: string;
+  onChange: (v: string) => void;
+  models: FetchedModel[];
+  loading: boolean;
+  onFetch: (forceRefresh?: boolean) => void;
+  disabled?: boolean;
+  /** What the trigger says while no model is chosen. */
+  emptyLabel?: string;
+  /**
+   * Portal target for the popover. Defaults to `document.body` when omitted.
+   * Pass the dialog's content node when this picker is rendered inside a
+   * Radix Dialog, so the popover lands inside the dialog's scroll-lock
+   * shard and the search/option list stays scrollable.
+   */
+  portalContainer?: HTMLElement | null;
+  /** Merged over the trigger's menu look, e.g. a tool row's field. */
+  triggerClassName?: string;
+  /** Merged over the wrapper, e.g. to fill a tool row's model column. */
+  className?: string;
+  /** Drawn in the chevron's place, e.g. a spinner while a change saves. */
+  trailing?: ReactNode;
+  /** Drawn before the value, e.g. the field's 模型 label. */
+  prefix?: ReactNode;
+  title?: string;
+  busy?: boolean;
+}
+
+export function ModelPicker({
+  id,
+  value,
+  onChange,
+  models,
+  loading,
+  onFetch,
+  portalContainer,
+  disabled = false,
+  emptyLabel,
+  triggerClassName,
+  className,
+  trailing,
+  prefix,
+  title,
+  busy,
+}: ModelPickerProps) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const menuTab = useMenuTab(() => setOpen(false));
+  const { search, updateSearch, filtered, grouped, vendors, loadMore } =
+    usePickerResults(models);
+
+  // Retry catalog loading when the picker opens with no available models.
+  const handleOpenChange = useCallback(
+    (next: boolean) => {
+      setOpen(next);
+      if (next) {
+        updateSearch("");
+        if (models.length === 0 && !loading) onFetch();
+      }
+    },
+    [models.length, loading, onFetch, updateSearch],
+  );
+
+  return (
+    <div className={cn("flex gap-1", className)}>
+      <Popover open={open} onOpenChange={handleOpenChange}>
+        <PopoverTrigger asChild>
+          <button
+            ref={menuTab.triggerRef}
+            id={id}
+            type="button"
+            role="combobox"
+            aria-expanded={open}
+            aria-haspopup="dialog"
+            aria-busy={busy || undefined}
+            title={title}
+            disabled={disabled}
+            className={cn(
+              menuTriggerClassName,
+              "max-w-none flex-1",
+              value && "text-ink",
+              triggerClassName,
+            )}
+          >
+            <span className="min-w-0 flex-1 truncate text-left">
+              {prefix}
+              {value || emptyLabel || t("modelExperience.chooseModel")}
+            </span>
+            {trailing ?? <MenuChevron />}
+          </button>
+        </PopoverTrigger>
+        <PopoverContent
+          onKeyDown={menuTab.onKeyDown}
+          onCloseAutoFocus={menuTab.onCloseAutoFocus}
+          className="min-w-[20rem] p-0"
+          align="start"
+          // Match the trigger width so the list never visually mismatches
+          // its anchor (Radix exposes this via CSS var), but no narrower than
+          // a long model id on one line: a tool row's field
+          // is a column, narrower than its list needs.
+          style={{ width: "var(--radix-popover-trigger-width)" }}
+          // Portal into the dialog's content node so this popover lives
+          // inside Radix Dialog's scroll-lock shard — otherwise wheel
+          // events on the model list get swallowed and the dropdown looks
+          // "stuck" (see `ModelPickerProps.portalContainer` above).
+          container={portalContainer ?? undefined}
+        >
+          <Command shouldFilter={false}>
+            <CommandInput
+              placeholder={t("modelPicker.searchModel")}
+              className="h-9"
+              value={search}
+              onValueChange={updateSearch}
+            />
+            <CommandList onScroll={loadMore}>
+              {loading ? (
+                <div className="flex items-center justify-center py-6 text-[12px] text-muted-foreground">
+                  <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                  {t("modelPicker.loading")}
+                </div>
+              ) : (
+                <>
+                  {filtered.length === 0 && (
+                    <CommandEmpty>{t("modelPicker.noModels")}</CommandEmpty>
+                  )}
+                  {vendors.map((vendor) => (
+                    <CommandGroup
+                      key={vendor}
+                      heading={
+                        vendor === "Other"
+                          ? t("modelPicker.otherVendor")
+                          : vendor
+                      }
+                    >
+                      {grouped[vendor].map((m) => (
+                        <CommandItem
+                          key={m.id}
+                          value={m.id}
+                          onSelect={() => {
+                            onChange(m.id);
+                            setOpen(false);
+                          }}
+                        >
+                          <Check
+                            className={cn(
+                              "mr-2 h-3.5 w-3.5",
+                              value === m.id ? "opacity-100" : "opacity-0",
+                            )}
+                          />
+                          <span className="truncate">{m.id}</span>
+                        </CommandItem>
+                      ))}
+                    </CommandGroup>
+                  ))}
+                </>
+              )}
+            </CommandList>
+          </Command>
+        </PopoverContent>
+      </Popover>
+    </div>
+  );
+}
