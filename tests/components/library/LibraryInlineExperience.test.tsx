@@ -166,8 +166,11 @@ it("collects one native item using its existing ticket and locates the saved res
     });
   mount();
   const native = await screen.findByRole("region", { name: "工具中发现" });
+  // The region renders before its scanned entries arrive.
   await userEvent.click(
-    within(native).getByRole("button", { name: "将 Only native 加入我的资源" }),
+    await within(native).findByRole("button", {
+      name: "将 Only native 加入我的资源",
+    }),
   );
   await waitFor(() =>
     expect(imported).toHaveBeenCalledWith("scan", ["native"], 1),
