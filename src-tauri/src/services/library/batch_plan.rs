@@ -12,8 +12,10 @@ fn assignment(kind: &ResourceKind, id: &str, tool: &str) -> String {
     }
 }
 fn tool_supported(kind: &ResourceKind, tool: &str) -> bool {
+    if *kind == ResourceKind::Skills {
+        return tool == "shared" || crate::services::library::skill_targets::find(tool).is_some();
+    }
     ["claude", "codex", "gemini", "opencode", "hermes"].contains(&tool)
-        || (*kind == ResourceKind::Skills && tool == "shared")
 }
 fn planner_db(
     db: &Database,
@@ -104,18 +106,26 @@ pub(super) fn build(
         }
         .ok_or_else(|| error("resourceMissing"))?;
         names.insert(id.clone(), name);
-        let mut selected: BTreeSet<String> =
-            ["claude", "codex", "gemini", "opencode", "hermes", "shared"]
-                .into_iter()
-                .filter(|tool| {
-                    snapshot
-                        .machine
-                        .assignments
-                        .get(&assignment(&kind, id, tool))
-                        == Some(id)
-                })
-                .map(str::to_owned)
-                .collect();
+        let known: Vec<&str> = if kind == ResourceKind::Skills {
+            crate::services::library::skill_targets::TARGETS
+                .iter()
+                .map(|target| target.id)
+                .chain(["shared"])
+                .collect()
+        } else {
+            vec!["claude", "codex", "gemini", "opencode", "hermes", "shared"]
+        };
+        let mut selected: BTreeSet<String> = known
+            .into_iter()
+            .filter(|tool| {
+                snapshot
+                    .machine
+                    .assignments
+                    .get(&assignment(&kind, id, tool))
+                    == Some(id)
+            })
+            .map(str::to_owned)
+            .collect();
         selected.extend(add);
         selected.retain(|tool| !withdraw.contains(tool));
         let full: Vec<_> = selected.into_iter().collect();

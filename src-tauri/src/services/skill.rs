@@ -414,7 +414,10 @@ impl SkillService {
                                 && crate::services::library::skill_resource::receipt_intact(receipt)
                         })
                     {
-                        row.apps.set_enabled_for(&tool.parse()?, true);
+                        // Agents outside the legacy app list have no flag here.
+                        if let Ok(app) = tool.parse::<AppType>() {
+                            row.apps.set_enabled_for(&app, true);
+                        }
                     }
                 }
                 Ok(row)

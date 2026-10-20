@@ -17,6 +17,25 @@ pub fn definition_view(db: &Database, row: &InstalledSkill) -> Result<Value, App
     let roots = skills::target_paths()?;
     let readers = skills::reader_paths();
     let scope_known = readers.is_ok();
+    // A full tree hash per receipt, once, rather than once per agent.
+    let intact_by_target: std::collections::BTreeMap<&str, bool> = snapshot
+        .machine
+        .receipts
+        .values()
+        .filter(|receipt| receipt.kind == ResourceKind::Skills && receipt.resource_id == row.id)
+        .map(|receipt| {
+            (
+                receipt.physical_target.as_str(),
+                skills::receipt_intact(receipt),
+            )
+        })
+        .collect();
+    let intact_of = |receipt: &super::Receipt| {
+        intact_by_target
+            .get(receipt.physical_target.as_str())
+            .copied()
+            .unwrap_or(false)
+    };
     let mut targets = Vec::new();
     for (tool, root) in roots {
         let path = root.join(&row.directory);
@@ -29,7 +48,7 @@ pub fn definition_view(db: &Database, row: &InstalledSkill) -> Result<Value, App
                 receipt.resource_id == row.id && receipt.kind == ResourceKind::Skills
             });
         let own = receipt.filter(|receipt| receipt.owners.contains(&tool));
-        let intact = receipt.is_some_and(skills::receipt_intact);
+        let intact = receipt.is_some_and(intact_of);
         let desired = snapshot
             .machine
             .assignments
@@ -67,7 +86,7 @@ pub fn definition_view(db: &Database, row: &InstalledSkill) -> Result<Value, App
                             .unwrap_or(false)
                         })
                     });
-                if visible && skills::receipt_intact(candidate) {
+                if visible && intact_of(candidate) {
                     readable_groups.push(json!({"path":candidate.path,"targetGroupId":candidate.physical_target,"owners":candidate.owners,"revision":candidate.resource_revision}));
                 }
             }
@@ -349,7 +368,7 @@ mod tests {
         assert_eq!(op.targets[0].tools, ["shared"]);
         assert_eq!(
             op.targets[0].readers,
-            ["codex", "copilot", "gemini", "opencode"]
+            ["codex", "copilot", "dsh", "gemini", "opencode"]
         );
         coordinator::apply_operation(&db, &op.id).unwrap();
         let view = definition_view(&db, &saved).unwrap();

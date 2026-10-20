@@ -4,7 +4,7 @@ use super::{
     ResourceRevision, TargetWrite,
 };
 use crate::{
-    app_config::{AppType, InstalledSkill, SkillApps},
+    app_config::{InstalledSkill, SkillApps},
     error::AppError,
     Database,
 };
@@ -13,7 +13,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
-    str::FromStr,
 };
 fn error(key: &str) -> AppError {
     AppError::Config(format!("library.{key}"))
@@ -270,18 +269,23 @@ pub fn artifact_for(db: &Database, id: &str) -> Result<PathBuf, AppError> {
     Ok(path)
 }
 pub fn native_paths() -> Result<BTreeMap<String, PathBuf>, AppError> {
-    ["claude", "codex", "gemini", "opencode", "hermes"]
-        .into_iter()
-        .map(|tool| {
-            let app = AppType::from_str(tool)?;
-            let path = crate::services::skill::SkillService::get_app_skills_dir(&app)
-                .map_err(|_| error("targetUnreadable"))?;
-            if !path.is_absolute() {
-                return Err(error("skillScopeUnsupported"));
+    let mut paths = BTreeMap::new();
+    for target in super::skill_targets::TARGETS {
+        match super::skill_targets::root(target.id) {
+            Ok(path) => {
+                paths.insert(target.id.to_string(), path);
             }
-            Ok((tool.to_string(), path))
-        })
-        .collect()
+            // A misplaced folder variable hides only that agent; the five
+            // bound tools still fail loudly, as before.
+            Err(failure)
+                if ["claude", "codex", "gemini", "opencode", "hermes"].contains(&target.id) =>
+            {
+                return Err(failure)
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(paths)
 }
 pub fn target_paths() -> Result<BTreeMap<String, PathBuf>, AppError> {
     let mut paths = native_paths()?;
@@ -304,7 +308,15 @@ pub fn reader_paths() -> Result<BTreeMap<String, Vec<PathBuf>>, AppError> {
         .into_iter()
         .map(|(tool, path)| (tool, vec![path]))
         .collect();
-    readers.get_mut("codex").unwrap().push(shared.clone());
+    // Gemini and OpenCode find the shared folder their own way, below.
+    for target in super::skill_targets::TARGETS
+        .iter()
+        .filter(|target| target.reads_shared && !["gemini", "opencode"].contains(&target.id))
+    {
+        if let Some(roots) = readers.get_mut(target.id) {
+            roots.push(shared.clone());
+        }
+    }
     // A known default reader, not a supported native write target or proof of loading.
     readers.insert("copilot".into(), vec![shared.clone()]);
     readers.get_mut("gemini").unwrap().push(
@@ -1570,6 +1582,45 @@ mod tests {
     }
     #[test]
     #[serial_test::serial]
+    fn skills_reach_every_registered_agent_and_withdraw_cleanly() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let skill = draft(&db, "body");
+        for tool in ["openclaw", "pi", "dsh", "workbuddy", "cursor", "codebuddy"] {
+            let entry = super::super::skill_targets::root(tool)
+                .unwrap()
+                .join(&skill.directory);
+            let op = preview(&db, &skill.id, &[tool.to_string()]).unwrap();
+            assert_eq!(
+                io::apply_operation(&db, &op.id).unwrap().status,
+                "applied",
+                "{tool}"
+            );
+            assert!(entry.join("SKILL.md").exists(), "{tool}");
+            let op = preview(&db, &skill.id, &[]).unwrap();
+            assert_eq!(
+                io::apply_operation(&db, &op.id).unwrap().status,
+                "applied",
+                "{tool}"
+            );
+            assert!(!entry.exists(), "{tool}");
+        }
+    }
+    #[test]
+    #[serial_test::serial]
+    fn dsh_reads_the_shared_folder_and_pi_only_its_own() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let shared = crate::config::get_home_dir().join(".agents/skills");
+        let readers = reader_paths().unwrap();
+        assert!(readers["dsh"].contains(&shared));
+        assert!(!readers["pi"].contains(&shared));
+        assert_eq!(
+            readers["cursor"],
+            vec![super::super::skill_targets::root("cursor").unwrap()]
+        );
+    }
+    #[test]
+    #[serial_test::serial]
     fn imported_row_paths_cannot_escape_the_native_root() {
         let _sandbox = crate::test_sandbox::sandbox();
         let db = Database::memory().unwrap();
@@ -1598,8 +1649,10 @@ mod tests {
     fn a_private_artifact_root_cannot_alias_native_skills() {
         let _sandbox = crate::test_sandbox::sandbox();
         let source = source("draft");
-        let native =
-            crate::services::skill::SkillService::get_app_skills_dir(&AppType::Claude).unwrap();
+        let native = crate::services::skill::SkillService::get_app_skills_dir(
+            &crate::app_config::AppType::Claude,
+        )
+        .unwrap();
         fs::create_dir_all(&native).unwrap();
         let private = artifacts::root();
         fs::create_dir_all(private.parent().unwrap()).unwrap();

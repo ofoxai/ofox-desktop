@@ -233,6 +233,14 @@ impl ToolVersion {
         self.into_catalog_inventory()
     }
 
+    /// Skills only need the agent's folder: a desktop app counts, WSL does not.
+    pub(crate) fn into_skill_inventory(mut self) -> super::install_catalog::InventoryEntry {
+        if self.env_type == "wsl" {
+            self.installation_status = InstallationStatus::Unknown;
+        }
+        self.into_catalog_inventory()
+    }
+
     pub(crate) fn into_catalog_inventory(self) -> super::install_catalog::InventoryEntry {
         // The binding detector accepts ChatGPT as a legacy Codex fallback.
         // The installation catalog lists these two products separately.

@@ -23,6 +23,51 @@ async fn resource_discovery(
         })
         .collect())
 }
+/// Every agent that can take skills, keyed by target id: one whose CLI or app is
+/// installed (never under WSL), or whose own folder is on this machine.
+async fn skill_discovery(
+) -> Result<std::collections::BTreeMap<String, crate::commands::InventoryEntry>, String> {
+    let targets = library::skill_targets::TARGETS;
+    let detected = crate::commands::get_tool_versions(
+        Some(
+            targets
+                .iter()
+                .filter_map(|target| target.tool.map(str::to_owned))
+                .collect(),
+        ),
+        None,
+        Some(false),
+    )
+    .await?;
+    let mut found: std::collections::BTreeMap<_, _> = detected
+        .into_iter()
+        .map(|tool| {
+            let entry = tool.into_skill_inventory();
+            (entry.tool_id.clone(), entry)
+        })
+        .collect();
+    for target in targets {
+        let installed = found
+            .get(target.id)
+            .is_some_and(|entry: &crate::commands::InventoryEntry| entry.status == "installed")
+            || library::skill_targets::detected_locally(target.id);
+        let entry =
+            found
+                .entry(target.id.to_string())
+                .or_insert_with(|| crate::commands::InventoryEntry {
+                    tool_id: target.id.to_string(),
+                    status: "notInstalled".into(),
+                    version: None,
+                    path: None,
+                    error: None,
+                    managed_copy: None,
+                });
+        if installed {
+            entry.status = "installed".into();
+        }
+    }
+    Ok(found)
+}
 fn verify_selected_tools(
     snapshot: &library::LibrarySnapshot,
     kind: library::ResourceKind,
@@ -470,7 +515,7 @@ pub fn get_library_summary(state: State<'_, AppState>) -> Result<Value, String> 
 #[tauri::command]
 pub async fn get_library_skills(state: State<'_, AppState>) -> Result<Value, String> {
     crate::agent_env::ready().await;
-    let discovery = resource_discovery().await?;
+    let discovery = skill_discovery().await?;
     let _io = crate::config_io::lock();
     library::skill_resource::ensure_metadata(&state.db).map_err(|e| e.to_string())?;
     let mut skills = Vec::new();
@@ -513,8 +558,17 @@ pub async fn get_library_skills(state: State<'_, AppState>) -> Result<Value, Str
         .filter(|op| op.kind == library::ResourceKind::Skills)
         .collect();
     operations.sort_by_key(|op| std::cmp::Reverse(op.created_at));
+    let resolved = library::skill_resource::native_paths().unwrap_or_default();
+    let skill_targets: Vec<Value> = library::skill_targets::TARGETS
+        .iter()
+        .map(|target| {
+            json!({"id":target.id,"label":target.label,"readsShared":target.reads_shared,
+                "detected":discovery.get(target.id).is_some_and(|entry| entry.status == "installed"),
+                "scopeKnown":resolved.contains_key(target.id)})
+        })
+        .collect();
     Ok(
-        json!({"epoch":snapshot.machine.epoch,"skills":skills,"operations":operations.into_iter().take(20).map(library::operation_view).collect::<Vec<_>>()}),
+        json!({"epoch":snapshot.machine.epoch,"skills":skills,"skillTargets":skill_targets,"operations":operations.into_iter().take(20).map(library::operation_view).collect::<Vec<_>>()}),
     )
 }
 #[tauri::command]
@@ -526,7 +580,7 @@ pub async fn preview_library_skills(
     expected_epoch: u64,
 ) -> Result<Value, String> {
     crate::agent_env::ready().await;
-    let discovery = resource_discovery().await?;
+    let discovery = skill_discovery().await?;
     let _io = crate::config_io::lock();
     library::catalog::verify_epoch(&state.db, expected_epoch).map_err(|e| e.to_string())?;
     let snapshot = state.db.library_snapshot().map_err(|e| e.to_string())?;
@@ -960,7 +1014,11 @@ pub async fn preview_library_batch(
     expected_epoch: u64,
 ) -> Result<Value, String> {
     crate::agent_env::ready().await;
-    let discovery = resource_discovery().await?;
+    let discovery = if kind == library::ResourceKind::Skills {
+        skill_discovery().await?
+    } else {
+        resource_discovery().await?
+    };
     let snapshot = state.db.library_snapshot().map_err(|e| e.to_string())?;
     for resource in &resources {
         let mut additions = resource.add_tools.clone();

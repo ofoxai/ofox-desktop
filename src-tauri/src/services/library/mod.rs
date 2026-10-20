@@ -16,6 +16,7 @@ pub(crate) mod resource_pack;
 pub(crate) mod skill_actions;
 pub(crate) mod skill_artifact;
 pub(crate) mod skill_resource;
+pub(crate) mod skill_targets;
 pub(crate) mod skill_view;
 mod store;
 mod view;
