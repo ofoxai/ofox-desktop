@@ -138,6 +138,10 @@ impl Scan {
         sid: &str,
         content: Option<&Value>,
     ) -> Result<(), AppError> {
+        // Indexing a non-object JSON value would panic mid-sync.
+        if !value.is_object() {
+            return Err(error("sourceReadFailed"));
+        }
         value["id"] = json!(id);
         value["sessionID"] = json!(sid);
         if !id.is_empty() && self.sessions.contains_key(sid) {
@@ -500,6 +504,16 @@ pub(crate) fn read(path: &Path) -> Result<ParsedSource, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_message_row_that_is_not_an_object_is_a_read_failure_not_a_panic() {
+        let mut scan = Scan::new();
+        scan.session(&json!({"id":"root","time":{"created":1000}}), "root".into())
+            .unwrap();
+        for value in [json!([]), json!(0), json!("x")] {
+            assert!(scan.message(value, "m", "root", None).is_err());
+        }
+    }
 
     #[test]
     fn native_runtime_opencode_keeps_all_roles_and_completed_times_in_native_message_order() {
