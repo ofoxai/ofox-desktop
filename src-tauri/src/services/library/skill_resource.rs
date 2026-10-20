@@ -882,6 +882,19 @@ pub(crate) fn preview_at_adopting(
                 );
             }
         }
+        // A taken-over entry that is still wanted, unchanged and intact stays
+        // exactly as it is: rewriting it would set the user's folder aside.
+        if old.as_ref().is_some_and(|receipt| {
+            receipt.resource_id == id
+                && adopted_owned(Some(receipt)).is_some()
+                && !owners.is_empty()
+                && receipt.owners.iter().cloned().collect::<BTreeSet<_>>() == owners
+                && receipt.resource_revision == meta.revision
+                && receipt.definition_hash == meta.hash
+                && receipt_intact(receipt)
+        }) {
+            continue;
+        }
         let mut readers = owners
             .iter()
             .filter(|tool| tool.as_str() != "shared")
@@ -1933,6 +1946,32 @@ mod tests {
         let target = skill_target(&db, &skill, "codex");
         assert_eq!(target["adopted"], true);
         assert_eq!(target["adoptable"], false);
+    }
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn giving_a_skill_to_another_agent_leaves_taken_over_entries_as_they_are() {
+        use std::os::unix::fs::MetadataExt;
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let skill = draft(&db, "body");
+        let claude = super::super::skill_targets::root("claude")
+            .unwrap()
+            .join("fixture");
+        user_folder(&claude, "body");
+        let inode = fs::metadata(claude.join("SKILL.md")).unwrap().ino();
+        let op = preview_adoption(&db, &skill.id, &["claude".into()], &["claude".into()]).unwrap();
+        io::apply_operation(&db, &op.id).unwrap();
+        let op = preview(&db, &skill.id, &["claude".into(), "pi".into()]).unwrap();
+        assert_eq!(io::apply_operation(&db, &op.id).unwrap().status, "applied");
+        assert!(!fs::symlink_metadata(&claude)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::metadata(claude.join("SKILL.md")).unwrap().ino(), inode);
+        assert_eq!(skill_target(&db, &skill, "claude")["adopted"], true);
+        assert_eq!(skill_target(&db, &skill, "claude")["status"], "applied");
+        assert_eq!(skill_target(&db, &skill, "pi")["status"], "applied");
     }
     #[test]
     fn receipts_written_before_take_over_existed_still_read() {
