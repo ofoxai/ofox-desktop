@@ -11,6 +11,7 @@ import { settingsApi } from "@/lib/api";
 import { getUsageOverview } from "@/lib/api/usageOverview";
 import { fmtCost, fmtTokenCount } from "@/lib/format";
 import { ofoxActivityUrl } from "@/lib/ofoxUrls";
+import { createUsageQuery } from "@/lib/usageWorkbench";
 import { queryClient } from "@/lib/query/queryClient";
 import { cn } from "@/lib/utils";
 
@@ -29,11 +30,13 @@ export default function TrayUsage() {
   const { t } = useTranslation();
   const { apex } = useOfoxApex();
   const [period, setPeriod] = useState<TrayPeriod>("today");
-  // The usage page's own cache entry, so either view warms the other.
+  // The usage page's query, so both views count the same native sources and
+  // price them the same way; it is built at fetch time to end now.
   const overview = useQuery(
     {
-      queryKey: ["usageOverview", apex, period, null],
-      queryFn: () => getUsageOverview(period, undefined, apex),
+      queryKey: ["usageOverview", apex, period, "tray"],
+      queryFn: () =>
+        getUsageOverview(period, createUsageQuery({ period }), apex),
       staleTime: 60_000,
       retry: false,
     },
