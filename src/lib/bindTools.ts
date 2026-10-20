@@ -177,7 +177,7 @@ async function selectWorkBuddyDefaults(): Promise<WorkBuddyModelSelection[]> {
 export async function bindTools(tools: string[]): Promise<string[]> {
   const existing = new Set(readBoundTools());
   const succeeded: string[] = [];
-  const failed: string[] = [];
+  const failed: { tool: string; reason?: string }[] = [];
   for (const tool of new Set(tools)) {
     if (existing.has(tool)) continue;
     if (!OFOX_AUTO_BIND_TOOLS.has(tool)) {
@@ -197,17 +197,25 @@ export async function bindTools(tools: string[]): Promise<string[]> {
       succeeded.push(tool);
     } catch (e) {
       console.error(`[bindTools] bind ${tool} failed`, e);
-      failed.push(tool);
+      // 后端的错误（例如 Pi/dsh 的「请先升级」）本来就是写给用户看的。
+      const reason =
+        typeof e === "string" ? e : e instanceof Error ? e.message : undefined;
+      failed.push({ tool, reason: reason?.trim() || undefined });
     }
   }
 
   if (failed.length > 0) {
-    // 让用户知道哪些工具没绑上——之前是 silent failure，用户只能从"工具
-    // 没出现在列表里"反推。常见原因是 token 过期：toast 文案不点破具体
-    // 错因（后端错误对最终用户不友好），主流程仍然继续，已成功的工具会
+    // 让用户知道哪些工具没绑上、为什么——之前只说「可重试或检查登录态」，
+    // 版本过旧这类要用户动手的原因看不到。主流程仍然继续，已成功的工具会
     // 被正常持久化。
+    const reasons = failed
+      .filter((item) => item.reason)
+      .map((item) => `${item.tool}: ${item.reason}`);
     toast.error(
-      i18n.t("toolLifecycle.bindFailed", { tools: failed.join("、") }),
+      i18n.t("toolLifecycle.bindFailed", {
+        tools: failed.map((item) => item.tool).join("、"),
+      }),
+      reasons.length ? { description: reasons.join("\n") } : undefined,
     );
   }
 

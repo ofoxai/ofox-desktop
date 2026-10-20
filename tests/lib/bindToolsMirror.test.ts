@@ -17,6 +17,11 @@ vi.mock("@tauri-apps/api/event", async () => {
   };
 });
 
+const toastError = vi.fn();
+vi.mock("sonner", () => ({
+  toast: { error: (...args: unknown[]) => toastError(...args) },
+}));
+
 // Mock toolMeta so bindTools doesn't pull in unrelated paths.
 vi.mock("@/config/toolMeta", () => ({
   BOUND_TOOLS_STORAGE_KEY: "bound_tools",
@@ -255,6 +260,29 @@ describe("bindTools.mirrorBoundToolsToSettings", () => {
     expect(bound).toEqual(["claude"]);
     expect(retained).toEqual(["workbuddy", "codex", "claude"]);
     expect(JSON.parse(localStorage.getItem("bound_tools")!)).toEqual(retained);
+  });
+
+  it("says why a tool could not be bound", async () => {
+    toastError.mockClear();
+    server.use(
+      http.post(`${TAURI_ENDPOINT}/get_settings`, () =>
+        HttpResponse.json(baseSettings),
+      ),
+      http.post(`${TAURI_ENDPOINT}/save_bound_tools`, () =>
+        HttpResponse.json(true),
+      ),
+      http.post(`${TAURI_ENDPOINT}/ofox_bind_tool`, () =>
+        HttpResponse.text("please upgrade dsh to 0.2", { status: 500 }),
+      ),
+    );
+    const { bindTools } = await import("@/lib/bindTools");
+    await bindTools(["dsh"]);
+    expect(toastError).toHaveBeenCalledOnce();
+    const [, options] = toastError.mock.calls[0] as [
+      string,
+      { description: string },
+    ];
+    expect(options.description).toBe("dsh: please upgrade dsh to 0.2");
   });
 
   it("retains every existing binding when adding a new tool fails", async () => {

@@ -137,8 +137,9 @@ fn health(record: &Record, tool: BindableTool) -> Result<ToolBindingStatus, Stri
             BindableTool::Dsh => dsh::scopes(record),
             _ => Err("不是原生工具".into()),
         };
-        if selected.is_err() {
+        if let Err(message) = selected {
             status = ToolBindingStatus::modified(vec!["current-provider".into()]);
+            status.message = Some(message);
         }
     }
     Ok(status)

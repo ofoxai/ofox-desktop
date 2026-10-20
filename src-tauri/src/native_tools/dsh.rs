@@ -38,15 +38,20 @@ fn patch(path: &Path) -> Result<Value, String> {
 pub(super) fn patch_for_test(path: &Path) -> Value {
     patch(path).unwrap()
 }
+/// dsh 0.1 把用户选的默认模型存在 `settings.yaml`，它盖过 profile 里 Ofox 写的模型，
+/// 桌面端选的模型对新会话不起作用。0.2 第一次运行时把它迁进 profile 并改名
+/// （`settings.yaml.imported`），之后模型选择和 Ofox 写的是同一处。
+pub(super) const UPGRADE_HINT: &str = "dsh 版本过旧：0.1 版的 settings.yaml 会盖过 Ofox 设置的模型。请先把 dsh 升级到 0.2 以上并运行一次，再绑定";
+fn require_current_layout(directory: &Path) -> Result<(), String> {
+    if directory.join("settings.yaml").exists() {
+        return Err(UPGRADE_HINT.into());
+    }
+    Ok(())
+}
 fn profile_paths(directory: &Path) -> Result<Vec<PathBuf>, String> {
     let root = directory.join("profiles");
-    let entries = std::fs::read_dir(&root).map_err(|_| {
-        if directory.join("settings.yaml").exists() {
-            "不支持的旧版 dsh 配置，请升级到使用 profiles/cordis.patch.yml 的版本".to_string()
-        } else {
-            "dsh 尚未初始化，请先运行 dsh 创建 profile".to_string()
-        }
-    })?;
+    let entries = std::fs::read_dir(&root)
+        .map_err(|_| "dsh 尚未初始化，请先运行 dsh 创建 profile".to_string())?;
     let mut paths = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|_| "无法读取 dsh profiles".to_string())?;
@@ -182,6 +187,7 @@ pub(super) fn plan(
     catalog: &[FetchedModel],
     previous: Option<&Record>,
 ) -> Result<Record, String> {
+    require_current_layout(directory)?;
     let mut record = previous.cloned().unwrap_or(Record {
         version: 1,
         directory: directory.into(),
@@ -287,6 +293,7 @@ fn validate_credentials(value: &Value) -> Result<(), String> {
 }
 
 pub(super) fn scopes(record: &Record) -> Result<Vec<NativeScopeModel>, String> {
+    require_current_layout(&record.directory)?;
     let home_path = record.directory.join("cordis.patch.yml");
     let home = patch(&home_path)?;
     validate_layers(&home, false)?;

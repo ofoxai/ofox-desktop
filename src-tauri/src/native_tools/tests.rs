@@ -350,6 +350,70 @@ async fn dsh_rejects_unknown_or_shadowing_credentials_without_partial_write() {
     }
 }
 
+const DSH_01_SETTINGS: &str =
+    "agent-default-model:\n  provider: ofox\n  model: anthropic/claude-opus-4.6\n";
+
+#[tokio::test]
+#[serial]
+async fn dsh_01_settings_yaml_refuses_bind_without_writing() {
+    let h = Home::new();
+    let db = Database::memory().unwrap();
+    let all = catalog();
+    let profile = h.dsh("profiles/web/cordis.patch.yml");
+    write(&profile, PROFILE);
+    write(&h.dsh("settings.yaml"), DSH_01_SETTINGS);
+
+    assert_eq!(
+        validate_bind(BindableTool::Dsh, &all[0], &all).unwrap_err(),
+        dsh::UPGRADE_HINT
+    );
+    let error = bind_with_catalog(&db, BindableTool::Dsh, KEY, &all[0], &all)
+        .await
+        .unwrap_err();
+    assert_eq!(error, dsh::UPGRADE_HINT);
+    assert_eq!(fs::read_to_string(&profile).unwrap(), PROFILE);
+    assert_eq!(
+        fs::read_to_string(h.dsh("settings.yaml")).unwrap(),
+        DSH_01_SETTINGS
+    );
+    assert!(!h.dsh(".env").exists());
+}
+
+#[tokio::test]
+#[serial]
+async fn dsh_settings_yaml_imported_by_02_does_not_block() {
+    let h = Home::new();
+    let db = Database::memory().unwrap();
+    let all = catalog();
+    write(&h.dsh("profiles/web/cordis.patch.yml"), PROFILE);
+    write(&h.dsh("settings.yaml.imported"), DSH_01_SETTINGS);
+
+    bind_with_catalog(&db, BindableTool::Dsh, KEY, &all[0], &all)
+        .await
+        .unwrap();
+    assert_eq!(
+        binding_status(&db, BindableTool::Dsh).await.status,
+        BindingStatus::Configured
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn dsh_01_settings_yaml_after_bind_reports_the_upgrade() {
+    let h = Home::new();
+    let db = Database::memory().unwrap();
+    let all = catalog();
+    write(&h.dsh("profiles/web/cordis.patch.yml"), PROFILE);
+    bind_with_catalog(&db, BindableTool::Dsh, KEY, &all[0], &all)
+        .await
+        .unwrap();
+    write(&h.dsh("settings.yaml"), DSH_01_SETTINGS);
+
+    let status = binding_status(&db, BindableTool::Dsh).await;
+    assert_eq!(status.status, BindingStatus::Modified);
+    assert_eq!(status.message.as_deref(), Some(dsh::UPGRADE_HINT));
+}
+
 #[tokio::test]
 #[serial]
 async fn dsh_multiline_flow_credential_refs_bind_and_restore_exactly() {
