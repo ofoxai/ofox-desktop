@@ -2107,10 +2107,8 @@ mod tests {
             vec![super::super::skill_targets::root("cursor").unwrap()]
         );
     }
-    /// The fixture skill's files, written by hand with the user's own modes.
-    #[cfg(unix)]
+    /// The fixture skill's files, with private modes on Unix hosts.
     fn user_folder(path: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
         fs::create_dir_all(path).unwrap();
         fs::write(
             path.join("SKILL.md"),
@@ -2118,10 +2116,14 @@ mod tests {
         )
         .unwrap();
         fs::write(path.join(".hidden"), body).unwrap();
-        for file in ["SKILL.md", ".hidden"] {
-            fs::set_permissions(path.join(file), fs::Permissions::from_mode(0o600)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for file in ["SKILL.md", ".hidden"] {
+                fs::set_permissions(path.join(file), fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
         }
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
     fn skill_target(db: &Database, skill: &InstalledSkill, tool: &str) -> serde_json::Value {
         let view = super::super::skill_view::definition_view(db, skill).unwrap();

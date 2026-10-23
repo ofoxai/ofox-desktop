@@ -469,17 +469,33 @@ pub(super) mod tests {
 
     #[test]
     fn a_same_length_edit_with_restored_mtime_invalidates_the_snapshot() {
-        use std::io::Write;
+        use std::io::{Seek, Write};
         let dir = fixture();
         let loader = dir
             .path()
             .join("lib/node_modules/@github/copilot/npm-loader.js");
         let metadata = fs::metadata(&loader).unwrap();
+        let before = stamp(&metadata).unwrap();
         let result = inspect_with(dir.path(), || {
             let mut file = fs::OpenOptions::new().write(true).open(&loader).unwrap();
-            file.write_all(&vec![b'x'; metadata.len() as usize])
-                .unwrap();
-            file.set_modified(metadata.modified().unwrap()).unwrap();
+            // Linux can reuse one ctime tick for rapid writes. Establish the
+            // ctime-guard precondition without changing size or original mtime.
+            let mut changed = false;
+            for _ in 0..100 {
+                file.rewind().unwrap();
+                file.write_all(&vec![b'x'; metadata.len() as usize])
+                    .unwrap();
+                file.set_modified(metadata.modified().unwrap()).unwrap();
+                let after = stamp(&fs::metadata(&loader).unwrap()).unwrap();
+                assert_eq!(after.size, before.size);
+                assert_eq!(after.modified, before.modified);
+                if (after.changed, after.changed_ns) != (before.changed, before.changed_ns) {
+                    changed = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(changed, "fixture ctime did not advance within one second");
         });
         assert_eq!(result, Err(Failure::Changed));
     }
