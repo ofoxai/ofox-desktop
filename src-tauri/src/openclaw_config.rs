@@ -26,23 +26,82 @@ const OPENCLAW_TOOLS_PROFILES: &[&str] = &["minimal", "coding", "messaging", "fu
 // Path Functions
 // ============================================================================
 
+/// Native state is independent of OPENCLAW_CONFIG_PATH. Reject relative paths:
+/// Desktop cannot recover the invocation directory of an external client.
+fn absolute_env(name: &str, home: &Path) -> Result<Option<PathBuf>, AppError> {
+    let raw = match std::env::var(name) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(_) => return Err(AppError::Config("library.skillScopeUnsupported".into())),
+    };
+    let value = raw.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let path = if value == "~" {
+        home.to_path_buf()
+    } else if value.starts_with("~/") || value.starts_with("~\\") {
+        home.join(&value[2..])
+    } else {
+        PathBuf::from(value)
+    };
+    if !path.is_absolute() {
+        return Err(AppError::Config("library.skillScopeUnsupported".into()));
+    }
+    Ok(Some(path))
+}
+
+pub(crate) fn resolve_openclaw_state_dir() -> Result<PathBuf, AppError> {
+    if let Some(dir) = get_openclaw_override_dir() {
+        return Ok(dir);
+    }
+    let os_home = crate::config::get_home_dir();
+    let home = if std::env::var("OPENCLAW_HOME")
+        .ok()
+        .is_some_and(|v| matches!(v.trim(), "null" | "undefined"))
+    {
+        os_home
+    } else {
+        absolute_env("OPENCLAW_HOME", &os_home)?.unwrap_or(os_home)
+    };
+    if let Some(dir) = absolute_env("OPENCLAW_STATE_DIR", &home)? {
+        return Ok(dir);
+    }
+    let current = home.join(".openclaw");
+    let legacy = home.join(".clawdbot");
+    if current
+        .symlink_metadata()
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        && legacy.symlink_metadata().is_ok()
+    {
+        return Ok(legacy);
+    }
+    Ok(current)
+}
+
+pub(crate) fn resolve_openclaw_config_path() -> Result<PathBuf, AppError> {
+    if let Some(dir) = get_openclaw_override_dir() {
+        return Ok(dir.join("openclaw.json"));
+    }
+    if let Some(path) = absolute_env("OPENCLAW_CONFIG_PATH", &crate::config::get_home_dir())? {
+        return Ok(path);
+    }
+    Ok(resolve_openclaw_state_dir()?.join("openclaw.json"))
+}
+
 /// 获取 OpenClaw 配置目录
 ///
 /// 默认路径: `~/.openclaw/`
 /// 可通过 settings.openclaw_config_dir 覆盖
 pub fn get_openclaw_dir() -> PathBuf {
-    if let Some(override_dir) = get_openclaw_override_dir() {
-        return override_dir;
-    }
-
-    crate::config::get_home_dir().join(".openclaw")
+    resolve_openclaw_state_dir().unwrap_or_else(|_| crate::config::get_home_dir().join(".openclaw"))
 }
 
 /// 获取 OpenClaw 配置文件路径
 ///
 /// 返回 `~/.openclaw/openclaw.json`
 pub fn get_openclaw_config_path() -> PathBuf {
-    get_openclaw_dir().join("openclaw.json")
+    resolve_openclaw_config_path().unwrap_or_else(|_| get_openclaw_dir().join("openclaw.json"))
 }
 
 fn default_openclaw_config_value() -> Value {

@@ -51,6 +51,7 @@ pub(crate) struct HermesMessage {
     pub id: i64,
     pub role: String,
     pub at_ms: i64,
+    pub tools: super::session_analytics::interactions::CallScan,
 }
 
 pub(crate) struct HermesRead {
@@ -371,7 +372,7 @@ fn read_messages(
 ) -> Result<Option<Vec<HermesMessage>>, AppError> {
     let mut stmt = conn
         .prepare(
-            "SELECT session_id,role,timestamp,MIN(id) FROM messages \
+            "SELECT session_id,role,timestamp,MIN(id),CASE WHEN length(CAST(tool_calls AS BLOB))<=1048576 THEN tool_calls ELSE NULL END,length(CAST(tool_calls AS BLOB)) FROM messages \
              WHERE (COALESCE(active,1)!=0 OR COALESCE(compacted,0)!=0) \
              AND COALESCE(json_extract(CASE WHEN json_valid(display_metadata) \
              THEN display_metadata ELSE '{}' END,'$.model_only'),0)=0 \
@@ -394,7 +395,40 @@ fn read_messages(
             reasons.insert("invalidMessageTime".into());
             continue;
         };
+        let message_id: i64 = row.get(3).map_err(|_| invalid("invalidDatabase"))?;
+        let mut tools = super::session_analytics::interactions::CallScan::default();
+        if role == "assistant" {
+            let bytes: Option<i64> = row.get(5).map_err(|_| invalid("invalidDatabase"))?;
+            let raw: Option<String> = row.get(4).map_err(|_| invalid("invalidDatabase"))?;
+            if bytes.is_some_and(|n| n > 1048576) {
+                tools.incomplete = true;
+            }
+            if let Some(raw) = raw.filter(|s| !s.is_empty()) {
+                match serde_json::from_str::<serde_json::Value>(&raw) {
+                    Ok(serde_json::Value::Array(calls)) => {
+                        for (ordinal, call) in calls.into_iter().enumerate() {
+                            let fallback_id = format!("message:{message_id}:tool:{ordinal}");
+                            let args = call
+                                .pointer("/function/arguments")
+                                .and_then(serde_json::Value::as_str)
+                                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+                            tools.record(
+                                Some(call["id"].as_str().unwrap_or(&fallback_id)),
+                                Some(at_ms),
+                                call.pointer("/function/name")
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or(""),
+                                args.as_ref(),
+                            );
+                        }
+                    }
+                    Ok(serde_json::Value::Null) => {}
+                    _ => tools.incomplete = true,
+                }
+            }
+        }
         out.push(HermesMessage {
+            tools,
             sid,
             role,
             at_ms,

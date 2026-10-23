@@ -39,6 +39,32 @@ fn verify_tree(root: &Path, directory: &Path, remaining: &mut usize) -> Result<(
     }
     Ok(())
 }
+fn resource_scope(value: &Value) -> Result<bool> {
+    let values = value.as_array().ok_or("resource kinds missing")?;
+    let kinds: std::collections::BTreeSet<_> = values.iter().filter_map(Value::as_str).collect();
+    if values.len() != kinds.len()
+        || (kinds != ["mcp", "skills"].into_iter().collect()
+            && kinds != ["instructions", "mcp", "skills"].into_iter().collect())
+    {
+        return Err("unsupported resource scope".into());
+    }
+    Ok(kinds.contains("instructions"))
+}
+
+#[test]
+fn resource_scope_rejects_duplicates_nonstrings_and_incomplete_scopes() {
+    assert!(!resource_scope(&json!(["mcp", "skills"])).unwrap());
+    assert!(resource_scope(&json!(["instructions", "mcp", "skills"])).unwrap());
+    for value in [
+        json!(["mcp", "skills", "skills"]),
+        json!(["mcp", "skills", null]),
+        json!(["mcp"]),
+        json!(["mcp", "skills", "other"]),
+    ] {
+        assert!(resource_scope(&value).is_err());
+    }
+}
+
 fn write_profile(requested_root: &Path) -> Result<Value> {
     let root = fs::canonicalize(requested_root)?;
     let temporary = fs::canonicalize(std::env::temp_dir())?;
@@ -52,9 +78,23 @@ fn write_profile(requested_root: &Path) -> Result<Value> {
     let input = read_json(&root.join("writer-input.json"))?;
     let source = proof["sourceSha"].as_str().ok_or("source missing")?;
     let agent = proof["agentId"].as_str().ok_or("agent missing")?;
+    let target = super::extension_targets::canonical(agent);
+    let resource_kinds =
+        input
+            .get("resourceKinds")
+            .cloned()
+            .unwrap_or(json!(["instructions", "mcp", "skills"]));
+    let with_instructions = resource_scope(&resource_kinds)?;
+    if (with_instructions && !["claude", "codex", "gemini", "opencode", "hermes"].contains(&target))
+        || (input.get("resourceKinds").is_some()
+            && (proof["resourceKinds"] != resource_kinds
+                || marker["resourceKinds"] != resource_kinds))
+    {
+        return Err("resource scope mismatch".into());
+    }
     if source.len() != 40
         || !source.bytes().all(|b| b.is_ascii_hexdigit())
-        || !["claude", "codex", "gemini", "opencode", "hermes"].contains(&agent)
+        || !super::extension_targets::CLIENTS.contains(&agent)
         || input["sourceSha"] != proof["sourceSha"]
         || input["agentId"] != proof["agentId"]
         || input["preparedRunId"] != proof["runId"]
@@ -83,6 +123,11 @@ fn write_profile(requested_root: &Path) -> Result<Value> {
         ("GEMINI_CLI_HOME", home.clone()),
         ("HERMES_HOME", home.join(".hermes")),
         ("OPENCODE_CONFIG_DIR", home.join(".config/opencode")),
+        ("OPENCLAW_STATE_DIR", home.join(".openclaw")),
+        ("OPENCLAW_CONFIG_PATH", home.join(".openclaw/openclaw.json")),
+        ("WORKBUDDY_CONFIG_DIR", home.join(".workbuddy")),
+        ("PI_CODING_AGENT_DIR", home.join(".pi/agent")),
+        ("DSH_HOME", home.join(".dsh")),
     ] {
         std::env::set_var(name, path);
     }
@@ -90,19 +135,23 @@ fn write_profile(requested_root: &Path) -> Result<Value> {
     let db = Database::memory()?;
     let mut operations = Vec::new();
     let mut files: Vec<(&str, PathBuf)> = vec![("proof", proof_path)];
-    let instruction = super::save_instruction(
-        &db,
-        InstructionSet {
-            id: "ofox-acceptance".into(),
-            name: "OFox acceptance".into(),
-            content: input["instructionText"]
-                .as_str()
-                .ok_or("instruction missing")?
-                .into(),
-            revision: 0,
-        },
-        None,
-    )?;
+    let instruction = if with_instructions {
+        Some(super::save_instruction(
+            &db,
+            InstructionSet {
+                id: "ofox-acceptance".into(),
+                name: "OFox acceptance".into(),
+                content: input["instructionText"]
+                    .as_str()
+                    .ok_or("instruction missing")?
+                    .into(),
+                revision: 0,
+            },
+            None,
+        )?)
+    } else {
+        None
+    };
     let staged = root.join("skill-source");
     fs::create_dir_all(&staged)?;
     crate::config::atomic_write(
@@ -132,9 +181,9 @@ fn write_profile(requested_root: &Path) -> Result<Value> {
         None,
     )?;
     let mcp = input["mcp"].as_object().ok_or("MCP input missing")?;
-    if mcp.len() != 2
+    if mcp.len() != if with_instructions { 2 } else { 1 }
         || !mcp.contains_key("ofox_acceptance")
-        || !mcp.contains_key("microsoft_learn")
+        || (with_instructions && !mcp.contains_key("microsoft_learn"))
     {
         return Err("unexpected MCP resources".into());
     }
@@ -154,17 +203,17 @@ fn write_profile(requested_root: &Path) -> Result<Value> {
             None,
         )?;
     }
-    for (kind, resources) in [
-        (ResourceKind::Instructions, vec![instruction.id]),
-        (
-            ResourceKind::Mcp,
-            vec!["ofox_acceptance".into(), "microsoft_learn".into()],
-        ),
+    let mut resources = vec![
+        (ResourceKind::Mcp, mcp.keys().cloned().collect::<Vec<_>>()),
         (
             ResourceKind::Skills,
             vec!["acceptance:ofox-acceptance".into()],
         ),
-    ] {
+    ];
+    if let Some(instruction) = instruction {
+        resources.insert(0, (ResourceKind::Instructions, vec![instruction.id]));
+    }
+    for (kind, resources) in resources {
         let plan = batch::preview_batch(
             &db,
             kind.clone(),
@@ -177,7 +226,7 @@ fn write_profile(requested_root: &Path) -> Result<Value> {
                     withdraw_tools: vec![],
                 })
                 .collect(),
-            vec![agent.into()],
+            vec![target.into()],
             batch::BatchAction::Apply,
             db.library_snapshot()?.machine.epoch,
         )?;
@@ -194,15 +243,17 @@ fn write_profile(requested_root: &Path) -> Result<Value> {
         }
         operations.push(json!({"kind":kind,"operationId":operation_id,"result":"applied","receiptSha256":hash(&serde_json::to_vec(&result)?)}));
     }
-    files.push((
-        "instructions",
-        coordinator::native_instruction_paths()?[agent].clone(),
-    ));
-    let mcp_path = mcp_resource::native_paths()?[agent].clone();
+    if with_instructions {
+        files.push((
+            "instructions",
+            coordinator::native_instruction_paths()?[target].clone(),
+        ));
+    }
+    let mcp_path = mcp_resource::native_paths()?[target].clone();
     files.push(("mcp", mcp_path.clone()));
     files.push((
         "skills",
-        skill_resource::native_paths()?[agent].join("ofox-acceptance/SKILL.md"),
+        skill_resource::native_paths()?[target].join("ofox-acceptance/SKILL.md"),
     ));
     if agent == "claude" {
         // --bare reads only this explicit MCP input. Preserve the actual writer's
@@ -222,7 +273,7 @@ fn write_profile(requested_root: &Path) -> Result<Value> {
     let receipt = json!({"schemaVersion":1,"writer":"ofoxSandboxWriterV1","sourceSha":source,
         "compiledSourceSha":option_env!("OFOX_BUILD_SOURCE_SHA").unwrap_or("unknown"),
         "compiledSourceClean":option_env!("OFOX_BUILD_SOURCE_CLEAN") == Some("true"),
-        "preparedRunId":proof["runId"],"root":root,"agentId":agent,"operations":operations,"files":evidence});
+        "preparedRunId":proof["runId"],"root":root,"agentId":agent,"resourceKinds":resource_kinds,"operations":operations,"files":evidence});
     crate::config::atomic_write(
         &root.join("writer-receipt.json"),
         &serde_json::to_vec_pretty(&receipt)?,
@@ -234,7 +285,18 @@ fn write_profile(requested_root: &Path) -> Result<Value> {
 #[serial_test::serial]
 fn native_acceptance_profile_uses_three_real_writers() {
     let mut profile_roots = Vec::new();
-    for agent in ["claude", "codex", "gemini", "opencode", "hermes"] {
+    let legacy = ["claude", "codex", "gemini", "opencode", "hermes"]
+        .into_iter()
+        .map(|agent| (agent, true));
+    let resources_only = super::extension_targets::CLIENTS
+        .iter()
+        .map(|agent| (*agent, false));
+    for (agent, with_instructions) in legacy.chain(resources_only) {
+        let kinds = if with_instructions {
+            json!(["instructions", "mcp", "skills"])
+        } else {
+            json!(["mcp", "skills"])
+        };
         let root = tempfile::Builder::new()
             .prefix("ofox-native-profile-")
             .tempdir()
@@ -245,22 +307,33 @@ fn native_acceptance_profile_uses_three_real_writers() {
         profile_roots.push(root.path().to_path_buf());
         std::fs::write(root.path().join("fixture-private.json"), json!({
         "schemaVersion":1,"runId":"11111111-1111-4111-8111-111111111111", "sourceSha":"a".repeat(40),
-        "agentId":agent, "nonce":"b".repeat(64), "instructionChallenge":"c".repeat(64),
+        "agentId":agent, "resourceKinds":kinds, "nonce":"b".repeat(64), "instructionChallenge":"c".repeat(64),
         "skillChallenge":"d".repeat(64), "receipt":root.path().join("mcp-receipt.json")
     }).to_string()).unwrap();
         let proof = fs::read(root.path().join("fixture-private.json")).unwrap();
-        fs::write(root.path().join(".ofox-acceptance-prepared.json"),json!({"privateProofSha256":hash(&proof),"resourcesMode":"writer","expiresAt":chrono::Utc::now().timestamp_millis()+60_000}).to_string()).unwrap();
-        fs::write(root.path().join("writer-input.json"),json!({"schemaVersion":1,"sourceSha":"a".repeat(40),"agentId":agent,"preparedRunId":"11111111-1111-4111-8111-111111111111","instructionText":"Acceptance instruction", "skillText":"---\nname: ofox-acceptance\ndescription: Read-only acceptance\n---\nRead only.","mcp":{"ofox_acceptance":{"command":"fixture-node","args":["fixture-server"]},"microsoft_learn":{"type":"http","url":"https://learn.microsoft.com/api/mcp"}}}).to_string()).unwrap();
+        fs::write(root.path().join(".ofox-acceptance-prepared.json"),json!({"privateProofSha256":hash(&proof),"resourcesMode":"writer","resourceKinds":kinds,"expiresAt":chrono::Utc::now().timestamp_millis()+60_000}).to_string()).unwrap();
+        fs::write(root.path().join("writer-input.json"),json!({"schemaVersion":1,"sourceSha":"a".repeat(40),"agentId":agent,"resourceKinds":kinds,"preparedRunId":"11111111-1111-4111-8111-111111111111","instructionText":"Acceptance instruction", "skillText":"---\nname: ofox-acceptance\ndescription: Read-only acceptance\n---\nRead only.","mcp":{"ofox_acceptance":{"command":"fixture-node","args":["fixture-server"]},"microsoft_learn":{"type":"http","url":"https://learn.microsoft.com/api/mcp"}}}).to_string()).unwrap();
+        if !with_instructions {
+            let mut input = read_json(&root.path().join("writer-input.json")).unwrap();
+            input["mcp"]
+                .as_object_mut()
+                .unwrap()
+                .remove("microsoft_learn");
+            fs::write(root.path().join("writer-input.json"), input.to_string()).unwrap();
+        }
         let receipt = write_profile(root.path()).unwrap();
         assert_eq!(receipt["writer"], "ofoxSandboxWriterV1");
-        assert_eq!(receipt["operations"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            receipt["operations"].as_array().unwrap().len(),
+            if with_instructions { 3 } else { 2 }
+        );
         assert!(receipt["operations"]
             .as_array()
             .unwrap()
             .iter()
             .all(|op| op["result"] == "applied"));
         assert_eq!(receipt["agentId"], agent);
-        for kind in ["instructions", "mcp", "skills"] {
+        for kind in kinds.as_array().unwrap().iter().filter_map(Value::as_str) {
             assert!(
                 receipt["files"].as_array().unwrap().iter().any(|entry| {
                     entry["kind"] == kind

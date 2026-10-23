@@ -1,3 +1,7 @@
+import {
+  resourceClientIds,
+  acceptanceResourceKinds,
+} from "./resource-targets.mjs";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import {
@@ -110,6 +114,15 @@ export function isolatedEnvironment(root, inherited = process.env) {
     CLAUDE_CONFIG_DIR: join(home, ".claude"),
     GEMINI_CLI_HOME: home,
     HERMES_HOME: join(home, ".hermes"),
+    OPENCODE_CONFIG_DIR: join(home, ".config/opencode"),
+    OPENCLAW_HOME: home,
+    OPENCLAW_STATE_DIR: join(home, ".openclaw"),
+    OPENCLAW_CONFIG_PATH: join(home, ".openclaw/openclaw.json"),
+    WORKBUDDY_CONFIG_DIR: join(home, ".workbuddy"),
+    PI_CODING_AGENT_DIR: join(home, ".pi/agent"),
+    PI_OFFLINE: "1",
+    PI_TELEMETRY: "0",
+    DSH_HOME: join(home, ".dsh"),
     TMPDIR: join(root, "tmp"),
     TMP: join(root, "tmp"),
     TEMP: join(root, "tmp"),
@@ -230,11 +243,14 @@ function validateManifest(manifest) {
     )
   )
     throw new Error("unsafeManifestField");
-  const agents = manifest.agents ?? [...agentIds];
+  const kinds = acceptanceResourceKinds(manifest.resourceKinds);
+  const agents = manifest.agents ?? [
+    ...(kinds.includes("instructions") ? agentIds : resourceClientIds),
+  ];
   if (
     !Array.isArray(agents) ||
     agents.length < 1 ||
-    agents.some((id) => !agentIds.includes(id)) ||
+    agents.some((id) => !resourceClientIds.includes(id)) ||
     new Set(agents).size !== agents.length
   )
     throw new Error("invalidAgentSelection");
@@ -410,12 +426,20 @@ export async function runAcceptance(
         evidenceLevel:
           manifest.mode === "fixture" ? "fixture" : "nativeClientAndLocalMcp",
         attempts: 0,
-        instructionDelivery:
-          agentId === "claude"
+        instructionDelivery: !acceptanceResourceKinds(
+          manifest.resourceKinds,
+        ).includes("instructions")
+          ? "notInScope"
+          : agentId === "claude"
             ? "explicitCliFileNoKeychain"
             : "nativeDefaultPath",
-        defaultInstructionDiscovery:
-          agentId === "claude" ? "unverified" : "pending",
+        defaultInstructionDiscovery: !acceptanceResourceKinds(
+          manifest.resourceKinds,
+        ).includes("instructions")
+          ? "notInScope"
+          : agentId === "claude"
+            ? "unverified"
+            : "pending",
         clientVersion: {
           status: manifest.mode === "fixture" ? "fixtureOnly" : "notExecuted",
           expected: manifest.versions?.[agentId] ?? null,
@@ -459,6 +483,7 @@ export async function runAcceptance(
           skillChallenge: randomBytes(32).toString("hex"),
           model: manifest.models?.[agentId] ?? "fixture-model",
           apex: manifest.ofoxApex ?? "ofox.ai",
+          resourceKinds: acceptanceResourceKinds(manifest.resourceKinds),
         };
         let profile;
         let paidLaunchStarted = false;
@@ -485,12 +510,17 @@ export async function runAcceptance(
           ) {
             const verified = await verifyWriterProfile(
               manifest.writerProfiles[agentId],
-              { sourceSha: manifest.sourceSha, agentId },
+              {
+                sourceSha: manifest.sourceSha,
+                agentId,
+                resourceKinds: manifest.resourceKinds,
+              },
             );
             profile = {
               ...profilePaths(verified.root, agentId),
               model: proof.model,
-              prompt: acceptancePrompt(),
+              prompt: acceptancePrompt(manifest.resourceKinds),
+              resourceKinds: acceptanceResourceKinds(manifest.resourceKinds),
               external: true,
             };
             Object.assign(proof, verified.proof);
@@ -603,14 +633,24 @@ export async function runAcceptance(
             await verifyWriterProfile(manifest.writerProfiles[agentId], {
               sourceSha: manifest.sourceSha,
               agentId,
+              resourceKinds: manifest.resourceKinds,
             });
-          if (manifest.mode === "native" && agentId !== "claude")
+          if (
+            manifest.mode === "native" &&
+            agentId !== "claude" &&
+            acceptanceResourceKinds(manifest.resourceKinds).includes(
+              "instructions",
+            )
+          )
             row.defaultInstructionDiscovery = "observedContentConsumption";
           // No token-price estimate is a settlement. Unknown server charges remain held.
           const cents = provider ? await provider.settle({ runId, callId }) : 0;
           budget.settle(callId, cents);
           row.status =
             manifest.mode === "native" &&
+            acceptanceResourceKinds(manifest.resourceKinds).includes(
+              "instructions",
+            ) &&
             (row.remoteMcp.status !== "verified" ||
               row.defaultInstructionDiscovery === "unverified")
               ? "partial"
@@ -624,6 +664,7 @@ export async function runAcceptance(
             "processCleanupUnverified",
             "clientLaunchFailed",
             "clientRunFailed",
+            "desktopEntryRequired",
             "receiptMismatch",
             "mcpReceiptMissing",
             "nativeEvidenceIncomplete",
@@ -738,10 +779,23 @@ export async function runAcceptance(
       report.status === "nativePassed" &&
       report.identity.status === "verified" &&
       report.configurationWriterVerified &&
-      agents.length === agentIds.length &&
+      agents.length ===
+        (acceptanceResourceKinds(manifest.resourceKinds).includes(
+          "instructions",
+        )
+          ? agentIds
+          : resourceClientIds
+        ).length &&
+      (acceptanceResourceKinds(manifest.resourceKinds).includes("instructions")
+        ? agentIds
+        : resourceClientIds
+      ).every((agent) => agents.includes(agent)) &&
       report.results.every(
         (row) =>
-          row.remoteMcp.status === "verified" &&
+          (!acceptanceResourceKinds(manifest.resourceKinds).includes(
+            "instructions",
+          ) ||
+            row.remoteMcp.status === "verified") &&
           row.defaultInstructionDiscovery !== "unverified",
       );
     if (report.status === "nativePassed" && !report.nativeAccepted)
@@ -821,6 +875,7 @@ export async function prepareAcceptanceProfiles(manifest, { outputDirectory }) {
       model: manifest.models?.[agentId] ?? "fixture-model",
       apex: manifest.ofoxApex ?? "ofox.ai",
       resourcesMode: "writer",
+      resourceKinds: manifest.resourceKinds,
     });
     profiles.push({
       agentId,

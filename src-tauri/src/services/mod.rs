@@ -14,6 +14,7 @@ pub mod low_balance;
 pub mod mcp;
 pub mod model_fetch;
 pub(crate) mod native_sqlite_snapshot;
+mod official_pricing;
 pub(crate) mod ofox_bind;
 pub mod ofox_pricing;
 pub mod omo;

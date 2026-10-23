@@ -3,10 +3,7 @@ import type {
   SkillDefinition,
   SkillTarget,
 } from "@/lib/api/library";
-import { TOOL_ORDER } from "@/config/toolMeta";
-
-/** Agents outside the tools page's order, in the order magpie lists them. */
-const EXTRA_ORDER = ["cursor", "codebuddy", "claude-desktop"];
+import { RESOURCE_TARGET_IDS } from "@/config/resourceTargets";
 
 export type SkillCellState =
   /** Ofox gave it to the agent and it is in place. */
@@ -36,17 +33,11 @@ export interface SkillCell {
 
 const ATTENTION = ["conflict", "needsReview", "unreadable", "failed"];
 
-const rank = (id: string) => {
-  const tool = TOOL_ORDER.indexOf(id);
-  if (tool >= 0) return tool;
-  const extra = EXTRA_ORDER.indexOf(id);
-  return extra >= 0 ? TOOL_ORDER.length + extra : Number.MAX_SAFE_INTEGER;
-};
-
 /**
- * One column per agent that is on this computer, plus any agent a skill is
- * already given to, so nothing Ofox wrote disappears from view. A backend that
- * doesn't list its agents yet gets a column for each available skill target.
+ * Show detected agents (and existing assignments) only within OFox's bindable
+ * tool catalogue and the backend's Skills adapters. Detection alone does not
+ * make a tool a supported binding target. Keep saved assignments intact when
+ * hiding a column so toggling another agent cannot withdraw legacy targets.
  */
 export function skillColumns(
   targets: SkillTarget[] | undefined,
@@ -66,14 +57,9 @@ export function skillColumns(
           (!targets && target.available))
       )
         ids.add(target.toolId);
-  const listed = (targets ?? []).map((target) => target.id);
-  return [...ids].sort(
-    (a, b) =>
-      rank(a) - rank(b) ||
-      // Unknown agents keep the backend's order, then their names.
-      (listed.indexOf(a) === -1 ? Infinity : listed.indexOf(a)) -
-        (listed.indexOf(b) === -1 ? Infinity : listed.indexOf(b)) ||
-      a.localeCompare(b),
+  const supported = targets && new Set(targets.map((target) => target.id));
+  return RESOURCE_TARGET_IDS.filter(
+    (id) => ids.has(id) && (!supported || supported.has(id)),
   );
 }
 

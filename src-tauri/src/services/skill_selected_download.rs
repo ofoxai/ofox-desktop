@@ -6,7 +6,7 @@ use anyhow::{anyhow, Result};
 use serde::{de::DeserializeOwned, Deserialize};
 use sha1::{Digest, Sha1};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     io::{Cursor, Write},
 };
@@ -16,28 +16,35 @@ trait Transport: Sync {
     fn read(&self, url: Url, max_bytes: u64) -> impl Future<Output = Result<Vec<u8>>> + Send;
 }
 struct HttpTransport(reqwest::Client);
-impl Transport for HttpTransport {
-    async fn read(&self, url: Url, max_bytes: u64) -> Result<Vec<u8>> {
-        // The client has redirects disabled. Do not follow URLs supplied by tree entries.
-        if url.scheme() != "https"
-            || !matches!(
-                url.host_str(),
-                Some("api.github.com" | "raw.githubusercontent.com")
-            )
-            || url.port().is_some()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.fragment().is_some()
-        {
-            return Err(failure("skillRepositoryInvalid"));
-        }
+enum HttpRead {
+    Bytes(Vec<u8>),
+    Redirect {
+        status: u16,
+        location: Option<String>,
+    },
+}
+trait HttpRequester: Sync {
+    fn request(&self, url: &Url, max_bytes: u64) -> impl Future<Output = Result<HttpRead>> + Send;
+}
+impl HttpRequester for HttpTransport {
+    async fn request(&self, url: &Url, max_bytes: u64) -> Result<HttpRead> {
         let mut response = self
             .0
-            .get(url)
+            .get(url.clone())
             .header("User-Agent", "ofox-desktop")
             .send()
             .await
             .map_err(|_| failure("skillDownloadFailed"))?;
+        if response.status().is_redirection() {
+            return Ok(HttpRead::Redirect {
+                status: response.status().as_u16(),
+                location: response
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned),
+            });
+        }
         if !response.status().is_success() {
             return Err(failure("skillDownloadFailed"));
         }
@@ -58,8 +65,98 @@ impl Transport for HttpTransport {
             }
             bytes.extend_from_slice(&chunk);
         }
-        Ok(bytes)
+        Ok(HttpRead::Bytes(bytes))
     }
+}
+impl Transport for HttpTransport {
+    async fn read(&self, url: Url, max_bytes: u64) -> Result<Vec<u8>> {
+        read_http_response(self, url, max_bytes).await
+    }
+}
+fn validate_http_url(url: &Url) -> Result<()> {
+    if url.scheme() != "https"
+        || !matches!(
+            url.host_str(),
+            Some("api.github.com" | "raw.githubusercontent.com")
+        )
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(failure("skillRepositoryInvalid"));
+    }
+    Ok(())
+}
+/// Only GitHub repository metadata may move. Preserve the requested commit/tree
+/// resource and query; raw blob redirects and arbitrary API paths stay refused.
+fn repository_resource(url: &Url) -> Option<Vec<&str>> {
+    if url.host_str() != Some("api.github.com") {
+        return None;
+    }
+    let segments: Vec<_> = url.path_segments()?.collect();
+    let resource = match segments.as_slice() {
+        ["repos", owner, name, rest @ ..]
+            if valid_repo_component(owner) && valid_repo_component(name) =>
+        {
+            rest
+        }
+        ["repositories", id, rest @ ..]
+            if !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            rest
+        }
+        _ => return None,
+    };
+    match resource {
+        ["commits", reference] if !reference.is_empty() => Some(resource.to_vec()),
+        ["git", "trees", sha] if valid_sha(sha) => Some(resource.to_vec()),
+        _ => None,
+    }
+}
+fn repository_redirect(from: &Url, status: u16, location: Option<&str>) -> Result<Url> {
+    let reject = || failure("skillDownloadFailed");
+    if ![301, 302, 307, 308].contains(&status) {
+        return Err(reject());
+    }
+    let location = location
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 2048
+                && value.trim() == *value
+                && !value.chars().any(char::is_control)
+        })
+        .ok_or_else(reject)?;
+    let next = from.join(location).map_err(|_| reject())?;
+    validate_http_url(&next).map_err(|_| reject())?;
+    let original = repository_resource(from).ok_or_else(reject)?;
+    if repository_resource(&next).as_ref() != Some(&original) || from.query() != next.query() {
+        return Err(reject());
+    }
+    Ok(next)
+}
+async fn read_http_response<T: HttpRequester>(
+    requester: &T,
+    mut url: Url,
+    max_bytes: u64,
+) -> Result<Vec<u8>> {
+    // The shared client itself keeps redirects disabled, including for MCP
+    // probes. Never let reqwest follow a Location before this policy checks it.
+    let mut visited = BTreeSet::new();
+    for redirects in 0..=3 {
+        validate_http_url(&url)?;
+        if !visited.insert(url.to_string()) {
+            return Err(failure("skillDownloadFailed"));
+        }
+        match requester.request(&url, max_bytes).await? {
+            HttpRead::Bytes(bytes) => return Ok(bytes),
+            HttpRead::Redirect { status, location } if redirects < 3 => {
+                url = repository_redirect(&url, status, location.as_deref())?;
+            }
+            HttpRead::Redirect { .. } => return Err(failure("skillDownloadFailed")),
+        }
+    }
+    Err(failure("skillDownloadFailed"))
 }
 #[derive(Clone, Copy)]
 struct Limits {
@@ -99,7 +196,7 @@ struct GitTree {
     truncated: bool,
     tree: Vec<TreeEntry>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct TreeEntry {
     path: String,
     mode: String,
@@ -114,15 +211,19 @@ fn failure(key: &str) -> anyhow::Error {
 fn valid_sha(sha: &str) -> bool {
     sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
+fn valid_repo_component(part: &str) -> bool {
+    !part.is_empty()
+        && part.len() <= 100
+        && ![".", ".."].contains(&part)
+        && part
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+}
 fn validate_repo(repo: &SkillRepo) -> Result<&str> {
-    if [&repo.owner, &repo.name].iter().any(|part| {
-        part.is_empty()
-            || part.len() > 100
-            || [".", ".."].contains(&part.as_str())
-            || !part
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
-    }) {
+    if [&repo.owner, &repo.name]
+        .iter()
+        .any(|part| !valid_repo_component(part))
+    {
         return Err(failure("skillRepositoryInvalid"));
     }
     let reference = if repo.branch.trim().is_empty() {
@@ -349,19 +450,166 @@ fn is_git_lfs_pointer(bytes: &[u8]) -> bool {
     }
     oid && size
 }
-pub(super) async fn download(repo: &SkillRepo, directory: &str) -> Result<(ExtractedDir, String)> {
+/// Discover descriptors without downloading repository assets, dependencies or archives.
+pub(super) async fn catalog(repo: &SkillRepo) -> Result<Vec<super::DiscoverableSkill>> {
+    let transport = HttpTransport(
+        crate::proxy::http_client::mcp_check_client()
+            .map_err(|_| failure("skillDownloadFailed"))?,
+    );
+    catalog_with(repo, &transport).await
+}
+async fn catalog_with<T: Transport>(
+    repo: &SkillRepo,
+    transport: &T,
+) -> Result<Vec<super::DiscoverableSkill>> {
+    use futures::{stream, StreamExt, TryStreamExt};
+    let reference = validate_repo(repo)?;
+    let limits = Limits::default();
+    let commit: Commit = metadata(
+        transport,
+        endpoint(
+            "api.github.com",
+            &["repos", &repo.owner, &repo.name, "commits", reference],
+        )?,
+        limits.metadata_bytes,
+    )
+    .await?;
+    if !valid_sha(&commit.sha)
+        || !valid_sha(&commit.commit.tree.sha)
+        || (valid_sha(reference) && !reference.eq_ignore_ascii_case(&commit.sha))
+    {
+        return Err(failure("skillRepositoryInvalid"));
+    }
+    let mut url = endpoint(
+        "api.github.com",
+        &[
+            "repos",
+            &repo.owner,
+            &repo.name,
+            "git",
+            "trees",
+            &commit.commit.tree.sha,
+        ],
+    )?;
+    url.query_pairs_mut().append_pair("recursive", "1");
+    let tree: GitTree = metadata(transport, url, limits.metadata_bytes).await?;
+    if tree.truncated
+        || !tree.sha.eq_ignore_ascii_case(&commit.commit.tree.sha)
+        || tree.tree.len() > limits.tree_entries
+    {
+        return Err(failure("skillRepositoryInvalid"));
+    }
+    let documents: Vec<_> = tree
+        .tree
+        .iter()
+        .filter(|entry| entry.path == "SKILL.md" || entry.path.ends_with("/SKILL.md"))
+        .cloned()
+        .collect();
+    if documents.len() > 4000 {
+        return Err(failure("skillTooLarge"));
+    }
+    let mut total = 0u64;
+    for entry in &documents {
+        artifacts::safe_relative(&entry.path).map_err(|_| failure("invalidSkillPath"))?;
+        if entry.kind != "blob"
+            || !["100644", "100755"].contains(&entry.mode.as_str())
+            || !valid_sha(&entry.sha)
+        {
+            return Err(failure("skillLinkUnsupported"));
+        }
+        let size = entry
+            .size
+            .ok_or_else(|| failure("skillRepositoryInvalid"))?;
+        total = total
+            .checked_add(size)
+            .ok_or_else(|| failure("skillTooLarge"))?;
+        if size > 512 * 1024 || total > 64 * 1024 * 1024 {
+            return Err(failure("skillTooLarge"));
+        }
+    }
+    let commit = &commit.sha;
+    let mut result: Vec<_> = stream::iter(documents.into_iter().map(|entry| async move {
+        let mut segments = vec![repo.owner.as_str(), repo.name.as_str(), commit.as_str()];
+        segments.extend(entry.path.split('/'));
+        let bytes = read(
+            transport,
+            endpoint("raw.githubusercontent.com", &segments)?,
+            512 * 1024,
+        )
+        .await?;
+        if !matches_git_blob(&entry, &bytes) {
+            return Err(failure("skillRepositoryInvalid"));
+        }
+        let content = std::str::from_utf8(&bytes).map_err(|_| failure("skillRepositoryInvalid"))?;
+        let meta = super::SkillService::parse_skill_metadata_content(content);
+        let path = entry.path.strip_suffix("/SKILL.md").unwrap_or_default();
+        let directory = if path.is_empty() {
+            repo.name.as_str()
+        } else {
+            path
+        };
+        Ok(super::DiscoverableSkill {
+            key: format!(
+                "{}/{}:{}",
+                repo.owner.to_ascii_lowercase(),
+                repo.name.to_ascii_lowercase(),
+                path
+            ),
+            name: meta
+                .name
+                .unwrap_or_else(|| directory.rsplit('/').next().unwrap_or(directory).to_owned()),
+            description: meta.description.unwrap_or_default(),
+            directory: directory.to_owned(),
+            readme_url: Some(super::SkillService::build_skill_doc_url(
+                &repo.owner,
+                &repo.name,
+                commit,
+                &entry.path,
+            )),
+            repo_owner: repo.owner.clone(),
+            repo_name: repo.name.clone(),
+            repo_branch: repo.branch.clone(),
+        })
+    }))
+    .buffer_unordered(16)
+    .try_collect()
+    .await?;
+    result.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.key.cmp(&b.key))
+    });
+    Ok(result)
+}
+
+pub(super) async fn download(
+    repo: &SkillRepo,
+    directory: &str,
+    exact: bool,
+) -> Result<(ExtractedDir, String)> {
     // Reuse the no-redirect client factory, including the user's existing proxy choice.
     let transport = HttpTransport(
         crate::proxy::http_client::mcp_check_client()
             .map_err(|_| failure("skillDownloadFailed"))?,
     );
-    download_with(repo, directory, &transport, Limits::default()).await
+    download_with_mode(repo, directory, &transport, Limits::default(), exact).await
 }
+#[cfg(test)]
 async fn download_with<T: Transport>(
     repo: &SkillRepo,
     directory: &str,
     transport: &T,
     limits: Limits,
+) -> Result<(ExtractedDir, String)> {
+    download_with_mode(repo, directory, transport, limits, false).await
+}
+async fn download_with_mode<T: Transport>(
+    repo: &SkillRepo,
+    directory: &str,
+    transport: &T,
+    limits: Limits,
+    exact: bool,
 ) -> Result<(ExtractedDir, String)> {
     let reference = validate_repo(repo)?;
     // New installations validate a non-empty directory before calling this method.
@@ -403,7 +651,23 @@ async fn download_with<T: Transport>(
     if tree.tree.len() > limits.tree_entries {
         return Err(failure("skillTooLarge"));
     }
-    let prefix = selected_prefix(&tree.tree, directory)?;
+    let prefix = if exact {
+        let document = if directory.is_empty() {
+            "SKILL.md".into()
+        } else {
+            format!("{directory}/SKILL.md")
+        };
+        if !tree
+            .tree
+            .iter()
+            .any(|entry| entry.path == document && entry.kind == "blob")
+        {
+            return Err(failure("skillSourceMissing"));
+        }
+        directory.to_owned()
+    } else {
+        selected_prefix(&tree.tree, directory)?
+    };
     let entries = selected(&tree, &prefix, limits)?;
     let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
     for entry in entries {
@@ -476,6 +740,211 @@ mod tests {
                 .ok_or_else(|| anyhow!("private-transport-sentinel"))
         }
     }
+    #[derive(Default)]
+    struct HttpFixture {
+        responses: BTreeMap<String, HttpRead>,
+        requests: Mutex<Vec<String>>,
+    }
+    impl HttpRequester for HttpFixture {
+        async fn request(&self, url: &Url, _max_bytes: u64) -> Result<HttpRead> {
+            self.requests.lock().unwrap().push(url.to_string());
+            match self.responses.get(url.as_str()) {
+                Some(HttpRead::Bytes(bytes)) => Ok(HttpRead::Bytes(bytes.clone())),
+                Some(HttpRead::Redirect { status, location }) => Ok(HttpRead::Redirect {
+                    status: *status,
+                    location: location.clone(),
+                }),
+                None => Err(anyhow!("private-transport-sentinel")),
+            }
+        }
+    }
+    impl Transport for HttpFixture {
+        async fn read(&self, url: Url, max_bytes: u64) -> Result<Vec<u8>> {
+            read_http_response(self, url, max_bytes).await
+        }
+    }
+    fn moved_fixture() -> HttpFixture {
+        let descriptor = b"---\nname: moved skill\ndescription: stays discoverable after a repository move\n---\n";
+        let source = fixture(
+            vec![blob("skills/chosen/SKILL.md", descriptor, false)],
+            &[("skills/chosen/SKILL.md", descriptor)],
+        );
+        let mut data = HttpFixture::default();
+        for (url, bytes) in source.responses {
+            if url.starts_with("https://api.github.com/repos/fixture/skills/") {
+                let moved = url.replace("/repos/fixture/skills/", "/repositories/123/");
+                data.responses.insert(
+                    url,
+                    HttpRead::Redirect {
+                        status: 301,
+                        location: Some(moved.clone()),
+                    },
+                );
+                data.responses.insert(moved, HttpRead::Bytes(bytes));
+            } else {
+                data.responses.insert(url, HttpRead::Bytes(bytes));
+            }
+        }
+        data
+    }
+    #[tokio::test]
+    async fn moved_repository_catalog_follows_only_same_github_repository_redirects() {
+        let data = moved_fixture();
+        let skills = catalog_with(&repo(), &data).await.unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].key, "fixture/skills:skills/chosen");
+        assert_eq!(skills[0].name, "moved skill");
+        assert_eq!(data.requests.lock().unwrap().len(), 5);
+    }
+    #[tokio::test]
+    async fn moved_repository_selected_download_retains_pinned_blob_validation() {
+        let data = moved_fixture();
+        let (downloaded, commit) =
+            download_with(&repo(), "skills/chosen", &data, Limits::default())
+                .await
+                .unwrap();
+        assert_eq!(commit, COMMIT);
+        assert!(downloaded.path().join("skills/chosen/SKILL.md").is_file());
+        let requests = data.requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(requests.last().unwrap().contains(COMMIT));
+    }
+    fn redirect_fixture(from: &str, status: u16, location: Option<&str>) -> HttpFixture {
+        let mut data = HttpFixture::default();
+        data.responses.insert(
+            from.to_owned(),
+            HttpRead::Redirect {
+                status,
+                location: location.map(str::to_owned),
+            },
+        );
+        data
+    }
+    #[tokio::test]
+    async fn repository_redirects_accept_relative_and_canonical_paths_without_changing_resource() {
+        let from = "https://api.github.com/repos/fixture/skills/commits/main";
+        for status in [301, 302, 307, 308] {
+            for location in [
+                "/repositories/123/commits/main",
+                "https://api.github.com/repos/moved/skills/commits/main",
+            ] {
+                let mut data = redirect_fixture(from, status, Some(location));
+                let target = Url::parse(from).unwrap().join(location).unwrap();
+                data.responses
+                    .insert(target.to_string(), HttpRead::Bytes(b"body".to_vec()));
+                assert_eq!(
+                    read_http_response(&data, Url::parse(from).unwrap(), 4)
+                        .await
+                        .unwrap(),
+                    b"body"
+                );
+                assert_eq!(data.requests.lock().unwrap().len(), 2);
+            }
+        }
+    }
+    #[tokio::test]
+    async fn repository_redirects_reject_untrusted_or_changed_resources_before_following() {
+        let from = "https://api.github.com/repos/fixture/skills/commits/main";
+        for location in [
+            None,
+            Some(""),
+            Some("https://evil.invalid/repositories/123/commits/main"),
+            Some("https://api.github.com.evil.invalid/repositories/123/commits/main"),
+            Some("https://raw.githubusercontent.com/repositories/123/commits/main"),
+            Some("http://api.github.com/repositories/123/commits/main"),
+            Some("https://user:private@api.github.com/repositories/123/commits/main"),
+            Some("https://api.github.com:444/repositories/123/commits/main"),
+            Some("https://api.github.com/repositories/123/commits/main#fragment"),
+            Some("https://api.github.com/repositories/123/commits/other"),
+            Some("https://api.github.com/repositories/123/commits/main?extra=1"),
+            Some("https://api.github.com/users/123/commits/main"),
+            Some("https://api.github.com/repositories/not-numeric/commits/main"),
+            Some("https://api.github.com/repositories/123/commits/main\n"),
+        ] {
+            let data = redirect_fixture(from, 301, location);
+            assert!(
+                read_http_response(&data, Url::parse(from).unwrap(), 4)
+                    .await
+                    .is_err(),
+                "accepted {location:?}"
+            );
+            assert_eq!(
+                data.requests.lock().unwrap().len(),
+                1,
+                "followed {location:?}"
+            );
+        }
+        for status in [300, 303, 304, 305, 306] {
+            let data = redirect_fixture(from, status, Some("/repositories/123/commits/main"));
+            assert!(read_http_response(&data, Url::parse(from).unwrap(), 4)
+                .await
+                .is_err());
+            assert_eq!(data.requests.lock().unwrap().len(), 1);
+        }
+        let raw = "https://raw.githubusercontent.com/fixture/skills/main/SKILL.md";
+        let data = redirect_fixture(
+            raw,
+            301,
+            Some("https://raw.githubusercontent.com/moved/skills/main/SKILL.md"),
+        );
+        assert!(read_http_response(&data, Url::parse(raw).unwrap(), 4)
+            .await
+            .is_err());
+        assert_eq!(data.requests.lock().unwrap().len(), 1);
+    }
+    #[tokio::test]
+    async fn repository_redirects_preserve_tree_query_and_bound_hops_and_loops() {
+        let from =
+            format!("https://api.github.com/repos/fixture/skills/git/trees/{TREE}?recursive=1");
+        let target =
+            format!("https://api.github.com/repositories/123/git/trees/{TREE}?recursive=1");
+        let mut data = redirect_fixture(&from, 301, Some(&target));
+        data.responses
+            .insert(target, HttpRead::Bytes(b"tree".to_vec()));
+        assert_eq!(
+            read_http_response(&data, Url::parse(&from).unwrap(), 4)
+                .await
+                .unwrap(),
+            b"tree"
+        );
+        let data = redirect_fixture(&from, 301, Some(&from));
+        assert!(read_http_response(&data, Url::parse(&from).unwrap(), 4)
+            .await
+            .is_err());
+        assert_eq!(data.requests.lock().unwrap().len(), 1);
+        let from = "https://api.github.com/repositories/1/commits/main";
+        let mut data = HttpFixture::default();
+        for id in 1..=4 {
+            data.responses.insert(
+                format!("https://api.github.com/repositories/{id}/commits/main"),
+                HttpRead::Redirect {
+                    status: 301,
+                    location: Some(format!("/repositories/{}/commits/main", id + 1)),
+                },
+            );
+        }
+        assert!(read_http_response(&data, Url::parse(from).unwrap(), 4)
+            .await
+            .is_err());
+        assert_eq!(data.requests.lock().unwrap().len(), 4);
+    }
+    #[tokio::test]
+    async fn moved_repository_catalog_still_rejects_unverified_descriptor_bytes() {
+        let mut data = moved_fixture();
+        let raw = format!(
+            "https://raw.githubusercontent.com/fixture/skills/{COMMIT}/skills/chosen/SKILL.md"
+        );
+        data.responses
+            .insert(raw, HttpRead::Bytes(b"changed".to_vec()));
+        assert_eq!(
+            catalog_with(&repo(), &data)
+                .await
+                .err()
+                .unwrap()
+                .to_string(),
+            "library.skillRepositoryInvalid"
+        );
+    }
     fn repo() -> SkillRepo {
         SkillRepo {
             owner: "fixture".into(),
@@ -519,6 +988,38 @@ mod tests {
             Ok(_) => panic!("unsafe selection unexpectedly downloaded"),
             Err(error) => error.to_string(),
         }
+    }
+    #[tokio::test]
+    async fn catalog_reads_only_descriptors_and_preserves_nested_and_root_identity() {
+        let root = b"---\nname: root skill\ndescription: root description\n---\n";
+        let nested = b"---\nname: nested skill\ndescription: searchable words\n---\n";
+        let data = fixture(
+            vec![
+                blob("SKILL.md", root, false),
+                blob("skills/nested/SKILL.md", nested, false),
+                blob("large-unused.bin", b"unrelated", false),
+            ],
+            &[("SKILL.md", root), ("skills/nested/SKILL.md", nested)],
+        );
+        let skills = catalog_with(&repo(), &data).await.unwrap();
+        assert_eq!(skills.len(), 2);
+        let nested = skills
+            .iter()
+            .find(|skill| skill.name == "nested skill")
+            .unwrap();
+        assert_eq!(nested.key, "fixture/skills:skills/nested");
+        assert_eq!(nested.directory, "skills/nested");
+        assert_eq!(nested.description, "searchable words");
+        let root = skills
+            .iter()
+            .find(|skill| skill.name == "root skill")
+            .unwrap();
+        assert_eq!(root.key, "fixture/skills:");
+        assert_eq!(root.directory, "skills");
+        assert_eq!(requests(&data).len(), 4);
+        assert!(requests(&data)
+            .iter()
+            .all(|url| !url.contains("large-unused.bin")));
     }
     #[tokio::test]
     async fn selected_download_fetches_only_chosen_blobs_preserves_hidden_license_and_execution() {
@@ -603,6 +1104,25 @@ mod tests {
             std::fs::read(downloaded.path().join("LICENSE.txt")).unwrap(),
             b"Root license"
         );
+    }
+    #[tokio::test]
+    async fn exact_selection_never_falls_back_to_a_moved_or_same_name_skill() {
+        let fixture = fixture(
+            vec![
+                blob("nested/chosen/SKILL.md", b"# Other", false),
+                blob("SKILL.md", b"# Root", false),
+            ],
+            &[],
+        );
+        assert_eq!(
+            download_with_mode(&repo(), "chosen", &fixture, Limits::default(), true)
+                .await
+                .err()
+                .unwrap()
+                .to_string(),
+            "library.skillSourceMissing"
+        );
+        assert_eq!(requests(&fixture).len(), 2);
     }
     #[tokio::test]
     async fn selected_download_reports_missing_root_without_using_a_nested_skill() {

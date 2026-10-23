@@ -59,7 +59,15 @@ fn reference(value: &str, tool: &str) -> Result<String, AppError> {
 }
 
 fn optional_reference(value: &str, tool: &str) -> Result<String, AppError> {
+    // Pi evaluates !command in config values. A portable literal must never
+    // become a shell command just because its first character is an exclamation mark.
+    if tool == "pi" && value.starts_with('!') {
+        return Err(error("referenceUnsupported"));
+    }
     if value.contains("${") {
+        if ["dsh", "workbuddy"].contains(&tool) {
+            return Err(error("referenceUnsupported"));
+        }
         reference(value, tool)
     } else {
         Ok(value.to_string())
@@ -112,6 +120,18 @@ fn string_list(value: &Value) -> bool {
 fn nonnegative(value: &Value) -> bool {
     value.as_f64().is_some_and(|n| n.is_finite() && n >= 0.0)
 }
+fn pi_exposure(value: &Value) -> bool {
+    value.as_str().is_some_and(|value| {
+        [
+            "codemode",
+            "codemode-deferred",
+            "deferred",
+            "direct",
+            "hidden",
+        ]
+        .contains(&value)
+    })
+}
 fn optional_field(
     tool: &str,
     transport: &str,
@@ -120,8 +140,18 @@ fn optional_field(
 ) -> Result<Value, AppError> {
     let remote = transport != "stdio";
     let valid = match (tool, key) {
+        ("pi", "exposure") => pi_exposure(value),
+        ("pi", "toolExposure") => value.as_object().is_some_and(|map| {
+            map.iter()
+                .all(|(name, exposure)| !name.is_empty() && pi_exposure(exposure))
+        }),
         ("claude", "timeout") => value.as_u64().is_some_and(|n| n >= 1000),
-        ("gemini" | "hermes", "timeout") => nonnegative(value),
+        ("gemini" | "hermes" | "dsh", "timeout") => nonnegative(value),
+        ("workbuddy" | "pi", "timeout") => value.as_f64().is_some_and(|n| n.is_finite() && n > 0.0),
+        ("openclaw", "requestTimeoutMs" | "connectionTimeoutMs") => {
+            value.as_u64().is_some_and(|n| n > 0)
+        }
+        ("dsh", "serverName") => value.as_str().is_some_and(|name| valid_name(name, 32)),
         ("opencode", "timeout") => value.as_u64().is_some_and(|n| n > 0),
         ("codex", "startup_timeout_sec" | "tool_timeout_sec") | ("hermes", "connect_timeout") => {
             nonnegative(value)
@@ -193,13 +223,31 @@ fn optional_field(
             return Ok(json!(mapped));
         }
     }
-    if tool == "hermes" && key == "timeout" {
+    if ["hermes", "pi"].contains(&tool) && key == "timeout" {
         return Ok(json!(value.as_f64().expect("validated number") / 1000.0));
     }
     Ok(value.clone())
 }
 
 fn verify_native_headers(server: &Value, tool: &str) -> Result<(), AppError> {
+    if (tool == "pi" && server.get("enabled").is_some_and(|v| v != &json!(true)))
+        || (tool == "workbuddy" && server.get("disabled").is_some_and(|v| v != &json!(false)))
+    {
+        return Err(error("mcpFieldsConflict"));
+    }
+    if tool == "dsh"
+        && server
+            .as_object()
+            .is_some_and(|map| map.keys().any(|key| key.starts_with('$')))
+    {
+        return Err(error("mcpScopeUnsupported"));
+    }
+
+    let server = if tool == "dsh" {
+        server.get("config").ok_or_else(|| error("nativeInvalid"))?
+    } else {
+        server
+    };
     if tool == "codex" {
         header_names(
             ["http_headers", "env_http_headers"]
@@ -225,7 +273,7 @@ fn verify_native_headers(server: &Value, tool: &str) -> Result<(), AppError> {
 }
 
 pub fn native_spec(tool: &str, spec: &Value) -> Result<Value, AppError> {
-    if !["claude", "codex", "gemini", "opencode", "hermes"].contains(&tool) {
+    if !super::mcp_targets::TOOLS.contains(&tool) {
         return Err(error("targetUnsupported"));
     }
     let obj = spec.as_object().ok_or_else(|| error("invalidMcp"))?;
@@ -240,7 +288,9 @@ pub fn native_spec(tool: &str, spec: &Value) -> Result<Value, AppError> {
         } else {
             "stdio"
         });
-    if !["stdio", "http", "sse"].contains(&transport) || (tool == "codex" && transport == "sse") {
+    if !["stdio", "http", "sse"].contains(&transport)
+        || (["codex", "pi", "dsh"].contains(&tool) && transport == "sse")
+    {
         return Err(error("transportUnsupported"));
     }
     let mut native = Map::new();
@@ -250,7 +300,11 @@ pub fn native_spec(tool: &str, spec: &Value) -> Result<Value, AppError> {
             continue;
         }
         let allowed = match tool {
-            "claude" => ["timeout"].contains(&key.as_str()),
+            "pi" => ["timeout", "exposure", "toolExposure"].contains(&key.as_str()),
+            "claude" | "workbuddy" | "dsh" => {
+                ["timeout"].contains(&key.as_str()) || (tool == "dsh" && key == "serverName")
+            }
+            "openclaw" => ["requestTimeoutMs", "connectionTimeoutMs"].contains(&key.as_str()),
             "codex" => [
                 "startup_timeout_sec",
                 "tool_timeout_sec",
@@ -295,7 +349,7 @@ pub fn native_spec(tool: &str, spec: &Value) -> Result<Value, AppError> {
                 .ok_or_else(|| error("invalidMcp"))?,
             None => vec![],
         };
-        if tool == "codex"
+        if ["codex", "dsh", "pi", "workbuddy"].contains(&tool)
             && (command.contains("${")
                 || args.iter().any(|arg| arg.as_str().unwrap().contains("${")))
         {
@@ -317,7 +371,7 @@ pub fn native_spec(tool: &str, spec: &Value) -> Result<Value, AppError> {
             if !args.is_empty() {
                 native.insert("args".into(), json!(args));
             }
-            if ["claude", "gemini"].contains(&tool) {
+            if ["claude", "gemini", "pi"].contains(&tool) {
                 native.insert("type".into(), json!("stdio"));
             }
         }
@@ -381,12 +435,25 @@ pub fn native_spec(tool: &str, spec: &Value) -> Result<Value, AppError> {
             .ok_or_else(|| error("invalidMcp"))?;
         native.insert("url".into(), json!(native_url(url, tool)?));
         match tool {
-            "claude" | "gemini" => {
+            "claude" | "gemini" | "pi" => {
                 native.insert("type".into(), json!(transport));
             }
             "opencode" => {
                 native.insert("type".into(), json!("remote"));
                 native.insert("enabled".into(), json!(true));
+            }
+            "workbuddy" if transport == "sse" => {
+                native.insert("type".into(), json!("sse"));
+            }
+            "openclaw" | "dsh" => {
+                native.insert(
+                    "transport".into(),
+                    json!(if transport == "http" {
+                        "streamable-http"
+                    } else {
+                        transport
+                    }),
+                );
             }
             "hermes" if transport == "sse" => {
                 native.insert("transport".into(), json!("sse"));
@@ -433,10 +500,45 @@ pub fn native_spec(tool: &str, spec: &Value) -> Result<Value, AppError> {
             }
         }
     }
+    if tool == "dsh" {
+        native.entry("transport").or_insert(json!("stdio"));
+        if let Some(timeout) = native.remove("timeout") {
+            native.insert("toolCallTimeoutMs".into(), timeout);
+        }
+    }
     if tool == "hermes" {
         native.insert("enabled".into(), json!(true));
     }
     Ok(json!(native))
+}
+
+fn valid_name(id: &str, max: usize) -> bool {
+    !id.is_empty()
+        && id.len() <= max
+        && id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+}
+pub fn native_server(tool: &str, id: &str, spec: &Value) -> Result<Value, AppError> {
+    if (tool == "pi" && !valid_name(id, 256))
+        || (tool == "dsh"
+            && !valid_name(
+                spec.get("serverName").and_then(Value::as_str).unwrap_or(id),
+                32,
+            ))
+    {
+        return Err(error("nativeMcpNameInvalid"));
+    }
+    let mut native = native_spec(tool, spec)?;
+    if tool == "dsh" {
+        native
+            .as_object_mut()
+            .unwrap()
+            .entry("serverName")
+            .or_insert(json!(id));
+        return Ok(json!({"name":"@deepseek-ai/dsh-mcp-client","config":native}));
+    }
+    Ok(native)
 }
 
 pub fn canonical_spec(tool: &str, native: &Value) -> Result<Value, AppError> {
@@ -444,6 +546,43 @@ pub fn canonical_spec(tool: &str, native: &Value) -> Result<Value, AppError> {
         .as_object()
         .ok_or_else(|| error("nativeInvalid"))?
         .clone();
+    if tool == "workbuddy" {
+        map.remove("disabled");
+    }
+    if tool == "dsh" {
+        if map.get("name").and_then(Value::as_str) != Some("@deepseek-ai/dsh-mcp-client") {
+            return Err(error("nativeInvalid"));
+        }
+        if map
+            .keys()
+            .any(|key| !["name", "config"].contains(&key.as_str()))
+        {
+            return Err(error("fieldUnsupported"));
+        }
+        map = map
+            .remove("config")
+            .and_then(|v| v.as_object().cloned())
+            .ok_or_else(|| error("nativeInvalid"))?;
+        if let Some(timeout) = map.remove("toolCallTimeoutMs") {
+            map.insert("timeout".into(), timeout);
+        }
+    }
+    if ["openclaw", "dsh"].contains(&tool) {
+        if let Some(transport) = map.remove("transport") {
+            map.insert(
+                "type".into(),
+                match transport.as_str() {
+                    Some("stdio") => json!("stdio"),
+                    Some("streamable-http") => json!("http"),
+                    Some("sse") if tool == "openclaw" => json!("sse"),
+                    _ => return Err(error("transportUnsupported")),
+                },
+            );
+        }
+    }
+    if tool == "pi" && map.get("type").and_then(Value::as_str) == Some("streamable-http") {
+        map.insert("type".into(), json!("http"));
+    }
     if tool == "opencode" {
         match map.get("type").and_then(Value::as_str) {
             Some("local") => {
@@ -559,7 +698,7 @@ pub fn canonical_spec(tool: &str, native: &Value) -> Result<Value, AppError> {
             map.insert("type".into(), json!("http"));
         }
     }
-    if tool == "hermes" {
+    if ["hermes", "pi"].contains(&tool) {
         if let Some(timeout) = map.get_mut("timeout") {
             let seconds = timeout
                 .as_f64()
@@ -663,13 +802,46 @@ pub fn section(tool: &str) -> &'static str {
         _ => "mcpServers",
     }
 }
+pub fn section_path(tool: &str) -> Vec<String> {
+    match tool {
+        "openclaw" => vec!["mcp".into(), "servers".into()],
+        "dsh" => vec![],
+        _ => vec![section(tool).into()],
+    }
+}
+fn server_path(tool: &str, id: &str) -> Vec<String> {
+    let mut path = section_path(tool);
+    path.push(id.into());
+    path
+}
+pub fn servers(root: &Value, tool: &str) -> Value {
+    let value = leaf(root, &section_path(tool))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if tool == "dsh" {
+        return Value::Object(
+            value
+                .as_object()
+                .into_iter()
+                .flat_map(|map| map.iter())
+                .filter(|(_, v)| {
+                    v.get("name").and_then(Value::as_str) == Some("@deepseek-ai/dsh-mcp-client")
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        );
+    }
+    value
+}
 pub fn parse_native(text: &str, tool: &str) -> Result<Value, AppError> {
     let body = if tool == "hermes" {
         text.strip_prefix('\u{feff}').unwrap_or(text)
     } else {
         text
     };
-    let value = if tool == "codex" {
+    let value = if tool == "dsh" {
+        crate::native_tools::parse_mcp_patch(body)?
+    } else if tool == "codex" {
         let value: toml::Value = toml::from_str(body).map_err(|_| error("nativeInvalid"))?;
         serde_json::to_value(value).map_err(|_| error("nativeInvalid"))?
     } else if tool == "hermes" && body.trim().is_empty() {
@@ -681,6 +853,25 @@ pub fn parse_native(text: &str, tool: &str) -> Result<Value, AppError> {
     } else {
         match tool {
             "claude" => super::native_json::parse(body, false, false, true)?,
+            "workbuddy" => super::native_json::parse(body, false, false, false)?,
+            "pi" => super::native_json::parse(body, false, false, false)?,
+            "openclaw" => {
+                let value = json5::from_str::<Value>(body).map_err(|_| error("nativeInvalid"))?;
+                // Traversing each managed path later rejects duplicate keys. Reject routing expressions/includes here.
+                fn includes(value: &Value) -> bool {
+                    match value {
+                        Value::Object(map) => {
+                            map.contains_key("$include") || map.values().any(includes)
+                        }
+                        Value::Array(values) => values.iter().any(includes),
+                        _ => false,
+                    }
+                }
+                if value.get("$include").is_some() || value.get("mcp").is_some_and(includes) {
+                    return Err(error("mcpScopeUnsupported"));
+                }
+                value
+            }
             "gemini" => super::native_json::parse(body, true, false, false)?,
             "opencode" => super::native_json::parse(body, true, true, false)?,
             _ => return Err(error("targetUnsupported")),
@@ -689,8 +880,11 @@ pub fn parse_native(text: &str, tool: &str) -> Result<Value, AppError> {
     if !value.is_object() {
         return Err(error("nativeInvalid"));
     }
-    if value.get(section(tool)).is_some_and(|v| !v.is_object()) {
-        return Err(error("nativeInvalid"));
+    let path = section_path(tool);
+    for count in 1..=path.len() {
+        if leaf(&value, &path[..count]).is_some_and(|v| !v.is_object()) {
+            return Err(error("nativeInvalid"));
+        }
     }
     Ok(value)
 }
@@ -709,7 +903,7 @@ fn flatten(value: &Value, path: Vec<String>, fields: &mut Vec<(Vec<String>, Valu
     }
 }
 pub fn validate_owned(owned: &OwnedFields) -> Result<(), AppError> {
-    if !["claude", "codex", "gemini", "opencode", "hermes"].contains(&owned.tool.as_str())
+    if !super::mcp_targets::TOOLS.contains(&owned.tool.as_str())
         || owned.server_id.is_empty()
         || owned.fields.is_empty()
     {
@@ -717,9 +911,9 @@ pub fn validate_owned(owned: &OwnedFields) -> Result<(), AppError> {
     }
     let mut paths = std::collections::BTreeSet::new();
     for (path, value) in &owned.fields {
-        if path.len() < 3
-            || path[0] != section(&owned.tool)
-            || path[1] != owned.server_id
+        let prefix = server_path(&owned.tool, &owned.server_id);
+        if path.len() <= prefix.len()
+            || !path.starts_with(&prefix)
             || value.is_object()
             || !paths.insert(path)
         {
@@ -728,10 +922,9 @@ pub fn validate_owned(owned: &OwnedFields) -> Result<(), AppError> {
     }
     for path in &owned.created_paths {
         // The servers section itself, when this write created it, or a path inside the server.
-        let section_only = path.len() == 1 && path[0] == section(&owned.tool);
-        if !section_only
-            && (path.len() < 2 || path[0] != section(&owned.tool) || path[1] != owned.server_id)
-        {
+        let section = section_path(&owned.tool);
+        let section_only = !path.is_empty() && section.starts_with(path);
+        if !section_only && !path.starts_with(&server_path(&owned.tool, &owned.server_id)) {
             return Err(error("stateUnreadable"));
         }
     }
@@ -740,7 +933,11 @@ pub fn validate_owned(owned: &OwnedFields) -> Result<(), AppError> {
 pub fn verify_owned_text(text: &str, owned: &OwnedFields) -> Result<(), AppError> {
     validate_owned(owned)?;
     let root = parse_native(text, &owned.tool)?;
-    verify_native_headers(&root[section(&owned.tool)][&owned.server_id], &owned.tool)?;
+    verify_native_headers(
+        leaf(&root, &server_path(&owned.tool, &owned.server_id))
+            .ok_or_else(|| error("mcpFieldsConflict"))?,
+        &owned.tool,
+    )?;
     for (path, value) in &owned.fields {
         if leaf(&root, path) != Some(value) {
             return Err(error("mcpFieldsConflict"));
@@ -766,13 +963,21 @@ pub fn adopt_server(
     spec: &Value,
 ) -> Result<OwnedFields, AppError> {
     let root = parse_native(text, tool)?;
-    let native = root
-        .get(section(tool))
-        .and_then(|servers| servers.get(id))
-        .ok_or_else(|| error("mcpNameConflict"))?;
+    let native = leaf(&root, &server_path(tool, id)).ok_or_else(|| error("mcpNameConflict"))?;
     verify_native_headers(native, tool)?;
+    let mut spec = spec.clone();
+    // Adopt explicit active switches as well as default-active entries. Later
+    // native disabling must not keep a stale "applied" status in the library.
+    let switch = match tool {
+        "pi" => Some("enabled"),
+        "workbuddy" => Some("disabled"),
+        _ => None,
+    };
+    if let Some((key, value)) = switch.and_then(|key| native.get(key).map(|value| (key, value))) {
+        spec[key] = value.clone();
+    }
     let mut fields = vec![];
-    flatten(spec, vec![section(tool).into(), id.into()], &mut fields);
+    flatten(&spec, server_path(tool, id), &mut fields);
     let owned = OwnedFields {
         tool: tool.into(),
         server_id: id.into(),
@@ -790,13 +995,17 @@ pub fn inherit_created_section<'a>(
     owned: &mut OwnedFields,
     others: impl IntoIterator<Item = &'a OwnedFields>,
 ) {
-    let section = vec![section(&owned.tool).to_string()];
-    if !owned.created_paths.contains(&section)
-        && others
-            .into_iter()
-            .any(|other| other.created_paths.contains(&section))
-    {
-        owned.created_paths.push(section);
+    let others: Vec<_> = others.into_iter().collect();
+    let section = section_path(&owned.tool);
+    for count in 1..=section.len() {
+        let parent = section[..count].to_vec();
+        if !owned.created_paths.contains(&parent)
+            && others
+                .iter()
+                .any(|other| other.created_paths.contains(&parent))
+        {
+            owned.created_paths.push(parent);
+        }
     }
 }
 
@@ -804,7 +1013,7 @@ fn withdrawal_parents(owned: &OwnedFields) -> Vec<Vec<String>> {
     let mut paths = owned.created_paths.clone();
     if owned.adopted_server {
         for (field, _) in &owned.fields {
-            for count in 2..field.len() {
+            for count in server_path(&owned.tool, &owned.server_id).len()..field.len() {
                 let parent = field[..count].to_vec();
                 if !paths.contains(&parent) {
                     paths.push(parent);
@@ -823,17 +1032,41 @@ pub fn patch_server(
     owned: Option<&OwnedFields>,
     spec: Option<&Value>,
 ) -> Result<(String, Option<OwnedFields>), AppError> {
-    if id.is_empty()
-        || id.len() > 256
-        || !["claude", "codex", "gemini", "opencode", "hermes"].contains(&tool)
-    {
+    if id.is_empty() || id.len() > 256 || !super::mcp_targets::TOOLS.contains(&tool) {
         return Err(error("invalidMcp"));
     }
-    let empty = if tool == "codex" { "" } else { "{}" };
+    let empty = match tool {
+        "codex" => "",
+        "dsh" => "[]",
+        _ => "{}",
+    };
     let text = current.unwrap_or(empty);
     let root = parse_native(text, tool)?;
-    if owned.is_none() && root.get(section(tool)).and_then(|v| v.get(id)).is_some() {
+    if owned.is_none() && leaf(&root, &server_path(tool, id)).is_some() {
         return Err(error("mcpNameConflict"));
+    }
+    if tool == "pi"
+        && servers(&root, tool).as_object().is_some_and(|map| {
+            map.keys()
+                .any(|key| key != id && key.replace('-', "_") == id.replace('-', "_"))
+        })
+    {
+        return Err(error("mcpNameConflict"));
+    }
+    if tool == "dsh" {
+        if let Some(name) = spec
+            .and_then(|v| v.pointer("/config/serverName"))
+            .and_then(Value::as_str)
+        {
+            if servers(&root, tool).as_object().is_some_and(|map| {
+                map.iter().any(|(key, v)| {
+                    key != id
+                        && v.pointer("/config/serverName").and_then(Value::as_str) == Some(name)
+                })
+            }) {
+                return Err(error("mcpNameConflict"));
+            }
+        }
     }
     let mut old = BTreeMap::new();
     if let Some(owned) = owned {
@@ -841,7 +1074,10 @@ pub fn patch_server(
         if owned.tool != tool || owned.server_id != id {
             return Err(error("ownershipChanged"));
         }
-        verify_native_headers(&root[section(tool)][id], tool)?;
+        verify_native_headers(
+            leaf(&root, &server_path(tool, id)).ok_or_else(|| error("mcpFieldsConflict"))?,
+            tool,
+        )?;
         for (path, value) in &owned.fields {
             if leaf(&root, path) != Some(value) {
                 return Err(error("mcpFieldsConflict"));
@@ -864,18 +1100,14 @@ pub fn patch_server(
             }
             // Removing the launch fields would strand the user's extensions in
             // an unusable server. Keep both the file and ownership proof intact.
-            if remaining
-                .get(section(tool))
-                .and_then(|v| v.get(id))
-                .is_some()
-            {
+            if leaf(&remaining, &server_path(tool, id)).is_some() {
                 return Err(error("withdrawHasUserFields"));
             }
         }
     }
     let mut fields = vec![];
     if let Some(spec) = spec {
-        flatten(spec, vec![section(tool).into(), id.into()], &mut fields);
+        flatten(spec, server_path(tool, id), &mut fields);
     }
     for (path, _) in &fields {
         if !old.contains_key(path) && leaf(&root, path).is_some() {
@@ -903,7 +1135,9 @@ pub fn patch_server(
         }
     }
     let render = |text: &str, edits: &[(Vec<String>, Option<Value>)]| -> Result<String, AppError> {
-        if tool == "codex" {
+        if tool == "dsh" {
+            crate::native_tools::edit_mcp_patch(text, edits)
+        } else if tool == "codex" {
             edit_toml(text, edits)
         } else if tool == "hermes" {
             super::yaml_paths::edit(text, edits)
@@ -937,7 +1171,10 @@ pub fn patch_server(
     }
     let after = parse_native(&result, tool)?;
     if spec.is_some() {
-        verify_native_headers(&after[section(tool)][id], tool)?;
+        verify_native_headers(
+            leaf(&after, &server_path(tool, id)).ok_or_else(|| error("verifyFailed"))?,
+            tool,
+        )?;
     }
     for (path, value) in &edits {
         if leaf(&after, path) != value.as_ref() {
@@ -1676,5 +1913,220 @@ mod tests {
             "not restored:\n{}",
             failures.join("\n")
         );
+    }
+}
+
+#[cfg(test)]
+mod expanded_target_tests {
+    use super::*;
+
+    #[test]
+    fn dsh_yaml_tag_examples_are_plain_text_when_not_yaml_tags() {
+        for literal in [
+            "# overrides, disables, and insert lists; `!!js` expressions allowed).\n",
+            "# See !<tag:yaml.org,2002:js> for expressions.\n",
+            "",
+        ] {
+            for text_value in [
+                "\"literal !!js and !<example>\"",
+                "'literal !!js and !<example>'",
+                "plain text with !!js and !<example>",
+                "|\n      !!js and !<example> are documentation",
+                ">\n      !!js and !<example> are documentation",
+                "\"multiline\n      !!js and !<example>\"",
+            ] {
+                let text = format!(
+                    "{literal}- id: model\n  config:\n    description: {text_value} # !!js comment\n- id: fixture\n  name: '@deepseek-ai/dsh-mcp-client'\n  config:\n    command: node\n"
+                );
+                let root =
+                    parse_native(&text, "dsh").expect("documentation is not an executable tag");
+                assert_eq!(
+                    servers(&root, "dsh")["fixture"]["config"]["command"],
+                    "node"
+                );
+                let native = native_server("dsh", "added", &json!({"command":"fixture"})).unwrap();
+                let (applied, owned) =
+                    patch_server(Some(&text), "dsh", "added", None, Some(&native)).unwrap();
+                assert!(
+                    applied.starts_with(&text),
+                    "unrelated rows and comments must remain intact"
+                );
+                let (restored, _) =
+                    patch_server(Some(&applied), "dsh", "added", owned.as_ref(), None).unwrap();
+                assert_eq!(parse_native(&restored, "dsh").unwrap(), root);
+                assert!(restored.starts_with(literal));
+            }
+        }
+    }
+
+    #[test]
+    fn dsh_yaml_explicit_tags_and_ambiguous_plugin_ids_remain_refused() {
+        for expression in [
+            "!!js process.env.TOKEN",
+            "!js process.env.TOKEN",
+            "!<tag:yaml.org,2002:js> process.env.TOKEN",
+            "!<tag:example.test,2026:js> process.env.TOKEN",
+            "!!str value",
+            "[safe, !!js process.env.TOKEN]",
+            "{value: !!js process.env.TOKEN}",
+        ] {
+            let text = format!("- id: model\n  config:\n    value: {expression}\n");
+            assert!(parse_native(&text, "dsh").is_err(), "{expression}");
+        }
+        for text in [
+            "%TAG !expr! tag:yaml.org,2002:\n---\n- id: model\n  config:\n    value: !expr!js process.env.TOKEN\n",
+            "- id: model\n  config: {}\n- id: model\n  name: plugin\n",
+        ] {
+            assert!(parse_native(text, "dsh").is_err());
+        }
+        for malformed in [
+            "- id: model\n  config: [private-fixture\n",
+            "- id: model\n  config: \"bad\\q private-fixture\"\n",
+            "\0private-fixture",
+            "invalid: private-fixture",
+        ] {
+            let failure = parse_native(malformed, "dsh").unwrap_err().to_string();
+            assert!(!failure.contains("private-fixture"));
+        }
+    }
+
+    #[test]
+    fn newly_bindable_targets_roundtrip_and_withdraw_without_touching_models() {
+        for (tool, original) in [
+            ("openclaw", "{models:{mode:'merge'}, // keep models\n mcp:{other:'keep'}}"),
+            ("workbuddy", "{\"other\":{\"keep\":true}}"),
+            ("pi", "{\"other\":{\"keep\":true}}"),
+            ("dsh", "# keep models\n- id: model\n  name: provider\n  config:\n    baseURL: https://ofox.io/v1\n"),
+        ] {
+            for canonical in [json!({"command":"npx","args":["-y","fixture"]}), json!({"url":"https://mcp.example.test/mcp"})] {
+                let native = native_server(tool, "fixture", &canonical).unwrap();
+                let (text, owned) = patch_server(Some(original), tool, "fixture", None, Some(&native)).unwrap_or_else(|e|panic!("{tool}: {e}"));
+                let root = parse_native(&text, tool).unwrap();
+                assert_eq!(servers(&root, tool)["fixture"], native, "{tool}");
+                verify_owned_text(&text, owned.as_ref().unwrap()).unwrap();
+                assert!(patch_server(Some(&text),tool,"fixture",None,Some(&native)).is_err());
+                let (restored, receipt) = patch_server(Some(&text),tool,"fixture",owned.as_ref(),None).unwrap_or_else(|e|panic!("withdraw {tool}: {e}"));
+                assert!(receipt.is_none());
+                assert_eq!(parse_native(&restored,tool).unwrap(),parse_native(original,tool).unwrap(),"{tool}");
+                if original.contains("# keep") { assert!(restored.contains("# keep models")); }
+            }
+        }
+    }
+    #[test]
+    fn native_transport_and_identifier_limits_are_enforced() {
+        for tool in ["pi", "dsh"] {
+            assert!(native_server(tool, "bad.name", &json!({"command":"node"})).is_err());
+            assert!(native_server(
+                tool,
+                "valid-name",
+                &json!({"type":"sse","url":"https://example.test/sse"})
+            )
+            .is_err());
+        }
+        for tool in ["workbuddy", "openclaw"] {
+            let native = native_server(
+                tool,
+                "fixture",
+                &json!({"type":"sse","url":"https://example.test/sse"}),
+            )
+            .unwrap();
+            assert_eq!(canonical_spec(tool, &native).unwrap()["type"], "sse");
+        }
+        assert!(native_server("pi", "fixture", &json!({"command":"node","timeout":0})).is_err());
+        let pi = native_server("pi", "fixture", &json!({"command":"node","timeout":2500})).unwrap();
+        assert_eq!(pi["timeout"], 2.5);
+        assert_eq!(canonical_spec("pi", &pi).unwrap()["timeout"], 2500);
+        let native = native_server("pi", "a-b", &json!({"command":"node"})).unwrap();
+        assert!(patch_server(
+            Some("{\"mcpServers\":{\"a_b\":{\"command\":\"node\"}}}"),
+            "pi",
+            "a-b",
+            None,
+            Some(&native)
+        )
+        .is_err());
+    }
+    #[test]
+    fn nested_section_ownership_is_shared_and_foreign_extensions_block_withdrawal() {
+        let native = native_server("openclaw", "a", &json!({"command":"node"})).unwrap();
+        let (text, a) = patch_server(None, "openclaw", "a", None, Some(&native)).unwrap();
+        let (text, mut b) =
+            patch_server(Some(&text), "openclaw", "b", None, Some(&native)).unwrap();
+        inherit_created_section(b.as_mut().unwrap(), [a.as_ref().unwrap()]);
+        let (text, _) = patch_server(Some(&text), "openclaw", "a", a.as_ref(), None).unwrap();
+        let (text, _) = patch_server(Some(&text), "openclaw", "b", b.as_ref(), None).unwrap();
+        assert_eq!(parse_native(&text, "openclaw").unwrap(), json!({}));
+        let (text, owned) = patch_server(None, "openclaw", "a", None, Some(&native)).unwrap();
+        let mut edited = parse_native(&text, "openclaw").unwrap();
+        edited["mcp"]["servers"]["a"]["custom"] = json!(true);
+        assert!(patch_server(
+            Some(&edited.to_string()),
+            "openclaw",
+            "a",
+            owned.as_ref(),
+            None
+        )
+        .is_err());
+    }
+    #[test]
+    fn executable_cordis_yaml_and_incompatible_references_are_refused() {
+        assert!(parse_native(
+            "- id: x\n  name: plugin\n  config:\n    token: !!js process.env.TOKEN\n",
+            "dsh"
+        )
+        .is_err());
+        assert!(native_server(
+            "dsh",
+            "fixture",
+            &json!({"command":"node","env":{"TOKEN":"${TOKEN}"}})
+        )
+        .is_err());
+        assert!(native_server(
+            "pi",
+            "fixture",
+            &json!({"command":"node","env":{"TOKEN":"!echo secret"}})
+        )
+        .is_err());
+        assert!(native_server(
+            "workbuddy",
+            "fixture",
+            &json!({"url":"https://example.test/mcp","headers":{"X-Token":"${TOKEN}"}})
+        )
+        .is_err());
+        assert!(parse_native("{mcp:{servers:{$include:'servers.json'}}}", "openclaw").is_err());
+        assert!(parse_native("{mcp:{$include:'external.json'}}", "openclaw").is_err());
+    }
+    #[test]
+    fn native_switches_cannot_leave_false_applied_receipts() {
+        for (tool, key, active) in [("pi", "enabled", true), ("workbuddy", "disabled", false)] {
+            let native = native_server(tool, "fixture", &json!({"command":"node"})).unwrap();
+            let (text, owned) = patch_server(None, tool, "fixture", None, Some(&native)).unwrap();
+            let mut root = parse_native(&text, tool).unwrap();
+            root["mcpServers"]["fixture"][key] = json!(!active);
+            assert!(verify_owned_text(&root.to_string(), owned.as_ref().unwrap()).is_err());
+            assert!(adopt_server(&root.to_string(), tool, "fixture", &native).is_err());
+            root["mcpServers"]["fixture"][key] = json!(active);
+            let text = root.to_string();
+            let adopted = adopt_server(&text, tool, "fixture", &native).unwrap();
+            let (after, _) =
+                patch_server(Some(&text), tool, "fixture", Some(&adopted), None).unwrap();
+            assert_eq!(
+                servers(&parse_native(&after, tool).unwrap(), tool),
+                json!({})
+            );
+        }
+    }
+    #[test]
+    fn pi_tool_exposure_is_preserved_and_invalid_modes_are_rejected() {
+        let spec = json!({"type":"stdio","command":"fixture-node","args":["server"],"exposure":"hidden","toolExposure":{"attest":"direct","search_*":"deferred"}});
+        let native = native_server("pi", "fixture", &spec).unwrap();
+        assert_eq!(native["toolExposure"], spec["toolExposure"]);
+        assert_eq!(canonical_spec("pi", &native).unwrap(), spec);
+        assert!(native_server("codex", "fixture", &spec).is_err());
+        for exposure in [json!("unknown"), json!(false)] {
+            let mut bad = spec.clone();
+            bad["exposure"] = exposure;
+            assert!(native_server("pi", "fixture", &bad).is_err());
+        }
     }
 }

@@ -3564,6 +3564,7 @@ dependencies = [
  "toml_edit 0.22.27",
  "tower 0.4.13",
  "tower-http 0.5.2",
+ "unsafe-libyaml",
  "url",
  "uuid",
  "webkit2gtk",

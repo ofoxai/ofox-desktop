@@ -34,7 +34,7 @@ mod rebuild;
 const VERSION: u8 = 1;
 /// Bump to read every Claude source again after a change to what is read
 /// (2: hour-long cache writes).
-const CLAUDE_PARSER_VERSION: u8 = 2;
+const CLAUDE_PARSER_VERSION: u8 = 3;
 /// The one-query read of every cached source. A 1,700-session history is
 /// about 125 MB even stored compactly, and a read over the budget refuses
 /// listings and every refresh alike; decoding it holds more than this anyway.
@@ -55,12 +55,19 @@ mod parity_tests;
 
 #[cfg(test)]
 thread_local! {
+    static QUERY_RAW_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static QUERY_DECODE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
 pub(crate) fn reset_query_decode_count() {
+    QUERY_RAW_BYTES.set(0);
     QUERY_DECODE_COUNT.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn query_raw_bytes() -> usize {
+    QUERY_RAW_BYTES.get()
 }
 
 #[cfg(test)]
@@ -68,7 +75,16 @@ pub(crate) fn query_decode_count() -> usize {
     QUERY_DECODE_COUNT.get()
 }
 
+#[derive(PartialEq, Eq)]
+struct SqliteObservation {
+    database: u64,
+    data_version: i64,
+    schema_version: i64,
+    changes: i64,
+}
+
 struct CachedProjection {
+    observation: Option<SqliteObservation>,
     key: [u8; 32],
     input: Arc<AnalyticsInput>,
     thread_sources: Arc<Vec<ThreadSource>>,
@@ -100,6 +116,55 @@ impl Default for ProjectionCache {
     }
 }
 impl ProjectionCache {
+    /// Only managed Database connections use this shortcut. Identity cannot be
+    /// reused across close/reopen or Backup replacement; SQLite counters cover
+    /// both this connection's writes and commits by external connections.
+    /// Only an established read transaction may retain a fast observation.
+    pub(crate) fn read_managed_on(
+        &self,
+        db: &Database,
+        conn: &rusqlite::Connection,
+    ) -> Result<Arc<AnalyticsInput>, AppError> {
+        // Establish the main read snapshot before reading data_version. Schema
+        // lookup also surfaces a dropped/unreadable table before a warm return.
+        let schema_version = conn.query_row("PRAGMA main.schema_version", [], |r| r.get(0))?;
+        let _: i64 = conn.query_row("SELECT rootpage FROM main.sqlite_schema WHERE type='table' AND name='session_meta_cache'", [], |r| r.get(0))?;
+        if conn.transaction_state(Some(rusqlite::DatabaseName::Main))?
+            != rusqlite::TransactionState::Read
+        {
+            // A write transaction might roll back without reverting total_changes.
+            // Autocommit reads have no pinned snapshot covering the proof and input.
+            return self.read_at(conn, Instant::now());
+        }
+        let observation = SqliteObservation {
+            database: db
+                .analytics_identity
+                .load(std::sync::atomic::Ordering::Relaxed),
+            data_version: conn.query_row("PRAGMA main.data_version", [], |r| r.get(0))?,
+            schema_version,
+            changes: conn.query_row("SELECT total_changes()", [], |r| r.get(0))?,
+        };
+        let now = Instant::now();
+        {
+            let slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = slot.as_ref().filter(|entry| {
+                entry.observation.as_ref() == Some(&observation)
+                    && now.saturating_duration_since(entry.created_at) < self.ttl
+            }) {
+                return Ok(Arc::clone(&entry.input));
+            }
+        }
+        let input = self.read_at(conn, now)?;
+        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = slot
+            .as_mut()
+            .filter(|entry| Arc::ptr_eq(&entry.input, &input))
+        {
+            entry.observation = Some(observation);
+        }
+        Ok(input)
+    }
+    #[cfg(test)]
     pub(crate) fn read_on(
         &self,
         conn: &rusqlite::Connection,
@@ -207,6 +272,7 @@ impl ProjectionCache {
             .filter(|_| !legacy_failed)
             .filter(|bytes| *bytes <= self.max_bytes)
             .map(|_| CachedProjection {
+                observation: None,
                 key,
                 input: Arc::clone(&input),
                 thread_sources: Arc::clone(&thread_sources),
@@ -298,6 +364,7 @@ fn projection_bytes(input: &AnalyticsInput) -> Option<usize> {
     bytes.add(4 * std::mem::size_of::<usize>())?;
     bytes.add(std::mem::size_of::<Vec<ThreadSource>>())?;
     bytes.string(&input.snapshot_version)?;
+    bytes.add(input.tool_evidence.retained_bytes()?)?;
     bytes.vector(&input.sessions)?;
     for session in &input.sessions {
         bytes.string(&session.identity.key)?;
@@ -439,6 +506,8 @@ struct Entry {
     native_method: bool,
     #[serde(default)]
     physical_source_count: Option<usize>,
+    #[serde(default)]
+    tool_evidence: super::session_analytics::interactions::Evidence,
 }
 struct Row {
     provider: String,
@@ -670,6 +739,8 @@ fn raw_rows_on(conn: &rusqlite::Connection) -> Result<Vec<RawRow>, AppError> {
         if bytes > MAX_CACHE_BYTES || result.len() >= MAX_SOURCES {
             return Err(invalid("cacheBudgetExceeded"));
         }
+        #[cfg(test)]
+        QUERY_RAW_BYTES.set(QUERY_RAW_BYTES.get() + raw.as_ref().map_or(0, String::len));
         result.push(RawRow {
             path,
             provider,
@@ -771,7 +842,7 @@ pub(crate) fn source_revision(spec: &SourceSpec) -> Result<Value, AppError> {
         None
     };
     Ok(
-        json!({"native":usage_source::normalized_stamp(&spec.provider,&spec.path)?,"project":project,"title":title,"parts":parts,"subagent":spec.subagent,"activityParserVersion":1,"codexParserVersion":if spec.provider=="codex" {Some(super::codex_native::VERSION)} else {None},"claudeParserVersion":if spec.provider=="claude" {Some(CLAUDE_PARSER_VERSION)} else {None}}),
+        json!({"native":usage_source::normalized_stamp(&spec.provider,&spec.path)?,"project":project,"title":title,"parts":parts,"subagent":spec.subagent,"activityParserVersion":1,"interactionParserVersion":super::session_analytics::interactions::VERSION,"codexParserVersion":if spec.provider=="codex" {Some(super::codex_native::VERSION)} else {None},"claudeParserVersion":if spec.provider=="claude" {Some(CLAUDE_PARSER_VERSION)} else {None}}),
     )
 }
 fn empty_entry(now: i64) -> Entry {
@@ -782,6 +853,7 @@ fn empty_entry(now: i64) -> Entry {
         codex_native: None,
         native_method: false,
         physical_source_count: None,
+        tool_evidence: Default::default(),
         stamp: None,
         sessions: vec![],
         facts: vec![],
@@ -987,6 +1059,7 @@ fn refresh_sources_inner(
                                 "parts",
                                 "subagent",
                                 "activityParserVersion",
+                                "interactionParserVersion",
                                 "codexParserVersion",
                             ]
                             .iter()
@@ -1144,6 +1217,7 @@ pub(crate) struct ParsedSource {
     pub messages: Vec<MessageEvent>,
     pub native_activity: Vec<super::session_native_activity::NativeActivityEvent>,
     pub reasons: Vec<String>,
+    pub tool_evidence: super::session_analytics::interactions::Evidence,
 }
 pub(crate) fn batch_key(batch: &BatchSource) -> Result<String, AppError> {
     let roots = serde_json::to_vec(&batch.roots).map_err(|_| invalid("invalidSourceRoots"))?;
@@ -1301,8 +1375,7 @@ fn refresh_batch(
     };
     let before = batch_stamp(batch);
     if let (Ok(native), Some(previous)) = (&before, previous) {
-        let revision =
-            json!({"native":native_revision(native)?,"db":db_revision,"roots":batch.roots});
+        let revision = json!({"native":native_revision(native)?,"db":db_revision,"roots":batch.roots,"interactionParserVersion":super::session_analytics::interactions::VERSION});
         if previous.available
             && previous.status != "failed"
             && previous.stamp.as_ref() == Some(&revision)
@@ -1332,6 +1405,7 @@ fn refresh_batch(
             entry.facts = parsed.facts;
             entry.messages = parsed.messages;
             entry.native_activity = parsed.native_activity;
+            entry.tool_evidence = parsed.tool_evidence;
             entry.reasons = parsed.reasons;
             entry.physical_source_count = native
                 .get("files")
@@ -1349,7 +1423,7 @@ fn refresh_batch(
             }
             .into();
             entry.stamp = Some(
-                json!({"native":native_revision(native)?,"db":db_revision,"roots":batch.roots}),
+                json!({"native":native_revision(native)?,"db":db_revision,"roots":batch.roots,"interactionParserVersion":super::session_analytics::interactions::VERSION}),
             );
             entry.succeeded_at_ms = Some(now);
             Ok(entry)
@@ -1407,6 +1481,7 @@ fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
         entry.facts = parsed.facts;
         entry.messages = parsed.messages;
         entry.native_activity = parsed.native_activity;
+        entry.tool_evidence = parsed.tool_evidence;
         entry.reasons = parsed.reasons;
         entry.status = if entry.reasons.is_empty() {
             "ok"
@@ -1511,6 +1586,19 @@ fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
                     Some("gemini") => "assistant",
                     _ => continue,
                 };
+                if role == "assistant" {
+                    let at = message
+                        .get("timestamp")
+                        .and_then(crate::session_manager::providers::parse_timestamp_to_ms);
+                    for call in message["toolCalls"].as_array().into_iter().flatten() {
+                        transcript.tools.record(
+                            call["id"].as_str(),
+                            at,
+                            call["name"].as_str().unwrap_or(""),
+                            call.get("args"),
+                        );
+                    }
+                }
                 let content = crate::session_manager::providers::extract_text(&message["content"]);
                 if (role == "user"
                     && crate::session_manager::title::clean_prompt(&content).is_none())
@@ -1591,6 +1679,9 @@ fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
                     }
                 })
                 .collect();
+        }
+        if matches!(spec.provider.as_str(), "claude" | "gemini") {
+            entry.tool_evidence.attach(&session_key, &transcript.tools);
         }
         entry.sessions.push(SessionDescriptor {
             identity: SessionIdentity {
@@ -2238,6 +2329,7 @@ fn input_from_rows(
         source_observations: vec![],
         codex_native_ready: false,
         legacy_history_available: false,
+        tool_evidence: Default::default(),
         thread_usage_coverage: Default::default(),
     };
     let mut hash = Sha256::new();
@@ -2446,6 +2538,9 @@ fn input_from_rows(
                 }
             }
             facts.insert(fact.event_key.clone(), fact);
+        }
+        if entry.available && entry.status != "failed" {
+            input.tool_evidence.extend(entry.tool_evidence);
         }
         input.native_activity.extend(entry.native_activity);
         for message in entry.messages {

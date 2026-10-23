@@ -3,12 +3,14 @@ pub(crate) mod batch;
 pub(crate) mod catalog;
 pub(crate) mod coordinator;
 mod display;
+pub(crate) mod extension_targets;
 mod instructions;
 pub(crate) mod inventory;
 pub(crate) mod mcp_actions;
 pub(crate) mod mcp_check;
 pub(crate) mod mcp_codec;
 pub(crate) mod mcp_resource;
+pub(crate) mod mcp_targets;
 #[cfg(test)]
 mod native_acceptance_profile;
 pub(crate) mod native_json;

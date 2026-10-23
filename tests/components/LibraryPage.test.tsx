@@ -73,9 +73,13 @@ function Refresh() {
 function Fixture({
   active = true,
   section,
+  location,
+  onLocated,
 }: {
   active?: boolean;
   section?: "mcp" | "skills";
+  location?: { kind: "mcp" | "skills"; request: number };
+  onLocated?: (request: number) => void;
 }) {
   const [client] = useState(
     () => new QueryClient({ defaultOptions: { queries: { retry: false } } }),
@@ -92,7 +96,9 @@ function Fixture({
               onChanged={() => undefined}
             />
           ) : (
-            <LibraryPage />
+            <div data-testid="library-scroller" style={{ overflowY: "auto" }}>
+              <LibraryPage location={location} onLocated={onLocated} />
+            </div>
           )}
         </InteractionScope>
         <Refresh />
@@ -1422,10 +1428,14 @@ it("shows MCP as a table with one checkbox per agent", async () => {
   expect(within(row).getByText("MCP demo")).toBeVisible();
   for (const tool of [
     "Claude Code",
-    "Codex",
+    "Codex / ChatGPT",
     "OpenCode",
     "Hermes",
     "Gemini CLI",
+    "OpenClaw",
+    "WorkBuddy",
+    "DeepSeek Harness",
+    "Pi",
   ])
     expect(
       within(row).getByRole("checkbox", {
@@ -1451,7 +1461,57 @@ it("shows Skills as magpie's skills page with one chip per agent", async () => {
     }),
   ).toHaveAttribute("aria-disabled", "true");
   expect(
+    within(panel).queryByRole("region", {
+      name: zh.library.skillsPage.discover,
+    }),
+  ).toBeNull();
+  await userEvent.click(
+    screen.getByRole("button", { name: zh.library.interaction.discover }),
+  );
+  expect(
     within(panel).getByRole("region", { name: zh.library.skillsPage.discover }),
-  ).toBeInTheDocument();
+  ).toBeVisible();
+  expect(
+    within(panel).getByRole("button", { name: "返回 Skills" }),
+  ).toBeVisible();
   expect(libraryApi.inventory).toHaveBeenCalledWith("skills");
+});
+
+it("opens Skills management for an explicit location after browsing discovery", async () => {
+  const located = vi.fn();
+  const view = render(<Fixture />);
+  await userEvent.click(screen.getByRole("tab", { name: /Skills/ }));
+  await screen.findByTestId("skill-row-skill");
+  await userEvent.click(
+    screen.getByRole("button", { name: zh.library.interaction.discover }),
+  );
+  expect(screen.queryByRole("textbox", { name: "技能来源" })).toBeNull();
+  const location = { kind: "skills" as const, request: 42 };
+  view.rerender(
+    <Fixture active={false} location={location} onLocated={located} />,
+  );
+  expect(located).not.toHaveBeenCalled();
+  view.rerender(<Fixture location={location} onLocated={located} />);
+  const source = await screen.findByRole("textbox", { name: "技能来源" });
+  expect(source).toHaveFocus();
+  expect(screen.queryByRole("button", { name: "返回 Skills" })).toBeNull();
+  expect(located).toHaveBeenCalledTimes(1);
+  expect(located).toHaveBeenCalledWith(42);
+});
+
+it("starts an explicit Skills location at the source instead of restoring a deep management scroll", async () => {
+  const view = render(<Fixture />);
+  await userEvent.click(screen.getByRole("tab", { name: /Skills/ }));
+  await screen.findByRole("textbox", { name: "技能来源" });
+  const scroller = screen.getByTestId("library-scroller");
+  scroller.scrollTop = 1400;
+  await userEvent.click(screen.getByRole("tab", { name: /^MCP/ }));
+  await screen.findByRole("button", { name: "添加 MCP" });
+  view.rerender(
+    <Fixture location={{ kind: "skills", request: 99 }} onLocated={vi.fn()} />,
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("textbox", { name: "技能来源" })).toHaveFocus(),
+  );
+  expect(scroller.scrollTop).toBe(0);
 });

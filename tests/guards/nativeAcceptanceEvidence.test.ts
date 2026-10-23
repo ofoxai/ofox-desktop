@@ -9,7 +9,10 @@ import {
   prepareProfile,
   microsoftLearnQuery,
   nativeEvents,
+  nativeInvocation,
+  profilePaths,
 } from "../../scripts/native-acceptance-drivers.mjs";
+import { resourceClientIds } from "../../scripts/resource-targets.mjs";
 import {
   verifyAcceptanceIdentity,
   verifyWriterProfile,
@@ -29,6 +32,124 @@ afterEach(async () => {
   );
 });
 describe("native acceptance identity and resource evidence", () => {
+  it("prepares all ten clients with MCP and Skills scope and binds that scope to every proof", async () => {
+    const root = await temp();
+    for (const agentId of resourceClientIds) {
+      const profile = await prepareProfile({
+        root: join(root, agentId),
+        agentId,
+        sourceSha: sha,
+        runId: "scope-test",
+        nonce: "b".repeat(64),
+        instructionChallenge: "c".repeat(64),
+        skillChallenge: "d".repeat(64),
+        resourcesMode: "writer",
+        resourceKinds: ["mcp", "skills"],
+      });
+      const input = JSON.parse(
+        await readFile(join(profile.root, "writer-input.json"), "utf8"),
+      );
+      expect(input.resourceKinds).toEqual(["mcp", "skills"]);
+      if (agentId === "hermes") {
+        const nativeYaml = await readFile(profile.mcpNativePath, "utf8");
+        expect(nativeYaml).toMatch(/^_config_version: 50\n/);
+        expect(nativeYaml).toContain("\nmcp_servers: {}\n");
+        expect(nativeYaml).toContain('"ofox-acceptance"');
+      }
+      expect(Object.keys(input.mcp)).toEqual(["ofox_acceptance"]);
+      expect(input.skillText).toContain("c".repeat(64));
+      expect(input.skillText).toContain("d".repeat(64));
+      await expect(access(profile.instructionPath)).rejects.toThrow();
+      expect(
+        JSON.parse(await readFile(profile.proofPath, "utf8")).resourceKinds,
+      ).toEqual(["mcp", "skills"]);
+      expect(
+        JSON.parse(
+          await readFile(
+            join(profile.root, ".ofox-acceptance-prepared.json"),
+            "utf8",
+          ),
+        ).resourceKinds,
+      ).toEqual(["mcp", "skills"]);
+    }
+    expect(profilePaths(root, "chatgpt").mcpNativePath).toBe(
+      profilePaths(root, "codex").mcpNativePath,
+    );
+    expect(profilePaths(root, "chatgpt").skillPath).toBe(
+      profilePaths(root, "codex").skillPath,
+    );
+  });
+  it("uses fixed native adapters and keeps desktop entrypoints separate from CLI evidence", () => {
+    for (const agentId of ["pi", "dsh", "openclaw"]) {
+      const invocation = nativeInvocation(agentId, {
+        workspace: "/sandbox/work",
+        home: "/sandbox/home",
+        prompt: "fixed acceptance",
+        model: "test-model",
+        resourceKinds: ["mcp", "skills"],
+      });
+      expect(invocation.shell).toBe(false);
+      if (agentId === "pi") {
+        expect(invocation.args).toContain("--no-extensions");
+        expect(invocation.args).toContain("builtin:mcp");
+      }
+      expect(invocation.args).toContain("fixed acceptance");
+      expect(invocation.args.join(" ")).not.toMatch(
+        /api-key|yolo|bypass|dangerously/,
+      );
+    }
+    for (const agentId of ["chatgpt", "workbuddy"])
+      expect(() =>
+        nativeInvocation(agentId, {
+          workspace: "/sandbox/work",
+          prompt: "fixed",
+          model: "test-model",
+          resourceKinds: ["mcp", "skills"],
+        }),
+      ).toThrow("desktopEntryRequired");
+  });
+  it("accepts only native tool events, never a model's claim, for the added CLI clients", () => {
+    const events = {
+      pi: [
+        {
+          type: "tool_execution_end",
+          toolName: "mcp__ofox_acceptance__attest",
+          toolCallId: "call-1",
+          isError: false,
+        },
+        { type: "agent_end", messages: [] },
+      ],
+      dsh: [
+        { type: "tool_call", tool: "ofox_acceptance_attest", callId: "call-1" },
+        { type: "tool_result", callId: "call-1", status: "completed" },
+        { type: "final", text: "done" },
+      ],
+      openclaw: [
+        {
+          ok: true,
+          status: "ok",
+          toolSummary: { tools: ["mcp__ofox_acceptance__attest"], failures: 0 },
+        },
+      ],
+    };
+    for (const [agentId, stream] of Object.entries(events)) {
+      expect(
+        nativeEvents(
+          agentId,
+          stream.map((row) => JSON.stringify(row)).join("\n"),
+        ),
+      ).toMatchObject({ completed: true, mcpCalled: true });
+      expect(
+        nativeEvents(
+          agentId,
+          JSON.stringify({
+            type: "final",
+            text: "I loaded the skill and called MCP",
+          }),
+        ).mcpCalled,
+      ).toBe(false);
+    }
+  });
   it("requires both a clean exact-SHA checkout and explicitly pinned matching artifact provenance", async () => {
     const repo = await temp();
     const git = (args: string[]) =>

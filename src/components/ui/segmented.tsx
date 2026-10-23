@@ -153,6 +153,8 @@ export interface SegmentedControlProps<T extends string> {
   options: ReadonlyArray<SegmentedItem<T>>;
   value: T;
   onChange: (value: T) => void;
+  /** Optional editor action when the currently selected option is clicked. */
+  onReselect?: (value: T) => void;
   "aria-label": string;
   disabled?: boolean;
   className?: string;
@@ -163,6 +165,7 @@ export function SegmentedControl<T extends string>({
   options,
   value,
   onChange,
+  onReselect,
   "aria-label": ariaLabel,
   disabled = false,
   className,
@@ -195,7 +198,8 @@ export function SegmentedControl<T extends string>({
             aria-checked={on}
             disabled={disabled}
             onClick={() => {
-              if (!on) onChange(option.value);
+              if (on) onReselect?.(option.value);
+              else onChange(option.value);
             }}
             {...bind(index)}
             className={cn(

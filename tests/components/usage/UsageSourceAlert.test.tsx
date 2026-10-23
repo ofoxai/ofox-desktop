@@ -88,3 +88,21 @@ it("counts unpriced models, or says the price catalog is unavailable", () => {
     "价格目录不可用，费用暂无法估算",
   );
 });
+
+it("identifies official fallback estimates alongside genuinely unpriced models", () => {
+  render(
+    <UsageSourceAlert
+      pricing={pricing({
+        officialModelIds: ["claude-opus-5-5", "claude-sonnet-5-5"],
+        officialCatalogVersion: "verified-manufacturer-prices",
+        unpricedModelIds: ["unknown"],
+        catalogState: "missing",
+      })}
+    />,
+  );
+  expect(screen.getByRole("status")).toHaveTextContent(
+    "2 个模型按厂商官方价估算",
+  );
+  expect(screen.getByRole("status")).toHaveTextContent("1 个模型未计价");
+  expect(screen.queryByText("价格目录不可用，费用暂无法估算")).toBeNull();
+});

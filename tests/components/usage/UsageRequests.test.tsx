@@ -136,6 +136,29 @@ it("opens detail by keyboard without presenting imported synthetic status as obs
   await userEvent.keyboard("{Escape}");
   await waitFor(() => expect(trigger).toHaveFocus());
 });
+
+it("shows manufacturer API pricing as the estimate basis in frozen request details", async () => {
+  const normal = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command: string, args: any) =>
+    command === "get_request_detail"
+      ? Promise.resolve({
+          ...row,
+          receipt: receipt(),
+          currentEstimate: {
+            ...estimate,
+            knownCostUsd: "4",
+            availability: "known",
+            officialModelIds: ["claude-opus-5-5"],
+          },
+        })
+      : normal(command, args),
+  );
+  render(<UsageRequests {...props} />);
+  await userEvent.click(await screen.findByRole("button", { name: /model/ }));
+  const dialog = await screen.findByRole("dialog");
+  expect(await within(dialog).findByText("厂商官方 API 标价")).toBeVisible();
+  expect(within(dialog).getByText("估价依据")).toBeVisible();
+});
 it("distinguishes a detail fetch failure from a missing record", async () => {
   const normal = mocks.invoke.getMockImplementation()!;
   mocks.invoke.mockImplementation((command, args) =>

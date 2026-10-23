@@ -424,6 +424,7 @@ mod tests {
                 .into(),
             codex_native_ready: false,
             legacy_history_available: true,
+            tool_evidence: Default::default(),
             thread_usage_coverage: Default::default(),
         }
     }

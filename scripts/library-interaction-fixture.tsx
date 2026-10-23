@@ -49,6 +49,22 @@ const targets = ["claude", "codex", "gemini", "opencode", "hermes"].map(
     desired: false,
   }),
 );
+const mcpTargets = [
+  "claude",
+  "codex",
+  "opencode",
+  "openclaw",
+  "hermes",
+  "gemini",
+  "workbuddy",
+  "dsh",
+  "pi",
+].map((toolId) => ({
+  ...targets[0],
+  toolId,
+  targetGroupId: toolId,
+  path: `/sandbox/${toolId}`,
+}));
 const db: Record<LibraryKind, LibraryData> = {
   instructions: {
     epoch: 1,
@@ -80,6 +96,7 @@ const db: Record<LibraryKind, LibraryData> = {
   },
   mcp: {
     epoch: 1,
+    targets: mcpTargets,
     servers: [
       {
         id: "context7",
@@ -91,7 +108,7 @@ const db: Record<LibraryKind, LibraryData> = {
         serviceHost: "mcp.context7.com",
         credentialState: "none",
         fields: [],
-        targets: targets.map((t) => ({
+        targets: mcpTargets.map((t) => ({
           ...t,
           desired: t.toolId === "codex",
           status: t.toolId === "codex" ? "applied" : t.status,
@@ -106,7 +123,7 @@ const db: Record<LibraryKind, LibraryData> = {
         transport: "stdio",
         credentialState: "none",
         fields: [],
-        targets,
+        targets: mcpTargets,
       },
     ],
     operations: [],
@@ -351,7 +368,7 @@ function Fixture() {
               </Button>
             </div>
           </header>
-          <div className="min-h-0 flex-1 overflow-auto px-4 pb-4 pt-1">
+          <div className="min-h-0 flex-1 overflow-auto px-4 pb-4">
             <LibraryPage />
           </div>
           <p className="flex-none border-t border-line px-4 py-1 text-note text-ink-muted">

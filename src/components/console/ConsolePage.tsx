@@ -193,7 +193,7 @@ function ConsoleShell({
         {shell.visited.has("library") && (
           <div
             {...panel("library")}
-            className="h-full overflow-y-auto px-4 pb-4 pt-1"
+            className="h-full overflow-y-auto px-4 pb-4"
           >
             <InteractionScope active={shell.active === "library"}>
               <LibraryPage

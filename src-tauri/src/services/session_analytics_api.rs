@@ -98,7 +98,7 @@ fn query_with_cache<Tz: TimeZone>(
     let (mut input, catalog) = {
         let mut conn = crate::database::lock_conn!(db.conn);
         let tx = conn.transaction()?;
-        let input = cache.read_on(&tx)?;
+        let input = cache.read_managed_on(db, &tx)?;
         let catalog = PriceCatalog::load_on(&tx, apex, now_ms)?;
         tx.commit()?;
         (input, catalog)
@@ -168,7 +168,12 @@ fn query_with_cache<Tz: TimeZone>(
             ..Default::default()
         };
         result.pricing_coverage = catalog.coverage_for(&result.totals.estimate);
-        for day in &mut result.series {
+        for day in result.series.iter_mut().chain(
+            result
+                .trend
+                .iter_mut()
+                .flat_map(|trend| trend.series.iter_mut()),
+        ) {
             day.messages = None;
             day.active_ms = None;
             day.known_messages = None;
@@ -219,6 +224,7 @@ mod tests {
             source_observations: vec![],
             codex_native_ready: true,
             legacy_history_available: false,
+            tool_evidence: Default::default(),
             thread_usage_coverage: Default::default(),
         };
         input.native_activity.push(

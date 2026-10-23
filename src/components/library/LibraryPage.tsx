@@ -35,6 +35,8 @@ export function LibraryPage({
   const active = useInteractionActive();
   const shell = useShell();
   const [tab, setTab] = useState<LibraryKind>("instructions");
+  const [skillsManagementRequest, setSkillsManagementRequest] =
+    useState<number>();
   const [visited, setVisited] = useState<Set<LibraryKind>>(
     () => new Set(["instructions"]),
   );
@@ -112,6 +114,10 @@ export function LibraryPage({
     if (!location || !active) return;
     guarded(() => {
       changeTab(location.kind);
+      if (location.kind === "skills") {
+        positions.current.set("skills", 0);
+        setSkillsManagementRequest(location.request);
+      }
       onLocated?.(location.request);
     });
   }, [location, active, onLocated]);
@@ -154,7 +160,7 @@ export function LibraryPage({
       <div
         ref={header}
         data-library-header
-        className="sticky top-0 z-20 -mx-1 flex flex-wrap items-center justify-between gap-3 border-b border-line-2 bg-background/95 px-1 py-2 backdrop-blur"
+        className="sticky top-0 z-20 -mx-4 flex flex-wrap items-center justify-between gap-3 border-b border-line-2 bg-canvas px-4 py-3"
       >
         <SegmentedNav
           aria-label={t("library.nav")}
@@ -239,6 +245,7 @@ export function LibraryPage({
               />
             ) : kind === "skills" ? (
               <LibrarySkillsPage
+                managementRequest={skillsManagementRequest}
                 registerRefresh={register}
                 registerDiscover={registerDiscover}
                 onChanged={() => void summary.refetch()}

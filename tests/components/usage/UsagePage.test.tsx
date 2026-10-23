@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import {
+  act,
   render,
   screen,
   waitFor,
@@ -147,6 +148,71 @@ it("publishes consecutive successful balance samples to the shared account", asy
   await waitFor(() => expect(balance()).toBe(18));
 });
 describe("UsagePage", () => {
+  it("uses the app calendar for custom dates and applies the selected local days", async () => {
+    const normal = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: any) => {
+      if (command === "get_usage_capabilities")
+        return { queryVersion: 1, sources: [] };
+      if (command === "get_usage_overview")
+        return {
+          ...overview,
+          appliedQuery: args.query,
+          queryFingerprint: "calendar-query",
+          snapshotVersion: "calendar-snapshot",
+        };
+      return normal(command, args);
+    });
+    const user = userEvent.setup();
+    render(<Page />);
+    await user.click(await screen.findByRole("radio", { name: "自定义" }));
+    const start = screen.getByLabelText("开始日期");
+    const end = screen.getByLabelText("结束日期");
+    expect(start).toHaveAttribute("type", "text");
+    expect(end).toHaveAttribute("type", "text");
+    await user.clear(start);
+    await user.paste("2026-10-01");
+    await user.clear(end);
+    await user.paste("2026-10-21");
+    await user.click(
+      screen.getByRole("button", { name: "为结束日期选择日期" }),
+    );
+    await user.click(screen.getByRole("button", { name: /2026年10月25日/ }));
+    expect(end).toHaveValue("2026-10-25");
+    await user.click(screen.getByRole("button", { name: "应用日期" }));
+    await waitFor(() =>
+      expect(mocks.invoke).toHaveBeenCalledWith(
+        "get_usage_overview",
+        expect.objectContaining({
+          query: expect.objectContaining({
+            startMs: new Date(2026, 9, 1).getTime(),
+            endMs: new Date(2026, 9, 26).getTime(),
+          }),
+        }),
+      ),
+    );
+    expect(screen.queryByLabelText("开始日期")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("radio", { name: "自定义" }));
+    expect(screen.getByLabelText("开始日期")).toHaveValue("2026-10-01");
+    expect(screen.getByLabelText("结束日期")).toHaveValue("2026-10-25");
+    const calls = mocks.invoke.mock.calls.filter(
+      ([command]) => command === "get_usage_overview",
+    ).length;
+    await user.clear(screen.getByLabelText("结束日期"));
+    await user.paste("2026-09-30");
+    await user.click(screen.getByRole("button", { name: "应用日期" }));
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "结束日期不得早于开始日期",
+    );
+    expect(
+      mocks.invoke.mock.calls.filter(
+        ([command]) => command === "get_usage_overview",
+      ),
+    ).toHaveLength(calls);
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    await user.click(screen.getByRole("radio", { name: "自定义" }));
+    expect(screen.getByLabelText("结束日期")).toHaveValue("2026-10-25");
+  });
+
   it.each([
     ["明细", "≈$4.41"],
     ["会话分析", "≈$3.25"],
@@ -256,11 +322,11 @@ describe("UsagePage", () => {
       expect(
         await within(panel).findByText(price, { exact: false }),
       ).toBeVisible();
-      expect(within(header).queryByText("按 Ofox 价格估算")).toBeNull();
+      expect(within(header).queryByText("按 API 单价估算")).toBeNull();
       expect(within(header).queryByText("—")).toBeNull();
       await userEvent.click(screen.getByRole("tab", { name: "概览" }));
       expect(await within(header).findByText("≈$2.00")).toBeVisible();
-      expect(within(header).getByTitle("按 Ofox 价格估算")).toBeVisible();
+      expect(within(header).getByTitle("按 API 单价估算")).toBeVisible();
     },
   );
 
@@ -474,11 +540,16 @@ it("keeps honest empty and refresh-failure states", async () => {
   render(<Page />);
   expect(await screen.findByText("该时间范围内暂无用量")).toBeVisible();
   fireEvent.click(screen.getByText("refresh-page"));
-  expect(await screen.findByText("Error: offline sync")).toBeInTheDocument();
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "刷新本机数据" }),
+    ).toHaveAttribute("title", zh.usagePage.refreshFailed),
+  );
+  expect(screen.queryByText("Error: offline sync")).toBeNull();
   expect(screen.getByText("$20.00")).toBeVisible();
 });
 
-it("gives every bound tool a tab and counts ChatGPT under Codex", async () => {
+it("shows usage tools independently of bindings and counts ChatGPT under Codex", async () => {
   const normal = mocks.invoke.getMockImplementation()!;
   mocks.invoke.mockImplementation((command: string, ...args: unknown[]) =>
     command === "get_usage_overview"
@@ -492,9 +563,56 @@ it("gives every bound tool a tab and counts ChatGPT under Codex", async () => {
       within(tools)
         .getAllByRole("button")
         .map((button) => button.getAttribute("aria-label")),
-    ).toEqual(["全部工具", "Claude Code", "Codex", "Hermes"]),
+    ).toEqual([
+      "全部工具",
+      "Claude Code",
+      "Codex",
+      "OpenCode",
+      "OpenClaw",
+      "Hermes",
+      "Gemini",
+      "WorkBuddy",
+      "DeepSeek Harness",
+      "Pi",
+    ]),
   );
   expect(screen.queryByText(/以下工具尚无分时用量统计/)).toBeNull();
+});
+
+it("keeps usage tool filters after unbinding when the initial reads fail", async () => {
+  const normal = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command: string, ...args: unknown[]) => {
+    if (command === "get_usage_capabilities")
+      return Promise.resolve({
+        queryVersion: 1,
+        requestSnapshots: true,
+        sources: [],
+      });
+    if (command === "get_usage_overview" || command === "get_request_logs")
+      return Promise.reject(new Error("read failed"));
+    return normal(command, ...args);
+  });
+  render(<Page bound={["hermes", "dsh"]} />);
+  fireEvent.click(await screen.findByRole("tab", { name: "明细" }));
+  const tools = await screen.findByRole("group", { name: "工具筛选" });
+  await waitFor(() =>
+    expect(
+      within(tools)
+        .getAllByRole("button")
+        .map((button) => button.getAttribute("aria-label")),
+    ).toEqual([
+      "全部工具",
+      "Claude Code",
+      "Codex",
+      "OpenCode",
+      "OpenClaw",
+      "Hermes",
+      "Gemini",
+      "WorkBuddy",
+      "DeepSeek Harness",
+      "Pi",
+    ]),
+  );
 });
 
 it("shows hours only with a forecast and reads millisecond chart timestamps", async () => {
@@ -822,3 +940,190 @@ it.each([true, false])(
     }
   },
 );
+
+it("keeps a filtered overview unchanged when an automatic refresh fails during a native rebuild", async () => {
+  localStorage.setItem("ofox.usageRefreshSeconds", "5");
+  const normal = mocks.invoke.getMockImplementation()!;
+  let failRefresh!: (error: Error) => void;
+  mocks.invoke.mockImplementation((command: string, args: any) => {
+    if (command === "get_usage_capabilities")
+      return Promise.resolve({
+        queryVersion: 1,
+        requestSnapshots: false,
+        projectFilter: false,
+        localRefresh: true,
+        nativeRebuild: true,
+        sources: [],
+      });
+    if (command === "get_usage_rebuild_progress")
+      return Promise.resolve({
+        operationId: "automatic-rebuild",
+        state: "running",
+        completedSources: 0,
+        totalSources: 901,
+        errorCode: null,
+      });
+    if (command === "get_usage_overview")
+      return Promise.resolve({
+        ...overview,
+        appliedQuery: args.query,
+        queryFingerprint: "query",
+        snapshotVersion: "snapshot",
+        options: { toolIds: ["claude", "codex"], modelIds: [], sourceIds: [] },
+      });
+    if (command === "refresh_local_usage")
+      return new Promise((_, reject) => {
+        failRefresh = reject;
+      });
+    return normal(command, args);
+  });
+  const timers = vi.spyOn(window, "setInterval");
+  try {
+    render(<Page />);
+    const tools = await screen.findByRole("group", { name: "工具筛选" });
+    const claude = within(tools).getByRole("button", { name: "Claude Code" });
+    await waitFor(() => expect(claude).toBeEnabled());
+    fireEvent.click(claude);
+    await waitFor(() => expect(claude).toHaveAttribute("aria-pressed", "true"));
+    await screen.findByText("unknown-model");
+    expect(screen.queryByText(/正在重建 Codex 本机统计/)).toBeNull();
+
+    const tick = timers.mock.calls.find(
+      (call) => call[1] === 5_000,
+    )![0] as () => void;
+    tick();
+    await waitFor(() => expect(failRefresh).toBeTypeOf("function"));
+    expect(
+      within(tools).getByRole("button", { name: "Claude Code" }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByText(/正在重建 Codex 本机统计/)).toBeNull();
+    await act(async () => failRefresh(new Error("background read failed")));
+    expect(screen.queryByText(/部分数据刷新失败/)).toBeNull();
+    expect(screen.getByText("unknown-model")).toBeVisible();
+  } finally {
+    timers.mockRestore();
+  }
+});
+
+it("publishes a fresh filtered overview only after the background read completes", async () => {
+  const normal = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command: string, args: any) => {
+    if (command === "get_usage_capabilities")
+      return Promise.resolve({
+        queryVersion: 1,
+        requestSnapshots: false,
+        projectFilter: false,
+        localRefresh: true,
+        sources: [],
+      });
+    if (command === "get_usage_overview")
+      return Promise.resolve({
+        ...overview,
+        appliedQuery: args.query,
+        queryFingerprint: "query",
+        snapshotVersion: "old",
+        options: { toolIds: ["claude", "codex"], modelIds: [], sourceIds: [] },
+      });
+    if (command === "refresh_local_usage") return Promise.resolve({});
+    return normal(command, args);
+  });
+  const timers = vi.spyOn(window, "setInterval");
+  try {
+    render(<Page />);
+    const tools = await screen.findByRole("group", { name: "工具筛选" });
+    const claude = within(tools).getByRole("button", { name: "Claude Code" });
+    await waitFor(() => expect(claude).toBeEnabled());
+    fireEvent.click(claude);
+    await waitFor(() => expect(claude).toHaveAttribute("aria-pressed", "true"));
+    await waitFor(() =>
+      expect(screen.getAllByText("1.2K").length).toBeGreaterThan(0),
+    );
+
+    let release!: (value: unknown) => void;
+    mocks.invoke.mockImplementation((command: string, args: any) =>
+      command === "get_usage_overview"
+        ? new Promise((resolve) => {
+            release = (value) =>
+              resolve({
+                ...(value as object),
+                appliedQuery: args.query,
+              });
+          })
+        : command === "refresh_local_usage"
+          ? Promise.resolve({})
+          : normal(command, args),
+    );
+    const tick = timers.mock.calls.find(
+      (call) => call[1] === 30_000,
+    )![0] as () => void;
+    tick();
+    await waitFor(() => expect(release).toBeTypeOf("function"));
+    expect(screen.getAllByText("1.2K")[0]).toBeVisible();
+    expect(claude).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByText(/正在更新筛选结果/)).toBeNull();
+
+    await act(async () =>
+      release({
+        ...overview,
+        totals: { ...totals, totalTokens: 7200 },
+        queryFingerprint: "query",
+        snapshotVersion: "new",
+      }),
+    );
+    await waitFor(() => expect(screen.getAllByText("7.2K")[0]).toBeVisible());
+    expect(claude).toHaveAttribute("aria-pressed", "true");
+    expect(screen.queryByText(/正在更新筛选结果/)).toBeNull();
+  } finally {
+    timers.mockRestore();
+  }
+});
+
+it("publishes local statistics even when the parallel account refresh fails", async () => {
+  const normal = mocks.invoke.getMockImplementation()!;
+  let synced = false;
+  let failAccount!: (reason: Error) => void;
+  let fail = false;
+  mocks.invoke.mockImplementation((command: string, args: any) => {
+    if (command === "get_usage_capabilities")
+      return Promise.resolve({
+        queryVersion: 1,
+        localRefresh: true,
+        sources: [],
+      });
+    if (command === "get_usage_overview")
+      return Promise.resolve({
+        ...overview,
+        totals: { ...totals, totalTokens: synced ? 2400 : 1200 },
+        appliedQuery: args.query,
+        queryFingerprint: "fixture",
+        snapshotVersion: synced ? "new" : "old",
+      });
+    if (command === "sync_session_usage") {
+      synced = true;
+      return Promise.resolve({});
+    }
+    if (command === "ofox_get_spending" && fail)
+      return new Promise((_, reject) => {
+        failAccount = reject;
+      });
+    return normal(command, args);
+  });
+  render(<Page />);
+  await screen.findAllByText("1.2K");
+  mocks.invoke.mockClear();
+  fail = true;
+  fireEvent.click(screen.getByText("refresh-page"));
+  // A slow account endpoint must not delay local publication either.
+  await screen.findAllByText("2.4K");
+  await act(async () => failAccount(new Error("account endpoint offline")));
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "刷新本机数据" }),
+    ).toHaveAttribute("title", zh.usagePage.refreshFailed),
+  );
+  expect(
+    mocks.invoke.mock.calls.filter(
+      ([command]) => command === "get_usage_overview",
+    ),
+  ).toHaveLength(1);
+});

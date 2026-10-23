@@ -115,6 +115,7 @@ mod tests {
             source_observations: vec![],
             codex_native_ready: true,
             legacy_history_available: false,
+            tool_evidence: Default::default(),
             thread_usage_coverage: BTreeMap::new(),
         }
     }

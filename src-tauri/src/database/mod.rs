@@ -73,6 +73,12 @@ pub(crate) use lock_conn;
 /// rusqlite::Connection 本身不是 Sync 的，因此需要这层包装。
 pub struct Database {
     pub(crate) conn: Mutex<Connection>,
+    pub(crate) analytics_identity: std::sync::atomic::AtomicU64,
+}
+
+pub(crate) fn next_analytics_identity() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 fn register_db_change_hook(conn: &Connection) {
@@ -142,6 +148,7 @@ impl Database {
 
         let db = Self {
             conn: Mutex::new(conn),
+            analytics_identity: std::sync::atomic::AtomicU64::new(next_analytics_identity()),
         };
         db.create_tables()?;
 
@@ -200,6 +207,7 @@ impl Database {
 
         let db = Self {
             conn: Mutex::new(conn),
+            analytics_identity: std::sync::atomic::AtomicU64::new(next_analytics_identity()),
         };
         db.create_tables()?;
         db.ensure_model_pricing_seeded()?;

@@ -1,9 +1,8 @@
 //! Ofox 模型 pricing 同步
 //!
-//! 从 resolved apex 的公开 `/v1/models` 拉取完整 pricing，保存独立的
-//! current-ofox-base-v1 catalog，再兼容写入本地
-//! `model_pricing` 表，让 claude/codex/gemini 的会话日志成本估算与 Ofox
-//! 实际计费保持一致。
+//! 从 resolved apex 的公开 `/v1/models` 保存独立的 Ofox 价格目录，
+//! 并独立刷新厂商官方 API 标价，供已下架／缺少价格的型号回退。
+//! Ofox 价格仍兼容写入 `model_pricing` 表；本机估算不代表实际扣费。
 //!
 //! ## 为什么不复用 [`crate::services::model_fetch`]
 //!
@@ -127,15 +126,32 @@ impl From<OpenAiShapeModel> for Option<NormalizedModel> {
 
 /// 强制同步 Ofox pricing 到本地。失败时不更新 cooldown。
 ///
-/// **只打 `/v1/models`** 一个端点。该公开目录包含全部厂商模型和价格。
+/// Ofox **只打 `/v1/models`** 一个端点，取得当前公开的型号和价格。
+/// 厂商价格目录独立同步，用于不再出现在 Ofox 目录中的历史型号。
 /// `/anthropic/v1/models` 与 `/gemini/v1beta/models` 在某些
 /// 部署环境下需要 Bearer token 鉴权（401），且即使能拿到也只是
 /// `/v1/models` 的子集，没必要冒鉴权失败的风险去打。
 pub async fn sync_pricing(db: &Database) -> Result<PricingSyncResult, AppError> {
+    sync_pricing_inner(db, true).await
+}
+
+async fn sync_pricing_inner(
+    db: &Database,
+    force_official: bool,
+) -> Result<PricingSyncResult, AppError> {
     static SYNC: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _flight = SYNC.lock().await;
     let apex = crate::ofox_apex::current_apex();
-    let payload = super::ofox_pricing::fetch_payload(apex).await?;
+    let (payload, official) = tokio::join!(
+        super::ofox_pricing::fetch_payload(apex),
+        super::official_pricing::sync_if_needed(db, force_official),
+    );
+    if let Err(error) = official {
+        log::warn!(
+            "pricing_sync: manufacturer price refresh failed; retaining verified prices: {error}"
+        );
+    }
+    let payload = payload?;
     super::ofox_pricing::persist_payload(
         db,
         apex,
@@ -225,12 +241,17 @@ pub async fn sync_pricing_if_needed(db: &Database) -> Result<PricingSyncResult, 
         )?
     };
     if !recent.coverage.stale {
+        if let Err(error) = super::official_pricing::sync_if_needed(db, false).await {
+            log::warn!(
+                "pricing_sync: manufacturer price refresh failed; retaining verified prices: {error}"
+            );
+        }
         return Ok(PricingSyncResult {
             skipped: true,
             ..Default::default()
         });
     }
-    sync_pricing(db).await
+    sync_pricing_inner(db, false).await
 }
 
 // ─── 写库 ─────────────────────────────────────────────────────────────────

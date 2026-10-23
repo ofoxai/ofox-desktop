@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
-pub(crate) const VERSION: u8 = 3;
+pub(crate) const VERSION: u8 = 4;
 const MAX_SOURCE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_LINE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_STREAM_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -43,6 +43,8 @@ pub(crate) struct NativeSnapshot {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub record_hashes: Vec<String>,
     pub complete: bool,
+    #[serde(default)]
+    pub tools: super::session_analytics::interactions::CallScan,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -744,6 +746,33 @@ impl Parser {
                 } else {
                     snapshot.reasons.insert("invalidNativeUsage".into());
                 }
+            }
+            "response_item"
+                if matches!(
+                    p["type"].as_str(),
+                    Some(
+                        "function_call"
+                            | "custom_tool_call"
+                            | "local_shell_call"
+                            | "web_search_call"
+                            | "tool_search_call"
+                            | "image_generation_call"
+                    )
+                ) =>
+            {
+                let name = p["name"]
+                    .as_str()
+                    .or_else(|| p["type"].as_str())
+                    .unwrap_or("");
+                let args: Option<Value> = p["arguments"]
+                    .as_str()
+                    .and_then(|s| serde_json::from_str(s).ok());
+                snapshot.tools.record(
+                    p["call_id"].as_str().or_else(|| p["id"].as_str()),
+                    time,
+                    name,
+                    args.as_ref(),
+                );
             }
             "response_item" if p["type"] == "message" => {
                 let role = p["role"].as_str().unwrap_or("");
@@ -1904,6 +1933,34 @@ mod tests {
             }
             a
         })
+    }
+
+    #[test]
+    fn codex_native_tools_count_calls_not_results_and_keep_no_arguments() {
+        let call = line(
+            2,
+            "response_item",
+            json!({"type":"function_call","call_id":"call-1","name":"exec_command","arguments":"{\"cmd\":\"private-shell-command\"}"}),
+        );
+        let snapshot = parsed(vec![
+            meta("thread", "billing"),
+            turn(1, "t"),
+            call.clone(),
+            call,
+            line(
+                3,
+                "response_item",
+                json!({"type":"function_call_output","call_id":"call-1","output":"private-result"}),
+            ),
+        ]);
+        assert_eq!(snapshot.tools.records.len(), 1);
+        assert_eq!(
+            snapshot.tools.records.values().next().unwrap().name,
+            "exec_command"
+        );
+        assert!(!serde_json::to_string(&snapshot.tools)
+            .unwrap()
+            .contains("private"));
     }
 
     #[test]

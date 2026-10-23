@@ -248,6 +248,57 @@ fn session_analytics_api_dst_natural_days_hours_and_later_event_activity_reconci
             day.series[0].end_ms - day.series[0].start_ms,
             day_hours * HOUR
         );
+        let serialized = serde_json::to_value(&day).unwrap();
+        assert_eq!(serialized["trend"]["granularity"], "hour");
+        let hours = serialized["trend"]["series"].as_array().unwrap();
+        assert_eq!(hours.len() as i64, day_hours);
+        assert_eq!(hours.first().unwrap()["startMs"], start);
+        assert_eq!(hours.last().unwrap()["endMs"], end);
+        assert!(hours
+            .windows(2)
+            .all(|pair| pair[0]["endMs"] == pair[1]["startMs"]));
+        assert_eq!(
+            hours
+                .iter()
+                .map(|hour| hour["totalTokens"].as_u64().unwrap())
+                .sum::<u64>(),
+            day.totals.tokens.total_tokens
+        );
+        assert_eq!(
+            hours
+                .iter()
+                .map(|hour| hour["knownMessages"].as_u64().unwrap())
+                .sum::<u64>(),
+            4
+        );
+        assert_eq!(
+            hours
+                .iter()
+                .map(|hour| hour["knownActiveMs"].as_u64().unwrap())
+                .sum::<u64>(),
+            4 * MINUTE as u64
+        );
+        let before = hours
+            .iter()
+            .find(|hour| {
+                hour["startMs"].as_i64().unwrap() <= transition - MINUTE
+                    && hour["endMs"].as_i64().unwrap() > transition - MINUTE
+            })
+            .unwrap();
+        let after = hours
+            .iter()
+            .find(|hour| {
+                hour["startMs"].as_i64().unwrap() <= transition + MINUTE
+                    && hour["endMs"].as_i64().unwrap() > transition + MINUTE
+            })
+            .unwrap();
+        assert_ne!(
+            before["startMs"], after["startMs"],
+            "both occurrences of a repeated hour retain separate identities"
+        );
+        assert_eq!(before["knownActiveMs"], 0);
+        assert_eq!(after["knownActiveMs"], 2 * MINUTE);
+        assert_eq!(day.totals.active_days, Some(1));
         assert_eq!(active_cell(&day, 6, 0), 2 * MINUTE as u64);
         assert_eq!(active_cell(&day, 6, 23), 0);
         if before_hour == after_hour {

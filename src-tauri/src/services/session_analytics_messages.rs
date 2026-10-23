@@ -14,6 +14,8 @@ pub struct TranscriptFacts {
     pub is_main: bool,
     pub messages: BTreeMap<String, MessageFact>,
     pub reasons: BTreeSet<String>,
+    #[serde(default)]
+    pub tools: super::session_analytics::interactions::CallScan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +72,9 @@ impl TranscriptScan {
                 None => message.get("role").and_then(Value::as_str).unwrap_or(""),
                 _ => return Ok(()),
             };
+            if role == "assistant" {
+                self.facts.tools.blocks(message.get("content"), timestamp);
+            }
             if !matches!(role, "user" | "assistant") || !visible(message.get("content"), role) {
                 return Ok(());
             }
@@ -434,5 +439,22 @@ mod tests {
         assert!(!result.is_main);
         assert!(result.reasons.contains("sessionIdentityUnavailable"));
         assert_eq!(result.messages.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod tool_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn assistant_tool_only_blocks_are_counted_without_becoming_visible_messages() {
+        let mut scan = TranscriptScan::new("claude", "fixture", false).unwrap();
+        let row = json!({"type":"assistant","sessionId":"s","timestamp":1000,"message":{"id":"m","role":"assistant","content":[{"type":"tool_use","id":"call","name":"Skill","input":{"skill":"fizzy"}}]}});
+        scan.line(1, &row).unwrap();
+        scan.line(2, &row).unwrap();
+        let result = scan.finish();
+        assert!(result.messages.is_empty());
+        assert_eq!(result.tools.records.len(), 1);
+        assert_eq!(result.tools.records["call"].skill.as_deref(), Some("fizzy"));
     }
 }

@@ -13,6 +13,10 @@ use std::collections::BTreeSet;
 
 #[path = "session_analytics_advanced.rs"]
 pub mod advanced;
+#[path = "session_analytics_interactions.rs"]
+pub mod interactions;
+#[path = "session_analytics_trend.rs"]
+mod trend;
 use advanced::{CompactTop, Distribution, HourActivity, KnownMetrics, MetricCoverage};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +41,8 @@ pub struct SourceReason {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalyticsInput {
+    #[serde(default)]
+    pub tool_evidence: interactions::Evidence,
     pub snapshot_version: String,
     pub sessions: Vec<SessionDescriptor>,
     pub facts: Vec<UsageFact>,
@@ -231,6 +237,9 @@ pub struct SessionAnalytics {
     pub pricing_coverage: PricingCoverage,
     pub totals: SessionKpis,
     pub series: Vec<AnalyticsDay>,
+    /// Optional finer chart projection; daily series still owns natural-day KPIs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trend: Option<trend::AnalyticsTrend>,
     pub by_project: Vec<AnalyticsRank>,
     pub by_model: Vec<AnalyticsRank>,
     pub by_tool: Vec<AnalyticsRank>,
@@ -241,6 +250,7 @@ pub struct SessionAnalytics {
     pub options: SessionOptions,
     pub unassociated: UnassociatedUsage,
     pub sources: Vec<SourceHealth>,
+    pub interactions: interactions::Interactions,
     pub compact_top: CompactTop,
     pub known_metrics: Option<KnownMetrics>,
     pub metric_coverage: MetricCoverage,
@@ -374,6 +384,7 @@ struct NumericEstimate {
     amount: Option<Decimal>,
     partial: bool,
     unpriced_models: BTreeSet<String>,
+    official_models: BTreeSet<String>,
     unpriced_records: Option<u64>,
     additional_units: bool,
 }
@@ -383,6 +394,7 @@ impl Default for NumericEstimate {
             amount: None,
             partial: false,
             unpriced_models: BTreeSet::new(),
+            official_models: BTreeSet::new(),
             unpriced_records: Some(0),
             additional_units: false,
         }
@@ -421,6 +433,11 @@ impl NumericEstimate {
                 self.unpriced_models.insert(model.clone());
             }
         }
+        for model in &value.official_model_ids {
+            if !self.official_models.contains(model) {
+                self.official_models.insert(model.clone());
+            }
+        }
         Ok(())
     }
     fn value(&self) -> CostEstimate {
@@ -436,6 +453,7 @@ impl NumericEstimate {
             unpriced_model_ids: self.unpriced_models.iter().cloned().collect(),
             unpriced_record_count: self.unpriced_records,
             additional_units_unsupported: self.additional_units,
+            official_model_ids: self.official_models.iter().cloned().collect(),
         }
     }
 }
@@ -1056,6 +1074,7 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
     let mut unassociated = Sum::default();
     let mut daily: Vec<Sum> = days.iter().map(|_| Sum::default()).collect();
     let mut daily_sessions: Vec<BTreeSet<&str>> = days.iter().map(|_| BTreeSet::new()).collect();
+    let mut hourly_trend = trend::HourlyTrend::new(&query, days, tz)?;
     let mut project_sums: BTreeMap<&str, (Sum, BTreeSet<&str>)> = BTreeMap::new();
     let mut model_sums: BTreeMap<&str, (Sum, BTreeSet<&str>)> = BTreeMap::new();
     let mut tool_sums: BTreeMap<&str, (Sum, BTreeSet<&str>)> = BTreeMap::new();
@@ -1117,6 +1136,9 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
             .ok_or_else(|| invalid("missingUsageDayBoundary"))?;
         daily[day].add_prepared(fact, &contribution)?;
         daily_sessions[day].insert(root.key.as_str());
+        if let Some(trend) = &mut hourly_trend {
+            trend.add_fact(fact, root.key.as_str(), &contribution)?;
+        }
         if !fact.complete {
             reasons.insert("incompleteUsageFact".into());
         }
@@ -1240,6 +1262,15 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
             reasons: row_reasons,
         });
     }
+    let interactions = interactions::summarize(
+        input,
+        &cohort_rows,
+        &roots,
+        &query,
+        metric_reason,
+        unquantified_source_gaps,
+        tz,
+    );
     let top_sessions = cohort_rows.iter().take(TOP_LIMIT).cloned().collect();
     let compact_top = advanced::compact_top(&cohort_rows);
     let distributions = vec![
@@ -1375,6 +1406,24 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
         estimate.unpriced_record_count = None;
     }
     let pricing_coverage = catalog.coverage_for(&estimate);
+    let trend = hourly_trend
+        .map(|trend| {
+            trend.finish(trend::Metrics {
+                window: &filters.window,
+                messages: &messages,
+                runtime_events: &runtime_events,
+                native_mode,
+                cohort: &cohort,
+                message_eligible: &message_eligible,
+                activity: &activity,
+                known_activity: &known_activity,
+                messages_available,
+                activity_available,
+                known_messages: known_messages.is_some(),
+                known_active: known_active_ms.is_some(),
+            })
+        })
+        .transpose()?;
     let fingerprint = query.fingerprint()?;
     let mut hash = Sha256::new();
     let method_version = if input.codex_native_ready {
@@ -1413,6 +1462,7 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
     hash.update(
         serde_json::to_vec(&activity_by_hour).map_err(|_| invalid("invalidHourProjection"))?,
     );
+    hash.update(serde_json::to_vec(&trend).map_err(|_| invalid("invalidTrendProjection"))?);
     let source_ids: BTreeSet<_> = input
         .facts
         .iter()
@@ -1465,6 +1515,7 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
             activity_reason,
         },
         series,
+        trend,
         by_project: rank(project_sums, true)?,
         by_model: rank(model_sums, false)?,
         by_tool: rank(tool_sums, false)?,
@@ -1479,6 +1530,7 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
             tokens: unassociated.tokens()?,
         },
         sources,
+        interactions,
         compact_top,
         known_metrics,
         metric_coverage,
@@ -1513,9 +1565,13 @@ mod tests {
                     unpriced_model_ids: models.iter().map(|v| (*v).into()).collect(),
                     unpriced_record_count: count,
                     additional_units_unsupported: additional,
+                    official_model_ids: vec![],
                 }
             };
+        let mut official = estimate(Some("4"), "known", &[], Some(0), false);
+        official.official_model_ids = vec!["claude-opus-5-5".into()];
         let cases = [
+            vec![official.clone(), official],
             vec![estimate(Some("0"), "free", &[], Some(0), false)],
             vec![
                 estimate(None, "unknown", &["missing"], Some(1), false),
@@ -1647,6 +1703,7 @@ mod tests {
             source_observations: vec![],
             codex_native_ready: false,
             legacy_history_available: false,
+            tool_evidence: Default::default(),
             thread_usage_coverage: Default::default(),
             sessions: vec![],
             facts: vec![],
@@ -1687,6 +1744,245 @@ mod tests {
         }
     }
 
+    #[test]
+    fn analytics_today_trend_splits_all_metrics_by_hour_and_preserves_natural_days() {
+        let hour = 3_600_000;
+        let end = 2 * hour + 30_000;
+        let mut query = query();
+        query.end_ms = end;
+        let mut data = input();
+        data.codex_native_ready = true;
+        data.sessions.push(descriptor("s", Project::Unknown));
+        data.sources.push(health("codex", "codex_session", "ok"));
+        data.facts = vec![
+            fact("first", Some("s"), "m", 1_000, [10, 1, 20, 2]),
+            fact("second", Some("s"), "m", hour, [30, 3, 40, 4]),
+            fact("end-excluded", Some("s"), "m", end, [900, 900, 0, 0]),
+        ];
+        for (index, at_ms) in [hour - 10_000, hour + 10_000].into_iter().enumerate() {
+            data.messages.push(MessageEvent {
+                session_key: "s".into(),
+                native_id: format!("message-{index}"),
+                at_ms,
+                role: Role::User,
+                main: true,
+            });
+            data.native_activity
+                .push(native_event("s", &format!("runtime-{index}"), at_ms));
+        }
+        let db = Database::memory().unwrap();
+        let result = build_analysis(
+            query,
+            &data,
+            &catalog(&db),
+            &[DayBoundary {
+                date: "1970-01-01".into(),
+                start_ms: 0,
+                end_ms: 24 * hour,
+            }],
+        )
+        .unwrap();
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["trend"]["granularity"], "hour");
+        let series = value["trend"]["series"].as_array().unwrap();
+        assert_eq!(series.len(), 3);
+        assert_eq!(series[0]["startMs"], 0);
+        assert_eq!(series[1]["startMs"], hour);
+        assert_eq!(series[2]["endMs"], end);
+        assert_eq!(
+            series
+                .iter()
+                .map(|p| p["totalTokens"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            [11, 33, 0]
+        );
+        assert_eq!(
+            series
+                .iter()
+                .map(|p| p["messages"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            [1, 1, 0]
+        );
+        assert_eq!(
+            series
+                .iter()
+                .map(|p| p["activeMs"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            [0, 20_000, 0]
+        );
+        assert_eq!(
+            series
+                .iter()
+                .map(|p| p["sessionCount"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            [1, 1, 0]
+        );
+        assert_eq!(result.totals.active_days, Some(1));
+        assert_eq!(result.series.len(), 1);
+        assert_eq!(result.series[0].tokens.total_tokens, 44);
+        assert_eq!(result.series[0].active_ms, Some(20_000));
+    }
+
+    #[test]
+    fn analytics_hourly_trend_keeps_clipped_legacy_gaps_and_session_identity() {
+        let hour = 3_600_000;
+        let mut selected = query();
+        selected.start_ms = Some(hour - 5_000);
+        selected.end_ms = hour + 5_000;
+        let mut data = input();
+        data.sessions.push(descriptor("s", Project::Unknown));
+        data.sources.push(health("codex", "codex_session", "ok"));
+        for (index, at_ms) in [hour - 10_000, hour + 10_000].into_iter().enumerate() {
+            data.messages.push(MessageEvent {
+                session_key: "s".into(),
+                native_id: format!("legacy-{index}"),
+                at_ms,
+                role: Role::Assistant,
+                main: true,
+            });
+        }
+        let db = Database::memory().unwrap();
+        let result = build_analysis(
+            selected,
+            &data,
+            &catalog(&db),
+            &[DayBoundary {
+                date: "1970-01-01".into(),
+                start_ms: 0,
+                end_ms: 24 * hour,
+            }],
+        )
+        .unwrap();
+        let hours = &result.trend.as_ref().unwrap().series;
+        assert_eq!(
+            hours.iter().map(|hour| hour.active_ms).collect::<Vec<_>>(),
+            [Some(5_000), Some(5_000)]
+        );
+        assert_eq!(
+            hours.iter().map(|hour| hour.messages).collect::<Vec<_>>(),
+            [Some(0), Some(0)]
+        );
+        assert_eq!(
+            hours
+                .iter()
+                .map(|hour| hour.session_count)
+                .collect::<Vec<_>>(),
+            [1, 1]
+        );
+        assert_eq!(result.totals.session_count, 1);
+        assert_eq!(result.totals.active_days, Some(1));
+        assert_eq!(result.totals.active_ms, Some(10_000));
+    }
+
+    #[test]
+    fn analytics_hourly_trend_preserves_pricing_coverage_and_filter_unavailability() {
+        let db = Database::memory().unwrap();
+        let catalog = PriceCatalog::ingest_on(&db.conn.lock().unwrap(), "ofox.ai", &serde_json::json!({"data":[{"id":"m","pricing":{"prompt":"1","completion":"2","input_cache_read":"0","input_cache_write":"0"}}]}), 100_000).unwrap();
+        let mut data = native_input("codex", "codex_session");
+        data.facts[0].complete = false;
+        data.native_activity = vec![
+            native_event("s", "begin", 1_000),
+            native_event("s", "end", 61_000),
+        ];
+        let bounds = [DayBoundary {
+            date: "1970-01-01".into(),
+            start_ms: 0,
+            end_ms: 86_400_000,
+        }];
+        let result = build_analysis(query(), &data, &catalog, &bounds).unwrap();
+        let hour = &result.trend.as_ref().unwrap().series[0];
+        assert_eq!(hour.estimate, result.series[0].estimate);
+        assert_eq!(hour.estimate.availability, "partial");
+        assert_eq!(hour.estimate.unpriced_record_count, None);
+        assert!(hour.estimate.known_cost_usd.is_some());
+        let mut by_model = query();
+        by_model.model_ids = vec!["m".into()];
+        let filtered = build_analysis(by_model, &data, &catalog, &bounds).unwrap();
+        let hour = &filtered.trend.as_ref().unwrap().series[0];
+        assert_eq!(hour.tokens.total_tokens, result.totals.tokens.total_tokens);
+        assert_eq!(
+            (
+                hour.messages,
+                hour.active_ms,
+                hour.known_messages,
+                hour.known_active_ms
+            ),
+            (None, None, None, None)
+        );
+        let mut all = query();
+        all.start_ms = None;
+        assert!(build_analysis(all, &data, &catalog, &bounds)
+            .unwrap()
+            .trend
+            .is_none());
+        let mut multi_day = query();
+        multi_day.end_ms = 2 * 86_400_000;
+        assert!(build_analysis(
+            multi_day,
+            &data,
+            &catalog,
+            &[
+                bounds[0].clone(),
+                DayBoundary {
+                    date: "1970-01-02".into(),
+                    start_ms: 86_400_000,
+                    end_ms: 2 * 86_400_000
+                }
+            ]
+        )
+        .unwrap()
+        .trend
+        .is_none());
+    }
+
+    #[test]
+    fn analytics_hourly_trend_uses_local_hour_boundaries_with_quarter_hour_offsets() {
+        use chrono::{FixedOffset, TimeZone};
+        let tz = FixedOffset::east_opt(5 * 3_600 + 45 * 60).unwrap();
+        let start = tz
+            .with_ymd_and_hms(2026, 10, 23, 0, 0, 0)
+            .unwrap()
+            .timestamp_millis();
+        let mut selected = query();
+        selected.start_ms = Some(start);
+        selected.end_ms = start + 3_600_000 + 15_000;
+        let mut data = input();
+        data.sessions.push(descriptor("s", Project::Unknown));
+        data.facts = vec![fact(
+            "local-hour",
+            Some("s"),
+            "m",
+            start + 3_600_000,
+            [7, 2, 0, 0],
+        )];
+        let db = Database::memory().unwrap();
+        let result = build_analysis_in(
+            selected,
+            &data,
+            &catalog(&db),
+            &[DayBoundary {
+                date: "2026-10-23".into(),
+                start_ms: start,
+                end_ms: start + 86_400_000,
+            }],
+            &tz,
+        )
+        .unwrap();
+        let hours = &result.trend.as_ref().unwrap().series;
+        assert_eq!(hours.len(), 2);
+        assert_eq!(hours[0].start_ms, start);
+        assert_eq!(hours[1].start_ms, start + 3_600_000);
+        assert_eq!(hours[1].end_ms, start + 3_600_000 + 15_000);
+        assert_eq!(
+            hours
+                .iter()
+                .map(|hour| hour.tokens.total_tokens)
+                .collect::<Vec<_>>(),
+            [0, 9]
+        );
+        assert!(hours[0].date.ends_with("+05:45"));
+    }
+
     fn native_input(tool: &str, source: &str) -> AnalyticsInput {
         let mut data = input();
         data.codex_native_ready = true;
@@ -1714,6 +2010,111 @@ mod tests {
             });
         }
         data
+    }
+
+    #[test]
+    fn interaction_summaries_use_full_cohort_and_respect_window_and_attribution() {
+        let db = Database::memory().unwrap();
+        let mut data = input();
+        for i in 0..125 {
+            let sid = format!("session-{i}");
+            data.sessions.push(descriptor(&sid, Project::Unknown));
+            data.facts.push(fact(
+                &format!("usage-{i}"),
+                Some(&sid),
+                "m",
+                10_000,
+                [1, 1, 0, 0],
+            ));
+            data.messages.push(MessageEvent {
+                session_key: sid.clone(),
+                native_id: format!("prompt-{i}"),
+                at_ms: 1_000,
+                role: Role::User,
+                main: true,
+            });
+            let mut scan = interactions::CallScan::default();
+            scan.record(Some("tool-1"), Some(20_000), "Bash", None);
+            scan.record(Some("tool-2"), Some(100_000), "Read", None);
+            data.tool_evidence.attach(&sid, &scan);
+        }
+        let mut result = build_analysis(query(), &data, &catalog(&db), &days()).unwrap();
+        assert_eq!(result.top_sessions.len(), 100);
+        assert_eq!(result.interactions.tools.calls, 125);
+        assert_eq!(result.interactions.tools.sessions, 125);
+        assert_eq!(result.interactions.coverage.eligible_sessions, 125);
+        assert_eq!(result.interactions.autonomy.samples, 125);
+        assert_eq!(result.interactions.autonomy.counts[1], 125);
+        // A complete repeated replica is counted once, a conflicting one is excluded.
+        data.tool_evidence
+            .calls
+            .push(data.tool_evidence.calls[0].clone());
+        result = build_analysis(query(), &data, &catalog(&db), &days()).unwrap();
+        assert_eq!(result.interactions.tools.calls, 125);
+        data.tool_evidence.calls.last_mut().unwrap().call.name = "Write".into();
+        result = build_analysis(query(), &data, &catalog(&db), &days()).unwrap();
+        assert_eq!(result.interactions.tools.calls, 124);
+        assert_eq!(result.interactions.coverage.excluded_sessions, 1);
+        data.tool_evidence.calls.last_mut().unwrap().call.name = "Bash".into();
+        data.tool_evidence.calls.last_mut().unwrap().call.at_ms = -1;
+        result = build_analysis(query(), &data, &catalog(&db), &days()).unwrap();
+        assert_eq!(result.interactions.tools.calls, 124);
+        assert_eq!(result.interactions.coverage.excluded_sessions, 1);
+        let mut q = query();
+        q.model_ids = vec!["m".into()];
+        result = build_analysis(q, &data, &catalog(&db), &days()).unwrap();
+        assert_eq!(result.interactions.coverage.state, "unavailable");
+        assert_eq!(result.interactions.tools.calls, 0);
+        // A source without a tool parser is unknown, never a measured zero.
+        data.tool_evidence = Default::default();
+        result = build_analysis(query(), &data, &catalog(&db), &days()).unwrap();
+        assert_eq!(result.interactions.coverage.state, "unavailable");
+        assert_eq!(result.interactions.coverage.excluded_sessions, 125);
+    }
+
+    #[test]
+    fn interaction_weeks_follow_the_same_query_timezone_as_daily_activity() {
+        use chrono::TimeZone;
+        let db = Database::memory().unwrap();
+        let at = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 18, 16, 30, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        let mut data = input();
+        data.sessions.push(descriptor("s", Project::Unknown));
+        data.facts
+            .push(fact("usage", Some("s"), "m", at, [1, 1, 0, 0]));
+        data.messages.push(MessageEvent {
+            session_key: "s".into(),
+            native_id: "prompt".into(),
+            at_ms: at,
+            role: Role::User,
+            main: true,
+        });
+        let mut scan = interactions::CallScan::default();
+        scan.record(Some("call"), Some(at), "Bash", None);
+        data.tool_evidence.attach("s", &scan);
+        let mut q = query();
+        q.start_ms = Some(at - 3_600_000);
+        q.end_ms = at + 3_600_000;
+        let boundaries = [DayBoundary {
+            date: "2026-10-18".into(),
+            start_ms: at - 3_600_000,
+            end_ms: at + 3_600_000,
+        }];
+        let utc =
+            build_analysis_in(q.clone(), &data, &catalog(&db), &boundaries, &chrono::Utc).unwrap();
+        let shanghai = build_analysis_in(
+            q,
+            &data,
+            &catalog(&db),
+            &boundaries,
+            &chrono::FixedOffset::east_opt(8 * 3600).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(utc.interactions.tools.weeks[0].start, "2026-10-12");
+        assert_eq!(shanghai.interactions.tools.weeks[0].start, "2026-10-19");
     }
 
     #[test]

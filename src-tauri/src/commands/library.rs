@@ -2,6 +2,81 @@ use crate::{services::library, AppState};
 use serde_json::{json, Value};
 use tauri::State;
 
+/// Read-only presence discovery: never start login shells or agent processes.
+/// A preview still performs the full current installation/version validation.
+async fn list_discovery() -> std::collections::BTreeMap<String, crate::commands::InventoryEntry> {
+    #[allow(unused_mut)]
+    let mut found: std::collections::BTreeMap<_, _> = library::skill_targets::all()
+        .map(|target| {
+            let mut detected = library::skill_targets::detected_locally(target.id);
+            detected |= crate::commands::misc::locate_cli(target.id);
+            if ["codex", "workbuddy"].contains(&target.id) {
+                let names = if target.id == "codex" {
+                    vec!["Codex.app", "ChatGPT.app"]
+                } else {
+                    vec!["WorkBuddy.app"]
+                };
+                let home = crate::config::get_home_dir();
+                detected |= [
+                    home.join("Applications"),
+                    std::path::PathBuf::from("/Applications"),
+                ]
+                .iter()
+                .any(|dir| names.iter().any(|name| dir.join(name).is_dir()))
+                    && cfg!(all(target_os = "macos", not(test)));
+            }
+            (
+                target.id.to_owned(),
+                crate::commands::InventoryEntry {
+                    tool_id: target.id.to_owned(),
+                    status: if detected { "installed" } else { "unknown" }.into(),
+                    version: None,
+                    path: None,
+                    error: None,
+                    managed_copy: None,
+                },
+            )
+        })
+        .collect();
+    #[cfg(windows)]
+    {
+        // Preserve desktop-only Windows installations. These bounded native
+        // metadata readers run outside config_io; no CLI/version batch is started.
+        let need_codex = found
+            .get("codex")
+            .is_none_or(|entry| entry.status != "installed");
+        let need_workbuddy = found
+            .get("workbuddy")
+            .is_none_or(|entry| entry.status != "installed");
+        let (codex, workbuddy) = tokio::join!(
+            async {
+                if need_codex {
+                    crate::commands::misc::codex_desktop_app().await
+                } else {
+                    Ok(None)
+                }
+            },
+            async {
+                if need_workbuddy {
+                    crate::commands::misc::find_workbuddy_app().await
+                } else {
+                    Ok(None)
+                }
+            }
+        );
+        for (tool, result) in [("codex", codex), ("workbuddy", workbuddy)] {
+            if let Ok(Some(app)) = result {
+                if let Some(entry) = found.get_mut(tool) {
+                    entry.status = "installed".into();
+                    entry.version = app.version;
+                    entry.path = Some(app.path.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    found
+}
+
 async fn resource_discovery(
 ) -> Result<std::collections::BTreeMap<String, crate::commands::InventoryEntry>, String> {
     let tools = crate::commands::get_tool_versions(
@@ -23,30 +98,70 @@ async fn resource_discovery(
         })
         .collect())
 }
-/// Every agent that can take skills, keyed by target id: one whose CLI or app is
-/// installed (never under WSL), or whose own folder is on this machine.
-async fn skill_discovery(
+async fn extension_discovery(
 ) -> Result<std::collections::BTreeMap<String, crate::commands::InventoryEntry>, String> {
-    let targets = library::skill_targets::TARGETS;
-    let detected = crate::commands::get_tool_versions(
+    let tools = crate::commands::get_tool_versions(
         Some(
-            targets
+            library::extension_targets::CLIENTS
                 .iter()
-                .filter_map(|target| target.tool.map(str::to_owned))
+                .map(|id| (*id).to_owned())
                 .collect(),
         ),
         None,
         Some(false),
     )
     .await?;
-    let mut found: std::collections::BTreeMap<_, _> = detected
+    let mut found = tools
         .into_iter()
         .map(|tool| {
             let entry = tool.into_skill_inventory();
             (entry.tool_id.clone(), entry)
         })
         .collect();
-    for target in targets {
+    merge_extension_aliases(&mut found);
+    Ok(found)
+}
+/// MCP supports native desktop clients too. ChatGPT and Codex resolve to one target.
+async fn mcp_discovery(
+) -> Result<std::collections::BTreeMap<String, crate::commands::InventoryEntry>, String> {
+    let mut found = extension_discovery().await?;
+    for (tool, entry) in &mut found {
+        if entry.status == "installed" {
+            if let Some(reason) =
+                library::mcp_targets::version_reason(tool, entry.version.as_deref())
+            {
+                entry.status = "unsupported".into();
+                entry.error = Some(reason.into());
+            }
+        }
+    }
+    Ok(found)
+}
+/// A desktop-only ChatGPT installation supplies the shared Codex target.
+fn merge_extension_aliases(
+    found: &mut std::collections::BTreeMap<String, crate::commands::InventoryEntry>,
+) {
+    if found
+        .get("codex")
+        .is_none_or(|entry| entry.status != "installed")
+    {
+        if let Some(mut entry) = found
+            .remove("chatgpt")
+            .filter(|entry| entry.status == "installed")
+        {
+            entry.tool_id = library::extension_targets::canonical("chatgpt").into();
+            found.insert("codex".into(), entry);
+        }
+    }
+    found.remove("chatgpt");
+}
+/// Every agent that can take skills, keyed by target id: one whose CLI or app is
+/// installed (never under WSL), or whose own folder is on this machine.
+async fn skill_discovery(
+) -> Result<std::collections::BTreeMap<String, crate::commands::InventoryEntry>, String> {
+    let targets: Vec<_> = library::skill_targets::all().collect();
+    let mut found = list_discovery().await;
+    for target in &targets {
         let installed = found
             .get(target.id)
             .is_some_and(|entry: &crate::commands::InventoryEntry| entry.status == "installed")
@@ -94,7 +209,17 @@ fn verify_selected_tools(
             .get(tool)
             .is_none_or(|entry| entry.status != "installed")
         {
-            return Err("library.nativeCliRequired".into());
+            return Err(discovery
+                .get(tool)
+                .and_then(|entry| entry.error.clone())
+                .filter(|reason| reason.starts_with("library."))
+                .unwrap_or_else(|| {
+                    if kind == library::ResourceKind::Mcp {
+                        "library.nativeMcpClientRequired".into()
+                    } else {
+                        "library.nativeCliRequired".into()
+                    }
+                }));
         }
     }
     Ok(())
@@ -125,7 +250,7 @@ fn check_revision(
 #[tauri::command]
 pub async fn get_library_instructions(state: State<'_, AppState>) -> Result<Value, String> {
     crate::agent_env::ready().await;
-    let discovery = resource_discovery().await?;
+    let discovery = list_discovery().await;
     let _io = crate::config_io::lock();
     let snapshot = state.db.library_snapshot().map_err(|e| e.to_string())?;
     let paths = library::coordinator::native_instruction_paths().map_err(|e| e.to_string())?;
@@ -304,7 +429,7 @@ pub fn cancel_library_operation(
 #[tauri::command]
 pub async fn get_library_mcp(state: State<'_, AppState>) -> Result<Value, String> {
     crate::agent_env::ready().await;
-    let discovery = resource_discovery().await?;
+    let discovery = list_discovery().await;
     library_mcp_from_discovery(&state.db, &discovery)
 }
 
@@ -330,6 +455,16 @@ fn library_mcp_from_discovery(
         .iter()
         .map(|path| library::coordinator::physical_id(path).map_err(|error| error.to_string()))
         .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+    let native_errors: std::collections::BTreeMap<_, _> = paths
+        .iter()
+        .filter_map(|(tool, path)| {
+            let result = library::coordinator::read(path).and_then(|text| {
+                text.map(|text| library::mcp_codec::parse_native(&text, tool).map(|_| ()))
+                    .unwrap_or(Ok(()))
+            });
+            result.err().map(|error| (tool.clone(), error.to_string()))
+        })
+        .collect();
     let global_targets: Vec<_> = paths.iter().map(|(tool, path)| {
         let discovery_status = discovery.get(tool).map(|entry|entry.status.as_str()).unwrap_or("unknown");
         let available = library::coordinator::target_available(discovery_status, path);
@@ -337,7 +472,7 @@ fn library_mcp_from_discovery(
             "available":available,"discoveryStatus":discovery_status,
             "pathState":if path.exists(){"exists"}else if path.parent().is_some_and(|parent|parent.is_dir()){"missing"}else{"missingParent"},
             "readers":physical.iter().filter(|(_,id)|*id==&physical[tool]).map(|(tool,_)|tool.clone()).chain(opencode_readers.contains(&physical[tool]).then_some("opencode".to_string())).collect::<std::collections::BTreeSet<_>>(),
-            "disabledReason":(!available).then_some("library.nativeCliRequired")})
+            "disabledReason":native_errors.get(tool).cloned().or_else(||discovery.get(tool).and_then(|entry|entry.error.clone()).filter(|reason|reason.starts_with("library."))).or_else(||(!available).then_some("library.nativeMcpClientRequired".to_string()))})
     }).collect();
     let servers = db.get_all_mcp_servers().map_err(|e| e.to_string())?;
     let definitions:Vec<_>=servers.values().map(|server|{
@@ -354,7 +489,7 @@ fn library_mcp_from_discovery(
             let intact=intact&&scope;
             let current=receipt.is_some_and(|receipt|snapshot.definitions.mcp.get(&server.id).is_some_and(|m|m.revision==receipt.resource_revision&&m.hash==receipt.definition_hash));
             let status=match(desired,owns,intact,current){(_,true,false,_)=>"conflict",(true,true,true,true)=>"applied",(true,_,_,_)=>"pending",(false,true,_,_)=>"needsReview",(false,false,true,_)=>"shared",_=>"unassigned"};
-            let reason=library::mcp_codec::native_spec(tool,&server.server).err().map(|e|e.to_string());
+            let reason=native_errors.get(tool).cloned().or_else(||library::mcp_codec::native_server(tool,&server.id,&server.server).err().map(|e|e.to_string())).or_else(||discovery.get(tool).and_then(|entry|entry.error.clone()).filter(|reason|reason.starts_with("library.")));
             json!({"toolId":tool,"path":path.to_string_lossy(),"targetGroupId":physical[tool],"available":library::coordinator::target_available(discovery.get(tool).map(|entry|entry.status.as_str()).unwrap_or("unknown"),path),
             "discoveryStatus":discovery.get(tool).map(|entry|entry.status.as_str()).unwrap_or("unknown"),
             "pathState":if path.exists(){"exists"}else if path.parent().is_some_and(|parent|parent.is_dir()){"missing"}else{"missingParent"},"desired":desired,"applied":owns&&intact&&current,"status":status,"readers":physical.iter().filter(|(_,id)|*id==&physical[tool]).map(|(tool,_)|tool.clone()).chain(opencode_readers.contains(&physical[tool]).then_some("opencode".to_string())).collect::<std::collections::BTreeSet<_>>(),"disabledReason":reason})
@@ -400,7 +535,7 @@ pub async fn preview_library_mcp(
     expected_epoch: u64,
 ) -> Result<Value, String> {
     crate::agent_env::ready().await;
-    let discovery = resource_discovery().await?;
+    let discovery = mcp_discovery().await?;
     let _io = crate::config_io::lock();
     library::catalog::verify_epoch(&state.db, expected_epoch).map_err(|e| e.to_string())?;
     let snapshot = state.db.library_snapshot().map_err(|e| e.to_string())?;
@@ -559,8 +694,7 @@ pub async fn get_library_skills(state: State<'_, AppState>) -> Result<Value, Str
         .collect();
     operations.sort_by_key(|op| std::cmp::Reverse(op.created_at));
     let resolved = library::skill_resource::native_paths().unwrap_or_default();
-    let skill_targets: Vec<Value> = library::skill_targets::TARGETS
-        .iter()
+    let skill_targets: Vec<Value> = library::extension_targets::TARGETS.iter()
         .map(|target| {
             json!({"id":target.id,"label":target.label,"readsShared":target.reads_shared,
                 "detected":discovery.get(target.id).is_some_and(|entry| entry.status == "installed"),
@@ -571,6 +705,92 @@ pub async fn get_library_skills(state: State<'_, AppState>) -> Result<Value, Str
         json!({"epoch":snapshot.machine.epoch,"skills":skills,"skillTargets":skill_targets,"operations":operations.into_iter().take(20).map(library::operation_view).collect::<Vec<_>>()}),
     )
 }
+#[tauri::command]
+pub async fn preview_library_skill_distribution(
+    state: State<'_, AppState>,
+    resource_id: String,
+    tools: Vec<String>,
+    adopt_tools: Vec<String>,
+    expected_revision: u64,
+    expected_epoch: u64,
+) -> Result<Value, String> {
+    crate::agent_env::ready().await;
+    let discovery = skill_discovery().await?;
+    let _io = crate::config_io::lock();
+    library::catalog::verify_epoch(&state.db, expected_epoch).map_err(|e| e.to_string())?;
+    let snapshot = state.db.library_snapshot().map_err(|e| e.to_string())?;
+    check_revision(
+        &snapshot,
+        library::ResourceKind::Skills,
+        &resource_id,
+        Some(expected_revision),
+    )?;
+    verify_selected_tools(
+        &snapshot,
+        library::ResourceKind::Skills,
+        &resource_id,
+        &tools,
+        &discovery,
+    )?;
+    library::skill_resource::preview_append(&state.db, &resource_id, &tools, &adopt_tools)
+        .map(|op| library::operation_view(&op))
+        .map_err(|e| e.to_string())
+}
+
+/// Explicit choice to replace a personal copy; ordinary distribution still refuses it.
+#[tauri::command]
+pub async fn preview_library_skill_replacement(
+    state: State<'_, AppState>,
+    resource_id: String,
+    tool: String,
+    expected_revision: u64,
+    expected_epoch: u64,
+) -> Result<Value, String> {
+    crate::agent_env::ready().await;
+    let discovery = skill_discovery().await?;
+    let _io = crate::config_io::lock();
+    library::catalog::verify_epoch(&state.db, expected_epoch).map_err(|e| e.to_string())?;
+    let snapshot = state.db.library_snapshot().map_err(|e| e.to_string())?;
+    check_revision(
+        &snapshot,
+        library::ResourceKind::Skills,
+        &resource_id,
+        Some(expected_revision),
+    )?;
+    verify_selected_tools(
+        &snapshot,
+        library::ResourceKind::Skills,
+        &resource_id,
+        std::slice::from_ref(&tool),
+        &discovery,
+    )?;
+    library::skill_resource::preview_replacement(&state.db, &resource_id, &tool)
+        .map(|op| library::operation_view(&op))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn keep_library_skill_native(
+    state: State<'_, AppState>,
+    resource_id: String,
+    tool: String,
+    expected_revision: u64,
+    expected_epoch: u64,
+) -> Result<bool, String> {
+    let _io = crate::config_io::lock();
+    library::catalog::verify_epoch(&state.db, expected_epoch).map_err(|e| e.to_string())?;
+    let snapshot = state.db.library_snapshot().map_err(|e| e.to_string())?;
+    check_revision(
+        &snapshot,
+        library::ResourceKind::Skills,
+        &resource_id,
+        Some(expected_revision),
+    )?;
+    library::skill_resource::keep_native(&state.db, &resource_id, &tool)
+        .map(|()| true)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn preview_library_skills(
     state: State<'_, AppState>,
@@ -661,10 +881,17 @@ pub async fn import_library_skill_directory(
     source: String,
     directory: String,
     name: String,
+    expected_epoch: Option<u64>,
 ) -> Result<Value, String> {
     crate::agent_env::ready().await;
+    let _io = crate::config_io::lock();
+    if let Some(epoch) = expected_epoch {
+        library::catalog::verify_epoch(&state.db, epoch).map_err(|e| e.to_string())?;
+    }
     library::catalog::import_directory(&state.db, std::path::Path::new(&source), &directory, &name)
-        .map(|row| json!({"id":row.id}))
+        .and_then(|row| {
+            library::skill_resource::collection_receipt(&state.db, &row, expected_epoch)
+        })
         .map_err(|e| e.to_string())
 }
 #[tauri::command]
@@ -906,7 +1133,7 @@ pub async fn preview_library_mcp_adoption(
     expected_epoch: u64,
 ) -> Result<Value, String> {
     crate::agent_env::ready().await;
-    let discovery = resource_discovery().await?;
+    let discovery = mcp_discovery().await?;
     let _io = crate::config_io::lock();
     library::catalog::verify_epoch(&state.db, expected_epoch).map_err(|e| e.to_string())?;
     let snapshot = state.db.library_snapshot().map_err(|e| e.to_string())?;
@@ -1069,6 +1296,8 @@ pub async fn preview_library_batch(
     crate::agent_env::ready().await;
     let discovery = if kind == library::ResourceKind::Skills {
         skill_discovery().await?
+    } else if kind == library::ResourceKind::Mcp {
+        mcp_discovery().await?
     } else {
         resource_discovery().await?
     };
@@ -1376,7 +1605,7 @@ mod mcp_target_tests {
         let targets = view["targets"]
             .as_array()
             .expect("first MCP needs backend-proven targets before a resource exists");
-        assert_eq!(targets.len(), 5);
+        assert_eq!(targets.len(), library::mcp_targets::TOOLS.len());
         for target in targets {
             assert_eq!(target["available"], target["toolId"] == "claude");
             assert!(target["path"]

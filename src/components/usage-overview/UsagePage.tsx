@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { RefreshCw } from "lucide-react";
+import { ArrowRight, RefreshCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useShell, useShellRefresh } from "@/components/shell/ShellContext";
 import { useInteractionActive } from "@/components/ui/interaction-scope";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { DatePicker } from "@/components/ui/date-picker";
 import { MenuSelect } from "@/components/ui/menu-select";
 import { SegmentedControl, SegmentedNav } from "@/components/ui/segmented";
 import type { OfoxAccount } from "@/hooks/useOfoxAccount";
@@ -18,6 +18,7 @@ import {
 } from "@/hooks/useUsageVisibility";
 import { settingsApi } from "@/lib/api";
 import {
+  getUsageOverview,
   getSessionUsageAnalytics,
   getUsageCapabilities,
   type UsageOverview,
@@ -34,7 +35,7 @@ import {
   type WorkbenchPeriod,
 } from "@/lib/usageWorkbench";
 import { createUsageRefreshCoordinator } from "@/lib/usageRefresh";
-import { inToolOrder, TOOL_META } from "@/config/toolMeta";
+import { inToolOrder, TOOL_META, TOOL_ORDER } from "@/config/toolMeta";
 import {
   UNKNOWN_USAGE_PROJECT_ID,
   usageProjectLabel,
@@ -42,6 +43,7 @@ import {
 import type { SessionAnalytics } from "@/types/sessionAnalytics";
 import type { UsageFilterOptions, UsageQueryV1 } from "@/types/usageQuery";
 import { formatUsageEstimate } from "@/lib/usageEstimate";
+import { formatCalendarDate } from "@/lib/calendarDate";
 import { UsageFilterToolbar, type UsageFilterChip } from "./UsageFilterToolbar";
 import { BalanceTrendCard } from "./BalanceTrendCard";
 import { UsageKpis } from "./UsageKpis";
@@ -51,7 +53,6 @@ import { UsageFilterMenu } from "./UsageFilterMenu";
 import { UsageRequests } from "./UsageRequests";
 import { UsageSourceAlert } from "./UsageSourceAlert";
 import { UsageSessions } from "./UsageSessions";
-import { UsageRebuildStatus } from "./UsageRebuildStatus";
 
 const EMPTY: string[] = [];
 type Tab = "overview" | "requests" | "sessions";
@@ -63,7 +64,6 @@ export function UsagePage({
   boundTools?: string[];
 }) {
   const { t, i18n } = useTranslation();
-  const refreshButton = useRef<HTMLButtonElement>(null);
   const { apex } = useOfoxApex();
   const shell = useShell();
   const interactionActive = useInteractionActive();
@@ -250,6 +250,9 @@ export function UsagePage({
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
   const [rangeError, setRangeError] = useState(false);
+  const [refreshPhase, setRefreshPhase] = useState<
+    "sync" | "query" | "account" | null
+  >(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [interval, setIntervalValue] = useState(() => {
     const saved = Number(
@@ -291,11 +294,13 @@ export function UsagePage({
       !activeRef.current
     )
       return;
-    setRefreshError(null);
-    try {
-      await (includeAccount ? state.refresh() : state.refreshLocal());
+    if (includeAccount) setRefreshError(null);
+    setRefreshPhase("sync");
+    let publishedQuery: UsageQueryV1 | undefined;
+    const stage = async () => {
       if (!activeRef.current || refreshOwnerRef.current !== owner) return;
       if (owner.tab === "sessions" && owner.analysisSupported) {
+        setRefreshPhase("query");
         const nextAnchor = Date.now();
         const nextQuery = {
           ...owner.query,
@@ -309,12 +314,58 @@ export function UsagePage({
           ["sessionUsageAnalytics", owner.apex, nextQuery],
           next,
         );
+        publishedQuery = nextQuery;
         setAnchor(nextAnchor);
-      } else if (effectiveTab === "overview") setAnchor(Date.now());
+      } else if (owner.tab === "overview" && modern) {
+        setRefreshPhase("query");
+        const nextAnchor = Date.now();
+        const nextQuery = {
+          ...owner.query,
+          ...resolveWorkbenchRange(owner.range, nextAnchor),
+        };
+        const next = await getUsageOverview(
+          legacyPeriod(owner.range.period),
+          nextQuery,
+          owner.apex,
+        );
+        if (!activeRef.current || refreshOwnerRef.current !== owner) return;
+        queryClient.setQueryData(
+          [
+            "usageOverview",
+            owner.apex,
+            legacyPeriod(owner.range.period),
+            nextQuery,
+          ],
+          next,
+        );
+        publishedQuery = nextQuery;
+        setAnchor(nextAnchor);
+      }
+      if (includeAccount && owner.tab === "overview" && account.user)
+        setRefreshPhase("account");
+    };
+    try {
+      // Publish local success independently of account network completion.
+      if (includeAccount) await state.refresh(stage);
+      else {
+        await state.refreshLocal();
+        await stage();
+      }
     } catch (error) {
-      if (activeRef.current && refreshOwnerRef.current === owner)
+      if (
+        includeAccount &&
+        activeRef.current &&
+        (refreshOwnerRef.current === owner ||
+          (publishedQuery &&
+            owner.apex === refreshOwnerRef.current.apex &&
+            owner.tab === refreshOwnerRef.current.tab &&
+            JSON.stringify(publishedQuery) ===
+              JSON.stringify(refreshOwnerRef.current.query)))
+      )
         setRefreshError(String(error));
       throw error;
+    } finally {
+      setRefreshPhase(null);
     }
   };
   const coordinator =
@@ -354,6 +405,19 @@ export function UsagePage({
     setCustomOpen(false);
     setRangeError(false);
   };
+  const toggleCustomRange = () => {
+    if (!customOpen) {
+      const current = resolveWorkbenchRange(range, anchor);
+      setCustomStart(formatCalendarDate(new Date(current.startMs ?? anchor)));
+      setCustomEnd(
+        formatCalendarDate(
+          new Date(current.endMs - (range.period === "custom" ? 1 : 0)),
+        ),
+      );
+      setRangeError(false);
+    }
+    setCustomOpen((value) => !value);
+  };
   const open = (url: string) =>
     void settingsApi
       .openExternal(url)
@@ -364,24 +428,12 @@ export function UsagePage({
   );
   const unsupported =
     data?.unsupportedTools.filter((id) => boundUsageTools.includes(id)) ?? [];
-  const errors = (
-    effectiveTab === "sessions"
-      ? [analysis.error]
-      : effectiveTab === "overview"
-        ? [
-            state.overview.error,
-            state.balance.error,
-            state.trend.error,
-            state.spending.error,
-          ]
-        : []
-  ).filter(Boolean);
-  // Every bound tool gets a tab, even with no usage in the period.
+  // Usage filters describe local history, not the current Ofox bindings.
+  // Keep supported tools available even if the first statistics read fails.
+  // ChatGPT's Codex mode is accounted for under Codex.
   const toolIds = inToolOrder([
+    ...TOOL_ORDER.filter((id) => id !== "chatgpt"),
     ...options.toolIds,
-    ...boundUsageTools.filter(
-      (id) => TOOL_META[id] && !data?.unsupportedTools.includes(id),
-    ),
     ...(filters.toolIds ?? []),
   ]);
   const modelIds = [
@@ -472,6 +524,19 @@ export function UsagePage({
       `${t("usageWorkbench.modelsFilter")}: ${previous.modelIds.length ? previous.modelIds.join(", ") : t("usageFilters.allModels")}`,
       `${t("usageWorkbench.projectsFilter")}: ${previous.projectIds.length ? previous.projectIds.map((id) => usageProjectLabel(id, null, null, projectNames)).join(", ") : t("usageFilters.allProjects")}`,
     ].join(" · ");
+  const queryFetching =
+    effectiveTab === "sessions"
+      ? analysis.isFetching
+      : effectiveTab === "overview"
+        ? state.overview.isFetching
+        : false;
+  const refreshing = !!refreshPhase || queryFetching;
+  const resultQuery =
+    (effectiveTab === "sessions"
+      ? analysisDisplay?.appliedQuery
+      : effectiveTab === "overview"
+        ? data?.appliedQuery
+        : undefined) ?? displayedQuery;
   return (
     <div className="flex min-w-0 flex-col gap-3">
       <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
@@ -532,9 +597,12 @@ export function UsagePage({
             }))}
             onChange={(period) =>
               period === "custom"
-                ? setCustomOpen((value) => !value)
+                ? toggleCustomRange()
                 : chooseRange({ period })
             }
+            onReselect={(period) => {
+              if (period === "custom") toggleCustomRange();
+            }}
           />
           {effectiveTab === "overview" && (
             <span
@@ -568,20 +636,29 @@ export function UsagePage({
             }))}
           />
           <Button
-            ref={refreshButton}
             variant="ghost"
             className="h-[26px] w-[26px] p-0 text-ink-muted"
             aria-label={t("usageWorkbench.refresh")}
-            title={t("usageWorkbench.refresh")}
+            aria-busy={refreshing}
+            disabled={refreshing}
+            title={
+              refreshError
+                ? t("usagePage.refreshFailed")
+                : t("usageWorkbench.refresh")
+            }
             onClick={() => void manualRefresh().catch(() => undefined)}
           >
-            <RefreshCw aria-hidden className="h-3.5 w-3.5" />
+            <RefreshCw
+              aria-hidden
+              className={`h-3.5 w-3.5 ${refreshing ? "animate-spin motion-reduce:animate-none" : ""}`}
+            />
           </Button>
         </div>
       </div>
       {customOpen && (
         <form
-          className="flex flex-wrap items-end gap-2 rounded-card border border-line bg-card p-3"
+          aria-label={t("usagePage.periods.custom")}
+          className="flex w-fit max-w-full flex-wrap items-end gap-3 rounded-card border border-line bg-card p-3 shadow-sm"
           onSubmit={(event) => {
             event.preventDefault();
             const next: WorkbenchRange = {
@@ -597,25 +674,54 @@ export function UsagePage({
             }
           }}
         >
-          <label className="grid gap-1 text-note text-ink-muted">
-            {t("usageWorkbench.startDate")}
-            <Input
-              type="date"
+          <div className="w-[156px]">
+            <DatePicker
+              label={t("usageWorkbench.startDate")}
               value={customStart}
-              onChange={(event) => setCustomStart(event.target.value)}
+              onChange={(value) => {
+                setCustomStart(value);
+                setRangeError(false);
+              }}
+              rangeStart={customStart}
+              rangeEnd={customEnd}
+              invalid={rangeError}
+              describedBy={rangeError ? "usage-custom-date-error" : undefined}
             />
-          </label>
-          <label className="grid gap-1 text-note text-ink-muted">
-            {t("usageWorkbench.endDate")}
-            <Input
-              type="date"
+          </div>
+          <ArrowRight aria-hidden className="mb-2 h-3.5 w-3.5 text-ink-faint" />
+          <div className="w-[156px]">
+            <DatePicker
+              label={t("usageWorkbench.endDate")}
               value={customEnd}
-              onChange={(event) => setCustomEnd(event.target.value)}
+              onChange={(value) => {
+                setCustomEnd(value);
+                setRangeError(false);
+              }}
+              rangeStart={customStart}
+              rangeEnd={customEnd}
+              invalid={rangeError}
+              describedBy={rangeError ? "usage-custom-date-error" : undefined}
             />
-          </label>
-          <Button type="submit">{t("usageWorkbench.applyRange")}</Button>
+          </div>
+          <div className="flex gap-1.5">
+            <Button type="submit" className="h-8 px-3.5">
+              {t("usageWorkbench.applyRange")}
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              className="h-8"
+              onClick={() => setCustomOpen(false)}
+            >
+              {t("common.cancel")}
+            </Button>
+          </div>
           {rangeError && (
-            <p role="alert" className="w-full text-note text-warn">
+            <p
+              id="usage-custom-date-error"
+              role="alert"
+              className="w-full text-note text-warn"
+            >
               {t("usageWorkbench.invalidRange")}
             </p>
           )}
@@ -679,15 +785,30 @@ export function UsagePage({
           {t("usageSessions.projectsCleared")}
         </p>
       )}
+      {refreshError && (
+        <p role="alert" className="text-note text-warn">
+          {t("usagePage.refreshFailed")}
+        </p>
+      )}
+      {refreshing && effectiveTab !== "requests" && (
+        <p
+          role="status"
+          className="flex items-center gap-2 text-note text-ink-2"
+        >
+          <RefreshCw
+            aria-hidden
+            className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
+          />
+          {t(`usageWorkbench.refreshPhase.${refreshPhase ?? "query"}`)}
+        </p>
+      )}
       <p className="text-note text-ink-muted">
         {t("usageWorkbench.rangeSummary", {
           start:
-            displayedQuery.startMs == null
+            resultQuery.startMs == null
               ? t("usageWorkbench.beginning")
-              : new Date(displayedQuery.startMs).toLocaleDateString(
-                  i18n.language,
-                ),
-          end: new Date(displayedQuery.endMs - 1).toLocaleString(i18n.language),
+              : new Date(resultQuery.startMs).toLocaleDateString(i18n.language),
+          end: new Date(resultQuery.endMs - 1).toLocaleString(i18n.language),
           timezone,
         })}
       </p>
@@ -696,43 +817,18 @@ export function UsagePage({
           {t("usageWorkbench.oldBackend")}
         </p>
       )}
-      <UsageRebuildStatus
-        active={visible}
-        supported={!!capabilities.data?.nativeRebuild}
-        onDismiss={() => refreshButton.current?.focus()}
-      />
-      {(errors.length > 0 || refreshError) && (
-        <div
-          role="alert"
-          className="rounded-card border border-warn/30 bg-warn-soft px-3 py-2 text-sub text-warn"
-        >
-          {t("usagePage.refreshFailed")}
-          <details>
-            <summary>{t("usagePage.errorDetails")}</summary>
-            <pre className="whitespace-pre-wrap break-words text-note">
-              {refreshError || errors.map(String).join("\n")}
-            </pre>
-          </details>
-          <Button
-            variant="ghost"
-            onClick={() => void manualRefresh().catch(() => undefined)}
-          >
-            {t("common.retry")}
-          </Button>
-        </div>
-      )}
       <section
         id="usage-overview-panel"
         role="tabpanel"
         aria-label={t("usageWorkbench.overview")}
         hidden={effectiveTab !== "overview"}
         className="space-y-3"
-        aria-busy={state.overview.isFetching}
+        aria-busy={state.overview.isFetching || !!refreshPhase}
       >
         {!state.overview.data && data && (
           <p
             role="status"
-            className="rounded-lg border border-line bg-card px-3 py-2 text-note text-ink-muted"
+            className="rounded-lg border border-brand/25 bg-brand/5 px-3 py-2 text-note text-ink-2"
           >
             {t(
               state.overview.isError
@@ -915,12 +1011,12 @@ export function UsagePage({
           role="tabpanel"
           aria-label={t("usageSessions.title")}
           hidden={effectiveTab !== "sessions"}
-          aria-busy={analysis.isFetching}
+          aria-busy={analysis.isFetching || !!refreshPhase}
         >
           {!analysis.data && analysisDisplay && (
             <p
               role="status"
-              className="rounded-lg border border-line bg-card px-3 py-2 text-note text-ink-muted"
+              className="rounded-lg border border-brand/25 bg-brand/5 px-3 py-2 text-note text-ink-2"
             >
               {t(
                 analysis.isError

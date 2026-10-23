@@ -35,6 +35,7 @@ struct Scan {
     runtime_message_count: usize,
     reasons: BTreeSet<String>,
     bytes: usize,
+    tools: BTreeMap<String, super::session_analytics::interactions::CallScan>,
 }
 impl Scan {
     fn new() -> Self {
@@ -47,6 +48,7 @@ impl Scan {
             runtime_message_count: 0,
             reasons: BTreeSet::new(),
             bytes: 0,
+            tools: BTreeMap::new(),
         }
     }
     fn budget(&mut self, bytes: usize) -> Result<(), AppError> {
@@ -144,6 +146,27 @@ impl Scan {
         }
         value["id"] = json!(id);
         value["sessionID"] = json!(sid);
+        if value["role"] == "assistant" {
+            let scan = self.tools.entry(sid.into()).or_default();
+            if content.is_none() {
+                scan.incomplete = true;
+            }
+            for part in content
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|p| p["type"] == "tool")
+            {
+                let at = native_time(part.pointer("/state/time/start"))
+                    .or_else(|| native_time(value.pointer("/time/created")));
+                scan.record(
+                    part["callID"].as_str().or_else(|| part["id"].as_str()),
+                    at,
+                    part["tool"].as_str().unwrap_or(""),
+                    part.pointer("/state/input"),
+                );
+            }
+        }
         if !id.is_empty() && self.sessions.contains_key(sid) {
             let created_ms = native_time(value.pointer("/time/created"));
             let completed_ms = (value["role"] == "assistant")
@@ -286,7 +309,14 @@ impl Scan {
                 }
             }
         }
+        let mut tool_evidence = super::session_analytics::interactions::Evidence::default();
+        for (sid, descriptor) in &self.sessions {
+            let mut scan = self.tools.remove(sid).unwrap_or_default();
+            scan.incomplete |= !descriptor.messages_supported;
+            tool_evidence.attach(&descriptor.identity.key, &scan);
+        }
         ParsedSource {
+            tool_evidence,
             sessions: self.sessions.into_values().collect(),
             facts: self.facts,
             messages: self.messages,

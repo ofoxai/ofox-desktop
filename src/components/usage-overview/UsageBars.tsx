@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { MenuSelect } from "@/components/ui/menu-select";
 import { Button } from "@/components/ui/button";
@@ -6,6 +6,7 @@ import type {
   UsageGranularity,
   UsageSeriesPoint,
 } from "@/lib/api/usageOverview";
+import { trendAreas } from "@/lib/usageTrend";
 import { fmtTokens } from "@/lib/format";
 import { formatUsageEstimate } from "@/lib/usageEstimate";
 
@@ -75,13 +76,31 @@ export function UsageBars({
     setMetric(value);
     onMetricChange?.(value);
   };
-  const label = (start: number) =>
-    new Date(start).toLocaleString(
-      i18n.language,
-      overview.granularity === "hour"
-        ? { hour: "2-digit", minute: "2-digit" }
-        : { month: "short", day: "numeric" },
+  const labels = useMemo(() => {
+    const hourly = overview.granularity === "hour";
+    const options: Intl.DateTimeFormatOptions = hourly
+      ? { hour: "2-digit", minute: "2-digit" }
+      : { month: "short", day: "numeric" };
+    const values = overview.series.map((point) =>
+      new Date(point.start).toLocaleString(i18n.language, options),
     );
+    const counts = new Map<string, number>();
+    for (const value of values) counts.set(value, (counts.get(value) ?? 0) + 1);
+    return new Map(
+      overview.series.map((point, index) => [
+        point.start,
+        hourly && (counts.get(values[index]) ?? 0) > 1
+          ? new Date(point.start).toLocaleString(i18n.language, {
+              ...options,
+              month: "short",
+              day: "numeric",
+              timeZoneName: "shortOffset",
+            })
+          : values[index],
+      ]),
+    );
+  }, [overview.series, overview.granularity, i18n.language]);
+  const label = (start: number) => labels.get(start) ?? "";
   const value = (point: TrendPoint): number | null =>
     metric === "tokens"
       ? point.inputTokens + point.outputTokens
@@ -116,6 +135,16 @@ export function UsageBars({
         : `${value(point)?.toLocaleString(i18n.language) ?? "—"} ${t(`usageWorkbench.${metric}`)}`;
   const max =
     Math.max(0, ...overview.series.map((point) => value(point) ?? 0)) || 1;
+  const continuous = overview.series.length > 31;
+  const areas = continuous
+    ? trendAreas(
+        overview.series.map(value),
+        overview.series.map((point) =>
+          metric === "tokens" ? point.inputTokens : 0,
+        ),
+        max,
+      )
+    : [];
   const current =
     overview.series[Math.min(selected, overview.series.length - 1)];
   return (
@@ -125,7 +154,11 @@ export function UsageBars({
       {analysis && (
         <div className="mb-2 flex min-w-0 flex-wrap items-center justify-between gap-2">
           <h2 className="text-note font-medium text-ink-muted">
-            {t("usageExperience.dailyTrend")}
+            {t(
+              overview.granularity === "hour"
+                ? "usageExperience.hourlyTrend"
+                : "usageExperience.dailyTrend",
+            )}
           </h2>
           <div
             role="tablist"
@@ -214,7 +247,7 @@ export function UsageBars({
               t(`usageWorkbench.${metric}`)
             )}
           </div>
-          <span className="text-note text-ink-faint">
+          <span className="text-note text-ink-muted">
             {t(`usageWorkbench.granularity.${overview.granularity}`)}
           </span>
           <MenuSelect<Metric>
@@ -240,7 +273,7 @@ export function UsageBars({
         </div>
       )}
       {analysis && (
-        <p className="mb-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-micro text-ink-faint">
+        <p className="mb-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-micro text-ink-muted">
           {metric === "tokens" && (
             <>
               <span>
@@ -265,12 +298,12 @@ export function UsageBars({
             id={analysis ? chartId : undefined}
             role={analysis ? "tabpanel" : undefined}
             aria-labelledby={analysis ? `${chartId}-${metric}` : undefined}
-            className={`grid min-w-0 grid-cols-[44px_minmax(0,1fr)] gap-2 ${analysis ? "h-[132px]" : "h-[205px]"}`}
+            className={`grid min-w-0 grid-cols-[44px_minmax(0,1fr)] gap-2 ${analysis ? "h-[190px]" : "h-[205px]"}`}
             aria-label={t("usagePage.chart")}
           >
             <div
               aria-hidden
-              className="flex flex-col justify-between pb-5 text-right text-micro tabular-nums text-ink-faint"
+              className="flex flex-col justify-between pb-5 text-right text-micro tabular-nums text-ink-muted"
             >
               <span>
                 {metric === "cost" ? `$${max.toPrecision(2)}` : fmtTokens(max)}
@@ -282,78 +315,131 @@ export function UsageBars({
               </span>
               <span>0</span>
             </div>
-            <div className="flex min-w-0 items-end gap-px border-b border-line-2 pb-5">
-              {overview.series.map((point, index) => {
-                const amount = value(point);
-                return (
-                  <button
-                    key={point.start}
-                    type="button"
-                    ref={(node) => {
-                      refs.current[index] = node;
-                    }}
-                    tabIndex={
-                      index === Math.min(selected, overview.series.length - 1)
-                        ? 0
-                        : -1
-                    }
-                    aria-label={`${label(point.start)} · ${formatted(point)}`}
-                    title={`${label(point.start)} · ${formatted(point)}`}
-                    className="relative flex h-full min-w-0 flex-1 items-end justify-center rounded-sm px-px outline-none hover:bg-pill focus-visible:ring-2 focus-visible:ring-brand/60"
-                    onFocus={() => setSelected(index)}
-                    onClick={() => setSelected(index)}
-                    onKeyDown={(event) => {
-                      const next =
-                        event.key === "ArrowRight"
-                          ? (index + 1) % overview.series.length
-                          : event.key === "ArrowLeft"
-                            ? (index - 1 + overview.series.length) %
-                              overview.series.length
-                            : event.key === "Home"
-                              ? 0
-                              : event.key === "End"
-                                ? overview.series.length - 1
-                                : undefined;
-                      if (next !== undefined) {
-                        event.preventDefault();
-                        refs.current[next]?.focus();
+            <div className="relative min-w-0 border-b border-line-2 pb-5">
+              <div
+                aria-hidden
+                className="pointer-events-none absolute inset-x-0 bottom-5 top-0 flex flex-col justify-between"
+              >
+                {[0, 1, 2].map((line) => (
+                  <span
+                    key={line}
+                    className="border-t border-dashed border-line/70"
+                  />
+                ))}
+              </div>
+              {continuous && (
+                <svg
+                  aria-hidden
+                  viewBox="0 0 1000 200"
+                  preserveAspectRatio="none"
+                  className="pointer-events-none absolute inset-x-0 bottom-5 top-0 h-[calc(100%-20px)] w-full overflow-visible"
+                >
+                  {areas.map((area, index) => (
+                    <g key={index}>
+                      <path d={area.lower} className="fill-brand/30" />
+                      <path d={area.upper} className="fill-brand/70" />
+                      {area.point && (
+                        <circle
+                          cx={area.point.x}
+                          cy={area.point.y}
+                          r="2.5"
+                          className="fill-brand"
+                        />
+                      )}
+                      <path
+                        d={area.line}
+                        className="fill-none stroke-brand"
+                        vectorEffect="non-scaling-stroke"
+                        strokeWidth="1.5"
+                      />
+                    </g>
+                  ))}
+                </svg>
+              )}
+              <div
+                className={`relative flex h-full min-w-0 items-end ${continuous ? "" : "gap-[clamp(2px,1.1vw,12px)]"}`}
+              >
+                {overview.series.map((point, index) => {
+                  const amount = value(point);
+                  return (
+                    <button
+                      key={point.start}
+                      type="button"
+                      ref={(node) => {
+                        refs.current[index] = node;
+                      }}
+                      tabIndex={
+                        index === Math.min(selected, overview.series.length - 1)
+                          ? 0
+                          : -1
                       }
-                    }}
-                  >
-                    {amount == null ? (
-                      <span className="text-micro text-ink-faint">—</span>
-                    ) : (
-                      <span
-                        aria-hidden
-                        className="flex w-full max-w-[28px] flex-col-reverse overflow-hidden rounded-t-sm bg-brand/75"
-                        style={{
-                          height: `${Math.max(0, amount / max) * 100}%`,
-                        }}
-                      >
-                        {metric === "tokens" && amount > 0 ? (
-                          <>
-                            <span
-                              className="bg-brand/30"
-                              style={{
-                                height: `${(point.inputTokens / amount) * 100}%`,
-                              }}
-                            />
-                            <span
-                              className="bg-brand/90"
-                              style={{
-                                height: `${(point.outputTokens / amount) * 100}%`,
-                              }}
-                            />
-                          </>
-                        ) : null}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
+                      aria-label={`${label(point.start)} · ${formatted(point)}`}
+                      title={`${label(point.start)} · ${formatted(point)}`}
+                      className={`relative flex h-full min-w-0 flex-1 items-end justify-center rounded-sm outline-none hover:bg-brand/5 focus-visible:ring-2 focus-visible:ring-brand/60 ${continuous ? "" : "px-1"}`}
+                      onFocus={() => setSelected(index)}
+                      onMouseEnter={() => setSelected(index)}
+                      onClick={() => setSelected(index)}
+                      onKeyDown={(event) => {
+                        const next =
+                          event.key === "ArrowRight"
+                            ? (index + 1) % overview.series.length
+                            : event.key === "ArrowLeft"
+                              ? (index - 1 + overview.series.length) %
+                                overview.series.length
+                              : event.key === "Home"
+                                ? 0
+                                : event.key === "End"
+                                  ? overview.series.length - 1
+                                  : undefined;
+                        if (next !== undefined) {
+                          event.preventDefault();
+                          refs.current[next]?.focus();
+                        }
+                      }}
+                    >
+                      {continuous ? (
+                        index ===
+                          Math.min(selected, overview.series.length - 1) && (
+                          <span
+                            aria-hidden
+                            className="pointer-events-none absolute inset-y-0 left-1/2 border-l border-brand/40"
+                          />
+                        )
+                      ) : amount == null ? (
+                        <span className="text-micro text-ink-muted">—</span>
+                      ) : (
+                        <span
+                          aria-hidden
+                          className="flex w-full max-w-[144px] flex-col-reverse overflow-hidden rounded-t-md bg-brand/75"
+                          style={{
+                            height: `${Math.max(0, amount / max) * 100}%`,
+                          }}
+                        >
+                          {metric === "tokens" && amount > 0 ? (
+                            <>
+                              <span
+                                className="bg-brand/30"
+                                style={{
+                                  height: `${(point.inputTokens / amount) * 100}%`,
+                                }}
+                              />
+                              <span
+                                className="bg-brand/90"
+                                style={{
+                                  height: `${(point.outputTokens / amount) * 100}%`,
+                                }}
+                              />
+                            </>
+                          ) : null}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </div>
-          <div className="mt-1 flex justify-between text-micro text-ink-faint">
+          <div className="mt-1 flex justify-between text-micro text-ink-muted">
             <span>
               {overview.series[0] ? label(overview.series[0].start) : ""}
             </span>
@@ -365,7 +451,6 @@ export function UsageBars({
           </div>
           {current && (
             <p
-              aria-live="polite"
               className={`${analysis ? "mt-1 text-micro" : "mt-2 text-note"} tabular-nums text-ink-muted`}
             >
               {label(current.start)} · {formatted(current)}

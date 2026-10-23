@@ -185,6 +185,19 @@ pub(crate) fn read_workbuddy(path: &Path) -> Result<WorkBuddyRead, AppError> {
                     .checked_add(1)
                     .ok_or_else(|| invalid("eventBudgetExceeded"))?;
             }
+            if value["type"] == "function_call" {
+                let args = value["arguments"]
+                    .as_str()
+                    .and_then(|s| serde_json::from_str::<Value>(s).ok());
+                analytics.tools.record(
+                    value["call_id"].as_str().or_else(|| value["id"].as_str()),
+                    at_ms,
+                    value["name"].as_str().unwrap_or(""),
+                    args.as_ref(),
+                );
+            } else if value["type"] == "message" && value["role"] == "assistant" {
+                analytics.tools.blocks(value.get("content"), at_ms);
+            }
             match value.get("type").and_then(Value::as_str) {
                 Some("custom-title") => {
                     if let Some(t) = value

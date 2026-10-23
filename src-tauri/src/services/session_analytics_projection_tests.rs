@@ -216,6 +216,9 @@ fn analytics_projection_external_connection_updates_and_different_databases_neve
         .unwrap();
     let db = Database {
         conn: std::sync::Mutex::new(Connection::open(&path).unwrap()),
+        analytics_identity: std::sync::atomic::AtomicU64::new(
+            crate::database::next_analytics_identity(),
+        ),
     };
     let old = run(&db, &cache);
     let external = Connection::open(&path).unwrap();
@@ -404,4 +407,145 @@ fn analytics_projection_prices_apex_and_freshness_are_reloaded_without_redecodin
     let corrupt = query_with_cache(&db, selected(), "ofox.io", NOW, &chrono::Utc, &cache).unwrap();
     assert!(corrupt.totals.estimate.known_cost_usd.is_none());
     assert_eq!(corrupt.pricing_coverage.catalog_state, "invalid");
+}
+
+#[test]
+fn unchanged_managed_database_does_not_copy_raw_history_on_filter_change() {
+    let (db, cache) = fixture();
+    run(&db, &cache);
+    reset_query_decode_count();
+    let mut next = selected();
+    next.start_ms = Some(NOW - 3_600_000);
+    let answer = query_with_cache(&db, next, "ofox.ai", NOW, &chrono::Utc, &cache).unwrap();
+    assert_eq!(answer.totals.tokens.input_tokens, 3);
+    assert_eq!(
+        super::super::session_analytics_index::query_raw_bytes(),
+        0,
+        "a verified unchanged SQLite snapshot must not copy every source JSON again"
+    );
+}
+
+#[test]
+#[ignore = "manual warm-filter read benchmark; synthetic 32 MiB cache"]
+fn managed_projection_warm_read_benchmark() {
+    let (db, cache) = fixture();
+    let conn = db.conn.lock().unwrap();
+    for i in 0..256 {
+        seed(&conn, &format!("bench-{i}"), 3);
+    }
+    conn.execute(
+        "UPDATE session_meta_cache SET meta_json=json_set(meta_json,'$.padding',?1)",
+        ["x".repeat(128 * 1024)],
+    )
+    .unwrap();
+    drop(conn);
+    run(&db, &cache);
+    let mut conn = db.conn.lock().unwrap();
+    let tx = conn.transaction().unwrap();
+    let start = std::time::Instant::now();
+    cache.read_on(&tx).unwrap();
+    let full = start.elapsed();
+    reset_query_decode_count();
+    let start = std::time::Instant::now();
+    cache.read_managed_on(&db, &tx).unwrap();
+    let fast = start.elapsed();
+    assert_eq!(super::super::session_analytics_index::query_raw_bytes(), 0);
+    eprintln!("synthetic 32 MiB warm projection: full validation {full:?}, unchanged SQLite observation {fast:?}");
+}
+
+#[test]
+fn managed_projection_does_not_publish_uncommitted_input_after_rollback() {
+    let (db, cache) = fixture();
+    run(&db, &cache);
+    {
+        let mut conn = db.conn.lock().unwrap();
+        let tx = conn.transaction().unwrap();
+        change_raw(&tx, |v| {
+            v["parts"]["analytics"]["value"]["facts"][0]["buckets"][0] = json!(99)
+        });
+        let dirty = cache.read_managed_on(&db, &tx).unwrap();
+        assert_eq!(dirty.facts[0].buckets[0], 99);
+        tx.rollback().unwrap();
+    }
+    assert_eq!(run(&db, &cache).totals.tokens.total_tokens, 5);
+}
+
+#[test]
+fn managed_projection_pins_wal_snapshot_and_observes_the_next_external_commit() {
+    let (original, cache) = fixture();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("wal.sqlite");
+    original
+        .conn
+        .lock()
+        .unwrap()
+        .execute("VACUUM INTO ?1", [path.to_str().unwrap()])
+        .unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("PRAGMA journal_mode=WAL").unwrap();
+    let db = Database {
+        conn: std::sync::Mutex::new(conn),
+        analytics_identity: std::sync::atomic::AtomicU64::new(
+            crate::database::next_analytics_identity(),
+        ),
+    };
+    run(&db, &cache);
+    {
+        let mut conn = db.conn.lock().unwrap();
+        let tx = conn.transaction().unwrap();
+        let before = cache.read_managed_on(&db, &tx).unwrap();
+        let external = Connection::open(&path).unwrap();
+        change_raw(&external, |v| {
+            v["parts"]["analytics"]["value"]["facts"][0]["buckets"][0] = json!(17)
+        });
+        assert!(std::sync::Arc::ptr_eq(
+            &before,
+            &cache.read_managed_on(&db, &tx).unwrap()
+        ));
+        tx.commit().unwrap();
+    }
+    assert_eq!(run(&db, &cache).totals.tokens.total_tokens, 19);
+}
+
+#[test]
+#[serial_test::serial]
+fn managed_projection_revalidates_after_sql_import_and_backup_restore() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::init().unwrap();
+    {
+        let conn = db.conn.lock().unwrap();
+        seed(&conn, "source", 3);
+        ready(&conn);
+    }
+    let cache = ProjectionCache::default();
+    let other = Database::memory().unwrap();
+    other.conn.lock().unwrap().execute("INSERT INTO providers(id,app_type,name,settings_config,meta) VALUES ('fixture','claude','Fixture','{}','{}')", []).unwrap();
+    run(&db, &cache);
+    let before = db
+        .analytics_identity
+        .load(std::sync::atomic::Ordering::Relaxed);
+    db.import_sql_string(&other.export_sql_string().unwrap())
+        .unwrap();
+    assert_ne!(
+        before,
+        db.analytics_identity
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+    reset_query_decode_count();
+    run(&db, &cache);
+    assert!(super::super::session_analytics_index::query_raw_bytes() > 0);
+    let backup = db.backup_database_file().unwrap().unwrap();
+    let before = db
+        .analytics_identity
+        .load(std::sync::atomic::Ordering::Relaxed);
+    db.restore_from_backup(backup.file_name().unwrap().to_str().unwrap())
+        .unwrap();
+    assert_ne!(
+        before,
+        db.analytics_identity
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
+    reset_query_decode_count();
+    run(&db, &cache);
+    assert!(super::super::session_analytics_index::query_raw_bytes() > 0);
 }

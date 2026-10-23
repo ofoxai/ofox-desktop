@@ -61,15 +61,20 @@ export function SessionUsageSummary({
         -
       </span>
     );
-  const costHint = t(
-    state === "unpriced"
-      ? "sessionCenter.unpricedDetails"
-      : state === "partial"
-        ? "sessionCenter.partialCostDetails"
-        : display
-          ? "sessionCenter.nativeThreadEstimate"
-          : "sessionCenter.estimated",
-  );
+  const costHint = [
+    t(
+      state === "unpriced"
+        ? "sessionCenter.unpricedDetails"
+        : state === "partial"
+          ? "sessionCenter.partialCostDetails"
+          : display
+            ? "sessionCenter.nativeThreadEstimate"
+            : "sessionCenter.estimated",
+    ),
+    ...(display?.estimate?.officialModelIds?.length
+      ? [t("usageWorkbench.officialPriceSource")]
+      : []),
+  ].join(" · ");
   // fresh input and output; what was read from the cache is said apart
   const split = [
     t("sessionCenter.tokenLine", {

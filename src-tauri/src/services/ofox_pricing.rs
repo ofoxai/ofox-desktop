@@ -1,4 +1,5 @@
-//! Current OFox base-token estimates, independent of saved request amounts.
+//! Current API base-token estimates: Ofox first, manufacturer list prices as
+//! fallback, independent of saved request amounts.
 //! The old model_pricing table mixes seeds, custom edits and downloaded prices;
 //! it is deliberately not used as evidence for this catalog.
 use crate::{database::Database, error::AppError};
@@ -21,6 +22,8 @@ pub struct CostEstimate {
     pub unpriced_model_ids: Vec<String>,
     pub unpriced_record_count: Option<u64>,
     pub additional_units_unsupported: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub official_model_ids: Vec<String>,
 }
 impl Default for CostEstimate {
     fn default() -> Self {
@@ -30,6 +33,7 @@ impl Default for CostEstimate {
             unpriced_model_ids: vec![],
             unpriced_record_count: Some(0),
             additional_units_unsupported: false,
+            official_model_ids: vec![],
         }
     }
 }
@@ -79,6 +83,10 @@ impl CostEstimate {
         self.unpriced_model_ids.sort();
         self.unpriced_model_ids.dedup();
         self.unpriced_record_count = count;
+        self.official_model_ids
+            .extend(other.official_model_ids.iter().cloned());
+        self.official_model_ids.sort();
+        self.official_model_ids.dedup();
         self.additional_units_unsupported |= other.additional_units_unsupported;
         self.availability = match self.known_cost_usd.as_deref() {
             None => "unknown",
@@ -105,13 +113,26 @@ pub struct PricingCoverage {
     pub unpriced_model_ids: Vec<String>,
     pub unpriced_record_count: Option<u64>,
     pub additional_units_unsupported: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub official_model_ids: Vec<String>,
+    pub official_catalog_version: Option<String>,
+    pub official_catalog_updated_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ModelRate {
-    rates: [Option<String>; 4],
-    additional_units: BTreeMap<String, Option<String>>,
+pub(super) struct ModelRate {
+    pub rates: [Option<String>; 4],
+    pub additional_units: BTreeMap<String, Option<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_tiers: Vec<ContextTier>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ContextTier {
+    pub above_tokens: u64,
+    pub rates: [Option<String>; 4],
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -128,6 +149,7 @@ struct CatalogSnapshot {
 #[derive(Debug, Clone)]
 pub struct PriceCatalog {
     snapshot: Option<CatalogSnapshot>,
+    official: super::official_pricing::OfficialCatalog,
     pub coverage: PricingCoverage,
 }
 
@@ -207,6 +229,7 @@ impl PriceCatalog {
                 }
             }
         };
+        let official = super::official_pricing::OfficialCatalog::load_on(conn)?;
         let coverage = PricingCoverage {
             policy: POLICY.into(),
             apex: apex.into(),
@@ -220,8 +243,15 @@ impl PriceCatalog {
             unpriced_model_ids: vec![],
             unpriced_record_count: Some(0),
             additional_units_unsupported: false,
+            official_model_ids: vec![],
+            official_catalog_version: Some(official.content_hash.clone()),
+            official_catalog_updated_at_ms: Some(official.fetched_at_ms),
         };
-        Ok(Self { snapshot, coverage })
+        Ok(Self {
+            snapshot,
+            official,
+            coverage,
+        })
     }
 
     pub fn ingest_on(
@@ -246,6 +276,15 @@ impl PriceCatalog {
         let mut models = BTreeMap::new();
         let mut claims: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for row in rows {
+            if row.get("enabled").and_then(Value::as_bool) == Some(false)
+                || row.get("disabled").and_then(Value::as_bool) == Some(true)
+                || matches!(
+                    row.get("status").and_then(Value::as_str),
+                    Some("disabled" | "retired" | "unavailable")
+                )
+            {
+                continue;
+            }
             let id = row
                 .get("id")
                 .and_then(Value::as_str)
@@ -297,6 +336,7 @@ impl PriceCatalog {
                 ModelRate {
                     rates,
                     additional_units,
+                    context_tiers: vec![],
                 },
             );
             let mut keys = vec![id.to_owned()];
@@ -369,7 +409,7 @@ impl PriceCatalog {
         hour_writes: u64,
         records: Option<u64>,
     ) -> CostEstimate {
-        let resolved = self.snapshot.as_ref().and_then(|s| {
+        let ofox = self.snapshot.as_ref().and_then(|s| {
             let rate = |name: &str| {
                 s.aliases
                     .get(name)
@@ -378,16 +418,82 @@ impl PriceCatalog {
             };
             rate(model).or_else(|| priced_as(model).and_then(rate))
         });
+        let official = self
+            .official
+            .resolve(model)
+            .or_else(|| priced_as(model).and_then(|id| self.official.resolve(id)));
+        let complete = |rate: &ModelRate| {
+            if buckets == [0; 4] {
+                rate.rates.iter().all(Option::is_some)
+            } else {
+                let mut needed = buckets;
+                let hour = hour_writes.min(needed[3]);
+                needed[3] -= hour;
+                needed
+                    .iter()
+                    .zip(&rate.rates)
+                    .all(|(n, rate)| *n == 0 || rate.is_some())
+                    && (hour == 0
+                        || rate.rates[0].is_some()
+                        || rate
+                            .additional_units
+                            .get("input_cache_write_1h")
+                            .is_some_and(Option::is_some))
+            }
+        };
+        let use_official = official.is_some()
+            && !ofox.is_some_and(complete)
+            && (ofox.is_none() || official.is_some_and(complete));
+        let resolved = if use_official { official } else { ofox };
+        let context_tokens = buckets[0]
+            .saturating_add(buckets[2])
+            .saturating_add(buckets[3]);
+        let tier = resolved.and_then(|rate| {
+            rate.context_tiers
+                .iter()
+                .rev()
+                .find(|tier| context_tokens > tier.above_tokens)
+        });
+        let tier_unknown = tier.is_some() && records != Some(1);
+        // An aggregate may contain requests in different tiers. Its partial
+        // amount is a floor, including a possible lower-priced tier, rather
+        // than assigning one request's tariff to the whole aggregate.
+        let floor = if tier_unknown {
+            resolved.map(|rate| {
+                std::array::from_fn::<_, 4, _>(|i| {
+                    std::iter::once(&rate.rates)
+                        .chain(rate.context_tiers.iter().map(|tier| &tier.rates))
+                        .map(|rates| rates[i].as_deref().and_then(|v| parse_rate(v).ok()))
+                        .collect::<Option<Vec<_>>>()
+                        .and_then(|rates| rates.into_iter().min())
+                        .map(clean_decimal)
+                })
+            })
+        } else {
+            None
+        };
+        let rate_values = if !tier_unknown {
+            tier.map(|tier| &tier.rates)
+        } else {
+            floor.as_ref()
+        }
+        .or_else(|| resolved.map(|rate| &rate.rates));
         let rate = |index: usize| {
-            resolved
-                .and_then(|rate| rate.rates[index].as_deref())
+            rate_values
+                .and_then(|rates| rates[index].as_deref())
                 .and_then(|v| parse_rate(v).ok())
         };
         let hour_rate = resolved
             .and_then(|rate| rate.additional_units.get("input_cache_write_1h"))
             .and_then(|v| v.as_deref())
             .and_then(|v| parse_rate(v).ok())
-            .and_then(|v| v.checked_mul(Decimal::from(1_000_000)))
+            .and_then(|v| {
+                if use_official {
+                    Some(v)
+                } else {
+                    v.checked_mul(Decimal::from(1_000_000))
+                }
+            })
             .or_else(|| rate(0).and_then(|input| input.checked_mul(Decimal::TWO)));
         let hour = hour_writes.min(buckets[3]);
         let priced = [
@@ -398,7 +504,7 @@ impl PriceCatalog {
             (hour, hour_rate),
         ];
         let mut known = false;
-        let mut unknown = false;
+        let mut unknown = tier_unknown;
         let mut amount = Decimal::ZERO;
         for (count, rate) in priced {
             if count == 0 {
@@ -417,7 +523,7 @@ impl PriceCatalog {
             }
         }
         if buckets == [0; 4] {
-            known = resolved.is_some_and(|rate| rate.rates.iter().all(Option::is_some));
+            known = rate_values.is_some_and(|rates| rates.iter().all(Option::is_some));
             unknown = !known;
         }
         let additional = resolved.is_some_and(|rate| {
@@ -441,8 +547,19 @@ impl PriceCatalog {
             known_cost_usd: known.then(|| clean_decimal(amount)),
             availability: availability.into(),
             unpriced_model_ids: if unknown { vec![model.into()] } else { vec![] },
-            unpriced_record_count: if unknown { records } else { Some(0) },
+            unpriced_record_count: if tier_unknown {
+                None
+            } else if unknown {
+                records
+            } else {
+                Some(0)
+            },
             additional_units_unsupported: additional,
+            official_model_ids: if use_official && known {
+                vec![model.into()]
+            } else {
+                vec![]
+            },
         }
     }
     pub fn coverage_for(&self, estimate: &CostEstimate) -> PricingCoverage {
@@ -450,6 +567,7 @@ impl PriceCatalog {
             unpriced_model_ids: estimate.unpriced_model_ids.clone(),
             unpriced_record_count: estimate.unpriced_record_count,
             additional_units_unsupported: estimate.additional_units_unsupported,
+            official_model_ids: estimate.official_model_ids.clone(),
             ..self.coverage.clone()
         }
     }
@@ -522,6 +640,178 @@ mod tests {
             {"id":"a/shared","aliases":["ambiguous"],"pricing":{"prompt":"1e-6"}},
             {"id":"b/shared","aliases":["ambiguous"],"pricing":{"prompt":"2e-6"}}
         ]})
+    }
+
+    #[test]
+    fn retired_ofox_models_use_manufacturer_api_prices_in_both_regions() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        for apex in ["ofox.ai", "ofox.io"] {
+            let catalog = PriceCatalog::ingest_on(&conn, apex, &payload(), 10).unwrap();
+            for model in ["claude-opus-5-5", "anthropic/claude-opus-5.5"] {
+                let estimate = catalog.estimate(model, [1_000_000; 4], Some(1));
+                assert_eq!(
+                    estimate.known_cost_usd.as_deref(),
+                    Some("29.2"),
+                    "{apex}: {model}"
+                );
+                assert_eq!(estimate.availability, "known");
+                assert!(estimate.unpriced_model_ids.is_empty());
+                assert_eq!(estimate.official_model_ids, vec![model]);
+                assert_eq!(
+                    catalog.coverage_for(&estimate).official_model_ids,
+                    vec![model]
+                );
+            }
+            for model in [
+                "anthropic/claude-haiku-4.5",
+                "anthropic/claude-haiku-5.5",
+                "anthropic/claude-opus-5",
+                "anthropic/claude-opus-5.5",
+                "anthropic/claude-sonnet-4.6",
+                "anthropic/claude-sonnet-5.5",
+                "claude-fable-5-1",
+                "claude-haiku-5-5",
+                "claude-opus-4-7",
+                "claude-opus-4-8",
+                "claude-opus-5",
+                "claude-opus-5-5",
+                "claude-sonnet-5",
+                "claude-sonnet-5-5",
+                "openai/gpt-6.1-sol",
+                "google/gemini-2.5-flash",
+                "deepseek/deepseek-v4-flash",
+            ] {
+                let estimate = catalog.estimate(model, [1000, 1000, 0, 0], Some(1));
+                assert_eq!(estimate.availability, "known", "{apex}: {model}");
+                assert_eq!(estimate.official_model_ids, vec![model]);
+            }
+            assert_eq!(
+                catalog
+                    .estimate("unknown", [1000, 100, 0, 0], Some(1))
+                    .availability,
+                "unknown"
+            );
+            assert_eq!(
+                catalog
+                    .estimate("relay/claude-opus-5.5-custom", [1000, 100, 0, 0], Some(1))
+                    .availability,
+                "unknown"
+            );
+        }
+    }
+
+    #[test]
+    fn manufacturer_prices_work_offline_without_an_ofox_catalog() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let catalog = PriceCatalog::load_on(&conn, "ofox.ai", 10).unwrap();
+        assert_eq!(
+            catalog
+                .estimate("claude-sonnet-5-5", [1_000_000; 4], Some(1))
+                .known_cost_usd
+                .as_deref(),
+            Some("14.6")
+        );
+    }
+
+    #[test]
+    fn manufacturer_hour_rates_use_per_million_units_and_unknown_amounts_have_no_provenance() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let mut catalog = PriceCatalog::load_on(&conn, "ofox.ai", 10).unwrap();
+        catalog.official = super::super::official_pricing::OfficialCatalog::from_payload(
+            &json!({"anthropic":{"models":{
+                "hourly":{"cost":{"input":4,"output":20,"cache_write":5,"input_cache_write_1h":8}},
+                "input-only":{"cost":{"input":4}}
+            }}}),
+            10,
+        )
+        .unwrap();
+        let hour = catalog.estimate_with_hour_writes(
+            "anthropic/hourly",
+            [0, 0, 0, 1_000_000],
+            1_000_000,
+            Some(1),
+        );
+        assert_eq!(hour.known_cost_usd.as_deref(), Some("8"));
+        assert_eq!(hour.official_model_ids, vec!["anthropic/hourly"]);
+        let unknown = catalog.estimate("anthropic/input-only", [0, 1000, 0, 0], Some(1));
+        assert_eq!(unknown.known_cost_usd, None);
+        assert!(unknown.official_model_ids.is_empty());
+        assert_eq!(unknown.unpriced_model_ids, vec!["anthropic/input-only"]);
+    }
+
+    #[test]
+    fn ofox_prices_including_free_take_precedence_over_manufacturer_prices() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        for (input, expected) in [("0", "0"), ("0.000002", "2")] {
+            let payload = json!({"data":[{"id":"anthropic/claude-opus-5.5", "aliases":["claude-opus-5-5"],
+                "pricing":{"prompt":input,"completion":"0","input_cache_read":"0","input_cache_write":"0"}}]});
+            let catalog = PriceCatalog::ingest_on(&conn, "ofox.ai", &payload, 10).unwrap();
+            let estimate = catalog.estimate("claude-opus-5-5", [1_000_000; 4], Some(1));
+            assert_eq!(estimate.known_cost_usd.as_deref(), Some(expected));
+            assert!(estimate.official_model_ids.is_empty());
+        }
+    }
+
+    #[test]
+    fn disabled_and_incomplete_ofox_prices_fall_back_without_mixing_tariffs() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        for disabled in [true, false] {
+            let payload = json!({"data":[{"id":"anthropic/claude-opus-5.5", "aliases":["claude-opus-5-5"],
+                "disabled":disabled,"pricing":{"prompt":"0.000001"}}]});
+            let catalog = PriceCatalog::ingest_on(&conn, "ofox.io", &payload, 10).unwrap();
+            let estimate = catalog.estimate("claude-opus-5-5", [1_000_000; 4], Some(1));
+            assert_eq!(estimate.known_cost_usd.as_deref(), Some("29.2"));
+            assert_eq!(estimate.official_model_ids, vec!["claude-opus-5-5"]);
+        }
+    }
+
+    #[test]
+    fn an_ofox_hour_cache_write_rate_is_usable_without_a_five_minute_rate() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let payload = json!({"data":[{"id":"anthropic/claude-opus-5.5","aliases":["claude-opus-5-5"],"pricing":{"input_cache_write_1h":"0.000003"}}]});
+        let catalog = PriceCatalog::ingest_on(&conn, "ofox.ai", &payload, 10).unwrap();
+        let estimate = catalog.estimate_with_hour_writes(
+            "claude-opus-5-5",
+            [0, 0, 0, 1_000_000],
+            1_000_000,
+            Some(1),
+        );
+        assert_eq!(estimate.known_cost_usd.as_deref(), Some("3"));
+        assert!(estimate.official_model_ids.is_empty());
+    }
+
+    #[test]
+    fn manufacturer_context_tiers_use_request_input_and_keep_aggregated_tiers_partial() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let catalog = PriceCatalog::load_on(&conn, "ofox.ai", 10).unwrap();
+        let small = catalog.estimate("claude-haiku-5-5", [1000; 4], Some(1));
+        assert_eq!(small.known_cost_usd.as_deref(), Some("0.000735"));
+        let large = catalog.estimate("claude-haiku-5-5", [200_000, 1000, 50_000, 10_000], Some(1));
+        assert_eq!(large.known_cost_usd.as_deref(), Some("0.11125"));
+        assert_eq!(large.availability, "known");
+        let aggregate =
+            catalog.estimate("claude-haiku-5-5", [200_000, 1000, 50_000, 10_000], Some(2));
+        assert_eq!(aggregate.availability, "partial");
+        assert_eq!(aggregate.unpriced_record_count, None);
+        assert_eq!(
+            catalog
+                .estimate_with_hour_writes(
+                    "claude-opus-5-5",
+                    [0, 0, 0, 1_000_000],
+                    600_000,
+                    Some(1)
+                )
+                .known_cost_usd
+                .as_deref(),
+            Some("6.8")
+        );
     }
 
     /// Codex's auto-review is not in the catalog; it is priced as GPT-5.6

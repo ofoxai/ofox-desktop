@@ -79,6 +79,18 @@ export function RequestDetailPanel({
             t("usageWorkbench.currentEstimate"),
             formatUsageEstimate(request.currentEstimate),
           ],
+          ...(request.currentEstimate?.knownCostUsd != null
+            ? [
+                [
+                  t("usageWorkbench.priceSource"),
+                  t(
+                    request.currentEstimate.officialModelIds?.length
+                      ? "usageWorkbench.officialPriceSource"
+                      : "usageWorkbench.ofoxPriceSource",
+                  ),
+                ],
+              ]
+            : []),
           ...(evidence.latency != null
             ? [[t("usageWorkbench.elapsed"), `${number(evidence.latency)} ms`]]
             : []),

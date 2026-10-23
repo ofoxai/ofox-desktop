@@ -51,16 +51,30 @@ function data(kind: LibraryKind): LibraryData {
     epoch,
     operations: [],
     [kind === "mcp" ? "servers" : kind]: resources,
-    targets: [
-      {
-        toolId: "codex",
-        path: "/sandbox",
-        targetGroupId: "codex",
-        status: "unassigned",
-        discoveryStatus: "installed",
-        available: true,
-      },
-    ],
+    ...(kind === "skills"
+      ? {
+          skillTargets: [
+            {
+              id: "codex",
+              label: "Codex",
+              detected: true,
+              scopeKnown: true,
+              readsShared: true,
+            },
+          ],
+        }
+      : {
+          targets: [
+            {
+              toolId: "codex",
+              path: "/sandbox",
+              targetGroupId: "codex",
+              status: "unassigned",
+              discoveryStatus: "installed",
+              available: true,
+            },
+          ],
+        }),
   };
 }
 beforeEach(() => {

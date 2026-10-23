@@ -302,8 +302,19 @@ it.each(["overview", "requests", "sessions"] as const)(
     });
     render(<Page />);
     await waitFor(() =>
-      expect(screen.queryAllByRole("alert").length).toBeGreaterThan(0),
+      expect(
+        mocks.invoke.mock.calls.some(
+          ([name]) =>
+            name ===
+            (tab === "overview"
+              ? "get_usage_overview"
+              : tab === "requests"
+                ? "get_request_logs"
+                : "get_session_usage_analytics"),
+        ),
+      ).toBe(true),
     );
+    expect(screen.queryByText(/部分数据刷新失败/)).toBeNull();
     expect(screen.queryByText("≈$0")).toBeNull();
     expect(
       screen.queryByRole("button", { name: "查看原始历史记录" }),
@@ -333,10 +344,10 @@ it("validates the refresh owner's captured region before publishing an analysis 
   render(<Page />);
   await screen.findByText("≈$0");
   await userEvent.click(screen.getByRole("button", { name: "刷新本机数据" }));
-  await waitFor(() =>
-    expect(screen.queryAllByRole("alert").length).toBeGreaterThan(0),
+  await waitFor(() => expect(reads).toBe(2));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    /部分数据刷新失败/,
   );
-  expect(reads).toBe(2);
   expect(kpi("Tokens")).toHaveTextContent("0");
 });
 

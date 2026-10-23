@@ -123,8 +123,11 @@ if (mode === "mcp-server") {
   )
     process.exit(7);
   const paths = JSON.parse(await readFile(`${proofPath}.paths`, "utf8"));
-  const instructions = await readFile(paths.instructionPath, "utf8");
   const skill = await readFile(paths.skillPath, "utf8");
+  const instructions =
+    proof.resourceKinds && !proof.resourceKinds.includes("instructions")
+      ? skill
+      : await readFile(paths.instructionPath, "utf8");
   const instructionChallenge = instructions.match(
     /instruction challenge is ([a-f0-9]+)/,
   )?.[1];

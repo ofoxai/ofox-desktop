@@ -10,92 +10,33 @@ fn error(key: &str) -> AppError {
     AppError::Config(format!("library.{key}"))
 }
 
-pub struct SkillTarget {
-    pub id: &'static str,
-    pub label: &'static str,
-    /// The id `get_tool_versions` knows the agent by, when it can detect it.
-    pub tool: Option<&'static str>,
-    /// Reads ~/.agents/skills as well as its own folder.
-    pub reads_shared: bool,
-}
+pub use super::extension_targets::SkillTarget;
 
-pub const TARGETS: &[SkillTarget] = &[
-    SkillTarget {
-        id: "claude",
-        label: "Claude Code",
-        tool: Some("claude"),
-        reads_shared: false,
-    },
-    SkillTarget {
-        id: "codex",
-        label: "Codex",
-        tool: Some("codex"),
-        reads_shared: true,
-    },
-    SkillTarget {
-        id: "gemini",
-        label: "Gemini CLI",
-        tool: Some("gemini"),
-        reads_shared: true,
-    },
-    SkillTarget {
-        id: "opencode",
-        label: "OpenCode",
-        tool: Some("opencode"),
-        reads_shared: true,
-    },
-    SkillTarget {
-        id: "hermes",
-        label: "Hermes",
-        tool: Some("hermes"),
-        reads_shared: false,
-    },
-    SkillTarget {
-        id: "openclaw",
-        label: "OpenClaw",
-        tool: Some("openclaw"),
-        reads_shared: false,
-    },
-    SkillTarget {
-        id: "pi",
-        label: "Pi",
-        tool: Some("pi"),
-        reads_shared: false,
-    },
-    SkillTarget {
-        id: "dsh",
-        label: "DeepSeek Harness",
-        tool: Some("dsh"),
-        reads_shared: true,
-    },
-    SkillTarget {
-        id: "workbuddy",
-        label: "WorkBuddy",
-        tool: Some("workbuddy"),
-        reads_shared: false,
-    },
+const LEGACY_TARGETS: &[SkillTarget] = &[
     SkillTarget {
         id: "cursor",
         label: "Cursor",
-        tool: None,
         reads_shared: false,
     },
     SkillTarget {
         id: "codebuddy",
         label: "CodeBuddy",
-        tool: None,
         reads_shared: false,
     },
     SkillTarget {
         id: "claude-desktop",
         label: "Claude Desktop",
-        tool: None,
         reads_shared: false,
     },
 ];
 
+pub fn all() -> impl Iterator<Item = &'static SkillTarget> {
+    super::extension_targets::TARGETS
+        .iter()
+        .chain(LEGACY_TARGETS)
+}
 pub fn find(id: &str) -> Option<&'static SkillTarget> {
-    TARGETS.iter().find(|target| target.id == id)
+    all().find(|target| target.id == id)
 }
 
 /// `$VARIABLE` (absolute, or under `~/`), else `~/<default>`.
@@ -180,7 +121,7 @@ pub fn home(id: &str) -> Result<PathBuf, AppError> {
         "gemini" => crate::gemini_config::get_gemini_dir(),
         "opencode" => crate::opencode_config::get_opencode_dir(),
         "hermes" => crate::hermes_config::get_hermes_dir(),
-        "openclaw" => home.join(".openclaw"),
+        "openclaw" => crate::openclaw_config::resolve_openclaw_state_dir()?,
         "pi" => env_dir("PI_CODING_AGENT_DIR", ".pi/agent")?,
         "dsh" => env_dir("DSH_HOME", ".dsh")?,
         "workbuddy" => env_dir("WORKBUDDY_CONFIG_DIR", ".workbuddy")?,
@@ -313,6 +254,20 @@ pub fn desktop_manifest_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn openclaw_resources_follow_state_override_but_not_config_file_parent() {
+        let sandbox = crate::test_sandbox::sandbox();
+        let state = sandbox.home().join("state");
+        let config = sandbox.home().join("config/custom.json");
+        std::env::set_var("OPENCLAW_STATE_DIR", &state);
+        std::env::set_var("OPENCLAW_CONFIG_PATH", &config);
+        assert_eq!(root("openclaw").unwrap(), state.join("skills"));
+        assert_eq!(super::super::mcp_targets::openclaw_path().unwrap(), config);
+        std::env::set_var("OPENCLAW_STATE_DIR", "relative/state");
+        assert!(root("openclaw").is_err());
+    }
 
     #[test]
     #[serial_test::serial]

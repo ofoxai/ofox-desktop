@@ -403,7 +403,7 @@ fn csv_cell(value: &str) -> String {
 }
 pub fn export_csv(snapshot_id: &str, destination: Option<&str>) -> Result<CsvExport, AppError> {
     let snapshot = get_snapshot(snapshot_id)?;
-    let mut csv="\u{feff}requestId,createdAtMs,tool,model,requestModel,newInputTokens,outputTokens,cacheReadTokens,cacheWriteTokens,savedCostUsd,currentKnownEstimateUsd,estimateAvailability,source,recordedStatusCode,recordedLatencyMs\r\n".to_owned();
+    let mut csv="\u{feff}requestId,createdAtMs,tool,model,requestModel,newInputTokens,outputTokens,cacheReadTokens,cacheWriteTokens,savedCostUsd,currentKnownEstimateUsd,estimateAvailability,source,recordedStatusCode,recordedLatencyMs,estimatePriceSource\r\n".to_owned();
     // Iterate in bounded pages; the immutable rows and price context are shared
     // with paging/detail, and the full matching set is exported, never one UI page.
     for page in snapshot.rows.chunks(1000) {
@@ -432,6 +432,13 @@ pub fn export_csv(snapshot_id: &str, destination: Option<&str>) -> Result<CsvExp
                 view.observed_latency_ms
                     .map(|v| v.to_string())
                     .unwrap_or_default(),
+                if view.current_estimate.known_cost_usd.is_none() {
+                    String::new()
+                } else if view.current_estimate.official_model_ids.is_empty() {
+                    "ofox".into()
+                } else {
+                    "manufacturer".into()
+                },
             ];
             csv.push_str(
                 &values
@@ -482,6 +489,102 @@ mod tests {
             project_ids: vec![],
             source_ids: vec![],
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn manufacturer_fallback_prices_remain_frozen_in_pages_detail_and_csv() {
+        let db = Database::memory().unwrap();
+        db.conn.lock().unwrap().execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,output_tokens,latency_ms,status_code,created_at,data_source) VALUES('official-opus','p','claude','claude-opus-5-5',1000000,0,0,200,1,'proxy'),('official-sonnet','p','claude','claude-sonnet-5-5',1000000,0,0,200,2,'proxy')",[]).unwrap();
+        let first = request_page(
+            &db,
+            query(),
+            RequestFilters::default(),
+            Pagination {
+                page: 0,
+                page_size: 1,
+            },
+            None,
+            "ofox.ai",
+            3000,
+        )
+        .unwrap();
+        assert_eq!(
+            first
+                .summary
+                .estimate
+                .as_ref()
+                .unwrap()
+                .known_cost_usd
+                .as_deref(),
+            Some("6")
+        );
+        assert_eq!(first.pricing_coverage.official_model_ids.len(), 2);
+        super::super::ofox_pricing::PriceCatalog::ingest_on(
+            &db.conn.lock().unwrap(),
+            "ofox.ai",
+            &serde_json::json!({"data":[
+                {"id":"claude-opus-5-5","pricing":{"prompt":"0.000009"}},
+                {"id":"claude-sonnet-5-5","pricing":{"prompt":"0.000009"}}
+            ]}),
+            4000,
+        )
+        .unwrap();
+        let second = request_page(
+            &db,
+            query(),
+            RequestFilters::default(),
+            Pagination {
+                page: 1,
+                page_size: 1,
+            },
+            Some(&first.snapshot_id),
+            "ofox.ai",
+            4000,
+        )
+        .unwrap();
+        assert_eq!(
+            second.data[0].current_estimate.known_cost_usd.as_deref(),
+            Some("4")
+        );
+        let detail = request_detail("official-opus", &first.snapshot_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            detail.current_estimate.official_model_ids,
+            vec!["claude-opus-5-5"]
+        );
+        let csv = export_csv(&first.snapshot_id, None).unwrap();
+        assert!(csv.csv.contains("estimatePriceSource"));
+        assert_eq!(csv.csv.matches("\"manufacturer\"").count(), 2);
+        let latest = request_page(
+            &db,
+            query(),
+            RequestFilters::default(),
+            Pagination {
+                page: 0,
+                page_size: 1,
+            },
+            None,
+            "ofox.ai",
+            4000,
+        )
+        .unwrap();
+        assert_eq!(
+            latest
+                .summary
+                .estimate
+                .as_ref()
+                .unwrap()
+                .known_cost_usd
+                .as_deref(),
+            Some("18")
+        );
+        assert!(latest.pricing_coverage.official_model_ids.is_empty());
+        assert_ne!(
+            first.receipt.snapshot_version,
+            latest.receipt.snapshot_version
+        );
     }
     #[test]
     #[serial_test::serial]

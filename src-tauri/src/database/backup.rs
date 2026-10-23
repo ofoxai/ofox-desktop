@@ -186,6 +186,11 @@ impl Database {
         // 使用 Backup 将临时库原子写回主库
         {
             let mut main_conn = lock_conn!(self.conn);
+            // SQLite Backup can replace pages without incrementing total_changes.
+            self.analytics_identity.store(
+                super::next_analytics_identity(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
             if preserves_usage {
                 // Usage writes do not take config_io; freeze their latest ledger
                 // and evidence under the same lock as the final replacement.
@@ -716,6 +721,11 @@ impl Database {
             .unwrap_or_default();
         {
             let mut main_conn = lock_conn!(self.conn);
+            // SQLite Backup can replace pages without incrementing total_changes.
+            self.analytics_identity.store(
+                super::next_analytics_identity(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
             Self::restore_local_usage_health(&main_conn, &staged)?;
             Backup::new(&staged, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?

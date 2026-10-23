@@ -68,6 +68,36 @@ pub(crate) fn read(_db: &Database, roots: &[PathBuf]) -> Result<ParsedSource, Ap
         })
         .collect();
     if let Some(messages) = &read.messages {
+        let mut scans = std::collections::BTreeMap::<
+            String,
+            super::session_analytics::interactions::CallScan,
+        >::new();
+        for message in messages {
+            let scan = scans.entry(message.sid.clone()).or_default();
+            scan.incomplete |= message.tools.incomplete;
+            scan.conflicts
+                .extend(message.tools.conflicts.iter().cloned());
+            scan.records.retain(|id, _| !scan.conflicts.contains(id));
+            for (id, call) in &message.tools.records {
+                if scan.conflicts.contains(id) {
+                    continue;
+                }
+                if scan.records.get(id).is_some_and(|prior| prior != call) {
+                    scan.incomplete = true;
+                    scan.records.remove(id);
+                    scan.conflicts.insert(id.clone());
+                } else {
+                    scan.records.insert(id.clone(), call.clone());
+                }
+            }
+        }
+        for session in &read.sessions {
+            let mut scan = scans.remove(&session.sid).unwrap_or_default();
+            scan.incomplete |= read.reasons.contains("invalidMessageTime");
+            result
+                .tool_evidence
+                .attach(&key("hermes", &session.sid), &scan);
+        }
         for session in read.sessions.iter().filter(|s| s.started_ms > 0) {
             let start = json!([session.sid, "start"]).to_string();
             result.native_activity.push(native::runtime_event(
@@ -149,6 +179,28 @@ mod tests {
 
     #[test]
     #[serial]
+    fn analytics_hermes_conflicting_call_times_have_no_winner() {
+        let sandbox = sandbox();
+        let root = root(sandbox.home(), &["main-aux"]);
+        let conn = Connection::open(root.join("state.db")).unwrap();
+        for timestamp in [1790820012.0, 1790820013.0, 1790820014.0] {
+            conn.execute("INSERT INTO messages(session_id,role,content,tool_calls,timestamp) VALUES('main-aux','assistant','synthetic',?1,?2)",rusqlite::params![r#"[{"id":"reused","function":{"name":"Bash"}}]"#,timestamp]).unwrap();
+        }
+        drop(conn);
+        let parsed = read(&Database::memory().unwrap(), std::slice::from_ref(&root)).unwrap();
+        assert!(parsed
+            .tool_evidence
+            .calls
+            .iter()
+            .all(|event| event.call.name != "Bash"));
+        assert!(parsed
+            .tool_evidence
+            .incomplete
+            .contains(&key("hermes", "main-aux")));
+    }
+
+    #[test]
+    #[serial]
     fn analytics_hermes_descriptor_project_and_manager_key_match_listing() {
         let sandbox = sandbox();
         let root = root(sandbox.home(), &["main-aux", "legacy"]);
@@ -160,6 +212,18 @@ mod tests {
             .unwrap();
         assert_eq!(alpha.project_path.as_deref(), Some("/work/alpha"));
         assert_eq!(alpha.title, "Alpha");
+        let calls: Vec<_> = parsed
+            .tool_evidence
+            .calls
+            .iter()
+            .filter(|event| event.session_key == alpha.identity.key)
+            .collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].call.name, "terminal");
+        assert!(!parsed
+            .tool_evidence
+            .incomplete
+            .contains(&alpha.identity.key));
         let listing = crate::session_manager::SessionMeta {
             provider_id: "hermes".into(),
             session_id: "main-aux".into(),

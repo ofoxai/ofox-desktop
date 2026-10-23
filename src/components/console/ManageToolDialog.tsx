@@ -235,6 +235,13 @@ export default function ManageToolDialog({
   const [restoring, setRestoring] = useState(false);
   const [unbindConfirming, setUnbindConfirming] = useState(false);
   const [unbindLoading, setUnbindLoading] = useState(false);
+  const returnFocusToUnbind = useRef(false);
+  const restoreUnbindFocus = useCallback((node: HTMLButtonElement | null) => {
+    if (node && returnFocusToUnbind.current) {
+      returnFocusToUnbind.current = false;
+      node.focus();
+    }
+  }, []);
   // What the unbind would restore; null until loaded (or if the preview failed).
   const [unbindPreview, setUnbindPreview] = useState<UnbindReport | null>(null);
   // Connectivity probe — null means "未测试". The backend always resolves
@@ -285,6 +292,7 @@ export default function ManageToolDialog({
     setUnbindConfirming(false);
     setUnbindLoading(false);
     setUnbindPreview(null);
+    returnFocusToUnbind.current = false;
     setPingResult(null);
     setPingLoading(false);
     setCompatibilityResults([]);
@@ -726,6 +734,7 @@ export default function ManageToolDialog({
       onOpenChange(false);
     } catch (e) {
       toast.error(t("unbind.failed", { error: String(e) }));
+      returnFocusToUnbind.current = true;
       setUnbindConfirming(false);
     } finally {
       setUnbindLoading(false);
@@ -821,7 +830,10 @@ export default function ManageToolDialog({
               )}
             </DialogHeader>
 
-            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4">
+            <div
+              hidden={unbindConfirming}
+              className="min-h-0 flex-1 space-y-4 overflow-y-auto px-5 py-4"
+            >
               {snapshotQuery.isError && (
                 <div
                   role="alert"
@@ -1302,74 +1314,106 @@ export default function ManageToolDialog({
               )}
             </div>
 
-            {unbindConfirming && <UnbindPreviewPanel preview={unbindPreview} />}
-
-            <DialogFooter className="!items-center gap-3 px-5 sm:!justify-between">
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="sm"
-                  onClick={handleUnbind}
-                  disabled={operationBusy}
-                  className={cn(
-                    unbindConfirming &&
-                      "border-danger/30 text-danger hover:bg-danger-soft hover:text-danger",
-                  )}
-                >
-                  {unbindLoading && (
-                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                  )}
-                  {unbindConfirming ? t("unbind.confirm") : t("unbind.button")}
-                </Button>
-                {uninstallPreview.available && (
-                  <Button
-                    variant="dangerGhost"
-                    size="sm"
-                    disabled={operationBusy}
-                    onClick={() => {
-                      uninstallPending.current = true;
-                      onOpenChange(false);
-                    }}
-                  >
-                    {t("toolUninstall.entry")}
-                  </Button>
-                )}
+            {unbindConfirming && (
+              <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+                <UnbindPreviewPanel preview={unbindPreview} />
               </div>
-              <div className="flex flex-wrap gap-2">
+            )}
+
+            {unbindConfirming ? (
+              <DialogFooter className="px-5">
                 <Button
                   type="button"
                   variant="secondary"
                   size="sm"
-                  onClick={() => onOpenChange(false)}
+                  autoFocus
+                  onClick={() => {
+                    returnFocusToUnbind.current = true;
+                    setUnbindConfirming(false);
+                    setUnbindPreview(null);
+                  }}
                   disabled={operationBusy}
                 >
                   {t("uiCopy.cancel")}
                 </Button>
                 <Button
                   type="button"
+                  variant="danger"
                   size="sm"
-                  onClick={handleSave}
-                  disabled={
-                    !modelWritable ||
-                    operationBusy ||
-                    (!isDirty && !currentModelLoaded) ||
-                    saving ||
-                    !protocol ||
-                    !compatibilityReady ||
-                    desktopCodex ||
-                    (tool.id === "opencode" &&
-                      (draftModels.length === 0 || modelsLoading)) ||
-                    (tool.id === "workbuddy" && !workBuddyCatalogReady)
-                  }
+                  onClick={() => void handleUnbind()}
+                  disabled={operationBusy}
                 >
-                  {saving && (
+                  {unbindLoading && (
                     <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
                   )}
-                  {t("uiCopy.save")}
+                  {t("unbind.confirm")}
                 </Button>
-              </div>
-            </DialogFooter>
+              </DialogFooter>
+            ) : (
+              <DialogFooter className="!items-center gap-3 px-5 sm:!justify-between">
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    ref={restoreUnbindFocus}
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={handleUnbind}
+                    disabled={operationBusy}
+                  >
+                    {unbindLoading && (
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    )}
+                    {t("unbind.button")}
+                  </Button>
+                  {uninstallPreview.available && (
+                    <Button
+                      variant="dangerGhost"
+                      size="sm"
+                      disabled={operationBusy}
+                      onClick={() => {
+                        uninstallPending.current = true;
+                        onOpenChange(false);
+                      }}
+                    >
+                      {t("toolUninstall.entry")}
+                    </Button>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => onOpenChange(false)}
+                    disabled={operationBusy}
+                  >
+                    {t("uiCopy.cancel")}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={handleSave}
+                    disabled={
+                      !modelWritable ||
+                      operationBusy ||
+                      (!isDirty && !currentModelLoaded) ||
+                      saving ||
+                      !protocol ||
+                      !compatibilityReady ||
+                      desktopCodex ||
+                      (tool.id === "opencode" &&
+                        (draftModels.length === 0 || modelsLoading)) ||
+                      (tool.id === "workbuddy" && !workBuddyCatalogReady)
+                    }
+                  >
+                    {saving && (
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    )}
+                    {t("uiCopy.save")}
+                  </Button>
+                </div>
+              </DialogFooter>
+            )}
           </>
         )}
       </DialogContent>
@@ -1395,16 +1439,16 @@ interface PingStatusBoxProps {
   model: string;
 }
 
-/** Shown between the first and second "解除绑定" click: what will be restored. */
+/** Plain-language confirmation before unbinding. */
 function UnbindPreviewPanel({ preview }: { preview: UnbindReport | null }) {
   const { t } = useTranslation();
-  const changedKeys = preview
-    ? [...preview.restoredKeys, ...preview.removedKeys]
-    : [];
+  const warningCodes = [
+    ...new Set(preview?.warnings.map((warning) => warning.code) ?? []),
+  ];
   return (
     <div
       role="note"
-      className="mx-6 mb-3 space-y-1.5 rounded-md border border-danger/30 bg-danger-soft px-3 py-2 text-[12px] text-ink "
+      className="space-y-2 rounded-md border border-line bg-muted/30 p-4 text-sub text-ink"
     >
       {preview && preview.sharedKeptBy.length > 0 ? (
         <p>
@@ -1414,37 +1458,16 @@ function UnbindPreviewPanel({ preview }: { preview: UnbindReport | null }) {
         </p>
       ) : preview?.alreadyUnbound ? (
         <p>{t("unbind.nothingToRestore")}</p>
+      ) : preview?.legacy ? (
+        <p>{t("unbind.legacyNotice")}</p>
       ) : (
-        <>
-          <p className="font-medium">{t("unbind.willRestoreTitle")}</p>
-          {preview?.legacy && (
-            <p className="text-warn ">{t("unbind.legacyNotice")}</p>
-          )}
-          {changedKeys.length > 0 ? (
-            <ul className="space-y-0.5 font-mono text-[11px] text-ink-muted">
-              {changedKeys.map((key) => (
-                <li key={key}>{key}</li>
-              ))}
-            </ul>
-          ) : (
-            <p>{t("unbind.generic")}</p>
-          )}
-          {!preview?.legacy && <p>{t("unbind.forceRestoreNotice")}</p>}
-          <p className="text-ink-muted">{t("unbind.keepNotice")}</p>
-        </>
+        <p>{t("unbind.generic")}</p>
       )}
-      {preview?.warnings.map((warning, index) => (
-        <p
-          key={`${warning.code}-${warning.file ?? index}`}
-          className="break-words text-ink-muted"
-        >
-          {t(`unbind.warning.${warning.code}`, {
-            defaultValue: "",
-            keys: preview.keptKeys.join(", "),
-          })}
-          {warning.file && (
-            <code className="ml-1 text-[11px]">{warning.file}</code>
-          )}
+      {warningCodes.map((code) => (
+        <p key={code} className="text-ink-muted">
+          {code === "userValueKept"
+            ? t("unbind.userChangesKept")
+            : t(`unbind.warning.${code}`, { defaultValue: "" })}
         </p>
       ))}
     </div>

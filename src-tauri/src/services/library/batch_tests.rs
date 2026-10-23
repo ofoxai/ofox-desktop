@@ -147,6 +147,10 @@ fn a_batch_applied_and_withdrawn_leaves_each_config_as_it_was() {
             "{\n  \"model\": {\n    \"name\": \"personal\"\n  }\n}\n",
         ),
         ("hermes", "model:\n  default: personal\n"),
+        ("openclaw", "{\n  models: {mode: 'merge'}\n}\n"),
+        ("workbuddy", "{\n  \"userField\": true\n}\n"),
+        ("pi", "{\n  \"userField\": true\n}\n"),
+        ("dsh", "# model routing stays untouched\n- id: model\n  name: provider\n  config:\n    baseURL: https://ofox.ai/v1\n"),
     ];
     for (tool, text) in originals {
         crate::config::atomic_write(&paths[tool], text.as_bytes()).unwrap();

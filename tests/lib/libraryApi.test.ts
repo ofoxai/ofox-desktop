@@ -36,3 +36,20 @@ it("uses a dedicated selected-export command so an older backend cannot silently
     expect.anything(),
   );
 });
+
+it("fences explicit Skills replacement and keep decisions with the opened revision and epoch", async () => {
+  await libraryApi.previewSkillReplacement("skill", "codex", 7, 19);
+  expect(invoke).toHaveBeenCalledWith("preview_library_skill_replacement", {
+    resourceId: "skill",
+    tool: "codex",
+    expectedRevision: 7,
+    expectedEpoch: 19,
+  });
+  await libraryApi.keepSkillNative("skill", "codex", 7, 19);
+  expect(invoke).toHaveBeenCalledWith("keep_library_skill_native", {
+    resourceId: "skill",
+    tool: "codex",
+    expectedRevision: 7,
+    expectedEpoch: 19,
+  });
+});

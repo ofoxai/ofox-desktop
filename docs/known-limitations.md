@@ -13,6 +13,10 @@ This ledger preserves the accepted non-blocking findings from the implementation
 
 ## Accepted deferred findings
 
+- The usage workbench custom date fields now use the app's local-calendar popover and editable `YYYY-MM-DD` text. Arrow keys, Home/End, Page Up/Down and Shift + Page Up/Down cover day/week/month/year navigation; Escape restores trigger focus. Local dates, leap years, reversed ranges, cancel/reopen and query boundaries have regression coverage. The UI was checked at 900px in light and dark browser previews on macOS; that preview does not certify a native Windows date picker run.
+
+- Manufacturer API price fallback uses first-party provider entries from models.dev with a bundled 2026-10-21 snapshot. Refresh failure retains verified cached prices; this environment returned HTTP 403 from that public feed, so a live catalog download was not validated. Unknown/custom model aliases and unsupported billing dimensions remain unpriced or partial. These are current list-price estimates, not historical invoices. See [price fallback](usage-official-price-fallback.md).
+
 The following entries retain the specific review observations. Some contain several closely related subitems; each remains deferred except the explicit resolved follow-ups above.
 
 1. **Task 1 — resolved by T17:** CODEX_HOME/CLAUDE_CONFIG_DIR readers and directory precedence now share the resolver. The current config comment explicitly documents unsupported override variables.
@@ -156,3 +160,33 @@ See the [workbench boundaries](library-workbench.md#已知边界): Codex overrid
 The My resources / Discovered in tools presentation changes neither the native reader roster nor saved definitions. Only supported native adapters contribute discovered configurations; a tool outside that roster is not established absent. Saved items can outlive their current native configuration. Exact matched sources move into each resource's expanded details, while conflicting same-name variants remain independently addable. Adding still does not apply, take ownership or prove connection success.
 
 This increment corrects Ofox display spelling without renaming compatibility identifiers or historical user data. Read-only installed-window verification and synthetic responsive/keyboard fixtures do not certify real client consumption, Windows installation or Apple notarization; those external acceptance limits remain unchanged.
+
+- Interaction insights: OpenClaw and DeepSeek Harness do not yet provide verified tool/Skill projections and are shown as unavailable/incomplete in mixed cohorts. Pi uses the active owned conversation branch; calls on abandoned branches are excluded. Skills invoked through shell commands, opaque wrappers, or implicit prompt expansion are not inferred. The macOS native readers passed compilation, all-targets Clippy and the Rust suite; the installed 1.3.7 app rendered real local history in the new analysis cards. Windows and paid agent-request acceptance remain unverified. The separate responsive design previews use synthetic data.
+
+### MCP 新增应用适配（2026-10-21）
+
+资源库已补齐 OpenClaw、WorkBuddy、DeepSeek Harness、Pi；Codex / ChatGPT 共用配置目标。新增原生格式与验证范围见 [资源库说明](library-workbench.md#mcp-可绑定应用补齐2026-10-21)。Pi 低于 0.99.0 或版本无法确认时不允许新增原生 MCP 分配。DeepSeek 可执行 YAML 标签、外部 include、未验证的凭据表达式会明确拒绝处理；不会执行表达式或覆盖原文件。WorkBuddy 自身授权仍需在客户端完成。macOS 的配置读取/schema 示例验证未覆盖 Windows，也未执行完整 MCP 工具会话；WorkBuddy 运行加载仍待验收。
+
+2026-10-23 的 DeepSeek 默认注释误报修复只改变标签识别：`!!js` 等标记出现在注释或普通字符串中时不再被当成可执行标签。实际 YAML 标签和 `%TAG` 指令仍不受支持；不执行表达式，也不推断运行连接成功。Windows 原生读取及写入仍需单独验证。
+
+该修复的首个本机重编译版本仍为 1.3.7，可执行文件摘要前缀 `20927a36`。前端 1515 项、Rust 3421 项通过（14 项忽略），类型、格式和 all-targets Clippy 通过。用户完成 macOS 钥匙串授权并正常重启后，原生 MCP 页面显示“状态已更新”，DeepSeek 列恢复正常复选框，原来的读取失败提示消失；DeepSeek home/web/headless 配置摘要未变。证据为 `/tmp/ofox-dsh-mcp-after.png` 和 `/tmp/ofox-installed-dsh-accepted.json`。此项只验证配置扫描，不代表已执行 MCP 工具调用。Computer Use 未操作 SecurityAgent。
+
+随后合并仓库迁移和单日小时趋势修复的本机 1.3.7 构建摘要前缀为 `bf1d1398`，已签名并替换为唯一安装版。前端 1517 项、Rust 3431 项通过（14 项忽略），类型、格式和 all-targets Clippy 通过；最终安装版原生 MCP 扫描正常，Skills 四仓库合计 917 项，其中原 `cexll/myclaude` 来源成功读取 11 项，无失败提示。DeepSeek 配置摘要未变。用户将 Ofox 置于前台后，真实用量页恢复查询，“今天”按 00:00–20:00 显示小时分布；证据为 `/tmp/ofox-hourly-real-installed.png`。此前未加载是后台窗口可见性门禁暂停，本次未改动该暂停策略。小时图同时通过后端回归、前端集成和 900px 三语明暗预览。安装与证据记录为 `/tmp/ofox-installed-latest.json`、`/tmp/ofox-repo-hourly-verification.json`。
+
+独立 Skills 发现视图版仍为本机 1.3.7，最新摘要前缀 `793ea225`，已签名并替换为唯一安装版。前端 1521 项、Rust 3431 项通过（14 项忽略），类型、格式和 all-targets Clippy 通过；独立复核和 900px 三语明暗、长列表返回、选择后可见安装区等测试数据检查已完成。钥匙串授权后，实际新版窗口已验证默认只显示已有内容、顶部“发现”切换独立视图、返回后恢复列表及入口焦点；四个仓库合计 917 项，其中一次临时读取失败经显式重试恢复。实机证据为 `/tmp/ofox-discovery-view-installed-open.png` 和 `/tmp/ofox-discovery-view-installed-back.png`；验收未执行原生安装或配置写入。DeepSeek 配置摘要未变；详细记录为 `/tmp/ofox-discovery-view-verification.json`。
+
+### MCP / Skills 分发验收边界（2026-10-22）
+
+十个可绑定客户端已纳入共同名单和真实 writer。Pi 1.3.0 的原生离线加载能识别受控 Skill 和内置 MCP 扩展，公开锁定版 filesystem MCP 包也完成独立下载及协议调用，但这些不能代替每个 Agent 的模型消费。专用 Key 的旧 Gemini 费用条目仍待对账，按既有预算保护暂停后续付费调用并保持禁用。Hermes 缺少依赖环境；ChatGPT / WorkBuddy 桌面隔离及消费未验收。逐项证据和未执行项见 [资源分发验收](resource-distribution-acceptance.md)。
+
+## Skills 不同副本的写入范围（2026-10-23）
+
+Magpie 样式的差异提示与导入已覆盖同目录身份的多个版本。嵌套或独立 reader 目录中的副本只读显示差异，不会因为它与资源库同名而被替换；“用资源库的”仅面向已解析的直接应用目录。SKILL.md 显示名相同但目录身份不同的技能保留独立入口。Claude Desktop 自带技能不可接管。Windows 原生文件替换及链接恢复尚未运行，macOS 沙箱和合成 UI 验证不能替代该验收。
+
+### Loading and Skills discovery verification (October 2026)
+
+The loading/discovery changes are verified on macOS; Windows discovery/install paths require a Windows run. First native synchronization and a changed/expired projection still perform full validation. Public repository discovery and skills.sh search require network access and can report GitHub rate limits/timeouts; cached results do not prove remote freshness. skills.sh identifiers are resolved before collection, so uncertain collection matches are not hidden by a leaf-name heuristic. The benchmark in usage-session-analytics.md covers a synthetic warm projection only.
+
+The live skills.sh search probe returned a page-sized count and ignored offset. The discovery view currently requests up to 40 public results per keyword; narrow the keyword for other matches. Full configured repository catalogs use local pagination. No claim of exhaustive or unlimited skills.sh pagination is made.
+
+The locally rebuilt macOS app (1.3.7) was signed, installed and verified as the sole installed Ofox bundle. After the user handled the first-launch Keychain prompt, the original window remained blank; normal quit/relaunch restored the renderer. This is the previously observed startup limitation above, not an established root-cause fix. Installed-window checks then verified real repository search, partial-repository failure/retry feedback, 40 skills.sh matches for a public keyword, actual nested-path resolution before collection, and Escape focus restoration. The 7-day analysis (375 sessions / 48.1M tokens) switched back to today (15 sessions / about 5M tokens) with a matching displayed date. Native sync/query progress was visible; GUI automation round trips are not a page-latency benchmark. Some old Codex source paths no longer exist, so partial/stale-source warnings remain appropriate; the existing generation consistency check can also reject a scan during live updates. No real skill installation, Agent configuration test writes or credential changes were performed. The separate 900px light/dark checks used synthetic UI data. Windows remains unverified.

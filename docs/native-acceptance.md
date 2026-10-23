@@ -145,3 +145,11 @@ pnpm exec vitest run tests/guards/nativeAcceptance.test.ts \
 ```
 
 分享的报告只包含脱敏摘要和结果；私有 profile、测试 key、控制台身份和账本不进入源码包。交付逐客户端列出“配置写入、指令、Skills、本地 MCP、远端 MCP、实际费用”各自证据，注明 source SHA 与原生版本。Windows 源码验证包、Developer ID / 公证与升级结果另列，不用离线通过或 macOS 检查替代其验收。
+
+## MCP / Skills 十客户端范围（2026-10-22）
+
+显式设置 `resourceKinds: ["mcp", "skills"]` 时，准备器、真实 writer、证据核验、预算客户端名单与汇总均覆盖全部十个可绑定客户端，Codex / ChatGPT 复用物理目标但单独报告。省略范围仍使用原有五客户端、三类资源规则。范围不能缺少 MCP 或 Skills，不能包含重复、未知项，也不能仅在回执一侧降级。
+
+固定 CLI 驱动新增 OpenClaw、DeepSeek Harness 和 Pi；Pi 隔离第三方扩展时显式加载 `builtin:mcp`，并使用 direct MCP exposure。ChatGPT / WorkBuddy 返回 `desktopEntryRequired`，不得用其他 CLI 的结果替代桌面消费证明。每个新客户端的原生格式事件与本地回执仍需同时满足；模型自述不能证明消费。
+
+十客户端真实 writer 可在无凭据、无模型调用的隔离配置中验证。此层、原生离线识别、真实 MCP 消费和最终账单分别报告。本轮预算及未执行原因见 [资源分发验收](resource-distribution-acceptance.md)，不得用历史其他源码的原生结果替代冻结快照的结果。

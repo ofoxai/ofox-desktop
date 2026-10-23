@@ -22,7 +22,7 @@ export interface RemoteMcpEvidenceV1 {
   responseSha256?: string;
 }
 export function profilePaths(root: string, agentId: string): NativeProfilePaths;
-export function acceptancePrompt(): string;
+export function acceptancePrompt(resourceKinds?: string[]): string;
 export function prepareProfile(input: {
   root: string;
   agentId: string;
@@ -35,8 +35,14 @@ export function prepareProfile(input: {
   apex?: string;
   credential?: string;
   resourcesMode?: "fixture" | "writer";
+  resourceKinds?: string[];
 }): Promise<
-  NativeProfilePaths & { prompt: string; model: string; key: string }
+  NativeProfilePaths & {
+    prompt: string;
+    model: string;
+    key: string;
+    resourceKinds: string[];
+  }
 >;
 export function nativeInvocation(
   agentId: string,
@@ -47,6 +53,7 @@ export function nativeInvocation(
     mcpConfig?: string;
     home?: string;
     instructionPath?: string;
+    resourceKinds?: string[];
   },
 ): { args: string[]; cwd: string; shell: false };
 export function nativeEvents(

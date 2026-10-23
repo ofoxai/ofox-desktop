@@ -239,10 +239,9 @@ describe("MCP composer editing", () => {
       );
     }
     render(<Fixture />);
-    expect(screen.getByRole("button", { name: "Codex" })).toHaveAttribute(
-      "aria-pressed",
-      "false",
-    );
+    expect(
+      screen.getByRole("button", { name: "Codex / ChatGPT" }),
+    ).toHaveAttribute("aria-pressed", "false");
     expect(screen.getByRole("button", { name: "预览并应用" })).toBeDisabled();
     fireEvent.change(screen.getByLabelText("配置标识"), {
       target: { value: "chosen-id" },
@@ -251,7 +250,9 @@ describe("MCP composer editing", () => {
       target: { value: "New name" },
     });
     expect(screen.getByLabelText("配置标识")).toHaveValue("chosen-id");
-    await userEvent.click(screen.getByRole("button", { name: "Codex" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Codex / ChatGPT" }),
+    );
     await userEvent.click(screen.getByRole("button", { name: "预览并应用" }));
     expect(save).toHaveBeenCalledWith(
       expect.objectContaining({ name: "New name" }),
@@ -466,7 +467,7 @@ describe("MCP composer editing", () => {
         onToolsChange={vi.fn()}
       />,
     );
-    const target = screen.getByRole("button", { name: "Codex" });
+    const target = screen.getByRole("button", { name: "Codex / ChatGPT" });
     expect(target).toHaveAttribute("title", "请先安装原生 CLI。");
     expect(target).toHaveAccessibleDescription("请先安装原生 CLI。");
     await act(async () => {

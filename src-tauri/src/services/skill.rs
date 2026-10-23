@@ -22,6 +22,12 @@ use crate::error::format_skill_error;
 #[path = "skill_selected_download.rs"]
 mod selected_download;
 
+type PreparedSkillArchive = (
+    crate::services::library::skill_artifact::ExtractedDir,
+    Vec<(InstalledSkill, PathBuf)>,
+    String,
+);
+
 // ========== 数据结构 ==========
 
 /// Skill 同步方式
@@ -364,14 +370,14 @@ impl SkillService {
 
         // Use the same home resolver as tool configuration. Windows ignores
         // HOME, so bypassing it would also bypass the isolated test home.
-        let home = get_home_dir();
-
         Ok(match app {
             AppType::Claude => crate::config::get_claude_config_dir().join("skills"),
             AppType::Codex => crate::codex_config::get_codex_config_dir().join("skills"),
             AppType::Gemini => crate::gemini_config::get_gemini_dir().join("skills"),
             AppType::OpenCode => crate::opencode_config::get_opencode_dir().join("skills"),
-            AppType::OpenClaw => home.join(".openclaw").join("skills"),
+            AppType::OpenClaw => {
+                crate::openclaw_config::resolve_openclaw_state_dir()?.join("skills")
+            }
             AppType::Hermes => crate::hermes_config::get_hermes_dir().join("skills"),
         })
     }
@@ -449,16 +455,21 @@ impl SkillService {
         &self,
         db: &Arc<Database>,
         skill: &DiscoverableSkill,
-        current_app: &AppType,
+        _current_app: &AppType,
         expected_epoch: Option<u64>,
     ) -> Result<InstalledSkill> {
-        self.install_with_download(
-            db,
-            skill,
-            current_app,
-            expected_epoch,
-            |repo, directory| async move { self.download_selected_repo(&repo, &directory).await },
-        )
+        self.collect_with_epoch(db, skill, expected_epoch).await
+    }
+
+    pub async fn collect_with_epoch(
+        &self,
+        db: &Arc<Database>,
+        skill: &DiscoverableSkill,
+        expected_epoch: Option<u64>,
+    ) -> Result<InstalledSkill> {
+        self.install_with_download(db, skill, expected_epoch, |repo, directory| async move {
+            selected_download::download(&repo, &directory, expected_epoch.is_some()).await
+        })
         .await
     }
 
@@ -466,7 +477,6 @@ impl SkillService {
         &self,
         db: &Arc<Database>,
         skill: &DiscoverableSkill,
-        current_app: &AppType,
         expected_epoch: Option<u64>,
         download: F,
     ) -> Result<InstalledSkill>
@@ -480,8 +490,26 @@ impl SkillService {
         >,
     {
         crate::agent_env::ready().await;
-        let _ = current_app;
         crate::services::library::skill_artifact::safe_relative(&skill.directory)?;
+        // Modern discovery keys carry the full source path, including an explicit
+        // empty path for a root skill. The destination leaf is a separate concern.
+        let source_path = if expected_epoch.is_some() {
+            let (repository, path) = skill
+                .key
+                .split_once(':')
+                .ok_or_else(|| anyhow!("library.skillRepositoryInvalid"))?;
+            if !repository
+                .eq_ignore_ascii_case(&format!("{}/{}", skill.repo_owner, skill.repo_name))
+            {
+                return Err(anyhow!("library.skillRepositoryInvalid"));
+            }
+            if !path.is_empty() {
+                crate::services::library::skill_artifact::safe_relative(path)?;
+            }
+            path.to_owned()
+        } else {
+            skill.directory.clone()
+        };
         let frozen_epoch = {
             let _guard = crate::config_io::lock();
             let snapshot = db.library_snapshot()?;
@@ -516,12 +544,17 @@ impl SkillService {
         };
         let (downloaded, commit) = timeout(
             std::time::Duration::from_secs(60),
-            download(repo.clone(), skill.directory.clone()),
+            download(repo.clone(), source_path.clone()),
         )
         .await
         .map_err(|_| anyhow!("library.skillDownloadTimeout"))??;
-        let source = Self::resolve_skill_source_dir(downloaded.path(), &skill.directory)
-            .ok_or_else(|| anyhow!("library.skillSourceAmbiguous"))?;
+        let source = if expected_epoch.is_some() {
+            let exact = downloaded.path().join(&source_path);
+            (exact.is_dir() && exact.join("SKILL.md").is_file()).then_some(exact)
+        } else {
+            Self::resolve_skill_source_dir(downloaded.path(), &skill.directory)
+        }
+        .ok_or_else(|| anyhow!("library.skillSourceAmbiguous"))?;
         let directory = skill
             .directory
             .rsplit('/')
@@ -534,7 +567,16 @@ impl SkillService {
             .to_string_lossy()
             .replace('\\', "/");
         let row = InstalledSkill {
-            id: skill.key.clone(),
+            id: if expected_epoch.is_some() {
+                format!(
+                    "{}/{}:{}",
+                    repo.owner.to_ascii_lowercase(),
+                    repo.name.to_ascii_lowercase(),
+                    doc.strip_suffix("/SKILL.md").unwrap_or_default()
+                )
+            } else {
+                skill.key.clone()
+            },
             name: skill.name.clone(),
             description: Some(skill.description.clone()),
             directory,
@@ -700,9 +742,8 @@ impl SkillService {
     pub fn restore_from_backup(
         db: &Arc<Database>,
         backup_id: &str,
-        current_app: &AppType,
+        _current_app: &AppType,
     ) -> Result<InstalledSkill> {
-        let _ = current_app;
         let backup = Self::backup_path_for_id(backup_id)?;
         let metadata = Self::read_backup_metadata(&backup)?;
         crate::services::library::skill_artifact::safe_leaf(&metadata.skill.directory)?;
@@ -1003,6 +1044,16 @@ impl SkillService {
         Ok(skills)
     }
 
+    /// Strict lookup for an explicit source. Never turn offline/timeout into an empty list.
+    pub async fn discover_repository(&self, repo: &SkillRepo) -> Result<Vec<DiscoverableSkill>> {
+        timeout(
+            std::time::Duration::from_secs(30),
+            selected_download::catalog(repo),
+        )
+        .await
+        .map_err(|_| anyhow!("library.skillDownloadTimeout"))?
+    }
+
     /// 从仓库获取技能列表
     async fn fetch_repo_skills(&self, repo: &SkillRepo) -> Result<Vec<DiscoverableSkill>> {
         let (temp_dir, resolved_branch) =
@@ -1093,7 +1144,12 @@ impl SkillService {
         let meta = self.parse_skill_metadata(skill_md)?;
 
         Ok(DiscoverableSkill {
-            key: format!("{}/{}:{}", repo.owner, repo.name, directory),
+            key: format!(
+                "{}/{}:{}",
+                repo.owner.to_ascii_lowercase(),
+                repo.name.to_ascii_lowercase(),
+                doc_path.strip_suffix("/SKILL.md").unwrap_or_default()
+            ),
             name: meta.name.unwrap_or_else(|| directory.to_string()),
             description: meta.description.unwrap_or_default(),
             directory: directory.to_string(),
@@ -1117,14 +1173,17 @@ impl SkillService {
     /// 静态方法：解析技能元数据
     fn parse_skill_metadata_static(path: &Path) -> Result<SkillMetadata> {
         let content = fs::read_to_string(path)?;
+        Ok(Self::parse_skill_metadata_content(&content))
+    }
+    fn parse_skill_metadata_content(content: &str) -> SkillMetadata {
         let content = content.trim_start_matches('\u{feff}');
 
         let parts: Vec<&str> = content.splitn(3, "---").collect();
         if parts.len() < 3 {
-            return Ok(SkillMetadata {
+            return SkillMetadata {
                 name: None,
                 description: None,
-            });
+            };
         }
 
         let front_matter = parts[1].trim();
@@ -1133,7 +1192,7 @@ impl SkillService {
             description: None,
         });
 
-        Ok(meta)
+        meta
     }
 
     /// 从 SKILL.md 读取名称和描述，不存在则用目录名兜底
@@ -1265,7 +1324,11 @@ impl SkillService {
         skills.retain(|skill| {
             // 使用完整 key（owner/repo:directory）作为唯一标识
             // 这样不同仓库的同名 skill 会分开显示
-            let unique_key = skill.key.to_lowercase();
+            let unique_key = skill
+                .key
+                .split_once(':')
+                .map(|(repo, path)| format!("{}:{path}", repo.to_ascii_lowercase()))
+                .unwrap_or_else(|| skill.key.clone());
             if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(unique_key) {
                 e.insert(true);
                 true
@@ -1284,7 +1347,7 @@ impl SkillService {
         crate::services::library::skill_artifact::ExtractedDir,
         String,
     )> {
-        selected_download::download(repo, directory).await
+        selected_download::download(repo, directory, true).await
     }
 
     /// 下载仓库
@@ -1461,6 +1524,30 @@ impl SkillService {
         directory: &str,
         origin: &str,
     ) -> Result<PathBuf> {
+        Self::archive_native_entry_from(source, directory, origin, source)
+    }
+
+    /// `source` may already be in a recovery folder; resolve relative links
+    /// from their original Agent location and retain that location in metadata.
+    pub(crate) fn archive_native_entry_from(
+        source: &Path,
+        directory: &str,
+        origin: &str,
+        original: &Path,
+    ) -> Result<PathBuf> {
+        let link = fs::symlink_metadata(source)?
+            .file_type()
+            .is_symlink()
+            .then(|| fs::read_link(source))
+            .transpose()?;
+        let content = match &link {
+            Some(link) if link.is_absolute() => link.clone(),
+            Some(link) => original
+                .parent()
+                .context("native skill has no parent")?
+                .join(link),
+            None => source.to_path_buf(),
+        };
         let backup_root = Self::get_backup_dir()?;
         let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
         let slug = Self::sanitize_backup_segment(directory);
@@ -1472,7 +1559,7 @@ impl SkillService {
         }
         fs::create_dir_all(&backup_path)
             .with_context(|| format!("failed to create {}", backup_path.display()))?;
-        let (name, description) = Self::read_skill_name_desc(&source.join("SKILL.md"), directory);
+        let (name, description) = Self::read_skill_name_desc(&content.join("SKILL.md"), directory);
         let now = Utc::now().timestamp();
         let metadata = SkillBackupMetadata {
             skill: InstalledSkill {
@@ -1490,7 +1577,7 @@ impl SkillService {
                 updated_at: now,
             },
             backup_created_at: now,
-            source_path: source.to_string_lossy().to_string(),
+            source_path: original.to_string_lossy().to_string(),
             execution: None,
             origin: Some(origin.to_string()),
         };
@@ -1499,7 +1586,20 @@ impl SkillService {
         crate::config::atomic_write(&backup_path.join("meta.json"), metadata_json.as_bytes())
             .with_context(|| format!("failed to write {}", backup_path.display()))?;
         let dest = backup_path.join("skill");
-        if fs::rename(source, &dest).is_err() {
+        if let Some(link) = link {
+            // Backups contain an independent, restorable folder snapshot. Retain
+            // the original link text separately, without writing its target.
+            crate::services::library::skill_artifact::copy_verified(&content, &dest)?;
+            let entry = serde_json::json!({"path": original, "link": link});
+            crate::config::atomic_write(
+                &backup_path.join("entry.json"),
+                &serde_json::to_vec_pretty(&entry)?,
+            )?;
+            #[cfg(unix)]
+            fs::remove_file(source)?;
+            #[cfg(windows)]
+            fs::remove_dir(source)?;
+        } else if fs::rename(source, &dest).is_err() {
             crate::services::library::skill_artifact::copy_verified(source, &dest)?;
             fs::remove_dir_all(source)
                 .with_context(|| format!("failed to remove {}", source.display()))?;
@@ -1586,14 +1686,40 @@ impl SkillService {
     pub fn install_from_zip(
         db: &Arc<Database>,
         zip_path: &Path,
-        current_app: &AppType,
+        _current_app: &AppType,
     ) -> Result<Vec<InstalledSkill>> {
-        let _ = current_app;
+        let (extracted, prepared, _archive_hash) = Self::prepare_zip(zip_path)?;
+        let existing = db.get_all_installed_skills()?;
+        if prepared.iter().any(|(skill, _)| {
+            existing
+                .values()
+                .any(|row| row.directory.eq_ignore_ascii_case(&skill.directory))
+        }) {
+            return Err(anyhow!("library.skillNameConflict"));
+        }
+        let mut imported = Vec::new();
+        for (skill, source) in prepared {
+            imported.push(
+                crate::services::library::skill_resource::save_draft_with_execution(
+                    db,
+                    skill,
+                    &source,
+                    None,
+                    Some(&extracted.execution_for(&source)?),
+                )?,
+            );
+        }
+        Ok(imported)
+    }
+
+    fn prepare_zip(zip_path: &Path) -> Result<PreparedSkillArchive> {
         use std::io::Read;
         let mut bytes = Vec::new();
         fs::File::open(zip_path)?
             .take(crate::services::library::skill_artifact::MAX_BYTES + 1)
             .read_to_end(&mut bytes)?;
+        use sha2::Digest;
+        let archive_hash = format!("{:x}", sha2::Sha256::digest(&bytes));
         let extracted = crate::services::library::skill_artifact::extract_zip(&bytes, false)?;
         let dirs = Self::scan_skills_in_dir(extracted.path())?;
         if dirs.is_empty() {
@@ -1640,27 +1766,87 @@ impl SkillService {
                 source,
             ));
         }
-        let existing = db.get_all_installed_skills()?;
-        if prepared.iter().any(|(skill, _)| {
-            existing
-                .values()
-                .any(|row| row.directory.eq_ignore_ascii_case(&skill.directory))
+        Ok((extracted, prepared, archive_hash))
+    }
+
+    /// Collect archive entries independently; a name conflict cannot hide successes.
+    pub fn collect_zip(
+        db: &Arc<Database>,
+        zip_path: &Path,
+        expected_epoch: u64,
+        directories: Option<&[String]>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let _io = crate::config_io::lock();
+        if db.library_snapshot()?.machine.epoch != expected_epoch {
+            return Err(anyhow!("library.epochChanged"));
+        }
+        let (extracted, prepared, archive_hash) = Self::prepare_zip(zip_path)?;
+        if directories.is_some_and(|directories| {
+            directories.is_empty()
+                || directories.iter().any(|directory| {
+                    !prepared
+                        .iter()
+                        .any(|(skill, _)| &skill.directory == directory)
+                })
         }) {
-            return Err(anyhow!("library.skillNameConflict"));
+            return Err(anyhow!("library.skillSourceMissing"));
         }
-        let mut imported = Vec::new();
-        for (skill, source) in prepared {
-            imported.push(
-                crate::services::library::skill_resource::save_draft_with_execution(
-                    db,
-                    skill,
-                    &source,
-                    None,
-                    Some(&extracted.execution_for(&source)?),
-                )?,
-            );
+        let mut results = Vec::new();
+        for (mut skill, source) in prepared {
+            if directories.is_some_and(|directories| !directories.contains(&skill.directory)) {
+                continue;
+            }
+            let relative = source
+                .strip_prefix(extracted.path())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            skill.id = format!("archive:{archive_hash}:{relative}");
+            let result = (|| -> Result<(serde_json::Value, &'static str)> {
+                let existing = db.get_all_installed_skills()?;
+                if let Some(existing) = existing
+                    .values()
+                    .find(|row| row.directory.eq_ignore_ascii_case(&skill.directory))
+                {
+                    if existing.id == skill.id
+                        && existing.content_hash.as_deref()
+                            == Some(&Self::compute_dir_hash(&source)?)
+                    {
+                        crate::services::library::skill_resource::artifact_for(db, &existing.id)?;
+                        return Ok((
+                            crate::services::library::skill_resource::collection_receipt(
+                                db,
+                                existing,
+                                Some(expected_epoch),
+                            )?,
+                            "skipped",
+                        ));
+                    }
+                    return Err(anyhow!("library.skillNameConflict"));
+                }
+                let row =
+                    crate::services::library::skill_resource::save_draft_with_execution_at_epoch(
+                        db,
+                        skill.clone(),
+                        &source,
+                        None,
+                        Some(&extracted.execution_for(&source)?),
+                        expected_epoch,
+                    )?;
+                Ok((
+                    crate::services::library::skill_resource::collection_receipt(
+                        db,
+                        &row,
+                        Some(expected_epoch),
+                    )?,
+                    "collected",
+                ))
+            })();
+            results.push(match result {
+                Ok((collected, status)) => serde_json::json!({"name":skill.name,"directory":skill.directory,"status":status,"collected":collected}),
+                Err(error) => serde_json::json!({"name":skill.name,"directory":skill.directory,"status":if error.to_string().contains("skillNameConflict") {"conflict"} else {"failed"},"reason":if let Some(reason) = error.to_string().split_whitespace().find(|part| part.starts_with("library.") && part.chars().all(|ch| ch.is_ascii_alphabetic() || ch == '.')) { reason.to_owned() } else {"library.skillWriteFailed".into()}}),
+            });
         }
-        Ok(imported)
+        Ok(results)
     }
 
     /// 递归扫描目录查找包含 SKILL.md 的技能目录
@@ -1737,6 +1923,14 @@ impl SkillService {
         limit: usize,
         offset: usize,
     ) -> Result<SkillsShSearchResult> {
+        let query = query.trim();
+        if query.chars().count() < 2
+            || query.len() > 512
+            || !(1..=100).contains(&limit)
+            || offset > 100_000
+        {
+            return Err(anyhow!("library.skillRepositoryInvalid"));
+        }
         let client = crate::proxy::http_client::get();
 
         let url = url::Url::parse_with_params(
@@ -1761,22 +1955,18 @@ impl SkillService {
             .skills
             .into_iter()
             .filter_map(|s| {
-                let parts: Vec<&str> = s.source.splitn(2, '/').collect();
-                if parts.len() != 2 {
+                let (owner, repo) = s.source.split_once('/')?;
+                if !valid_skills_sh_source(owner, repo, &s.skill_id) {
                     return None;
                 }
-                let (owner, repo) = (parts[0].to_string(), parts[1].to_string());
-                // 过滤非 GitHub 来源（如 "skills.volces.com"、"mcp-hub.momenta.works"）
-                if owner.contains('.') || repo.contains('.') {
-                    return None;
-                }
+                let (owner, repo) = (owner.to_owned(), repo.to_owned());
                 Some(SkillsShDiscoverableSkill {
                     key: s.id,
                     name: s.name,
                     directory: s.skill_id.clone(),
                     repo_owner: owner.clone(),
                     repo_name: repo.clone(),
-                    repo_branch: "main".to_string(),
+                    repo_branch: "HEAD".to_string(),
                     installs: s.installs,
                     readme_url: Some(format!("https://github.com/{}/{}", owner, repo)),
                 })
@@ -1789,6 +1979,21 @@ impl SkillService {
             query: resp.query,
         })
     }
+}
+
+fn valid_skills_sh_source(owner: &str, repo: &str, directory: &str) -> bool {
+    !owner.is_empty()
+        && owner.len() <= 100
+        && owner
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
+        && !repo.is_empty()
+        && repo.len() <= 100
+        && ![".", ".."].contains(&repo)
+        && repo
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+        && crate::services::library::skill_artifact::safe_relative(directory).is_ok()
 }
 
 // ========== 迁移支持 ==========
@@ -1806,6 +2011,23 @@ pub fn migrate_skills_to_ssot(db: &Arc<Database>) -> Result<usize> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn skills_sh_sources_accept_dotted_repositories_but_reject_untrusted_coordinates() {
+        assert!(valid_skills_sh_source(
+            "example",
+            "skills.repo",
+            "find-skills"
+        ));
+        for (owner, repo, path) in [
+            ("host.example", "skills", "find"),
+            ("ok", "repo/extra", "find"),
+            ("ok", "..", "find"),
+            ("ok", "repo", "../outside"),
+            ("ok", "repo", "/absolute"),
+        ] {
+            assert!(!valid_skills_sh_source(owner, repo, path));
+        }
+    }
     #[test]
     #[serial_test::serial]
     fn folders_taken_back_from_agents_outlive_backup_pruning() {
@@ -1859,6 +2081,60 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    async fn root_repository_skill_uses_the_same_discovery_and_collection_identity() {
+        use std::io::{Cursor, Write};
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Arc::new(Database::memory().unwrap());
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        zip.start_file("SKILL.md", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"---\nname: root-skill\ndescription: Test\n---\nRoot skill")
+            .unwrap();
+        zip.start_file("skills/SKILL.md", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"---\nname: wrong-child\ndescription: Wrong child\n---\nChild skill")
+            .unwrap();
+        let extracted = crate::services::library::skill_artifact::extract_zip(
+            &zip.finish().unwrap().into_inner(),
+            false,
+        )
+        .unwrap();
+        let service = SkillService::new();
+        let recipe = service
+            .build_skill_from_metadata(
+                &extracted.path().join("SKILL.md"),
+                "skills",
+                "SKILL.md",
+                &SkillRepo {
+                    owner: "Fixture".into(),
+                    name: "Skills".into(),
+                    branch: "main".into(),
+                    enabled: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(recipe.key, "fixture/skills:");
+        let installed = service
+            .install_with_download(&db, &recipe, Some(0), |_, path| async move {
+                assert!(
+                    path.is_empty(),
+                    "root selection must never become a leaf lookup"
+                );
+                Ok((extracted, "a".repeat(40)))
+            })
+            .await
+            .unwrap();
+        assert_eq!(installed.id, recipe.key);
+        assert_eq!(installed.directory, "skills");
+        let artifact =
+            crate::services::library::skill_resource::artifact_for(&db, &installed.id).unwrap();
+        assert!(fs::read_to_string(artifact.join("SKILL.md"))
+            .unwrap()
+            .contains("Root skill"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
     async fn skill_collection_epoch_change_while_downloading_cannot_create_a_draft() {
         let _sandbox = crate::test_sandbox::sandbox();
         let db = Arc::new(Database::memory().unwrap());
@@ -1873,7 +2149,6 @@ mod tests {
             .install_with_download(
                 &db,
                 &epoch_collection_recipe(),
-                &AppType::Claude,
                 Some(original.machine.epoch),
                 |_, _| async {
                     let current = db.library_snapshot().unwrap();
@@ -1920,7 +2195,6 @@ mod tests {
             .install_with_download(
                 &db,
                 &epoch_collection_recipe(),
-                &AppType::Claude,
                 Some(before.machine.epoch),
                 |_, _| async {
                     called.set(true);
@@ -1954,7 +2228,7 @@ mod tests {
         let recipe = epoch_collection_recipe();
         let service = SkillService::new();
         let saved = service
-            .install_with_download(&db, &recipe, &AppType::Claude, Some(0), |_, _| async {
+            .install_with_download(&db, &recipe, Some(0), |_, _| async {
                 Ok((epoch_collection_download(), "a".repeat(40)))
             })
             .await
@@ -1964,16 +2238,10 @@ mod tests {
         let before = db.library_snapshot().unwrap();
         let called = std::cell::Cell::new(false);
         let strict = service
-            .install_with_download(
-                &db,
-                &recipe,
-                &AppType::Claude,
-                Some(before.machine.epoch),
-                |_, _| async {
-                    called.set(true);
-                    Err(anyhow!("unexpected fixture download"))
-                },
-            )
+            .install_with_download(&db, &recipe, Some(before.machine.epoch), |_, _| async {
+                called.set(true);
+                Err(anyhow!("unexpected fixture download"))
+            })
             .await;
         assert!(strict
             .unwrap_err()
@@ -1982,7 +2250,7 @@ mod tests {
         assert!(!called.get());
         assert_eq!(db.library_snapshot().unwrap(), before);
         let legacy = service
-            .install_with_download(&db, &recipe, &AppType::Claude, None, |_, _| async {
+            .install_with_download(&db, &recipe, None, |_, _| async {
                 called.set(true);
                 Err(anyhow!("unexpected fixture download"))
             })
@@ -2133,6 +2401,72 @@ mod tests {
             zip.write_all(body.as_bytes()).unwrap();
         }
         zip.finish().unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn archive_collection_reports_conflicts_and_reuses_exact_source_without_distribution() {
+        let sandbox = crate::test_sandbox::sandbox();
+        let db = Arc::new(Database::memory().unwrap());
+        let zip = sandbox.home().join("source.zip");
+        skill_zip(
+            &zip,
+            Some((
+                "nested/other/SKILL.md",
+                "---\nname: other\ndescription: Other\n---\nother",
+            )),
+        );
+        let first = SkillService::collect_zip(&db, &zip, 0, None).unwrap();
+        assert_eq!(first.len(), 2);
+        assert!(first.iter().all(|item| item["status"] == "collected"));
+        assert!(db
+            .library_snapshot()
+            .unwrap()
+            .machine
+            .assignments
+            .is_empty());
+        let second = SkillService::collect_zip(&db, &zip, 0, None).unwrap();
+        assert!(second.iter().all(|item| item["status"] == "skipped"));
+        assert_eq!(db.get_all_installed_skills().unwrap().len(), 2);
+        skill_zip(
+            &zip,
+            Some((
+                "nested/third/SKILL.md",
+                "---\nname: third\ndescription: Third\n---\nthird",
+            )),
+        );
+        let changed = SkillService::collect_zip(&db, &zip, 0, None).unwrap();
+        assert!(changed
+            .iter()
+            .any(|item| item["directory"] == "fixture" && item["status"] == "conflict"));
+        assert!(changed
+            .iter()
+            .any(|item| item["directory"] == "third" && item["status"] == "collected"));
+        assert!(SkillService::collect_zip(&db, &zip, 99, None).is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn archive_retry_does_not_skip_a_missing_or_changed_artifact() {
+        let sandbox = crate::test_sandbox::sandbox();
+        let db = Arc::new(Database::memory().unwrap());
+        let zip = sandbox.home().join("source.zip");
+        skill_zip(&zip, None);
+        let first = SkillService::collect_zip(&db, &zip, 0, None).unwrap();
+        let id = first[0]["collected"]["id"].as_str().unwrap();
+        let artifact = crate::services::library::skill_resource::artifact_for(&db, id).unwrap();
+        fs::write(artifact.join("SKILL.md"), "changed locally").unwrap();
+        let changed = SkillService::collect_zip(&db, &zip, 0, None).unwrap();
+        assert_eq!(changed[0]["status"], "failed");
+        fs::remove_dir_all(artifact).unwrap();
+        let missing = SkillService::collect_zip(&db, &zip, 0, None).unwrap();
+        assert_eq!(missing[0]["status"], "failed");
+        assert!(db
+            .library_snapshot()
+            .unwrap()
+            .machine
+            .assignments
+            .is_empty());
     }
 
     #[test]

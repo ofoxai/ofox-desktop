@@ -926,7 +926,7 @@ async fn get_single_tool_version_impl(
 /// The Codex desktop app, counted as Codex when its CLI is absent:
 /// ChatGPT.app on macOS, the Microsoft Store package on Windows.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-async fn codex_desktop_app() -> Result<Option<DesktopInstallation>, String> {
+pub(crate) async fn codex_desktop_app() -> Result<Option<DesktopInstallation>, String> {
     #[cfg(target_os = "macos")]
     return super::tool_update::codex_desktop_version().await;
     #[cfg(target_os = "windows")]
@@ -1543,7 +1543,7 @@ fn node_manager_bin_dirs(
 }
 
 /// 扫描常见路径查找 CLI
-async fn scan_cli_version(tool: &str) -> LocalDetection {
+fn cli_search_paths(tool: &str) -> (Vec<PathBuf>, String, Option<String>) {
     let home = crate::config::try_get_home_dir().unwrap_or_default();
 
     // 常见的安装路径（原生安装优先）
@@ -1634,6 +1634,22 @@ async fn scan_cli_version(tool: &str) -> LocalDetection {
     for path in std::env::split_paths(&current_path) {
         push_unique_path(&mut search_paths, path);
     }
+    (search_paths, current_path, first_error)
+}
+/// Read-only resource lists reuse every installer fallback without running a CLI.
+pub(crate) fn locate_cli(tool: &str) -> bool {
+    #[cfg(windows)]
+    if super::windows_tools::find_tool(tool).is_some() {
+        return true;
+    }
+    let (paths, _, _) = cli_search_paths(tool);
+    paths
+        .iter()
+        .flat_map(|dir| tool_executable_candidates(tool, dir))
+        .any(|path| super::tool_update::candidate_exists(&path).unwrap_or(false))
+}
+async fn scan_cli_version(tool: &str) -> LocalDetection {
+    let (search_paths, current_path, first_error) = cli_search_paths(tool);
     scan_cli_paths(tool, &search_paths, &current_path, first_error).await
 }
 
@@ -2673,6 +2689,27 @@ pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<()
 mod tests {
     use super::*;
     use crate::commands::tool_update::probe_fixture_output;
+
+    #[test]
+    #[cfg(unix)]
+    #[serial_test::serial]
+    fn resource_presence_finds_user_prefix_without_running_the_cli() {
+        use std::os::unix::fs::PermissionsExt;
+        let sandbox = crate::test_sandbox::sandbox();
+        let bin = sandbox.home().join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let marker = sandbox.home().join("unexpected-execution");
+        let tool = bin.join("ofox-fixture-agent");
+        std::fs::write(
+            &tool,
+            format!("#!/bin/sh\ntouch '{}'\nexit 99\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(locate_cli("ofox-fixture-agent"));
+        assert!(!marker.exists());
+        assert!(!sandbox.home().join(".ofox-fixture-agent").exists());
+    }
 
     /// The manifest as `release.yml` publishes it, after a release that built
     /// both platforms.

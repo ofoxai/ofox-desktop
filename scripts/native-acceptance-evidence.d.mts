@@ -26,6 +26,7 @@ export interface WriterProfileReceiptV1 {
   preparedRunId: string;
   root: string;
   agentId: string;
+  resourceKinds?: string[];
   operations: Array<{
     kind: string;
     operationId: string;
@@ -40,13 +41,19 @@ export function verifyAcceptanceIdentity(
 ): Promise<AcceptanceIdentityV1>;
 export function profileResourceEvidence(profile: {
   instructionPath: string;
+  resourceKinds?: string[];
   mcpConfig: string;
   mcpNativePath?: string;
   skillPath: string;
 }): Promise<ResourceEvidenceV1>;
 export function verifyWriterProfile(
   spec: { root: string; receiptPath: string; receiptSha256: string },
-  expected: { sourceSha: string; agentId: string; now?: number },
+  expected: {
+    sourceSha: string;
+    agentId: string;
+    resourceKinds?: string[];
+    now?: number;
+  },
 ): Promise<{
   root: string;
   receipt: WriterProfileReceiptV1;

@@ -98,10 +98,10 @@ it("opens original history from the request list with its exact query and return
   expect(screen.queryByText(/原始历史记录仅供核对/)).toBeNull();
 });
 
-it("shows native cache rebuild progress and cancels only its exact operation", async () => {
+it("keeps a native cache rebuild out of the usage layout", async () => {
   localStorage.setItem("ofox.usageTab", "sessions");
   const normal = mocks.invoke.getMockImplementation()!;
-  let progress = {
+  const progress = {
     operationId: "rebuild-a",
     state: "running",
     completedSources: 2,
@@ -110,31 +110,46 @@ it("shows native cache rebuild progress and cancels only its exact operation", a
   };
   mocks.invoke.mockImplementation(async (command: string, args: any) => {
     if (command === "get_usage_rebuild_progress") return progress;
-    if (command === "cancel_usage_rebuild") {
-      expect(args).toEqual({ operationId: "rebuild-a" });
-      progress = { ...progress, state: "cancelling" };
-      return progress;
-    }
     const result = await normal(command, args);
     if (command === "get_usage_capabilities") result.nativeRebuild = true;
     return result;
   });
   render(<Page />);
-  expect(
-    await screen.findByText("正在重建 Codex 本机统计：2 / 5 个来源"),
-  ).toBeVisible();
-  const cancel = screen.getByRole("button", { name: "取消重建" });
-  cancel.focus();
-  await userEvent.keyboard("{Enter}");
-  expect(
-    await screen.findByText("正在停止后续重建，保留原有统计…"),
-  ).toBeVisible();
-  expect(mocks.invoke).toHaveBeenCalledWith("cancel_usage_rebuild", {
-    operationId: "rebuild-a",
-  });
+  await screen.findByText(/中位数 15 · p90 20/);
+  expect(screen.queryByText(/正在重建 Codex 本机统计/)).toBeNull();
+  expect(screen.queryByRole("button", { name: "取消重建" })).toBeNull();
   expect(
     mocks.invoke.mock.calls.filter(([name]) => name === "sync_session_usage"),
   ).toHaveLength(0);
+});
+
+it("keeps automatic refresh silent while viewing a frozen request snapshot", async () => {
+  localStorage.setItem("ofox.usageTab", "requests");
+  localStorage.setItem("ofox.usageRefreshSeconds", "5");
+  const normal = mocks.invoke.getMockImplementation()!;
+  let finishRefresh!: () => void;
+  mocks.invoke.mockImplementation((command: string, args: any) =>
+    command === "refresh_local_usage"
+      ? new Promise((resolve) => {
+          finishRefresh = () => resolve({});
+        })
+      : normal(command, args),
+  );
+  const interval = vi.spyOn(window, "setInterval");
+  try {
+    render(<Page />);
+    await screen.findByRole("region", { name: "当前请求条件" });
+    const tick = interval.mock.calls.find(
+      (call) => call[1] === 5_000,
+    )![0] as () => void;
+    tick();
+    await waitFor(() => expect(finishRefresh).toBeTypeOf("function"));
+    await act(async () => finishRefresh());
+    expect(screen.queryByText(/当前分页保持原快照/)).toBeNull();
+    expect(screen.queryByText(/正在重建 Codex 本机统计/)).toBeNull();
+  } finally {
+    interval.mockRestore();
+  }
 });
 beforeEach(() => {
   queryClient.clear();
@@ -442,9 +457,12 @@ it("keeps the old snapshot and chart state when the refreshed analysis read fail
   const trend = screen.getByRole("tab", { name: "输出 Tokens" });
   const normal = mocks.invoke.getMockImplementation()!;
   mocks.invoke.mockClear();
+  let rejectRead!: (error: Error) => void;
   mocks.invoke.mockImplementation((command: string, args: any) =>
     command === "get_session_usage_analytics"
-      ? Promise.reject(new Error("usage.analytics.fixtureReadFailed"))
+      ? new Promise((_, reject) => {
+          rejectRead = reject;
+        })
       : normal(command, args),
   );
   const tick = interval.mock.calls.find(
@@ -452,7 +470,11 @@ it("keeps the old snapshot and chart state when the refreshed analysis read fail
   )![0] as () => void;
   interval.mockRestore();
   tick();
-  await screen.findByRole("alert");
+  await waitFor(() => expect(rejectRead).toBeTypeOf("function"));
+  await act(async () =>
+    rejectRead(new Error("usage.analytics.fixtureReadFailed")),
+  );
+  expect(screen.queryByText(/部分数据刷新失败/)).toBeNull();
   expect(screen.getByText(/中位数 15 · p90 20/)).toBeVisible();
   expect(trend.isConnected).toBe(true);
   expect(trend).toHaveTextContent("输出");
@@ -715,4 +737,30 @@ it("removes one project from a multi-selected ranking without altering other dim
       },
     ),
   );
+});
+
+it("shows refresh progress throughout native sync and staged analysis read", async () => {
+  localStorage.setItem("ofox.usageTab", "sessions");
+  const normal = mocks.invoke.getMockImplementation()!;
+  let finishSync!: () => void;
+  mocks.invoke.mockImplementation((command: string, args: any) =>
+    command === "sync_session_usage"
+      ? new Promise((resolve) => {
+          finishSync = () => resolve({});
+        })
+      : normal(command, args),
+  );
+  render(<Page />);
+  await screen.findByText(/中位数 15 · p90 20/);
+  const refresh = screen.getByRole("button", { name: "刷新本机数据" });
+  await userEvent.click(refresh);
+  await waitFor(() => expect(finishSync).toBeTypeOf("function"));
+  expect(refresh).toHaveAttribute("aria-busy", "true");
+  expect(screen.getByRole("tabpanel", { name: "会话分析" })).toHaveAttribute(
+    "aria-busy",
+    "true",
+  );
+  expect(screen.getByText("正在同步本机记录…")).toBeVisible();
+  await act(async () => finishSync());
+  await waitFor(() => expect(refresh).toHaveAttribute("aria-busy", "false"));
 });

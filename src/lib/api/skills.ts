@@ -149,7 +149,48 @@ export const skillsApi = {
     return await invoke("delete_skill_backup", { backupId });
   },
 
-  /** 安装 Skill（统一安装） */
+  /** Collect into the library without an implicit distribution target. */
+  async collect(
+    skill: DiscoverableSkill,
+    expectedEpoch: number,
+  ): Promise<{
+    id: string;
+    epoch: number;
+    revision: number;
+    artifactHash: string;
+  }> {
+    return await invoke("collect_library_skill", { skill, expectedEpoch });
+  },
+
+  async discoverRepository(repo: SkillRepo): Promise<DiscoverableSkill[]> {
+    return await invoke("discover_skill_repository", { repo });
+  },
+  async collectZip(
+    zipPath: string,
+    expectedEpoch: number,
+    directories?: string[],
+  ): Promise<
+    {
+      name: string;
+      directory: string;
+      status: "collected" | "skipped" | "conflict" | "failed";
+      reason?: string;
+      collected?: {
+        id: string;
+        epoch: number;
+        revision: number;
+        artifactHash: string;
+      };
+    }[]
+  > {
+    return await invoke("collect_library_skill_zip", {
+      zipPath,
+      expectedEpoch,
+      directories,
+    });
+  },
+
+  /** 安装 Skill（统一安装，兼容旧页面） */
   async installUnified(
     skill: DiscoverableSkill,
     currentApp: AppId,

@@ -517,6 +517,44 @@ export const libraryApi = {
       expectedRevision,
       expectedEpoch,
     }),
+  previewSkillDistribution: (
+    resourceId: string,
+    tools: string[],
+    adoptTools: string[],
+    expectedRevision: number,
+    expectedEpoch: number,
+  ) =>
+    invoke<LibraryOperation>("preview_library_skill_distribution", {
+      resourceId,
+      tools,
+      adoptTools,
+      expectedRevision,
+      expectedEpoch,
+    }),
+  previewSkillReplacement: (
+    resourceId: string,
+    tool: string,
+    expectedRevision: number,
+    expectedEpoch: number,
+  ) =>
+    invoke<LibraryOperation>("preview_library_skill_replacement", {
+      resourceId,
+      tool,
+      expectedRevision,
+      expectedEpoch,
+    }),
+  keepSkillNative: (
+    resourceId: string,
+    tool: string,
+    expectedRevision: number,
+    expectedEpoch: number,
+  ) =>
+    invoke<boolean>("keep_library_skill_native", {
+      resourceId,
+      tool,
+      expectedRevision,
+      expectedEpoch,
+    }),
   previewSkillAdoption: (
     resourceId: string,
     tools: string[],
@@ -663,11 +701,22 @@ export const libraryApi = {
       expectedEpoch,
       expectedHash,
     }),
-  importSkillDirectory: (source: string, directory: string, name: string) =>
-    invoke<{ id: string }>("import_library_skill_directory", {
+  importSkillDirectory: (
+    source: string,
+    directory: string,
+    name: string,
+    expectedEpoch?: number,
+  ) =>
+    invoke<{
+      id: string;
+      epoch: number;
+      revision: number;
+      artifactHash: string;
+    }>("import_library_skill_directory", {
       source,
       directory,
       name,
+      expectedEpoch,
     }),
   pickDirectory: () =>
     invoke<string | null>("pick_directory", { defaultPath: null }),

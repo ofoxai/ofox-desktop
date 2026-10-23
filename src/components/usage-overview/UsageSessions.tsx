@@ -22,6 +22,11 @@ import { UsageSourceAlert } from "./UsageSourceAlert";
 import { UsageSessionRanking } from "./UsageSessionRanking";
 import { UsageTimeInsights } from "./UsageTimeInsights";
 import { UsageDistributions } from "./UsageDistributions";
+import {
+  UsageSessionShape,
+  UsageSkillInsights,
+  UsageToolInsights,
+} from "./UsageInteractions";
 import { SegmentedControl } from "@/components/ui/segmented";
 import {
   formatActivity,
@@ -280,8 +285,8 @@ export function UsageSessions({
             onMetricChange={setMetric}
             analysis
             overview={{
-              granularity: "day",
-              series: data.series.map((day) => ({
+              granularity: data.trend?.granularity ?? "day",
+              series: (data.trend?.series ?? data.series).map((day) => ({
                 ...day,
                 start: day.startMs,
                 messages: day.messages ?? day.knownMessages ?? null,
@@ -369,6 +374,14 @@ export function UsageSessions({
               }}
             />
           </div>
+          <div className="grid min-w-0 items-stretch gap-2 min-[720px]:grid-cols-2">
+            <UsageSessionShape
+              distributions={data.distributions}
+              interactions={data.interactions}
+            />
+            <UsageSkillInsights data={data.interactions} />
+          </div>
+          <UsageToolInsights data={data.interactions} />
           <UsageDistributions
             distributions={data.distributions}
             activityLabel={activityLabel}

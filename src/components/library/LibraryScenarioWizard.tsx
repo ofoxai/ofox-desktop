@@ -1,3 +1,4 @@
+import { MCP_TABLE_TOOLS } from "./mcpTableCells";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Layers } from "lucide-react";
@@ -463,17 +464,19 @@ export function LibraryScenarioWizard({
       );
       if (snapshots.some((data) => data.epoch !== epoch))
         throw new Error("library.epochChanged");
-      const supported = [
-        "claude",
-        "codex",
-        "gemini",
-        "opencode",
-        "hermes",
-      ].filter((tool) =>
-        snapshots.every((data) =>
-          data.targets?.some(
-            (target) => target.toolId === tool && target.available,
-          ),
+      const supported = MCP_TABLE_TOOLS.filter((tool) =>
+        snapshots.every((data, index) =>
+          kinds[index] === "skills" && data.skillTargets
+            ? data.skillTargets.some(
+                (target) =>
+                  target.id === tool && target.detected && target.scopeKnown,
+              )
+            : data.targets?.some(
+                (target) =>
+                  target.toolId === tool &&
+                  target.available &&
+                  !target.disabledReason,
+              ),
         ),
       );
       if (generation.current === expectedGeneration) {

@@ -2,6 +2,7 @@
 //! Patch/scope algorithms adapted from Magpie (MIT; see MAGPIE_LICENSE).
 mod common;
 mod dsh;
+mod patch_yaml;
 mod pi;
 #[cfg(test)]
 mod tests;
@@ -625,4 +626,57 @@ fn reconcile_one(db: &Database, tool: BindableTool) -> Result<bool, String> {
         common::commit(db, tool.as_str(), &record)?;
     }
     Ok(tool_changed)
+}
+
+/// MCP uses the same lossless Cordis patch editor as model bindings. The plugin
+/// id is the map key; omit it in the value so leaf ownership can remove a row.
+pub(crate) fn parse_mcp_patch(text: &str) -> Result<Value, crate::error::AppError> {
+    fn invalid() -> crate::error::AppError {
+        crate::error::AppError::Config("library.nativeInvalid".into())
+    }
+    if !text.trim().is_empty() {
+        // Inspect YAML tokens before serde_yaml normalizes !!/URI tags. Comments
+        // and scalar documentation (including dsh's stock header) are not tags.
+        patch_yaml::validate_no_tags(text)?;
+        let yaml: serde_yaml::Value = serde_yaml::from_str(text).map_err(|_| invalid())?;
+        if let Some(rows) = yaml.as_sequence() {
+            let mut ids = std::collections::BTreeSet::new();
+            for row in rows {
+                if let Some(id) = row.get("id").and_then(serde_yaml::Value::as_str) {
+                    if !ids.insert(id) {
+                        return Err(crate::error::AppError::Config(
+                            "library.mcpScopeUnsupported".into(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    let mut root = common::parse(Some(text), Format::Patch).map_err(|_| invalid())?;
+    for value in root.as_object_mut().ok_or_else(invalid)?.values_mut() {
+        value.as_object_mut().ok_or_else(invalid)?.remove("id");
+    }
+    Ok(root)
+}
+pub(crate) fn edit_mcp_patch(
+    text: &str,
+    edits: &[(Vec<String>, Option<Value>)],
+) -> Result<String, crate::error::AppError> {
+    let mut before = parse_mcp_patch(text)?;
+    let mut after = before.clone();
+    for (path, value) in edits {
+        common::put(&mut after, path, value.clone());
+    }
+    for root in [&mut before, &mut after] {
+        for (id, value) in root.as_object_mut().unwrap() {
+            value["id"] = json!(id);
+        }
+    }
+    let result = common::render(text, Format::Patch, &before, &after)
+        .map_err(|_| crate::error::AppError::Config("library.nativeInvalid".into()))?;
+    Ok(if text.contains("\r\n") && !result.contains("\r\n") {
+        result.replace('\n', "\r\n")
+    } else {
+        result
+    })
 }

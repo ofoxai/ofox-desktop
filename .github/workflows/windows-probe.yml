@@ -16,6 +16,7 @@ on:
   push:
     branches:
       - main
+      - "release/**"
       - "feat/chatgpt-**"
       - "feat/*windows*"
   pull_request:

@@ -20,6 +20,7 @@ pub(crate) fn empty() -> ParsedSource {
         messages: vec![],
         native_activity: vec![],
         reasons: vec![],
+        tool_evidence: Default::default(),
     }
 }
 

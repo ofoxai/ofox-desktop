@@ -54,6 +54,9 @@ fn resolve(kind: &ResourceKind) -> Result<(Vec<Route>, Vec<String>), AppError> {
                     routes.push(route(&tool, "nativeMcp", path));
                 }
             }
+            for path in super::super::mcp_targets::dsh_profile_paths()? {
+                routes.push(route("dsh", "nativeMcp", path));
+            }
             // Preserve native global precedence. A later layer merges keys, not whole servers.
             let mut paths = crate::opencode_config::global_config_paths();
             if let Some(raw) = std::env::var_os("OPENCODE_CONFIG").filter(|value| !value.is_empty())
@@ -439,10 +442,7 @@ fn mcp_single(
     if route.tool == "opencode" {
         crate::services::library::native_json::validate_routing_keys(&root, &["mcp"])?;
     }
-    let servers = root
-        .get(mcp_codec::section(&route.tool))
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let servers = mcp_codec::servers(&root, &route.tool);
     Ok(Some((servers, proof)))
 }
 fn valid_spec(tool: &str, native: &Value) -> Result<Value, AppError> {
@@ -509,7 +509,10 @@ fn add_mcp(
         hash.clone(),
         None,
     );
-    if native.get("enabled").and_then(Value::as_bool) != Some(false) {
+    if native.get("enabled").and_then(Value::as_bool) != Some(false)
+        && !(source.tool_id == "workbuddy"
+            && native.get("disabled").and_then(Value::as_bool) == Some(true))
+    {
         return;
     }
     let entry = data

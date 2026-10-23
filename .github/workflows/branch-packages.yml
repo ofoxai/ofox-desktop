@@ -1,0 +1,184 @@
+name: Branch Packages
+
+# Preview installers are Actions artifacts attached to the branch commit.
+# This workflow has no signing/publishing credentials and never deploys.
+on:
+  push:
+    branches: ["release/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: branch-packages-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "20"
+  PNPM_VERSION: "10.12.3"
+
+jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  windows-probe:
+    name: Wait for Windows Probe at this SHA
+    runs-on: ubuntu-latest
+    timeout-minutes: 95
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Require the independent Windows result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+        run: node scripts/check-windows-probe.mjs --wait
+
+  build:
+    name: Package (${{ matrix.platform }})
+    needs: [verify, windows-probe]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-aarch64
+            os: macos-14
+            bundles: dmg
+          - platform: windows-x86_64
+            os: windows-2022
+            bundles: nsis
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: branch-packages-${{ matrix.platform }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            branch-packages-${{ matrix.platform }}-cargo-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Verify checkout and version; remove stale cached bundles
+        id: identity
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const version = JSON.parse(fs.readFileSync('package.json')).version;
+          const tauri = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json')).version;
+          const cargo = fs.readFileSync('src-tauri/Cargo.toml', 'utf8').match(/^version = "([^"]+)"/m)?.[1];
+          if (!/^\d+\.\d+\.\d+$/.test(version) || version !== tauri || version !== cargo) {
+            throw new Error('Version metadata differs');
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`);
+          fs.rmSync('src-tauri/target/release/bundle', { recursive: true, force: true });
+          NODE
+      - name: Build macOS preview (ad-hoc signed, no notarization)
+        if: runner.os == 'macOS'
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
+        run: |
+          test "$(uname -m)" = "arm64"
+          pnpm tauri build --bundles dmg -- --locked --bin ofox-desktop
+          codesign --verify --deep --strict 'src-tauri/target/release/bundle/macos/Ofox Desktop.app'
+      - name: Build Windows preview (unsigned)
+        if: runner.os == 'Windows'
+        run: pnpm tauri build --bundles nsis -- --locked --bin ofox-desktop
+      - name: Prepare exact installer
+        shell: bash
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const mac = process.env.RELEASE_PLATFORM === 'darwin-aarch64';
+          const directory = `src-tauri/target/release/bundle/${mac ? 'dmg' : 'nsis'}`;
+          const version = process.env.VERSION;
+          const extension = mac ? 'dmg' : 'exe';
+          const suffix = mac ? `_${version}_aarch64.dmg` : `_${version}_x64-setup.exe`;
+          const files = fs.readdirSync(directory).filter(name => name.endsWith(suffix));
+          if (files.length !== 1) throw new Error(`Expected one current ${extension} installer`);
+          fs.mkdirSync('dist-release');
+          fs.copyFileSync(path.join(directory, files[0]), `dist-release/ofox_desktop_${version}.${extension}`);
+          NODE
+      - name: Record source and SHA-256
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          VERSION: ${{ steps.identity.outputs.version }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+          SOURCE_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain --untracked-files=no)"
+          node scripts/release-artifacts.mjs record-build
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const build = JSON.parse(fs.readFileSync('build-provenance.json'));
+          fs.copyFileSync('build-provenance.json', 'dist-release/build-provenance.json');
+          fs.writeFileSync('dist-release/SHA256SUMS.txt', `${build.artifact.sha256}  ${build.artifact.file}\n`);
+          fs.writeFileSync('dist-release/README.txt', [
+            `Ofox Desktop ${build.version} branch preview`,
+            `Branch: ${process.env.SOURCE_BRANCH}`,
+            `Source commit: ${build.sourceSha}`,
+            `Platform: ${build.platform}`,
+            'macOS: ad-hoc signed, not Apple-notarized. Windows: unsigned.',
+            'This is a test installer. It uses the normal Ofox application identity and user data.',
+            'No official release was published by this workflow.',
+            '',
+          ].join('\n'));
+          NODE
+      - name: Upload branch installer
+        id: upload
+        uses: actions/upload-artifact@v6
+        with:
+          name: branch-packages-${{ matrix.platform }}-${{ github.sha }}
+          path: dist-release/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Download link
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          {
+            echo "## Branch installer: ${PLATFORM}"
+            echo ""
+            echo "Commit: ${SOURCE_SHA}"
+            echo ""
+            echo "[Download installer, SHA-256 and source record](${ARTIFACT_URL})"
+          } >> "$GITHUB_STEP_SUMMARY"

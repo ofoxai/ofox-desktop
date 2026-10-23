@@ -53,8 +53,12 @@ describe("mcpCell", () => {
       "claude",
       "codex",
       "opencode",
+      "openclaw",
       "hermes",
       "gemini",
+      "workbuddy",
+      "dsh",
+      "pi",
     ]);
   });
   it("is checked and toggleable once Ofox applied it, or while it is assigned", () => {
@@ -132,5 +136,31 @@ describe("mcpCell", () => {
       mcpCell(row([target("codex")], { appOwned: true }), "codex").state,
     ).toBe("appOwned");
     expect(mcpCell(row([]), "codex").state).toBe("unsupported");
+  });
+  it("does not mistake an old Pi config file for native MCP support", () => {
+    const scan = inventory([
+      {
+        matchedResourceIds: ["context7"],
+        sources: [{ sourceId: "pi", toolId: "pi" }],
+      },
+    ]);
+    expect(
+      mcpCell(
+        row([
+          target("pi", {
+            available: false,
+            discoveryStatus: "unsupported",
+            disabledReason: "library.piMcpVersion",
+          }),
+        ]),
+        "pi",
+        scan,
+      ),
+    ).toMatchObject({
+      state: "unsupported",
+      checked: false,
+      toggleable: false,
+      reason: "library.piMcpVersion",
+    });
   });
 });

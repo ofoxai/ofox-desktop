@@ -1,10 +1,8 @@
 import type { LibraryInventory, McpDefinition } from "@/lib/api/library";
-import { TOOL_ORDER } from "@/config/toolMeta";
+import { RESOURCE_TARGET_IDS } from "@/config/resourceTargets";
 
 /** Bindable agents Ofox can write MCP servers for, in the tools page's order. */
-export const MCP_TABLE_TOOLS = TOOL_ORDER.filter((tool) =>
-  ["claude", "codex", "gemini", "opencode", "hermes"].includes(tool),
-);
+export const MCP_TABLE_TOOLS = RESOURCE_TARGET_IDS;
 
 export type McpCellState =
   /** Ofox wrote it and it is intact. */
@@ -71,6 +69,13 @@ export function mcpCell(
       checked: true,
       toggleable: true,
     };
+  if (target.discoveryStatus === "unsupported")
+    return {
+      state: "unsupported",
+      checked: false,
+      toggleable: false,
+      reason: target.disabledReason,
+    };
   if (sources.length || target.status === "shared") {
     const off =
       sources.length > 0 && sources.every((source) => source.disabled);
@@ -81,7 +86,12 @@ export function mcpCell(
   if (sameNameElsewhere)
     return { state: "conflict", checked: false, toggleable: false };
   if (!target.available)
-    return { state: "unavailable", checked: false, toggleable: false };
+    return {
+      state: "unavailable",
+      checked: false,
+      toggleable: false,
+      reason: target.disabledReason,
+    };
   if (target.disabledReason)
     return {
       state: "unsupported",

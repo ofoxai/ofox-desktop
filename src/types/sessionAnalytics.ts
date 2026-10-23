@@ -68,7 +68,10 @@ export interface AnalyticsSession {
 }
 export interface SessionAnalytics extends UsageReceipt {
   totals: AnalyticsKpis;
+  /** Natural-day calendar data, independent of the trend's bucket size. */
   series: AnalyticsDay[];
+  /** Receipt-bound trend; absent on older backends that only expose days. */
+  trend?: { granularity: "hour" | "day"; series: AnalyticsDay[] };
   byProject: AnalyticsRank[];
   byModel: AnalyticsRank[];
   byTool: AnalyticsRank[];
@@ -98,6 +101,7 @@ export interface SessionAnalytics extends UsageReceipt {
     coverage: AnalyticsMetricCoverage;
   };
   distributions?: AnalyticsDistribution[];
+  interactions?: AnalyticsInteractions;
   analyticsSnapshotId?: string | null;
   pagingUnavailableReason?: string | null;
 }
@@ -111,7 +115,7 @@ export interface AnalyticsMetricCoverage {
   reasons: string[];
 }
 export interface AnalyticsDistribution {
-  metric: "tokens" | "messages" | "activeMs";
+  metric: "tokens" | "messages" | "activeMs" | "toolCallsPerPrompt";
   edges: number[];
   counts: number[];
   samples: number;
@@ -134,4 +138,34 @@ export interface AnalyticsPage
     managerKey?: string | null;
   };
   viewFingerprint: string;
+}
+
+export interface AnalyticsToolStat {
+  name: string;
+  category: string;
+  calls: number;
+  sessions: number;
+}
+export interface AnalyticsInteractions {
+  coverage: AnalyticsMetricCoverage;
+  tools: {
+    calls: number;
+    sessions: number;
+    top: AnalyticsToolStat[];
+    categories: AnalyticsToolStat[];
+    weeks: { start: string; calls: Record<string, number> }[];
+  };
+  skills: {
+    calls: number;
+    count: number;
+    top: {
+      name: string;
+      calls: number;
+      sessions: number;
+      last: string;
+      agents: Record<string, number>;
+      projects: { name: string; calls: number }[];
+    }[];
+  };
+  autonomy: AnalyticsDistribution;
 }

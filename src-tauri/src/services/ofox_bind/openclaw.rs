@@ -47,6 +47,7 @@ fn parse(text: &str) -> Result<Value, String> {
 }
 
 pub(crate) fn validate(text: &str) -> Result<(), String> {
+    openclaw_config::resolve_openclaw_config_path().map_err(|e| e.to_string())?;
     json_file::validate(text, LABEL)
 }
 
@@ -138,7 +139,7 @@ pub(crate) fn write_bound(
     select_route: bool,
     txn: &mut FileTxn,
 ) -> Result<(), String> {
-    let path = config_path();
+    let path = openclaw_config::resolve_openclaw_config_path().map_err(|e| e.to_string())?;
     let bound = bound_config(
         read_text(&path)?.as_deref(),
         template,

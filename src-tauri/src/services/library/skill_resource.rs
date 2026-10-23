@@ -26,6 +26,9 @@ pub struct DirectoryPlan {
     pub fallback_copy: bool,
     pub stage_path: String,
     pub backup_path: String,
+    /// Explicit replacement preserves the previous entry in user-visible backups.
+    #[serde(default)]
+    pub preserve_backup: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -63,6 +66,28 @@ pub fn spec_hash(skill: &InstalledSkill) -> Result<String, AppError> {
     Ok(io::fingerprint(Some(
         &serde_json::to_vec(&portable).map_err(|_| error("invalidSkill"))?,
     )))
+}
+pub fn collection_receipt(
+    db: &Database,
+    skill: &InstalledSkill,
+    expected_epoch: Option<u64>,
+) -> Result<serde_json::Value, AppError> {
+    let _guard = crate::config_io::lock();
+    let snapshot = db.library_snapshot()?;
+    if expected_epoch.is_some_and(|epoch| epoch != snapshot.machine.epoch) {
+        return Err(error("epochChanged"));
+    }
+    let meta = snapshot
+        .definitions
+        .skills
+        .get(&skill.id)
+        .ok_or_else(|| error("resourceMissing"))?;
+    if spec_hash(skill)? != meta.hash {
+        return Err(error("revisionChanged"));
+    }
+    Ok(
+        serde_json::json!({"id":skill.id, "epoch":snapshot.machine.epoch,"revision":meta.revision,"artifactHash":skill.content_hash}),
+    )
 }
 pub fn save_draft(
     db: &Database,
@@ -281,7 +306,7 @@ pub fn artifact_for(db: &Database, id: &str) -> Result<PathBuf, AppError> {
 }
 pub fn native_paths() -> Result<BTreeMap<String, PathBuf>, AppError> {
     let mut paths = BTreeMap::new();
-    for target in super::skill_targets::TARGETS {
+    for target in super::skill_targets::all() {
         match super::skill_targets::root(target.id) {
             Ok(path) => {
                 paths.insert(target.id.to_string(), path);
@@ -322,8 +347,7 @@ pub fn reader_paths() -> Result<BTreeMap<String, Vec<PathBuf>>, AppError> {
         .map(|(tool, path)| (tool, vec![path]))
         .collect();
     // Gemini and OpenCode find the shared folder their own way, below.
-    for target in super::skill_targets::TARGETS
-        .iter()
+    for target in super::skill_targets::all()
         .filter(|target| target.reads_shared && !["gemini", "opencode"].contains(&target.id))
     {
         if let Some(roots) = readers.get_mut(target.id) {
@@ -522,6 +546,43 @@ pub fn entry_id(path: &Path) -> Result<String, AppError> {
         .ok_or_else(|| error("invalidSkillPath"))
 }
 pub fn entry_hash_with(path: &Path, artifact: Option<&str>) -> Result<String, AppError> {
+    entry_hash_from(path, artifact, path.parent())
+}
+/// Contents are reused only within one locked read, never across scans. Link
+/// text and the physical entry identity are still checked for every receipt.
+#[derive(Default)]
+pub(crate) struct TreeHashes {
+    hashes: BTreeMap<(PathBuf, Option<String>), String>,
+}
+impl TreeHashes {
+    pub(crate) fn hash(&mut self, path: &Path, artifact: Option<&str>) -> Result<String, AppError> {
+        let real = fs::canonicalize(path).map_err(|_| error("skillUnreadable"))?;
+        let key = (real.clone(), artifact.map(str::to_owned));
+        if let Some(hash) = self.hashes.get(&key) {
+            return Ok(hash.clone());
+        }
+        let hash = if let Some(artifact) = artifact {
+            artifacts::hash_with_execution(&real, &artifacts::manifest(artifact)?)?
+        } else {
+            artifacts::tree_hash(&real)?
+        };
+        self.hashes.insert(key, hash.clone());
+        Ok(hash)
+    }
+}
+fn entry_hash_from(
+    path: &Path,
+    artifact: Option<&str>,
+    link_parent: Option<&Path>,
+) -> Result<String, AppError> {
+    entry_hash_from_with(path, artifact, link_parent, &mut TreeHashes::default())
+}
+fn entry_hash_from_with(
+    path: &Path,
+    artifact: Option<&str>,
+    link_parent: Option<&Path>,
+    hashes: &mut TreeHashes,
+) -> Result<String, AppError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok("missing".into()),
@@ -532,11 +593,11 @@ pub fn entry_hash_with(path: &Path, artifact: Option<&str>) -> Result<String, Ap
         let source = if link.is_absolute() {
             link.clone()
         } else {
-            path.parent()
+            link_parent
                 .ok_or_else(|| error("skillUnreadable"))?
                 .join(&link)
         };
-        let tree = artifacts::tree_hash(&source)?;
+        let tree = hashes.hash(&source, None)?;
         return Ok(io::fingerprint(Some(
             format!("symlink:{}:{tree}", link.to_string_lossy()).as_bytes(),
         )));
@@ -544,11 +605,7 @@ pub fn entry_hash_with(path: &Path, artifact: Option<&str>) -> Result<String, Ap
     if !metadata.is_dir() {
         return Err(error("skillEntryUnsupported"));
     }
-    let hash = if let Some(artifact) = artifact {
-        artifacts::hash_with_execution(path, &artifacts::manifest(artifact)?)?
-    } else {
-        artifacts::tree_hash(path)?
-    };
+    let hash = hashes.hash(path, artifact)?;
     Ok(io::fingerprint(Some(format!("copy:{hash}").as_bytes())))
 }
 fn predicted(hash: &str, method: &str) -> Result<String, AppError> {
@@ -569,6 +626,9 @@ fn predicted(hash: &str, method: &str) -> Result<String, AppError> {
 /// rules: a link by its own text (it may be relative, so it is not followed),
 /// a folder by its files whatever their modes.
 fn adopted_hash(path: &Path) -> Result<String, AppError> {
+    adopted_hash_with(path, &mut TreeHashes::default())
+}
+fn adopted_hash_with(path: &Path, hashes: &mut TreeHashes) -> Result<String, AppError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok("missing".into()),
@@ -582,7 +642,7 @@ fn adopted_hash(path: &Path) -> Result<String, AppError> {
         return Err(error("skillEntryUnsupported"));
     }
     Ok(io::fingerprint(Some(
-        format!("copy:{}", artifacts::tree_hash(path)?).as_bytes(),
+        format!("copy:{}", hashes.hash(path, None)?).as_bytes(),
     )))
 }
 fn adopted_link_hash(link: &str) -> String {
@@ -794,6 +854,136 @@ pub(crate) fn preview_at_adopting(
     resolvers: Option<BTreeMap<String, PathBuf>>,
     adopt: &BTreeSet<String>,
 ) -> Result<Operation, AppError> {
+    preview_scoped(db, id, roots, resolvers, adopt, false, &BTreeSet::new())
+}
+
+/// Append only these targets. Existing assignments and physical entries outside
+/// this scope are neither withdrawn, inspected for drift nor rewritten.
+pub fn preview_append(
+    db: &Database,
+    id: &str,
+    tools: &[String],
+    adopt: &[String],
+) -> Result<Operation, AppError> {
+    if tools.is_empty() || adopt.iter().any(|tool| !tools.contains(tool)) {
+        return Err(error("targetUnsupported"));
+    }
+    ensure_metadata(db)?;
+    preview_scoped(
+        db,
+        id,
+        &selected_roots(tools)?,
+        Some(resolver_paths()?),
+        &adopt.iter().cloned().collect(),
+        true,
+        &BTreeSet::new(),
+    )
+}
+
+/// Explicitly replace this agent's different copy, preserving it in backups.
+pub fn preview_replacement(db: &Database, id: &str, tool: &str) -> Result<Operation, AppError> {
+    if tool == "shared" || tool == "claude-desktop" {
+        return Err(error("targetUnsupported"));
+    }
+    ensure_metadata(db)?;
+    preview_scoped(
+        db,
+        id,
+        &selected_roots(&[tool.into()])?,
+        Some(resolver_paths()?),
+        &BTreeSet::new(),
+        true,
+        &BTreeSet::from([tool.into()]),
+    )
+}
+
+/// Let the agent keep its own files and stop managing this physical entry.
+/// No native files are written, removed, linked or followed for writes.
+pub fn keep_native(db: &Database, id: &str, tool: &str) -> Result<(), AppError> {
+    let _guard = crate::config_io::lock();
+    if tool == "shared" {
+        return Err(error("targetUnsupported"));
+    }
+    let before = db.library_snapshot()?;
+    let row = db
+        .get_installed_skill(id)?
+        .ok_or_else(|| error("resourceMissing"))?;
+    let root = selected_roots(&[tool.into()])?.remove(0).1;
+    let path = root.join(&row.directory);
+    let physical = entry_id(&path)?;
+    // An unreadable entry cannot be treated as a confirmed personal copy.
+    content_hash(&path)?;
+    let key = format!("skills:{physical}");
+    if before
+        .machine
+        .receipts
+        .get(&key)
+        .is_some_and(|receipt| receipt.resource_id != id)
+    {
+        return Err(error("sharedTargetConflict"));
+    }
+    // Keeping the native version revokes older plans for this physical entry,
+    // including a replacement preview created while it was still unowned.
+    let pending: BTreeSet<String> = before
+        .machine
+        .operations
+        .values()
+        .filter(|op| {
+            op.kind == ResourceKind::Skills
+                && !["applied", "cancelled"].contains(&op.status.as_str())
+                && op
+                    .targets
+                    .iter()
+                    .any(|target| target.physical_target == physical)
+        })
+        .map(|op| op.id.clone())
+        .collect();
+    let mut batches = BTreeSet::new();
+    for operation in pending {
+        if let Some(child) = operation.strip_prefix(super::batch::CHILD_PREFIX) {
+            let (parent, _) = child
+                .rsplit_once(':')
+                .ok_or_else(|| error("stateUnreadable"))?;
+            batches.insert(parent.to_owned());
+        } else {
+            io::cancel_operation(db, &operation)?;
+        }
+    }
+    for batch in batches {
+        let result = super::batch::cancel_batch(db, &batch)?;
+        if result["status"] != "cancelled" {
+            return Err(error("operationNeedsReview"));
+        }
+    }
+    let before = db.library_snapshot()?;
+    let mut next = before.clone();
+    if let Some(receipt) = before.machine.receipts.get(&key) {
+        if receipt.resource_id != id {
+            return Err(error("sharedTargetConflict"));
+        }
+        for owner in &receipt.owners {
+            next.machine.assignments.remove(&assignment(id, owner));
+        }
+        next.machine.receipts.remove(&key);
+    }
+    for (owner, root) in target_paths()? {
+        if entry_id(&root.join(&row.directory))? == physical {
+            next.machine.assignments.remove(&assignment(id, &owner));
+        }
+    }
+    db.library_commit(&before, &next)?;
+    Ok(())
+}
+
+fn preview_scoped(
+    db: &Database,
+    id: &str,
+    roots: &[(String, PathBuf)],
+    resolvers: Option<BTreeMap<String, PathBuf>>,
+    adopt: &BTreeSet<String>,
+    append_only: bool,
+    replace: &BTreeSet<String>,
+) -> Result<Operation, AppError> {
     let _guard = crate::config_io::lock();
     let before = db.library_snapshot()?;
     let meta = before
@@ -823,7 +1013,8 @@ pub(crate) fn preview_at_adopting(
                 .assignments
                 .iter()
                 .filter(|(key, resource)| {
-                    resource.as_str() == id
+                    !append_only
+                        && resource.as_str() == id
                         && key
                             .strip_prefix(&format!("skills:{id}:"))
                             .is_some_and(|tool| !selected.contains(tool))
@@ -843,12 +1034,9 @@ pub(crate) fn preview_at_adopting(
             .or_insert((path, BTreeSet::new()));
         group.1.insert(tool.clone());
     }
-    for receipt in before
-        .machine
-        .receipts
-        .values()
-        .filter(|receipt| receipt.kind == ResourceKind::Skills && receipt.resource_id == id)
-    {
+    for receipt in before.machine.receipts.values().filter(|receipt| {
+        !append_only && receipt.kind == ResourceKind::Skills && receipt.resource_id == id
+    }) {
         groups
             .entry(receipt.physical_target.clone())
             .or_insert((PathBuf::from(&receipt.path), BTreeSet::new()));
@@ -949,6 +1137,7 @@ pub(crate) fn preview_at_adopting(
                         .map_err(|_| error("stateUnreadable"))
                 })
                 .transpose()?;
+            let replacing = owners.iter().any(|tool| replace.contains(tool));
             let current = owned_hash(&path, previous_owned.as_ref())?;
             target.before_hash = current.clone();
             if let Some(receipt) = &old {
@@ -958,10 +1147,13 @@ pub(crate) fn preview_at_adopting(
                 if receipt.resource_id != id {
                     return Err(error("sharedTargetConflict"));
                 }
-                if current != owned.entry_hash && !(current == "missing" && owners.is_empty()) {
+                if !replacing
+                    && current != owned.entry_hash
+                    && !(current == "missing" && owners.is_empty())
+                {
                     return Err(error("skillEntryChanged"));
                 }
-            } else if current != "missing" {
+            } else if current != "missing" && !replacing {
                 // Only the same skill, in an agent asked to take it over, is kept as it is.
                 if !owners.iter().any(|tool| adopt.contains(tool))
                     || owners.contains("claude-desktop")
@@ -1018,6 +1210,7 @@ pub(crate) fn preview_at_adopting(
                 fallback_copy: sync == crate::services::skill::SyncMethod::Auto,
                 stage_path: stage.to_string_lossy().into_owned(),
                 backup_path: backup.to_string_lossy().into_owned(),
+                preserve_backup: replacing && current != "missing",
             });
             if !owners.is_empty() {
                 target.receipt = Some(Receipt {
@@ -1256,18 +1449,34 @@ pub fn cleanup(target: &TargetWrite) -> Result<(), AppError> {
         let previous = target
             .previous_receipt
             .as_ref()
-            .ok_or_else(|| error("operationNeedsReview"))?;
-        let owned: DirectoryOwned =
-            serde_json::from_str(&previous.owned_segment).map_err(|_| error("stateUnreadable"))?;
-        if owned_hash(backup, Some(&owned))? != target.before_hash {
+            .map(|receipt| {
+                serde_json::from_str::<DirectoryOwned>(&receipt.owned_segment)
+                    .map_err(|_| error("stateUnreadable"))
+            })
+            .transpose()?;
+        let backup_hash = if previous
+            .as_ref()
+            .is_some_and(|owned| owned.adopted.is_some())
+        {
+            adopted_hash(backup)?
+        } else {
+            entry_hash_from(
+                backup,
+                previous.as_ref().map(|owned| owned.artifact_hash.as_str()),
+                Path::new(&target.path).parent(),
+            )?
+        };
+        if backup_hash != target.before_hash {
             return Err(error("operationNeedsReview"));
         }
-        let user_folder = owned.adopted.is_some()
+        let user_folder = previous
+            .as_ref()
+            .is_some_and(|owned| owned.adopted.is_some())
             && !fs::symlink_metadata(backup)
                 .map_err(|_| error("operationNeedsReview"))?
                 .file_type()
                 .is_symlink();
-        if user_folder {
+        if plan.preserve_backup || user_folder {
             // The user's own folder: set it aside where it can be restored, never deleted.
             let leaf = Path::new(&target.path)
                 .file_name()
@@ -1278,8 +1487,13 @@ pub fn cleanup(target: &TargetWrite) -> Result<(), AppError> {
             } else {
                 "libraryUpdate"
             };
-            crate::services::skill::SkillService::archive_native_entry(backup, leaf, origin)
-                .map_err(|_| error("operationNeedsReview"))?;
+            crate::services::skill::SkillService::archive_native_entry_from(
+                backup,
+                leaf,
+                origin,
+                Path::new(&target.path),
+            )
+            .map_err(|_| error("operationNeedsReview"))?;
         } else {
             unlink(backup)?;
         }
@@ -1335,16 +1549,23 @@ pub fn discard_staged(target: &mut TargetWrite) -> Result<(), AppError> {
     Ok(())
 }
 pub fn receipt_intact(receipt: &Receipt) -> bool {
+    receipt_intact_with(receipt, &mut TreeHashes::default())
+}
+pub(crate) fn receipt_intact_with(receipt: &Receipt, hashes: &mut TreeHashes) -> bool {
     let path = Path::new(&receipt.path);
     validate_receipt(receipt).is_ok()
         && entry_id(path).ok().as_deref() == Some(receipt.physical_target.as_str())
         && serde_json::from_str::<DirectoryOwned>(&receipt.owned_segment)
             .ok()
             .is_some_and(|owned| {
-                owned_hash(path, Some(&owned)).ok().as_ref() == Some(&owned.entry_hash)
-                    // A taken-over link is checked by its text; its files must match too.
+                let entry = if owned.adopted.is_some() {
+                    adopted_hash_with(path, hashes)
+                } else {
+                    entry_hash_from_with(path, Some(&owned.artifact_hash), path.parent(), hashes)
+                };
+                entry.ok().as_ref() == Some(&owned.entry_hash)
                     && (owned.adopted.is_none()
-                        || content_hash(path).ok().as_ref() == Some(&owned.artifact_hash))
+                        || hashes.hash(path, None).ok().as_ref() == Some(&owned.artifact_hash))
             })
 }
 
@@ -1352,6 +1573,24 @@ pub fn receipt_intact(receipt: &Receipt) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    #[cfg(unix)]
+    fn read_hashes_reuse_alias_contents_but_next_scan_observes_external_edits() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("SKILL.md"), "first").unwrap();
+        let mut hashes = TreeHashes::default();
+        let expected = hashes.hash(&source, None).unwrap();
+        for n in 0..9 {
+            let link = temp.path().join(format!("alias-{n}"));
+            std::os::unix::fs::symlink(&source, &link).unwrap();
+            assert_eq!(hashes.hash(&link, None).unwrap(), expected);
+        }
+        assert_eq!(hashes.hashes.len(), 1);
+        fs::write(source.join("SKILL.md"), "changed").unwrap();
+        assert_ne!(TreeHashes::default().hash(&source, None).unwrap(), expected);
+    }
     #[test]
     #[serial_test::serial]
     fn skill_draft_epoch_guard_rejects_an_old_download_before_publication() {
@@ -1789,6 +2028,48 @@ mod tests {
     }
     #[test]
     #[serial_test::serial]
+    fn append_skill_preserves_previous_assignments_and_ignores_their_drift() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        copy_mode();
+        let db = Database::memory().unwrap();
+        let skill = draft(&db, "body");
+        let first = preview_append(&db, &skill.id, &["claude".into()], &[]).unwrap();
+        assert_eq!(
+            io::apply_operation(&db, &first.id).unwrap().status,
+            "applied"
+        );
+        let old_path = native_paths().unwrap()["claude"].join("fixture/SKILL.md");
+        fs::write(&old_path, "external user modification").unwrap();
+        let before = db.library_snapshot().unwrap();
+        let second = preview_append(&db, &skill.id, &["pi".into()], &[]).unwrap();
+        assert_eq!(second.targets.len(), 1);
+        assert_eq!(second.targets[0].tools, vec!["pi"]);
+        assert!(!second
+            .desired_updates
+            .contains_key(&assignment(&skill.id, "claude")));
+        assert_eq!(
+            io::apply_operation(&db, &second.id).unwrap().status,
+            "applied"
+        );
+        let after = db.library_snapshot().unwrap();
+        assert_eq!(
+            after.machine.assignments[&assignment(&skill.id, "claude")],
+            skill.id
+        );
+        assert_eq!(
+            after.machine.assignments[&assignment(&skill.id, "pi")],
+            skill.id
+        );
+        assert_eq!(
+            fs::read_to_string(old_path).unwrap(),
+            "external user modification"
+        );
+        for (key, receipt) in before.machine.receipts {
+            assert_eq!(after.machine.receipts[&key], receipt);
+        }
+    }
+    #[test]
+    #[serial_test::serial]
     fn skills_reach_every_registered_agent_and_withdraw_cleanly() {
         let _sandbox = crate::test_sandbox::sandbox();
         let db = Database::memory().unwrap();
@@ -1908,6 +2189,217 @@ mod tests {
             "the user's own"
         );
     }
+    #[test]
+    #[serial_test::serial]
+    fn explicit_replacement_backs_up_different_copies_and_keep_never_rewrites_them() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        copy_mode();
+        let db = Database::memory().unwrap();
+        let skill = draft(&db, "library");
+        for tool in super::super::extension_targets::TOOLS {
+            let native = native_paths().unwrap()[*tool].join("fixture");
+            user_folder(&native, "personal");
+            assert_eq!(
+                skill_target(&db, &skill, tool)["disabledReason"],
+                "library.skillNameConflict"
+            );
+            let normal = preview_append(&db, &skill.id, &[(*tool).into()], &[]).unwrap();
+            assert_eq!(normal.targets[0].status, "conflict");
+            keep_native(&db, &skill.id, tool).unwrap();
+            assert_eq!(
+                fs::read_to_string(native.join(".hidden")).unwrap(),
+                "personal"
+            );
+            let replace = preview_replacement(&db, &skill.id, tool).unwrap();
+            assert_eq!(replace.targets[0].status, "pending");
+            assert_eq!(
+                io::apply_operation(&db, &replace.id).unwrap().status,
+                "applied"
+            );
+            assert_eq!(
+                fs::read_to_string(native.join(".hidden")).unwrap(),
+                "library"
+            );
+            fs::write(native.join(".hidden"), "personal edit").unwrap();
+            keep_native(&db, &skill.id, tool).unwrap();
+            assert_eq!(
+                fs::read_to_string(native.join(".hidden")).unwrap(),
+                "personal edit"
+            );
+            let snapshot = db.library_snapshot().unwrap();
+            assert!(!snapshot
+                .machine
+                .assignments
+                .contains_key(&assignment(&skill.id, tool)));
+            assert!(!snapshot
+                .machine
+                .receipts
+                .contains_key(&format!("skills:{}", entry_id(&native).unwrap())));
+        }
+        let backups = crate::services::skill::SkillService::list_backups().unwrap();
+        assert_eq!(backups.len(), super::super::extension_targets::TOOLS.len());
+        for backup in backups {
+            assert_eq!(
+                fs::read_to_string(Path::new(&backup.backup_path).join("skill/.hidden")).unwrap(),
+                "personal"
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn keeping_an_unowned_copy_revokes_older_replacement_and_batch_previews() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let skill = draft(&db, "library");
+        let native = native_paths().unwrap()["codex"].join("fixture");
+        user_folder(&native, "personal");
+        let replacement = preview_replacement(&db, &skill.id, "codex").unwrap();
+        let batch = super::super::batch::preview_batch(
+            &db,
+            ResourceKind::Skills,
+            vec![super::super::batch::BatchResource {
+                resource_id: skill.id.clone(),
+                expected_revision: 1,
+                add_tools: vec![],
+                withdraw_tools: vec![],
+            }],
+            vec!["codex".into()],
+            super::super::batch::BatchAction::Apply,
+            0,
+        )
+        .unwrap();
+        keep_native(&db, &skill.id, "codex").unwrap();
+        assert!(io::apply_operation(&db, &replacement.id)
+            .unwrap_err()
+            .to_string()
+            .contains("operationCancelled"));
+        assert!(
+            super::super::batch::run_batch(&db, batch["operationId"].as_str().unwrap()).is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(native.join(".hidden")).unwrap(),
+            "personal"
+        );
+        assert!(db
+            .library_snapshot()
+            .unwrap()
+            .machine
+            .assignments
+            .is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn replacement_rechecks_native_files_and_preserves_edited_managed_copies() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        copy_mode();
+        let db = Database::memory().unwrap();
+        let skill = draft(&db, "library");
+        let native = native_paths().unwrap()["codex"].join("fixture");
+        user_folder(&native, "personal");
+        let stale = preview_replacement(&db, &skill.id, "codex").unwrap();
+        fs::write(native.join(".hidden"), "new edit").unwrap();
+        assert_ne!(
+            io::apply_operation(&db, &stale.id).unwrap().status,
+            "applied"
+        );
+        assert_eq!(
+            fs::read_to_string(native.join(".hidden")).unwrap(),
+            "new edit"
+        );
+        let current = preview_replacement(&db, &skill.id, "codex").unwrap();
+        assert_eq!(
+            io::apply_operation(&db, &current.id).unwrap().status,
+            "applied"
+        );
+        fs::write(native.join(".hidden"), "managed edit").unwrap();
+        let again = preview_replacement(&db, &skill.id, "codex").unwrap();
+        assert_eq!(
+            io::apply_operation(&db, &again.id).unwrap().status,
+            "applied"
+        );
+        let backups = crate::services::skill::SkillService::list_backups().unwrap();
+        let bodies: BTreeSet<String> = backups
+            .iter()
+            .map(|backup| {
+                fs::read_to_string(Path::new(&backup.backup_path).join("skill/.hidden")).unwrap()
+            })
+            .collect();
+        assert_eq!(
+            bodies,
+            BTreeSet::from(["new edit".into(), "managed edit".into()])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn replacing_personal_links_saves_restorable_snapshots_and_keeps_external_targets() {
+        let sandbox = crate::test_sandbox::sandbox();
+        copy_mode();
+        let db = Database::memory().unwrap();
+        let skill = draft(&db, "library");
+        let external = sandbox.home().join("external");
+        user_folder(&external, "external");
+        for relative in [false, true] {
+            let native = native_paths().unwrap()["codex"].join("fixture");
+            fs::create_dir_all(native.parent().unwrap()).unwrap();
+            if native.exists() {
+                fs::remove_dir_all(&native).unwrap();
+            }
+            let link = if relative {
+                PathBuf::from("../../external")
+            } else {
+                external.clone()
+            };
+            std::os::unix::fs::symlink(&link, &native).unwrap();
+            let op = preview_replacement(&db, &skill.id, "codex").unwrap();
+            assert_eq!(io::apply_operation(&db, &op.id).unwrap().status, "applied");
+            assert_eq!(
+                fs::read_to_string(external.join(".hidden")).unwrap(),
+                "external"
+            );
+            let backups = crate::services::skill::SkillService::list_backups().unwrap();
+            let backup = backups
+                .iter()
+                .find(|backup| {
+                    let entry: serde_json::Value = serde_json::from_slice(
+                        &fs::read(Path::new(&backup.backup_path).join("entry.json")).unwrap(),
+                    )
+                    .unwrap();
+                    entry["link"] == link.to_string_lossy().as_ref()
+                })
+                .unwrap();
+            let folder = Path::new(&backup.backup_path).join("skill");
+            assert!(!fs::symlink_metadata(&folder)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert_eq!(
+                fs::read_to_string(folder.join(".hidden")).unwrap(),
+                "external"
+            );
+            let metadata: serde_json::Value = serde_json::from_slice(
+                &fs::read(Path::new(&backup.backup_path).join("meta.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(metadata["sourcePath"], native.to_string_lossy().as_ref());
+            let restored_db = std::sync::Arc::new(Database::memory().unwrap());
+            let restored = crate::services::skill::SkillService::restore_from_backup(
+                &restored_db,
+                &backup.backup_id,
+                &crate::app_config::AppType::Codex,
+            )
+            .unwrap();
+            let artifact = artifact_for(&restored_db, &restored.id).unwrap();
+            assert_eq!(
+                fs::read_to_string(artifact.join(".hidden")).unwrap(),
+                "external"
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     #[serial_test::serial]

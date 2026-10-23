@@ -78,6 +78,8 @@ thiserror = "2.0"
 anyhow = "1.0"
 zip = "2.2"
 serde_yaml = "0.9"
+# Token-level tag checks use the same parser already pinned by serde_yaml.
+unsafe-libyaml = "0.2.11"
 zstd = "0.13"
 tempfile = "3"
 url = "2.5"
@@ -87,7 +89,7 @@ base64 = "0.22"
 # 生成"<tool> on <host>"风格的 ofox API key 默认名字——在 ofox console 里
 # 用户一眼看出这把 key 是哪个工具 / 哪台机器创建的。多设备场景靠 host 区分。
 hostname = "0.4"
-rusqlite = { version = "0.31", features = ["bundled", "backup", "hooks"] }
+rusqlite = { version = "0.31", features = ["bundled", "backup", "hooks", "modern_sqlite"] }
 indexmap = { version = "2", features = ["serde"] }
 rust_decimal = "1.33"
 uuid = { version = "1.11", features = ["v4"] }

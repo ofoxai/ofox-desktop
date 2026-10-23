@@ -45,6 +45,44 @@ it("labels input and output without a theme-dependent light/dark claim", () => {
   expect(screen.getByText("输出")).toBeVisible();
 });
 
+it("distinguishes repeated local hours at a daylight-saving fold", () => {
+  const format = Date.prototype.toLocaleString;
+  const spy = vi
+    .spyOn(Date.prototype, "toLocaleString")
+    .mockImplementation(function (this: Date, locales, options) {
+      return format.call(this, locales, {
+        ...options,
+        timeZone: "America/New_York",
+      });
+    });
+  try {
+    render(
+      <UsageBars
+        analysis
+        overview={{
+          granularity: "hour",
+          series: ["2026-11-01T05:00:00Z", "2026-11-01T06:00:00Z"].map(
+            (at) => ({
+              start: Date.parse(at),
+              inputTokens: 10,
+              outputTokens: 0,
+            }),
+          ),
+        }}
+      />,
+    );
+    expect(screen.getByRole("heading", { name: "每小时趋势" })).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: /GMT-4.*10 Tokens/ }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: /GMT-5.*10 Tokens/ }),
+    ).toBeVisible();
+  } finally {
+    spy.mockRestore();
+  }
+});
+
 it("offers inline analysis metrics and skips unavailable message/activity tabs by keyboard", async () => {
   render(
     <UsageBars
@@ -72,4 +110,33 @@ it("offers inline analysis metrics and skips unavailable message/activity tabs b
   await userEvent.keyboard("{End}");
   expect(screen.getByRole("tab", { name: "现价估算" })).toHaveFocus();
   expect(screen.getByRole("tabpanel")).toBeVisible();
+});
+
+it("keeps exact keyboard values and missing days when a long trend becomes continuous", async () => {
+  const series = Array.from({ length: 40 }, (_, index) => ({
+    start: 1791993600000 + index * 86400000,
+    inputTokens: index,
+    outputTokens: 1,
+    messages: index === 2 ? null : index,
+    estimate: undefined,
+  }));
+  render(
+    <UsageBars
+      analysis
+      selectedMetric="messages"
+      overview={{ granularity: "day", series }}
+    />,
+  );
+  const points = screen
+    .getAllByRole("button")
+    .filter((button) => button.getAttribute("aria-label")?.includes(" · "));
+  points[0].focus();
+  await userEvent.keyboard("{ArrowRight}{ArrowRight}");
+  expect(points[2]).toHaveFocus();
+  expect(points[2]).toHaveAccessibleName(/— 消息数/);
+  await userEvent.keyboard("{End}");
+  expect(points[39]).toHaveFocus();
+  expect(points[39]).toHaveAccessibleName(/39 消息数/);
+  await userEvent.click(screen.getByText("查看趋势数据表"));
+  expect(screen.getByRole("table")).toHaveTextContent("39 消息数");
 });

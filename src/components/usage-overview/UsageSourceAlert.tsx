@@ -14,7 +14,7 @@ export function UsageSourceAlert({
   pricing?: UsagePricingCoverage;
   onRetry?: () => void;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const failed = [
     ...new Set(
       (sources ?? [])
@@ -22,27 +22,53 @@ export function UsageSourceAlert({
         .map((source) => TOOL_META[source.toolId]?.label ?? source.toolId),
     ),
   ];
-  const priceUnavailable = ["invalid", "unsupported", "missing"].includes(
-    pricing?.catalogState ?? "",
-  );
+  const priceUnavailable =
+    ["invalid", "unsupported", "missing"].includes(
+      pricing?.catalogState ?? "",
+    ) && !pricing?.officialCatalogVersion;
   const unpriced = pricing?.unpricedModelIds.length ?? 0;
-  if (!failed.length && !priceUnavailable && !unpriced) return null;
+  const official = pricing?.officialModelIds?.length ?? 0;
+  if (!failed.length && !priceUnavailable && !unpriced && !official)
+    return null;
   return (
     <div
       role="status"
-      className="flex flex-wrap items-center gap-x-3 gap-y-1 text-note text-warn"
+      className="flex flex-wrap items-center gap-x-3 gap-y-1 text-note text-ink-muted"
     >
       {!!failed.length && (
-        <span>
+        <span className="text-warn">
           {t("usageWorkbench.sourcesFailed", { tools: failed.join(" · ") })}
         </span>
       )}
       {priceUnavailable ? (
-        <span>{t("usageWorkbench.priceUnavailable")}</span>
+        <span className="text-warn">
+          {t("usageWorkbench.priceUnavailable")}
+        </span>
       ) : (
         !!unpriced && (
-          <span>{t("usageWorkbench.pricePartial", { count: unpriced })}</span>
+          <span className="text-warn">
+            {t("usageWorkbench.pricePartial", { count: unpriced })}
+          </span>
         )
+      )}
+      {!!official && (
+        <span
+          title={[
+            t("usageWorkbench.officialPriceSource"),
+            ...(pricing?.officialCatalogUpdatedAtMs
+              ? [
+                  new Date(pricing.officialCatalogUpdatedAtMs).toLocaleString(
+                    i18n.language,
+                  ),
+                ]
+              : []),
+            pricing?.officialModelIds?.join(" · "),
+          ]
+            .filter(Boolean)
+            .join("\n")}
+        >
+          {t("usageWorkbench.officialFallback", { count: official })}
+        </span>
       )}
       {!!failed.length && onRetry && (
         <Button variant="ghost" className="h-6 px-2" onClick={onRetry}>

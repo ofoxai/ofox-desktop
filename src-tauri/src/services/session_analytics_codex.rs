@@ -128,6 +128,17 @@ pub(super) fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
             .checked_add(1)
             .ok_or_else(|| invalid("nativeTokenOverflow"))?;
     }
+    let mut tool_scan = native.tools.clone();
+    tool_scan.incomplete |= !native.complete
+        || native.reasons.iter().any(|r| {
+            matches!(
+                r.as_str(),
+                "unprovenInheritedBoundary"
+                    | "projectionBudgetExceeded"
+                    | "sourceLineBudgetExceeded"
+            )
+        });
+    entry.tool_evidence.attach(&session_key, &tool_scan);
     entry.messages = native
         .messages
         .iter()

@@ -287,6 +287,19 @@ pub fn native_paths() -> Result<BTreeMap<String, PathBuf>, AppError> {
             crate::gemini_config::get_gemini_settings_path(),
         ),
         ("opencode".into(), opencode),
+        ("openclaw".into(), super::mcp_targets::openclaw_path()?),
+        ("workbuddy".into(), super::mcp_targets::workbuddy_path()?),
+        (
+            "pi".into(),
+            super::mcp_targets::native_tool_path(crate::app_config::BindableTool::Pi, "mcp.json")?,
+        ),
+        (
+            "dsh".into(),
+            super::mcp_targets::native_tool_path(
+                crate::app_config::BindableTool::Dsh,
+                "cordis.patch.yml",
+            )?,
+        ),
         (
             "hermes".into(),
             crate::hermes_config::get_hermes_config_path(),
@@ -330,12 +343,19 @@ pub fn opencode_reader_paths() -> Result<Vec<PathBuf>, AppError> {
 pub fn routing_dependencies() -> Result<super::RoutingDependencies, AppError> {
     let paths = opencode_reader_paths()?
         .into_iter()
+        .chain(super::mcp_targets::dsh_profile_paths()?)
         .map(|path| Ok((path.to_string_lossy().into_owned(), io::physical_id(&path)?)))
         .collect::<Result<_, AppError>>()?;
     let environment: BTreeMap<_, _> = [
         "OPENCODE_CONFIG",
         "OPENCODE_CONFIG_DIR",
         "OPENCODE_CONFIG_CONTENT",
+        "OPENCLAW_CONFIG_PATH",
+        "OPENCLAW_STATE_DIR",
+        "OPENCLAW_HOME",
+        "WORKBUDDY_CONFIG_DIR",
+        "DSH_HOME",
+        "PI_CODING_AGENT_DIR",
     ]
     .into_iter()
     .map(|key| (key, std::env::var(key).ok()))
@@ -623,6 +643,38 @@ pub(crate) fn preview_at_adoption(
                     }
                 }
             }
+            if owners.iter().any(|tool| tool == "dsh") {
+                let name = server
+                    .server
+                    .get("serverName")
+                    .and_then(Value::as_str)
+                    .unwrap_or(id);
+                for path in super::mcp_targets::dsh_profile_paths()? {
+                    let text = io::read(&path)?;
+                    write.source_fingerprints.insert(
+                        path.to_string_lossy().into_owned(),
+                        super::SourceFingerprint {
+                            physical_target: io::physical_id(&path)?,
+                            hash: io::fingerprint(text.as_deref().map(str::as_bytes)),
+                        },
+                    );
+                    if let Some(text) = text {
+                        let root = mcp_codec::parse_native(&text, "dsh")?;
+                        if root.get(id).is_some()
+                            || mcp_codec::servers(&root, "dsh")
+                                .as_object()
+                                .is_some_and(|map| {
+                                    map.values().any(|v| {
+                                        v.pointer("/config/serverName").and_then(Value::as_str)
+                                            == Some(name)
+                                    })
+                                })
+                        {
+                            return Err(error("mcpNameConflict"));
+                        }
+                    }
+                }
+            }
             let text = io::read(&group.path)?;
             write.before_hash = io::fingerprint(text.as_deref().map(str::as_bytes));
             let owned = old
@@ -640,16 +692,16 @@ pub(crate) fn preview_at_adoption(
             let native = if owners.is_empty() {
                 None
             } else {
-                let mut native = mcp_codec::native_spec(formatter, &server.server)?;
+                let mut native = mcp_codec::native_server(formatter, id, &server.server)?;
                 if formatter == "claude" {
                     crate::claude_mcp::prepare_mcp_spec_for_path(&mut native, &group.path);
                 }
                 for tool in &owners {
-                    let mut sibling = mcp_codec::native_spec(tool, &server.server)?;
+                    let mut sibling = mcp_codec::native_server(tool, id, &server.server)?;
                     if tool == "claude" {
                         crate::claude_mcp::prepare_mcp_spec_for_path(&mut sibling, &group.path);
                     }
-                    if mcp_codec::section(tool) != mcp_codec::section(formatter)
+                    if mcp_codec::section_path(tool) != mcp_codec::section_path(formatter)
                         || sibling != native
                     {
                         return Err(error("sharedFormatConflict"));
@@ -674,13 +726,13 @@ pub(crate) fn preview_at_adoption(
                     )?
                 };
             for reader in &write.readers {
-                if mcp_codec::section(reader) != mcp_codec::section(formatter)
+                if mcp_codec::section_path(reader) != mcp_codec::section_path(formatter)
                     || mcp_codec::parse_native(&after, reader).is_err()
                 {
                     return Err(error("sharedFormatConflict"));
                 }
                 if let Some(native) = &native {
-                    let mut expected = mcp_codec::native_spec(reader, &server.server)
+                    let mut expected = mcp_codec::native_server(reader, id, &server.server)
                         .map_err(|_| error("sharedFormatConflict"))?;
                     if reader == "claude" {
                         crate::claude_mcp::prepare_mcp_spec_for_path(&mut expected, &group.path);
@@ -791,9 +843,9 @@ pub fn definition_view(server: &McpServer, snapshot: &LibrarySnapshot) -> Value 
         None if server.server.get("url").is_some() => "http",
         None => "stdio",
     };
-    let credential_state = if ["claude", "codex", "gemini", "opencode", "hermes"]
+    let credential_state = if super::mcp_targets::TOOLS
         .iter()
-        .any(|tool| mcp_codec::native_spec(tool, &server.server).is_ok())
+        .any(|tool| mcp_codec::native_server(tool, &server.id, &server.server).is_ok())
     {
         "nativeEnvironmentRequired"
     } else {

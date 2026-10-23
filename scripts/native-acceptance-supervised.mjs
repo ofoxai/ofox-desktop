@@ -9,18 +9,13 @@ import {
   rm,
 } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
+import { resourceClientIds } from "./resource-targets.mjs";
 
 const digest = (value) => createHash("sha256").update(value).digest("hex");
 const sha256 = /^[a-f0-9]{64}$/;
 const identifier = /^[a-z0-9-]{1,64}$/;
 const nanoPerCent = 10_000_000;
-const knownAgents = new Set([
-  "claude",
-  "codex",
-  "gemini",
-  "opencode",
-  "hermes",
-]);
+const knownAgents = new Set(resourceClientIds);
 const pngHeader = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 async function readPrivate(path) {
   const metadata = await lstat(path);

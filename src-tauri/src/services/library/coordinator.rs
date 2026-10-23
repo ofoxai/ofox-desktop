@@ -983,6 +983,9 @@ mod tests {
         std::fs::write(&path, &op.targets[0].after_text).unwrap();
         let reopened = Database {
             conn: std::sync::Mutex::new(rusqlite::Connection::open(&db_path).unwrap()),
+            analytics_identity: std::sync::atomic::AtomicU64::new(
+                crate::database::next_analytics_identity(),
+            ),
         };
         assert_eq!(
             recover_operation(&reopened, &op.id).unwrap().status,

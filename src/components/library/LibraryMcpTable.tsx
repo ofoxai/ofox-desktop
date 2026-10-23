@@ -1,9 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
-import { Download, MoreHorizontal, Pencil, Plus } from "lucide-react";
+import {
+  Download,
+  Loader2,
+  MoreHorizontal,
+  Pencil,
+  Plus,
+  X,
+} from "lucide-react";
 import {
   libraryApi,
+  type LibraryInventory,
   type LibraryOperation,
   type McpDefinition,
 } from "@/lib/api/library";
@@ -13,6 +21,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { SearchInput } from "@/components/ui/search-input";
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -115,6 +124,7 @@ export function LibraryMcpTable({
     routingSettings?.geminiConfigDir,
     routingSettings?.opencodeConfigDir,
     routingSettings?.hermesConfigDir,
+    routingSettings?.openclawConfigDir,
   ]);
   const query = useQuery({
     queryKey: ["library", "mcp", routingKey],
@@ -138,11 +148,44 @@ export function LibraryMcpTable({
     definitionsKey + routingKey,
     active,
   );
+  const updating =
+    query.isFetching ||
+    native.loading ||
+    (writable && !native.inventory && !native.error && !native.expired);
+  // Retain observations only for display during a rescan of the same rows and
+  // route. The old scan ticket is never used to authorize an action.
+  const displayKey = definitionsKey + routingKey;
+  const previous = useRef<{ key: string; inventory: LibraryInventory }>();
+  useEffect(() => {
+    if (native.inventory)
+      previous.current = { key: displayKey, inventory: native.inventory };
+  }, [displayKey, native.inventory]);
+  const displayedInventory =
+    native.inventory ??
+    (updating && previous.current?.key === displayKey
+      ? previous.current.inventory
+      : undefined);
+  const unknownTools = new Map(
+    (displayedInventory?.sources ?? [])
+      .filter((source) => !["ready", "missing"].includes(source.state))
+      .map((source) => [source.toolId, source.reason]),
+  );
+  const incompleteMessage = t("library.mcpTable.scanIncomplete", {
+    tools: [...unknownTools.keys()]
+      .map((tool) => toolLabel(tool, t))
+      .join(", "),
+  });
+  const searchRef = useRef<HTMLInputElement>(null);
+  const retryScan = () => {
+    searchRef.current?.focus();
+    native.rescan();
+  };
   const [search, setSearch] = useState("");
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [dialog, setDialog] = useState<DialogState | null>(null);
+  const dialogTrigger = useRef<HTMLButtonElement | null>(null);
   const [checking, setChecking] = useState(false);
   const mounted = useRef(true);
   useEffect(() => {
@@ -210,7 +253,9 @@ export function LibraryMcpTable({
     run("import", async () => {
       const inventory = native.inventory;
       if (!inventory || !importable.length)
-        return t("library.mcpTable.importNone");
+        return unknownTools.size
+          ? incompleteMessage
+          : t("library.mcpTable.importNone");
       const result = await libraryApi.importInventory(
         inventory.ticketId,
         importable.map((entry) => entry.entryId),
@@ -241,16 +286,17 @@ export function LibraryMcpTable({
       Object.fromEntries(
         MCP_TABLE_TOOLS.map((tool) => [
           tool,
-          mcpCell(row, tool, native.inventory),
+          mcpCell(row, tool, displayedInventory),
         ]),
       ) as Record<string, McpCell>,
     ]),
   );
   const cellText = (cell: McpCell, tool: string) =>
-    cell.reason && ["unsupported", "conflict"].includes(cell.state)
+    cell.reason &&
+    ["unsupported", "conflict", "unavailable"].includes(cell.state)
       ? libraryError(cell.reason, t)
       : t(`library.mcpTable.cell.${cell.state}`, {
-          tool: toolLabel(tool, t),
+          tool: tool === "codex" ? "Codex / ChatGPT" : toolLabel(tool, t),
         });
   const formTargets = MCP_TABLE_TOOLS.flatMap((tool) =>
     (data?.targets ?? []).filter((target) => target.toolId === tool),
@@ -259,6 +305,7 @@ export function LibraryMcpTable({
     <section aria-label={t("library.tabs.mcp")} className="space-y-3">
       <div className="flex flex-wrap items-center gap-3">
         <SearchInput
+          ref={searchRef}
           className="w-full max-w-sm"
           value={search}
           onChange={setSearch}
@@ -266,28 +313,82 @@ export function LibraryMcpTable({
           aria-label={t("library.mcpTable.search")}
         />
         <span className="text-sub text-ink-muted">
-          {t("library.mcpTable.count", { count: rows.length })}
+          {query.isPending
+            ? "—"
+            : t("library.mcpTable.count", { count: rows.length })}
         </span>
         <div className="ml-auto flex items-center gap-2">
           <Button
             variant="ghost"
-            disabled={!writable || !!busy || !native.inventory}
+            className="min-w-28"
+            disabled={!writable || !!busy || updating || !native.inventory}
             onClick={() => void importFromTools()}
           >
-            <Download className="mr-1 h-3.5 w-3.5" />
-            {t("library.mcpTable.import")}
-            {importable.length ? ` · ${importable.length}` : ""}
+            {updating ? (
+              <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+            ) : (
+              <Download className="mr-1 h-3.5 w-3.5" />
+            )}
+            {t(
+              updating
+                ? "library.mcpTable.scanning"
+                : "library.mcpTable.import",
+            )}
+            {!updating && importable.length ? ` · ${importable.length}` : ""}
           </Button>
           <Button
             disabled={!writable || !!busy}
-            onClick={() =>
-              setDialog({ type: "add", draft: createMcpDraft(), tools: [] })
-            }
+            onClick={(event) => {
+              dialogTrigger.current = event.currentTarget;
+              setDialog({ type: "add", draft: createMcpDraft(), tools: [] });
+            }}
           >
             <Plus className="mr-1 h-3.5 w-3.5" />
             {t("library.mcpTable.add")}
           </Button>
         </div>
+      </div>
+      <div className="flex min-h-5 items-center gap-2 text-note text-ink-muted">
+        {native.error ? (
+          <p role="alert" className="flex items-center gap-2 text-danger">
+            {t("library.mcpTable.scanFailed")}
+            <Button variant="ghost" disabled={!!busy} onClick={retryScan}>
+              {t("common.retry")}
+            </Button>
+          </p>
+        ) : native.expired ? (
+          <p role="status" className="flex items-center gap-2">
+            {t("library.inventoryExpired")}
+            <Button variant="ghost" disabled={!!busy} onClick={retryScan}>
+              {t("common.retry")}
+            </Button>
+          </p>
+        ) : !updating && unknownTools.size > 0 ? (
+          <p role="alert" className="flex items-center gap-2 text-warn">
+            {incompleteMessage}
+            <Button variant="ghost" disabled={!!busy} onClick={retryScan}>
+              {t("common.retry")}
+            </Button>
+          </p>
+        ) : (
+          <p role="status" className="flex items-center gap-2">
+            {updating && (
+              <Loader2
+                aria-hidden
+                className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
+              />
+            )}
+            {updating
+              ? t(
+                  displayedInventory
+                    ? "library.mcpTable.refreshing"
+                    : "library.mcpTable.loading",
+                )
+              : native.inventory
+                ? t("library.mcpTable.updated")
+                : ""}
+          </p>
+        )}
       </div>
       {data && !writable && (
         <p role="status" className="text-ctl text-warn">
@@ -314,7 +415,7 @@ export function LibraryMcpTable({
         </p>
       ) : (
         <div className="overflow-x-auto rounded-list border border-line bg-card">
-          <table className="w-full min-w-[640px] border-collapse text-left">
+          <table className="w-full min-w-[900px] border-collapse text-left">
             <thead className="bg-pill/60">
               <tr className="border-b border-line-2">
                 <th className="px-4 py-2 text-sub font-medium text-ink-muted">
@@ -325,20 +426,33 @@ export function LibraryMcpTable({
                     key={tool}
                     scope="col"
                     className="w-14 px-1 py-2 text-center"
-                    title={toolLabel(tool, t)}
+                    title={
+                      tool === "codex" ? "Codex / ChatGPT" : toolLabel(tool, t)
+                    }
                   >
-                    <span className="sr-only">{toolLabel(tool, t)}</span>
+                    <span className="sr-only">
+                      {tool === "codex"
+                        ? "Codex / ChatGPT"
+                        : toolLabel(tool, t)}
+                    </span>
                     <span
                       aria-hidden
                       className="flex flex-col items-center gap-0.5"
                     >
                       <ToolBadge toolId={tool} size={18} variant="plain" />
                       <span className="text-micro tabular-nums text-ink-muted">
-                        {
+                        {displayedInventory && !unknownTools.has(tool) ? (
                           rows.filter(
                             (row) => cells.get(row.id)?.[tool].checked,
                           ).length
-                        }
+                        ) : (
+                          <span
+                            className={cn(
+                              "inline-block h-2.5 w-3 rounded bg-line",
+                              updating && "motion-safe:animate-pulse",
+                            )}
+                          />
+                        )}
                       </span>
                     </span>
                   </th>
@@ -382,8 +496,32 @@ export function LibraryMcpTable({
                     )}
                   </td>
                   {MCP_TABLE_TOOLS.map((tool) => {
+                    if (!displayedInventory || unknownTools.has(tool))
+                      return (
+                        <td
+                          key={tool}
+                          className="px-1 py-2.5 text-center"
+                          title={
+                            unknownTools.get(tool)
+                              ? libraryError(unknownTools.get(tool), t)
+                              : undefined
+                          }
+                        >
+                          <span
+                            aria-label={t("library.mcpTable.unknown")}
+                            className={cn(
+                              "inline-block h-4 w-4 align-middle",
+                              updating
+                                ? "rounded bg-line motion-safe:animate-pulse"
+                                : "text-ink-faint",
+                            )}
+                          >
+                            {updating ? "" : "—"}
+                          </span>
+                        </td>
+                      );
                     const cell = cells.get(row.id)![tool];
-                    const label = `${row.name} · ${toolLabel(tool, t)} · ${cellText(cell, tool)}`;
+                    const label = `${row.name} · ${tool === "codex" ? "Codex / ChatGPT" : toolLabel(tool, t)} · ${cellText(cell, tool)}`;
                     return (
                       <td
                         key={tool}
@@ -401,7 +539,13 @@ export function LibraryMcpTable({
                             )}
                             checked={cell.checked}
                             aria-busy={busy === `${row.id}:${tool}`}
-                            disabled={!writable || !!busy || !cell.toggleable}
+                            disabled={
+                              !writable ||
+                              !!busy ||
+                              updating ||
+                              !native.inventory ||
+                              !cell.toggleable
+                            }
                             onCheckedChange={() => void toggle(row, tool, cell)}
                           />
                           {["conflict", "pending", "presentOff"].includes(
@@ -436,7 +580,8 @@ export function LibraryMcpTable({
                           name: row.name,
                         })}
                         disabled={!writable || !!busy}
-                        onClick={() =>
+                        onClick={(event) => {
+                          dialogTrigger.current = event.currentTarget;
                           setDialog({
                             type: "edit",
                             row,
@@ -445,8 +590,8 @@ export function LibraryMcpTable({
                               transport:
                                 row.transport as LibraryMcpDraft["transport"],
                             }),
-                          })
-                        }
+                          });
+                        }}
                       >
                         <Pencil className="h-3.5 w-3.5" />
                       </Button>
@@ -509,45 +654,83 @@ export function LibraryMcpTable({
           </table>
         </div>
       )}
-      {native.loading && (
-        <p className="text-note text-ink-faint">
-          {t("library.workbench2.scanning")}
-        </p>
-      )}
       <Dialog
         open={dialog?.type === "add" || dialog?.type === "edit"}
         onOpenChange={(open) => {
           if (!open && !busy) setDialog(null);
         }}
       >
-        <DialogContent className="sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>
+        <DialogContent
+          className="sm:max-w-2xl"
+          aria-describedby={undefined}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            if (!active) return;
+            const trigger = dialogTrigger.current;
+            if (trigger?.isConnected && !trigger.disabled) trigger.focus();
+            else searchRef.current?.focus();
+          }}
+        >
+          <DialogHeader className="flex-row items-center justify-between gap-3">
+            <DialogTitle className="min-w-0 flex-1">
               {dialog?.type === "edit"
                 ? t("library.mcpTable.edit", { name: dialog.row.name })
                 : t("library.mcpTable.add")}
             </DialogTitle>
+            <DialogClose asChild>
+              <Button
+                type="button"
+                variant="icon"
+                size="icon"
+                aria-label={t("common.close")}
+                disabled={!!busy}
+              >
+                <X aria-hidden className="h-4 w-4" />
+              </Button>
+            </DialogClose>
           </DialogHeader>
           <div className="min-h-0 flex-1 overflow-y-auto px-[18px] py-4">
             {dialog?.type === "add" && (
               <LibraryMcpForm
                 immediate
                 value={dialog.draft}
-                onChange={(draft) => setDialog({ ...dialog, draft })}
+                onChange={(draft) =>
+                  setDialog((previous) =>
+                    previous?.type === "add"
+                      ? {
+                          ...previous,
+                          draft: {
+                            ...draft,
+                            identifier: previous.draft.identifier,
+                          },
+                        }
+                      : previous,
+                  )
+                }
                 identifier={
                   dialog.draft.identifier ||
                   createMcpIdentifier(dialog.draft.name, existingIds)
                 }
                 onIdentifierChange={(identifier) =>
-                  setDialog({
-                    ...dialog,
-                    draft: { ...dialog.draft, identifier },
-                  })
+                  setDialog((previous) =>
+                    previous?.type === "add"
+                      ? {
+                          ...previous,
+                          draft: { ...previous.draft, identifier },
+                        }
+                      : previous,
+                  )
                 }
                 existingIdentifiers={existingIds}
                 targets={formTargets}
                 selectedTools={dialog.tools}
-                onToolsChange={(tools) => setDialog({ ...dialog, tools })}
+                onToolsChange={(tools) =>
+                  setDialog((previous) =>
+                    previous?.type === "add"
+                      ? { ...previous, tools }
+                      : previous,
+                  )
+                }
                 busy={!!busy}
                 onSave={(draft, intent) =>
                   run("add", async () => {
@@ -595,7 +778,13 @@ export function LibraryMcpTable({
                 immediate
                 initial={dialog.row}
                 value={dialog.draft}
-                onChange={(draft) => setDialog({ ...dialog, draft })}
+                onChange={(draft) =>
+                  setDialog((previous) =>
+                    previous?.type === "edit"
+                      ? { ...previous, draft }
+                      : previous,
+                  )
+                }
                 identifier={dialog.row.id}
                 existingIdentifiers={existingIds}
                 busy={!!busy}
@@ -618,6 +807,13 @@ export function LibraryMcpTable({
               />
             )}
           </div>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button type="button" variant="secondary" disabled={!!busy}>
+                {t("common.cancel")}
+              </Button>
+            </DialogClose>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
       <Dialog

@@ -297,7 +297,7 @@ describe("native acceptance safety and evidence", () => {
     const installedDependency = createRequire(
       createRequire(import.meta.url).resolve("msw/package.json"),
     );
-    const yargs = installedDependency("yargs/yargs") as (
+    const yargs = installedDependency("yargs") as (
       args: string[],
     ) => OfflineParser;
     const invocation = nativeInvocation("gemini", {

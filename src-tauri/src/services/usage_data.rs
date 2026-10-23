@@ -16,8 +16,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-const MAX_ROWS: usize = 100_000;
-const MAX_BYTES: usize = 64 * 1024 * 1024;
+// Bound the materialized read by its size, not its record count. A long local
+// history can contain many small native facts while each UI page stays small.
+// The request snapshot has a separate 128 MiB serialized cap.
+const MAX_BYTES: usize = 96 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -194,7 +196,7 @@ fn read_records(
         l.input_cost_usd,l.output_cost_usd,l.cache_read_cost_usd,l.cache_creation_cost_usd,l.total_cost_usd,
         l.is_streaming,l.latency_ms,l.first_token_ms,l.duration_ms,l.status_code,l.error_message,l.created_at,l.data_source,l.session_id
         FROM proxy_request_logs l LEFT JOIN providers p ON p.id=l.provider_id AND p.app_type=l.app_type
-        WHERE {} ORDER BY l.created_at DESC,l.request_id DESC LIMIT {}",predicates.join(" AND "),MAX_ROWS+1);
+        WHERE {} ORDER BY l.created_at DESC,l.request_id DESC",predicates.join(" AND "));
     let mut statement = conn.prepare(&sql)?;
     let rows = statement.query_map(params_from_iter(values), |row| {
         let status = row.get::<_, i64>(20)?;
@@ -256,7 +258,7 @@ fn read_records(
                 .map_err(|_| AppError::Database("usage.requests.serialize".into()))?
                 .len(),
         );
-        if result.len() >= MAX_ROWS || bytes > MAX_BYTES {
+        if bytes > MAX_BYTES {
             return Err(AppError::InvalidInput(
                 "usage.requests.snapshotTooLarge".into(),
             ));
@@ -323,11 +325,11 @@ fn native_records(input: &AnalyticsInput, query: &UsageQueryV1) -> Result<Vec<Re
         .filter(|s| s.identity.tool_id == "codex")
         .map(|s| (s.identity.key.as_str(), s))
         .collect();
+    let mut bytes = 0usize;
     input
         .facts
         .iter()
         .filter(|fact| selected_fact(fact, query))
-        .take(MAX_ROWS + 1)
         .map(|fact| {
             if chrono::DateTime::from_timestamp_millis(fact.at_ms).is_none() {
                 return Err(AppError::InvalidInput("usage.query.invalidTime".into()));
@@ -378,7 +380,21 @@ fn native_records(input: &AnalyticsInput, query: &UsageQueryV1) -> Result<Vec<Re
                 usage_complete: fact.complete,
             })
         })
-        .collect()
+        .try_fold(Vec::new(), |mut records, next| {
+            let record: Record = next?;
+            bytes = bytes.saturating_add(
+                serde_json::to_vec(&record.row)
+                    .map_err(|_| AppError::Database("usage.requests.serialize".into()))?
+                    .len(),
+            );
+            if bytes > MAX_BYTES {
+                return Err(AppError::InvalidInput(
+                    "usage.requests.snapshotTooLarge".into(),
+                ));
+            }
+            records.push(record);
+            Ok(records)
+        })
 }
 
 fn record_budget(records: &[Record]) -> Result<(), AppError> {
@@ -398,7 +414,7 @@ fn record_budget(records: &[Record]) -> Result<(), AppError> {
             )
             .saturating_add(record.row.request_id.len())
             .saturating_add(64);
-        if records.len() > MAX_ROWS || bytes > MAX_BYTES {
+        if bytes > MAX_BYTES {
             return Err(AppError::InvalidInput(
                 "usage.requests.snapshotTooLarge".into(),
             ));
@@ -430,7 +446,7 @@ pub fn read_dataset<Tz: TimeZone>(
     let mut conn = crate::database::lock_conn!(db.conn);
     let tx = conn.transaction()?;
     let catalog = PriceCatalog::load_on(&tx, apex, now_ms)?;
-    let input = session_analytics_index::projection_cache().read_on(&tx)?;
+    let input = session_analytics_index::projection_cache().read_managed_on(db, &tx)?;
     let request_filters = request_filters
         .cloned()
         .map(RequestFilters::normalized)

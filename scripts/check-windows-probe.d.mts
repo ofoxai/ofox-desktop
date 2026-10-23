@@ -1,4 +1,5 @@
 export interface ProbeRun {
+  id?: number;
   event: string;
   head_sha: string;
   status: string;
@@ -15,4 +16,15 @@ export function successfulProbe(
 export function verifyWindowsProbe(environment: {
   EXPECTED_SHA?: string;
   EXPECTED_REPOSITORY?: string;
-}): void;
+}): ProbeRun;
+export function waitForWindowsProbe(
+  environment: { EXPECTED_SHA?: string; EXPECTED_REPOSITORY?: string },
+  options?: {
+    listRuns?: (identity: {
+      sha: string;
+      repository: string;
+    }) => ProbeRun[] | Promise<ProbeRun[]>;
+    sleep?: (milliseconds: number) => unknown | Promise<unknown>;
+    maxAttempts?: number;
+  },
+): Promise<ProbeRun>;

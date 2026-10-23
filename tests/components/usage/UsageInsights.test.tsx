@@ -19,6 +19,56 @@ beforeEach(() => {
   mocks.page.mockReset();
 });
 
+it("uses receipt-bound hourly trend buckets for today and retains daily calendar data", async () => {
+  const base = sessionAnalyticsFixture();
+  const start = new Date(2026, 9, 23).getTime();
+  const hour = 3600000;
+  const data = Object.assign({}, base, {
+    appliedQuery: {
+      ...base.appliedQuery,
+      startMs: start,
+      endMs: start + 2.5 * hour,
+    },
+    trend: {
+      granularity: "hour" as const,
+      series: [0, 1, 2].map((index) => ({
+        ...base.series[0],
+        startMs: start + index * hour,
+        endMs: start + Math.min(index + 1, 2.5) * hour,
+        inputTokens: index * 10,
+        outputTokens: 0,
+        totalTokens: index * 10,
+      })),
+    },
+    series: [
+      {
+        ...base.series[0],
+        date: "2026-10-23",
+        startMs: start,
+        totalTokens: 30,
+      },
+    ],
+  });
+  const view = render(<UsageSessions data={data} active />);
+  expect(screen.getByRole("heading", { name: "每小时趋势" })).toBeVisible();
+  expect(screen.getByText("每小时")).toBeVisible();
+  const chart = screen.getByRole("tabpanel");
+  const points = within(chart).getAllByRole("button");
+  expect(points).toHaveLength(3);
+  expect(points[0]).toHaveAccessibleName(/0 Tokens/);
+  expect(points[1]).toHaveAccessibleName(/10 Tokens/);
+  expect(points[2]).toHaveAccessibleName(/20 Tokens/);
+  points[0].focus();
+  await userEvent.keyboard("{End}");
+  expect(points[2]).toHaveFocus();
+  await userEvent.click(screen.getByRole("radio", { name: "活动日历" }));
+  expect(screen.getByRole("button", { name: "2026-10-23 · 30" })).toBeVisible();
+
+  view.rerender(<UsageSessions data={base} active />);
+  expect(screen.getByRole("heading", { name: "每日趋势" })).toBeVisible();
+  expect(screen.queryByText("每小时")).toBeNull();
+});
+
 it("keeps a full ranking frozen while new analysis arrives and ignores a late previous sort", async () => {
   const data = sessionAnalyticsFixture();
   data.analyticsSnapshotId = "frozen-one";
@@ -166,7 +216,7 @@ it("labels zero activity separately from a positive duration below one minute", 
   );
   await userEvent.click(screen.getByText("会话分布"));
   expect(screen.getByText("0 分钟")).toBeVisible();
-  expect(screen.getByText("不足 1 分钟（非零）")).toBeVisible();
+  expect(screen.getByLabelText("不足 1 分钟（非零）：1 个会话")).toBeVisible();
 });
 it("does not round a verifiable positive activity interval down to a displayed zero", () => {
   const data = sessionAnalyticsFixture();

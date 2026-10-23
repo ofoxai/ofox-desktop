@@ -326,7 +326,7 @@ describe("ManageToolDialog binding lifecycle", () => {
     expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "解除绑定" }));
     const confirm = await screen.findByRole("button", {
-      name: "确认解除绑定？",
+      name: "确认解除绑定",
     });
     fireEvent.click(confirm);
     await waitFor(() => expect(unbind).toHaveBeenCalledWith("codex"));
@@ -344,12 +344,16 @@ describe("ManageToolDialog binding lifecycle", () => {
       ...emptyReport,
       warnings: [
         { code: "configAlreadyMissing", file: "~/.codex/config.toml" },
+        { code: "configAlreadyMissing", file: "~/.codex/other.toml" },
       ],
     });
     await renderLifecycleTool();
     fireEvent.click(screen.getByRole("button", { name: "解除绑定" }));
     expect(await screen.findByText(/配置已删除，不再恢复/)).toBeVisible();
-    expect(screen.getByText("~/.codex/config.toml")).toBeVisible();
+    expect(screen.getAllByText(/配置已删除，不再恢复/)).toHaveLength(1);
+    expect(screen.getByRole("note")).not.toHaveTextContent(
+      "~/.codex/config.toml",
+    );
   });
 });
 beforeAll(() => {
@@ -1296,7 +1300,7 @@ describe("ManageToolDialog unbind", () => {
     await screen.findByText("/Users/test/.codex/config.toml");
   }
 
-  it("previews what the first click will restore and that MCP/skills are kept", async () => {
+  it("previews the unbind effect without listing configuration keys", async () => {
     const preview = vi
       .spyOn(ofoxBindApi, "unbindPreview")
       .mockResolvedValue(report());
@@ -1304,19 +1308,47 @@ describe("ManageToolDialog unbind", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "解除绑定" }));
 
-    expect(await screen.findByText(/恢复到绑定前/)).toBeVisible();
-    expect(screen.getByText("~/.codex/config.toml: model")).toBeVisible();
-    expect(
-      screen.getByText("~/.codex/config.toml: model_provider"),
-    ).toBeVisible();
-    expect(screen.getByText(/MCP、skills、插件/)).toBeVisible();
+    expect(await screen.findByText(/尽量恢复绑定前的设置/)).toBeVisible();
+    expect(screen.getByRole("note")).not.toHaveTextContent(
+      "~/.codex/config.toml",
+    );
     expect(preview).toHaveBeenCalledWith("codex", []);
-    expect(
-      screen.getByRole("button", { name: "确认解除绑定？" }),
-    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "确认解除绑定" })).toBeVisible();
   });
 
-  it("says settings changed after binding are kept and lists them", async () => {
+  it("keeps unbind confirmation short and clear of the management form", async () => {
+    vi.spyOn(ofoxBindApi, "unbindPreview").mockResolvedValue(report());
+    await renderCodex();
+
+    fireEvent.click(screen.getByRole("button", { name: "解除绑定" }));
+    const confirm = await screen.findByRole("button", {
+      name: "确认解除绑定",
+    });
+    const note = screen.getByRole("note");
+    expect(note).toHaveTextContent("接入设置");
+    expect(note).not.toHaveTextContent("~/.codex/config.toml");
+    expect(screen.getByText("连通性")).not.toBeVisible();
+    expect(screen.queryByRole("button", { name: "保存" })).toBeNull();
+    expect(confirm).toBeVisible();
+  });
+
+  it("returns to management without unbinding when confirmation is cancelled", async () => {
+    vi.spyOn(ofoxBindApi, "unbindPreview").mockResolvedValue(report());
+    const unbind = vi.spyOn(bindToolsModule, "unbindTool");
+    await renderCodex();
+
+    fireEvent.click(screen.getByRole("button", { name: "解除绑定" }));
+    await screen.findByRole("button", { name: "确认解除绑定" });
+    const cancel = screen.getByRole("button", { name: "取消" });
+    expect(cancel).toHaveFocus();
+    fireEvent.click(cancel);
+
+    expect(screen.getByText("连通性")).toBeVisible();
+    expect(screen.getByRole("button", { name: "解除绑定" })).toHaveFocus();
+    expect(unbind).not.toHaveBeenCalled();
+  });
+
+  it("says settings changed after binding are kept without paths in confirmation", async () => {
     const kept = report({
       exactFiles: [],
       keptKeys: ["~/.codex/config.toml: model_reasoning_effort"],
@@ -1331,16 +1363,14 @@ describe("ManageToolDialog unbind", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "解除绑定" }));
 
-    expect(
-      await screen.findByText(/Ofox 能判断是你修改过的设置会保留/),
-    ).toBeVisible();
+    expect(await screen.findByText(/绑定后你改过的设置会保留/)).toBeVisible();
     expect(screen.queryByText(/也会恢复为绑定前的值/)).not.toBeInTheDocument();
     const listed =
       "绑定后你改过的设置保持不变：~/.codex/config.toml: model_reasoning_effort";
-    expect(screen.getByText(listed)).toBeVisible();
+    expect(screen.getByRole("note")).not.toHaveTextContent(listed);
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "确认解除绑定？" }),
+      await screen.findByRole("button", { name: "确认解除绑定" }),
     );
     await waitFor(() => expect(unbind).toHaveBeenCalledWith("codex"));
     await waitFor(() =>
@@ -1356,7 +1386,7 @@ describe("ManageToolDialog unbind", () => {
     );
     await renderCodex();
     fireEvent.click(screen.getByRole("button", { name: "解除绑定" }));
-    expect(await screen.findByText(/旧版本中绑定/)).toBeVisible();
+    expect(await screen.findByText(/旧版本没有保存原配置/)).toBeVisible();
   });
 
   it("explains that ChatGPT keeps the shared Codex config", async () => {
@@ -1379,7 +1409,7 @@ describe("ManageToolDialog unbind", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "解除绑定" }));
     fireEvent.click(
-      await screen.findByRole("button", { name: "确认解除绑定？" }),
+      await screen.findByRole("button", { name: "确认解除绑定" }),
     );
 
     await waitFor(() => expect(unbind).toHaveBeenCalledWith("codex"));
@@ -1402,13 +1432,16 @@ describe("ManageToolDialog unbind", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "解除绑定" }));
     fireEvent.click(
-      await screen.findByRole("button", { name: "确认解除绑定？" }),
+      await screen.findByRole("button", { name: "确认解除绑定" }),
     );
 
     await waitFor(() =>
       expect(error).toHaveBeenCalledWith("解除绑定失败：Error: restore failed"),
     );
     expect(onOpenChange).not.toHaveBeenCalledWith(false);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "解除绑定" })).toHaveFocus(),
+    );
   });
 });
 

@@ -3,12 +3,12 @@ export type SkillSource =
       kind: "repository";
       owner: string;
       name: string;
-      /** Absent when not typed: the saved branch, else the repository's default. */
+      /** Absent when not typed: use the repository's default branch. */
       branch?: string;
       /** A folder inside the repository, from a /tree/<ref>/<path> link. */
       path?: string;
     }
-  | { kind: "folder"; path: string; leaf: string };
+  | { kind: "folder" | "archive"; path: string; leaf: string };
 
 const PART = /^[A-Za-z0-9_.-]+$/;
 
@@ -20,7 +20,11 @@ export function parseSkillSource(input: string): SkillSource | null {
     const trimmed = text.replace(/[\\/]+$/, "");
     const leaf = trimmed.split(/[\\/]/).pop() ?? "";
     if (!leaf || leaf === "~") return null;
-    return { kind: "folder", path: trimmed, leaf };
+    return {
+      kind: /\.zip$/i.test(leaf) ? "archive" : "folder",
+      path: trimmed,
+      leaf,
+    };
   }
   const link = text.match(
     /^(?:https?:\/\/)?(?:www\.)?github\.com\/([^/\s]+)\/([^/\s?#]+?)(?:\.git)?(?:\/tree\/([^/\s?#]+)(?:\/([^?#\s]*))?)?\/?(?:[?#].*)?$/i,

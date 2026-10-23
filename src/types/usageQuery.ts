@@ -26,6 +26,8 @@ export interface UsageEstimate {
   unpricedModelIds: string[];
   unpricedRecordCount: number | null;
   additionalUnitsUnsupported: boolean;
+  /** Models estimated with manufacturer API prices when Ofox has no usable rate. */
+  officialModelIds?: string[];
 }
 
 export interface UsagePricingCoverage {
@@ -39,6 +41,9 @@ export interface UsagePricingCoverage {
   additionalUnitsUnsupported: boolean;
   catalogState?: "missing" | "ready" | "invalid" | "unsupported";
   errorCode?: string | null;
+  officialModelIds?: string[];
+  officialCatalogVersion?: string | null;
+  officialCatalogUpdatedAtMs?: number | null;
 }
 
 export interface UsageReceipt {

@@ -1,8 +1,8 @@
 //! Skills 命令层
 //!
 //! v3.10.0+ 统一管理架构：
-//! - 支持三应用开关（Claude/Codex/Gemini）
-//! - SSOT 存储在 ~/.cc-switch/skills/
+//! Legacy interfaces remain compatible. Library collection and native
+//! distribution are separate operations and do not infer a current app.
 
 use crate::app_config::{AppType, InstalledSkill, UnmanagedSkill};
 use crate::error::format_skill_error;
@@ -59,18 +59,76 @@ pub fn delete_skill_backup(backup_id: String) -> Result<bool, String> {
 /// - current_app: 兼容参数；收录不自动启用任何工具
 /// - expected_epoch: 可选的本机资源库 epoch，恢复后拒绝旧收录请求
 #[tauri::command]
+pub async fn collect_library_skill_zip(
+    zip_path: String,
+    expected_epoch: u64,
+    directories: Option<Vec<String>>,
+    app_state: State<'_, AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    crate::agent_env::ready().await;
+    SkillService::collect_zip(
+        &app_state.db,
+        std::path::Path::new(&zip_path),
+        expected_epoch,
+        directories.as_deref(),
+    )
+    .map_err(|error| {
+        let error = error.to_string();
+        if error.starts_with("library.") {
+            error
+        } else {
+            "library.skillWriteFailed".into()
+        }
+    })
+}
+
+#[tauri::command]
+pub async fn collect_library_skill(
+    skill: DiscoverableSkill,
+    expected_epoch: u64,
+    service: State<'_, SkillServiceState>,
+    app_state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let row = service
+        .0
+        .collect_with_epoch(&app_state.db, &skill, Some(expected_epoch))
+        .await
+        .map_err(|e| e.to_string())?;
+    crate::services::library::skill_resource::collection_receipt(
+        &app_state.db,
+        &row,
+        Some(expected_epoch),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn discover_skill_repository(
+    repo: SkillRepo,
+    service: State<'_, SkillServiceState>,
+) -> Result<Vec<DiscoverableSkill>, String> {
+    service
+        .0
+        .discover_repository(&repo)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn install_skill_unified(
     skill: DiscoverableSkill,
-    current_app: String,
+    current_app: Option<String>,
     expected_epoch: Option<u64>,
     service: State<'_, SkillServiceState>,
     app_state: State<'_, AppState>,
 ) -> Result<InstalledSkill, String> {
-    let app_type = parse_app_type(&current_app)?;
+    if let Some(app) = current_app {
+        parse_app_type(&app)?;
+    }
 
     service
         .0
-        .install_with_epoch(&app_state.db, &skill, &app_type, expected_epoch)
+        .collect_with_epoch(&app_state.db, &skill, expected_epoch)
         .await
         .map_err(|e| e.to_string())
 }

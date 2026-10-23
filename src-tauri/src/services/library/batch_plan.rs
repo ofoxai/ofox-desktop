@@ -15,6 +15,9 @@ fn tool_supported(kind: &ResourceKind, tool: &str) -> bool {
     if *kind == ResourceKind::Skills {
         return tool == "shared" || crate::services::library::skill_targets::find(tool).is_some();
     }
+    if *kind == ResourceKind::Mcp {
+        return crate::services::library::mcp_targets::TOOLS.contains(&tool);
+    }
     ["claude", "codex", "gemini", "opencode", "hermes"].contains(&tool)
 }
 fn planner_db(
@@ -107,11 +110,12 @@ pub(super) fn build(
         .ok_or_else(|| error("resourceMissing"))?;
         names.insert(id.clone(), name);
         let known: Vec<&str> = if kind == ResourceKind::Skills {
-            crate::services::library::skill_targets::TARGETS
-                .iter()
+            crate::services::library::skill_targets::all()
                 .map(|target| target.id)
                 .chain(["shared"])
                 .collect()
+        } else if kind == ResourceKind::Mcp {
+            crate::services::library::mcp_targets::TOOLS.to_vec()
         } else {
             vec!["claude", "codex", "gemini", "opencode", "hermes", "shared"]
         };
@@ -320,7 +324,8 @@ fn compose(
             let server = servers
                 .get(&operation.resource_id)
                 .ok_or_else(|| error("resourceMissing"))?;
-            let mut native = mcp_codec::native_spec(&formatter, &server.server)?;
+            let mut native =
+                mcp_codec::native_server(&formatter, &operation.resource_id, &server.server)?;
             if formatter == "claude" {
                 crate::claude_mcp::prepare_mcp_spec_for_path(&mut native, Path::new(&target.path));
             }

@@ -48,6 +48,7 @@ export function useUsageOverview(
   const [sourceVersion, setSourceVersion] = useState(0);
   const enabled = options.enabled ?? true;
   const accountEnabled = options.accountEnabled ?? enabled;
+  const queryMode = !!options.query;
   const overview = useQuery(
     {
       queryKey: ["usageOverview", apex, period, options.query ?? null],
@@ -108,11 +109,12 @@ export function useUsageOverview(
     });
   }, [balance.data, identity, apex]);
   useEffect(() => {
+    // Query-mode refresh is staged and published once by UsagePage.
+    if (queryMode) return;
     let disposed = false;
     let stop: (() => void) | undefined;
     void listen("usage-synced", () => {
       if (disposed) return;
-      setSourceVersion((version) => version + 1);
       void queryClient.invalidateQueries({
         queryKey: ["usageOverview", apex],
       });
@@ -126,10 +128,12 @@ export function useUsageOverview(
       disposed = true;
       stop?.();
     };
-  }, [apex]);
+  }, [apex, queryMode]);
   const readLocal = async () => {
-    setSourceVersion((version) => version + 1);
-    if (enabled) await overview.refetch({ throwOnError: true });
+    // Query-mode snapshots are staged by UsagePage before its visible query
+    // changes. Legacy period reads still refetch their stable query key here.
+    if (enabled && !options.query)
+      await overview.refetch({ throwOnError: true });
   };
   const refreshLocal = async () => {
     if (options.localRefreshSupported) await usageApi.refreshLocalUsage();
@@ -138,11 +142,14 @@ export function useUsageOverview(
   const refreshManual = async () => {
     await usageApi.syncSessionUsage();
     await readLocal();
+    // The request list keeps an explicit snapshot until a manual refresh.
+    // Background sync never inserts a new-data banner into its layout.
+    setSourceVersion((version) => version + 1);
   };
-  const refresh = async () => {
+  const refresh = async (afterLocal?: () => Promise<void>) => {
     // Keep every failed source visible while still refreshing the other sources.
     const results = await Promise.allSettled([
-      refreshManual(),
+      refreshManual().then(() => afterLocal?.()),
       ...(user && accountEnabled
         ? [
             balance.refetch({ throwOnError: true }),

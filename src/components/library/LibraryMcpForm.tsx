@@ -1395,8 +1395,16 @@ export function LibraryMcpForm({
                         <button
                           type="button"
                           aria-pressed={selectedTools.includes(target.toolId)}
-                          aria-label={toolLabel(target.toolId, t)}
-                          aria-disabled={disabled || !target.available}
+                          aria-label={
+                            target.toolId === "codex"
+                              ? "Codex / ChatGPT"
+                              : toolLabel(target.toolId, t)
+                          }
+                          aria-disabled={
+                            disabled ||
+                            !target.available ||
+                            !!target.disabledReason
+                          }
                           aria-describedby={
                             reason
                               ? `${fieldsId}-${target.toolId}-reason`
@@ -1405,7 +1413,11 @@ export function LibraryMcpForm({
                           title={reason || undefined}
                           className={`inline-flex max-w-full items-center gap-2 rounded-ctl border px-3 py-2 text-ctl outline-none focus-visible:ring-2 focus-visible:ring-brand ${selectedTools.includes(target.toolId) ? "border-brand bg-brand/10" : "border-line bg-card"}`}
                           onClick={() => {
-                            if (!disabled && target.available)
+                            if (
+                              !disabled &&
+                              target.available &&
+                              !target.disabledReason
+                            )
                               onToolsChange(
                                 selectedTools.includes(target.toolId)
                                   ? selectedTools.filter(
@@ -1420,7 +1432,11 @@ export function LibraryMcpForm({
                             size={18}
                             variant="plain"
                           />
-                          <span>{toolLabel(target.toolId, t)}</span>
+                          <span>
+                            {target.toolId === "codex"
+                              ? "Codex / ChatGPT"
+                              : toolLabel(target.toolId, t)}
+                          </span>
                         </button>
                       </TooltipTrigger>
                       {reason && (

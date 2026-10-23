@@ -115,6 +115,9 @@ pub(crate) fn read(_db: &Database, roots: &[PathBuf]) -> Result<ParsedSource, Ap
             None,
             path.to_str(),
         );
+        result
+            .tool_evidence
+            .attach(&descriptor.identity.key, &transcript.tools);
         descriptor.message_reasons = transcript
             .reasons
             .iter()

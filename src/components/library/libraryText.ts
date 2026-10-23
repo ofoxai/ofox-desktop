@@ -49,6 +49,11 @@ export function toolLabel(tool: string, t: TFunction) {
     : ({
         claude: "Claude Code",
         codex: "Codex",
+        chatgpt: "ChatGPT",
+        openclaw: "OpenClaw",
+        workbuddy: "WorkBuddy",
+        dsh: "DeepSeek Harness",
+        pi: "Pi",
         copilot: "GitHub Copilot CLI",
         gemini: "Gemini CLI",
         opencode: "OpenCode",

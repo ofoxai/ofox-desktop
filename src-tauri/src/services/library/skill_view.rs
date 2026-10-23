@@ -17,7 +17,8 @@ pub fn definition_view(db: &Database, row: &InstalledSkill) -> Result<Value, App
     let roots = skills::target_paths()?;
     let readers = skills::reader_paths();
     let scope_known = readers.is_ok();
-    // A full tree hash per receipt, once, rather than once per agent.
+    let mut hashes = skills::TreeHashes::default();
+    // One content tree read for aliases, with separate entry/link verification.
     let intact_by_target: std::collections::BTreeMap<&str, bool> = snapshot
         .machine
         .receipts
@@ -26,7 +27,7 @@ pub fn definition_view(db: &Database, row: &InstalledSkill) -> Result<Value, App
         .map(|receipt| {
             (
                 receipt.physical_target.as_str(),
-                skills::receipt_intact(receipt),
+                skills::receipt_intact_with(receipt, &mut hashes),
             )
         })
         .collect();
@@ -104,6 +105,15 @@ pub fn definition_view(db: &Database, row: &InstalledSkill) -> Result<Value, App
             serde_json::from_str::<skills::DirectoryOwned>(&receipt.owned_segment)
                 .is_ok_and(|owned| owned.adopted.is_some())
         });
+        let native_hash = entry
+            .as_ref()
+            .filter(|_| receipt.is_none() || !intact)
+            .map(|_| hashes.hash(&path, None));
+        let native_different = (receipt.is_none() || !intact)
+            && native_hash.as_ref().is_some_and(|hash| {
+                hash.as_ref()
+                    .is_ok_and(|hash| Some(hash) != row.content_hash.as_ref())
+            });
         // The same skill is already there and nobody owns it: switching it on takes it over.
         let adoptable = tool != "claude-desktop"
             && entry.is_some()
@@ -112,10 +122,11 @@ pub fn definition_view(db: &Database, row: &InstalledSkill) -> Result<Value, App
                 .receipts
                 .contains_key(&format!("skills:{physical}"))
             && row.content_hash.is_some()
-            && skills::content_hash(&path).ok() == row.content_hash;
+            && native_hash.as_ref().and_then(|hash| hash.as_ref().ok())
+                == row.content_hash.as_ref();
         let status = if !scope_known && (desired || own.is_some()) {
             "needsReview"
-        } else if own.is_some() && !intact {
+        } else if native_different || (own.is_some() && !intact) {
             "conflict"
         } else if desired && own.is_some() && intact && current {
             "applied"
@@ -131,14 +142,18 @@ pub fn definition_view(db: &Database, row: &InstalledSkill) -> Result<Value, App
         targets.push(json!({"toolId":tool,"path":path.to_string_lossy(),"targetGroupId":physical,"desired":desired,"applied":scope_known&&desired&&own.is_some()&&intact&&current,
             "readable":if scope_known{Some(readable)}else{None},"readers":if scope_known{Some(potential)}else{None},"readableGroups":readable_groups,"status":status,
             "lastAppliedRevision":own.map(|receipt|receipt.resource_revision),"pathState":if path.exists(){"exists"}else if root.is_dir(){"missing"}else{"missingParent"},
-            "scopeKnown":scope_known,"disabledReason":if scope_known{None}else{Some("library.nativeScopeUnsupported")},
+            "scopeKnown":scope_known,"disabledReason":if !scope_known {Some("library.nativeScopeUnsupported")} else if native_different && snapshot.machine.receipts.get(&format!("skills:{physical}")).is_some_and(|receipt| receipt.resource_id != row.id) {Some("library.sharedTargetConflict")} else if native_different {Some(if own.is_some() {"library.skillEntryChanged"} else {"library.skillNameConflict"})} else {None},
             "adopted":adopted,"adoptable":adoptable,"entryKind":entry_kind}));
     }
     let source_state = if meta.is_none() {
         "needsMigration"
     } else if !matches {
         "changed"
-    } else if skills::artifact_for(db, &row.id).is_ok() {
+    } else if row.content_hash.as_deref().is_some_and(|hash| {
+        artifacts::path(hash)
+            .and_then(|path| hashes.hash(&path, None))
+            .is_ok_and(|actual| actual == hash)
+    }) {
         "ready"
     } else {
         "unverified"

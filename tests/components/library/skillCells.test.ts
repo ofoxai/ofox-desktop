@@ -41,13 +41,58 @@ const agent = (id: string, detected = true): SkillTarget => ({
 });
 
 describe("skillColumns", () => {
-  it("shows detected agents in the tools page order, then cursor, codebuddy and Claude Desktop", () => {
+  it("does not resurrect non-bindable or unsupported agents from saved assignments", () => {
+    const saved = skill([
+      target("cursor", { desired: true, status: "applied" }),
+      target("claude-desktop", { desired: true, status: "applied" }),
+      target("codebuddy", { desired: true, status: "applied" }),
+      target("gemini", { desired: true, status: "applied" }),
+      target("codex", { desired: true, status: "applied" }),
+    ]);
+    expect(skillColumns([agent("codex")], [saved])).toEqual(["codex"]);
+  });
+  it("also filters non-bindable agents in the older-backend fallback", () => {
+    expect(
+      skillColumns(undefined, [
+        skill([
+          target("cursor"),
+          target("claude-desktop"),
+          target("codebuddy"),
+          target("openclaw"),
+          target("codex"),
+        ]),
+      ]),
+    ).toEqual(["codex", "openclaw"]);
+  });
+  it("All changes only visible agents and preserves existing hidden assignments", () => {
+    const saved = skill([
+      target("cursor", { desired: true, status: "applied" }),
+      target("codex"),
+      target("claude-desktop"),
+    ]);
+    const columns = skillColumns(
+      [agent("cursor"), agent("codex"), agent("claude-desktop")],
+      [saved],
+    );
+    expect(skillAll(saved, columns).tools).toEqual(["cursor", "codex"]);
+    const enabled = {
+      ...saved,
+      targets: saved.targets.map((t) =>
+        t.toolId === "codex" ? { ...t, desired: true, status: "applied" } : t,
+      ),
+    };
+    expect(skillAll(enabled, columns).tools).toEqual(["cursor"]);
+  });
+
+  it("shows only detected bindable agents with a Skills adapter, in tool order", () => {
     expect(
       skillColumns(
         [
           agent("claude-desktop"),
           agent("cursor"),
           agent("pi"),
+          agent("openclaw"),
+          agent("unregistered"),
           agent("codebuddy"),
           agent("codex"),
           agent("claude"),
@@ -55,14 +100,7 @@ describe("skillColumns", () => {
         ],
         [],
       ),
-    ).toEqual([
-      "claude",
-      "codex",
-      "pi",
-      "cursor",
-      "codebuddy",
-      "claude-desktop",
-    ]);
+    ).toEqual(["claude", "codex", "openclaw", "pi"]);
   });
   it("keeps an undetected agent a skill is already given to, but never the shared folder", () => {
     expect(

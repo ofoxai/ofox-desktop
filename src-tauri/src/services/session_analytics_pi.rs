@@ -126,6 +126,7 @@ pub(crate) fn read(db: &Database, roots: &[PathBuf]) -> Result<ParsedSource, App
         if read.reasons.contains("incompleteEnumeration") {
             descriptor.message_reasons.push("incompleteSource".into());
         }
+        let mut tool_scan = super::session_analytics::interactions::CallScan::default();
         if !ownership_unknown {
             let inherited = read
                 .inherited_entries
@@ -159,6 +160,12 @@ pub(crate) fn read(db: &Database, roots: &[PathBuf]) -> Result<ParsedSource, App
                 };
                 if read.inherited_entries.contains(id) {
                     continue;
+                }
+                if entry["message"]["role"] == "assistant" {
+                    let at = entry
+                        .get("timestamp")
+                        .and_then(crate::session_manager::providers::parse_timestamp_to_ms);
+                    tool_scan.blocks(entry["message"].get("content"), at);
                 }
                 let role = match entry["message"]["role"].as_str() {
                     Some("user") => Role::User,
@@ -204,6 +211,11 @@ pub(crate) fn read(db: &Database, roots: &[PathBuf]) -> Result<ParsedSource, App
                 }
                 messages.insert(event_key, event);
             }
+        }
+        if !ownership_unknown {
+            result
+                .tool_evidence
+                .attach(&descriptor.identity.key, &tool_scan);
         }
         descriptor.message_reasons.sort();
         descriptor.message_reasons.dedup();

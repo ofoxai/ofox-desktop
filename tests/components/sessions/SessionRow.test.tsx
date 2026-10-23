@@ -190,7 +190,7 @@ describe("compact session metadata and honest usage states", () => {
     );
     expect(
       screen.getByText(
-        "仅此会话的可核验用量，子会话另列；费用按当前 Ofox 价格估算，不代表账户实际扣费。",
+        "仅此会话的可核验用量，子会话另列；优先按 Ofox 价格估算，缺少时用厂商官方 API 标价，不代表实际扣费。",
       ),
     ).toBeVisible();
   });

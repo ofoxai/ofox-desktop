@@ -1,3 +1,4 @@
+import { acceptanceResourceKinds } from "./resource-targets.mjs";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -118,6 +119,8 @@ export async function profileResourceEvidence(profile) {
     mcp: profile.mcpNativePath ?? profile.mcpConfig,
     skills: profile.skillPath,
   })) {
+    if (!acceptanceResourceKinds(profile.resourceKinds).includes(kind))
+      continue;
     const bytes = await bounded(path);
     result[kind] = {
       sha256: hash(bytes),
@@ -133,7 +136,7 @@ export async function profileResourceEvidence(profile) {
 // ownership, infer a successful AI call, or authorize an arbitrary path.
 export async function verifyWriterProfile(
   spec,
-  { sourceSha, agentId, now = Date.now() },
+  { sourceSha, agentId, resourceKinds: requestedKinds, now = Date.now() },
 ) {
   if (
     !spec ||
@@ -142,6 +145,7 @@ export async function verifyWriterProfile(
     !/^[a-f0-9]{64}$/.test(spec.receiptSha256 ?? "")
   )
     throw new Error("writerProfileInvalid");
+  const resourceKinds = acceptanceResourceKinds(requestedKinds);
   const root = await realpath(spec.root);
   if (!inside(await realpath(tmpdir()), root))
     throw new Error("writerProfileOutsideSandbox");
@@ -164,6 +168,10 @@ export async function verifyWriterProfile(
     receipt.compiledSourceSha !== sourceSha ||
     receipt.compiledSourceClean !== true ||
     receipt.agentId !== agentId ||
+    JSON.stringify(acceptanceResourceKinds(receipt.resourceKinds)) !==
+      JSON.stringify(resourceKinds) ||
+    JSON.stringify(acceptanceResourceKinds(marker.resourceKinds)) !==
+      JSON.stringify(resourceKinds) ||
     (await realpath(receipt.root ?? "")) !== root ||
     marker.schemaVersion !== 1 ||
     marker.sourceSha !== sourceSha ||
@@ -175,7 +183,7 @@ export async function verifyWriterProfile(
     throw new Error("writerReceiptIdentityMismatch");
   if (
     !Array.isArray(receipt.operations) ||
-    !["instructions", "mcp", "skills"].every((kind) =>
+    !resourceKinds.every((kind) =>
       receipt.operations.some(
         (operation) =>
           operation.kind === kind &&
@@ -190,7 +198,7 @@ export async function verifyWriterProfile(
   if (
     !Array.isArray(receipt.files) ||
     receipt.files.length > 1000 ||
-    !["instructions", "mcp", "skills", "proof"].every((kind) =>
+    ![...resourceKinds, "proof"].every((kind) =>
       receipt.files.some((file) => file.kind === kind),
     )
   )
@@ -218,6 +226,7 @@ export async function verifyWriterProfile(
     skills: paths.skillPath,
   }))
     if (
+      resourceKinds.includes(kind) &&
       !receipt.files.some(
         (file) =>
           file.kind === kind &&
@@ -249,6 +258,8 @@ export async function verifyWriterProfile(
     proof.runId !== receipt.preparedRunId ||
     proof.sourceSha !== sourceSha ||
     proof.agentId !== agentId ||
+    JSON.stringify(acceptanceResourceKinds(proof.resourceKinds)) !==
+      JSON.stringify(resourceKinds) ||
     typeof proof.receipt !== "string" ||
     basename(proof.receipt) !== "mcp-receipt.json" ||
     (await realpath(dirname(proof.receipt))) !== root
