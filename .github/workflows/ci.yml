@@ -4,12 +4,13 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [main, "release/**"]
+    branches: [main]
   # The release workflow calls this one to verify the commit it is about to build.
   workflow_call:
 
-# A pull request supersedes its own earlier runs. Every main/release commit keeps
-# its own run (keyed by sha), so each one gets a verdict.
+# A pull request supersedes its earlier runs; main keeps a verdict per SHA.
+# Release branches run these same complete checks through Branch Packages, so a
+# single push does not queue two identical CI suites behind this concurrency key.
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -36,7 +37,7 @@ jobs:
       - name: Get pnpm store directory
         id: pnpm-store
         shell: bash
-        run: echo "path=$(pnpm store path --silent)" >> $GITHUB_OUTPUT
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
 
       - name: Cache pnpm store
         uses: actions/cache@v5

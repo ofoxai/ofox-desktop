@@ -39,6 +39,10 @@ describe("branch installer packages", () => {
     expect(workflow).toContain("platform: darwin-aarch64");
     expect(workflow).toContain("platform: windows-x86_64");
     expect(workflow).toContain('APPLE_SIGNING_IDENTITY: "-"');
+    expect(workflow).toContain("pnpm tauri build --bundles app,dmg --");
+    // Tauri can bundle auxiliary Cargo binaries found in the restored target.
+    // Build all binary targets so cached probes cannot enter a new installer.
+    expect(workflow).not.toContain("--bin ofox-desktop");
     expect(workflow).toContain(
       "node scripts/release-artifacts.mjs record-build",
     );
@@ -49,6 +53,9 @@ describe("branch installer packages", () => {
     expect(workflow).toContain("retention-days: 30");
     const windows = readFileSync(".github/workflows/windows-probe.yml", "utf8");
     expect(windows.split("\nconcurrency:")[0]).toContain('"release/**"');
+    const ci = readFileSync(".github/workflows/ci.yml", "utf8");
+    expect(ci).toContain("branches: [main]");
+    expect(ci).not.toContain('branches: [main, "release/**"]');
   });
 
   it("waits for this commit's own completed Windows result", async () => {

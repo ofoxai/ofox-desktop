@@ -108,11 +108,12 @@ jobs:
           APPLE_SIGNING_IDENTITY: "-"
         run: |
           test "$(uname -m)" = "arm64"
-          pnpm tauri build --bundles dmg -- --locked --bin ofox-desktop
+          # Keep the app for signature verification; dmg-only builds remove it.
+          pnpm tauri build --bundles app,dmg -- --locked
           codesign --verify --deep --strict 'src-tauri/target/release/bundle/macos/Ofox Desktop.app'
       - name: Build Windows preview (unsigned)
         if: runner.os == 'Windows'
-        run: pnpm tauri build --bundles nsis -- --locked --bin ofox-desktop
+        run: pnpm tauri build --bundles nsis -- --locked
       - name: Prepare exact installer
         shell: bash
         env:
