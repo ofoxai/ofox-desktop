@@ -68,3 +68,32 @@ it("keeps an omitted record basis compatible with older effective-statistics rec
   expect(sameRequestFilters({ recordBasis: "savedHistory" }, {})).toBe(false);
   expect(sameRequestFilters({ recordBasis: "unknown" }, {})).toBe(false);
 });
+
+it("includes provider, rank, status and day focus in request receipt ownership", () => {
+  const filters = {
+    providerKey: "unknown",
+    statusClass: "failed" as const,
+    selection: { modelId: "org/model", toolId: "claude" },
+    dayStartMs: 0,
+  };
+  expect(sameRequestFilters(filters, filters)).toBe(true);
+  expect(sameRequestFilters({}, filters)).toBe(false);
+  expect(sameRequestFilters({ ...filters, dayStartMs: 1 }, filters)).toBe(
+    false,
+  );
+  expect(
+    sameRequestFilters(
+      { ...filters, selection: { modelId: "org/other" } },
+      filters,
+    ),
+  ).toBe(false);
+  for (const invalid of [
+    { selection: "model" },
+    { selection: { providerKey: 1 } },
+    { providerKey: 2 },
+    { dayStartMs: Number.NaN },
+    { statusClass: "anything" },
+  ]) {
+    expect(sameRequestFilters(invalid)).toBe(false);
+  }
+});

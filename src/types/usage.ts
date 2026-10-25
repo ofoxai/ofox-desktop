@@ -11,6 +11,7 @@ import type {
   UsageGranularity,
   UsageSeriesPoint,
 } from "@/lib/api/usageOverview";
+import type { UsageRequestDashboard } from "@/types/usageRequestDashboard";
 
 export interface TokenUsage {
   inputTokens: number;
@@ -72,6 +73,7 @@ export interface DataSourceSummary {
 }
 
 export interface PaginatedLogs extends Partial<UsageReceipt> {
+  dashboard?: UsageRequestDashboard;
   data: RequestLog[];
   total: number;
   page: number;

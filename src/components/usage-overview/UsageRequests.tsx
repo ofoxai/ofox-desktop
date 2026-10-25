@@ -28,6 +28,13 @@ import { UsageSourceAlert } from "./UsageSourceAlert";
 import { UsageBars } from "./UsageBars";
 import { usageIsUnavailable } from "@/lib/usageWorkbench";
 import { UsageRequestMeasurements } from "./UsageRequestMeasurements";
+import { UsageRequestChart } from "./UsageRequestChart";
+import { UsageRequestSummary } from "./UsageRequestSummary";
+import {
+  requestTokenTotal,
+  toggleRequestGroup,
+  REQUEST_METRICS,
+} from "@/lib/usageRequestDashboard";
 import { RequestDetailPanel } from "@/components/usage/RequestDetailPanel";
 import { queryClient } from "@/lib/query/queryClient";
 import { usageApi } from "@/lib/api/usage";
@@ -39,6 +46,10 @@ import type {
   UsageSnapshotReceipt,
   UsageFilterOptions,
 } from "@/types/usageQuery";
+import type {
+  RequestMetric,
+  RequestChartDimension,
+} from "@/types/usageRequestDashboard";
 
 export function UsageRequests({
   query,
@@ -68,13 +79,62 @@ export function UsageRequests({
   const { t, i18n } = useTranslation();
   const [draft, setDraft] = useState("");
   const [filters, setFilters] = useState<UsageRequestFilters>({});
+  const [trendView, setTrendView] = useState<{
+    metric: RequestMetric;
+    dimension: RequestChartDimension;
+  }>(() => {
+    let metric: RequestMetric = "tokens";
+    try {
+      const saved = localStorage.getItem(
+        "ofox.usageRequests.metric",
+      ) as RequestMetric;
+      if (REQUEST_METRICS.includes(saved)) metric = saved;
+    } catch {
+      /* Optional preference. */
+    }
+    return { metric, dimension: "model" };
+  });
+  const rankFocus = useRef<string | null>(null);
+  const dayFocus = useRef<number | null>(null);
+  const [dayOwner, setDayOwner] = useState<string>();
+  // A refresh within the same local calendar range keeps focus; a new range
+  // must never send a day selected from an unrelated calendar to the backend.
+  const dayScope = JSON.stringify([
+    query.startMs,
+    new Date(query.endMs - 1).toLocaleDateString("en-CA"),
+    Intl.DateTimeFormat().resolvedOptions().timeZone,
+    apex,
+    recordBasis,
+    [...query.toolIds].sort(),
+    [...query.modelIds].sort(),
+    [...query.projectIds].sort(),
+    [...query.sourceIds].sort(),
+    [...(filters.sourceIds ?? [])].sort(),
+    filters.statusCode,
+    filters.statusKind,
+    filters.statusClass,
+    filters.search?.trim(),
+  ]);
+  const focusedDay = dayOwner === dayScope ? filters.dayStartMs : undefined;
+  useEffect(() => {
+    if (!active) {
+      rankFocus.current = null;
+      dayFocus.current = null;
+      setFilters((previous) =>
+        previous.selection || previous.dayStartMs != null
+          ? { ...previous, selection: undefined, dayStartMs: undefined }
+          : previous,
+      );
+    }
+  }, [active]);
   const [generation, setGeneration] = useState(0);
   const requestFilters = useMemo(
     () => ({
       ...filters,
+      ...(filters.dayStartMs != null ? { dayStartMs: focusedDay } : {}),
       ...(recordBasis === "savedHistory" ? { recordBasis } : {}),
     }),
-    [filters, recordBasis],
+    [filters, recordBasis, focusedDay],
   );
   const scope = JSON.stringify([apex, query, requestFilters, generation]);
   const searchInput = useRef<HTMLInputElement>(null);
@@ -117,6 +177,30 @@ export function UsageRequests({
     },
     queryClient,
   );
+  useEffect(() => {
+    // Refreshing an all-history snapshot can introduce older evidence and
+    // change its calendar granularity. Retire an obsolete day, not the query.
+    if (
+      result.isError &&
+      focusedDay != null &&
+      String(result.error).includes("usage.requests.invalidDay")
+    ) {
+      setFilters((previous) => ({ ...previous, dayStartMs: undefined }));
+      setDayOwner(undefined);
+      dayFocus.current = null;
+      searchInput.current?.focus();
+    }
+  }, [result.isError, result.error, focusedDay]);
+  useEffect(() => {
+    if (
+      result.isError &&
+      (rankFocus.current != null || dayFocus.current != null)
+    ) {
+      rankFocus.current = null;
+      dayFocus.current = null;
+      searchInput.current?.focus();
+    }
+  }, [result.isError]);
   useEffect(() => {
     if (result.data?.snapshotId)
       setPaging((previous) =>
@@ -284,12 +368,14 @@ export function UsageRequests({
           value={
             filters.statusCode != null
               ? String(filters.statusCode)
-              : (filters.statusKind ?? "all")
+              : (filters.statusClass ?? filters.statusKind ?? "all")
           }
           onChange={(value) =>
             setFilters((previous) => ({
               ...previous,
               statusCode: /^\d+$/.test(value) ? Number(value) : undefined,
+              statusClass:
+                value === "failed" || value === "succeeded" ? value : undefined,
               statusKind:
                 value === "recorded" || value === "unrecorded"
                   ? value
@@ -298,6 +384,18 @@ export function UsageRequests({
           }
           options={[
             { value: "all", label: t("usageWorkbench.allStatus") },
+            ...(data?.dashboard
+              ? [
+                  {
+                    value: "failed",
+                    label: t("requestDashboard.failedStatus"),
+                  },
+                  {
+                    value: "succeeded",
+                    label: t("requestDashboard.succeededStatus"),
+                  },
+                ]
+              : []),
             { value: "recorded", label: t("usageWorkbench.recordedStatus") },
             {
               value: "unrecorded",
@@ -324,6 +422,36 @@ export function UsageRequests({
           {t("usageWorkbench.reset")}
         </Button>
       </form>
+      {(filters.selection || focusedDay != null) && (
+        <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-lg bg-pill px-3 py-2 text-note text-ink-muted">
+          <span className="min-w-0 break-words">
+            {t("requestDashboard.focus")}{" "}
+            {[
+              filters.selection?.modelId,
+              filters.selection?.toolId,
+              focusedDay != null
+                ? new Date(focusedDay).toLocaleDateString(i18n.language)
+                : null,
+            ]
+              .filter((value) => value != null)
+              .join(" · ")}
+          </span>
+          <Button
+            variant="ghost"
+            className="h-6"
+            onClick={() => {
+              searchInput.current?.focus();
+              setFilters((previous) => ({
+                ...previous,
+                selection: undefined,
+                dayStartMs: undefined,
+              }));
+            }}
+          >
+            {t("requestDashboard.clearFocus")}
+          </Button>
+        </div>
+      )}
       {updateVersion > seenUpdate && (
         <div
           role="status"
@@ -348,7 +476,60 @@ export function UsageRequests({
             {t("usageExperience.savedHistory")}
           </Button>
         )}
-      {summary && (
+      {data?.dashboard && !noUsage && (
+        <>
+          <UsageRequestSummary
+            totals={data.dashboard.totals}
+            onFailed={() =>
+              setFilters((previous) => ({
+                ...previous,
+                statusClass:
+                  previous.statusClass === "failed" ? undefined : "failed",
+                statusCode: undefined,
+                statusKind: undefined,
+              }))
+            }
+          />
+          <UsageRequestChart
+            dashboard={data.dashboard}
+            selection={filters.selection}
+            dayStartMs={focusedDay}
+            view={trendView}
+            onViewChange={setTrendView}
+            focusGroupId={rankFocus.current}
+            focusPointStart={dayFocus.current}
+            onFocusRestored={(found) => {
+              rankFocus.current = null;
+              dayFocus.current = null;
+              if (!found) searchInput.current?.focus();
+            }}
+            onGroup={(dimension, group) => {
+              dayFocus.current = null;
+              rankFocus.current = group.id;
+              setFilters((previous) => ({
+                ...previous,
+                selection: toggleRequestGroup(
+                  dimension,
+                  group,
+                  previous.selection,
+                ),
+              }));
+            }}
+            onDay={(dayStartMs) => {
+              rankFocus.current = null;
+              dayFocus.current = dayStartMs ?? focusedDay ?? null;
+              setDayOwner(dayScope);
+              setFilters((previous) => ({ ...previous, dayStartMs }));
+            }}
+          />
+        </>
+      )}
+      {data && !data.dashboard && (
+        <p className="text-note text-ink-muted">
+          {t("requestDashboard.unavailable")}
+        </p>
+      )}
+      {!data?.dashboard && summary && (
         <div className="flex flex-wrap gap-x-5 gap-y-1 rounded-card border border-line bg-card p-3 text-sub tabular-nums">
           <span>
             {t("usageWorkbench.records")}:{" "}
@@ -361,18 +542,18 @@ export function UsageRequests({
           </span>
         </div>
       )}
-      {data?.trend && !noUsage && (
+      {!data?.dashboard && data?.trend && !noUsage && (
         <section aria-label={t("usageWorkbench.requestTrend")}>
           <UsageBars overview={data.trend} />
         </section>
       )}
-      {data?.measurements && (
+      {!data?.dashboard && data?.measurements && (
         <UsageRequestMeasurements
           measurements={data.measurements}
           total={data.total}
         />
       )}
-      {data && (!data.trend || !data.measurements) && (
+      {data && !data.dashboard && (!data.trend || !data.measurements) && (
         <p className="text-note text-ink-muted">
           {t("usageWorkbench.requestAnalyticsUnavailable")}
         </p>
@@ -404,119 +585,147 @@ export function UsageRequests({
       ) : (
         <>
           <TooltipProvider delayDuration={250}>
-            <div className="overflow-hidden rounded-list border border-line bg-card">
-              <div className="grid grid-cols-[100px_minmax(0,1fr)_110px_110px] gap-3 border-b border-line-2 px-3 py-2 text-note text-ink-muted">
-                <span>{t("usageWorkbench.date")}</span>
-                <span>{t("usage.model")}</span>
-                <span className="text-right">Tokens</span>
-                <span className="text-right">
-                  {t("usageWorkbench.currentEstimate")}
-                </span>
-              </div>
-              {!data?.data.length ? (
-                <p className="p-7 text-center text-sub text-ink-muted">
-                  {t(
-                    noUsage
-                      ? "usagePage.unavailable"
-                      : data?.coverage?.state === "unsupported"
-                        ? "usageWorkbench.queryUnavailable"
-                        : "usageWorkbench.noRequests",
-                  )}
-                </p>
-              ) : (
-                data.data.map((record) => {
-                  const source = requestSourcePresentation(
-                    record.dataSource,
-                    t,
-                  );
-                  const status = requestMeasurements(record).status;
-                  const time = new Date(
-                    record.createdAtMs ?? record.createdAt * 1000,
-                  ).toLocaleString(i18n.language, {
-                    month: "2-digit",
-                    day: "2-digit",
-                    hour: "2-digit",
-                    minute: "2-digit",
-                  });
-                  return (
-                    <Tooltip key={record.requestId}>
-                      <TooltipTrigger asChild>
-                        <button
-                          type="button"
-                          aria-label={t("usageWorkbench.viewRequestRecord", {
-                            model: record.model,
-                            time,
-                          })}
-                          className="grid w-full grid-cols-[100px_minmax(0,1fr)_110px_110px] items-center gap-3 border-b border-line-2 px-3 py-3 text-left last:border-b-0 hover:bg-pill focus-visible:relative focus-visible:z-[1] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/50"
-                          onClick={(event) =>
-                            setSelected({
-                              id: record.requestId,
-                              snapshotId: data.snapshotId,
-                              trigger: event.currentTarget,
-                              apex,
-                              receipt: {
-                                queryFingerprint: data.queryFingerprint!,
-                                snapshotVersion: data.snapshotVersion!,
-                              },
-                            })
-                          }
-                        >
-                          <span className="text-note tabular-nums text-ink-muted">
-                            {time}
-                          </span>
-                          <span className="flex min-w-0 items-center gap-2">
-                            <ToolBadge toolId={record.appType} size={22} />
-                            <span className="min-w-0">
-                              <span
-                                className="block truncate text-sub text-ink"
-                                title={record.model}
-                              >
-                                {record.model}
-                              </span>
-                              <span
-                                className="block truncate text-note text-ink-muted"
-                                title={source.description}
-                              >
-                                {source.label}
-                                {status != null && (
-                                  <span
-                                    className={
-                                      status >= 400 ? "text-warn" : undefined
-                                    }
-                                  >
-                                    {" · HTTP "}
-                                    {status}
-                                  </span>
-                                )}
-                              </span>
-                            </span>
-                          </span>
-                          <span className="text-right tabular-nums">
-                            <span className="block text-sub text-ink">
-                              {fmtTokens(
-                                record.inputTokens + record.outputTokens,
-                              )}
-                            </span>
-                            <span className="block text-note text-ink-muted">
-                              {fmtTokens(record.inputTokens)} /{" "}
-                              {fmtTokens(record.outputTokens)}
-                            </span>
-                          </span>
-                          <span
-                            className="text-right text-sub tabular-nums text-ink"
-                            title={
-                              record.currentEstimate?.knownCostUsd ?? undefined
+            <div className="overflow-x-auto rounded-list border border-line bg-card">
+              <div className="min-w-[1058px]">
+                <div className="grid grid-cols-[95px_minmax(160px,1fr)_repeat(4,75px)_85px_100px_75px_65px] gap-3 border-b border-line-2 px-3 py-2 text-note text-ink-muted">
+                  <span>{t("usageWorkbench.date")}</span>
+                  <span>{t("usage.model")}</span>
+                  {[
+                    "input",
+                    "output",
+                    "cacheRead",
+                    "cacheWrite",
+                    "totalTokens",
+                    "cost",
+                    "duration",
+                    "status",
+                  ].map((key) => (
+                    <span key={key} className="text-right">
+                      {t(`requestDashboard.${key}`)}
+                    </span>
+                  ))}
+                </div>
+                {!data?.data.length ? (
+                  <p className="p-7 text-center text-sub text-ink-muted">
+                    {t(
+                      noUsage
+                        ? "usagePage.unavailable"
+                        : data?.coverage?.state === "unsupported"
+                          ? "usageWorkbench.queryUnavailable"
+                          : "usageWorkbench.noRequests",
+                    )}
+                  </p>
+                ) : (
+                  data.data.map((record) => {
+                    const source = requestSourcePresentation(
+                      record.dataSource,
+                      t,
+                    );
+                    const measurements = requestMeasurements(record);
+                    const status = measurements.status;
+                    const time = new Date(
+                      record.createdAtMs ?? record.createdAt * 1000,
+                    ).toLocaleString(i18n.language, {
+                      month: "2-digit",
+                      day: "2-digit",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    });
+                    return (
+                      <Tooltip key={record.requestId}>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            aria-label={t("usageWorkbench.viewRequestRecord", {
+                              model: record.model,
+                              time,
+                            })}
+                            className="grid w-full grid-cols-[95px_minmax(160px,1fr)_repeat(4,75px)_85px_100px_75px_65px] items-center gap-3 border-b border-line-2 px-3 py-3 text-left last:border-b-0 hover:bg-pill focus-visible:relative focus-visible:z-[1] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/50"
+                            onClick={(event) =>
+                              setSelected({
+                                id: record.requestId,
+                                snapshotId: data.snapshotId,
+                                trigger: event.currentTarget,
+                                apex,
+                                receipt: {
+                                  queryFingerprint: data.queryFingerprint!,
+                                  snapshotVersion: data.snapshotVersion!,
+                                },
+                              })
                             }
                           >
-                            {formatUsageEstimate(record.currentEstimate)}
-                          </span>
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent>{source.description}</TooltipContent>
-                    </Tooltip>
-                  );
-                })
-              )}
+                            <span className="text-note tabular-nums text-ink-muted">
+                              {time}
+                            </span>
+                            <span className="flex min-w-0 items-center gap-2">
+                              <ToolBadge toolId={record.appType} size={22} />
+                              <span className="min-w-0">
+                                <span
+                                  className="block truncate text-sub text-ink"
+                                  title={record.model}
+                                >
+                                  {record.model}
+                                </span>
+                                <span
+                                  className="block truncate text-note text-ink-muted"
+                                  title={source.description}
+                                >
+                                  {source.label}
+                                  {status != null && (
+                                    <span
+                                      className={
+                                        status >= 400 ? "text-warn" : undefined
+                                      }
+                                    >
+                                      {" · HTTP "}
+                                      {status}
+                                    </span>
+                                  )}
+                                </span>
+                              </span>
+                            </span>
+                            {[
+                              record.inputTokens,
+                              record.outputTokens,
+                              record.cacheReadTokens,
+                              record.cacheCreationTokens,
+                              requestTokenTotal(record),
+                            ].map((value, index) => (
+                              <span
+                                key={index}
+                                className="text-right text-sub tabular-nums text-ink"
+                                title={value.toLocaleString(i18n.language)}
+                              >
+                                {fmtTokens(value)}
+                              </span>
+                            ))}
+                            <span
+                              className="text-right text-sub tabular-nums text-ink"
+                              title={
+                                record.currentEstimate?.knownCostUsd ??
+                                undefined
+                              }
+                            >
+                              {formatUsageEstimate(record.currentEstimate)}
+                            </span>
+                            <span className="text-right text-note tabular-nums text-ink-muted">
+                              {measurements.latency == null
+                                ? "—"
+                                : `${measurements.latency.toLocaleString(i18n.language)} ms`}
+                            </span>
+                            <span
+                              className={`text-right text-note tabular-nums ${status != null && status >= 400 ? "text-warn" : "text-ink-muted"}`}
+                            >
+                              {status ?? "—"}
+                            </span>
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>{source.description}</TooltipContent>
+                      </Tooltip>
+                    );
+                  })
+                )}
+              </div>
             </div>
           </TooltipProvider>
           <div className="flex flex-wrap items-center justify-between gap-2 text-note text-ink-muted">

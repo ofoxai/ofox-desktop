@@ -111,7 +111,6 @@ export function RequestDetailPanel({
           request.dataSource ?? t("usageWorkbench.notProvided"),
         ],
         [t("usage.appType"), request.appType],
-        [t("usage.provider"), request.providerName ?? request.providerId],
         [t("usage.costMultiplier"), request.costMultiplier],
         ...(request.recordedCostUsd === null
           ? []

@@ -24,6 +24,10 @@ const MAX_BYTES: usize = 96 * 1024 * 1024;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RequestFilters {
+    pub provider_key: Option<String>,
+    pub status_class: Option<String>,
+    pub selection: Option<RequestSelection>,
+    pub day_start_ms: Option<i64>,
     pub record_basis: Option<String>,
     #[serde(default)]
     pub source_ids: Vec<String>,
@@ -31,9 +35,51 @@ pub struct RequestFilters {
     pub status_kind: Option<String>,
     pub search: Option<String>,
 }
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RequestSelection {
+    pub model_id: Option<String>,
+    pub tool_id: Option<String>,
+    pub provider_key: Option<String>,
+}
+
+/// A local adapter name or current binding cannot establish a historical vendor.
+pub(crate) fn request_provider(row: &RequestLogDetail) -> (String, Option<String>) {
+    if row.data_source.as_deref().unwrap_or("proxy") != "proxy"
+        || row.provider_id.is_empty()
+        || row.provider_id.starts_with('_')
+    {
+        return ("unknown".into(), None);
+    }
+    (
+        serde_json::to_string(&(&row.app_type, &row.provider_id))
+            .expect("string pair serialization is infallible"),
+        Some(
+            row.provider_name
+                .clone()
+                .unwrap_or_else(|| row.provider_id.clone()),
+        ),
+    )
+}
 impl RequestFilters {
     pub fn normalized(mut self) -> Result<Self, AppError> {
-        if self.source_ids.len() > 256
+        let selection = self.selection.as_ref();
+        if self
+            .provider_key
+            .as_ref()
+            .is_some_and(|s| s.is_empty() || s.len() > 2048)
+            || selection.is_some_and(|s| {
+                s.model_id.as_ref().is_some_and(|v| v.len() > 512)
+                    || s.tool_id.as_ref().is_some_and(|v| v.len() > 512)
+                    || s.provider_key
+                        .as_ref()
+                        .is_some_and(|v| v.is_empty() || v.len() > 2048)
+            })
+            || self
+                .status_class
+                .as_deref()
+                .is_some_and(|s| !["failed", "succeeded"].contains(&s))
+            || self.source_ids.len() > 256
             || self
                 .record_basis
                 .as_deref()
@@ -60,12 +106,26 @@ impl RequestFilters {
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty());
         self.record_basis = Some(self.record_basis.unwrap_or_else(|| "effective".into()));
+        if self
+            .selection
+            .as_ref()
+            .is_some_and(|s| s == &RequestSelection::default())
+        {
+            self.selection = None;
+        }
         Ok(self)
     }
     pub(crate) fn matches(&self, row: &RequestLogDetail) -> bool {
         let source = row.data_source.as_deref().unwrap_or("proxy");
         let status = observed_status(row);
         (self.source_ids.is_empty() || self.source_ids.iter().any(|s| s == source))
+            && self
+                .provider_key
+                .as_ref()
+                .is_none_or(|key| &request_provider(row).0 == key)
+            && self.status_class.as_deref().is_none_or(|class| {
+                status.is_some_and(|value| (value >= 400) == (class == "failed"))
+            })
             && self.status_code.is_none_or(|s| status == Some(s))
             && self
                 .status_kind

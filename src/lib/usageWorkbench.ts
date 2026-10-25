@@ -126,6 +126,14 @@ export function normalizedRequestFilters(value: UsageRequestFilters = {}) {
     statusCode: value.statusCode ?? null,
     statusKind: value.statusKind ?? null,
     search: value.search?.trim() || null,
+    providerKey: value.providerKey ?? null,
+    statusClass: value.statusClass ?? null,
+    selection: {
+      modelId: value.selection?.modelId ?? null,
+      toolId: value.selection?.toolId ?? null,
+      providerKey: value.selection?.providerKey ?? null,
+    },
+    dayStartMs: value.dayStartMs ?? null,
   };
 }
 
@@ -135,6 +143,21 @@ export function sameRequestFilters(
 ) {
   if (!actual || typeof actual !== "object") return false;
   const value = actual as UsageRequestFilters;
+  if (
+    (value.providerKey != null && typeof value.providerKey !== "string") ||
+    (value.dayStartMs != null && !Number.isSafeInteger(value.dayStartMs)) ||
+    (value.statusClass != null &&
+      value.statusClass !== "failed" &&
+      value.statusClass !== "succeeded") ||
+    (value.selection != null &&
+      (typeof value.selection !== "object" ||
+        Array.isArray(value.selection) ||
+        ["modelId", "toolId", "providerKey"].some((key) => {
+          const id = (value.selection as Record<string, unknown>)[key];
+          return id != null && typeof id !== "string";
+        })))
+  )
+    return false;
   if (
     value.sourceIds != null &&
     (!Array.isArray(value.sourceIds) ||

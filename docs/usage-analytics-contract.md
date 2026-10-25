@@ -240,10 +240,19 @@ that saved-cost behavior is separate from versioned read-only estimates.
 
 ```ts
 type UsageRequestFilters = {
+  recordBasis?: "effective" | "savedHistory";
   sourceIds?: string[];
   statusCode?: number | null;
   statusKind?: "recorded" | "unrecorded" | null;
+  statusClass?: "failed" | "succeeded" | null;
   search?: string | null;
+  providerKey?: string | null;
+  selection?: {
+    modelId?: string | null;
+    toolId?: string | null;
+    providerKey?: string | null;
+  } | null;
+  dayStartMs?: number | null;
 };
 ```
 
@@ -262,6 +271,48 @@ and trend aggregate precisely the matching readable detail records. Trend uses
 the same bounded local-hour/day/week calendar and current-price estimates as
 overview, with request-only filters already applied. It does not reuse overview
 KPIs that ignore request filters or include archived rollups.
+
+The request response additionally contains `dashboard`; older backends may omit
+it. This request-only projection supplies `totals`, the full-period `series`,
+`dimensions` (model, modelProvider, provider, agent), and provider choices.
+Each total includes the four token buckets, `totalTokensIncludingCache`, current
+estimate, cache hit rate and measurement samples. Shared `UsageTotals.totalTokens`
+continues to mean new input plus output. No overview, session-analysis, source
+reader, stored amount or pricing rule is changed by this dashboard.
+
+Provider keys encode the tool/provider ID pair; model/provider keys encode a
+pair rather than splitting a model name on `/`. Native adapter names and current
+bindings do not prove a historical vendor. Such records use the unknown-provider
+group. Successful/failed filters require an observed HTTP status; absent status
+is neither success nor failure.
+
+Dashboard totals, rows and CSV include all explicit conditions, temporary rank
+selection and the selected day. The chart retains the full-period context before
+day focus, highlighting the selected day. Each dimension's candidate rankings
+ignore only their own temporary rank fields, retaining the other conditions;
+the model/provider dimension ignores both model and provider focus. Provider
+choices ignore the explicit provider pick. All these projections are computed
+before paging from one read transaction and retained in the same snapshot.
+The complete dashboard, including its local-calendar context, enters the
+snapshot version. Group time series are sparse; the top-level series supplies
+zero buckets. The renderer draws seven leading categories plus Other, preserving
+unknown/partial estimates rather than displaying them as free.
+
+The current Requests UI displays four summary cells (Token, requests, cost and
+cache hit rate), three chart metrics (Token, cost and requests), and model/Agent
+grouping. Speed and provider presentation are hidden at the user's request;
+the compatible provider dimensions, filters and measurement fields in this IPC
+contract remain available. A previously stored speed preference falls back to
+Token. The chart section contains its absolute screen-reader readout so it
+cannot extend the application document outside the page's scroll owner.
+
+The renderer keeps rank and day focus local to Requests. Leaving the tab clears
+them without changing shared filters. An explicit range, tool, model, project,
+source, status or search change invalidates a day from the previous base calendar.
+An all-history refresh that makes a day obsolete clears that day and reads again;
+other failures retain the normal error/retry path. Chart preferences and keyboard
+focus survive asynchronous request selection. Missing dashboard capability is
+reported explicitly while the compatible legacy view remains readable.
 
 `measurements` returns `statusSamples`, `failedSamples`, `failureRate`,
 `latencySamples`, `avgLatencyMs`, `firstTokenSamples`, `avgFirstTokenMs`,
@@ -299,11 +350,13 @@ savedPath and an empty csv string. Failed/expired snapshots are errors, never
 silently replaced with a newer query. CSV quotes every cell, escapes quotes and
 neutralizes spreadsheet formulas. It excludes request/response bodies,
 credentials and error text.
+The original 16 columns retain their order and meanings; the final appended
+`totalTokensIncludingCache` column sums the four frozen token buckets.
 
 Snapshots live only in memory, expire after 10 minutes and are lost on restart.
 The global store retains at most four snapshots and 128 MiB of serialized snapshots,
-evicting the oldest when necessary. An initial read is bounded to 100,000 rows
-and 64 MiB of source projection and fails explicitly beyond either budget;
+evicting the oldest when necessary. An initial read is bounded to 96 MiB of
+source projection and fails explicitly beyond its budget;
 results are never silently truncated. CSV iterates the frozen rows in chunks of
 1,000, but constructs the complete CSV in bounded memory before atomic file
 write. This is not a streaming export of an unbounded database result. Export

@@ -1,5 +1,6 @@
 //! Frozen request metadata for paging, detail and complete matching CSV export.
 //! Snapshots never contain request/response bodies or credentials.
+mod dashboard;
 use super::{
     ofox_pricing::{CostEstimate, PricingCoverage},
     usage_analytics::{self, Sum, UsageTrend},
@@ -40,6 +41,7 @@ pub struct RequestView {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestPage {
+    pub dashboard: dashboard::Dashboard,
     pub method_version: &'static str,
     pub input_snapshot_version: String,
     pub source_coverage: super::session_analytics::SourceCoverage,
@@ -61,6 +63,7 @@ pub struct RequestPage {
 }
 #[derive(Serialize)]
 struct Snapshot {
+    dashboard: dashboard::Dashboard,
     method_version: &'static str,
     input_snapshot_version: String,
     source_coverage: super::session_analytics::SourceCoverage,
@@ -257,15 +260,12 @@ pub(crate) fn request_page_in<Tz: chrono::TimeZone>(
         if page != 0 {
             return Err(invalid("snapshotRequired"));
         }
-        let data = usage_data::read_dataset(db, query.clone(), Some(&filters), apex, now_ms, tz)?;
-        let mut total = Sum::default();
-        for atom in &data.atoms {
-            total.add(atom, &data.catalog)?;
-        }
-        let summary = total.totals()?;
-        let trend = usage_analytics::build_trend(&data.query, &data.atoms, &data.catalog, tz)?;
-        let projection_version =
-            usage_analytics::projection_version(&data.snapshot_version, &trend)?;
+        // Retain provider choices and rank candidates in the same read transaction.
+        // Temporary dashboard selections are applied only after evidence is frozen.
+        let mut base_filters = filters.clone();
+        base_filters.provider_key = None;
+        let data =
+            usage_data::read_dataset(db, query.clone(), Some(&base_filters), apex, now_ms, tz)?;
         let rows: Vec<_> = data
             .records
             .into_iter()
@@ -303,8 +303,38 @@ pub(crate) fn request_page_in<Tz: chrono::TimeZone>(
                 })
             })
             .collect::<Result<Vec<_>, AppError>>()?;
+        if rows.len() != data.atoms.len() {
+            return Err(invalid("recordProjectionMismatch"));
+        }
+        let calendar = usage_analytics::build_trend(&data.query, &data.atoms, &data.catalog, tz)?;
+        let (dashboard, indices) = dashboard::build(&rows, &calendar, query.end_ms, &filters)?;
+        let mut total = Sum::default();
+        let mut keep = vec![false; rows.len()];
+        for index in indices {
+            keep[index] = true;
+        }
+        let atoms = data
+            .atoms
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, atom)| keep[i].then_some(atom))
+            .collect::<Vec<_>>();
+        for atom in &atoms {
+            total.add(atom, &data.catalog)?;
+        }
+        let summary = total.totals()?;
+        let trend = usage_analytics::build_trend(&data.query, &atoms, &data.catalog, tz)?;
+        let rows = rows
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, row)| keep[i].then_some(row))
+            .collect::<Vec<_>>();
+        let projection_version =
+            usage_analytics::projection_version(&data.snapshot_version, &trend)?;
+        let dashboard_version = serde_json::to_vec(&dashboard).map_err(|_| invalid("serialize"))?;
         let measurements = measure(&rows);
         retain_snapshot(Snapshot {
+            dashboard,
             method_version: data.method_version,
             input_snapshot_version: data.input_snapshot_version,
             source_coverage: data.source_coverage,
@@ -314,9 +344,10 @@ pub(crate) fn request_page_in<Tz: chrono::TimeZone>(
                 snapshot_version: format!(
                     "{:x}",
                     Sha256::digest(format!(
-                        "{}:{}",
+                        "{}:{}:{:x}",
                         projection_version,
-                        fingerprint(&data.query, &filters)?
+                        fingerprint(&data.query, &filters)?,
+                        Sha256::digest(dashboard_version)
                     ))
                 ),
             },
@@ -344,6 +375,7 @@ pub(crate) fn request_page_in<Tz: chrono::TimeZone>(
         .cloned()
         .collect();
     Ok(RequestPage {
+        dashboard: snapshot.dashboard.clone(),
         method_version: snapshot.method_version,
         input_snapshot_version: snapshot.input_snapshot_version.clone(),
         source_coverage: snapshot.source_coverage.clone(),
@@ -403,7 +435,7 @@ fn csv_cell(value: &str) -> String {
 }
 pub fn export_csv(snapshot_id: &str, destination: Option<&str>) -> Result<CsvExport, AppError> {
     let snapshot = get_snapshot(snapshot_id)?;
-    let mut csv="\u{feff}requestId,createdAtMs,tool,model,requestModel,newInputTokens,outputTokens,cacheReadTokens,cacheWriteTokens,savedCostUsd,currentKnownEstimateUsd,estimateAvailability,source,recordedStatusCode,recordedLatencyMs,estimatePriceSource\r\n".to_owned();
+    let mut csv="\u{feff}requestId,createdAtMs,tool,model,requestModel,newInputTokens,outputTokens,cacheReadTokens,cacheWriteTokens,savedCostUsd,currentKnownEstimateUsd,estimateAvailability,source,recordedStatusCode,recordedLatencyMs,estimatePriceSource,totalTokensIncludingCache\r\n".to_owned();
     // Iterate in bounded pages; the immutable rows and price context are shared
     // with paging/detail, and the full matching set is exported, never one UI page.
     for page in snapshot.rows.chunks(1000) {
@@ -439,6 +471,7 @@ pub fn export_csv(snapshot_id: &str, destination: Option<&str>) -> Result<CsvExp
                 } else {
                     "manufacturer".into()
                 },
+                dashboard::row_tokens(view)?.to_string(),
             ];
             csv.push_str(
                 &values
@@ -865,6 +898,223 @@ mod tests {
             serde_json::to_value(latest).unwrap()["measurements"]["statusSamples"],
             3
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn request_dashboard_uses_all_rows_cache_buckets_and_frozen_provider_groups() {
+        let db = Database::memory().unwrap();
+        for (id, provider, model, source, status, at) in [
+            ("dash-a", "one", "model/a", "proxy", 200, 1),
+            ("dash-b", "two", "model/a", "proxy", 503, 86_401),
+            ("dash-c", "local", "other", "session_log", 200, 1),
+        ] {
+            db.conn.lock().unwrap().execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,latency_ms,status_code,created_at,data_source) VALUES(?1,?2,'claude',?3,10,20,30,40,0,?5,?6,?4)",params![id,provider,model,source,status,at]).unwrap();
+        }
+        let q = UsageQueryV1 {
+            start_ms: Some(0),
+            end_ms: 3 * 86_400_000,
+            ..query()
+        };
+        let first = request_page_in(
+            &db,
+            q.clone(),
+            RequestFilters::default(),
+            Pagination {
+                page: 0,
+                page_size: 1,
+            },
+            None,
+            "ofox.ai",
+            (&chrono::Utc, q.end_ms),
+        )
+        .unwrap();
+        let value = serde_json::to_value(&first).unwrap();
+        let dash = &value["dashboard"];
+        assert_eq!(
+            first.summary.total_tokens, 90,
+            "shared main-token meaning is unchanged"
+        );
+        assert_eq!(dash["totals"]["totalTokensIncludingCache"], 300);
+        assert_eq!(dash["totals"]["measurements"]["statusSamples"], 2);
+        assert_eq!(dash["totals"]["measurements"]["failedSamples"], 1);
+        assert!(dash["totals"]["measurements"]["avgGenerationTokensPerSecond"].is_null());
+        assert_eq!(
+            dash["dimensions"]["model"]["rankings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            dash["dimensions"]["provider"]["groups"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            dash["dimensions"]["modelProvider"]["groups"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        db.conn.lock().unwrap().execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at) VALUES('dash-late','one','claude','model/a',900,0,200,2)",[]).unwrap();
+        let next = request_page_in(
+            &db,
+            q.clone(),
+            RequestFilters::default(),
+            Pagination {
+                page: 1,
+                page_size: 1,
+            },
+            Some(&first.snapshot_id),
+            "ofox.ai",
+            (&chrono::Utc, q.end_ms),
+        )
+        .unwrap();
+        assert_eq!(serde_json::to_value(next).unwrap()["dashboard"], *dash);
+        let csv = export_csv(&first.snapshot_id, None).unwrap();
+        assert_eq!(csv.record_count, 3);
+        assert!(csv
+            .csv
+            .lines()
+            .next()
+            .unwrap()
+            .ends_with("totalTokensIncludingCache"));
+        assert!(csv
+            .csv
+            .lines()
+            .skip(1)
+            .all(|line| line.ends_with("\"100\"")));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn request_dashboard_selection_is_exact_and_rank_candidates_ignore_only_their_own_focus() {
+        let db = Database::memory().unwrap();
+        for (id, model, at) in [
+            ("select-a", "model/a", 1),
+            ("select-b", "other", 1),
+            ("select-c", "model/a", 86_401),
+        ] {
+            db.conn.lock().unwrap().execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,latency_ms,status_code,created_at,data_source) VALUES(?1,'local','claude',?2,10,0,200,?3,'session_log')",params![id,model,at]).unwrap();
+        }
+        let q = UsageQueryV1 {
+            start_ms: Some(0),
+            end_ms: 3 * 86_400_000,
+            ..query()
+        };
+        let filters: RequestFilters = serde_json::from_value(
+            serde_json::json!({"selection":{"modelId":"model/a"},"dayStartMs":0}),
+        )
+        .unwrap();
+        let page = request_page_in(
+            &db,
+            q.clone(),
+            filters,
+            Pagination {
+                page: 0,
+                page_size: 20,
+            },
+            None,
+            "ofox.io",
+            (&chrono::Utc, q.end_ms),
+        )
+        .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.data[0].record.request_id, "select-a");
+        let value = serde_json::to_value(&page).unwrap();
+        assert_eq!(
+            value["dashboard"]["dimensions"]["model"]["rankings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            value["dashboard"]["series"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p["totals"]["requests"].as_u64().unwrap())
+                .sum::<u64>(),
+            2
+        );
+        assert_eq!(export_csv(&page.snapshot_id, None).unwrap().record_count, 1);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn request_dashboard_status_classes_and_provider_identity_work_for_both_regions() {
+        let db = Database::memory().unwrap();
+        for (id, tool, source, status) in [
+            ("provider-claude", "claude", "proxy", 200),
+            ("provider-codex", "codex", "proxy", 429),
+            ("provider-native", "claude", "session_log", 200),
+        ] {
+            db.conn.lock().unwrap().execute("INSERT INTO proxy_request_logs(request_id,provider_id,app_type,model,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens,latency_ms,status_code,created_at,data_source) VALUES(?1,'same-id',?2,'org/model',1,2,3,4,0,?4,1,?3)",params![id,tool,source,status]).unwrap();
+        }
+        for apex in ["ofox.ai", "ofox.io"] {
+            let all = request_page(
+                &db,
+                query(),
+                RequestFilters::default(),
+                Pagination {
+                    page: 0,
+                    page_size: 1,
+                },
+                None,
+                apex,
+                3000,
+            )
+            .unwrap();
+            let value = serde_json::to_value(&all).unwrap();
+            assert_eq!(
+                value["dashboard"]["providers"].as_array().unwrap().len(),
+                3,
+                "equal provider IDs in different tools must not alias"
+            );
+            for (json, expected) in [
+                (
+                    serde_json::json!({"statusClass":"failed"}),
+                    "provider-codex",
+                ),
+                (
+                    serde_json::json!({"statusClass":"succeeded"}),
+                    "provider-claude",
+                ),
+                (
+                    serde_json::json!({"providerKey":"unknown"}),
+                    "provider-native",
+                ),
+            ] {
+                let filters = serde_json::from_value(json).unwrap();
+                let page = request_page(
+                    &db,
+                    query(),
+                    filters,
+                    Pagination {
+                        page: 0,
+                        page_size: 20,
+                    },
+                    None,
+                    apex,
+                    3000,
+                )
+                .unwrap();
+                assert_eq!(page.total, 1);
+                assert_eq!(page.data[0].record.request_id, expected);
+                assert_eq!(export_csv(&page.snapshot_id, None).unwrap().record_count, 1);
+                assert_eq!(page.summary.total_tokens, 3);
+                assert_eq!(
+                    serde_json::to_value(page).unwrap()["dashboard"]["totals"]
+                        ["totalTokensIncludingCache"],
+                    10
+                );
+            }
+        }
     }
 
     #[test]

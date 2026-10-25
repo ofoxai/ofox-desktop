@@ -92,7 +92,7 @@ it("opens original history from the request list with its exact query and return
   await userEvent.keyboard("{Enter}");
   await waitFor(() =>
     expect(
-      screen.getByRole("textbox", { name: "搜索请求、模型或供应商" }),
+      screen.getByRole("textbox", { name: "搜索请求或模型" }),
     ).toHaveFocus(),
   );
   expect(screen.queryByText(/原始历史记录仅供核对/)).toBeNull();

@@ -2,6 +2,23 @@
 
 This ledger preserves the accepted non-blocking findings from the implementation review. Deferred means known and not claimed fixed. It is not a claim that these paths were validated on Windows. Windows native execution and installed-agent version checks remain separate acceptance work.
 
+## Request dashboard alignment
+
+- Cache-inclusive totals apply to Requests only. Overview and session-analysis
+  contracts retain their existing token meanings and pricing behavior.
+- Requests hides output speed and provider presentation. Existing compatible
+  measurement and provider fields remain in the IPC projection. This page
+  change does not restore native timing inference; missing HTTP status or
+  first-token evidence remains unknown.
+- Renderer acceptance uses fictional IPC data at 620, 900 and 1280 pixels in
+  zh/en/ja and both themes. It is not validation of Windows WebView rendering,
+  new paid native traffic or a release. The separately authorized macOS build
+  was signed, installed and checked against existing local history after the
+  user completed system authorization; see the
+  [installation record](usage-requests-alignment.md#subsequent-local-installation-2026-10-25).
+  The previous app is retained in a verified backup; user configuration and
+  history directories were not replaced.
+
 ## Resolved follow-ups
 
 - T7 menu selection, Tab focus, popup semantics, collision boundary, highlight stability, narrow menu, unknown TTL and aria-controls: resolved in T18 with regression tests.

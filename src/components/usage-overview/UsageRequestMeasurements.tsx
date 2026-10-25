@@ -45,22 +45,13 @@ export function UsageRequestMeasurements({
       ),
       samples: measurements.firstTokenSamples,
     },
-    {
-      label: t("usageWorkbench.generationSpeed"),
-      value: measured(
-        measurements.avgGenerationTokensPerSecond,
-        measurements.generationSpeedSamples,
-        "Tokens/s",
-      ),
-      samples: measurements.generationSpeedSamples,
-    },
   ];
   return (
     <section
       aria-label={t("usageWorkbench.measurements")}
       className="rounded-list border border-line bg-card p-3.5"
     >
-      <dl className="grid grid-cols-2 gap-4 md:grid-cols-4">
+      <dl className="grid grid-cols-2 gap-4 md:grid-cols-3">
         {items.map((item) => (
           <div key={item.label} className="min-w-0">
             <dt className="text-note text-ink-muted">{item.label}</dt>

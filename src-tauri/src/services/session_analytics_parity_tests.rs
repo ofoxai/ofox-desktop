@@ -732,10 +732,14 @@ fn native_parity_frozen_four_sources_match_magpie_and_all_consumers() {
             .split(',')
             .map(|s| s.trim_matches('"'))
             .collect::<Vec<_>>();
-        assert_eq!(cells.len(), 16);
+        assert_eq!(cells.len(), 17);
         assert_eq!((cells[9], cells[13], cells[14]), ("", "", ""));
         assert_eq!(cells[15], if cells[10].is_empty() { "" } else { "ofox" });
         let parsed = std::array::from_fn(|index| cells[index + 5].parse::<u64>().unwrap());
+        assert_eq!(
+            cells[16].parse::<u64>().unwrap(),
+            parsed.iter().sum::<u64>()
+        );
         csv_total.add(parsed, (!cells[10].is_empty()).then_some(cells[10]));
     }
     check_counter(&mut errors, "csv.total", &csv_total, &expected);

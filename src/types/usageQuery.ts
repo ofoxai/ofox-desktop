@@ -128,6 +128,14 @@ export interface UsageAttribution {
 }
 
 export interface UsageRequestFilters {
+  providerKey?: string | null;
+  statusClass?: "failed" | "succeeded" | null;
+  selection?: {
+    modelId?: string | null;
+    toolId?: string | null;
+    providerKey?: string | null;
+  } | null;
+  dayStartMs?: number | null;
   recordBasis?: "effective" | "savedHistory";
   sourceIds?: string[];
   statusCode?: number | null;

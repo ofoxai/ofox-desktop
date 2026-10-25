@@ -1,4 +1,10 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import i18n from "i18next";
@@ -6,6 +12,7 @@ import zh from "@/i18n/locales/zh.json";
 import { UsageRequests } from "@/components/usage-overview/UsageRequests";
 import { queryClient } from "@/lib/query/queryClient";
 import { createUsageQuery } from "@/lib/usageWorkbench";
+import { requestDashboardFixture } from "./requestDashboardFixture";
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), save: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: mocks.save }));
@@ -91,6 +98,29 @@ beforeEach(() => {
       };
     throw new Error(command);
   });
+});
+
+it("omits output speed and provider controls, rankings and table columns from Requests", async () => {
+  const normal = mocks.invoke.getMockImplementation()!;
+  const dashboard = requestDashboardFixture();
+  dashboard.totals.measurements.generationSpeedSamples = 5;
+  dashboard.totals.measurements.avgGenerationTokensPerSecond = 75;
+  mocks.invoke.mockImplementation(async (command, args) =>
+    command === "get_request_logs"
+      ? { ...(await normal(command, args)), dashboard }
+      : normal(command, args),
+  );
+  render(<UsageRequests {...props} />);
+  const summary = await screen.findByRole("region", { name: "请求汇总" });
+  expect(summary).not.toHaveTextContent("输出速度");
+  expect(summary).toHaveTextContent("缓存命中率");
+  expect(screen.queryByRole("radio", { name: "速度" })).toBeNull();
+  expect(screen.queryByRole("combobox", { name: "供应商" })).toBeNull();
+  expect(screen.queryByRole("radio", { name: "供应商" })).toBeNull();
+  expect(screen.queryByRole("radio", { name: "模型 · 供应商" })).toBeNull();
+  expect(screen.queryByText("供应商未知")).toBeNull();
+  expect(screen.queryByText("供应商", { selector: "span" })).toBeNull();
+  expect(screen.getByRole("textbox", { name: "搜索请求或模型" })).toBeVisible();
 });
 it("keeps a frozen snapshot across pages and resets the first request on filter changes", async () => {
   const view = render(<UsageRequests {...props} />);
@@ -372,8 +402,8 @@ it("shows the frozen complete-condition trend and measured sample denominators a
   expect(metrics).toHaveTextContent("3 / 45");
   expect(metrics).toHaveTextContent("0 ms");
   expect(metrics).toHaveTextContent("2 / 45");
-  expect(metrics).toHaveTextContent("0 / 45");
-  expect(metrics).toHaveTextContent("暂无可用样本");
+  expect(metrics).not.toHaveTextContent("生成速度");
+  expect(metrics).not.toHaveTextContent("0 / 45");
   const trend = screen.getByRole("region", { name: "请求趋势" });
   expect(
     within(trend).getByRole("button", { name: /540 Tokens/ }),
@@ -397,6 +427,194 @@ it("explains older-backend absence instead of manufacturing zero-sample statisti
   await screen.findByRole("button", { name: /model/ });
   expect(screen.getByText("当前后端未提供请求趋势和测量摘要。")).toBeVisible();
   expect(screen.queryByRole("region", { name: "请求测量" })).toBeNull();
+  await userEvent.click(screen.getByRole("combobox", { name: "状态" }));
+  expect(screen.queryByRole("option", { name: "失败" })).toBeNull();
+  expect(screen.queryByRole("option", { name: "成功" })).toBeNull();
+  await userEvent.keyboard("{Escape}");
+});
+
+it("shows the request dashboard with cache-inclusive tokens and isolated ranking filters", async () => {
+  const normal = mocks.invoke.getMockImplementation()!;
+  const measurements = {
+    statusSamples: 0,
+    failedSamples: 0,
+    failureRate: null,
+    latencySamples: 0,
+    avgLatencyMs: null,
+    firstTokenSamples: 0,
+    avgFirstTokenMs: null,
+    generationSpeedSamples: 0,
+    avgGenerationTokensPerSecond: null,
+  };
+  const totals = {
+    requests: 45,
+    inputTokens: 450,
+    outputTokens: 90,
+    cacheReadTokens: 3000,
+    cacheWriteTokens: 60,
+    totalTokensIncludingCache: 3600,
+    cacheHitRate: 3000 / 3510,
+    estimate,
+    measurements,
+  };
+  const point = { start: 0, end: 86400000, totals };
+  const group = {
+    id: "model",
+    label: "model",
+    modelId: "model",
+    providerKey: "fixture-provider",
+    toolId: "fixture-agent",
+    totals,
+    series: [point],
+  };
+  mocks.invoke.mockImplementation(async (command, args) =>
+    command === "get_request_logs"
+      ? {
+          ...(await normal(command, args)),
+          dashboard: {
+            granularity: "day",
+            totals,
+            series: [point],
+            providers: [],
+            dimensions: Object.fromEntries(
+              ["model", "modelProvider", "provider", "agent"].map((key) => [
+                key,
+                {
+                  groups: [group],
+                  rankings: [group],
+                },
+              ]),
+            ),
+          },
+        }
+      : normal(command, args),
+  );
+  const view = render(<UsageRequests {...props} />);
+  const summary = await screen.findByRole("region", { name: "请求汇总" });
+  expect(summary).toHaveTextContent("3.6K");
+  expect(summary).toHaveTextContent("85.5%");
+  expect(summary).toHaveTextContent("暂无可用样本");
+  expect(screen.queryByRole("region", { name: "请求测量" })).toBeNull();
+  const chart = screen.getByRole("region", { name: "请求趋势" });
+  for (const name of ["Token", "费用", "请求", "模型", "Agent"]) {
+    expect(within(chart).getByRole("radio", { name })).toBeVisible();
+  }
+  await userEvent.click(screen.getByRole("button", { name: "筛选模型 model" }));
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "get_request_logs",
+      expect.objectContaining({
+        page: 0,
+        requestFilters: expect.objectContaining({
+          selection: { modelId: "model" },
+        }),
+      }),
+    ),
+  );
+  view.rerender(<UsageRequests {...props} active={false} />);
+  view.rerender(<UsageRequests {...props} active />);
+  await waitFor(() => {
+    const calls = mocks.invoke.mock.calls.filter(
+      ([name]) => name === "get_request_logs",
+    );
+    expect(calls.at(-1)?.[1].requestFilters.selection).toBeUndefined();
+  });
+  await userEvent.click(await screen.findByRole("radio", { name: "Agent" }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "筛选Agent model" }),
+  );
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith(
+      "get_request_logs",
+      expect.objectContaining({
+        requestFilters: expect.objectContaining({
+          selection: { toolId: "fixture-agent" },
+        }),
+      }),
+    ),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("radio", { name: "Agent" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    ),
+  );
+  expect(screen.getByRole("button", { name: "筛选Agent model" })).toHaveFocus();
+  const day = screen
+    .getByRole("img", { name: "请求趋势" })
+    .querySelector('[role="button"]')!;
+  fireEvent.click(day);
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenLastCalledWith(
+      "get_request_logs",
+      expect.objectContaining({
+        requestFilters: expect.objectContaining({ dayStartMs: 0 }),
+      }),
+    ),
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("img", { name: "请求趋势" })).toHaveFocus(),
+  );
+  mocks.invoke.mockClear();
+  await userEvent.type(
+    screen.getByRole("textbox", { name: "搜索请求或模型" }),
+    "today-only",
+  );
+  await userEvent.click(screen.getByRole("button", { name: "应用请求条件" }));
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenLastCalledWith(
+      "get_request_logs",
+      expect.objectContaining({
+        requestFilters: expect.objectContaining({ search: "today-only" }),
+      }),
+    ),
+  );
+  expect(
+    mocks.invoke.mock.calls
+      .filter(([name]) => name === "get_request_logs")
+      .every(([, args]) => args.requestFilters.dayStartMs == null),
+  ).toBe(true);
+  fireEvent.click(
+    (await screen.findByRole("img", { name: "请求趋势" })).querySelector(
+      '[role="button"]',
+    )!,
+  );
+  await waitFor(() =>
+    expect(screen.getByRole("img", { name: "请求趋势" })).toHaveFocus(),
+  );
+  mocks.invoke.mockClear();
+  view.rerender(
+    <UsageRequests
+      {...props}
+      query={{ ...query, startMs: 1000, endMs: 5000 }}
+    />,
+  );
+  await waitFor(() => expect(mocks.invoke).toHaveBeenCalled());
+  expect(
+    mocks.invoke.mock.calls
+      .filter(([name]) => name === "get_request_logs")
+      .every(([, args]) => args.requestFilters.dayStartMs == null),
+  ).toBe(true);
+  const previous = mocks.invoke.getMockImplementation()!;
+  let obsoleteDayRejected = false;
+  mocks.invoke.mockImplementation(async (command, args) => {
+    if (
+      command === "get_request_logs" &&
+      args.requestFilters.dayStartMs != null
+    ) {
+      obsoleteDayRejected = true;
+      throw new Error("usage.requests.invalidDay");
+    }
+    return previous(command, args);
+  });
+  fireEvent.click(
+    (await screen.findByRole("img", { name: "请求趋势" })).querySelector(
+      '[role="button"]',
+    )!,
+  );
+  await waitFor(() => expect(obsoleteDayRejected).toBe(true));
+  await screen.findByRole("region", { name: "请求汇总" });
+  expect(screen.queryByRole("alert")).toBeNull();
 });
 
 it("honors the same explicit first-token measurement provenance in request detail", async () => {
