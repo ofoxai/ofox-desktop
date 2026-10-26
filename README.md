@@ -4,206 +4,173 @@
 
 # Ofox Desktop
 
-### 一个账号，打通所有 AI 编程工具
+### 一个入口管理 AI 工具、会话、用量与资源
 
-把 Claude Code、Codex、ChatGPT 桌面版、Gemini CLI、OpenCode、OpenClaw、Hermes、
-WorkBuddy 的供应商配置收进一个桌面应用——登录一次，一键接入，不再手动改配置文件。
+连接 Ofox 账号，管理本机 AI 工具的安装、接入和模型设置；
+查看会话与用量，将 MCP、Skills 和指令分发到支持的应用。
 
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)](https://desktop.ofox.ai/latest.json)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)](https://github.com/ofoxai/ofox-desktop/releases/latest)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-[下载](https://ofox.ai/desktop) · [官网](https://ofox.ai)
+[官网下载](https://ofox.ai/desktop) · [GitHub Releases](https://github.com/ofoxai/ofox-desktop/releases/latest) · [官网](https://ofox.ai)
 
 </div>
 
 ---
 
-## 这是什么
+## 主要入口
 
-每个 AI 编程工具都有自己的一套配置：Claude Code 读 `~/.claude/settings.json`，
-Codex 和 ChatGPT 桌面版共用 `~/.codex/config.toml`，Gemini CLI 读 `.env` 加
-`settings.json`，OpenCode 和 OpenClaw 各有各的 JSON/JSON5 方言，Hermes 用 YAML，
-WorkBuddy 又是另一份模型列表。
+| 页面       | 可以做什么                                                     |
+| ---------- | -------------------------------------------------------------- |
+| **工具**   | 检测本机安装、安装或更新工具、绑定 Ofox、管理模型与接入状态    |
+| **会话**   | 按项目查看本地会话，搜索、导出、续聊，使用可恢复的回收站       |
+| **用量**   | 查看账户余额、本地请求和会话统计，按工具、项目、模型与日期筛选 |
+| **资源库** | 管理指令、MCP 和 Skills，发现原生配置，预览并分发到多个应用    |
 
-想换个供应商——比如从官方订阅切到中转服务，或者在几家之间比价——就得挨个
-翻文档、找配置路径、改对字段名、重启工具。多装几个工具，这事就从"有点烦"
-变成"每次都要查"。工具本身还要装、要升级，有的还得先装 Node.js。
+不同工具、版本和操作系统支持的操作有所不同，应用会显示当前可用动作和不可用原因。
 
-Ofox Desktop 把这些收敛成一次点击。它知道每个工具装在哪、配置文件在哪、字段
-叫什么，然后原子化地写进去；没装的帮你装，有新版本帮你升。
+## 工具与模型
 
-## 核心能力
+支持 Claude Code、Codex、ChatGPT 桌面版、Gemini CLI、OpenCode、OpenClaw、
+Hermes、WorkBuddy、DeepSeek Harness（dsh）和 Pi。
 
-**一个账号覆盖所有工具**
+- **检测与安装管理**：区分已安装、未安装和检测异常，按实际安装来源提供更新、修复或手动处理入口。支持自动更新的工具可以逐个或批量更新；ChatGPT 等桌面客户端按其原生更新方式处理。
+- **Ofox 接入**：登录后为绑定工具管理专属 API Key，并按各工具的原生格式配置接入。退出登录、切换账号、卸载工具和解除绑定是不同操作，详见[绑定生命周期](docs/tool-lifecycle.md)。
+- **模型状态**：区分写入配置的默认模型与工具实际观察到的模型。支持保存和预览多工具模型方案；已有会话、启动参数及工具自己的模型选择仍可能影响实际使用的模型。
+- **共享配置**：Codex 与 ChatGPT 的 Codex 模式共用配置目标。ChatGPT 内已有会话的模型由客户端决定；dsh 新会话默认模型与已有会话也分别处理。
+- **恢复与解绑**：配置缺失时提供显式恢复；解绑先预览，再按 Ofox 管理的字段与当前文件状态恢复。能够识别的用户改动、共享配置持有者和其他资源会参与检查，冲突会说明原因。
+- **区域选择**：支持自动探测和手动选择 `ofox.ai` / `ofox.io`。启动和区域切换时协调 Ofox 管理的地址，用户自定义地址出现冲突时保留并提示。
 
-用 Ofox 账号登录后，把任意工具"绑定"到 Ofox——应用会自动为该工具申请一把
-专属 API key，写入它自己的配置格式。所有工具共用一个账号、一份额度，不用
-在每个平台单独注册充值。退出登录会让这些 key 失效（工具暂停可用），再次登录
-后自动换成当前账号的新 key，其余设置不变，详见
-[工具生命周期](docs/tool-lifecycle.md)。
+工具安装与绑定状态分别记录。卸载工具不会自动解除绑定，重新安装和恢复接入也分别提供操作。
+实际配置目录支持应用设置和部分原生环境变量覆盖，见[各工具配置与数据来源](docs/agent-wiring.md)和[更新方式](docs/tool-updates.md)。
 
-**自动检测，一键安装和升级**
+## 资源库
 
-自动发现本机已安装的工具。没装的在工具列表里一键安装，缺 Node.js 时先帮你
-装好（macOS 通过 nvm，Windows 通过 winget）。有新版本时列表里直接显示
-「升级到 vX」，按工具原来的安装方式升级（Homebrew、npm、pnpm 或工具自带的
-更新命令）；多个工具可以一键全部升级。认不出安装来源的（如 Volta）只给手动
-升级入口，不会另装一份。
+### MCP
 
-**模型先测再换**
+以应用矩阵查看服务器的分发状态，支持表单、命令和 JSON 配置输入、原生配置发现、
+导入比较、批量分发与撤回。修改会先预览并核对当前配置；同名冲突、来源变化和部分失败分别展示。
 
-切换模型前先用一次流式请求实测兼容性，不兼容的模型不让选。OpenCode 会自动
-选用实测能用的 Chat Completions 或 Responses 协议。
+目标包括 Claude Code、Codex / ChatGPT、Gemini CLI、OpenCode、OpenClaw、Hermes、
+WorkBuddy、dsh 和 Pi。Codex / ChatGPT 共用一个物理配置目标；各客户端的传输协议、
+版本要求及配置范围由适配器检查。
 
-**解绑原样还原**
+收录到资源库、写入应用配置与连接成功分别显示。MCP 连接检查需要显式执行，
+客户端的信任和 OAuth 授权仍在对应客户端完成。
 
-解绑时把接入方式（provider、base URL、key、认证方式、模型）还原成绑定前的
-样子；绑定期间加的 MCP、技能、插件都保留，JSON/JSON5 里的注释不会丢。解绑前
-先预览要改什么，解绑后展示结果。Codex 绑定不改 `auth.json`，ChatGPT 登录令牌
-不会发往 Ofox。
+### Skills
 
-**卸载不丢绑定**
+- 从 GitHub 仓库、skills.sh、ZIP、本地目录或应用中发现并收录 Skills。
+- 在已收录技能与在线发现之间切换，按名称、描述、仓库和来源路径搜索。
+- 选择多个应用分发，查看共享目录、已应用、待处理及内容不同的副本。
+- 同名不同内容先比较；选择替换时保留备份，也可以保留应用自己的版本。
+- 显式检查更新，处理备份、恢复和部分失败重试；本地修改不会因一次更新检查被自动覆盖。
 
-工具被删掉后，绑定记录仍然保留，工具折叠到「未安装」分组，重新装上后绑定还在。
-接入配置丢了可以一键恢复；你改过的字段不会被覆盖。
+### 指令与资源包
 
-**环境变量冲突提醒**
+管理可编辑指令及模板，预览应用后的文件变化。支持选中资源的批量应用、撤回与资源包导入导出，
+并提供本机批次历史和恢复检查。恢复会重新核对当前状态，过期计划不能直接重放。
 
-发现会绕过 Ofox 配置的环境变量（例如系统级的 `GEMINI_API_KEY`），告诉你它设在
-哪里、怎么删除。只显示变量名和来源，不显示值。
+完整的目标范围、配置格式与边界见[资源库说明](docs/library-workbench.md)。
 
-**区域自动选择**
+## 会话与用量
 
-每次启动按出口 IP 自动选用 `ofox.ai` 或 `ofox.io`，已绑定工具里由 Ofox 写入的
-地址随之更新；你自己改过的地址不会被覆盖，而是提示冲突。手动选过区域后就固定
-下来。
+**会话**提供项目与会话列表、Markdown 导出、续聊入口及可恢复的回收站。
+操作能力取决于对应工具的本地记录；缺失、只支持元数据或无法确认的状态会明确显示。
 
-**原生供应商管理**
+**用量**将账户信息与本地记录分别呈现，提供概览、请求明细与会话分析。
+请求面板包含汇总、分组图表、排名、日期选择、请求表格和 CSV 导出，支持按工具、
+项目、模型等维度筛选。请求面板的 Token 合计包含输入、输出、缓存读取和缓存写入；
+其他视图保留各自标明的统计口径。
 
-不想用 Ofox 也完全可以。应用本身就是个供应商配置管理器：为每个工具维护多套
-配置（官方订阅、各家中转、自建网关），点一下切换，切换前自动快照当前配置，
-随时能切回去。内置主流供应商预设，填个 key 就能用。
+本地统计依赖原生记录的覆盖范围。缺失证据、未知价格和部分覆盖分别标注；
+价格估算与服务端账单分别展示。详细口径见[用量契约](docs/usage-analytics-contract.md)和[请求面板说明](docs/usage-requests-alignment.md)。
 
-**配置直写，不做中间层**
+## 配置与凭据
 
-凭据直接写进工具自己的配置文件，请求由工具直连供应商——Ofox Desktop 不代理
-你的流量，关掉应用工具照常工作。这意味着没有额外延迟，也不存在"应用挂了工具
-就不能用"的问题。
+- 模型请求由工具直接发送到其配置的服务端，Ofox Desktop 负责配置、管理与本地统计，不代理这些请求。
+- Ofox 保存的登录令牌和工具密钥使用系统凭据存储，开发版与正式版隔离。向工具提供的 API Key 仍需按其原生格式写入本机配置文件。
+- 配置改动使用文件事务与冲突检查，保留不属于本次操作的字段；跨文件操作可能部分完成，结果会逐项显示。
+- 环境变量冲突会给出来源和处理入口。WebDAV 同步、数据库备份与恢复可在设置中管理。
 
-**凭据存系统钥匙串**
+具体行为与已知边界见[工具接线](docs/agent-wiring.md)和[已知限制](docs/known-limitations.md)。
 
-OAuth token 和 API key 存在 macOS 钥匙串或 Windows 凭据管理器里，不落明文
-配置。debug 构建用独立的存储，和正式版隔离。
+## 安装与更新
 
-**其他**
+从[官网下载页](https://ofox.ai/desktop)或 [GitHub Releases](https://github.com/ofoxai/ofox-desktop/releases/latest) 取得正式安装包。
 
-- 工具健康检查——一键探测各工具当前配置是否真的能通
-- 低余额提醒
-- MCP 服务器配置管理
-- 用量统计与成本核算
-- WebDAV 多设备同步
-- 托盘常驻，快捷切换
+| 平台                     | 安装包 | 说明                                                                        |
+| ------------------------ | ------ | --------------------------------------------------------------------------- |
+| macOS 12+，Apple Silicon | `.dmg` | 正式发布包含代码签名与 Apple 公证                                           |
+| Windows 10/11，x64       | `.exe` | NSIS 安装包；暂未代码签名，SmartScreen 提示时可在“更多信息”中选择“仍要运行” |
 
-## 支持的工具
-
-| 工具 | 配置文件 | 格式 |
-| --- | --- | --- |
-| Claude Code | `~/.claude/settings.json` | JSON |
-| Codex | `~/.codex/config.toml` | TOML |
-| ChatGPT 桌面版 | 与 Codex 共用 `~/.codex/config.toml` | TOML |
-| Gemini CLI | `~/.gemini/.env` + `~/.gemini/settings.json` | dotenv + JSON |
-| OpenCode | `~/.config/opencode/opencode.json` | JSON |
-| OpenClaw | `~/.openclaw/openclaw.json` | JSON5 |
-| Hermes | `~/.hermes/config.yaml`（Windows：`%LOCALAPPDATA%\hermes\config.yaml`） | YAML |
-| WorkBuddy | `~/.workbuddy/models.json` | JSON |
-
-Windows 上 `~` 指用户目录（`%USERPROFILE%`）。
-
-## 安装
-
-从 [ofox.ai/desktop](https://ofox.ai/desktop) 下载，或直接取最新版：
+应用顶栏会提示新版本，也可从设置检查更新。各 AI 客户端仍有自己的系统与版本要求。
+GitHub Release 附带 `SHA256SUMS.txt`，可用于核对安装包；线上更新清单为：
 
 ```bash
-curl -s https://desktop.ofox.ai/latest.json
+curl -fsSL https://desktop.ofox.ai/latest.json
 ```
 
-| 平台 | 安装包 | 说明 |
-| --- | --- | --- |
-| macOS 12+（Apple Silicon） | `.dmg` | 已签名 + 公证，下载即用 |
-| Windows 10/11（x64） | `.exe` | 暂未代码签名，SmartScreen 提示时点「更多信息 → 仍要运行」 |
+<details>
+<summary>从早期版本升级后的 macOS 钥匙串授权</summary>
 
-应用内「关于」页可检查更新。
+从旧签名版本升级时，macOS 可能要求新版 Ofox Desktop 重新获得已有钥匙串条目的读取权限。
+这类提示涉及已保存的登录凭据和工具密钥，可能出现多次。
 
-### 从 1.3.2 或更早版本升级：钥匙串授权
+确认是当前 Ofox Desktop 的升级提示后，按系统要求输入密码并选择“始终允许”。
+若之前拒绝了授权，可退出应用后重新打开再处理。后续是否再次提示取决于签名和系统授权状态。
 
-升级后第一次打开，macOS 会连续弹出几次「Ofox Desktop 想要使用您存储在钥匙串中的
-"ai.ofox.desktop.oauth"（或 "ai.ofox.desktop.apikey"）中的机密信息」。
-
-**为什么会弹**：从 1.3.4 起，macOS 版改用公司（NICE TALK PTE. LTD.）的 Apple
-开发者证书签名。你的登录信息和各工具的 API Key 存在系统钥匙串里，每一条只认当初
-保存它的那个签名。签名换了，macOS 会把新版当成另一个程序，逐条问你是否允许它读取。
-这是 macOS 保护钥匙串的机制，Ofox 并没有要新的权限，读的也还是原来那些数据。
-
-**会弹几次**：登录信息 2 次（access token、refresh token 各一条），再加上每个已
-绑定的工具 1 次。
-
-**怎么点**：每个弹窗都输入开机密码，点「始终允许」。点「允许」只放行这一次，下次
-打开还会再问。不小心点了「拒绝」的话，从菜单栏图标退出 Ofox 再打开，会重新询问。
-
-**只有这一次**：以后的版本都用同一张证书签名，再升级不会再问。新装 1.3.4 及以后
-版本的用户不会遇到。
+</details>
 
 ## 开发
 
-```bash
-pnpm install
-pnpm tauri dev          # 开发模式
-pnpm tauri build        # 打包
-```
-
-前置要求：Node 20+、pnpm 10+、Rust stable。Windows 上另需 Microsoft C++
-生成工具和 WebView2，见 [Tauri 前置要求](https://tauri.app/start/prerequisites/)。
-
-其他命令：
+需要 Node.js 20.19+（20.x）或 22.12+、pnpm 10 和 Rust stable。
+CI 使用 Node.js 20 与 pnpm 10.12.3。Windows 还需要 Microsoft C++ 生成工具和 WebView2；
+平台依赖见 [Tauri 前置要求](https://tauri.app/start/prerequisites/)。
 
 ```bash
-pnpm typecheck          # TypeScript 类型检查
-pnpm test:unit          # 前端单元测试
-pnpm format             # 格式化
-cargo test --manifest-path src-tauri/Cargo.toml    # Rust 测试
+pnpm install --frozen-lockfile
+pnpm dev                  # 启动完整 Tauri 开发应用
+pnpm dev:renderer         # 仅启动 renderer，端口 3011
+pnpm build:renderer       # 构建网页资源
+pnpm build                # 构建桌面应用
 ```
 
-技术栈：Tauri 2 + React 18 + TypeScript + Tailwind，后端 Rust。
+检查命令：
 
-更多说明：
+```bash
+pnpm typecheck
+pnpm format:check
+pnpm test:unit
+cargo fmt --check --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path src-tauri/Cargo.toml
+```
 
-- [工具更新](docs/tool-updates.md)——各安装来源的检测与升级方式
-- [绑定生命周期](docs/tool-lifecycle.md)——卸载、恢复与解绑的状态规则
-- [Windows 测试](docs/windows-testing.md)——Windows 验证入口与手动验收清单
+测试配置、凭据与会话写入使用临时沙箱。平台专属行为需要在原生系统验证，
+macOS 结果不能代替 Windows；开发约定见 [AGENTS.md](AGENTS.md)和[代码标准](docs/code-standards.md)。
 
 ### 发版
 
-正式发版由 GitHub Actions 完成——打 tag 触发构建：macOS 产出签名并公证的
-`.dmg`，Windows 产出 `.exe` 安装包（暂未签名）。产物发布到 Cloudflare R2，
-`latest.json` 按平台合并更新：
+正式发布使用 [Release workflow](.github/workflows/release.yml)，产物上传到 Cloudflare R2 和 GitHub Releases，
+再按平台合并更新 `latest.json`。
 
-```bash
-git tag <version>_$(date +%Y%m%d_%H%M)
-git push origin --tags
-```
+1. 同步 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 中应用自身的版本，以及 `src-tauri/tauri.conf.json`。
+2. 完成检查，并取得同一最终提交的独立 Windows Probe 成功记录。PR 合并引用的验证不能代替源提交的 push / 手动验证。
+3. 在发布环境允许的分支上运行 `release.yml` 的 `dry_run=true`。确认提交 SHA 一致，等待完整检查、构建、签名、公证和安装包验证全部通过；遵守 GitHub 发布环境审批。
+4. 在该已验证提交上创建 `<version>_YYYYMMDD_HHMM` 标签，只推送这一个标签，触发正式发布。
+5. 核对 GitHub Release、两个平台的安装包校验值，以及线上 `latest.json`。
 
-版本号需在 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`
-三处保持一致，CI 会校验并在不一致时直接失败。
-
-`scripts/release.sh` 是本地应急发版脚本，常规情况请用 CI。
+签名和公证也属于 dry-run 验证。普通分支的预览安装包只用于测试，不能作为正式公证包分发，
+详见[分支安装包](docs/branch-packages.md)和[发布门禁](docs/code-standards.md#release-gate)。
+`scripts/release.sh` 仅供 CI 不可用时应急使用。
 
 ## 许可
 
 [MIT](LICENSE)
 
-本项目基于 [cc-switch](https://github.com/farion1231/cc-switch)（MIT，
-Copyright © 2025 Jason Young）开发，在其供应商切换能力之上增加了 Ofox
-账号体系、工具绑定与健康检查等功能。Windows 上的命令行工具检测、安装与升级
-移植自 [magpie](https://github.com/yetone/magpie)（MIT，Copyright © 2026
-yetone）。感谢原作者的工作。
+本项目基于 [cc-switch](https://github.com/farion1231/cc-switch)（MIT，Copyright © 2025 Jason Young）开发，
+在其基础上增加了 Ofox 账号、工具管理、资源库和会话用量等能力。
+Windows 命令行工具的检测、安装与升级移植自 [magpie](https://github.com/yetone/magpie)
+（MIT，Copyright © 2026 yetone）。感谢原作者的工作。
