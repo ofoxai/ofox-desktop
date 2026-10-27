@@ -174,6 +174,10 @@ test("the MCP server lists exactly web_search and web_fetch with bounded inputs"
   assert.equal(search.inputSchema.properties.query.minLength, 1);
   assert.equal(search.inputSchema.properties.query.maxLength, 2000);
   assert.equal(search.inputSchema.additionalProperties, false);
+  // One call may bill one or two search calls (a search, an opened page).
+  assert.doesNotMatch(search.description, /one paid/i);
+  assert.match(search.description, /one or two billed search calls/);
+  assert.match(search.inputSchema.properties.query.description, /never a URL/);
   const fetchTool = tools.find((tool) => tool.name === "web_fetch");
   assert.deepEqual(fetchTool.inputSchema.required, ["url"]);
 });

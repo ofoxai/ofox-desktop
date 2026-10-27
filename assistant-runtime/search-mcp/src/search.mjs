@@ -1,7 +1,8 @@
 import { proxyRefused } from "./proxy.mjs";
 import { scrubSecrets } from "./redact.mjs";
 
-// One paid web search through the Ofox Responses API.
+// A paid web search through the Ofox Responses API: one request, billed as
+// one or two search calls.
 //
 // The gateway bills every `web_search_call` output item (`open_page` included)
 // at the model's web_search price. `max_tool_calls: 1` limits those items but

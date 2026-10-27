@@ -1,8 +1,9 @@
 # Ofox search MCP server
 
 A small stdio MCP server, built on the official `@modelcontextprotocol/sdk`,
-that gives the Ofox assistant two tools: `web_search` (one paid search
-through the Ofox Responses API) and `web_fetch` (read one public web page).
+that gives the Ofox assistant two tools: `web_search` (a paid search through
+the Ofox Responses API, billed as one or two search calls, see
+[Billing](#billing)) and `web_fetch` (read one public web page).
 `npm run build` bundles `src/server.mjs` into the single file
 `dist/ofox-search-mcp.mjs`, which runs on the bundled Node 22 with no
 `node_modules`. Only the stdio transport is bundled; the build fails if the

@@ -133,8 +133,9 @@ export function createSearchServer(
       title: "Web search",
       description:
         "Search the web through Ofox and get a short summary with source " +
-        "links. Each call is one paid web search: search only when current " +
-        "or outside information is needed, and never repeat a search that " +
+        "links. Each call is paid, one or two billed search calls (a " +
+        "search, sometimes an opened page): search only when current or " +
+        "outside information is needed, and never repeat a search that " +
         "returned search_outcome_unknown.",
       inputSchema: z.strictObject({
         query: z
@@ -142,7 +143,10 @@ export function createSearchServer(
           .min(1)
           .max(2000)
           .regex(/\S/)
-          .describe("What to search for (1-2000 characters)"),
+          .describe(
+            "What to search for (1-2000 characters): words, never a URL; " +
+              "site:example.com searches one site",
+          ),
       }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
