@@ -156,10 +156,16 @@ pub fn auth_app_base() -> String {
 /// 默认走线上；设了 `OFOX_USE_LOCAL=1` 时切回 `http://localhost:8080`
 /// （ofox-core Go service）。
 pub fn auth_api_base() -> String {
+    auth_api_base_for(current_apex())
+}
+
+/// 同 [`auth_api_base`]，但用调用方给定的 apex——助手一次运行开始时冻结 apex，
+/// 中途切地区不会把这次运行的请求改打到另一个 host。
+pub(crate) fn auth_api_base_for(apex: &str) -> String {
     if use_local_dev() {
         DEV_API_BASE.to_string()
     } else {
-        format!("https://api.{}", current_apex())
+        format!("https://api.{apex}")
     }
 }
 
@@ -170,10 +176,15 @@ pub fn auth_api_base() -> String {
 /// 前缀分发）；设了 `OFOX_USE_LOCAL=1` 时切回 `http://localhost:8088`
 /// （ofox-gateway plugin）。
 pub fn gateway_base() -> String {
+    gateway_base_for(current_apex())
+}
+
+/// 同 [`gateway_base`]，但用调用方给定的 apex（见 [`auth_api_base_for`]）。
+pub(crate) fn gateway_base_for(apex: &str) -> String {
     if use_local_dev() {
         DEV_GATEWAY_BASE.to_string()
     } else {
-        format!("https://api.{}", current_apex())
+        format!("https://api.{apex}")
     }
 }
 
@@ -201,7 +212,13 @@ pub(crate) fn mentions_ofox_gateway(text: &str) -> bool {
 /// 仍然遵守 apex 切换（ofox.ai ⇌ ofox.io），所以国内用户的模型列表来自
 /// `api.ofox.io`。
 pub fn models_catalog_base() -> String {
-    format!("https://api.{}", current_apex())
+    models_catalog_base_for(current_apex())
+}
+
+/// 同 [`models_catalog_base`]，但用调用方给定的 apex：模型列表按 apex 缓存时，
+/// 缓存键和实际请求的 host 必然一致。
+pub(crate) fn models_catalog_base_for(apex: &str) -> String {
+    format!("https://api.{apex}")
 }
 
 /// 营销站 `https://<apex>` —— terms / privacy / 主站 marketing 链接。
@@ -634,6 +651,29 @@ mod tests {
             openapi_api_key_url(id),
             format!("{}/{id}", openapi_api_keys_url())
         );
+    }
+
+    #[test]
+    fn apex_bound_bases_use_the_given_apex_not_the_current_one() {
+        // 助手一次运行开始时冻结 apex：中途切地区，这次运行仍打开始时的 host。
+        assert_eq!(models_catalog_base_for("ofox.io"), "https://api.ofox.io");
+        assert_eq!(models_catalog_base_for("ofox.ai"), "https://api.ofox.ai");
+        assert_eq!(
+            models_catalog_base(),
+            models_catalog_base_for(current_apex())
+        );
+        assert_eq!(auth_api_base(), auth_api_base_for(current_apex()));
+        assert_eq!(gateway_base(), gateway_base_for(current_apex()));
+        if use_local_dev() {
+            eprintln!("[test] OFOX_USE_LOCAL is set; skipping production apex assertions");
+            assert_eq!(auth_api_base_for("ofox.io"), DEV_API_BASE);
+            assert_eq!(gateway_base_for("ofox.io"), DEV_GATEWAY_BASE);
+            return;
+        }
+        for apex in KNOWN_APEXES {
+            assert_eq!(auth_api_base_for(apex), format!("https://api.{apex}"));
+            assert_eq!(gateway_base_for(apex), format!("https://api.{apex}"));
+        }
     }
 
     #[test]
