@@ -69,10 +69,12 @@ export function useAssistant(enabled: boolean) {
   const [bootstrap, setBootstrap] = useState<AssistantBootstrap | null>(null);
   const [chosenModel, setChosenModel] = useState<string | null>(null);
   const newModelId = chosenModel ?? bootstrap?.defaultModelId ?? "";
-  // Web search for the conversation the first message creates; each new
-  // conversation starts with it off.
+  // Web search for the conversation the first message creates. A new
+  // conversation starts with the last choice made on the switch for this
+  // account in this window (off until one is made), like the model picker.
   const [newWebSearch, setNewWebSearchState] = useState(false);
   const newWebSearchRef = useRef(newWebSearch);
+  const lastWebSearch = useRef(false);
   const [search, setSearch] = useState("");
   const [sessions, setSessions] = useState<AssistantSession[]>([]);
   const [unreadable, setUnreadable] = useState<AssistantUnreadableSession[]>(
@@ -393,6 +395,7 @@ export function useAssistant(enabled: boolean) {
       setBootstrap(null);
       bootstrapRef.current = null;
       setChosenModel(null);
+      lastWebSearch.current = false;
       setNewWebSearch(false);
       setRunSearch(null);
       setSearchSkipped(new Set());
@@ -710,7 +713,7 @@ export function useAssistant(enabled: boolean) {
       selectionSequence.current += 1;
       updateSequence.current += 1;
       createdSession.current = null;
-      setNewWebSearch(false);
+      setNewWebSearch(lastWebSearch.current);
       detailSequence.current += 1;
       setBusy(false);
       setSelectedId(id);
@@ -757,7 +760,7 @@ export function useAssistant(enabled: boolean) {
       throw new Error("assistant_request_expired");
     selectedRef.current = value.id;
     createdSession.current = value.id;
-    setNewWebSearch(false);
+    setNewWebSearch(lastWebSearch.current);
     drafts.current.set(value.id, draftRef.current);
     attachmentDrafts.current.set(value.id, attachmentsRef.current);
     setSelectedId(value.id);
@@ -830,6 +833,7 @@ export function useAssistant(enabled: boolean) {
    */
   const setWebSearch = useCallback(
     (on: boolean) => {
+      lastWebSearch.current = on;
       if (selectedRef.current) void update({ webSearch: on });
       else setNewWebSearch(on);
     },

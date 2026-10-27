@@ -2039,7 +2039,7 @@ describe("web search", () => {
     expect(toggle()).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("leaves web search off in a conversation started from another one", async () => {
+  it("leaves web search off in a new conversation until the switch is used", async () => {
     current.session.webSearch = true;
     await openConversation();
     mocks.createSession.mockImplementation(async (request) => ({
@@ -2057,6 +2057,59 @@ describe("web search", () => {
       }),
     );
     expect(toggle()).toHaveAttribute("aria-pressed", "false");
+  });
+
+  describe("for a new conversation", () => {
+    const newConversation = async () => {
+      mocks.createSession.mockImplementation(async (request) => ({
+        ...session,
+        id: "session-b",
+        ...request,
+      }));
+      await userEvent.click(
+        screen.getByRole("button", { name: "New conversation" }),
+      );
+    };
+
+    it.each([true, false])(
+      "starts with the last choice made on the switch (%s)",
+      async (on) => {
+        current.session.webSearch = !on;
+        await openConversation();
+        await userEvent.click(toggle());
+        await waitFor(() =>
+          expect(toggle()).toHaveAttribute("aria-pressed", String(on)),
+        );
+        await newConversation();
+        await waitFor(() =>
+          expect(mocks.createSession).toHaveBeenCalledWith({
+            modelId: "balanced",
+            webSearch: on,
+          }),
+        );
+        expect(toggle()).toHaveAttribute("aria-pressed", String(on));
+      },
+    );
+
+    it("starts with search off again once the account changed", async () => {
+      await openConversation();
+      await userEvent.click(toggle());
+      await waitFor(() =>
+        expect(toggle()).toHaveAttribute("aria-pressed", "true"),
+      );
+      act(() => mocks.auth?.("expired"));
+      act(() => mocks.auth?.("restored"));
+      await screen.findByRole("button", { name: /My conversation/ });
+      await waitFor(() => expect(toggle()).toBeEnabled());
+      expect(toggle()).toHaveAttribute("aria-pressed", "false");
+      await newConversation();
+      await waitFor(() =>
+        expect(mocks.createSession).toHaveBeenCalledWith({
+          modelId: "balanced",
+          webSearch: false,
+        }),
+      );
+    });
   });
 
   it("can be changed while a reply runs, which goes on", async () => {
