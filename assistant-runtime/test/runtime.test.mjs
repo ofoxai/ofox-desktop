@@ -425,6 +425,74 @@ test("provider errors never retry paid requests and stay scrubbed in native hist
   await runtime.close();
 });
 
+test("a refused or unanswered model request reports why and costs a known zero", async (t) => {
+  for (const [name, reply, expected] of [
+    [
+      "balance",
+      () =>
+        Response.json(
+          {
+            error: {
+              message: "Insufficient credits. Current balance: $0.",
+              type: "insufficient_credits",
+              code: 402,
+            },
+          },
+          { status: 402 },
+        ),
+      { errorStatus: 402 },
+    ],
+    [
+      "unknown model",
+      () =>
+        Response.json(
+          { error: { message: "model not found" } },
+          { status: 404 },
+        ),
+      { errorStatus: 404 },
+    ],
+    [
+      "offline",
+      () => {
+        throw new TypeError("fetch failed");
+      },
+      { errorKind: "network" },
+    ],
+  ]) {
+    const params = await sandbox(t);
+    const runtime = new AssistantRuntime({ fetch: async () => reply() });
+    const result = await runtime.run(params);
+    assert.equal(result.status, "error", name);
+    assert.equal(result.errorStatus, expected.errorStatus, name);
+    assert.equal(result.errorKind, expected.errorKind, name);
+    const failed = result.entries.at(-1);
+    assert.equal(failed.errorStatus, expected.errorStatus, name);
+    assert.equal(failed.errorKind, expected.errorKind, name);
+    assert.equal(failed.usageCoverage, "complete", name);
+    assert.equal(result.usageCoverage, "complete", name);
+    // The reason survives a reload of the native history.
+    assert.deepEqual(
+      (await new AssistantRuntime().load(params)).entries,
+      result.entries,
+      name,
+    );
+    await runtime.close();
+  }
+});
+
+test("a server error may have generated output, so its cost stays unknown", async (t) => {
+  const params = await sandbox(t);
+  const runtime = new AssistantRuntime({
+    fetch: async () =>
+      Response.json({ error: { message: "upstream failed" } }, { status: 500 }),
+  });
+  const result = await runtime.run(params);
+  assert.equal(result.status, "error");
+  assert.equal(result.errorStatus, 500);
+  assert.equal(result.entries.at(-1).usageCoverage, "incomplete");
+  await runtime.close();
+});
+
 test("stop aborts the active streamed request and preserves its partial native turn", async (t) => {
   const params = await sandbox(t);
   let started;

@@ -25,6 +25,25 @@ function usageCoverage(usage) {
     : "incomplete";
 }
 
+// The gateway refused the request (4xx), or it never got an answer or was
+// never sent: nothing was generated, so its cost is a known zero.
+function unbilled(message) {
+  return (
+    message.stopReason === "error" &&
+    ((message.errorStatus >= 400 && message.errorStatus < 500) ||
+      message.errorKind === "network" ||
+      message.errorKind === "not_sent")
+  );
+}
+
+// Why one model request failed: its HTTP status, or no response at all.
+function markFailure(message, outcome) {
+  if (message.stopReason !== "error") return message;
+  if (outcome.status) message.errorStatus = outcome.status;
+  else if (outcome.network) message.errorKind = "network";
+  return message;
+}
+
 function knownPrice(value) {
   return (
     value !== undefined &&
@@ -163,12 +182,16 @@ function projection(manager, secrets = []) {
           usage: message.usage,
           usageCoverage:
             message.role === "assistant"
-              ? usageCoverage(message.usage)
+              ? unbilled(message)
+                ? "complete"
+                : usageCoverage(message.usage)
               : undefined,
           active: active.has(entry.id),
           timestamp: message.timestamp ?? Date.parse(entry.timestamp),
           stopReason: message.stopReason,
           errorMessage: message.errorMessage,
+          errorStatus: message.errorStatus,
+          errorKind: message.errorKind,
           runId: marker?.runId,
           operationId: marker?.operationId,
           pricingKnown:
@@ -527,7 +550,7 @@ export class AssistantRuntime {
           ),
         );
       };
-      const safeFetch = async (input, options) => {
+      const safeFetch = async (input, options, outcome = {}) => {
         context.abort.signal.throwIfAborted();
         const url = new URL(
           typeof input === "string" || input instanceof URL ? input : input.url,
@@ -549,19 +572,28 @@ export class AssistantRuntime {
         for (const name of ["x-api-key", "api-key", "x-goog-api-key", "cookie"])
           headers.delete(name);
         headers.set("Authorization", `Bearer ${apiKey}`);
-        return await providerFetch(input, {
-          ...options,
-          headers,
-          redirect: "error",
-        });
+        let response;
+        try {
+          response = await providerFetch(input, {
+            ...options,
+            headers,
+            redirect: "error",
+          });
+        } catch (error) {
+          if (!context.abort.signal.aborted) outcome.network = true;
+          throw error;
+        }
+        if (response.status >= 400) outcome.status = response.status;
+        return response;
       };
       modelRuntime.streamSimple = (target, transcript, options) => {
         const summaryRequest = options?.sessionId !== manager.getSessionId();
+        const outcome = {};
         const source = originalStream(target, redact(transcript, [apiKey]), {
           ...options,
           maxRetries: 0,
           timeoutMs: 900000,
-          fetch: safeFetch,
+          fetch: (input, init) => safeFetch(input, init, outcome),
           env: {},
           headers: { ...options?.headers, Authorization: `Bearer ${apiKey}` },
           identity: { attribution: { name: "Ofox Desktop" } },
@@ -569,9 +601,17 @@ export class AssistantRuntime {
         const filtered = new AssistantMessageEventStream();
         (async () => {
           try {
-            for await (const event of source)
-              filtered.push(redact(event, [apiKey]));
-            const result = redact(await source.result(), [apiKey]);
+            for await (const event of source) {
+              const safe = redact(event, [apiKey]);
+              // Pi keeps the failed message of the error event.
+              if (safe.type === "error" && safe.error)
+                markFailure(safe.error, outcome);
+              filtered.push(safe);
+            }
+            const result = markFailure(
+              redact(await source.result(), [apiKey]),
+              outcome,
+            );
             if (summaryRequest) recordSummaryUsage(target, result.usage);
             filtered.end(result);
           } catch (error) {
@@ -600,6 +640,7 @@ export class AssistantRuntime {
                 },
               },
             };
+            markFailure(message, outcome);
             filtered.push({ type: "error", reason: "error", error: message });
             filtered.end(message);
           }
@@ -769,11 +810,14 @@ export class AssistantRuntime {
           : context.unknownOutcome || last?.stopReason === "error"
             ? "error"
             : "completed";
-      if (result.status === "error")
+      if (result.status === "error") {
         result.errorMessage =
           context.unknownMessage ??
           last?.errorMessage ??
           "Assistant operation failed";
+        result.errorStatus = last?.errorStatus;
+        result.errorKind = last?.errorKind;
+      }
       this.notify(context, "run_end", { status: result.status });
       return result;
     } catch (error) {
@@ -808,12 +852,14 @@ export class AssistantRuntime {
           },
           stopReason: context.abort.signal.aborted ? "aborted" : "error",
           errorMessage: message,
+          errorKind: "not_sent",
           timestamp: Date.now(),
         });
         const rejected = {
           ...projection(manager, [apiKey]),
           status: context.abort.signal.aborted ? "stopped" : "error",
           errorMessage: message,
+          errorKind: "not_sent",
         };
         this.notify(context, "error", {
           message,

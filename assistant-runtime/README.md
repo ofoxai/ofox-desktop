@@ -81,8 +81,12 @@ branch on native entry IDs; regenerate resends the native user text and images.
 Every new turn has a non-context `ofox-desktop-run` marker with the run and
 operation IDs and the historical pricing-availability flags. Projection entries
 return normalized text, active branch, runId/operationId, usage, stopReason,
-pricingKnown and final (only the last assistant entry of each run). Images and
-system text are excluded from the projection. A turn that fails or is stopped
+pricingKnown and final (only the last assistant entry of each run). A failed
+run's result and its assistant entry also carry `errorStatus` (the HTTP status
+of a refused model request) or `errorKind` (`network` when no response came,
+`not_sent` when the turn failed before its request); such a request generated
+nothing, so its usage coverage is complete at zero cost. Images and system text
+are excluded from the projection. A turn that fails or is stopped
 before its model request is kept in native history and can be retried
 explicitly.
 
