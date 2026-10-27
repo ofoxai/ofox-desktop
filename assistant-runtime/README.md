@@ -319,7 +319,12 @@ Run parameters:
   `fetch_not_allowed` without a request.
 - `proxy`: the one model requests use. The server tunnels both tools through
   it; `web_fetch` checks DNS locally first and verifies the certificate for
-  the host name (see the search-mcp README).
+  the host name (see the search-mcp README). When every local answer is a
+  fake-IP address (`198.18.0.0/15`, Clash/Surge TUN), `web_fetch` checks the
+  host with DNS-over-HTTPS at `https://dns.alidns.com/resolve` (a fixed
+  infrastructure URL, not an Ofox one) through the same route as
+  `web_search`, and refuses it with `fetch_not_allowed` unless every answer
+  there is public.
 
 Events: `tool_start` is `{name, toolCallId, args}` with `args` `{query}` or
 `{url}`. `tool_end` is `{name, toolCallId, success:true, details}` or
