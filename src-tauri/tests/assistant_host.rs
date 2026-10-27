@@ -1536,3 +1536,355 @@ fn a_pick_lands_only_for_the_account_and_authority_that_opened_the_dialog() {
         );
     });
 }
+
+/// A 1x1 PNG.
+fn png() -> Vec<u8> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=")
+        .unwrap()
+}
+
+/// A real one-page PDF showing `text` in Helvetica, with a valid xref (as
+/// the runtime's own `pdfPages` fixture builds it).
+fn pdf(text: &str) -> Vec<u8> {
+    let content = format!("BT /F1 12 Tf 20 150 Td ({text}) Tj ET");
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [4 0 R] /Count 1 >>".into(),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>".into(),
+        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+    ];
+    let mut out = String::from("%PDF-1.4\n");
+    let mut offsets = vec![];
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out += &format!("{} 0 obj\n{object}\nendobj\n", index + 1);
+    }
+    let xref = out.len();
+    out += &format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1);
+    for offset in offsets {
+        out += &format!("{offset:010} 00000 n \n");
+    }
+    out += &format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+        objects.len() + 1
+    );
+    out.into_bytes()
+}
+
+/// Pick one file into the conversation; returns its attachment id.
+async fn attach(
+    host: &Arc<AssistantHost>,
+    config: &Path,
+    sid: &str,
+    name: &str,
+    bytes: &[u8],
+) -> String {
+    let source = picked(config, name, bytes);
+    let imported = host
+        .pick_attachments(sid, move || Ok(vec![source]))
+        .await
+        .unwrap();
+    imported[0].id.clone()
+}
+
+/// The `attachment` events of a run.
+fn outcomes(env: &TestEnv, run: &str) -> Vec<Value> {
+    env.events(run)
+        .into_iter()
+        .filter(|e| e.r#type == "attachment")
+        .map(|e| e.data)
+        .collect()
+}
+
+fn user_message<'a>(detail: &'a Detail, run: &str) -> &'a Message {
+    detail
+        .messages
+        .iter()
+        .find(|m| m.role == "user" && m.run_id.as_deref() == Some(run))
+        .unwrap()
+}
+
+#[test]
+fn a_text_attachment_reaches_the_model_and_its_outcome_is_kept() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let file = attach(
+            &host,
+            config.path(),
+            &sid,
+            "notes.txt",
+            b"Quarterly numbers: 42 apples",
+        )
+        .await;
+        gateway.reply(Reply::Stream("You have 42 apples".into()));
+        let (run, end) = turn(
+            &host,
+            &env,
+            request(&sid, "Summarize the file", json!({"attachmentIds": [file]})),
+        )
+        .await;
+        assert_eq!(end.data["status"], "completed");
+
+        let sent = gateway.requests()[0].text();
+        assert!(sent.contains("Summarize the file"), "{sent}");
+        assert!(
+            sent.contains("[User attachment: \\\"notes.txt\\\""),
+            "{sent}"
+        );
+        assert!(sent.contains("Quarterly numbers: 42 apples"), "{sent}");
+
+        let events = env.events(&run);
+        let outcome = outcomes(&env, &run);
+        assert_eq!(outcome.len(), 1, "{outcome:?}");
+        assert_eq!(outcome[0]["id"], file);
+        assert_eq!(outcome[0]["status"], "ready");
+        assert!(outcome[0]["code"].is_null());
+        assert_eq!(outcome[0]["details"]["format"], "text");
+        let read = events
+            .iter()
+            .position(|e| e.r#type == "attachment")
+            .unwrap();
+        let streamed = events
+            .iter()
+            .position(|e| e.r#type == "text_delta")
+            .unwrap();
+        assert!(read < streamed, "the outcome comes before the answer");
+
+        // A reload shows the outcome on the conversation and on the turn.
+        let reloaded = AssistantHost::new(env.clone());
+        let detail = reloaded.get_session(&sid).await.unwrap();
+        let user = user_message(&detail, &run);
+        assert_eq!(user.content, "Summarize the file", "the user's own words");
+        assert_eq!(user.attachments.len(), 1);
+        assert_eq!(user.attachments[0].id, file);
+        assert_eq!(user.attachments[0].status, "ready");
+        assert_eq!(
+            user.attachments[0].details.as_ref().unwrap()["format"],
+            "text"
+        );
+        assert_eq!(detail.attachments[0].status, "ready");
+        assert_eq!(
+            detail.attachments[0].details.as_ref().unwrap()["characters"],
+            28
+        );
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+    assert_no_secret_in_events(&env, &[KEY]);
+}
+
+#[test]
+fn a_pdf_attachment_is_read_and_its_outcome_persists() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let file = attach(
+            &host,
+            config.path(),
+            &sid,
+            "invoice.pdf",
+            &pdf("Invoice total 1234"),
+        )
+        .await;
+        gateway.reply(Reply::Stream("The total is 1234".into()));
+        let (run, end) = turn(
+            &host,
+            &env,
+            request(&sid, "What is the total?", json!({"attachmentIds": [file]})),
+        )
+        .await;
+        assert_eq!(end.data["status"], "completed");
+        assert!(gateway.requests()[0].text().contains("Invoice total 1234"));
+
+        let outcome = outcomes(&env, &run);
+        assert_eq!(outcome.len(), 1, "{outcome:?}");
+        assert_eq!(outcome[0]["status"], "ready");
+        assert_eq!(outcome[0]["details"]["format"], "pdf");
+        assert_eq!(outcome[0]["details"]["pageCount"], 1);
+
+        let detail = AssistantHost::new(env.clone())
+            .get_session(&sid)
+            .await
+            .unwrap();
+        let saved = &detail.attachments[0];
+        assert_eq!(
+            (saved.name.as_str(), saved.mime_type.as_str()),
+            ("invoice.pdf", "application/pdf")
+        );
+        assert_eq!(saved.details.as_ref().unwrap()["pageCount"], 1);
+        assert_eq!(saved.details.as_ref().unwrap()["textCoverage"], "complete");
+        let user = user_message(&detail, &run);
+        assert_eq!(
+            user.attachments[0].details.as_ref().unwrap()["format"],
+            "pdf"
+        );
+        assert!(session_dir(config.path(), &sid)
+            .join("attachments")
+            .join(&file)
+            .is_file());
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+}
+
+#[test]
+fn an_image_for_a_text_only_model_is_blocked_before_any_request_and_costs_nothing() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.reply(Reply::Stream("A priced answer".into()));
+        turn(&host, &env, request(&sid, "First", json!({}))).await;
+        let priced = host.get_session(&sid).await.unwrap().usage;
+        assert!(priced["estimatedCostUsd"].is_string(), "{priced}");
+
+        let image = attach(&host, config.path(), &sid, "photo.png", &png()).await;
+        let (run, end) = turn(
+            &host,
+            &env,
+            request(
+                &sid,
+                "What is in the picture?",
+                json!({"attachmentIds": [image]}),
+            ),
+        )
+        .await;
+        assert_eq!(end.data["status"], "error");
+        let error = wait_for(&env, &run, "error").await;
+        assert_eq!(error.data["code"], "assistant_vision_model_required");
+        assert_eq!(gateway.requests().len(), 1, "no model request was made");
+
+        let outcome = outcomes(&env, &run);
+        assert_eq!(outcome.len(), 1, "{outcome:?}");
+        assert_eq!(outcome[0]["status"], "model_unsupported");
+        assert_eq!(outcome[0]["code"], "assistant_vision_model_required");
+        assert_eq!(outcome[0]["details"]["mimeType"], "image/png");
+
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(detail.attachments[0].status, "model_unsupported");
+        assert_eq!(
+            detail.attachments[0].reason.as_deref(),
+            Some("assistant_vision_model_required")
+        );
+        let user = user_message(&detail, &run);
+        assert_eq!(user.content, "What is in the picture?");
+        assert_eq!(user.attachments[0].status, "model_unsupported");
+        assert_eq!(detail.messages.last().unwrap().status, "error");
+        // A blocked turn was never sent: the cost stays known.
+        assert_eq!(detail.usage["estimatedCostUsd"], priced["estimatedCostUsd"]);
+        assert_ne!(detail.usage["usageCoverage"], "incomplete");
+
+        // Retrying it reads its picture again, and is blocked again for free.
+        let blocked = detail.messages.last().unwrap().id.clone();
+        let (retry, end) = turn(
+            &host,
+            &env,
+            request(&sid, "", json!({"regenerateMessageId": blocked})),
+        )
+        .await;
+        assert_eq!(end.data["status"], "error");
+        assert_eq!(
+            wait_for(&env, &retry, "error").await.data["code"],
+            "assistant_vision_model_required"
+        );
+        assert_eq!(outcomes(&env, &retry).len(), 1);
+        assert_eq!(gateway.requests().len(), 1);
+        let detail = host.get_session(&sid).await.unwrap();
+        let user = user_message(&detail, &retry);
+        assert_eq!(user.content, "What is in the picture?");
+        assert_eq!(user.attachments[0].status, "model_unsupported");
+        assert_eq!(detail.usage["estimatedCostUsd"], priced["estimatedCostUsd"]);
+
+        gateway.reply(Reply::Stream("Still here".into()));
+        let (_, end) = turn(&host, &env, request(&sid, "Without the picture", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+    assert_no_secret_in_events(&env, &[KEY]);
+}
+
+#[test]
+fn regenerate_and_edit_send_the_turns_files_again() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    const MARKER: &str = "Marker-7Q2 inventory: 5 pears";
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let file = attach(&host, config.path(), &sid, "stock.txt", MARKER.as_bytes()).await;
+        gateway.reply(Reply::Stream("Answer one".into()));
+        turn(
+            &host,
+            &env,
+            request(&sid, "Count the fruit", json!({"attachmentIds": [file]})),
+        )
+        .await;
+        let answer = host.get_session(&sid).await.unwrap().messages[1].id.clone();
+
+        gateway.reply(Reply::Stream("Answer two".into()));
+        let (regenerated, end) = turn(
+            &host,
+            &env,
+            request(&sid, "", json!({"regenerateMessageId": answer})),
+        )
+        .await;
+        assert_eq!(end.data["status"], "completed");
+        let resent = gateway.requests()[1].text();
+        assert_eq!(resent.matches(MARKER).count(), 1, "{resent}");
+        assert!(resent.contains("Count the fruit") && !resent.contains("Answer one"));
+        assert_eq!(
+            outcomes(&env, &regenerated).len(),
+            1,
+            "the file was read again"
+        );
+        let detail = host.get_session(&sid).await.unwrap();
+        let user = user_message(&detail, &regenerated);
+        assert_eq!(user.content, "Count the fruit");
+        assert_eq!(user.attachments[0].id, file);
+
+        // An edit without a selection of its own keeps the turn's files.
+        gateway.reply(Reply::Stream("Answer three".into()));
+        let (edited, end) = turn(
+            &host,
+            &env,
+            request(
+                &sid,
+                "Count only the pears",
+                json!({"editMessageId": user.id}),
+            ),
+        )
+        .await;
+        assert_eq!(end.data["status"], "completed");
+        let sent = gateway.requests()[2].text();
+        assert_eq!(sent.matches(MARKER).count(), 1, "{sent}");
+        assert!(sent.contains("Count only the pears") && !sent.contains("Count the fruit"));
+        assert_eq!(outcomes(&env, &edited).len(), 1);
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(user_message(&detail, &edited).attachments[0].id, file);
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+    assert_no_secret_in_events(&env, &[KEY]);
+}

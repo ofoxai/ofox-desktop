@@ -6,8 +6,8 @@
 use super::{
     catalog, process,
     projection::{
-        add_usage, is_dangling, merge_native, save_projection, settle_interrupted, settle_run,
-        ProjectionBuffer,
+        add_usage, is_dangling, merge_native, record_attachment_outcome, save_projection,
+        settle_interrupted, settle_run, AttachmentOutcome, ProjectionBuffer,
     },
     store::AssistantStore,
     types::*,
@@ -290,12 +290,29 @@ fn is_network_error(message: &str) -> bool {
     .any(|marker| lower.contains(marker))
 }
 
+/// The code a turn's attachments stopped it with before its request: the
+/// runtime's `<code>: <message>` for `assistant_vision_model_required` or an
+/// `assistant_attachment_*` code (README "Outcome events").
+fn blocked_input_code(detail: &str) -> Option<&str> {
+    let end = detail
+        .find(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
+        .unwrap_or(detail.len());
+    let (code, rest) = detail.split_at(end);
+    let attachment = code
+        .strip_prefix("assistant_attachment_")
+        .is_some_and(|name| !name.is_empty());
+    ((rest.is_empty() || rest.starts_with(':'))
+        && (attachment || code == "assistant_vision_model_required"))
+        .then_some(code)
+}
+
 /// A failed model request as a stable code. The runtime reports the HTTP
 /// status (`errorStatus`) or that no answer came (`errorKind`: `not_sent` when
 /// the request never left the machine, `network` when it was sent); older or
-/// unforeseen forms fall back to the text, for the code only. The cost is a
-/// known zero only for a request refused with a 4xx or never sent, and only
-/// when the attempt had not already shown text or counted tokens.
+/// unforeseen forms fall back to the text, for the code only. A turn its
+/// attachments blocked (never sent) keeps their code. The cost is a known
+/// zero only for a request refused with a 4xx or never sent, and only when
+/// the attempt had not already shown text or counted tokens.
 fn provider_failure(result: &Value, detail: String, progressed: bool) -> Failure {
     let status = result["errorStatus"]
         .as_u64()
@@ -306,18 +323,25 @@ fn provider_failure(result: &Value, detail: String, progressed: bool) -> Failure
     let network = kind == "network"
         || (not_sent && result["errorCode"].is_string())
         || (status.is_none() && kind.is_null() && is_network_error(&detail));
-    let code = match status {
-        Some(401) => KEY_REJECTED,
-        Some(402) => INSUFFICIENT_BALANCE,
-        Some(404) => MODEL_UNAVAILABLE,
-        Some(429) => RATE_LIMITED,
-        Some(403) if mentions_balance(&detail) => INSUFFICIENT_BALANCE,
-        _ if is_ofox_balance_error(&detail) => INSUFFICIENT_BALANCE,
-        _ if network => NETWORK_ERROR,
-        _ => MODEL_REQUEST_FAILED,
-    };
+    let blocked = not_sent
+        .then(|| blocked_input_code(&detail))
+        .flatten()
+        .map(str::to_owned);
+    let code = blocked.unwrap_or_else(|| {
+        match status {
+            Some(401) => KEY_REJECTED,
+            Some(402) => INSUFFICIENT_BALANCE,
+            Some(404) => MODEL_UNAVAILABLE,
+            Some(429) => RATE_LIMITED,
+            Some(403) if mentions_balance(&detail) => INSUFFICIENT_BALANCE,
+            _ if is_ofox_balance_error(&detail) => INSUFFICIENT_BALANCE,
+            _ if network => NETWORK_ERROR,
+            _ => MODEL_REQUEST_FAILED,
+        }
+        .to_owned()
+    });
     Failure {
-        code: code.into(),
+        code,
         detail: Some(detail),
         unbilled: !progressed && (matches!(status, Some(400..=499)) || not_sent),
         native: None,
@@ -1086,6 +1110,14 @@ impl AssistantHost {
                 self.emit(control, "usage", json!({ "usage": usage }));
             }
             "compaction_start" | "compaction_end" => self.emit(control, kind, data),
+            "attachment" => {
+                let mut outcome = AttachmentOutcome::parse(&data)?;
+                if let Some(details) = &mut outcome.details {
+                    scrub_secrets_in(details, &control.secrets());
+                }
+                self.save_attachment_outcome(control, &outcome).await?;
+                self.emit(control, "attachment", outcome.to_event());
+            }
             // run_start, message_end, error and run_end: the host publishes its
             // own once the turn is saved.
             _ => {}
@@ -1212,6 +1244,27 @@ impl AssistantHost {
                 add_usage(&mut record.usage, data.get("usage").unwrap_or(&data));
                 record.session.updated_at = now();
                 Ok(record.usage.clone())
+            })
+        })
+        .await
+    }
+
+    /// Saved before it is published, so a reload shows what the user saw.
+    async fn save_attachment_outcome(
+        &self,
+        control: &RunControl,
+        outcome: &AttachmentOutcome,
+    ) -> Result<(), String> {
+        let store = self.store(&control.identity.owner)?;
+        let (sid, run_id, outcome) = (
+            control.session_id.clone(),
+            control.run_id.clone(),
+            outcome.clone(),
+        );
+        blocking(move || {
+            store.mutate(&sid, |record| {
+                record_attachment_outcome(record, &run_id, &outcome);
+                Ok(())
             })
         })
         .await
@@ -1425,6 +1478,7 @@ mod tests {
         catalog: Mutex<Vec<String>>,
         fetches: AtomicU64,
         runtime: Mutex<Option<PathBuf>>,
+        events: Mutex<Vec<Event>>,
     }
 
     impl Environment for FixedEnvironment {
@@ -1467,7 +1521,9 @@ mod tests {
                 .clone()
                 .ok_or_else(|| RUNTIME_UNAVAILABLE.into())
         }
-        fn emit(&self, _: Event) {}
+        fn emit(&self, event: Event) {
+            self.events.lock().unwrap().push(event);
+        }
     }
 
     fn identity() -> Identity {
@@ -1494,6 +1550,7 @@ mod tests {
             catalog: Mutex::new(vec!["test/model".into()]),
             fetches: AtomicU64::new(0),
             runtime: Mutex::new(None),
+            events: Mutex::default(),
         });
         let host = AssistantHost::new(env.clone());
         (config, env, host)
@@ -1841,12 +1898,42 @@ mod tests {
             ),
             code(NETWORK_ERROR, false)
         );
-        assert_eq!(
-            failure(
-                json!({"errorKind": "not_sent"}),
-                "assistant_vision_model_required"
+        // A turn its attachments blocked before its request keeps their code.
+        for (text, expected) in [
+            (
+                "assistant_vision_model_required: This model cannot read images; choose a vision model",
+                "assistant_vision_model_required",
             ),
-            code(MODEL_REQUEST_FAILED, true)
+            ("assistant_vision_model_required", "assistant_vision_model_required"),
+            (
+                "assistant_attachment_unreadable: The attachment could not be read",
+                "assistant_attachment_unreadable",
+            ),
+            (
+                "assistant_attachment_too_large: A message holds at most 10 images",
+                "assistant_attachment_too_large",
+            ),
+            (
+                "assistant_attachment_not_found: Unknown attachment",
+                "assistant_attachment_not_found",
+            ),
+            // Not an attachment code: the generic failure.
+            ("assistant_attachment_: x", MODEL_REQUEST_FAILED),
+            ("assistant_attachment_unreadable2x: x", "assistant_attachment_unreadable2x"),
+            ("assistant_attachment_unreadable x", MODEL_REQUEST_FAILED),
+            ("assistant_vision_model_required_soon: x", MODEL_REQUEST_FAILED),
+            ("A message supports at most 10 images", MODEL_REQUEST_FAILED),
+        ] {
+            assert_eq!(
+                failure(json!({"errorKind": "not_sent"}), text),
+                code(expected, true),
+                "{text}"
+            );
+        }
+        // Only a turn that was never sent: other text cannot claim the code.
+        assert_eq!(
+            failure(json!({}), "assistant_vision_model_required: x"),
+            code(MODEL_REQUEST_FAILED, false)
         );
         // Text alone names the failure but never makes it free.
         assert_eq!(
@@ -1997,6 +2084,78 @@ mod tests {
             store.load_detail(&sid).unwrap().messages[0].content,
             "Already shown"
         );
+    }
+
+    /// An outcome is saved on the file and on its turn, without the run's
+    /// key, before the renderer hears of it.
+    #[tokio::test]
+    async fn an_attachment_outcome_is_saved_then_published() {
+        let (_config, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let run = control(&sid);
+        let file = id();
+        let attachment = json!({
+            "id": file, "name": "a.txt", "mimeType": "text/plain", "sizeBytes": 2,
+            "status": "ready",
+        });
+        store
+            .mutate(&sid, |record| {
+                record
+                    .attachments
+                    .push(serde_json::from_value(attachment.clone()).unwrap());
+                record.messages.push(
+                    serde_json::from_value(json!({
+                        "id": id(), "role": "user", "content": "Read it", "createdAt": 1,
+                        "status": "completed", "runId": run.run_id, "attachments": [attachment],
+                    }))
+                    .unwrap(),
+                );
+                Ok(())
+            })
+            .unwrap();
+        let event = |data: Value| {
+            json!({
+                "sessionId": sid, "runId": run.run_id, "operationId": run.operation_id,
+                "type": "attachment", "data": data,
+            })
+        };
+        let data = json!({
+            "id": file, "status": "unreadable", "code": "assistant_attachment_unreadable",
+            "details": {"format": "text", "reason": "invalid_utf8", "seen": "test-opaque-run-key"},
+        });
+        host.on_event(&run, &event(data), &mut Attempt::default())
+            .await
+            .unwrap();
+
+        let detail = store.load_detail(&sid).unwrap();
+        for saved in [&detail.attachments[0], &detail.messages[0].attachments[0]] {
+            assert_eq!(saved.status, "unreadable");
+            assert_eq!(
+                saved.reason.as_deref(),
+                Some("assistant_attachment_unreadable")
+            );
+            let details = saved.details.as_ref().unwrap();
+            assert_eq!(details["reason"], "invalid_utf8");
+            assert_eq!(details["seen"], crate::redact::REDACTED);
+        }
+        let published = env.events.lock().unwrap().pop().unwrap();
+        assert_eq!(published.r#type, "attachment");
+        assert_eq!(published.run_id, run.run_id);
+        assert_eq!(
+            published.data,
+            json!({
+                "id": file, "status": "unreadable", "code": "assistant_attachment_unreadable",
+                "details": {"format": "text", "reason": "invalid_utf8", "seen": crate::redact::REDACTED},
+            })
+        );
+
+        let malformed = event(json!({"id": file, "status": "lost"}));
+        let refused = host
+            .on_event(&run, &malformed, &mut Attempt::default())
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, PROTOCOL);
     }
 
     #[test]

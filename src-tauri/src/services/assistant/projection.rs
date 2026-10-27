@@ -315,6 +315,79 @@ pub(super) fn merge_native(
     Ok(())
 }
 
+/// One attachment's outcome as a run read it (assistant-runtime README,
+/// "Outcome events").
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct AttachmentOutcome {
+    pub id: String,
+    /// One of [`ATTACHMENT_STATUSES`].
+    pub status: String,
+    /// `assistant_attachment_partial` or the blocking `assistant_*` code.
+    pub code: Option<String>,
+    pub details: Option<Value>,
+}
+
+impl AttachmentOutcome {
+    /// The outcome an `attachment` event carries; anything else is a
+    /// protocol error.
+    pub(super) fn parse(data: &Value) -> Result<Self, String> {
+        let id = data["id"].as_str().filter(|id| !id.is_empty());
+        let status = data["status"]
+            .as_str()
+            .filter(|status| ATTACHMENT_STATUSES.contains(status));
+        let code = match &data["code"] {
+            Value::Null => None,
+            Value::String(code) => Some(code.clone()),
+            _ => return Err(PROTOCOL.into()),
+        };
+        let details = match &data["details"] {
+            Value::Null => None,
+            details @ Value::Object(_) => Some(details.clone()),
+            _ => return Err(PROTOCOL.into()),
+        };
+        match (id, status) {
+            (Some(id), Some(status)) => Ok(Self {
+                id: id.into(),
+                status: status.into(),
+                code,
+                details,
+            }),
+            _ => Err(PROTOCOL.into()),
+        }
+    }
+
+    /// The `attachment` event the renderer gets.
+    pub(super) fn to_event(&self) -> Value {
+        json!({
+            "id": self.id, "status": self.status, "code": self.code, "details": self.details,
+        })
+    }
+}
+
+/// Keep a run's outcome for one file: on the conversation's file (its last
+/// outcome) and on that file of the run's user message (this turn's).
+pub(super) fn record_attachment_outcome(
+    record: &mut SessionRecord,
+    run_id: &str,
+    outcome: &AttachmentOutcome,
+) {
+    let turn = record
+        .messages
+        .iter_mut()
+        .filter(|m| m.role == "user" && m.run_id.as_deref() == Some(run_id))
+        .flat_map(|m| m.attachments.iter_mut());
+    for file in record
+        .attachments
+        .iter_mut()
+        .chain(turn)
+        .filter(|file| file.id == outcome.id)
+    {
+        file.status = outcome.status.clone();
+        file.reason = outcome.code.clone();
+        file.details = outcome.details.clone();
+    }
+}
+
 /// Recount the session's usage from the native history. One unpriced or
 /// incomplete request leaves the cost unknown for good.
 pub(super) fn project_usage(totals: &mut Value, entries: &[Value]) {
@@ -565,5 +638,83 @@ mod tests {
         });
         assert_eq!(result.unwrap_err(), "assistant_native_unknown_run");
         assert!(store.load_detail(&sid).unwrap().messages.is_empty());
+    }
+
+    fn file(id: &str) -> Attachment {
+        serde_json::from_value(json!({
+            "id": id, "name": "scan.pdf", "mimeType": "application/pdf", "sizeBytes": 9,
+            "status": "ready",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_outcome_is_kept_on_the_file_and_on_the_turn_that_read_it() {
+        let (_config, store) = store();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let (earlier, now_run) = (id(), id());
+        let (pdf, other) = (id(), id());
+        let mut asked_before = message(&id(), "user", &earlier, 1);
+        asked_before.attachments = vec![file(&pdf)];
+        let mut asked = message(&id(), "user", &now_run, 2);
+        asked.attachments = vec![file(&other), file(&pdf)];
+        let mut record = store.load_record(&sid).unwrap();
+        record.messages = vec![asked_before, asked];
+        record.attachments = vec![file(&pdf), file(&other)];
+
+        let outcome = AttachmentOutcome::parse(&json!({
+            "id": pdf, "status": "partial", "code": "assistant_attachment_partial",
+            "details": {"format": "pdf", "pageCount": 3, "pagesWithoutText": [2]},
+        }))
+        .unwrap();
+        record_attachment_outcome(&mut record, &now_run, &outcome);
+
+        let read = |a: &Attachment| (a.status.clone(), a.reason.clone(), a.details.clone());
+        let expected = (
+            "partial".to_string(),
+            Some("assistant_attachment_partial".to_string()),
+            Some(json!({"format": "pdf", "pageCount": 3, "pagesWithoutText": [2]})),
+        );
+        assert_eq!(read(&record.attachments[0]), expected);
+        assert_eq!(read(&record.messages[1].attachments[1]), expected);
+        // Another file, and the turn that read this one before, keep theirs.
+        assert_eq!(record.attachments[1].status, "ready");
+        assert_eq!(record.messages[1].attachments[0].status, "ready");
+        assert_eq!(record.messages[0].attachments[0].status, "ready");
+        assert_eq!(
+            outcome.to_event(),
+            json!({
+                "id": pdf, "status": "partial", "code": "assistant_attachment_partial",
+                "details": {"format": "pdf", "pageCount": 3, "pagesWithoutText": [2]},
+            })
+        );
+
+        // A later run that reads it fully clears the code and details it had.
+        let ready = AttachmentOutcome::parse(&json!({
+            "id": pdf, "status": "ready", "code": null, "details": null,
+        }))
+        .unwrap();
+        record_attachment_outcome(&mut record, &now_run, &ready);
+        assert_eq!(read(&record.attachments[0]), ("ready".into(), None, None));
+    }
+
+    #[test]
+    fn a_malformed_outcome_is_a_protocol_error() {
+        let id = id();
+        for data in [
+            json!({"status": "ready", "code": null, "details": {}}),
+            json!({"id": "", "status": "ready"}),
+            json!({"id": id, "status": "processing"}),
+            json!({"id": id, "status": "ready", "code": 1}),
+            json!({"id": id, "status": "ready", "details": "text"}),
+        ] {
+            assert_eq!(
+                AttachmentOutcome::parse(&data).unwrap_err(),
+                PROTOCOL,
+                "{data}"
+            );
+        }
+        let bare = AttachmentOutcome::parse(&json!({"id": id, "status": "unsupported"})).unwrap();
+        assert_eq!((bare.code, bare.details), (None, None));
     }
 }
