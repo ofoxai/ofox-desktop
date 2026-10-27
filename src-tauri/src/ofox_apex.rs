@@ -156,17 +156,28 @@ pub fn auth_app_base() -> String {
 /// 默认走线上；设了 `OFOX_USE_LOCAL=1` 时切回 `http://localhost:8080`
 /// （ofox-core Go service）。
 pub fn auth_api_base() -> String {
-    auth_api_base_for(current_apex())
+    auth_api_base_at(current_apex())
 }
 
 /// 同 [`auth_api_base`]，但用调用方给定的 apex——助手一次运行开始时冻结 apex，
-/// 中途切地区不会把这次运行的请求改打到另一个 host。
-pub(crate) fn auth_api_base_for(apex: &str) -> String {
+/// 中途切地区不会把这次运行的请求改打到另一个 host。apex 不在
+/// [`KNOWN_APEXES`] 里时返回 `None`：调用方传来的字符串绝不拼成 host。
+#[allow(dead_code)] // The assistant host builds its frozen-apex URLs with it (S1 Task 4).
+pub(crate) fn auth_api_base_for(apex: &str) -> Option<String> {
+    known_apex(apex).map(auth_api_base_at)
+}
+
+fn auth_api_base_at(apex: &'static str) -> String {
     if use_local_dev() {
         DEV_API_BASE.to_string()
     } else {
         format!("https://api.{apex}")
     }
+}
+
+/// `apex` 本身是已知值时返回它的 `'static` 版本，否则 `None`。
+fn known_apex(apex: &str) -> Option<&'static str> {
+    KNOWN_APEXES.iter().copied().find(|known| *known == apex)
 }
 
 /// LLM 网关 base —— `<gateway>/v1`、`<gateway>/anthropic`、`<gateway>/gemini`
@@ -176,11 +187,17 @@ pub(crate) fn auth_api_base_for(apex: &str) -> String {
 /// 前缀分发）；设了 `OFOX_USE_LOCAL=1` 时切回 `http://localhost:8088`
 /// （ofox-gateway plugin）。
 pub fn gateway_base() -> String {
-    gateway_base_for(current_apex())
+    gateway_base_at(current_apex())
 }
 
-/// 同 [`gateway_base`]，但用调用方给定的 apex（见 [`auth_api_base_for`]）。
-pub(crate) fn gateway_base_for(apex: &str) -> String {
+/// 同 [`gateway_base`]，但用调用方给定的 apex；未知 apex 返回 `None`
+/// （见 [`auth_api_base_for`]）。
+#[allow(dead_code)] // The assistant host builds its frozen-apex URLs with it (S1 Task 4).
+pub(crate) fn gateway_base_for(apex: &str) -> Option<String> {
+    known_apex(apex).map(gateway_base_at)
+}
+
+fn gateway_base_at(apex: &'static str) -> String {
     if use_local_dev() {
         DEV_GATEWAY_BASE.to_string()
     } else {
@@ -212,12 +229,16 @@ pub(crate) fn mentions_ofox_gateway(text: &str) -> bool {
 /// 仍然遵守 apex 切换（ofox.ai ⇌ ofox.io），所以国内用户的模型列表来自
 /// `api.ofox.io`。
 pub fn models_catalog_base() -> String {
-    models_catalog_base_for(current_apex())
+    models_catalog_base_at(current_apex())
 }
 
 /// 同 [`models_catalog_base`]，但用调用方给定的 apex：模型列表按 apex 缓存时，
-/// 缓存键和实际请求的 host 必然一致。
-pub(crate) fn models_catalog_base_for(apex: &str) -> String {
+/// 缓存键和实际请求的 host 必然一致。未知 apex 返回 `None`。
+pub(crate) fn models_catalog_base_for(apex: &str) -> Option<String> {
+    known_apex(apex).map(models_catalog_base_at)
+}
+
+fn models_catalog_base_at(apex: &'static str) -> String {
     format!("https://api.{apex}")
 }
 
@@ -656,23 +677,46 @@ mod tests {
     #[test]
     fn apex_bound_bases_use_the_given_apex_not_the_current_one() {
         // 助手一次运行开始时冻结 apex：中途切地区，这次运行仍打开始时的 host。
-        assert_eq!(models_catalog_base_for("ofox.io"), "https://api.ofox.io");
-        assert_eq!(models_catalog_base_for("ofox.ai"), "https://api.ofox.ai");
+        let some = |s: &str| Some(s.to_string());
         assert_eq!(
-            models_catalog_base(),
+            models_catalog_base_for("ofox.io"),
+            some("https://api.ofox.io")
+        );
+        assert_eq!(
+            models_catalog_base_for("ofox.ai"),
+            some("https://api.ofox.ai")
+        );
+        assert_eq!(
+            Some(models_catalog_base()),
             models_catalog_base_for(current_apex())
         );
-        assert_eq!(auth_api_base(), auth_api_base_for(current_apex()));
-        assert_eq!(gateway_base(), gateway_base_for(current_apex()));
+        assert_eq!(Some(auth_api_base()), auth_api_base_for(current_apex()));
+        assert_eq!(Some(gateway_base()), gateway_base_for(current_apex()));
         if use_local_dev() {
             eprintln!("[test] OFOX_USE_LOCAL is set; skipping production apex assertions");
-            assert_eq!(auth_api_base_for("ofox.io"), DEV_API_BASE);
-            assert_eq!(gateway_base_for("ofox.io"), DEV_GATEWAY_BASE);
+            assert_eq!(auth_api_base_for("ofox.io"), some(DEV_API_BASE));
+            assert_eq!(gateway_base_for("ofox.io"), some(DEV_GATEWAY_BASE));
             return;
         }
         for apex in KNOWN_APEXES {
-            assert_eq!(auth_api_base_for(apex), format!("https://api.{apex}"));
-            assert_eq!(gateway_base_for(apex), format!("https://api.{apex}"));
+            assert_eq!(auth_api_base_for(apex), Some(format!("https://api.{apex}")));
+            assert_eq!(gateway_base_for(apex), Some(format!("https://api.{apex}")));
+        }
+    }
+
+    #[test]
+    fn apex_bound_bases_never_build_a_host_from_an_unknown_apex() {
+        // 冻结的 apex 来自调用方：不在白名单里就不拼 URL，key 不会被发到任意 host。
+        for apex in [
+            "",
+            "ofox.evil",
+            "OFOX.AI",
+            "ofox.ai/evil",
+            "evil.com#ofox.ai",
+        ] {
+            assert_eq!(auth_api_base_for(apex), None, "{apex}");
+            assert_eq!(gateway_base_for(apex), None, "{apex}");
+            assert_eq!(models_catalog_base_for(apex), None, "{apex}");
         }
     }
 

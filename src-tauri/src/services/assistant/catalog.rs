@@ -138,28 +138,45 @@ pub fn default_model_id(models: &[Model], remembered: Option<&str>) -> Option<St
         .map(str::to_owned)
 }
 
+/// The live catalog is ~150 KiB; anything near this is not a catalog.
+const MAX_CATALOG_BYTES: usize = 8 * 1024 * 1024;
+
+/// The chat models of `apex`'s public catalog. An apex that is not a known Ofox
+/// apex is refused before any request is made.
 pub async fn fetch_models(apex: &str) -> Result<Vec<Model>, String> {
-    let response = crate::proxy::http_client::get()
-        .get(format!(
-            "{}/v1/models",
-            crate::ofox_apex::models_catalog_base_for(apex)
-        ))
+    let base = crate::ofox_apex::models_catalog_base_for(apex).ok_or("assistant_unknown_apex")?;
+    fetch_models_at(&format!("{base}/v1/models")).await
+}
+
+/// [`fetch_models`] against a given URL, so tests can point it at a local server.
+async fn fetch_models_at(url: &str) -> Result<Vec<Model>, String> {
+    let unavailable = |_| "assistant_catalog_unavailable".to_string();
+    let mut response = crate::proxy::http_client::get()
+        .get(url)
         .timeout(Duration::from_secs(15))
         .send()
         .await
-        .map_err(|_| "assistant_catalog_unavailable")?;
+        .map_err(unavailable)?;
     if !response.status().is_success() {
         return Err("assistant_catalog_unavailable".into());
     }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|_| "assistant_catalog_unavailable")?;
-    if bytes.len() > 8 * 1024 * 1024 {
-        return Err("assistant_catalog_too_large".into());
+    let too_large = || "assistant_catalog_too_large".to_string();
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_CATALOG_BYTES as u64)
+    {
+        return Err(too_large());
     }
-    let models =
-        parse_models(serde_json::from_slice(&bytes).map_err(|_| "assistant_catalog_invalid")?);
+    // Count while reading: a missing or false length cannot make us buffer more.
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(unavailable)? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_CATALOG_BYTES {
+            return Err(too_large());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let catalog = serde_json::from_slice(&bytes).map_err(|_| "assistant_catalog_invalid")?;
+    let models = parse_models(catalog);
     if models.is_empty() {
         return Err("assistant_no_compatible_models".into());
     }
@@ -288,6 +305,101 @@ mod tests {
     #[test]
     fn an_empty_catalog_has_no_default() {
         assert_eq!(default_model_id(&[], Some(PREFERRED_MODEL_IDS[0])), None);
+    }
+
+    async fn serve(response: wiremock::ResponseTemplate) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn fetch_from(server: &wiremock::MockServer) -> Result<Vec<Model>, String> {
+        fetch_models_at(&format!("{}/v1/models", server.uri())).await
+    }
+
+    #[tokio::test]
+    async fn fetch_returns_the_chat_models_of_the_catalog() {
+        let body = json!({"data": [
+            entry("chat/model", &["/v1/chat/completions"], &["text"], &["text"]),
+            entry("image/model", &["/v1/images/generations"], &["text"], &["image"]),
+        ]});
+        let server = serve(wiremock::ResponseTemplate::new(200).set_body_json(body)).await;
+        assert_eq!(ids(&fetch_from(&server).await.unwrap()), ["chat/model"]);
+    }
+
+    #[tokio::test]
+    async fn fetch_reports_each_failure_with_its_own_code() {
+        use wiremock::ResponseTemplate;
+        let only_images = json!({"data": [
+            entry("image/model", &["/v1/images/generations"], &["text"], &["image"]),
+        ]});
+        for (response, code) in [
+            (ResponseTemplate::new(503), "assistant_catalog_unavailable"),
+            (
+                ResponseTemplate::new(200).set_body_string("not json"),
+                "assistant_catalog_invalid",
+            ),
+            (
+                ResponseTemplate::new(200).set_body_json(only_images),
+                "assistant_no_compatible_models",
+            ),
+        ] {
+            let server = serve(response).await;
+            assert_eq!(fetch_from(&server).await.unwrap_err(), code);
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_refuses_a_catalog_over_the_size_limit() {
+        let body = vec![b' '; MAX_CATALOG_BYTES + 1];
+        let server = serve(wiremock::ResponseTemplate::new(200).set_body_bytes(body)).await;
+        assert_eq!(
+            fetch_from(&server).await.unwrap_err(),
+            "assistant_catalog_too_large"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_stops_reading_an_unsized_catalog_at_the_limit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).await;
+            // Chunked, no length header: only the running count can stop this.
+            let head = b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n";
+            if socket.write_all(head).await.is_err() {
+                return;
+            }
+            let chunk = vec![b' '; 1024 * 1024];
+            for _ in 0..16 {
+                let size = format!("{:x}\r\n", chunk.len());
+                for part in [size.as_bytes(), &chunk, b"\r\n"] {
+                    if socket.write_all(part).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            let _ = socket.write_all(b"0\r\n\r\n").await;
+        });
+        let result = fetch_models_at(&format!("http://{address}/v1/models")).await;
+        server.abort();
+        assert_eq!(result.unwrap_err(), "assistant_catalog_too_large");
+    }
+
+    #[tokio::test]
+    async fn fetch_never_builds_a_host_from_an_unknown_apex() {
+        assert_eq!(
+            fetch_models("evil.example").await.unwrap_err(),
+            "assistant_unknown_apex"
+        );
     }
 
     #[test]
