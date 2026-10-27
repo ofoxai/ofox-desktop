@@ -13,13 +13,16 @@ import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { AttachmentList, isSendable } from "./AssistantAttachments";
 
 const MessageMarkdown = memo(SessionMarkdown);
 
 /**
  * One user question or assistant reply. Only those two roles reach this view.
  * `onRetry` is given for a question whose turn failed before the model kept
- * it: it can only be sent again, as a new turn.
+ * it: it can only be sent again, as a new turn. A question shows the files it
+ * was sent with and that turn's outcome; an edit sends them again, leaving
+ * out those that can't be read.
  */
 export function AssistantMessageView({
   message,
@@ -39,6 +42,11 @@ export function AssistantMessageView({
   const [text, setText] = useState(message.content);
   const isUser = message.role === "user";
   const streaming = message.status === "streaming";
+  const files = message.attachments ?? [];
+  const resendable = files.filter(isSendable);
+  // An edit with no files of its own keeps all of the original's, so one
+  // whose files all fail to read could only fail the same way again.
+  const noReadableFiles = files.length > 0 && resendable.length === 0;
   // Edit and regenerate branch from the model's own history: a turn that
   // never reached it (it failed first) has no entry there to branch from.
   const branchable =
@@ -92,13 +100,36 @@ export function AssistantMessageView({
             value={text}
             onChange={(event) => setText(event.target.value)}
           />
+          {files.length > 0 && (
+            <>
+              <AttachmentList files={files} />
+              <p
+                className={cn(
+                  "text-note",
+                  noReadableFiles ? "text-danger" : "text-ink-muted",
+                )}
+              >
+                {noReadableFiles
+                  ? t("assistant.editNoReadableFiles")
+                  : [
+                      t("assistant.editKeepsFiles"),
+                      resendable.length < files.length &&
+                        t("assistant.editDropsFiles"),
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+              </p>
+            </>
+          )}
           <p className="text-note text-ink-muted">
             {t("assistant.editPreservesOriginal")}
           </p>
           <div className="flex gap-2">
             <Button
               disabled={
-                disabled || (!text.trim() && !message.attachments?.length)
+                disabled ||
+                noReadableFiles ||
+                (!text.trim() && !resendable.length)
               }
               onClick={() => {
                 void onEdit(text).then((sent) => {
@@ -130,14 +161,25 @@ export function AssistantMessageView({
           {t("assistant.typing")}
         </p>
       ) : (
-        <div
-          className={cn(
-            "min-w-0 break-words text-ui leading-relaxed text-ink",
-            isUser && "rounded-list bg-card-2 px-3 py-2.5",
+        <>
+          {/* A question sent with files alone has no words to show. */}
+          {(message.content || !files.length) && (
+            <div
+              className={cn(
+                "min-w-0 break-words text-ui leading-relaxed text-ink",
+                isUser && "rounded-list bg-card-2 px-3 py-2.5",
+              )}
+            >
+              <MessageMarkdown content={message.content} syntaxHighlight />
+            </div>
           )}
-        >
-          <MessageMarkdown content={message.content} syntaxHighlight />
-        </div>
+          {files.length > 0 && (
+            <AttachmentList
+              files={files}
+              className={message.content ? "mt-2" : undefined}
+            />
+          )}
+        </>
       )}
       {!editing && !streaming && (
         <div className="mt-2 flex items-center gap-1">
