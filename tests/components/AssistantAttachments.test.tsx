@@ -87,7 +87,18 @@ describe("attachment chips", () => {
         pagesWithoutText: [2, 3, 4, 7],
         pagesAttachedAsImages: [2, 3],
       },
-      "Pages 4, 7 have no text and weren't attached as images.",
+      "Pages 4, 7 have no text and weren't attached as images. Ask about those pages by number to have them read.",
+    ],
+    [
+      "PDF page without text a vision model did not get",
+      "partial",
+      "assistant_attachment_partial",
+      {
+        format: "pdf",
+        pagesWithoutText: [1, 2, 3],
+        pagesAttachedAsImages: [1, 2],
+      },
+      "Page 3 has no text and wasn't attached as an image. Ask about that page by number to have it read.",
     ],
     [
       "text cut at the extraction limit",
@@ -157,7 +168,7 @@ describe("attachment chips", () => {
       "too_large",
       "assistant_attachment_too_large",
       null,
-      "This file is too large to read.",
+      "This file is too large to read. Attach a smaller file instead.",
     ],
     [
       "password-protected PDF",
@@ -171,7 +182,7 @@ describe("attachment chips", () => {
       "unreadable",
       "assistant_attachment_unreadable",
       { format: "pdf", reason: "invalid_pdf" },
-      "This PDF is damaged or isn't a valid PDF.",
+      "This PDF is damaged or isn't a valid PDF. Save or export it as a PDF again, then attach it again.",
     ],
     [
       "text that is not UTF-8",
@@ -185,7 +196,7 @@ describe("attachment chips", () => {
       "unreadable",
       "assistant_attachment_unreadable",
       { format: "image", reason: "invalid_image" },
-      "This image is damaged or isn't a valid image.",
+      "This image is damaged or isn't a valid image. Save it again as a PNG or JPEG, then attach it again.",
     ],
     [
       "file that is gone",

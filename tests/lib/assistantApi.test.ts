@@ -217,6 +217,11 @@ describe("assistant error messages", () => {
     ["attachmentTotalTooLarge", /new conversation/i],
     ["attachmentUnsupported", /images.*PDFs.*text files/i],
     ["attachmentUnreadable", /attach it again/i],
+    // Also the alert for a sent turn's file, which can't be removed.
+    [
+      "attachmentUnavailable",
+      /attach the file again.*send your message again/i,
+    ],
     ["visionModelRequired", /choose a model that can read images/i],
     ["searchOutcomeUnknown", /may have been charged.*not repeated/i],
   ])("tells the user what to do about %s", (message, action) => {
