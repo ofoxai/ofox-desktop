@@ -4973,7 +4973,7 @@
     "removeAttachment": "{{name}} を削除",
     "attachmentsBlocked": "読み取れないファイルを削除してから送信してください。",
     "webSearch": "Web 検索",
-    "webSearchPrice": "検索 1 回あたり {{price}}（別途わずかなトークン料金）",
+    "webSearchPrice": "検索 1 回あたり約 {{low}}〜{{high}}（別途わずかなトークン料金）",
     "webSearchUnavailable": "現在 Web 検索は利用できません。返信はモデル自身の知識で作成されます。",
     "webSearchNextMessage": "Web 検索の変更は次のメッセージから適用されます。",
     "searchSkipped": "この返信では Web 検索を利用できなかったため、モデル自身の知識で作成されています。",

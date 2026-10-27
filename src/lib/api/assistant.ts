@@ -52,7 +52,10 @@ export interface AssistantBootstrap {
  */
 export interface AssistantSearchStatus {
   available: boolean;
-  /** USD per search as a decimal string; its tokens come on top. Null when unavailable. */
+  /**
+   * USD per billed search call as a decimal string; one search makes one or
+   * two, and the search model's tokens come on top. Null when unavailable.
+   */
   unitPriceUsd: string | null;
   model: string;
 }

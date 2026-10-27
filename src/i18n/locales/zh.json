@@ -4973,7 +4973,7 @@
     "removeAttachment": "移除 {{name}}",
     "attachmentsBlocked": "请先移除无法读取的文件，再发送。",
     "webSearch": "联网搜索",
-    "webSearchPrice": "每次搜索 {{price}}，另加少量 Token 费用",
+    "webSearchPrice": "每次搜索约 {{low}}–{{high}}，另加少量 Token 费用",
     "webSearchUnavailable": "联网搜索暂不可用，回复将基于模型自身的知识。",
     "webSearchNextMessage": "联网搜索的更改将从你的下一条消息开始生效。",
     "searchSkipped": "此回复无法使用联网搜索，因此基于模型自身的知识作答。",

@@ -1801,7 +1801,8 @@ describe("run edges", () => {
 });
 
 describe("conversation cost", () => {
-  const usageLine = () => screen.queryByText(/tokens|Cost/);
+  // Not the search price beside it, which mentions tokens too.
+  const usageLine = () => screen.queryByText(/^(Input|Cost|Estimated cost)/);
 
   it("shows a saved conversation's tokens and estimated cost", async () => {
     current.usage = {
@@ -1986,14 +1987,33 @@ describe("web search", () => {
     expect(toggle()).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("says what a search costs, like other costs, and shows it while search is on", async () => {
-    const price = "≈$0.014 per search, plus a little for its tokens";
-    await openConversation();
-    expect(toggle()).toHaveAccessibleDescription(price);
-    expect(screen.queryByText(price)).toBeNull();
-    await userEvent.click(toggle());
-    expect(await screen.findByText(price)).toBeVisible();
-  });
+  it.each([
+    ["en", "About $0.014–$0.028 per search, plus a little for its tokens"],
+    ["ja", "検索 1 回あたり約 $0.014〜$0.028（別途わずかなトークン料金）"],
+    ["zh", "每次搜索约 $0.014–$0.028，另加少量 Token 费用"],
+  ])(
+    "always shows what a search may cost, one or two billed calls, in %s",
+    async (language, price) => {
+      i18n.addResourceBundle("zh", "translation", zh, true, true);
+      i18n.addResourceBundle("ja", "translation", ja, true, true);
+      await i18n.changeLanguage(language);
+      render(page());
+      await userEvent.click(
+        await screen.findByRole("button", { name: /My conversation/ }),
+      );
+      const button = await screen.findByRole("button", {
+        name: language === "en" ? "Web search" : /Web|联网/,
+      });
+      await waitFor(() => expect(button).toBeEnabled());
+      expect(button).toHaveAccessibleDescription(price);
+      expect(screen.getByText(price)).toBeVisible();
+      await userEvent.click(button);
+      await waitFor(() =>
+        expect(button).toHaveAttribute("aria-pressed", "true"),
+      );
+      expect(screen.getByText(price)).toBeVisible();
+    },
+  );
 
   it("starts the first conversation with web search when it was turned on before the first message", async () => {
     mocks.listSessions.mockResolvedValue(listOf([]));

@@ -4973,7 +4973,7 @@
     "removeAttachment": "Remove {{name}}",
     "attachmentsBlocked": "Remove the files that can't be read, then send.",
     "webSearch": "Web search",
-    "webSearchPrice": "{{price}} per search, plus a little for its tokens",
+    "webSearchPrice": "About {{low}}–{{high}} per search, plus a little for its tokens",
     "webSearchUnavailable": "Web search is unavailable right now. Replies use the model's own knowledge.",
     "webSearchNextMessage": "Your web search change applies to your next message.",
     "searchSkipped": "Web search was unavailable for this reply, so it uses the model's own knowledge.",

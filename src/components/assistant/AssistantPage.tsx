@@ -37,6 +37,21 @@ import { cn } from "@/lib/utils";
 
 const STARTERS = ["summary", "writing", "explain"] as const;
 
+const usd = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  maximumSignificantDigits: 3,
+});
+
+/**
+ * What one web search may cost: the gateway bills each search call, and one
+ * search can make one or two (a search, then opening a page).
+ */
+function searchPriceRange(unitPriceUsd: string) {
+  const price = Number(unitPriceUsd);
+  return { low: usd.format(price), high: usd.format(price * 2) };
+}
+
 /**
  * A conversation's tokens and cost. The cost is shown only once its runs are
  * saved, and as unavailable whenever a request's cost is unknown: never as
@@ -149,11 +164,10 @@ function AssistantWorkspace() {
   const searchNote = !bootstrap
     ? null
     : searchPrice !== null
-      ? t("assistant.webSearchPrice", { price: fmtCost(Number(searchPrice)) })
+      ? t("assistant.webSearchPrice", searchPriceRange(searchPrice))
       : t("assistant.webSearchUnavailable");
-  // The price while search is on; why it can't be turned on while it can't.
-  const showSearchNote =
-    available && (searchPrice === null || assistant.webSearch);
+  // What a search costs, or why there is none, whether search is on or not.
+  const showSearchNote = available && searchNote !== null;
   // Search can be turned on only while it is offered, and always off, so a
   // conversation never keeps it on when it can't be seen to work. A
   // conversation still loading (or whose load failed) has no setting to
