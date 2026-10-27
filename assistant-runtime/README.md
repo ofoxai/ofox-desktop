@@ -29,7 +29,10 @@ pnpm assistant:smoke    # run the copied production tree: Pi SDK + native JSONL
 executable and its LICENSE to `resources/node/`, installs the production
 dependencies from `package-lock.json` into `resources/runtime/` with
 `npm ci --omit=dev --ignore-scripts`, and prunes Pi's `examples/` (a demo ships
-a GPL-licensed `doom.wasm`) and every `*.map` file. `resources/manifest.json`
+a GPL-licensed `doom.wasm`) and every `*.map` file. `resources/runtime-install.json`
+records the lockfile and `package.json` hashes, Node version and platform of
+that install; while they are unchanged the next prepare skips `npm ci` and only
+copies `src/` again. `resources/manifest.json`
 records the protocol, SDK and Node versions and `minimumMacOS`, read from
 `src-tauri/tauri.conf.json` (`bundle.macOS.minimumSystemVersion`, 12.0). Node
 22 supports macOS 11 and later. With `APPLE_SIGNING_IDENTITY` set on macOS,

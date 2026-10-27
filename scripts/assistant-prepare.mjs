@@ -16,6 +16,12 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  clearInstallStamp,
+  installIsCurrent,
+  installStamp,
+  writeInstallStamp,
+} from "./assistant-install-stamp.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const runtime = path.join(root, "assistant-runtime");
@@ -246,18 +252,34 @@ if (process.argv.includes("--node-only")) {
   await install(runtime);
 } else {
   const production = path.join(resources, "runtime");
-  await rm(production, { recursive: true, force: true });
-  await mkdir(production, { recursive: true });
-  for (const filename of ["package.json", "package-lock.json"])
-    await copyFile(
-      path.join(runtime, filename),
-      path.join(production, filename),
+  const stampFile = path.join(resources, "runtime-install.json");
+  const wanted = await installStamp({
+    runtime,
+    nodeVersion: manifest.version,
+    platform: target,
+  });
+  if (await installIsCurrent(production, stampFile, wanted)) {
+    process.stdout.write(
+      "Assistant runtime dependencies are current; skipping npm ci\n",
     );
+  } else {
+    await clearInstallStamp(stampFile);
+    await rm(production, { recursive: true, force: true });
+    await mkdir(production, { recursive: true });
+    for (const filename of ["package.json", "package-lock.json"])
+      await copyFile(
+        path.join(runtime, filename),
+        path.join(production, filename),
+      );
+    await install(production);
+    await pruneProduction(production);
+    await writeInstallStamp(stampFile, wanted);
+  }
+  // The runtime's own source is copied every time: it changes without the lockfile.
+  await rm(path.join(production, "src"), { recursive: true, force: true });
   await cp(path.join(runtime, "src"), path.join(production, "src"), {
     recursive: true,
   });
-  await install(production);
-  await pruneProduction(production);
   await signMacFiles(resources);
   const stamp = path.join(nodeDirectory, "source.json");
   const source = JSON.parse(await readFile(stamp, "utf8"));
