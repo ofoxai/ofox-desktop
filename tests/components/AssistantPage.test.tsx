@@ -388,7 +388,7 @@ describe("errors", () => {
     [
       "assistant_key_storage_unavailable",
       "en",
-      "The assistant's API key couldn't be read or saved on this computer. Make sure the system credential store (Keychain) is available, then try again.",
+      "The assistant's API key couldn't be read or saved on this computer. Make sure the system credential store is available, then try again.",
     ],
     [
       "assistant_key_unavailable",
