@@ -2305,3 +2305,47 @@ fn a_run_may_read_the_pages_of_the_conversation_and_no_others() {
     assert_no_secret_on_disk(config.path(), &[KEY]);
     assert_no_secret_in_events(&env, &[KEY]);
 }
+
+#[test]
+fn stopping_a_run_during_its_search_leaves_the_cost_unknown() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = searching(&host, &env).await;
+        gateway.reply(Reply::ToolCalls(vec![(
+            "web_search",
+            json!({"query": "slow news"}),
+        )]));
+        // The search is sent and never answered.
+        gateway.reply(Reply::Hang(String::new()));
+        let run = host
+            .send(request(&sid, "Any slow news?", json!({})))
+            .await
+            .unwrap();
+        wait_for(&env, &run.run_id, "tool_start").await;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !gateway.requests().iter().any(|r| r.path == "/v1/responses") {
+            assert!(Instant::now() < deadline, "the search never went out");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        host.stop(&sid, &run.run_id, &run.operation_id)
+            .await
+            .unwrap();
+        let end = wait_for(&env, &run.run_id, "run_end").await;
+        assert_eq!(end.data["status"], "stopped");
+        assert!(of_type(&env, &run.run_id, "error").is_empty());
+
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(detail.usage["usageCoverage"], "incomplete");
+        assert!(detail.usage["estimatedCostUsd"].is_null());
+        assert!(detail.usage["searchCostUsd"].is_null());
+        assert_eq!(gateway.requests().len(), 2, "no request after the stop");
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+    assert_no_secret_in_events(&env, &[KEY]);
+}
