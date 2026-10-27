@@ -6,8 +6,9 @@ use super::{
     store::{self, SessionList, SessionRecord},
     types::*,
 };
-use serde_json::{json, Value};
-use std::path::PathBuf;
+use serde_json::{json, Map, Value};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const MAX_MESSAGE_BYTES: usize = 128_000;
@@ -189,26 +190,21 @@ impl AssistantHost {
         validate_id(&request.session_id)?;
         validate_id(&request.run_id)?;
         validate_id(&request.operation_id)?;
-        if request.text.len() > MAX_MESSAGE_BYTES {
-            return Err("assistant_message_too_large".into());
-        }
-        if (request.text.trim().is_empty() && request.regenerate_message_id.is_none())
-            || (request.edit_message_id.is_some() && request.regenerate_message_id.is_some())
-        {
-            return Err("assistant_invalid_message".into());
-        }
-        // Attachments arrive in a later stage; none can be sent yet.
-        if !request.attachment_ids.is_empty() {
-            return Err("assistant_attachment_not_found".into());
-        }
+        check_message(&request)?;
         self.ensure_accepting_runs()?;
         let generation = self.generation();
         let identity = self.identity().await?;
         self.recover(&identity, &request.session_id).await?;
-        let (record, native_file) = blocking({
+        let (record, native_file, attachment_root) = blocking({
             let store = self.store(&identity.owner)?;
             let sid = request.session_id.clone();
-            move || Ok((store.load_record(&sid)?, store.native_history_path(&sid)?))
+            move || {
+                Ok((
+                    store.load_record(&sid)?,
+                    store.native_history_path(&sid)?,
+                    store.attachment_root(&sid)?,
+                ))
+            }
         })
         .await?;
         if record.session.deleted_at.is_some() {
@@ -222,6 +218,7 @@ impl AssistantHost {
             return Err("assistant_native_history_missing".into());
         }
         let branch = Branch::resolve(&record, &request)?;
+        let selected = selection(&record, &request, &branch)?;
         let base_url = self.env.gateway_base(&identity.apex)?;
         let proxy = blocking({
             let env = self.env.clone();
@@ -245,17 +242,18 @@ impl AssistantHost {
             let request = request.clone();
             let branch = branch.clone();
             let text = text.clone();
+            let selected = selected.clone();
             move || {
                 host.register_run(control.clone(), generation, || {
                     store.mutate(&request.session_id, |record| {
-                        publish_turn(record, &control, &request, &branch, &text)
+                        publish_turn(record, &control, &request, &branch, &text, &selected)
                     })
                 })
             }
         })
         .await?;
 
-        let params = json!({
+        let mut params = json!({
             "sessionId": request.session_id,
             "runId": request.run_id,
             "operationId": request.operation_id,
@@ -270,6 +268,14 @@ impl AssistantHost {
             "editEntryId": branch.edit_entry,
             "regenerateEntryId": branch.regenerate_entry,
         });
+        if let Some(params) = params.as_object_mut() {
+            params.extend(attachment_params(
+                &record,
+                &attachment_root,
+                &selected,
+                &branch,
+            ));
+        }
         self.emit_start(&control);
         self.spawn_run(control, params);
         Ok(RunRef {
@@ -334,6 +340,26 @@ impl AssistantHost {
     }
 }
 
+/// The checks a send needs no state for: the text's size, and text or a file
+/// unless it regenerates (which sends its turn again).
+fn check_message(request: &SendRequest) -> Result<(), String> {
+    if request.text.len() > MAX_MESSAGE_BYTES {
+        return Err("assistant_message_too_large".into());
+    }
+    if (request.text.trim().is_empty()
+        && request.attachment_ids.is_empty()
+        && request.regenerate_message_id.is_none())
+        || (request.edit_message_id.is_some() && request.regenerate_message_id.is_some())
+    {
+        return Err("assistant_invalid_message".into());
+    }
+    // No conversation holds more files than this.
+    if request.attachment_ids.len() > attachments::MAX_PER_SESSION {
+        return Err("assistant_attachment_not_found".into());
+    }
+    Ok(())
+}
+
 /// Which earlier turn a send rewrites, if any.
 #[derive(Clone, Default)]
 struct Branch {
@@ -341,6 +367,8 @@ struct Branch {
     revision_of: Option<String>,
     /// For a regenerate: the user text it sends again.
     resent_text: Option<String>,
+    /// The files the replaced user message sent.
+    replaced_attachments: Vec<String>,
     edit_entry: Option<String>,
     regenerate_entry: Option<String>,
 }
@@ -354,10 +382,12 @@ impl Branch {
                 .iter()
                 .find(|m| m.id == id && m.role == role)
         };
+        let sent = |user: &Message| user.attachments.iter().map(|a| a.id.clone()).collect();
         if let Some(mid) = &request.edit_message_id {
             let user = find(mid, "user").ok_or(UNAVAILABLE)?;
             return Ok(Self {
                 revision_of: Some(user.id.clone()),
+                replaced_attachments: sent(user),
                 edit_entry: Some(user.native_entry_id.clone().ok_or(UNAVAILABLE)?),
                 ..Self::default()
             });
@@ -374,6 +404,7 @@ impl Branch {
             return Ok(Self {
                 revision_of: Some(user.id.clone()),
                 resent_text: Some(user.content.clone()),
+                replaced_attachments: sent(user),
                 regenerate_entry: Some(entry),
                 ..Self::default()
             });
@@ -382,15 +413,85 @@ impl Branch {
     }
 }
 
-/// Save the new turn as the run registers: the user message, the empty
-/// assistant message the stream fills, the title, and the running operation.
-/// An edit or regenerate marks the replaced turns superseded.
+/// The files a send carries, in order and each once: a regenerate sends its
+/// turn's files again, an edit without a selection of its own keeps the
+/// edited turn's, and any other send takes `attachmentIds` (a regenerate
+/// ignores them, as it ignores its text). Every one must be a selectable
+/// file of the conversation. The copies are `ready`: this turn's outcome
+/// arrives with its run.
+fn selection(
+    record: &SessionRecord,
+    request: &SendRequest,
+    branch: &Branch,
+) -> Result<Vec<Attachment>, String> {
+    let keeps_turn = request.regenerate_message_id.is_some()
+        || (request.edit_message_id.is_some() && request.attachment_ids.is_empty());
+    let ids = if keeps_turn {
+        &branch.replaced_attachments
+    } else {
+        &request.attachment_ids
+    };
+    let mut seen = HashSet::new();
+    ids.iter()
+        .filter(|id| seen.insert(id.as_str()))
+        .map(|id| {
+            record
+                .attachments
+                .iter()
+                .find(|a| &a.id == id && a.selectable())
+                .map(|a| Attachment {
+                    status: "ready".into(),
+                    reason: None,
+                    details: None,
+                    ..a.clone()
+                })
+                .ok_or_else(|| "assistant_attachment_not_found".to_string())
+        })
+        .collect()
+}
+
+/// The attachment part of a run's parameters (assistant-runtime README,
+/// "Attachments"): every file of the conversation, kept as `<root>/<id>`, and
+/// this turn's selection, always given since the runtime's default is none.
+/// A regenerate also gives the user's own text to rebuild its turn from.
+fn attachment_params(
+    record: &SessionRecord,
+    root: &Path,
+    selected: &[Attachment],
+    branch: &Branch,
+) -> Map<String, Value> {
+    let files: Vec<Value> = record
+        .attachments
+        .iter()
+        .map(|a| {
+            json!({
+                "id": a.id, "name": a.name, "mimeType": a.mime_type,
+                "sizeBytes": a.size_bytes, "path": a.id,
+            })
+        })
+        .collect();
+    let selected: Vec<&str> = selected.iter().map(|a| a.id.as_str()).collect();
+    let mut params = Map::new();
+    params.insert("attachmentRoot".into(), json!(root));
+    params.insert("attachments".into(), json!(files));
+    params.insert("selectedAttachmentIds".into(), json!(selected));
+    if let Some(text) = &branch.resent_text {
+        params.insert("originalPrompt".into(), json!(text));
+    }
+    params
+}
+
+/// Save the new turn as the run registers: the user message with the files
+/// it sends, the empty assistant message the stream fills, the title, and
+/// the running operation. An edit or regenerate marks the replaced turns
+/// superseded.
 fn publish_turn(
     record: &mut SessionRecord,
     control: &RunControl,
     request: &SendRequest,
     branch: &Branch,
     text: &str,
+    selected: &[Attachment],
 ) -> Result<(), String> {
     store::ensure_new_operation(record, &request.operation_id)?;
     if let Some(mid) = &branch.revision_of {
@@ -409,7 +510,7 @@ fn publish_turn(
         created_at: at,
         reasoning: None,
         status: "completed".into(),
-        attachments: vec![],
+        attachments: selected.to_vec(),
         sources: vec![],
         superseded: false,
         revision_of: branch.revision_of.clone(),
@@ -431,7 +532,12 @@ fn publish_turn(
         run_id: Some(request.run_id.clone()),
     });
     if record.session.title.is_empty() {
-        record.session.title = user_text.trim().chars().take(TITLE_CHARS).collect();
+        // A file sent alone names the conversation.
+        let title = match user_text.trim() {
+            "" => selected.first().map_or("", |a| a.name.as_str()),
+            text => text,
+        };
+        record.session.title = title.chars().take(TITLE_CHARS).collect();
     }
     store::consume_draft(&mut record.session, request);
     record.session.updated_at = at;
@@ -445,4 +551,189 @@ fn publish_turn(
         status: OperationStatus::Running,
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::assistant::host::Identity;
+
+    fn attachment(name: &str, status: &str) -> Attachment {
+        serde_json::from_value(json!({
+            "id": id(), "name": name, "mimeType": "text/plain", "sizeBytes": 3,
+            "status": status, "reason": "assistant_attachment_partial",
+            "details": {"format": "text"},
+        }))
+        .unwrap()
+    }
+
+    fn message(role: &str, run: &str, attachments: &[&Attachment]) -> Message {
+        serde_json::from_value(json!({
+            "id": id(), "role": role, "content": format!("{role} text"), "createdAt": 1,
+            "reasoning": null, "status": "completed", "attachments": attachments,
+            "revisionOf": null, "nativeEntryId": id(), "runId": run,
+        }))
+        .unwrap()
+    }
+
+    /// One earlier turn that sent `a`; `a`, `b` and an unfinished `pending`
+    /// are in the conversation.
+    fn fixture() -> (SessionRecord, [Attachment; 3], Message, Message) {
+        let a = attachment("a.txt", "partial");
+        let b = attachment("b.md", "ready");
+        let pending = attachment("c.txt", "processing");
+        let run = id();
+        let user = message("user", &run, &[&a]);
+        let reply = message("assistant", &run, &[]);
+        let record = SessionRecord {
+            session: serde_json::from_value(json!({
+                "id": id(), "title": "", "modelId": "m", "createdAt": 1, "updatedAt": 1,
+            }))
+            .unwrap(),
+            messages: vec![user.clone(), reply.clone()],
+            attachments: vec![a.clone(), b.clone(), pending.clone()],
+            usage: json!({}),
+            operations: vec![],
+        };
+        (record, [a, b, pending], user, reply)
+    }
+
+    fn send(record: &SessionRecord, text: &str, extra: Value) -> SendRequest {
+        let mut value = json!({
+            "sessionId": record.session.id, "runId": id(), "operationId": id(), "text": text,
+        });
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn ids(selection: &[Attachment]) -> Vec<&str> {
+        selection.iter().map(|a| a.id.as_str()).collect()
+    }
+
+    fn select(record: &SessionRecord, request: &SendRequest) -> Result<Vec<Attachment>, String> {
+        selection(record, request, &Branch::resolve(record, request)?)
+    }
+
+    #[test]
+    fn a_new_turn_sends_each_file_it_selected_once_in_order() {
+        let (record, [a, b, pending], _, _) = fixture();
+        let request = send(&record, "x", json!({"attachmentIds": [b.id, a.id, b.id]}));
+        let selected = select(&record, &request).unwrap();
+        assert_eq!(ids(&selected), [b.id.as_str(), a.id.as_str()]);
+        // The new turn's own outcome is not known yet.
+        for attachment in &selected {
+            assert_eq!(attachment.status, "ready");
+            assert!(attachment.reason.is_none() && attachment.details.is_none());
+        }
+        assert_eq!(selected[1].name, "a.txt");
+
+        for unknown in [id(), pending.id.clone()] {
+            let request = send(&record, "x", json!({"attachmentIds": [a.id, unknown]}));
+            assert_eq!(
+                select(&record, &request).unwrap_err(),
+                "assistant_attachment_not_found"
+            );
+        }
+        assert!(select(&record, &send(&record, "x", json!({})))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_regenerate_resends_its_turns_files_and_an_edit_keeps_them_unless_it_picks_others() {
+        let (record, [a, b, _], user, reply) = fixture();
+        let regenerate = send(
+            &record,
+            "",
+            json!({"regenerateMessageId": reply.id, "attachmentIds": [b.id]}),
+        );
+        assert_eq!(ids(&select(&record, &regenerate).unwrap()), [a.id.as_str()]);
+
+        let keep = send(&record, "Edited", json!({"editMessageId": user.id}));
+        assert_eq!(ids(&select(&record, &keep).unwrap()), [a.id.as_str()]);
+        let replace = send(
+            &record,
+            "Edited",
+            json!({"editMessageId": user.id, "attachmentIds": [b.id]}),
+        );
+        assert_eq!(ids(&select(&record, &replace).unwrap()), [b.id.as_str()]);
+    }
+
+    #[test]
+    fn the_runtime_gets_every_file_of_the_conversation_and_the_turns_selection() {
+        let (record, [a, b, _], _, reply) = fixture();
+        let root = Path::new("/config/assistant/owner/sid/attachments");
+        let request = send(&record, "x", json!({"attachmentIds": [b.id]}));
+        let branch = Branch::resolve(&record, &request).unwrap();
+        let selected = selection(&record, &request, &branch).unwrap();
+        let params = attachment_params(&record, root, &selected, &branch);
+        assert_eq!(params["attachmentRoot"], json!(root));
+        assert_eq!(
+            params["attachments"],
+            json!(record
+                .attachments
+                .iter()
+                .map(|a| json!({
+                    "id": a.id, "name": a.name, "mimeType": a.mime_type,
+                    "sizeBytes": a.size_bytes, "path": a.id,
+                }))
+                .collect::<Vec<_>>())
+        );
+        assert_eq!(params["selectedAttachmentIds"], json!([b.id]));
+        assert!(!params.contains_key("originalPrompt"));
+
+        // Always a selection, even an empty one: the runtime's default is none.
+        let plain = send(&record, "x", json!({}));
+        let branch = Branch::resolve(&record, &plain).unwrap();
+        let params = attachment_params(&record, root, &[], &branch);
+        assert_eq!(params["selectedAttachmentIds"], json!([]));
+
+        // A regenerate rebuilds its turn from the user's own words.
+        let regenerate = send(&record, "", json!({"regenerateMessageId": reply.id}));
+        let branch = Branch::resolve(&record, &regenerate).unwrap();
+        let selected = selection(&record, &regenerate, &branch).unwrap();
+        let params = attachment_params(&record, root, &selected, &branch);
+        assert_eq!(params["originalPrompt"], "user text");
+        assert_eq!(params["selectedAttachmentIds"], json!([a.id]));
+    }
+
+    #[test]
+    fn the_new_user_message_keeps_its_selection_and_a_file_alone_names_the_session() {
+        let (mut record, [a, b, _], _, _) = fixture();
+        let request = send(&record, "  ", json!({"attachmentIds": [b.id, a.id]}));
+        let branch = Branch::resolve(&record, &request).unwrap();
+        let selected = selection(&record, &request, &branch).unwrap();
+        let identity = Identity {
+            owner: "ab".repeat(32),
+            apex: "ofox.ai".into(),
+        };
+        let control = RunControl::new(identity, &request, "test-key-0123".into());
+        publish_turn(&mut record, &control, &request, &branch, "  ", &selected).unwrap();
+
+        let user = &record.messages[2];
+        assert_eq!(user.role, "user");
+        assert_eq!(ids(&user.attachments), [b.id.as_str(), a.id.as_str()]);
+        assert_eq!(user.attachments[1].status, "ready");
+        assert_eq!(record.session.title, "b.md");
+        // The conversation's own list keeps the last outcomes.
+        assert_eq!(record.attachments[0].status, "partial");
+    }
+
+    #[test]
+    fn a_message_needs_text_or_a_file() {
+        let (record, [a, _, _], _, _) = fixture();
+        assert_eq!(
+            check_message(&send(&record, " \n", json!({}))).unwrap_err(),
+            "assistant_invalid_message"
+        );
+        assert!(check_message(&send(&record, "", json!({"attachmentIds": [a.id]}))).is_ok());
+        let too_many = vec![a.id.clone(); attachments::MAX_PER_SESSION + 1];
+        assert_eq!(
+            check_message(&send(&record, "x", json!({ "attachmentIds": too_many }))).unwrap_err(),
+            "assistant_attachment_not_found"
+        );
+    }
 }
