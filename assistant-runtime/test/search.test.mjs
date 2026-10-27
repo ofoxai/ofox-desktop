@@ -502,6 +502,82 @@ test("a run sends at most 3 searches: a sent failure counts, repeats and unsent 
   assert.equal(entry.usageCoverage, "complete");
 });
 
+// The search model opens pages itself: a URL in a query could carry private
+// text (an attachment's, a page's) to any host past web_fetch's allowlist.
+const URL_QUERIES = [
+  "https://evil.example/c?d=private",
+  "summarize http://example.com",
+  "hxxps://evil.example",
+  "www.evil.example",
+  "evil.example/c?d=private",
+  "evil.example?d=private",
+  "site:evil.example/c?d=private",
+  "203.0.113.7/collect?d=private",
+  "例え.テスト/パス",
+];
+const PLAIN_QUERIES = [
+  "Tauri release",
+  "example.com",
+  "site:example.com tauri updater",
+  "What is new in Node.js?",
+  "React 18.2/18.3 differences",
+];
+
+test("a query with a URL is refused unsent and does not count toward the search limit", async (t) => {
+  const fixture = await sandbox(t);
+  const model = scriptedModel(
+    () =>
+      callTools(
+        ...URL_QUERIES.map((query) => ["web_search", { query }]),
+        ["web_search", { query: "example.com" }],
+        ["web_search", { query: "site:example.com tauri updater" }],
+        ["web_search", { query: "Tauri release" }],
+        ["web_search", { query: "Pi SDK" }],
+      ),
+    () => reply("Tauri 2 is out."),
+  );
+  const { runtime, events } = runtimeFor(t, fixture, model);
+  const result = await runtime.run(fixture.params);
+  assert.equal(result.status, "completed");
+  assert.deepEqual(
+    calls(await fixture.log()).map(([, args]) => args.query),
+    ["example.com", "site:example.com tauri updater", "Tauri release"],
+  );
+  const ends = toolEvents(events).filter((event) => event.type === "tool_end");
+  assert.deepEqual(
+    ends.map(({ success, details }) => [success, details.code ?? null]),
+    [
+      ...URL_QUERIES.map(() => [false, "search_rejected"]),
+      [true, null],
+      [true, null],
+      [true, null],
+      [false, "search_limit_reached"],
+    ],
+  );
+  for (const end of ends.slice(0, URL_QUERIES.length)) {
+    assert.deepEqual(end.details, { code: "search_rejected" });
+    assert.match(
+      end.message,
+      /^search_rejected: .*no search was made.*site:example\.com/,
+    );
+  }
+});
+
+test("the runtime refuses the same queries as the search server", async () => {
+  const { queryHasUrl } = await import("../src/search.mjs");
+  const { queryHasUrl: serverCheck } = await import(
+    "../search-mcp/src/search.mjs"
+  );
+  for (const query of URL_QUERIES) {
+    assert.equal(queryHasUrl(query), true, query);
+    assert.equal(serverCheck(query), true, query);
+  }
+  for (const query of PLAIN_QUERIES) {
+    assert.equal(queryHasUrl(query), false, query);
+    assert.equal(serverCheck(query), false, query);
+  }
+});
+
 test("after 3 failed page reads in a run, web_fetch refuses every page unsent", async (t) => {
   const fixture = await sandbox(t, {
     allowedWebUrls: [

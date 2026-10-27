@@ -30,8 +30,29 @@ const INHERITED_ENV = ["SystemRoot", "TEMP", "TMP", "PATH"];
 const SEARCH_GUIDELINES = [
   "web_search searches the web through Ofox and returns a short summary with numbered source links. Each call is a paid search: search only when the answer needs current or outside information.",
   `Search once with one precise query. Search again only if the results are insufficient, with a different query, and make at most ${MAX_SEARCHES} searches per turn.`,
+  "A query is words, never a URL or a web address with a path; to search one site, add site:example.com.",
   "When an answer uses search or page results, cite the sources you relied on as Markdown links to their URLs.",
 ];
+
+// The search model opens pages itself, so a URL in a query could carry
+// private text to any host it names. The same check as the search server's
+// queryHasUrl (search-mcp/src/search.mjs): any scheme, a `www.` host, or a
+// host name or IPv4 address followed by a path or query string. A bare
+// domain and `site:example.com` stay allowed.
+const QUERY_URL = new RegExp(
+  [
+    String.raw`\w+://`,
+    String.raw`(?<![\p{L}\p{N}_-])www\.[\p{L}\p{N}]`,
+    String.raw`(?:[\p{L}\p{N}-]+\.)+\p{L}[\p{L}\p{N}-]*(?::\d+)?(?:/|\?[^\s?])`,
+    String.raw`\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?(?:/|\?[^\s?])`,
+  ].join("|"),
+  "iu",
+);
+
+/** Whether a search query names a URL the search model could open. */
+export function queryHasUrl(query) {
+  return QUERY_URL.test(query);
+}
 const FETCH_GUIDELINES = [
   "web_fetch reads the text of one public HTTPS page that the user linked or that a web search in this turn returned; other pages are refused.",
   "Prefer the search summary: read a page only when the summary lacks what the answer needs, and do not retry a page that failed.",
@@ -99,6 +120,11 @@ const searchLimit = () =>
   toolFailure(
     "search_limit_reached",
     `This turn already made ${MAX_SEARCHES} web searches, the most allowed. Do not search again: answer with the information you already have.`,
+  );
+const urlQuery = () =>
+  toolFailure(
+    "search_rejected",
+    "A search query must not contain a URL, a www. address or a web address with a path or query string; no search was made. Search with words, a bare domain (example.com) or site:example.com instead.",
   );
 const fetchLimit = () =>
   toolFailure(
@@ -373,6 +399,8 @@ export function webTools(runtime, context, { searchTimeoutMs }) {
       query: Type.String({ minLength: 1, maxLength: 2000, pattern: "\\S" }),
     }),
     async ({ query }, signal) => {
+      // Before any paid call, and not one of the run's searches.
+      if (queryHasUrl(query)) throw urlQuery();
       const key = searchKey(query);
       if (searches.has(key)) return repeatedSearch(await searches.get(key));
       if (searchCount >= MAX_SEARCHES) throw searchLimit();
