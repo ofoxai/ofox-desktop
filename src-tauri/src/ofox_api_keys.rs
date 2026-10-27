@@ -636,6 +636,13 @@ fn key_name_on_this_host(label: &str) -> String {
 /// 等正在签的那把落盘后再吊销它。
 static ASSISTANT_KEY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// 持着 [`ASSISTANT_KEY_LOCK`] 签发、吊销时最多等服务器这么久：共享客户端的超时是
+/// 600 秒，不能让一次没回应的请求把所有发送和退出登录一起卡住。
+#[cfg(not(test))]
+const KEY_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+const KEY_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// 助手 key 在本机的状态（不访问网络，也不读钥匙串）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -769,7 +776,13 @@ async fn assistant_key_at(
         }
     }
 
-    let created = create_key_at(create_url, &assistant_key_name(), manager).await?;
+    // 超时后服务器上可能已经签了一把：拿不到 id，只能留给用户在后台清理。
+    let created = tokio::time::timeout(
+        KEY_REQUEST_TIMEOUT,
+        create_key_at(create_url, &assistant_key_name(), manager),
+    )
+    .await
+    .map_err(|_| ApiKeyError::RemoteRejected("creating the assistant key timed out".into()))??;
     let meta = AssistantKeyMeta {
         key_id: created.key_id,
         owner: Some(owner),
@@ -849,7 +862,14 @@ where
     let Some(meta) = settings::get_assistant_key_meta().filter(|meta| !meta.revoked) else {
         return true;
     };
-    let revoked = match delete(meta.key_id.clone()).await {
+    let deleted = tokio::time::timeout(KEY_REQUEST_TIMEOUT, delete(meta.key_id.clone()))
+        .await
+        .unwrap_or_else(|_| {
+            Err(ApiKeyError::RemoteRejected(
+                "deleting the assistant key timed out".into(),
+            ))
+        });
+    let revoked = match deleted {
         Ok(()) => true,
         Err(e) => {
             log::warn!(
@@ -1778,6 +1798,65 @@ mod tests {
         );
         assert_eq!(store.load(Slot::AssistantKey).unwrap(), None);
         assert!(settings::get_assistant_key_meta().unwrap().revoked);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_mint_that_never_answers_gives_up_and_frees_the_key_lock() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        let manager = signed_in_as("org_a").await;
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/openapi/api-keys"))
+            .respond_with(
+                ResponseTemplate::new(201)
+                    .set_body_json(json!({ "id": "late", "key": "sk-of-late" }))
+                    .set_delay(KEY_REQUEST_TIMEOUT * 20),
+            )
+            .mount(&server)
+            .await;
+        let url = format!("{}/openapi/api-keys", server.uri());
+
+        let started = std::time::Instant::now();
+        let result =
+            fetch_or_create_assistant_key_at(FetchMode::CachedOk, &store, &manager, &url).await;
+
+        assert!(
+            matches!(result, Err(ApiKeyError::RemoteRejected(_))),
+            "{result:?}"
+        );
+        assert!(started.elapsed() < KEY_REQUEST_TIMEOUT * 10);
+        assert!(
+            ASSISTANT_KEY_LOCK.try_lock().is_ok(),
+            "the lock is free again"
+        );
+        assert_eq!(store.load(Slot::AssistantKey).unwrap(), None);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_logout_revoke_that_never_answers_queues_the_key_and_ends() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        let a = owner_of("org_a");
+        keep_assistant_key(
+            &store,
+            "sk-of-A",
+            assistant_record("assistant-a", Some(a.clone())),
+        );
+
+        let revoked = stop_assistant_key_with(&store, Some(&a), |_| {
+            std::future::pending::<Result<(), ApiKeyError>>()
+        })
+        .await;
+
+        assert!(!revoked);
+        assert_eq!(
+            settings::list_keys_to_delete(),
+            [waiting("assistant-a", Some(a))]
+        );
+        assert_eq!(store.load(Slot::AssistantKey).unwrap(), None);
     }
 
     #[tokio::test]
