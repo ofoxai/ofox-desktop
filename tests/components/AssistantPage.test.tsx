@@ -17,6 +17,7 @@ import { AssistantPage } from "@/components/assistant/AssistantPage";
 import { useAssistant } from "@/components/assistant/useAssistant";
 import { ShellProvider, useShell } from "@/components/shell/ShellContext";
 import type {
+  AssistantAttachment,
   AssistantBootstrap,
   AssistantEvent,
   AssistantMessage,
@@ -33,6 +34,7 @@ const mocks = vi.hoisted(() => ({
   createSession: vi.fn(),
   getSession: vi.fn(),
   updateSession: vi.fn(),
+  pickAttachments: vi.fn(),
   send: vi.fn(),
   stop: vi.fn(),
   subscribe: vi.fn(),
@@ -129,6 +131,7 @@ beforeEach(async () => {
     current = { ...current, session: { ...current.session, ...patch } };
     return current.session;
   });
+  mocks.pickAttachments.mockResolvedValue([]);
   mocks.send.mockResolvedValue({ runId: "unused", operationId: "unused" });
   mocks.stop.mockResolvedValue(undefined);
   mocks.subscribe.mockImplementation(async (listener) => {
@@ -860,6 +863,386 @@ describe("a turn that failed before the model kept it", () => {
     expect(
       screen.getByRole("button", { name: "Edit and resend" }),
     ).toBeVisible();
+  });
+});
+
+describe("attachments", () => {
+  const pdf: AssistantAttachment = {
+    id: "file-pdf",
+    name: "report.pdf",
+    mimeType: "application/pdf",
+    sizeBytes: 2048,
+    status: "ready",
+    reason: null,
+    previewUrl: null,
+    details: null,
+  };
+  const photo: AssistantAttachment = {
+    ...pdf,
+    id: "file-png",
+    name: "photo.png",
+    mimeType: "image/png",
+    sizeBytes: 3_400_000,
+  };
+  const locked: AssistantAttachment = {
+    ...pdf,
+    id: "file-locked",
+    name: "locked.pdf",
+    status: "unreadable",
+    reason: "assistant_attachment_unreadable",
+    details: { format: "pdf", reason: "password_protected" },
+  };
+  const footer = () => composer().closest("footer") as HTMLElement;
+  const composerFiles = () =>
+    within(footer()).queryByRole("list", { name: "Attached files" });
+  const attach = () => screen.getByRole("button", { name: "Attach files" });
+  const sendButton = () => screen.getByRole("button", { name: "Send" });
+  const withDraftFiles = (
+    files: AssistantAttachment[],
+    draft = "",
+  ): AssistantSessionDetail => ({
+    ...current,
+    session: {
+      ...current.session,
+      draft,
+      draftAttachmentIds: files.map((file) => file.id),
+    },
+    attachments: files,
+  });
+  async function pick(files: AssistantAttachment[]) {
+    mocks.pickAttachments.mockResolvedValueOnce(files);
+    await userEvent.click(attach());
+    await waitFor(() =>
+      expect(composerFiles()).toHaveTextContent(files[0].name),
+    );
+  }
+
+  it("attaches picked files to the draft and saves them with it", async () => {
+    await openConversation();
+    await pick([pdf, photo]);
+    expect(mocks.pickAttachments).toHaveBeenCalledWith("session-a");
+    const [first, second] = within(composerFiles()!).getAllByRole("listitem");
+    expect(first).toHaveTextContent("report.pdf");
+    expect(first).toHaveTextContent("2.0 KB");
+    expect(second).toHaveTextContent("photo.png");
+    await waitFor(() =>
+      expect(mocks.updateSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: "session-a",
+          draftAttachmentIds: ["file-pdf", "file-png"],
+        }),
+      ),
+    );
+  });
+
+  it("sends files without words, and shows them on the question", async () => {
+    await openConversation();
+    expect(sendButton()).toBeDisabled();
+    await pick([pdf]);
+    expect(sendButton()).toBeEnabled();
+    await userEvent.click(sendButton());
+    await waitFor(() =>
+      expect(mocks.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: "session-a",
+          text: "",
+          attachmentIds: ["file-pdf"],
+        }),
+      ),
+    );
+    expect(composerFiles()).toBeNull();
+    const question = screen.getByRole("article", { name: "You" });
+    expect(
+      within(question).getByRole("list", { name: "Attached files" }),
+    ).toHaveTextContent("report.pdf");
+  });
+
+  it("restores a saved draft's files, and removes one from the draft", async () => {
+    current = withDraftFiles([pdf]);
+    await openConversation();
+    expect(composerFiles()).toHaveTextContent("report.pdf");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Remove report.pdf" }),
+    );
+    expect(composerFiles()).toBeNull();
+    expect(sendButton()).toBeDisabled();
+    await waitFor(() =>
+      expect(mocks.updateSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: "session-a",
+          draftAttachmentIds: [],
+        }),
+      ),
+    );
+  });
+
+  it("won't send a file that can't be read, and says why", async () => {
+    current = withDraftFiles([locked], "Read this");
+    await openConversation();
+    expect(composerFiles()).toHaveTextContent(
+      "This PDF is password-protected. Remove the password, then attach it again.",
+    );
+    expect(
+      screen.getByText("Remove the files that can't be read, then send."),
+    ).toBeVisible();
+    expect(sendButton()).toBeDisabled();
+    fireEvent.keyDown(composer(), { key: "Enter" });
+    expect(mocks.send).not.toHaveBeenCalled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Remove locked.pdf" }),
+    );
+    expect(sendButton()).toBeEnabled();
+    expect(
+      screen.queryByText("Remove the files that can't be read, then send."),
+    ).toBeNull();
+  });
+
+  it.each<[AssistantAttachment["status"], string]>([
+    ["partial", "Part of this file wasn't read."],
+    ["model_unsupported", "Choose a model that can read images"],
+  ])(
+    "still sends a %s file, saying what its last read found",
+    async (status, note) => {
+      current = withDraftFiles([{ ...photo, status, details: null }], "Look");
+      await openConversation();
+      expect(composerFiles()).toHaveTextContent(note);
+      await userEvent.click(sendButton());
+      await waitFor(() =>
+        expect(mocks.send).toHaveBeenCalledWith(
+          expect.objectContaining({ attachmentIds: ["file-png"] }),
+        ),
+      );
+    },
+  );
+
+  it("changes nothing when the file dialog is cancelled", async () => {
+    await openConversation();
+    await userEvent.click(attach());
+    await waitFor(() => expect(mocks.pickAttachments).toHaveBeenCalled());
+    await waitFor(() => expect(attach()).toBeEnabled());
+    expect(composerFiles()).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it.each([
+    [
+      "assistant_attachment_too_many",
+      "Too many files. Attach up to 10 at a time and up to 200 per conversation.",
+    ],
+    [
+      "assistant_attachment_too_large",
+      "A file is too large. Files can be up to 25 MB",
+    ],
+    [
+      "assistant_attachment_dialog_failed",
+      "The file picker couldn't be opened. Please try again.",
+    ],
+  ])("explains a refused pick (%s) in words", async (code, expected) => {
+    mocks.pickAttachments.mockRejectedValueOnce(code);
+    await openConversation();
+    await userEvent.click(attach());
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(expected);
+    expect(document.body).not.toHaveTextContent("assistant_");
+    expect(composerFiles()).toBeNull();
+    expect(attach()).toBeEnabled();
+  });
+
+  it("starts a conversation for files picked before there is one", async () => {
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    await waitFor(() => expect(attach()).toBeEnabled());
+    mocks.pickAttachments.mockResolvedValueOnce([pdf]);
+    await userEvent.click(attach());
+    await waitFor(() =>
+      expect(mocks.pickAttachments).toHaveBeenCalledWith("session-a"),
+    );
+    expect(mocks.createSession).toHaveBeenCalledOnce();
+    await waitFor(() =>
+      expect(composerFiles()).toHaveTextContent("report.pdf"),
+    );
+  });
+
+  it("keeps each conversation's files with its own draft", async () => {
+    const other = { ...session, id: "session-b", title: "Other conversation" };
+    mocks.listSessions.mockResolvedValue(listOf([session, other]));
+    mocks.getSession.mockImplementation(async (id: string) =>
+      id === other.id
+        ? { ...current, session: other, attachments: [] }
+        : current,
+    );
+    await openConversation();
+    await pick([pdf]);
+    await userEvent.click(
+      screen.getByRole("button", { name: /Other conversation/ }),
+    );
+    await waitFor(() => expect(composer()).toBeEnabled());
+    expect(composerFiles()).toBeNull();
+    await waitFor(() =>
+      expect(mocks.updateSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: "session-a",
+          draftAttachmentIds: ["file-pdf"],
+        }),
+      ),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /My conversation/ }),
+    );
+    await waitFor(() =>
+      expect(composerFiles()).toHaveTextContent("report.pdf"),
+    );
+  });
+
+  it("puts the files back in the composer when a send fails", async () => {
+    mocks.send.mockRejectedValueOnce("assistant_network_error");
+    await openConversation();
+    await pick([pdf]);
+    await userEvent.type(composer(), "Summarize");
+    await userEvent.click(sendButton());
+    await screen.findByRole("alert");
+    expect(composerFiles()).toHaveTextContent("report.pdf");
+    expect(composer()).toHaveValue("Summarize");
+    expect(screen.queryByRole("article", { name: "You" })).toBeNull();
+  });
+
+  it("can't attach files while a reply runs", async () => {
+    await openConversation();
+    await userEvent.type(composer(), "Hello");
+    await userEvent.click(sendButton());
+    await screen.findByRole("button", { name: "Stop" });
+    expect(attach()).toBeDisabled();
+  });
+
+  it("shows each file's outcome as the run reads it, and why the turn was blocked", async () => {
+    await openConversation();
+    await pick([photo]);
+    await userEvent.type(composer(), "What is this?");
+    await userEvent.click(sendButton());
+    await screen.findByRole("button", { name: "Stop" });
+    const sent = mocks.send.mock.calls[0][0];
+    act(() =>
+      mocks.listener?.({
+        ...sent,
+        type: "attachment",
+        data: {
+          id: "file-png",
+          status: "model_unsupported",
+          code: "assistant_vision_model_required",
+          details: { format: "image", mimeType: "image/png" },
+        },
+      }),
+    );
+    const question = screen.getByRole("article", { name: "You" });
+    expect(
+      within(question).getByRole("list", { name: "Attached files" }),
+    ).toHaveTextContent(
+      "This model can't read images. Choose a model that can read images, then try again.",
+    );
+    act(() =>
+      mocks.listener?.({
+        ...sent,
+        type: "error",
+        data: {
+          code: "assistant_vision_model_required",
+          message:
+            "assistant_vision_model_required: This model cannot read images",
+        },
+      }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "This model can't read images. Choose a model that can read images, then regenerate the reply.",
+    );
+    expect(document.body).not.toHaveTextContent("assistant_");
+  });
+
+  it("ignores the outcome of a run this view does not follow", async () => {
+    await openConversation();
+    await pick([photo]);
+    await userEvent.click(sendButton());
+    await screen.findByRole("button", { name: "Stop" });
+    const sent = mocks.send.mock.calls[0][0];
+    act(() =>
+      mocks.listener?.({
+        ...sent,
+        runId: "another-run",
+        type: "attachment",
+        data: {
+          id: "file-png",
+          status: "unreadable",
+          code: "assistant_attachment_unreadable",
+          details: { reason: "invalid_image" },
+        },
+      }),
+    );
+    expect(screen.getByRole("article", { name: "You" })).not.toHaveTextContent(
+      "This image is damaged",
+    );
+  });
+
+  it("sends a failed question again with the files that can still be read", async () => {
+    current.messages = [
+      {
+        id: "lost-question",
+        role: "user",
+        content: "Compare these",
+        createdAt: 1,
+        status: "completed",
+        nativeEntryId: null,
+        runId: "lost-run",
+        attachments: [pdf, locked],
+      },
+      {
+        id: "lost-reply",
+        role: "assistant",
+        content: "",
+        createdAt: 2,
+        status: "error",
+        nativeEntryId: null,
+        runId: "lost-run",
+      },
+    ];
+    await openConversation();
+    await userEvent.click(screen.getByRole("button", { name: "Send again" }));
+    await waitFor(() =>
+      expect(mocks.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: "Compare these",
+          attachmentIds: ["file-pdf"],
+        }),
+      ),
+    );
+  });
+
+  it("edits a question and sends again the files that can be read", async () => {
+    current.messages = [
+      {
+        id: "original",
+        role: "user",
+        content: "Compare these",
+        createdAt: 1,
+        nativeEntryId: "entry-original",
+        runId: "run-original",
+        attachments: [pdf, locked],
+      },
+    ];
+    await openConversation();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Edit and resend" }),
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "Edit and resend" }), {
+      target: { value: "Compare again" },
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Resend" }));
+    await waitFor(() =>
+      expect(mocks.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          editMessageId: "original",
+          text: "Compare again",
+          attachmentIds: ["file-pdf"],
+        }),
+      ),
+    );
   });
 });
 

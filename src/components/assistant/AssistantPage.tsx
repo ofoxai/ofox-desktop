@@ -7,6 +7,7 @@ import {
   ArrowUpRight,
   Loader2,
   MessageSquare,
+  Paperclip,
   Pencil,
   Plus,
   Square,
@@ -16,6 +17,7 @@ import { assistantErrorKey, type AssistantUsage } from "@/lib/api/assistant";
 import { fmtCost, fmtTokens } from "@/lib/format";
 import { useAssistant } from "./useAssistant";
 import { AssistantMessageView } from "./AssistantMessageView";
+import { AttachmentList, isSendable } from "./AssistantAttachments";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -155,7 +157,12 @@ function AssistantWorkspace() {
     !message.superseded &&
     !message.nativeEntryId &&
     Boolean(message.runId) &&
-    unfinishedRuns.has(message.runId);
+    unfinishedRuns.has(message.runId) &&
+    // Sent again, it carries only the files that can still be read.
+    Boolean(message.content.trim() || message.attachments?.some(isSendable));
+  const files = assistant.attachments;
+  // Files whose last read failed outright are never sent: they must go first.
+  const blockedFiles = files.some((file) => !isSendable(file));
 
   useShellRefresh("assistant", async () => {
     await assistant.loadBootstrap();
@@ -460,7 +467,10 @@ function AssistantWorkspace() {
                       retryable(message)
                         ? () => {
                             follow.current = true;
-                            void assistant.send({ text: message.content });
+                            void assistant.send({
+                              text: message.content,
+                              attachments: message.attachments,
+                            });
                           }
                         : undefined
                     }
@@ -486,6 +496,20 @@ function AssistantWorkspace() {
         <footer className="shrink-0 bg-card px-4 pb-3 pt-2">
           <div className="mx-auto w-full max-w-[760px]">
             <div className="rounded-list border border-line bg-card shadow-[0_1px_3px_rgba(0,0,0,.04)] transition-[border-color,box-shadow] focus-within:border-brand/60 focus-within:ring-2 focus-within:ring-brand/10">
+              {files.length > 0 && (
+                <div className="max-h-36 overflow-y-auto px-3 pt-3">
+                  <AttachmentList
+                    files={files}
+                    onRemove={assistant.removeAttachment}
+                    removeDisabled={busy || Boolean(run)}
+                  />
+                  {blockedFiles && (
+                    <p className="mt-1.5 text-note text-danger">
+                      {t("assistant.attachmentsBlocked")}
+                    </p>
+                  )}
+                </div>
+              )}
               <Textarea
                 ref={composer}
                 rows={3}
@@ -510,10 +534,21 @@ function AssistantWorkspace() {
                   }
                 }}
               />
-              <div className="flex items-center justify-between gap-2 px-3 pb-2">
-                <span className="min-w-0 truncate text-note text-ink-faint">
-                  {run ? t("assistant.running") : t("assistant.sendHint")}
-                </span>
+              <div className="flex items-center justify-between gap-2 pb-2 pl-2 pr-3">
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <Button
+                    variant="icon"
+                    aria-label={t("assistant.attach")}
+                    title={t("assistant.attach")}
+                    disabled={!writable}
+                    onClick={() => void assistant.pickAttachments()}
+                  >
+                    <Paperclip aria-hidden className="h-3.5 w-3.5" />
+                  </Button>
+                  <span className="min-w-0 truncate text-note text-ink-faint">
+                    {run ? t("assistant.running") : t("assistant.sendHint")}
+                  </span>
+                </div>
                 {run ? (
                   <Button variant="secondary" onClick={stop}>
                     <Square aria-hidden className="h-3.5 w-3.5" />
@@ -522,7 +557,11 @@ function AssistantWorkspace() {
                 ) : (
                   <Button
                     aria-label={t("assistant.send")}
-                    disabled={!writable || !assistant.draft.trim()}
+                    disabled={
+                      !writable ||
+                      blockedFiles ||
+                      (!assistant.draft.trim() && !files.length)
+                    }
                     onClick={send}
                   >
                     <ArrowUp aria-hidden className="h-3.5 w-3.5" />

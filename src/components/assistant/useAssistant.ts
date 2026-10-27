@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   assistantApi,
   assistantErrorCode,
+  type AssistantAttachment,
   type AssistantBootstrap,
   type AssistantEvent,
   type AssistantMessage,
@@ -11,12 +12,22 @@ import {
   type AssistantUnreadableSession,
   type AssistantUpdateRequest,
 } from "@/lib/api/assistant";
+import { isSendable } from "./AssistantAttachments";
 
 const freshId = () => crypto.randomUUID();
 const IDENTITY_CHANGED = "assistant_identity_changed";
 
 /** A backend or renderer error code; the page turns it into a localized message. */
 export type AssistantError = string;
+
+/** A conversation's draft as last saved; `files` unknown until read or written. */
+interface SavedDraft {
+  text: string;
+  files?: string[];
+}
+
+const sameIds = (a: string[], b: string[]) =>
+  a.length === b.length && a.every((id, index) => id === b[index]);
 
 /** The owner check the backend applies to writes that outlive a sign-in. */
 function expectedIdentity(identity: AssistantBootstrap | null) {
@@ -41,6 +52,9 @@ export function useAssistant(enabled: boolean) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<AssistantSessionDetail | null>(null);
   const [draft, setDraftState] = useState("");
+  const [attachments, setAttachmentsState] = useState<AssistantAttachment[]>(
+    [],
+  );
   const [stream, setStream] = useState<AssistantMessage | null>(null);
   const [run, setRunState] = useState<AssistantRunRef | null>(null);
   const [compacting, setCompacting] = useState(false);
@@ -60,9 +74,12 @@ export function useAssistant(enabled: boolean) {
   const runRef = useRef(run);
   const draftRef = useRef(draft);
   const drafts = useRef(new Map<string, string>());
+  // The files of each conversation's draft, kept like its text.
+  const attachmentsRef = useRef(attachments);
+  const attachmentDrafts = useRef(new Map<string, AssistantAttachment[]>());
   const draftWrites = useRef(new Map<string, Promise<void>>());
   const draftAuthority = useRef(0);
-  const savedDrafts = useRef(new Map<string, string>());
+  const savedDrafts = useRef(new Map<string, SavedDraft>());
   const bootstrapRef = useRef<AssistantBootstrap | null>(null);
   const pendingSends = useRef(new Map<string, { cancelled: boolean }>());
   const refreshSessionsRef = useRef<(generation?: number) => Promise<void>>(
@@ -83,6 +100,13 @@ export function useAssistant(enabled: boolean) {
     draftRef.current = value;
     if (selectedRef.current) drafts.current.set(selectedRef.current, value);
     setDraftState(value);
+  }, []);
+
+  const setAttachments = useCallback((value: AssistantAttachment[]) => {
+    attachmentsRef.current = value;
+    if (selectedRef.current)
+      attachmentDrafts.current.set(selectedRef.current, value);
+    setAttachmentsState(value);
   }, []);
 
   const showError = useCallback((value: unknown) => {
@@ -117,20 +141,30 @@ export function useAssistant(enabled: boolean) {
   }, []);
   reloadAuthority.current = () => void loadBootstrap();
 
+  /**
+   * Save a conversation's draft text and, when given and changed, its files.
+   * Writes to one conversation run in order.
+   */
   const persistDraft = useCallback(
-    (sessionId: string, text: string) => {
+    (sessionId: string, text: string, files?: string[]) => {
       const generation = draftAuthority.current;
-      const write = () =>
-        assistantApi.updateSession({
-          sessionId,
-          draft: text,
-          ...expectedIdentity(bootstrapRef.current),
-        });
       const task = (draftWrites.current.get(sessionId) ?? Promise.resolve())
         .catch(() => undefined)
         .then(async () => {
           if (generation !== draftAuthority.current) return;
-          if (savedDrafts.current.get(sessionId) === text) return;
+          const saved = savedDrafts.current.get(sessionId);
+          const newFiles =
+            files && !(saved?.files && sameIds(saved.files, files))
+              ? files
+              : undefined;
+          if (saved?.text === text && !newFiles) return;
+          const write = () =>
+            assistantApi.updateSession({
+              sessionId,
+              draft: text,
+              ...(newFiles ? { draftAttachmentIds: newFiles } : {}),
+              ...expectedIdentity(bootstrapRef.current),
+            });
           try {
             await write();
           } catch (reason) {
@@ -148,7 +182,10 @@ export function useAssistant(enabled: boolean) {
             await write();
           }
           if (generation === draftAuthority.current)
-            savedDrafts.current.set(sessionId, text);
+            savedDrafts.current.set(sessionId, {
+              text,
+              files: newFiles ?? saved?.files,
+            });
         });
       draftWrites.current.set(sessionId, task);
       return task;
@@ -217,7 +254,10 @@ export function useAssistant(enabled: boolean) {
                 message.role === "assistant" && message.status === "streaming",
             )
           : undefined;
-        savedDrafts.current.set(sessionId, value.session.draft);
+        savedDrafts.current.set(sessionId, {
+          text: value.session.draft,
+          files: value.session.draftAttachmentIds,
+        });
         const alreadyFollowing = Boolean(runRef.current);
         setDetail((old) => {
           if (preparing)
@@ -242,6 +282,12 @@ export function useAssistant(enabled: boolean) {
         if (resumed && !alreadyFollowing) setStream(resumed);
         if (!preparing) setRun(value.session.activeRun);
         if (!drafts.current.has(sessionId)) setDraft(value.session.draft);
+        if (!attachmentDrafts.current.has(sessionId))
+          setAttachments(
+            value.session.draftAttachmentIds.flatMap(
+              (id) => value.attachments.find((file) => file.id === id) ?? [],
+            ),
+          );
         return true;
       } catch (reason) {
         if (
@@ -253,10 +299,12 @@ export function useAssistant(enabled: boolean) {
         return false;
       }
     },
-    [setDraft, setRun, showError],
+    [setAttachments, setDraft, setRun, showError],
   );
 
   const savedDraft = detail?.session.draft ?? "";
+  const savedFileKey = (detail?.session.draftAttachmentIds ?? []).join("\n");
+  const fileKey = attachments.map((file) => file.id).join("\n");
   const detailSessionId = detail?.session.id;
   useEffect(() => {
     mounted.current = true;
@@ -280,6 +328,7 @@ export function useAssistant(enabled: boolean) {
       detailSequence.current += 1;
       selectedRef.current = null;
       drafts.current.clear();
+      attachmentDrafts.current.clear();
       savedDrafts.current.clear();
       setSelectedId(null);
       setDetail(null);
@@ -291,6 +340,7 @@ export function useAssistant(enabled: boolean) {
       setLoading(false);
       setRun(null);
       setDraft("");
+      setAttachments([]);
       setBootstrap(null);
       bootstrapRef.current = null;
       setChosenModel(null);
@@ -317,7 +367,7 @@ export function useAssistant(enabled: boolean) {
       epoch.current += 1;
       cleanup.forEach((off) => off());
     };
-  }, [enabled, loadBootstrap, setDraft, setRun, showError]); // List refresh uses its current request fencing separately.
+  }, [enabled, loadBootstrap, setAttachments, setDraft, setRun, showError]); // List refresh uses its current request fencing separately.
 
   useEffect(() => {
     if (!enabled) return;
@@ -348,12 +398,17 @@ export function useAssistant(enabled: boolean) {
 
   // Persist only a draft which still belongs to the displayed session. The backend also checks owner.
   useEffect(() => {
-    if (!selectedId || detailSessionId !== selectedId || draft === savedDraft)
+    if (
+      !selectedId ||
+      detailSessionId !== selectedId ||
+      (draft === savedDraft && fileKey === savedFileKey)
+    )
       return;
     const generation = epoch.current;
     const sequence = ++draftSequence.current;
+    const files = fileKey ? fileKey.split("\n") : [];
     const timer = setTimeout(() => {
-      void persistDraft(selectedId, draft)
+      void persistDraft(selectedId, draft, files)
         .then(() => {
           if (
             generation === epoch.current &&
@@ -361,7 +416,16 @@ export function useAssistant(enabled: boolean) {
             selectedRef.current === selectedId
           )
             setDetail((old) =>
-              old ? { ...old, session: { ...old.session, draft } } : old,
+              old
+                ? {
+                    ...old,
+                    session: {
+                      ...old.session,
+                      draft,
+                      draftAttachmentIds: files,
+                    },
+                  }
+                : old,
             );
         })
         .catch((reason) => {
@@ -372,7 +436,16 @@ export function useAssistant(enabled: boolean) {
       clearTimeout(timer);
       draftSequence.current += 1;
     };
-  }, [selectedId, draft, detailSessionId, savedDraft, persistDraft, showError]);
+  }, [
+    selectedId,
+    draft,
+    fileKey,
+    detailSessionId,
+    savedDraft,
+    savedFileKey,
+    persistDraft,
+    showError,
+  ]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -428,6 +501,36 @@ export function useAssistant(enabled: boolean) {
             const { usage } = event.data;
             setDetail((old) =>
               old?.session.id === event.sessionId ? { ...old, usage } : old,
+            );
+            return;
+          }
+          case "attachment": {
+            // How a file of this turn was read: kept on the file and on the
+            // question it was sent with until the saved transcript is read.
+            const { id, status, code, details } = event.data;
+            if (typeof id !== "string") return;
+            const read = (file: AssistantAttachment) =>
+              file.id === id
+                ? { ...file, status, reason: code, details }
+                : file;
+            const pending = `pending-${event.operationId}`;
+            setDetail((old) =>
+              old?.session.id === event.sessionId
+                ? {
+                    ...old,
+                    attachments: old.attachments.map(read),
+                    messages: old.messages.map((message) =>
+                      message.role === "user" &&
+                      message.attachments &&
+                      (message.id === pending || message.runId === event.runId)
+                        ? {
+                            ...message,
+                            attachments: message.attachments.map(read),
+                          }
+                        : message,
+                    ),
+                  }
+                : old,
             );
             return;
           }
@@ -493,7 +596,11 @@ export function useAssistant(enabled: boolean) {
         return;
       }
       if (previous && drafts.current.has(previous))
-        void persistDraft(previous, draftRef.current).catch(showError);
+        void persistDraft(
+          previous,
+          draftRef.current,
+          attachmentDrafts.current.get(previous)?.map((file) => file.id),
+        ).catch(showError);
       selectedRef.current = id;
       selectionSequence.current += 1;
       updateSequence.current += 1;
@@ -508,6 +615,10 @@ export function useAssistant(enabled: boolean) {
       setRun(null);
       draftRef.current = id ? (drafts.current.get(id) ?? "") : "";
       setDraftState(draftRef.current);
+      attachmentsRef.current = id
+        ? (attachmentDrafts.current.get(id) ?? [])
+        : [];
+      setAttachmentsState(attachmentsRef.current);
       setError(null);
     },
     [loading, detail, loadSelected, setRun, persistDraft, showError],
@@ -533,6 +644,7 @@ export function useAssistant(enabled: boolean) {
     selectedRef.current = value.id;
     createdSession.current = value.id;
     drafts.current.set(value.id, draftRef.current);
+    attachmentDrafts.current.set(value.id, attachmentsRef.current);
     setSelectedId(value.id);
     setDetail({ session: value, messages: [], attachments: [], usage: {} });
     void refreshSessions();
@@ -598,36 +710,47 @@ export function useAssistant(enabled: boolean) {
   );
 
   /**
-   * Send the composer's draft, edit or regenerate an earlier turn, or (`text`
-   * alone) send a stored question again as a new turn, leaving the draft.
+   * Send the composer's draft and files, edit or regenerate an earlier turn,
+   * or (`text`, with the question's `attachments`) send a stored question
+   * again as a new turn, leaving the draft.
    */
   const send = useCallback(
     async (options?: {
       editMessageId?: string;
       regenerateMessageId?: string;
       text?: string;
+      attachments?: AssistantAttachment[];
     }) => {
+      const { editMessageId, regenerateMessageId } = options ?? {};
       const text = options?.text ?? draftRef.current;
       const fromComposer = options?.text === undefined;
-      const revision = Boolean(
-        options?.editMessageId || options?.regenerateMessageId,
-      );
-      // Attachments arrive in a later stage; an edit keeps whatever its original carried.
-      const attachmentIds = options?.editMessageId
-        ? (detail?.messages
-            .find((message) => message.id === options.editMessageId)
-            ?.attachments?.map((item) => item.id) ?? [])
-        : [];
+      const revision = Boolean(editMessageId || regenerateMessageId);
+      // A regenerate reads its turn's own files again. An edit or a question
+      // sent again carries its files, leaving out those that can't be read;
+      // the composer's files are sent only when all of them can be.
+      const chosen = regenerateMessageId
+        ? []
+        : editMessageId
+          ? (detail?.messages.find((message) => message.id === editMessageId)
+              ?.attachments ?? [])
+          : fromComposer
+            ? attachmentsRef.current
+            : (options?.attachments ?? []);
+      const files = fromComposer ? chosen : chosen.filter(isSendable);
       if (
         busy ||
         loading ||
         runRef.current ||
-        (!text.trim() && !attachmentIds.length && !options?.regenerateMessageId)
+        files.some((file) => !isSendable(file)) ||
+        // An edit sent without files keeps all of its original's.
+        (editMessageId && chosen.length > 0 && !files.length) ||
+        (!text.trim() && !files.length && !regenerateMessageId)
       )
         return false;
       setBusy(true);
       setError(null);
       const originalDraft = draftRef.current;
+      const originalFiles = attachmentsRef.current;
       let sessionId: string | undefined;
       let preparingRunId: string | undefined;
       let preparation: { cancelled: boolean } | undefined;
@@ -650,8 +773,11 @@ export function useAssistant(enabled: boolean) {
           createdAt: Date.now(),
           status: "streaming",
         });
-        if (fromComposer) setDraft("");
-        if (!options?.regenerateMessageId)
+        if (fromComposer) {
+          setDraft("");
+          setAttachments([]);
+        }
+        if (!regenerateMessageId)
           setDetail((old) =>
             old
               ? {
@@ -663,13 +789,19 @@ export function useAssistant(enabled: boolean) {
                       role: "user",
                       content: text,
                       createdAt: Date.now(),
-                      revisionOf: options?.editMessageId,
+                      revisionOf: editMessageId,
+                      attachments: files,
                     },
                   ],
                 }
               : old,
           );
-        if (fromComposer) await persistDraft(sessionId, originalDraft);
+        if (fromComposer)
+          await persistDraft(
+            sessionId,
+            originalDraft,
+            originalFiles.map((file) => file.id),
+          );
         if (generation !== epoch.current)
           throw new Error("assistant_request_expired");
         if (preparation.cancelled) throw new Error("assistant_cancelled");
@@ -677,8 +809,9 @@ export function useAssistant(enabled: boolean) {
           sessionId,
           ...reference,
           text,
-          attachmentIds,
-          ...options,
+          attachmentIds: files.map((file) => file.id),
+          ...(editMessageId ? { editMessageId } : {}),
+          ...(regenerateMessageId ? { regenerateMessageId } : {}),
         });
         // The backend has registered the run: a conversation read that began
         // before then may still answer without it, and must not end it here.
@@ -699,6 +832,9 @@ export function useAssistant(enabled: boolean) {
           await persistDraft(
             sessionId,
             drafts.current.get(sessionId) ?? "",
+            (attachmentDrafts.current.get(sessionId) ?? []).map(
+              (file) => file.id,
+            ),
           ).catch(showError);
         }
         return true;
@@ -722,6 +858,8 @@ export function useAssistant(enabled: boolean) {
               : old,
           );
           if (fromComposer && !draftRef.current) setDraft(originalDraft);
+          if (fromComposer && !attachmentsRef.current.length)
+            setAttachments(originalFiles);
           if (!preparation?.cancelled) showError(reason);
         }
         return false;
@@ -740,11 +878,69 @@ export function useAssistant(enabled: boolean) {
       busy,
       loading,
       ensureSession,
+      setAttachments,
       setDraft,
       setRun,
       showError,
       persistDraft,
     ],
+  );
+
+  /**
+   * Open the file dialog and add the files it imports to the draft, creating
+   * the conversation first when there is none. Cancelling changes nothing.
+   */
+  const pickAttachments = useCallback(async () => {
+    if (busy || loading || runRef.current) return;
+    setBusy(true);
+    setError(null);
+    const generation = epoch.current;
+    const selection = selectionSequence.current;
+    try {
+      const session = await ensureSession();
+      const added = await assistantApi.pickAttachments(session.id);
+      if (
+        !added.length ||
+        !mounted.current ||
+        generation !== epoch.current ||
+        selectedRef.current !== session.id
+      )
+        return;
+      const fresh = (list: AssistantAttachment[]) =>
+        added.filter((file) => !list.some((item) => item.id === file.id));
+      setDetail((old) =>
+        old?.session.id === session.id
+          ? {
+              ...old,
+              attachments: [...old.attachments, ...fresh(old.attachments)],
+            }
+          : old,
+      );
+      setAttachments([
+        ...attachmentsRef.current,
+        ...fresh(attachmentsRef.current),
+      ]);
+    } catch (reason) {
+      if (
+        generation === epoch.current &&
+        selection === selectionSequence.current
+      )
+        showError(reason);
+    } finally {
+      if (
+        mounted.current &&
+        generation === epoch.current &&
+        selection === selectionSequence.current
+      )
+        setBusy(false);
+    }
+  }, [busy, loading, ensureSession, setAttachments, showError]);
+
+  /** Take a file out of the draft; it stays in the conversation's files. */
+  const removeAttachment = useCallback(
+    (id: string) =>
+      setAttachments(attachmentsRef.current.filter((file) => file.id !== id)),
+    [setAttachments],
   );
 
   const stop = useCallback(async () => {
@@ -774,6 +970,9 @@ export function useAssistant(enabled: boolean) {
     detail,
     draft,
     setDraft,
+    attachments,
+    pickAttachments,
+    removeAttachment,
     stream,
     run,
     compacting,
