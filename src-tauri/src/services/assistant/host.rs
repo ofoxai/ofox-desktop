@@ -251,10 +251,18 @@ fn leading_status(message: &str) -> Option<u16> {
     (code.len() == 3).then(|| code.parse().ok()).flatten()
 }
 
-fn is_balance_error(message: &str) -> bool {
+/// Ofox's own error type for an empty balance, whatever the status.
+fn is_ofox_balance_error(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("insufficient_credits")
+}
+
+/// Generic balance wording; only trusted on a 403, never on a 429 or 5xx
+/// where it can be an upstream provider's quota.
+fn mentions_balance(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
     [
-        "insufficient_credits",
         "insufficient credits",
         "insufficient_balance",
         "insufficient balance",
@@ -281,29 +289,36 @@ fn is_network_error(message: &str) -> bool {
 }
 
 /// A failed model request as a stable code. The runtime reports the HTTP
-/// status (`errorStatus`) or that no response came (`errorKind: network`);
-/// older or unforeseen forms fall back to the text. A refused (4xx),
-/// unanswered or unsent request generated nothing, so it costs a known zero.
-fn provider_failure(result: &Value, detail: String) -> Failure {
+/// status (`errorStatus`) or that no answer came (`errorKind`: `not_sent` when
+/// the request never left the machine, `network` when it was sent); older or
+/// unforeseen forms fall back to the text, for the code only. The cost is a
+/// known zero only for a request refused with a 4xx or never sent, and only
+/// when the attempt had not already shown text or counted tokens.
+fn provider_failure(result: &Value, detail: String, progressed: bool) -> Failure {
     let status = result["errorStatus"]
         .as_u64()
         .and_then(|s| u16::try_from(s).ok())
         .or_else(|| leading_status(&detail));
-    let network =
-        result["errorKind"] == "network" || (status.is_none() && is_network_error(&detail));
+    let kind = &result["errorKind"];
+    let not_sent = kind == "not_sent";
+    let network = kind == "network"
+        || (not_sent && result["errorCode"].is_string())
+        || (status.is_none() && kind.is_null() && is_network_error(&detail));
     let code = match status {
         Some(401) => KEY_REJECTED,
         Some(402) => INSUFFICIENT_BALANCE,
         Some(404) => MODEL_UNAVAILABLE,
         Some(429) => RATE_LIMITED,
-        _ if is_balance_error(&detail) => INSUFFICIENT_BALANCE,
+        Some(403) if mentions_balance(&detail) => INSUFFICIENT_BALANCE,
+        _ if is_ofox_balance_error(&detail) => INSUFFICIENT_BALANCE,
         _ if network => NETWORK_ERROR,
         _ => MODEL_REQUEST_FAILED,
     };
     Failure {
         code: code.into(),
         detail: Some(detail),
-        unbilled: matches!(status, Some(400..=499)) || network || result["errorKind"] == "not_sent",
+        unbilled: !progressed && (matches!(status, Some(400..=499)) || not_sent),
+        native: None,
     }
 }
 
@@ -348,6 +363,19 @@ struct Failure {
     detail: Option<String>,
     /// The request cost nothing: the session's cost stays known.
     unbilled: bool,
+    /// For [`RETRY_WITH_NEW_KEY`]: the refused attempt's native entries, kept
+    /// if the retry does not start.
+    native: Option<Value>,
+}
+
+impl Failure {
+    /// A failure before anything was sent: it cost nothing.
+    fn unsent(code: String) -> Self {
+        Self {
+            unbilled: true,
+            ..code.into()
+        }
+    }
 }
 
 impl From<String> for Failure {
@@ -356,6 +384,7 @@ impl From<String> for Failure {
             code,
             detail: None,
             unbilled: false,
+            native: None,
         }
     }
 }
@@ -375,6 +404,8 @@ struct Attempt {
     progressed: bool,
     /// The runtime answered the run request; there is nothing left to stop.
     answered: bool,
+    /// The run request reached the runtime: before that nothing was billed.
+    sent: bool,
 }
 
 /// Whether a runtime usage report counts any tokens.
@@ -838,33 +869,49 @@ impl AssistantHost {
         .await?;
         match self.run_once(control, &params, true).await {
             Err(failure) if failure.code == RETRY_WITH_NEW_KEY => {
-                // Neither attempt was billed: whatever happens next, the
-                // session's cost stays known.
-                let unbilled = |code: String| Failure {
-                    code,
-                    detail: None,
-                    unbilled: true,
+                // The refused attempt cost nothing. It is rolled back only once
+                // a new key is in hand; without one it stays in both histories.
+                let refused = failure.native.unwrap_or(Value::Null);
+                let keep_refused = |code: String| async {
+                    self.apply_native(control, &refused)
+                        .await
+                        .map_err(Failure::unsent)?;
+                    Err::<Finish, _>(Failure {
+                        detail: failure.detail.clone(),
+                        ..Failure::unsent(code)
+                    })
                 };
-                self.validate_run(control).map_err(unbilled)?;
-                if self.identity().await.map_err(unbilled)? != control.identity {
-                    return Err(unbilled(IDENTITY_CHANGED.into()));
+                let key = match self.key_for_retry(control, &params).await {
+                    Ok(key) => key,
+                    Err(code) => return keep_refused(code).await,
+                };
+                if let Err(code) = blocking(move || restore(&native, before)).await {
+                    return keep_refused(code).await;
                 }
-                blocking(move || restore(&native, before))
-                    .await
-                    .map_err(unbilled)?;
-                let rejected = params["apiKey"].as_str().unwrap_or_default().to_owned();
-                let admit = || self.validate_run(control);
-                let key = self
-                    .env
-                    .api_key(&control.identity, Some(&rejected), &admit)
-                    .await
-                    .map_err(unbilled)?;
                 control.add_secret(&key);
                 params["apiKey"] = json!(key);
                 self.run_once(control, &params, false).await
             }
             outcome => outcome,
         }
+    }
+
+    /// A new key for a run whose key the gateway refused, asked for only
+    /// while the run may still go on.
+    async fn key_for_retry(
+        &self,
+        control: &Arc<RunControl>,
+        params: &Value,
+    ) -> Result<String, String> {
+        self.validate_run(control)?;
+        if self.identity().await? != control.identity {
+            return Err(IDENTITY_CHANGED.into());
+        }
+        let rejected = params["apiKey"].as_str().unwrap_or_default();
+        let admit = || self.validate_run(control);
+        self.env
+            .api_key(&control.identity, Some(rejected), &admit)
+            .await
     }
 
     async fn run_once(
@@ -874,12 +921,15 @@ impl AssistantHost {
         may_retry: bool,
     ) -> Result<Finish, Failure> {
         use tokio::io::BufReader;
-        self.validate_run(control)?;
-        let runtime = self.runtime()?;
-        let mut child = process::Child::spawn(runtime_command(&runtime))?;
-        let mut input = child.take_stdin().ok_or(STDIO)?;
-        let output = child.take_stdout().ok_or(STDIO)?;
-        let stderr = child.take_stderr().ok_or(STDIO)?;
+        // Until the run request reaches the runtime, nothing is billed.
+        let stdio = || Failure::unsent(STDIO.into());
+        self.validate_run(control).map_err(Failure::unsent)?;
+        let runtime = self.runtime().map_err(Failure::unsent)?;
+        let mut child =
+            process::Child::spawn(runtime_command(&runtime)).map_err(Failure::unsent)?;
+        let mut input = child.take_stdin().ok_or_else(stdio)?;
+        let output = child.take_stdout().ok_or_else(stdio)?;
+        let stderr = child.take_stderr().ok_or_else(stdio)?;
         // Drain, never publish: dependencies may print request headers.
         let drain = tokio::spawn(async move {
             let _ = process::bounded_output(stderr, 64 * 1024).await;
@@ -897,7 +947,11 @@ impl AssistantHost {
                 (&mut input, &mut output, &mut buffer),
                 &mut attempt,
             )
-            .await;
+            .await
+            .map_err(|failure| Failure {
+                unbilled: failure.unbilled || !attempt.sent,
+                ..failure
+            });
         let flushed = self.flush(control, &mut attempt.projection).await;
         let result = match (result, flushed) {
             (Ok(_), Err(error)) => Err(error.into()),
@@ -941,6 +995,7 @@ impl AssistantHost {
             _ = cancel.changed() => return Err(CANCELLED.into()),
             result = write_line(input, &line) => result?,
         }
+        attempt.sent = true;
         let mut ticker = tokio::time::interval(Duration::from_millis(250));
         loop {
             let length = tokio::select! {
@@ -1025,9 +1080,8 @@ impl AssistantHost {
         let secrets = control.secrets();
         if let Some(error) = value.get("error") {
             return Err(Failure {
-                code: "assistant_runtime_failed".into(),
                 detail: error["message"].as_str().map(|m| scrub_text(m, &secrets)),
-                unbilled: false,
+                ..Failure::from("assistant_runtime_failed")
             });
         }
         self.flush(control, &mut attempt.projection).await?;
@@ -1046,11 +1100,13 @@ impl AssistantHost {
                     result["errorMessage"].as_str().unwrap_or("Request failed"),
                     &secrets,
                 );
-                let failure = provider_failure(result, detail);
+                let failure = provider_failure(result, detail, attempt.progressed);
                 if failure.code == KEY_REJECTED && may_retry && !attempt.progressed {
-                    // Nothing saved: the caller rolls this attempt back and retries.
+                    // Nothing saved yet: the caller retries with a new key, or
+                    // keeps these entries if it cannot.
                     return Err(Failure {
                         code: RETRY_WITH_NEW_KEY.into(),
+                        native: Some(result["entries"].clone()),
                         ..failure
                     });
                 }
@@ -1345,6 +1401,7 @@ mod tests {
         config: PathBuf,
         catalog: Mutex<Vec<String>>,
         fetches: AtomicU64,
+        runtime: Mutex<Option<PathBuf>>,
     }
 
     impl Environment for FixedEnvironment {
@@ -1381,7 +1438,11 @@ mod tests {
             self.config.clone()
         }
         fn runtime_dir(&self) -> Result<PathBuf, String> {
-            Err(RUNTIME_UNAVAILABLE.into())
+            self.runtime
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| RUNTIME_UNAVAILABLE.into())
         }
         fn emit(&self, _: Event) {}
     }
@@ -1409,6 +1470,7 @@ mod tests {
             config: config.path().to_path_buf(),
             catalog: Mutex::new(vec!["test/model".into()]),
             fetches: AtomicU64::new(0),
+            runtime: Mutex::new(None),
         });
         let host = AssistantHost::new(env.clone());
         (config, env, host)
@@ -1655,13 +1717,14 @@ mod tests {
     }
 
     #[test]
-    fn provider_failures_get_their_own_codes_and_unbilled_ones_cost_nothing() {
+    fn provider_failures_get_their_own_codes_and_only_refused_or_unsent_ones_cost_nothing() {
         let failure = |result: Value, text: &str| {
-            let failure = provider_failure(&result, text.into());
+            let failure = provider_failure(&result, text.into(), false);
             (failure.code, failure.unbilled)
         };
         let code = |code: &str, unbilled: bool| (code.to_string(), unbilled);
-        // The runtime's structured status.
+        // The runtime's structured status: a 4xx was refused, a 5xx may have
+        // followed upstream billing.
         for (status, expected) in [
             (401, code(KEY_REJECTED, true)),
             (402, code(INSUFFICIENT_BALANCE, true)),
@@ -1677,9 +1740,20 @@ mod tests {
                 "{status}"
             );
         }
+        // Never left the machine: a known zero. Sent without an answer: unknown.
         assert_eq!(
-            failure(json!({"errorKind": "network"}), "Connection error."),
+            failure(
+                json!({"errorKind": "not_sent", "errorCode": "ECONNREFUSED"}),
+                "Connection error."
+            ),
             code(NETWORK_ERROR, true)
+        );
+        assert_eq!(
+            failure(
+                json!({"errorKind": "network", "errorCode": "UND_ERR_SOCKET"}),
+                "Connection error."
+            ),
+            code(NETWORK_ERROR, false)
         );
         assert_eq!(
             failure(
@@ -1688,14 +1762,44 @@ mod tests {
             ),
             code(MODEL_REQUEST_FAILED, true)
         );
-        // Ofox's balance error under another status.
+        // Text alone names the failure but never makes it free.
         assert_eq!(
-            failure(
-                json!({"errorStatus": 403}),
-                r#"403: {"message":"Insufficient credits.","type":"insufficient_credits"}"#
-            ),
-            code(INSUFFICIENT_BALANCE, true)
+            failure(json!({}), "fetch failed"),
+            code(NETWORK_ERROR, false)
         );
+        // Balance: a 402, a 403 that says so, or Ofox's own error type; never
+        // an upstream quota behind a 429 or 5xx.
+        for (status, text, expected) in [
+            (
+                403,
+                "403: {\"type\":\"insufficient_quota\"}",
+                INSUFFICIENT_BALANCE,
+            ),
+            (
+                400,
+                "400: {\"type\":\"insufficient_credits\"}",
+                INSUFFICIENT_BALANCE,
+            ),
+            (429, "429: {\"type\":\"insufficient_quota\"}", RATE_LIMITED),
+            (
+                500,
+                "500: {\"type\":\"insufficient_quota\"}",
+                MODEL_REQUEST_FAILED,
+            ),
+            (
+                503,
+                "503: Insufficient balance upstream",
+                MODEL_REQUEST_FAILED,
+            ),
+        ] {
+            assert_eq!(
+                failure(json!({"errorStatus": status}), text).0,
+                expected,
+                "{text}"
+            );
+        }
+        // An attempt that already showed text or counted tokens is never free.
+        assert!(!provider_failure(&json!({"errorStatus": 402}), "x".into(), true).unbilled);
         // Without a reported status: the head of the text, per protocol.
         for (text, expected) in [
             ("401: {\"message\":\"Invalid API key\"}", KEY_REJECTED),
@@ -1718,7 +1822,6 @@ mod tests {
                 MODEL_UNAVAILABLE,
             ),
             ("Connection error.", NETWORK_ERROR),
-            ("fetch failed", NETWORK_ERROR),
             ("connect ECONNREFUSED 127.0.0.1:443", NETWORK_ERROR),
             ("4010 retries", MODEL_REQUEST_FAILED),
             ("Request failed after 401 attempts", MODEL_REQUEST_FAILED),
@@ -1726,6 +1829,88 @@ mod tests {
         ] {
             assert_eq!(failure(json!({}), text).0, expected, "{text}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_run_that_never_reached_the_runtime_cost_nothing() {
+        let (_config, host) = fixture();
+        let run = control(&id());
+        let failure = host.run_once(&run, &json!({}), true).await.unwrap_err();
+        assert_eq!(failure.code, RUNTIME_UNAVAILABLE);
+        assert!(failure.unbilled);
+    }
+
+    /// The runtime started, but the run request never reached it: nothing
+    /// could have been billed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_run_refused_before_its_request_reached_the_runtime_cost_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let (config, env, host) = fixture_with_env();
+        let base = config.path().join("runtime-stub");
+        let node = base.join("node").join("node");
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+        std::fs::write(&node, "#!/bin/sh\ncat > /dev/null\n").unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let entry = base.join("runtime").join("src").join("main.mjs");
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(&entry, "").unwrap();
+        *env.runtime.lock().unwrap() = Some(base);
+        // The run was started in another region than the one now current.
+        let request: SendRequest = serde_json::from_value(json!({
+            "sessionId": id(), "runId": id(), "operationId": id(), "text": "hi",
+        }))
+        .unwrap();
+        let elsewhere = Identity {
+            apex: "ofox.io".into(),
+            ..identity()
+        };
+        let run = Arc::new(RunControl::new(elsewhere, &request, "test-key-0123".into()));
+        let failure = host.run_once(&run, &json!({}), true).await.unwrap_err();
+        assert_eq!(failure.code, IDENTITY_CHANGED);
+        assert!(failure.unbilled);
+    }
+
+    /// A refused key after shown text is not retried: the retry would append
+    /// a second answer to what the user already saw.
+    #[tokio::test]
+    async fn a_refused_key_after_shown_text_ends_the_run_without_a_retry() {
+        let (_config, host) = fixture();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let run = control(&sid);
+        store
+            .mutate(&sid, |record| {
+                record.messages.push(
+                    serde_json::from_value(json!({
+                        "id": run.message_id, "role": "assistant", "content": "",
+                        "createdAt": 1, "status": "streaming", "runId": run.run_id,
+                    }))
+                    .unwrap(),
+                );
+                Ok(())
+            })
+            .unwrap();
+        let mut attempt = Attempt::default();
+        let event = json!({
+            "sessionId": sid, "runId": run.run_id, "operationId": run.operation_id,
+            "type": "text_delta", "data": {"delta": "Already shown"},
+        });
+        host.on_event(&run, &event, &mut attempt).await.unwrap();
+        let result = json!({"result": {
+            "status": "error", "errorStatus": 401, "entries": [],
+            "errorMessage": "401: {\"message\":\"Invalid API key\"}",
+        }});
+        let failure = host
+            .on_result(&run, &result, true, &mut attempt)
+            .await
+            .unwrap_err();
+        assert_eq!(failure.code, KEY_REJECTED);
+        assert!(!failure.unbilled, "shown text may have been billed");
+        assert_eq!(
+            store.load_detail(&sid).unwrap().messages[0].content,
+            "Already shown"
+        );
     }
 
     #[test]
@@ -1801,6 +1986,25 @@ mod tests {
         std::fs::write(&damaged, saved).unwrap();
         host.update_session(trash(&sid)).await.unwrap();
         assert!(run.cancelled(), "trashing a session stops its run");
+
+        // Saved, but the choice could not be remembered: the old model's run
+        // still stops before the error is returned.
+        let run = control(&sid);
+        host.runs.lock().unwrap().insert(sid.clone(), run.clone());
+        let prefs = damaged
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("prefs.json");
+        std::fs::create_dir_all(&prefs).unwrap();
+        let switch: UpdateRequest =
+            serde_json::from_value(json!({"sessionId": sid, "modelId": "test/model"})).unwrap();
+        assert_eq!(
+            host.update_session(switch).await.unwrap_err(),
+            "assistant_invalid_storage_path"
+        );
+        assert!(run.cancelled());
     }
 
     #[test]

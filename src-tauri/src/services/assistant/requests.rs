@@ -146,7 +146,7 @@ impl AssistantHost {
         let stops_run = request.model_id.is_some() || request.deleted == Some(true);
         let sid = request.session_id.clone();
         self.ensure_current(&identity, generation).await?;
-        let mut session = blocking({
+        let (mut session, remembered) = blocking({
             let store = self.store(&identity.owner)?;
             let host = self.clone();
             move || {
@@ -156,16 +156,20 @@ impl AssistantHost {
                     }
                     Ok(())
                 })?;
-                if request.model_id.is_some() {
-                    store.remember_model(&session.model_id)?;
-                }
-                Ok(session)
+                let remembered = match &request.model_id {
+                    Some(_) => store.remember_model(&session.model_id),
+                    None => Ok(()),
+                };
+                Ok((session, remembered))
             }
         })
         .await?;
+        // The change is saved: the old model's run stops even if remembering
+        // the choice failed.
         if stops_run {
             self.cancel_session(&sid);
         }
+        remembered?;
         self.decorate(&identity.owner, &mut session);
         Ok(session)
     }

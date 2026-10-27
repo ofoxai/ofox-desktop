@@ -242,6 +242,8 @@ struct EnvState {
     replacement: Option<String>,
     rejected: Vec<String>,
     key_minted: bool,
+    /// Refuse to replace a refused key, as for one minted moments ago.
+    refuse_refresh: bool,
     gateways: HashMap<String, String>,
 }
 
@@ -263,6 +265,7 @@ impl TestEnv {
                 replacement: Some(NEW_KEY.into()),
                 rejected: vec![],
                 key_minted: false,
+                refuse_refresh: false,
                 gateways: gateways
                     .iter()
                     .map(|(apex, gateway)| (apex.to_string(), gateway.base_url()))
@@ -283,6 +286,15 @@ impl TestEnv {
             owner: owner(),
             apex: apex.into(),
         }));
+    }
+
+    /// Send `apex`'s model requests to `base_url`.
+    fn route(&self, apex: &str, base_url: String) {
+        self.state
+            .lock()
+            .unwrap()
+            .gateways
+            .insert(apex.into(), base_url);
     }
 
     fn events(&self, run_id: &str) -> Vec<Event> {
@@ -322,6 +334,9 @@ impl Environment for TestEnv {
             }
             if let Some(rejected) = rejected {
                 state.rejected.push(rejected.into());
+                if state.refuse_refresh {
+                    return Err("assistant_key_rejected".into());
+                }
                 if state.key == rejected {
                     if let Some(next) = state.replacement.take() {
                         state.key = next;
@@ -985,7 +1000,20 @@ fn provider_failures_have_their_own_codes_and_unbilled_ones_keep_the_cost_known(
         let priced = host.get_session(&sid).await.unwrap().usage;
         assert!(priced["estimatedCostUsd"].is_string(), "{priced}");
 
-        // Refused or unanswered requests generate nothing: the cost stays known.
+        let assert_failed = |code: &'static str| {
+            let (host, env) = (host.clone(), env.clone());
+            async move {
+                let (run, end) = turn(&host, &env, request(&sid_of(&host).await, code, json!({}))).await;
+                assert_eq!(end.data["status"], "error", "{code}");
+                let error = wait_for(&env, &run, "error").await;
+                assert_eq!(error.data["code"], code);
+                let detail = host.get_session(&sid_of(&host).await).await.unwrap();
+                assert_eq!(detail.messages.last().unwrap().status, "error", "{code}");
+                detail.usage
+            }
+        };
+
+        // Refused with a 4xx: nothing was generated, the cost stays known.
         for (reply, code) in [
             (
                 Reply::Error(
@@ -1008,37 +1036,90 @@ fn provider_failures_have_their_own_codes_and_unbilled_ones_keep_the_cost_known(
                 ),
                 "assistant_model_unavailable",
             ),
-            (Reply::Drop, "assistant_network_error"),
         ] {
             gateway.reply(reply);
-            let (run, end) = turn(&host, &env, request(&sid, code, json!({}))).await;
-            assert_eq!(end.data["status"], "error", "{code}");
-            let error = wait_for(&env, &run, "error").await;
-            assert_eq!(error.data["code"], code);
-            let detail = host.get_session(&sid).await.unwrap();
-            assert_eq!(detail.messages.last().unwrap().status, "error", "{code}");
-            assert_eq!(
-                detail.usage["estimatedCostUsd"], priced["estimatedCostUsd"],
-                "{code}"
-            );
-            assert_ne!(detail.usage["usageCoverage"], "incomplete", "{code}");
+            let usage = assert_failed(code).await;
+            assert_eq!(usage["estimatedCostUsd"], priced["estimatedCostUsd"], "{code}");
+            assert_ne!(usage["usageCoverage"], "incomplete", "{code}");
         }
 
-        // A server error may have generated something: the cost becomes unknown.
+        // Never sent (connection refused): also a known zero.
+        env.route("ofox.io", format!("http://localhost:{}", closed_port()));
+        env.signed_in("ofox.io");
+        let usage = assert_failed("assistant_network_error").await;
+        assert_eq!(usage["estimatedCostUsd"], priced["estimatedCostUsd"]);
+        assert_ne!(usage["usageCoverage"], "incomplete");
+        env.signed_in("ofox.ai");
+
+        // Sent, then the connection closed without an answer: maybe billed.
+        gateway.reply(Reply::Drop);
+        let usage = assert_failed("assistant_network_error").await;
+        assert!(usage["estimatedCostUsd"].is_null(), "{usage}");
+        assert_eq!(usage["usageCoverage"], "incomplete");
+
+        // A server error may have followed upstream billing.
         gateway.reply(Reply::Error(
             500,
             json!({"error":{"message":"upstream failed"}}),
         ));
-        let (run, _) = turn(&host, &env, request(&sid, "Then", json!({}))).await;
-        let error = wait_for(&env, &run, "error").await;
-        assert_eq!(error.data["code"], "assistant_model_request_failed");
-        let usage = host.get_session(&sid).await.unwrap().usage;
+        let usage = assert_failed("assistant_model_request_failed").await;
         assert!(usage["estimatedCostUsd"].is_null(), "{usage}");
-        assert_eq!(usage["usageCoverage"], "incomplete");
 
         gateway.reply(Reply::Stream("Back again".into()));
         let (_, end) = turn(&host, &env, request(&sid, "Still there?", json!({}))).await;
         assert_eq!(end.data["status"], "completed");
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+    assert_no_secret_in_events(&env, &[KEY]);
+}
+
+/// A local port nothing listens on.
+fn closed_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// The one session of a test.
+async fn sid_of(host: &AssistantHost) -> String {
+    host.list_sessions(false, "").await.unwrap().sessions[0]
+        .id
+        .clone()
+}
+
+#[test]
+fn a_refused_key_that_cannot_be_replaced_keeps_the_turn_in_both_histories() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    env.state.lock().unwrap().refuse_refresh = true;
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.reply(Reply::Error(401, invalid_key()));
+        let (run, end) = turn(&host, &env, request(&sid, "Kept question", json!({}))).await;
+        assert_eq!(end.data["status"], "error");
+        let error = wait_for(&env, &run, "error").await;
+        assert_eq!(error.data["code"], "assistant_key_rejected");
+        assert_eq!(gateway.requests().len(), 1, "no second attempt");
+        assert_eq!(env.state.lock().unwrap().rejected, [KEY]);
+
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(detail.messages.len(), 2);
+        assert_eq!(detail.messages[0].content, "Kept question");
+        assert!(detail.messages.iter().all(|m| m.native_entry_id.is_some()));
+        assert_eq!(detail.messages[1].status, "error");
+        let native =
+            std::fs::read_to_string(session_dir(config.path(), &sid).join("session.jsonl"))
+                .unwrap();
+        assert_eq!(native.matches("Kept question").count(), 1);
+        // The refused request cost nothing.
+        assert_ne!(detail.usage["usageCoverage"], "incomplete");
     });
     assert_no_secret_on_disk(config.path(), &[KEY]);
 }

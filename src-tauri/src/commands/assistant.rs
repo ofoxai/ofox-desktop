@@ -133,6 +133,35 @@ fn key_error(error: ApiKeyError) -> String {
     .into()
 }
 
+/// The host's admission as the key module asks it (under the key lock),
+/// keeping the host's own reason when it refuses.
+fn admission_check<'a>(
+    admit: &'a Admit<'a>,
+    refusal: &'a Mutex<Option<String>>,
+) -> impl Fn() -> bool + Send + Sync + 'a {
+    move || match admit() {
+        Ok(()) => true,
+        Err(code) => {
+            *refusal.lock().unwrap_or_else(|e| e.into_inner()) = Some(code);
+            false
+        }
+    }
+}
+
+/// A key fetch's result as the host's code: the host's refusal wins, and a
+/// key refused moments after minting is not replaced (another would be too).
+fn key_outcome(
+    result: Result<Option<String>, ApiKeyError>,
+    refusal: Option<String>,
+) -> Result<String, String> {
+    match (result, refusal) {
+        (Ok(Some(key)), _) => Ok(key),
+        (Ok(None), _) => Err(KEY_REJECTED.into()),
+        (Err(_), Some(code)) => Err(code),
+        (Err(error), None) => Err(key_error(error)),
+    }
+}
+
 /// Where the prepared runtime is: the checkout's in a debug build, the
 /// bundled resource in a release build.
 fn runtime_dir_for(
@@ -164,15 +193,8 @@ impl Environment for AssistantEnvironment {
         Box::pin(async move {
             let manager = self.auth()?;
             key_owner(&manager, identity).await?;
-            // Asked under the key lock; keep the host's own reason when it refuses.
             let refusal = Mutex::new(None);
-            let check = || match admit() {
-                Ok(()) => true,
-                Err(code) => {
-                    *refusal.lock().unwrap_or_else(|e| e.into_inner()) = Some(code);
-                    false
-                }
-            };
+            let check = admission_check(admit, &refusal);
             let result = match rejected {
                 None => ofox_api_keys::fetch_or_create_assistant_key(
                     FetchMode::CachedOk,
@@ -192,15 +214,11 @@ impl Environment for AssistantEnvironment {
                     .await
                 }
             };
-            match result {
-                Ok(Some(key)) => Ok(key),
-                // Minted moments ago and refused already: another key would be too.
-                Ok(None) => Err(KEY_REJECTED.into()),
-                Err(error) => match refusal.into_inner().unwrap_or_else(|e| e.into_inner()) {
-                    Some(code) => Err(code),
-                    None => Err(key_error(error)),
-                },
-            }
+            drop(check);
+            key_outcome(
+                result,
+                refusal.into_inner().unwrap_or_else(|e| e.into_inner()),
+            )
         })
     }
 
@@ -336,6 +354,46 @@ mod tests {
         ] {
             assert_eq!(key_error(error), code);
         }
+    }
+
+    #[test]
+    fn a_refused_admission_is_reported_with_the_hosts_own_code() {
+        let refusal = Mutex::new(None);
+        let closed = || Err::<(), _>("assistant_signing_out".to_string());
+        let check = admission_check(&closed, &refusal);
+        assert!(!check());
+        drop(check);
+        let refused = refusal.into_inner().unwrap();
+        assert_eq!(refused.as_deref(), Some("assistant_signing_out"));
+        assert_eq!(
+            key_outcome(
+                Err(ApiKeyError::Unauthorized(
+                    "assistant runs are closed".into()
+                )),
+                refused
+            )
+            .unwrap_err(),
+            "assistant_signing_out"
+        );
+
+        let refusal = Mutex::new(None);
+        let open = || Ok::<(), String>(());
+        assert!(admission_check(&open, &refusal)());
+        assert_eq!(refusal.into_inner().unwrap(), None);
+    }
+
+    #[test]
+    fn key_results_map_to_the_hosts_codes() {
+        assert_eq!(key_outcome(Ok(Some("k".into())), None).unwrap(), "k");
+        assert_eq!(
+            key_outcome(Ok(None), None).unwrap_err(),
+            KEY_REJECTED,
+            "a key refused moments after minting is not replaced"
+        );
+        assert_eq!(
+            key_outcome(Err(ApiKeyError::Storage("keychain".into())), None).unwrap_err(),
+            "assistant_key_storage_unavailable"
+        );
     }
 
     #[test]
