@@ -16,7 +16,8 @@ import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { AttachmentList, isSendable } from "./AssistantAttachments";
+import { isSendable } from "@/utils/assistantAttachments";
+import { AttachmentList } from "./AssistantAttachments";
 import type { AssistantActivity } from "./useAssistant";
 
 const MessageMarkdown = memo(SessionMarkdown);

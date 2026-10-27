@@ -6,16 +6,8 @@ import { fmtBytes } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-/**
- * Outcomes a file may be sent with again: read in full or in part, or only
- * waiting for a model that can read images. The others can't be read at all.
- */
-const SENDABLE = new Set<string>(["ready", "partial", "model_unsupported"]);
+/** Outcomes that still let a file be sent, shown as warnings. */
 const WARNINGS = new Set<string>(["partial", "model_unsupported"]);
-
-export function isSendable(file: Pick<AssistantAttachment, "status">) {
-  return SENDABLE.has(file.status);
-}
 
 const integers = (value: unknown): number[] =>
   Array.isArray(value)

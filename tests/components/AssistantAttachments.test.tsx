@@ -5,10 +5,7 @@ import i18n from "i18next";
 import en from "@/i18n/locales/en.json";
 import ja from "@/i18n/locales/ja.json";
 import zh from "@/i18n/locales/zh.json";
-import {
-  AttachmentList,
-  isSendable,
-} from "@/components/assistant/AssistantAttachments";
+import { AttachmentList } from "@/components/assistant/AssistantAttachments";
 import type {
   AssistantAttachment,
   AssistantAttachmentStatus,
@@ -283,17 +280,5 @@ describe("attachment chips", () => {
     expect(onRemove).toHaveBeenCalledWith("f1");
     rendered.rerender(<AttachmentList files={[file()]} />);
     expect(screen.queryByRole("button", { name: /Remove/ })).toBeNull();
-  });
-
-  it.each<[AssistantAttachmentStatus, boolean]>([
-    ["ready", true],
-    ["partial", true],
-    ["model_unsupported", true],
-    ["unreadable", false],
-    ["unsupported", false],
-    ["too_large", false],
-    ["processing" as AssistantAttachmentStatus, false],
-  ])("can send a %s file again: %s", (status, sendable) => {
-    expect(isSendable({ status })).toBe(sendable);
   });
 });

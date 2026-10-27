@@ -1010,12 +1010,27 @@ describe("attachments", () => {
   it.each<[AssistantAttachment["status"], string]>([
     ["partial", "Part of this file wasn't read."],
     ["model_unsupported", "Choose a model that can read images"],
+    ["too_large", "A message can carry up to 10 images."],
   ])(
-    "still sends a %s file, saying what its last read found",
+    "sends a draft file an earlier turn read as %s, without that turn's words",
     async (status, note) => {
-      current = withDraftFiles([{ ...photo, status, details: null }], "Look");
+      const earlier = {
+        ...photo,
+        status,
+        details: status === "too_large" ? { limit: "message_images" } : null,
+      };
+      current = withDraftFiles([earlier], "Look");
+      current.session.modelId = "vision";
+      mocks.bootstrap.mockResolvedValue({
+        ...capabilities,
+        models: [
+          ...capabilities.models,
+          { ...model("vision", "Vision model"), supportsImages: true },
+        ],
+      });
       await openConversation();
-      expect(composerFiles()).toHaveTextContent(note);
+      expect(composerFiles()).toHaveTextContent("photo.png");
+      expect(composerFiles()).not.toHaveTextContent(note);
       await userEvent.click(sendButton());
       await waitFor(() =>
         expect(mocks.send).toHaveBeenCalledWith(

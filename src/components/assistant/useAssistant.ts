@@ -12,7 +12,7 @@ import {
   type AssistantUnreadableSession,
   type AssistantUpdateRequest,
 } from "@/lib/api/assistant";
-import { isSendable } from "./AssistantAttachments";
+import { asDraftFile, isSendable } from "@/utils/assistantAttachments";
 
 const freshId = () => crypto.randomUUID();
 const IDENTITY_CHANGED = "assistant_identity_changed";
@@ -333,11 +333,13 @@ export function useAssistant(enabled: boolean) {
         if (resumed && !alreadyFollowing) setStream(resumed);
         if (!preparing) setRun(value.session.activeRun);
         if (!drafts.current.has(sessionId)) setDraft(value.session.draft);
+        // A saved draft's files, as the next message would send them.
         if (!attachmentDrafts.current.has(sessionId))
           setAttachments(
-            value.session.draftAttachmentIds.flatMap(
-              (id) => value.attachments.find((file) => file.id === id) ?? [],
-            ),
+            value.session.draftAttachmentIds.flatMap((id) => {
+              const file = value.attachments.find((item) => item.id === id);
+              return file ? asDraftFile(file) : [];
+            }),
           );
         return true;
       } catch (reason) {
