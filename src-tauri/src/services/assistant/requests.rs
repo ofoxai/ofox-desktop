@@ -5,6 +5,7 @@ use super::{
     host::{blocking, local_gateway_allowed, AssistantHost, Identity, RunControl},
     store::{self, SessionList, SessionRecord},
     types::*,
+    web,
 };
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
@@ -31,6 +32,7 @@ impl AssistantHost {
         .await
         .unwrap_or_default();
         let default_model_id = catalog::default_model_id(&models, remembered.as_deref());
+        let search = search_status(&models);
         let runtime = match self.runtime() {
             Ok(runtime) => json!({"available": true, "reason": null, "version": runtime.version}),
             Err(reason) => json!({"available": false, "reason": reason, "version": null}),
@@ -49,6 +51,7 @@ impl AssistantHost {
             "defaultModelId": default_model_id,
             "modelUnavailableReason": model_error,
             "key": {"status": key},
+            "search": search,
         }))
     }
 
@@ -219,6 +222,12 @@ impl AssistantHost {
         }
         let branch = Branch::resolve(&record, &request)?;
         let selected = selection(&record, &request, &branch)?;
+        // Search only at a price the catalog gives; the run keeps it.
+        let search_price = if record.session.web_search {
+            catalog::search_price(&self.models(&identity.apex).await?)
+        } else {
+            None
+        };
         let base_url = self.env.gateway_base(&identity.apex)?;
         let proxy = blocking({
             let env = self.env.clone();
@@ -243,10 +252,19 @@ impl AssistantHost {
             let branch = branch.clone();
             let text = text.clone();
             let selected = selected.clone();
+            let search_price = search_price.clone();
             move || {
                 host.register_run(control.clone(), generation, || {
                     store.mutate(&request.session_id, |record| {
-                        publish_turn(record, &control, &request, &branch, &text, &selected)
+                        publish_turn(
+                            record,
+                            &control,
+                            &request,
+                            &branch,
+                            &text,
+                            &selected,
+                            search_price,
+                        )
                     })
                 })
             }
@@ -275,6 +293,8 @@ impl AssistantHost {
                 &selected,
                 &branch,
             ));
+            let prompt = branch.resent_text.as_deref().unwrap_or(&text);
+            params.extend(web_params(&record, &branch, prompt, search_price.as_ref()));
         }
         self.emit_start(&control);
         self.spawn_run(control, params);
@@ -481,10 +501,51 @@ fn attachment_params(
     params
 }
 
+/// The web search part of a run's parameters: `webSearch` only with a search
+/// price (the session's switch is on and the catalog prices the search
+/// model), and then `allowedWebUrls` (see [`web::allowed_web_urls`]) from
+/// the prompt and the turns before it on the conversation's current branch.
+fn web_params(
+    record: &SessionRecord,
+    branch: &Branch,
+    prompt: &str,
+    search: Option<&catalog::SearchPrice>,
+) -> Map<String, Value> {
+    let mut params = Map::new();
+    params.insert("webSearch".into(), json!(search.is_some()));
+    if search.is_none() {
+        return params;
+    }
+    // An edit or regenerate starts again from the turn it replaces.
+    let end = branch
+        .revision_of
+        .as_ref()
+        .and_then(|mid| record.messages.iter().position(|m| &m.id == mid))
+        .unwrap_or(record.messages.len());
+    let earlier = record.messages[..end]
+        .iter()
+        .rev()
+        .filter(|m| !m.superseded);
+    let urls = web::allowed_web_urls(prompt, earlier);
+    params.insert("allowedWebUrls".into(), json!(urls));
+    params
+}
+
+/// Bootstrap's `search`: whether runs can search, and the price of one
+/// search (the search model's tokens come on top).
+fn search_status(models: &[catalog::Model]) -> Value {
+    let price = catalog::search_price(models);
+    json!({
+        "available": price.is_some(),
+        "unitPriceUsd": price.map(|p| p.per_search.normalize().to_string()),
+        "model": catalog::SEARCH_MODEL,
+    })
+}
+
 /// Save the new turn as the run registers: the user message with the files
 /// it sends, the empty assistant message the stream fills, the title, and
-/// the running operation. An edit or regenerate marks the replaced turns
-/// superseded.
+/// the running operation with the search price the run was given. An edit or
+/// regenerate marks the replaced turns superseded.
 fn publish_turn(
     record: &mut SessionRecord,
     control: &RunControl,
@@ -492,6 +553,7 @@ fn publish_turn(
     branch: &Branch,
     text: &str,
     selected: &[Attachment],
+    search_price: Option<catalog::SearchPrice>,
 ) -> Result<(), String> {
     store::ensure_new_operation(record, &request.operation_id)?;
     if let Some(mid) = &branch.revision_of {
@@ -549,7 +611,7 @@ fn publish_turn(
         id: request.operation_id.clone(),
         run_id: request.run_id.clone(),
         status: OperationStatus::Running,
-        search_price: None,
+        search_price,
     });
     Ok(())
 }
@@ -712,7 +774,16 @@ mod tests {
             apex: "ofox.ai".into(),
         };
         let control = RunControl::new(identity, &request, "test-key-0123".into());
-        publish_turn(&mut record, &control, &request, &branch, "  ", &selected).unwrap();
+        publish_turn(
+            &mut record,
+            &control,
+            &request,
+            &branch,
+            "  ",
+            &selected,
+            None,
+        )
+        .unwrap();
 
         let user = &record.messages[2];
         assert_eq!(user.role, "user");
@@ -721,6 +792,161 @@ mod tests {
         assert_eq!(record.session.title, "b.md");
         // The conversation's own list keeps the last outcomes.
         assert_eq!(record.attachments[0].status, "partial");
+    }
+
+    fn sourced(message: &mut Message, urls: &[&str]) {
+        message.sources = urls
+            .iter()
+            .map(|url| json!({"id": id(), "title": "t", "url": url, "excerpt": ""}))
+            .collect();
+    }
+
+    fn price() -> catalog::SearchPrice {
+        serde_json::from_value(json!({
+            "perSearch": "0.014", "perInputToken": "0", "perOutputToken": "0",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_allowlist_holds_the_prompts_links_earlier_questions_and_earlier_sources() {
+        let (mut record, _, mut user, mut reply) = fixture();
+        user.content = "Compare https://asked.example.com/".into();
+        reply.content = "Answer citing https://answer-text.example.com/".into();
+        sourced(
+            &mut reply,
+            &[
+                "https://source.example.com/1",
+                "http://insecure.example.com/",
+            ],
+        );
+        let mut old = message("user", &id(), &[]);
+        old.content = "https://old-branch.example.com/".into();
+        old.superseded = true;
+        record.messages = vec![old, user.clone(), reply.clone()];
+
+        let request = send(&record, "x", json!({}));
+        let branch = Branch::resolve(&record, &request).unwrap();
+        let params = web_params(
+            &record,
+            &branch,
+            "Now https://new.example.com/?q=1",
+            Some(&price()),
+        );
+        assert_eq!(params["webSearch"], true);
+        assert_eq!(
+            params["allowedWebUrls"],
+            json!([
+                "https://asked.example.com/",
+                "https://new.example.com/?q=1",
+                "https://source.example.com/1",
+            ])
+        );
+
+        // An edit keeps only the turns before the edited one.
+        let edit = send(&record, "x", json!({"editMessageId": user.id}));
+        let branch = Branch::resolve(&record, &edit).unwrap();
+        let params = web_params(
+            &record,
+            &branch,
+            "https://edited.example.com/",
+            Some(&price()),
+        );
+        assert_eq!(
+            params["allowedWebUrls"],
+            json!(["https://edited.example.com/"])
+        );
+
+        // Without search the run gets neither the tools nor the list.
+        let off = web_params(&record, &branch, "https://edited.example.com/", None);
+        assert_eq!(off["webSearch"], false);
+        assert!(!off.contains_key("allowedWebUrls"));
+    }
+
+    #[test]
+    fn the_allowlist_keeps_the_prompt_and_the_newest_pages_when_it_is_full() {
+        let (mut record, _, _, mut reply) = fixture();
+        let old: Vec<String> = (0..600)
+            .map(|i| format!("https://old.example.com/{i:03}"))
+            .collect();
+        sourced(
+            &mut reply,
+            &old.iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        let mut newer = message("assistant", &id(), &[]);
+        sourced(&mut newer, &["https://zz-newest.example.com/"]);
+        record.messages = vec![reply, newer];
+        let request = send(&record, "x", json!({}));
+        let branch = Branch::resolve(&record, &request).unwrap();
+        let params = web_params(
+            &record,
+            &branch,
+            "https://zz-prompt.example.com/",
+            Some(&price()),
+        );
+        let urls: Vec<&str> = params["allowedWebUrls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u.as_str().unwrap())
+            .collect();
+        assert_eq!(urls.len(), web::MAX_ALLOWED_WEB_URLS);
+        let mut sorted = urls.clone();
+        sorted.sort();
+        assert_eq!(urls, sorted);
+        assert!(urls.contains(&"https://zz-prompt.example.com/"));
+        assert!(urls.contains(&"https://zz-newest.example.com/"));
+    }
+
+    #[test]
+    fn the_runs_ledger_row_keeps_the_search_price_it_was_given() {
+        let (mut record, _, _, _) = fixture();
+        let request = send(&record, "Search this", json!({}));
+        let branch = Branch::resolve(&record, &request).unwrap();
+        let identity = Identity {
+            owner: "ab".repeat(32),
+            apex: "ofox.ai".into(),
+        };
+        let control = RunControl::new(identity, &request, "test-key-0123".into());
+        publish_turn(
+            &mut record,
+            &control,
+            &request,
+            &branch,
+            "Search this",
+            &[],
+            Some(price()),
+        )
+        .unwrap();
+        let row = record.operations.last().unwrap();
+        assert_eq!(row.run_id, request.run_id);
+        assert_eq!(row.search_price, Some(price()));
+    }
+
+    #[test]
+    fn bootstrap_offers_search_only_with_a_priced_search_model() {
+        let row = |pricing: Value| -> catalog::Model {
+            serde_json::from_value(json!({
+                "id": catalog::SEARCH_MODEL, "name": "GPT-5 Nano", "contextWindow": 128000,
+                "maxOutputTokens": 8192, "supportsImages": false, "inputModalities": ["text"],
+                "supportedEndpoints": ["/v1/responses"], "inputPricePerMillion": null,
+                "outputPricePerMillion": null, "pricing": pricing, "cost": {},
+                "pricingKnown": true,
+            }))
+            .unwrap()
+        };
+        let priced =
+            row(json!({"prompt": "0.00000005", "completion": "0.0000004", "web_search": "0.0140"}));
+        assert_eq!(
+            search_status(&[priced]),
+            json!({"available": true, "unitPriceUsd": "0.014", "model": "openai/gpt-5-nano"})
+        );
+        let unpriced = row(json!({"prompt": "0.00000005", "completion": "0.0000004"}));
+        assert_eq!(
+            search_status(&[unpriced]),
+            json!({"available": false, "unitPriceUsd": null, "model": "openai/gpt-5-nano"})
+        );
+        assert_eq!(search_status(&[])["available"], false);
     }
 
     #[test]

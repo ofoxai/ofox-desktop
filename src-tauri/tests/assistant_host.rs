@@ -52,7 +52,14 @@ enum Reply {
     Error(u16, Value),
     /// Reads the request, then closes the connection without an answer.
     Drop,
+    /// A streamed turn that calls these tools (name, arguments).
+    ToolCalls(Vec<(&'static str, Value)>),
+    /// A JSON answer, as the Responses API gives one to the search server.
+    Json(u16, Value),
 }
+
+/// Tool-call ids are unique, as a provider's are.
+static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn invalid_key() -> Value {
     json!({"error":{"message":"Invalid API key","type":"invalid_request_error","code":"invalid_api_key"}})
@@ -60,6 +67,7 @@ fn invalid_key() -> Value {
 
 #[derive(Clone, Debug)]
 struct Request {
+    path: String,
     authorization: String,
     body: Value,
 }
@@ -123,6 +131,11 @@ fn serve(stream: TcpStream, script: &Mutex<VecDeque<Reply>>, requests: &Mutex<Ve
     if reader.read_line(&mut line).unwrap_or(0) == 0 {
         return;
     }
+    let path = line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or_default()
+        .to_owned();
     loop {
         line.clear();
         reader.read_line(&mut line).unwrap();
@@ -142,6 +155,7 @@ fn serve(stream: TcpStream, script: &Mutex<VecDeque<Reply>>, requests: &Mutex<Ve
         read_chunked(&mut reader)
     };
     requests.lock().unwrap().push(Request {
+        path,
         authorization: headers.get("authorization").cloned().unwrap_or_default(),
         body: serde_json::from_slice(&body).unwrap(),
     });
@@ -185,6 +199,36 @@ fn serve(stream: TcpStream, script: &Mutex<VecDeque<Reply>>, requests: &Mutex<Ve
         }
         Reply::Drop => {
             let _ = out.shutdown(std::net::Shutdown::Both);
+        }
+        Reply::ToolCalls(calls) => {
+            start_stream(&mut out);
+            let calls: Vec<Value> = calls
+                .iter()
+                .enumerate()
+                .map(|(index, (name, args))| {
+                    let id = CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    json!({"index": index, "id": format!("call-{id}"), "type": "function",
+                           "function": {"name": name, "arguments": args.to_string()}})
+                })
+                .collect();
+            let chunk = json!({"id":"mock","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":calls},"finish_reason":null}]});
+            let _ = out.write_all(
+                format!(
+                    "data: {chunk}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                    json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}})
+                )
+                .as_bytes(),
+            );
+        }
+        Reply::Json(code, body) => {
+            let body = body.to_string();
+            let _ = out.write_all(
+                format!(
+                    "HTTP/1.1 {code} OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
         }
     }
     let _ = out.flush();
@@ -236,6 +280,8 @@ struct TestEnv {
     key_waiting: std::sync::atomic::AtomicBool,
     /// The proxy model requests should take.
     proxy: Mutex<Option<RunProxy>>,
+    /// The models the catalog offers.
+    catalog: Mutex<Vec<Model>>,
 }
 
 struct EnvState {
@@ -277,6 +323,7 @@ impl TestEnv {
             key_gate: Mutex::new(None),
             key_waiting: std::sync::atomic::AtomicBool::new(false),
             proxy: Mutex::new(None),
+            catalog: Mutex::new(vec![test_model()]),
         })
     }
 
@@ -356,7 +403,7 @@ impl Environment for TestEnv {
     }
 
     fn models<'a>(&'a self, _apex: &'a str) -> BoxFuture<'a, Result<Vec<Model>, String>> {
-        Box::pin(async move { Ok(vec![test_model()]) })
+        Box::pin(async move { Ok(self.catalog.lock().unwrap().clone()) })
     }
 
     fn gateway_base(&self, apex: &str) -> Result<String, String> {
@@ -1884,6 +1931,368 @@ fn regenerate_and_edit_send_the_turns_files_again() {
         assert_eq!(outcomes(&env, &edited).len(), 1);
         let detail = host.get_session(&sid).await.unwrap();
         assert_eq!(user_message(&detail, &edited).attachments[0].id, file);
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+    assert_no_secret_in_events(&env, &[KEY]);
+}
+
+// ── web search ───────────────────────────────────────────────────────────
+
+const SEARCH_MODEL: &str = "openai/gpt-5-nano";
+
+/// The search model's catalog row, at the live prices.
+fn search_model() -> Model {
+    serde_json::from_value(json!({
+        "id": SEARCH_MODEL,
+        "name": "GPT-5 Nano",
+        "contextWindow": 128000,
+        "maxOutputTokens": 16384,
+        "supportsImages": false,
+        "inputModalities": ["text"],
+        "supportedEndpoints": ["/v1/chat/completions", "/v1/responses"],
+        "inputPricePerMillion": "0.05",
+        "outputPricePerMillion": "0.4",
+        "pricing": {"prompt": "0.00000005", "completion": "0.0000004", "web_search": "0.014"},
+        "cost": {"input": 0.05, "output": 0.4, "cacheRead": null, "cacheWrite": null},
+        "pricingKnown": true,
+    }))
+    .unwrap()
+}
+
+/// A host whose catalog prices web search, and a conversation with search on.
+async fn searching(host: &Arc<AssistantHost>, env: &TestEnv) -> String {
+    env.catalog.lock().unwrap().push(search_model());
+    let sid = create(host).await;
+    let update = serde_json::from_value(json!({"sessionId": sid, "webSearch": true})).unwrap();
+    assert!(host.update_session(update).await.unwrap().web_search);
+    sid
+}
+
+/// One Responses API answer with one billed search: a cited page, then the
+/// search's sources (one of them plain http).
+fn search_answer(sources: &[&str]) -> Value {
+    json!({
+        "id": "resp_mock", "object": "response", "status": "completed", "model": SEARCH_MODEL,
+        "output": [
+            {"type": "web_search_call", "id": "ws_mock", "status": "completed",
+             "action": {"type": "search", "query": "pi sdk",
+                        "sources": sources.iter().map(|url| json!({"type": "url", "url": url})).collect::<Vec<_>>()}},
+            {"type": "message", "id": "msg_mock", "role": "assistant", "status": "completed",
+             "content": [{"type": "output_text", "text": "Pi builds agents [Pi SDK](https://pi.dev/sdk).",
+                          "annotations": [{"type": "url_citation", "url": "https://pi.dev/sdk#intro",
+                                           "title": "Pi SDK", "start_index": 17, "end_index": 46}]}]}
+        ],
+        "usage": {"input_tokens": 1000, "output_tokens": 500, "total_tokens": 1500},
+    })
+}
+
+fn tool_names(request: &Request) -> Vec<String> {
+    request.body["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_owned))
+        .collect()
+}
+
+fn of_type(env: &TestEnv, run: &str, kind: &str) -> Vec<Value> {
+    env.events(run)
+        .into_iter()
+        .filter(|e| e.r#type == kind)
+        .map(|e| e.data)
+        .collect()
+}
+
+/// The text of the tool results the model was sent.
+fn tool_results(request: &Request) -> Vec<String> {
+    request.body["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["role"] == "tool")
+        .map(|m| text_of(&m["content"]))
+        .collect()
+}
+
+fn decimal(value: &Value) -> f64 {
+    value.as_str().unwrap().parse().unwrap()
+}
+
+#[test]
+fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        // The catalog has no search model: no search, even with the switch on.
+        let boot = host.bootstrap().await.unwrap();
+        assert_eq!(
+            boot["search"],
+            json!({"available": false, "unitPriceUsd": null, "model": SEARCH_MODEL})
+        );
+        let sid = create(&host).await;
+        let on = serde_json::from_value(json!({"sessionId": sid, "webSearch": true})).unwrap();
+        host.update_session(on).await.unwrap();
+        gateway.reply(Reply::Stream("No search here".into()));
+        let (_, end) = turn(&host, &env, request(&sid, "What is new?", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        assert!(tool_names(&gateway.requests()[0]).is_empty());
+
+        // Priced: offered, and a conversation with search off still gets no tools.
+        env.catalog.lock().unwrap().push(search_model());
+        let boot = AssistantHost::new(env.clone()).bootstrap().await.unwrap();
+        assert_eq!(
+            boot["search"],
+            json!({"available": true, "unitPriceUsd": "0.014", "model": SEARCH_MODEL})
+        );
+        let host = AssistantHost::new(env.clone());
+        let request_off: types::CreateRequest =
+            serde_json::from_value(json!({"webSearch": false})).unwrap();
+        let off = host.create_session(request_off).await.unwrap();
+        assert!(!off.web_search);
+        gateway.reply(Reply::Stream("Still no search".into()));
+        turn(&host, &env, request(&off.id, "What is new?", json!({}))).await;
+        assert!(tool_names(&gateway.requests()[1]).is_empty());
+
+        // The conversation with search on now gets both tools.
+        gateway.reply(Reply::Stream("Could search".into()));
+        turn(&host, &env, request(&sid, "And now?", json!({}))).await;
+        assert_eq!(
+            tool_names(&gateway.requests()[2]),
+            ["web_search", "web_fetch"]
+        );
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(detail.usage["searchCount"], 0);
+        assert_eq!(detail.usage["searchCostUsd"], "0");
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+}
+
+#[test]
+fn a_search_keeps_its_sources_on_the_reply_and_adds_its_cost() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = searching(&host, &env).await;
+        gateway.reply(Reply::ToolCalls(vec![(
+            "web_search",
+            json!({"query": "pi sdk"}),
+        )]));
+        gateway.reply(Reply::Json(
+            200,
+            search_answer(&["https://pi.dev/docs", "http://plain.example.com/"]),
+        ));
+        gateway.reply(Reply::Stream(
+            "Pi builds agents [Pi SDK](https://pi.dev/sdk).".into(),
+        ));
+        let (run, end) = turn(&host, &env, request(&sid, "What is the Pi SDK?", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+
+        // The model, the search server, the model again.
+        let requests = gateway.requests();
+        let paths: Vec<_> = requests.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/v1/chat/completions",
+                "/v1/responses",
+                "/v1/chat/completions"
+            ]
+        );
+        assert!(requests
+            .iter()
+            .all(|r| r.authorization == format!("Bearer {KEY}")));
+        assert_eq!(requests[1].body["model"], SEARCH_MODEL);
+        assert!(requests[1].body["input"]
+            .as_str()
+            .unwrap()
+            .ends_with("pi sdk"));
+        assert!(tool_results(&requests[2])[0].contains("Pi builds agents"));
+
+        // Progress, then the sources before the search's end.
+        let message_id = env.events(&run)[0].data["messageId"].clone();
+        let kinds: Vec<String> = env
+            .events(&run)
+            .into_iter()
+            .map(|e| e.r#type)
+            .filter(|kind| ["tool_start", "sources", "tool_end"].contains(&kind.as_str()))
+            .collect();
+        assert_eq!(kinds, ["tool_start", "sources", "tool_end"]);
+        assert_eq!(
+            of_type(&env, &run, "tool_start")[0],
+            json!({"messageId": message_id, "name": "web_search",
+                   "toolCallId": of_type(&env, &run, "tool_start")[0]["toolCallId"],
+                   "args": {"query": "pi sdk"}})
+        );
+        let tool_end = &of_type(&env, &run, "tool_end")[0];
+        assert_eq!(
+            (&tool_end["success"], &tool_end["code"]),
+            (&json!(true), &Value::Null)
+        );
+        let published = &of_type(&env, &run, "sources")[0];
+        assert_eq!(published["messageId"], message_id);
+        let pages: Vec<&str> = published["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["url"].as_str().unwrap())
+            .collect();
+        assert_eq!(pages, ["https://pi.dev/sdk", "https://pi.dev/docs"]);
+
+        // A reload shows them on the reply, and the search in the cost.
+        let detail = AssistantHost::new(env.clone())
+            .get_session(&sid)
+            .await
+            .unwrap();
+        let reply = detail
+            .messages
+            .iter()
+            .find(|m| m.id == message_id.as_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            reply.content,
+            "Pi builds agents [Pi SDK](https://pi.dev/sdk)."
+        );
+        assert_eq!(json!(reply.sources), published["sources"]);
+        assert_eq!(reply.sources[0]["title"], "Pi SDK");
+        assert_eq!(reply.sources[0]["excerpt"], "Pi builds agents");
+        assert!(reply.sources[0]["id"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("{run}-")));
+        assert_eq!(detail.usage["searchCount"], 1);
+        // 0.014 + 1000 × 0.00000005 + 500 × 0.0000004
+        assert_eq!(detail.usage["searchCostUsd"], "0.01425");
+        assert_eq!(detail.usage["modelRequests"], 2);
+        // Two model requests of 10 in, 5 out at 2 and 10 per million.
+        let models = decimal(&detail.usage["estimatedCostUsd"]) - 0.01425;
+        assert!((models - 0.00014).abs() < 1e-12, "{}", detail.usage);
+        assert_ne!(detail.usage["usageCoverage"], "incomplete");
+        let native =
+            std::fs::read_to_string(session_dir(config.path(), &sid).join("session.jsonl"))
+                .unwrap();
+        assert!(native.contains("\"searchCalls\":1"));
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+    assert_no_secret_in_events(&env, &[KEY]);
+}
+
+#[test]
+fn a_search_with_an_unknown_outcome_ends_the_run_and_leaves_the_cost_unknown() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = searching(&host, &env).await;
+        gateway.reply(Reply::Stream("A priced answer".into()));
+        turn(&host, &env, request(&sid, "First", json!({}))).await;
+        assert!(host.get_session(&sid).await.unwrap().usage["estimatedCostUsd"].is_string());
+
+        gateway.reply(Reply::ToolCalls(vec![(
+            "web_search",
+            json!({"query": "breaking news"}),
+        )]));
+        // The gateway failed after the search may have run.
+        gateway.reply(Reply::Error(
+            502,
+            json!({"error": {"message": "upstream failed"}}),
+        ));
+        let (run, end) = turn(&host, &env, request(&sid, "Any news?", json!({}))).await;
+        assert_eq!(end.data["status"], "error");
+        let error = wait_for(&env, &run, "error").await;
+        assert_eq!(error.data["code"], "assistant_search_outcome_unknown");
+        assert_eq!(gateway.requests().len(), 3, "nothing after the search");
+        let tool_end = &of_type(&env, &run, "tool_end")[0];
+        assert_eq!(tool_end["success"], false);
+        assert_eq!(tool_end["code"], "search_outcome_unknown");
+        assert!(of_type(&env, &run, "sources").is_empty());
+
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(detail.usage["usageCoverage"], "incomplete");
+        assert!(detail.usage["estimatedCostUsd"].is_null());
+        assert!(detail.usage["searchCostUsd"].is_null());
+
+        // A later answer cannot make it known again.
+        gateway.reply(Reply::Stream("Later".into()));
+        turn(&host, &env, request(&sid, "Later", json!({}))).await;
+        let detail = host.get_session(&sid).await.unwrap();
+        assert!(detail.usage["estimatedCostUsd"].is_null());
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+    assert_no_secret_in_events(&env, &[KEY]);
+}
+
+#[test]
+fn a_run_may_read_the_pages_of_the_conversation_and_no_others() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    // `.invalid` pages are refused by the search server itself, so no page is
+    // ever requested; what the model reads tells which side refused.
+    const LINKED: &str = "https://linked.example.invalid/doc";
+    const SOURCE: &str = "https://source.example.invalid/x";
+    const OTHER: &str = "https://other.example.invalid/";
+    const SERVER_REFUSED: &str = "Web host is not allowed";
+    const NOT_ALLOWED: &str = "Only pages the user linked";
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = searching(&host, &env).await;
+        // The first turn links a page and searches; its source is kept.
+        gateway.reply(Reply::ToolCalls(vec![(
+            "web_search",
+            json!({"query": "x"}),
+        )]));
+        gateway.reply(Reply::Json(200, search_answer(&[SOURCE])));
+        gateway.reply(Reply::Stream("Found it".into()));
+        let prompt = format!("Read [this]({LINKED}), please.");
+        let (_, end) = turn(&host, &env, request(&sid, &prompt, json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+
+        // A later turn may read the linked page and the source, not others.
+        gateway.reply(Reply::ToolCalls(vec![
+            ("web_fetch", json!({"url": LINKED})),
+            ("web_fetch", json!({"url": SOURCE})),
+            ("web_fetch", json!({"url": OTHER})),
+        ]));
+        gateway.reply(Reply::Stream("Read them".into()));
+        let (run, end) = turn(&host, &env, request(&sid, "Read both again", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        let results = tool_results(gateway.requests().last().unwrap());
+        let last_three = &results[results.len() - 3..];
+        assert!(last_three[0].contains(SERVER_REFUSED), "{last_three:?}");
+        assert!(last_three[1].contains(SERVER_REFUSED), "{last_three:?}");
+        assert!(last_three[2].contains(NOT_ALLOWED), "{last_three:?}");
+        let ends = of_type(&env, &run, "tool_end");
+        assert!(ends
+            .iter()
+            .all(|e| e["name"] == "web_fetch" && e["code"] == "fetch_not_allowed"));
+        let starts = of_type(&env, &run, "tool_start");
+        assert_eq!(starts[0]["args"], json!({"url": LINKED}));
+        // No page and no second search went out.
+        assert_eq!(
+            gateway
+                .requests()
+                .iter()
+                .filter(|r| r.path == "/v1/responses")
+                .count(),
+            1
+        );
     });
     assert_no_secret_on_disk(config.path(), &[KEY]);
     assert_no_secret_in_events(&env, &[KEY]);

@@ -8,5 +8,6 @@ mod projection;
 mod requests;
 pub mod store;
 pub mod types;
+mod web;
 
 pub use host::AssistantHost;

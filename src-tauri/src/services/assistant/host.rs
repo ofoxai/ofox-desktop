@@ -11,6 +11,7 @@ use super::{
     },
     store::AssistantStore,
     types::*,
+    web,
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -40,6 +41,9 @@ pub(super) const MODEL_UNAVAILABLE: &str = "assistant_model_unavailable";
 const RETRY_WITH_NEW_KEY: &str = "assistant_retry_with_new_key";
 const NETWORK_ERROR: &str = "assistant_network_error";
 const MODEL_REQUEST_FAILED: &str = "assistant_model_request_failed";
+/// A web search may or may not have run (and been billed); the runtime ended
+/// the run rather than repeat it.
+const SEARCH_OUTCOME_UNKNOWN: &str = "assistant_search_outcome_unknown";
 const STDIO: &str = "assistant_runtime_stdio";
 pub(super) const PROTOCOL: &str = "assistant_runtime_protocol";
 const RUNTIME_UNAVAILABLE: &str = "assistant_runtime_unavailable";
@@ -321,8 +325,18 @@ fn blocked_input_code(detail: &str) -> Option<&str> {
 /// unforeseen forms fall back to the text, for the code only. A turn its
 /// attachments blocked (never sent) keeps their code. The cost is a known
 /// zero only for a request refused with a 4xx or never sent, and only when
-/// the attempt had not already shown text or counted tokens.
+/// the attempt had not already shown text or counted tokens. A run a web
+/// search with an unknown outcome ended (the runtime's
+/// `search_outcome_unknown: …`) may have been billed whatever else it says.
 fn provider_failure(result: &Value, detail: String, progressed: bool) -> Failure {
+    if leading_code(&detail, &["search_outcome_unknown"]).is_some() {
+        return Failure {
+            code: SEARCH_OUTCOME_UNKNOWN.into(),
+            detail: Some(detail),
+            unbilled: false,
+            native: None,
+        };
+    }
     let status = result["errorStatus"]
         .as_u64()
         .and_then(|s| u16::try_from(s).ok())
@@ -1120,6 +1134,30 @@ impl AssistantHost {
                 self.emit(control, "usage", json!({ "usage": usage }));
             }
             "compaction_start" | "compaction_end" => self.emit(control, kind, data),
+            "tool_start" => {
+                // The model's tool call has been answered with tokens, and the
+                // tool may cost something: never repeat this attempt.
+                attempt.progressed = true;
+                let mut shown = web::tool_start_event(&data)?;
+                shown["messageId"] = json!(control.message_id);
+                self.emit(control, kind, shown);
+            }
+            "tool_end" => {
+                attempt.progressed = true;
+                let mut shown = web::tool_end_event(&data)?;
+                shown["messageId"] = json!(control.message_id);
+                if data["name"] == "web_search" && data["success"] == true {
+                    let found = web::search_sources(&control.run_id, &data["details"]);
+                    if let Some(sources) = self.save_sources(control, found).await? {
+                        self.emit(
+                            control,
+                            "sources",
+                            json!({"messageId": control.message_id, "sources": sources}),
+                        );
+                    }
+                }
+                self.emit(control, kind, shown);
+            }
             "attachment" => {
                 // The whole outcome loses the run's keys before it is read.
                 scrub_secrets_in(&mut data, &control.secrets());
@@ -1256,6 +1294,40 @@ impl AssistantHost {
                 add_usage(&mut record.usage, data.get("usage").unwrap_or(&data));
                 record.session.updated_at = now();
                 Ok(record.usage.clone())
+            })
+        })
+        .await
+    }
+
+    /// Add a search's sources to the run's reply, without the run's keys.
+    /// Returns all of the reply's sources when any was new, else `None`.
+    async fn save_sources(
+        &self,
+        control: &RunControl,
+        mut found: Vec<Value>,
+    ) -> Result<Option<Vec<Value>>, String> {
+        if found.is_empty() {
+            return Ok(None);
+        }
+        let secrets = control.secrets();
+        for source in &mut found {
+            scrub_secrets_in(source, &secrets);
+        }
+        let store = self.store(&control.identity.owner)?;
+        let (sid, mid) = (control.session_id.clone(), control.message_id.clone());
+        blocking(move || {
+            store.mutate(&sid, |record| {
+                let message = record
+                    .messages
+                    .iter_mut()
+                    .find(|m| m.id == mid)
+                    .ok_or("assistant_message_not_found")?;
+                if !web::add_sources(message, found) {
+                    return Ok(None);
+                }
+                let sources = message.sources.clone();
+                record.session.updated_at = now();
+                Ok(Some(sources))
             })
         })
         .await
@@ -1955,6 +2027,26 @@ mod tests {
             failure(json!({}), "assistant_vision_model_required: x"),
             code(MODEL_REQUEST_FAILED, false)
         );
+        // A search that may have run ended the run: never free, whatever
+        // else the last request reported, and never a network error.
+        for result in [
+            json!({}),
+            json!({"errorKind": "not_sent"}),
+            json!({"errorStatus": 400}),
+        ] {
+            assert_eq!(
+                failure(
+                    result.clone(),
+                    "search_outcome_unknown: The web search may or may not have run and been billed: the request timed out. Do not repeat it automatically."
+                ),
+                code(SEARCH_OUTCOME_UNKNOWN, false),
+                "{result}"
+            );
+        }
+        assert_eq!(
+            failure(json!({}), "search_outcome_unknownx: x").0,
+            MODEL_REQUEST_FAILED
+        );
         // Text alone names the failure but never makes it free.
         assert_eq!(
             failure(json!({}), "fetch failed"),
@@ -2257,6 +2349,108 @@ mod tests {
         assert!(
             env.events.lock().unwrap().is_empty(),
             "nothing was published"
+        );
+    }
+
+    /// Tool calls are shown as progress; a search's sources are saved on the
+    /// run's reply before they are published.
+    #[tokio::test]
+    async fn tool_progress_is_published_and_search_sources_are_kept_on_the_reply() {
+        let (_config, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let run = control(&sid);
+        store
+            .mutate(&sid, |record| {
+                record.messages.push(
+                    serde_json::from_value(json!({
+                        "id": run.message_id, "role": "assistant", "content": "",
+                        "createdAt": 1, "status": "streaming", "runId": run.run_id,
+                    }))
+                    .unwrap(),
+                );
+                Ok(())
+            })
+            .unwrap();
+        let event = |kind: &str, data: Value| {
+            json!({
+                "sessionId": sid, "runId": run.run_id, "operationId": run.operation_id,
+                "type": kind, "data": data,
+            })
+        };
+        let found = json!({
+            "usage": {"searchCalls": 1, "inputTokens": 10, "outputTokens": 5, "model": "openai/gpt-5-nano"},
+            "sources": [
+                {"title": "Pi", "url": "https://pi.dev/", "snippet": "test-opaque-run-key"},
+                {"title": "Plain", "url": "http://plain.example.com/"},
+            ],
+        });
+        let mut attempt = Attempt::default();
+        for (kind, data) in [
+            (
+                "tool_start",
+                json!({"name": "web_search", "toolCallId": "call-1", "args": {"query": "Pi"}}),
+            ),
+            (
+                "tool_end",
+                json!({"name": "web_search", "toolCallId": "call-1", "success": true, "details": found}),
+            ),
+            // The same query again: the same pages, nothing new to keep.
+            (
+                "tool_end",
+                json!({"name": "web_search", "toolCallId": "call-2", "success": true, "details": found}),
+            ),
+            (
+                "tool_end",
+                json!({"name": "read_attachment", "toolCallId": "call-3", "success": false,
+                       "message": "assistant_attachment_not_found: Unknown attachment"}),
+            ),
+        ] {
+            host.on_event(&run, &event(kind, data), &mut attempt)
+                .await
+                .unwrap();
+        }
+        assert!(attempt.progressed, "a tool call may have cost something");
+
+        let saved = store.load_detail(&sid).unwrap().messages[0].sources.clone();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0]["url"], "https://pi.dev/");
+        assert_eq!(saved[0]["excerpt"], crate::redact::REDACTED);
+        let published: Vec<(String, Value)> = env
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| (e.r#type.clone(), e.data.clone()))
+            .collect();
+        let kinds: Vec<&str> = published.iter().map(|(kind, _)| kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            ["tool_start", "sources", "tool_end", "tool_end", "tool_end"]
+        );
+        assert_eq!(
+            published[0].1,
+            json!({"messageId": run.message_id, "name": "web_search", "toolCallId": "call-1",
+                   "args": {"query": "Pi"}})
+        );
+        assert_eq!(
+            published[1].1,
+            json!({"messageId": run.message_id, "sources": saved})
+        );
+        assert_eq!(published[2].1["success"], true);
+        assert_eq!(
+            published[4].1,
+            json!({"messageId": run.message_id, "name": "read_attachment", "toolCallId": "call-3",
+                   "success": false, "code": "assistant_attachment_not_found"})
+        );
+
+        let malformed = event("tool_end", json!({"name": "web_search", "success": true}));
+        assert_eq!(
+            host.on_event(&run, &malformed, &mut attempt)
+                .await
+                .unwrap_err()
+                .code,
+            PROTOCOL
         );
     }
 
