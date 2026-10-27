@@ -1,0 +1,222 @@
+{
+  "background": false,
+  "completed_at": 1793093105,
+  "created_at": 1793093095,
+  "error": null,
+  "frequency_penalty": 0,
+  "id": "resp_0ece76c04cc493f0006ae06de79ddc8196831d10d711abe016::Rw5dZOGdwgxAhcRLayMtXnqUj869Iw39p3ORIkt0hNYA-ooklGcgyNbYOU6InLWI8Qk",
+  "incomplete_details": null,
+  "instructions": null,
+  "max_output_tokens": 1500,
+  "max_tool_calls": 1,
+  "metadata": {},
+  "model": "openai/gpt-5-nano",
+  "object": "response",
+  "output": [
+    {
+      "content": [],
+      "encrypted_content": null,
+      "id": "rs_0ece76c04cc493f0006ae06de7f8948196bd8a225e255d4067::X5ubJ_23MCEX9cFuqMTXQRHAyN0Sj8DdigZZ3HLevcsroK0Z0zWhQSHCNb56WyswkGs",
+      "summary": [],
+      "type": "reasoning"
+    },
+    {
+      "action": {
+        "queries": [
+          "Pi coding agent SDK earendil-works",
+          "earendil-works Pi SDK",
+          "Pi programming agent SDK Earendil Works"
+        ],
+        "query": "Pi coding agent SDK earendil-works",
+        "sources": [
+          {
+            "type": "url",
+            "url": "https://github.com/earendil-works/pi"
+          },
+          {
+            "type": "url",
+            "url": "https://pi.dev/docs/latest/sdk"
+          },
+          {
+            "type": "url",
+            "url": "https://deepwiki.com/earendil-works/pi/7.1-pi-coding-agent-sdk"
+          },
+          {
+            "type": "url",
+            "url": "https://github.com/earendil-works/"
+          },
+          {
+            "type": "url",
+            "url": "https://github.com/tEhThing/earendil-works-pi"
+          },
+          {
+            "type": "url",
+            "url": "https://github.com/earendil-works/pi/tree/main/packages/coding-agent/examples/sdk"
+          },
+          {
+            "type": "url",
+            "url": "https://www.npmjs.com/package/%40earendil-works/pi-ai"
+          },
+          {
+            "type": "url",
+            "url": "https://www.npmjs.com/package/%40earendil-works/pi-coding-agent"
+          },
+          {
+            "type": "url",
+            "url": "https://deepwiki.com/earendil-works/pi/7-sdk-and-programmatic-usage"
+          },
+          {
+            "type": "url",
+            "url": "https://pi.dev/"
+          },
+          {
+            "type": "url",
+            "url": "https://pi.dev/packages/pi-web-ui?name=earendil-works"
+          },
+          {
+            "type": "url",
+            "url": "https://pi.dev/packages?name=earendil-works"
+          },
+          {
+            "type": "url",
+            "url": "https://grok-wiki.com/public/docs/earendil-works-pi-7860a70e44d1"
+          },
+          {
+            "type": "url",
+            "url": "https://www.curepo.dev/repo/earendil-works/pi"
+          },
+          {
+            "type": "url",
+            "url": "https://ghtrends.dev/earendil-works/pi/"
+          },
+          {
+            "type": "url",
+            "url": "https://earendil.com/posts/pi-durable/"
+          },
+          {
+            "type": "url",
+            "url": "https://npm.io/package/%40earendil-works/pi-coding-agent"
+          }
+        ],
+        "type": "search"
+      },
+      "id": "ws_0ece76c04cc493f0006ae06de84a488196a098d4a35a585cc1",
+      "status": "completed",
+      "type": "web_search_call"
+    },
+    {
+      "content": [],
+      "encrypted_content": null,
+      "id": "rs_0ece76c04cc493f0006ae06ded4b6081968e4b0eb42c03cc86::eEZGKHntYkKpl1uoQbA3goDZN8gTtwcchfeb1KvUQq_UG5uldzrUGMdj7somL-HEnx8",
+      "summary": [],
+      "type": "reasoning"
+    },
+    {
+      "content": [
+        {
+          "annotations": [
+            {
+              "end_index": 599,
+              "start_index": 547,
+              "title": "GitHub - earendil-works/pi: AI agent toolkit: unified LLM API, agent ...",
+              "type": "url_citation",
+              "url": "https://github.com/earendil-works/pi"
+            },
+            {
+              "end_index": 1034,
+              "start_index": 992,
+              "title": "SDK · Documentation · Pi",
+              "type": "url_citation",
+              "url": "https://pi.dev/docs/latest/sdk"
+            },
+            {
+              "end_index": 1466,
+              "start_index": 1386,
+              "title": "pi-coding-agent SDK | earendil-works/pi | DeepWiki",
+              "type": "url_citation",
+              "url": "https://deepwiki.com/earendil-works/pi/7.1-pi-coding-agent-sdk"
+            },
+            {
+              "end_index": 1946,
+              "start_index": 1849,
+              "title": "pi/packages/coding-agent/examples/sdk at main · earendil-works/pi",
+              "type": "url_citation",
+              "url": "https://github.com/earendil-works/pi/tree/main/packages/coding-agent/examples/sdk"
+            },
+            {
+              "end_index": 2359,
+              "start_index": 2281,
+              "title": "@earendil-works/pi-coding-agent - npm",
+              "type": "url_citation",
+              "url": "https://www.npmjs.com/package/%40earendil-works/pi-coding-agent"
+            },
+            {
+              "end_index": 2825,
+              "start_index": 2770,
+              "title": "Package Catalog · Pi",
+              "type": "url_citation",
+              "url": "https://pi.dev/packages?name=earendil-works"
+            }
+          ],
+          "logprobs": [],
+          "text": "Here are the most relevant and recent web results for \"Pi coding agent SDK earendil-works\" as of now:\n\n- GitHub: earendil-works/pi - AI agent toolkit including the coding-agent SDK\n  - Summary: The main repository for Pi, an AI agent toolkit. It includes the pi-coding-agent SDK, coding-agent CLI, and examples. Active development with recent commits (including coding-agent features and Nix support).\n  - Relevance: Central source for the SDK and coding-agent components you asked about.\n  - Source: GitHub repository page for earendil-works/pi. ([github.com](https://github.com/earendil-works/pi))\n\n- Pi SDK Documentation: SDK for @earendil-works/pi-coding-agent\n  - Summary: Official SDK docs describing how to embed Pi in a Node.js or Bun process, providing direct TypeScript access to agents, sessions, tools, and resources. Includes code samples for createAgentSession.\n  - Relevance: Direct documentation for the coding-agent SDK you asked about.\n  - Source: pi.dev/sdk documentation. ([pi.dev](https://pi.dev/docs/latest/sdk))\n\n- DeepWiki: pi-coding-agent SDK overview\n  - Summary: Overview and paraphrased docs for the pi-coding-agent SDK, including its purpose, language bindings (TypeScript/JavaScript), and how it enables embedding Pi in apps.\n  - Relevance: Independent reference summarizing the SDK's purpose and usage.\n  - Source: DeepWiki entry for pi-coding-agent SDK. ([deepwiki.com](https://deepwiki.com/earendil-works/pi/7.1-pi-coding-agent-sdk))\n\n- GitHub: earendil-works/pi (coding-agent SDK components)\n  - Summary: The same Pi monorepo; specific pages show coding-agent examples and the SDK usage patterns (e.g., examples/sdk demonstrating createAgentSession and runtime integration).\n  - Relevance: Practical examples and usage details for the SDK.\n  - Source: Examples directory and coding-agent docs in earendil-works/pi. ([github.com](https://github.com/earendil-works/pi/tree/main/packages/coding-agent/examples/sdk))\n\n- NPM: @earendil-works/pi-coding-agent\n  - Summary: NPM package page for the SDK, with install instructions and usage notes. Indicates recent activity and public OSS usage.\n  - Relevance: Official package entry point for developers integrating the SDK into Node.js/Bun apps.\n  - Source: npm page for @earendil-works/pi-coding-agent. ([npmjs.com](https://www.npmjs.com/package/%40earendil-works/pi-coding-agent))\n\n- Pi ecosystem overview: pi.dev packaging and SDK integration\n  - Summary: Catalog and package pages showing earendil-works packages, including SDK integrations and web UI components that reference the coding-agent SDK.\n  - Relevance: Context on how the coding-agent SDK fits into the broader Pi package ecosystem.\n  - Source: pi.dev package catalog and pi-web-ui pages referencing earendil-works components. ([pi.dev](https://pi.dev/packages?name=earendil-works))\n\nNotes on dates and recency:\n- These sources show ongoing activity within the Pi project and the earendil-works SDK (several items show “last week” or recent commits/releases). If you want exact dates for a specific item (e.g., the latest release tag or a particular commit), I can pull those details next.",
+          "type": "output_text"
+        }
+      ],
+      "id": "msg_0ece76c04cc493f0006ae06deea1788196bc72b4537d120d58",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    }
+  ],
+  "parallel_tool_calls": true,
+  "presence_penalty": 0,
+  "previous_response_id": null,
+  "prompt_cache_key": null,
+  "prompt_cache_retention": "in_memory",
+  "reasoning": {
+    "context": "current_turn",
+    "effort": "low",
+    "mode": "standard"
+  },
+  "safety_identifier": null,
+  "service_tier": "default",
+  "status": "completed",
+  "store": true,
+  "temperature": 1,
+  "text": {
+    "format": {
+      "type": "text"
+    },
+    "verbosity": "medium"
+  },
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "search_content_types": ["text"],
+      "search_context_size": "low",
+      "type": "web_search",
+      "user_location": {
+        "country": "US",
+        "type": "approximate"
+      }
+    }
+  ],
+  "top_logprobs": 0,
+  "top_p": 1,
+  "truncation": "disabled",
+  "usage": {
+    "input_tokens": 8497,
+    "input_tokens_details": {
+      "cache_write_tokens": 0,
+      "cached_read_tokens": 4096,
+      "cached_tokens": 4096,
+      "cached_write_tokens": 0
+    },
+    "output_tokens": 820,
+    "output_tokens_details": {
+      "reasoning_tokens": 64
+    },
+    "total_tokens": 9317
+  }
+}
