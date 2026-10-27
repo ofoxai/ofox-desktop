@@ -1,9 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 // A namespace import lets esbuild drop zod's ~250 KiB of unused locales.
 import * as z from "zod";
+import { proxiedFetch } from "./proxy.mjs";
 import { redact, scrubSecrets } from "./redact.mjs";
 import { SearchError, webSearch } from "./search.mjs";
-import { FetchError, readWebPage } from "./web.mjs";
+import { FetchError, readWebPage, tunneledRequest } from "./web.mjs";
 
 export const SERVER_NAME = "ofox-search";
 export const SERVER_VERSION = "0.1.0";
@@ -117,6 +118,11 @@ export function createSearchServer(
         secrets,
       ).slice(0, 300)}`,
     );
+  // One set of proxy connections per server, when the app has a proxy.
+  const fetchImpl = config.proxy ? proxiedFetch(config.proxy) : undefined;
+  const fetchProxy = config.proxy
+    ? { noProxy: config.proxy.noProxy, request: tunneledRequest(config.proxy) }
+    : null;
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
   server.registerTool(
@@ -140,7 +146,10 @@ export function createSearchServer(
     },
     async ({ query }, extra) => {
       try {
-        const result = await search(query, config, { signal: extra.signal });
+        const result = await search(query, config, {
+          signal: extra.signal,
+          fetchImpl,
+        });
         return searchToolResult(scrubSecrets(result, secrets));
       } catch (error) {
         if (!(error instanceof SearchError)) unexpected("web_search", error);
@@ -164,7 +173,11 @@ export function createSearchServer(
     },
     async ({ url }, extra) => {
       try {
-        const page = await fetchPage(url, { signal: extra.signal, secrets });
+        const page = await fetchPage(url, {
+          signal: extra.signal,
+          secrets,
+          proxy: fetchProxy,
+        });
         return fetchToolResult(scrubSecrets(page, secrets));
       } catch (error) {
         if (!(error instanceof FetchError)) unexpected("web_fetch", error);

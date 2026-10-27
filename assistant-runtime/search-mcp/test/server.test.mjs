@@ -3,7 +3,10 @@
 // any node_modules.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { copyFile, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { createServer } from "node:http";
+import { connect as connectSocket } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -183,6 +186,11 @@ test("invalid configuration exits non-zero at startup without echoing the key", 
       OFOX_BASE_URL: "https://api.ofox.ai",
       OFOX_SEARCH_MODEL: KEY + " x",
     },
+    {
+      OFOX_ASSISTANT_KEY: KEY,
+      OFOX_BASE_URL: "https://api.ofox.ai",
+      OFOX_PROXY_URL: `ftp://user:${KEY}@127.0.0.1:21`,
+    },
   ]) {
     const { code, stdout, stderr } = await run(copy, env);
     assert.equal(code, 2, JSON.stringify(Object.keys(env)));
@@ -190,4 +198,48 @@ test("invalid configuration exits non-zero at startup without echoing the key", 
     assert.match(stderr, /^ofox-search-mcp: OFOX_[A-Z_]+ /);
     assert.equal(stderr.includes(KEY), false, stderr);
   }
+});
+
+test("the bundle sends web_search through the proxy named in its environment", async (t) => {
+  const gateway = await startGateway((_req, res) =>
+    replyJson(res, 200, { output: [] }),
+  );
+  t.after(gateway.close);
+  const gatewayPort = Number(new URL(gateway.baseUrl).port);
+  const tunnels = [];
+  const sockets = new Set();
+  const proxy = createServer();
+  proxy.on("connect", (request, client, head) => {
+    tunnels.push(request.url);
+    sockets.add(client);
+    const upstream = connectSocket(gatewayPort, "localhost", () => {
+      client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      upstream.write(head);
+      upstream.pipe(client);
+      client.pipe(upstream);
+    });
+    sockets.add(upstream);
+  });
+  proxy.listen(0, "127.0.0.1");
+  await once(proxy, "listening");
+  t.after(async () => {
+    sockets.forEach((socket) => socket.destroy());
+    await new Promise((resolve) => proxy.close(resolve));
+  });
+  const { client, stderr } = await connect(t, {
+    OFOX_ASSISTANT_KEY: KEY,
+    OFOX_BASE_URL: gateway.baseUrl,
+    OFOX_ALLOW_LOCAL_GATEWAY: "1",
+    OFOX_PROXY_URL: `http://user:proxy-secret@127.0.0.1:${proxy.address().port}`,
+    OFOX_NO_PROXY: "example.invalid",
+  });
+  const result = await client.callTool({
+    name: "web_search",
+    arguments: { query: "proxied" },
+  });
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(tunnels, [`localhost:${gatewayPort}`]);
+  assert.equal(gateway.requests.length, 1);
+  await client.close();
+  assert.equal(stderr(), "");
 });

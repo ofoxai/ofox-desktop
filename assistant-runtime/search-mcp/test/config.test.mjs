@@ -22,6 +22,7 @@ test("both production apexes are accepted with the default search model", () => 
       apiKey: KEY,
       baseUrl,
       model: DEFAULT_SEARCH_MODEL,
+      proxy: null,
     });
   }
   assert.equal(DEFAULT_SEARCH_MODEL, "openai/gpt-5-nano");
@@ -137,6 +138,49 @@ test("config errors never echo the key, even when it leaks into another variable
       assert.ok(error instanceof ConfigError);
       assert.equal(error.message.includes(KEY), false, error.message);
       assert.equal(error.message.includes("sk-of-"), false, error.message);
+    }
+  }
+});
+
+test("the app's proxy comes from the environment, socks5h meaning socks5", () => {
+  assert.equal(loadConfig(env({ OFOX_PROXY_URL: "" })).proxy, null);
+  assert.deepEqual(
+    loadConfig(
+      env({
+        OFOX_PROXY_URL: "http://user:secret@127.0.0.1:8080",
+        OFOX_NO_PROXY: "localhost,.corp.example",
+      }),
+    ).proxy,
+    {
+      url: "http://user:secret@127.0.0.1:8080/",
+      noProxy: "localhost,.corp.example",
+    },
+  );
+  assert.deepEqual(
+    loadConfig(env({ OFOX_PROXY_URL: "socks5h://127.0.0.1:1080" })).proxy,
+    { url: "socks5://127.0.0.1:1080", noProxy: "" },
+  );
+  assert.equal(
+    loadConfig(env({ OFOX_PROXY_URL: "https://proxy.example:8443" })).proxy.url,
+    "https://proxy.example:8443/",
+  );
+});
+
+test("an unusable proxy setting is a config error that never echoes it", () => {
+  for (const proxy of [
+    "not a url",
+    "ftp://user:secret@127.0.0.1:21",
+    "socks4://user:secret@127.0.0.1:1080",
+    "file:///etc/passwd",
+  ]) {
+    try {
+      loadConfig(env({ OFOX_PROXY_URL: proxy }));
+      assert.fail(`expected a config error for ${proxy}`);
+    } catch (error) {
+      assert.ok(error instanceof ConfigError, proxy);
+      assert.match(error.message, /^OFOX_PROXY_URL /);
+      assert.equal(error.message.includes("secret"), false, error.message);
+      assert.equal(error.message.includes("127.0.0.1"), false, error.message);
     }
   }
 });

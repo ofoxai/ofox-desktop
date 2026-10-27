@@ -1,11 +1,12 @@
 const REDACTED = "[REDACTED]";
 
 // Same rules as assistant-runtime/src/security.mjs: the known secrets first, then
-// anything that looks like a bearer token, an Ofox/OpenAI-style key or a
-// `key=value` secret. Everything this server writes to stderr or returns as
-// error text passes through here.
+// the credentials of any URL (the proxy's), then anything that looks like a
+// bearer token, an Ofox/OpenAI-style key or a `key=value` secret. Everything
+// this server writes to stderr or returns as error text passes through here.
 export function redact(text, secrets = []) {
   return scrubSecrets(String(text), secrets)
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, `$1${REDACTED}@`)
     .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, `$1 ${REDACTED}`)
     .replace(/\bsk-(?:of-|ofi-|ant-|proj-)?[A-Za-z0-9_-]{8,}/g, REDACTED)
     .replace(
