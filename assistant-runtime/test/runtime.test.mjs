@@ -647,6 +647,58 @@ test("a request refused with a 4xx or never sent reports why and costs a known z
       },
       { errorKind: "not_sent", errorCode: "CERT_HAS_EXPIRED" },
     ],
+    [
+      "proxy refused the tunnel",
+      () => {
+        throw networkError(
+          Object.assign(
+            new Error("Proxy response (407) !== 200 when HTTP Tunneling"),
+            { code: "UND_ERR_ABORTED" },
+          ),
+        );
+      },
+      { errorKind: "not_sent", errorCode: "UND_ERR_ABORTED" },
+    ],
+    [
+      "proxy closed while opening the tunnel",
+      () => {
+        throw networkError(
+          Object.assign(new Error("Proxy Connection failed"), {
+            code: "UND_ERR_PRX_CONN",
+            cause: Object.assign(new Error("other side closed"), {
+              code: "UND_ERR_SOCKET",
+            }),
+          }),
+        );
+      },
+      { errorKind: "not_sent", errorCode: "UND_ERR_PRX_CONN" },
+    ],
+    [
+      "proxy's own TLS failed",
+      () => {
+        throw networkError(
+          Object.assign(new Error("Secure Proxy Connection failed"), {
+            code: "UND_ERR_PRX_TLS",
+            cause: Object.assign(new Error("socket hang up"), {
+              code: "ECONNRESET",
+            }),
+          }),
+        );
+      },
+      { errorKind: "not_sent", errorCode: "UND_ERR_PRX_TLS" },
+    ],
+    [
+      "SOCKS5 proxy refused the target",
+      () => {
+        throw networkError(
+          Object.assign(
+            new Error("SOCKS5 connection failed: Connection refused"),
+            { code: "UND_ERR_SOCKS5_REPLY_5" },
+          ),
+        );
+      },
+      { errorKind: "not_sent", errorCode: "UND_ERR_SOCKS5_REPLY_5" },
+    ],
   ]) {
     const params = await sandbox(t);
     const runtime = new AssistantRuntime({ fetch: async () => reply() });
@@ -694,6 +746,15 @@ test("a sent request that got no answer may have been billed, so its cost stays 
       "unreachable while reading",
       networkError(systemError("EHOSTUNREACH", "read")),
       "EHOSTUNREACH",
+    ],
+    [
+      "aborted for an unknown reason",
+      networkError(
+        Object.assign(new Error("Request aborted"), {
+          code: "UND_ERR_ABORTED",
+        }),
+      ),
+      "UND_ERR_ABORTED",
     ],
     [
       "timed out before the headers",

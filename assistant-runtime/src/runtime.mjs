@@ -85,10 +85,27 @@ function beforeConnecting({ code, syscall }) {
   );
 }
 
+// Proxy failures before the tunnel to Ofox exists, as undici 8.10.2 reports
+// them: the proxy refused CONNECT (a bare UND_ERR_ABORTED stays unknown), it
+// closed or failed TLS while connecting, or SOCKS5 failed. What such an error
+// wraps happened between this machine and the proxy.
+function beforeTunnel({ code, message }) {
+  return (
+    (code === "UND_ERR_ABORTED" &&
+      /^Proxy response \(\d+\) !== 200 when HTTP Tunneling$/.test(message)) ||
+    code === "UND_ERR_PRX_CONN" ||
+    code === "UND_ERR_PRX_TLS" ||
+    code.startsWith("UND_ERR_SOCKS5")
+  );
+}
+
 function networkFailure(error) {
   const causes = codedCauses(error);
   return {
-    sent: !(causes.length > 0 && causes.every(beforeConnecting)),
+    sent: !(
+      causes.some(beforeTunnel) ||
+      (causes.length > 0 && causes.every(beforeConnecting))
+    ),
     code: causes[0]?.code,
   };
 }

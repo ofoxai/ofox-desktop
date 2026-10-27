@@ -172,6 +172,10 @@ test("the Ofox gateway is reached through the proxy, never around it", async (t)
     tunnel.tunnels.map((item) => item.target),
     ["api.ofox.ai:443"],
   );
+  // A refused CONNECT means nothing reached Ofox: a known zero cost.
+  assert.equal(result.errorKind, "not_sent");
+  assert.equal(result.errorCode, "UND_ERR_ABORTED");
+  assert.equal(result.entries.at(-1).usageCoverage, "complete");
 });
 
 test("an unusable proxy setting stops the run before any request", async (t) => {

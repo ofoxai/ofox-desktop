@@ -117,8 +117,9 @@ return normalized text, active branch, runId/operationId, usage, stopReason,
 pricingKnown and final (only the last assistant entry of each run). A failed
 run's result and its assistant entry also carry `errorStatus` (the HTTP status
 of a refused model request) or `errorKind`: `not_sent` when the request never
-left the machine (DNS, connection refused, connect timeout, TLS certificate, or
-a turn that failed before its request) and `network` when it was sent but no
+left the machine (DNS, connection refused, connect timeout, TLS certificate, a
+proxy that refused or failed before its tunnel to Ofox opened, or a turn that
+failed before its request) and `network` when it was sent but no
 answer came; `errorCode` names the network error. A 4xx or `not_sent` request
 generated nothing, so its usage coverage is complete at zero cost; a `network`
 or 5xx failure may have been billed and stays incomplete. Images and system
