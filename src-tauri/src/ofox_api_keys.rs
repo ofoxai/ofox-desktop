@@ -1895,11 +1895,14 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn a_mint_waits_for_a_slow_token_refresh_instead_of_cancelling_it() {
+        // 刷新比签发超时慢一半；签发本身有整整 1 秒，机器忙时也不会误超时。
+        let request_timeout = std::time::Duration::from_secs(1);
+        let refresh_delay = std::time::Duration::from_millis(1500);
         let _home = TempSettingsHome::new();
         let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
         let manager = signed_in_as("org_a").await;
         let (server, url) = mint_endpoint(1).await;
-        let refresh = refresh_in_flight(&manager, SHORT_TIMEOUT * 3).await;
+        let refresh = refresh_in_flight(&manager, refresh_delay).await;
 
         let key = assistant_key_at(
             FetchMode::CachedOk,
@@ -1908,7 +1911,7 @@ mod tests {
             &store,
             &manager,
             &url,
-            SHORT_TIMEOUT,
+            request_timeout,
         )
         .await;
 
