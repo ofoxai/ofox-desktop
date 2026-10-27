@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  checkMacDmgMinimum,
   recordBuild,
   verifyRelease,
   checkRelease,
@@ -44,6 +45,7 @@ async function fixture() {
     });
   }
   const calls: string[] = [];
+  const metadata = { minimumSystemVersion: "13.5" };
   const run = async (command: string, args: string[]) => {
     calls.push(`${command} ${args.slice(0, 3).join(" ")}`);
     if (args[0] === "notarytool" && args[1] === "info")
@@ -56,11 +58,16 @@ async function fixture() {
     }
     if (command === "codesign" && args[0] === "-dv")
       return "Authority=Developer ID Application: Fixture\nTeamIdentifier=TEAM123\nCDHash=0123456789";
-    if (command === "plutil")
-      return args[1] === "CFBundleIdentifier" ? "ai.ofox.desktop" : version;
+    if (command === "plutil") {
+      if (args[1] === "CFBundleIdentifier") return "ai.ofox.desktop";
+      if (args[1] === "LSMinimumSystemVersion")
+        return metadata.minimumSystemVersion;
+      return version;
+    }
     return "";
   };
   return {
+    metadata,
     artifactsRoot,
     provenanceRoot,
     notaryRoot,
@@ -79,6 +86,50 @@ afterEach(async () => {
 });
 
 describe("verified release artifacts", () => {
+  it("applies the same minimum check to an emergency cached DMG", async () => {
+    const input = await fixture();
+    const dmg = join(
+      input.artifactsRoot,
+      "build-darwin-aarch64",
+      `ofox_desktop_${version}.dmg`,
+    );
+    input.metadata.minimumSystemVersion = "12.0";
+    await expect(checkMacDmgMinimum({ dmg, run: input.run })).rejects.toThrow(
+      "minimumMacOSMismatch",
+    );
+    input.metadata.minimumSystemVersion = "13.5";
+    await expect(checkMacDmgMinimum({ dmg, run: input.run })).resolves.toBe(
+      "13.5",
+    );
+  });
+
+  it.each(["12.0", "13.4", "14.0", "", "unknown"])(
+    "refuses a signed App with an incorrect macOS minimum: %s",
+    async (minimum) => {
+      const input = await fixture();
+      input.metadata.minimumSystemVersion = minimum;
+      await expect(verifyRelease(input)).rejects.toThrow(
+        "minimumMacOSMismatch",
+      );
+    },
+  );
+
+  it("accepts 13.5.0 and records the whole-app minimum in the publish proof", async () => {
+    const input = await fixture();
+    input.metadata.minimumSystemVersion = "13.5.0";
+    const proof = await verifyRelease(input);
+    expect(proof.platforms[0].notarization).toMatchObject({
+      minimumSystemVersion: "13.5",
+    });
+    const path = join(input.artifactsRoot, "verified-release.json");
+    const saved = JSON.parse(await readFile(path, "utf8"));
+    delete saved.platforms[0].notarization.minimumSystemVersion;
+    await writeFile(path, JSON.stringify(saved));
+    await expect(checkRelease(input)).rejects.toThrow(
+      "verificationProvenanceMismatch",
+    );
+  });
+
   it("hashes the stapled bytes and checks App identity before marking a source SHA verified", async () => {
     const input = await fixture();
     await verifyRelease(input);

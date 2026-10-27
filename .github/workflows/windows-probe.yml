@@ -34,6 +34,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Node.js for bundled assistant verification
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24.22.1"
+
+      - name: Install and test isolated assistant runtime
+        run: |
+          node scripts/assistant-prepare.mjs --install-only
+          node scripts/assistant-test.mjs
+          node scripts/assistant-prepare.mjs
+          node scripts/assistant-smoke.mjs
+        shell: pwsh
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:

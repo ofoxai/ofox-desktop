@@ -263,6 +263,8 @@
     "retry": "Retry"
   },
   "update": {
+    "requiresMacOS": "This update requires macOS {{version}} or later.",
+    "compatibilityUnknown": "The update’s system compatibility could not be verified. Please try again later.",
     "promptTitle": "Update available",
     "promptMessage": "Ofox Desktop {{version}} is now available. Visit the download page to get the update.",
     "later": "Later",
@@ -276,7 +278,8 @@
       "tools": "Tools",
       "sessions": "Sessions",
       "usage": "Usage",
-      "library": "Library"
+      "library": "Library",
+      "assistant": "Assistant"
     },
     "refresh": "Refresh",
     "settings": "Settings",
@@ -550,8 +553,8 @@
         "description": "Import and export local configuration data"
       },
       "backup": {
-        "title": "Backup & Restore",
-        "description": "Manage automatic backups, view and restore database snapshots"
+        "title": "Configuration database snapshots",
+        "description": "These snapshots do not contain complete assistant history or attachments. Use Assistant backup and restore to migrate conversations."
       },
       "cloudSync": {
         "title": "Cloud Sync",
@@ -630,7 +633,7 @@
     "configCorrupted": "SQL file may be corrupted or invalid",
     "backupId": "Backup ID",
     "backupManager": {
-      "title": "Database Backups",
+      "title": "Configuration database snapshots",
       "description": "Automatic database snapshots for restoring to a previous state",
       "empty": "No backups yet",
       "restore": "Restore",
@@ -4867,5 +4870,266 @@
     "unavailable": "This backend does not provide the grouped request dashboard yet.",
     "keyboardChart": "Use the arrow keys to inspect time points, Enter to select a day, and Escape to close the tooltip.",
     "totalTokens": "Total tokens"
-  }
+  },
+  "assistant": {
+    "title": "Ofox Assistant",
+    "general": "Ofox Assistant",
+    "configuration": "Configuration Assistant",
+    "chooseAssistant": "Choose assistant",
+    "generalDescription": "Ask questions, write, and understand images and documents. Enable web search to find information with sources.",
+    "configurationDescription": "Inspect tool and model settings, explain issues, and change settings or start processes after authorization.",
+    "generalBoundary": "This assistant uses only your attachments and enabled web tools.",
+    "configurationBoundary": "Configuration actions follow the selected permission. Credentials stay in the local backend by default.",
+    "generalWelcome": "How can I help?",
+    "configurationWelcome": "Let’s fix your configuration",
+    "startHint": "Start a new conversation, or type your question below.",
+    "loginRequired": "Sign in to Ofox to use the built-in assistant.",
+    "conversations": "Conversations",
+    "newConversation": "New conversation",
+    "search": "Search conversations",
+    "trash": "Trash",
+    "showTrash": "Show trash",
+    "showActive": "Back to conversations",
+    "emptyTrash": "Trash is empty",
+    "noConversations": "No conversations yet",
+    "untitled": "New conversation",
+    "chat": "Assistant conversation",
+    "model": "Choose model",
+    "searchModels": "Search models",
+    "contextWindow": "Context {{count}} tokens",
+    "modelPrice": "Input ${{input}} / output ${{output}} per million tokens",
+    "permissions": "Permissions",
+    "web": "Web search",
+    "runtimeUnavailable": "Assistant runtime unavailable",
+    "runtimeUnavailableHint": "Check that the bundled runtime is installed correctly, then refresh and try again.",
+    "retry": "Retry",
+    "loading": "Loading…",
+    "running": "Working…",
+    "message": "Message",
+    "composerPlaceholder": "Type a message, or attach images and documents…",
+    "send": "Send",
+    "sendHint": "Enter to send · Shift+Enter for a new line",
+    "stop": "Stop",
+    "stopped": "Stopped",
+    "failed": "Failed",
+    "attach": "Attach files",
+    "attachments": "Attachments",
+    "processing": "Processing",
+    "removeAttachment": "Remove {{name}}",
+    "rename": "Rename conversation",
+    "renameDescription": "Give this conversation a name you can find easily.",
+    "conversationTitle": "Conversation title",
+    "export": "Readable export",
+    "exported": "Conversation exported",
+    "delete": "Move to trash",
+    "restore": "Restore",
+    "purge": "Delete permanently",
+    "purgeWarning": "This permanently deletes the conversation, its messages, and associated attachments. This cannot be undone.",
+    "archivedHint": "This conversation is in the trash. Restore it to continue.",
+    "memory": "Manual memory",
+    "memoryDescription": "Save preferences or background you explicitly add for this assistant’s future conversations. Do not save keys or passwords.",
+    "noMemories": "No saved memories",
+    "memoryContent": "Memory content",
+    "memoryPlaceholder": "For example: Reply in English and keep configuration steps concise.",
+    "editMemory": "Edit memory",
+    "deleteMemory": "Delete memory",
+    "addMemory": "Add memory",
+    "editMessage": "Edit and resend",
+    "editPreservesOriginal": "Resending preserves the original message and reply as previous versions.",
+    "resend": "Resend",
+    "regenerate": "Regenerate",
+    "previousVersion": "View previous version",
+    "reasoning": "Reasoning",
+    "sources": "Sources",
+    "compacting": "Organizing conversation context…",
+    "operations": "Operations ({{count}})",
+    "approval": "Waiting for approval",
+    "allowOnce": "Allow once",
+    "allowSession": "Allow in this conversation",
+    "deny": "Deny",
+    "fullAccessTitle": "Enable full access?",
+    "fullAccessWarning": "Full access lets the assistant run arbitrary commands, start processes, and read or change files accessible to your user account. Commands may read files containing keys or other credentials, so the model cannot be guaranteed never to access credentials.\n\nEnable this only for tasks and tools you trust. You can switch to a lower permission at any time.",
+    "enableFullAccess": "Confirm full access",
+    "usage": "Input {{input}} · Output {{output}} tokens",
+    "estimatedCost": "Model estimate ${{cost}}",
+    "billedCost": "Actual charge ${{cost}}",
+    "error": "The assistant encountered a problem. Please try again.",
+    "requestExpired": "The account or assistant changed. Please try again.",
+    "searchUnavailable": "Web search unavailable",
+    "searchPrice": "Per search: {{currency}} {{price}}",
+    "searchPriceUnknown": "Search pricing unavailable",
+    "reauthorizationRequired": "Authorize assistant access for your current account to send messages. History and backups remain available.",
+    "permission": {
+      "readOnly": "Read only",
+      "ask": "Ask each time",
+      "autoConfig": "Auto configure",
+      "fullAccess": "Full access"
+    },
+    "permissionDescription": {
+      "readOnly": "Inspect and explain without changing settings or running commands.",
+      "ask": "Ask before changing settings or running commands.",
+      "autoConfig": "Allow supported configuration actions; other commands still need approval.",
+      "fullAccess": "Allow arbitrary local commands after confirming file and credential access."
+    },
+    "roles": {
+      "user": "You",
+      "assistant": "Assistant",
+      "tool": "Tool",
+      "system": "System"
+    },
+    "operationStatus": {
+      "running": "Running",
+      "completed": "Completed",
+      "failed": "Failed",
+      "cancelled": "Cancelled",
+      "unknown": "Outcome unknown"
+    },
+    "openTools": "Open Tools",
+    "sessionLoading": "The conversation is loading. Please try again shortly.",
+    "nativeHistoryMissing": "Local assistant history or attachment files are missing. Restore the assistant data backup for this computer, or start a new conversation. Existing message records are preserved.",
+    "searchUsage": "{{count}} searches · Estimate ${{cost}}",
+    "operationTitle": {
+      "config_status": "Check configuration",
+      "diagnose_tool": "Diagnose tool",
+      "bind_tool": "Connect tool to Ofox",
+      "set_tool_model": "Change tool model",
+      "install_tool": "Install tool",
+      "update_tool": "Update tool",
+      "run_command": "Run local command"
+    },
+    "runtimeReason": {
+      "assistant_requires_macos_13_5": "The built-in assistant requires macOS 13.5 or later.",
+      "assistant_runtime_unavailable": "Bundled runtime files are unavailable. Check that the application is installed correctly."
+    },
+    "searchReason": {
+      "pricing_unavailable": "Search pricing is unavailable, so search is disabled.",
+      "service_unavailable": "The search service is temporarily unavailable.",
+      "client_not_allowed": "Web search has not been enabled for this application."
+    },
+    "usageTitle": "Built-in assistant · Retained local conversations",
+    "usageScope": "Totals for conversations retained on this computer for the current account and organization, including trash. Separate from external tool history and account billing.",
+    "usageUnavailable": "Unavailable",
+    "inputTokens": "Input tokens",
+    "outputTokens": "Output tokens",
+    "modelEstimate": "Model estimate",
+    "searchCalls": "Search calls",
+    "searchEstimate": "Search estimate",
+    "refreshUsage": "Refresh assistant usage",
+    "usageFailed": "Assistant usage is unavailable. Please try again.",
+    "usageConversations": "{{sessions}} conversations · {{runs}} runs",
+    "actualChargeUnavailable": "Actual charges are not available in this local summary.",
+    "navTitle": "Assistant",
+    "backup": {
+      "title": "Assistant backup and restore",
+      "description": "Includes both assistants for the current account and organization: conversations, branches, trash, drafts, memories, preferences, local usage, native history and attachment copies. Credentials and temporary permissions are excluded.",
+      "stopFirst": "Stop all assistant tasks in this account before backing up or restoring.",
+      "create": "Create complete backup",
+      "preview": "Preview restore",
+      "saved": "Complete assistant backup saved.",
+      "summary": "{{sessions}} conversations · {{files}} files · {{count}} new records",
+      "skipped": "{{count}} identical records will be skipped.",
+      "safeMerge": "Existing records are kept on conflict. Restored configuration permissions start at Ask each time. No past action will run again.",
+      "conflicts": "{{count}} conflicts: local data will be kept.",
+      "confirm": "Restore validated backup",
+      "restored": "Restored {{count}} records.",
+      "failed": "Backup or restore could not be completed. Check the file and retry.",
+      "working": "Validating or saving the assistant archive…"
+    },
+    "capabilities": {
+      "title": "Configuration capabilities",
+      "description": "Permissions authorize actions; they do not add missing integrations. Support shown for the selected permission mode. Tool results disclose remaining manual steps.",
+      "tool": "Tool",
+      "action": "Action",
+      "supportTitle": "Support",
+      "command": "Arbitrary host commands",
+      "support": {
+        "automatic": "Can run automatically",
+        "confirmation": "Needs confirmation",
+        "toolsPage": "Continue in Tools",
+        "unsupported": "Unavailable"
+      },
+      "actions": {
+        "config_status": "Read sanitized status",
+        "diagnose_tool": "Run fixed diagnostics",
+        "bind_tool": "Bind Ofox configuration",
+        "set_tool_model": "Set managed model",
+        "install_tool": "Install",
+        "update_tool": "Update"
+      },
+      "notes": {
+        "nativeInstaller": "Use the desktop application’s native installer or updater in Tools.",
+        "platformUnavailable": "This platform has no supported automatic lifecycle adapter.",
+        "staticPartial": "Partial static indicators only. Full managed-field checks require Tools.",
+        "staticOnly": "Static configuration only; this application has no CLI diagnostics.",
+        "diagnosticsPartial": "Fixed version checks plus partial static indicators. Full configuration checks require Tools.",
+        "fixedDiagnostics": "Runs fixed version or help checks after authorization; it is not a complete connection test.",
+        "installPrerequisites": "Requires a usable supported installer and dependencies. Missing Node/npm or installer prerequisites are handed to Tools.",
+        "originalManager": "Only supported original installation sources can update automatically; unknown sources require Tools.",
+        "managedConfiguration": "Uses the existing managed configuration services with conflict protection."
+      }
+    },
+    "authorization": {
+      "title": "Authorize assistant",
+      "description": "Authorize the same account and organization to use the assistant. Cancelling or failing keeps your existing tools signed in.",
+      "open": "Open authorization page",
+      "waiting": "Waiting for assistant authorization…",
+      "failed": "Assistant authorization was not completed. Your existing account is kept."
+    },
+    "conversationUsageIncomplete": "Known usage only; this conversation has incomplete usage records.",
+    "usageIncomplete": "Coverage is incomplete. Known usage is shown; unknown costs are unavailable. Deleted conversations are excluded from these local totals.",
+    "modelUnavailable": "Model service is unavailable. You can still read history and use backup and restore.",
+    "loginLimited": "Signed in with tool management permissions. The server does not yet support assistant access.",
+    "starters": {
+      "summary": {
+        "label": "Summarize content",
+        "prompt": "Please summarize the following content, highlight the key points, and list any action items:\n\n"
+      },
+      "writing": {
+        "label": "Polish writing",
+        "prompt": "Please polish the following text to make it clearer and more natural:\n\n"
+      },
+      "explain": {
+        "label": "Explain a question",
+        "prompt": "Please explain the following question in plain language and give an example:\n\n"
+      },
+      "status": {
+        "label": "Check tool status",
+        "prompt": "Please check the status of my AI tools and explain anything that needs attention."
+      },
+      "connection": {
+        "label": "Diagnose a connection",
+        "prompt": "Please help me diagnose this connection problem. Explain your findings before changing any settings:\n\n"
+      },
+      "model": {
+        "label": "Choose a model",
+        "prompt": "Please explain my current model settings and help me choose a suitable model."
+      }
+    }
+  },
+  "assistant_native_history_missing": "Local assistant history or attachment files are missing. Restore the assistant data backup for this computer, or start a new conversation. Existing message records are preserved.",
+  "assistant_operation_outcome_unknown": "The operation may have partially completed. Automatic retries have stopped. Check the actual state before proceeding.",
+  "assistant_backup_busy": "Stop all tasks for this account before backing up or restoring.",
+  "assistant_backup_invalid": "Invalid or unsafe assistant archive. No existing data was replaced.",
+  "assistant_backup_identity_mismatch": "This backup belongs to a different account or organization.",
+  "assistant_backup_version_unsupported": "This backup format or runtime version is not supported.",
+  "assistant_backup_checksum_failed": "Backup file verification failed. No existing data was replaced.",
+  "assistant_backup_file_missing": "Required native history or attachment files are missing.",
+  "assistant_backup_too_large": "The archive exceeds the backup safety limit (2 GiB total, 512 MiB per native history). No partial backup was saved.",
+  "assistant_backup_io_failed": "Unable to complete the file operation. Check disk space and access permissions, then retry.",
+  "assistant_backup_preview_expired": "The restore preview expired or the account changed. Preview the backup again.",
+  "assistant_backup_local_changed": "Local data changed. Preview the restore again.",
+  "assistant_backup_recovery_conflict": "Restore recovery needs attention. Existing data is kept; retain the archive and retry after resolving the conflicting files.",
+  "assistant_backup_invalid_target": "Choose a backup location outside Ofox application data.",
+  "assistant_authorization_identity_mismatch": "Use the same account and organization to add assistant permission.",
+  "assistant_authorization_persist_failed": "The new authorization could not be saved. Your previous session is kept.",
+  "assistant_authorization_persist_rollback_failed": "Authorization storage needs repair. Your current account remains in memory; check credential storage before restarting.",
+  "assistant_signing_out": "Signing out. New assistant tasks are no longer accepted.",
+  "assistant_shutting_down": "The app is closing. New assistant tasks are no longer accepted.",
+  "assistant_sign_in_required": "Sign in before using the assistant.",
+  "assistant_search_outcome_unknown": "The search may have completed or incurred a charge. Automatic retries have stopped. Check the outcome before retrying.",
+  "assistant_vision_model_required": "This content requires image understanding. Switch to a model that supports images and retry. Your message and attachments are kept.",
+  "authorization_cancelled": "Authorization cancelled.",
+  "invalid_scope": "The server does not yet support assistant permission. Existing tool management remains available.",
+  "assistant_storage_active_schema": "This database contains unsupported triggers, views or virtual tables. Assistant writes and backups are unavailable; existing data is kept.",
+  "configuration_snapshot_active_schema_unsupported": "This configuration snapshot contains unsupported executable or virtual schema. It was not imported."
 }

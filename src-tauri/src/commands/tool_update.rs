@@ -515,6 +515,29 @@ pub(crate) async fn resolve_plan(tool: &str, install: &Installation) -> Result<U
 }
 
 async fn resolve_plan_inner(tool: &str, install: &Installation) -> Result<UpdatePlan, String> {
+    resolve_plan_inner_with(tool, install, None).await
+}
+
+/// Same ownership checks as the existing updater; assistant probes stay in the
+/// managed process tree and are cancelled when the owning run is stopped.
+pub(crate) async fn resolve_plan_cancellable(
+    tool: &str,
+    install: &Installation,
+    cancel: tokio::sync::watch::Receiver<bool>,
+) -> Result<UpdatePlan, String> {
+    tokio::time::timeout(
+        PROBE_TIMEOUT,
+        resolve_plan_inner_with(tool, install, Some(cancel)),
+    )
+    .await
+    .map_err(|_| "Installation-source detection timed out".to_string())?
+}
+
+async fn resolve_plan_inner_with(
+    tool: &str,
+    install: &Installation,
+    cancel: Option<tokio::sync::watch::Receiver<bool>>,
+) -> Result<UpdatePlan, String> {
     let original = verified_plan(tool, install);
     // The pnpm 11 cache discovery below follows the Unix layout.
     if original.is_ok() || cfg!(target_os = "windows") {
@@ -565,12 +588,22 @@ async fn resolve_plan_inner(tool: &str, install: &Installation) -> Result<Update
             continue;
         }
         let query = |argument| {
+            let cancel = cancel.clone();
             let mut command = Command::new(&program);
+            if cancel.is_some() {
+                crate::services::assistant::process::clean_environment(&mut command);
+            }
             command
                 .args([argument, "--global"])
                 .env("PATH", &install.search_path)
                 .current_dir(bin_dir);
-            bounded_output(command)
+            async move {
+                if let Some(cancel) = cancel {
+                    crate::services::assistant::process::run(command, cancel, PROBE_TIMEOUT).await
+                } else {
+                    bounded_output(command).await
+                }
+            }
         };
         let (root, bin) = tokio::join!(query("root"), query("bin"));
         let (Ok(root), Ok(bin)) = (root, bin) else {
@@ -650,7 +683,7 @@ pub struct UpdateResult {
     pub after: String,
 }
 
-fn verify_result(before: &str, after: &str, latest: &str) -> UpdateResult {
+pub(crate) fn verify_result(before: &str, after: &str, latest: &str) -> UpdateResult {
     let status = match (
         parse_version(before),
         parse_version(after),
@@ -670,7 +703,11 @@ fn verify_result(before: &str, after: &str, latest: &str) -> UpdateResult {
     }
 }
 
-fn execution_args(plan: &UpdatePlan, install: &Installation, latest: &str) -> Vec<String> {
+pub(crate) fn execution_args(
+    plan: &UpdatePlan,
+    install: &Installation,
+    latest: &str,
+) -> Vec<String> {
     let mut args = plan.args.clone();
     // A release-age policy may select an older version than dist-tags.latest.
     // Constrain a healthy installation so that this cannot downgrade it.

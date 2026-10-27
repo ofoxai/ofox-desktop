@@ -50,6 +50,56 @@ try {
     $failed = $false
     try { Resolve-NativeCommand "ofox-nonexistent-fixture-command" } catch { $failed = $true }
     if (-not $failed) { throw "Missing prerequisite was not rejected." }
+    # Both full and -BackendOnly verification must prepare packaged resources
+    # before the first Cargo check. Checking direct try-body statements excludes
+    # a helper accidentally hidden inside the frontend-only branch.
+    $tryBody = $ast.Find({
+        param($node)
+        $node -is [Management.Automation.Language.TryStatementAst] -and
+            $node.Body.Extent.Text -match 'runner-self-tests'
+    }, $false).Body.Statements
+    $prepareIndex = -1
+    $rustIndex = -1
+    for ($index = 0; $index -lt $tryBody.Count; $index++) {
+        $statement = $tryBody[$index]
+        if ($statement -is [Management.Automation.Language.PipelineAst] -and
+            $statement.Extent.Text -match '^Initialize-AssistantRuntime\s*$') {
+            $prepareIndex = $index
+        }
+        if ($statement.Extent.Text -match '^Invoke-VerificationStep "rust-format"') { $rustIndex = $index }
+    }
+    if ($prepareIndex -lt 0 -or $prepareIndex -ge $rustIndex) {
+        throw "Assistant preparation must execute unconditionally before Rust checks, including -BackendOnly."
+    }
+    $prepareFunction = $ast.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq "Initialize-AssistantRuntime"
+    }, $false)
+    if (-not $prepareFunction) { throw "Assistant preparation function is missing." }
+    . ([scriptblock]::Create($prepareFunction.Extent.Text))
+    $preparationCalls = New-Object 'System.Collections.Generic.List[object]'
+    function Resolve-NativeCommand([string]$Name) {
+        if ($Name -ne "node") { throw "Backend preparation unexpectedly requires $Name." }
+        return "fixture-node.exe"
+    }
+    function Invoke-VerificationStep([string]$Name, [string]$Program, [string[]]$Arguments) {
+        $preparationCalls.Add([pscustomobject]@{ name = $Name; program = $Program; arguments = $Arguments })
+    }
+    $repoRoot = Join-Path $reportDirectory "checkout with spaces"
+    Initialize-AssistantRuntime
+    if (($preparationCalls.name -join ',') -ne 'assistant-node-version,assistant-runtime-prepare,assistant-production-smoke') {
+        throw "Assistant resources must be prepared before their production smoke check."
+    }
+    if ($preparationCalls.Where({ $_.program -ne 'fixture-node.exe' }).Count -ne 0) {
+        throw "Preparation did not use the resolved Node executable."
+    }
+    if ($preparationCalls[1].arguments.Count -ne 1 -or $preparationCalls[1].arguments[0] -ne (Join-Path $repoRoot 'scripts/assistant-prepare.mjs')) {
+        throw "Preparation must pass the script path as one argument, including spaces."
+    }
+    if ($preparationCalls[2].arguments.Count -ne 1 -or $preparationCalls[2].arguments[0] -ne (Join-Path $repoRoot 'scripts/assistant-smoke.mjs')) {
+        throw "Preparation must verify the copied production tree."
+    }
     Write-Host "Windows runner regressions passed."
 } finally {
     Remove-Item -Recurse -Force $reportDirectory

@@ -263,6 +263,8 @@
     "retry": "再試行"
   },
   "update": {
+    "requiresMacOS": "この更新には macOS {{version}} 以降が必要です。",
+    "compatibilityUnknown": "更新のシステム互換性を確認できませんでした。後でもう一度お試しください。",
     "promptTitle": "新しいバージョンがあります",
     "promptMessage": "Ofox Desktop {{version}} がリリースされました。ダウンロードページから更新してください。",
     "later": "後で",
@@ -276,7 +278,8 @@
       "tools": "ツール",
       "sessions": "セッション",
       "usage": "使用量",
-      "library": "リソース"
+      "library": "リソース",
+      "assistant": "アシスタント"
     },
     "refresh": "再読み込み",
     "settings": "設定",
@@ -550,8 +553,8 @@
         "description": "ローカル設定データのインポートとエクスポート"
       },
       "backup": {
-        "title": "バックアップと復元",
-        "description": "自動バックアップの管理、データベーススナップショットの表示と復元"
+        "title": "設定データベースのスナップショット",
+        "description": "完全なアシスタント履歴と添付ファイルは含みません。会話の移行にはアシスタントのバックアップと復元を使用してください。"
       },
       "cloudSync": {
         "title": "クラウド同期",
@@ -630,7 +633,7 @@
     "configCorrupted": "SQL ファイルが壊れているか形式が無効な可能性があります",
     "backupId": "バックアップ ID",
     "backupManager": {
-      "title": "データベースバックアップ",
+      "title": "設定データベースのスナップショット",
       "description": "以前の状態に復元するための自動データベーススナップショット",
       "empty": "バックアップはまだありません",
       "restore": "復元",
@@ -4867,5 +4870,266 @@
     "unavailable": "このバックエンドはリクエストのグループ別パネルに未対応です。",
     "keyboardChart": "左右キーで時刻を確認し、Enter で日付を選択、Escape でヒントを閉じます。",
     "totalTokens": "合計 Token"
-  }
+  },
+  "assistant": {
+    "title": "Ofox アシスタント",
+    "general": "Ofox アシスタント",
+    "configuration": "設定アシスタント",
+    "chooseAssistant": "アシスタントを選択",
+    "generalDescription": "質問への回答、文章作成、画像や文書の理解。ウェブ検索を有効にすると、出典付きで情報を調べられます。",
+    "configurationDescription": "ツールやモデルの設定を確認し、問題を説明します。許可後に設定の変更やプロセスの起動も行います。",
+    "generalBoundary": "追加した添付ファイルと有効なウェブツールのみを使用します。",
+    "configurationBoundary": "設定操作は選択した権限に従います。認証情報は通常、ローカルのバックエンドで使用します。",
+    "generalWelcome": "何をお手伝いしましょうか？",
+    "configurationWelcome": "設定の問題を解決しましょう",
+    "startHint": "新しい会話を作成するか、下に質問を入力してください。",
+    "loginRequired": "内蔵アシスタントを使うには Ofox にログインしてください。",
+    "conversations": "会話",
+    "newConversation": "新しい会話",
+    "search": "会話を検索",
+    "trash": "ゴミ箱",
+    "showTrash": "ゴミ箱を表示",
+    "showActive": "会話に戻る",
+    "emptyTrash": "ゴミ箱は空です",
+    "noConversations": "会話はまだありません",
+    "untitled": "新しい会話",
+    "chat": "アシスタントの会話",
+    "model": "モデルを選択",
+    "searchModels": "モデルを検索",
+    "contextWindow": "コンテキスト {{count}} tokens",
+    "modelPrice": "入力 ${{input}} / 出力 ${{output}}（100万 tokens あたり）",
+    "permissions": "操作権限",
+    "web": "ウェブ検索",
+    "runtimeUnavailable": "アシスタントの実行環境が利用できません",
+    "runtimeUnavailableHint": "内蔵の実行環境が正しくインストールされているか確認し、再読み込みしてください。",
+    "retry": "再試行",
+    "loading": "読み込み中…",
+    "running": "処理中…",
+    "message": "メッセージ",
+    "composerPlaceholder": "メッセージを入力、または画像や文書を添付…",
+    "send": "送信",
+    "sendHint": "Enter で送信 · Shift+Enter で改行",
+    "stop": "停止",
+    "stopped": "停止済み",
+    "failed": "失敗",
+    "attach": "ファイルを添付",
+    "attachments": "添付ファイル",
+    "processing": "処理中",
+    "removeAttachment": "{{name}} を削除",
+    "rename": "会話の名前を変更",
+    "renameDescription": "見つけやすい会話名を付けてください。",
+    "conversationTitle": "会話名",
+    "export": "閲覧用エクスポート",
+    "exported": "会話をエクスポートしました",
+    "delete": "ゴミ箱に移動",
+    "restore": "復元",
+    "purge": "完全に削除",
+    "purgeWarning": "この会話、メッセージ、関連する添付ファイルを完全に削除します。元に戻せません。",
+    "archivedHint": "この会話はゴミ箱にあります。復元すると会話を続けられます。",
+    "memory": "手動メモリ",
+    "memoryDescription": "明示的に追加した好みや背景情報を、このアシスタントの今後の会話で使用します。キーやパスワードは保存しないでください。",
+    "noMemories": "保存されたメモリはありません",
+    "memoryContent": "メモリの内容",
+    "memoryPlaceholder": "例：日本語で回答し、設定手順は簡潔に説明してください。",
+    "editMemory": "メモリを編集",
+    "deleteMemory": "メモリを削除",
+    "addMemory": "メモリを追加",
+    "editMessage": "編集して再送信",
+    "editPreservesOriginal": "再送信しても元のメッセージと回答は履歴として保持されます。",
+    "resend": "再送信",
+    "regenerate": "再生成",
+    "previousVersion": "以前のバージョンを表示",
+    "reasoning": "思考過程",
+    "sources": "出典",
+    "compacting": "会話のコンテキストを整理しています…",
+    "operations": "操作履歴（{{count}}）",
+    "approval": "操作の許可を待っています",
+    "allowOnce": "今回のみ許可",
+    "allowSession": "この会話で許可",
+    "deny": "拒否",
+    "fullAccessTitle": "フルアクセスを有効にしますか？",
+    "fullAccessWarning": "フルアクセスでは、任意のコマンドの実行、プロセスの起動、現在のユーザーがアクセスできるファイルの読み取りや変更を許可します。コマンドがキーなどの認証情報を含むファイルを読み取る可能性があるため、モデルが認証情報にアクセスしないことは保証できません。\n\n信頼できるタスクやツールでのみ有効にしてください。いつでも権限を下げられます。",
+    "enableFullAccess": "フルアクセスを確認",
+    "usage": "入力 {{input}} · 出力 {{output}} tokens",
+    "estimatedCost": "モデル推定 ${{cost}}",
+    "billedCost": "実際の請求 ${{cost}}",
+    "error": "アシスタントで問題が発生しました。再試行してください。",
+    "requestExpired": "アカウントまたはアシスタントが変更されました。再試行してください。",
+    "searchUnavailable": "ウェブ検索は利用できません",
+    "searchPrice": "検索1回：{{currency}} {{price}}",
+    "searchPriceUnknown": "検索料金を取得できません",
+    "reauthorizationRequired": "現在のアカウントにアシスタント権限を追加して送信してください。履歴とバックアップは引き続き利用できます。",
+    "permission": {
+      "readOnly": "読み取り専用",
+      "ask": "毎回確認",
+      "autoConfig": "自動設定",
+      "fullAccess": "フルアクセス"
+    },
+    "permissionDescription": {
+      "readOnly": "設定の変更やコマンドの実行をせず、確認と説明のみ行います。",
+      "ask": "設定の変更やコマンドの実行前に許可を求めます。",
+      "autoConfig": "対応する設定操作を許可します。その他のコマンドには確認が必要です。",
+      "fullAccess": "ファイルと認証情報へのアクセスを確認した上で、任意のローカルコマンドを許可します。"
+    },
+    "roles": {
+      "user": "あなた",
+      "assistant": "アシスタント",
+      "tool": "ツール",
+      "system": "システム"
+    },
+    "operationStatus": {
+      "running": "実行中",
+      "completed": "完了",
+      "failed": "失敗",
+      "cancelled": "キャンセル済み",
+      "unknown": "結果を確認してください"
+    },
+    "openTools": "ツールを開く",
+    "sessionLoading": "会話を読み込み中です。しばらくしてから再試行してください。",
+    "nativeHistoryMissing": "ローカルのアシスタント履歴または添付ファイルが見つかりません。このコンピューターのアシスタントデータのバックアップを復元するか、新しい会話を始めてください。既存のメッセージ記録は保持されます。",
+    "searchUsage": "検索 {{count}} 回 · 推定 ${{cost}}",
+    "operationTitle": {
+      "config_status": "設定を確認",
+      "diagnose_tool": "ツールを診断",
+      "bind_tool": "ツールを Ofox に接続",
+      "set_tool_model": "モデルを変更",
+      "install_tool": "ツールをインストール",
+      "update_tool": "ツールを更新",
+      "run_command": "ローカルコマンドを実行"
+    },
+    "runtimeReason": {
+      "assistant_requires_macos_13_5": "内蔵アシスタントには macOS 13.5 以降が必要です。",
+      "assistant_runtime_unavailable": "内蔵の実行環境が見つかりません。アプリのインストールを確認してください。"
+    },
+    "searchReason": {
+      "pricing_unavailable": "検索料金が取得できないため、検索を無効にしました。",
+      "service_unavailable": "検索サービスは一時的に利用できません。",
+      "client_not_allowed": "このアプリではウェブ検索がまだ有効になっていません。"
+    },
+    "usageTitle": "内蔵アシスタント · ローカルに保持した会話",
+    "usageScope": "現在のアカウントと組織について、このコンピューターに保持されている会話の累計です。ゴミ箱を含み、外部ツールの履歴やアカウントの請求とは別です。",
+    "usageUnavailable": "取得できません",
+    "inputTokens": "入力 tokens",
+    "outputTokens": "出力 tokens",
+    "modelEstimate": "モデル料金の推定",
+    "searchCalls": "検索回数",
+    "searchEstimate": "検索料金の推定",
+    "refreshUsage": "アシスタントの使用量を更新",
+    "usageFailed": "アシスタントの使用量が取得できません。再試行してください。",
+    "usageConversations": "会話 {{sessions}} 件 · 実行 {{runs}} 回",
+    "actualChargeUnavailable": "このローカル集計には実際の請求額は含まれていません。",
+    "navTitle": "アシスタント",
+    "backup": {
+      "title": "アシスタントのバックアップと復元",
+      "description": "現在のアカウントと組織の両アシスタントについて、会話、分岐、ゴミ箱、下書き、メモリー、設定、ローカル使用量、元の履歴、添付ファイルのコピーを含みます。認証情報と一時的な権限は含みません。",
+      "stopFirst": "バックアップや復元の前に、このアカウントのすべてのタスクを停止してください。",
+      "create": "完全バックアップを作成",
+      "preview": "復元をプレビュー",
+      "saved": "完全バックアップを保存しました。",
+      "summary": "会話 {{sessions}} 件 · ファイル {{files}} 件 · 新しいレコード {{count}} 件",
+      "skipped": "同一のレコード {{count}} 件をスキップします。",
+      "safeMerge": "競合時はローカルデータを保持します。復元後の権限は毎回確認に戻り、過去の操作は再実行しません。",
+      "conflicts": "競合 {{count}} 件：ローカルデータを保持します。",
+      "confirm": "検証済みバックアップを復元",
+      "restored": "{{count}} 件を復元しました。",
+      "failed": "バックアップや復元を完了できませんでした。ファイルを確認して再試行してください。",
+      "working": "アシスタントのアーカイブを検証または保存しています…"
+    },
+    "capabilities": {
+      "title": "設定機能の対応範囲",
+      "description": "権限は操作を許可するもので、未実装の連携を追加するものではありません。現在の権限での対応範囲を表示します。実行結果には残りの手動操作を示します。",
+      "tool": "ツール",
+      "action": "操作",
+      "supportTitle": "対応",
+      "command": "任意のホストコマンド",
+      "support": {
+        "automatic": "自動実行可能",
+        "confirmation": "確認が必要",
+        "toolsPage": "ツール画面で続行",
+        "unsupported": "利用不可"
+      },
+      "actions": {
+        "config_status": "マスク済み状態を読む",
+        "diagnose_tool": "固定の診断を実行",
+        "bind_tool": "Ofox 設定を適用",
+        "set_tool_model": "管理対象モデルを設定",
+        "install_tool": "インストール",
+        "update_tool": "更新"
+      },
+      "notes": {
+        "nativeInstaller": "ツール画面でデスクトップアプリのネイティブインストーラーや更新機能を使用してください。",
+        "platformUnavailable": "このプラットフォームでは自動インストールと更新に未対応です。",
+        "staticPartial": "静的な状態の一部のみ確認します。完全な管理設定の確認はツール画面で行います。",
+        "staticOnly": "静的設定のみ確認します。このアプリには CLI 診断がありません。",
+        "diagnosticsPartial": "固定のバージョン確認と一部の静的状態のみ。設定全体はツール画面で確認します。",
+        "fixedDiagnostics": "許可後に固定のバージョンやヘルプを確認します。完全な接続テストではありません。",
+        "installPrerequisites": "対応するインストーラーと依存環境が必要です。Node/npm などが不足する場合はツール画面で対応します。",
+        "originalManager": "確認できた元のインストール元のみ自動更新できます。不明な場合はツール画面で対応します。",
+        "managedConfiguration": "既存の管理設定サービスを使い、競合やユーザーの変更を保護します。"
+      }
+    },
+    "authorization": {
+      "title": "アシスタントを認可",
+      "description": "現在と同じアカウントと組織にアシスタント権限を追加します。キャンセルや失敗時も既存のログインを保持します。",
+      "open": "認可ページを開く",
+      "waiting": "アシスタントの認可を待っています…",
+      "failed": "アシスタントの認可が完了しませんでした。元のアカウントを保持しています。"
+    },
+    "conversationUsageIncomplete": "この会話の使用量記録は不完全です。既知の使用量のみ表示します。",
+    "usageIncomplete": "記録が不完全です。既知の使用量のみ表示し、不明な費用はゼロとして表示しません。完全に削除した会話はローカル合計に含みません。",
+    "modelUnavailable": "モデルサービスを利用できません。履歴の閲覧とバックアップ・復元は引き続き利用できます。",
+    "loginLimited": "ツール管理の権限でログインします。サーバーはアシスタント権限に未対応です。",
+    "starters": {
+      "summary": {
+        "label": "内容を要約",
+        "prompt": "以下の内容を要約し、要点と対応事項を整理してください：\n\n"
+      },
+      "writing": {
+        "label": "文章を整える",
+        "prompt": "以下の文章を、より明確で自然な表現に整えてください：\n\n"
+      },
+      "explain": {
+        "label": "質問を解説",
+        "prompt": "以下の質問について、わかりやすい言葉と例を使って説明してください：\n\n"
+      },
+      "status": {
+        "label": "ツールの状態を確認",
+        "prompt": "AIツールの状態を確認し、対応が必要な問題を説明してください。"
+      },
+      "connection": {
+        "label": "接続の問題を調べる",
+        "prompt": "以下の接続の問題を調べてください。設定を変更する前に、確認結果を説明してください：\n\n"
+      },
+      "model": {
+        "label": "モデル設定を確認",
+        "prompt": "現在のモデル設定を説明し、適切なモデルの選択を手伝ってください。"
+      }
+    }
+  },
+  "assistant_native_history_missing": "ローカルのアシスタント履歴または添付ファイルが見つかりません。このコンピューターのアシスタントデータのバックアップを復元するか、新しい会話を始めてください。既存のメッセージ記録は保持されます。",
+  "assistant_operation_outcome_unknown": "操作が一部完了している可能性があります。自動再試行を停止しました。実際の状態を確認してから続けてください。",
+  "assistant_backup_busy": "このアカウントのすべてのタスクを停止してからバックアップや復元を行ってください。",
+  "assistant_backup_invalid": "無効または安全でないアーカイブです。既存のデータは置き換えていません。",
+  "assistant_backup_identity_mismatch": "別のアカウントまたは組織のバックアップです。",
+  "assistant_backup_version_unsupported": "このバックアップ形式やランタイムのバージョンには未対応です。",
+  "assistant_backup_checksum_failed": "バックアップの検証に失敗しました。既存のデータは置き換えていません。",
+  "assistant_backup_file_missing": "必要な元の履歴や添付ファイルがありません。",
+  "assistant_backup_too_large": "安全上限（合計 2 GiB、元の履歴 1 件につき 512 MiB）を超えています。不完全なバックアップは保存していません。",
+  "assistant_backup_io_failed": "ファイル操作を完了できません。空き容量とアクセス権を確認して再試行してください。",
+  "assistant_backup_preview_expired": "復元プレビューが期限切れかアカウントが変わりました。再度プレビューしてください。",
+  "assistant_backup_local_changed": "ローカルデータが変わりました。再度プレビューしてください。",
+  "assistant_backup_recovery_conflict": "復元ログやファイルに競合があります。既存のデータとアーカイブを保持して、競合を解決してから再試行してください。",
+  "assistant_backup_invalid_target": "Ofox のアプリデータ以外の保存先を選択してください。",
+  "assistant_authorization_identity_mismatch": "同じアカウントと組織でアシスタントを認可してください。",
+  "assistant_authorization_persist_failed": "新しい認可を保存できませんでした。元のセッションを保持しています。",
+  "assistant_authorization_persist_rollback_failed": "認証情報の復旧に失敗しました。現在のアカウントはメモリーに保持しています。再起動前に保存先を確認してください。",
+  "assistant_signing_out": "ログアウト中です。新しいアシスタントタスクの受付を停止しました。",
+  "assistant_shutting_down": "アプリを終了中です。新しいアシスタントタスクの受付を停止しました。",
+  "assistant_sign_in_required": "アシスタントを使うにはログインしてください。",
+  "assistant_search_outcome_unknown": "検索が完了または課金された可能性があります。自動再試行は停止しました。再試行する前に結果を確認してください。",
+  "assistant_vision_model_required": "この内容には画像理解が必要です。画像対応モデルに切り替えて再試行してください。メッセージと添付ファイルは保持されます。",
+  "authorization_cancelled": "認可をキャンセルしました。",
+  "invalid_scope": "サーバーがアシスタント権限に未対応です。既存のツール管理は引き続き利用できます。",
+  "assistant_storage_active_schema": "データベースに未対応のトリガー、ビューまたは仮想テーブルがあります。アシスタントの書き込みとバックアップは利用できません。元のデータを保持しています。",
+  "configuration_snapshot_active_schema_unsupported": "設定スナップショットに未対応の実行可能な構造や仮想テーブルがあります。インポートしていません。"
 }

@@ -6,6 +6,7 @@
         "label": "main",
         "title": "Ofox Desktop",
         "titleBarStyle": "Visible",
+        "hiddenTitle": false,
         "trafficLightPosition": {
           "x": 14,
           "y": 17
@@ -22,14 +23,16 @@
     ]
   },
   "bundle": {
-    "resources": [
-      "../src/assets/agent-logos/LICENSE-*.txt",
-      "../src/assets/agent-logos/LICENSE-*.md",
-      "../src/assets/agent-logos/NOTICE.md",
-      "../src/assets/library-logos/NOTICE.md",
-      "src/services/MAGPIE_LICENSE",
-      "src/session_manager/MAGPIE_LICENSE",
-      "src/native_tools/MAGPIE_LICENSE"
-    ]
+    "resources": {
+      "../scripts/installer/": null,
+      "../assistant-runtime/resources/": "assistant-runtime/",
+      "../src/assets/agent-logos/LICENSE-*.txt": "_up_/src/assets/agent-logos/",
+      "../src/assets/agent-logos/LICENSE-*.md": "_up_/src/assets/agent-logos/",
+      "../src/assets/agent-logos/NOTICE.md": "_up_/src/assets/agent-logos/NOTICE.md",
+      "../src/assets/library-logos/NOTICE.md": "_up_/src/assets/library-logos/NOTICE.md",
+      "src/services/MAGPIE_LICENSE": "src/services/MAGPIE_LICENSE",
+      "src/session_manager/MAGPIE_LICENSE": "src/session_manager/MAGPIE_LICENSE",
+      "src/native_tools/MAGPIE_LICENSE": "src/native_tools/MAGPIE_LICENSE"
+    }
   }
 }

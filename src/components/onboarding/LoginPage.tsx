@@ -381,6 +381,11 @@ export default function LoginPage({
             </div>
           )}
 
+          {deviceCode?.assistant_unavailable && (
+            <p role="status" className="mb-3 text-sm text-ink-muted">
+              {t("assistant.loginLimited")}
+            </p>
+          )}
           {/* Device Code Display (polling state) */}
           {loginState === "polling" && deviceCode && (
             <div className="mb-8 flex flex-col items-center gap-3">

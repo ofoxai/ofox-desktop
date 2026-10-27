@@ -161,10 +161,41 @@ impl Database {
         let temp_conn =
             Connection::open(&temp_path).map_err(|e| AppError::Database(e.to_string()))?;
 
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+        temp_conn.authorizer(Some(|context: AuthContext<'_>| match context.action {
+            AuthAction::CreateTrigger { .. }
+            | AuthAction::CreateTempTable { .. }
+            | AuthAction::CreateTempIndex { .. }
+            | AuthAction::CreateTempTrigger { .. }
+            | AuthAction::CreateView { .. }
+            | AuthAction::CreateTempView { .. }
+            | AuthAction::Attach { .. }
+            | AuthAction::Detach { .. }
+            | AuthAction::CreateVtable { .. } => Authorization::Deny,
+            AuthAction::Pragma { pragma_name, .. }
+                if !matches!(
+                    pragma_name.to_ascii_lowercase().as_str(),
+                    "foreign_keys" | "user_version"
+                ) =>
+            {
+                Authorization::Deny
+            }
+            AuthAction::Function { function_name }
+                if matches!(
+                    function_name.to_ascii_lowercase().as_str(),
+                    "load_extension" | "readfile" | "writefile"
+                ) =>
+            {
+                Authorization::Deny
+            }
+            _ => Authorization::Allow,
+        }));
         temp_conn
             .execute_batch(sql_content)
             .map_err(|e| AppError::Database(format!("执行 SQL 导入失败: {e}")))?;
 
+        temp_conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        Self::validate_passive_schema(&temp_conn)?;
         // 补齐缺失表/索引并进行基础校验
         Self::create_tables_on_conn(&temp_conn)?;
         Self::apply_schema_migrations_on_conn(&temp_conn)?;
@@ -197,6 +228,7 @@ impl Database {
                 Self::restore_tables(&main_conn, &temp_conn, preserve_tables)?;
             }
             Self::restore_local_usage_health(&main_conn, &temp_conn)?;
+            crate::services::assistant::local_data::restore_local(&main_conn, &temp_conn)?;
             let backup = Backup::new(&temp_conn, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?;
             backup
@@ -435,6 +467,12 @@ impl Database {
         Ok(())
     }
 
+    fn validate_passive_schema(conn: &Connection) -> Result<(), AppError> {
+        crate::services::assistant::local_data::ensure_passive(conn).map_err(|_| {
+            AppError::Config("configuration_snapshot_active_schema_unsupported".into())
+        })
+    }
+
     /// 基础状态校验
     fn validate_basic_state(conn: &Connection) -> Result<(), AppError> {
         let provider_count: i64 = conn
@@ -463,6 +501,7 @@ impl Database {
 
     /// 导出数据库为 SQL 文本
     fn dump_sql(conn: &Connection, skip_tables: &[&str]) -> Result<String, AppError> {
+        Self::validate_passive_schema(conn)?;
         let mut output = String::new();
         let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let user_version: i64 = conn
@@ -539,7 +578,9 @@ impl Database {
                     {
                         continue;
                     }
-                    if key == crate::services::usage_health::SETTING_KEY {
+                    if key == crate::services::usage_health::SETTING_KEY
+                        || crate::services::assistant::local_data::is_private_key(&key)
+                    {
                         continue;
                     }
                 }
@@ -709,6 +750,7 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))?
             .step(-1)
             .map_err(|e| AppError::Database(e.to_string()))?;
+        Self::validate_passive_schema(&staged)?;
         Self::create_tables_on_conn(&staged)?;
         Self::apply_schema_migrations_on_conn(&staged)?;
         Self::restore_tables(&local_snapshot, &staged, MACHINE_LOCAL_TABLES)?;
@@ -727,6 +769,7 @@ impl Database {
                 std::sync::atomic::Ordering::Relaxed,
             );
             Self::restore_local_usage_health(&main_conn, &staged)?;
+            crate::services::assistant::local_data::restore_local(&main_conn, &staged)?;
             Backup::new(&staged, &mut main_conn)
                 .map_err(|e| AppError::Database(e.to_string()))?
                 .step(-1)
@@ -829,10 +872,177 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use super::Database;
+    use super::{Database, MACHINE_LOCAL_TABLES};
     use crate::error::AppError;
     use crate::settings::{update_settings, AppSettings};
+    use rusqlite::{backup::Backup, Connection};
     use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn configuration_triggers_cannot_copy_private_history() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let local = Database::memory().unwrap();
+        let remote = Database::memory().unwrap();
+        local
+            .set_setting("assistant_v1:owner:session", "private-marker")
+            .unwrap();
+        remote.conn.lock().unwrap().execute("INSERT INTO providers(id,app_type,name,settings_config,meta) VALUES ('fixture','claude','Fixture','{}','{}')",[]).unwrap();
+        let sql=format!("{}\nCREATE TRIGGER copy_assistant AFTER INSERT ON settings WHEN NEW.key GLOB 'assistant_*' BEGIN INSERT OR REPLACE INTO settings(key,value) VALUES ('history-copy',NEW.value); END;",remote.export_sql_string().unwrap());
+        assert!(local.import_sql_string(&sql).is_err());
+        assert!(local.get_setting("history-copy").unwrap().is_none());
+        assert_eq!(
+            local
+                .get_setting("assistant_v1:owner:session")
+                .unwrap()
+                .as_deref(),
+            Some("private-marker")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn configuration_temp_tables_cannot_shadow_local_assistant_preservation() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let local = Database::memory().unwrap();
+        let remote = Database::memory().unwrap();
+        local
+            .set_setting("assistant_v1:owner:session", "keep private")
+            .unwrap();
+        remote.conn.lock().unwrap().execute("INSERT INTO providers(id,app_type,name,settings_config,meta) VALUES ('fixture','claude','Fixture','{}','{}')",[]).unwrap();
+        let sql = format!(
+            "{}\nCREATE TEMP TABLE settings(key TEXT PRIMARY KEY,value TEXT);",
+            remote.export_sql_string().unwrap()
+        );
+        assert!(local.import_sql_string(&sql).is_err());
+        assert_eq!(
+            local
+                .get_setting("assistant_v1:owner:session")
+                .unwrap()
+                .as_deref(),
+            Some("keep private")
+        );
+    }
+    #[test]
+    fn table_list_alias_shadow_cannot_mask_virtual_configuration_storage() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        conn.execute_batch("DROP TABLE settings;CREATE VIRTUAL TABLE settings USING fts5(key,value);CREATE TABLE pragma_table_list(schema TEXT,type TEXT);").unwrap();
+        assert!(Database::validate_passive_schema(&conn).is_err());
+        assert!(crate::services::assistant::local_data::ensure_passive(&conn).is_err());
+    }
+
+    #[test]
+    fn virtual_configuration_storage_is_not_a_passive_snapshot() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        conn.execute_batch(
+            "DROP TABLE settings;CREATE VIRTUAL TABLE settings USING fts5(key,value);",
+        )
+        .unwrap();
+        assert!(Database::validate_passive_schema(&conn).is_err());
+        assert!(crate::services::assistant::local_data::ensure_passive(&conn).is_err());
+    }
+
+    #[test]
+    fn assistant_private_rows_never_leave_configuration_exports() {
+        let db = Database::memory().unwrap();
+        for key in [
+            "assistant_v1:owner:session",
+            "assistant_memory_v1:owner:General",
+            "assistant_model_v1:owner:General",
+        ] {
+            db.set_setting(key, "private-chat-marker").unwrap();
+        }
+        db.set_setting("ordinary-setting", "ordinary-marker")
+            .unwrap();
+        for dump in [
+            db.export_sql_string().unwrap(),
+            db.export_sql_string_for_sync().unwrap(),
+        ] {
+            assert!(
+                !dump.contains("private-chat-marker"),
+                "configuration export must not contain assistant history"
+            );
+            assert!(dump.contains("ordinary-marker"));
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn assistant_rows_survive_configuration_import_including_late_local_writes() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let local = Database::memory().unwrap();
+        let remote = Database::memory().unwrap();
+        let key = "assistant_v1:owner:session";
+        local.set_setting(key, "before").unwrap();
+        remote
+            .set_setting("ordinary-setting", "remote-config")
+            .unwrap();
+        remote.conn.lock().unwrap().execute("INSERT INTO providers(id,app_type,name,settings_config,meta) VALUES ('fixture','claude','Fixture','{}','{}')", []).unwrap();
+        let dump = format!(
+            "{}\nINSERT OR REPLACE INTO settings(key,value) VALUES ('{}','foreign-chat');",
+            remote.export_sql_string().unwrap(),
+            key
+        );
+        local
+            .import_sql_string_inner(&dump, MACHINE_LOCAL_TABLES, |_| {
+                local.set_setting(key, "latest-local-chat").unwrap();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            local.get_setting(key).unwrap().as_deref(),
+            Some("latest-local-chat")
+        );
+        assert_eq!(
+            local.get_setting("ordinary-setting").unwrap().as_deref(),
+            Some("remote-config")
+        );
+        local.import_sql_string_for_sync(&dump).unwrap();
+        assert_eq!(
+            local.get_setting(key).unwrap().as_deref(),
+            Some("latest-local-chat")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn assistant_rows_survive_a_configuration_database_snapshot_restore() {
+        let sandbox = crate::test_sandbox::sandbox();
+        let local = Database::memory().unwrap();
+        let remote = Database::memory().unwrap();
+        local
+            .set_setting("assistant_memory_v1:owner:General", "local-memory")
+            .unwrap();
+        remote
+            .set_setting("assistant_memory_v1:owner:General", "foreign-memory")
+            .unwrap();
+        remote
+            .set_setting("ordinary-setting", "remote-config")
+            .unwrap();
+        let directory = crate::config::get_app_config_dir().join("backups");
+        crate::config::create_private_dir_all(&directory).unwrap();
+        let mut target = Connection::open(directory.join("assistant-fixture.db")).unwrap();
+        Backup::new(&remote.conn.lock().unwrap(), &mut target)
+            .unwrap()
+            .step(-1)
+            .unwrap();
+        drop(target);
+        local.restore_from_backup("assistant-fixture.db").unwrap();
+        assert_eq!(
+            local
+                .get_setting("assistant_memory_v1:owner:General")
+                .unwrap()
+                .as_deref(),
+            Some("local-memory")
+        );
+        assert_eq!(
+            local.get_setting("ordinary-setting").unwrap().as_deref(),
+            Some("remote-config")
+        );
+        assert!(sandbox.home().exists());
+    }
 
     #[test]
     fn library_machine_receipts_and_journal_never_leave_sql_exports() {
@@ -1516,10 +1726,7 @@ mod tests {
         let sandbox = crate::test_sandbox::sandbox();
         let remote = Database::memory()?;
         remote.conn.lock().unwrap().execute_batch(
-            "CREATE TRIGGER fail_late_cache BEFORE INSERT ON session_meta_cache
-             WHEN NEW.session_id='concurrent-session'
-             BEGIN SELECT RAISE(ABORT,'fixture late cache copy'); END;
-             INSERT INTO providers(id,app_type,name,settings_config,meta)
+            "INSERT INTO providers(id,app_type,name,settings_config,meta)
              VALUES('remote-provider','claude','Remote','{}','{}');",
         )?;
         let sql = remote.export_sql_string_for_sync()?;
@@ -1530,7 +1737,8 @@ mod tests {
             [],
         )?;
         let mut committed = None;
-        let result = local.import_sync_with_resources(&sql, |_| {
+        let result = local.import_sync_with_resources(&sql, |staged| {
+            staged.execute_batch("CREATE TEMP TRIGGER fail_late_cache BEFORE INSERT ON session_meta_cache WHEN NEW.session_id='concurrent-session' BEGIN SELECT RAISE(ABORT,'fixture late cache copy'); END;")?;
             commit_concurrent_usage(
                 &local,
                 &sandbox.home().join("late.jsonl"),

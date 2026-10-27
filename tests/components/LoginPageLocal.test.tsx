@@ -98,3 +98,25 @@ it("keeps the local-management link as readable as the sign-up line", () => {
   expect(local).toHaveClass("text-ui");
   expect(local).not.toHaveClass("text-sub");
 });
+
+it("explains a legacy-scope fallback while continuing ordinary login", async () => {
+  mocks.start.mockResolvedValue({
+    device_code: "legacy-device",
+    user_code: "LEGACY",
+    interval: 5,
+    expires_in: 600,
+    verification_uri: "https://example.test/verify",
+    assistant_unavailable: true,
+  });
+  mocks.open.mockResolvedValue(undefined);
+  render(<LoginPage onLoginSuccess={vi.fn()} />);
+  fireEvent.click(
+    screen.getByRole("button", { name: i18n.t("uiCopy.loginArrow") }),
+  );
+  expect(
+    await screen.findByText(i18n.t("assistant.loginLimited")),
+  ).toBeVisible();
+  expect(
+    screen.getByRole("button", { name: i18n.t("uiCopy.authorized") }),
+  ).toBeEnabled();
+});

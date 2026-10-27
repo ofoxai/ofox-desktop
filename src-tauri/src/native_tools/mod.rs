@@ -271,6 +271,7 @@ pub(crate) async fn bind_with_catalog(
 ) -> Result<(), String> {
     let _guard = BIND_LOCK.lock().await;
     model_api(tool, model)?;
+    crate::model_selection::check_write_revision(db, tool.as_str())?;
     let previous = common::load(db, tool.as_str())?;
     if let Some(record) = &previous {
         if health(record, tool)?.status != BindingStatus::Configured {

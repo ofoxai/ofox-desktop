@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 
+mod assistant;
 mod auth;
 mod balance;
 mod catalog_lifecycle;
@@ -60,6 +61,7 @@ mod webdav_sync;
 mod window;
 mod workspace;
 
+pub use assistant::*;
 pub use auth::*;
 pub use balance::*;
 pub use catalog_lifecycle::*;

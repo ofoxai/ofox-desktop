@@ -915,6 +915,7 @@ async fn bind_inner(
     crate::agent_env::ready().await;
     let _guard = BIND_LOCK.lock().await;
     let _file_locks = file_locks(tool);
+    crate::model_selection::check_write_revision(db, tool.record_key())?;
     if require_existing {
         require_existing_ofox_config(tool)?;
         let health = status::inspect_managed_fields(db, tool, Some(api_key))

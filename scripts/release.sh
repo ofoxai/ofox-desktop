@@ -7,22 +7,19 @@
 #   常规路径：打 tag 触发 .github/workflows/release.yml
 #     git tag <version>_$(date +%Y%m%d_%H%M) && git push origin --tags
 #
-#   CI 相比本脚本的额外保障：凭据存 GitHub Environment 而非本机环境变量、
-#   tag 前缀与版本号交叉校验、latest.json 按平台合并（不会覆盖掉其他平台的
-#   downloads key）。本脚本直接覆写 latest.json —— 将来 Windows/Linux 上线后
-#   用它发版会抹掉其他平台的条目，届时务必只用 CI。
-#
-#   应急场景（CI 不可用 / GitHub 挂了 / 需要立刻出包）才用这个脚本。用完记得
-#   确认线上 latest.json 与预期一致：curl -s https://desktop.ofox.ai/latest.json
+#   正式与应急发布共用双清单规划器。latest.json 保留兼容 macOS 12 的
+#   1.3.8 Mac 下载项；latest-v2.json 供新客户端使用。首次初始化新清单走 CI。
+#   正式与应急发布共用 R2 条件写入锁，安装包只允许同哈希幂等重试。
 #
 # 流程：
 #   1. 校验三处版本号一致（package.json / tauri.conf.json / Cargo.toml）
 #   2. pnpm tauri build（默认 macOS aarch64；可 --skip-build 复用已有产物）
 #   3. 把 .dmg 上传到 R2: release/mac/arm/ofox_desktop_<version>.dmg
-#   4. 生成并上传 latest.json（检查更新读这个）
+#   4. 校验并上传 latest-v2.json 与受保护的 latest.json
 #
 # 前置条件：
-#   - wrangler 已登录（CLOUDFLARE_API_TOKEN 或 wrangler login）
+#   - AWS CLI 支持 PutObject IfMatch / IfNoneMatch（启动时检测）
+#   - 已配置 R2 S3 凭据及 CLOUDFLARE_ACCOUNT_ID，不读取 Wrangler 登录态
 #   - bucket: ofox-desktop-releases；自定义域: https://desktop.ofox.ai
 #   - 详见 .claude/skills/tool-release/SKILL.md
 #
@@ -117,6 +114,11 @@ if [[ -z "$DMG_SRC" && "$DRY_RUN" -eq 0 ]]; then
 fi
 echo "▶ dmg 源文件: ${DMG_SRC:-(dry-run, 未定位)}"
 
+# Check the actual selected DMG even when reusing a cached artifact.
+if [[ "$DRY_RUN" -eq 0 ]]; then
+  node scripts/release-artifacts.mjs check-macos-minimum "$DMG_SRC"
+fi
+
 # ── 3.5 公证 + staple dmg 容器 ────────────────────────────────────────
 # 关键坑：Tauri 只公证并 staple 了 dmg **内含的 .app**，但 dmg 文件本身没有
 # staple——用户下载 dmg 双击挂载时 Gatekeeper 仍判 Unnotarized。这里对 dmg
@@ -146,86 +148,22 @@ fi
 DMG_KEY="${R2_PREFIX}/ofox_desktop_${VERSION}.dmg"
 DMG_URL="${BASE_URL}/${DMG_KEY}"
 
-# ── 4. 生成 latest.json ───────────────────────────────────────────────
-# 保留其他平台（Windows 等由 CI 发布）的既有条目，只更新本平台，同 release.yml。
-# 旧清单走带认证的 R2 读取（不走公开 CDN），并且只保留指向本站 release 目录、
-# 文件名合规的已知平台条目，避免把被篡改的下载链接重新发布出去。
-PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-OLD_FILE="$(mktemp -t ofox-old-latest-XXXX.json)"
-if wrangler r2 object get "${BUCKET}/latest.json" --file "$OLD_FILE" --remote >/dev/null 2>&1; then
-  OLD_JSON=$(cat "$OLD_FILE")
-elif [[ "$DRY_RUN" -eq 1 ]]; then
-  echo "⚠️  [dry-run] 读不到 R2 上现有的 latest.json，按空清单预览" >&2
-  OLD_JSON='{}'
-elif [[ "${FRESH_MANIFEST:-0}" == "1" ]]; then
-  OLD_JSON='{}'
-else
-  rm -f "$OLD_FILE"
-  echo "❌ 读不到 R2 上现有的 latest.json；直接覆盖会丢掉其他平台的下载项。" >&2
-  echo "   确认是首次发布后，用 FRESH_MANIFEST=1 重试。" >&2
-  exit 1
-fi
-rm -f "$OLD_FILE"
-LATEST_JSON=$(OLD_JSON="$OLD_JSON" VERSION="$VERSION" PUB_DATE="$PUB_DATE" NOTES="$NOTES" \
-  PLATFORM_KEY="$PLATFORM_KEY" DMG_URL="$DMG_URL" DOWNLOAD_PAGE="$DOWNLOAD_PAGE" \
-  BASE_URL="$BASE_URL" node <<'NODE'
-const e = process.env;
-let old = {};
-try { old = JSON.parse(e.OLD_JSON); } catch {}
-const PREFIX = {
-  'darwin-aarch64': 'release/mac/arm/',
-  'windows-x86_64': 'release/windows/x64/',
-  'linux-x86_64': 'release/linux/x64/',
-};
-const FILE = /^ofox_desktop_\d+\.\d+\.\d+\.(dmg|exe|msi|AppImage)$/;
-const downloads = {};
-for (const [key, url] of Object.entries(old.downloads || {})) {
-  const base = PREFIX[key] && `${e.BASE_URL}/${PREFIX[key]}`;
-  if (base && typeof url === 'string' && url.startsWith(base) && FILE.test(url.slice(base.length))) {
-    downloads[key] = url;
-  } else {
-    console.error(`⚠️  丢弃不合规的旧下载项 ${key}: ${url}`);
-  }
-}
-downloads[e.PLATFORM_KEY] = e.DMG_URL;
-console.log(JSON.stringify({
-  version: e.VERSION,
-  pubDate: e.PUB_DATE,
-  notes: e.NOTES,
-  downloads,
-  downloadPage: e.DOWNLOAD_PAGE,
-}, null, 2));
-NODE
-)
-echo "▶ latest.json:"
-echo "$LATEST_JSON" | sed 's/^/    /'
-
+# ── 4. 共用 R2 锁、不可变安装包与条件清单写入 ─────────────────────────
+: "${CLOUDFLARE_ACCOUNT_ID:?CLOUDFLARE_ACCOUNT_ID 未设置}"
+ENDPOINT="https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com"
+FEED_DIR="$(mktemp -d -t ofox-update-feeds-XXXX)"
+trap 'rm -rf "$FEED_DIR"' EXIT
+PUBLISH_ARGS=(scripts/update-manifests.mjs publish --bucket "$BUCKET" --endpoint "$ENDPOINT"
+  --version "$VERSION" --artifact "$PLATFORM_KEY=$DMG_SRC"
+  --pub-date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --notes "$NOTES"
+  --output "$FEED_DIR/new")
+[[ "$DRY_RUN" -eq 1 ]] && PUBLISH_ARGS+=(--dry-run)
+node "${PUBLISH_ARGS[@]}"
 if [[ "$DRY_RUN" -eq 1 ]]; then
-  echo "✅ [dry-run] 完成，未上传。"
-  echo "   将上传 dmg → r2://${BUCKET}/${DMG_KEY}"
-  echo "   将上传清单 → r2://${BUCKET}/latest.json"
+  echo "✅ [dry-run] 校验完成，未取得远端锁或上传。"
   exit 0
 fi
-
-# ── 5. 上传 R2 ────────────────────────────────────────────────────────
-TMP_JSON="$(mktemp -t ofox-latest-XXXX.json)"
-trap 'rm -f "$TMP_JSON"' EXIT
-printf '%s' "$LATEST_JSON" > "$TMP_JSON"
-
-echo "▶ 上传 dmg → r2://${BUCKET}/${DMG_KEY}"
-wrangler r2 object put "${BUCKET}/${DMG_KEY}" \
-  --file="$DMG_SRC" \
-  --content-type "application/x-apple-diskimage" \
-  --remote
-
-echo "▶ 上传 latest.json → r2://${BUCKET}/latest.json"
-wrangler r2 object put "${BUCKET}/latest.json" \
-  --file="$TMP_JSON" \
-  --content-type "application/json" \
-  --remote
-
-echo ""
 echo "✅ 发布完成 v$VERSION"
 echo "   下载: $DMG_URL"
-echo "   清单: ${BASE_URL}/latest.json"
-echo "   验证: curl -s ${BASE_URL}/latest.json"
+echo "   新清单: ${BASE_URL}/latest-v2.json"
+echo "   旧清单: ${BASE_URL}/latest.json（Mac 保留 1.3.8）"

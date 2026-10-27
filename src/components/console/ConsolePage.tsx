@@ -26,6 +26,7 @@ import {
   type ShellPage,
 } from "@/components/shell/ShellContext";
 import { UsagePage } from "@/components/usage-overview/UsagePage";
+import { AccountAssistantPanel } from "@/components/assistant/AccountAssistantPanel";
 import {
   OptionalToolsCatalog,
   type InstallCatalogHandle,
@@ -125,7 +126,7 @@ function ConsoleShell({
   const { t } = useTranslation();
   const shell = useShell();
   // 应用自更新的首次发现弹窗；常驻的提示在顶栏（UpdatePill）。数据源 =
-  // UpdateContext（自动检查走 R2 latest.json）。
+  // UpdateContext（自动检查走 R2 latest-v2.json）。
   const {
     updateInfo,
     shouldPrompt: shouldPromptUpdate,
@@ -148,6 +149,16 @@ function ConsoleShell({
       </div>
 
       <main className="min-h-0 flex-1">
+        {shell.visited.has("assistant") && (
+          <div {...panel("assistant")} className="h-full px-4 pb-4 pt-1">
+            <InteractionScope active={shell.active === "assistant"}>
+              <AccountAssistantPanel
+                enabled={Boolean(localSignedIn)}
+                onLoginRequested={onLoginRequested}
+              />
+            </InteractionScope>
+          </div>
+        )}
         <div
           {...panel("tools")}
           className="h-full overscroll-contain overflow-y-auto px-[max(16px,calc(50%-600px))] pb-6 pt-1"

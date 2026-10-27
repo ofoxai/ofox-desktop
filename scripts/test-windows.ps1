@@ -68,6 +68,15 @@ function Invoke-VerificationStep([string]$Name, [string]$Program, [string[]]$Arg
     if ($exitCode -ne 0) { throw "$Name failed (exit $exitCode). See $logPath" }
 }
 
+function Initialize-AssistantRuntime {
+    # Tauri and the native assistant tests require the packaged Node/resources
+    # even in -BackendOnly mode. This does not install a user-visible CLI.
+    $assistantNode = Resolve-NativeCommand "node"
+    Invoke-VerificationStep "assistant-node-version" $assistantNode @("--version")
+    Invoke-VerificationStep "assistant-runtime-prepare" $assistantNode @((Join-Path $repoRoot "scripts/assistant-prepare.mjs"))
+    Invoke-VerificationStep "assistant-production-smoke" $assistantNode @((Join-Path $repoRoot "scripts/assistant-smoke.mjs"))
+}
+
 try {
     [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
     Set-Location $repoRoot
@@ -80,6 +89,7 @@ try {
     }
     $powerShell = (Get-Process -Id $PID).Path
     Invoke-VerificationStep "runner-self-tests" $powerShell @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $repoRoot "scripts/tests/test-windows-runner.ps1"))
+    Initialize-AssistantRuntime
 
     if (-not $BackendOnly) {
         $node = Resolve-NativeCommand "node"

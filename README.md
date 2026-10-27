@@ -30,6 +30,12 @@
 
 不同工具、版本和操作系统支持的操作有所不同，应用会显示当前可用动作和不可用原因。
 
+## 内置助手（开发分支）
+
+本分支新增 **Ofox 助手**与**配置助手**，采用随包提供的 Pi SDK，支持对话、文档阅读和受授权的配置操作。聊天按账号、组织与助手保存在本机；配置同步不上传聊天，独立的完整备份包含原生历史和附件副本。单对话 JSON 为可读导出，`.db` 为配置数据库快照。
+
+助手需要追加模型调用授权；缺少授权或模型服务暂不可用时，历史和完整备份仍可使用。后端授权与搜索部署、旧版更新入口兼容、原生平台和正式签名验收完成前，不发布新安装包。范围与限制见[内置助手说明](docs/builtin-assistants.md)。
+
 ## 工具与模型
 
 支持 Claude Code、Codex、ChatGPT 桌面版、Gemini CLI、OpenCode、OpenClaw、
@@ -102,15 +108,21 @@ WorkBuddy、dsh 和 Pi。Codex / ChatGPT 共用一个物理配置目标；各客
 
 | 平台                     | 安装包 | 说明                                                                        |
 | ------------------------ | ------ | --------------------------------------------------------------------------- |
-| macOS 12+，Apple Silicon | `.dmg` | 正式发布包含代码签名与 Apple 公证                                           |
+| macOS 13.5+，Apple Silicon | `.dmg` | 正式发布包含代码签名与 Apple 公证                                           |
 | Windows 10/11，x64       | `.exe` | NSIS 安装包；暂未代码签名，SmartScreen 提示时可在“更多信息”中选择“仍要运行” |
 
 应用顶栏会提示新版本，也可从设置检查更新。各 AI 客户端仍有自己的系统与版本要求。
-GitHub Release 附带 `SHA256SUMS.txt`，可用于核对安装包；线上更新清单为：
+整个应用要求 macOS 13.5 或更新版本；macOS 12–13.4 无法运行本版本，应保留兼容的旧版安装。
+旧版 Mac 客户端（包括运行在 macOS 13.5+ 上的旧客户端）需要手动下载安装一次新版，之后恢复正常检查更新。
+旧清单保留兼容的 1.3.8 Mac 包，Windows 继续更新；新客户端使用带系统门槛的 v2 清单。
+历史 1.3.8 安装包不变，本开发分支仍受发布验收门槛约束。
+GitHub Release 附带 `SHA256SUMS.txt`，可用于核对安装包；新客户端使用的清单为：
 
 ```bash
-curl -fsSL https://desktop.ofox.ai/latest.json
+curl -fsSL -A ofox-desktop https://desktop.ofox.ai/latest-v2.json
 ```
+
+旧清单为 `latest.json`。迁移及发布恢复规则见[双更新清单](docs/update-feeds.md)。
 
 <details>
 <summary>从早期版本升级后的 macOS 钥匙串授权</summary>
@@ -126,7 +138,9 @@ curl -fsSL https://desktop.ofox.ai/latest.json
 ## 开发
 
 需要 Node.js 20.19+（20.x）或 22.12+、pnpm 10 和 Rust stable。
-CI 使用 Node.js 20 与 pnpm 10.12.3。Windows 还需要 Microsoft C++ 生成工具和 WebView2；
+前端 CI 使用 Node.js 20；助手和 Rust 检查使用固定 Node.js 24.22.1，pnpm 为 10.12.3。
+构建主机需要 npm 和 tar 来准备随包运行时；安装包用户无需安装 Node 或 Pi。
+Windows 还需要 Microsoft C++ 生成工具和 WebView2；
 平台依赖见 [Tauri 前置要求](https://tauri.app/start/prerequisites/)。
 
 ```bash
@@ -143,6 +157,10 @@ pnpm build                # 构建桌面应用
 pnpm typecheck
 pnpm format:check
 pnpm test:unit
+pnpm assistant:install
+pnpm assistant:test
+pnpm assistant:prepare     # 直接运行 Rust 检查前准备资源
+pnpm assistant:smoke
 cargo fmt --check --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml
@@ -154,17 +172,17 @@ macOS 结果不能代替 Windows；开发约定见 [AGENTS.md](AGENTS.md)和[代
 ### 发版
 
 正式发布使用 [Release workflow](.github/workflows/release.yml)，产物上传到 Cloudflare R2 和 GitHub Releases，
-再按平台合并更新 `latest.json`。
+再使用共同的 R2 条件写入锁与安装包哈希核对，更新 `latest-v2.json` 和受保护的旧清单 `latest.json`。
 
 1. 同步 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 中应用自身的版本，以及 `src-tauri/tauri.conf.json`。
 2. 完成检查，并取得同一最终提交的独立 Windows Probe 成功记录。PR 合并引用的验证不能代替源提交的 push / 手动验证。
 3. 在发布环境允许的分支上运行 `release.yml` 的 `dry_run=true`。确认提交 SHA 一致，等待完整检查、构建、签名、公证和安装包验证全部通过；遵守 GitHub 发布环境审批。
 4. 在该已验证提交上创建 `<version>_YYYYMMDD_HHMM` 标签，只推送这一个标签，触发正式发布。
-5. 核对 GitHub Release、两个平台的安装包校验值，以及线上 `latest.json`。
+5. 核对 GitHub Release、两个平台的安装包校验值，以及线上两套清单；旧清单的 Mac 下载项必须仍为 1.3.8。
 
 签名和公证也属于 dry-run 验证。普通分支的预览安装包只用于测试，不能作为正式公证包分发，
 详见[分支安装包](docs/branch-packages.md)和[发布门禁](docs/code-standards.md#release-gate)。
-`scripts/release.sh` 仅供 CI 不可用时应急使用。
+`scripts/release.sh` 仅供 CI 不可用时应急使用，需要支持条件写入的 AWS CLI、R2 S3 凭据和账号 ID，不能绕过共同发布锁或替换既有安装包。详见[操作约束](docs/update-feeds.md)。
 
 ## 许可
 

@@ -6,6 +6,7 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { getVersion } from "@tauri-apps/api/app";
 import { settingsApi } from "@/lib/api";
+import { updateCompatibilityIssue } from "@/lib/updateCompatibility";
 import { Badge } from "@/components/ui/badge";
 import { motion } from "framer-motion";
 import appIcon from "@/assets/icons/app-icon.png";
@@ -58,7 +59,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   }, [t]);
 
   const handleCheckUpdate = useCallback(async () => {
-    // Ofox Desktop 自托管更新：拉 R2 的 latest.json 比对版本。本应用不做自动
+    // Ofox Desktop 自托管更新：拉 R2 的 latest-v2.json 比对版本。本应用不做自动
     // 安装，发现新版只提示并引导用户去下载页手动安装。
     setIsCheckingUpdate(true);
     try {
@@ -94,7 +95,12 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
       );
     } catch (error) {
       console.error("[AboutSection] Check update failed", error);
-      toast.error(t("settings.checkUpdateFailed"));
+      const issue = updateCompatibilityIssue(error);
+      toast.error(
+        issue
+          ? t(issue.key, { version: issue.version })
+          : t("settings.checkUpdateFailed"),
+      );
     } finally {
       setIsCheckingUpdate(false);
     }

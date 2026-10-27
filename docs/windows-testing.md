@@ -12,6 +12,8 @@
   需要 CMake 时也安装 CMake 工具。
 - Rust MSVC 1.87+（仓库固定 toolchain 为 1.95），安装 `rustfmt` 和 `clippy`。
 - Node.js 满足 Vite 7 要求（20.19+ 或 22.12+），pnpm 10.12.3。
+- `-BackendOnly` 也需要构建主机上的 Node.js 与 npm，用来准备锁定的助手
+  运行时及生产依赖；最终用户不需要安装 Node、Pi 或其他 CLI。
 - 运行桌面界面时需要 WebView2。
 
 Windows 的 C++、WebView2 和 MSVC 环境要求见
@@ -28,7 +30,7 @@ rustup component add rustfmt clippy
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-windows.ps1
 ```
 
-脚本依次安装锁定的前端依赖，执行 TypeScript、格式、前端单测、渲染构建、Rust
+脚本先准备并检查随包助手运行时，再安装锁定的前端依赖，执行 TypeScript、格式、前端单测、渲染构建、Rust
 格式、Windows `clippy --all-targets` 和完整 Rust 测试，最后编译只读探针。
 测试串行运行，配置目录隔离在临时目录；本地 HTTP 模拟测试临时绕过 localhost
 代理，完成后恢复进程环境变量。
@@ -39,7 +41,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-windows.ps1
 # 已装好仓库依赖时，跳过 pnpm install
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-windows.ps1 -SkipDependencyInstall
 
-# 仅验证 Rust/Windows 后端
+# 仅验证 Rust/Windows 后端（仍会准备并检查随包助手运行时）
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-windows.ps1 -BackendOnly
 
 # 完整验证后生成可启动的正式配置模式 exe 和 release 探针

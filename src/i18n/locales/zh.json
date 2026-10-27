@@ -263,6 +263,8 @@
     "retry": "重试"
   },
   "update": {
+    "requiresMacOS": "此更新需要 macOS {{version}} 或更新版本。",
+    "compatibilityUnknown": "无法确认更新的系统兼容性，请稍后重试。",
     "promptTitle": "发现新版本",
     "promptMessage": "Ofox Desktop {{version}} 已发布，前往下载页获取更新。",
     "later": "稍后",
@@ -276,7 +278,8 @@
       "tools": "工具",
       "sessions": "会话",
       "usage": "用量",
-      "library": "资源库"
+      "library": "资源库",
+      "assistant": "助手"
     },
     "refresh": "刷新",
     "settings": "设置",
@@ -550,8 +553,8 @@
         "description": "导入和导出本地配置数据"
       },
       "backup": {
-        "title": "备份与恢复",
-        "description": "管理自动备份，查看和恢复数据库快照"
+        "title": "配置数据库快照",
+        "description": "快照不包含完整助手历史和附件。迁移对话请使用助手备份与恢复。"
       },
       "cloudSync": {
         "title": "云同步",
@@ -630,7 +633,7 @@
     "configCorrupted": "SQL 文件可能已损坏或格式不正确",
     "backupId": "备份ID",
     "backupManager": {
-      "title": "数据库备份",
+      "title": "配置数据库快照",
       "description": "自动备份的数据库快照，可用于恢复到之前的状态",
       "empty": "暂无备份",
       "restore": "恢复",
@@ -4867,5 +4870,266 @@
     "unavailable": "当前后端尚未提供分组请求面板。",
     "keyboardChart": "使用左右方向键查看时间点，Enter 选择当天，Escape 关闭提示。",
     "totalTokens": "总 Token"
-  }
+  },
+  "assistant": {
+    "title": "Ofox 助手",
+    "general": "Ofox 助手",
+    "configuration": "配置助手",
+    "chooseAssistant": "选择助手",
+    "generalDescription": "日常问答、写作、图片与文档理解。开启联网后可检索资料并查看来源。",
+    "configurationDescription": "检查工具与模型配置，解释问题，并在授权后修改配置或启动进程。",
+    "generalBoundary": "对话助手仅使用你添加的附件与已开启的联网工具。",
+    "configurationBoundary": "配置操作遵循当前权限。密钥默认由本机后端使用。",
+    "generalWelcome": "有什么可以帮你？",
+    "configurationWelcome": "一起解决配置问题",
+    "startHint": "从新对话开始，也可以直接输入问题。",
+    "loginRequired": "登录 Ofox 后即可使用内置助手。",
+    "conversations": "对话",
+    "newConversation": "新对话",
+    "search": "搜索对话",
+    "trash": "回收站",
+    "showTrash": "查看回收站",
+    "showActive": "返回对话",
+    "emptyTrash": "回收站为空",
+    "noConversations": "暂无对话",
+    "untitled": "新对话",
+    "chat": "助手对话",
+    "model": "选择模型",
+    "searchModels": "搜索模型",
+    "contextWindow": "上下文 {{count}} tokens",
+    "modelPrice": "输入 ${{input}} / 输出 ${{output}} 每百万 tokens",
+    "permissions": "操作权限",
+    "web": "联网",
+    "runtimeUnavailable": "助手运行时不可用",
+    "runtimeUnavailableHint": "请检查内置运行时是否安装完整，刷新后重试。",
+    "retry": "重试",
+    "loading": "加载中…",
+    "running": "正在处理…",
+    "message": "消息",
+    "composerPlaceholder": "输入消息，或添加图片与文档…",
+    "send": "发送",
+    "sendHint": "Enter 发送 · Shift+Enter 换行",
+    "stop": "停止",
+    "stopped": "已停止",
+    "failed": "失败",
+    "attach": "添加附件",
+    "attachments": "附件",
+    "processing": "处理中",
+    "removeAttachment": "移除 {{name}}",
+    "rename": "重命名对话",
+    "renameDescription": "为这个对话起一个容易查找的名字。",
+    "conversationTitle": "对话名称",
+    "export": "可读导出",
+    "exported": "对话已导出",
+    "delete": "移到回收站",
+    "restore": "恢复",
+    "purge": "永久删除",
+    "purgeWarning": "此操作会永久删除此对话、消息和关联附件，无法恢复。",
+    "archivedHint": "此对话位于回收站。恢复后可继续对话。",
+    "memory": "手动记忆",
+    "memoryDescription": "只保存你明确添加的偏好或背景，供这个助手后续对话使用。请勿保存密钥或密码。",
+    "noMemories": "暂无手动记忆",
+    "memoryContent": "记忆内容",
+    "memoryPlaceholder": "例如：请用中文回答，解释配置步骤时简明一些。",
+    "editMemory": "编辑记忆",
+    "deleteMemory": "删除记忆",
+    "addMemory": "添加记忆",
+    "editMessage": "编辑并重发",
+    "editPreservesOriginal": "重发会保留原消息与原回复，作为历史版本。",
+    "resend": "重发",
+    "regenerate": "重新生成",
+    "previousVersion": "查看历史版本",
+    "reasoning": "思考过程",
+    "sources": "来源",
+    "compacting": "正在整理对话上下文…",
+    "operations": "操作记录（{{count}}）",
+    "approval": "等待操作授权",
+    "allowOnce": "允许一次",
+    "allowSession": "本对话允许",
+    "deny": "拒绝",
+    "fullAccessTitle": "开启完全访问？",
+    "fullAccessWarning": "完全访问允许助手在本机运行任意命令、启动进程、读取和修改当前用户可访问的文件。命令可能读到包含密钥或其他凭据的文件，因此无法保证模型永远无法获取凭据。\n\n请仅在信任当前任务与工具时启用；你可以随时切回较低权限。",
+    "enableFullAccess": "确认开启完全访问",
+    "usage": "输入 {{input}} · 输出 {{output}} tokens",
+    "estimatedCost": "模型估算 ${{cost}}",
+    "billedCost": "实际扣费 ${{cost}}",
+    "error": "助手暂时遇到问题，请重试。",
+    "requestExpired": "账户或助手已切换，请重新操作。",
+    "searchUnavailable": "联网不可用",
+    "searchPrice": "每次搜索 {{currency}} {{price}}",
+    "searchPriceUnknown": "联网价格暂不可用",
+    "reauthorizationRequired": "请为当前账号追加助手权限后发送消息。历史和备份仍可使用。",
+    "permission": {
+      "readOnly": "只读",
+      "ask": "逐次询问",
+      "autoConfig": "自动配置",
+      "fullAccess": "完全访问"
+    },
+    "permissionDescription": {
+      "readOnly": "只检查和解释，不修改配置或启动命令。",
+      "ask": "修改配置、运行命令前由你批准。",
+      "autoConfig": "允许受支持的配置操作；其他命令仍需批准。",
+      "fullAccess": "允许任意本机命令，需确认凭据与文件访问边界。"
+    },
+    "roles": {
+      "user": "你",
+      "assistant": "助手",
+      "tool": "工具",
+      "system": "系统"
+    },
+    "operationStatus": {
+      "running": "执行中",
+      "completed": "已完成",
+      "failed": "失败",
+      "cancelled": "已取消",
+      "unknown": "结果待确认"
+    },
+    "openTools": "打开工具页",
+    "sessionLoading": "对话正在加载，请稍后重试。",
+    "nativeHistoryMissing": "本机的助手历史或附件文件已缺失。请恢复这台电脑的助手数据备份，或新建对话；现有消息记录仍会保留。",
+    "searchUsage": "搜索 {{count}} 次 · 估算 ${{cost}}",
+    "operationTitle": {
+      "config_status": "检查配置",
+      "diagnose_tool": "诊断工具",
+      "bind_tool": "将工具接入 Ofox",
+      "set_tool_model": "更换工具模型",
+      "install_tool": "安装工具",
+      "update_tool": "升级工具",
+      "run_command": "运行本机命令"
+    },
+    "runtimeReason": {
+      "assistant_requires_macos_13_5": "内置助手需要 macOS 13.5 或更新版本。",
+      "assistant_runtime_unavailable": "内置运行时文件不可用，请检查应用安装是否完整。"
+    },
+    "searchReason": {
+      "pricing_unavailable": "联网价格暂时不可用，搜索已关闭。",
+      "service_unavailable": "联网服务暂时不可用。",
+      "client_not_allowed": "当前应用尚未开通联网搜索。"
+    },
+    "usageTitle": "内置助手 · 本机保留对话",
+    "usageScope": "当前账户与组织保留在本机的对话累计，包含回收站；独立于外部工具记录与账户账单。",
+    "usageUnavailable": "暂不可用",
+    "inputTokens": "输入 tokens",
+    "outputTokens": "输出 tokens",
+    "modelEstimate": "模型费用估算",
+    "searchCalls": "搜索次数",
+    "searchEstimate": "搜索费用估算",
+    "refreshUsage": "刷新内置助手用量",
+    "usageFailed": "内置助手用量暂时不可用，请重试。",
+    "usageConversations": "{{sessions}} 个对话 · {{runs}} 次运行",
+    "actualChargeUnavailable": "此本机摘要暂未提供实际账单。",
+    "navTitle": "助手",
+    "backup": {
+      "title": "助手备份与恢复",
+      "description": "包含当前账号和组织下两个助手的会话、分支、回收站、草稿、记忆、偏好、本地用量、原生历史和附件副本。排除系统凭据和临时授权。",
+      "stopFirst": "备份或恢复前，请先停止当前账号的所有助手任务。",
+      "create": "创建完整备份",
+      "preview": "预览恢复",
+      "saved": "助手完整备份已保存。",
+      "summary": "{{sessions}} 个会话 · {{files}} 个文件 · {{count}} 条新记录",
+      "skipped": "将跳过 {{count}} 条相同记录。",
+      "safeMerge": "冲突时保留本机数据。恢复后配置权限回到逐次确认，历史操作不会重新执行。",
+      "conflicts": "{{count}} 处冲突：将保留本机数据。",
+      "confirm": "恢复已校验备份",
+      "restored": "已恢复 {{count}} 条记录。",
+      "failed": "备份或恢复未完成，请检查文件后重试。",
+      "working": "正在校验或保存助手归档…"
+    },
+    "capabilities": {
+      "title": "配置能力说明",
+      "description": "权限用于授权操作，不会增加尚未接入的功能。以下按当前权限显示实际支持范围，执行结果会说明仍需手动完成的步骤。",
+      "tool": "工具",
+      "action": "操作",
+      "supportTitle": "支持情况",
+      "command": "任意主机命令",
+      "support": {
+        "automatic": "可自动完成",
+        "confirmation": "需要确认",
+        "toolsPage": "转工具页处理",
+        "unsupported": "暂不可用"
+      },
+      "actions": {
+        "config_status": "读取脱敏状态",
+        "diagnose_tool": "启动固定诊断",
+        "bind_tool": "绑定 Ofox 配置",
+        "set_tool_model": "设置托管模型",
+        "install_tool": "安装",
+        "update_tool": "更新"
+      },
+      "notes": {
+        "nativeInstaller": "需在工具页使用桌面应用的原生安装或更新入口。",
+        "platformUnavailable": "此平台暂无自动安装或更新适配。",
+        "staticPartial": "仅读取部分静态状态；完整托管配置检查需转工具页。",
+        "staticOnly": "仅检查静态配置，该应用没有 CLI 诊断。",
+        "diagnosticsPartial": "固定版本检查和部分静态状态；完整配置检查需转工具页。",
+        "fixedDiagnostics": "授权后执行固定版本或帮助检查，并非完整连接测试。",
+        "installPrerequisites": "需有可用的受支持安装器和依赖。缺少 Node/npm 等前置条件时转工具页处理。",
+        "originalManager": "仅支持已识别的原安装来源；未知来源需转工具页。",
+        "managedConfiguration": "复用现有托管配置服务，保留冲突检查和用户修改保护。"
+      }
+    },
+    "authorization": {
+      "title": "授权助手",
+      "description": "为当前账号和组织追加助手权限。取消或失败会保留现有登录和工具管理。",
+      "open": "打开授权页面",
+      "waiting": "正在等待助手授权…",
+      "failed": "助手授权未完成，已保留原账号登录。"
+    },
+    "conversationUsageIncomplete": "此会话的用量记录不完整，仅显示已知用量。",
+    "usageIncomplete": "记录覆盖不完整，仅显示已知用量；未知费用不作零值展示。永久删除的会话不计入本机合计。",
+    "modelUnavailable": "模型服务暂不可用，仍可查看历史和使用备份恢复。",
+    "loginLimited": "已使用工具管理权限登录；服务端尚未支持助手权限。",
+    "starters": {
+      "summary": {
+        "label": "总结内容",
+        "prompt": "请帮我总结以下内容，提炼要点并列出待办：\n\n"
+      },
+      "writing": {
+        "label": "润色文字",
+        "prompt": "请帮我润色下面这段文字，让表达更清晰自然：\n\n"
+      },
+      "explain": {
+        "label": "解释一个问题",
+        "prompt": "请用清晰易懂的方式解释这个问题，并给出例子：\n\n"
+      },
+      "status": {
+        "label": "检查工具状态",
+        "prompt": "请检查我的 AI 工具状态，并说明有哪些需要处理的问题。"
+      },
+      "connection": {
+        "label": "诊断连接问题",
+        "prompt": "请帮我诊断下面的连接问题，修改配置前先说明检查结果：\n\n"
+      },
+      "model": {
+        "label": "了解模型配置",
+        "prompt": "请解释我当前的模型配置，并帮我选择合适的模型。"
+      }
+    }
+  },
+  "assistant_native_history_missing": "本机的助手历史或附件文件已缺失。请恢复这台电脑的助手数据备份，或新建对话；现有消息记录仍会保留。",
+  "assistant_operation_outcome_unknown": "操作可能已部分完成，已停止自动重试。请先检查实际状态再决定下一步。",
+  "assistant_backup_busy": "请先停止当前账号的所有助手任务，再备份或恢复。",
+  "assistant_backup_invalid": "助手归档无效或包含不安全内容，未替换已有数据。",
+  "assistant_backup_identity_mismatch": "备份不属于当前账号和组织。",
+  "assistant_backup_version_unsupported": "不支持此备份格式或运行时版本。",
+  "assistant_backup_checksum_failed": "备份文件校验失败，未替换已有数据。",
+  "assistant_backup_file_missing": "缺少必需的原生历史或附件文件。",
+  "assistant_backup_too_large": "归档超过安全上限（总计 2 GiB，单份原生历史 512 MiB），未保存不完整备份。",
+  "assistant_backup_io_failed": "文件操作未完成，请检查磁盘空间和访问权限后重试。",
+  "assistant_backup_preview_expired": "恢复预览已过期或身份已改变，请重新预览。",
+  "assistant_backup_local_changed": "本机数据已变化，请重新预览恢复。",
+  "assistant_backup_recovery_conflict": "恢复日志或文件存在冲突，已保留现有数据。请保留归档，处理冲突后重试。",
+  "assistant_backup_invalid_target": "请将备份保存到 Ofox 应用数据目录之外。",
+  "assistant_authorization_identity_mismatch": "追加助手权限时请使用相同账号和组织。",
+  "assistant_authorization_persist_failed": "新授权未能保存，已保留之前的会话。",
+  "assistant_authorization_persist_rollback_failed": "授权存储恢复失败，当前账号仍保留在内存中；重启前请检查凭据存储。",
+  "assistant_signing_out": "正在退出账号，已停止接受新的助手任务。",
+  "assistant_shutting_down": "应用正在退出，已停止接受新的助手任务。",
+  "assistant_sign_in_required": "请先登录后再使用助手。",
+  "assistant_search_outcome_unknown": "搜索可能已完成或计费，已停止自动重试。请先确认结果再决定是否重试。",
+  "assistant_vision_model_required": "当前内容需要图片理解能力，请切换到支持图片的模型后重试。原消息和附件会保留。",
+  "authorization_cancelled": "授权已取消。",
+  "invalid_scope": "服务端尚未支持助手权限，现有工具管理仍可使用。",
+  "assistant_storage_active_schema": "数据库包含不支持的触发器、视图或虚拟表，助手写入和备份暂不可用，已保留原数据。",
+  "configuration_snapshot_active_schema_unsupported": "配置快照含不支持的活动结构或虚拟表，未执行导入。"
 }

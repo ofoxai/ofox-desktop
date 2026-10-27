@@ -83,6 +83,10 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-cargo-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Verify bundled assistant production closure
+        run: |
+          pnpm assistant:prepare
+          pnpm assistant:smoke
       - name: Verify checkout and version; remove stale cached bundles
         id: identity
         shell: bash

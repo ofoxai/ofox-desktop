@@ -11,7 +11,8 @@ import { MenuSelect } from "@/components/ui/menu-select";
 import { SegmentedControl, SegmentedNav } from "@/components/ui/segmented";
 import type { OfoxAccount } from "@/hooks/useOfoxAccount";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
-import { useUsageOverview } from "@/hooks/useUsageOverview";
+import { accountIdentity, useUsageOverview } from "@/hooks/useUsageOverview";
+import { AssistantUsageCard } from "@/components/assistant/AssistantUsageCard";
 import {
   canRefreshUsageNow,
   useUsageVisibility,
@@ -850,6 +851,10 @@ export function UsagePage({
           trend={state.trend.data}
           spending={state.spending.data}
           recharge={() => open(ofoxWalletUrl(apex))}
+        />
+        <AssistantUsageCard
+          identity={account.user ? accountIdentity(account.user, apex) : ""}
+          active={visible && effectiveTab === "overview"}
         />
         <p className="pt-1 text-note font-medium text-ink-muted">
           {t("usageWorkbench.localHistory")}

@@ -514,6 +514,17 @@ pub(crate) fn atomic_write_private_with(
 ///   写完 `sync_all` 之后才 rename：断电不会留下长度对、内容全零的文件。
 /// - 任何一步失败，临时文件都会被清掉，目标文件保持原样。
 pub fn atomic_write_with(path: &Path, data: &[u8], opts: AtomicOpts) -> Result<(), AppError> {
+    atomic_write_stream(path, opts, |file| {
+        file.write_all(data).map_err(|e| AppError::io(path, e))
+    })
+}
+
+/// Stream a large artifact through the same permission-preserving atomic commit.
+pub(crate) fn atomic_write_stream(
+    path: &Path,
+    opts: AtomicOpts,
+    write: impl FnOnce(&mut fs::File) -> Result<(), AppError>,
+) -> Result<(), AppError> {
     let target = write_target(path)?;
     let file_name = target
         .file_name()
@@ -527,7 +538,7 @@ pub fn atomic_write_with(path: &Path, data: &[u8], opts: AtomicOpts) -> Result<(
 
     let (tmp, mut file) = create_temp_file(parent, file_name, &target, opts)?;
     let mut guard = TempFileGuard::new(tmp.clone());
-    file.write_all(data).map_err(|e| AppError::io(&tmp, e))?;
+    write(&mut file)?;
     file.sync_all().map_err(|e| AppError::io(&tmp, e))?;
     // Windows 不能重命名还开着的文件。
     drop(file);

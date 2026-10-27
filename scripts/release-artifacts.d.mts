@@ -22,7 +22,7 @@ export interface ReleaseManifest {
   platforms: Array<{
     platform: string;
     artifact: { file: string; sha256: string; bytes: number };
-    notarization?: { status: string };
+    notarization?: { status: string; minimumSystemVersion?: string };
   }>;
 }
 export function recordBuild(input: BuildInput): Promise<unknown>;
@@ -32,3 +32,8 @@ export function checkRelease(input: {
   sourceSha: string;
   version: string;
 }): Promise<ReleaseManifest>;
+
+export function checkMacDmgMinimum(input: {
+  dmg: string;
+  run?: (command: string, args: string[]) => Promise<string>;
+}): Promise<string>;

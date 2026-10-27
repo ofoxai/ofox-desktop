@@ -58,12 +58,28 @@ jobs:
       - name: Unit tests
         run: pnpm test:unit
 
+      - name: Install isolated assistant dependencies
+        run: pnpm assistant:install
+
+      - name: Assistant SDK and security tests
+        run: pnpm assistant:test
+
   backend:
     name: Backend Checks
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Node.js for bundled assistant resources
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24.22.1"
+
+      - name: Prepare production assistant resources before Cargo
+        run: |
+          node scripts/assistant-prepare.mjs
+          node scripts/assistant-smoke.mjs
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -109,6 +125,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Node.js for bundled assistant verification
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24.22.1"
+
+      - name: Install and test isolated assistant runtime
+        run: |
+          node scripts/assistant-prepare.mjs --install-only
+          node scripts/assistant-test.mjs
+          node scripts/assistant-prepare.mjs
+          node scripts/assistant-smoke.mjs
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable

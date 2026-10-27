@@ -156,10 +156,14 @@ pub fn auth_app_base() -> String {
 /// 默认走线上；设了 `OFOX_USE_LOCAL=1` 时切回 `http://localhost:8080`
 /// （ofox-core Go service）。
 pub fn auth_api_base() -> String {
+    auth_api_base_for(current_apex())
+}
+
+pub(crate) fn auth_api_base_for(apex: &str) -> String {
     if use_local_dev() {
         DEV_API_BASE.to_string()
     } else {
-        format!("https://api.{}", current_apex())
+        format!("https://api.{apex}")
     }
 }
 
@@ -170,10 +174,14 @@ pub fn auth_api_base() -> String {
 /// 前缀分发）；设了 `OFOX_USE_LOCAL=1` 时切回 `http://localhost:8088`
 /// （ofox-gateway plugin）。
 pub fn gateway_base() -> String {
+    gateway_base_for(current_apex())
+}
+
+pub(crate) fn gateway_base_for(apex: &str) -> String {
     if use_local_dev() {
         DEV_GATEWAY_BASE.to_string()
     } else {
-        format!("https://api.{}", current_apex())
+        format!("https://api.{apex}")
     }
 }
 

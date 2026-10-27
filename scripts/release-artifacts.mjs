@@ -38,6 +38,23 @@ async function digest(path) {
 async function json(path) {
   return JSON.parse(await readFile(path, "utf8"));
 }
+function normalizedMacVersion(value) {
+  if (typeof value !== "string" || !/^\d+\.\d+(?:\.\d+)?$/.test(value))
+    return null;
+  const parts = value.split(".").map(Number);
+  if (!parts.every(Number.isSafeInteger)) return null;
+  while (parts.length < 3) parts.push(0);
+  return parts.join(".");
+}
+async function configuredMacMinimum() {
+  const config = await json(
+    new URL("../src-tauri/tauri.conf.json", import.meta.url),
+  );
+  const value = config.bundle?.macOS?.minimumSystemVersion;
+  if (!normalizedMacVersion(value))
+    throw new Error("invalidMinimumMacOSConfiguration");
+  return value;
+}
 async function saveJson(path, value) {
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.${process.pid}.tmp`;
@@ -106,6 +123,61 @@ function appleAuth(auth) {
     auth.teamId,
   ];
 }
+async function verifyAppMinimum(app, run) {
+  const info = join(app, "Contents", "Info.plist");
+  const minimumSystemVersion = await configuredMacMinimum();
+  const actualMinimum = (
+    await run("plutil", [
+      "-extract",
+      "LSMinimumSystemVersion",
+      "raw",
+      "-o",
+      "-",
+      info,
+    ])
+  ).trim();
+  if (
+    normalizedMacVersion(actualMinimum) !==
+    normalizedMacVersion(minimumSystemVersion)
+  )
+    throw new Error("minimumMacOSMismatch");
+  return minimumSystemVersion;
+}
+
+// The emergency uploader must check the selected DMG itself, including --skip-build.
+export async function checkMacDmgMinimum({ dmg, run = runCommand }) {
+  if (!dmg) throw new Error("unexpectedArtifact");
+  const stat = await lstat(dmg);
+  if (!stat.isFile() || stat.isSymbolicLink())
+    throw new Error("unexpectedArtifact");
+  const mount = await mkdtemp(join(tmpdir(), "ofox-minimum-mount-"));
+  let attached = false;
+  try {
+    await run("hdiutil", [
+      "attach",
+      "-readonly",
+      "-nobrowse",
+      "-mountpoint",
+      mount,
+      "-plist",
+      dmg,
+    ]);
+    attached = true;
+    const apps = (await readdir(mount)).filter((entry) =>
+      entry.endsWith(".app"),
+    );
+    if (apps.length !== 1) throw new Error("unexpectedAppBundle");
+    const app = join(mount, apps[0]);
+    const appStat = await lstat(app);
+    if (!appStat.isDirectory() || appStat.isSymbolicLink())
+      throw new Error("unexpectedAppBundle");
+    return await verifyAppMinimum(app, run);
+  } finally {
+    if (attached) await run("hdiutil", ["detach", mount]);
+    await rm(mount, { recursive: true, force: true });
+  }
+}
+
 async function verifyMac({
   dmg,
   submissionId,
@@ -231,6 +303,7 @@ async function verifyMac({
       ).trim() !== version
     )
       throw new Error("appIdentityMismatch");
+    const minimumSystemVersion = await verifyAppMinimum(app, run);
     await run("spctl", ["--assess", "--type", "execute", "--verbose=2", app]);
     return {
       artifact: stapledArtifact,
@@ -239,6 +312,7 @@ async function verifyMac({
         submissionId,
         teamId: expectedTeamId,
         appBundleId: "ai.ofox.desktop",
+        minimumSystemVersion,
         appCodeSignatureVerified: true,
         dmgStapleVerified: true,
         gatekeeperVerified: true,
@@ -376,6 +450,8 @@ export async function checkRelease({ artifactsRoot, sourceSha, version }) {
     if (
       record.platform === "darwin-aarch64" &&
       (record.notarization?.status !== "Accepted" ||
+        record.notarization?.minimumSystemVersion !==
+          (await configuredMacMinimum()) ||
         !record.notarization?.appCodeSignatureVerified ||
         !record.notarization?.dmgStapleVerified ||
         !record.notarization?.gatekeeperVerified)
@@ -387,6 +463,11 @@ export async function checkRelease({ artifactsRoot, sourceSha, version }) {
 
 async function main() {
   const [mode] = process.argv.slice(2);
+  if (mode === "check-macos-minimum") {
+    const minimum = await checkMacDmgMinimum({ dmg: process.argv[3] });
+    console.log(`App minimum macOS ${minimum} verified`);
+    return;
+  }
   const shared = {
     sourceSha: process.env.EXPECTED_SHA,
     version: process.env.VERSION,

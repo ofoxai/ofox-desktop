@@ -4,7 +4,7 @@
 //! Uses Device Authorization Grant (RFC 8628).
 
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Manager, State};
 use tokio::sync::RwLock;
 
 use crate::services::balance_history::{self, BalanceTrend};
@@ -19,10 +19,24 @@ pub struct OfoxAuthState(pub Arc<RwLock<crate::ofox_auth::OfoxAuthManager>>);
 /// Returns device code info (user_code, verification_uri, etc.).
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ofox_start_login(
+    assistant_only: Option<bool>,
     state: State<'_, OfoxAuthState>,
 ) -> Result<crate::ofox_auth::OfoxDeviceCodeResponse, String> {
     let manager = state.0.read().await;
-    manager.start_device_flow().await
+    if assistant_only.unwrap_or(false) {
+        manager.start_device_flow_for(true).await
+    } else {
+        manager.start_device_flow().await
+    }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn ofox_cancel_login(
+    device_code: String,
+    state: State<'_, OfoxAuthState>,
+) -> Result<(), String> {
+    state.0.read().await.cancel_device_flow(&device_code).await;
+    Ok(())
 }
 
 /// Poll for device code approval.
@@ -31,11 +45,17 @@ pub async fn ofox_start_login(
 /// Errors: "slow_down", "access_denied", "expired_token"
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ofox_poll_for_token(
+    app: tauri::AppHandle,
     device_code: String,
     state: State<'_, OfoxAuthState>,
 ) -> Result<Option<crate::ofox_auth::OfoxUserInfo>, String> {
     let manager = state.0.read().await;
-    manager.poll_for_token(&device_code).await
+    let result = manager.poll_for_token(&device_code).await?;
+    if result.is_some() {
+        app.state::<crate::services::assistant::AssistantHost>()
+            .authorization_succeeded();
+    }
+    Ok(result)
 }
 
 /// Get Ofox user info (if authenticated).
@@ -149,8 +169,13 @@ pub async fn ofox_logout(
     app_handle: tauri::AppHandle,
     state: State<'_, OfoxAuthState>,
 ) -> Result<crate::services::account_keys::LogoutReport, String> {
+    let assistant_host = app_handle.try_state::<crate::services::assistant::AssistantHost>();
+    let logout_receipt = assistant_host.as_ref().map(|host| host.begin_logout());
     let report = crate::services::account_keys::stop_for_logout(&state.0).await;
     state.0.write().await.logout();
+    if let (Some(host), Some(receipt)) = (assistant_host.as_ref(), logout_receipt) {
+        host.finish_logout(receipt);
+    }
     crate::commands::model_selection::notify(&app_handle, report.stopped.clone());
     Ok(report)
 }

@@ -70,3 +70,6 @@ The optional catalog has a separate Copilot CLI lifecycle on macOS arm64, using 
 Unbound core CLIs and Goose also expose [copyable manual installation commands](install-catalog-commands.md), with shell and PowerShell recipes selected by host. Unknown hosts and download-only applications show explicit guide text. Copying does not execute an installer or alter binding state; the manual recipes do not extend automatic lifecycle support.
 
 Second-round library discovery adds ticket-scoped source inspection/reveal and metadata-only MCP comparison. Both positive and negative source proofs, definition revisions, routing and restore epoch fence those operations. Builtin recipe matches verify MCP definitions, instruction content or a skill's fixed provenance and artifact; they do not grant ownership. See [the workbench contract](library-workbench.md#第二轮添加定位与来源证据) for parsing, assignment and compatibility boundaries.
+
+
+The [built-in assistants](builtin-assistants.md) use a separate, bundled Pi SDK sidecar with Ofox-owned native history and account-scoped UI projections. They do not use the external Pi adapter or its global resource discovery. Configuration writes reuse the adapter services with an additional session authority and revision guard.

@@ -85,6 +85,7 @@ export interface OfoxDeviceCodeResponse {
   verification_uri_complete: string | null;
   expires_in: number;
   interval: number;
+  assistant_unavailable?: boolean;
 }
 
 /** Event name emitted by the backend when refresh_token is rejected. */
@@ -92,8 +93,10 @@ export const OFOX_AUTH_EXPIRED_EVENT = "ofox-auth-expired";
 /** Event name emitted by the backend after a successful re-login. */
 export const OFOX_AUTH_RESTORED_EVENT = "ofox-auth-restored";
 
-export async function ofoxStartLogin(): Promise<OfoxDeviceCodeResponse> {
-  return invoke<OfoxDeviceCodeResponse>("ofox_start_login");
+export async function ofoxStartLogin(
+  assistantOnly = false,
+): Promise<OfoxDeviceCodeResponse> {
+  return invoke<OfoxDeviceCodeResponse>("ofox_start_login", { assistantOnly });
 }
 
 export async function ofoxPollForToken(
@@ -144,4 +147,8 @@ export interface KeyReconcileReport {
 /** 让已绑定的工具都用当前账号的 API Key（换了账号或退出过登录时才会真的换）。 */
 export async function ofoxReconcileToolKeys(): Promise<KeyReconcileReport> {
   return invoke<KeyReconcileReport>("ofox_reconcile_tool_keys");
+}
+
+export function ofoxCancelLogin(deviceCode: string): Promise<void> {
+  return invoke<void>("ofox_cancel_login", { deviceCode });
 }

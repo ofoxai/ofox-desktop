@@ -84,7 +84,9 @@ pub(crate) fn next_analytics_identity() -> u64 {
 fn register_db_change_hook(conn: &Connection) {
     conn.update_hook(Some(
         |action: Action, _database: &str, table: &str, _row_id: i64| match action {
-            Action::SQLITE_INSERT | Action::SQLITE_UPDATE | Action::SQLITE_DELETE => {
+            Action::SQLITE_INSERT | Action::SQLITE_UPDATE | Action::SQLITE_DELETE
+                if crate::services::assistant::local_data::should_notify(table) =>
+            {
                 crate::services::webdav_auto_sync::notify_db_changed(table);
             }
             _ => {}

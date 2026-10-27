@@ -10,6 +10,7 @@ import { SegmentedControl } from "@/components/ui/segmented";
 import { ListCard, ListHead, ListRow } from "@/components/ui/list";
 import { Switch } from "@/components/ui/switch";
 import { settingsApi } from "@/lib/api";
+import { updateCompatibilityIssue } from "@/lib/updateCompatibility";
 import { ofoxLogout } from "@/lib/api/ofoxAuth";
 import { announceLogout } from "@/lib/accountKeys";
 import { useOfoxAuth } from "@/hooks/useOfoxAuth";
@@ -32,7 +33,7 @@ import type { Settings } from "@/types";
  *                   link to the Ofox website (it left the console footer)
  *
  * The "检查更新" button calls the Ofox-native self-hosted update check
- * (`check_for_updates` → desktop.ofox.ai/latest.json on Cloudflare R2), NOT
+ * (`check_for_updates` → desktop.ofox.ai/latest-v2.json on Cloudflare R2), NOT
  * cc-switch's old tauri-plugin-updater flow (whose endpoint points upstream).
  * New version → toast with a "前往下载" action; up-to-date → success toast.
  */
@@ -283,7 +284,7 @@ export default function OfoxSettingsDialog({
   }, [loggingOut, refetch, onOpenChange, t]);
 
   const handleCheckUpdate = useCallback(async () => {
-    // 查自托管清单（Cloudflare R2 上的 desktop.ofox.ai/latest.json），与当前
+    // 查自托管清单（Cloudflare R2 上的 desktop.ofox.ai/latest-v2.json），与当前
     // 版本比对；有新版引导用户手动下载，不做应用内自动安装。详见 `tool-release`
     // skill 与 `misc.rs::check_for_updates`。
     if (checkingUpdate) return;
@@ -320,7 +321,12 @@ export default function OfoxSettingsDialog({
       }
     } catch (e) {
       console.error("[OfoxSettingsDialog] checkUpdates failed", e);
-      toast.error(t("uiCopy.updateFailed"));
+      const issue = updateCompatibilityIssue(e);
+      toast.error(
+        issue
+          ? t(issue.key, { version: issue.version })
+          : t("uiCopy.updateFailed"),
+      );
     } finally {
       setCheckingUpdate(false);
     }

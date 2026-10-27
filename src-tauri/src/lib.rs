@@ -98,7 +98,7 @@ use std::sync::Arc;
 use tauri::image::Image;
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::RunEvent;
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Listener, Manager};
 
 fn redact_url_for_log(url_str: &str) -> String {
     match url::Url::parse(url_str) {
@@ -460,6 +460,9 @@ pub fn run() {
             }
 
             let app_state = AppState::new(db);
+            if let Err(error) = services::assistant::backup::recover_all(&app_state.db) {
+                log::error!("Assistant restore recovery pending: {error}");
+            }
 
             // 设置 AppHandle 用于代理故障转移时的 UI 更新
             app_state.proxy_service.set_app_handle(app.handle().clone());
@@ -921,6 +924,13 @@ pub fn run() {
             );
             // 将同一个实例注入到全局状态，避免重复创建导致的不一致
             app.manage(app_state);
+            app.manage(services::assistant::AssistantHost::default());
+            for event in ["ofox-auth-expired", "ofox-auth-restored", "ofox-reauth-requested", "ofox-apex-changed"] {
+                let handle=app.handle().clone();
+                app.listen(event,move |_| {
+                    if let Some(host)=handle.try_state::<services::assistant::AssistantHost>() { host.cancel_all(); }
+                });
+            }
 
             // 从数据库加载日志配置并应用
             {
@@ -1332,6 +1342,23 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::assistant_backup,
+            commands::assistant_preview_restore,
+            commands::assistant_restore,
+            commands::assistant_bootstrap,
+            commands::assistant_usage,
+            commands::assistant_list_sessions,
+            commands::assistant_create_session,
+            commands::assistant_get_session,
+            commands::assistant_update_session,
+            commands::assistant_send,
+            commands::assistant_stop,
+            commands::assistant_respond_approval,
+            commands::assistant_pick_attachments,
+            commands::assistant_save_memory,
+            commands::assistant_delete_memory,
+            commands::assistant_export_session,
+            commands::assistant_purge_session,
             commands::model_selection_snapshot,
             commands::model_selection_save,
             commands::model_effort_save,
@@ -1733,6 +1760,7 @@ pub fn run() {
             commands::is_lightweight_mode,
             // Ofox OAuth
             commands::ofox_auth::ofox_start_login,
+            commands::ofox_auth::ofox_cancel_login,
             commands::ofox_auth::ofox_poll_for_token,
             commands::ofox_auth::ofox_get_user_info,
             commands::ofox_auth::ofox_refresh_user_info,
@@ -1781,6 +1809,16 @@ pub fn run() {
         .expect("error while running tauri application");
 
     app.run(|app_handle, event| {
+        // macOS's predefined Quit uses applicationWillTerminate and can reach
+        // Exit directly, without ExitRequested. That callback must finish the
+        // assistant cleanup before returning; a spawned future may never run.
+        if matches!(&event, RunEvent::Exit) {
+            if let Some(host) = app_handle.try_state::<services::assistant::AssistantHost>() {
+                host.handle_terminal_exit(&event);
+            }
+            return;
+        }
+
         // 处理退出请求（所有平台）
         if let RunEvent::ExitRequested { api, code, .. } = &event {
             // code 为 None 表示运行时自动触发（如隐藏窗口的 WebView 被回收导致无存活窗口），
@@ -1794,6 +1832,9 @@ pub fn run() {
             }
 
             log::info!("收到用户主动退出请求 (code={code:?})，开始清理...");
+            if let Some(host) = app_handle.try_state::<services::assistant::AssistantHost>() {
+                host.begin_shutdown();
+            }
             api.prevent_exit();
 
             let app_handle = app_handle.clone();
@@ -1873,6 +1914,9 @@ pub fn run() {
 /// 确保 Claude Code/Codex/Gemini 的配置不会处于损坏状态。
 /// 使用 stop_with_restore_keep_state 保留 settings 表中的代理状态，下次启动时自动恢复。
 pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
+    if let Some(host) = app_handle.try_state::<services::assistant::AssistantHost>() {
+        host.shutdown().await;
+    }
     if let Some(state) = app_handle.try_state::<store::AppState>() {
         let proxy_service = &state.proxy_service;
 

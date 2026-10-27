@@ -1,6 +1,6 @@
 name: Release
 
-# 发版流程：打 tag → 构建 → 签名/公证 → 上传 R2 → 更新 latest.json
+# 发版流程：打 tag → 构建 → 签名/公证 → 上传 R2 → 更新两套清单
 #
 # 安全模型（公开仓库）：
 #   1. 只由 tag push 触发。fork 无法向本仓库推 tag，因此拿不到任何 secret。
@@ -193,6 +193,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Verify bundled assistant production closure
+        run: |
+          pnpm assistant:prepare
+          pnpm assistant:smoke
+
       # ── macOS：证书导入 ──────────────────────────────────────
       # 建临时 keychain 而非污染 runner 默认 keychain；always() 那步会清理。
       - name: Import Apple signing certificate
@@ -376,7 +381,7 @@ jobs:
           security delete-keychain "$RUNNER_TEMP/build.keychain-db" 2>/dev/null || true
 
   # ─────────────────────────────────────────────────────────────
-  # 发布：汇总各平台产物 → 上传 R2 → 合并更新 latest.json
+  # 发布：校验各平台产物 → 共用 R2 锁 → 不可变安装包与双清单条件写入
   # ─────────────────────────────────────────────────────────────
   verify-artifacts:
     name: Verify signed and notarized artifacts (including dry runs)
@@ -422,6 +427,9 @@ jobs:
 
   publish:
     name: Publish to R2
+    concurrency:
+      group: ofox-desktop-update-feeds
+      cancel-in-progress: false
     needs: [build, verify-artifacts]
     environment: release
     # Only publish the exact bytes approved by verify-artifacts; never re-sign/repack here.
@@ -470,142 +478,18 @@ jobs:
           } > ~/.aws/credentials
           chmod 600 ~/.aws/credentials
 
-      - name: Upload installers to R2
+      - name: Publish protected update feeds and immutable installers
         shell: bash
         env:
           ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
           ENDPOINT="https://${ACCOUNT_ID}.r2.cloudflarestorage.com"
-
-          # platform → R2 前缀、扩展名 → content-type。新增平台时在这里加一行。
-          # 用 case 而非关联数组：本任务跑在 macOS 上，系统 bash 是 3.2。
-          prefix_for() {
-            case "$1" in
-              darwin-aarch64) echo "release/mac/arm" ;;
-              windows-x86_64) echo "release/windows/x64" ;;
-              linux-x86_64) echo "release/linux/x64" ;;
-            esac
-          }
-          ctype_for() {
-            case "$1" in
-              dmg) echo "application/x-apple-diskimage" ;;
-              msi) echo "application/x-msi" ;;
-              exe) echo "application/vnd.microsoft.portable-executable" ;;
-              AppImage) echo "application/x-executable" ;;
-              *) echo "application/octet-stream" ;;
-            esac
-          }
-
-          for dir in artifacts/build-*; do
-            [ -d "$dir" ] || continue
-            platform="${dir#artifacts/build-}"
-            prefix="$(prefix_for "$platform")"
-            [ -z "$prefix" ] && { echo "❌ 未知平台 ${platform}，缺少 R2 前缀映射" >&2; exit 1; }
-
-            for file in "$dir"/*; do
-              [ -f "$file" ] || continue
-              fname=$(basename "$file")
-              ext="${fname##*.}"
-              ctype="$(ctype_for "$ext")"
-
-              echo "▶ ${fname} → r2://${BUCKET}/${prefix}/${fname}"
-              aws s3 cp "$file" "s3://${BUCKET}/${prefix}/${fname}" \
-                --endpoint-url "$ENDPOINT" \
-                --content-type "$ctype" \
-                --only-show-errors
-            done
-          done
-          echo "✅ 安装包上传完成"
-
-      # latest.json 必须「合并」而非「覆盖」：各平台可能在不同时间独立发版，
-      # 直接覆盖会抹掉其他平台的 downloads key。
-      - name: Update latest.json
-        shell: bash
-        env:
-          ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          set -euo pipefail
-          ENDPOINT="https://${ACCOUNT_ID}.r2.cloudflarestorage.com"
-
-          # 拉现有清单；不存在则从空对象起步
-          if aws s3 cp "s3://${BUCKET}/latest.json" old.json \
-               --endpoint-url "$ENDPOINT" --only-show-errors 2>/dev/null; then
-            echo "▶ 已拉取现有 latest.json"
-          else
-            echo '{}' > old.json
-            echo "▶ 无现有 latest.json，新建"
-          fi
-
-          # 本次构建覆盖了哪些平台
-          PLATFORMS=""
-          for dir in artifacts/build-*; do
-            [ -d "$dir" ] || continue
-            PLATFORMS="${PLATFORMS} ${dir#artifacts/build-}"
-          done
-
-          VERSION="$VERSION" BASE_URL="$BASE_URL" DOWNLOAD_PAGE="$DOWNLOAD_PAGE" \
-          PLATFORMS="$PLATFORMS" node <<'NODE' > latest.json
-          const fs = require('fs');
-          const old = JSON.parse(fs.readFileSync('old.json', 'utf8'));
-          const { VERSION, BASE_URL, DOWNLOAD_PAGE, PLATFORMS } = process.env;
-
-          const PREFIX = {
-            'darwin-aarch64': 'release/mac/arm',
-            'windows-x86_64': 'release/windows/x64',
-            'linux-x86_64':   'release/linux/x64',
-          };
-          const EXT = {
-            'darwin-aarch64': 'dmg',
-            'windows-x86_64': 'exe',
-            'linux-x86_64':   'AppImage',
-          };
-
-          // 保留其他平台既有条目，只更新本次构建的平台
-          const downloads = { ...(old.downloads || {}) };
-          for (const p of PLATFORMS.trim().split(/\s+/).filter(Boolean)) {
-            downloads[p] = `${BASE_URL}/${PREFIX[p]}/ofox_desktop_${VERSION}.${EXT[p]}`;
-          }
-
-          console.log(JSON.stringify({
-            version: VERSION,
-            pubDate: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
-            notes: old.notes ?? "",   // 默认留空，避免撑爆检查更新 toast
-            downloads,
-            downloadPage: DOWNLOAD_PAGE,
-          }, null, 2));
-          NODE
-
-          echo "▶ 新 latest.json:"
-          cat latest.json
-
-          aws s3 cp latest.json "s3://${BUCKET}/latest.json" \
-            --endpoint-url "$ENDPOINT" \
-            --content-type "application/json" \
-            --cache-control "no-cache, max-age=0" \
-            --only-show-errors
-          echo "✅ 清单已更新"
-
-      - name: Verify published manifest
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "▶ 拉取 ${BASE_URL}/latest.json"
-          # CDN 可能有短暂缓存，重试几次
-          for i in 1 2 3 4 5; do
-            PUBLISHED=$(curl -fsSL "${BASE_URL}/latest.json" || echo '{}')
-            GOT=$(echo "$PUBLISHED" | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version || ''" 2>/dev/null || echo "")
-            if [ "$GOT" = "$VERSION" ]; then
-              echo "$PUBLISHED"
-              echo "✅ 线上清单版本 = $VERSION"
-              exit 0
-            fi
-            echo "⏳ 线上仍为 '${GOT}'，等待 CDN 刷新 (${i}/5)..."
-            sleep 10
-          done
-          echo "⚠️ 线上清单未在预期时间内更新到 $VERSION —— 可能是 CDN 缓存，请手动核对" >&2
-          # 上传已成功，缓存滞后不应判定发版失败
-          exit 0
+          # The shared R2 lease also serializes emergency publishers.
+          # Planning and validation happen under the lease before installer writes.
+          node scripts/update-manifests.mjs publish --bucket "$BUCKET" --endpoint "$ENDPOINT" \
+            --version "$VERSION" --source-sha "$GITHUB_SHA" --artifacts-root artifacts \
+            --pub-date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --output update-feeds
 
       # 把 R2 上的同一份安装包挂到 GitHub Release，tag 页面上就能直接下载。
       - name: Create GitHub Release
@@ -669,7 +553,8 @@ jobs:
             echo ""
             echo "| 项 | 值 |"
             echo "| --- | --- |"
-            echo "| 清单 | ${BASE_URL}/latest.json |"
+            echo "| 新清单 | ${BASE_URL}/latest-v2.json |"
+            echo "| 旧清单（Mac 保留 1.3.8） | ${BASE_URL}/latest.json |"
             for dir in artifacts/build-*; do
               [ -d "$dir" ] || continue
               for f in "$dir"/*; do

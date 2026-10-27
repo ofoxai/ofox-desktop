@@ -74,7 +74,7 @@ export const settingsApi = {
     return await invoke("restart_app");
   },
 
-  /** 检查 Ofox Desktop 自身更新（拉 R2 的 latest.json 比对版本）。
+  /** 检查 Ofox Desktop 自身更新（拉 R2 的 latest-v2.json 比对版本）。
    *  本应用不做自动安装——返回结果由前端引导用户手动下载。 */
   async checkUpdates(): Promise<UpdateCheckResult> {
     return await invoke("check_for_updates");

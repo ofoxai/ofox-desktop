@@ -54,14 +54,18 @@ pub async fn copy_text_to_clipboard(text: String) -> Result<bool, String> {
 
 /// Ofox Desktop 自托管更新清单地址（Cloudflare R2 + 自定义域）。
 /// 结构见 `scripts/release.sh` 与 `tool-release` skill。
-const OFOX_UPDATE_MANIFEST_URL: &str = "https://desktop.ofox.ai/latest.json";
+const OFOX_UPDATE_MANIFEST_URL: &str = "https://desktop.ofox.ai/latest-v2.json";
 
-/// `latest.json` 的反序列化结构。`downloads` 的 key 形如 `darwin-aarch64`，
+/// v2 清单的反序列化结构。`downloads` 的 key 形如 `darwin-aarch64`，
 /// 与 `current_platform_key()` 对齐。发布脚本写的是 camelCase（`pubDate`、
 /// `downloadPage`），旧的 snake_case 字段名仍然兼容。
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UpdateManifest {
+    #[serde(default)]
+    schema_version: Option<u32>,
+    #[serde(default, rename = "minimumMacOS")]
+    minimum_mac_os: Option<String>,
     version: String,
     #[serde(default, alias = "pub_date")]
     pub_date: Option<String>,
@@ -113,7 +117,7 @@ fn is_newer(latest: &str, current: &str) -> bool {
     parse(latest) > parse(current)
 }
 
-/// 检查更新：拉取 R2 上的 `latest.json`，与当前版本比对，返回结构化结果。
+/// 检查更新：只拉取 R2 上的 `latest-v2.json`，与当前版本比对，返回结构化结果。
 /// 前端据此弹"前往下载"提示——本应用不做自动安装，引导用户手动下载。
 #[tauri::command]
 pub async fn check_for_updates() -> Result<UpdateCheckResult, String> {
@@ -130,11 +134,17 @@ pub async fn check_for_updates() -> Result<UpdateCheckResult, String> {
         .await
         .map_err(|e| format!("解析更新清单失败: {e}"))?;
 
-    Ok(resolve_update(
+    #[cfg(target_os = "macos")]
+    let system_version = macos_product_version().await;
+    #[cfg(not(target_os = "macos"))]
+    let system_version: Option<String> = None;
+
+    resolve_modern_update(
         manifest,
         &current_version,
         &manifest_platform_key(),
-    ))
+        system_version.as_deref(),
+    )
 }
 
 /// 清单与当前版本、平台比对。命中当前平台的直链；否则回退到通用下载页。
@@ -161,6 +171,73 @@ fn resolve_update(
         notes: manifest.notes,
         pub_date: manifest.pub_date,
     }
+}
+
+fn resolve_modern_update(
+    manifest: UpdateManifest,
+    current_version: &str,
+    platform_key: &str,
+    system_version: Option<&str>,
+) -> Result<UpdateCheckResult, String> {
+    if manifest.schema_version != Some(2) {
+        return Err("invalidUpdateManifest".into());
+    }
+    let minimum = manifest
+        .minimum_mac_os
+        .as_deref()
+        .and_then(parse_macos_version)
+        .ok_or("invalidUpdateManifest")?;
+    if platform_key.starts_with("darwin-") {
+        let current = system_version
+            .and_then(parse_macos_version)
+            .ok_or("updateCompatibilityUnknown")?;
+        if current < minimum {
+            return Err(format!(
+                "updateRequiresMacOS:{}",
+                manifest.minimum_mac_os.as_deref().unwrap_or_default()
+            ));
+        }
+    }
+    if !manifest.downloads.contains_key(platform_key) {
+        return Err("invalidUpdateManifest".into());
+    }
+    Ok(resolve_update(manifest, current_version, platform_key))
+}
+
+fn parse_macos_version(value: &str) -> Option<[u64; 3]> {
+    let parts: Vec<_> = value.split('.').collect();
+    if !(2..=3).contains(&parts.len()) {
+        return None;
+    }
+    let mut result = [0; 3];
+    for (index, part) in parts.into_iter().enumerate() {
+        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        result[index] = part.parse().ok()?;
+    }
+    Some(result)
+}
+
+#[cfg(target_os = "macos")]
+async fn macos_product_version() -> Option<String> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::process::Command::new("/usr/bin/sw_vers")
+            .arg("-productVersion")
+            .env_clear()
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    parse_macos_version(&value)?;
+    Some(value)
 }
 
 /// 判断是否为便携版（绿色版）运行
@@ -1543,7 +1620,7 @@ fn node_manager_bin_dirs(
 }
 
 /// 扫描常见路径查找 CLI
-fn cli_search_paths(tool: &str) -> (Vec<PathBuf>, String, Option<String>) {
+pub(crate) fn cli_search_paths(tool: &str) -> (Vec<PathBuf>, String, Option<String>) {
     let home = crate::config::try_get_home_dir().unwrap_or_default();
 
     // 常见的安装路径（原生安装优先）
@@ -2774,6 +2851,75 @@ mod tests {
         assert!(!result.has_update);
         let result = resolve_update(manifest(&lagging), "1.3.4", "darwin-aarch64");
         assert!(result.has_update);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn native_macos_product_version_is_available_for_update_gating() {
+        let version = macos_product_version()
+            .await
+            .expect("sw_vers product version");
+        assert!(parse_macos_version(&version).is_some());
+    }
+
+    const MODERN_MANIFEST: &str = r#"{
+      "schemaVersion": 2, "minimumMacOS": "13.5", "version": "1.3.9",
+      "downloads": {
+        "darwin-aarch64": "https://desktop.ofox.ai/release/mac/arm/ofox_desktop_1.3.9.dmg",
+        "windows-x86_64": "https://desktop.ofox.ai/release/windows/x64/ofox_desktop_1.3.9.exe"
+      }
+    }"#;
+
+    #[test]
+    fn modern_feed_requires_schema_and_minimum_metadata() {
+        let legacy = manifest(RELEASED_MANIFEST);
+        assert!(resolve_modern_update(legacy, "1.3.8", "darwin-aarch64", Some("26.5.1")).is_err());
+        for minimum in ["unknown", "", "13", "13.5.1.2"] {
+            let text = MODERN_MANIFEST.replace("\"13.5\"", &format!("\"{minimum}\""));
+            assert!(resolve_modern_update(
+                manifest(&text),
+                "1.3.8",
+                "darwin-aarch64",
+                Some("26.5.1")
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn modern_feed_never_offers_an_incompatible_or_unverified_mac_package() {
+        for current in [None, Some("12.0"), Some("13.4.9"), Some("unknown")] {
+            assert!(resolve_modern_update(
+                manifest(MODERN_MANIFEST),
+                "1.3.8",
+                "darwin-aarch64",
+                current
+            )
+            .is_err());
+        }
+        for current in ["13.5", "13.5.0", "14.0", "26.5.1"] {
+            let result = resolve_modern_update(
+                manifest(MODERN_MANIFEST),
+                "1.3.8",
+                "darwin-aarch64",
+                Some(current),
+            )
+            .unwrap();
+            assert!(result.has_update);
+            assert!(result.download_url.unwrap().ends_with("_1.3.9.dmg"));
+        }
+    }
+
+    #[test]
+    fn dual_feed_keeps_old_mac_quiet_and_old_windows_updating() {
+        let pinned = MODERN_MANIFEST.replace("_1.3.9.dmg", "_1.3.8.dmg");
+        assert!(!resolve_update(manifest(&pinned), "1.3.8", "darwin-aarch64").has_update);
+        assert!(resolve_update(manifest(&pinned), "1.3.8", "windows-x86_64").has_update);
+        assert!(
+            resolve_modern_update(manifest(MODERN_MANIFEST), "1.3.8", "windows-x86_64", None)
+                .unwrap()
+                .has_update
+        );
     }
 
     #[test]

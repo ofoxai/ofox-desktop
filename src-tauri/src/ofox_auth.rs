@@ -29,9 +29,9 @@ use tokio::sync::RwLock;
 // 切换 apex 后下一次请求立刻走新地址，不需要重启进程。
 // `apikey.write` 让我们能调 `POST/GET/PATCH/DELETE /openapi/api-keys`，
 // 给每个工具按 slug 单独签发一把 `sk-of-...` LLM key，写进工具真实配置文件。
-// `llm.read` / `llm.invoke` 当前都没被消费——chat/completions 这条链直连
-// LLM gateway，认证用 sk-of- key，不依赖 OAuth access_token 的 scope。
-const OFOX_SCOPES: &str = "org.read balance.read apikey.write offline_access";
+// 内置助手使用 llm.invoke；旧 token 必须重新授权，刷新不能扩大已有 scope。
+const OFOX_LEGACY_SCOPES: &str = "org.read balance.read apikey.write offline_access";
+const OFOX_SCOPES: &str = "org.read balance.read apikey.write offline_access llm.invoke";
 
 /// 线上 OAuth client（public client，无 client_secret）。在 ofox.io / ofox.ai 的
 /// OAuth app 后台注册为 `is_confidential=false`，device flow RFC 8628 §3.1 标准用法。
@@ -195,6 +195,8 @@ pub struct OfoxDeviceCodeResponse {
     pub verification_uri_complete: Option<String>,
     pub expires_in: u64,
     pub interval: u64,
+    #[serde(default)]
+    pub assistant_unavailable: bool,
 }
 
 /// 当前 metadata 文件的 schema 版本。
@@ -251,6 +253,10 @@ struct LegacyOfoxTokenStore {
 #[derive(Debug, Clone)]
 struct PendingDeviceCode {
     expires_at_ms: i64,
+    scope: String,
+    expected_owner: Option<String>,
+    generation: u64,
+    apex: String,
 }
 
 struct CachedAccessToken {
@@ -289,6 +295,8 @@ pub struct OfoxAuthManager {
     storage_path: PathBuf,
     access_token: Arc<RwLock<Option<CachedAccessToken>>>,
     refresh_token: Arc<RwLock<Option<String>>>,
+    granted_scope: std::sync::RwLock<String>,
+    auth_generation: std::sync::atomic::AtomicU64,
     user_info: Arc<RwLock<Option<OfoxUserInfo>>>,
     /// Authoritative auth state for the UI. Transitions:
     ///   LoggedOut → Active     (successful device flow)
@@ -332,6 +340,8 @@ impl OfoxAuthManager {
             storage_path,
             access_token: Arc::new(RwLock::new(None)),
             refresh_token: Arc::new(RwLock::new(None)),
+            granted_scope: std::sync::RwLock::new(String::new()),
+            auth_generation: std::sync::atomic::AtomicU64::new(0),
             user_info: Arc::new(RwLock::new(None)),
             auth_state: Arc::new(RwLock::new(OfoxAuthState::LoggedOut)),
             refresh_lock: tokio::sync::Mutex::new(()),
@@ -382,44 +392,165 @@ impl OfoxAuthManager {
     ///
     /// Returns device code info including user_code and verification_uri.
     pub async fn start_device_flow(&self) -> Result<OfoxDeviceCodeResponse, String> {
-        let response = self
-            .http_client
-            .post(crate::ofox_apex::device_auth_url())
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .form(&[("client_id", client_id()), ("scope", OFOX_SCOPES)])
-            .send()
+        self.start_device_flow_for(false).await
+    }
+    pub async fn start_device_flow_for(
+        &self,
+        assistant_only: bool,
+    ) -> Result<OfoxDeviceCodeResponse, String> {
+        self.start_device_flow_with(&crate::ofox_apex::device_auth_url(), assistant_only)
             .await
-            .map_err(|e| format!("Device authorization request failed: {e}"))?;
-
-        if !response.status().is_success() {
+    }
+    #[cfg(test)]
+    async fn start_device_flow_at(&self, url: &str) -> Result<OfoxDeviceCodeResponse, String> {
+        self.start_device_flow_with(url, false).await
+    }
+    async fn start_device_flow_with(
+        &self,
+        url: &str,
+        assistant_only: bool,
+    ) -> Result<OfoxDeviceCodeResponse, String> {
+        let expected_owner = if assistant_only {
+            let owner = self
+                .current_key_owner()
+                .await
+                .ok_or("assistant_sign_in_required")?;
+            Some(crate::services::assistant::store::namespace(
+                owner.user_id.as_deref().unwrap_or(""),
+                owner.org_id.as_deref().unwrap_or(""),
+            )?)
+        } else {
+            None
+        };
+        let generation = self
+            .auth_generation
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let apex = crate::ofox_apex::current_apex().to_string();
+        let mut scope = OFOX_SCOPES;
+        let mut resp = loop {
+            let response = self
+                .http_client
+                .post(url)
+                .form(&[("client_id", client_id()), ("scope", scope)])
+                .send()
+                .await
+                .map_err(|_| "Device authorization request failed")?;
+            if response.status().is_success() {
+                break response
+                    .json::<OfoxDeviceCodeResponse>()
+                    .await
+                    .map_err(|_| "Invalid device authorization response")?;
+            }
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(format!("Device authorization failed: {status} - {text}"));
-        }
-
-        let resp: OfoxDeviceCodeResponse = response
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse device authorization response: {e}"))?;
-
-        // Store pending device code
-        let expires_at_ms = chrono::Utc::now().timestamp_millis() + (resp.expires_in as i64) * 1000;
+            let error = response.json::<OAuthErrorResponse>().await.ok();
+            if !assistant_only
+                && scope == OFOX_SCOPES
+                && status == reqwest::StatusCode::BAD_REQUEST
+                && error.as_ref().is_some_and(|e| e.error == "invalid_scope")
+            {
+                scope = OFOX_LEGACY_SCOPES;
+                continue;
+            }
+            return Err(error
+                .map(|e| e.error)
+                .unwrap_or_else(|| format!("Device authorization failed: {status}")));
+        };
+        if generation
+            != self
+                .auth_generation
+                .load(std::sync::atomic::Ordering::SeqCst)
+            || apex != crate::ofox_apex::current_apex()
         {
-            let mut pending = self.pending_device_codes.write().await;
-            // Clean expired entries
-            let now_ms = chrono::Utc::now().timestamp_millis();
-            pending.retain(|_, entry| entry.expires_at_ms > now_ms);
-            pending.insert(
-                resp.device_code.clone(),
-                PendingDeviceCode { expires_at_ms },
-            );
+            return Err("assistant_identity_changed".into());
         }
-
-        log::info!(
-            "[OfoxAuth] Device flow started, user_code: {}",
-            resp.user_code
+        resp.assistant_unavailable = scope == OFOX_LEGACY_SCOPES;
+        let expires_at_ms = chrono::Utc::now()
+            .timestamp_millis()
+            .saturating_add((resp.expires_in.min(86_400) as i64) * 1000);
+        let mut pending = self.pending_device_codes.write().await;
+        let now = chrono::Utc::now().timestamp_millis();
+        pending.retain(|_, item| item.expires_at_ms > now);
+        pending.insert(
+            resp.device_code.clone(),
+            PendingDeviceCode {
+                expires_at_ms,
+                scope: scope.into(),
+                expected_owner,
+                generation,
+                apex,
+            },
         );
         Ok(resp)
+    }
+    pub async fn cancel_device_flow(&self, device_code: &str) {
+        self.pending_device_codes.write().await.remove(device_code);
+    }
+
+    fn save_additional_grant(
+        &self,
+        token: &OAuthTokenResponse,
+        expires: i64,
+        scope: &str,
+        user: &OfoxUserInfo,
+    ) -> Result<(), String> {
+        use crate::ofox_secret::Slot;
+        // Snapshot before changing either store. A failed/cancelled upgrade never
+        // clears the working in-memory account or intentionally signs it out.
+        let old_at = self
+            .secret_store
+            .load(Slot::AccessToken)
+            .map_err(|_| "assistant_authorization_persist_failed")?;
+        let old_rt = self
+            .secret_store
+            .load(Slot::RefreshToken)
+            .map_err(|_| "assistant_authorization_persist_failed")?;
+        let metadata = match std::fs::read(&self.storage_path) {
+            Ok(bytes) => Some(bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => return Err("assistant_authorization_persist_failed".into()),
+        };
+        let old_scope = self
+            .granted_scope
+            .read()
+            .map_err(|_| "scope_lock_failed")?
+            .clone();
+        if self
+            .save_to_disk(
+                &token.access_token,
+                token.refresh_token.as_deref(),
+                expires,
+                scope,
+                Some(user),
+                false,
+            )
+            .is_ok()
+        {
+            return Ok(());
+        }
+        let mut restored = true;
+        for (slot, value) in [(Slot::RefreshToken, old_rt), (Slot::AccessToken, old_at)] {
+            restored &= match value {
+                Some(value) => self.secret_store.save(slot, &value),
+                None => self.secret_store.clear(slot),
+            }
+            .is_ok();
+        }
+        restored &= match metadata {
+            Some(bytes) => crate::config::atomic_write(&self.storage_path, &bytes).is_ok(),
+            None => match std::fs::remove_file(&self.storage_path) {
+                Ok(()) => true,
+                Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+            },
+        };
+        if let Ok(mut grant) = self.granted_scope.write() {
+            *grant = old_scope;
+        }
+        Err(if restored {
+            "assistant_authorization_persist_failed"
+        } else {
+            "assistant_authorization_persist_rollback_failed"
+        }
+        .into())
     }
 
     /// Poll the token endpoint for device code approval.
@@ -431,24 +562,43 @@ impl OfoxAuthManager {
     /// - `Err("access_denied")` — user denied
     /// - `Err("expired_token")` — device code expired
     pub async fn poll_for_token(&self, device_code: &str) -> Result<Option<OfoxUserInfo>, String> {
-        // Verify device code is pending
-        {
-            let pending = self.pending_device_codes.read().await;
-            let entry = pending
-                .get(device_code)
-                .ok_or_else(|| "Unknown device code. Please restart login.".to_string())?;
-
-            if entry.expires_at_ms <= chrono::Utc::now().timestamp_millis() {
-                drop(pending);
-                let mut pending = self.pending_device_codes.write().await;
-                pending.remove(device_code);
-                return Err("expired_token".to_string());
-            }
+        self.poll_for_token_at(
+            device_code,
+            &crate::ofox_apex::token_url(),
+            &crate::ofox_apex::user_info_url(),
+            true,
+        )
+        .await
+    }
+    async fn poll_for_token_at(
+        &self,
+        device_code: &str,
+        token_url: &str,
+        profile_url: &str,
+        fetch_balance: bool,
+    ) -> Result<Option<OfoxUserInfo>, String> {
+        let entry = self
+            .pending_device_codes
+            .read()
+            .await
+            .get(device_code)
+            .cloned()
+            .ok_or("authorization_cancelled")?;
+        if entry.expires_at_ms <= chrono::Utc::now().timestamp_millis() {
+            self.cancel_device_flow(device_code).await;
+            return Err("expired_token".into());
         }
-
+        if entry.generation
+            != self
+                .auth_generation
+                .load(std::sync::atomic::Ordering::SeqCst)
+            || entry.apex != crate::ofox_apex::current_apex()
+        {
+            return Err("assistant_identity_changed".into());
+        }
         let response = self
             .http_client
-            .post(crate::ofox_apex::token_url())
+            .post(token_url)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .form(&[
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
@@ -468,83 +618,107 @@ impl OfoxAuthManager {
                 .await
                 .map_err(|e| format!("Failed to parse token response: {e}"))?;
 
-            // Remove from pending
-            {
-                let mut pending = self.pending_device_codes.write().await;
-                pending.remove(device_code);
-            }
-
             let expires_at_ms = compute_expires_at_ms(token_resp.expires_in);
-
-            // Store tokens
-            {
-                let mut at = self.access_token.write().await;
-                *at = Some(CachedAccessToken {
-                    token: token_resp.access_token.clone(),
-                    expires_at_ms,
-                });
-            }
-            {
-                let mut rt = self.refresh_token.write().await;
-                *rt = token_resp.refresh_token.clone();
-            }
-
-            // Fetch user info. Failure here is **non-fatal** — the tokens
-            // we just stored are valid, the OAuth handshake is complete, and
-            // the only thing that didn't load is the profile/balance bundle.
-            // Treat that as a transient network glitch: keep an empty user
-            // placeholder, still transition to Active, and let
-            // `ofox_get_user_info` (which already has cache fallback in
-            // `commands/ofox_auth.rs`) fill the gap on the next call.
-            //
-            // Pre-fix: a `?` here propagated the error all the way up to
-            // the LoginPage's poll loop, which silently swallowed it. Tokens
-            // were on disk but the UI was stuck — `set_state(Active)` and
-            // `emit("ofox-auth-restored")` below never ran, and the device
-            // code (already consumed by the upstream) couldn't be polled
-            // again. Net effect: the user got stuck on the spinner forever.
-            let user = match self.get_user_info_from_api(&token_resp.access_token).await {
-                Ok(u) => u,
-                Err(e) => {
-                    log::warn!(
-                        "[OfoxAuth] device login: tokens stored OK, but \
-                         /openapi/me failed ({e}). Continuing with empty \
-                         profile; will be filled on next refresh."
-                    );
-                    OfoxUserInfo {
-                        id: None,
-                        email: None,
-                        name: None,
-                        org_id: None,
-                        avatar_url: None,
-                        role: None,
-                        balance: None,
-                        spending: None,
-                    }
-                }
+            // Probe the proposed credential without expiring or changing the old
+            // account. An additional grant must verify the same user AND org.
+            let profile = self
+                .fetch_user_profile(
+                    &token_resp.access_token,
+                    profile_url,
+                    entry.expected_owner.is_none(),
+                )
+                .await;
+            let mut user = match profile {
+                Ok(user) => user,
+                Err(error) if entry.expected_owner.is_some() => return Err(error),
+                Err(_) => OfoxUserInfo {
+                    id: None,
+                    email: None,
+                    name: None,
+                    org_id: None,
+                    avatar_url: None,
+                    role: None,
+                    balance: None,
+                    spending: None,
+                },
             };
-            {
-                let mut ui = self.user_info.write().await;
-                *ui = Some(user.clone());
+            if let Some(expected) = &entry.expected_owner {
+                let owner = user.key_owner();
+                if crate::services::assistant::store::namespace(
+                    owner.user_id.as_deref().unwrap_or(""),
+                    owner.org_id.as_deref().unwrap_or(""),
+                )? != *expected
+                {
+                    return Err("assistant_authorization_identity_mismatch".into());
+                }
+                user.balance = self
+                    .user_info
+                    .read()
+                    .await
+                    .as_ref()
+                    .and_then(|u| u.balance.clone());
+            } else if fetch_balance {
+                if let Ok(balance) = self.fetch_balance(&token_resp.access_token).await {
+                    user.balance = Some(balance);
+                }
             }
-
-            // Transition to Active and emit a restored event so any UI sitting on
-            // an expired banner can drop it immediately.
-            let prev_state = self.set_state(OfoxAuthState::Active).await;
-            if prev_state != OfoxAuthState::Active {
+            let _refresh = self.refresh_lock.lock().await;
+            let mut pending = self.pending_device_codes.write().await;
+            if !pending.contains_key(device_code) {
+                return Err("authorization_cancelled".into());
+            }
+            if entry.generation
+                != self
+                    .auth_generation
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                || entry.apex != crate::ofox_apex::current_apex()
+            {
+                return Err("assistant_identity_changed".into());
+            }
+            if let Some(expected) = &entry.expected_owner {
+                let current = self
+                    .current_key_owner()
+                    .await
+                    .ok_or("assistant_identity_changed")?;
+                if crate::services::assistant::store::namespace(
+                    current.user_id.as_deref().unwrap_or(""),
+                    current.org_id.as_deref().unwrap_or(""),
+                )? != *expected
+                {
+                    return Err("assistant_identity_changed".into());
+                }
+            }
+            let scope = token_resp.scope.as_deref().unwrap_or(&entry.scope);
+            if entry.expected_owner.is_some()
+                && !scope.split_whitespace().any(|s| s == "llm.invoke")
+            {
+                return Err("assistant_reauthorization_required".into());
+            }
+            if entry.expected_owner.is_some() {
+                self.save_additional_grant(&token_resp, expires_at_ms, scope, &user)?;
+            } else {
+                self.save_to_disk(
+                    &token_resp.access_token,
+                    token_resp.refresh_token.as_deref(),
+                    expires_at_ms,
+                    scope,
+                    Some(&user),
+                    false,
+                )?;
+            }
+            *self.access_token.write().await = Some(CachedAccessToken {
+                token: token_resp.access_token.clone(),
+                expires_at_ms,
+            });
+            *self.refresh_token.write().await = token_resp.refresh_token.clone();
+            *self.user_info.write().await = Some(user.clone());
+            pending.remove(device_code);
+            self.auth_generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let previous = self.set_state(OfoxAuthState::Active).await;
+            if previous != OfoxAuthState::Active {
                 self.emit_state_event("ofox-auth-restored").await;
             }
-
-            // Persist
-            self.save_to_disk(
-                &token_resp.access_token,
-                token_resp.refresh_token.as_deref(),
-                expires_at_ms,
-                token_resp.scope.as_deref().unwrap_or(OFOX_SCOPES),
-                Some(&user),
-                false,
-            )?;
-
             // Notify the token-refresh listener (lib.rs) so it pushes the
             // freshly-issued access_token into every `ofox-*` provider's
             // settings_config. Without this, a re-login after logout (or a
@@ -712,11 +886,27 @@ impl OfoxAuthManager {
 
         let current_rt = self.refresh_token.read().await.clone();
         let current_user = self.user_info.read().await.clone();
+        // A refresh never grants newly requested scopes. Servers omitting
+        // `scope` retain the previous grant (RFC 6749 section 6).
+        let previous_scope = self
+            .granted_scope
+            .read()
+            .map_err(|_| "scope_lock_failed")?
+            .clone();
+        let refresh_scope = if let Some(reported) = token_resp.scope.as_deref() {
+            previous_scope
+                .split_whitespace()
+                .filter(|scope| reported.split_whitespace().any(|value| value == *scope))
+                .collect::<Vec<_>>()
+                .join(" ")
+        } else {
+            previous_scope
+        };
         self.save_to_disk(
             &token_resp.access_token,
             current_rt.as_deref(),
             expires_at_ms,
-            token_resp.scope.as_deref().unwrap_or(OFOX_SCOPES),
+            &refresh_scope,
             current_user.as_ref(),
             false,
         )?;
@@ -782,10 +972,18 @@ impl OfoxAuthManager {
 
     // ==================== User Info ====================
 
-    async fn get_user_info_from_api(&self, access_token: &str) -> Result<OfoxUserInfo, String> {
+    async fn fetch_user_profile(
+        &self,
+        access_token: &str,
+        url: &str,
+        expire_current: bool,
+    ) -> Result<OfoxUserInfo, String> {
+        let generation = self
+            .auth_generation
+            .load(std::sync::atomic::Ordering::SeqCst);
         let response = self
             .http_client
-            .get(crate::ofox_apex::user_info_url())
+            .get(url)
             .header("Authorization", format!("Bearer {access_token}"))
             .send()
             .await
@@ -793,37 +991,60 @@ impl OfoxAuthManager {
 
         let status = response.status();
         if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
             // 401/403 from the resource server means our token isn't being
             // honored — typically a server-side revocation. Surface as expired
             // so the UI prompts for re-auth instead of silently retrying.
             if status == reqwest::StatusCode::UNAUTHORIZED
                 || status == reqwest::StatusCode::FORBIDDEN
             {
-                log::warn!(
-                    "[OfoxAuth] /openapi/me returned {status}, marking session expired: {text}"
-                );
-                self.mark_expired().await;
+                if expire_current {
+                    let _lock = self.refresh_lock.lock().await;
+                    if generation
+                        == self
+                            .auth_generation
+                            .load(std::sync::atomic::Ordering::SeqCst)
+                        && self
+                            .access_token
+                            .read()
+                            .await
+                            .as_ref()
+                            .is_some_and(|cached| cached.token == access_token)
+                    {
+                        log::warn!("[OfoxAuth] current profile request returned {status}");
+                        self.mark_expired().await;
+                    }
+                }
                 return Err("session_expired".to_string());
             }
-            return Err(format!("User info request failed: {status} - {text}"));
+            return Err(format!("User info request failed: {status}"));
         }
 
-        let mut user: OfoxUserInfo = response
+        let user: OfoxUserInfo = response
             .json()
             .await
             .map_err(|e| format!("Failed to parse user info: {e}"))?;
 
+        Ok(user)
+    }
+
+    async fn get_user_info_from_api_at(
+        &self,
+        access_token: &str,
+        url: &str,
+        with_balance: bool,
+    ) -> Result<OfoxUserInfo, String> {
+        let mut user = self.fetch_user_profile(access_token, url, true).await?;
         // Best-effort balance fetch — a balance failure must not bring the
         // entire login flow down (a fresh org may not have wallet data yet,
         // or `balance.read` scope may have been denied).
-        match self.fetch_balance(access_token).await {
-            Ok(balance) => user.balance = Some(balance),
-            Err(e) => {
-                log::warn!("[OfoxAuth] balance fetch failed (non-fatal): {e}");
+        if with_balance {
+            match self.fetch_balance(access_token).await {
+                Ok(balance) => user.balance = Some(balance),
+                Err(e) => {
+                    log::warn!("[OfoxAuth] balance fetch failed (non-fatal): {e}");
+                }
             }
         }
-
         // NOTE: spending-limits fetch is intentionally NOT chained in here.
         // The endpoint tracks *configured caps*, not month-to-date usage,
         // so it can't satisfy the "本月消耗" card. `get_spending` is called on
@@ -919,6 +1140,12 @@ impl OfoxAuthManager {
         self.user_info.try_read().ok().and_then(|ui| ui.clone())
     }
 
+    pub fn has_scope(&self, scope: &str) -> bool {
+        self.granted_scope
+            .read()
+            .is_ok_and(|granted| granted.split_whitespace().any(|value| value == scope))
+    }
+
     /// 当前登录的是哪个账号（API key 按它的组织计费）。没登录或还没取到
     /// 用户信息时为 `None`。
     pub async fn current_key_owner(&self) -> Option<crate::settings::KeyOwner> {
@@ -955,31 +1182,69 @@ impl OfoxAuthManager {
     /// Fetch fresh user info from the API, refreshing the access token if needed,
     /// then update the in-memory cache and persist to disk.
     pub async fn refresh_user_info(&self) -> Result<OfoxUserInfo, String> {
+        self.refresh_user_info_at(&crate::ofox_apex::user_info_url(), true)
+            .await
+    }
+    async fn refresh_user_info_at(
+        &self,
+        url: &str,
+        with_balance: bool,
+    ) -> Result<OfoxUserInfo, String> {
         let access_token = self.get_valid_access_token().await?;
-        let user = self.get_user_info_from_api(&access_token).await?;
+        let generation = self
+            .auth_generation
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let user = self
+            .get_user_info_from_api_at(&access_token, url, with_balance)
+            .await?;
 
+        let _lock = self.refresh_lock.lock().await;
+        if generation
+            != self
+                .auth_generation
+                .load(std::sync::atomic::Ordering::SeqCst)
+            || self
+                .access_token
+                .read()
+                .await
+                .as_ref()
+                .is_none_or(|cached| cached.token != access_token)
         {
-            let mut ui = self.user_info.write().await;
-            *ui = Some(user.clone());
+            return Err("auth_session_changed".into());
         }
-
+        let previous_owner = self
+            .user_info
+            .read()
+            .await
+            .as_ref()
+            .map(OfoxUserInfo::key_owner);
         // Persist alongside current tokens
         let current_at = {
             let at = self.access_token.read().await;
             at.as_ref().map(|c| (c.token.clone(), c.expires_at_ms))
         };
         let current_rt = self.refresh_token.read().await.clone();
+        let current_scope = self
+            .granted_scope
+            .read()
+            .map_err(|_| "scope_lock_failed")?
+            .clone();
         if let Some((at_token, expires_at_ms)) = current_at {
             self.save_to_disk(
                 &at_token,
                 current_rt.as_deref(),
                 expires_at_ms,
-                OFOX_SCOPES,
+                &current_scope,
                 Some(&user),
                 false,
             )?;
         }
 
+        if previous_owner != Some(user.key_owner()) {
+            self.auth_generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        *self.user_info.write().await = Some(user.clone());
         Ok(user)
     }
 
@@ -1030,11 +1295,16 @@ impl OfoxAuthManager {
         // Persist the expired flag so a restart doesn't try to refresh again.
         let current_rt = self.refresh_token.read().await.clone();
         let current_user = self.user_info.read().await.clone();
+        let current_scope = self
+            .granted_scope
+            .read()
+            .map(|s| s.clone())
+            .unwrap_or_default();
         if let Err(e) = self.save_to_disk(
             "",
             current_rt.as_deref(),
             0,
-            OFOX_SCOPES,
+            &current_scope,
             current_user.as_ref(),
             true,
         ) {
@@ -1057,6 +1327,14 @@ impl OfoxAuthManager {
     }
 
     pub fn logout(&mut self) {
+        self.auth_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut pending) = self.pending_device_codes.try_write() {
+            pending.clear();
+        }
+        if let Ok(mut scope) = self.granted_scope.write() {
+            scope.clear();
+        }
         if let Ok(mut at) = self.access_token.try_write() {
             *at = None;
         }
@@ -1149,6 +1427,11 @@ impl OfoxAuthManager {
         crate::config::atomic_write(&self.storage_path, data.as_bytes())
             .map_err(|e| format!("Failed to write auth file: {e}"))?;
 
+        *self
+            .granted_scope
+            .write()
+            .map_err(|_| "scope_lock_failed")? = scope.to_string();
+
         log::debug!("[OfoxAuth] Auth state persisted (keychain + metadata)");
         Ok(())
     }
@@ -1193,6 +1476,14 @@ impl OfoxAuthManager {
         let stored_at = self.secret_store.load(Slot::AccessToken)?;
         let stored_rt = self.secret_store.load(Slot::RefreshToken)?;
         let has_any_token = stored_at.is_some() || stored_rt.is_some();
+        *self
+            .granted_scope
+            .write()
+            .map_err(|_| "scope_lock_failed")? = if has_any_token {
+            metadata.scope.clone()
+        } else {
+            String::new()
+        };
 
         // 状态推导：expired flag 优先（哪怕钥匙串里 RT 还在，用户已被 IDP
         // 拒过一次就不该再无声重试）。否则按"钥匙串里有没有 token"判断。
@@ -1319,7 +1610,352 @@ fn compute_expires_at_ms(expires_in: Option<i64>) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn profile_fixture() -> OfoxUserInfo {
+        serde_json::from_value(
+            serde_json::json!({"id":"test-user","org_id":"test-org","email":"test@example.test"}),
+        )
+        .unwrap()
+    }
+    async fn additional_manager(temp: &tempfile::TempDir) -> OfoxAuthManager {
+        let manager = seeded_manager(temp).await;
+        let user = profile_fixture();
+        *manager.user_info.write().await = Some(user.clone());
+        manager
+            .save_to_disk(
+                "old-at",
+                Some("rt-1"),
+                chrono::Utc::now().timestamp_millis() + 60_000,
+                OFOX_LEGACY_SCOPES,
+                Some(&user),
+                false,
+            )
+            .unwrap();
+        manager
+    }
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn refreshing_an_old_consent_cannot_add_server_returned_scopes() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"access_token":"rotated-at","refresh_token":"rotated-rt","expires_in":3600,"scope":"org.read offline_access llm.invoke"}))).expect(1).mount(&server).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = seeded_manager(&tmp).await;
+        *manager.granted_scope.write().unwrap() = "org.read offline_access".into();
+        manager
+            .refresh_access_token_at(&server.uri())
+            .await
+            .unwrap();
+        assert!(!manager.has_scope("llm.invoke"));
+        assert!(manager.has_scope("org.read"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_late_profile_response_cannot_expire_or_overwrite_an_upgraded_session() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+        for status in [401, 200] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/old-profile"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .set_delay(std::time::Duration::from_millis(80))
+                        .set_body_json(serde_json::json!({"id":"test-user","org_id":"old-org"})),
+                )
+                .mount(&server)
+                .await;
+            let tmp = tempfile::tempdir().unwrap();
+            let manager = Arc::new(additional_manager(&tmp).await);
+            manager
+                .access_token
+                .write()
+                .await
+                .as_mut()
+                .unwrap()
+                .expires_at_ms = chrono::Utc::now().timestamp_millis() + 3_600_000;
+            let worker = manager.clone();
+            let url = format!("{}/old-profile", server.uri());
+            let refresh =
+                tokio::spawn(async move { worker.refresh_user_info_at(&url, false).await });
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while server.received_requests().await.unwrap().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            {
+                let _lock = manager.refresh_lock.lock().await;
+                manager
+                    .save_to_disk(
+                        "new-at",
+                        Some("new-rt"),
+                        chrono::Utc::now().timestamp_millis() + 3_600_000,
+                        OFOX_SCOPES,
+                        Some(&profile_fixture()),
+                        false,
+                    )
+                    .unwrap();
+                *manager.access_token.write().await = Some(CachedAccessToken {
+                    token: "new-at".into(),
+                    expires_at_ms: chrono::Utc::now().timestamp_millis() + 3_600_000,
+                });
+                *manager.refresh_token.write().await = Some("new-rt".into());
+                manager
+                    .auth_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            let _ = refresh.await.unwrap();
+            assert!(
+                manager.is_authenticated(),
+                "late status {status} expired the new grant"
+            );
+            assert_eq!(
+                manager
+                    .access_token
+                    .read()
+                    .await
+                    .as_ref()
+                    .map(|c| c.token.as_str()),
+                Some("new-at")
+            );
+            assert_eq!(
+                manager.get_user_info().unwrap().org_id.as_deref(),
+                Some("test-org")
+            );
+            assert!(manager.has_scope("llm.invoke"));
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn device_login_network_or_other_errors_never_downgrade_scope() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+        for (status, error) in [
+            (500, "invalid_scope"),
+            (400, "invalid_client"),
+            (403, "invalid_scope"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/device"))
+                .respond_with(
+                    ResponseTemplate::new(status).set_body_json(serde_json::json!({"error":error})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let temp = tempfile::tempdir().unwrap();
+            let manager = additional_manager(&temp).await;
+            assert!(manager
+                .start_device_flow_at(&format!("{}/device", server.uri()))
+                .await
+                .is_err());
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+            assert!(!manager.has_scope("llm.invoke"));
+            assert!(manager.is_authenticated());
+        }
+    }
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn additional_grant_denial_mismatch_and_cancel_keep_the_original_account() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+        for scenario in ["denied", "mismatch", "cancel", "success"] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST")).and(path("/device")).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"device_code":"additional","user_code":"ABCD","verification_uri":"https://example.test/verify","expires_in":600,"interval":5}))).mount(&server).await;
+            Mock::given(method("POST")).and(path("/token")).respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(30)).set_body_json(serde_json::json!({"access_token":"new-at","refresh_token":"new-rt","expires_in":3600}))).mount(&server).await;
+            let response = if scenario == "denied" {
+                ResponseTemplate::new(401)
+            } else {
+                ResponseTemplate::new(200).set_body_json(if scenario == "mismatch" {
+                    serde_json::json!({"id":"other-user","org_id":"test-org"})
+                } else {
+                    serde_json::to_value(profile_fixture()).unwrap()
+                })
+            };
+            Mock::given(method("GET"))
+                .and(path("/me"))
+                .respond_with(response)
+                .mount(&server)
+                .await;
+            let temp = tempfile::tempdir().unwrap();
+            let manager = Arc::new(additional_manager(&temp).await);
+            manager
+                .start_device_flow_with(&format!("{}/device", server.uri()), true)
+                .await
+                .unwrap();
+            let worker = manager.clone();
+            let base = server.uri();
+            let poll = tokio::spawn(async move {
+                worker
+                    .poll_for_token_at(
+                        "additional",
+                        &format!("{base}/token"),
+                        &format!("{base}/me"),
+                        false,
+                    )
+                    .await
+            });
+            if scenario == "cancel" {
+                // Wait for the request to start, then revoke its pending receipt.
+                tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                    while server.received_requests().await.unwrap().len() < 2 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                manager.cancel_device_flow("additional").await;
+            }
+            let result = poll.await.unwrap();
+            assert_eq!(result.is_ok(), scenario == "success", "{scenario}");
+            assert!(manager.is_authenticated());
+            assert_eq!(
+                manager.get_user_info().unwrap().id.as_deref(),
+                Some("test-user")
+            );
+            assert_eq!(
+                manager.access_token.read().await.as_ref().unwrap().token,
+                if scenario == "success" {
+                    "new-at"
+                } else {
+                    "old-at"
+                }
+            );
+            assert_eq!(
+                manager
+                    .secret_store
+                    .load(crate::ofox_secret::Slot::RefreshToken)
+                    .unwrap()
+                    .as_deref(),
+                Some(if scenario == "success" {
+                    "new-rt"
+                } else {
+                    "rt-1"
+                })
+            );
+            assert_eq!(manager.has_scope("llm.invoke"), scenario == "success");
+        }
+    }
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_fallback_grant_without_scope_cannot_gain_assistant_permission() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        use wiremock::{
+            matchers::{method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"access_token":"legacy-at","refresh_token":"legacy-rt"}),
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::to_value(profile_fixture()).unwrap()),
+            )
+            .mount(&server)
+            .await;
+        let temp = tempfile::tempdir().unwrap();
+        let manager = additional_manager(&temp).await;
+        manager.pending_device_codes.write().await.insert(
+            "legacy".into(),
+            PendingDeviceCode {
+                expires_at_ms: chrono::Utc::now().timestamp_millis() + 60_000,
+                scope: OFOX_LEGACY_SCOPES.into(),
+                expected_owner: None,
+                generation: 0,
+                apex: crate::ofox_apex::current_apex().into(),
+            },
+        );
+        manager
+            .poll_for_token_at(
+                "legacy",
+                &format!("{}/token", server.uri()),
+                &format!("{}/me", server.uri()),
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(!manager.has_scope("llm.invoke"));
+        assert!(manager.is_authenticated());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn device_login_falls_back_once_only_for_explicit_invalid_scope() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        use wiremock::{
+            matchers::{body_string_contains, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/device"))
+            .and(body_string_contains("llm.invoke"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_json(serde_json::json!({"error":"invalid_scope"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST")).and(path("/device")).and(body_string_contains("scope=org.read+balance.read+apikey.write+offline_access"))
+            .and(wiremock::matchers::body_string_contains("client_id="))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"device_code":"fallback-device","user_code":"ABCD","verification_uri":"https://example.test/verify","expires_in":600,"interval":5}))).mount(&server).await;
+        let temp = tempfile::tempdir().unwrap();
+        let manager = OfoxAuthManager::new_with_secret_store(
+            temp.path().into(),
+            Arc::new(crate::ofox_secret::InMemoryStore::new()),
+        );
+        assert!(manager
+            .start_device_flow_at(&format!("{}/device", server.uri()))
+            .await
+            .is_ok());
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
     use crate::ofox_secret::SecretStore;
+
+    #[tokio::test]
+    async fn expiring_and_restarting_an_old_grant_cannot_add_llm_invoke() {
+        let temp = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(crate::ofox_secret::InMemoryStore::new());
+        let manager = OfoxAuthManager::new_with_secret_store(temp.path().into(), secrets.clone());
+        manager
+            .save_to_disk(
+                "test-access",
+                Some("test-refresh"),
+                1,
+                "org.read offline_access",
+                None,
+                false,
+            )
+            .unwrap();
+        assert!(!manager.has_scope("llm.invoke"));
+        manager.mark_expired().await;
+        assert!(!manager.has_scope("llm.invoke"));
+        let restored = OfoxAuthManager::new_with_secret_store(temp.path().into(), secrets);
+        assert!(!restored.has_scope("llm.invoke"));
+    }
 
     #[test]
     fn test_compute_expires_at_ms() {

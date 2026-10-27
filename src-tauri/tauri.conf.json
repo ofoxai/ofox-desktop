@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:3011",
-    "beforeDevCommand": "pnpm run dev:renderer",
-    "beforeBuildCommand": "pnpm run build:renderer"
+    "beforeDevCommand": "pnpm run assistant:prepare && pnpm run dev:renderer",
+    "beforeBuildCommand": "pnpm run assistant:prepare && pnpm run build:renderer"
   },
   "app": {
     "macOSPrivateApi": true,
@@ -16,6 +16,7 @@
         "label": "main",
         "title": "",
         "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
         "trafficLightPosition": {
           "x": 14,
           "y": 17
@@ -42,16 +43,17 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": false,
-    "resources": [
-      "../scripts/installer/**/*",
-      "../src/assets/agent-logos/LICENSE-*.txt",
-      "../src/assets/agent-logos/LICENSE-*.md",
-      "../src/assets/agent-logos/NOTICE.md",
-      "../src/assets/library-logos/NOTICE.md",
-      "src/services/MAGPIE_LICENSE",
-      "src/session_manager/MAGPIE_LICENSE",
-      "src/native_tools/MAGPIE_LICENSE"
-    ],
+    "resources": {
+      "../assistant-runtime/resources/": "assistant-runtime/",
+      "../scripts/installer/": "_up_/scripts/installer/",
+      "../src/assets/agent-logos/LICENSE-*.txt": "_up_/src/assets/agent-logos/",
+      "../src/assets/agent-logos/LICENSE-*.md": "_up_/src/assets/agent-logos/",
+      "../src/assets/agent-logos/NOTICE.md": "_up_/src/assets/agent-logos/NOTICE.md",
+      "../src/assets/library-logos/NOTICE.md": "_up_/src/assets/library-logos/NOTICE.md",
+      "src/services/MAGPIE_LICENSE": "src/services/MAGPIE_LICENSE",
+      "src/session_manager/MAGPIE_LICENSE": "src/session_manager/MAGPIE_LICENSE",
+      "src/native_tools/MAGPIE_LICENSE": "src/native_tools/MAGPIE_LICENSE"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -65,7 +67,7 @@
       }
     },
     "macOS": {
-      "minimumSystemVersion": "12.0"
+      "minimumSystemVersion": "13.5"
     }
   },
   "plugins": {

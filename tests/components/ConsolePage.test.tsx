@@ -169,6 +169,33 @@ it("local mode does not load accounts, reconcile keys or query binding/model sta
   expect(commands).not.toContain("model_selection_snapshot");
 });
 
+it.each([false, true])(
+  "requires sign-in for the assistant independently of the local-tools route (%s)",
+  async (localOnly) => {
+    const onLoginRequested = vi.fn();
+    render(
+      <ConsolePage
+        boundTools={[]}
+        localOnly={localOnly}
+        localSignedIn={false}
+        onLoginRequested={onLoginRequested}
+      />,
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "助手" }));
+    await act(async () => undefined);
+    expect(
+      mocks.invoke.mock.calls.filter(([name]) =>
+        String(name).startsWith("assistant_"),
+      ),
+    ).toHaveLength(0);
+    expect(screen.getByRole("button", { name: "刷新" })).toBeDisabled();
+    expect(onLoginRequested).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "登录 Ofox" }));
+    expect(onLoginRequested).toHaveBeenCalledOnce();
+    expect(mocks.openExternal).not.toHaveBeenCalled();
+  },
+);
+
 it.each([
   [false, "登录 Ofox"],
   [true, "一键绑定工具"],
@@ -368,7 +395,7 @@ describe("Console title bar", () => {
 });
 
 describe("Console navigation", () => {
-  it("offers 工具, 会话, 资源库 and 用量, and no 模型方案 tab", async () => {
+  it("offers 工具, 会话, 资源库, 用量 and 助手, and no 模型方案 tab", async () => {
     render(<ConsolePage boundTools={[]} />);
     await screen.findByText("Test User");
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
@@ -376,6 +403,7 @@ describe("Console navigation", () => {
       "会话",
       "资源库",
       "用量",
+      "助手",
     ]);
   });
 

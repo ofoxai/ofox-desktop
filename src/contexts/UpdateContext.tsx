@@ -87,7 +87,7 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
     setError(null);
 
     try {
-      // Ofox 自托管链路：拉 R2 的 latest.json 比对版本。本应用不做自动安装，
+      // Ofox 自托管链路：拉 R2 的 latest-v2.json 比对版本。本应用不做自动安装，
       // 发现新版只引导用户去下载页手动安装。
       const result = await settingsApi.checkUpdates();
 

@@ -317,6 +317,7 @@ pub(crate) fn record_write_receipt(db: &Database, tool: &str) {
 
 /// Invoked after acquiring the adapter lock, immediately before mutating files or DB.
 pub(crate) fn check_write_revision(db: &Database, tool: &str) -> Result<(), String> {
+    crate::services::assistant::tools::check_write_authority()?;
     let expected = EXPECTED_WRITE.try_with(Clone::clone).ok();
     if let Some(expected) = expected {
         let target = canonical_tool(tool)?;
