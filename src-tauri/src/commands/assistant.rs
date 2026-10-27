@@ -3,9 +3,10 @@
 //! drive the same code. [`AssistantEnvironment`] lends the host the app's
 //! sign-in, the assistant key, the model catalog, files and event channel.
 use crate::ofox_api_keys::{self, ApiKeyError, AssistantKeyStatus, FetchMode};
+use crate::ofox_auth::{OfoxAuthManager, OfoxAuthStatus};
 use crate::services::assistant::{
     catalog,
-    host::{BoxFuture, Environment, Identity, SIGN_IN_REQUIRED},
+    host::{Admit, BoxFuture, Environment, Identity, KEY_REJECTED, SIGN_IN_REQUIRED},
     store::{self, SessionList},
     types::{CreateRequest, Detail, Event, RunRef, SendRequest, Session, UpdateRequest},
     AssistantHost,
@@ -13,7 +14,7 @@ use crate::services::assistant::{
 use crate::settings::KeyOwner;
 use serde_json::Value;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager, State};
 use tokio::sync::RwLock;
 
@@ -77,33 +78,46 @@ pub struct AssistantEnvironment {
     app: tauri::AppHandle,
 }
 
+type AuthManager = Arc<RwLock<OfoxAuthManager>>;
+
 impl AssistantEnvironment {
     pub fn new(app: tauri::AppHandle) -> Self {
         Self { app }
     }
 
-    fn auth(&self) -> Result<Arc<RwLock<crate::ofox_auth::OfoxAuthManager>>, String> {
+    fn auth(&self) -> Result<AuthManager, String> {
         self.app
             .try_state::<crate::commands::ofox_auth::OfoxAuthState>()
             .map(|state| state.0.clone())
             .ok_or_else(|| SIGN_IN_REQUIRED.to_string())
     }
+}
 
-    /// The signed-in account, and only if it is `identity`'s: a key is never
-    /// fetched for a signed-out state or for another account.
-    async fn key_owner(&self, identity: &Identity) -> Result<KeyOwner, String> {
-        let owner = self
-            .auth()?
-            .read()
-            .await
-            .current_key_owner()
-            .await
-            .ok_or(SIGN_IN_REQUIRED)?;
-        if store::owner_key(&owner)? != identity.owner {
-            return Err("assistant_identity_changed".into());
-        }
-        Ok(owner)
+/// The signed-in account and region as the host's [`Identity`].
+fn identity_from(status: OfoxAuthStatus, apex: &str) -> Result<Identity, String> {
+    if status.state != crate::ofox_auth::OfoxAuthState::Active {
+        return Err(SIGN_IN_REQUIRED.into());
     }
+    let user = status.user.ok_or("assistant_identity_unavailable")?;
+    Ok(Identity {
+        owner: store::owner_key(&user.key_owner())?,
+        apex: apex.into(),
+    })
+}
+
+/// The signed-in account, and only if it is `identity`'s: a key is never
+/// fetched for a signed-out state or for another account.
+async fn key_owner(manager: &AuthManager, identity: &Identity) -> Result<KeyOwner, String> {
+    let owner = manager
+        .read()
+        .await
+        .current_key_owner()
+        .await
+        .ok_or(SIGN_IN_REQUIRED)?;
+    if store::owner_key(&owner)? != identity.owner {
+        return Err("assistant_identity_changed".into());
+    }
+    Ok(owner)
 }
 
 fn key_error(error: ApiKeyError) -> String {
@@ -119,19 +133,25 @@ fn key_error(error: ApiKeyError) -> String {
     .into()
 }
 
+/// Where the prepared runtime is: the checkout's in a debug build, the
+/// bundled resource in a release build.
+fn runtime_dir_for(
+    debug: bool,
+    resource_dir: impl FnOnce() -> Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    if debug {
+        return Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assistant-runtime/resources"));
+    }
+    resource_dir()
+        .map(|dir| dir.join("assistant-runtime"))
+        .ok_or_else(|| "assistant_runtime_unavailable".into())
+}
+
 impl Environment for AssistantEnvironment {
     fn identity(&self) -> BoxFuture<'_, Result<Identity, String>> {
         Box::pin(async move {
-            let auth = self.auth()?;
-            let status = auth.read().await.get_auth_status().await;
-            if status.state != crate::ofox_auth::OfoxAuthState::Active {
-                return Err(SIGN_IN_REQUIRED.into());
-            }
-            let user = status.user.ok_or("assistant_identity_unavailable")?;
-            Ok(Identity {
-                owner: store::owner_key(&user.key_owner())?,
-                apex: crate::ofox_apex::current_apex().into(),
-            })
+            let status = self.auth()?.read().await.get_auth_status().await;
+            identity_from(status, crate::ofox_apex::current_apex())
         })
     }
 
@@ -139,35 +159,57 @@ impl Environment for AssistantEnvironment {
         &'a self,
         identity: &'a Identity,
         rejected: Option<&'a str>,
+        admit: &'a Admit<'a>,
     ) -> BoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
-            self.key_owner(identity).await?;
             let manager = self.auth()?;
-            match rejected {
-                None => {
-                    ofox_api_keys::fetch_or_create_assistant_key(
-                        FetchMode::CachedOk,
-                        &identity.apex,
-                        &manager,
-                    )
-                    .await
+            key_owner(&manager, identity).await?;
+            // Asked under the key lock; keep the host's own reason when it refuses.
+            let refusal = Mutex::new(None);
+            let check = || match admit() {
+                Ok(()) => true,
+                Err(code) => {
+                    *refusal.lock().unwrap_or_else(|e| e.into_inner()) = Some(code);
+                    false
                 }
+            };
+            let result = match rejected {
+                None => ofox_api_keys::fetch_or_create_assistant_key(
+                    FetchMode::CachedOk,
+                    &identity.apex,
+                    &check,
+                    &manager,
+                )
+                .await
+                .map(Some),
                 Some(rejected) => {
                     ofox_api_keys::refresh_rejected_assistant_key(
                         rejected,
                         &identity.apex,
+                        &check,
                         &manager,
                     )
                     .await
                 }
+            };
+            match result {
+                Ok(Some(key)) => Ok(key),
+                // Minted moments ago and refused already: another key would be too.
+                Ok(None) => Err(KEY_REJECTED.into()),
+                Err(error) => match refusal.into_inner().unwrap_or_else(|e| e.into_inner()) {
+                    Some(code) => Err(code),
+                    None => Err(key_error(error)),
+                },
             }
-            .map_err(key_error)
         })
     }
 
     fn key_ready<'a>(&'a self, identity: &'a Identity) -> BoxFuture<'a, bool> {
         Box::pin(async move {
-            self.key_owner(identity).await.is_ok_and(|owner| {
+            let Ok(manager) = self.auth() else {
+                return false;
+            };
+            key_owner(&manager, identity).await.is_ok_and(|owner| {
                 ofox_api_keys::assistant_key_status(Some(&owner)) == AssistantKeyStatus::Ready
             })
         })
@@ -186,21 +228,130 @@ impl Environment for AssistantEnvironment {
     }
 
     fn runtime_dir(&self) -> Result<PathBuf, String> {
-        if cfg!(debug_assertions) {
-            return Ok(
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assistant-runtime/resources")
-            );
-        }
-        self.app
-            .path()
-            .resource_dir()
-            .map(|dir| dir.join("assistant-runtime"))
-            .map_err(|_| "assistant_runtime_unavailable".into())
+        runtime_dir_for(cfg!(debug_assertions), || {
+            self.app.path().resource_dir().ok()
+        })
     }
 
     fn emit(&self, event: Event) {
         if let Err(error) = self.app.emit(ASSISTANT_EVENT, event) {
             log::warn!("[Assistant] could not publish an event: {error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ofox_auth::OfoxUserInfo;
+
+    fn user(id: &str, org: &str) -> OfoxUserInfo {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "email": null, "name": null, "org_id": org, "avatar_url": null,
+        }))
+        .unwrap()
+    }
+
+    fn identity_of(id: &str, org: &str) -> Identity {
+        Identity {
+            owner: store::owner_key(&user(id, org).key_owner()).unwrap(),
+            apex: "ofox.ai".into(),
+        }
+    }
+
+    async fn manager(signed_in: Option<OfoxUserInfo>) -> (tempfile::TempDir, AuthManager) {
+        let config = tempfile::tempdir().unwrap();
+        let manager = OfoxAuthManager::new_with_secret_store(
+            config.path().to_path_buf(),
+            Arc::new(crate::ofox_secret::InMemoryStore::new()),
+        );
+        if let Some(user) = signed_in {
+            manager.set_signed_in_for_test(user).await;
+        }
+        (config, Arc::new(RwLock::new(manager)))
+    }
+
+    #[tokio::test]
+    async fn a_key_is_fetched_only_for_the_signed_in_account_of_the_run() {
+        let run = identity_of("user_a", "org_a");
+        let (_config, signed_out) = manager(None).await;
+        assert_eq!(
+            key_owner(&signed_out, &run).await.unwrap_err(),
+            SIGN_IN_REQUIRED
+        );
+        let (_config, other) = manager(Some(user("user_b", "org_b"))).await;
+        assert_eq!(
+            key_owner(&other, &run).await.unwrap_err(),
+            "assistant_identity_changed"
+        );
+        let (_config, same) = manager(Some(user("user_a", "org_a"))).await;
+        assert_eq!(
+            key_owner(&same, &run).await.unwrap().org_id.as_deref(),
+            Some("org_a")
+        );
+    }
+
+    #[tokio::test]
+    async fn only_an_active_session_with_a_full_account_is_an_identity() {
+        let (_config, signed_out) = manager(None).await;
+        let status = signed_out.read().await.get_auth_status().await;
+        assert_eq!(
+            identity_from(status, "ofox.io").unwrap_err(),
+            SIGN_IN_REQUIRED
+        );
+        let (_config, signed_in) = manager(Some(user("user_a", "org_a"))).await;
+        let status = signed_in.read().await.get_auth_status().await;
+        assert_eq!(
+            identity_from(status, "ofox.io").unwrap(),
+            Identity {
+                apex: "ofox.io".into(),
+                ..identity_of("user_a", "org_a")
+            }
+        );
+        let mut no_org = user("user_a", "org_a");
+        no_org.org_id = None;
+        let (_config, partial) = manager(Some(no_org)).await;
+        let status = partial.read().await.get_auth_status().await;
+        assert_eq!(
+            identity_from(status, "ofox.io").unwrap_err(),
+            "assistant_identity_unavailable"
+        );
+    }
+
+    #[test]
+    fn key_failures_map_to_stable_codes_without_their_text() {
+        for (error, code) in [
+            (
+                ApiKeyError::Unauthorized("token sk-of-abcdefghijklmnop".into()),
+                SIGN_IN_REQUIRED,
+            ),
+            (
+                ApiKeyError::RemoteRejected("500".into()),
+                "assistant_key_unavailable",
+            ),
+            (
+                ApiKeyError::Storage("keychain".into()),
+                "assistant_key_storage_unavailable",
+            ),
+        ] {
+            assert_eq!(key_error(error), code);
+        }
+    }
+
+    #[test]
+    fn the_runtime_comes_from_the_checkout_in_debug_and_the_bundle_in_release() {
+        let checkout = runtime_dir_for(true, || panic!("debug builds read no resources")).unwrap();
+        assert!(
+            checkout.ends_with("assistant-runtime/resources"),
+            "{checkout:?}"
+        );
+        assert_eq!(
+            runtime_dir_for(false, || Some(PathBuf::from("/Resources"))).unwrap(),
+            PathBuf::from("/Resources/assistant-runtime")
+        );
+        assert_eq!(
+            runtime_dir_for(false, || None).unwrap_err(),
+            "assistant_runtime_unavailable"
+        );
     }
 }

@@ -646,29 +646,50 @@ pub enum AssistantKeyStatus {
     Missing,
 }
 
+/// 网关拒绝的助手 key 若是这段时间内刚签发的，就不再换：多半不是 key 本身的
+/// 问题，换了也会被拒，只会反复签新 key。
+const REJECTED_KEY_COOLDOWN_SECS: i64 = 600;
+
+/// 签发前再问一次（拿到锁之后）：助手是否还放行这次运行。
+pub type AssistantAdmit<'a> = dyn Fn() -> bool + Send + Sync + 'a;
+
 /// 取或签发助手 key，在 `apex` 地区签发（一次运行冻结的地区）。`CachedOk` 时有
 /// 当前账号能用的记录和原文就直接返回；`ForceRefresh` 跳过缓存重签。换掉的旧 key
-/// 没停用的话排队，等它的账号登录时在服务器上删掉。没登录时一律
-/// `Unauthorized`：不签发，也不交出上一个账号的 key。
+/// 没停用的话排队，等它的账号登录时在服务器上删掉。没登录、或拿到锁时 `admit`
+/// 不再放行（退出登录正在吊销 key）时一律 `Unauthorized`：不签发，也不交出
+/// 上一个账号的 key。
 pub async fn fetch_or_create_assistant_key(
     mode: FetchMode,
     apex: &str,
+    admit: &AssistantAdmit<'_>,
     manager: &Arc<RwLock<OfoxAuthManager>>,
 ) -> Result<String, ApiKeyError> {
     let url = assistant_keys_url(apex)?;
-    fetch_or_create_assistant_key_at(mode, &default_store(), manager, &url).await
+    assistant_key_at(mode, None, admit, &default_store(), manager, &url)
+        .await?
+        .ok_or_else(|| ApiKeyError::RemoteRejected("no assistant key".into()))
 }
 
 /// 网关拒绝了 `rejected`（401）后调用：缓存里还是这把就重签（同
 /// `ForceRefresh`）；已经换过了（另一次运行先遇到 401）就直接用换好的那把，
-/// 不再签第三把，也不把正在用的新 key 排进删除队列。
+/// 不再签第三把，也不把正在用的新 key 排进删除队列。被拒的就是
+/// [`REJECTED_KEY_COOLDOWN_SECS`] 内刚签的那把时返回 `None`，不再换。
 pub async fn refresh_rejected_assistant_key(
     rejected: &str,
     apex: &str,
+    admit: &AssistantAdmit<'_>,
     manager: &Arc<RwLock<OfoxAuthManager>>,
-) -> Result<String, ApiKeyError> {
+) -> Result<Option<String>, ApiKeyError> {
     let url = assistant_keys_url(apex)?;
-    refresh_rejected_assistant_key_at(rejected, &default_store(), manager, &url).await
+    assistant_key_at(
+        FetchMode::ForceRefresh,
+        Some(rejected),
+        admit,
+        &default_store(),
+        manager,
+        &url,
+    )
+    .await
 }
 
 fn assistant_keys_url(apex: &str) -> Result<String, ApiKeyError> {
@@ -676,26 +697,31 @@ fn assistant_keys_url(apex: &str) -> Result<String, ApiKeyError> {
         .ok_or_else(|| ApiKeyError::RemoteRejected("unknown Ofox region".into()))
 }
 
-/// [`fetch_or_create_assistant_key`] 的主体；store 和签发 URL 由调用方传入。
+/// [`fetch_or_create_assistant_key`] 的主体（测试用）；store 和签发 URL 由调用方传入。
+#[cfg(test)]
 async fn fetch_or_create_assistant_key_at(
     mode: FetchMode,
     store: &Arc<dyn SecretStore>,
     manager: &Arc<RwLock<OfoxAuthManager>>,
     create_url: &str,
 ) -> Result<String, ApiKeyError> {
-    assistant_key_at(mode, None, store, manager, create_url).await
+    assistant_key_at(mode, None, &|| true, store, manager, create_url)
+        .await?
+        .ok_or_else(|| ApiKeyError::RemoteRejected("no assistant key".into()))
 }
 
-/// [`refresh_rejected_assistant_key`] 的主体。
+/// [`refresh_rejected_assistant_key`] 的主体（测试用）。
+#[cfg(test)]
 async fn refresh_rejected_assistant_key_at(
     rejected: &str,
     store: &Arc<dyn SecretStore>,
     manager: &Arc<RwLock<OfoxAuthManager>>,
     create_url: &str,
-) -> Result<String, ApiKeyError> {
+) -> Result<Option<String>, ApiKeyError> {
     assistant_key_at(
         FetchMode::ForceRefresh,
         Some(rejected),
+        &|| true,
         store,
         manager,
         create_url,
@@ -703,14 +729,23 @@ async fn refresh_rejected_assistant_key_at(
     .await
 }
 
+/// `None` 只在 `rejected` 是刚签的当前 key 时出现（见
+/// [`refresh_rejected_assistant_key`]）。
 async fn assistant_key_at(
     mode: FetchMode,
     rejected: Option<&str>,
+    admit: &AssistantAdmit<'_>,
     store: &Arc<dyn SecretStore>,
     manager: &Arc<RwLock<OfoxAuthManager>>,
     create_url: &str,
-) -> Result<String, ApiKeyError> {
+) -> Result<Option<String>, ApiKeyError> {
     let _serial = ASSISTANT_KEY_LOCK.lock().await;
+    // 拿到锁后再问：退出登录持这把锁吊销 key，在锁外等着的发送拿不到新 key。
+    if !admit() {
+        return Err(ApiKeyError::Unauthorized(
+            "assistant runs are closed".into(),
+        ));
+    }
     let Some(owner) = manager.read().await.current_key_owner().await else {
         return Err(ApiKeyError::Unauthorized("signed out".into()));
     };
@@ -722,9 +757,15 @@ async fn assistant_key_at(
         _ => None,
     };
     if let Some(key) = cached {
-        let replaced_already = rejected.is_some_and(|rejected| rejected != key);
-        if matches!(mode, FetchMode::CachedOk) || replaced_already {
-            return Ok(key);
+        let issued_recently = previous.as_ref().is_some_and(|meta| {
+            chrono::Utc::now().timestamp() - meta.created_at < REJECTED_KEY_COOLDOWN_SECS
+        });
+        match rejected {
+            None if matches!(mode, FetchMode::CachedOk) => return Ok(Some(key)),
+            // 另一次运行已经换过了。
+            Some(rejected) if rejected != key => return Ok(Some(key)),
+            Some(_) if issued_recently => return Ok(None),
+            _ => {}
         }
     }
 
@@ -749,7 +790,7 @@ async fn assistant_key_at(
             owner: previous.owner,
         });
     }
-    Ok(created.secret)
+    Ok(Some(created.secret))
 }
 
 /// 先落钥匙串再落记录，理由同 [`save_key`]。
@@ -1527,8 +1568,8 @@ mod tests {
         );
 
         server.verify().await;
-        assert_eq!(first.unwrap(), "sk-of-assistant-new");
-        assert_eq!(second.unwrap(), "sk-of-assistant-new");
+        assert_eq!(first.unwrap().as_deref(), Some("sk-of-assistant-new"));
+        assert_eq!(second.unwrap().as_deref(), Some("sk-of-assistant-new"));
         assert_eq!(
             settings::list_keys_to_delete(),
             [waiting("assistant-old", Some(owner_of("org_a")))]
@@ -1557,8 +1598,75 @@ mod tests {
             .unwrap();
 
         server.verify().await;
-        assert_eq!(key, "sk-of-current");
+        assert_eq!(key.as_deref(), Some("sk-of-current"));
         assert!(settings::list_keys_to_delete().is_empty());
+    }
+
+    /// 刚签的 key 就被拒：不再换（换了多半也被拒），交给调用方报错。
+    #[tokio::test]
+    #[serial]
+    async fn a_rejected_key_minted_moments_ago_is_not_replaced_again() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        keep_assistant_key(
+            &store,
+            "sk-of-fresh",
+            AssistantKeyMeta {
+                created_at: chrono::Utc::now().timestamp() - 60,
+                ..assistant_record("assistant-fresh", Some(owner_of("org_a")))
+            },
+        );
+        let manager = signed_in_as("org_a").await;
+        let (server, url) = mint_endpoint(0).await;
+
+        let key = refresh_rejected_assistant_key_at("sk-of-fresh", &store, &manager, &url)
+            .await
+            .unwrap();
+
+        server.verify().await;
+        assert_eq!(key, None);
+        assert!(settings::list_keys_to_delete().is_empty());
+        assert_eq!(
+            store.load(Slot::AssistantKey).unwrap().as_deref(),
+            Some("sk-of-fresh")
+        );
+    }
+
+    /// 发送先过了放行检查，在 key 锁外等的时候退出登录关了放行、吊销了 key：
+    /// 拿到锁后再问一次，不签新 key（否则这把 key 会活过退出登录）。
+    #[tokio::test]
+    #[serial]
+    async fn a_send_waiting_on_the_key_lock_through_a_logout_gets_no_key() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        let manager = signed_in_as("org_a").await;
+        let (server, url) = mint_endpoint(0).await;
+        let admitted = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        let logout = ASSISTANT_KEY_LOCK.lock().await;
+        let send = tokio::spawn({
+            let (store, manager, url, admitted) = (
+                store.clone(),
+                manager.clone(),
+                url.clone(),
+                admitted.clone(),
+            );
+            async move {
+                let admit = move || admitted.load(std::sync::atomic::Ordering::SeqCst);
+                assistant_key_at(FetchMode::CachedOk, None, &admit, &store, &manager, &url).await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        admitted.store(false, std::sync::atomic::Ordering::SeqCst);
+        drop(logout);
+
+        let result = send.await.unwrap();
+        assert!(
+            matches!(result, Err(ApiKeyError::Unauthorized(_))),
+            "{result:?}"
+        );
+        server.verify().await;
+        assert_eq!(settings::get_assistant_key_meta(), None);
     }
 
     /// 没登录时既不签发、也不把上一个账号留下的 key 交出去。
@@ -1587,7 +1695,9 @@ mod tests {
             fetch_or_create_assistant_key_at(FetchMode::CachedOk, &store, &signed_out, &url).await,
             fetch_or_create_assistant_key_at(FetchMode::ForceRefresh, &store, &signed_out, &url)
                 .await,
-            refresh_rejected_assistant_key_at("sk-of-previous", &store, &signed_out, &url).await,
+            refresh_rejected_assistant_key_at("sk-of-previous", &store, &signed_out, &url)
+                .await
+                .map(Option::unwrap_or_default),
         ] {
             assert!(
                 matches!(result, Err(ApiKeyError::Unauthorized(_))),

@@ -69,11 +69,11 @@ impl AssistantHost {
     pub async fn create_session(&self, request: CreateRequest) -> Result<Session, String> {
         let identity = self.identity().await?;
         let generation = self.generation();
-        let models = self.models(&identity.apex).await?;
         let store = self.store(&identity.owner)?;
         let selected = match request.model_id {
-            Some(model) => model,
+            Some(model) => self.model(&identity.apex, &model).await?.id,
             None => {
+                let models = self.models(&identity.apex).await?;
                 let remembered = blocking({
                     let store = self.store(&identity.owner)?;
                     move || store.remembered_model()
@@ -84,9 +84,6 @@ impl AssistantHost {
                     .ok_or("assistant_choose_model")?
             }
         };
-        if !models.iter().any(|m| m.id == selected) {
-            return Err("assistant_model_unavailable".into());
-        }
         self.ensure_current(&identity, generation).await?;
         let detail = blocking(move || {
             let detail = store.create(&selected, request.web_search)?;
@@ -125,7 +122,7 @@ impl AssistantHost {
     }
 
     /// Title, model, draft, web search and trash state. Changing the model or
-    /// trashing the session stops its run.
+    /// trashing the session stops its run, once the change is saved.
     pub async fn update_session(
         self: &Arc<Self>,
         request: UpdateRequest,
@@ -144,18 +141,10 @@ impl AssistantHost {
             return Err(super::host::IDENTITY_CHANGED.into());
         }
         if let Some(model) = &request.model_id {
-            if !self
-                .models(&identity.apex)
-                .await?
-                .iter()
-                .any(|m| &m.id == model)
-            {
-                return Err("assistant_model_unavailable".into());
-            }
+            self.model(&identity.apex, model).await?;
         }
-        if request.model_id.is_some() || request.deleted == Some(true) {
-            self.cancel_session(&request.session_id);
-        }
+        let stops_run = request.model_id.is_some() || request.deleted == Some(true);
+        let sid = request.session_id.clone();
         self.ensure_current(&identity, generation).await?;
         let mut session = blocking({
             let store = self.store(&identity.owner)?;
@@ -174,6 +163,9 @@ impl AssistantHost {
             }
         })
         .await?;
+        if stops_run {
+            self.cancel_session(&sid);
+        }
         self.decorate(&identity.owner, &mut session);
         Ok(session)
     }
@@ -208,12 +200,7 @@ impl AssistantHost {
             return Err("assistant_session_deleted".into());
         }
         self.runtime()?;
-        let model = self
-            .models(&identity.apex)
-            .await?
-            .into_iter()
-            .find(|m| m.id == record.session.model_id)
-            .ok_or("assistant_model_unavailable")?;
+        let model = self.model(&identity.apex, &record.session.model_id).await?;
         // Native history is the conversation's context: once a turn reached
         // the runtime, its history must still be there.
         if !native_file.is_file() && record.messages.iter().any(|m| m.native_entry_id.is_some()) {
@@ -221,7 +208,11 @@ impl AssistantHost {
         }
         let branch = Branch::resolve(&record, &request)?;
         let base_url = self.env.gateway_base(&identity.apex)?;
-        let key = self.env.api_key(&identity, None).await?;
+        // Checked again under the key lock: a logout that revokes keys while
+        // this send waits for the lock leaves it with no key.
+        self.ensure_current(&identity, generation).await?;
+        let admit = move || self.admit(generation);
+        let key = self.env.api_key(&identity, None, &admit).await?;
         self.ensure_current(&identity, generation).await?;
 
         let control = Arc::new(RunControl::new(identity.clone(), &request, key.clone()));

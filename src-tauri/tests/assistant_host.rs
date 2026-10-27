@@ -3,7 +3,7 @@
 //! conversation files in a temp dir.
 use cc_switch_lib::assistant::{
     catalog::Model,
-    host::{AssistantHost, BoxFuture, Environment, Identity},
+    host::{Admit, AssistantHost, BoxFuture, Environment, Identity},
     types::{self, CreateRequest, Detail, Event, Message, SendRequest},
 };
 use serde_json::{json, Value};
@@ -48,8 +48,14 @@ enum Reply {
     Stream(String),
     /// Starts streaming, then holds the connection open until the client goes.
     Hang(String),
-    /// An HTTP error with an OpenAI-style body.
-    Status(u16),
+    /// An HTTP error with this body.
+    Error(u16, Value),
+    /// Reads the request, then closes the connection without an answer.
+    Drop,
+}
+
+fn invalid_key() -> Value {
+    json!({"error":{"message":"Invalid API key","type":"invalid_request_error","code":"invalid_api_key"}})
 }
 
 #[derive(Clone, Debug)]
@@ -167,15 +173,18 @@ fn serve(stream: TcpStream, script: &Mutex<VecDeque<Reply>>, requests: &Mutex<Ve
             out.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
             let _ = reader.read(&mut [0; 1]);
         }
-        Reply::Status(code) => {
-            let body = json!({"error":{"message":"Invalid API key","type":"invalid_request_error","code":"invalid_api_key"}}).to_string();
+        Reply::Error(code, body) => {
+            let body = body.to_string();
             let _ = out.write_all(
                 format!(
-                    "HTTP/1.1 {code} Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {code} Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                     body.len()
                 )
                 .as_bytes(),
             );
+        }
+        Reply::Drop => {
+            let _ = out.shutdown(std::net::Shutdown::Both);
         }
     }
     let _ = out.flush();
@@ -222,6 +231,9 @@ struct TestEnv {
     runtime: PathBuf,
     state: Mutex<EnvState>,
     events: Mutex<Vec<Event>>,
+    /// When set, a key fetch waits here first, as on a busy key lock.
+    key_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    key_waiting: std::sync::atomic::AtomicBool,
 }
 
 struct EnvState {
@@ -257,6 +269,8 @@ impl TestEnv {
                     .collect(),
             }),
             events: Mutex::new(vec![]),
+            key_gate: Mutex::new(None),
+            key_waiting: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -291,8 +305,17 @@ impl Environment for TestEnv {
         &'a self,
         identity: &'a Identity,
         rejected: Option<&'a str>,
+        admit: &'a Admit<'a>,
     ) -> BoxFuture<'a, Result<String, String>> {
         Box::pin(async move {
+            let gate = self.key_gate.lock().unwrap().clone();
+            if let Some(gate) = gate {
+                self.key_waiting
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                gate.notified().await;
+            }
+            // What the key lock asks before it hands out or mints a key.
+            admit()?;
             let mut state = self.state.lock().unwrap();
             if state.identity.as_ref() != Ok(identity) {
                 return Err("assistant_sign_in_required".into());
@@ -911,7 +934,7 @@ fn a_refused_key_is_replaced_once_and_the_turn_is_kept_once() {
     let host = AssistantHost::new(env.clone());
     runtime().block_on(async {
         let sid = create(&host).await;
-        gateway.reply(Reply::Status(401));
+        gateway.reply(Reply::Error(401, invalid_key()));
         gateway.reply(Reply::Stream("Answer with the new key".into()));
         let (_, end) = turn(&host, &env, request(&sid, "Unique question", json!({}))).await;
         assert_eq!(end.data["status"], "completed");
@@ -934,8 +957,8 @@ fn a_refused_key_is_replaced_once_and_the_turn_is_kept_once() {
         assert_eq!(native.matches("Unique question").count(), 1);
 
         // A key refused again after the retry ends the run: one retry only.
-        gateway.reply(Reply::Status(401));
-        gateway.reply(Reply::Status(401));
+        gateway.reply(Reply::Error(401, invalid_key()));
+        gateway.reply(Reply::Error(401, invalid_key()));
         let (run, end) = turn(&host, &env, request(&sid, "Again", json!({}))).await;
         assert_eq!(end.data["status"], "error");
         let error = wait_for(&env, &run, "error").await;
@@ -944,4 +967,116 @@ fn a_refused_key_is_replaced_once_and_the_turn_is_kept_once() {
     });
     assert_no_secret_on_disk(config.path(), &[KEY, NEW_KEY]);
     assert_no_secret_in_events(&env, &[KEY, NEW_KEY]);
+}
+
+#[test]
+fn provider_failures_have_their_own_codes_and_unbilled_ones_keep_the_cost_known() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.reply(Reply::Stream("A priced answer".into()));
+        turn(&host, &env, request(&sid, "First", json!({}))).await;
+        let priced = host.get_session(&sid).await.unwrap().usage;
+        assert!(priced["estimatedCostUsd"].is_string(), "{priced}");
+
+        // Refused or unanswered requests generate nothing: the cost stays known.
+        for (reply, code) in [
+            (
+                Reply::Error(
+                    402,
+                    json!({"error":{"message":"Insufficient credits. Current balance: $0. Please top up to continue.","type":"insufficient_credits","code":402}}),
+                ),
+                "assistant_insufficient_balance",
+            ),
+            (
+                Reply::Error(
+                    429,
+                    json!({"error":{"message":"Rate limit reached","type":"rate_limit_error"}}),
+                ),
+                "assistant_rate_limited",
+            ),
+            (
+                Reply::Error(
+                    404,
+                    json!({"error":{"message":"The model does not exist","type":"invalid_request_error"}}),
+                ),
+                "assistant_model_unavailable",
+            ),
+            (Reply::Drop, "assistant_network_error"),
+        ] {
+            gateway.reply(reply);
+            let (run, end) = turn(&host, &env, request(&sid, code, json!({}))).await;
+            assert_eq!(end.data["status"], "error", "{code}");
+            let error = wait_for(&env, &run, "error").await;
+            assert_eq!(error.data["code"], code);
+            let detail = host.get_session(&sid).await.unwrap();
+            assert_eq!(detail.messages.last().unwrap().status, "error", "{code}");
+            assert_eq!(
+                detail.usage["estimatedCostUsd"], priced["estimatedCostUsd"],
+                "{code}"
+            );
+            assert_ne!(detail.usage["usageCoverage"], "incomplete", "{code}");
+        }
+
+        // A server error may have generated something: the cost becomes unknown.
+        gateway.reply(Reply::Error(
+            500,
+            json!({"error":{"message":"upstream failed"}}),
+        ));
+        let (run, _) = turn(&host, &env, request(&sid, "Then", json!({}))).await;
+        let error = wait_for(&env, &run, "error").await;
+        assert_eq!(error.data["code"], "assistant_model_request_failed");
+        let usage = host.get_session(&sid).await.unwrap().usage;
+        assert!(usage["estimatedCostUsd"].is_null(), "{usage}");
+        assert_eq!(usage["usageCoverage"], "incomplete");
+
+        gateway.reply(Reply::Stream("Back again".into()));
+        let (_, end) = turn(&host, &env, request(&sid, "Still there?", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+}
+
+#[test]
+fn a_logout_while_the_first_send_waits_for_its_key_mints_nothing() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let gate = Arc::new(tokio::sync::Notify::new());
+        *env.key_gate.lock().unwrap() = Some(gate.clone());
+        let send = tokio::spawn({
+            let host = host.clone();
+            let request = request(&sid, "First message", json!({}));
+            async move { host.send(request).await }
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !env.key_waiting.load(std::sync::atomic::Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "the send never asked for a key");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Logout closes admission and revokes keys while the send waits.
+        let receipt = host.begin_logout();
+        gate.notify_one();
+        assert_eq!(send.await.unwrap().unwrap_err(), "assistant_signing_out");
+        host.finish_logout(receipt);
+        assert!(
+            !env.state.lock().unwrap().key_minted,
+            "no key outlives the logout"
+        );
+        let detail = host.get_session(&sid).await.unwrap();
+        assert!(detail.messages.is_empty());
+        assert!(gateway.requests().is_empty());
+    });
 }

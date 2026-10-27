@@ -10,12 +10,15 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::Duration;
 
-/// The run's message, session and ledger row as the run ended.
+/// The run's message, session and ledger row as the run ended. A run that
+/// did not complete makes the session's cost unknown, unless it failed
+/// without being billed (`unbilled`).
 pub(super) fn settle_run(
     record: &mut SessionRecord,
     control: &RunControl,
     completed: bool,
     stopped: bool,
+    unbilled: bool,
 ) -> Result<(Option<Message>, Session), String> {
     let message = record
         .messages
@@ -40,7 +43,7 @@ pub(super) fn settle_run(
     {
         record.session.active_run = None;
     }
-    if !completed {
+    if !completed && !unbilled {
         ensure_object(&mut record.usage);
         record.usage["usageCoverage"] = json!("incomplete");
         record.usage["estimatedCostUsd"] = Value::Null;

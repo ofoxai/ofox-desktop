@@ -24,16 +24,28 @@ use tokio::io::{AsyncBufRead, AsyncWrite};
 use tokio::sync::watch;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+/// Whether a run may still get a key; the error is the code to report.
+pub type Admit<'a> = dyn Fn() -> Result<(), String> + Send + Sync + 'a;
 
 pub(super) const STATE: &str = "assistant_state_unavailable";
 pub const SIGN_IN_REQUIRED: &str = "assistant_sign_in_required";
 pub(super) const IDENTITY_CHANGED: &str = "assistant_identity_changed";
 const CANCELLED: &str = "assistant_cancelled";
-const KEY_REJECTED: &str = "assistant_key_rejected";
+pub const KEY_REJECTED: &str = "assistant_key_rejected";
+const INSUFFICIENT_BALANCE: &str = "assistant_insufficient_balance";
+const RATE_LIMITED: &str = "assistant_rate_limited";
+pub(super) const MODEL_UNAVAILABLE: &str = "assistant_model_unavailable";
+/// Internal: the first attempt's key was refused before anything was shown
+/// or billed, so the run may retry with a new key. Never published.
+const RETRY_WITH_NEW_KEY: &str = "assistant_retry_with_new_key";
+const NETWORK_ERROR: &str = "assistant_network_error";
+const MODEL_REQUEST_FAILED: &str = "assistant_model_request_failed";
 const STDIO: &str = "assistant_runtime_stdio";
 pub(super) const PROTOCOL: &str = "assistant_runtime_protocol";
 const RUNTIME_UNAVAILABLE: &str = "assistant_runtime_unavailable";
 const RUN_DEADLINE: Duration = Duration::from_secs(900);
+/// How long a fetched model catalog is trusted.
+const MODELS_TTL: Duration = Duration::from_secs(600);
 const FRAME_LIMIT: usize = 8 * 1024 * 1024;
 
 /// The signed-in account (its [`super::store::owner_key`]) and the region a
@@ -51,11 +63,14 @@ pub trait Environment: Send + Sync + 'static {
     fn identity(&self) -> BoxFuture<'_, Result<Identity, String>>;
     /// The assistant's own API key for `identity`'s account. `rejected` is a
     /// key the gateway has just refused: replace it, unless another run
-    /// already did.
+    /// already did ([`KEY_REJECTED`] when it is too new to replace again).
+    /// `admit` is asked again once the key lock is held, so a logout that
+    /// revoked keys meanwhile gets no new one.
     fn api_key<'a>(
         &'a self,
         identity: &'a Identity,
         rejected: Option<&'a str>,
+        admit: &'a Admit<'a>,
     ) -> BoxFuture<'a, Result<String, String>>;
     /// Whether a key for `identity` is ready, without minting one.
     fn key_ready<'a>(&'a self, identity: &'a Identity) -> BoxFuture<'a, bool>;
@@ -143,7 +158,7 @@ pub struct AssistantHost {
     recovered: Mutex<HashSet<String>>,
     /// The live run of each session, by session id.
     runs: Mutex<HashMap<String, Arc<RunControl>>>,
-    models: Mutex<HashMap<String, Vec<catalog::Model>>>,
+    models: Mutex<HashMap<String, (std::time::Instant, Vec<catalog::Model>)>>,
 }
 
 fn session_key(owner: &str, sid: &str) -> String {
@@ -221,18 +236,75 @@ fn is_local_gateway(base_url: &str) -> bool {
         && port.parse::<u32>().is_ok_and(|p| p <= 65_535)
 }
 
-/// The runtime's error text for a gateway 401, in the forms the Pi SDK gives
-/// for each protocol: `401: …` / `401 status code (no body)` (Chat
-/// Completions), `401 {…}` (Anthropic Messages), `… API error (401): …`
-/// (Responses).
-fn is_gateway_unauthorized(message: &str) -> bool {
+/// The HTTP status at the head of the runtime's error text, in the forms the
+/// Pi SDK gives for each protocol: `401: …` / `401 status code (no body)`
+/// (Chat Completions), `401 {…}` (Anthropic Messages), `… API error (401): …`
+/// (Responses). Used when the runtime gave no `errorStatus`.
+fn leading_status(message: &str) -> Option<u16> {
     let message = message.trim_start();
-    message
-        .strip_prefix("401")
-        .is_some_and(|rest| !rest.starts_with(|c: char| c.is_ascii_digit()))
-        || message
-            .split_once(':')
-            .is_some_and(|(head, _)| head.ends_with("API error (401)"))
+    let digits: String = message.chars().take_while(char::is_ascii_digit).collect();
+    if digits.len() == 3 {
+        return digits.parse().ok();
+    }
+    let (head, _) = message.split_once(':')?;
+    let code = head.strip_suffix(')')?.rsplit_once("API error (")?.1;
+    (code.len() == 3).then(|| code.parse().ok()).flatten()
+}
+
+fn is_balance_error(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    [
+        "insufficient_credits",
+        "insufficient credits",
+        "insufficient_balance",
+        "insufficient balance",
+        "insufficient_quota",
+    ]
+    .iter()
+    .any(|marker| message.contains(marker))
+}
+
+fn is_network_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "fetch failed",
+        "connection error",
+        "timed out",
+        "econnrefused",
+        "econnreset",
+        "etimedout",
+        "enotfound",
+        "eai_again",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+/// A failed model request as a stable code. The runtime reports the HTTP
+/// status (`errorStatus`) or that no response came (`errorKind: network`);
+/// older or unforeseen forms fall back to the text. A refused (4xx),
+/// unanswered or unsent request generated nothing, so it costs a known zero.
+fn provider_failure(result: &Value, detail: String) -> Failure {
+    let status = result["errorStatus"]
+        .as_u64()
+        .and_then(|s| u16::try_from(s).ok())
+        .or_else(|| leading_status(&detail));
+    let network =
+        result["errorKind"] == "network" || (status.is_none() && is_network_error(&detail));
+    let code = match status {
+        Some(401) => KEY_REJECTED,
+        Some(402) => INSUFFICIENT_BALANCE,
+        Some(404) => MODEL_UNAVAILABLE,
+        Some(429) => RATE_LIMITED,
+        _ if is_balance_error(&detail) => INSUFFICIENT_BALANCE,
+        _ if network => NETWORK_ERROR,
+        _ => MODEL_REQUEST_FAILED,
+    };
+    Failure {
+        code: code.into(),
+        detail: Some(detail),
+        unbilled: matches!(status, Some(400..=499)) || network || result["errorKind"] == "not_sent",
+    }
 }
 
 pub(super) fn runtime_at(base: &Path) -> Result<Runtime, String> {
@@ -274,11 +346,17 @@ enum Finish {
 struct Failure {
     code: String,
     detail: Option<String>,
+    /// The request cost nothing: the session's cost stays known.
+    unbilled: bool,
 }
 
 impl From<String> for Failure {
     fn from(code: String) -> Self {
-        Self { code, detail: None }
+        Self {
+            code,
+            detail: None,
+            unbilled: false,
+        }
     }
 }
 
@@ -286,6 +364,25 @@ impl From<&str> for Failure {
     fn from(code: &str) -> Self {
         code.to_string().into()
     }
+}
+
+/// What one runtime attempt has done so far.
+#[derive(Default)]
+struct Attempt {
+    projection: ProjectionBuffer,
+    /// Text reached the user or a request counted tokens: a refused key is
+    /// then not retried, so nothing shown or billed is replayed.
+    progressed: bool,
+    /// The runtime answered the run request; there is nothing left to stop.
+    answered: bool,
+}
+
+/// Whether a runtime usage report counts any tokens.
+fn counts_tokens(data: &Value) -> bool {
+    let usage = data.get("usage").unwrap_or(data);
+    ["input", "output", "cacheRead", "cacheWrite", "totalTokens"]
+        .iter()
+        .any(|key| usage[*key].as_u64().unwrap_or(0) > 0)
 }
 
 impl AssistantHost {
@@ -327,17 +424,54 @@ impl AssistantHost {
         Ok(())
     }
 
-    /// The chat models of `apex`, fetched once per apex.
+    /// The chat models of `apex`, fetched again after [`MODELS_TTL`]. When
+    /// that fetch fails, the last catalog is better than none.
     pub(super) async fn models(&self, apex: &str) -> Result<Vec<catalog::Model>, String> {
-        if let Some(models) = self.models.lock().map_err(|_| STATE)?.get(apex) {
-            return Ok(models.clone());
+        self.catalog(apex, false).await
+    }
+
+    async fn catalog(&self, apex: &str, refresh: bool) -> Result<Vec<catalog::Model>, String> {
+        let cached = self.models.lock().map_err(|_| STATE)?.get(apex).cloned();
+        if let Some((fetched, models)) = &cached {
+            if !refresh && fetched.elapsed() < MODELS_TTL {
+                return Ok(models.clone());
+            }
         }
-        let models = self.env.models(apex).await?;
-        self.models
-            .lock()
-            .map_err(|_| STATE)?
-            .insert(apex.to_owned(), models.clone());
-        Ok(models)
+        match self.env.models(apex).await {
+            Ok(models) => {
+                self.models
+                    .lock()
+                    .map_err(|_| STATE)?
+                    .insert(apex.to_owned(), (std::time::Instant::now(), models.clone()));
+                Ok(models)
+            }
+            Err(error) => cached.map(|(_, models)| models).ok_or(error),
+        }
+    }
+
+    /// One model of `apex`'s catalog; a model the cached catalog lacks is
+    /// looked up once more in a fresh one.
+    pub(super) async fn model(&self, apex: &str, id: &str) -> Result<catalog::Model, String> {
+        let find = |models: Vec<catalog::Model>| models.into_iter().find(|m| m.id == id);
+        if let Some(model) = find(self.models(apex).await?) {
+            return Ok(model);
+        }
+        find(self.catalog(apex, true).await?).ok_or_else(|| MODEL_UNAVAILABLE.into())
+    }
+
+    fn forget_models(&self, apex: &str) {
+        if let Ok(mut models) = self.models.lock() {
+            models.remove(apex);
+        }
+    }
+
+    /// Admission for a key fetch: open, and no revocation since `generation`.
+    pub(super) fn admit(&self, generation: u64) -> Result<(), String> {
+        self.ensure_accepting_runs()?;
+        if self.generation() != generation {
+            return Err(IDENTITY_CHANGED.into());
+        }
+        Ok(())
     }
 
     pub(super) fn runtime(&self) -> Result<Runtime, String> {
@@ -703,11 +837,28 @@ impl AssistantHost {
         })
         .await?;
         match self.run_once(control, &params, true).await {
-            Err(failure) if failure.code == KEY_REJECTED => {
-                self.validate_run(control)?;
-                blocking(move || restore(&native, before)).await?;
+            Err(failure) if failure.code == RETRY_WITH_NEW_KEY => {
+                // Neither attempt was billed: whatever happens next, the
+                // session's cost stays known.
+                let unbilled = |code: String| Failure {
+                    code,
+                    detail: None,
+                    unbilled: true,
+                };
+                self.validate_run(control).map_err(unbilled)?;
+                if self.identity().await.map_err(unbilled)? != control.identity {
+                    return Err(unbilled(IDENTITY_CHANGED.into()));
+                }
+                blocking(move || restore(&native, before))
+                    .await
+                    .map_err(unbilled)?;
                 let rejected = params["apiKey"].as_str().unwrap_or_default().to_owned();
-                let key = self.env.api_key(&control.identity, Some(&rejected)).await?;
+                let admit = || self.validate_run(control);
+                let key = self
+                    .env
+                    .api_key(&control.identity, Some(&rejected), &admit)
+                    .await
+                    .map_err(unbilled)?;
                 control.add_secret(&key);
                 params["apiKey"] = json!(key);
                 self.run_once(control, &params, false).await
@@ -735,7 +886,7 @@ impl AssistantHost {
         });
         let mut output = BufReader::new(output);
         let mut buffer = Vec::new();
-        let mut projection = ProjectionBuffer::default();
+        let mut attempt = Attempt::default();
         let request_id = id();
         let result = self
             .converse(
@@ -744,15 +895,16 @@ impl AssistantHost {
                 may_retry,
                 &request_id,
                 (&mut input, &mut output, &mut buffer),
-                &mut projection,
+                &mut attempt,
             )
             .await;
-        let flushed = self.flush(control, &mut projection).await;
+        let flushed = self.flush(control, &mut attempt.projection).await;
         let result = match (result, flushed) {
             (Ok(_), Err(error)) => Err(error.into()),
             (result, _) => result,
         };
         if result.is_err()
+            && !attempt.answered
             && (control.cancelled() || tokio::time::Instant::now() >= control.deadline)
         {
             // Let the runtime save the interrupted turn before the process goes.
@@ -771,7 +923,7 @@ impl AssistantHost {
         may_retry: bool,
         request_id: &str,
         (input, output, buffer): (&mut I, &mut O, &mut Vec<u8>),
-        projection: &mut ProjectionBuffer,
+        attempt: &mut Attempt,
     ) -> Result<Finish, Failure>
     where
         I: AsyncWrite + Unpin,
@@ -794,8 +946,8 @@ impl AssistantHost {
             let length = tokio::select! {
                 _ = cancel.changed() => return Err(CANCELLED.into()),
                 _ = ticker.tick() => {
-                    if projection.due() {
-                        self.flush(control, projection).await?;
+                    if attempt.projection.due() {
+                        self.flush(control, &mut attempt.projection).await?;
                     }
                     if self.identity().await? != control.identity {
                         return Err(IDENTITY_CHANGED.into());
@@ -814,7 +966,7 @@ impl AssistantHost {
             let value: Value = serde_json::from_slice(buffer).map_err(|_| PROTOCOL)?;
             buffer.clear();
             if value["method"] == "event" {
-                self.on_event(control, &value["params"], projection).await?;
+                self.on_event(control, &value["params"], attempt).await?;
             } else if value["method"] == "tool" {
                 ensure_same_run(control, &value["params"])?;
                 // Chat registers no tools; refuse at once so the runtime never waits.
@@ -823,7 +975,8 @@ impl AssistantHost {
                 )?;
                 write_line(input, &reply).await?;
             } else if value["id"] == request_id {
-                return self.on_result(control, &value, may_retry, projection).await;
+                attempt.answered = true;
+                return self.on_result(control, &value, may_retry, attempt).await;
             }
         }
     }
@@ -832,7 +985,7 @@ impl AssistantHost {
         &self,
         control: &Arc<RunControl>,
         params: &Value,
-        projection: &mut ProjectionBuffer,
+        attempt: &mut Attempt,
     ) -> Result<(), Failure> {
         ensure_same_run(control, params)?;
         let kind = params["type"].as_str().ok_or(PROTOCOL)?;
@@ -842,13 +995,15 @@ impl AssistantHost {
         }
         match kind {
             "text_delta" | "thinking_delta" => {
-                projection.push(control, kind, &mut data);
-                if projection.due() {
-                    self.flush(control, projection).await?;
+                attempt.progressed = true;
+                attempt.projection.push(control, kind, &mut data);
+                if attempt.projection.due() {
+                    self.flush(control, &mut attempt.projection).await?;
                 }
                 self.emit(control, kind, data);
             }
             "usage" => {
+                attempt.progressed |= counts_tokens(&data);
                 let usage = self.save_usage(control, data).await?;
                 self.emit(control, "usage", json!({ "usage": usage }));
             }
@@ -865,16 +1020,17 @@ impl AssistantHost {
         control: &Arc<RunControl>,
         value: &Value,
         may_retry: bool,
-        projection: &mut ProjectionBuffer,
+        attempt: &mut Attempt,
     ) -> Result<Finish, Failure> {
         let secrets = control.secrets();
         if let Some(error) = value.get("error") {
             return Err(Failure {
                 code: "assistant_runtime_failed".into(),
                 detail: error["message"].as_str().map(|m| scrub_text(m, &secrets)),
+                unbilled: false,
             });
         }
-        self.flush(control, projection).await?;
+        self.flush(control, &mut attempt.projection).await?;
         let result = &value["result"];
         match result["status"].as_str() {
             Some("completed") | Some("stopped") => {
@@ -890,24 +1046,16 @@ impl AssistantHost {
                     result["errorMessage"].as_str().unwrap_or("Request failed"),
                     &secrets,
                 );
-                let unauthorized = is_gateway_unauthorized(&detail);
-                if unauthorized && may_retry {
+                let failure = provider_failure(result, detail);
+                if failure.code == KEY_REJECTED && may_retry && !attempt.progressed {
                     // Nothing saved: the caller rolls this attempt back and retries.
                     return Err(Failure {
-                        code: KEY_REJECTED.into(),
-                        detail: Some(detail),
+                        code: RETRY_WITH_NEW_KEY.into(),
+                        ..failure
                     });
                 }
                 self.apply_native(control, &result["entries"]).await?;
-                Err(Failure {
-                    code: if unauthorized {
-                        KEY_REJECTED
-                    } else {
-                        "assistant_model_request_failed"
-                    }
-                    .into(),
-                    detail: Some(detail),
-                })
+                Err(failure)
             }
         }
     }
@@ -1009,6 +1157,13 @@ impl AssistantHost {
             Err(_) => control.cancelled(),
         };
         let completed = matches!(outcome, Ok(Finish::Completed));
+        // A failure that cost nothing leaves the session's cost known.
+        let unbilled = matches!(&outcome, Err(failure) if failure.unbilled && !stopped);
+        if let Err(failure) = &outcome {
+            if failure.code == MODEL_UNAVAILABLE {
+                self.forget_models(&control.identity.apex);
+            }
+        }
         if outcome.is_err() {
             if let Ok(mut recovered) = self.recovered.lock() {
                 recovered.remove(&session_key(&control.identity.owner, &control.session_id));
@@ -1020,7 +1175,7 @@ impl AssistantHost {
                 let sid = control.session_id.clone();
                 blocking(move || {
                     store.mutate(&sid, |record| {
-                        settle_run(record, &control, completed, stopped)
+                        settle_run(record, &control, completed, stopped, unbilled)
                     })
                 })
                 .await
@@ -1184,10 +1339,12 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
 
-    /// Signed in as one account in `ofox.ai`, files in a temp dir; no key,
-    /// catalog or runtime.
+    /// Signed in as one account in `ofox.ai`, files in a temp dir; a one-model
+    /// catalog whose fetches are counted; no key or runtime.
     struct FixedEnvironment {
         config: PathBuf,
+        catalog: Mutex<Vec<String>>,
+        fetches: AtomicU64,
     }
 
     impl Environment for FixedEnvironment {
@@ -1198,6 +1355,7 @@ mod tests {
             &'a self,
             _: &'a Identity,
             _: Option<&'a str>,
+            _: &'a Admit<'a>,
         ) -> BoxFuture<'a, Result<String, String>> {
             Box::pin(async { Err("assistant_key_unavailable".to_string()) })
         }
@@ -1205,7 +1363,16 @@ mod tests {
             Box::pin(async { false })
         }
         fn models<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Vec<catalog::Model>, String>> {
-            Box::pin(async { Ok(vec![]) })
+            Box::pin(async {
+                self.fetches.fetch_add(1, Ordering::SeqCst);
+                Ok(self
+                    .catalog
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|id| model(id))
+                    .collect())
+            })
         }
         fn gateway_base(&self, _: &str) -> Result<String, String> {
             Err("assistant_unknown_apex".into())
@@ -1226,11 +1393,29 @@ mod tests {
         }
     }
 
-    fn fixture() -> (tempfile::TempDir, Arc<AssistantHost>) {
+    fn model(id: &str) -> catalog::Model {
+        serde_json::from_value(json!({
+            "id": id, "name": id, "contextWindow": 32000, "maxOutputTokens": 1024,
+            "supportsImages": false, "inputModalities": ["text"],
+            "supportedEndpoints": ["/v1/chat/completions"], "inputPricePerMillion": null,
+            "outputPricePerMillion": null, "pricing": {}, "cost": {}, "pricingKnown": false,
+        }))
+        .unwrap()
+    }
+
+    fn fixture_with_env() -> (tempfile::TempDir, Arc<FixedEnvironment>, Arc<AssistantHost>) {
         let config = tempfile::tempdir().unwrap();
-        let host = AssistantHost::new(Arc::new(FixedEnvironment {
+        let env = Arc::new(FixedEnvironment {
             config: config.path().to_path_buf(),
-        }));
+            catalog: Mutex::new(vec!["test/model".into()]),
+            fetches: AtomicU64::new(0),
+        });
+        let host = AssistantHost::new(env.clone());
+        (config, env, host)
+    }
+
+    fn fixture() -> (tempfile::TempDir, Arc<AssistantHost>) {
+        let (config, _env, host) = fixture_with_env();
         (config, host)
     }
 
@@ -1470,24 +1655,152 @@ mod tests {
     }
 
     #[test]
-    fn a_gateway_401_is_recognized_in_each_protocols_wording() {
-        for refused in [
-            "401: {\"message\":\"Invalid API key\"}",
-            "401 status code (no body)",
-            "401 {\"error\":{\"message\":\"Invalid API key\"}}",
-            "ofox-desktop API error (401): {\"message\":\"Invalid API key\"}",
+    fn provider_failures_get_their_own_codes_and_unbilled_ones_cost_nothing() {
+        let failure = |result: Value, text: &str| {
+            let failure = provider_failure(&result, text.into());
+            (failure.code, failure.unbilled)
+        };
+        let code = |code: &str, unbilled: bool| (code.to_string(), unbilled);
+        // The runtime's structured status.
+        for (status, expected) in [
+            (401, code(KEY_REJECTED, true)),
+            (402, code(INSUFFICIENT_BALANCE, true)),
+            (404, code(MODEL_UNAVAILABLE, true)),
+            (429, code(RATE_LIMITED, true)),
+            (400, code(MODEL_REQUEST_FAILED, true)),
+            (500, code(MODEL_REQUEST_FAILED, false)),
+            (503, code(MODEL_REQUEST_FAILED, false)),
         ] {
-            assert!(is_gateway_unauthorized(refused), "{refused}");
+            assert_eq!(
+                failure(json!({"errorStatus": status}), "x"),
+                expected,
+                "{status}"
+            );
         }
-        for other in [
-            "403: {\"message\":\"Forbidden\"}",
-            "4010 retries",
-            "429 Too Many Requests",
-            "ofox-desktop API error (500): boom",
-            "Request failed after 401 attempts",
+        assert_eq!(
+            failure(json!({"errorKind": "network"}), "Connection error."),
+            code(NETWORK_ERROR, true)
+        );
+        assert_eq!(
+            failure(
+                json!({"errorKind": "not_sent"}),
+                "assistant_vision_model_required"
+            ),
+            code(MODEL_REQUEST_FAILED, true)
+        );
+        // Ofox's balance error under another status.
+        assert_eq!(
+            failure(
+                json!({"errorStatus": 403}),
+                r#"403: {"message":"Insufficient credits.","type":"insufficient_credits"}"#
+            ),
+            code(INSUFFICIENT_BALANCE, true)
+        );
+        // Without a reported status: the head of the text, per protocol.
+        for (text, expected) in [
+            ("401: {\"message\":\"Invalid API key\"}", KEY_REJECTED),
+            ("401 status code (no body)", KEY_REJECTED),
+            (
+                "401 {\"error\":{\"message\":\"Invalid API key\"}}",
+                KEY_REJECTED,
+            ),
+            (
+                "ofox-desktop API error (401): {\"message\":\"x\"}",
+                KEY_REJECTED,
+            ),
+            (
+                "402: {\"message\":\"Insufficient credits\"}",
+                INSUFFICIENT_BALANCE,
+            ),
+            ("429 Too Many Requests", RATE_LIMITED),
+            (
+                "ofox-desktop API error (404): no such model",
+                MODEL_UNAVAILABLE,
+            ),
+            ("Connection error.", NETWORK_ERROR),
+            ("fetch failed", NETWORK_ERROR),
+            ("connect ECONNREFUSED 127.0.0.1:443", NETWORK_ERROR),
+            ("4010 retries", MODEL_REQUEST_FAILED),
+            ("Request failed after 401 attempts", MODEL_REQUEST_FAILED),
+            ("ofox-desktop API error (500): boom", MODEL_REQUEST_FAILED),
         ] {
-            assert!(!is_gateway_unauthorized(other), "{other}");
+            assert_eq!(failure(json!({}), text).0, expected, "{text}");
         }
+    }
+
+    #[test]
+    fn only_shown_text_or_counted_tokens_make_an_attempt_unrepeatable() {
+        let zero = json!({"usage": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0}});
+        assert!(!counts_tokens(&zero));
+        assert!(!counts_tokens(&json!({})));
+        assert!(counts_tokens(&json!({"usage": {"input": 12, "output": 0}})));
+        assert!(counts_tokens(&json!({"totalTokens": 3})));
+    }
+
+    #[tokio::test]
+    async fn the_model_catalog_is_fetched_again_when_stale_or_missing_a_model() {
+        let (_config, env, host) = fixture_with_env();
+        host.models("ofox.ai").await.unwrap();
+        host.models("ofox.ai").await.unwrap();
+        assert_eq!(
+            env.fetches.load(Ordering::SeqCst),
+            1,
+            "fresh catalogs are reused"
+        );
+
+        // A model the cached catalog lacks: one fresh look before refusing.
+        env.catalog.lock().unwrap().push("new/model".into());
+        assert_eq!(
+            host.model("ofox.ai", "new/model").await.unwrap().id,
+            "new/model"
+        );
+        assert_eq!(env.fetches.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            host.model("ofox.ai", "gone/model").await.unwrap_err(),
+            MODEL_UNAVAILABLE
+        );
+        assert_eq!(env.fetches.load(Ordering::SeqCst), 3);
+
+        // After the TTL the catalog is fetched again.
+        if let Some((fetched, _)) = host.models.lock().unwrap().get_mut("ofox.ai") {
+            *fetched -= MODELS_TTL;
+        }
+        host.models("ofox.ai").await.unwrap();
+        assert_eq!(env.fetches.load(Ordering::SeqCst), 4);
+
+        // A run that found its model gone drops the catalog.
+        host.forget_models("ofox.ai");
+        host.models("ofox.ai").await.unwrap();
+        assert_eq!(env.fetches.load(Ordering::SeqCst), 5);
+    }
+
+    #[tokio::test]
+    async fn an_update_that_is_not_saved_leaves_the_run_running() {
+        let (config, host) = fixture();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let run = control(&sid);
+        host.runs.lock().unwrap().insert(sid.clone(), run.clone());
+        let trash = |sid: &str| -> UpdateRequest {
+            serde_json::from_value(json!({"sessionId": sid, "deleted": true})).unwrap()
+        };
+        let damaged = config
+            .path()
+            .join("assistant")
+            .join(identity().owner)
+            .join(&sid)
+            .join("session.json");
+        let saved = std::fs::read(&damaged).unwrap();
+        std::fs::write(&damaged, "{").unwrap();
+        assert_eq!(
+            host.update_session(trash(&sid)).await.unwrap_err(),
+            "assistant_invalid_session"
+        );
+        assert!(!run.cancelled(), "a refused update stops nothing");
+
+        std::fs::write(&damaged, saved).unwrap();
+        host.update_session(trash(&sid)).await.unwrap();
+        assert!(run.cancelled(), "trashing a session stops its run");
     }
 
     #[test]
