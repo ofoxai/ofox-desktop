@@ -19,6 +19,8 @@ import { ShellProvider, useShell } from "@/components/shell/ShellContext";
 import type {
   AssistantBootstrap,
   AssistantEvent,
+  AssistantMessage,
+  AssistantModel,
   AssistantSession,
   AssistantSessionDetail,
   AssistantSessionList,
@@ -50,16 +52,34 @@ const session: AssistantSession = {
   title: "My conversation",
   modelId: "balanced",
   webSearch: false,
+  draft: "",
+  draftAttachmentIds: [],
   createdAt: 1,
   updatedAt: 1,
+  deletedAt: null,
+  activeRun: null,
 };
+const model = (id: string, name: string): AssistantModel => ({
+  id,
+  name,
+  contextWindow: 128_000,
+  maxOutputTokens: 16_000,
+  supportsImages: false,
+  inputModalities: ["text"],
+  supportedEndpoints: ["chat/completions"],
+  inputPricePerMillion: null,
+  outputPricePerMillion: null,
+  pricing: {},
+  cost: { input: null, output: null, cacheRead: null, cacheWrite: null },
+  pricingKnown: false,
+});
 const capabilities: AssistantBootstrap = {
-  runtime: { available: true, version: "test" },
-  models: [
-    { id: "balanced", name: "Balanced model" },
-    { id: "fast", name: "Fast model" },
-  ],
+  owner: "a".repeat(64),
+  authorityGeneration: 1,
+  runtime: { available: true, reason: null, version: "test" },
+  models: [model("balanced", "Balanced model"), model("fast", "Fast model")],
   defaultModelId: "balanced",
+  modelUnavailableReason: null,
   key: { status: "ready" },
 };
 let current: AssistantSessionDetail;
@@ -92,7 +112,12 @@ beforeEach(async () => {
   Element.prototype.scrollIntoView = vi.fn();
   i18n.addResourceBundle("en", "translation", en, true, true);
   await i18n.changeLanguage("en");
-  current = { session: { ...session }, messages: [], attachments: [] };
+  current = {
+    session: { ...session },
+    messages: [],
+    attachments: [],
+    usage: {},
+  };
   mocks.bootstrap.mockResolvedValue(capabilities);
   mocks.listSessions.mockImplementation(async () => listOf([current.session]));
   mocks.createSession.mockImplementation(async () => current.session);
@@ -274,7 +299,7 @@ describe("history", () => {
     mocks.listSessions.mockResolvedValue(
       listOf(
         [session],
-        [{ id: "damaged-session", code: "assistant_invalid_session" }],
+        [{ id: "damaged-session", error: "assistant_invalid_session" }],
       ),
     );
     render(page());
@@ -308,6 +333,8 @@ describe("history", () => {
       expect(mocks.updateSession).toHaveBeenCalledWith({
         sessionId: "session-a",
         title: "Trip plan",
+        expectedOwner: capabilities.owner,
+        expectedGeneration: capabilities.authorityGeneration,
       }),
     );
   });
@@ -324,6 +351,8 @@ describe("history", () => {
       expect(mocks.updateSession).toHaveBeenCalledWith({
         sessionId: "session-a",
         modelId: "fast",
+        expectedOwner: capabilities.owner,
+        expectedGeneration: capabilities.authorityGeneration,
       }),
     );
   });
@@ -354,16 +383,20 @@ describe("errors", () => {
       "この会話の保存ファイルが破損しているため開けません。",
     ],
     [
-      "assistant_vision_model_required",
+      "assistant_key_storage_unavailable",
       "en",
-      "This content requires image understanding. Switch to a model that supports images and retry. Your message is kept.",
+      "The assistant's API key couldn't be read or saved on this computer. Make sure the system credential store (Keychain) is available, then try again.",
+    ],
+    [
+      "assistant_key_unavailable",
+      "zh",
+      "没能创建助手的 API Key，请检查网络后重试。",
     ],
   ])(
-    "localizes a wrapped assistant error %s in %s",
+    "localizes the command error %s in %s",
     async (code, language, expected) => {
-      mocks.send.mockRejectedValueOnce(
-        new Error(`assistant_model_request_failed: ${code}`),
-      );
+      // A command rejects with the bare code.
+      mocks.send.mockRejectedValueOnce(code);
       await openConversation();
       i18n.addResourceBundle("zh", "translation", zh, true, true);
       i18n.addResourceBundle("ja", "translation", ja, true, true);
@@ -398,31 +431,77 @@ describe("errors", () => {
     expect(document.body).not.toHaveTextContent("assistant_brand_new_failure");
   });
 
-  it("shows a run's error event as a localized message and ignores a user stop", async () => {
+  it.each([
+    [
+      "assistant_insufficient_balance",
+      "en",
+      "Your Ofox balance is too low for this reply. Top up your account, then try again.",
+    ],
+    ["assistant_rate_limited", "zh", "请求太频繁了，请稍等片刻再试。"],
+    [
+      "assistant_network_error",
+      "ja",
+      "Ofox のモデルサービスに接続できませんでした。インターネット接続を確認してもう一度お試しください。",
+    ],
+    [
+      "assistant_key_rejected",
+      "en",
+      "Ofox didn't accept the assistant's API key. Wait a few minutes and try again. If it keeps happening, sign out and sign in again.",
+    ],
+    [
+      "assistant_model_unavailable",
+      "en",
+      "This model isn't available right now. Choose another model.",
+    ],
+  ])(
+    "explains the run failure %s in %s by its code, never with the provider's text",
+    async (code, language, expected) => {
+      await openConversation();
+      i18n.addResourceBundle("zh", "translation", zh, true, true);
+      i18n.addResourceBundle("ja", "translation", ja, true, true);
+      await act(async () => {
+        await i18n.changeLanguage(language);
+      });
+      await userEvent.type(
+        screen.getByRole("textbox", { name: i18n.t("assistant.message") }),
+        "Hello",
+      );
+      await userEvent.click(
+        screen.getByRole("button", { name: i18n.t("assistant.send") }),
+      );
+      await screen.findByRole("button", { name: i18n.t("assistant.stop") });
+      const sent = mocks.send.mock.calls[0][0];
+      const provider = 'upstream said {"type":"insufficient_credits"}';
+      act(() =>
+        mocks.listener?.({
+          ...sent,
+          type: "error",
+          data: { code, message: provider },
+        }),
+      );
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent(expected);
+      expect(document.body).not.toHaveTextContent(provider);
+      expect(document.body).not.toHaveTextContent(code);
+    },
+  );
+
+  it("shows no error for a reply the user stopped", async () => {
     await openConversation();
     await userEvent.type(composer(), "Hello");
     await userEvent.click(screen.getByRole("button", { name: "Send" }));
-    await screen.findByRole("button", { name: "Stop" });
+    await userEvent.click(await screen.findByRole("button", { name: "Stop" }));
     const sent = mocks.send.mock.calls[0][0];
+    // A stop ends with run_end alone: the host sends no error for it.
     act(() =>
       mocks.listener?.({
         ...sent,
-        type: "error",
-        data: { code: "stopped", message: "aborted" },
+        type: "run_end",
+        data: { stopped: true, status: "stopped" },
       }),
     );
+    expect(await screen.findByRole("button", { name: "Send" })).toBeVisible();
     expect(screen.queryByRole("alert")).toBeNull();
-    act(() =>
-      mocks.listener?.({
-        ...sent,
-        type: "error",
-        data: { code: "runtime_error", message: "upstream 503 body" },
-      }),
-    );
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "The model service couldn't complete the reply. Please try again.",
-    );
-    expect(document.body).not.toHaveTextContent("upstream 503 body");
   });
 
   it("preserves a draft after a failed send", async () => {
@@ -468,12 +547,14 @@ describe("internal records", () => {
       },
       messages: [
         { id: "q", role: "user", content: "Question", createdAt: 1 },
+        // Written by an older build; the host itself saves only user and
+        // assistant messages.
         {
           id: "internal",
           role: "tool",
           content: "assistant_request",
           createdAt: 2,
-        },
+        } as unknown as AssistantMessage,
         {
           id: "reply",
           role: "assistant",
@@ -492,6 +573,7 @@ describe("internal records", () => {
     await openConversation();
     expect(await screen.findByText("Thinking…")).toBeVisible();
     act(() => {
+      // Event types this build does not know are ignored.
       mocks.listener?.({
         sessionId: "session-a",
         runId: "run-a",
@@ -500,14 +582,14 @@ describe("internal records", () => {
         data: {
           operation: { id: "op-a", title: "assistant_request" },
         },
-      });
+      } as unknown as AssistantEvent);
       mocks.listener?.({
         sessionId: "session-a",
         runId: "run-a",
         operationId: "op-a",
         type: "tool_start",
         data: { name: "assistant_request" },
-      });
+      } as unknown as AssistantEvent);
     });
     expect(screen.getByText("Question")).toBeVisible();
     expect(document.body).not.toHaveTextContent("assistant_request");
@@ -562,7 +644,7 @@ describe("running a reply", () => {
         runId: "resumed-run",
         operationId: "resumed-operation",
         type: "text_delta",
-        data: { delta: " and live tail" },
+        data: { delta: " and live tail", messageId: "reply" },
       }),
     );
     expect(await screen.findByText("Saved prefix and live tail")).toBeVisible();
@@ -579,18 +661,18 @@ describe("running a reply", () => {
         ...sent,
         operationId: "old-operation",
         type: "text_delta",
-        data: { delta: "STALE REPLY" },
+        data: { delta: "STALE REPLY", messageId: "reply" },
       });
       mocks.listener?.({
         ...sent,
         sessionId: "another-session",
         type: "text_delta",
-        data: { delta: "WRONG SESSION" },
+        data: { delta: "WRONG SESSION", messageId: "reply" },
       });
       mocks.listener?.({
         ...sent,
         type: "text_delta",
-        data: { delta: "Current reply" },
+        data: { delta: "Current reply", messageId: "reply" },
       });
     });
     expect(await screen.findByText("Current reply")).toBeVisible();
@@ -611,7 +693,11 @@ describe("running a reply", () => {
     await screen.findByRole("button", { name: "Stop" });
     const sent = mocks.send.mock.calls[0][0];
     act(() =>
-      mocks.listener?.({ ...sent, type: "text_delta", data: { delta: "Hi" } }),
+      mocks.listener?.({
+        ...sent,
+        type: "text_delta",
+        data: { delta: "Hi", messageId: "reply" },
+      }),
     );
     current = {
       ...current,
@@ -627,7 +713,11 @@ describe("running a reply", () => {
       ],
     };
     act(() =>
-      mocks.listener?.({ ...sent, type: "run_end", data: { stopped: false } }),
+      mocks.listener?.({
+        ...sent,
+        type: "run_end",
+        data: { stopped: false, status: "completed" },
+      }),
     );
     expect(await screen.findByText("Hi there")).toBeVisible();
     expect(await screen.findByRole("button", { name: "Send" })).toBeVisible();
@@ -995,38 +1085,35 @@ describe("selection and history edges", () => {
     );
   });
 
-  it.each(["run_end", "error"])(
-    "refreshes a background conversation's Replying… mark on its %s",
-    async (type) => {
-      const other = { ...session, id: "session-b", title: "Other" };
-      mocks.listSessions.mockResolvedValue(
-        listOf([
-          { ...session, activeRun: { runId: "bg-run", operationId: "bg-op" } },
-          other,
-        ]),
-      );
-      render(page());
-      const list = await screen.findByRole("list", { name: "Conversations" });
-      await within(list).findByText("Replying…");
-      mocks.listSessions.mockResolvedValue(listOf([session, other]));
-      act(() =>
-        mocks.listener?.({
-          sessionId: "session-a",
-          runId: "bg-run",
-          operationId: "bg-op",
-          type,
-          data: {},
-        }),
-      );
-      await waitFor(() =>
-        expect(within(list).queryByText("Replying…")).toBeNull(),
-      );
-    },
-  );
+  it("refreshes a background conversation's Replying… mark on its run_end", async () => {
+    const other = { ...session, id: "session-b", title: "Other" };
+    mocks.listSessions.mockResolvedValue(
+      listOf([
+        { ...session, activeRun: { runId: "bg-run", operationId: "bg-op" } },
+        other,
+      ]),
+    );
+    render(page());
+    const list = await screen.findByRole("list", { name: "Conversations" });
+    await within(list).findByText("Replying…");
+    mocks.listSessions.mockResolvedValue(listOf([session, other]));
+    act(() =>
+      mocks.listener?.({
+        sessionId: "session-a",
+        runId: "bg-run",
+        operationId: "bg-op",
+        type: "run_end",
+        data: { stopped: false, status: "completed" },
+      }),
+    );
+    await waitFor(() =>
+      expect(within(list).queryByText("Replying…")).toBeNull(),
+    );
+  });
 
   it("describes a row the backend could not list by its own code", async () => {
     mocks.listSessions.mockResolvedValue(
-      listOf([], [{ id: "x", code: "assistant_storage_unavailable" }]),
+      listOf([], [{ id: "x", error: "assistant_storage_unavailable" }]),
     );
     render(page());
     const list = await screen.findByRole("list", { name: "Conversations" });
@@ -1085,7 +1172,7 @@ describe("run edges", () => {
         sessionId: session.id,
         ...run,
         type: "text_delta",
-        data: { delta: "Answer" },
+        data: { delta: "Answer", messageId: "reply" },
       }),
     );
     expect(hook.result.current.stream?.content).toBe("Answer");
@@ -1123,7 +1210,7 @@ describe("run edges", () => {
             role: "tool",
             content: "assistant_request",
             createdAt: 1,
-          },
+          } as unknown as AssistantMessage,
         },
       }),
     );

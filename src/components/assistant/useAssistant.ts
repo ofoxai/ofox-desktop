@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   assistantApi,
-  assistantErrorText,
+  assistantErrorCode,
   type AssistantBootstrap,
   type AssistantEvent,
   type AssistantMessage,
@@ -14,7 +14,7 @@ import {
 
 const freshId = () => crypto.randomUUID();
 
-/** Raw failure text or code; the page turns it into a localized message. */
+/** A backend or renderer error code; the page turns it into a localized message. */
 export type AssistantError = string;
 
 /** The owner check the backend applies to writes that outlive a sign-in. */
@@ -80,7 +80,7 @@ export function useAssistant(enabled: boolean) {
   }, []);
 
   const showError = useCallback((value: unknown) => {
-    if (mounted.current) setError(assistantErrorText(value));
+    if (mounted.current) setError(assistantErrorCode(value));
   }, []);
 
   const persistDraft = useCallback((sessionId: string, text: string) => {
@@ -172,7 +172,7 @@ export function useAssistant(enabled: boolean) {
                 message.role === "assistant" && message.status === "streaming",
             )
           : undefined;
-        savedDrafts.current.set(sessionId, value.session.draft ?? "");
+        savedDrafts.current.set(sessionId, value.session.draft);
         const alreadyFollowing = Boolean(runRef.current);
         setDetail((old) => {
           if (preparing)
@@ -195,8 +195,8 @@ export function useAssistant(enabled: boolean) {
             : value;
         });
         if (resumed && !alreadyFollowing) setStream(resumed);
-        if (!preparing) setRun(value.session.activeRun ?? null);
-        if (!drafts.current.has(sessionId)) setDraft(value.session.draft ?? "");
+        if (!preparing) setRun(value.session.activeRun);
+        if (!drafts.current.has(sessionId)) setDraft(value.session.draft);
         return true;
       } catch (reason) {
         if (
@@ -342,47 +342,58 @@ export function useAssistant(enabled: boolean) {
         ) {
           // A run this view no longer follows (another conversation, or one
           // left behind) still changes the history's "Replying…" marks.
-          if (["run_end", "done", "error"].includes(event.type))
-            void refreshSessionsRef.current();
+          // `run_end` is always its last event, also after an `error`.
+          if (event.type === "run_end") void refreshSessionsRef.current();
           return;
         }
-        const data = event.data ?? {};
-        // Tool, operation and other internal events are never shown.
-        if (event.type === "text_delta" || event.type === "thinking_delta") {
-          if (typeof data.delta !== "string") return;
-          const delta = data.delta;
-          setStream((previous) => {
-            const value = previous ?? blank(event.runId);
-            return event.type === "text_delta"
-              ? { ...value, content: value.content + delta }
-              : { ...value, reasoning: (value.reasoning ?? "") + delta };
-          });
-        } else if (event.type === "compaction_start") {
-          setCompacting(true);
-        } else if (event.type === "compaction_end") {
-          setCompacting(false);
-        } else if (event.type === "message") {
-          // The final reply; anything but an assistant message is internal.
-          const message = data.message;
-          if (
-            typeof message === "object" &&
-            message?.role === "assistant" &&
-            typeof message.id === "string" &&
-            typeof message.content === "string"
-          )
-            setStream(message);
-        } else if (event.type === "error") {
-          // The user's own stop is not a failure.
-          if (data.code !== "stopped") setError(assistantErrorText(data));
-        } else if (event.type === "run_end" || event.type === "done") {
-          setRun(null);
-          setCompacting(false);
-          // Keep the streamed reply until the canonical saved transcript is available.
-          void refreshDetail(event.sessionId).then((loaded) => {
-            if (loaded && selectedRef.current === event.sessionId)
-              setStream(null);
-          });
-          void refreshSessionsRef.current();
+        // run_start, session and event types this build does not know change
+        // nothing on screen: the transcript and session are read again at
+        // run_end.
+        switch (event.type) {
+          case "text_delta":
+          case "thinking_delta": {
+            const { delta } = event.data;
+            if (typeof delta !== "string") return;
+            const thinking = event.type === "thinking_delta";
+            setStream((previous) => {
+              const value = previous ?? blank(event.runId);
+              return thinking
+                ? { ...value, reasoning: (value.reasoning ?? "") + delta }
+                : { ...value, content: value.content + delta };
+            });
+            return;
+          }
+          case "compaction_start":
+            setCompacting(true);
+            return;
+          case "compaction_end":
+            setCompacting(false);
+            return;
+          case "message": {
+            // The saved reply; anything but an assistant message is internal.
+            const { message } = event.data;
+            if (
+              message?.role === "assistant" &&
+              typeof message.id === "string" &&
+              typeof message.content === "string"
+            )
+              setStream(message);
+            return;
+          }
+          case "error":
+            // A stop sends no error; a failure is shown by its code alone.
+            setError(assistantErrorCode(event.data));
+            return;
+          case "run_end":
+            setRun(null);
+            setCompacting(false);
+            // Keep the streamed reply until the canonical saved transcript is available.
+            void refreshDetail(event.sessionId).then((loaded) => {
+              if (loaded && selectedRef.current === event.sessionId)
+                setStream(null);
+            });
+            void refreshSessionsRef.current();
+            return;
         }
       })
       .then((unsubscribe) => {
@@ -448,7 +459,7 @@ export function useAssistant(enabled: boolean) {
     createdSession.current = value.id;
     drafts.current.set(value.id, draftRef.current);
     setSelectedId(value.id);
-    setDetail({ session: value, messages: [], attachments: [] });
+    setDetail({ session: value, messages: [], attachments: [], usage: {} });
     void refreshSessions();
     return value;
   }, [detail, newModelId, refreshSessions]);

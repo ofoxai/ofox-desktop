@@ -193,7 +193,7 @@ function AssistantWorkspace() {
                   {t("assistant.unreadable")}
                 </span>
                 <span className="mt-0.5 block text-note">
-                  {t(assistantErrorKey(item.code))}
+                  {t(assistantErrorKey(item.error))}
                 </span>
               </li>
             ))}
@@ -455,7 +455,7 @@ function AssistantWorkspace() {
                 )}
               </div>
             </div>
-            {bootstrap?.key?.status === "missing" && (
+            {bootstrap?.key.status === "missing" && (
               <p className="mt-2 text-note text-ink-muted">
                 {t("assistant.keyMissingHint")}
               </p>

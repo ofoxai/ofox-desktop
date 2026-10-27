@@ -31,29 +31,20 @@ beforeEach(() => {
 });
 
 describe("assistant commands", () => {
-  it("lists one filter of sessions and names every damaged one with its code", async () => {
+  it("lists one filter of sessions with the damaged ones as the backend names them", async () => {
     invoke.mockResolvedValue({
       sessions: [{ id: "a", title: "Saved" }],
-      unreadable: [
-        { id: "b", error: "assistant_invalid_session" },
-        { id: "c", code: "assistant_storage_unavailable" },
-      ],
+      unreadable: [{ id: "b", error: "assistant_invalid_session" }],
     });
     const list = await assistantApi.listSessions(false, "notes");
     expect(invoke).toHaveBeenCalledWith("assistant_list_sessions", {
       deleted: false,
       search: "notes",
     });
-    expect(list.sessions).toEqual([{ id: "a", title: "Saved" }]);
-    expect(list.unreadable).toEqual([
-      { id: "b", code: "assistant_invalid_session" },
-      { id: "c", code: "assistant_storage_unavailable" },
-    ]);
-  });
-
-  it("treats a reply without unreadable rows as none", async () => {
-    invoke.mockResolvedValue({ sessions: [] });
-    expect((await assistantApi.listSessions()).unreadable).toEqual([]);
+    expect(list).toEqual({
+      sessions: [{ id: "a", title: "Saved" }],
+      unreadable: [{ id: "b", error: "assistant_invalid_session" }],
+    });
   });
 
   it("creates a chat session with only a model and the web search flag", async () => {
@@ -92,33 +83,43 @@ describe("assistant error messages", () => {
     ["assistant_session_busy", "assistant.errors.sessionBusy"],
     [new Error("assistant_unknown_apex"), "assistant.errors.unknownApex"],
     [
-      new Error("assistant_model_request_failed: assistant_signing_out"),
-      "assistant.errors.signingOut",
+      { code: "assistant_insufficient_balance", message: "402 credits" },
+      "assistant.errors.insufficientBalance",
+    ],
+    [{ code: "assistant_rate_limited" }, "assistant.errors.rateLimited"],
+    [{ code: "assistant_network_error" }, "assistant.errors.networkError"],
+    [{ code: "assistant_key_rejected" }, "assistant.errors.keyRejected"],
+    [
+      "assistant_key_storage_unavailable",
+      "assistant.errors.keyStorageUnavailable",
     ],
     [
-      "assistant_model_request_failed: 503 Service Unavailable",
+      { code: "assistant_model_unavailable" },
+      "assistant.errors.modelUnavailable",
+    ],
+    [
+      { code: "assistant_model_request_failed" },
       "assistant.errors.modelRequestFailed",
-    ],
-    [
-      { code: "runtime_error", message: "upstream closed" },
-      "assistant.errors.modelRequestFailed",
-    ],
-    [
-      {
-        code: "input_preparation_failed",
-        message:
-          "assistant_vision_model_required: This model cannot read images",
-      },
-      "assistant.errors.visionModelRequired",
     ],
   ])("maps %o to its own message", (error, key) => {
     expect(assistantErrorKey(error)).toBe(key);
   });
 
+  it("reads an error event by its code and never by the provider's text", () => {
+    expect(
+      assistantErrorKey({
+        code: "assistant_model_request_failed",
+        message: "assistant_signing_out: upstream said so",
+      }),
+    ).toBe("assistant.errors.modelRequestFailed");
+  });
+
   it.each([
     "assistant_brand_new_failure",
+    "assistant_model_request_failed: assistant_signing_out",
     new Error("Provider unavailable"),
     { code: "assistant_something_else" },
+    { message: "assistant_signing_out" },
     undefined,
   ])("falls back to the generic message for %o", (error) => {
     expect(assistantErrorKey(error)).toBe("assistant.errors.generic");
@@ -136,27 +137,14 @@ describe("assistant error messages", () => {
     }
   });
 
-  it("covers the codes the host is known to return", () => {
-    for (const code of [
-      "assistant_unknown_apex",
-      "assistant_invalid_session",
-      "assistant_sign_in_required",
-      "assistant_signing_out",
-      "assistant_shutting_down",
-      "assistant_identity_changed",
-      "assistant_session_busy",
-      "assistant_session_not_found",
-      "assistant_message_too_large",
-      "assistant_title_too_long",
-      "assistant_model_unavailable",
-      "assistant_choose_model",
-      "assistant_catalog_unavailable",
-      "assistant_runtime_unavailable",
-      "assistant_run_timeout",
-      "assistant_storage_unavailable",
-      "assistant_native_history_missing",
-      "assistant_cancelled",
-    ])
-      expect(ASSISTANT_ERROR_MESSAGES, code).toHaveProperty(code);
+  it.each([
+    ["insufficientBalance", /top up/i],
+    ["rateLimited", /wait/i],
+    ["networkError", /connection/i],
+    ["keyRejected", /sign (out|in)/i],
+  ])("tells the user what to do about %s", (message, action) => {
+    expect(
+      en.assistant.errors[message as keyof typeof en.assistant.errors],
+    ).toMatch(action);
   });
 });
