@@ -71,18 +71,23 @@ test("production pruning drops unused PDF.js builds, viewers, decoders and fonts
     assert.equal(await exists(path.join(modules, kept)), true, kept);
 });
 
-test("the runtime pins PDF.js and the native canvas and ships no Office parsers", async () => {
+test("the runtime pins PDF.js, the native canvas and the MCP client and ships no Office parsers", async () => {
   const runtime = new URL("../", import.meta.url);
   const manifest = JSON.parse(
     await readFile(new URL("package.json", runtime), "utf8"),
   );
   assert.equal(manifest.dependencies["pdfjs-dist"], "6.4.299");
   assert.equal(manifest.dependencies["@napi-rs/canvas"], "1.0.13");
+  assert.equal(manifest.dependencies["@earendil-works/pi-mcp"], "1.4.0");
   const lock = JSON.parse(
     await readFile(new URL("package-lock.json", runtime), "utf8"),
   );
   assert.equal(lock.packages["node_modules/pdfjs-dist"].version, "6.4.299");
   assert.equal(lock.packages["node_modules/@napi-rs/canvas"].version, "1.0.13");
+  assert.equal(
+    lock.packages["node_modules/@earendil-works/pi-mcp"].version,
+    "1.4.0",
+  );
   for (const name of Object.keys(lock.packages))
     assert.doesNotMatch(name, /fflate|fast-xml-parser|mammoth|xlsx/);
 });
@@ -108,4 +113,26 @@ test("third-party notices cover the native canvas and PDF.js", async () => {
   const pdfjs = await readFile(new URL("pdfjs-dist.txt", notices), "utf8");
   assert.match(pdfjs, /pdfjs-dist 6\.4\.299/);
   assert.match(pdfjs, /Apache License\s+Version 2\.0/);
+});
+
+test("the search server's notice names the versions its lockfile bundles", async () => {
+  const notice = await readFile(
+    new URL("../notices/ofox-search-mcp.txt", import.meta.url),
+    "utf8",
+  );
+  const lock = JSON.parse(
+    await readFile(
+      new URL("../search-mcp/package-lock.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  // search-mcp's own test checks every package of the built bundle.
+  for (const name of ["@modelcontextprotocol/sdk", "zod", "undici"]) {
+    const { version, license } = lock.packages[`node_modules/${name}`];
+    assert.ok(
+      notice.includes(`\n${name} ${version} (${license})\n`),
+      `${name} ${version}`,
+    );
+  }
+  assert.match(notice, /Copyright \(c\) 2024 Anthropic, PBC/);
 });

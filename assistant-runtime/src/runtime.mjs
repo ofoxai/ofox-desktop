@@ -6,11 +6,21 @@ import {
   prepareAttachments,
   readAttachmentTool,
 } from "./attachments.mjs";
+import {
+  SEARCH_SERVER,
+  SEARCH_TIMEOUT_MS,
+  SearchServer,
+  allowedWebUrls,
+  searchServerEnvironment,
+  webTools,
+} from "./search.mjs";
 import { errorMessage, modelForOfox, scrubSecrets } from "./security.mjs";
 
 // Side-effect-free tools that may still run after another operation's outcome
 // became unknown.
-const READ_TOOLS = new Set(["read_attachment"]);
+const READ_TOOLS = new Set(["read_attachment", "web_fetch"]);
+// Tools whose result details the host reads from native history.
+const WEB_TOOLS = new Set(["web_search", "web_fetch"]);
 const MAX_TOOL_CALLS = 20;
 
 function contentText(content) {
@@ -143,6 +153,49 @@ async function proxiedFetch(proxy) {
   return {
     fetch: (input, init) => fetch(input, { ...init, dispatcher }),
     close: () => dispatcher.destroy().catch(() => undefined),
+  };
+}
+
+// What a web_search result cost is known from its usage counts. It is unknown
+// when the search may have run without an answer (search_outcome_unknown) or
+// the server did not report its tokens. A refused or unsent search cost
+// nothing.
+function searchCoverage(details) {
+  if (details?.error?.code === "search_outcome_unknown") return "incomplete";
+  if (
+    details &&
+    "usage" in details &&
+    !(
+      Number.isSafeInteger(details.usage?.inputTokens) &&
+      Number.isSafeInteger(details.usage?.outputTokens)
+    )
+  )
+    return "incomplete";
+  return "complete";
+}
+
+function messageCoverage(message) {
+  if (message.role === "assistant")
+    return unbilled(message) ? "complete" : usageCoverage(message.usage);
+  if (message.role === "toolResult" && message.toolName === "web_search")
+    return searchCoverage(message.details);
+  return undefined;
+}
+
+// A tool result names its tool and call; a web tool's also keeps its details
+// (search usage and sources, or the page read).
+function toolFields(message) {
+  if (message.role !== "toolResult") return {};
+  return {
+    toolName: message.toolName,
+    toolCallId: message.toolCallId,
+    isError: message.isError === true,
+    details:
+      WEB_TOOLS.has(message.toolName) &&
+      message.details &&
+      typeof message.details === "object"
+        ? message.details
+        : undefined,
   };
 }
 
@@ -293,12 +346,8 @@ function projection(manager, secrets = []) {
                 .join("\n")
             : "",
           usage: message.usage,
-          usageCoverage:
-            message.role === "assistant"
-              ? unbilled(message)
-                ? "complete"
-                : usageCoverage(message.usage)
-              : undefined,
+          usageCoverage: messageCoverage(message),
+          ...toolFields(message),
           active: active.has(entry.id),
           timestamp: message.timestamp ?? Date.parse(entry.timestamp),
           stopReason: message.stopReason,
@@ -353,7 +402,13 @@ function systemPrompt(tools) {
 }
 
 export class AssistantRuntime {
-  constructor({ hostCall, emit, fetch: providerFetch } = {}) {
+  constructor({
+    hostCall,
+    emit,
+    fetch: providerFetch,
+    searchServer = SEARCH_SERVER,
+    searchTimeoutMs = SEARCH_TIMEOUT_MS,
+  } = {}) {
     this.hostCall =
       hostCall ??
       (async () => {
@@ -361,6 +416,8 @@ export class AssistantRuntime {
       });
     this.emit = emit ?? (() => {});
     this.providerFetch = providerFetch;
+    this.searchServer = searchServer;
+    this.searchTimeoutMs = searchTimeoutMs;
     this.runs = new Map();
     this.secrets = new Set();
   }
@@ -413,15 +470,26 @@ export class AssistantRuntime {
 
   // Model tools for this run, built with wrapTool so they share the call
   // budget and the unknown-outcome gate. Attachments are readable only when
-  // the conversation has some.
+  // the conversation has some; the web only when the run enables web search
+  // (its server starts on the first call and stops with the run).
   tools(context, model) {
-    return context.attachments.size
-      ? [
-          readAttachmentTool(this, context, {
-            vision: model.input.includes("image"),
-          }),
-        ]
-      : [];
+    const tools = [];
+    if (context.attachments.size)
+      tools.push(
+        readAttachmentTool(this, context, {
+          vision: model.input.includes("image"),
+        }),
+      );
+    if (context.params.webSearch === true) {
+      context.search = new SearchServer({
+        script: this.searchServer,
+        env: searchServerEnvironment(context.params),
+      });
+      tools.push(
+        ...webTools(this, context, { searchTimeoutMs: this.searchTimeoutMs }),
+      );
+    }
+    return tools;
   }
 
   hostTool(context, name, args, signal, toolCallId) {
@@ -439,7 +507,15 @@ export class AssistantRuntime {
     );
   }
 
-  wrapTool(context, name, description, parameters, execute) {
+  // `publishDetails` adds a result's details, or a failure's, to tool_end.
+  wrapTool(
+    context,
+    name,
+    description,
+    parameters,
+    execute,
+    { publishDetails = false } = {},
+  ) {
     return {
       name,
       label: name,
@@ -483,6 +559,9 @@ export class AssistantRuntime {
               name,
               toolCallId,
               success: true,
+              ...(publishDetails && safe?.details !== undefined
+                ? { details: safe.details }
+                : {}),
             });
             return safe?.content
               ? safe
@@ -497,6 +576,12 @@ export class AssistantRuntime {
                   details: safe,
                 };
           } catch (error) {
+            const details =
+              publishDetails &&
+              error.details &&
+              typeof error.details === "object"
+                ? error.details
+                : undefined;
             if (
               error.code === "unknown_outcome" ||
               error.outcomeUnknown === true ||
@@ -510,11 +595,15 @@ export class AssistantRuntime {
               toolCallId,
               success: false,
               message,
+              ...(details ? { details } : {}),
             });
             if (context.unknownOutcome)
               return {
                 content: [{ type: "text", text: message }],
-                details: { code: "unknown_outcome" },
+                details: {
+                  code: "unknown_outcome",
+                  ...(details ? { error: details } : {}),
+                },
                 terminate: true,
               };
             throw new Error(message);
@@ -559,6 +648,7 @@ export class AssistantRuntime {
       selected.some((id) => typeof id !== "string")
     )
       throw new Error("Invalid attachment selection");
+    const webUrls = allowedWebUrls(params.allowedWebUrls);
     const apiKey = params.apiKey;
     // Every credential of this run: its key, and a key the gateway refused
     // earlier in the same run. Conversation content loses exactly these.
@@ -574,6 +664,7 @@ export class AssistantRuntime {
       callCount: 0,
       calls: new Map(),
       unknownOutcome: false,
+      webUrls,
     };
     this.runs.set(params.runId, context);
     let unsubscribe;
@@ -1078,6 +1169,7 @@ export class AssistantRuntime {
     } finally {
       unsubscribe?.();
       context.session?.dispose();
+      await context.search?.close();
       void proxy?.close();
       this.runs.delete(params.runId);
       // The process is one run long in production. Retain key fingerprints only until close

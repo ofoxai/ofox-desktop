@@ -15,6 +15,17 @@ test("redact removes the key and bearer tokens from any text", () => {
   assert.equal(redact("plain", [""]), "plain");
 });
 
+test("redact drops the credentials of any URL, such as the proxy's", () => {
+  assert.equal(
+    redact("connect failed: http://user:proxy-pass@10.0.0.1:3128 refused"),
+    "connect failed: http://[REDACTED]@10.0.0.1:3128 refused",
+  );
+  assert.equal(
+    redact("socks5://only-user@proxy.example:1080"),
+    "socks5://[REDACTED]@proxy.example:1080",
+  );
+});
+
 test("scrubbing masks the key and its percent-encoded forms in every string", () => {
   const encoded = encodeURIComponent(SPECIAL_KEY);
   const lower = encoded.replace(/%[0-9A-F]{2}/g, (hex) => hex.toLowerCase());

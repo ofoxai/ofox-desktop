@@ -203,6 +203,16 @@ fn every_platform_maps_the_assistant_runtime_to_its_exact_bundle_root() {
                 && target == &PathBuf::from(format!("assistant-runtime/node/{node_name}"))),
             "{config} must ship the actual platform's fixed Node at its host-resolved path"
         );
+        // The sidecar starts the web search server next to `runtime/`.
+        let search = root
+            .join("../assistant-runtime/resources/search-mcp/ofox-search-mcp.mjs")
+            .canonicalize()
+            .expect("search server bundle prepared before Cargo");
+        assert!(
+            entries.iter().any(|(source, target)| source == &search
+                && target == &PathBuf::from("assistant-runtime/search-mcp/ofox-search-mcp.mjs")),
+            "{config} must ship the search server where the sidecar resolves it"
+        );
         // Pi's demo extensions (one is a GPL-licensed doom.wasm) and source maps
         // are pruned by the prepare script and must never reach the bundle; a
         // doom.wasm is rejected wherever a dependency might carry one.
@@ -254,8 +264,9 @@ fn every_platform_bundles_the_assistant_runtime_licenses() {
         .join("../assistant-runtime/PI_LICENSE")
         .canonicalize()
         .unwrap();
-    // Notices for the native canvas addon and PDF.js, copied by the prepare
-    // script into the runtime resources.
+    // Notices for the native canvas addon, PDF.js and the packages bundled
+    // into the search server, copied by the prepare script into the runtime
+    // resources.
     let notices = root.join("../assistant-runtime/resources/notices");
     let canvas_notice = notices
         .join("napi-rs-canvas.txt")
@@ -265,6 +276,10 @@ fn every_platform_bundles_the_assistant_runtime_licenses() {
         .join("pdfjs-dist.txt")
         .canonicalize()
         .expect("PDF.js notice prepared before Cargo");
+    let search_notice = notices
+        .join("ofox-search-mcp.txt")
+        .canonicalize()
+        .expect("search server notice prepared before Cargo");
     for config in ["tauri.conf.json", "tauri.windows.conf.json"] {
         let entries = expanded_resource_entries(&resource_config(config));
         for (license, target) in [
@@ -275,6 +290,10 @@ fn every_platform_bundles_the_assistant_runtime_licenses() {
                 "assistant-runtime/notices/napi-rs-canvas.txt",
             ),
             (&pdfjs_notice, "assistant-runtime/notices/pdfjs-dist.txt"),
+            (
+                &search_notice,
+                "assistant-runtime/notices/ofox-search-mcp.txt",
+            ),
         ] {
             assert!(
                 entries

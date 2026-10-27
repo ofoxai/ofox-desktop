@@ -3,7 +3,10 @@
 // any node_modules.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { copyFile, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { createServer } from "node:http";
+import { connect as connectSocket } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -183,6 +186,11 @@ test("invalid configuration exits non-zero at startup without echoing the key", 
       OFOX_BASE_URL: "https://api.ofox.ai",
       OFOX_SEARCH_MODEL: KEY + " x",
     },
+    {
+      OFOX_ASSISTANT_KEY: KEY,
+      OFOX_BASE_URL: "https://api.ofox.ai",
+      OFOX_PROXY_URL: `ftp://user:${KEY}@127.0.0.1:21`,
+    },
   ]) {
     const { code, stdout, stderr } = await run(copy, env);
     assert.equal(code, 2, JSON.stringify(Object.keys(env)));
@@ -190,4 +198,106 @@ test("invalid configuration exits non-zero at startup without echoing the key", 
     assert.match(stderr, /^ofox-search-mcp: OFOX_[A-Z_]+ /);
     assert.equal(stderr.includes(KEY), false, stderr);
   }
+});
+
+test("the bundle sends web_search through the proxy named in its environment", async (t) => {
+  const gateway = await startGateway((_req, res) =>
+    replyJson(res, 200, { output: [] }),
+  );
+  t.after(gateway.close);
+  const gatewayPort = Number(new URL(gateway.baseUrl).port);
+  const tunnels = [];
+  const sockets = new Set();
+  const proxy = createServer();
+  proxy.on("connect", (request, client, head) => {
+    tunnels.push(request.url);
+    sockets.add(client);
+    const upstream = connectSocket(gatewayPort, "localhost", () => {
+      client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      upstream.write(head);
+      upstream.pipe(client);
+      client.pipe(upstream);
+    });
+    sockets.add(upstream);
+  });
+  proxy.listen(0, "127.0.0.1");
+  await once(proxy, "listening");
+  t.after(async () => {
+    sockets.forEach((socket) => socket.destroy());
+    await new Promise((resolve) => proxy.close(resolve));
+  });
+  const { client, stderr } = await connect(t, {
+    OFOX_ASSISTANT_KEY: KEY,
+    OFOX_BASE_URL: gateway.baseUrl,
+    OFOX_ALLOW_LOCAL_GATEWAY: "1",
+    OFOX_PROXY_URL: `http://user:proxy-secret@127.0.0.1:${proxy.address().port}`,
+    OFOX_NO_PROXY: "example.invalid",
+  });
+  const result = await client.callTool({
+    name: "web_search",
+    arguments: { query: "proxied" },
+  });
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(tunnels, [`localhost:${gatewayPort}`]);
+  assert.equal(gateway.requests.length, 1);
+  await client.close();
+  assert.equal(stderr(), "");
+});
+
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+};
+
+test("the bundle dies with its client, even during a search", async (t) => {
+  const { copy } = await isolatedBundle(t);
+  let release;
+  const searching = new Promise((resolve) => (release = resolve));
+  // The gateway never answers: the search would wait for its 60 s timeout.
+  const gateway = await startGateway(() => release());
+  t.after(gateway.close);
+  // A client that starts the server in its own process group, as pi-mcp does
+  // on POSIX, so killing the client's group does not reach the server.
+  const client = spawn(
+    process.execPath,
+    [
+      "-e",
+      `const child = require("node:child_process").spawn(process.execPath, [process.argv[1]], {
+        detached: process.platform !== "win32",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const send = (message) => child.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\\n");
+      send({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } } });
+      send({ method: "notifications/initialized" });
+      send({ id: 2, method: "tools/call", params: { name: "web_search", arguments: { query: "slow" } } });
+      child.stdout.resume();
+      child.stderr.resume();
+      process.stdout.write(child.pid + "\\n");`,
+      copy,
+    ],
+    {
+      env: {
+        ...process.env,
+        OFOX_ASSISTANT_KEY: KEY,
+        OFOX_BASE_URL: gateway.baseUrl,
+        OFOX_ALLOW_LOCAL_GATEWAY: "1",
+      },
+      stdio: ["ignore", "pipe", "inherit"],
+    },
+  );
+  const [line] = await once(client.stdout, "data");
+  const server = Number(String(line).trim());
+  t.after(() => {
+    if (alive(server)) process.kill(server, "SIGKILL");
+  });
+  await searching;
+  client.kill("SIGKILL");
+  const deadline = Date.now() + 5000;
+  while (alive(server) && Date.now() < deadline)
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(alive(server), false, "the server outlived its client");
 });

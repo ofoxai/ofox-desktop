@@ -147,8 +147,148 @@ async function productionSmoke() {
       result.entries,
     );
     await runtime.close();
+
+    // The copied search server bundle runs without node_modules, serves
+    // exactly its two tools to the shipped pi-mcp client, and refuses to
+    // start without its configuration.
+    const { spawnSync } = await import("node:child_process");
+    const bundle = path.join(
+      production,
+      "..",
+      "search-mcp",
+      "ofox-search-mcp.mjs",
+    );
+    const refused = spawnSync(process.execPath, [bundle], {
+      env: {},
+      input: "",
+      encoding: "utf8",
+    });
+    assert.equal(refused.status, 2);
+    assert.equal(refused.stdout, "");
+    assert.match(refused.stderr, /^ofox-search-mcp: OFOX_ASSISTANT_KEY /);
+    const { McpClient, StdioTransport } = await import(
+      pathToFileURL(
+        path.join(
+          production,
+          "node_modules/@earendil-works/pi-mcp/dist/index.js",
+        ),
+      ).href
+    );
+    const client = new McpClient({ name: "smoke", version: "0.0.0" });
+    await client.connect(
+      new StdioTransport({
+        command: process.execPath,
+        args: [bundle],
+        env: {
+          OFOX_ASSISTANT_KEY: testToken,
+          OFOX_BASE_URL: "https://api.ofox.ai",
+        },
+        inheritEnv: false,
+      }),
+    );
+    assert.deepEqual(
+      (await client.listTools()).map((tool) => tool.name).sort(),
+      ["web_fetch", "web_search"],
+    );
+    await client.close();
+
+    // A web search through the packaged runtime: the runtime finds the
+    // bundle next to itself and the bundle reaches a local gateway.
+    const { createServer } = await import("node:http");
+    const searches = [];
+    const gateway = createServer((request, response) => {
+      searches.push(request.headers.authorization);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          model: "openai/gpt-5-nano",
+          output: [
+            {
+              type: "web_search_call",
+              action: {
+                sources: [{ type: "url", url: "https://example.com/smoke" }],
+              },
+            },
+            {
+              type: "message",
+              content: [{ type: "output_text", text: "Smoke summary." }],
+            },
+          ],
+          usage: { input_tokens: 10, output_tokens: 5 },
+        }),
+      );
+    });
+    await new Promise((resolve) => gateway.listen(0, "localhost", resolve));
+    const baseUrl = `http://localhost:${gateway.address().port}`;
+    let turns = 0;
+    const searching = new AssistantRuntime({
+      fetch: async () => {
+        turns++;
+        const delta =
+          turns === 1
+            ? {
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: "smoke-search",
+                    type: "function",
+                    function: {
+                      name: "web_search",
+                      arguments: JSON.stringify({ query: "smoke" }),
+                    },
+                  },
+                ],
+              }
+            : { content: "Searched." };
+        return new Response(
+          [
+            { choices: [{ index: 0, delta: { role: "assistant", ...delta } }] },
+            {
+              choices: [
+                {
+                  index: 0,
+                  delta: {},
+                  finish_reason: turns === 1 ? "tool_calls" : "stop",
+                },
+              ],
+            },
+          ]
+            .map((value) => `data: ${JSON.stringify(value)}\n\n`)
+            .join("") + "data: [DONE]\n\n",
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      },
+    });
+    const searched = await searching.run({
+      sessionId: "smoke-search-session",
+      runId: "smoke-search-run",
+      operationId: "smoke-search-operation",
+      sessionFile: path.join(directory, "search.jsonl"),
+      prompt: "search",
+      apiKey: testToken,
+      apex: "ofox.ai",
+      baseUrl,
+      allowLocalGateway: true,
+      webSearch: true,
+      model: {
+        id: "test/packaged",
+        supportedEndpoints: ["/v1/chat/completions"],
+        contextWindow: 32000,
+        maxOutputTokens: 1024,
+      },
+    });
+    await searching.close();
+    await new Promise((resolve) => gateway.close(resolve));
+    assert.equal(searched.status, "completed");
+    assert.deepEqual(searches, [`Bearer ${testToken}`]);
+    const tool = searched.entries.find((entry) => entry.role === "tool");
+    assert.equal(tool.toolName, "web_search");
+    assert.equal(tool.details.usage.searchCalls, 1);
+    assert.deepEqual(tool.details.sources, [
+      { title: "example.com", url: "https://example.com/smoke" },
+    ]);
     process.stdout.write(
-      `Production smoke passed (${process.version}; Pi SDK, native canvas, PDF text and rendering, native JSONL)\n`,
+      `Production smoke passed (${process.version}; Pi SDK, native canvas, PDF text and rendering, native JSONL, search server)\n`,
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -188,7 +328,15 @@ for (const office of ["fflate", "fast-xml-parser"])
     false,
     `${office} must not ship`,
   );
-for (const notice of ["napi-rs-canvas.txt", "pdfjs-dist.txt"])
+assert.ok(
+  existsSync(path.join(resources, "search-mcp", "ofox-search-mcp.mjs")),
+  "search-mcp/ofox-search-mcp.mjs must ship; run pnpm assistant:prepare",
+);
+for (const notice of [
+  "napi-rs-canvas.txt",
+  "pdfjs-dist.txt",
+  "ofox-search-mcp.txt",
+])
   assert.ok(
     existsSync(path.join(resources, "notices", notice)),
     `notices/${notice} must ship; run pnpm assistant:prepare`,

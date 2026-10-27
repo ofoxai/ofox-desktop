@@ -6,6 +6,7 @@ const OFOX_GATEWAYS = new Set(["https://api.ofox.ai", "https://api.ofox.io"]);
 // words.
 const KEY_PATTERN = /^[\x21-\x7e]{16,512}$/;
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
+const PROXY_SCHEMES = new Set(["http:", "https:", "socks5:"]);
 
 export class ConfigError extends Error {
   constructor(message) {
@@ -20,6 +21,29 @@ export class ConfigError extends Error {
 function isLocalGateway(value) {
   const port = /^http:\/\/localhost:([1-9]\d{0,4})$/.exec(value)?.[1];
   return port !== undefined && Number(port) <= 65535;
+}
+
+// The app's proxy, the one the assistant runtime uses for model requests: an
+// HTTP(S) or SOCKS5 URL (credentials included) and the NO_PROXY-style hosts
+// that bypass it. The URL is never echoed: it may carry a password.
+function proxyConfig(env) {
+  const value = env.OFOX_PROXY_URL;
+  if (value === undefined || value === "") return null;
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    url = null;
+  }
+  if (url?.protocol === "socks5h:") url.protocol = "socks5:";
+  if (!url || !PROXY_SCHEMES.has(url.protocol) || !url.hostname)
+    throw new ConfigError(
+      "OFOX_PROXY_URL is not a valid http, https or socks5 proxy URL",
+    );
+  return {
+    url: url.href,
+    noProxy: typeof env.OFOX_NO_PROXY === "string" ? env.OFOX_NO_PROXY : "",
+  };
 }
 
 // Messages are fixed strings: they never echo a value, so a key pasted into
@@ -44,5 +68,5 @@ export function loadConfig(env = process.env) {
   const model = env.OFOX_SEARCH_MODEL || DEFAULT_SEARCH_MODEL;
   if (!MODEL_PATTERN.test(model))
     throw new ConfigError("OFOX_SEARCH_MODEL is not a valid model id");
-  return { apiKey, baseUrl, model };
+  return { apiKey, baseUrl, model, proxy: proxyConfig(env) };
 }

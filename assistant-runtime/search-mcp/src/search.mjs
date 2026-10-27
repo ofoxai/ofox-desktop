@@ -1,3 +1,4 @@
+import { proxyRefused } from "./proxy.mjs";
 import { scrubSecrets } from "./redact.mjs";
 
 // One paid web search through the Ofox Responses API.
@@ -64,8 +65,10 @@ export function searchRequestBody(query, model) {
 }
 
 // undici wraps the socket error as `cause`; happy eyeballs adds an
-// AggregateError with one error per address.
+// AggregateError with one error per address. A proxy that refused or failed
+// before its tunnel opened never passed the request on either.
 function neverSent(error) {
+  if (proxyRefused(error)) return true;
   const pending = [error];
   for (let seen = 0; pending.length > 0 && seen < 20; seen++) {
     const item = pending.shift();

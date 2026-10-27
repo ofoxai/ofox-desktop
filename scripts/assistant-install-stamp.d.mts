@@ -15,6 +15,7 @@ export function installIsCurrent(
   production: string,
   stampFile: string,
   wanted: InstallStamp,
+  required?: string,
 ): Promise<boolean>;
 export function writeInstallStamp(
   stampFile: string,

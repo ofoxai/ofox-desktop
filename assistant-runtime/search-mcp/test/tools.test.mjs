@@ -21,8 +21,8 @@ const CONFIG = {
 };
 const bytes = (text) => Buffer.byteLength(text, "utf8");
 
-async function connect(t, deps) {
-  const server = createSearchServer(CONFIG, deps);
+async function connect(t, deps, config = CONFIG) {
+  const server = createSearchServer(config, deps);
   const client = new Client({ name: "test", version: "0.0.0" });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   await server.connect(serverSide);
@@ -211,6 +211,43 @@ test("tool calls pass the query, config and a cancel signal through", async (t) 
   assert.equal(calls[1].url, "https://example.com/");
   assert.ok(calls[1].signal instanceof AbortSignal);
   assert.deepEqual(calls[1].secrets, [KEY]);
+});
+
+test("both tools use the app's proxy only when the config names one", async (t) => {
+  for (const proxy of [
+    null,
+    { url: "http://127.0.0.1:3128/", noProxy: ".corp.example" },
+  ]) {
+    const calls = [];
+    const client = await connect(
+      t,
+      {
+        search: async (_query, _config, options) => {
+          calls.push(options.fetchImpl);
+          return { summary: "S", results: [], usage: { searchCalls: 1 } };
+        },
+        fetchPage: async (url, options) => {
+          calls.push(options.proxy);
+          return { url, text: "T", truncated: false };
+        },
+      },
+      { ...CONFIG, proxy },
+    );
+    await client.callTool({ name: "web_search", arguments: { query: "q" } });
+    await client.callTool({
+      name: "web_fetch",
+      arguments: { url: "https://example.com/" },
+    });
+    const [fetchImpl, fetchProxy] = calls;
+    if (proxy === null) {
+      assert.equal(fetchImpl, undefined);
+      assert.equal(fetchProxy, null);
+    } else {
+      assert.equal(typeof fetchImpl, "function");
+      assert.equal(fetchProxy.noProxy, ".corp.example");
+      assert.equal(typeof fetchProxy.request, "function");
+    }
+  }
 });
 
 test("invalid arguments are rejected before any search is made", async (t) => {

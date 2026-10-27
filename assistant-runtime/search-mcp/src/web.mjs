@@ -2,19 +2,28 @@
 // web.mjs: HTTPS on 443 only, every DNS answer must be public, the connection
 // is pinned to the checked address, every redirect is re-checked, and the
 // 15 s / 2 MiB / 20,000-character limits hold. Only static HTML or plain text
-// is read; no cookies are sent or kept.
+// is read; no cookies are sent or kept. Through the app's proxy the DNS
+// answers are still checked here, but the tunnel opens by host name, so the
+// connection cannot be pinned; the certificate is verified for that name.
 //
 // The "only URLs from the user or this conversation's search" allowlist is
 // not here: the client wrapper that exposes this tool to the model owns it.
 import { lookup as dnsLookup } from "node:dns/promises";
 import https from "node:https";
 import { isIP } from "node:net";
+import { ProxyAgent, request as undiciRequest } from "undici";
+import { bypassesProxy, proxyRefused } from "./proxy.mjs";
 import { scrubSecrets } from "./redact.mjs";
 
 export const FETCH_TIMEOUT_MS = 15_000;
 export const MAX_PAGE_BYTES = 2 * 1024 * 1024;
 export const MAX_PAGE_CHARS = 20_000;
 const MAX_REDIRECTS = 4;
+const REQUEST_HEADERS = {
+  Accept: "text/html,text/plain;q=0.9",
+  "Accept-Encoding": "identity",
+  "User-Agent": "OfoxDesktop-WebRead/1",
+};
 const BLOCKED_HOSTS = new Set([
   "localhost",
   "api.ofox.ai",
@@ -115,11 +124,7 @@ async function pinnedRequest(url, pinned, signal) {
         agent: false,
         rejectUnauthorized: true,
         maxHeaderSize: 16 * 1024,
-        headers: {
-          Accept: "text/html,text/plain;q=0.9",
-          "Accept-Encoding": "identity",
-          "User-Agent": "OfoxDesktop-WebRead/1",
-        },
+        headers: REQUEST_HEADERS,
         lookup: (_hostname, options, callback) =>
           callback(
             null,
@@ -161,6 +166,54 @@ async function pinnedRequest(url, pinned, signal) {
   });
 }
 
+/**
+ * A request through the app's proxy: a CONNECT (or SOCKS5) tunnel to the
+ * host name, TLS verified for that name. The caller checked its DNS answers.
+ * `requestTls` adds TLS options for the page connection (tests trust a local
+ * certificate with it).
+ */
+export function tunneledRequest(proxy, { requestTls } = {}) {
+  const dispatcher = new ProxyAgent({
+    uri: proxy.url,
+    proxyTunnel: true,
+    maxHeaderSize: 16 * 1024,
+    ...(requestTls ? { requestTls } : {}),
+  });
+  return async (url, _pinned, signal) => {
+    let response;
+    try {
+      response = await undiciRequest(url, {
+        method: "GET",
+        dispatcher,
+        signal,
+        headers: REQUEST_HEADERS,
+      });
+    } catch (error) {
+      if (proxyRefused(error))
+        throw new FetchError(
+          "fetch_failed",
+          "The proxy refused or failed the connection to the web page",
+        );
+      throw error;
+    }
+    const chunks = [];
+    let length = 0;
+    for await (const chunk of response.body) {
+      length += chunk.length;
+      if (length > MAX_PAGE_BYTES) {
+        response.body.destroy();
+        throw tooLarge();
+      }
+      chunks.push(chunk);
+    }
+    return {
+      status: response.statusCode,
+      headers: response.headers,
+      body: Buffer.concat(chunks),
+    };
+  };
+}
+
 export function htmlText(html) {
   return html
     .replace(
@@ -191,7 +244,7 @@ export function htmlText(html) {
     .trim();
 }
 
-async function follow(start, { signal, secrets, lookup, request }) {
+async function follow(start, { signal, secrets, lookup, request, proxy }) {
   let url = start;
   for (let redirects = 0; ; redirects++) {
     signal.throwIfAborted();
@@ -204,7 +257,9 @@ async function follow(start, { signal, secrets, lookup, request }) {
       addresses.some((item) => !isPublicAddress(item.address))
     )
       throw notAllowed("Web DNS contains a non-public address");
-    const response = await request(url, addresses[0], signal);
+    const send =
+      proxy && !bypassesProxy(url, proxy.noProxy) ? proxy.request : request;
+    const response = await send(url, addresses[0], signal);
     if ([301, 302, 303, 307, 308].includes(response.status)) {
       if (redirects === MAX_REDIRECTS)
         throw new FetchError("fetch_failed", "Web redirect limit exceeded");
@@ -251,6 +306,7 @@ export async function readWebPage(
     timeoutMs = FETCH_TIMEOUT_MS,
     lookup = dnsLookup,
     request = pinnedRequest,
+    proxy = null,
   } = {},
 ) {
   const url = validateWebUrl(value);
@@ -268,7 +324,7 @@ export async function readWebPage(
   try {
     return await Promise.race([
       aborted,
-      follow(url, { signal: combined, secrets, lookup, request }),
+      follow(url, { signal: combined, secrets, lookup, request, proxy }),
     ]);
   } catch (error) {
     if (error instanceof FetchError) throw error;

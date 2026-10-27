@@ -8,22 +8,25 @@ prompt replaces Pi's coding-assistant role with a general chat assistant.
 
 The model receives a tool only when the run enables it: `read_attachment`
 exists only when the conversation has attachments (see
-[Attachments](#attachments)). `tools()` in `src/runtime.mjs` is the extension
-point; tools are built with `wrapTool()` so they share the per-run call limit
-and the unknown-outcome gate. The system prompt describes only what the run
-enables: a tool adds its own sentences through Pi's `promptGuidelines`, so a
-run without attachments mentions no tools, attachments or search.
+[Attachments](#attachments)), `web_search` and `web_fetch` only when the run
+sets `webSearch` (see [Web search](#web-search)). `tools()` in
+`src/runtime.mjs` is the extension point; tools are built with `wrapTool()` so
+they share the per-run call limit and the unknown-outcome gate. The system
+prompt describes only what the run enables: a tool adds its own sentences
+through Pi's `promptGuidelines`, so a run without attachments or web search
+mentions no tools, attachments or search.
 
 ## Prepare and test
 
 From the repository root (build hosts need npm and tar; users do not):
 
 ```sh
-pnpm assistant:install  # test dependencies in assistant-runtime/node_modules
-pnpm assistant:test     # runtime tests on the pinned Node, mock providers only
+pnpm assistant:install  # test dependencies of the runtime and of search-mcp/
+pnpm assistant:test     # runtime tests on the pinned Node, mock providers only,
+                        # then search-mcp/'s build and tests
 pnpm assistant:prepare  # production resources for the current OS/architecture
 pnpm assistant:smoke    # run the copied production tree: Pi SDK, native canvas,
-                        # PDF text and rendering, native JSONL
+                        # PDF text and rendering, native JSONL, search server
 ```
 
 `assistant:prepare` downloads the Node archive named in `node-downloads.json`
@@ -41,23 +44,37 @@ which the runtime never sets). The PDF.js `legacy/build/` and the `cmaps/`,
 lockfile and `package.json` hashes, a hash of `scripts/assistant-prepare.mjs`
 and `scripts/assistant-prune.mjs`, Node version and platform of that install;
 while they are unchanged the next prepare skips `npm ci` and only copies `src/`
-and `notices/` again, so a changed prune rule installs and prunes afresh. `notices/` is copied to `resources/notices/`: third-party
-notices for `@napi-rs/canvas` (including the libraries compiled into its native
-addon) and `pdfjs-dist`. `resources/manifest.json`
-records the protocol, SDK and Node versions and `minimumMacOS`, read from
-`src-tauri/tauri.conf.json` (`bundle.macOS.minimumSystemVersion`, 12.0). Node
-22 supports macOS 11 and later, and the `@napi-rs/canvas` 1.0.13 addon macOS
-11.0. With `APPLE_SIGNING_IDENTITY` set on macOS, every Mach-O file, the canvas
-addon included, is signed (hardened runtime, a secure timestamp and the JIT
-entitlement for Node, except for ad-hoc `-` signing).
+and `notices/` again. A changed install or prune rule changes that hash, so
+the next prepare installs and prunes afresh.
+
+Prepare then builds the search MCP server (`search-mcp/`, see
+[Web search](#web-search)): `npm ci --ignore-scripts` with its
+devDependencies (esbuild) and `node build.mjs` on the bundled Node, and copies
+the single file `dist/ofox-search-mcp.mjs` to `resources/search-mcp/`.
+`resources/search-mcp-build.json` records its lockfile, `package.json`, build
+script, sources and this script; while they are unchanged the build is
+skipped.
+
+`notices/` is copied to `resources/notices/`: third-party notices for
+`@napi-rs/canvas` (including the libraries compiled into its native addon),
+`pdfjs-dist` and the packages compiled into the search server
+(`ofox-search-mcp.txt`; the search server's tests fail when the bundle gains a
+package it does not name). `resources/manifest.json` records the protocol, SDK
+and Node versions, the entry and search server paths and `minimumMacOS`, read
+from `src-tauri/tauri.conf.json` (`bundle.macOS.minimumSystemVersion`, 12.0).
+Node 22 supports macOS 11 and later, and the `@napi-rs/canvas` 1.0.13 addon
+macOS 11.0. With `APPLE_SIGNING_IDENTITY` set on macOS, every Mach-O file, the
+canvas addon included, is signed (hardened runtime, a secure timestamp and the
+JIT entitlement for Node, except for ad-hoc `-` signing).
 
 Tauri's dev and build hooks run `assistant:prepare`, and the resource map ships
 `resources/` as `assistant-runtime/` in the application: the host starts
 `assistant-runtime/node/node` (`node.exe` on Windows) with
-`assistant-runtime/runtime/src/main.mjs`. Generated files are ignored by Git;
-the npm lockfile and the pinned archive hashes are committed. Release packages
-are macOS Apple Silicon and Windows x64; macOS Intel is pinned for local builds
-and Linux x64 for CI.
+`assistant-runtime/runtime/src/main.mjs`, and the sidecar starts
+`assistant-runtime/search-mcp/ofox-search-mcp.mjs` with the same Node.
+Generated files are ignored by Git; the npm lockfiles and the pinned archive
+hashes are committed. Release packages are macOS Apple Silicon and Windows
+x64; macOS Intel is pinned for local builds and Linux x64 for CI.
 
 The protocol tests spawn `resources/node/node`. Without it they fail at once
 and ask you to run `pnpm assistant:prepare`. Their mock gateway listens on an
@@ -74,7 +91,8 @@ takes a trusted absolute `sessionFile`. `run` and `compact` take:
 sessionId, runId, operationId, sessionFile, model, apiKey, knownSecrets?,
 apex (ofox.ai|ofox.io), baseUrl?, allowLocalGateway?, proxy?, prompt,
 attachmentRoot?, attachments?[], selectedAttachmentIds?[], originalPrompt?,
-editEntryId?, regenerateEntryId?, thinkingLevel?, instructions? (compact)
+webSearch?, allowedWebUrls?[], editEntryId?, regenerateEntryId?,
+thinkingLevel?, instructions? (compact)
 ```
 
 `apiKey` is the assistant's own Ofox API key. It is sent only in the
@@ -96,7 +114,8 @@ sidecar gets no proxy environment variables. Requests then use undici
 tunnel through the `http`, `https` or `socks5` proxy unless the target matches
 `noProxy` (`NO_PROXY` syntax). The origin check above applies unchanged. The
 URL may carry the proxy's credentials; it is never logged or echoed, and
-diagnostics drop any `user:password@` part of a URL.
+diagnostics drop any `user:password@` part of a URL. The search server gets
+the same proxy (see [Web search](#web-search)).
 
 `model` contains id, advertised supportedEndpoints, contextWindow,
 maxOutputTokens, inputModalities/supportsImages, reasoning, cost (USD per million
@@ -133,7 +152,8 @@ attachment selection, and can be retried explicitly.
 
 Events are `{method:"event",params:{sessionId,runId,operationId,type,data}}`.
 Types include run_start/attachment/text_delta/thinking_delta/tool_start/
-tool_end/message_end/usage/compaction_start/compaction_end/error/run_end.
+tool_end/message_end/usage/compaction_start/compaction_end/error/run_end
+(`tool_start`/`tool_end` of the web tools: see [Web search](#web-search)).
 Streamed text holds back a tail long enough to replace a key split across
 deltas.
 The host must persist the final RPC projection **before** publishing its UI
@@ -255,5 +275,89 @@ code units) of extracted text per attachment, 20,000 characters per
 pages are at most 2000 pixels per side, 4 megapixels and 5 MiB (PNG, else
 JPEG); no OCR text is invented. PDF.js does not decode an embedded image over
 40 megapixels (a 600-dpi A4 scan has about 35), so a page holding one is not
-rendered rather than sent blank: inline it stays for `read_attachment`, which
-reports `too_large` with `pdf_image` for it. Extracted text is cached per run in a 32 Mi-character LRU.
+rendered rather than sent blank, unless PDF.js stops at another error earlier
+on the same page: inline it stays for `read_attachment`, which reports
+`too_large` with `pdf_image` for it. Extracted text is cached per run in a
+32 Mi-character LRU.
+
+## Web search
+
+With `webSearch: true` the run registers `web_search {query}` (1-2000
+characters) and `web_fetch {url}` (`src/search.mjs`). Both are tools of the
+bundled search MCP server ([`search-mcp/`](search-mcp/README.md), shipped as
+`search-mcp/ofox-search-mcp.mjs` next to `runtime/`). The runtime starts it on
+the first call with pi-mcp's `McpClient` + `StdioTransport` (`node`, the bundle
+path as the only argument, `inheritEnv: false`) and stops it when the run
+ends; a stop while it starts ends the wait at once, and it must answer
+`initialize` within 10 s. The environment it is given is `OFOX_ASSISTANT_KEY`
+(the run's `apiKey`, never on the command line), `OFOX_BASE_URL` (`baseUrl`,
+else `https://api.{apex}`), `OFOX_ALLOW_LOCAL_GATEWAY=1` with
+`allowLocalGateway`, `OFOX_PROXY_URL` and `OFOX_NO_PROXY` from `proxy`, and
+`SystemRoot`, `TEMP`, `TMP` and `PATH` when the sidecar has them. The OS adds
+its own on top: macOS `__CF_USER_TEXT_ENCODING`, and on Windows libuv copies
+the variables every process needs (`USERPROFILE`, `WINDIR`, `USERNAME` and
+others) from the sidecar. pi-mcp starts the server in its own process group on
+POSIX, so it exits as soon as its stdin closes, even during a search: a
+sidecar that dies, killed with its group or not, takes it along. The server's
+own stderr (already redacted) is forwarded to the sidecar's stderr.
+
+### Contract for the search host
+
+Run parameters:
+
+- `webSearch` (default off): registers both tools and their prompt guidelines
+  (search only for current or outside information, one paid search per call,
+  cite the sources used as Markdown links). Compaction runs register them too
+  but never call them.
+- `allowedWebUrls` (default none): the HTTPS pages `web_fetch` may read,
+  usually the URLs in the user's messages and the sources of earlier answers.
+  At most 500 strings of at most 2048 characters; anything else rejects the
+  request before a turn starts. Every source a `web_search` of the run returns
+  is added. URLs compare as the server reads them: without the fragment, with
+  a lower-case host and no default port. Other URLs fail with
+  `fetch_not_allowed` without a request.
+- `proxy`: the one model requests use. The server tunnels both tools through
+  it; `web_fetch` checks DNS locally first and verifies the certificate for
+  the host name (see the search-mcp README).
+
+Events: `tool_start` is `{name, toolCallId, args}` with `args` `{query}` or
+`{url}`. `tool_end` is `{name, toolCallId, success:true, details}` or
+`{name, toolCallId, success:false, message, details}`:
+
+| Tool         | Success `details`                                                                             | Failure `details` |
+| ------------ | --------------------------------------------------------------------------------------------- | ----------------- |
+| `web_search` | `{usage: {searchCalls, inputTokens, outputTokens, model}, sources: [{title, url, snippet?}]}` | `{code, status?}` |
+| `web_fetch`  | `{url, truncated}`, `url` after redirects                                                     | `{code, status?}` |
+
+`message` is `<code>: <message>`, the text the model reads. The codes are the
+server's (see the search-mcp README) and the runtime's own:
+`search_unavailable` (the server could not start, or stopped; nothing was
+sent; a later call starts it again), `search_rejected`/`fetch_rejected` (the
+server rejected the arguments), `search_failed` without `status` also when the
+server answered with a JSON-RPC error (it never ran the search), and
+`fetch_not_allowed` (also: the URL is not allowed in this run).
+Source URLs are passed on as the server returns them; `inputTokens` and
+`outputTokens` are `null` when the gateway did not report them.
+
+Billing: every `web_search` success is `usage.searchCalls` paid searches at
+the web_search price of `usage.model`, plus its tokens. Nothing is retried
+automatically. The same query again in one run (case and spacing ignored)
+after a success, or while it runs, is answered from that result with
+`deduplicated: true` and zero usage; after a failure the model may try it
+again. A failure other than `search_outcome_unknown` cost nothing.
+
+Unknown outcome: `search_outcome_unknown` comes from the server, or from the
+runtime when the server did not answer within 70 s, answered malformed, the
+run was stopped during the search or the server exited during it. Like a host
+`unknown_outcome` it ends the run without another tool or model request:
+`status:"error"` with `errorMessage` `search_outcome_unknown: ...`, or
+`stopped` when the user stopped it.
+
+Native history and projection: every tool entry (`role:"tool"`) has
+`toolName`, `toolCallId` and `isError`. A web tool entry keeps `details`: the
+success details above, `{code:"unknown_outcome", error:{code:
+"search_outcome_unknown"}}` for an unknown outcome, `{}` for other failures. A
+`web_search` entry has `usageCoverage`: `incomplete` for an unknown outcome or
+missing token counts, else `complete`; the projection's `usageCoverage`
+includes it. The host prices searches itself, so search usage is reported
+only here and in `tool_end`, never in `usage` events or entries.

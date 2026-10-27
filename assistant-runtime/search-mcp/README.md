@@ -8,9 +8,14 @@ through the Ofox Responses API) and `web_fetch` (read one public web page).
 `node_modules`. Only the stdio transport is bundled; the build fails if the
 SDK's Express/Hono HTTP transports end up in it.
 
-It is not wired into the assistant yet. The later client wrapper starts it
-with pi-mcp's `McpClient` + `StdioTransport` and `inheritEnv: false`, and
-exposes the tools to the model as Pi tools.
+`pnpm assistant:prepare` builds it and ships the bundle as
+`resources/search-mcp/ofox-search-mcp.mjs`. When a run enables web search, the
+assistant runtime (`../src/search.mjs`) starts it with pi-mcp's `McpClient` +
+`StdioTransport` and `inheritEnv: false`, and exposes the tools to the model
+as Pi tools (see "Web search" in `../README.md`). Third-party code compiled
+into the bundle is listed in `dist/bundled-packages.json` at build time; its
+notices are `../notices/ofox-search-mcp.txt`, and `test/notices.test.mjs`
+fails when the bundle gains a package the notice does not name.
 
 ## Environment
 
@@ -24,9 +29,33 @@ contains the key.
 | `OFOX_BASE_URL`            | yes      | Exactly `https://api.ofox.ai` or `https://api.ofox.io`.              |
 | `OFOX_SEARCH_MODEL`        | no       | Search model id; default `openai/gpt-5-nano`.                        |
 | `OFOX_ALLOW_LOCAL_GATEWAY` | no       | `1` also allows `http://localhost:<port>` as the base URL (tests).   |
+| `OFOX_PROXY_URL`           | no       | The app's `http`, `https` or `socks5` proxy, credentials included.   |
+| `OFOX_NO_PROXY`            | no       | Hosts that bypass the proxy (`NO_PROXY` syntax).                     |
 
 The host derives `OFOX_BASE_URL` from the selected `ofoxApex`; the server
 never picks a region itself.
+
+### Proxy
+
+The host passes the proxy the assistant runtime uses for model requests (the
+app's setting, else the system proxy) in `OFOX_PROXY_URL`/`OFOX_NO_PROXY`; the
+server reads no other proxy variables. The URL is never logged or echoed,
+and diagnostics drop any `user:password@` part of a URL. `socks5h` means
+`socks5`.
+
+- `web_search` uses undici (pinned, 8.10.2, the version the runtime ships)
+  with an `EnvHttpProxyAgent`, like the runtime's model requests: it tunnels
+  to the gateway unless `OFOX_NO_PROXY` matches it. A proxy that refuses or
+  fails before its tunnel opens (refused CONNECT, connection or TLS failure
+  to the proxy, SOCKS5 failure) is `search_failed` without `status`: nothing
+  was sent.
+- `web_fetch` still resolves the page's host here and requires every answer
+  to be public, then opens a CONNECT (or SOCKS5) tunnel to the host **name**
+  through the proxy and verifies the certificate for that name. The proxy
+  resolves the name itself, so the connection cannot be pinned to the
+  checked address. A host that `OFOX_NO_PROXY` matches (same rules as
+  undici's) keeps the pinned direct connection. A refused tunnel is
+  `fetch_failed`.
 
 ## Tools
 
@@ -72,15 +101,17 @@ search's sources, deduplicated by URL) and usage:
 
 Reads one page with the safety rules of the assistant runtime: HTTPS on port
 443 only, no credentials in the URL, no local or Ofox hosts, every DNS answer
-must be public, the connection is pinned to the checked address, every
-redirect (at most 4) is checked again, 15 s timeout, 2 MiB body limit, static
+must be public, the connection is pinned to the checked address (through a
+proxy: tunnelled by name, see [Proxy](#proxy)), every redirect (at most 4) is
+checked again, 15 s timeout, 2 MiB body limit, static
 HTML or plain text only, at most 20,000 characters of text, no cookies. The
 result is `{ url, text, truncated }`, where `url` is the final URL after
 redirects.
 
 **The allowlist is not here.** `web_fetch` reads any URL that passes the
-rules above. The client wrapper must only let the model fetch URLs that the
-user wrote or that a `web_search` in the same conversation returned.
+rules above. The runtime only lets the model fetch URLs that the host allows
+(`allowedWebUrls`: the user's links and earlier sources) or that a
+`web_search` of the same run returned.
 
 ## Billing
 
@@ -114,7 +145,7 @@ cut to its limit.
 | `search_outcome_unknown`      | The search may have run and been billed: timeout, cancellation, any network error other than a connect()/DNS failure (TLS errors included), HTTP 5xx or 3xx, a body over 1 MiB, unreadable or malformed success. Do not repeat it automatically. |
 | `search_unauthorized`         | HTTP 401/403: the key was rejected.                                                                                                                                                                                                              |
 | `search_insufficient_balance` | HTTP 402, or a 4xx (never 429) with Ofox's own error shape `error.type: "insufficient_credits"` or `error.code: 402`. An upstream `insufficient_quota` is not the user's balance.                                                                |
-| `search_failed`               | Another 4xx (with `status`; 429 means rate-limited, try later), or connect()/DNS failed (no `status`; nothing was sent). There is no separate rate-limit code: use `status` 429.                                                                 |
+| `search_failed`               | Another 4xx (with `status`; 429 means rate-limited, try later), or connect()/DNS or the proxy failed before its tunnel (no `status`; nothing was sent). There is no separate rate-limit code: use `status` 429.                                  |
 | `fetch_not_allowed`           | The URL, a DNS answer or a redirect target broke the `web_fetch` rules.                                                                                                                                                                          |
 | `fetch_too_large`             | The page body is over 2 MiB.                                                                                                                                                                                                                     |
 | `fetch_unsupported_content`   | The page is not HTML or plain text.                                                                                                                                                                                                              |
@@ -123,6 +154,10 @@ cut to its limit.
 Invalid arguments (an empty or too long query, extra fields) are rejected by
 the SDK before the handler runs, as an `isError` result without
 `structuredContent`; no request is made.
+
+The server exits as soon as its stdin closes, even during a search: the
+client starts it in its own process group, so a client killed with its group
+would otherwise leave it running until the search ends.
 
 The server writes nothing but MCP messages to stdout. stderr gets only short
 diagnostics with the key and any bearer token redacted, because the host
@@ -134,12 +169,19 @@ Use the bundled runtime's Node version (22.23.4):
 
 ```sh
 npm ci
-npm run build   # dist/ofox-search-mcp.mjs, about 380 KiB
+npm run build   # dist/ofox-search-mcp.mjs, about 920 KiB (undici included)
 npm test        # builds first, then node --test; no live network calls
 ```
+
+`pnpm assistant:install` installs these dependencies and `pnpm assistant:test`
+(which CI runs) builds and runs these tests after the runtime's, on the
+bundled Node. The build writes each file whole (by rename), so test runs can
+overlap.
 
 The tests use a local mock gateway on an ephemeral port with
 `OFOX_ALLOW_LOCAL_GATEWAY=1`, real Ofox responses in `test/fixtures/`
 (`encrypted_content` removed), and the SDK's `Client` +
 `StdioClientTransport` against a copy of the built bundle in an empty temp
-directory.
+directory. The proxy tests run a local CONNECT proxy and an HTTPS server with
+a test-only certificate for `example.com` (`test/fixtures/tls/`, valid until
+2126); `web_fetch` DNS answers are injected.
