@@ -21,8 +21,9 @@ mentions no tools, attachments or search.
 From the repository root (build hosts need npm and tar; users do not):
 
 ```sh
-pnpm assistant:install  # test dependencies in assistant-runtime/node_modules
-pnpm assistant:test     # runtime tests on the pinned Node, mock providers only
+pnpm assistant:install  # test dependencies of the runtime and of search-mcp/
+pnpm assistant:test     # runtime tests on the pinned Node, mock providers only,
+                        # then search-mcp/'s build and tests
 pnpm assistant:prepare  # production resources for the current OS/architecture
 pnpm assistant:smoke    # run the copied production tree: Pi SDK, native canvas,
                         # PDF text and rendering, native JSONL, search server
@@ -287,12 +288,18 @@ bundled search MCP server ([`search-mcp/`](search-mcp/README.md), shipped as
 `search-mcp/ofox-search-mcp.mjs` next to `runtime/`). The runtime starts it on
 the first call with pi-mcp's `McpClient` + `StdioTransport` (`node`, the bundle
 path as the only argument, `inheritEnv: false`) and stops it when the run
-ends. Its whole environment is `OFOX_ASSISTANT_KEY` (the run's `apiKey`, never
-on the command line), `OFOX_BASE_URL` (`baseUrl`, else `https://api.{apex}`),
-`OFOX_ALLOW_LOCAL_GATEWAY=1` with `allowLocalGateway`, `OFOX_PROXY_URL` and
-`OFOX_NO_PROXY` from `proxy`, and `SystemRoot`, `TEMP`, `TMP` and `PATH` when
-the sidecar has them. The server's own stderr (already redacted) is forwarded
-to the sidecar's stderr.
+ends; a stop while it starts ends the wait at once, and it must answer
+`initialize` within 10 s. The environment it is given is `OFOX_ASSISTANT_KEY`
+(the run's `apiKey`, never on the command line), `OFOX_BASE_URL` (`baseUrl`,
+else `https://api.{apex}`), `OFOX_ALLOW_LOCAL_GATEWAY=1` with
+`allowLocalGateway`, `OFOX_PROXY_URL` and `OFOX_NO_PROXY` from `proxy`, and
+`SystemRoot`, `TEMP`, `TMP` and `PATH` when the sidecar has them. The OS adds
+its own on top: macOS `__CF_USER_TEXT_ENCODING`, and on Windows libuv copies
+the variables every process needs (`USERPROFILE`, `WINDIR`, `USERNAME` and
+others) from the sidecar. pi-mcp starts the server in its own process group on
+POSIX, so it exits as soon as its stdin closes, even during a search: a
+sidecar that dies, killed with its group or not, takes it along. The server's
+own stderr (already redacted) is forwarded to the sidecar's stderr.
 
 ### Contract for the search host
 
@@ -325,20 +332,23 @@ Events: `tool_start` is `{name, toolCallId, args}` with `args` `{query}` or
 `message` is `<code>: <message>`, the text the model reads. The codes are the
 server's (see the search-mcp README) and the runtime's own:
 `search_unavailable` (the server could not start, or stopped; nothing was
-sent), `search_rejected`/`fetch_rejected` (the server rejected the
-arguments), `fetch_not_allowed` (also: the URL is not allowed in this run).
+sent; a later call starts it again), `search_rejected`/`fetch_rejected` (the
+server rejected the arguments), `search_failed` without `status` also when the
+server answered with a JSON-RPC error (it never ran the search), and
+`fetch_not_allowed` (also: the URL is not allowed in this run).
 Source URLs are passed on as the server returns them; `inputTokens` and
 `outputTokens` are `null` when the gateway did not report them.
 
 Billing: every `web_search` success is `usage.searchCalls` paid searches at
-the web_search price of `usage.model`, plus its tokens. Nothing is retried.
-The same query again in one run (case and spacing ignored) is answered from
-the first result with `deduplicated: true` and zero usage. A failure other
-than `search_outcome_unknown` cost nothing.
+the web_search price of `usage.model`, plus its tokens. Nothing is retried
+automatically. The same query again in one run (case and spacing ignored)
+after a success, or while it runs, is answered from that result with
+`deduplicated: true` and zero usage; after a failure the model may try it
+again. A failure other than `search_outcome_unknown` cost nothing.
 
 Unknown outcome: `search_outcome_unknown` comes from the server, or from the
-runtime when the server did not answer within 70 s, the run was stopped
-during the search or the server exited during it. Like a host
+runtime when the server did not answer within 70 s, answered malformed, the
+run was stopped during the search or the server exited during it. Like a host
 `unknown_outcome` it ends the run without another tool or model request:
 `status:"error"` with `errorMessage` `search_outcome_unknown: ...`, or
 `stopped` when the user stopped it.

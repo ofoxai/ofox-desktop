@@ -10,6 +10,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -19,6 +20,18 @@ import { AssistantRuntime } from "../src/runtime.mjs";
 const token = "search-run-credential-never-persist-0123456789";
 const STUB = fileURLToPath(
   new URL("./fixtures/stub-search-mcp.mjs", import.meta.url),
+);
+// What the OS adds to any process started with an empty environment: macOS
+// __CF_USER_TEXT_ENCODING; on Windows, libuv copies the variables a process
+// needs (USERPROFILE, WINDIR, USERNAME...) from the parent.
+const PLATFORM_ENV = new Set(
+  JSON.parse(
+    spawnSync(
+      process.execPath,
+      ["-e", "process.stdout.write(JSON.stringify(Object.keys(process.env)))"],
+      { env: {}, encoding: "utf8" },
+    ).stdout,
+  ),
 );
 const ALLOWED_ENV = new Set([
   "OFOX_ASSISTANT_KEY",
@@ -270,11 +283,11 @@ test("the server gets the key and gateway only through its own environment", asy
     assert.equal(start.event, "start");
     assert.deepEqual(start.argv, [fixture.server]);
     assert.equal(JSON.stringify(start.argv).includes(token), false);
-    // inheritEnv: false. Only the variables Node itself may need pass on
-    // (macOS adds __CF_USER_TEXT_ENCODING to every process it starts).
+    // inheritEnv: false. Only the variables Node itself may need pass on,
+    // and what the OS adds to every process.
     for (const name of Object.keys(start.env))
       assert.ok(
-        ALLOWED_ENV.has(name) || name === "__CF_USER_TEXT_ENCODING",
+        ALLOWED_ENV.has(name) || PLATFORM_ENV.has(name),
         `unexpected ${name}`,
       );
     if (process.env.PATH) assert.equal(start.env.PATH, process.env.PATH);
@@ -306,6 +319,8 @@ test("search and fetch failures reach the model as errors and the run goes on", 
         ["web_search", { query: "rate limited" }],
         ["web_search", { query: "rejected arguments" }],
         ["web_fetch", { url: "https://example.com/missing" }],
+        ["web_search", { query: "protocol error" }],
+        ["web_search", { query: "rate limited" }],
       ),
     () => reply("I could not search right now."),
   );
@@ -319,7 +334,18 @@ test("search and fetch failures reach the model as errors and the run goes on", 
       { success: false, details: { code: "search_failed", status: 429 } },
       { success: false, details: { code: "search_rejected" } },
       { success: false, details: { code: "fetch_failed", status: 404 } },
+      { success: false, details: { code: "search_failed" } },
+      { success: false, details: { code: "search_failed", status: 429 } },
     ],
+  );
+  // A JSON-RPC error answer means the server never ran the search.
+  assert.match(ends[3].message, /no search was made/);
+  // Only successes are reused: a failed query may be tried again.
+  assert.equal(
+    calls(await fixture.log()).filter(
+      ([, args]) => args.query === "rate limited",
+    ).length,
+    2,
   );
   assert.match(
     ends[0].message,
@@ -328,7 +354,7 @@ test("search and fetch failures reach the model as errors and the run goes on", 
   assert.match(ends[1].message, /^search_rejected: .*Input validation error/);
   assert.match(ends[2].message, /^fetch_failed: Web page returned HTTP 404/);
   const results = toolResults(model.requests[1]);
-  assert.equal(results.length, 3);
+  assert.equal(results.length, 5);
   assert.match(JSON.stringify(results[0].content), /rate-limited/);
   const tools = result.entries.filter((entry) => entry.role === "tool");
   assert.deepEqual(
@@ -337,6 +363,8 @@ test("search and fetch failures reach the model as errors and the run goes on", 
       ["web_search", true, "complete"],
       ["web_search", true, "complete"],
       ["web_fetch", true, undefined],
+      ["web_search", true, "complete"],
+      ["web_search", true, "complete"],
     ],
   );
   assert.equal(result.usageCoverage, "complete");
@@ -368,8 +396,8 @@ test("a search with an unknown outcome is never repeated and ends the run", asyn
   assert.equal(result.usageCoverage, "incomplete");
 });
 
-test("a search the server does not answer in time, or crashes during, has an unknown outcome", async (t) => {
-  for (const query of ["hang", "crash"]) {
+test("a search the server does not answer in time, crashes during or answers malformed has an unknown outcome", async (t) => {
+  for (const query of ["hang", "crash", "malformed answer"]) {
     const fixture = await sandbox(t);
     const model = scriptedModel(() => callTools(["web_search", { query }]));
     const { runtime, events } = runtimeFor(t, fixture, model, {
@@ -478,19 +506,27 @@ test("stopping a run during a search ends it as stopped and stops the server", a
   assert.equal((await fixture.log()).at(-1).event, "exit");
 });
 
-test("a search server that cannot start fails the call without an unknown outcome", async (t) => {
+test("a search server that cannot start fails the call without an unknown outcome, and may start again", async (t) => {
   const fixture = await sandbox(t);
-  const refusing = path.join(path.dirname(fixture.server), "refusing.mjs");
+  const directory = path.dirname(fixture.server);
+  const refusing = path.join(directory, "refusing.mjs");
   await writeFile(
     refusing,
-    'process.stderr.write("ofox-search-mcp: OFOX_BASE_URL must be exactly https://api.ofox.ai or https://api.ofox.io\\n"); process.exit(2);',
+    `import { appendFileSync } from "node:fs";
+appendFileSync(${JSON.stringify(path.join(directory, "starts"))}, "start\\n");
+process.stderr.write("ofox-search-mcp: OFOX_BASE_URL must be exactly https://api.ofox.ai or https://api.ofox.io\\n");
+process.exit(2);`,
   );
   for (const [script, reason] of [
-    [path.join(path.dirname(fixture.server), "missing.mjs"), /unavailable$/],
+    [path.join(directory, "missing.mjs"), /unavailable$/],
     [refusing, /unavailable \(OFOX_BASE_URL must be exactly/],
   ]) {
     const model = scriptedModel(
-      () => callTools(["web_search", { query: "anything" }]),
+      () =>
+        callTools(
+          ["web_search", { query: "anything" }],
+          ["web_search", { query: "anything" }],
+        ),
       () => reply("Search is unavailable."),
     );
     const { runtime, events } = runtimeFor(t, fixture, model, {
@@ -498,13 +534,70 @@ test("a search server that cannot start fails the call without an unknown outcom
     });
     const result = await runtime.run(fixture.params);
     assert.equal(result.status, "completed");
-    const end = toolEvents(events).find((event) => event.type === "tool_end");
-    assert.equal(end.success, false);
-    assert.deepEqual(end.details, { code: "search_unavailable" });
-    assert.match(end.message, /^search_unavailable: /);
-    assert.match(end.message, reason);
+    const ends = toolEvents(events).filter(
+      (event) => event.type === "tool_end",
+    );
+    assert.equal(ends.length, 2);
+    for (const end of ends) {
+      assert.equal(end.success, false);
+      assert.deepEqual(end.details, { code: "search_unavailable" });
+      assert.match(end.message, /^search_unavailable: /);
+      assert.match(end.message, reason);
+    }
     assert.equal(model.requests.length, 2);
   }
+  // Each call tried to start the server again.
+  assert.equal(
+    (await readFile(path.join(directory, "starts"), "utf8")).trim().split("\n")
+      .length,
+    2,
+  );
+});
+
+test("stopping a run while the search server starts ends it at once", async (t) => {
+  const fixture = await sandbox(t);
+  const directory = path.dirname(fixture.server);
+  const silent = path.join(directory, "silent.mjs");
+  const started = path.join(directory, "started");
+  // Starts, never answers initialize and ignores stdin closing.
+  await writeFile(
+    silent,
+    `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(started)}, String(process.pid));
+process.stdin.resume();
+setInterval(() => {}, 1000);`,
+  );
+  const model = scriptedModel(() =>
+    callTools(["web_search", { query: "slow start" }]),
+  );
+  const { runtime, events } = runtimeFor(t, fixture, model, {
+    searchServer: silent,
+  });
+  const running = runtime.run(fixture.params);
+  let pid;
+  for (let waited = 0; waited < 100 && !pid; waited++) {
+    pid = Number(await readFile(started, "utf8").catch(() => "")) || undefined;
+    if (!pid) await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.ok(pid, "the server started");
+  const stoppedAt = Date.now();
+  await runtime.stop(fixture.params);
+  const result = await running;
+  assert.equal(result.status, "stopped");
+  assert.ok(Date.now() - stoppedAt < 5000, "stop did not wait for the server");
+  const end = toolEvents(events).find((event) => event.type === "tool_end");
+  assert.equal(end.success, false);
+  assert.equal(end.details, undefined, "nothing was sent: no unknown outcome");
+  let alive = true;
+  for (let waited = 0; waited < 60 && alive; waited++) {
+    try {
+      process.kill(pid, 0);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } catch {
+      alive = false;
+    }
+  }
+  assert.equal(alive, false, "the server was stopped");
 });
 
 test("a malformed web URL allowlist rejects the run before any request", async (t) => {

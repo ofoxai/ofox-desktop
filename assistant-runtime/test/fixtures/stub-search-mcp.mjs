@@ -38,6 +38,7 @@ function search(query) {
       isError: true,
       content: text("MCP error -32602: Input validation error"),
     };
+  if (query === "malformed answer") return { content: "not a list" };
   if (query === "hang") return undefined;
   if (query === "crash") process.exit(3);
   const slug = query.toLowerCase().replace(/[^a-z0-9]+/g, "-");
@@ -101,9 +102,16 @@ createInterface({ input: process.stdin })
       send({ id: message.id, result: { tools } });
     else if (message.method === "tools/call") {
       const { name, arguments: args } = message.params;
-      const result =
-        name === "web_search" ? search(args.query) : fetchPage(args.url);
-      if (result) send({ id: message.id, result });
+      if (args.query === "protocol error")
+        send({
+          id: message.id,
+          error: { code: -32602, message: "Invalid params" },
+        });
+      else {
+        const result =
+          name === "web_search" ? search(args.query) : fetchPage(args.url);
+        if (result) send({ id: message.id, result });
+      }
     } else if (message.id !== undefined)
       send({
         id: message.id,

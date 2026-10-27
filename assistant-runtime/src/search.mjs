@@ -14,6 +14,8 @@ export const SEARCH_SERVER = fileURLToPath(
 // The server gives a search 60 s; pi-mcp's default request timeout is 30 s.
 export const SEARCH_TIMEOUT_MS = 70_000;
 const FETCH_TIMEOUT_MS = 30_000;
+// The bundle answers initialize within milliseconds.
+const START_TIMEOUT_MS = 10_000;
 const MAX_ALLOWED_URLS = 500;
 const MAX_URL_CHARS = 2048;
 // What Node itself may need on Windows and macOS; nothing else is inherited.
@@ -119,9 +121,10 @@ function failedResult(name, result) {
 }
 
 /**
- * A call that threw instead of answering. A JSON-RPC error means the server
- * refused the request before running it. Otherwise (timeout, stop, the server
- * gone) a search may have run and been billed; a page read has no cost.
+ * A call without a usable answer. A JSON-RPC error answer (an McpError from
+ * `request`, which raises no other) means the server refused the request
+ * before running it. Otherwise (timeout, stop, the server gone, a malformed
+ * answer) a search may have run and been billed; a page read has no cost.
  */
 async function failedCall(name, error, timeoutMs) {
   const { McpError, McpTimeoutError } = await import("@earendil-works/pi-mcp");
@@ -130,15 +133,18 @@ async function failedCall(name, error, timeoutMs) {
       ? `the search server did not answer within ${Math.round(timeoutMs / 1000)} s`
       : error?.name === "AbortError"
         ? "the run was stopped while it ran"
-        : "the search server stopped while it ran";
+        : error instanceof MalformedAnswer
+          ? "the search server's answer was malformed"
+          : "the search server stopped while it ran";
+  const refused = error instanceof McpError;
   if (name !== "web_search")
     return toolFailure(
       "fetch_failed",
-      error instanceof McpError
+      refused
         ? "The search server refused the request"
         : `The page was not read: ${reason}`,
     );
-  if (error instanceof McpError)
+  if (refused)
     return toolFailure(
       "search_failed",
       "The search server refused the request; no search was made",
@@ -148,6 +154,20 @@ async function failedCall(name, error, timeoutMs) {
     `The web search may or may not have run and been billed: ${reason}. Do not repeat it automatically.`,
     { outcomeUnknown: true },
   );
+}
+
+class MalformedAnswer extends Error {}
+
+// A tools/call result as MCP defines it; `content` may be left out.
+function callResult(value) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    (value.content !== undefined && !Array.isArray(value.content))
+  )
+    throw new MalformedAnswer();
+  return value;
 }
 
 /** The run's search server, started on its first call. */
@@ -164,14 +184,22 @@ export class SearchServer {
   }
 
   async call(name, args, { signal, timeoutMs }) {
-    const client = await this.#connect();
+    const client = await this.#started(signal);
     // Nothing was sent yet: a stop here is an ordinary failure.
     signal?.throwIfAborted();
     if (client.connectionState !== "connected")
       throw unavailable("it stopped during this run");
     let result;
     try {
-      result = await client.callTool(name, args, { signal, timeoutMs });
+      // `request`, not `callTool`: callTool also raises an McpError of its
+      // own for a malformed answer, which must not read as a refusal.
+      result = callResult(
+        await client.request(
+          "tools/call",
+          { name, arguments: args },
+          { signal, timeoutMs },
+        ),
+      );
     } catch (error) {
       throw await failedCall(name, error, timeoutMs);
     }
@@ -179,6 +207,27 @@ export class SearchServer {
     return result;
   }
 
+  // The started server; a stop ends the wait at once (the run's end then
+  // stops the server).
+  async #started(signal) {
+    signal?.throwIfAborted();
+    const connecting = this.#connect();
+    if (!signal) return await connecting;
+    let onAbort;
+    try {
+      return await Promise.race([
+        connecting,
+        new Promise((_resolve, reject) => {
+          onAbort = () => reject(signal.reason);
+          signal.addEventListener("abort", onAbort, { once: true });
+        }),
+      ]);
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  // A server that failed to start may be started again by a later call.
   #connect() {
     this.#connecting ??= (async () => {
       const { McpClient, StdioTransport } = await import(
@@ -198,11 +247,14 @@ export class SearchServer {
       const client = new McpClient({
         name: "ofox-desktop-assistant",
         version: "1.0.0",
+        // initialize only: every call passes its own timeout.
+        requestTimeoutMs: START_TIMEOUT_MS,
       });
       this.#client = client;
       try {
         await client.connect(transport);
       } catch {
+        this.#connecting = undefined;
         await client.close().catch(() => {});
         // The server's own one-line reason, such as invalid configuration.
         throw unavailable(
@@ -297,7 +349,10 @@ export function webTools(runtime, context, { searchTimeoutMs }) {
           { signal: runSignal(signal), timeoutMs: searchTimeoutMs },
         )
         .then(searchResult);
+      // Successes (and a search in flight) are reused; a failed query may be
+      // tried again. An unknown outcome ends the run anyway.
       searches.set(key, pending);
+      pending.catch(() => searches.delete(key));
       const result = await pending;
       for (const source of result.details.sources) {
         const page = webUrlKey(source.url);
