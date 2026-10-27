@@ -128,6 +128,8 @@ export async function ofoxIsAuthenticated(): Promise<boolean> {
 export interface LogoutReport {
   stopped: string[];
   notRevoked: string[];
+  /** 助手自己的 key 没能在服务器上吊销；后端会留着以后再删。 */
+  assistantNotRevoked: boolean;
 }
 
 /** 退出登录：先停用本账号在这台电脑上用的 API Key，工具保持绑定、暂停使用。 */

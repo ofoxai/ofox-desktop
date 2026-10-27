@@ -92,7 +92,8 @@
     "switched": "{{tools}} now use {{account}}'s credits.",
     "switchedToCurrent": "{{tools}} now use this account's credits.",
     "switchFailed": "{{tool}} still uses the previous account's API key: {{message}}",
-    "listSeparator": ", "
+    "listSeparator": ", ",
+    "assistantNotRevoked": "The assistant's API key could not be stopped on the server (you may be offline). It will be deleted automatically later."
   },
   "connectivity": {
     "insufficientCreditsTitle": "Out of credits",

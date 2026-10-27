@@ -92,7 +92,8 @@
     "switched": "{{tools}} 已改用 {{account}} 的额度。",
     "switchedToCurrent": "{{tools}} 已改用当前账号的额度。",
     "switchFailed": "{{tool}} 还在用之前账号的 API Key：{{message}}",
-    "listSeparator": "、"
+    "listSeparator": "、",
+    "assistantNotRevoked": "助手的 API Key 没能在服务器上停用（可能没联网），之后会自动删除。"
   },
   "connectivity": {
     "insufficientCreditsTitle": "余额不足",
