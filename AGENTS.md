@@ -14,6 +14,8 @@ Ofox Desktop is a Tauri 2 application. React/TypeScript lives in `src/`, Rust in
 
 `pnpm install --frozen-lockfile`; `pnpm dev` for Tauri, `pnpm dev:renderer` for Vite, `pnpm build:renderer` for renderer, `pnpm build` for desktop bundles. Final gates are `pnpm typecheck`, `pnpm format:check`, `pnpm test:unit`, `cargo fmt --check --manifest-path src-tauri/Cargo.toml`, `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`, and `cargo test --manifest-path src-tauri/Cargo.toml`. Run platform-specific code on its native OS; a macOS result does not validate Windows. See [Windows testing](docs/windows-testing.md).
 
+Run `pnpm assistant:prepare` before any Cargo build or test (Tauri validates the `assistant-runtime/resources/` resource map); `pnpm assistant:test` runs the bundled sidecar's tests on its pinned Node (after `pnpm assistant:install`).
+
 Use existing Prettier/rustfmt style, PascalCase components, `use`-prefixed hooks, camelCase frontend values and IPC payloads, and snake_case Rust identifiers. Use `@/` imports. Preserve compatible optional fields and the current database schema unless a migration is necessary. Use Conventional Commit subjects and explain behavior and verification in PR descriptions.
 
 ## User files, secrets, and endpoints
