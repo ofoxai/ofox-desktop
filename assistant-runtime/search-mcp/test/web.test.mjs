@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import test from "node:test";
 import {
   FetchError,
+  MAX_PAGE_BYTES,
   htmlText,
   isPublicAddress,
   readWebPage,
@@ -257,6 +258,39 @@ test("HTML text extraction drops markup and decodes entities", () => {
     ),
     "a & b AB\n\nc",
   );
+});
+
+test("an unclosed script, comment or tag hides the rest of the page, as in a browser", () => {
+  assert.equal(htmlText("<p>Shown</p><script>hidden() <p>too"), "Shown");
+  assert.equal(htmlText("<p>Shown</p><!-- open <p>hidden"), "Shown");
+  assert.equal(htmlText("<p>Shown</p><div class=open hidden"), "Shown");
+  assert.equal(
+    htmlText("<SCRIPT>x</script >A<style>.a{}</STYLE><b>B</b>"),
+    "A B",
+  );
+  assert.equal(htmlText("<script>a</scripts>b</script>Shown"), "Shown");
+  assert.equal(htmlText("<!DOCTYPE html><?xml x?>Shown"), "Shown");
+  // A "<" that starts no tag is text.
+  assert.equal(htmlText("1 < 2 and 3 > 2"), "1 < 2 and 3 > 2");
+});
+
+test("2 MiB of unclosed scripts, comments or tags is read well within the deadline", async () => {
+  // A quadratic scan would block the event loop for minutes, so the 15 s
+  // deadline could never fire.
+  for (const unit of ["<script>", "<script", "<!--", "<", "<style a='", "<b"]) {
+    const start = "<p>Start</p>";
+    const body =
+      start +
+      unit.repeat(Math.floor((MAX_PAGE_BYTES - start.length) / unit.length));
+    assert.ok(body.length > MAX_PAGE_BYTES - unit.length, unit);
+    const started = performance.now();
+    const result = await readWebPage("https://example.com/", {
+      lookup: publicLookup,
+      request: page(body),
+    });
+    assert.ok(performance.now() - started < 2000, unit);
+    assert.match(result.text, /^Start/, unit);
+  }
 });
 
 // "你好，世界" in GBK, and "日本" in Shift_JIS.

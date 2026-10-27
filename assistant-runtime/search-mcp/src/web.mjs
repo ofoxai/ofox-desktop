@@ -320,15 +320,81 @@ function decodePage(body, contentType, html) {
   return decoder.decode(body);
 }
 
+// Elements whose content is never page text, and those that start a line.
+const HIDDEN_ELEMENTS = new Set(["script", "style", "noscript", "template"]);
+const LINE_ELEMENTS = new Set([
+  ..."p div h1 h2 h3 h4 h5 h6 li tr br section article".split(" "),
+]);
+const TAG_NAME = /[a-z][a-z0-9-]*/y;
+
+/**
+ * Markup out of an HTML page, in one pass. A tag ends at its first ">"; a
+ * "<" that starts no tag, comment or declaration is text. As in a browser,
+ * an unclosed comment, tag or hidden element hides the rest of the page.
+ * Every search for an end resumes past the last one's start, so each costs
+ * one scan of the page in all: a page of unclosed tags cannot stall the
+ * event loop (and with it the read's deadline).
+ */
+function stripMarkup(html) {
+  // ASCII only, so every index is the same in both strings.
+  const lower = html.replace(/[A-Z]+/g, (letters) => letters.toLowerCase());
+  const searches = new Map();
+  const next = (mark, from) => {
+    const last = searches.get(mark);
+    if (last && from >= last.from && (last.at === -1 || last.at >= from))
+      return last.at;
+    const at = lower.indexOf(mark, from);
+    searches.set(mark, { from, at });
+    return at;
+  };
+  // A hidden element's end tag: `</name` then a space, "/" or ">".
+  const endTag = (name, from) => {
+    let at = next(`</${name}`, from);
+    while (at !== -1 && !/[\s/>]/.test(lower[at + name.length + 2] ?? ">"))
+      at = next(`</${name}`, at + 1);
+    return at;
+  };
+  const parts = [];
+  let at = 0;
+  while (at < html.length) {
+    const open = html.indexOf("<", at);
+    if (open === -1) {
+      parts.push(html.slice(at));
+      break;
+    }
+    parts.push(html.slice(at, open));
+    if (lower.startsWith("<!--", open)) {
+      const end = next("-->", open + 4);
+      if (end === -1) break;
+      parts.push(" ");
+      at = end + 3;
+      continue;
+    }
+    const after = html[open + 1];
+    TAG_NAME.lastIndex = open + (after === "/" ? 2 : 1);
+    const name = TAG_NAME.exec(lower)?.[0];
+    // `<!DOCTYPE …>`, `<?…>` and `</…>` without a name end at ">" too.
+    if (!name && after !== "!" && after !== "?" && after !== "/") {
+      parts.push("<");
+      at = open + 1;
+      continue;
+    }
+    const end = next(">", open + 1);
+    if (end === -1) break;
+    at = end + 1;
+    if (after !== "/" && HIDDEN_ELEMENTS.has(name)) {
+      const close = endTag(name, at);
+      const closeEnd = close === -1 ? -1 : next(">", close);
+      if (closeEnd === -1) break;
+      at = closeEnd + 1;
+    }
+    parts.push(LINE_ELEMENTS.has(name) ? "\n" : " ");
+  }
+  return parts.join("");
+}
+
 export function htmlText(html) {
-  return html
-    .replace(
-      /<(script|style|noscript|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi,
-      " ",
-    )
-    .replace(/<!--[^]*?-->/g, " ")
-    .replace(/<\/?(?:p|div|h[1-6]|li|tr|br|section|article)\b[^>]*>/gi, "\n")
-    .replace(/<[^>]*>/g, " ")
+  return stripMarkup(html)
     .replace(/&#(?:x([0-9a-f]+)|(\d+));/gi, (_match, hex, decimal) => {
       const code = Number.parseInt(hex || decimal, hex ? 16 : 10);
       return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : " ";
