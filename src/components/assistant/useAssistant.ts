@@ -89,6 +89,12 @@ export function useAssistant(enabled: boolean) {
   const [stream, setStream] = useState<AssistantMessage | null>(null);
   const [run, setRunState] = useState<AssistantRunRef | null>(null);
   const [tools, setTools] = useState<RunningTool[]>([]);
+  // The files a run this window sent reads before its model request: those
+  // whose outcome has not come in yet.
+  const [reading, setReading] = useState<{
+    runId: string;
+    ids: string[];
+  } | null>(null);
   const [runSearch, setRunSearchState] = useState<RunSearch | null>(null);
   const runSearchRef = useRef(runSearch);
   // Replies whose run went without the web search their conversation asked
@@ -591,6 +597,11 @@ export function useAssistant(enabled: boolean) {
             // question it was sent with until the saved transcript is read.
             const { id, status, code, details } = event.data;
             if (typeof id !== "string") return;
+            setReading((old) =>
+              old?.runId === event.runId
+                ? { ...old, ids: old.ids.filter((item) => item !== id) }
+                : old,
+            );
             const read = (file: AssistantAttachment) =>
               file.id === id
                 ? { ...file, status, reason: code, details }
@@ -870,6 +881,18 @@ export function useAssistant(enabled: boolean) {
             ? attachmentsRef.current
             : (options?.attachments ?? []);
       const files = fromComposer ? chosen : chosen.filter(isSendable);
+      // What the run reads first: a regenerate reads its question's files.
+      const regenerated = regenerateMessageId
+        ? detail?.messages.find((message) => message.id === regenerateMessageId)
+        : undefined;
+      const read = regenerated
+        ? (detail?.messages.find(
+            (message) =>
+              message.role === "user" &&
+              Boolean(message.runId) &&
+              message.runId === regenerated.runId,
+          )?.attachments ?? [])
+        : files;
       if (
         busy ||
         loading ||
@@ -903,6 +926,10 @@ export function useAssistant(enabled: boolean) {
           runId: reference.runId,
           requested: session.webSearch,
           got: null,
+        });
+        setReading({
+          runId: reference.runId,
+          ids: read.map((file) => file.id),
         });
         setStream({
           id: `stream-${reference.runId}`,
@@ -1097,8 +1124,13 @@ export function useAssistant(enabled: boolean) {
     }
   }, [showError]);
 
-  // The latest tool still running says what the reply is doing.
-  const activity = tools[tools.length - 1]?.activity ?? null;
+  // The latest tool still running says what the reply is doing; before its
+  // model request, a run reads the files it was sent with.
+  const activity =
+    tools[tools.length - 1]?.activity ??
+    (reading?.runId === run?.runId && reading?.ids.length
+      ? "readingFile"
+      : null);
   // The open conversation's setting; off while it loads.
   const webSearch = selectedId
     ? detail?.session.id === selectedId && detail.session.webSearch

@@ -1246,6 +1246,62 @@ describe("attachments", () => {
     expect(document.body).not.toHaveTextContent("assistant_");
   });
 
+  it("says it is reading the files until each one's outcome is in", async () => {
+    await openConversation();
+    await pick([pdf, photo]);
+    await userEvent.click(sendButton());
+    await screen.findByRole("button", { name: "Stop" });
+    const sent = mocks.send.mock.calls[0][0];
+    const reply = () => screen.getByRole("article", { name: "Assistant" });
+    expect(within(reply()).getByRole("status")).toHaveTextContent(
+      "Reading a file…",
+    );
+    const read = (id: string) =>
+      act(() =>
+        mocks.listener?.({
+          ...sent,
+          type: "attachment",
+          data: { id, status: "ready", code: null, details: null },
+        }),
+      );
+    read("file-pdf");
+    expect(within(reply()).getByRole("status")).toHaveTextContent(
+      "Reading a file…",
+    );
+    read("file-png");
+    expect(within(reply()).getByRole("status")).toHaveTextContent("Thinking…");
+  });
+
+  it("says it is reading the files of a reply being regenerated", async () => {
+    current.messages = [
+      {
+        id: "q",
+        role: "user",
+        content: "Summarize",
+        createdAt: 1,
+        nativeEntryId: "entry-q",
+        runId: "run-1",
+        attachments: [pdf],
+      },
+      {
+        id: "a",
+        role: "assistant",
+        content: "Summary",
+        createdAt: 2,
+        status: "completed",
+        nativeEntryId: "entry-a",
+        runId: "run-1",
+      },
+    ];
+    await openConversation();
+    await userEvent.click(screen.getByRole("button", { name: "Regenerate" }));
+    await screen.findByRole("button", { name: "Stop" });
+    const streaming = screen.getAllByRole("article", { name: "Assistant" });
+    expect(
+      within(streaming[streaming.length - 1]).getByRole("status"),
+    ).toHaveTextContent("Reading a file…");
+  });
+
   it("ignores the outcome of a run this view does not follow", async () => {
     await openConversation();
     await pick([photo]);
